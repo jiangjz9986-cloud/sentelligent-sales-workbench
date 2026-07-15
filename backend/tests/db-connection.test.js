@@ -37,6 +37,7 @@ test("file-backed connections apply the SQLite durability and concurrency policy
 test("memory connections keep foreign keys and timeout policy without requiring WAL", () => {
   const db = createConnection({ databaseUrl: ":memory:" });
   try {
+    assert.equal(db.prepare("PRAGMA journal_mode").get().journal_mode, "memory");
     assert.equal(db.prepare("PRAGMA foreign_keys").get().foreign_keys, 1);
     assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 5000);
     assert.equal(db.prepare("PRAGMA synchronous").get().synchronous, 1);

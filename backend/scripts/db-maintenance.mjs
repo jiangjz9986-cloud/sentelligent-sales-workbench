@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,14 +48,29 @@ export function restoreDatabase({ databaseUrl, backupPath, backupDir } = {}) {
   const config = createRuntimeConfig({ databaseUrl, backupDir });
   ensureRuntimeDirs(config);
   mkdirSync(dirname(config.databaseUrl), { recursive: true });
+  assertRestoreIsOffline(config.databaseUrl);
 
   let preRestoreBackupPath = null;
   if (existsSync(config.databaseUrl)) {
-    preRestoreBackupPath = join(config.backupDir, `${timestamp()}-pre-restore.sqlite`);
-    copyFileSync(config.databaseUrl, preRestoreBackupPath);
+    preRestoreBackupPath = backupDatabase({
+      databaseUrl: config.databaseUrl,
+      backupDir: config.backupDir,
+      label: "pre-restore"
+    }).backupPath;
   }
 
-  copyFileSync(backupPath, config.databaseUrl);
+  const candidatePath = join(dirname(config.databaseUrl), `.${timestamp()}-restore-candidate.sqlite`);
+  try {
+    copyFileSync(backupPath, candidatePath);
+    validateRestoreCandidate(candidatePath);
+    assertRestoreIsOffline(config.databaseUrl);
+    copyFileSync(candidatePath, config.databaseUrl);
+  } finally {
+    rmSync(candidatePath, { force: true });
+    rmSync(`${candidatePath}-wal`, { force: true });
+    rmSync(`${candidatePath}-shm`, { force: true });
+  }
+
   const info = inspectDatabase({ databaseUrl: config.databaseUrl });
 
   return {
@@ -65,6 +80,24 @@ export function restoreDatabase({ databaseUrl, backupPath, backupDir } = {}) {
     preRestoreBackupPath,
     tables: info.tables,
   };
+}
+
+function assertRestoreIsOffline(databasePath) {
+  const sidecars = [`${databasePath}-wal`, `${databasePath}-shm`].filter(existsSync);
+  if (sidecars.length > 0) {
+    throw new Error(
+      `Restore refused: live database has WAL sidecars (${sidecars.join(", ")}). Stop the service and checkpoint first.`
+    );
+  }
+}
+
+function validateRestoreCandidate(databaseUrl) {
+  const db = openDatabase({ databaseUrl });
+  try {
+    db.prepare("PRAGMA schema_version").get();
+  } finally {
+    db.close();
+  }
 }
 
 export function inspectDatabase({ databaseUrl } = {}) {

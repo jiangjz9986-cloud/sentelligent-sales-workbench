@@ -57,4 +57,46 @@ describe("sqlite maintenance", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("refuses restore while the live database has active WAL sidecars", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-wal-"));
+    const databaseUrl = join(root, "data", "sales-workbench.sqlite");
+    const backupDir = join(root, "backups");
+    let liveDatabase;
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const backup = backupDatabase({ databaseUrl, backupDir, label: "before-wal-write" });
+
+      liveDatabase = openDatabase({ databaseUrl });
+      run(liveDatabase, "DELETE FROM customers WHERE id = $id", { $id: "rizhao" });
+      const expectedCustomers = all(liveDatabase, "SELECT id FROM customers ORDER BY id").map((row) => row.id);
+
+      assert.equal(existsSync(`${databaseUrl}-wal`), true);
+      assert.equal(existsSync(`${databaseUrl}-shm`), true);
+      assert.throws(
+        () => restoreDatabase({ databaseUrl, backupPath: backup.backupPath, backupDir }),
+        /stop the service and checkpoint first/i
+      );
+      assert.deepEqual(
+        all(liveDatabase, "SELECT id FROM customers ORDER BY id").map((row) => row.id),
+        expectedCustomers
+      );
+
+      liveDatabase.close();
+      liveDatabase = null;
+      const reopened = openDatabase({ databaseUrl });
+      try {
+        assert.deepEqual(
+          all(reopened, "SELECT id FROM customers ORDER BY id").map((row) => row.id),
+          expectedCustomers
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      liveDatabase?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
