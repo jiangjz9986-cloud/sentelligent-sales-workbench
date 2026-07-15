@@ -1,41 +1,19 @@
-import { DatabaseSync } from "node:sqlite";
-import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirSync, readFileSync } from "node:fs";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const schemaPath = resolve(here, "schema.sql");
+import { createConnection, resolveDatabasePath } from "./db/connection.js";
+import { migrateDatabase } from "./db/migrate.js";
 
-export function resolveDatabasePath(databaseUrl = "./data/sales-workbench.sqlite") {
-  if (databaseUrl === ":memory:") return databaseUrl;
-  if (databaseUrl.startsWith("file:")) return fileURLToPath(databaseUrl);
-  return isAbsolute(databaseUrl) ? databaseUrl : resolve(process.cwd(), databaseUrl);
-}
+export { migrateDatabase, resolveDatabasePath };
 
 export function openDatabase({ databaseUrl } = {}) {
-  const databasePath = resolveDatabasePath(databaseUrl);
-  if (databasePath !== ":memory:") {
-    mkdirSync(dirname(databasePath), { recursive: true });
+  const db = createConnection({ databaseUrl });
+  try {
+    migrateDatabase(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
   }
-
-  const db = new DatabaseSync(databasePath);
-  db.exec("PRAGMA foreign_keys = ON");
-  migrateDatabase(db);
-  return db;
-}
-
-export function migrateDatabase(db) {
-  db.exec(readFileSync(schemaPath, "utf8"));
-  ensureColumn(db, "action_items", "assignee", "TEXT");
-  ensureColumn(db, "risk_items", "assignee", "TEXT");
-  ensureColumn(db, "risk_items", "due", "TEXT");
-  ensureColumn(db, "solution_drafts", "artifact_type", "TEXT NOT NULL DEFAULT 'solution_framework'");
-}
-
-function ensureColumn(db, table, column, definition) {
-  const existingColumns = db.prepare(`PRAGMA table_info(${table})`).all().map((item) => item.name);
-  if (existingColumns.includes(column)) return;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 export function run(db, sql, params = {}) {
