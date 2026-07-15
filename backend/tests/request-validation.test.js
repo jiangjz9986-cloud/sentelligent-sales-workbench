@@ -32,8 +32,12 @@ async function post(path, body) {
   return request(path, { method: "POST", body: JSON.stringify(body) });
 }
 
-async function patch(path, body) {
-  return request(path, { method: "PATCH", body: JSON.stringify(body) });
+async function patch(path, body, version) {
+  return request(path, {
+    method: "PATCH",
+    ...(version === undefined ? {} : { headers: { "If-Match": `"${version}"` } }),
+    body: JSON.stringify(body),
+  });
 }
 
 beforeEach(async () => {
@@ -128,7 +132,11 @@ describe("strict business request validation", () => {
     });
     assert.equal(created.response.status, 201);
     assertValidation(
-      await patch(`/api/opportunities/${created.body.item.id}`, { customerId: "missing-customer" }),
+      await patch(
+        `/api/opportunities/${created.body.item.id}`,
+        { customerId: "missing-customer" },
+        created.body.item.version,
+      ),
       "customerId",
     );
   });
@@ -149,7 +157,7 @@ describe("strict business request validation", () => {
 
     const reassigned = await patch(`/api/opportunities/${created.body.item.id}`, {
       customerId: secondCustomer.id,
-    });
+    }, created.body.item.version);
     assert.equal(reassigned.response.status, 200);
     assert.equal(reassigned.body.item.customerId, secondCustomer.id);
     assert.equal(reassigned.body.item.customer, secondCustomer.name);
@@ -160,7 +168,7 @@ describe("strict business request validation", () => {
 
     const forgedPatch = await patch(`/api/opportunities/${created.body.item.id}`, {
       customer: "Another forged customer name",
-    });
+    }, reassigned.body.item.version);
     assert.equal(forgedPatch.response.status, 200);
     assert.equal(forgedPatch.body.item.customerId, secondCustomer.id);
     assert.equal(forgedPatch.body.item.customer, secondCustomer.name);
@@ -168,10 +176,10 @@ describe("strict business request validation", () => {
 
   it("rejects invalid action, risk, and weekly report statuses", async () => {
     const action = (await request("/api/actions")).body.items[0];
-    assertValidation(await patch(`/api/actions/${action.id}`, { status: "invalid" }), "status");
+    assertValidation(await patch(`/api/actions/${action.id}`, { status: "invalid" }, action.version), "status");
 
     const risk = (await request("/api/risks")).body.items[0];
-    assertValidation(await patch(`/api/risks/${risk.id}`, { status: "invalid" }), "status");
+    assertValidation(await patch(`/api/risks/${risk.id}`, { status: "invalid" }, risk.version), "status");
 
     const weekly = await post("/api/reports/weekly/draft", {
       owner: "Validation owner",
@@ -180,7 +188,11 @@ describe("strict business request validation", () => {
     });
     assert.equal(weekly.response.status, 201);
     assertValidation(
-      await patch(`/api/reports/weekly/${weekly.body.item.id}`, { status: "invalid" }),
+      await patch(
+        `/api/reports/weekly/${weekly.body.item.id}`,
+        { status: "invalid" },
+        weekly.body.item.version,
+      ),
       "status",
     );
   });
@@ -192,7 +204,7 @@ describe("strict business request validation", () => {
       reason: "Validated action reason",
       priority: "高",
       tone: "blue",
-    });
+    }, action.version);
 
     assert.equal(updated.response.status, 200);
     assert.equal(updated.body.item.title, "Validated action title");
@@ -344,7 +356,11 @@ describe("strict business request validation", () => {
     );
 
     assertValidation(
-      await patch(`/api/solutions/${solution.body.item.id}`, { status: "saved", extra: true }),
+      await patch(
+        `/api/solutions/${solution.body.item.id}`,
+        { status: "saved", extra: true },
+        solution.body.item.version,
+      ),
       "extra",
     );
 
@@ -369,6 +385,7 @@ describe("strict business request validation", () => {
     assert.equal(customer.response.status, 201);
     const rejectedDelete = await request(`/api/customers/${customer.body.item.id}`, {
       method: "DELETE",
+      headers: { "If-Match": `"${customer.body.item.version}"` },
       body: JSON.stringify({ extra: true }),
     });
     assertValidation(rejectedDelete, "extra");

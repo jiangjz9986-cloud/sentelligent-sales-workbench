@@ -2502,7 +2502,7 @@ export function SolutionPage({ selected, onSelect, customer, opportunity, apiCli
       const saved = await apiClient.saveSolutionDraft(currentDraft.id, {
         content: draftText,
         status: "saved",
-      });
+      }, currentDraft.version);
       storeDraft(saved);
       setDraftStatus(`${selectedArtifact.label}已保存。`);
     } catch {
@@ -2674,7 +2674,7 @@ export function WeeklyPage({
       const saved = await apiClient.saveWeeklyReport(weeklyDraft.id, {
         content: weeklyDraftText,
         status,
-      });
+      }, weeklyDraft.version);
       setWeeklyDraft(saved);
       setWeeklyDraftText(saved.content);
       setDraftStatus(status === "ready" ? "周报已确认定稿，可导出 Word。" : "周报已保存，可继续编辑或导出。");

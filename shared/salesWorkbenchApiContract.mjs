@@ -1,8 +1,9 @@
-export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-06-05";
+export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-07-15";
 
 export const SALES_WORKBENCH_API_SCHEMAS = {
   customer: {
     id: "string",
+    version: "positiveInteger",
     name: "string",
     region: "nullableString",
     type: "nullableString",
@@ -23,6 +24,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   opportunity: {
     id: "string",
+    version: "positiveInteger",
     customerId: "string",
     name: "string",
     customer: "nullableString",
@@ -41,6 +43,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   actionItem: {
     id: "string",
+    version: "positiveInteger",
     customerId: "nullableString",
     opportunityId: "nullableString",
     title: "string",
@@ -57,6 +60,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   riskItem: {
     id: "string",
+    version: "positiveInteger",
     customerId: "nullableString",
     opportunityId: "nullableString",
     title: "string",
@@ -76,6 +80,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   knowledgeItem: {
     id: "string",
+    version: "positiveInteger",
     title: "string",
     category: "nullableString",
     tags: "array",
@@ -87,6 +92,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   quickRecord: {
     id: "string",
+    version: "positiveInteger",
     rawContent: "string",
     occurredAt: "nullableString",
     sourceChannel: "nullableString",
@@ -114,6 +120,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   weeklyReport: {
     id: "string",
+    version: "positiveInteger",
     owner: "string",
     periodStart: "string",
     periodEnd: "string",
@@ -123,6 +130,7 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   solutionDraft: {
     id: "string",
+    version: "positiveInteger",
     owner: "string",
     artifactType: "string",
     title: "string",
@@ -166,6 +174,7 @@ function isExpectedType(value, descriptor) {
   if (descriptor === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
   if (descriptor === "string") return typeof value === "string";
   if (descriptor === "number") return typeof value === "number" && Number.isFinite(value);
+  if (descriptor === "positiveInteger") return Number.isSafeInteger(value) && value > 0;
   if (descriptor === "nullableString") return value === null || typeof value === "string";
   if (descriptor === "nullableNumber") return value === null || (typeof value === "number" && Number.isFinite(value));
   throw new Error(`Unknown API contract descriptor: ${descriptor}`);

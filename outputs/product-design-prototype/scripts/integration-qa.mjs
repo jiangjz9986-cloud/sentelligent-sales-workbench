@@ -136,6 +136,8 @@ function connectCdp(wsUrl) {
     let id = 0;
     const pending = new Map();
     const consoleErrors = [];
+    const networkRequests = new Map();
+    const networkResponses = [];
 
     ws.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
@@ -145,6 +147,21 @@ function connectCdp(wsUrl) {
       }
       if (message.method === "Log.entryAdded" && message.params.entry.level === "error") {
         consoleErrors.push(message.params.entry.text);
+      }
+      if (message.method === "Network.requestWillBeSent") {
+        networkRequests.set(message.params.requestId, {
+          method: message.params.request.method,
+          url: message.params.request.url,
+        });
+      }
+      if (message.method === "Network.responseReceived") {
+        const request = networkRequests.get(message.params.requestId);
+        networkResponses.push({
+          requestId: message.params.requestId,
+          method: request?.method ?? null,
+          url: message.params.response.url,
+          status: message.params.response.status,
+        });
       }
 
       if (!pending.has(message.id)) return;
@@ -160,6 +177,7 @@ function connectCdp(wsUrl) {
         resolveConnect({
           ws,
           consoleErrors,
+          networkResponses,
           send(method, params = {}) {
             const callId = ++id;
             ws.send(JSON.stringify({ id: callId, method, params }));
@@ -212,6 +230,7 @@ async function openChromeCdp() {
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
   await cdp.send("Log.enable");
+  await cdp.send("Network.enable");
 
   return {
     ...cdp,
@@ -1244,6 +1263,146 @@ async function runViewport(cdp, url, viewport) {
   `);
 }
 
+async function waitForNetworkResponse(cdp, startIndex, predicate, timeoutMs = 8000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const match = cdp.networkResponses.slice(startIndex).find(predicate);
+    if (match) return match;
+    await delay(100);
+  }
+  return cdp.networkResponses.slice(startIndex).find(predicate) ?? null;
+}
+
+async function runCustomerConflictRegression(cdp, frontendUrl, backendUrl, apiFetch) {
+  const customerName = "测试集成客户";
+  const localSummary = "本地未保存的冲突摘要";
+  const serverSummary = "服务端并发更新后的摘要";
+
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await cdp.send("Page.navigate", { url: frontendUrl });
+  await delay(1800);
+  const editorOpened = await evaluate(cdp, `
+    (async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitUntil = async (predicate, timeoutMs = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          const value = predicate();
+          if (value) return value;
+          await wait(100);
+        }
+        throw new Error('Timed out opening the customer conflict editor');
+      };
+      const customerName = ${JSON.stringify(customerName)};
+      const localSummary = ${JSON.stringify(localSummary)};
+      await waitUntil(() => document.querySelector('[data-testid="api-status"]')?.textContent?.includes('在线'));
+      await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
+      [...document.querySelectorAll('.nav-item')]
+        .find((button) => button.textContent.includes('客户画像'))?.click();
+      await waitUntil(() => document.querySelector('[data-testid="customer-list-view"]'));
+      const row = [...document.querySelectorAll('[data-testid="customer-list-view"] .list-button')]
+        .find((button) => button.textContent.includes(customerName));
+      const detailButton = row?.querySelector('[data-testid="customer-open-detail"]');
+      if (!detailButton) throw new Error('Missing conflict-test customer detail button');
+      detailButton.click();
+      await waitUntil(() => document.querySelector('[data-testid="page-customer"] h1')?.textContent?.includes(customerName));
+      document.querySelector('[data-testid="customer-edit-detail"]')?.click();
+      const editor = await waitUntil(() => document.querySelector('[data-testid="customer-editor"]'));
+      const field = [...editor.querySelectorAll('.form-field')]
+        .find((item) => item.querySelector('span')?.textContent?.trim() === '客户摘要');
+      const textarea = field?.querySelector('textarea');
+      if (!textarea) throw new Error('Missing customer summary editor');
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(textarea, localSummary);
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      textarea.dispatchEvent(new Event('change', { bubbles: true }));
+      await wait(100);
+      return textarea.value === localSummary;
+    })()
+  `);
+  assert.equal(editorOpened, true, "conflict regression should open the customer editor with a local draft");
+
+  const customersResponse = await apiFetch("/api/customers");
+  assert.equal(customersResponse.status, 200, "conflict regression should load the current customer version");
+  const customers = await customersResponse.json();
+  const customer = customers.items?.find((item) => item.name === customerName);
+  assert.ok(customer, "conflict regression customer should exist");
+  const advancedResponse = await apiFetch(`/api/customers/${customer.id}`, {
+    method: "PATCH",
+    headers: { "If-Match": `"${customer.version}"` },
+    body: JSON.stringify({ summary: serverSummary }),
+  });
+  assert.equal(advancedResponse.status, 200, "out-of-band customer update should advance the server version");
+  const advanced = await advancedResponse.json();
+  assert.equal(advanced.item.version, customer.version + 1);
+
+  const responseStart = cdp.networkResponses.length;
+  const browserState = await evaluate(cdp, `
+    (async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitUntil = async (predicate, timeoutMs = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          const value = predicate();
+          if (value) return value;
+          await wait(100);
+        }
+        throw new Error('Timed out waiting for stale customer save');
+      };
+      const localSummary = ${JSON.stringify(localSummary)};
+      const editor = document.querySelector('[data-testid="customer-editor"]');
+      const saveButton = [...editor.querySelectorAll('button')]
+        .find((button) => button.textContent.includes('保存客户'));
+      if (!saveButton) throw new Error('Missing customer save button');
+      saveButton.click();
+      await wait(100);
+      await waitUntil(() => {
+        const status = document.querySelector('[data-testid="customer-editor"] .editor-status')?.textContent?.trim();
+        return status && status !== '就绪' && status !== '保存中';
+      });
+      const retainedEditor = document.querySelector('[data-testid="customer-editor"]');
+      if (!retainedEditor) {
+        return { editorOpen: false, summary: null, status: '', localSummaryRetained: false };
+      }
+      const summaryField = [...retainedEditor.querySelectorAll('.form-field')]
+        .find((item) => item.querySelector('span')?.textContent?.trim() === '客户摘要');
+      return {
+        editorOpen: Boolean(retainedEditor),
+        summary: summaryField?.querySelector('textarea')?.value ?? null,
+        status: retainedEditor.querySelector('.editor-status')?.textContent?.trim() ?? '',
+        localSummaryRetained: summaryField?.querySelector('textarea')?.value === localSummary,
+      };
+    })()
+  `);
+  const conflictResponse = await waitForNetworkResponse(
+    cdp,
+    responseStart,
+    (item) => item.method === "PATCH" && item.url === `${backendUrl}/api/customers/${customer.id}`,
+  );
+  assert.ok(conflictResponse, "browser customer PATCH response should be captured through CDP");
+  assert.equal(conflictResponse.status, 409, "stale browser customer PATCH should return 409");
+  assert.equal(browserState.editorOpen, true, "409 should leave the customer editor open");
+  assert.equal(browserState.localSummaryRetained, true, "409 should preserve the local unsaved customer summary");
+
+  const persistedResponse = await apiFetch(`/api/customers/${customer.id}`);
+  assert.equal(persistedResponse.status, 200);
+  const persisted = await persistedResponse.json();
+  assert.equal(persisted.item.summary, serverSummary, "409 should not replace the newer server customer value");
+  assert.equal(persisted.item.version, advanced.item.version, "409 should not advance the server version");
+
+  return {
+    status: conflictResponse.status,
+    editorOpen: browserState.editorOpen,
+    localSummaryRetained: browserState.localSummaryRetained,
+    serverSummaryRetained: persisted.item.summary === serverSummary,
+  };
+}
+
 async function main() {
   assert.ok(existsSync(backendDir), `Backend directory does not exist: ${backendDir}`);
 
@@ -1330,6 +1489,7 @@ async function main() {
       });
     };
 
+    const conflictRegression = await runCustomerConflictRegression(cdp, frontendUrl, backendUrl, apiFetch);
     const latestRecords = await apiFetch("/api/quick-records").then((response) => response.json());
     const latestRecord = latestRecords.items?.[0];
     const customersAfterEdit = await apiFetch("/api/customers").then((response) => response.json());
@@ -1388,13 +1548,17 @@ async function main() {
     const expectedInitialSession401s = cdp.consoleErrors.filter((message) =>
       /Failed to load resource: the server responded with a status of 401 \(Unauthorized\)/.test(message),
     );
+    const expectedConflict409s = cdp.consoleErrors.filter((message) =>
+      /Failed to load resource: the server responded with a status of 409 \(Conflict\)/.test(message),
+    );
     const unexpectedConsoleErrors = cdp.consoleErrors.filter((message) =>
-      !expectedInitialSession401s.includes(message),
+      !expectedInitialSession401s.includes(message) && !expectedConflict409s.includes(message),
     );
     assert.ok(
       expectedInitialSession401s.length >= 1 && expectedInitialSession401s.length <= 2,
       `expected one or two initial anonymous session probes, got ${expectedInitialSession401s.length}`,
     );
+    assert.ok(expectedConflict409s.length <= 1, `expected at most one stale-write console error, got ${expectedConflict409s.length}`);
     assert.equal(unexpectedConsoleErrors.length, 0, `browser console errors: ${unexpectedConsoleErrors.join("; ")}`);
     const expectedWeekRange = getCurrentWeekRange();
     const expectedWeeklyExportFilename = `weekly-report-${expectedWeekRange.periodStart}-${expectedWeekRange.periodEnd}.doc`;
@@ -1543,6 +1707,7 @@ async function main() {
             weekly: viewportResults.find((result) => result.name === "desktop")?.weeklyDraftText.length ?? 0,
             solution: viewportResults.find((result) => result.name === "desktop")?.solutionDraftText.length ?? 0,
           },
+          conflictRegression,
           viewports: viewportResults.map((result) => ({
             name: result.name,
             viewport: result.viewport,

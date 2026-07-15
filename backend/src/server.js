@@ -89,6 +89,7 @@ function customerFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     name: row.name,
     region: row.region,
     type: row.type,
@@ -115,6 +116,7 @@ function opportunityFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     customerId: row.customer_id,
     name: row.name,
     customer: row.customer,
@@ -139,6 +141,7 @@ function quickRecordFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     rawContent: row.raw_content,
     occurredAt: row.occurred_at,
     sourceChannel: row.source_channel,
@@ -177,6 +180,7 @@ function weeklyReportFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     owner: row.owner,
     periodStart: row.period_start,
     periodEnd: row.period_end,
@@ -192,6 +196,7 @@ function solutionDraftFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     owner: row.owner,
     artifactType: row.artifact_type ?? "solution_framework",
     title: row.title,
@@ -222,6 +227,7 @@ function actionFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     customerId: row.customer_id,
     opportunityId: row.opportunity_id,
     title: row.title,
@@ -242,6 +248,7 @@ function riskFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     customerId: row.customer_id,
     opportunityId: row.opportunity_id,
     title: row.title,
@@ -278,18 +285,26 @@ function dateChip(value) {
 }
 
 function dashboardSummaryFromDb(db) {
-  const customers = all(db, "SELECT * FROM customers ORDER BY relation DESC, updated_at DESC").map(customerFromRow);
-  const opportunities = all(db, "SELECT * FROM opportunities ORDER BY probability DESC, updated_at DESC").map(opportunityFromRow);
+  const customers = all(db, "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY relation DESC, updated_at DESC").map(customerFromRow);
+  const opportunities = all(
+    db,
+    `SELECT opportunities.*
+     FROM opportunities
+     INNER JOIN customers ON customers.id = opportunities.customer_id
+     WHERE opportunities.deleted_at IS NULL
+       AND customers.deleted_at IS NULL
+     ORDER BY opportunities.probability DESC, opportunities.updated_at DESC`,
+  ).map(opportunityFromRow);
   const priorityRank = (value) => {
     const text = String(value ?? "");
     if (text.includes("高") || text.includes("楂")) return 0;
     if (text.includes("中") || text.includes("涓")) return 1;
     return 2;
   };
-  const actions = all(db, "SELECT * FROM action_items ORDER BY updated_at DESC")
+  const actions = all(db, "SELECT * FROM action_items WHERE deleted_at IS NULL ORDER BY updated_at DESC")
     .map(actionFromRow)
     .sort((left, right) => priorityRank(left.priority) - priorityRank(right.priority));
-  const risks = all(db, "SELECT * FROM risk_items ORDER BY score DESC, updated_at DESC").map(riskFromRow);
+  const risks = all(db, "SELECT * FROM risk_items WHERE deleted_at IS NULL ORDER BY score DESC, updated_at DESC").map(riskFromRow);
   const quickRecords = all(db, "SELECT * FROM quick_records ORDER BY occurred_at DESC, created_at DESC").map(quickRecordFromRow);
   const openActions = actions.filter((item) => item.status !== "done");
   const openRisks = risks.filter((item) => item.status !== "closed");
@@ -359,6 +374,7 @@ function knowledgeFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     title: row.title,
     category: row.category,
     tags: parseJson(row.tags),
@@ -379,30 +395,75 @@ function auditLogFromRow(row) {
     entityId: row.entity_id,
     actor: row.actor,
     metadata: parseJson(row.metadata_json, {}),
+    requestId: row.request_id ?? null,
+    before: parseJson(row.before_json, {}),
+    after: parseJson(row.after_json, {}),
+    entityVersion: row.entity_version ?? null,
     createdAt: row.created_at,
   };
+}
+
+const softDeleteAuditFields = {
+  customer: ["id", "version", "name", "owner", "createdAt", "updatedAt"],
+  opportunity: ["id", "version", "customerId", "name", "stage", "owner", "createdAt", "updatedAt"],
+  weekly_report: ["id", "version", "owner", "periodStart", "periodEnd", "status", "createdAt", "updatedAt"],
+  action: ["id", "version", "customerId", "opportunityId", "title", "status", "assignee", "due", "createdAt", "updatedAt"],
+  risk: ["id", "version", "customerId", "opportunityId", "title", "status", "severity", "score", "sourceType", "sourceId", "createdAt", "updatedAt"],
+  knowledge: ["id", "version", "title", "category", "source", "createdAt", "updatedAt"],
+};
+
+function softDeleteAuditSnapshot(entityType, entity, lifecycle = {}) {
+  const fields = softDeleteAuditFields[entityType];
+  if (!fields) throw new Error(`Missing soft-delete audit allowlist for ${entityType}`);
+  return {
+    ...Object.fromEntries(fields.filter((field) => entity[field] !== undefined).map((field) => [field, entity[field]])),
+    ...lifecycle,
+  };
+}
+
+function sanitizeAuditScalar(value) {
+  if (typeof value !== "string") return value;
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "[REDACTED]")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .replace(/\b(?:cookie|csrf(?:token)?|session(?:id|token|cookie)?|credential|wechat(?:secret|token)?|provider(?:api)?key)\s*[:=]\s*[^\s,;]+/gi, "[REDACTED]");
 }
 
 function sanitizeAuditMetadata(value, depth = 0) {
   if (depth > 5) return null;
   if (value === null || value === undefined) return value;
-  if (typeof value !== "object") return value;
+  if (typeof value !== "object") return sanitizeAuditScalar(value);
   if (Array.isArray(value)) return value.slice(0, 20).map((item) => sanitizeAuditMetadata(item, depth + 1));
 
   const sanitized = {};
   for (const [key, item] of Object.entries(value)) {
-    if (/key|secret|token|authorization|password/i.test(key)) continue;
+    if (/api.?key|secret|token|authorization|password|contact|phone|mobile|email|cookie|csrf|credential|session|wechat|provider.?key/i.test(key)) continue;
     sanitized[key] = sanitizeAuditMetadata(item, depth + 1);
   }
   return sanitized;
 }
 
-function recordAuditLog(db, { action, entityType, entityId = null, actor = null, metadata = {} }) {
+function recordAuditLog(db, {
+  action,
+  entityType,
+  entityId = null,
+  actor = null,
+  metadata = {},
+  requestId = null,
+  before = {},
+  after = {},
+  entityVersion = null,
+}) {
   const id = randomUUID();
   run(
     db,
-    `INSERT INTO audit_logs (id, action, entity_type, entity_id, actor, metadata_json)
-     VALUES ($id, $action, $entityType, $entityId, $actor, $metadataJson)`,
+    `INSERT INTO audit_logs (
+       id, action, entity_type, entity_id, actor, metadata_json,
+       request_id, before_json, after_json, entity_version
+     ) VALUES (
+       $id, $action, $entityType, $entityId, $actor, $metadataJson,
+       $requestId, $beforeJson, $afterJson, $entityVersion
+     )`,
     {
       $id: id,
       $action: action,
@@ -410,6 +471,10 @@ function recordAuditLog(db, { action, entityType, entityId = null, actor = null,
       $entityId: entityId,
       $actor: actor,
       $metadataJson: JSON.stringify(sanitizeAuditMetadata(metadata) ?? {}),
+      $requestId: requestId,
+      $beforeJson: JSON.stringify(sanitizeAuditMetadata(before) ?? {}),
+      $afterJson: JSON.stringify(sanitizeAuditMetadata(after) ?? {}),
+      $entityVersion: entityVersion,
     },
   );
   return auditLogFromRow(get(db, "SELECT * FROM audit_logs WHERE id = $id", { $id: id }));
@@ -488,6 +553,135 @@ function validationFailure(field, rule = "reference") {
   });
 }
 
+function parseExpectedVersion(request) {
+  const rawHeaderCount = Array.isArray(request.rawHeaders)
+    ? request.rawHeaders.filter((value, index) => index % 2 === 0 && String(value).toLowerCase() === "if-match").length
+    : 0;
+  const rawValue = request.headers["if-match"];
+  const match = rawHeaderCount === 1 && typeof rawValue === "string"
+    ? /^"([1-9]\d*)"$/.exec(rawValue)
+    : null;
+  const version = match ? Number(match[1]) : NaN;
+  if (!Number.isSafeInteger(version) || version <= 0) {
+    throw new HttpError(428, "PRECONDITION_REQUIRED", "A current quoted entity version is required");
+  }
+  return version;
+}
+
+function throwVersionFailure(db, { table, id, softDeletable }) {
+  const current = get(
+    db,
+    `SELECT version${softDeletable ? ", deleted_at" : ""} FROM ${table} WHERE id = $id`,
+    { $id: id },
+  );
+  if (!current || (softDeletable && current.deleted_at)) notFound();
+  throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+    currentVersion: Number(current.version),
+  });
+}
+
+function runVersionedUpdate(db, {
+  table,
+  id,
+  expectedVersion,
+  setSql,
+  params,
+  softDeletable = true,
+}) {
+  const result = run(
+    db,
+    `UPDATE ${table}
+     SET ${setSql},
+         version = version + 1,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = $id
+       AND version = $expectedVersion
+       ${softDeletable ? "AND deleted_at IS NULL" : ""}`,
+    {
+      ...params,
+      $id: id,
+      $expectedVersion: expectedVersion,
+    },
+  );
+  if (result.changes !== 1) {
+    throwVersionFailure(db, { table, id, softDeletable });
+  }
+}
+
+function withImmediateTransaction(db, work) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = work();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function softDeleteRecord(db, {
+  table,
+  id,
+  expectedVersion,
+  fromRow,
+  deletedBy,
+  action,
+  entityType,
+  requestId,
+  metadata,
+}) {
+  return withImmediateTransaction(db, () => {
+    const beforeRow = get(db, `SELECT * FROM ${table} WHERE id = $id`, { $id: id });
+    if (!beforeRow || beforeRow.deleted_at) notFound();
+
+    const result = run(
+      db,
+      `UPDATE ${table}
+       SET deleted_at = CURRENT_TIMESTAMP,
+           deleted_by = $deletedBy,
+           version = version + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $id
+         AND version = $expectedVersion
+         AND deleted_at IS NULL`,
+      {
+        $id: id,
+        $expectedVersion: expectedVersion,
+        $deletedBy: deletedBy,
+      },
+    );
+    if (result.changes !== 1) {
+      throwVersionFailure(db, { table, id, softDeletable: true });
+    }
+
+    const afterRow = get(db, `SELECT * FROM ${table} WHERE id = $id`, { $id: id });
+    const beforeEntity = fromRow(beforeRow);
+    const afterEntity = fromRow(afterRow);
+    const before = softDeleteAuditSnapshot(entityType, beforeEntity);
+    const after = softDeleteAuditSnapshot(entityType, afterEntity, {
+      deletedAt: afterRow.deleted_at,
+      deletedBy: afterRow.deleted_by,
+    });
+    recordAuditLog(db, {
+      action,
+      entityType,
+      entityId: id,
+      actor: deletedBy,
+      metadata: typeof metadata === "function" ? metadata(beforeEntity) : metadata,
+      requestId,
+      before,
+      after,
+      entityVersion: afterEntity.version,
+    });
+    return {
+      ...afterEntity,
+      deletedAt: afterRow.deleted_at,
+      deletedBy: afterRow.deleted_by,
+    };
+  });
+}
+
 function activeCustomerRow(db, id) {
   if (!id) return null;
   return get(
@@ -499,9 +693,38 @@ function activeCustomerRow(db, id) {
 
 function activeOpportunityRow(db, id) {
   if (!id) return null;
+  const row = activeOpportunityEntityRow(db, id);
+  return row ? { id: row.id, customerId: row.customer_id } : null;
+}
+
+function activeOpportunityEntityRow(db, id) {
+  if (!id) return null;
   return get(
     db,
-    "SELECT id, customer_id AS customerId FROM opportunities WHERE id = $id AND deleted_at IS NULL",
+    `SELECT opportunities.*
+     FROM opportunities
+     INNER JOIN customers ON customers.id = opportunities.customer_id
+     WHERE opportunities.id = $id
+       AND opportunities.deleted_at IS NULL
+       AND customers.deleted_at IS NULL`,
+    { $id: id },
+  );
+}
+
+function activeSolutionDraftRow(db, id) {
+  if (!id) return null;
+  return get(
+    db,
+    `SELECT solution_drafts.*
+     FROM solution_drafts
+     INNER JOIN customers
+       ON customers.id = solution_drafts.customer_id
+      AND customers.deleted_at IS NULL
+     INNER JOIN opportunities
+       ON opportunities.id = solution_drafts.opportunity_id
+      AND opportunities.customer_id = solution_drafts.customer_id
+      AND opportunities.deleted_at IS NULL
+     WHERE solution_drafts.id = $id`,
     { $id: id },
   );
 }
@@ -607,14 +830,15 @@ function patchJsonValue(body, field, currentValue) {
   return Object.hasOwn(body, field) ? json(body[field]) : json(currentValue);
 }
 
-function updateCustomer(db, id, body) {
-  const current = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: id }));
+function updateCustomer(db, id, body, expectedVersion) {
+  const current = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: id }));
   if (!current) return null;
 
-  run(
-    db,
-    `UPDATE customers
-     SET name = $name,
+  runVersionedUpdate(db, {
+    table: "customers",
+    id,
+    expectedVersion,
+    setSql: `name = $name,
          region = $region,
          type = $type,
          level = $level,
@@ -630,11 +854,8 @@ function updateCustomer(db, id, body) {
          summary = $summary,
          needs = $needs,
          risks = $risks,
-         opportunities = $opportunities,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
-    {
-      $id: id,
+         opportunities = $opportunities`,
+    params: {
       $name: patchValue(body, "name", current.name),
       $region: patchValue(body, "region", current.region),
       $type: patchValue(body, "type", current.type),
@@ -653,19 +874,20 @@ function updateCustomer(db, id, body) {
       $risks: patchJsonValue(body, "risks", current.risks),
       $opportunities: patchJsonValue(body, "opportunities", current.opportunities),
     },
-  );
+  });
 
-  return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: id }));
+  return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
-function updateOpportunity(db, id, body) {
-  const current = opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: id }));
+function updateOpportunity(db, id, body, expectedVersion) {
+  const current = opportunityFromRow(activeOpportunityEntityRow(db, id));
   if (!current) return null;
 
-  run(
-    db,
-    `UPDATE opportunities
-     SET customer_id = $customerId,
+  runVersionedUpdate(db, {
+    table: "opportunities",
+    id,
+    expectedVersion,
+    setSql: `customer_id = $customerId,
          name = $name,
          customer = $customer,
          stage = $stage,
@@ -679,11 +901,8 @@ function updateOpportunity(db, id, body) {
          source_record = $sourceRecord,
          risk = $risk,
          next = $next,
-         tone = $tone,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
-    {
-      $id: id,
+         tone = $tone`,
+    params: {
       $customerId: patchValue(body, "customerId", current.customerId),
       $name: patchValue(body, "name", current.name),
       $customer: patchValue(body, "customer", current.customer),
@@ -700,9 +919,9 @@ function updateOpportunity(db, id, body) {
       $next: patchValue(body, "next", current.next),
       $tone: patchValue(body, "tone", current.tone),
     },
-  );
+  });
 
-  return opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: id }));
+  return opportunityFromRow(activeOpportunityEntityRow(db, id));
 }
 
 function normalizeTags(tags) {
@@ -731,23 +950,21 @@ function createKnowledgeItem(db, body) {
   return knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id", { $id: id }));
 }
 
-function updateKnowledgeItem(db, id, body) {
-  const current = knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id", { $id: id }));
+function updateKnowledgeItem(db, id, body, expectedVersion) {
+  const current = knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
   if (!current) return null;
 
-  run(
-    db,
-    `UPDATE knowledge_items
-     SET title = $title,
+  runVersionedUpdate(db, {
+    table: "knowledge_items",
+    id,
+    expectedVersion,
+    setSql: `title = $title,
          category = $category,
          tags = $tags,
          summary = $summary,
          content = $content,
-         source = $source,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
-    {
-      $id: id,
+         source = $source`,
+    params: {
       $title: patchValue(body, "title", current.title),
       $category: patchValue(body, "category", current.category),
       $tags: Object.hasOwn(body, "tags") ? json(normalizeTags(body.tags)) : json(current.tags),
@@ -755,33 +972,31 @@ function updateKnowledgeItem(db, id, body) {
       $content: patchValue(body, "content", current.content),
       $source: patchValue(body, "source", current.source),
     },
-  );
+  });
 
-  return knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id", { $id: id }));
+  return knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
-function updateActionItem(db, id, body) {
-  const current = actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id", { $id: id }));
+function updateActionItem(db, id, body, expectedVersion) {
+  const current = actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
   if (!current) return null;
   const nextStatus = patchValue(body, "status", current.status);
   if (!actionStatuses.has(nextStatus)) {
     return { error: "invalid_status" };
   }
 
-  run(
-    db,
-    `UPDATE action_items
-     SET title = $title,
+  runVersionedUpdate(db, {
+    table: "action_items",
+    id,
+    expectedVersion,
+    setSql: `title = $title,
          reason = $reason,
          status = $status,
          due = $due,
          assignee = $assignee,
          priority = $priority,
-         tone = $tone,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
-    {
-      $id: id,
+         tone = $tone`,
+    params: {
       $title: patchValue(body, "title", current.title),
       $reason: patchValue(body, "reason", current.reason),
       $status: nextStatus,
@@ -790,34 +1005,32 @@ function updateActionItem(db, id, body) {
       $priority: patchValue(body, "priority", current.priority),
       $tone: patchValue(body, "tone", current.tone),
     },
-  );
+  });
 
-  return actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id", { $id: id }));
+  return actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
-function updateWeeklyReport(db, id, body) {
-  const current = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id", { $id: id }));
+function updateWeeklyReport(db, id, body, expectedVersion) {
+  const current = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: id }));
   if (!current) return null;
   const nextStatus = patchValue(body, "status", current.status);
   if (!weeklyReportStatuses.has(nextStatus)) {
     return { error: "invalid_status" };
   }
 
-  run(
-    db,
-    `UPDATE weekly_reports
-     SET status = $status,
-         content = $content,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
-    {
-      $id: id,
+  runVersionedUpdate(db, {
+    table: "weekly_reports",
+    id,
+    expectedVersion,
+    setSql: `status = $status,
+         content = $content`,
+    params: {
       $status: nextStatus,
       $content: patchValue(body, "content", current.content),
     },
-  );
+  });
 
-  return weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id", { $id: id }));
+  return weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
 function escapeHtml(value) {
@@ -861,28 +1074,26 @@ function buildWeeklyWordDocument(report) {
 </html>`;
 }
 
-function updateRiskItem(db, id, body) {
-  const current = riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id", { $id: id }));
+function updateRiskItem(db, id, body, expectedVersion) {
+  const current = riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
   if (!current) return null;
   const nextStatus = patchValue(body, "status", current.status);
   if (!riskStatuses.has(nextStatus)) {
     return { error: "invalid_status" };
   }
 
-  run(
-    db,
-    `UPDATE risk_items
-     SET status = $status,
+  runVersionedUpdate(db, {
+    table: "risk_items",
+    id,
+    expectedVersion,
+    setSql: `status = $status,
          action = $action,
          assignee = $assignee,
          due = $due,
          severity = $severity,
          score = $score,
-         tone = $tone,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
-    {
-      $id: id,
+         tone = $tone`,
+    params: {
       $status: nextStatus,
       $action: patchValue(body, "action", current.action),
       $assignee: patchValue(body, "assignee", current.assignee),
@@ -891,17 +1102,9 @@ function updateRiskItem(db, id, body) {
       $score: patchValue(body, "score", current.score),
       $tone: patchValue(body, "tone", current.tone),
     },
-  );
+  });
 
-  return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id", { $id: id }));
-}
-
-function deleteRecord(db, { table, id, fromRow, select = "SELECT * FROM $table WHERE id = $id" }) {
-  const query = select.replace("$table", table);
-  const current = fromRow(get(db, query, { $id: id }));
-  if (!current) return null;
-  run(db, `DELETE FROM ${table} WHERE id = $id`, { $id: id });
-  return current;
+  return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
 function splitSearchTerms(...values) {
@@ -931,7 +1134,7 @@ function scoreKnowledgeItem(item, terms, tags) {
 }
 
 function searchKnowledgeItems(db, { query = "", tags = [], limit = 8 } = {}) {
-  const rows = all(db, "SELECT * FROM knowledge_items ORDER BY updated_at DESC").map(knowledgeFromRow);
+  const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL ORDER BY updated_at DESC").map(knowledgeFromRow);
   const cleanTags = normalizeTags(tags);
   const terms = splitSearchTerms(query, ...cleanTags);
   const maxItems = Math.max(1, Math.min(Number(limit) || 8, 20));
@@ -956,7 +1159,7 @@ function normalizeKnowledgeIds(value) {
 
 function getKnowledgeItemsByIds(db, ids) {
   if (!ids.length) return [];
-  const rows = all(db, "SELECT * FROM knowledge_items").map(knowledgeFromRow);
+  const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL").map(knowledgeFromRow);
   const byId = new Map(rows.map((item) => [item.id, item]));
   return ids.map((id) => byId.get(id)).filter(Boolean);
 }
@@ -1006,7 +1209,7 @@ function buildOpportunitySourceRecord(quickRecord) {
 
 function syncCustomerFromQuickRecord(db, customerId, quickRecord, insight) {
   if (!customerId) return null;
-  const current = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: customerId }));
+  const current = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: customerId }));
   if (!current) return null;
 
   const syncPreview = appendUnique(current.syncPreview, buildCustomerSyncPreview(quickRecord, insight)).slice(0, 8);
@@ -1020,7 +1223,7 @@ function syncCustomerFromQuickRecord(db, customerId, quickRecord, insight) {
          needs = $needs,
          risks = $risks,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
+     WHERE id = $id AND deleted_at IS NULL`,
     {
       $id: current.id,
       $syncPreview: json(syncPreview),
@@ -1029,12 +1232,12 @@ function syncCustomerFromQuickRecord(db, customerId, quickRecord, insight) {
     },
   );
 
-  return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: current.id }));
+  return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: current.id }));
 }
 
 function syncOpportunityFromQuickRecord(db, opportunityId, quickRecord, insight) {
   if (!opportunityId) return null;
-  const current = opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: opportunityId }));
+  const current = opportunityFromRow(activeOpportunityEntityRow(db, opportunityId));
   if (!current) return null;
 
   const requirements = appendUnique(current.requirements, insight?.summary?.request?.text).slice(0, 8);
@@ -1049,7 +1252,7 @@ function syncOpportunityFromQuickRecord(db, opportunityId, quickRecord, insight)
          risk = COALESCE($risk, risk),
          next = COALESCE($next, next),
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id`,
+     WHERE id = $id AND deleted_at IS NULL`,
     {
       $id: current.id,
       $requirements: json(requirements),
@@ -1060,7 +1263,7 @@ function syncOpportunityFromQuickRecord(db, opportunityId, quickRecord, insight)
     },
   );
 
-  return opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: current.id }));
+  return opportunityFromRow(activeOpportunityEntityRow(db, current.id));
 }
 
 function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportunity) {
@@ -1104,7 +1307,7 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
     },
   );
 
-  return actionFromRow(get(db, "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId", {
+  return actionFromRow(get(db, "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId AND deleted_at IS NULL", {
     $sourceRecordId: quickRecord.id,
   }));
 }
@@ -1113,7 +1316,8 @@ function getDraftActions(db, { customerId, opportunityId }) {
   return all(
     db,
     `SELECT * FROM action_items
-     WHERE customer_id = $customerId OR opportunity_id = $opportunityId
+     WHERE deleted_at IS NULL
+       AND (customer_id = $customerId OR opportunity_id = $opportunityId)
      ORDER BY
        CASE priority WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END,
        updated_at DESC`,
@@ -1220,6 +1424,7 @@ function upsertRiskItem(db, draft) {
          AND title = $title
          AND source_type = $sourceType
          AND COALESCE(source_id, '') = COALESCE($sourceId, '')
+         AND deleted_at IS NULL
        LIMIT 1`,
       {
         $opportunityId: draft.opportunityId,
@@ -1256,7 +1461,7 @@ function upsertRiskItem(db, draft) {
         $tone: draft.tone,
       },
     );
-    return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id", { $id: current.id }));
+    return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: current.id }));
   }
 
   const id = randomUUID();
@@ -1286,7 +1491,7 @@ function upsertRiskItem(db, draft) {
     },
   );
 
-  return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id", { $id: id }));
+  return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
 function upsertRiskFromQuickRecord(db, quickRecord, insight, customer, opportunity) {
@@ -1521,7 +1726,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/customers") {
-        const rows = all(db, "SELECT * FROM customers ORDER BY created_at ASC");
+        const rows = all(db, "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY created_at ASC");
         sendJson(response, 200, { items: rows.map(customerFromRow) });
         return;
       }
@@ -1541,15 +1746,16 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
-        const item = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: parts[2] }));
+        const item = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: parts[2] }));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, customerPatchSchema);
-        const item = updateCustomer(db, parts[2], body);
+        const item = updateCustomer(db, parts[2], body, expectedVersion);
         if (!item) return notFound(response);
         recordAuditLog(db, {
           action: "customer.update",
@@ -1563,26 +1769,33 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         await validateEmptyBody(request);
-        const deleted = deleteRecord(db, {
+        const deleted = softDeleteRecord(db, {
           table: "customers",
           id: parts[2],
+          expectedVersion,
           fromRow: customerFromRow,
-        });
-        if (!deleted) return notFound(response);
-        recordAuditLog(db, {
           action: "customer.delete",
           entityType: "customer",
-          entityId: deleted.id,
-          actor: deleted.owner,
-          metadata: { name: deleted.name, region: deleted.region, level: deleted.level },
+          deletedBy: request.authContext.account,
+          requestId,
+          metadata: (before) => ({ name: before.name, region: before.region, level: before.level }),
         });
         sendJson(response, 200, { deleted });
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/opportunities") {
-        const rows = all(db, "SELECT * FROM opportunities ORDER BY created_at ASC");
+        const rows = all(
+          db,
+          `SELECT opportunities.*
+           FROM opportunities
+           INNER JOIN customers ON customers.id = opportunities.customer_id
+           WHERE opportunities.deleted_at IS NULL
+             AND customers.deleted_at IS NULL
+           ORDER BY opportunities.created_at ASC`,
+        );
         sendJson(response, 200, { items: rows.map(opportunityFromRow) });
         return;
       }
@@ -1603,18 +1816,19 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
-        const item = opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: parts[2] }));
+        const item = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, opportunityPatchSchema);
-        const existing = opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: parts[2] }));
+        const existing = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
         if (!existing) return notFound(response);
         const customer = requireActiveCustomer(db, body.customerId ?? existing.customerId);
-        const item = updateOpportunity(db, parts[2], { ...body, customer: customer.name });
+        const item = updateOpportunity(db, parts[2], { ...body, customer: customer.name }, expectedVersion);
         if (!item) return notFound(response);
         recordAuditLog(db, {
           action: "opportunity.update",
@@ -1628,19 +1842,18 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         await validateEmptyBody(request);
-        const deleted = deleteRecord(db, {
+        const deleted = softDeleteRecord(db, {
           table: "opportunities",
           id: parts[2],
+          expectedVersion,
           fromRow: opportunityFromRow,
-        });
-        if (!deleted) return notFound(response);
-        recordAuditLog(db, {
           action: "opportunity.delete",
           entityType: "opportunity",
-          entityId: deleted.id,
-          actor: deleted.owner,
-          metadata: { name: deleted.name, customerId: deleted.customerId, stage: deleted.stage },
+          deletedBy: request.authContext.account,
+          requestId,
+          metadata: (before) => ({ name: before.name, customerId: before.customerId, stage: before.stage }),
         });
         sendJson(response, 200, { deleted });
         return;
@@ -1650,6 +1863,7 @@ export function createServer(options = {}) {
         const rows = all(
           db,
           `SELECT * FROM action_items
+           WHERE deleted_at IS NULL
            ORDER BY
              CASE priority WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END,
              updated_at DESC`,
@@ -1659,8 +1873,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.actionPatch);
-        const item = updateActionItem(db, parts[2], body);
+        const item = updateActionItem(db, parts[2], body, expectedVersion);
         if (!item) return notFound(response);
         if (item.error === "invalid_status") return badRequest(response, "status must be pending, in_progress, done, or deferred");
         recordAuditLog(db, {
@@ -1675,19 +1890,18 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         await validateEmptyBody(request);
-        const deleted = deleteRecord(db, {
+        const deleted = softDeleteRecord(db, {
           table: "action_items",
           id: parts[2],
+          expectedVersion,
           fromRow: actionFromRow,
-        });
-        if (!deleted) return notFound(response);
-        recordAuditLog(db, {
           action: "action.delete",
           entityType: "action",
-          entityId: deleted.id,
-          actor: deleted.assignee,
-          metadata: { title: deleted.title, customerId: deleted.customerId, status: deleted.status },
+          deletedBy: request.authContext.account,
+          requestId,
+          metadata: (before) => ({ title: before.title, customerId: before.customerId, status: before.status }),
         });
         sendJson(response, 200, { deleted });
         return;
@@ -1697,6 +1911,7 @@ export function createServer(options = {}) {
         const rows = all(
           db,
           `SELECT * FROM risk_items
+           WHERE deleted_at IS NULL
            ORDER BY
              CASE severity WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END,
              score DESC,
@@ -1707,8 +1922,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "risks" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.riskPatch);
-        const item = updateRiskItem(db, parts[2], body);
+        const item = updateRiskItem(db, parts[2], body, expectedVersion);
         if (!item) return notFound(response);
         if (item.error === "invalid_status") return badRequest(response, "status must be open, accepted, in_progress, deferred, or closed");
         recordAuditLog(db, {
@@ -1723,26 +1939,25 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "risks" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         await validateEmptyBody(request);
-        const deleted = deleteRecord(db, {
+        const deleted = softDeleteRecord(db, {
           table: "risk_items",
           id: parts[2],
+          expectedVersion,
           fromRow: riskFromRow,
-        });
-        if (!deleted) return notFound(response);
-        recordAuditLog(db, {
           action: "risk.delete",
           entityType: "risk",
-          entityId: deleted.id,
-          actor: deleted.assignee,
-          metadata: { title: deleted.title, status: deleted.status, sourceType: deleted.sourceType },
+          deletedBy: request.authContext.account,
+          requestId,
+          metadata: (before) => ({ title: before.title, status: before.status, sourceType: before.sourceType }),
         });
         sendJson(response, 200, { deleted });
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/knowledge") {
-        const rows = all(db, "SELECT * FROM knowledge_items ORDER BY updated_at DESC, title ASC");
+        const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL ORDER BY updated_at DESC, title ASC");
         sendJson(response, 200, { items: rows.map(knowledgeFromRow) });
         return;
       }
@@ -1764,8 +1979,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "knowledge" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, knowledgePatchSchema);
-        const item = updateKnowledgeItem(db, parts[2], body);
+        const item = updateKnowledgeItem(db, parts[2], body, expectedVersion);
         if (!item) return notFound(response);
         recordAuditLog(db, {
           action: "knowledge.update",
@@ -1778,18 +1994,18 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "knowledge" && parts[2]) {
+        const expectedVersion = parseExpectedVersion(request);
         await validateEmptyBody(request);
-        const deleted = deleteRecord(db, {
+        const deleted = softDeleteRecord(db, {
           table: "knowledge_items",
           id: parts[2],
+          expectedVersion,
           fromRow: knowledgeFromRow,
-        });
-        if (!deleted) return notFound(response);
-        recordAuditLog(db, {
           action: "knowledge.delete",
           entityType: "knowledge",
-          entityId: deleted.id,
-          metadata: { title: deleted.title, category: deleted.category },
+          deletedBy: request.authContext.account,
+          requestId,
+          metadata: (before) => ({ title: before.title, category: before.category }),
         });
         sendJson(response, 200, { deleted });
         return;
@@ -1817,13 +2033,11 @@ export function createServer(options = {}) {
         parts[2] &&
         parts[3] === "diagnose-risks"
       ) {
-        const opportunity = opportunityFromRow(
-          get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: parts[2] }),
-        );
+        const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
         if (!opportunity) return notFound(response);
 
         const customer = customerFromRow(
-          get(db, "SELECT * FROM customers WHERE id = $id", { $id: opportunity.customerId }),
+          get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: opportunity.customerId }),
         );
         if (!customer) return notFound(response);
 
@@ -2180,7 +2394,7 @@ export function createServer(options = {}) {
         parts[3] &&
         parts[4] === "export"
       ) {
-        const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id", { $id: parts[3] }));
+        const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: parts[3] }));
         if (!item) return notFound(response);
         const format = url.searchParams.get("format") ?? "word";
         if (format !== "word") return badRequest(response, "format must be word");
@@ -2199,8 +2413,9 @@ export function createServer(options = {}) {
         parts[2] === "weekly" &&
         parts[3]
       ) {
+        const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.weeklyPatch);
-        const item = updateWeeklyReport(db, parts[3], body);
+        const item = updateWeeklyReport(db, parts[3], body, expectedVersion);
         if (!item) return notFound(response);
         if (item.error === "invalid_status") return badRequest(response, "status must be draft, saved, or ready");
         recordAuditLog(db, {
@@ -2215,13 +2430,42 @@ export function createServer(options = {}) {
       }
 
       if (
+        request.method === "DELETE" &&
+        parts[0] === "api" &&
+        parts[1] === "reports" &&
+        parts[2] === "weekly" &&
+        parts[3]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        const deleted = softDeleteRecord(db, {
+          table: "weekly_reports",
+          id: parts[3],
+          expectedVersion,
+          fromRow: weeklyReportFromRow,
+          action: "weekly_report.delete",
+          entityType: "weekly_report",
+          deletedBy: request.authContext.account,
+          requestId,
+          metadata: (before) => ({
+            owner: before.owner,
+            periodStart: before.periodStart,
+            periodEnd: before.periodEnd,
+            status: before.status,
+          }),
+        });
+        sendJson(response, 200, { deleted });
+        return;
+      }
+
+      if (
         request.method === "GET" &&
         parts[0] === "api" &&
         parts[1] === "reports" &&
         parts[2] === "weekly" &&
         parts[3]
       ) {
-        const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id", { $id: parts[3] }));
+        const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: parts[3] }));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;
@@ -2237,8 +2481,8 @@ export function createServer(options = {}) {
           validationFailure("knowledgeIds", "array");
         }
 
-        const customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: body.customerId }));
-        const opportunity = opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: body.opportunityId }));
+        const customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: body.customerId }));
+        const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, body.opportunityId));
         validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
         const selectedKnowledge = getKnowledgeItemsByIds(db, knowledgeIds);
         if (selectedKnowledge.length !== knowledgeIds.length) {
@@ -2324,25 +2568,25 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "solutions" && parts[2]) {
-        const existing = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: parts[2] }));
+        const expectedVersion = parseExpectedVersion(request);
+        const existing = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2]));
         if (!existing) return notFound(response);
         const body = await readValidatedJson(request, requestSchemas.solutionPatch);
         const status = body.status ?? existing.status;
-        run(
-          db,
-          `UPDATE solution_drafts
-             SET title = $title,
+        runVersionedUpdate(db, {
+          table: "solution_drafts",
+          id: existing.id,
+          expectedVersion,
+          softDeletable: false,
+          setSql: `title = $title,
                  content = $content,
-                 status = $status,
-                 updated_at = CURRENT_TIMESTAMP
-           WHERE id = $id`,
-          {
-            $id: existing.id,
+                 status = $status`,
+          params: {
             $title: body.title ?? existing.title,
             $content: body.content ?? existing.content,
             $status: status,
           },
-        );
+        });
         const item = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: existing.id }));
         recordAuditLog(db, {
           action: "solution_draft.update",
@@ -2360,7 +2604,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && parts[0] === "api" && parts[1] === "solutions" && parts[2]) {
-        const item = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: parts[2] }));
+        const item = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2]));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;

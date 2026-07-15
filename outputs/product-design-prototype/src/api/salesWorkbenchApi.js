@@ -28,6 +28,13 @@ function pickOwnFields(source, fields) {
   return picked;
 }
 
+function versionHeaders(version) {
+  if (!Number.isSafeInteger(version) || version <= 0) {
+    throw new TypeError("A positive integer entity version is required");
+  }
+  return { "If-Match": `"${version}"` };
+}
+
 function requestHeaders(options, csrfToken) {
   const method = String(options.method ?? "GET").toUpperCase();
   const suppliedHeaders = { ...(options.headers ?? {}) };
@@ -66,6 +73,8 @@ function toApiError(response, body) {
   error.status = response?.status;
   error.code = details?.code;
   error.fields = details?.fields;
+  error.details = details?.fields;
+  error.currentVersion = details?.fields?.currentVersion;
   error.requestId = details?.requestId;
   error.body = body;
   return error;
@@ -276,13 +285,17 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       const isUpdate = Boolean(id);
       const saved = await requestApi(isUpdate ? `/api/customers/${id}` : "/api/customers", {
         method: isUpdate ? "PATCH" : "POST",
+        ...(isUpdate ? { headers: versionHeaders(customer.version) } : {}),
         body: JSON.stringify(payload),
       });
       return assertApiEntity("customer", saved.item);
     },
 
-    async deleteCustomer(customerId) {
-      const deleted = await requestApi(`/api/customers/${customerId}`, { method: "DELETE" });
+    async deleteCustomer(customerId, version) {
+      const deleted = await requestApi(`/api/customers/${customerId}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+      });
       return assertApiEntity("customer", deleted.deleted);
     },
 
@@ -292,13 +305,17 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       const isUpdate = Boolean(id);
       const saved = await requestApi(isUpdate ? `/api/opportunities/${id}` : "/api/opportunities", {
         method: isUpdate ? "PATCH" : "POST",
+        ...(isUpdate ? { headers: versionHeaders(opportunity.version) } : {}),
         body: JSON.stringify(payload),
       });
       return assertApiEntity("opportunity", saved.item);
     },
 
-    async deleteOpportunity(opportunityId) {
-      const deleted = await requestApi(`/api/opportunities/${opportunityId}`, { method: "DELETE" });
+    async deleteOpportunity(opportunityId, version) {
+      const deleted = await requestApi(`/api/opportunities/${opportunityId}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+      });
       return assertApiEntity("opportunity", deleted.deleted);
     },
 
@@ -308,13 +325,17 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       const isUpdate = Boolean(id);
       const saved = await requestApi(isUpdate ? `/api/knowledge/${id}` : "/api/knowledge", {
         method: isUpdate ? "PATCH" : "POST",
+        ...(isUpdate ? { headers: versionHeaders(item.version) } : {}),
         body: JSON.stringify(payload),
       });
       return assertApiEntity("knowledgeItem", saved.item);
     },
 
-    async deleteKnowledgeItem(itemId) {
-      const deleted = await requestApi(`/api/knowledge/${itemId}`, { method: "DELETE" });
+    async deleteKnowledgeItem(itemId, version) {
+      const deleted = await requestApi(`/api/knowledge/${itemId}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+      });
       return assertApiEntity("knowledgeItem", deleted.deleted);
     },
 
@@ -326,29 +347,37 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiCollection("knowledgeItem", searched.items ?? []);
     },
 
-    async updateRiskStatus(riskId, patch) {
+    async updateRiskStatus(riskId, patch, version) {
       const updated = await requestApi(`/api/risks/${riskId}`, {
         method: "PATCH",
+        headers: versionHeaders(version),
         body: JSON.stringify(patch),
       });
       return assertApiEntity("riskItem", updated.item);
     },
 
-    async deleteRisk(riskId) {
-      const deleted = await requestApi(`/api/risks/${riskId}`, { method: "DELETE" });
+    async deleteRisk(riskId, version) {
+      const deleted = await requestApi(`/api/risks/${riskId}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+      });
       return assertApiEntity("riskItem", deleted.deleted);
     },
 
-    async updateActionStatus(actionId, patch) {
+    async updateActionStatus(actionId, patch, version) {
       const updated = await requestApi(`/api/actions/${actionId}`, {
         method: "PATCH",
+        headers: versionHeaders(version),
         body: JSON.stringify(patch),
       });
       return assertApiEntity("actionItem", updated.item);
     },
 
-    async deleteAction(actionId) {
-      const deleted = await requestApi(`/api/actions/${actionId}`, { method: "DELETE" });
+    async deleteAction(actionId, version) {
+      const deleted = await requestApi(`/api/actions/${actionId}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+      });
       return assertApiEntity("actionItem", deleted.deleted);
     },
 
@@ -383,12 +412,21 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("weeklyReport", draft.item);
     },
 
-    async saveWeeklyReport(reportId, patch) {
+    async saveWeeklyReport(reportId, patch, version) {
       const saved = await requestApi(`/api/reports/weekly/${reportId}`, {
         method: "PATCH",
+        headers: versionHeaders(version),
         body: JSON.stringify(patch),
       });
       return assertApiEntity("weeklyReport", saved.item);
+    },
+
+    async deleteWeeklyReport(reportId, version) {
+      const deleted = await requestApi(`/api/reports/weekly/${reportId}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+      });
+      return assertApiEntity("weeklyReport", deleted.deleted);
     },
 
     async downloadWeeklyReport(reportId, format = "word") {
@@ -422,9 +460,10 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("solutionDraft", draft.item);
     },
 
-    async saveSolutionDraft(draftId, patch) {
+    async saveSolutionDraft(draftId, patch, version) {
       const saved = await requestApi(`/api/solutions/${draftId}`, {
         method: "PATCH",
+        headers: versionHeaders(version),
         body: JSON.stringify(patch),
       });
       return assertApiEntity("solutionDraft", saved.item);

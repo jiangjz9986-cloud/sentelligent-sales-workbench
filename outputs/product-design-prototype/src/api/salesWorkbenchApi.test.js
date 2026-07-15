@@ -70,6 +70,7 @@ function deferred() {
 function sampleCustomer(overrides = {}) {
   return {
     id: "rizhao",
+    version: 1,
     name: "Rizhao TCM Hospital",
     region: "Rizhao",
     type: "hospital",
@@ -94,6 +95,7 @@ function sampleCustomer(overrides = {}) {
 function sampleOpportunity(overrides = {}) {
   return {
     id: "op-rizhao-plan",
+    version: 1,
     customerId: "rizhao",
     name: "Rizhao TCM five-year plan",
     customer: "Rizhao TCM Hospital",
@@ -116,6 +118,7 @@ function sampleOpportunity(overrides = {}) {
 function sampleAction(overrides = {}) {
   return {
     id: "act-1",
+    version: 1,
     customerId: "rizhao",
     opportunityId: "op-rizhao-plan",
     title: "Prepare planning material",
@@ -136,6 +139,7 @@ function sampleAction(overrides = {}) {
 function sampleRisk(overrides = {}) {
   return {
     id: "risk-1",
+    version: 1,
     customerId: "rizhao",
     opportunityId: "op-rizhao-plan",
     title: "Budget path unclear",
@@ -159,6 +163,7 @@ function sampleRisk(overrides = {}) {
 function sampleKnowledgeItem(overrides = {}) {
   return {
     id: "k-mobile-cloud",
+    version: 1,
     title: "移动云灾备对比清单",
     category: "话术材料",
     tags: ["移动云", "灾备", "数据自主权"],
@@ -193,6 +198,7 @@ function sampleDashboardSummary(overrides = {}) {
 function sampleQuickRecord(overrides = {}) {
   return {
     id: "qr-1",
+    version: 1,
     rawContent: "Rizhao record",
     occurredAt: "2026-06-03T09:00:00+08:00",
     sourceChannel: "field visit",
@@ -237,6 +243,7 @@ function sampleConfirmation(overrides = {}) {
 function sampleWeeklyReport(overrides = {}) {
   return {
     id: "wr-1",
+    version: 1,
     owner: "Jizhen",
     periodStart: "2026-06-01",
     periodEnd: "2026-06-07",
@@ -250,6 +257,7 @@ function sampleWeeklyReport(overrides = {}) {
 function sampleSolutionDraft(overrides = {}) {
   return {
     id: "sd-1",
+    version: 1,
     owner: "Jizhen",
     artifactType: "solution_framework",
     title: "Rizhao solution draft",
@@ -353,7 +361,7 @@ describe("sales workbench API client", () => {
     });
 
     const session = await api.restoreSession();
-    await api.updateActionStatus("act-1", { status: "done" });
+    await api.updateActionStatus("act-1", { status: "done" }, 1);
 
     assert.deepEqual(session, {
       account: "jiangjz",
@@ -390,7 +398,7 @@ describe("sales workbench API client", () => {
     api.setSession({ csrfToken: "csrf-methods" });
 
     await api.startWeixinBinding();
-    await api.saveWeeklyReport("wr-1", { status: "ready" });
+    await api.saveWeeklyReport("wr-1", { status: "ready" }, 1);
     await api.stopWeixinBinding();
     await api.getWeixinBindingStatus();
     await salesWorkbenchApiModule.requestJson(
@@ -530,7 +538,7 @@ describe("sales workbench API client", () => {
             error: {
               code: "VERSION_CONFLICT",
               message: "Record changed",
-              fields: { version: "stale" },
+              fields: { currentVersion: 7 },
               requestId: "req-conflict-409",
             },
           }, 409);
@@ -542,12 +550,21 @@ describe("sales workbench API client", () => {
     });
     api.setSession({ csrfToken: "csrf-conflict" });
 
+    const patch = { status: "closed" };
     await assert.rejects(
-      () => api.updateRiskStatus("risk-1", { status: "closed" }),
-      (error) => error.status === 409 && error.code === "VERSION_CONFLICT",
+      () => api.updateRiskStatus("risk-1", patch, 6),
+      (error) => {
+        assert.equal(error.status, 409);
+        assert.equal(error.code, "VERSION_CONFLICT");
+        assert.deepEqual(error.fields, { currentVersion: 7 });
+        assert.equal(error.currentVersion, 7);
+        return true;
+      },
     );
     await api.startWeixinBinding();
 
+    assert.deepEqual(patch, { status: "closed" });
+    assert.equal(headerValue(calls[0].options, "If-Match"), '"6"');
     assert.equal(unauthorizedCalls, 0);
     assert.deepEqual(calls.map(({ options }) => headerValue(options, "X-CSRF-Token")), [
       "csrf-conflict",
@@ -621,7 +638,7 @@ describe("sales workbench API client", () => {
     });
     api.setSession({ csrfToken: "csrf-old-session" });
 
-    const oldRequest = api.updateRiskStatus("risk-1", { status: "closed" });
+    const oldRequest = api.updateRiskStatus("risk-1", { status: "closed" }, 1);
     api.setSession({ csrfToken: "csrf-new-session" });
     oldResponse.resolve(jsonResponse({
       error: { code: "UNAUTHORIZED", message: "Old request expired", requestId: "old-401" },
@@ -650,8 +667,8 @@ describe("sales workbench API client", () => {
     });
     api.setSession({ csrfToken: "csrf-shared" });
 
-    const firstRequest = api.updateRiskStatus("risk-1", { status: "closed" });
-    const secondRequest = api.updateActionStatus("action-1", { status: "done" });
+    const firstRequest = api.updateRiskStatus("risk-1", { status: "closed" }, 1);
+    const secondRequest = api.updateActionStatus("action-1", { status: "done" }, 1);
     firstResponse.resolve(jsonResponse({ error: { code: "UNAUTHORIZED", message: "Expired" } }, 401));
     secondResponse.resolve(jsonResponse({ error: { code: "UNAUTHORIZED", message: "Expired" } }, 401));
     const results = await Promise.allSettled([firstRequest, secondRequest]);
@@ -852,6 +869,7 @@ describe("sales workbench API client", () => {
     });
     const updatedCustomer = await api.saveCustomer({
       id: "jiaozhou",
+      version: createdCustomer.version,
       level: "重点培育",
       relation: 52,
     });
@@ -862,6 +880,7 @@ describe("sales workbench API client", () => {
     });
     const updatedOpportunity = await api.saveOpportunity({
       id: "op-jiaozhou-plan",
+      version: createdOpportunity.version,
       stage: "初步沟通",
       probability: 45,
     });
@@ -917,6 +936,7 @@ describe("sales workbench API client", () => {
     });
     const updated = await api.saveKnowledgeItem({
       id: "k-rizhao-plan",
+      version: created.version,
       summary: "已更新为领导汇报口径。",
     });
     const searched = await api.searchKnowledge({
@@ -1075,6 +1095,71 @@ describe("sales workbench API client", () => {
     ]);
   });
 
+  it("requires positive integer versions in all mutable public entity contracts", () => {
+    const cases = [
+      ["customer", sampleCustomer({ version: 0 })],
+      ["opportunity", sampleOpportunity({ version: 0 })],
+      ["quickRecord", sampleQuickRecord({ version: 0 })],
+      ["weeklyReport", sampleWeeklyReport({ version: 0 })],
+      ["solutionDraft", sampleSolutionDraft({ version: 0 })],
+      ["actionItem", sampleAction({ version: 0 })],
+      ["riskItem", sampleRisk({ version: 0 })],
+      ["knowledgeItem", sampleKnowledgeItem({ version: 0 })],
+    ];
+
+    for (const [entityName, entity] of cases) {
+      assert.throws(
+        () => assertApiEntity(entityName, entity),
+        /positiveInteger/,
+        entityName,
+      );
+    }
+  });
+
+  it("sends quoted If-Match versions for PATCH and DELETE methods", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (options.method === "DELETE") {
+          if (url.includes("/reports/weekly/")) return jsonResponse({ deleted: sampleWeeklyReport({ version: 3 }) });
+          if (url.includes("/customers/")) return jsonResponse({ deleted: sampleCustomer({ version: 3 }) });
+          if (url.includes("/opportunities/")) return jsonResponse({ deleted: sampleOpportunity({ version: 3 }) });
+          if (url.includes("/knowledge/")) return jsonResponse({ deleted: sampleKnowledgeItem({ version: 3 }) });
+          if (url.includes("/actions/")) return jsonResponse({ deleted: sampleAction({ version: 3 }) });
+          return jsonResponse({ deleted: sampleRisk({ version: 3 }) });
+        }
+        if (url.includes("/customers/")) return jsonResponse({ item: sampleCustomer({ version: 3 }) });
+        if (url.includes("/opportunities/")) return jsonResponse({ item: sampleOpportunity({ version: 3 }) });
+        if (url.includes("/knowledge/")) return jsonResponse({ item: sampleKnowledgeItem({ version: 3 }) });
+        if (url.includes("/actions/")) return jsonResponse({ item: sampleAction({ version: 3 }) });
+        if (url.includes("/risks/")) return jsonResponse({ item: sampleRisk({ version: 3 }) });
+        if (url.includes("/reports/weekly/")) return jsonResponse({ item: sampleWeeklyReport({ version: 3 }) });
+        return jsonResponse({ item: sampleSolutionDraft({ version: 3 }) });
+      },
+    });
+
+    await api.saveCustomer(sampleCustomer({ version: 2 }));
+    await api.saveOpportunity(sampleOpportunity({ version: 2 }));
+    await api.saveKnowledgeItem(sampleKnowledgeItem({ version: 2 }));
+    await api.updateActionStatus("act-1", { status: "done" }, 2);
+    await api.updateRiskStatus("risk-1", { status: "closed" }, 2);
+    await api.saveWeeklyReport("wr-1", { status: "saved" }, 2);
+    await api.saveSolutionDraft("sd-1", { status: "saved" }, 2);
+    await api.deleteCustomer("rizhao", 2);
+    await api.deleteOpportunity("op-rizhao-plan", 2);
+    await api.deleteKnowledgeItem("k-mobile-cloud", 2);
+    await api.deleteAction("act-1", 2);
+    await api.deleteRisk("risk-1", 2);
+    await api.deleteWeeklyReport("wr-1", 2);
+
+    assert.equal(calls.length, 13);
+    for (const call of calls) {
+      assert.equal(headerValue(call.options, "If-Match"), '"2"', call.url);
+    }
+  });
+
   it("updates risk status through the backend", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
@@ -1094,7 +1179,7 @@ describe("sales workbench API client", () => {
       assignee: "Presales Li",
       due: "Friday 17:00",
       action: "已安排售前确认预算路径。",
-    });
+    }, 1);
 
     assertApiEntity("riskItem", updated);
     assert.equal(updated.status, "in_progress");
@@ -1138,7 +1223,7 @@ describe("sales workbench API client", () => {
       status: "deferred",
       due: "Friday 17:00",
       assignee: "Presales Li",
-    });
+    }, 1);
 
     assertApiEntity("actionItem", updated);
     assert.equal(updated.status, "deferred");
@@ -1173,11 +1258,11 @@ describe("sales workbench API client", () => {
       },
     });
 
-    await api.deleteCustomer("customer-1");
-    await api.deleteOpportunity("opportunity-1");
-    await api.deleteKnowledgeItem("knowledge-1");
-    await api.deleteAction("action-1");
-    await api.deleteRisk("risk-1");
+    await api.deleteCustomer("customer-1", 1);
+    await api.deleteOpportunity("opportunity-1", 1);
+    await api.deleteKnowledgeItem("knowledge-1", 1);
+    await api.deleteAction("action-1", 1);
+    await api.deleteRisk("risk-1", 1);
 
     assert.deepEqual(calls, [
       { url: "http://127.0.0.1:8787/api/customers/customer-1", method: "DELETE" },
@@ -1325,7 +1410,7 @@ describe("sales workbench API client", () => {
     const saved = await api.saveWeeklyReport("wr-1", {
       content: "# edited weekly report",
       status: "ready",
-    });
+    }, 1);
     const downloaded = await api.downloadWeeklyReport("wr-1", "word");
 
     assertApiEntity("weeklyReport", saved);
@@ -1426,7 +1511,7 @@ describe("sales workbench API client", () => {
     const saved = await api.saveSolutionDraft("sd-1", {
       content: "# edited solution artifact",
       status: "saved",
-    });
+    }, 1);
 
     assertApiEntity("solutionDraft", saved);
     assert.equal(saved.status, "saved");

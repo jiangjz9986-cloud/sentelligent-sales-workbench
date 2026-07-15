@@ -30,6 +30,10 @@ async function request(path, options = {}) {
   return { response, body };
 }
 
+function ifMatch(version) {
+  return { "If-Match": `"${version}"` };
+}
+
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "sentelligent-api-"));
   databaseUrl = join(tempDir, "test.sqlite");
@@ -418,6 +422,7 @@ describe("sales workbench backend API", () => {
 
     const updatedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`, {
       method: "PATCH",
+      headers: ifMatch(createdCustomer.body.item.version),
       body: JSON.stringify({
         level: "重点培育",
         relation: 52,
@@ -455,6 +460,7 @@ describe("sales workbench backend API", () => {
 
     const updatedOpportunity = await request(`/api/opportunities/${createdOpportunity.body.item.id}`, {
       method: "PATCH",
+      headers: ifMatch(createdOpportunity.body.item.version),
       body: JSON.stringify({
         stage: "初步沟通",
         probability: 45,
@@ -488,7 +494,10 @@ describe("sales workbench backend API", () => {
 
     assert.equal(createdCustomer.response.status, 201);
 
-    const deletedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`, { method: "DELETE" });
+    const deletedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`, {
+      method: "DELETE",
+      headers: ifMatch(createdCustomer.body.item.version),
+    });
     assert.equal(deletedCustomer.response.status, 200);
     assert.equal(deletedCustomer.body.deleted.id, createdCustomer.body.item.id);
 
@@ -507,7 +516,10 @@ describe("sales workbench backend API", () => {
 
     assert.equal(createdOpportunity.response.status, 201);
 
-    const deletedOpportunity = await request(`/api/opportunities/${createdOpportunity.body.item.id}`, { method: "DELETE" });
+    const deletedOpportunity = await request(`/api/opportunities/${createdOpportunity.body.item.id}`, {
+      method: "DELETE",
+      headers: ifMatch(createdOpportunity.body.item.version),
+    });
     assert.equal(deletedOpportunity.response.status, 200);
     assert.equal(deletedOpportunity.body.deleted.id, createdOpportunity.body.item.id);
 
@@ -522,17 +534,26 @@ describe("sales workbench backend API", () => {
 
     assert.equal(createdKnowledge.response.status, 201);
 
-    const deletedKnowledge = await request(`/api/knowledge/${createdKnowledge.body.item.id}`, { method: "DELETE" });
+    const deletedKnowledge = await request(`/api/knowledge/${createdKnowledge.body.item.id}`, {
+      method: "DELETE",
+      headers: ifMatch(createdKnowledge.body.item.version),
+    });
     assert.equal(deletedKnowledge.response.status, 200);
     assert.equal(deletedKnowledge.body.deleted.id, createdKnowledge.body.item.id);
 
     const action = (await request("/api/actions")).body.items[0];
-    const deletedAction = await request(`/api/actions/${action.id}`, { method: "DELETE" });
+    const deletedAction = await request(`/api/actions/${action.id}`, {
+      method: "DELETE",
+      headers: ifMatch(action.version),
+    });
     assert.equal(deletedAction.response.status, 200);
     assert.equal(deletedAction.body.deleted.id, action.id);
 
     const risk = (await request("/api/risks")).body.items[0];
-    const deletedRisk = await request(`/api/risks/${risk.id}`, { method: "DELETE" });
+    const deletedRisk = await request(`/api/risks/${risk.id}`, {
+      method: "DELETE",
+      headers: ifMatch(risk.version),
+    });
     assert.equal(deletedRisk.response.status, 200);
     assert.equal(deletedRisk.body.deleted.id, risk.id);
   });
@@ -677,6 +698,7 @@ describe("sales workbench backend API", () => {
     const editedContent = "# 已确认周报\n\n本周重点：日照中医医院十五五规划材料已补齐。";
     const saved = await request(`/api/reports/weekly/${report.body.item.id}`, {
       method: "PATCH",
+      headers: ifMatch(report.body.item.version),
       body: JSON.stringify({
         status: "ready",
         content: editedContent,
@@ -701,6 +723,7 @@ describe("sales workbench backend API", () => {
 
     const invalid = await request(`/api/reports/weekly/${report.body.item.id}`, {
       method: "PATCH",
+      headers: ifMatch(saved.body.item.version),
       body: JSON.stringify({ status: "unknown" }),
     });
     assert.equal(invalid.response.status, 422);
@@ -835,6 +858,7 @@ describe("sales workbench backend API", () => {
 
     const saved = await request(`/api/solutions/${draft.body.item.id}`, {
       method: "PATCH",
+      headers: ifMatch(draft.body.item.version),
       body: JSON.stringify({
         content: "# 修改后的沟通提纲\n\n## 会议目标\n确认预算路径。",
         status: "saved",
@@ -849,6 +873,7 @@ describe("sales workbench backend API", () => {
 
     const invalid = await request(`/api/solutions/${draft.body.item.id}`, {
       method: "PATCH",
+      headers: ifMatch(saved.body.item.version),
       body: JSON.stringify({ status: "unknown" }),
     });
     assert.equal(invalid.response.status, 422);
@@ -1080,6 +1105,7 @@ describe("sales workbench backend API", () => {
 
     const started = await request(`/api/risks/${risk.id}`, {
       method: "PATCH",
+      headers: ifMatch(risk.version),
       body: JSON.stringify({
         status: "in_progress",
         assignee: "售前李工",
@@ -1096,6 +1122,7 @@ describe("sales workbench backend API", () => {
 
     const deferred = await request(`/api/risks/${risk.id}`, {
       method: "PATCH",
+      headers: ifMatch(started.body.item.version),
       body: JSON.stringify({
         status: "deferred",
         action: "客户会议延期，风险处理顺延到下周。",
@@ -1109,6 +1136,7 @@ describe("sales workbench backend API", () => {
 
     const closed = await request(`/api/risks/${risk.id}`, {
       method: "PATCH",
+      headers: ifMatch(deferred.body.item.version),
       body: JSON.stringify({
         status: "closed",
         assignee: "继振",
@@ -1121,6 +1149,7 @@ describe("sales workbench backend API", () => {
 
     const invalid = await request(`/api/risks/${risk.id}`, {
       method: "PATCH",
+      headers: ifMatch(closed.body.item.version),
       body: JSON.stringify({ status: "unknown" }),
     });
     assert.equal(invalid.response.status, 422);
@@ -1137,6 +1166,7 @@ describe("sales workbench backend API", () => {
 
     const updated = await request(`/api/actions/${action.id}`, {
       method: "PATCH",
+      headers: ifMatch(action.version),
       body: JSON.stringify({
         status: "deferred",
         due: "周五 17:00",
@@ -1151,6 +1181,7 @@ describe("sales workbench backend API", () => {
 
     const completed = await request(`/api/actions/${action.id}`, {
       method: "PATCH",
+      headers: ifMatch(updated.body.item.version),
       body: JSON.stringify({
         status: "done",
         assignee: "继振",
@@ -1162,6 +1193,7 @@ describe("sales workbench backend API", () => {
 
     const invalid = await request(`/api/actions/${action.id}`, {
       method: "PATCH",
+      headers: ifMatch(completed.body.item.version),
       body: JSON.stringify({ status: "blocked" }),
     });
     assert.equal(invalid.response.status, 422);
@@ -1210,6 +1242,7 @@ describe("sales workbench backend API", () => {
     const action = (await request("/api/actions")).body.items[0];
     const actionUpdate = await request(`/api/actions/${action.id}`, {
       method: "PATCH",
+      headers: ifMatch(action.version),
       body: JSON.stringify({
         status: "done",
         assignee: "继振",

@@ -630,8 +630,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleSaveCustomer(draft) {
+    const currentEntity = draft.id ? workbenchCustomers.find((item) => item.id === draft.id) : null;
     const saved = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.saveCustomer(draft)
+      ? await apiClient.saveCustomer(currentEntity ? { ...draft, version: currentEntity.version } : draft)
       : normalizeLocalCustomer(draft);
     setWorkbenchCustomers((current) => mergeById(current, saved));
     setSelectedCustomerId(saved.id);
@@ -640,8 +641,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleSaveOpportunity(draft) {
+    const currentEntity = draft.id ? workbenchOpportunities.find((item) => item.id === draft.id) : null;
     const saved = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.saveOpportunity(draft)
+      ? await apiClient.saveOpportunity(currentEntity ? { ...draft, version: currentEntity.version } : draft)
       : normalizeLocalOpportunity(draft);
     setWorkbenchOpportunities((current) => mergeById(current, saved));
     setSelectedOpportunityId(saved.id);
@@ -659,8 +661,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleSaveKnowledge(draft) {
+    const currentEntity = draft.id ? workbenchKnowledge.find((item) => item.id === draft.id) : null;
     const saved = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.saveKnowledgeItem(draft)
+      ? await apiClient.saveKnowledgeItem(currentEntity ? { ...draft, version: currentEntity.version } : draft)
       : normalizeLocalKnowledge(draft);
     setWorkbenchKnowledge((current) => mergeById(current, saved));
     setSelectedKnowledgeId(saved.id);
@@ -681,8 +684,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleUpdateRiskStatus(id, patch) {
+    const currentEntity = workbenchRisks.find((item) => item.id === id);
     const updated = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.updateRiskStatus(id, patch)
+      ? await apiClient.updateRiskStatus(id, patch, currentEntity?.version)
       : normalizeLocalRisk(id, patch);
     setWorkbenchRisks((current) => mergeById(current, updated));
     setSelectedRiskId(updated.id);
@@ -691,8 +695,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleUpdateActionStatus(id, patch) {
+    const currentEntity = workbenchActions.find((item) => item.id === id);
     const updated = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.updateActionStatus(id, patch)
+      ? await apiClient.updateActionStatus(id, patch, currentEntity?.version)
       : normalizeLocalAction(id, patch);
     setWorkbenchActions((current) => mergeById(current, updated));
     setSelectedActionId(updated.id);
@@ -703,7 +708,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   async function handleDeleteCustomer(id) {
     const existing = workbenchCustomers.find((item) => item.id === id);
     const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteCustomer(id)
+      ? await apiClient.deleteCustomer(id, existing?.version)
       : existing;
     const remainingCustomers = workbenchCustomers.filter((item) => item.id !== id);
     setWorkbenchCustomers(remainingCustomers);
@@ -719,7 +724,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   async function handleDeleteOpportunity(id) {
     const existing = workbenchOpportunities.find((item) => item.id === id);
     const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteOpportunity(id)
+      ? await apiClient.deleteOpportunity(id, existing?.version)
       : existing;
     const deletedName = deleted?.name ?? existing?.name;
     const remainingOpportunities = workbenchOpportunities.filter((item) => item.id !== id);
@@ -743,7 +748,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   async function handleDeleteKnowledge(id) {
     const existing = workbenchKnowledge.find((item) => item.id === id);
     const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteKnowledgeItem(id)
+      ? await apiClient.deleteKnowledgeItem(id, existing?.version)
       : existing;
     const remainingKnowledge = workbenchKnowledge.filter((item) => item.id !== id);
     setWorkbenchKnowledge(remainingKnowledge);
@@ -757,7 +762,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   async function handleDeleteAction(id) {
     const existing = workbenchActions.find((item) => item.id === id);
     const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteAction(id)
+      ? await apiClient.deleteAction(id, existing?.version)
       : existing;
     const remainingActions = workbenchActions.filter((item) => item.id !== id);
     setWorkbenchActions(remainingActions);
@@ -772,7 +777,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   async function handleDeleteRisk(id) {
     const existing = workbenchRisks.find((item) => item.id === id);
     const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteRisk(id)
+      ? await apiClient.deleteRisk(id, existing?.version)
       : existing;
     const remainingRisks = workbenchRisks.filter((item) => item.id !== id);
     setWorkbenchRisks(remainingRisks);
