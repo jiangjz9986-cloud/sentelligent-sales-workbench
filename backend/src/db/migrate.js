@@ -3,11 +3,20 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { apply as applyPhase1WriteIntegrity } from "./migrations/0002_phase1_write_integrity.mjs";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
   {
     version: "0001",
-    path: resolve(here, "migrations", "0001_baseline.sql")
+    path: resolve(here, "migrations", "0001_baseline.sql"),
+    type: "sql",
+  },
+  {
+    version: "0002",
+    path: resolve(here, "migrations", "0002_phase1_write_integrity.mjs"),
+    type: "module",
+    apply: applyPhase1WriteIntegrity,
   }
 ];
 
@@ -32,6 +41,27 @@ function repairBaselineColumns(db) {
     if (!columns.some((column) => column.name === repair.column)) {
       db.exec(`ALTER TABLE ${repair.table} ADD COLUMN ${repair.column} ${repair.definition}`);
     }
+  }
+}
+
+export function executeMigration(db, migration, source) {
+  if (migration.type === "sql") {
+    db.exec(source);
+    return;
+  }
+  if (migration.type !== "module") {
+    throw new Error(`Unknown migration type for ${migration.version}: ${migration.type}`);
+  }
+  if (typeof migration.apply !== "function") {
+    throw new Error(`Module migration ${migration.version} must export a synchronous apply function`);
+  }
+  if (migration.apply.constructor?.name === "AsyncFunction") {
+    throw new Error(`Module migration ${migration.version} apply function must be synchronous`);
+  }
+
+  const result = migration.apply(db);
+  if (result && typeof result.then === "function") {
+    throw new Error(`Module migration ${migration.version} returned a Promise; apply must be synchronous`);
   }
 }
 
@@ -65,7 +95,7 @@ export function migrateDatabase(db) {
         continue;
       }
 
-      db.exec(source);
+      executeMigration(db, migration, source);
       if (migration.version === "0001") repairBaselineColumns(db);
       recordMigration.run({ version: migration.version, checksum });
     }

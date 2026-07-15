@@ -9,7 +9,100 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { all, openDatabase, run } from "../src/db.js";
 import { createConnection } from "../src/db/connection.js";
-import { canonicalMigrationSource, migrateDatabase, migrationChecksum } from "../src/db/migrate.js";
+import {
+  canonicalMigrationSource,
+  executeMigration,
+  migrateDatabase,
+  migrationChecksum,
+} from "../src/db/migrate.js";
+
+const businessTables = [
+  "customers",
+  "opportunities",
+  "quick_records",
+  "ai_insights",
+  "manual_confirmations",
+  "weekly_reports",
+  "solution_drafts",
+  "ai_suggestions",
+  "action_items",
+  "risk_items",
+  "knowledge_items",
+  "audit_logs",
+];
+
+const writeIntegrityColumns = {
+  customers: ["version", "deleted_at", "deleted_by"],
+  opportunities: ["version", "deleted_at", "deleted_by"],
+  quick_records: ["version", "voided_at", "voided_by", "void_reason"],
+  weekly_reports: ["version", "deleted_at", "deleted_by"],
+  solution_drafts: ["version"],
+  action_items: ["version", "deleted_at", "deleted_by"],
+  risk_items: ["version", "deleted_at", "deleted_by"],
+  knowledge_items: ["version", "deleted_at", "deleted_by"],
+};
+
+function columnNames(db, table) {
+  return all(db, `PRAGMA table_info(${table})`).map((row) => row.name);
+}
+
+function columnInfo(db, table, column) {
+  return all(db, `PRAGMA table_info(${table})`).find((row) => row.name === column);
+}
+
+function indexColumns(db, index) {
+  return all(db, `PRAGMA index_info(${index})`).map((row) => row.name);
+}
+
+function databaseTableNames(db) {
+  return all(db, "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    .map((row) => row.name);
+}
+
+function tableCounts(db) {
+  return Object.fromEntries(
+    businessTables.map((table) => [table, all(db, `SELECT COUNT(*) AS count FROM ${table}`)[0].count]),
+  );
+}
+
+function rowsHash(db, table, omittedColumns = []) {
+  const omitted = new Set(omittedColumns);
+  const rows = all(db, `SELECT * FROM ${table} ORDER BY id`).map((row) =>
+    Object.fromEntries(Object.entries(row).filter(([column]) => !omitted.has(column))),
+  );
+  return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
+}
+
+function seedLegacyBusinessRows(db) {
+  const baselinePath = fileURLToPath(new URL("../src/db/migrations/0001_baseline.sql", import.meta.url));
+  db.exec(readFileSync(baselinePath, "utf8"));
+  db.exec(`
+    INSERT INTO customers (id, name, region, relation)
+    VALUES ('legacy-customer', 'Legacy customer', 'north', 71);
+    INSERT INTO opportunities (id, customer_id, name, stage, probability)
+    VALUES ('legacy-opportunity', 'legacy-customer', 'Legacy opportunity', 'discovery', 45);
+    INSERT INTO quick_records (id, raw_content, customer_id, opportunity_id, status)
+    VALUES ('legacy-record', 'Legacy record', 'legacy-customer', 'legacy-opportunity', 'recorded');
+    INSERT INTO ai_insights (id, quick_record_id, analysis_json)
+    VALUES ('legacy-insight', 'legacy-record', '{"summary":"legacy"}');
+    INSERT INTO manual_confirmations (id, quick_record_id, target, confirmed_by)
+    VALUES ('legacy-confirmation', 'legacy-record', 'customer', 'legacy-owner');
+    INSERT INTO weekly_reports (id, owner, period_start, period_end, content)
+    VALUES ('legacy-weekly', 'legacy-owner', '2026-07-06', '2026-07-12', 'Legacy weekly report');
+    INSERT INTO solution_drafts (id, owner, title, customer_id, opportunity_id, content)
+    VALUES ('legacy-solution', 'legacy-owner', 'Legacy solution', 'legacy-customer', 'legacy-opportunity', 'Legacy content');
+    INSERT INTO ai_suggestions (id, type, title, content)
+    VALUES ('legacy-suggestion', 'next_action', 'Legacy suggestion', 'Legacy suggestion content');
+    INSERT INTO action_items (id, customer_id, opportunity_id, title, source_record_id)
+    VALUES ('legacy-action', 'legacy-customer', 'legacy-opportunity', 'Legacy action', 'legacy-record');
+    INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, evidence, action)
+    VALUES ('legacy-risk', 'legacy-customer', 'legacy-opportunity', 'Legacy risk', 'Legacy target', 'Legacy evidence', 'Legacy mitigation');
+    INSERT INTO knowledge_items (id, title, category, content)
+    VALUES ('legacy-knowledge', 'Legacy knowledge', 'reference', 'Legacy knowledge content');
+    INSERT INTO audit_logs (id, action, entity_type, entity_id, actor)
+    VALUES ('legacy-audit', 'create', 'customer', 'legacy-customer', 'legacy-owner');
+  `);
+}
 
 function withDatabase(testBody) {
   const directory = mkdtempSync(join(tmpdir(), "sentelligent-migrations-"));
@@ -22,7 +115,7 @@ function withDatabase(testBody) {
   }
 }
 
-test("records baseline migration 0001 exactly once and remains idempotent on reopen", () => {
+test("records versioned migrations exactly once and remains idempotent on reopen", () => {
   withDatabase((databaseUrl) => {
     let first;
     let second;
@@ -34,13 +127,156 @@ test("records baseline migration 0001 exactly once and remains idempotent on reo
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 1);
+      assert.equal(firstMigrations.length, 2);
       assert.equal(firstMigrations[0].version, "0001");
+      assert.equal(firstMigrations[1].version, "0002");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
+      assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
+      const migrationSources = [
+        "../src/db/migrations/0001_baseline.sql",
+        "../src/db/migrations/0002_phase1_write_integrity.mjs",
+      ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
+      assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
+      assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
       first?.close();
+    }
+  });
+});
+
+test("rejects a stored checksum that does not match migration 0002", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      run(db, "INSERT INTO customers (id, name) VALUES (:id, :name)", {
+        id: "checksum-0002-customer",
+        name: "Checksum 0002 customer",
+      });
+      const update = run(db, "UPDATE schema_migrations SET checksum = :checksum WHERE version = :version", {
+        checksum: "not-the-write-integrity-checksum",
+        version: "0002",
+      });
+      assert.equal(update.changes, 1);
+    } finally {
+      db.close();
+    }
+
+    assert.throws(
+      () => {
+        const unexpected = openDatabase({ databaseUrl });
+        unexpected.close();
+      },
+      /Checksum mismatch for migration 0002/,
+    );
+
+    const readable = createConnection({ databaseUrl });
+    try {
+      assert.equal(
+        all(readable, "SELECT name FROM customers WHERE id = 'checksum-0002-customer'")[0].name,
+        "Checksum 0002 customer",
+      );
+      assert.equal(
+        all(readable, "SELECT checksum FROM schema_migrations WHERE version = '0002'")[0].checksum,
+        "not-the-write-integrity-checksum",
+      );
+    } finally {
+      readable.close();
+    }
+  });
+});
+
+test("upgrades all legacy business data into the phase one write-integrity schema", () => {
+  withDatabase((databaseUrl) => {
+    const legacy = createConnection({ databaseUrl });
+    seedLegacyBusinessRows(legacy);
+    const countsBefore = tableCounts(legacy);
+    const hashesBefore = Object.fromEntries(
+      Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+        table,
+        rowsHash(legacy, table, omittedColumns),
+      ]),
+    );
+    legacy.close();
+
+    const migrated = openDatabase({ databaseUrl });
+    try {
+      for (const [table, expectedColumns] of Object.entries(writeIntegrityColumns)) {
+        const actualColumns = columnNames(migrated, table);
+        for (const column of expectedColumns) assert.equal(actualColumns.includes(column), true);
+      }
+      for (const table of Object.keys(writeIntegrityColumns)) {
+        const version = columnInfo(migrated, table, "version");
+        assert.equal(version.type, "INTEGER");
+        assert.equal(version.notnull, 1);
+        assert.equal(version.dflt_value, "1");
+      }
+      for (const table of [
+        "customers",
+        "opportunities",
+        "weekly_reports",
+        "action_items",
+        "risk_items",
+        "knowledge_items",
+      ]) {
+        assert.equal(columnInfo(migrated, table, "deleted_at").type, "TEXT");
+        assert.equal(columnInfo(migrated, table, "deleted_by").type, "TEXT");
+      }
+      const auditColumns = columnNames(migrated, "audit_logs");
+      for (const column of ["request_id", "before_json", "after_json", "entity_version"]) {
+        assert.equal(auditColumns.includes(column), true);
+      }
+      assert.equal(columnInfo(migrated, "audit_logs", "before_json").notnull, 1);
+      assert.equal(columnInfo(migrated, "audit_logs", "before_json").dflt_value, "'{}'");
+      assert.equal(columnInfo(migrated, "audit_logs", "after_json").notnull, 1);
+      assert.equal(columnInfo(migrated, "audit_logs", "after_json").dflt_value, "'{}'");
+      const tables = databaseTableNames(migrated);
+      for (const table of ["auth_sessions", "idempotency_keys", "login_rate_limits"]) {
+        assert.equal(tables.includes(table), true);
+      }
+      assert.deepEqual(
+        indexColumns(migrated, "idx_auth_sessions_active"),
+        ["token_hash", "expires_at", "revoked_at"],
+      );
+      assert.deepEqual(indexColumns(migrated, "idx_idempotency_expiry"), ["expires_at"]);
+      assert.deepEqual(
+        ["actor", "method", "request_path", "key"].map((column) =>
+          columnInfo(migrated, "idempotency_keys", column).pk),
+        [1, 2, 3, 4],
+      );
+
+      run(migrated, `
+        INSERT INTO auth_sessions (id, token_hash, account, expires_at, created_at)
+        VALUES ('session-1', 'token-hash', 'legacy-owner', '2026-07-20', '2026-07-15')
+      `);
+      assert.throws(() => run(migrated, `
+        INSERT INTO auth_sessions (id, token_hash, account, expires_at, created_at)
+        VALUES ('session-2', 'token-hash', 'legacy-owner', '2026-07-20', '2026-07-15')
+      `), /UNIQUE constraint failed/i);
+      assert.throws(() => run(migrated, `
+        INSERT INTO idempotency_keys (
+          actor, method, request_path, key, request_hash, state, created_at, expires_at
+        ) VALUES (
+          'legacy-owner', 'POST', '/api/customers', 'invalid-state', 'request-hash',
+          'invalid', '2026-07-15', '2026-07-16'
+        )
+      `), /CHECK constraint failed/i);
+
+      assert.deepEqual(tableCounts(migrated), countsBefore);
+      const hashesAfter = Object.fromEntries(
+        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+          table,
+          rowsHash(migrated, table, omittedColumns),
+        ]),
+      );
+      assert.deepEqual(hashesAfter, hashesBefore);
+      assert.deepEqual(
+        all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
+        ["0001", "0002"],
+      );
+    } finally {
+      migrated.close();
     }
   });
 });
@@ -89,6 +325,43 @@ test("uses the same migration checksum for LF and CRLF source text", () => {
   const crlf = lf.replace(/\n/g, "\r\n");
 
   assert.equal(migrationChecksum(lf), migrationChecksum(crlf));
+  assert.notEqual(migrationChecksum(lf), migrationChecksum(`${lf}-- changed\n`));
+});
+
+test("rejects unknown, missing, and asynchronous module migration executors", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    assert.throws(
+      () => executeMigration(db, { version: "test", type: "unknown" }, ""),
+      /Unknown migration type/i,
+    );
+    assert.throws(
+      () => executeMigration(db, { version: "test", type: "module" }, ""),
+      /must export a synchronous apply function/i,
+    );
+
+    let asyncApplyCalled = false;
+    assert.throws(
+      () => executeMigration(db, {
+        version: "test",
+        type: "module",
+        apply: async () => { asyncApplyCalled = true; },
+      }, ""),
+      /must be synchronous/i,
+    );
+    assert.equal(asyncApplyCalled, false);
+
+    assert.throws(
+      () => executeMigration(db, {
+        version: "test",
+        type: "module",
+        apply: () => Promise.resolve(),
+      }, ""),
+      /returned a Promise/i,
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test("rejects a raw CRLF checksum for baseline migration 0001 without mutating rows", () => {
@@ -194,7 +467,72 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 1);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 2);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("rolls back every 0002 schema change when the module migration fails partway", () => {
+  withDatabase((databaseUrl) => {
+    const db = createConnection({ databaseUrl });
+    try {
+      seedLegacyBusinessRows(db);
+      const baselinePath = fileURLToPath(new URL("../src/db/migrations/0001_baseline.sql", import.meta.url));
+      const baselineChecksum = migrationChecksum(readFileSync(baselinePath, "utf8"));
+      db.exec(`
+        CREATE TABLE schema_migrations (
+          version TEXT PRIMARY KEY,
+          checksum TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        );
+        CREATE TABLE auth_sessions (id TEXT PRIMARY KEY);
+      `);
+      run(db, `
+        INSERT INTO schema_migrations (version, checksum, applied_at)
+        VALUES ('0001', :checksum, CURRENT_TIMESTAMP)
+      `, { checksum: baselineChecksum });
+      const countsBefore = tableCounts(db);
+      const hashesBefore = Object.fromEntries(
+        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+          table,
+          rowsHash(db, table, omittedColumns),
+        ]),
+      );
+
+      assert.throws(() => migrateDatabase(db), /token_hash/i);
+
+      for (const [table, expectedColumns] of Object.entries(writeIntegrityColumns)) {
+        const actualColumns = columnNames(db, table);
+        for (const column of expectedColumns) assert.equal(actualColumns.includes(column), false);
+      }
+      const auditColumnsAfterFailure = columnNames(db, "audit_logs");
+      for (const column of ["request_id", "before_json", "after_json", "entity_version"]) {
+        assert.equal(auditColumnsAfterFailure.includes(column), false);
+      }
+      assert.equal(databaseTableNames(db).includes("idempotency_keys"), false);
+      assert.equal(databaseTableNames(db).includes("login_rate_limits"), false);
+      assert.deepEqual(tableCounts(db), countsBefore);
+      const hashesAfterFailure = Object.fromEntries(
+        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+          table,
+          rowsHash(db, table, omittedColumns),
+        ]),
+      );
+      assert.deepEqual(hashesAfterFailure, hashesBefore);
+      assert.deepEqual(
+        all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
+        ["0001"],
+      );
+
+      db.exec("DROP TABLE auth_sessions");
+      migrateDatabase(db);
+      assert.equal(columnNames(db, "customers").includes("version"), true);
+      assert.deepEqual(
+        all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
+        ["0001", "0002"],
+      );
     } finally {
       db.close();
     }
@@ -332,6 +670,7 @@ test("serializes blocked concurrent startup without duplicate baseline records",
     const db = openDatabase({ databaseUrl });
     try {
       assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0001'").length, 1);
+      assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0002'").length, 1);
     } finally {
       db.close();
     }
