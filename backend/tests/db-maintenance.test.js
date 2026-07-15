@@ -1,16 +1,22 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
   backupDatabase,
+  installRestoreCandidate,
   inspectDatabase,
   restoreDatabase,
+  snapshotRestoreSource,
 } from "../scripts/db-maintenance.mjs";
 import { all, openDatabase, run } from "../src/db.js";
-import { createConnection } from "../src/db/connection.js";
+import {
+  createConnection,
+  databaseMaintenanceLockPath,
+  databaseOpeningMarkerPrefix,
+} from "../src/db/connection.js";
 import { seedDatabase } from "../src/seed.js";
 
 function seedTestDatabase(databaseUrl) {
@@ -43,6 +49,22 @@ function createLegacyActionDatabase(databaseUrl) {
   } finally {
     db.close();
   }
+}
+
+function corruptTableRootPage(databaseUrl, tableName) {
+  const db = createConnection({ databaseUrl });
+  let pageSize;
+  let rootPage;
+  try {
+    pageSize = db.prepare("PRAGMA page_size").get().page_size;
+    rootPage = db.prepare("SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName).rootpage;
+  } finally {
+    db.close();
+  }
+  const bytes = readFileSync(databaseUrl);
+  const offset = (rootPage - 1) * pageSize;
+  bytes.fill(0, offset, Math.min(offset + 16, bytes.length));
+  writeFileSync(databaseUrl, bytes);
 }
 
 describe("sqlite maintenance", () => {
@@ -80,6 +102,8 @@ describe("sqlite maintenance", () => {
       assert.equal(info.status, "ready");
       assert.equal(info.tables.customers, before.tables.customers);
       assert.equal(info.tables.opportunities, before.tables.opportunities);
+      assert.equal(existsSync(databaseMaintenanceLockPath(databaseUrl)), false);
+      assert.equal(readdirSync(join(root, "data")).some((name) => name.includes("restore-rollback")), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -200,6 +224,258 @@ describe("sqlite maintenance", () => {
       } finally {
         live.close();
       }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a structurally empty sqlite backup before migrations can make it look valid", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-empty-"));
+    const databaseUrl = join(root, "data", "sales-workbench.sqlite");
+    const backupPath = join(root, "empty.sqlite");
+    const backupDir = join(root, "backups");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const empty = createConnection({ databaseUrl: backupPath });
+      empty.exec("PRAGMA journal_mode = DELETE");
+      empty.close();
+      const liveBytes = readFileSync(databaseUrl);
+
+      assert.throws(
+        () => restoreDatabase({ databaseUrl, backupPath, backupDir }),
+        /missing required tables/i,
+      );
+      assert.deepEqual(readFileSync(databaseUrl), liveBytes);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a backup source with active WAL sidecars before copying stale data", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-source-wal-"));
+    const databaseUrl = join(root, "live", "sales-workbench.sqlite");
+    const sourceDatabaseUrl = join(root, "source", "backup.sqlite");
+    const backupDir = join(root, "restore-backups");
+    let sourceDatabase;
+
+    try {
+      seedTestDatabase(databaseUrl);
+      seedTestDatabase(sourceDatabaseUrl);
+      sourceDatabase = openDatabase({ databaseUrl: sourceDatabaseUrl });
+      run(sourceDatabase, "DELETE FROM customers WHERE id = $id", { $id: "rizhao" });
+      assert.equal(existsSync(`${sourceDatabaseUrl}-wal`), true);
+      assert.equal(existsSync(`${sourceDatabaseUrl}-shm`), true);
+      const liveBytes = readFileSync(databaseUrl);
+      const walBytes = readFileSync(`${sourceDatabaseUrl}-wal`);
+      const shmBytes = readFileSync(`${sourceDatabaseUrl}-shm`);
+
+      assert.throws(
+        () => restoreDatabase({ databaseUrl, backupPath: sourceDatabaseUrl, backupDir }),
+        /backup source.*WAL sidecars/i,
+      );
+      assert.deepEqual(readFileSync(databaseUrl), liveBytes);
+      assert.deepEqual(readFileSync(`${sourceDatabaseUrl}-wal`), walBytes);
+      assert.deepEqual(readFileSync(`${sourceDatabaseUrl}-shm`), shmBytes);
+      assert.equal(existsSync(backupDir), false);
+    } finally {
+      sourceDatabase?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a transactionally consistent candidate from a WAL-backed source", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-snapshot-"));
+    const sourceDatabaseUrl = join(root, "source.sqlite");
+    const candidatePath = join(root, "candidate.sqlite");
+    let sourceDatabase;
+
+    try {
+      seedTestDatabase(sourceDatabaseUrl);
+      sourceDatabase = openDatabase({ databaseUrl: sourceDatabaseUrl });
+      run(sourceDatabase, "DELETE FROM customers WHERE id = $id", { $id: "rizhao" });
+      const expectedCustomerIds = all(sourceDatabase, "SELECT id FROM customers ORDER BY id")
+        .map((row) => row.id);
+      assert.equal(existsSync(`${sourceDatabaseUrl}-wal`), true);
+
+      snapshotRestoreSource({ sourcePath: sourceDatabaseUrl, candidatePath });
+
+      const candidate = openDatabase({ databaseUrl: candidatePath });
+      try {
+        assert.deepEqual(
+          all(candidate, "SELECT id FROM customers ORDER BY id").map((row) => row.id),
+          expectedCustomerIds,
+        );
+      } finally {
+        candidate.close();
+      }
+    } finally {
+      sourceDatabase?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a corrupt restore candidate before replacing the live database", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-corrupt-"));
+    const databaseUrl = join(root, "data", "sales-workbench.sqlite");
+    const backupDir = join(root, "backups");
+    const corruptBackupPath = join(root, "corrupt.sqlite");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const backup = backupDatabase({ databaseUrl, backupDir, label: "valid" });
+      copyFileSync(backup.backupPath, corruptBackupPath);
+      corruptTableRootPage(corruptBackupPath, "customers");
+      const liveBytes = readFileSync(databaseUrl);
+
+      assert.throws(
+        () => restoreDatabase({ databaseUrl, backupPath: corruptBackupPath, backupDir }),
+        /integrity|quick_check|malformed/i
+      );
+      assert.deepEqual(readFileSync(databaseUrl), liveBytes);
+      const live = openDatabase({ databaseUrl });
+      try {
+        assert.equal(all(live, "PRAGMA quick_check")[0].quick_check, "ok");
+      } finally {
+        live.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a restore candidate with foreign key violations", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-foreign-key-"));
+    const databaseUrl = join(root, "data", "sales-workbench.sqlite");
+    const backupDir = join(root, "backups");
+    const invalidBackupPath = join(root, "foreign-key-violation.sqlite");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const backup = backupDatabase({ databaseUrl, backupDir, label: "valid" });
+      copyFileSync(backup.backupPath, invalidBackupPath);
+      const invalid = createConnection({ databaseUrl: invalidBackupPath });
+      try {
+        invalid.exec("PRAGMA foreign_keys = OFF");
+        const result = run(
+          invalid,
+          "UPDATE opportunities SET customer_id = 'missing-customer' WHERE id = (SELECT id FROM opportunities LIMIT 1)"
+        );
+        assert.equal(result.changes, 1);
+      } finally {
+        invalid.close();
+      }
+      const liveBytes = readFileSync(databaseUrl);
+
+      assert.throws(
+        () => restoreDatabase({ databaseUrl, backupPath: invalidBackupPath, backupDir }),
+        /foreign.key/i
+      );
+      assert.deepEqual(readFileSync(databaseUrl), liveBytes);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the previous database file when installed-candidate validation fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-rollback-"));
+    const databaseUrl = join(root, "live.sqlite");
+    const candidatePath = join(root, "candidate.sqlite");
+
+    try {
+      writeFileSync(databaseUrl, "original-live-database");
+      writeFileSync(candidatePath, "replacement-candidate");
+
+      assert.throws(
+        () => installRestoreCandidate({
+          databaseUrl,
+          candidatePath,
+          validate: (installedPath) => {
+            assert.equal(installedPath, databaseUrl);
+            assert.equal(readFileSync(databaseUrl, "utf8"), "replacement-candidate");
+            const rollbackName = readdirSync(root).find((name) => name.includes("restore-rollback"));
+            assert.ok(rollbackName);
+            assert.equal(readFileSync(join(root, rollbackName), "utf8"), "original-live-database");
+            throw new Error("post-install validation failed");
+          },
+        }),
+        /post-install validation failed/
+      );
+      assert.equal(readFileSync(databaseUrl, "utf8"), "original-live-database");
+      assert.equal(existsSync(candidatePath), false);
+      assert.equal(existsSync(databaseMaintenanceLockPath(databaseUrl)), false);
+      assert.equal(readdirSync(root).some((name) => name.includes("restore-rollback")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to install a restore candidate that still has sidecars", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-candidate-wal-"));
+    const databaseUrl = join(root, "live.sqlite");
+    const candidatePath = join(root, "candidate.sqlite");
+
+    try {
+      writeFileSync(databaseUrl, "original-live-database");
+      writeFileSync(candidatePath, "replacement-candidate");
+      writeFileSync(`${candidatePath}-wal`, "active wal");
+      writeFileSync(`${candidatePath}-shm`, "active shm");
+
+      assert.throws(
+        () => installRestoreCandidate({ databaseUrl, candidatePath, validate: () => {} }),
+        /restore candidate.*WAL sidecars/i,
+      );
+      assert.equal(readFileSync(databaseUrl, "utf8"), "original-live-database");
+      assert.equal(readFileSync(candidatePath, "utf8"), "replacement-candidate");
+      assert.equal(readFileSync(`${candidatePath}-wal`, "utf8"), "active wal");
+      assert.equal(readFileSync(`${candidatePath}-shm`, "utf8"), "active shm");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not remove a maintenance lock owned by another restore process", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-existing-lock-"));
+    const databaseUrl = join(root, "live.sqlite");
+    const candidatePath = join(root, "candidate.sqlite");
+    const lockPath = databaseMaintenanceLockPath(databaseUrl);
+
+    try {
+      writeFileSync(databaseUrl, "original-live-database");
+      writeFileSync(candidatePath, "replacement-candidate");
+      writeFileSync(lockPath, "owned by another process");
+
+      assert.throws(
+        () => installRestoreCandidate({ databaseUrl, candidatePath, validate: () => {} }),
+        /maintenance is already in progress/i,
+      );
+      assert.equal(readFileSync(lockPath, "utf8"), "owned by another process");
+      assert.equal(readFileSync(databaseUrl, "utf8"), "original-live-database");
+      assert.equal(readFileSync(candidatePath, "utf8"), "replacement-candidate");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to swap files while another process is opening the live database", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-opening-"));
+    const databaseUrl = join(root, "live.sqlite");
+    const candidatePath = join(root, "candidate.sqlite");
+    const openingMarker = `${databaseOpeningMarkerPrefix(databaseUrl)}other-process.lock`;
+
+    try {
+      writeFileSync(databaseUrl, "original-live-database");
+      writeFileSync(candidatePath, "replacement-candidate");
+      writeFileSync(openingMarker, "connection opening");
+
+      assert.throws(
+        () => installRestoreCandidate({ databaseUrl, candidatePath, validate: () => {} }),
+        /database connection is opening/i,
+      );
+      assert.equal(readFileSync(databaseUrl, "utf8"), "original-live-database");
+      assert.equal(readFileSync(candidatePath, "utf8"), "replacement-candidate");
+      assert.equal(readFileSync(openingMarker, "utf8"), "connection opening");
+      assert.equal(existsSync(databaseMaintenanceLockPath(databaseUrl)), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
