@@ -45,11 +45,15 @@ import {
 import { seedDatabase } from "./seed.js";
 import {
   buildSolutionDraft,
-  isSolutionArtifactType,
   normalizeSolutionArtifactType,
 } from "./solutionDraft.js";
 import { createWeixinLoginBinding } from "./weixin/loginBinding.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
+import {
+  partialSchema,
+  requestSchemas,
+  validateObject,
+} from "./validation/requests.js";
 
 const jsonColumns = {
   customer: [
@@ -466,9 +470,65 @@ function unauthorized(_response, message = "Please sign in", code = "UNAUTHORIZE
 const riskStatuses = new Set(["open", "accepted", "in_progress", "deferred", "closed"]);
 const actionStatuses = new Set(["pending", "in_progress", "done", "deferred"]);
 const weeklyReportStatuses = new Set(["draft", "saved", "ready"]);
+const customerPatchSchema = partialSchema(requestSchemas.customerCreate);
+const opportunityPatchSchema = partialSchema(requestSchemas.opportunityCreate);
+const knowledgePatchSchema = partialSchema(requestSchemas.knowledgeCreate);
+
+async function readValidatedJson(request, schema, options) {
+  return validateObject(schema, await readJson(request), options);
+}
+
+async function validateEmptyBody(request) {
+  await readValidatedJson(request, {}, { allowEmpty: true });
+}
+
+function validationFailure(field, rule = "reference") {
+  throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", {
+    [field]: rule,
+  });
+}
+
+function activeCustomerRow(db, id) {
+  if (!id) return null;
+  return get(
+    db,
+    "SELECT id, name FROM customers WHERE id = $id AND deleted_at IS NULL",
+    { $id: id },
+  );
+}
+
+function activeOpportunityRow(db, id) {
+  if (!id) return null;
+  return get(
+    db,
+    "SELECT id, customer_id AS customerId FROM opportunities WHERE id = $id AND deleted_at IS NULL",
+    { $id: id },
+  );
+}
+
+function requireActiveCustomer(db, id) {
+  const customer = activeCustomerRow(db, id);
+  if (!customer) validationFailure("customerId");
+  return customer;
+}
+
+function requireActiveOpportunity(db, id) {
+  const opportunity = activeOpportunityRow(db, id);
+  if (!opportunity) validationFailure("opportunityId");
+  return opportunity;
+}
+
+function validateCustomerOpportunityPair(db, customerId, opportunityId) {
+  if (customerId) requireActiveCustomer(db, customerId);
+  if (!opportunityId) return;
+  const opportunity = requireActiveOpportunity(db, opportunityId);
+  if (customerId && opportunity.customerId !== customerId) {
+    validationFailure("opportunityId", "relationship");
+  }
+}
 
 function createCustomer(db, body) {
-  const id = body.id ?? randomUUID();
+  const id = randomUUID();
   run(
     db,
     `INSERT INTO customers (
@@ -505,7 +565,7 @@ function createCustomer(db, body) {
 }
 
 function createOpportunity(db, body) {
-  const id = body.id ?? randomUUID();
+  const id = randomUUID();
   run(
     db,
     `INSERT INTO opportunities (
@@ -650,7 +710,7 @@ function normalizeTags(tags) {
 }
 
 function createKnowledgeItem(db, body) {
-  const id = body.id ?? randomUUID();
+  const id = randomUUID();
   run(
     db,
     `INSERT INTO knowledge_items (
@@ -711,7 +771,9 @@ function updateActionItem(db, id, body) {
   run(
     db,
     `UPDATE action_items
-     SET status = $status,
+     SET title = $title,
+         reason = $reason,
+         status = $status,
          due = $due,
          assignee = $assignee,
          priority = $priority,
@@ -720,6 +782,8 @@ function updateActionItem(db, id, body) {
      WHERE id = $id`,
     {
       $id: id,
+      $title: patchValue(body, "title", current.title),
+      $reason: patchValue(body, "reason", current.reason),
       $status: nextStatus,
       $due: patchValue(body, "due", current.due),
       $assignee: patchValue(body, "assignee", current.assignee),
@@ -1371,7 +1435,7 @@ export function createServer(options = {}) {
         const session = await authenticateLogin(
           db,
           config,
-          await readJson(request),
+          await readValidatedJson(request, requestSchemas.login),
           request.socket?.remoteAddress ?? "unknown",
         );
         if (!session) {
@@ -1421,6 +1485,7 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/auth/logout") {
         if (requestIdentity.kind !== "user") return unauthorized(response);
+        await validateEmptyBody(request);
         revokeSession(db, config, requestIdentity.cookieValue);
         sendJson(response, 204, null, {
           "Set-Cookie": buildSessionCookie(config, "", { clear: true }),
@@ -1444,11 +1509,13 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/integrations/weixin-agent/login") {
+        await validateEmptyBody(request);
         sendJson(response, 201, { item: weixinLoginBinding.start() });
         return;
       }
 
       if (request.method === "DELETE" && url.pathname === "/api/integrations/weixin-agent/login") {
+        await validateEmptyBody(request);
         sendJson(response, 200, { item: weixinLoginBinding.stop() });
         return;
       }
@@ -1460,8 +1527,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/customers") {
-        const body = await readJson(request);
-        if (!body.name) return badRequest(response, "name is required");
+        const body = await readValidatedJson(request, requestSchemas.customerCreate);
         const item = createCustomer(db, body);
         recordAuditLog(db, {
           action: "customer.create",
@@ -1482,7 +1548,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, customerPatchSchema);
         const item = updateCustomer(db, parts[2], body);
         if (!item) return notFound(response);
         recordAuditLog(db, {
@@ -1497,6 +1563,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
+        await validateEmptyBody(request);
         const deleted = deleteRecord(db, {
           table: "customers",
           id: parts[2],
@@ -1521,9 +1588,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/opportunities") {
-        const body = await readJson(request);
-        if (!body.name || !body.customerId) return badRequest(response, "name and customerId are required");
-        const item = createOpportunity(db, body);
+        const body = await readValidatedJson(request, requestSchemas.opportunityCreate);
+        const customer = requireActiveCustomer(db, body.customerId);
+        const item = createOpportunity(db, { ...body, customer: customer.name });
         recordAuditLog(db, {
           action: "opportunity.create",
           entityType: "opportunity",
@@ -1543,8 +1610,11 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
-        const body = await readJson(request);
-        const item = updateOpportunity(db, parts[2], body);
+        const body = await readValidatedJson(request, opportunityPatchSchema);
+        const existing = opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: parts[2] }));
+        if (!existing) return notFound(response);
+        const customer = requireActiveCustomer(db, body.customerId ?? existing.customerId);
+        const item = updateOpportunity(db, parts[2], { ...body, customer: customer.name });
         if (!item) return notFound(response);
         recordAuditLog(db, {
           action: "opportunity.update",
@@ -1558,6 +1628,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
+        await validateEmptyBody(request);
         const deleted = deleteRecord(db, {
           table: "opportunities",
           id: parts[2],
@@ -1588,7 +1659,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.actionPatch);
         const item = updateActionItem(db, parts[2], body);
         if (!item) return notFound(response);
         if (item.error === "invalid_status") return badRequest(response, "status must be pending, in_progress, done, or deferred");
@@ -1604,6 +1675,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
+        await validateEmptyBody(request);
         const deleted = deleteRecord(db, {
           table: "action_items",
           id: parts[2],
@@ -1635,7 +1707,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "risks" && parts[2]) {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.riskPatch);
         const item = updateRiskItem(db, parts[2], body);
         if (!item) return notFound(response);
         if (item.error === "invalid_status") return badRequest(response, "status must be open, accepted, in_progress, deferred, or closed");
@@ -1651,6 +1723,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "risks" && parts[2]) {
+        await validateEmptyBody(request);
         const deleted = deleteRecord(db, {
           table: "risk_items",
           id: parts[2],
@@ -1675,8 +1748,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/knowledge") {
-        const body = await readJson(request);
-        if (!String(body.title ?? "").trim()) return badRequest(response, "title is required");
+        const body = await readValidatedJson(request, requestSchemas.knowledgeCreate);
         const item = createKnowledgeItem(db, {
           ...body,
           title: String(body.title).trim(),
@@ -1692,7 +1764,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "knowledge" && parts[2]) {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, knowledgePatchSchema);
         const item = updateKnowledgeItem(db, parts[2], body);
         if (!item) return notFound(response);
         recordAuditLog(db, {
@@ -1706,6 +1778,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "knowledge" && parts[2]) {
+        await validateEmptyBody(request);
         const deleted = deleteRecord(db, {
           table: "knowledge_items",
           id: parts[2],
@@ -1723,7 +1796,11 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/knowledge/search") {
-        const body = await readJson(request);
+        const body = await readValidatedJson(
+          request,
+          requestSchemas.knowledgeSearch,
+          { allowEmpty: true },
+        );
         const items = searchKnowledgeItems(db, {
           query: body.query,
           tags: body.tags,
@@ -1750,7 +1827,11 @@ export function createServer(options = {}) {
         );
         if (!customer) return notFound(response);
 
-        const body = await readJson(request);
+        const body = await readValidatedJson(
+          request,
+          requestSchemas.riskDiagnose,
+          { allowEmpty: true },
+        );
         const sourceType = body.sourceType ?? "opportunity_diagnosis";
         const sourceId = body.sourceId ?? opportunity.id;
         const items = buildOpportunityRiskDrafts({
@@ -1784,9 +1865,8 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/quick-records/preview") {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.quickRecordPreview);
         const rawContent = String(body.rawContent ?? "").trim();
-        if (!rawContent) return badRequest(response, "rawContent is required");
 
         const analysis = await analyzeQuickRecord(rawContent, config, {
           fetchImpl: options.fetchImpl,
@@ -1804,9 +1884,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/quick-records") {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.quickRecordCreate);
         const rawContent = String(body.rawContent ?? "").trim();
-        if (!rawContent) return badRequest(response, "rawContent is required");
+        validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
 
         const id = randomUUID();
         run(
@@ -1837,6 +1917,7 @@ export function createServer(options = {}) {
         parts[2] &&
         parts[3] === "analyze"
       ) {
+        await validateEmptyBody(request);
         const quickRecord = quickRecordFromRow(
           get(db, "SELECT * FROM quick_records WHERE id = $id", { $id: parts[2] }),
         );
@@ -1869,10 +1950,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/ai/suggestions") {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.aiSuggestion);
         const type = String(body.type ?? "").trim();
         const title = String(body.title ?? "").trim();
-        if (!type || !title) return badRequest(response, "type and title are required");
 
         const suggestion = await generateManualSuggestion(
           {
@@ -1925,12 +2005,8 @@ export function createServer(options = {}) {
         );
         if (!quickRecord) return notFound(response);
 
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.confirmation);
         const targets = Array.from(new Set(body.targets ?? []));
-        const allowed = new Set(["customer", "opportunity", "weekly"]);
-        if (targets.length === 0 || targets.some((target) => !allowed.has(target))) {
-          return badRequest(response, "targets must include customer, opportunity, or weekly");
-        }
 
         const insight = getLatestInsight(db, quickRecord.id);
         for (const target of targets) {
@@ -2014,17 +2090,14 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/reports/weekly/draft") {
-        const body = await readJson(request);
-        if (!body.owner || !body.periodStart || !body.periodEnd) {
-          return badRequest(response, "owner, periodStart, and periodEnd are required");
-        }
+        const body = await readValidatedJson(request, requestSchemas.weeklyDraft);
         const knowledgeIds = normalizeKnowledgeIds(body.knowledgeIds);
         if (knowledgeIds === null) {
-          return badRequest(response, "knowledgeIds must be an array when provided");
+          validationFailure("knowledgeIds", "array");
         }
         const knowledge = getKnowledgeItemsByIds(db, knowledgeIds);
         if (knowledge.length !== knowledgeIds.length) {
-          return badRequest(response, "knowledgeIds must reference existing knowledge items");
+          validationFailure("knowledgeIds");
         }
 
         const rows = all(
@@ -2126,7 +2199,7 @@ export function createServer(options = {}) {
         parts[2] === "weekly" &&
         parts[3]
       ) {
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.weeklyPatch);
         const item = updateWeeklyReport(db, parts[3], body);
         if (!item) return notFound(response);
         if (item.error === "invalid_status") return badRequest(response, "status must be draft, saved, or ready");
@@ -2155,27 +2228,21 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/solutions/draft") {
-        const body = await readJson(request);
-        if (!body.owner || !body.customerId || !body.opportunityId) {
-          return badRequest(response, "owner, customerId, and opportunityId are required");
-        }
+        const body = await readValidatedJson(request, requestSchemas.solutionDraft);
         const artifactType = body.artifactType === undefined
           ? "solution_framework"
           : String(body.artifactType);
-        if (!isSolutionArtifactType(artifactType)) {
-          return badRequest(response, "artifactType must be communication_outline, presales_questions, solution_framework, report_outline, or competitive_talk");
-        }
         const knowledgeIds = normalizeKnowledgeIds(body.knowledgeIds);
         if (knowledgeIds === null) {
-          return badRequest(response, "knowledgeIds must be an array when provided");
+          validationFailure("knowledgeIds", "array");
         }
 
         const customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: body.customerId }));
         const opportunity = opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: body.opportunityId }));
-        if (!customer || !opportunity) return notFound(response);
+        validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
         const selectedKnowledge = getKnowledgeItemsByIds(db, knowledgeIds);
         if (selectedKnowledge.length !== knowledgeIds.length) {
-          return badRequest(response, "knowledgeIds must reference existing knowledge items");
+          validationFailure("knowledgeIds");
         }
 
         const actions = getDraftActions(db, {
@@ -2259,11 +2326,8 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "solutions" && parts[2]) {
         const existing = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: parts[2] }));
         if (!existing) return notFound(response);
-        const body = await readJson(request);
+        const body = await readValidatedJson(request, requestSchemas.solutionPatch);
         const status = body.status ?? existing.status;
-        if (!["draft", "saved", "ready"].includes(status)) {
-          return badRequest(response, "status must be draft, saved, or ready");
-        }
         run(
           db,
           `UPDATE solution_drafts

@@ -421,6 +421,14 @@ describe("sales workbench API client", () => {
       ["POST", "http://127.0.0.1:8787/api/opportunities"],
       ["PATCH", "http://127.0.0.1:8787/api/opportunities/op-jiaozhou-plan"],
     ]);
+    assert.deepEqual(calls[1].body, {
+      level: "重点培育",
+      relation: 52,
+    });
+    assert.deepEqual(calls[3].body, {
+      stage: "初步沟通",
+      probability: 45,
+    });
   });
 
   it("creates, updates, and searches knowledge items through the backend", async () => {
@@ -467,7 +475,147 @@ describe("sales workbench API client", () => {
       ["PATCH", "http://127.0.0.1:8787/api/knowledge/k-rizhao-plan"],
       ["POST", "http://127.0.0.1:8787/api/knowledge/search"],
     ]);
+    assert.deepEqual(calls[1].body, {
+      summary: "已更新为领导汇报口径。",
+    });
     assert.deepEqual(calls[2].body, { query: "日照 移动云", tags: ["移动云"] });
+  });
+
+  it("sends only writable fields when saving full customer, opportunity, and knowledge entities", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, method: options.method, body: JSON.parse(options.body) });
+        if (url.includes("/api/customers/")) return jsonResponse({ item: sampleCustomer() });
+        if (url.includes("/api/opportunities/")) return jsonResponse({ item: sampleOpportunity() });
+        return jsonResponse({ item: sampleKnowledgeItem() });
+      },
+    });
+
+    const customer = sampleCustomer({
+      createdAt: "2026-07-15T08:00:00.000Z",
+      updatedAt: "2026-07-15T09:00:00.000Z",
+      version: 7,
+      deletedAt: null,
+      serverComputed: "readonly",
+    });
+    const opportunity = sampleOpportunity({
+      createdAt: "2026-07-15T08:00:00.000Z",
+      updatedAt: "2026-07-15T09:00:00.000Z",
+      version: 8,
+      deletedAt: null,
+      serverComputed: "readonly",
+    });
+    const knowledge = sampleKnowledgeItem({
+      version: 9,
+      deletedAt: null,
+      serverComputed: "readonly",
+    });
+
+    await api.saveCustomer(customer);
+    await api.saveOpportunity(opportunity);
+    await api.saveKnowledgeItem(knowledge);
+
+    assert.deepEqual(calls[0], {
+      url: "http://127.0.0.1:8787/api/customers/rizhao",
+      method: "PATCH",
+      body: {
+        name: customer.name,
+        region: customer.region,
+        type: customer.type,
+        level: customer.level,
+        owner: customer.owner,
+        contact: customer.contact,
+        relation: customer.relation,
+        stakeholders: customer.stakeholders,
+        decisionChain: customer.decisionChain,
+        historyProjects: customer.historyProjects,
+        infrastructure: customer.infrastructure,
+        syncPreview: customer.syncPreview,
+        budget: customer.budget,
+        summary: customer.summary,
+        needs: customer.needs,
+        risks: customer.risks,
+        opportunities: customer.opportunities,
+      },
+    });
+    assert.deepEqual(calls[1], {
+      url: "http://127.0.0.1:8787/api/opportunities/op-rizhao-plan",
+      method: "PATCH",
+      body: {
+        customerId: opportunity.customerId,
+        name: opportunity.name,
+        customer: opportunity.customer,
+        stage: opportunity.stage,
+        amount: opportunity.amount,
+        owner: opportunity.owner,
+        probability: opportunity.probability,
+        days: opportunity.days,
+        requirements: opportunity.requirements,
+        competitors: opportunity.competitors,
+        solutionDirection: opportunity.solutionDirection,
+        sourceRecord: opportunity.sourceRecord,
+        risk: opportunity.risk,
+        next: opportunity.next,
+        tone: opportunity.tone,
+      },
+    });
+    assert.deepEqual(calls[2], {
+      url: "http://127.0.0.1:8787/api/knowledge/k-mobile-cloud",
+      method: "PATCH",
+      body: {
+        title: knowledge.title,
+        category: knowledge.category,
+        tags: knowledge.tags,
+        summary: knowledge.summary,
+        content: knowledge.content,
+        source: knowledge.source,
+      },
+    });
+  });
+
+  it("uses the same writable field allowlists for customer, opportunity, and knowledge creates", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        const body = JSON.parse(options.body);
+        calls.push({ url, method: options.method, body });
+        if (url.endsWith("/api/customers")) return jsonResponse({ item: sampleCustomer({ name: body.name }) }, 201);
+        if (url.endsWith("/api/opportunities")) return jsonResponse({ item: sampleOpportunity({ name: body.name }) }, 201);
+        return jsonResponse({ item: sampleKnowledgeItem({ title: body.title }) }, 201);
+      },
+    });
+
+    const readonly = {
+      createdAt: "2026-07-15T08:00:00.000Z",
+      updatedAt: "2026-07-15T09:00:00.000Z",
+      version: 1,
+      deletedAt: null,
+      serverComputed: "readonly",
+    };
+    await api.saveCustomer({ name: "New customer", region: "East", ...readonly });
+    await api.saveOpportunity({ customerId: "rizhao", name: "New opportunity", probability: 50, ...readonly });
+    await api.saveKnowledgeItem({ title: "New knowledge", tags: ["tag"], ...readonly });
+
+    assert.deepEqual(calls, [
+      {
+        url: "http://127.0.0.1:8787/api/customers",
+        method: "POST",
+        body: { name: "New customer", region: "East" },
+      },
+      {
+        url: "http://127.0.0.1:8787/api/opportunities",
+        method: "POST",
+        body: { customerId: "rizhao", name: "New opportunity", probability: 50 },
+      },
+      {
+        url: "http://127.0.0.1:8787/api/knowledge",
+        method: "POST",
+        body: { title: "New knowledge", tags: ["tag"] },
+      },
+    ]);
   });
 
   it("updates risk status through the backend", async () => {

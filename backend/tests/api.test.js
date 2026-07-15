@@ -211,7 +211,7 @@ describe("sales workbench backend API", () => {
       method: "POST",
       body: JSON.stringify({ account: "jiangjz" }),
     });
-    assert.equal(login.response.status, 401);
+    assert.equal(login.response.status, 422);
     assert.equal("token" in login.body, false);
     assert.equal((await request("/api/customers")).response.status, 401);
   });
@@ -703,7 +703,7 @@ describe("sales workbench backend API", () => {
       method: "PATCH",
       body: JSON.stringify({ status: "unknown" }),
     });
-    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.response.status, 422);
   });
 
   it("uses the configured DeepSeek model when generating weekly drafts", async () => {
@@ -851,7 +851,7 @@ describe("sales workbench backend API", () => {
       method: "PATCH",
       body: JSON.stringify({ status: "unknown" }),
     });
-    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.response.status, 422);
   });
 
   it("forces explicitly selected knowledge into solution draft citations", async () => {
@@ -1123,7 +1123,7 @@ describe("sales workbench backend API", () => {
       method: "PATCH",
       body: JSON.stringify({ status: "unknown" }),
     });
-    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.response.status, 422);
 
     const risks = await request("/api/risks");
     assert.ok(risks.body.items.some((item) => item.id === risk.id && item.status === "closed" && item.assignee === "继振" && item.due === "下周一 10:00"));
@@ -1164,7 +1164,7 @@ describe("sales workbench backend API", () => {
       method: "PATCH",
       body: JSON.stringify({ status: "blocked" }),
     });
-    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.response.status, 422);
 
     const actionsAfter = await request("/api/actions");
     assert.ok(actionsAfter.body.items.some((item) => item.id === action.id && item.status === "done" && item.assignee === "继振"));

@@ -7,6 +7,27 @@ export function resolveApiBaseUrl(env = {}, runtime = globalThis) {
   return String(env.VITE_API_BASE_URL ?? runtime?.__SENTELLIGENT_API_BASE_URL__ ?? "").trim().replace(/\/+$/, "");
 }
 
+const WRITABLE_FIELDS = Object.freeze({
+  customer: Object.freeze([
+    "name", "region", "type", "level", "owner", "contact", "relation", "stakeholders",
+    "decisionChain", "historyProjects", "infrastructure", "syncPreview", "budget", "summary",
+    "needs", "risks", "opportunities",
+  ]),
+  opportunity: Object.freeze([
+    "customerId", "name", "customer", "stage", "amount", "owner", "probability", "days",
+    "requirements", "competitors", "solutionDirection", "sourceRecord", "risk", "next", "tone",
+  ]),
+  knowledge: Object.freeze(["title", "category", "tags", "summary", "content", "source"]),
+});
+
+function pickOwnFields(source, fields) {
+  const picked = {};
+  for (const field of fields) {
+    if (Object.hasOwn(source, field)) picked[field] = source[field];
+  }
+  return picked;
+}
+
 async function requestJson(fetchImpl, url, options = {}, authHeaders = {}) {
   const response = await fetchImpl(url, {
     ...options,
@@ -118,10 +139,12 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, authToken 
     },
 
     async saveCustomer(customer) {
-      const isUpdate = Boolean(customer.id);
-      const saved = await requestApi(isUpdate ? `/api/customers/${customer.id}` : "/api/customers", {
+      const { id } = customer;
+      const payload = pickOwnFields(customer, WRITABLE_FIELDS.customer);
+      const isUpdate = Boolean(id);
+      const saved = await requestApi(isUpdate ? `/api/customers/${id}` : "/api/customers", {
         method: isUpdate ? "PATCH" : "POST",
-        body: JSON.stringify(customer),
+        body: JSON.stringify(payload),
       });
       return assertApiEntity("customer", saved.item);
     },
@@ -132,10 +155,12 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, authToken 
     },
 
     async saveOpportunity(opportunity) {
-      const isUpdate = Boolean(opportunity.id);
-      const saved = await requestApi(isUpdate ? `/api/opportunities/${opportunity.id}` : "/api/opportunities", {
+      const { id } = opportunity;
+      const payload = pickOwnFields(opportunity, WRITABLE_FIELDS.opportunity);
+      const isUpdate = Boolean(id);
+      const saved = await requestApi(isUpdate ? `/api/opportunities/${id}` : "/api/opportunities", {
         method: isUpdate ? "PATCH" : "POST",
-        body: JSON.stringify(opportunity),
+        body: JSON.stringify(payload),
       });
       return assertApiEntity("opportunity", saved.item);
     },
@@ -146,10 +171,12 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, authToken 
     },
 
     async saveKnowledgeItem(item) {
-      const isUpdate = Boolean(item.id);
-      const saved = await requestApi(isUpdate ? `/api/knowledge/${item.id}` : "/api/knowledge", {
+      const { id } = item;
+      const payload = pickOwnFields(item, WRITABLE_FIELDS.knowledge);
+      const isUpdate = Boolean(id);
+      const saved = await requestApi(isUpdate ? `/api/knowledge/${id}` : "/api/knowledge", {
         method: isUpdate ? "PATCH" : "POST",
-        body: JSON.stringify(item),
+        body: JSON.stringify(payload),
       });
       return assertApiEntity("knowledgeItem", saved.item);
     },
