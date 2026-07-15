@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -10,12 +10,39 @@ import {
   restoreDatabase,
 } from "../scripts/db-maintenance.mjs";
 import { all, openDatabase, run } from "../src/db.js";
+import { createConnection } from "../src/db/connection.js";
 import { seedDatabase } from "../src/seed.js";
 
 function seedTestDatabase(databaseUrl) {
   const db = openDatabase({ databaseUrl });
   seedDatabase(db);
   db.close();
+}
+
+function createLegacyActionDatabase(databaseUrl) {
+  const db = createConnection({ databaseUrl });
+  try {
+    db.exec(`
+      CREATE TABLE action_items (
+        id TEXT PRIMARY KEY,
+        customer_id TEXT,
+        opportunity_id TEXT,
+        title TEXT NOT NULL,
+        customer TEXT,
+        reason TEXT,
+        due TEXT,
+        priority TEXT NOT NULL DEFAULT 'medium',
+        status TEXT NOT NULL DEFAULT 'pending',
+        source_record_id TEXT UNIQUE,
+        tone TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    run(db, "INSERT INTO action_items (id, title) VALUES ('legacy-action', 'Legacy action')");
+  } finally {
+    db.close();
+  }
 }
 
 describe("sqlite maintenance", () => {
@@ -111,6 +138,69 @@ describe("sqlite maintenance", () => {
       }
     } finally {
       liveDatabase?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves a checksum-drifted offline database byte-for-byte before restoring", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-drifted-"));
+    const databaseUrl = join(root, "data", "sales-workbench.sqlite");
+    const backupDir = join(root, "backups");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const backup = backupDatabase({ databaseUrl, backupDir, label: "known-good" });
+      const knownGood = openDatabase({ databaseUrl });
+      const knownGoodChecksum = all(knownGood, "SELECT checksum FROM schema_migrations WHERE version = '0001'")[0].checksum;
+      knownGood.close();
+      const drifted = createConnection({ databaseUrl });
+      try {
+        run(drifted, "UPDATE schema_migrations SET checksum = 'drifted-checksum' WHERE version = '0001'");
+      } finally {
+        drifted.close();
+      }
+      const driftedBytes = readFileSync(databaseUrl);
+      assert.equal(existsSync(`${databaseUrl}-wal`), false);
+      assert.equal(existsSync(`${databaseUrl}-shm`), false);
+
+      const restored = restoreDatabase({ databaseUrl, backupPath: backup.backupPath, backupDir });
+
+      assert.deepEqual(readFileSync(restored.preRestoreBackupPath), driftedBytes);
+      const db = openDatabase({ databaseUrl });
+      try {
+        assert.equal(all(db, "SELECT checksum FROM schema_migrations WHERE version = '0001'")[0].checksum, knownGoodChecksum);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves an unstamped legacy live database byte-identical when candidate validation fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-invalid-"));
+    const databaseUrl = join(root, "data", "sales-workbench.sqlite");
+    const backupPath = join(root, "invalid-backup.sqlite");
+    const backupDir = join(root, "backups");
+
+    try {
+      createLegacyActionDatabase(databaseUrl);
+      writeFileSync(backupPath, "not a sqlite database");
+      const liveBytes = readFileSync(databaseUrl);
+      assert.equal(existsSync(`${databaseUrl}-wal`), false);
+      assert.equal(existsSync(`${databaseUrl}-shm`), false);
+
+      assert.throws(() => restoreDatabase({ databaseUrl, backupPath, backupDir }));
+
+      assert.deepEqual(readFileSync(databaseUrl), liveBytes);
+      const live = createConnection({ databaseUrl });
+      try {
+        assert.equal(all(live, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").length, 0);
+        assert.equal(all(live, "PRAGMA table_info(action_items)").some((column) => column.name === "assignee"), false);
+      } finally {
+        live.close();
+      }
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });

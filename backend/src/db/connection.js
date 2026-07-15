@@ -29,5 +29,11 @@ export function createConnection({ databaseUrl } = {}) {
     mkdirSync(dirname(databasePath), { recursive: true });
   }
 
-  return configureConnection(new DatabaseSync(databasePath), { fileBacked });
+  const db = new DatabaseSync(databasePath);
+  try {
+    return configureConnection(db, { fileBacked });
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }

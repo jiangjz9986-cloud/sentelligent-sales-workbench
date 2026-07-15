@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { spawn } from "node:child_process";
+import { fork } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { all, openDatabase, run } from "../src/db.js";
@@ -218,62 +218,98 @@ test("does not stamp migration 0001 when the baseline transaction fails", () => 
   });
 });
 
-function startMigrationChild(databaseUrl) {
-  const dbModuleUrl = pathToFileURL(fileURLToPath(new URL("../src/db.js", import.meta.url))).href;
-  const source = `import { openDatabase } from ${JSON.stringify(dbModuleUrl)}; process.stdout.write('READY\\n'); const db = openDatabase({ databaseUrl: ${JSON.stringify(databaseUrl)} }); db.close();`;
-  let resolveReady;
-  let rejectReady;
-  const ready = new Promise((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
+function startMigrationChild(scriptPath, databaseUrl) {
+  const child = fork(scriptPath, [], {
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: ["ignore", "ignore", "ignore", "ipc"]
   });
-  let resolveCompletion;
-  let rejectCompletion;
+  let resolveBeforeBegin;
+  let rejectBeforeBegin;
+  const beforeBegin = new Promise((resolve, reject) => {
+    resolveBeforeBegin = resolve;
+    rejectBeforeBegin = reject;
+  });
+  let resolveCompleted;
+  let rejectCompleted;
   const completed = new Promise((resolve, reject) => {
-    resolveCompletion = resolve;
-    rejectCompletion = reject;
+    resolveCompleted = resolve;
+    rejectCompleted = reject;
   });
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", source]);
-  let stdout = "";
-  let stderr = "";
 
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-    if (stdout.includes("READY\n")) resolveReady();
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
+  child.on("message", (message) => {
+    if (message?.type === "before-begin") resolveBeforeBegin();
   });
   child.on("error", (error) => {
-    rejectReady(error);
-    rejectCompletion(error);
+    rejectBeforeBegin(error);
+    rejectCompleted(error);
   });
-  child.on("close", (code) => {
-    if (!stdout.includes("READY\n")) {
-      rejectReady(new Error(`Concurrent opener did not signal readiness: ${stderr}`));
-    }
-    if (code === 0) resolveCompletion();
-    else rejectCompletion(new Error(`Concurrent opener failed with code ${code}: ${stderr}`));
+  child.on("exit", (code, signal) => {
+    if (code === 0) resolveCompleted();
+    else rejectCompleted(new Error(`Concurrent opener exited with code ${code}, signal ${signal}`));
   });
 
-  return { ready, completed };
+  return { child, beforeBegin, completed, rejectBeforeBegin };
+}
+
+function withinTimeout(promise, message) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(message)), 5000);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    );
+  });
 }
 
 test("acquires BEGIN IMMEDIATE before selecting applied migration versions", () => {
   const migrationPath = fileURLToPath(new URL("../src/db/migrate.js", import.meta.url));
   const source = readFileSync(migrationPath, "utf8");
+  const beginIndex = source.indexOf('db.exec("BEGIN IMMEDIATE")');
+  const selectIndex = source.indexOf("SELECT checksum FROM schema_migrations");
 
-  assert.ok(
-    source.indexOf('db.exec("BEGIN IMMEDIATE")') < source.indexOf("SELECT checksum FROM schema_migrations")
-  );
+  assert.ok(beginIndex >= 0);
+  assert.ok(selectIndex >= 0);
+  assert.ok(beginIndex < selectIndex);
 });
 
 test("serializes blocked concurrent startup without duplicate baseline records", async () => {
   const directory = mkdtempSync(join(tmpdir(), "sentelligent-migrations-concurrent-"));
   const databaseUrl = join(directory, "workbench.sqlite");
+  const childScriptPath = join(directory, "migration-child.mjs");
   const parent = createConnection({ databaseUrl });
+  const children = [];
 
   try {
+    const connectionUrl = pathToFileURL(fileURLToPath(new URL("../src/db/connection.js", import.meta.url))).href;
+    const migrationUrl = pathToFileURL(fileURLToPath(new URL("../src/db/migrate.js", import.meta.url))).href;
+    writeFileSync(childScriptPath, `
+      import { createConnection } from ${JSON.stringify(connectionUrl)};
+      import { migrateDatabase } from ${JSON.stringify(migrationUrl)};
+      const db = createConnection({ databaseUrl: process.env.DATABASE_URL });
+      const guardedDb = new Proxy(db, {
+        get(target, property) {
+          if (property === "exec") {
+            return (sql) => {
+              if (sql === "BEGIN IMMEDIATE") process.send?.({ type: "before-begin" });
+              return target.exec(sql);
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+      });
+      try {
+        migrateDatabase(guardedDb);
+      } finally {
+        db.close();
+      }
+    `);
     parent.exec(`
       CREATE TABLE schema_migrations (
         version TEXT PRIMARY KEY,
@@ -282,11 +318,16 @@ test("serializes blocked concurrent startup without duplicate baseline records",
       )
     `);
     parent.exec("BEGIN IMMEDIATE");
-    const children = [startMigrationChild(databaseUrl), startMigrationChild(databaseUrl)];
-    await Promise.all(children.map((child) => child.ready));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    children.push(startMigrationChild(childScriptPath, databaseUrl), startMigrationChild(childScriptPath, databaseUrl));
+    await withinTimeout(
+      Promise.all(children.map((child) => child.beforeBegin)),
+      "Timed out waiting for concurrent migrations to reach BEGIN IMMEDIATE"
+    );
     parent.exec("COMMIT");
-    await Promise.all(children.map((child) => child.completed));
+    await withinTimeout(
+      Promise.all(children.map((child) => child.completed)),
+      "Timed out waiting for concurrent migrations to finish"
+    );
 
     const db = openDatabase({ databaseUrl });
     try {
@@ -301,6 +342,11 @@ test("serializes blocked concurrent startup without duplicate baseline records",
       // The parent transaction has already committed.
     }
     parent.close();
+    for (const child of children) {
+      if (child.child.exitCode === null) child.child.kill();
+      child.rejectBeforeBegin(new Error("Concurrent migration cleanup"));
+    }
+    await Promise.allSettled(children.map((child) => child.completed));
     rmSync(directory, { recursive: true, force: true });
   }
 });

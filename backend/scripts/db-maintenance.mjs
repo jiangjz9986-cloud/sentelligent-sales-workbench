@@ -52,11 +52,8 @@ export function restoreDatabase({ databaseUrl, backupPath, backupDir } = {}) {
 
   let preRestoreBackupPath = null;
   if (existsSync(config.databaseUrl)) {
-    preRestoreBackupPath = backupDatabase({
-      databaseUrl: config.databaseUrl,
-      backupDir: config.backupDir,
-      label: "pre-restore"
-    }).backupPath;
+    preRestoreBackupPath = join(config.backupDir, `${timestamp()}-pre-restore.sqlite`);
+    copyFileSync(config.databaseUrl, preRestoreBackupPath);
   }
 
   const candidatePath = join(dirname(config.databaseUrl), `.${timestamp()}-restore-candidate.sqlite`);
