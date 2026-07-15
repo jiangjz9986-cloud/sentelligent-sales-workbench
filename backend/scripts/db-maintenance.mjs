@@ -15,12 +15,16 @@ import {
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { all, migrateDatabase, openDatabase } from "../src/db.js";
+import { migrateDatabase, openDatabase } from "../src/db.js";
 import {
   databaseMaintenanceLockPath,
   databaseOpeningMarkerPrefix,
   resolveDatabasePath,
 } from "../src/db/connection.js";
+import {
+  inspectDatabase as inspectDatabaseIntegrity,
+  inspectDatabaseConnection,
+} from "../src/db/integrity.js";
 import {
   createRuntimeConfig,
   ensureRuntimeDirs,
@@ -38,21 +42,6 @@ function labelPart(value = "manual") {
     .replace(/^-+|-+$/g, "")
     .slice(0, 48) || "manual";
 }
-
-const requiredBusinessTables = [
-  "customers",
-  "opportunities",
-  "quick_records",
-  "ai_insights",
-  "manual_confirmations",
-  "weekly_reports",
-  "solution_drafts",
-  "ai_suggestions",
-  "action_items",
-  "risk_items",
-  "knowledge_items",
-  "audit_logs",
-];
 
 export function backupDatabase({ databaseUrl, backupDir, label } = {}) {
   const config = createRuntimeConfig({ databaseUrl, backupDir });
@@ -160,28 +149,26 @@ function assertDatabaseIsOffline(databasePath, label) {
 function validateDatabaseIntegrity(databaseUrl, { requireBusinessTables = true } = {}) {
   const db = new DatabaseSync(databaseUrl, { readOnly: true });
   try {
-    const quickCheck = db.prepare("PRAGMA quick_check").all();
-    if (quickCheck.length !== 1 || quickCheck[0].quick_check !== "ok") {
-      const details = quickCheck.map((row) => row.quick_check).join("; ");
-      throw new Error(`Restore candidate failed PRAGMA quick_check: ${details || "no result"}`);
+    let report;
+    try {
+      report = inspectDatabaseConnection(db);
+    } catch (error) {
+      throw new Error(`Restore candidate failed PRAGMA quick_check: ${error.message}`, {
+        cause: error,
+      });
     }
-
-    const foreignKeyViolations = db.prepare("PRAGMA foreign_key_check").all();
-    if (foreignKeyViolations.length > 0) {
+    if (report.quickCheck !== "ok") {
+      throw new Error(`Restore candidate failed PRAGMA quick_check: ${report.quickCheck}`);
+    }
+    if (report.foreignKeyViolations.length > 0) {
       throw new Error(
-        `Restore candidate failed PRAGMA foreign_key_check: ${JSON.stringify(foreignKeyViolations.slice(0, 5))}`
+        `Restore candidate failed PRAGMA foreign_key_check: ${JSON.stringify(report.foreignKeyViolations.slice(0, 5))}`
       );
     }
-
-    if (requireBusinessTables) {
-      const tableNames = new Set(
-        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name),
-      );
-      const missingTables = requiredBusinessTables.filter((table) => !tableNames.has(table));
-      if (missingTables.length > 0) {
-        throw new Error(`Restore candidate is missing required tables: ${missingTables.join(", ")}`);
-      }
+    if (requireBusinessTables && report.missingTables.length > 0) {
+      throw new Error(`Restore candidate is missing required tables: ${report.missingTables.join(", ")}`);
     }
+    return report;
   } finally {
     db.close();
   }
@@ -391,35 +378,22 @@ function installCandidateWhileLocked({ databasePath, candidatePath, preRestoreBa
 
 export function inspectDatabase({ databaseUrl } = {}) {
   const config = createRuntimeConfig({ databaseUrl });
-  ensureRuntimeDirs(config);
-  const db = openDatabase({ databaseUrl: config.databaseUrl });
-  try {
-    const tableNames = [
-      "customers",
-      "opportunities",
-      "quick_records",
-      "ai_insights",
-      "manual_confirmations",
-      "weekly_reports",
-      "solution_drafts",
-      "action_items",
-    ];
-    const tables = Object.fromEntries(
-      tableNames.map((table) => [
-        table,
-        all(db, `SELECT COUNT(*) AS count FROM ${table}`)[0].count,
-      ]),
-    );
-    return {
-      status: "ready",
-      databasePath: config.databaseUrl,
-      exists: existsSync(config.databaseUrl),
-      bytes: existsSync(config.databaseUrl) ? statSync(config.databaseUrl).size : 0,
-      tables,
-    };
-  } finally {
-    db.close();
-  }
+  const report = inspectDatabaseIntegrity(config.databaseUrl);
+  return {
+    status:
+      !report.error &&
+      report.quickCheck === "ok" &&
+      Array.isArray(report.foreignKeyViolations) &&
+      report.foreignKeyViolations.length === 0 &&
+      report.missingTables.length === 0
+        ? "ready"
+        : "invalid",
+    databasePath: config.databaseUrl,
+    exists: existsSync(config.databaseUrl),
+    bytes: existsSync(config.databaseUrl) ? statSync(config.databaseUrl).size : 0,
+    ...report,
+    tables: report.tableCounts,
+  };
 }
 
 async function main() {

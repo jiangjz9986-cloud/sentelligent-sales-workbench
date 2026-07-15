@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   backupDatabase,
@@ -23,6 +25,16 @@ function seedTestDatabase(databaseUrl) {
   const db = openDatabase({ databaseUrl });
   seedDatabase(db);
   db.close();
+}
+
+function runDbCheck(databaseUrl) {
+  const scriptPath = fileURLToPath(new URL("../scripts/db-check.mjs", import.meta.url));
+  const backendRoot = fileURLToPath(new URL("..", import.meta.url));
+  return spawnSync(process.execPath, [scriptPath], {
+    cwd: backendRoot,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    encoding: "utf8",
+  });
 }
 
 function createLegacyActionDatabase(databaseUrl) {
@@ -78,6 +90,13 @@ describe("sqlite maintenance", () => {
       const before = inspectDatabase({ databaseUrl });
       const backup = backupDatabase({ databaseUrl, backupDir, label: "before-change" });
 
+      assert.equal(before.quickCheck, "ok");
+      assert.deepEqual(before.foreignKeyViolations, []);
+      assert.equal(before.pragmas.foreignKeys, 1);
+      assert.equal(before.pragmas.journalMode, "wal");
+      assert.equal(before.pragmas.busyTimeout, 5000);
+      assert.equal(Object.keys(before.tableCounts).length, 12);
+      assert.deepEqual(before.tables, before.tableCounts);
       assert.equal(backup.status, "backed_up");
       assert.equal(existsSync(backup.backupPath), true);
       assert.equal(backup.databasePath, databaseUrl);
@@ -162,6 +181,176 @@ describe("sqlite maintenance", () => {
       }
     } finally {
       liveDatabase?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prints a healthy 12-table integrity report from the db-check command", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-"));
+    const databaseUrl = join(root, "sales-workbench.sqlite");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const result = runDbCheck(databaseUrl);
+
+      assert.equal(result.status, 0, result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.databasePath, databaseUrl);
+      assert.equal(report.quickCheck, "ok");
+      assert.deepEqual(report.foreignKeyViolations, []);
+      assert.equal(report.pragmas.busyTimeout, 5000);
+      assert.equal(Object.keys(report.tableCounts).length, 12);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a failing db-check report for foreign key violations", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-foreign-key-"));
+    const databaseUrl = join(root, "sales-workbench.sqlite");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const invalid = createConnection({ databaseUrl });
+      try {
+        invalid.exec("PRAGMA foreign_keys = OFF");
+        const update = run(
+          invalid,
+          "UPDATE opportunities SET customer_id = 'missing-customer' WHERE id = (SELECT id FROM opportunities LIMIT 1)",
+        );
+        assert.equal(update.changes, 1);
+      } finally {
+        invalid.close();
+      }
+
+      assert.equal(inspectDatabase({ databaseUrl }).status, "invalid");
+      const result = runDbCheck(databaseUrl);
+      assert.equal(result.status, 1, result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.quickCheck, "ok");
+      assert.equal(report.foreignKeyViolations.length, 1);
+      assert.equal(report.foreignKeyViolations[0].table, "opportunities");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("inspects a DELETE-journal database without changing its file or directory entries", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-read-only-"));
+    const databaseUrl = join(root, "sales-workbench.sqlite");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const db = createConnection({ databaseUrl });
+      db.exec("PRAGMA journal_mode = DELETE");
+      db.close();
+      const beforeBytes = readFileSync(databaseUrl);
+      const beforeEntries = readdirSync(root).sort();
+
+      const report = inspectDatabase({ databaseUrl });
+
+      assert.equal(report.status, "ready");
+      assert.equal(report.pragmas.journalMode, "delete");
+      assert.deepEqual(readFileSync(databaseUrl), beforeBytes);
+      assert.deepEqual(readdirSync(root).sort(), beforeEntries);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("inspects a clean WAL database without creating persistent sidecars", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-clean-wal-"));
+    const databaseUrl = join(root, "sales-workbench.sqlite");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      assert.equal(existsSync(`${databaseUrl}-wal`), false);
+      assert.equal(existsSync(`${databaseUrl}-shm`), false);
+      const beforeBytes = readFileSync(databaseUrl);
+      const beforeEntries = readdirSync(root).sort();
+
+      const report = inspectDatabase({ databaseUrl });
+
+      assert.equal(report.status, "ready");
+      assert.equal(report.pragmas.journalMode, "wal");
+      assert.deepEqual(readFileSync(databaseUrl), beforeBytes);
+      assert.deepEqual(readdirSync(root).sort(), beforeEntries);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an active WAL database as busy without changing its sidecars", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-active-wal-"));
+    const databaseUrl = join(root, "sales-workbench.sqlite");
+    let active;
+
+    try {
+      seedTestDatabase(databaseUrl);
+      active = openDatabase({ databaseUrl });
+      run(active, "UPDATE customers SET summary = 'active write' WHERE id = 'rizhao'");
+      const beforeWal = readFileSync(`${databaseUrl}-wal`);
+      const beforeShm = readFileSync(`${databaseUrl}-shm`);
+
+      const directReport = inspectDatabase({ databaseUrl });
+      assert.equal(directReport.status, "invalid");
+      assert.equal(directReport.error.code, "DATABASE_BUSY");
+
+      const result = runDbCheck(databaseUrl);
+      assert.equal(result.status, 1);
+      const cliReport = JSON.parse(result.stdout);
+      assert.equal(cliReport.error.code, "DATABASE_BUSY");
+      assert.deepEqual(readFileSync(`${databaseUrl}-wal`), beforeWal);
+      assert.deepEqual(readFileSync(`${databaseUrl}-shm`), beforeShm);
+    } finally {
+      active?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not create a database when db-check targets a missing file", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-missing-"));
+    const databaseUrl = join(root, "missing.sqlite");
+
+    try {
+      const directReport = inspectDatabase({ databaseUrl });
+      assert.equal(directReport.status, "invalid");
+      assert.equal(directReport.error.code, "DATABASE_NOT_FOUND");
+      assert.equal(existsSync(databaseUrl), false);
+
+      const result = runDbCheck(databaseUrl);
+      assert.equal(result.status, 1);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.error.code, "DATABASE_NOT_FOUND");
+      assert.equal(report.quickCheck, "error");
+      assert.equal(report.foreignKeyViolations, null);
+      assert.equal(Object.keys(report.tableCounts).length, 12);
+      assert.equal(existsSync(databaseUrl), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns stable JSON without modifying a corrupt database", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-corrupt-"));
+    const databaseUrl = join(root, "corrupt.sqlite");
+
+    try {
+      writeFileSync(databaseUrl, "not a sqlite database");
+      const beforeBytes = readFileSync(databaseUrl);
+      const beforeEntries = readdirSync(root).sort();
+
+      const result = runDbCheck(databaseUrl);
+
+      assert.equal(result.status, 1);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.error.code, "INSPECTION_FAILED");
+      assert.equal(report.quickCheck, "error");
+      assert.equal(report.foreignKeyViolations, null);
+      assert.equal(Object.keys(report.tableCounts).length, 12);
+      assert.deepEqual(readFileSync(databaseUrl), beforeBytes);
+      assert.deepEqual(readdirSync(root).sort(), beforeEntries);
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });

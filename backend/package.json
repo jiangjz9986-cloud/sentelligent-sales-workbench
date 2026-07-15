@@ -14,6 +14,7 @@
     "service:health": "node scripts/service.mjs health",
     "service:stop": "node scripts/service.mjs stop",
     "db:info": "node scripts/db-maintenance.mjs info",
+    "db:check": "node scripts/db-check.mjs",
     "db:backup": "node scripts/db-maintenance.mjs backup",
     "db:restore": "node scripts/db-maintenance.mjs restore",
     "weixin:login": "node src/weixin/worker.js login",
