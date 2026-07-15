@@ -6,7 +6,9 @@ import {
   assertApiEntity,
 } from "../../../../shared/salesWorkbenchApiContract.mjs";
 import {
+  createConfirmationAttemptTracker,
   createSalesWorkbenchApi,
+  createStrongUuid,
   resolveApiBaseUrl,
 } from "./salesWorkbenchApi.js";
 import * as salesWorkbenchApiModule from "./salesWorkbenchApi.js";
@@ -277,6 +279,55 @@ function sampleSolutionDraft(overrides = {}) {
 }
 
 describe("sales workbench API client", () => {
+  it("creates cryptographically strong UUIDs with a getRandomValues fallback", () => {
+    assert.equal(createStrongUuid({ randomUUID: () => "native-uuid" }), "native-uuid");
+
+    let calls = 0;
+    const fallback = createStrongUuid({
+      getRandomValues(bytes) {
+        calls += 1;
+        for (let index = 0; index < bytes.length; index += 1) bytes[index] = index;
+        return bytes;
+      },
+    });
+    assert.equal(calls, 1);
+    assert.equal(fallback, "00010203-0405-4607-8809-0a0b0c0d0e0f");
+    assert.throws(() => createStrongUuid({}), /cryptographic/i);
+  });
+
+  it("reuses one in-memory confirmation attempt until identity inputs change or it resets", () => {
+    const generated = [];
+    const tracker = createConfirmationAttemptTracker({
+      createId: () => {
+        const id = `attempt-${generated.length + 1}`;
+        generated.push(id);
+        return id;
+      },
+    });
+    const base = {
+      quickRecordId: "qr-1",
+      quickRecordVersion: 4,
+      analysisVersionId: "ai-1",
+      targets: ["customer"],
+      targetVersions: { customer: 7 },
+    };
+
+    const first = tracker.keyFor(base);
+    assert.equal(tracker.keyFor({ ...base, targets: [...base.targets] }), first);
+    assert.equal(tracker.keyFor({ ...base, quickRecordVersion: 5 }), first);
+    assert.equal(tracker.keyFor({ ...base, targetVersions: { customer: 8 } }), first);
+    assert.equal(generated.length, 1);
+    assert.notEqual(tracker.keyFor({ ...base, targets: ["opportunity"] }), first);
+    assert.notEqual(tracker.keyFor({ ...base, analysisVersionId: "ai-2" }), "attempt-2");
+    assert.notEqual(tracker.keyFor({ ...base, quickRecordId: "qr-2" }), "attempt-3");
+
+    const current = tracker.keyFor(base);
+    tracker.complete(current);
+    assert.notEqual(tracker.keyFor(base), current);
+    tracker.reset();
+    assert.notEqual(tracker.keyFor(base), generated.at(-2));
+  });
+
   it("resolves an empty API base when no runtime value is configured", () => {
     assert.equal(resolveApiBaseUrl({}), "");
     assert.equal(resolveApiBaseUrl({ VITE_API_BASE_URL: "  " }), "");
@@ -775,6 +826,43 @@ describe("sales workbench API client", () => {
     ]);
     assert.equal(result.customers[0].id, "rizhao");
     assert.equal(result.opportunities[0].id, "op-rizhao-plan");
+  });
+
+  it("loads the current quick record and business versions for conflict recovery", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, method: options.method ?? "GET" });
+        if (url.endsWith("/api/quick-records")) {
+          return jsonResponse({
+            items: [
+              sampleQuickRecord({ id: "qr-other", version: 2 }),
+              sampleQuickRecord({ id: "qr-1", version: 6 }),
+            ],
+          });
+        }
+        if (url.endsWith("/api/customers")) {
+          return jsonResponse({ items: [sampleCustomer({ version: 8 })] });
+        }
+        if (url.endsWith("/api/opportunities")) {
+          return jsonResponse({ items: [sampleOpportunity({ version: 10 })] });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+
+    const refreshed = await api.refreshQuickRecordConfirmationState("qr-1");
+
+    assert.equal(refreshed.quickRecord.id, "qr-1");
+    assert.equal(refreshed.quickRecord.version, 6);
+    assert.equal(refreshed.customers[0].version, 8);
+    assert.equal(refreshed.opportunities[0].version, 10);
+    assert.deepEqual(calls, [
+      { url: "http://127.0.0.1:8787/api/quick-records", method: "GET" },
+      { url: "http://127.0.0.1:8787/api/customers", method: "GET" },
+      { url: "http://127.0.0.1:8787/api/opportunities", method: "GET" },
+    ]);
   });
 
   it("creates a quick record without triggering analysis", async () => {
@@ -1282,7 +1370,11 @@ describe("sales workbench API client", () => {
           targets: ["customer", "opportunity", "weekly"],
           confirmedBy: "Jizhen",
           note: "manual confirmation",
+          targetVersions: { customer: 7, opportunity: 9 },
+          analysisVersionId: "ai-1",
         });
+        assert.equal(headerValue(options, "Idempotency-Key"), "attempt-123");
+        assert.equal(headerValue(options, "If-Match"), '"4"');
         return jsonResponse({
           confirmations: [sampleConfirmation()],
           quickRecord: sampleQuickRecord({
@@ -1300,6 +1392,10 @@ describe("sales workbench API client", () => {
     const result = await api.confirmQuickRecord("qr-1", ["customer", "opportunity", "weekly"], {
       confirmedBy: "Jizhen",
       note: "manual confirmation",
+      idempotencyKey: "attempt-123",
+      quickRecordVersion: 4,
+      targetVersions: { customer: 7, opportunity: 9 },
+      analysisVersionId: "ai-1",
     });
 
     assert.equal(result.quickRecord.status, "confirmed");
@@ -1327,7 +1423,12 @@ describe("sales workbench API client", () => {
     });
 
     await assert.rejects(
-      () => api.confirmQuickRecord("qr-1", ["customer"], { confirmedBy: "Jizhen" }),
+      () => api.confirmQuickRecord("qr-1", ["customer"], {
+        confirmedBy: "Jizhen",
+        idempotencyKey: "malformed-response-attempt",
+        quickRecordVersion: 1,
+        targetVersions: { customer: 1 },
+      }),
       /riskItem\.score: expected number/,
     );
   });

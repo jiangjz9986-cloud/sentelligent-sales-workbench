@@ -42,6 +42,7 @@ import {
   WeixinBindingPage,
   WeeklyPage,
 } from "./features/salesWorkbench/pages.jsx";
+import { mergeEntityByVersion } from "./quickRecordModel.js";
 import { getCurrentWeekRange } from "./weekRange.js";
 
 function resolveHeadingContext({
@@ -520,10 +521,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   function mergeById(items, item) {
-    if (!item?.id) return items;
-    return items.some((current) => current.id === item.id)
-      ? items.map((current) => (current.id === item.id ? item : current))
-      : [item, ...items];
+    return mergeEntityByVersion(items, item);
   }
 
   function makeLocalId(prefix) {
@@ -846,6 +844,13 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     void refreshOverviewSummary();
   }
 
+  function handleConfirmationRefresh(refreshed) {
+    setWorkbenchCustomers((current) =>
+      (refreshed.customers ?? []).reduce((items, item) => mergeById(items, item), current));
+    setWorkbenchOpportunities((current) =>
+      (refreshed.opportunities ?? []).reduce((items, item) => mergeById(items, item), current));
+  }
+
   return (
     <main className="app-shell">
       <div className="product-window">
@@ -943,8 +948,11 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 setSelectedOpportunityId={setSelectedOpportunityId}
                 openOpportunityDetail={openOpportunityDetail}
                 onBusinessSync={handleBusinessSync}
+                onConfirmationRefresh={handleConfirmationRefresh}
                 apiClient={apiClient}
                 backendStatus={backendStatus}
+                customersList={workbenchCustomers}
+                opportunitiesList={workbenchOpportunities}
               />
             )}
             {active === "customer" && (

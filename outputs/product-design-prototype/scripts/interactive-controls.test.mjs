@@ -69,4 +69,13 @@ describe("interactive control wiring", () => {
 
     assert.deepEqual(unsafeRoleButtons, []);
   });
+
+  it("locks every quick-record confirmation control while synchronization is active", () => {
+    const pageSource = readFileSync(resolve("src/features/salesWorkbench/pages.jsx"), "utf8");
+    const manualSync = pageSource.match(/<div className="manual-sync">[\s\S]*?<\/div>/)?.[0] ?? "";
+
+    assert.match(pageSource, /createExclusiveAsyncGate/);
+    assert.match(pageSource, /confirmationGateRef/);
+    assert.match(manualSync, /disabled=\{confirmationPending\}/);
+  });
 });

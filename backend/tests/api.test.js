@@ -572,10 +572,15 @@ describe("sales workbench backend API", () => {
 
     const confirmed = await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
+      headers: {
+        ...ifMatch(created.body.item.version),
+        "Idempotency-Key": "api-confirm-all-targets",
+      },
       body: JSON.stringify({
         targets: ["customer", "opportunity", "weekly"],
         confirmedBy: "继振",
         note: "人工确认同步到客户、商机和周报草稿",
+        targetVersions: { customer: 1, opportunity: 1 },
       }),
     });
 
@@ -616,6 +621,10 @@ describe("sales workbench backend API", () => {
     await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
+      headers: {
+        ...ifMatch(created.body.item.version),
+        "Idempotency-Key": "api-weekly-draft-source",
+      },
       body: JSON.stringify({
         targets: ["weekly"],
         confirmedBy: "继振",
@@ -680,6 +689,10 @@ describe("sales workbench backend API", () => {
     await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
+      headers: {
+        ...ifMatch(created.body.item.version),
+        "Idempotency-Key": "api-weekly-edit-source",
+      },
       body: JSON.stringify({
         targets: ["weekly"],
         confirmedBy: "继振",
@@ -741,6 +754,10 @@ describe("sales workbench backend API", () => {
     await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
+      headers: {
+        ...ifMatch(created.body.item.version),
+        "Idempotency-Key": "api-weekly-model-source",
+      },
       body: JSON.stringify({
         targets: ["weekly"],
         confirmedBy: "继振",
@@ -1091,6 +1108,60 @@ describe("sales workbench backend API", () => {
     assert.equal(risks.response.status, 200);
     assertApiCollection("riskItem", risks.body.items);
     assert.ok(risks.body.items.some((item) => item.sourceId === "audit-risk-1"));
+  });
+
+  it("keeps identical diagnosed risk source identities separate across opportunities", async () => {
+    const createdOpportunity = await request("/api/opportunities", {
+      method: "POST",
+      body: JSON.stringify({
+        customerId: "rizhao",
+        name: "Second planning opportunity",
+        customer: "Rizhao",
+        stage: "planning",
+        amount: "pending",
+        owner: "Task 9 tester",
+        probability: 30,
+        days: 0,
+        requirements: ["budget approval"],
+        competitors: [],
+        solutionDirection: [],
+      }),
+    });
+    assert.equal(createdOpportunity.response.status, 201);
+
+    const diagnosisBody = JSON.stringify({
+      sourceType: "shared_manual_audit",
+      sourceId: "shared-risk-source",
+    });
+    const first = await request("/api/opportunities/op-rizhao-plan/diagnose-risks", {
+      method: "POST",
+      body: diagnosisBody,
+    });
+    const second = await request(
+      `/api/opportunities/${createdOpportunity.body.item.id}/diagnose-risks`,
+      { method: "POST", body: diagnosisBody },
+    );
+    assert.equal(first.response.status, 201);
+    assert.equal(second.response.status, 201);
+
+    const firstByTitle = new Map(first.body.items.map((item) => [item.title, item]));
+    const secondRisk = second.body.items.find((item) => firstByTitle.has(item.title));
+    assert.ok(secondRisk, "expected both opportunities to generate at least one identical risk title");
+    const firstRisk = firstByTitle.get(secondRisk.title);
+    assert.notEqual(secondRisk.id, firstRisk.id);
+    assert.equal(firstRisk.opportunityId, "op-rizhao-plan");
+    assert.equal(secondRisk.opportunityId, createdOpportunity.body.item.id);
+
+    const risks = await request("/api/risks");
+    const persisted = risks.body.items.filter((item) =>
+      item.title === secondRisk.title &&
+      item.sourceType === "shared_manual_audit" &&
+      item.sourceId === "shared-risk-source");
+    assert.equal(persisted.length, 2);
+    assert.deepEqual(
+      persisted.map((item) => item.opportunityId).sort(),
+      ["op-rizhao-plan", createdOpportunity.body.item.id].sort(),
+    );
   });
 
   it("transitions risk status with a persisted handling note", async () => {

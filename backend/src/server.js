@@ -22,6 +22,13 @@ import {
 } from "./auth/session.js";
 import { loadConfig } from "./config.js";
 import { all, get, openDatabase, run } from "./db.js";
+import { withImmediateTransaction } from "./db/transaction.js";
+import {
+  claimIdempotency,
+  completeIdempotency,
+  parseIdempotencyKey,
+  requestHash,
+} from "./services/idempotency.js";
 import { HttpError } from "./http/errors.js";
 import { readJsonBody } from "./http/request.js";
 import {
@@ -553,6 +560,21 @@ function validationFailure(field, rule = "reference") {
   });
 }
 
+function requireConfirmationTargetVersions(body, targets) {
+  for (const target of ["customer", "opportunity"]) {
+    if (!targets.includes(target)) continue;
+    if (!Number.isSafeInteger(body.targetVersions?.[target]) || body.targetVersions[target] <= 0) {
+      validationFailure("targetVersions", "required");
+    }
+  }
+}
+
+function triggerFailpoint(options, name) {
+  if (options.failpoints instanceof Set && options.failpoints.has(name)) {
+    throw new Error(`Failpoint triggered: ${name}`);
+  }
+}
+
 function parseExpectedVersion(request) {
   const rawHeaderCount = Array.isArray(request.rawHeaders)
     ? request.rawHeaders.filter((value, index) => index % 2 === 0 && String(value).toLowerCase() === "if-match").length
@@ -605,18 +627,6 @@ function runVersionedUpdate(db, {
   );
   if (result.changes !== 1) {
     throwVersionFailure(db, { table, id, softDeletable });
-  }
-}
-
-function withImmediateTransaction(db, work) {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = work();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
   }
 }
 
@@ -1207,53 +1217,51 @@ function buildOpportunitySourceRecord(quickRecord) {
   return `${occurred} 快速记录 ${quickRecord.id}：${compactText(quickRecord.rawContent)}`;
 }
 
-function syncCustomerFromQuickRecord(db, customerId, quickRecord, insight) {
+function syncCustomerFromQuickRecord(db, customerId, expectedVersion, quickRecord, insight) {
   if (!customerId) return null;
   const current = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: customerId }));
-  if (!current) return null;
+  if (!current) notFound();
 
   const syncPreview = appendUnique(current.syncPreview, buildCustomerSyncPreview(quickRecord, insight)).slice(0, 8);
   const needs = appendUnique(current.needs, insight?.summary?.request?.text).slice(0, 8);
   const risks = appendUnique(current.risks, insight?.summary?.risk?.text).slice(0, 8);
 
-  run(
-    db,
-    `UPDATE customers
-     SET sync_preview = $syncPreview,
+  runVersionedUpdate(db, {
+    table: "customers",
+    id: current.id,
+    expectedVersion,
+    setSql: `sync_preview = $syncPreview,
          needs = $needs,
-         risks = $risks,
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id AND deleted_at IS NULL`,
-    {
+         risks = $risks`,
+    params: {
       $id: current.id,
       $syncPreview: json(syncPreview),
       $needs: json(needs),
       $risks: json(risks),
     },
-  );
+  });
 
   return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: current.id }));
 }
 
-function syncOpportunityFromQuickRecord(db, opportunityId, quickRecord, insight) {
+function syncOpportunityFromQuickRecord(db, opportunityId, expectedVersion, quickRecord, insight) {
   if (!opportunityId) return null;
   const current = opportunityFromRow(activeOpportunityEntityRow(db, opportunityId));
-  if (!current) return null;
+  if (!current) notFound();
 
   const requirements = appendUnique(current.requirements, insight?.summary?.request?.text).slice(0, 8);
   const solutionDirection = appendUnique(current.solutionDirection, insight?.summary?.action?.text).slice(0, 8);
 
-  run(
-    db,
-    `UPDATE opportunities
-     SET requirements = $requirements,
+  runVersionedUpdate(db, {
+    table: "opportunities",
+    id: current.id,
+    expectedVersion,
+    setSql: `requirements = $requirements,
          solution_direction = $solutionDirection,
          source_record = $sourceRecord,
          risk = COALESCE($risk, risk),
-         next = COALESCE($next, next),
-         updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id AND deleted_at IS NULL`,
-    {
+         next = COALESCE($next, next)`,
+    params: {
       $id: current.id,
       $requirements: json(requirements),
       $solutionDirection: json(solutionDirection),
@@ -1261,7 +1269,7 @@ function syncOpportunityFromQuickRecord(db, opportunityId, quickRecord, insight)
       $risk: insight?.summary?.risk?.text ?? null,
       $next: insight?.summary?.action?.text ?? null,
     },
-  );
+  });
 
   return opportunityFromRow(activeOpportunityEntityRow(db, current.id));
 }
@@ -1271,41 +1279,66 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
   const actionText = insight?.summary?.action?.text ?? `跟进快速记录：${compactText(quickRecord.rawContent, 40)}`;
   const riskText = insight?.summary?.risk?.text;
   const priority = riskText ? "高" : "中";
-
-  run(
+  const params = {
+    $customerId: customer?.id ?? opportunity?.customerId ?? quickRecord.customerId,
+    $opportunityId: opportunity?.id ?? quickRecord.opportunityId,
+    $title: compactText(actionText, 80),
+    $customer: customerName,
+    $reason: riskText || `来自快速记录 ${quickRecord.id} 的人工确认结果`,
+    $due: "待确认",
+    $assignee: "继振",
+    $priority: priority,
+    $sourceRecordId: quickRecord.id,
+    $tone: priority === "高" ? "red" : "blue",
+  };
+  const currentRow = get(
     db,
-    `INSERT INTO action_items (
+    "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId",
+    { $sourceRecordId: quickRecord.id },
+  );
+  const current = actionFromRow(currentRow);
+
+  if (current) {
+    const reactivating = Boolean(currentRow.deleted_at);
+    runVersionedUpdate(db, {
+      table: "action_items",
+      id: current.id,
+      expectedVersion: current.version,
+      softDeletable: false,
+      setSql: `customer_id = $customerId,
+          opportunity_id = $opportunityId,
+          title = $title,
+          customer = $customer,
+          reason = $reason,
+          priority = $priority,
+          tone = $tone,
+          deleted_at = NULL,
+          deleted_by = NULL
+          ${reactivating ? ", due = $due, assignee = $assignee, status = 'pending'" : ""}`,
+      params: {
+        $customerId: params.$customerId,
+        $opportunityId: params.$opportunityId,
+        $title: params.$title,
+        $customer: params.$customer,
+        $reason: params.$reason,
+        $priority: params.$priority,
+        $tone: params.$tone,
+        ...(reactivating ? { $due: params.$due, $assignee: params.$assignee } : {}),
+      },
+    });
+  } else {
+    run(
+      db,
+      `INSERT INTO action_items (
        id, customer_id, opportunity_id, title, customer, reason, due,
        assignee, priority, status, source_record_id, tone
      ) VALUES (
        $id, $customerId, $opportunityId, $title, $customer, $reason, $due,
        $assignee, $priority, 'pending', $sourceRecordId, $tone
-     )
-     ON CONFLICT(source_record_id) DO UPDATE SET
-       customer_id = excluded.customer_id,
-       opportunity_id = excluded.opportunity_id,
-       title = excluded.title,
-       customer = excluded.customer,
-       reason = excluded.reason,
-       due = excluded.due,
-       assignee = excluded.assignee,
-       priority = excluded.priority,
-       tone = excluded.tone,
-       updated_at = CURRENT_TIMESTAMP`,
-    {
-      $id: randomUUID(),
-      $customerId: customer?.id ?? opportunity?.customerId ?? insight?.customer?.id ?? quickRecord.customerId,
-      $opportunityId: opportunity?.id ?? insight?.opportunity?.id ?? quickRecord.opportunityId,
-      $title: compactText(actionText, 80),
-      $customer: customerName,
-      $reason: riskText || `来自快速记录 ${quickRecord.id} 的人工确认结果`,
-      $due: "待确认",
-      $assignee: "继振",
-      $priority: priority,
-      $sourceRecordId: quickRecord.id,
-      $tone: priority === "高" ? "red" : "blue",
-    },
-  );
+     )`,
+      { ...params, $id: randomUUID() },
+    );
+  }
 
   return actionFromRow(get(db, "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId AND deleted_at IS NULL", {
     $sourceRecordId: quickRecord.id,
@@ -1415,52 +1448,88 @@ function buildOpportunityRiskDrafts({ customer, opportunity, sourceType, sourceI
   }));
 }
 
-function upsertRiskItem(db, draft) {
-  const current = riskFromRow(
-    get(
-      db,
-      `SELECT * FROM risk_items
-       WHERE opportunity_id = $opportunityId
-         AND title = $title
-         AND source_type = $sourceType
-         AND COALESCE(source_id, '') = COALESCE($sourceId, '')
-         AND deleted_at IS NULL
-       LIMIT 1`,
-      {
-        $opportunityId: draft.opportunityId,
-        $title: draft.title,
-        $sourceType: draft.sourceType,
-        $sourceId: draft.sourceId ?? null,
-      },
-    ),
+function getActiveQuickRecordRiskRow(db, sourceId) {
+  return get(
+    db,
+    `SELECT * FROM risk_items
+     WHERE source_type = 'quick_record'
+       AND source_id = $sourceId
+       AND deleted_at IS NULL
+     ORDER BY created_at ASC, id ASC
+     LIMIT 1`,
+    { $sourceId: sourceId },
   );
+}
+
+function getQuickRecordRiskRow(db, sourceId) {
+  return get(
+    db,
+    `SELECT * FROM risk_items
+     WHERE source_type = 'quick_record'
+       AND source_id = $sourceId
+     ORDER BY
+       (deleted_at IS NOT NULL) ASC,
+       julianday(updated_at) DESC,
+       updated_at DESC,
+       id DESC
+     LIMIT 1`,
+    { $sourceId: sourceId },
+  );
+}
+
+function upsertRiskItem(db, draft) {
+  const currentRow = draft.sourceType === "quick_record"
+    ? getQuickRecordRiskRow(db, draft.sourceId)
+    : get(
+        db,
+        `SELECT * FROM risk_items
+         WHERE title = $title
+           AND opportunity_id = $opportunityId
+           AND source_type = $sourceType
+           AND COALESCE(source_id, '') = COALESCE($sourceId, '')
+           AND deleted_at IS NULL
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1`,
+        {
+          $title: draft.title,
+          $opportunityId: draft.opportunityId,
+          $sourceType: draft.sourceType,
+          $sourceId: draft.sourceId ?? null,
+        },
+      );
+  const current = riskFromRow(currentRow);
 
   if (current) {
-    run(
-      db,
-      `UPDATE risk_items
-       SET customer_id = $customerId,
+    const reactivating = draft.sourceType === "quick_record" && Boolean(currentRow.deleted_at);
+    runVersionedUpdate(db, {
+      table: "risk_items",
+      id: current.id,
+      expectedVersion: current.version,
+      softDeletable: !reactivating,
+      setSql: `title = $title,
+           customer_id = $customerId,
+           opportunity_id = $opportunityId,
            target = $target,
            score = $score,
            severity = $severity,
-           status = $status,
            evidence = $evidence,
            action = $action,
-           tone = $tone,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $id`,
-      {
+           tone = $tone
+           ${reactivating ? ", status = $status, deleted_at = NULL, deleted_by = NULL" : ""}`,
+      params: {
         $id: current.id,
+        $title: draft.title,
         $customerId: draft.customerId,
+        $opportunityId: draft.opportunityId,
         $target: draft.target,
         $score: draft.score,
         $severity: draft.severity,
-        $status: draft.status,
         $evidence: draft.evidence,
         $action: draft.action,
         $tone: draft.tone,
+        ...(reactivating ? { $status: draft.status } : {}),
       },
-    );
+    });
     return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: current.id }));
   }
 
@@ -2214,92 +2283,224 @@ export function createServer(options = {}) {
         parts[2] &&
         parts[3] === "confirm"
       ) {
-        const quickRecord = quickRecordFromRow(
-          get(db, "SELECT * FROM quick_records WHERE id = $id", { $id: parts[2] }),
-        );
-        if (!quickRecord) return notFound(response);
-
+        const idempotencyKey = parseIdempotencyKey(request);
+        const expectedQuickRecordVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.confirmation);
         const targets = Array.from(new Set(body.targets ?? []));
+        requireConfirmationTargetVersions(body, targets);
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: idempotencyKey,
+          hash: requestHash(body),
+        };
 
-        const insight = getLatestInsight(db, quickRecord.id);
-        for (const target of targets) {
-          run(
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+
+          const quickRecord = quickRecordFromRow(get(
             db,
-            `INSERT INTO manual_confirmations (id, quick_record_id, target, confirmed_by, note)
-             VALUES ($id, $quickRecordId, $target, $confirmedBy, $note)
-             ON CONFLICT(quick_record_id, target) DO UPDATE SET
-               confirmed_by = excluded.confirmed_by,
-               note = excluded.note,
-               created_at = CURRENT_TIMESTAMP`,
-            {
-              $id: randomUUID(),
-              $quickRecordId: quickRecord.id,
-              $target: target,
-              $confirmedBy: body.confirmedBy ?? null,
-              $note: body.note ?? null,
+            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
+            { $id: parts[2] },
+          ));
+          if (!quickRecord) notFound();
+          if (quickRecord.version !== expectedQuickRecordVersion) {
+            throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+              currentVersion: quickRecord.version,
+            });
+          }
+
+          const insight = body.analysisVersionId
+            ? insightFromRow(get(
+              db,
+              "SELECT * FROM ai_insights WHERE id = $id AND quick_record_id = $quickRecordId",
+              { $id: body.analysisVersionId, $quickRecordId: quickRecord.id },
+            ))
+            : getLatestInsight(db, quickRecord.id);
+          if (body.analysisVersionId && !insight) notFound();
+
+          const nextCustomerId = targets.includes("customer")
+            ? insight?.customer?.id ?? quickRecord.customerId
+            : quickRecord.customerId;
+          const nextOpportunityId = targets.includes("opportunity")
+            ? insight?.opportunity?.id ?? quickRecord.opportunityId
+            : quickRecord.opportunityId;
+          const finalCustomer = nextCustomerId
+            ? customerFromRow(get(
+              db,
+              "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL",
+              { $id: nextCustomerId },
+            ))
+            : null;
+          const finalOpportunity = nextOpportunityId
+            ? opportunityFromRow(activeOpportunityEntityRow(db, nextOpportunityId))
+            : null;
+          if (nextCustomerId && !finalCustomer) validationFailure("customerId");
+          if (nextOpportunityId && !finalOpportunity) validationFailure("opportunityId");
+          if (finalCustomer && finalOpportunity && finalOpportunity.customerId !== finalCustomer.id) {
+            validationFailure("opportunityId", "relationship");
+          }
+          const customerBefore = targets.includes("customer") ? finalCustomer : null;
+          const opportunityBefore = targets.includes("opportunity") ? finalOpportunity : null;
+          if (customerBefore && customerBefore.version !== body.targetVersions.customer) {
+            throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+              currentVersion: customerBefore.version,
+            });
+          }
+          if (opportunityBefore && opportunityBefore.version !== body.targetVersions.opportunity) {
+            throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+              currentVersion: opportunityBefore.version,
+            });
+          }
+
+          const confirmationsBefore = all(
+            db,
+            "SELECT * FROM manual_confirmations WHERE quick_record_id = $quickRecordId ORDER BY target ASC",
+            { $quickRecordId: quickRecord.id },
+          ).map(confirmationFromRow);
+          const actionBefore = actionFromRow(get(
+            db,
+            "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId AND deleted_at IS NULL",
+            { $sourceRecordId: quickRecord.id },
+          ));
+          const riskBefore = riskFromRow(getActiveQuickRecordRiskRow(db, quickRecord.id));
+
+          for (const target of targets) {
+            run(
+              db,
+              `INSERT INTO manual_confirmations (id, quick_record_id, target, confirmed_by, note)
+               VALUES ($id, $quickRecordId, $target, $confirmedBy, $note)
+               ON CONFLICT(quick_record_id, target) DO UPDATE SET
+                 confirmed_by = excluded.confirmed_by,
+                 note = excluded.note,
+                 created_at = CURRENT_TIMESTAMP`,
+              {
+                $id: randomUUID(),
+                $quickRecordId: quickRecord.id,
+                $target: target,
+                $confirmedBy: body.confirmedBy ?? null,
+                $note: body.note ?? null,
+              },
+            );
+          }
+
+          runVersionedUpdate(db, {
+            table: "quick_records",
+            id: quickRecord.id,
+            expectedVersion: expectedQuickRecordVersion,
+            softDeletable: false,
+            setSql: `status = 'confirmed',
+                 customer_id = $customerId,
+                 opportunity_id = $opportunityId`,
+            params: {
+              $customerId: nextCustomerId ?? null,
+              $opportunityId: nextOpportunityId ?? null,
             },
-          );
-        }
-
-        const nextCustomerId = targets.includes("customer") ? insight?.customer?.id ?? quickRecord.customerId : quickRecord.customerId;
-        const nextOpportunityId = targets.includes("opportunity")
-          ? insight?.opportunity?.id ?? quickRecord.opportunityId
-          : quickRecord.opportunityId;
-
-        run(
-          db,
-          `UPDATE quick_records
-           SET status = 'confirmed',
-               customer_id = $customerId,
-               opportunity_id = $opportunityId,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id = $id`,
-          {
-            $id: quickRecord.id,
-            $customerId: nextCustomerId ?? null,
-            $opportunityId: nextOpportunityId ?? null,
-          },
-        );
-
-        const confirmations = all(
-          db,
-          "SELECT * FROM manual_confirmations WHERE quick_record_id = $quickRecordId ORDER BY target ASC",
-          { $quickRecordId: quickRecord.id },
-        ).map(confirmationFromRow);
-        const updatedRecord = quickRecordFromRow(get(db, "SELECT * FROM quick_records WHERE id = $id", { $id: quickRecord.id }));
-        const updatedCustomer = targets.includes("customer")
-          ? syncCustomerFromQuickRecord(db, nextCustomerId, updatedRecord, insight)
-          : null;
-        const updatedOpportunity = targets.includes("opportunity")
-          ? syncOpportunityFromQuickRecord(db, nextOpportunityId, updatedRecord, insight)
-          : null;
-        const action = targets.some((target) => target === "customer" || target === "opportunity")
-          ? upsertActionFromQuickRecord(db, updatedRecord, insight, updatedCustomer, updatedOpportunity)
-          : null;
-        const risk = targets.some((target) => target === "customer" || target === "opportunity")
-          ? upsertRiskFromQuickRecord(db, updatedRecord, insight, updatedCustomer, updatedOpportunity)
-          : null;
-
-        recordAuditLog(db, {
-          action: "quick_record.confirm",
-          entityType: "quick_record",
-          entityId: updatedRecord.id,
-          actor: body.confirmedBy ?? null,
-          metadata: {
-            targets,
-            customerId: updatedRecord.customerId,
-            opportunityId: updatedRecord.opportunityId,
-          },
+          });
+          const updatedRecord = quickRecordFromRow(get(
+            db,
+            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
+            { $id: quickRecord.id },
+          ));
+          const updatedCustomer = customerBefore
+            ? syncCustomerFromQuickRecord(
+              db,
+              nextCustomerId,
+              body.targetVersions.customer,
+              updatedRecord,
+              insight,
+            )
+            : null;
+          const updatedOpportunity = opportunityBefore
+            ? syncOpportunityFromQuickRecord(
+              db,
+              nextOpportunityId,
+              body.targetVersions.opportunity,
+              updatedRecord,
+              insight,
+            )
+            : null;
+          const derivedCustomer = updatedCustomer ?? finalCustomer;
+          const derivedOpportunity = updatedOpportunity ?? finalOpportunity;
+          const writesBusinessTargets = customerBefore || opportunityBefore;
+          const action = writesBusinessTargets
+            ? upsertActionFromQuickRecord(db, updatedRecord, insight, derivedCustomer, derivedOpportunity)
+            : null;
+          triggerFailpoint(options, "confirm.afterAction");
+          const risk = writesBusinessTargets
+            ? upsertRiskFromQuickRecord(db, updatedRecord, insight, derivedCustomer, derivedOpportunity)
+            : null;
+          const actionAfter = actionFromRow(get(
+            db,
+            "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId AND deleted_at IS NULL",
+            { $sourceRecordId: quickRecord.id },
+          ));
+          const riskAfter = riskFromRow(getActiveQuickRecordRiskRow(db, quickRecord.id));
+          const confirmations = all(
+            db,
+            "SELECT * FROM manual_confirmations WHERE quick_record_id = $quickRecordId ORDER BY target ASC",
+            { $quickRecordId: quickRecord.id },
+          ).map(confirmationFromRow);
+          const responseBody = {
+            confirmations,
+            quickRecord: updatedRecord,
+            ...(updatedCustomer ? { customer: updatedCustomer } : {}),
+            ...(updatedOpportunity ? { opportunity: updatedOpportunity } : {}),
+            ...(action ? { action } : {}),
+            ...(risk ? { risk } : {}),
+          };
+          const auditEvidence = (record, customer, opportunity, confirmationRows, actionItem, riskItem) => ({
+            quickRecord: {
+              id: record.id,
+              version: record.version,
+              status: record.status,
+              customerId: record.customerId,
+              opportunityId: record.opportunityId,
+            },
+            customer: customer ? { id: customer.id, version: customer.version } : null,
+            opportunity: opportunity ? { id: opportunity.id, version: opportunity.version } : null,
+            confirmations: confirmationRows.map((item) => ({ id: item.id, target: item.target })),
+            action: actionItem ? { id: actionItem.id, version: actionItem.version } : null,
+            risk: riskItem ? { id: riskItem.id, version: riskItem.version, title: riskItem.title } : null,
+          });
+          recordAuditLog(db, {
+            action: "quick_record.confirm",
+            entityType: "quick_record",
+            entityId: updatedRecord.id,
+            actor: request.authContext.account,
+            requestId,
+            metadata: {
+              targets,
+              analysisVersionId: body.analysisVersionId ?? null,
+            },
+            before: auditEvidence(
+              quickRecord,
+              customerBefore,
+              opportunityBefore,
+              confirmationsBefore,
+              actionBefore,
+              riskBefore,
+            ),
+            after: auditEvidence(
+              updatedRecord,
+              updatedCustomer,
+              updatedOpportunity,
+              confirmations,
+              actionAfter,
+              riskAfter,
+            ),
+            entityVersion: updatedRecord.version,
+          });
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            status: 201,
+            body: responseBody,
+          });
+          return { status: 201, body: responseBody };
         });
-        sendJson(response, 201, {
-          confirmations,
-          quickRecord: updatedRecord,
-          ...(updatedCustomer ? { customer: updatedCustomer } : {}),
-          ...(updatedOpportunity ? { opportunity: updatedOpportunity } : {}),
-          ...(action ? { action } : {}),
-          ...(risk ? { risk } : {}),
-        });
+        sendJson(response, result.status, result.body);
         return;
       }
 

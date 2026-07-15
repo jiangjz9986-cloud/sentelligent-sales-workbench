@@ -247,10 +247,17 @@ describe("strict business request validation", () => {
     });
     assert.equal(quickRecord.response.status, 201);
 
-    const result = await post(`/api/quick-records/${quickRecord.body.item.id}/confirm`, {
-      targets: ["database"],
-      confirmedBy: "tester",
-      note: "must not persist",
+    const result = await request(`/api/quick-records/${quickRecord.body.item.id}/confirm`, {
+      method: "POST",
+      headers: {
+        "Idempotency-Key": "invalid-confirmation-target",
+        "If-Match": `"${quickRecord.body.item.version}"`,
+      },
+      body: JSON.stringify({
+        targets: ["database"],
+        confirmedBy: "tester",
+        note: "must not persist",
+      }),
     });
     assertValidation(result, "targets");
   });

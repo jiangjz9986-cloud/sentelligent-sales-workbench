@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { apply as applyPhase1WriteIntegrity } from "./migrations/0002_phase1_write_integrity.mjs";
+import { apply as applyQuickRecordRiskIdentity } from "./migrations/0003_quick_record_risk_identity.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -17,7 +18,13 @@ const migrations = [
     path: resolve(here, "migrations", "0002_phase1_write_integrity.mjs"),
     type: "module",
     apply: applyPhase1WriteIntegrity,
-  }
+  },
+  {
+    version: "0003",
+    path: resolve(here, "migrations", "0003_quick_record_risk_identity.mjs"),
+    type: "module",
+    apply: applyQuickRecordRiskIdentity,
+  },
 ];
 
 const baselineRepairs = [

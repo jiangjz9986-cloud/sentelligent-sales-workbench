@@ -93,6 +93,91 @@ export function getQuickRecordFlow({ hasInput, hasAnalysis, confirmedTargets }) 
   ];
 }
 
+export function createExclusiveAsyncGate() {
+  let active = false;
+  return {
+    async run(work) {
+      if (active) return { status: "busy" };
+      active = true;
+      try {
+        return await work();
+      } finally {
+        active = false;
+      }
+    },
+  };
+}
+
+export function mergeEntityByVersion(items, item) {
+  if (!item?.id) return items;
+  const current = items.find((candidate) => candidate.id === item.id);
+  if (!current) return [item, ...items];
+
+  const currentVersion = current.version;
+  const incomingVersion = item.version;
+  if (
+    Number.isSafeInteger(currentVersion) &&
+    Number.isSafeInteger(incomingVersion) &&
+    incomingVersion < currentVersion
+  ) {
+    return items;
+  }
+  return items.map((candidate) => candidate.id === item.id ? item : candidate);
+}
+
+export async function confirmQuickRecordTarget({
+  apiClient,
+  attemptTracker,
+  quickRecord,
+  analysis,
+  target,
+  customers,
+  opportunities,
+  confirmedBy,
+}) {
+  const targetVersions = {};
+  if (target.id === "customer") {
+    const customerId = analysis?.customer?.id ?? quickRecord.customerId;
+    const customer = customers?.find((item) => item.id === customerId);
+    if (!Number.isSafeInteger(customer?.version) || customer.version <= 0) {
+      return { status: "missing_version", entity: "customer" };
+    }
+    targetVersions.customer = customer.version;
+  }
+  if (target.id === "opportunity") {
+    const opportunityId = analysis?.opportunity?.id ?? quickRecord.opportunityId;
+    const opportunity = opportunities?.find((item) => item.id === opportunityId);
+    if (!Number.isSafeInteger(opportunity?.version) || opportunity.version <= 0) {
+      return { status: "missing_version", entity: "opportunity" };
+    }
+    targetVersions.opportunity = opportunity.version;
+  }
+
+  const idempotencyKey = attemptTracker.keyFor({
+    quickRecordId: quickRecord.id,
+    quickRecordVersion: quickRecord.version,
+    analysisVersionId: analysis?.id ?? null,
+    targets: [target.id],
+    targetVersions,
+  });
+  try {
+    const result = await apiClient.confirmQuickRecord(quickRecord.id, [target.id], {
+      confirmedBy,
+      note: target.status,
+      idempotencyKey,
+      quickRecordVersion: quickRecord.version,
+      targetVersions,
+      analysisVersionId: analysis?.id ?? null,
+    });
+    attemptTracker.complete(idempotencyKey);
+    return { status: "confirmed", result, idempotencyKey };
+  } catch (error) {
+    if (error?.code !== "VERSION_CONFLICT") throw error;
+    const refreshed = await apiClient.refreshQuickRecordConfirmationState(quickRecord.id);
+    return { status: "conflict", error, refreshed, idempotencyKey };
+  }
+}
+
 export function getSyncTargets() {
   return [
     {

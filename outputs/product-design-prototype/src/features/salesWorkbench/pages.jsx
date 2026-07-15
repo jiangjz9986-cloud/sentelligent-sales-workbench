@@ -41,6 +41,7 @@ import {
   weeklyDays,
 } from "../../data/salesWorkbenchData.js";
 import { triggerBlobDownload } from "../../downloadFile.js";
+import { createConfirmationAttemptTracker } from "../../api/salesWorkbenchApi.js";
 import {
   CompactList,
   ExpandableInsight,
@@ -56,6 +57,8 @@ import {
 } from "../../components/primitives.jsx";
 import {
   buildQuickRecordAnalysis,
+  confirmQuickRecordTarget,
+  createExclusiveAsyncGate,
   getQuickRecordFlow,
   getSyncTargets,
 } from "../../quickRecordModel.js";
@@ -393,13 +396,17 @@ export function QuickRecord({
   setSelectedOpportunityId,
   openOpportunityDetail,
   onBusinessSync,
+  onConfirmationRefresh,
   apiClient,
   backendStatus,
+  customersList,
+  opportunitiesList,
 }) {
   const [analysis, setAnalysis] = useState(null);
-  const [quickRecordId, setQuickRecordId] = useState(null);
+  const [quickRecord, setQuickRecord] = useState(null);
   const [selectedHistoryId, setSelectedHistoryId] = useState(null);
   const [confirmedTargets, setConfirmedTargets] = useState([]);
+  const [confirmationPending, setConfirmationPending] = useState(false);
   const [syncLog, setSyncLog] = useState([]);
   const [voiceStatus, setVoiceStatus] = useState("idle");
   const [voiceMessage, setVoiceMessage] = useState("点击开始转写即可。");
@@ -411,6 +418,15 @@ export function QuickRecord({
   const audioChunksRef = useRef([]);
   const voiceAudioUrlRef = useRef("");
   const voiceBaseTextRef = useRef("");
+  const confirmationAttemptRef = useRef(null);
+  if (!confirmationAttemptRef.current) {
+    confirmationAttemptRef.current = createConfirmationAttemptTracker();
+  }
+  const confirmationGateRef = useRef(null);
+  if (!confirmationGateRef.current) {
+    confirmationGateRef.current = createExclusiveAsyncGate();
+  }
+  const quickRecordId = quickRecord?.id ?? null;
   const hasInput = recordText.trim().length > 0;
   const speechRecognitionAvailable = canUseSpeechRecognition();
   const audioCaptureAvailable = canCaptureAudio();
@@ -433,8 +449,9 @@ export function QuickRecord({
     : voiceMessage;
 
   function resetAnalysis(status) {
+    confirmationAttemptRef.current.reset();
     setAnalysis(null);
-    setQuickRecordId(null);
+    setQuickRecord(null);
     setSelectedHistoryId(null);
     setConfirmedTargets([]);
     setSyncLog([]);
@@ -472,10 +489,11 @@ export function QuickRecord({
     if (recognitionRef.current) stopVoiceRecognition();
     if (mediaRecorderRef.current) stopVoiceRecognition();
     clearVoiceAudio();
+    confirmationAttemptRef.current.reset();
     setRecordMode("text");
     setRecordText("");
     setAnalysis(null);
-    setQuickRecordId(null);
+    setQuickRecord(null);
     setSelectedHistoryId(null);
     setConfirmedTargets([]);
     setSyncLog([]);
@@ -487,12 +505,13 @@ export function QuickRecord({
     if (recognitionRef.current) stopVoiceRecognition();
     if (mediaRecorderRef.current) stopVoiceRecognition();
     clearVoiceAudio();
+    confirmationAttemptRef.current.reset();
     const nextText = item.rawContent ?? `${item.customer}：${item.title}。${item.feedback}`;
     const nextAnalysis = item.analysis ?? buildQuickRecordAnalysis(nextText);
     setRecordMode("text");
     setRecordText(nextText);
     setAnalysis(nextAnalysis);
-    setQuickRecordId(null);
+    setQuickRecord(null);
     setSelectedHistoryId(item.id);
     setConfirmedTargets(item.confirmedTargets ?? []);
     setSyncLog(item.syncLog ?? []);
@@ -501,6 +520,7 @@ export function QuickRecord({
   }
 
   function updateAnalysisSummary(section, text) {
+    confirmationAttemptRef.current.reset();
     setAnalysis((current) => {
       if (!current?.summary?.[section]) return current;
       return {
@@ -766,13 +786,15 @@ export function QuickRecord({
       return;
     }
 
+    confirmationAttemptRef.current.reset();
+
     if (apiClient?.isEnabled) {
       setSyncStatus("正在分析记录内容");
       try {
         const result = await apiClient.analyzeQuickRecord(recordText, {
           sourceChannel: recordMode === "voice" ? "语音转写" : "快速记录",
         });
-        setQuickRecordId(result.quickRecord.id);
+        setQuickRecord(result.quickRecord);
         setAnalysis(result.analysis);
         setConfirmedTargets([]);
         setSyncLog([]);
@@ -784,7 +806,7 @@ export function QuickRecord({
       }
     }
 
-    setQuickRecordId(null);
+    setQuickRecord(null);
     setAnalysis(nextAnalysis);
     setConfirmedTargets([]);
     setSyncLog([]);
@@ -792,15 +814,34 @@ export function QuickRecord({
     setSyncStatus("已完成结构化识别，等待人工同步");
   }
 
-  async function confirmTarget(target) {
+  async function confirmTargetUnlocked(target) {
     let nextLogEntry = null;
     if (quickRecordId && apiClient?.isEnabled) {
       setSyncStatus(`正在同步${target.label}`);
       try {
-        const result = await apiClient.confirmQuickRecord(quickRecordId, [target.id], {
+        const outcome = await confirmQuickRecordTarget({
+          apiClient,
+          attemptTracker: confirmationAttemptRef.current,
+          quickRecord,
+          analysis,
+          target,
+          customers: customersList,
+          opportunities: opportunitiesList,
           confirmedBy: "继振",
-          note: target.status,
         });
+        if (outcome.status === "missing_version") {
+          const entityLabel = outcome.entity === "customer" ? "客户" : "商机";
+          setSyncStatus(`同步失败，请刷新${entityLabel}版本后重试：${target.label}`);
+          return;
+        }
+        if (outcome.status === "conflict") {
+          setQuickRecord(outcome.refreshed.quickRecord);
+          onConfirmationRefresh?.(outcome.refreshed);
+          setSyncStatus(`数据已刷新，请重试：${target.label}`);
+          return;
+        }
+        const result = outcome.result;
+        setQuickRecord(result.quickRecord);
         onBusinessSync?.(result);
         nextLogEntry = (result.confirmations ?? []).find((item) => item.target === target.id) ?? null;
       } catch {
@@ -823,8 +864,12 @@ export function QuickRecord({
       return [...current, target.id];
     });
 
-    if (target.id === "customer") setSelectedCustomerId("rizhao");
-    if (target.id === "opportunity") setSelectedOpportunityId("op-rizhao-plan");
+    if (target.id === "customer") {
+      setSelectedCustomerId(analysis?.customer?.id ?? quickRecord?.customerId ?? "rizhao");
+    }
+    if (target.id === "opportunity") {
+      setSelectedOpportunityId(analysis?.opportunity?.id ?? quickRecord?.opportunityId ?? "op-rizhao-plan");
+    }
     if (nextLogEntry) {
       setSyncLog((current) => [
         ...current.filter((item) => item.target !== nextLogEntry.target),
@@ -832,6 +877,25 @@ export function QuickRecord({
       ]);
     }
     setSyncStatus(quickRecordId && backendStatus === "connected" ? `${target.status}（已同步）` : target.status);
+  }
+
+  async function confirmTarget(target) {
+    try {
+      const outcome = await confirmationGateRef.current.run(async () => {
+        setConfirmationPending(true);
+        try {
+          await confirmTargetUnlocked(target);
+          return { status: "settled" };
+        } finally {
+          setConfirmationPending(false);
+        }
+      });
+      if (outcome.status === "busy") {
+        setSyncStatus("正在同步，请稍候");
+      }
+    } catch {
+      setSyncStatus(`同步失败，请稍后重试：${target.label}`);
+    }
   }
 
   function switchToTextRecord() {
@@ -1074,6 +1138,7 @@ export function QuickRecord({
                   className={confirmed ? "ghost-button confirmed" : target.id === "customer" ? "primary-button" : "ghost-button"}
                   key={target.id}
                   type="button"
+                  disabled={confirmationPending}
                   onClick={() => confirmTarget(target)}
                 >
                   {confirmed ? <Check size={16} /> : <Icon size={16} />}
@@ -1081,7 +1146,12 @@ export function QuickRecord({
                 </button>
               );
             })}
-            <button className="ghost-button" type="button" onClick={() => resetAnalysis("补充内容后可重新识别")}>
+            <button
+              className="ghost-button"
+              type="button"
+              disabled={confirmationPending}
+              onClick={() => resetAnalysis("补充内容后可重新识别")}
+            >
               补充内容后再识别
             </button>
           </div>

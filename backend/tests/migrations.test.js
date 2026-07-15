@@ -15,6 +15,7 @@ import {
   migrateDatabase,
   migrationChecksum,
 } from "../src/db/migrate.js";
+import { apply as applyPhase1WriteIntegrity } from "../src/db/migrations/0002_phase1_write_integrity.mjs";
 
 const businessTables = [
   "customers",
@@ -115,6 +116,40 @@ function withDatabase(testBody) {
   }
 }
 
+function migrateThrough0002(db) {
+  const migrationPaths = [
+    fileURLToPath(new URL("../src/db/migrations/0001_baseline.sql", import.meta.url)),
+    fileURLToPath(new URL("../src/db/migrations/0002_phase1_write_integrity.mjs", import.meta.url)),
+  ];
+  const sources = migrationPaths.map((path) => readFileSync(path, "utf8"));
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    executeMigration(db, { version: "0001", type: "sql" }, sources[0]);
+    executeMigration(db, {
+      version: "0002",
+      type: "module",
+      apply: applyPhase1WriteIntegrity,
+    }, sources[1]);
+    db.exec(`
+      CREATE TABLE schema_migrations (
+        version TEXT PRIMARY KEY,
+        checksum TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )
+    `);
+    const insert = db.prepare(`
+      INSERT INTO schema_migrations (version, checksum, applied_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+    `);
+    insert.run("0001", migrationChecksum(sources[0]));
+    insert.run("0002", migrationChecksum(sources[1]));
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 test("records versioned migrations exactly once and remains idempotent on reopen", () => {
   withDatabase((databaseUrl) => {
     let first;
@@ -127,21 +162,118 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 2);
+      assert.equal(firstMigrations.length, 3);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
+      assert.equal(firstMigrations[2].version, "0003");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
+      assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
       const migrationSources = [
         "../src/db/migrations/0001_baseline.sql",
         "../src/db/migrations/0002_phase1_write_integrity.mjs",
+        "../src/db/migrations/0003_quick_record_risk_identity.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
+      assert.equal(firstMigrations[2].checksum, migrationChecksum(migrationSources[2]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
       first?.close();
+    }
+  });
+});
+
+test("migration 0003 reconciles active quick-record risk duplicates and enforces partial uniqueness", () => {
+  withDatabase((databaseUrl) => {
+    const db = createConnection({ databaseUrl });
+    try {
+      migrateThrough0002(db);
+      db.exec(`
+        INSERT INTO risk_items (
+          id, title, target, evidence, action, source_type, source_id,
+          version, created_at, updated_at
+        ) VALUES
+          ('risk-old', 'Old active', 'target', 'evidence', 'action', 'quick_record', 'qr-duplicate', 2, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z'),
+          ('risk-current', 'Current active', 'target', 'evidence', 'action', 'quick_record', 'qr-duplicate', 5, '2026-07-15T00:00:00.000Z', '2026-07-16T00:00:00.000Z'),
+          ('risk-history', 'Deleted history', 'target', 'evidence', 'action', 'quick_record', 'qr-duplicate', 9, '2026-07-13T00:00:00.000Z', '2026-07-17T00:00:00.000Z'),
+          ('risk-single', 'Single active', 'target', 'evidence', 'action', 'quick_record', 'qr-single', 4, '2026-07-15T00:00:00.000Z', '2026-07-15T00:00:00.000Z');
+        UPDATE risk_items
+        SET deleted_at = '2026-07-15T12:00:00.000Z', deleted_by = 'legacy-user'
+        WHERE id = 'risk-history';
+      `);
+
+      migrateDatabase(db);
+
+      const rows = all(db, `
+        SELECT id, version, deleted_at, deleted_by, title, updated_at
+        FROM risk_items
+        WHERE source_type = 'quick_record' AND source_id = 'qr-duplicate'
+        ORDER BY id
+      `);
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      assert.equal(rows.filter((row) => row.deleted_at === null).length, 1);
+      assert.equal(byId.get("risk-current").deleted_at, null);
+      assert.equal(byId.get("risk-current").version, 5);
+      assert.equal(byId.get("risk-current").title, "Current active");
+      assert.ok(byId.get("risk-old").deleted_at);
+      assert.equal(byId.get("risk-old").deleted_by, "migration:0003");
+      assert.equal(byId.get("risk-old").version, 3);
+      assert.equal(byId.get("risk-old").title, "Old active");
+      assert.equal(byId.get("risk-history").deleted_at, "2026-07-15T12:00:00.000Z");
+      assert.equal(byId.get("risk-history").deleted_by, "legacy-user");
+      assert.equal(byId.get("risk-history").version, 9);
+      assert.equal(byId.get("risk-history").updated_at, "2026-07-17T00:00:00.000Z");
+      const single = all(
+        db,
+        "SELECT id, version, deleted_at, deleted_by FROM risk_items WHERE id = 'risk-single'",
+      )[0];
+      assert.equal(single.id, "risk-single");
+      assert.equal(single.version, 4);
+      assert.equal(single.deleted_at, null);
+      assert.equal(single.deleted_by, null);
+
+      const migration = all(db, "SELECT version, checksum FROM schema_migrations WHERE version = '0003'");
+      assert.equal(migration.length, 1);
+      assert.match(migration[0].checksum, /^[a-f0-9]{64}$/);
+      const index = all(db, `
+        SELECT sql FROM sqlite_master
+        WHERE type = 'index' AND name = 'ux_risk_items_active_quick_record_source'
+      `);
+      assert.equal(index.length, 1);
+      assert.match(index[0].sql, /UNIQUE/i);
+      assert.match(index[0].sql, /source_type\s*=\s*'quick_record'/i);
+      assert.match(index[0].sql, /source_id\s+IS\s+NOT\s+NULL/i);
+      assert.match(index[0].sql, /deleted_at\s+IS\s+NULL/i);
+
+      assert.throws(() => db.exec(`
+        INSERT INTO risk_items (id, title, target, evidence, action, source_type, source_id)
+        VALUES ('risk-active-conflict', 'conflict', 'target', 'evidence', 'action', 'quick_record', 'qr-duplicate')
+      `), /UNIQUE constraint failed/i);
+      db.exec(`
+        INSERT INTO risk_items (id, title, target, evidence, action, source_type, source_id, deleted_at)
+        VALUES ('risk-deleted-extra', 'history', 'target', 'evidence', 'action', 'quick_record', 'qr-duplicate', CURRENT_TIMESTAMP);
+        INSERT INTO risk_items (id, title, target, evidence, action, source_type, source_id)
+        VALUES ('risk-non-quick', 'other source', 'target', 'evidence', 'action', 'manual', 'qr-duplicate');
+      `);
+
+      const beforeReopen = all(db, `
+        SELECT id, version, deleted_at, deleted_by
+        FROM risk_items
+        WHERE source_type = 'quick_record' AND source_id = 'qr-duplicate'
+        ORDER BY id
+      `);
+      migrateDatabase(db);
+      assert.deepEqual(all(db, `
+        SELECT id, version, deleted_at, deleted_by
+        FROM risk_items
+        WHERE source_type = 'quick_record' AND source_id = 'qr-duplicate'
+        ORDER BY id
+      `), beforeReopen);
+      assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0003'").length, 1);
+    } finally {
+      db.close();
     }
   });
 });
@@ -273,7 +405,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002"],
+        ["0001", "0002", "0003"],
       );
     } finally {
       migrated.close();
@@ -467,7 +599,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 2);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 3);
     } finally {
       db.close();
     }
@@ -531,7 +663,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002"],
+        ["0001", "0002", "0003"],
       );
     } finally {
       db.close();
@@ -671,6 +803,7 @@ test("serializes blocked concurrent startup without duplicate baseline records",
     try {
       assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0001'").length, 1);
       assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0002'").length, 1);
+      assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0003'").length, 1);
     } finally {
       db.close();
     }

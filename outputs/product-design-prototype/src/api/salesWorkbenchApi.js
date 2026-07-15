@@ -35,6 +35,53 @@ function versionHeaders(version) {
   return { "If-Match": `"${version}"` };
 }
 
+export function createStrongUuid(cryptoImpl = globalThis.crypto) {
+  if (typeof cryptoImpl?.randomUUID === "function") return cryptoImpl.randomUUID();
+  if (typeof cryptoImpl?.getRandomValues !== "function") {
+    throw new Error("A cryptographic random source is required for confirmation attempts");
+  }
+
+  const bytes = new Uint8Array(16);
+  cryptoImpl.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join(""),
+  ].join("-");
+}
+
+function confirmationAttemptFingerprint(input) {
+  return JSON.stringify({
+    quickRecordId: input.quickRecordId ?? null,
+    analysisVersionId: input.analysisVersionId ?? null,
+    targets: [...(input.targets ?? [])].map(String).sort(),
+  });
+}
+
+export function createConfirmationAttemptTracker({ createId = createStrongUuid } = {}) {
+  let current = null;
+  return {
+    keyFor(input) {
+      const fingerprint = confirmationAttemptFingerprint(input);
+      if (!current || current.fingerprint !== fingerprint) {
+        current = { fingerprint, key: createId() };
+      }
+      return current.key;
+    },
+    complete(key) {
+      if (current?.key === key) current = null;
+    },
+    reset() {
+      current = null;
+    },
+  };
+}
+
 function requestHeaders(options, csrfToken) {
   const method = String(options.method ?? "GET").toUpperCase();
   const suppliedHeaders = { ...(options.headers ?? {}) };
@@ -262,6 +309,26 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       };
     },
 
+    async refreshQuickRecordConfirmationState(quickRecordId) {
+      const [quickRecords, customers, opportunities] = await Promise.all([
+        requestApi("/api/quick-records"),
+        requestApi("/api/customers"),
+        requestApi("/api/opportunities"),
+      ]);
+      const currentQuickRecords = assertApiCollection("quickRecord", quickRecords.items ?? []);
+      const quickRecord = currentQuickRecords.find((item) => item.id === quickRecordId);
+      if (!quickRecord) {
+        const error = new Error("The quick record is no longer available");
+        error.code = "QUICK_RECORD_NOT_FOUND";
+        throw error;
+      }
+      return {
+        quickRecord,
+        customers: assertApiCollection("customer", customers.items ?? []),
+        opportunities: assertApiCollection("opportunity", opportunities.items ?? []),
+      };
+    },
+
     async getDashboardSummary() {
       const summary = await requestApi("/api/dashboard/summary");
       return assertApiEntity("dashboardSummary", summary.item);
@@ -382,13 +449,24 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     },
 
     async confirmQuickRecord(quickRecordId, targets, options = {}) {
+      const idempotencyKey = String(options.idempotencyKey ?? "");
+      if (!idempotencyKey || idempotencyKey.trim() !== idempotencyKey) {
+        throw new TypeError("A valid confirmation Idempotency-Key is required");
+      }
+      const payload = {
+        targets,
+        confirmedBy: options.confirmedBy ?? "继振",
+        note: options.note ?? "",
+        targetVersions: options.targetVersions ?? {},
+      };
+      if (options.analysisVersionId) payload.analysisVersionId = options.analysisVersionId;
       const confirmed = await requestApi(`/api/quick-records/${quickRecordId}/confirm`, {
         method: "POST",
-        body: JSON.stringify({
-          targets,
-          confirmedBy: options.confirmedBy ?? "继振",
-          note: options.note ?? "",
-        }),
+        headers: {
+          ...versionHeaders(options.quickRecordVersion),
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(payload),
       });
 
       return {
