@@ -63,13 +63,16 @@ test("rejects a stored checksum that does not match migration 0001", () => {
       db?.close();
     }
 
-    assert.throws(
-      () => openDatabase({ databaseUrl }),
-      (error) => {
-        assert.equal(error.message, "Checksum mismatch for migration 0001");
-        return true;
-      }
-    );
+    let driftError;
+    let unexpectedDatabase;
+    try {
+      unexpectedDatabase = openDatabase({ databaseUrl });
+    } catch (error) {
+      driftError = error;
+    } finally {
+      unexpectedDatabase?.close();
+    }
+    assert.equal(driftError?.message, "Checksum mismatch for migration 0001");
 
     const readable = createConnection({ databaseUrl });
     try {
@@ -88,27 +91,43 @@ test("uses the same migration checksum for LF and CRLF source text", () => {
   assert.equal(migrationChecksum(lf), migrationChecksum(crlf));
 });
 
-test("adopts the prior Windows CRLF checksum for baseline migration 0001", () => {
+test("rejects a raw CRLF checksum for baseline migration 0001 without mutating rows", () => {
   withDatabase((databaseUrl) => {
     const baselinePath = fileURLToPath(new URL("../src/db/migrations/0001_baseline.sql", import.meta.url));
     const canonicalSource = canonicalMigrationSource(readFileSync(baselinePath, "utf8"));
-    const priorWindowsChecksum = createHash("sha256")
+    const rawCrlfChecksum = createHash("sha256")
       .update(canonicalSource.replace(/\n/g, "\r\n"))
       .digest("hex");
     const db = openDatabase({ databaseUrl });
     try {
+      run(db, "INSERT INTO customers (id, name) VALUES ('raw-checksum-customer', 'Raw checksum customer')");
       run(db, "UPDATE schema_migrations SET checksum = :checksum WHERE version = '0001'", {
-        checksum: priorWindowsChecksum
+        checksum: rawCrlfChecksum
       });
     } finally {
       db.close();
     }
 
-    const reopened = openDatabase({ databaseUrl });
+    let driftError;
+    let unexpectedDatabase;
+    try {
+      unexpectedDatabase = openDatabase({ databaseUrl });
+    } catch (error) {
+      driftError = error;
+    } finally {
+      unexpectedDatabase?.close();
+    }
+    assert.equal(driftError?.message, "Checksum mismatch for migration 0001");
+
+    const reopened = createConnection({ databaseUrl });
     try {
       assert.equal(
         all(reopened, "SELECT checksum FROM schema_migrations WHERE version = '0001'")[0].checksum,
-        migrationChecksum(canonicalSource)
+        rawCrlfChecksum
+      );
+      assert.equal(
+        all(reopened, "SELECT name FROM customers WHERE id = 'raw-checksum-customer'")[0].name,
+        "Raw checksum customer"
       );
     } finally {
       reopened.close();
@@ -199,30 +218,75 @@ test("does not stamp migration 0001 when the baseline transaction fails", () => 
   });
 });
 
-function openDatabaseInChild(databaseUrl) {
+function startMigrationChild(databaseUrl) {
   const dbModuleUrl = pathToFileURL(fileURLToPath(new URL("../src/db.js", import.meta.url))).href;
-  const source = `import { openDatabase } from ${JSON.stringify(dbModuleUrl)}; const db = openDatabase({ databaseUrl: ${JSON.stringify(databaseUrl)} }); db.close();`;
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--input-type=module", "--eval", source]);
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Concurrent opener failed with code ${code}: ${stderr}`));
-    });
+  const source = `import { openDatabase } from ${JSON.stringify(dbModuleUrl)}; process.stdout.write('READY\\n'); const db = openDatabase({ databaseUrl: ${JSON.stringify(databaseUrl)} }); db.close();`;
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
   });
+  let resolveCompletion;
+  let rejectCompletion;
+  const completed = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", source]);
+  let stdout = "";
+  let stderr = "";
+
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+    if (stdout.includes("READY\n")) resolveReady();
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.on("error", (error) => {
+    rejectReady(error);
+    rejectCompletion(error);
+  });
+  child.on("close", (code) => {
+    if (!stdout.includes("READY\n")) {
+      rejectReady(new Error(`Concurrent opener did not signal readiness: ${stderr}`));
+    }
+    if (code === 0) resolveCompletion();
+    else rejectCompletion(new Error(`Concurrent opener failed with code ${code}: ${stderr}`));
+  });
+
+  return { ready, completed };
 }
 
-test("serializes concurrent database startup without duplicate baseline records", async () => {
+test("acquires BEGIN IMMEDIATE before selecting applied migration versions", () => {
+  const migrationPath = fileURLToPath(new URL("../src/db/migrate.js", import.meta.url));
+  const source = readFileSync(migrationPath, "utf8");
+
+  assert.ok(
+    source.indexOf('db.exec("BEGIN IMMEDIATE")') < source.indexOf("SELECT checksum FROM schema_migrations")
+  );
+});
+
+test("serializes blocked concurrent startup without duplicate baseline records", async () => {
   const directory = mkdtempSync(join(tmpdir(), "sentelligent-migrations-concurrent-"));
   const databaseUrl = join(directory, "workbench.sqlite");
+  const parent = createConnection({ databaseUrl });
 
   try {
-    await Promise.all(Array.from({ length: 8 }, () => openDatabaseInChild(databaseUrl)));
+    parent.exec(`
+      CREATE TABLE schema_migrations (
+        version TEXT PRIMARY KEY,
+        checksum TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )
+    `);
+    parent.exec("BEGIN IMMEDIATE");
+    const children = [startMigrationChild(databaseUrl), startMigrationChild(databaseUrl)];
+    await Promise.all(children.map((child) => child.ready));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    parent.exec("COMMIT");
+    await Promise.all(children.map((child) => child.completed));
 
     const db = openDatabase({ databaseUrl });
     try {
@@ -231,6 +295,12 @@ test("serializes concurrent database startup without duplicate baseline records"
       db.close();
     }
   } finally {
+    try {
+      parent.exec("ROLLBACK");
+    } catch {
+      // The parent transaction has already committed.
+    }
+    parent.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

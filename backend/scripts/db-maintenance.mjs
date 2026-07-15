@@ -43,12 +43,12 @@ export function backupDatabase({ databaseUrl, backupDir, label } = {}) {
 
 export function restoreDatabase({ databaseUrl, backupPath, backupDir } = {}) {
   if (!backupPath) throw new Error("backupPath is required for restore");
-  if (!existsSync(backupPath)) throw new Error(`Backup does not exist: ${backupPath}`);
 
   const config = createRuntimeConfig({ databaseUrl, backupDir });
+  assertRestoreIsOffline(config.databaseUrl);
+  if (!existsSync(backupPath)) throw new Error(`Backup does not exist: ${backupPath}`);
   ensureRuntimeDirs(config);
   mkdirSync(dirname(config.databaseUrl), { recursive: true });
-  assertRestoreIsOffline(config.databaseUrl);
 
   let preRestoreBackupPath = null;
   if (existsSync(config.databaseUrl)) {

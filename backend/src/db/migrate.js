@@ -26,10 +26,6 @@ export function migrationChecksum(source) {
   return createHash("sha256").update(canonicalMigrationSource(source)).digest("hex");
 }
 
-function priorWindowsChecksum(source) {
-  return createHash("sha256").update(source.replace(/\n/g, "\r\n")).digest("hex");
-}
-
 function repairBaselineColumns(db) {
   for (const repair of baselineRepairs) {
     const columns = db.prepare(`PRAGMA table_info(${repair.table})`).all();
@@ -57,10 +53,6 @@ export function migrateDatabase(db) {
       INSERT INTO schema_migrations (version, checksum, applied_at)
       VALUES (:version, :checksum, CURRENT_TIMESTAMP)
     `);
-    const updateMigrationChecksum = db.prepare(`
-      UPDATE schema_migrations SET checksum = :checksum WHERE version = :version
-    `);
-
     for (const migration of migrations) {
       const source = canonicalMigrationSource(readFileSync(migration.path, "utf8"));
       const checksum = migrationChecksum(source);
@@ -68,11 +60,7 @@ export function migrateDatabase(db) {
 
       if (applied) {
         if (applied.checksum !== checksum) {
-          if (migration.version === "0001" && applied.checksum === priorWindowsChecksum(source)) {
-            updateMigrationChecksum.run({ version: migration.version, checksum });
-          } else {
-            throw new Error(`Checksum mismatch for migration ${migration.version}`);
-          }
+          throw new Error(`Checksum mismatch for migration ${migration.version}`);
         }
         continue;
       }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -61,12 +61,13 @@ describe("sqlite maintenance", () => {
   it("refuses restore while the live database has active WAL sidecars", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-db-maint-wal-"));
     const databaseUrl = join(root, "data", "sales-workbench.sqlite");
-    const backupDir = join(root, "backups");
+    const sourceBackupDir = join(root, "source-backups");
+    const backupDir = join(root, "restore-backups");
     let liveDatabase;
 
     try {
       seedTestDatabase(databaseUrl);
-      const backup = backupDatabase({ databaseUrl, backupDir, label: "before-wal-write" });
+      const backup = backupDatabase({ databaseUrl, backupDir: sourceBackupDir, label: "before-wal-write" });
 
       liveDatabase = openDatabase({ databaseUrl });
       run(liveDatabase, "DELETE FROM customers WHERE id = $id", { $id: "rizhao" });
@@ -74,10 +75,24 @@ describe("sqlite maintenance", () => {
 
       assert.equal(existsSync(`${databaseUrl}-wal`), true);
       assert.equal(existsSync(`${databaseUrl}-shm`), true);
+      assert.equal(existsSync(backupDir), false);
+      const beforeRestore = {
+        rootEntries: readdirSync(root).sort(),
+        databaseEntries: readdirSync(join(root, "data")).sort(),
+        database: readFileSync(databaseUrl),
+        wal: readFileSync(`${databaseUrl}-wal`),
+        shm: readFileSync(`${databaseUrl}-shm`)
+      };
       assert.throws(
         () => restoreDatabase({ databaseUrl, backupPath: backup.backupPath, backupDir }),
         /stop the service and checkpoint first/i
       );
+      assert.equal(existsSync(backupDir), false);
+      assert.deepEqual(readdirSync(root).sort(), beforeRestore.rootEntries);
+      assert.deepEqual(readdirSync(join(root, "data")).sort(), beforeRestore.databaseEntries);
+      assert.deepEqual(readFileSync(databaseUrl), beforeRestore.database);
+      assert.deepEqual(readFileSync(`${databaseUrl}-wal`), beforeRestore.wal);
+      assert.deepEqual(readFileSync(`${databaseUrl}-shm`), beforeRestore.shm);
       assert.deepEqual(
         all(liveDatabase, "SELECT id FROM customers ORDER BY id").map((row) => row.id),
         expectedCustomers
