@@ -16,10 +16,8 @@ import {
   resolveApiBaseUrl,
 } from "./api/salesWorkbenchApi.js";
 import {
-  clearCachedAuthSession,
-  createAuthSession,
-  readCachedAuthSession,
-  writeCachedAuthSession,
+  clearLegacyAuthSession,
+  createDisplaySession,
 } from "./sessionAuth.js";
 import {
   actionSeeds,
@@ -130,14 +128,9 @@ function getBrowserStorage() {
   }
 }
 
-function getInitialAuthSession() {
-  return readCachedAuthSession(getBrowserStorage());
-}
-
 function LoginScreen({ apiClient, onLogin }) {
   const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
-  const [rememberLogin, setRememberLogin] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -160,12 +153,8 @@ function LoginScreen({ apiClient, onLogin }) {
         account: normalizedAccount,
         password,
       });
-      const session = createAuthSession(authenticated);
-      if (rememberLogin) {
-        writeCachedAuthSession(getBrowserStorage(), session);
-      }
       setError("");
-      onLogin(session);
+      onLogin(createDisplaySession(authenticated));
     } catch (loginError) {
       setError(loginError?.status === 401 ? "账号或密码错误" : "登录失败，请稍后重试");
     } finally {
@@ -238,15 +227,6 @@ function LoginScreen({ apiClient, onLogin }) {
               </div>
             </label>
 
-            <label className="remember-row">
-              <input
-                type="checkbox"
-                checked={rememberLogin}
-                onChange={(event) => setRememberLogin(event.target.checked)}
-              />
-              <span>保持 7 天登录</span>
-            </label>
-
             {error ? <p className="login-error" role="alert">{error}</p> : null}
 
             <button className="primary-button login-submit" type="submit" data-testid="login-submit" disabled={isSubmitting}>
@@ -260,31 +240,104 @@ function LoginScreen({ apiClient, onLogin }) {
   );
 }
 
+function AuthCheckingScreen() {
+  return (
+    <main className="app-shell login-shell" data-testid="auth-checking">
+      <div className="login-window">
+        <section className="login-brand-panel" aria-label="森特智行">
+          <img className="login-logo" src="/sent-zhixing-transparent-logo.png" alt="森特智行" />
+          <div className="login-brand-copy">
+            <span className="eyebrow">AI 销售作战台</span>
+            <h1>销售工作台</h1>
+          </div>
+        </section>
+        <section className="login-card" aria-live="polite" role="status">
+          <div className="login-card-head">
+            <span className="login-lock">
+              <ShieldCheck size={24} />
+            </span>
+            <div>
+              <span className="eyebrow">安全登录</span>
+              <h2>正在验证登录状态</h2>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
 export function App() {
-  const [authSession, setAuthSession] = useState(getInitialAuthSession);
+  const [authPhase, setAuthPhase] = useState("checking");
+  const [authSession, setAuthSession] = useState(null);
   const apiBaseUrl = resolveApiBaseUrl(import.meta.env);
-  const loginApiClient = useMemo(
-    () => createSalesWorkbenchApi({ baseUrl: apiBaseUrl }),
+  const apiClient = useMemo(
+    () => createSalesWorkbenchApi({
+      baseUrl: apiBaseUrl,
+      onUnauthorized: () => {
+        setAuthSession(null);
+        setAuthPhase("anonymous");
+      },
+    }),
     [apiBaseUrl],
   );
 
-  function handleLogout() {
-    clearCachedAuthSession(getBrowserStorage());
-    setAuthSession(null);
+  useEffect(() => {
+    clearLegacyAuthSession(getBrowserStorage());
+    if (!apiClient.isEnabled) {
+      setAuthPhase("anonymous");
+      return undefined;
+    }
+
+    let cancelled = false;
+    apiClient
+      .restoreSession()
+      .then((session) => {
+        if (cancelled) return;
+        setAuthSession(createDisplaySession(session));
+        setAuthPhase("authenticated");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        apiClient.setSession(null);
+        setAuthSession(null);
+        setAuthPhase("anonymous");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiClient]);
+
+  function handleLogin(session) {
+    setAuthSession(createDisplaySession(session));
+    setAuthPhase("authenticated");
   }
 
-  if (!authSession) {
-    return <LoginScreen apiClient={loginApiClient} onLogin={setAuthSession} />;
+  async function handleLogout() {
+    try {
+      await apiClient.logout();
+    } catch {
+      // Local session state must still be cleared when the network is unavailable.
+    } finally {
+      apiClient.setSession(null);
+      setAuthSession(null);
+      setAuthPhase("anonymous");
+    }
   }
 
-  return <SalesWorkbenchApp apiBaseUrl={apiBaseUrl} authSession={authSession} onLogout={handleLogout} />;
+  if (authPhase === "checking") {
+    return <AuthCheckingScreen />;
+  }
+
+  if (authPhase !== "authenticated" || !authSession) {
+    return <LoginScreen apiClient={apiClient} onLogin={handleLogin} />;
+  }
+
+  return <SalesWorkbenchApp apiClient={apiClient} authSession={authSession} onLogout={handleLogout} />;
 }
 
-function SalesWorkbenchApp({ apiBaseUrl, authSession, onLogout }) {
-  const apiClient = useMemo(
-    () => createSalesWorkbenchApi({ baseUrl: apiBaseUrl, authToken: authSession?.token }),
-    [apiBaseUrl, authSession?.token],
-  );
+function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [active, setActive] = useState("overview");
   const [workbenchCustomers, setWorkbenchCustomers] = useState(customers);
   const [workbenchOpportunities, setWorkbenchOpportunities] = useState(opportunities);

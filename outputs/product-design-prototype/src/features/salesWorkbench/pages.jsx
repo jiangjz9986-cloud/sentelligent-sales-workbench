@@ -40,6 +40,7 @@ import {
   statusTone,
   weeklyDays,
 } from "../../data/salesWorkbenchData.js";
+import { triggerBlobDownload } from "../../downloadFile.js";
 import {
   CompactList,
   ExpandableInsight,
@@ -2622,6 +2623,7 @@ export function WeeklyPage({
   const [localWeeklyDraftText, setLocalWeeklyDraftText] = useState("");
   const [draftStatus, setDraftStatus] = useState("周报草稿尚未生成。");
   const [expandedDay, setExpandedDay] = useState(null);
+  const [isExporting, setIsExporting] = useState(false);
   const daily = weeklyView === "daily";
   const weeklyDraft = externalWeeklyDraft ?? localWeeklyDraft;
   const weeklyDraftText = externalWeeklyDraft ? externalWeeklyDraftText ?? "" : localWeeklyDraftText;
@@ -2681,9 +2683,29 @@ export function WeeklyPage({
     }
   }
 
-  const weeklyExportUrl = weeklyDraft && apiClient?.isEnabled
-    ? apiClient.getWeeklyReportExportUrl(weeklyDraft.id)
-    : "";
+  async function exportWeeklyDraft() {
+    if (!weeklyDraft) {
+      setDraftStatus("请先生成周报草稿。");
+      return;
+    }
+    if (!apiClient?.isEnabled || backendStatus !== "connected") {
+      setDraftStatus("当前连接未恢复，暂不能导出周报。");
+      return;
+    }
+
+    setIsExporting(true);
+    setDraftStatus("正在准备周报文件");
+    try {
+      const download = await apiClient.downloadWeeklyReport(weeklyDraft.id, "word");
+      await triggerBlobDownload(download);
+      setDraftStatus("周报 Word 已导出。");
+    } catch {
+      setDraftStatus("周报导出失败，请稍后重试。");
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
   const weeklyStatusLabel = {
     draft: "草稿",
     saved: "已保存",
@@ -2829,19 +2851,16 @@ export function WeeklyPage({
                     <Check size={16} />
                     确认定稿
                   </button>
-                  <a
-                    className={`ghost-button ${weeklyExportUrl ? "" : "disabled"}`}
-                    href={weeklyExportUrl || undefined}
-                    role="button"
-                    download
-                    aria-disabled={!weeklyExportUrl}
-                    onClick={(event) => {
-                      if (!weeklyExportUrl) event.preventDefault();
-                    }}
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    data-testid="weekly-export-button"
+                    disabled={isExporting || !apiClient?.isEnabled || backendStatus !== "connected"}
+                    onClick={exportWeeklyDraft}
                   >
-                    <FileText size={16} />
-                    导出 Word
-                  </a>
+                    <Download size={16} />
+                    {isExporting ? "导出中" : "导出 Word"}
+                  </button>
                 </div>
               </section>
             ) : null}

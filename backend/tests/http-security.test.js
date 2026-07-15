@@ -190,6 +190,7 @@ test("allows credentialed CORS for exact configured origins only", () => {
   assert.deepEqual(corsHeaders("https://sales.example.test", config), {
     "Access-Control-Allow-Origin": "https://sales.example.test",
     "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Expose-Headers": "Content-Disposition",
     "Access-Control-Allow-Headers": "Content-Type,X-CSRF-Token,Idempotency-Key,If-Match",
     "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
     Vary: "Origin",

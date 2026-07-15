@@ -7,6 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "test:auth": "node --test src/sessionAuth.test.js",
+    "test:download": "node --test src/downloadFile.test.js",
     "preview": "vite preview --host 127.0.0.1",
     "test:quick": "node --test src/quickRecordModel.test.js",
     "test:week": "node --test src/weekRange.test.js",
@@ -22,7 +23,7 @@
     "test:visual": "node --test scripts/visual-rhythm.test.mjs",
     "test:modules": "node --test scripts/module-coverage.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",
-    "qa:local": "npm run build && npm run test:auth && npm run test:quick && npm run test:week && npm run test:api && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:visual && npm run test:modules && npm run scan:secrets",
+    "qa:local": "npm run build && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:api && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:visual && npm run test:modules && npm run scan:secrets",
     "qa:integration": "node scripts/integration-qa.mjs"
   },
   "dependencies": {

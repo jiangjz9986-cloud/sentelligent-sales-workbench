@@ -216,6 +216,10 @@ describe("cookie authentication protocol", () => {
     assert.equal(preflight.response.status, 204);
     assert.equal(preflight.response.headers.get("access-control-allow-origin"), allowedOrigin);
     assert.equal(preflight.response.headers.get("access-control-allow-credentials"), "true");
+    assert.equal(
+      preflight.response.headers.get("access-control-expose-headers"),
+      "Content-Disposition",
+    );
     assert.match(preflight.response.headers.get("vary"), /Origin/i);
 
     const rejected = await request("/api/health", {
@@ -224,6 +228,7 @@ describe("cookie authentication protocol", () => {
     assert.equal(rejected.response.status, 403);
     assert.equal(rejected.body.error.code, "ORIGIN_NOT_ALLOWED");
     assert.equal(rejected.response.headers.get("access-control-allow-origin"), null);
+    assert.equal(rejected.response.headers.get("access-control-expose-headers"), null);
   });
 
   it("rejects oversized JSON before authentication work", async () => {

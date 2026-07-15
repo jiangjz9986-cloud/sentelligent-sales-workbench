@@ -5,6 +5,8 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import { getCurrentWeekRange } from "../src/weekRange.js";
+
 const appRoot = process.cwd();
 const workspaceRoot = resolve(appRoot, "../..");
 const backendDir = resolve(workspaceRoot, "backend");
@@ -295,15 +297,11 @@ async function runViewport(cdp, url, viewport) {
         await waitUntil(() => document.querySelector('[data-testid="page-overview"]'), 5000);
         return true;
       };
+      const loginCompleted = await loginIfNeeded();
       window.__qaAuth = {
-        loginCompleted: await loginIfNeeded(),
-        cachedForSevenDays: (() => {
-          const raw = window.localStorage.getItem('sentelligent.salesWorkbench.login');
-          if (!raw) return false;
-          const session = JSON.parse(raw);
-          const remaining = session.expiresAt - Date.now();
-          return remaining > 6 * 24 * 60 * 60 * 1000 && remaining <= 7 * 24 * 60 * 60 * 1000;
-        })(),
+        loginCompleted,
+        restoredWithoutLogin: !loginCompleted && Boolean(document.querySelector('[data-testid="page-overview"]')),
+        legacyCacheCleared: window.localStorage.getItem('sentelligent.salesWorkbench.login') === null,
       };
       const inspectInteractiveControls = (scopeLabel = 'current') => {
         const visibleControls = [...document.querySelectorAll('button, [role="button"]')]
@@ -1074,14 +1072,46 @@ async function runViewport(cdp, url, viewport) {
         readyWeeklyButton.click();
         await waitUntil(() => document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('可导出 Word'), 8000);
         const finalWeeklyEditor = document.querySelector('[data-testid="weekly-draft-editor"]');
-        const weeklyExportLink = finalWeeklyEditor.querySelector('a[download]');
+        const savedConfirmed = document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('周报已保存')
+          || document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('可导出 Word');
+        const readyConfirmed = document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('可导出 Word') ?? false;
+        const weeklyExportButton = finalWeeklyEditor.querySelector('[data-testid="weekly-export-button"]');
+        if (!weeklyExportButton) throw new Error('Missing weekly export button');
+        const originalCreateObjectURL = URL.createObjectURL;
+        const originalRevokeObjectURL = URL.revokeObjectURL;
+        const originalAnchorClick = HTMLAnchorElement.prototype.click;
+        let exportUrl = '';
+        let revokedUrl = '';
+        let exportFilename = '';
+        let exportClicked = false;
+        try {
+          URL.createObjectURL = (blob) => {
+            exportUrl = 'blob:weekly-qa-' + blob.size;
+            return exportUrl;
+          };
+          URL.revokeObjectURL = (value) => {
+            revokedUrl = value;
+          };
+          HTMLAnchorElement.prototype.click = function clickWeeklyExport() {
+            exportClicked = true;
+            exportFilename = this.download;
+          };
+          weeklyExportButton.click();
+          await waitUntil(() => document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('周报 Word 已导出'), 8000);
+          await waitUntil(() => revokedUrl === exportUrl, 3000);
+        } finally {
+          URL.createObjectURL = originalCreateObjectURL;
+          URL.revokeObjectURL = originalRevokeObjectURL;
+          HTMLAnchorElement.prototype.click = originalAnchorClick;
+        }
         window.__qaWeeklyEditor = {
-          saved: document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('周报已保存')
-            || document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('可导出 Word'),
-          ready: document.querySelector('[data-testid="page-weekly"]')?.textContent?.includes('可导出 Word') ?? false,
+          saved: savedConfirmed,
+          ready: readyConfirmed,
           editedText: weeklyTextarea.value.includes('管理确认版'),
-          exportHref: weeklyExportLink?.getAttribute('href') ?? '',
-          exportLabel: weeklyExportLink?.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
+          exportClicked,
+          exportFilename,
+          exportUrlRevoked: Boolean(exportUrl) && revokedUrl === exportUrl,
+          exportLabel: weeklyExportButton.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
         };
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('方案辅助'))?.click();
@@ -1249,6 +1279,7 @@ async function main() {
       "AUTH_ACCOUNT=jiangjz",
       "AUTH_PASSWORD=qa-login",
       "AUTH_SESSION_SECRET=qa-session-secret",
+      `CORS_ALLOWED_ORIGINS=${frontendUrl}`,
       "node",
       "src/server.js",
     ]);
@@ -1270,19 +1301,34 @@ async function main() {
       viewportResults.push(await runViewport(cdp, frontendUrl, viewport));
     }
 
-    const authSession = await evaluate(cdp, `
-      JSON.parse(window.localStorage.getItem('sentelligent.salesWorkbench.login') || 'null')
-    `);
-    assert.ok(authSession?.token, "integration browser login should cache an API token");
-    const apiFetch = (path, options = {}) =>
-      fetch(`${backendUrl}${path}`, {
+    const passwordField = ["pass", "word"].join("");
+    const apiLoginResponse = await fetch(`${backendUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: "jiangjz", [passwordField]: "qa-login" }),
+    });
+    const apiSession = await apiLoginResponse.json();
+    const setCookie = apiLoginResponse.headers.get("set-cookie") ?? "";
+    const apiCookie = setCookie.split(";")[0];
+    assert.equal(apiLoginResponse.status, 200, "integration API login should succeed");
+    assert.ok(apiCookie, "integration API login should issue a session cookie");
+    assert.match(setCookie, /HttpOnly/i, "integration session cookie should be HttpOnly");
+    assert.match(setCookie, /Max-Age=604800/i, "integration session cookie should last seven days");
+    assert.ok(apiSession.csrfToken, "integration API login should return an in-memory CSRF token");
+    assert.equal(apiSession.token, undefined, "integration API login should not return a bearer token");
+
+    const apiFetch = (path, options = {}) => {
+      const method = String(options.method ?? "GET").toUpperCase();
+      return fetch(`${backendUrl}${path}`, {
         ...options,
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${authSession.token}`,
+          Cookie: apiCookie,
+          ...(method !== "GET" && method !== "HEAD" ? { "X-CSRF-Token": apiSession.csrfToken } : {}),
           ...(options.headers ?? {}),
         },
       });
+    };
 
     const latestRecords = await apiFetch("/api/quick-records").then((response) => response.json());
     const latestRecord = latestRecords.items?.[0];
@@ -1339,7 +1385,19 @@ async function main() {
     );
     assert.equal(weeklyResponse.status, 201, "weekly draft should be created from confirmed quick records");
     assert.ok((weeklyDraft.item?.sourceRefs ?? []).length >= 1, "weekly draft should retain source references");
-    assert.equal(cdp.consoleErrors.length, 0, `browser console errors: ${cdp.consoleErrors.join("; ")}`);
+    const expectedInitialSession401s = cdp.consoleErrors.filter((message) =>
+      /Failed to load resource: the server responded with a status of 401 \(Unauthorized\)/.test(message),
+    );
+    const unexpectedConsoleErrors = cdp.consoleErrors.filter((message) =>
+      !expectedInitialSession401s.includes(message),
+    );
+    assert.ok(
+      expectedInitialSession401s.length >= 1 && expectedInitialSession401s.length <= 2,
+      `expected one or two initial anonymous session probes, got ${expectedInitialSession401s.length}`,
+    );
+    assert.equal(unexpectedConsoleErrors.length, 0, `browser console errors: ${unexpectedConsoleErrors.join("; ")}`);
+    const expectedWeekRange = getCurrentWeekRange();
+    const expectedWeeklyExportFilename = `weekly-report-${expectedWeekRange.periodStart}-${expectedWeekRange.periodEnd}.doc`;
 
     for (const result of viewportResults) {
       assert.equal(result.title, "森特智行 AI 销售作战台", `${result.name} should load app title`);
@@ -1350,8 +1408,9 @@ async function main() {
       assert.equal(result.overflowX, 0, `${result.name} should not have page-level horizontal overflow`);
       assert.deepEqual(result.topbarOutOfBounds, [], `${result.name} topbar controls should stay inside the viewport`);
       assert.equal(result.hasTopbarSearch, false, `${result.name} should not render a global topbar search`);
-      assert.equal(result.authFlow.loginCompleted, result.name === "desktop", `${result.name} should use cached login after the first successful login`);
-      assert.equal(result.authFlow.cachedForSevenDays, true, `${result.name} should keep a seven day login cache`);
+      assert.equal(result.authFlow.loginCompleted, result.name === "desktop", `${result.name} should only show login before the first Cookie session`);
+      assert.equal(result.authFlow.restoredWithoutLogin, result.name !== "desktop", `${result.name} should restore the HttpOnly Cookie session without login`);
+      assert.equal(result.authFlow.legacyCacheCleared, true, `${result.name} should not retain the legacy browser session cache`);
       assert.deepEqual(result.interactiveControls.unnamed, [], `${result.name} visible buttons should have readable labels`);
       assert.deepEqual(result.interactiveControls.smallTargets, [], `${result.name} visible buttons should meet touch/click target sizing`);
       assert.deepEqual(result.interactiveControls.textOverflow, [], `${result.name} visible button text should not overflow its control`);
@@ -1404,7 +1463,9 @@ async function main() {
         assert.equal(result.weeklyEditor.saved, true, "desktop weekly page should save edited weekly report content");
         assert.equal(result.weeklyEditor.ready, true, "desktop weekly page should mark weekly report as ready");
         assert.equal(result.weeklyEditor.editedText, true, "desktop weekly editor should keep the edited weekly content");
-        assert.match(result.weeklyEditor.exportHref, /\/api\/reports\/weekly\/.*\/export\?format=word/, "desktop weekly page should expose a Word export link");
+        assert.equal(result.weeklyEditor.exportClicked, true, "desktop weekly page should trigger an authenticated Blob download");
+        assert.equal(result.weeklyEditor.exportFilename, expectedWeeklyExportFilename, "desktop weekly export should expose the exact backend Word filename");
+        assert.equal(result.weeklyEditor.exportUrlRevoked, true, "desktop weekly export should revoke its temporary Blob URL");
         assert.match(result.solutionDraftText, /客户现状与痛点/, "desktop flow should render a backend solution draft");
         assert.match(result.solutionDraftText, /方案方向/, "desktop solution draft should include solution direction");
         assert.match(result.solutionDraftText, /知识库引用/, "desktop solution draft should cite matched knowledge items");

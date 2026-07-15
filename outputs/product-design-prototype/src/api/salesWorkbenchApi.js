@@ -28,43 +28,143 @@ function pickOwnFields(source, fields) {
   return picked;
 }
 
-async function requestJson(fetchImpl, url, options = {}, authHeaders = {}) {
+function requestHeaders(options, csrfToken) {
+  const method = String(options.method ?? "GET").toUpperCase();
+  const suppliedHeaders = { ...(options.headers ?? {}) };
+  for (const name of Object.keys(suppliedHeaders)) {
+    const normalizedName = name.toLowerCase();
+    if (normalizedName === "authorization" || normalizedName === "x-csrf-token") {
+      delete suppliedHeaders[name];
+    }
+  }
+
+  return {
+    "Content-Type": "application/json",
+    ...suppliedHeaders,
+    ...(method !== "GET" && method !== "HEAD" && csrfToken
+      ? { "X-CSRF-Token": csrfToken }
+      : {}),
+  };
+}
+
+async function readResponseBody(response) {
+  if (typeof response?.text !== "function") return null;
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function toApiError(response, body) {
+  const details = body && typeof body === "object" ? body.error : null;
+  const error = new Error(
+    details?.message ?? `Request failed with ${response?.status ?? "unknown status"}`,
+  );
+  error.status = response?.status;
+  error.code = details?.code;
+  error.fields = details?.fields;
+  error.requestId = details?.requestId;
+  error.body = body;
+  return error;
+}
+
+export async function requestJson(fetchImpl, url, options = {}, csrfToken = "") {
   const response = await fetchImpl(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeaders,
-      ...(options.headers ?? {}),
-    },
+    credentials: "include",
+    headers: requestHeaders(options, csrfToken),
   });
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  const body = await readResponseBody(response);
 
   if (!response.ok) {
-    const error = new Error(body?.message ?? body?.error ?? `Request failed with ${response.status}`);
-    error.status = response.status;
-    error.body = body;
-    throw error;
+    throw toApiError(response, body);
   }
 
   return body;
 }
 
-export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, authToken = "" } = {}) {
+function displaySession(session) {
+  if (
+    !session?.account ||
+    typeof session.expiresAt !== "string" ||
+    Number.isNaN(Date.parse(session.expiresAt)) ||
+    !session.csrfToken
+  ) {
+    throw new Error("登录响应缺少必要会话信息");
+  }
+  return {
+    account: String(session.account).trim(),
+    displayName: String(session.displayName ?? session.account).trim() || String(session.account).trim(),
+    expiresAt: new Date(session.expiresAt).toISOString(),
+  };
+}
+
+function contentDispositionFilename(headers) {
+  const value = typeof headers?.get === "function"
+    ? headers.get("content-disposition")
+    : headers?.["content-disposition"] ?? headers?.["Content-Disposition"];
+  if (!value) return null;
+
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(value);
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1].trim());
+    } catch {
+      return encoded[1].trim();
+    }
+  }
+  const plain = /filename=(?:"([^"]+)"|([^;]+))/i.exec(value);
+  return plain ? (plain[1] ?? plain[2]).trim() : null;
+}
+
+export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthorized } = {}) {
   const root = resolveApiBaseUrl({ VITE_API_BASE_URL: baseUrl });
+  let csrfToken = "";
+  let sessionGeneration = 0;
+  let restoreRequestId = 0;
+  let loginRequestId = 0;
 
   function url(path) {
     if (!root) throw new Error("API base URL is not configured");
     return `${root}${path}`;
   }
 
-  function authHeaders() {
-    const token = String(authToken ?? "");
-    return token ? { Authorization: `Bearer ${token}` } : {};
+  function replaceSession(session) {
+    sessionGeneration += 1;
+    restoreRequestId += 1;
+    loginRequestId += 1;
+    csrfToken = String(session?.csrfToken ?? "");
   }
 
-  function requestApi(path, options = {}) {
-    return requestJson(fetchImpl, url(path), options, authHeaders());
+  function setSession(session) {
+    replaceSession(session);
+  }
+
+  function staleSessionError() {
+    const error = new Error("Stale session response was ignored");
+    error.code = "STALE_SESSION_RESPONSE";
+    return error;
+  }
+
+  function invalidateSession(error, expectedGeneration) {
+    if (expectedGeneration !== sessionGeneration) return false;
+    replaceSession(null);
+    onUnauthorized?.(error);
+    return true;
+  }
+
+  async function requestApi(path, options = {}) {
+    const requestGeneration = sessionGeneration;
+    const requestCsrfToken = csrfToken;
+    try {
+      return await requestJson(fetchImpl, url(path), options, requestCsrfToken);
+    } catch (error) {
+      if (error?.status === 401) invalidateSession(error, requestGeneration);
+      throw error;
+    }
   }
 
   async function createQuickRecord(rawContent, metadata = {}) {
@@ -84,21 +184,53 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, authToken 
 
   return {
     isEnabled: Boolean(root),
+    setSession,
 
     async login({ account, password }) {
+      const requestId = ++loginRequestId;
+      restoreRequestId += 1;
+      const requestGeneration = sessionGeneration;
       const session = await requestJson(fetchImpl, url("/api/auth/login"), {
         method: "POST",
         body: JSON.stringify({ account, password }),
       });
-      if (!session?.account || !session?.token || !Number.isFinite(session?.expiresAt)) {
-        throw new Error("登录响应缺少必要会话信息");
+      const result = displaySession(session);
+      if (requestId !== loginRequestId || requestGeneration !== sessionGeneration) {
+        throw staleSessionError();
       }
-      return {
-        account: session.account,
-        displayName: session.displayName ?? session.account,
-        token: session.token,
-        expiresAt: session.expiresAt,
-      };
+      replaceSession(session);
+      return result;
+    },
+
+    async restoreSession() {
+      const requestId = ++restoreRequestId;
+      const requestGeneration = sessionGeneration;
+      let session;
+      try {
+        session = await requestJson(fetchImpl, url("/api/auth/session"));
+      } catch (error) {
+        if (error?.status === 401 && requestId === restoreRequestId) {
+          invalidateSession(error, requestGeneration);
+        }
+        throw error;
+      }
+      const result = displaySession(session);
+      if (requestId !== restoreRequestId || requestGeneration !== sessionGeneration) {
+        throw staleSessionError();
+      }
+      replaceSession(session);
+      return result;
+    },
+
+    async logout() {
+      try {
+        await requestApi("/api/auth/logout", {
+          method: "POST",
+          body: "{}",
+        });
+      } finally {
+        setSession(null);
+      }
     },
 
     async loadBootstrap() {
@@ -259,10 +391,25 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, authToken 
       return assertApiEntity("weeklyReport", saved.item);
     },
 
-    getWeeklyReportExportUrl(reportId, format = "word") {
-      const params = new URLSearchParams({ format });
-      if (authToken) params.set("token", authToken);
-      return url(`/api/reports/weekly/${encodeURIComponent(reportId)}/export?${params.toString()}`);
+    async downloadWeeklyReport(reportId, format = "word") {
+      if (format !== "word") throw new Error("Weekly report export format must be word");
+      const requestGeneration = sessionGeneration;
+      const response = await fetchImpl(
+        url(`/api/reports/weekly/${encodeURIComponent(reportId)}/export?format=word`),
+        {
+          method: "GET",
+          credentials: "include",
+        },
+      );
+      if (!response.ok) {
+        const error = toApiError(response, await readResponseBody(response));
+        if (error.status === 401) invalidateSession(error, requestGeneration);
+        throw error;
+      }
+      return {
+        blob: await response.blob(),
+        filename: contentDispositionFilename(response.headers) ?? "weekly-report.doc",
+      };
     },
 
     async generateSolutionDraft({ owner, customerId, opportunityId, artifactType = "solution_framework", knowledgeIds = [] }) {

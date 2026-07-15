@@ -9,13 +9,62 @@ import {
   createSalesWorkbenchApi,
   resolveApiBaseUrl,
 } from "./salesWorkbenchApi.js";
+import * as salesWorkbenchApiModule from "./salesWorkbenchApi.js";
 
-function jsonResponse(body, status = 200) {
+function responseHeaders(values = {}) {
+  const entries = new Map(
+    Object.entries(values).map(([name, value]) => [name.toLowerCase(), String(value)]),
+  );
+  return {
+    get(name) {
+      return entries.get(String(name).toLowerCase()) ?? null;
+    },
+  };
+}
+
+function jsonResponse(body, status = 200, headers = {}) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    text: async () => JSON.stringify(body),
+    headers: responseHeaders(headers),
+    text: async () => body == null ? "" : JSON.stringify(body),
   };
+}
+
+function blobResponse(blob, status = 200, headers = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: responseHeaders(headers),
+    text: async () => blob.text(),
+    blob: async () => blob,
+  };
+}
+
+function headerValue(options, name) {
+  const headers = options.headers ?? {};
+  if (typeof headers.get === "function") return headers.get(name);
+  const matchedName = Object.keys(headers).find(
+    (candidate) => candidate.toLowerCase() === String(name).toLowerCase(),
+  );
+  return matchedName ? headers[matchedName] : undefined;
+}
+
+function apiFetchProbe(calls) {
+  return async (url, options = {}) => {
+    calls.push({ url, options });
+    return jsonResponse(null, 204);
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function sampleCustomer(overrides = {}) {
@@ -237,32 +286,440 @@ describe("sales workbench API client", () => {
     );
   });
 
-  it("logs in through the backend without exposing credentials in cached session data", async () => {
-    const passwordField = "pass" + "word";
-    const tokenField = "tok" + "en";
+  it("logs in with Cookie credentials, keeps CSRF in memory, and returns display-only session data", async () => {
+    const passwordField = ["pass", "word"].join("");
     const calls = [];
     const api = createSalesWorkbenchApi({
       baseUrl: "https://example.test",
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
+        if (url.endsWith("/api/auth/login")) {
+          return jsonResponse({
+            account: "jiangjz",
+            displayName: "姜继振",
+            expiresAt: "2026-07-22T00:00:00.000Z",
+            csrfToken: "csrf-login",
+          });
+        }
         return jsonResponse({
-          account: "jiangjz",
-          displayName: "jiangjz",
-          [tokenField]: "payload.signature",
-          expiresAt: Date.UTC(2026, 5, 16, 8, 0, 0),
+          item: {
+            status: "waiting_scan",
+            qrSvg: "<svg role=\"img\"></svg>",
+            message: "二维码已生成",
+          },
         });
       },
     });
+    api.setSession({ csrfToken: "stale-csrf" });
 
     const session = await api.login({ account: "jiangjz", [passwordField]: "unit-secret" });
+    await api.startWeixinBinding();
 
+    assert.deepEqual(session, {
+      account: "jiangjz",
+      displayName: "姜继振",
+      expiresAt: "2026-07-22T00:00:00.000Z",
+    });
+    assert.equal(session.token, undefined);
+    assert.equal(session.csrfToken, undefined);
     assert.equal(calls[0].url, "https://example.test/api/auth/login");
     assert.equal(calls[0].options.method, "POST");
-    assert.deepEqual(JSON.parse(calls[0].options.body), { account: "jiangjz", [passwordField]: "unit-secret" });
-    assert.equal(session.account, "jiangjz");
-    assert.equal(session.displayName, "jiangjz");
-    assert.equal(session.token, "payload.signature");
-    assert.equal(session.expiresAt, Date.UTC(2026, 5, 16, 8, 0, 0));
+    assert.equal(calls[0].options.credentials, "include");
+    assert.equal(headerValue(calls[0].options, "Authorization"), undefined);
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+    assert.deepEqual(JSON.parse(calls[0].options.body), {
+      account: "jiangjz",
+      [passwordField]: "unit-secret",
+    });
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), "csrf-login");
+  });
+
+  it("restores a Cookie session without exposing CSRF in the returned display state", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/api/auth/session")) {
+          return jsonResponse({
+            account: "jiangjz",
+            displayName: "姜继振",
+            expiresAt: "2026-07-22T00:00:00.000Z",
+            csrfToken: "csrf-restored",
+          });
+        }
+        return jsonResponse({ item: sampleAction({ status: "done" }) });
+      },
+    });
+
+    const session = await api.restoreSession();
+    await api.updateActionStatus("act-1", { status: "done" });
+
+    assert.deepEqual(session, {
+      account: "jiangjz",
+      displayName: "姜继振",
+      expiresAt: "2026-07-22T00:00:00.000Z",
+    });
+    assert.equal(session.token, undefined);
+    assert.equal(session.csrfToken, undefined);
+    assert.equal(calls[0].url, "https://example.test/api/auth/session");
+    assert.equal(calls[0].options.credentials, "include");
+    assert.equal(headerValue(calls[0].options, "Authorization"), undefined);
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), "csrf-restored");
+  });
+
+  it("uses Cookie credentials and CSRF only for authenticated write methods", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (options.method === "PATCH") {
+          return jsonResponse({ item: sampleWeeklyReport({ status: "ready" }) });
+        }
+        return jsonResponse({
+          item: {
+            status: "waiting_scan",
+            qrSvg: "<svg role=\"img\"></svg>",
+            message: "二维码已生成",
+          },
+        });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-methods" });
+
+    await api.startWeixinBinding();
+    await api.saveWeeklyReport("wr-1", { status: "ready" });
+    await api.stopWeixinBinding();
+    await api.getWeixinBindingStatus();
+    await salesWorkbenchApiModule.requestJson(
+      apiFetchProbe(calls),
+      "https://example.test/api/write-probe",
+      {
+        method: "POST",
+        headers: {
+          Authorization: "blocked",
+          "X-CSRF-Token": "blocked",
+        },
+      },
+      "csrf-methods",
+    );
+    await salesWorkbenchApiModule.requestJson(
+      apiFetchProbe(calls),
+      "https://example.test/api/probe",
+      { method: "HEAD" },
+      "csrf-methods",
+    );
+
+    assert.deepEqual(calls.map(({ options }) => options.method ?? "GET"), [
+      "POST",
+      "PATCH",
+      "DELETE",
+      "GET",
+      "POST",
+      "HEAD",
+    ]);
+    for (const { options } of calls) {
+      assert.equal(options.credentials, "include");
+      assert.equal(headerValue(options, "Authorization"), undefined);
+    }
+    assert.deepEqual(calls.map(({ options }) => headerValue(options, "X-CSRF-Token")), [
+      "csrf-methods",
+      "csrf-methods",
+      "csrf-methods",
+      undefined,
+      "csrf-methods",
+      undefined,
+    ]);
+  });
+
+  it("does not invalidate an existing session or notify globally for a login 401", async () => {
+    const calls = [];
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/api/auth/login")) {
+          return jsonResponse({
+            error: {
+              code: "INVALID_CREDENTIALS",
+              message: "Account or password is incorrect",
+              fields: null,
+              requestId: "req-login-401",
+            },
+          }, 401);
+        }
+        return jsonResponse({
+          item: { status: "waiting_scan", message: "二维码已生成" },
+        });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-existing" });
+
+    await assert.rejects(
+      () => api.login({ account: "jiangjz", password: "wrong" }),
+      (error) => error.status === 401 && error.code === "INVALID_CREDENTIALS",
+    );
+    await api.startWeixinBinding();
+
+    assert.equal(unauthorizedCalls, 0);
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), "csrf-existing");
+  });
+
+  it("invalidates restored session state on 401 and preserves the structured API error", async () => {
+    const calls = [];
+    const unauthorizedErrors = [];
+    const body = {
+      error: {
+        code: "UNAUTHORIZED",
+        message: "Session expired",
+        fields: { session: "expired" },
+        requestId: "req-session-401",
+      },
+    };
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: (error) => unauthorizedErrors.push(error),
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/api/auth/session")) return jsonResponse(body, 401);
+        return jsonResponse({
+          item: { status: "waiting_scan", message: "二维码已生成" },
+        });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-expired" });
+
+    let rejectedError;
+    await assert.rejects(
+      () => api.restoreSession(),
+      (error) => {
+        rejectedError = error;
+        assert.equal(error.status, 401);
+        assert.equal(error.code, "UNAUTHORIZED");
+        assert.equal(error.message, "Session expired");
+        assert.deepEqual(error.fields, { session: "expired" });
+        assert.equal(error.requestId, "req-session-401");
+        assert.deepEqual(error.body, body);
+        return true;
+      },
+    );
+    await api.startWeixinBinding();
+
+    assert.deepEqual(unauthorizedErrors, [rejectedError]);
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
+  });
+
+  it("preserves CSRF state and skips unauthorized notification for 409 responses", async () => {
+    const calls = [];
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (calls.length === 1) {
+          return jsonResponse({
+            error: {
+              code: "VERSION_CONFLICT",
+              message: "Record changed",
+              fields: { version: "stale" },
+              requestId: "req-conflict-409",
+            },
+          }, 409);
+        }
+        return jsonResponse({
+          item: { status: "waiting_scan", message: "二维码已生成" },
+        });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-conflict" });
+
+    await assert.rejects(
+      () => api.updateRiskStatus("risk-1", { status: "closed" }),
+      (error) => error.status === 409 && error.code === "VERSION_CONFLICT",
+    );
+    await api.startWeixinBinding();
+
+    assert.equal(unauthorizedCalls, 0);
+    assert.deepEqual(calls.map(({ options }) => headerValue(options, "X-CSRF-Token")), [
+      "csrf-conflict",
+      "csrf-conflict",
+    ]);
+  });
+
+  it("ignores stale restore success after a newer restore failure and session replacement", async () => {
+    const firstRestore = deferred();
+    const secondRestore = deferred();
+    const calls = [];
+    let restoreCalls = 0;
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/api/auth/session")) {
+          restoreCalls += 1;
+          return restoreCalls === 1 ? firstRestore.promise : secondRestore.promise;
+        }
+        return jsonResponse({ item: { status: "waiting_scan", message: "二维码已生成" } });
+      },
+    });
+
+    const staleRestore = api.restoreSession();
+    const latestRestore = api.restoreSession();
+    secondRestore.resolve(jsonResponse({
+      error: {
+        code: "UNAUTHORIZED",
+        message: "No session",
+        requestId: "restore-latest-401",
+      },
+    }, 401));
+    await assert.rejects(() => latestRestore, (error) => error.status === 401);
+    api.setSession({ csrfToken: "csrf-new-session" });
+    firstRestore.resolve(jsonResponse({
+      account: "stale-account",
+      displayName: "Stale",
+      expiresAt: "2026-07-22T00:00:00.000Z",
+      csrfToken: "csrf-stale-restore",
+    }));
+
+    await assert.rejects(
+      () => staleRestore,
+      (error) => error.code === "STALE_SESSION_RESPONSE",
+    );
+    await api.startWeixinBinding();
+
+    assert.equal(unauthorizedCalls, 1);
+    assert.equal(headerValue(calls.at(-1).options, "X-CSRF-Token"), "csrf-new-session");
+  });
+
+  it("does not let a stale business 401 clear a newer session", async () => {
+    const oldResponse = deferred();
+    const calls = [];
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (calls.length === 1) return oldResponse.promise;
+        return jsonResponse({ item: { status: "waiting_scan", message: "二维码已生成" } });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-old-session" });
+
+    const oldRequest = api.updateRiskStatus("risk-1", { status: "closed" });
+    api.setSession({ csrfToken: "csrf-new-session" });
+    oldResponse.resolve(jsonResponse({
+      error: { code: "UNAUTHORIZED", message: "Old request expired", requestId: "old-401" },
+    }, 401));
+    await assert.rejects(() => oldRequest, (error) => error.status === 401);
+    await api.startWeixinBinding();
+
+    assert.equal(unauthorizedCalls, 0);
+    assert.equal(headerValue(calls.at(-1).options, "X-CSRF-Token"), "csrf-new-session");
+  });
+
+  it("notifies once when concurrent requests fail with 401 in the same session generation", async () => {
+    const firstResponse = deferred();
+    const secondResponse = deferred();
+    let callCount = 0;
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async () => {
+        callCount += 1;
+        return callCount === 1 ? firstResponse.promise : secondResponse.promise;
+      },
+    });
+    api.setSession({ csrfToken: "csrf-shared" });
+
+    const firstRequest = api.updateRiskStatus("risk-1", { status: "closed" });
+    const secondRequest = api.updateActionStatus("action-1", { status: "done" });
+    firstResponse.resolve(jsonResponse({ error: { code: "UNAUTHORIZED", message: "Expired" } }, 401));
+    secondResponse.resolve(jsonResponse({ error: { code: "UNAUTHORIZED", message: "Expired" } }, 401));
+    const results = await Promise.allSettled([firstRequest, secondRequest]);
+
+    assert.deepEqual(results.map((result) => result.status), ["rejected", "rejected"]);
+    assert.equal(unauthorizedCalls, 1);
+  });
+
+  it("logs out with Cookie credentials and CSRF, then clears in-memory session state", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/api/auth/logout")) return jsonResponse(null, 204);
+        return jsonResponse({
+          item: { status: "waiting_scan", message: "二维码已生成" },
+        });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-logout" });
+
+    await api.logout();
+    await api.startWeixinBinding();
+
+    assert.equal(calls[0].url, "https://example.test/api/auth/logout");
+    assert.equal(calls[0].options.method, "POST");
+    assert.equal(calls[0].options.body, "{}");
+    assert.equal(calls[0].options.credentials, "include");
+    assert.equal(headerValue(calls[0].options, "Authorization"), undefined);
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "csrf-logout");
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
+  });
+
+  it("clears in-memory session state after logout network or API failures", async () => {
+    for (const failure of [
+      new TypeError("offline"),
+      jsonResponse({
+        error: {
+          code: "LOGOUT_FAILED",
+          message: "Logout failed",
+          fields: null,
+          requestId: "req-logout-500",
+        },
+      }, 500),
+    ]) {
+      const calls = [];
+      const api = createSalesWorkbenchApi({
+        baseUrl: "https://example.test",
+        fetchImpl: async (url, options = {}) => {
+          calls.push({ url, options });
+          if (calls.length === 1) {
+            if (failure instanceof Error) throw failure;
+            return failure;
+          }
+          return jsonResponse({
+            item: { status: "waiting_scan", message: "二维码已生成" },
+          });
+        },
+      });
+      api.setSession({ csrfToken: "csrf-logout-failure" });
+
+      await assert.rejects(() => api.logout());
+      await api.startWeixinBinding();
+
+      assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "csrf-logout-failure");
+      assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
+    }
   });
 
   it("loads bootstrap records and dashboard summary from the configured backend", async () => {
@@ -839,12 +1296,13 @@ describe("sales workbench API client", () => {
     assert.equal(solution.sourceRefs.length, 3);
   });
 
-  it("saves weekly report edits and exposes a Word export URL", async () => {
+  it("saves weekly report edits and downloads the authenticated Word Blob", async () => {
     const calls = [];
+    const wordBlob = new Blob(["weekly report"], { type: "application/msword" });
     const api = createSalesWorkbenchApi({
       baseUrl: "http://127.0.0.1:8787",
       fetchImpl: async (url, options = {}) => {
-        calls.push({ url, method: options.method ?? "GET", body: JSON.parse(options.body ?? "{}") });
+        calls.push({ url, options });
         if (url.endsWith("/api/reports/weekly/wr-1")) {
           return jsonResponse({
             item: sampleWeeklyReport({
@@ -853,26 +1311,98 @@ describe("sales workbench API client", () => {
             }),
           });
         }
+        if (url.endsWith("/api/reports/weekly/wr-1/export?format=word")) {
+          return blobResponse(wordBlob, 200, {
+            "Content-Type": "application/msword",
+            "Content-Disposition": "attachment; filename=\"weekly-report-2026-06-01-2026-06-07.doc\"",
+          });
+        }
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
+    api.setSession({ csrfToken: "csrf-export" });
 
     const saved = await api.saveWeeklyReport("wr-1", {
       content: "# edited weekly report",
       status: "ready",
     });
+    const downloaded = await api.downloadWeeklyReport("wr-1", "word");
 
     assertApiEntity("weeklyReport", saved);
     assert.equal(saved.status, "ready");
     assert.equal(saved.content, "# edited weekly report");
-    assert.equal(api.getWeeklyReportExportUrl("wr-1"), "http://127.0.0.1:8787/api/reports/weekly/wr-1/export?format=word");
-    assert.deepEqual(calls, [
-      {
-        url: "http://127.0.0.1:8787/api/reports/weekly/wr-1",
-        method: "PATCH",
-        body: { content: "# edited weekly report", status: "ready" },
+    assert.equal(api.getWeeklyReportExportUrl, undefined);
+    assert.equal(downloaded.blob, wordBlob);
+    assert.equal(downloaded.blob instanceof Blob, true);
+    assert.equal(downloaded.blob.type, "application/msword");
+    assert.equal(downloaded.filename, "weekly-report-2026-06-01-2026-06-07.doc");
+    assert.equal(calls[0].url, "http://127.0.0.1:8787/api/reports/weekly/wr-1");
+    assert.equal(calls[0].options.credentials, "include");
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "csrf-export");
+    assert.equal(calls[1].url, "http://127.0.0.1:8787/api/reports/weekly/wr-1/export?format=word");
+    assert.equal(calls[1].url.includes(["tok", "en="].join("")), false);
+    assert.equal(calls[1].options.method, "GET");
+    assert.equal(calls[1].options.credentials, "include");
+    assert.equal(headerValue(calls[1].options, "Authorization"), undefined);
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
+  });
+
+  it("uses a .doc fallback filename when the export response has no headers mock", async () => {
+    const wordBlob = new Blob(["weekly report"], { type: "application/msword" });
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        blob: async () => wordBlob,
+      }),
+    });
+
+    const downloaded = await api.downloadWeeklyReport("wr-1");
+
+    assert.equal(downloaded.blob, wordBlob);
+    assert.equal(downloaded.filename, "weekly-report.doc");
+  });
+
+  it("reuses structured API errors and invalidates the session for export 401", async () => {
+    const calls = [];
+    let unauthorizedCalls = 0;
+    const body = {
+      error: {
+        code: "UNAUTHORIZED",
+        message: "Session expired during export",
+        fields: null,
+        requestId: "req-export-401",
       },
-    ]);
+    };
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.includes("/export?")) return jsonResponse(body, 401);
+        return jsonResponse({ item: { status: "waiting_scan", message: "二维码已生成" } });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-export-expired" });
+
+    await assert.rejects(
+      () => api.downloadWeeklyReport("wr-1", "word"),
+      (error) => {
+        assert.equal(error.status, 401);
+        assert.equal(error.code, "UNAUTHORIZED");
+        assert.equal(error.fields, null);
+        assert.equal(error.requestId, "req-export-401");
+        assert.deepEqual(error.body, body);
+        return true;
+      },
+    );
+    await api.startWeixinBinding();
+
+    assert.equal(unauthorizedCalls, 1);
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
   });
 
   it("saves solution draft edits through the backend", async () => {
@@ -957,12 +1487,13 @@ describe("sales workbench API client", () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
       baseUrl: "http://127.0.0.1:8787",
-      authToken: "session-token",
       fetchImpl: async (url, options = {}) => {
         calls.push({
           url,
           method: options.method ?? "GET",
-          authorization: options.headers?.Authorization,
+          credentials: options.credentials,
+          authorization: headerValue(options, "Authorization"),
+          csrf: headerValue(options, "X-CSRF-Token"),
         });
         return jsonResponse({
           item: {
@@ -973,6 +1504,7 @@ describe("sales workbench API client", () => {
         });
       },
     });
+    api.setSession({ csrfToken: "csrf-weixin" });
 
     const started = await api.startWeixinBinding();
     const status = await api.getWeixinBindingStatus();
@@ -985,17 +1517,23 @@ describe("sales workbench API client", () => {
       {
         url: "http://127.0.0.1:8787/api/integrations/weixin-agent/login",
         method: "POST",
-        authorization: "Bearer session-token",
+        credentials: "include",
+        authorization: undefined,
+        csrf: "csrf-weixin",
       },
       {
         url: "http://127.0.0.1:8787/api/integrations/weixin-agent/login",
         method: "GET",
-        authorization: "Bearer session-token",
+        credentials: "include",
+        authorization: undefined,
+        csrf: undefined,
       },
       {
         url: "http://127.0.0.1:8787/api/integrations/weixin-agent/login",
         method: "DELETE",
-        authorization: "Bearer session-token",
+        credentials: "include",
+        authorization: undefined,
+        csrf: "csrf-weixin",
       },
     ]);
   });

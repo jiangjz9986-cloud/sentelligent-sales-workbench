@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import { createStaticServer, createStaticServerConfig } from "./static-server.mjs";
 
 const chromePath = findChrome();
+const visualApiBaseUrl = "https://visual-api.test";
 
 const viewports = [
   { name: "desktop", width: 1440, height: 900, mobile: false },
@@ -152,15 +153,33 @@ async function openChromeCdp() {
   await cdp.send("Runtime.enable");
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
     source: `
-      try {
-        window.localStorage.setItem('sentelligent.salesWorkbench.login', JSON.stringify({
-          account: 'visual-qa',
-          displayName: 'visual-qa',
-          ['tok' + 'en']: 'visual',
-          createdAt: Date.now(),
-          expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-        }));
-      } catch {}
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const requestUrl = String(typeof input === 'string' ? input : input?.url ?? '');
+        if (requestUrl.startsWith('${visualApiBaseUrl}/api/')) {
+          const pathname = new URL(requestUrl).pathname;
+          const isSession = pathname === '/api/auth/session';
+          const body = isSession
+            ? {
+                account: 'visual-qa',
+                displayName: 'visual-qa',
+                expiresAt: '2099-01-01T00:00:00.000Z',
+                csrfToken: 'visual-csrf',
+              }
+            : {
+                error: {
+                  code: 'VISUAL_QA_OFFLINE',
+                  message: 'Visual QA uses local business fixtures',
+                  requestId: 'visual-qa',
+                },
+              };
+          return new Response(JSON.stringify(body), {
+            status: isSession ? 200 : 503,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return nativeFetch(input, init);
+      };
     `,
   });
 
@@ -209,24 +228,6 @@ async function measureVisualRhythm(cdp, url, viewport) {
         }
         throw new Error('Timed out waiting for visual rhythm page condition');
       };
-      const setInputValue = (input, value) => {
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        setter.call(input, value);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      };
-      const loginIfNeeded = async () => {
-        const submit = document.querySelector('[data-testid="login-submit"]');
-        if (!submit) return;
-        window.localStorage.setItem('sentelligent.salesWorkbench.login', JSON.stringify({
-          account: 'visual-qa',
-          displayName: 'visual-qa',
-          ['tok' + 'en']: 'visual',
-          createdAt: Date.now(),
-          expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-        }));
-        window.location.reload();
-        await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
-      };
       const visibleRect = (element) => {
         if (!element) return null;
         const rect = element.getBoundingClientRect();
@@ -241,7 +242,6 @@ async function measureVisualRhythm(cdp, url, viewport) {
         });
       };
       const results = [];
-      await loginIfNeeded();
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
       for (const page of pages) {
         document.querySelectorAll('.nav-item')[page.navIndex]?.click();
@@ -301,25 +301,6 @@ async function measureDesktopListDensity(cdp, url) {
         }
         throw new Error('Timed out waiting for list density page condition');
       };
-      const setInputValue = (input, value) => {
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        setter.call(input, value);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      };
-      const loginIfNeeded = async () => {
-        const submit = document.querySelector('[data-testid="login-submit"]');
-        if (!submit) return;
-        window.localStorage.setItem('sentelligent.salesWorkbench.login', JSON.stringify({
-          account: 'visual-qa',
-          displayName: 'visual-qa',
-          ['tok' + 'en']: 'visual',
-          createdAt: Date.now(),
-          expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-        }));
-        window.location.reload();
-        await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
-      };
-      await loginIfNeeded();
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
       const results = [];
       for (const page of listPages) {
@@ -349,7 +330,11 @@ describe("visual rhythm", () => {
     assert.equal(existsSync(resolve("dist", "index.html")), true, "run npm run build before visual rhythm QA");
 
     const port = await getFreePort();
-    const server = createStaticServer(createStaticServerConfig({ port, distPath: resolve("dist") }));
+    const server = createStaticServer(createStaticServerConfig({
+      port,
+      distPath: resolve("dist"),
+      apiBaseUrl: visualApiBaseUrl,
+    }));
     await new Promise((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
 
     let cdp;
@@ -386,7 +371,11 @@ describe("visual rhythm", () => {
     assert.equal(existsSync(resolve("dist", "index.html")), true, "run npm run build before visual rhythm QA");
 
     const port = await getFreePort();
-    const server = createStaticServer(createStaticServerConfig({ port, distPath: resolve("dist") }));
+    const server = createStaticServer(createStaticServerConfig({
+      port,
+      distPath: resolve("dist"),
+      apiBaseUrl: visualApiBaseUrl,
+    }));
     await new Promise((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
 
     let cdp;
