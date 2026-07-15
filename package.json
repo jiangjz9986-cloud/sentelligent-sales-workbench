@@ -1,0 +1,37 @@
+{
+  "name": "sentelligent-sales-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:start": "node scripts/local-dev.mjs start",
+    "dev:status": "node scripts/local-dev.mjs status",
+    "dev:health": "node scripts/local-dev.mjs health",
+    "dev:stop": "node scripts/local-dev.mjs stop",
+    "wsl:backend:start": "node scripts/wsl-backend.mjs start",
+    "wsl:backend:status": "node scripts/wsl-backend.mjs status",
+    "wsl:backend:health": "node scripts/wsl-backend.mjs health",
+    "wsl:backend:stop": "node scripts/wsl-backend.mjs stop",
+    "wsl:backend:restart": "node scripts/wsl-backend.mjs restart",
+    "wsl:db:info": "node scripts/wsl-backend.mjs info",
+    "wsl:db:backup": "node scripts/wsl-backend.mjs backup",
+    "wsl:db:restore": "node scripts/wsl-backend.mjs restore",
+    "wsl:stack:start": "node scripts/wsl-stack.mjs start",
+    "wsl:stack:status": "node scripts/wsl-stack.mjs status",
+    "wsl:stack:health": "node scripts/wsl-stack.mjs health",
+    "wsl:stack:stop": "node scripts/wsl-stack.mjs stop",
+    "wsl:stack:restart": "node scripts/wsl-stack.mjs restart",
+    "wsl:stack:smoke": "node scripts/fixed-stack-smoke.mjs",
+    "scan:secrets": "node scripts/project-secret-scan.mjs",
+    "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
+    "qa:full": "npm run test:deploy && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration"
+  },
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

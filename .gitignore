@@ -1,0 +1,49 @@
+# Secrets
+.env
+**/.env
+!**/.env.example
+
+# Dependencies and build outputs
+**/node_modules/
+**/dist/
+**/build/
+**/coverage/
+.npm-cache/
+
+# Runtime state, databases, and logs
+.runtime/
+**/*.sqlite
+**/*.sqlite-*
+**/*.db
+**/*.db-*
+*.log
+*.pid
+
+# Local Codex coordination state
+.agents/
+.codex/
+
+# Generated project outputs. Keep only the active app, selected references,
+# brand assets, and current audit evidence under version control.
+outputs/*
+!outputs/product-design-prototype/
+!outputs/product-design-prototype/**
+outputs/product-design-prototype/.npm-cache/
+outputs/product-design-prototype/node_modules/
+outputs/product-design-prototype/dist/
+outputs/product-design-prototype/qa/
+!outputs/design-renders/
+outputs/design-renders/*
+!outputs/design-renders/selected/
+!outputs/design-renders/selected/**
+!outputs/logo/
+!outputs/logo/**
+!outputs/qa-audit/
+!outputs/qa-audit/**
+
+# OS/editor artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.tmp

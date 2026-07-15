@@ -1,0 +1,35 @@
+{
+  "name": "product-design-prototype",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test:auth": "node --test src/sessionAuth.test.js",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:quick": "node --test src/quickRecordModel.test.js",
+    "test:week": "node --test src/weekRange.test.js",
+    "test:api": "node --test src/api/salesWorkbenchApi.test.js",
+    "test:contract": "node scripts/customer-opportunity-contract.test.mjs",
+    "test:static": "node --test scripts/static-server.test.mjs",
+    "test:copy": "node --test scripts/formal-ui-copy.test.mjs",
+    "test:controls": "node --test scripts/interactive-controls.test.mjs",
+    "test:forms": "node --test scripts/form-accessibility.test.mjs",
+    "test:polish": "node --test scripts/interaction-polish.test.mjs",
+    "test:readonly": "node --test scripts/readonly-detail-actions.test.mjs",
+    "test:favicon": "node --test scripts/favicon-asset.test.mjs",
+    "test:visual": "node --test scripts/visual-rhythm.test.mjs",
+    "test:modules": "node --test scripts/module-coverage.test.mjs",
+    "scan:secrets": "node scripts/secret-scan.mjs",
+    "qa:local": "npm run build && npm run test:auth && npm run test:quick && npm run test:week && npm run test:api && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:visual && npm run test:modules && npm run scan:secrets",
+    "qa:integration": "node scripts/integration-qa.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "5.0.4",
+    "lucide-react": "^1.17.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "vite": "6.4.2"
+  }
+}

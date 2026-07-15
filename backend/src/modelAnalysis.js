@@ -1,0 +1,357 @@
+import { buildQuickRecordAnalysis } from "./quickRecordAnalysis.js";
+
+function fallbackAnalysis(rawContent, source) {
+  const analysis = buildQuickRecordAnalysis(rawContent);
+  if (!analysis) return null;
+  return { ...analysis, source };
+}
+
+function completionUrl(baseUrl) {
+  return `${String(baseUrl ?? "https://api.deepseek.com").replace(/\/+$/, "")}/chat/completions`;
+}
+
+function requireText(value, path) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError(`Model analysis response is missing ${path}`);
+  }
+  return value.trim();
+}
+
+function nullableString(value) {
+  if (value === null || value === undefined) return null;
+  return typeof value === "string" ? value : String(value);
+}
+
+function normalizeMatch(value, path) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`Model analysis response is missing ${path}`);
+  }
+  return {
+    id: nullableString(value.id),
+    value: requireText(value.value, `${path}.value`),
+    meta: nullableString(value.meta) ?? "模型识别",
+    tone: nullableString(value.tone) ?? "blue",
+  };
+}
+
+function normalizeSummaryItem(value, path) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`Model analysis response is missing ${path}`);
+  }
+  return {
+    title: requireText(value.title, `${path}.title`),
+    text: requireText(value.text, `${path}.text`),
+  };
+}
+
+function stripJsonFence(content) {
+  const text = String(content ?? "").trim();
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fenced ? fenced[1].trim() : text;
+}
+
+export function parseModelAnalysisContent(content, provider = "model") {
+  const parsed = JSON.parse(stripJsonFence(content));
+  return {
+    source: provider || "model",
+    confidence: Number.isFinite(Number(parsed.confidence)) ? Number(parsed.confidence) : 78,
+    customer: normalizeMatch(parsed.customer, "customer"),
+    opportunity: normalizeMatch(parsed.opportunity, "opportunity"),
+    weekly: normalizeMatch(parsed.weekly, "weekly"),
+    summary: {
+      request: normalizeSummaryItem(parsed.summary?.request, "summary.request"),
+      feedback: normalizeSummaryItem(parsed.summary?.feedback, "summary.feedback"),
+      risk: normalizeSummaryItem(parsed.summary?.risk, "summary.risk"),
+      action: normalizeSummaryItem(parsed.summary?.action, "summary.action"),
+    },
+  };
+}
+
+function buildMessages(rawContent) {
+  return [
+    {
+      role: "system",
+      content: [
+        "你是森特智行 AI 销售作战台的销售记录分析器。",
+        "请只输出合法 JSON，不要输出解释文字。",
+        "JSON 必须包含 customer、opportunity、weekly、summary。",
+        "summary 必须包含 request、feedback、risk、action，每项都有 title 和 text。",
+        "示例 JSON：",
+        JSON.stringify({
+          customer: { id: "rizhao", value: "日照中医医院", meta: "置信度 90%", tone: "blue" },
+          opportunity: { id: "op-rizhao-plan", value: "日照中医医院十五五规划", meta: "置信度 80%", tone: "green" },
+          weekly: { value: "周三 / 06-03", meta: "本周记录", tone: "amber" },
+          summary: {
+            request: { title: "客户诉求", text: "客户希望补齐基础架构能力。" },
+            feedback: { title: "客户反馈", text: "客户对现有平台可控性有顾虑。" },
+            risk: { title: "风险点", text: "预算路径和决策链仍需确认。" },
+            action: { title: "建议动作", text: "同步客户画像、商机和周报草稿。" },
+          },
+        }),
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: `请分析以下销售快速记录并输出 JSON：\n${String(rawContent ?? "").trim()}`,
+    },
+  ];
+}
+
+async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 1200 }) {
+  const response = await fetchImpl(completionUrl(config.modelBaseUrl), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.modelApiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.modelName ?? "deepseek-v4-flash",
+      messages,
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+      max_tokens: maxTokens,
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(config.modelTimeoutMs ?? 30000),
+  });
+
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    throw new Error(`model provider returned ${response.status}`);
+  }
+
+  const content = body.choices?.[0]?.message?.content;
+  if (!content) throw new Error("model provider returned empty content");
+  return content;
+}
+
+async function callModel(rawContent, config, fetchImpl) {
+  const content = await callChatCompletion({
+    messages: buildMessages(rawContent),
+    config,
+    fetchImpl,
+    maxTokens: 1200,
+  });
+  return parseModelAnalysisContent(content, config.modelProvider ?? "model");
+}
+
+function shouldUseModel(config) {
+  return config.aiAnalysisMode === "model" && Boolean(config.modelApiKey);
+}
+
+function parseModelDraftContent(content) {
+  const parsed = JSON.parse(stripJsonFence(content));
+  return requireText(parsed.content, "content");
+}
+
+function compact(value, limit = 900) {
+  const text = String(value ?? "").trim();
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function buildWeeklyDraftMessages(context) {
+  const records = (context.records ?? []).map((record) => ({
+    id: record.id,
+    occurredAt: record.occurredAt,
+    sourceChannel: record.sourceChannel,
+    rawContent: compact(record.rawContent, 500),
+    analysis: record.analysis,
+  }));
+
+  return [
+    {
+      role: "system",
+      content: [
+        "你是森特智行 AI 销售作战台的周报提炼助手。",
+        "请只输出合法 JSON，不要输出解释文字。",
+        "JSON 必须包含 content 字段，content 为中文 Markdown 周报正文。",
+        "必须保留人工确认后的事实，不要编造客户、金额或承诺。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        owner: context.owner,
+        periodStart: context.periodStart,
+        periodEnd: context.periodEnd,
+        records,
+        knowledge: context.knowledge ?? [],
+        fallbackContent: compact(context.fallbackDraft?.content, 1600),
+      }),
+    },
+  ];
+}
+
+function buildSolutionDraftMessages(context) {
+  const artifactLabels = {
+    communication_outline: "沟通提纲",
+    presales_questions: "售前问题清单",
+    solution_framework: "方案框架",
+    report_outline: "汇报材料大纲",
+    competitive_talk: "竞品应对话术",
+  };
+  const artifactLabel = artifactLabels[context.artifactType] ?? "方案框架";
+  return [
+    {
+      role: "system",
+      content: [
+        "你是森特智行 AI 销售作战台的方案辅助助手。",
+        "请只输出合法 JSON，不要输出解释文字。",
+        `JSON 必须包含 content 字段，content 为中文 Markdown「${artifactLabel}」正文。`,
+        "必须基于客户画像、商机档案、下一步动作和知识库引用生成，不要编造未提供的信息。",
+        "不要改变用户请求的交付物类型，不要输出与交付物无关的长篇方案。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        owner: context.owner,
+        artifactType: context.artifactType,
+        artifactLabel,
+        customer: context.customer,
+        opportunity: context.opportunity,
+        actions: context.actions,
+        knowledge: context.knowledge,
+        fallbackTitle: context.fallbackDraft?.title,
+        fallbackContent: compact(context.fallbackDraft?.content, 2200),
+      }),
+    },
+  ];
+}
+
+function labelForSuggestionType(type) {
+  return {
+    customer_profile: "客户画像补全",
+    opportunity_push: "商机推进",
+    knowledge_talk: "知识话术",
+  }[type] ?? "销售建议";
+}
+
+function sourceRefForSuggestion(type, context = {}) {
+  return {
+    type: type || "manual_suggestion",
+    id: context.id ?? context.customerId ?? context.opportunityId ?? context.knowledgeId ?? "manual",
+  };
+}
+
+function buildFallbackSuggestion({ type, title, context = {} }) {
+  const label = labelForSuggestionType(type);
+  const contextText = compact(JSON.stringify(context, null, 2), 900);
+  const headline = title || `${label}建议`;
+  return {
+    type: type || "manual_suggestion",
+    title: headline,
+    status: "generated",
+    content: [
+      `## ${headline}`,
+      "",
+      `- 依据：${context.customer ?? context.opportunity ?? context.knowledge ?? context.title ?? "当前业务上下文"}。`,
+      `- 建议：围绕${label}补齐关键事实、责任人、时间窗口和下一步确认动作。`,
+      "- 使用方式：销售确认后再写入客户档案、商机推进、周报或方案材料。",
+      "",
+      "### 上下文摘要",
+      contextText || "当前未提供额外上下文。",
+    ].join("\n"),
+    sourceRefs: [sourceRefForSuggestion(type, context)],
+  };
+}
+
+function buildManualSuggestionMessages({ type, title, context, fallbackSuggestion }) {
+  return [
+    {
+      role: "system",
+      content: [
+        "你是森特智行 AI 销售作战台的销售建议助手。",
+        "请只输出合法 JSON，不要输出解释文字。",
+        "JSON 必须包含 content 字段，content 为中文 Markdown 建议正文。",
+        "必须基于用户提供的上下文生成，不要编造未提供的客户承诺、金额或时间。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        type,
+        title,
+        context,
+        fallbackContent: compact(fallbackSuggestion?.content, 1500),
+      }),
+    },
+  ];
+}
+
+async function enhanceDraftWithModel(fallbackDraft, messages, config, options = {}) {
+  if (!shouldUseModel(config)) return fallbackDraft;
+
+  try {
+    const content = await callChatCompletion({
+      messages,
+      config,
+      fetchImpl: options.fetchImpl ?? fetch,
+      maxTokens: 2600,
+    });
+    return {
+      ...fallbackDraft,
+      content: parseModelDraftContent(content),
+    };
+  } catch {
+    return fallbackDraft;
+  }
+}
+
+export async function enhanceWeeklyDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
+  return enhanceDraftWithModel(
+    fallbackDraft,
+    buildWeeklyDraftMessages({ ...context, fallbackDraft }),
+    config,
+    options,
+  );
+}
+
+export async function enhanceSolutionDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
+  return enhanceDraftWithModel(
+    fallbackDraft,
+    buildSolutionDraftMessages({ ...context, fallbackDraft }),
+    config,
+    options,
+  );
+}
+
+export async function generateManualSuggestion(input, config = {}, options = {}) {
+  const fallbackSuggestion = buildFallbackSuggestion(input ?? {});
+  if (!shouldUseModel(config)) return fallbackSuggestion;
+
+  try {
+    const content = await callChatCompletion({
+      messages: buildManualSuggestionMessages({ ...(input ?? {}), fallbackSuggestion }),
+      config,
+      fetchImpl: options.fetchImpl ?? fetch,
+      maxTokens: 1800,
+    });
+    return {
+      ...fallbackSuggestion,
+      content: parseModelDraftContent(content),
+    };
+  } catch {
+    return fallbackSuggestion;
+  }
+}
+
+export async function analyzeQuickRecord(rawContent, config = {}, options = {}) {
+  const text = String(rawContent ?? "").trim();
+  if (!text) return null;
+
+  if (config.aiAnalysisMode !== "model") {
+    return fallbackAnalysis(text, "mock");
+  }
+
+  if (!config.modelApiKey) {
+    return fallbackAnalysis(text, "mock_missing_model_key");
+  }
+
+  try {
+    return await callModel(text, config, options.fetchImpl ?? fetch);
+  } catch {
+    return fallbackAnalysis(text, "mock_model_fallback");
+  }
+}
