@@ -7,6 +7,7 @@
     "test": "node --test tests/*.test.js",
     "migrate": "node src/db.js --migrate",
     "seed": "node src/seed.js",
+    "auth:hash": "node scripts/hash-password.mjs",
     "smoke": "node scripts/smoke.mjs",
     "service": "node scripts/service.mjs",
     "service:start": "node scripts/service.mjs start",

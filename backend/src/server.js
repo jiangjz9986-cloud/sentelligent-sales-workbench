@@ -1227,8 +1227,21 @@ function splitPath(pathname) {
   return pathname.split("/").filter(Boolean);
 }
 
+function hasLegacyBearerAuthConfiguration(config) {
+  return Boolean(
+    config.nodeEnv !== "production" &&
+    config.authAccount &&
+    config.authPassword &&
+    config.authSessionSecret,
+  );
+}
+
 function isAuthEnabled(config) {
-  return Boolean(config.authAccount && config.authPassword);
+  return Boolean(config.authRequired && hasLegacyBearerAuthConfiguration(config));
+}
+
+function isAuthMisconfigured(config) {
+  return Boolean(config.authRequired && !hasLegacyBearerAuthConfiguration(config));
 }
 
 function safeEqual(left, right) {
@@ -1327,6 +1340,18 @@ export function createServer(options = {}) {
         const session = authenticateLogin(config, await readJson(request));
         if (!session) return unauthorized(response, "账号或密码错误");
         sendJson(response, 200, session);
+        return;
+      }
+
+      if (
+        isAuthMisconfigured(config) &&
+        url.pathname.startsWith("/api/") &&
+        url.pathname !== "/api/health"
+      ) {
+        sendJson(response, 503, {
+          error: "auth_not_configured",
+          message: "Authentication is required but not fully configured",
+        });
         return;
       }
 

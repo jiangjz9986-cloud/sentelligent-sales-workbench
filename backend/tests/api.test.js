@@ -8,6 +8,7 @@ import {
   assertApiCollection,
   assertApiEntity,
 } from "../../shared/salesWorkbenchApiContract.mjs";
+import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 
 let tempDir;
@@ -37,6 +38,7 @@ beforeEach(async () => {
     seed: true,
     aiAnalysisMode: "mock",
     modelApiKey: "",
+    authRequired: false,
     authAccount: "",
     authPassword: "",
   });
@@ -157,6 +159,59 @@ describe("sales workbench backend API", () => {
     assert.ok(unlockedCustomers.body.items.length >= 1);
   });
 
+  it("fails closed when authentication is required but credentials are incomplete", async () => {
+    await new Promise((resolve) => server.close(resolve));
+    server = createServer({
+      databaseUrl,
+      seed: true,
+      authRequired: true,
+      authAccount: "",
+      authPassword: "",
+      authPasswordHash: "",
+      authSessionSecret: "",
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address();
+    baseUrl = `http://127.0.0.1:${port}`;
+
+    assert.equal((await request("/api/health")).response.status, 200);
+    const customers = await request("/api/customers");
+    assert.equal(customers.response.status, 503);
+    assert.equal(customers.body.error, "auth_not_configured");
+    const login = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account: "jiangjz", password: "wrong" }),
+    });
+    assert.equal(login.response.status, 503);
+  });
+
+  it("keeps hash-only credentials closed until cookie login is active", async () => {
+    await new Promise((resolve) => server.close(resolve));
+    server = createServer({
+      databaseUrl,
+      seed: true,
+      nodeEnv: "test",
+      authRequired: true,
+      authAccount: "jiangjz",
+      authPassword: "",
+      authPasswordHash: await hashPassword("unit-login-secret", {
+        salt: Buffer.alloc(16, 7),
+      }),
+      authSessionSecret: "unit-session-secret",
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address();
+    baseUrl = `http://127.0.0.1:${port}`;
+
+    const login = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account: "jiangjz" }),
+    });
+    assert.equal(login.response.status, 503);
+    assert.equal("token" in login.body, false);
+    assert.equal((await request("/api/customers")).response.status, 503);
+  });
+
   it("allows a configured WeChat agent machine token without using the user password", async () => {
     await new Promise((resolve) => server.close(resolve));
     server = createServer({
@@ -259,6 +314,7 @@ describe("sales workbench backend API", () => {
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com",
       modelName: "deepseek-v4-flash",
+      authRequired: false,
       authAccount: "",
       authPassword: "",
       fetchImpl: async (url, options = {}) => {
@@ -673,6 +729,7 @@ describe("sales workbench backend API", () => {
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com",
       modelName: "deepseek-v4-flash",
+      authRequired: false,
       authAccount: "",
       authPassword: "",
       fetchImpl: async (url, options = {}) => {
@@ -834,6 +891,7 @@ describe("sales workbench backend API", () => {
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com/",
       modelName: "deepseek-v4-flash",
+      authRequired: false,
       authAccount: "",
       authPassword: "",
       fetchImpl: async (url, options = {}) => {
@@ -899,6 +957,7 @@ describe("sales workbench backend API", () => {
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com/",
       modelName: "deepseek-v4-flash",
+      authRequired: false,
       authAccount: "",
       authPassword: "",
       fetchImpl: async (url, options = {}) => {
@@ -1118,6 +1177,7 @@ describe("sales workbench backend API", () => {
       modelApiKey: "test-provider-key",
       modelBaseUrl: "https://api.deepseek.com",
       modelName: "deepseek-v4-flash",
+      authRequired: false,
       authAccount: "",
       authPassword: "",
       fetchImpl: async () => modelTextCompletion("## DeepSeek 建议\n已生成可审计建议。"),

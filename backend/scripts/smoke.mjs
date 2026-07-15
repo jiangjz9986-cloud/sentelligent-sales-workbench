@@ -10,7 +10,7 @@ const databaseUrl = join(smokeDir, "smoke.sqlite");
 let server;
 
 try {
-  server = createServer({ databaseUrl, seed: true });
+  server = createServer({ databaseUrl, seed: true, authRequired: false });
   await new Promise((resolve) => {
     server.listen(0, "127.0.0.1", resolve);
   });
