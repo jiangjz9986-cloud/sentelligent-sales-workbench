@@ -1,9 +1,41 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
+import {
+  authenticateMachineRequest,
+  assertMachineRouteAllowed,
+} from "./auth/machineAuthorization.js";
+import {
+  assertLoginAllowed,
+  clearLoginFailures,
+  loginRateLimitKey,
+  pruneLoginRateLimits,
+  recordLoginFailure,
+} from "./auth/loginRateLimit.js";
+import { validatePasswordHashEncoding, verifyPassword } from "./auth/password.js";
+import {
+  createCsrfToken,
+  createSession,
+  getActiveSession,
+  revokeSession,
+} from "./auth/session.js";
 import { loadConfig } from "./config.js";
 import { all, get, openDatabase, run } from "./db.js";
+import { HttpError } from "./http/errors.js";
+import { readJsonBody } from "./http/request.js";
+import {
+  sendDocument as sendHttpDocument,
+  sendError as sendHttpError,
+  sendJson as sendHttpJson,
+} from "./http/response.js";
+import {
+  assertCsrfToken,
+  buildSessionCookie,
+  constantTimeEqual,
+  corsHeaders,
+  parseCookies,
+} from "./http/security.js";
 import {
   analyzeQuickRecord,
   enhanceSolutionDraftWithModel,
@@ -33,7 +65,8 @@ const jsonColumns = {
   opportunity: ["requirements", "competitors", "solution_direction"],
 };
 
-const authSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
+const responseContextSymbol = Symbol("responseContext");
+const requestConfigSymbol = Symbol("requestConfig");
 
 function parseJson(value, fallback = []) {
   if (!value) return fallback;
@@ -397,46 +430,37 @@ function listAuditLogs(db, searchParams) {
   ).map(auditLogFromRow);
 }
 
-function sendJson(response, statusCode, body) {
-  response.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
-  });
-  response.end(JSON.stringify(body));
+function responseOptions(response, headers) {
+  return {
+    ...(response[responseContextSymbol] ?? {}),
+    ...(headers ? { headers } : {}),
+  };
+}
+
+function sendJson(response, statusCode, body, headers) {
+  sendHttpJson(response, statusCode, body, responseOptions(response, headers));
 }
 
 function sendDocument(response, statusCode, body, headers = {}) {
-  response.writeHead(statusCode, {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization",
-    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
-    ...headers,
-  });
-  response.end(body);
+  sendHttpDocument(response, statusCode, body, responseOptions(response, headers));
 }
 
 async function readJson(request) {
-  const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
-  if (chunks.length === 0) return {};
-
-  const raw = Buffer.concat(chunks).toString("utf8");
-  if (!raw.trim()) return {};
-  return JSON.parse(raw);
+  return readJsonBody(request, {
+    maxBytes: request[requestConfigSymbol]?.jsonBodyLimitBytes,
+  });
 }
 
-function notFound(response) {
-  sendJson(response, 404, { error: "not_found" });
+function notFound() {
+  throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
 }
 
-function badRequest(response, message) {
-  sendJson(response, 400, { error: "bad_request", message });
+function badRequest(_response, message) {
+  throw new HttpError(400, "BAD_REQUEST", message);
 }
 
-function unauthorized(response, message = "请先登录") {
-  sendJson(response, 401, { error: "unauthorized", message });
+function unauthorized(_response, message = "Please sign in", code = "UNAUTHORIZED") {
+  throw new HttpError(401, code, message);
 }
 
 const riskStatuses = new Set(["open", "accepted", "in_progress", "deferred", "closed"]);
@@ -1227,89 +1251,66 @@ function splitPath(pathname) {
   return pathname.split("/").filter(Boolean);
 }
 
-function hasLegacyBearerAuthConfiguration(config) {
+function hasCookieAuthConfiguration(config) {
+  const hasCredential =
+    validatePasswordHashEncoding(config.authPasswordHash) ||
+    (config.nodeEnv === "development" &&
+      typeof config.authPassword === "string" &&
+      config.authPassword.length > 0);
   return Boolean(
-    config.nodeEnv !== "production" &&
     config.authAccount &&
-    config.authPassword &&
+    hasCredential &&
     config.authSessionSecret,
   );
 }
 
 function isAuthEnabled(config) {
-  return Boolean(config.authRequired && hasLegacyBearerAuthConfiguration(config));
+  return Boolean(config.authRequired && hasCookieAuthConfiguration(config));
 }
 
 function isAuthMisconfigured(config) {
-  return Boolean(config.authRequired && !hasLegacyBearerAuthConfiguration(config));
+  return Boolean(config.authRequired && !hasCookieAuthConfiguration(config));
 }
 
-function safeEqual(left, right) {
-  const leftBuffer = Buffer.from(String(left ?? ""));
-  const rightBuffer = Buffer.from(String(right ?? ""));
-  if (leftBuffer.length !== rightBuffer.length) return false;
-  return timingSafeEqual(leftBuffer, rightBuffer);
-}
+async function authenticateLogin(db, config, body, remoteAddress, now = Date.now()) {
+  const account = typeof body?.account === "string" ? body.account.trim() : "";
+  const address = remoteAddress || "unknown";
+  const limiterKeys = [
+    loginRateLimitKey(config.authSessionSecret, account || "<missing>", address),
+    loginRateLimitKey(config.authSessionSecret, "<all-accounts>", address),
+  ];
+  pruneLoginRateLimits(db, now);
+  for (const limiterKey of limiterKeys) assertLoginAllowed(db, limiterKey, now);
 
-function signAuthPayload(encodedPayload, config) {
-  const secret = config.authSessionSecret || config.authPassword;
-  return createHmac("sha256", secret).update(encodedPayload).digest("base64url");
-}
-
-function createAuthToken(config, now = Date.now()) {
-  const expiresAt = now + authSessionTtlMs;
-  const payload = Buffer.from(
-    JSON.stringify({
-      account: config.authAccount,
-      expiresAt,
-    }),
-  ).toString("base64url");
-  const signature = signAuthPayload(payload, config);
-  return {
-    account: config.authAccount,
-    displayName: config.authAccount,
-    token: `${payload}.${signature}`,
-    expiresAt,
-  };
-}
-
-function verifyAuthToken(token, config, now = Date.now()) {
-  if (!isAuthEnabled(config) || typeof token !== "string") return null;
-  const [payload, signature] = token.split(".");
-  if (!payload || !signature) return null;
-  const expectedSignature = signAuthPayload(payload, config);
-  if (!safeEqual(signature, expectedSignature)) return null;
-
-  try {
-    const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    if (parsed.account !== config.authAccount) return null;
-    if (!Number.isFinite(parsed.expiresAt) || parsed.expiresAt <= now) return null;
-    return { account: parsed.account, expiresAt: parsed.expiresAt };
-  } catch {
+  const passwordMatches = validatePasswordHashEncoding(config.authPasswordHash)
+    ? await verifyPassword(body?.password, config.authPasswordHash)
+    : constantTimeEqual(body?.password, config.authPassword);
+  if (account !== config.authAccount || !passwordMatches) {
+    for (const limiterKey of limiterKeys) recordLoginFailure(db, limiterKey, now);
     return null;
   }
+
+  for (const limiterKey of limiterKeys) clearLoginFailures(db, limiterKey);
+  return createSession(db, config, { account: config.authAccount, now });
 }
 
-function verifyWeixinAgentToken(token, config) {
-  if (!config.weixinAgentApiToken || typeof token !== "string") return null;
-  if (!safeEqual(token, config.weixinAgentApiToken)) return null;
-  return { account: "weixin-agent", integration: "weixin-agent" };
+function authenticateRequest(db, config, request, now = Date.now()) {
+  const cookies = parseCookies(request.headers.cookie);
+  const cookieValue = cookies[config.authCookieName];
+  const activeSession = getActiveSession(db, config, cookieValue, now);
+  if (activeSession) {
+    return {
+      ...activeSession,
+      cookieValue,
+      csrfToken: createCsrfToken(config, activeSession.id),
+      kind: "user",
+    };
+  }
+  return authenticateMachineRequest(request.headers.authorization, config);
 }
 
-function verifyAuthorizationHeader(header, config) {
-  const value = String(header ?? "");
-  const match = value.match(/^Bearer\s+(.+)$/i);
-  if (!match) return null;
-  return verifyAuthToken(match[1], config) ?? verifyWeixinAgentToken(match[1], config);
-}
-
-function authenticateLogin(config, body) {
-  if (!isAuthEnabled(config)) return null;
-  const account = String(body?.account ?? "").trim();
-  const password = String(body?.password ?? "");
-  if (!safeEqual(account, config.authAccount)) return null;
-  if (!safeEqual(password, config.authPassword)) return null;
-  return createAuthToken(config);
+function isCookieWrite(method) {
+  return method === "POST" || method === "PATCH" || method === "DELETE";
 }
 
 export function createServer(options = {}) {
@@ -1323,46 +1324,23 @@ export function createServer(options = {}) {
   });
 
   const server = createHttpServer(async (request, response) => {
-    if (request.method === "OPTIONS") {
-      sendJson(response, 204, {});
-      return;
-    }
-
-    const url = new URL(request.url, `http://${request.headers.host ?? "127.0.0.1"}`);
-    const parts = splitPath(url.pathname);
-
+    const requestId = randomUUID();
+    request[requestConfigSymbol] = config;
+    response[responseContextSymbol] = { config, requestId };
     try {
-      if (request.method === "POST" && url.pathname === "/api/auth/login") {
-        if (!isAuthEnabled(config)) {
-          sendJson(response, 503, { error: "auth_not_configured", message: "登录账号尚未配置" });
-          return;
-        }
-        const session = authenticateLogin(config, await readJson(request));
-        if (!session) return unauthorized(response, "账号或密码错误");
-        sendJson(response, 200, session);
-        return;
+      const origin = request.headers.origin;
+      if (Array.isArray(origin)) {
+        throw new HttpError(403, "ORIGIN_NOT_ALLOWED", "Request origin is not allowed");
       }
+      corsHeaders(origin, config);
+      response[responseContextSymbol].origin = origin;
 
-      if (
-        isAuthMisconfigured(config) &&
-        url.pathname.startsWith("/api/") &&
-        url.pathname !== "/api/health"
-      ) {
-        sendJson(response, 503, {
-          error: "auth_not_configured",
-          message: "Authentication is required but not fully configured",
-        });
+      const url = new URL(request.url, `http://${request.headers.host ?? "127.0.0.1"}`);
+      const parts = splitPath(url.pathname);
+
+      if (request.method === "OPTIONS") {
+        sendJson(response, 204, null);
         return;
-      }
-
-      if (
-        isAuthEnabled(config) &&
-        url.pathname.startsWith("/api/") &&
-        url.pathname !== "/api/health" &&
-        !verifyAuthorizationHeader(request.headers.authorization, config) &&
-        !verifyAuthToken(url.searchParams.get("token"), config)
-      ) {
-        return unauthorized(response);
       }
 
       if (request.method === "GET" && url.pathname === "/api/health") {
@@ -1375,6 +1353,77 @@ export function createServer(options = {}) {
           modelName: config.modelName,
           modelReady: config.aiAnalysisMode === "model" && Boolean(config.modelApiKey),
           authEnabled: isAuthEnabled(config),
+        });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/auth/login") {
+        if (authenticateMachineRequest(request.headers.authorization, config)) {
+          assertMachineRouteAllowed(request.method, url.pathname);
+        }
+        if (!isAuthEnabled(config)) {
+          throw new HttpError(
+            503,
+            "AUTH_NOT_CONFIGURED",
+            "Authentication is required but not fully configured",
+          );
+        }
+        const session = await authenticateLogin(
+          db,
+          config,
+          await readJson(request),
+          request.socket?.remoteAddress ?? "unknown",
+        );
+        if (!session) {
+          return unauthorized(response, "Account or password is incorrect", "INVALID_CREDENTIALS");
+        }
+        sendJson(response, 200, {
+          account: session.account,
+          displayName: session.account,
+          expiresAt: session.expiresAt,
+          csrfToken: session.csrfToken,
+        }, {
+          "Set-Cookie": buildSessionCookie(config, session.cookieValue),
+        });
+        return;
+      }
+
+      if (isAuthMisconfigured(config) && url.pathname.startsWith("/api/")) {
+        throw new HttpError(
+          503,
+          "AUTH_NOT_CONFIGURED",
+          "Authentication is required but not fully configured",
+        );
+      }
+
+      let requestIdentity = { account: "anonymous", kind: "anonymous" };
+      if (config.authRequired && url.pathname.startsWith("/api/")) {
+        requestIdentity = authenticateRequest(db, config, request);
+        if (!requestIdentity) return unauthorized(response);
+        if (requestIdentity.kind === "machine") {
+          assertMachineRouteAllowed(request.method, url.pathname);
+        } else if (isCookieWrite(request.method)) {
+          assertCsrfToken(request.headers["x-csrf-token"], requestIdentity.csrfToken);
+        }
+      }
+      request.authContext = requestIdentity;
+
+      if (request.method === "GET" && url.pathname === "/api/auth/session") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        sendJson(response, 200, {
+          account: requestIdentity.account,
+          displayName: requestIdentity.account,
+          expiresAt: requestIdentity.expiresAt,
+          csrfToken: requestIdentity.csrfToken,
+        });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        revokeSession(db, config, requestIdentity.cookieValue);
+        sendJson(response, 204, null, {
+          "Set-Cookie": buildSessionCookie(config, "", { clear: true }),
         });
         return;
       }
@@ -2255,11 +2304,11 @@ export function createServer(options = {}) {
 
       notFound(response);
     } catch (error) {
-      if (error instanceof SyntaxError) {
-        badRequest(response, "invalid JSON body");
+      if (response.headersSent) {
+        response.destroy();
         return;
       }
-      sendJson(response, 500, { error: "internal_error", message: error.message });
+      sendHttpError(response, error, responseOptions(response));
     }
   });
 

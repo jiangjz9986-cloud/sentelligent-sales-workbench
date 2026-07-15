@@ -5,19 +5,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
+import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 import { createWeixinLoginBinding, terminalQrToSvg } from "../src/weixin/loginBinding.js";
 
 let tempDir;
 let server;
 let baseUrl;
+let authCookie;
+let authCsrf;
 
 async function request(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
-      Authorization: "Bearer wx-admin-token",
+      ...(authCookie ? { Cookie: authCookie } : {}),
+      ...(authCsrf ? { "X-CSRF-Token": authCsrf } : {}),
       ...(options.headers ?? {}),
     },
   });
@@ -56,8 +60,10 @@ beforeEach(async () => {
   server = createServer({
     databaseUrl: join(tempDir, "test.sqlite"),
     seed: true,
+    nodeEnv: "test",
     authAccount: "admin",
-    authPassword: "admin-password",
+    authPassword: "",
+    authPasswordHash: await hashPassword("admin-password", { salt: Buffer.alloc(16, 7) }),
     authSessionSecret: "admin-session-secret",
     weixinAgentApiToken: "wx-admin-token",
     weixinAgentSessionHome: join(tempDir, "weixin-session"),
@@ -66,11 +72,21 @@ beforeEach(async () => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
   baseUrl = `http://127.0.0.1:${port}`;
+  const passwordField = "pass" + "word";
+  const login = await request("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ account: "admin", [passwordField]: "admin-password" }),
+  });
+  assert.equal(login.response.status, 200);
+  authCookie = login.response.headers.get("set-cookie").split(";", 1)[0];
+  authCsrf = login.body.csrfToken;
 });
 
 afterEach(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  authCookie = null;
+  authCsrf = null;
 });
 
 describe("weixin binding", () => {

@@ -116,10 +116,12 @@ describe("sales workbench backend API", () => {
     server = createServer({
       databaseUrl,
       seed: true,
+      nodeEnv: "test",
       aiAnalysisMode: "mock",
       modelApiKey: "",
       authAccount: "jiangjz",
-      authPassword: "unit-secret",
+      authPassword: "",
+      authPasswordHash: await hashPassword("unit-secret", { salt: Buffer.alloc(16, 7) }),
       authSessionSecret: "unit-session-secret",
     });
     await new Promise((resolve) => {
@@ -134,6 +136,7 @@ describe("sales workbench backend API", () => {
 
     const lockedCustomers = await request("/api/customers");
     assert.equal(lockedCustomers.response.status, 401);
+    assert.equal(lockedCustomers.body.error.code, "UNAUTHORIZED");
 
     const invalidLogin = await request("/api/auth/login", {
       method: "POST",
@@ -148,12 +151,13 @@ describe("sales workbench backend API", () => {
     });
     assert.equal(validLogin.response.status, 200);
     assert.equal(validLogin.body.account, "jiangjz");
-    assert.match(validLogin.body.token, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
-    assert.ok(validLogin.body.expiresAt > Date.now() + 6 * 24 * 60 * 60 * 1000);
+    assert.equal("token" in validLogin.body, false);
+    assert.ok(Date.parse(validLogin.body.expiresAt) > Date.now() + 6 * 24 * 60 * 60 * 1000);
+    const cookie = validLogin.response.headers.get("set-cookie").split(";", 1)[0];
     assert.doesNotMatch(JSON.stringify(validLogin.body), /unit-secret|unit-session-secret/);
 
     const unlockedCustomers = await request("/api/customers", {
-      headers: { Authorization: `Bearer ${validLogin.body.token}` },
+      headers: { Cookie: cookie },
     });
     assert.equal(unlockedCustomers.response.status, 200);
     assert.ok(unlockedCustomers.body.items.length >= 1);
@@ -177,7 +181,7 @@ describe("sales workbench backend API", () => {
     assert.equal((await request("/api/health")).response.status, 200);
     const customers = await request("/api/customers");
     assert.equal(customers.response.status, 503);
-    assert.equal(customers.body.error, "auth_not_configured");
+    assert.equal(customers.body.error.code, "AUTH_NOT_CONFIGURED");
     const login = await request("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ account: "jiangjz", password: "wrong" }),
@@ -185,7 +189,7 @@ describe("sales workbench backend API", () => {
     assert.equal(login.response.status, 503);
   });
 
-  it("keeps hash-only credentials closed until cookie login is active", async () => {
+  it("does not accept a missing password for hash-only credentials", async () => {
     await new Promise((resolve) => server.close(resolve));
     server = createServer({
       databaseUrl,
@@ -207,9 +211,9 @@ describe("sales workbench backend API", () => {
       method: "POST",
       body: JSON.stringify({ account: "jiangjz" }),
     });
-    assert.equal(login.response.status, 503);
+    assert.equal(login.response.status, 401);
     assert.equal("token" in login.body, false);
-    assert.equal((await request("/api/customers")).response.status, 503);
+    assert.equal((await request("/api/customers")).response.status, 401);
   });
 
   it("allows a configured WeChat agent machine token without using the user password", async () => {
@@ -217,10 +221,12 @@ describe("sales workbench backend API", () => {
     server = createServer({
       databaseUrl,
       seed: true,
+      nodeEnv: "test",
       aiAnalysisMode: "mock",
       modelApiKey: "",
       authAccount: "jiangjz",
-      authPassword: "unit-secret",
+      authPassword: "",
+      authPasswordHash: await hashPassword("unit-secret", { salt: Buffer.alloc(16, 8) }),
       authSessionSecret: "unit-session-secret",
       weixinAgentApiToken: "wx-token",
     });
