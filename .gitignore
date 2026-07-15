@@ -22,6 +22,7 @@
 # Local Codex coordination state
 .agents/
 .codex/
+.worktrees/
 
 # Generated project outputs. Keep only the active app, selected references,
 # brand assets, and current audit evidence under version control.
