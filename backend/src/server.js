@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
+import { insertAudit } from "./audit/auditRepository.js";
 import {
   authenticateMachineRequest,
   assertMachineRouteAllowed,
@@ -428,65 +429,6 @@ function softDeleteAuditSnapshot(entityType, entity, lifecycle = {}) {
   };
 }
 
-function sanitizeAuditScalar(value) {
-  if (typeof value !== "string") return value;
-  return value
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "[REDACTED]")
-    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
-    .replace(/\b(?:cookie|csrf(?:token)?|session(?:id|token|cookie)?|credential|wechat(?:secret|token)?|provider(?:api)?key)\s*[:=]\s*[^\s,;]+/gi, "[REDACTED]");
-}
-
-function sanitizeAuditMetadata(value, depth = 0) {
-  if (depth > 5) return null;
-  if (value === null || value === undefined) return value;
-  if (typeof value !== "object") return sanitizeAuditScalar(value);
-  if (Array.isArray(value)) return value.slice(0, 20).map((item) => sanitizeAuditMetadata(item, depth + 1));
-
-  const sanitized = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (/api.?key|secret|token|authorization|password|contact|phone|mobile|email|cookie|csrf|credential|session|wechat|provider.?key/i.test(key)) continue;
-    sanitized[key] = sanitizeAuditMetadata(item, depth + 1);
-  }
-  return sanitized;
-}
-
-function recordAuditLog(db, {
-  action,
-  entityType,
-  entityId = null,
-  actor = null,
-  metadata = {},
-  requestId = null,
-  before = {},
-  after = {},
-  entityVersion = null,
-}) {
-  const id = randomUUID();
-  run(
-    db,
-    `INSERT INTO audit_logs (
-       id, action, entity_type, entity_id, actor, metadata_json,
-       request_id, before_json, after_json, entity_version
-     ) VALUES (
-       $id, $action, $entityType, $entityId, $actor, $metadataJson,
-       $requestId, $beforeJson, $afterJson, $entityVersion
-     )`,
-    {
-      $id: id,
-      $action: action,
-      $entityType: entityType,
-      $entityId: entityId,
-      $actor: actor,
-      $metadataJson: JSON.stringify(sanitizeAuditMetadata(metadata) ?? {}),
-      $requestId: requestId,
-      $beforeJson: JSON.stringify(sanitizeAuditMetadata(before) ?? {}),
-      $afterJson: JSON.stringify(sanitizeAuditMetadata(after) ?? {}),
-      $entityVersion: entityVersion,
-    },
-  );
-  return auditLogFromRow(get(db, "SELECT * FROM audit_logs WHERE id = $id", { $id: id }));
-}
-
 function listAuditLogs(db, searchParams) {
   const limit = Math.max(1, Math.min(Number(searchParams.get("limit")) || 100, 500));
   return all(
@@ -673,7 +615,7 @@ function softDeleteRecord(db, {
       deletedAt: afterRow.deleted_at,
       deletedBy: afterRow.deleted_by,
     });
-    recordAuditLog(db, {
+    insertAudit(db, {
       action,
       entityType,
       entityId: id,
@@ -1477,8 +1419,8 @@ function getQuickRecordRiskRow(db, sourceId) {
   );
 }
 
-function upsertRiskItem(db, draft) {
-  const currentRow = draft.sourceType === "quick_record"
+function findRiskItemRowForDraft(db, draft) {
+  return draft.sourceType === "quick_record"
     ? getQuickRecordRiskRow(db, draft.sourceId)
     : get(
         db,
@@ -1497,6 +1439,10 @@ function upsertRiskItem(db, draft) {
           $sourceId: draft.sourceId ?? null,
         },
       );
+}
+
+function upsertRiskItem(db, draft) {
+  const currentRow = findRiskItemRowForDraft(db, draft);
   const current = riskFromRow(currentRow);
 
   if (current) {
@@ -1802,13 +1748,20 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/customers") {
         const body = await readValidatedJson(request, requestSchemas.customerCreate);
-        const item = createCustomer(db, body);
-        recordAuditLog(db, {
-          action: "customer.create",
-          entityType: "customer",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: { name: item.name, region: item.region, level: item.level },
+        const item = withImmediateTransaction(db, () => {
+          const created = createCustomer(db, body);
+          insertAudit(db, {
+            action: "customer.create",
+            entityType: "customer",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: { name: created.name, region: created.region, level: created.level },
+          });
+          return created;
         });
         sendJson(response, 201, { item });
         return;
@@ -1824,14 +1777,27 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, customerPatchSchema);
-        const item = updateCustomer(db, parts[2], body, expectedVersion);
-        if (!item) return notFound(response);
-        recordAuditLog(db, {
-          action: "customer.update",
-          entityType: "customer",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: { changedFields: Object.keys(body) },
+        const item = withImmediateTransaction(db, () => {
+          const before = customerFromRow(get(
+            db,
+            "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL",
+            { $id: parts[2] },
+          ));
+          if (!before) notFound();
+          const updated = updateCustomer(db, parts[2], body, expectedVersion);
+          if (!updated) notFound();
+          insertAudit(db, {
+            action: "customer.update",
+            entityType: "customer",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: { changedFields: Object.keys(body) },
+          });
+          return updated;
         });
         sendJson(response, 200, { item });
         return;
@@ -1871,14 +1837,21 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/opportunities") {
         const body = await readValidatedJson(request, requestSchemas.opportunityCreate);
-        const customer = requireActiveCustomer(db, body.customerId);
-        const item = createOpportunity(db, { ...body, customer: customer.name });
-        recordAuditLog(db, {
-          action: "opportunity.create",
-          entityType: "opportunity",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: { name: item.name, customerId: item.customerId, stage: item.stage },
+        const item = withImmediateTransaction(db, () => {
+          const customer = requireActiveCustomer(db, body.customerId);
+          const created = createOpportunity(db, { ...body, customer: customer.name });
+          insertAudit(db, {
+            action: "opportunity.create",
+            entityType: "opportunity",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: { name: created.name, customerId: created.customerId, stage: created.stage },
+          });
+          return created;
         });
         sendJson(response, 201, { item });
         return;
@@ -1894,17 +1867,28 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, opportunityPatchSchema);
-        const existing = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
-        if (!existing) return notFound(response);
-        const customer = requireActiveCustomer(db, body.customerId ?? existing.customerId);
-        const item = updateOpportunity(db, parts[2], { ...body, customer: customer.name }, expectedVersion);
-        if (!item) return notFound(response);
-        recordAuditLog(db, {
-          action: "opportunity.update",
-          entityType: "opportunity",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: { changedFields: Object.keys(body), stage: item.stage, probability: item.probability },
+        const item = withImmediateTransaction(db, () => {
+          const before = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
+          if (!before) notFound();
+          const customer = requireActiveCustomer(db, body.customerId ?? before.customerId);
+          const updated = updateOpportunity(db, parts[2], { ...body, customer: customer.name }, expectedVersion);
+          if (!updated) notFound();
+          insertAudit(db, {
+            action: "opportunity.update",
+            entityType: "opportunity",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: {
+              changedFields: Object.keys(body),
+              stage: updated.stage,
+              probability: updated.probability,
+            },
+          });
+          return updated;
         });
         sendJson(response, 200, { item });
         return;
@@ -1944,15 +1928,30 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.actionPatch);
-        const item = updateActionItem(db, parts[2], body, expectedVersion);
-        if (!item) return notFound(response);
-        if (item.error === "invalid_status") return badRequest(response, "status must be pending, in_progress, done, or deferred");
-        recordAuditLog(db, {
-          action: "action.update",
-          entityType: "action",
-          entityId: item.id,
-          actor: item.assignee,
-          metadata: { status: item.status, due: item.due, changedFields: Object.keys(body) },
+        const item = withImmediateTransaction(db, () => {
+          const before = actionFromRow(get(
+            db,
+            "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL",
+            { $id: parts[2] },
+          ));
+          if (!before) notFound();
+          const updated = updateActionItem(db, parts[2], body, expectedVersion);
+          if (!updated) notFound();
+          if (updated.error === "invalid_status") {
+            badRequest(response, "status must be pending, in_progress, done, or deferred");
+          }
+          insertAudit(db, {
+            action: "action.update",
+            entityType: "action",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: { status: updated.status, due: updated.due, changedFields: Object.keys(body) },
+          });
+          return updated;
         });
         sendJson(response, 200, { item });
         return;
@@ -1993,15 +1992,30 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "risks" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.riskPatch);
-        const item = updateRiskItem(db, parts[2], body, expectedVersion);
-        if (!item) return notFound(response);
-        if (item.error === "invalid_status") return badRequest(response, "status must be open, accepted, in_progress, deferred, or closed");
-        recordAuditLog(db, {
-          action: "risk.update",
-          entityType: "risk",
-          entityId: item.id,
-          actor: item.assignee,
-          metadata: { status: item.status, due: item.due, changedFields: Object.keys(body) },
+        const item = withImmediateTransaction(db, () => {
+          const before = riskFromRow(get(
+            db,
+            "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL",
+            { $id: parts[2] },
+          ));
+          if (!before) notFound();
+          const updated = updateRiskItem(db, parts[2], body, expectedVersion);
+          if (!updated) notFound();
+          if (updated.error === "invalid_status") {
+            badRequest(response, "status must be open, accepted, in_progress, deferred, or closed");
+          }
+          insertAudit(db, {
+            action: "risk.update",
+            entityType: "risk",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: { status: updated.status, due: updated.due, changedFields: Object.keys(body) },
+          });
+          return updated;
         });
         sendJson(response, 200, { item });
         return;
@@ -2033,15 +2047,23 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/knowledge") {
         const body = await readValidatedJson(request, requestSchemas.knowledgeCreate);
-        const item = createKnowledgeItem(db, {
-          ...body,
-          title: String(body.title).trim(),
-        });
-        recordAuditLog(db, {
-          action: "knowledge.create",
-          entityType: "knowledge",
-          entityId: item.id,
-          metadata: { title: item.title, category: item.category, tags: item.tags },
+        const item = withImmediateTransaction(db, () => {
+          const created = createKnowledgeItem(db, {
+            ...body,
+            title: String(body.title).trim(),
+          });
+          insertAudit(db, {
+            action: "knowledge.create",
+            entityType: "knowledge",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: { title: created.title, category: created.category, tags: created.tags },
+          });
+          return created;
         });
         sendJson(response, 201, { item });
         return;
@@ -2050,13 +2072,27 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "knowledge" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, knowledgePatchSchema);
-        const item = updateKnowledgeItem(db, parts[2], body, expectedVersion);
-        if (!item) return notFound(response);
-        recordAuditLog(db, {
-          action: "knowledge.update",
-          entityType: "knowledge",
-          entityId: item.id,
-          metadata: { changedFields: Object.keys(body), title: item.title },
+        const item = withImmediateTransaction(db, () => {
+          const before = knowledgeFromRow(get(
+            db,
+            "SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL",
+            { $id: parts[2] },
+          ));
+          if (!before) notFound();
+          const updated = updateKnowledgeItem(db, parts[2], body, expectedVersion);
+          if (!updated) notFound();
+          insertAudit(db, {
+            action: "knowledge.update",
+            entityType: "knowledge",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: { changedFields: Object.keys(body), title: updated.title },
+          });
+          return updated;
         });
         sendJson(response, 200, { item });
         return;
@@ -2102,41 +2138,50 @@ export function createServer(options = {}) {
         parts[2] &&
         parts[3] === "diagnose-risks"
       ) {
-        const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
-        if (!opportunity) return notFound(response);
-
-        const customer = customerFromRow(
-          get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: opportunity.customerId }),
-        );
-        if (!customer) return notFound(response);
-
         const body = await readValidatedJson(
           request,
           requestSchemas.riskDiagnose,
           { allowEmpty: true },
         );
         const sourceType = body.sourceType ?? "opportunity_diagnosis";
-        const sourceId = body.sourceId ?? opportunity.id;
-        const items = buildOpportunityRiskDrafts({
-          customer,
-          opportunity,
-          sourceType,
-          sourceId,
-        }).map((draft) => upsertRiskItem(db, draft));
+        const sourceId = body.sourceId ?? parts[2];
+        const items = withImmediateTransaction(db, () => {
+          const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
+          if (!opportunity) notFound();
+          const customer = customerFromRow(get(
+            db,
+            "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL",
+            { $id: opportunity.customerId },
+          ));
+          if (!customer) notFound();
 
-        for (const item of items) {
-          recordAuditLog(db, {
-            action: "risk.diagnose",
-            entityType: "risk",
-            entityId: item.id,
-            metadata: {
-              customerId: item.customerId,
-              opportunityId: item.opportunityId,
-              sourceType: item.sourceType,
-              sourceId: item.sourceId,
-            },
+          return buildOpportunityRiskDrafts({
+            customer,
+            opportunity,
+            sourceType,
+            sourceId,
+          }).map((draft) => {
+            const before = riskFromRow(findRiskItemRowForDraft(db, draft));
+            const item = upsertRiskItem(db, draft);
+            insertAudit(db, {
+              action: "risk.diagnose",
+              entityType: "risk",
+              entityId: item.id,
+              actor: request.authContext.account,
+              requestId,
+              before,
+              after: item,
+              entityVersion: item.version,
+              metadata: {
+                customerId: item.customerId,
+                opportunityId: item.opportunityId,
+                sourceType: item.sourceType,
+                sourceId: item.sourceId,
+              },
+            });
+            return item;
           });
-        }
+        });
         sendJson(response, 201, { items });
         return;
       }
@@ -2169,26 +2214,43 @@ export function createServer(options = {}) {
       if (request.method === "POST" && url.pathname === "/api/quick-records") {
         const body = await readValidatedJson(request, requestSchemas.quickRecordCreate);
         const rawContent = String(body.rawContent ?? "").trim();
-        validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
-
-        const id = randomUUID();
-        run(
-          db,
-          `INSERT INTO quick_records (
-            id, raw_content, occurred_at, source_channel, customer_id, opportunity_id
-          ) VALUES (
-            $id, $rawContent, $occurredAt, $sourceChannel, $customerId, $opportunityId
-          )`,
-          {
-            $id: id,
-            $rawContent: rawContent,
-            $occurredAt: body.occurredAt ?? null,
-            $sourceChannel: body.sourceChannel ?? "快速记录",
-            $customerId: body.customerId ?? null,
-            $opportunityId: body.opportunityId ?? null,
-          },
-        );
-        const item = quickRecordFromRow(get(db, "SELECT * FROM quick_records WHERE id = $id", { $id: id }));
+        const item = withImmediateTransaction(db, () => {
+          validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
+          const id = randomUUID();
+          run(
+            db,
+            `INSERT INTO quick_records (
+              id, raw_content, occurred_at, source_channel, customer_id, opportunity_id
+            ) VALUES (
+              $id, $rawContent, $occurredAt, $sourceChannel, $customerId, $opportunityId
+            )`,
+            {
+              $id: id,
+              $rawContent: rawContent,
+              $occurredAt: body.occurredAt ?? null,
+              $sourceChannel: body.sourceChannel ?? "快速记录",
+              $customerId: body.customerId ?? null,
+              $opportunityId: body.opportunityId ?? null,
+            },
+          );
+          const created = quickRecordFromRow(get(db, "SELECT * FROM quick_records WHERE id = $id", { $id: id }));
+          insertAudit(db, {
+            action: "quick_record.create",
+            entityType: "quick_record",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: {
+              sourceChannel: created.sourceChannel,
+              customerId: created.customerId,
+              opportunityId: created.opportunityId,
+            },
+          });
+          return created;
+        });
         sendJson(response, 201, { item });
         return;
       }
@@ -2211,24 +2273,50 @@ export function createServer(options = {}) {
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
 
-        const id = randomUUID();
-        run(
-          db,
-          `INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
-           VALUES ($id, $quickRecordId, $source, $confidence, $analysisJson)`,
-          {
-            $id: id,
-            $quickRecordId: quickRecord.id,
-            $source: analysis.source,
-            $confidence: analysis.confidence ?? 70,
-            $analysisJson: JSON.stringify(analysis),
-          },
-        );
-        run(db, "UPDATE quick_records SET status = 'analyzed', updated_at = CURRENT_TIMESTAMP WHERE id = $id", {
-          $id: quickRecord.id,
-        });
+        const item = withImmediateTransaction(db, () => {
+          const current = quickRecordFromRow(get(
+            db,
+            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
+            { $id: quickRecord.id },
+          ));
+          if (!current) notFound();
 
-        sendJson(response, 201, { item: getLatestInsight(db, quickRecord.id) });
+          const id = randomUUID();
+          run(
+            db,
+            `INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
+             VALUES ($id, $quickRecordId, $source, $confidence, $analysisJson)`,
+            {
+              $id: id,
+              $quickRecordId: current.id,
+              $source: analysis.source,
+              $confidence: analysis.confidence ?? 70,
+              $analysisJson: JSON.stringify(analysis),
+            },
+          );
+          run(db, "UPDATE quick_records SET status = 'analyzed', updated_at = CURRENT_TIMESTAMP WHERE id = $id", {
+            $id: current.id,
+          });
+          const updatedRecord = quickRecordFromRow(get(
+            db,
+            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
+            { $id: current.id },
+          ));
+          const insight = insightFromRow(get(db, "SELECT * FROM ai_insights WHERE id = $id", { $id: id }));
+          insertAudit(db, {
+            action: "quick_record.analyze",
+            entityType: "quick_record",
+            entityId: current.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { quickRecord: current, insight: null },
+            after: { quickRecord: updatedRecord, insight },
+            entityVersion: updatedRecord.version,
+            metadata: { insightId: insight.id, source: insight.source, confidence: insight.confidence },
+          });
+          return insight;
+        });
+        sendJson(response, 201, { item });
         return;
       }
 
@@ -2246,31 +2334,37 @@ export function createServer(options = {}) {
           config,
           { fetchImpl: options.fetchImpl },
         );
-        const id = randomUUID();
-        run(
-          db,
-          `INSERT INTO ai_suggestions (id, type, title, status, content, source_refs)
-           VALUES ($id, $type, $title, $status, $content, $sourceRefs)`,
-          {
-            $id: id,
-            $type: suggestion.type,
-            $title: suggestion.title,
-            $status: suggestion.status,
-            $content: suggestion.content,
-            $sourceRefs: JSON.stringify(suggestion.sourceRefs),
-          },
-        );
-
-        const item = aiSuggestionFromRow(get(db, "SELECT * FROM ai_suggestions WHERE id = $id", { $id: id }));
-        recordAuditLog(db, {
-          action: "ai.suggestion.generate",
-          entityType: "ai_suggestion",
-          entityId: item.id,
-          metadata: {
-            type: item.type,
-            title: item.title,
-            sourceRefs: item.sourceRefs.length,
-          },
+        const item = withImmediateTransaction(db, () => {
+          const id = randomUUID();
+          run(
+            db,
+            `INSERT INTO ai_suggestions (id, type, title, status, content, source_refs)
+             VALUES ($id, $type, $title, $status, $content, $sourceRefs)`,
+            {
+              $id: id,
+              $type: suggestion.type,
+              $title: suggestion.title,
+              $status: suggestion.status,
+              $content: suggestion.content,
+              $sourceRefs: JSON.stringify(suggestion.sourceRefs),
+            },
+          );
+          const created = aiSuggestionFromRow(get(db, "SELECT * FROM ai_suggestions WHERE id = $id", { $id: id }));
+          insertAudit(db, {
+            action: "ai.suggestion.generate",
+            entityType: "ai_suggestion",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            metadata: {
+              type: created.type,
+              title: created.title,
+              sourceRefs: created.sourceRefs.length,
+            },
+          });
+          return created;
         });
         sendJson(response, 201, { item });
         return;
@@ -2465,7 +2559,7 @@ export function createServer(options = {}) {
             action: actionItem ? { id: actionItem.id, version: actionItem.version } : null,
             risk: riskItem ? { id: riskItem.id, version: riskItem.version, title: riskItem.title } : null,
           });
-          recordAuditLog(db, {
+          insertAudit(db, {
             action: "quick_record.confirm",
             entityType: "quick_record",
             entityId: updatedRecord.id,
@@ -2555,33 +2649,42 @@ export function createServer(options = {}) {
           { fetchImpl: options.fetchImpl },
         );
 
-        const id = randomUUID();
-        run(
-          db,
-          `INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
-           VALUES ($id, $owner, $periodStart, $periodEnd, 'draft', $content, $sourceRefs)`,
-          {
-            $id: id,
-            $owner: body.owner,
-            $periodStart: body.periodStart,
-            $periodEnd: body.periodEnd,
-            $content: draft.content,
-            $sourceRefs: JSON.stringify(draft.sourceRefs),
-          },
-        );
-
-        const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id", { $id: id }));
-        recordAuditLog(db, {
-          action: "weekly_report.draft",
-          entityType: "weekly_report",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: {
-            periodStart: item.periodStart,
-            periodEnd: item.periodEnd,
-            sourceRefs: item.sourceRefs.length,
-            knowledgeIds,
-          },
+        const item = withImmediateTransaction(db, () => {
+          if (getKnowledgeItemsByIds(db, knowledgeIds).length !== knowledgeIds.length) {
+            validationFailure("knowledgeIds");
+          }
+          const id = randomUUID();
+          run(
+            db,
+            `INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
+             VALUES ($id, $owner, $periodStart, $periodEnd, 'draft', $content, $sourceRefs)`,
+            {
+              $id: id,
+              $owner: body.owner,
+              $periodStart: body.periodStart,
+              $periodEnd: body.periodEnd,
+              $content: draft.content,
+              $sourceRefs: JSON.stringify(draft.sourceRefs),
+            },
+          );
+          const created = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id", { $id: id }));
+          insertAudit(db, {
+            action: "weekly_report.draft",
+            entityType: "weekly_report",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: {
+              periodStart: created.periodStart,
+              periodEnd: created.periodEnd,
+              sourceRefs: created.sourceRefs.length,
+              knowledgeIds,
+            },
+          });
+          return created;
         });
         sendJson(response, 201, { item });
         return;
@@ -2616,15 +2719,30 @@ export function createServer(options = {}) {
       ) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.weeklyPatch);
-        const item = updateWeeklyReport(db, parts[3], body, expectedVersion);
-        if (!item) return notFound(response);
-        if (item.error === "invalid_status") return badRequest(response, "status must be draft, saved, or ready");
-        recordAuditLog(db, {
-          action: "weekly_report.update",
-          entityType: "weekly_report",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: { status: item.status, changedFields: Object.keys(body) },
+        const item = withImmediateTransaction(db, () => {
+          const before = weeklyReportFromRow(get(
+            db,
+            "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL",
+            { $id: parts[3] },
+          ));
+          if (!before) notFound();
+          const updated = updateWeeklyReport(db, parts[3], body, expectedVersion);
+          if (!updated) notFound();
+          if (updated.error === "invalid_status") {
+            badRequest(response, "status must be draft, saved, or ready");
+          }
+          insertAudit(db, {
+            action: "weekly_report.update",
+            entityType: "weekly_report",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: { status: updated.status, changedFields: Object.keys(body) },
+          });
+          return updated;
         });
         sendJson(response, 200, { item });
         return;
@@ -2730,39 +2848,49 @@ export function createServer(options = {}) {
           { fetchImpl: options.fetchImpl },
         );
 
-        const id = randomUUID();
-        run(
-          db,
-          `INSERT INTO solution_drafts (
-             id, owner, artifact_type, title, customer_id, opportunity_id, status, content, source_refs
-           ) VALUES (
-             $id, $owner, $artifactType, $title, $customerId, $opportunityId, 'draft', $content, $sourceRefs
-           )`,
-          {
-            $id: id,
-            $owner: body.owner,
-            $artifactType: draft.artifactType ?? fallbackDraft.artifactType,
-            $title: draft.title,
-            $customerId: customer.id,
-            $opportunityId: opportunity.id,
-            $content: draft.content,
-            $sourceRefs: JSON.stringify(draft.sourceRefs),
-          },
-        );
-
-        const item = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: id }));
-        recordAuditLog(db, {
-          action: "solution_draft.generate",
-          entityType: "solution_draft",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: {
-            customerId: item.customerId,
-            opportunityId: item.opportunityId,
-            artifactType: item.artifactType,
-            sourceRefs: item.sourceRefs.length,
-            knowledgeIds,
-          },
+        const item = withImmediateTransaction(db, () => {
+          validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
+          if (getKnowledgeItemsByIds(db, knowledgeIds).length !== knowledgeIds.length) {
+            validationFailure("knowledgeIds");
+          }
+          const id = randomUUID();
+          run(
+            db,
+            `INSERT INTO solution_drafts (
+               id, owner, artifact_type, title, customer_id, opportunity_id, status, content, source_refs
+             ) VALUES (
+               $id, $owner, $artifactType, $title, $customerId, $opportunityId, 'draft', $content, $sourceRefs
+             )`,
+            {
+              $id: id,
+              $owner: body.owner,
+              $artifactType: draft.artifactType ?? fallbackDraft.artifactType,
+              $title: draft.title,
+              $customerId: customer.id,
+              $opportunityId: opportunity.id,
+              $content: draft.content,
+              $sourceRefs: JSON.stringify(draft.sourceRefs),
+            },
+          );
+          const created = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: id }));
+          insertAudit(db, {
+            action: "solution_draft.generate",
+            entityType: "solution_draft",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: {
+              customerId: created.customerId,
+              opportunityId: created.opportunityId,
+              artifactType: created.artifactType,
+              sourceRefs: created.sourceRefs.length,
+              knowledgeIds,
+            },
+          });
+          return created;
         });
         sendJson(response, 201, { item });
         return;
@@ -2770,35 +2898,45 @@ export function createServer(options = {}) {
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "solutions" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
-        const existing = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2]));
-        if (!existing) return notFound(response);
         const body = await readValidatedJson(request, requestSchemas.solutionPatch);
-        const status = body.status ?? existing.status;
-        runVersionedUpdate(db, {
-          table: "solution_drafts",
-          id: existing.id,
-          expectedVersion,
-          softDeletable: false,
-          setSql: `title = $title,
-                 content = $content,
-                 status = $status`,
-          params: {
-            $title: body.title ?? existing.title,
-            $content: body.content ?? existing.content,
-            $status: status,
-          },
-        });
-        const item = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: existing.id }));
-        recordAuditLog(db, {
-          action: "solution_draft.update",
-          entityType: "solution_draft",
-          entityId: item.id,
-          actor: item.owner,
-          metadata: {
-            status: item.status,
-            artifactType: item.artifactType,
-            changedFields: Object.keys(body),
-          },
+        const item = withImmediateTransaction(db, () => {
+          const before = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2]));
+          if (!before) notFound();
+          runVersionedUpdate(db, {
+            table: "solution_drafts",
+            id: before.id,
+            expectedVersion,
+            softDeletable: false,
+            setSql: `title = $title,
+                   content = $content,
+                   status = $status`,
+            params: {
+              $title: body.title ?? before.title,
+              $content: body.content ?? before.content,
+              $status: body.status ?? before.status,
+            },
+          });
+          const updated = solutionDraftFromRow(get(
+            db,
+            "SELECT * FROM solution_drafts WHERE id = $id",
+            { $id: before.id },
+          ));
+          insertAudit(db, {
+            action: "solution_draft.update",
+            entityType: "solution_draft",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: {
+              status: updated.status,
+              artifactType: updated.artifactType,
+              changedFields: Object.keys(body),
+            },
+          });
+          return updated;
         });
         sendJson(response, 200, { item });
         return;
