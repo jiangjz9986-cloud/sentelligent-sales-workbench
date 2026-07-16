@@ -18,9 +18,10 @@ describe("WSL backend service wrapper", () => {
     const command = buildWslBackendCommand(config);
 
     assert.equal(command.command, "wsl.exe");
-    assert.deepEqual(command.args.slice(0, 4), [
+    assert.deepEqual(command.args.slice(0, 5), [
       "--cd",
       "/mnt/c/Users/50159/Desktop/妫壒鏅鸿/backend",
+      "--exec",
       "env",
       "PORT=8897",
     ]);
@@ -43,5 +44,6 @@ describe("WSL backend service wrapper", () => {
 
     assert.ok(command.args.includes("scripts/db-maintenance.mjs"));
     assert.ok(command.args.includes("backup"));
+    assert.equal(command.args[2], "--exec");
   });
 });

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -43,7 +43,9 @@ export function buildBackendSeedCommand(config) {
     args: [
       "--cd",
       config.backendWslPath,
+      "--exec",
       "env",
+      "NODE_ENV=development",
       `DATABASE_URL=${config.databaseUrl}`,
       "npm",
       "run",
@@ -58,9 +60,13 @@ export function buildBackendCommand(config) {
     args: [
       "--cd",
       config.backendWslPath,
+      "--exec",
       "env",
       `PORT=${config.backendPort}`,
       `DATABASE_URL=${config.databaseUrl}`,
+      `CORS_ALLOWED_ORIGINS=${config.frontendUrl}`,
+      "AUTH_COOKIE_SECURE=false",
+      "NODE_ENV=development",
       "node",
       "src/server.js",
     ],
@@ -143,6 +149,89 @@ function runProcess(commandSpec) {
   });
 }
 
+function normalizeCommandText(value) {
+  return String(value ?? "")
+    .replaceAll("\\", "/")
+    .replace(/["']/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function executableName(value) {
+  return basename(normalizeCommandText(value));
+}
+
+export function createWindowsProcessFingerprint(commandSpec, commandTokens = commandSpec.args ?? []) {
+  const safeTokens = commandTokens
+    .map(String)
+    .filter((token) => token.length > 1)
+    .filter((token) => !/(?:password|secret|token|api_key|authorization)=/i.test(token));
+
+  return {
+    executable: executableName(commandSpec.command),
+    commandTokens: safeTokens,
+  };
+}
+
+export function matchesWindowsProcessFingerprint(processInfo, fingerprint) {
+  if (!processInfo || !fingerprint?.executable || !fingerprint?.commandTokens?.length) return false;
+  if (executableName(processInfo.executable) !== executableName(fingerprint.executable)) return false;
+
+  const commandLine = normalizeCommandText(processInfo.commandLine);
+  return fingerprint.commandTokens.every((token) => commandLine.includes(normalizeCommandText(token)));
+}
+
+async function inspectWindowsProcess(pid) {
+  const numericPid = Number(pid);
+  if (!Number.isSafeInteger(numericPid) || numericPid <= 0) return null;
+  const script = [
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+    `$item = Get-CimInstance Win32_Process -Filter \"ProcessId = ${numericPid}\" -ErrorAction SilentlyContinue`,
+    "if ($null -ne $item) {",
+    "  [pscustomobject]@{ pid = [int]$item.ProcessId; executable = [string]$item.Name; commandLine = [string]$item.CommandLine } | ConvertTo-Json -Compress",
+    "}",
+  ].join("\n");
+  const result = await runProcess({
+    command: "powershell.exe",
+    args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+  });
+  const output = result.stdout.trim();
+  return output ? JSON.parse(output) : null;
+}
+
+async function terminateWindowsProcess(pid) {
+  await runProcess({
+    command: "taskkill.exe",
+    args: ["/PID", String(pid), "/T", "/F"],
+  });
+}
+
+export async function stopOwnedWindowsProcess(runtimeProcess, dependencies = {}) {
+  const pid = Number(runtimeProcess?.pid);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return { status: "not_running", pid: runtimeProcess?.pid ?? null };
+  if (!runtimeProcess?.fingerprint) return { status: "ownership_unverified", pid };
+
+  const inspectProcess = dependencies.inspectProcess ?? inspectWindowsProcess;
+  const terminateProcess = dependencies.terminateProcess ?? terminateWindowsProcess;
+  let processInfo;
+  try {
+    processInfo = await inspectProcess(pid);
+  } catch (error) {
+    return { status: "inspection_failed", pid, message: error.message };
+  }
+  if (!processInfo) return { status: "not_running", pid };
+  if (!matchesWindowsProcessFingerprint(processInfo, runtimeProcess.fingerprint)) {
+    return { status: "ownership_mismatch", pid };
+  }
+
+  try {
+    await terminateProcess(pid);
+    return { status: "terminated", pid };
+  } catch (error) {
+    return { status: "termination_failed", pid, message: error.message };
+  }
+}
+
 async function waitForJson(url, timeoutMs = 25000) {
   const started = Date.now();
   let lastError;
@@ -185,25 +274,40 @@ function readRuntime(config) {
   return JSON.parse(readFileSync(config.runtimePath, "utf8"));
 }
 
-async function taskkill(pid) {
-  if (!pid) return;
-  await runProcess({
-    command: "taskkill.exe",
-    args: ["/PID", String(pid), "/T", "/F"],
-  }).catch(() => {});
-}
-
 async function start(config) {
   await runProcess(buildBackendSeedCommand(config));
-  const backendPid = spawnProcess(buildBackendCommand(config));
-  const backendHealth = await waitForJson(`${config.backendUrl}/api/health`);
-  const frontendPid = spawnProcess(buildFrontendCommand(config));
-  await waitForHttp(config.frontendUrl);
+  const backendCommand = buildBackendCommand(config);
+  const backendPid = spawnProcess(backendCommand);
+  const backendProcess = {
+    pid: backendPid,
+    fingerprint: createWindowsProcessFingerprint(backendCommand),
+  };
+  let frontendProcess = null;
+  let backendHealth;
+
+  try {
+    backendHealth = await waitForJson(`${config.backendUrl}/api/health`);
+    const frontendCommand = buildFrontendCommand(config);
+    const frontendPid = spawnProcess(frontendCommand);
+    frontendProcess = {
+      pid: frontendPid,
+      fingerprint: createWindowsProcessFingerprint(frontendCommand),
+    };
+    await waitForHttp(config.frontendUrl);
+  } catch (error) {
+    await stopOwnedWindowsProcess(frontendProcess);
+    await stopOwnedWindowsProcess(backendProcess);
+    throw error;
+  }
 
   const runtime = {
     runtimePath: config.runtimePath,
     backendPid,
-    frontendPid,
+    frontendPid: frontendProcess.pid,
+    processes: {
+      backend: backendProcess,
+      frontend: frontendProcess,
+    },
     backendUrl: config.backendUrl,
     frontendUrl: config.frontendUrl,
     backendPort: config.backendPort,
@@ -253,14 +357,17 @@ async function status(config) {
   }
 }
 
-export async function stop(config) {
+export async function stop(config, dependencies = {}) {
   const runtime = readRuntime(config);
   if (!runtime) return { status: "stopped", runtimePath: config.runtimePath };
-  await taskkill(runtime.frontendPid);
-  await taskkill(runtime.backendPid);
-  rmSync(runtime.runtimePath ?? config.runtimePath, { force: true });
+  const frontendProcess = runtime.processes?.frontend ?? { pid: runtime.frontendPid };
+  const backendProcess = runtime.processes?.backend ?? { pid: runtime.backendPid };
+  const frontend = await stopOwnedWindowsProcess(frontendProcess, dependencies);
+  const backend = await stopOwnedWindowsProcess(backendProcess, dependencies);
+  rmSync(config.runtimePath, { force: true });
   return {
     status: "stopped",
+    processes: { frontend, backend },
     backendUrl: runtime.backendUrl,
     frontendUrl: runtime.frontendUrl,
     runtimePath: config.runtimePath,

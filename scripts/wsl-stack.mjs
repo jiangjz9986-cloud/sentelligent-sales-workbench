@@ -61,7 +61,7 @@ function pushEnv(args, key, value) {
 }
 
 export function buildStaticServerCommand(config, command) {
-  const args = ["--cd", config.frontendWslPath, "env"];
+  const args = ["--cd", config.frontendWslPath, "--exec", "env"];
   pushEnv(args, "PORT", config.frontendPort);
   pushEnv(args, "SENT_ZX_RUNTIME_ROOT", config.runtimeRoot);
   pushEnv(args, "API_BASE_URL", config.backendUrl);

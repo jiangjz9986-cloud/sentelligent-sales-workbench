@@ -6,6 +6,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { getCurrentWeekRange } from "../src/weekRange.js";
+import {
+  createWindowsProcessFingerprint,
+  stopOwnedWindowsProcess,
+} from "../../../scripts/local-dev.mjs";
+import { hashPassword } from "../../../backend/src/auth/password.js";
 
 const appRoot = process.cwd();
 const workspaceRoot = resolve(appRoot, "../..");
@@ -58,6 +63,23 @@ function delay(ms) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
+async function removeDirectoryWhenReleased(directoryPath, timeoutMs = 15000) {
+  const started = Date.now();
+  let lastError;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      rmSync(directoryPath, { recursive: true, force: true });
+      if (!existsSync(directoryPath)) return;
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `Timed out removing isolated browser profile ${directoryPath}: ${lastError?.message ?? "directory remains"}`,
+  );
+}
+
 function runProcess(command, args, options = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(command, args, {
@@ -98,6 +120,10 @@ function spawnManaged(command, args, options = {}) {
   child.stderr.on("data", (chunk) => {
     child.output += chunk.toString();
   });
+  child.runtimeProcess = {
+    pid: child.pid,
+    fingerprint: createWindowsProcessFingerprint({ command, args }),
+  };
   return child;
 }
 
@@ -118,16 +144,72 @@ async function waitForHttp(url, timeoutMs = 20000) {
 }
 
 async function stopProcessTree(child) {
-  if (!child?.pid) return;
-  await runProcess("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"]).catch(() => {});
+  if (!child?.pid) return { status: "not_running", pid: null };
+  return stopOwnedWindowsProcess(child.runtimeProcess ?? { pid: child.pid });
 }
 
-async function stopWslPort(port) {
-  await runProcess("wsl.exe", [
+async function assertOwnedWslListener(port, { backendWslPath, databaseUrl }, { terminate = false } = {}) {
+  const numericPort = Number(port);
+  if (!Number.isSafeInteger(numericPort) || numericPort <= 0) throw new Error(`Invalid WSL listener port: ${port}`);
+  const script = String.raw`
+set -eu
+port="$1"
+expected_cwd="$2"
+expected_db="$3"
+mode="$4"
+pids="$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+if [ -z "$pids" ]; then
+  exit 0
+fi
+for pid in $pids; do
+  cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+  command_line="$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  if [ "$cwd" != "$expected_cwd" ]; then
+    printf 'WSL listener ownership mismatch for PID %s: cwd=%s\n' "$pid" "$cwd" >&2
+    exit 42
+  fi
+  case "$command_line" in
+    *"node src/server.js"*) ;;
+    *)
+      printf 'WSL listener ownership mismatch for PID %s: command=%s\n' "$pid" "$command_line" >&2
+      exit 42
+      ;;
+  esac
+  if ! tr '\000' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -Fqx "DATABASE_URL=$expected_db"; then
+    printf 'WSL listener ownership mismatch for PID %s: database fingerprint differs\n' "$pid" >&2
+    exit 42
+  fi
+done
+if [ "$mode" = "terminate" ]; then
+  kill -- $pids
+  attempt=0
+  while [ -n "$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)" ] && [ "$attempt" -lt 50 ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if [ -n "$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)" ]; then
+    printf 'WSL listener did not stop on port %s\n' "$port" >&2
+    exit 43
+  fi
+fi
+printf '%s\n' $pids
+`;
+  const result = await runProcess("wsl.exe", [
+    "--exec",
     "bash",
-    "-lc",
-    `pids=$(lsof -t -iTCP:${port} -sTCP:LISTEN 2>/dev/null || true); if [ -n "$pids" ]; then kill $pids 2>/dev/null || true; fi`,
-  ]).catch(() => {});
+    "-c",
+    script,
+    "sent-zx-listener-check",
+    String(numericPort),
+    backendWslPath,
+    databaseUrl,
+    terminate ? "terminate" : "inspect",
+  ]);
+  return result.stdout.trim().split(/\s+/).filter(Boolean).map(Number);
+}
+
+async function stopWslPort(port, identity) {
+  return assertOwnedWslListener(port, identity, { terminate: true });
 }
 
 function connectCdp(wsUrl) {
@@ -152,6 +234,7 @@ function connectCdp(wsUrl) {
         networkRequests.set(message.params.requestId, {
           method: message.params.request.method,
           url: message.params.request.url,
+          requestHeaders: { ...message.params.request.headers },
         });
       }
       if (message.method === "Network.responseReceived") {
@@ -161,6 +244,7 @@ function connectCdp(wsUrl) {
           method: request?.method ?? null,
           url: message.params.response.url,
           status: message.params.response.status,
+          requestHeaders: request?.requestHeaders ?? {},
         });
       }
 
@@ -236,10 +320,11 @@ async function openChromeCdp() {
     ...cdp,
     async close() {
       cdp.ws.close();
-      await stopProcessTree(chrome);
-      try {
-        rmSync(profilePath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-      } catch {}
+      const stopResult = await stopProcessTree(chrome);
+      await removeDirectoryWhenReleased(profilePath);
+      if (!["terminated", "not_running"].includes(stopResult.status)) {
+        throw new Error(`Refused unverified browser cleanup for PID ${chrome.pid}: ${stopResult.status}`);
+      }
     },
   };
 }
@@ -1412,15 +1497,19 @@ async function main() {
   const frontendUrl = `http://127.0.0.1:${frontendPort}`;
   const databaseUrl = `/tmp/sent-zx-integration-${Date.now()}.sqlite`;
   const backendWslPath = toWslPath(backendDir);
+  const authPasswordHash = await hashPassword("qa-login", { salt: Buffer.alloc(16, 23) });
   let backend;
   let frontend;
   let cdp;
+  let runError;
 
   try {
     await runProcess("wsl.exe", [
       "--cd",
       backendWslPath,
+      "--exec",
       "env",
+      "NODE_ENV=test",
       `DATABASE_URL=${databaseUrl}`,
       "npm",
       "run",
@@ -1430,15 +1519,18 @@ async function main() {
     backend = spawnManaged("wsl.exe", [
       "--cd",
       backendWslPath,
+      "--exec",
       "env",
       `PORT=${backendPort}`,
       `DATABASE_URL=${databaseUrl}`,
       "AI_ANALYSIS_MODE=mock",
       "DEEPSEEK_API_KEY=",
       "AUTH_ACCOUNT=jiangjz",
-      "AUTH_PASSWORD=qa-login",
+      `AUTH_PASSWORD_HASH=${authPasswordHash}`,
       "AUTH_SESSION_SECRET=qa-session-secret",
       `CORS_ALLOWED_ORIGINS=${frontendUrl}`,
+      "AUTH_COOKIE_SECURE=false",
+      "NODE_ENV=test",
       "node",
       "src/server.js",
     ]);
@@ -1449,7 +1541,7 @@ async function main() {
       ["/d", "/s", "/c", "npm.cmd", "run", "dev", "--", "--port", String(frontendPort), "--strictPort"],
       {
         cwd: appRoot,
-        env: { VITE_API_BASE_URL: backendUrl },
+        env: { VITE_API_BASE_URL: backendUrl, NODE_ENV: "test" },
       },
     );
     await waitForHttp(frontendUrl);
@@ -1459,6 +1551,68 @@ async function main() {
     for (const viewport of viewportCases) {
       viewportResults.push(await runViewport(cdp, frontendUrl, viewport));
     }
+
+    const refreshStart = cdp.networkResponses.length;
+    await cdp.send("Page.reload", { ignoreCache: true });
+    const refreshState = await evaluate(cdp, `
+      (async () => {
+        const started = Date.now();
+        while (Date.now() - started < 8000) {
+          if (document.querySelector('[data-testid="page-overview"]')) {
+            return {
+              overviewVisible: true,
+              loginVisible: Boolean(document.querySelector('[data-testid="login-submit"]')),
+              legacyLocalStorage: window.localStorage.getItem('sentelligent.salesWorkbench.login'),
+              localStorageEntries: Object.entries(window.localStorage),
+              sessionStorageEntries: Object.entries(window.sessionStorage),
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return {
+          overviewVisible: false,
+          loginVisible: Boolean(document.querySelector('[data-testid="login-submit"]')),
+          legacyLocalStorage: window.localStorage.getItem('sentelligent.salesWorkbench.login'),
+          localStorageEntries: Object.entries(window.localStorage),
+          sessionStorageEntries: Object.entries(window.sessionStorage),
+        };
+      })()
+    `);
+    const refreshSessionResponse = await waitForNetworkResponse(
+      cdp,
+      refreshStart,
+      (item) => item.method === "GET" && item.url === `${backendUrl}/api/auth/session`,
+    );
+    assert.ok(refreshSessionResponse, "page refresh should call GET /api/auth/session");
+    assert.equal(refreshSessionResponse.status, 200, "page refresh should restore the active Cookie session");
+    assert.equal(refreshState.overviewVisible, true, "page refresh should restore the protected workbench");
+    assert.equal(refreshState.loginVisible, false, "page refresh should not show login for an active session");
+    assert.equal(refreshState.legacyLocalStorage, null, "page refresh should not restore the legacy login cache");
+    const persistedBrowserAuth = [
+      ...refreshState.localStorageEntries,
+      ...refreshState.sessionStorageEntries,
+    ].filter(([key, value]) => /auth|token|csrf|session|login/i.test(`${key} ${value}`));
+    assert.deepEqual(persistedBrowserAuth, [], "browser storage should not persist authentication or CSRF tokens");
+
+    const browserWrite = cdp.networkResponses.find((item) =>
+      ["POST", "PATCH", "DELETE"].includes(item.method) &&
+      item.url.startsWith(`${backendUrl}/api/`) &&
+      !item.url.endsWith("/api/auth/login"),
+    );
+    assert.ok(browserWrite, "browser flow should issue at least one authenticated write");
+    const browserWriteHeaders = Object.fromEntries(
+      Object.entries(browserWrite.requestHeaders ?? {}).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+    assert.ok(browserWriteHeaders["x-csrf-token"], "browser writes should carry X-CSRF-Token");
+    assert.equal(browserWriteHeaders.authorization, undefined, "browser writes must not carry Authorization");
+
+    const browserWeeklyExport = cdp.networkResponses.find((item) =>
+      item.method === "GET" && /\/api\/reports\/weekly\/[^/]+\/export\?/.test(item.url),
+    );
+    assert.ok(browserWeeklyExport, "browser flow should perform an authenticated weekly export");
+    const weeklyExportUrl = new URL(browserWeeklyExport.url);
+    assert.equal(weeklyExportUrl.searchParams.has("token"), false, "weekly export URL must not contain a query token");
+    assert.equal(weeklyExportUrl.searchParams.has("authorization"), false, "weekly export URL must not contain Authorization data");
 
     const passwordField = ["pass", "word"].join("");
     const apiLoginResponse = await fetch(`${backendUrl}/api/auth/login`, {
@@ -1679,6 +1833,67 @@ async function main() {
       }
     }
 
+    const cookiesBeforeLogout = await cdp.send("Network.getCookies", { urls: [backendUrl] });
+    const browserSessionCookie = cookiesBeforeLogout.cookies.find((cookie) => cookie.name === "sentelligent_session");
+    assert.ok(browserSessionCookie?.value, "browser login should create the HttpOnly session cookie");
+    assert.equal(browserSessionCookie.httpOnly, true, "browser session cookie should be HttpOnly");
+
+    const logoutStart = cdp.networkResponses.length;
+    const logoutState = await evaluate(cdp, `
+      (async () => {
+        const logout = document.querySelector('button[title="退出登录"]');
+        if (!logout) throw new Error('Missing logout button');
+        logout.click();
+        const started = Date.now();
+        while (Date.now() - started < 8000) {
+          if (document.querySelector('[data-testid="login-submit"]')) {
+            return {
+              loginVisible: true,
+              protectedVisible: Boolean(document.querySelector('[data-testid="page-overview"]')),
+            };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        return { loginVisible: false, protectedVisible: true };
+      })()
+    `);
+    const logoutResponse = await waitForNetworkResponse(
+      cdp,
+      logoutStart,
+      (item) => item.method === "POST" && item.url === `${backendUrl}/api/auth/logout`,
+    );
+    assert.ok(logoutResponse, "logout should call POST /api/auth/logout");
+    assert.equal(logoutResponse.status, 204, "logout should revoke the active server session");
+    const logoutHeaders = Object.fromEntries(
+      Object.entries(logoutResponse.requestHeaders ?? {}).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+    assert.ok(logoutHeaders["x-csrf-token"], "logout should carry X-CSRF-Token");
+    assert.equal(logoutHeaders.authorization, undefined, "logout must not carry Authorization");
+    assert.equal(logoutState.loginVisible, true, "logout should return the browser to login");
+    assert.equal(logoutState.protectedVisible, false, "logout should remove protected workbench content");
+
+    const revokedSessionResponse = await fetch(`${backendUrl}/api/auth/session`, {
+      headers: { Cookie: `${browserSessionCookie.name}=${browserSessionCookie.value}` },
+    });
+    assert.equal(revokedSessionResponse.status, 401, "the pre-logout Cookie should be revoked server-side");
+
+    const protectedReloadStart = cdp.networkResponses.length;
+    await cdp.send("Page.navigate", { url: frontendUrl });
+    await delay(1200);
+    const protectedReloadState = await evaluate(cdp, `({
+      loginVisible: Boolean(document.querySelector('[data-testid="login-submit"]')),
+      protectedVisible: Boolean(document.querySelector('[data-testid="page-overview"]')),
+    })`);
+    const postLogoutSessionResponse = await waitForNetworkResponse(
+      cdp,
+      protectedReloadStart,
+      (item) => item.method === "GET" && item.url === `${backendUrl}/api/auth/session`,
+    );
+    assert.ok(postLogoutSessionResponse, "protected reload should probe GET /api/auth/session");
+    assert.equal(postLogoutSessionResponse.status, 401, "protected reload should reject the logged-out session");
+    assert.equal(protectedReloadState.loginVisible, true, "protected reload should remain on login after logout");
+    assert.equal(protectedReloadState.protectedVisible, false, "protected UI must stay hidden after logout");
+
     console.log(
       JSON.stringify(
         {
@@ -1708,6 +1923,14 @@ async function main() {
             solution: viewportResults.find((result) => result.name === "desktop")?.solutionDraftText.length ?? 0,
           },
           conflictRegression,
+          authSecurity: {
+            refreshSessionStatus: refreshSessionResponse.status,
+            browserWriteMethod: browserWrite.method,
+            weeklyExportWithoutToken: !weeklyExportUrl.searchParams.has("token"),
+            logoutStatus: logoutResponse.status,
+            revokedSessionStatus: revokedSessionResponse.status,
+            postLogoutSessionStatus: postLogoutSessionResponse.status,
+          },
           viewports: viewportResults.map((result) => ({
             name: result.name,
             viewport: result.viewport,
@@ -1723,14 +1946,54 @@ async function main() {
     if (cdp?.consoleErrors?.length) {
       console.error(`Browser console errors before failure: ${cdp.consoleErrors.join("; ")}`);
     }
-    throw error;
+    runError = error;
   } finally {
-    if (cdp) await cdp.close();
-    await stopProcessTree(frontend);
-    await stopProcessTree(backend);
-    await stopWslPort(backendPort);
-    await runProcess("wsl.exe", ["rm", "-f", databaseUrl]).catch(() => {});
+    const cleanupErrors = [];
+    const captureCleanup = async (label, operation) => {
+      try {
+        return await operation();
+      } catch (error) {
+        cleanupErrors.push(new Error(`${label}: ${error.message}`, { cause: error }));
+        return null;
+      }
+    };
+    const assertStopped = (label, result) => {
+      if (result && !["terminated", "not_running"].includes(result.status)) {
+        cleanupErrors.push(new Error(`${label}: refused process cleanup (${result.status})`));
+      }
+    };
+
+    if (cdp) await captureCleanup("browser cleanup", () => cdp.close());
+    const frontendStop = await captureCleanup("frontend cleanup", () => stopProcessTree(frontend));
+    assertStopped("frontend cleanup", frontendStop);
+    const backendStop = await captureCleanup("backend wrapper cleanup", () => stopProcessTree(backend));
+    assertStopped("backend wrapper cleanup", backendStop);
+    await captureCleanup("WSL listener cleanup", () =>
+      stopWslPort(backendPort, { backendWslPath, databaseUrl }));
+    await captureCleanup("temporary database cleanup", () =>
+      runProcess("wsl.exe", [
+        "--exec",
+        "rm",
+        "-f",
+        databaseUrl,
+        `${databaseUrl}-wal`,
+        `${databaseUrl}-shm`,
+        `${databaseUrl}-journal`,
+      ]));
+
+    if (cleanupErrors.length > 0) {
+      const cleanupSummary = cleanupErrors.map((error) => error.message).join("; ");
+      const cleanupFailure = new AggregateError(
+        cleanupErrors,
+        `Integration cleanup failed: ${cleanupSummary}`,
+      );
+      runError = runError
+        ? new AggregateError([runError, cleanupFailure], "Integration QA failed and cleanup was incomplete")
+        : cleanupFailure;
+    }
   }
+
+  if (runError) throw runError;
 }
 
 main().catch((error) => {

@@ -56,7 +56,7 @@ export function buildWslBackendCommand(config) {
       : null;
   if (!script) throw new Error(`Unknown WSL backend command: ${config.command}`);
 
-  const args = ["--cd", config.backendWslPath, "env"];
+  const args = ["--cd", config.backendWslPath, "--exec", "env"];
   pushEnv(args, "PORT", config.port);
   pushEnv(args, "HOST", config.host);
   pushEnv(args, "SENT_ZX_RUNTIME_ROOT", config.runtimeRoot);

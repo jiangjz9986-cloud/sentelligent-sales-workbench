@@ -34,9 +34,10 @@ describe("WSL full-stack production wrapper", () => {
     const command = buildStaticServerCommand(config, "start");
 
     assert.equal(command.command, "wsl.exe");
-    assert.deepEqual(command.args.slice(0, 4), [
+    assert.deepEqual(command.args.slice(0, 5), [
       "--cd",
       "/mnt/c/Users/50159/Desktop/妫壒鏅鸿/outputs/product-design-prototype",
+      "--exec",
       "env",
       "PORT=8091",
     ]);
