@@ -100,6 +100,20 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     opportunityId: "nullableString",
     status: "string",
   },
+  quickRecordHistory: {
+    id: "string",
+    version: "positiveInteger",
+    rawContent: "string",
+    occurredAt: "nullableString",
+    sourceChannel: "nullableString",
+    customerId: "nullableString",
+    opportunityId: "nullableString",
+    status: "string",
+    analysis: "nullableObject",
+    confirmations: "array",
+    confirmedTargets: "array",
+    syncLog: "array",
+  },
   aiInsight: {
     id: "string",
     quickRecordId: "string",
@@ -172,6 +186,7 @@ function describeValue(value) {
 function isExpectedType(value, descriptor) {
   if (descriptor === "array") return Array.isArray(value);
   if (descriptor === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (descriptor === "nullableObject") return value === null || (typeof value === "object" && !Array.isArray(value));
   if (descriptor === "string") return typeof value === "string";
   if (descriptor === "number") return typeof value === "number" && Number.isFinite(value);
   if (descriptor === "positiveInteger") return Number.isSafeInteger(value) && value > 0;

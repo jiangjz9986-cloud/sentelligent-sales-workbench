@@ -386,6 +386,8 @@ export function QuickRecord({
 }) {
   const [analysis, setAnalysis] = useState(null);
   const [quickRecord, setQuickRecord] = useState(null);
+  const [analysisDirty, setAnalysisDirty] = useState(false);
+  const [analysisSavePending, setAnalysisSavePending] = useState(false);
   const [selectedHistoryId, setSelectedHistoryId] = useState(null);
   const [confirmedTargets, setConfirmedTargets] = useState([]);
   const [confirmationPending, setConfirmationPending] = useState(false);
@@ -434,6 +436,8 @@ export function QuickRecord({
     confirmationAttemptRef.current.reset();
     setAnalysis(null);
     setQuickRecord(null);
+    setAnalysisDirty(false);
+    setAnalysisSavePending(false);
     setSelectedHistoryId(null);
     setConfirmedTargets([]);
     setSyncLog([]);
@@ -476,6 +480,8 @@ export function QuickRecord({
     setRecordText("");
     setAnalysis(null);
     setQuickRecord(null);
+    setAnalysisDirty(false);
+    setAnalysisSavePending(false);
     setSelectedHistoryId(null);
     setConfirmedTargets([]);
     setSyncLog([]);
@@ -490,19 +496,24 @@ export function QuickRecord({
     confirmationAttemptRef.current.reset();
     const nextText = item.rawContent ?? `${item.customer}：${item.title}。${item.feedback}`;
     const nextAnalysis = item.analysis ?? null;
+    const nextSyncLog = item.syncLog ?? item.confirmations ?? [];
+    const nextConfirmedTargets = item.confirmedTargets ?? nextSyncLog.map((entry) => entry.target);
     setRecordMode("text");
     setRecordText(nextText);
     setAnalysis(nextAnalysis);
-    setQuickRecord(null);
+    setQuickRecord(item);
+    setAnalysisDirty(false);
+    setAnalysisSavePending(false);
     setSelectedHistoryId(item.id);
-    setConfirmedTargets(item.confirmedTargets ?? []);
-    setSyncLog(item.syncLog ?? []);
+    setConfirmedTargets(nextConfirmedTargets);
+    setSyncLog(nextSyncLog);
     setAnalysisVisible(Boolean(nextAnalysis));
     setSyncStatus(nextAnalysis ? "已载入历史分析，可直接修改或确认同步" : "已载入历史记录，暂无已保存分析");
   }
 
   function updateAnalysisSummary(section, text) {
     confirmationAttemptRef.current.reset();
+    setAnalysisDirty(true);
     setAnalysis((current) => {
       if (!current?.summary?.[section]) return current;
       return {
@@ -516,7 +527,7 @@ export function QuickRecord({
         },
       };
     });
-    setSyncStatus("分析内容已手动修改，确认后再写入业务档案");
+    setSyncStatus("分析内容已修改，请先保存再同步");
   }
 
   function appendVoiceTranscript(transcript, status) {
@@ -783,15 +794,92 @@ export function QuickRecord({
       const result = await apiClient.analyzeQuickRecord(recordText, {
         sourceChannel: recordMode === "voice" ? "语音转写" : "快速记录",
       });
-      setQuickRecord(result.quickRecord);
-      onQuickRecordSaved?.(result.quickRecord);
+      const historyItem = {
+        ...result.quickRecord,
+        analysis: result.analysis,
+        confirmations: [],
+        confirmedTargets: [],
+        syncLog: [],
+      };
+      setQuickRecord(historyItem);
+      onQuickRecordSaved?.(historyItem);
       setAnalysis(result.analysis);
+      setAnalysisDirty(false);
+      setAnalysisSavePending(false);
+      setSelectedHistoryId(result.quickRecord.id);
       setConfirmedTargets([]);
       setSyncLog([]);
       setAnalysisVisible(true);
       setSyncStatus("分析完成，等待人工同步");
     } catch (error) {
       setSyncStatus(error?.message || "分析失败，请稍后重试");
+    }
+  }
+
+  async function saveAnalysisChanges() {
+    if (!quickRecordId || !analysis) {
+      setSyncStatus("请先完成分析，再保存修改");
+      return;
+    }
+    try {
+      assertBackendReady(
+        { isEnabled: apiClient?.isEnabled, status: backendStatus },
+        "保存分析修改",
+      );
+    } catch (error) {
+      setSyncStatus(error.message);
+      return;
+    }
+
+    setAnalysisSavePending(true);
+    setSyncStatus("正在保存分析修改");
+    try {
+      const saved = await apiClient.saveQuickRecordAnalysis(
+        quickRecordId,
+        analysis.summary,
+        quickRecord.version,
+      );
+      const confirmations = quickRecord.confirmations ?? syncLog;
+      const nextConfirmedTargets = quickRecord.confirmedTargets ?? confirmedTargets;
+      const historyItem = {
+        ...quickRecord,
+        ...saved.quickRecord,
+        analysis: saved.analysis,
+        confirmations,
+        confirmedTargets: nextConfirmedTargets,
+        syncLog: confirmations,
+      };
+      confirmationAttemptRef.current.reset();
+      setQuickRecord(historyItem);
+      setAnalysis(saved.analysis);
+      setAnalysisDirty(false);
+      setSyncLog(confirmations);
+      setConfirmedTargets(nextConfirmedTargets);
+      onQuickRecordSaved?.(historyItem);
+      setSyncStatus("分析修改已保存，可继续确认同步");
+    } catch (error) {
+      if (error?.code === "VERSION_CONFLICT") {
+        try {
+          const refreshed = await apiClient.refreshQuickRecordConfirmationState(quickRecordId);
+          const historyItem = refreshed.quickRecord;
+          setQuickRecord(historyItem);
+          setAnalysis(historyItem.analysis ?? null);
+          setAnalysisDirty(false);
+          setConfirmedTargets(historyItem.confirmedTargets ?? []);
+          setSyncLog(historyItem.syncLog ?? historyItem.confirmations ?? []);
+          setAnalysisVisible(Boolean(historyItem.analysis));
+          onQuickRecordSaved?.(historyItem);
+          onConfirmationRefresh?.(refreshed);
+          setSyncStatus("记录已被其他操作更新，已载入最新分析");
+          return;
+        } catch (refreshError) {
+          setSyncStatus(refreshError?.message || "分析版本已变化，请刷新后重试");
+          return;
+        }
+      }
+      setSyncStatus(error?.message || "分析修改保存失败，请稍后重试");
+    } finally {
+      setAnalysisSavePending(false);
     }
   }
 
@@ -809,6 +897,10 @@ export function QuickRecord({
     }
     if (!quickRecordId) {
       setSyncStatus("请先完成 AI 分析，再同步业务档案");
+      return;
+    }
+    if (analysisDirty) {
+      setSyncStatus("请先保存分析修改，再同步业务档案");
       return;
     }
 
@@ -830,16 +922,37 @@ export function QuickRecord({
         return;
       }
       if (outcome.status === "conflict") {
-        setQuickRecord(outcome.refreshed.quickRecord);
-        onQuickRecordSaved?.(outcome.refreshed.quickRecord);
+        const historyItem = outcome.refreshed.quickRecord;
+        setQuickRecord(historyItem);
+        setAnalysis(historyItem.analysis ?? null);
+        setAnalysisDirty(false);
+        setConfirmedTargets(historyItem.confirmedTargets ?? []);
+        setSyncLog(historyItem.syncLog ?? historyItem.confirmations ?? []);
+        setAnalysisVisible(Boolean(historyItem.analysis));
+        onQuickRecordSaved?.(historyItem);
         onConfirmationRefresh?.(outcome.refreshed);
         setSyncStatus(`数据已刷新，请重试：${target.label}`);
         return;
       }
       const result = outcome.result;
       confirmationResult = result;
-      setQuickRecord(result.quickRecord);
-      onQuickRecordSaved?.(result.quickRecord);
+      const confirmations = result.confirmations ?? [];
+      const nextConfirmedTargets = confirmations.map((item) => item.target);
+      const nextAnalysis = result.analysis ?? analysis;
+      const historyItem = {
+        ...quickRecord,
+        ...result.quickRecord,
+        analysis: nextAnalysis,
+        confirmations,
+        confirmedTargets: nextConfirmedTargets,
+        syncLog: confirmations,
+      };
+      setQuickRecord(historyItem);
+      setAnalysis(nextAnalysis);
+      setAnalysisDirty(false);
+      setConfirmedTargets(nextConfirmedTargets);
+      setSyncLog(confirmations);
+      onQuickRecordSaved?.(historyItem);
       onBusinessSync?.(result);
       nextLogEntry = (result.confirmations ?? []).find((item) => item.target === target.id) ?? null;
     } catch (error) {
@@ -847,10 +960,7 @@ export function QuickRecord({
       return;
     }
 
-    setConfirmedTargets((current) => {
-      if (current.includes(target.id)) return current;
-      return [...current, target.id];
-    });
+    setConfirmedTargets((current) => current.includes(target.id) ? current : [...current, target.id]);
 
     if (target.id === "customer") {
       setSelectedCustomerId(resolveConfirmedSelectionId("customer", {
@@ -1129,6 +1239,21 @@ export function QuickRecord({
               />
             ))}
           </div>
+          <div className="composer-actions analysis-save-actions">
+            <button
+              className={analysisDirty ? "primary-button" : "ghost-button"}
+              type="button"
+              data-testid="save-analysis-modifications"
+              disabled={!analysisDirty || analysisSavePending}
+              onClick={saveAnalysisChanges}
+            >
+              <Save size={16} />
+              {analysisSavePending ? "保存中" : "保存分析修改"}
+            </button>
+            <span className="status-text">
+              {analysisDirty ? "修改尚未保存" : "分析内容已保存"}
+            </span>
+          </div>
           <div className="manual-sync">
             {getSyncTargets().map((target) => {
               const confirmed = confirmedTargets.includes(target.id);
@@ -1138,7 +1263,7 @@ export function QuickRecord({
                   className={confirmed ? "ghost-button confirmed" : target.id === "customer" ? "primary-button" : "ghost-button"}
                   key={target.id}
                   type="button"
-                  disabled={confirmationPending}
+                  disabled={confirmationPending || analysisSavePending || analysisDirty}
                   onClick={() => confirmTarget(target)}
                 >
                   {confirmed ? <Check size={16} /> : <Icon size={16} />}
@@ -1149,7 +1274,7 @@ export function QuickRecord({
             <button
               className="ghost-button"
               type="button"
-              disabled={confirmationPending}
+              disabled={confirmationPending || analysisSavePending}
               onClick={() => resetAnalysis("补充内容后可重新识别")}
             >
               补充内容后再识别
@@ -2565,6 +2690,7 @@ export function WeeklyPage({
   const [localWeeklyDraftText, setLocalWeeklyDraftText] = useState("");
   const [draftStatus, setDraftStatus] = useState("周报草稿尚未生成。");
   const [isExporting, setIsExporting] = useState(false);
+  const [expandedDayKey, setExpandedDayKey] = useState(null);
   const daily = weeklyView === "daily";
   const weeklyDraft = externalWeeklyDraft ?? localWeeklyDraft;
   const weeklyDraftText = externalWeeklyDraft ? externalWeeklyDraftText ?? "" : localWeeklyDraftText;
@@ -2573,6 +2699,7 @@ export function WeeklyPage({
 
   useEffect(() => {
     if (!weeklyDraft) return;
+    setExpandedDayKey(null);
     const hasKnowledge = weeklyDraft.sourceRefs?.some((ref) => ref.type === "knowledge");
     setDraftStatus(hasKnowledge ? "已载入知识库引用周报，来源引用已保留。" : "周报草稿已生成，来源记录已保留。");
   }, [weeklyDraft?.id]);
@@ -2654,6 +2781,9 @@ export function WeeklyPage({
   }[weeklyDraft?.status] ?? weeklyDraft?.status ?? "未生成";
   const weekRangeLabel = formatWeekRangeLabel(getCurrentWeekRange());
   const sourceRefs = weeklyDraft?.sourceRefs ?? [];
+  const sourceMetricDetail = sourceRefs.length > 0
+    ? `${weekRangeLabel}：${sourceRefs.map(sourceRefText).join("；")}`
+    : `${weekRangeLabel}：周报正文 ${weeklyDraftText.trim().length} 字`;
 
   if (!weeklyDraft) {
     return (
@@ -2697,15 +2827,33 @@ export function WeeklyPage({
 
       {daily ? (
         <div className="daily-grid" data-testid="weekly-daily-view">
-          {sourceRefs.length > 0 ? sourceRefs.map((ref, index) => (
-            <section className="day-card" key={`${ref.type ?? "source"}-${ref.id ?? index}`}>
-              <div>
-                <span className="date-chip tone-blue">{String(index + 1).padStart(2, "0")}</span>
-                <h3>{sourceRefText(ref)}</h3>
-              </div>
-              <p>来源已纳入 {weekRangeLabel} 周报草稿。</p>
-            </section>
-          )) : (
+          {sourceRefs.length > 0 ? sourceRefs.map((ref, index) => {
+            const dayKey = `${ref.type ?? "source"}-${ref.id ?? index}`;
+            const expanded = expandedDayKey === dayKey;
+            return (
+              <button
+                className={`day-card interactive-card ${expanded ? "expanded" : ""}`}
+                key={dayKey}
+                type="button"
+                aria-expanded={expanded}
+                onClick={() => setExpandedDayKey((current) => current === dayKey ? null : dayKey)}
+              >
+                <div>
+                  <span className="date-chip tone-blue">{String(index + 1).padStart(2, "0")}</span>
+                  <h3>{sourceRefText(ref)}</h3>
+                </div>
+                <p>来源已纳入 {weekRangeLabel} 周报草稿。</p>
+                {expanded ? (
+                  <span className="day-card-detail" data-testid="weekly-expanded-day">
+                    <strong>{sourceRefText(ref)}</strong>
+                    <span>来源类型：{ref.type ?? "source"}</span>
+                    {ref.id ? <span>来源编号：{ref.id}</span> : null}
+                    <span>周报范围：{weekRangeLabel}</span>
+                  </span>
+                ) : null}
+              </button>
+            );
+          }) : (
             <section className="workbench-state-panel" data-testid="weekly-source-empty" role="status">
               <FileText size={28} />
               <strong>草稿暂无来源引用</strong>
@@ -2717,6 +2865,13 @@ export function WeeklyPage({
         <div className="summary-grid" data-testid="weekly-summary-view">
           <DraftPreview draft={weeklyDraft} emptyText="周报草稿暂无正文。" />
           <div className="stack">
+            <MetricCard
+              label="真实来源"
+              value={String(sourceRefs.length)}
+              badge={weeklyStatusLabel}
+              tone="blue"
+              detail={sourceMetricDetail}
+            />
             <section className="manual-box compact">
               <div>
                 <strong>{weekRangeLabel} / {weeklyStatusLabel}</strong>

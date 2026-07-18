@@ -1140,17 +1140,38 @@ function mergeKnowledgeItems(...groups) {
   return [...byId.values()];
 }
 
-function getLatestInsight(db, quickRecordId) {
-  return insightFromRow(
-    get(
-      db,
-      `SELECT * FROM ai_insights
-       WHERE quick_record_id = $quickRecordId
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      { $quickRecordId: quickRecordId },
-    ),
+function getLatestInsightRow(db, quickRecordId) {
+  return get(
+    db,
+    `SELECT * FROM ai_insights
+     WHERE quick_record_id = $quickRecordId
+     ORDER BY created_at DESC, rowid DESC
+     LIMIT 1`,
+    { $quickRecordId: quickRecordId },
   );
+}
+
+function getLatestInsight(db, quickRecordId) {
+  return insightFromRow(getLatestInsightRow(db, quickRecordId));
+}
+
+function quickRecordHistoryFromRow(db, row) {
+  const quickRecord = quickRecordFromRow(row);
+  if (!quickRecord) return null;
+  const confirmations = all(
+    db,
+    `SELECT * FROM manual_confirmations
+     WHERE quick_record_id = $quickRecordId
+     ORDER BY created_at ASC, target ASC`,
+    { $quickRecordId: quickRecord.id },
+  ).map(confirmationFromRow);
+  return {
+    ...quickRecord,
+    analysis: getLatestInsight(db, quickRecord.id),
+    confirmations,
+    confirmedTargets: confirmations.map((item) => item.target),
+    syncLog: confirmations,
+  };
 }
 
 function compactText(value, maxLength = 72) {
@@ -2203,8 +2224,8 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/quick-records") {
-        const rows = all(db, "SELECT * FROM quick_records ORDER BY created_at DESC");
-        sendJson(response, 200, { items: rows.map(quickRecordFromRow) });
+        const rows = all(db, "SELECT * FROM quick_records WHERE voided_at IS NULL ORDER BY created_at DESC");
+        sendJson(response, 200, { items: rows.map((row) => quickRecordHistoryFromRow(db, row)) });
         return;
       }
 
@@ -2289,7 +2310,7 @@ export function createServer(options = {}) {
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
 
-        const item = withImmediateTransaction(db, () => {
+        const result = withImmediateTransaction(db, () => {
           const current = quickRecordFromRow(get(
             db,
             "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
@@ -2330,9 +2351,96 @@ export function createServer(options = {}) {
             entityVersion: updatedRecord.version,
             metadata: { insightId: insight.id, source: insight.source, confidence: insight.confidence },
           });
-          return insight;
+          return { insight, quickRecord: updatedRecord };
         });
-        sendJson(response, 201, { item });
+        sendJson(response, 201, { item: result.insight, quickRecord: result.quickRecord });
+        return;
+      }
+
+      if (
+        request.method === "PATCH" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "quick-records" &&
+        parts[2] &&
+        parts[3] === "analysis"
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = await readValidatedJson(request, requestSchemas.quickRecordAnalysisPatch);
+        if (Object.keys(body.summary).length === 0) validationFailure("summary", "minKeys");
+
+        const result = withImmediateTransaction(db, () => {
+          const beforeRecord = quickRecordFromRow(get(
+            db,
+            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
+            { $id: parts[2] },
+          ));
+          if (!beforeRecord) notFound();
+          const insightRow = getLatestInsightRow(db, beforeRecord.id);
+          if (!insightRow) notFound();
+
+          const persistedAnalysis = parseJson(insightRow.analysis_json, null);
+          if (!persistedAnalysis?.summary || typeof persistedAnalysis.summary !== "object") {
+            throw new HttpError(500, "DATA_INTEGRITY_ERROR", "Saved quick-record analysis is invalid");
+          }
+          const nextSummary = { ...persistedAnalysis.summary };
+          for (const [key, text] of Object.entries(body.summary)) {
+            const current = nextSummary[key];
+            if (!current || typeof current !== "object" || Array.isArray(current)) {
+              throw new HttpError(500, "DATA_INTEGRITY_ERROR", "Saved quick-record analysis summary is invalid");
+            }
+            nextSummary[key] = { ...current, text };
+          }
+          const nextAnalysisJson = {
+            ...persistedAnalysis,
+            summary: nextSummary,
+          };
+
+          runVersionedUpdate(db, {
+            table: "quick_records",
+            id: beforeRecord.id,
+            expectedVersion,
+            softDeletable: false,
+            setSql: "status = $status",
+            params: { $status: beforeRecord.status },
+          });
+          run(
+            db,
+            "UPDATE ai_insights SET analysis_json = $analysisJson WHERE id = $id",
+            {
+              $id: insightRow.id,
+              $analysisJson: JSON.stringify(nextAnalysisJson),
+            },
+          );
+
+          const quickRecord = quickRecordFromRow(get(
+            db,
+            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
+            { $id: beforeRecord.id },
+          ));
+          const beforeAnalysis = insightFromRow(insightRow);
+          const analysis = insightFromRow(get(
+            db,
+            "SELECT * FROM ai_insights WHERE id = $id",
+            { $id: insightRow.id },
+          ));
+          insertAudit(db, {
+            action: "quick_record.analysis.update",
+            entityType: "quick_record",
+            entityId: quickRecord.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { quickRecord: beforeRecord, analysis: beforeAnalysis },
+            after: { quickRecord, analysis },
+            entityVersion: quickRecord.version,
+            metadata: {
+              insightId: analysis.id,
+              summaryFields: Object.keys(body.summary),
+            },
+          });
+          return { quickRecord, analysis };
+        });
+        sendJson(response, 200, result);
         return;
       }
 
@@ -2556,6 +2664,7 @@ export function createServer(options = {}) {
           const responseBody = {
             confirmations,
             quickRecord: updatedRecord,
+            analysis: insight,
             ...(updatedCustomer ? { customer: updatedCustomer } : {}),
             ...(updatedOpportunity ? { opportunity: updatedOpportunity } : {}),
             ...(action ? { action } : {}),

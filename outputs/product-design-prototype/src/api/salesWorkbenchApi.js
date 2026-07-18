@@ -314,7 +314,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         actions: bootstrapItems("actions", "actionItem", actions),
         risks: bootstrapItems("risks", "riskItem", risks),
         knowledge: bootstrapItems("knowledge", "knowledgeItem", knowledge),
-        quickRecords: bootstrapItems("quickRecords", "quickRecord", quickRecords),
+        quickRecords: bootstrapItems("quickRecords", "quickRecordHistory", quickRecords),
         solutionDocs: bootstrapItems("solutions", "solutionDraft", solutions),
         summary: assertApiEntity("dashboardSummary", summary.item),
       };
@@ -326,7 +326,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         requestApi("/api/customers"),
         requestApi("/api/opportunities"),
       ]);
-      const currentQuickRecords = assertApiCollection("quickRecord", quickRecords.items ?? []);
+      const currentQuickRecords = assertApiCollection("quickRecordHistory", quickRecords.items ?? []);
       const quickRecord = currentQuickRecords.find((item) => item.id === quickRecordId);
       if (!quickRecord) {
         const error = new Error("The quick record is no longer available");
@@ -352,8 +352,26 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       const analyzed = await requestApi(`/api/quick-records/${quickRecord.id}/analyze`, { method: "POST" });
 
       return {
-        quickRecord,
+        quickRecord: assertApiEntity("quickRecord", analyzed.quickRecord),
         analysis: assertApiEntity("aiInsight", analyzed.item),
+      };
+    },
+
+    async saveQuickRecordAnalysis(quickRecordId, summary, version) {
+      const summaryText = Object.fromEntries(
+        Object.entries(summary ?? {}).map(([key, value]) => [
+          key,
+          typeof value === "string" ? value : String(value?.text ?? ""),
+        ]),
+      );
+      const saved = await requestApi(`/api/quick-records/${quickRecordId}/analysis`, {
+        method: "PATCH",
+        headers: versionHeaders(version),
+        body: JSON.stringify({ summary: summaryText }),
+      });
+      return {
+        quickRecord: assertApiEntity("quickRecord", saved.quickRecord),
+        analysis: assertApiEntity("aiInsight", saved.analysis),
       };
     },
 
@@ -484,6 +502,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         ...confirmed,
         confirmations: assertApiCollection("manualConfirmation", confirmed.confirmations ?? []),
         quickRecord: assertApiEntity("quickRecord", confirmed.quickRecord),
+        analysis: confirmed.analysis ? assertApiEntity("aiInsight", confirmed.analysis) : null,
         customer: confirmed.customer ? assertApiEntity("customer", confirmed.customer) : null,
         opportunity: confirmed.opportunity ? assertApiEntity("opportunity", confirmed.opportunity) : null,
         action: confirmed.action ? assertApiEntity("actionItem", confirmed.action) : null,

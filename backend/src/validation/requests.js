@@ -191,6 +191,15 @@ export const requestSchemas = freezeSchema({
     customerId: text(200, { nullable: true, nonEmpty: true }), opportunityId: text(200, { nullable: true, nonEmpty: true }),
   },
   quickRecordPreview: { rawContent: text(50000, { required: true }) },
+  quickRecordAnalysisPatch: {
+    summary: {
+      type: "object",
+      required: true,
+      maxKeys: 4,
+      allowedKeys: ["request", "feedback", "risk", "action"],
+      value: text(5000),
+    },
+  },
   confirmation: {
     targets: { type: "array", minItems: 1, maxItems: 3, required: true, values: ["customer", "opportunity", "weekly"] },
     confirmedBy: text(100, { nullable: true }), note: text(5000, { nullable: true }), analysisVersionId: text(200, { nullable: true }),

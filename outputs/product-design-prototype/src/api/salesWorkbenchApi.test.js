@@ -278,13 +278,26 @@ function sampleSolutionDraft(overrides = {}) {
   };
 }
 
+function sampleQuickRecordHistory(overrides = {}) {
+  const analysis = sampleAnalysis();
+  const confirmations = [sampleConfirmation()];
+  return sampleQuickRecord({
+    status: "confirmed",
+    analysis,
+    confirmations,
+    confirmedTargets: confirmations.map((item) => item.target),
+    syncLog: confirmations,
+    ...overrides,
+  });
+}
+
 function bootstrapResponse(url) {
   if (url.endsWith("/api/customers")) return jsonResponse({ items: [sampleCustomer()] });
   if (url.endsWith("/api/opportunities")) return jsonResponse({ items: [sampleOpportunity()] });
   if (url.endsWith("/api/actions")) return jsonResponse({ items: [sampleAction()] });
   if (url.endsWith("/api/risks")) return jsonResponse({ items: [sampleRisk()] });
   if (url.endsWith("/api/knowledge")) return jsonResponse({ items: [sampleKnowledgeItem()] });
-  if (url.endsWith("/api/quick-records")) return jsonResponse({ items: [sampleQuickRecord()] });
+  if (url.endsWith("/api/quick-records")) return jsonResponse({ items: [sampleQuickRecordHistory()] });
   if (url.endsWith("/api/solutions")) return jsonResponse({ items: [sampleSolutionDraft()] });
   if (url.endsWith("/api/dashboard/summary")) return jsonResponse({ item: sampleDashboardSummary() });
   return jsonResponse({ error: "not_found" }, 404);
@@ -823,6 +836,9 @@ describe("sales workbench API client", () => {
     assert.equal(result.risks[0].sourceId, "op-rizhao-plan");
     assertApiEntity("dashboardSummary", result.summary);
     assert.equal(result.summary.metrics.opportunities.value, 2);
+    assert.equal(result.quickRecords[0].analysis.id, "ai-1");
+    assert.deepEqual(result.quickRecords[0].confirmedTargets, ["weekly"]);
+    assert.deepEqual(result.quickRecords[0].syncLog, result.quickRecords[0].confirmations);
     assert.equal(result.knowledge[0].title, "移动云灾备对比清单");
     assert.deepEqual(calls, [
       { url: "http://127.0.0.1:8787/api/customers", method: "GET" },
@@ -864,6 +880,21 @@ describe("sales workbench API client", () => {
           && /expected array/i.test(error.message),
       );
     }
+  });
+
+  it("rejects quick-record bootstrap items that omit persisted analysis and confirmation state", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url) => url.endsWith("/api/quick-records")
+        ? jsonResponse({ items: [sampleQuickRecord()] })
+        : bootstrapResponse(url),
+    });
+
+    await assert.rejects(
+      () => api.loadBootstrap(),
+      (error) => error instanceof TypeError
+        && /quickRecords\.items\[0\]\.(analysis|confirmations|confirmedTargets|syncLog)/.test(error.message),
+    );
   });
 
   it("aborts stale bootstrap requests without globally invalidating a successful retry", async () => {
@@ -915,8 +946,8 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/quick-records")) {
           return jsonResponse({
             items: [
-              sampleQuickRecord({ id: "qr-other", version: 2 }),
-              sampleQuickRecord({ id: "qr-1", version: 6 }),
+              sampleQuickRecordHistory({ id: "qr-other", version: 2 }),
+              sampleQuickRecordHistory({ id: "qr-1", version: 6 }),
             ],
           });
         }
@@ -983,7 +1014,12 @@ describe("sales workbench API client", () => {
       fetchImpl: async (url, options = {}) => {
         bodies.push({ url, body: options.body ? JSON.parse(options.body) : null });
         if (url.endsWith("/api/quick-records")) return jsonResponse({ item: sampleQuickRecord() }, 201);
-        if (url.endsWith("/api/quick-records/qr-1/analyze")) return jsonResponse({ item: sampleAnalysis() }, 201);
+        if (url.endsWith("/api/quick-records/qr-1/analyze")) {
+          return jsonResponse({
+            item: sampleAnalysis(),
+            quickRecord: sampleQuickRecord({ status: "analyzed" }),
+          }, 201);
+        }
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
@@ -997,12 +1033,56 @@ describe("sales workbench API client", () => {
     assertApiEntity("quickRecord", result.quickRecord);
     assertApiEntity("aiInsight", result.analysis);
     assert.equal(result.analysis.customer.value, "Rizhao TCM Hospital");
+    assert.equal(result.quickRecord.status, "analyzed");
     assert.deepEqual(bodies.map((item) => item.url), [
       "http://127.0.0.1:8787/api/quick-records",
       "http://127.0.0.1:8787/api/quick-records/qr-1/analyze",
     ]);
     assert.equal(bodies[0].body.rawContent, "Rizhao record");
     assert.equal(bodies[0].body.sourceChannel, "field visit");
+  });
+
+  it("saves editable quick-record analysis with CSRF and a quoted entity version", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        return jsonResponse({
+          quickRecord: sampleQuickRecord({ version: 5, status: "confirmed" }),
+          analysis: sampleAnalysis({
+            summary: {
+              ...sampleAnalysis().summary,
+              request: { title: "request", text: "manually saved request" },
+            },
+          }),
+        });
+      },
+    });
+    api.setSession({ csrfToken: "analysis-csrf" });
+
+    const result = await api.saveQuickRecordAnalysis("qr-1", {
+      request: { title: "request", text: "manually saved request" },
+      feedback: { title: "feedback", text: "saved feedback" },
+      risk: { title: "risk", text: "saved risk" },
+      action: { title: "action", text: "saved action" },
+    }, 4);
+
+    assert.equal(result.quickRecord.version, 5);
+    assert.equal(result.analysis.summary.request.text, "manually saved request");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "http://127.0.0.1:8787/api/quick-records/qr-1/analysis");
+    assert.equal(calls[0].options.method, "PATCH");
+    assert.equal(headerValue(calls[0].options, "If-Match"), '"4"');
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "analysis-csrf");
+    assert.deepEqual(JSON.parse(calls[0].options.body), {
+      summary: {
+        request: "manually saved request",
+        feedback: "saved feedback",
+        risk: "saved risk",
+        action: "saved action",
+      },
+    });
   });
 
   it("creates and updates customer and opportunity records through the backend", async () => {

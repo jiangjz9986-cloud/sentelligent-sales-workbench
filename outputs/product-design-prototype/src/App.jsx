@@ -813,9 +813,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   function handleBusinessSync(result) {
-    if (result.quickRecord) {
-      setWorkbenchQuickRecords((current) => mergeById(current, result.quickRecord));
-    }
     if (result.customer) {
       setWorkbenchCustomers((current) => mergeById(current, result.customer));
       setSelectedCustomerId(result.customer.id);
