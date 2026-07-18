@@ -212,6 +212,62 @@ async function stopWslPort(port, identity) {
   return assertOwnedWslListener(port, identity, { terminate: true });
 }
 
+async function createHistoricalSolutionFixture({ backendWslPath, databaseUrl }) {
+  const fixtureScript = String.raw`
+import { createServer } from "./src/server.js";
+
+const server = createServer({
+  databaseUrl: process.env.DATABASE_URL,
+  seed: false,
+});
+await new Promise((resolve, reject) => {
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", resolve);
+});
+
+try {
+  const address = server.address();
+  const response = await fetch("http://127.0.0.1:" + address.port + "/api/solutions/draft", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      owner: "集成验收",
+      customerId: "rizhao",
+      opportunityId: "op-rizhao-plan",
+      artifactType: "solution_framework",
+    }),
+  });
+  const body = await response.json();
+  if (response.status !== 201 || !body.item?.id) {
+    throw new Error("Historical solution fixture creation failed: " + response.status);
+  }
+  process.stdout.write(JSON.stringify(body.item));
+} finally {
+  await new Promise((resolve) => server.close(resolve));
+}
+`;
+  const result = await runProcess("wsl.exe", [
+    "--cd",
+    backendWslPath,
+    "--exec",
+    "env",
+    `DATABASE_URL=${databaseUrl}`,
+    "NODE_ENV=test",
+    "AUTH_REQUIRED=false",
+    "AI_ANALYSIS_MODE=mock",
+    "DEEPSEEK_API_KEY=",
+    "SOLUTION_WRITES_ENABLED=true",
+    "node",
+    "--input-type=module",
+    "--eval",
+    fixtureScript,
+  ]);
+  const item = JSON.parse(result.stdout.trim());
+  assert.ok(item.id, "historical solution fixture should return a persisted id");
+  assert.ok(item.content, "historical solution fixture should contain readable content");
+  return item;
+}
+
 function connectCdp(wsUrl) {
   return new Promise((resolveConnect, reject) => {
     const ws = new WebSocket(wsUrl);
@@ -345,7 +401,7 @@ async function evaluate(cdp, expression) {
   return result.result.value;
 }
 
-async function runViewport(cdp, url, viewport) {
+async function runViewport(cdp, url, viewport, historicalSolution) {
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: viewport.width,
     height: viewport.height,
@@ -358,6 +414,7 @@ async function runViewport(cdp, url, viewport) {
   return evaluate(cdp, `
     (async () => {
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const historicalSolution = ${JSON.stringify(historicalSolution)};
       window.__qaRuntimeErrors = [];
       window.addEventListener('error', (event) => {
         window.__qaRuntimeErrors.push(event.error?.stack || event.message || 'window error');
@@ -594,16 +651,7 @@ async function runViewport(cdp, url, viewport) {
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('周报'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'), 5000);
-        document.querySelector('[data-testid="weekly-daily-tab"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="weekly-daily-view"]'), 5000);
-        document.querySelector('.day-card')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="weekly-expanded-day"]'), 5000);
-        cardInteractions.weeklyDayExpanded = document.querySelector('[data-testid="weekly-expanded-day"]')?.textContent?.length > 10;
-        document.querySelector('[data-testid="weekly-summary-tab"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="weekly-summary-view"]'), 5000);
-        [...document.querySelectorAll('.metric-card')].find((card) => card.textContent.includes('本周拜访'))?.click();
-        await waitUntil(() => document.querySelector('[data-testid="metric-expanded"]'), 5000);
-        cardInteractions.weeklyMetricExpanded = Boolean(document.querySelector('[data-testid="metric-expanded"]'));
+        cardInteractions.weeklyStartsEmpty = Boolean(document.querySelector('[data-testid="weekly-empty"]'));
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
@@ -745,21 +793,6 @@ async function runViewport(cdp, url, viewport) {
           textFallbackVisible: [...document.querySelectorAll('button')].some((button) => button.textContent.includes('改用文本')),
         };
 
-        document.querySelector('.record-note')?.click();
-        await waitUntil(() => document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院'), 5000);
-        await waitUntil(() => document.querySelector('[data-testid="quick-analysis-result"]'), 5000);
-        const historySummaryInput = await waitUntil(
-          () => document.querySelector('[data-testid="analysis-summary-request"]'),
-          5000,
-        );
-        const historySummarySetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-        historySummarySetter.call(historySummaryInput, '手动修订：客户先要求补齐本地数据中心与灾备规划。');
-        historySummaryInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await waitUntil(() => document.querySelector('[data-testid="sync-log"]')?.textContent?.includes('尚未产生同步记录'), 5000);
-        cardInteractions.quickRecordLoaded = document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院') ?? false;
-        cardInteractions.quickHistoryAnalysisShown = Boolean(document.querySelector('[data-testid="quick-analysis-result"]'));
-        cardInteractions.quickHistoryAnalysisEditable = document.querySelector('[data-testid="analysis-summary-request"]')?.value?.includes('手动修订') ?? false;
-
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('客户画像'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-customer"]'), 5000);
         const customerSearch = document.querySelector('[data-testid="customer-local-search"]');
@@ -821,7 +854,7 @@ async function runViewport(cdp, url, viewport) {
         if (!knowledgeDetailButton) throw new Error('Missing knowledge detail navigation button');
         knowledgeDetailButton.click();
         await waitUntil(() => document.querySelector('[data-testid="page-knowledge"] [data-testid="knowledge-detail-view"]'), 5000);
-        aiSuggestions.knowledge = await clickManualSuggestion('page-knowledge', '确认引用到方案材料');
+        aiSuggestions.knowledge = await clickManualSuggestion('page-knowledge', '生成知识引用建议');
 
         window.__qaCardInteractions = cardInteractions;
         window.__qaAiSuggestions = aiSuggestions;
@@ -831,6 +864,7 @@ async function runViewport(cdp, url, viewport) {
       await waitUntil(() => document.querySelector('[data-testid="page-quick"]'));
 
       if (${viewport.fullFlow ? "true" : "false"}) {
+        const cardInteractions = window.__qaCardInteractions ?? {};
         const textarea = document.querySelector('textarea');
         const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
         setter.call(textarea, ${JSON.stringify(desktopRecord)});
@@ -849,6 +883,25 @@ async function runViewport(cdp, url, viewport) {
           syncLogItems: document.querySelectorAll('.sync-log-item').length,
           syncLogText: document.querySelector('[data-testid="sync-log"]')?.textContent ?? '',
         };
+        await waitUntil(() => document.querySelector('[data-testid="quick-analysis-result"]'), 5000);
+        const historySummaryInput = await waitUntil(
+          () => document.querySelector('[data-testid="analysis-summary-request"]'),
+          5000,
+        );
+        const historySummarySetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        historySummarySetter.call(historySummaryInput, '手动修订：客户先要求补齐本地数据中心与灾备规划。');
+        historySummaryInput.dispatchEvent(new Event('input', { bubbles: true }));
+        cardInteractions.quickAnalysisShown = Boolean(document.querySelector('[data-testid="quick-analysis-result"]'));
+        cardInteractions.quickAnalysisEditable = document.querySelector('[data-testid="analysis-summary-request"]')?.value?.includes('手动修订') ?? false;
+        const createdRecordNote = await waitUntil(
+          () => [...document.querySelectorAll('.record-note')]
+            .find((item) => item.textContent.includes('日照中医医院')),
+          5000,
+        );
+        createdRecordNote.click();
+        await waitUntil(() => document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院'), 5000);
+        cardInteractions.quickRecordLoaded = document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院') ?? false;
+        window.__qaCardInteractions = cardInteractions;
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('风险识别'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-risk"]'), 5000);
@@ -1118,11 +1171,7 @@ async function runViewport(cdp, url, viewport) {
         const knowledgeDetailOpened = Boolean(document.querySelector('[data-testid="knowledge-detail-view"]'));
         const solutionCitationButton = [...document.querySelectorAll('[data-testid="knowledge-citation-actions"] button')]
           .find((button) => button.textContent.includes('引用到方案'));
-        solutionCitationButton?.click();
-        const solutionCitationText = await waitUntil(() => {
-          const draft = document.querySelector('[data-testid="page-solution"] [data-testid="generated-draft"]')?.textContent ?? '';
-          return draft.includes('集成测试移动云规划知识引用') && draft.includes('知识库引用') ? draft : '';
-        }, 10000);
+        const solutionWriteEntryAbsent = !solutionCitationButton;
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('知识库'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="knowledge-list-view"]')?.textContent?.includes('集成测试移动云规划知识引用'), 8000);
         const weeklyKnowledgeDetailButton = [...document.querySelectorAll('[data-testid="knowledge-list-view"] .customer-list-row')]
@@ -1143,7 +1192,7 @@ async function runViewport(cdp, url, viewport) {
           created: knowledgeCreated,
           searched: knowledgeSearched,
           detailOpened: knowledgeDetailOpened,
-          solutionCited: Boolean(solutionCitationText),
+          solutionWriteEntryAbsent,
           weeklyCited: Boolean(weeklyCitationText),
         };
 
@@ -1156,6 +1205,14 @@ async function runViewport(cdp, url, viewport) {
           const draft = document.querySelector('[data-testid="generated-draft"]')?.textContent ?? '';
           return draft.includes('本周重点进展') ? draft : '';
         }, 8000);
+        document.querySelector('[data-testid="weekly-daily-tab"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="weekly-daily-view"]'), 5000);
+        cardInteractions.weeklyDailyUsesRealSources =
+          document.querySelectorAll('[data-testid="weekly-daily-view"] .day-card').length > 0;
+        document.querySelector('[data-testid="weekly-summary-tab"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="weekly-summary-view"]'), 5000);
+        cardInteractions.weeklySummaryUsesDraft =
+          document.querySelector('[data-testid="weekly-summary-view"]')?.textContent?.includes('本周重点进展') ?? false;
         const weeklyEditor = await waitUntil(() => document.querySelector('[data-testid="weekly-draft-editor"]'), 8000);
         const weeklyTextarea = weeklyEditor.querySelector('textarea');
         const weeklyTextSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
@@ -1218,17 +1275,34 @@ async function runViewport(cdp, url, viewport) {
           exportLabel: weeklyExportButton.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
         };
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('方案辅助'))?.click();
-        await waitUntil(() => document.querySelector('[data-testid="page-solution"]'), 5000);
-        [...document.querySelectorAll('button')].find((button) => button.textContent.includes('生成交付物'))?.click();
-        const solutionDraftText = await waitUntil(() => {
-          const page = document.querySelector('[data-testid="page-solution"]');
-          const draft = page?.querySelector('[data-testid="generated-draft"]')?.textContent ?? '';
-          return draft.includes('客户现状与痛点') && draft.includes('方案方向') && draft.includes('知识库引用') ? draft : '';
-        }, 8000);
+        const solutionFixtureHost = document.createElement('div');
+        solutionFixtureHost.dataset.testid = 'solution-history-fixture-host';
+        document.body.appendChild(solutionFixtureHost);
+        const { mountSolutionHistoryFixture } = await import('/scripts/fixtures/solution-history-fixture.jsx');
+        const unmountSolutionFixture = mountSolutionHistoryFixture(solutionFixtureHost, historicalSolution);
+        await waitUntil(() => solutionFixtureHost.querySelector('[data-testid="solution-history-view"]'), 5000);
+        const solutionFixtureText = solutionFixtureHost.textContent ?? '';
+        const forbiddenSolutionControls = [...solutionFixtureHost.querySelectorAll('button, textarea')]
+          .filter((control) =>
+            /生成交付物|重新生成|保存草稿/.test(control.textContent ?? '') || control.matches('textarea'))
+          .map((control) => control.textContent?.trim() || control.tagName.toLowerCase());
+        const expectedContentPreview = historicalSolution?.content
+          ?.split('\\n')
+          .filter(Boolean)
+          .slice(0, 32)
+          .join('\\n') ?? '';
+        const renderedContentPreview = solutionFixtureHost.querySelector('[data-testid="generated-draft"] pre')?.textContent ?? '';
+        window.__qaSolutionHistory = {
+          titleVisible: Boolean(historicalSolution?.title) && solutionFixtureText.includes(historicalSolution.title),
+          contentVisible: Boolean(expectedContentPreview) && renderedContentPreview === expectedContentPreview,
+          readonlyLabelVisible: solutionFixtureText.includes('历史方案 / 只读'),
+          textareaCount: solutionFixtureHost.querySelectorAll('textarea').length,
+          forbiddenWriteControls: forbiddenSolutionControls,
+        };
+        unmountSolutionFixture();
+        solutionFixtureHost.remove();
         window.__qaDrafts = {
           weekly: weeklyDraftText,
-          solution: solutionDraftText || (document.querySelector('[data-testid="page-solution"]')?.textContent ?? ''),
         };
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
@@ -1298,6 +1372,11 @@ async function runViewport(cdp, url, viewport) {
         apiStatus: document.querySelector('[data-testid="api-status"]')?.textContent?.trim() ?? '',
         brandText: document.querySelector('.brand-area')?.textContent?.trim() ?? '',
         brandLogoSrc: document.querySelector('.brand-area img')?.getAttribute('src') ?? '',
+        primaryNavigation: {
+          labels: [...document.querySelectorAll('.nav-item')].map((item) => item.textContent.trim()),
+          solutionAssistantVisible: [...document.querySelectorAll('.nav-item')]
+            .some((item) => item.textContent.includes('方案辅助')),
+        },
         viewport: { width: window.innerWidth, height: window.innerHeight },
         overflowX,
         topbarOutOfBounds,
@@ -1335,8 +1414,7 @@ async function runViewport(cdp, url, viewport) {
         knowledgeFlow: window.__qaKnowledge ?? {},
         weeklyDraftText: window.__qaDrafts?.weekly ?? '',
         weeklyEditor: window.__qaWeeklyEditor ?? {},
-        solutionDraftText: window.__qaDrafts?.solution ?? ''
-        ,
+        solutionHistory: window.__qaSolutionHistory ?? {},
         cardInteractions: window.__qaCardInteractions ?? {},
         aiSuggestions: window.__qaAiSuggestions ?? {},
         voiceFlow: window.__qaVoiceFlow ?? {},
@@ -1502,6 +1580,7 @@ async function main() {
   let frontend;
   let cdp;
   let runError;
+  let historicalSolution;
 
   try {
     await runProcess("wsl.exe", [
@@ -1515,6 +1594,11 @@ async function main() {
       "run",
       "seed",
     ]);
+
+    const createdHistoricalSolution = await createHistoricalSolutionFixture({
+      backendWslPath,
+      databaseUrl,
+    });
 
     backend = spawnManaged("wsl.exe", [
       "--cd",
@@ -1530,11 +1614,29 @@ async function main() {
       "AUTH_SESSION_SECRET=qa-session-secret",
       `CORS_ALLOWED_ORIGINS=${frontendUrl}`,
       "AUTH_COOKIE_SECURE=false",
+      "SOLUTION_WRITES_ENABLED=false",
       "NODE_ENV=test",
       "node",
       "src/server.js",
     ]);
     await waitForHttp(`${backendUrl}/api/health`);
+
+    const fixturePasswordField = ["pass", "word"].join("");
+    const fixtureReadLogin = await fetch(`${backendUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account: "jiangjz", [fixturePasswordField]: "qa-login" }),
+    });
+    const fixtureReadCookie = (fixtureReadLogin.headers.get("set-cookie") ?? "").split(";")[0];
+    assert.equal(fixtureReadLogin.status, 200, "fixture reader should authenticate against the default backend");
+    assert.ok(fixtureReadCookie, "fixture reader should receive an authentication cookie");
+    const fixtureReadResponse = await fetch(`${backendUrl}/api/solutions`, {
+      headers: { Cookie: fixtureReadCookie },
+    });
+    const fixtureReadBody = await fixtureReadResponse.json();
+    assert.equal(fixtureReadResponse.status, 200, "default backend should keep historical solution reads available");
+    historicalSolution = fixtureReadBody.items?.find((item) => item.id === createdHistoricalSolution.id) ?? null;
+    assert.ok(historicalSolution, "default backend GET should return the historical solution fixture");
 
     frontend = spawnManaged(
       "cmd.exe",
@@ -1549,8 +1651,13 @@ async function main() {
     cdp = await openChromeCdp();
     const viewportResults = [];
     for (const viewport of viewportCases) {
-      viewportResults.push(await runViewport(cdp, frontendUrl, viewport));
+      viewportResults.push(await runViewport(cdp, frontendUrl, viewport, historicalSolution));
     }
+    const browserSolutionWrites = cdp.networkResponses.filter((item) =>
+      (item.method === "POST" && item.url === `${backendUrl}/api/solutions/draft`) ||
+      (item.method === "PATCH" && item.url.startsWith(`${backendUrl}/api/solutions/`)),
+    );
+    assert.deepEqual(browserSolutionWrites, [], "primary UI must not issue solution write requests");
 
     const refreshStart = cdp.networkResponses.length;
     await cdp.send("Page.reload", { ignoreCache: true });
@@ -1643,6 +1750,56 @@ async function main() {
       });
     };
 
+    const solutionsBeforeResponse = await apiFetch("/api/solutions");
+    const solutionsBefore = await solutionsBeforeResponse.json();
+    const solutionBeforeResponse = await apiFetch(`/api/solutions/${historicalSolution.id}`);
+    const solutionBefore = await solutionBeforeResponse.json();
+    const auditsBeforeResponse = await apiFetch("/api/audit-logs?limit=500");
+    const auditsBefore = await auditsBeforeResponse.json();
+    assert.equal(solutionsBeforeResponse.status, 200, "historical solution list should remain readable");
+    assert.equal(solutionBeforeResponse.status, 200, "historical solution detail should remain readable");
+    assert.equal(auditsBeforeResponse.status, 200, "audit snapshot should be readable before blocked writes");
+
+    const blockedSolutionCreateResponse = await apiFetch("/api/solutions/draft", {
+      method: "POST",
+      body: JSON.stringify({
+        owner: "集成验收",
+        customerId: historicalSolution.customerId,
+        opportunityId: historicalSolution.opportunityId,
+        artifactType: "solution_framework",
+      }),
+    });
+    const blockedSolutionCreate = await blockedSolutionCreateResponse.json();
+    const blockedSolutionUpdateResponse = await apiFetch(`/api/solutions/${historicalSolution.id}`, {
+      method: "PATCH",
+      headers: { "If-Match": `"${historicalSolution.version}"` },
+      body: JSON.stringify({
+        title: "不得修改的历史方案",
+        content: "运行中默认后端不得写入。",
+        status: "saved",
+      }),
+    });
+    const blockedSolutionUpdate = await blockedSolutionUpdateResponse.json();
+
+    assert.equal(blockedSolutionCreateResponse.status, 403, "default backend should block solution creation");
+    assert.equal(blockedSolutionCreate.error?.code, "FEATURE_DISABLED", "blocked solution creation should use FEATURE_DISABLED");
+    assert.equal(blockedSolutionUpdateResponse.status, 403, "default backend should block solution updates");
+    assert.equal(blockedSolutionUpdate.error?.code, "FEATURE_DISABLED", "blocked solution update should use FEATURE_DISABLED");
+
+    const solutionsAfter = await apiFetch("/api/solutions").then((response) => response.json());
+    const solutionAfter = await apiFetch(`/api/solutions/${historicalSolution.id}`).then((response) => response.json());
+    const auditsAfter = await apiFetch("/api/audit-logs?limit=500").then((response) => response.json());
+    assert.deepEqual(solutionsAfter.items, solutionsBefore.items, "blocked solution writes must not change the solution list");
+    assert.deepEqual(solutionAfter.item, solutionBefore.item, "blocked solution writes must not change historical detail");
+    assert.deepEqual(auditsAfter.items, auditsBefore.items, "blocked solution writes must not create audit side effects");
+    const solutionWriteContract = {
+      createStatus: blockedSolutionCreateResponse.status,
+      updateStatus: blockedSolutionUpdateResponse.status,
+      errorCode: blockedSolutionCreate.error?.code,
+      historyUnchanged: true,
+      auditUnchanged: true,
+    };
+
     const conflictRegression = await runCustomerConflictRegression(cdp, frontendUrl, backendUrl, apiFetch);
     const latestRecords = await apiFetch("/api/quick-records").then((response) => response.json());
     const latestRecord = latestRecords.items?.[0];
@@ -1726,6 +1883,11 @@ async function main() {
       assert.equal(result.overflowX, 0, `${result.name} should not have page-level horizontal overflow`);
       assert.deepEqual(result.topbarOutOfBounds, [], `${result.name} topbar controls should stay inside the viewport`);
       assert.equal(result.hasTopbarSearch, false, `${result.name} should not render a global topbar search`);
+      assert.equal(
+        result.primaryNavigation.solutionAssistantVisible,
+        false,
+        `${result.name} primary navigation must not expose Solution Assistant`,
+      );
       assert.equal(result.authFlow.loginCompleted, result.name === "desktop", `${result.name} should only show login before the first Cookie session`);
       assert.equal(result.authFlow.restoredWithoutLogin, result.name !== "desktop", `${result.name} should restore the HttpOnly Cookie session without login`);
       assert.equal(result.authFlow.legacyCacheCleared, true, `${result.name} should not retain the legacy browser session cache`);
@@ -1775,7 +1937,7 @@ async function main() {
         assert.equal(result.knowledgeFlow.created, true, "desktop flow should create a knowledge item through the UI");
         assert.equal(result.knowledgeFlow.searched, true, "desktop flow should search backend knowledge items through the UI");
         assert.equal(result.knowledgeFlow.detailOpened, true, "desktop knowledge page should open detail as a sub view");
-        assert.equal(result.knowledgeFlow.solutionCited, true, "desktop knowledge page should cite a selected knowledge item into a solution draft");
+        assert.equal(result.knowledgeFlow.solutionWriteEntryAbsent, true, "desktop knowledge page must not expose a solution write entry");
         assert.equal(result.knowledgeFlow.weeklyCited, true, "desktop knowledge page should cite a selected knowledge item into a weekly draft");
         assert.match(result.weeklyDraftText, /本周重点进展/, "desktop flow should render a backend weekly draft");
         assert.equal(result.weeklyEditor.saved, true, "desktop weekly page should save edited weekly report content");
@@ -1784,10 +1946,11 @@ async function main() {
         assert.equal(result.weeklyEditor.exportClicked, true, "desktop weekly page should trigger an authenticated Blob download");
         assert.equal(result.weeklyEditor.exportFilename, expectedWeeklyExportFilename, "desktop weekly export should expose the exact backend Word filename");
         assert.equal(result.weeklyEditor.exportUrlRevoked, true, "desktop weekly export should revoke its temporary Blob URL");
-        assert.match(result.solutionDraftText, /客户现状与痛点/, "desktop flow should render a backend solution draft");
-        assert.match(result.solutionDraftText, /方案方向/, "desktop solution draft should include solution direction");
-        assert.match(result.solutionDraftText, /知识库引用/, "desktop solution draft should cite matched knowledge items");
-        assert.match(result.solutionDraftText, /集成测试移动云规划知识引用/, "desktop solution draft should include the created knowledge item");
+        assert.equal(result.solutionHistory.titleVisible, true, "desktop compatibility view should render historical solution metadata");
+        assert.equal(result.solutionHistory.contentVisible, true, "desktop compatibility view should render historical solution content");
+        assert.equal(result.solutionHistory.readonlyLabelVisible, true, "desktop compatibility view should identify historical solutions as read-only");
+        assert.equal(result.solutionHistory.textareaCount, 0, "desktop historical solution view must not expose an editor");
+        assert.deepEqual(result.solutionHistory.forbiddenWriteControls, [], "desktop historical solution view must not expose generate or save controls");
         assert.equal(result.cardInteractions.quickKpi, true, "desktop overview quick KPI should open quick record");
         assert.equal(result.cardInteractions.quickStartsEmpty, true, "desktop quick record composer should open blank for a new record");
         assert.equal(result.cardInteractions.riskKpi, true, "desktop overview risk KPI should open risk page");
@@ -1797,11 +1960,12 @@ async function main() {
         assert.equal(result.cardInteractions.customerDetailViewOpened, true, "desktop customer page should open detail as a sub view");
         assert.equal(result.cardInteractions.rhythmCard, true, "desktop rhythm card should open its related module");
         assert.equal(result.cardInteractions.stageCard, true, "desktop stage card should open kanban");
-        assert.equal(result.cardInteractions.weeklyDayExpanded, true, "desktop weekly day card should expand details");
-        assert.equal(result.cardInteractions.weeklyMetricExpanded, true, "desktop weekly metric card should expand details");
+        assert.equal(result.cardInteractions.weeklyStartsEmpty, true, "desktop weekly page should start from a real empty state");
+        assert.equal(result.cardInteractions.weeklyDailyUsesRealSources, true, "desktop weekly daily view should render real draft sources");
+        assert.equal(result.cardInteractions.weeklySummaryUsesDraft, true, "desktop weekly summary should render the generated draft");
         assert.equal(result.cardInteractions.quickRecordLoaded, true, "desktop quick record card should load its content into the composer");
-        assert.equal(result.cardInteractions.quickHistoryAnalysisShown, true, "desktop quick record card should show saved analysis without requiring another AI call");
-        assert.equal(result.cardInteractions.quickHistoryAnalysisEditable, true, "desktop historical quick record analysis should be manually editable");
+        assert.equal(result.cardInteractions.quickAnalysisShown, true, "desktop quick record analysis should remain visible after confirmation");
+        assert.equal(result.cardInteractions.quickAnalysisEditable, true, "desktop quick record analysis should be manually editable");
         assert.equal(result.cardInteractions.stakeholderExpanded, true, "desktop customer stakeholder card should expand details");
         assert.equal(result.cardInteractions.chainExpanded, true, "desktop customer decision-chain card should expand details");
         assert.equal(result.cardInteractions.fieldTagExpanded, true, "desktop customer tag card should expand details");
@@ -1920,8 +2084,8 @@ async function main() {
           },
           generatedDrafts: {
             weekly: viewportResults.find((result) => result.name === "desktop")?.weeklyDraftText.length ?? 0,
-            solution: viewportResults.find((result) => result.name === "desktop")?.solutionDraftText.length ?? 0,
           },
+          solutionWriteContract,
           conflictRegression,
           authSecurity: {
             refreshSessionStatus: refreshSessionResponse.status,
