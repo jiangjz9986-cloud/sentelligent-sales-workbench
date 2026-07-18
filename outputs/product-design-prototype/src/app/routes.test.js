@@ -289,6 +289,48 @@ describe("workbench route parser and builder", () => {
     }
   });
 
+  it("rejects raw and encoded path traversal before URL normalization", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+    const traversalCases = [
+      ["/customers/../actions", {}],
+      ["/customers/%2e%2e/actions", {}],
+      ["/%2E/customers", {}],
+      ["/outside/../sentelligent/customers", { basePath: "/sentelligent/" }],
+      ["/outside/%2E%2E/sentelligent/customers", { basePath: "/sentelligent/" }],
+      [
+        "https://workbench.example/outside/../sentelligent/customers",
+        { basePath: "/sentelligent/" },
+      ],
+      [{ pathname: "/customers/../actions", search: "", hash: "" }, {}],
+    ];
+
+    for (const [input, options] of traversalCases) {
+      assert.deepEqual(
+        parseWorkbenchRoute(input, options),
+        expectedRoute({ replace: true }),
+        typeof input === "string" ? input : JSON.stringify(input),
+      );
+    }
+  });
+
+  it("rejects internal empty path segments before URL normalization", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+
+    for (const url of [
+      "/customers//customer-1",
+      "/customers///customer-1",
+      "/sentelligent//customers",
+    ]) {
+      assert.deepEqual(
+        parseWorkbenchRoute(url, {
+          basePath: url.startsWith("/sentelligent") ? "/sentelligent/" : "/",
+        }),
+        expectedRoute({ replace: true }),
+        url,
+      );
+    }
+  });
+
   it("does not mistake a path outside the configured base for an app route", () => {
     const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
 
@@ -332,6 +374,63 @@ describe("workbench route parser and builder", () => {
     );
   });
 
+  it("marks raw query controls invalid before URL strips them", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+
+    for (const control of ["\t", "\n", "\r"]) {
+      const parsed = parseWorkbenchRoute(
+        `/customers?q=kept&broken=left${control}right&status=open`,
+      );
+      assert.deepEqual(
+        parsed,
+        expectedRoute({
+          page: "customers",
+          active: "customer",
+          mode: "list",
+          filters: { q: ["kept"], status: ["open"] },
+          replace: true,
+        }),
+        JSON.stringify(control),
+      );
+    }
+  });
+
+  it("rejects C1 controls in parsed path and query data", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+
+    for (const url of [
+      "/customers/customer%C2%80one",
+      "/customers/customer%C2%85one",
+      "/customers/customer%C2%9Fone",
+    ]) {
+      assert.deepEqual(
+        parseWorkbenchRoute(url),
+        expectedRoute({ replace: true }),
+        url,
+      );
+    }
+
+    assert.deepEqual(
+      parseWorkbenchRoute("/customers?q=kept&status=bad%C2%85value"),
+      expectedRoute({
+        page: "customers",
+        active: "customer",
+        mode: "list",
+        filters: { q: ["kept"] },
+        replace: true,
+      }),
+    );
+    assert.deepEqual(
+      parseWorkbenchRoute(`/customers?q=left\u009fright`),
+      expectedRoute({
+        page: "customers",
+        active: "customer",
+        mode: "list",
+        replace: true,
+      }),
+    );
+  });
+
   it("rejects route states that cannot produce an unambiguous URL", () => {
     const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
 
@@ -348,6 +447,126 @@ describe("workbench route parser and builder", () => {
       () => buildWorkbenchUrl({ page: "actions", mode: "new" }),
       /mode/i,
     );
+  });
+
+  it("defaults only an undefined mode and rejects null", () => {
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+
+    assert.equal(buildWorkbenchUrl({ page: "customers", mode: undefined }), "/customers");
+    assert.equal(buildWorkbenchUrl({ page: "customers" }), "/customers");
+    assert.throws(
+      () => buildWorkbenchUrl({ page: "customers", mode: null }),
+      /mode/i,
+    );
+  });
+
+  it("rejects stale entity identifiers on routes that do not address an entity", () => {
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+    const invalidStates = [
+      { page: "overview", mode: "index", entityId: "stale" },
+      { page: "quick-records", mode: "new", entityId: "stale" },
+      { page: "customers", mode: "list", entityId: "stale" },
+      { page: "customers", mode: "new", entityId: "stale" },
+      { page: "weekly-reports", mode: "index", entityId: "stale" },
+      { page: "settings/weixin", mode: "index", entityId: "stale" },
+      { page: "solutions", mode: "list", entityId: "stale" },
+    ];
+
+    for (const state of invalidStates) {
+      assert.throws(() => buildWorkbenchUrl(state), /entity/i, JSON.stringify(state));
+    }
+  });
+
+  it("rejects contradictory canonical active and read-only metadata", () => {
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+
+    assert.throws(
+      () => buildWorkbenchUrl({ page: "solutions", mode: "list", readOnly: false }),
+      /read.?only/i,
+    );
+    assert.throws(
+      () => buildWorkbenchUrl({ page: "customers", mode: "list", readOnly: true }),
+      /read.?only/i,
+    );
+    assert.throws(
+      () => buildWorkbenchUrl({ page: "customers", mode: "list", active: "actions" }),
+      /active/i,
+    );
+    assert.equal(
+      buildWorkbenchUrl({
+        page: "solutions",
+        mode: "list",
+        active: "solution",
+        readOnly: true,
+      }),
+      "/solutions",
+    );
+  });
+
+  it("accepts only plain filter records containing non-empty string arrays", () => {
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+    const inheritedFilters = Object.create({ q: ["inherited"] });
+    const nullPrototypeFilters = Object.create(null);
+    nullPrototypeFilters.q = ["value"];
+
+    for (const filters of [
+      new Date(),
+      new Map([["q", ["value"]]]),
+      inheritedFilters,
+      nullPrototypeFilters,
+      { q: [] },
+      { q: "value" },
+    ]) {
+      assert.throws(
+        () => buildWorkbenchUrl({ page: "customers", mode: "list", filters }),
+        /filter/i,
+      );
+    }
+
+    assert.equal(
+      buildWorkbenchUrl({
+        page: "customers",
+        mode: "list",
+        filters: { q: ["value"], status: ["open", "won"] },
+      }),
+      "/customers?q=value&status=open&status=won",
+    );
+  });
+
+  it("rejects C1 controls when building entity, filter, and base paths", () => {
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+    const normalizeBasePath = requireFunction(routeModule, "normalizeBasePath");
+
+    for (const control of ["\u0080", "\u0085", "\u009f"]) {
+      assert.throws(
+        () =>
+          buildWorkbenchUrl({
+            page: "customers",
+            mode: "detail",
+            entityId: `customer${control}one`,
+          }),
+        /entity/i,
+      );
+      assert.throws(
+        () =>
+          buildWorkbenchUrl({
+            page: "customers",
+            mode: "list",
+            filters: { q: [`left${control}right`] },
+          }),
+        /filter/i,
+      );
+      assert.throws(() => normalizeBasePath(`/sent${control}elligent/`), /base path/i);
+    }
+  });
+
+  it("strictly round-trips every canonical route state", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+
+    for (const [, state] of routeCases) {
+      assert.deepEqual(parseWorkbenchRoute(buildWorkbenchUrl(state)), state);
+    }
   });
 });
 
@@ -371,6 +590,8 @@ describe("public base path", () => {
       "/sentelligent/#app",
       "/../sentelligent/",
       "/sentelligent/%2Fadmin/",
+      "/sentelligent/%C2%85admin/",
+      "\t/sentelligent/\n",
       "\\sentelligent\\",
     ]) {
       assert.throws(() => normalizeBasePath(value), /base path/i, value);

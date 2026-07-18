@@ -2,7 +2,7 @@ const ROUTE_ORIGIN = "https://workbench.invalid";
 const RESERVED_FILTER_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const RESERVED_ENTITY_IDS = new Set(["new", "edit"]);
 const FILTER_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
-const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 
 const PAGE_META = Object.freeze({
   overview: Object.freeze({ active: "overview", defaultMode: "index", readOnly: false }),
@@ -53,6 +53,7 @@ function encodeEntityId(entityId) {
 export function normalizeBasePath(basePath = "/") {
   if (basePath == null || basePath === "") return "/";
   if (typeof basePath !== "string") throw new TypeError("Invalid base path");
+  if (CONTROL_CHARACTER_PATTERN.test(basePath)) throw new TypeError("Invalid base path");
 
   const value = basePath.trim();
   if (value === "") return "/";
@@ -217,19 +218,56 @@ function parseFilters(search) {
   return { filters, invalid };
 }
 
-function filterSearch(filters = {}) {
-  if (filters == null) return "";
-  if (typeof filters !== "object" || Array.isArray(filters)) {
+function plainFilterEntries(filters) {
+  if (
+    typeof filters !== "object" ||
+    filters === null ||
+    Object.getPrototypeOf(filters) !== Object.prototype
+  ) {
     throw new TypeError("Invalid query filters");
   }
 
+  const ownKeys = Reflect.ownKeys(filters);
+  if (ownKeys.some((key) => typeof key !== "string")) {
+    throw new TypeError("Invalid query filters");
+  }
+
+  return ownKeys.map((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(filters, key);
+    if (!descriptor?.enumerable || !("value" in descriptor)) {
+      throw new TypeError("Invalid query filters");
+    }
+    return [key, descriptor.value];
+  });
+}
+
+function assertFilterValues(values, key) {
+  if (
+    !Array.isArray(values) ||
+    Object.getPrototypeOf(values) !== Array.prototype ||
+    values.length === 0 ||
+    Object.keys(values).length !== values.length
+  ) {
+    throw new TypeError(`Invalid query filter: ${key}`);
+  }
+
+  for (let index = 0; index < values.length; index += 1) {
+    if (!Object.hasOwn(values, index) || !isLegalFilterValue(values[index])) {
+      throw new TypeError(`Invalid query filter: ${key}`);
+    }
+  }
+  return values;
+}
+
+function filterSearch(filters = {}) {
+  const entries = plainFilterEntries(filters).sort(([left], [right]) =>
+    left.localeCompare(right, "en"),
+  );
+
   const params = new URLSearchParams();
-  const keys = Object.keys(filters).sort((left, right) => left.localeCompare(right, "en"));
-  for (const key of keys) {
+  for (const [key, values] of entries) {
     if (!isLegalFilterKey(key)) throw new TypeError(`Invalid query filter: ${key}`);
-    const rawValues = Array.isArray(filters[key]) ? filters[key] : [filters[key]];
-    for (const value of rawValues) {
-      if (!isLegalFilterValue(value)) throw new TypeError(`Invalid query filter: ${key}`);
+    for (const value of assertFilterValues(values, key)) {
       params.append(key, value);
     }
   }
@@ -237,18 +275,103 @@ function filterSearch(filters = {}) {
   return query ? `?${query}` : "";
 }
 
-function extractLocation(input) {
-  if (input && typeof input === "object" && !(input instanceof URL)) {
-    const pathname = typeof input.pathname === "string" ? input.pathname : "/";
-    const search = typeof input.search === "string" ? input.search : "";
-    const hash = typeof input.hash === "string" ? input.hash : "";
-    if (pathname.includes("\\")) throw new TypeError("Invalid route URL");
-    return new URL(`${pathname}${search}${hash}`, ROUTE_ORIGIN);
-  }
-  if (typeof input === "string" && input.includes("\\")) {
+function splitPathSearchHash(value) {
+  const hashIndex = value.indexOf("#");
+  const hash = hashIndex === -1 ? "" : value.slice(hashIndex);
+  const beforeHash = hashIndex === -1 ? value : value.slice(0, hashIndex);
+  const searchIndex = beforeHash.indexOf("?");
+  const search = searchIndex === -1 ? "" : beforeHash.slice(searchIndex);
+  const pathname = searchIndex === -1 ? beforeHash : beforeHash.slice(0, searchIndex);
+  return { pathname: pathname || "/", search, hash };
+}
+
+function rawPartsFromString(value) {
+  const schemeMatch = value.match(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//);
+  const hasAuthority = Boolean(schemeMatch) || value.startsWith("//");
+  if (!hasAuthority) return splitPathSearchHash(value);
+
+  const authorityStart = schemeMatch ? schemeMatch[0].length : 2;
+  const afterAuthorityStart = value.slice(authorityStart);
+  const boundaryIndex = afterAuthorityStart.search(/[/?#]/);
+  const authority =
+    boundaryIndex === -1
+      ? afterAuthorityStart
+      : afterAuthorityStart.slice(0, boundaryIndex);
+  if (
+    !authority ||
+    authority.includes("\\") ||
+    CONTROL_CHARACTER_PATTERN.test(authority)
+  ) {
     throw new TypeError("Invalid route URL");
   }
-  return new URL(input instanceof URL ? input.href : String(input ?? "/"), ROUTE_ORIGIN);
+
+  if (boundaryIndex === -1) return { pathname: "/", search: "", hash: "" };
+  const remainder = afterAuthorityStart.slice(boundaryIndex);
+  return splitPathSearchHash(remainder.startsWith("/") ? remainder : `/${remainder}`);
+}
+
+function assertRawPathname(pathname) {
+  if (
+    typeof pathname !== "string" ||
+    pathname.includes("?") ||
+    pathname.includes("#") ||
+    pathname.includes("\\") ||
+    CONTROL_CHARACTER_PATTERN.test(pathname)
+  ) {
+    throw new TypeError("Invalid route URL");
+  }
+
+  const rawSegments = (pathname || "/").split("/");
+  if (pathname.startsWith("/")) rawSegments.shift();
+  if (pathname.endsWith("/") && rawSegments.at(-1) === "") rawSegments.pop();
+  if (rawSegments.some((segment) => segment === "")) {
+    throw new TypeError("Invalid route URL");
+  }
+  for (const segment of rawSegments) decodePathSegment(segment, "route segment");
+}
+
+function rawLocationParts(input) {
+  if (input instanceof URL) {
+    return {
+      source: input.href,
+      pathname: input.pathname,
+      search: input.search,
+      hash: input.hash,
+    };
+  }
+  if (input && typeof input === "object") {
+    const pathname = input.pathname === undefined ? "/" : input.pathname;
+    const search = input.search === undefined ? "" : input.search;
+    const hash = input.hash === undefined ? "" : input.hash;
+    if (
+      typeof pathname !== "string" ||
+      typeof search !== "string" ||
+      typeof hash !== "string" ||
+      (search && !search.startsWith("?")) ||
+      (hash && !hash.startsWith("#"))
+    ) {
+      throw new TypeError("Invalid route URL");
+    }
+    return {
+      source: `${pathname}${search}${hash}`,
+      pathname,
+      search,
+      hash,
+    };
+  }
+
+  const source = String(input ?? "/");
+  return { source, ...rawPartsFromString(source) };
+}
+
+function extractLocation(input) {
+  const raw = rawLocationParts(input);
+  assertRawPathname(raw.pathname);
+  return {
+    location: new URL(raw.source, ROUTE_ORIGIN),
+    rawSearch: raw.search,
+    rawHash: raw.hash,
+  };
 }
 
 function relativePath(pathname, basePath) {
@@ -262,14 +385,15 @@ function relativePath(pathname, basePath) {
 }
 
 export function parseWorkbenchRoute(input, { basePath = "/" } = {}) {
-  let location;
+  let extracted;
   let normalizedBasePath;
   try {
     normalizedBasePath = normalizeBasePath(basePath);
-    location = extractLocation(input);
+    extracted = extractLocation(input);
   } catch {
     return overviewFallback();
   }
+  const { location, rawSearch, rawHash } = extracted;
 
   let rawRelativePath = relativePath(location.pathname, normalizedBasePath);
   if (rawRelativePath == null) return overviewFallback();
@@ -289,7 +413,7 @@ export function parseWorkbenchRoute(input, { basePath = "/" } = {}) {
   const matched = matchRoute(segments);
   if (!matched) return overviewFallback();
 
-  const { filters, invalid: invalidFilters } = parseFilters(location.search);
+  const { filters, invalid: invalidFilters } = parseFilters(rawSearch);
   const state = { ...matched, filters };
   const canonicalUrl = buildWorkbenchUrl(state, { basePath: normalizedBasePath });
   return {
@@ -297,9 +421,24 @@ export function parseWorkbenchRoute(input, { basePath = "/" } = {}) {
     replace:
       hadTrailingSlash ||
       invalidFilters ||
-      Boolean(location.hash) ||
+      Boolean(rawHash) ||
       canonicalUrl !== `${location.pathname}${location.search}`,
   };
+}
+
+function assertCanonicalRouteMetadata(route, meta) {
+  if (route.active !== undefined && route.active !== meta.active) {
+    throw new TypeError("Invalid route active state");
+  }
+  if (route.readOnly !== undefined && route.readOnly !== meta.readOnly) {
+    throw new TypeError("Invalid route read-only state");
+  }
+}
+
+function assertNoEntityId(route) {
+  if (route.entityId !== undefined && route.entityId !== null) {
+    throw new TypeError("Invalid entity id for route mode");
+  }
 }
 
 function pathForRoute(route) {
@@ -307,23 +446,39 @@ function pathForRoute(route) {
   const { page } = route;
   const meta = PAGE_META[page];
   if (!meta) throw new TypeError("Invalid route page");
-  const mode = route.mode ?? meta.defaultMode;
+  assertCanonicalRouteMetadata(route, meta);
+  const mode = route.mode === undefined ? meta.defaultMode : route.mode;
 
-  if (page === "overview" && mode === "index") return "overview";
+  if (page === "overview" && mode === "index") {
+    assertNoEntityId(route);
+    return "overview";
+  }
   if (page === "quick-records") {
-    if (mode === "new") return page;
+    if (mode === "new") {
+      assertNoEntityId(route);
+      return page;
+    }
     if (mode === "history") return `${page}/${encodeEntityId(route.entityId)}`;
     throw new TypeError("Invalid route mode");
   }
   if (page === "customers" || page === "opportunities" || page === "knowledge") {
-    if (mode === "list") return page;
-    if (mode === "new") return `${page}/new`;
+    if (mode === "list") {
+      assertNoEntityId(route);
+      return page;
+    }
+    if (mode === "new") {
+      assertNoEntityId(route);
+      return `${page}/new`;
+    }
     if (mode === "detail") return `${page}/${encodeEntityId(route.entityId)}`;
     if (mode === "edit") return `${page}/${encodeEntityId(route.entityId)}/edit`;
     throw new TypeError("Invalid route mode");
   }
   if (page === "actions" || page === "risks") {
-    if (mode === "list") return page;
+    if (mode === "list") {
+      assertNoEntityId(route);
+      return page;
+    }
     if (mode === "detail") return `${page}/${encodeEntityId(route.entityId)}`;
     if (mode === "edit") return `${page}/${encodeEntityId(route.entityId)}/edit`;
     throw new TypeError("Invalid route mode");
@@ -332,10 +487,14 @@ function pathForRoute(route) {
     (page === "weekly-reports" || page === "kanban" || page === "settings/weixin") &&
     mode === "index"
   ) {
+    assertNoEntityId(route);
     return page;
   }
   if (page === "solutions") {
-    if (mode === "list") return page;
+    if (mode === "list") {
+      assertNoEntityId(route);
+      return page;
+    }
     if (mode === "detail") return `${page}/${encodeEntityId(route.entityId)}`;
     throw new TypeError("Invalid route mode");
   }
