@@ -127,7 +127,17 @@ describe("portable release package", () => {
         "outputs/product-design-prototype/docs/02-开发实施方案.md",
         "# 开发实施方案\n",
       );
-      workspace.write(".env.example", "AUTH_PASSWORD_HASH=\n");
+      workspace.write(
+        ".env.example",
+        [
+          "AUTH_PASSWORD_HASH=",
+          "AUTH_SESSION_SECRET=<set-in-production>",
+          "MODEL_API_KEY=${MODEL_API_KEY}",
+          `${["API", "KEY"].join("_")}="<set-in-production>"`,
+          "WEIXIN_AGENT_API_TOKEN=your-token-here",
+          "",
+        ].join("\n"),
+      );
       workspace.write("backend/src/server.js", "export const ready = true;\n");
       workspace.write("src/auth/token.js", "export const tokenName = 'csrf';\n");
       workspace.write("src/audio/player.js", "export const play = () => {};\n");
@@ -316,6 +326,84 @@ describe("portable release package", () => {
       workspace.cleanup();
       output.cleanup();
       extracted.cleanup();
+    }
+  });
+
+  it("rejects real keys, tokens, passwords, and private keys in included templates", async () => {
+    const sensitiveFixtures = [
+      {
+        path: "backend/.env.example",
+        value: ["s", "k"].join("") + `-${sha256("provider-key-fixture")}`,
+        content(value) {
+          return `MODEL_API_KEY=${value}\n`;
+        },
+      },
+      {
+        path: "config/credentials.sample.json",
+        value: `token_${sha256("access-token-fixture")}`,
+        content(value) {
+          return `${JSON.stringify({ accessToken: value }, null, 2)}\n`;
+        },
+      },
+      {
+        path: "config/auth-template.yaml",
+        value: sha256("password-fixture"),
+        content(value) {
+          return `password: ${value}\n`;
+        },
+      },
+      {
+        path: "config/private-key.example.txt",
+        value: [
+          ["-----BEGIN", "PRIVATE KEY-----"].join(" "),
+          sha256("private-key-fixture"),
+          ["-----END", "PRIVATE KEY-----"].join(" "),
+        ].join("\n"),
+        content(value) {
+          return `${value}\n`;
+        },
+      },
+    ];
+
+    for (const [index, fixture] of sensitiveFixtures.entries()) {
+      const workspace = makeWorkspace(`sentelligent-secret-source-${index}-`);
+      const output = makeWorkspace(`sentelligent-secret-output-${index}-`);
+      try {
+        workspace.write("package.json", '{"name":"fixture","private":true}\n');
+        workspace.write("backend/src/server.js", "export const ready = true;\n");
+        workspace.write(
+          "backend/src/db/migrations/0001_baseline.sql",
+          "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+        );
+        workspace.write(
+          "outputs/product-design-prototype/dist/index.html",
+          "<main>ready</main>\n",
+        );
+        workspace.write(fixture.path, fixture.content(fixture.value));
+
+        const { createReleasePackage } = await loadReleaseModule();
+        await assert.rejects(
+          createReleasePackage({
+            sourceRoot: workspace.root,
+            outputDir: output.root,
+            gitInfo: {
+              branch: "codex/release-candidate",
+              commit: "0123456789abcdef0123456789abcdef01234567",
+              clean: true,
+            },
+            createdAt: "2026-07-19T08:00:00.000Z",
+          }),
+          (error) => {
+            assert.match(error.message, /secret/i);
+            assert.ok(!error.message.includes(fixture.value));
+            return true;
+          },
+        );
+        assert.deepEqual(listFiles(output.root), []);
+      } finally {
+        workspace.cleanup();
+        output.cleanup();
+      }
     }
   });
 

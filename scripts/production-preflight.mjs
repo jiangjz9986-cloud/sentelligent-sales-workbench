@@ -36,6 +36,11 @@ const REQUIRED_PROTECTED_LISTENERS = Object.freeze([
   { port: 8797, owner: "qingyang" },
 ]);
 const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
+const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
+const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
+const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
+const ALLOWED_SERVICE_USERS = new Set(["root", "sentelligent"]);
+const REQUIRED_PROJECT_SERVICE_NAMES = new Set(REQUIRED_PROJECT_SERVICES);
 
 function parseEnvFile(filePath) {
   const entries = {};
@@ -173,40 +178,65 @@ async function inspectSqlite(filePath, { requireNoSidecars = false } = {}) {
   }
 }
 
-function normalizedNativePath(filePath) {
-  const resolvedPath = resolve(filePath);
-  const realPath = realpathSync.native(resolvedPath);
+function normalizedNativePath(realPath) {
   return process.platform === "win32" ? realPath.toLowerCase() : realPath;
 }
 
-function compareDatabaseIdentity(databasePath, backupPath) {
+function reliableIdentityValue(value) {
+  if (typeof value === "bigint") return value > 0n;
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+const defaultIdentityFileSystem = Object.freeze({
+  realpath(filePath) {
+    return realpathSync.native(filePath);
+  },
+  stat(filePath) {
+    return statSync(filePath, { bigint: true });
+  },
+});
+
+export function compareDatabaseIdentity(
+  databasePath,
+  backupPath,
+  fileSystem = defaultIdentityFileSystem,
+) {
   try {
-    const primaryPath = normalizedNativePath(databasePath);
-    const candidatePath = normalizedNativePath(backupPath);
+    if (
+      typeof fileSystem?.realpath !== "function" ||
+      typeof fileSystem?.stat !== "function"
+    ) {
+      return { distinct: false, verifiedBy: "unavailable" };
+    }
+    const resolvedDatabasePath = resolve(databasePath);
+    const resolvedBackupPath = resolve(backupPath);
+    const primaryPath = normalizedNativePath(
+      fileSystem.realpath(resolvedDatabasePath),
+    );
+    const candidatePath = normalizedNativePath(
+      fileSystem.realpath(resolvedBackupPath),
+    );
     if (primaryPath === candidatePath) {
       return { distinct: false, verifiedBy: "resolved-path" };
     }
 
-    const primary = statSync(resolve(databasePath));
-    const candidate = statSync(resolve(backupPath));
+    const primary = fileSystem.stat(resolvedDatabasePath);
+    const candidate = fileSystem.stat(resolvedBackupPath);
     const identityAvailable =
-      Number.isFinite(primary.dev) &&
-      Number.isFinite(primary.ino) &&
-      Number.isFinite(candidate.dev) &&
-      Number.isFinite(candidate.ino) &&
-      primary.ino !== 0 &&
-      candidate.ino !== 0;
+      reliableIdentityValue(primary?.dev) &&
+      reliableIdentityValue(primary?.ino) &&
+      reliableIdentityValue(candidate?.dev) &&
+      reliableIdentityValue(candidate?.ino);
+    if (!identityAvailable) {
+      return { distinct: false, verifiedBy: "unavailable" };
+    }
     if (
-      identityAvailable &&
       primary.dev === candidate.dev &&
       primary.ino === candidate.ino
     ) {
       return { distinct: false, verifiedBy: "device-and-inode" };
     }
-    return {
-      distinct: true,
-      verifiedBy: identityAvailable ? "device-and-inode" : "resolved-path",
-    };
+    return { distinct: true, verifiedBy: "device-and-inode" };
   } catch {
     return { distinct: false, verifiedBy: "unavailable" };
   }
@@ -224,9 +254,12 @@ function parsePlannedCommand(command) {
   if (typeof command !== "string" || /[\r\n;&|`$<>(){}]/.test(command)) {
     return null;
   }
+  const services = REQUIRED_PROJECT_SERVICES
+    .map((service) => service.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
   const pattern = new RegExp(
     `^systemctl\\s+(${ALLOWED_SERVICE_ACTIONS.join("|")})\\s+` +
-      "(sentelligent-[A-Za-z0-9@_.-]+\\.service)$",
+      `(${services})$`,
   );
   const match = command.trim().match(pattern);
   return match ? { action: match[1], service: match[2] } : null;
@@ -240,13 +273,7 @@ export function validatePlannedCommands(plan) {
   if (commands.length === 0 || commands.length !== actions.length) return false;
   const parsed = commands.map(parsePlannedCommand);
   if (parsed.some((command) => command === null)) return false;
-  const serviceNames = Array.isArray(plan?.projectServices)
-    ? new Set(plan.projectServices.map((service) => service?.name))
-    : null;
-  if (
-    serviceNames &&
-    parsed.some((command) => !serviceNames.has(command.service))
-  ) {
+  if (parsed.some((command) => !REQUIRED_PROJECT_SERVICE_NAMES.has(command.service))) {
     return false;
   }
   const commandKeys = parsed
@@ -256,7 +283,7 @@ export function validatePlannedCommands(plan) {
     .map((action) => {
       if (
         !ALLOWED_SERVICE_ACTIONS.includes(action?.action) ||
-        !/^sentelligent-[A-Za-z0-9@_.-]+\.service$/.test(action?.service ?? "")
+        !REQUIRED_PROJECT_SERVICE_NAMES.has(action?.service)
       ) {
         return null;
       }
@@ -269,7 +296,6 @@ export function validatePlannedCommands(plan) {
 
 function approvedProjectPaths(plan) {
   if (!Array.isArray(plan?.projectPaths)) return null;
-  const blocked = new Set(["/", "/etc", "/opt", "/usr", "/var"]);
   const paths = [];
   for (const entry of plan.projectPaths) {
     const value = entry?.path;
@@ -282,10 +308,23 @@ function approvedProjectPaths(plan) {
       return null;
     }
     const normalized = posix.normalize(value);
-    if (blocked.has(normalized) || normalized.includes("/../")) return null;
-    paths.push(normalized.replace(/\/$/, ""));
+    const path = normalized.replace(/\/$/, "");
+    if (
+      path !== DEFAULT_PROJECT_PATH &&
+      !pathWithin(path, PROJECT_CURRENT_PATH) &&
+      !pathWithin(path, PROJECT_RELEASES_PATH) &&
+      path !== CADDY_CONFIG_PATH
+    ) {
+      return null;
+    }
+    paths.push(path);
   }
-  if (!paths.includes(DEFAULT_PROJECT_PATH)) return null;
+  if (
+    !paths.includes(DEFAULT_PROJECT_PATH) ||
+    !paths.includes(CADDY_CONFIG_PATH)
+  ) {
+    return null;
+  }
   return [...new Set(paths)];
 }
 
@@ -320,8 +359,15 @@ function validateProjectServices(plan) {
   const services = Array.isArray(plan?.projectServices)
     ? plan.projectServices
     : [];
-  const projectPaths = approvedProjectPaths(plan);
-  if (projectPaths === null) return false;
+  if (approvedProjectPaths(plan) === null) return false;
+  const serviceNames = services.map((service) => service?.name);
+  if (
+    services.length !== REQUIRED_PROJECT_SERVICES.length ||
+    new Set(serviceNames).size !== REQUIRED_PROJECT_SERVICES.length ||
+    !serviceNames.every((name) => REQUIRED_PROJECT_SERVICE_NAMES.has(name))
+  ) {
+    return false;
+  }
   const serviceMap = new Map(services.map((service) => [service?.name, service]));
   const requiredReady = REQUIRED_PROJECT_SERVICES.every((name) => {
     const service = serviceMap.get(name);
@@ -333,25 +379,26 @@ function validateProjectServices(plan) {
     ].includes(fragmentPath);
     const workingDirectoryOwned =
       typeof service?.WorkingDirectory === "string" &&
-      projectPaths.some((path) => pathWithin(service.WorkingDirectory, path));
+      pathWithin(service.WorkingDirectory, DEFAULT_PROJECT_PATH);
     const execStartOwned =
       typeof service?.ExecStart === "string" &&
-      projectPaths.some((path) => commandReferencesPath(service.ExecStart, path));
+      commandReferencesPath(
+        service.ExecStart,
+        name === "sentelligent-caddy.service"
+          ? CADDY_CONFIG_PATH
+          : DEFAULT_PROJECT_PATH,
+      );
     return (
       service &&
       isEnabled(service.enabled) &&
       isActive(service.active) &&
       fragmentOwned &&
       execStartOwned &&
-      typeof service.User === "string" &&
-      /^[A-Za-z_][A-Za-z0-9_-]*$/.test(service.User) &&
+      ALLOWED_SERVICE_USERS.has(service.User) &&
       workingDirectoryOwned
     );
   });
-  const ownedNamesOnly = services.every((service) =>
-    /^sentelligent-[A-Za-z0-9@_.-]+\.service$/.test(service?.name ?? ""),
-  );
-  return requiredReady && ownedNamesOnly;
+  return requiredReady;
 }
 
 function validatesUnrelatedProtection(plan) {

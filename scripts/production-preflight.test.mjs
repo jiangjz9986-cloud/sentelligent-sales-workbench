@@ -111,6 +111,8 @@ function validServicePlan() {
     hostname: "sentelligent-production-01",
     projectPaths: [
       { path: projectRoot, approved: true },
+      { path: `${projectRoot}/current`, approved: true },
+      { path: `${projectRoot}/releases/2026-07-19`, approved: true },
       { path: "/etc/caddy/Caddyfile", approved: true },
     ],
     projectServices: requiredProjectServices.map((name) => ({
@@ -481,6 +483,139 @@ describe("production preflight", () => {
         }),
         false,
         `${command} must be rejected`,
+      );
+    }
+
+    const shadowService = "sentelligent-shadow.service";
+    assert.equal(
+      validatePlannedCommands({
+        projectServices: [
+          ...requiredProjectServices.map((name) => ({ name })),
+          { name: shadowService },
+        ],
+        plannedActions: [{ action: "restart", service: shadowService }],
+        plannedCommands: [`systemctl restart ${shadowService}`],
+      }),
+      false,
+      "a caller-added sentelligent service must not expand the command allowlist",
+    );
+  });
+
+  it("rejects expanded service ownership, caller paths, Caddy paths, and users", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const environment = validEnvironment(origin);
+      const envFile = workspace.write("production.env", environment.source);
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const { runProductionPreflight } = await loadPreflightModule();
+
+      const cases = [
+        {
+          name: "extra-project-service",
+          failedChecks: ["services.project"],
+          mutate(plan) {
+            plan.projectServices.push({
+              name: "sentelligent-shadow.service",
+              enabled: true,
+              active: true,
+              FragmentPath: "/etc/systemd/system/sentelligent-shadow.service",
+              ExecStart:
+                "/usr/bin/node /opt/sentelligent-sales-workbench/backend/src/server.js",
+              User: "sentelligent",
+              WorkingDirectory: "/opt/sentelligent-sales-workbench",
+            });
+          },
+        },
+        {
+          name: "caller-expanded-project-path",
+          failedChecks: ["services.snapshot", "services.project"],
+          mutate(plan) {
+            plan.projectPaths.push({
+              path: "/opt/sentelligent-sales-workbench/caller-added",
+              approved: true,
+            });
+          },
+        },
+        {
+          name: "caller-expanded-caddy-path",
+          failedChecks: ["services.snapshot", "services.project"],
+          mutate(plan) {
+            const caddyPathIndex = plan.projectPaths.findIndex(
+              (entry) => entry.path === "/etc/caddy/Caddyfile",
+            );
+            plan.projectPaths[caddyPathIndex] = {
+              path: "/etc/caddy/sites-enabled/sentelligent.caddy",
+              approved: true,
+            };
+            const caddy = plan.projectServices.find(
+              (service) => service.name === "sentelligent-caddy.service",
+            );
+            caddy.ExecStart =
+              "/usr/bin/caddy run --config /etc/caddy/sites-enabled/sentelligent.caddy";
+          },
+        },
+        {
+          name: "unapproved-service-user",
+          failedChecks: ["services.project"],
+          mutate(plan) {
+            plan.projectServices[0].User = "nobody";
+          },
+        },
+      ];
+
+      for (const testCase of cases) {
+        const plan = validServicePlan();
+        testCase.mutate(plan);
+        const servicePlanPath = workspace.write(
+          `${testCase.name}.json`,
+          JSON.stringify(plan, null, 2),
+        );
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        for (const checkId of testCase.failedChecks) {
+          assert.equal(
+            report.checks.find((check) => check.id === checkId)?.status,
+            "failed",
+            `${testCase.name} must fail ${checkId}`,
+          );
+        }
+      }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("fails closed when database file identity metadata is unavailable", async () => {
+    const { compareDatabaseIdentity } = await loadPreflightModule();
+    assert.equal(typeof compareDatabaseIdentity, "function");
+
+    for (const fileSystem of [
+      {
+        realpath: (filePath) => `/resolved/${filePath}`,
+        stat: () => ({ dev: 0n, ino: 0n }),
+      },
+      {
+        realpath: (filePath) => `/resolved/${filePath}`,
+        stat: () => {
+          throw new Error("identity unavailable");
+        },
+      },
+    ]) {
+      assert.deepEqual(
+        compareDatabaseIdentity("primary.sqlite", "backup.sqlite", fileSystem),
+        { distinct: false, verifiedBy: "unavailable" },
       );
     }
   });

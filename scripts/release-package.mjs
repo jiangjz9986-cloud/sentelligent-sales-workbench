@@ -71,11 +71,115 @@ const excludedDirectoryNames = new Set([
   "weixin-session-home",
 ]);
 
+const highRiskSecretPatterns = Object.freeze([
+  { name: "provider-key", expression: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
+  { name: "aws-access-key", expression: /\bAKIA[0-9A-Z]{16}\b/g },
+  {
+    name: "github-token",
+    expression: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})\b/g,
+  },
+  { name: "google-api-key", expression: /\bAIza[0-9A-Za-z_-]{30,}\b/g },
+  {
+    name: "bearer-token",
+    expression: /\bBearer\s+[A-Za-z0-9._~+/-]{20,}={0,2}\b/gi,
+  },
+  {
+    name: "private-key",
+    expression: /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----/g,
+  },
+]);
+
+const quotedCredentialAssignmentPattern =
+  /\b(?:api[_-]?key|secret|token|password)\b[ \t]*[:=][ \t]*(["'])([^"'\r\n]{8,})\1/gi;
+const templateAssignmentPattern =
+  /["']?([A-Za-z][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^,\s\]\r\n#;]+))/g;
+
 function normalizeRelativePath(filePath) {
   return String(filePath)
     .replaceAll("\\", "/")
     .replace(/^\.\/+/, "")
     .replace(/\/+/g, "/");
+}
+
+function isCredentialTemplatePath(filePath) {
+  const normalized = normalizeRelativePath(filePath).toLowerCase();
+  const fileName = normalized.split("/").at(-1);
+  if (fileName.endsWith(".env.example")) return true;
+  const hasTemplateMarker =
+    /(?:^|[._-])(?:example|sample|template)(?:[._-]|$)/.test(fileName);
+  const hasCredentialMarker =
+    /(?:credential|secret|token|password|private[._-]?key|api[._-]?key|auth|service[._-]?account|env|config)/.test(
+      fileName,
+    );
+  return hasTemplateMarker && hasCredentialMarker;
+}
+
+function isSensitiveAssignmentName(name) {
+  return /(?:credential|secret|token|password|private.?key|api.?key|access.?key)/i.test(
+    name,
+  );
+}
+
+function isPlaceholderValue(rawValue) {
+  const value = String(rawValue ?? "").trim();
+  if (!value || /^(?:null|none|undefined)$/i.test(value)) return true;
+  if (
+    /^(?:<[^>]+>|\$\{[^}]+\}|\{\{[^}]+\}\})$/.test(value) ||
+    /^(?:your|replace|change|example|sample|placeholder|dummy|mock|test|fixture|redacted|unset|todo|tbd|not[-_ ]?set)(?:$|[-_ ].*)/i.test(
+      value,
+    ) ||
+    /^[x*._-]{4,}$/i.test(value)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function textContent(content) {
+  if (!Buffer.isBuffer(content) || content.includes(0)) return null;
+  return content.toString("utf8");
+}
+
+function lineNumberAt(content, index) {
+  return content.slice(0, index).split("\n").length;
+}
+
+function assertNoReleaseSecrets(files, contentByPath) {
+  for (const file of files) {
+    const content = textContent(contentByPath.get(file));
+    if (content === null) continue;
+
+    for (const pattern of highRiskSecretPatterns) {
+      pattern.expression.lastIndex = 0;
+      const match = pattern.expression.exec(content);
+      if (match) {
+        throw new Error(
+          `Release content secret gate rejected ${file}:${lineNumberAt(content, match.index)} (${pattern.name})`,
+        );
+      }
+    }
+
+    quotedCredentialAssignmentPattern.lastIndex = 0;
+    for (const match of content.matchAll(quotedCredentialAssignmentPattern)) {
+      if (!isPlaceholderValue(match[2])) {
+        throw new Error(
+          `Release content secret gate rejected ${file}:${lineNumberAt(content, match.index)} (credential-assignment)`,
+        );
+      }
+    }
+
+    if (!isCredentialTemplatePath(file)) continue;
+    templateAssignmentPattern.lastIndex = 0;
+    for (const match of content.matchAll(templateAssignmentPattern)) {
+      const [, name, doubleQuoted, singleQuoted, unquoted] = match;
+      const value = doubleQuoted ?? singleQuoted ?? unquoted ?? "";
+      if (isSensitiveAssignmentName(name) && !isPlaceholderValue(value)) {
+        throw new Error(
+          `Release content secret gate rejected ${file}:${lineNumberAt(content, match.index)} (template-credential)`,
+        );
+      }
+    }
+  }
 }
 
 export function shouldExcludeReleasePath(filePath) {
@@ -492,6 +596,7 @@ export async function createReleasePackage({
   const contentByPath = new Map(
     files.map((file) => [file, readFileSync(join(root, file))]),
   );
+  assertNoReleaseSecrets(files, contentByPath);
   const manifest = buildReleaseManifest({
     source,
     createdAt: normalizedCreatedAt,
