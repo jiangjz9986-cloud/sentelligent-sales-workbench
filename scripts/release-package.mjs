@@ -50,6 +50,9 @@ const excludedDirectoryNames = new Set([
   ".pnpm-store",
   ".runtime",
   ".worktrees",
+  "audio-session",
+  "audio-sessions",
+  "build",
   "coverage",
   "log",
   "logs",
@@ -58,6 +61,12 @@ const excludedDirectoryNames = new Set([
   "sessions",
   "temp",
   "tmp",
+  "runtime-audio",
+  "runtime-audios",
+  "voice-assets",
+  "voice-recordings",
+  "voice-session",
+  "voice-sessions",
   "weixin-session",
   "weixin-session-home",
 ]);
@@ -82,6 +91,15 @@ export function shouldExcludeReleasePath(filePath) {
 
   const parts = normalized.split("/");
   const lowerParts = parts.map((part) => part.toLowerCase());
+  const lowerPath = lowerParts.join("/");
+  const productDist = "outputs/product-design-prototype/dist";
+  if (
+    lowerParts.includes("dist") &&
+    lowerPath !== productDist &&
+    !lowerPath.startsWith(`${productDist}/`)
+  ) {
+    return true;
+  }
   if (lowerParts.some((part) => excludedDirectoryNames.has(part))) return true;
 
   const fileName = lowerParts.at(-1);
@@ -92,14 +110,40 @@ export function shouldExcludeReleasePath(filePath) {
     fileName.startsWith(".env.") ||
     fileName.includes(".env.");
   if (isEnvironmentFile && !isEnvironmentExample) return true;
-  if (/\.(?:db|sqlite|sqlite3)(?:-(?:journal|shm|wal))?$/.test(fileName)) return true;
-  if (/\.(?:key|log|p12|pem|pfx|pid)$/.test(fileName)) return true;
+  if (
+    /\.(?:db|sqlite|sqlite3)(?:-(?:journal|shm|wal)|\.(?:bak|backup|copy|old|orig|save|snapshot|tmp)(?:\.[a-z0-9_-]+)*)?$/.test(
+      fileName,
+    )
+  ) {
+    return true;
+  }
+  if (/\.(?:log|pid)(?:\.|$)/.test(fileName)) return true;
+  if (/\.(?:jks|kdbx|key|keystore|p12|pem|pfx|ppk|secret|secrets)$/.test(fileName)) {
+    return true;
+  }
+  if (/^id_(?:dsa|ecdsa|ed25519|rsa)(?:\.pub)?$/.test(fileName)) return true;
+  const explicitTemplate = /(?:^|[._-])(?:example|sample|template)(?:[._-]|$)/.test(
+    fileName,
+  );
+  if (
+    !explicitTemplate &&
+    /(?:^|[._-])(?:credentials?|secrets?|private[._-]?(?:key|secret)|service[._-]?account|client[._-]?secret|api[._-]?key|auth[._-]?token|access[._-]?token)(?:[._-]|$)/.test(
+      fileName,
+    ) &&
+    /\.(?:conf|ini|json|properties|txt|xml|ya?ml)$/.test(fileName)
+  ) {
+    return true;
+  }
   if (/\.(?:tar|tar\.gz|tgz|zip)$/.test(fileName)) return true;
   return false;
 }
 
 function hashBuffer(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function compareUtf8Paths(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
 function runGit(root, args) {
@@ -210,7 +254,7 @@ function collectSourceFiles(root) {
     }
     if (stats.isFile()) unique.add(relativePath);
   }
-  return [...unique].sort((left, right) => left.localeCompare(right, "en"));
+  return [...unique].sort(compareUtf8Paths);
 }
 
 function checksumsFor(files, contentByPath, prefix) {
@@ -219,6 +263,14 @@ function checksumsFor(files, contentByPath, prefix) {
       .filter((file) => file.startsWith(prefix))
       .map((file) => [file, hashBuffer(contentByPath.get(file))]),
   );
+}
+
+function sourceTreeHash(files) {
+  const index = Object.entries(files)
+    .sort(([left], [right]) => compareUtf8Paths(left, right))
+    .map(([file, hash]) => `${hash}  ${file}\n`)
+    .join("");
+  return hashBuffer(Buffer.from(index, "utf8"));
 }
 
 export function buildReleaseManifest({
@@ -234,15 +286,21 @@ export function buildReleaseManifest({
   const migrationFiles = files.filter((file) =>
     file.startsWith("backend/src/db/migrations/"),
   );
+  const sourceFiles = files.filter(
+    (file) => !file.startsWith("outputs/product-design-prototype/dist/"),
+  );
   if (buildFiles.length === 0) {
     throw new Error("Frontend build artifacts are missing; run the production build first");
   }
   if (migrationFiles.length === 0) {
     throw new Error("Database migration files are missing from the release package");
   }
+  const sourceFileHashes = Object.fromEntries(
+    sourceFiles.map((file) => [file, hashBuffer(contentByPath.get(file))]),
+  );
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     product: "sentelligent-sales-workbench",
     createdAt,
     source,
@@ -267,13 +325,18 @@ export function buildReleaseManifest({
         "backend/src/db/migrations/",
       ),
     },
+    sourceHashes: {
+      algorithm: "sha256",
+      files: sourceFileHashes,
+      treeSha256: sourceTreeHash(sourceFileHashes),
+    },
     requiredEnvNames: [...REQUIRED_ENV_NAMES],
     exclusions: [
       "environment files except *.env.example",
-      "SQLite databases and sidecars",
-      "logs and PID files",
-      "session state",
-      "dependencies and package caches",
+      "SQLite databases, backups, copies, and sidecars",
+      "logs, rotated logs, PID files, and PID rotations",
+      "runtime voice recordings, voice assets, audio sessions, and other session state",
+      "dependencies, package caches, build folders, coverage, and non-product dist folders",
       "Git, Codex, agent, worktree, and runtime metadata",
       "private keys and certificates",
     ],
@@ -449,7 +512,7 @@ export async function createReleasePackage({
       path: `${rootDirectory}/release-manifest.json`,
       content: manifestContent,
     },
-  ].sort((left, right) => left.path.localeCompare(right.path, "en"));
+  ].sort((left, right) => compareUtf8Paths(left.path, right.path));
 
   mkdirSync(destination, { recursive: true });
   const finalArchiveName = safeArchiveName(

@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  realpathSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const REQUIRED_PROJECT_SERVICES = Object.freeze([
@@ -14,6 +16,26 @@ export const REQUIRED_PROJECT_SERVICES = Object.freeze([
   "sentelligent-caddy.service",
   "sentelligent-weixin-agent.service",
 ]);
+
+const ALLOWED_SERVICE_ACTIONS = Object.freeze([
+  "enable",
+  "is-active",
+  "is-enabled",
+  "restart",
+  "start",
+  "status",
+  "stop",
+]);
+const REQUIRED_PROTECTED_OBJECTS = Object.freeze([
+  "account-vault",
+  "qingyang",
+  "proxy",
+]);
+const REQUIRED_PROTECTED_LISTENERS = Object.freeze([
+  { port: 4876, owner: "account-vault" },
+  { port: 8797, owner: "qingyang" },
+]);
+const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 
 function parseEnvFile(filePath) {
   const entries = {};
@@ -106,7 +128,7 @@ function sha256File(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
-async function inspectSqlite(filePath) {
+async function inspectSqlite(filePath, { requireNoSidecars = false } = {}) {
   const resolvedPath = resolve(filePath);
   if (!existsSync(resolvedPath)) {
     return {
@@ -117,7 +139,7 @@ async function inspectSqlite(filePath) {
   }
   const sidecars = [`${resolvedPath}-wal`, `${resolvedPath}-shm`, `${resolvedPath}-journal`]
     .filter(existsSync);
-  if (sidecars.length > 0) {
+  if (requireNoSidecars && sidecars.length > 0) {
     return {
       quickCheck: "error",
       foreignKeyViolations: null,
@@ -151,6 +173,45 @@ async function inspectSqlite(filePath) {
   }
 }
 
+function normalizedNativePath(filePath) {
+  const resolvedPath = resolve(filePath);
+  const realPath = realpathSync.native(resolvedPath);
+  return process.platform === "win32" ? realPath.toLowerCase() : realPath;
+}
+
+function compareDatabaseIdentity(databasePath, backupPath) {
+  try {
+    const primaryPath = normalizedNativePath(databasePath);
+    const candidatePath = normalizedNativePath(backupPath);
+    if (primaryPath === candidatePath) {
+      return { distinct: false, verifiedBy: "resolved-path" };
+    }
+
+    const primary = statSync(resolve(databasePath));
+    const candidate = statSync(resolve(backupPath));
+    const identityAvailable =
+      Number.isFinite(primary.dev) &&
+      Number.isFinite(primary.ino) &&
+      Number.isFinite(candidate.dev) &&
+      Number.isFinite(candidate.ino) &&
+      primary.ino !== 0 &&
+      candidate.ino !== 0;
+    if (
+      identityAvailable &&
+      primary.dev === candidate.dev &&
+      primary.ino === candidate.ino
+    ) {
+      return { distinct: false, verifiedBy: "device-and-inode" };
+    }
+    return {
+      distinct: true,
+      verifiedBy: identityAvailable ? "device-and-inode" : "resolved-path",
+    };
+  } catch {
+    return { distinct: false, verifiedBy: "unavailable" };
+  }
+}
+
 function isEnabled(value) {
   return value === true || value === "enabled";
 }
@@ -159,47 +220,138 @@ function isActive(value) {
   return value === true || value === "active";
 }
 
-function unsafeCommand(command) {
-  const source = String(command ?? "").trim();
-  const forbiddenProcessCommand = [
-    /\bpkill\b/i,
-    /\bkillall\b/i,
-    /taskkill(?:\.exe)?\s+\/im\s+node/i,
-    /docker\s+compose\s+down/i,
-  ].some((pattern) => pattern.test(source));
-  if (forbiddenProcessCommand) return true;
+function parsePlannedCommand(command) {
+  if (typeof command !== "string" || /[\r\n;&|`$<>(){}]/.test(command)) {
+    return null;
+  }
+  const pattern = new RegExp(
+    `^systemctl\\s+(${ALLOWED_SERVICE_ACTIONS.join("|")})\\s+` +
+      "(sentelligent-[A-Za-z0-9@_.-]+\\.service)$",
+  );
+  const match = command.trim().match(pattern);
+  return match ? { action: match[1], service: match[2] } : null;
+}
 
-  const mutatesSystemd = /\bsystemctl\s+(?:disable|enable|restart|start|stop)\b/i
-    .test(source);
-  if (!mutatesSystemd) return false;
-  return !/^(?:sudo\s+)?systemctl\s+(?:disable|enable|restart|start|stop)\s+sentelligent-[A-Za-z0-9@_.-]+\.service$/i
-    .test(source);
+export function validatePlannedCommands(plan) {
+  const commands = Array.isArray(plan?.plannedCommands)
+    ? plan.plannedCommands
+    : [];
+  const actions = Array.isArray(plan?.plannedActions) ? plan.plannedActions : [];
+  if (commands.length === 0 || commands.length !== actions.length) return false;
+  const parsed = commands.map(parsePlannedCommand);
+  if (parsed.some((command) => command === null)) return false;
+  const serviceNames = Array.isArray(plan?.projectServices)
+    ? new Set(plan.projectServices.map((service) => service?.name))
+    : null;
+  if (
+    serviceNames &&
+    parsed.some((command) => !serviceNames.has(command.service))
+  ) {
+    return false;
+  }
+  const commandKeys = parsed
+    .map((command) => `${command.action}:${command.service}`)
+    .sort();
+  const actionKeys = actions
+    .map((action) => {
+      if (
+        !ALLOWED_SERVICE_ACTIONS.includes(action?.action) ||
+        !/^sentelligent-[A-Za-z0-9@_.-]+\.service$/.test(action?.service ?? "")
+      ) {
+        return null;
+      }
+      return `${action.action}:${action.service}`;
+    })
+    .sort();
+  return !actionKeys.includes(null) &&
+    JSON.stringify(commandKeys) === JSON.stringify(actionKeys);
+}
+
+function approvedProjectPaths(plan) {
+  if (!Array.isArray(plan?.projectPaths)) return null;
+  const blocked = new Set(["/", "/etc", "/opt", "/usr", "/var"]);
+  const paths = [];
+  for (const entry of plan.projectPaths) {
+    const value = entry?.path;
+    if (
+      entry?.approved !== true ||
+      typeof value !== "string" ||
+      !posix.isAbsolute(value) ||
+      value.split("/").includes("..")
+    ) {
+      return null;
+    }
+    const normalized = posix.normalize(value);
+    if (blocked.has(normalized) || normalized.includes("/../")) return null;
+    paths.push(normalized.replace(/\/$/, ""));
+  }
+  if (!paths.includes(DEFAULT_PROJECT_PATH)) return null;
+  return [...new Set(paths)];
+}
+
+function pathWithin(candidate, root) {
+  const value = posix.normalize(candidate);
+  return value === root || value.startsWith(`${root}/`);
+}
+
+function commandReferencesPath(command, root) {
+  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[\\s='\"])(?:${escaped})(?:/|$|[\\s'\"])`).test(
+    command,
+  );
+}
+
+function validateServiceSnapshot(plan, referenceTime) {
+  const generatedAt = Date.parse(plan?.snapshotGeneratedAt ?? "");
+  const reference = Date.parse(referenceTime);
+  const age = reference - generatedAt;
+  return (
+    Number.isFinite(generatedAt) &&
+    Number.isFinite(reference) &&
+    age >= -5 * 60_000 &&
+    age <= 24 * 60 * 60_000 &&
+    typeof plan?.hostname === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(plan.hostname) &&
+    approvedProjectPaths(plan) !== null
+  );
 }
 
 function validateProjectServices(plan) {
   const services = Array.isArray(plan?.projectServices)
     ? plan.projectServices
     : [];
+  const projectPaths = approvedProjectPaths(plan);
+  if (projectPaths === null) return false;
   const serviceMap = new Map(services.map((service) => [service?.name, service]));
   const requiredReady = REQUIRED_PROJECT_SERVICES.every((name) => {
     const service = serviceMap.get(name);
+    const fragmentPath = posix.normalize(service?.FragmentPath ?? "");
+    const fragmentOwned = [
+      `/etc/systemd/system/${name}`,
+      `/lib/systemd/system/${name}`,
+      `/usr/lib/systemd/system/${name}`,
+    ].includes(fragmentPath);
+    const workingDirectoryOwned =
+      typeof service?.WorkingDirectory === "string" &&
+      projectPaths.some((path) => pathWithin(service.WorkingDirectory, path));
+    const execStartOwned =
+      typeof service?.ExecStart === "string" &&
+      projectPaths.some((path) => commandReferencesPath(service.ExecStart, path));
     return (
       service &&
       isEnabled(service.enabled) &&
-      isActive(service.active)
+      isActive(service.active) &&
+      fragmentOwned &&
+      execStartOwned &&
+      typeof service.User === "string" &&
+      /^[A-Za-z_][A-Za-z0-9_-]*$/.test(service.User) &&
+      workingDirectoryOwned
     );
   });
   const ownedNamesOnly = services.every((service) =>
     /^sentelligent-[A-Za-z0-9@_.-]+\.service$/.test(service?.name ?? ""),
   );
-  const actions = Array.isArray(plan?.plannedActions) ? plan.plannedActions : [];
-  const actionsOwned = actions.every(
-    (action) =>
-      ["enable", "restart", "start", "status", "stop"].includes(action?.action) &&
-      serviceMap.has(action?.service) &&
-      /^sentelligent-[A-Za-z0-9@_.-]+\.service$/.test(action.service),
-  );
-  return requiredReady && ownedNamesOnly && actionsOwned;
+  return requiredReady && ownedNamesOnly;
 }
 
 function validatesUnrelatedProtection(plan) {
@@ -207,25 +359,53 @@ function validatesUnrelatedProtection(plan) {
     ? plan.unrelatedServices
     : [];
   const actions = Array.isArray(plan?.plannedActions) ? plan.plannedActions : [];
-  const commands = Array.isArray(plan?.plannedCommands)
-    ? plan.plannedCommands
-    : [];
-  if (unrelated.length === 0) return false;
+  const protectedObjects = new Set(
+    Array.isArray(plan?.protectedObjects) ? plan.protectedObjects : [],
+  );
+  const listeners = Array.isArray(plan?.listeners) ? plan.listeners : [];
+  if (
+    unrelated.length === 0 ||
+    !REQUIRED_PROTECTED_OBJECTS.every((name) => protectedObjects.has(name))
+  ) {
+    return false;
+  }
   const protectedNames = new Set(unrelated.map((service) => service?.name));
   const inventoryProtected = unrelated.every(
     (service) =>
       service?.protected === true &&
       typeof service?.name === "string" &&
       service.name.length > 0 &&
-      !service.name.startsWith("sentelligent-"),
+      typeof service.active === "boolean" &&
+      !service.name.startsWith("sentelligent-") &&
+      protectedObjects.has(service?.protectionId),
+  );
+  const requiredObjectsInventoried = REQUIRED_PROTECTED_OBJECTS.every((name) =>
+    unrelated.some((service) => service?.protectionId === name),
+  );
+  const listenersProtected = listeners.length > 0 && listeners.every(
+    (listener) =>
+      Number.isInteger(listener?.port) &&
+      listener.port > 0 &&
+      listener.port <= 65_535 &&
+      listener.protected === true &&
+      protectedObjects.has(listener?.owner),
+  );
+  const requiredListenersPresent = REQUIRED_PROTECTED_LISTENERS.every(
+    (required) =>
+      listeners.some(
+        (listener) =>
+          listener?.port === required.port && listener?.owner === required.owner,
+      ),
   );
   const actionsIsolated = actions.every(
     (action) => !protectedNames.has(action?.service),
   );
   return (
     inventoryProtected &&
-    actionsIsolated &&
-    commands.every((command) => !unsafeCommand(command))
+    requiredObjectsInventoried &&
+    listenersProtected &&
+    requiredListenersPresent &&
+    actionsIsolated
   );
 }
 
@@ -272,7 +452,13 @@ export async function runProductionPreflight({
   const servicePlanResult = safeReadServicePlan(servicePlanPath);
   const servicePlan = servicePlanResult.value;
   const database = await inspectSqlite(databasePath ?? "");
-  const backup = await inspectSqlite(backupPath ?? "");
+  const backup = await inspectSqlite(backupPath ?? "", {
+    requireNoSidecars: true,
+  });
+  const databaseIdentity = compareDatabaseIdentity(
+    databasePath ?? "",
+    backupPath ?? "",
+  );
 
   let actualBackupSha256 = "";
   try {
@@ -357,6 +543,13 @@ export async function runProductionPreflight({
         : { violations: database.foreignKeyViolations },
     ),
     makeCheck(
+      "backup.identity",
+      databaseIdentity.distinct,
+      "Backup resolves to a different file identity from the primary database.",
+      "Backup must not be the primary database, a symlink to it, or a hard link to it.",
+      { verifiedBy: databaseIdentity.verifiedBy },
+    ),
+    makeCheck(
       "backup.sha256",
       backupHashMatches,
       "Backup SHA-256 matches the separately recorded value.",
@@ -379,11 +572,27 @@ export async function runProductionPreflight({
         : { violations: backup.foreignKeyViolations },
     ),
     makeCheck(
+      "services.snapshot",
+      servicePlanResult.error === null &&
+        validateServiceSnapshot(servicePlan, createdAt),
+      "Service inventory is a current, host-identified read-only snapshot with approved project paths.",
+      servicePlanResult.error ??
+        "Service snapshot requires a recent snapshotGeneratedAt, hostname, and approved project paths.",
+    ),
+    makeCheck(
       "services.project",
       servicePlanResult.error === null && validateProjectServices(servicePlan),
       "All required project services are active, enabled, and exclusively targeted.",
       servicePlanResult.error ??
         "Required project services must be active, enabled, and the only action targets.",
+    ),
+    makeCheck(
+      "services.commands",
+      servicePlanResult.error === null &&
+        validatePlannedCommands(servicePlan),
+      "Every planned command exactly matches one allowed systemctl action for one project service.",
+      servicePlanResult.error ??
+        "Planned commands must use the exact single-service systemctl allowlist without shell syntax.",
     ),
     makeCheck(
       "services.unrelatedProtection",
@@ -397,7 +606,7 @@ export async function runProductionPreflight({
   const passed = checks.filter((check) => check.status === "passed").length;
   const failed = checks.length - passed;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date(createdAt).toISOString(),
     status: failed === 0 ? "passed" : "failed",
     summary: {

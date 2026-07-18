@@ -36,6 +36,16 @@ function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
 }
 
+function stableTreeHash(files) {
+  const index = Object.entries(files)
+    .sort(([left], [right]) =>
+      Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")),
+    )
+    .map(([file, hash]) => `${hash}  ${file}\n`)
+    .join("");
+  return sha256(index);
+}
+
 async function loadReleaseModule() {
   try {
     return await import("./release-package.mjs");
@@ -119,6 +129,10 @@ describe("portable release package", () => {
       );
       workspace.write(".env.example", "AUTH_PASSWORD_HASH=\n");
       workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write("src/auth/token.js", "export const tokenName = 'csrf';\n");
+      workspace.write("src/audio/player.js", "export const play = () => {};\n");
+      workspace.write("src/sessionManager.js", "export const restore = () => {};\n");
+      workspace.write("assets/voice-wave.png", Buffer.from([1, 2, 3, 4]));
       workspace.write("backend/src/db/migrations/0001_baseline.sql", baselineMigration);
       workspace.write(
         "backend/src/db/migrations/0002_write_integrity.mjs",
@@ -142,7 +156,21 @@ describe("portable release package", () => {
         "backend/.env",
         "backend/data/sales-workbench.sqlite",
         "backend/data/sales-workbench.sqlite-wal",
+        "backend/data/sales-workbench.sqlite.bak",
+        "backend/data/sales-workbench.db.backup",
+        "backend/data/sales-workbench.sqlite3.copy",
+        "backend/data/sales-workbench.db.old",
         "logs/backend.log",
+        "backend.log.1",
+        "backend.log.2026-07-19.gz",
+        "backend.pid.2",
+        "build/server.js",
+        "coverage/lcov.info",
+        "other/dist/app.js",
+        "voice-recordings/call.webm",
+        "voice-assets/call.wav",
+        "runtime-audio/meeting.m4a",
+        "audio-sessions/live.webm",
         "weixin-session/credentials.json",
         "sessions/browser.json",
         "node_modules/example/index.js",
@@ -152,6 +180,15 @@ describe("portable release package", () => {
         ".runtime/handoff/private.txt",
         ".npm-cache/cache.bin",
         "server-private.pem",
+        "id_rsa",
+        "id_ed25519",
+        "credentials.json",
+        "secrets.json",
+        "service-account.json",
+        "private-secret.txt",
+        "deployment.secret",
+        "release-keystore.jks",
+        "client.ppk",
       ];
       for (const file of excludedFiles) workspace.write(file, `private fixture: ${file}\n`);
 
@@ -177,6 +214,10 @@ describe("portable release package", () => {
       const files = listFiles(packageRoot);
       assert.ok(files.includes("package.json"));
       assert.ok(files.includes(".env.example"));
+      assert.ok(files.includes("src/auth/token.js"));
+      assert.ok(files.includes("src/audio/player.js"));
+      assert.ok(files.includes("src/sessionManager.js"));
+      assert.ok(files.includes("assets/voice-wave.png"));
       assert.ok(
         files.includes(
           "outputs/product-design-prototype/docs/02-开发实施方案.md",
@@ -224,6 +265,29 @@ describe("portable release package", () => {
         sha256(integrityMigration),
       );
 
+      const sourceFiles = files.filter(
+        (file) =>
+          file !== "release-manifest.json" &&
+          !file.startsWith("outputs/product-design-prototype/dist/"),
+      );
+      const expectedSourceHashes = Object.fromEntries(
+        sourceFiles.map((file) => [
+          file,
+          sha256(readFileSync(join(packageRoot, file))),
+        ]),
+      );
+      assert.deepEqual(manifest.sourceHashes.files, expectedSourceHashes);
+      assert.equal(
+        manifest.sourceHashes.treeSha256,
+        stableTreeHash(expectedSourceHashes),
+      );
+      assert.ok(!("release-manifest.json" in manifest.sourceHashes.files));
+      assert.ok(
+        !Object.keys(manifest.sourceHashes.files).some((file) =>
+          file.startsWith("outputs/product-design-prototype/dist/"),
+        ),
+      );
+
       for (const name of [
         "NODE_ENV",
         "DATABASE_URL",
@@ -254,6 +318,73 @@ describe("portable release package", () => {
       extracted.cleanup();
     }
   });
+
+  it(
+    "builds and extracts the real project through Unicode source, output, and destination paths",
+    { timeout: 180_000 },
+    async () => {
+      const acceptance = makeWorkspace("森特智行-发布验收-");
+      const outputDir = join(acceptance.root, "发布包");
+      const extractDir = join(acceptance.root, "解压结果");
+      const frontendRoot = join(
+        projectRoot,
+        "outputs",
+        "product-design-prototype",
+      );
+      const buildCommand = process.platform === "win32"
+        ? {
+            command: process.env.ComSpec ?? "cmd.exe",
+            args: ["/d", "/s", "/c", "npm.cmd", "run", "build"],
+          }
+        : { command: "npm", args: ["run", "build"] };
+
+      try {
+        const build = spawnSync(buildCommand.command, buildCommand.args, {
+          cwd: frontendRoot,
+          encoding: "utf8",
+          timeout: 120_000,
+        });
+        assert.equal(
+          build.status,
+          0,
+          build.error?.message || build.stderr || build.stdout,
+        );
+
+        const { createReleasePackage } = await loadReleaseModule();
+        const result = await createReleasePackage({
+          sourceRoot: projectRoot,
+          outputDir,
+          allowDirty: true,
+          createdAt: "2026-07-19T08:00:00.000Z",
+        });
+        extractArchive(result.archivePath, extractDir);
+
+        const packageRoot = join(extractDir, result.rootDirectory);
+        const manifest = JSON.parse(
+          readFileSync(join(packageRoot, "release-manifest.json"), "utf8"),
+        );
+        assert.ok(
+          existsSync(join(packageRoot, "docs", "正式交付验收手册.md")),
+        );
+        assert.ok(
+          existsSync(
+            join(
+              packageRoot,
+              "outputs",
+              "product-design-prototype",
+              "dist",
+              "index.html",
+            ),
+          ),
+        );
+        assert.ok(Object.keys(manifest.buildHashes.files).length > 0);
+        assert.ok(Object.keys(manifest.sourceHashes.files).length > 0);
+        assert.match(manifest.sourceHashes.treeSha256, /^[a-f0-9]{64}$/);
+      } finally {
+        acceptance.cleanup();
+      }
+    },
+  );
 
   it("exposes dedicated package and production preflight commands", () => {
     const packageJson = JSON.parse(

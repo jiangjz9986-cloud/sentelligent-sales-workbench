@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
+  existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -93,16 +95,57 @@ function validEnvironment(origin) {
 }
 
 function validServicePlan() {
+  const projectRoot = "/opt/sentelligent-sales-workbench";
+  const execStartByService = {
+    "sentelligent-backend.service":
+      `/usr/bin/node ${projectRoot}/backend/src/server.js`,
+    "sentelligent-frontend.service":
+      `/usr/bin/node ${projectRoot}/outputs/product-design-prototype/scripts/static-server.mjs`,
+    "sentelligent-caddy.service":
+      "/usr/bin/caddy run --config /etc/caddy/Caddyfile",
+    "sentelligent-weixin-agent.service":
+      `/usr/bin/node ${projectRoot}/backend/src/weixin/worker.js start`,
+  };
   return {
+    snapshotGeneratedAt: new Date().toISOString(),
+    hostname: "sentelligent-production-01",
+    projectPaths: [
+      { path: projectRoot, approved: true },
+      { path: "/etc/caddy/Caddyfile", approved: true },
+    ],
     projectServices: requiredProjectServices.map((name) => ({
       name,
       enabled: true,
       active: true,
+      FragmentPath: `/etc/systemd/system/${name}`,
+      ExecStart: execStartByService[name],
+      User: "sentelligent",
+      WorkingDirectory: projectRoot,
     })),
     unrelatedServices: [
-      { name: "account-vault.service", protected: true, active: true },
-      { name: "qingyang.service", protected: true, active: true },
-      { name: "proxy.service", protected: true, active: true },
+      {
+        name: "account-vault.service",
+        protectionId: "account-vault",
+        protected: true,
+        active: true,
+      },
+      {
+        name: "qingyang.service",
+        protectionId: "qingyang",
+        protected: true,
+        active: true,
+      },
+      {
+        name: "proxy.service",
+        protectionId: "proxy",
+        protected: true,
+        active: true,
+      },
+    ],
+    protectedObjects: ["account-vault", "qingyang", "proxy"],
+    listeners: [
+      { port: 4876, owner: "account-vault", protected: true },
+      { port: 8797, owner: "qingyang", protected: true },
     ],
     plannedActions: requiredProjectServices.map((service) => ({
       action: "restart",
@@ -138,19 +181,27 @@ describe("production preflight", () => {
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
+      const writer = new DatabaseSync(databasePath);
+      writer.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;");
+      writer.exec("INSERT INTO parents (id) VALUES (2)");
+      assert.ok(existsSync(`${databasePath}-wal`));
 
-      const { runProductionPreflight } = await loadPreflightModule();
-      assert.equal(typeof runProductionPreflight, "function");
-
-      const report = await runProductionPreflight({
-        envFile,
-        databasePath,
-        backupPath,
-        expectedBackupSha256: fileSha256(backupPath),
-        expectedOrigins: [origin],
-        servicePlanPath,
-        nodeVersion: "24.14.1",
-      });
+      let report;
+      try {
+        const { runProductionPreflight } = await loadPreflightModule();
+        assert.equal(typeof runProductionPreflight, "function");
+        report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+      } finally {
+        writer.close();
+      }
 
       assert.equal(report.status, "passed");
       assert.equal(report.summary.failed, 0);
@@ -167,9 +218,12 @@ describe("production preflight", () => {
         "database.quickCheck",
         "database.foreignKeys",
         "backup.sha256",
+        "backup.identity",
         "backup.quickCheck",
         "backup.foreignKeys",
         "services.project",
+        "services.snapshot",
+        "services.commands",
         "services.unrelatedProtection",
       ]) {
         assert.ok(report.checks.some((check) => check.id === id), `missing ${id}`);
@@ -294,10 +348,186 @@ describe("production preflight", () => {
       assert.equal(report.status, "failed");
       assert.equal(
         report.checks.find(
-          (check) => check.id === "services.unrelatedProtection",
+          (check) => check.id === "services.commands",
         )?.status,
         "failed",
       );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("rejects the primary database itself and a hard link as backup evidence", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const environment = validEnvironment(origin);
+      const envFile = workspace.write("production.env", environment.source);
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const servicePlanPath = workspace.write(
+        "service-plan.json",
+        JSON.stringify(validServicePlan(), null, 2),
+      );
+      makeDatabase(databasePath);
+      const { runProductionPreflight } = await loadPreflightModule();
+
+      for (const backupPath of [
+        databasePath,
+        join(workspace.root, "backups", "hard-link.sqlite"),
+      ]) {
+        if (backupPath !== databasePath) {
+          mkdirSync(dirname(backupPath), { recursive: true });
+          linkSync(databasePath, backupPath);
+        }
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        assert.equal(report.status, "failed");
+        assert.equal(
+          report.checks.find((check) => check.id === "backup.identity")
+            ?.status,
+          "failed",
+        );
+      }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("requires backups to be free of SQLite sidecars while allowing the live primary WAL", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const environment = validEnvironment(origin);
+      const envFile = workspace.write("production.env", environment.source);
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      const servicePlanPath = workspace.write(
+        "service-plan.json",
+        JSON.stringify(validServicePlan(), null, 2),
+      );
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      writeFileSync(`${backupPath}-wal`, "unexpected sidecar");
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+      assert.equal(
+        report.checks.find((check) => check.id === "backup.quickCheck")
+          ?.status,
+        "failed",
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("uses an exact systemctl allowlist and rejects command bypasses", async () => {
+    const { validatePlannedCommands } = await loadPreflightModule();
+    assert.equal(typeof validatePlannedCommands, "function");
+    const service = "sentelligent-backend.service";
+
+    for (const action of [
+      "start",
+      "stop",
+      "restart",
+      "enable",
+      "status",
+      "is-active",
+      "is-enabled",
+    ]) {
+      assert.equal(
+        validatePlannedCommands({
+          plannedActions: [{ action, service }],
+          plannedCommands: [`systemctl ${action} ${service}`],
+        }),
+        true,
+        `${action} should be allowed for one project service`,
+      );
+    }
+
+    for (const command of [
+      `service ${service} restart`,
+      `systemctl --user restart ${service}`,
+      `systemctl restart ${service} sentelligent-frontend.service`,
+      `systemctl restart ${service} && systemctl restart nginx.service`,
+      `systemctl restart ${service}; true`,
+      `systemctl restart ${service} | cat`,
+      `sudo systemctl restart ${service}`,
+      `systemctl disable ${service}`,
+      "pkill node",
+      "killall node",
+      "docker compose down",
+    ]) {
+      assert.equal(
+        validatePlannedCommands({
+          plannedActions: [{ action: "restart", service }],
+          plannedCommands: [command],
+        }),
+        false,
+        `${command} must be rejected`,
+      );
+    }
+  });
+
+  it("rejects incomplete service ownership and generic protection snapshots", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const environment = validEnvironment(origin);
+      const envFile = workspace.write("production.env", environment.source);
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const plan = validServicePlan();
+      delete plan.snapshotGeneratedAt;
+      plan.hostname = "";
+      plan.projectServices[0].ExecStart = "/usr/bin/node /opt/other/server.js";
+      plan.projectServices[1].FragmentPath = "/tmp/frontend.service";
+      plan.projectServices[2].User = "";
+      plan.projectServices[3].WorkingDirectory = "/opt/other";
+      plan.protectedObjects = ["anything"];
+      plan.listeners = [{ port: 1234, owner: "anything", protected: true }];
+      const servicePlanPath = workspace.write(
+        "service-plan.json",
+        JSON.stringify(plan, null, 2),
+      );
+      const { runProductionPreflight } = await loadPreflightModule();
+
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+      const failed = new Set(
+        report.checks
+          .filter((check) => check.status === "failed")
+          .map((check) => check.id),
+      );
+      assert.ok(failed.has("services.snapshot"));
+      assert.ok(failed.has("services.project"));
+      assert.ok(failed.has("services.unrelatedProtection"));
     } finally {
       workspace.cleanup();
     }
