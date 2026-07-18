@@ -30,11 +30,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
   kanbanStages,
-  quickRecords,
-  solutionDocs,
   statusTone,
   weeklyDays,
 } from "../../data/salesWorkbenchData.js";
+import { assertBackendReady } from "../../app/workbenchState.js";
 import { triggerBlobDownload } from "../../downloadFile.js";
 import { createConfirmationAttemptTracker } from "../../api/salesWorkbenchApi.js";
 import {
@@ -51,7 +50,6 @@ import {
   Timeline,
 } from "../../components/primitives.jsx";
 import {
-  buildQuickRecordAnalysis,
   confirmQuickRecordTarget,
   createExclusiveAsyncGate,
   getQuickRecordFlow,
@@ -94,29 +92,12 @@ function joinedList(value) {
   return String(value ?? "");
 }
 
-function fallbackSuggestion({ type, title, context = {} }) {
-  const entity = context.customer || context.opportunity || context.knowledge || context.title || "当前业务";
-  const typeTips = {
-    customer_profile: "建议补齐关键联系人、预算节奏、已确认需求和下一次拜访问题，并把来源记录同步到客户画像。",
-    opportunity_push: "建议先确认预算路径与竞品压力，再安排售前材料、责任人和下一次客户沟通时间。",
-    knowledge_talk: "建议先核对客户场景，再把可复用话术、材料出处和适用边界写入方案草稿。",
-  };
-  return {
-    id: `local-suggestion-${Date.now().toString(36)}`,
-    type,
-    title,
-    status: "generated",
-    content: `${entity}：${typeTips[type] ?? "建议结合当前页面信息确认下一步动作、责任人和交付材料。"}`,
-    sourceRefs: [],
-    createdAt: new Date().toISOString(),
-  };
-}
-
 async function generateBusinessSuggestion(apiClient, backendStatus, payload) {
-  if (apiClient?.isEnabled && backendStatus === "connected") {
-    return apiClient.generateAiSuggestion(payload);
-  }
-  return fallbackSuggestion(payload);
+  assertBackendReady(
+    { isEnabled: apiClient?.isEnabled, status: backendStatus },
+    "生成 AI 建议",
+  );
+  return apiClient.generateAiSuggestion(payload);
 }
 
 export function Overview({
@@ -365,6 +346,21 @@ const voiceStatusText = {
   error: "需处理",
 };
 
+function quickRecordHistoryView(item) {
+  const date = new Date(item.occurredAt ?? item.createdAt ?? "");
+  const validDate = !Number.isNaN(date.getTime());
+  const status = item.status === "confirmed" ? "已确认" : item.status === "analyzed" ? "待同步" : "已记录";
+  return {
+    day: validDate ? String(date.getDate()).padStart(2, "0") : "--",
+    date: validDate ? `${date.getMonth() + 1}月` : "待记录",
+    customer: item.customer ?? item.customerId ?? "未关联客户",
+    title: item.title ?? item.rawContent ?? "未填写内容",
+    feedback: item.sourceChannel ?? "快速记录",
+    status,
+    tone: status === "已确认" ? "green" : status === "待同步" ? "amber" : "blue",
+  };
+}
+
 export function QuickRecord({
   recordMode,
   setRecordMode,
@@ -379,9 +375,11 @@ export function QuickRecord({
   setSelectedOpportunityId,
   openOpportunityDetail,
   onBusinessSync,
+  onQuickRecordSaved,
   onConfirmationRefresh,
   apiClient,
   backendStatus,
+  quickRecords = [],
   customersList,
   opportunitiesList,
 }) {
@@ -490,7 +488,7 @@ export function QuickRecord({
     clearVoiceAudio();
     confirmationAttemptRef.current.reset();
     const nextText = item.rawContent ?? `${item.customer}：${item.title}。${item.feedback}`;
-    const nextAnalysis = item.analysis ?? buildQuickRecordAnalysis(nextText);
+    const nextAnalysis = item.analysis ?? null;
     setRecordMode("text");
     setRecordText(nextText);
     setAnalysis(nextAnalysis);
@@ -499,7 +497,7 @@ export function QuickRecord({
     setConfirmedTargets(item.confirmedTargets ?? []);
     setSyncLog(item.syncLog ?? []);
     setAnalysisVisible(Boolean(nextAnalysis));
-    setSyncStatus("已载入历史分析，可直接修改或确认同步");
+    setSyncStatus(nextAnalysis ? "已载入历史分析，可直接修改或确认同步" : "已载入历史记录，暂无已保存分析");
   }
 
   function updateAnalysisSummary(section, text) {
@@ -763,83 +761,87 @@ export function QuickRecord({
   }, []);
 
   async function confirmAnalysis() {
-    const nextAnalysis = buildQuickRecordAnalysis(recordText);
-    if (!nextAnalysis) {
+    if (!recordText.trim()) {
       resetAnalysis("请先录入文本或语音转写内容");
       return;
     }
 
     confirmationAttemptRef.current.reset();
-
-    if (apiClient?.isEnabled) {
-      setSyncStatus("正在分析记录内容");
-      try {
-        const result = await apiClient.analyzeQuickRecord(recordText, {
-          sourceChannel: recordMode === "voice" ? "语音转写" : "快速记录",
-        });
-        setQuickRecord(result.quickRecord);
-        setAnalysis(result.analysis);
-        setConfirmedTargets([]);
-        setSyncLog([]);
-        setAnalysisVisible(true);
-        setSyncStatus("分析完成，等待人工同步");
-        return;
-      } catch {
-        setSyncStatus("智能分析暂未连接，已生成基础识别结果");
-      }
+    try {
+      assertBackendReady(
+        { isEnabled: apiClient?.isEnabled, status: backendStatus },
+        "分析快速记录",
+      );
+    } catch (error) {
+      setSyncStatus(error.message);
+      return;
     }
 
-    setQuickRecord(null);
-    setAnalysis(nextAnalysis);
-    setConfirmedTargets([]);
-    setSyncLog([]);
-    setAnalysisVisible(true);
-    setSyncStatus("已完成结构化识别，等待人工同步");
+    setSyncStatus("正在分析记录内容");
+    try {
+      const result = await apiClient.analyzeQuickRecord(recordText, {
+        sourceChannel: recordMode === "voice" ? "语音转写" : "快速记录",
+      });
+      setQuickRecord(result.quickRecord);
+      onQuickRecordSaved?.(result.quickRecord);
+      setAnalysis(result.analysis);
+      setConfirmedTargets([]);
+      setSyncLog([]);
+      setAnalysisVisible(true);
+      setSyncStatus("分析完成，等待人工同步");
+    } catch (error) {
+      setSyncStatus(error?.message || "分析失败，请稍后重试");
+    }
   }
 
   async function confirmTargetUnlocked(target) {
     let nextLogEntry = null;
-    if (quickRecordId && apiClient?.isEnabled) {
-      setSyncStatus(`正在同步${target.label}`);
-      try {
-        const outcome = await confirmQuickRecordTarget({
-          apiClient,
-          attemptTracker: confirmationAttemptRef.current,
-          quickRecord,
-          analysis,
-          target,
-          customers: customersList,
-          opportunities: opportunitiesList,
-          confirmedBy: "继振",
-        });
-        if (outcome.status === "missing_version") {
-          const entityLabel = outcome.entity === "customer" ? "客户" : "商机";
-          setSyncStatus(`同步失败，请刷新${entityLabel}版本后重试：${target.label}`);
-          return;
-        }
-        if (outcome.status === "conflict") {
-          setQuickRecord(outcome.refreshed.quickRecord);
-          onConfirmationRefresh?.(outcome.refreshed);
-          setSyncStatus(`数据已刷新，请重试：${target.label}`);
-          return;
-        }
-        const result = outcome.result;
-        setQuickRecord(result.quickRecord);
-        onBusinessSync?.(result);
-        nextLogEntry = (result.confirmations ?? []).find((item) => item.target === target.id) ?? null;
-      } catch {
-        setSyncStatus(`同步失败，请稍后重试：${target.label}`);
+    try {
+      assertBackendReady(
+        { isEnabled: apiClient?.isEnabled, status: backendStatus },
+        `同步${target.label}`,
+      );
+    } catch (error) {
+      setSyncStatus(error.message);
+      return;
+    }
+    if (!quickRecordId) {
+      setSyncStatus("请先完成 AI 分析，再同步业务档案");
+      return;
+    }
+
+    setSyncStatus(`正在同步${target.label}`);
+    try {
+      const outcome = await confirmQuickRecordTarget({
+        apiClient,
+        attemptTracker: confirmationAttemptRef.current,
+        quickRecord,
+        analysis,
+        target,
+        customers: customersList,
+        opportunities: opportunitiesList,
+        confirmedBy: "继振",
+      });
+      if (outcome.status === "missing_version") {
+        const entityLabel = outcome.entity === "customer" ? "客户" : "商机";
+        setSyncStatus(`同步失败，请刷新${entityLabel}版本后重试：${target.label}`);
         return;
       }
-    } else {
-      nextLogEntry = {
-        id: `${target.id}-${Date.now()}`,
-        quickRecordId: "local-record",
-        target: target.id,
-        confirmedBy: "继振",
-        note: target.status,
-        createdAt: new Date().toISOString(),
-      };
+      if (outcome.status === "conflict") {
+        setQuickRecord(outcome.refreshed.quickRecord);
+        onQuickRecordSaved?.(outcome.refreshed.quickRecord);
+        onConfirmationRefresh?.(outcome.refreshed);
+        setSyncStatus(`数据已刷新，请重试：${target.label}`);
+        return;
+      }
+      const result = outcome.result;
+      setQuickRecord(result.quickRecord);
+      onQuickRecordSaved?.(result.quickRecord);
+      onBusinessSync?.(result);
+      nextLogEntry = (result.confirmations ?? []).find((item) => item.target === target.id) ?? null;
+    } catch (error) {
+      setSyncStatus(error?.message || `同步失败，请稍后重试：${target.label}`);
+      return;
     }
 
     setConfirmedTargets((current) => {
@@ -859,7 +861,7 @@ export function QuickRecord({
         nextLogEntry,
       ]);
     }
-    setSyncStatus(quickRecordId && backendStatus === "connected" ? `${target.status}（已同步）` : target.status);
+    setSyncStatus(`${target.status}（已同步）`);
   }
 
   async function confirmTarget(target) {
@@ -891,33 +893,37 @@ export function QuickRecord({
     resetAnalysis("请继续在记录框内录入内容");
   }
 
+  const historyItems = quickRecords.map((item) => ({ item, view: quickRecordHistoryView(item) }));
+  const pendingHistoryCount = quickRecords.filter((item) => item.status !== "confirmed").length;
+
   return (
     <div className="record-layout">
       <Panel title="已有快速记录" meta="今日记录" className="record-list-panel">
         <div className="record-list-summary">
-          <span>今日 1 条</span>
-          <b>3 条待确认</b>
+          <span>{quickRecords.length} 条记录</span>
+          <b>{pendingHistoryCount} 条待确认</b>
         </div>
         <div className="list-stack">
-          {quickRecords.map((item) => (
+          {historyItems.map(({ item, view }) => (
             <button
-              className={`list-button record-note tone-rail-${item.tone} ${selectedHistoryId === item.id ? "selected" : ""}`}
+              className={`list-button record-note tone-rail-${view.tone} ${selectedHistoryId === item.id ? "selected" : ""}`}
               key={item.id}
               type="button"
               onClick={() => loadHistoricalRecord(item)}
             >
-              <span className={`date-chip ${statusTone[item.tone]}`}>
-                <b>{item.day}</b>
-                <small>{item.date}</small>
+              <span className={`date-chip ${statusTone[view.tone]}`}>
+                <b>{view.day}</b>
+                <small>{view.date}</small>
               </span>
               <span>
-                <strong>{item.customer}</strong>
-                <small>{item.title}</small>
-                <em>{item.feedback}</em>
+                <strong>{view.customer}</strong>
+                <small>{view.title}</small>
+                <em>{view.feedback}</em>
               </span>
-              <b className={`pill ${statusTone[item.tone]}`}>{item.status}</b>
+              <b className={`pill ${statusTone[view.tone]}`}>{view.status}</b>
             </button>
           ))}
+          {quickRecords.length === 0 ? <p className="empty-list">暂无历史记录，可直接创建新记录。</p> : null}
         </div>
       </Panel>
 
@@ -1480,7 +1486,7 @@ function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSave
       setMode("edit");
       setForm(customerToForm(saved));
       onSaved?.(saved);
-      setSaveStatus(backendStatus === "connected" ? "已保存" : "已暂存");
+       setSaveStatus("已保存");
     } catch (error) {
       setSaveStatus(error.message || "保存失败");
     }
@@ -1588,7 +1594,7 @@ function OpportunityEditor({ selected, customersList, initialMode = "edit", onSa
       setMode("edit");
       setForm(opportunityToForm(saved, selectedCustomer));
       onSaved?.(saved);
-      setSaveStatus(backendStatus === "connected" ? "已保存" : "已暂存");
+      setSaveStatus("已保存");
     } catch (error) {
       setSaveStatus(error.message || "保存失败");
     }
@@ -1700,7 +1706,7 @@ function KnowledgeEditor({ selected, initialMode = "edit", onSaveKnowledge, onSa
       setMode("edit");
       setForm(knowledgeToForm(saved));
       onSaved?.(saved);
-      setSaveStatus(backendStatus === "connected" ? "已保存到知识库" : "已暂存");
+      setSaveStatus("已保存到知识库");
     } catch (error) {
       setSaveStatus(error.message || "保存失败");
     }
@@ -1835,7 +1841,11 @@ export function CustomerPage({
                 </button>
               </article>
             ))}
-            {visibleItems.length === 0 ? <p className="empty-list">没有匹配客户，请调整关键词。</p> : null}
+            {visibleItems.length === 0 ? (
+              <p className="empty-list">
+                {items.length === 0 ? "暂无客户，可点击右上角新增客户。" : "没有匹配客户，请调整关键词。"}
+              </p>
+            ) : null}
           </div>
         </Panel>
       </section>
@@ -2057,7 +2067,11 @@ export function OpportunityPage({
                 </button>
               </article>
             ))}
-            {visibleItems.length === 0 ? <p className="empty-list">没有匹配商机，请调整关键词。</p> : null}
+            {visibleItems.length === 0 ? (
+              <p className="empty-list">
+                {items.length === 0 ? "暂无商机，可点击右上角新增商机。" : "没有匹配商机，请调整关键词。"}
+              </p>
+            ) : null}
           </div>
         </Panel>
       </section>
@@ -2258,7 +2272,7 @@ export function ActionsPage({
         tone: status === "done" ? "green" : status === "deferred" ? "amber" : "blue",
       });
       const meta = actionStatusMeta[updated.status] ?? actionStatusMeta.pending;
-      setStatusMessage(backendStatus === "connected" ? `${meta.message}（已同步）` : meta.message);
+       setStatusMessage(`${meta.message}（已同步）`);
     } catch {
       setStatusMessage("动作更新失败，请稍后重试。");
     }
@@ -2318,7 +2332,11 @@ export function ActionsPage({
                 </button>
               </article>
             ))}
-            {visibleItems.length === 0 ? <p className="empty-list">没有匹配动作，请调整关键词。</p> : null}
+            {visibleItems.length === 0 ? (
+              <p className="empty-list">
+                {items.length === 0 ? "暂无动作记录。" : "没有匹配动作，请调整关键词。"}
+              </p>
+            ) : null}
           </div>
         </Panel>
       </section>
@@ -2486,7 +2504,7 @@ function sourceRefText(ref) {
   return `${typeLabel}：${ref.title ?? ref.id ?? "来源"}`;
 }
 
-export function SolutionPage({ selected, onSelect, customer, opportunity, apiClient, backendStatus, draft, setDraft }) {
+export function SolutionPage({ selected, onSelect, customer, opportunity, apiClient, backendStatus, draft, setDraft, solutionDocs = [] }) {
   const [localDrafts, setLocalDrafts] = useState({});
   const [selectedArtifactType, setSelectedArtifactType] = useState(draft?.artifactType ?? "solution_framework");
   const [draftStatus, setDraftStatus] = useState("选择交付物后，可生成对应方案材料。");
@@ -2638,8 +2656,9 @@ export function SolutionPage({ selected, onSelect, customer, opportunity, apiCli
                 >
                   <strong>{item.title}</strong>
                   <small>{item.type} / {item.source}</small>
-                </button>
-              ))}
+                  </button>
+                ))}
+              {solutionDocs.length === 0 ? <p className="empty-list">暂无已保存的方案历史。</p> : null}
             </div>
           </Panel>
         </div>
@@ -2998,7 +3017,7 @@ export function RiskPage({
         due: due.trim() || "待确认",
         tone: action.tone,
       });
-      setStatusMessage(backendStatus === "connected" ? "风险状态已保存" : "风险状态已暂存");
+      setStatusMessage("风险状态已保存");
     } catch (error) {
       setStatusMessage(error.message || "风险状态保存失败");
     }
@@ -3058,7 +3077,11 @@ export function RiskPage({
                 </button>
               </article>
             ))}
-            {visibleItems.length === 0 ? <p className="empty-list">没有匹配风险，请调整关键词。</p> : null}
+            {visibleItems.length === 0 ? (
+              <p className="empty-list">
+                {items.length === 0 ? "暂无风险记录。" : "没有匹配风险，请调整关键词。"}
+              </p>
+            ) : null}
           </div>
         </Panel>
       </section>
@@ -3298,7 +3321,11 @@ export function KnowledgePage({
                 </button>
               </article>
             ))}
-            {visibleItems.length === 0 ? <p className="empty-list">没有匹配材料，请调整关键词。</p> : null}
+            {visibleItems.length === 0 ? (
+              <p className="empty-list">
+                {items.length === 0 ? "暂无知识材料，可点击右上角新增知识。" : "没有匹配材料，请调整关键词。"}
+              </p>
+            ) : null}
           </div>
         </Panel>
       </section>
@@ -3629,7 +3656,7 @@ export function KanbanPage({
         id: item.id,
         stage: nextStage,
       });
-      setStatusMessage(backendStatus === "connected" ? "看板已更新，并同步到商机档案" : "看板已更新，当前为本地暂存");
+            setStatusMessage("看板已更新，并同步到商机档案");
     } catch (error) {
       setStatusMessage(error.message || "看板阶段更新失败");
     }

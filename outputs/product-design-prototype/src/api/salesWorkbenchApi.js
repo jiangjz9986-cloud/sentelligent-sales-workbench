@@ -290,12 +290,13 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     },
 
     async loadBootstrap() {
-      const [customers, opportunities, actions, risks, knowledge, summary] = await Promise.all([
+      const [customers, opportunities, actions, risks, knowledge, quickRecords, summary] = await Promise.all([
         requestApi("/api/customers"),
         requestApi("/api/opportunities"),
         requestApi("/api/actions"),
         requestApi("/api/risks"),
         requestApi("/api/knowledge"),
+        requestApi("/api/quick-records"),
         requestApi("/api/dashboard/summary"),
       ]);
 
@@ -305,6 +306,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         actions: assertApiCollection("actionItem", actions.items ?? []),
         risks: assertApiCollection("riskItem", risks.items ?? []),
         knowledge: assertApiCollection("knowledgeItem", knowledge.items ?? []),
+        quickRecords: assertApiCollection("quickRecord", quickRecords.items ?? []),
         summary: assertApiEntity("dashboardSummary", summary.item),
       };
     },

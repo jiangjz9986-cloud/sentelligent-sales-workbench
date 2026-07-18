@@ -801,6 +801,7 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/actions")) return jsonResponse({ items: [sampleAction()] });
         if (url.endsWith("/api/risks")) return jsonResponse({ items: [sampleRisk()] });
         if (url.endsWith("/api/knowledge")) return jsonResponse({ items: [sampleKnowledgeItem()] });
+        if (url.endsWith("/api/quick-records")) return jsonResponse({ items: [sampleQuickRecord()] });
         if (url.endsWith("/api/dashboard/summary")) return jsonResponse({ item: sampleDashboardSummary() });
         return jsonResponse({ error: "not_found" }, 404);
       },
@@ -811,6 +812,7 @@ describe("sales workbench API client", () => {
     assertApiCollection("customer", result.customers);
     assertApiCollection("opportunity", result.opportunities);
     assertApiCollection("knowledgeItem", result.knowledge);
+    assertApiCollection("quickRecord", result.quickRecords);
     assert.equal(result.actions[0].sourceRecordId, "qr-1");
     assert.equal(result.risks[0].sourceId, "op-rizhao-plan");
     assertApiEntity("dashboardSummary", result.summary);
@@ -822,6 +824,7 @@ describe("sales workbench API client", () => {
       { url: "http://127.0.0.1:8787/api/actions", method: "GET" },
       { url: "http://127.0.0.1:8787/api/risks", method: "GET" },
       { url: "http://127.0.0.1:8787/api/knowledge", method: "GET" },
+      { url: "http://127.0.0.1:8787/api/quick-records", method: "GET" },
       { url: "http://127.0.0.1:8787/api/dashboard/summary", method: "GET" },
     ]);
     assert.equal(result.customers[0].id, "rizhao");

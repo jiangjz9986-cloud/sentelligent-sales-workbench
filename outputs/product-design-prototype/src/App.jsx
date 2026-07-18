@@ -25,11 +25,12 @@ import {
 } from "./sessionAuth.js";
 import {
   navItems,
-  solutionDocs,
 } from "./data/salesWorkbenchData.js";
 import {
   createErrorWorkbenchState,
   createLoadingWorkbenchState,
+  assertBackendReady,
+  incrementBootstrapAttempt,
   normalizeBootstrapData,
 } from "./app/workbenchState.js";
 import {
@@ -392,9 +393,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [selectedOpportunityId, setSelectedOpportunityId] = useState(null);
   const [selectedActionId, setSelectedActionId] = useState(null);
-  const [selectedDocId, setSelectedDocId] = useState(solutionDocs[0].id);
   const [selectedRiskId, setSelectedRiskId] = useState(null);
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState(null);
+  const [selectedSolutionId, setSelectedSolutionId] = useState(null);
   const [customerViewMode, setCustomerViewMode] = useState("list");
   const [opportunityViewMode, setOpportunityViewMode] = useState("list");
   const [actionViewMode, setActionViewMode] = useState("list");
@@ -415,6 +416,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     actions: workbenchActions,
     risks: workbenchRisks,
     knowledge: workbenchKnowledge,
+    quickRecords: workbenchQuickRecords,
+    solutionDocs: workbenchSolutionDocs,
     summary: overviewSummary,
     errorMessage: bootstrapErrorMessage,
   } = workbenchState;
@@ -444,6 +447,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
 
   function setWorkbenchKnowledge(nextValue) {
     updateWorkbenchCollection("knowledge", nextValue);
+  }
+
+  function setWorkbenchQuickRecords(nextValue) {
+    updateWorkbenchCollection("quickRecords", nextValue);
   }
 
   function setOverviewSummary(nextValue) {
@@ -476,6 +483,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         setSelectedActionId(nextState.actions[0]?.id ?? null);
         setSelectedRiskId(nextState.risks[0]?.id ?? null);
         setSelectedKnowledgeId(nextState.knowledge[0]?.id ?? null);
+        setSelectedSolutionId(nextState.solutionDocs[0]?.id ?? null);
         setBackendStatus("connected");
       })
       .catch((error) => {
@@ -507,7 +515,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     workbenchOpportunities.find((item) => item.id === selectedOpportunityId) ?? workbenchOpportunities[0];
   const selectedAction =
     workbenchActions.find((item) => item.id === selectedActionId) ?? workbenchActions[0];
-  const selectedDoc = solutionDocs.find((item) => item.id === selectedDocId) ?? solutionDocs[0];
+  const selectedDoc = workbenchSolutionDocs.find((item) => item.id === selectedSolutionId) ?? workbenchSolutionDocs[0];
   const selectedRisk =
     workbenchRisks.find((item) => item.id === selectedRiskId) ?? workbenchRisks[0];
   const selectedKnowledge =
@@ -624,114 +632,17 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     return mergeEntityByVersion(items, item);
   }
 
-  function makeLocalId(prefix) {
-    return `${prefix}-${Date.now().toString(36)}`;
-  }
-
-  function normalizeLocalCustomer(draft) {
-    const current = workbenchCustomers.find((item) => item.id === draft.id);
-    return {
-      id: draft.id ?? makeLocalId("customer"),
-      name: "",
-      region: "",
-      type: "",
-      level: "",
-      owner: "继振",
-      contact: "",
-      relation: 40,
-      stakeholders: [],
-      decisionChain: [],
-      historyProjects: [],
-      infrastructure: [],
-      syncPreview: [],
-      budget: "",
-      summary: "",
-      needs: [],
-      risks: [],
-      opportunities: [],
-      ...(current ?? {}),
-      ...draft,
-    };
-  }
-
-  function normalizeLocalOpportunity(draft) {
-    const current = workbenchOpportunities.find((item) => item.id === draft.id);
-    const customer = workbenchCustomers.find((item) => item.id === draft.customerId);
-    return {
-      id: draft.id ?? makeLocalId("opportunity"),
-      customerId: draft.customerId ?? customer?.id ?? "",
-      name: "",
-      stage: "线索",
-      amount: "待定",
-      owner: "继振",
-      probability: 30,
-      days: 0,
-      requirements: [],
-      competitors: [],
-      solutionDirection: [],
-      sourceRecord: "手动维护",
-      risk: "",
-      next: "",
-      tone: "blue",
-      ...(current ?? {}),
-      ...draft,
-      customer: customer?.name ?? draft.customer ?? current?.customer ?? "",
-    };
-  }
-
-  function normalizeLocalKnowledge(draft) {
-    const current = workbenchKnowledge.find((item) => item.id === draft.id);
-    const now = new Date().toISOString();
-    return {
-      id: draft.id ?? makeLocalId("knowledge"),
-      title: "",
-      category: "销售材料",
-      tags: [],
-      summary: "",
-      content: "",
-      source: "本地资料",
-      createdAt: current?.createdAt ?? now,
-      updatedAt: now,
-      ...(current ?? {}),
-      ...draft,
-    };
-  }
-
-  function normalizeLocalRisk(id, patch) {
-    const current = workbenchRisks.find((item) => item.id === id);
-    return {
-      ...(current ?? {}),
-      id,
-      status: patch.status ?? current?.status ?? "open",
-      action: patch.action ?? current?.action ?? "",
-      assignee: patch.assignee ?? current?.assignee ?? "继振",
-      due: patch.due ?? current?.due ?? "待确认",
-      severity: patch.severity ?? current?.severity ?? "中",
-      score: patch.score ?? current?.score ?? 60,
-      tone: patch.tone ?? current?.tone ?? "amber",
-      updatedAt: new Date().toISOString(),
-    };
-  }
-
-  function normalizeLocalAction(id, patch) {
-    const current = workbenchActions.find((item) => item.id === id);
-    return {
-      ...(current ?? {}),
-      id,
-      status: patch.status ?? current?.status ?? "pending",
-      due: patch.due ?? current?.due ?? "待确认",
-      assignee: patch.assignee ?? current?.assignee ?? "继振",
-      priority: patch.priority ?? current?.priority ?? "中",
-      tone: patch.tone ?? current?.tone ?? "blue",
-      updatedAt: new Date().toISOString(),
-    };
+  function ensureBackend(operation) {
+    assertBackendReady(
+      { isEnabled: apiClient.isEnabled, status: backendStatus },
+      operation,
+    );
   }
 
   async function handleSaveCustomer(draft) {
+    ensureBackend("保存客户");
     const currentEntity = draft.id ? workbenchCustomers.find((item) => item.id === draft.id) : null;
-    const saved = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.saveCustomer(currentEntity ? { ...draft, version: currentEntity.version } : draft)
-      : normalizeLocalCustomer(draft);
+    const saved = await apiClient.saveCustomer(currentEntity ? { ...draft, version: currentEntity.version } : draft);
     setWorkbenchCustomers((current) => mergeById(current, saved));
     setSelectedCustomerId(saved.id);
     await refreshOverviewSummary();
@@ -739,10 +650,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleSaveOpportunity(draft) {
+    ensureBackend("保存商机");
     const currentEntity = draft.id ? workbenchOpportunities.find((item) => item.id === draft.id) : null;
-    const saved = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.saveOpportunity(currentEntity ? { ...draft, version: currentEntity.version } : draft)
-      : normalizeLocalOpportunity(draft);
+    const saved = await apiClient.saveOpportunity(currentEntity ? { ...draft, version: currentEntity.version } : draft);
     setWorkbenchOpportunities((current) => mergeById(current, saved));
     setSelectedOpportunityId(saved.id);
     setWorkbenchCustomers((current) =>
@@ -759,33 +669,23 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleSaveKnowledge(draft) {
+    ensureBackend("保存知识材料");
     const currentEntity = draft.id ? workbenchKnowledge.find((item) => item.id === draft.id) : null;
-    const saved = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.saveKnowledgeItem(currentEntity ? { ...draft, version: currentEntity.version } : draft)
-      : normalizeLocalKnowledge(draft);
+    const saved = await apiClient.saveKnowledgeItem(currentEntity ? { ...draft, version: currentEntity.version } : draft);
     setWorkbenchKnowledge((current) => mergeById(current, saved));
     setSelectedKnowledgeId(saved.id);
     return saved;
   }
 
   async function handleSearchKnowledge({ query: searchText, tags }) {
-    if (apiClient.isEnabled && backendStatus === "connected") {
-      return apiClient.searchKnowledge({ query: searchText, tags, limit: 12 });
-    }
-    const terms = String(searchText ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-    return workbenchKnowledge.filter((item) => {
-      const haystack = [item.title, item.category, item.summary, item.content, ...(item.tags ?? [])]
-        .join(" ")
-        .toLowerCase();
-      return terms.every((term) => haystack.includes(term)) || (tags ?? []).some((tag) => item.tags?.includes(tag));
-    });
+    ensureBackend("检索知识库");
+    return apiClient.searchKnowledge({ query: searchText, tags, limit: 12 });
   }
 
   async function handleUpdateRiskStatus(id, patch) {
+    ensureBackend("更新风险");
     const currentEntity = workbenchRisks.find((item) => item.id === id);
-    const updated = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.updateRiskStatus(id, patch, currentEntity?.version)
-      : normalizeLocalRisk(id, patch);
+    const updated = await apiClient.updateRiskStatus(id, patch, currentEntity?.version);
     setWorkbenchRisks((current) => mergeById(current, updated));
     setSelectedRiskId(updated.id);
     await refreshOverviewSummary();
@@ -793,10 +693,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleUpdateActionStatus(id, patch) {
+    ensureBackend("更新动作");
     const currentEntity = workbenchActions.find((item) => item.id === id);
-    const updated = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.updateActionStatus(id, patch, currentEntity?.version)
-      : normalizeLocalAction(id, patch);
+    const updated = await apiClient.updateActionStatus(id, patch, currentEntity?.version);
     setWorkbenchActions((current) => mergeById(current, updated));
     setSelectedActionId(updated.id);
     await refreshOverviewSummary();
@@ -804,10 +703,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleDeleteCustomer(id) {
+    ensureBackend("删除客户");
     const existing = workbenchCustomers.find((item) => item.id === id);
-    const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteCustomer(id, existing?.version)
-      : existing;
+    const deleted = await apiClient.deleteCustomer(id, existing?.version);
     const remainingCustomers = workbenchCustomers.filter((item) => item.id !== id);
     setWorkbenchCustomers(remainingCustomers);
     setWorkbenchOpportunities((current) => current.filter((item) => item.customerId !== id));
@@ -820,10 +718,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleDeleteOpportunity(id) {
+    ensureBackend("删除商机");
     const existing = workbenchOpportunities.find((item) => item.id === id);
-    const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteOpportunity(id, existing?.version)
-      : existing;
+    const deleted = await apiClient.deleteOpportunity(id, existing?.version);
     const deletedName = deleted?.name ?? existing?.name;
     const remainingOpportunities = workbenchOpportunities.filter((item) => item.id !== id);
     setWorkbenchOpportunities(remainingOpportunities);
@@ -844,10 +741,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleDeleteKnowledge(id) {
+    ensureBackend("删除知识材料");
     const existing = workbenchKnowledge.find((item) => item.id === id);
-    const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteKnowledgeItem(id, existing?.version)
-      : existing;
+    const deleted = await apiClient.deleteKnowledgeItem(id, existing?.version);
     const remainingKnowledge = workbenchKnowledge.filter((item) => item.id !== id);
     setWorkbenchKnowledge(remainingKnowledge);
     if (selectedKnowledgeId === id) {
@@ -858,10 +754,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleDeleteAction(id) {
+    ensureBackend("删除动作");
     const existing = workbenchActions.find((item) => item.id === id);
-    const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteAction(id, existing?.version)
-      : existing;
+    const deleted = await apiClient.deleteAction(id, existing?.version);
     const remainingActions = workbenchActions.filter((item) => item.id !== id);
     setWorkbenchActions(remainingActions);
     if (selectedActionId === id) {
@@ -873,10 +768,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   async function handleDeleteRisk(id) {
+    ensureBackend("删除风险");
     const existing = workbenchRisks.find((item) => item.id === id);
-    const deleted = apiClient.isEnabled && backendStatus === "connected"
-      ? await apiClient.deleteRisk(id, existing?.version)
-      : existing;
+    const deleted = await apiClient.deleteRisk(id, existing?.version);
     const remainingRisks = workbenchRisks.filter((item) => item.id !== id);
     setWorkbenchRisks(remainingRisks);
     if (selectedRiskId === id) {
@@ -904,7 +798,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         knowledgeIds: [knowledgeItem.id],
       });
       setSolutionDraft(draft);
-      setSelectedDocId(solutionDocs[0].id);
       setActive("solution");
       return draft;
     }
@@ -928,6 +821,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   function handleBusinessSync(result) {
+    if (result.quickRecord) {
+      setWorkbenchQuickRecords((current) => mergeById(current, result.quickRecord));
+    }
     if (result.customer) {
       setWorkbenchCustomers((current) => mergeById(current, result.customer));
       setSelectedCustomerId(result.customer.id);
@@ -1039,7 +935,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               <WorkbenchStatePanel
                 status={visibleBootstrapStatus}
                 errorMessage={bootstrapErrorMessage}
-                onRetry={() => setBootstrapAttempt((current) => current + 1)}
+                onRetry={() => setBootstrapAttempt(incrementBootstrapAttempt)}
                 onCreateCustomer={() => {
                   setCustomerViewMode("create");
                   setActive("customer");
@@ -1080,11 +976,13 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 setSelectedOpportunityId={setSelectedOpportunityId}
                 openOpportunityDetail={openOpportunityDetail}
                 onBusinessSync={handleBusinessSync}
+                onQuickRecordSaved={(item) => setWorkbenchQuickRecords((current) => mergeById(current, item))}
                 onConfirmationRefresh={handleConfirmationRefresh}
                 apiClient={apiClient}
                 backendStatus={backendStatus}
                 customersList={workbenchCustomers}
                 opportunitiesList={workbenchOpportunities}
+                quickRecords={workbenchQuickRecords}
               />
             )}
             {active === "customer" && (
@@ -1136,13 +1034,14 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
             {active === "solution" && (
               <SolutionPage
                 selected={selectedDoc}
-                onSelect={setSelectedDocId}
+                onSelect={setSelectedSolutionId}
                 customer={selectedCustomer}
                 opportunity={selectedOpportunity}
                 apiClient={apiClient}
                 backendStatus={backendStatus}
                 draft={solutionDraft}
                 setDraft={setSolutionDraft}
+                solutionDocs={workbenchSolutionDocs}
               />
             )}
             {active === "weekly" && (

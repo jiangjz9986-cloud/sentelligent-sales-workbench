@@ -165,6 +165,7 @@ async function openChromeCdp() {
             '/api/actions',
             '/api/risks',
             '/api/knowledge',
+            '/api/quick-records',
           ].includes(pathname);
           const isSummary = pathname === '/api/dashboard/summary';
           const body = isSession

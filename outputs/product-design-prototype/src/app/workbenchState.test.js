@@ -10,6 +10,8 @@ const collectionKeys = [
   "actions",
   "risks",
   "knowledge",
+  "quickRecords",
+  "solutionDocs",
 ];
 
 function requireFunction(name) {
@@ -104,6 +106,31 @@ describe("workbench bootstrap state", () => {
     );
   });
 
+  it("increments bootstrap retry attempts through a pure helper", () => {
+    const incrementBootstrapAttempt = requireFunction("incrementBootstrapAttempt");
+
+    assert.equal(incrementBootstrapAttempt(0), 1);
+    assert.equal(incrementBootstrapAttempt(4), 5);
+    assert.equal(incrementBootstrapAttempt(-1), 1);
+    assert.equal(incrementBootstrapAttempt("2"), 1);
+  });
+
+  it("rejects offline writes without mutating the loaded state", () => {
+    const assertBackendReady = requireFunction("assertBackendReady");
+    const normalizeBootstrapData = requireFunction("normalizeBootstrapData");
+    const state = normalizeBootstrapData({
+      ...emptyCollections(),
+      customers: [{ id: "customer-live", name: "真实客户" }],
+    });
+    const before = structuredClone(state);
+
+    assert.throws(
+      () => assertBackendReady({ isEnabled: false, status: "offline" }, "保存客户"),
+      /业务服务未连接/,
+    );
+    assert.deepEqual(state, before);
+  });
+
   it("does not import static demo collections into production workbench state", () => {
     const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
     const pagesSource = readFileSync(
@@ -116,6 +143,8 @@ describe("workbench bootstrap state", () => {
       "opportunities",
       "risks",
       "knowledgeItems",
+      "quickRecords",
+      "solutionDocs",
     ];
 
     assert.deepEqual(
@@ -126,6 +155,8 @@ describe("workbench bootstrap state", () => {
       salesDataImports(pagesSource).filter((name) => forbiddenImports.includes(name)),
       [],
     );
+    assert.doesNotMatch(appSource, /normalizeLocal[A-Z]/);
+    assert.doesNotMatch(pagesSource, /fallbackSuggestion|local-suggestion/);
   });
 
   it("wires loading, empty, error, and retry states into the workbench shell", () => {
@@ -139,6 +170,7 @@ describe("workbench bootstrap state", () => {
     ]) {
       assert.match(appSource, new RegExp(`data-testid="${testId}"`));
     }
+    assert.match(appSource, /setBootstrapAttempt\(incrementBootstrapAttempt\)/);
     assert.doesNotMatch(
       appSource,
       /data\.(customers|opportunities|actions|risks|knowledge)\.length\s*>\s*0/,

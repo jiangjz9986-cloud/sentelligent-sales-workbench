@@ -11,6 +11,8 @@ const BUSINESS_COLLECTION_KEYS = Object.freeze([
   "actions",
   "risks",
   "knowledge",
+  "quickRecords",
+  "solutionDocs",
 ]);
 
 function emptyBusinessCollections() {
@@ -28,10 +30,11 @@ export function createLoadingWorkbenchState() {
 }
 
 export function normalizeBootstrapData(bootstrap = {}) {
+  const source = bootstrap && typeof bootstrap === "object" ? bootstrap : {};
   const collections = Object.fromEntries(
     BUSINESS_COLLECTION_KEYS.map((key) => [
       key,
-      Array.isArray(bootstrap[key]) ? bootstrap[key] : [],
+      Array.isArray(source[key]) ? source[key] : [],
     ]),
   );
   const hasBusinessRecords = BUSINESS_COLLECTION_KEYS.some(
@@ -41,10 +44,20 @@ export function normalizeBootstrapData(bootstrap = {}) {
   return {
     status: hasBusinessRecords ? "ready" : "empty",
     ...collections,
-    summary: bootstrap.summary ?? null,
+    summary: source.summary ?? null,
     errorMessage: "",
     canRetry: false,
   };
+}
+
+export function incrementBootstrapAttempt(currentAttempt) {
+  return Number.isInteger(currentAttempt) && currentAttempt >= 0 ? currentAttempt + 1 : 1;
+}
+
+export function assertBackendReady({ isEnabled, status }, operation = "执行此操作") {
+  if (!isEnabled || status !== "connected") {
+    throw new Error(`业务服务未连接，暂不能${operation}。请恢复连接后重试。`);
+  }
 }
 
 export function createErrorWorkbenchState(error) {
