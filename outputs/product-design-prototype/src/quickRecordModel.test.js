@@ -9,6 +9,7 @@ import {
   getSyncTargets,
   mergeEntityByVersion,
 } from "./quickRecordModel.js";
+import * as quickRecordModelModule from "./quickRecordModel.js";
 import { createConfirmationAttemptTracker } from "./api/salesWorkbenchApi.js";
 
 describe("quick record model", () => {
@@ -60,6 +61,34 @@ describe("quick record model", () => {
       getSyncTargets().map((item) => item.id),
       ["customer", "opportunity", "weekly"],
     );
+  });
+
+  it("keeps confirmed selections null when no real customer or opportunity id is returned", () => {
+    assert.equal(typeof quickRecordModelModule.resolveConfirmedSelectionId, "function");
+    const resolveConfirmedSelectionId = quickRecordModelModule.resolveConfirmedSelectionId;
+
+    assert.equal(resolveConfirmedSelectionId("customer", {
+      result: { customer: { id: "customer-from-result" } },
+      analysis: { customer: { id: "customer-from-analysis" } },
+      quickRecord: { customerId: "customer-from-record" },
+    }), "customer-from-result");
+    assert.equal(resolveConfirmedSelectionId("opportunity", {
+      result: { quickRecord: { opportunityId: "opportunity-from-result-record" } },
+      analysis: { opportunity: { id: "opportunity-from-analysis" } },
+      quickRecord: { opportunityId: "opportunity-from-record" },
+    }), "opportunity-from-result-record");
+    assert.equal(resolveConfirmedSelectionId("customer", {
+      result: {},
+      analysis: { customer: { id: "customer-from-analysis" } },
+      quickRecord: { customerId: "customer-from-record" },
+    }), "customer-from-analysis");
+    assert.equal(resolveConfirmedSelectionId("opportunity", {
+      result: {},
+      analysis: {},
+      quickRecord: { opportunityId: "opportunity-from-record" },
+    }), "opportunity-from-record");
+    assert.equal(resolveConfirmedSelectionId("customer", { result: {}, analysis: {}, quickRecord: {} }), null);
+    assert.equal(resolveConfirmedSelectionId("opportunity", { result: {}, analysis: {}, quickRecord: {} }), null);
   });
 
   it("refreshes versions after conflict and reuses the same confirmation key on manual retry", async () => {

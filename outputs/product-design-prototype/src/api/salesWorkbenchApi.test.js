@@ -278,6 +278,18 @@ function sampleSolutionDraft(overrides = {}) {
   };
 }
 
+function bootstrapResponse(url) {
+  if (url.endsWith("/api/customers")) return jsonResponse({ items: [sampleCustomer()] });
+  if (url.endsWith("/api/opportunities")) return jsonResponse({ items: [sampleOpportunity()] });
+  if (url.endsWith("/api/actions")) return jsonResponse({ items: [sampleAction()] });
+  if (url.endsWith("/api/risks")) return jsonResponse({ items: [sampleRisk()] });
+  if (url.endsWith("/api/knowledge")) return jsonResponse({ items: [sampleKnowledgeItem()] });
+  if (url.endsWith("/api/quick-records")) return jsonResponse({ items: [sampleQuickRecord()] });
+  if (url.endsWith("/api/solutions")) return jsonResponse({ items: [sampleSolutionDraft()] });
+  if (url.endsWith("/api/dashboard/summary")) return jsonResponse({ item: sampleDashboardSummary() });
+  return jsonResponse({ error: "not_found" }, 404);
+}
+
 describe("sales workbench API client", () => {
   it("creates cryptographically strong UUIDs with a getRandomValues fallback", () => {
     assert.equal(createStrongUuid({ randomUUID: () => "native-uuid" }), "native-uuid");
@@ -796,14 +808,7 @@ describe("sales workbench API client", () => {
       baseUrl: "http://127.0.0.1:8787/",
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, method: options.method ?? "GET" });
-        if (url.endsWith("/api/customers")) return jsonResponse({ items: [sampleCustomer()] });
-        if (url.endsWith("/api/opportunities")) return jsonResponse({ items: [sampleOpportunity()] });
-        if (url.endsWith("/api/actions")) return jsonResponse({ items: [sampleAction()] });
-        if (url.endsWith("/api/risks")) return jsonResponse({ items: [sampleRisk()] });
-        if (url.endsWith("/api/knowledge")) return jsonResponse({ items: [sampleKnowledgeItem()] });
-        if (url.endsWith("/api/quick-records")) return jsonResponse({ items: [sampleQuickRecord()] });
-        if (url.endsWith("/api/dashboard/summary")) return jsonResponse({ item: sampleDashboardSummary() });
-        return jsonResponse({ error: "not_found" }, 404);
+        return bootstrapResponse(url);
       },
     });
 
@@ -813,6 +818,7 @@ describe("sales workbench API client", () => {
     assertApiCollection("opportunity", result.opportunities);
     assertApiCollection("knowledgeItem", result.knowledge);
     assertApiCollection("quickRecord", result.quickRecords);
+    assertApiCollection("solutionDraft", result.solutionDocs);
     assert.equal(result.actions[0].sourceRecordId, "qr-1");
     assert.equal(result.risks[0].sourceId, "op-rizhao-plan");
     assertApiEntity("dashboardSummary", result.summary);
@@ -825,10 +831,79 @@ describe("sales workbench API client", () => {
       { url: "http://127.0.0.1:8787/api/risks", method: "GET" },
       { url: "http://127.0.0.1:8787/api/knowledge", method: "GET" },
       { url: "http://127.0.0.1:8787/api/quick-records", method: "GET" },
+      { url: "http://127.0.0.1:8787/api/solutions", method: "GET" },
       { url: "http://127.0.0.1:8787/api/dashboard/summary", method: "GET" },
     ]);
     assert.equal(result.customers[0].id, "rizhao");
     assert.equal(result.opportunities[0].id, "op-rizhao-plan");
+  });
+
+  it("rejects successful bootstrap collection responses that omit an explicit items array", async () => {
+    const collections = [
+      ["/api/customers", "customers.items"],
+      ["/api/opportunities", "opportunities.items"],
+      ["/api/actions", "actions.items"],
+      ["/api/risks", "risks.items"],
+      ["/api/knowledge", "knowledge.items"],
+      ["/api/quick-records", "quickRecords.items"],
+      ["/api/solutions", "solutions.items"],
+    ];
+
+    for (const [malformedPath, expectedPath] of collections) {
+      const api = createSalesWorkbenchApi({
+        baseUrl: "https://example.test",
+        fetchImpl: async (url) => url.endsWith(malformedPath)
+          ? jsonResponse({})
+          : bootstrapResponse(url),
+      });
+
+      await assert.rejects(
+        () => api.loadBootstrap(),
+        (error) => error instanceof TypeError
+          && error.message.includes(expectedPath)
+          && /expected array/i.test(error.message),
+      );
+    }
+  });
+
+  it("aborts stale bootstrap requests without globally invalidating a successful retry", async () => {
+    const staleResponses = [];
+    const staleCalls = [];
+    let servingStaleBootstrap = true;
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        if (!servingStaleBootstrap) return bootstrapResponse(url);
+        const pending = deferred();
+        staleResponses.push(pending);
+        staleCalls.push({ url, options });
+        return pending.promise;
+      },
+    });
+    api.setSession({ csrfToken: "csrf-current-session" });
+    const controller = new AbortController();
+
+    const staleBootstrap = api.loadBootstrap({ signal: controller.signal });
+    await Promise.resolve();
+    servingStaleBootstrap = false;
+    controller.abort();
+    const latestBootstrap = await api.loadBootstrap();
+    assert.equal(latestBootstrap.customers[0].id, "rizhao");
+
+    for (const pending of staleResponses) {
+      pending.resolve(jsonResponse({
+        error: { code: "UNAUTHORIZED", message: "Stale bootstrap expired" },
+      }, 401));
+    }
+    await assert.rejects(() => staleBootstrap, (error) => error.status === 401);
+
+    assert.equal(staleCalls.length, 8);
+    assert.equal(staleCalls.every(({ options }) => options.signal === controller.signal), true);
+    assert.equal(unauthorizedCalls, 0);
   });
 
   it("loads the current quick record and business versions for conflict recovery", async () => {

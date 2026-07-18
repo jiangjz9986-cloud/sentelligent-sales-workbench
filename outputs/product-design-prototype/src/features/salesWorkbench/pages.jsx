@@ -31,7 +31,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   kanbanStages,
   statusTone,
-  weeklyDays,
 } from "../../data/salesWorkbenchData.js";
 import { assertBackendReady } from "../../app/workbenchState.js";
 import { triggerBlobDownload } from "../../downloadFile.js";
@@ -54,6 +53,7 @@ import {
   createExclusiveAsyncGate,
   getQuickRecordFlow,
   getSyncTargets,
+  resolveConfirmedSelectionId,
 } from "../../quickRecordModel.js";
 import { formatWeekRangeLabel, getCurrentWeekRange } from "../../weekRange.js";
 
@@ -796,6 +796,7 @@ export function QuickRecord({
 
   async function confirmTargetUnlocked(target) {
     let nextLogEntry = null;
+    let confirmationResult = null;
     try {
       assertBackendReady(
         { isEnabled: apiClient?.isEnabled, status: backendStatus },
@@ -835,6 +836,7 @@ export function QuickRecord({
         return;
       }
       const result = outcome.result;
+      confirmationResult = result;
       setQuickRecord(result.quickRecord);
       onQuickRecordSaved?.(result.quickRecord);
       onBusinessSync?.(result);
@@ -850,10 +852,18 @@ export function QuickRecord({
     });
 
     if (target.id === "customer") {
-      setSelectedCustomerId(analysis?.customer?.id ?? quickRecord?.customerId ?? "rizhao");
+      setSelectedCustomerId(resolveConfirmedSelectionId("customer", {
+        result: confirmationResult,
+        analysis,
+        quickRecord,
+      }));
     }
     if (target.id === "opportunity") {
-      setSelectedOpportunityId(analysis?.opportunity?.id ?? quickRecord?.opportunityId ?? "op-rizhao-plan");
+      setSelectedOpportunityId(resolveConfirmedSelectionId("opportunity", {
+        result: confirmationResult,
+        analysis,
+        quickRecord,
+      }));
     }
     if (nextLogEntry) {
       setSyncLog((current) => [
@@ -2500,6 +2510,7 @@ function sourceRefText(ref) {
     opportunity: "商机",
     action: "动作",
     knowledge: "知识",
+    quick_record: "快速记录",
   }[ref.type] ?? ref.type;
   return `${typeLabel}：${ref.title ?? ref.id ?? "来源"}`;
 }
@@ -2655,8 +2666,8 @@ export function SolutionPage({ selected, onSelect, customer, opportunity, apiCli
                   onClick={() => onSelect?.(item.id)}
                 >
                   <strong>{item.title}</strong>
-                  <small>{item.type} / {item.source}</small>
-                  </button>
+                  <small>{item.artifactType} / {item.status}</small>
+                </button>
                 ))}
               {solutionDocs.length === 0 ? <p className="empty-list">暂无已保存的方案历史。</p> : null}
             </div>
@@ -2694,7 +2705,6 @@ export function WeeklyPage({
   const [localWeeklyDraft, setLocalWeeklyDraft] = useState(null);
   const [localWeeklyDraftText, setLocalWeeklyDraftText] = useState("");
   const [draftStatus, setDraftStatus] = useState("周报草稿尚未生成。");
-  const [expandedDay, setExpandedDay] = useState(null);
   const [isExporting, setIsExporting] = useState(false);
   const daily = weeklyView === "daily";
   const weeklyDraft = externalWeeklyDraft ?? localWeeklyDraft;
@@ -2710,7 +2720,7 @@ export function WeeklyPage({
 
   async function generateWeeklyDraft() {
     if (!apiClient?.isEnabled || backendStatus !== "connected") {
-      setDraftStatus("当前连接未恢复，可先查看周报结构。");
+      setDraftStatus("当前连接未恢复，暂不能生成周报。");
       return;
     }
 
@@ -2784,6 +2794,21 @@ export function WeeklyPage({
     ready: "已定稿",
   }[weeklyDraft?.status] ?? weeklyDraft?.status ?? "未生成";
   const weekRangeLabel = formatWeekRangeLabel(getCurrentWeekRange());
+  const sourceRefs = weeklyDraft?.sourceRefs ?? [];
+
+  if (!weeklyDraft) {
+    return (
+      <section className="workbench-state-panel" data-testid="weekly-empty" role="status">
+        <FileText size={28} />
+        <strong>尚未生成周报</strong>
+        <p>{draftStatus}</p>
+        <button className="primary-button" type="button" onClick={generateWeeklyDraft}>
+          <Sparkles size={16} />
+          生成本周周报
+        </button>
+      </section>
+    );
+  }
 
   return (
     <div className="weekly-layout">
@@ -2813,129 +2838,69 @@ export function WeeklyPage({
 
       {daily ? (
         <div className="daily-grid" data-testid="weekly-daily-view">
-          {weeklyDays.map((item) => (
-            <section
-              className={`day-card interactive-card ${expandedDay === item.day ? "expanded" : ""}`}
-              key={item.day}
-              role="button"
-              tabIndex={0}
-              aria-label={`${expandedDay === item.day ? "收起" : "展开"}${item.day}记录`}
-              aria-expanded={expandedDay === item.day}
-              onClick={() => setExpandedDay((current) => (current === item.day ? null : item.day))}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setExpandedDay((current) => (current === item.day ? null : item.day));
-                }
-              }}
-            >
+          {sourceRefs.length > 0 ? sourceRefs.map((ref, index) => (
+            <section className="day-card" key={`${ref.type ?? "source"}-${ref.id ?? index}`}>
               <div>
-                <span className="date-chip tone-blue">{item.date}</span>
-                <h3>{item.day}</h3>
+                <span className="date-chip tone-blue">{String(index + 1).padStart(2, "0")}</span>
+                <h3>{sourceRefText(ref)}</h3>
               </div>
-              <ul>
-                {item.records.map((record) => (
-                  <li key={record}>{record}</li>
-                ))}
-              </ul>
-              <p>{item.feedback}</p>
-              {expandedDay === item.day ? (
-                <div className="day-card-detail" data-testid="weekly-expanded-day">
-                  <strong>当天处理</strong>
-                  <span>已展开记录、客户反馈和可同步到周报的行动线索。</span>
-                </div>
-              ) : null}
+              <p>来源已纳入 {weekRangeLabel} 周报草稿。</p>
             </section>
-          ))}
+          )) : (
+            <section className="workbench-state-panel" data-testid="weekly-source-empty" role="status">
+              <FileText size={28} />
+              <strong>草稿暂无来源引用</strong>
+              <p>当前周报草稿暂无可展示的来源记录。</p>
+            </section>
+          )}
         </div>
       ) : (
         <div className="summary-grid" data-testid="weekly-summary-view">
-          <section className="paper">
-            <span className="eyebrow">本周周报草稿</span>
-            <h2>{weekRangeLabel} 销售周报 / 管理汇报</h2>
-            <h3>一、本周重点工作</h3>
-            <p>
-              本周围绕日照中医医院十五五规划、黄岛区中医院双活机房调研机会、胜利油田中心医院服务器采购参考和黄岛区域客户覆盖展开。
-            </p>
-            <h3>二、客户反馈与机会</h3>
-            <p>
-              日照中医医院对移动云灾备模式提出明确顾虑，黄岛区中医院释放调研机会，多个客户对 AI 算力基础架构处于观望阶段。
-            </p>
-            <h3>三、风险与需要支持</h3>
-            <ul>
-              <li>预算路径仍需确认，尤其是胜利油田中心医院与日照中医医院。</li>
-              <li>黄岛区中医院需要售前支持调研并输出双活机房规划。</li>
-              <li>移动云灾备问题需要形成可对比的方案材料。</li>
-            </ul>
-          </section>
+          <DraftPreview draft={weeklyDraft} emptyText="周报草稿暂无正文。" />
           <div className="stack">
-            <MetricCard
-              label="本周拜访 / 沟通"
-              value="12"
-              badge="来自快速记录"
-              tone="blue"
-              detail="点击展开：该指标汇总已确认进入周报的拜访、电话、微信和会议记录。"
-            />
-            <MetricCard
-              label="新增调研机会"
-              value="2"
-              badge="黄岛区中医 / 黄岛中心"
-              tone="green"
-              detail="点击展开：用于提醒销售安排售前、客户现场调研和下一次沟通窗口。"
-            />
-            <MetricCard
-              label="需公司支持"
-              value="3"
-              badge="售前 / 架构图 / 案例"
-              tone="amber"
-              detail="点击展开：用于向经理同步需要协调的售前、方案材料和案例资源。"
-            />
             <section className="manual-box compact">
               <div>
-                <strong>确认生成周报分析</strong>
+                <strong>{weekRangeLabel} / {weeklyStatusLabel}</strong>
                 <p>{draftStatus}</p>
               </div>
               <button className="primary-button" type="button" onClick={generateWeeklyDraft}>
                 <Sparkles size={16} />
-                手动生成
+                重新生成
               </button>
             </section>
-            <DraftPreview draft={weeklyDraft} emptyText="尚未生成周报。已确认进入周报的快速记录会作为来源。" />
-            {weeklyDraft ? (
-              <section className="weekly-editor" data-testid="weekly-draft-editor">
-                <div className="generated-draft-head">
-                  <span className="pill tone-blue">可编辑</span>
-                  <strong>周报正文确认</strong>
-                  <small>{weeklyDraft.sourceRefs.length} 个来源引用 / {weeklyStatusLabel}</small>
-                </div>
-                <textarea
-                  value={weeklyDraftText}
-                  onChange={(event) => setWeeklyDraftText(event.target.value)}
-                  rows={8}
-                  aria-label="周报正文"
-                />
-                <div className="composer-actions weekly-editor-actions">
-                  <button className="ghost-button" type="button" onClick={() => saveWeeklyDraft("saved")}>
-                    <Save size={16} />
-                    保存周报
-                  </button>
-                  <button className="primary-button" type="button" onClick={() => saveWeeklyDraft("ready")}>
-                    <Check size={16} />
-                    确认定稿
-                  </button>
-                  <button
-                    className="ghost-button"
-                    type="button"
-                    data-testid="weekly-export-button"
-                    disabled={isExporting || !apiClient?.isEnabled || backendStatus !== "connected"}
-                    onClick={exportWeeklyDraft}
-                  >
-                    <Download size={16} />
-                    {isExporting ? "导出中" : "导出 Word"}
-                  </button>
-                </div>
-              </section>
-            ) : null}
+            <section className="weekly-editor" data-testid="weekly-draft-editor">
+              <div className="generated-draft-head">
+                <span className="pill tone-blue">可编辑</span>
+                <strong>周报正文确认</strong>
+                <small>{sourceRefs.length} 个来源引用 / {weeklyStatusLabel}</small>
+              </div>
+              <textarea
+                value={weeklyDraftText}
+                onChange={(event) => setWeeklyDraftText(event.target.value)}
+                rows={8}
+                aria-label="周报正文"
+              />
+              <div className="composer-actions weekly-editor-actions">
+                <button className="ghost-button" type="button" onClick={() => saveWeeklyDraft("saved")}>
+                  <Save size={16} />
+                  保存周报
+                </button>
+                <button className="primary-button" type="button" onClick={() => saveWeeklyDraft("ready")}>
+                  <Check size={16} />
+                  确认定稿
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  data-testid="weekly-export-button"
+                  disabled={isExporting || !apiClient?.isEnabled || backendStatus !== "connected"}
+                  onClick={exportWeeklyDraft}
+                >
+                  <Download size={16} />
+                  {isExporting ? "导出中" : "导出 Word"}
+                </button>
+              </div>
+            </section>
           </div>
         </div>
       )}

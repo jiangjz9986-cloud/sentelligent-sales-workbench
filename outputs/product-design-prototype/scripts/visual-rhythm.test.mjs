@@ -122,7 +122,7 @@ function connectCdp(wsUrl) {
   });
 }
 
-async function openChromeCdp() {
+async function openChromeCdp({ failFirstBootstrap = false } = {}) {
   const profilePath = mkdtempSync(join(tmpdir(), "sent-zx-visual-chrome-"));
   const chrome = spawnManaged(chromePath, [
     "--headless=new",
@@ -154,10 +154,12 @@ async function openChromeCdp() {
   await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
     source: `
       const nativeFetch = window.fetch.bind(window);
+      window.__visualApiCalls = {};
       window.fetch = async (input, init) => {
         const requestUrl = String(typeof input === 'string' ? input : input?.url ?? '');
         if (requestUrl.startsWith('${visualApiBaseUrl}/api/')) {
           const pathname = new URL(requestUrl).pathname;
+          window.__visualApiCalls[pathname] = (window.__visualApiCalls[pathname] ?? 0) + 1;
           const isSession = pathname === '/api/auth/session';
           const isCollection = [
             '/api/customers',
@@ -166,8 +168,21 @@ async function openChromeCdp() {
             '/api/risks',
             '/api/knowledge',
             '/api/quick-records',
+            '/api/solutions',
           ].includes(pathname);
           const isSummary = pathname === '/api/dashboard/summary';
+          const isBootstrap = isCollection || isSummary;
+          const shouldFail = ${JSON.stringify(failFirstBootstrap)}
+            && isBootstrap
+            && window.__visualApiCalls[pathname] === 1;
+          if (shouldFail) {
+            return new Response(JSON.stringify({
+              error: { code: 'VISUAL_QA_BOOTSTRAP_FAILURE', message: 'First bootstrap failed' },
+            }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
           const body = isSession
             ? {
                 account: 'visual-qa',
@@ -414,6 +429,57 @@ describe("visual rhythm", () => {
       const failures = measurements.filter((item) => item.fillRatio === null || item.fillRatio < 0.9);
 
       assert.deepEqual(failures, []);
+    } finally {
+      if (cdp) await cdp.close();
+      server.closeAllConnections?.();
+      await new Promise((resolveClose) => server.close(resolveClose));
+    }
+  });
+
+  it("retries an empty bootstrap without rendering demo customer or weekly data", async () => {
+    assert.equal(existsSync(resolve("dist", "index.html")), true, "run npm run build before visual rhythm QA");
+
+    const port = await getFreePort();
+    const server = createStaticServer(createStaticServerConfig({
+      port,
+      distPath: resolve("dist"),
+      apiBaseUrl: visualApiBaseUrl,
+    }));
+    await new Promise((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
+
+    let cdp;
+    try {
+      cdp = await openChromeCdp({ failFirstBootstrap: true });
+      await cdp.send("Page.navigate", { url: `http://127.0.0.1:${port}` });
+      await delay(1200);
+      const result = await evaluate(cdp, `
+        (async () => {
+          const wait = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+          const waitUntil = async (predicate, timeoutMs = 5000) => {
+            const started = Date.now();
+            while (Date.now() - started < timeoutMs) {
+              const value = predicate();
+              if (value) return value;
+              await wait(50);
+            }
+            throw new Error('Timed out waiting for bootstrap retry state');
+          };
+          await waitUntil(() => document.querySelector('[data-testid="bootstrap-retry"]'));
+          document.querySelector('[data-testid="bootstrap-retry"]').click();
+          await waitUntil(() => document.querySelector('[data-testid="workbench-empty"]'));
+          document.querySelectorAll('.nav-item')[6]?.click();
+          await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'));
+          await wait(100);
+          return {
+            customerBootstrapCalls: window.__visualApiCalls['/api/customers'] ?? 0,
+            text: document.querySelector('[data-testid="page-weekly"]')?.innerText ?? '',
+          };
+        })()
+      `);
+
+      assert.equal(result.customerBootstrapCalls, 2);
+      assert.match(result.text, /尚未生成周报/);
+      assert.doesNotMatch(result.text, /日照中医医院|胜利油田中心医院|黄岛区中医院|黄岛中心医院|680\s*万/);
     } finally {
       if (cdp) await cdp.close();
       server.closeAllConnections?.();

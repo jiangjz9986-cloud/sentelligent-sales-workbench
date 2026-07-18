@@ -218,9 +218,15 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     try {
       return await requestJson(fetchImpl, url(path), options, requestCsrfToken);
     } catch (error) {
-      if (error?.status === 401) invalidateSession(error, requestGeneration);
+      if (error?.status === 401 && !options.signal?.aborted) {
+        invalidateSession(error, requestGeneration);
+      }
       throw error;
     }
+  }
+
+  function bootstrapItems(responseName, entityName, response) {
+    return assertApiCollection(entityName, response?.items, `${responseName}.items`);
   }
 
   async function createQuickRecord(rawContent, metadata = {}) {
@@ -289,24 +295,27 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       }
     },
 
-    async loadBootstrap() {
-      const [customers, opportunities, actions, risks, knowledge, quickRecords, summary] = await Promise.all([
-        requestApi("/api/customers"),
-        requestApi("/api/opportunities"),
-        requestApi("/api/actions"),
-        requestApi("/api/risks"),
-        requestApi("/api/knowledge"),
-        requestApi("/api/quick-records"),
-        requestApi("/api/dashboard/summary"),
+    async loadBootstrap({ signal } = {}) {
+      const requestOptions = { signal };
+      const [customers, opportunities, actions, risks, knowledge, quickRecords, solutions, summary] = await Promise.all([
+        requestApi("/api/customers", requestOptions),
+        requestApi("/api/opportunities", requestOptions),
+        requestApi("/api/actions", requestOptions),
+        requestApi("/api/risks", requestOptions),
+        requestApi("/api/knowledge", requestOptions),
+        requestApi("/api/quick-records", requestOptions),
+        requestApi("/api/solutions", requestOptions),
+        requestApi("/api/dashboard/summary", requestOptions),
       ]);
 
       return {
-        customers: assertApiCollection("customer", customers.items ?? []),
-        opportunities: assertApiCollection("opportunity", opportunities.items ?? []),
-        actions: assertApiCollection("actionItem", actions.items ?? []),
-        risks: assertApiCollection("riskItem", risks.items ?? []),
-        knowledge: assertApiCollection("knowledgeItem", knowledge.items ?? []),
-        quickRecords: assertApiCollection("quickRecord", quickRecords.items ?? []),
+        customers: bootstrapItems("customers", "customer", customers),
+        opportunities: bootstrapItems("opportunities", "opportunity", opportunities),
+        actions: bootstrapItems("actions", "actionItem", actions),
+        risks: bootstrapItems("risks", "riskItem", risks),
+        knowledge: bootstrapItems("knowledge", "knowledgeItem", knowledge),
+        quickRecords: bootstrapItems("quickRecords", "quickRecord", quickRecords),
+        solutionDocs: bootstrapItems("solutions", "solutionDraft", solutions),
         summary: assertApiEntity("dashboardSummary", summary.item),
       };
     },

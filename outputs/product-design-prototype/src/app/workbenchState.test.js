@@ -115,6 +115,32 @@ describe("workbench bootstrap state", () => {
     assert.equal(incrementBootstrapAttempt("2"), 1);
   });
 
+  it("accepts results only from the current non-aborted bootstrap generation", () => {
+    const isCurrentBootstrapAttempt = requireFunction("isCurrentBootstrapAttempt");
+    const activeSignal = new AbortController().signal;
+    const aborted = new AbortController();
+    aborted.abort();
+
+    assert.equal(isCurrentBootstrapAttempt(3, 3, activeSignal), true);
+    assert.equal(isCurrentBootstrapAttempt(4, 3, activeSignal), false);
+    assert.equal(isCurrentBootstrapAttempt(3, 3, aborted.signal), false);
+  });
+
+  it("removes a deleted entity from the latest collection without dropping newer records", () => {
+    const removeEntityById = requireFunction("removeEntityById");
+    const latestCollection = [
+      { id: "created-while-delete-was-pending", version: 1 },
+      { id: "delete-me", version: 2 },
+      { id: "keep-me", version: 4 },
+    ];
+
+    assert.deepEqual(removeEntityById(latestCollection, "delete-me"), [
+      latestCollection[0],
+      latestCollection[2],
+    ]);
+    assert.strictEqual(removeEntityById(latestCollection, "missing"), latestCollection);
+  });
+
   it("rejects offline writes without mutating the loaded state", () => {
     const assertBackendReady = requireFunction("assertBackendReady");
     const normalizeBootstrapData = requireFunction("normalizeBootstrapData");
@@ -145,6 +171,7 @@ describe("workbench bootstrap state", () => {
       "knowledgeItems",
       "quickRecords",
       "solutionDocs",
+      "weeklyDays",
     ];
 
     assert.deepEqual(
@@ -157,6 +184,12 @@ describe("workbench bootstrap state", () => {
     );
     assert.doesNotMatch(appSource, /normalizeLocal[A-Z]/);
     assert.doesNotMatch(pagesSource, /fallbackSuggestion|local-suggestion/);
+    assert.doesNotMatch(
+      pagesSource,
+      /日照中医医院|胜利油田中心医院|黄岛区中医院|黄岛中心医院/,
+    );
+    assert.match(pagesSource, /\{item\.artifactType\}\s*\/\s*\{item\.status\}/);
+    assert.doesNotMatch(pagesSource, /\{item\.type\}\s*\/\s*\{item\.source\}/);
   });
 
   it("wires loading, empty, error, and retry states into the workbench shell", () => {
@@ -174,6 +207,26 @@ describe("workbench bootstrap state", () => {
     assert.doesNotMatch(
       appSource,
       /data\.(customers|opportunities|actions|risks|knowledge)\.length\s*>\s*0/,
+    );
+  });
+
+  it("applies every asynchronous deletion to the latest React collection state", () => {
+    const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
+    for (const setter of [
+      "setWorkbenchCustomers",
+      "setWorkbenchOpportunities",
+      "setWorkbenchKnowledge",
+      "setWorkbenchActions",
+      "setWorkbenchRisks",
+    ]) {
+      assert.match(
+        appSource,
+        new RegExp(`${setter}\\(\\(current\\) => removeEntityById\\(current, id\\)\\)`),
+      );
+    }
+    assert.doesNotMatch(
+      appSource,
+      /const remaining(?:Customers|Opportunities|Knowledge|Actions|Risks)\s*=/,
     );
   });
 });

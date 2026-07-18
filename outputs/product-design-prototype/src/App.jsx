@@ -13,7 +13,7 @@ import {
   ShieldCheck,
   UserRound,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createSalesWorkbenchApi,
@@ -31,7 +31,9 @@ import {
   createLoadingWorkbenchState,
   assertBackendReady,
   incrementBootstrapAttempt,
+  isCurrentBootstrapAttempt,
   normalizeBootstrapData,
+  removeEntityById,
 } from "./app/workbenchState.js";
 import {
   ActionsPage,
@@ -390,6 +392,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [workbenchState, setWorkbenchState] = useState(createLoadingWorkbenchState);
   const [backendStatus, setBackendStatus] = useState(apiClient.isEnabled ? "connecting" : "offline");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const bootstrapGenerationRef = useRef(0);
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [selectedOpportunityId, setSelectedOpportunityId] = useState(null);
   const [selectedActionId, setSelectedActionId] = useState(null);
@@ -461,21 +464,24 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   }
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    const requestGeneration = ++bootstrapGenerationRef.current;
     setWorkbenchState(createLoadingWorkbenchState());
     setBackendStatus("connecting");
     if (!apiClient.isEnabled) {
       setWorkbenchState(createErrorWorkbenchState(new Error("业务服务未配置，请联系管理员。")));
       setBackendStatus("offline");
-      return () => {
-        cancelled = true;
-      };
+      return () => controller.abort();
     }
 
     apiClient
-      .loadBootstrap()
+      .loadBootstrap({ signal: controller.signal })
       .then((data) => {
-        if (cancelled) return;
+        if (!isCurrentBootstrapAttempt(
+          bootstrapGenerationRef.current,
+          requestGeneration,
+          controller.signal,
+        )) return;
         const nextState = normalizeBootstrapData(data);
         setWorkbenchState(nextState);
         setSelectedCustomerId(nextState.customers[0]?.id ?? null);
@@ -487,19 +493,22 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         setBackendStatus("connected");
       })
       .catch((error) => {
-        if (cancelled) return;
+        if (!isCurrentBootstrapAttempt(
+          bootstrapGenerationRef.current,
+          requestGeneration,
+          controller.signal,
+        )) return;
         setWorkbenchState(createErrorWorkbenchState(error));
         setSelectedCustomerId(null);
         setSelectedOpportunityId(null);
         setSelectedActionId(null);
         setSelectedRiskId(null);
         setSelectedKnowledgeId(null);
+        setSelectedSolutionId(null);
         setBackendStatus("offline");
       });
 
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [apiClient, bootstrapAttempt]);
 
   const activeMeta = navItems.find((item) => item.id === active) ?? navItems[0];
@@ -706,12 +715,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     ensureBackend("删除客户");
     const existing = workbenchCustomers.find((item) => item.id === id);
     const deleted = await apiClient.deleteCustomer(id, existing?.version);
-    const remainingCustomers = workbenchCustomers.filter((item) => item.id !== id);
-    setWorkbenchCustomers(remainingCustomers);
+    setWorkbenchCustomers((current) => removeEntityById(current, id));
     setWorkbenchOpportunities((current) => current.filter((item) => item.customerId !== id));
-    if (selectedCustomerId === id) {
-      setSelectedCustomerId(remainingCustomers[0]?.id ?? null);
-    }
+    setSelectedCustomerId((current) => current === id ? null : current);
+    setSelectedOpportunityId(null);
     setCustomerViewMode("list");
     await refreshOverviewSummary();
     return deleted ?? { id };
@@ -722,8 +729,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const existing = workbenchOpportunities.find((item) => item.id === id);
     const deleted = await apiClient.deleteOpportunity(id, existing?.version);
     const deletedName = deleted?.name ?? existing?.name;
-    const remainingOpportunities = workbenchOpportunities.filter((item) => item.id !== id);
-    setWorkbenchOpportunities(remainingOpportunities);
+    setWorkbenchOpportunities((current) => removeEntityById(current, id));
     setWorkbenchCustomers((current) =>
       current.map((customer) => ({
         ...customer,
@@ -732,9 +738,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
           : customer.opportunities,
       })),
     );
-    if (selectedOpportunityId === id) {
-      setSelectedOpportunityId(remainingOpportunities[0]?.id ?? null);
-    }
+    setSelectedOpportunityId((current) => current === id ? null : current);
     setOpportunityViewMode("list");
     await refreshOverviewSummary();
     return deleted ?? { id };
@@ -744,11 +748,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     ensureBackend("删除知识材料");
     const existing = workbenchKnowledge.find((item) => item.id === id);
     const deleted = await apiClient.deleteKnowledgeItem(id, existing?.version);
-    const remainingKnowledge = workbenchKnowledge.filter((item) => item.id !== id);
-    setWorkbenchKnowledge(remainingKnowledge);
-    if (selectedKnowledgeId === id) {
-      setSelectedKnowledgeId(remainingKnowledge[0]?.id ?? null);
-    }
+    setWorkbenchKnowledge((current) => removeEntityById(current, id));
+    setSelectedKnowledgeId((current) => current === id ? null : current);
     setKnowledgeViewMode("list");
     return deleted ?? { id };
   }
@@ -757,11 +758,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     ensureBackend("删除动作");
     const existing = workbenchActions.find((item) => item.id === id);
     const deleted = await apiClient.deleteAction(id, existing?.version);
-    const remainingActions = workbenchActions.filter((item) => item.id !== id);
-    setWorkbenchActions(remainingActions);
-    if (selectedActionId === id) {
-      setSelectedActionId(remainingActions[0]?.id ?? null);
-    }
+    setWorkbenchActions((current) => removeEntityById(current, id));
+    setSelectedActionId((current) => current === id ? null : current);
     setActionViewMode("list");
     await refreshOverviewSummary();
     return deleted ?? { id };
@@ -771,11 +769,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     ensureBackend("删除风险");
     const existing = workbenchRisks.find((item) => item.id === id);
     const deleted = await apiClient.deleteRisk(id, existing?.version);
-    const remainingRisks = workbenchRisks.filter((item) => item.id !== id);
-    setWorkbenchRisks(remainingRisks);
-    if (selectedRiskId === id) {
-      setSelectedRiskId(remainingRisks[0]?.id ?? null);
-    }
+    setWorkbenchRisks((current) => removeEntityById(current, id));
+    setSelectedRiskId((current) => current === id ? null : current);
     setRiskViewMode("list");
     await refreshOverviewSummary();
     return deleted ?? { id };

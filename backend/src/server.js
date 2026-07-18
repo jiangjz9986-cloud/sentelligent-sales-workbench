@@ -681,6 +681,22 @@ function activeSolutionDraftRow(db, id) {
   );
 }
 
+function activeSolutionDraftRows(db) {
+  return all(
+    db,
+    `SELECT solution_drafts.*
+     FROM solution_drafts
+     INNER JOIN customers
+       ON customers.id = solution_drafts.customer_id
+      AND customers.deleted_at IS NULL
+     INNER JOIN opportunities
+       ON opportunities.id = solution_drafts.opportunity_id
+      AND opportunities.customer_id = solution_drafts.customer_id
+      AND opportunities.deleted_at IS NULL
+     ORDER BY solution_drafts.updated_at DESC, solution_drafts.created_at DESC`,
+  );
+}
+
 function requireActiveCustomer(db, id) {
   const customer = activeCustomerRow(db, id);
   if (!customer) validationFailure("customerId");
@@ -2787,6 +2803,12 @@ export function createServer(options = {}) {
         const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: parts[3] }));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/solutions") {
+        const items = activeSolutionDraftRows(db).map(solutionDraftFromRow);
+        sendJson(response, 200, { items });
         return;
       }
 

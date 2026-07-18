@@ -54,6 +54,16 @@ export function incrementBootstrapAttempt(currentAttempt) {
   return Number.isInteger(currentAttempt) && currentAttempt >= 0 ? currentAttempt + 1 : 1;
 }
 
+export function isCurrentBootstrapAttempt(currentGeneration, requestGeneration, signal) {
+  return currentGeneration === requestGeneration && !signal?.aborted;
+}
+
+export function removeEntityById(items, id) {
+  if (!Array.isArray(items)) return [];
+  if (!items.some((item) => item.id === id)) return items;
+  return items.filter((item) => item.id !== id);
+}
+
 export function assertBackendReady({ isEnabled, status }, operation = "执行此操作") {
   if (!isEnabled || status !== "connected") {
     throw new Error(`业务服务未连接，暂不能${operation}。请恢复连接后重试。`);

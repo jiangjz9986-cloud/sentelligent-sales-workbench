@@ -834,6 +834,54 @@ describe("sales workbench backend API", () => {
     assert.equal(loaded.body.item.id, draft.body.item.id);
   });
 
+  it("lists real solution drafts and filters drafts whose opportunity dependency was deleted", async () => {
+    const opportunityDraft = await request("/api/solutions/draft", {
+      method: "POST",
+      body: JSON.stringify({
+        owner: "solution-list-test",
+        customerId: "rizhao",
+        opportunityId: "op-rizhao-plan",
+      }),
+    });
+    const customerDraft = await request("/api/solutions/draft", {
+      method: "POST",
+      body: JSON.stringify({
+        owner: "solution-list-test",
+        customerId: "huangdao-tcm",
+        opportunityId: "op-huangdao-tcm",
+      }),
+    });
+    assert.equal(opportunityDraft.response.status, 201);
+    assert.equal(customerDraft.response.status, 201);
+
+    const listed = await request("/api/solutions");
+    assert.equal(listed.response.status, 200);
+    assertApiCollection("solutionDraft", listed.body.items);
+    assert.ok(listed.body.items.some((item) => item.id === opportunityDraft.body.item.id));
+    assert.ok(listed.body.items.some((item) => item.id === customerDraft.body.item.id));
+
+    const opportunities = await request("/api/opportunities");
+    const opportunityDependency = opportunities.body.items.find((item) => item.id === "op-rizhao-plan");
+    const deletedOpportunity = await request(`/api/opportunities/${opportunityDependency.id}`, {
+      method: "DELETE",
+      headers: ifMatch(opportunityDependency.version),
+    });
+    assert.equal(deletedOpportunity.response.status, 200);
+    const customers = await request("/api/customers");
+    const customerDependency = customers.body.items.find((item) => item.id === "huangdao-tcm");
+    const deletedCustomer = await request(`/api/customers/${customerDependency.id}`, {
+      method: "DELETE",
+      headers: ifMatch(customerDependency.version),
+    });
+    assert.equal(deletedCustomer.response.status, 200);
+
+    const filtered = await request("/api/solutions");
+    assert.equal(filtered.response.status, 200);
+    assertApiCollection("solutionDraft", filtered.body.items);
+    assert.equal(filtered.body.items.some((item) => item.id === opportunityDraft.body.item.id), false);
+    assert.equal(filtered.body.items.some((item) => item.id === customerDraft.body.item.id), false);
+  });
+
   it("generates dedicated solution assistant artifacts by type", async () => {
     const cases = [
       ["communication_outline", /沟通提纲/, /会议目标|开场/],

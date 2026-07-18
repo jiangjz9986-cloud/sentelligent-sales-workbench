@@ -125,6 +125,24 @@ export function mergeEntityByVersion(items, item) {
   return items.map((candidate) => candidate.id === item.id ? item : candidate);
 }
 
+export function resolveConfirmedSelectionId(targetId, { result, analysis, quickRecord } = {}) {
+  if (targetId === "customer") {
+    return result?.customer?.id
+      ?? result?.quickRecord?.customerId
+      ?? analysis?.customer?.id
+      ?? quickRecord?.customerId
+      ?? null;
+  }
+  if (targetId === "opportunity") {
+    return result?.opportunity?.id
+      ?? result?.quickRecord?.opportunityId
+      ?? analysis?.opportunity?.id
+      ?? quickRecord?.opportunityId
+      ?? null;
+  }
+  return null;
+}
+
 export async function confirmQuickRecordTarget({
   apiClient,
   attemptTracker,
