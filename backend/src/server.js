@@ -2813,6 +2813,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/solutions/draft") {
+        if (!config.solutionWritesEnabled) {
+          throw new HttpError(403, "FEATURE_DISABLED", "Solution writes are disabled");
+        }
         const body = await readValidatedJson(request, requestSchemas.solutionDraft);
         const artifactType = body.artifactType === undefined
           ? "solution_framework"
@@ -2919,6 +2922,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "solutions" && parts[2]) {
+        if (!config.solutionWritesEnabled) {
+          throw new HttpError(403, "FEATURE_DISABLED", "Solution writes are disabled");
+        }
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.solutionPatch);
         const item = withImmediateTransaction(db, () => {

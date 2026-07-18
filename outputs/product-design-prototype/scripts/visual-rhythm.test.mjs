@@ -23,12 +23,11 @@ const pages = [
   { name: "customer", navIndex: 2, testId: "page-customer" },
   { name: "opportunity", navIndex: 3, testId: "page-opportunity" },
   { name: "actions", navIndex: 4, testId: "page-actions" },
-  { name: "solution", navIndex: 5, testId: "page-solution" },
-  { name: "weekly", navIndex: 6, testId: "page-weekly" },
-  { name: "risk", navIndex: 7, testId: "page-risk" },
-  { name: "knowledge", navIndex: 8, testId: "page-knowledge" },
-  { name: "kanban", navIndex: 9, testId: "page-kanban" },
-  { name: "weixin", navIndex: 10, testId: "page-weixin" },
+  { name: "weekly", navIndex: 5, testId: "page-weekly" },
+  { name: "risk", navIndex: 6, testId: "page-risk" },
+  { name: "knowledge", navIndex: 7, testId: "page-knowledge" },
+  { name: "kanban", navIndex: 8, testId: "page-kanban" },
+  { name: "weixin", navIndex: 9, testId: "page-weixin" },
 ];
 
 function findChrome() {
@@ -487,7 +486,7 @@ describe("visual rhythm", () => {
           await waitUntil(() => document.querySelector('[data-testid="bootstrap-retry"]'));
           document.querySelector('[data-testid="bootstrap-retry"]').click();
           await waitUntil(() => document.querySelector('[data-testid="workbench-empty"]'));
-          document.querySelectorAll('.nav-item')[6]?.click();
+          document.querySelectorAll('.nav-item')[5]?.click();
           await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'));
           await wait(100);
           return {

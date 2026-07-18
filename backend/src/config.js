@@ -142,6 +142,11 @@ export function loadConfig(overrides = {}) {
     modelBaseUrl: env.modelBaseUrl ?? env.MODEL_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
     modelName: env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL ?? "deepseek-v4-flash",
     modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
+    solutionWritesEnabled: booleanValue(
+      env.solutionWritesEnabled ?? env.SOLUTION_WRITES_ENABLED,
+      false,
+      "SOLUTION_WRITES_ENABLED",
+    ),
     authAccount: String(env.authAccount ?? env.AUTH_ACCOUNT ?? "").trim(),
     authRequired,
     authPassword,

@@ -38,6 +38,7 @@ async function withHarness(options, work) {
     nodeEnv: "test",
     aiAnalysisMode: "mock",
     modelApiKey: "",
+    solutionWritesEnabled: true,
     authRequired: true,
     authAccount: account,
     authPassword: "",

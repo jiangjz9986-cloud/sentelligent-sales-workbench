@@ -5,7 +5,6 @@ import {
   CalendarClock,
   Command,
   FileText,
-  Lightbulb,
   Mic,
   PanelLeft,
   ShieldAlert,
@@ -27,13 +26,16 @@ export const navItems = [
   { id: "customer", label: "客户画像", icon: UsersRound },
   { id: "opportunity", label: "商机档案", icon: BriefcaseBusiness },
   { id: "actions", label: "下一步动作", icon: CalendarClock },
-  { id: "solution", label: "方案辅助", icon: Lightbulb },
   { id: "weekly", label: "周报与汇报", icon: FileText },
   { id: "risk", label: "风险识别", icon: ShieldAlert },
   { id: "knowledge", label: "知识库", icon: BookOpen },
   { id: "kanban", label: "商机看板", icon: PanelLeft },
   { id: "weixin", label: "微信绑定", icon: Bot },
 ];
+
+export const compatibilityRouteMeta = {
+  solution: { id: "solution", label: "历史方案" },
+};
 
 export const customers = [
   {

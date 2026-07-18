@@ -48,6 +48,7 @@ beforeEach(async () => {
     nodeEnv: "test",
     authRequired: false,
     aiAnalysisMode: "mock",
+    solutionWritesEnabled: true,
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
@@ -314,6 +315,7 @@ describe("strict business request validation", () => {
       authRequired: false,
       aiAnalysisMode: "model",
       modelApiKey: "test",
+      solutionWritesEnabled: true,
       fetchImpl: async () => {
         modelFetchCount += 1;
         return {

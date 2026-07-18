@@ -78,7 +78,7 @@ function pageTitle(active) {
     customer: "客户画像",
     opportunity: "商机档案",
     actions: "下一步动作",
-    solution: "方案辅助",
+    solution: "历史方案",
     weekly: "周报与管理汇报",
     risk: "风险识别",
     knowledge: "销售知识库",
@@ -2472,39 +2472,6 @@ export function ActionsPage({
   );
 }
 
-const solutionArtifacts = [
-  {
-    id: "communication_outline",
-    label: "沟通提纲",
-    desc: "面向下一次客户会议，明确目标、问题和会后动作。",
-    tone: "blue",
-  },
-  {
-    id: "presales_questions",
-    label: "售前问题清单",
-    desc: "整理基础架构、业务系统、预算与迁移边界问题。",
-    tone: "amber",
-  },
-  {
-    id: "solution_framework",
-    label: "方案框架",
-    desc: "形成客户现状、方案方向、实施路径和确认事项。",
-    tone: "green",
-  },
-  {
-    id: "report_outline",
-    label: "汇报材料大纲",
-    desc: "沉淀领导汇报结构、客户价值和决策请求。",
-    tone: "teal",
-  },
-  {
-    id: "competitive_talk",
-    label: "竞品应对话术",
-    desc: "围绕竞品、异议、证据材料和应对口径组织。",
-    tone: "red",
-  },
-];
-
 function sourceRefText(ref) {
   const typeLabel = {
     artifact: "交付物",
@@ -2517,178 +2484,68 @@ function sourceRefText(ref) {
   return `${typeLabel}：${ref.title ?? ref.id ?? "来源"}`;
 }
 
-export function SolutionPage({ selected, onSelect, customer, opportunity, apiClient, backendStatus, draft, setDraft, solutionDocs = [] }) {
-  const [localDrafts, setLocalDrafts] = useState({});
-  const [selectedArtifactType, setSelectedArtifactType] = useState(draft?.artifactType ?? "solution_framework");
-  const [draftStatus, setDraftStatus] = useState("选择交付物后，可生成对应方案材料。");
-  const [draftText, setDraftText] = useState("");
-  const selectedArtifact = solutionArtifacts.find((item) => item.id === selectedArtifactType) ?? solutionArtifacts[0];
-  const externalDraft = draft?.artifactType === selectedArtifactType ? draft : null;
-  const currentDraft = localDrafts[selectedArtifactType] ?? externalDraft ?? null;
-  const visibleDraft = currentDraft ? { ...currentDraft, content: draftText || currentDraft.content } : null;
-  const updateExternalDraft = setDraft ?? (() => {});
-
-  useEffect(() => {
-    if (!draft?.artifactType) return;
-    setLocalDrafts((current) => ({ ...current, [draft.artifactType]: draft }));
-    setSelectedArtifactType(draft.artifactType);
-  }, [draft?.id]);
-
-  useEffect(() => {
-    setDraftText(currentDraft?.content ?? "");
-    if (!currentDraft) {
-      setDraftStatus(`${selectedArtifact.label}尚未生成。`);
-      return;
-    }
-    const hasKnowledge = currentDraft.sourceRefs?.some((ref) => ref.type === "knowledge");
-    setDraftStatus(hasKnowledge ? `${selectedArtifact.label}已生成，知识库引用已保留。` : `${selectedArtifact.label}已生成，来源引用已保留。`);
-  }, [currentDraft?.id, selectedArtifactType]);
-
-  function storeDraft(item) {
-    setLocalDrafts((current) => ({ ...current, [item.artifactType]: item }));
-    updateExternalDraft(item);
-    setDraftText(item.content);
-  }
-
-  async function generateSolutionDraft() {
-    if (!apiClient?.isEnabled || backendStatus !== "connected") {
-      setDraftStatus("当前连接未恢复，可先查看交付物结构。");
-      return;
-    }
-
-    setDraftStatus(`正在生成${selectedArtifact.label}`);
-    try {
-      const item = await apiClient.generateSolutionDraft({
-        owner: "继振",
-        customerId: customer.id,
-        opportunityId: opportunity.id,
-        artifactType: selectedArtifact.id,
-      });
-      storeDraft(item);
-      setDraftStatus(`${selectedArtifact.label}已生成，可直接修改后保存。`);
-    } catch {
-      setDraftStatus(`${selectedArtifact.label}生成失败，请检查客户与商机数据后重试。`);
-    }
-  }
-
-  async function saveSolutionDraft() {
-    if (!currentDraft) {
-      setDraftStatus("请先生成交付物。");
-      return;
-    }
-    if (!apiClient?.isEnabled || backendStatus !== "connected") {
-      setDraftStatus("当前连接未恢复，暂不能保存草稿。");
-      return;
-    }
-
-    setDraftStatus(`正在保存${selectedArtifact.label}`);
-    try {
-      const saved = await apiClient.saveSolutionDraft(currentDraft.id, {
-        content: draftText,
-        status: "saved",
-      }, currentDraft.version);
-      storeDraft(saved);
-      setDraftStatus(`${selectedArtifact.label}已保存。`);
-    } catch {
-      setDraftStatus(`${selectedArtifact.label}保存失败，请稍后重试。`);
-    }
-  }
-
-  const sourceRefs = currentDraft?.sourceRefs?.length
-    ? currentDraft.sourceRefs
-    : [
-        { type: "artifact", id: selectedArtifact.id, title: selectedArtifact.label },
-        { type: "customer", id: customer.id, title: customer.name },
-        { type: "opportunity", id: opportunity.id, title: opportunity.name },
-      ];
+export function SolutionPage({ selected, onSelect, solutionDocs = [] }) {
+  const currentSolution = selected ?? solutionDocs[0] ?? null;
+  const sourceRefs = currentSolution?.sourceRefs ?? [];
+  const historicalContent = selected?.content ?? currentSolution?.content ?? "";
 
   return (
-    <div className="solution-workbench list-detail-grid">
-      <Panel title="方案交付物" meta="先选类型" className="list-panel">
-        <div className="list-stack solution-artifact-list">
-          {solutionArtifacts.map((item) => (
+    <div
+      className="solution-workbench list-detail-grid"
+      data-testid="solution-history-view"
+    >
+      <Panel title="历史方案" meta={`${solutionDocs.length} 份`} className="list-panel">
+        <div className="related-docs" data-testid="solution-history-list">
+          {solutionDocs.map((item) => (
             <button
-              className={`list-button ${selectedArtifactType === item.id ? "selected" : ""}`}
+              className={currentSolution?.id === item.id ? "selected" : ""}
               key={item.id}
               type="button"
-              data-testid={`solution-artifact-${item.id}`}
-              onClick={() => setSelectedArtifactType(item.id)}
+              onClick={() => onSelect?.(item.id)}
             >
-              <span>
-                <strong>{item.label}</strong>
-                <small>{item.desc}</small>
-              </span>
-              <b className={`pill tone-${item.tone}`}>{localDrafts[item.id] ? "已生成" : "待生成"}</b>
+              <strong>{item.title}</strong>
+              <small>{item.artifactType} / {item.status}</small>
             </button>
           ))}
+          {solutionDocs.length === 0 ? (
+            <p className="empty-list">暂无已保存的方案历史。</p>
+          ) : null}
         </div>
       </Panel>
-      <section className="detail-surface paper-like solution-detail">
-        <div className="solution-detail-head">
-          <div>
-            <span className="eyebrow">方案辅助 / {selectedArtifact.label}</span>
-            <h2>{selectedArtifact.label}</h2>
-            <p>{selectedArtifact.desc}</p>
-          </div>
-          <div className="detail-toolbar-actions">
-            <button className="primary-button draft-button" type="button" onClick={generateSolutionDraft}>
-              <Sparkles size={16} />
-              生成交付物
-            </button>
-            <button className="ghost-button" type="button" onClick={generateSolutionDraft}>
-              <RefreshCw size={15} />
-              重新生成
-            </button>
-            <button className="ghost-button" type="button" onClick={saveSolutionDraft}>
-              <Save size={15} />
-              保存草稿
-            </button>
-          </div>
-        </div>
-        <div className="draft-source-strip">
-          <span>客户：{customer.name}</span>
-          <span>商机：{opportunity.name}</span>
-          <span>状态：{draftStatus}</span>
-        </div>
-        <div className="solution-context-grid">
-          <Panel title="来源与引用" meta={`${sourceRefs.length} 个来源`}>
-            <div className="source-ref-list">
-              {sourceRefs.map((ref, index) => (
-                <span key={`${ref.type}-${ref.id ?? index}`}>{sourceRefText(ref)}</span>
-              ))}
+      <section
+        className="detail-surface paper-like solution-detail"
+        data-testid="solution-history-detail"
+      >
+        {currentSolution ? (
+          <>
+            <div className="solution-detail-head">
+              <div>
+                <span className="eyebrow">历史方案 / 只读</span>
+                <h2>{currentSolution.title}</h2>
+                <p>{currentSolution.artifactType} / {currentSolution.status}</p>
+              </div>
             </div>
-          </Panel>
-          <Panel title="关联材料" meta="可切换查看">
-            <div className="related-docs">
-              {solutionDocs.map((item) => (
-                <button
-                  className={selected?.id === item.id ? "selected" : ""}
-                  key={item.id}
-                  type="button"
-                  onClick={() => onSelect?.(item.id)}
-                >
-                  <strong>{item.title}</strong>
-                  <small>{item.artifactType} / {item.status}</small>
-                </button>
+            <div className="draft-source-strip">
+              <span>客户 ID：{currentSolution.customerId}</span>
+              <span>商机 ID：{currentSolution.opportunityId}</span>
+              <span>状态：{currentSolution.status}</span>
+            </div>
+            <Panel title="来源与引用" meta={`${sourceRefs.length} 个来源`}>
+              <div className="source-ref-list">
+                {sourceRefs.map((ref, index) => (
+                  <span key={`${ref.type}-${ref.id ?? index}`}>{sourceRefText(ref)}</span>
                 ))}
-              {solutionDocs.length === 0 ? <p className="empty-list">暂无已保存的方案历史。</p> : null}
-            </div>
-          </Panel>
-        </div>
-        <label className="form-field solution-editor-field">
-          <span>草稿正文</span>
-          <textarea
-            aria-label="方案交付物草稿正文"
-            className="solution-editor"
-            value={draftText}
-            onChange={(event) => {
-              setDraftText(event.target.value);
-              if (currentDraft) setDraftStatus(`${selectedArtifact.label}已手动修改，请保存草稿。`);
-            }}
-            placeholder={`点击“生成交付物”后，这里会显示${selectedArtifact.label}，可手动修改。`}
-          />
-        </label>
-        <DraftPreview draft={visibleDraft} emptyText={`尚未生成${selectedArtifact.label}。`} />
+                {sourceRefs.length === 0 ? <p className="empty-list">暂无来源引用。</p> : null}
+              </div>
+            </Panel>
+            <DraftPreview
+              draft={{ ...currentSolution, content: historicalContent }}
+              emptyText="该历史方案没有正文内容。"
+            />
+          </>
+        ) : (
+          <p className="empty-list">选择一份历史方案后查看只读详情。</p>
+        )}
       </section>
     </div>
   );
@@ -3353,22 +3210,13 @@ export function KnowledgePage({
         </div>
         <section className="citation-panel" data-testid="knowledge-citation-actions">
           <div>
-            <span className="eyebrow">引用到业务交付物</span>
+            <span className="eyebrow">引用到业务汇报</span>
             <strong>{customer?.name ?? "当前客户"} / {opportunity?.name ?? "当前商机"}</strong>
             <p>{citationStatus}</p>
           </div>
           <div className="citation-actions">
             <button
               className="primary-button"
-              type="button"
-              disabled={citingTarget !== null}
-              onClick={() => citeKnowledge("solution")}
-            >
-              <Link2 size={16} />
-              {citingTarget === "solution" ? "生成中" : "引用到方案"}
-            </button>
-            <button
-              className="ghost-button"
               type="button"
               disabled={citingTarget !== null}
               onClick={() => citeKnowledge("weekly")}
@@ -3388,12 +3236,12 @@ export function KnowledgePage({
           />
         </Panel>
         <ManualConfirmBox
-          title="确认引用到方案材料"
-          desc="引用知识库材料前需要人工确认客户场景，避免把不匹配的案例写进方案。"
+          title="生成知识引用建议"
+          desc="引用知识库材料前需要人工确认客户场景，避免把不匹配的案例写进业务材料。"
           onGenerate={() =>
             generateBusinessSuggestion(apiClient, backendStatus, {
               type: "knowledge_talk",
-              title: "确认引用到方案材料",
+              title: "生成知识引用建议",
               context: {
                 knowledgeId: current.id,
                 knowledge: current.title,

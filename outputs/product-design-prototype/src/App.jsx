@@ -24,6 +24,7 @@ import {
   createDisplaySession,
 } from "./sessionAuth.js";
 import {
+  compatibilityRouteMeta,
   navItems,
 } from "./data/salesWorkbenchData.js";
 import {
@@ -64,6 +65,7 @@ function resolveHeadingContext({
   selectedAction,
   selectedRisk,
   selectedKnowledge,
+  selectedSolution,
 }) {
   if (active === "customer") {
     if (customerViewMode === "create") {
@@ -122,6 +124,10 @@ function resolveHeadingContext({
       return { title: selectedKnowledge?.title || "知识库材料列表" };
     }
     return { title: "知识库材料列表" };
+  }
+
+  if (active === "solution") {
+    return { title: selectedSolution?.title ?? "历史方案" };
   }
 
   return null;
@@ -409,7 +415,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [analysisVisible, setAnalysisVisible] = useState(false);
   const [syncStatus, setSyncStatus] = useState("尚未写入任何业务档案");
   const [weeklyView, setWeeklyView] = useState("daily");
-  const [solutionDraft, setSolutionDraft] = useState(null);
   const [weeklyDraft, setWeeklyDraft] = useState(null);
   const [weeklyDraftText, setWeeklyDraftText] = useState("");
   const {
@@ -511,7 +516,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     return () => controller.abort();
   }, [apiClient, bootstrapAttempt]);
 
-  const activeMeta = navItems.find((item) => item.id === active) ?? navItems[0];
+  const activeMeta =
+    navItems.find((item) => item.id === active) ??
+    compatibilityRouteMeta[active] ??
+    navItems[0];
   const apiStatusLabel = {
     connecting: "连接中",
     connected: "在线",
@@ -541,6 +549,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     selectedAction,
     selectedRisk,
     selectedKnowledge,
+    selectedSolution: selectedDoc,
   });
   const headingAction = (() => {
     if (active === "customer" && customerViewMode === "list") {
@@ -785,18 +794,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       throw new Error("请先选择客户和商机");
     }
 
-    if (target === "solution") {
-      const draft = await apiClient.generateSolutionDraft({
-        owner: "继振",
-        customerId: selectedCustomer.id,
-        opportunityId: selectedOpportunity.id,
-        knowledgeIds: [knowledgeItem.id],
-      });
-      setSolutionDraft(draft);
-      setActive("solution");
-      return draft;
-    }
-
     if (target === "weekly") {
       const { periodStart, periodEnd } = getCurrentWeekRange();
       const draft = await apiClient.generateWeeklyDraft({
@@ -848,8 +845,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const blockedByBootstrap =
     bootstrapStatus === "loading" ||
     bootstrapStatus === "error" ||
-    (bootstrapStatus === "empty" && (active === "overview" || active === "solution")) ||
-    (active === "solution" && (!selectedCustomer || !selectedOpportunity));
+    (bootstrapStatus === "empty" && active === "overview");
   const visibleBootstrapStatus =
     bootstrapStatus === "loading" || bootstrapStatus === "error" ? bootstrapStatus : "empty";
 
@@ -1030,12 +1026,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               <SolutionPage
                 selected={selectedDoc}
                 onSelect={setSelectedSolutionId}
-                customer={selectedCustomer}
-                opportunity={selectedOpportunity}
-                apiClient={apiClient}
-                backendStatus={backendStatus}
-                draft={solutionDraft}
-                setDraft={setSolutionDraft}
                 solutionDocs={workbenchSolutionDocs}
               />
             )}

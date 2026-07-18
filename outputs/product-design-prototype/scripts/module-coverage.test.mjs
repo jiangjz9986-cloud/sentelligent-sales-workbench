@@ -12,6 +12,10 @@ function extractNavIds(source) {
   return [...block.matchAll(/\{\s*id:\s*"([^"]+)"/g)].map((match) => match[1]);
 }
 
+function extractNavBlock(source) {
+  return source.match(/export const navItems = \[([\s\S]*?)\];/)?.[1] ?? "";
+}
+
 function extractVisualPageNames(source) {
   const block = source.match(/const pages = \[([\s\S]*?)\];/)?.[1] ?? "";
   return [...block.matchAll(/\{\s*name:\s*"([^"]+)"/g)].map((match) => match[1]);
@@ -81,30 +85,31 @@ describe("business module delivery coverage", () => {
     });
   });
 
-  it("keeps solution assistant deliverables and actions wired in the page", () => {
-    const pageSource = read("src/features/salesWorkbench/pages.jsx");
-    const apiSource = read("src/api/salesWorkbenchApi.js");
-    const requiredArtifactTypes = [
-      "communication_outline",
-      "presales_questions",
-      "solution_framework",
-      "report_outline",
-      "competitive_talk",
-    ];
-    const requiredLabels = [
-      "沟通提纲",
-      "售前问题清单",
-      "方案框架",
-      "汇报材料大纲",
-      "竞品应对话术",
-      "生成交付物",
-      "重新生成",
-      "保存草稿",
-      "来源与引用",
-    ];
+  it("keeps the deferred solution assistant out of responsive primary navigation", () => {
+    const dataSource = read("src/data/salesWorkbenchData.js");
+    const appSource = read("src/App.jsx");
+    const navBlock = extractNavBlock(dataSource);
 
-    assert.deepEqual(requiredArtifactTypes.filter((type) => !pageSource.includes(type)), []);
-    assert.deepEqual(requiredLabels.filter((label) => !pageSource.includes(label)), []);
-    assert.match(apiSource, /artifactType/);
+    assert.doesNotMatch(navBlock, /\bid:\s*"solution"|方案辅助/);
+    assert.match(appSource, /<aside className="sidebar">[\s\S]*\{navItems\.map/);
+    assert.doesNotMatch(appSource, /setActive\("solution"\)/);
+  });
+
+  it("keeps the historical solution compatibility state read-only", () => {
+    const pageSource = read("src/features/salesWorkbench/pages.jsx");
+    const appSource = read("src/App.jsx");
+    const solutionPageSource = pageSource.match(
+      /export function SolutionPage\([\s\S]*?(?=\nexport function WeeklyPage)/,
+    )?.[0] ?? "";
+
+    assert.match(appSource, /active === "solution"/);
+    assert.match(solutionPageSource, /data-testid="solution-history-view"/);
+    assert.match(solutionPageSource, /solutionDocs\.map/);
+    assert.match(solutionPageSource, /selected\?\.content/);
+    assert.doesNotMatch(
+      solutionPageSource,
+      /generateSolutionDraft|saveSolutionDraft|<textarea|生成交付物|重新生成|保存草稿/,
+    );
+    assert.doesNotMatch(pageSource, /引用到方案/);
   });
 });

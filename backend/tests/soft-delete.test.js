@@ -58,6 +58,7 @@ beforeEach(async () => {
     seed: true,
     aiAnalysisMode: "mock",
     modelApiKey: "",
+    solutionWritesEnabled: true,
     authRequired: false,
     authAccount: "",
     authPassword: "",
