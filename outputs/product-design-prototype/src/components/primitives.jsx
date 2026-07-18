@@ -67,29 +67,35 @@ export function CompactList({ items, onSelect }) {
 }
 
 export function StageStrip({ stageCounts = [], onStageClick }) {
-  const countByStage = new Map(stageCounts.map((item) => [item.stage, item.count]));
+  const dataByStage = new Map(stageCounts.map((item) => [item.stage, item]));
   return (
     <div className="stage-strip">
       {[
-        ["线索", 7, "190 万"],
-        ["初步沟通", 6, "260 万"],
-        ["调研机会", 3, "3000 万"],
-        ["方案输出", 4, "规划类"],
-        ["方案交流", 5, "待定"],
-        ["预算确认", 2, "参考报价"],
-        ["暂停观察", 2, "维护中"],
-      ].map(([stage, count, amount]) => (
-        <button
-          className={`stage-card ${onStageClick ? "interactive-card" : ""}`}
-          key={stage}
-          type="button"
-          onClick={() => onStageClick?.(stage)}
-        >
-          <span>{stage}</span>
-          <strong>{countByStage.get(stage) ?? count}</strong>
-          <small>{amount}</small>
-        </button>
-      ))}
+        "线索",
+        "初步沟通",
+        "调研机会",
+        "方案输出",
+        "方案交流",
+        "预算确认",
+        "暂停观察",
+      ].map((stage) => {
+        const stageData = dataByStage.get(stage);
+        const amount = stageData?.amount;
+        const hasAmount = amount !== null && amount !== undefined && String(amount).trim() !== "";
+
+        return (
+          <button
+            className={`stage-card ${onStageClick ? "interactive-card" : ""}`}
+            key={stage}
+            type="button"
+            onClick={() => onStageClick?.(stage)}
+          >
+            <span>{stage}</span>
+            <strong>{stageData?.count ?? 0}</strong>
+            {hasAmount ? <small>{amount}</small> : null}
+          </button>
+        );
+      })}
     </div>
   );
 }
