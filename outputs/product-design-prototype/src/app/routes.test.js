@@ -289,7 +289,7 @@ describe("workbench route parser and builder", () => {
     }
   });
 
-  it("rejects raw and encoded path traversal before URL normalization", () => {
+  it("rejects raw and encoded traversal in root-relative string paths", () => {
     const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
     const traversalCases = [
       ["/customers/../actions", {}],
@@ -297,11 +297,6 @@ describe("workbench route parser and builder", () => {
       ["/%2E/customers", {}],
       ["/outside/../sentelligent/customers", { basePath: "/sentelligent/" }],
       ["/outside/%2E%2E/sentelligent/customers", { basePath: "/sentelligent/" }],
-      [
-        "https://workbench.invalid/outside/../sentelligent/customers",
-        { basePath: "/sentelligent/" },
-      ],
-      [{ pathname: "/customers/../actions", search: "", hash: "" }, {}],
     ];
 
     for (const [input, options] of traversalCases) {
@@ -350,9 +345,16 @@ describe("workbench route parser and builder", () => {
     const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
 
     assert.deepEqual(
-      parseWorkbenchRoute("https://workbench.invalid/sentelligent/", {
-        basePath: "/sentelligent/",
-      }),
+      parseWorkbenchRoute(
+        {
+          pathname: "/sentelligent/",
+          search: "",
+          hash: "",
+        },
+        {
+          basePath: "/sentelligent/",
+        },
+      ),
       expectedRoute({ replace: true }),
     );
   });
@@ -390,7 +392,7 @@ describe("workbench route parser and builder", () => {
     );
   });
 
-  it("strictly classifies string paths and accepts only same-origin absolute URLs", () => {
+  it("rejects every complete URL string and normalized URL instance", () => {
     const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
 
     for (const input of [
@@ -399,19 +401,83 @@ describe("workbench route parser and builder", () => {
       "https:/customers",
       "https:../customers",
       "//workbench.invalid/customers",
-      "https://example.com/customers",
+      "https://sales.example.com/customers",
+      "https://workbench.invalid/customers",
+      new URL("https://sales.example.com/customers"),
+      new URL("https://workbench.invalid/customers"),
+      new URL("https://workbench.invalid/customers/../actions"),
     ]) {
       assert.deepEqual(
         parseWorkbenchRoute(input),
         expectedRoute({ replace: true }),
-        input,
+        String(input),
       );
     }
+  });
+
+  it("accepts only plain location snapshots with own enumerable data fields", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
 
     assert.deepEqual(
-      parseWorkbenchRoute("https://workbench.invalid/customers"),
+      parseWorkbenchRoute({ pathname: "/customers" }),
       expectedRoute({ page: "customers", active: "customer", mode: "list" }),
     );
+    assert.deepEqual(
+      parseWorkbenchRoute({
+        pathname: "/customers",
+        search: "?q=safe",
+        hash: "",
+      }),
+      expectedRoute({
+        page: "customers",
+        active: "customer",
+        mode: "list",
+        filters: { q: ["safe"] },
+      }),
+    );
+
+    let getterCalls = 0;
+    const ownGetter = { search: "", hash: "" };
+    Object.defineProperty(ownGetter, "pathname", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "/customers";
+      },
+    });
+    const inheritedGetter = Object.create({
+      get pathname() {
+        getterCalls += 1;
+        return "/customers";
+      },
+    });
+    const customPrototype = Object.assign(Object.create({ custom: true }), {
+      pathname: "/customers",
+      search: "",
+      hash: "",
+    });
+    const hiddenPathname = { search: "", hash: "" };
+    Object.defineProperty(hiddenPathname, "pathname", {
+      configurable: true,
+      enumerable: false,
+      value: "/customers",
+      writable: true,
+    });
+
+    for (const input of [
+      ownGetter,
+      inheritedGetter,
+      customPrototype,
+      hiddenPathname,
+      { pathname: undefined, search: "?q=must-not-survive", hash: "" },
+    ]) {
+      assert.deepEqual(
+        parseWorkbenchRoute(input),
+        expectedRoute({ replace: true }),
+      );
+    }
+    assert.equal(getterCalls, 0);
   });
 
   it("marks raw query controls invalid before URL strips them", () => {

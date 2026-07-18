@@ -1,4 +1,3 @@
-const ROUTE_ORIGIN = "https://workbench.invalid";
 const RESERVED_FILTER_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const RESERVED_ENTITY_IDS = new Set(["new", "edit"]);
 const FILTER_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -306,34 +305,10 @@ function splitPathSearchHash(value) {
 }
 
 function rawPartsFromString(value) {
-  if (value.startsWith("/") && !value.startsWith("//")) {
-    return splitPathSearchHash(value);
-  }
-
-  const absoluteMatch = value.match(/^(https?):\/\/([^/?#]+)(.*)$/i);
-  if (!absoluteMatch) throw new TypeError("Invalid route URL");
-
-  const [, , authority, remainder] = absoluteMatch;
-  if (
-    !authority ||
-    authority.includes("\\") ||
-    CONTROL_CHARACTER_PATTERN.test(authority)
-  ) {
+  if (!value.startsWith("/") || value.startsWith("//")) {
     throw new TypeError("Invalid route URL");
   }
-
-  const location = new URL(value);
-  if (
-    location.origin !== ROUTE_ORIGIN ||
-    location.username ||
-    location.password
-  ) {
-    throw new TypeError("Invalid route URL");
-  }
-
-  return splitPathSearchHash(
-    !remainder ? "/" : remainder.startsWith("/") ? remainder : `/${remainder}`,
-  );
+  return splitPathSearchHash(value);
 }
 
 function canonicalizeRawPathname(pathname) {
@@ -362,44 +337,49 @@ function canonicalizeRawPathname(pathname) {
 }
 
 function rawLocationParts(input) {
-  if (input instanceof URL) {
-    return {
-      source: input.href,
-      pathname: input.pathname,
-      search: input.search,
-      hash: input.hash,
-    };
+  if (typeof input === "string") {
+    return rawPartsFromString(input);
   }
-  if (input && typeof input === "object") {
-    const pathname = input.pathname === undefined ? "/" : input.pathname;
-    const search = input.search === undefined ? "" : input.search;
-    const hash = input.hash === undefined ? "" : input.hash;
+
+  if (
+    !input ||
+    typeof input !== "object" ||
+    Object.getPrototypeOf(input) !== Object.prototype
+  ) {
+    throw new TypeError("Invalid route URL");
+  }
+
+  const parts = Object.assign(Object.create(null), {
+    pathname: "/",
+    search: "",
+    hash: "",
+  });
+  for (const key of Reflect.ownKeys(input)) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
     if (
-      typeof pathname !== "string" ||
-      typeof search !== "string" ||
-      typeof hash !== "string" ||
-      (search && !search.startsWith("?")) ||
-      (hash && !hash.startsWith("#"))
+      typeof key !== "string" ||
+      !Object.hasOwn(parts, key) ||
+      !descriptor?.enumerable ||
+      !("value" in descriptor) ||
+      typeof descriptor.value !== "string"
     ) {
       throw new TypeError("Invalid route URL");
     }
-    return {
-      source: `${pathname}${search}${hash}`,
-      pathname,
-      search,
-      hash,
-    };
+    parts[key] = descriptor.value;
   }
 
-  const source = String(input ?? "/");
-  return { source, ...rawPartsFromString(source) };
+  if (
+    (parts.search && !parts.search.startsWith("?")) ||
+    (parts.hash && !parts.hash.startsWith("#"))
+  ) {
+    throw new TypeError("Invalid route URL");
+  }
+  return parts;
 }
 
 function extractLocation(input) {
   const raw = rawLocationParts(input);
   const pathname = canonicalizeRawPathname(raw.pathname);
-  const location = new URL(raw.source, ROUTE_ORIGIN);
-  if (location.origin !== ROUTE_ORIGIN) throw new TypeError("Invalid route URL");
   return {
     pathname,
     originalPathSearch: `${raw.pathname}${raw.search}`,
