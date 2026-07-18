@@ -192,6 +192,22 @@ describe("workbench bootstrap state", () => {
     assert.doesNotMatch(pagesSource, /\{item\.type\}\s*\/\s*\{item\.source\}/);
   });
 
+  it("does not embed demo customers in the opportunity timeline", () => {
+    const primitivesSource = readFileSync(
+      new URL("../components/primitives.jsx", import.meta.url),
+      "utf8",
+    );
+
+    assert.match(
+      primitivesSource,
+      /export function Timeline\(\{\s*items\s*=\s*\[\]\s*\}\)/,
+    );
+    assert.doesNotMatch(
+      primitivesSource,
+      /日照中医医院|胜利油田中心医院|黄岛区中医院|黄岛中心医院/,
+    );
+  });
+
   it("wires loading, empty, error, and retry states into the workbench shell", () => {
     const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
 

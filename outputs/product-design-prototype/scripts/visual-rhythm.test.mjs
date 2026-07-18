@@ -122,7 +122,7 @@ function connectCdp(wsUrl) {
   });
 }
 
-async function openChromeCdp({ failFirstBootstrap = false } = {}) {
+async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } = {}) {
   const profilePath = mkdtempSync(join(tmpdir(), "sent-zx-visual-chrome-"));
   const chrome = spawnManaged(chromePath, [
     "--headless=new",
@@ -155,6 +155,13 @@ async function openChromeCdp({ failFirstBootstrap = false } = {}) {
     source: `
       const nativeFetch = window.fetch.bind(window);
       window.__visualApiCalls = {};
+      window.__visualErrors = [];
+      window.addEventListener('error', (event) => {
+        window.__visualErrors.push(event.error?.stack ?? event.message ?? 'Unknown window error');
+      });
+      window.addEventListener('unhandledrejection', (event) => {
+        window.__visualErrors.push(event.reason?.stack ?? String(event.reason));
+      });
       window.fetch = async (input, init) => {
         const requestUrl = String(typeof input === 'string' ? input : input?.url ?? '');
         if (requestUrl.startsWith('${visualApiBaseUrl}/api/')) {
@@ -191,11 +198,24 @@ async function openChromeCdp({ failFirstBootstrap = false } = {}) {
                 csrfToken: 'visual-csrf',
               }
             : isCollection
-              ? { items: [] }
+              ? {
+                  items: pathname === '/api/opportunities'
+                    ? ${JSON.stringify(opportunities)}
+                    : [],
+                }
               : isSummary
                 ? {
                     item: {
-                      metrics: {},
+                      metrics: {
+                        quickRecords: { value: 0, badge: '暂无记录', tone: 'blue' },
+                        opportunities: {
+                          value: ${opportunities.length},
+                          badge: '真实商机',
+                          tone: 'amber',
+                        },
+                        forecast: { value: '待确认', badge: '暂无预测', tone: 'green' },
+                        risks: { value: 0, badge: '暂无风险', tone: 'red' },
+                      },
                       priorityActions: [],
                       customerHeat: [],
                       recentRecords: [],
@@ -480,6 +500,128 @@ describe("visual rhythm", () => {
       assert.equal(result.customerBootstrapCalls, 2);
       assert.match(result.text, /尚未生成周报/);
       assert.doesNotMatch(result.text, /日照中医医院|胜利油田中心医院|黄岛区中医院|黄岛中心医院|680\s*万/);
+    } finally {
+      if (cdp) await cdp.close();
+      server.closeAllConnections?.();
+      await new Promise((resolveClose) => server.close(resolveClose));
+    }
+  });
+
+  it("renders real opportunity timeline items and an explicit empty state", async () => {
+    assert.equal(existsSync(resolve("dist", "index.html")), true, "run npm run build before visual rhythm QA");
+
+    const opportunities = [
+      {
+        id: "op-timeline-real",
+        version: 1,
+        customerId: "customer-real",
+        name: "数据中心更新项目",
+        customer: "真实客户甲",
+        stage: "需求确认",
+        amount: "待确认",
+        owner: "负责人甲",
+        probability: 35,
+        days: 2,
+        requirements: [],
+        competitors: [],
+        solutionDirection: [],
+        sourceRecord: "CRM-20260719-001 客户现场沟通纪要",
+        risk: null,
+        next: null,
+        tone: "blue",
+        createdAt: "2026-07-18T02:00:00.000Z",
+        updatedAt: "2026-07-19T03:30:00.000Z",
+      },
+      {
+        id: "op-timeline-empty",
+        version: 1,
+        customerId: "customer-empty",
+        name: "待补充商机",
+        customer: "真实客户乙",
+        stage: "初步接触",
+        amount: null,
+        owner: null,
+        probability: 10,
+        days: 0,
+        requirements: [],
+        competitors: [],
+        solutionDirection: [],
+        sourceRecord: null,
+        risk: null,
+        next: null,
+        tone: "gray",
+      },
+    ];
+    const port = await getFreePort();
+    const server = createStaticServer(createStaticServerConfig({
+      port,
+      distPath: resolve("dist"),
+      apiBaseUrl: visualApiBaseUrl,
+    }));
+    await new Promise((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
+
+    let cdp;
+    try {
+      cdp = await openChromeCdp({ opportunities });
+      await cdp.send("Page.navigate", { url: `http://127.0.0.1:${port}` });
+      await delay(1200);
+      const result = await evaluate(cdp, `
+        (async () => {
+          const wait = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+          const waitUntil = async (predicate, label, timeoutMs = 5000) => {
+            const started = Date.now();
+            while (Date.now() - started < timeoutMs) {
+              const value = predicate();
+              if (value) return value;
+              await wait(50);
+            }
+            throw new Error(
+              'Timed out waiting for ' + label
+              + '; body=' + document.body.innerText.slice(0, 500)
+              + '; apiCalls=' + JSON.stringify(window.__visualApiCalls)
+              + '; errors=' + JSON.stringify(window.__visualErrors),
+            );
+          };
+
+          await waitUntil(() => document.querySelector('[data-testid="page-overview"]'), 'workbench bootstrap');
+          document.querySelectorAll('.nav-item')[3]?.click();
+          await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 'opportunity list');
+
+          const openButtons = () => [...document.querySelectorAll('[data-testid="opportunity-open-detail"]')];
+          openButtons()[0]?.click();
+          await waitUntil(
+            () => document.querySelector('[data-testid="opportunity-detail-view"] .timeline'),
+            'real opportunity timeline',
+          );
+          const realTimelineText = document.querySelector('[data-testid="opportunity-detail-view"] .timeline')?.innerText ?? '';
+
+          document.querySelector('[data-testid="opportunity-detail-view"] .sticky-subview-toolbar > button')?.click();
+          await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 'opportunity list return');
+          openButtons()[1]?.click();
+          await waitUntil(
+            () => document.querySelector('[data-testid="opportunity-detail-view"] .timeline'),
+            'empty opportunity timeline',
+          );
+
+          return {
+            realTimelineText,
+            emptyTimelineText: document.querySelector('[data-testid="opportunity-detail-view"] .timeline')?.innerText ?? '',
+            hasEmptyState: Boolean(document.querySelector('[data-testid="opportunity-timeline-empty"]')),
+          };
+        })()
+      `);
+
+      assert.match(result.realTimelineText, /CRM-20260719-001 客户现场沟通纪要/);
+      assert.doesNotMatch(
+        result.realTimelineText,
+        /日照中医医院|胜利油田中心医院|黄岛区中医院|黄岛中心医院/,
+      );
+      assert.equal(result.hasEmptyState, true);
+      assert.match(result.emptyTimelineText, /暂无时间线记录/);
+      assert.doesNotMatch(
+        result.emptyTimelineText,
+        /日照中医医院|胜利油田中心医院|黄岛区中医院|黄岛中心医院/,
+      );
     } finally {
       if (cdp) await cdp.close();
       server.closeAllConnections?.();

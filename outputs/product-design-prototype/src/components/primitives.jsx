@@ -248,19 +248,15 @@ export function ManualConfirmBox({ title, desc, compact = false, onGenerate }) {
   );
 }
 
-export function Timeline() {
+export function Timeline({ items = [] }) {
   const [expandedRow, setExpandedRow] = useState(null);
+  const timelineItems = Array.isArray(items) ? items : [];
 
   return (
     <Panel title="阶段时间线" meta="记录来源">
       <div className="timeline">
-        {[
-          ["05-26", "线上沟通", "胜利油田中心医院仍在三甲复审，服务器采购仅参考报价。"],
-          ["06-03", "现场调研", "日照中医医院确认本地数据中心健壮度与移动云灾备问题。"],
-          ["06-05", "方案输出", "根据现有材料输出客户要求的十五五年度规划。"],
-          ["下周", "计划动作", "黄岛区中医院和黄岛中心医院安排机房调研。"],
-        ].map(([date, title, desc]) => {
-          const id = `${date}-${title}`;
+        {timelineItems.length > 0 ? timelineItems.map((item, index) => {
+          const id = item.id ?? `${item.date}-${item.title}-${index}`;
           return (
           <button
             className={`time-row interactive-card ${expandedRow === id ? "expanded" : ""}`}
@@ -268,10 +264,10 @@ export function Timeline() {
             type="button"
             onClick={() => setExpandedRow((current) => (current === id ? null : id))}
           >
-            <time>{date}</time>
+            <time>{item.date}</time>
             <span>
-              <strong>{title}</strong>
-              <small>{desc}</small>
+              <strong>{item.title}</strong>
+              <small>{item.description}</small>
               {expandedRow === id ? (
                 <small className="item-detail" data-testid="timeline-expanded">
                   已展开：可回看来源记录、确认责任人，并同步下一步动作。
@@ -280,7 +276,11 @@ export function Timeline() {
             </span>
           </button>
           );
-        })}
+        }) : (
+          <p className="empty-list" data-testid="opportunity-timeline-empty">
+            暂无时间线记录
+          </p>
+        )}
       </div>
     </Panel>
   );

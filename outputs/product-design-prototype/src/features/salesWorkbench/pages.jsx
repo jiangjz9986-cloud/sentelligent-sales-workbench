@@ -56,6 +56,7 @@ import {
   resolveConfirmedSelectionId,
 } from "../../quickRecordModel.js";
 import { formatWeekRangeLabel, getCurrentWeekRange } from "../../weekRange.js";
+import { buildOpportunityTimeline } from "./opportunityTimeline.js";
 
 export function PageHeading({ active, activeMeta, headingContext, action }) {
   const title = headingContext?.title ?? pageTitle(active);
@@ -2027,6 +2028,7 @@ export function OpportunityPage({
 
   const isCreateView = viewMode === "create";
   const isEditView = viewMode === "edit";
+  const timelineItems = buildOpportunityTimeline(selected);
 
   async function deleteCurrentOpportunity() {
     if (!selected?.id || !onDeleteOpportunity) return;
@@ -2184,7 +2186,7 @@ export function OpportunityPage({
             </ExpandableInsight>
           </Panel>
         </div>
-        <Timeline />
+        <Timeline items={timelineItems} />
         <div className="detail-actions">
           <button
             className="ghost-button"
