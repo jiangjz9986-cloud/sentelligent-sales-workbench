@@ -19,6 +19,7 @@ const chromePath = findChrome();
 
 const desktopRecord =
   "周三现场拜访日照中医医院，和主任及主管工程师梁斌讨论未来 3-5 年规划。客户希望补齐本地数据中心基础架构健壮度，未来将移动云作为灾备中心。客户反馈移动云资源计费、平台封闭、数据导出配合度和后台管理权都存在问题。需要输出十五五年度规划材料，并判断是否同步到商机档案和周报。";
+const manualAnalysisRevision = "手动修订：客户先要求补齐本地数据中心与灾备规划。";
 
 const viewportCases = [
   { name: "desktop", width: 1440, height: 900, mobile: false, fullFlow: true },
@@ -883,16 +884,19 @@ async function runViewport(cdp, url, viewport, historicalSolution) {
           syncLogItems: document.querySelectorAll('.sync-log-item').length,
           syncLogText: document.querySelector('[data-testid="sync-log"]')?.textContent ?? '',
         };
-        await waitUntil(() => document.querySelector('[data-testid="quick-analysis-result"]'), 5000);
-        const historySummaryInput = await waitUntil(
+        const savedSummaryInput = await waitUntil(
           () => document.querySelector('[data-testid="analysis-summary-request"]'),
           5000,
         );
-        const historySummarySetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-        historySummarySetter.call(historySummaryInput, '手动修订：客户先要求补齐本地数据中心与灾备规划。');
-        historySummaryInput.dispatchEvent(new Event('input', { bubbles: true }));
-        cardInteractions.quickAnalysisShown = Boolean(document.querySelector('[data-testid="quick-analysis-result"]'));
-        cardInteractions.quickAnalysisEditable = document.querySelector('[data-testid="analysis-summary-request"]')?.value?.includes('手动修订') ?? false;
+        const savedAnalysisSummary = savedSummaryInput.value;
+        const quickAiRequestCount = () => performance.getEntriesByType('resource')
+          .filter((entry) => {
+            const path = new URL(entry.name).pathname;
+            return path === '/api/quick-records/preview'
+              || (path.startsWith('/api/quick-records/') && path.endsWith('/analyze'));
+          })
+          .length;
+        const quickAiRequestsBeforeHistory = quickAiRequestCount();
         const createdRecordNote = await waitUntil(
           () => [...document.querySelectorAll('.record-note')]
             .find((item) => item.textContent.includes('日照中医医院')),
@@ -900,7 +904,51 @@ async function runViewport(cdp, url, viewport, historicalSolution) {
         );
         createdRecordNote.click();
         await waitUntil(() => document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院'), 5000);
+        let restoredSummaryInput = null;
+        try {
+          restoredSummaryInput = await waitUntil(
+            () => document.querySelector('[data-testid="analysis-summary-request"]'),
+            1200,
+          );
+        } catch {
+          restoredSummaryInput = null;
+        }
+        const restoredAnalysisSummary = restoredSummaryInput?.value ?? '';
+        if (restoredSummaryInput) {
+          const restoredSummarySetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          restoredSummarySetter.call(restoredSummaryInput, ${JSON.stringify(manualAnalysisRevision)});
+          restoredSummaryInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        await waitUntil(
+          () => document.querySelector('[data-testid="analysis-summary-request"]')?.value === ${JSON.stringify(manualAnalysisRevision)},
+          5000,
+        );
+        const saveAnalysisButton = document.querySelector('[data-testid="save-analysis-modifications"]');
+        if (!saveAnalysisButton) throw new Error('Missing explicit analysis save button');
+        saveAnalysisButton.click();
+        await waitUntil(
+          () => document.querySelector('.status-text')?.textContent?.includes('分析修改已保存'),
+          8000,
+        );
+        const customerSyncButton = [...document.querySelectorAll('.manual-sync button')]
+          .find((button) => button.textContent.includes('客户画像'));
+        if (!customerSyncButton) throw new Error('Missing customer re-sync button after analysis save');
+        customerSyncButton.click();
+        await waitUntil(
+          () => document.querySelector('.status-text')?.textContent?.includes('已同步'),
+          8000,
+        );
+        const quickAiRequestsAfterHistory = quickAiRequestCount();
         cardInteractions.quickRecordLoaded = document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院') ?? false;
+        cardInteractions.quickSavedAnalysisRestored = Boolean(savedAnalysisSummary)
+          && restoredAnalysisSummary === savedAnalysisSummary;
+        cardInteractions.quickHistoryAnalysisEditable = document.querySelector('[data-testid="analysis-summary-request"]')?.value === ${JSON.stringify(manualAnalysisRevision)};
+        cardInteractions.quickAnalysisSaveControl = Boolean(saveAnalysisButton);
+        cardInteractions.quickAnalysisSaved = document.querySelector('[data-testid="analysis-summary-request"]')?.value === ${JSON.stringify(manualAnalysisRevision)};
+        cardInteractions.quickAnalysisResynced = document.querySelector('.status-text')?.textContent?.includes('已同步') ?? false;
+        cardInteractions.quickHistoryNoAiReplay = quickAiRequestsAfterHistory === quickAiRequestsBeforeHistory;
+        cardInteractions.quickAiRequestsBeforeHistory = quickAiRequestsBeforeHistory;
+        cardInteractions.quickAiRequestsAfterHistory = quickAiRequestsAfterHistory;
         window.__qaCardInteractions = cardInteractions;
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('风险识别'))?.click();
@@ -1209,10 +1257,26 @@ async function runViewport(cdp, url, viewport, historicalSolution) {
         await waitUntil(() => document.querySelector('[data-testid="weekly-daily-view"]'), 5000);
         cardInteractions.weeklyDailyUsesRealSources =
           document.querySelectorAll('[data-testid="weekly-daily-view"] .day-card').length > 0;
+        const realWeeklyDayCard = await waitUntil(
+          () => document.querySelector('[data-testid="weekly-daily-view"] .day-card'),
+          5000,
+        );
+        realWeeklyDayCard.click();
+        await waitUntil(() => document.querySelector('[data-testid="weekly-expanded-day"]'), 5000);
+        cardInteractions.weeklyDayExpanded = Boolean(document.querySelector('[data-testid="weekly-expanded-day"]'));
         document.querySelector('[data-testid="weekly-summary-tab"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="weekly-summary-view"]'), 5000);
         cardInteractions.weeklySummaryUsesDraft =
           document.querySelector('[data-testid="weekly-summary-view"]')?.textContent?.includes('本周重点进展') ?? false;
+        const realWeeklyMetricCard = await waitUntil(
+          () => document.querySelector('[data-testid="weekly-summary-view"] .metric-card'),
+          5000,
+        );
+        realWeeklyMetricCard.click();
+        await waitUntil(() => document.querySelector('[data-testid="weekly-summary-view"] [data-testid="metric-expanded"]'), 5000);
+        cardInteractions.weeklyMetricExpanded = Boolean(
+          document.querySelector('[data-testid="weekly-summary-view"] [data-testid="metric-expanded"]'),
+        );
         const weeklyEditor = await waitUntil(() => document.querySelector('[data-testid="weekly-draft-editor"]'), 8000);
         const weeklyTextarea = weeklyEditor.querySelector('textarea');
         const weeklyTextSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
@@ -1666,8 +1730,30 @@ async function main() {
         const started = Date.now();
         while (Date.now() - started < 8000) {
           if (document.querySelector('[data-testid="page-overview"]')) {
+            const quickNav = [...document.querySelectorAll('.nav-item')]
+              .find((button) => button.textContent.includes('快速记录'));
+            quickNav?.click();
+            const quickStarted = Date.now();
+            let restoredAnalysis = '';
+            while (Date.now() - quickStarted < 5000) {
+              const record = [...document.querySelectorAll('.record-note')]
+                .find((item) => item.textContent.includes('日照中医医院'));
+              if (record) {
+                record.click();
+                const analysisStarted = Date.now();
+                while (Date.now() - analysisStarted < 3000) {
+                  restoredAnalysis = document.querySelector('[data-testid="analysis-summary-request"]')?.value ?? '';
+                  if (restoredAnalysis) break;
+                  await new Promise((resolve) => setTimeout(resolve, 100));
+                }
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
             return {
               overviewVisible: true,
+              quickAnalysisRestored: restoredAnalysis === ${JSON.stringify(manualAnalysisRevision)},
+              restoredAnalysis,
               loginVisible: Boolean(document.querySelector('[data-testid="login-submit"]')),
               legacyLocalStorage: window.localStorage.getItem('sentelligent.salesWorkbench.login'),
               localStorageEntries: Object.entries(window.localStorage),
@@ -1693,6 +1779,7 @@ async function main() {
     assert.ok(refreshSessionResponse, "page refresh should call GET /api/auth/session");
     assert.equal(refreshSessionResponse.status, 200, "page refresh should restore the active Cookie session");
     assert.equal(refreshState.overviewVisible, true, "page refresh should restore the protected workbench");
+    assert.equal(refreshState.quickAnalysisRestored, true, "page refresh should restore the manually saved quick-record analysis");
     assert.equal(refreshState.loginVisible, false, "page refresh should not show login for an active session");
     assert.equal(refreshState.legacyLocalStorage, null, "page refresh should not restore the legacy login cache");
     const persistedBrowserAuth = [
@@ -1700,6 +1787,14 @@ async function main() {
       ...refreshState.sessionStorageEntries,
     ].filter(([key, value]) => /auth|token|csrf|session|login/i.test(`${key} ${value}`));
     assert.deepEqual(persistedBrowserAuth, [], "browser storage should not persist authentication or CSRF tokens");
+    const refreshQuickAiRequests = cdp.networkResponses.slice(refreshStart).filter((item) => {
+      const pathname = new URL(item.url).pathname;
+      return item.method === "POST" && (
+        pathname === "/api/quick-records/preview" ||
+        (pathname.startsWith("/api/quick-records/") && pathname.endsWith("/analyze"))
+      );
+    });
+    assert.deepEqual(refreshQuickAiRequests, [], "refresh and historical selection must not replay quick-record AI requests");
 
     const browserWrite = cdp.networkResponses.find((item) =>
       ["POST", "PATCH", "DELETE"].includes(item.method) &&
@@ -1823,10 +1918,24 @@ async function main() {
     assert.equal(latestRecord?.status, "confirmed", "latest backend quick record should be confirmed");
     assert.equal(latestRecord?.customerId, "rizhao", "latest backend quick record should link to the customer");
     assert.equal(latestRecord?.opportunityId, "op-rizhao-plan", "latest backend quick record should link to the opportunity");
+    assert.equal(
+      latestRecord?.analysis?.summary?.request?.text,
+      manualAnalysisRevision,
+      "quick-record list should return the manually saved analysis after refresh",
+    );
+    assert.deepEqual(
+      [...(latestRecord?.confirmedTargets ?? [])].sort(),
+      ["customer", "opportunity", "weekly"],
+      "quick-record list should return all persisted confirmation targets",
+    );
     assert.match(
       (syncedCustomer.item?.syncPreview ?? []).join("\n"),
       /快速记录已确认/,
       "confirmed quick record should write back to customer sync preview",
+    );
+    assert.ok(
+      (syncedCustomer.item?.syncPreview ?? []).some((item) => item.includes(manualAnalysisRevision)),
+      "confirmation after manual analysis save should use the persisted revision",
     );
     assert.match(
       syncedOpportunity.item?.sourceRecord ?? "",
@@ -1962,10 +2071,21 @@ async function main() {
         assert.equal(result.cardInteractions.stageCard, true, "desktop stage card should open kanban");
         assert.equal(result.cardInteractions.weeklyStartsEmpty, true, "desktop weekly page should start from a real empty state");
         assert.equal(result.cardInteractions.weeklyDailyUsesRealSources, true, "desktop weekly daily view should render real draft sources");
+        assert.equal(result.cardInteractions.weeklyDayExpanded, true, "desktop real weekly day card should expand its source details");
         assert.equal(result.cardInteractions.weeklySummaryUsesDraft, true, "desktop weekly summary should render the generated draft");
+        assert.equal(result.cardInteractions.weeklyMetricExpanded, true, "desktop real weekly metric card should expand its details");
         assert.equal(result.cardInteractions.quickRecordLoaded, true, "desktop quick record card should load its content into the composer");
-        assert.equal(result.cardInteractions.quickAnalysisShown, true, "desktop quick record analysis should remain visible after confirmation");
-        assert.equal(result.cardInteractions.quickAnalysisEditable, true, "desktop quick record analysis should be manually editable");
+        assert.equal(result.cardInteractions.quickSavedAnalysisRestored, true, "desktop history should restore the saved quick-record analysis");
+        assert.equal(result.cardInteractions.quickHistoryAnalysisEditable, true, "desktop restored historical analysis should be manually editable");
+        assert.equal(result.cardInteractions.quickAnalysisSaveControl, true, "desktop restored analysis should expose an explicit save control");
+        assert.equal(result.cardInteractions.quickAnalysisSaved, true, "desktop analysis save should retain the manual revision");
+        assert.equal(result.cardInteractions.quickAnalysisResynced, true, "desktop should re-sync from the saved analysis revision");
+        assert.equal(result.cardInteractions.quickHistoryNoAiReplay, true, "desktop history should not trigger another analyze or preview request");
+        assert.equal(
+          result.cardInteractions.quickAiRequestsAfterHistory,
+          result.cardInteractions.quickAiRequestsBeforeHistory,
+          "desktop history click should preserve the quick-record AI request count",
+        );
         assert.equal(result.cardInteractions.stakeholderExpanded, true, "desktop customer stakeholder card should expand details");
         assert.equal(result.cardInteractions.chainExpanded, true, "desktop customer decision-chain card should expand details");
         assert.equal(result.cardInteractions.fieldTagExpanded, true, "desktop customer tag card should expand details");
