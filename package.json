@@ -23,6 +23,9 @@
     "wsl:stack:restart": "node scripts/wsl-stack.mjs restart",
     "wsl:stack:smoke": "node scripts/fixed-stack-smoke.mjs",
     "scan:secrets": "node scripts/project-secret-scan.mjs",
+    "release:package": "node scripts/release-package.mjs",
+    "preflight:production": "node scripts/production-preflight.mjs",
+    "test:release": "node --test scripts/release-package.test.mjs scripts/production-preflight.test.mjs",
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
     "qa:full": "npm run test:deploy && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration"
   },
