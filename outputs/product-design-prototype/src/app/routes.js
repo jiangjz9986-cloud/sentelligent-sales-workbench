@@ -244,19 +244,39 @@ function plainFilterEntries(filters) {
 function assertFilterValues(values, key) {
   if (
     !Array.isArray(values) ||
-    Object.getPrototypeOf(values) !== Array.prototype ||
-    values.length === 0 ||
-    Object.keys(values).length !== values.length
+    Object.getPrototypeOf(values) !== Array.prototype
   ) {
     throw new TypeError(`Invalid query filter: ${key}`);
   }
 
-  for (let index = 0; index < values.length; index += 1) {
-    if (!Object.hasOwn(values, index) || !isLegalFilterValue(values[index])) {
+  const ownKeys = Reflect.ownKeys(values);
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(values, "length");
+  const length = lengthDescriptor?.value;
+  if (
+    !lengthDescriptor ||
+    !("value" in lengthDescriptor) ||
+    lengthDescriptor.enumerable ||
+    !Number.isSafeInteger(length) ||
+    length <= 0 ||
+    ownKeys.length !== length + 1
+  ) {
+    throw new TypeError(`Invalid query filter: ${key}`);
+  }
+
+  const snapshot = [];
+  for (let index = 0; index < length; index += 1) {
+    const propertyKey = String(index);
+    const descriptor = Object.getOwnPropertyDescriptor(values, propertyKey);
+    if (
+      !descriptor?.enumerable ||
+      !("value" in descriptor) ||
+      !isLegalFilterValue(descriptor.value)
+    ) {
       throw new TypeError(`Invalid query filter: ${key}`);
     }
+    snapshot.push(descriptor.value);
   }
-  return values;
+  return snapshot;
 }
 
 function filterSearch(filters = {}) {
@@ -286,17 +306,14 @@ function splitPathSearchHash(value) {
 }
 
 function rawPartsFromString(value) {
-  const schemeMatch = value.match(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//);
-  const hasAuthority = Boolean(schemeMatch) || value.startsWith("//");
-  if (!hasAuthority) return splitPathSearchHash(value);
+  if (value.startsWith("/") && !value.startsWith("//")) {
+    return splitPathSearchHash(value);
+  }
 
-  const authorityStart = schemeMatch ? schemeMatch[0].length : 2;
-  const afterAuthorityStart = value.slice(authorityStart);
-  const boundaryIndex = afterAuthorityStart.search(/[/?#]/);
-  const authority =
-    boundaryIndex === -1
-      ? afterAuthorityStart
-      : afterAuthorityStart.slice(0, boundaryIndex);
+  const absoluteMatch = value.match(/^(https?):\/\/([^/?#]+)(.*)$/i);
+  if (!absoluteMatch) throw new TypeError("Invalid route URL");
+
+  const [, , authority, remainder] = absoluteMatch;
   if (
     !authority ||
     authority.includes("\\") ||
@@ -305,14 +322,24 @@ function rawPartsFromString(value) {
     throw new TypeError("Invalid route URL");
   }
 
-  if (boundaryIndex === -1) return { pathname: "/", search: "", hash: "" };
-  const remainder = afterAuthorityStart.slice(boundaryIndex);
-  return splitPathSearchHash(remainder.startsWith("/") ? remainder : `/${remainder}`);
+  const location = new URL(value);
+  if (
+    location.origin !== ROUTE_ORIGIN ||
+    location.username ||
+    location.password
+  ) {
+    throw new TypeError("Invalid route URL");
+  }
+
+  return splitPathSearchHash(
+    !remainder ? "/" : remainder.startsWith("/") ? remainder : `/${remainder}`,
+  );
 }
 
-function assertRawPathname(pathname) {
+function canonicalizeRawPathname(pathname) {
   if (
     typeof pathname !== "string" ||
+    !pathname.startsWith("/") ||
     pathname.includes("?") ||
     pathname.includes("#") ||
     pathname.includes("\\") ||
@@ -327,7 +354,11 @@ function assertRawPathname(pathname) {
   if (rawSegments.some((segment) => segment === "")) {
     throw new TypeError("Invalid route URL");
   }
-  for (const segment of rawSegments) decodePathSegment(segment, "route segment");
+  const encodedSegments = rawSegments.map((segment) =>
+    encodeURIComponent(decodePathSegment(segment, "route segment")),
+  );
+  const trailingSlash = pathname.length > 1 && pathname.endsWith("/") ? "/" : "";
+  return encodedSegments.length ? `/${encodedSegments.join("/")}${trailingSlash}` : "/";
 }
 
 function rawLocationParts(input) {
@@ -366,9 +397,12 @@ function rawLocationParts(input) {
 
 function extractLocation(input) {
   const raw = rawLocationParts(input);
-  assertRawPathname(raw.pathname);
+  const pathname = canonicalizeRawPathname(raw.pathname);
+  const location = new URL(raw.source, ROUTE_ORIGIN);
+  if (location.origin !== ROUTE_ORIGIN) throw new TypeError("Invalid route URL");
   return {
-    location: new URL(raw.source, ROUTE_ORIGIN),
+    pathname,
+    originalPathSearch: `${raw.pathname}${raw.search}`,
     rawSearch: raw.search,
     rawHash: raw.hash,
   };
@@ -393,9 +427,9 @@ export function parseWorkbenchRoute(input, { basePath = "/" } = {}) {
   } catch {
     return overviewFallback();
   }
-  const { location, rawSearch, rawHash } = extracted;
+  const { pathname, originalPathSearch, rawSearch, rawHash } = extracted;
 
-  let rawRelativePath = relativePath(location.pathname, normalizedBasePath);
+  let rawRelativePath = relativePath(pathname, normalizedBasePath);
   if (rawRelativePath == null) return overviewFallback();
 
   const hadTrailingSlash = rawRelativePath.length > 0 && rawRelativePath.endsWith("/");
@@ -422,8 +456,33 @@ export function parseWorkbenchRoute(input, { basePath = "/" } = {}) {
       hadTrailingSlash ||
       invalidFilters ||
       Boolean(rawHash) ||
-      canonicalUrl !== `${location.pathname}${location.search}`,
+      canonicalUrl !== originalPathSearch,
   };
+}
+
+function snapshotRouteState(route) {
+  if (
+    !route ||
+    typeof route !== "object" ||
+    Object.getPrototypeOf(route) !== Object.prototype
+  ) {
+    throw new TypeError("Invalid route state");
+  }
+
+  const snapshot = Object.create(null);
+  for (const key of Reflect.ownKeys(route)) {
+    const descriptor = Object.getOwnPropertyDescriptor(route, key);
+    if (
+      typeof key !== "string" ||
+      !descriptor?.enumerable ||
+      !("value" in descriptor)
+    ) {
+      throw new TypeError("Invalid route state");
+    }
+    snapshot[key] = descriptor.value;
+  }
+  if (!Object.hasOwn(snapshot, "page")) throw new TypeError("Invalid route page");
+  return snapshot;
 }
 
 function assertCanonicalRouteMetadata(route, meta) {
@@ -442,10 +501,9 @@ function assertNoEntityId(route) {
 }
 
 function pathForRoute(route) {
-  if (!route || typeof route !== "object") throw new TypeError("Invalid route state");
   const { page } = route;
+  if (!Object.hasOwn(PAGE_META, page)) throw new TypeError("Invalid route page");
   const meta = PAGE_META[page];
-  if (!meta) throw new TypeError("Invalid route page");
   assertCanonicalRouteMetadata(route, meta);
   const mode = route.mode === undefined ? meta.defaultMode : route.mode;
 
@@ -503,6 +561,7 @@ function pathForRoute(route) {
 
 export function buildWorkbenchUrl(route, { basePath = "/" } = {}) {
   const normalizedBasePath = normalizeBasePath(basePath);
-  const pathname = `${normalizedBasePath}${pathForRoute(route)}`;
-  return `${pathname}${filterSearch(route.filters)}`;
+  const state = snapshotRouteState(route);
+  const pathname = `${normalizedBasePath}${pathForRoute(state)}`;
+  return `${pathname}${filterSearch(state.filters)}`;
 }

@@ -298,7 +298,7 @@ describe("workbench route parser and builder", () => {
       ["/outside/../sentelligent/customers", { basePath: "/sentelligent/" }],
       ["/outside/%2E%2E/sentelligent/customers", { basePath: "/sentelligent/" }],
       [
-        "https://workbench.example/outside/../sentelligent/customers",
+        "https://workbench.invalid/outside/../sentelligent/customers",
         { basePath: "/sentelligent/" },
       ],
       [{ pathname: "/customers/../actions", search: "", hash: "" }, {}],
@@ -350,7 +350,7 @@ describe("workbench route parser and builder", () => {
     const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
 
     assert.deepEqual(
-      parseWorkbenchRoute("https://workbench.example/sentelligent/", {
+      parseWorkbenchRoute("https://workbench.invalid/sentelligent/", {
         basePath: "/sentelligent/",
       }),
       expectedRoute({ replace: true }),
@@ -371,6 +371,46 @@ describe("workbench route parser and builder", () => {
         filters: { q: ["test"] },
         replace: true,
       }),
+    );
+  });
+
+  it("matches a safely encoded base prefix after canonicalizing path segments", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+
+    assert.deepEqual(
+      parseWorkbenchRoute("/%73entelligent/customers", {
+        basePath: "/sentelligent/",
+      }),
+      expectedRoute({
+        page: "customers",
+        active: "customer",
+        mode: "list",
+        replace: true,
+      }),
+    );
+  });
+
+  it("strictly classifies string paths and accepts only same-origin absolute URLs", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+
+    for (const input of [
+      "customers",
+      "https:customers",
+      "https:/customers",
+      "https:../customers",
+      "//workbench.invalid/customers",
+      "https://example.com/customers",
+    ]) {
+      assert.deepEqual(
+        parseWorkbenchRoute(input),
+        expectedRoute({ replace: true }),
+        input,
+      );
+    }
+
+    assert.deepEqual(
+      parseWorkbenchRoute("https://workbench.invalid/customers"),
+      expectedRoute({ page: "customers", active: "customer", mode: "list" }),
     );
   });
 
@@ -530,6 +570,79 @@ describe("workbench route parser and builder", () => {
         filters: { q: ["value"], status: ["open", "won"] },
       }),
       "/customers?q=value&status=open&status=won",
+    );
+  });
+
+  it("snapshots filter arrays from own enumerable data descriptors", () => {
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+    let getterCalls = 0;
+    const accessorValues = ["safe"];
+    Object.defineProperty(accessorValues, "0", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return getterCalls === 1 ? "safe" : "bad\u0085value";
+      },
+    });
+
+    const sparseValues = [];
+    sparseValues.length = 1;
+    const extendedValues = ["safe"];
+    extendedValues.extra = "unexpected";
+    const hiddenValues = ["safe"];
+    Object.defineProperty(hiddenValues, "0", {
+      configurable: true,
+      enumerable: false,
+      value: "safe",
+      writable: true,
+    });
+
+    for (const values of [accessorValues, sparseValues, extendedValues, hiddenValues]) {
+      assert.throws(
+        () =>
+          buildWorkbenchUrl({
+            page: "customers",
+            mode: "list",
+            filters: { q: values },
+          }),
+        /filter/i,
+      );
+    }
+    assert.equal(getterCalls, 0);
+  });
+
+  it("accepts route state only from own enumerable data descriptors", () => {
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+    let getterCalls = 0;
+    const accessorRoute = { mode: "list" };
+    Object.defineProperty(accessorRoute, "page", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "customers";
+      },
+    });
+
+    for (const route of [
+      Object.create({ page: "customers", mode: "list" }),
+      Object.assign(Object.create({ mode: "list" }), { page: "customers" }),
+      accessorRoute,
+    ]) {
+      assert.throws(() => buildWorkbenchUrl(route), /route/i);
+    }
+    assert.equal(getterCalls, 0);
+
+    assert.equal(
+      buildWorkbenchUrl({
+        page: "customers",
+        mode: "list",
+        active: "customer",
+        readOnly: false,
+        filters: { q: ["safe"] },
+      }),
+      "/customers?q=safe",
     );
   });
 
