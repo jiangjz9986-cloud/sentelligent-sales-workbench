@@ -29,13 +29,8 @@
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
-  actionSeeds,
-  customers,
-  knowledgeItems,
   kanbanStages,
-  opportunities,
   quickRecords,
-  risks,
   solutionDocs,
   statusTone,
   weeklyDays,
@@ -125,9 +120,9 @@ async function generateBusinessSuggestion(apiClient, backendStatus, payload) {
 }
 
 export function Overview({
-  actions = actionSeeds,
-  customersList = customers,
-  opportunitiesList = opportunities,
+  actions = [],
+  customersList = [],
+  opportunitiesList = [],
   summary,
   setActive,
   setSelectedActionId,
@@ -141,30 +136,18 @@ export function Overview({
   openRiskList,
 }) {
   const metrics = summary?.metrics ?? {
-    quickRecords: { value: 19, badge: "3 条待同步", tone: "blue" },
-    opportunities: { value: 12, badge: "4 个需经理介入", tone: "amber" },
-    forecast: { value: "680 万", badge: "本月预测", tone: "green" },
-    risks: { value: 3, badge: "预算/竞争/资源", tone: "red" },
+    quickRecords: { value: 0, badge: "0 条待确认", tone: "blue" },
+    opportunities: { value: 0, badge: "0 个重点推进", tone: "amber" },
+    forecast: { value: "0 万", badge: "本月预测", tone: "green" },
+    risks: { value: 0, badge: "暂无高风险", tone: "red" },
   };
-  const priorityActions = (summary?.priorityActions?.length ? summary.priorityActions : [...actions, ...actionSeeds])
+  const priorityActions = (summary?.priorityActions ?? actions)
     .filter((item, index, source) => source.findIndex((candidate) => candidate.title === item.title) === index)
     .slice(0, 4);
-  const healthItems = summary?.customerHeat?.length
-    ? summary.customerHeat
-    : [
-        { name: "日照中医医院", label: "关系升温", value: 82, tone: "green" },
-        { name: "胜利油田中心医院", label: "复审跟进", value: 68, tone: "blue" },
-        { name: "黄岛区中医院", label: "调研确认", value: 56, tone: "amber" },
-      ];
-  const recentRecords = summary?.recentRecords?.length ? summary.recentRecords : quickRecords;
-  const overviewOpportunities = summary?.opportunities?.length ? summary.opportunities : opportunitiesList.slice(0, 4);
-  const rhythmItems = summary?.rhythm?.length
-    ? summary.rhythm
-    : [
-        { time: "09:30", title: "补齐日照中医十五五规划材料", type: "方案辅助", target: "solution" },
-        { time: "14:00", title: "约黄岛区中医院机房调研", type: "下一步动作", target: "actions" },
-        { time: "18:00", title: "整理本周记录", type: "周报与汇报", target: "weekly" },
-      ];
+  const healthItems = summary?.customerHeat ?? [];
+  const recentRecords = summary?.recentRecords ?? [];
+  const overviewOpportunities = summary?.opportunities ?? opportunitiesList.slice(0, 4);
+  const rhythmItems = summary?.rhythm ?? [];
 
   return (
     <div className="screen-grid overview-grid">
@@ -1779,7 +1762,7 @@ export function CustomerPage({
   openOpportunityDetail,
   onSaveCustomer,
   onDeleteCustomer,
-  opportunitiesList = opportunities,
+  opportunitiesList = [],
   viewMode = "list",
   setViewMode,
   apiClient,
@@ -1831,7 +1814,7 @@ export function CustomerPage({
           <div className="list-stack">
             {visibleItems.map((item) => (
               <article
-                className={`list-button customer-list-row ${selected.id === item.id ? "selected" : ""}`}
+                className={`list-button customer-list-row ${selected?.id === item.id ? "selected" : ""}`}
                 key={item.id}
               >
                 <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
@@ -2053,7 +2036,7 @@ export function OpportunityPage({
           <div className="list-stack">
             {visibleItems.map((item) => (
               <article
-                className={`list-button customer-list-row ${selected.id === item.id ? "selected" : ""}`}
+                className={`list-button customer-list-row ${selected?.id === item.id ? "selected" : ""}`}
                 key={item.id}
               >
                 <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
@@ -2232,7 +2215,7 @@ const actionStatusMeta = {
 };
 
 export function ActionsPage({
-  items = actionSeeds,
+  items = [],
   selected,
   onSelect,
   setActive,
@@ -2242,12 +2225,12 @@ export function ActionsPage({
   onDeleteAction,
   backendStatus,
 }) {
-  const current = selected ?? items[0] ?? actionSeeds[0];
+  const current = selected ?? items[0] ?? null;
   const [searchText, setSearchText] = useState("");
-  const currentStatus = actionStatusMeta[current.status] ?? actionStatusMeta.pending;
+  const currentStatus = actionStatusMeta[current?.status] ?? actionStatusMeta.pending;
   const isEditView = viewMode === "edit";
-  const [assignee, setAssignee] = useState(current.assignee ?? "继振");
-  const [due, setDue] = useState(current.due ?? "");
+  const [assignee, setAssignee] = useState(current?.assignee ?? "继振");
+  const [due, setDue] = useState(current?.due ?? "");
   const [statusMessage, setStatusMessage] = useState("确认负责人和时间后，可更新动作处理状态。");
   const cleanSearch = searchText.trim().toLowerCase();
   const visibleItems = cleanSearch
@@ -2259,13 +2242,13 @@ export function ActionsPage({
     : items;
 
   useEffect(() => {
-    setAssignee(current.assignee ?? "继振");
-    setDue(current.due ?? "");
+    setAssignee(current?.assignee ?? "继振");
+    setDue(current?.due ?? "");
     setStatusMessage("确认负责人和时间后，可更新动作处理状态。");
-  }, [current.id, current.assignee, current.due]);
+  }, [current?.id, current?.assignee, current?.due]);
 
   async function updateAction(status) {
-    if (!onUpdateActionStatus) return;
+    if (!current?.id || !onUpdateActionStatus) return;
     setStatusMessage("正在更新动作状态");
     try {
       const updated = await onUpdateActionStatus(current.id, {
@@ -2314,7 +2297,7 @@ export function ActionsPage({
           <div className="list-stack">
             {visibleItems.map((item) => (
               <article
-                className={`list-button customer-list-row ${current.id === item.id ? "selected" : ""}`}
+                className={`list-button customer-list-row ${current?.id === item.id ? "selected" : ""}`}
                 key={item.id}
               >
                 <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
@@ -2973,7 +2956,7 @@ function riskSourceLabel(sourceType) {
 }
 
 export function RiskPage({
-  items = risks,
+  items = [],
   selected,
   onSelect,
   viewMode = "list",
@@ -2982,14 +2965,14 @@ export function RiskPage({
   onDeleteRisk,
   backendStatus,
 }) {
-  const current = selected ?? items[0] ?? risks[0];
+  const current = selected ?? items[0] ?? null;
   const [searchText, setSearchText] = useState("");
   const isEditView = viewMode === "edit";
   const [statusMessage, setStatusMessage] = useState("选择风险后，可人工确认、开始处理或关闭。");
-  const [assignee, setAssignee] = useState(current.assignee ?? "继振");
-  const [due, setDue] = useState(current.due ?? "待确认");
-  const currentStatus = riskStatusMeta[current.status] ?? riskStatusMeta.open;
-  const sourceLabel = riskSourceLabel(current.sourceType);
+  const [assignee, setAssignee] = useState(current?.assignee ?? "继振");
+  const [due, setDue] = useState(current?.due ?? "待确认");
+  const currentStatus = riskStatusMeta[current?.status] ?? riskStatusMeta.open;
+  const sourceLabel = riskSourceLabel(current?.sourceType);
   const cleanSearch = searchText.trim().toLowerCase();
   const visibleItems = cleanSearch
     ? items.filter((item) =>
@@ -3000,9 +2983,9 @@ export function RiskPage({
     : items;
 
   useEffect(() => {
-    setAssignee(current.assignee ?? "继振");
-    setDue(current.due ?? "待确认");
-  }, [current.id, current.assignee, current.due]);
+    setAssignee(current?.assignee ?? "继振");
+    setDue(current?.due ?? "待确认");
+  }, [current?.id, current?.assignee, current?.due]);
 
   async function updateStatus(action) {
     if (!current?.id) return;
@@ -3054,7 +3037,7 @@ export function RiskPage({
           <div className="list-stack">
             {visibleItems.map((item) => (
               <article
-                className={`list-button customer-list-row ${current.id === item.id ? "selected" : ""}`}
+                className={`list-button customer-list-row ${current?.id === item.id ? "selected" : ""}`}
                 key={item.id}
               >
                 <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
@@ -3195,7 +3178,7 @@ export function RiskPage({
 }
 
 export function KnowledgePage({
-  items = knowledgeItems,
+  items = [],
   selected,
   onSelect,
   viewMode = "list",
@@ -3214,7 +3197,7 @@ export function KnowledgePage({
   const [searchStatus, setSearchStatus] = useState("按客户、场景或标签检索销售材料。");
   const [citationStatus, setCitationStatus] = useState("选择知识材料后，可生成带来源引用的方案或周报草稿。");
   const [citingTarget, setCitingTarget] = useState(null);
-  const current = selected ?? visibleItems[0] ?? knowledgeItems[0];
+  const current = selected ?? visibleItems[0] ?? null;
 
   useEffect(() => {
     setVisibleItems(items);
@@ -3294,7 +3277,7 @@ export function KnowledgePage({
           <div className="list-stack">
             {visibleItems.map((item) => (
               <article
-                className={`list-button customer-list-row ${current.id === item.id ? "selected" : ""}`}
+                className={`list-button customer-list-row ${current?.id === item.id ? "selected" : ""}`}
                 key={item.id}
               >
                 <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
@@ -3622,7 +3605,7 @@ export function WeixinBindingPage({ apiClient, backendStatus }) {
 }
 
 export function KanbanPage({
-  opportunitiesList = opportunities,
+  opportunitiesList = [],
   setActive,
   setSelectedOpportunityId,
   openOpportunityDetail,

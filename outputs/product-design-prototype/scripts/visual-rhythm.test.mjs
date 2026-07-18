@@ -159,6 +159,14 @@ async function openChromeCdp() {
         if (requestUrl.startsWith('${visualApiBaseUrl}/api/')) {
           const pathname = new URL(requestUrl).pathname;
           const isSession = pathname === '/api/auth/session';
+          const isCollection = [
+            '/api/customers',
+            '/api/opportunities',
+            '/api/actions',
+            '/api/risks',
+            '/api/knowledge',
+          ].includes(pathname);
+          const isSummary = pathname === '/api/dashboard/summary';
           const body = isSession
             ? {
                 account: 'visual-qa',
@@ -166,6 +174,21 @@ async function openChromeCdp() {
                 expiresAt: '2099-01-01T00:00:00.000Z',
                 csrfToken: 'visual-csrf',
               }
+            : isCollection
+              ? { items: [] }
+              : isSummary
+                ? {
+                    item: {
+                      metrics: {},
+                      priorityActions: [],
+                      customerHeat: [],
+                      recentRecords: [],
+                      opportunities: [],
+                      rhythm: [],
+                      stageCounts: [],
+                      generatedAt: '2099-01-01T00:00:00.000Z',
+                    },
+                  }
             : {
                 error: {
                   code: 'VISUAL_QA_OFFLINE',
@@ -174,7 +197,7 @@ async function openChromeCdp() {
                 },
               };
           return new Response(JSON.stringify(body), {
-            status: isSession ? 200 : 503,
+            status: isSession || isCollection || isSummary ? 200 : 503,
             headers: { 'Content-Type': 'application/json' },
           });
         }
@@ -349,7 +372,12 @@ describe("visual rhythm", () => {
       const failures = allResults.filter((item) => {
         const maxTopInset = item.viewport === "mobile" ? 16 : 30;
         const maxTitleGap = item.viewport === "mobile" ? 34 : 42;
-        const maxFirstViewportRatio = item.viewport === "desktop" ? 0.34 : 0.42;
+        const isEmptyState = item.firstClass === "workbench-state-panel" || /-list-view$/.test(item.firstClass);
+        const maxFirstViewportRatio = item.viewport === "desktop"
+          ? 0.34
+          : item.viewport === "mobile" && isEmptyState
+            ? 0.62
+            : 0.42;
         return (
           item.topInset === null ||
           item.titleToFirst === null ||

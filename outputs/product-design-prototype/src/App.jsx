@@ -1,11 +1,15 @@
 import {
+  CircleAlert,
+  Database,
   Eye,
   EyeOff,
   FileText,
+  LoaderCircle,
   LockKeyhole,
   LogIn,
   Mic,
   Plus,
+  RefreshCw,
   ShieldCheck,
   UserRound,
 } from "lucide-react";
@@ -20,14 +24,14 @@ import {
   createDisplaySession,
 } from "./sessionAuth.js";
 import {
-  actionSeeds,
-  customers,
-  knowledgeItems,
   navItems,
-  opportunities,
-  risks,
   solutionDocs,
 } from "./data/salesWorkbenchData.js";
+import {
+  createErrorWorkbenchState,
+  createLoadingWorkbenchState,
+  normalizeBootstrapData,
+} from "./app/workbenchState.js";
 import {
   ActionsPage,
   CustomerPage,
@@ -63,10 +67,10 @@ function resolveHeadingContext({
       return { title: "新增客户" };
     }
     if (customerViewMode === "edit") {
-      return { title: `修改${selectedCustomer.name}` };
+      return { title: selectedCustomer ? `修改${selectedCustomer.name}` : "客户列表" };
     }
     if (customerViewMode === "detail") {
-      return { title: selectedCustomer.name };
+      return { title: selectedCustomer?.name ?? "客户列表" };
     }
     return { title: "客户列表" };
   }
@@ -76,30 +80,30 @@ function resolveHeadingContext({
       return { title: "新增商机" };
     }
     if (opportunityViewMode === "edit") {
-      return { title: `修改${selectedOpportunity.name}` };
+      return { title: selectedOpportunity ? `修改${selectedOpportunity.name}` : "商机列表" };
     }
     if (opportunityViewMode === "detail") {
-      return { title: selectedOpportunity.name };
+      return { title: selectedOpportunity?.name ?? "商机列表" };
     }
     return { title: "商机列表" };
   }
 
   if (active === "actions") {
     if (actionViewMode === "edit") {
-      return { title: `修改${selectedAction.title}` };
+      return { title: selectedAction ? `修改${selectedAction.title}` : "下一步动作列表" };
     }
     if (actionViewMode === "detail") {
-      return { title: selectedAction.title };
+      return { title: selectedAction?.title ?? "下一步动作列表" };
     }
     return { title: "下一步动作列表" };
   }
 
   if (active === "risk") {
     if (riskViewMode === "edit") {
-      return { title: `修改${selectedRisk.title}` };
+      return { title: selectedRisk ? `修改${selectedRisk.title}` : "风险识别列表" };
     }
     if (riskViewMode === "detail") {
-      return { title: selectedRisk.title };
+      return { title: selectedRisk?.title ?? "风险识别列表" };
     }
     return { title: "风险识别列表" };
   }
@@ -109,10 +113,10 @@ function resolveHeadingContext({
       return { title: "新增知识材料" };
     }
     if (knowledgeViewMode === "edit") {
-      return { title: `修改${selectedKnowledge.title || "知识材料"}` };
+      return { title: selectedKnowledge ? `修改${selectedKnowledge.title || "知识材料"}` : "知识库材料列表" };
     }
     if (knowledgeViewMode === "detail") {
-      return { title: selectedKnowledge.title || "新增知识材料" };
+      return { title: selectedKnowledge?.title || "知识库材料列表" };
     }
     return { title: "知识库材料列表" };
   }
@@ -268,6 +272,48 @@ function AuthCheckingScreen() {
   );
 }
 
+function WorkbenchStatePanel({ status, errorMessage, onRetry, onCreateCustomer }) {
+  if (status === "loading") {
+    return (
+      <section className="workbench-state-panel" data-testid="workbench-loading" role="status" aria-live="polite">
+        <LoaderCircle className="state-spinner" size={28} />
+        <strong>正在加载业务数据</strong>
+        <p>客户、商机、动作、风险和知识记录正在从业务服务同步。</p>
+      </section>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <section className="workbench-state-panel error" data-testid="workbench-error" role="alert">
+        <CircleAlert size={28} />
+        <strong>业务数据加载失败</strong>
+        <p>{errorMessage}</p>
+        <button className="primary-button" type="button" data-testid="bootstrap-retry" onClick={onRetry}>
+          <RefreshCw size={16} />
+          重试
+        </button>
+      </section>
+    );
+  }
+
+  if (status === "empty") {
+    return (
+      <section className="workbench-state-panel" data-testid="workbench-empty" role="status">
+        <Database size={28} />
+        <strong>暂无业务数据</strong>
+        <p>当前数据库没有客户、商机、动作、风险或知识记录。</p>
+        <button className="primary-button" type="button" onClick={onCreateCustomer}>
+          <Plus size={16} />
+          新增客户
+        </button>
+      </section>
+    );
+  }
+
+  return null;
+}
+
 export function App() {
   const [authPhase, setAuthPhase] = useState("checking");
   const [authSession, setAuthSession] = useState(null);
@@ -340,19 +386,15 @@ export function App() {
 
 function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [active, setActive] = useState("overview");
-  const [workbenchCustomers, setWorkbenchCustomers] = useState(customers);
-  const [workbenchOpportunities, setWorkbenchOpportunities] = useState(opportunities);
-  const [workbenchActions, setWorkbenchActions] = useState(actionSeeds);
-  const [workbenchRisks, setWorkbenchRisks] = useState(risks);
-  const [workbenchKnowledge, setWorkbenchKnowledge] = useState(knowledgeItems);
-  const [overviewSummary, setOverviewSummary] = useState(null);
-  const [backendStatus, setBackendStatus] = useState(apiClient.isEnabled ? "connecting" : "static");
-  const [selectedCustomerId, setSelectedCustomerId] = useState(customers[0].id);
-  const [selectedOpportunityId, setSelectedOpportunityId] = useState(opportunities[0].id);
-  const [selectedActionId, setSelectedActionId] = useState(actionSeeds[0].id);
+  const [workbenchState, setWorkbenchState] = useState(createLoadingWorkbenchState);
+  const [backendStatus, setBackendStatus] = useState(apiClient.isEnabled ? "connecting" : "offline");
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
+  const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+  const [selectedOpportunityId, setSelectedOpportunityId] = useState(null);
+  const [selectedActionId, setSelectedActionId] = useState(null);
   const [selectedDocId, setSelectedDocId] = useState(solutionDocs[0].id);
-  const [selectedRiskId, setSelectedRiskId] = useState(risks[0].id);
-  const [selectedKnowledgeId, setSelectedKnowledgeId] = useState(knowledgeItems[0].id);
+  const [selectedRiskId, setSelectedRiskId] = useState(null);
+  const [selectedKnowledgeId, setSelectedKnowledgeId] = useState(null);
   const [customerViewMode, setCustomerViewMode] = useState("list");
   const [opportunityViewMode, setOpportunityViewMode] = useState("list");
   const [actionViewMode, setActionViewMode] = useState("list");
@@ -366,52 +408,110 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [solutionDraft, setSolutionDraft] = useState(null);
   const [weeklyDraft, setWeeklyDraft] = useState(null);
   const [weeklyDraftText, setWeeklyDraftText] = useState("");
+  const {
+    status: bootstrapStatus,
+    customers: workbenchCustomers,
+    opportunities: workbenchOpportunities,
+    actions: workbenchActions,
+    risks: workbenchRisks,
+    knowledge: workbenchKnowledge,
+    summary: overviewSummary,
+    errorMessage: bootstrapErrorMessage,
+  } = workbenchState;
+
+  function updateWorkbenchCollection(key, nextValue) {
+    setWorkbenchState((current) => normalizeBootstrapData({
+      ...current,
+      [key]: typeof nextValue === "function" ? nextValue(current[key]) : nextValue,
+    }));
+  }
+
+  function setWorkbenchCustomers(nextValue) {
+    updateWorkbenchCollection("customers", nextValue);
+  }
+
+  function setWorkbenchOpportunities(nextValue) {
+    updateWorkbenchCollection("opportunities", nextValue);
+  }
+
+  function setWorkbenchActions(nextValue) {
+    updateWorkbenchCollection("actions", nextValue);
+  }
+
+  function setWorkbenchRisks(nextValue) {
+    updateWorkbenchCollection("risks", nextValue);
+  }
+
+  function setWorkbenchKnowledge(nextValue) {
+    updateWorkbenchCollection("knowledge", nextValue);
+  }
+
+  function setOverviewSummary(nextValue) {
+    setWorkbenchState((current) => ({
+      ...current,
+      summary: typeof nextValue === "function" ? nextValue(current.summary) : nextValue,
+    }));
+  }
 
   useEffect(() => {
-    if (!apiClient.isEnabled) return;
-
     let cancelled = false;
+    setWorkbenchState(createLoadingWorkbenchState());
     setBackendStatus("connecting");
+    if (!apiClient.isEnabled) {
+      setWorkbenchState(createErrorWorkbenchState(new Error("业务服务未配置，请联系管理员。")));
+      setBackendStatus("offline");
+      return () => {
+        cancelled = true;
+      };
+    }
+
     apiClient
       .loadBootstrap()
       .then((data) => {
         if (cancelled) return;
-        if (data.customers.length > 0) setWorkbenchCustomers(data.customers);
-        if (data.opportunities.length > 0) setWorkbenchOpportunities(data.opportunities);
-        if (data.actions.length > 0) setWorkbenchActions(data.actions);
-        if (data.risks.length > 0) setWorkbenchRisks(data.risks);
-        if (data.knowledge.length > 0) setWorkbenchKnowledge(data.knowledge);
-        if (data.summary) setOverviewSummary(data.summary);
+        const nextState = normalizeBootstrapData(data);
+        setWorkbenchState(nextState);
+        setSelectedCustomerId(nextState.customers[0]?.id ?? null);
+        setSelectedOpportunityId(nextState.opportunities[0]?.id ?? null);
+        setSelectedActionId(nextState.actions[0]?.id ?? null);
+        setSelectedRiskId(nextState.risks[0]?.id ?? null);
+        setSelectedKnowledgeId(nextState.knowledge[0]?.id ?? null);
         setBackendStatus("connected");
       })
-      .catch(() => {
-        if (!cancelled) setBackendStatus("offline");
+      .catch((error) => {
+        if (cancelled) return;
+        setWorkbenchState(createErrorWorkbenchState(error));
+        setSelectedCustomerId(null);
+        setSelectedOpportunityId(null);
+        setSelectedActionId(null);
+        setSelectedRiskId(null);
+        setSelectedKnowledgeId(null);
+        setBackendStatus("offline");
       });
 
     return () => {
       cancelled = true;
     };
-  }, [apiClient]);
+  }, [apiClient, bootstrapAttempt]);
 
   const activeMeta = navItems.find((item) => item.id === active) ?? navItems[0];
   const apiStatusLabel = {
-    static: "本地",
     connecting: "连接中",
     connected: "在线",
     offline: "离线",
   }[backendStatus];
 
   const selectedCustomer =
-    workbenchCustomers.find((item) => item.id === selectedCustomerId) ?? workbenchCustomers[0] ?? customers[0];
+    workbenchCustomers.find((item) => item.id === selectedCustomerId) ?? workbenchCustomers[0];
   const selectedOpportunity =
-    workbenchOpportunities.find((item) => item.id === selectedOpportunityId) ?? workbenchOpportunities[0] ?? opportunities[0];
+    workbenchOpportunities.find((item) => item.id === selectedOpportunityId) ?? workbenchOpportunities[0];
   const selectedAction =
-    workbenchActions.find((item) => item.id === selectedActionId) ?? workbenchActions[0] ?? actionSeeds[0];
+    workbenchActions.find((item) => item.id === selectedActionId) ?? workbenchActions[0];
   const selectedDoc = solutionDocs.find((item) => item.id === selectedDocId) ?? solutionDocs[0];
   const selectedRisk =
-    workbenchRisks.find((item) => item.id === selectedRiskId) ?? workbenchRisks[0] ?? risks[0];
+    workbenchRisks.find((item) => item.id === selectedRiskId) ?? workbenchRisks[0];
   const selectedKnowledge =
-    workbenchKnowledge.find((item) => item.id === selectedKnowledgeId) ?? workbenchKnowledge[0] ?? knowledgeItems[0];
+    workbenchKnowledge.find((item) => item.id === selectedKnowledgeId) ?? workbenchKnowledge[0];
   const headingContext = resolveHeadingContext({
     active,
     customerViewMode,
@@ -712,7 +812,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setWorkbenchCustomers(remainingCustomers);
     setWorkbenchOpportunities((current) => current.filter((item) => item.customerId !== id));
     if (selectedCustomerId === id) {
-      setSelectedCustomerId(remainingCustomers[0]?.id ?? customers[0]?.id);
+      setSelectedCustomerId(remainingCustomers[0]?.id ?? null);
     }
     setCustomerViewMode("list");
     await refreshOverviewSummary();
@@ -736,7 +836,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       })),
     );
     if (selectedOpportunityId === id) {
-      setSelectedOpportunityId(remainingOpportunities[0]?.id ?? opportunities[0]?.id);
+      setSelectedOpportunityId(remainingOpportunities[0]?.id ?? null);
     }
     setOpportunityViewMode("list");
     await refreshOverviewSummary();
@@ -751,7 +851,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const remainingKnowledge = workbenchKnowledge.filter((item) => item.id !== id);
     setWorkbenchKnowledge(remainingKnowledge);
     if (selectedKnowledgeId === id) {
-      setSelectedKnowledgeId(remainingKnowledge[0]?.id ?? knowledgeItems[0]?.id);
+      setSelectedKnowledgeId(remainingKnowledge[0]?.id ?? null);
     }
     setKnowledgeViewMode("list");
     return deleted ?? { id };
@@ -765,7 +865,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const remainingActions = workbenchActions.filter((item) => item.id !== id);
     setWorkbenchActions(remainingActions);
     if (selectedActionId === id) {
-      setSelectedActionId(remainingActions[0]?.id ?? actionSeeds[0]?.id);
+      setSelectedActionId(remainingActions[0]?.id ?? null);
     }
     setActionViewMode("list");
     await refreshOverviewSummary();
@@ -780,7 +880,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const remainingRisks = workbenchRisks.filter((item) => item.id !== id);
     setWorkbenchRisks(remainingRisks);
     if (selectedRiskId === id) {
-      setSelectedRiskId(remainingRisks[0]?.id ?? risks[0]?.id);
+      setSelectedRiskId(remainingRisks[0]?.id ?? null);
     }
     setRiskViewMode("list");
     await refreshOverviewSummary();
@@ -791,6 +891,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     if (!knowledgeItem?.id) throw new Error("请选择要引用的知识材料");
     if (!apiClient.isEnabled || backendStatus !== "connected") {
       throw new Error("业务服务未连接，暂不能生成可追溯草稿");
+    }
+    if (!selectedCustomer?.id || !selectedOpportunity?.id) {
+      throw new Error("请先选择客户和商机");
     }
 
     if (target === "solution") {
@@ -850,6 +953,14 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setWorkbenchOpportunities((current) =>
       (refreshed.opportunities ?? []).reduce((items, item) => mergeById(items, item), current));
   }
+
+  const blockedByBootstrap =
+    bootstrapStatus === "loading" ||
+    bootstrapStatus === "error" ||
+    (bootstrapStatus === "empty" && (active === "overview" || active === "solution")) ||
+    (active === "solution" && (!selectedCustomer || !selectedOpportunity));
+  const visibleBootstrapStatus =
+    bootstrapStatus === "loading" || bootstrapStatus === "error" ? bootstrapStatus : "empty";
 
   return (
     <main className="app-shell">
@@ -912,9 +1023,30 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
             })}
           </aside>
 
-          <section className={`content ${active === "quick" ? "quick-content" : ""}`} data-testid={`page-${active}`}>
-            <PageHeading active={active} activeMeta={activeMeta} headingContext={headingContext} action={headingAction} />
+          <section
+            className={`content ${active === "quick" ? "quick-content" : ""}`}
+            data-testid={`page-${active}`}
+            data-workbench-state={bootstrapStatus}
+          >
+            <PageHeading
+              active={active}
+              activeMeta={activeMeta}
+              headingContext={headingContext}
+              action={bootstrapStatus === "loading" || bootstrapStatus === "error" ? null : headingAction}
+            />
 
+            {blockedByBootstrap ? (
+              <WorkbenchStatePanel
+                status={visibleBootstrapStatus}
+                errorMessage={bootstrapErrorMessage}
+                onRetry={() => setBootstrapAttempt((current) => current + 1)}
+                onCreateCustomer={() => {
+                  setCustomerViewMode("create");
+                  setActive("customer");
+                }}
+              />
+            ) : (
+              <>
             {active === "overview" && (
               <Overview
                 actions={workbenchActions}
@@ -1069,6 +1201,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 apiClient={apiClient}
                 backendStatus={backendStatus}
               />
+            )}
+              </>
             )}
           </section>
         </div>
