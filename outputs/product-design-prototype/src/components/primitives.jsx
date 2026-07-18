@@ -67,21 +67,41 @@ export function CompactList({ items, onSelect }) {
 }
 
 export function StageStrip({ stageCounts = [], onStageClick }) {
-  const dataByStage = new Map(stageCounts.map((item) => [item.stage, item]));
+  const fixedStages = [
+    "线索",
+    "初步沟通",
+    "调研机会",
+    "方案输出",
+    "方案交流",
+    "预算确认",
+    "暂停观察",
+  ];
+  const stageOrder = [...fixedStages];
+  const dataByStage = new Map(fixedStages.map((stage) => [stage, { count: 0, amounts: [] }]));
+
+  for (const item of Array.isArray(stageCounts) ? stageCounts : []) {
+    const stage = String(item?.stage ?? "").trim() || "未设置";
+    if (!dataByStage.has(stage)) {
+      dataByStage.set(stage, { count: 0, amounts: [] });
+      stageOrder.push(stage);
+    }
+
+    const stageData = dataByStage.get(stage);
+    const count = Number(item?.count);
+    stageData.count += Number.isFinite(count) ? count : 0;
+
+    const amount = item?.amount;
+    const amountText = amount === null || amount === undefined ? "" : String(amount).trim();
+    if (amountText && !stageData.amounts.includes(amountText)) {
+      stageData.amounts.push(amountText);
+    }
+  }
+
   return (
     <div className="stage-strip">
-      {[
-        "线索",
-        "初步沟通",
-        "调研机会",
-        "方案输出",
-        "方案交流",
-        "预算确认",
-        "暂停观察",
-      ].map((stage) => {
+      {stageOrder.map((stage) => {
         const stageData = dataByStage.get(stage);
-        const amount = stageData?.amount;
-        const hasAmount = amount !== null && amount !== undefined && String(amount).trim() !== "";
+        const amount = stageData.amounts.join(" / ");
 
         return (
           <button
@@ -91,8 +111,8 @@ export function StageStrip({ stageCounts = [], onStageClick }) {
             onClick={() => onStageClick?.(stage)}
           >
             <span>{stage}</span>
-            <strong>{stageData?.count ?? 0}</strong>
-            {hasAmount ? <small>{amount}</small> : null}
+            <strong>{stageData.count}</strong>
+            {amount ? <small>{amount}</small> : null}
           </button>
         );
       })}

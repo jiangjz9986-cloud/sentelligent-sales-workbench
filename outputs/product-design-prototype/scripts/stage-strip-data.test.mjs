@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,11 +22,113 @@ if (!chromePath) {
 let vite;
 let fixtureBaseUrl;
 
-function renderFixture(name) {
-  const userDataDir = mkdtempSync(join(tmpdir(), "stage-strip-test-"));
+async function terminateChildProcess(child) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
 
-  return new Promise((resolveRender, rejectRender) => {
-    const browser = spawn(
+  if (process.platform === "win32") {
+    await new Promise((resolveTermination) => {
+      const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timeout);
+        killer.off("close", finish);
+        killer.off("error", finish);
+        resolveTermination();
+      };
+      const timeout = setTimeout(() => {
+        killer.kill();
+        finish();
+      }, 2_000);
+      killer.once("close", finish);
+      killer.once("error", finish);
+    });
+    return;
+  }
+
+  await new Promise((resolveTermination) => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      child.off("close", finish);
+      child.off("error", finish);
+      resolveTermination();
+    };
+    const timeout = setTimeout(finish, 2_000);
+    child.once("close", finish);
+    child.once("error", finish);
+    if (!child.kill("SIGKILL")) finish();
+  });
+}
+
+function waitForChildProcess(child, { timeoutMs, terminate, cleanup }) {
+  return new Promise((resolveCompletion, rejectCompletion) => {
+    let settled = false;
+    let timeout;
+
+    async function finish({ code, error, shouldTerminate = false }) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.off("close", handleClose);
+      child.off("error", handleError);
+
+      let finalError = error;
+      if (shouldTerminate) {
+        try {
+          await terminate();
+        } catch (terminationError) {
+          finalError ??= terminationError;
+        }
+      }
+
+      try {
+        await cleanup();
+      } catch (cleanupError) {
+        finalError ??= cleanupError;
+      }
+
+      if (finalError) rejectCompletion(finalError);
+      else resolveCompletion(code);
+    }
+
+    function handleClose(code) {
+      void finish({ code });
+    }
+
+    function handleError(error) {
+      void finish({ error, shouldTerminate: true });
+    }
+
+    child.once("close", handleClose);
+    child.once("error", handleError);
+    timeout = setTimeout(() => {
+      void finish({
+        error: new Error(`Headless browser timed out after ${timeoutMs} ms`),
+        shouldTerminate: true,
+      });
+    }, timeoutMs);
+  });
+}
+
+async function renderFixture(name) {
+  const userDataDir = mkdtempSync(join(tmpdir(), "stage-strip-test-"));
+  const cleanup = () => rmSync(userDataDir, {
+    force: true,
+    maxRetries: 5,
+    recursive: true,
+    retryDelay: 50,
+  });
+  let browser;
+
+  try {
+    browser = spawn(
       chromePath,
       [
         "--headless=new",
@@ -38,32 +141,37 @@ function renderFixture(name) {
       ],
       { windowsHide: true },
     );
-    let stdout = "";
-    let stderr = "";
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 
-    browser.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    browser.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    browser.on("error", rejectRender);
-    browser.on("close", (code) => {
-      rmSync(userDataDir, { force: true, recursive: true });
-      if (code !== 0) {
-        rejectRender(new Error(`Headless browser exited with ${code}: ${stderr}`));
-        return;
-      }
-
-      const encodedSnapshot = stdout.match(/data-stage-strip-snapshot="([^"]+)"/)?.[1];
-      if (!encodedSnapshot) {
-        rejectRender(new Error(`StageStrip fixture did not render. Browser output: ${stdout}\n${stderr}`));
-        return;
-      }
-
-      resolveRender(JSON.parse(decodeURIComponent(encodedSnapshot)));
-    });
+  const completion = waitForChildProcess(browser, {
+    timeoutMs: 20_000,
+    cleanup,
+    terminate: () => terminateChildProcess(browser),
   });
+  let stdout = "";
+  let stderr = "";
+
+  browser.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+  browser.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  const code = await completion;
+  if (code !== 0) {
+    throw new Error(`Headless browser exited with ${code}: ${stderr}`);
+  }
+
+  const encodedSnapshot = stdout.match(/data-stage-strip-snapshot="([^"]+)"/)?.[1];
+  if (!encodedSnapshot) {
+    throw new Error(`StageStrip fixture did not render. Browser output: ${stdout}\n${stderr}`);
+  }
+
+  return JSON.parse(decodeURIComponent(encodedSnapshot));
 }
 
 before(async () => {
@@ -106,5 +214,89 @@ describe("StageStrip business data", () => {
         .filter(({ stage }) => stage !== "线索")
         .every(({ amount }) => amount === null),
     );
+  });
+
+  it("keeps unknown and unset stage counts visible without changing the total", async () => {
+    const rows = await renderFixture("mixed");
+    const renderedTotal = rows.reduce((total, { count }) => total + Number(count), 0);
+
+    assert.deepEqual(rows.find(({ stage }) => stage === "招投标"), {
+      stage: "招投标",
+      count: "3",
+      amount: "真实金额 120 万",
+    });
+    assert.deepEqual(rows.find(({ stage }) => stage === "未设置"), {
+      stage: "未设置",
+      count: "7",
+      amount: null,
+    });
+    assert.equal(rows.find(({ stage }) => stage === "初步沟通")?.count, "0");
+    assert.equal(renderedTotal, 12);
+  });
+});
+
+describe("browser process lifecycle", () => {
+  it("cleans once after a normal close without terminating an exited process", async () => {
+    const child = new EventEmitter();
+    let cleanupCalls = 0;
+    let terminateCalls = 0;
+    const completion = waitForChildProcess(child, {
+      timeoutMs: 20,
+      cleanup: async () => {
+        cleanupCalls += 1;
+      },
+      terminate: async () => {
+        terminateCalls += 1;
+      },
+    });
+
+    child.emit("close", 0);
+
+    assert.equal(await completion, 0);
+    child.emit("close", 0);
+    assert.equal(cleanupCalls, 1);
+    assert.equal(terminateCalls, 0);
+  });
+
+  it("terminates and cleans once after a child-process error", async () => {
+    const child = new EventEmitter();
+    let cleanupCalls = 0;
+    let terminateCalls = 0;
+    const completion = waitForChildProcess(child, {
+      timeoutMs: 20,
+      cleanup: async () => {
+        cleanupCalls += 1;
+      },
+      terminate: async () => {
+        terminateCalls += 1;
+      },
+    });
+
+    child.emit("error", new Error("spawn failed"));
+
+    await assert.rejects(completion, /spawn failed/);
+    child.emit("close", 1);
+    assert.equal(cleanupCalls, 1);
+    assert.equal(terminateCalls, 1);
+  });
+
+  it("terminates and cleans once when the child process times out", async () => {
+    const child = new EventEmitter();
+    let cleanupCalls = 0;
+    let terminateCalls = 0;
+    const completion = waitForChildProcess(child, {
+      timeoutMs: 10,
+      cleanup: async () => {
+        cleanupCalls += 1;
+      },
+      terminate: async () => {
+        terminateCalls += 1;
+      },
+    });
+
+    await assert.rejects(completion, /timed out after 10 ms/);
+    child.emit("close", 1);
+    assert.equal(cleanupCalls, 1);
+    assert.equal(terminateCalls, 1);
   });
 });

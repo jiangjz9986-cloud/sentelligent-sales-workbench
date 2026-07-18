@@ -7,6 +7,13 @@ const fixture = new URLSearchParams(window.location.search).get("fixture");
 const fixtures = {
   missing: [{ stage: "线索", count: 2 }],
   "real-amount": [{ stage: "线索", count: 2, amount: "真实金额 680 万" }],
+  mixed: [
+    { stage: "线索", count: 2 },
+    { stage: "招投标", count: 3, amount: "真实金额 120 万" },
+    { stage: "", count: 4 },
+    { stage: "   ", count: 1 },
+    { stage: null, count: 2 },
+  ],
 };
 
 flushSync(() => {
