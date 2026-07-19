@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -34,6 +35,19 @@ function makeWorkspace(prefix) {
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function withBom(text, encoding) {
+  if (encoding === "utf8") {
+    return Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text, "utf8")]);
+  }
+  const littleEndian = Buffer.from(text, "utf16le");
+  if (encoding === "utf16le") {
+    return Buffer.concat([Buffer.from([0xff, 0xfe]), littleEndian]);
+  }
+  const bigEndian = Buffer.from(littleEndian);
+  bigEndian.swap16();
+  return Buffer.concat([Buffer.from([0xfe, 0xff]), bigEndian]);
 }
 
 function stableTreeHash(files) {
@@ -87,6 +101,111 @@ function listFiles(root, current = root, files = []) {
   return files.sort();
 }
 
+function runGit(root, args) {
+  const result = spawnSync("git", args, {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(
+    result.status,
+    0,
+    result.error?.message || result.stderr || result.stdout,
+  );
+  return result.stdout.trim();
+}
+
+function commitWorkspace(workspace, branch = "codex/release-candidate") {
+  runGit(workspace.root, ["init", "--initial-branch", branch]);
+  runGit(workspace.root, ["config", "user.name", "Release Fixture"]);
+  runGit(workspace.root, [
+    "config",
+    "user.email",
+    "release-fixture@example.invalid",
+  ]);
+  runGit(workspace.root, ["add", "--all"]);
+  runGit(workspace.root, ["commit", "-m", "test: initialize release fixture"]);
+  return {
+    branch: runGit(workspace.root, ["branch", "--show-current"]),
+    commit: runGit(workspace.root, ["rev-parse", "HEAD"]),
+  };
+}
+
+function writeMinimumReleaseFixture(workspace) {
+  workspace.write("package.json", '{"name":"fixture","private":true}\n');
+  workspace.write("backend/src/server.js", "export const ready = true;\n");
+  workspace.write(
+    "backend/src/db/migrations/0001_baseline.sql",
+    "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+  );
+  workspace.write(
+    "outputs/product-design-prototype/dist/index.html",
+    "<main>ready</main>\n",
+  );
+}
+
+function runReleaseCli(args) {
+  return spawnSync(
+    process.execPath,
+    [join(projectRoot, "scripts", "release-package.mjs"), ...args],
+    {
+      cwd: projectRoot,
+      encoding: "utf8",
+      windowsHide: true,
+    },
+  );
+}
+
+function copyTrackedProject(sourceRoot, destinationRoot) {
+  const tracked = spawnSync(
+    "git",
+    ["-c", "core.quotepath=false", "ls-files", "-z", "--cached"],
+    {
+      cwd: sourceRoot,
+      encoding: "buffer",
+      windowsHide: true,
+    },
+  );
+  assert.equal(
+    tracked.status,
+    0,
+    tracked.error?.message || tracked.stderr.toString("utf8"),
+  );
+  for (const relativePath of tracked.stdout.toString("utf8").split("\0").filter(Boolean)) {
+    const sourcePath = join(sourceRoot, relativePath);
+    if (!existsSync(sourcePath)) continue;
+    const destinationPath = join(destinationRoot, relativePath);
+    mkdirSync(dirname(destinationPath), { recursive: true });
+    copyFileSync(sourcePath, destinationPath);
+  }
+
+  const productDist = join(
+    "outputs",
+    "product-design-prototype",
+    "dist",
+  );
+  copyDirectoryFiles(
+    join(sourceRoot, productDist),
+    join(destinationRoot, productDist),
+  );
+}
+
+function copyDirectoryFiles(sourceRoot, destinationRoot, current = sourceRoot) {
+  for (const entry of readdirSync(current, { withFileTypes: true })) {
+    const sourcePath = join(current, entry.name);
+    const relativePath = sourcePath.slice(sourceRoot.length + 1);
+    const destinationPath = join(destinationRoot, relativePath);
+    if (entry.isDirectory()) {
+      copyDirectoryFiles(sourceRoot, destinationRoot, sourcePath);
+    } else if (entry.isFile()) {
+      mkdirSync(dirname(destinationPath), { recursive: true });
+      copyFileSync(sourcePath, destinationPath);
+    } else {
+      assert.fail(`real release fixture cannot copy non-file entry: ${sourcePath}`);
+    }
+  }
+}
+
 describe("portable release package", () => {
   it("keeps every tracked npm cache setting portable", () => {
     const configFiles = trackedNpmConfigs();
@@ -107,6 +226,105 @@ describe("portable release package", () => {
         /(?:^|[\\/])(?:Users|home)[\\/][^\\/]+/i,
         `${relativePath} must not embed a user profile`,
       );
+    }
+  });
+
+  it("rejects a dirty release source through the API", async () => {
+    const workspace = makeWorkspace("sentelligent-dirty-api-");
+    const output = makeWorkspace("sentelligent-dirty-api-output-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      commitWorkspace(workspace);
+      workspace.write("README.md", "uncommitted release change\n");
+
+      const { createReleasePackage } = await loadReleaseModule();
+      await assert.rejects(
+        createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+        }),
+        /dirty|clean/i,
+      );
+      assert.deepEqual(listFiles(output.root), []);
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("rejects API dirty and Git metadata bypass options", async () => {
+    for (const [index, bypass] of [
+      ["allowDirty", { allowDirty: true }],
+      [
+        "gitInfo",
+        {
+          gitInfo: {
+            branch: "forged/release",
+            commit: "0123456789abcdef0123456789abcdef01234567",
+            clean: true,
+          },
+        },
+      ],
+    ]) {
+      const workspace = makeWorkspace(`sentelligent-api-bypass-${index}-`);
+      const output = makeWorkspace(`sentelligent-api-bypass-output-${index}-`);
+      try {
+        writeMinimumReleaseFixture(workspace);
+        commitWorkspace(workspace);
+        if (index === "allowDirty") {
+          workspace.write("README.md", "dirty bypass attempt\n");
+        }
+
+        const { createReleasePackage } = await loadReleaseModule();
+        await assert.rejects(
+          createReleasePackage({
+            sourceRoot: workspace.root,
+            outputDir: output.root,
+            ...bypass,
+          }),
+          new RegExp(`${index}.*(?:unsupported|not allowed)|(?:unsupported|not allowed).*${index}`, "i"),
+        );
+        assert.deepEqual(listFiles(output.root), []);
+      } finally {
+        workspace.cleanup();
+        output.cleanup();
+      }
+    }
+  });
+
+  it("rejects dirty CLI sources and does not accept --allow-dirty", () => {
+    const dirtyWorkspace = makeWorkspace("sentelligent-dirty-cli-");
+    const dirtyOutput = makeWorkspace("sentelligent-dirty-cli-output-");
+    const cleanWorkspace = makeWorkspace("sentelligent-clean-cli-");
+    const cleanOutput = makeWorkspace("sentelligent-clean-cli-output-");
+    try {
+      writeMinimumReleaseFixture(dirtyWorkspace);
+      commitWorkspace(dirtyWorkspace);
+      dirtyWorkspace.write("README.md", "dirty CLI attempt\n");
+
+      const dirtyResult = runReleaseCli([
+        `--source-root=${dirtyWorkspace.root}`,
+        `--output-dir=${dirtyOutput.root}`,
+      ]);
+      assert.notEqual(dirtyResult.status, 0);
+      assert.match(dirtyResult.stderr, /dirty|clean/i);
+      assert.deepEqual(listFiles(dirtyOutput.root), []);
+
+      writeMinimumReleaseFixture(cleanWorkspace);
+      commitWorkspace(cleanWorkspace);
+      const bypassResult = runReleaseCli([
+        `--source-root=${cleanWorkspace.root}`,
+        `--output-dir=${cleanOutput.root}`,
+        "--allow-dirty",
+      ]);
+      assert.notEqual(bypassResult.status, 0);
+      assert.match(bypassResult.stderr, /unknown argument.*allow-dirty/i);
+      assert.deepEqual(listFiles(cleanOutput.root), []);
+    } finally {
+      dirtyWorkspace.cleanup();
+      dirtyOutput.cleanup();
+      cleanWorkspace.cleanup();
+      cleanOutput.cleanup();
     }
   });
 
@@ -185,7 +403,7 @@ describe("portable release package", () => {
         "sessions/browser.json",
         "node_modules/example/index.js",
         "outputs/product-design-prototype/node_modules/example/index.js",
-        ".git/config",
+        ".git/private-fixture",
         ".codex/state.json",
         ".runtime/handoff/private.txt",
         ".npm-cache/cache.bin",
@@ -202,17 +420,14 @@ describe("portable release package", () => {
       ];
       for (const file of excludedFiles) workspace.write(file, `private fixture: ${file}\n`);
 
+      const source = commitWorkspace(workspace);
+
       const { createReleasePackage } = await loadReleaseModule();
       assert.equal(typeof createReleasePackage, "function");
 
       const result = await createReleasePackage({
         sourceRoot: workspace.root,
         outputDir: output.root,
-        gitInfo: {
-          branch: "codex/release-candidate",
-          commit: "0123456789abcdef0123456789abcdef01234567",
-          clean: true,
-        },
         createdAt: "2026-07-19T08:00:00.000Z",
       });
 
@@ -245,11 +460,8 @@ describe("portable release package", () => {
       const manifest = JSON.parse(
         readFileSync(join(packageRoot, "release-manifest.json"), "utf8"),
       );
-      assert.equal(manifest.source.branch, "codex/release-candidate");
-      assert.equal(
-        manifest.source.commit,
-        "0123456789abcdef0123456789abcdef01234567",
-      );
+      assert.equal(manifest.source.branch, source.branch);
+      assert.equal(manifest.source.commit, source.commit);
       assert.equal(
         manifest.buildHashes.files[
           "outputs/product-design-prototype/dist/assets/app.js"
@@ -380,17 +592,13 @@ describe("portable release package", () => {
           "<main>ready</main>\n",
         );
         workspace.write(fixture.path, fixture.content(fixture.value));
+        commitWorkspace(workspace);
 
         const { createReleasePackage } = await loadReleaseModule();
         await assert.rejects(
           createReleasePackage({
             sourceRoot: workspace.root,
             outputDir: output.root,
-            gitInfo: {
-              branch: "codex/release-candidate",
-              commit: "0123456789abcdef0123456789abcdef01234567",
-              clean: true,
-            },
             createdAt: "2026-07-19T08:00:00.000Z",
           }),
           (error) => {
@@ -407,13 +615,189 @@ describe("portable release package", () => {
     }
   });
 
+  it("allows explicit low-entropy credential labels only inside test source", async () => {
+    const workspace = makeWorkspace("sentelligent-test-placeholder-");
+    const output = makeWorkspace("sentelligent-test-placeholder-output-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      workspace.write(
+        "backend/tests/machine-auth.test.js",
+        'const config = { weixinAgentApiToken: "machine-secret" };\n',
+      );
+      commitWorkspace(workspace);
+
+      const { createReleasePackage } = await loadReleaseModule();
+      const result = await createReleasePackage({
+        sourceRoot: workspace.root,
+        outputDir: output.root,
+        createdAt: "2026-07-19T08:00:00.000Z",
+      });
+      assert.ok(existsSync(result.archivePath));
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("rejects sensitive assignments in ordinary YAML, JSON, and BOM text encodings", async () => {
+    const sensitiveFixtures = [
+      {
+        path: "config/runtime-placeholder.yaml",
+        value: "machine-secret",
+        content(value) {
+          return `clientSecret: ${value}\n`;
+        },
+      },
+      {
+        path: "config/runtime-prefixed-random.yaml",
+        value: `test_${sha256("prefixed-random-access-token")}`,
+        content(value) {
+          return `accessToken: ${value}\n`;
+        },
+      },
+      {
+        path: "config/runtime-weak-password.yaml",
+        value: "secret",
+        assertValueHidden: false,
+        content(value) {
+          return `password: ${value}\n`;
+        },
+      },
+      {
+        path: "src/runtime-config.js",
+        value: sha256("ordinary-javascript-client-secret"),
+        content(value) {
+          return `export const clientSecret = "${value}";\n`;
+        },
+      },
+      {
+        path: "config/runtime.yaml",
+        value: sha256("ordinary-yaml-client-secret"),
+        content(value) {
+          return `client_secret: ${value}\n`;
+        },
+      },
+      {
+        path: "config/runtime.json",
+        value: `token_${sha256("ordinary-json-access-token")}`,
+        content(value) {
+          return `${JSON.stringify({ accessToken: value }, null, 2)}\n`;
+        },
+      },
+      {
+        path: "config/runtime-config.yaml",
+        value: sha256("utf8-bom-api-key"),
+        content(value) {
+          return withBom(`api-key: ${value}\n`, "utf8");
+        },
+      },
+      {
+        path: "backend/.env.example",
+        value: sha256("utf16le-model-key"),
+        content(value) {
+          return withBom(`MODEL_API_KEY=${value}\n`, "utf16le");
+        },
+      },
+      {
+        path: "config/credentials.env.example",
+        value: sha256("utf16be-password"),
+        content(value) {
+          return withBom(`password=${value}\n`, "utf16be");
+        },
+      },
+    ];
+
+    for (const [index, fixture] of sensitiveFixtures.entries()) {
+      const workspace = makeWorkspace(`sentelligent-text-secret-${index}-`);
+      const output = makeWorkspace(`sentelligent-text-output-${index}-`);
+      try {
+        workspace.write("package.json", '{"name":"fixture","private":true}\n');
+        workspace.write("backend/src/server.js", "export const ready = true;\n");
+        workspace.write(
+          "backend/src/db/migrations/0001_baseline.sql",
+          "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+        );
+        workspace.write(
+          "outputs/product-design-prototype/dist/index.html",
+          "<main>ready</main>\n",
+        );
+        workspace.write(fixture.path, fixture.content(fixture.value));
+        commitWorkspace(workspace);
+
+        const { createReleasePackage } = await loadReleaseModule();
+        await assert.rejects(
+          createReleasePackage({
+            sourceRoot: workspace.root,
+            outputDir: output.root,
+            createdAt: "2026-07-19T08:00:00.000Z",
+          }),
+          (error) => {
+            assert.match(error.message, /secret/i);
+            if (fixture.assertValueHidden !== false) {
+              assert.ok(!error.message.includes(fixture.value));
+            }
+            return true;
+          },
+        );
+        assert.deepEqual(listFiles(output.root), []);
+      } finally {
+        workspace.cleanup();
+        output.cleanup();
+      }
+    }
+  });
+
+  it("fails closed when explicit text configuration cannot be decoded safely", async () => {
+    const malformedFixtures = [
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from("clientSecret=not-a-secret\0trailing", "utf8"),
+    ];
+
+    for (const [index, content] of malformedFixtures.entries()) {
+      const workspace = makeWorkspace(`sentelligent-bad-text-${index}-`);
+      const output = makeWorkspace(`sentelligent-bad-text-output-${index}-`);
+      try {
+        workspace.write("package.json", '{"name":"fixture","private":true}\n');
+        workspace.write("backend/src/server.js", "export const ready = true;\n");
+        workspace.write(
+          "backend/src/db/migrations/0001_baseline.sql",
+          "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+        );
+        workspace.write(
+          "outputs/product-design-prototype/dist/index.html",
+          "<main>ready</main>\n",
+        );
+        workspace.write(`config/runtime-${index}.yaml`, content);
+        commitWorkspace(workspace);
+
+        const { createReleasePackage } = await loadReleaseModule();
+        await assert.rejects(
+          createReleasePackage({
+            sourceRoot: workspace.root,
+            outputDir: output.root,
+            createdAt: "2026-07-19T08:00:00.000Z",
+          }),
+          (error) => {
+            assert.match(error.message, /secret|decode|text/i);
+            assert.ok(!error.message.includes("not-a-secret"));
+            return true;
+          },
+        );
+        assert.deepEqual(listFiles(output.root), []);
+      } finally {
+        workspace.cleanup();
+        output.cleanup();
+      }
+    }
+  });
+
   it(
     "builds and extracts the real project through Unicode source, output, and destination paths",
     { timeout: 180_000 },
     async () => {
-      const acceptance = makeWorkspace("森特智行-发布验收-");
-      const outputDir = join(acceptance.root, "发布包");
-      const extractDir = join(acceptance.root, "解压结果");
+      const source = makeWorkspace("森特智行-源代码-");
+      const output = makeWorkspace("森特智行-发布包-");
+      const extracted = makeWorkspace("森特智行-解压结果-");
       const frontendRoot = join(
         projectRoot,
         "outputs",
@@ -438,16 +822,18 @@ describe("portable release package", () => {
           build.error?.message || build.stderr || build.stdout,
         );
 
+        copyTrackedProject(projectRoot, source.root);
+        commitWorkspace(source);
+
         const { createReleasePackage } = await loadReleaseModule();
         const result = await createReleasePackage({
-          sourceRoot: projectRoot,
-          outputDir,
-          allowDirty: true,
+          sourceRoot: source.root,
+          outputDir: output.root,
           createdAt: "2026-07-19T08:00:00.000Z",
         });
-        extractArchive(result.archivePath, extractDir);
+        extractArchive(result.archivePath, extracted.root);
 
-        const packageRoot = join(extractDir, result.rootDirectory);
+        const packageRoot = join(extracted.root, result.rootDirectory);
         const manifest = JSON.parse(
           readFileSync(join(packageRoot, "release-manifest.json"), "utf8"),
         );
@@ -469,7 +855,9 @@ describe("portable release package", () => {
         assert.ok(Object.keys(manifest.sourceHashes.files).length > 0);
         assert.match(manifest.sourceHashes.treeSha256, /^[a-f0-9]{64}$/);
       } finally {
-        acceptance.cleanup();
+        source.cleanup();
+        output.cleanup();
+        extracted.cleanup();
       }
     },
   );

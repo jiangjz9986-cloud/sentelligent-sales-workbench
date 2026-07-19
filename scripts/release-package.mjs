@@ -8,8 +8,9 @@ import {
   readdirSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TextDecoder } from "node:util";
 import { gzipSync } from "node:zlib";
 
 const defaultRoot = resolve(import.meta.dirname, "..");
@@ -89,10 +90,51 @@ const highRiskSecretPatterns = Object.freeze([
   },
 ]);
 
-const quotedCredentialAssignmentPattern =
-  /\b(?:api[_-]?key|secret|token|password)\b[ \t]*[:=][ \t]*(["'])([^"'\r\n]{8,})\1/gi;
-const templateAssignmentPattern =
-  /["']?([A-Za-z][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^,\s\]\r\n#;]+))/g;
+const sensitiveAssignmentPattern =
+  /(?:^|[\r\n,{;])[ \t]*(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*(?:"((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)'|([^,"'\r\n\]#;]*))/g;
+
+const explicitTextExtensions = new Set([
+  ".cjs",
+  ".conf",
+  ".config",
+  ".css",
+  ".env",
+  ".example",
+  ".html",
+  ".ini",
+  ".js",
+  ".json",
+  ".jsx",
+  ".md",
+  ".mjs",
+  ".npmrc",
+  ".properties",
+  ".ps1",
+  ".service",
+  ".sh",
+  ".sql",
+  ".toml",
+  ".ts",
+  ".tsx",
+  ".txt",
+  ".xml",
+  ".yaml",
+  ".yml",
+]);
+
+const configurationAssignmentExtensions = new Set([
+  ".conf",
+  ".config",
+  ".env",
+  ".example",
+  ".ini",
+  ".json",
+  ".npmrc",
+  ".properties",
+  ".toml",
+  ".yaml",
+  ".yml",
+]);
 
 function normalizeRelativePath(filePath) {
   return String(filePath)
@@ -115,29 +157,254 @@ function isCredentialTemplatePath(filePath) {
 }
 
 function isSensitiveAssignmentName(name) {
-  return /(?:credential|secret|token|password|private.?key|api.?key|access.?key)/i.test(
-    name,
+  const compact = String(name)
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  return [
+    "credential",
+    "password",
+    "passwordhash",
+    "passphrase",
+    "secret",
+    "secrethash",
+    "token",
+    "tokenhash",
+    "accesstoken",
+    "refreshtoken",
+    "authtoken",
+    "apitoken",
+    "clientsecret",
+    "apisecret",
+    "apikey",
+    "privatekey",
+    "privatekeypem",
+    "accesskey",
+  ].some(
+    (suffix) => compact === suffix || compact.endsWith(suffix),
   );
 }
 
-function isPlaceholderValue(rawValue) {
+const testFixtureMarkers = new Set([
+  "admin",
+  "analysis",
+  "audit",
+  "blocked",
+  "csrf",
+  "dev",
+  "development",
+  "dummy",
+  "example",
+  "fake",
+  "fixture",
+  "local",
+  "machine",
+  "mock",
+  "model",
+  "password",
+  "qa",
+  "sample",
+  "secret",
+  "test",
+  "token",
+  "unit",
+  "visual",
+  "wrong",
+]);
+
+const placeholderLeadWords = new Set([
+  "change",
+  "dev",
+  "development",
+  "dummy",
+  "example",
+  "fake",
+  "fixture",
+  "invalid",
+  "legacy",
+  "local",
+  "mock",
+  "must",
+  "not",
+  "placeholder",
+  "qa",
+  "redacted",
+  "replace",
+  "rotated",
+  "sample",
+  "sentinel",
+  "tbd",
+  "test",
+  "todo",
+  "too",
+  "unit",
+  "unset",
+  "warning",
+  "wrong",
+  "wx",
+  "your",
+]);
+
+const placeholderWords = new Set([
+  ...placeholderLeadWords,
+  ...testFixtureMarkers,
+  "a",
+  "access",
+  "api",
+  "backend",
+  "be",
+  "client",
+  "conflict",
+  "credential",
+  "current",
+  "env",
+  "existing",
+  "expired",
+  "export",
+  "extra",
+  "failure",
+  "from",
+  "hash",
+  "here",
+  "in",
+  "key",
+  "login",
+  "logout",
+  "me",
+  "methods",
+  "new",
+  "old",
+  "only",
+  "plaintext",
+  "private",
+  "production",
+  "provider",
+  "restore",
+  "restored",
+  "session",
+  "shared",
+  "short",
+  "stale",
+  "used",
+  "value",
+  "weixin",
+]);
+
+function isTestSourcePath(filePath) {
+  const normalized = normalizeRelativePath(filePath).toLowerCase();
+  return (
+    /(?:^|\/)(?:__tests__|fixtures|test|tests)(?:\/|$)/.test(normalized) ||
+    /\.(?:spec|test)\.[cm]?[jt]sx?$/.test(normalized)
+  );
+}
+
+function placeholderParts(value) {
+  const normalized = value.replace(/([a-z0-9])([A-Z])/g, "$1-$2");
+  if (
+    normalized.length > 96 ||
+    !/^[A-Za-z0-9]+(?:[-_ ][A-Za-z0-9]+){0,7}$/.test(normalized)
+  ) {
+    return null;
+  }
+  const parts = normalized.toLowerCase().split(/[-_ ]/);
+  return parts.every((part) =>
+    /^\d+$/.test(part) ? part.length <= 4 : placeholderWords.has(part),
+  )
+    ? parts
+    : null;
+}
+
+function isExplicitPlaceholderLabel(value) {
+  const parts = placeholderParts(value);
+  return parts !== null && placeholderLeadWords.has(parts[0]);
+}
+
+function isExplicitTestFixtureLabel(value, filePath) {
+  if (!isTestSourcePath(filePath)) return false;
+  const parts = placeholderParts(value);
+  return parts !== null && parts.some((part) => testFixtureMarkers.has(part));
+}
+
+function isPlaceholderValue(rawValue, filePath) {
   const value = String(rawValue ?? "").trim();
   if (!value || /^(?:null|none|undefined)$/i.test(value)) return true;
   if (
     /^(?:<[^>]+>|\$\{[^}]+\}|\{\{[^}]+\}\})$/.test(value) ||
-    /^(?:your|replace|change|example|sample|placeholder|dummy|mock|test|fixture|redacted|unset|todo|tbd|not[-_ ]?set)(?:$|[-_ ].*)/i.test(
-      value,
-    ) ||
-    /^[x*._-]{4,}$/i.test(value)
+    isExplicitPlaceholderLabel(value) ||
+    /^[x*._-]{4,}$/i.test(value) ||
+    isExplicitTestFixtureLabel(value, filePath)
   ) {
     return true;
   }
   return false;
 }
 
-function textContent(content) {
-  if (!Buffer.isBuffer(content) || content.includes(0)) return null;
-  return content.toString("utf8");
+function isExplicitTextPath(filePath) {
+  const fileName = basename(filePath).toLowerCase();
+  return (
+    explicitTextExtensions.has(extname(fileName)) ||
+    ["caddyfile", "dockerfile", "license", "makefile"].includes(fileName)
+  );
+}
+
+function isConfigurationAssignmentPath(filePath) {
+  return (
+    configurationAssignmentExtensions.has(extname(filePath).toLowerCase()) ||
+    isCredentialTemplatePath(filePath)
+  );
+}
+
+function decodeText(encoding, content) {
+  return new TextDecoder(encoding, { fatal: true, ignoreBOM: true }).decode(
+    content,
+  );
+}
+
+function textContent(filePath, content) {
+  if (!Buffer.isBuffer(content)) return null;
+  const explicitText = isExplicitTextPath(filePath);
+  let text;
+  try {
+    if (
+      content.length >= 3 &&
+      content[0] === 0xef &&
+      content[1] === 0xbb &&
+      content[2] === 0xbf
+    ) {
+      text = decodeText("utf-8", content.subarray(3));
+    } else if (
+      content.length >= 2 &&
+      content[0] === 0xff &&
+      content[1] === 0xfe
+    ) {
+      text = decodeText("utf-16le", content.subarray(2));
+    } else if (
+      content.length >= 2 &&
+      content[0] === 0xfe &&
+      content[1] === 0xff
+    ) {
+      text = decodeText("utf-16be", content.subarray(2));
+    } else {
+      if (content.includes(0)) {
+        if (!explicitText) return null;
+        throw new Error("NUL in explicit text");
+      }
+      text = decodeText("utf-8", content);
+    }
+  } catch {
+    if (!explicitText) return null;
+    throw new Error(
+      `Release content secret gate could not safely decode ${filePath} (text-decoding)`,
+    );
+  }
+
+  if (text.includes("\0")) {
+    if (!explicitText) return null;
+    throw new Error(
+      `Release content secret gate could not safely decode ${filePath} (unexpected-nul)`,
+    );
+  }
+  return text;
 }
 
 function lineNumberAt(content, index) {
@@ -146,7 +413,7 @@ function lineNumberAt(content, index) {
 
 function assertNoReleaseSecrets(files, contentByPath) {
   for (const file of files) {
-    const content = textContent(contentByPath.get(file));
+    const content = textContent(file, contentByPath.get(file));
     if (content === null) continue;
 
     for (const pattern of highRiskSecretPatterns) {
@@ -159,23 +426,19 @@ function assertNoReleaseSecrets(files, contentByPath) {
       }
     }
 
-    quotedCredentialAssignmentPattern.lastIndex = 0;
-    for (const match of content.matchAll(quotedCredentialAssignmentPattern)) {
-      if (!isPlaceholderValue(match[2])) {
-        throw new Error(
-          `Release content secret gate rejected ${file}:${lineNumberAt(content, match.index)} (credential-assignment)`,
-        );
-      }
-    }
-
-    if (!isCredentialTemplatePath(file)) continue;
-    templateAssignmentPattern.lastIndex = 0;
-    for (const match of content.matchAll(templateAssignmentPattern)) {
+    sensitiveAssignmentPattern.lastIndex = 0;
+    for (const match of content.matchAll(sensitiveAssignmentPattern)) {
       const [, name, doubleQuoted, singleQuoted, unquoted] = match;
       const value = doubleQuoted ?? singleQuoted ?? unquoted ?? "";
-      if (isSensitiveAssignmentName(name) && !isPlaceholderValue(value)) {
+      const quoted = doubleQuoted !== undefined || singleQuoted !== undefined;
+      if (
+        isSensitiveAssignmentName(name) &&
+        (quoted || isConfigurationAssignmentPath(file)) &&
+        !isPlaceholderValue(value, file)
+      ) {
+        const assignmentOffset = match[0].search(/[^\r\n]/);
         throw new Error(
-          `Release content secret gate rejected ${file}:${lineNumberAt(content, match.index)} (template-credential)`,
+          `Release content secret gate rejected ${file}:${lineNumberAt(content, match.index + Math.max(0, assignmentOffset))} (credential-assignment)`,
         );
       }
     }
@@ -271,7 +534,7 @@ function gitText(root, args, label) {
   return result.stdout.toString("utf8").trim();
 }
 
-function detectGitInfo(root, { allowDirty = false } = {}) {
+function detectGitInfo(root) {
   if (!isGitWorkTree(root)) {
     throw new Error("Release packages must be created from a Git worktree");
   }
@@ -282,10 +545,8 @@ function detectGitInfo(root, { allowDirty = false } = {}) {
     ["status", "--porcelain=v1", "--untracked-files=all"],
     "Git status lookup",
   ) === "";
-  if (!clean && !allowDirty) {
-    throw new Error(
-      "Release worktree is dirty. Commit the release candidate or use --allow-dirty explicitly.",
-    );
+  if (!clean) {
+    throw new Error("Release worktree is dirty. Commit the release candidate before packaging.");
   }
   return {
     branch: branch === "HEAD" ? "detached" : branch,
@@ -571,22 +832,22 @@ function safeArchiveName(value, fallback) {
   return archiveName;
 }
 
-export async function createReleasePackage({
-  sourceRoot = defaultRoot,
-  outputDir = join(defaultRoot, ".runtime", "releases"),
-  archiveName,
-  gitInfo,
-  allowDirty = false,
-  createdAt = new Date().toISOString(),
-} = {}) {
+export async function createReleasePackage(options = {}) {
+  if (Object.hasOwn(options, "allowDirty")) {
+    throw new Error("allowDirty is unsupported; release packaging requires a clean Git worktree");
+  }
+  if (Object.hasOwn(options, "gitInfo")) {
+    throw new Error("gitInfo is unsupported; release metadata must come from the source Git worktree");
+  }
+  const {
+    sourceRoot = defaultRoot,
+    outputDir = join(defaultRoot, ".runtime", "releases"),
+    archiveName,
+    createdAt = new Date().toISOString(),
+  } = options;
   const root = resolve(sourceRoot);
   const destination = resolve(outputDir);
-  const source = normalizeGitInfo(
-    gitInfo ?? detectGitInfo(root, { allowDirty }),
-  );
-  if (!source.clean && !allowDirty) {
-    throw new Error("Release package source must be clean");
-  }
+  const source = normalizeGitInfo(detectGitInfo(root));
 
   const timestamp = new Date(createdAt);
   if (Number.isNaN(timestamp.getTime())) throw new Error("createdAt must be an ISO date");
@@ -647,10 +908,6 @@ export async function createReleasePackage({
 function parseArguments(argv) {
   const options = {};
   for (const argument of argv) {
-    if (argument === "--allow-dirty") {
-      options.allowDirty = true;
-      continue;
-    }
     const separator = argument.indexOf("=");
     if (!argument.startsWith("--") || separator === -1) {
       throw new Error(`Unknown argument: ${argument}`);

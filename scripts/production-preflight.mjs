@@ -39,6 +39,8 @@ const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
 const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
+const NODE_EXECUTABLE = "/usr/bin/node";
+const CADDY_EXECUTABLE = "/usr/bin/caddy";
 const ALLOWED_SERVICE_USERS = new Set(["root", "sentelligent"]);
 const REQUIRED_PROJECT_SERVICE_NAMES = new Set(REQUIRED_PROJECT_SERVICES);
 
@@ -333,11 +335,73 @@ function pathWithin(candidate, root) {
   return value === root || value.startsWith(`${root}/`);
 }
 
-function commandReferencesPath(command, root) {
-  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:^|[\\s='\"])(?:${escaped})(?:/|$|[\\s'\"])`).test(
-    command,
+function isReleaseEntryPath(candidate, entryPath) {
+  if (candidate === `${DEFAULT_PROJECT_PATH}/${entryPath}`) return true;
+  if (candidate === `${PROJECT_CURRENT_PATH}/${entryPath}`) return true;
+  if (!candidate.startsWith(`${PROJECT_RELEASES_PATH}/`)) return false;
+  const relativePath = candidate.slice(`${PROJECT_RELEASES_PATH}/`.length);
+  const separator = relativePath.indexOf("/");
+  if (separator <= 0) return false;
+  const releaseId = relativePath.slice(0, separator);
+  return (
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(releaseId) &&
+    !releaseId.includes("..") &&
+    relativePath.slice(separator + 1) === entryPath
   );
+}
+
+function exactExecTokens(command) {
+  if (
+    typeof command !== "string" ||
+    command !== command.trim() ||
+    /[\0\r\n;&|`$<>(){}[\]!'"\\]/.test(command)
+  ) {
+    return null;
+  }
+  const tokens = command.split(/[ \t]+/);
+  return tokens.length > 0 && tokens.every(Boolean) ? tokens : null;
+}
+
+export function validateProjectServiceExecStart(serviceName, command) {
+  const tokens = exactExecTokens(command);
+  if (tokens === null) return false;
+
+  if (serviceName === "sentelligent-backend.service") {
+    return (
+      tokens.length === 2 &&
+      tokens[0] === NODE_EXECUTABLE &&
+      isReleaseEntryPath(tokens[1], "backend/src/server.js")
+    );
+  }
+  if (serviceName === "sentelligent-frontend.service") {
+    return (
+      tokens.length === 3 &&
+      tokens[0] === NODE_EXECUTABLE &&
+      isReleaseEntryPath(
+        tokens[1],
+        "outputs/product-design-prototype/scripts/static-server.mjs",
+      ) &&
+      tokens[2] === "serve"
+    );
+  }
+  if (serviceName === "sentelligent-caddy.service") {
+    return (
+      tokens.length === 4 &&
+      tokens[0] === CADDY_EXECUTABLE &&
+      tokens[1] === "run" &&
+      tokens[2] === "--config" &&
+      tokens[3] === CADDY_CONFIG_PATH
+    );
+  }
+  if (serviceName === "sentelligent-weixin-agent.service") {
+    return (
+      tokens.length === 3 &&
+      tokens[0] === NODE_EXECUTABLE &&
+      isReleaseEntryPath(tokens[1], "backend/src/weixin/worker.js") &&
+      tokens[2] === "start"
+    );
+  }
+  return false;
 }
 
 function validateServiceSnapshot(plan, referenceTime) {
@@ -382,12 +446,7 @@ function validateProjectServices(plan) {
       pathWithin(service.WorkingDirectory, DEFAULT_PROJECT_PATH);
     const execStartOwned =
       typeof service?.ExecStart === "string" &&
-      commandReferencesPath(
-        service.ExecStart,
-        name === "sentelligent-caddy.service"
-          ? CADDY_CONFIG_PATH
-          : DEFAULT_PROJECT_PATH,
-      );
+      validateProjectServiceExecStart(name, service.ExecStart);
     return (
       service &&
       isEnabled(service.enabled) &&

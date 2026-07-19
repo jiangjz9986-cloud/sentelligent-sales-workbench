@@ -94,13 +94,13 @@ function validEnvironment(origin) {
   };
 }
 
-function validServicePlan() {
+function validLegacyServiceSnapshot() {
   const projectRoot = "/opt/sentelligent-sales-workbench";
   const execStartByService = {
     "sentelligent-backend.service":
       `/usr/bin/node ${projectRoot}/backend/src/server.js`,
     "sentelligent-frontend.service":
-      `/usr/bin/node ${projectRoot}/outputs/product-design-prototype/scripts/static-server.mjs`,
+      `/usr/bin/node ${projectRoot}/outputs/product-design-prototype/scripts/static-server.mjs serve`,
     "sentelligent-caddy.service":
       "/usr/bin/caddy run --config /etc/caddy/Caddyfile",
     "sentelligent-weixin-agent.service":
@@ -168,7 +168,7 @@ async function loadPreflightModule() {
 }
 
 describe("production preflight", () => {
-  it("passes a complete offline production snapshot without exposing auth values", async () => {
+  it("passes a current pre-deployment legacy service snapshot without exposing auth values", async () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
@@ -178,7 +178,7 @@ describe("production preflight", () => {
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validServicePlan(), null, 2),
+        JSON.stringify(validLegacyServiceSnapshot(), null, 2),
       );
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
@@ -263,7 +263,7 @@ describe("production preflight", () => {
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
 
-      const servicePlan = validServicePlan();
+      const servicePlan = validLegacyServiceSnapshot();
       servicePlan.projectServices = servicePlan.projectServices.slice(0, 2);
       servicePlan.unrelatedServices[0].protected = false;
       servicePlan.plannedActions.push({
@@ -327,7 +327,7 @@ describe("production preflight", () => {
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
 
-      const servicePlan = validServicePlan();
+      const servicePlan = validLegacyServiceSnapshot();
       servicePlan.plannedCommands = [
         "systemctl restart sentelligent-backend.service account-vault.service",
       ];
@@ -368,7 +368,7 @@ describe("production preflight", () => {
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validServicePlan(), null, 2),
+        JSON.stringify(validLegacyServiceSnapshot(), null, 2),
       );
       makeDatabase(databasePath);
       const { runProductionPreflight } = await loadPreflightModule();
@@ -412,7 +412,7 @@ describe("production preflight", () => {
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validServicePlan(), null, 2),
+        JSON.stringify(validLegacyServiceSnapshot(), null, 2),
       );
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
@@ -501,6 +501,125 @@ describe("production preflight", () => {
     );
   });
 
+  it("accepts exact legacy pre-deployment and current/release post-deployment ExecStart snapshots while rejecting path lures", async () => {
+    const { validateProjectServiceExecStart } = await loadPreflightModule();
+    assert.equal(typeof validateProjectServiceExecStart, "function");
+    const currentRoot = "/opt/sentelligent-sales-workbench/current";
+    const releaseRoot =
+      "/opt/sentelligent-sales-workbench/releases/2026-07-19_338fbf1";
+    const backendEntry = `${currentRoot}/backend/src/server.js`;
+    const frontendEntry =
+      `${currentRoot}/outputs/product-design-prototype/scripts/static-server.mjs`;
+    const weixinEntry = `${currentRoot}/backend/src/weixin/worker.js`;
+
+    for (const [service, command] of [
+      ["sentelligent-backend.service", `/usr/bin/node ${backendEntry}`],
+      [
+        "sentelligent-backend.service",
+        "/usr/bin/node /opt/sentelligent-sales-workbench/backend/src/server.js",
+      ],
+      [
+        "sentelligent-frontend.service",
+        `/usr/bin/node ${releaseRoot}/outputs/product-design-prototype/scripts/static-server.mjs serve`,
+      ],
+      [
+        "sentelligent-frontend.service",
+        "/usr/bin/node /opt/sentelligent-sales-workbench/outputs/product-design-prototype/scripts/static-server.mjs serve",
+      ],
+      [
+        "sentelligent-caddy.service",
+        "/usr/bin/caddy run --config /etc/caddy/Caddyfile",
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        `/usr/bin/node ${releaseRoot}/backend/src/weixin/worker.js start`,
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        "/usr/bin/node /opt/sentelligent-sales-workbench/backend/src/weixin/worker.js start",
+      ],
+    ]) {
+      assert.equal(
+        validateProjectServiceExecStart(service, command),
+        true,
+        `${service} should accept its fixed direct entry command`,
+      );
+    }
+
+    for (const [service, command] of [
+      [
+        "sentelligent-backend.service",
+        `/bin/sh -c /usr/bin/node ${backendEntry}`,
+      ],
+      [
+        "sentelligent-backend.service",
+        `/bin/bash /tmp/external-start.sh ${backendEntry}`,
+      ],
+      [
+        "sentelligent-backend.service",
+        `/usr/bin/node /tmp/external-start.mjs ${backendEntry}`,
+      ],
+      [
+        "sentelligent-backend.service",
+        `/usr/bin/node ${backendEntry} --inspect`,
+      ],
+      [
+        "sentelligent-backend.service",
+        "/usr/bin/node /opt/sentelligent-sales-workbench-backup/backend/src/server.js",
+      ],
+      [
+        "sentelligent-backend.service",
+        "/usr/bin/node /opt/sentelligent-sales-workbench/backend/src/server.js/child",
+      ],
+      [
+        "sentelligent-frontend.service",
+        `/usr/bin/node ${frontendEntry}`,
+      ],
+      [
+        "sentelligent-frontend.service",
+        `/usr/bin/node ${frontendEntry} serve; /bin/true`,
+      ],
+      [
+        "sentelligent-frontend.service",
+        `powershell -File C:\\outside.ps1 ${frontendEntry}`,
+      ],
+      [
+        "sentelligent-caddy.service",
+        "/bin/bash -c /usr/bin/caddy run --config /etc/caddy/Caddyfile",
+      ],
+      [
+        "sentelligent-caddy.service",
+        "/usr/bin/caddy run --config /etc/caddy/Caddyfile --watch",
+      ],
+      [
+        "sentelligent-caddy.service",
+        "/usr/bin/caddy run --config /tmp/Caddyfile /etc/caddy/Caddyfile",
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        `/usr/bin/node ${weixinEntry} login-start`,
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        `systemctl start sentelligent-weixin-agent.service ${weixinEntry}`,
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        `cmd /c node ${weixinEntry} start`,
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        `/usr/bin/node ${weixinEntry} start && /bin/true`,
+      ],
+    ]) {
+      assert.equal(
+        validateProjectServiceExecStart(service, command),
+        false,
+        `${service} must reject ${command}`,
+      );
+    }
+  });
+
   it("rejects expanded service ownership, caller paths, Caddy paths, and users", async () => {
     const workspace = makeWorkspace();
     try {
@@ -569,7 +688,7 @@ describe("production preflight", () => {
       ];
 
       for (const testCase of cases) {
-        const plan = validServicePlan();
+        const plan = validLegacyServiceSnapshot();
         testCase.mutate(plan);
         const servicePlanPath = workspace.write(
           `${testCase.name}.json`,
@@ -631,7 +750,7 @@ describe("production preflight", () => {
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
-      const plan = validServicePlan();
+      const plan = validLegacyServiceSnapshot();
       delete plan.snapshotGeneratedAt;
       plan.hostname = "";
       plan.projectServices[0].ExecStart = "/usr/bin/node /opt/other/server.js";
