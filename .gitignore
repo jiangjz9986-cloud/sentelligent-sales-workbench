@@ -19,6 +19,27 @@
 *.log
 *.pid
 
+# Private keys, certificates, archives, and business media
+*.pem
+*.key
+*.p12
+*.pfx
+*.ppk
+*.crt
+*.cer
+*.bundle
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.webm
+*.ogg
+*.m4a
+*.wav
+*.mp3
+*.aac
+*.flac
+
 # Local Codex coordination state
 .agents/
 .codex/

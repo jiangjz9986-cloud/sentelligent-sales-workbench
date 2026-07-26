@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/security
+    about: 不要在普通 Issue 中提交凭据、客户数据或攻击细节。

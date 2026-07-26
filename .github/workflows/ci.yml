@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Source, backend, and frontend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            outputs/product-design-prototype/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci --prefix backend
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix outputs/product-design-prototype
+
+      - name: Scan current source for secrets
+        run: npm run scan:secrets
+
+      - name: Verify release tooling
+        run: npm run test:release
+
+      - name: Test backend
+        run: npm --prefix backend test
+
+      - name: Build and test frontend
+        run: npm --prefix outputs/product-design-prototype run qa:local

@@ -1,0 +1,61 @@
+name: 缺陷报告
+description: 报告可复现的功能、数据、视觉或部署问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 问题现象
+      description: 描述实际结果，禁止粘贴密码、Token、客户原文或生产数据库内容。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 输入脱敏测试数据……
+        4. 观察到……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: 环境
+      options:
+        - 本地开发
+        - 集成 QA
+        - 生产环境
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: 浏览器与视口
+      placeholder: Chrome 1440x900 / iPhone Safari 390x844
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏证据
+      description: 可提供截图、测试名称和错误类别，不要提供凭据或真实客户数据。
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: 回归范围
+      description: 修复后还需要验证哪些相邻功能。

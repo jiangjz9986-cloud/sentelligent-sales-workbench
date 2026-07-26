@@ -29,12 +29,12 @@
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
     "qa:full": "npm run test:deploy && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration"
   },
-  "description": "",
+  "description": "Sentelligent AI sales workbench for customer, opportunity, action, risk, voice and weekly workflows.",
   "main": "index.js",
   "directories": {
     "doc": "docs"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "UNLICENSED"
 }

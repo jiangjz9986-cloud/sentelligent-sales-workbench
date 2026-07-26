@@ -1,0 +1,60 @@
+name: 功能需求
+description: 提交新的业务能力、交互优化或系统改进
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 业务问题
+      description: 说明当前用户遇到的问题，不要只描述预期按钮或页面。
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 描述完成后用户可以做什么，以及成功的判断标准。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 主要范围
+      options:
+        - 前端与交互
+        - 后端 API
+        - 数据库
+        - AI 分析
+        - 语音
+        - 微信机器人
+        - 部署与运维
+        - 跨模块
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 列出可测试、可判定的业务和技术验收条件。
+    validations:
+      required: true
+
+  - type: textarea
+    id: data
+    attributes:
+      label: 数据与安全影响
+      description: 说明是否涉及客户数据、数据库迁移、录音、凭据或权限。
+
+  - type: checkboxes
+    id: devices
+    attributes:
+      label: 需要验收的终端
+      options:
+        - label: PC Chrome
+        - label: iPhone Safari
+        - label: Android Chrome
