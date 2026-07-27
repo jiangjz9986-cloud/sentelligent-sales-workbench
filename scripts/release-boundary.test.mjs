@@ -51,9 +51,12 @@ describe("Phase 1 release boundary", () => {
     assert.match(localDev, /CORS_ALLOWED_ORIGINS/);
     assert.match(localDev, /AUTH_COOKIE_SECURE/);
     assert.match(localDev, /NODE_ENV=development/);
-    assert.match(integrationQa, /AUTH_COOKIE_SECURE=false/);
+    assert.match(
+      integrationQa,
+      /AUTH_COOKIE_SECURE["']?\s*(?::|=)\s*["']?false["']?/,
+    );
     assert.match(integrationQa, /NODE_ENV=test/);
-    assert.match(integrationQa, /AUTH_PASSWORD_HASH=/);
+    assert.match(integrationQa, /AUTH_PASSWORD_HASH["']?\s*(?::|=)/);
     assert.doesNotMatch(integrationQa, /["'`]AUTH_PASSWORD=/);
   });
 

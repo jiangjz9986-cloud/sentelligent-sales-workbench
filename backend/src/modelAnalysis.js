@@ -1,4 +1,5 @@
 import { buildQuickRecordAnalysis } from "./quickRecordAnalysis.js";
+import { analyzeSalesDecision as analyzeSalesDecisionAgent } from "./ai/agents/salesDecisionAgent.js";
 
 function fallbackAnalysis(rawContent, source) {
   const analysis = buildQuickRecordAnalysis(rawContent);
@@ -280,6 +281,55 @@ function buildManualSuggestionMessages({ type, title, context, fallbackSuggestio
   ];
 }
 
+function parseItineraryOrderContent(content, expectedStopIds) {
+  const parsed = JSON.parse(stripJsonFence(content));
+  const orderedStopIds = parsed?.orderedStopIds;
+  const expected = new Set(expectedStopIds);
+  if (
+    !Array.isArray(orderedStopIds) ||
+    orderedStopIds.length !== expectedStopIds.length ||
+    new Set(orderedStopIds).size !== expected.size ||
+    orderedStopIds.some((id) => typeof id !== "string" || !expected.has(id))
+  ) {
+    throw new TypeError("Model itinerary response must contain a complete stop permutation");
+  }
+  if (!Array.isArray(parsed.advice)) {
+    throw new TypeError("Model itinerary response is missing advice");
+  }
+  const advice = parsed.advice.slice(0, 5).map((item, index) => requireText(item, `advice[${index}]`));
+  return {
+    orderedStopIds: [...orderedStopIds],
+    summary: requireText(parsed.summary, "summary"),
+    advice,
+  };
+}
+
+function buildItineraryOrderMessages(fallback, context) {
+  return [
+    {
+      role: "system",
+      content: [
+        "你是森特智行 AI 销售作战台的拜访行程助手。",
+        "只输出合法 JSON，不要输出解释文字。",
+        "orderedStopIds 必须包含输入中的全部停靠点 ID，每个 ID 恰好一次，不得添加或遗漏。",
+        "不得虚构地址、时间、距离或客户信息；预约时间属于硬约束。",
+        "JSON 必须包含 orderedStopIds、summary 和 advice，advice 为不超过 5 项的字符串数组。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        departureAt: context.departureAt,
+        stops: context.stops,
+        durationMatrix: context.durationMatrix,
+        distanceMatrix: context.distanceMatrix,
+        deterministicOrder: fallback.orderedStopIds,
+        deterministicSummary: fallback.summary,
+      }),
+    },
+  ];
+}
+
 async function enhanceDraftWithModel(fallbackDraft, messages, config, options = {}) {
   if (!shouldUseModel(config)) return fallbackDraft;
 
@@ -337,6 +387,25 @@ export async function generateManualSuggestion(input, config = {}, options = {})
   }
 }
 
+export async function enhanceItineraryOrderWithModel(fallback, context, config = {}, options = {}) {
+  if (!shouldUseModel(config)) return fallback;
+  try {
+    const expectedStopIds = (context.stops ?? []).map((stop) => stop.id);
+    const content = await callChatCompletion({
+      messages: buildItineraryOrderMessages(fallback, context),
+      config,
+      fetchImpl: options.fetchImpl ?? fetch,
+      maxTokens: 1000,
+    });
+    return {
+      ...parseItineraryOrderContent(content, expectedStopIds),
+      source: config.modelProvider ?? "model",
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export async function analyzeQuickRecord(rawContent, config = {}, options = {}) {
   const text = String(rawContent ?? "").trim();
   if (!text) return null;
@@ -354,4 +423,8 @@ export async function analyzeQuickRecord(rawContent, config = {}, options = {}) 
   } catch {
     return fallbackAnalysis(text, "mock_model_fallback");
   }
+}
+
+export async function analyzeSalesDecision(context, config = {}, options = {}) {
+  return analyzeSalesDecisionAgent(context, config, options);
 }

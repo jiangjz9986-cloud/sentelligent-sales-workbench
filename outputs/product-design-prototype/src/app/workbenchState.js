@@ -13,6 +13,7 @@ const BUSINESS_COLLECTION_KEYS = Object.freeze([
   "knowledge",
   "quickRecords",
   "solutionDocs",
+  "itineraries",
 ]);
 
 function emptyBusinessCollections() {

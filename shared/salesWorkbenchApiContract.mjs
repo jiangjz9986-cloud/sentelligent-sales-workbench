@@ -1,4 +1,4 @@
-export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-07-15";
+export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-07-27";
 
 export const SALES_WORKBENCH_API_SCHEMAS = {
   customer: {
@@ -165,6 +165,20 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     sourceRefs: "array",
     createdAt: "string",
   },
+  salesDecisionAnalysis: {
+    id: "string",
+    version: "positiveInteger",
+    analysisType: "string",
+    industry: "string",
+    customerId: "nullableString",
+    opportunityId: "nullableString",
+    quickRecordId: "nullableString",
+    input: "object",
+    analysis: "object",
+    source: "string",
+    createdBy: "string",
+    createdAt: "string",
+  },
   dashboardSummary: {
     metrics: "object",
     priorityActions: "array",
@@ -174,6 +188,19 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     rhythm: "array",
     stageCounts: "array",
     generatedAt: "string",
+  },
+  visitItinerary: {
+    id: "string",
+    version: "positiveInteger",
+    title: "string",
+    visitDate: "string",
+    status: "string",
+    request: "object",
+    plan: "object",
+    createdBy: "string",
+    updatedBy: "string",
+    createdAt: "string",
+    updatedAt: "string",
   },
 };
 

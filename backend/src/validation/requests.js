@@ -165,6 +165,20 @@ const stringArray = (maxItems, itemMax = 200, options = {}) => ({
   item: text(itemMax),
   ...options,
 });
+const geoLocation = () => safeObject({ maxKeys: 2, allowedKeys: ["lng", "lat"] });
+
+const itineraryStopSchema = freezeSchema({
+  id: text(200, { required: true }),
+  customerId: text(200, { nullable: true, nonEmpty: true }),
+  customerName: text(200, { required: true }),
+  address: text(500, { required: true }),
+  city: text(100, { nullable: true }),
+  priority: { type: "enum", values: ["low", "normal", "medium", "high"], required: true },
+  visitMinutes: { type: "integer", min: 1, max: 480, required: true },
+  appointmentAt: text(50, { nullable: true }),
+  notes: text(2000, { nullable: true }),
+  location: geoLocation(),
+});
 
 export const requestSchemas = freezeSchema({
   login: {
@@ -233,6 +247,20 @@ export const requestSchemas = freezeSchema({
     knowledgeIds: stringArray(100, 200),
   },
   aiSuggestion: { type: text(100, { required: true }), title: text(500, { required: true }), context: safeObject() },
+  salesDecisionAnalyze: {
+    analysisType: {
+      type: "enum",
+      values: ["opportunity_diagnosis", "customer_analysis", "meeting_preparation", "next_step_decision"],
+    },
+    industry: {
+      type: "enum",
+      values: ["general", "medical", "government", "cloud", "datacenter", "xinchuang"],
+    },
+    customerId: text(200, { nullable: true, nonEmpty: true }),
+    opportunityId: text(200, { nullable: true, nonEmpty: true }),
+    quickRecordId: text(200, { nullable: true, nonEmpty: true }),
+    rawContent: text(50000, { nullable: true, nonEmpty: true }),
+  },
   solutionDraft: {
     owner: text(100, { required: true }), customerId: text(200, { required: true }), opportunityId: text(200, { required: true }),
     artifactType: { type: "enum", values: ["solution_framework", "communication_outline", "presales_questions", "report_outline", "competitive_talk"] },
@@ -243,4 +271,73 @@ export const requestSchemas = freezeSchema({
     status: { type: "enum", values: ["draft", "saved", "ready"] },
   },
   riskDiagnose: { sourceType: text(100, { nullable: true }), sourceId: text(200, { nullable: true }) },
+  itineraryCreate: {
+    title: text(200, { required: true }),
+    visitDate: text(10, { required: true }),
+    status: { type: "enum", values: ["planned", "completed", "cancelled"] },
+    departureAddress: text(500, { required: true }),
+    departureCity: text(100, { nullable: true }),
+    departureLocation: geoLocation(),
+    departureAt: text(50, { required: true }),
+    stops: {
+      type: "array",
+      required: true,
+      minItems: 1,
+      maxItems: 8,
+      item: safeObject({ maxKeys: 20 }),
+    },
+  },
 });
+
+function prefixedValidationError(error, prefix) {
+  if (!(error instanceof HttpError) || error.code !== "VALIDATION_ERROR" || !error.fields) throw error;
+  throw new HttpError(
+    422,
+    "VALIDATION_ERROR",
+    "Request validation failed",
+    Object.fromEntries(Object.entries(error.fields).map(([field, rule]) => [`${prefix}.${field}`, rule])),
+  );
+}
+
+function assertDateTime(value, field) {
+  if (!Number.isFinite(Date.parse(value))) fail(field, "dateTime");
+}
+
+function assertVisitDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) fail("visitDate", "date");
+  const date = new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+    fail("visitDate", "date");
+  }
+}
+
+function assertGeoLocation(value, field) {
+  if (value === undefined) return;
+  if (!Object.hasOwn(value, "lng") || !Object.hasOwn(value, "lat")) fail(field, "location");
+  if (
+    typeof value.lng !== "number" || value.lng < -180 || value.lng > 180 ||
+    typeof value.lat !== "number" || value.lat < -90 || value.lat > 90
+  ) {
+    fail(field, "location");
+  }
+}
+
+export function validateVisitItineraryRequest(body) {
+  const validated = validateObject(requestSchemas.itineraryCreate, body);
+  assertVisitDate(validated.visitDate);
+  assertDateTime(validated.departureAt, "departureAt");
+  assertGeoLocation(validated.departureLocation, "departureLocation");
+  const ids = new Set();
+  validated.stops.forEach((stop, index) => {
+    try {
+      validateObject(itineraryStopSchema, stop);
+    } catch (error) {
+      prefixedValidationError(error, `stops[${index}]`);
+    }
+    if (ids.has(stop.id.trim())) fail("stops", "uniqueIds");
+    ids.add(stop.id.trim());
+    if (stop.appointmentAt) assertDateTime(stop.appointmentAt, `stops[${index}].appointmentAt`);
+    assertGeoLocation(stop.location, `stops[${index}].location`);
+  });
+  return validated;
+}

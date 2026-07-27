@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { apply as applyPhase1WriteIntegrity } from "./migrations/0002_phase1_write_integrity.mjs";
 import { apply as applyQuickRecordRiskIdentity } from "./migrations/0003_quick_record_risk_identity.mjs";
+import { apply as applyVisitItineraries } from "./migrations/0005_visit_itineraries.mjs";
+import { apply as applySalesDecisionAnalyses } from "./migrations/0006_sales_decision_analyses.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -24,6 +26,18 @@ const migrations = [
     path: resolve(here, "migrations", "0003_quick_record_risk_identity.mjs"),
     type: "module",
     apply: applyQuickRecordRiskIdentity,
+  },
+  {
+    version: "0005",
+    path: resolve(here, "migrations", "0005_visit_itineraries.mjs"),
+    type: "module",
+    apply: applyVisitItineraries,
+  },
+  {
+    version: "0006",
+    path: resolve(here, "migrations", "0006_sales_decision_analyses.mjs"),
+    type: "module",
+    apply: applySalesDecisionAnalyses,
   },
 ];
 

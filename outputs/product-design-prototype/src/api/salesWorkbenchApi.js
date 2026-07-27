@@ -18,6 +18,9 @@ const WRITABLE_FIELDS = Object.freeze({
     "requirements", "competitors", "solutionDirection", "sourceRecord", "risk", "next", "tone",
   ]),
   knowledge: Object.freeze(["title", "category", "tags", "summary", "content", "source"]),
+  itinerary: Object.freeze([
+    "title", "visitDate", "status", "departureAddress", "departureCity", "departureLocation", "departureAt", "stops",
+  ]),
 });
 
 function pickOwnFields(source, fields) {
@@ -297,7 +300,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
 
     async loadBootstrap({ signal } = {}) {
       const requestOptions = { signal };
-      const [customers, opportunities, actions, risks, knowledge, quickRecords, solutions, summary] = await Promise.all([
+      const [customers, opportunities, actions, risks, knowledge, quickRecords, solutions, itineraries, summary] = await Promise.all([
         requestApi("/api/customers", requestOptions),
         requestApi("/api/opportunities", requestOptions),
         requestApi("/api/actions", requestOptions),
@@ -305,6 +308,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         requestApi("/api/knowledge", requestOptions),
         requestApi("/api/quick-records", requestOptions),
         requestApi("/api/solutions", requestOptions),
+        requestApi("/api/itineraries", requestOptions),
         requestApi("/api/dashboard/summary", requestOptions),
       ]);
 
@@ -316,6 +320,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         knowledge: bootstrapItems("knowledge", "knowledgeItem", knowledge),
         quickRecords: bootstrapItems("quickRecords", "quickRecordHistory", quickRecords),
         solutionDocs: bootstrapItems("solutions", "solutionDraft", solutions),
+        itineraries: bootstrapItems("itineraries", "visitItinerary", itineraries),
         summary: assertApiEntity("dashboardSummary", summary.item),
       };
     },
@@ -343,6 +348,39 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     async getDashboardSummary() {
       const summary = await requestApi("/api/dashboard/summary");
       return assertApiEntity("dashboardSummary", summary.item);
+    },
+
+    async listVisitItineraries({ status, signal } = {}) {
+      const query = status ? `?status=${encodeURIComponent(status)}` : "";
+      const response = await requestApi(`/api/itineraries${query}`, { signal });
+      return assertApiCollection("visitItinerary", response.items ?? [], "itineraries.items");
+    },
+
+    async getVisitItinerary(itineraryId, { signal } = {}) {
+      const response = await requestApi(`/api/itineraries/${encodeURIComponent(itineraryId)}`, { signal });
+      return assertApiEntity("visitItinerary", response.item);
+    },
+
+    async saveVisitItinerary(itinerary) {
+      const payload = pickOwnFields(itinerary, WRITABLE_FIELDS.itinerary);
+      const isUpdate = Boolean(itinerary.id);
+      const response = await requestApi(
+        isUpdate ? `/api/itineraries/${encodeURIComponent(itinerary.id)}` : "/api/itineraries",
+        {
+          method: isUpdate ? "PATCH" : "POST",
+          ...(isUpdate ? { headers: versionHeaders(itinerary.version) } : {}),
+          body: JSON.stringify(payload),
+        },
+      );
+      return assertApiEntity("visitItinerary", response.item);
+    },
+
+    async deleteVisitItinerary(itineraryId, version) {
+      const response = await requestApi(`/api/itineraries/${encodeURIComponent(itineraryId)}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+      });
+      return assertApiEntity("visitItinerary", response.deleted);
     },
 
     createQuickRecord,
@@ -583,6 +621,42 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         body: JSON.stringify({ type, title, context }),
       });
       return assertApiEntity("aiSuggestion", suggestion.item);
+    },
+
+    async listSalesDecisionAnalyses(filters = {}) {
+      const params = new URLSearchParams();
+      for (const field of ["customerId", "opportunityId", "quickRecordId"]) {
+        const value = filters[field];
+        if (value !== undefined && value !== null && String(value).trim()) {
+          params.set(field, String(value).trim());
+        }
+      }
+      const query = params.toString();
+      const response = await requestApi(`/api/ai/sales-decisions${query ? `?${query}` : ""}`);
+      return {
+        items: assertApiCollection("salesDecisionAnalysis", response.items),
+      };
+    },
+
+    async createSalesDecisionAnalysis(input = {}) {
+      const payload = pickOwnFields(input, [
+        "analysisType",
+        "industry",
+        "customerId",
+        "opportunityId",
+        "quickRecordId",
+        "rawContent",
+      ]);
+      const response = await requestApi("/api/ai/sales-decisions", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      return assertApiEntity("salesDecisionAnalysis", response.item);
+    },
+
+    async getSalesDecisionAnalysis(id) {
+      const response = await requestApi(`/api/ai/sales-decisions/${encodeURIComponent(id)}`);
+      return assertApiEntity("salesDecisionAnalysis", response.item);
     },
 
     async startWeixinBinding() {

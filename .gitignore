@@ -50,6 +50,10 @@
 outputs/*
 !outputs/product-design-prototype/
 !outputs/product-design-prototype/**
+outputs/product-design-prototype/.env
+outputs/product-design-prototype/.env.local
+outputs/product-design-prototype/.env.*.local
+!outputs/product-design-prototype/.env.example
 outputs/product-design-prototype/.npm-cache/
 outputs/product-design-prototype/node_modules/
 outputs/product-design-prototype/dist/

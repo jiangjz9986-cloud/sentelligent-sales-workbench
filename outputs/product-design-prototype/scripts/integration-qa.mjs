@@ -128,6 +128,21 @@ function spawnManaged(command, args, options = {}) {
   return child;
 }
 
+async function detectIntegrationRuntime() {
+  const requested = String(process.env.SENT_ZX_INTEGRATION_RUNTIME ?? "auto").trim().toLowerCase();
+  if (!["auto", "native", "wsl"].includes(requested)) {
+    throw new Error("SENT_ZX_INTEGRATION_RUNTIME must be auto, native, or wsl");
+  }
+  if (requested === "native") return "native";
+  try {
+    await runProcess("wsl.exe", ["--status"]);
+    return "wsl";
+  } catch (error) {
+    if (requested === "wsl") throw error;
+    return "native";
+  }
+}
+
 async function waitForHttp(url, timeoutMs = 20000) {
   const started = Date.now();
   let lastError;
@@ -213,7 +228,26 @@ async function stopWslPort(port, identity) {
   return assertOwnedWslListener(port, identity, { terminate: true });
 }
 
-async function createHistoricalSolutionFixture({ backendWslPath, databaseUrl }) {
+async function runBackendFixtureScript({ runtimeMode, backendWslPath, env, script }) {
+  return runtimeMode === "wsl"
+    ? runProcess("wsl.exe", [
+        "--cd",
+        backendWslPath,
+        "--exec",
+        "env",
+        ...Object.entries(env).map(([key, value]) => `${key}=${value}`),
+        "node",
+        "--input-type=module",
+        "--eval",
+        script,
+      ])
+    : runProcess(process.execPath, ["--input-type=module", "--eval", script], {
+        cwd: backendDir,
+        env,
+      });
+}
+
+async function createHistoricalSolutionFixture({ runtimeMode, backendWslPath, databaseUrl }) {
   const fixtureScript = String.raw`
 import { createServer } from "./src/server.js";
 
@@ -247,25 +281,122 @@ try {
   await new Promise((resolve) => server.close(resolve));
 }
 `;
-  const result = await runProcess("wsl.exe", [
-    "--cd",
+  const fixtureEnv = {
+    DATABASE_URL: databaseUrl,
+    NODE_ENV: "test",
+    AUTH_REQUIRED: "false",
+    AI_ANALYSIS_MODE: "mock",
+    DEEPSEEK_API_KEY: "",
+    SOLUTION_WRITES_ENABLED: "true",
+  };
+  const result = await runBackendFixtureScript({
+    runtimeMode,
     backendWslPath,
-    "--exec",
-    "env",
-    `DATABASE_URL=${databaseUrl}`,
-    "NODE_ENV=test",
-    "AUTH_REQUIRED=false",
-    "AI_ANALYSIS_MODE=mock",
-    "DEEPSEEK_API_KEY=",
-    "SOLUTION_WRITES_ENABLED=true",
-    "node",
-    "--input-type=module",
-    "--eval",
-    fixtureScript,
-  ]);
+    env: fixtureEnv,
+    script: fixtureScript,
+  });
   const item = JSON.parse(result.stdout.trim());
   assert.ok(item.id, "historical solution fixture should return a persisted id");
   assert.ok(item.content, "historical solution fixture should contain readable content");
+  return item;
+}
+
+async function createHistoricalItineraryFixture({ runtimeMode, backendWslPath, databaseUrl }) {
+  const fixtureScript = String.raw`
+import { createServer } from "./src/server.js";
+
+const origin = { lng: 120.149201, lat: 35.987754 };
+const destination = { lng: 116.608817, lat: 35.415405 };
+const server = createServer({
+  databaseUrl: process.env.DATABASE_URL,
+  seed: false,
+  amapClient: {
+    async geocode({ address }) {
+      if (address.includes("秀兰禧悦山")) {
+        return { formattedAddress: "山东省青岛市黄岛区秀兰禧悦山", location: origin };
+      }
+      if (address.includes("济宁市第二人民医院")) {
+        return { formattedAddress: "山东省济宁市任城区济宁市第二人民医院", location: destination };
+      }
+      throw new Error("Unexpected itinerary fixture address");
+    },
+    async drivingMatrix() {
+      return {
+        distances: [[0, 382400], [382400, 0]],
+        durations: [[0, 16020], [16020, 0]],
+      };
+    },
+    async drivingRoute() {
+      return {
+        distanceMeters: 382400,
+        durationSeconds: 16020,
+        tollsCny: 154,
+        trafficLights: 24,
+        polyline: [
+          origin,
+          { lng: 119.632, lat: 35.827 },
+          { lng: 118.741, lat: 35.601 },
+          { lng: 117.756, lat: 35.465 },
+          destination,
+        ],
+        steps: [],
+      };
+    },
+  },
+});
+await new Promise((resolve, reject) => {
+  server.once("error", reject);
+  server.listen(0, "127.0.0.1", resolve);
+});
+
+try {
+  const address = server.address();
+  const response = await fetch("http://127.0.0.1:" + address.port + "/api/itineraries", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: "黄岛至济宁客户拜访",
+      visitDate: "2026-07-28",
+      status: "planned",
+      departureAddress: "青岛市黄岛区秀兰禧悦山",
+      departureCity: "青岛",
+      departureAt: "2026-07-28T08:00:00+08:00",
+      stops: [{
+        id: "jining-second-hospital",
+        customerName: "济宁市第二人民医院",
+        address: "济宁市任城区济宁市第二人民医院",
+        city: "济宁",
+        priority: "high",
+        visitMinutes: 60,
+        appointmentAt: "2026-07-28T13:30:00+08:00",
+        notes: "确认信息化建设计划",
+      }],
+    }),
+  });
+  const body = await response.json();
+  if (response.status !== 201 || !body.item?.id) {
+    throw new Error("Historical itinerary fixture creation failed: " + response.status);
+  }
+  process.stdout.write(JSON.stringify(body.item));
+} finally {
+  await new Promise((resolve) => server.close(resolve));
+}
+`;
+  const result = await runBackendFixtureScript({
+    runtimeMode,
+    backendWslPath,
+    env: {
+      DATABASE_URL: databaseUrl,
+      NODE_ENV: "test",
+      AUTH_REQUIRED: "false",
+      AI_ANALYSIS_MODE: "mock",
+      DEEPSEEK_API_KEY: "",
+    },
+    script: fixtureScript,
+  });
+  const item = JSON.parse(result.stdout.trim());
+  assert.ok(item.id, "historical itinerary fixture should return a persisted id");
+  assert.ok(item.plan?.route?.polyline?.length > 1, "historical itinerary fixture should contain a route polyline");
   return item;
 }
 
@@ -402,7 +533,7 @@ async function evaluate(cdp, expression) {
   return result.result.value;
 }
 
-async function runViewport(cdp, url, viewport, historicalSolution) {
+async function runViewport(cdp, url, viewport, historicalSolution, historicalItinerary, realItineraryFlow) {
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: viewport.width,
     height: viewport.height,
@@ -1369,6 +1500,127 @@ async function runViewport(cdp, url, viewport, historicalSolution) {
           weekly: weeklyDraftText,
         };
 
+        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('智能拜访行程'))?.click();
+        await waitUntil(() => document.querySelector('[data-testid="itinerary-list-view"]'), 5000);
+        const itineraryListOpened = Boolean(document.querySelector('[data-testid="itinerary-list-view"]'));
+        const itineraryTitle = ${JSON.stringify(historicalItinerary?.title ?? "")};
+        const itineraryRow = [...document.querySelectorAll('.itinerary-table-row')]
+          .find((row) => row.textContent.includes(itineraryTitle));
+        const itineraryDetailButton = [...(itineraryRow?.querySelectorAll('button') ?? [])]
+          .find((button) => button.textContent.includes('查看详情'));
+        if (!itineraryDetailButton) throw new Error('Missing saved itinerary detail button');
+        itineraryDetailButton.click();
+        const itineraryDetail = await waitUntil(
+          () => document.querySelector('[data-testid="itinerary-detail-view"]'),
+          5000,
+        );
+        const itineraryMapCanvas = itineraryDetail.querySelector('.itinerary-map-canvas');
+        await waitUntil(() => {
+          const status = itineraryMapCanvas?.dataset.mapStatus;
+          return status && status !== 'loading';
+        }, 10000);
+        const itineraryMapStatus = itineraryMapCanvas?.dataset.mapStatus ?? 'missing';
+        const itineraryMarkers = itineraryDetail.querySelectorAll('.itinerary-map-marker').length;
+        const itineraryMapSurface = Boolean(
+          itineraryMapCanvas?.querySelector('.amap-maps, canvas, svg'),
+        );
+        const itineraryNavigationHref = itineraryDetail
+          .querySelector('.itinerary-navigation-link')?.getAttribute('href') ?? '';
+        const itineraryDetailReadOnly = itineraryDetail.querySelectorAll('input, textarea, select').length === 0;
+        const itineraryEditAvailable = [...itineraryDetail.querySelectorAll('button')]
+          .some((button) => button.textContent.includes('修改'));
+        const itineraryBackButton = [...itineraryDetail.querySelectorAll('button')]
+          .find((button) => button.textContent.includes('返回列表'));
+        if (!itineraryBackButton) throw new Error('Missing itinerary back button');
+        itineraryBackButton.click();
+        await waitUntil(() => document.querySelector('[data-testid="itinerary-list-view"]'), 5000);
+        const itinerarySearch = document.querySelector('[data-testid="itinerary-local-search"]');
+        if (!itinerarySearch) throw new Error('Missing itinerary local search');
+        setInputValue(itinerarySearch, itineraryTitle);
+        await waitUntil(() => itinerarySearch.value === itineraryTitle, 3000);
+        const itineraryLocalSearch = itinerarySearch.value === itineraryTitle
+          && document.querySelector('[data-testid="itinerary-list-view"]')?.textContent?.includes(itineraryTitle);
+        const itineraryCreateButton = document.querySelector('[data-testid="itinerary-create-detail"]');
+        if (!itineraryCreateButton) throw new Error('Missing itinerary create button');
+        itineraryCreateButton.click();
+        const itineraryEditor = await waitUntil(
+          () => document.querySelector('[data-testid="itinerary-form-view"]'),
+          5000,
+        );
+        const itineraryStops = [...itineraryEditor.querySelectorAll('.itinerary-stop-editor')];
+        const itineraryCreateStartsBlank =
+          (document.querySelector('[data-testid="page-itinerary"] h1')?.textContent?.includes('新建拜访行程') ?? false)
+          && getEditorControl(itineraryEditor, '行程名称')?.value === ''
+          && getEditorControl(itineraryEditor, '拜访日期')?.value === ''
+          && getEditorControl(itineraryEditor, '出发时间')?.value === ''
+          && getEditorControl(itineraryEditor, '出发地址')?.value === '';
+        const itineraryOneEmptyStop = itineraryStops.length === 1
+          && getEditorControl(itineraryStops[0], '客户名称')?.value === ''
+          && getEditorControl(itineraryStops[0], '客户地址')?.value === '';
+        let itineraryCreatedWithAmap = false;
+        let itineraryCreatedMapReady = false;
+        let itineraryCreatedDistance = '';
+        let itineraryDeleted = false;
+        if (${realItineraryFlow ? "true" : "false"}) {
+          setEditorField(itineraryEditor, '行程名称', '真实高德集成行程');
+          setEditorField(itineraryEditor, '拜访日期', '2026-07-29');
+          setEditorField(itineraryEditor, '出发时间', '2026-07-29T08:00');
+          setEditorField(itineraryEditor, '出发地址', '黄岛区秀兰禧悦山');
+          setEditorField(itineraryEditor, '出发城市', '青岛');
+          setEditorField(itineraryStops[0], '客户名称', '济宁市第二人民医院');
+          setEditorField(itineraryStops[0], '客户地址', '济宁市第二人民医院');
+          setEditorField(itineraryStops[0], '城市', '济宁');
+          const createItineraryButton = [...itineraryEditor.querySelectorAll('button')]
+            .find((button) => button.textContent.includes('生成并保存行程'));
+          if (!createItineraryButton) throw new Error('Missing itinerary save button');
+          createItineraryButton.click();
+          const createdItineraryDetail = await waitUntil(() => {
+            const detail = document.querySelector('[data-testid="itinerary-detail-view"]');
+            const heading = document.querySelector('[data-testid="page-itinerary"] h1')?.textContent ?? '';
+            return detail && heading.includes('真实高德集成行程') ? detail : null;
+          }, 20000);
+          itineraryCreatedWithAmap = Boolean(createdItineraryDetail);
+          await waitUntil(
+            () => createdItineraryDetail.querySelector('.itinerary-map-canvas')?.dataset.mapStatus === 'ready',
+            10000,
+          );
+          itineraryCreatedMapReady = true;
+          itineraryCreatedDistance = createdItineraryDetail
+            .querySelector('.itinerary-metric-grid b')?.textContent?.trim() ?? '';
+          const deleteItineraryButton = [...createdItineraryDetail.querySelectorAll('.detail-toolbar-actions button')]
+            .find((button) => button.textContent.includes('删除'));
+          if (!deleteItineraryButton) throw new Error('Missing created itinerary delete button');
+          deleteItineraryButton.click();
+          const deleteConfirmation = await waitUntil(
+            () => document.querySelector('[data-testid="itinerary-delete-confirmation"]'),
+            3000,
+          );
+          const confirmDeleteButton = [...deleteConfirmation.querySelectorAll('button')]
+            .find((button) => button.textContent.includes('确认删除'));
+          if (!confirmDeleteButton) throw new Error('Missing itinerary delete confirmation button');
+          confirmDeleteButton.click();
+          await waitUntil(() => document.querySelector('[data-testid="itinerary-list-view"]'), 8000);
+          itineraryDeleted = !document.querySelector('[data-testid="itinerary-list-view"]')
+            ?.textContent?.includes('真实高德集成行程');
+        }
+        window.__qaItinerary = {
+          listOpened: itineraryListOpened,
+          localSearch: itineraryLocalSearch,
+          detailReadOnly: itineraryDetailReadOnly,
+          editAvailable: itineraryEditAvailable,
+          navigationKeyFree: Boolean(itineraryNavigationHref)
+            && !/[?&]key=|security|jscode/i.test(itineraryNavigationHref),
+          mapStatus: itineraryMapStatus,
+          mapMarkers: itineraryMarkers,
+          mapSurface: itineraryMapSurface,
+          createStartsBlank: itineraryCreateStartsBlank,
+          oneEmptyStop: itineraryOneEmptyStop,
+          createdWithAmap: itineraryCreatedWithAmap,
+          createdMapReady: itineraryCreatedMapReady,
+          createdDistance: itineraryCreatedDistance,
+          deleted: itineraryDeleted,
+        };
+
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
       }
@@ -1476,6 +1728,7 @@ async function runViewport(cdp, url, viewport, historicalSolution) {
         actionFlow: window.__qaAction ?? {},
         editFlow: window.__qaEdit ?? {},
         knowledgeFlow: window.__qaKnowledge ?? {},
+        itineraryFlow: window.__qaItinerary ?? {},
         weeklyDraftText: window.__qaDrafts?.weekly ?? '',
         weeklyEditor: window.__qaWeeklyEditor ?? {},
         solutionHistory: window.__qaSolutionHistory ?? {},
@@ -1488,6 +1741,245 @@ async function runViewport(cdp, url, viewport, historicalSolution) {
       };
     })()
   `);
+}
+
+async function inspectSalesDecisionViewport(cdp, frontendUrl, viewport) {
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: viewport.width,
+    height: viewport.height,
+    deviceScaleFactor: 1,
+    mobile: viewport.mobile,
+  });
+  await cdp.send("Page.navigate", { url: frontendUrl });
+
+  return evaluate(cdp, `
+    (async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitUntil = async (predicate, timeoutMs = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          const value = predicate();
+          if (value) return value;
+          await wait(100);
+        }
+        throw new Error('Timed out opening the sales decision panel');
+      };
+
+      await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
+      const opportunityNav = [...document.querySelectorAll('.nav-item')]
+        .find((button) => button.textContent.includes('商机档案'));
+      if (!opportunityNav) throw new Error('Missing opportunity navigation');
+      opportunityNav.click();
+      await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'));
+
+      const opportunityRow = [...document.querySelectorAll('.customer-list-row')]
+        .find((row) => row.textContent.includes('日照中医医院'));
+      const detailButton = opportunityRow?.querySelector('[data-testid="opportunity-open-detail"]');
+      if (!detailButton) throw new Error('Missing sales decision opportunity detail entry');
+      detailButton.click();
+      await waitUntil(() => document.querySelector('[data-testid="sales-decision-panel"]'));
+      await waitUntil(() => {
+        const analyze = document.querySelector('[data-testid="sales-decision-analyze"]');
+        const settled = document.querySelector('[data-testid="sales-decision-result"], [data-testid="sales-decision-empty"]');
+        return analyze && !analyze.disabled && settled;
+      });
+
+      const panel = document.querySelector('[data-testid="sales-decision-panel"]');
+      panel.scrollIntoView({ block: 'start' });
+      await wait(120);
+      const panelRect = panel.getBoundingClientRect();
+      const grid = panel.querySelector('.sales-decision-grid');
+      const gridColumns = grid
+        ? getComputedStyle(grid).gridTemplateColumns.split(/\\s+/).filter(Boolean).length
+        : 0;
+      const overflowElements = [...panel.querySelectorAll('button, h3, p, li, .sales-decision-boundary span, .editor-status')]
+        .filter((element) => {
+          const bounds = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          if (bounds.width === 0 || bounds.height === 0 || style.display === 'none' || style.visibility === 'hidden') return false;
+          if (style.overflowX === 'auto' || style.overflowX === 'scroll') return false;
+          return element.scrollWidth > element.clientWidth + 2;
+        })
+        .map((element) => ({
+          tag: element.tagName.toLowerCase(),
+          text: element.textContent.replace(/\\s+/g, ' ').trim().slice(0, 80),
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+        }));
+      const controlTargets = [...panel.querySelectorAll('button')]
+        .filter((button) => {
+          const bounds = button.getBoundingClientRect();
+          return bounds.width > 0 && bounds.height > 0;
+        })
+        .map((button) => {
+          const bounds = button.getBoundingClientRect();
+          return {
+            label: button.textContent.replace(/\\s+/g, ' ').trim(),
+            width: Math.round(bounds.width),
+            height: Math.round(bounds.height),
+          };
+        });
+
+      return {
+        name: ${JSON.stringify(viewport.name)},
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        resultVisible: Boolean(panel.querySelector('[data-testid="sales-decision-result"]')),
+        headline: panel.querySelector('.sales-decision-headline h3')?.textContent?.trim() ?? '',
+        pageOverflowX: Math.max(0, Math.ceil(Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth)),
+        panelOverflowX: Math.max(0, Math.ceil(panel.scrollWidth - panel.clientWidth)),
+        panelOutOfBounds: panelRect.left < -1 || panelRect.right > window.innerWidth + 1,
+        overflowElements,
+        gridColumns,
+        controlTargets,
+        selectedHistoryPressed: panel.querySelector('.sales-decision-history-item.selected')?.getAttribute('aria-pressed') === 'true',
+        liveStatusVisible: Boolean(panel.querySelector('[role="status"][aria-live="polite"]')),
+      };
+    })()
+  `);
+}
+
+async function runSalesDecisionRegression(cdp, frontendUrl, backendUrl) {
+  const regressionStart = cdp.networkResponses.length;
+  const desktop = viewportCases.find((viewport) => viewport.name === "desktop");
+  const initialState = await inspectSalesDecisionViewport(cdp, frontendUrl, desktop);
+
+  const analyzeStart = cdp.networkResponses.length;
+  const analyzeState = await evaluate(cdp, `
+    (async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitUntil = async (predicate, timeoutMs = 10000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          const value = predicate();
+          if (value) return value;
+          await wait(100);
+        }
+        throw new Error('Timed out waiting for the sales decision analysis');
+      };
+      const button = document.querySelector('[data-testid="sales-decision-analyze"]');
+      const historyBefore = document.querySelectorAll('.sales-decision-history-item').length;
+      if (!button || button.disabled) throw new Error('Sales decision analyze action is unavailable');
+      button.click();
+      await waitUntil(() => {
+        const status = document.querySelector('[data-testid="sales-decision-panel"] [role="status"]')?.textContent ?? '';
+        return document.querySelector('[data-testid="sales-decision-result"]') &&
+          !document.querySelector('[data-testid="sales-decision-analyze"]')?.disabled &&
+          status.includes('诊断已保存');
+      });
+      return {
+        resultVisible: Boolean(document.querySelector('[data-testid="sales-decision-result"]')),
+        historyBefore,
+        historyAfter: document.querySelectorAll('.sales-decision-history-item').length,
+        boundaryText: document.querySelector('.sales-decision-boundary')?.textContent?.trim() ?? '',
+      };
+    })()
+  `);
+  await delay(120);
+  const analyzeRequests = cdp.networkResponses.slice(analyzeStart)
+    .filter((item) => new URL(item.url).pathname === "/api/ai/sales-decisions");
+  const analyzePostRequests = analyzeRequests.filter((item) => item.method === "POST");
+
+  const historyStart = cdp.networkResponses.length;
+  const historyState = await evaluate(cdp, `
+    (async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitUntil = async (predicate, timeoutMs = 8000) => {
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+          const value = predicate();
+          if (value) return value;
+          await wait(100);
+        }
+        throw new Error('Timed out reading saved sales decision history');
+      };
+      const historyItem = document.querySelector('.sales-decision-history-item.selected') ??
+        document.querySelector('.sales-decision-history-item');
+      if (!historyItem) throw new Error('Missing saved sales decision history');
+      historyItem.click();
+      await waitUntil(() => {
+        const status = document.querySelector('[data-testid="sales-decision-panel"] [role="status"]')?.textContent ?? '';
+        return status.includes('不会重新调用模型');
+      });
+      return {
+        resultVisible: Boolean(document.querySelector('[data-testid="sales-decision-result"]')),
+        selectedHistoryPressed: document.querySelector('.sales-decision-history-item.selected')?.getAttribute('aria-pressed') === 'true',
+        status: document.querySelector('[data-testid="sales-decision-panel"] [role="status"]')?.textContent?.trim() ?? '',
+      };
+    })()
+  `);
+  await delay(120);
+  const historyRequests = cdp.networkResponses.slice(historyStart)
+    .filter((item) => /^\/api\/ai\/sales-decisions\/[^/]+$/.test(new URL(item.url).pathname));
+  const historyReadRequests = historyRequests.filter((item) => item.method === "GET");
+
+  assert.equal(initialState.resultVisible, false, "sales decision regression should start from a genuine empty state");
+  assert.equal(analyzeState.resultVisible, true, "sales decision action should render a saved diagnosis");
+  assert.ok(analyzeState.historyAfter >= analyzeState.historyBefore + 1, "sales decision action should add one history item");
+  assert.match(analyzeState.boundaryText, /人工确认/, "sales decision result should keep the human confirmation boundary visible");
+  assert.deepEqual(
+    analyzePostRequests.map((item) => [item.method, item.status]),
+    [["POST", 201]],
+    "sales decision action should issue exactly one successful POST",
+  );
+  assert.equal(historyState.resultVisible, true, "saved sales decision history should render the existing result");
+  assert.equal(historyState.selectedHistoryPressed, true, "saved sales decision history should retain its selected state");
+  assert.match(historyState.status, /不会重新调用模型/, "history should explicitly confirm that the model was not called again");
+  assert.deepEqual(
+    historyReadRequests.map((item) => [item.method, item.status]),
+    [["GET", 200]],
+    "opening one sales decision history item should issue exactly one GET",
+  );
+  assert.equal(
+    historyRequests.filter((item) => item.method === "POST").length,
+    0,
+    "opening sales decision history must not issue another analysis POST",
+  );
+
+  const viewportStates = [];
+  for (const viewport of viewportCases) {
+    viewportStates.push(await inspectSalesDecisionViewport(cdp, frontendUrl, viewport));
+  }
+
+  for (const state of viewportStates) {
+    const expectedColumns = state.viewport.width <= 760 ? 1 : 2;
+    const minimumTarget = state.viewport.width <= 430 ? 44 : 40;
+    assert.equal(state.resultVisible, true, `${state.name} should load the saved sales decision result`);
+    assert.ok(state.headline.length > 0, `${state.name} should render a diagnosis headline`);
+    assert.equal(state.pageOverflowX, 0, `${state.name} sales decision view should not overflow the page horizontally`);
+    assert.equal(state.panelOverflowX, 0, `${state.name} sales decision panel should not overflow horizontally`);
+    assert.equal(state.panelOutOfBounds, false, `${state.name} sales decision panel should stay inside the viewport`);
+    assert.deepEqual(state.overflowElements, [], `${state.name} sales decision text should fit its controls and content blocks`);
+    assert.equal(state.gridColumns, expectedColumns, `${state.name} sales decision grid should use the responsive column count`);
+    assert.equal(state.selectedHistoryPressed, true, `${state.name} should expose the selected diagnosis history state`);
+    assert.equal(state.liveStatusVisible, true, `${state.name} should expose an aria-live diagnosis status`);
+    assert.deepEqual(
+      state.controlTargets.filter((item) => item.width < minimumTarget || item.height < minimumTarget),
+      [],
+      `${state.name} sales decision controls should meet the ${minimumTarget}px target size`,
+    );
+  }
+
+  const regressionRequests = cdp.networkResponses.slice(regressionStart);
+  const diagnosticPosts = regressionRequests.filter((item) =>
+    item.method === "POST" && new URL(item.url).pathname === "/api/ai/sales-decisions");
+  assert.equal(diagnosticPosts.length, 1, "saved history and responsive checks must not trigger another diagnosis POST");
+  const forbiddenWritePrefixes = ["/api/customers", "/api/opportunities", "/api/actions", "/api/risks"];
+  const businessWriteRequests = regressionRequests.filter((item) =>
+    ["POST", "PATCH", "DELETE"].includes(item.method) &&
+    forbiddenWritePrefixes.some((prefix) => new URL(item.url).pathname.startsWith(prefix)));
+  assert.deepEqual(businessWriteRequests, [], "sales decision diagnosis and history must not write customer, opportunity, action, or risk data");
+
+  return {
+    analyzeRequests: analyzePostRequests.map((item) => ({ method: item.method, status: item.status })),
+    historyRequests: historyReadRequests.map((item) => ({ method: item.method, status: item.status })),
+    businessWriteRequests: businessWriteRequests.length,
+    viewports: viewportStates.map((state) => ({
+      name: state.name,
+      pageOverflowX: state.pageOverflowX,
+      panelOverflowX: state.panelOverflowX,
+      gridColumns: state.gridColumns,
+    })),
+  };
 }
 
 async function waitForNetworkResponse(cdp, startIndex, predicate, timeoutMs = 8000) {
@@ -1633,11 +2125,16 @@ async function runCustomerConflictRegression(cdp, frontendUrl, backendUrl, apiFe
 async function main() {
   assert.ok(existsSync(backendDir), `Backend directory does not exist: ${backendDir}`);
 
+  const runtimeMode = await detectIntegrationRuntime();
+  const expectAmapReady = String(process.env.SENT_ZX_EXPECT_AMAP ?? "false").toLowerCase() === "true";
+  const realItineraryFlow = String(process.env.SENT_ZX_REAL_ITINERARY ?? "false").toLowerCase() === "true";
   const backendPort = await getFreePort();
   const frontendPort = await getFreePort();
   const backendUrl = `http://127.0.0.1:${backendPort}`;
   const frontendUrl = `http://127.0.0.1:${frontendPort}`;
-  const databaseUrl = `/tmp/sent-zx-integration-${Date.now()}.sqlite`;
+  const databaseUrl = runtimeMode === "wsl"
+    ? `/tmp/sent-zx-integration-${Date.now()}.sqlite`
+    : join(tmpdir(), `sent-zx-integration-${Date.now()}.sqlite`);
   const backendWslPath = toWslPath(backendDir);
   const authPasswordHash = await hashPassword("qa-login", { salt: Buffer.alloc(16, 23) });
   let backend;
@@ -1645,44 +2142,66 @@ async function main() {
   let cdp;
   let runError;
   let historicalSolution;
+  let historicalItinerary;
 
   try {
-    await runProcess("wsl.exe", [
-      "--cd",
-      backendWslPath,
-      "--exec",
-      "env",
-      "NODE_ENV=test",
-      `DATABASE_URL=${databaseUrl}`,
-      "npm",
-      "run",
-      "seed",
-    ]);
+    if (runtimeMode === "wsl") {
+      await runProcess("wsl.exe", [
+        "--cd",
+        backendWslPath,
+        "--exec",
+        "env",
+        "NODE_ENV=test",
+        `DATABASE_URL=${databaseUrl}`,
+        "npm",
+        "run",
+        "seed",
+      ]);
+    } else {
+      await runProcess(process.execPath, ["src/seed.js"], {
+        cwd: backendDir,
+        env: { NODE_ENV: "test", DATABASE_URL: databaseUrl },
+      });
+    }
 
     const createdHistoricalSolution = await createHistoricalSolutionFixture({
+      runtimeMode,
+      backendWslPath,
+      databaseUrl,
+    });
+    const createdHistoricalItinerary = await createHistoricalItineraryFixture({
+      runtimeMode,
       backendWslPath,
       databaseUrl,
     });
 
-    backend = spawnManaged("wsl.exe", [
-      "--cd",
-      backendWslPath,
-      "--exec",
-      "env",
-      `PORT=${backendPort}`,
-      `DATABASE_URL=${databaseUrl}`,
-      "AI_ANALYSIS_MODE=mock",
-      "DEEPSEEK_API_KEY=",
-      "AUTH_ACCOUNT=jiangjz",
-      `AUTH_PASSWORD_HASH=${authPasswordHash}`,
-      "AUTH_SESSION_SECRET=qa-session-secret",
-      `CORS_ALLOWED_ORIGINS=${frontendUrl}`,
-      "AUTH_COOKIE_SECURE=false",
-      "SOLUTION_WRITES_ENABLED=false",
-      "NODE_ENV=test",
-      "node",
-      "src/server.js",
-    ]);
+    const backendEnv = {
+      PORT: String(backendPort),
+      DATABASE_URL: databaseUrl,
+      AI_ANALYSIS_MODE: "mock",
+      DEEPSEEK_API_KEY: "",
+      AUTH_ACCOUNT: "jiangjz",
+      AUTH_PASSWORD_HASH: authPasswordHash,
+      AUTH_SESSION_SECRET: "qa-session-secret",
+      CORS_ALLOWED_ORIGINS: frontendUrl,
+      AUTH_COOKIE_SECURE: "false",
+      SOLUTION_WRITES_ENABLED: "false",
+      NODE_ENV: "test",
+    };
+    backend = runtimeMode === "wsl"
+      ? spawnManaged("wsl.exe", [
+          "--cd",
+          backendWslPath,
+          "--exec",
+          "env",
+          ...Object.entries(backendEnv).map(([key, value]) => `${key}=${value}`),
+          "node",
+          "src/server.js",
+        ])
+      : spawnManaged(process.execPath, ["src/server.js"], {
+          cwd: backendDir,
+          env: backendEnv,
+        });
     await waitForHttp(`${backendUrl}/api/health`);
 
     const fixturePasswordField = ["pass", "word"].join("");
@@ -1701,10 +2220,24 @@ async function main() {
     assert.equal(fixtureReadResponse.status, 200, "default backend should keep historical solution reads available");
     historicalSolution = fixtureReadBody.items?.find((item) => item.id === createdHistoricalSolution.id) ?? null;
     assert.ok(historicalSolution, "default backend GET should return the historical solution fixture");
+    const fixtureItineraryResponse = await fetch(`${backendUrl}/api/itineraries`, {
+      headers: { Cookie: fixtureReadCookie },
+    });
+    const fixtureItineraryBody = await fixtureItineraryResponse.json();
+    assert.equal(fixtureItineraryResponse.status, 200, "default backend should keep historical itinerary reads available");
+    historicalItinerary = fixtureItineraryBody.items?.find((item) => item.id === createdHistoricalItinerary.id) ?? null;
+    assert.ok(historicalItinerary, "default backend GET should return the historical itinerary fixture");
 
     frontend = spawnManaged(
-      "cmd.exe",
-      ["/d", "/s", "/c", "npm.cmd", "run", "dev", "--", "--port", String(frontendPort), "--strictPort"],
+      process.execPath,
+      [
+        resolve(appRoot, "node_modules/vite/bin/vite.js"),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(frontendPort),
+        "--strictPort",
+      ],
       {
         cwd: appRoot,
         env: { VITE_API_BASE_URL: backendUrl, NODE_ENV: "test" },
@@ -1715,13 +2248,34 @@ async function main() {
     cdp = await openChromeCdp();
     const viewportResults = [];
     for (const viewport of viewportCases) {
-      viewportResults.push(await runViewport(cdp, frontendUrl, viewport, historicalSolution));
+      viewportResults.push(await runViewport(
+        cdp,
+        frontendUrl,
+        viewport,
+        historicalSolution,
+        historicalItinerary,
+        realItineraryFlow,
+      ));
     }
+    const salesDecisionRegression = await runSalesDecisionRegression(cdp, frontendUrl, backendUrl);
     const browserSolutionWrites = cdp.networkResponses.filter((item) =>
       (item.method === "POST" && item.url === `${backendUrl}/api/solutions/draft`) ||
       (item.method === "PATCH" && item.url.startsWith(`${backendUrl}/api/solutions/`)),
     );
     assert.deepEqual(browserSolutionWrites, [], "primary UI must not issue solution write requests");
+    const browserItineraryWrites = cdp.networkResponses.filter((item) =>
+      ["POST", "PATCH", "DELETE"].includes(item.method) &&
+      new URL(item.url).pathname.startsWith("/api/itineraries"),
+    );
+    if (realItineraryFlow) {
+      assert.deepEqual(
+        browserItineraryWrites.map((item) => item.method),
+        ["POST", "DELETE"],
+        "real itinerary browser QA should create and then delete exactly one itinerary",
+      );
+    } else {
+      assert.deepEqual(browserItineraryWrites, [], "reading saved itinerary history must not trigger replanning writes");
+    }
 
     const refreshStart = cdp.networkResponses.length;
     await cdp.send("Page.reload", { ignoreCache: true });
@@ -2048,6 +2602,24 @@ async function main() {
         assert.equal(result.knowledgeFlow.detailOpened, true, "desktop knowledge page should open detail as a sub view");
         assert.equal(result.knowledgeFlow.solutionWriteEntryAbsent, true, "desktop knowledge page must not expose a solution write entry");
         assert.equal(result.knowledgeFlow.weeklyCited, true, "desktop knowledge page should cite a selected knowledge item into a weekly draft");
+        assert.equal(result.itineraryFlow.listOpened, true, "desktop itinerary navigation should open the persisted itinerary list");
+        assert.equal(result.itineraryFlow.localSearch, true, "desktop itinerary search should accept a module-local query");
+        assert.equal(result.itineraryFlow.detailReadOnly, true, "desktop itinerary detail should remain read-only until modify is clicked");
+        assert.equal(result.itineraryFlow.editAvailable, true, "desktop itinerary detail should expose an explicit modify action");
+        assert.equal(result.itineraryFlow.navigationKeyFree, true, "desktop itinerary navigation links must not contain provider credentials");
+        if (expectAmapReady) {
+          assert.equal(result.itineraryFlow.mapStatus, "ready", "desktop itinerary map should load with the configured AMap JS key");
+          assert.equal(result.itineraryFlow.mapMarkers, 2, "desktop itinerary map should render the departure and customer markers");
+          assert.equal(result.itineraryFlow.mapSurface, true, "desktop itinerary map should render a visible map surface");
+        }
+        if (realItineraryFlow) {
+          assert.equal(result.itineraryFlow.createdWithAmap, true, "desktop itinerary form should create a real AMap-backed route");
+          assert.equal(result.itineraryFlow.createdMapReady, true, "newly created itinerary should render its real AMap route");
+          assert.match(result.itineraryFlow.createdDistance, /km$/, "newly created itinerary should expose a routed distance");
+          assert.equal(result.itineraryFlow.deleted, true, "desktop itinerary flow should delete its real QA record");
+        }
+        assert.equal(result.itineraryFlow.createStartsBlank, true, "desktop itinerary create button should open a blank itinerary editor directly");
+        assert.equal(result.itineraryFlow.oneEmptyStop, true, "desktop itinerary editor should start with one blank customer stop");
         assert.match(result.weeklyDraftText, /本周重点进展/, "desktop flow should render a backend weekly draft");
         assert.equal(result.weeklyEditor.saved, true, "desktop weekly page should save edited weekly report content");
         assert.equal(result.weeklyEditor.ready, true, "desktop weekly page should mark weekly report as ready");
@@ -2182,6 +2754,7 @@ async function main() {
       JSON.stringify(
         {
           status: "passed",
+          runtimeMode,
           backendUrl,
           frontendUrl,
           latestRecord: {
@@ -2205,6 +2778,8 @@ async function main() {
           generatedDrafts: {
             weekly: viewportResults.find((result) => result.name === "desktop")?.weeklyDraftText.length ?? 0,
           },
+          itinerary: viewportResults.find((result) => result.name === "desktop")?.itineraryFlow ?? {},
+          salesDecision: salesDecisionRegression,
           solutionWriteContract,
           conflictRegression,
           authSecurity: {
@@ -2252,18 +2827,26 @@ async function main() {
     assertStopped("frontend cleanup", frontendStop);
     const backendStop = await captureCleanup("backend wrapper cleanup", () => stopProcessTree(backend));
     assertStopped("backend wrapper cleanup", backendStop);
-    await captureCleanup("WSL listener cleanup", () =>
-      stopWslPort(backendPort, { backendWslPath, databaseUrl }));
-    await captureCleanup("temporary database cleanup", () =>
-      runProcess("wsl.exe", [
-        "--exec",
-        "rm",
-        "-f",
-        databaseUrl,
-        `${databaseUrl}-wal`,
-        `${databaseUrl}-shm`,
-        `${databaseUrl}-journal`,
-      ]));
+    if (runtimeMode === "wsl") {
+      await captureCleanup("WSL listener cleanup", () =>
+        stopWslPort(backendPort, { backendWslPath, databaseUrl }));
+      await captureCleanup("temporary database cleanup", () =>
+        runProcess("wsl.exe", [
+          "--exec",
+          "rm",
+          "-f",
+          databaseUrl,
+          `${databaseUrl}-wal`,
+          `${databaseUrl}-shm`,
+          `${databaseUrl}-journal`,
+        ]));
+    } else {
+      await captureCleanup("temporary database cleanup", async () => {
+        for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+          rmSync(`${databaseUrl}${suffix}`, { force: true });
+        }
+      });
+    }
 
     if (cleanupErrors.length > 0) {
       const cleanupSummary = cleanupErrors.map((error) => error.message).join("; ");

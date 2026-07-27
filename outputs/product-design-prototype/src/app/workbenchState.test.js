@@ -12,6 +12,7 @@ const collectionKeys = [
   "knowledge",
   "quickRecords",
   "solutionDocs",
+  "itineraries",
 ];
 
 function requireFunction(name) {

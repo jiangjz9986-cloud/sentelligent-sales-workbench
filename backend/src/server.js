@@ -24,6 +24,15 @@ import {
 import { loadConfig } from "./config.js";
 import { all, get, openDatabase, run } from "./db.js";
 import { withImmediateTransaction } from "./db/transaction.js";
+import { buildSalesDecisionInputSnapshot } from "./ai/agents/salesDecisionAgent.js";
+import { createSalesDecisionRepository } from "./ai/agents/salesDecisionRepository.js";
+import {
+  ItineraryNotFoundError,
+  ItineraryVersionConflictError,
+  createVisitItineraryRepository,
+} from "./itinerary/repository.js";
+import { planVisitItinerary } from "./itinerary/planner.js";
+import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import {
   claimIdempotency,
   completeIdempotency,
@@ -46,6 +55,7 @@ import {
 } from "./http/security.js";
 import {
   analyzeQuickRecord,
+  analyzeSalesDecision,
   enhanceSolutionDraftWithModel,
   enhanceWeeklyDraftWithModel,
   generateManualSuggestion,
@@ -60,6 +70,7 @@ import { buildWeeklyDraft } from "./weeklyDraft.js";
 import {
   partialSchema,
   requestSchemas,
+  validateVisitItineraryRequest,
   validateObject,
 } from "./validation/requests.js";
 
@@ -1634,15 +1645,181 @@ function isCookieWrite(method) {
   return method === "POST" || method === "PATCH" || method === "DELETE";
 }
 
+function itineraryAuditSnapshot(item) {
+  if (!item) return null;
+  return {
+    id: item.id,
+    version: item.version,
+    title: item.title,
+    visitDate: item.visitDate,
+    status: item.status,
+    stopCount: Array.isArray(item.request?.stops) ? item.request.stops.length : 0,
+    optimizationSource: item.plan?.optimization?.source ?? null,
+    createdBy: item.createdBy,
+    updatedBy: item.updatedBy,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    ...(item.deletedAt ? { deletedAt: item.deletedAt, deletedBy: item.deletedBy } : {}),
+  };
+}
+
+function itineraryRepositoryFailure(error) {
+  if (error instanceof ItineraryNotFoundError) notFound();
+  if (error instanceof ItineraryVersionConflictError) {
+    throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+      currentVersion: error.currentVersion,
+    });
+  }
+  throw error;
+}
+
+function itineraryMapFailure(error) {
+  if (!(error instanceof AmapServiceError)) throw error;
+  if (error.code === "AMAP_LOCATION_MISMATCH") {
+    throw new HttpError(422, error.code, "Resolved location does not match the requested city");
+  }
+  if (error.code === "AMAP_NO_RESULT" || error.code === "AMAP_NO_ROUTE") {
+    throw new HttpError(422, error.code, "Map service could not resolve the requested itinerary");
+  }
+  if (error.code === "AMAP_TIMEOUT") {
+    throw new HttpError(504, error.code, "Map service request timed out");
+  }
+  throw new HttpError(502, error.code, "Map service could not complete the request");
+}
+
+function buildSalesDecisionContext(db, body) {
+  let customer = null;
+  let opportunity = null;
+  let quickRecord = null;
+
+  if (body.customerId) {
+    customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", {
+      $id: body.customerId,
+    }));
+    if (!customer) notFound();
+  }
+
+  if (body.opportunityId) {
+    opportunity = opportunityFromRow(activeOpportunityEntityRow(db, body.opportunityId));
+    if (!opportunity) notFound();
+    if (customer && opportunity.customerId !== customer.id) {
+      validationFailure("opportunityId", "relationship");
+    }
+    if (!customer) {
+      customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", {
+        $id: opportunity.customerId,
+      }));
+    }
+  }
+
+  if (body.quickRecordId) {
+    quickRecord = quickRecordFromRow(get(
+      db,
+      "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
+      { $id: body.quickRecordId },
+    ));
+    if (!quickRecord) notFound();
+    if (customer && quickRecord.customerId && quickRecord.customerId !== customer.id) {
+      validationFailure("quickRecordId", "relationship");
+    }
+    if (opportunity && quickRecord.opportunityId && quickRecord.opportunityId !== opportunity.id) {
+      validationFailure("quickRecordId", "relationship");
+    }
+    if (!customer && quickRecord.customerId) {
+      customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", {
+        $id: quickRecord.customerId,
+      }));
+    }
+    if (!opportunity && quickRecord.opportunityId) {
+      opportunity = opportunityFromRow(activeOpportunityEntityRow(db, quickRecord.opportunityId));
+    }
+  }
+
+  const rawContent = String(body.rawContent ?? quickRecord?.rawContent ?? "").trim();
+  if (!customer && !opportunity && !quickRecord && !rawContent) {
+    validationFailure("body", "source");
+  }
+
+  const customerId = customer?.id ?? quickRecord?.customerId ?? opportunity?.customerId ?? null;
+  const opportunityId = opportunity?.id ?? quickRecord?.opportunityId ?? null;
+  const actions = customerId || opportunityId
+    ? getDraftActions(db, { customerId, opportunityId })
+    : [];
+  const risks = customerId || opportunityId
+    ? all(
+      db,
+      `SELECT * FROM risk_items
+       WHERE deleted_at IS NULL
+         AND (customer_id = $customerId OR opportunity_id = $opportunityId)
+       ORDER BY updated_at DESC
+       LIMIT 20`,
+      { $customerId: customerId, $opportunityId: opportunityId },
+    ).map(riskFromRow)
+    : [];
+  const knowledge = searchKnowledgeItems(db, {
+    query: [customer?.name, opportunity?.name, rawContent].filter(Boolean).join(" "),
+    limit: 6,
+  });
+
+  return {
+    analysisType: body.analysisType ?? "opportunity_diagnosis",
+    industry: body.industry ?? "general",
+    rawContent,
+    customer,
+    opportunity,
+    quickRecord,
+    actions,
+    risks,
+    knowledge,
+    customerId,
+    opportunityId,
+    quickRecordId: quickRecord?.id ?? null,
+  };
+}
+
 export function createServer(options = {}) {
   const config = loadConfig(options);
   const db = openDatabase({ databaseUrl: config.databaseUrl });
   if (options.seed) seedDatabase(db);
+  const itineraryRepository = createVisitItineraryRepository(db, {
+    clock: options.itineraryClock ?? (() => new Date()),
+    ...(options.itineraryIdFactory ? { idFactory: options.itineraryIdFactory } : {}),
+  });
+  const salesDecisionRepository = createSalesDecisionRepository(db, {
+    ...(options.salesDecisionIdFactory ? { idFactory: options.salesDecisionIdFactory } : {}),
+    ...(options.salesDecisionClock ? { clock: options.salesDecisionClock } : {}),
+  });
+  const amapClient = Object.hasOwn(options, "amapClient")
+    ? options.amapClient
+    : config.amapWebServiceKey
+      ? createAmapClient({
+          apiKey: config.amapWebServiceKey,
+          timeoutMs: config.amapTimeoutMs,
+          fetchImpl: options.fetchImpl ?? fetch,
+        })
+      : null;
   const weixinLoginBinding = createWeixinLoginBinding({
     config,
     spawnLoginProcess: options.spawnWeixinLoginProcess,
     now: options.now,
   });
+
+  async function buildItineraryPlan(body) {
+    if (!amapClient) {
+      throw new HttpError(503, "AMAP_NOT_CONFIGURED", "Map service is not configured");
+    }
+    try {
+      return await planVisitItinerary(body, {
+        amapClient,
+        modelConfig: config,
+        fetchImpl: options.fetchImpl,
+        clock: options.itineraryClock ?? (() => new Date()),
+        ...(options.itineraryEnhanceOrder ? { enhanceOrder: options.itineraryEnhanceOrder } : {}),
+      });
+    } catch (error) {
+      return itineraryMapFailure(error);
+    }
+  }
 
   const server = createHttpServer(async (request, response) => {
     const requestId = randomUUID();
@@ -1757,6 +1934,168 @@ export function createServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/api/audit-logs") {
         sendJson(response, 200, { items: listAuditLogs(db, url.searchParams) });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/itineraries") {
+        const status = url.searchParams.get("status") || undefined;
+        let items;
+        try {
+          items = itineraryRepository.list({ status });
+        } catch (error) {
+          if (error instanceof TypeError) validationFailure("status", "enum");
+          throw error;
+        }
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/itineraries") {
+        const body = validateVisitItineraryRequest(await readJson(request));
+        const snapshotRequest = { ...body, status: body.status ?? "planned" };
+        const plan = await buildItineraryPlan(snapshotRequest);
+        const item = withImmediateTransaction(db, () => {
+          const created = itineraryRepository.create({
+            title: snapshotRequest.title,
+            visitDate: snapshotRequest.visitDate,
+            status: snapshotRequest.status,
+            request: snapshotRequest,
+            plan,
+            actor: request.authContext.account,
+          });
+          triggerFailpoint(options, "itinerary.create.afterWrite");
+          insertAudit(db, {
+            action: "visit_itinerary.create",
+            entityType: "visit_itinerary",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: itineraryAuditSnapshot(created),
+            entityVersion: created.version,
+            metadata: {
+              visitDate: created.visitDate,
+              status: created.status,
+              stopCount: created.request.stops.length,
+            },
+          });
+          return created;
+        });
+        sendJson(response, 201, { item });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "itineraries" &&
+        parts[2]
+      ) {
+        const item = itineraryRepository.get(parts[2]);
+        if (!item) notFound();
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "PATCH" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "itineraries" &&
+        parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = validateVisitItineraryRequest(await readJson(request));
+        const current = itineraryRepository.get(parts[2]);
+        if (!current) notFound();
+        if (current.version !== expectedVersion) {
+          throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+            currentVersion: current.version,
+          });
+        }
+        const snapshotRequest = { ...body, status: body.status ?? current.status };
+        const plan = await buildItineraryPlan(snapshotRequest);
+        const item = withImmediateTransaction(db, () => {
+          const before = itineraryRepository.get(parts[2]);
+          if (!before) notFound();
+          let updated;
+          try {
+            updated = itineraryRepository.update(parts[2], {
+              expectedVersion,
+              title: snapshotRequest.title,
+              visitDate: snapshotRequest.visitDate,
+              status: snapshotRequest.status,
+              request: snapshotRequest,
+              plan,
+              actor: request.authContext.account,
+            });
+          } catch (error) {
+            itineraryRepositoryFailure(error);
+          }
+          triggerFailpoint(options, "itinerary.update.afterWrite");
+          insertAudit(db, {
+            action: "visit_itinerary.update",
+            entityType: "visit_itinerary",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before: itineraryAuditSnapshot(before),
+            after: itineraryAuditSnapshot(updated),
+            entityVersion: updated.version,
+            metadata: {
+              visitDate: updated.visitDate,
+              status: updated.status,
+              stopCount: updated.request.stops.length,
+              replanned: true,
+            },
+          });
+          return updated;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "DELETE" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "itineraries" &&
+        parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        const deleted = withImmediateTransaction(db, () => {
+          const before = itineraryRepository.get(parts[2]);
+          if (!before) notFound();
+          let result;
+          try {
+            result = itineraryRepository.softDelete(parts[2], {
+              expectedVersion,
+              actor: request.authContext.account,
+            });
+          } catch (error) {
+            itineraryRepositoryFailure(error);
+          }
+          triggerFailpoint(options, "itinerary.delete.afterWrite");
+          insertAudit(db, {
+            action: "visit_itinerary.delete",
+            entityType: "visit_itinerary",
+            entityId: result.id,
+            actor: request.authContext.account,
+            requestId,
+            before: itineraryAuditSnapshot(before),
+            after: itineraryAuditSnapshot(result),
+            entityVersion: result.version,
+            metadata: {
+              visitDate: result.visitDate,
+              status: result.status,
+              stopCount: result.request.stops.length,
+            },
+          });
+          return result;
+        });
+        sendJson(response, 200, { deleted });
         return;
       }
 
@@ -2441,6 +2780,79 @@ export function createServer(options = {}) {
           return { quickRecord, analysis };
         });
         sendJson(response, 200, result);
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/ai/sales-decisions") {
+        const items = salesDecisionRepository.list({
+          customerId: url.searchParams.get("customerId") || undefined,
+          opportunityId: url.searchParams.get("opportunityId") || undefined,
+          quickRecordId: url.searchParams.get("quickRecordId") || undefined,
+        });
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "ai" &&
+        parts[2] === "sales-decisions" &&
+        parts[3]
+      ) {
+        const item = salesDecisionRepository.get(parts[3]);
+        if (!item) return notFound(response);
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/ai/sales-decisions") {
+        const body = await readValidatedJson(request, requestSchemas.salesDecisionAnalyze);
+        const context = buildSalesDecisionContext(db, body);
+        const inputSnapshot = buildSalesDecisionInputSnapshot(context);
+        const analysis = await analyzeSalesDecision(context, config, {
+          fetchImpl: options.fetchImpl,
+        });
+        const item = withImmediateTransaction(db, () => {
+          const created = salesDecisionRepository.create({
+            analysisType: context.analysisType,
+            industry: context.industry,
+            customerId: context.customerId,
+            opportunityId: context.opportunityId,
+            quickRecordId: context.quickRecordId,
+            input: inputSnapshot,
+            analysis,
+            source: analysis.source,
+            createdBy: request.authContext.account,
+          });
+          insertAudit(db, {
+            action: "sales_decision_analysis.create",
+            entityType: "sales_decision_analysis",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: {
+              id: created.id,
+              version: created.version,
+              analysisType: created.analysisType,
+              customerId: created.customerId,
+              opportunityId: created.opportunityId,
+              quickRecordId: created.quickRecordId,
+              source: created.source,
+              analysisTypeResult: created.analysis.analysisType,
+            },
+            entityVersion: created.version,
+            metadata: {
+              source: created.source,
+              decision: created.analysis.decision?.code,
+              score: created.analysis.score?.total,
+            },
+          });
+          return created;
+        });
+        sendJson(response, 201, { item });
         return;
       }
 

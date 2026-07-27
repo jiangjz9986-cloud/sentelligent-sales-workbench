@@ -16,6 +16,8 @@ export const BUSINESS_TABLES = [
   "action_items",
   "risk_items",
   "knowledge_items",
+  "visit_itineraries",
+  "sales_decision_analyses",
   "audit_logs",
 ];
 

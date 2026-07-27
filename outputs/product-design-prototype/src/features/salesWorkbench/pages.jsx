@@ -57,6 +57,7 @@ import {
 } from "../../quickRecordModel.js";
 import { formatWeekRangeLabel, getCurrentWeekRange } from "../../weekRange.js";
 import { buildOpportunityTimeline } from "./opportunityTimeline.js";
+import { SalesDecisionPanel } from "./SalesDecisionPanel.jsx";
 
 export function PageHeading({ active, activeMeta, headingContext, action }) {
   const title = headingContext?.title ?? pageTitle(active);
@@ -2312,6 +2313,12 @@ export function OpportunityPage({
           </Panel>
         </div>
         <Timeline items={timelineItems} />
+        <SalesDecisionPanel
+          selected={selected}
+          customer={customersList.find((item) => item.id === selected.customerId) ?? null}
+          apiClient={apiClient}
+          backendStatus={backendStatus}
+        />
         <div className="detail-actions">
           <button
             className="ghost-button"

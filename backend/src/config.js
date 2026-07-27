@@ -131,6 +131,10 @@ export function loadConfig(overrides = {}) {
     env.jsonBodyLimitBytes ?? env.JSON_BODY_LIMIT_BYTES ?? 1_048_576,
     "JSON_BODY_LIMIT_BYTES",
   );
+  const amapTimeoutMs = positiveInteger(
+    env.amapTimeoutMs ?? env.AMAP_TIMEOUT_MS ?? 10_000,
+    "AMAP_TIMEOUT_MS",
+  );
 
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
@@ -142,6 +146,8 @@ export function loadConfig(overrides = {}) {
     modelBaseUrl: env.modelBaseUrl ?? env.MODEL_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
     modelName: env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL ?? "deepseek-v4-flash",
     modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
+    amapWebServiceKey: String(env.amapWebServiceKey ?? env.AMAP_WEB_SERVICE_KEY ?? "").trim(),
+    amapTimeoutMs,
     solutionWritesEnabled: booleanValue(
       env.solutionWritesEnabled ?? env.SOLUTION_WRITES_ENABLED,
       false,

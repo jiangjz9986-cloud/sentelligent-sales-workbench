@@ -196,6 +196,26 @@ const routeCases = [
     }),
     "/solutions/solution-1",
   ],
+  [
+    "/itineraries",
+    expectedRoute({ page: "itineraries", active: "itinerary", mode: "list" }),
+    "/itineraries",
+  ],
+  [
+    "/itineraries/new",
+    expectedRoute({ page: "itineraries", active: "itinerary", mode: "new" }),
+    "/itineraries/new",
+  ],
+  [
+    "/itineraries/itinerary-1",
+    expectedRoute({ page: "itineraries", active: "itinerary", mode: "detail", entityId: "itinerary-1" }),
+    "/itineraries/itinerary-1",
+  ],
+  [
+    "/itineraries/itinerary-1/edit",
+    expectedRoute({ page: "itineraries", active: "itinerary", mode: "edit", entityId: "itinerary-1" }),
+    "/itineraries/itinerary-1/edit",
+  ],
 ];
 
 describe("workbench route parser and builder", () => {

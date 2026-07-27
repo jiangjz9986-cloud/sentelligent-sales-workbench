@@ -50,6 +50,7 @@ import {
   WeixinBindingPage,
   WeeklyPage,
 } from "./features/salesWorkbench/pages.jsx";
+import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage.jsx";
 import { mergeEntityByVersion } from "./quickRecordModel.js";
 import { getCurrentWeekRange } from "./weekRange.js";
 
@@ -66,6 +67,8 @@ function resolveHeadingContext({
   selectedRisk,
   selectedKnowledge,
   selectedSolution,
+  itineraryViewMode,
+  selectedItinerary,
 }) {
   if (active === "customer") {
     if (customerViewMode === "create") {
@@ -128,6 +131,17 @@ function resolveHeadingContext({
 
   if (active === "solution") {
     return { title: selectedSolution?.title ?? "历史方案" };
+  }
+
+  if (active === "itinerary") {
+    if (itineraryViewMode === "new") return { title: "新建拜访行程" };
+    if (itineraryViewMode === "edit") {
+      return { title: selectedItinerary ? `修改${selectedItinerary.title}` : "智能拜访行程" };
+    }
+    if (itineraryViewMode === "detail") {
+      return { title: selectedItinerary?.title ?? "智能拜访行程" };
+    }
+    return { title: "智能拜访行程" };
   }
 
   return null;
@@ -405,11 +419,13 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [selectedRiskId, setSelectedRiskId] = useState(null);
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState(null);
   const [selectedSolutionId, setSelectedSolutionId] = useState(null);
+  const [selectedItineraryId, setSelectedItineraryId] = useState(null);
   const [customerViewMode, setCustomerViewMode] = useState("list");
   const [opportunityViewMode, setOpportunityViewMode] = useState("list");
   const [actionViewMode, setActionViewMode] = useState("list");
   const [riskViewMode, setRiskViewMode] = useState("list");
   const [knowledgeViewMode, setKnowledgeViewMode] = useState("list");
+  const [itineraryViewMode, setItineraryViewMode] = useState("list");
   const [recordMode, setRecordMode] = useState("voice");
   const [recordText, setRecordText] = useState("");
   const [analysisVisible, setAnalysisVisible] = useState(false);
@@ -426,6 +442,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     knowledge: workbenchKnowledge,
     quickRecords: workbenchQuickRecords,
     solutionDocs: workbenchSolutionDocs,
+    itineraries: workbenchItineraries,
     summary: overviewSummary,
     errorMessage: bootstrapErrorMessage,
   } = workbenchState;
@@ -459,6 +476,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
 
   function setWorkbenchQuickRecords(nextValue) {
     updateWorkbenchCollection("quickRecords", nextValue);
+  }
+
+  function setWorkbenchItineraries(nextValue) {
+    updateWorkbenchCollection("itineraries", nextValue);
   }
 
   function setOverviewSummary(nextValue) {
@@ -495,6 +516,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         setSelectedRiskId(nextState.risks[0]?.id ?? null);
         setSelectedKnowledgeId(nextState.knowledge[0]?.id ?? null);
         setSelectedSolutionId(nextState.solutionDocs[0]?.id ?? null);
+        setSelectedItineraryId(nextState.itineraries[0]?.id ?? null);
         setBackendStatus("connected");
       })
       .catch((error) => {
@@ -510,6 +532,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         setSelectedRiskId(null);
         setSelectedKnowledgeId(null);
         setSelectedSolutionId(null);
+        setSelectedItineraryId(null);
         setBackendStatus("offline");
       });
 
@@ -537,6 +560,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     workbenchRisks.find((item) => item.id === selectedRiskId) ?? workbenchRisks[0];
   const selectedKnowledge =
     workbenchKnowledge.find((item) => item.id === selectedKnowledgeId) ?? workbenchKnowledge[0];
+  const selectedItinerary =
+    workbenchItineraries.find((item) => item.id === selectedItineraryId) ?? null;
   const headingContext = resolveHeadingContext({
     active,
     customerViewMode,
@@ -550,6 +575,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     selectedRisk,
     selectedKnowledge,
     selectedSolution: selectedDoc,
+    itineraryViewMode,
+    selectedItinerary,
   });
   const headingAction = (() => {
     if (active === "customer" && customerViewMode === "list") {
@@ -590,6 +617,23 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         >
           <Plus size={16} />
           新增知识
+        </button>
+      );
+    }
+
+    if (active === "itinerary" && itineraryViewMode === "list") {
+      return (
+        <button
+          className="primary-button"
+          type="button"
+          data-testid="itinerary-create-detail"
+          onClick={() => {
+            setSelectedItineraryId(null);
+            setItineraryViewMode("new");
+          }}
+        >
+          <Plus size={16} />
+          新建行程
         </button>
       );
     }
@@ -785,6 +829,28 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     return deleted ?? { id };
   }
 
+  async function handleSaveItinerary(draft) {
+    ensureBackend("保存拜访行程");
+    const saved = await apiClient.saveVisitItinerary(draft);
+    setWorkbenchItineraries((current) => mergeById(current, saved));
+    setSelectedItineraryId(saved.id);
+    setItineraryViewMode("detail");
+    return saved;
+  }
+
+  async function handleDeleteItinerary() {
+    ensureBackend("删除拜访行程");
+    if (!selectedItinerary) throw new Error("拜访行程不存在");
+    const deleted = await apiClient.deleteVisitItinerary(
+      selectedItinerary.id,
+      selectedItinerary.version,
+    );
+    setWorkbenchItineraries((current) => removeEntityById(current, selectedItinerary.id));
+    setSelectedItineraryId(null);
+    setItineraryViewMode("list");
+    return deleted;
+  }
+
   async function handleCiteKnowledge(target, knowledgeItem) {
     if (!knowledgeItem?.id) throw new Error("请选择要引用的知识材料");
     if (!apiClient.isEnabled || backendStatus !== "connected") {
@@ -897,6 +963,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                     if (item.id === "actions") setActionViewMode("list");
                     if (item.id === "risk") setRiskViewMode("list");
                     if (item.id === "knowledge") setKnowledgeViewMode("list");
+                    if (item.id === "itinerary") setItineraryViewMode("list");
                     setActive(item.id);
                   }}
                 >
@@ -1017,6 +1084,22 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 onUpdateActionStatus={handleUpdateActionStatus}
                 onDeleteAction={handleDeleteAction}
                 backendStatus={backendStatus}
+              />
+            )}
+            {active === "itinerary" && (
+              <VisitItineraryPage
+                items={workbenchItineraries}
+                selected={selectedItinerary}
+                customers={workbenchCustomers}
+                viewMode={itineraryViewMode}
+                onOpen={(id) => {
+                  setSelectedItineraryId(id);
+                  setItineraryViewMode("detail");
+                }}
+                onBack={() => setItineraryViewMode("list")}
+                onEdit={() => setItineraryViewMode("edit")}
+                onSave={handleSaveItinerary}
+                onDelete={handleDeleteItinerary}
               />
             )}
             {active === "solution" && (

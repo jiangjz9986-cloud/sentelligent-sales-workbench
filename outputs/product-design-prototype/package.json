@@ -14,6 +14,10 @@
     "test:state": "node --test src/app/workbenchState.test.js",
     "test:routes": "node --test src/app/routes.test.js",
     "test:api": "node --test src/api/salesWorkbenchApi.test.js",
+    "test:sales-decision": "node --test src/api/salesDecisionApi.test.js src/features/salesWorkbench/salesDecisionViewModel.test.js",
+    "test:sales-decision-page": "node --test scripts/sales-decision-page.test.mjs",
+    "test:itinerary": "node --test src/features/visitItinerary/visitItineraryModel.test.js src/features/visitItinerary/amapGeocoder.test.js",
+    "test:itinerary-page": "node --test scripts/itinerary-page.test.mjs",
     "test:contract": "node scripts/customer-opportunity-contract.test.mjs",
     "test:static": "node --test scripts/static-server.test.mjs",
     "test:copy": "node --test scripts/formal-ui-copy.test.mjs",
@@ -26,7 +30,7 @@
     "test:visual": "node --test scripts/visual-rhythm.test.mjs",
     "test:modules": "node --test scripts/module-coverage.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",
-    "qa:local": "npm run build && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run scan:secrets",
+    "qa:local": "npm run build && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:itinerary && npm run test:itinerary-page && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run scan:secrets",
     "qa:integration": "node scripts/integration-qa.mjs"
   },
   "dependencies": {

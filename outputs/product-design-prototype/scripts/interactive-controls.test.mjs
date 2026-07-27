@@ -7,6 +7,7 @@ const controlFiles = [
   "src/App.jsx",
   "src/features/salesWorkbench/pages.jsx",
   "src/components/primitives.jsx",
+  "src/features/visitItinerary/VisitItineraryPage.jsx",
 ];
 
 function readUiSource() {

@@ -162,21 +162,29 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 3);
+      assert.equal(firstMigrations.length, 5);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
+      assert.equal(firstMigrations[3].version, "0005");
+      assert.equal(firstMigrations[4].version, "0006");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
+      assert.match(firstMigrations[3].checksum, /^[a-f0-9]{64}$/);
+      assert.match(firstMigrations[4].checksum, /^[a-f0-9]{64}$/);
       const migrationSources = [
         "../src/db/migrations/0001_baseline.sql",
         "../src/db/migrations/0002_phase1_write_integrity.mjs",
         "../src/db/migrations/0003_quick_record_risk_identity.mjs",
+        "../src/db/migrations/0005_visit_itineraries.mjs",
+        "../src/db/migrations/0006_sales_decision_analyses.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
       assert.equal(firstMigrations[2].checksum, migrationChecksum(migrationSources[2]));
+      assert.equal(firstMigrations[3].checksum, migrationChecksum(migrationSources[3]));
+      assert.equal(firstMigrations[4].checksum, migrationChecksum(migrationSources[4]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -405,7 +413,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003"],
+        ["0001", "0002", "0003", "0005", "0006"],
       );
     } finally {
       migrated.close();
@@ -599,7 +607,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 3);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 5);
     } finally {
       db.close();
     }
@@ -663,7 +671,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003"],
+        ["0001", "0002", "0003", "0005", "0006"],
       );
     } finally {
       db.close();
@@ -804,6 +812,8 @@ test("serializes blocked concurrent startup without duplicate baseline records",
       assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0001'").length, 1);
       assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0002'").length, 1);
       assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0003'").length, 1);
+      assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0005'").length, 1);
+      assert.equal(all(db, "SELECT version FROM schema_migrations WHERE version = '0006'").length, 1);
     } finally {
       db.close();
     }

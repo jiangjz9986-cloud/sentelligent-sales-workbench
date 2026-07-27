@@ -9,6 +9,7 @@ const PAGE_META = Object.freeze({
   customers: Object.freeze({ active: "customer", defaultMode: "list", readOnly: false }),
   opportunities: Object.freeze({ active: "opportunity", defaultMode: "list", readOnly: false }),
   actions: Object.freeze({ active: "actions", defaultMode: "list", readOnly: false }),
+  itineraries: Object.freeze({ active: "itinerary", defaultMode: "list", readOnly: false }),
   "weekly-reports": Object.freeze({ active: "weekly", defaultMode: "index", readOnly: false }),
   risks: Object.freeze({ active: "risk", defaultMode: "list", readOnly: false }),
   knowledge: Object.freeze({ active: "knowledge", defaultMode: "list", readOnly: false }),
@@ -130,7 +131,7 @@ function matchRoute(segments) {
     }
     return null;
   }
-  if (page === "customers" || page === "opportunities" || page === "knowledge") {
+  if (page === "customers" || page === "opportunities" || page === "knowledge" || page === "itineraries") {
     return matchEntityRoute(page, segments, { allowNew: true });
   }
   if (page === "actions" || page === "risks") {
@@ -499,7 +500,7 @@ function pathForRoute(route) {
     if (mode === "history") return `${page}/${encodeEntityId(route.entityId)}`;
     throw new TypeError("Invalid route mode");
   }
-  if (page === "customers" || page === "opportunities" || page === "knowledge") {
+  if (page === "customers" || page === "opportunities" || page === "knowledge" || page === "itineraries") {
     if (mode === "list") {
       assertNoEntityId(route);
       return page;

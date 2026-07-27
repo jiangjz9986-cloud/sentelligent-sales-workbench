@@ -23,11 +23,12 @@ const pages = [
   { name: "customer", navIndex: 2, testId: "page-customer" },
   { name: "opportunity", navIndex: 3, testId: "page-opportunity" },
   { name: "actions", navIndex: 4, testId: "page-actions" },
-  { name: "weekly", navIndex: 5, testId: "page-weekly" },
-  { name: "risk", navIndex: 6, testId: "page-risk" },
-  { name: "knowledge", navIndex: 7, testId: "page-knowledge" },
-  { name: "kanban", navIndex: 8, testId: "page-kanban" },
-  { name: "weixin", navIndex: 9, testId: "page-weixin" },
+  { name: "itinerary", navIndex: 5, testId: "page-itinerary" },
+  { name: "weekly", navIndex: 6, testId: "page-weekly" },
+  { name: "risk", navIndex: 7, testId: "page-risk" },
+  { name: "knowledge", navIndex: 8, testId: "page-knowledge" },
+  { name: "kanban", navIndex: 9, testId: "page-kanban" },
+  { name: "weixin", navIndex: 10, testId: "page-weixin" },
 ];
 
 function findChrome() {
@@ -175,6 +176,7 @@ async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } 
             '/api/knowledge',
             '/api/quick-records',
             '/api/solutions',
+            '/api/itineraries',
           ].includes(pathname);
           const isSummary = pathname === '/api/dashboard/summary';
           const isBootstrap = isCollection || isSummary;
@@ -486,7 +488,8 @@ describe("visual rhythm", () => {
           await waitUntil(() => document.querySelector('[data-testid="bootstrap-retry"]'));
           document.querySelector('[data-testid="bootstrap-retry"]').click();
           await waitUntil(() => document.querySelector('[data-testid="workbench-empty"]'));
-          document.querySelectorAll('.nav-item')[5]?.click();
+          [...document.querySelectorAll('.nav-item')]
+            .find((item) => item.textContent.includes('周报'))?.click();
           await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'));
           await wait(100);
           return {

@@ -95,7 +95,8 @@ describe("sqlite maintenance", () => {
       assert.equal(before.pragmas.foreignKeys, 1);
       assert.equal(before.pragmas.journalMode, "wal");
       assert.equal(before.pragmas.busyTimeout, 5000);
-      assert.equal(Object.keys(before.tableCounts).length, 12);
+      assert.equal(Object.keys(before.tableCounts).length, 14);
+      assert.equal(before.tableCounts.sales_decision_analyses, 0);
       assert.deepEqual(before.tables, before.tableCounts);
       assert.equal(backup.status, "backed_up");
       assert.equal(existsSync(backup.backupPath), true);
@@ -185,7 +186,7 @@ describe("sqlite maintenance", () => {
     }
   });
 
-  it("prints a healthy 12-table integrity report from the db-check command", () => {
+  it("prints a healthy 14-table integrity report from the db-check command", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-"));
     const databaseUrl = join(root, "sales-workbench.sqlite");
 
@@ -199,7 +200,8 @@ describe("sqlite maintenance", () => {
       assert.equal(report.quickCheck, "ok");
       assert.deepEqual(report.foreignKeyViolations, []);
       assert.equal(report.pragmas.busyTimeout, 5000);
-      assert.equal(Object.keys(report.tableCounts).length, 12);
+      assert.equal(Object.keys(report.tableCounts).length, 14);
+      assert.equal(report.tableCounts.sales_decision_analyses, 0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -324,7 +326,8 @@ describe("sqlite maintenance", () => {
       assert.equal(report.error.code, "DATABASE_NOT_FOUND");
       assert.equal(report.quickCheck, "error");
       assert.equal(report.foreignKeyViolations, null);
-      assert.equal(Object.keys(report.tableCounts).length, 12);
+      assert.equal(Object.keys(report.tableCounts).length, 14);
+      assert.equal(report.tableCounts.sales_decision_analyses, null);
       assert.equal(existsSync(databaseUrl), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -347,7 +350,8 @@ describe("sqlite maintenance", () => {
       assert.equal(report.error.code, "INSPECTION_FAILED");
       assert.equal(report.quickCheck, "error");
       assert.equal(report.foreignKeyViolations, null);
-      assert.equal(Object.keys(report.tableCounts).length, 12);
+      assert.equal(Object.keys(report.tableCounts).length, 14);
+      assert.equal(report.tableCounts.sales_decision_analyses, null);
       assert.deepEqual(readFileSync(databaseUrl), beforeBytes);
       assert.deepEqual(readdirSync(root).sort(), beforeEntries);
     } finally {

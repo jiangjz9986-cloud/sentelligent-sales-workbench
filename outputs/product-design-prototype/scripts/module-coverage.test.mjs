@@ -62,6 +62,10 @@ describe("business module delivery coverage", () => {
       "generateSolutionDraft",
       "saveSolutionDraft",
       "generateAiSuggestion",
+      "listVisitItineraries",
+      "getVisitItinerary",
+      "saveVisitItinerary",
+      "deleteVisitItinerary",
     ];
 
     const missingApiClient = requiredApiMethods.filter((method) => !apiSource.includes(`${method}(`));
@@ -76,6 +80,7 @@ describe("business module delivery coverage", () => {
       "weekly",
       "solution",
       "kanban",
+      "itinerary",
     ].filter((keyword) => !integrationSource.toLowerCase().includes(keyword));
 
     assert.deepEqual({ missingApiClient, missingApiTests, missingIntegration }, {

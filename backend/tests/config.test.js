@@ -19,6 +19,8 @@ describe("backend model configuration", () => {
         "DEEPSEEK_API_KEY=secret-from-env-file",
         "DEEPSEEK_BASE_URL=https://api.deepseek.com",
         "DEEPSEEK_MODEL=deepseek-v4-flash",
+        "AMAP_WEB_SERVICE_KEY=amap-secret-from-env-file",
+        "AMAP_TIMEOUT_MS=12345",
         "AUTH_ACCOUNT=jiangjz",
         "AUTH_PASSWORD=secret-from-env-file",
         "AUTH_SESSION_SECRET=session-secret-from-env-file",
@@ -36,6 +38,8 @@ describe("backend model configuration", () => {
       assert.equal(config.modelBaseUrl, "https://api.deepseek.com");
       assert.equal(config.modelName, "deepseek-v4-flash");
       assert.equal(config.modelApiKey, "secret-from-env-file");
+      assert.equal(config.amapWebServiceKey, "amap-secret-from-env-file");
+      assert.equal(config.amapTimeoutMs, 12345);
       assert.equal(config.authAccount, "jiangjz");
       assert.equal(config.authPassword, "secret-from-env-file");
       assert.equal(config.authSessionSecret, "session-secret-from-env-file");
@@ -68,6 +72,8 @@ describe("backend model configuration", () => {
       "http://localhost:5184",
     ]);
     assert.equal(config.jsonBodyLimitBytes, 1_048_576);
+    assert.equal(config.amapWebServiceKey, "");
+    assert.equal(config.amapTimeoutMs, 10_000);
     assert.equal(config.nodeEnv, "development");
   });
 
@@ -127,6 +133,7 @@ describe("backend model configuration", () => {
     }
     for (const value of [0, -1, 1.5, "1e6", "NaN", true]) {
       assert.throws(() => loadConfig({ ...base, JSON_BODY_LIMIT_BYTES: value }), /JSON_BODY_LIMIT_BYTES/);
+      assert.throws(() => loadConfig({ ...base, AMAP_TIMEOUT_MS: value }), /AMAP_TIMEOUT_MS/);
     }
   });
 

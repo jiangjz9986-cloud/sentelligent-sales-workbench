@@ -211,6 +211,49 @@ function sampleQuickRecord(overrides = {}) {
   };
 }
 
+function sampleVisitItinerary(overrides = {}) {
+  return {
+    id: "itinerary-1",
+    version: 1,
+    title: "济宁客户拜访",
+    visitDate: "2026-07-28",
+    status: "planned",
+    request: {
+      title: "济宁客户拜访",
+      visitDate: "2026-07-28",
+      status: "planned",
+      departureAddress: "青岛市黄岛区秀兰禧悦山",
+      departureCity: "青岛",
+      departureAt: "2026-07-28T00:00:00.000Z",
+      stops: [{
+        id: "customer-b",
+        customerId: "customer-b",
+        customerName: "济宁第二人民医院",
+        address: "济宁市任城区济宁市第二人民医院",
+        city: "济宁",
+        priority: "high",
+        visitMinutes: 60,
+        appointmentAt: null,
+        notes: null,
+      }],
+    },
+    plan: {
+      orderedStopIds: ["customer-b"],
+      stops: [{ id: "customer-b", location: { lng: 116.608817, lat: 35.415405 } }],
+      schedule: [{ stopId: "customer-b", sequence: 1 }],
+      route: { distanceMeters: 379100, durationSeconds: 15360 },
+      summary: "前往济宁第二人民医院。",
+      advice: [],
+      optimization: { source: "deterministic" },
+    },
+    createdBy: "jiangjz",
+    updatedBy: "jiangjz",
+    createdAt: "2026-07-27T12:00:00.000Z",
+    updatedAt: "2026-07-27T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
 function sampleAnalysis(overrides = {}) {
   return {
     id: "ai-1",
@@ -299,6 +342,7 @@ function bootstrapResponse(url) {
   if (url.endsWith("/api/knowledge")) return jsonResponse({ items: [sampleKnowledgeItem()] });
   if (url.endsWith("/api/quick-records")) return jsonResponse({ items: [sampleQuickRecordHistory()] });
   if (url.endsWith("/api/solutions")) return jsonResponse({ items: [sampleSolutionDraft()] });
+  if (url.endsWith("/api/itineraries")) return jsonResponse({ items: [sampleVisitItinerary()] });
   if (url.endsWith("/api/dashboard/summary")) return jsonResponse({ item: sampleDashboardSummary() });
   return jsonResponse({ error: "not_found" }, 404);
 }
@@ -832,6 +876,7 @@ describe("sales workbench API client", () => {
     assertApiCollection("knowledgeItem", result.knowledge);
     assertApiCollection("quickRecord", result.quickRecords);
     assertApiCollection("solutionDraft", result.solutionDocs);
+    assertApiCollection("visitItinerary", result.itineraries);
     assert.equal(result.actions[0].sourceRecordId, "qr-1");
     assert.equal(result.risks[0].sourceId, "op-rizhao-plan");
     assertApiEntity("dashboardSummary", result.summary);
@@ -848,6 +893,7 @@ describe("sales workbench API client", () => {
       { url: "http://127.0.0.1:8787/api/knowledge", method: "GET" },
       { url: "http://127.0.0.1:8787/api/quick-records", method: "GET" },
       { url: "http://127.0.0.1:8787/api/solutions", method: "GET" },
+      { url: "http://127.0.0.1:8787/api/itineraries", method: "GET" },
       { url: "http://127.0.0.1:8787/api/dashboard/summary", method: "GET" },
     ]);
     assert.equal(result.customers[0].id, "rizhao");
@@ -863,6 +909,7 @@ describe("sales workbench API client", () => {
       ["/api/knowledge", "knowledge.items"],
       ["/api/quick-records", "quickRecords.items"],
       ["/api/solutions", "solutions.items"],
+      ["/api/itineraries", "itineraries.items"],
     ];
 
     for (const [malformedPath, expectedPath] of collections) {
@@ -932,7 +979,7 @@ describe("sales workbench API client", () => {
     }
     await assert.rejects(() => staleBootstrap, (error) => error.status === 401);
 
-    assert.equal(staleCalls.length, 8);
+    assert.equal(staleCalls.length, 9);
     assert.equal(staleCalls.every(({ options }) => options.signal === controller.signal), true);
     assert.equal(unauthorizedCalls, 0);
   });
@@ -1825,6 +1872,80 @@ describe("sales workbench API client", () => {
         },
       },
     ]);
+  });
+
+  it("loads and writes visit itineraries with strict versions and CSRF", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+        });
+        if (url.endsWith("/api/itineraries?status=planned")) {
+          return jsonResponse({ items: [sampleVisitItinerary()] });
+        }
+        if (url.endsWith("/api/itineraries/itinerary-1") && (options.method ?? "GET") === "GET") {
+          return jsonResponse({ item: sampleVisitItinerary() });
+        }
+        if (url.endsWith("/api/itineraries") && options.method === "POST") {
+          return jsonResponse({ item: sampleVisitItinerary() }, 201);
+        }
+        if (url.endsWith("/api/itineraries/itinerary-1") && options.method === "PATCH") {
+          return jsonResponse({ item: sampleVisitItinerary({ version: 2, title: "调整后的拜访" }) });
+        }
+        if (url.endsWith("/api/itineraries/itinerary-1") && options.method === "DELETE") {
+          return jsonResponse({ deleted: sampleVisitItinerary({ version: 3 }) });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "csrf-test" });
+    const input = {
+      title: "济宁客户拜访",
+      visitDate: "2026-07-28",
+      status: "planned",
+      departureAddress: "青岛市黄岛区秀兰禧悦山",
+      departureCity: "青岛",
+      departureLocation: { lng: 120.149201, lat: 35.987754 },
+      departureAt: "2026-07-28T00:00:00.000Z",
+      stops: sampleVisitItinerary().request.stops.map((stop) => ({
+        ...stop,
+        location: { lng: 116.608817, lat: 35.415405 },
+      })),
+      unexpected: "must not be sent",
+    };
+
+    const listed = await api.listVisitItineraries({ status: "planned" });
+    const loaded = await api.getVisitItinerary("itinerary-1");
+    const created = await api.saveVisitItinerary(input);
+    const updated = await api.saveVisitItinerary({ ...input, id: "itinerary-1", version: 1, title: "调整后的拜访" });
+    const deleted = await api.deleteVisitItinerary("itinerary-1", 2);
+
+    assertApiCollection("visitItinerary", listed);
+    assertApiEntity("visitItinerary", loaded);
+    assertApiEntity("visitItinerary", created);
+    assertApiEntity("visitItinerary", updated);
+    assertApiEntity("visitItinerary", deleted);
+    assert.equal(calls[0].url, "http://127.0.0.1:8787/api/itineraries?status=planned");
+    assert.equal(calls[0].csrf, undefined);
+    assert.equal(calls[1].url, "http://127.0.0.1:8787/api/itineraries/itinerary-1");
+    assert.equal(calls[2].method, "POST");
+    assert.equal(calls[2].csrf, "csrf-test");
+    assert.equal(Object.hasOwn(calls[2].body, "unexpected"), false);
+    assert.equal(Object.hasOwn(calls[2].body, "id"), false);
+    assert.deepEqual(calls[2].body.departureLocation, input.departureLocation);
+    assert.deepEqual(calls[2].body.stops[0].location, input.stops[0].location);
+    assert.equal(calls[3].method, "PATCH");
+    assert.equal(calls[3].ifMatch, '"1"');
+    assert.equal(calls[3].csrf, "csrf-test");
+    assert.equal(calls[4].method, "DELETE");
+    assert.equal(calls[4].ifMatch, '"2"');
+    assert.equal(calls[4].csrf, "csrf-test");
   });
 
   it("starts, reads, and stops WeChat robot binding through the backend", async () => {

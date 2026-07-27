@@ -803,12 +803,15 @@ describe("portable release package", () => {
         "outputs",
         "product-design-prototype",
       );
-      const buildCommand = process.platform === "win32"
-        ? {
-            command: process.env.ComSpec ?? "cmd.exe",
-            args: ["/d", "/s", "/c", "npm.cmd", "run", "build"],
-          }
-        : { command: "npm", args: ["run", "build"] };
+      const viteEntry = join(frontendRoot, "node_modules", "vite", "bin", "vite.js");
+      const buildCommand = existsSync(viteEntry)
+        ? { command: process.execPath, args: [viteEntry, "build"] }
+        : process.platform === "win32"
+          ? {
+              command: process.env.ComSpec ?? "cmd.exe",
+              args: ["/d", "/s", "/c", "npm.cmd", "run", "build"],
+            }
+          : { command: "npm", args: ["run", "build"] };
 
       try {
         const build = spawnSync(buildCommand.command, buildCommand.args, {
