@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
+import { gunzipSync } from "node:zlib";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 
@@ -35,6 +36,42 @@ function makeWorkspace(prefix) {
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function tarEntryMtimes(archivePath) {
+  const tar = gunzipSync(readFileSync(archivePath));
+  const mtimes = [];
+  for (let offset = 0; offset + 512 <= tar.length;) {
+    const header = tar.subarray(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) break;
+    const size = Number.parseInt(
+      header.subarray(124, 136).toString("ascii").replaceAll("\0", "").trim(),
+      8,
+    );
+    const mtime = Number.parseInt(
+      header.subarray(136, 148).toString("ascii").replaceAll("\0", "").trim(),
+      8,
+    );
+    assert.ok(Number.isSafeInteger(size), "tar entry size must be valid octal");
+    assert.ok(Number.isSafeInteger(mtime), "tar entry mtime must be valid octal");
+    mtimes.push(mtime);
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
+  assert.ok(mtimes.length > 0, "release archive must contain tar entries");
+  return mtimes;
+}
+
+async function withSourceDateEpoch(value, callback) {
+  const hadOriginal = Object.hasOwn(process.env, "SOURCE_DATE_EPOCH");
+  const original = process.env.SOURCE_DATE_EPOCH;
+  if (value === undefined) delete process.env.SOURCE_DATE_EPOCH;
+  else process.env.SOURCE_DATE_EPOCH = value;
+  try {
+    return await callback();
+  } finally {
+    if (hadOriginal) process.env.SOURCE_DATE_EPOCH = original;
+    else delete process.env.SOURCE_DATE_EPOCH;
+  }
 }
 
 function withBom(text, encoding) {
@@ -328,6 +365,176 @@ describe("portable release package", () => {
     }
   });
 
+  it("uses SOURCE_DATE_EPOCH for reproducible default manifests and tar mtimes", async () => {
+    const workspace = makeWorkspace("sentelligent-source-date-epoch-");
+    const output = makeWorkspace("sentelligent-source-date-epoch-output-");
+    const epochSeconds = 1_700_000_000;
+    try {
+      writeMinimumReleaseFixture(workspace);
+      commitWorkspace(workspace);
+
+      await withSourceDateEpoch(String(epochSeconds), async () => {
+        const { createReleasePackage } = await loadReleaseModule();
+        const options = {
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+        };
+        const first = await createReleasePackage(options);
+        const firstArchive = readFileSync(first.archivePath);
+        const firstMtimes = tarEntryMtimes(first.archivePath);
+        rmSync(first.archivePath);
+
+        const second = await createReleasePackage(options);
+        const expectedCreatedAt = new Date(epochSeconds * 1000).toISOString();
+
+        assert.equal(first.manifest.createdAt, expectedCreatedAt);
+        assert.equal(second.manifest.createdAt, expectedCreatedAt);
+        assert.ok(firstMtimes.every((mtime) => mtime === epochSeconds));
+        assert.ok(
+          tarEntryMtimes(second.archivePath).every(
+            (mtime) => mtime === epochSeconds,
+          ),
+        );
+        assert.equal(first.archiveSha256, second.archiveSha256);
+        assert.deepEqual(firstArchive, readFileSync(second.archivePath));
+      });
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("creates byte-identical packages from a named branch and detached HEAD", async () => {
+    const workspace = makeWorkspace("sentelligent-checkout-state-");
+    const branchOutput = makeWorkspace("sentelligent-branch-output-");
+    const detachedOutput = makeWorkspace("sentelligent-detached-output-");
+    const epochSeconds = 1_700_000_000;
+    try {
+      writeMinimumReleaseFixture(workspace);
+      const source = commitWorkspace(workspace);
+
+      await withSourceDateEpoch(String(epochSeconds), async () => {
+        const { createReleasePackage } = await loadReleaseModule();
+        const branchPackage = await createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: branchOutput.root,
+        });
+
+        runGit(workspace.root, ["checkout", "--detach", source.commit]);
+        const detachedPackage = await createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: detachedOutput.root,
+        });
+
+        const manifestBytes = (manifest) =>
+          Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+        assert.deepEqual(
+          manifestBytes(branchPackage.manifest),
+          manifestBytes(detachedPackage.manifest),
+        );
+        assert.deepEqual(branchPackage.manifest.source, {
+          commit: source.commit,
+          clean: true,
+        });
+        assert.equal(branchPackage.archiveSha256, detachedPackage.archiveSha256);
+        assert.deepEqual(
+          readFileSync(branchPackage.archivePath),
+          readFileSync(detachedPackage.archivePath),
+        );
+      });
+    } finally {
+      workspace.cleanup();
+      branchOutput.cleanup();
+      detachedOutput.cleanup();
+    }
+  });
+
+  it("falls back to the HEAD commit time when SOURCE_DATE_EPOCH is absent", async () => {
+    const workspace = makeWorkspace("sentelligent-head-time-");
+    const output = makeWorkspace("sentelligent-head-time-output-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      commitWorkspace(workspace);
+      const headEpochSeconds = Number(
+        runGit(workspace.root, ["show", "-s", "--format=%ct", "HEAD"]),
+      );
+
+      await withSourceDateEpoch(undefined, async () => {
+        const { createReleasePackage } = await loadReleaseModule();
+        const options = {
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+        };
+        const first = await createReleasePackage(options);
+        const firstArchive = readFileSync(first.archivePath);
+        rmSync(first.archivePath);
+        const second = await createReleasePackage(options);
+
+        assert.equal(
+          first.manifest.createdAt,
+          new Date(headEpochSeconds * 1000).toISOString(),
+        );
+        assert.equal(first.manifest.createdAt, second.manifest.createdAt);
+        assert.ok(
+          tarEntryMtimes(second.archivePath).every(
+            (mtime) => mtime === headEpochSeconds,
+          ),
+        );
+        assert.equal(first.archiveSha256, second.archiveSha256);
+        assert.deepEqual(firstArchive, readFileSync(second.archivePath));
+      });
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("documents rollback by repinning exactly the three project systemd units", async () => {
+    const { buildReleaseManifest } = await loadReleaseModule();
+    const files = [
+      "README.md",
+      "backend/src/db/migrations/0001_baseline.sql",
+      "outputs/product-design-prototype/dist/index.html",
+    ];
+    const contentByPath = new Map(
+      files.map((file) => [file, Buffer.from(`${file}\n`, "utf8")]),
+    );
+    const manifest = buildReleaseManifest({
+      source: {
+        commit: "0123456789abcdef0123456789abcdef01234567",
+        clean: true,
+      },
+      createdAt: "2026-07-19T08:00:00.000Z",
+      files,
+      contentByPath,
+      rootDirectory: "sentelligent-sales-workbench-0123456789ab",
+    });
+
+    assert.equal(
+      manifest.rollback.strategy,
+      "repin-systemd-units-to-immutable-release",
+    );
+    assert.deepEqual(manifest.rollback.serviceUnits, [
+      "sentelligent-backend.service",
+      "sentelligent-frontend.service",
+      "sentelligent-weixin-agent.service",
+    ]);
+    const rollbackText = [
+      manifest.rollback.releasePathPolicy,
+      ...manifest.rollback.instructions,
+    ].join(" ");
+    assert.match(rollbackText, /immutable release.*real path/i);
+    assert.match(rollbackText, /current.*(?:informational|must not)/i);
+    assert.doesNotMatch(rollbackText, /switch.*current.*pointer/i);
+    assert.doesNotMatch(rollbackText, /sentelligent-\*/i);
+    assert.match(rollbackText, /systemctl daemon-reload/i);
+    assert.match(rollbackText, /restart only/i);
+    for (const unit of manifest.rollback.serviceUnits) {
+      assert.match(rollbackText, new RegExp(unit.replaceAll(".", "\\.")));
+    }
+    assert.match(rollbackText, /do not restart.*Caddy.*unrelated services/i);
+  });
+
   it("creates an extractable archive without secrets, runtime data, dependencies, or Codex metadata", async () => {
     const workspace = makeWorkspace("sentelligent-release-source-");
     const output = makeWorkspace("sentelligent-release-output-");
@@ -460,8 +667,10 @@ describe("portable release package", () => {
       const manifest = JSON.parse(
         readFileSync(join(packageRoot, "release-manifest.json"), "utf8"),
       );
-      assert.equal(manifest.source.branch, source.branch);
-      assert.equal(manifest.source.commit, source.commit);
+      assert.deepEqual(manifest.source, {
+        commit: source.commit,
+        clean: true,
+      });
       assert.equal(
         manifest.buildHashes.files[
           "outputs/product-design-prototype/dist/assets/app.js"
@@ -526,8 +735,15 @@ describe("portable release package", () => {
           `manifest should name ${name}`,
         );
       }
-      assert.equal(manifest.rollback.strategy, "switch-release-pointer");
-      assert.ok(manifest.rollback.instructions.length >= 4);
+      assert.equal(
+        manifest.rollback.strategy,
+        "repin-systemd-units-to-immutable-release",
+      );
+      assert.deepEqual(manifest.rollback.serviceUnits, [
+        "sentelligent-backend.service",
+        "sentelligent-frontend.service",
+        "sentelligent-weixin-agent.service",
+      ]);
       assert.match(manifest.rollback.databasePolicy, /forward/i);
       assert.doesNotMatch(
         JSON.stringify(manifest),
@@ -562,6 +778,14 @@ describe("portable release package", () => {
         value: sha256("password-fixture"),
         content(value) {
           return `password: ${value}\n`;
+        },
+      },
+      {
+        path: "backend/src/runtime-config.js",
+        value: ["Prod", "735280", "!"].join(""),
+        content(value) {
+          const tick = String.fromCharCode(96);
+          return ["const password", tick + value + tick].join(" = ") + ";\n";
         },
       },
       {
@@ -623,6 +847,36 @@ describe("portable release package", () => {
       workspace.write(
         "backend/tests/machine-auth.test.js",
         'const config = { weixinAgentApiToken: "machine-secret" };\n',
+      );
+      commitWorkspace(workspace);
+
+      const { createReleasePackage } = await loadReleaseModule();
+      const result = await createReleasePackage({
+        sourceRoot: workspace.root,
+        outputDir: output.root,
+        createdAt: "2026-07-19T08:00:00.000Z",
+      });
+      assert.ok(existsSync(result.archivePath));
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("allows GitHub Actions context references without treating them as credential values", async () => {
+    const workspace = makeWorkspace("sentelligent-github-context-");
+    const output = makeWorkspace("sentelligent-github-context-output-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      workspace.write(
+        ".github/workflows/release.yml",
+        [
+          "name: Release",
+          "env:",
+          "  GH_TOKEN: ${{ github.token }}",
+          "  API_TOKEN: ${{ secrets.RELEASE_API_TOKEN }}",
+          "",
+        ].join("\n"),
       );
       commitWorkspace(workspace);
 

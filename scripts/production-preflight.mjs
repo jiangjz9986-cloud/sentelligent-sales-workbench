@@ -54,6 +54,24 @@ const SERVICE_USERS = Object.freeze({
   "sentelligent-weixin-agent.service": new Set(["root", "sentelligent", "sentzx"]),
 });
 const REQUIRED_PROJECT_SERVICE_NAMES = new Set(REQUIRED_PROJECT_SERVICES);
+const IMMUTABLE_RELEASE_SERVICE_ENTRIES = Object.freeze({
+  "sentelligent-backend.service": {
+    entryPath: "backend/src/server.js",
+    workingDirectoryPath: "backend",
+    trailingArguments: [],
+  },
+  "sentelligent-frontend.service": {
+    entryPath:
+      "outputs/product-design-prototype/scripts/static-server.mjs",
+    workingDirectoryPath: "outputs/product-design-prototype",
+    trailingArguments: ["serve"],
+  },
+  "sentelligent-weixin-agent.service": {
+    entryPath: "backend/src/weixin/worker.js",
+    workingDirectoryPath: "backend",
+    trailingArguments: ["start"],
+  },
+});
 
 function parseEnvFile(filePath) {
   const entries = {};
@@ -400,6 +418,115 @@ function exactExecTokens(command) {
   return tokens.length > 0 && tokens.every(Boolean) ? tokens : null;
 }
 
+function immutableReleaseRoot(manifestPath) {
+  if (
+    typeof manifestPath !== "string" ||
+    manifestPath !== posix.normalize(manifestPath) ||
+    posix.basename(manifestPath) !== "release-manifest.json"
+  ) {
+    return null;
+  }
+  const releaseRoot = posix.dirname(manifestPath);
+  if (!releaseRoot.startsWith(`${PROJECT_RELEASES_PATH}/`)) return null;
+  const releaseId = releaseRoot.slice(`${PROJECT_RELEASES_PATH}/`.length);
+  if (
+    releaseId.includes("/") ||
+    releaseId.includes("..") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(releaseId)
+  ) {
+    return null;
+  }
+  return releaseRoot;
+}
+
+function immutableServiceReleaseRoot(serviceName, command) {
+  const profile = IMMUTABLE_RELEASE_SERVICE_ENTRIES[serviceName];
+  const tokens = exactExecTokens(command);
+  if (
+    !profile ||
+    tokens === null ||
+    tokens[0] !== PROJECT_NODE_EXECUTABLE ||
+    tokens.length !== 2 + profile.trailingArguments.length ||
+    JSON.stringify(tokens.slice(2)) !==
+      JSON.stringify(profile.trailingArguments)
+  ) {
+    return null;
+  }
+  const suffix = `/${profile.entryPath}`;
+  if (!tokens[1].endsWith(suffix)) return null;
+  const releaseRoot = tokens[1].slice(0, -suffix.length);
+  return immutableReleaseRoot(`${releaseRoot}/release-manifest.json`);
+}
+
+export function validateReleaseIdentity({
+  manifest,
+  manifestPath,
+  expectedCommit,
+  servicePlan,
+} = {}) {
+  if (!/^[a-f0-9]{40}$/.test(String(expectedCommit ?? ""))) {
+    return {
+      valid: false,
+      message: "Expected release commit must be exactly 40 lowercase hexadecimal characters.",
+    };
+  }
+  if (
+    manifest === null ||
+    typeof manifest !== "object" ||
+    Array.isArray(manifest) ||
+    manifest.source?.commit !== expectedCommit
+  ) {
+    return {
+      valid: false,
+      message: "Release manifest source commit must exactly match the expected commit.",
+    };
+  }
+  const releasePath = immutableReleaseRoot(manifestPath);
+  if (releasePath === null) {
+    return {
+      valid: false,
+      message:
+        "Release manifest must resolve to /opt/sentelligent-sales-workbench/releases/<safe-id>/release-manifest.json.",
+    };
+  }
+
+  const services = Array.isArray(servicePlan?.projectServices)
+    ? servicePlan.projectServices
+    : [];
+  for (const serviceName of Object.keys(IMMUTABLE_RELEASE_SERVICE_ENTRIES)) {
+    const profile = IMMUTABLE_RELEASE_SERVICE_ENTRIES[serviceName];
+    const matchingServices = services.filter(
+      (service) => service?.name === serviceName,
+    );
+    const service = matchingServices[0];
+    if (
+      matchingServices.length !== 1 ||
+      immutableServiceReleaseRoot(
+        serviceName,
+        service?.ExecStart,
+      ) !== releasePath ||
+      service?.WorkingDirectory !==
+        `${releasePath}/${profile.workingDirectoryPath}`
+    ) {
+      return {
+        valid: false,
+        message:
+          "Backend, frontend, and WeChat ExecStart and WorkingDirectory values must use the project Node 24 runtime and the same immutable release real path as the manifest.",
+      };
+    }
+  }
+
+  return {
+    valid: true,
+    message:
+      "Release manifest, commit, and application service paths identify one immutable release.",
+    details: {
+      commit: expectedCommit,
+      releasePath,
+    },
+  };
+}
+
 function isCurrentCentosFrontendCommand(tokens) {
   return JSON.stringify(tokens) === JSON.stringify([
     "/usr/local/bin/node",
@@ -621,6 +748,26 @@ function safeReadServicePlan(servicePlanPath) {
   }
 }
 
+function safeReadReleaseManifest(releaseManifestPath) {
+  try {
+    if (typeof releaseManifestPath !== "string" || !releaseManifestPath) {
+      throw new Error("release manifest path is missing");
+    }
+    const manifestPath = realpathSync(resolve(releaseManifestPath));
+    return {
+      value: JSON.parse(readFileSync(manifestPath, "utf8")),
+      manifestPath,
+      error: null,
+    };
+  } catch {
+    return {
+      value: {},
+      manifestPath: "",
+      error: "release manifest could not be read and parsed",
+    };
+  }
+}
+
 export async function runProductionPreflight({
   envFile,
   databasePath,
@@ -628,6 +775,8 @@ export async function runProductionPreflight({
   expectedBackupSha256,
   expectedOrigins,
   servicePlanPath,
+  releaseManifestPath,
+  expectedCommit,
   nodeVersion = process.versions.node,
   createdAt = new Date().toISOString(),
 } = {}) {
@@ -635,6 +784,18 @@ export async function runProductionPreflight({
   const environment = environmentResult.value;
   const servicePlanResult = safeReadServicePlan(servicePlanPath);
   const servicePlan = servicePlanResult.value;
+  const releaseManifestResult = safeReadReleaseManifest(releaseManifestPath);
+  const releaseIdentity = releaseManifestResult.error === null
+    ? validateReleaseIdentity({
+        manifest: releaseManifestResult.value,
+        manifestPath: releaseManifestResult.manifestPath,
+        expectedCommit,
+        servicePlan,
+      })
+    : {
+        valid: false,
+        message: releaseManifestResult.error,
+      };
   const database = await inspectSqlite(databasePath ?? "");
   const backup = await inspectSqlite(backupPath ?? "", {
     requireNoSidecars: true,
@@ -661,6 +822,13 @@ export async function runProductionPreflight({
     : [];
 
   const checks = [
+    makeCheck(
+      "release.identity",
+      releaseIdentity.valid,
+      releaseIdentity.message,
+      releaseIdentity.message,
+      releaseIdentity.valid ? releaseIdentity.details : undefined,
+    ),
     makeCheck(
       "node.version",
       nodeMajor(nodeVersion) >= 24,
@@ -817,6 +985,8 @@ function parseArguments(argv) {
     else if (name === "backup-sha256") options.expectedBackupSha256 = value;
     else if (name === "expected-origin") options.expectedOrigins.push(value);
     else if (name === "service-plan") options.servicePlanPath = value;
+    else if (name === "release-manifest") options.releaseManifestPath = value;
+    else if (name === "expected-commit") options.expectedCommit = value;
     else if (name === "report") options.reportPath = value;
     else throw new Error(`Unknown argument: --${name}`);
   }
@@ -826,6 +996,8 @@ function parseArguments(argv) {
     "backupPath",
     "expectedBackupSha256",
     "servicePlanPath",
+    "releaseManifestPath",
+    "expectedCommit",
   ]) {
     if (!options[name]) throw new Error(`Missing required preflight option: ${name}`);
   }

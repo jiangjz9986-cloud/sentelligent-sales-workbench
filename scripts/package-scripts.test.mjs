@@ -27,4 +27,14 @@ describe("root package QA scripts", () => {
       /npm --prefix outputs\/product-design-prototype run qa:local/,
     );
   });
+
+  it("checks out complete history before the mandatory secret scan", () => {
+    const checkout = ciWorkflow.indexOf("uses: actions/checkout@v4");
+    const fullHistory = ciWorkflow.indexOf("fetch-depth: 0");
+    const secretScan = ciWorkflow.indexOf("npm run scan:secrets");
+
+    assert.ok(checkout >= 0, "CI must check out the repository");
+    assert.ok(fullHistory > checkout, "CI checkout must include complete Git history");
+    assert.ok(secretScan > fullHistory, "the secret scan must run after complete checkout");
+  });
 });
