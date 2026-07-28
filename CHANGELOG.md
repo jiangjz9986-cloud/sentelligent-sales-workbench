@@ -11,7 +11,7 @@
 - 使用真实赢单、输单、暂停和合规升级案例校准销售决策评分。
 - 把根 HTML 的 HSTS、CSP 等响应头补齐到与 API 一致，不直接修改共享 Caddy。
 
-## [0.2.0] - 2026-07-29T01:19:27.509+08:00
+## [0.2.0] - 2026-07-29T01:40:43.097+08:00
 
 ### 状态判定
 
@@ -34,12 +34,13 @@
 - 发布包秘密门禁识别受限的 GitHub Actions 上下文引用，同时拒绝普通配置和无插值 JavaScript 模板字符串中的真实敏感赋值。
 - GitHub Release 拆分为只读验证 job 和独立写权限发布 job；验证 checkout 不持久化仓库凭据。
 - 凭据门禁覆盖当前树、全部 refs 的历史 blob、commit、annotated tag 和 Git notes 消息，并分批读取历史内容。
+- PR CI 使用完整 Git 历史运行强制凭据扫描，避免浅克隆在安全门禁阶段失败关闭。
 - 发布包以完整 commit 作为稳定身份，同一提交在命名分支和 detached HEAD 下生成字节一致的归档。
 - 生产预检增加 `release.identity`，强制三个项目服务使用项目 Node 24，并把 `ExecStart`、`WorkingDirectory`、manifest 和完整 commit 绑定到同一 immutable release。
 
 ### 验证基线
 
-- 根发布与安全测试：`77/77`。
+- 根发布与安全测试：`78/78`。
 - 后端测试：`267/267`；前端构建、`qa:local` 和 `qa:integration` 均通过。
 - 内容冻结时的已验证生产基线 `v0.1.0`：公开 HTTPS 冒烟 `25/25`，生产预检 `18/18`。
 - `360x800` 与 `1920x1080` 文档宽度等于视口宽度，无页面级横向溢出；Chrome 控制台无业务 `error` 或 `warn`。
