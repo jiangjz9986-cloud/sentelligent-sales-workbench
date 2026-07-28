@@ -42,6 +42,12 @@ export const REQUIRED_ENV_NAMES = Object.freeze([
   "WEIXIN_AGENT_SESSION_HOME",
 ]);
 
+const PROJECT_SERVICE_UNITS = Object.freeze([
+  "sentelligent-backend.service",
+  "sentelligent-frontend.service",
+  "sentelligent-weixin-agent.service",
+]);
+
 const excludedDirectoryNames = new Set([
   ".agents",
   ".cache",
@@ -91,7 +97,7 @@ const highRiskSecretPatterns = Object.freeze([
 ]);
 
 const sensitiveAssignmentPattern =
-  /(?:^|[\r\n,{;])[ \t]*(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*(?:"((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)'|([^,"'\r\n\]#;]*))/g;
+  /(?:^|[\r\n,{;])[ \t]*(?:(?:export[ \t]+)?(?:const|let|var)[ \t]+)?["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*[:=][ \t]*(?:"((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)'|`((?:\\.|[^`\\$\r\n])*)`|([^,"'`\r\n\]#;]*))/g;
 
 const explicitTextExtensions = new Set([
   ".cjs",
@@ -429,9 +435,12 @@ function assertNoReleaseSecrets(files, contentByPath) {
 
     sensitiveAssignmentPattern.lastIndex = 0;
     for (const match of content.matchAll(sensitiveAssignmentPattern)) {
-      const [, name, doubleQuoted, singleQuoted, unquoted] = match;
-      const value = doubleQuoted ?? singleQuoted ?? unquoted ?? "";
-      const quoted = doubleQuoted !== undefined || singleQuoted !== undefined;
+      const [, name, doubleQuoted, singleQuoted, templateQuoted, unquoted] = match;
+      const value = doubleQuoted ?? singleQuoted ?? templateQuoted ?? unquoted ?? "";
+      const quoted =
+        doubleQuoted !== undefined ||
+        singleQuoted !== undefined ||
+        templateQuoted !== undefined;
       if (
         isSensitiveAssignmentName(name) &&
         (quoted || isConfigurationAssignmentPath(file)) &&
@@ -539,7 +548,6 @@ function detectGitInfo(root) {
   if (!isGitWorkTree(root)) {
     throw new Error("Release packages must be created from a Git worktree");
   }
-  const branch = gitText(root, ["rev-parse", "--abbrev-ref", "HEAD"], "Git branch lookup");
   const commit = gitText(root, ["rev-parse", "HEAD"], "Git commit lookup");
   const clean = gitText(
     root,
@@ -550,21 +558,17 @@ function detectGitInfo(root) {
     throw new Error("Release worktree is dirty. Commit the release candidate before packaging.");
   }
   return {
-    branch: branch === "HEAD" ? "detached" : branch,
     commit,
     clean,
   };
 }
 
 function normalizeGitInfo(gitInfo) {
-  const branch = String(gitInfo?.branch ?? "").trim();
   const commit = String(gitInfo?.commit ?? "").trim().toLowerCase();
-  if (!branch) throw new Error("Release manifest requires a branch");
   if (!/^[a-f0-9]{7,64}$/.test(commit)) {
     throw new Error("Release manifest requires a full hexadecimal commit");
   }
   return {
-    branch,
     commit,
     clean: gitInfo?.clean === true,
   };
@@ -664,6 +668,7 @@ export function buildReleaseManifest({
   const sourceFileHashes = Object.fromEntries(
     sourceFiles.map((file) => [file, hashBuffer(contentByPath.get(file))]),
   );
+  const serviceUnitList = PROJECT_SERVICE_UNITS.join(", ");
 
   return {
     schemaVersion: 2,
@@ -707,12 +712,16 @@ export function buildReleaseManifest({
       "private keys and certificates",
     ],
     rollback: {
-      strategy: "switch-release-pointer",
+      strategy: "repin-systemd-units-to-immutable-release",
+      serviceUnits: [...PROJECT_SERVICE_UNITS],
+      releasePathPolicy:
+        "Systemd units must use the previous verified immutable release real path. The current symlink is informational only and must not be used by ExecStart or WorkingDirectory.",
       instructions: [
         "Verify the pre-deployment database backup SHA-256 and integrity report.",
-        "Stop only the project-owned sentelligent-* services.",
-        "Switch the project-owned current release pointer to the previous verified release.",
-        "Start only the project-owned sentelligent-* services.",
+        "Verify the previous immutable release real path and its manifest checksums.",
+        `Update ExecStart and WorkingDirectory in ${serviceUnitList} to that exact real path.`,
+        "Run systemctl daemon-reload.",
+        `Restart only ${serviceUnitList}; do not restart shared Caddy or unrelated services.`,
         "Run health, login, read, write, export, and audit smoke checks.",
       ],
       databasePolicy:
@@ -833,6 +842,39 @@ function safeArchiveName(value, fallback) {
   return archiveName;
 }
 
+function timestampFromEpochSeconds(value, label) {
+  const text = String(value).trim();
+  if (!/^\d+$/.test(text)) {
+    throw new Error(`${label} must be a non-negative integer number of seconds`);
+  }
+  const milliseconds = Number(text) * 1000;
+  const timestamp = new Date(milliseconds);
+  if (!Number.isSafeInteger(milliseconds) || Number.isNaN(timestamp.getTime())) {
+    throw new Error(`${label} is outside the supported date range`);
+  }
+  return timestamp;
+}
+
+function resolveReleaseTimestamp(root, createdAt) {
+  if (createdAt !== undefined) {
+    const timestamp = new Date(createdAt);
+    if (Number.isNaN(timestamp.getTime())) {
+      throw new Error("createdAt must be an ISO date");
+    }
+    return timestamp;
+  }
+  if (process.env.SOURCE_DATE_EPOCH !== undefined) {
+    return timestampFromEpochSeconds(
+      process.env.SOURCE_DATE_EPOCH,
+      "SOURCE_DATE_EPOCH",
+    );
+  }
+  return timestampFromEpochSeconds(
+    gitText(root, ["show", "-s", "--format=%ct", "HEAD"], "Git commit time lookup"),
+    "Git HEAD commit time",
+  );
+}
+
 export async function createReleasePackage(options = {}) {
   if (Object.hasOwn(options, "allowDirty")) {
     throw new Error("allowDirty is unsupported; release packaging requires a clean Git worktree");
@@ -844,14 +886,13 @@ export async function createReleasePackage(options = {}) {
     sourceRoot = defaultRoot,
     outputDir = join(defaultRoot, ".runtime", "releases"),
     archiveName,
-    createdAt = new Date().toISOString(),
+    createdAt,
   } = options;
   const root = resolve(sourceRoot);
   const destination = resolve(outputDir);
   const source = normalizeGitInfo(detectGitInfo(root));
 
-  const timestamp = new Date(createdAt);
-  if (Number.isNaN(timestamp.getTime())) throw new Error("createdAt must be an ISO date");
+  const timestamp = resolveReleaseTimestamp(root, createdAt);
   const normalizedCreatedAt = timestamp.toISOString();
   const rootDirectory = `sentelligent-sales-workbench-${source.commit.slice(0, 12)}`;
   const files = collectSourceFiles(root);

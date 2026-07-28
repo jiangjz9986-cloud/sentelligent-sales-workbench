@@ -4,19 +4,21 @@
 
 系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，`main` 是唯一可部署来源；生产数据库、录音、微信状态、密钥和备份不进入 Git。
 
-## 当前版本
+## 代码版本与已验证基线
 
 | 项目 | 状态 |
 | --- | --- |
-| 本次正式版本 | `v0.2.0` |
-| 本次内容冻结时间 | `2026-07-29T00:03:40.503+08:00` |
-| 已验证生产基线 | `f89e1e79f57ccfa95def5fb402dc27ebfec446b4` |
-| 基线部署时间 | `2026-07-28T22:30:21+08:00` |
-| 基线 release | `/opt/sentelligent-sales-workbench/releases/2026-07-28_f89e1e7` |
-| 生产运行时 | 独立 Node.js 24，后端 `127.0.0.1:8897`，前端 `127.0.0.1:8088` |
-| 生产验收 | 公开 HTTPS 冒烟 `25/25`，生产预检 `18/18` |
+| 当前代码版本 | `0.2.0` |
+| 代码内容冻结时间 | `2026-07-29T01:19:27.509+08:00` |
+| 正式发布判定 | 以 [GitHub Releases](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases) 中 `v0.2.0` 的 tag、`publishedAt` 和资产 SHA-256 为准 |
+| 生产部署判定 | 以 [部署记录](docs/部署记录.md) 的最新版本条目和服务器 evidence 为准 |
+| 内容冻结时已验证的生产基线 | `v0.1.0` / `f89e1e79f57ccfa95def5fb402dc27ebfec446b4` |
+| 该基线部署时间 | `2026-07-28T22:30:21+08:00` |
+| 该基线 release | `/opt/sentelligent-sales-workbench/releases/2026-07-28_f89e1e7` |
+| 该基线运行时 | 独立 Node.js 24，后端 `127.0.0.1:8897`，前端 `127.0.0.1:8088` |
+| 该基线验收 | 公开 HTTPS 冒烟 `25/25`，生产预检 `18/18` |
 
-`v0.2.0` 增加跨设备开发文档、模块说明、版本记录、标签发布和回滚规范。GitHub Release 的发布时间、提交 SHA、构建包和 SHA-256 是该版本的最终发布证据。
+`0.2.0` 表示仓库当前代码版本，不自动表示 tag、GitHub Release 或生产切换已经完成。该版本增加跨设备开发文档、模块说明、版本记录、标签发布和回滚规范；正式发布和部署状态始终由上表所列证据判定。
 
 ## 功能状态
 
@@ -105,7 +107,7 @@ npm --prefix outputs/product-design-prototype run qa:integration
 涉及生产发布时还要完成：
 
 - 一致性数据库备份、`quick_check`、外键检查和 SHA-256
-- 生产预检 `18/18`
+- 生产预检 `19/19`，其中 `release.identity` 必须绑定 manifest、完整 commit 和三个项目服务的同一 immutable release
 - 公开 HTTPS 冒烟 `25/25`
 - Chrome 桌面与移动视口验收
 - 三个项目服务、共享 Caddy 和受保护服务盘点
@@ -116,6 +118,7 @@ npm --prefix outputs/product-design-prototype run qa:integration
 - 使用语义化版本，源文件版本写入 `VERSION` 和三个 `package.json`。
 - `v*` 标签触发 GitHub Release workflow，重新运行质量门并生成 `.tar.gz`、`release-result.json` 和 `SHA256SUMS`。
 - 生产只部署已合并到 `main` 且已打标签的提交。
+- GitHub Release 归档已包含质量门验证过的前端 `dist`；生产直接使用该目录，不在服务器重新构建前端。
 - 每个 release 使用独立目录。systemd 单元直接固定到真实 release 路径，`current` 只作人工识别，不作为服务启动依据。
 - 回滚只切换三个项目服务到上一已验收 release。共享 Caddy 和同机其他系统不随应用回滚重启。
 

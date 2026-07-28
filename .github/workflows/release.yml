@@ -6,13 +6,15 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: Verify and publish immutable release
+  verify:
+    name: Verify and build immutable release
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     env:
       CHROME_PATH: /usr/bin/google-chrome
 
@@ -21,6 +23,20 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch all heads, tags, and notes without persisting credentials
+        env:
+          GIT_AUTH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          basic="$(printf 'x-access-token:%s' "$GIT_AUTH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" \
+            fetch --force --prune origin \
+            '+refs/heads/*:refs/remotes/origin/*' \
+            '+refs/tags/*:refs/tags/*' \
+            '+refs/notes/*:refs/notes/*'
+          unset basic
 
       - name: Use Node.js 24
         uses: actions/setup-node@v4
@@ -31,11 +47,53 @@ jobs:
             backend/package-lock.json
             outputs/product-design-prototype/package-lock.json
 
-      - name: Verify tag matches package version
+      - name: Verify tagged commit belongs to origin/main
         shell: bash
         run: |
-          expected="v$(node -p "require('./package.json').version")"
-          test "$GITHUB_REF_NAME" = "$expected"
+          git show-ref --verify --quiet refs/remotes/origin/main
+          tag_commit="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          test -n "$tag_commit"
+          test "$(git rev-parse HEAD)" = "$tag_commit"
+          git merge-base --is-ancestor "$tag_commit" origin/main
+
+      - name: Verify release versions are consistent
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
+          const expected = readFileSync("VERSION", "utf8").trim();
+          const rootPackage = readJson("package.json");
+          const backendPackage = readJson("backend/package.json");
+          const backendLock = readJson("backend/package-lock.json");
+          const frontendPackage = readJson("outputs/product-design-prototype/package.json");
+          const frontendLock = readJson("outputs/product-design-prototype/package-lock.json");
+          const versions = [
+            ["VERSION", expected],
+            ["package.json", rootPackage.version],
+            ["backend/package.json", backendPackage.version],
+            ["backend/package-lock.json", backendLock.version],
+            ["backend/package-lock.json packages root", backendLock.packages?.[""]?.version],
+            ["outputs/product-design-prototype/package.json", frontendPackage.version],
+            ["outputs/product-design-prototype/package-lock.json", frontendLock.version],
+            ["outputs/product-design-prototype/package-lock.json packages root", frontendLock.packages?.[""]?.version],
+          ];
+          const mismatches = versions.filter(([, version]) => version !== expected);
+
+          if (!expected || mismatches.length > 0) {
+            const details = versions.map(([file, version]) => `${file}=${version ?? "missing"}`).join(", ");
+            throw new Error(`Version mismatch: expected ${expected || "missing"}; ${details}`);
+          }
+
+          const expectedTag = `v${expected}`;
+          if (process.env.GITHUB_REF_NAME !== expectedTag) {
+            throw new Error(`Tag mismatch: expected ${expectedTag}, received ${process.env.GITHUB_REF_NAME}`);
+          }
+          NODE
+
+      - name: Scan working tree and complete Git history for secrets
+        run: node scripts/project-secret-scan.mjs --history
 
       - name: Install backend dependencies
         run: npm ci --prefix backend
@@ -44,7 +102,7 @@ jobs:
         run: npm ci --prefix outputs/product-design-prototype
 
       - name: Verify release tooling and source boundaries
-        run: npm run test:deploy
+        run: node --test scripts/*.test.mjs
 
       - name: Test backend
         run: npm --prefix backend test
@@ -56,10 +114,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          npm run release:package -- \
+          node scripts/release-package.mjs \
             --output-dir=dist \
             --archive-name="sentelligent-sales-workbench-${GITHUB_REF_NAME}.tar.gz" \
             > dist/release-result.json
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; JSON.parse(readFileSync("dist/release-result.json", "utf8"));'
           sha256sum dist/*.tar.gz > dist/SHA256SUMS
 
       - name: Upload verified release evidence
@@ -73,8 +132,24 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  publish:
+    name: Publish verified immutable release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified release evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: "sentelligent-sales-workbench-${{ github.ref_name }}"
+          path: dist
+
       - name: Create GitHub Release
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
