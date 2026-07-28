@@ -8,9 +8,9 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前代码版本 | `0.2.0` |
-| 代码内容冻结时间 | `2026-07-29T02:36:24.435+08:00` |
-| 正式发布判定 | 以 [GitHub Releases](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases) 中 `v0.2.0` 的 tag、`publishedAt` 和资产 SHA-256 为准 |
+| 当前代码版本 | `0.2.1` |
+| 代码内容冻结时间 | `2026-07-29T03:02:34+08:00` |
+| 正式发布判定 | 以 [GitHub Releases](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases) 中 `v0.2.1` 的 tag、`publishedAt` 和资产 SHA-256 为准 |
 | 生产部署判定 | 以 [部署记录](docs/部署记录.md) 的最新版本条目和服务器 evidence 为准 |
 | 内容冻结时已验证的生产基线 | `v0.1.0` / `f89e1e79f57ccfa95def5fb402dc27ebfec446b4` |
 | 该基线部署时间 | `2026-07-28T22:30:21+08:00` |
@@ -18,7 +18,7 @@
 | 该基线运行时 | 独立 Node.js 24，后端 `127.0.0.1:8897`，前端 `127.0.0.1:8088` |
 | 该基线验收 | 公开 HTTPS 冒烟 `25/25`，生产预检 `18/18` |
 
-`0.2.0` 表示仓库当前代码版本，不自动表示 tag、GitHub Release 或生产切换已经完成。该版本增加跨设备开发文档、模块说明、版本记录、标签发布和回滚规范；正式发布和部署状态始终由上表所列证据判定。
+`0.2.1` 表示仓库当前代码版本，不自动表示 tag、GitHub Release 或生产切换已经完成。`v0.2.0` 标签已固定在 `591e48d`，但其 Release workflow 因 Linux 对 Windows 绝对路径的解析差异失败，且没有创建 Release；本热修复修正跨宿主路径并让 PR CI 提前运行全部根脚本测试。正式发布和部署状态始终由上表所列证据判定。
 
 ## 功能状态
 
