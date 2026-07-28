@@ -39,9 +39,20 @@ const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
 const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
-const NODE_EXECUTABLE = "/usr/bin/node";
-const CADDY_EXECUTABLE = "/usr/bin/caddy";
-const ALLOWED_SERVICE_USERS = new Set(["root", "sentelligent"]);
+const PROJECT_NODE_EXECUTABLE =
+  `${DEFAULT_PROJECT_PATH}/runtime/node-v24/bin/node`;
+const PORTABLE_NODE_EXECUTABLE = "/usr/bin/node";
+const CENTOS_LEGACY_NODE_EXECUTABLE = "/usr/local/bin/node";
+const CADDY_EXECUTABLES = new Set([
+  "/usr/bin/caddy",
+  "/usr/local/bin/caddy",
+]);
+const SERVICE_USERS = Object.freeze({
+  "sentelligent-backend.service": new Set(["root", "sentelligent", "sentzx"]),
+  "sentelligent-frontend.service": new Set(["root", "sentelligent", "sentzx"]),
+  "sentelligent-caddy.service": new Set(["root", "caddy", "sentelligent"]),
+  "sentelligent-weixin-agent.service": new Set(["root", "sentelligent", "sentzx"]),
+});
 const REQUIRED_PROJECT_SERVICE_NAMES = new Set(REQUIRED_PROJECT_SERVICES);
 
 function parseEnvFile(filePath) {
@@ -267,6 +278,23 @@ function parsePlannedCommand(command) {
   return match ? { action: match[1], service: match[2] } : null;
 }
 
+function hasProjectOwnedCaddyProfile(plan) {
+  const services = Array.isArray(plan?.projectServices)
+    ? plan.projectServices
+    : [];
+  const caddy = services.find(
+    (service) => service?.name === "sentelligent-caddy.service",
+  );
+  const workingDirectory = caddy?.WorkingDirectory;
+  return (
+    ["root", "sentelligent"].includes(caddy?.User) &&
+    typeof workingDirectory === "string" &&
+    pathWithin(workingDirectory, DEFAULT_PROJECT_PATH) &&
+    typeof caddy?.ExecStart === "string" &&
+    validateProjectServiceExecStart(caddy.name, caddy.ExecStart)
+  );
+}
+
 export function validatePlannedCommands(plan) {
   const commands = Array.isArray(plan?.plannedCommands)
     ? plan.plannedCommands
@@ -276,6 +304,16 @@ export function validatePlannedCommands(plan) {
   const parsed = commands.map(parsePlannedCommand);
   if (parsed.some((command) => command === null)) return false;
   if (parsed.some((command) => !REQUIRED_PROJECT_SERVICE_NAMES.has(command.service))) {
+    return false;
+  }
+  if (
+    !hasProjectOwnedCaddyProfile(plan) &&
+    parsed.some(
+      (command) =>
+        command.service === "sentelligent-caddy.service" &&
+        ["enable", "restart", "start", "stop"].includes(command.action),
+    )
+  ) {
     return false;
   }
   const commandKeys = parsed
@@ -362,6 +400,37 @@ function exactExecTokens(command) {
   return tokens.length > 0 && tokens.every(Boolean) ? tokens : null;
 }
 
+function isCurrentCentosFrontendCommand(tokens) {
+  return JSON.stringify(tokens) === JSON.stringify([
+    "/usr/local/bin/node",
+    `${DEFAULT_PROJECT_PATH}/frontend/scripts/static-server.mjs`,
+    "serve",
+    "--host=0.0.0.0",
+    "--port=8088",
+    `--dist-path=${DEFAULT_PROJECT_PATH}/frontend/dist`,
+    "--api-base-url=https://82.156.210.199",
+  ]);
+}
+
+function isAllowedNodeEntry(
+  executable,
+  candidate,
+  entryPath,
+  { allowCentosLegacy = false } = {},
+) {
+  if (
+    executable === PORTABLE_NODE_EXECUTABLE ||
+    executable === PROJECT_NODE_EXECUTABLE
+  ) {
+    return isReleaseEntryPath(candidate, entryPath);
+  }
+  return (
+    allowCentosLegacy &&
+    executable === CENTOS_LEGACY_NODE_EXECUTABLE &&
+    candidate === `${DEFAULT_PROJECT_PATH}/${entryPath}`
+  );
+}
+
 export function validateProjectServiceExecStart(serviceName, command) {
   const tokens = exactExecTokens(command);
   if (tokens === null) return false;
@@ -369,15 +438,16 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-backend.service") {
     return (
       tokens.length === 2 &&
-      tokens[0] === NODE_EXECUTABLE &&
-      isReleaseEntryPath(tokens[1], "backend/src/server.js")
+      isAllowedNodeEntry(tokens[0], tokens[1], "backend/src/server.js", {
+        allowCentosLegacy: true,
+      })
     );
   }
   if (serviceName === "sentelligent-frontend.service") {
-    return (
+    return isCurrentCentosFrontendCommand(tokens) || (
       tokens.length === 3 &&
-      tokens[0] === NODE_EXECUTABLE &&
-      isReleaseEntryPath(
+      isAllowedNodeEntry(
+        tokens[0],
         tokens[1],
         "outputs/product-design-prototype/scripts/static-server.mjs",
       ) &&
@@ -387,7 +457,7 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-caddy.service") {
     return (
       tokens.length === 4 &&
-      tokens[0] === CADDY_EXECUTABLE &&
+      CADDY_EXECUTABLES.has(tokens[0]) &&
       tokens[1] === "run" &&
       tokens[2] === "--config" &&
       tokens[3] === CADDY_CONFIG_PATH
@@ -396,8 +466,9 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-weixin-agent.service") {
     return (
       tokens.length === 3 &&
-      tokens[0] === NODE_EXECUTABLE &&
-      isReleaseEntryPath(tokens[1], "backend/src/weixin/worker.js") &&
+      isAllowedNodeEntry(tokens[0], tokens[1], "backend/src/weixin/worker.js", {
+        allowCentosLegacy: true,
+      }) &&
       tokens[2] === "start"
     );
   }
@@ -441,9 +512,13 @@ function validateProjectServices(plan) {
       `/lib/systemd/system/${name}`,
       `/usr/lib/systemd/system/${name}`,
     ].includes(fragmentPath);
-    const workingDirectoryOwned =
-      typeof service?.WorkingDirectory === "string" &&
-      pathWithin(service.WorkingDirectory, DEFAULT_PROJECT_PATH);
+    const workingDirectory = service?.WorkingDirectory;
+    const workingDirectoryOwned = name === "sentelligent-caddy.service"
+      ? workingDirectory === "" ||
+        typeof workingDirectory === "string" &&
+          pathWithin(workingDirectory, DEFAULT_PROJECT_PATH)
+      : typeof service?.WorkingDirectory === "string" &&
+        pathWithin(service.WorkingDirectory, DEFAULT_PROJECT_PATH);
     const execStartOwned =
       typeof service?.ExecStart === "string" &&
       validateProjectServiceExecStart(name, service.ExecStart);
@@ -453,7 +528,7 @@ function validateProjectServices(plan) {
       isActive(service.active) &&
       fragmentOwned &&
       execStartOwned &&
-      ALLOWED_SERVICE_USERS.has(service.User) &&
+      SERVICE_USERS[name]?.has(service.User) &&
       workingDirectoryOwned
     );
   });

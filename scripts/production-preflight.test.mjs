@@ -159,6 +159,50 @@ function validLegacyServiceSnapshot() {
   };
 }
 
+function validCentos7ServiceSnapshot() {
+  const projectRoot = "/opt/sentelligent-sales-workbench";
+  const plan = validLegacyServiceSnapshot();
+  const serviceByName = new Map(
+    plan.projectServices.map((service) => [service.name, service]),
+  );
+
+  Object.assign(serviceByName.get("sentelligent-backend.service"), {
+    ExecStart: `/usr/local/bin/node ${projectRoot}/backend/src/server.js`,
+    User: "sentzx",
+    WorkingDirectory: `${projectRoot}/backend`,
+  });
+  Object.assign(serviceByName.get("sentelligent-frontend.service"), {
+    ExecStart: [
+      "/usr/local/bin/node",
+      `${projectRoot}/frontend/scripts/static-server.mjs`,
+      "serve",
+      "--host=0.0.0.0",
+      "--port=8088",
+      `--dist-path=${projectRoot}/frontend/dist`,
+      "--api-base-url=https://82.156.210.199",
+    ].join(" "),
+    User: "sentzx",
+    WorkingDirectory: `${projectRoot}/frontend`,
+  });
+  Object.assign(serviceByName.get("sentelligent-caddy.service"), {
+    ExecStart: "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile",
+    User: "caddy",
+    WorkingDirectory: "",
+  });
+  Object.assign(serviceByName.get("sentelligent-weixin-agent.service"), {
+    ExecStart: `/usr/local/bin/node ${projectRoot}/backend/src/weixin/worker.js start`,
+    User: "sentzx",
+    WorkingDirectory: `${projectRoot}/backend`,
+  });
+  plan.plannedActions = plan.plannedActions.filter(
+    ({ service }) => service !== "sentelligent-caddy.service",
+  );
+  plan.plannedCommands = plan.plannedCommands.filter(
+    (command) => !command.endsWith(" sentelligent-caddy.service"),
+  );
+  return plan;
+}
+
 async function loadPreflightModule() {
   try {
     return await import("./production-preflight.mjs");
@@ -234,6 +278,98 @@ describe("production preflight", () => {
       const serialized = JSON.stringify(report);
       assert.ok(!serialized.includes(environment.passwordHash));
       assert.ok(!serialized.includes(environment.sessionValue));
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("accepts the exact current CentOS 7 service snapshot without targeting shared Caddy", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://82.156.210.199";
+      const environment = validEnvironment(origin);
+      const envFile = workspace.write("production.env", environment.source);
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      const servicePlanPath = workspace.write(
+        "service-plan.json",
+        JSON.stringify(validCentos7ServiceSnapshot(), null, 2),
+      );
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.18.0",
+      });
+
+      assert.equal(
+        report.status,
+        "passed",
+        JSON.stringify(report.checks.filter((check) => check.status === "failed")),
+      );
+      assert.equal(
+        report.checks.find((check) => check.id === "services.project")?.status,
+        "passed",
+      );
+      assert.equal(
+        report.checks.find((check) => check.id === "services.commands")?.status,
+        "passed",
+      );
+
+      for (const [name, execStart] of [
+        [
+          "exact",
+          "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile",
+        ],
+        [
+          "whitespace-variant",
+          "/usr/local/bin/caddy  run --config /etc/caddy/Caddyfile",
+        ],
+        [
+          "portable-binary-variant",
+          "/usr/bin/caddy run --config /etc/caddy/Caddyfile",
+        ],
+      ]) {
+        const unsafeSharedCaddyPlan = validCentos7ServiceSnapshot();
+        unsafeSharedCaddyPlan.projectServices.find(
+          (service) => service.name === "sentelligent-caddy.service",
+        ).ExecStart = execStart;
+        unsafeSharedCaddyPlan.plannedActions.push({
+          action: "restart",
+          service: "sentelligent-caddy.service",
+        });
+        unsafeSharedCaddyPlan.plannedCommands.push(
+          "systemctl restart sentelligent-caddy.service",
+        );
+        const unsafeSharedCaddyPlanPath = workspace.write(
+          `unsafe-shared-caddy-${name}-plan.json`,
+          JSON.stringify(unsafeSharedCaddyPlan, null, 2),
+        );
+        const unsafeSharedCaddyReport = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath: unsafeSharedCaddyPlanPath,
+          nodeVersion: "24.18.0",
+        });
+        assert.equal(unsafeSharedCaddyReport.status, "failed");
+        assert.equal(
+          unsafeSharedCaddyReport.checks.find(
+            (check) => check.id === "services.commands",
+          )?.status,
+          "failed",
+        );
+      }
     } finally {
       workspace.cleanup();
     }
@@ -511,9 +647,12 @@ describe("production preflight", () => {
     const frontendEntry =
       `${currentRoot}/outputs/product-design-prototype/scripts/static-server.mjs`;
     const weixinEntry = `${currentRoot}/backend/src/weixin/worker.js`;
+    const projectNode =
+      "/opt/sentelligent-sales-workbench/runtime/node-v24/bin/node";
 
     for (const [service, command] of [
       ["sentelligent-backend.service", `/usr/bin/node ${backendEntry}`],
+      ["sentelligent-backend.service", `${projectNode} ${backendEntry}`],
       [
         "sentelligent-backend.service",
         "/usr/bin/node /opt/sentelligent-sales-workbench/backend/src/server.js",
@@ -533,6 +672,10 @@ describe("production preflight", () => {
       [
         "sentelligent-weixin-agent.service",
         `/usr/bin/node ${releaseRoot}/backend/src/weixin/worker.js start`,
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        `${projectNode} ${releaseRoot}/backend/src/weixin/worker.js start`,
       ],
       [
         "sentelligent-weixin-agent.service",
@@ -572,8 +715,20 @@ describe("production preflight", () => {
         "/usr/bin/node /opt/sentelligent-sales-workbench/backend/src/server.js/child",
       ],
       [
+        "sentelligent-backend.service",
+        `/opt/sentelligent-sales-workbench/runtime/node-v24-copy/bin/node ${backendEntry}`,
+      ],
+      [
+        "sentelligent-backend.service",
+        `/usr/local/bin/node ${backendEntry}`,
+      ],
+      [
         "sentelligent-frontend.service",
         `/usr/bin/node ${frontendEntry}`,
+      ],
+      [
+        "sentelligent-frontend.service",
+        `/usr/local/bin/node ${frontendEntry} serve`,
       ],
       [
         "sentelligent-frontend.service",
@@ -610,6 +765,10 @@ describe("production preflight", () => {
       [
         "sentelligent-weixin-agent.service",
         `/usr/bin/node ${weixinEntry} start && /bin/true`,
+      ],
+      [
+        "sentelligent-weixin-agent.service",
+        `/usr/local/bin/node ${releaseRoot}/backend/src/weixin/worker.js start`,
       ],
     ]) {
       assert.equal(
@@ -683,6 +842,15 @@ describe("production preflight", () => {
           failedChecks: ["services.project"],
           mutate(plan) {
             plan.projectServices[0].User = "nobody";
+          },
+        },
+        {
+          name: "malformed-caddy-working-directory",
+          failedChecks: ["services.project"],
+          mutate(plan) {
+            plan.projectServices.find(
+              (service) => service.name === "sentelligent-caddy.service",
+            ).WorkingDirectory = {};
           },
         },
       ];
