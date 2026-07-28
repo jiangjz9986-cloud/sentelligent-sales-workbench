@@ -1,5 +1,7 @@
 # 开发协作规范
 
+新设备初始化、跨设备接续和版本发布的完整步骤见 [多设备开发与版本管理](docs/多设备开发与版本管理.md)。生产操作见 [发布与回滚操作手册](docs/发布与回滚操作手册.md)。
+
 ## 基本原则
 
 - `main` 始终代表已验证、可部署或可回滚的版本。
@@ -52,7 +54,7 @@ docs: update production handoff
 
 ```bash
 npm run scan:secrets
-npm run test:release
+npm run test:deploy
 npm --prefix backend test
 npm --prefix outputs/product-design-prototype run qa:local
 ```
@@ -73,3 +75,12 @@ npm --prefix outputs/product-design-prototype run qa:integration
 - 已知风险和未完成项
 
 主控制会话负责审查差异、复跑关键测试、整合分支和最终产品验收。
+
+## 正式版本
+
+- `VERSION`、三个 `package.json`、两个 lockfile 和 `CHANGELOG.md` 必须保持一致。
+- 版本内容、内容冻结时间和已知限制写入 `docs/releases/vX.Y.Z.md`。
+- 只有已合并到 `main` 的提交可以创建 `vX.Y.Z` 标签。
+- 标签不能移动。发布有误时递增版本，不覆盖原标签或 GitHub Release。
+- GitHub Release 保存最终 tag 时间、提交 SHA、发布包、manifest 和 SHA-256。
+- 云端部署完成后记录新旧 release、数据库备份、预检、冒烟和回滚点。

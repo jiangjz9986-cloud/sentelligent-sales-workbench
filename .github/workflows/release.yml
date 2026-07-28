@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Verify and publish immutable release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CHROME_PATH: /usr/bin/google-chrome
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            outputs/product-design-prototype/package-lock.json
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "$expected"
+
+      - name: Install backend dependencies
+        run: npm ci --prefix backend
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix outputs/product-design-prototype
+
+      - name: Verify release tooling and source boundaries
+        run: npm run test:deploy
+
+      - name: Test backend
+        run: npm --prefix backend test
+
+      - name: Build and test frontend
+        run: npm --prefix outputs/product-design-prototype run qa:local
+
+      - name: Build immutable release evidence
+        shell: bash
+        run: |
+          mkdir -p dist
+          npm run release:package -- \
+            --output-dir=dist \
+            --archive-name="sentelligent-sales-workbench-${GITHUB_REF_NAME}.tar.gz" \
+            > dist/release-result.json
+          sha256sum dist/*.tar.gz > dist/SHA256SUMS
+
+      - name: Upload verified release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: "sentelligent-sales-workbench-${{ github.ref_name }}"
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/release-result.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*.tar.gz \
+            dist/SHA256SUMS \
+            dist/release-result.json \
+            --verify-tag \
+            --title "森特智行 ${GITHUB_REF_NAME}" \
+            --generate-notes

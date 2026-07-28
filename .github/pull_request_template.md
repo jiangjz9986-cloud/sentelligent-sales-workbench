@@ -6,6 +6,12 @@ Closes #
 
 -
 
+## 版本信息
+
+- 版本：
+- 内容冻结时间（ISO 8601）：
+- 是否需要 tag / GitHub Release：
+
 ## 用户影响
 
 -
@@ -21,7 +27,7 @@ Closes #
 ## 验证
 
 - [ ] `npm run scan:secrets`
-- [ ] `npm run test:release`
+- [ ] `npm run test:deploy`
 - [ ] `npm --prefix backend test`
 - [ ] `npm --prefix outputs/product-design-prototype run qa:local`
 - [ ] 需要时已运行 `qa:integration`
@@ -39,6 +45,10 @@ Closes #
 
 - 发布步骤：
 - 回滚步骤：
+- 上一已验收 release：
+- 数据库备份与 SHA-256：
+- 生产预检与公开 HTTPS 冒烟：
+- 共享 Caddy 和同机受保护服务未受影响：
 
 ## 截图或证据
 
