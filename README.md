@@ -9,7 +9,7 @@
 | 项目 | 状态 |
 | --- | --- |
 | 当前代码版本 | `0.2.1` |
-| 代码内容冻结时间 | `2026-07-29T03:02:34+08:00` |
+| 代码内容冻结时间 | `2026-07-29T03:16:40+08:00` |
 | 正式发布判定 | 以 [GitHub Releases](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases) 中 `v0.2.1` 的 tag、`publishedAt` 和资产 SHA-256 为准 |
 | 生产部署判定 | 以 [部署记录](docs/部署记录.md) 的最新版本条目和服务器 evidence 为准 |
 | 内容冻结时已验证的生产基线 | `v0.1.0` / `f89e1e79f57ccfa95def5fb402dc27ebfec446b4` |
