@@ -9,14 +9,22 @@ const runtimeDir = resolve(defaultWorkspaceRoot, ".runtime");
 const runtimePath = resolve(runtimeDir, "local-dev.json");
 
 function isWindowsAbsolutePath(value) {
-  return (
-    win32.isAbsolute(value) &&
-    (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\"))
-  );
+  return win32.isAbsolute(value) && /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function assertSupportedWorkspacePath(value) {
+  const isUncPath = value.startsWith("\\\\") || value.startsWith("//");
+  const isWindowsRootRelative = value.startsWith("\\") && !isUncPath;
+  if (isUncPath || isWindowsRootRelative) {
+    throw new TypeError(
+      "Unsupported workspace path; map it to a drive letter or provide a mounted POSIX path.",
+    );
+  }
 }
 
 export function resolveWorkspacePath(inputPath) {
   const value = String(inputPath);
+  assertSupportedWorkspacePath(value);
   if (isWindowsAbsolutePath(value)) return win32.normalize(value);
   if (posix.isAbsolute(value)) return posix.normalize(value);
   return resolve(value);
@@ -24,6 +32,7 @@ export function resolveWorkspacePath(inputPath) {
 
 export function joinWorkspacePath(workspaceRoot, ...segments) {
   const root = String(workspaceRoot);
+  assertSupportedWorkspacePath(root);
   if (isWindowsAbsolutePath(root)) return win32.join(root, ...segments);
   if (posix.isAbsolute(root)) return posix.join(root, ...segments);
   return resolve(root, ...segments);

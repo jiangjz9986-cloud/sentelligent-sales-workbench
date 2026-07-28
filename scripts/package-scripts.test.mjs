@@ -37,4 +37,11 @@ describe("root package QA scripts", () => {
     assert.ok(fullHistory > checkout, "CI checkout must include complete Git history");
     assert.ok(secretScan > fullHistory, "the secret scan must run after complete checkout");
   });
+
+  it("makes complete Git history scanning explicit in the shared secret command", () => {
+    assert.match(
+      packageJson.scripts?.["scan:secrets"] ?? "",
+      /project-secret-scan\.mjs --history/,
+    );
+  });
 });
