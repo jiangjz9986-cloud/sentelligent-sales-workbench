@@ -324,34 +324,52 @@ describe("production preflight", () => {
         "passed",
       );
 
-      const unsafeSharedCaddyPlan = validCentos7ServiceSnapshot();
-      unsafeSharedCaddyPlan.plannedActions.push({
-        action: "restart",
-        service: "sentelligent-caddy.service",
-      });
-      unsafeSharedCaddyPlan.plannedCommands.push(
-        "systemctl restart sentelligent-caddy.service",
-      );
-      const unsafeSharedCaddyPlanPath = workspace.write(
-        "unsafe-shared-caddy-plan.json",
-        JSON.stringify(unsafeSharedCaddyPlan, null, 2),
-      );
-      const unsafeSharedCaddyReport = await runProductionPreflight({
-        envFile,
-        databasePath,
-        backupPath,
-        expectedBackupSha256: fileSha256(backupPath),
-        expectedOrigins: [origin],
-        servicePlanPath: unsafeSharedCaddyPlanPath,
-        nodeVersion: "24.18.0",
-      });
-      assert.equal(unsafeSharedCaddyReport.status, "failed");
-      assert.equal(
-        unsafeSharedCaddyReport.checks.find(
-          (check) => check.id === "services.commands",
-        )?.status,
-        "failed",
-      );
+      for (const [name, execStart] of [
+        [
+          "exact",
+          "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile",
+        ],
+        [
+          "whitespace-variant",
+          "/usr/local/bin/caddy  run --config /etc/caddy/Caddyfile",
+        ],
+        [
+          "portable-binary-variant",
+          "/usr/bin/caddy run --config /etc/caddy/Caddyfile",
+        ],
+      ]) {
+        const unsafeSharedCaddyPlan = validCentos7ServiceSnapshot();
+        unsafeSharedCaddyPlan.projectServices.find(
+          (service) => service.name === "sentelligent-caddy.service",
+        ).ExecStart = execStart;
+        unsafeSharedCaddyPlan.plannedActions.push({
+          action: "restart",
+          service: "sentelligent-caddy.service",
+        });
+        unsafeSharedCaddyPlan.plannedCommands.push(
+          "systemctl restart sentelligent-caddy.service",
+        );
+        const unsafeSharedCaddyPlanPath = workspace.write(
+          `unsafe-shared-caddy-${name}-plan.json`,
+          JSON.stringify(unsafeSharedCaddyPlan, null, 2),
+        );
+        const unsafeSharedCaddyReport = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath: unsafeSharedCaddyPlanPath,
+          nodeVersion: "24.18.0",
+        });
+        assert.equal(unsafeSharedCaddyReport.status, "failed");
+        assert.equal(
+          unsafeSharedCaddyReport.checks.find(
+            (check) => check.id === "services.commands",
+          )?.status,
+          "failed",
+        );
+      }
     } finally {
       workspace.cleanup();
     }

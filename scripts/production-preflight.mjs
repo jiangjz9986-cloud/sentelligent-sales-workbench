@@ -278,18 +278,20 @@ function parsePlannedCommand(command) {
   return match ? { action: match[1], service: match[2] } : null;
 }
 
-function hasSharedCaddyProfile(plan) {
+function hasProjectOwnedCaddyProfile(plan) {
   const services = Array.isArray(plan?.projectServices)
     ? plan.projectServices
     : [];
   const caddy = services.find(
     (service) => service?.name === "sentelligent-caddy.service",
   );
+  const workingDirectory = caddy?.WorkingDirectory;
   return (
-    caddy?.User === "caddy" &&
-    caddy?.WorkingDirectory === "" &&
-    caddy?.ExecStart ===
-      "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile"
+    ["root", "sentelligent"].includes(caddy?.User) &&
+    typeof workingDirectory === "string" &&
+    pathWithin(workingDirectory, DEFAULT_PROJECT_PATH) &&
+    typeof caddy?.ExecStart === "string" &&
+    validateProjectServiceExecStart(caddy.name, caddy.ExecStart)
   );
 }
 
@@ -305,7 +307,7 @@ export function validatePlannedCommands(plan) {
     return false;
   }
   if (
-    hasSharedCaddyProfile(plan) &&
+    !hasProjectOwnedCaddyProfile(plan) &&
     parsed.some(
       (command) =>
         command.service === "sentelligent-caddy.service" &&
