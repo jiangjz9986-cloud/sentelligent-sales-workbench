@@ -185,7 +185,8 @@ function validCentos7ServiceSnapshot() {
     WorkingDirectory: `${projectRoot}/frontend`,
   });
   Object.assign(serviceByName.get("sentelligent-caddy.service"), {
-    ExecStart: "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile",
+    ExecStart:
+      "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile",
     User: "caddy",
     WorkingDirectory: "",
   });
@@ -670,6 +671,10 @@ describe("production preflight", () => {
         "/usr/bin/caddy run --config /etc/caddy/Caddyfile",
       ],
       [
+        "sentelligent-caddy.service",
+        "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile",
+      ],
+      [
         "sentelligent-weixin-agent.service",
         `/usr/bin/node ${releaseRoot}/backend/src/weixin/worker.js start`,
       ],
@@ -745,6 +750,14 @@ describe("production preflight", () => {
       [
         "sentelligent-caddy.service",
         "/usr/bin/caddy run --config /etc/caddy/Caddyfile --watch",
+      ],
+      [
+        "sentelligent-caddy.service",
+        "/usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter json",
+      ],
+      [
+        "sentelligent-caddy.service",
+        "/usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --watch",
       ],
       [
         "sentelligent-caddy.service",

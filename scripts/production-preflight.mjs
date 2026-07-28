@@ -456,7 +456,10 @@ export function validateProjectServiceExecStart(serviceName, command) {
   }
   if (serviceName === "sentelligent-caddy.service") {
     return (
-      tokens.length === 4 &&
+      (tokens.length === 4 ||
+        tokens.length === 6 &&
+          tokens[4] === "--adapter" &&
+          tokens[5] === "caddyfile") &&
       CADDY_EXECUTABLES.has(tokens[0]) &&
       tokens[1] === "run" &&
       tokens[2] === "--config" &&
