@@ -39,9 +39,23 @@ const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
 const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
-const NODE_EXECUTABLE = "/usr/bin/node";
-const CADDY_EXECUTABLE = "/usr/bin/caddy";
-const ALLOWED_SERVICE_USERS = new Set(["root", "sentelligent"]);
+const PROJECT_NODE_EXECUTABLE =
+  `${DEFAULT_PROJECT_PATH}/runtime/node-v24/bin/node`;
+const NODE_EXECUTABLES = new Set([
+  "/usr/bin/node",
+  "/usr/local/bin/node",
+  PROJECT_NODE_EXECUTABLE,
+]);
+const CADDY_EXECUTABLES = new Set([
+  "/usr/bin/caddy",
+  "/usr/local/bin/caddy",
+]);
+const SERVICE_USERS = Object.freeze({
+  "sentelligent-backend.service": new Set(["root", "sentelligent", "sentzx"]),
+  "sentelligent-frontend.service": new Set(["root", "sentelligent", "sentzx"]),
+  "sentelligent-caddy.service": new Set(["root", "caddy", "sentelligent"]),
+  "sentelligent-weixin-agent.service": new Set(["root", "sentelligent", "sentzx"]),
+});
 const REQUIRED_PROJECT_SERVICE_NAMES = new Set(REQUIRED_PROJECT_SERVICES);
 
 function parseEnvFile(filePath) {
@@ -362,6 +376,18 @@ function exactExecTokens(command) {
   return tokens.length > 0 && tokens.every(Boolean) ? tokens : null;
 }
 
+function isCurrentCentosFrontendCommand(tokens) {
+  return JSON.stringify(tokens) === JSON.stringify([
+    "/usr/local/bin/node",
+    `${DEFAULT_PROJECT_PATH}/frontend/scripts/static-server.mjs`,
+    "serve",
+    "--host=0.0.0.0",
+    "--port=8088",
+    `--dist-path=${DEFAULT_PROJECT_PATH}/frontend/dist`,
+    "--api-base-url=https://82.156.210.199",
+  ]);
+}
+
 export function validateProjectServiceExecStart(serviceName, command) {
   const tokens = exactExecTokens(command);
   if (tokens === null) return false;
@@ -369,14 +395,14 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-backend.service") {
     return (
       tokens.length === 2 &&
-      tokens[0] === NODE_EXECUTABLE &&
+      NODE_EXECUTABLES.has(tokens[0]) &&
       isReleaseEntryPath(tokens[1], "backend/src/server.js")
     );
   }
   if (serviceName === "sentelligent-frontend.service") {
-    return (
+    return isCurrentCentosFrontendCommand(tokens) || (
       tokens.length === 3 &&
-      tokens[0] === NODE_EXECUTABLE &&
+      NODE_EXECUTABLES.has(tokens[0]) &&
       isReleaseEntryPath(
         tokens[1],
         "outputs/product-design-prototype/scripts/static-server.mjs",
@@ -387,7 +413,7 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-caddy.service") {
     return (
       tokens.length === 4 &&
-      tokens[0] === CADDY_EXECUTABLE &&
+      CADDY_EXECUTABLES.has(tokens[0]) &&
       tokens[1] === "run" &&
       tokens[2] === "--config" &&
       tokens[3] === CADDY_CONFIG_PATH
@@ -396,7 +422,7 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-weixin-agent.service") {
     return (
       tokens.length === 3 &&
-      tokens[0] === NODE_EXECUTABLE &&
+      NODE_EXECUTABLES.has(tokens[0]) &&
       isReleaseEntryPath(tokens[1], "backend/src/weixin/worker.js") &&
       tokens[2] === "start"
     );
@@ -441,9 +467,11 @@ function validateProjectServices(plan) {
       `/lib/systemd/system/${name}`,
       `/usr/lib/systemd/system/${name}`,
     ].includes(fragmentPath);
-    const workingDirectoryOwned =
-      typeof service?.WorkingDirectory === "string" &&
-      pathWithin(service.WorkingDirectory, DEFAULT_PROJECT_PATH);
+    const workingDirectoryOwned = name === "sentelligent-caddy.service"
+      ? service?.WorkingDirectory === "" ||
+        pathWithin(service?.WorkingDirectory ?? "", DEFAULT_PROJECT_PATH)
+      : typeof service?.WorkingDirectory === "string" &&
+        pathWithin(service.WorkingDirectory, DEFAULT_PROJECT_PATH);
     const execStartOwned =
       typeof service?.ExecStart === "string" &&
       validateProjectServiceExecStart(name, service.ExecStart);
@@ -453,7 +481,7 @@ function validateProjectServices(plan) {
       isActive(service.active) &&
       fragmentOwned &&
       execStartOwned &&
-      ALLOWED_SERVICE_USERS.has(service.User) &&
+      SERVICE_USERS[name]?.has(service.User) &&
       workingDirectoryOwned
     );
   });
