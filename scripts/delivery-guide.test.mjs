@@ -59,4 +59,16 @@ describe("formal delivery guide", () => {
       assert.match(content, literalPattern(required));
     }
   });
+
+  it("documents the isolated Node 24 and shared Caddy production boundaries", () => {
+    for (const required of [
+      "/opt/sentelligent-sales-workbench/runtime/node-v24/bin/node",
+      "sentzx",
+      "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile",
+      "共享 Caddy",
+      "不得包含 sentelligent-caddy.service",
+    ]) {
+      assert.match(content, literalPattern(required));
+    }
+  });
 });

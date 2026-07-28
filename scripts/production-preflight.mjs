@@ -41,11 +41,8 @@ const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
 const PROJECT_NODE_EXECUTABLE =
   `${DEFAULT_PROJECT_PATH}/runtime/node-v24/bin/node`;
-const NODE_EXECUTABLES = new Set([
-  "/usr/bin/node",
-  "/usr/local/bin/node",
-  PROJECT_NODE_EXECUTABLE,
-]);
+const PORTABLE_NODE_EXECUTABLE = "/usr/bin/node";
+const CENTOS_LEGACY_NODE_EXECUTABLE = "/usr/local/bin/node";
 const CADDY_EXECUTABLES = new Set([
   "/usr/bin/caddy",
   "/usr/local/bin/caddy",
@@ -281,6 +278,21 @@ function parsePlannedCommand(command) {
   return match ? { action: match[1], service: match[2] } : null;
 }
 
+function hasSharedCaddyProfile(plan) {
+  const services = Array.isArray(plan?.projectServices)
+    ? plan.projectServices
+    : [];
+  const caddy = services.find(
+    (service) => service?.name === "sentelligent-caddy.service",
+  );
+  return (
+    caddy?.User === "caddy" &&
+    caddy?.WorkingDirectory === "" &&
+    caddy?.ExecStart ===
+      "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile"
+  );
+}
+
 export function validatePlannedCommands(plan) {
   const commands = Array.isArray(plan?.plannedCommands)
     ? plan.plannedCommands
@@ -290,6 +302,16 @@ export function validatePlannedCommands(plan) {
   const parsed = commands.map(parsePlannedCommand);
   if (parsed.some((command) => command === null)) return false;
   if (parsed.some((command) => !REQUIRED_PROJECT_SERVICE_NAMES.has(command.service))) {
+    return false;
+  }
+  if (
+    hasSharedCaddyProfile(plan) &&
+    parsed.some(
+      (command) =>
+        command.service === "sentelligent-caddy.service" &&
+        ["enable", "restart", "start", "stop"].includes(command.action),
+    )
+  ) {
     return false;
   }
   const commandKeys = parsed
@@ -388,6 +410,25 @@ function isCurrentCentosFrontendCommand(tokens) {
   ]);
 }
 
+function isAllowedNodeEntry(
+  executable,
+  candidate,
+  entryPath,
+  { allowCentosLegacy = false } = {},
+) {
+  if (
+    executable === PORTABLE_NODE_EXECUTABLE ||
+    executable === PROJECT_NODE_EXECUTABLE
+  ) {
+    return isReleaseEntryPath(candidate, entryPath);
+  }
+  return (
+    allowCentosLegacy &&
+    executable === CENTOS_LEGACY_NODE_EXECUTABLE &&
+    candidate === `${DEFAULT_PROJECT_PATH}/${entryPath}`
+  );
+}
+
 export function validateProjectServiceExecStart(serviceName, command) {
   const tokens = exactExecTokens(command);
   if (tokens === null) return false;
@@ -395,15 +436,16 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-backend.service") {
     return (
       tokens.length === 2 &&
-      NODE_EXECUTABLES.has(tokens[0]) &&
-      isReleaseEntryPath(tokens[1], "backend/src/server.js")
+      isAllowedNodeEntry(tokens[0], tokens[1], "backend/src/server.js", {
+        allowCentosLegacy: true,
+      })
     );
   }
   if (serviceName === "sentelligent-frontend.service") {
     return isCurrentCentosFrontendCommand(tokens) || (
       tokens.length === 3 &&
-      NODE_EXECUTABLES.has(tokens[0]) &&
-      isReleaseEntryPath(
+      isAllowedNodeEntry(
+        tokens[0],
         tokens[1],
         "outputs/product-design-prototype/scripts/static-server.mjs",
       ) &&
@@ -422,8 +464,9 @@ export function validateProjectServiceExecStart(serviceName, command) {
   if (serviceName === "sentelligent-weixin-agent.service") {
     return (
       tokens.length === 3 &&
-      NODE_EXECUTABLES.has(tokens[0]) &&
-      isReleaseEntryPath(tokens[1], "backend/src/weixin/worker.js") &&
+      isAllowedNodeEntry(tokens[0], tokens[1], "backend/src/weixin/worker.js", {
+        allowCentosLegacy: true,
+      }) &&
       tokens[2] === "start"
     );
   }
@@ -467,9 +510,11 @@ function validateProjectServices(plan) {
       `/lib/systemd/system/${name}`,
       `/usr/lib/systemd/system/${name}`,
     ].includes(fragmentPath);
+    const workingDirectory = service?.WorkingDirectory;
     const workingDirectoryOwned = name === "sentelligent-caddy.service"
-      ? service?.WorkingDirectory === "" ||
-        pathWithin(service?.WorkingDirectory ?? "", DEFAULT_PROJECT_PATH)
+      ? workingDirectory === "" ||
+        typeof workingDirectory === "string" &&
+          pathWithin(workingDirectory, DEFAULT_PROJECT_PATH)
       : typeof service?.WorkingDirectory === "string" &&
         pathWithin(service.WorkingDirectory, DEFAULT_PROJECT_PATH);
     const execStartOwned =
