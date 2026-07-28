@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -8,20 +8,50 @@ const defaultWorkspaceRoot = resolve(here, "..");
 const runtimeDir = resolve(defaultWorkspaceRoot, ".runtime");
 const runtimePath = resolve(runtimeDir, "local-dev.json");
 
+function isWindowsAbsolutePath(value) {
+  return win32.isAbsolute(value) && /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function assertSupportedWorkspacePath(value) {
+  const isUncPath = value.startsWith("\\\\") || value.startsWith("//");
+  const isWindowsRootRelative = value.startsWith("\\") && !isUncPath;
+  if (isUncPath || isWindowsRootRelative) {
+    throw new TypeError(
+      "Unsupported workspace path; map it to a drive letter or provide a mounted POSIX path.",
+    );
+  }
+}
+
+export function resolveWorkspacePath(inputPath) {
+  const value = String(inputPath);
+  assertSupportedWorkspacePath(value);
+  if (isWindowsAbsolutePath(value)) return win32.normalize(value);
+  if (posix.isAbsolute(value)) return posix.normalize(value);
+  return resolve(value);
+}
+
+export function joinWorkspacePath(workspaceRoot, ...segments) {
+  const root = String(workspaceRoot);
+  assertSupportedWorkspacePath(root);
+  if (isWindowsAbsolutePath(root)) return win32.join(root, ...segments);
+  if (posix.isAbsolute(root)) return posix.join(root, ...segments);
+  return resolve(root, ...segments);
+}
+
 export function toWslPath(windowsPath) {
-  const normalized = resolve(windowsPath).replaceAll("\\", "/");
+  const normalized = resolveWorkspacePath(windowsPath).replaceAll("\\", "/");
   const match = normalized.match(/^([A-Za-z]):\/(.*)$/);
   if (!match) return normalized;
   return `/mnt/${match[1].toLowerCase()}/${match[2]}`;
 }
 
 export function createConfig(overrides = {}) {
-  const workspaceRoot = resolve(overrides.workspaceRoot ?? defaultWorkspaceRoot);
+  const workspaceRoot = resolveWorkspacePath(overrides.workspaceRoot ?? defaultWorkspaceRoot);
   const backendPort = Number(overrides.backendPort ?? process.env.SENT_ZX_BACKEND_PORT ?? 8897);
   const frontendPort = Number(overrides.frontendPort ?? process.env.SENT_ZX_FRONTEND_PORT ?? 5184);
   const databaseUrl = String(overrides.databaseUrl ?? process.env.SENT_ZX_DATABASE_URL ?? "/tmp/sent-zx-local-dev.sqlite");
-  const backendDir = resolve(workspaceRoot, "backend");
-  const frontendDir = resolve(workspaceRoot, "outputs", "product-design-prototype");
+  const backendDir = joinWorkspacePath(workspaceRoot, "backend");
+  const frontendDir = joinWorkspacePath(workspaceRoot, "outputs", "product-design-prototype");
 
   return {
     workspaceRoot,
@@ -33,7 +63,7 @@ export function createConfig(overrides = {}) {
     backendUrl: `http://127.0.0.1:${backendPort}`,
     frontendUrl: `http://127.0.0.1:${frontendPort}`,
     databaseUrl,
-    runtimePath: resolve(workspaceRoot, ".runtime", "local-dev.json"),
+    runtimePath: joinWorkspacePath(workspaceRoot, ".runtime", "local-dev.json"),
   };
 }
 

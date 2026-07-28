@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 
-import { toWslPath } from "./local-dev.mjs";
+import {
+  joinWorkspacePath,
+  resolveWorkspacePath,
+  toWslPath,
+} from "./local-dev.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const defaultWorkspaceRoot = resolve(here, "..");
@@ -22,8 +26,8 @@ function parseArgs(argv) {
 }
 
 export function createWslBackendConfig(overrides = {}) {
-  const workspaceRoot = resolve(overrides.workspaceRoot ?? defaultWorkspaceRoot);
-  const backendDir = resolve(workspaceRoot, "backend");
+  const workspaceRoot = resolveWorkspacePath(overrides.workspaceRoot ?? defaultWorkspaceRoot);
+  const backendDir = joinWorkspacePath(workspaceRoot, "backend");
   return {
     workspaceRoot,
     backendDir,

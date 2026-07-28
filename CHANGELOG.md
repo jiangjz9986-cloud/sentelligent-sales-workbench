@@ -11,6 +11,28 @@
 - 使用真实赢单、输单、暂停和合规升级案例校准销售决策评分。
 - 把根 HTML 的 HSTS、CSP 等响应头补齐到与 API 一致，不直接修改共享 Caddy。
 
+## [0.2.1] - 2026-07-29T02:54:59.072+08:00
+
+### 状态判定
+
+- 当前仓库正式版本号升级为 `0.2.1`；是否已经创建 `v0.2.1` tag、GitHub Release 或完成生产部署，分别以 GitHub 和 [部署记录](docs/部署记录.md) 的后续证据为准，本条目不预填尚未发生的成功结果。
+- annotated tag `v0.2.0` 已固定指向提交 `591e48d464341d1df95f541d84790e7452341d5d`，不得删除、移动或复用。
+- `v0.2.0` 的 Release workflow run `30389038587` 在 `Verify release tooling and source boundaries` 阶段失败，因此没有创建 `v0.2.0` GitHub Release，也没有发布对应资产。
+
+### 修复
+
+- 跨宿主识别 Windows 绝对路径：在 Linux/WSL 上遇到 `C:/...` 时使用 `path.win32` 判断、规范化和拼接，避免被错误解析为当前工作目录下的 `C:/...` 相对路径。
+- 对无法可靠映射到 WSL 的 UNC 网络共享和 Windows 根相对工作区路径失败关闭，提示改用盘符或已挂载的 POSIX 路径。
+- 将上述规则统一用于本地开发、WSL 后端和 WSL 全栈配置入口，覆盖发布流程暴露出的 6 项跨平台回归。
+- 收紧 CI 门禁：PR CI 与标签 Release workflow 使用同一组根脚本测试 `node --test scripts/*.test.mjs`，使 Linux runner 在合并前执行完整的发布工具与源码边界检查。
+- 将共享凭据扫描命令显式固定为 `--history`，防止默认值变化造成 PR CI 与 Release workflow 的扫描范围漂移。
+
+### 发布要求
+
+- 必须在 Windows 与 Linux/WSL 上验证三个 WSL 辅助脚本的路径解析测试，并完成根、后端、前端和凭据扫描质量门。
+- 只能在修复提交进入 `main` 且 CI 成功后创建新的 annotated tag `v0.2.1`；不得复用 `v0.2.0`。
+- GitHub Release 资产、SHA-256、生产备份、部署、预检和 HTTPS 冒烟均须在实际完成后记录，不以本条目代替发布或部署证据。
+
 ## [0.2.0] - 2026-07-29T02:36:24.435+08:00
 
 ### 状态判定
@@ -81,7 +103,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.1.0
 [0.1.0-baseline]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.1.0-baseline

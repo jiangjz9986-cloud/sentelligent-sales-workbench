@@ -16,6 +16,31 @@ const {
 } = localDev;
 
 describe("local WSL dev orchestration", () => {
+  it("preserves POSIX absolute workspace paths across host platforms", () => {
+    assert.equal(localDev.resolveWorkspacePath("/tmp/sent-zx"), "/tmp/sent-zx");
+    assert.equal(
+      localDev.joinWorkspacePath("/tmp/sent-zx", "backend"),
+      "/tmp/sent-zx/backend",
+    );
+  });
+
+  it("rejects workspace paths that cannot be mapped into WSL reliably", () => {
+    for (const workspaceRoot of [
+      "\\\\fileserver\\sales\\sent-zx",
+      "//fileserver/sales/sent-zx",
+      "\\sales\\sent-zx",
+    ]) {
+      assert.throws(
+        () => localDev.resolveWorkspacePath(workspaceRoot),
+        /map it to a drive letter or provide a mounted POSIX path/,
+      );
+      assert.throws(
+        () => toWslPath(workspaceRoot),
+        /map it to a drive letter or provide a mounted POSIX path/,
+      );
+    }
+  });
+
   it("maps Windows paths into WSL mount paths without shell interpolation", () => {
     assert.equal(
       toWslPath("C:\\Users\\50159\\Desktop\\森特智行\\backend"),

@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { toWslPath } from "./local-dev.mjs";
+import {
+  joinWorkspacePath,
+  resolveWorkspacePath,
+  toWslPath,
+} from "./local-dev.mjs";
 import {
   buildWslBackendCommand,
   createWslBackendConfig,
@@ -24,8 +28,8 @@ function parseArgs(argv) {
 }
 
 export function createWslStackConfig(overrides = {}) {
-  const workspaceRoot = resolve(overrides.workspaceRoot ?? defaultWorkspaceRoot);
-  const frontendDir = resolve(workspaceRoot, "outputs", "product-design-prototype");
+  const workspaceRoot = resolveWorkspacePath(overrides.workspaceRoot ?? defaultWorkspaceRoot);
+  const frontendDir = joinWorkspacePath(workspaceRoot, "outputs", "product-design-prototype");
   const backendPort = Number(overrides.backendPort ?? process.env.SENT_ZX_BACKEND_PORT ?? 8897);
   const frontendPort = Number(overrides.frontendPort ?? process.env.SENT_ZX_FRONTEND_PORT ?? 8088);
   const runtimeRoot = overrides.runtimeRoot ?? process.env.SENT_ZX_RUNTIME_ROOT;

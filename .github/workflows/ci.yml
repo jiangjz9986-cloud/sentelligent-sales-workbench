@@ -46,7 +46,7 @@ jobs:
         run: npm run scan:secrets
 
       - name: Verify release tooling
-        run: npm run test:release
+        run: node --test scripts/*.test.mjs
 
       - name: Test backend
         run: npm --prefix backend test
