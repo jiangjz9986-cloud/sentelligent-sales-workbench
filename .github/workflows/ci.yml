@@ -18,6 +18,8 @@ jobs:
     name: Source, backend, and frontend checks
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      CHROME_PATH: /usr/bin/google-chrome
 
     steps:
       - name: Check out source
