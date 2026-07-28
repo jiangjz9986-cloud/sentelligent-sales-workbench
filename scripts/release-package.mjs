@@ -330,6 +330,7 @@ function isPlaceholderValue(rawValue, filePath) {
   if (!value || /^(?:null|none|undefined)$/i.test(value)) return true;
   if (
     /^(?:<[^>]+>|\$\{[^}]+\}|\{\{[^}]+\}\})$/.test(value) ||
+    /^\$\{\{\s*(?:github|secrets|vars|env|inputs|runner|job|steps|needs|strategy|matrix)\.[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*\s*\}\}$/.test(value) ||
     isExplicitPlaceholderLabel(value) ||
     /^[x*._-]{4,}$/i.test(value) ||
     isExplicitTestFixtureLabel(value, filePath)

@@ -639,6 +639,36 @@ describe("portable release package", () => {
     }
   });
 
+  it("allows GitHub Actions context references without treating them as credential values", async () => {
+    const workspace = makeWorkspace("sentelligent-github-context-");
+    const output = makeWorkspace("sentelligent-github-context-output-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      workspace.write(
+        ".github/workflows/release.yml",
+        [
+          "name: Release",
+          "env:",
+          "  GH_TOKEN: ${{ github.token }}",
+          "  API_TOKEN: ${{ secrets.RELEASE_API_TOKEN }}",
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      const { createReleasePackage } = await loadReleaseModule();
+      const result = await createReleasePackage({
+        sourceRoot: workspace.root,
+        outputDir: output.root,
+        createdAt: "2026-07-19T08:00:00.000Z",
+      });
+      assert.ok(existsSync(result.archivePath));
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
   it("rejects sensitive assignments in ordinary YAML, JSON, and BOM text encodings", async () => {
     const sensitiveFixtures = [
       {
