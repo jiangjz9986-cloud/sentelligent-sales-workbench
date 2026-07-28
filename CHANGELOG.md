@@ -11,7 +11,7 @@
 - 使用真实赢单、输单、暂停和合规升级案例校准销售决策评分。
 - 把根 HTML 的 HSTS、CSP 等响应头补齐到与 API 一致，不直接修改共享 Caddy。
 
-## [0.2.0] - 2026-07-29T01:40:43.097+08:00
+## [0.2.0] - 2026-07-29T02:36:24.435+08:00
 
 ### 状态判定
 
@@ -35,6 +35,7 @@
 - GitHub Release 拆分为只读验证 job 和独立写权限发布 job；验证 checkout 不持久化仓库凭据。
 - 凭据门禁覆盖当前树、全部 refs 的历史 blob、commit、annotated tag 和 Git notes 消息，并分批读取历史内容。
 - PR CI 使用完整 Git 历史运行强制凭据扫描，避免浅克隆在安全门禁阶段失败关闭。
+- 浏览器视觉 QA 为 CDP 与 HTTP server 设置期限，在 POSIX 上终止并验证独立进程组，在 Windows 上验证 `taskkill` 结果，并保证多项清理互不跳过。
 - 发布包以完整 commit 作为稳定身份，同一提交在命名分支和 detached HEAD 下生成字节一致的归档。
 - 生产预检增加 `release.identity`，强制三个项目服务使用项目 Node 24，并把 `ExecStart`、`WorkingDirectory`、manifest 和完整 commit 绑定到同一 immutable release。
 
