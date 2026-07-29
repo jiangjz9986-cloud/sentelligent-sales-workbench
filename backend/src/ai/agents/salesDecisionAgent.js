@@ -1,6 +1,7 @@
 import {
   normalizeSalesDecisionAnalysis,
   SALES_DECISION_OUTPUT_SHAPE,
+  SALES_DECISION_STAGES,
 } from "./salesDecisionSchema.js";
 import { resolveSalesDecisionPlaybook } from "./salesDecisionPlaybooks.js";
 
@@ -569,11 +570,15 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
       options.fetchImpl ?? fetch,
     );
     const deterministic = buildDeterministicSalesDecision(inputContext);
+    const recommendedStage = SALES_DECISION_STAGES.includes(parsed?.stage?.recommended)
+      ? parsed.stage.recommended
+      : deterministic.stage.current;
     const normalized = normalizeSalesDecisionAnalysis({
       ...parsed,
       stage: {
         ...parsed.stage,
         current: deterministic.stage.current,
+        recommended: recommendedStage,
       },
     }, {
       source: config.modelProvider ?? "deepseek",
