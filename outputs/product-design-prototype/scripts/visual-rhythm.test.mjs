@@ -13,10 +13,15 @@ const chromePath = findChrome();
 const visualApiBaseUrl = "https://visual-api.test";
 
 const viewports = [
+  { name: "desktop-large", width: 1920, height: 1080, mobile: false },
+  { name: "desktop-compact", width: 1366, height: 768, mobile: false },
   { name: "desktop", width: 1440, height: 900, mobile: false },
   { name: "tablet", width: 834, height: 1194, mobile: false },
   { name: "mobile", width: 390, height: 844, mobile: true },
+  { name: "mobile-small", width: 360, height: 800, mobile: true },
 ];
+
+const mobileShellViewports = viewports.filter((viewport) => viewport.mobile);
 
 const pages = [
   { name: "overview", navIndex: 0, testId: "page-overview" },
@@ -584,6 +589,7 @@ async function measureVisualRhythm(cdp, url, viewport) {
         const firstViewportRatio = firstRect ? Number((firstRect.top / window.innerHeight).toFixed(3)) : null;
         results.push({
           page: page.name,
+          mobile: ${JSON.stringify(viewport.mobile)},
           h1: title?.textContent?.trim() ?? '',
           topInset,
           titleToFirst,
@@ -644,6 +650,40 @@ async function measureDesktopListDensity(cdp, url) {
         });
       }
       return results;
+    })()
+  `);
+}
+
+async function measureMobileShell(cdp, url, viewport) {
+  await cdp.send("Emulation.setDeviceMetricsOverride", {
+    width: viewport.width,
+    height: viewport.height,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await cdp.send("Page.navigate", { url });
+  await delay(1200);
+
+  return evaluate(cdp, `
+    (async () => {
+      const wait = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+      const started = Date.now();
+      while (!document.querySelector('[data-testid="page-overview"]')) {
+        if (Date.now() - started > 5000) throw new Error('Timed out waiting for mobile shell');
+        await wait(50);
+      }
+      const sidebar = document.querySelector('.sidebar');
+      const logo = document.querySelector('.brand-area img');
+      const navKicker = document.querySelector('.nav-kicker');
+      const rect = sidebar?.getBoundingClientRect();
+      return {
+        sidebarHeight: rect ? Math.round(rect.height) : null,
+        scrollbarThickness: sidebar ? Math.max(0, sidebar.offsetHeight - sidebar.clientHeight) : null,
+        navKickerDisplay: navKicker ? getComputedStyle(navKicker).display : null,
+        logoCurrentSrc: logo?.currentSrc ?? '',
+        visualScale: window.visualViewport?.scale ?? null,
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
     })()
   `);
 }
@@ -774,6 +814,34 @@ describe("CDP command lifecycle", () => {
 });
 
 describe("visual rhythm", () => {
+  it("keeps the mobile brand and horizontal navigation compact without a visible scrollbar", async () => {
+    assert.equal(existsSync(resolve("dist", "index.html")), true, "run npm run build before visual rhythm QA");
+
+    const port = await getFreePort();
+    const server = createStaticServer(createStaticServerConfig({
+      port,
+      distPath: resolve("dist"),
+      apiBaseUrl: visualApiBaseUrl,
+    }));
+    await new Promise((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
+
+    let cdp;
+    try {
+      cdp = await openChromeCdp();
+      for (const viewport of mobileShellViewports) {
+        const shell = await measureMobileShell(cdp, `http://127.0.0.1:${port}`, viewport);
+        assert.ok(shell.sidebarHeight <= 68, `${viewport.name} navigation is too tall: ${shell.sidebarHeight}px`);
+        assert.ok(shell.scrollbarThickness <= 2, `${viewport.name} should hide the native navigation scrollbar`);
+        assert.equal(shell.navKickerDisplay, "none", `${viewport.name} should hide the desktop navigation kicker`);
+        assert.match(shell.logoCurrentSrc, /sent-zhixing-icon\.png$/, `${viewport.name} should use the compact company icon`);
+        assert.equal(shell.visualScale, 1, `${viewport.name} should render at 100% scale`);
+        assert.equal(shell.overflowX, 0, `${viewport.name} should not overflow horizontally`);
+      }
+    } finally {
+      await closeVisualResources({ cdp, server });
+    }
+  });
+
   it("keeps page headings and first business modules visually connected across viewports", async () => {
     assert.equal(existsSync(resolve("dist", "index.html")), true, "run npm run build before visual rhythm QA");
 
@@ -795,12 +863,12 @@ describe("visual rhythm", () => {
       }
 
       const failures = allResults.filter((item) => {
-        const maxTopInset = item.viewport === "mobile" ? 16 : 30;
-        const maxTitleGap = item.viewport === "mobile" ? 34 : 42;
+        const maxTopInset = item.mobile ? 16 : 30;
+        const maxTitleGap = item.mobile ? 34 : 42;
         const isEmptyState = item.firstClass === "workbench-state-panel" || /-list-view$/.test(item.firstClass);
         const maxFirstViewportRatio = item.viewport === "desktop"
           ? 0.34
-          : item.viewport === "mobile" && isEmptyState
+          : item.mobile && isEmptyState
             ? 0.62
             : 0.42;
         return (

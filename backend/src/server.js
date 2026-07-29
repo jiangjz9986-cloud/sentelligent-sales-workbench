@@ -23,6 +23,7 @@ import {
 } from "./auth/session.js";
 import { loadConfig } from "./config.js";
 import { all, get, openDatabase, run } from "./db.js";
+import { createDatabaseIdentity } from "./db/databaseIdentity.js";
 import { withImmediateTransaction } from "./db/transaction.js";
 import { buildSalesDecisionInputSnapshot } from "./ai/agents/salesDecisionAgent.js";
 import { createSalesDecisionRepository } from "./ai/agents/salesDecisionRepository.js";
@@ -1780,6 +1781,12 @@ function buildSalesDecisionContext(db, body) {
 export function createServer(options = {}) {
   const config = loadConfig(options);
   const db = openDatabase({ databaseUrl: config.databaseUrl });
+  const databaseIdentity = config.authSessionSecret.length >= 32
+    ? createDatabaseIdentity({
+        databaseUrl: config.databaseUrl,
+        secret: config.authSessionSecret,
+      })
+    : null;
   if (options.seed) seedDatabase(db);
   const itineraryRepository = createVisitItineraryRepository(db, {
     clock: options.itineraryClock ?? (() => new Date()),
@@ -1846,6 +1853,7 @@ export function createServer(options = {}) {
         sendJson(response, 200, {
           status: "ok",
           database: "ready",
+          databaseIdentity,
           aiAnalysisMode: config.aiAnalysisMode,
           modelProvider: config.modelProvider,
           modelName: config.modelName,

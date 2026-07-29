@@ -24,6 +24,16 @@ describe("GitHub tagged release workflow", () => {
     assert.match(workflow, /tags:\s*\n\s*- ["']v\*["']/);
   });
 
+  it("serializes release runs for the same immutable tag", () => {
+    const workflowHeader = workflow.slice(0, workflow.indexOf("jobs:"));
+
+    assert.match(
+      workflowHeader,
+      /concurrency:\s*\r?\n\s+group:\s*release-tag-\$\{\{ github\.ref \}\}/,
+    );
+    assert.match(workflowHeader, /cancel-in-progress:\s*false/);
+  });
+
   it("isolates read-only verification from the write-enabled publish job", () => {
     const verifyJob = readJob("verify");
     const publishJob = readJob("publish");
@@ -48,7 +58,7 @@ describe("GitHub tagged release workflow", () => {
       verifyJob,
       /name:\s*["']?sentelligent-sales-workbench-\$\{\{ github\.ref_name \}\}/,
     );
-    assert.equal(publishSteps.length, 2);
+    assert.equal(publishSteps.length, 3);
     assert.match(publishJob, /actions\/download-artifact@v4/);
     assert.match(publishJob, /GH_REPO:\s*\$\{\{ github\.repository \}\}/);
     assert.match(
@@ -97,6 +107,23 @@ describe("GitHub tagged release workflow", () => {
     assert.doesNotMatch(workflow, /npm run test:deploy/);
     assert.match(workflow, /npm --prefix backend test/);
     assert.match(workflow, /npm --prefix outputs\/product-design-prototype run qa:local/);
+    assert.match(workflow, /npm --prefix outputs\/product-design-prototype run qa:integration/);
+    assert.match(workflow, /playwright install --with-deps webkit/);
+    assert.match(workflow, /npm --prefix outputs\/product-design-prototype run qa:webkit/);
+  });
+
+  it("revalidates the remote tag against github.sha immediately before publishing", () => {
+    const publishJob = readJob("publish");
+    const tagCheck = publishJob.indexOf('tag_ref="refs/tags/${GITHUB_REF_NAME}"');
+    const releaseCreate = publishJob.indexOf('gh release create "$GITHUB_REF_NAME"');
+
+    assert.match(publishJob, /EXPECTED_RELEASE_SHA:\s*\$\{\{ github\.sha \}\}/);
+    assert.match(publishJob, /git[^\n]*ls-remote --tags/);
+    assert.match(publishJob, /"\$tag_ref" "\$\{tag_ref\}\^\{\}"/);
+    assert.match(publishJob, /resolved_sha="\$\{peeled_sha:-\$direct_sha\}"/);
+    assert.match(publishJob, /test "\$resolved_sha" = "\$EXPECTED_RELEASE_SHA"/);
+    assert.ok(tagCheck >= 0, "missing remote tag revalidation");
+    assert.ok(releaseCreate > tagCheck, "remote tag must be revalidated before publishing");
   });
 
   it("scans the working tree and complete Git history before packaging", () => {

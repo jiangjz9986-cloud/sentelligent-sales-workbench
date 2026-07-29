@@ -4,6 +4,10 @@ import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
 const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+const frontendPackageJson = JSON.parse(readFileSync(
+  resolve("outputs", "product-design-prototype", "package.json"),
+  "utf8",
+));
 const ciWorkflow = readFileSync(
   resolve(".github", "workflows", "ci.yml"),
   "utf8",
@@ -18,6 +22,7 @@ describe("root package QA scripts", () => {
     assert.match(script, /npm --prefix backend test/);
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:local/);
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:integration/);
+    assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:webkit/);
   });
 
   it("pins the GitHub Linux Chrome executable for browser-backed frontend QA", () => {
@@ -42,6 +47,26 @@ describe("root package QA scripts", () => {
     assert.match(
       packageJson.scripts?.["scan:secrets"] ?? "",
       /project-secret-scan\.mjs --history/,
+    );
+  });
+
+  it("exposes the guarded production HTTPS smoke runner", () => {
+    assert.equal(
+      packageJson.scripts?.["smoke:production:https"],
+      "node scripts/production-https-smoke.mjs",
+    );
+  });
+
+  it("exposes repeatable WebKit acceptance for iPhone Safari equivalence", () => {
+    assert.equal(
+      frontendPackageJson.scripts?.["qa:webkit"],
+      "node scripts/webkit-qa.mjs",
+    );
+    assert.equal(frontendPackageJson.devDependencies?.playwright, "1.61.1");
+    assert.match(ciWorkflow, /playwright install --with-deps webkit/);
+    assert.match(
+      ciWorkflow,
+      /npm --prefix outputs\/product-design-prototype run qa:webkit/,
     );
   });
 });

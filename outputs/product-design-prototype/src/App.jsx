@@ -458,6 +458,11 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     updateWorkbenchCollection("customers", nextValue);
   }
 
+  function navigateTo(nextActive) {
+    if (nextActive === "quick") setRecordMode("voice");
+    setActive(nextActive);
+  }
+
   function setWorkbenchOpportunities(nextValue) {
     updateWorkbenchCollection("opportunities", nextValue);
   }
@@ -918,7 +923,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         <header className="topbar">
           <div className="brand-area">
             <span className="brand-mark brand-logo-mark">
-              <img src="/sent-zhixing-transparent-logo.png" alt="森特智行" />
+              <picture>
+                <source media="(max-width: 430px)" srcSet="/sent-zhixing-icon.png" />
+                <img src="/sent-zhixing-transparent-logo.png" alt="森特智行" />
+              </picture>
             </span>
           </div>
           <div className="top-actions">
@@ -928,7 +936,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
             <button
               className="ghost-button"
               type="button"
-              onClick={() => setActive("weekly")}
+              onClick={() => navigateTo("weekly")}
             >
               <FileText size={16} />
               周报
@@ -936,7 +944,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
             <button
               className="primary-button"
               type="button"
-              onClick={() => setActive("quick")}
+              data-testid="topbar-quick-record"
+              onClick={() => navigateTo("quick")}
             >
               <Mic size={16} />
               快速记录
@@ -956,6 +965,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 <button
                   key={item.id}
                   className={`nav-item ${active === item.id ? "active" : ""}`}
+                  data-testid={`nav-${item.id}`}
                   type="button"
                   onClick={() => {
                     if (item.id === "customer") setCustomerViewMode("list");
@@ -964,7 +974,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                     if (item.id === "risk") setRiskViewMode("list");
                     if (item.id === "knowledge") setKnowledgeViewMode("list");
                     if (item.id === "itinerary") setItineraryViewMode("list");
-                    setActive(item.id);
+                    navigateTo(item.id);
                   }}
                 >
                   <Icon size={18} />
@@ -993,7 +1003,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 onRetry={() => setBootstrapAttempt(incrementBootstrapAttempt)}
                 onCreateCustomer={() => {
                   setCustomerViewMode("create");
-                  setActive("customer");
+                  navigateTo("customer");
                 }}
               />
             ) : (
@@ -1004,7 +1014,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 customersList={workbenchCustomers}
                 opportunitiesList={workbenchOpportunities}
                 summary={overviewSummary}
-                setActive={setActive}
+                setActive={navigateTo}
                 setSelectedActionId={setSelectedActionId}
                 setSelectedCustomerId={setSelectedCustomerId}
                 setSelectedOpportunityId={setSelectedOpportunityId}
@@ -1026,7 +1036,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 setAnalysisVisible={setAnalysisVisible}
                 syncStatus={syncStatus}
                 setSyncStatus={setSyncStatus}
-                setActive={setActive}
+                setActive={navigateTo}
                 setSelectedCustomerId={setSelectedCustomerId}
                 setSelectedOpportunityId={setSelectedOpportunityId}
                 openOpportunityDetail={openOpportunityDetail}
@@ -1045,7 +1055,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 items={workbenchCustomers}
                 selected={selectedCustomer}
                 onSelect={setSelectedCustomerId}
-                setActive={setActive}
+                setActive={navigateTo}
                 setSelectedOpportunityId={setSelectedOpportunityId}
                 openOpportunityDetail={openOpportunityDetail}
                 onSaveCustomer={handleSaveCustomer}
@@ -1062,7 +1072,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 items={workbenchOpportunities}
                 selected={selectedOpportunity}
                 onSelect={setSelectedOpportunityId}
-                setActive={setActive}
+                setActive={navigateTo}
                 setSelectedCustomerId={setSelectedCustomerId}
                 viewMode={opportunityViewMode}
                 setViewMode={setOpportunityViewMode}
@@ -1078,7 +1088,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 items={workbenchActions}
                 selected={selectedAction}
                 onSelect={setSelectedActionId}
-                setActive={setActive}
+                setActive={navigateTo}
                 viewMode={actionViewMode}
                 setViewMode={setActionViewMode}
                 onUpdateActionStatus={handleUpdateActionStatus}
@@ -1153,7 +1163,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
             {active === "kanban" && (
               <KanbanPage
                 opportunitiesList={workbenchOpportunities}
-                setActive={setActive}
+                setActive={navigateTo}
                 setSelectedOpportunityId={setSelectedOpportunityId}
                 openOpportunityDetail={openOpportunityDetail}
                 onSaveOpportunity={handleSaveOpportunity}

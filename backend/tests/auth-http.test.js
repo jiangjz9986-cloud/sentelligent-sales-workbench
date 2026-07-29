@@ -340,6 +340,7 @@ describe("cookie authentication protocol", () => {
 
     const health = await request("/api/health");
     assert.equal(health.response.status, 200);
+    assert.match(health.body.databaseIdentity, /^[A-Za-z0-9_-]{43}$/);
     assert.match(health.response.headers.get("content-security-policy"), /default-src 'self'/);
     assert.equal(health.response.headers.get("x-content-type-options"), "nosniff");
     assert.equal(health.response.headers.get("referrer-policy"), "strict-origin-when-cross-origin");

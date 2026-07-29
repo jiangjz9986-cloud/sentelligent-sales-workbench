@@ -10,6 +10,7 @@ import {
   createWindowsProcessFingerprint,
   stopOwnedWindowsProcess,
 } from "../../../scripts/local-dev.mjs";
+import { stopOwnedPosixProcess } from "../../../scripts/owned-posix-process.mjs";
 import { hashPassword } from "../../../backend/src/auth/password.js";
 
 const appRoot = process.cwd();
@@ -23,6 +24,8 @@ const manualAnalysisRevision = "手动修订：客户先要求补齐本地数据
 
 const viewportCases = [
   { name: "desktop", width: 1440, height: 900, mobile: false, fullFlow: true },
+  { name: "desktop-large", width: 1920, height: 1080, mobile: false, fullFlow: false },
+  { name: "desktop-compact", width: 1366, height: 768, mobile: false, fullFlow: false },
   { name: "tablet", width: 834, height: 1194, mobile: false, fullFlow: false },
   { name: "narrow-window", width: 390, height: 844, mobile: false, fullFlow: false },
   { name: "iphone", width: 390, height: 844, mobile: true, fullFlow: false },
@@ -107,9 +110,11 @@ function runProcess(command, args, options = {}) {
 }
 
 function spawnManaged(command, args, options = {}) {
+  const processCwd = resolve(options.cwd ?? process.cwd());
   const child = spawn(command, args, {
-    cwd: options.cwd,
+    cwd: processCwd,
     env: { ...process.env, ...(options.env ?? {}) },
+    detached: process.platform !== "win32",
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -123,7 +128,11 @@ function spawnManaged(command, args, options = {}) {
   });
   child.runtimeProcess = {
     pid: child.pid,
-    fingerprint: createWindowsProcessFingerprint({ command, args }),
+    fingerprint: {
+      ...createWindowsProcessFingerprint({ command, args }),
+      cwd: processCwd,
+      allowExecutableWrapper: options.allowExecutableWrapper === true,
+    },
   };
   return child;
 }
@@ -161,7 +170,10 @@ async function waitForHttp(url, timeoutMs = 20000) {
 
 async function stopProcessTree(child) {
   if (!child?.pid) return { status: "not_running", pid: null };
-  return stopOwnedWindowsProcess(child.runtimeProcess ?? { pid: child.pid });
+  const runtimeProcess = child.runtimeProcess ?? { pid: child.pid };
+  return process.platform === "win32"
+    ? stopOwnedWindowsProcess(runtimeProcess)
+    : stopOwnedPosixProcess(runtimeProcess);
 }
 
 async function assertOwnedWslListener(port, { backendWslPath, databaseUrl }, { terminate = false } = {}) {
@@ -437,9 +449,9 @@ function connectCdp(wsUrl) {
       }
 
       if (!pending.has(message.id)) return;
-      const { resolve, reject } = pending.get(message.id);
+      const { method, resolve, reject } = pending.get(message.id);
       pending.delete(message.id);
-      if (message.error) reject(new Error(message.error.message));
+      if (message.error) reject(new Error(`CDP ${method} failed: ${message.error.message}`));
       else resolve(message.result);
     });
 
@@ -453,7 +465,7 @@ function connectCdp(wsUrl) {
           send(method, params = {}) {
             const callId = ++id;
             ws.send(JSON.stringify({ id: callId, method, params }));
-            return new Promise((resolve, reject) => pending.set(callId, { resolve, reject }));
+            return new Promise((resolve, reject) => pending.set(callId, { method, resolve, reject }));
           },
         });
       },
@@ -492,7 +504,7 @@ async function openChromeCdp() {
     "--remote-debugging-port=0",
     `--user-data-dir=${profilePath}`,
     "about:blank",
-  ]);
+  ], { allowExecutableWrapper: true });
 
   const port = await waitForDevTools(profilePath);
   const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
@@ -597,22 +609,26 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         legacyCacheCleared: window.localStorage.getItem('sentelligent.salesWorkbench.login') === null,
       };
       const inspectInteractiveControls = (scopeLabel = 'current') => {
-        const visibleControls = [...document.querySelectorAll('button, [role="button"]')]
+        const targetElement = (item) => item.closest('.search-box, .itinerary-filter, .voice-file-button') || item;
+        const visibleControls = [...document.querySelectorAll('button, [role="button"], a[href], input:not([type="hidden"]), select, textarea')]
           .filter((item) => {
-            const bounds = item.getBoundingClientRect();
+            const bounds = targetElement(item).getBoundingClientRect();
             const style = getComputedStyle(item);
             if (item.disabled) return false;
             if (style.display === 'none' || style.visibility === 'hidden' || bounds.width === 0 || bounds.height === 0) return false;
             if (bounds.bottom < 0 || bounds.top > window.innerHeight || bounds.right < 0 || bounds.left > window.innerWidth) return false;
             return true;
           });
-        const minTarget = window.innerWidth <= 430 ? 40 : 34;
+        const minTarget = window.innerWidth <= 430 ? 44 : 34;
         const unnamed = [];
         const smallTargets = [];
         const textOverflow = [];
         for (const item of visibleControls) {
-          const bounds = item.getBoundingClientRect();
-          const label = (item.getAttribute('aria-label') || item.textContent || item.title || '').replace(/\\s+/g, ' ').trim();
+          const bounds = targetElement(item).getBoundingClientRect();
+          const implicitLabel = item.labels?.[0]?.querySelector('span')?.textContent || item.labels?.[0]?.textContent || '';
+          const label = (item.getAttribute('aria-label') || item.title || implicitLabel || item.textContent || item.placeholder || '')
+            .replace(/\\s+/g, ' ')
+            .trim();
           if (!label) {
             unnamed.push({
               scope: scopeLabel,
@@ -630,7 +646,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
               height: Math.round(bounds.height),
             });
           }
-          if (item.scrollWidth > item.clientWidth + 2 || item.scrollHeight > item.clientHeight + 2) {
+          if (
+            item.matches('button, [role="button"], a[href]')
+            && (item.scrollWidth > item.clientWidth + 2 || item.scrollHeight > item.clientHeight + 2)
+          ) {
             textOverflow.push({
               scope: scopeLabel,
               label,
@@ -819,8 +838,35 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         }
         window.SpeechRecognition = FakeSpeechRecognition;
         window.webkitSpeechRecognition = FakeSpeechRecognition;
-        const voiceModeButton = [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音');
+        let voiceModeButton = [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音');
         if (!voiceModeButton) throw new Error('Missing quick record voice mode button');
+        const defaultedToVoice = voiceModeButton.classList.contains('active');
+        const textModeButton = [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '文本');
+        if (!textModeButton) throw new Error('Missing quick record text mode button');
+        textModeButton.click();
+        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('客户画像'))?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-customer"]'), 5000);
+        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
+        voiceModeButton = [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音');
+        const resetToVoiceAfterReturn = voiceModeButton?.classList.contains('active') ?? false;
+        document.querySelector('[data-testid="quick-record-mode-text"]')?.click();
+        document.querySelector('[data-testid="nav-customer"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-customer"]'), 5000);
+        document.querySelector('[data-testid="topbar-quick-record"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
+        const resetToVoiceFromTopbar =
+          document.querySelector('[data-testid="quick-record-mode-voice"]')?.classList.contains('active') ?? false;
+        document.querySelector('[data-testid="quick-record-mode-text"]')?.click();
+        document.querySelector('[data-testid="nav-overview"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-overview"]'), 5000);
+        [...document.querySelectorAll('.overview-kpi')]
+          .find((button) => button.textContent.includes('本周快速记录'))
+          ?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
+        const resetToVoiceFromOverview =
+          document.querySelector('[data-testid="quick-record-mode-voice"]')?.classList.contains('active') ?? false;
+        voiceModeButton = document.querySelector('[data-testid="quick-record-mode-voice"]');
         voiceModeButton.click();
         const startVoiceButton = await waitUntil(
           () => [...document.querySelectorAll('button')].find((button) => button.textContent.includes('开始转写')),
@@ -840,6 +886,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         stopVoiceButton.click();
         await waitUntil(() => voiceRecognition.stopped, 5000);
         window.__qaVoiceFlow = {
+          defaultedToVoice,
+          resetToVoiceAfterReturn,
+          resetToVoiceFromTopbar,
+          resetToVoiceFromOverview,
           started: voiceRecognition.started,
           stopped: voiceRecognition.stopped,
           transcriptInComposer: document.querySelector('textarea')?.value?.includes('移动云计费') ?? false,
@@ -1223,12 +1273,63 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const customerCreated = document.querySelector('[data-testid="page-customer"]')?.textContent?.includes('测试集成客户') ?? false;
         document.querySelector('[data-testid="customer-edit-detail"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="customer-editor"]'), 5000);
+        const originalCustomerLevel = getEditorControl(document.querySelector('[data-testid="customer-editor"]'), '级别')?.value;
+        setEditorField(document.querySelector('[data-testid="customer-editor"]'), '级别', '取消不应保存');
+        document.querySelector('[data-testid="customer-cancel-edit"]')?.click();
+        await waitUntil(
+          () => document.querySelector('[data-testid="customer-detail-view"]') && !document.querySelector('[data-testid="customer-editor"]'),
+          5000,
+        );
+        document.querySelector('[data-testid="customer-edit-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-editor"]'), 5000);
+        const customerCancelPreserved = getEditorControl(
+          document.querySelector('[data-testid="customer-editor"]'),
+          '级别',
+        )?.value === originalCustomerLevel;
         setEditorField(document.querySelector('[data-testid="customer-editor"]'), '级别', '重点培育');
-        clickEditorButton(document.querySelector('[data-testid="customer-editor"]'), '保存客户');
-        await waitUntil(() => document.querySelector('[data-testid="customer-detail-view"]'), 8000);
+        document.querySelector('[data-testid="customer-save-edit"]')?.click();
+        await waitUntil(
+          () => document.querySelector('[data-testid="customer-detail-view"]') && !document.querySelector('[data-testid="customer-editor"]'),
+          8000,
+        );
+        const customerSaveClosedEditor = !document.querySelector('[data-testid="customer-editor"]');
         document.querySelector('[data-testid="customer-edit-detail"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="customer-editor"]'), 5000);
         const customerUpdated = getEditorControl(document.querySelector('[data-testid="customer-editor"]'), '级别')?.value === '重点培育';
+        document.querySelector('[data-testid="customer-cancel-edit"]')?.click();
+        await waitUntil(() => !document.querySelector('[data-testid="customer-editor"]'), 5000);
+
+        [...document.querySelectorAll('button')].find((button) => button.textContent.includes('返回列表'))?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-list-view"]'), 5000);
+        document.querySelector('[data-testid="customer-create-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-editor"]'), 5000);
+        setEditorField(document.querySelector('[data-testid="customer-editor"]'), '客户名称', '测试删除客户');
+        setEditorField(document.querySelector('[data-testid="customer-editor"]'), '区域', '删除验证');
+        setEditorField(document.querySelector('[data-testid="customer-editor"]'), '类型', '集成测试');
+        document.querySelector('[data-testid="customer-save-edit"]')?.click();
+        await waitUntil(
+          () => document.querySelector('[data-testid="page-customer"] h1')?.textContent?.includes('测试删除客户')
+            && !document.querySelector('[data-testid="customer-editor"]'),
+          8000,
+        );
+        window.confirm = () => false;
+        document.querySelector('[data-testid="customer-delete-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-delete-dialog"]'), 5000);
+        const customerDeleteDialogVisible = Boolean(document.querySelector('[data-testid="customer-delete-dialog"]'));
+        document.querySelector('[data-testid="customer-delete-cancel"]')?.click();
+        await waitUntil(() => !document.querySelector('[data-testid="customer-delete-dialog"]'), 5000);
+        const customerDeleteCancelPreserved =
+          document.querySelector('[data-testid="page-customer"] h1')?.textContent?.includes('测试删除客户') ?? false;
+        document.querySelector('[data-testid="customer-delete-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-delete-dialog"]'), 5000);
+        document.querySelector('[data-testid="customer-delete-confirm"]')?.click();
+        await waitUntil(
+          () => document.querySelector('[data-testid="customer-list-view"]')
+            && !document.querySelector('[data-testid="customer-list-view"]')?.textContent?.includes('测试删除客户'),
+          8000,
+        );
+        const customerDeleteConfirmed =
+          !document.querySelector('[data-testid="customer-list-view"]')?.textContent?.includes('测试删除客户');
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('商机档案'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-opportunity"]'), 5000);
@@ -1304,7 +1405,12 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         window.__qaEdit = {
           customerCreateStartsBlank,
           customerCreated,
+          customerCancelPreserved,
+          customerSaveClosedEditor,
           customerUpdated,
+          customerDeleteDialogVisible,
+          customerDeleteCancelPreserved,
+          customerDeleteConfirmed,
           opportunityCreateStartsBlank,
           opportunityCreated,
           opportunityUpdated,
@@ -1470,32 +1576,6 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           exportLabel: weeklyExportButton.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
         };
 
-        const solutionFixtureHost = document.createElement('div');
-        solutionFixtureHost.dataset.testid = 'solution-history-fixture-host';
-        document.body.appendChild(solutionFixtureHost);
-        const { mountSolutionHistoryFixture } = await import('/scripts/fixtures/solution-history-fixture.jsx');
-        const unmountSolutionFixture = mountSolutionHistoryFixture(solutionFixtureHost, historicalSolution);
-        await waitUntil(() => solutionFixtureHost.querySelector('[data-testid="solution-history-view"]'), 5000);
-        const solutionFixtureText = solutionFixtureHost.textContent ?? '';
-        const forbiddenSolutionControls = [...solutionFixtureHost.querySelectorAll('button, textarea')]
-          .filter((control) =>
-            /生成交付物|重新生成|保存草稿/.test(control.textContent ?? '') || control.matches('textarea'))
-          .map((control) => control.textContent?.trim() || control.tagName.toLowerCase());
-        const expectedContentPreview = historicalSolution?.content
-          ?.split('\\n')
-          .filter(Boolean)
-          .slice(0, 32)
-          .join('\\n') ?? '';
-        const renderedContentPreview = solutionFixtureHost.querySelector('[data-testid="generated-draft"] pre')?.textContent ?? '';
-        window.__qaSolutionHistory = {
-          titleVisible: Boolean(historicalSolution?.title) && solutionFixtureText.includes(historicalSolution.title),
-          contentVisible: Boolean(expectedContentPreview) && renderedContentPreview === expectedContentPreview,
-          readonlyLabelVisible: solutionFixtureText.includes('历史方案 / 只读'),
-          textareaCount: solutionFixtureHost.querySelectorAll('textarea').length,
-          forbiddenWriteControls: forbiddenSolutionControls,
-        };
-        unmountSolutionFixture();
-        solutionFixtureHost.remove();
         window.__qaDrafts = {
           weekly: weeklyDraftText,
         };
@@ -1658,6 +1738,24 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const listRows = inspectBusinessListRows(pageLabel);
         if (listRows.length) listRowIssuesByPage.push({ page: pageLabel, rows: listRows });
       }
+      if (window.innerWidth <= 430) {
+        document.querySelector('[data-testid="nav-customer"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-list-view"]'), 5000);
+        document.querySelector('[data-testid="customer-open-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-detail-view"]'), 5000);
+        const detailControls = await inspectCurrentPageAcrossScroll('客户详情');
+        if (detailControls.unnamed.length || detailControls.smallTargets.length || detailControls.textOverflow.length) {
+          interactiveIssuesByPage.push({ page: '客户详情', ...detailControls });
+        }
+        document.querySelector('[data-testid="customer-edit-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="customer-editor"]'), 5000);
+        const editorControls = await inspectCurrentPageAcrossScroll('客户修改');
+        if (editorControls.unnamed.length || editorControls.smallTargets.length || editorControls.textOverflow.length) {
+          interactiveIssuesByPage.push({ page: '客户修改', ...editorControls });
+        }
+        document.querySelector('[data-testid="customer-cancel-edit"]')?.click();
+        await waitUntil(() => !document.querySelector('[data-testid="customer-editor"]'), 5000);
+      }
       window.__qaInteractiveByPage = { issues: interactiveIssuesByPage };
       window.__qaListRowsByPage = { issues: listRowIssuesByPage };
       [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
@@ -1731,7 +1829,6 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         itineraryFlow: window.__qaItinerary ?? {},
         weeklyDraftText: window.__qaDrafts?.weekly ?? '',
         weeklyEditor: window.__qaWeeklyEditor ?? {},
-        solutionHistory: window.__qaSolutionHistory ?? {},
         cardInteractions: window.__qaCardInteractions ?? {},
         aiSuggestions: window.__qaAiSuggestions ?? {},
         voiceFlow: window.__qaVoiceFlow ?? {},
@@ -2228,19 +2325,24 @@ async function main() {
     historicalItinerary = fixtureItineraryBody.items?.find((item) => item.id === createdHistoricalItinerary.id) ?? null;
     assert.ok(historicalItinerary, "default backend GET should return the historical itinerary fixture");
 
+    const integrationDistPath = resolve(appRoot, "dist");
+    assert.ok(
+      existsSync(resolve(integrationDistPath, "index.html")),
+      "run the frontend build before Chrome integration QA",
+    );
     frontend = spawnManaged(
       process.execPath,
       [
-        resolve(appRoot, "node_modules/vite/bin/vite.js"),
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(frontendPort),
-        "--strictPort",
+        "scripts/static-server.mjs",
+        "serve",
+        "--host=127.0.0.1",
+        `--port=${frontendPort}`,
+        `--dist-path=${integrationDistPath}`,
+        `--api-base-url=${backendUrl}`,
       ],
       {
         cwd: appRoot,
-        env: { VITE_API_BASE_URL: backendUrl, NODE_ENV: "test" },
+        env: { NODE_ENV: "test" },
       },
     );
     await waitForHttp(frontendUrl);
@@ -2257,6 +2359,10 @@ async function main() {
         realItineraryFlow,
       ));
     }
+    const browserCustomerDeletes = cdp.networkResponses.filter((item) =>
+      item.method === "DELETE" && /\/api\/customers\/[A-Za-z0-9._~-]+$/.test(new URL(item.url).pathname),
+    );
+    assert.equal(browserCustomerDeletes.length, 1, "customer delete cancel and confirm should issue exactly one DELETE request");
     const salesDecisionRegression = await runSalesDecisionRegression(cdp, frontendUrl, backendUrl);
     const browserSolutionWrites = cdp.networkResponses.filter((item) =>
       (item.method === "POST" && item.url === `${backendUrl}/api/solutions/draft`) ||
@@ -2513,6 +2619,11 @@ async function main() {
       (customersAfterEdit.items ?? []).some((item) => item.name === "测试集成客户" && item.level === "重点培育"),
       "customer editor should create and update a backend customer",
     );
+    assert.equal(
+      (customersAfterEdit.items ?? []).some((item) => item.name === "测试删除客户"),
+      false,
+      "confirmed customer deletion should stay deleted after a backend reload",
+    );
     assert.ok(
       (opportunitiesAfterEdit.items ?? []).some((item) => item.name === "测试集成客户规划调研" && item.stage === "调研机会"),
       "opportunity editor and kanban should persist the final opportunity stage",
@@ -2588,6 +2699,12 @@ async function main() {
         assert.equal(result.actionFlow.detailViewOpened, true, "desktop action page should open detail as a sub view");
         assert.equal(result.editFlow.customerCreateStartsBlank, true, "desktop customer create button should open a blank customer editor directly");
         assert.equal(result.editFlow.customerCreated, true, "desktop flow should create and update a customer through the UI");
+        assert.equal(result.editFlow.customerCancelPreserved, true, "desktop customer cancel should discard local edits");
+        assert.equal(result.editFlow.customerSaveClosedEditor, true, "desktop customer save should return to read-only detail");
+        assert.equal(result.editFlow.customerUpdated, true, "desktop customer save should persist and reload the edited value");
+        assert.equal(result.editFlow.customerDeleteDialogVisible, true, "desktop customer delete should use an in-app confirmation dialog");
+        assert.equal(result.editFlow.customerDeleteCancelPreserved, true, "desktop customer delete cancel should keep the customer visible");
+        assert.equal(result.editFlow.customerDeleteConfirmed, true, "desktop customer delete confirm should remove the customer from the list");
         assert.equal(result.editFlow.opportunityCreateStartsBlank, true, "desktop opportunity create button should open a blank opportunity editor directly");
         assert.equal(result.editFlow.opportunityCreated, true, "desktop flow should create an opportunity through the UI");
         assert.equal(result.editFlow.opportunityUpdated, true, "desktop flow should update the opportunity through the UI");
@@ -2627,11 +2744,6 @@ async function main() {
         assert.equal(result.weeklyEditor.exportClicked, true, "desktop weekly page should trigger an authenticated Blob download");
         assert.equal(result.weeklyEditor.exportFilename, expectedWeeklyExportFilename, "desktop weekly export should expose the exact backend Word filename");
         assert.equal(result.weeklyEditor.exportUrlRevoked, true, "desktop weekly export should revoke its temporary Blob URL");
-        assert.equal(result.solutionHistory.titleVisible, true, "desktop compatibility view should render historical solution metadata");
-        assert.equal(result.solutionHistory.contentVisible, true, "desktop compatibility view should render historical solution content");
-        assert.equal(result.solutionHistory.readonlyLabelVisible, true, "desktop compatibility view should identify historical solutions as read-only");
-        assert.equal(result.solutionHistory.textareaCount, 0, "desktop historical solution view must not expose an editor");
-        assert.deepEqual(result.solutionHistory.forbiddenWriteControls, [], "desktop historical solution view must not expose generate or save controls");
         assert.equal(result.cardInteractions.quickKpi, true, "desktop overview quick KPI should open quick record");
         assert.equal(result.cardInteractions.quickStartsEmpty, true, "desktop quick record composer should open blank for a new record");
         assert.equal(result.cardInteractions.riskKpi, true, "desktop overview risk KPI should open risk page");
@@ -2671,6 +2783,10 @@ async function main() {
         assert.equal(result.aiSuggestions.opportunity, true, "desktop opportunity page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.knowledge, true, "desktop knowledge page should generate an AI suggestion through the UI");
         assert.equal(result.voiceFlow.started, true, "desktop quick record voice mode should start browser speech recognition");
+        assert.equal(result.voiceFlow.defaultedToVoice, true, "desktop quick record should default to voice mode");
+        assert.equal(result.voiceFlow.resetToVoiceAfterReturn, true, "desktop quick record should reset to voice mode whenever the page is reopened");
+        assert.equal(result.voiceFlow.resetToVoiceFromTopbar, true, "desktop topbar quick record entry should reset to voice mode");
+        assert.equal(result.voiceFlow.resetToVoiceFromOverview, true, "desktop overview quick record entry should reset to voice mode");
         assert.equal(result.voiceFlow.transcriptInComposer, true, "desktop quick record voice mode should write transcript into composer");
         assert.equal(result.voiceFlow.stopped, true, "desktop quick record voice mode should stop browser speech recognition");
         assert.equal(result.voiceFallback.recordingStarted, true, "desktop quick record voice mode should fall back to recording when speech recognition is unavailable");

@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
+import { buildReleaseManifest } from "./release-package.mjs";
 
 const requiredProjectServices = [
   "sentelligent-backend.service",
@@ -209,6 +210,58 @@ function validCentos7ServiceSnapshot() {
     (command) => !command.endsWith(" sentelligent-caddy.service"),
   );
   return plan;
+}
+
+function makeReleaseFixture({ commit = expectedReleaseCommit } = {}) {
+  const workspace = makeWorkspace();
+  const releaseDirectoryPath = join(workspace.root, "release");
+  const contents = new Map([
+    ["README.md", Buffer.from("# Release fixture\n", "utf8")],
+    [
+      "backend/src/server.js",
+      Buffer.from("export const serverReady = true;\n", "utf8"),
+    ],
+    [
+      "backend/src/weixin/worker.js",
+      Buffer.from("export const workerReady = true;\n", "utf8"),
+    ],
+    [
+      "backend/src/db/migrations/0001_baseline.sql",
+      Buffer.from("CREATE TABLE fixture (id TEXT PRIMARY KEY);\n", "utf8"),
+    ],
+    [
+      "outputs/product-design-prototype/scripts/static-server.mjs",
+      Buffer.from("export const staticServerReady = true;\n", "utf8"),
+    ],
+    [
+      "outputs/product-design-prototype/dist/index.html",
+      Buffer.from("<main>release fixture</main>\n", "utf8"),
+    ],
+  ]);
+  const files = [...contents.keys()];
+  for (const [relativePath, content] of contents) {
+    workspace.write(`release/${relativePath}`, content);
+  }
+  const manifest = buildReleaseManifest({
+    source: { commit, clean: true },
+    createdAt: "2026-07-29T08:00:00.000Z",
+    files,
+    contentByPath: contents,
+    rootDirectory: `sentelligent-sales-workbench-${commit.slice(0, 12)}`,
+  });
+  workspace.write(
+    "release/release-manifest.json",
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
+  return {
+    manifest,
+    manifestPath: `${immutableReleaseRoot}/release-manifest.json`,
+    releaseDirectoryPath,
+    filePath(relativePath) {
+      return join(releaseDirectoryPath, ...relativePath.split("/"));
+    },
+    cleanup: workspace.cleanup,
+  };
 }
 
 function validImmutableReleaseSnapshot(
@@ -426,181 +479,261 @@ describe("production preflight", () => {
   });
 
   it("binds a parseable manifest and exact 40-character commit to one immutable release", async () => {
-    const { validateReleaseIdentity } = await loadPreflightModule();
-    assert.equal(typeof validateReleaseIdentity, "function");
-    const servicePlan = validImmutableReleaseSnapshot();
-    const manifest = {
-      schemaVersion: 2,
-      product: "sentelligent-sales-workbench",
-      source: { commit: expectedReleaseCommit },
-    };
+    const fixture = makeReleaseFixture();
+    try {
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      assert.equal(typeof validateReleaseIdentity, "function");
+      const servicePlan = validImmutableReleaseSnapshot();
 
-    const result = validateReleaseIdentity({
-      manifest,
-      manifestPath: `${immutableReleaseRoot}/release-manifest.json`,
-      expectedCommit: expectedReleaseCommit,
-      servicePlan,
-    });
-
-    assert.equal(result.valid, true, result.message);
-    assert.deepEqual(result.details, {
-      commit: expectedReleaseCommit,
-      releasePath: immutableReleaseRoot,
-    });
-
-    const caddy = servicePlan.projectServices.find(
-      (service) => service.name === "sentelligent-caddy.service",
-    );
-    caddy.ExecStart =
-      "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile";
-    caddy.WorkingDirectory = "/srv/shared-caddy";
-    assert.equal(
-      validateReleaseIdentity({
-        manifest,
-        manifestPath: `${immutableReleaseRoot}/release-manifest.json`,
+      const result = validateReleaseIdentity({
+        manifest: fixture.manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
         expectedCommit: expectedReleaseCommit,
         servicePlan,
-      }).valid,
-      true,
-      "shared Caddy must not participate in immutable release path binding",
-    );
-  });
+      });
 
-  it("requires every application service WorkingDirectory to exactly match the same immutable release", async () => {
-    const { validateReleaseIdentity } = await loadPreflightModule();
-    const manifest = {
-      schemaVersion: 2,
-      product: "sentelligent-sales-workbench",
-      source: { commit: expectedReleaseCommit },
-    };
-    const cases = [
-      ["sentelligent-backend.service", immutableReleaseRoot],
-      [
-        "sentelligent-frontend.service",
-        `${immutableReleaseRoot}/outputs`,
-      ],
-      [
-        "sentelligent-weixin-agent.service",
-        "/opt/sentelligent-sales-workbench/releases/2026-07-28_old/backend",
-      ],
-    ];
+      assert.equal(result.valid, true, result.message);
+      assert.deepEqual(result.details, {
+        commit: expectedReleaseCommit,
+        releasePath: immutableReleaseRoot,
+      });
 
-    for (const [serviceName, workingDirectory] of cases) {
-      const servicePlan = validImmutableReleaseSnapshot();
-      servicePlan.projectServices.find(
-        (service) => service.name === serviceName,
-      ).WorkingDirectory = workingDirectory;
-
+      const caddy = servicePlan.projectServices.find(
+        (service) => service.name === "sentelligent-caddy.service",
+      );
+      caddy.ExecStart =
+        "/usr/local/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile";
+      caddy.WorkingDirectory = "/srv/shared-caddy";
       assert.equal(
         validateReleaseIdentity({
-          manifest,
-          manifestPath: `${immutableReleaseRoot}/release-manifest.json`,
+          manifest: fixture.manifest,
+          manifestPath: fixture.manifestPath,
+          releaseDirectoryPath: fixture.releaseDirectoryPath,
           expectedCommit: expectedReleaseCommit,
           servicePlan,
         }).valid,
-        false,
-        `${serviceName} must reject WorkingDirectory=${workingDirectory}`,
+        true,
+        "shared Caddy must not participate in immutable release path binding",
       );
+    } finally {
+      fixture.cleanup();
     }
   });
 
-  it("requires the project Node 24 executable for every immutable application service", async () => {
-    const { validateReleaseIdentity } = await loadPreflightModule();
-    const manifest = {
-      schemaVersion: 2,
-      product: "sentelligent-sales-workbench",
-      source: { commit: expectedReleaseCommit },
-    };
-    const applicationServices = [
-      "sentelligent-backend.service",
-      "sentelligent-frontend.service",
-      "sentelligent-weixin-agent.service",
-    ];
+  it("rejects a fake manifest that contains only source.commit", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const result = validateReleaseIdentity({
+        manifest: { source: { commit: expectedReleaseCommit } },
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+      });
 
-    for (const serviceName of applicationServices) {
-      for (const executable of ["/usr/bin/node", "/usr/local/bin/node"]) {
+      assert.equal(result.valid, false, result.message);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  for (const [field, invalidValue] of [
+    ["schemaVersion", 1],
+    ["product", "another-product"],
+  ]) {
+    it(`rejects a release manifest with an invalid ${field}`, async () => {
+      const fixture = makeReleaseFixture();
+      try {
+        const { validateReleaseIdentity } = await loadPreflightModule();
+        const manifest = structuredClone(fixture.manifest);
+        manifest[field] = invalidValue;
+        const result = validateReleaseIdentity({
+          manifest,
+          manifestPath: fixture.manifestPath,
+          releaseDirectoryPath: fixture.releaseDirectoryPath,
+          expectedCommit: expectedReleaseCommit,
+          servicePlan: validImmutableReleaseSnapshot(),
+        });
+
+        assert.equal(result.valid, false, result.message);
+      } finally {
+        fixture.cleanup();
+      }
+    });
+  }
+
+  for (const [category, relativePath] of [
+    ["dist", "outputs/product-design-prototype/dist/index.html"],
+    ["source", "backend/src/server.js"],
+    ["migration", "backend/src/db/migrations/0001_baseline.sql"],
+  ]) {
+    for (const operation of ["tampered", "missing"]) {
+      it(`rejects a ${operation} ${category} file in the release directory`, async () => {
+        const fixture = makeReleaseFixture();
+        try {
+          const { validateReleaseIdentity } = await loadPreflightModule();
+          const targetPath = fixture.filePath(relativePath);
+          if (operation === "tampered") {
+            writeFileSync(targetPath, "tampered release content\n");
+          } else {
+            rmSync(targetPath);
+          }
+          const result = validateReleaseIdentity({
+            manifest: fixture.manifest,
+            manifestPath: fixture.manifestPath,
+            releaseDirectoryPath: fixture.releaseDirectoryPath,
+            expectedCommit: expectedReleaseCommit,
+            servicePlan: validImmutableReleaseSnapshot(),
+          });
+
+          assert.equal(result.valid, false, result.message);
+        } finally {
+          fixture.cleanup();
+        }
+      });
+    }
+  }
+
+  it("requires every application service WorkingDirectory to exactly match the same immutable release", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const cases = [
+        ["sentelligent-backend.service", immutableReleaseRoot],
+        [
+          "sentelligent-frontend.service",
+          `${immutableReleaseRoot}/outputs`,
+        ],
+        [
+          "sentelligent-weixin-agent.service",
+          "/opt/sentelligent-sales-workbench/releases/2026-07-28_old/backend",
+        ],
+      ];
+
+      for (const [serviceName, workingDirectory] of cases) {
         const servicePlan = validImmutableReleaseSnapshot();
-        const service = servicePlan.projectServices.find(
-          (candidate) => candidate.name === serviceName,
-        );
-        service.ExecStart = service.ExecStart.replace(
-          projectNodeExecutable,
-          executable,
-        );
+        servicePlan.projectServices.find(
+          (service) => service.name === serviceName,
+        ).WorkingDirectory = workingDirectory;
 
         assert.equal(
           validateReleaseIdentity({
-            manifest,
-            manifestPath: `${immutableReleaseRoot}/release-manifest.json`,
+            manifest: fixture.manifest,
+            manifestPath: fixture.manifestPath,
+            releaseDirectoryPath: fixture.releaseDirectoryPath,
             expectedCommit: expectedReleaseCommit,
             servicePlan,
           }).valid,
           false,
-          `${serviceName} must reject ${executable}`,
+          `${serviceName} must reject WorkingDirectory=${workingDirectory}`,
         );
       }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("requires the project Node 24 executable for every immutable application service", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const applicationServices = [
+        "sentelligent-backend.service",
+        "sentelligent-frontend.service",
+        "sentelligent-weixin-agent.service",
+      ];
+
+      for (const serviceName of applicationServices) {
+        for (const executable of ["/usr/bin/node", "/usr/local/bin/node"]) {
+          const servicePlan = validImmutableReleaseSnapshot();
+          const service = servicePlan.projectServices.find(
+            (candidate) => candidate.name === serviceName,
+          );
+          service.ExecStart = service.ExecStart.replace(
+            projectNodeExecutable,
+            executable,
+          );
+
+          assert.equal(
+            validateReleaseIdentity({
+              manifest: fixture.manifest,
+              manifestPath: fixture.manifestPath,
+              releaseDirectoryPath: fixture.releaseDirectoryPath,
+              expectedCommit: expectedReleaseCommit,
+              servicePlan,
+            }).valid,
+            false,
+            `${serviceName} must reject ${executable}`,
+          );
+        }
+      }
+    } finally {
+      fixture.cleanup();
     }
   });
 
   it("rejects malformed identity evidence, current paths, old releases, and mixed releases", async () => {
-    const { validateReleaseIdentity } = await loadPreflightModule();
-    assert.equal(typeof validateReleaseIdentity, "function");
-    const manifest = {
-      schemaVersion: 2,
-      product: "sentelligent-sales-workbench",
-      source: { commit: expectedReleaseCommit },
-    };
-    const validInput = {
-      manifest,
-      manifestPath: `${immutableReleaseRoot}/release-manifest.json`,
-      expectedCommit: expectedReleaseCommit,
-      servicePlan: validImmutableReleaseSnapshot(),
-    };
+    const fixture = makeReleaseFixture();
+    try {
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      assert.equal(typeof validateReleaseIdentity, "function");
+      const validInput = {
+        manifest: fixture.manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+      };
 
-    for (const [name, mutate] of [
-      ["short expected commit", (input) => {
-        input.expectedCommit = expectedReleaseCommit.slice(0, 12);
-      }],
-      ["uppercase expected commit", (input) => {
-        input.expectedCommit = expectedReleaseCommit.toUpperCase();
-      }],
-      ["manifest commit mismatch", (input) => {
-        input.manifest.source.commit = "f".repeat(40);
-      }],
-      ["manifest outside immutable release", (input) => {
-        input.manifestPath =
-          "/opt/sentelligent-sales-workbench/current/release-manifest.json";
-      }],
-      ["unsafe release id", (input) => {
-        input.manifestPath =
-          "/opt/sentelligent-sales-workbench/releases/../release-manifest.json";
-      }],
-      ["current backend", (input) => {
-        input.servicePlan.projectServices.find(
-          (service) => service.name === "sentelligent-backend.service",
-        ).ExecStart =
-          "/usr/bin/node /opt/sentelligent-sales-workbench/current/backend/src/server.js";
-      }],
-      ["old frontend release", (input) => {
-        input.servicePlan.projectServices.find(
-          (service) => service.name === "sentelligent-frontend.service",
-        ).ExecStart =
-          "/usr/bin/node /opt/sentelligent-sales-workbench/releases/2026-07-28_old/outputs/product-design-prototype/scripts/static-server.mjs serve";
-      }],
-      ["mixed WeChat release", (input) => {
-        input.servicePlan.projectServices.find(
-          (service) => service.name === "sentelligent-weixin-agent.service",
-        ).ExecStart =
-          "/usr/bin/node /opt/sentelligent-sales-workbench/releases/2026-07-29_other/backend/src/weixin/worker.js start";
-      }],
-    ]) {
-      const input = structuredClone(validInput);
-      mutate(input);
-      assert.equal(
-        validateReleaseIdentity(input).valid,
-        false,
-        `${name} must fail release.identity`,
-      );
+      for (const [name, mutate] of [
+        ["short expected commit", (input) => {
+          input.expectedCommit = expectedReleaseCommit.slice(0, 12);
+        }],
+        ["uppercase expected commit", (input) => {
+          input.expectedCommit = expectedReleaseCommit.toUpperCase();
+        }],
+        ["manifest commit mismatch", (input) => {
+          input.manifest.source.commit = "f".repeat(40);
+        }],
+        ["manifest outside immutable release", (input) => {
+          input.manifestPath =
+            "/opt/sentelligent-sales-workbench/current/release-manifest.json";
+        }],
+        ["unsafe release id", (input) => {
+          input.manifestPath =
+            "/opt/sentelligent-sales-workbench/releases/../release-manifest.json";
+        }],
+        ["current backend", (input) => {
+          input.servicePlan.projectServices.find(
+            (service) => service.name === "sentelligent-backend.service",
+          ).ExecStart =
+            "/usr/bin/node /opt/sentelligent-sales-workbench/current/backend/src/server.js";
+        }],
+        ["old frontend release", (input) => {
+          input.servicePlan.projectServices.find(
+            (service) => service.name === "sentelligent-frontend.service",
+          ).ExecStart =
+            "/usr/bin/node /opt/sentelligent-sales-workbench/releases/2026-07-28_old/outputs/product-design-prototype/scripts/static-server.mjs serve";
+        }],
+        ["mixed WeChat release", (input) => {
+          input.servicePlan.projectServices.find(
+            (service) => service.name === "sentelligent-weixin-agent.service",
+          ).ExecStart =
+            "/usr/bin/node /opt/sentelligent-sales-workbench/releases/2026-07-29_other/backend/src/weixin/worker.js start";
+        }],
+      ]) {
+        const input = structuredClone(validInput);
+        mutate(input);
+        assert.equal(
+          validateReleaseIdentity(input).valid,
+          false,
+          `${name} must fail release.identity`,
+        );
+      }
+    } finally {
+      fixture.cleanup();
     }
   });
 
@@ -1224,6 +1357,48 @@ describe("production preflight", () => {
         compareDatabaseIdentity("primary.sqlite", "backup.sqlite", fileSystem),
         { distinct: false, verifiedBy: "unavailable" },
       );
+    }
+  });
+
+  it("rejects a protected unrelated service that is not active", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const environment = validEnvironment(origin);
+      const envFile = workspace.write("production.env", environment.source);
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const plan = validLegacyServiceSnapshot();
+      plan.unrelatedServices.find(
+        (service) => service.protectionId === "account-vault",
+      ).active = false;
+      const servicePlanPath = workspace.write(
+        "inactive-protected-service-plan.json",
+        JSON.stringify(plan, null, 2),
+      );
+      const { runProductionPreflight } = await loadPreflightModule();
+
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+
+      assert.equal(
+        report.checks.find(
+          (check) => check.id === "services.unrelatedProtection",
+        )?.status,
+        "failed",
+      );
+    } finally {
+      workspace.cleanup();
     }
   });
 

@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { scanProjectSecrets } from "./project-secret-scan.mjs";
 
 const sampleProviderKey = `sk-${"1234567890abcdef1234567890abcdef"}`;
+const frontendScannerPath = resolve(
+  fileURLToPath(new URL(".", import.meta.url)),
+  "..",
+  "outputs",
+  "product-design-prototype",
+  "scripts",
+  "secret-scan.mjs",
+);
 
 function git(root, ...args) {
   return execFileSync("git", args, {
@@ -50,6 +59,33 @@ function makeWorkspace() {
 }
 
 describe("project secret scan", () => {
+  it("keeps the frontend entrypoint aligned with runtime and test-fixture exclusions", () => {
+    const workspace = makeWorkspace();
+    try {
+      const frontendRoot = join(workspace.root, "outputs", "product-design-prototype");
+      workspace.write(
+        ".runtime/playwright-browsers/WebInspectorUI.js",
+        'const apiKey = "fixture-browser-key";\n',
+      );
+      workspace.write(
+        "backend/tests/database-identity.test.js",
+        'const secret = "unit-backend-session-private-secret";\n',
+      );
+      workspace.write("src/index.js", "console.log('clean');\n");
+      mkdirSync(frontendRoot, { recursive: true });
+
+      const result = spawnSync(process.execPath, [frontendScannerPath], {
+        cwd: frontendRoot,
+        encoding: "utf8",
+      });
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(JSON.parse(result.stdout).status, "passed");
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("finds OpenAI-style provider keys in project text files", () => {
     const workspace = makeWorkspace();
     try {

@@ -7,6 +7,7 @@ import {
   createStaticServerConfig,
   injectRuntimeConfig,
   resolveRequestPath,
+  securityHeadersFor,
 } from "./static-server.mjs";
 
 describe("production static server", () => {
@@ -25,6 +26,22 @@ describe("production static server", () => {
     assert.equal(config.port, 8088);
     assert.equal(config.host, "127.0.0.1");
     assert.equal(config.apiBaseUrl, "http://127.0.0.1:8897");
+  });
+
+  it("rejects API origins with invalid syntax, schemes, credentials, query, or fragments", () => {
+    for (const apiBaseUrl of [
+      "",
+      "backend.internal/api",
+      "ftp://backend.internal/api",
+      "https://user:password@backend.internal/api",
+      "https://backend.internal/api?tenant=1",
+      "https://backend.internal/api#fragment",
+    ]) {
+      assert.throws(
+        () => createStaticServerConfig({ apiBaseUrl }),
+        /api base url/i,
+      );
+    }
   });
 
   it("resolves static asset requests without directory traversal", () => {
@@ -48,5 +65,18 @@ describe("production static server", () => {
 
     assert.match(injected, /window\.__SENTELLIGENT_API_BASE_URL__ = "https:\/\/82\.156\.210\.199"/);
     assert.match(injected, /<head><script>/);
+  });
+
+  it("sets production browser security headers without blocking voice or AMap", () => {
+    const headers = securityHeadersFor({ apiBaseUrl: "https://82.156.210.199/" });
+
+    assert.match(headers["Content-Security-Policy"], /default-src 'self'/);
+    assert.match(headers["Content-Security-Policy"], /script-src[^;]*'unsafe-inline'[^;]*webapi\.amap\.com/);
+    assert.match(headers["Content-Security-Policy"], /connect-src[^;]*https:\/\/82\.156\.210\.199[^;]*amap\.com/);
+    assert.match(headers["Content-Security-Policy"], /media-src 'self' blob:/);
+    assert.equal(headers["Strict-Transport-Security"], "max-age=31536000; includeSubDomains");
+    assert.equal(headers["X-Content-Type-Options"], "nosniff");
+    assert.equal(headers["X-Frame-Options"], "DENY");
+    assert.match(headers["Permissions-Policy"], /microphone=\(self\)/);
   });
 });

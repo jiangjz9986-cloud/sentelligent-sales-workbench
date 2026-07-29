@@ -30,6 +30,25 @@ function joinRuntimePath(root, ...parts) {
   return isPosixAbsolutePath(root) ? posix.join(root, ...parts) : join(root, ...parts);
 }
 
+function normalizeApiBaseUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value ?? "").trim());
+  } catch {
+    throw new TypeError("API base URL must be an absolute HTTP(S) URL");
+  }
+  if (
+    !["http:", "https:"].includes(parsed.protocol) ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new TypeError("API base URL must be an absolute HTTP(S) URL without credentials, query, or fragments");
+  }
+  return parsed.href.replace(/\/+$/, "");
+}
+
 function parseOptions(argv) {
   const [command = "status", ...rest] = argv;
   const options = {};
@@ -61,7 +80,7 @@ export function createStaticServerConfig(overrides = {}) {
     logPath: joinRuntimePath(logDir, "frontend-static.log"),
     host: env.host ?? env.HOST ?? "127.0.0.1",
     port: Number(env.port ?? env.PORT ?? 8088),
-    apiBaseUrl: String(env.apiBaseUrl ?? env.API_BASE_URL ?? "").replace(/\/+$/, ""),
+    apiBaseUrl: normalizeApiBaseUrl(env.apiBaseUrl ?? env.API_BASE_URL),
   };
 }
 
@@ -107,6 +126,32 @@ export function contentTypeFor(filePath) {
     ".ico": "image/x-icon",
     ".webp": "image/webp",
   }[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+}
+
+export function securityHeadersFor({ apiBaseUrl } = {}) {
+  const apiOrigin = new URL(apiBaseUrl).origin;
+  const contentSecurityPolicy = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' https://webapi.amap.com https://*.amap.com",
+    "style-src 'self' 'unsafe-inline' https://*.amap.com https://*.alicdn.com",
+    "img-src 'self' data: blob: https://*.amap.com https://*.alicdn.com",
+    `connect-src 'self' ${apiOrigin} https://*.amap.com`,
+    "font-src 'self' data: https://*.amap.com https://*.alicdn.com",
+    "media-src 'self' blob:",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+  return {
+    "Content-Security-Policy": contentSecurityPolicy,
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "microphone=(self), geolocation=(self), camera=(), payment=(), usb=()",
+  };
 }
 
 export function injectRuntimeConfig(html, config) {
@@ -155,8 +200,12 @@ async function waitForHealth(config, timeoutMs = 10000) {
 
 export function createStaticServer(config) {
   return createServer((request, response) => {
+    const securityHeaders = securityHeadersFor(config);
     if (request.url?.startsWith("/_health")) {
-      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.writeHead(200, {
+        ...securityHeaders,
+        "Content-Type": "application/json; charset=utf-8",
+      });
       response.end(JSON.stringify({
         status: "ok",
         apiBaseUrl: config.apiBaseUrl,
@@ -167,7 +216,10 @@ export function createStaticServer(config) {
 
     const requested = resolveRequestPath(config.distPath, request.url ?? "/");
     if (!requested) {
-      response.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+      response.writeHead(403, {
+        ...securityHeaders,
+        "Content-Type": "text/plain; charset=utf-8",
+      });
       response.end("Forbidden");
       return;
     }
@@ -178,6 +230,7 @@ export function createStaticServer(config) {
     }
 
     response.writeHead(200, {
+      ...securityHeaders,
       "Content-Type": contentTypeFor(filePath),
       "Cache-Control": filePath.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable",
     });

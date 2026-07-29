@@ -34,13 +34,15 @@ describe("Phase 1 release boundary", () => {
     }
   });
 
-  it("requires a verified project fingerprint before Windows or WSL PID termination", () => {
+  it("requires a verified project fingerprint before Windows, POSIX, or WSL PID termination", () => {
     const localDev = sources.get("scripts/local-dev.mjs");
     const integrationQa = sources.get("outputs/product-design-prototype/scripts/integration-qa.mjs");
 
     assert.match(localDev, /stopOwnedWindowsProcess/);
     assert.match(localDev, /fingerprint/);
     assert.match(integrationQa, /stopOwnedWindowsProcess/);
+    assert.match(integrationQa, /stopOwnedPosixProcess/);
+    assert.match(integrationQa, /process\.platform\s*===\s*["']win32["']/);
     assert.match(integrationQa, /assertOwnedWslListener/);
   });
 
@@ -82,5 +84,15 @@ describe("Phase 1 release boundary", () => {
 
     assert.match(integrationQa, /"bash",\s*"-c",\s*script/);
     assert.doesNotMatch(integrationQa, /"bash",\s*"-lc",\s*script/);
+  });
+
+  it("runs Chrome integration against the built production static server", () => {
+    const integrationQa = sources.get("outputs/product-design-prototype/scripts/integration-qa.mjs");
+
+    assert.match(integrationQa, /scripts\/static-server\.mjs/);
+    assert.match(integrationQa, /--dist-path=/);
+    assert.match(integrationQa, /--api-base-url=/);
+    assert.doesNotMatch(integrationQa, /node_modules\/vite\/bin\/vite\.js/);
+    assert.doesNotMatch(integrationQa, /import\(['"]\/scripts\//);
   });
 });
