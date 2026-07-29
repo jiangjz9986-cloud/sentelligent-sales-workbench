@@ -45,6 +45,25 @@ function modelContent(overrides = {}) {
 }
 
 describe("model-backed quick record analysis", () => {
+  it("allocates enough completion tokens for reasoning-capable model output", async () => {
+    let requestBody;
+    await analyzeQuickRecord("Validate the budget owner and decision chain.", {
+      aiAnalysisMode: "model",
+      modelProvider: "deepseek",
+      modelApiKey: "fixture",
+      modelName: "deepseek-v4-flash",
+    }, {
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return jsonResponse({
+          choices: [{ message: { content: modelContent() } }],
+        });
+      },
+    });
+
+    assert.equal(requestBody.max_tokens, 3200);
+  });
+
   it("calls an OpenAI-compatible JSON chat completion endpoint for model mode", async () => {
     const calls = [];
     const result = await analyzeQuickRecord("日照中医医院需要十五五规划材料", {

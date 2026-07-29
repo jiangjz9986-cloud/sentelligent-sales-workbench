@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### v0.2.5 hotfix candidate
+
+- 将快速记录 DeepSeek 请求的 completion token 预算从 1200 调整为 3200，避免推理型模型在生成最终 JSON 前因 `finish_reason: length` 截断并静默降级。
+- 增加请求预算回归测试；不修改数据库、认证、部署配置或其他模型任务的 token 预算。
+- 生产发布门禁仍要求预检 `19/19`、HTTPS 冒烟 `25/25` 且物理清理为 `clean`。
+
 ### v0.2.4 hotfix candidate
 
 - 完整收口销售决策阶段边界：`stage.current` 始终来自服务端事实；`stage.recommended` 仅接受 `sales-decision-v1` 规范枚举，未知值保守回落到 current。
