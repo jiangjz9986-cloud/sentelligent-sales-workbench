@@ -199,10 +199,11 @@ describe("sales decision agent v1", () => {
     assert.equal(result.writebackPreview.requiresHumanConfirmation, true);
   });
 
-  it("uses the evidence-derived current stage when the model echoes a business stage", async () => {
+  it("normalizes model business stages without discarding valid analysis", async () => {
     const context = baseContext();
     const modelAnalysis = overconfidentModelAnalysis(context);
     modelAnalysis.stage.current = "qualification";
+    modelAnalysis.stage.recommended = "proposal";
 
     const result = await analyzeSalesDecision(
       context,
@@ -216,7 +217,9 @@ describe("sales decision agent v1", () => {
     );
 
     assert.equal(result.source, "deepseek");
-    assert.equal(result.stage.current, buildDeterministicSalesDecision(context).stage.current);
+    const currentStage = buildDeterministicSalesDecision(context).stage.current;
+    assert.equal(result.stage.current, currentStage);
+    assert.equal(result.stage.recommended, currentStage);
   });
 
   it("applies evidence caps and restores critical unknowns to a valid but overconfident model response", async () => {
