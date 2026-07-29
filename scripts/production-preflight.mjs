@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   realpathSync,
   readFileSync,
   statSync,
@@ -41,6 +43,11 @@ const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
 const PROJECT_NODE_EXECUTABLE =
   `${DEFAULT_PROJECT_PATH}/runtime/node-v24/bin/node`;
+const RELEASE_MANIFEST_SCHEMA_VERSION = 2;
+const RELEASE_PRODUCT = "sentelligent-sales-workbench";
+const RELEASE_MANIFEST_FILE = "release-manifest.json";
+const RELEASE_BUILD_PREFIX = "outputs/product-design-prototype/dist/";
+const RELEASE_MIGRATION_PREFIX = "backend/src/db/migrations/";
 const PORTABLE_NODE_EXECUTABLE = "/usr/bin/node";
 const CENTOS_LEGACY_NODE_EXECUTABLE = "/usr/local/bin/node";
 const CADDY_EXECUTABLES = new Set([
@@ -458,9 +465,227 @@ function immutableServiceReleaseRoot(serviceName, command) {
   return immutableReleaseRoot(`${releaseRoot}/release-manifest.json`);
 }
 
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function compareUtf8Paths(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function isCanonicalReleaseFilePath(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    !value.includes("\\") &&
+    !value.includes("\0") &&
+    !posix.isAbsolute(value) &&
+    value === posix.normalize(value) &&
+    value.split("/").every((segment) => segment && segment !== "." && segment !== "..")
+  );
+}
+
+function isCanonicalIsoTimestamp(value) {
+  const timestamp = Date.parse(value);
+  return (
+    typeof value === "string" &&
+    Number.isFinite(timestamp) &&
+    new Date(timestamp).toISOString() === value
+  );
+}
+
+function sourceTreeSha256(files) {
+  const index = Object.entries(files)
+    .sort(([left], [right]) => compareUtf8Paths(left, right))
+    .map(([file, hash]) => `${hash}  ${file}\n`)
+    .join("");
+  return createHash("sha256").update(index, "utf8").digest("hex");
+}
+
+function manifestShapeError(manifest, expectedCommit) {
+  if (
+    !isRecord(manifest) ||
+    manifest.schemaVersion !== RELEASE_MANIFEST_SCHEMA_VERSION ||
+    manifest.product !== RELEASE_PRODUCT
+  ) {
+    return "Release manifest schemaVersion and product must match the release packager contract.";
+  }
+  if (
+    !isRecord(manifest.source) ||
+    manifest.source.commit !== expectedCommit ||
+    manifest.source.clean !== true
+  ) {
+    return "Release manifest source must identify the exact commit and a clean packaged worktree.";
+  }
+  if (
+    !isCanonicalIsoTimestamp(manifest.createdAt) ||
+    !isRecord(manifest.archive) ||
+    manifest.archive.format !== "tar.gz" ||
+    manifest.archive.rootDirectory !==
+      `${RELEASE_PRODUCT}-${expectedCommit.slice(0, 12)}` ||
+    !Number.isSafeInteger(manifest.archive.packagedFiles) ||
+    manifest.archive.packagedFiles < 2
+  ) {
+    return "Release manifest timestamp and archive metadata must match the release packager contract.";
+  }
+  return null;
+}
+
+function collectReleaseFiles(releaseDirectoryPath) {
+  const root = realpathSync.native(resolve(releaseDirectoryPath));
+  if (!lstatSync(root).isDirectory()) {
+    throw new Error("release root is not a directory");
+  }
+  const files = [];
+
+  function visit(directoryPath, relativeDirectory = "") {
+    const entries = readdirSync(directoryPath, { withFileTypes: true })
+      .sort((left, right) => compareUtf8Paths(left.name, right.name));
+    for (const entry of entries) {
+      const relativePath = relativeDirectory
+        ? `${relativeDirectory}/${entry.name}`
+        : entry.name;
+      if (!isCanonicalReleaseFilePath(relativePath) || entry.isSymbolicLink()) {
+        throw new Error("release contains an unsafe path");
+      }
+      const filePath = resolve(directoryPath, entry.name);
+      if (entry.isDirectory()) {
+        visit(filePath, relativePath);
+      } else if (entry.isFile()) {
+        files.push(relativePath);
+      } else {
+        throw new Error("release contains a non-regular file");
+      }
+    }
+  }
+
+  visit(root);
+  return {
+    root,
+    files: files.sort(compareUtf8Paths),
+  };
+}
+
+function validHashSection(section, pathIsAllowed) {
+  if (
+    !isRecord(section) ||
+    section.algorithm !== "sha256" ||
+    !isRecord(section.files)
+  ) {
+    return false;
+  }
+  const entries = Object.entries(section.files);
+  return (
+    entries.length > 0 &&
+    entries.every(
+      ([file, hash]) =>
+        isCanonicalReleaseFilePath(file) &&
+        pathIsAllowed(file) &&
+        /^[a-f0-9]{64}$/.test(hash),
+    )
+  );
+}
+
+function sameFileHashes(expected, actual) {
+  const expectedFiles = Object.keys(expected).sort(compareUtf8Paths);
+  const actualFiles = Object.keys(actual).sort(compareUtf8Paths);
+  return (
+    JSON.stringify(expectedFiles) === JSON.stringify(actualFiles) &&
+    actualFiles.every((file) => expected[file] === actual[file])
+  );
+}
+
+function verifyReleaseContents(manifest, releaseDirectoryPath) {
+  try {
+    const buildSection = manifest.buildHashes;
+    const migrationSection = manifest.migrationChecksums;
+    const sourceSection = manifest.sourceHashes;
+    if (
+      !validHashSection(
+        buildSection,
+        (file) => file.startsWith(RELEASE_BUILD_PREFIX),
+      ) ||
+      !validHashSection(
+        migrationSection,
+        (file) => file.startsWith(RELEASE_MIGRATION_PREFIX),
+      ) ||
+      !validHashSection(
+        sourceSection,
+        (file) =>
+          file !== RELEASE_MANIFEST_FILE &&
+          !file.startsWith(RELEASE_BUILD_PREFIX),
+      ) ||
+      !/^[a-f0-9]{64}$/.test(sourceSection.treeSha256)
+    ) {
+      return {
+        valid: false,
+        message: "Release manifest hash sections must match the release packager contract.",
+      };
+    }
+
+    const { root, files } = collectReleaseFiles(releaseDirectoryPath);
+    if (
+      !files.includes(RELEASE_MANIFEST_FILE) ||
+      manifest.archive.packagedFiles !== files.length
+    ) {
+      return {
+        valid: false,
+        message: "Release manifest packaged file count does not match the release directory.",
+      };
+    }
+    const packagedFiles = files.filter((file) => file !== RELEASE_MANIFEST_FILE);
+    const buildFiles = packagedFiles.filter((file) =>
+      file.startsWith(RELEASE_BUILD_PREFIX)
+    );
+    const migrationFiles = packagedFiles.filter((file) =>
+      file.startsWith(RELEASE_MIGRATION_PREFIX)
+    );
+    const sourceFiles = packagedFiles.filter(
+      (file) => !file.startsWith(RELEASE_BUILD_PREFIX),
+    );
+    const actualHashes = Object.fromEntries(
+      packagedFiles.map((file) => [
+        file,
+        sha256File(resolve(root, ...file.split("/"))),
+      ]),
+    );
+    const actualBuildHashes = Object.fromEntries(
+      buildFiles.map((file) => [file, actualHashes[file]]),
+    );
+    const actualMigrationHashes = Object.fromEntries(
+      migrationFiles.map((file) => [file, actualHashes[file]]),
+    );
+    const actualSourceHashes = Object.fromEntries(
+      sourceFiles.map((file) => [file, actualHashes[file]]),
+    );
+    const serviceEntriesPresent = Object.values(
+      IMMUTABLE_RELEASE_SERVICE_ENTRIES,
+    ).every(({ entryPath }) => Object.hasOwn(actualSourceHashes, entryPath));
+    if (
+      !serviceEntriesPresent ||
+      !sameFileHashes(buildSection.files, actualBuildHashes) ||
+      !sameFileHashes(migrationSection.files, actualMigrationHashes) ||
+      !sameFileHashes(sourceSection.files, actualSourceHashes) ||
+      sourceSection.treeSha256 !== sourceTreeSha256(actualSourceHashes)
+    ) {
+      return {
+        valid: false,
+        message: "Release build, source, or migration files do not match the manifest SHA-256 inventory.",
+      };
+    }
+    return { valid: true };
+  } catch {
+    return {
+      valid: false,
+      message: "Release directory could not be read as a complete regular-file package.",
+    };
+  }
+}
+
 export function validateReleaseIdentity({
   manifest,
   manifestPath,
+  releaseDirectoryPath,
   expectedCommit,
   servicePlan,
 } = {}) {
@@ -470,16 +695,15 @@ export function validateReleaseIdentity({
       message: "Expected release commit must be exactly 40 lowercase hexadecimal characters.",
     };
   }
-  if (
-    manifest === null ||
-    typeof manifest !== "object" ||
-    Array.isArray(manifest) ||
-    manifest.source?.commit !== expectedCommit
-  ) {
+  if (!isRecord(manifest) || manifest.source?.commit !== expectedCommit) {
     return {
       valid: false,
       message: "Release manifest source commit must exactly match the expected commit.",
     };
+  }
+  const shapeError = manifestShapeError(manifest, expectedCommit);
+  if (shapeError !== null) {
+    return { valid: false, message: shapeError };
   }
   const releasePath = immutableReleaseRoot(manifestPath);
   if (releasePath === null) {
@@ -515,6 +739,12 @@ export function validateReleaseIdentity({
       };
     }
   }
+
+  const releaseContents = verifyReleaseContents(
+    manifest,
+    releaseDirectoryPath ?? dirname(resolve(manifestPath)),
+  );
+  if (!releaseContents.valid) return releaseContents;
 
   return {
     valid: true,
@@ -686,7 +916,7 @@ function validatesUnrelatedProtection(plan) {
       service?.protected === true &&
       typeof service?.name === "string" &&
       service.name.length > 0 &&
-      typeof service.active === "boolean" &&
+      service.active === true &&
       !service.name.startsWith("sentelligent-") &&
       protectedObjects.has(service?.protectionId),
   );

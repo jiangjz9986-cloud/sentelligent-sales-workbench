@@ -1,6 +1,6 @@
 {
   "name": "product-design-prototype",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -31,7 +31,8 @@
     "test:modules": "node --test scripts/module-coverage.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",
     "qa:local": "npm run build && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:itinerary && npm run test:itinerary-page && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run scan:secrets",
-    "qa:integration": "node scripts/integration-qa.mjs"
+    "qa:integration": "node scripts/integration-qa.mjs",
+    "qa:webkit": "node scripts/webkit-qa.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "5.0.4",
@@ -39,5 +40,8 @@
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "vite": "6.4.2"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1"
   }
 }

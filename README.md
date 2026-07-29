@@ -4,21 +4,20 @@
 
 系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，`main` 是唯一可部署来源；生产数据库、录音、微信状态、密钥和备份不进入 Git。
 
-## 代码版本与已验证基线
+## 代码、发布与生产状态
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前代码版本 | `0.2.1` |
-| 代码内容冻结时间 | `2026-07-29T03:16:40+08:00` |
-| 正式发布判定 | 以 [GitHub Releases](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases) 中 `v0.2.1` 的 tag、`publishedAt` 和资产 SHA-256 为准 |
-| 生产部署判定 | 以 [部署记录](docs/部署记录.md) 的最新版本条目和服务器 evidence 为准 |
-| 内容冻结时已验证的生产基线 | `v0.1.0` / `f89e1e79f57ccfa95def5fb402dc27ebfec446b4` |
-| 该基线部署时间 | `2026-07-28T22:30:21+08:00` |
-| 该基线 release | `/opt/sentelligent-sales-workbench/releases/2026-07-28_f89e1e7` |
-| 该基线运行时 | 独立 Node.js 24，后端 `127.0.0.1:8897`，前端 `127.0.0.1:8088` |
-| 该基线验收 | 公开 HTTPS 冒烟 `25/25`，生产预检 `18/18` |
+| 当前生产版本 | `v0.2.1` |
+| 生产提交 | `f8d43bbfd6172828340a270c5276485192223a65` |
+| 注释标签 | `v0.2.1`，创建于 `2026-07-29T03:27:14+08:00` |
+| GitHub Release | [森特智行 v0.2.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.1)，发布于 `2026-07-29T03:29:14+08:00` |
+| Release 归档 SHA-256 | `fbcd705dd28257faec3139f31837bb8562e6f7405b770c402d83c8746789a815` |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-07-29_f8d43bb` |
+| 当前开发目标 | `v0.2.2`，分支 `codex/project-sync-release` |
+| `v0.2.2` 状态 | 源码与包元数据已切换到 `0.2.2`，本地完整质量门已通过；改动仍在候选分支中，PR CI、tag、GitHub Release 和生产部署尚未完成 |
 
-`0.2.1` 表示仓库当前代码版本，不自动表示 tag、GitHub Release 或生产切换已经完成。`v0.2.0` 标签已固定在 `591e48d`，但其 Release workflow 因 Linux 对 Windows 绝对路径的解析差异失败，且没有创建 Release；本热修复修正跨宿主路径并让 PR CI 提前运行全部根脚本测试。正式发布和部署状态始终由上表所列证据判定。
+`v0.2.0` 标签固定在 `591e48d`。该版本的 Release workflow 因 Linux 对 Windows 绝对路径的解析差异失败，没有创建 GitHub Release；`v0.2.1` 使用新标签完成修复发布，未移动或复用 `v0.2.0`。生产部署细节见 [部署记录](docs/部署记录.md)，开发中的 `v0.2.2` 见 [版本说明](docs/releases/v0.2.2.md)。
 
 ## 功能状态
 
@@ -28,7 +27,7 @@
 | 快速记录 | 默认语音模式，支持文本、浏览器实时识别、AI 提炼、历史结果读取和人工修改 | 长期录音资产的完整上传、播放与恢复仍需继续完善 |
 | 客户画像 | 列表、模块内搜索、只读详情、显式新增/修改/删除 | 修改使用版本号和审计，删除为受保护软删除 |
 | 商机档案与看板 | 商机 CRUD、阶段、金额、概率、风险、动作和阶段统计 | 阶段调整仍应由真实客户行为证明 |
-| 销售决策 Agent V1 | 在商机详情显式运行 DeepSeek 诊断，保存输入/分析快照和只读历史 | 不自动修改客户、商机、行动或风险；评分仍需真实赢单/输单案例校准 |
+| 销售决策 Agent V1 | 规则规格文档已经完成并通过章节、UTF-8 和 JSON 示例检查 | 尚未按核心提示词、场景 playbook、行业规则、JSON Schema 和评估集拆分接入 DeepSeek 运行时，不能按已上线功能统计；现有快速记录分析是独立链路 |
 | 下一步动作与风险 | 后端真实数据、状态更新、来源追踪和审计 | AI 建议必须经人工确认后写回 |
 | 智能拜访行程 | 高德地址解析、路线、时间、里程、过路费、顺序优化、地图和历史快照 | 历史读取不重复调用地图或模型 |
 | 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
@@ -102,6 +101,7 @@ npm run test:deploy
 npm --prefix backend test
 npm --prefix outputs/product-design-prototype run qa:local
 npm --prefix outputs/product-design-prototype run qa:integration
+npm --prefix outputs/product-design-prototype run qa:webkit
 ```
 
 涉及生产发布时还要完成：
@@ -115,7 +115,7 @@ npm --prefix outputs/product-design-prototype run qa:integration
 
 ## 版本与发布
 
-- 使用语义化版本，源文件版本写入 `VERSION` 和三个 `package.json`。
+- 使用语义化版本，源文件版本写入 `VERSION` 和三个 `package.json`。版本字段只标识候选代码，正式发布仍以 tag、GitHub Release 和部署证据为准。
 - `v*` 标签触发 GitHub Release workflow，重新运行质量门并生成 `.tar.gz`、`release-result.json` 和 `SHA256SUMS`。
 - 生产只部署已合并到 `main` 且已打标签的提交。
 - GitHub Release 归档已包含质量门验证过的前端 `dist`；生产直接使用该目录，不在服务器重新构建前端。

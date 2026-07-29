@@ -180,6 +180,12 @@ p {
   display: block;
 }
 
+.brand-logo-mark picture {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .search-box {
   height: 42px;
   min-width: 0;
@@ -295,6 +301,82 @@ p {
   color: #b42318;
   border-color: rgba(217, 45, 32, 0.2);
   background: rgba(254, 243, 242, 0.82);
+}
+
+.danger-button {
+  color: #fff;
+  border-color: #b42318;
+  background: #b42318;
+}
+
+.danger-button:hover:not(:disabled) {
+  border-color: #912018;
+  background: #912018;
+}
+
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: rgba(16, 24, 40, 0.46);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.confirm-dialog {
+  width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: 14px 16px;
+  padding: 22px;
+  border: 1px solid rgba(16, 24, 40, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 22px 60px rgba(16, 24, 40, 0.22);
+}
+
+.confirm-dialog-icon {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #b42318;
+  background: #fef3f2;
+}
+
+.confirm-dialog-copy h2,
+.confirm-dialog-copy p {
+  margin: 0;
+}
+
+.confirm-dialog-copy h2 {
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.confirm-dialog-copy p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.confirm-dialog-copy .confirm-dialog-error {
+  color: #b42318;
+  font-weight: 700;
+}
+
+.confirm-dialog-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 .primary-button {
@@ -4284,22 +4366,41 @@ textarea:focus {
 
   .workspace {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .sidebar {
     display: flex;
     gap: 6px;
     overflow-x: auto;
+    overflow-y: hidden;
+    min-height: 60px;
+    padding: 8px 10px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    touch-action: pan-x;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sidebar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-kicker {
+    display: none;
   }
 
   .nav-item {
+    height: 44px;
     width: auto;
     min-width: 92px;
     justify-content: flex-start;
     flex: 0 0 auto;
     padding: 0 12px;
+    margin-bottom: 0;
+    scroll-snap-align: start;
   }
 
   .nav-item span {
@@ -4308,6 +4409,7 @@ textarea:focus {
 
   .content {
     padding: 14px;
+    scrollbar-gutter: auto;
   }
 
   .content.quick-content {
@@ -4479,17 +4581,51 @@ textarea:focus {
     flex-basis: 100%;
   }
 
+  .topbar {
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .confirm-dialog {
+    padding: 18px;
+  }
+
+  .confirm-dialog-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .confirm-dialog-actions .ghost-button,
+  .confirm-dialog-actions .primary-button {
+    width: 100%;
+  }
+
+  .page-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    flex-wrap: nowrap;
+  }
+
+  .page-heading > div:first-child {
+    min-width: 0;
+  }
+
+  .brand-area {
+    width: 44px;
+  }
+
   .brand-logo-mark {
-    width: 48px;
-    height: 42px;
-    overflow: hidden;
+    width: 44px;
+    height: 44px;
+    overflow: visible;
   }
 
   .brand-logo-mark img {
-    width: auto;
-    max-width: none;
-    height: 42px;
-    object-fit: initial;
+    width: 44px;
+    height: 44px;
+    object-fit: contain;
   }
 
   .brand-area small {
@@ -4501,18 +4637,54 @@ textarea:focus {
   }
 
   .search-box {
-    height: 40px;
+    height: 44px;
+  }
+
+  .search-box.compact,
+  .itinerary-filter,
+  .plain-link,
+  .chain-step,
+  .field-tag,
+  .form-field input,
+  .form-field select {
+    min-height: 44px;
+  }
+
+  .search-box input,
+  .itinerary-filter select,
+  .form-field input,
+  .form-field select,
+  .form-field textarea {
+    font-size: 16px;
   }
 
   .ghost-button,
   .primary-button {
-    min-height: 40px;
+    min-height: 44px;
     padding: 0 8px;
     font-size: 12px;
   }
 
   .top-actions {
+    grid-template-columns: auto minmax(62px, 0.75fr) minmax(94px, 1.2fr) 44px;
     gap: 6px;
+  }
+
+  .api-status,
+  .avatar-button,
+  .segmented button {
+    min-height: 44px;
+  }
+
+  .customer-list-row .ghost-button,
+  .knowledge-search .ghost-button,
+  .ghost-button.compact-icon {
+    min-height: 44px;
+  }
+
+  .avatar-button {
+    width: 44px;
+    height: 44px;
   }
 
   .panel,

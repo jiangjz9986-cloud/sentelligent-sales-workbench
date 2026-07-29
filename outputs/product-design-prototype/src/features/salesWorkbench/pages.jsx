@@ -1059,6 +1059,7 @@ export function QuickRecord({
           <div className="segmented">
             <button
               className={recordMode === "text" ? "active" : ""}
+              data-testid="quick-record-mode-text"
               type="button"
               onClick={() => {
                 if (recognitionRef.current) stopVoiceRecognition();
@@ -1070,6 +1071,7 @@ export function QuickRecord({
             </button>
             <button
               className={recordMode === "voice" ? "active" : ""}
+              data-testid="quick-record-mode-voice"
               type="button"
               onClick={() => setRecordMode("voice")}
             >
@@ -1591,6 +1593,76 @@ function showOperationError(message) {
   }
 }
 
+function DeleteConfirmationDialog({
+  open,
+  entityName,
+  busy = false,
+  errorMessage = "",
+  onCancel,
+  onConfirm,
+  testIdPrefix,
+}) {
+  const cancelButtonRef = useRef(null);
+  const titleId = `${testIdPrefix}-title`;
+  const descriptionId = `${testIdPrefix}-description`;
+
+  useEffect(() => {
+    if (!open) return undefined;
+    cancelButtonRef.current?.focus();
+    const onKeyDown = (event) => {
+      if (event.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel, open]);
+
+  if (!open) return null;
+
+  return (
+    <div className="confirm-dialog-backdrop">
+      <section
+        className="confirm-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        data-testid={`${testIdPrefix}-dialog`}
+      >
+        <div className="confirm-dialog-icon" aria-hidden="true">
+          <Trash2 size={20} />
+        </div>
+        <div className="confirm-dialog-copy">
+          <h2 id={titleId}>确认删除客户</h2>
+          <p id={descriptionId}>“{entityName}”将从客户列表中移除，此操作不能撤销。</p>
+          {errorMessage ? <p className="confirm-dialog-error" role="alert">{errorMessage}</p> : null}
+        </div>
+        <div className="confirm-dialog-actions">
+          <button
+            className="ghost-button"
+            type="button"
+            ref={cancelButtonRef}
+            data-testid={`${testIdPrefix}-cancel`}
+            disabled={busy}
+            onClick={onCancel}
+          >
+            取消
+          </button>
+          <button
+            className="primary-button danger-button"
+            type="button"
+            data-testid={`${testIdPrefix}-confirm`}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            <Trash2 size={16} />
+            {busy ? "删除中" : "确认删除"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSaved, onCancel, backendStatus }) {
   const [mode, setMode] = useState(initialMode);
   const [form, setForm] = useState(() => (initialMode === "new" ? customerToForm(null) : customerToForm(selected)));
@@ -1645,7 +1717,7 @@ function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSave
             <ChevronLeft size={16} />
             {isNew ? "取消新增" : "取消修改"}
           </button>
-          <button className="primary-button" type="submit">
+          <button className="primary-button" type="submit" data-testid="customer-save-edit">
             <Save size={16} />
             {isNew ? "创建客户" : "保存客户"}
           </button>
@@ -1912,6 +1984,9 @@ export function CustomerPage({
   backendStatus,
 }) {
   const [searchText, setSearchText] = useState("");
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const cleanSearch = searchText.trim().toLowerCase();
   const visibleItems = cleanSearch
     ? items.filter((item) =>
@@ -1929,14 +2004,24 @@ export function CustomerPage({
   const isCreateView = viewMode === "create";
   const isEditView = viewMode === "edit";
 
-  async function deleteCurrentCustomer() {
+  function requestDeleteCurrentCustomer() {
     if (!selected?.id || !onDeleteCustomer) return;
-    if (!confirmDelete(`确认删除客户「${selected.name}」？删除后将从客户列表移除。`)) return;
+    setDeleteError("");
+    setDeleteDialogOpen(true);
+  }
+
+  async function confirmDeleteCurrentCustomer() {
+    if (!selected?.id || !onDeleteCustomer || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError("");
     try {
       await onDeleteCustomer(selected.id);
+      setDeleteDialogOpen(false);
       setViewMode?.("list");
     } catch (error) {
-      showOperationError(error.message || "删除客户失败，请稍后重试。");
+      setDeleteError(error.message || "删除客户失败，请稍后重试。");
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -2012,7 +2097,7 @@ export function CustomerPage({
               className="ghost-button danger"
               type="button"
               data-testid="customer-delete-detail"
-              onClick={deleteCurrentCustomer}
+              onClick={requestDeleteCurrentCustomer}
             >
               <Trash2 size={15} />
               删除
@@ -2119,6 +2204,19 @@ export function CustomerPage({
           </>
         )}
       </section>
+      <DeleteConfirmationDialog
+        open={deleteDialogOpen}
+        entityName={selected?.name ?? "当前客户"}
+        busy={deleteBusy}
+        errorMessage={deleteError}
+        onCancel={() => {
+          if (deleteBusy) return;
+          setDeleteError("");
+          setDeleteDialogOpen(false);
+        }}
+        onConfirm={confirmDeleteCurrentCustomer}
+        testIdPrefix="customer-delete"
+      />
     </section>
   );
 }

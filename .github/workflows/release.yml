@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-tag-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: Verify and build immutable release
@@ -101,6 +105,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix outputs/product-design-prototype
 
+      - name: Install WebKit browser
+        working-directory: outputs/product-design-prototype
+        run: npx playwright install --with-deps webkit
+
       - name: Verify release tooling and source boundaries
         run: node --test scripts/*.test.mjs
 
@@ -109,6 +117,12 @@ jobs:
 
       - name: Build and test frontend
         run: npm --prefix outputs/product-design-prototype run qa:local
+
+      - name: Run browser integration QA
+        run: npm --prefix outputs/product-design-prototype run qa:integration
+
+      - name: Run WebKit Safari-equivalence QA
+        run: npm --prefix outputs/product-design-prototype run qa:webkit
 
       - name: Build immutable release evidence
         shell: bash
@@ -146,6 +160,26 @@ jobs:
         with:
           name: "sentelligent-sales-workbench-${{ github.ref_name }}"
           path: dist
+
+      - name: Revalidate immutable tag before publishing
+        env:
+          GIT_AUTH_TOKEN: ${{ github.token }}
+          EXPECTED_RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          tag_ref="refs/tags/${GITHUB_REF_NAME}"
+          basic="$(printf 'x-access-token:%s' "$GIT_AUTH_TOKEN" | base64 | tr -d '\n')"
+          remote_refs="$(git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" ls-remote --tags \
+            "https://github.com/${GITHUB_REPOSITORY}.git" "$tag_ref" "${tag_ref}^{}")"
+          unset basic
+
+          direct_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="$tag_ref" '$2 == ref { print $1 }')"
+          peeled_sha="$(printf '%s\n' "$remote_refs" | awk -v ref="${tag_ref}^{}" '$2 == ref { print $1 }')"
+          resolved_sha="${peeled_sha:-$direct_sha}"
+
+          test -n "$direct_sha"
+          test -n "$resolved_sha"
+          test "$resolved_sha" = "$EXPECTED_RELEASE_SHA"
 
       - name: Create GitHub Release
         env:
