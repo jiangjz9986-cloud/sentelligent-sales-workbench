@@ -199,6 +199,26 @@ describe("sales decision agent v1", () => {
     assert.equal(result.writebackPreview.requiresHumanConfirmation, true);
   });
 
+  it("uses the evidence-derived current stage when the model echoes a business stage", async () => {
+    const context = baseContext();
+    const modelAnalysis = overconfidentModelAnalysis(context);
+    modelAnalysis.stage.current = "qualification";
+
+    const result = await analyzeSalesDecision(
+      context,
+      {
+        aiAnalysisMode: "model",
+        modelApiKey: "fixture",
+        modelBaseUrl: "https://example.invalid",
+        modelName: "deepseek-v4-flash",
+      },
+      { fetchImpl: async () => modelResponse(modelAnalysis) },
+    );
+
+    assert.equal(result.source, "deepseek");
+    assert.equal(result.stage.current, buildDeterministicSalesDecision(context).stage.current);
+  });
+
   it("applies evidence caps and restores critical unknowns to a valid but overconfident model response", async () => {
     const context = baseContext();
     const overconfident = overconfidentModelAnalysis(context);

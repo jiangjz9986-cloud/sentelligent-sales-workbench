@@ -568,7 +568,14 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
       config,
       options.fetchImpl ?? fetch,
     );
-    const normalized = normalizeSalesDecisionAnalysis(parsed, {
+    const deterministic = buildDeterministicSalesDecision(inputContext);
+    const normalized = normalizeSalesDecisionAnalysis({
+      ...parsed,
+      stage: {
+        ...parsed.stage,
+        current: deterministic.stage.current,
+      },
+    }, {
       source: config.modelProvider ?? "deepseek",
     });
     return applySalesDecisionGuardrails(normalized, inputContext);
