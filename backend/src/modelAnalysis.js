@@ -132,7 +132,7 @@ async function callModel(rawContent, config, fetchImpl) {
     messages: buildMessages(rawContent),
     config,
     fetchImpl,
-    maxTokens: 1200,
+    maxTokens: 3200,
   });
   return parseModelAnalysisContent(content, config.modelProvider ?? "model");
 }
