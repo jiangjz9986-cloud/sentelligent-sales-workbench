@@ -4,7 +4,14 @@
 
 ## [Unreleased]
 
-当前工作树的目标版本为 `v0.2.2`。源码和包元数据已经切换到 `0.2.2`，但本条目记录的仍是分支 `codex/project-sync-release` 上尚未冻结的开发候选；tag、GitHub Release 和生产部署尚未创建或更新。
+### v0.2.3 hotfix candidate
+
+- 修复销售决策模型边界：`stage.current` 由服务端根据已存商机阶段推导，不再接受模型回显的业务阶段名，避免合法 DeepSeek 结果被误判后静默降级。
+- 修复 CentOS awk 兼容性：停服后的 8088/8897 监听检查不再使用保留函数名 `index` 作为变量，恢复项目端口关闭门禁。
+- 保持 `stage.recommended`、写回确认、合规门禁及其余 `sales-decision-v1` 字段的严格校验；不包含数据库迁移或依赖升级。
+- 发布门禁要求重新取得生产预检 `19/19`、HTTPS 冒烟 `25/25` 且物理清理为 `clean`，不得复用 `v0.2.2` 的失败报告。
+
+当前工作树的目标版本为 `v0.2.3`。`v0.2.2` 已合并、发布并部署到 immutable release，但生产 HTTPS 冒烟发现销售决策模型阶段回显会触发静默降级；本分支仅记录尚未冻结的 hotfix 候选，`v0.2.3` tag、GitHub Release 和生产部署尚未创建。
 
 ### 候选改动
 

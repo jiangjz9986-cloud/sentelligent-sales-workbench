@@ -707,8 +707,8 @@ stop_writers_and_lock_database() {
   for port in 8088 8897; do
     if ss -H -lnt | awk -v port="$port" '
       {
-        for (index = 1; index <= NF; index += 1) {
-          if ($index ~ (":" port "$")) { print; exit }
+        for (field = 1; field <= NF; field += 1) {
+          if ($field ~ (":" port "$")) { print; exit }
         }
       }
     ' | grep -q .; then

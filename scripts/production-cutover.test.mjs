@@ -551,6 +551,11 @@ describe("controlled production cutover", () => {
     );
   });
 
+  it("uses portable awk variable names for post-stop listener checks", () => {
+    assert.doesNotMatch(source, /for \(index\s*=/);
+    assert.match(source, /for \(field\s*= 1; field <= NF; field \+= 1\)/);
+  });
+
   it("captures protected process, unit, Caddyfile, and listener identity", () => {
     assert.deepEqual(shellArray("PROTECTED_SERVICES"), [
       "sentelligent-caddy.service",
