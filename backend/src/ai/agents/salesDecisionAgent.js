@@ -6,12 +6,21 @@ import {
 import { resolveSalesDecisionPlaybook } from "./salesDecisionPlaybooks.js";
 
 const IMPACT_PATTERN = /影响|导致|成本|效率|故障|风险|收入|停机|合规|患者|恢复|损失|压力/;
+const MINIMUM_SALES_DECISION_MODEL_TIMEOUT_MS = 60_000;
 const COMPLIANCE_PATTERNS = [
   { pattern: /回扣|返点|红包|利益输送|不当宴请/, flag: "疑似不当利益安排" },
   { pattern: /围标|串标|陪标|泄露标底|操纵采购/, flag: "疑似采购不当或围标串标" },
   { pattern: /伪造资质|伪造案例|编造承诺|虚假测试/, flag: "疑似虚假陈述或材料造假" },
   { pattern: /绕过.*合规|绕过.*安全|跳过.*审查/, flag: "疑似绕过合规或安全审查" },
 ];
+
+export function resolveSalesDecisionModelTimeoutMs(config = {}) {
+  const configured = Number(config.modelTimeoutMs);
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return MINIMUM_SALES_DECISION_MODEL_TIMEOUT_MS;
+  }
+  return Math.max(Math.trunc(configured), MINIMUM_SALES_DECISION_MODEL_TIMEOUT_MS);
+}
 
 function compact(value, limit = 1200) {
   const text = String(value ?? "").trim();
@@ -545,7 +554,7 @@ async function callSalesDecisionModel(context, config, fetchImpl) {
       max_tokens: 3200,
       stream: false,
     }),
-    signal: AbortSignal.timeout(config.modelTimeoutMs ?? 30000),
+    signal: AbortSignal.timeout(resolveSalesDecisionModelTimeoutMs(config)),
   });
   const bodyText = await response.text();
   if (!response.ok) throw new Error(`sales decision model returned ${response.status}`);

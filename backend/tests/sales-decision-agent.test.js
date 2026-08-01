@@ -5,6 +5,7 @@ import {
   buildDeterministicSalesDecision,
   buildSalesDecisionMessages,
   analyzeSalesDecision,
+  resolveSalesDecisionModelTimeoutMs,
 } from "../src/ai/agents/salesDecisionAgent.js";
 import {
   normalizeSalesDecisionAnalysis,
@@ -85,6 +86,12 @@ function overconfidentModelAnalysis(context) {
 }
 
 describe("sales decision agent v1", () => {
+  it("reserves at least sixty seconds for the larger structured model response", () => {
+    assert.equal(resolveSalesDecisionModelTimeoutMs({}), 60_000);
+    assert.equal(resolveSalesDecisionModelTimeoutMs({ modelTimeoutMs: 30_000 }), 60_000);
+    assert.equal(resolveSalesDecisionModelTimeoutMs({ modelTimeoutMs: 90_000 }), 90_000);
+  });
+
   it("keeps facts, inferences, and unknowns separate and caps an under-evidenced opportunity", () => {
     const result = buildDeterministicSalesDecision(baseContext());
 
