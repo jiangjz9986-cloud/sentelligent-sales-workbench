@@ -584,6 +584,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     itineraryViewMode,
     selectedItinerary,
   });
+  const headingSubView = (() => {
+    if (active === "customer") return customerViewMode !== "list";
+    if (active === "opportunity") return opportunityViewMode !== "list";
+    if (active === "actions") return actionViewMode !== "list";
+    if (active === "risk") return riskViewMode !== "list";
+    if (active === "knowledge") return knowledgeViewMode !== "list";
+    if (active === "itinerary") return itineraryViewMode !== "list";
+    return false;
+  })();
   const headingAction = (() => {
     if (active === "customer" && customerViewMode === "list") {
       return (
@@ -1001,6 +1010,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               active={active}
               activeMeta={activeMeta}
               headingContext={headingContext}
+              subView={headingSubView}
               action={bootstrapStatus === "loading" || bootstrapStatus === "error" ? null : headingAction}
             />
 
