@@ -583,8 +583,9 @@ async function measureVisualRhythm(cdp, url, viewport) {
         const headingRect = visibleRect(heading);
         const titleRect = visibleRect(title);
         const firstRect = visibleRect(first);
-        const topInset = contentRect && headingRect ? round(headingRect.top - contentRect.top) : null;
-        const titleToFirst = titleRect && firstRect ? round(firstRect.top - titleRect.bottom) : null;
+        const anchorRect = headingRect ?? firstRect;
+        const topInset = contentRect && anchorRect ? round(anchorRect.top - contentRect.top) : null;
+        const titleToFirst = titleRect && firstRect ? round(firstRect.top - titleRect.bottom) : (firstRect ? 0 : null);
         const headingToFirst = headingRect && firstRect ? round(firstRect.top - headingRect.bottom) : null;
         const firstViewportRatio = firstRect ? Number((firstRect.top / window.innerHeight).toFixed(3)) : null;
         results.push({

@@ -61,11 +61,20 @@ import { formatWeekRangeLabel, getCurrentWeekRange } from "../../weekRange.js";
 import { buildOpportunityTimeline } from "./opportunityTimeline.js";
 import { SalesDecisionPanel } from "./SalesDecisionPanel.jsx";
 
-export function PageHeading({ active, activeMeta, headingContext, action }) {
+export function PageHeading({ active, activeMeta, headingContext, action, subView = false }) {
   const title = headingContext?.title ?? pageTitle(active);
 
+  if (!subView) {
+    if (!action) return null;
+    return (
+      <div className="page-heading action-only">
+        <div className="page-heading-action">{action}</div>
+      </div>
+    );
+  }
+
   return (
-    <div className={`page-heading ${active === "quick" ? "compact-heading" : ""}`}>
+    <div className="page-heading compact-heading">
       <div>
         <span className="eyebrow">{activeMeta.label}</span>
         <h1>{title}</h1>
@@ -1022,35 +1031,6 @@ export function QuickRecord({
 
   return (
     <div className="record-layout">
-      <Panel title="已有快速记录" meta="今日记录" className="record-list-panel">
-        <div className="record-list-summary">
-          <span>{quickRecords.length} 条记录</span>
-          <b>{pendingHistoryCount} 条待确认</b>
-        </div>
-        <div className="list-stack">
-          {historyItems.map(({ item, view }) => (
-            <button
-              className={`list-button record-note tone-rail-${view.tone} ${selectedHistoryId === item.id ? "selected" : ""}`}
-              key={item.id}
-              type="button"
-              onClick={() => loadHistoricalRecord(item)}
-            >
-              <span className={`date-chip ${statusTone[view.tone]}`}>
-                <b>{view.day}</b>
-                <small>{view.date}</small>
-              </span>
-              <span>
-                <strong>{view.customer}</strong>
-                <small>{view.title}</small>
-                <em>{view.feedback}</em>
-              </span>
-              <b className={`pill ${statusTone[view.tone]}`}>{view.status}</b>
-            </button>
-          ))}
-          {quickRecords.length === 0 ? <p className="empty-list">暂无历史记录，可直接创建新记录。</p> : null}
-        </div>
-      </Panel>
-
       <section className="record-composer">
         <div className="composer-head">
           <div>
@@ -1327,6 +1307,35 @@ export function QuickRecord({
           </div>
         </section>
       )}
+
+      <Panel title="已有快速记录" meta="今日记录" className="record-list-panel">
+        <div className="record-list-summary">
+          <span>{quickRecords.length} 条记录</span>
+          <b>{pendingHistoryCount} 条待确认</b>
+        </div>
+        <div className="list-stack">
+          {historyItems.map(({ item, view }) => (
+            <button
+              className={`list-button record-note tone-rail-${view.tone} ${selectedHistoryId === item.id ? "selected" : ""}`}
+              key={item.id}
+              type="button"
+              onClick={() => loadHistoricalRecord(item)}
+            >
+              <span className={`date-chip ${statusTone[view.tone]}`}>
+                <b>{view.day}</b>
+                <small>{view.date}</small>
+              </span>
+              <span>
+                <strong>{view.customer}</strong>
+                <small>{view.title}</small>
+                <em>{view.feedback}</em>
+              </span>
+              <b className={`pill ${statusTone[view.tone]}`}>{view.status}</b>
+            </button>
+          ))}
+          {quickRecords.length === 0 ? <p className="empty-list">暂无历史记录，可直接创建新记录。</p> : null}
+        </div>
+      </Panel>
     </div>
   );
 }

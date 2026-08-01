@@ -790,13 +790,13 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         cardInteractions.quickKpi = await clickCardOpening('.metric-card', '本周快速记录', '[data-testid="page-quick"]', '先记录');
         cardInteractions.quickStartsEmpty = (document.querySelector('.record-composer textarea')?.value ?? '').trim() === '';
         await openOverview();
-        cardInteractions.riskKpi = await clickCardOpening('.metric-card', '高风险项', '[data-testid="page-risk"]', '风险识别列表');
+        cardInteractions.riskKpi = await clickCardOpening('.metric-card', '高风险项', '[data-testid="page-risk"]', '风险列表');
         await openOverview();
         cardInteractions.priorityAction = await clickCardOpening('.compact-item', '补齐', '[data-testid="action-detail-view"]', null);
         await openOverview();
         cardInteractions.customerTemperature = await clickCardOpening('.progress-row', '日照中医医院', '[data-testid="customer-detail-view"]', null);
         await openOverview();
-        cardInteractions.rhythmCard = await clickCardOpening('.rhythm-row', '补齐', '[data-testid="page-actions"]', '下一步动作列表');
+        cardInteractions.rhythmCard = await clickCardOpening('.rhythm-row', '补齐', '[data-testid="page-actions"]', '动作列表');
         await openOverview();
         cardInteractions.stageCard = await clickCardOpening('.stage-card', '线索', '[data-testid="page-kanban"]', '线索');
 
@@ -1783,6 +1783,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         name: ${JSON.stringify(viewport.name)},
         title: document.title,
         h1: document.querySelector('h1')?.textContent?.trim() ?? '',
+        composerTitle: document.querySelector('.composer-head h2')?.textContent?.trim() ?? '',
         apiStatus: document.querySelector('[data-testid="api-status"]')?.textContent?.trim() ?? '',
         brandText: document.querySelector('.brand-area')?.textContent?.trim() ?? '',
         brandLogoSrc: document.querySelector('.brand-area img')?.getAttribute('src') ?? '',
@@ -2652,7 +2653,8 @@ async function main() {
       assert.equal(result.title, "森特智行 AI 销售作战台", `${result.name} should load app title`);
       assert.equal(result.brandText, "", `${result.name} top brand should only render the logo image`);
       assert.equal(result.brandLogoSrc, "/sent-zhixing-transparent-logo.png", `${result.name} should use the Sent Zhixing logo asset`);
-      assert.equal(result.h1, "语音 / 文本快速记录", `${result.name} should open quick record`);
+      assert.equal(result.h1, "", `${result.name} main pages should not render a duplicated page heading`);
+      assert.equal(result.composerTitle, "先记录，再确认识别", `${result.name} should open quick record`);
       assert.equal(result.apiStatus, "在线", `${result.name} should show an online service state`);
       assert.equal(result.overflowX, 0, `${result.name} should not have page-level horizontal overflow`);
       assert.deepEqual(result.topbarOutOfBounds, [], `${result.name} topbar controls should stay inside the viewport`);
