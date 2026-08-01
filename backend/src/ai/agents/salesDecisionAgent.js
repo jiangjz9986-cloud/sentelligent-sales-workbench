@@ -551,7 +551,7 @@ async function callSalesDecisionModel(context, config, fetchImpl) {
       messages: buildSalesDecisionMessages(context),
       response_format: { type: "json_object" },
       temperature: 0.1,
-      max_tokens: 3200,
+      max_tokens: 6400,
       stream: false,
     }),
     signal: AbortSignal.timeout(resolveSalesDecisionModelTimeoutMs(config)),
