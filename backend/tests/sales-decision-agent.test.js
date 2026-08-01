@@ -86,10 +86,10 @@ function overconfidentModelAnalysis(context) {
 }
 
 describe("sales decision agent v1", () => {
-  it("reserves at least sixty seconds for the larger structured model response", () => {
-    assert.equal(resolveSalesDecisionModelTimeoutMs({}), 60_000);
-    assert.equal(resolveSalesDecisionModelTimeoutMs({ modelTimeoutMs: 30_000 }), 60_000);
-    assert.equal(resolveSalesDecisionModelTimeoutMs({ modelTimeoutMs: 90_000 }), 90_000);
+  it("reserves two minutes for long-tail structured model responses", () => {
+    assert.equal(resolveSalesDecisionModelTimeoutMs({}), 120_000);
+    assert.equal(resolveSalesDecisionModelTimeoutMs({ modelTimeoutMs: 60_000 }), 120_000);
+    assert.equal(resolveSalesDecisionModelTimeoutMs({ modelTimeoutMs: 180_000 }), 180_000);
   });
 
   it("keeps facts, inferences, and unknowns separate and caps an under-evidenced opportunity", () => {
