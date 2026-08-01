@@ -750,6 +750,7 @@ export async function runSmoke({
         method: "POST",
         authenticated: true,
         csrfProtected: true,
+        timeoutMs: 180_000,
         headers: writeHeaders("sales-decision.create"),
         body: {
           analysisType: "opportunity_diagnosis",

@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### v0.3.4 sales decision long-tail hotfix
+
+- 将销售决策模型调用的最短超时从 `60s` 提高到 `120s`，并将生产 HTTPS 冒烟中该单项请求超时提高到 `180s`，覆盖推理型模型在完整业务上下文下的长尾响应。
+- 保留 `v0.3.3` 的 6400 completion token 预算；快速记录继续使用生产显式配置的 `60s`，其他模型任务不变。
+- 无 API、数据库、认证或写回确认边界变更；仍以生产 `19/19`、`25/25`、清理 `clean` 和 10 类残留为 0 作为验收门禁。
+
 ### v0.3.3 sales decision token-budget hotfix
 
 - 将销售决策 DeepSeek 请求的 completion token 预算从 `3200` 提高到 `6400`；生产无写入诊断证明 `3200` 会出现 HTTP 200、`finish_reason=length` 且最终内容为空，`6400` 可返回完整 `sales-decision-v1` JSON。
