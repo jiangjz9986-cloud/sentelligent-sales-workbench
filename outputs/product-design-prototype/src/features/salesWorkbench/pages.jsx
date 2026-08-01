@@ -1,6 +1,7 @@
 ﻿import {
   BarChart3,
   Bot,
+  BriefcaseBusiness,
   CalendarClock,
   Check,
   ChevronLeft,
@@ -26,6 +27,7 @@
   Sparkles,
   Target,
   Trash2,
+  TrendingUp,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -134,10 +136,10 @@ export function Overview({
 
   return (
     <div className="screen-grid overview-grid">
-      <MetricCard label="本周快速记录" value={metrics.quickRecords.value} badge={metrics.quickRecords.badge} tone={metrics.quickRecords.tone} className="overview-kpi" onClick={() => setActive("quick")} />
-      <MetricCard label="重点商机" value={metrics.opportunities.value} badge={metrics.opportunities.badge} tone={metrics.opportunities.tone} className="overview-kpi" onClick={() => openOpportunityList ? openOpportunityList() : setActive("opportunity")} />
-      <MetricCard label="预计回款" value={metrics.forecast.value} badge={metrics.forecast.badge} tone={metrics.forecast.tone} className="overview-kpi" onClick={() => setActive("kanban")} />
-      <MetricCard label="高风险项" value={metrics.risks.value} badge={metrics.risks.badge} tone={metrics.risks.tone} className="overview-kpi" onClick={() => openRiskList ? openRiskList() : setActive("risk")} />
+      <MetricCard label="本周快速记录" value={metrics.quickRecords.value} badge={metrics.quickRecords.badge} tone={metrics.quickRecords.tone} icon={Mic} className="overview-kpi" onClick={() => setActive("quick")} />
+      <MetricCard label="重点商机" value={metrics.opportunities.value} badge={metrics.opportunities.badge} tone={metrics.opportunities.tone} icon={BriefcaseBusiness} className="overview-kpi" onClick={() => openOpportunityList ? openOpportunityList() : setActive("opportunity")} />
+      <MetricCard label="预计回款" value={metrics.forecast.value} badge={metrics.forecast.badge} tone={metrics.forecast.tone} icon={TrendingUp} className="overview-kpi" onClick={() => setActive("kanban")} />
+      <MetricCard label="高风险项" value={metrics.risks.value} badge={metrics.risks.badge} tone={metrics.risks.tone} icon={ShieldAlert} className="overview-kpi" onClick={() => openRiskList ? openRiskList() : setActive("risk")} />
 
       <section className="hero-card overview-hero">
         <span>销售作战总览</span>

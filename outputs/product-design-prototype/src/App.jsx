@@ -11,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   UserRound,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -982,6 +983,13 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 </button>
               );
             })}
+            <div className="sidebar-foot">
+              <div className="sidebar-foot-title">
+                <Sparkles size={14} />
+                AI 同步引擎
+              </div>
+              <div className="sidebar-foot-desc">服务状态 · {apiStatusLabel}</div>
+            </div>
           </aside>
 
           <section

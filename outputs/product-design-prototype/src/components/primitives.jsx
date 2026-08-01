@@ -14,7 +14,7 @@ export function Panel({ title, meta, children, className = "" }) {
   );
 }
 
-export function MetricCard({ label, value, badge, tone, className = "", onClick, detail }) {
+export function MetricCard({ label, value, badge, tone, className = "", onClick, detail, icon: Icon }) {
   const [expanded, setExpanded] = useState(false);
   const isInteractive = Boolean(onClick || detail);
   const Component = isInteractive ? "button" : "section";
@@ -26,10 +26,17 @@ export function MetricCard({ label, value, badge, tone, className = "", onClick,
       type={isInteractive ? "button" : undefined}
       onClick={isInteractive ? handleClick : undefined}
     >
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <b className={`pill ${statusTone[tone]}`}>{badge}</b>
-      {expanded && detail ? <small data-testid="metric-expanded">{detail}</small> : null}
+      {Icon ? (
+        <span className={`metric-icon ${statusTone[tone]}`}>
+          <Icon size={19} />
+        </span>
+      ) : null}
+      <span className="metric-body">
+        <span>{label}</span>
+        <strong>{value}</strong>
+        <b className={`pill ${statusTone[tone]}`}>{badge}</b>
+        {expanded && detail ? <small data-testid="metric-expanded">{detail}</small> : null}
+      </span>
     </Component>
   );
 }
