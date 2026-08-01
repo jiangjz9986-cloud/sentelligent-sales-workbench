@@ -182,6 +182,29 @@ describe("sales decision agent v1", () => {
     assert.match(user.content, /数据中心升级项目/);
   });
 
+  it("allocates enough completion tokens for a reasoning-capable structured response", async () => {
+    const context = baseContext();
+    let requestBody;
+
+    await analyzeSalesDecision(
+      context,
+      {
+        aiAnalysisMode: "model",
+        modelApiKey: "fixture",
+        modelBaseUrl: "https://example.invalid",
+        modelName: "deepseek-v4-flash",
+      },
+      {
+        fetchImpl: async (_url, options) => {
+          requestBody = JSON.parse(options.body);
+          return modelResponse(overconfidentModelAnalysis(context));
+        },
+      },
+    );
+
+    assert.equal(requestBody.max_tokens, 6400);
+  });
+
   it("falls back safely when the configured model returns invalid JSON", async () => {
     const result = await analyzeSalesDecision(
       baseContext(),
