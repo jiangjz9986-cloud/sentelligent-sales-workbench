@@ -32,6 +32,28 @@ function pad(value) {
   return String(value).padStart(2, "0");
 }
 
+export function formatVisitDateParts(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text(value).trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) return null;
+  const weekday = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+  return {
+    isoDate: `${year}-${pad(month)}-${pad(day)}`,
+    month: `${month}月`,
+    day: pad(day),
+    weekday,
+    label: `${year}年${month}月${day}日 ${weekday}`,
+  };
+}
+
 export function localDateTimeInput(value) {
   if (!value) return "";
   const date = new Date(value);

@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { devices, webkit } from "playwright";
 
 import { hashPassword } from "../../../backend/src/auth/password.js";
+import { openDatabase } from "../../../backend/src/db.js";
+import { createVisitItineraryRepository } from "../../../backend/src/itinerary/repository.js";
 import { createServer as createBackendServer } from "../../../backend/src/server.js";
 import {
   createStaticServer,
@@ -137,8 +139,59 @@ async function main() {
   const frontendPort = await freePort();
   const backendOrigin = `http://127.0.0.1:${backendPort}`;
   const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
+  const databaseUrl = resolve(runtimeDirectory, "webkit.sqlite");
+  const fixtureDb = openDatabase({ databaseUrl });
+  try {
+    createVisitItineraryRepository(fixtureDb, {
+      idFactory: () => "webkit-itinerary-fixture",
+      clock: () => new Date("2026-07-27T12:00:00.000Z"),
+    }).create({
+      actor: "jiangjz",
+      title: "黄岛至济宁候选验收行程",
+      visitDate: "2026-07-29",
+      status: "planned",
+      request: {
+        title: "黄岛至济宁候选验收行程",
+        visitDate: "2026-07-29",
+        status: "planned",
+        departureAddress: "青岛市黄岛区秀兰禧悦山",
+        departureCity: "青岛",
+        departureAt: "2026-07-29T00:00:00.000Z",
+        stops: [{
+          id: "webkit-stop-jining",
+          customerName: "济宁市第二人民医院",
+          address: "济宁市任城区济宁市第二人民医院",
+          city: "济宁",
+          priority: "high",
+          visitMinutes: 60,
+          appointmentAt: "2026-07-29T05:30:00.000Z",
+          notes: "移动端日期视觉验收",
+        }],
+      },
+      plan: {
+        provider: "qa-fixture",
+        summary: "黄岛出发前往济宁，完成单客户拜访。",
+        advice: ["出发前确认预约时间。"],
+        departure: { formattedAddress: "青岛市黄岛区秀兰禧悦山" },
+        stops: [{
+          id: "webkit-stop-jining",
+          customerName: "济宁市第二人民医院",
+          address: "济宁市任城区济宁市第二人民医院",
+          formattedAddress: "济宁市任城区济宁市第二人民医院",
+          priority: "high",
+          visitMinutes: 60,
+        }],
+        orderedStopIds: ["webkit-stop-jining"],
+        schedule: [],
+        route: { distanceMeters: 379100, durationSeconds: 15120, tollsCny: 0, polyline: [] },
+        totals: {},
+      },
+    });
+  } finally {
+    fixtureDb.close();
+  }
   const backend = createBackendServer({
-    databaseUrl: resolve(runtimeDirectory, "webkit.sqlite"),
+    databaseUrl,
     seed: true,
     nodeEnv: "test",
     host: "127.0.0.1",
@@ -186,6 +239,41 @@ async function main() {
     await page.locator('input[aria-label="密码"]').fill(loginPassword);
     await page.getByTestId("login-submit").click();
     await page.getByTestId("page-overview").waitFor();
+
+    for (const module of ["customer", "opportunity", "knowledge", "itinerary"]) {
+      await page.getByTestId(`nav-${module}`).click();
+      const createAction = page.getByTestId(`${module}-create-detail`);
+      await createAction.waitFor();
+      assert.equal(
+        await createAction.evaluate((element) => Boolean(element.closest(".panel-title"))),
+        true,
+        `${module} create action should live inside its list panel header`,
+      );
+    }
+    const itineraryDate = page.locator(".itinerary-date-tile").first();
+    const itineraryDateParts = await itineraryDate.evaluate((element) => ({
+      label: element.getAttribute("aria-label"),
+      month: element.querySelector(".itinerary-date-month")?.textContent?.trim(),
+      day: element.querySelector(".itinerary-date-day")?.textContent?.trim(),
+      weekday: element.querySelector(".itinerary-date-weekday")?.textContent?.trim(),
+      width: Math.round(element.getBoundingClientRect().width),
+      height: Math.round(element.getBoundingClientRect().height),
+    }));
+    assert.match(itineraryDateParts.label, /^\d{4}年\d{1,2}月\d{1,2}日 周[日一二三四五六]$/);
+    assert.match(itineraryDateParts.month, /^\d{1,2}月$/);
+    assert.match(itineraryDateParts.day, /^\d{2}$/);
+    assert.match(itineraryDateParts.weekday, /^周[日一二三四五六]$/);
+    assert.ok(itineraryDateParts.width >= 70 && itineraryDateParts.height >= 60);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const desktopItineraryMetrics = await shellMetrics(page);
+    assert.equal(desktopItineraryMetrics.overflowX, 0);
+    assert.ok(await page.getByTestId("itinerary-create-detail").evaluate(
+      (element) => element.getBoundingClientRect().height >= 44,
+    ));
+    const desktopScreenshotPath = resolve(evidenceDirectory, "webkit-itinerary-1440x900.png");
+    await page.screenshot({ path: desktopScreenshotPath, fullPage: false });
+    await page.setViewportSize({ width: 390, height: 844 });
 
     await page.getByTestId("nav-quick").click();
     await page.getByTestId("page-quick").waitFor();
@@ -235,6 +323,8 @@ async function main() {
     assert.equal(await page.getByTestId("quick-record-mode-voice").evaluate((item) => item.classList.contains("active")), true);
 
     await page.setViewportSize({ width: 360, height: 800 });
+    await page.getByTestId("nav-itinerary").click();
+    await page.getByTestId("itinerary-list-view").waitFor();
     const smallMetrics = await shellMetrics(page);
     assert.equal(smallMetrics.visualScale, 1);
     assert.equal(smallMetrics.overflowX, 0);
@@ -251,8 +341,10 @@ async function main() {
       status: "passed",
       engine: "webkit",
       browserVersion: browser.version(),
-      viewports: [initialMetrics, smallMetrics],
+      viewports: [desktopItineraryMetrics, initialMetrics, smallMetrics],
       checks: {
+        listActionsInPanelHeaders: true,
+        semanticItineraryDate: true,
         voiceFallback: true,
         customerReadOnly: true,
         customerCancel: true,
@@ -260,7 +352,10 @@ async function main() {
         quickRecordVoiceReset: true,
         logout: true,
       },
-      screenshot: screenshotPath,
+      screenshots: {
+        desktopItinerary: desktopScreenshotPath,
+        mobileItinerary: screenshotPath,
+      },
     };
     writeFileSync(
       resolve(evidenceDirectory, "webkit-qa-report.json"),

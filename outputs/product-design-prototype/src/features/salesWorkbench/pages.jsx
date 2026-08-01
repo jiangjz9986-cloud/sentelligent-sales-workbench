@@ -2039,7 +2039,22 @@ export function CustomerPage({
   if (viewMode === "list") {
     return (
       <section className="customer-list-view" data-testid="customer-list-view">
-        <Panel title="客户列表" meta={`${visibleItems.length} / ${items.length} 家客户`} className="list-panel customer-list-panel">
+        <Panel
+          title="客户列表"
+          meta={`${visibleItems.length} / ${items.length} 家客户`}
+          className="list-panel customer-list-panel"
+          action={(
+            <button
+              className="primary-button"
+              type="button"
+              data-testid="customer-create-detail"
+              onClick={() => setViewMode?.("create")}
+            >
+              <Plus size={16} />
+              新增客户
+            </button>
+          )}
+        >
           <label className="search-box page-search">
             <Search size={16} />
             <input
@@ -2076,7 +2091,7 @@ export function CustomerPage({
             ))}
             {visibleItems.length === 0 ? (
               <p className="empty-list">
-                {items.length === 0 ? "暂无客户，可点击右上角新增客户。" : "没有匹配客户，请调整关键词。"}
+                {items.length === 0 ? "暂无客户，可点击“新增客户”开始录入。" : "没有匹配客户，请调整关键词。"}
               </p>
             ) : null}
           </div>
@@ -2279,7 +2294,22 @@ export function OpportunityPage({
   if (viewMode === "list") {
     return (
       <section className="opportunity-list-view" data-testid="opportunity-list-view">
-        <Panel title="商机列表" meta={`${visibleItems.length} / ${items.length} 个商机`} className="list-panel opportunity-list-panel">
+        <Panel
+          title="商机列表"
+          meta={`${visibleItems.length} / ${items.length} 个商机`}
+          className="list-panel opportunity-list-panel"
+          action={(
+            <button
+              className="primary-button"
+              type="button"
+              data-testid="opportunity-create-detail"
+              onClick={() => setViewMode?.("create")}
+            >
+              <Plus size={16} />
+              新增商机
+            </button>
+          )}
+        >
           <label className="search-box page-search">
             <Search size={16} />
             <input
@@ -2316,7 +2346,7 @@ export function OpportunityPage({
             ))}
             {visibleItems.length === 0 ? (
               <p className="empty-list">
-                {items.length === 0 ? "暂无商机，可点击右上角新增商机。" : "没有匹配商机，请调整关键词。"}
+                {items.length === 0 ? "暂无商机，可点击“新增商机”开始录入。" : "没有匹配商机，请调整关键词。"}
               </p>
             ) : null}
           </div>
@@ -3375,7 +3405,22 @@ export function KnowledgePage({
   if (viewMode === "list") {
     return (
       <section className="knowledge-list-view" data-testid="knowledge-list-view">
-        <Panel title="知识列表" meta={`${visibleItems.length} 条`} className="list-panel knowledge-list-panel">
+        <Panel
+          title="知识列表"
+          meta={`${visibleItems.length} 条`}
+          className="list-panel knowledge-list-panel"
+          action={(
+            <button
+              className="primary-button"
+              type="button"
+              data-testid="knowledge-create-detail"
+              onClick={() => setViewMode?.("create")}
+            >
+              <Plus size={16} />
+              新增知识
+            </button>
+          )}
+        >
           <form className="knowledge-search" data-testid="knowledge-search" onSubmit={submitSearch}>
             <label className="search-box compact">
               <Search size={16} />
@@ -3418,7 +3463,7 @@ export function KnowledgePage({
             ))}
             {visibleItems.length === 0 ? (
               <p className="empty-list">
-                {items.length === 0 ? "暂无知识材料，可点击右上角新增知识。" : "没有匹配材料，请调整关键词。"}
+                {items.length === 0 ? "暂无知识材料，可点击“新增知识”开始录入。" : "没有匹配材料，请调整关键词。"}
               </p>
             ) : null}
           </div>
