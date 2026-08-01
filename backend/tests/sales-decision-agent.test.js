@@ -229,6 +229,36 @@ describe("sales decision agent v1", () => {
     assert.equal(result.writebackPreview.requiresHumanConfirmation, true);
   });
 
+  it("drops malformed optional writeback preview entries without discarding valid model analysis", async () => {
+    const context = baseContext();
+    const modelAnalysis = overconfidentModelAnalysis(context);
+    modelAnalysis.writebackPreview = {
+      requiresHumanConfirmation: false,
+      customerFields: [{ field: "level", value: "S" }, "", " summary "],
+      opportunityFields: [null, "stage"],
+      actions: [{ action: "confirm budget" }],
+      risks: [42, "budget owner is unknown"],
+    };
+
+    const result = await analyzeSalesDecision(
+      context,
+      {
+        aiAnalysisMode: "model",
+        modelApiKey: "fixture",
+        modelBaseUrl: "https://example.invalid",
+        modelName: "deepseek-v4-flash",
+      },
+      { fetchImpl: async () => modelResponse(modelAnalysis) },
+    );
+
+    assert.equal(result.source, "deepseek");
+    assert.equal(result.writebackPreview.requiresHumanConfirmation, true);
+    assert.deepEqual(result.writebackPreview.customerFields, ["summary"]);
+    assert.deepEqual(result.writebackPreview.opportunityFields, ["stage"]);
+    assert.deepEqual(result.writebackPreview.actions, []);
+    assert.deepEqual(result.writebackPreview.risks, ["budget owner is unknown"]);
+  });
+
   it("normalizes model business stages without discarding valid analysis", async () => {
     const context = baseContext();
     const modelAnalysis = overconfidentModelAnalysis(context);

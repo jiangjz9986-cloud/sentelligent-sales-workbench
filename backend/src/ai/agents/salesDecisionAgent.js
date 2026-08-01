@@ -514,6 +514,7 @@ export function buildSalesDecisionMessages(inputContext = {}) {
         "score.dimensions 必须输出模板中的 8 个维度，max 固定且总和为 100；score、total 和所有 confidence 必须使用 0-100 整数。",
         "stakeholders 只能使用上下文中已有姓名；没有联系人证据时输出空数组。nextActions 最多 5 条且必须包含全部模板字段。",
         `当前行业 playbook：${playbook.label}；重点：${playbook.focus.join("、")}。`,
+        "writebackPreview.customerFields, opportunityFields, actions, and risks must be arrays of non-empty strings only; never output objects or placeholders in these arrays.",
         `JSON 形状：${JSON.stringify(SALES_DECISION_OUTPUT_SHAPE)}`,
       ].join("\n"),
     },
@@ -537,6 +538,28 @@ function stripJsonFence(content) {
   const text = String(content ?? "").trim();
   const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
   return fenced ? fenced[1].trim() : text;
+}
+
+function sanitizeWritebackPreview(value) {
+  const preview = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+  const stringEntries = (items) => Array.isArray(items)
+    ? items
+      .filter((item) => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 20)
+      .map((item) => item.slice(0, 200))
+    : [];
+  return {
+    ...preview,
+    requiresHumanConfirmation: true,
+    customerFields: stringEntries(preview.customerFields),
+    opportunityFields: stringEntries(preview.opportunityFields),
+    actions: stringEntries(preview.actions),
+    risks: stringEntries(preview.risks),
+  };
 }
 
 async function callSalesDecisionModel(context, config, fetchImpl) {
@@ -589,6 +612,7 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
         current: deterministic.stage.current,
         recommended: recommendedStage,
       },
+      writebackPreview: sanitizeWritebackPreview(parsed?.writebackPreview),
     }, {
       source: config.modelProvider ?? "deepseek",
     });
