@@ -267,7 +267,7 @@ p {
 
 .ghost-button,
 .primary-button {
-  min-height: 38px;
+  min-height: 40px;
   justify-content: center;
   gap: 7px;
   padding: 0 14px;
