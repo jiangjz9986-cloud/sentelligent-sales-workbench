@@ -17,3 +17,5 @@ For local WSL development, prefer the root orchestration commands in `../../pack
 Model keys and production secrets must never be written to frontend code, screenshots, docs, logs, or committed examples. Use backend environment variables and `.env.example` placeholders only.
 
 Shared API field contracts live at `../../shared/salesWorkbenchApiContract.mjs`. Treat this file as main-control owned. Any feature thread that changes customer, opportunity, quick-record, AI insight, manual confirmation, or weekly report fields must update the shared contract and run frontend `npm run qa:local`, frontend `npm run qa:integration`, and backend `npm test` in Windows and WSL.
+
+List-page primary create actions belong in the relevant content card header beside its title and count, not in a detached page-level row. Itinerary dates must present month, day, and weekday as readable calendar information and must never wrap a hyphenated `MM-DD` string across lines.

@@ -62,7 +62,7 @@ assert.ok(
   "Quick record composer should open as a blank new-record input by default.",
 );
 
-const createDetailEntries = appSource.match(/data-testid="(?:customer|opportunity|knowledge)-create-detail"[\s\S]{0,260}?set(?:Customer|Opportunity|Knowledge)ViewMode\("create"\)/g) ?? [];
+const createDetailEntries = appSource.match(/data-testid="(?:customer|opportunity|knowledge)-create-detail"[\s\S]{0,260}?setViewMode\?\.\("create"\)/g) ?? [];
 assert.equal(
   createDetailEntries.length,
   3,

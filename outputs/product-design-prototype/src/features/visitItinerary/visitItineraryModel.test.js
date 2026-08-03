@@ -7,6 +7,7 @@ import {
   buildAmapNavigationUrl,
   createEmptyVisitItineraryDraft,
   draftFromVisitItinerary,
+  formatVisitDateParts,
   localDateTimeInput,
   orderedVisitStops,
   visitItineraryMatches,
@@ -171,5 +172,24 @@ describe("visit itinerary form model", () => {
     assert.equal(visitItineraryMatches(item, "2026-07-28"), true);
     assert.equal(visitItineraryMatches(item, "第二人民医院"), true);
     assert.equal(visitItineraryMatches(item, "完全无关"), false);
+  });
+
+  it("formats a visit date as local calendar parts without UTC shifting", () => {
+    assert.deepEqual(formatVisitDateParts("2026-07-29"), {
+      isoDate: "2026-07-29",
+      month: "7月",
+      day: "29",
+      weekday: "周三",
+      label: "2026年7月29日 周三",
+    });
+    assert.deepEqual(formatVisitDateParts("2026-01-04"), {
+      isoDate: "2026-01-04",
+      month: "1月",
+      day: "04",
+      weekday: "周日",
+      label: "2026年1月4日 周日",
+    });
+    assert.equal(formatVisitDateParts("2026-02-30"), null);
+    assert.equal(formatVisitDateParts("07-29"), null);
   });
 });

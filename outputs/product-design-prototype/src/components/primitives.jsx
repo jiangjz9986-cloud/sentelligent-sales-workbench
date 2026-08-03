@@ -2,12 +2,15 @@ import { useState } from "react";
 import { Check, ChevronRight, ClipboardList, Sparkles, Target } from "lucide-react";
 import { statusTone } from "../data/salesWorkbenchData.js";
 
-export function Panel({ title, meta, children, className = "" }) {
+export function Panel({ title, meta, action, children, className = "" }) {
   return (
     <section className={`panel ${className}`}>
       <div className="panel-title">
         <strong>{title}</strong>
-        <span>{meta}</span>
+        <div className="panel-title-end">
+          {meta ? <span>{meta}</span> : null}
+          {action ? <div className="panel-title-action">{action}</div> : null}
+        </div>
       </div>
       {children}
     </section>

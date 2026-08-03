@@ -20,12 +20,14 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AmapRouteMap } from "./AmapRouteMap.jsx";
 import { geocodeVisitItineraryPayload } from "./amapGeocoder.js";
+import { Panel } from "../../components/primitives.jsx";
 import {
   addVisitStop,
   applyCustomerToVisitStop,
   buildAmapNavigationUrl,
   createEmptyVisitItineraryDraft,
   draftFromVisitItinerary,
+  formatVisitDateParts,
   orderedVisitStops,
   visitItineraryMatches,
   visitItineraryPayload,
@@ -66,47 +68,63 @@ function formatTime(value) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }
 
-function ListView({ items, onOpen, query, setQuery, statusFilter, setStatusFilter }) {
+function ListView({ items, onOpen, onCreate, query, setQuery, statusFilter, setStatusFilter }) {
   const filtered = useMemo(() => items.filter((item) => (
     (!statusFilter || item.status === statusFilter) && visitItineraryMatches(item, query)
   )), [items, query, statusFilter]);
 
   return (
     <section className="itinerary-page itinerary-list-view" data-testid="itinerary-list-view">
-      <div className="itinerary-list-toolbar">
-        <label className="search-box page-search itinerary-search">
-          <Search size={17} />
-          <input
-            data-testid="itinerary-local-search"
-            aria-label="搜索拜访行程"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索名称、日期或客户"
-          />
-        </label>
-        <label className="itinerary-filter">
-          <span>状态</span>
-          <select aria-label="筛选行程状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-            <option value="">全部</option>
-            <option value="planned">待执行</option>
-            <option value="completed">已完成</option>
-            <option value="cancelled">已取消</option>
-          </select>
-        </label>
-      </div>
-
-      <div className="panel itinerary-list-panel">
+      <Panel
+        title="行程安排"
+        meta={`${filtered.length} / ${items.length} 条行程`}
+        className="itinerary-list-panel"
+        action={(
+          <button className="primary-button" type="button" data-testid="itinerary-create-detail" onClick={onCreate}>
+            <Plus size={16} />
+            新建行程
+          </button>
+        )}
+      >
+        <div className="itinerary-list-toolbar">
+          <label className="search-box page-search itinerary-search">
+            <Search size={17} />
+            <input
+              data-testid="itinerary-local-search"
+              aria-label="搜索拜访行程"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索名称、日期或客户"
+            />
+          </label>
+          <label className="itinerary-filter">
+            <span>状态</span>
+            <select aria-label="筛选行程状态" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="">全部</option>
+              <option value="planned">待执行</option>
+              <option value="completed">已完成</option>
+              <option value="cancelled">已取消</option>
+            </select>
+          </label>
+        </div>
         <div className="itinerary-table-head" aria-hidden="true">
           <span>行程</span><span>拜访客户</span><span>预计路程</span><span>状态</span><span />
         </div>
         <div className="itinerary-table-body">
-          {filtered.map((item) => (
+          {filtered.map((item) => {
+            const date = formatVisitDateParts(item.visitDate);
+            return (
             <article className="itinerary-table-row" key={item.id}>
               <button className="itinerary-row-main" type="button" onClick={() => onOpen(item.id)}>
-                <span className="itinerary-date-tile">
-                  <CalendarDays size={16} />
-                  <b>{item.visitDate.slice(5)}</b>
-                </span>
+                <time
+                  className="itinerary-date-tile"
+                  dateTime={date?.isoDate ?? item.visitDate}
+                  aria-label={date?.label ?? item.visitDate}
+                >
+                  <span className="itinerary-date-month"><CalendarDays size={12} />{date?.month ?? "日期"}</span>
+                  <strong className="itinerary-date-day">{date?.day ?? "--"}</strong>
+                  <span className="itinerary-date-weekday">{date?.weekday ?? "待定"}</span>
+                </time>
                 <span className="itinerary-row-title">
                   <strong>{item.title}</strong>
                   <small>{item.request.departureAddress}</small>
@@ -123,10 +141,11 @@ function ListView({ items, onOpen, query, setQuery, statusFilter, setStatusFilte
               <span className={`pill itinerary-status ${item.status}`}>{statusLabels[item.status] ?? item.status}</span>
               <button className="ghost-button" type="button" onClick={() => onOpen(item.id)}>查看详情</button>
             </article>
-          ))}
+            );
+          })}
           {filtered.length === 0 ? <p className="empty-list">没有符合条件的拜访行程</p> : null}
         </div>
-      </div>
+      </Panel>
     </section>
   );
 }
@@ -327,6 +346,7 @@ export function VisitItineraryPage({
   viewMode = "list",
   customers = [],
   onOpen,
+  onCreate,
   onBack,
   onEdit,
   onSave,
@@ -353,6 +373,7 @@ export function VisitItineraryPage({
     <ListView
       items={items}
       onOpen={onOpen}
+      onCreate={onCreate}
       query={query}
       setQuery={setQuery}
       statusFilter={statusFilter}

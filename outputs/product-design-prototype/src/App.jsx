@@ -593,68 +593,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     if (active === "itinerary") return itineraryViewMode !== "list";
     return false;
   })();
-  const headingAction = (() => {
-    if (active === "customer" && customerViewMode === "list") {
-      return (
-        <button
-          className="primary-button"
-          type="button"
-          data-testid="customer-create-detail"
-          onClick={() => setCustomerViewMode("create")}
-        >
-          <Plus size={16} />
-          新增客户
-        </button>
-      );
-    }
-
-    if (active === "opportunity" && opportunityViewMode === "list") {
-      return (
-        <button
-          className="primary-button"
-          type="button"
-          data-testid="opportunity-create-detail"
-          onClick={() => setOpportunityViewMode("create")}
-        >
-          <Plus size={16} />
-          新增商机
-        </button>
-      );
-    }
-
-    if (active === "knowledge" && knowledgeViewMode === "list") {
-      return (
-        <button
-          className="primary-button"
-          type="button"
-          data-testid="knowledge-create-detail"
-          onClick={() => setKnowledgeViewMode("create")}
-        >
-          <Plus size={16} />
-          新增知识
-        </button>
-      );
-    }
-
-    if (active === "itinerary" && itineraryViewMode === "list") {
-      return (
-        <button
-          className="primary-button"
-          type="button"
-          data-testid="itinerary-create-detail"
-          onClick={() => {
-            setSelectedItineraryId(null);
-            setItineraryViewMode("new");
-          }}
-        >
-          <Plus size={16} />
-          新建行程
-        </button>
-      );
-    }
-
-    return null;
-  })();
   const avatarInitial = String(authSession?.displayName ?? authSession?.account ?? "继").trim().slice(0, 1) || "继";
 
   function openCustomerDetail(customerId) {
@@ -1011,7 +949,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               activeMeta={activeMeta}
               headingContext={headingContext}
               subView={headingSubView}
-              action={bootstrapStatus === "loading" || bootstrapStatus === "error" ? null : headingAction}
+              action={null}
             />
 
             {blockedByBootstrap ? (
@@ -1123,6 +1061,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 onOpen={(id) => {
                   setSelectedItineraryId(id);
                   setItineraryViewMode("detail");
+                }}
+                onCreate={() => {
+                  setSelectedItineraryId(null);
+                  setItineraryViewMode("new");
                 }}
                 onBack={() => setItineraryViewMode("list")}
                 onEdit={() => setItineraryViewMode("edit")}
