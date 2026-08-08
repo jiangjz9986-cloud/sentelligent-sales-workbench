@@ -14,10 +14,10 @@
 | GitHub Release | [森特智行 v0.3.6](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.6)，发布于 `2026-08-03T21:34:16+08:00` |
 | Release 归档 SHA-256 | `d94989bfe27108d03ac414d6c249d82c02c4f298d7ebb799d5c7d12ca3ddd75d` |
 | 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-08-03_b603f74` |
-| 当前开发目标 | `v0.4.0`，分支 `codex/travel-expense-reimbursement` |
-| `v0.4.0` 状态 | 差旅报销、iCost 文本分流、付款凭证、发票仓库、无损文件存储和打印能力正在完成发布前收口；正式状态以 tag、GitHub Release 和生产证据为准 |
+| 当前开发目标 | `v0.4.2`，分支 `codex/v0.4.2-preflight-boundary-fix` |
+| `v0.4.2` 状态 | `v0.4.0` 差旅报销完整能力及 `v0.4.1` 部署契约修复均已进入补丁发布收口；本补丁进一步固定前端环境路径、拒绝旧基线未哈希依赖，并关闭 release 验签与冻结之间的替换窗口，正式状态以 tag、GitHub Release 和生产证据为准 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-06` 只读复核。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选说明见 [v0.4.0 版本说明](docs/releases/v0.4.0.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-08` 只读复核。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选说明见 [v0.4.2 版本说明](docs/releases/v0.4.2.md)。
 
 ## 功能状态
 

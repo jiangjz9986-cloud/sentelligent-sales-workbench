@@ -617,6 +617,30 @@ describe("controlled production cutover", () => {
     }
   });
 
+  it("rejects candidate files outside the manifest inventory", () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const extraPath = join(fixture.root, "backend", "unverified-extra.js");
+      writeFileSync(extraPath, "export const unverified = true;\n", "utf8");
+      const result = runBash(
+        [
+          "-c",
+          'source "$1"\nNEW_RELEASE=$2\nEXPECTED_COMMIT=$3\nverify_release_manifest',
+          "production-cutover-test",
+          toBashPath(scriptPath),
+          fixture.root.replaceAll("\\", "/"),
+          fixture.manifest.source.commit,
+        ],
+        { env: { NODE_BIN: toBashPath(process.execPath) } },
+      );
+
+      assert.notEqual(result.status, 0, outputOf(result));
+      assert.match(outputOf(result), /inventory|file count/i);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("accepts only a fresh exact 24/24 preflight report bound to this cutover", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-"));
     const reportPath = join(root, "preflight.json");
@@ -708,10 +732,10 @@ describe("controlled production cutover", () => {
     }
   });
 
-  it("checks the preflight gate before release freezing or service mutation", () => {
+  it("checks the preflight gate before frozen-release validation or service mutation", () => {
     const mainSource = source.slice(source.indexOf("main() {"));
     const gateIndex = mainSource.indexOf("verify_preflight_report");
-    const freezeIndex = mainSource.indexOf("freeze_candidate_release");
+    const freezeIndex = mainSource.indexOf("assert_candidate_release_frozen");
     const mutationIndex = mainSource.indexOf("stop_writers_and_lock_database");
     assert.ok(gateIndex >= 0, "main must verify the preflight report");
     assert.ok(freezeIndex > gateIndex, "preflight must pass before release freezing");
@@ -942,21 +966,25 @@ describe("controlled production cutover", () => {
     assert.match(source, /assert_protected_unchanged "\$PROTECTED_BEFORE" "\$PROTECTED_AFTER"/);
   });
 
-  it("freezes the verified candidate release before any service mutation", () => {
-    assert.match(source, /freeze_candidate_release\(\)/);
+  it("requires an already-frozen candidate before hash verification and any service mutation", () => {
+    assert.match(source, /assert_candidate_release_frozen\(\)/);
     assert.match(source, /find "\$NEW_RELEASE" -type l/);
     assert.match(source, /find "\$NEW_RELEASE" -type f -links \+1/);
-    assert.match(source, /chown -R root:root "\$NEW_RELEASE"/);
-    assert.match(source, /chmod go-w/);
     assert.match(source, /stat -c '%u:%g:%a:%h:%F'/);
+    const freezeBody = source.slice(
+      source.indexOf("assert_candidate_release_frozen()"),
+      source.indexOf("stage_project_units()"),
+    );
+    assert.doesNotMatch(freezeBody, /\bchown\b|\bchmod\b/);
     const mainSource = source.slice(source.indexOf("main() {"));
     const verifyIndex = mainSource.indexOf("  verify_release_manifest");
-    const freezeIndex = mainSource.indexOf("  freeze_candidate_release");
+    const freezeIndex = mainSource.indexOf("  assert_candidate_release_frozen");
     const rehearsalIndex = mainSource.indexOf("  rehearse_candidate_migrations");
     const mutationIndex = mainSource.indexOf("  stop_writers_and_lock_database");
     assert.ok(verifyIndex >= 0, "manifest verification call is missing");
-    assert.ok(freezeIndex > verifyIndex, "release freeze must follow hash verification");
-    assert.ok(rehearsalIndex > freezeIndex, "migration rehearsal must use the frozen release");
+    assert.ok(freezeIndex >= 0, "frozen-release validation call is missing");
+    assert.ok(verifyIndex > freezeIndex, "hash verification must use an already-frozen release");
+    assert.ok(rehearsalIndex > verifyIndex, "migration rehearsal must use the verified frozen release");
     assert.ok(mutationIndex > rehearsalIndex, "release freeze must precede mutation");
   });
 
