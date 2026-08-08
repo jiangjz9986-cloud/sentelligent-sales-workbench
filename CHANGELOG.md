@@ -13,6 +13,10 @@
 - Record the production diagnosis without model content or credentials: the v0.4.3 smoke context intermittently returned HTTP 200 with empty `message.content`; a controlled `3000`-token run ended with `finish_reason=length`, while the same context completed at `6946` tokens under a `12000` limit.
 - Require a new immutable v0.4.4 release and fresh production evidence; the deployed v0.4.3 tree and its reports remain preserved and must not be edited in place.
 
+### Production closeout
+
+- Published from merged `main` as `v0.4.4` and deployed to a new immutable release; the controlled cutover, post-cutover `24/24` preflight, fresh HTTPS `25/25` smoke (`cleanup=clean`) and real Chrome desktop/mobile acceptance are recorded in `docs/部署记录.md`.
+
 ## [0.4.3] - 2026-08-08
 
 ### CentOS 7 cutover compatibility
