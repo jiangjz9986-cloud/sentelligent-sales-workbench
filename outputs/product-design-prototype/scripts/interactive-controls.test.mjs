@@ -8,6 +8,16 @@ const controlFiles = [
   "src/features/salesWorkbench/pages.jsx",
   "src/components/primitives.jsx",
   "src/features/visitItinerary/VisitItineraryPage.jsx",
+  "src/features/travelExpense/AdvanceSettlement.jsx",
+  "src/features/travelExpense/ExpenseEditorDrawer.jsx",
+  "src/features/travelExpense/ExpenseLedger.jsx",
+  "src/features/travelExpense/InvoiceManager.jsx",
+  "src/features/travelExpense/InvoicePrintPreview.jsx",
+  "src/features/travelExpense/PaymentRecordPrintPreview.jsx",
+  "src/features/travelExpense/PaymentProofCenter.jsx",
+  "src/features/travelExpense/ReimbursementOrganizer.jsx",
+  "src/features/travelExpense/TravelExpensePage.jsx",
+  "src/features/travelExpense/WeeklyExpenseOverview.jsx",
 ];
 
 function readUiSource() {

@@ -130,6 +130,11 @@ const routeCases = [
     "/weekly-reports",
   ],
   [
+    "/travel-expenses",
+    expectedRoute({ page: "travel-expenses", active: "expense", mode: "index" }),
+    "/travel-expenses",
+  ],
+  [
     "/risks",
     expectedRoute({ page: "risks", active: "risk", mode: "list" }),
     "/risks",

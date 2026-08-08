@@ -119,6 +119,68 @@ describe("project secret scan", () => {
     }
   });
 
+  it("skips Git-ignored local secrets while scanning untracked project files", () => {
+    const workspace = makeWorkspace();
+    try {
+      initializeRepository(workspace);
+      workspace.write(".gitignore", ".env\n.worktrees/\n");
+      workspace.write("src/tracked.js", "console.log('tracked');\n");
+      commitAll(workspace, "clean baseline");
+
+      workspace.write(".env", `MODEL_API_KEY="${sampleProviderKey}"\n`);
+      workspace.write(
+        ".worktrees/archived/backend/.env",
+        `MODEL_API_KEY="${sampleProviderKey}"\n`,
+      );
+      workspace.write("src/untracked.js", "console.log('untracked');\n");
+
+      const result = scanProjectSecrets({
+        root: workspace.root,
+        includeGitHistory: false,
+      });
+
+      assert.equal(result.status, "passed");
+      assert.deepEqual(result.findings, []);
+      assert.equal(result.scannedFiles, 3);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("handles Git-visible listings larger than the child-process default without scanning ignored secrets", () => {
+    const workspace = makeWorkspace();
+    try {
+      initializeRepository(workspace);
+      workspace.write(".gitignore", ".env\n");
+      workspace.write("README.md", "clean baseline\n");
+      commitAll(workspace, "clean baseline");
+
+      const cleanBlob = git(workspace.root, "rev-parse", "HEAD:README.md");
+      const indexInfo = Array.from({ length: 6500 }, (_, index) => {
+        const suffix = `${String(index).padStart(5, "0")}-${"x".repeat(150)}.js`;
+        return `100644 ${cleanBlob}\tgenerated/${suffix}`;
+      }).join("\n") + "\n";
+      execFileSync("git", ["update-index", "--index-info"], {
+        cwd: workspace.root,
+        input: indexInfo,
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      workspace.write(".env", `MODEL_API_KEY="${sampleProviderKey}"\n`);
+
+      const result = scanProjectSecrets({
+        root: workspace.root,
+        includeGitHistory: false,
+      });
+
+      assert.equal(result.status, "passed");
+      assert.deepEqual(result.findings, []);
+      assert.equal(result.scannedFiles, 2);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("passes when scanned project files contain only placeholders", () => {
     const workspace = makeWorkspace();
     try {
@@ -307,6 +369,35 @@ describe("project secret scan", () => {
       assert.equal(historyFinding?.file, "config/.env");
       assert.equal(historyFinding?.pattern, "OpenAI-style key");
       assert.match(historyFinding?.object ?? "", /^[0-9a-f]{40,64}$/);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("ignores Codex turn-diff refs that are not publishable repository history", () => {
+    const workspace = makeWorkspace();
+    try {
+      initializeRepository(workspace);
+      workspace.write("README.md", "clean main branch\n");
+      commitAll(workspace, "clean baseline");
+
+      git(workspace.root, "switch", "-c", "temporary-codex-snapshot");
+      workspace.write("config/.env", `MODEL_API_KEY="${sampleProviderKey}"\n`);
+      commitAll(workspace, `API_TOKEN=${sampleProviderKey}`);
+      const snapshotCommit = git(workspace.root, "rev-parse", "HEAD");
+      git(
+        workspace.root,
+        "update-ref",
+        "refs/codex/turn-diffs/checkpoints/test/snapshot",
+        snapshotCommit,
+      );
+      git(workspace.root, "switch", "main");
+      git(workspace.root, "branch", "-D", "temporary-codex-snapshot");
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "passed");
+      assert.deepEqual(result.findings, []);
     } finally {
       workspace.cleanup();
     }

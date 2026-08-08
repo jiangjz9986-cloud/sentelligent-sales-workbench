@@ -10,6 +10,7 @@ const PAGE_META = Object.freeze({
   opportunities: Object.freeze({ active: "opportunity", defaultMode: "list", readOnly: false }),
   actions: Object.freeze({ active: "actions", defaultMode: "list", readOnly: false }),
   itineraries: Object.freeze({ active: "itinerary", defaultMode: "list", readOnly: false }),
+  "travel-expenses": Object.freeze({ active: "expense", defaultMode: "index", readOnly: false }),
   "weekly-reports": Object.freeze({ active: "weekly", defaultMode: "index", readOnly: false }),
   risks: Object.freeze({ active: "risk", defaultMode: "list", readOnly: false }),
   knowledge: Object.freeze({ active: "knowledge", defaultMode: "list", readOnly: false }),
@@ -138,7 +139,7 @@ function matchRoute(segments) {
     return matchEntityRoute(page, segments);
   }
   if (
-    (page === "weekly-reports" || page === "kanban") &&
+    (page === "travel-expenses" || page === "weekly-reports" || page === "kanban") &&
     segments.length === 1
   ) {
     return routeState(page, "index");
@@ -523,7 +524,7 @@ function pathForRoute(route) {
     throw new TypeError("Invalid route mode");
   }
   if (
-    (page === "weekly-reports" || page === "kanban" || page === "settings/weixin") &&
+    (page === "travel-expenses" || page === "weekly-reports" || page === "kanban" || page === "settings/weixin") &&
     mode === "index"
   ) {
     assertNoEntityId(route);

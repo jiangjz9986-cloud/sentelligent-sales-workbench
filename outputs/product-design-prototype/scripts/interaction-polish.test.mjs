@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
-const css = readFileSync(resolve("src/styles/global.css"), "utf8");
+const cssFiles = [
+  "src/styles/global.css",
+  "src/features/travelExpense/travelExpense.css",
+];
+const css = cssFiles
+  .map((file) => `${file}\n${readFileSync(resolve(file), "utf8")}`)
+  .join("\n\n");
 
 const focusSelectors = [
   ".primary-button:focus-visible",
@@ -11,6 +17,9 @@ const focusSelectors = [
   ".nav-item:focus-visible",
   ".segmented button:focus-visible",
   ".list-row-main:focus-visible",
+  ".expense-tabs button:focus-visible",
+  ".expense-upload-tile:focus-within",
+  ".expense-receipt-thumb > button:focus-visible",
 ];
 
 describe("interaction polish CSS", () => {

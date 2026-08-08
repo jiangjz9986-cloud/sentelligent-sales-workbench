@@ -86,6 +86,14 @@ function positiveInteger(value, name) {
   return parsed;
 }
 
+function invoiceOcrLanguagesValue(value) {
+  const normalized = String(value ?? "chi_sim+eng").trim();
+  if (!/^[A-Za-z0-9_.+-]{1,100}$/.test(normalized)) {
+    throw new Error("INVOICE_OCR_LANGUAGES contains unsupported characters");
+  }
+  return normalized;
+}
+
 function isStrongSessionSecret(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
@@ -135,6 +143,18 @@ export function loadConfig(overrides = {}) {
     env.amapTimeoutMs ?? env.AMAP_TIMEOUT_MS ?? 10_000,
     "AMAP_TIMEOUT_MS",
   );
+  const icostWebhookRateLimit = positiveInteger(
+    env.icostWebhookRateLimit ?? env.ICOST_WEBHOOK_RATE_LIMIT ?? 30,
+    "ICOST_WEBHOOK_RATE_LIMIT",
+  );
+  const icostWebhookWindowMs = positiveInteger(
+    env.icostWebhookWindowMs ?? env.ICOST_WEBHOOK_WINDOW_MS ?? 300_000,
+    "ICOST_WEBHOOK_WINDOW_MS",
+  );
+  const invoiceTextExtractionTimeoutMs = positiveInteger(
+    env.invoiceTextExtractionTimeoutMs ?? env.INVOICE_TEXT_EXTRACTION_TIMEOUT_MS ?? 30_000,
+    "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
+  );
 
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
@@ -172,6 +192,20 @@ export function loadConfig(overrides = {}) {
     weixinAgentBackendUrl: env.weixinAgentBackendUrl ?? env.WEIXIN_AGENT_BACKEND_URL ?? "",
     weixinAgentOwner: env.weixinAgentOwner ?? env.WEIXIN_AGENT_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "",
     weixinAgentSessionHome: env.weixinAgentSessionHome ?? env.WEIXIN_AGENT_SESSION_HOME ?? "",
+    icostWebhookToken: String(env.icostWebhookToken ?? env.ICOST_WEBHOOK_TOKEN ?? "").trim(),
+    icostWebhookOwner: String(
+      env.icostWebhookOwner ?? env.ICOST_WEBHOOK_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "icost",
+    ).trim(),
+    icostWebhookRateLimit,
+    icostWebhookWindowMs,
+    invoiceOcrCommand: String(env.invoiceOcrCommand ?? env.INVOICE_OCR_COMMAND ?? "").trim(),
+    invoicePdfTextCommand: String(
+      env.invoicePdfTextCommand ?? env.INVOICE_PDF_TEXT_COMMAND ?? "",
+    ).trim(),
+    invoiceOcrLanguages: invoiceOcrLanguagesValue(
+      env.invoiceOcrLanguages ?? env.INVOICE_OCR_LANGUAGES,
+    ),
+    invoiceTextExtractionTimeoutMs,
   };
 
   validateProductionConfig(config, { explicitAllowedOrigins });

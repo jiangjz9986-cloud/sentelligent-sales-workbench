@@ -24,17 +24,18 @@ const viewports = [
 const mobileShellViewports = viewports.filter((viewport) => viewport.mobile);
 
 const pages = [
-  { name: "overview", navIndex: 0, testId: "page-overview" },
-  { name: "quick", navIndex: 1, testId: "page-quick" },
-  { name: "customer", navIndex: 2, testId: "page-customer" },
-  { name: "opportunity", navIndex: 3, testId: "page-opportunity" },
-  { name: "actions", navIndex: 4, testId: "page-actions" },
-  { name: "itinerary", navIndex: 5, testId: "page-itinerary" },
-  { name: "weekly", navIndex: 6, testId: "page-weekly" },
-  { name: "risk", navIndex: 7, testId: "page-risk" },
-  { name: "knowledge", navIndex: 8, testId: "page-knowledge" },
-  { name: "kanban", navIndex: 9, testId: "page-kanban" },
-  { name: "weixin", navIndex: 10, testId: "page-weixin" },
+  { name: "overview", testId: "page-overview" },
+  { name: "quick", testId: "page-quick" },
+  { name: "customer", testId: "page-customer" },
+  { name: "opportunity", testId: "page-opportunity" },
+  { name: "actions", testId: "page-actions" },
+  { name: "itinerary", testId: "page-itinerary" },
+  { name: "expense", testId: "page-expense" },
+  { name: "weekly", testId: "page-weekly" },
+  { name: "risk", testId: "page-risk" },
+  { name: "knowledge", testId: "page-knowledge" },
+  { name: "kanban", testId: "page-kanban" },
+  { name: "weixin", testId: "page-weixin" },
 ];
 
 function findChrome() {
@@ -572,7 +573,7 @@ async function measureVisualRhythm(cdp, url, viewport) {
       const results = [];
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
       for (const page of pages) {
-        document.querySelectorAll('.nav-item')[page.navIndex]?.click();
+        document.querySelector('[data-testid="nav-' + page.name + '"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
         await wait(180);
         const content = document.querySelector('[data-testid="' + page.testId + '"]');
@@ -634,7 +635,7 @@ async function measureDesktopListDensity(cdp, url) {
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
       const results = [];
       for (const page of listPages) {
-        document.querySelectorAll('.nav-item')[page.navIndex]?.click();
+        document.querySelector('[data-testid="nav-' + page.name + '"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
         await wait(180);
         const content = document.querySelector('[data-testid="' + page.testId + '"]');

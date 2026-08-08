@@ -21,6 +21,29 @@ const WRITABLE_FIELDS = Object.freeze({
   itinerary: Object.freeze([
     "title", "visitDate", "status", "departureAddress", "departureCity", "departureLocation", "departureAt", "stops",
   ]),
+  travelExpense: Object.freeze([
+    "occurredOn", "category", "purpose", "merchant", "itineraryId", "customerId", "notes", "payments",
+  ]),
+  travelExpensePayment: Object.freeze([
+    "id", "paidAt", "merchant", "amountCents", "reimbursementCents", "fundingSource",
+    "paymentMethod", "accountLast4", "differenceReason",
+  ]),
+  travelExpenseAttachment: Object.freeze([
+    "paymentIds", "kind", "fileName", "mediaType", "contentBase64", "coveredCents", "notes",
+  ]),
+  travelExpenseAdvance: Object.freeze([
+    "weekStart", "status", "requestedCents", "receivedCents", "requestedOn", "receivedOn", "purpose", "notes",
+  ]),
+  invoiceUpload: Object.freeze(["fileName", "mediaType", "contentBase64", "sourceRef"]),
+  invoiceReview: Object.freeze([
+    "invoiceCode", "invoiceNumber", "issuedOn", "sellerName", "buyerName",
+    "amountExTaxCents", "taxCents", "totalCents", "suggestedCategory",
+  ]),
+  invoiceMatch: Object.freeze([
+    "expenseReferenceCode", "paymentId", "allocatedCents", "matchMethod",
+  ]),
+  noInvoiceConfirmation: Object.freeze(["paymentId", "reason"]),
+  documentInboxConfirm: Object.freeze(["expenseReferenceCode", "paymentId"]),
 });
 
 function pickOwnFields(source, fields) {
@@ -29,6 +52,137 @@ function pickOwnFields(source, fields) {
     if (Object.hasOwn(source, field)) picked[field] = source[field];
   }
   return picked;
+}
+
+function travelExpensePayload(expense) {
+  const payload = pickOwnFields(expense, WRITABLE_FIELDS.travelExpense);
+  if (Array.isArray(payload.payments)) {
+    payload.payments = payload.payments.map((payment) => (
+      pickOwnFields(payment, WRITABLE_FIELDS.travelExpensePayment)
+    ));
+  }
+  return payload;
+}
+
+function assertTravelExpense(value, path = "travelExpense") {
+  const expense = assertApiEntity("travelExpense", value, path);
+  assertApiCollection("travelExpensePayment", expense.payments, `${path}.payments`);
+  assertApiCollection("travelExpenseAttachment", expense.attachments, `${path}.attachments`);
+  return expense;
+}
+
+function assertTravelExpenseCollection(values, path = "travelExpenses.items") {
+  const expenses = assertApiCollection("travelExpense", values, path);
+  expenses.forEach((expense, index) => assertTravelExpense(expense, `${path}[${index}]`));
+  return expenses;
+}
+
+function assertTravelExpenseDocumentInbox(value, path = "travelExpenseDocumentInbox") {
+  const item = assertApiEntity("travelExpenseDocumentInbox", value, path);
+  assertApiCollection("travelExpenseDocumentCandidate", item.candidates, `${path}.candidates`);
+  if (Object.hasOwn(item, "content") || Object.hasOwn(item, "contentBlob") || Object.hasOwn(item, "contentBase64")) {
+    throw new TypeError(`${path}: document inbox JSON must not expose original document bytes`);
+  }
+  return item;
+}
+
+function apiObject(value, path) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path}: expected object`);
+  }
+  return value;
+}
+
+function requiredApiString(value, path) {
+  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${path}: expected non-empty string`);
+  return value;
+}
+
+function requiredApiVersion(value, path) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${path}: expected positive integer`);
+  return value;
+}
+
+function nullableApiCents(value, path) {
+  if (value === null || value === undefined) return value;
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${path}: expected non-negative integer cents`);
+  return value;
+}
+
+function apiItems(values, path, assertItem) {
+  if (!Array.isArray(values)) throw new TypeError(`${path}: expected array`);
+  return values.map((value, index) => assertItem(value, `${path}[${index}]`));
+}
+
+function assertInvoice(value, path = "invoice") {
+  const invoice = apiObject(value, path);
+  requiredApiString(invoice.id, `${path}.id`);
+  requiredApiVersion(invoice.version, `${path}.version`);
+  requiredApiString(invoice.fileName, `${path}.fileName`);
+  requiredApiString(invoice.mediaType, `${path}.mediaType`);
+  requiredApiString(invoice.status, `${path}.status`);
+  nullableApiCents(invoice.totalCents, `${path}.totalCents`);
+  if (!Array.isArray(invoice.conflicts ?? [])) throw new TypeError(`${path}.conflicts: expected array`);
+  if (Object.hasOwn(invoice, "content") || Object.hasOwn(invoice, "contentBlob") || Object.hasOwn(invoice, "contentBase64")) {
+    throw new TypeError(`${path}: invoice JSON must not expose original document bytes`);
+  }
+  return invoice;
+}
+
+function assertInvoiceMatch(value, path = "invoiceMatch") {
+  const match = apiObject(value, path);
+  requiredApiString(match.id, `${path}.id`);
+  requiredApiVersion(match.version, `${path}.version`);
+  requiredApiString(match.invoiceId, `${path}.invoiceId`);
+  requiredApiString(match.expenseId, `${path}.expenseId`);
+  requiredApiString(match.state, `${path}.state`);
+  nullableApiCents(match.allocatedCents, `${path}.allocatedCents`);
+  return match;
+}
+
+function assertNoInvoiceConfirmation(value, path = "noInvoiceConfirmation") {
+  const confirmation = apiObject(value, path);
+  requiredApiString(confirmation.id, `${path}.id`);
+  requiredApiVersion(confirmation.version, `${path}.version`);
+  requiredApiString(confirmation.expenseId, `${path}.expenseId`);
+  nullableApiCents(confirmation.amountSnapshotCents, `${path}.amountSnapshotCents`);
+  return confirmation;
+}
+
+function assertInvoiceCoverage(value, path = "invoiceCoverage") {
+  const coverage = apiObject(value, path);
+  requiredApiString(coverage.weekStart, `${path}.weekStart`);
+  for (const field of ["reimbursementCents", "confirmedCoverageCents", "noInvoiceConfirmedCents", "missingInvoiceCents"]) {
+    nullableApiCents(coverage[field], `${path}.${field}`);
+  }
+  return coverage;
+}
+
+function assertInvoiceCandidate(value, path = "invoiceCandidate") {
+  const candidate = apiObject(value, path);
+  requiredApiString(candidate.id, `${path}.id`);
+  requiredApiVersion(candidate.version, `${path}.version`);
+  requiredApiString(candidate.invoiceId, `${path}.invoiceId`);
+  requiredApiString(candidate.expenseId, `${path}.expenseId`);
+  requiredApiString(candidate.status, `${path}.status`);
+  nullableApiCents(candidate.proposedCents, `${path}.proposedCents`);
+  if (!Array.isArray(candidate.rationale ?? [])) throw new TypeError(`${path}.rationale: expected array`);
+  return candidate;
+}
+
+function idempotencyHeaders(options, label) {
+  const key = String(options?.idempotencyKey ?? "");
+  if (!key || key.trim() !== key) throw new TypeError(`A valid ${label} Idempotency-Key is required`);
+  return { "Idempotency-Key": key };
+}
+
+function queryPath(path, values) {
+  const query = new URLSearchParams();
+  for (const [name, value] of Object.entries(values)) {
+    if (value !== undefined && value !== null && value !== "") query.set(name, String(value));
+  }
+  const suffix = query.toString();
+  return suffix ? `${path}?${suffix}` : path;
 }
 
 function versionHeaders(version) {
@@ -228,6 +382,25 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     }
   }
 
+  async function requestApiResponse(path, options = {}) {
+    const requestGeneration = sessionGeneration;
+    try {
+      const response = await fetchImpl(url(path), {
+        ...options,
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw toApiError(response, await readResponseBody(response));
+      }
+      return response;
+    } catch (error) {
+      if (error?.status === 401 && !options.signal?.aborted) {
+        invalidateSession(error, requestGeneration);
+      }
+      throw error;
+    }
+  }
+
   function bootstrapItems(responseName, entityName, response) {
     return assertApiCollection(entityName, response?.items, `${responseName}.items`);
   }
@@ -381,6 +554,309 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         headers: versionHeaders(version),
       });
       return assertApiEntity("visitItinerary", response.deleted);
+    },
+
+    async listTravelExpenses({ weekStart, signal } = {}) {
+      const query = weekStart ? `?weekStart=${encodeURIComponent(weekStart)}` : "";
+      const response = await requestApi(`/api/travel-expenses${query}`, { signal });
+      return assertTravelExpenseCollection(response?.items, "travelExpenses.items");
+    },
+
+    async getTravelExpense(expenseId, { signal } = {}) {
+      const response = await requestApi(`/api/travel-expenses/${encodeURIComponent(expenseId)}`, { signal });
+      return assertTravelExpense(response?.item, "travelExpense.item");
+    },
+
+    async saveTravelExpense(expense) {
+      const isUpdate = Boolean(expense.id);
+      const response = await requestApi(
+        isUpdate ? `/api/travel-expenses/${encodeURIComponent(expense.id)}` : "/api/travel-expenses",
+        {
+          method: isUpdate ? "PATCH" : "POST",
+          ...(isUpdate ? { headers: versionHeaders(expense.version) } : {}),
+          body: JSON.stringify(travelExpensePayload(expense)),
+        },
+      );
+      return assertTravelExpense(response?.item, "travelExpense.item");
+    },
+
+    async deleteTravelExpense(expenseId, version) {
+      const response = await requestApi(`/api/travel-expenses/${encodeURIComponent(expenseId)}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+        body: "{}",
+      });
+      return assertTravelExpense(response?.deleted, "travelExpense.deleted");
+    },
+
+    async addTravelExpenseAttachment(expenseId, attachment, version) {
+      const response = await requestApi(
+        `/api/travel-expenses/${encodeURIComponent(expenseId)}/attachments`,
+        {
+          method: "POST",
+          headers: versionHeaders(version),
+          body: JSON.stringify(pickOwnFields(attachment, WRITABLE_FIELDS.travelExpenseAttachment)),
+        },
+      );
+      return assertTravelExpense(response?.item, "travelExpense.item");
+    },
+
+    getTravelExpenseAttachmentContentUrl(attachmentId) {
+      return url(`/api/travel-expense-attachments/${encodeURIComponent(attachmentId)}/content`);
+    },
+
+    async getTravelExpenseAttachmentContentResponse(attachmentId, { signal } = {}) {
+      return requestApiResponse(`/api/travel-expense-attachments/${encodeURIComponent(attachmentId)}/content`, {
+        method: "GET",
+        credentials: "include",
+        redirect: "error",
+        headers: { Accept: "application/pdf" },
+        signal,
+      });
+    },
+
+    async deleteTravelExpenseAttachment(attachmentId, version) {
+      const response = await requestApi(
+        `/api/travel-expense-attachments/${encodeURIComponent(attachmentId)}`,
+        {
+          method: "DELETE",
+          headers: versionHeaders(version),
+          body: "{}",
+        },
+      );
+      return assertTravelExpense(response?.item, "travelExpense.item");
+    },
+
+    async listTravelExpenseDocumentInbox({ status, documentKind, signal } = {}) {
+      const response = await requestApi(queryPath("/api/travel-expense-document-inbox", { status, documentKind }), { signal });
+      const items = assertApiCollection(
+        "travelExpenseDocumentInbox",
+        response?.items,
+        "travelExpenseDocumentInbox.items",
+      );
+      items.forEach((item, index) => assertTravelExpenseDocumentInbox(item, `travelExpenseDocumentInbox.items[${index}]`));
+      return items;
+    },
+
+    async getTravelExpenseDocumentInbox(documentId, { signal } = {}) {
+      const response = await requestApi(
+        `/api/travel-expense-document-inbox/${encodeURIComponent(documentId)}`,
+        { signal },
+      );
+      return assertTravelExpenseDocumentInbox(response?.item, "travelExpenseDocumentInbox.item");
+    },
+
+    getTravelExpenseDocumentInboxContentUrl(documentId) {
+      return url(`/api/travel-expense-document-inbox/${encodeURIComponent(documentId)}/content`);
+    },
+
+    async getTravelExpenseDocumentInboxContentResponse(documentId, { signal } = {}) {
+      return requestApiResponse(`/api/travel-expense-document-inbox/${encodeURIComponent(documentId)}/content`, {
+        method: "GET",
+        credentials: "include",
+        redirect: "error",
+        headers: { Accept: "application/pdf,image/*" },
+        signal,
+      });
+    },
+
+    async confirmTravelExpenseDocumentInbox(documentId, selection, version) {
+      const response = await requestApi(
+        `/api/travel-expense-document-inbox/${encodeURIComponent(documentId)}/confirm`,
+        {
+          method: "POST",
+          headers: versionHeaders(version),
+          body: JSON.stringify(pickOwnFields(selection, WRITABLE_FIELDS.documentInboxConfirm)),
+        },
+      );
+      return assertTravelExpenseDocumentInbox(response?.item, "travelExpenseDocumentInbox.item");
+    },
+
+    async rejectTravelExpenseDocumentInbox(documentId, version) {
+      const response = await requestApi(
+        `/api/travel-expense-document-inbox/${encodeURIComponent(documentId)}/reject`,
+        {
+          method: "POST",
+          headers: versionHeaders(version),
+          body: "{}",
+        },
+      );
+      return assertTravelExpenseDocumentInbox(response?.item, "travelExpenseDocumentInbox.item");
+    },
+
+    async listTravelExpenseAdvances({ weekStart, signal } = {}) {
+      const query = weekStart ? `?weekStart=${encodeURIComponent(weekStart)}` : "";
+      const response = await requestApi(`/api/travel-expense-advances${query}`, { signal });
+      return assertApiCollection("travelExpenseAdvance", response?.items, "travelExpenseAdvances.items");
+    },
+
+    async saveTravelExpenseAdvance(advance) {
+      const isUpdate = Boolean(advance.id);
+      const response = await requestApi(
+        isUpdate ? `/api/travel-expense-advances/${encodeURIComponent(advance.id)}` : "/api/travel-expense-advances",
+        {
+          method: isUpdate ? "PATCH" : "POST",
+          ...(isUpdate ? { headers: versionHeaders(advance.version) } : {}),
+          body: JSON.stringify(pickOwnFields(advance, WRITABLE_FIELDS.travelExpenseAdvance)),
+        },
+      );
+      return assertApiEntity("travelExpenseAdvance", response?.item, "travelExpenseAdvance.item");
+    },
+
+    async deleteTravelExpenseAdvance(advanceId, version) {
+      const response = await requestApi(`/api/travel-expense-advances/${encodeURIComponent(advanceId)}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+        body: "{}",
+      });
+      return assertApiEntity("travelExpenseAdvance", response?.deleted, "travelExpenseAdvance.deleted");
+    },
+
+    async listInvoices({ status, signal } = {}) {
+      const response = await requestApi(queryPath("/api/invoices", { status }), { signal });
+      return apiItems(response?.items, "invoices.items", assertInvoice);
+    },
+
+    async uploadInvoice(invoice, options = {}) {
+      const response = await requestApi("/api/invoices", {
+        method: "POST",
+        headers: idempotencyHeaders(options, "invoice upload"),
+        body: JSON.stringify(pickOwnFields(invoice, WRITABLE_FIELDS.invoiceUpload)),
+      });
+      return assertInvoice(response?.item, "invoice.item");
+    },
+
+    async getInvoice(invoiceId, { signal } = {}) {
+      const response = await requestApi(`/api/invoices/${encodeURIComponent(invoiceId)}`, { signal });
+      return assertInvoice(response?.item, "invoice.item");
+    },
+
+    getInvoiceContentUrl(invoiceId) {
+      return url(`/api/invoices/${encodeURIComponent(invoiceId)}/content`);
+    },
+
+    async getInvoiceContentResponse(invoiceId, { signal } = {}) {
+      return requestApiResponse(`/api/invoices/${encodeURIComponent(invoiceId)}/content`, {
+        method: "GET",
+        credentials: "include",
+        redirect: "error",
+        headers: { Accept: "application/pdf" },
+        signal,
+      });
+    },
+
+    async reviewInvoice(invoiceId, fields, version) {
+      const response = await requestApi(`/api/invoices/${encodeURIComponent(invoiceId)}/review`, {
+        method: "PATCH",
+        headers: versionHeaders(version),
+        body: JSON.stringify(pickOwnFields(fields, WRITABLE_FIELDS.invoiceReview)),
+      });
+      return assertInvoice(response?.item, "invoice.item");
+    },
+
+    async deleteInvoice(invoiceId, version) {
+      const response = await requestApi(`/api/invoices/${encodeURIComponent(invoiceId)}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+        body: "{}",
+      });
+      return assertInvoice(response?.deleted ?? response?.item, "invoice.deleted");
+    },
+
+    async listInvoiceMatches({ invoiceId, expenseId, state, signal } = {}) {
+      const response = await requestApi(queryPath("/api/invoice-matches", { invoiceId, expenseId, state }), { signal });
+      return apiItems(response?.items, "invoiceMatches.items", assertInvoiceMatch);
+    },
+
+    async createInvoiceMatch(invoiceId, match, version, options = {}) {
+      const response = await requestApi(`/api/invoices/${encodeURIComponent(invoiceId)}/matches`, {
+        method: "POST",
+        headers: {
+          ...versionHeaders(version),
+          ...idempotencyHeaders(options, "invoice match"),
+        },
+        body: JSON.stringify(pickOwnFields(match, WRITABLE_FIELDS.invoiceMatch)),
+      });
+      return assertInvoiceMatch(response?.item, "invoiceMatch.item");
+    },
+
+    async revokeInvoiceMatch(matchId, version) {
+      const response = await requestApi(`/api/invoice-matches/${encodeURIComponent(matchId)}`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+        body: "{}",
+      });
+      return assertInvoiceMatch(response?.item, "invoiceMatch.item");
+    },
+
+    async listNoInvoiceConfirmations({ weekStart, expenseId, signal } = {}) {
+      const response = await requestApi(queryPath("/api/travel-expense-no-invoice-confirmations", { weekStart, expenseId }), { signal });
+      return apiItems(response?.items, "noInvoiceConfirmations.items", assertNoInvoiceConfirmation);
+    },
+
+    async confirmNoInvoice(expenseId, confirmation, version, options = {}) {
+      const response = await requestApi(`/api/travel-expenses/${encodeURIComponent(expenseId)}/no-invoice`, {
+        method: "POST",
+        headers: {
+          ...versionHeaders(version),
+          ...idempotencyHeaders(options, "no-invoice confirmation"),
+        },
+        body: JSON.stringify(pickOwnFields(confirmation, WRITABLE_FIELDS.noInvoiceConfirmation)),
+      });
+      return assertNoInvoiceConfirmation(response?.item, "noInvoiceConfirmation.item");
+    },
+
+    async revokeNoInvoice(expenseId, confirmationId, version) {
+      const response = await requestApi(`/api/travel-expenses/${encodeURIComponent(expenseId)}/no-invoice`, {
+        method: "DELETE",
+        headers: versionHeaders(version),
+        body: JSON.stringify({ confirmationId }),
+      });
+      return assertNoInvoiceConfirmation(response?.item, "noInvoiceConfirmation.item");
+    },
+
+    async getWeekInvoiceCoverage(weekStart, { signal } = {}) {
+      const response = await requestApi(`/api/travel-expense-weeks/${encodeURIComponent(weekStart)}/invoice-coverage`, { signal });
+      return assertInvoiceCoverage(response?.item, "invoiceCoverage.item");
+    },
+
+    async listInvoiceCandidates({ weekStart, status, signal } = {}) {
+      const path = `/api/travel-expense-weeks/${encodeURIComponent(weekStart)}/invoice-suggestions`;
+      const response = await requestApi(queryPath(path, { status }), { signal });
+      return apiItems(response?.items, "invoiceCandidates.items", assertInvoiceCandidate);
+    },
+
+    async generateInvoiceCandidates(weekStart, options = {}) {
+      const response = await requestApi(`/api/travel-expense-weeks/${encodeURIComponent(weekStart)}/invoice-suggestions`, {
+        method: "POST",
+        headers: idempotencyHeaders(options, "invoice candidate generation"),
+        body: "{}",
+      });
+      return apiItems(response?.items, "invoiceCandidates.items", assertInvoiceCandidate);
+    },
+
+    async acceptInvoiceCandidate(candidateId, expectedVersion, options = {}) {
+      const response = await requestApi(`/api/invoice-match-candidates/${encodeURIComponent(candidateId)}/accept`, {
+        method: "POST",
+        headers: {
+          ...idempotencyHeaders(options, "invoice candidate acceptance"),
+          ...versionHeaders(expectedVersion),
+        },
+        body: "{}",
+      });
+      return assertInvoiceCandidate(response?.item, "invoiceCandidate.item");
+    },
+
+    async rejectInvoiceCandidate(candidateId, expectedVersion, options = {}) {
+      const response = await requestApi(`/api/invoice-match-candidates/${encodeURIComponent(candidateId)}/reject`, {
+        method: "POST",
+        headers: {
+          ...idempotencyHeaders(options, "invoice candidate rejection"),
+          ...versionHeaders(expectedVersion),
+        },
+        body: "{}",
+      });
+      return assertInvoiceCandidate(response?.item, "invoiceCandidate.item");
     },
 
     createQuickRecord,

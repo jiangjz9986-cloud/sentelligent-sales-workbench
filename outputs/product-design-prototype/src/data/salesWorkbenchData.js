@@ -8,6 +8,7 @@ import {
   Mic,
   MapPinned,
   PanelLeft,
+  ReceiptText,
   ShieldAlert,
   UsersRound,
 } from "lucide-react";
@@ -28,6 +29,7 @@ export const navItems = [
   { id: "opportunity", label: "商机档案", icon: BriefcaseBusiness },
   { id: "actions", label: "下一步动作", icon: CalendarClock },
   { id: "itinerary", label: "智能拜访行程", icon: MapPinned },
+  { id: "expense", label: "差旅报销", icon: ReceiptText },
   { id: "weekly", label: "周报与汇报", icon: FileText },
   { id: "risk", label: "风险识别", icon: ShieldAlert },
   { id: "knowledge", label: "知识库", icon: BookOpen },

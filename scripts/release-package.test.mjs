@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
+  fsyncSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { gunzipSync } from "node:zlib";
@@ -196,7 +203,15 @@ function runReleaseCli(args) {
 function copyTrackedProject(sourceRoot, destinationRoot) {
   const tracked = spawnSync(
     "git",
-    ["-c", "core.quotepath=false", "ls-files", "-z", "--cached"],
+    [
+      "-c",
+      "core.quotepath=false",
+      "ls-files",
+      "-z",
+      "--cached",
+      "--others",
+      "--exclude-standard",
+    ],
     {
       cwd: sourceRoot,
       encoding: "buffer",
@@ -225,6 +240,39 @@ function copyTrackedProject(sourceRoot, destinationRoot) {
     join(sourceRoot, productDist),
     join(destinationRoot, productDist),
   );
+
+  const sourceDependencies = join(
+    sourceRoot,
+    "outputs",
+    "product-design-prototype",
+    "node_modules",
+  );
+  const destinationDependencies = join(
+    destinationRoot,
+    "outputs",
+    "product-design-prototype",
+    "node_modules",
+  );
+  if (existsSync(sourceDependencies)) {
+    symlinkSync(
+      sourceDependencies,
+      destinationDependencies,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+  }
+}
+
+async function withEnvironmentVariable(name, value, callback) {
+  const hadOriginal = Object.hasOwn(process.env, name);
+  const original = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  try {
+    return await callback();
+  } finally {
+    if (hadOriginal) process.env[name] = original;
+    else delete process.env[name];
+  }
 }
 
 function copyDirectoryFiles(sourceRoot, destinationRoot, current = sourceRoot) {
@@ -244,6 +292,30 @@ function copyDirectoryFiles(sourceRoot, destinationRoot, current = sourceRoot) {
 }
 
 describe("portable release package", () => {
+  it("excludes business media while preserving explicit runtime assets", async () => {
+    const { shouldExcludeReleasePath } = await loadReleaseModule();
+
+    for (const file of [
+      "receipts/payment-proof.png",
+      "invoices/2026-06-17.pdf",
+      "design-references/travel-expense/internal-screen.png",
+      "design-options/reimbursement-option.png",
+      "handoff/expense-list.xlsx",
+    ]) {
+      assert.equal(shouldExcludeReleasePath(file), true, `${file} must be excluded`);
+    }
+
+    for (const file of [
+      "outputs/product-design-prototype/public/sente-logo.png",
+      "outputs/product-design-prototype/dist/assets/sente-logo.png",
+      "outputs/logo/sent-zhixing-transparent-logo.png",
+      "森特透明底LOGO 800 800.png",
+      "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut",
+    ]) {
+      assert.equal(shouldExcludeReleasePath(file), false, `${file} must be preserved`);
+    }
+  });
+
   it("keeps every tracked npm cache setting portable", () => {
     const configFiles = trackedNpmConfigs();
     assert.ok(configFiles.length > 0, "at least one tracked .npmrc should be checked");
@@ -362,6 +434,1081 @@ describe("portable release package", () => {
       dirtyOutput.cleanup();
       cleanWorkspace.cleanup();
       cleanOutput.cleanup();
+    }
+  });
+
+  it("rebuilds ignored frontend dist from the exact commit instead of packaging stale worktree bytes", async () => {
+    const workspace = makeWorkspace("sentelligent-stale-dist-");
+    const output = makeWorkspace("sentelligent-stale-dist-output-");
+    const extracted = makeWorkspace("sentelligent-stale-dist-extracted-");
+    const committedBuild = "<main>fresh build from exact commit</main>\n";
+    const staleBuild = "<main>stale ignored worktree build</main>\n";
+    try {
+      workspace.write(
+        ".gitignore",
+        "outputs/product-design-prototype/dist/\n",
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          private: true,
+          type: "module",
+          scripts: { build: "node build.mjs" },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+          `writeFileSync(new URL("./dist/index.html", import.meta.url), ${JSON.stringify(committedBuild)});`,
+          "",
+        ].join("\n"),
+      );
+      const source = commitWorkspace(workspace);
+
+      workspace.write(
+        "outputs/product-design-prototype/dist/index.html",
+        staleBuild,
+      );
+      assert.equal(
+        runGit(workspace.root, ["status", "--porcelain=v1", "--untracked-files=all"]),
+        "",
+        "the stale ignored dist must not make the release source appear dirty",
+      );
+
+      const { createReleasePackage } = await loadReleaseModule();
+      const result = await createReleasePackage({
+        sourceRoot: workspace.root,
+        outputDir: output.root,
+        createdAt: "2026-07-19T08:00:00.000Z",
+      });
+      extractArchive(result.archivePath, extracted.root);
+
+      const packagedBuildPath = join(
+        extracted.root,
+        result.rootDirectory,
+        "outputs",
+        "product-design-prototype",
+        "dist",
+        "index.html",
+      );
+      assert.equal(readFileSync(packagedBuildPath, "utf8"), committedBuild);
+      assert.equal(
+        result.manifest.buildHashes.files[
+          "outputs/product-design-prototype/dist/index.html"
+        ],
+        sha256(committedBuild),
+      );
+      assert.equal(result.manifest.source.commit, source.commit);
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+      extracted.cleanup();
+    }
+  });
+
+  it("rejects a generated dist root that links outside the exact commit checkout", async () => {
+    const workspace = makeWorkspace("sentelligent-dist-link-");
+    const externalDist = makeWorkspace("sentelligent-external-dist-");
+    const output = makeWorkspace("sentelligent-dist-link-output-");
+    try {
+      externalDist.write(
+        "outside.bin",
+        Buffer.from([0x00, 0x01, 0x02, 0x03, 0xff]),
+      );
+      workspace.write(
+        ".gitignore",
+        "outputs/product-design-prototype/dist/\n",
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          private: true,
+          type: "module",
+          scripts: { build: "node build.mjs" },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { rmSync, symlinkSync } from "node:fs";',
+          'import { fileURLToPath } from "node:url";',
+          'const distPath = fileURLToPath(new URL("./dist", import.meta.url));',
+          'rmSync(distPath, { recursive: true, force: true });',
+          `symlinkSync(${JSON.stringify(externalDist.root)}, distPath, process.platform === "win32" ? "junction" : "dir");`,
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      const { createReleasePackage } = await loadReleaseModule();
+      await assert.rejects(
+        createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+          createdAt: "2026-07-19T08:00:00.000Z",
+        }),
+        /symbolic|junction|link|outside|escape|boundary/i,
+      );
+      assert.deepEqual(listFiles(output.root), []);
+    } finally {
+      workspace.cleanup();
+      externalDist.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("never consumes ignored source node_modules while rebuilding an exact commit", async () => {
+    const workspace = makeWorkspace("sentelligent-ignored-dependencies-");
+    const output = makeWorkspace("sentelligent-ignored-dependencies-output-");
+    try {
+      workspace.write(
+        ".gitignore",
+        [
+          "outputs/product-design-prototype/dist/",
+          "outputs/product-design-prototype/node_modules/",
+          "",
+        ].join("\n"),
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          private: true,
+          type: "module",
+          scripts: { build: "node build.mjs" },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'import { buildValue } from "./node_modules/build-helper.mjs";',
+          'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+          'writeFileSync(new URL("./dist/index.html", import.meta.url), buildValue);',
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+      workspace.write(
+        "outputs/product-design-prototype/node_modules/build-helper.mjs",
+        'export const buildValue = "ignored dependency controlled the release\\n";\n',
+      );
+      assert.equal(
+        runGit(workspace.root, ["status", "--porcelain=v1", "--untracked-files=all"]),
+        "",
+      );
+
+      const { createReleasePackage } = await loadReleaseModule();
+      await assert.rejects(
+        createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+          createdAt: "2026-07-19T08:00:00.000Z",
+        }),
+        /build|module|dependency/i,
+      );
+      assert.deepEqual(listFiles(output.root), []);
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("uses an allowlisted frontend build environment that cannot leak caller secrets", async () => {
+    const workspace = makeWorkspace("sentelligent-build-environment-");
+    const output = makeWorkspace("sentelligent-build-environment-output-");
+    const extracted = makeWorkspace("sentelligent-build-environment-extracted-");
+    const variableName = "SENTELLIGENT_RELEASE_TEST_BINARY_SECRET";
+    const secret = `environment-only-${sha256("release-build-environment-secret")}`;
+    try {
+      workspace.write(
+        ".gitignore",
+        "outputs/product-design-prototype/dist/\n",
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          private: true,
+          type: "module",
+          scripts: { build: "node build.mjs" },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          `const value = process.env.${variableName} ?? "not-present";`,
+          'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+          'writeFileSync(new URL("./dist/environment.bin", import.meta.url), Buffer.concat([Buffer.from([0]), Buffer.from(value)]));',
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      await withEnvironmentVariable(variableName, secret, async () => {
+        const { createReleasePackage } = await loadReleaseModule();
+        const result = await createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+          createdAt: "2026-07-19T08:00:00.000Z",
+        });
+        extractArchive(result.archivePath, extracted.root);
+        const packagedBinary = readFileSync(join(
+          extracted.root,
+          result.rootDirectory,
+          "outputs",
+          "product-design-prototype",
+          "dist",
+          "environment.bin",
+        ));
+        assert.equal(packagedBinary.includes(Buffer.from(secret)), false);
+        assert.equal(packagedBinary.includes(Buffer.from("not-present")), true);
+      });
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+      extracted.cleanup();
+    }
+  });
+
+  it("bypasses caller npm wrappers and invokes a controlled build entry directly", async () => {
+    const workspace = makeWorkspace("sentelligent-direct-build-entry-");
+    const output = makeWorkspace("sentelligent-direct-build-entry-output-");
+    const extracted = makeWorkspace("sentelligent-direct-build-entry-extracted-");
+    try {
+      workspace.write(
+        ".gitignore",
+        "outputs/product-design-prototype/dist/\n",
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          private: true,
+          type: "module",
+          scripts: { build: "node build.mjs" },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+          'writeFileSync(new URL("./dist/environment.json", import.meta.url), `${JSON.stringify(Object.keys(process.env).sort())}\\n`);',
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "fake-npm/package.json",
+        '{"name":"npm","version":"10.9.7","private":true}\n',
+      );
+      const fakeNpmCli = workspace.write(
+        "fake-npm/bin/npm-cli.js",
+        [
+          'import { spawnSync } from "node:child_process";',
+          'const result = spawnSync(process.execPath, ["build.mjs"], {',
+          '  cwd: process.cwd(),',
+          '  env: { ...process.env, NPM_WRAPPER_INJECTED: "yes" },',
+          '  stdio: "inherit",',
+          '});',
+          'process.exit(result.status ?? 1);',
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      await withEnvironmentVariable("npm_execpath", fakeNpmCli, async () => {
+        const { createReleasePackage } = await loadReleaseModule();
+        const result = await createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+          createdAt: "2026-07-19T08:00:00.000Z",
+        });
+        extractArchive(result.archivePath, extracted.root);
+        const environmentNames = JSON.parse(readFileSync(join(
+          extracted.root,
+          result.rootDirectory,
+          "outputs",
+          "product-design-prototype",
+          "dist",
+          "environment.json",
+        ), "utf8"));
+        assert.equal(environmentNames.includes("NPM_WRAPPER_INJECTED"), false);
+        assert.deepEqual(
+          environmentNames,
+          result.manifest.buildProvenance.frontend.environment.allowedNames,
+        );
+      });
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+      extracted.cleanup();
+    }
+  });
+
+  it("installs declared dependencies from the committed lockfile and records build provenance", async () => {
+    const workspace = makeWorkspace("sentelligent-locked-dependencies-");
+    const output = makeWorkspace("sentelligent-locked-dependencies-output-");
+    const extracted = makeWorkspace("sentelligent-locked-dependencies-extracted-");
+    const committedBuild = "committed lockfile dependency built the release\n";
+    const ignoredBuild = "ignored source dependency changed the release\n";
+    try {
+      workspace.write(
+        ".gitignore",
+        [
+          "outputs/product-design-prototype/dist/",
+          "outputs/product-design-prototype/node_modules/",
+          "",
+        ].join("\n"),
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "release-fixtures/release-build-helper/package.json",
+        `${JSON.stringify({
+          name: "release-build-helper",
+          version: "1.0.0",
+          private: true,
+          type: "module",
+          exports: "./index.mjs",
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "release-fixtures/release-build-helper/index.mjs",
+        `export const buildValue = ${JSON.stringify(committedBuild)};\n`,
+      );
+      const frontendPackage = {
+        name: "frontend-fixture",
+        private: true,
+        type: "module",
+        scripts: { build: "node build.mjs" },
+        dependencies: {
+          "release-build-helper": "file:../../release-fixtures/release-build-helper",
+        },
+      };
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify(frontendPackage, null, 2)}\n`,
+      );
+      const lockfile = {
+        name: "frontend-fixture",
+        lockfileVersion: 3,
+        requires: true,
+        packages: {
+          "": {
+            name: "frontend-fixture",
+            dependencies: frontendPackage.dependencies,
+          },
+          "../../release-fixtures/release-build-helper": {
+            name: "release-build-helper",
+            version: "1.0.0",
+          },
+          "node_modules/release-build-helper": {
+            resolved: "../../release-fixtures/release-build-helper",
+            link: true,
+          },
+        },
+      };
+      const lockfileContent = `${JSON.stringify(lockfile, null, 2)}\n`;
+      workspace.write(
+        "outputs/product-design-prototype/package-lock.json",
+        lockfileContent,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'import { buildValue } from "release-build-helper";',
+          'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+          'writeFileSync(new URL("./dist/index.html", import.meta.url), buildValue);',
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      workspace.write(
+        "outputs/product-design-prototype/node_modules/release-build-helper/package.json",
+        `${JSON.stringify({
+          name: "release-build-helper",
+          version: "9.9.9",
+          type: "module",
+          exports: "./index.mjs",
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/node_modules/release-build-helper/index.mjs",
+        `export const buildValue = ${JSON.stringify(ignoredBuild)};\n`,
+      );
+      assert.equal(
+        runGit(workspace.root, ["status", "--porcelain=v1", "--untracked-files=all"]),
+        "",
+      );
+
+      const { createReleasePackage } = await loadReleaseModule();
+      const result = await createReleasePackage({
+        sourceRoot: workspace.root,
+        outputDir: output.root,
+        createdAt: "2026-07-19T08:00:00.000Z",
+      });
+      extractArchive(result.archivePath, extracted.root);
+      const packagedBuild = readFileSync(join(
+        extracted.root,
+        result.rootDirectory,
+        "outputs",
+        "product-design-prototype",
+        "dist",
+        "index.html",
+      ), "utf8");
+      assert.equal(packagedBuild, committedBuild);
+      assert.notEqual(packagedBuild, ignoredBuild);
+      assert.deepEqual(result.manifest.buildProvenance.frontend.lockfile, {
+        path: "outputs/product-design-prototype/package-lock.json",
+        sha256: sha256(lockfileContent),
+        lockfileVersion: 3,
+      });
+      assert.equal(
+        result.manifest.buildProvenance.frontend.runtime.node,
+        process.version,
+      );
+      assert.match(
+        result.manifest.buildProvenance.frontend.runtime.npm,
+        /^\d+\.\d+\.\d+(?:[-+].+)?$/,
+      );
+      assert.deepEqual(result.manifest.buildProvenance.frontend.install, {
+        command: "npm ci",
+        ignoreScripts: true,
+        includeDev: true,
+      });
+      assert.equal(
+        result.manifest.buildProvenance.frontend.environment.identity,
+        "sentelligent-release-frontend-v1",
+      );
+      assert.ok(
+        result.manifest.buildProvenance.frontend.environment.allowedNames.includes(
+          "NODE_ENV",
+        ),
+      );
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+      extracted.cleanup();
+    }
+  });
+
+  it("rejects ignored local-dependency bytes injected by a shared post-checkout hook", async () => {
+    const workspace = makeWorkspace("sentelligent-hook-local-dependency-");
+    const output = makeWorkspace("sentelligent-hook-local-dependency-output-");
+    try {
+      workspace.write(
+        ".gitignore",
+        [
+          "outputs/product-design-prototype/dist/",
+          "outputs/product-design-prototype/node_modules/",
+          "release-fixtures/release-build-helper/dist/",
+          "",
+        ].join("\n"),
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "release-fixtures/release-build-helper/package.json",
+        `${JSON.stringify({
+          name: "release-build-helper",
+          version: "1.0.0",
+          private: true,
+          type: "module",
+          exports: "./dist/index.mjs",
+        }, null, 2)}\n`,
+      );
+      const frontendPackage = {
+        name: "frontend-fixture",
+        private: true,
+        type: "module",
+        scripts: { build: "node build.mjs" },
+        dependencies: {
+          "release-build-helper": "file:../../release-fixtures/release-build-helper",
+        },
+      };
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify(frontendPackage, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package-lock.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": {
+              name: "frontend-fixture",
+              dependencies: frontendPackage.dependencies,
+            },
+            "../../release-fixtures/release-build-helper": {
+              name: "release-build-helper",
+              version: "1.0.0",
+            },
+            "node_modules/release-build-helper": {
+              resolved: "../../release-fixtures/release-build-helper",
+              link: true,
+            },
+          },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/.npmrc",
+        "offline=true\nregistry=https://registry.invalid/\n",
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'import { buildValue } from "release-build-helper";',
+          'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+          'writeFileSync(new URL("./dist/index.html", import.meta.url), buildValue);',
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      const hookPath = workspace.write(
+        ".git/hooks/post-checkout",
+        [
+          "#!/bin/sh",
+          'mkdir -p "$PWD/release-fixtures/release-build-helper/dist"',
+          "cat > \"$PWD/release-fixtures/release-build-helper/dist/index.mjs\" <<'EOF'",
+          'export const buildValue = "hook-controlled release\\n";',
+          "EOF",
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(hookPath, 0o755);
+
+      const { createReleasePackage } = await loadReleaseModule();
+      await assert.rejects(
+        createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+          createdAt: "2026-08-07T00:00:00.000Z",
+        }),
+        /exact release commit|local dependency|tracked|build|module/i,
+      );
+      assert.deepEqual(listFiles(output.root), []);
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("isolates user and global npm configuration while including locked dev dependencies", async () => {
+    const workspace = makeWorkspace("sentelligent-isolated-npm-config-");
+    const output = makeWorkspace("sentelligent-isolated-npm-config-output-");
+    try {
+      workspace.write(
+        ".gitignore",
+        "outputs/product-design-prototype/dist/\n",
+      );
+      workspace.write("package.json", '{"name":"fixture","private":true}\n');
+      workspace.write("backend/src/server.js", "export const ready = true;\n");
+      workspace.write(
+        "backend/src/db/migrations/0001_baseline.sql",
+        "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          private: true,
+          type: "module",
+          scripts: { build: "node build.mjs" },
+          devDependencies: { "fixture-only": "1.0.0" },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/package-lock.json",
+        `${JSON.stringify({
+          name: "frontend-fixture",
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": {
+              name: "frontend-fixture",
+              devDependencies: { "fixture-only": "1.0.0" },
+            },
+            "node_modules/fixture-only": {
+              version: "1.0.0",
+              resolved: "https://registry.invalid/fixture-only-1.0.0.tgz",
+              integrity: "sha512-Zml4dHVyZS1sb2NrZWRkZXBlbmRlbmN5",
+              dev: true,
+            },
+          },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "outputs/product-design-prototype/build.mjs",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+          'writeFileSync(new URL("./dist/index.html", import.meta.url), "isolated npm config\\n");',
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "fake-npm/package.json",
+        '{"name":"npm","version":"10.9.7","private":true}\n',
+      );
+      const fakeNpmCli = workspace.write(
+        "fake-npm/bin/npm-cli.js",
+        [
+          'import { readFileSync } from "node:fs";',
+          'const args = process.argv.slice(2);',
+          'if (args[0] === "--version") { console.log("10.9.7"); process.exit(0); }',
+          'if (args[0] !== "ci") process.exit(20);',
+          'for (const flag of ["--ignore-scripts", "--include=dev", "--userconfig", "--globalconfig"]) {',
+          '  if (!args.includes(flag)) process.exit(21);',
+          '}',
+          'for (const flag of ["--userconfig", "--globalconfig"]) {',
+          '  const path = args[args.indexOf(flag) + 1];',
+          '  if (!path || readFileSync(path, "utf8") !== "") process.exit(22);',
+          '}',
+          'process.exit(0);',
+          "",
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      await withEnvironmentVariable(
+        "SENTELLIGENT_RELEASE_NPM_CLI",
+        fakeNpmCli,
+        async () => {
+          const { createReleasePackage } = await loadReleaseModule();
+          const result = await createReleasePackage({
+            sourceRoot: workspace.root,
+            outputDir: output.root,
+            createdAt: "2026-07-19T08:00:00.000Z",
+          });
+          assert.deepEqual(result.manifest.buildProvenance.frontend.install, {
+            command: "npm ci",
+            ignoreScripts: true,
+            includeDev: true,
+          });
+        },
+      );
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("rejects committed local dependency specifications that escape the exact checkout", async () => {
+    const checkout = makeWorkspace("sentelligent-local-dependency-checkout-");
+    const external = makeWorkspace("sentelligent-local-dependency-external-");
+    try {
+      const frontendRoot = join(
+        checkout.root,
+        "outputs",
+        "product-design-prototype",
+      );
+      mkdirSync(frontendRoot, { recursive: true });
+      external.write(
+        "package.json",
+        '{"name":"external-build-input","version":"1.0.0"}\n',
+      );
+      const packageJson = {
+        name: "frontend-fixture",
+        dependencies: {
+          "external-build-input": `file:${external.root.replaceAll("\\", "/")}`,
+        },
+      };
+      const lockfile = {
+        lockfileVersion: 3,
+        packages: {
+          "": {
+            dependencies: packageJson.dependencies,
+          },
+          "node_modules/external-build-input": {
+            resolved: `file:${external.root.replaceAll("\\", "/")}`,
+            link: true,
+          },
+        },
+      };
+
+      const { validateFrontendDependencyInputs } = await loadReleaseModule();
+      assert.equal(typeof validateFrontendDependencyInputs, "function");
+      assert.throws(
+        () => validateFrontendDependencyInputs({
+          checkoutRoot: checkout.root,
+          frontendRoot,
+          packageJson,
+          lockfile,
+          tracked: new Set(),
+        }),
+        /outside|escape|exact checkout|commit/i,
+      );
+    } finally {
+      checkout.cleanup();
+      external.cleanup();
+    }
+  });
+
+  it("rejects ignored bytes inside a local dependency even when release filters exclude them", async () => {
+    const checkout = makeWorkspace("sentelligent-local-dependency-ignored-bytes-");
+    try {
+      const frontendRoot = join(
+        checkout.root,
+        "outputs",
+        "product-design-prototype",
+      );
+      checkout.write(
+        "release-fixtures/release-build-helper/package.json",
+        '{"name":"release-build-helper","version":"1.0.0"}\n',
+      );
+      checkout.write(
+        "release-fixtures/release-build-helper/dist/index.mjs",
+        'export const buildValue = "ignored bytes";\n',
+      );
+      mkdirSync(frontendRoot, { recursive: true });
+      const packageJson = {
+        name: "frontend-fixture",
+        dependencies: {
+          "release-build-helper": "file:../../release-fixtures/release-build-helper",
+        },
+      };
+      const lockfile = {
+        lockfileVersion: 3,
+        packages: {
+          "": {
+            dependencies: packageJson.dependencies,
+          },
+          "../../release-fixtures/release-build-helper": {
+            name: "release-build-helper",
+            version: "1.0.0",
+          },
+          "node_modules/release-build-helper": {
+            resolved: "../../release-fixtures/release-build-helper",
+            link: true,
+          },
+        },
+      };
+      const trackedPackagePath = "release-fixtures/release-build-helper/package.json";
+
+      const { validateFrontendDependencyInputs } = await loadReleaseModule();
+      assert.throws(
+        () => validateFrontendDependencyInputs({
+          checkoutRoot: checkout.root,
+          frontendRoot,
+          packageJson,
+          lockfile,
+          tracked: new Set([trackedPackagePath]),
+        }),
+        /outside the exact release commit|tracked|ignored|local dependency/i,
+      );
+    } finally {
+      checkout.cleanup();
+    }
+  });
+
+  it(
+    "resolves a Windows PATH npm wrapper to its verified npm-cli.js",
+    { skip: process.platform !== "win32" },
+    async () => {
+      const workspace = makeWorkspace("sentelligent-windows-path-npm-");
+      const output = makeWorkspace("sentelligent-windows-path-npm-output-");
+      try {
+        workspace.write(
+          ".gitignore",
+          "outputs/product-design-prototype/dist/\n",
+        );
+        workspace.write("package.json", '{"name":"fixture","private":true}\n');
+        workspace.write("backend/src/server.js", "export const ready = true;\n");
+        workspace.write(
+          "backend/src/db/migrations/0001_baseline.sql",
+          "CREATE TABLE customers (id TEXT PRIMARY KEY);\n",
+        );
+        workspace.write(
+          "outputs/product-design-prototype/package.json",
+          `${JSON.stringify({
+            name: "frontend-fixture",
+            private: true,
+            type: "module",
+            scripts: { build: "node build.mjs" },
+            devDependencies: { "fixture-only": "1.0.0" },
+          }, null, 2)}\n`,
+        );
+        workspace.write(
+          "outputs/product-design-prototype/package-lock.json",
+          `${JSON.stringify({
+            name: "frontend-fixture",
+            lockfileVersion: 3,
+            requires: true,
+            packages: {
+              "": {
+                name: "frontend-fixture",
+                devDependencies: { "fixture-only": "1.0.0" },
+              },
+              "node_modules/fixture-only": {
+                version: "1.0.0",
+                resolved: "https://registry.invalid/fixture-only-1.0.0.tgz",
+                integrity: "sha512-Zml4dHVyZS1sb2NrZWRkZXBlbmRlbmN5",
+                dev: true,
+              },
+            },
+          }, null, 2)}\n`,
+        );
+        workspace.write(
+          "outputs/product-design-prototype/build.mjs",
+          [
+            'import { mkdirSync, writeFileSync } from "node:fs";',
+            'mkdirSync(new URL("./dist/", import.meta.url), { recursive: true });',
+            'writeFileSync(new URL("./dist/index.html", import.meta.url), "windows PATH npm\\n");',
+            "",
+          ].join("\n"),
+        );
+        commitWorkspace(workspace);
+
+        const fakeNodeRoot = makeWorkspace("sentelligent-fake-node-root-");
+        const fakeRuntimeRoot = makeWorkspace("sentelligent-fake-runtime-root-");
+        try {
+          fakeNodeRoot.write("npm.cmd", "@echo off\r\nexit /b 99\r\n");
+          fakeNodeRoot.write(
+            "node_modules/npm/package.json",
+            '{"name":"npm","version":"10.9.7","private":true}\n',
+          );
+          fakeNodeRoot.write(
+            "node_modules/npm/bin/npm-cli.js",
+            [
+              'const args = process.argv.slice(2);',
+              'if (args[0] === "--version") { console.log("10.9.7"); process.exit(0); }',
+              'if (args[0] !== "ci") process.exit(20);',
+              'process.exit(0);',
+              "",
+            ].join("\n"),
+          );
+          const pathName = Object.keys(process.env).find(
+            (name) => name.toLowerCase() === "path",
+          ) ?? "PATH";
+          const originalPath = process.env[pathName] ?? "";
+          const fakeNodePath = join(fakeRuntimeRoot.root, basename(process.execPath));
+          copyFileSync(process.execPath, fakeNodePath);
+          await withEnvironmentVariable(
+            "SENTELLIGENT_RELEASE_NPM_CLI",
+            undefined,
+            () => withEnvironmentVariable(
+              "npm_execpath",
+              undefined,
+              () => withEnvironmentVariable(
+                pathName,
+                `${fakeNodeRoot.root}${delimiter}${originalPath}`,
+                async () => {
+                  const { createReleasePackage } = await loadReleaseModule();
+                  const result = await createReleasePackage({
+                    sourceRoot: workspace.root,
+                    outputDir: output.root,
+                    createdAt: "2026-07-19T08:00:00.000Z",
+                    runtime: { nodeExecutable: fakeNodePath },
+                  });
+                  assert.equal(
+                    result.manifest.buildProvenance.frontend.runtime.npm,
+                    "10.9.7",
+                  );
+                  assert.equal(
+                    result.manifest.buildProvenance.frontend.runtime.npmResolutionSource,
+                    "PATH",
+                  );
+                },
+              ),
+            ),
+          );
+        } finally {
+          fakeNodeRoot.cleanup();
+          fakeRuntimeRoot.cleanup();
+        }
+      } finally {
+        workspace.cleanup();
+        output.cleanup();
+      }
+    },
+  );
+
+  it("cleans a Git worktree registration when exact-commit byte verification fails", async () => {
+    const workspace = makeWorkspace("sentelligent-failed-worktree-");
+    const output = makeWorkspace("sentelligent-failed-worktree-output-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      commitWorkspace(workspace);
+      workspace.write(".gitattributes", "checkout-mismatch.txt text eol=crlf\n");
+      workspace.write("checkout-mismatch.txt", "line-one\nline-two\n");
+      runGit(workspace.root, ["add", ".gitattributes", "checkout-mismatch.txt"]);
+      runGit(workspace.root, ["commit", "-m", "add checkout mismatch fixture"]);
+
+      const { createReleasePackage } = await loadReleaseModule();
+      await assert.rejects(
+        createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+          createdAt: "2026-07-19T08:00:00.000Z",
+        }),
+        /Exact release commit checkout bytes differ from the Git blob: checkout-mismatch\.txt/i,
+      );
+
+      const inventory = runGit(workspace.root, ["worktree", "list", "--porcelain"]);
+      assert.equal(
+        inventory.split(/\r?\n/u).filter((line) => line.startsWith("worktree ")).length,
+        1,
+        inventory,
+      );
+      const prune = spawnSync("git", ["worktree", "prune", "--dry-run", "--verbose"], {
+        cwd: workspace.root,
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      assert.equal(prune.status, 0, prune.stderr || prune.stdout);
+      assert.equal(prune.stdout.trim(), "");
+      assert.deepEqual(listFiles(output.root), []);
+    } finally {
+      spawnSync("git", ["worktree", "prune"], {
+        cwd: workspace.root,
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("rejects active smudge filters before detached release materialization", async () => {
+    const workspace = makeWorkspace("sentelligent-smudge-filter-");
+    const output = makeWorkspace("sentelligent-smudge-filter-output-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      workspace.write(".gitattributes", "filter-target.txt filter=release-smudge\n");
+      workspace.write("filter-target.txt", "tracked release bytes\n");
+      commitWorkspace(workspace);
+
+      const markerPath = join(workspace.root, ".git", "smudge-filter-ran");
+      const markerForGit = markerPath.replaceAll("\\", "/");
+      runGit(workspace.root, [
+        "config",
+        "filter.release-smudge.smudge",
+        `cat > "${markerForGit}" && cat "${markerForGit}"`,
+      ]);
+      runGit(workspace.root, [
+        "config",
+        "filter.release-smudge.required",
+        "true",
+      ]);
+
+      const { createReleasePackage } = await loadReleaseModule();
+      await assert.rejects(
+        createReleasePackage({
+          sourceRoot: workspace.root,
+          outputDir: output.root,
+          createdAt: "2026-08-07T00:00:00.000Z",
+        }),
+        /filter|checkout materialization/i,
+      );
+      assert.equal(
+        existsSync(markerPath),
+        false,
+        "release validation must reject the filter before Git executes it",
+      );
+      assert.deepEqual(listFiles(output.root), []);
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+    }
+  });
+
+  it("publishes an archive atomically and removes a partial temporary file after failure", async () => {
+    const output = makeWorkspace("sentelligent-atomic-archive-output-");
+    const archivePath = join(output.root, "release.tar.gz");
+    const archive = Buffer.from("complete release archive bytes", "utf8");
+    try {
+      const { publishArchiveAtomically } = await loadReleaseModule();
+      assert.equal(typeof publishArchiveAtomically, "function");
+      assert.throws(
+        () => publishArchiveAtomically(archivePath, archive, {
+          openSync,
+          writeFileSync(fileDescriptor, content) {
+            writeFileSync(fileDescriptor, content.subarray(0, 7));
+            throw new Error("simulated interrupted archive write");
+          },
+          fsyncSync,
+          closeSync,
+          linkSync,
+          unlinkSync,
+        }),
+        /simulated interrupted archive write/i,
+      );
+      assert.equal(existsSync(archivePath), false);
+      assert.deepEqual(listFiles(output.root), []);
+    } finally {
+      output.cleanup();
+    }
+  });
+
+  it("never overwrites an existing final archive during atomic publication", async () => {
+    const output = makeWorkspace("sentelligent-existing-archive-output-");
+    const archivePath = output.write("release.tar.gz", "existing verified archive\n");
+    const original = readFileSync(archivePath);
+    try {
+      const { publishArchiveAtomically } = await loadReleaseModule();
+      assert.equal(typeof publishArchiveAtomically, "function");
+      assert.throws(
+        () => publishArchiveAtomically(
+          archivePath,
+          Buffer.from("replacement archive must not win", "utf8"),
+        ),
+        /already exists|exist/i,
+      );
+      assert.deepEqual(readFileSync(archivePath), original);
+      assert.deepEqual(listFiles(output.root), ["release.tar.gz"]);
+    } finally {
+      output.cleanup();
     }
   });
 
@@ -489,6 +1636,55 @@ describe("portable release package", () => {
     }
   });
 
+  it("resolves the captured release commit time even when HEAD points at a newer commit", async () => {
+    const workspace = makeWorkspace("sentelligent-captured-commit-time-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      const captured = commitWorkspace(workspace);
+      const capturedEpochSeconds = Number(
+        runGit(workspace.root, ["show", "-s", "--format=%ct", captured.commit]),
+      );
+      workspace.write("README.md", "newer HEAD must not change release time\n");
+      runGit(workspace.root, ["add", "README.md"]);
+      const newerTimestamp = new Date((capturedEpochSeconds + 3_600) * 1000).toISOString();
+      const newerCommit = spawnSync(
+        "git",
+        ["commit", "-m", "test: move head after capturing release commit"],
+        {
+          cwd: workspace.root,
+          encoding: "utf8",
+          windowsHide: true,
+          env: {
+            ...process.env,
+            GIT_AUTHOR_DATE: newerTimestamp,
+            GIT_COMMITTER_DATE: newerTimestamp,
+          },
+        },
+      );
+      assert.equal(
+        newerCommit.status,
+        0,
+        newerCommit.error?.message || newerCommit.stderr || newerCommit.stdout,
+      );
+      assert.notEqual(runGit(workspace.root, ["rev-parse", "HEAD"]), captured.commit);
+
+      await withSourceDateEpoch(undefined, async () => {
+        const { resolveReleaseTimestamp } = await loadReleaseModule();
+        assert.equal(typeof resolveReleaseTimestamp, "function");
+        const timestamp = resolveReleaseTimestamp(
+          workspace.root,
+          captured.commit,
+        );
+        assert.equal(
+          timestamp.toISOString(),
+          new Date(capturedEpochSeconds * 1000).toISOString(),
+        );
+      });
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("documents rollback by repinning exactly the three project systemd units", async () => {
     const { buildReleaseManifest } = await loadReleaseModule();
     const files = [
@@ -567,7 +1763,10 @@ describe("portable release package", () => {
       workspace.write("src/auth/token.js", "export const tokenName = 'csrf';\n");
       workspace.write("src/audio/player.js", "export const play = () => {};\n");
       workspace.write("src/sessionManager.js", "export const restore = () => {};\n");
-      workspace.write("assets/voice-wave.png", Buffer.from([1, 2, 3, 4]));
+      workspace.write(
+        "outputs/product-design-prototype/public/voice-wave.png",
+        Buffer.from([1, 2, 3, 4]),
+      );
       workspace.write("backend/src/db/migrations/0001_baseline.sql", baselineMigration);
       workspace.write(
         "backend/src/db/migrations/0002_write_integrity.mjs",
@@ -624,6 +1823,10 @@ describe("portable release package", () => {
         "deployment.secret",
         "release-keystore.jks",
         "client.ppk",
+        "receipts/payment-proof.png",
+        "invoices/2026-06-17.pdf",
+        "design-references/travel-expense/internal-screen.png",
+        "handoff/expense-list.xlsx",
       ];
       for (const file of excludedFiles) workspace.write(file, `private fixture: ${file}\n`);
 
@@ -649,7 +1852,9 @@ describe("portable release package", () => {
       assert.ok(files.includes("src/auth/token.js"));
       assert.ok(files.includes("src/audio/player.js"));
       assert.ok(files.includes("src/sessionManager.js"));
-      assert.ok(files.includes("assets/voice-wave.png"));
+      assert.ok(
+        files.includes("outputs/product-design-prototype/public/voice-wave.png"),
+      );
       assert.ok(
         files.includes(
           "outputs/product-design-prototype/docs/02-开发实施方案.md",
@@ -729,6 +1934,14 @@ describe("portable release package", () => {
         "SOLUTION_WRITES_ENABLED",
         "MODEL_API_KEY",
         "WEIXIN_AGENT_API_TOKEN",
+        "ICOST_WEBHOOK_TOKEN",
+        "ICOST_WEBHOOK_OWNER",
+        "ICOST_WEBHOOK_RATE_LIMIT",
+        "ICOST_WEBHOOK_WINDOW_MS",
+        "INVOICE_OCR_COMMAND",
+        "INVOICE_PDF_TEXT_COMMAND",
+        "INVOICE_OCR_LANGUAGES",
+        "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
       ]) {
         assert.ok(
           manifest.requiredEnvNames.includes(name),
@@ -749,6 +1962,103 @@ describe("portable release package", () => {
         JSON.stringify(manifest),
         /AUTH_SESSION_SECRET\s*[:=]\s*[^",}\s]+/,
         "manifest must contain environment names only",
+      );
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+      extracted.cleanup();
+    }
+  });
+
+  it("packages the exact installed backend production dependency tree", async () => {
+    const workspace = makeWorkspace("sentelligent-production-dependencies-");
+    const output = makeWorkspace("sentelligent-production-dependencies-output-");
+    const extracted = makeWorkspace("sentelligent-production-dependencies-extracted-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      workspace.write(
+        "backend/package.json",
+        `${JSON.stringify({
+          name: "backend-fixture",
+          private: true,
+          type: "module",
+          dependencies: { "production-only": "1.0.0" },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "backend/package-lock.json",
+        `${JSON.stringify({
+          name: "backend-fixture",
+          lockfileVersion: 3,
+          requires: true,
+          packages: {
+            "": {
+              name: "backend-fixture",
+              dependencies: { "production-only": "1.0.0" },
+            },
+            "node_modules/production-only": {
+              version: "1.0.0",
+              resolved: "https://registry.invalid/production-only-1.0.0.tgz",
+              integrity: "sha512-cHJvZHVjdGlvbi1vbmx5",
+            },
+          },
+        }, null, 2)}\n`,
+      );
+      workspace.write(
+        "fake-npm/package.json",
+        '{"name":"npm","version":"10.9.7","private":true}\n',
+      );
+      const fakeNpmCli = workspace.write(
+        "fake-npm/bin/npm-cli.js",
+        [
+          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'import { join } from "node:path";',
+          'const args = process.argv.slice(2);',
+          'if (args[0] === "--version") { console.log("10.9.7"); process.exit(0); }',
+          'if (args[0] !== "ci" || !args.includes("--ignore-scripts") || !args.includes("--omit=dev")) process.exit(30);',
+          'const packageRoot = join(process.cwd(), "node_modules", "production-only");',
+          'mkdirSync(packageRoot, { recursive: true });',
+          'writeFileSync(join(packageRoot, "package.json"), "{\\"name\\":\\"production-only\\",\\"version\\":\\"1.0.0\\"}\\n");',
+          'writeFileSync(join(packageRoot, "index.js"), "export const productionOnly = true;\\n");',
+          '',
+        ].join("\n"),
+      );
+      commitWorkspace(workspace);
+
+      await withEnvironmentVariable(
+        "SENTELLIGENT_RELEASE_NPM_CLI",
+        fakeNpmCli,
+        async () => {
+          const { createReleasePackage } = await loadReleaseModule();
+          const result = await createReleasePackage({
+            sourceRoot: workspace.root,
+            outputDir: output.root,
+            createdAt: "2026-08-07T00:00:00.000Z",
+          });
+          extractArchive(result.archivePath, extracted.root);
+          const packageRoot = join(extracted.root, result.rootDirectory);
+          const dependencyPath =
+            "backend/node_modules/production-only/index.js";
+          assert.equal(
+            readFileSync(join(packageRoot, dependencyPath), "utf8"),
+            "export const productionOnly = true;\n",
+          );
+          assert.equal(
+            result.manifest.productionDependencyHashes.files[dependencyPath],
+            sha256("export const productionOnly = true;\n"),
+          );
+          assert.ok(
+            !Object.hasOwn(result.manifest.sourceHashes.files, dependencyPath),
+          );
+          assert.deepEqual(
+            result.manifest.buildProvenance.backend.install,
+            {
+              command: "npm ci",
+              ignoreScripts: true,
+              omitDev: true,
+            },
+          );
+        },
       );
     } finally {
       workspace.cleanup();
@@ -846,7 +2156,14 @@ describe("portable release package", () => {
       writeMinimumReleaseFixture(workspace);
       workspace.write(
         "backend/tests/machine-auth.test.js",
-        'const config = { weixinAgentApiToken: "machine-secret" };\n',
+        [
+          'const config = { weixinAgentApiToken: "machine-secret" };',
+          'const loginPassword = "fixture-password-for-tests";',
+          'const icostWebhookToken = "qa-icost-webhook-token";',
+          'const modelApiKey = "test-expense-analysis-key";',
+          'const providerSecret = "test-provider-error-secret";',
+          "",
+        ].join("\n"),
       );
       commitWorkspace(workspace);
 

@@ -52,6 +52,7 @@ import {
   WeeklyPage,
 } from "./features/salesWorkbench/pages.jsx";
 import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage.jsx";
+import { TravelExpensePage } from "./features/travelExpense/TravelExpensePage.jsx";
 import { mergeEntityByVersion } from "./quickRecordModel.js";
 import { getCurrentWeekRange } from "./weekRange.js";
 
@@ -1070,6 +1071,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 onEdit={() => setItineraryViewMode("edit")}
                 onSave={handleSaveItinerary}
                 onDelete={handleDeleteItinerary}
+              />
+            )}
+            {active === "expense" && (
+              <TravelExpensePage
+                apiClient={apiClient}
+                backendStatus={backendStatus}
+                customers={workbenchCustomers}
+                itineraries={workbenchItineraries}
+                owner={authSession.displayName}
               />
             )}
             {active === "solution" && (

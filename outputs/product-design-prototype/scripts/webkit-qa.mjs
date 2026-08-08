@@ -21,6 +21,7 @@ const appRoot = resolve(here, "..");
 const workspaceRoot = resolve(appRoot, "..", "..");
 const distPath = resolve(appRoot, "dist");
 const loginPassword = "qa-login-password";
+const expenseTabs = ["overview", "ledger", "proofs", "invoices", "settlement", "organize"];
 
 function listen(server, port) {
   return new Promise((resolveListen, reject) => {
@@ -82,6 +83,24 @@ async function shellMetrics(page) {
       undersized,
     };
   });
+}
+
+async function assertExpensePageReady(page) {
+  const expensePage = page.locator('.expense-page[data-testid="page-expense"]');
+  await expensePage.waitFor();
+  await expensePage.locator(".expense-loading").waitFor({ state: "detached" });
+  assert.equal(await expensePage.locator(".expense-page-alert").count(), 0);
+
+  for (const tabId of expenseTabs) {
+    const tab = page.getByTestId(`expense-tab-${tabId}`);
+    await tab.waitFor();
+    assert.equal(await tab.count(), 1, `expense tab ${tabId} should render once`);
+  }
+
+  const naturalWeekInput = expensePage.locator('input[type="week"]');
+  await naturalWeekInput.waitFor();
+  assert.equal(await naturalWeekInput.count(), 1);
+  assert.equal(await naturalWeekInput.getAttribute("type"), "week");
 }
 
 function installSafariVoiceFallback() {
@@ -268,12 +287,29 @@ async function main() {
     await page.setViewportSize({ width: 1440, height: 900 });
     const desktopItineraryMetrics = await shellMetrics(page);
     assert.equal(desktopItineraryMetrics.overflowX, 0);
+    assert.deepEqual(desktopItineraryMetrics.undersized, []);
     assert.ok(await page.getByTestId("itinerary-create-detail").evaluate(
       (element) => element.getBoundingClientRect().height >= 44,
     ));
     const desktopScreenshotPath = resolve(evidenceDirectory, "webkit-itinerary-1440x900.png");
     await page.screenshot({ path: desktopScreenshotPath, fullPage: false });
+
+    await page.getByTestId("nav-expense").click();
+    await assertExpensePageReady(page);
+    const desktopExpenseMetrics = await shellMetrics(page);
+    assert.equal(desktopExpenseMetrics.overflowX, 0);
+    assert.deepEqual(desktopExpenseMetrics.undersized, []);
+    const desktopExpenseScreenshotPath = resolve(evidenceDirectory, "webkit-expense-1440x900.png");
+    await page.screenshot({ path: desktopExpenseScreenshotPath, fullPage: false });
+
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByTestId("nav-expense").click();
+    await assertExpensePageReady(page);
+    const mobileExpenseMetrics = await shellMetrics(page);
+    assert.equal(mobileExpenseMetrics.overflowX, 0);
+    assert.deepEqual(mobileExpenseMetrics.undersized, []);
+    const mobileExpenseScreenshotPath = resolve(evidenceDirectory, "webkit-expense-390x844.png");
+    await page.screenshot({ path: mobileExpenseScreenshotPath, fullPage: false });
 
     await page.getByTestId("nav-quick").click();
     await page.getByTestId("page-quick").waitFor();
@@ -341,10 +377,21 @@ async function main() {
       status: "passed",
       engine: "webkit",
       browserVersion: browser.version(),
-      viewports: [desktopItineraryMetrics, initialMetrics, smallMetrics],
+      viewports: [
+        desktopItineraryMetrics,
+        desktopExpenseMetrics,
+        mobileExpenseMetrics,
+        initialMetrics,
+        smallMetrics,
+      ],
       checks: {
         listActionsInPanelHeaders: true,
         semanticItineraryDate: true,
+        expenseDesktop: true,
+        expenseMobile: true,
+        expenseTabs,
+        expenseNaturalWeek: true,
+        expenseNoAlert: true,
         voiceFallback: true,
         customerReadOnly: true,
         customerCancel: true,
@@ -354,6 +401,8 @@ async function main() {
       },
       screenshots: {
         desktopItinerary: desktopScreenshotPath,
+        desktopExpense: desktopExpenseScreenshotPath,
+        mobileExpense: mobileExpenseScreenshotPath,
         mobileItinerary: screenshotPath,
       },
     };

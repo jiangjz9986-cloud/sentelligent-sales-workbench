@@ -32,15 +32,65 @@ import {
   ItineraryVersionConflictError,
   createVisitItineraryRepository,
 } from "./itinerary/repository.js";
+import {
+  TravelExpenseDependencyConflictError,
+  TravelExpenseNotFoundError,
+  TravelExpenseVersionConflictError,
+  createTravelExpenseRepository,
+} from "./travelExpense/repository.js";
+import { analyzeExpenseText } from "./travelExpense/ingestionAnalysis.js";
+import { analyzeInvoiceText } from "./travelExpense/invoiceTextAnalysis.js";
+import { createTravelExpenseIngestionRepository } from "./travelExpense/ingestionRepository.js";
+import {
+  recognizeInvoiceDocument,
+  validateDocumentFileName,
+} from "./travelExpense/invoiceRecognition.js";
+import {
+  createLocalDocumentTextExtractor,
+  probeLocalDocumentTextTools,
+} from "./travelExpense/localDocumentTextExtractor.js";
+import {
+  DocumentInboxDuplicateError,
+  DocumentInboxNotFoundError,
+  DocumentInboxStateConflictError,
+  DocumentInboxVersionConflictError,
+  createTravelExpenseDocumentInboxRepository,
+} from "./travelExpense/documentInboxRepository.js";
+import {
+  analyzePaymentProofText,
+  recognizePaymentProofDocument,
+} from "./travelExpense/paymentProofRecognition.js";
+import {
+  InvoiceDuplicateError,
+  InvoiceMatchConflictError,
+  InvoiceNotFoundError,
+  InvoiceVersionConflictError,
+  createInvoiceRepository,
+} from "./travelExpense/invoiceRepository.js";
+import { withDocumentBlobWritePreflight } from "./travelExpense/documentBlobStore.js";
+import {
+  validateTravelExpenseAdvancePayload,
+  validateTravelExpenseAttachmentPayload,
+  validateTravelExpensePayload,
+  validateTravelExpenseWeekStart,
+} from "./travelExpense/validation.js";
+import {
+  authenticateIcostWebhook,
+  createFixedWindowLimiter,
+  isIcostWebhookRouteAllowed,
+  validateIcostTextPayload,
+} from "./integrations/icostWebhook.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import {
   claimIdempotency,
   completeIdempotency,
   parseIdempotencyKey,
+  releaseIdempotencyClaim,
   requestHash,
 } from "./services/idempotency.js";
 import { HttpError } from "./http/errors.js";
+import { Base64DecodingError, decodeCanonicalBase64 } from "./http/strictBase64.js";
 import { readJsonBody } from "./http/request.js";
 import {
   sendDocument as sendHttpDocument,
@@ -91,6 +141,308 @@ const jsonColumns = {
 
 const responseContextSymbol = Symbol("responseContext");
 const requestConfigSymbol = Symbol("requestConfig");
+const TRAVEL_EXPENSE_ATTACHMENT_JSON_MAX_BYTES = 17 * 1024 * 1024;
+const INVOICE_UPLOAD_JSON_MAX_BYTES = 17 * 1024 * 1024;
+const DOCUMENT_UPLOAD_MAX_BYTES = 12 * 1024 * 1024;
+const DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH = 200_000;
+const EXTRACTED_TEXT_TRUNCATED_WARNING = "EXTRACTED_TEXT_TRUNCATED";
+const ICOST_EXPENSE_ROUTE = "/api/integrations/icost/expenses";
+
+function boundPaymentProofRecognition(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  if (typeof value.extractedText !== "string") return value;
+  const extractedText = value.extractedText.trim();
+  if (extractedText.length <= DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH) return value;
+  const warnings = Array.isArray(value.warnings) ? value.warnings : [];
+  return {
+    ...value,
+    extractedText: extractedText.slice(0, DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH),
+    warnings: [...new Set([...warnings, EXTRACTED_TEXT_TRUNCATED_WARNING])],
+  };
+}
+
+function modelCompletionUrl(baseUrl) {
+  return `${String(baseUrl ?? "https://api.deepseek.com").replace(/\/+$/, "")}/chat/completions`;
+}
+
+function createExpenseModelClient(config, fetchImpl) {
+  if (config.aiAnalysisMode !== "model") return null;
+  if (!config.modelApiKey) {
+    return async () => {
+      throw new Error("model_not_configured");
+    };
+  }
+  return async ({ signal, ...request }) => fetchImpl(modelCompletionUrl(config.modelBaseUrl), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.modelApiKey}`,
+    },
+    body: JSON.stringify(request),
+    signal,
+  });
+}
+
+function icostResponseItem(item, replayed) {
+  return {
+    id: item.id,
+    status: item.status,
+    warnings: item.warnings,
+    expenseId: item.expenseId,
+    paymentId: item.paymentId,
+    expenseReferenceCode: item.expenseReferenceCode,
+    replayed,
+  };
+}
+
+function plainObject(value, field = "body") {
+  if (
+    value === null
+    || typeof value !== "object"
+    || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+  ) {
+    validationFailure(field, "object");
+  }
+  return value;
+}
+
+function allowedPayloadKeys(value, allowed) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) validationFailure(key, "unknown");
+  }
+}
+
+function payloadText(value, field, { optional = false, max = 5000 } = {}) {
+  if ((value === undefined || value === null || value === "") && optional) return null;
+  if (typeof value !== "string" || !value.trim()) validationFailure(field, "required");
+  const normalized = value.trim();
+  if (normalized.length > max) validationFailure(field, "max");
+  return normalized;
+}
+
+function payloadPositiveCents(value, field) {
+  if (!Number.isSafeInteger(value) || value <= 0) validationFailure(field, "positiveInteger");
+  return value;
+}
+
+function payloadOptionalPositiveCents(value, field) {
+  if (value === undefined || value === null || value === "") return null;
+  return payloadPositiveCents(value, field);
+}
+
+function payloadDateOnly(value, field) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    validationFailure(field, "date");
+  }
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() + 1 !== month
+    || date.getUTCDate() !== day
+  ) {
+    validationFailure(field, "date");
+  }
+  return value;
+}
+
+function payloadTime(value, field) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value)) {
+    validationFailure(field, "time");
+  }
+  return value;
+}
+
+function decodeStrictBase64(value, field = "contentBase64") {
+  try {
+    return decodeCanonicalBase64(value, { maxDecodedBytes: DOCUMENT_UPLOAD_MAX_BYTES });
+  } catch (error) {
+    if (error instanceof Base64DecodingError) validationFailure(field, error.reason);
+    throw error;
+  }
+}
+
+function payloadFileName(value, field = "fileName") {
+  try {
+    return validateDocumentFileName(value);
+  } catch {
+    validationFailure(field, "invalid");
+  }
+}
+
+function encodeContentDispositionFileName(fileName) {
+  return encodeURIComponent(fileName).replace(/[!'()*]/g, (character) => (
+    `%${character.codePointAt(0).toString(16).toUpperCase()}`
+  ));
+}
+
+function inlineContentDisposition(fileName) {
+  return `inline; filename*=UTF-8''${encodeContentDispositionFileName(fileName)}`;
+}
+
+function validateInvoiceUploadPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["fileName", "mediaType", "contentBase64", "sourceRef"]));
+  return {
+    fileName: payloadFileName(body.fileName),
+    mediaType: payloadText(body.mediaType, "mediaType", { max: 100 }),
+    content: decodeStrictBase64(body.contentBase64),
+    sourceRef: payloadText(body.sourceRef, "sourceRef", { optional: true, max: 500 }),
+  };
+}
+
+function validateTravelExpenseDocumentInboxPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set([
+    "expenseReferenceCode",
+    "fileName",
+    "mediaType",
+    "contentBase64",
+    "sourceRef",
+    "textHint",
+    "amountCents",
+    "occurredOn",
+    "paidTime",
+    "matchMode",
+  ]));
+  const expenseReferenceCode = payloadText(
+    body.expenseReferenceCode,
+    "expenseReferenceCode",
+    { optional: true, max: 200 },
+  );
+  const matchMode = payloadText(body.matchMode, "matchMode", { max: 50 });
+  if (!new Set(["candidates_only", "expense_reference"]).has(matchMode)) {
+    validationFailure("matchMode", "enum");
+  }
+  if (matchMode === "expense_reference" && !expenseReferenceCode) {
+    validationFailure("expenseReferenceCode", "required");
+  }
+  if (matchMode === "candidates_only" && expenseReferenceCode) {
+    validationFailure("expenseReferenceCode", "forbidden");
+  }
+  return {
+    expenseReferenceCode: expenseReferenceCode?.toUpperCase() ?? null,
+    fileName: payloadFileName(body.fileName),
+    mediaType: payloadText(body.mediaType, "mediaType", { max: 100 }),
+    content: decodeStrictBase64(body.contentBase64),
+    sourceRef: payloadText(body.sourceRef, "sourceRef", { max: 500 }),
+    textHint: payloadText(body.textHint, "textHint", { optional: true, max: 2000 }),
+    amountCents: payloadOptionalPositiveCents(body.amountCents, "amountCents"),
+    occurredOn: payloadDateOnly(body.occurredOn, "occurredOn"),
+    paidTime: payloadTime(body.paidTime, "paidTime"),
+    matchMode,
+  };
+}
+
+function validateDocumentInboxConfirmPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["expenseReferenceCode", "paymentId"]));
+  return {
+    expenseReferenceCode: payloadText(body.expenseReferenceCode, "expenseReferenceCode", { max: 200 }).toUpperCase(),
+    paymentId: payloadText(body.paymentId, "paymentId", { max: 200 }),
+  };
+}
+
+function documentInboxResponseItem(item) {
+  const recognition = item?.recognition && typeof item.recognition === "object"
+    ? item.recognition
+    : null;
+  return {
+    ...item,
+    candidates: Array.isArray(recognition?.candidates) ? recognition.candidates : [],
+    attachmentId: typeof recognition?.attachmentId === "string" ? recognition.attachmentId : null,
+  };
+}
+
+function validateInvoiceReviewPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set([
+    "invoiceCode",
+    "invoiceNumber",
+    "issuedOn",
+    "sellerName",
+    "buyerName",
+    "amountExTaxCents",
+    "taxCents",
+    "totalCents",
+    "suggestedCategory",
+  ]));
+  return body;
+}
+
+function validateInvoiceMatchPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["expenseReferenceCode", "paymentId", "allocatedCents", "matchMethod"]));
+  return {
+    expenseReferenceCode: payloadText(body.expenseReferenceCode, "expenseReferenceCode", { max: 200 }),
+    paymentId: payloadText(body.paymentId, "paymentId", { optional: true, max: 200 }),
+    allocatedCents: payloadPositiveCents(body.allocatedCents, "allocatedCents"),
+    matchMethod: payloadText(body.matchMethod ?? "manual_selection", "matchMethod", { max: 50 }),
+  };
+}
+
+function validateNoInvoicePayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["paymentId", "reason"]));
+  return {
+    paymentId: payloadText(body.paymentId, "paymentId", { optional: true, max: 200 }),
+    reason: payloadText(body.reason, "reason", { max: 1000 }),
+  };
+}
+
+function validateNoInvoiceRevokePayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["confirmationId"]));
+  return { confirmationId: payloadText(body.confirmationId, "confirmationId", { max: 200 }) };
+}
+
+function optionalQueryBoolean(value, field) {
+  if (value === null || value === undefined || value === "") return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  validationFailure(field, "boolean");
+}
+
+function invoiceRepositoryFailure(error) {
+  if (error instanceof InvoiceDuplicateError) {
+    throw new HttpError(409, error.code, error.message, { existingInvoiceId: error.existingInvoiceId });
+  }
+  if (error instanceof InvoiceNotFoundError) {
+    throw new HttpError(404, error.code, error.message);
+  }
+  if (error instanceof InvoiceVersionConflictError) {
+    throw new HttpError(409, error.code, error.message, { currentVersion: error.currentVersion });
+  }
+  if (error instanceof InvoiceMatchConflictError) {
+    throw new HttpError(409, error.code, error.message);
+  }
+  if (error instanceof TypeError) {
+    throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { body: error.message });
+  }
+  throw error;
+}
+
+function documentInboxRepositoryFailure(error) {
+  if (error instanceof DocumentInboxDuplicateError) {
+    throw new HttpError(409, error.code, error.message, { existingDocumentId: error.existingId });
+  }
+  if (error instanceof DocumentInboxNotFoundError) {
+    throw new HttpError(404, error.code, error.message);
+  }
+  if (error instanceof DocumentInboxVersionConflictError) {
+    throw new HttpError(409, error.code, error.message, { currentVersion: error.currentVersion });
+  }
+  if (error instanceof DocumentInboxStateConflictError) {
+    throw new HttpError(409, error.code, error.message, { status: error.status });
+  }
+  if (error instanceof TypeError) {
+    throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { body: error.message });
+  }
+  throw error;
+}
 
 function parseJson(value, fallback = []) {
   if (!value) return fallback;
@@ -441,17 +793,19 @@ function softDeleteAuditSnapshot(entityType, entity, lifecycle = {}) {
   };
 }
 
-function listAuditLogs(db, searchParams) {
+function listAuditLogs(db, searchParams, account) {
   const limit = Math.max(1, Math.min(Number(searchParams.get("limit")) || 100, 500));
   return all(
     db,
     `SELECT * FROM audit_logs
-     WHERE ($action IS NULL OR action = $action)
+     WHERE (actor = $account OR json_extract(metadata_json, '$.owner') = $account)
+       AND ($action IS NULL OR action = $action)
        AND ($entityType IS NULL OR entity_type = $entityType)
        AND ($entityId IS NULL OR entity_id = $entityId)
      ORDER BY created_at DESC
      LIMIT $limit`,
     {
+      $account: account,
       $action: searchParams.get("action") || null,
       $entityType: searchParams.get("entityType") || null,
       $entityId: searchParams.get("entityId") || null,
@@ -475,9 +829,9 @@ function sendDocument(response, statusCode, body, headers = {}) {
   sendHttpDocument(response, statusCode, body, responseOptions(response, headers));
 }
 
-async function readJson(request) {
+async function readJson(request, { maxBytes } = {}) {
   return readJsonBody(request, {
-    maxBytes: request[requestConfigSymbol]?.jsonBodyLimitBytes,
+    maxBytes: maxBytes ?? request[requestConfigSymbol]?.jsonBodyLimitBytes,
   });
 }
 
@@ -1674,6 +2028,95 @@ function itineraryRepositoryFailure(error) {
   throw error;
 }
 
+function travelExpenseRepositoryFailure(error) {
+  if (error instanceof TravelExpenseNotFoundError) notFound();
+  if (error instanceof TravelExpenseVersionConflictError) {
+    throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+      currentVersion: error.currentVersion,
+    });
+  }
+  if (error instanceof TravelExpenseDependencyConflictError) {
+    throw new HttpError(409, error.code, error.message);
+  }
+  throw error;
+}
+
+function travelExpenseAuditSnapshot(item) {
+  if (!item) return null;
+  return {
+    id: item.id,
+    version: item.version,
+    owner: item.owner,
+    occurredOn: item.occurredOn,
+    category: item.category,
+    purpose: item.purpose,
+    merchant: item.merchant,
+    invoiceStatus: item.invoiceStatus,
+    paymentCount: item.payments.length,
+    attachmentCount: item.attachments.length,
+    actualPaidCents: item.actualPaidCents,
+    reimbursementCents: item.reimbursementCents,
+    createdBy: item.createdBy,
+    updatedBy: item.updatedBy,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    ...(item.deletedAt ? { deletedAt: item.deletedAt, deletedBy: item.deletedBy } : {}),
+  };
+}
+
+function travelExpenseAttachmentAuditSnapshot(item) {
+  if (!item) return null;
+  return {
+    id: item.id,
+    expenseId: item.expenseId,
+    paymentIds: item.paymentIds,
+    sequence: item.sequence,
+    kind: item.kind,
+    fileName: item.fileName,
+    mediaType: item.mediaType,
+    sizeBytes: item.sizeBytes,
+    coveredCents: item.coveredCents,
+    notes: item.notes,
+    createdBy: item.createdBy,
+    createdAt: item.createdAt,
+  };
+}
+
+function travelExpenseAdvanceFromRow(row) {
+  if (!row) return null;
+  const item = {
+    id: row.id,
+    version: Number(row.version),
+    owner: row.owner,
+    weekStart: row.week_start,
+    status: row.status,
+    requestedCents: Number(row.requested_cents),
+    receivedCents: Number(row.received_cents),
+    requestedOn: row.requested_on,
+    receivedOn: row.received_on,
+    purpose: row.purpose,
+    notes: row.notes,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+  if (row.deleted_at) {
+    item.deletedAt = row.deleted_at;
+    item.deletedBy = row.deleted_by;
+  }
+  return item;
+}
+
+function activeTravelExpenseAdvance(db, id, owner) {
+  return travelExpenseAdvanceFromRow(get(
+    db,
+    `SELECT * FROM travel_expense_advances
+     WHERE id = $id AND owner = $owner AND deleted_at IS NULL`,
+    { $id: id, $owner: owner },
+  ));
+}
+
 function itineraryMapFailure(error) {
   if (!(error instanceof AmapServiceError)) throw error;
   if (error.code === "AMAP_LOCATION_MISMATCH") {
@@ -1792,6 +2235,79 @@ export function createServer(options = {}) {
     clock: options.itineraryClock ?? (() => new Date()),
     ...(options.itineraryIdFactory ? { idFactory: options.itineraryIdFactory } : {}),
   });
+  const travelExpenseRepository = createTravelExpenseRepository(db, {
+    clock: options.travelExpenseClock ?? (() => new Date()),
+    ...(options.travelExpenseIdFactory ? { idFactory: options.travelExpenseIdFactory } : {}),
+  });
+  const travelExpenseDocumentInboxRepository = createTravelExpenseDocumentInboxRepository(db, {
+    clock: options.travelExpenseDocumentInboxClock ?? options.travelExpenseClock ?? (() => new Date()),
+    ...(options.travelExpenseDocumentInboxIdFactory
+      ? { idFactory: options.travelExpenseDocumentInboxIdFactory }
+      : {}),
+  });
+  const invoiceRepository = createInvoiceRepository(db, {
+    clock: options.invoiceClock ?? options.travelExpenseClock ?? (() => new Date()),
+    ...(options.invoiceIdFactory ? { idFactory: options.invoiceIdFactory } : {}),
+    ...(options.invoiceMatchIdFactory ? { matchIdFactory: options.invoiceMatchIdFactory } : {}),
+    ...(options.noInvoiceConfirmationIdFactory
+      ? { confirmationIdFactory: options.noInvoiceConfirmationIdFactory }
+      : {}),
+    ...(options.invoiceCandidateIdFactory
+      ? { candidateIdFactory: options.invoiceCandidateIdFactory }
+      : {}),
+  });
+  const invoiceTextTools = options.invoiceTextTools ?? probeLocalDocumentTextTools({
+    ocrCommand: config.invoiceOcrCommand,
+    pdfTextCommand: config.invoicePdfTextCommand,
+  });
+  const invoiceTextExtractor = options.invoiceTextExtractor ?? createLocalDocumentTextExtractor({
+    ocrCommand: config.invoiceOcrCommand,
+    pdfTextCommand: config.invoicePdfTextCommand,
+    ocrLanguages: config.invoiceOcrLanguages,
+    timeoutMs: config.invoiceTextExtractionTimeoutMs,
+  });
+  const invoiceRecognizer = options.invoiceRecognizer ?? ((file) => recognizeInvoiceDocument(file, {
+    textExtractor: invoiceTextExtractor,
+    analyzeText: options.invoiceTextAnalyzer ?? ((text) => analyzeInvoiceText(text, {
+      modelClient: expenseModelClient,
+      modelName: config.modelName,
+      modelTimeoutMs: config.modelTimeoutMs,
+    })),
+  }));
+  const travelExpenseIngestionRepository = createTravelExpenseIngestionRepository(db, {
+    clock: options.travelExpenseIngestionClock ?? options.travelExpenseClock ?? (() => new Date()),
+    ...(options.travelExpenseIngestionIdFactory
+      ? { idFactory: options.travelExpenseIngestionIdFactory }
+      : {}),
+  });
+  const icostRateLimiter = options.icostRateLimiter ?? createFixedWindowLimiter({
+    limit: config.icostWebhookRateLimit,
+    windowMs: config.icostWebhookWindowMs,
+    clock: options.icostRateLimitClock ?? Date.now,
+  });
+  const expenseModelClient = createExpenseModelClient(config, options.fetchImpl ?? fetch);
+  const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => (
+    recognizePaymentProofDocument(file, {
+      typedEvidence: recognitionOptions.typedEvidence,
+      textExtractor: invoiceTextExtractor,
+      analyzeText: options.paymentProofTextAnalyzer ?? ((text) => analyzePaymentProofText(text, {
+        modelClient: expenseModelClient,
+        modelName: config.modelName,
+        modelTimeoutMs: config.modelTimeoutMs,
+      })),
+      modelProvider: config.modelProvider,
+      modelName: config.modelName,
+      modelTimeoutMs: config.modelTimeoutMs,
+    })
+  ));
+  const travelExpenseAnalyzer = options.travelExpenseAnalyzer ?? ((text) => analyzeExpenseText(text, {
+    clock: options.travelExpenseAnalysisClock ?? options.travelExpenseClock ?? (() => new Date()),
+    modelClient: expenseModelClient,
+    modelProvider: config.modelProvider,
+    modelName: config.modelName,
+    modelTimeoutMs: config.modelTimeoutMs,
+    minModelConfidence: 0.8,
+  }));
   const salesDecisionRepository = createSalesDecisionRepository(db, {
     ...(options.salesDecisionIdFactory ? { idFactory: options.salesDecisionIdFactory } : {}),
     ...(options.salesDecisionClock ? { clock: options.salesDecisionClock } : {}),
@@ -1858,6 +2374,7 @@ export function createServer(options = {}) {
           modelProvider: config.modelProvider,
           modelName: config.modelName,
           modelReady: config.aiAnalysisMode === "model" && Boolean(config.modelApiKey),
+          invoiceTextTools,
           authEnabled: isAuthEnabled(config),
         });
         return;
@@ -1891,6 +2408,88 @@ export function createServer(options = {}) {
         }, {
           "Set-Cookie": buildSessionCookie(config, session.cookieValue),
         });
+        return;
+      }
+
+      if (url.pathname === ICOST_EXPENSE_ROUTE) {
+        if (!isIcostWebhookRouteAllowed(request.method, url.pathname)) {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for the iCost expense webhook"),
+            responseOptions(response, { Allow: "POST" }),
+          );
+          return;
+        }
+        const integrationIdentity = authenticateIcostWebhook(request.headers.authorization, config);
+        if (!integrationIdentity) return unauthorized(response);
+
+        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
+        const rateLimit = icostRateLimiter.consume(`${integrationIdentity.account}\u0000${remoteAddress}`);
+        if (!rateLimit.allowed) {
+          sendHttpError(
+            response,
+            new HttpError(429, "RATE_LIMITED", "Too many iCost expense writes"),
+            responseOptions(response, {
+              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
+            }),
+          );
+          return;
+        }
+
+        const body = validateIcostTextPayload(await readJson(request));
+        const received = travelExpenseIngestionRepository.receive({
+          owner: integrationIdentity.account,
+          actor: "icost-webhook",
+          source: "icost",
+          idempotencyKey: body.idempotencyKey,
+          requestHash: requestHash(body),
+          rawText: body.text,
+          capturedAt: body.capturedAt ?? null,
+          sourceId: body.sourceId ?? null,
+        });
+
+        if (received.replayed && ["accepted", "review_required"].includes(received.item.status)) {
+          sendJson(response, 200, { item: icostResponseItem(received.item, true) });
+          return;
+        }
+
+        const claimed = travelExpenseIngestionRepository.claim(received.item.id, {
+          leaseMs: Math.max(60_000, config.modelTimeoutMs * 2),
+        });
+        if (claimed.replayed) {
+          sendJson(response, 200, { item: icostResponseItem(claimed.item, true) });
+          return;
+        }
+
+        let analysis;
+        try {
+          analysis = await travelExpenseAnalyzer(body.text, {
+            capturedAt: body.capturedAt ?? null,
+            sourceId: body.sourceId ?? null,
+          });
+        } catch {
+          analysis = {
+            status: "review_required",
+            confidence: 0,
+            expense: null,
+            warnings: ["model_error"],
+            source: {
+              provider: config.modelProvider || "deepseek",
+              model: config.modelName || null,
+            },
+          };
+        }
+        const completed = travelExpenseIngestionRepository.complete(received.item.id, {
+          analysis,
+          leaseToken: claimed.leaseToken,
+        });
+        const replayed = received.replayed || completed.replayed;
+        const statusCode = replayed
+          ? 200
+          : completed.item.status === "accepted"
+            ? 201
+            : 202;
+        sendJson(response, statusCode, { item: icostResponseItem(completed.item, replayed) });
         return;
       }
 
@@ -1941,7 +2540,1508 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/audit-logs") {
-        sendJson(response, 200, { items: listAuditLogs(db, url.searchParams) });
+        sendJson(response, 200, {
+          items: listAuditLogs(db, url.searchParams, request.authContext.account),
+        });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/travel-expense-document-inbox") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        let items;
+        try {
+          items = travelExpenseDocumentInboxRepository.listDocuments({
+            owner: request.authContext.account,
+            status: url.searchParams.get("status"),
+            documentKind: url.searchParams.get("documentKind"),
+          });
+        } catch (error) {
+          documentInboxRepositoryFailure(error);
+        }
+        sendJson(response, 200, { items: items.map(documentInboxResponseItem) });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 3
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-document-inbox"
+        && parts[2]
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const item = travelExpenseDocumentInboxRepository.getDocument(parts[2], {
+          owner: request.authContext.account,
+        });
+        if (!item) notFound();
+        sendJson(response, 200, { item: documentInboxResponseItem(item) });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-document-inbox"
+        && parts[2]
+        && parts[3] === "content"
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const item = travelExpenseDocumentInboxRepository.getDocumentContent(parts[2], {
+          owner: request.authContext.account,
+        });
+        if (!item) notFound();
+        sendDocument(response, 200, item.content, {
+          "Content-Type": item.mediaType,
+          "Content-Length": String(item.sizeBytes),
+          "Content-Disposition": inlineContentDisposition(item.fileName),
+          "Cache-Control": "no-store",
+        });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-document-inbox"
+        && parts[2]
+        && parts[3] === "confirm"
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const expectedVersion = parseExpectedVersion(request);
+        const body = validateDocumentInboxConfirmPayload(await readJson(request));
+        const inboxContent = travelExpenseDocumentInboxRepository.getDocumentContent(parts[2], {
+          owner: request.authContext.account,
+        });
+        if (!inboxContent) notFound();
+
+        const item = await withDocumentBlobWritePreflight(db, {
+          owner: request.authContext.account,
+          content: inboxContent.content,
+        }, (encodedDocumentBlob) => withImmediateTransaction(db, () => {
+          const beforeInbox = travelExpenseDocumentInboxRepository.getDocument(parts[2], {
+            owner: request.authContext.account,
+          });
+          if (!beforeInbox) notFound();
+          if (beforeInbox.version !== expectedVersion) {
+            throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+              currentVersion: beforeInbox.version,
+            });
+          }
+          if (beforeInbox.status !== "review_required") {
+            throw new HttpError(409, "DOCUMENT_INBOX_STATE_CONFLICT", "Document inbox item is no longer awaiting review", {
+              status: beforeInbox.status,
+            });
+          }
+
+          const expenseReference = travelExpenseDocumentInboxRepository.findExpenseByReference({
+            owner: request.authContext.account,
+            referenceCode: body.expenseReferenceCode,
+          });
+          if (!expenseReference) notFound();
+          const beforeExpense = travelExpenseRepository.getExpense(expenseReference.id, {
+            owner: request.authContext.account,
+          });
+          if (!beforeExpense) notFound();
+          const payment = beforeExpense.payments.find((candidate) => candidate.id === body.paymentId);
+          if (!payment) {
+            throw new HttpError(422, "PAYMENT_NOT_IN_EXPENSE", "The selected payment does not belong to this expense");
+          }
+
+          let updatedExpense;
+          try {
+            updatedExpense = travelExpenseRepository.addAttachment(beforeExpense.id, {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion: beforeExpense.version,
+              paymentIds: [payment.id],
+              kind: "payment_proof",
+              fileName: inboxContent.fileName,
+              mediaType: inboxContent.mediaType,
+              content: inboxContent.content,
+              encodedDocumentBlob,
+              coveredCents: payment.reimbursementCents,
+              notes: "微信付款凭证人工确认",
+            });
+          } catch (error) {
+            travelExpenseRepositoryFailure(error);
+          }
+          const previousAttachmentIds = new Set(beforeExpense.attachments.map((attachment) => attachment.id));
+          const attachment = updatedExpense.attachments.find((candidate) => !previousAttachmentIds.has(candidate.id));
+          if (!attachment) throw new Error("Payment proof confirmation did not return the new attachment");
+
+          let matchedInbox;
+          try {
+            matchedInbox = travelExpenseDocumentInboxRepository.markMatched(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+              matchedExpenseId: beforeExpense.id,
+              matchedPaymentId: payment.id,
+              attachmentId: attachment.id,
+            });
+          } catch (error) {
+            documentInboxRepositoryFailure(error);
+          }
+
+          insertAudit(db, {
+            action: "travel_expense.attachment_add",
+            entityType: "travel_expense_attachment",
+            entityId: attachment.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: travelExpenseAttachmentAuditSnapshot(attachment),
+            entityVersion: updatedExpense.version,
+            metadata: {
+              expenseId: updatedExpense.id,
+              expenseVersion: updatedExpense.version,
+              source: "weixin_review",
+              documentInboxId: matchedInbox.id,
+            },
+          });
+          insertAudit(db, {
+            action: "travel_expense_document_inbox.confirm",
+            entityType: "travel_expense_document_inbox",
+            entityId: matchedInbox.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { id: beforeInbox.id, status: beforeInbox.status, version: beforeInbox.version },
+            after: { id: matchedInbox.id, status: matchedInbox.status, version: matchedInbox.version },
+            entityVersion: matchedInbox.version,
+            metadata: {
+              expenseId: updatedExpense.id,
+              paymentId: payment.id,
+              attachmentId: attachment.id,
+            },
+          });
+          return documentInboxResponseItem(matchedInbox);
+        }));
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-document-inbox"
+        && parts[2]
+        && parts[3] === "reject"
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        let item;
+        try {
+          item = withImmediateTransaction(db, () => {
+            const before = travelExpenseDocumentInboxRepository.getDocument(parts[2], {
+              owner: request.authContext.account,
+            });
+            if (!before) notFound();
+            const rejected = travelExpenseDocumentInboxRepository.rejectDocument(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+            insertAudit(db, {
+              action: "travel_expense_document_inbox.reject",
+              entityType: "travel_expense_document_inbox",
+              entityId: rejected.id,
+              actor: request.authContext.account,
+              requestId,
+              before: { id: before.id, status: before.status, version: before.version },
+              after: { id: rejected.id, status: rejected.status, version: rejected.version },
+              entityVersion: rejected.version,
+              metadata: { source: rejected.source },
+            });
+            return documentInboxResponseItem(rejected);
+          });
+        } catch (error) {
+          documentInboxRepositoryFailure(error);
+        }
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/travel-expense-document-inbox") {
+        if (request.authContext.kind !== "machine") {
+          throw new HttpError(403, "MACHINE_REQUIRED", "This document inbox accepts WeChat machine requests only");
+        }
+        const rawBody = await readJson(request, { maxBytes: TRAVEL_EXPENSE_ATTACHMENT_JSON_MAX_BYTES });
+        const body = validateTravelExpenseDocumentInboxPayload(rawBody);
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: parseIdempotencyKey(request),
+          hash: requestHash(rawBody),
+        };
+        const claim = claimIdempotency(db, idempotencyScope);
+        if (claim.replay) {
+          sendJson(response, claim.status, claim.body);
+          return;
+        }
+
+        try {
+          if (body.matchMode === "expense_reference") {
+            const referencedExpense = travelExpenseDocumentInboxRepository.findExpenseByReference({
+              owner: request.authContext.account,
+              referenceCode: body.expenseReferenceCode,
+            });
+            if (!referencedExpense) notFound();
+          }
+          const recognition = boundPaymentProofRecognition(await paymentProofRecognizer({
+            fileName: body.fileName,
+            mediaType: body.mediaType,
+            buffer: body.content,
+          }, {
+            typedEvidence: {
+              amountCents: body.amountCents,
+              occurredOn: body.occurredOn,
+              paidTime: body.paidTime,
+            },
+          }));
+          const recognizedEvidence = recognition?.evidence && typeof recognition.evidence === "object"
+            ? recognition.evidence
+            : {};
+          const conflictFields = new Set(Array.isArray(recognition?.conflicts)
+            ? recognition.conflicts.map((conflict) => conflict?.field).filter(Boolean)
+            : []);
+          const effectiveEvidence = Object.fromEntries(
+            ["amountCents", "occurredOn", "paidTime"].map((field) => [
+              field,
+              conflictFields.has(field) ? null : body[field] ?? recognizedEvidence[field] ?? null,
+            ]),
+          );
+          const usedRecognizedEvidence = ["amountCents", "occurredOn", "paidTime"]
+            .some((field) => body[field] === null && effectiveEvidence[field] !== null);
+
+          const result = await withDocumentBlobWritePreflight(db, {
+            owner: request.authContext.account,
+            content: body.content,
+          }, (encodedDocumentBlob) => withImmediateTransaction(db, () => {
+            if (body.matchMode === "expense_reference") {
+              const referencedExpense = travelExpenseDocumentInboxRepository.findExpenseByReference({
+                owner: request.authContext.account,
+                referenceCode: body.expenseReferenceCode,
+              });
+              if (!referencedExpense) notFound();
+            }
+            const candidates = travelExpenseDocumentInboxRepository.findPaymentCandidates({
+              owner: request.authContext.account,
+              expenseReferenceCode: body.matchMode === "expense_reference"
+                ? body.expenseReferenceCode
+                : null,
+              amountCents: effectiveEvidence.amountCents,
+              occurredOn: effectiveEvidence.occurredOn,
+              paidTime: effectiveEvidence.paidTime,
+            });
+            const hasCompleteTypedEvidence = body.amountCents !== null
+              && body.occurredOn !== null
+              && body.paidTime !== null;
+            const matchedCandidate = body.matchMode === "expense_reference"
+              && hasCompleteTypedEvidence
+              && conflictFields.size === 0
+              && !recognition?.warnings?.includes(EXTRACTED_TEXT_TRUNCATED_WARNING)
+              && candidates.length === 1
+              ? candidates[0]
+              : null;
+            const before = matchedCandidate
+              ? travelExpenseRepository.getExpense(matchedCandidate.expenseId, {
+                  owner: request.authContext.account,
+                })
+              : null;
+            if (matchedCandidate && !before) notFound();
+
+            let inboxItem;
+            try {
+              inboxItem = travelExpenseDocumentInboxRepository.createDocument({
+                owner: request.authContext.account,
+                actor: request.authContext.account,
+                source: "weixin",
+                sourceRef: body.sourceRef,
+                documentKind: "payment_proof",
+                fileName: body.fileName,
+                mediaType: body.mediaType,
+                content: body.content,
+                encodedDocumentBlob,
+                status: matchedCandidate ? "matched" : "review_required",
+                extractedText: recognition?.extractedText ?? null,
+                recognition: {
+                  ...recognition,
+                  expenseReferenceCode: body.expenseReferenceCode,
+                  matchMode: body.matchMode,
+                  textHint: body.textHint,
+                  effectiveEvidence,
+                  usedRecognizedEvidence,
+                  candidates,
+                },
+                errorCode: matchedCandidate ? null : recognition?.warnings?.[0] ?? null,
+                matchedExpenseId: matchedCandidate?.expenseId ?? null,
+                matchedPaymentId: matchedCandidate?.paymentId ?? null,
+              });
+            } catch (error) {
+              documentInboxRepositoryFailure(error);
+            }
+
+            let attachmentId = null;
+            if (matchedCandidate) {
+              let updated;
+              try {
+                updated = travelExpenseRepository.addAttachment(matchedCandidate.expenseId, {
+                  owner: request.authContext.account,
+                  actor: request.authContext.account,
+                  expectedVersion: before.version,
+                  paymentIds: [matchedCandidate.paymentId],
+                  kind: "payment_proof",
+                  fileName: body.fileName,
+                  mediaType: body.mediaType,
+                  content: body.content,
+                  encodedDocumentBlob,
+                  coveredCents: matchedCandidate.reimbursementCents,
+                  notes: "微信导入付款凭证",
+                });
+              } catch (error) {
+                travelExpenseRepositoryFailure(error);
+              }
+              const previousAttachmentIds = new Set(before.attachments.map((item) => item.id));
+              const added = updated.attachments.find((item) => !previousAttachmentIds.has(item.id));
+              if (!added) throw new Error("WeChat payment proof write did not return the new attachment");
+              attachmentId = added.id;
+              insertAudit(db, {
+                action: "travel_expense.attachment_add",
+                entityType: "travel_expense_attachment",
+                entityId: added.id,
+                actor: request.authContext.account,
+                requestId,
+                before: null,
+                after: travelExpenseAttachmentAuditSnapshot(added),
+                entityVersion: updated.version,
+                metadata: {
+                  expenseId: updated.id,
+                  expenseVersion: updated.version,
+                  kind: added.kind,
+                  sizeBytes: added.sizeBytes,
+                  source: "weixin",
+                },
+              });
+            }
+
+            const responseBody = {
+              item: {
+                ...documentInboxResponseItem(inboxItem),
+                expenseReferenceCode: body.expenseReferenceCode,
+                candidates,
+                attachmentId,
+              },
+            };
+            insertAudit(db, {
+              action: "travel_expense_document_inbox.create",
+              entityType: "travel_expense_document_inbox",
+              entityId: inboxItem.id,
+              actor: request.authContext.account,
+              requestId,
+              before: null,
+              after: {
+                id: inboxItem.id,
+                status: inboxItem.status,
+                matchedExpenseId: inboxItem.matchedExpenseId,
+                matchedPaymentId: inboxItem.matchedPaymentId,
+                sizeBytes: inboxItem.sizeBytes,
+              },
+              entityVersion: inboxItem.version,
+              metadata: {
+                source: "weixin",
+                candidateCount: candidates.length,
+                matchMode: body.matchMode,
+                usedRecognizedEvidence,
+                recognitionWarningCount: Array.isArray(recognition?.warnings) ? recognition.warnings.length : 0,
+              },
+            });
+            const status = matchedCandidate ? 201 : 202;
+            completeIdempotency(db, {
+              ...idempotencyScope,
+              claimToken: claim.claimToken,
+              status,
+              body: responseBody,
+            });
+            return { status, body: responseBody };
+          }));
+          sendJson(response, result.status, result.body);
+        } catch (error) {
+          releaseIdempotencyClaim(db, { ...idempotencyScope, claimToken: claim.claimToken });
+          documentInboxRepositoryFailure(error);
+        }
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/invoices") {
+        const items = invoiceRepository.listInvoices({
+          owner: request.authContext.account,
+          status: url.searchParams.get("status"),
+        });
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/invoice-matches") {
+        const items = invoiceRepository.listMatches({
+          owner: request.authContext.account,
+          weekStart: url.searchParams.get("weekStart") || undefined,
+          invoiceId: url.searchParams.get("invoiceId") || undefined,
+          expenseId: url.searchParams.get("expenseId") || undefined,
+          state: url.searchParams.get("state") || undefined,
+        });
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && url.pathname === "/api/travel-expense-no-invoice-confirmations"
+      ) {
+        const items = invoiceRepository.listNoInvoiceConfirmations({
+          owner: request.authContext.account,
+          weekStart: url.searchParams.get("weekStart") || undefined,
+          expenseId: url.searchParams.get("expenseId") || undefined,
+          paymentId: url.searchParams.get("paymentId") || undefined,
+          active: optionalQueryBoolean(url.searchParams.get("active"), "active"),
+        });
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/invoices") {
+        const rawBody = await readJson(request, { maxBytes: INVOICE_UPLOAD_JSON_MAX_BYTES });
+        const body = validateInvoiceUploadPayload(rawBody);
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: parseIdempotencyKey(request),
+          hash: requestHash(rawBody),
+        };
+        const claim = claimIdempotency(db, idempotencyScope);
+        if (claim.replay) {
+          sendJson(response, claim.status, claim.body);
+          return;
+        }
+
+        let recognition;
+        try {
+          recognition = await invoiceRecognizer({
+            fileName: body.fileName,
+            mediaType: body.mediaType,
+            buffer: body.content,
+          });
+        } catch {
+          recognition = {
+            status: "review_required",
+            extractedText: null,
+            ocr: null,
+            model: null,
+            conflicts: [],
+            warnings: ["RECOGNITION_FAILED"],
+            fields: {},
+          };
+        }
+
+        try {
+          const responseBody = await withDocumentBlobWritePreflight(db, {
+            owner: request.authContext.account,
+            content: body.content,
+          }, (encodedDocumentBlob) => withImmediateTransaction(db, () => {
+            let created;
+            try {
+              created = invoiceRepository.createInvoice({
+                owner: request.authContext.account,
+                actor: request.authContext.account,
+                source: request.authContext.kind === "machine" ? "weixin" : "manual",
+                sourceRef: body.sourceRef,
+                fileName: body.fileName,
+                mediaType: body.mediaType,
+                content: body.content,
+                encodedDocumentBlob,
+                recognition,
+              });
+            } catch (error) {
+              invoiceRepositoryFailure(error);
+            }
+            insertAudit(db, {
+              action: "invoice.create",
+              entityType: "invoice",
+              entityId: created.id,
+              actor: request.authContext.account,
+              requestId,
+              before: null,
+              after: {
+                id: created.id,
+                status: created.status,
+                version: created.version,
+                sizeBytes: created.sizeBytes,
+                totalCents: created.totalCents,
+                conflictCount: created.conflicts.length,
+              },
+              entityVersion: created.version,
+              metadata: { source: created.source, mediaType: created.mediaType },
+            });
+            const result = { item: created };
+            completeIdempotency(db, {
+              ...idempotencyScope,
+              claimToken: claim.claimToken,
+              status: 201,
+              body: result,
+            });
+            return result;
+          }));
+          sendJson(response, 201, responseBody);
+        } catch (error) {
+          releaseIdempotencyClaim(db, { ...idempotencyScope, claimToken: claim.claimToken });
+          invoiceRepositoryFailure(error);
+        }
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "invoices"
+        && parts[2]
+        && parts[3] === "content"
+      ) {
+        const item = invoiceRepository.getInvoiceContent(parts[2], {
+          owner: request.authContext.account,
+        });
+        if (!item) notFound();
+        sendDocument(response, 200, item.content, {
+          "Content-Type": item.mediaType,
+          "Content-Length": String(item.sizeBytes),
+          "Content-Disposition": inlineContentDisposition(item.fileName),
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 3
+        && parts[0] === "api"
+        && parts[1] === "invoices"
+        && parts[2]
+      ) {
+        const item = invoiceRepository.getInvoice(parts[2], { owner: request.authContext.account });
+        if (!item) notFound();
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "DELETE"
+        && parts.length === 3
+        && parts[0] === "api"
+        && parts[1] === "invoices"
+        && parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        const deleted = withImmediateTransaction(db, () => {
+          const before = invoiceRepository.getInvoice(parts[2], { owner: request.authContext.account });
+          if (!before) notFound();
+          let item;
+          try {
+            item = invoiceRepository.softDeleteInvoice(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "invoice.delete",
+            entityType: "invoice",
+            entityId: item.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { status: before.status, version: before.version, deletedAt: null },
+            after: { status: item.status, version: item.version, deletedAt: item.deletedAt },
+            entityVersion: item.version,
+            metadata: { sizeBytes: item.sizeBytes, mediaType: item.mediaType },
+          });
+          return item;
+        });
+        sendJson(response, 200, { deleted });
+        return;
+      }
+
+      if (
+        request.method === "PATCH"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "invoices"
+        && parts[2]
+        && parts[3] === "review"
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const fields = validateInvoiceReviewPayload(await readJson(request));
+        const item = withImmediateTransaction(db, () => {
+          const before = invoiceRepository.getInvoice(parts[2], { owner: request.authContext.account });
+          if (!before) notFound();
+          let updated;
+          try {
+            updated = invoiceRepository.finalizeReview(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+              fields,
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "invoice.review_finalize",
+            entityType: "invoice",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { status: before.status, version: before.version, conflictCount: before.conflicts.length },
+            after: { status: updated.status, version: updated.version, conflictCount: updated.conflicts.length },
+            entityVersion: updated.version,
+            metadata: { totalCents: updated.totalCents, issuedOn: updated.issuedOn },
+          });
+          return updated;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-weeks"
+        && parts[2]
+        && parts[3] === "invoice-suggestions"
+      ) {
+        const items = invoiceRepository.listMatchCandidates({
+          owner: request.authContext.account,
+          weekStart: parts[2],
+          invoiceId: url.searchParams.get("invoiceId") || undefined,
+          expenseId: url.searchParams.get("expenseId") || undefined,
+          status: url.searchParams.get("status") || undefined,
+        });
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "invoices"
+        && parts[2]
+        && parts[3] === "matches"
+      ) {
+        const expectedInvoiceVersion = parseExpectedVersion(request);
+        const body = validateInvoiceMatchPayload(await readJson(request));
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: parseIdempotencyKey(request),
+          hash: requestHash(body),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+          const invoice = invoiceRepository.getInvoice(parts[2], { owner: request.authContext.account });
+          if (!invoice) notFound();
+          if (invoice.version !== expectedInvoiceVersion) {
+            throw new HttpError(409, "VERSION_CONFLICT", "Invoice was updated by another request", {
+              currentVersion: invoice.version,
+            });
+          }
+          let match;
+          try {
+            match = invoiceRepository.createConfirmedMatch({
+              ...body,
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              invoiceId: parts[2],
+              expectedInvoiceVersion,
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "invoice.match_confirm",
+            entityType: "invoice_match",
+            entityId: match.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: {
+              state: match.state,
+              invoiceId: match.invoiceId,
+              expenseId: match.expenseId,
+              paymentId: match.paymentId,
+              allocatedCents: match.allocatedCents,
+            },
+            entityVersion: match.version,
+            metadata: { matchMethod: match.matchMethod },
+          });
+          const responseBody = { item: match };
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 201,
+            body: responseBody,
+          });
+          return { status: 201, body: responseBody };
+        });
+        sendJson(response, result.status, result.body);
+        return;
+      }
+
+      if (
+        request.method === "DELETE"
+        && parts.length === 3
+        && parts[0] === "api"
+        && parts[1] === "invoice-matches"
+        && parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        const item = withImmediateTransaction(db, () => {
+          let revoked;
+          try {
+            revoked = invoiceRepository.revokeMatch(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "invoice.match_revoke",
+            entityType: "invoice_match",
+            entityId: revoked.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { state: "confirmed" },
+            after: { state: revoked.state },
+            entityVersion: revoked.version,
+            metadata: {
+              invoiceId: revoked.invoiceId,
+              expenseId: revoked.expenseId,
+              allocatedCents: revoked.allocatedCents,
+            },
+          });
+          return revoked;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expenses"
+        && parts[2]
+        && parts[3] === "no-invoice"
+      ) {
+        const expectedExpenseVersion = parseExpectedVersion(request);
+        const body = validateNoInvoicePayload(await readJson(request));
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: parseIdempotencyKey(request),
+          hash: requestHash(body),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+          const expense = travelExpenseRepository.getExpense(parts[2], { owner: request.authContext.account });
+          if (!expense) notFound();
+          if (expense.version !== expectedExpenseVersion) {
+            throw new HttpError(409, "VERSION_CONFLICT", "Travel expense was updated by another request", {
+              currentVersion: expense.version,
+            });
+          }
+          let confirmation;
+          try {
+            confirmation = invoiceRepository.confirmNoInvoice({
+              ...body,
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expenseId: parts[2],
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "travel_expense.no_invoice_confirm",
+            entityType: "travel_expense_no_invoice_confirmation",
+            entityId: confirmation.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: {
+              expenseId: confirmation.expenseId,
+              paymentId: confirmation.paymentId,
+              amountSnapshotCents: confirmation.amountSnapshotCents,
+              active: true,
+            },
+            entityVersion: confirmation.version,
+            metadata: { reasonLength: confirmation.reason.length },
+          });
+          const responseBody = { item: confirmation };
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 201,
+            body: responseBody,
+          });
+          return { status: 201, body: responseBody };
+        });
+        sendJson(response, result.status, result.body);
+        return;
+      }
+
+      if (
+        request.method === "DELETE"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expenses"
+        && parts[2]
+        && parts[3] === "no-invoice"
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = validateNoInvoiceRevokePayload(await readJson(request));
+        const item = withImmediateTransaction(db, () => {
+          let revoked;
+          try {
+            revoked = invoiceRepository.revokeNoInvoice(body.confirmationId, {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expenseId: parts[2],
+              expectedVersion,
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "travel_expense.no_invoice_revoke",
+            entityType: "travel_expense_no_invoice_confirmation",
+            entityId: revoked.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { active: true },
+            after: { active: false, expenseId: revoked.expenseId, paymentId: revoked.paymentId },
+            entityVersion: revoked.version,
+            metadata: { amountSnapshotCents: revoked.amountSnapshotCents },
+          });
+          return revoked;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-weeks"
+        && parts[2]
+        && parts[3] === "invoice-coverage"
+      ) {
+        const item = invoiceRepository.getWeekInvoiceCoverage({
+          owner: request.authContext.account,
+          weekStart: parts[2],
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "travel-expense-weeks"
+        && parts[2]
+        && parts[3] === "invoice-suggestions"
+      ) {
+        const body = plainObject(await readJson(request));
+        allowedPayloadKeys(body, new Set());
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: parseIdempotencyKey(request),
+          hash: requestHash(body),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+          let items;
+          try {
+            items = invoiceRepository.generateMatchCandidates({
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              weekStart: parts[2],
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "invoice.suggestions_generate",
+            entityType: "travel_expense_week",
+            entityId: parts[2],
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: { weekStart: parts[2], candidateCount: items.length, status: "suggested" },
+            metadata: { proposedCents: items.reduce((sum, item) => sum + item.proposedCents, 0) },
+          });
+          const responseBody = { items };
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 201,
+            body: responseBody,
+          });
+          return { status: 201, body: responseBody };
+        });
+        sendJson(response, result.status, result.body);
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "invoice-match-candidates"
+        && parts[2]
+        && ["accept", "reject"].includes(parts[3])
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = plainObject(await readJson(request));
+        allowedPayloadKeys(body, new Set());
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: parseIdempotencyKey(request),
+          hash: requestHash({ expectedVersion }),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+
+          if (parts[3] === "accept") {
+            let accepted;
+            try {
+              accepted = invoiceRepository.acceptMatchCandidate(parts[2], {
+                owner: request.authContext.account,
+                actor: request.authContext.account,
+                expectedVersion,
+              });
+            } catch (error) {
+              invoiceRepositoryFailure(error);
+            }
+            insertAudit(db, {
+              action: "invoice.candidate_accept",
+              entityType: "invoice_match_candidate",
+              entityId: accepted.candidate.id,
+              actor: request.authContext.account,
+              requestId,
+              before: { status: "suggested", version: expectedVersion },
+              after: {
+                status: accepted.candidate.status,
+                version: accepted.candidate.version,
+                acceptedMatchId: accepted.match.id,
+              },
+              entityVersion: accepted.candidate.version,
+              metadata: {
+                invoiceId: accepted.candidate.invoiceId,
+                expenseId: accepted.candidate.expenseId,
+                proposedCents: accepted.candidate.proposedCents,
+              },
+            });
+            const responseBody = { item: accepted.candidate, match: accepted.match };
+            completeIdempotency(db, {
+              ...idempotencyScope,
+              claimToken: claim.claimToken,
+              status: 201,
+              body: responseBody,
+            });
+            return { status: 201, body: responseBody };
+          }
+
+          let rejected;
+          try {
+            rejected = invoiceRepository.rejectMatchCandidate(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            invoiceRepositoryFailure(error);
+          }
+          insertAudit(db, {
+            action: "invoice.candidate_reject",
+            entityType: "invoice_match_candidate",
+            entityId: rejected.id,
+            actor: request.authContext.account,
+            requestId,
+            before: { status: "suggested", version: expectedVersion },
+            after: { status: rejected.status, version: rejected.version },
+            entityVersion: rejected.version,
+            metadata: {
+              invoiceId: rejected.invoiceId,
+              expenseId: rejected.expenseId,
+              proposedCents: rejected.proposedCents,
+            },
+          });
+          const responseBody = { item: rejected };
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 200,
+            body: responseBody,
+          });
+          return { status: 200, body: responseBody };
+        });
+        sendJson(response, result.status, result.body);
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/travel-expenses") {
+        const weekStart = validateTravelExpenseWeekStart(url.searchParams.get("weekStart"));
+        const items = travelExpenseRepository.listExpenses({
+          owner: request.authContext.account,
+          weekStart,
+        });
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/travel-expenses") {
+        const body = validateTravelExpensePayload(await readJson(request));
+        const item = withImmediateTransaction(db, () => {
+          const created = travelExpenseRepository.createExpense({
+            ...body,
+            owner: request.authContext.account,
+            actor: request.authContext.account,
+          });
+          triggerFailpoint(options, "travelExpense.create.afterWrite");
+          insertAudit(db, {
+            action: "travel_expense.create",
+            entityType: "travel_expense",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: travelExpenseAuditSnapshot(created),
+            entityVersion: created.version,
+            metadata: {
+              occurredOn: created.occurredOn,
+              category: created.category,
+              paymentCount: created.payments.length,
+            },
+          });
+          return created;
+        });
+        sendJson(response, 201, { item });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expenses" &&
+        parts[2]
+      ) {
+        const item = travelExpenseRepository.getExpense(parts[2], {
+          owner: request.authContext.account,
+        });
+        if (!item) notFound();
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "PATCH" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expenses" &&
+        parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = validateTravelExpensePayload(await readJson(request));
+        const item = withImmediateTransaction(db, () => {
+          const before = travelExpenseRepository.getExpense(parts[2], {
+            owner: request.authContext.account,
+          });
+          if (!before) notFound();
+          let updated;
+          try {
+            updated = travelExpenseRepository.updateExpense(parts[2], {
+              ...body,
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            travelExpenseRepositoryFailure(error);
+          }
+          triggerFailpoint(options, "travelExpense.update.afterWrite");
+          insertAudit(db, {
+            action: "travel_expense.update",
+            entityType: "travel_expense",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before: travelExpenseAuditSnapshot(before),
+            after: travelExpenseAuditSnapshot(updated),
+            entityVersion: updated.version,
+            metadata: {
+              occurredOn: updated.occurredOn,
+              category: updated.category,
+              paymentCount: updated.payments.length,
+            },
+          });
+          return updated;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "DELETE" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expenses" &&
+        parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        const deleted = withImmediateTransaction(db, () => {
+          const before = travelExpenseRepository.getExpense(parts[2], {
+            owner: request.authContext.account,
+          });
+          if (!before) notFound();
+          let result;
+          try {
+            result = travelExpenseRepository.softDeleteExpense(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            travelExpenseRepositoryFailure(error);
+          }
+          triggerFailpoint(options, "travelExpense.delete.afterWrite");
+          insertAudit(db, {
+            action: "travel_expense.delete",
+            entityType: "travel_expense",
+            entityId: result.id,
+            actor: request.authContext.account,
+            requestId,
+            before: travelExpenseAuditSnapshot(before),
+            after: travelExpenseAuditSnapshot(result),
+            entityVersion: result.version,
+            metadata: {
+              occurredOn: result.occurredOn,
+              category: result.category,
+              paymentCount: result.payments.length,
+            },
+          });
+          return result;
+        });
+        sendJson(response, 200, { deleted });
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expenses" &&
+        parts[2] &&
+        parts[3] === "attachments"
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = validateTravelExpenseAttachmentPayload(await readJson(request, {
+          maxBytes: TRAVEL_EXPENSE_ATTACHMENT_JSON_MAX_BYTES,
+        }));
+        let item;
+        try {
+          item = await withDocumentBlobWritePreflight(db, {
+            owner: request.authContext.account,
+            content: body.content,
+          }, (encodedDocumentBlob) => withImmediateTransaction(db, () => {
+            const before = travelExpenseRepository.getExpense(parts[2], {
+              owner: request.authContext.account,
+            });
+            if (!before) notFound();
+            let updated;
+            try {
+              updated = travelExpenseRepository.addAttachment(parts[2], {
+                ...body,
+                owner: request.authContext.account,
+                actor: request.authContext.account,
+                expectedVersion,
+                encodedDocumentBlob,
+              });
+            } catch (error) {
+              travelExpenseRepositoryFailure(error);
+            }
+            const previousIds = new Set(before.attachments.map((attachment) => attachment.id));
+            const added = updated.attachments.find((attachment) => !previousIds.has(attachment.id));
+            if (!added) throw new Error("Travel expense attachment write did not return the new attachment");
+            triggerFailpoint(options, "travelExpense.attachmentAdd.afterWrite");
+            insertAudit(db, {
+              action: "travel_expense.attachment_add",
+              entityType: "travel_expense_attachment",
+              entityId: added.id,
+              actor: request.authContext.account,
+              requestId,
+              before: null,
+              after: travelExpenseAttachmentAuditSnapshot(added),
+              entityVersion: updated.version,
+              metadata: {
+                expenseId: updated.id,
+                expenseVersion: updated.version,
+                kind: added.kind,
+                sizeBytes: added.sizeBytes,
+              },
+            });
+            return updated;
+          }));
+        } catch (error) {
+          travelExpenseRepositoryFailure(error);
+        }
+        sendJson(response, 201, { item });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expense-attachments" &&
+        parts[2] &&
+        parts[3] === "content"
+      ) {
+        const item = travelExpenseRepository.getAttachmentContent(parts[2], {
+          owner: request.authContext.account,
+        });
+        if (!item) notFound();
+        sendDocument(response, 200, item.content, {
+          "Content-Type": item.mediaType,
+          "Content-Length": String(item.sizeBytes),
+          "Content-Disposition": inlineContentDisposition(item.fileName),
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        return;
+      }
+
+      if (
+        request.method === "DELETE" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expense-attachments" &&
+        parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        const item = withImmediateTransaction(db, () => {
+          const attachmentRow = get(
+            db,
+            `SELECT a.id, a.expense_id
+             FROM travel_expense_attachments a
+             JOIN travel_expenses e ON e.id = a.expense_id
+             WHERE a.id = $id AND e.owner = $owner AND e.deleted_at IS NULL`,
+            { $id: parts[2], $owner: request.authContext.account },
+          );
+          if (!attachmentRow) notFound();
+          const beforeExpense = travelExpenseRepository.getExpense(attachmentRow.expense_id, {
+            owner: request.authContext.account,
+          });
+          const beforeAttachment = beforeExpense?.attachments.find((attachment) => attachment.id === parts[2]);
+          if (!beforeAttachment) notFound();
+          let updated;
+          try {
+            updated = travelExpenseRepository.deleteAttachment(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            travelExpenseRepositoryFailure(error);
+          }
+          triggerFailpoint(options, "travelExpense.attachmentDelete.afterWrite");
+          insertAudit(db, {
+            action: "travel_expense.attachment_delete",
+            entityType: "travel_expense_attachment",
+            entityId: beforeAttachment.id,
+            actor: request.authContext.account,
+            requestId,
+            before: travelExpenseAttachmentAuditSnapshot(beforeAttachment),
+            after: null,
+            entityVersion: updated.version,
+            metadata: {
+              expenseId: updated.id,
+              expenseVersion: updated.version,
+              kind: beforeAttachment.kind,
+              sizeBytes: beforeAttachment.sizeBytes,
+            },
+          });
+          return updated;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/travel-expense-advances") {
+        const weekStart = validateTravelExpenseWeekStart(url.searchParams.get("weekStart"));
+        const items = travelExpenseRepository.listAdvances({
+          owner: request.authContext.account,
+          weekStart,
+        });
+        sendJson(response, 200, { items });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/travel-expense-advances") {
+        const body = validateTravelExpenseAdvancePayload(await readJson(request));
+        const item = withImmediateTransaction(db, () => {
+          const created = travelExpenseRepository.createAdvance({
+            ...body,
+            owner: request.authContext.account,
+            actor: request.authContext.account,
+          });
+          triggerFailpoint(options, "travelExpense.advanceCreate.afterWrite");
+          insertAudit(db, {
+            action: "travel_expense_advance.create",
+            entityType: "travel_expense_advance",
+            entityId: created.id,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: {
+              weekStart: created.weekStart,
+              status: created.status,
+              requestedCents: created.requestedCents,
+              receivedCents: created.receivedCents,
+            },
+          });
+          return created;
+        });
+        sendJson(response, 201, { item });
+        return;
+      }
+
+      if (
+        request.method === "PATCH" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expense-advances" &&
+        parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        const body = validateTravelExpenseAdvancePayload(await readJson(request));
+        const item = withImmediateTransaction(db, () => {
+          const before = activeTravelExpenseAdvance(db, parts[2], request.authContext.account);
+          if (!before) notFound();
+          let updated;
+          try {
+            updated = travelExpenseRepository.updateAdvance(parts[2], {
+              ...body,
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            travelExpenseRepositoryFailure(error);
+          }
+          triggerFailpoint(options, "travelExpense.advanceUpdate.afterWrite");
+          insertAudit(db, {
+            action: "travel_expense_advance.update",
+            entityType: "travel_expense_advance",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: {
+              weekStart: updated.weekStart,
+              status: updated.status,
+              requestedCents: updated.requestedCents,
+              receivedCents: updated.receivedCents,
+            },
+          });
+          return updated;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "DELETE" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "travel-expense-advances" &&
+        parts[2]
+      ) {
+        const expectedVersion = parseExpectedVersion(request);
+        await validateEmptyBody(request);
+        const deleted = withImmediateTransaction(db, () => {
+          const before = activeTravelExpenseAdvance(db, parts[2], request.authContext.account);
+          if (!before) notFound();
+          let result;
+          try {
+            result = travelExpenseRepository.softDeleteAdvance(parts[2], {
+              owner: request.authContext.account,
+              actor: request.authContext.account,
+              expectedVersion,
+            });
+          } catch (error) {
+            travelExpenseRepositoryFailure(error);
+          }
+          triggerFailpoint(options, "travelExpense.advanceDelete.afterWrite");
+          insertAudit(db, {
+            action: "travel_expense_advance.delete",
+            entityType: "travel_expense_advance",
+            entityId: result.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: result,
+            entityVersion: result.version,
+            metadata: {
+              weekStart: result.weekStart,
+              status: result.status,
+              requestedCents: result.requestedCents,
+              receivedCents: result.receivedCents,
+            },
+          });
+          return result;
+        });
+        sendJson(response, 200, { deleted });
         return;
       }
 
@@ -3134,6 +5234,7 @@ export function createServer(options = {}) {
           });
           completeIdempotency(db, {
             ...idempotencyScope,
+            claimToken: claim.claimToken,
             status: 201,
             body: responseBody,
           });

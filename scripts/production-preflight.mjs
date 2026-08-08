@@ -1,16 +1,24 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   realpathSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, posix, resolve } from "node:path";
+import { dirname, isAbsolute, posix, relative, resolve, sep } from "node:path";
+import { hostname as readHostname } from "node:os";
 import { fileURLToPath } from "node:url";
+
+import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
 export const REQUIRED_PROJECT_SERVICES = Object.freeze([
   "sentelligent-backend.service",
@@ -34,8 +42,30 @@ const REQUIRED_PROTECTED_OBJECTS = Object.freeze([
   "proxy",
 ]);
 const REQUIRED_PROTECTED_LISTENERS = Object.freeze([
-  { port: 4876, owner: "account-vault" },
-  { port: 8797, owner: "qingyang" },
+  {
+    port: 4876,
+    owner: "account-vault",
+    service: "codex-account-vault-cloud.service",
+  },
+  {
+    port: 8797,
+    owner: "qingyang",
+    service: "qingyang-store.service",
+  },
+]);
+const SHARED_CADDY_MUTATING_ACTIONS = Object.freeze([
+  "enable",
+  "restart",
+  "start",
+  "stop",
+]);
+const REQUIRED_PROTECTED_SERVICES = Object.freeze([
+  {
+    name: "codex-account-vault-cloud.service",
+    protectionId: "account-vault",
+  },
+  { name: "qingyang-store.service", protectionId: "qingyang" },
+  { name: "codex-vault-mihomo.service", protectionId: "proxy" },
 ]);
 const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
@@ -43,11 +73,12 @@ const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
 const PROJECT_NODE_EXECUTABLE =
   `${DEFAULT_PROJECT_PATH}/runtime/node-v24/bin/node`;
-const RELEASE_MANIFEST_SCHEMA_VERSION = 2;
+const RELEASE_MANIFEST_SCHEMA_VERSION = 3;
 const RELEASE_PRODUCT = "sentelligent-sales-workbench";
 const RELEASE_MANIFEST_FILE = "release-manifest.json";
 const RELEASE_BUILD_PREFIX = "outputs/product-design-prototype/dist/";
 const RELEASE_MIGRATION_PREFIX = "backend/src/db/migrations/";
+const RELEASE_PRODUCTION_DEPENDENCY_PREFIX = "backend/node_modules/";
 const PORTABLE_NODE_EXECUTABLE = "/usr/bin/node";
 const CENTOS_LEGACY_NODE_EXECUTABLE = "/usr/local/bin/node";
 const CADDY_EXECUTABLES = new Set([
@@ -61,6 +92,13 @@ const SERVICE_USERS = Object.freeze({
   "sentelligent-weixin-agent.service": new Set(["root", "sentelligent", "sentzx"]),
 });
 const REQUIRED_PROJECT_SERVICE_NAMES = new Set(REQUIRED_PROJECT_SERVICES);
+const BACKEND_ENVIRONMENT_SERVICES = Object.freeze([
+  "sentelligent-backend.service",
+  "sentelligent-weixin-agent.service",
+]);
+const APPROVED_MODEL_PROVIDER = "deepseek";
+const APPROVED_MODEL_NAME = "deepseek-v4-flash";
+const APPROVED_MODEL_BASE_URL = "https://api.deepseek.com";
 const IMMUTABLE_RELEASE_SERVICE_ENTRIES = Object.freeze({
   "sentelligent-backend.service": {
     entryPath: "backend/src/server.js",
@@ -80,9 +118,9 @@ const IMMUTABLE_RELEASE_SERVICE_ENTRIES = Object.freeze({
   },
 });
 
-function parseEnvFile(filePath) {
+function parseEnvFile(content) {
   const entries = {};
-  for (const line of readFileSync(filePath, "utf8").split(/\r?\n/)) {
+  for (const line of String(content).split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const separator = trimmed.indexOf("=");
@@ -128,6 +166,419 @@ function isStrongSessionValue(value) {
   return decoded !== null && decoded.length >= 32;
 }
 
+function isPositiveSafeIntegerText(value) {
+  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return false;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0;
+}
+
+function isIcostWebhookToken(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{64}$/.test(value);
+}
+
+function hasIcostWebhookConfiguration(environment) {
+  const owner = environment.ICOST_WEBHOOK_OWNER;
+  return (
+    isIcostWebhookToken(environment.ICOST_WEBHOOK_TOKEN) &&
+    typeof owner === "string" &&
+    owner.length > 0 &&
+    owner.length <= 200 &&
+    owner === owner.trim() &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(owner) &&
+    owner === environment.AUTH_ACCOUNT &&
+    isPositiveSafeIntegerText(environment.ICOST_WEBHOOK_RATE_LIMIT) &&
+    isPositiveSafeIntegerText(environment.ICOST_WEBHOOK_WINDOW_MS)
+  );
+}
+
+function isProductionModelKey(value) {
+  return (
+    typeof value === "string" &&
+    value.length >= 16 &&
+    value.length <= 4096 &&
+    value === value.trim() &&
+    !/[\u0000-\u0020\u007f-\u009f]/u.test(value)
+  );
+}
+
+function hasProductionModelConfiguration(environment) {
+  const modelKey = environment.MODEL_API_KEY;
+  const baseUrl = typeof environment.MODEL_BASE_URL === "string"
+    ? environment.MODEL_BASE_URL.replace(/\/+$/, "")
+    : "";
+  const isolated = [
+    environment.AUTH_SESSION_SECRET,
+    environment.WEIXIN_AGENT_API_TOKEN,
+    environment.ICOST_WEBHOOK_TOKEN,
+  ]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .every((value) => value !== modelKey);
+  return (
+    environment.AI_ANALYSIS_MODE === "model" &&
+    environment.MODEL_PROVIDER === APPROVED_MODEL_PROVIDER &&
+    environment.MODEL_NAME === APPROVED_MODEL_NAME &&
+    baseUrl === APPROVED_MODEL_BASE_URL &&
+    isPositiveSafeIntegerText(environment.MODEL_TIMEOUT_MS) &&
+    isProductionModelKey(modelKey) &&
+    isolated
+  );
+}
+
+function hasIsolatedIcostWebhookToken(environment) {
+  const token = environment.ICOST_WEBHOOK_TOKEN;
+  if (!isIcostWebhookToken(token)) return false;
+  return [
+    environment.AUTH_SESSION_SECRET,
+    environment.MODEL_API_KEY,
+    environment.DEEPSEEK_API_KEY,
+    environment.WEIXIN_AGENT_API_TOKEN,
+  ]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .every((value) => value !== token);
+}
+
+function isProductionToolCommand(value) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 1024 ||
+    value !== value.trim() ||
+    /[\u0000-\u001f\u007f-\u009f\s]/u.test(value)
+  ) {
+    return false;
+  }
+  const segmentPattern = /^[A-Za-z0-9._+-]+$/;
+  if (!value.includes("/")) return segmentPattern.test(value);
+  if (!value.startsWith("/")) return false;
+  const segments = value.slice(1).split("/");
+  return segments.every(
+    (segment) =>
+      segment.length > 0 &&
+      segment !== "." &&
+      segment !== ".." &&
+      segmentPattern.test(segment),
+  );
+}
+
+function inspectSecureExecutable(value) {
+  try {
+    const resolvedPath = realpathSync.native(value);
+    const metadata = statSync(resolvedPath);
+    return {
+      regularFile: metadata.isFile(),
+      secureOwnership:
+        metadata.uid === 0 &&
+        (metadata.mode & 0o022) === 0,
+      resolvedPath,
+    };
+  } catch {
+    return {
+      regularFile: false,
+      secureOwnership: false,
+      resolvedPath: "",
+    };
+  }
+}
+
+function failedToolRun() {
+  return { status: null, stdout: "", stderr: "" };
+}
+
+function resolveRunuserExecutable() {
+  for (const candidate of ["/usr/sbin/runuser", "/sbin/runuser"]) {
+    const inspection = inspectSecureExecutable(candidate);
+    if (inspection.regularFile && inspection.secureOwnership) {
+      return inspection.resolvedPath;
+    }
+  }
+  return "";
+}
+
+export function runToolAsServiceUser(
+  { user, command, args },
+  {
+    platform = process.platform,
+    currentUid = typeof process.getuid === "function" ? process.getuid() : null,
+    resolveRunuser = resolveRunuserExecutable,
+    spawn = spawnSync,
+  } = {},
+) {
+  if (
+    platform !== "linux" ||
+    currentUid !== 0 ||
+    typeof user !== "string" ||
+    !/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(user) ||
+    !Array.isArray(args) ||
+    args.some((value) => typeof value !== "string")
+  ) {
+    return failedToolRun();
+  }
+  const runuser = resolveRunuser();
+  if (!runuser) return failedToolRun();
+  const result = spawn(
+    runuser,
+    ["-u", user, "--", command, ...args],
+    {
+      cwd: "/",
+      encoding: "utf8",
+      env: {
+        PATH: "/usr/bin:/bin",
+        LANG: "C",
+        LC_ALL: "C",
+      },
+      input: "",
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024,
+      shell: false,
+      timeout: 5_000,
+      windowsHide: true,
+    },
+  );
+  return {
+    status: result.status,
+    stdout: String(result.stdout ?? ""),
+    stderr: String(result.stderr ?? ""),
+  };
+}
+
+function successfulToolRun(result) {
+  return isRecord(result) && result.status === 0;
+}
+
+function listedTesseractLanguages(output) {
+  return new Set(
+    String(output ?? "")
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => /^[A-Za-z0-9_.-]+$/.test(line)),
+  );
+}
+
+export function inspectInvoiceExtractionTools(
+  request,
+  {
+    inspectSecureExecutable: inspect = inspectSecureExecutable,
+    runAsServiceUser = runToolAsServiceUser,
+  } = {},
+) {
+  const emptyEvidence = {
+    serviceIdentityResolved: false,
+    ocr: {
+      regularFile: false,
+      executableByServiceUser: false,
+      identity: "unknown",
+      requiredLanguagesAvailable: false,
+    },
+    pdfText: {
+      regularFile: false,
+      executableByServiceUser: false,
+      identity: "unknown",
+    },
+  };
+  const backendService = request?.backendService;
+  if (
+    !isRecord(request) ||
+    !isRecord(backendService) ||
+    typeof backendService.user !== "string" ||
+    backendService.dynamicUser !== false ||
+    backendService.group !== "" ||
+    !Array.isArray(backendService.supplementaryGroups) ||
+    backendService.supplementaryGroups.length !== 0 ||
+    !isRecord(request.ocr) ||
+    typeof request.ocr.command !== "string" ||
+    !Array.isArray(request.ocr.requiredLanguages) ||
+    !request.ocr.requiredLanguages.every(
+      (language) =>
+        typeof language === "string" &&
+        /^[A-Za-z0-9_.-]+$/.test(language),
+    ) ||
+    !isRecord(request.pdfText) ||
+    typeof request.pdfText.command !== "string"
+  ) {
+    return emptyEvidence;
+  }
+
+  let ocrInspection;
+  let pdfInspection;
+  try {
+    ocrInspection = inspect(request.ocr.command);
+    pdfInspection = inspect(request.pdfText.command);
+  } catch {
+    return emptyEvidence;
+  }
+  const ocrRegular =
+    isRecord(ocrInspection) &&
+    ocrInspection.regularFile === true &&
+    ocrInspection.secureOwnership === true &&
+    typeof ocrInspection.resolvedPath === "string" &&
+    ocrInspection.resolvedPath.length > 0;
+  const pdfRegular =
+    isRecord(pdfInspection) &&
+    pdfInspection.regularFile === true &&
+    pdfInspection.secureOwnership === true &&
+    typeof pdfInspection.resolvedPath === "string" &&
+    pdfInspection.resolvedPath.length > 0;
+  if (!ocrRegular || !pdfRegular) {
+    return {
+      ...emptyEvidence,
+      ocr: { ...emptyEvidence.ocr, regularFile: ocrRegular },
+      pdfText: { ...emptyEvidence.pdfText, regularFile: pdfRegular },
+    };
+  }
+
+  const ocrExecutable = successfulToolRun(runAsServiceUser({
+    user: backendService.user,
+    command: "/usr/bin/test",
+    args: ["-x", ocrInspection.resolvedPath],
+  }));
+  const pdfExecutable = successfulToolRun(runAsServiceUser({
+    user: backendService.user,
+    command: "/usr/bin/test",
+    args: ["-x", pdfInspection.resolvedPath],
+  }));
+  const serviceIdentityResolved = ocrExecutable || pdfExecutable;
+  const ocrVersion = ocrExecutable
+    ? runAsServiceUser({
+        user: backendService.user,
+        command: ocrInspection.resolvedPath,
+        args: ["--version"],
+      })
+    : failedToolRun();
+  const ocrLanguages = ocrExecutable
+    ? runAsServiceUser({
+        user: backendService.user,
+        command: ocrInspection.resolvedPath,
+        args: ["--list-langs"],
+      })
+    : failedToolRun();
+  const pdfVersion = pdfExecutable
+    ? runAsServiceUser({
+        user: backendService.user,
+        command: pdfInspection.resolvedPath,
+        args: ["-v"],
+      })
+    : failedToolRun();
+  const ocrIdentity =
+    successfulToolRun(ocrVersion) &&
+    /^tesseract\s+\d/iu.test(`${ocrVersion.stdout}\n${ocrVersion.stderr}`.trim());
+  const pdfIdentity =
+    successfulToolRun(pdfVersion) &&
+    /^pdftotext version\s+\d/iu.test(`${pdfVersion.stdout}\n${pdfVersion.stderr}`.trim());
+  const availableLanguages = successfulToolRun(ocrLanguages)
+    ? listedTesseractLanguages(ocrLanguages.stdout)
+    : new Set();
+
+  return {
+    serviceIdentityResolved,
+    ocr: {
+      regularFile: true,
+      executableByServiceUser: ocrExecutable,
+      identity: ocrIdentity ? "tesseract" : "unknown",
+      requiredLanguagesAvailable:
+        ocrIdentity &&
+        request.ocr.requiredLanguages.every((language) =>
+          availableLanguages.has(language),
+        ),
+    },
+    pdfText: {
+      regularFile: true,
+      executableByServiceUser: pdfExecutable,
+      identity: pdfIdentity ? "poppler-pdftotext" : "unknown",
+    },
+  };
+}
+
+function parseInvoiceOcrLanguages(value) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 100 ||
+    !/^[A-Za-z0-9_.-]+(?:\+[A-Za-z0-9_.-]+)*$/.test(value)
+  ) {
+    return null;
+  }
+  return value.split("+");
+}
+
+function backendServiceInspectionIdentity(servicePlan) {
+  const services = Array.isArray(servicePlan?.projectServices)
+    ? servicePlan.projectServices
+    : [];
+  const matches = services.filter(
+    (service) => service?.name === "sentelligent-backend.service",
+  );
+  if (
+    matches.length !== 1 ||
+    typeof matches[0]?.User !== "string" ||
+    typeof matches[0]?.Group !== "string" ||
+    !Array.isArray(matches[0]?.SupplementaryGroups) ||
+    !matches[0].SupplementaryGroups.every(
+      (value) => typeof value === "string",
+    ) ||
+    typeof matches[0]?.DynamicUser !== "boolean"
+  ) {
+    return null;
+  }
+  const service = matches[0];
+  return {
+    user: service.User,
+    group: service.Group,
+    supplementaryGroups: [...service.SupplementaryGroups],
+    dynamicUser: service.DynamicUser,
+  };
+}
+
+function hasInvoiceExtractionConfiguration(
+  environment,
+  servicePlan,
+  invoiceToolInspector = inspectInvoiceExtractionTools,
+) {
+  const requiredLanguages = parseInvoiceOcrLanguages(
+    environment.INVOICE_OCR_LANGUAGES,
+  );
+  const backendService = backendServiceInspectionIdentity(servicePlan);
+  if (
+    !isProductionToolCommand(environment.INVOICE_OCR_COMMAND) ||
+    !environment.INVOICE_OCR_COMMAND.startsWith("/") ||
+    !isProductionToolCommand(environment.INVOICE_PDF_TEXT_COMMAND) ||
+    !environment.INVOICE_PDF_TEXT_COMMAND.startsWith("/") ||
+    requiredLanguages === null ||
+    !isPositiveSafeIntegerText(environment.INVOICE_TEXT_EXTRACTION_TIMEOUT_MS) ||
+    backendService === null ||
+    typeof invoiceToolInspector !== "function"
+  ) {
+    return false;
+  }
+
+  try {
+    const evidence = invoiceToolInspector({
+      backendService,
+      ocr: {
+        command: environment.INVOICE_OCR_COMMAND,
+        requiredLanguages,
+      },
+      pdfText: {
+        command: environment.INVOICE_PDF_TEXT_COMMAND,
+      },
+    });
+    return (
+      isRecord(evidence) &&
+      evidence.serviceIdentityResolved === true &&
+      isRecord(evidence.ocr) &&
+      evidence.ocr.regularFile === true &&
+      evidence.ocr.executableByServiceUser === true &&
+      evidence.ocr.identity === "tesseract" &&
+      evidence.ocr.requiredLanguagesAvailable === true &&
+      isRecord(evidence.pdfText) &&
+      evidence.pdfText.regularFile === true &&
+      evidence.pdfText.executableByServiceUser === true &&
+      evidence.pdfText.identity === "poppler-pdftotext"
+    );
+  } catch {
+    return false;
+  }
+}
+
 function canonicalOrigins(values) {
   const origins = new Set();
   for (const value of values) {
@@ -171,48 +622,151 @@ function sha256File(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
-async function inspectSqlite(filePath, { requireNoSidecars = false } = {}) {
+const defaultStableFileSystem = Object.freeze({
+  close: closeSync,
+  fstat: fstatSync,
+  lstat: lstatSync,
+  open: openSync,
+  read(fileDescriptor) {
+    return readFileSync(fileDescriptor);
+  },
+  realpath(filePath) {
+    return realpathSync.native(filePath);
+  },
+});
+
+function sameStableIdentity(left, right) {
+  return [
+    "dev",
+    "ino",
+    "mode",
+    "nlink",
+    "uid",
+    "gid",
+    "size",
+    "mtimeNs",
+    "ctimeNs",
+  ].every((field) => left?.[field] === right?.[field]);
+}
+
+export function readStableRegularFile(
+  filePath,
+  { fileSystem: overrides = {}, validate, label = "file" } = {},
+) {
+  const fileSystem = { ...defaultStableFileSystem, ...overrides };
+  const absolutePath = resolve(filePath);
+  const lexical = fileSystem.lstat(absolutePath, { bigint: true });
+  if (!lexical.isFile() || lexical.isSymbolicLink()) {
+    throw new Error(`${label} must be a regular non-symbolic file`);
+  }
+  const realPath = fileSystem.realpath(absolutePath);
+  const noFollow = Number(constants.O_NOFOLLOW ?? 0);
+  const fileDescriptor = fileSystem.open(
+    realPath,
+    Number(constants.O_RDONLY) | noFollow,
+  );
+  try {
+    const before = fileSystem.fstat(fileDescriptor, { bigint: true });
+    if (!before.isFile()) {
+      throw new Error(`${label} descriptor must identify a regular file`);
+    }
+    if (before.nlink !== 1n) {
+      throw new Error(`${label} must have exactly one hard link`);
+    }
+    const content = fileSystem.read(fileDescriptor);
+    if (!Buffer.isBuffer(content) || BigInt(content.length) !== before.size) {
+      throw new Error(`${label} changed while it was read`);
+    }
+    const validation = typeof validate === "function"
+      ? validate({ content, realPath, metadata: before })
+      : undefined;
+    const after = fileSystem.fstat(fileDescriptor, { bigint: true });
+    const lexicalAfter = fileSystem.lstat(realPath, { bigint: true });
+    if (
+      !sameStableIdentity(before, after) ||
+      lexicalAfter.isSymbolicLink() ||
+      lexicalAfter.dev !== before.dev ||
+      lexicalAfter.ino !== before.ino ||
+      lexicalAfter.nlink !== 1n
+    ) {
+      throw new Error(`${label} identity changed during validation`);
+    }
+    return {
+      content,
+      realPath,
+      sha256: createHash("sha256").update(content).digest("hex"),
+      metadata: before,
+      validation,
+    };
+  } finally {
+    fileSystem.close(fileDescriptor);
+  }
+}
+
+export async function inspectSqlite(
+  filePath,
+  { requireNoSidecars = false } = {},
+) {
   const resolvedPath = resolve(filePath);
   if (!existsSync(resolvedPath)) {
     return {
       quickCheck: "error",
       foreignKeyViolations: null,
+      sha256: "",
       error: "database file is missing",
     };
   }
-  const sidecars = [`${resolvedPath}-wal`, `${resolvedPath}-shm`, `${resolvedPath}-journal`]
-    .filter(existsSync);
-  if (requireNoSidecars && sidecars.length > 0) {
-    return {
-      quickCheck: "error",
-      foreignKeyViolations: null,
-      error: "database has active sidecar files",
-    };
-  }
 
-  let database;
   try {
     const { DatabaseSync } = await import("node:sqlite");
-    database = new DatabaseSync(resolvedPath, { readOnly: true });
-    const quickRows = database.prepare("PRAGMA quick_check").all();
-    const quickCheck =
-      quickRows.length === 1 && quickRows[0].quick_check === "ok"
-        ? "ok"
-        : quickRows.map((row) => row.quick_check).join("; ") || "no result";
-    const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all();
+    const stable = readStableRegularFile(resolvedPath, {
+      label: "database file",
+      validate({ realPath }) {
+        const sidecars = [
+          `${realPath}-wal`,
+          `${realPath}-shm`,
+          `${realPath}-journal`,
+        ].filter(existsSync);
+        if (requireNoSidecars && sidecars.length > 0) {
+          throw new Error("database has active sidecar files");
+        }
+        const database = new DatabaseSync(realPath, { readOnly: true });
+        try {
+          const quickRows = database.prepare("PRAGMA quick_check").all();
+          const quickCheck =
+            quickRows.length === 1 && quickRows[0].quick_check === "ok"
+              ? "ok"
+              : quickRows.map((row) => row.quick_check).join("; ") || "no result";
+          const foreignKeyViolations = database
+            .prepare("PRAGMA foreign_key_check")
+            .all();
+          return {
+            quickCheck,
+            foreignKeyViolations: foreignKeyViolations.length,
+          };
+        } finally {
+          database.close();
+        }
+      },
+    });
     return {
-      quickCheck,
-      foreignKeyViolations: foreignKeyViolations.length,
+      ...stable.validation,
+      sha256: stable.sha256,
+      realPath: stable.realPath,
       error: null,
     };
-  } catch {
+  } catch (error) {
+    const safeReason = /(?:hard link|link count|single link|sidecar|changed during validation)/iu.test(
+      String(error?.message ?? ""),
+    )
+      ? String(error.message)
+      : "database inspection failed";
     return {
       quickCheck: "error",
       foreignKeyViolations: null,
-      error: "database inspection failed",
+      sha256: "",
+      error: safeReason,
     };
-  } finally {
-    database?.close();
   }
 }
 
@@ -303,23 +857,6 @@ function parsePlannedCommand(command) {
   return match ? { action: match[1], service: match[2] } : null;
 }
 
-function hasProjectOwnedCaddyProfile(plan) {
-  const services = Array.isArray(plan?.projectServices)
-    ? plan.projectServices
-    : [];
-  const caddy = services.find(
-    (service) => service?.name === "sentelligent-caddy.service",
-  );
-  const workingDirectory = caddy?.WorkingDirectory;
-  return (
-    ["root", "sentelligent"].includes(caddy?.User) &&
-    typeof workingDirectory === "string" &&
-    pathWithin(workingDirectory, DEFAULT_PROJECT_PATH) &&
-    typeof caddy?.ExecStart === "string" &&
-    validateProjectServiceExecStart(caddy.name, caddy.ExecStart)
-  );
-}
-
 export function validatePlannedCommands(plan) {
   const commands = Array.isArray(plan?.plannedCommands)
     ? plan.plannedCommands
@@ -331,14 +868,11 @@ export function validatePlannedCommands(plan) {
   if (parsed.some((command) => !REQUIRED_PROJECT_SERVICE_NAMES.has(command.service))) {
     return false;
   }
-  if (
-    !hasProjectOwnedCaddyProfile(plan) &&
-    parsed.some(
-      (command) =>
-        command.service === "sentelligent-caddy.service" &&
-        ["enable", "restart", "start", "stop"].includes(command.action),
-    )
-  ) {
+  if (parsed.some(
+    (command) =>
+      command.service === "sentelligent-caddy.service" &&
+      SHARED_CADDY_MUTATING_ACTIONS.includes(command.action),
+  )) {
     return false;
   }
   const commandKeys = parsed
@@ -502,6 +1036,214 @@ function sourceTreeSha256(files) {
   return createHash("sha256").update(index, "utf8").digest("hex");
 }
 
+function compareSameFileIdentity(
+  configuredPath,
+  inspectedPath,
+  fileSystem = defaultIdentityFileSystem,
+) {
+  try {
+    if (
+      typeof fileSystem?.realpath !== "function" ||
+      typeof fileSystem?.stat !== "function"
+    ) {
+      return { matches: false, verifiedBy: "unavailable" };
+    }
+    const configuredAbsolute = resolve(configuredPath);
+    const inspectedAbsolute = resolve(inspectedPath);
+    const configuredRealPath = normalizedNativePath(
+      fileSystem.realpath(configuredAbsolute),
+    );
+    const inspectedRealPath = normalizedNativePath(
+      fileSystem.realpath(inspectedAbsolute),
+    );
+    if (configuredRealPath === inspectedRealPath) {
+      return { matches: true, verifiedBy: "resolved-path" };
+    }
+    const configured = fileSystem.stat(configuredAbsolute);
+    const inspected = fileSystem.stat(inspectedAbsolute);
+    const identityAvailable =
+      reliableIdentityValue(configured?.dev) &&
+      reliableIdentityValue(configured?.ino) &&
+      reliableIdentityValue(inspected?.dev) &&
+      reliableIdentityValue(inspected?.ino);
+    if (!identityAvailable) {
+      return { matches: false, verifiedBy: "unavailable" };
+    }
+    return {
+      matches:
+        configured.dev === inspected.dev && configured.ino === inspected.ino,
+      verifiedBy: "device-and-inode",
+    };
+  } catch {
+    return { matches: false, verifiedBy: "unavailable" };
+  }
+}
+
+function configuredDatabasePath(databaseUrl, servicePlan) {
+  if (typeof databaseUrl !== "string" || !databaseUrl.trim()) return null;
+  const value = databaseUrl.trim();
+  if (value === ":memory:") return null;
+  if (value.startsWith("file:")) {
+    try {
+      return fileURLToPath(value);
+    } catch {
+      return null;
+    }
+  }
+  if (isAbsolute(value)) return resolve(value);
+  const backendServices = Array.isArray(servicePlan?.projectServices)
+    ? servicePlan.projectServices.filter(
+        (service) => service?.name === "sentelligent-backend.service",
+      )
+    : [];
+  const workingDirectory = backendServices[0]?.WorkingDirectory;
+  if (
+    backendServices.length !== 1 ||
+    typeof workingDirectory !== "string" ||
+    !isAbsolute(workingDirectory)
+  ) {
+    return null;
+  }
+  return resolve(workingDirectory, value);
+}
+
+function serviceEnvironmentBindingMatches(
+  servicePlan,
+  envFilePath,
+  envFileSha256,
+  fileSystem = defaultIdentityFileSystem,
+) {
+  if (
+    typeof envFilePath !== "string" ||
+    !envFilePath ||
+    !/^[a-f0-9]{64}$/.test(String(envFileSha256 ?? ""))
+  ) {
+    return false;
+  }
+  const services = Array.isArray(servicePlan?.projectServices)
+    ? servicePlan.projectServices
+    : [];
+  let expectedRealPath;
+  try {
+    expectedRealPath = normalizedNativePath(fileSystem.realpath(resolve(envFilePath)));
+  } catch {
+    return false;
+  }
+  return BACKEND_ENVIRONMENT_SERVICES.every((serviceName) => {
+    const matches = services.filter((service) => service?.name === serviceName);
+    if (matches.length !== 1) return false;
+    const service = matches[0];
+    if (
+      typeof service.EnvironmentFile !== "string" ||
+      service.EnvironmentFileSha256 !== envFileSha256
+    ) {
+      return false;
+    }
+    try {
+      return normalizedNativePath(
+        fileSystem.realpath(resolve(service.EnvironmentFile)),
+      ) === expectedRealPath;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function hasRequiredEnvironmentContract(value) {
+  if (!Array.isArray(value) || value.length !== REQUIRED_ENV_NAMES.length) {
+    return false;
+  }
+  const names = new Set(value);
+  return (
+    names.size === REQUIRED_ENV_NAMES.length &&
+    REQUIRED_ENV_NAMES.every((name) => names.has(name))
+  );
+}
+
+function hasExactFrontendBuildProvenance(manifest) {
+  const frontend = manifest?.buildProvenance?.frontend;
+  const lockfile = frontend?.lockfile;
+  const runtime = frontend?.runtime;
+  const install = frontend?.install;
+  const environment = frontend?.environment;
+  const allowedNames = Array.isArray(environment?.allowedNames)
+    ? environment.allowedNames
+    : [];
+  const lockfilePath = "outputs/product-design-prototype/package-lock.json";
+  return (
+    isRecord(frontend) &&
+    isRecord(lockfile) &&
+    lockfile.path === lockfilePath &&
+    /^[a-f0-9]{64}$/.test(lockfile.sha256) &&
+    lockfile.lockfileVersion === 3 &&
+    isRecord(manifest.sourceHashes?.files) &&
+    manifest.sourceHashes.files[lockfilePath] === lockfile.sha256 &&
+    isRecord(runtime) &&
+    nodeMajor(runtime.node) >= 24 &&
+    /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(runtime.npm) &&
+    [
+      "SENTELLIGENT_RELEASE_NPM_CLI",
+      "npm_execpath",
+      "node-adjacent",
+      "node-lib-adjacent",
+      "PATH",
+    ].includes(runtime.npmResolutionSource) &&
+    ["win32", "linux", "darwin"].includes(runtime.platform) &&
+    typeof runtime.architecture === "string" &&
+    /^[A-Za-z0-9_-]{1,32}$/.test(runtime.architecture) &&
+    isRecord(install) &&
+    install.command === "npm ci" &&
+    install.ignoreScripts === true &&
+    install.includeDev === true &&
+    isRecord(environment) &&
+    environment.identity === "sentelligent-release-frontend-v1" &&
+    allowedNames.length > 0 &&
+    new Set(allowedNames).size === allowedNames.length &&
+    allowedNames.every(
+      (name) =>
+        typeof name === "string" &&
+        /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name) &&
+        !/(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)/iu.test(name),
+    ) &&
+    allowedNames.includes("NODE_ENV") &&
+    allowedNames.includes("PATH") &&
+    allowedNames.includes("SENTELLIGENT_RELEASE_BUILD_ENV")
+  );
+}
+
+function hasExactBackendDependencyProvenance(manifest) {
+  const backend = manifest?.buildProvenance?.backend;
+  const lockfile = backend?.lockfile;
+  const runtime = backend?.runtime;
+  const install = backend?.install;
+  const lockfilePath = "backend/package-lock.json";
+  return (
+    isRecord(backend) &&
+    isRecord(lockfile) &&
+    lockfile.path === lockfilePath &&
+    /^[a-f0-9]{64}$/.test(lockfile.sha256) &&
+    lockfile.lockfileVersion === 3 &&
+    isRecord(manifest.sourceHashes?.files) &&
+    manifest.sourceHashes.files[lockfilePath] === lockfile.sha256 &&
+    isRecord(runtime) &&
+    nodeMajor(runtime.node) >= 24 &&
+    /^\d+\.\d+\.\d+(?:[-+].+)?$/.test(runtime.npm) &&
+    [
+      "SENTELLIGENT_RELEASE_NPM_CLI",
+      "npm_execpath",
+      "node-adjacent",
+      "node-lib-adjacent",
+      "PATH",
+    ].includes(runtime.npmResolutionSource) &&
+    runtime.platform === "linux" &&
+    runtime.architecture === "x64" &&
+    isRecord(install) &&
+    install.command === "npm ci" &&
+    install.ignoreScripts === true &&
+    install.omitDev === true
+  );
+}
+
 function manifestShapeError(manifest, expectedCommit) {
   if (
     !isRecord(manifest) ||
@@ -517,6 +1259,15 @@ function manifestShapeError(manifest, expectedCommit) {
   ) {
     return "Release manifest source must identify the exact commit and a clean packaged worktree.";
   }
+  if (!hasRequiredEnvironmentContract(manifest.requiredEnvNames)) {
+    return "Release manifest required environment names must exactly match the release packager contract.";
+  }
+  if (!hasExactFrontendBuildProvenance(manifest)) {
+    return "Release manifest must bind the frontend build to its committed lockfile, npm runtime, isolated install, and allowlisted environment.";
+  }
+  if (!hasExactBackendDependencyProvenance(manifest)) {
+    return "Release manifest must bind the packaged backend production dependency tree to its committed lockfile and isolated production-only install.";
+  }
   if (
     !isCanonicalIsoTimestamp(manifest.createdAt) ||
     !isRecord(manifest.archive) ||
@@ -531,9 +1282,40 @@ function manifestShapeError(manifest, expectedCommit) {
   return null;
 }
 
+export function validateImmutableReleaseEntryMetadata(
+  metadata,
+  { directory, enforcePosix = process.platform !== "win32" } = {},
+) {
+  if (
+    !metadata ||
+    typeof metadata.isDirectory !== "function" ||
+    typeof metadata.isFile !== "function" ||
+    typeof metadata.isSymbolicLink !== "function" ||
+    metadata.isSymbolicLink()
+  ) {
+    return false;
+  }
+  if (directory ? !metadata.isDirectory() : !metadata.isFile()) return false;
+  if (!directory && metadata.nlink !== 1n && metadata.nlink !== 1) return false;
+  if (!enforcePosix) return true;
+  const uid = typeof metadata.uid === "bigint" ? metadata.uid : BigInt(metadata.uid);
+  const gid = typeof metadata.gid === "bigint" ? metadata.gid : BigInt(metadata.gid);
+  const mode = typeof metadata.mode === "bigint" ? metadata.mode : BigInt(metadata.mode);
+  return uid === 0n && gid === 0n && (mode & 0o022n) === 0n;
+}
+
 function collectReleaseFiles(releaseDirectoryPath) {
-  const root = realpathSync.native(resolve(releaseDirectoryPath));
-  if (!lstatSync(root).isDirectory()) {
+  const requestedRoot = resolve(releaseDirectoryPath);
+  const root = realpathSync.native(requestedRoot);
+  if (normalizedNativePath(root) !== normalizedNativePath(requestedRoot)) {
+    throw new Error("release root or one of its ancestors is redirected");
+  }
+  const rootMetadata = lstatSync(root, { bigint: true });
+  if (
+    !validateImmutableReleaseEntryMetadata(rootMetadata, {
+      directory: true,
+    })
+  ) {
     throw new Error("release root is not a directory");
   }
   const files = [];
@@ -549,9 +1331,33 @@ function collectReleaseFiles(releaseDirectoryPath) {
         throw new Error("release contains an unsafe path");
       }
       const filePath = resolve(directoryPath, entry.name);
+      const realFilePath = realpathSync.native(filePath);
+      const escaped = relative(root, realFilePath);
+      if (
+        escaped === ".." ||
+        escaped.startsWith(`..${sep}`) ||
+        isAbsolute(escaped)
+      ) {
+        throw new Error("release entry escaped its immutable root");
+      }
+      const metadata = lstatSync(filePath, { bigint: true });
       if (entry.isDirectory()) {
+        if (
+          !validateImmutableReleaseEntryMetadata(metadata, {
+            directory: true,
+          })
+        ) {
+          throw new Error("release contains a mutable directory");
+        }
         visit(filePath, relativePath);
       } else if (entry.isFile()) {
+        if (
+          !validateImmutableReleaseEntryMetadata(metadata, {
+            directory: false,
+          })
+        ) {
+          throw new Error("release contains a mutable or hard-linked file");
+        }
         files.push(relativePath);
       } else {
         throw new Error("release contains a non-regular file");
@@ -599,6 +1405,7 @@ function verifyReleaseContents(manifest, releaseDirectoryPath) {
   try {
     const buildSection = manifest.buildHashes;
     const migrationSection = manifest.migrationChecksums;
+    const dependencySection = manifest.productionDependencyHashes;
     const sourceSection = manifest.sourceHashes;
     if (
       !validHashSection(
@@ -610,10 +1417,16 @@ function verifyReleaseContents(manifest, releaseDirectoryPath) {
         (file) => file.startsWith(RELEASE_MIGRATION_PREFIX),
       ) ||
       !validHashSection(
+        dependencySection,
+        (file) => file.startsWith(RELEASE_PRODUCTION_DEPENDENCY_PREFIX),
+      ) ||
+      !/^[a-f0-9]{64}$/.test(dependencySection.treeSha256) ||
+      !validHashSection(
         sourceSection,
         (file) =>
           file !== RELEASE_MANIFEST_FILE &&
-          !file.startsWith(RELEASE_BUILD_PREFIX),
+          !file.startsWith(RELEASE_BUILD_PREFIX) &&
+          !file.startsWith(RELEASE_PRODUCTION_DEPENDENCY_PREFIX),
       ) ||
       !/^[a-f0-9]{64}$/.test(sourceSection.treeSha256)
     ) {
@@ -640,13 +1453,20 @@ function verifyReleaseContents(manifest, releaseDirectoryPath) {
     const migrationFiles = packagedFiles.filter((file) =>
       file.startsWith(RELEASE_MIGRATION_PREFIX)
     );
+    const dependencyFiles = packagedFiles.filter((file) =>
+      file.startsWith(RELEASE_PRODUCTION_DEPENDENCY_PREFIX)
+    );
     const sourceFiles = packagedFiles.filter(
-      (file) => !file.startsWith(RELEASE_BUILD_PREFIX),
+      (file) =>
+        !file.startsWith(RELEASE_BUILD_PREFIX) &&
+        !file.startsWith(RELEASE_PRODUCTION_DEPENDENCY_PREFIX),
     );
     const actualHashes = Object.fromEntries(
       packagedFiles.map((file) => [
         file,
-        sha256File(resolve(root, ...file.split("/"))),
+        readStableRegularFile(resolve(root, ...file.split("/")), {
+          label: `release file ${file}`,
+        }).sha256,
       ]),
     );
     const actualBuildHashes = Object.fromEntries(
@@ -654,6 +1474,9 @@ function verifyReleaseContents(manifest, releaseDirectoryPath) {
     );
     const actualMigrationHashes = Object.fromEntries(
       migrationFiles.map((file) => [file, actualHashes[file]]),
+    );
+    const actualDependencyHashes = Object.fromEntries(
+      dependencyFiles.map((file) => [file, actualHashes[file]]),
     );
     const actualSourceHashes = Object.fromEntries(
       sourceFiles.map((file) => [file, actualHashes[file]]),
@@ -665,12 +1488,15 @@ function verifyReleaseContents(manifest, releaseDirectoryPath) {
       !serviceEntriesPresent ||
       !sameFileHashes(buildSection.files, actualBuildHashes) ||
       !sameFileHashes(migrationSection.files, actualMigrationHashes) ||
+      !sameFileHashes(dependencySection.files, actualDependencyHashes) ||
+      dependencySection.treeSha256 !==
+        sourceTreeSha256(actualDependencyHashes) ||
       !sameFileHashes(sourceSection.files, actualSourceHashes) ||
       sourceSection.treeSha256 !== sourceTreeSha256(actualSourceHashes)
     ) {
       return {
         valid: false,
-        message: "Release build, source, or migration files do not match the manifest SHA-256 inventory.",
+        message: "Release build, source, migration, or production dependency files do not match the manifest SHA-256 inventory.",
       };
     }
     return { valid: true };
@@ -835,22 +1661,101 @@ export function validateProjectServiceExecStart(serviceName, command) {
   return false;
 }
 
-function validateServiceSnapshot(plan, referenceTime) {
+export function validateServiceSnapshot(
+  plan,
+  referenceTime,
+  expectedHostIdentity,
+  actualHostIdentity,
+) {
   const generatedAt = Date.parse(plan?.snapshotGeneratedAt ?? "");
   const reference = Date.parse(referenceTime);
   const age = reference - generatedAt;
+  const expectedHostname = expectedHostIdentity?.hostname;
+  const expectedMachineId = expectedHostIdentity?.machineId;
   return (
     Number.isFinite(generatedAt) &&
     Number.isFinite(reference) &&
     age >= -5 * 60_000 &&
     age <= 24 * 60 * 60_000 &&
-    typeof plan?.hostname === "string" &&
-    /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(plan.hostname) &&
+    typeof expectedHostname === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(expectedHostname) &&
+    typeof expectedMachineId === "string" &&
+    /^[a-f0-9]{32}$/.test(expectedMachineId) &&
+    actualHostIdentity?.hostname === expectedHostname &&
+    actualHostIdentity?.machineId === expectedMachineId &&
+    plan?.hostname === expectedHostname &&
+    plan?.machineId === expectedMachineId &&
     approvedProjectPaths(plan) !== null
   );
 }
 
-function validateProjectServices(plan) {
+export function inspectHostIdentity({
+  hostnameReader = readHostname,
+  machineIdPath = "/etc/machine-id",
+} = {}) {
+  try {
+    const hostname = String(hostnameReader()).trim();
+    const machineId = readStableRegularFile(machineIdPath, {
+      label: "host machine identity",
+    }).content.toString("utf8").trim().toLowerCase();
+    return { hostname, machineId };
+  } catch {
+    return null;
+  }
+}
+
+const EMPTY_SYSTEMD_ARRAY_FIELDS = Object.freeze([
+  "ExecCondition",
+  "ExecStartPre",
+  "ExecStartPost",
+  "ExecStop",
+  "ExecReload",
+  "DropInPaths",
+  "Environment",
+  "BindPaths",
+  "BindReadOnlyPaths",
+  "ReadWritePaths",
+  "ReadOnlyPaths",
+  "InaccessiblePaths",
+  "ExecPaths",
+  "NoExecPaths",
+  "TemporaryFileSystem",
+]);
+
+export function validateSystemdExecutionSurface(service) {
+  if (
+    !isRecord(service) ||
+    !EMPTY_SYSTEMD_ARRAY_FIELDS.every(
+      (field) => Array.isArray(service[field]) && service[field].length === 0,
+    ) ||
+    service.RootDirectory !== "" ||
+    service.RootImage !== "" ||
+    service.ProtectSystem !== "no" ||
+    service.ProtectHome !== "no" ||
+    service.PrivateTmp !== false ||
+    service.PrivateDevices !== false ||
+    !Array.isArray(service.EnvironmentFiles)
+  ) {
+    return false;
+  }
+  if (BACKEND_ENVIRONMENT_SERVICES.includes(service.name)) {
+    if (service.EnvironmentFile === undefined) {
+      return service.EnvironmentFiles.length === 0;
+    }
+    return (
+      typeof service.EnvironmentFile === "string" &&
+      service.EnvironmentFile.length > 0 &&
+      service.EnvironmentFiles.length === 1 &&
+      service.EnvironmentFiles[0] === service.EnvironmentFile
+    );
+  }
+  return (
+    (service.EnvironmentFile === undefined || service.EnvironmentFile === "") &&
+    service.EnvironmentFiles.length === 0
+  );
+}
+
+export function validateProjectServices(plan) {
   const services = Array.isArray(plan?.projectServices)
     ? plan.projectServices
     : [];
@@ -889,13 +1794,14 @@ function validateProjectServices(plan) {
       fragmentOwned &&
       execStartOwned &&
       SERVICE_USERS[name]?.has(service.User) &&
-      workingDirectoryOwned
+      workingDirectoryOwned &&
+      validateSystemdExecutionSurface(service)
     );
   });
   return requiredReady;
 }
 
-function validatesUnrelatedProtection(plan) {
+export function validatesUnrelatedProtection(plan) {
   const unrelated = Array.isArray(plan?.unrelatedServices)
     ? plan.unrelatedServices
     : [];
@@ -905,37 +1811,62 @@ function validatesUnrelatedProtection(plan) {
   );
   const listeners = Array.isArray(plan?.listeners) ? plan.listeners : [];
   if (
-    unrelated.length === 0 ||
+    unrelated.length !== REQUIRED_PROTECTED_SERVICES.length ||
     !REQUIRED_PROTECTED_OBJECTS.every((name) => protectedObjects.has(name))
   ) {
     return false;
   }
   const protectedNames = new Set(unrelated.map((service) => service?.name));
-  const inventoryProtected = unrelated.every(
-    (service) =>
-      service?.protected === true &&
-      typeof service?.name === "string" &&
-      service.name.length > 0 &&
-      service.active === true &&
-      !service.name.startsWith("sentelligent-") &&
-      protectedObjects.has(service?.protectionId),
+  const inventoryProtected = REQUIRED_PROTECTED_SERVICES.every(
+    (required) => {
+      const matches = unrelated.filter(
+        (service) => service?.name === required.name,
+      );
+      const service = matches[0];
+      return (
+        matches.length === 1 &&
+        service?.protectionId === required.protectionId &&
+        service.protected === true &&
+        service.active === true &&
+        service.enabled === true &&
+        Number.isSafeInteger(service.mainPid) &&
+        service.mainPid > 0 &&
+        isCanonicalIsoTimestamp(service.activeEnterTimestamp) &&
+        [
+          `/etc/systemd/system/${required.name}`,
+          `/lib/systemd/system/${required.name}`,
+          `/usr/lib/systemd/system/${required.name}`,
+        ].includes(service.FragmentPath) &&
+        /^[a-f0-9]{64}$/.test(String(service.UnitFileSha256 ?? ""))
+      );
+    },
   );
   const requiredObjectsInventoried = REQUIRED_PROTECTED_OBJECTS.every((name) =>
     unrelated.some((service) => service?.protectionId === name),
   );
   const listenersProtected = listeners.length > 0 && listeners.every(
-    (listener) =>
-      Number.isInteger(listener?.port) &&
-      listener.port > 0 &&
-      listener.port <= 65_535 &&
-      listener.protected === true &&
-      protectedObjects.has(listener?.owner),
+    (listener) => {
+      const service = unrelated.find(
+        (candidate) => candidate?.name === listener?.service,
+      );
+      return (
+        Number.isInteger(listener?.port) &&
+        listener.port > 0 &&
+        listener.port <= 65_535 &&
+        listener.protected === true &&
+        protectedObjects.has(listener?.owner) &&
+        service?.protectionId === listener.owner &&
+        service.mainPid === listener.mainPid
+      );
+    },
   );
   const requiredListenersPresent = REQUIRED_PROTECTED_LISTENERS.every(
     (required) =>
       listeners.some(
         (listener) =>
-          listener?.port === required.port && listener?.owner === required.owner,
+          listener?.port === required.port &&
+          listener?.owner === required.owner &&
+          listener?.service === required.service,
       ),
   );
   const actionsIsolated = actions.every(
@@ -961,16 +1892,32 @@ function makeCheck(id, passed, passedMessage, failedMessage, details) {
 
 function safeReadEnvironment(envFile) {
   try {
-    return { value: parseEnvFile(resolve(envFile)), error: null };
+    const stable = readStableRegularFile(envFile, {
+      label: "production environment snapshot",
+    });
+    return {
+      value: parseEnvFile(stable.content.toString("utf8")),
+      path: stable.realPath,
+      sha256: stable.sha256,
+      error: null,
+    };
   } catch {
-    return { value: {}, error: "production environment snapshot could not be read" };
+    return {
+      value: {},
+      path: "",
+      sha256: "",
+      error: "production environment snapshot could not be read",
+    };
   }
 }
 
 function safeReadServicePlan(servicePlanPath) {
   try {
+    const stable = readStableRegularFile(servicePlanPath, {
+      label: "service protection plan",
+    });
     return {
-      value: JSON.parse(readFileSync(resolve(servicePlanPath), "utf8")),
+      value: JSON.parse(stable.content.toString("utf8")),
       error: null,
     };
   } catch {
@@ -983,10 +1930,12 @@ function safeReadReleaseManifest(releaseManifestPath) {
     if (typeof releaseManifestPath !== "string" || !releaseManifestPath) {
       throw new Error("release manifest path is missing");
     }
-    const manifestPath = realpathSync(resolve(releaseManifestPath));
+    const stable = readStableRegularFile(releaseManifestPath, {
+      label: "release manifest",
+    });
     return {
-      value: JSON.parse(readFileSync(manifestPath, "utf8")),
-      manifestPath,
+      value: JSON.parse(stable.content.toString("utf8")),
+      manifestPath: stable.realPath,
       error: null,
     };
   } catch {
@@ -1009,6 +1958,9 @@ export async function runProductionPreflight({
   expectedCommit,
   nodeVersion = process.versions.node,
   createdAt = new Date().toISOString(),
+  invoiceToolInspector = inspectInvoiceExtractionTools,
+  expectedHostIdentity,
+  hostIdentityInspector = inspectHostIdentity,
 } = {}) {
   const environmentResult = safeReadEnvironment(envFile);
   const environment = environmentResult.value;
@@ -1034,13 +1986,38 @@ export async function runProductionPreflight({
     databasePath ?? "",
     backupPath ?? "",
   );
-
-  let actualBackupSha256 = "";
+  const environmentDatabasePath = configuredDatabasePath(
+    environment.DATABASE_URL,
+    servicePlan,
+  );
+  const environmentDatabaseIdentity = environmentDatabasePath === null
+    ? { matches: false, verifiedBy: "unavailable" }
+    : compareSameFileIdentity(environmentDatabasePath, databasePath ?? "");
+  const serviceEnvironmentBound = serviceEnvironmentBindingMatches(
+    servicePlan,
+    environmentResult.path,
+    environmentResult.sha256,
+  );
+  const environmentDatabaseBound =
+    environmentResult.error === null &&
+    environmentDatabaseIdentity.matches &&
+    serviceEnvironmentBound;
+  let actualHostIdentity = null;
   try {
-    actualBackupSha256 = sha256File(resolve(backupPath));
+    actualHostIdentity = await hostIdentityInspector();
   } catch {
-    actualBackupSha256 = "";
+    actualHostIdentity = null;
   }
+  const serviceSnapshotValid =
+    servicePlanResult.error === null &&
+    validateServiceSnapshot(
+      servicePlan,
+      createdAt,
+      expectedHostIdentity,
+      actualHostIdentity,
+    );
+
+  const actualBackupSha256 = backup.sha256 ?? "";
   const expectedHashValid = /^[a-f0-9]{64}$/i.test(
     String(expectedBackupSha256 ?? ""),
   );
@@ -1110,6 +2087,46 @@ export async function runProductionPreflight({
       "SOLUTION_WRITES_ENABLED must be false.",
     ),
     makeCheck(
+      "env.aiModel",
+      hasProductionModelConfiguration(environment),
+      "Expense automation uses the approved production model configuration and an isolated API key.",
+      "Production expense automation requires model mode, the approved DeepSeek provider, endpoint and model, a positive timeout, and an isolated non-empty MODEL_API_KEY.",
+    ),
+    makeCheck(
+      "env.icostWebhook",
+      hasIcostWebhookConfiguration(environment),
+      "The iCost write-only webhook has a strong token, bound owner, and positive rate limits.",
+      "The iCost write-only webhook requires a 64-character token, the authenticated owner, and positive integer rate limits.",
+    ),
+    makeCheck(
+      "env.icostIsolation",
+      hasIsolatedIcostWebhookToken(environment),
+      "The iCost webhook token is isolated from other project credentials.",
+      "The iCost webhook token must not reuse the session, model, or WeChat credential.",
+    ),
+    makeCheck(
+      "env.invoiceExtraction",
+      hasInvoiceExtractionConfiguration(
+        environment,
+        servicePlan,
+        invoiceToolInspector,
+      ),
+      "Invoice OCR and PDF extraction tools are executable files with safe settings.",
+      "Invoice OCR/PDF commands must be absolute executable files, with safe OCR languages and a positive extraction timeout.",
+    ),
+    makeCheck(
+      "database.environmentBinding",
+      environmentDatabaseBound,
+      "DATABASE_URL, the inspected database, and backend service EnvironmentFile snapshots identify the same production configuration.",
+      "DATABASE_URL must explicitly identify the inspected database, and backend/WeChat services must snapshot the same environment file path and SHA-256.",
+      {
+        databaseVerifiedBy: environmentDatabaseIdentity.verifiedBy,
+        serviceBindings: serviceEnvironmentBound
+          ? BACKEND_ENVIRONMENT_SERVICES.length
+          : 0,
+      },
+    ),
+    makeCheck(
       "database.quickCheck",
       database.quickCheck === "ok",
       "Primary database PRAGMA quick_check returned ok.",
@@ -1155,8 +2172,7 @@ export async function runProductionPreflight({
     ),
     makeCheck(
       "services.snapshot",
-      servicePlanResult.error === null &&
-        validateServiceSnapshot(servicePlan, createdAt),
+      serviceSnapshotValid,
       "Service inventory is a current, host-identified read-only snapshot with approved project paths.",
       servicePlanResult.error ??
         "Service snapshot requires a recent snapshotGeneratedAt, hostname, and approved project paths.",
@@ -1189,8 +2205,22 @@ export async function runProductionPreflight({
   const failed = checks.length - passed;
   return {
     schemaVersion: 2,
+    product: RELEASE_PRODUCT,
     generatedAt: new Date(createdAt).toISOString(),
     status: failed === 0 ? "passed" : "failed",
+    scope: {
+      releasePath: releaseIdentity.valid
+        ? releaseIdentity.details.releasePath
+        : null,
+      expectedCommit: releaseIdentity.valid ? expectedCommit : null,
+      databasePath: environmentDatabaseBound ? database.realPath : null,
+      hostname: serviceSnapshotValid ? expectedHostIdentity.hostname : null,
+      machineIdSha256: serviceSnapshotValid
+        ? createHash("sha256")
+            .update(expectedHostIdentity.machineId)
+            .digest("hex")
+        : null,
+    },
     summary: {
       total: checks.length,
       passed,
@@ -1217,6 +2247,8 @@ function parseArguments(argv) {
     else if (name === "service-plan") options.servicePlanPath = value;
     else if (name === "release-manifest") options.releaseManifestPath = value;
     else if (name === "expected-commit") options.expectedCommit = value;
+    else if (name === "expected-hostname") options.expectedHostname = value;
+    else if (name === "expected-machine-id") options.expectedMachineId = value;
     else if (name === "report") options.reportPath = value;
     else throw new Error(`Unknown argument: --${name}`);
   }
@@ -1228,6 +2260,8 @@ function parseArguments(argv) {
     "servicePlanPath",
     "releaseManifestPath",
     "expectedCommit",
+    "expectedHostname",
+    "expectedMachineId",
   ]) {
     if (!options[name]) throw new Error(`Missing required preflight option: ${name}`);
   }
@@ -1238,13 +2272,24 @@ function parseArguments(argv) {
 }
 
 async function main() {
-  const { reportPath, ...options } = parseArguments(process.argv.slice(2));
-  const report = await runProductionPreflight(options);
+  const {
+    reportPath,
+    expectedHostname,
+    expectedMachineId,
+    ...options
+  } = parseArguments(process.argv.slice(2));
+  const report = await runProductionPreflight({
+    ...options,
+    expectedHostIdentity: {
+      hostname: expectedHostname,
+      machineId: expectedMachineId,
+    },
+  });
   const output = `${JSON.stringify(report, null, 2)}\n`;
   if (reportPath) {
     const absoluteReportPath = resolve(reportPath);
     mkdirSync(dirname(absoluteReportPath), { recursive: true });
-    writeFileSync(absoluteReportPath, output, { flag: "wx" });
+    writeFileSync(absoluteReportPath, output, { flag: "wx", mode: 0o600 });
   }
   if (report.status === "passed") process.stdout.write(output);
   else {

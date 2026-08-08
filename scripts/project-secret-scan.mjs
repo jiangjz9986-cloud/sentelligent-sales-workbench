@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const defaultRoot = resolve(fileURLToPath(import.meta.url), "..", "..");
 const maxGitOutputBytes = 64 * 1024 * 1024;
 const targetGitBatchBytes = 8 * 1024 * 1024;
+const nonPublishableGitRefGlob = "refs/codex/turn-diffs/**";
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 const ignoredDirs = new Set([
@@ -120,6 +121,36 @@ function walk(dir, root, files = []) {
     else if (stats.isFile() && shouldRead(fullPath)) files.push(fullPath);
   }
   return files;
+}
+
+function isIgnoredProjectPath(relativePath) {
+  const normalized = relativePath.replaceAll("\\", "/");
+  const parts = normalized.split("/");
+  if (parts.some((part) => ignoredDirs.has(part))) return true;
+  return normalized === "backend/data"
+    || normalized.startsWith("backend/data/")
+    || normalized.includes("/backend/data/");
+}
+
+function listGitVisibleFiles(root) {
+  if (!isGitRepository(root)) return null;
+  const output = runGit(root, [
+    "ls-files",
+    "-z",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+  ]);
+  return output
+    .split("\0")
+    .filter(Boolean)
+    .filter((relativePath) => !isIgnoredProjectPath(relativePath))
+    .map((relativePath) => join(root, ...relativePath.split("/")))
+    .filter((filePath) => existsSync(filePath) && statSync(filePath).isFile() && shouldRead(filePath));
+}
+
+function listWorkingTreeFiles(root) {
+  return listGitVisibleFiles(root) ?? walk(root, root);
 }
 
 function isTestSourcePath(filePath) {
@@ -256,7 +287,14 @@ function isGitRepository(root) {
 }
 
 function listHistoricalBlobs(root) {
-  const listing = runGit(root, ["-c", "core.quotePath=false", "rev-list", "--objects", "--all"]);
+  const listing = runGit(root, [
+    "-c",
+    "core.quotePath=false",
+    "rev-list",
+    `--exclude=${nonPublishableGitRefGlob}`,
+    "--objects",
+    "--all",
+  ]);
   const pathsByObject = new Map();
 
   const recordPath = (object, file) => {
@@ -276,6 +314,7 @@ function listHistoricalBlobs(root) {
     "-c",
     "core.quotePath=false",
     "log",
+    `--exclude=${nonPublishableGitRefGlob}`,
     "--all",
     "--format=",
     "--raw",
@@ -387,6 +426,7 @@ function scanGitHistoryMessages(root) {
 
   const commitLog = runGit(root, [
     "log",
+    `--exclude=${nonPublishableGitRefGlob}`,
     "--all",
     "--format=%H%x1f%B%x1e",
   ]);
@@ -504,7 +544,7 @@ function scanGitHistory(root) {
 
 export function scanProjectSecrets({ root = defaultRoot, includeGitHistory = true } = {}) {
   const workspaceRoot = resolve(root);
-  const files = walk(workspaceRoot, workspaceRoot);
+  const files = listWorkingTreeFiles(workspaceRoot);
   const findings = [];
 
   for (const file of files) {

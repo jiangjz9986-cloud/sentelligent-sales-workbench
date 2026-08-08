@@ -4,63 +4,108 @@
 
 ## [Unreleased]
 
-### v0.3.6 list actions and itinerary date polish
+## [0.4.0] - 2026-08-08
+
+### 新增
+
+- 新增个人差旅报销模块：按自然周管理七类费用、多笔实际付款、提前请款、多退少补、付款凭证、发票仓库、人工匹配、无票确认和报销整理。
+- 新增实际付款记录 A4 主表/凭证附页，以及每页固定四槽的发票合并打印；认证 PDF 使用 PDF.js 逐页渲染 Canvas，全部页面就绪后才能打印。
+- 新增 iCost 只写文本 Webhook 与统一快捷指令交付物；先完成 iCost 记账，再按账本名精确分流，“出差报销”只写森特智行，未知账本不进入本系统。
+- 新增微信付款凭证和发票图片/PDF写入能力、OCR/PDF文本提取、DeepSeek结构化分析、冲突复核与精确验收数据清理工具。
+
+### 数据与安全
+
+- 新增迁移 `0007`至 `0010`，将费用、付款、请款、iCost ingestion、发票、匹配候选、无票确认和幂等处理租约持久化；迁移保持向前兼容。
+- 图片和 PDF 保留原始字节；仅在 Brotli 严格缩小时无损压缩，同账号按原始 SHA-256 内容寻址去重，读取时校验长度与摘要。完整 OCR/PDF 文本继续保留用于人工复核，但模型请求副本统一限制为最多 200,000 个字符。
+- 付款凭证、微信待处理原件和发票原件使用 `Cache-Control: no-store`，退出或切换账号后不复用浏览器缓存。
+- iCost 使用独立 URL、Bearer Token、owner、限流、幂等与审计，只允许 `POST /api/integrations/icost/expenses`，不复用登录、模型或微信凭据。
+- 生产预检扩展为 `24/24`，增加正式 DeepSeek 模式/端点/模型/独立密钥、iCost 配置隔离、发票提取配置、主机身份，以及 `DATABASE_URL`/数据库/backend-weixin `EnvironmentFile` 路径及 SHA-256 绑定。
+
+### 发布要求
+
+- 正式发布必须重新通过后端、前端、发布脚本、Chromium、WebKit、完整 Git 历史秘密扫描和 `git diff --check`。
+- 发布包仅接受明确允许的前端公开资产、构建资产、品牌资产和无密钥 unsigned 快捷指令；业务图片、PDF、Office 文件和设计工作参考不进入归档。
+- 生产只重启 backend、frontend、weixin-agent；共享 Caddy、轻氧、account-vault、Mihomo 和 `127.0.0.1:8797` 保持不变。
+- cutover 必须先验证 15 分钟内生成、权限为 `0600`、SHA-256 一致且绑定当前主机/数据库/release 的 `24/24` 预检报告，否则不得冻结 release 或修改服务。
+- 上线完成以 GitHub Release、不可变归档、`24/24` 预检、`25/25` HTTPS 冒烟、浏览器验收和 iCost 测试数据精确清理为准。
+
+## [0.3.6] - 2026-08-03
+
+### List actions and itinerary date polish
 
 - 将客户、商机、知识和行程的新增操作收回对应内容卡片标题区，减少页面顶部空白并保持操作与列表上下文相邻。
 - 优化行程日期卡片，按“月 / 日 / 星期”展示并使用本地日期字段，避免时区转换造成日期偏移。
 - 增加列表操作区静态契约、日期格式模型测试，以及桌面和移动端 WebKit 布局验收；无 API、数据库结构或生产配置变更。
 
-### v0.3.5 sales decision writeback-preview hotfix
+## [0.3.5] - 2026-08-01
+
+### Sales decision writeback-preview hotfix
 
 - 保持销售决策核心契约严格校验，仅在进入契约前清洗四个可选的人工确认写回预览数组：保留合法非空字符串，丢弃模型偶发输出的对象、空值和占位项。
 - 明确提示词中 `writebackPreview` 四个数组的字符串约束，并始终强制 `requiresHumanConfirmation=true`；不改变决策、评分、合规、数据库或 API 边界。
 - 生产诊断证据：DeepSeek HTTP 200、`finish_reason=stop`、内容 5711 字符，原降级原因为 `writebackPreview.customerFields[0]` 非字符串，而非 token 或超时。
 
-### v0.3.4 sales decision long-tail hotfix
+## [0.3.4] - 2026-08-01
+
+### Sales decision long-tail hotfix
 
 - 将销售决策模型调用的最短超时从 `60s` 提高到 `120s`，并将生产 HTTPS 冒烟中该单项请求超时提高到 `180s`，覆盖推理型模型在完整业务上下文下的长尾响应。
 - 保留 `v0.3.3` 的 6400 completion token 预算；快速记录继续使用生产显式配置的 `60s`，其他模型任务不变。
 - 无 API、数据库、认证或写回确认边界变更；仍以生产 `19/19`、`25/25`、清理 `clean` 和 10 类残留为 0 作为验收门禁。
 
-### v0.3.3 sales decision token-budget hotfix
+## [0.3.3] - 2026-08-01
+
+### Sales decision token-budget hotfix
 
 - 将销售决策 DeepSeek 请求的 completion token 预算从 `3200` 提高到 `6400`；生产无写入诊断证明 `3200` 会出现 HTTP 200、`finish_reason=length` 且最终内容为空，`6400` 可返回完整 `sales-decision-v1` JSON。
 - 增加真实请求体预算回归测试；保留 `v0.3.2` 的销售决策 60 秒最短超时，不修改快速记录、其他模型任务、API、数据库、认证或写回确认边界。
 - 正式验收仍要求生产预检 `19/19`、HTTPS 冒烟 `25/25`、清理 `clean` 且 10 类残留为 0。
 
-### v0.3.2 sales decision timeout hotfix
+## [0.3.2] - 2026-08-01
+
+### Sales decision timeout hotfix
 
 - 将销售决策 DeepSeek 请求的最短超时从共享默认值 `30s` 提高到 `60s`，为更大的 `sales-decision-v1` 结构化响应保留合理余量；更大的显式模型超时仍保持有效。
 - 增加超时下限回归测试；不修改快速记录、其他模型任务、API、数据库结构、认证或生产配置。
 - 修复候选必须重新通过全量测试、生产 `19/19` 预检和 `25/25` HTTPS 冒烟，失败冒烟产生的数据必须保持物理清理为 `clean`。
 
-### v0.3.1 UI polish
+## [0.3.1] - 2026-08-01
+
+### UI polish
 
 - 去除总览、快速记录及各业务列表页重复的大标题；列表页仅保留新增操作，客户、商机、动作、风险、知识库和行程的详情/编辑页继续显示紧凑上下文标题。
 - 将快速记录重排为“左侧录入、右侧分析、下方历史记录”的双栏工作区，增加顶部强调线、编号流程步骤和更清晰的录入空间；平板与手机自动切换为录入、分析、历史的单列顺序。
 - 保留既有 `data-testid`、交互、API 和业务文案契约；无数据库迁移、无依赖升级、无生产配置变更。
 - 发布候选已通过前端生产构建、169 项前端测试、Chrome 7 视口集成和 WebKit 26.5 双移动视口验收；正式部署仍须重新通过 GitHub Release 工作流、生产 `19/19` 预检和 `25/25` HTTPS 冒烟。
 
-### v0.3.0 UI redesign candidate
+## [0.3.0] - 2026-08-01
+
+### UI redesign candidate
 
 - 整体视觉升级：品牌主色 `#007aff` 调整为 `#2f6bff`，语义色加深（绿 `#16a34a`、橙 `#d97706`、红 `#dc2626`），去除大窗框圆角改全出血布局。
 - 侧栏改为藏青深色渐变并新增「AI 同步引擎」状态卡；登录页改为左侧深蓝品牌区、右侧表单的分栏布局。
 - KPI 卡片增加彩色图标芯片（lucide 图标），卡片改白底发丝边框，表格数字使用 `tnum` 等宽数字。
 - 无数据库迁移、无 API 变更、无依赖升级；为纯样式与少量 JSX 结构变更，必须重新通过生产 `19/19` 预检和 `25/25` HTTPS 冒烟。
 
-### v0.2.5 hotfix candidate
+## [0.2.5] - 2026-07-29
+
+### Hotfix candidate
 
 - 将快速记录 DeepSeek 请求的 completion token 预算从 1200 调整为 3200，避免推理型模型在生成最终 JSON 前因 `finish_reason: length` 截断并静默降级。
 - 增加请求预算回归测试；不修改数据库、认证、部署配置或其他模型任务的 token 预算。
 - 生产发布门禁仍要求预检 `19/19`、HTTPS 冒烟 `25/25` 且物理清理为 `clean`。
 
-### v0.2.4 hotfix candidate
+## [0.2.4] - 2026-07-29
+
+### Hotfix candidate
 
 - 完整收口销售决策阶段边界：`stage.current` 始终来自服务端事实；`stage.recommended` 仅接受 `sales-decision-v1` 规范枚举，未知值保守回落到 current。
 - 修复 `v0.2.3` 生产冒烟仍出现的 `stage.recommended` 非规范业务阶段导致 DeepSeek 分析整体降级问题。
 - 无数据库迁移、无依赖升级、无认证或部署配置变更；必须重新通过生产 `19/19` 预检和 `25/25` HTTPS 冒烟。
 
-### v0.2.3 hotfix candidate
+## [0.2.3] - 2026-07-29
+
+### Hotfix candidate
 
 - 修复销售决策模型边界：`stage.current` 由服务端根据已存商机阶段推导，不再接受模型回显的业务阶段名，避免合法 DeepSeek 结果被误判后静默降级。
 - 修复 CentOS awk 兼容性：停服后的 8088/8897 监听检查不再使用保留函数名 `index` 作为变量，恢复项目端口关闭门禁。
@@ -182,7 +227,18 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.0
+[0.3.6]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.6
+[0.3.5]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.5
+[0.3.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.4
+[0.3.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.3
+[0.3.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.2
+[0.3.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.1
+[0.3.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.0
+[0.2.5]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.5
+[0.2.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.4
+[0.2.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.3
 [0.2.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.1
 [0.2.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.1.0

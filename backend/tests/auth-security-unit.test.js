@@ -30,21 +30,30 @@ function withDatabase(testBody) {
 
 describe("machine authorization", () => {
   it("authenticates only the configured machine bearer without leaking it", () => {
-    const config = { weixinAgentApiToken: "wx-unit-token" };
+    const config = {
+      weixinAgentApiToken: "wx-unit-token",
+      authAccount: "personal-owner",
+      weixinAgentOwner: "weixin-owner",
+    };
 
     assert.equal(authenticateMachineRequest(undefined, config), null);
     assert.equal(authenticateMachineRequest("Basic abc", config), null);
     assert.equal(authenticateMachineRequest("Bearer wrong", config), null);
     assert.deepEqual(authenticateMachineRequest("bearer wx-unit-token", config), {
-      account: "weixin-agent",
+      account: "weixin-owner",
       integration: "weixin-agent",
       kind: "machine",
     });
     assert.deepEqual(authenticateMachineRequest("Bearer wx-unit-token", config), {
-      account: "weixin-agent",
+      account: "weixin-owner",
       integration: "weixin-agent",
       kind: "machine",
     });
+
+    assert.equal(authenticateMachineRequest("Bearer wx-unit-token", {
+      weixinAgentApiToken: "wx-unit-token",
+      authAccount: "personal-owner",
+    }).account, "personal-owner");
   });
 
   it("allows only the declared machine capabilities", () => {

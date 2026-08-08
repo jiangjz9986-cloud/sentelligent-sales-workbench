@@ -41,6 +41,8 @@ BACKUP_DIR="${BACKUP_DIR:-}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-}"
 WEIXIN_SESSION_DIR="${WEIXIN_SESSION_DIR:-}"
 NODE_BIN="${NODE_BIN:-$PROJECT_ROOT/runtime/node-v24/bin/node}"
+PREFLIGHT_REPORT="${PREFLIGHT_REPORT:-}"
+PREFLIGHT_REPORT_SHA256="${PREFLIGHT_REPORT_SHA256:-}"
 
 OLD_RELEASE=""
 RUN_ID=""
@@ -90,13 +92,16 @@ Required:
   --backup-dir=<path>        Controlled backup output root
   --evidence-dir=<path>      Controlled evidence output root
   --weixin-session-dir=<path> WeChat session state directory
+  --preflight-report=<path>  Fresh passed 24/24 production preflight report
+  --preflight-report-sha256=<sha256> Exact report SHA-256
 
 Optional:
   --node=<path>              Project Node.js 24+ executable
   --help                     Show this message
 
 The same values may be supplied through NEW_RELEASE, EXPECTED_COMMIT,
-DATABASE_PATH, BACKUP_DIR, EVIDENCE_DIR, WEIXIN_SESSION_DIR, and NODE_BIN.
+DATABASE_PATH, BACKUP_DIR, EVIDENCE_DIR, WEIXIN_SESSION_DIR, NODE_BIN,
+PREFLIGHT_REPORT, and PREFLIGHT_REPORT_SHA256.
 EOF
 }
 
@@ -198,6 +203,24 @@ parse_arguments() {
         fi
         NODE_BIN=$1
         ;;
+      --preflight-report=*) PREFLIGHT_REPORT=${1#*=} ;;
+      --preflight-report)
+        shift
+        if [[ $# -eq 0 ]]; then
+          fail "--preflight-report requires a value"
+          return 1
+        fi
+        PREFLIGHT_REPORT=$1
+        ;;
+      --preflight-report-sha256=*) PREFLIGHT_REPORT_SHA256=${1#*=} ;;
+      --preflight-report-sha256)
+        shift
+        if [[ $# -eq 0 ]]; then
+          fail "--preflight-report-sha256 requires a value"
+          return 1
+        fi
+        PREFLIGHT_REPORT_SHA256=$1
+        ;;
       --help|-h)
         usage
         return 2
@@ -272,6 +295,8 @@ validate_arguments() {
   [[ -n "$EVIDENCE_DIR" ]] || fail "EVIDENCE_DIR is required"
   [[ -n "$WEIXIN_SESSION_DIR" ]] || fail "WEIXIN_SESSION_DIR is required"
   [[ -n "$NODE_BIN" ]] || fail "NODE_BIN is required"
+  [[ -n "$PREFLIGHT_REPORT" ]] || fail "PREFLIGHT_REPORT is required"
+  [[ -n "$PREFLIGHT_REPORT_SHA256" ]] || fail "PREFLIGHT_REPORT_SHA256 is required"
 
   validate_release_path_syntax "$NEW_RELEASE"
   [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
@@ -292,6 +317,10 @@ validate_arguments() {
   validate_plain_absolute_path "$NODE_BIN" "Node executable"
   [[ "$NODE_BIN" == "$PROJECT_ROOT/runtime/"* ]] ||
     fail "Node executable must remain under the project runtime"
+  validate_controlled_output_path \
+    "$PREFLIGHT_REPORT" "$PROJECT_ROOT/evidence" "Preflight report"
+  [[ "$PREFLIGHT_REPORT_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+    fail "PREFLIGHT_REPORT_SHA256 must be exactly 64 lowercase hexadecimal characters"
 }
 
 systemctl_property() {
@@ -301,8 +330,173 @@ systemctl_property() {
     sed -n "s/^${property}=//p"
 }
 
+assert_clean_systemd_execution_surface() {
+  local service=$1
+  local property value
+  local -a empty_properties=(
+    ExecCondition ExecStartPre ExecStartPost ExecStop ExecReload DropInPaths
+    Environment RootDirectory RootImage BindPaths BindReadOnlyPaths
+    ReadWritePaths ReadOnlyPaths InaccessiblePaths ExecPaths NoExecPaths
+    TemporaryFileSystem
+  )
+  for property in "${empty_properties[@]}"; do
+    value="$(systemctl_property "$service" "$property")"
+    [[ -z "$value" ]] ||
+      fail "$service has an unexpected systemd $property execution surface"
+  done
+
+  for property in ProtectSystem ProtectHome; do
+    value="$(systemctl_property "$service" "$property")"
+    [[ "$value" == "no" ]] ||
+      fail "$service has an unexpected systemd $property value"
+  done
+  for property in PrivateTmp PrivateDevices DynamicUser; do
+    value="$(systemctl_property "$service" "$property")"
+    [[ "$value" == "no" ]] ||
+      fail "$service has an unexpected systemd $property value"
+  done
+
+  value="$(systemctl_property "$service" EnvironmentFiles)"
+  if [[ "$service" == "sentelligent-frontend.service" ]]; then
+    [[ -z "$value" ]] ||
+      fail "$service must not consume the private backend environment"
+  else
+    [[ -n "$value" && "$value" != *$'\n'* ]] ||
+      fail "$service must identify exactly one production EnvironmentFile"
+  fi
+}
+
 sha256_file() {
   sha256sum "$1" | awk '{print $1}'
+}
+
+verify_preflight_report() {
+  PREFLIGHT_REPORT_PATH="$PREFLIGHT_REPORT" \
+  PREFLIGHT_REPORT_EXPECTED_SHA256="$PREFLIGHT_REPORT_SHA256" \
+  PREFLIGHT_EXPECTED_RELEASE="$OLD_RELEASE" \
+  PREFLIGHT_EXPECTED_DATABASE="$DATABASE_PATH" \
+    "$NODE_BIN" --input-type=module --eval '
+      import { createHash } from "node:crypto";
+      import {
+        closeSync,
+        constants,
+        fstatSync,
+        lstatSync,
+        openSync,
+        readFileSync,
+        realpathSync,
+      } from "node:fs";
+      import { resolve } from "node:path";
+
+      const requestedPath = resolve(process.env.PREFLIGHT_REPORT_PATH);
+      const normalize = (value) =>
+        process.platform === "win32" ? resolve(value).toLowerCase() : value;
+      const lexical = lstatSync(requestedPath, { bigint: true });
+      if (!lexical.isFile() || lexical.isSymbolicLink()) {
+        throw new Error("Preflight report must be a regular non-symbolic file");
+      }
+      const realPath = realpathSync.native(requestedPath);
+      if (normalize(realPath) !== normalize(requestedPath)) {
+        throw new Error("Preflight report path must be canonical");
+      }
+      const descriptor = openSync(
+        realPath,
+        Number(constants.O_RDONLY) | Number(constants.O_NOFOLLOW ?? 0),
+      );
+      let content;
+      let before;
+      try {
+        before = fstatSync(descriptor, { bigint: true });
+        if (!before.isFile() || before.nlink !== 1n) {
+          throw new Error("Preflight report must be a single-link regular file");
+        }
+        if (process.platform !== "win32" && (before.mode & 0o077n) !== 0n) {
+          throw new Error("Preflight report must not be accessible by group or other");
+        }
+        content = readFileSync(descriptor);
+        if (BigInt(content.length) !== before.size) {
+          throw new Error("Preflight report changed while it was read");
+        }
+        const actualSha256 = createHash("sha256").update(content).digest("hex");
+        if (
+          !/^[a-f0-9]{64}$/.test(process.env.PREFLIGHT_REPORT_EXPECTED_SHA256 ?? "") ||
+          actualSha256 !== process.env.PREFLIGHT_REPORT_EXPECTED_SHA256
+        ) {
+          throw new Error("Preflight report SHA-256 mismatch");
+        }
+      } finally {
+        closeSync(descriptor);
+      }
+
+      const report = JSON.parse(content.toString("utf8"));
+      const requiredChecks = [
+        "release.identity",
+        "node.version",
+        "env.production",
+        "env.authRequired",
+        "env.authHash",
+        "env.sessionSecret",
+        "env.secureCookie",
+        "env.cors",
+        "env.solutionWrites",
+        "env.aiModel",
+        "env.icostWebhook",
+        "env.icostIsolation",
+        "env.invoiceExtraction",
+        "database.environmentBinding",
+        "database.quickCheck",
+        "database.foreignKeys",
+        "backup.identity",
+        "backup.sha256",
+        "backup.quickCheck",
+        "backup.foreignKeys",
+        "services.snapshot",
+        "services.project",
+        "services.commands",
+        "services.unrelatedProtection",
+      ].sort();
+      const generatedAt = Date.parse(report.generatedAt ?? "");
+      const age = Date.now() - generatedAt;
+      if (!Number.isFinite(generatedAt) || age < -5 * 60_000 || age > 15 * 60_000) {
+        throw new Error("Preflight report is not fresh enough for cutover");
+      }
+      if (
+        report.schemaVersion !== 2 ||
+        report.product !== "sentelligent-sales-workbench" ||
+        report.status !== "passed" ||
+        report.summary?.total !== 24 ||
+        report.summary?.passed !== 24 ||
+        report.summary?.failed !== 0
+      ) {
+        throw new Error("Preflight report must be an exact passed 24/24 result");
+      }
+      if (!Array.isArray(report.checks) || report.checks.length !== 24) {
+        throw new Error("Preflight report must contain exactly 24 checks");
+      }
+      const observedChecks = report.checks.map((check) => check?.id).sort();
+      if (
+        report.checks.some((check) => check?.status !== "passed") ||
+        JSON.stringify(observedChecks) !== JSON.stringify(requiredChecks)
+      ) {
+        throw new Error("Preflight report check identities or statuses are invalid");
+      }
+      if (
+        report.scope?.releasePath !== process.env.PREFLIGHT_EXPECTED_RELEASE ||
+        !/^[a-f0-9]{40}$/.test(String(report.scope?.expectedCommit ?? "")) ||
+        report.scope?.databasePath !== process.env.PREFLIGHT_EXPECTED_DATABASE ||
+        typeof report.scope?.hostname !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(report.scope.hostname) ||
+        !/^[a-f0-9]{64}$/.test(String(report.scope?.machineIdSha256 ?? ""))
+      ) {
+        throw new Error("Preflight report scope does not match the current release, database, or host identity");
+      }
+      const after = lstatSync(realPath, { bigint: true });
+      for (const field of ["dev", "ino", "mode", "nlink", "size", "mtimeNs", "ctimeNs"]) {
+        if (after[field] !== before[field]) {
+          throw new Error("Preflight report identity changed during validation");
+        }
+      }
+    '
 }
 
 transform_frontend_config() {
@@ -468,6 +662,7 @@ assert_project_services_ready() {
       fail "$service WorkingDirectory is outside the expected release"
     [[ "$exec_start" == *"$expected_release/"* ]] ||
       fail "$service ExecStart is outside the expected release"
+    assert_clean_systemd_execution_surface "$service"
   done
 }
 
@@ -562,7 +757,7 @@ verify_release_manifest() {
       ];
 
       if (
-        manifest.schemaVersion !== 2 ||
+        manifest.schemaVersion !== 3 ||
         manifest.product !== "sentelligent-sales-workbench" ||
         manifest.source?.commit !== expectedCommit ||
         manifest.source?.clean !== true
@@ -576,6 +771,7 @@ verify_release_manifest() {
       const groups = [
         ["build", manifest.buildHashes],
         ["migration", manifest.migrationChecksums],
+        ["production dependency", manifest.productionDependencyHashes],
         ["source", manifest.sourceHashes],
       ];
       const allFiles = new Set();
@@ -618,6 +814,16 @@ verify_release_manifest() {
       if (sha256(Buffer.from(sourceIndex, "utf8")) !== manifest.sourceHashes.treeSha256) {
         throw new Error("Candidate source tree checksum mismatch");
       }
+      const dependencyIndex = Object.entries(manifest.productionDependencyHashes.files)
+        .sort(([left], [right]) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
+        .map(([file, hash]) => `${hash}  ${file}\n`)
+        .join("");
+      if (
+        sha256(Buffer.from(dependencyIndex, "utf8")) !==
+        manifest.productionDependencyHashes.treeSha256
+      ) {
+        throw new Error("Candidate production dependency tree checksum mismatch");
+      }
       const migrationFiles = Object.keys(manifest.migrationChecksums.files);
       if (!migrationFiles.every((file) => manifest.sourceHashes.files[file])) {
         throw new Error("Migration checksums are not bound to source checksums");
@@ -626,6 +832,42 @@ verify_release_manifest() {
         throw new Error("Candidate archive file count mismatch");
       }
     '
+}
+
+freeze_candidate_release() {
+  [[ "$mutation_started" -eq 0 && "$services_stopped" -eq 0 &&
+    "$unit_install_started" -eq 0 && "$current_switched" -eq 0 ]] ||
+    fail "Candidate release must be frozen before production mutation"
+
+  if find "$NEW_RELEASE" -type l -print -quit | grep -q .; then
+    fail "Candidate release contains a symbolic link"
+  fi
+  if find "$NEW_RELEASE" -type f -links +1 -print -quit | grep -q .; then
+    fail "Candidate release contains a hard-linked file"
+  fi
+
+  chown -R root:root "$NEW_RELEASE"
+  find "$NEW_RELEASE" -type d -exec chmod go-w {} +
+  find "$NEW_RELEASE" -type f -exec chmod go-w {} +
+
+  local entry metadata uid gid mode links file_type numeric_mode
+  while IFS= read -r -d '' entry; do
+    metadata="$(stat -c '%u:%g:%a:%h:%F' "$entry")"
+    IFS=: read -r uid gid mode links file_type <<< "$metadata"
+    [[ "$uid" == "0" && "$gid" == "0" ]] ||
+      fail "Candidate release ownership is not root:root"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] ||
+      fail "Candidate release mode is invalid"
+    numeric_mode=$((8#$mode))
+    (( (numeric_mode & 0022) == 0 )) ||
+      fail "Candidate release remains writable by a runtime identity"
+    if [[ "$file_type" == "regular file" ]]; then
+      [[ "$links" == "1" ]] ||
+        fail "Candidate release file is hard linked"
+    elif [[ "$file_type" != "directory" ]]; then
+      fail "Candidate release contains an unsupported entry type"
+    fi
+  done < <(find "$NEW_RELEASE" -xdev -print0)
 }
 
 stage_project_units() {
@@ -643,6 +885,7 @@ stage_project_units() {
     fragment="$(systemctl_property "$service" FragmentPath)"
     [[ "$fragment" == "$installed" ]] || fail "$service FragmentPath is not controlled"
     [[ -f "$installed" && ! -L "$installed" ]] || fail "$service unit is not a regular file"
+    assert_clean_systemd_execution_surface "$service"
     grep -Fq "$OLD_RELEASE" "$installed" || fail "$service unit is not pinned to the old release"
     if grep -Fq "$CURRENT_LINK" "$installed"; then
       fail "$service unit references current"
@@ -729,6 +972,109 @@ backup_weixin_session() {
   tar -tzf "$WEIXIN_BACKUP" >/dev/null
   WEIXIN_BACKUP_SHA="$(sha256_file "$WEIXIN_BACKUP")"
   [[ "$WEIXIN_BACKUP_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "WeChat backup hash failed"
+}
+
+verify_sqlite_integrity() {
+  local database_path=$1
+  local label=$2
+  VERIFY_DATABASE="$database_path" VERIFY_DATABASE_LABEL="$label" \
+    "$NODE_BIN" --input-type=module --eval '
+      import { DatabaseSync } from "node:sqlite";
+      const database = new DatabaseSync(process.env.VERIFY_DATABASE, { readOnly: true });
+      try {
+        const quick = database.prepare("PRAGMA quick_check").all();
+        const foreign = database.prepare("PRAGMA foreign_key_check").all();
+        if (quick.length !== 1 || quick[0].quick_check !== "ok") {
+          throw new Error(`${process.env.VERIFY_DATABASE_LABEL} quick_check integrity verification failed`);
+        }
+        if (foreign.length !== 0) {
+          throw new Error(`${process.env.VERIFY_DATABASE_LABEL} foreign key integrity verification failed`);
+        }
+      } finally {
+        database.close();
+      }
+    '
+}
+
+rehearse_candidate_migrations() {
+  [[ "$mutation_started" -eq 0 && "$services_stopped" -eq 0 &&
+    "$unit_install_started" -eq 0 && "$current_switched" -eq 0 ]] ||
+    fail "Candidate migration rehearsal must run before production mutation"
+
+  local verified_backup="$RUN_BACKUP_DIR/database-pre-cutover-verified.sqlite"
+  local rehearsal_database="$RUN_BACKUP_DIR/database-migration-rehearsal.sqlite"
+  [[ ! -e "$verified_backup" && ! -L "$verified_backup" ]] ||
+    fail "Pre-cutover migration backup already exists"
+  [[ ! -e "$rehearsal_database" && ! -L "$rehearsal_database" ]] ||
+    fail "Migration rehearsal database already exists"
+
+  SOURCE_DATABASE="$DATABASE_PATH" TARGET_DATABASE="$verified_backup" \
+    "$NODE_BIN" --input-type=module --eval '
+      import { DatabaseSync } from "node:sqlite";
+      const source = new DatabaseSync(process.env.SOURCE_DATABASE, { readOnly: true });
+      try {
+        source.prepare("VACUUM INTO ?").run(process.env.TARGET_DATABASE);
+      } finally {
+        source.close();
+      }
+    '
+  [[ -s "$verified_backup" && ! -L "$verified_backup" ]] ||
+    fail "Pre-cutover migration backup is unavailable"
+  chmod 0600 "$verified_backup"
+  [[ ! "$DATABASE_PATH" -ef "$verified_backup" ]] ||
+    fail "Pre-cutover migration backup is not isolated from production"
+  verify_sqlite_integrity "$verified_backup" "Pre-cutover migration backup"
+
+  SOURCE_DATABASE="$verified_backup" TARGET_DATABASE="$rehearsal_database" \
+    "$NODE_BIN" --input-type=module --eval '
+      import { closeSync, constants, copyFileSync, fsyncSync, openSync } from "node:fs";
+      copyFileSync(
+        process.env.SOURCE_DATABASE,
+        process.env.TARGET_DATABASE,
+        constants.COPYFILE_EXCL,
+      );
+      const descriptor = openSync(process.env.TARGET_DATABASE, "r+");
+      try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+    '
+  chmod 0600 "$rehearsal_database"
+  [[ -f "$rehearsal_database" && ! -L "$rehearsal_database" ]] ||
+    fail "Migration rehearsal database is unavailable"
+  [[ ! "$DATABASE_PATH" -ef "$rehearsal_database" ]] ||
+    fail "Migration rehearsal database is not isolated from production"
+  [[ ! "$verified_backup" -ef "$rehearsal_database" ]] ||
+    fail "Migration rehearsal database is not isolated from its verified backup"
+  cmp --silent "$verified_backup" "$rehearsal_database"
+
+  (
+    cd "$NEW_RELEASE/backend"
+    unset DATABASE_PATH
+    NODE_ENV=test databaseUrl="$rehearsal_database" DATABASE_URL="$rehearsal_database" \
+      "$NODE_BIN" src/db.js --migrate
+  )
+
+  MIGRATION_DATABASE="$rehearsal_database" "$NODE_BIN" --input-type=module --eval '
+    import { DatabaseSync } from "node:sqlite";
+    const database = new DatabaseSync(process.env.MIGRATION_DATABASE);
+    try {
+      database.exec("PRAGMA busy_timeout = 5000");
+      const checkpoint = database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+      if (Number(checkpoint.busy) !== 0) {
+        throw new Error("Migration rehearsal WAL checkpoint remained busy");
+      }
+      const journalMode = database.prepare("PRAGMA journal_mode = DELETE").get().journal_mode;
+      if (String(journalMode).toLowerCase() !== "delete") {
+        throw new Error(`Unexpected migration rehearsal journal mode: ${journalMode}`);
+      }
+    } finally {
+      database.close();
+    }
+  '
+  local suffix
+  for suffix in -wal -shm -journal; do
+    [[ ! -e "${rehearsal_database}${suffix}" ]] ||
+      fail "Migration rehearsal SQLite sidecar remained after checkpoint"
+  done
+  verify_sqlite_integrity "$rehearsal_database" "Migrated rehearsal database"
 }
 
 backup_sqlite_offline() {
@@ -1055,6 +1401,7 @@ main() {
   [[ "$parse_status" -eq 0 ]] || return "$parse_status"
   validate_arguments
   prepare_runtime
+  verify_preflight_report
 
   trap rollback_cutover ERR
   trap 'rollback_cutover 129' HUP
@@ -1062,11 +1409,13 @@ main() {
   trap 'rollback_cutover 143' TERM
 
   verify_release_manifest
+  freeze_candidate_release
   assert_project_services_ready "$OLD_RELEASE"
   assert_frontend_release_health "$OLD_RELEASE"
   capture_protected_snapshot "$PROTECTED_BEFORE"
   PROTECTED_BEFORE_SHA="$(sha256_file "$PROTECTED_BEFORE")"
   protected_snapshot_ready=1
+  rehearse_candidate_migrations
   stage_project_units
   stop_writers_and_lock_database
   backup_weixin_session
