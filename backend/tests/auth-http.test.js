@@ -288,6 +288,7 @@ describe("cookie authentication protocol", () => {
   });
 
   it("allows only the exact POST routes needed for WeChat document imports", () => {
+    assert.equal(isMachineRouteAllowed("POST", "/api/quick-records/preview"), true);
     assert.equal(isMachineRouteAllowed("POST", "/api/travel-expense-document-inbox"), true);
     assert.equal(isMachineRouteAllowed("POST", "/api/invoices"), true);
 
