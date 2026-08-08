@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
+import { isMachineRouteAllowed } from "../src/auth/machineAuthorization.js";
 import { createServer } from "../src/server.js";
 
 const passwordField = "pass" + "word";
@@ -271,6 +272,8 @@ describe("cookie authentication protocol", () => {
 
     for (const [method, path] of [
       ["GET", "/api/audit-logs"],
+      ["GET", "/api/invoices"],
+      ["GET", "/api/travel-expense-document-inbox"],
       ["POST", "/api/auth/login"],
       ["POST", "/api/integrations/weixin-agent/login"],
       ["DELETE", "/api/customers/customer-1"],
@@ -281,6 +284,21 @@ describe("cookie authentication protocol", () => {
       });
       assert.equal(denied.response.status, 403);
       assert.equal(denied.body.error.code, "MACHINE_SCOPE_DENIED");
+    }
+  });
+
+  it("allows only the exact POST routes needed for WeChat document imports", () => {
+    assert.equal(isMachineRouteAllowed("POST", "/api/travel-expense-document-inbox"), true);
+    assert.equal(isMachineRouteAllowed("POST", "/api/invoices"), true);
+
+    for (const [method, path] of [
+      ["GET", "/api/travel-expense-document-inbox"],
+      ["GET", "/api/invoices"],
+      ["PUT", "/api/invoices"],
+      ["POST", "/api/invoices/invoice-1/match"],
+      ["POST", "/api/travel-expenses/EXP-1/attachments"],
+    ]) {
+      assert.equal(isMachineRouteAllowed(method, path), false, `${method} ${path} must remain denied`);
     }
   });
 

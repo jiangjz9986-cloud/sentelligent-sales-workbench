@@ -7,6 +7,10 @@ import { apply as applyPhase1WriteIntegrity } from "./migrations/0002_phase1_wri
 import { apply as applyQuickRecordRiskIdentity } from "./migrations/0003_quick_record_risk_identity.mjs";
 import { apply as applyVisitItineraries } from "./migrations/0005_visit_itineraries.mjs";
 import { apply as applySalesDecisionAnalyses } from "./migrations/0006_sales_decision_analyses.mjs";
+import { apply as applyTravelExpenses } from "./migrations/0007_travel_expenses.mjs";
+import { apply as applyExpenseIngestionInvoices } from "./migrations/0008_expense_ingestion_invoices.mjs";
+import { apply as applyLosslessDocumentBlobs } from "./migrations/0009_lossless_document_blobs.mjs";
+import { apply as applyIdempotencyClaimLeases } from "./migrations/0010_idempotency_claim_leases.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -38,6 +42,30 @@ const migrations = [
     path: resolve(here, "migrations", "0006_sales_decision_analyses.mjs"),
     type: "module",
     apply: applySalesDecisionAnalyses,
+  },
+  {
+    version: "0007",
+    path: resolve(here, "migrations", "0007_travel_expenses.mjs"),
+    type: "module",
+    apply: applyTravelExpenses,
+  },
+  {
+    version: "0008",
+    path: resolve(here, "migrations", "0008_expense_ingestion_invoices.mjs"),
+    type: "module",
+    apply: applyExpenseIngestionInvoices,
+  },
+  {
+    version: "0009",
+    path: resolve(here, "migrations", "0009_lossless_document_blobs.mjs"),
+    type: "module",
+    apply: applyLosslessDocumentBlobs,
+  },
+  {
+    version: "0010",
+    path: resolve(here, "migrations", "0010_idempotency_claim_leases.mjs"),
+    type: "module",
+    apply: applyIdempotencyClaimLeases,
   },
 ];
 

@@ -6,6 +6,8 @@ const ALLOWED_MACHINE_ROUTES = new Set([
   "GET /api/customers",
   "POST /api/quick-records",
   "POST /api/reports/weekly/draft",
+  "POST /api/travel-expense-document-inbox",
+  "POST /api/invoices",
 ]);
 const QUICK_RECORD_ANALYZE_ROUTE = /^POST \/api\/quick-records\/[^/]+\/analyze$/;
 
@@ -18,9 +20,16 @@ function configuredMachineToken(config) {
   return typeof token === "string" && token.length > 0 ? token : null;
 }
 
-function machineIdentity() {
+function configuredMachineOwner(config) {
+  for (const value of [config?.weixinAgentOwner, config?.authAccount]) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "weixin-agent";
+}
+
+function machineIdentity(config) {
   return {
-    account: "weixin-agent",
+    account: configuredMachineOwner(config),
     integration: "weixin-agent",
   };
 }
@@ -31,7 +40,7 @@ export function verifyMachineToken(token, config) {
 
   // Hashing both values gives timingSafeEqual two equal-length buffers for every comparison.
   return timingSafeEqual(tokenDigest(token), tokenDigest(expected))
-    ? machineIdentity()
+    ? machineIdentity(config)
     : null;
 }
 

@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { HttpError } from "../http/errors.js";
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const IDEMPOTENCY_PROCESSING_LEASE_MS = 5 * 60 * 1000;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 200;
 
 function invalidJsonValue() {
@@ -86,6 +87,17 @@ function nowDate(value) {
   return date;
 }
 
+function requireClaimToken(scope) {
+  if (typeof scope.claimToken !== "string" || scope.claimToken.length < 1) {
+    throw new TypeError("A current idempotency claim token is required");
+  }
+  return scope.claimToken;
+}
+
+function expiresAt(now) {
+  return new Date(now.getTime() + IDEMPOTENCY_TTL_MS).toISOString();
+}
+
 export function claimIdempotency(db, scope) {
   const params = scopeParams(scope);
   const now = nowDate(scope.now);
@@ -133,26 +145,62 @@ export function claimIdempotency(db, scope) {
           body: JSON.parse(existing.response_json),
         };
       }
-      throw new HttpError(409, "REQUEST_IN_PROGRESS", "The same request is already being processed");
+      const startedAt = Date.parse(existing.created_at);
+      const leaseIsActive = Number.isFinite(startedAt)
+        && startedAt + IDEMPOTENCY_PROCESSING_LEASE_MS > now.getTime();
+      if (leaseIsActive) {
+        throw new HttpError(409, "REQUEST_IN_PROGRESS", "The same request is already being processed");
+      }
+
+      const claimToken = randomUUID();
+      const reclaimed = db.prepare(`
+        UPDATE idempotency_keys
+        SET claim_token = $claimToken,
+            response_status = NULL,
+            response_json = NULL,
+            created_at = $createdAt,
+            expires_at = $expiresAt
+        WHERE actor = $actor
+          AND method = $method
+          AND request_path = $requestPath
+          AND key = $key
+          AND request_hash = $requestHash
+          AND state = 'processing'
+          AND created_at = $previousCreatedAt
+          AND claim_token IS $previousClaimToken
+      `).run({
+        ...params,
+        $requestHash: scope.hash,
+        $claimToken: claimToken,
+        $createdAt: nowIso,
+        $expiresAt: expiresAt(now),
+        $previousCreatedAt: existing.created_at,
+        $previousClaimToken: existing.claim_token ?? null,
+      });
+      if (reclaimed.changes !== 1) {
+        throw new HttpError(409, "REQUEST_IN_PROGRESS", "The same request is already being processed");
+      }
+      return { replay: false, claimToken };
     }
   }
 
-  const expiresIso = new Date(now.getTime() + IDEMPOTENCY_TTL_MS).toISOString();
+  const claimToken = randomUUID();
   db.prepare(`
     INSERT INTO idempotency_keys (
       actor, method, request_path, key, request_hash, state,
-      response_status, response_json, created_at, expires_at
+      claim_token, response_status, response_json, created_at, expires_at
     ) VALUES (
       $actor, $method, $requestPath, $key, $requestHash, 'processing',
-      NULL, NULL, $createdAt, $expiresAt
+      $claimToken, NULL, NULL, $createdAt, $expiresAt
     )
   `).run({
     ...params,
     $requestHash: scope.hash,
+    $claimToken: claimToken,
     $createdAt: nowIso,
-    $expiresAt: expiresIso,
+    $expiresAt: expiresAt(now),
   });
-  return { replay: false };
+  return { replay: false, claimToken };
 }
 
 export function completeIdempotency(db, scope) {
@@ -160,9 +208,11 @@ export function completeIdempotency(db, scope) {
     throw new TypeError("Idempotency response status must be a valid HTTP status");
   }
   stableJson(scope.body);
+  const claimToken = requireClaimToken(scope);
   const result = db.prepare(`
     UPDATE idempotency_keys
     SET state = 'completed',
+        claim_token = NULL,
         response_status = $responseStatus,
         response_json = $responseJson
     WHERE actor = $actor
@@ -171,13 +221,33 @@ export function completeIdempotency(db, scope) {
       AND key = $key
       AND request_hash = $requestHash
       AND state = 'processing'
+      AND claim_token = $claimToken
   `).run({
     ...scopeParams(scope),
     $requestHash: scope.hash,
+    $claimToken: claimToken,
     $responseStatus: scope.status,
     $responseJson: JSON.stringify(scope.body),
   });
   if (result.changes !== 1) {
-    throw new Error("The idempotency claim could not be completed");
+    throw new Error("The idempotency claim is no longer current");
   }
+}
+
+export function releaseIdempotencyClaim(db, scope) {
+  const result = db.prepare(`
+    DELETE FROM idempotency_keys
+    WHERE actor = $actor
+      AND method = $method
+      AND request_path = $requestPath
+      AND key = $key
+      AND request_hash = $requestHash
+      AND state = 'processing'
+      AND claim_token = $claimToken
+  `).run({
+    ...scopeParams(scope),
+    $requestHash: scope.hash,
+    $claimToken: requireClaimToken(scope),
+  });
+  return result.changes === 1;
 }

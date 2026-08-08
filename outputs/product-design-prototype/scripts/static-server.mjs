@@ -134,7 +134,7 @@ export function securityHeadersFor({ apiBaseUrl } = {}) {
     "default-src 'self'",
     "script-src 'self' 'unsafe-inline' https://webapi.amap.com https://*.amap.com",
     "style-src 'self' 'unsafe-inline' https://*.amap.com https://*.alicdn.com",
-    "img-src 'self' data: blob: https://*.amap.com https://*.alicdn.com",
+    `img-src 'self' data: blob: ${apiOrigin} https://*.amap.com https://*.alicdn.com`,
     `connect-src 'self' ${apiOrigin} https://*.amap.com`,
     "font-src 'self' data: https://*.amap.com https://*.alicdn.com",
     "media-src 'self' blob:",

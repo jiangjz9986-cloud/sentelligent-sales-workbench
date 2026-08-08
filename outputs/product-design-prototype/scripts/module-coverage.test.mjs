@@ -66,6 +66,33 @@ describe("business module delivery coverage", () => {
       "getVisitItinerary",
       "saveVisitItinerary",
       "deleteVisitItinerary",
+      "listTravelExpenses",
+      "getTravelExpense",
+      "saveTravelExpense",
+      "deleteTravelExpense",
+      "addTravelExpenseAttachment",
+      "getTravelExpenseAttachmentContentUrl",
+      "deleteTravelExpenseAttachment",
+      "listTravelExpenseAdvances",
+      "saveTravelExpenseAdvance",
+      "deleteTravelExpenseAdvance",
+      "listInvoices",
+      "uploadInvoice",
+      "getInvoice",
+      "getInvoiceContentUrl",
+      "reviewInvoice",
+      "deleteInvoice",
+      "listInvoiceMatches",
+      "createInvoiceMatch",
+      "revokeInvoiceMatch",
+      "listNoInvoiceConfirmations",
+      "confirmNoInvoice",
+      "revokeNoInvoice",
+      "getWeekInvoiceCoverage",
+      "listInvoiceCandidates",
+      "generateInvoiceCandidates",
+      "acceptInvoiceCandidate",
+      "rejectInvoiceCandidate",
     ];
 
     const missingApiClient = requiredApiMethods.filter((method) => !apiSource.includes(`${method}(`));
@@ -81,6 +108,7 @@ describe("business module delivery coverage", () => {
       "solution",
       "kanban",
       "itinerary",
+      "expense",
     ].filter((keyword) => !integrationSource.toLowerCase().includes(keyword));
 
     assert.deepEqual({ missingApiClient, missingApiTests, missingIntegration }, {

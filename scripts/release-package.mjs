@@ -1,19 +1,60 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
+  linkSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, extname, join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  basename,
+  delimiter,
+  dirname,
+  extname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { gzipSync } from "node:zlib";
 
 const defaultRoot = resolve(import.meta.dirname, "..");
+const GIT_OUTPUT_LIMIT_BYTES = 256 * 1024 * 1024;
+const PRODUCT_FRONTEND_PATH = join("outputs", "product-design-prototype");
+const PRODUCT_DIST_PATH = join(PRODUCT_FRONTEND_PATH, "dist");
+const PRODUCT_DIST_PREFIX = "outputs/product-design-prototype/dist/";
+const PRODUCT_NODE_MODULES_PREFIX = "outputs/product-design-prototype/node_modules/";
+const PRODUCT_LOCKFILE_RELEASE_PATH = "outputs/product-design-prototype/package-lock.json";
+const BACKEND_PATH = "backend";
+const BACKEND_LOCKFILE_RELEASE_PATH = "backend/package-lock.json";
+const BACKEND_NODE_MODULES_PATH = join(BACKEND_PATH, "node_modules");
+const BACKEND_NODE_MODULES_PREFIX = "backend/node_modules/";
+const FRONTEND_BUILD_ENVIRONMENT_IDENTITY = "sentelligent-release-frontend-v1";
+const RELEASE_NPM_CLI_ENV = "SENTELLIGENT_RELEASE_NPM_CLI";
+const WINDOWS_IMPLICIT_BUILD_ENV_NAMES = Object.freeze([
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOGONSERVER",
+  "SYSTEMDRIVE",
+  "TEMP",
+  "USERDOMAIN",
+  "USERNAME",
+  "USERPROFILE",
+]);
 
 export const REQUIRED_ENV_NAMES = Object.freeze([
   "NODE_ENV",
@@ -40,6 +81,14 @@ export const REQUIRED_ENV_NAMES = Object.freeze([
   "WEIXIN_AGENT_BACKEND_URL",
   "WEIXIN_AGENT_OWNER",
   "WEIXIN_AGENT_SESSION_HOME",
+  "ICOST_WEBHOOK_TOKEN",
+  "ICOST_WEBHOOK_OWNER",
+  "ICOST_WEBHOOK_RATE_LIMIT",
+  "ICOST_WEBHOOK_WINDOW_MS",
+  "INVOICE_OCR_COMMAND",
+  "INVOICE_PDF_TEXT_COMMAND",
+  "INVOICE_OCR_LANGUAGES",
+  "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
 ]);
 
 const PROJECT_SERVICE_UNITS = Object.freeze([
@@ -266,13 +315,17 @@ const placeholderWords = new Set([
   "env",
   "existing",
   "expired",
+  "expense",
+  "error",
   "export",
   "extra",
   "failure",
+  "for",
   "from",
   "hash",
   "here",
   "in",
+  "icost",
   "key",
   "login",
   "logout",
@@ -291,8 +344,10 @@ const placeholderWords = new Set([
   "shared",
   "short",
   "stale",
+  "tests",
   "used",
   "value",
+  "webhook",
   "weixin",
 ]);
 
@@ -512,6 +567,20 @@ export function shouldExcludeReleasePath(filePath) {
     return true;
   }
   if (/\.(?:tar|tar\.gz|tgz|zip)$/.test(fileName)) return true;
+  if (
+    /\.(?:aac|bmp|docx?|flac|gif|heic|heif|jpe?g|m4a|mp3|ogg|pdf|png|pptx?|shortcut|tiff?|wav|webm|webp|xlsx?)$/.test(
+      fileName,
+    )
+  ) {
+    const allowedMedia =
+      lowerPath.startsWith(`${productDist}/`) ||
+      lowerPath.startsWith("outputs/product-design-prototype/public/") ||
+      lowerPath.startsWith("outputs/logo/") ||
+      lowerPath === "森特透明底logo 800 800.png" ||
+      lowerPath ===
+        "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut";
+    if (!allowedMedia) return true;
+  }
   return false;
 }
 
@@ -526,8 +595,33 @@ function compareUtf8Paths(left, right) {
 function runGit(root, args) {
   return spawnSync("git", ["-C", root, ...args], {
     encoding: "buffer",
+    maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
     windowsHide: true,
   });
+}
+
+function gitPathList(root, args, label) {
+  const result = runGit(root, args);
+  if (result.status !== 0) {
+    const message = result.stderr.toString("utf8").trim();
+    throw new Error(`${label} failed${message ? `: ${message}` : ""}`);
+  }
+  return result.stdout
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .map(normalizeRelativePath);
+}
+
+function gitFileContent(root, commit, file) {
+  const result = runGit(root, ["show", `${commit}:${file}`]);
+  if (result.status !== 0) {
+    const message = result.error?.message || result.stderr.toString("utf8").trim();
+    throw new Error(
+      `Git blob read failed for ${file}${message ? `: ${message}` : ""}`,
+    );
+  }
+  return result.stdout;
 }
 
 function isGitWorkTree(root) {
@@ -574,16 +668,74 @@ function normalizeGitInfo(gitInfo) {
   };
 }
 
-function walkFiles(root, current = root, files = []) {
+function assertSafeReleaseTraversalPath(rootRealPath, candidatePath, label) {
+  const metadata = lstatSync(candidatePath);
+  if (metadata.isSymbolicLink()) {
+    throw new Error(`Release packages do not accept symbolic links: ${label}`);
+  }
+  const candidateRealPath = realpathSync.native(candidatePath);
+  const escaped = relative(rootRealPath, candidateRealPath);
+  if (
+    escaped === ".." ||
+    escaped.startsWith(`..${sep}`) ||
+    isAbsolute(escaped)
+  ) {
+    throw new Error(`Release path escapes its traversal boundary: ${label}`);
+  }
+  return metadata;
+}
+
+function walkFiles(root, current = root, files = [], rootRealPath) {
+  const traversalRootRealPath = rootRealPath ?? realpathSync.native(root);
+  const currentLabel = normalizeRelativePath(relative(root, current)) || ".";
+  assertSafeReleaseTraversalPath(
+    traversalRootRealPath,
+    current,
+    currentLabel,
+  );
   for (const entry of readdirSync(current, { withFileTypes: true })) {
     const fullPath = join(current, entry.name);
     const relativePath = normalizeRelativePath(relative(root, fullPath));
     if (shouldExcludeReleasePath(relativePath)) continue;
-    if (entry.isSymbolicLink()) {
-      throw new Error(`Release packages do not accept symbolic links: ${relativePath}`);
+    const metadata = assertSafeReleaseTraversalPath(
+      traversalRootRealPath,
+      fullPath,
+      relativePath,
+    );
+    if (metadata.isDirectory()) {
+      walkFiles(root, fullPath, files, traversalRootRealPath);
+    } else if (metadata.isFile()) {
+      files.push(relativePath);
     }
-    if (entry.isDirectory()) walkFiles(root, fullPath, files);
-    else if (entry.isFile()) files.push(relativePath);
+  }
+  return files;
+}
+
+function walkAllRegularFiles(root, current = root, files = [], rootRealPath) {
+  const traversalRootRealPath = rootRealPath ?? realpathSync.native(root);
+  const currentLabel = normalizeRelativePath(relative(root, current)) || ".";
+  assertSafeReleaseTraversalPath(
+    traversalRootRealPath,
+    current,
+    currentLabel,
+  );
+  for (const entry of readdirSync(current, { withFileTypes: true })) {
+    const fullPath = join(current, entry.name);
+    const relativePath = normalizeRelativePath(relative(root, fullPath));
+    // npm creates executable shims in node_modules/.bin as symbolic links on
+    // POSIX hosts. Services invoke approved binaries directly, so these
+    // platform-specific shims are not part of the immutable production tree.
+    if (relativePath.split("/").includes(".bin")) continue;
+    const metadata = assertSafeReleaseTraversalPath(
+      traversalRootRealPath,
+      fullPath,
+      relativePath,
+    );
+    if (metadata.isDirectory()) {
+      walkAllRegularFiles(root, fullPath, files, traversalRootRealPath);
+    } else if (metadata.isFile()) {
+      files.push(relativePath);
+    }
   }
   return files;
 }
@@ -606,16 +758,919 @@ function trackedFiles(root) {
     .map(normalizeRelativePath);
 }
 
+function assertSafeCheckoutMaterialization(root) {
+  const files = trackedFiles(root);
+  const staged = runGit(root, [
+    "-c",
+    "core.quotepath=false",
+    "ls-files",
+    "--stage",
+    "-z",
+  ]);
+  if (staged.status !== 0) {
+    throw new Error(
+      `Git checkout materialization inventory failed: ${staged.stderr.toString("utf8").trim()}`,
+    );
+  }
+  for (const entry of staged.stdout.toString("utf8").split("\0").filter(Boolean)) {
+    if (entry.startsWith("160000 ")) {
+      throw new Error(
+        "Release checkout materialization does not allow Git submodules",
+      );
+    }
+  }
+
+  const attributes = spawnSync(
+    "git",
+    [
+      "-C",
+      root,
+      "-c",
+      "core.quotepath=false",
+      "check-attr",
+      "-z",
+      "--cached",
+      "--stdin",
+      "filter",
+    ],
+    {
+      encoding: "buffer",
+      input: Buffer.from(`${files.join("\0")}\0`, "utf8"),
+      maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
+      windowsHide: true,
+    },
+  );
+  if (attributes.status !== 0) {
+    const message = attributes.stderr.toString("utf8").trim();
+    throw new Error(
+      `Git checkout filter inspection failed${message ? `: ${message}` : ""}`,
+    );
+  }
+  const fields = attributes.stdout.toString("utf8").split("\0");
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const [file, attribute, value] = fields.slice(index, index + 3);
+    if (
+      attribute === "filter" &&
+      value !== "unspecified" &&
+      value !== "unset"
+    ) {
+      throw new Error(
+        `Release checkout materialization rejects active Git filters: ${normalizeRelativePath(file)}`,
+      );
+    }
+  }
+}
+
+function assertExactCommitCheckout(checkoutRoot, commit) {
+  const tracked = trackedFiles(checkoutRoot);
+  for (const file of tracked) {
+    const fullPath = join(checkoutRoot, file);
+    let metadata;
+    try {
+      metadata = lstatSync(fullPath);
+    } catch (error) {
+      throw new Error(`Exact release commit checkout is missing tracked file: ${file}`, {
+        cause: error,
+      });
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new Error(`Exact release commit checkout contains a non-regular tracked path: ${file}`);
+    }
+    const actual = readFileSync(fullPath);
+    const expected = gitFileContent(checkoutRoot, commit, file);
+    if (!actual.equals(expected)) {
+      throw new Error(`Exact release commit checkout bytes differ from the Git blob: ${file}`);
+    }
+  }
+
+  const unexpected = [
+    ...gitPathList(
+      checkoutRoot,
+      ["ls-files", "--others", "--exclude-standard", "-z"],
+      "Exact release commit untracked-file verification",
+    ),
+    ...gitPathList(
+      checkoutRoot,
+      ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+      "Exact release commit ignored-file verification",
+    ),
+  ];
+  if (unexpected.length > 0) {
+    throw new Error(`Exact release commit checkout contains bytes outside Git: ${unexpected[0]}`);
+  }
+}
+
+function createCommitWorktree(root, commit) {
+  assertSafeCheckoutMaterialization(root);
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "sentelligent-release-commit-"));
+  const checkoutRoot = join(temporaryRoot, "checkout");
+  const hooksRoot = join(temporaryRoot, "empty-git-hooks");
+  mkdirSync(hooksRoot, { recursive: true });
+  const worktree = { temporaryRoot, checkoutRoot };
+  try {
+    const result = runGit(root, [
+      "-c",
+      `core.hooksPath=${hooksRoot}`,
+      "-c",
+      "core.autocrlf=false",
+      "worktree",
+      "add",
+      "--detach",
+      checkoutRoot,
+      commit,
+    ]);
+    if (result.status !== 0) {
+      const message = result.stderr.toString("utf8").trim();
+      throw new Error(
+        `Exact release commit checkout failed${message ? `: ${message}` : ""}`,
+      );
+    }
+    const checkedOutCommit = gitText(
+      checkoutRoot,
+      ["rev-parse", "HEAD"],
+      "Release commit checkout verification",
+    );
+    if (checkedOutCommit !== commit) {
+      throw new Error("Exact release commit checkout resolved to an unexpected commit");
+    }
+    assertExactCommitCheckout(checkoutRoot, commit);
+    return worktree;
+  } catch (error) {
+    try {
+      removeCommitWorktree(root, worktree);
+    } catch {
+      // Preserve the checkout failure while cleanup remains best-effort here.
+    }
+    throw error;
+  }
+}
+
+function removeCommitWorktree(root, worktree) {
+  const failures = [];
+  const removeResult = runGit(root, [
+    "worktree",
+    "remove",
+    "--force",
+    worktree.checkoutRoot,
+  ]);
+  if (removeResult.status !== 0) {
+    failures.push(removeResult.stderr.toString("utf8").trim());
+  }
+  try {
+    rmSync(worktree.temporaryRoot, { recursive: true, force: true });
+  } catch (error) {
+    failures.push(error.message);
+  }
+  const pruneResult = runGit(root, ["worktree", "prune"]);
+  if (pruneResult.status !== 0) {
+    failures.push(pruneResult.stderr.toString("utf8").trim());
+  }
+  if (failures.length > 0) {
+    const message = failures.find(Boolean);
+    throw new Error(
+      `Exact release commit checkout cleanup failed${message ? `: ${message}` : ""}`,
+    );
+  }
+}
+
+function resolveDirectFrontendBuildInvocation(frontendRoot, buildScript, nodeExecutable) {
+  if (buildScript === "vite build") {
+    const viteEntry = join(frontendRoot, "node_modules", "vite", "bin", "vite.js");
+    if (existsSync(viteEntry)) {
+      return { command: nodeExecutable, args: [viteEntry, "build"] };
+    }
+  }
+
+  const nodeScript = /^node ((?:\.\/)?[A-Za-z0-9._/-]+)$/u.exec(buildScript);
+  if (nodeScript) {
+    const segments = nodeScript[1].replace(/^\.\//u, "").split("/");
+    if (segments.every((segment) => segment && segment !== "." && segment !== "..")) {
+      const scriptPath = resolve(frontendRoot, ...segments);
+      const relativePath = relative(frontendRoot, scriptPath);
+      if (
+        relativePath &&
+        !relativePath.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
+        relativePath !== ".." &&
+        existsSync(scriptPath)
+      ) {
+        return { command: nodeExecutable, args: [scriptPath] };
+      }
+    }
+  }
+  return null;
+}
+
+function resolveNpmBuildInvocation(frontendRoot, buildScript, nodeExecutable) {
+  const directInvocation = resolveDirectFrontendBuildInvocation(
+    frontendRoot,
+    buildScript,
+    nodeExecutable,
+  );
+  if (directInvocation) return directInvocation;
+  throw new Error(
+    "Frontend production build must use the controlled `vite build` or `node <relative-script>` form",
+  );
+}
+
+function frontendBuildEnvironment(nodeExecutable) {
+  const environment = {
+    NODE_ENV: "production",
+    PATH: dirname(nodeExecutable),
+    SENTELLIGENT_RELEASE_BUILD_ENV: FRONTEND_BUILD_ENVIRONMENT_IDENTITY,
+  };
+  for (const name of ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"]) {
+    const actualName = Object.keys(process.env).find(
+      (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+    );
+    if (actualName && process.env[actualName]) {
+      environment[name] = process.env[actualName];
+    }
+  }
+  return environment;
+}
+
+function frontendBuildAllowedNames(environment) {
+  const names = new Set(Object.keys(environment));
+  if (process.platform === "win32") {
+    for (const name of WINDOWS_IMPLICIT_BUILD_ENV_NAMES) names.add(name);
+  }
+  return [...names].sort(compareUtf8Paths);
+}
+
+function packageDeclaresDependencies(packageJson) {
+  return [
+    packageJson.dependencies,
+    packageJson.devDependencies,
+    packageJson.optionalDependencies,
+  ].some(
+    (section) =>
+      section &&
+      typeof section === "object" &&
+      !Array.isArray(section) &&
+      Object.keys(section).length > 0,
+  );
+}
+
+function packageDeclaresProductionDependencies(packageJson) {
+  return ["dependencies", "optionalDependencies"].some(
+    (field) =>
+      packageJson?.[field] &&
+      typeof packageJson[field] === "object" &&
+      Object.keys(packageJson[field]).length > 0,
+  );
+}
+
+function pathEscapesRealRoot(rootRealPath, candidateRealPath) {
+  const escaped = relative(rootRealPath, candidateRealPath);
+  return (
+    escaped === ".." ||
+    escaped.startsWith(`..${sep}`) ||
+    isAbsolute(escaped)
+  );
+}
+
+function localDependencyTarget(frontendRoot, specification) {
+  if (typeof specification !== "string") return null;
+  if (specification.startsWith("file://")) {
+    return fileURLToPath(new URL(specification));
+  }
+  if (specification.startsWith("file:")) {
+    return resolve(frontendRoot, decodeURIComponent(specification.slice(5)));
+  }
+  if (specification.startsWith("link:")) {
+    return resolve(frontendRoot, decodeURIComponent(specification.slice(5)));
+  }
+  return null;
+}
+
+function validateTrackedLocalDependencyTarget({
+  checkoutRoot,
+  frontendRoot,
+  specification,
+  tracked,
+}) {
+  const target = localDependencyTarget(frontendRoot, specification);
+  if (target === null) return;
+  const checkoutRealPath = realpathSync.native(checkoutRoot);
+  let targetRealPath;
+  let metadata;
+  try {
+    metadata = lstatSync(target);
+    if (metadata.isSymbolicLink()) throw new Error("symbolic link");
+    targetRealPath = realpathSync.native(target);
+  } catch (error) {
+    throw new Error("Frontend local dependency must resolve to a tracked checkout path", {
+      cause: error,
+    });
+  }
+  if (pathEscapesRealRoot(checkoutRealPath, targetRealPath)) {
+    throw new Error(
+      "Frontend local dependency escapes the exact release commit checkout",
+    );
+  }
+
+  const targetFiles = metadata.isDirectory()
+    ? walkAllRegularFiles(targetRealPath)
+    : metadata.isFile()
+      ? [""]
+      : [];
+  if (targetFiles.length === 0) {
+    throw new Error("Frontend local dependency contains no tracked regular files");
+  }
+  for (const targetFile of targetFiles) {
+    const fullPath = targetFile ? join(targetRealPath, targetFile) : targetRealPath;
+    const releasePath = normalizeRelativePath(relative(checkoutRealPath, fullPath));
+    if (!tracked.has(releasePath)) {
+      throw new Error(
+        "Frontend local dependency includes bytes outside the exact release commit",
+      );
+    }
+  }
+}
+
+export function validateFrontendDependencyInputs({
+  checkoutRoot,
+  frontendRoot,
+  packageJson,
+  lockfile,
+  tracked,
+}) {
+  if (!(tracked instanceof Set)) {
+    throw new Error("Frontend dependency validation requires tracked file evidence");
+  }
+  for (const sectionName of [
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+  ]) {
+    const section = packageJson?.[sectionName];
+    if (!section || typeof section !== "object" || Array.isArray(section)) continue;
+    for (const specification of Object.values(section)) {
+      validateTrackedLocalDependencyTarget({
+        checkoutRoot,
+        frontendRoot,
+        specification,
+        tracked,
+      });
+    }
+  }
+
+  if (!lockfile || typeof lockfile !== "object" || lockfile.lockfileVersion !== 3) {
+    throw new Error("Frontend package-lock.json must use lockfileVersion 3");
+  }
+  if (!lockfile.packages || typeof lockfile.packages !== "object") {
+    throw new Error("Frontend package-lock.json must contain package entries");
+  }
+  for (const [packagePath, entry] of Object.entries(lockfile.packages)) {
+    if (!packagePath || !entry || typeof entry !== "object") continue;
+    const resolvedValue = typeof entry.resolved === "string" ? entry.resolved : "";
+    if (entry.link === true || /^(?:file|link):/u.test(resolvedValue)) {
+      if (!resolvedValue) {
+        throw new Error("Frontend linked lockfile dependency must identify its target");
+      }
+      validateTrackedLocalDependencyTarget({
+        checkoutRoot,
+        frontendRoot,
+        specification: /^(?:file|link):/u.test(resolvedValue)
+          ? resolvedValue
+          : `file:${resolvedValue}`,
+        tracked,
+      });
+      continue;
+    }
+    if (
+      /^https?:/u.test(resolvedValue) &&
+      (typeof entry.integrity !== "string" ||
+        !/^sha(?:256|384|512)-[A-Za-z0-9+/=]+$/u.test(entry.integrity))
+    ) {
+      throw new Error(
+        "Frontend registry lockfile dependency must include integrity evidence",
+      );
+    }
+  }
+}
+
+function environmentValue(name) {
+  const actualName = Object.keys(process.env).find(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  );
+  return actualName ? process.env[actualName] : undefined;
+}
+
+function npmInstallEnvironment(cacheRoot, userConfigPath, globalConfigPath, nodeExecutable) {
+  const environment = {
+    PATH: dirname(nodeExecutable),
+    npm_config_audit: "false",
+    npm_config_cache: cacheRoot,
+    npm_config_fund: "false",
+    npm_config_globalconfig: globalConfigPath,
+    npm_config_ignore_scripts: "true",
+    npm_config_userconfig: userConfigPath,
+  };
+  for (const name of ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"]) {
+    const value = environmentValue(name);
+    if (value) environment[name] = value;
+  }
+  return environment;
+}
+
+function npmCliInvocation(environment, nodeExecutable) {
+  const configured = environmentValue(RELEASE_NPM_CLI_ENV);
+  const inherited = environmentValue("npm_execpath");
+  const adjacent = join(
+    dirname(nodeExecutable),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  const candidates = [
+    configured ? { path: configured, source: RELEASE_NPM_CLI_ENV } : null,
+    inherited ? { path: inherited, source: "npm_execpath" } : null,
+    existsSync(adjacent) ? { path: adjacent, source: "node-adjacent" } : null,
+  ].filter(Boolean);
+
+  const posixAdjacent = resolve(
+    dirname(nodeExecutable),
+    "..",
+    "lib",
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  if (existsSync(posixAdjacent)) {
+    candidates.push({ path: posixAdjacent, source: "node-lib-adjacent" });
+  }
+
+  const pathEnvironment = environmentValue("PATH");
+  for (const pathEntry of String(pathEnvironment ?? "")
+    .split(delimiter)
+    .map((entry) => entry.trim())
+    .filter(Boolean)) {
+    const wrapperNames = process.platform === "win32"
+      ? ["npm.cmd", "npm.exe", "npm"]
+      : ["npm"];
+    for (const wrapperName of wrapperNames) {
+      const wrapperPath = join(pathEntry, wrapperName);
+      if (!existsSync(wrapperPath)) continue;
+      try {
+        const wrapperRealPath = realpathSync.native(wrapperPath);
+        if (basename(wrapperRealPath) === "npm-cli.js") {
+          candidates.push({ path: wrapperRealPath, source: "PATH" });
+        }
+      } catch {
+        // Continue with standard npm layouts below.
+      }
+      for (const candidatePath of [
+        join(pathEntry, "node_modules", "npm", "bin", "npm-cli.js"),
+        resolve(pathEntry, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+      ]) {
+        if (existsSync(candidatePath)) {
+          candidates.push({ path: candidatePath, source: "PATH" });
+        }
+      }
+    }
+  }
+
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const candidatePath = resolve(candidate.path);
+    try {
+      const resolvedPath = realpathSync.native(candidatePath);
+      if (seen.has(resolvedPath)) continue;
+      seen.add(resolvedPath);
+      if (!lstatSync(resolvedPath).isFile()) throw new Error("not a file");
+      const packagePath = resolve(dirname(resolvedPath), "..", "package.json");
+      const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+      if (
+        packageJson?.name !== "npm" ||
+        typeof packageJson?.version !== "string"
+      ) {
+        throw new Error("npm package identity is invalid");
+      }
+      const probe = spawnSync(nodeExecutable, [resolvedPath, "--version"], {
+        encoding: "utf8",
+        env: environment,
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      const version = String(probe.stdout ?? "").trim();
+      if (probe.status !== 0 || !/^\d+\.\d+\.\d+(?:[-+].+)?$/.test(version)) {
+        throw new Error("version probe failed");
+      }
+      if (version !== packageJson.version) {
+        throw new Error("npm CLI version does not match its package metadata");
+      }
+      return {
+        command: nodeExecutable,
+        argsPrefix: [resolvedPath],
+        version,
+        source: candidate.source,
+      };
+    } catch (error) {
+      if (candidate.source === RELEASE_NPM_CLI_ENV) {
+        throw new Error(
+          `${RELEASE_NPM_CLI_ENV} must identify a working npm CLI file`,
+          { cause: error },
+        );
+      }
+    }
+  }
+  throw new Error(
+    `Frontend dependencies require npm. Invoke packaging through npm or set ${RELEASE_NPM_CLI_ENV} to an npm CLI file.`,
+  );
+}
+
+function installFrontendDependencies({
+  checkoutRoot,
+  commit,
+  frontendRoot,
+  packageJson,
+  temporaryRoot,
+  nodeExecutable,
+}) {
+  const lockfilePath = join(frontendRoot, "package-lock.json");
+  const committedLockfile = existsSync(lockfilePath)
+    ? gitFileContent(checkoutRoot, commit, PRODUCT_LOCKFILE_RELEASE_PATH)
+    : null;
+  let parsedLockfile = null;
+  if (committedLockfile) {
+    try {
+      parsedLockfile = JSON.parse(committedLockfile.toString("utf8"));
+    } catch (error) {
+      throw new Error("Frontend package-lock.json must be valid JSON", {
+        cause: error,
+      });
+    }
+    validateFrontendDependencyInputs({
+      checkoutRoot,
+      frontendRoot,
+      packageJson,
+      lockfile: parsedLockfile,
+      tracked: new Set(trackedFiles(checkoutRoot)),
+    });
+  }
+  const declaresDependencies = packageDeclaresDependencies(packageJson);
+  if (!declaresDependencies) {
+    return {
+      lockfile: committedLockfile
+        ? {
+            path: PRODUCT_LOCKFILE_RELEASE_PATH,
+            sha256: hashBuffer(committedLockfile),
+            lockfileVersion: parsedLockfile.lockfileVersion,
+          }
+        : null,
+      runtime: {
+        node: process.version,
+        npm: null,
+        npmResolutionSource: null,
+        platform: process.platform,
+        architecture: process.arch,
+      },
+      install: {
+        command: null,
+        ignoreScripts: true,
+      },
+    };
+  }
+  if (!existsSync(lockfilePath)) {
+    throw new Error(
+      `Frontend dependencies require the committed lockfile ${PRODUCT_LOCKFILE_RELEASE_PATH}`,
+    );
+  }
+
+  const cacheRoot = join(temporaryRoot, "npm-cache");
+  const userConfigPath = join(temporaryRoot, "empty-user-npmrc");
+  const globalConfigPath = join(temporaryRoot, "empty-global-npmrc");
+  mkdirSync(cacheRoot, { recursive: true });
+  writeFileSync(userConfigPath, "", { flag: "wx" });
+  writeFileSync(globalConfigPath, "", { flag: "wx" });
+  const installEnvironment = npmInstallEnvironment(
+    cacheRoot,
+    userConfigPath,
+    globalConfigPath,
+    nodeExecutable,
+  );
+  const npm = npmCliInvocation(installEnvironment, nodeExecutable);
+  const result = spawnSync(
+    npm.command,
+    [
+      ...npm.argsPrefix,
+      "ci",
+      "--ignore-scripts",
+      "--include=dev",
+      "--no-audit",
+      "--no-fund",
+      "--cache",
+      cacheRoot,
+      "--userconfig",
+      userConfigPath,
+      "--globalconfig",
+      globalConfigPath,
+    ],
+    {
+      cwd: frontendRoot,
+      encoding: "utf8",
+      env: npm.environment ?? installEnvironment,
+      timeout: 300_000,
+      windowsHide: true,
+    },
+  );
+  if (result.status !== 0) {
+    const message = result.error?.message || result.stderr || result.stdout;
+    throw new Error(
+      `Frontend dependency installation from the committed lockfile failed${message ? `: ${String(message).trim()}` : ""}`,
+    );
+  }
+  return {
+    lockfile: {
+      path: PRODUCT_LOCKFILE_RELEASE_PATH,
+      sha256: hashBuffer(committedLockfile),
+      lockfileVersion: parsedLockfile.lockfileVersion,
+    },
+    runtime: {
+      node: process.version,
+      npm: npm.version,
+      npmResolutionSource: npm.source,
+      platform: process.platform,
+      architecture: process.arch,
+    },
+    install: {
+      command: "npm ci",
+      ignoreScripts: true,
+      includeDev: true,
+    },
+  };
+}
+
+function installBackendProductionDependencies({
+  checkoutRoot,
+  commit,
+  temporaryRoot,
+  nodeExecutable,
+}) {
+  const backendRoot = join(checkoutRoot, BACKEND_PATH);
+  const packagePath = join(backendRoot, "package.json");
+  if (!existsSync(packagePath)) return null;
+
+  let packageJson;
+  try {
+    packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+  } catch (error) {
+    throw new Error("Backend package.json must be valid JSON", { cause: error });
+  }
+  if (!packageDeclaresProductionDependencies(packageJson)) {
+    return {
+      lockfile: null,
+      runtime: {
+        node: process.version,
+        npm: null,
+        npmResolutionSource: null,
+        platform: process.platform,
+        architecture: process.arch,
+      },
+      install: {
+        command: null,
+        ignoreScripts: true,
+        omitDev: true,
+      },
+    };
+  }
+
+  const lockfilePath = join(backendRoot, "package-lock.json");
+  if (!existsSync(lockfilePath)) {
+    throw new Error(
+      `Backend production dependencies require the committed lockfile ${BACKEND_LOCKFILE_RELEASE_PATH}`,
+    );
+  }
+  const committedLockfile = gitFileContent(
+    checkoutRoot,
+    commit,
+    BACKEND_LOCKFILE_RELEASE_PATH,
+  );
+  let lockfile;
+  try {
+    lockfile = JSON.parse(committedLockfile.toString("utf8"));
+  } catch (error) {
+    throw new Error("Backend package-lock.json must be valid JSON", {
+      cause: error,
+    });
+  }
+  validateFrontendDependencyInputs({
+    checkoutRoot,
+    frontendRoot: backendRoot,
+    packageJson,
+    lockfile,
+    tracked: new Set(trackedFiles(checkoutRoot)),
+  });
+
+  const cacheRoot = join(temporaryRoot, "backend-npm-cache");
+  const userConfigPath = join(temporaryRoot, "empty-backend-user-npmrc");
+  const globalConfigPath = join(temporaryRoot, "empty-backend-global-npmrc");
+  mkdirSync(cacheRoot, { recursive: true });
+  writeFileSync(userConfigPath, "", { flag: "wx" });
+  writeFileSync(globalConfigPath, "", { flag: "wx" });
+  const installEnvironment = npmInstallEnvironment(
+    cacheRoot,
+    userConfigPath,
+    globalConfigPath,
+    nodeExecutable,
+  );
+  const npm = npmCliInvocation(installEnvironment, nodeExecutable);
+  const result = spawnSync(
+    npm.command,
+    [
+      ...npm.argsPrefix,
+      "ci",
+      "--ignore-scripts",
+      "--omit=dev",
+      "--no-audit",
+      "--no-fund",
+      "--cache",
+      cacheRoot,
+      "--userconfig",
+      userConfigPath,
+      "--globalconfig",
+      globalConfigPath,
+    ],
+    {
+      cwd: backendRoot,
+      encoding: "utf8",
+      env: npm.environment ?? installEnvironment,
+      timeout: 300_000,
+      windowsHide: true,
+    },
+  );
+  if (result.status !== 0) {
+    const message = result.error?.message || result.stderr || result.stdout;
+    throw new Error(
+      `Backend production dependency installation from the committed lockfile failed${message ? `: ${String(message).trim()}` : ""}`,
+    );
+  }
+  if (!existsSync(join(checkoutRoot, BACKEND_NODE_MODULES_PATH))) {
+    throw new Error(
+      "Backend production dependency installation did not create node_modules",
+    );
+  }
+  return {
+    lockfile: {
+      path: BACKEND_LOCKFILE_RELEASE_PATH,
+      sha256: hashBuffer(committedLockfile),
+      lockfileVersion: lockfile.lockfileVersion,
+    },
+    runtime: {
+      node: process.version,
+      npm: npm.version,
+      npmResolutionSource: npm.source,
+      platform: process.platform,
+      architecture: process.arch,
+    },
+    install: {
+      command: "npm ci",
+      ignoreScripts: true,
+      omitDev: true,
+    },
+  };
+}
+
+function assertBuildDidNotMutateCommit(checkoutRoot, commit) {
+  const checkedOutCommit = gitText(
+    checkoutRoot,
+    ["rev-parse", "HEAD"],
+    "Release build commit verification",
+  );
+  if (checkedOutCommit !== commit) {
+    throw new Error("Frontend build changed the checked-out release commit");
+  }
+
+  const changedTrackedFiles = gitPathList(
+    checkoutRoot,
+    ["diff", "--name-only", "-z", "HEAD", "--"],
+    "Release build tracked-file verification",
+  );
+  const stagedFiles = gitPathList(
+    checkoutRoot,
+    ["diff", "--cached", "--name-only", "-z", "HEAD", "--"],
+    "Release build staged-file verification",
+  );
+  const untrackedFiles = gitPathList(
+    checkoutRoot,
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    "Release build untracked-file verification",
+  );
+  const ignoredFiles = gitPathList(
+    checkoutRoot,
+    ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+    "Release build ignored-file verification",
+  );
+  const unexpected = [
+    ...changedTrackedFiles,
+    ...stagedFiles,
+    ...untrackedFiles,
+    ...ignoredFiles,
+  ].filter(
+    (file) =>
+      !file.startsWith(PRODUCT_DIST_PREFIX)
+      && !file.startsWith(PRODUCT_NODE_MODULES_PREFIX),
+  );
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Frontend build modified files outside its dist directory: ${unexpected[0]}`,
+    );
+  }
+}
+
+function buildFrontendFromCommit(checkoutRoot, commit, temporaryRoot, nodeExecutable) {
+  const frontendRoot = join(checkoutRoot, PRODUCT_FRONTEND_PATH);
+  const packagePath = join(frontendRoot, "package.json");
+  if (!existsSync(packagePath)) {
+    return false;
+  }
+
+  let packageJson;
+  try {
+    packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+  } catch {
+    throw new Error("Frontend package.json must be valid JSON before release packaging");
+  }
+  if (typeof packageJson.scripts?.build !== "string" || !packageJson.scripts.build.trim()) {
+    throw new Error("Frontend package.json must define a production build script");
+  }
+
+  const distRoot = join(checkoutRoot, PRODUCT_DIST_PATH);
+  rmSync(distRoot, { recursive: true, force: true });
+  const buildEnvironment = frontendBuildEnvironment(nodeExecutable);
+  let dependencyProvenance;
+  let result;
+  try {
+    dependencyProvenance = installFrontendDependencies({
+      checkoutRoot,
+      commit,
+      frontendRoot,
+      packageJson,
+      temporaryRoot,
+      nodeExecutable,
+    });
+    const invocation = resolveNpmBuildInvocation(
+      frontendRoot,
+      packageJson.scripts.build.trim(),
+      nodeExecutable,
+    );
+    result = spawnSync(invocation.command, invocation.args, {
+      cwd: frontendRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      env: buildEnvironment,
+      timeout: 180_000,
+    });
+  } finally {
+    rmSync(join(frontendRoot, "node_modules"), {
+      recursive: true,
+      force: true,
+    });
+  }
+
+  if (result.status !== 0) {
+    const message = result.error?.message || result.stderr || result.stdout;
+    throw new Error(
+      `Frontend production build from exact commit ${commit.slice(0, 12)} failed${message ? `: ${String(message).trim()}` : ""}`,
+    );
+  }
+  if (!existsSync(distRoot)) {
+    throw new Error("Frontend production build did not create its dist directory");
+  }
+  assertBuildDidNotMutateCommit(checkoutRoot, commit);
+  return {
+    frontend: {
+      ...dependencyProvenance,
+      environment: {
+        identity: FRONTEND_BUILD_ENVIRONMENT_IDENTITY,
+        allowedNames: frontendBuildAllowedNames(buildEnvironment),
+      },
+    },
+  };
+}
+
 function collectSourceFiles(root) {
   const candidates = isGitWorkTree(root) ? trackedFiles(root) : walkFiles(root);
-  const buildRoot = join(root, "outputs", "product-design-prototype", "dist");
+  const buildRoot = join(root, PRODUCT_DIST_PATH);
   if (isGitWorkTree(root) && existsSync(buildRoot)) {
     candidates.push(...walkFiles(root, buildRoot));
+  }
+  const backendDependenciesRoot = join(root, BACKEND_NODE_MODULES_PATH);
+  if (existsSync(backendDependenciesRoot)) {
+    candidates.push(...walkAllRegularFiles(root, backendDependenciesRoot));
   }
 
   const unique = new Set();
   for (const relativePath of candidates) {
-    if (shouldExcludeReleasePath(relativePath)) continue;
+    if (
+      shouldExcludeReleasePath(relativePath) &&
+      !relativePath.startsWith(BACKEND_NODE_MODULES_PREFIX)
+    ) {
+      continue;
+    }
     const fullPath = join(root, relativePath);
     if (!existsSync(fullPath)) continue;
     const stats = lstatSync(fullPath);
@@ -649,6 +1704,7 @@ export function buildReleaseManifest({
   files,
   contentByPath,
   rootDirectory,
+  buildProvenance = null,
 }) {
   const buildFiles = files.filter((file) =>
     file.startsWith("outputs/product-design-prototype/dist/"),
@@ -656,8 +1712,13 @@ export function buildReleaseManifest({
   const migrationFiles = files.filter((file) =>
     file.startsWith("backend/src/db/migrations/"),
   );
+  const productionDependencyFiles = files.filter((file) =>
+    file.startsWith(BACKEND_NODE_MODULES_PREFIX),
+  );
   const sourceFiles = files.filter(
-    (file) => !file.startsWith("outputs/product-design-prototype/dist/"),
+    (file) =>
+      !file.startsWith("outputs/product-design-prototype/dist/") &&
+      !file.startsWith(BACKEND_NODE_MODULES_PREFIX),
   );
   if (buildFiles.length === 0) {
     throw new Error("Frontend build artifacts are missing; run the production build first");
@@ -671,10 +1732,11 @@ export function buildReleaseManifest({
   const serviceUnitList = PROJECT_SERVICE_UNITS.join(", ");
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     product: "sentelligent-sales-workbench",
     createdAt,
     source,
+    buildProvenance,
     archive: {
       format: "tar.gz",
       rootDirectory,
@@ -696,6 +1758,21 @@ export function buildReleaseManifest({
         "backend/src/db/migrations/",
       ),
     },
+    productionDependencyHashes: {
+      algorithm: "sha256",
+      files: checksumsFor(
+        productionDependencyFiles,
+        contentByPath,
+        BACKEND_NODE_MODULES_PREFIX,
+      ),
+      treeSha256: sourceTreeHash(
+        checksumsFor(
+          productionDependencyFiles,
+          contentByPath,
+          BACKEND_NODE_MODULES_PREFIX,
+        ),
+      ),
+    },
     sourceHashes: {
       algorithm: "sha256",
       files: sourceFileHashes,
@@ -707,7 +1784,7 @@ export function buildReleaseManifest({
       "SQLite databases, backups, copies, and sidecars",
       "logs, rotated logs, PID files, and PID rotations",
       "runtime voice recordings, voice assets, audio sessions, and other session state",
-      "dependencies, package caches, build folders, coverage, and non-product dist folders",
+      "frontend/build dependencies, package caches, build folders, coverage, and non-product dist folders; backend production dependencies are included only through their manifest-covered tree",
       "Git, Codex, agent, worktree, and runtime metadata",
       "private keys and certificates",
     ],
@@ -842,6 +1919,76 @@ function safeArchiveName(value, fallback) {
   return archiveName;
 }
 
+const defaultArchiveFileOperations = Object.freeze({
+  openSync,
+  writeFileSync,
+  fsyncSync,
+  closeSync,
+  linkSync,
+  unlinkSync,
+});
+
+export function publishArchiveAtomically(
+  archivePath,
+  archive,
+  operationOverrides = {},
+) {
+  if (existsSync(archivePath)) {
+    throw new Error(`Release archive already exists: ${archivePath}`);
+  }
+  const operations = {
+    ...defaultArchiveFileOperations,
+    ...operationOverrides,
+  };
+  const temporaryPath = join(
+    dirname(archivePath),
+    `.${basename(archivePath)}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`,
+  );
+  let fileDescriptor;
+  let finalLinked = false;
+  try {
+    fileDescriptor = operations.openSync(temporaryPath, "wx", 0o600);
+    operations.writeFileSync(fileDescriptor, archive);
+    operations.fsyncSync(fileDescriptor);
+    operations.closeSync(fileDescriptor);
+    fileDescriptor = undefined;
+    try {
+      operations.linkSync(temporaryPath, archivePath);
+      finalLinked = true;
+    } catch (error) {
+      if (error?.code === "EEXIST" || existsSync(archivePath)) {
+        throw new Error(`Release archive already exists: ${archivePath}`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+    operations.unlinkSync(temporaryPath);
+    return archivePath;
+  } catch (error) {
+    if (fileDescriptor !== undefined) {
+      try {
+        operations.closeSync(fileDescriptor);
+      } catch {
+        // Continue removing any partial file without replacing the primary error.
+      }
+    }
+    if (finalLinked) {
+      try {
+        operations.unlinkSync(archivePath);
+      } catch {
+        // The original publication error remains the primary failure.
+      }
+    }
+    try {
+      operations.unlinkSync(temporaryPath);
+    } catch {
+      // The original write/publication error remains the primary failure.
+    }
+    throw error;
+  }
+}
+
 function timestampFromEpochSeconds(value, label) {
   const text = String(value).trim();
   if (!/^\d+$/.test(text)) {
@@ -855,7 +2002,7 @@ function timestampFromEpochSeconds(value, label) {
   return timestamp;
 }
 
-function resolveReleaseTimestamp(root, createdAt) {
+export function resolveReleaseTimestamp(root, commit, createdAt) {
   if (createdAt !== undefined) {
     const timestamp = new Date(createdAt);
     if (Number.isNaN(timestamp.getTime())) {
@@ -870,8 +2017,12 @@ function resolveReleaseTimestamp(root, createdAt) {
     );
   }
   return timestampFromEpochSeconds(
-    gitText(root, ["show", "-s", "--format=%ct", "HEAD"], "Git commit time lookup"),
-    "Git HEAD commit time",
+    gitText(
+      root,
+      ["show", "-s", "--format=%ct", commit],
+      "Git release commit time lookup",
+    ),
+    "Git release commit time",
   );
 }
 
@@ -887,26 +2038,83 @@ export async function createReleasePackage(options = {}) {
     outputDir = join(defaultRoot, ".runtime", "releases"),
     archiveName,
     createdAt,
+    runtime = {},
   } = options;
+  if (runtime === null || typeof runtime !== "object" || Array.isArray(runtime)) {
+    throw new TypeError("runtime must be an object");
+  }
+  const unexpectedRuntimeOptions = Object.keys(runtime).filter((name) => name !== "nodeExecutable");
+  if (unexpectedRuntimeOptions.length > 0) {
+    throw new Error(`Unsupported release runtime option: ${unexpectedRuntimeOptions[0]}`);
+  }
+  const requestedNodeExecutable = runtime.nodeExecutable ?? process.execPath;
+  if (typeof requestedNodeExecutable !== "string" || !isAbsolute(requestedNodeExecutable)) {
+    throw new TypeError("runtime.nodeExecutable must be an absolute file path");
+  }
+  const nodeExecutable = realpathSync.native(requestedNodeExecutable);
+  if (!lstatSync(nodeExecutable).isFile()) {
+    throw new TypeError("runtime.nodeExecutable must identify a regular file");
+  }
   const root = resolve(sourceRoot);
   const destination = resolve(outputDir);
   const source = normalizeGitInfo(detectGitInfo(root));
 
-  const timestamp = resolveReleaseTimestamp(root, createdAt);
+  const timestamp = resolveReleaseTimestamp(root, source.commit, createdAt);
   const normalizedCreatedAt = timestamp.toISOString();
   const rootDirectory = `sentelligent-sales-workbench-${source.commit.slice(0, 12)}`;
-  const files = collectSourceFiles(root);
-  const contentByPath = new Map(
-    files.map((file) => [file, readFileSync(join(root, file))]),
-  );
-  assertNoReleaseSecrets(files, contentByPath);
-  const manifest = buildReleaseManifest({
-    source,
-    createdAt: normalizedCreatedAt,
-    files,
-    contentByPath,
-    rootDirectory,
-  });
+  const worktree = createCommitWorktree(root, source.commit);
+  let files;
+  let contentByPath;
+  let manifest;
+  let packagingError;
+  try {
+    const frontendBuildProvenance = buildFrontendFromCommit(
+      worktree.checkoutRoot,
+      source.commit,
+      worktree.temporaryRoot,
+      nodeExecutable,
+    );
+    const backendBuildProvenance = installBackendProductionDependencies({
+      checkoutRoot: worktree.checkoutRoot,
+      commit: source.commit,
+      temporaryRoot: worktree.temporaryRoot,
+      nodeExecutable,
+    });
+    const buildProvenance = {
+      ...(frontendBuildProvenance || {}),
+      ...(backendBuildProvenance
+        ? { backend: backendBuildProvenance }
+        : {}),
+    };
+    files = collectSourceFiles(worktree.checkoutRoot);
+    const tracked = new Set(trackedFiles(worktree.checkoutRoot));
+    contentByPath = new Map(
+      files.map((file) => [
+        file,
+        tracked.has(file) && !file.startsWith(PRODUCT_DIST_PREFIX)
+          ? gitFileContent(worktree.checkoutRoot, source.commit, file)
+          : readFileSync(join(worktree.checkoutRoot, file)),
+      ]),
+    );
+    assertNoReleaseSecrets(files, contentByPath);
+    manifest = buildReleaseManifest({
+      source,
+      createdAt: normalizedCreatedAt,
+      files,
+      contentByPath,
+      rootDirectory,
+      buildProvenance,
+    });
+  } catch (error) {
+    packagingError = error;
+    throw error;
+  } finally {
+    try {
+      removeCommitWorktree(root, worktree);
+    } catch (cleanupError) {
+      if (!packagingError) throw cleanupError;
+    }
+  }
   const manifestContent = Buffer.from(
     `${JSON.stringify(manifest, null, 2)}\n`,
     "utf8",
@@ -928,15 +2136,11 @@ export async function createReleasePackage(options = {}) {
     `${rootDirectory}.tar.gz`,
   );
   const archivePath = join(destination, finalArchiveName);
-  if (existsSync(archivePath)) {
-    throw new Error(`Release archive already exists: ${archivePath}`);
-  }
-
   const archive = createTarGzip(
     entries,
     Math.floor(timestamp.getTime() / 1000),
   );
-  writeFileSync(archivePath, archive, { flag: "wx" });
+  publishArchiveAtomically(archivePath, archive);
   return {
     status: "created",
     archivePath,

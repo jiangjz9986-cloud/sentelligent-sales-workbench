@@ -1,6 +1,8 @@
 # Secrets
 .env
 **/.env
+.env.*
+**/.env.*
 !**/.env.example
 
 # Dependencies and build outputs
@@ -39,11 +41,20 @@
 *.mp3
 *.aac
 *.flac
+*.shortcut
+!integrations/icost-shortcut/icost-dual-write.unsigned.shortcut
 
 # Local Codex coordination state
 .agents/
 .codex/
+.codex-tmp/
 .worktrees/
+tmp/
+design-options/
+design-references/
+
+# This npm-based monorepo does not use a root pnpm lockfile.
+/pnpm-lock.yaml
 
 # Generated project outputs. Keep only the active app, selected references,
 # brand assets, and current audit evidence under version control.

@@ -1,3 +1,12 @@
+import { createHash } from "node:crypto";
+
+import {
+  parsePaymentProofCommandArgs,
+  readWeixinDocument,
+  WeixinDocumentError,
+  weixinDocumentSourceRef,
+} from "../travelExpense/documentInboxMedia.js";
+
 const helpText = [
   "森特智行微信助手",
   "",
@@ -8,6 +17,8 @@ const helpText = [
   "可用命令：",
   "/客户 关键词 - 查询客户",
   "/周报 - 生成本周周报草稿",
+  "/付款凭证 EXP-... 金额/时间 - 上传付款凭证并查看候选付款",
+  "/发票 - 上传图片或 PDF 到发票仓库",
   "取消 - 清空当前暂存内容",
   "/帮助 - 查看说明",
 ].join("\n");
@@ -24,6 +35,10 @@ function compact(value, limit = 700) {
 function parseJsonResponse(text) {
   if (!text) return null;
   return JSON.parse(text);
+}
+
+function documentIdempotencyKey(sourceRef) {
+  return `weixin:${createHash("sha256").update(String(sourceRef), "utf8").digest("hex")}`;
 }
 
 function formatDateOnly(date) {
@@ -195,6 +210,24 @@ class SalesWorkbenchClient {
     const body = await this.request("/api/reports/weekly/draft", { method: "POST", body: payload });
     return body.item;
   }
+
+  async uploadPaymentProof(payload) {
+    const body = await this.request("/api/travel-expense-document-inbox", {
+      method: "POST",
+      headers: { "Idempotency-Key": documentIdempotencyKey(payload.sourceRef) },
+      body: payload,
+    });
+    return body.item;
+  }
+
+  async uploadInvoice(payload) {
+    const body = await this.request("/api/invoices", {
+      method: "POST",
+      headers: { "Idempotency-Key": documentIdempotencyKey(payload.sourceRef) },
+      body: payload,
+    });
+    return body.item;
+  }
 }
 
 function formatQuickRecordReply(record, insight) {
@@ -240,6 +273,120 @@ function formatWeeklyReply(report) {
   ].join("\n");
 }
 
+function formatCandidate(candidate) {
+  const paidAt = cleanText(candidate?.paidAt ?? candidate?.occurredAt) || "时间待确认";
+  const amountCents = Number(candidate?.amountCents);
+  const amount = Number.isSafeInteger(amountCents) && amountCents >= 0
+    ? `¥${(amountCents / 100).toFixed(2)}`
+    : "金额待确认";
+  const paymentId = cleanText(candidate?.paymentId ?? candidate?.id);
+  return `- ${paidAt} / ${amount}${paymentId ? ` / ${paymentId}` : ""}`;
+}
+
+function formatPaymentRecognition(item) {
+  const recognition = item?.recognition && typeof item.recognition === "object"
+    ? item.recognition
+    : null;
+  const evidence = recognition?.evidence && typeof recognition.evidence === "object"
+    ? recognition.evidence
+    : null;
+  if (evidence) {
+    const amount = Number.isSafeInteger(evidence.amountCents) && evidence.amountCents > 0
+      ? `¥${(evidence.amountCents / 100).toFixed(2)}`
+      : "金额待确认";
+    const date = cleanText(evidence.occurredOn) || "日期待确认";
+    const time = cleanText(evidence.paidTime) || "时间待确认";
+    return `已识别：${amount} / ${date} / ${time}。`;
+  }
+  if ((Array.isArray(recognition?.warnings) && recognition.warnings.length > 0) || item?.errorCode) {
+    return "自动识别未完成，但原件已无损保留，请在系统中人工选择账单和付款。";
+  }
+  return null;
+}
+
+function formatPaymentProofReply(item, commandInput) {
+  const allCandidates = Array.isArray(item?.candidates) ? item.candidates : [];
+  const candidates = allCandidates.slice(0, 5);
+  const hasReference = Boolean(commandInput.expenseReferenceCode);
+  const matched = item?.status === "matched" && Boolean(item?.attachmentId);
+  if (matched) {
+    const paymentId = cleanText(item?.matchedPaymentId ?? candidates[0]?.paymentId);
+    return [
+      "付款凭证已上传并自动关联。",
+      `账单编号：${commandInput.expenseReferenceCode}`,
+      `已自动关联付款${paymentId ? `：${paymentId}` : ""}，可在系统中查看。`,
+    ].join("\n");
+  }
+  const recognitionSummary = formatPaymentRecognition(item);
+  return [
+    "付款凭证已上传到待处理区。",
+    hasReference
+      ? `账单编号：${commandInput.expenseReferenceCode}`
+      : "未提供 EXP 编号，已按金额和时间查找候选。",
+    ...(recognitionSummary ? [recognitionSummary] : []),
+    `候选付款 ${allCandidates.length} 笔，${hasReference ? "尚未自动关联" : "未自动关联"}，请在系统中人工确认。`,
+    ...candidates.map(formatCandidate),
+  ].join("\n");
+}
+
+function formatInvoiceReply() {
+  return "发票已存入发票仓库，无需先匹配费用。请在系统中人工复核识别结果。";
+}
+
+const documentErrorReplies = new Map([
+  ["missing_media", "请把图片或 PDF 和命令一起发送。"],
+  ["unsupported_media", "只支持 JPG、PNG、WebP 图片或 PDF，请重新发送。"],
+  ["file_unavailable", "文件读取失败，请重新发送原文件。"],
+  ["too_large", "文件不能超过 12 MiB，请压缩后重新发送。"],
+  ["invalid_filename", "文件名无效，请重命名后重新发送。"],
+  ["mime_mismatch", "文件类型与实际内容不一致，请导出正确文件后重新发送。"],
+  ["invalid_magic", "无法识别文件内容，请发送完整的 JPG、PNG、WebP 图片或 PDF。"],
+]);
+
+function documentCommandFailure(error) {
+  if (error instanceof WeixinDocumentError) {
+    return documentErrorReplies.get(error.code) ?? documentErrorReplies.get("file_unavailable");
+  }
+  return "暂时上传失败，请稍后重试；原文件可以重新发送。";
+}
+
+async function uploadPaymentProofCommand(request, command, client, now) {
+  try {
+    const document = await readWeixinDocument(request?.media);
+    const commandInput = parsePaymentProofCommandArgs(command.args, now());
+    const item = await client.uploadPaymentProof({
+      expenseReferenceCode: commandInput.expenseReferenceCode,
+      fileName: document.fileName,
+      mediaType: document.mediaType,
+      contentBase64: document.contentBase64,
+      sourceRef: weixinDocumentSourceRef(request, document.sha256),
+      textHint: commandInput.textHint,
+      amountCents: commandInput.amountCents,
+      occurredOn: commandInput.occurredOn,
+      paidTime: commandInput.paidTime,
+      matchMode: commandInput.matchMode,
+    });
+    return { text: formatPaymentProofReply(item, commandInput) };
+  } catch (error) {
+    return { text: documentCommandFailure(error) };
+  }
+}
+
+async function uploadInvoiceCommand(request, client) {
+  try {
+    const document = await readWeixinDocument(request?.media);
+    await client.uploadInvoice({
+      fileName: document.fileName,
+      mediaType: document.mediaType,
+      contentBase64: document.contentBase64,
+      sourceRef: weixinDocumentSourceRef(request, document.sha256),
+    });
+    return { text: formatInvoiceReply() };
+  } catch (error) {
+    return { text: documentCommandFailure(error) };
+  }
+}
+
 function parseCommand(text) {
   const value = cleanText(text);
   if (!value.startsWith("/")) return null;
@@ -274,6 +421,14 @@ export function createSalesWorkbenchWeixinAgent(options = {}) {
         const range = weekRange(now());
         const report = await client.createWeeklyDraft({ owner, ...range });
         return { text: formatWeeklyReply(report) };
+      }
+
+      if (command?.command === "付款凭证") {
+        return uploadPaymentProofCommand(request, command, client, now);
+      }
+
+      if (command?.command === "发票") {
+        return uploadInvoiceCommand(request, client);
       }
 
       if (naturalCustomerQuery) {

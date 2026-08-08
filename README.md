@@ -8,16 +8,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前生产版本 | `v0.2.1` |
-| 生产提交 | `f8d43bbfd6172828340a270c5276485192223a65` |
-| 注释标签 | `v0.2.1`，创建于 `2026-07-29T03:27:14+08:00` |
-| GitHub Release | [森特智行 v0.2.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.2.1)，发布于 `2026-07-29T03:29:14+08:00` |
-| Release 归档 SHA-256 | `fbcd705dd28257faec3139f31837bb8562e6f7405b770c402d83c8746789a815` |
-| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-07-29_f8d43bb` |
-| 当前开发目标 | `v0.2.2`，分支 `codex/project-sync-release` |
-| `v0.2.2` 状态 | 源码与包元数据已切换到 `0.2.2`，本地完整质量门已通过；改动仍在候选分支中，PR CI、tag、GitHub Release 和生产部署尚未完成 |
+| 当前生产版本 | `v0.3.6` |
+| 生产提交 | `b603f74d7d7a941c77a642736a34f2a723c6e5d4` |
+| 注释标签 | `v0.3.6`，创建于 `2026-08-03T21:29:47+08:00` |
+| GitHub Release | [森特智行 v0.3.6](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.6)，发布于 `2026-08-03T21:34:16+08:00` |
+| Release 归档 SHA-256 | `d94989bfe27108d03ac414d6c249d82c02c4f298d7ebb799d5c7d12ca3ddd75d` |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-08-03_b603f74` |
+| 当前开发目标 | `v0.4.0`，分支 `codex/travel-expense-reimbursement` |
+| `v0.4.0` 状态 | 差旅报销、iCost 文本分流、付款凭证、发票仓库、无损文件存储和打印能力正在完成发布前收口；正式状态以 tag、GitHub Release 和生产证据为准 |
 
-`v0.2.0` 标签固定在 `591e48d`。该版本的 Release workflow 因 Linux 对 Windows 绝对路径的解析差异失败，没有创建 GitHub Release；`v0.2.1` 使用新标签完成修复发布，未移动或复用 `v0.2.0`。生产部署细节见 [部署记录](docs/部署记录.md)，开发中的 `v0.2.2` 见 [版本说明](docs/releases/v0.2.2.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-06` 只读复核。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选说明见 [v0.4.0 版本说明](docs/releases/v0.4.0.md)。
 
 ## 功能状态
 
@@ -30,9 +30,11 @@
 | 销售决策 Agent V1 | 规则规格文档已经完成并通过章节、UTF-8 和 JSON 示例检查 | 尚未按核心提示词、场景 playbook、行业规则、JSON Schema 和评估集拆分接入 DeepSeek 运行时，不能按已上线功能统计；现有快速记录分析是独立链路 |
 | 下一步动作与风险 | 后端真实数据、状态更新、来源追踪和审计 | AI 建议必须经人工确认后写回 |
 | 智能拜访行程 | 高德地址解析、路线、时间、里程、过路费、顺序优化、地图和历史快照 | 历史读取不重复调用地图或模型 |
+| 差旅报销 | 按自然周管理费用、多笔实付、提前请款、多退少补、付款凭证、发票仓库、人工匹配和 A4 打印 | 单账号个人使用；自动识别结果必须人工复核，不包含审批流和财务付款 |
+| iCost 快捷指令 | iCost 成功记账后按账本名精确分流；“出差报销”只写森特智行，其他账本不进入本系统 | 只写文本 Webhook，独立 URL、独立 Token、幂等和审计；未知账本不发送 |
 | 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
 | 知识库 | 模块内搜索、条目维护和引用 | 后续可继续扩展检索与引用质量评估 |
-| 微信机器人 | 系统内绑定入口、worker 自启动和状态查询 | 消息事件幂等、草稿持久化和单消费者保护仍需加强 |
+| 微信机器人 | 系统内绑定、worker 自启动、付款凭证和发票图片/PDF接入 | 机器身份只获得声明的写入路由；通用消息草稿持久化仍需继续加强 |
 | 方案辅助 | 只读兼容入口 | 按当前产品决定暂停写入和 AI 调用 |
 
 ## 技术结构
@@ -107,7 +109,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 涉及生产发布时还要完成：
 
 - 一致性数据库备份、`quick_check`、外键检查和 SHA-256
-- 生产预检 `19/19`，其中 `release.identity` 必须绑定 manifest、完整 commit 和三个项目服务的同一 immutable release
+- 生产预检 `24/24`，其中 `env.aiModel` 强制正式 DeepSeek 模式、端点、模型和独立密钥；`release.identity` 绑定 manifest、完整 commit 和三个项目服务；`database.environmentBinding` 绑定 `DATABASE_URL`、实际数据库以及 backend/WeChat 的同一 `EnvironmentFile` 路径和 SHA-256
 - 公开 HTTPS 冒烟 `25/25`
 - Chrome 桌面与移动视口验收
 - 三个项目服务、共享 Caddy 和受保护服务盘点

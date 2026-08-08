@@ -26,6 +26,14 @@ describe("backend model configuration", () => {
         "AUTH_SESSION_SECRET=session-secret-from-env-file",
         "WEIXIN_AGENT_API_TOKEN=machine-token-from-env-file",
         "WEIXIN_AGENT_BACKEND_URL=https://example.test",
+        "ICOST_WEBHOOK_TOKEN=icost-token-from-env-file",
+        "ICOST_WEBHOOK_OWNER=jiangjz",
+        "ICOST_WEBHOOK_RATE_LIMIT=18",
+        "ICOST_WEBHOOK_WINDOW_MS=90000",
+        "INVOICE_OCR_COMMAND=C:/Tools/tesseract.exe",
+        "INVOICE_PDF_TEXT_COMMAND=C:/Tools/pdftotext.exe",
+        "INVOICE_OCR_LANGUAGES=chi_sim+eng",
+        "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS=45678",
       ].join("\n"),
       "utf8",
     );
@@ -45,6 +53,14 @@ describe("backend model configuration", () => {
       assert.equal(config.authSessionSecret, "session-secret-from-env-file");
       assert.equal(config.weixinAgentApiToken, "machine-token-from-env-file");
       assert.equal(config.weixinAgentBackendUrl, "https://example.test");
+      assert.equal(config.icostWebhookToken, "icost-token-from-env-file");
+      assert.equal(config.icostWebhookOwner, "jiangjz");
+      assert.equal(config.icostWebhookRateLimit, 18);
+      assert.equal(config.icostWebhookWindowMs, 90_000);
+      assert.equal(config.invoiceOcrCommand, "C:/Tools/tesseract.exe");
+      assert.equal(config.invoicePdfTextCommand, "C:/Tools/pdftotext.exe");
+      assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
+      assert.equal(config.invoiceTextExtractionTimeoutMs, 45_678);
       assert.equal(config.port, 8788);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -74,6 +90,14 @@ describe("backend model configuration", () => {
     assert.equal(config.jsonBodyLimitBytes, 1_048_576);
     assert.equal(config.amapWebServiceKey, "");
     assert.equal(config.amapTimeoutMs, 10_000);
+    assert.equal(config.icostWebhookToken, "");
+    assert.equal(config.icostWebhookOwner, "jiangjz");
+    assert.equal(config.icostWebhookRateLimit, 30);
+    assert.equal(config.icostWebhookWindowMs, 300_000);
+    assert.equal(config.invoiceOcrCommand, "");
+    assert.equal(config.invoicePdfTextCommand, "");
+    assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
+    assert.equal(config.invoiceTextExtractionTimeoutMs, 30_000);
     assert.equal(config.nodeEnv, "development");
   });
 
@@ -134,7 +158,11 @@ describe("backend model configuration", () => {
     for (const value of [0, -1, 1.5, "1e6", "NaN", true]) {
       assert.throws(() => loadConfig({ ...base, JSON_BODY_LIMIT_BYTES: value }), /JSON_BODY_LIMIT_BYTES/);
       assert.throws(() => loadConfig({ ...base, AMAP_TIMEOUT_MS: value }), /AMAP_TIMEOUT_MS/);
+      assert.throws(() => loadConfig({ ...base, ICOST_WEBHOOK_RATE_LIMIT: value }), /ICOST_WEBHOOK_RATE_LIMIT/);
+      assert.throws(() => loadConfig({ ...base, ICOST_WEBHOOK_WINDOW_MS: value }), /ICOST_WEBHOOK_WINDOW_MS/);
+      assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
+    assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
   });
 
   it("emits the plaintext development-password warning once without leaking its value", () => {

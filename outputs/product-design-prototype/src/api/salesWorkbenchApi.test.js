@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  SALES_WORKBENCH_API_CONTRACT_VERSION,
   assertApiCollection,
   assertApiEntity,
 } from "../../../../shared/salesWorkbenchApiContract.mjs";
@@ -253,6 +254,232 @@ function sampleVisitItinerary(overrides = {}) {
     ...overrides,
   };
 }
+
+function sampleTravelExpensePayment(overrides = {}) {
+  return {
+    id: "payment-1",
+    expenseId: "expense-1",
+    sequence: 1,
+    paidAt: "2026-08-04T12:30:00+08:00",
+    merchant: "差旅餐厅",
+    amountCents: 6800,
+    reimbursementCents: 6800,
+    fundingSource: "personal",
+    paymentMethod: "wechat",
+    accountLast4: "1234",
+    differenceReason: null,
+    createdAt: "2026-08-04T12:31:00.000Z",
+    updatedAt: "2026-08-04T12:31:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleTravelExpenseAttachment(overrides = {}) {
+  return {
+    id: "attachment-1",
+    expenseId: "expense-1",
+    paymentIds: ["payment-1"],
+    sequence: 1,
+    kind: "payment_proof",
+    fileName: "付款截图.png",
+    mediaType: "image/png",
+    sizeBytes: 1024,
+    coveredCents: 6800,
+    notes: null,
+    createdBy: "jiangjz",
+    createdAt: "2026-08-04T12:32:00.000Z",
+    contentUrl: "/api/travel-expense-attachments/attachment-1/content",
+    ...overrides,
+  };
+}
+
+function sampleTravelExpense(overrides = {}) {
+  return {
+    id: "expense-1",
+    version: 1,
+    owner: "jiangjz",
+    referenceCode: "EXP-20260804-ABC12345",
+    occurredOn: "2026-08-04",
+    category: "lunch",
+    purpose: "客户拜访午餐",
+    merchant: "差旅餐厅",
+    itineraryId: "itinerary-1",
+    customerId: "customer-1",
+    invoiceStatus: "covered",
+    notes: null,
+    payments: [sampleTravelExpensePayment()],
+    attachments: [sampleTravelExpenseAttachment()],
+    createdBy: "jiangjz",
+    updatedBy: "jiangjz",
+    createdAt: "2026-08-04T12:31:00.000Z",
+    updatedAt: "2026-08-04T12:32:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleTravelExpenseAdvance(overrides = {}) {
+  return {
+    id: "advance-1",
+    version: 1,
+    owner: "jiangjz",
+    weekStart: "2026-08-03",
+    status: "received",
+    requestedCents: 200000,
+    receivedCents: 180000,
+    requestedOn: "2026-08-01",
+    receivedOn: "2026-08-03",
+    purpose: "本周差旅备用金",
+    notes: null,
+    createdBy: "jiangjz",
+    updatedBy: "jiangjz",
+    createdAt: "2026-08-01T08:00:00.000Z",
+    updatedAt: "2026-08-03T08:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleInvoice(overrides = {}) {
+  return {
+    id: "invoice-1",
+    version: 1,
+    source: "manual",
+    sourceRef: null,
+    fileName: "客户招待发票.pdf",
+    mediaType: "application/pdf",
+    sizeBytes: 4096,
+    sha256: "a".repeat(64),
+    status: "review_required",
+    extractedText: "发票日期 2026-08-04 合计 100.00 元",
+    ocr: { issuedOn: "2026-08-03", totalCents: 9900 },
+    model: { issuedOn: "2026-08-04", totalCents: 10000 },
+    conflicts: [{ field: "issuedOn", ocrValue: "2026-08-03", modelValue: "2026-08-04" }],
+    invoiceCode: null,
+    invoiceNumber: "INV-20260804",
+    issuedOn: null,
+    sellerName: "示例商户",
+    buyerName: "森特公司",
+    amountExTaxCents: 9434,
+    taxCents: 566,
+    totalCents: null,
+    suggestedCategory: "hospitality",
+    createdAt: "2026-08-05T01:00:00.000Z",
+    updatedAt: "2026-08-05T01:00:00.000Z",
+    contentUrl: "/api/invoices/invoice-1/content",
+    ...overrides,
+  };
+}
+
+function sampleTravelExpenseDocumentCandidate(overrides = {}) {
+  return {
+    expenseId: "expense-1",
+    expenseReferenceCode: "EXP-20260804-ABC12345",
+    expenseVersion: 1,
+    expenseOccurredOn: "2026-08-04",
+    category: "lunch",
+    purpose: "客户拜访午餐",
+    paymentId: "payment-1",
+    paidAt: "2026-08-04T12:30:00+08:00",
+    merchant: "差旅餐厅",
+    amountCents: 6800,
+    reimbursementCents: 6800,
+    ...overrides,
+  };
+}
+
+function sampleTravelExpenseDocumentInbox(overrides = {}) {
+  return {
+    id: "inbox-1",
+    version: 1,
+    owner: "jiangjz",
+    source: "weixin",
+    sourceRef: "wx-message-1",
+    documentKind: "payment_proof",
+    fileName: "付款截图.png",
+    mediaType: "image/png",
+    sizeBytes: 1024,
+    sha256: "a".repeat(64),
+    status: "review_required",
+    extractedText: "支付时间 2026-08-04 18:23 金额 48.50 元",
+    recognition: {
+      evidence: { amountCents: 4850, occurredOn: "2026-08-04", paidTime: "18:23" },
+      typedEvidence: { amountCents: null, occurredOn: null, paidTime: null },
+      conflicts: [],
+      warnings: [],
+    },
+    matchedExpenseId: null,
+    matchedPaymentId: null,
+    errorCode: null,
+    candidates: [sampleTravelExpenseDocumentCandidate()],
+    attachmentId: null,
+    createdAt: "2026-08-05T01:00:00.000Z",
+    updatedAt: "2026-08-05T01:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleInvoiceMatch(overrides = {}) {
+  return {
+    id: "match-1",
+    version: 1,
+    invoiceId: "invoice-1",
+    expenseId: "expense-1",
+    paymentId: "payment-1",
+    allocatedCents: 10000,
+    matchMethod: "manual_code",
+    state: "confirmed",
+    score: null,
+    rationale: [],
+    createdAt: "2026-08-05T01:10:00.000Z",
+    updatedAt: "2026-08-05T01:10:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleNoInvoiceConfirmation(overrides = {}) {
+  return {
+    id: "no-invoice-1",
+    version: 1,
+    expenseId: "expense-1",
+    paymentId: "payment-1",
+    amountSnapshotCents: 6800,
+    reason: "商户暂时无法开票",
+    confirmedAt: "2026-08-05T01:20:00.000Z",
+    revokedAt: null,
+    ...overrides,
+  };
+}
+
+function sampleInvoiceCandidate(overrides = {}) {
+  return {
+    id: "candidate-1",
+    version: 1,
+    weekStart: "2026-08-03",
+    invoiceId: "invoice-1",
+    expenseId: "expense-1",
+    paymentId: "payment-1",
+    proposedCents: 6800,
+    score: 0.92,
+    rationale: ["金额接近", "日期在本周"],
+    status: "suggested",
+    createdAt: "2026-08-05T01:30:00.000Z",
+    updatedAt: "2026-08-05T01:30:00.000Z",
+    ...overrides,
+  };
+}
+
+it("rejects invoice candidate responses without a concurrency version", async () => {
+  const api = createSalesWorkbenchApi({
+    baseUrl: "https://example.test",
+    fetchImpl: async () => jsonResponse({
+      items: [sampleInvoiceCandidate({ version: undefined })],
+    }),
+  });
+
+  await assert.rejects(
+    () => api.listInvoiceCandidates({ weekStart: "2026-08-03" }),
+    /invoiceCandidates\.items\[0\]\.version: expected positive integer/,
+  );
+});
 
 function sampleAnalysis(overrides = {}) {
   return {
@@ -1946,6 +2173,617 @@ describe("sales workbench API client", () => {
     assert.equal(calls[4].method, "DELETE");
     assert.equal(calls[4].ifMatch, '"2"');
     assert.equal(calls[4].csrf, "csrf-test");
+  });
+
+  it("publishes strict travel-expense response contracts with integer-cent amounts", () => {
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-08-07");
+    assertApiEntity("travelExpensePayment", sampleTravelExpensePayment());
+    assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment());
+    assertApiEntity("travelExpense", sampleTravelExpense());
+    assertApiEntity("travelExpenseAdvance", sampleTravelExpenseAdvance());
+
+    assert.throws(
+      () => assertApiEntity("travelExpensePayment", sampleTravelExpensePayment({ amountCents: 68.5 })),
+      /nonNegativeInteger/,
+    );
+    assert.throws(
+      () => assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment({ sizeBytes: 0 })),
+      /positiveInteger/,
+    );
+    assert.throws(
+      () => assertApiEntity("travelExpense", sampleTravelExpense({ referenceCode: undefined })),
+      /referenceCode: expected string/,
+    );
+  });
+
+  it("directly rejects malformed document inbox and candidate structures in the shared contract", () => {
+    assertApiEntity("travelExpenseDocumentInbox", sampleTravelExpenseDocumentInbox());
+    assertApiEntity("travelExpenseDocumentCandidate", sampleTravelExpenseDocumentCandidate());
+
+    assert.throws(
+      () => assertApiEntity(
+        "travelExpenseDocumentInbox",
+        sampleTravelExpenseDocumentInbox({ recognition: [] }),
+      ),
+      /travelExpenseDocumentInbox\.recognition: expected nullableObject, received array/,
+    );
+    assert.throws(
+      () => assertApiEntity(
+        "travelExpenseDocumentCandidate",
+        sampleTravelExpenseDocumentCandidate({ expenseVersion: "1" }),
+      ),
+      /travelExpenseDocumentCandidate\.expenseVersion: expected positiveInteger, received string/,
+    );
+  });
+
+  it("loads and writes travel expenses with encoded URLs, CSRF, versions, and writable fields only", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+          signal: options.signal,
+        });
+        if (url.endsWith("/api/travel-expenses?weekStart=2026-08-03")) {
+          return jsonResponse({ items: [sampleTravelExpense()] });
+        }
+        if (url.endsWith("/api/travel-expenses/expense%2F%E4%B8%80%E5%8F%B7") && (options.method ?? "GET") === "GET") {
+          return jsonResponse({ item: sampleTravelExpense({ id: "expense/一号" }) });
+        }
+        if (url.endsWith("/api/travel-expenses") && options.method === "POST") {
+          return jsonResponse({ item: sampleTravelExpense() }, 201);
+        }
+        if (url.endsWith("/api/travel-expenses/expense%2F%E4%B8%80%E5%8F%B7") && options.method === "PATCH") {
+          return jsonResponse({ item: sampleTravelExpense({ id: "expense/一号", version: 2 }) });
+        }
+        if (url.endsWith("/api/travel-expenses/expense%2F%E4%B8%80%E5%8F%B7") && options.method === "DELETE") {
+          return jsonResponse({ deleted: sampleTravelExpense({ id: "expense/一号", version: 3 }) });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "csrf-test" });
+    const controller = new AbortController();
+    const expenseInput = {
+      occurredOn: "2026-08-04",
+      category: "lunch",
+      purpose: "客户拜访午餐",
+      merchant: "差旅餐厅",
+      itineraryId: "itinerary-1",
+      customerId: "customer-1",
+      invoiceStatus: "covered",
+      notes: "人工录入",
+      payments: [{
+        id: "payment-1",
+        paidAt: "2026-08-04T12:30:00+08:00",
+        merchant: "差旅餐厅",
+        amountCents: 6800,
+        reimbursementCents: 6800,
+        fundingSource: "personal",
+        paymentMethod: "wechat",
+        accountLast4: "1234",
+        differenceReason: null,
+        owner: "forged-owner",
+        createdAt: "must-not-be-sent",
+      }],
+      owner: "forged-owner",
+      unexpected: "must-not-be-sent",
+    };
+
+    const listed = await api.listTravelExpenses({ weekStart: "2026-08-03", signal: controller.signal });
+    const loaded = await api.getTravelExpense("expense/一号");
+    const created = await api.saveTravelExpense(expenseInput);
+    const updated = await api.saveTravelExpense({
+      ...expenseInput,
+      id: "expense/一号",
+      version: 1,
+      createdAt: "must-not-be-sent",
+    });
+    const deleted = await api.deleteTravelExpense("expense/一号", 2);
+
+    assertApiCollection("travelExpense", listed);
+    assertApiEntity("travelExpense", loaded);
+    assertApiEntity("travelExpense", created);
+    assert.equal(updated.version, 2);
+    assert.equal(deleted.version, 3);
+    assert.equal(calls[0].signal, controller.signal);
+    assert.equal(calls[1].url, "http://127.0.0.1:8787/api/travel-expenses/expense%2F%E4%B8%80%E5%8F%B7");
+    assert.equal(calls[2].method, "POST");
+    assert.equal(calls[2].csrf, "csrf-test");
+    assert.deepEqual(calls[2].body, {
+      occurredOn: "2026-08-04",
+      category: "lunch",
+      purpose: "客户拜访午餐",
+      merchant: "差旅餐厅",
+      itineraryId: "itinerary-1",
+      customerId: "customer-1",
+      notes: "人工录入",
+      payments: [{
+        id: "payment-1",
+        paidAt: "2026-08-04T12:30:00+08:00",
+        merchant: "差旅餐厅",
+        amountCents: 6800,
+        reimbursementCents: 6800,
+        fundingSource: "personal",
+        paymentMethod: "wechat",
+        accountLast4: "1234",
+        differenceReason: null,
+      }],
+    });
+    assert.equal(calls[3].method, "PATCH");
+    assert.equal(calls[3].ifMatch, '"1"');
+    assert.equal(calls[3].csrf, "csrf-test");
+    assert.deepEqual(calls[3].body, calls[2].body);
+    assert.equal(calls[4].method, "DELETE");
+    assert.equal(calls[4].ifMatch, '"2"');
+    assert.equal(calls[4].csrf, "csrf-test");
+    assert.deepEqual(calls[4].body, {});
+  });
+
+  it("adds and deletes expense attachments and builds an authenticated encoded content URL", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+        });
+        return jsonResponse({
+          item: sampleTravelExpense({ version: options.method === "POST" ? 2 : 3 }),
+        }, options.method === "POST" ? 201 : 200);
+      },
+    });
+    api.setSession({ csrfToken: "csrf-test" });
+
+    const withAttachment = await api.addTravelExpenseAttachment("expense/一号", {
+      paymentIds: ["payment/一号", "payment-2"],
+      kind: "payment_proof",
+      fileName: "付款 截图.png",
+      mediaType: "image/png",
+      contentBase64: "aW1hZ2U=",
+      coveredCents: 6800,
+      notes: "同一截图关联两笔付款",
+      owner: "forged-owner",
+      content: "must-not-be-sent",
+    }, 1);
+    const contentUrl = api.getTravelExpenseAttachmentContentUrl("attachment/一号");
+    const withoutAttachment = await api.deleteTravelExpenseAttachment("attachment/一号", 2);
+
+    assert.equal(withAttachment.version, 2);
+    assert.equal(withoutAttachment.version, 3);
+    assert.equal(
+      contentUrl,
+      "https://example.test/api/travel-expense-attachments/attachment%2F%E4%B8%80%E5%8F%B7/content",
+    );
+    assert.deepEqual(calls, [
+      {
+        url: "https://example.test/api/travel-expenses/expense%2F%E4%B8%80%E5%8F%B7/attachments",
+        method: "POST",
+        body: {
+          paymentIds: ["payment/一号", "payment-2"],
+          kind: "payment_proof",
+          fileName: "付款 截图.png",
+          mediaType: "image/png",
+          contentBase64: "aW1hZ2U=",
+          coveredCents: 6800,
+          notes: "同一截图关联两笔付款",
+        },
+        csrf: "csrf-test",
+        ifMatch: '"1"',
+      },
+      {
+        url: "https://example.test/api/travel-expense-attachments/attachment%2F%E4%B8%80%E5%8F%B7",
+        method: "DELETE",
+        body: {},
+        csrf: "csrf-test",
+        ifMatch: '"2"',
+      },
+    ]);
+  });
+
+  it("loads protected travel-expense attachment PDF content with Cookie credentials", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        return new Response("%PDF-1.4\n%%EOF", {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        });
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const response = await api.getTravelExpenseAttachmentContentResponse("attachment/一号");
+
+    assert.equal(response.status, 200);
+    assert.equal(calls[0].url, "https://example.test/api/travel-expense-attachments/attachment%2F%E4%B8%80%E5%8F%B7/content");
+    assert.equal(calls[0].options.method, "GET");
+    assert.equal(calls[0].options.credentials, "include");
+    assert.equal(calls[0].options.redirect, "error");
+    assert.equal(headerValue(calls[0].options, "Accept"), "application/pdf");
+    assert.equal(headerValue(calls[0].options, "Content-Type"), undefined);
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+  });
+
+  it("lists, reads, confirms, and rejects the protected payment-proof review inbox", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/content")) {
+          return new Response("image-bytes", { status: 200, headers: { "Content-Type": "image/png" } });
+        }
+        if (url.includes("?")) return jsonResponse({ items: [sampleTravelExpenseDocumentInbox()] });
+        if (url.endsWith("/confirm")) {
+          return jsonResponse({ item: sampleTravelExpenseDocumentInbox({
+            version: 2,
+            status: "matched",
+            matchedExpenseId: "expense-1",
+            matchedPaymentId: "payment-1",
+            attachmentId: "attachment-1",
+          }) });
+        }
+        if (url.endsWith("/reject")) {
+          return jsonResponse({ item: sampleTravelExpenseDocumentInbox({ version: 2, status: "rejected" }) });
+        }
+        return jsonResponse({ item: sampleTravelExpenseDocumentInbox() });
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const listed = await api.listTravelExpenseDocumentInbox({ status: "review_required", documentKind: "payment_proof" });
+    const detail = await api.getTravelExpenseDocumentInbox("inbox/一号");
+    const content = await api.getTravelExpenseDocumentInboxContentResponse("inbox/一号");
+    const confirmed = await api.confirmTravelExpenseDocumentInbox("inbox/一号", {
+      expenseReferenceCode: "EXP-20260804-ABC12345",
+      paymentId: "payment-1",
+      ignored: "must-not-be-sent",
+    }, 1);
+    const rejected = await api.rejectTravelExpenseDocumentInbox("inbox/二号", 1);
+
+    assert.equal(listed.length, 1);
+    assert.equal(detail.id, "inbox-1");
+    assert.equal(content.status, 200);
+    assert.equal(confirmed.attachmentId, "attachment-1");
+    assert.equal(rejected.status, "rejected");
+    assert.match(calls[0].url, /status=review_required/);
+    assert.match(calls[0].url, /documentKind=payment_proof/);
+    assert.equal(calls[1].url, "https://example.test/api/travel-expense-document-inbox/inbox%2F%E4%B8%80%E5%8F%B7");
+    assert.equal(calls[2].options.credentials, "include");
+    assert.equal(calls[2].options.redirect, "error");
+    assert.equal(headerValue(calls[2].options, "Accept"), "application/pdf,image/*");
+    assert.deepEqual(JSON.parse(calls[3].options.body), {
+      expenseReferenceCode: "EXP-20260804-ABC12345",
+      paymentId: "payment-1",
+    });
+    assert.equal(headerValue(calls[3].options, "If-Match"), '"1"');
+    assert.equal(headerValue(calls[3].options, "X-CSRF-Token"), "fixture-csrf-token");
+    assert.equal(headerValue(calls[4].options, "If-Match"), '"1"');
+    assert.equal(headerValue(calls[4].options, "X-CSRF-Token"), "fixture-csrf-token");
+  });
+
+  it("loads and writes travel expense advances with week queries and optimistic locking", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+        });
+        if (url.endsWith("?weekStart=2026-08-03")) return jsonResponse({ items: [sampleTravelExpenseAdvance()] });
+        if (options.method === "POST") return jsonResponse({ item: sampleTravelExpenseAdvance() }, 201);
+        if (options.method === "PATCH") return jsonResponse({ item: sampleTravelExpenseAdvance({ version: 2 }) });
+        return jsonResponse({ deleted: sampleTravelExpenseAdvance({ version: 3 }) });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-test" });
+    const advanceInput = {
+      weekStart: "2026-08-03",
+      status: "received",
+      requestedCents: 200000,
+      receivedCents: 180000,
+      requestedOn: "2026-08-01",
+      receivedOn: "2026-08-03",
+      purpose: "本周差旅备用金",
+      notes: "第一版人工录入",
+      owner: "forged-owner",
+      unexpected: "must-not-be-sent",
+    };
+
+    const listed = await api.listTravelExpenseAdvances({ weekStart: "2026-08-03" });
+    const created = await api.saveTravelExpenseAdvance(advanceInput);
+    const updated = await api.saveTravelExpenseAdvance({ ...advanceInput, id: "advance/一号", version: 1 });
+    const deleted = await api.deleteTravelExpenseAdvance("advance/一号", 2);
+
+    assertApiCollection("travelExpenseAdvance", listed);
+    assertApiEntity("travelExpenseAdvance", created);
+    assert.equal(updated.version, 2);
+    assert.equal(deleted.version, 3);
+    assert.equal(calls[0].url, "http://127.0.0.1:8787/api/travel-expense-advances?weekStart=2026-08-03");
+    assert.deepEqual(calls[1].body, {
+      weekStart: "2026-08-03",
+      status: "received",
+      requestedCents: 200000,
+      receivedCents: 180000,
+      requestedOn: "2026-08-01",
+      receivedOn: "2026-08-03",
+      purpose: "本周差旅备用金",
+      notes: "第一版人工录入",
+    });
+    assert.equal(calls[1].csrf, "csrf-test");
+    assert.equal(calls[2].url, "http://127.0.0.1:8787/api/travel-expense-advances/advance%2F%E4%B8%80%E5%8F%B7");
+    assert.equal(calls[2].ifMatch, '"1"');
+    assert.equal(calls[2].csrf, "csrf-test");
+    assert.deepEqual(calls[2].body, calls[1].body);
+    assert.equal(calls[3].ifMatch, '"2"');
+    assert.equal(calls[3].csrf, "csrf-test");
+    assert.deepEqual(calls[3].body, {});
+  });
+
+  it("loads, uploads, reviews, and deletes invoices with encoded URLs and strict write headers", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+          idempotencyKey: headerValue(options, "Idempotency-Key"),
+        });
+        if (url.endsWith("/api/invoices?status=review_required")) {
+          return jsonResponse({ items: [sampleInvoice()] });
+        }
+        if (url.endsWith("/api/invoices") && options.method === "POST") {
+          return jsonResponse({ item: sampleInvoice() }, 201);
+        }
+        if (url.endsWith("/api/invoices/invoice%2F%E4%B8%80%E5%8F%B7") && (options.method ?? "GET") === "GET") {
+          return jsonResponse({ item: sampleInvoice({ id: "invoice/一号" }) });
+        }
+        if (url.endsWith("/api/invoices/invoice%2F%E4%B8%80%E5%8F%B7/review")) {
+          return jsonResponse({ item: sampleInvoice({ id: "invoice/一号", version: 2, status: "unmatched", conflicts: [], issuedOn: "2026-08-04", totalCents: 10000 }) });
+        }
+        if (url.endsWith("/api/invoices/invoice%2F%E4%B8%80%E5%8F%B7") && options.method === "DELETE") {
+          return jsonResponse({ deleted: sampleInvoice({ id: "invoice/一号", version: 3, status: "deleted" }) });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const listed = await api.listInvoices({ status: "review_required" });
+    const uploaded = await api.uploadInvoice({
+      fileName: "客户招待发票.pdf",
+      mediaType: "application/pdf",
+      contentBase64: "JVBERi0xLjQ=",
+      sourceRef: "manual-upload",
+      owner: "must-not-be-sent",
+    }, { idempotencyKey: "invoice-upload-1" });
+    const loaded = await api.getInvoice("invoice/一号");
+    const contentUrl = api.getInvoiceContentUrl("invoice/一号");
+    const reviewed = await api.reviewInvoice("invoice/一号", {
+      invoiceNumber: "INV-20260804",
+      issuedOn: "2026-08-04",
+      sellerName: "示例商户",
+      buyerName: "森特公司",
+      amountExTaxCents: 9434,
+      taxCents: 566,
+      totalCents: 10000,
+      suggestedCategory: "hospitality",
+      unexpected: "must-not-be-sent",
+    }, 1);
+    const deleted = await api.deleteInvoice("invoice/一号", 2);
+
+    assert.equal(listed.length, 1);
+    assert.equal(uploaded.id, "invoice-1");
+    assert.equal(loaded.id, "invoice/一号");
+    assert.equal(reviewed.version, 2);
+    assert.equal(deleted.version, 3);
+    assert.equal(contentUrl, "https://example.test/api/invoices/invoice%2F%E4%B8%80%E5%8F%B7/content");
+    assert.equal(calls[1].idempotencyKey, "invoice-upload-1");
+    assert.equal(calls[1].csrf, "fixture-csrf-token");
+    assert.deepEqual(calls[1].body, {
+      fileName: "客户招待发票.pdf",
+      mediaType: "application/pdf",
+      contentBase64: "JVBERi0xLjQ=",
+      sourceRef: "manual-upload",
+    });
+    assert.equal(calls[3].ifMatch, '"1"');
+    assert.equal(calls[3].csrf, "fixture-csrf-token");
+    assert.equal(Object.hasOwn(calls[3].body, "unexpected"), false);
+    assert.equal(calls[4].ifMatch, '"2"');
+    assert.equal(calls[4].method, "DELETE");
+  });
+
+  it("loads protected invoice content through the API client with Cookie credentials", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        return new Response("%PDF-1.4\n%%EOF", {
+          status: 200,
+          headers: { "Content-Type": "application/pdf" },
+        });
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const response = await api.getInvoiceContentResponse("invoice/一号");
+
+    assert.equal(response.status, 200);
+    assert.equal(calls[0].url, "https://example.test/api/invoices/invoice%2F%E4%B8%80%E5%8F%B7/content");
+    assert.equal(calls[0].options.method, "GET");
+    assert.equal(calls[0].options.credentials, "include");
+    assert.equal(calls[0].options.redirect, "error");
+    assert.equal(headerValue(calls[0].options, "Accept"), "application/pdf");
+    assert.equal(headerValue(calls[0].options, "Content-Type"), undefined);
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+  });
+
+  it("invalidates the active session when protected invoice content returns 401", async () => {
+    const calls = [];
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (calls.length === 1) {
+          return jsonResponse({
+            error: { code: "UNAUTHORIZED", message: "Session expired", requestId: "invoice-pdf-401" },
+          }, 401);
+        }
+        return jsonResponse({ item: { status: "waiting_scan", message: "waiting" } });
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    await assert.rejects(
+      () => api.getInvoiceContentResponse("invoice-1"),
+      (error) => error.status === 401 && error.code === "UNAUTHORIZED",
+    );
+    await api.startWeixinBinding();
+
+    assert.equal(unauthorizedCalls, 1);
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
+  });
+
+  it("supports invoice matches, no-invoice confirmations, weekly coverage, and candidate decisions", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+          idempotencyKey: headerValue(options, "Idempotency-Key"),
+        });
+        if (url.includes("/api/invoice-matches?") && (options.method ?? "GET") === "GET") return jsonResponse({ items: [sampleInvoiceMatch()] });
+        if (url.endsWith("/api/invoices/invoice-1/matches")) return jsonResponse({ item: sampleInvoiceMatch() }, 201);
+        if (url.endsWith("/api/invoice-matches/match-1")) return jsonResponse({ item: sampleInvoiceMatch({ version: 2, state: "revoked" }) });
+        if (url.includes("/api/travel-expense-no-invoice-confirmations?")) return jsonResponse({ items: [sampleNoInvoiceConfirmation()] });
+        if (url.endsWith("/api/travel-expenses/expense-1/no-invoice") && options.method === "POST") return jsonResponse({ item: sampleNoInvoiceConfirmation() }, 201);
+        if (url.endsWith("/api/travel-expenses/expense-1/no-invoice") && options.method === "DELETE") return jsonResponse({ item: sampleNoInvoiceConfirmation({ version: 2, revokedAt: "2026-08-05T02:00:00.000Z" }) });
+        if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-coverage")) return jsonResponse({ item: { weekStart: "2026-08-03", reimbursementCents: 10000, confirmedCoverageCents: 0, noInvoiceConfirmedCents: 6800, missingInvoiceCents: 10000 } });
+        if (url.includes("/api/travel-expense-weeks/2026-08-03/invoice-suggestions?")) return jsonResponse({ items: [sampleInvoiceCandidate()] });
+        if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-suggestions")) return jsonResponse({ items: [sampleInvoiceCandidate()] }, 201);
+        if (url.endsWith("/api/invoice-match-candidates/candidate-1/accept")) return jsonResponse({ item: sampleInvoiceCandidate({ status: "accepted" }) });
+        if (url.endsWith("/api/invoice-match-candidates/candidate-1/reject")) return jsonResponse({ item: sampleInvoiceCandidate({ status: "rejected" }) });
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const matches = await api.listInvoiceMatches({ invoiceId: "invoice-1", state: "confirmed" });
+    const matched = await api.createInvoiceMatch("invoice-1", {
+      expenseReferenceCode: "EXP-20260804-0001",
+      paymentId: "payment-1",
+      allocatedCents: 10000,
+      matchMethod: "manual_code",
+    }, 1, { idempotencyKey: "match-create-1" });
+    const revokedMatch = await api.revokeInvoiceMatch("match-1", 1);
+    const confirmations = await api.listNoInvoiceConfirmations({ weekStart: "2026-08-03" });
+    const confirmedNoInvoice = await api.confirmNoInvoice("expense-1", {
+      paymentId: "payment-1",
+      reason: "商户暂时无法开票",
+    }, 1, { idempotencyKey: "no-invoice-1" });
+    const revokedNoInvoice = await api.revokeNoInvoice("expense-1", "no-invoice-1", 1);
+    const coverage = await api.getWeekInvoiceCoverage("2026-08-03");
+    const candidates = await api.listInvoiceCandidates({ weekStart: "2026-08-03", status: "suggested" });
+    const generated = await api.generateInvoiceCandidates("2026-08-03", { idempotencyKey: "candidate-generate-1" });
+    const accepted = await api.acceptInvoiceCandidate("candidate-1", 1, { idempotencyKey: "candidate-accept-1" });
+    const rejected = await api.rejectInvoiceCandidate("candidate-1", 1, { idempotencyKey: "candidate-reject-1" });
+
+    assert.equal(matches[0].state, "confirmed");
+    assert.equal(matched.invoiceId, "invoice-1");
+    assert.equal(revokedMatch.state, "revoked");
+    assert.equal(confirmations[0].id, "no-invoice-1");
+    assert.equal(confirmedNoInvoice.expenseId, "expense-1");
+    assert.ok(revokedNoInvoice.revokedAt);
+    assert.equal(coverage.missingInvoiceCents, 10000);
+    assert.equal(candidates[0].status, "suggested");
+    assert.equal(generated.length, 1);
+    assert.equal(accepted.status, "accepted");
+    assert.equal(rejected.status, "rejected");
+    assert.equal(calls[1].ifMatch, '"1"');
+    assert.equal(calls[1].idempotencyKey, "match-create-1");
+    assert.equal(calls[4].idempotencyKey, "no-invoice-1");
+    assert.deepEqual(calls[5].body, { confirmationId: "no-invoice-1" });
+    assert.match(calls[7].url, /\/api\/travel-expense-weeks\/2026-08-03\/invoice-suggestions\?status=suggested$/);
+    assert.equal(calls[8].idempotencyKey, "candidate-generate-1");
+    assert.equal(calls[9].idempotencyKey, "candidate-accept-1");
+    assert.equal(calls[9].ifMatch, '"1"');
+    assert.equal(calls[10].idempotencyKey, "candidate-reject-1");
+    assert.equal(calls[10].ifMatch, '"1"');
+  });
+
+  it("rejects malformed nested travel-expense responses", async () => {
+    const malformed = sampleTravelExpense({
+      payments: [sampleTravelExpensePayment({ amountCents: "6800" })],
+    });
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({ items: [malformed] }),
+    });
+
+    await assert.rejects(
+      () => api.listTravelExpenses({ weekStart: "2026-08-03" }),
+      /travelExpenses\.items\[0\]\.payments\[0\]\.amountCents: expected nonNegativeInteger/,
+    );
+  });
+
+  it("invalidates the active session when a travel-expense request is unauthorized", async () => {
+    const calls = [];
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized: () => {
+        unauthorizedCalls += 1;
+      },
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (calls.length === 1) {
+          return jsonResponse({
+            error: { code: "UNAUTHORIZED", message: "Session expired", requestId: "travel-401" },
+          }, 401);
+        }
+        return jsonResponse({ item: { status: "waiting_scan", message: "waiting" } });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-test" });
+
+    await assert.rejects(
+      () => api.listTravelExpenses({ weekStart: "2026-08-03" }),
+      (error) => error.status === 401 && error.code === "UNAUTHORIZED",
+    );
+    await api.startWeixinBinding();
+
+    assert.equal(unauthorizedCalls, 1);
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
   });
 
   it("starts, reads, and stops WeChat robot binding through the backend", async () => {

@@ -72,8 +72,12 @@ describe("production static server", () => {
 
     assert.match(headers["Content-Security-Policy"], /default-src 'self'/);
     assert.match(headers["Content-Security-Policy"], /script-src[^;]*'unsafe-inline'[^;]*webapi\.amap\.com/);
+    assert.match(headers["Content-Security-Policy"], /img-src[^;]*https:\/\/82\.156\.210\.199/);
     assert.match(headers["Content-Security-Policy"], /connect-src[^;]*https:\/\/82\.156\.210\.199[^;]*amap\.com/);
     assert.match(headers["Content-Security-Policy"], /media-src 'self' blob:/);
+    assert.doesNotMatch(headers["Content-Security-Policy"], /frame-src/);
+    assert.match(headers["Content-Security-Policy"], /object-src 'none'/);
+    assert.match(headers["Content-Security-Policy"], /frame-ancestors 'none'/);
     assert.equal(headers["Strict-Transport-Security"], "max-age=31536000; includeSubDomains");
     assert.equal(headers["X-Content-Type-Options"], "nosniff");
     assert.equal(headers["X-Frame-Options"], "DENY");

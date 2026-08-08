@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 
 import { buildReleaseManifest } from "./release-package.mjs";
@@ -19,6 +20,32 @@ import { buildReleaseManifest } from "./release-package.mjs";
 const scriptPath = resolve("scripts", "production-cutover.sh");
 const source = existsSync(scriptPath) ? readFileSync(scriptPath, "utf8") : "";
 const projectRoot = "/opt/sentelligent-sales-workbench";
+const preflightCheckIds = [
+  "release.identity",
+  "node.version",
+  "env.production",
+  "env.authRequired",
+  "env.authHash",
+  "env.sessionSecret",
+  "env.secureCookie",
+  "env.cors",
+  "env.solutionWrites",
+  "env.aiModel",
+  "env.icostWebhook",
+  "env.icostIsolation",
+  "env.invoiceExtraction",
+  "database.environmentBinding",
+  "database.quickCheck",
+  "database.foreignKeys",
+  "backup.identity",
+  "backup.sha256",
+  "backup.quickCheck",
+  "backup.foreignKeys",
+  "services.snapshot",
+  "services.project",
+  "services.commands",
+  "services.unrelatedProtection",
+];
 const validArguments = [
   `--new-release=${projectRoot}/releases/release-candidate`,
   `--expected-commit=${"a".repeat(40)}`,
@@ -27,7 +54,36 @@ const validArguments = [
   `--evidence-dir=${projectRoot}/evidence/cutover-candidate`,
   `--weixin-session-dir=${projectRoot}/weixin-session`,
   `--node=${projectRoot}/runtime/node-v24/bin/node`,
+  `--preflight-report=${projectRoot}/evidence/preflight-candidate.json`,
+  `--preflight-report-sha256=${"b".repeat(64)}`,
 ];
+
+function validPreflightReport({
+  generatedAt = new Date().toISOString(),
+  releasePath = `${projectRoot}/releases/release-candidate`,
+  expectedCommit = "a".repeat(40),
+  databasePath = "/var/lib/sentelligent-sales-workbench/sales-workbench.sqlite",
+} = {}) {
+  return {
+    schemaVersion: 2,
+    product: "sentelligent-sales-workbench",
+    generatedAt,
+    status: "passed",
+    scope: {
+      releasePath,
+      expectedCommit,
+      databasePath,
+      hostname: "sentelligent-production-01",
+      machineIdSha256: "e".repeat(64),
+    },
+    summary: { total: 24, passed: 24, failed: 0 },
+    checks: preflightCheckIds.map((id) => ({
+      id,
+      status: "passed",
+      message: "verified",
+    })),
+  };
+}
 
 function findBash() {
   if (process.env.BASH_PATH) return process.env.BASH_PATH;
@@ -91,6 +147,10 @@ function makeReleaseFixture(commit = "a".repeat(40)) {
     ["backend/src/server.js", Buffer.from("export const server = true;\n")],
     ["backend/src/weixin/worker.js", Buffer.from("export const worker = true;\n")],
     [
+      "backend/node_modules/production-only/index.js",
+      Buffer.from("export const productionOnly = true;\n"),
+    ],
+    [
       "backend/src/db/migrations/0001_fixture.sql",
       Buffer.from("CREATE TABLE fixture (id TEXT PRIMARY KEY);\n"),
     ],
@@ -121,6 +181,66 @@ function makeReleaseFixture(commit = "a".repeat(40)) {
     "utf8",
   );
   return { root, manifest };
+}
+
+function makeMigrationReleaseFixture(root, { foreignKeyViolation = false } = {}) {
+  const releaseRoot = join(root, "release");
+  const migrationEntry = join(releaseRoot, "backend", "src", "db.js");
+  mkdirSync(join(migrationEntry, ".."), { recursive: true });
+  writeFileSync(
+    join(releaseRoot, "backend", "package.json"),
+    `${JSON.stringify({ type: "module" })}\n`,
+    "utf8",
+  );
+  writeFileSync(
+    migrationEntry,
+    [
+      'import { DatabaseSync } from "node:sqlite";',
+      'if (!process.argv.includes("--migrate")) throw new Error("Expected --migrate");',
+      'if (process.env.DATABASE_PATH) throw new Error("Production database path leaked into migration rehearsal");',
+      'const database = new DatabaseSync(process.env.DATABASE_URL);',
+      'try {',
+      foreignKeyViolation
+        ? '  database.exec("PRAGMA foreign_keys = OFF; CREATE TABLE candidate_parent (id INTEGER PRIMARY KEY); CREATE TABLE candidate_child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES candidate_parent(id)); INSERT INTO candidate_child (id, parent_id) VALUES (1, 999);");'
+        : '  database.exec("CREATE TABLE candidate_migration (id INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);");',
+      '} finally {',
+      '  database.close();',
+      '}',
+      'console.log("Database migrated");',
+      '',
+    ].join("\n"),
+    "utf8",
+  );
+  return releaseRoot;
+}
+
+function createMigrationSourceDatabase(databasePath) {
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE existing_record (
+        id INTEGER PRIMARY KEY,
+        label TEXT NOT NULL
+      );
+      INSERT INTO existing_record (id, label) VALUES (1, 'production-data');
+    `);
+  } finally {
+    database.close();
+  }
+}
+
+function databaseHasTable(databasePath, tableName) {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return Boolean(
+      database
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(tableName),
+    );
+  } finally {
+    database.close();
+  }
 }
 
 function sourceAndRun(command, options = {}) {
@@ -162,6 +282,8 @@ describe("controlled production cutover", () => {
       "--evidence-dir",
       "--weixin-session-dir",
       "--node",
+      "--preflight-report",
+      "--preflight-report-sha256",
     ]) {
       assert.match(result.stdout, new RegExp(`${option}(?:=|[ <])`));
     }
@@ -173,6 +295,8 @@ describe("controlled production cutover", () => {
       ["--unknown-option", "--help"],
       ["--new-release"],
       ["--expected-commit"],
+      ["--preflight-report"],
+      ["--preflight-report-sha256"],
     ]) {
       const result = runBash([toBashPath(scriptPath), ...args]);
       assert.notEqual(result.status, 0, `${args.join(" ")} must fail`);
@@ -493,6 +617,251 @@ describe("controlled production cutover", () => {
     }
   });
 
+  it("accepts only a fresh exact 24/24 preflight report bound to this cutover", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-"));
+    const reportPath = join(root, "preflight.json");
+    const releasePath = `${projectRoot}/releases/release-candidate`;
+    const currentReleasePath = `${projectRoot}/releases/current-release`;
+    const expectedCommit = "a".repeat(40);
+    const databasePath = "/var/lib/sentelligent-sales-workbench/sales-workbench.sqlite";
+    try {
+      const runValidation = (report, expectedSha256 = null) => {
+        writeFileSync(reportPath, `${JSON.stringify(report)}\n`, "utf8");
+        chmodSync(reportPath, 0o600);
+        const sha256 = expectedSha256 ?? createHash("sha256")
+          .update(readFileSync(reportPath))
+          .digest("hex");
+        return sourceAndRun(
+          [
+            `PREFLIGHT_REPORT=${JSON.stringify(reportPath.replaceAll("\\", "/"))}`,
+            `PREFLIGHT_REPORT_SHA256=${sha256}`,
+            `NEW_RELEASE=${releasePath}`,
+            `OLD_RELEASE=${currentReleasePath}`,
+            `EXPECTED_COMMIT=${expectedCommit}`,
+            `DATABASE_PATH=${databasePath}`,
+            `NODE_BIN=${JSON.stringify(toBashPath(process.execPath))}`,
+            "verify_preflight_report",
+          ].join("\n"),
+        );
+      };
+
+      const validResult = runValidation(validPreflightReport({
+        releasePath: currentReleasePath,
+        expectedCommit: "b".repeat(40),
+      }));
+      assert.equal(validResult.status, 0, outputOf(validResult));
+
+      for (const [name, report, expectedPattern] of [
+        [
+          "stale",
+          validPreflightReport({ generatedAt: "2026-08-01T00:00:00.000Z" }),
+          /fresh|age/i,
+        ],
+        [
+          "not 24\/24",
+          {
+            ...validPreflightReport(),
+            status: "failed",
+            summary: { total: 24, passed: 23, failed: 1 },
+          },
+          /24\/24|passed/i,
+        ],
+        [
+          "wrong release",
+          validPreflightReport({
+            releasePath: `${projectRoot}/releases/other-candidate`,
+            expectedCommit: "b".repeat(40),
+          }),
+          /scope|release/i,
+        ],
+        [
+          "wrong commit",
+          validPreflightReport({
+            releasePath: currentReleasePath,
+            expectedCommit: "not-a-commit",
+          }),
+          /scope|commit/i,
+        ],
+        [
+          "wrong database",
+          validPreflightReport({
+            releasePath: currentReleasePath,
+            expectedCommit: "b".repeat(40),
+            databasePath: "/var/lib/sentelligent-sales-workbench/other.sqlite",
+          }),
+          /scope|database/i,
+        ],
+      ]) {
+        const result = runValidation(report);
+        assert.notEqual(result.status, 0, `${name} must fail`);
+        assert.match(outputOf(result), expectedPattern, name);
+      }
+
+      const hashMismatch = runValidation(
+        validPreflightReport(),
+        "d".repeat(64),
+      );
+      assert.notEqual(hashMismatch.status, 0, "hash mismatch must fail");
+      assert.match(outputOf(hashMismatch), /sha-256|hash/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("checks the preflight gate before release freezing or service mutation", () => {
+    const mainSource = source.slice(source.indexOf("main() {"));
+    const gateIndex = mainSource.indexOf("verify_preflight_report");
+    const freezeIndex = mainSource.indexOf("freeze_candidate_release");
+    const mutationIndex = mainSource.indexOf("stop_writers_and_lock_database");
+    assert.ok(gateIndex >= 0, "main must verify the preflight report");
+    assert.ok(freezeIndex > gateIndex, "preflight must pass before release freezing");
+    assert.ok(mutationIndex > gateIndex, "preflight must pass before service mutation");
+  });
+
+  it("rehearses candidate migrations only on an isolated copy of a verified backup", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-migration-rehearsal-"));
+    const databasePath = join(root, "production.sqlite");
+    const runBackupDir = join(root, "backups");
+    const systemctlLog = join(root, "systemctl.log");
+    try {
+      mkdirSync(runBackupDir, { recursive: true });
+      const releaseRoot = makeMigrationReleaseFixture(root);
+      createMigrationSourceDatabase(databasePath);
+      const sourceBefore = createHash("sha256").update(readFileSync(databasePath)).digest("hex");
+      const fakeBin = join(root, "bin");
+      mkdirSync(fakeBin, { recursive: true });
+      const fakeSystemctl = join(fakeBin, "systemctl");
+      writeFileSync(
+        fakeSystemctl,
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(toBashPath(systemctlLog))}\n`,
+        "utf8",
+      );
+      chmodSync(fakeSystemctl, 0o755);
+      const fakeChmod = join(fakeBin, "chmod");
+      writeFileSync(fakeChmod, "#!/bin/sh\nexit 0\n", "utf8");
+      chmodSync(fakeChmod, 0o755);
+
+      const directResult = runBash(
+        [
+          "-c",
+          [
+            'source "$1"',
+            "NEW_RELEASE=$2",
+            "export DATABASE_PATH=$3",
+            "RUN_BACKUP_DIR=$4",
+            "NODE_BIN=$5",
+            "rehearse_candidate_migrations",
+          ].join("\n"),
+          "production-cutover-test",
+          toBashPath(scriptPath),
+          releaseRoot.replaceAll("\\", "/"),
+          databasePath.replaceAll("\\", "/"),
+          runBackupDir.replaceAll("\\", "/"),
+          toBashPath(process.execPath),
+        ],
+        { env: { PATH: `${toBashPath(fakeBin)}:/usr/bin:/bin` } },
+      );
+
+      assert.equal(directResult.status, 0, outputOf(directResult));
+      assert.equal(existsSync(systemctlLog), false, "migration rehearsal must not call systemctl");
+      assert.equal(
+        createHash("sha256").update(readFileSync(databasePath)).digest("hex"),
+        sourceBefore,
+        "migration rehearsal must not modify the production database",
+      );
+      assert.equal(databaseHasTable(databasePath, "candidate_migration"), false);
+
+      const verifiedBackup = join(runBackupDir, "database-pre-cutover-verified.sqlite");
+      const rehearsalDatabase = join(runBackupDir, "database-migration-rehearsal.sqlite");
+      assert.equal(databaseHasTable(verifiedBackup, "candidate_migration"), false);
+      assert.equal(databaseHasTable(rehearsalDatabase, "candidate_migration"), true);
+      const rehearsal = new DatabaseSync(rehearsalDatabase, { readOnly: true });
+      try {
+        assert.deepEqual(
+          rehearsal.prepare("PRAGMA quick_check").all().map((row) => ({ ...row })),
+          [{ quick_check: "ok" }],
+        );
+        assert.deepEqual(rehearsal.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally {
+        rehearsal.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks service mutation when the migrated rehearsal violates foreign keys", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-migration-invalid-"));
+    const databasePath = join(root, "production.sqlite");
+    const runBackupDir = join(root, "backups");
+    const systemctlLog = join(root, "systemctl.log");
+    try {
+      mkdirSync(runBackupDir, { recursive: true });
+      const releaseRoot = makeMigrationReleaseFixture(root, { foreignKeyViolation: true });
+      createMigrationSourceDatabase(databasePath);
+      const sourceBefore = createHash("sha256").update(readFileSync(databasePath)).digest("hex");
+      const fakeBin = join(root, "bin");
+      mkdirSync(fakeBin, { recursive: true });
+      const fakeSystemctl = join(fakeBin, "systemctl");
+      writeFileSync(
+        fakeSystemctl,
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(toBashPath(systemctlLog))}\n`,
+        "utf8",
+      );
+      chmodSync(fakeSystemctl, 0o755);
+      const fakeChmod = join(fakeBin, "chmod");
+      writeFileSync(fakeChmod, "#!/bin/sh\nexit 0\n", "utf8");
+      chmodSync(fakeChmod, 0o755);
+
+      const result = runBash(
+        [
+          "-c",
+          [
+            'source "$1"',
+            "NEW_RELEASE=$2",
+            "export DATABASE_PATH=$3",
+            "RUN_BACKUP_DIR=$4",
+            "NODE_BIN=$5",
+            "rehearse_candidate_migrations",
+            "systemctl_mutate stop sentelligent-backend.service",
+          ].join("\n"),
+          "production-cutover-test",
+          toBashPath(scriptPath),
+          releaseRoot.replaceAll("\\", "/"),
+          databasePath.replaceAll("\\", "/"),
+          runBackupDir.replaceAll("\\", "/"),
+          toBashPath(process.execPath),
+        ],
+        { env: { PATH: `${toBashPath(fakeBin)}:/usr/bin:/bin` } },
+      );
+
+      assert.notEqual(result.status, 0, outputOf(result));
+      assert.match(outputOf(result), /foreign key|integrity verification/i);
+      assert.equal(existsSync(systemctlLog), false, "failed rehearsal must stop before systemctl");
+      assert.equal(
+        createHash("sha256").update(readFileSync(databasePath)).digest("hex"),
+        sourceBefore,
+        "failed rehearsal must not modify the production database",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runs the candidate migration rehearsal before the first service mutation", () => {
+    const mainStart = source.indexOf("\nmain() {");
+    const invocationStart = source.indexOf('\nif [[ "${BASH_SOURCE[0]}"', mainStart);
+    assert.ok(mainStart >= 0 && invocationStart > mainStart, "main function must be available");
+    const mainBody = source.slice(mainStart, invocationStart);
+    const verifyIndex = mainBody.indexOf("verify_release_manifest");
+    const rehearsalIndex = mainBody.indexOf("rehearse_candidate_migrations");
+    const stopIndex = mainBody.indexOf("stop_writers_and_lock_database");
+
+    assert.ok(verifyIndex >= 0, "main must verify the release manifest");
+    assert.ok(rehearsalIndex > verifyIndex, "rehearsal must use a verified candidate release");
+    assert.ok(stopIndex > rehearsalIndex, "rehearsal must finish before service mutation");
+  });
+
   it("does not remove a maintenance lock whose identity changed", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-lock-replaced-"));
     const lockPath = join(root, "database.maintenance-lock");
@@ -571,6 +940,65 @@ describe("controlled production cutover", () => {
     assert.match(source, /sha256sum/);
     assert.match(source, /ss -H -lntu/);
     assert.match(source, /assert_protected_unchanged "\$PROTECTED_BEFORE" "\$PROTECTED_AFTER"/);
+  });
+
+  it("freezes the verified candidate release before any service mutation", () => {
+    assert.match(source, /freeze_candidate_release\(\)/);
+    assert.match(source, /find "\$NEW_RELEASE" -type l/);
+    assert.match(source, /find "\$NEW_RELEASE" -type f -links \+1/);
+    assert.match(source, /chown -R root:root "\$NEW_RELEASE"/);
+    assert.match(source, /chmod go-w/);
+    assert.match(source, /stat -c '%u:%g:%a:%h:%F'/);
+    const mainSource = source.slice(source.indexOf("main() {"));
+    const verifyIndex = mainSource.indexOf("  verify_release_manifest");
+    const freezeIndex = mainSource.indexOf("  freeze_candidate_release");
+    const rehearsalIndex = mainSource.indexOf("  rehearse_candidate_migrations");
+    const mutationIndex = mainSource.indexOf("  stop_writers_and_lock_database");
+    assert.ok(verifyIndex >= 0, "manifest verification call is missing");
+    assert.ok(freezeIndex > verifyIndex, "release freeze must follow hash verification");
+    assert.ok(rehearsalIndex > freezeIndex, "migration rehearsal must use the frozen release");
+    assert.ok(mutationIndex > rehearsalIndex, "release freeze must precede mutation");
+  });
+
+  it("rejects hidden systemd execution surfaces before staging and after install", () => {
+    assert.match(source, /assert_clean_systemd_execution_surface\(\)/);
+    for (const property of [
+      "ExecCondition",
+      "ExecStartPre",
+      "ExecStartPost",
+      "ExecStop",
+      "ExecReload",
+      "DropInPaths",
+      "Environment",
+      "RootDirectory",
+      "RootImage",
+      "BindPaths",
+      "BindReadOnlyPaths",
+      "ReadWritePaths",
+      "ReadOnlyPaths",
+      "InaccessiblePaths",
+      "ExecPaths",
+      "NoExecPaths",
+      "TemporaryFileSystem",
+    ]) {
+      assert.match(source, new RegExp(property));
+    }
+    const stageBody = source.slice(
+      source.indexOf("stage_project_units()"),
+      source.indexOf("stop_writers_and_lock_database()"),
+    );
+    assert.match(
+      stageBody,
+      /assert_clean_systemd_execution_surface "\$service"/,
+    );
+    const readyBody = source.slice(
+      source.indexOf("assert_project_services_ready()"),
+      source.indexOf("normalize_listener_rows()"),
+    );
+    assert.match(
+      readyBody,
+      /assert_clean_systemd_execution_surface "\$service"/,
+    );
   });
 
   it("implements fail-closed maintenance, offline backups, atomic current, and rollback", () => {

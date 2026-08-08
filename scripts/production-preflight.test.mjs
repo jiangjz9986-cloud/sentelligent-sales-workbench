@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
+  fstatSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -74,7 +77,9 @@ function fileSha256(filePath) {
     .digest("hex");
 }
 
-function validEnvironment(origin) {
+function validEnvironment(origin, databaseUrl) {
+  assert.equal(typeof databaseUrl, "string");
+  assert.ok(databaseUrl.length > 0);
   const passwordHash = [
     "scrypt",
     "16384",
@@ -84,22 +89,71 @@ function validEnvironment(origin) {
     Buffer.alloc(64, 2).toString("base64url"),
   ].join("$");
   const sessionValue = Buffer.alloc(32, 3).toString("base64url");
+  const modelApiKey = createHash("sha256")
+    .update("fixture-model-api-key")
+    .digest("hex");
+  const weixinAgentApiToken = createHash("sha256")
+    .update("fixture-weixin-agent-token")
+    .digest("hex");
+  const icostWebhookToken = createHash("sha256")
+    .update("fixture-icost-webhook-token")
+    .digest("hex");
+  const icostWebhookOwner = "fixture-owner";
+  const invoiceOcrCommand = "/opt/sentelligent-tools/tesseract-fixture";
+  const invoicePdfTextCommand = "/opt/sentelligent-tools/pdftotext-fixture";
+  const invoiceOcrLanguages = "chi_sim+eng";
 
   return {
     source: [
       "NODE_ENV=production",
+      `DATABASE_URL=${databaseUrl}`,
       "AUTH_REQUIRED=true",
-      "AUTH_ACCOUNT=fixture-owner",
+      `AUTH_ACCOUNT=${icostWebhookOwner}`,
       `AUTH_PASSWORD_HASH=${passwordHash}`,
       `AUTH_SESSION_SECRET=${sessionValue}`,
       "AUTH_COOKIE_SECURE=true",
       `CORS_ALLOWED_ORIGINS=${origin}`,
       "SOLUTION_WRITES_ENABLED=false",
+      "AI_ANALYSIS_MODE=model",
+      "MODEL_PROVIDER=deepseek",
+      `MODEL_API_KEY=${modelApiKey}`,
+      "MODEL_BASE_URL=https://api.deepseek.com",
+      "MODEL_NAME=deepseek-v4-flash",
+      "MODEL_TIMEOUT_MS=120000",
+      `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
+      `ICOST_WEBHOOK_TOKEN=${icostWebhookToken}`,
+      `ICOST_WEBHOOK_OWNER=${icostWebhookOwner}`,
+      "ICOST_WEBHOOK_RATE_LIMIT=37",
+      "ICOST_WEBHOOK_WINDOW_MS=271828",
+      `INVOICE_OCR_COMMAND=${invoiceOcrCommand}`,
+      `INVOICE_PDF_TEXT_COMMAND=${invoicePdfTextCommand}`,
+      `INVOICE_OCR_LANGUAGES=${invoiceOcrLanguages}`,
+      "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS=45679",
       "",
     ].join("\n"),
     passwordHash,
     sessionValue,
+    modelApiKey,
+    weixinAgentApiToken,
+    icostWebhookToken,
+    icostWebhookOwner,
+    invoiceOcrCommand,
+    invoicePdfTextCommand,
+    invoiceOcrLanguages,
   };
+}
+
+function hardenReleaseFixturePermissions(root) {
+  if (process.platform === "win32") return;
+  const visit = (directoryPath) => {
+    chmodSync(directoryPath, 0o755);
+    for (const entry of readdirSync(directoryPath, { withFileTypes: true })) {
+      const entryPath = join(directoryPath, entry.name);
+      if (entry.isDirectory()) visit(entryPath);
+      else if (entry.isFile()) chmodSync(entryPath, 0o644);
+    }
+  };
+  visit(root);
 }
 
 function validLegacyServiceSnapshot() {
@@ -117,6 +171,7 @@ function validLegacyServiceSnapshot() {
   return {
     snapshotGeneratedAt: new Date().toISOString(),
     hostname: "sentelligent-production-01",
+    machineId: "0123456789abcdef0123456789abcdef",
     projectPaths: [
       { path: projectRoot, approved: true },
       { path: `${projectRoot}/current`, approved: true },
@@ -130,41 +185,109 @@ function validLegacyServiceSnapshot() {
       FragmentPath: `/etc/systemd/system/${name}`,
       ExecStart: execStartByService[name],
       User: "sentelligent",
+      Group: "",
+      SupplementaryGroups: [],
+      DynamicUser: false,
       WorkingDirectory: projectRoot,
+      ExecCondition: [],
+      ExecStartPre: [],
+      ExecStartPost: [],
+      ExecStop: [],
+      ExecReload: [],
+      DropInPaths: [],
+      Environment: [],
+      EnvironmentFiles: [],
+      RootDirectory: "",
+      RootImage: "",
+      BindPaths: [],
+      BindReadOnlyPaths: [],
+      ReadWritePaths: [],
+      ReadOnlyPaths: [],
+      InaccessiblePaths: [],
+      ExecPaths: [],
+      NoExecPaths: [],
+      TemporaryFileSystem: [],
+      ProtectSystem: "no",
+      ProtectHome: "no",
+      PrivateTmp: false,
+      PrivateDevices: false,
     })),
     unrelatedServices: [
       {
-        name: "account-vault.service",
+        name: "codex-account-vault-cloud.service",
         protectionId: "account-vault",
         protected: true,
         active: true,
+        enabled: true,
+        mainPid: 4101,
+        activeEnterTimestamp: "2026-08-07T00:00:01.000Z",
+        FragmentPath: "/etc/systemd/system/codex-account-vault-cloud.service",
+        UnitFileSha256: "1".repeat(64),
       },
       {
-        name: "qingyang.service",
+        name: "qingyang-store.service",
         protectionId: "qingyang",
         protected: true,
         active: true,
+        enabled: true,
+        mainPid: 4102,
+        activeEnterTimestamp: "2026-08-07T00:00:02.000Z",
+        FragmentPath: "/etc/systemd/system/qingyang-store.service",
+        UnitFileSha256: "2".repeat(64),
       },
       {
-        name: "proxy.service",
+        name: "codex-vault-mihomo.service",
         protectionId: "proxy",
         protected: true,
         active: true,
+        enabled: true,
+        mainPid: 4103,
+        activeEnterTimestamp: "2026-08-07T00:00:03.000Z",
+        FragmentPath: "/etc/systemd/system/codex-vault-mihomo.service",
+        UnitFileSha256: "3".repeat(64),
       },
     ],
     protectedObjects: ["account-vault", "qingyang", "proxy"],
     listeners: [
-      { port: 4876, owner: "account-vault", protected: true },
-      { port: 8797, owner: "qingyang", protected: true },
+      {
+        port: 4876,
+        owner: "account-vault",
+        service: "codex-account-vault-cloud.service",
+        mainPid: 4101,
+        protected: true,
+      },
+      {
+        port: 8797,
+        owner: "qingyang",
+        service: "qingyang-store.service",
+        mainPid: 4102,
+        protected: true,
+      },
     ],
-    plannedActions: requiredProjectServices.map((service) => ({
+    plannedActions: requiredProjectServices
+      .filter((service) => service !== "sentelligent-caddy.service")
+      .map((service) => ({
       action: "restart",
       service,
     })),
-    plannedCommands: requiredProjectServices.map(
-      (service) => `systemctl restart ${service}`,
-    ),
+    plannedCommands: requiredProjectServices
+      .filter((service) => service !== "sentelligent-caddy.service")
+      .map((service) => `systemctl restart ${service}`),
   };
+}
+
+function bindBackendEnvironment(plan, envFile) {
+  const hash = fileSha256(envFile);
+  for (const serviceName of [
+    "sentelligent-backend.service",
+    "sentelligent-weixin-agent.service",
+  ]) {
+    const service = plan.projectServices.find(({ name }) => name === serviceName);
+    service.EnvironmentFile = envFile;
+    service.EnvironmentFileSha256 = hash;
+    service.EnvironmentFiles = [envFile];
+  }
+  return plan;
 }
 
 function validCentos7ServiceSnapshot() {
@@ -215,6 +338,34 @@ function validCentos7ServiceSnapshot() {
 function makeReleaseFixture({ commit = expectedReleaseCommit } = {}) {
   const workspace = makeWorkspace();
   const releaseDirectoryPath = join(workspace.root, "release");
+  const frontendLockfile = Buffer.from(
+    `${JSON.stringify({
+      name: "release-fixture-frontend",
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": { name: "release-fixture-frontend" } },
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  const backendLockfile = Buffer.from(
+    `${JSON.stringify({
+      name: "release-fixture-backend",
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": {
+          name: "release-fixture-backend",
+          dependencies: { "production-only": "1.0.0" },
+        },
+        "node_modules/production-only": {
+          version: "1.0.0",
+          resolved: "https://registry.invalid/production-only-1.0.0.tgz",
+          integrity: "sha512-cHJvZHVjdGlvbi1vbmx5",
+        },
+      },
+    }, null, 2)}\n`,
+    "utf8",
+  );
   const contents = new Map([
     ["README.md", Buffer.from("# Release fixture\n", "utf8")],
     [
@@ -225,6 +376,18 @@ function makeReleaseFixture({ commit = expectedReleaseCommit } = {}) {
       "backend/src/weixin/worker.js",
       Buffer.from("export const workerReady = true;\n", "utf8"),
     ],
+    ["backend/package-lock.json", backendLockfile],
+    [
+      "backend/node_modules/production-only/package.json",
+      Buffer.from(
+        '{"name":"production-only","version":"1.0.0"}\n',
+        "utf8",
+      ),
+    ],
+    [
+      "backend/node_modules/production-only/index.js",
+      Buffer.from("export const productionOnly = true;\n", "utf8"),
+    ],
     [
       "backend/src/db/migrations/0001_baseline.sql",
       Buffer.from("CREATE TABLE fixture (id TEXT PRIMARY KEY);\n", "utf8"),
@@ -232,6 +395,10 @@ function makeReleaseFixture({ commit = expectedReleaseCommit } = {}) {
     [
       "outputs/product-design-prototype/scripts/static-server.mjs",
       Buffer.from("export const staticServerReady = true;\n", "utf8"),
+    ],
+    [
+      "outputs/product-design-prototype/package-lock.json",
+      frontendLockfile,
     ],
     [
       "outputs/product-design-prototype/dist/index.html",
@@ -248,11 +415,60 @@ function makeReleaseFixture({ commit = expectedReleaseCommit } = {}) {
     files,
     contentByPath: contents,
     rootDirectory: `sentelligent-sales-workbench-${commit.slice(0, 12)}`,
+    buildProvenance: {
+      frontend: {
+        lockfile: {
+          path: "outputs/product-design-prototype/package-lock.json",
+          sha256: createHash("sha256").update(frontendLockfile).digest("hex"),
+          lockfileVersion: 3,
+        },
+        runtime: {
+          node: "v24.14.1",
+          npm: "10.9.7",
+          npmResolutionSource: "npm_execpath",
+          platform: "linux",
+          architecture: "x64",
+        },
+        install: {
+          command: "npm ci",
+          ignoreScripts: true,
+          includeDev: true,
+        },
+        environment: {
+          identity: "sentelligent-release-frontend-v1",
+          allowedNames: [
+            "NODE_ENV",
+            "PATH",
+            "SENTELLIGENT_RELEASE_BUILD_ENV",
+          ],
+        },
+      },
+      backend: {
+        lockfile: {
+          path: "backend/package-lock.json",
+          sha256: createHash("sha256").update(backendLockfile).digest("hex"),
+          lockfileVersion: 3,
+        },
+        runtime: {
+          node: "v24.14.1",
+          npm: "10.9.7",
+          npmResolutionSource: "npm_execpath",
+          platform: "linux",
+          architecture: "x64",
+        },
+        install: {
+          command: "npm ci",
+          ignoreScripts: true,
+          omitDev: true,
+        },
+      },
+    },
   });
   workspace.write(
     "release/release-manifest.json",
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
+  hardenReleaseFixturePermissions(releaseDirectoryPath);
   return {
     manifest,
     manifestPath: `${immutableReleaseRoot}/release-manifest.json`,
@@ -297,24 +513,78 @@ function validImmutableReleaseSnapshot(
 
 async function loadPreflightModule() {
   try {
-    return await import("./production-preflight.mjs");
+    const module = await import("./production-preflight.mjs");
+    return {
+      ...module,
+      validateReleaseIdentity(options) {
+        return module.validateReleaseIdentity({
+          ...options,
+          enforcePosix: options?.enforcePosix ?? false,
+        });
+      },
+      runProductionPreflight(options) {
+        const servicePlan = JSON.parse(
+          readFileSync(options.servicePlanPath, "utf8"),
+        );
+        const fixtureHostIdentity = {
+          hostname: servicePlan.hostname,
+          machineId: servicePlan.machineId,
+        };
+        return module.runProductionPreflight({
+          ...options,
+          expectedHostIdentity:
+            options?.expectedHostIdentity ?? fixtureHostIdentity,
+          hostIdentityInspector:
+            options?.hostIdentityInspector ?? (() => fixtureHostIdentity),
+          invoiceToolInspector: options?.invoiceToolInspector ?? ((request) => {
+            const ocrValid =
+              request?.ocr?.command ===
+                "/opt/sentelligent-tools/tesseract-fixture" &&
+              Array.isArray(request?.ocr?.requiredLanguages) &&
+              request.ocr.requiredLanguages.every((language) =>
+                ["chi_sim", "eng"].includes(language),
+              );
+            const pdfValid =
+              request?.pdfText?.command ===
+              "/opt/sentelligent-tools/pdftotext-fixture";
+            const userValid = ["root", "sentelligent", "sentzx"].includes(
+              request?.backendService?.user,
+            );
+            return {
+              serviceIdentityResolved: userValid,
+              ocr: {
+                regularFile: ocrValid,
+                executableByServiceUser: ocrValid && userValid,
+                identity: ocrValid ? "tesseract" : "unknown",
+                requiredLanguagesAvailable: ocrValid,
+              },
+              pdfText: {
+                regularFile: pdfValid,
+                executableByServiceUser: pdfValid && userValid,
+                identity: pdfValid ? "poppler-pdftotext" : "unknown",
+              },
+            };
+          }),
+        });
+      },
+    };
   } catch (error) {
     assert.fail(`production-preflight.mjs must be implemented: ${error.message}`);
   }
 }
 
 describe("production preflight", () => {
-  it("keeps all 18 legacy core checks compatible while failing a release without identity evidence", async () => {
+  it("keeps all core checks compatible while failing a release without identity evidence", async () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validLegacyServiceSnapshot(), null, 2),
+        JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
       );
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
@@ -342,8 +612,8 @@ describe("production preflight", () => {
       }
 
       assert.equal(report.status, "failed");
-      assert.equal(report.summary.total, 19);
-      assert.equal(report.summary.passed, 18);
+      assert.equal(report.summary.total, 24);
+      assert.equal(report.summary.passed, 23);
       assert.equal(report.summary.failed, 1);
       assert.equal(
         report.checks.find((check) => check.id === "release.identity")?.status,
@@ -362,6 +632,11 @@ describe("production preflight", () => {
         "env.secureCookie",
         "env.cors",
         "env.solutionWrites",
+        "env.aiModel",
+        "env.icostWebhook",
+        "env.icostIsolation",
+        "env.invoiceExtraction",
+        "database.environmentBinding",
         "database.quickCheck",
         "database.foreignKeys",
         "backup.sha256",
@@ -377,8 +652,586 @@ describe("production preflight", () => {
       }
 
       const serialized = JSON.stringify(report);
-      assert.ok(!serialized.includes(environment.passwordHash));
-      assert.ok(!serialized.includes(environment.sessionValue));
+      for (const value of [
+        environment.passwordHash,
+        environment.sessionValue,
+        environment.modelApiKey,
+        environment.weixinAgentApiToken,
+        environment.icostWebhookToken,
+        environment.icostWebhookOwner,
+        environment.invoiceOcrCommand,
+        environment.invoicePdfTextCommand,
+        environment.invoiceOcrLanguages,
+      ]) {
+        assert.ok(!serialized.includes(value), "preflight report must not expose environment values");
+      }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("fails closed when DATABASE_URL or service EnvironmentFile evidence targets another production state", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const otherDatabasePath = join(workspace.root, "other.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      makeDatabase(otherDatabasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const environment = validEnvironment(origin, databasePath);
+      const { runProductionPreflight } = await loadPreflightModule();
+
+      const cases = [
+        {
+          name: "missing-database-url",
+          source: environment.source.replace(/^DATABASE_URL=.*\n/m, ""),
+          mutatePlan() {},
+        },
+        {
+          name: "different-database-url",
+          source: environment.source.replace(
+            /^DATABASE_URL=.*$/m,
+            `DATABASE_URL=${otherDatabasePath}`,
+          ),
+          mutatePlan() {},
+        },
+        {
+          name: "different-environment-path",
+          source: environment.source,
+          mutatePlan(plan, envFile) {
+            const otherEnvFile = workspace.write("other-production.env", readFileSync(envFile));
+            for (const serviceName of [
+              "sentelligent-backend.service",
+              "sentelligent-weixin-agent.service",
+            ]) {
+              plan.projectServices.find(({ name }) => name === serviceName).EnvironmentFile = otherEnvFile;
+            }
+          },
+        },
+        {
+          name: "different-environment-hash",
+          source: environment.source,
+          mutatePlan(plan) {
+            plan.projectServices.find(
+              ({ name }) => name === "sentelligent-backend.service",
+            ).EnvironmentFileSha256 = "0".repeat(64);
+          },
+        },
+      ];
+
+      for (const testCase of cases) {
+        const envFile = workspace.write(`${testCase.name}.env`, testCase.source);
+        const plan = bindBackendEnvironment(validLegacyServiceSnapshot(), envFile);
+        testCase.mutatePlan(plan, envFile);
+        const servicePlanPath = workspace.write(
+          `${testCase.name}.json`,
+          JSON.stringify(plan, null, 2),
+        );
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        assert.equal(
+          report.checks.find(({ id }) => id === "database.environmentBinding")?.status,
+          "failed",
+          testCase.name,
+        );
+        assert.equal(
+          report.checks.find(({ id }) => id === "database.quickCheck")?.status,
+          "passed",
+          `${testCase.name} must still inspect the requested database`,
+        );
+      }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("fails closed for missing, malformed, cross-owner, or reused iCost and invoice extraction settings", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      const cases = [
+        ["short iCost token", "ICOST_WEBHOOK_TOKEN", "short", "env.icostWebhook"],
+        ["cross-owner binding", "ICOST_WEBHOOK_OWNER", "another-owner", "env.icostWebhook"],
+        ["zero iCost rate limit", "ICOST_WEBHOOK_RATE_LIMIT", "0", "env.icostWebhook"],
+        ["fractional iCost window", "ICOST_WEBHOOK_WINDOW_MS", "1.5", "env.icostWebhook"],
+        ["reused model token", "ICOST_WEBHOOK_TOKEN", environment.modelApiKey, "env.icostIsolation"],
+        ["reused WeChat token", "ICOST_WEBHOOK_TOKEN", environment.weixinAgentApiToken, "env.icostIsolation"],
+        ["missing OCR command", "INVOICE_OCR_COMMAND", "", "env.invoiceExtraction"],
+        ["relative OCR path", "INVOICE_OCR_COMMAND", "../tesseract", "env.invoiceExtraction"],
+        ["nonexistent OCR executable", "INVOICE_OCR_COMMAND", "/opt/sentelligent-tools/missing-tesseract", "env.invoiceExtraction"],
+        ["PDF command with arguments", "INVOICE_PDF_TEXT_COMMAND", "/usr/bin/pdftotext --version", "env.invoiceExtraction"],
+        ["invalid OCR languages", "INVOICE_OCR_LANGUAGES", "chi sim", "env.invoiceExtraction"],
+        ["zero extraction timeout", "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS", "0", "env.invoiceExtraction"],
+      ];
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      for (const [name, variable, value, failedCheck] of cases) {
+        const source = environment.source.replace(
+          new RegExp(`^${variable}=.*$`, "m"),
+          `${variable}=${value}`,
+        );
+        const envFile = workspace.write(`unsafe-${variable}-${name}.env`, source);
+        const servicePlanPath = workspace.write(
+          `service-plan-${variable}-${name}.json`,
+          JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+        );
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        assert.equal(
+          report.checks.find((check) => check.id === failedCheck)?.status,
+          "failed",
+          name,
+        );
+        assert.ok(
+          !JSON.stringify(report).includes(environment.icostWebhookToken),
+          `${name} must not expose the valid iCost token`,
+        );
+      }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("rejects legacy boolean-only invoice tool evidence for the backend service user", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
+      const servicePlanPath = workspace.write(
+        "service-plan.json",
+        JSON.stringify(
+          bindBackendEnvironment(validLegacyServiceSnapshot(), envFile),
+          null,
+          2,
+        ),
+      );
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+        invoiceToolInspector: () => true,
+      });
+      assert.equal(
+        report.checks.find(({ id }) => id === "env.invoiceExtraction")?.status,
+        "failed",
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("accepts structured invoice capabilities bound to the backend service user", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
+      const servicePlanPath = workspace.write(
+        "service-plan.json",
+        JSON.stringify(
+          bindBackendEnvironment(validLegacyServiceSnapshot(), envFile),
+          null,
+          2,
+        ),
+      );
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      let inspectionRequest;
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+        invoiceToolInspector(request) {
+          inspectionRequest = request;
+          return {
+            serviceIdentityResolved: true,
+            ocr: {
+              regularFile: true,
+              executableByServiceUser: true,
+              identity: "tesseract",
+              requiredLanguagesAvailable: true,
+            },
+            pdfText: {
+              regularFile: true,
+              executableByServiceUser: true,
+              identity: "poppler-pdftotext",
+            },
+          };
+        },
+      });
+      assert.equal(
+        report.checks.find(({ id }) => id === "env.invoiceExtraction")?.status,
+        "passed",
+      );
+      assert.equal(inspectionRequest.backendService.user, "sentelligent");
+      assert.deepEqual(inspectionRequest.ocr.requiredLanguages, ["chi_sim", "eng"]);
+      assert.equal(inspectionRequest.ocr.command, environment.invoiceOcrCommand);
+      assert.equal(
+        inspectionRequest.pdfText.command,
+        environment.invoicePdfTextCommand,
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("fails closed when the backend service identity snapshot omits group semantics", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
+      const servicePlan = bindBackendEnvironment(
+        validLegacyServiceSnapshot(),
+        envFile,
+      );
+      const backend = servicePlan.projectServices.find(
+        ({ name }) => name === "sentelligent-backend.service",
+      );
+      delete backend.Group;
+      delete backend.SupplementaryGroups;
+      delete backend.DynamicUser;
+      const servicePlanPath = workspace.write(
+        "service-plan.json",
+        JSON.stringify(servicePlan, null, 2),
+      );
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+      assert.equal(
+        report.checks.find(({ id }) => id === "env.invoiceExtraction")?.status,
+        "failed",
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("inspects exact invoice tool capabilities as the backend service user", async () => {
+    const calls = [];
+    const { inspectInvoiceExtractionTools } = await loadPreflightModule();
+    assert.equal(typeof inspectInvoiceExtractionTools, "function");
+    const evidence = inspectInvoiceExtractionTools(
+      {
+        backendService: {
+          user: "sentelligent",
+          group: "",
+          supplementaryGroups: [],
+          dynamicUser: false,
+        },
+        ocr: {
+          command: "/usr/bin/tesseract",
+          requiredLanguages: ["chi_sim", "eng"],
+        },
+        pdfText: {
+          command: "/usr/bin/pdftotext",
+        },
+      },
+      {
+        inspectSecureExecutable(command) {
+          return {
+            regularFile: true,
+            secureOwnership: true,
+            resolvedPath: command,
+          };
+        },
+        runAsServiceUser(call) {
+          calls.push(call);
+          if (call.command === "/usr/bin/test") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (call.command === "/usr/bin/tesseract" && call.args[0] === "--version") {
+            return { status: 0, stdout: "tesseract 5.3.0\n", stderr: "" };
+          }
+          if (call.command === "/usr/bin/tesseract" && call.args[0] === "--list-langs") {
+            return {
+              status: 0,
+              stdout: "List of available languages (2):\nchi_sim\neng\n",
+              stderr: "",
+            };
+          }
+          if (call.command === "/usr/bin/pdftotext" && call.args[0] === "-v") {
+            return {
+              status: 0,
+              stdout: "",
+              stderr: "pdftotext version 24.02.0\n",
+            };
+          }
+          return { status: 1, stdout: "", stderr: "unexpected probe" };
+        },
+      },
+    );
+
+    assert.deepEqual(evidence, {
+      serviceIdentityResolved: true,
+      ocr: {
+        regularFile: true,
+        executableByServiceUser: true,
+        identity: "tesseract",
+        requiredLanguagesAvailable: true,
+      },
+      pdfText: {
+        regularFile: true,
+        executableByServiceUser: true,
+        identity: "poppler-pdftotext",
+      },
+    });
+    assert.ok(calls.length >= 5);
+    assert.ok(calls.every(({ user }) => user === "sentelligent"));
+    assert.ok(
+      calls.some(
+        ({ command, args }) =>
+          command === "/usr/bin/test" &&
+          args[0] === "-x" &&
+          args[1] === "/usr/bin/tesseract",
+      ),
+    );
+  });
+
+  it("runs bounded invoice probes with runuser and a secret-free environment", async () => {
+    const marker = "must-not-reach-invoice-tool";
+    const sensitiveName = ["MODEL", "API", "KEY"].join("_");
+    const originalValue = process.env[sensitiveName];
+    process.env[sensitiveName] = marker;
+    try {
+      let captured;
+      const { runToolAsServiceUser } = await loadPreflightModule();
+      assert.equal(typeof runToolAsServiceUser, "function");
+      const result = runToolAsServiceUser(
+        {
+          user: "sentelligent",
+          command: "/usr/bin/tesseract",
+          args: ["--version"],
+        },
+        {
+          platform: "linux",
+          currentUid: 0,
+          resolveRunuser: () => "/usr/sbin/runuser",
+          spawn(command, args, options) {
+            captured = { command, args, options };
+            return {
+              status: 0,
+              stdout: "tesseract 5.3.0\n",
+              stderr: "",
+            };
+          },
+        },
+      );
+      assert.equal(result.status, 0);
+      assert.equal(captured.command, "/usr/sbin/runuser");
+      assert.deepEqual(captured.args, [
+        "-u",
+        "sentelligent",
+        "--",
+        "/usr/bin/tesseract",
+        "--version",
+      ]);
+      assert.equal(captured.options.shell, false);
+      assert.equal(captured.options.timeout, 5_000);
+      assert.equal(captured.options.killSignal, "SIGKILL");
+      assert.equal(captured.options.maxBuffer, 64 * 1024);
+      assert.equal(captured.options.cwd, "/");
+      assert.deepEqual(captured.options.env, {
+        PATH: "/usr/bin:/bin",
+        LANG: "C",
+        LC_ALL: "C",
+      });
+      assert.equal(JSON.stringify(captured).includes(marker), false);
+    } finally {
+      if (originalValue === undefined) delete process.env[sensitiveName];
+      else process.env[sensitiveName] = originalValue;
+    }
+  });
+
+  it("fails closed for root-only access, generic tools, and missing OCR languages", async () => {
+    const { inspectInvoiceExtractionTools } = await loadPreflightModule();
+    const request = {
+      backendService: {
+        user: "sentelligent",
+        group: "",
+        supplementaryGroups: [],
+        dynamicUser: false,
+      },
+      ocr: {
+        command: "/usr/bin/tesseract",
+        requiredLanguages: ["chi_sim", "eng"],
+      },
+      pdfText: {
+        command: "/usr/bin/pdftotext",
+      },
+    };
+    const inspectSecureExecutable = (command) => ({
+      regularFile: true,
+      secureOwnership: true,
+      resolvedPath: command,
+    });
+    const exactProbe = ({ command, args }) => {
+      if (command === "/usr/bin/test") {
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (command === "/usr/bin/tesseract" && args[0] === "--version") {
+        return { status: 0, stdout: "tesseract 5.3.0\n", stderr: "" };
+      }
+      if (command === "/usr/bin/tesseract" && args[0] === "--list-langs") {
+        return { status: 0, stdout: "chi_sim\neng\n", stderr: "" };
+      }
+      if (command === "/usr/bin/pdftotext" && args[0] === "-v") {
+        return { status: 0, stdout: "", stderr: "pdftotext version 24.02.0\n" };
+      }
+      return { status: 1, stdout: "", stderr: "" };
+    };
+
+    const rootOnly = inspectInvoiceExtractionTools(request, {
+      inspectSecureExecutable,
+      runAsServiceUser(call) {
+        if (
+          call.command === "/usr/bin/test" &&
+          call.args[1] === "/usr/bin/tesseract"
+        ) {
+          return { status: 1, stdout: "", stderr: "permission denied" };
+        }
+        return exactProbe(call);
+      },
+    });
+    assert.equal(rootOnly.ocr.executableByServiceUser, false);
+
+    const generic = inspectInvoiceExtractionTools(request, {
+      inspectSecureExecutable,
+      runAsServiceUser(call) {
+        if (call.command === "/usr/bin/test") return exactProbe(call);
+        return { status: 0, stdout: "fixture tool 1.0\n", stderr: "" };
+      },
+    });
+    assert.equal(generic.ocr.identity, "unknown");
+    assert.equal(generic.pdfText.identity, "unknown");
+
+    const missingLanguage = inspectInvoiceExtractionTools(request, {
+      inspectSecureExecutable,
+      runAsServiceUser(call) {
+        if (
+          call.command === "/usr/bin/tesseract" &&
+          call.args[0] === "--list-langs"
+        ) {
+          return { status: 0, stdout: "eng\n", stderr: "" };
+        }
+        return exactProbe(call);
+      },
+    });
+    assert.equal(missingLanguage.ocr.requiredLanguagesAvailable, false);
+  });
+
+  it("fails closed unless production expense automation uses the approved model configuration and an isolated key", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      const cases = [
+        ["mock analysis mode", "AI_ANALYSIS_MODE", "mock"],
+        ["unexpected provider", "MODEL_PROVIDER", "another-provider"],
+        ["unexpected model", "MODEL_NAME", "deepseek-chat"],
+        ["unexpected model endpoint", "MODEL_BASE_URL", "https://example.test"],
+        ["insecure model endpoint", "MODEL_BASE_URL", "http://api.deepseek.com"],
+        ["zero model timeout", "MODEL_TIMEOUT_MS", "0"],
+        ["missing model key", "MODEL_API_KEY", ""],
+        ["model key reused from session", "MODEL_API_KEY", environment.sessionValue],
+        ["model key reused from WeChat", "MODEL_API_KEY", environment.weixinAgentApiToken],
+        ["model key reused from iCost", "MODEL_API_KEY", environment.icostWebhookToken],
+      ];
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      for (const [name, variable, value] of cases) {
+        const source = environment.source.replace(
+          new RegExp(`^${variable}=.*$`, "m"),
+          `${variable}=${value}`,
+        );
+        const envFile = workspace.write(`unsafe-model-${name}.env`, source);
+        const servicePlanPath = workspace.write(
+          `service-plan-model-${name}.json`,
+          JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+        );
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        assert.equal(
+          report.checks.find((check) => check.id === "env.aiModel")?.status,
+          "failed",
+          name,
+        );
+        assert.ok(
+          !JSON.stringify(report).includes(environment.modelApiKey),
+          `${name} must not expose the valid model key`,
+        );
+      }
     } finally {
       workspace.cleanup();
     }
@@ -388,13 +1241,13 @@ describe("production preflight", () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://82.156.210.199";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validCentos7ServiceSnapshot(), null, 2),
+        JSON.stringify(bindBackendEnvironment(validCentos7ServiceSnapshot(), envFile), null, 2),
       );
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
@@ -539,6 +1392,49 @@ describe("production preflight", () => {
     }
   });
 
+  it("rejects a release manifest without exact frontend build provenance", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const manifest = structuredClone(fixture.manifest);
+      delete manifest.buildProvenance;
+      const result = validateReleaseIdentity({
+        manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+      });
+
+      assert.equal(result.valid, false, result.message);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a release manifest that omits a required production integration setting", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const manifest = structuredClone(fixture.manifest);
+      manifest.requiredEnvNames = manifest.requiredEnvNames.filter(
+        (name) => name !== "ICOST_WEBHOOK_TOKEN",
+      );
+      const result = validateReleaseIdentity({
+        manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+      });
+
+      assert.equal(result.valid, false, result.message);
+      assert.match(result.message, /required environment/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   for (const [field, invalidValue] of [
     ["schemaVersion", 1],
     ["product", "another-product"],
@@ -568,6 +1464,7 @@ describe("production preflight", () => {
     ["dist", "outputs/product-design-prototype/dist/index.html"],
     ["source", "backend/src/server.js"],
     ["migration", "backend/src/db/migrations/0001_baseline.sql"],
+    ["production dependency", "backend/node_modules/production-only/index.js"],
   ]) {
     for (const operation of ["tampered", "missing"]) {
       it(`rejects a ${operation} ${category} file in the release directory`, async () => {
@@ -595,6 +1492,56 @@ describe("production preflight", () => {
       });
     }
   }
+
+  it("rejects an arbitrary addition to the backend production dependency tree", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      fixture.filePath("backend/node_modules/injected/index.js");
+      writeFileSync(
+        fixture.filePath("backend/node_modules/production-only/injected.js"),
+        "export const injected = true;\n",
+      );
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const result = validateReleaseIdentity({
+        manifest: fixture.manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+      });
+
+      assert.equal(result.valid, false, result.message);
+      assert.match(result.message, /dependency|inventory|release/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a manifest-matching release file that is hard linked outside the release", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const relativePath =
+        "backend/node_modules/production-only/index.js";
+      const targetPath = fixture.filePath(relativePath);
+      const externalPath = join(dirname(fixture.releaseDirectoryPath), "linked-dependency.js");
+      writeFileSync(externalPath, readFileSync(targetPath));
+      rmSync(targetPath);
+      linkSync(externalPath, targetPath);
+
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const result = validateReleaseIdentity({
+        manifest: fixture.manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+      });
+      assert.equal(result.valid, false, result.message);
+      assert.match(result.message, /regular|hard link|release directory/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
 
   it("requires every application service WorkingDirectory to exactly match the same immutable release", async () => {
     const fixture = makeReleaseFixture();
@@ -741,13 +1688,13 @@ describe("production preflight", () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validImmutableReleaseSnapshot(), null, 2),
+        JSON.stringify(bindBackendEnvironment(validImmutableReleaseSnapshot(), envFile), null, 2),
       );
       const releaseManifestPath = workspace.write(
         "release-manifest.json",
@@ -780,7 +1727,7 @@ describe("production preflight", () => {
     }
   });
 
-  it("requires release manifest and expected commit CLI options", () => {
+  it("requires release and explicit host identity CLI options", () => {
     const scriptPath = fileURLToPath(
       new URL("./production-preflight.mjs", import.meta.url),
     );
@@ -804,6 +1751,23 @@ describe("production preflight", () => {
         "expected commit",
         ["--release-manifest=release-manifest.json"],
         "Missing required preflight option: expectedCommit",
+      ],
+      [
+        "expected hostname",
+        [
+          "--release-manifest=release-manifest.json",
+          `--expected-commit=${expectedReleaseCommit}`,
+        ],
+        "Missing required preflight option: expectedHostname",
+      ],
+      [
+        "expected machine id",
+        [
+          "--release-manifest=release-manifest.json",
+          `--expected-commit=${expectedReleaseCommit}`,
+          "--expected-hostname=sentelligent-production-01",
+        ],
+        "Missing required preflight option: expectedMachineId",
       ],
     ]) {
       const result = spawnSync(process.execPath, [
@@ -896,15 +1860,15 @@ describe("production preflight", () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
 
-      const servicePlan = validLegacyServiceSnapshot();
+      const servicePlan = bindBackendEnvironment(validLegacyServiceSnapshot(), envFile);
       servicePlan.plannedCommands = [
         "systemctl restart sentelligent-backend.service account-vault.service",
       ];
@@ -940,12 +1904,12 @@ describe("production preflight", () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validLegacyServiceSnapshot(), null, 2),
+        JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
       );
       makeDatabase(databasePath);
       const { runProductionPreflight } = await loadPreflightModule();
@@ -983,13 +1947,13 @@ describe("production preflight", () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       const servicePlanPath = workspace.write(
         "service-plan.json",
-        JSON.stringify(validLegacyServiceSnapshot(), null, 2),
+        JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
       );
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
@@ -1076,6 +2040,38 @@ describe("production preflight", () => {
       false,
       "a caller-added sentelligent service must not expand the command allowlist",
     );
+
+    const caddyService = "sentelligent-caddy.service";
+    for (const action of ["enable", "restart", "start", "stop"]) {
+      for (const projectOwned of [false, true]) {
+        assert.equal(
+          validatePlannedCommands({
+            projectServices: projectOwned
+              ? [{
+                  name: caddyService,
+                  User: "sentelligent",
+                  WorkingDirectory: "/opt/sentelligent-sales-workbench",
+                  ExecStart: "/usr/bin/caddy run --config /etc/caddy/Caddyfile",
+                }]
+              : [],
+            plannedActions: [{ action, service: caddyService }],
+            plannedCommands: [`systemctl ${action} ${caddyService}`],
+          }),
+          false,
+          `shared Caddy ${action} must remain read-only for every profile`,
+        );
+      }
+    }
+    for (const action of ["status", "is-active", "is-enabled"]) {
+      assert.equal(
+        validatePlannedCommands({
+          plannedActions: [{ action, service: caddyService }],
+          plannedCommands: [`systemctl ${action} ${caddyService}`],
+        }),
+        true,
+        `shared Caddy ${action} should remain available for read-only verification`,
+      );
+    }
   });
 
   it("accepts exact legacy pre-deployment and current/release post-deployment ExecStart snapshots while rejecting path lures", async () => {
@@ -1236,9 +2232,9 @@ describe("production preflight", () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
@@ -1309,7 +2305,7 @@ describe("production preflight", () => {
       ];
 
       for (const testCase of cases) {
-        const plan = validLegacyServiceSnapshot();
+        const plan = bindBackendEnvironment(validLegacyServiceSnapshot(), envFile);
         testCase.mutate(plan);
         const servicePlanPath = workspace.write(
           `${testCase.name}.json`,
@@ -1360,18 +2356,110 @@ describe("production preflight", () => {
     }
   });
 
+  it("reads security-sensitive files once and rejects hard links or identity changes", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const sourcePath = workspace.write("stable.env", "NODE_ENV=production\n");
+      const hardLinkPath = join(workspace.root, "stable-hardlink.env");
+      linkSync(sourcePath, hardLinkPath);
+      const { readStableRegularFile } = await loadPreflightModule();
+      assert.equal(typeof readStableRegularFile, "function");
+      assert.throws(
+        () => readStableRegularFile(sourcePath),
+        /hard link|link count|single link/i,
+      );
+
+      rmSync(hardLinkPath);
+      let fstatCalls = 0;
+      assert.throws(
+        () =>
+          readStableRegularFile(sourcePath, {
+            fileSystem: {
+              fstat(fileDescriptor, options) {
+                const metadata = fstatSync(fileDescriptor, options);
+                fstatCalls += 1;
+                if (fstatCalls === 2) {
+                  return {
+                    ...metadata,
+                    size: metadata.size + 1n,
+                  };
+                }
+                return metadata;
+              },
+            },
+          }),
+        /changed|identity|stable/i,
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("requires immutable release files to be root-owned, single-link, and runtime-read-only", async () => {
+    const { validateImmutableReleaseEntryMetadata } =
+      await loadPreflightModule();
+    assert.equal(typeof validateImmutableReleaseEntryMetadata, "function");
+    const fileMetadata = {
+      isDirectory: () => false,
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      uid: 0n,
+      gid: 0n,
+      mode: 0o100644n,
+      nlink: 1n,
+    };
+    assert.equal(
+      validateImmutableReleaseEntryMetadata(fileMetadata, {
+        directory: false,
+        enforcePosix: true,
+      }),
+      true,
+    );
+    for (const metadata of [
+      { ...fileMetadata, uid: 1000n },
+      { ...fileMetadata, gid: 1000n },
+      { ...fileMetadata, mode: 0o100664n },
+      { ...fileMetadata, nlink: 2n },
+    ]) {
+      assert.equal(
+        validateImmutableReleaseEntryMetadata(metadata, {
+          directory: false,
+          enforcePosix: true,
+        }),
+        false,
+      );
+    }
+  });
+
+  it("rejects a valid SQLite primary that has another hard link", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const databasePath = join(workspace.root, "primary.sqlite");
+      const hardLinkPath = join(workspace.root, "primary-alias.sqlite");
+      makeDatabase(databasePath);
+      linkSync(databasePath, hardLinkPath);
+      const { inspectSqlite } = await loadPreflightModule();
+      assert.equal(typeof inspectSqlite, "function");
+      const inspection = await inspectSqlite(databasePath);
+      assert.notEqual(inspection.quickCheck, "ok");
+      assert.match(inspection.error, /hard link|link count|single link/i);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("rejects a protected unrelated service that is not active", async () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
-      const plan = validLegacyServiceSnapshot();
+      const plan = bindBackendEnvironment(validLegacyServiceSnapshot(), envFile);
       plan.unrelatedServices.find(
         (service) => service.protectionId === "account-vault",
       ).active = false;
@@ -1406,14 +2494,14 @@ describe("production preflight", () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
-      const environment = validEnvironment(origin);
-      const envFile = workspace.write("production.env", environment.source);
       const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("production.env", environment.source);
       const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
       makeDatabase(databasePath);
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
-      const plan = validLegacyServiceSnapshot();
+      const plan = bindBackendEnvironment(validLegacyServiceSnapshot(), envFile);
       delete plan.snapshotGeneratedAt;
       plan.hostname = "";
       plan.projectServices[0].ExecStart = "/usr/bin/node /opt/other/server.js";
@@ -1447,6 +2535,92 @@ describe("production preflight", () => {
       assert.ok(failed.has("services.unrelatedProtection"));
     } finally {
       workspace.cleanup();
+    }
+  });
+
+  it("rejects hidden systemd commands, drop-ins, environments, and path directives", async () => {
+    const { validateProjectServices } = await loadPreflightModule();
+    assert.equal(typeof validateProjectServices, "function");
+    const validPlan = validImmutableReleaseSnapshot();
+    assert.equal(validateProjectServices(validPlan), true);
+
+    const cases = [
+      ["ExecStartPost", ["/bin/sh -c injected"]],
+      ["DropInPaths", ["/etc/systemd/system/service.d/override.conf"]],
+      ["Environment", ["NODE_OPTIONS=--import=/tmp/injected.mjs"]],
+      ["ReadWritePaths", ["/opt/sentelligent-sales-workbench/releases"]],
+      ["RootDirectory", "/tmp/alternate-root"],
+      ["PrivateDevices", true],
+    ];
+    for (const [field, value] of cases) {
+      const plan = validImmutableReleaseSnapshot();
+      plan.projectServices.find(
+        ({ name }) => name === "sentelligent-backend.service",
+      )[field] = value;
+      assert.equal(
+        validateProjectServices(plan),
+        false,
+        `${field} must be part of the exact systemd execution surface`,
+      );
+    }
+
+    const frontendPlan = validImmutableReleaseSnapshot();
+    frontendPlan.projectServices.find(
+      ({ name }) => name === "sentelligent-frontend.service",
+    ).EnvironmentFiles = ["/opt/sentelligent-sales-workbench/config/backend.env"];
+    assert.equal(validateProjectServices(frontendPlan), false);
+  });
+
+  it("binds snapshots to the explicit host and exact protected service identities", async () => {
+    const { validateServiceSnapshot, validatesUnrelatedProtection } =
+      await loadPreflightModule();
+    assert.equal(typeof validateServiceSnapshot, "function");
+    assert.equal(typeof validatesUnrelatedProtection, "function");
+    const plan = validImmutableReleaseSnapshot();
+    const hostIdentity = {
+      hostname: plan.hostname,
+      machineId: plan.machineId,
+    };
+    assert.equal(
+      validateServiceSnapshot(
+        plan,
+        new Date().toISOString(),
+        hostIdentity,
+        hostIdentity,
+      ),
+      true,
+    );
+    assert.equal(validatesUnrelatedProtection(plan), true);
+
+    const wrongHost = structuredClone(plan);
+    wrongHost.machineId = "f".repeat(32);
+    assert.equal(
+      validateServiceSnapshot(
+        wrongHost,
+        new Date().toISOString(),
+        hostIdentity,
+        hostIdentity,
+      ),
+      false,
+    );
+
+    for (const mutate of [
+      (candidate) => {
+        candidate.unrelatedServices[0].name = "account-vault.service";
+      },
+      (candidate) => {
+        candidate.unrelatedServices[1].UnitFileSha256 = "";
+      },
+      (candidate) => {
+        candidate.listeners[0].service = "qingyang-store.service";
+      },
+      (candidate) => {
+        candidate.listeners[1].mainPid += 1;
+      },
+    ]) {
+      const candidate = structuredClone(plan);
+      mutate(candidate);
+      assert.equal(validatesUnrelatedProtection(candidate), false);
     }
   });
 });

@@ -1701,6 +1701,66 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           deleted: itineraryDeleted,
         };
 
+        const expenseNav = document.querySelector('[data-testid="nav-expense"]');
+        if (!expenseNav) throw new Error('Missing travel expense navigation');
+        expenseNav.click();
+        const expensePage = await waitUntil(
+          () => document.querySelector('[data-testid="page-expense"]'),
+          5000,
+        );
+        await waitUntil(() => !expensePage.querySelector('.expense-loading'), 10000);
+        const expectedExpenseTabs = ['overview', 'ledger', 'proofs', 'invoices', 'settlement', 'organize'];
+        const expenseTabIds = [...expensePage.querySelectorAll('[data-testid^="expense-tab-"]')]
+          .map((tab) => tab.getAttribute('data-testid')?.replace('expense-tab-', '') ?? '');
+        const naturalWeekInput = expensePage.querySelector('input[type="week"]');
+        const organizeTab = expensePage.querySelector('[data-testid="expense-tab-organize"]');
+        if (!organizeTab) throw new Error('Missing travel expense organize tab');
+        organizeTab.click();
+        await waitUntil(
+          () => organizeTab.getAttribute('aria-selected') === 'true'
+            && expensePage.querySelector('.expense-organizer-view'),
+          3000,
+        );
+        const openExpenseEditorButton = [...expensePage.querySelectorAll('button')]
+          .find((button) => button.textContent.includes('记一笔'));
+        if (!openExpenseEditorButton) throw new Error('Missing travel expense create button');
+        openExpenseEditorButton.click();
+        const expenseEditor = await waitUntil(
+          () => document.querySelector('.expense-drawer[role="dialog"]'),
+          3000,
+        );
+        const expenseEditorControls = [...expenseEditor.querySelectorAll('input, select, textarea')];
+        const expenseEditorLabelsComplete = expenseEditorControls.length > 0
+          && expenseEditorControls.every((control) => {
+            if (control.closest('label')?.textContent?.trim()) return true;
+            if (control.getAttribute('aria-label')?.trim()) return true;
+            if (!control.id) return false;
+            return [...expenseEditor.querySelectorAll('label')]
+              .some((label) => label.htmlFor === control.id && label.textContent?.trim());
+          });
+        const closeExpenseEditorButton = [...expenseEditor.querySelectorAll('button')]
+          .find((button) => button.getAttribute('aria-label') === '关闭费用录入');
+        if (!closeExpenseEditorButton) throw new Error('Missing travel expense editor close button');
+        closeExpenseEditorButton.click();
+        await waitUntil(() => !document.querySelector('.expense-drawer[role="dialog"]'), 3000);
+        window.__qaExpense = {
+          pageOpened: Boolean(expensePage),
+          loadedWithoutAlert: !expensePage.querySelector('.expense-loading')
+            && !expensePage.querySelector('.expense-page-alert'),
+          tabsPresent: expectedExpenseTabs.every((tabId) => expenseTabIds.includes(tabId))
+            && expenseTabIds.length === expectedExpenseTabs.length,
+          tabIds: expenseTabIds,
+          naturalWeekInput: naturalWeekInput?.type === 'week'
+            && /^\\d{4}-W\\d{2}$/.test(naturalWeekInput.value),
+          weekValue: naturalWeekInput?.value ?? '',
+          organizeOpened: organizeTab.getAttribute('aria-selected') === 'true'
+            && Boolean(expensePage.querySelector('.expense-organizer-view')),
+          editorOpened: Boolean(expenseEditor),
+          editorControlCount: expenseEditorControls.length,
+          editorLabelsComplete: expenseEditorLabelsComplete,
+          editorClosed: !document.querySelector('.expense-drawer[role="dialog"]'),
+        };
+
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
       }
@@ -1828,6 +1888,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         editFlow: window.__qaEdit ?? {},
         knowledgeFlow: window.__qaKnowledge ?? {},
         itineraryFlow: window.__qaItinerary ?? {},
+        expenseFlow: window.__qaExpense ?? {},
         weeklyDraftText: window.__qaDrafts?.weekly ?? '',
         weeklyEditor: window.__qaWeeklyEditor ?? {},
         cardInteractions: window.__qaCardInteractions ?? {},
@@ -2506,6 +2567,27 @@ async function main() {
       });
     };
 
+    const travelExpenseWeekStart = getCurrentWeekRange().periodStart;
+    const [travelExpensesResponse, travelExpenseAdvancesResponse] = await Promise.all([
+      apiFetch(`/api/travel-expenses?weekStart=${encodeURIComponent(travelExpenseWeekStart)}`),
+      apiFetch(`/api/travel-expense-advances?weekStart=${encodeURIComponent(travelExpenseWeekStart)}`),
+    ]);
+    const [travelExpensesBody, travelExpenseAdvancesBody] = await Promise.all([
+      travelExpensesResponse.json(),
+      travelExpenseAdvancesResponse.json(),
+    ]);
+    assert.equal(travelExpensesResponse.status, 200, "travel expense list should be readable for the current natural week");
+    assert.equal(travelExpenseAdvancesResponse.status, 200, "travel expense advance list should be readable for the current natural week");
+    assert.ok(Array.isArray(travelExpensesBody.items), "travel expense list should return an items array");
+    assert.ok(Array.isArray(travelExpenseAdvancesBody.items), "travel expense advance list should return an items array");
+    const travelExpenseReadContract = {
+      weekStart: travelExpenseWeekStart,
+      expensesStatus: travelExpensesResponse.status,
+      advancesStatus: travelExpenseAdvancesResponse.status,
+      expenseItems: travelExpensesBody.items.length,
+      advanceItems: travelExpenseAdvancesBody.items.length,
+    };
+
     const solutionsBeforeResponse = await apiFetch("/api/solutions");
     const solutionsBefore = await solutionsBeforeResponse.json();
     const solutionBeforeResponse = await apiFetch(`/api/solutions/${historicalSolution.id}`);
@@ -2739,6 +2821,20 @@ async function main() {
         }
         assert.equal(result.itineraryFlow.createStartsBlank, true, "desktop itinerary create button should open a blank itinerary editor directly");
         assert.equal(result.itineraryFlow.oneEmptyStop, true, "desktop itinerary editor should start with one blank customer stop");
+        assert.equal(result.expenseFlow.pageOpened, true, "desktop travel expense navigation should open the expense page");
+        assert.equal(result.expenseFlow.loadedWithoutAlert, true, "desktop travel expense page should finish loading without an error alert");
+        assert.deepEqual(
+          result.expenseFlow.tabIds,
+          ['overview', 'ledger', 'proofs', 'invoices', 'settlement', 'organize'],
+          "desktop travel expense page should expose all six reimbursement tabs",
+        );
+        assert.equal(result.expenseFlow.tabsPresent, true, "desktop travel expense page should expose exactly the expected reimbursement tabs");
+        assert.equal(result.expenseFlow.naturalWeekInput, true, "desktop travel expense page should use a populated natural-week input");
+        assert.equal(result.expenseFlow.organizeOpened, true, "desktop travel expense organize tab should open the payment record workbench");
+        assert.equal(result.expenseFlow.editorOpened, true, "desktop travel expense create action should open the expense editor");
+        assert.ok(result.expenseFlow.editorControlCount > 0, "desktop travel expense editor should render form controls");
+        assert.equal(result.expenseFlow.editorLabelsComplete, true, "desktop travel expense editor controls should all have readable labels");
+        assert.equal(result.expenseFlow.editorClosed, true, "desktop travel expense editor should close without saving");
         assert.match(result.weeklyDraftText, /本周重点进展/, "desktop flow should render a backend weekly draft");
         assert.equal(result.weeklyEditor.saved, true, "desktop weekly page should save edited weekly report content");
         assert.equal(result.weeklyEditor.ready, true, "desktop weekly page should mark weekly report as ready");
@@ -2897,6 +2993,10 @@ async function main() {
             weekly: viewportResults.find((result) => result.name === "desktop")?.weeklyDraftText.length ?? 0,
           },
           itinerary: viewportResults.find((result) => result.name === "desktop")?.itineraryFlow ?? {},
+          travelExpense: {
+            ui: viewportResults.find((result) => result.name === "desktop")?.expenseFlow ?? {},
+            api: travelExpenseReadContract,
+          },
           salesDecision: salesDecisionRegression,
           solutionWriteContract,
           conflictRegression,
