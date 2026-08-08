@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
@@ -117,6 +117,12 @@ import {
   normalizeSolutionArtifactType,
 } from "./solutionDraft.js";
 import { createWeixinLoginBinding } from "./weixin/loginBinding.js";
+import { createAssistantEventRepository } from "./assistant/eventRepository.js";
+import { createAssistantSessionRepository } from "./assistant/sessionRepository.js";
+import { createAssistantPendingActionRepository } from "./assistant/pendingActionRepository.js";
+import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
+import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
+import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import {
   partialSchema,
@@ -147,6 +153,7 @@ const DOCUMENT_UPLOAD_MAX_BYTES = 12 * 1024 * 1024;
 const DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH = 200_000;
 const EXTRACTED_TEXT_TRUNCATED_WARNING = "EXTRACTED_TEXT_TRUNCATED";
 const ICOST_EXPENSE_ROUTE = "/api/integrations/icost/expenses";
+const WEIXIN_ASSISTANT_EVENT_ROUTE = "/api/integrations/weixin-agent/events";
 
 function boundPaymentProofRecognition(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
@@ -2327,6 +2334,41 @@ export function createServer(options = {}) {
     now: options.now,
   });
 
+  const assistantClock = options.assistantClock ?? options.now ?? (() => new Date());
+  const assistantConfirmationSecret = options.assistantConfirmationSecret
+    ?? (config.authSessionSecret.length >= 32
+      ? Buffer.from(config.authSessionSecret, "utf8")
+      : createHash("sha256").update(String(config.authSessionSecret || "assistant-runtime"), "utf8").digest());
+  const assistantEventRepository = options.assistantEventRepository
+    ?? createAssistantEventRepository(db, { clock: assistantClock });
+  const assistantSessionRepository = options.assistantSessionRepository
+    ?? createAssistantSessionRepository(db, { clock: assistantClock });
+  const assistantPendingActionRepository = options.assistantPendingActionRepository
+    ?? createAssistantPendingActionRepository(db, {
+      clock: assistantClock,
+      confirmationSecret: assistantConfirmationSecret,
+    });
+  const assistantToolHandlers = options.assistantToolHandlers
+    ?? createAssistantToolHandlers({
+      db,
+      config,
+      sessionRepository: assistantSessionRepository,
+      travelExpenseDocumentInboxRepository,
+      invoiceRepository,
+      paymentProofRecognizer,
+      invoiceRecognizer,
+      clock: assistantClock,
+      fetchImpl: options.fetchImpl ?? fetch,
+    });
+  const assistantOrchestrator = options.assistantOrchestrator
+    ?? createAssistantOrchestrator({
+      eventRepository: assistantEventRepository,
+      sessionRepository: assistantSessionRepository,
+      pendingActionRepository: assistantPendingActionRepository,
+      toolHandlers: assistantToolHandlers,
+      clock: assistantClock,
+    });
+
   async function buildItineraryPlan(body) {
     if (!amapClient) {
       throw new HttpError(503, "AMAP_NOT_CONFIGURED", "Map service is not configured");
@@ -2490,6 +2532,83 @@ export function createServer(options = {}) {
             ? 201
             : 202;
         sendJson(response, statusCode, { item: icostResponseItem(completed.item, replayed) });
+        return;
+      }
+
+      if (url.pathname === WEIXIN_ASSISTANT_EVENT_ROUTE) {
+        if (request.method !== "POST") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for the WeChat assistant event endpoint"),
+            responseOptions(response, { Allow: "POST" }),
+          );
+          return;
+        }
+        const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
+        if (!machineIdentity) return unauthorized(response);
+        assertMachineRouteAllowed(request.method, url.pathname);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const rawBody = await readJson(request, { maxBytes: TRAVEL_EXPENSE_ATTACHMENT_JSON_MAX_BYTES });
+        let body;
+        try {
+          body = await validateWeixinAssistantEvent(rawBody);
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { media: "invalid" });
+        }
+        if (idempotencyKey !== body.sourceMessageId && idempotencyKey !== `weixin:${body.sourceMessageId}`) {
+          throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { idempotencyKey: "mismatch" });
+        }
+        assertWeixinSenderAllowed(config, body);
+        const senderHash = createHash("sha256").update(body.senderId, "utf8").digest("hex");
+        const conversationScope = `weixin:${createHash("sha256")
+          .update(`${body.senderId}\u0000${body.conversationId}`, "utf8")
+          .digest("hex")}`;
+        const eventId = `weixin:${createHash("sha256")
+          .update(`${body.senderId}\u0000${body.sourceMessageId}`, "utf8")
+          .digest("hex")}`;
+        const auditMetadata = {
+          senderHash,
+          chatType: body.chatType,
+          ...(body.groupId
+            ? { groupHash: createHash("sha256").update(body.groupId, "utf8").digest("hex") }
+            : {}),
+        };
+        const result = await assistantOrchestrator.handle({
+          context: {
+            owner: machineIdentity.account,
+            channel: "weixin",
+            conversation: conversationScope,
+            event: eventId,
+            requestId,
+          },
+          input: {
+            text: body.text,
+            ...(body.pendingActionId ? { pendingActionId: body.pendingActionId } : {}),
+            ...(body.confirmationCode ? { confirmationCode: body.confirmationCode } : {}),
+          },
+          serverData: {
+            auditMetadata,
+            ...(body.media ? { media: body.media } : {}),
+          },
+        });
+        const runtimeBody = result.body && typeof result.body === "object" ? result.body : {};
+        const toolResult = runtimeBody.result && typeof runtimeBody.result === "object"
+          ? runtimeBody.result
+          : {};
+        const publicBody = {
+          status: runtimeBody.status ?? (result.status >= 400 ? "error" : "ok"),
+          text: typeof toolResult.text === "string"
+            ? toolResult.text
+            : typeof runtimeBody.message === "string"
+              ? runtimeBody.message
+              : "处理完成。",
+          ...(runtimeBody.toolName ? { toolName: runtimeBody.toolName } : {}),
+          ...(runtimeBody.actionId ? { actionId: runtimeBody.actionId } : {}),
+          ...(runtimeBody.risk ? { risk: runtimeBody.risk } : {}),
+          ...(runtimeBody.confirmationCode ? { confirmationCode: runtimeBody.confirmationCode } : {}),
+        };
+        sendJson(response, result.status, publicBody);
         return;
       }
 

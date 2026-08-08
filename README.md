@@ -34,7 +34,7 @@
 | iCost 快捷指令 | iCost 成功记账后按账本名精确分流；“出差报销”只写森特智行，其他账本不进入本系统 | 只写文本 Webhook，独立 URL、独立 Token、幂等和审计；未知账本不发送 |
 | 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
 | 知识库 | 模块内搜索、条目维护和引用 | 后续可继续扩展检索与引用质量评估 |
-| 微信机器人 | 系统内绑定、worker 自启动、付款凭证和发票图片/PDF接入 | 机器身份只获得声明的写入路由；通用消息草稿持久化仍需继续加强 |
+| 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF接入 | 机器身份只获得声明的写入路由；真实微信设备往返验收仍需在部署前完成 |
 | 方案辅助 | 只读兼容入口 | 按当前产品决定暂停写入和 AI 调用 |
 
 ## 技术结构
@@ -139,6 +139,22 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 
 提交前必须运行密钥扫描。发现凭据进入 Git 后，先撤销和轮换，再清理历史；只删除工作区文件不算处理完成。详见 [SECURITY.md](SECURITY.md)。
 
+## 微信 Clawbot 助手事件契约
+
+现有 `weixin-agent-sdk` worker 通过独立机器 Token 调用：
+
+```text
+POST /api/integrations/weixin-agent/events
+Authorization: Bearer <森特智行专用 WEIXIN_AGENT_API_TOKEN>
+Idempotency-Key: <稳定重试键>
+```
+
+请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和六位 `confirmationCode`。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
+
+sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`；群聊默认拒绝，只有同时设置 `WEIXIN_ALLOW_GROUPS=true`（以及需要时的 `WEIXIN_ALLOWED_GROUP_IDS`）才会放行。owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。重复事件返回第一次保存的响应；同一消息 ID 携带不同正文返回 409。
+
+当前 `weixin-agent-sdk@0.5` 不暴露真实 `senderId`、`messageId` 或群聊元数据。worker 暂以 `conversationId` 作为 sender 身份，并以稳定的会话/文本/媒体 SHA-256 生成 `sourceMessageId`；因此完全相同的重复文本会被视为重放。升级 SDK 或接入能提供真实消息元数据的适配器后，应优先替换这两个临时映射，再进行真实设备验收。
+
 ## 文档索引
 
 - [原始项目需求书](项目需求书.txt)
@@ -154,6 +170,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 - [变更日志](CHANGELOG.md)
 - [安全策略](SECURITY.md)
 - [协作规范](CONTRIBUTING.md)
+- [微信 Clawbot 助手集成说明](docs/微信Clawbot助手集成.md)
 
 ## 许可
 

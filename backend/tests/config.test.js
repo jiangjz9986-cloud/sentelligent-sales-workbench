@@ -26,6 +26,10 @@ describe("backend model configuration", () => {
         "AUTH_SESSION_SECRET=session-secret-from-env-file",
         "WEIXIN_AGENT_API_TOKEN=machine-token-from-env-file",
         "WEIXIN_AGENT_BACKEND_URL=https://example.test",
+        "WEIXIN_AGENT_SENDER_ID=sender-from-env-file",
+        "WEIXIN_AGENT_CHAT_TYPE=direct",
+        "WEIXIN_ALLOWED_SENDER_IDS=sender-from-env-file,sender-two",
+        "WEIXIN_ALLOW_GROUPS=false",
         "ICOST_WEBHOOK_TOKEN=icost-token-from-env-file",
         "ICOST_WEBHOOK_OWNER=jiangjz",
         "ICOST_WEBHOOK_RATE_LIMIT=18",
@@ -53,6 +57,10 @@ describe("backend model configuration", () => {
       assert.equal(config.authSessionSecret, "session-secret-from-env-file");
       assert.equal(config.weixinAgentApiToken, "machine-token-from-env-file");
       assert.equal(config.weixinAgentBackendUrl, "https://example.test");
+      assert.equal(config.weixinAgentSenderId, "sender-from-env-file");
+      assert.equal(config.weixinAgentChatType, "direct");
+      assert.deepEqual(config.weixinAllowedSenderIds, ["sender-from-env-file", "sender-two"]);
+      assert.equal(config.weixinAllowGroups, false);
       assert.equal(config.icostWebhookToken, "icost-token-from-env-file");
       assert.equal(config.icostWebhookOwner, "jiangjz");
       assert.equal(config.icostWebhookRateLimit, 18);
@@ -163,6 +171,7 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
+    assert.throws(() => loadConfig({ ...base, WEIXIN_AGENT_CHAT_TYPE: "unknown" }), /WEIXIN_AGENT_CHAT_TYPE/);
   });
 
   it("emits the plaintext development-password warning once without leaking its value", () => {

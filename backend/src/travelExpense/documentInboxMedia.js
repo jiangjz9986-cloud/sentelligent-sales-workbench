@@ -6,6 +6,7 @@ import {
   inspectInvoiceFile,
   validateDocumentFileName,
 } from "./invoiceRecognition.js";
+import { Base64DecodingError, decodeCanonicalBase64 } from "../http/strictBase64.js";
 
 export const MAX_WEIXIN_DOCUMENT_BYTES = 12 * 1024 * 1024;
 
@@ -39,13 +40,14 @@ function cleanText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function validatedFileName(media, filePath, mediaType, sha256) {
+function validatedFileName(media, fallbackName, mediaType, sha256) {
   const supplied = cleanText(media?.fileName);
   if (supplied && (supplied === "." || supplied === ".." || /[\\/]/u.test(supplied))) {
     fail("invalid_filename");
   }
 
-  let fileName = supplied || basename(filePath);
+  let fileName = supplied || cleanText(fallbackName);
+  if (!fileName) fileName = `weixin-${sha256.slice(0, 16)}${EXTENSION_BY_MEDIA_TYPE.get(mediaType)}`;
   try {
     fileName = validateDocumentFileName(fileName);
   } catch {
@@ -61,7 +63,7 @@ function validatedFileName(media, filePath, mediaType, sha256) {
 
 function validateDeclaredMedia(media, detectedMediaType) {
   const mediaKind = cleanText(media?.type);
-  const declaredMediaType = cleanText(media?.mimeType).toLowerCase();
+  const declaredMediaType = cleanText(media?.mimeType ?? media?.mediaType).toLowerCase();
 
   if (mediaKind !== "image" && mediaKind !== "file") fail("unsupported_media");
   if (mediaKind === "image" && !detectedMediaType.startsWith("image/")) fail("mime_mismatch");
@@ -76,22 +78,32 @@ export async function readWeixinDocument(media) {
   if (!["image", "file"].includes(cleanText(media.type))) fail("unsupported_media");
 
   const filePath = cleanText(media.filePath);
-  if (!filePath) fail("file_unavailable");
-
-  let fileStat;
-  try {
-    fileStat = await lstat(filePath);
-  } catch {
-    fail("file_unavailable");
-  }
-  if (!fileStat.isFile()) fail("file_unavailable");
-  if (fileStat.size > MAX_WEIXIN_DOCUMENT_BYTES) fail("too_large");
-
   let content;
-  try {
-    content = await readFile(filePath);
-  } catch {
-    fail("file_unavailable");
+  let fallbackName = cleanText(media.fileName);
+  const encoded = typeof media.contentBase64 === "string" ? media.contentBase64 : "";
+  if (encoded) {
+    try {
+      content = decodeCanonicalBase64(encoded, { maxDecodedBytes: MAX_WEIXIN_DOCUMENT_BYTES });
+    } catch (error) {
+      if (error instanceof Base64DecodingError && error.reason === "maxDecodedBytes") fail("too_large");
+      fail("file_unavailable");
+    }
+  } else {
+    if (!filePath) fail("file_unavailable");
+    let fileStat;
+    try {
+      fileStat = await lstat(filePath);
+    } catch {
+      fail("file_unavailable");
+    }
+    if (!fileStat.isFile()) fail("file_unavailable");
+    if (fileStat.size > MAX_WEIXIN_DOCUMENT_BYTES) fail("too_large");
+    try {
+      content = await readFile(filePath);
+    } catch {
+      fail("file_unavailable");
+    }
+    fallbackName ||= basename(filePath);
   }
   if (content.length > MAX_WEIXIN_DOCUMENT_BYTES) fail("too_large");
 
@@ -102,7 +114,7 @@ export async function readWeixinDocument(media) {
   let inspected;
   try {
     inspected = inspectInvoiceFile({
-      fileName: basename(filePath) || "weixin-document",
+      fileName: fallbackName || "weixin-document",
       mediaType: detectedMediaType,
       buffer: content,
     });
@@ -111,7 +123,7 @@ export async function readWeixinDocument(media) {
   }
 
   return {
-    fileName: validatedFileName(media, filePath, detectedMediaType, inspected.sha256),
+    fileName: validatedFileName(media, fallbackName, detectedMediaType, inspected.sha256),
     mediaType: detectedMediaType,
     contentBase64: inspected.buffer.toString("base64"),
     sha256: inspected.sha256,

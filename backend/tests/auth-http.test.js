@@ -291,6 +291,7 @@ describe("cookie authentication protocol", () => {
     assert.equal(isMachineRouteAllowed("POST", "/api/quick-records/preview"), true);
     assert.equal(isMachineRouteAllowed("POST", "/api/travel-expense-document-inbox"), true);
     assert.equal(isMachineRouteAllowed("POST", "/api/invoices"), true);
+    assert.equal(isMachineRouteAllowed("POST", "/api/integrations/weixin-agent/events"), true);
 
     for (const [method, path] of [
       ["GET", "/api/travel-expense-document-inbox"],
@@ -298,6 +299,7 @@ describe("cookie authentication protocol", () => {
       ["PUT", "/api/invoices"],
       ["POST", "/api/invoices/invoice-1/match"],
       ["POST", "/api/travel-expenses/EXP-1/attachments"],
+      ["GET", "/api/integrations/weixin-agent/events"],
     ]) {
       assert.equal(isMachineRouteAllowed(method, path), false, `${method} ${path} must remain denied`);
     }

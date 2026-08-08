@@ -8,7 +8,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 import { createSalesWorkbenchWeixinAgent } from "../src/weixin/agentBridge.js";
 
-const machineToken = "wx-http-integration-token";
+const machineToken = "wx-test-token";
 let tempDir;
 let server;
 let baseUrl;

@@ -1,0 +1,150 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, it } from "node:test";
+
+import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
+import { VALID_PNG } from "./helpers/image-fixtures.js";
+
+const temporaryDirectories = [];
+
+async function mediaPath() {
+  const directory = await mkdtemp(join(tmpdir(), "sentelligent-remote-agent-"));
+  temporaryDirectories.push(directory);
+  const filePath = join(directory, "receipt.png");
+  await writeFile(filePath, VALID_PNG);
+  return filePath;
+}
+
+function jsonResponse(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe("remote Clawbot agent adapter", () => {
+  it("posts text and normalized media bytes without local-only fields", async () => {
+    const calls = [];
+    const filePath = await mediaPath();
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test/",
+      apiToken: "test-machine-token",
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return jsonResponse({ status: "ok", reply: "received" });
+      },
+    });
+
+    const result = await agent.chat({
+      conversationId: "conversation-1",
+      text: "午餐 48.50 元",
+      owner: "must-not-be-forwarded",
+      media: { type: "image", filePath, mimeType: "image/*", fileName: "receipt.png" },
+    });
+
+    assert.deepEqual(result, { status: "ok", reply: "received" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://sales.example.test/api/integrations/weixin-agent/events");
+    assert.equal(calls[0].options.method, "POST");
+    assert.equal(calls[0].options.headers.Authorization, "Bearer test-machine-token");
+    assert.match(calls[0].options.headers["Idempotency-Key"], /^weixin:[0-9a-f]{64}$/);
+    const body = JSON.parse(calls[0].options.body);
+    assert.deepEqual(body, {
+      conversationId: "conversation-1",
+      text: "午餐 48.50 元",
+      sourceMessageId: body.sourceMessageId,
+      media: {
+        fileName: "receipt.png",
+        mediaType: "image/png",
+        contentBase64: VALID_PNG.toString("base64"),
+        sha256: body.media.sha256,
+        sourceRef: body.media.sourceRef,
+      },
+    });
+    assert.doesNotMatch(calls[0].options.body, /must-not-be-forwarded|filePath|test-machine-token|[A-Z]:\\/i);
+  });
+
+  it("derives stable source and replay keys from conversation, text, and media hash", async () => {
+    const calls = [];
+    const filePath = await mediaPath();
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "token",
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return jsonResponse({ status: "ok" });
+      },
+    });
+
+    await agent.chat({ conversationId: "c-1", text: "same", media: { type: "image", filePath, mimeType: "image/*" } });
+    await agent.chat({ conversationId: "c-1", text: "same", media: { type: "image", filePath, mimeType: "image/*" } });
+    await agent.chat({ conversationId: "c-1", text: "different", media: { type: "image", filePath, mimeType: "image/*" } });
+
+    const firstBody = JSON.parse(calls[0].options.body);
+    const secondBody = JSON.parse(calls[1].options.body);
+    const thirdBody = JSON.parse(calls[2].options.body);
+    assert.equal(firstBody.sourceMessageId, secondBody.sourceMessageId);
+    assert.equal(calls[0].options.headers["Idempotency-Key"], calls[1].options.headers["Idempotency-Key"]);
+    assert.notEqual(firstBody.sourceMessageId, thirdBody.sourceMessageId);
+    assert.notEqual(calls[0].options.headers["Idempotency-Key"], calls[2].options.headers["Idempotency-Key"]);
+  });
+
+  it("rejects non-JSON or non-2xx responses with a safe error", async () => {
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse({ message: "internal C:\\private\\db.sqlite test-secret-token" }, 500),
+    });
+
+    await assert.rejects(
+      agent.chat({ conversationId: "c-1", text: "hello" }),
+      (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
+        assert.equal(error.message, "远程助手暂时不可用，请稍后重试");
+        assert.doesNotMatch(error.message, /internal|private|sqlite|test-secret-token/i);
+        return true;
+      },
+    );
+  });
+
+  it("forwards sender and chat metadata while keeping the owner server-owned", async () => {
+    let requestBody;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "token",
+      senderId: "sender-1",
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return jsonResponse({ status: "ok", text: "received" });
+      },
+    });
+
+    const result = await agent.chat({
+      conversationId: "c-1",
+      text: "拜访医院",
+      senderId: "sender-from-message",
+      chatType: "group",
+      groupId: "group-1",
+      messageId: "wx-message-1",
+      pendingActionId: "action-1",
+      confirmationCode: "482913",
+      owner: "attacker-owner",
+    });
+
+    assert.equal(result.text, "received");
+    assert.equal(requestBody.senderId, "sender-from-message");
+    assert.equal(requestBody.chatType, "group");
+    assert.equal(requestBody.groupId, "group-1");
+    assert.equal(requestBody.sourceMessageId, "wx-message-1");
+    assert.equal(requestBody.pendingActionId, "action-1");
+    assert.equal(requestBody.confirmationCode, "482913");
+    assert.equal(Object.hasOwn(requestBody, "owner"), false);
+  });
+});

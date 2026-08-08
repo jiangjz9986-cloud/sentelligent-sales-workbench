@@ -9,6 +9,7 @@ const ALLOWED_MACHINE_ROUTES = new Set([
   "POST /api/reports/weekly/draft",
   "POST /api/travel-expense-document-inbox",
   "POST /api/invoices",
+  "POST /api/integrations/weixin-agent/events",
 ]);
 const QUICK_RECORD_ANALYZE_ROUTE = /^POST \/api\/quick-records\/[^/]+\/analyze$/;
 

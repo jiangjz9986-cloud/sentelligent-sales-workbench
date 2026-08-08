@@ -94,6 +94,23 @@ function invoiceOcrLanguagesValue(value) {
   return normalized;
 }
 
+function identifierList(value, name) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value ?? "").split(",");
+  const result = [];
+  for (const raw of values) {
+    if (typeof raw !== "string") throw new Error(`${name} contains an invalid identifier`);
+    const item = raw.trim();
+    if (!item) continue;
+    if (item.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(item)) {
+      throw new Error(`${name} contains an invalid identifier`);
+    }
+    if (!result.includes(item)) result.push(item);
+  }
+  return result;
+}
+
 function isStrongSessionSecret(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
@@ -155,6 +172,20 @@ export function loadConfig(overrides = {}) {
     env.invoiceTextExtractionTimeoutMs ?? env.INVOICE_TEXT_EXTRACTION_TIMEOUT_MS ?? 30_000,
     "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
   );
+  const weixinAllowedSenderIds = identifierList(
+    env.weixinAllowedSenderIds ?? env.WEIXIN_ALLOWED_SENDER_IDS,
+    "WEIXIN_ALLOWED_SENDER_IDS",
+  );
+  const weixinAllowedGroupIds = identifierList(
+    env.weixinAllowedGroupIds ?? env.WEIXIN_ALLOWED_GROUP_IDS,
+    "WEIXIN_ALLOWED_GROUP_IDS",
+  );
+  const weixinAgentChatType = String(
+    env.weixinAgentChatType ?? env.WEIXIN_AGENT_CHAT_TYPE ?? "direct",
+  ).trim().toLowerCase();
+  if (!["direct", "group"].includes(weixinAgentChatType)) {
+    throw new Error("WEIXIN_AGENT_CHAT_TYPE must be direct or group");
+  }
 
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
@@ -191,7 +222,16 @@ export function loadConfig(overrides = {}) {
     weixinAgentApiToken: env.weixinAgentApiToken ?? env.WEIXIN_AGENT_API_TOKEN ?? "",
     weixinAgentBackendUrl: env.weixinAgentBackendUrl ?? env.WEIXIN_AGENT_BACKEND_URL ?? "",
     weixinAgentOwner: env.weixinAgentOwner ?? env.WEIXIN_AGENT_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "",
+    weixinAgentSenderId: String(env.weixinAgentSenderId ?? env.WEIXIN_AGENT_SENDER_ID ?? "").trim(),
+    weixinAgentChatType,
     weixinAgentSessionHome: env.weixinAgentSessionHome ?? env.WEIXIN_AGENT_SESSION_HOME ?? "",
+    weixinAllowedSenderIds,
+    weixinAllowedGroupIds,
+    weixinAllowGroups: booleanValue(
+      env.weixinAllowGroups ?? env.WEIXIN_ALLOW_GROUPS,
+      false,
+      "WEIXIN_ALLOW_GROUPS",
+    ),
     icostWebhookToken: String(env.icostWebhookToken ?? env.ICOST_WEBHOOK_TOKEN ?? "").trim(),
     icostWebhookOwner: String(
       env.icostWebhookOwner ?? env.ICOST_WEBHOOK_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "icost",

@@ -107,6 +107,15 @@ function createDraftSession() {
   };
 }
 
+function createMemorySessionStore() {
+  const sessions = new Map();
+  return {
+    get: (key) => sessions.get(key),
+    set: (key, value) => sessions.set(key, value),
+    delete: (key) => sessions.delete(key),
+  };
+}
+
 function appendDraftPart(session, request, receivedAt) {
   const text = cleanText(request?.text);
   if (!text) return;
@@ -399,7 +408,13 @@ export function createSalesWorkbenchWeixinAgent(options = {}) {
   const client = new SalesWorkbenchClient(options);
   const now = options.now ?? (() => new Date());
   const owner = options.owner || "weixin-agent";
-  const sessions = new Map();
+  const sessionStore = options.sessionStore ?? createMemorySessionStore();
+  if (
+    !sessionStore
+    || typeof sessionStore.get !== "function"
+    || typeof sessionStore.set !== "function"
+    || typeof sessionStore.delete !== "function"
+  ) throw new TypeError("sessionStore must support get, set, and delete");
 
   return {
     async chat(request) {
@@ -441,12 +456,12 @@ export function createSalesWorkbenchWeixinAgent(options = {}) {
       }
 
       if (isClearCommand(text)) {
-        sessions.delete(sessionKey);
+        await sessionStore.delete(sessionKey);
         return { text: "已清空当前暂存内容，可以重新发送记录。" };
       }
 
       if (isRecordCommand(text)) {
-        const session = sessions.get(sessionKey);
+        const session = await sessionStore.get(sessionKey);
         if (!session || session.parts.length === 0) {
           return { text: "当前没有暂存内容。请先发送拜访、电话或会议内容。" };
         }
@@ -456,7 +471,7 @@ export function createSalesWorkbenchWeixinAgent(options = {}) {
       }
 
       if (isEnterCommand(text)) {
-        const session = sessions.get(sessionKey);
+        const session = await sessionStore.get(sessionKey);
         if (!session || session.parts.length === 0) {
           return { text: "当前没有待录入内容。请先发送记录内容。" };
         }
@@ -471,13 +486,13 @@ export function createSalesWorkbenchWeixinAgent(options = {}) {
           sourceChannel: sourceChannelFromParts(session.parts),
         });
         const insight = await client.analyzeQuickRecord(record.id);
-        sessions.delete(sessionKey);
+        await sessionStore.delete(sessionKey);
         return { text: formatQuickRecordReply(record, insight) };
       }
 
-      const session = sessions.get(sessionKey) ?? createDraftSession();
+      const session = (await sessionStore.get(sessionKey)) ?? createDraftSession();
       appendDraftPart(session, request, now());
-      sessions.set(sessionKey, session);
+      await sessionStore.set(sessionKey, session);
 
       if (session.phase === "review") {
         await buildDraftPreview(session, client);
