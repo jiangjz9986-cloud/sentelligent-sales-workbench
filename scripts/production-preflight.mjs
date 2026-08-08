@@ -70,6 +70,7 @@ const REQUIRED_PROTECTED_SERVICES = Object.freeze([
 const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
 const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
+const FRONTEND_ENVIRONMENT_FILE = `${DEFAULT_PROJECT_PATH}/config/frontend.env`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
 const PROJECT_NODE_EXECUTABLE =
   `${DEFAULT_PROJECT_PATH}/runtime/node-v24/bin/node`;
@@ -1306,10 +1307,7 @@ export function validateImmutableReleaseEntryMetadata(
 
 function collectReleaseFiles(
   releaseDirectoryPath,
-  {
-    enforcePosix = process.platform !== "win32",
-    allowLegacyOwnership = false,
-  } = {},
+  { enforcePosix = process.platform !== "win32" } = {},
 ) {
   const requestedRoot = resolve(releaseDirectoryPath);
   const root = realpathSync.native(requestedRoot);
@@ -1321,12 +1319,7 @@ function collectReleaseFiles(
     directory: true,
     enforcePosix,
   });
-  const validLegacyRoot =
-    allowLegacyOwnership &&
-    rootMetadata.isDirectory() &&
-    !rootMetadata.isSymbolicLink() &&
-    (rootMetadata.mode & 0o022n) === 0n;
-  if (!validRoot && !validLegacyRoot) {
+  if (!validRoot) {
     throw new Error("release root is not a directory");
   }
   const files = [];
@@ -1357,9 +1350,7 @@ function collectReleaseFiles(
           directory: true,
           enforcePosix,
         });
-        const validLegacyDirectory =
-          allowLegacyOwnership && (metadata.mode & 0o022n) === 0n;
-        if (!validDirectory && !validLegacyDirectory) {
+        if (!validDirectory) {
           throw new Error("release contains a mutable directory");
         }
         visit(filePath, relativePath);
@@ -1368,11 +1359,7 @@ function collectReleaseFiles(
           directory: false,
           enforcePosix,
         });
-        const validLegacyFile =
-          allowLegacyOwnership &&
-          metadata.nlink === 1n &&
-          (metadata.mode & 0o022n) === 0n;
-        if (!validFile && !validLegacyFile) {
+        if (!validFile) {
           throw new Error("release contains a mutable or hard-linked file");
         }
         files.push(relativePath);
@@ -1556,7 +1543,6 @@ function verifyLegacyReleaseContents(
     }
     const { root, files } = collectReleaseFiles(releaseDirectoryPath, {
       enforcePosix,
-      allowLegacyOwnership: true,
     });
     if (
       !files.includes(RELEASE_MANIFEST_FILE) ||
@@ -1574,7 +1560,7 @@ function verifyLegacyReleaseContents(
       ...Object.keys(sourceSection.files),
     ]);
     const unexpectedFiles = [...packagedFiles].filter(
-      (file) => !expectedFiles.has(file) && !file.startsWith("backend/node_modules/"),
+      (file) => !expectedFiles.has(file),
     );
     if (unexpectedFiles.length > 0) {
       return { valid: false, message: "Legacy release contains files outside its verified hash inventory." };
@@ -1922,8 +1908,7 @@ export function validateSystemdExecutionSurface(service) {
   if (service.name === "sentelligent-frontend.service") {
     if (
       typeof service.EnvironmentFile !== "string" ||
-      !service.EnvironmentFile.endsWith("/config/frontend.env") ||
-      service.EnvironmentFile.includes("/backend.env")
+      service.EnvironmentFile !== FRONTEND_ENVIRONMENT_FILE
     ) {
       return false;
     }

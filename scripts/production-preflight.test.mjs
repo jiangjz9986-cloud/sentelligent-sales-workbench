@@ -505,6 +505,27 @@ function makeReleaseFixture({ commit = expectedReleaseCommit } = {}) {
   };
 }
 
+function makeLegacyReleaseFixture() {
+  const fixture = makeReleaseFixture();
+  const manifest = structuredClone(fixture.manifest);
+  const packagedDependencyFiles = Object.keys(
+    manifest.productionDependencyHashes?.files ?? {},
+  );
+  for (const dependencyFile of packagedDependencyFiles) {
+    rmSync(fixture.filePath(dependencyFile), { force: true });
+  }
+  manifest.schemaVersion = 2;
+  manifest.archive.packagedFiles -= packagedDependencyFiles.length;
+  delete manifest.buildProvenance;
+  delete manifest.productionDependencyHashes;
+  writeFileSync(
+    fixture.filePath("release-manifest.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
+  hardenReleaseFixturePermissions(fixture.releaseDirectoryPath);
+  return { ...fixture, manifest };
+}
+
 function validImmutableReleaseSnapshot(
   releaseRoot = immutableReleaseRoot,
 ) {
@@ -1424,14 +1445,11 @@ describe("production preflight", () => {
   });
 
   it("allows a legacy schema-2 manifest only for the pre-cutover current release", async () => {
-    const fixture = makeReleaseFixture();
+    const fixture = makeLegacyReleaseFixture();
     try {
-      const legacyManifest = structuredClone(fixture.manifest);
-      legacyManifest.schemaVersion = 2;
-      delete legacyManifest.buildProvenance;
       const { validateReleaseIdentity } = await loadPreflightModule();
       const result = validateReleaseIdentity({
-        manifest: legacyManifest,
+        manifest: fixture.manifest,
         manifestPath: fixture.manifestPath,
         releaseDirectoryPath: fixture.releaseDirectoryPath,
         expectedCommit: expectedReleaseCommit,
@@ -1444,6 +1462,82 @@ describe("production preflight", () => {
     } finally {
       fixture.cleanup();
     }
+  });
+
+  it("rejects deployment-installed dependencies outside a legacy schema-2 archive inventory", async () => {
+    const fixture = makeLegacyReleaseFixture();
+    try {
+      const installedDependencyPath = fixture.filePath(
+        "backend/node_modules/post-install-only/index.js",
+      );
+      mkdirSync(dirname(installedDependencyPath), { recursive: true });
+      writeFileSync(
+        installedDependencyPath,
+        "export const installedAfterPackaging = true;\n",
+      );
+      hardenReleaseFixturePermissions(fixture.releaseDirectoryPath);
+
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const result = validateReleaseIdentity({
+        manifest: fixture.manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        enforcePosix: false,
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(result.valid, false);
+      assert.match(result.message, /file count|inventory/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects unhashed dependency files counted as part of a legacy schema-2 archive", async () => {
+    const fixture = makeLegacyReleaseFixture();
+    try {
+      const unverifiedDependencyPath = fixture.filePath(
+        "backend/node_modules/unverified/index.js",
+      );
+      mkdirSync(dirname(unverifiedDependencyPath), { recursive: true });
+      writeFileSync(
+        unverifiedDependencyPath,
+        "export const unverifiedArchiveEntry = true;\n",
+      );
+      fixture.manifest.archive.packagedFiles += 1;
+      hardenReleaseFixturePermissions(fixture.releaseDirectoryPath);
+
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const result = validateReleaseIdentity({
+        manifest: fixture.manifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        enforcePosix: false,
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(result.valid, false);
+      assert.match(result.message, /inventory|hash/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("never relaxes root ownership for a legacy current release", () => {
+    const preflightSource = readFileSync(
+      fileURLToPath(new URL("./production-preflight.mjs", import.meta.url)),
+      "utf8",
+    );
+    const legacyVerifier = preflightSource.slice(
+      preflightSource.indexOf("function verifyLegacyReleaseContents"),
+      preflightSource.indexOf("export function validateReleaseIdentity"),
+    );
+    assert.ok(legacyVerifier.length > 0);
+    assert.doesNotMatch(legacyVerifier, /allowLegacyOwnership/);
   });
 
   it("binds a parseable manifest and exact 40-character commit to one immutable release", async () => {
@@ -2684,6 +2778,14 @@ describe("production preflight", () => {
       ({ name }) => name === "sentelligent-frontend.service",
     ).EnvironmentFiles = ["/opt/sentelligent-sales-workbench/config/backend.env"];
     assert.equal(validateProjectServices(frontendPlan), false);
+
+    const redirectedFrontendPlan = validImmutableReleaseSnapshot();
+    const redirectedFrontend = redirectedFrontendPlan.projectServices.find(
+      ({ name }) => name === "sentelligent-frontend.service",
+    );
+    redirectedFrontend.EnvironmentFile = "/tmp/config/frontend.env";
+    redirectedFrontend.EnvironmentFiles = [redirectedFrontend.EnvironmentFile];
+    assert.equal(validateProjectServices(redirectedFrontendPlan), false);
   });
 
   it("binds snapshots to the explicit host and exact protected service identities", async () => {

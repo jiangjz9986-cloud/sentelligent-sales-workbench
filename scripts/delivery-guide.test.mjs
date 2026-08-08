@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
 const guidePath = resolve("docs", "正式交付验收手册.md");
+const releaseGuidePath = resolve("docs", "发布与回滚操作手册.md");
 
 function literalPattern(value) {
   return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
@@ -70,5 +71,24 @@ describe("formal delivery guide", () => {
     ]) {
       assert.match(content, literalPattern(required));
     }
+  });
+});
+
+describe("production release staging guide", () => {
+  const content = readFileSync(releaseGuidePath, "utf8");
+
+  it("stages and preserves releases as root-owned immutable trees", () => {
+    for (const required of [
+      "install -d -o root -g root -m 0755",
+      "--no-same-owner",
+      "--no-same-permissions",
+      "chown -R root:root",
+      "trusted_manifest_sha=",
+      "旧生产 release",
+      "重新执行 24/24",
+    ]) {
+      assert.match(content, literalPattern(required));
+    }
+    assert.doesNotMatch(content, /install -d -o sentzx -g sentzx/);
   });
 });

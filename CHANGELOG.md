@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-08
+
+### Production preflight hardening
+
+- Require the frontend systemd unit to use exactly `/opt/sentelligent-sales-workbench/config/frontend.env`; suffix-matching paths outside the project configuration root are rejected.
+- Require schema-2 current releases to remain an exact SHA-256-bound archive inventory; unverified deployment-installed dependencies are rejected.
+- Require both legacy and current releases to be `root:root` immutable trees, reject candidates that were not frozen before hash verification, and document root-owned extraction so the runtime identity cannot replace files between verification and cutover.
+- Add regression fixtures for both boundary cases and refresh release-facing documentation before the guarded production cutover.
+
 ## [0.4.1] - 2026-08-08
 
 ### Production hardening
@@ -236,7 +245,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.2
 [0.4.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.0
 [0.3.6]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.6

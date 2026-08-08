@@ -762,7 +762,7 @@ verify_release_manifest() {
   RELEASE_DIRECTORY="$NEW_RELEASE" EXPECTED_RELEASE_COMMIT="$EXPECTED_COMMIT" \
     "$NODE_BIN" --input-type=module --eval '
       import { createHash } from "node:crypto";
-      import { lstatSync, readFileSync } from "node:fs";
+      import { lstatSync, readFileSync, readdirSync } from "node:fs";
       import { isAbsolute, relative, resolve, sep } from "node:path";
 
       const root = resolve(process.env.RELEASE_DIRECTORY);
@@ -851,13 +851,47 @@ verify_release_manifest() {
       if (manifest.archive?.packagedFiles !== allFiles.size + 1) {
         throw new Error("Candidate archive file count mismatch");
       }
+      const diskFiles = [];
+      const visit = (directory, relativeDirectory = "") => {
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+          const file = relativeDirectory
+            ? `${relativeDirectory}/${entry.name}`
+            : entry.name;
+          if (
+            file.includes("\\") ||
+            file.split("/").some((part) => part === "" || part === "." || part === "..")
+          ) {
+            throw new Error(`Unsafe candidate release entry: ${file}`);
+          }
+          const fullPath = resolve(directory, entry.name);
+          const stats = lstatSync(fullPath);
+          if (entry.isSymbolicLink() || stats.isSymbolicLink()) {
+            throw new Error(`Candidate release entry is symbolic: ${file}`);
+          }
+          if (entry.isDirectory() && stats.isDirectory()) {
+            visit(fullPath, file);
+          } else if (entry.isFile() && stats.isFile()) {
+            diskFiles.push(file);
+          } else {
+            throw new Error(`Candidate release entry is not regular: ${file}`);
+          }
+        }
+      };
+      visit(root);
+      const expectedDiskFiles = new Set([...allFiles, "release-manifest.json"]);
+      if (
+        diskFiles.length !== expectedDiskFiles.size ||
+        diskFiles.some((file) => !expectedDiskFiles.has(file))
+      ) {
+        throw new Error("Candidate release contains files outside the manifest inventory");
+      }
     '
 }
 
-freeze_candidate_release() {
+assert_candidate_release_frozen() {
   [[ "$mutation_started" -eq 0 && "$services_stopped" -eq 0 &&
     "$unit_install_started" -eq 0 && "$current_switched" -eq 0 ]] ||
-    fail "Candidate release must be frozen before production mutation"
+    fail "Candidate release immutability must be verified before production mutation"
 
   if find "$NEW_RELEASE" -type l -print -quit | grep -q .; then
     fail "Candidate release contains a symbolic link"
@@ -865,10 +899,6 @@ freeze_candidate_release() {
   if find "$NEW_RELEASE" -type f -links +1 -print -quit | grep -q .; then
     fail "Candidate release contains a hard-linked file"
   fi
-
-  chown -R root:root "$NEW_RELEASE"
-  find "$NEW_RELEASE" -type d -exec chmod go-w {} +
-  find "$NEW_RELEASE" -type f -exec chmod go-w {} +
 
   local entry metadata uid gid mode links file_type numeric_mode
   while IFS= read -r -d '' entry; do
@@ -1428,8 +1458,8 @@ main() {
   trap 'rollback_cutover 130' INT
   trap 'rollback_cutover 143' TERM
 
+  assert_candidate_release_frozen
   verify_release_manifest
-  freeze_candidate_release
   assert_project_services_ready "$OLD_RELEASE"
   assert_frontend_release_health "$OLD_RELEASE"
   capture_protected_snapshot "$PROTECTED_BEFORE"
