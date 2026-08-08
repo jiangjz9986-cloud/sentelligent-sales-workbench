@@ -722,6 +722,10 @@ function walkAllRegularFiles(root, current = root, files = [], rootRealPath) {
   for (const entry of readdirSync(current, { withFileTypes: true })) {
     const fullPath = join(current, entry.name);
     const relativePath = normalizeRelativePath(relative(root, fullPath));
+    // npm creates executable shims in node_modules/.bin as symbolic links on
+    // POSIX hosts. Services invoke approved binaries directly, so these
+    // platform-specific shims are not part of the immutable production tree.
+    if (relativePath.split("/").includes(".bin")) continue;
     const metadata = assertSafeReleaseTraversalPath(
       traversalRootRealPath,
       fullPath,

@@ -516,6 +516,12 @@ async function loadPreflightModule() {
     const module = await import("./production-preflight.mjs");
     return {
       ...module,
+      validateReleaseIdentity(options) {
+        return module.validateReleaseIdentity({
+          ...options,
+          enforcePosix: options?.enforcePosix ?? false,
+        });
+      },
       runProductionPreflight(options) {
         const servicePlan = JSON.parse(
           readFileSync(options.servicePlanPath, "utf8"),

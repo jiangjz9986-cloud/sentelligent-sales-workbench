@@ -1991,7 +1991,7 @@ describe("portable release package", () => {
       const fakeNpmCli = workspace.write(
         "fake-npm/bin/npm-cli.js",
         [
-          'import { mkdirSync, writeFileSync } from "node:fs";',
+          'import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";',
           'import { join } from "node:path";',
           'const args = process.argv.slice(2);',
           'if (args[0] === "--version") { console.log("10.9.7"); process.exit(0); }',
@@ -2000,6 +2000,7 @@ describe("portable release package", () => {
           'mkdirSync(packageRoot, { recursive: true });',
           'writeFileSync(join(packageRoot, "package.json"), "{\\"name\\":\\"production-only\\",\\"version\\":\\"1.0.0\\"}\\n");',
           'writeFileSync(join(packageRoot, "index.js"), "export const productionOnly = true;\\n");',
+          'if (process.platform !== "win32") { const binRoot = join(process.cwd(), "node_modules", ".bin"); mkdirSync(binRoot, { recursive: true }); symlinkSync("../production-only/index.js", join(binRoot, "production-only")); }',
           '',
         ].join("\n"),
       );
@@ -2026,6 +2027,18 @@ describe("portable release package", () => {
           assert.equal(
             result.manifest.productionDependencyHashes.files[dependencyPath],
             sha256("export const productionOnly = true;\n"),
+          );
+          assert.equal(
+            existsSync(
+              join(
+                packageRoot,
+                "backend",
+                "node_modules",
+                ".bin",
+                "production-only",
+              ),
+            ),
+            false,
           );
           assert.ok(
             !Object.hasOwn(result.manifest.sourceHashes.files, dependencyPath),

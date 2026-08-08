@@ -1304,7 +1304,10 @@ export function validateImmutableReleaseEntryMetadata(
   return uid === 0n && gid === 0n && (mode & 0o022n) === 0n;
 }
 
-function collectReleaseFiles(releaseDirectoryPath) {
+function collectReleaseFiles(
+  releaseDirectoryPath,
+  { enforcePosix = process.platform !== "win32" } = {},
+) {
   const requestedRoot = resolve(releaseDirectoryPath);
   const root = realpathSync.native(requestedRoot);
   if (normalizedNativePath(root) !== normalizedNativePath(requestedRoot)) {
@@ -1314,6 +1317,7 @@ function collectReleaseFiles(releaseDirectoryPath) {
   if (
     !validateImmutableReleaseEntryMetadata(rootMetadata, {
       directory: true,
+      enforcePosix,
     })
   ) {
     throw new Error("release root is not a directory");
@@ -1345,6 +1349,7 @@ function collectReleaseFiles(releaseDirectoryPath) {
         if (
           !validateImmutableReleaseEntryMetadata(metadata, {
             directory: true,
+            enforcePosix,
           })
         ) {
           throw new Error("release contains a mutable directory");
@@ -1354,6 +1359,7 @@ function collectReleaseFiles(releaseDirectoryPath) {
         if (
           !validateImmutableReleaseEntryMetadata(metadata, {
             directory: false,
+            enforcePosix,
           })
         ) {
           throw new Error("release contains a mutable or hard-linked file");
@@ -1401,7 +1407,11 @@ function sameFileHashes(expected, actual) {
   );
 }
 
-function verifyReleaseContents(manifest, releaseDirectoryPath) {
+function verifyReleaseContents(
+  manifest,
+  releaseDirectoryPath,
+  { enforcePosix = process.platform !== "win32" } = {},
+) {
   try {
     const buildSection = manifest.buildHashes;
     const migrationSection = manifest.migrationChecksums;
@@ -1436,7 +1446,9 @@ function verifyReleaseContents(manifest, releaseDirectoryPath) {
       };
     }
 
-    const { root, files } = collectReleaseFiles(releaseDirectoryPath);
+    const { root, files } = collectReleaseFiles(releaseDirectoryPath, {
+      enforcePosix,
+    });
     if (
       !files.includes(RELEASE_MANIFEST_FILE) ||
       manifest.archive.packagedFiles !== files.length
@@ -1514,6 +1526,7 @@ export function validateReleaseIdentity({
   releaseDirectoryPath,
   expectedCommit,
   servicePlan,
+  enforcePosix = process.platform !== "win32",
 } = {}) {
   if (!/^[a-f0-9]{40}$/.test(String(expectedCommit ?? ""))) {
     return {
@@ -1569,6 +1582,7 @@ export function validateReleaseIdentity({
   const releaseContents = verifyReleaseContents(
     manifest,
     releaseDirectoryPath ?? dirname(resolve(manifestPath)),
+    { enforcePosix },
   );
   if (!releaseContents.valid) return releaseContents;
 
