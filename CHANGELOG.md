@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-08
+
+### Sales decision reasoning budget
+
+- Raise the DeepSeek sales-decision completion budget from `6400` to `12000` tokens so reasoning-capable responses retain enough budget for the required `sales-decision-v1` JSON body.
+- Preserve the existing two-minute minimum model timeout, evidence guardrails, deterministic fallback, API contract, database schema, dependency set, and human-confirmed writeback boundary.
+- Record the production diagnosis without model content or credentials: the v0.4.3 smoke context intermittently returned HTTP 200 with empty `message.content`; a controlled `3000`-token run ended with `finish_reason=length`, while the same context completed at `6946` tokens under a `12000` limit.
+- Require a new immutable v0.4.4 release and fresh production evidence; the deployed v0.4.3 tree and its reports remain preserved and must not be edited in place.
+
 ## [0.4.3] - 2026-08-08
 
 ### CentOS 7 cutover compatibility
@@ -255,7 +264,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.4
 [0.4.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.3
 [0.4.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.2
 [0.4.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.1
