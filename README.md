@@ -8,16 +8,16 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前生产版本 | `v0.4.3` |
-| 生产提交 | `504fa81a30cf503b033385a950ff9d0af81778f2` |
-| 注释标签 | `v0.4.3`，创建于 `2026-08-08T16:19:11+08:00` |
-| GitHub Release | [森特智行 v0.4.3](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.3)，发布于 `2026-08-08T16:24:38+08:00` |
-| Release 归档 SHA-256 | `5d1bcb22d50b8343cbf117bddebca3fd52bc1098c0c228b7dbd6e207ffd69739` |
-| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_504fa81a30cf` |
-| 当前开发目标 | `v0.4.4`，分支 `codex/v0.4.4-model-token-budget` |
-| `v0.4.4` 状态 | 基于已部署的 `v0.4.3`，将销售决策推理型模型的 completion 预算从 `6400` 提升到 `12000`；业务 API、数据库迁移、依赖和用户工作流不变，正式状态以新 tag、GitHub Release 和生产证据为准 |
+| 当前生产版本 | `v0.4.4` |
+| 生产提交 | `6c90de28a5c0eea33c31fdd3a41966764167956f` |
+| 注释标签 | `v0.4.4` |
+| GitHub Release | [森特智行 v0.4.4](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.4) |
+| Release 归档 SHA-256 | `7c3c3cac77c20eb4a7d99125f2af0ef1f73505e19a75228a8841af5bb0e8803d` |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_6c90de28a5c0` |
+| 回滚 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_504fa81a30cf` |
+| `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-08` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选说明见 [v0.4.4 版本说明](docs/releases/v0.4.4.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-08` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.4.4 版本说明](docs/releases/v0.4.4.md)。
 
 ## 功能状态
 
@@ -147,6 +147,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 - [开发进度与路线图](docs/开发进度与路线图.md)
 - [开发日志](docs/开发日志.md)
 - [多设备开发与版本管理](docs/多设备开发与版本管理.md)
+- [v0.4.4 换机交接说明](docs/森特智行-v0.4.4-换机交接说明.md)
 - [发布与回滚操作手册](docs/发布与回滚操作手册.md)
 - [部署记录](docs/部署记录.md)
 - [正式交付验收手册](docs/正式交付验收手册.md)
