@@ -8,6 +8,8 @@ import { after, before, describe, it } from "node:test";
 
 import { createServer } from "vite";
 
+import { resolveStageStripBrowserTimeoutMs } from "./stage-strip-timeout.mjs";
+
 const chromePath = [
   process.env.CHROME_PATH,
   "C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -118,6 +120,7 @@ function waitForChildProcess(child, { timeoutMs, terminate, cleanup }) {
 }
 
 async function renderFixture(name) {
+  const browserTimeoutMs = resolveStageStripBrowserTimeoutMs();
   const userDataDir = mkdtempSync(join(tmpdir(), "stage-strip-test-"));
   const cleanup = () => rmSync(userDataDir, {
     force: true,
@@ -147,7 +150,7 @@ async function renderFixture(name) {
   }
 
   const completion = waitForChildProcess(browser, {
-    timeoutMs: 20_000,
+    timeoutMs: browserTimeoutMs,
     cleanup,
     terminate: () => terminateChildProcess(browser),
   });
