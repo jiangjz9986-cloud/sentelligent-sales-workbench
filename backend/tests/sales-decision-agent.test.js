@@ -182,7 +182,7 @@ describe("sales decision agent v1", () => {
     assert.match(user.content, /数据中心升级项目/);
   });
 
-  it("allocates enough completion tokens for a reasoning-capable structured response", async () => {
+  it("allocates enough reasoning and JSON completion tokens for a structured response", async () => {
     const context = baseContext();
     let requestBody;
 
@@ -202,7 +202,7 @@ describe("sales decision agent v1", () => {
       },
     );
 
-    assert.equal(requestBody.max_tokens, 6400);
+    assert.equal(requestBody.max_tokens, 12_000);
   });
 
   it("falls back safely when the configured model returns invalid JSON", async () => {
