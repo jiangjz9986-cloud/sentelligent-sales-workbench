@@ -28,7 +28,7 @@
     "test:polish": "node --test scripts/interaction-polish.test.mjs",
     "test:readonly": "node --test scripts/readonly-detail-actions.test.mjs",
     "test:favicon": "node --test scripts/favicon-asset.test.mjs",
-    "test:stage-strip": "node --test scripts/stage-strip-data.test.mjs",
+    "test:stage-strip": "node --test scripts/stage-strip-timeout.test.mjs scripts/stage-strip-data.test.mjs",
     "test:visual": "node --test scripts/visual-rhythm.test.mjs",
     "test:modules": "node --test scripts/module-coverage.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",
