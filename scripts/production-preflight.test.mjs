@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   fstatSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -139,6 +141,19 @@ function validEnvironment(origin, databaseUrl) {
     invoicePdfTextCommand,
     invoiceOcrLanguages,
   };
+}
+
+function hardenReleaseFixturePermissions(root) {
+  if (process.platform === "win32") return;
+  const visit = (directoryPath) => {
+    chmodSync(directoryPath, 0o755);
+    for (const entry of readdirSync(directoryPath, { withFileTypes: true })) {
+      const entryPath = join(directoryPath, entry.name);
+      if (entry.isDirectory()) visit(entryPath);
+      else if (entry.isFile()) chmodSync(entryPath, 0o644);
+    }
+  };
+  visit(root);
 }
 
 function validLegacyServiceSnapshot() {
@@ -453,6 +468,7 @@ function makeReleaseFixture({ commit = expectedReleaseCommit } = {}) {
     "release/release-manifest.json",
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
+  hardenReleaseFixturePermissions(releaseDirectoryPath);
   return {
     manifest,
     manifestPath: `${immutableReleaseRoot}/release-manifest.json`,

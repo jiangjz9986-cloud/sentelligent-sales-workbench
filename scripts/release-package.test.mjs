@@ -13,7 +13,6 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -241,25 +240,6 @@ function copyTrackedProject(sourceRoot, destinationRoot) {
     join(destinationRoot, productDist),
   );
 
-  const sourceDependencies = join(
-    sourceRoot,
-    "outputs",
-    "product-design-prototype",
-    "node_modules",
-  );
-  const destinationDependencies = join(
-    destinationRoot,
-    "outputs",
-    "product-design-prototype",
-    "node_modules",
-  );
-  if (existsSync(sourceDependencies)) {
-    symlinkSync(
-      sourceDependencies,
-      destinationDependencies,
-      process.platform === "win32" ? "junction" : "dir",
-    );
-  }
 }
 
 async function withEnvironmentVariable(name, value, callback) {
