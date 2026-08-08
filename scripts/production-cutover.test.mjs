@@ -1029,7 +1029,7 @@ describe("controlled production cutover", () => {
     );
   });
 
-  it("accepts the hardened production unit surface and isolates environment files", () => {
+  it("accepts the hardened CentOS 7 unit surface while rejecting enabled DynamicUser", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-surface-"));
     const fakeBin = join(root, "bin");
     try {
@@ -1039,29 +1039,27 @@ describe("controlled production cutover", () => {
         fakeSystemctl,
         `#!/bin/sh
 service="$2"
-property="\${3#--property=}"
-output_property="$property"
-case "$property" in
-  PrivateTmp) value=yes ;;
-  PrivateDevices|DynamicUser) value=no ;;
-  ProtectSystem|ProtectHome) value=no ;;
-  Environment)
-    if [ "$service" = "sentelligent-weixin-agent.service" ]; then value='HOME=/opt/sentelligent-sales-workbench/weixin-session'; else value=''; fi
-    ;;
-  EnvironmentFiles)
-    output_property=EnvironmentFile
-    case "$service" in
-      sentelligent-backend.service|sentelligent-weixin-agent.service) value='/opt/sentelligent-sales-workbench/config/backend.env (ignore_errors=no)' ;;
-      sentelligent-frontend.service) value='/opt/sentelligent-sales-workbench/config/frontend.env (ignore_errors=no)' ;;
-      *) value='' ;;
-    esac
-    if [ "\${INJECT_EXTRA_ENV_FILE:-}" = "1" ]; then
-      value="$value /tmp/unapproved.env (ignore_errors=no)"
-    fi
-    ;;
+if [ "$#" -ne 2 ]; then
+  exit 64
+fi
+printf 'ProtectSystem=no\\nProtectHome=no\\nPrivateTmp=yes\\nPrivateDevices=no\\n'
+if [ -n "\${INJECT_DYNAMIC_USER:-}" ]; then
+  printf 'DynamicUser=%s\\n' "$INJECT_DYNAMIC_USER"
+fi
+if [ "$service" = "sentelligent-weixin-agent.service" ]; then
+  printf 'Environment=HOME=/opt/sentelligent-sales-workbench/weixin-session\\n'
+else
+  printf 'Environment=\\n'
+fi
+case "$service" in
+  sentelligent-backend.service|sentelligent-weixin-agent.service) value='/opt/sentelligent-sales-workbench/config/backend.env (ignore_errors=no)' ;;
+  sentelligent-frontend.service) value='/opt/sentelligent-sales-workbench/config/frontend.env (ignore_errors=no)' ;;
   *) value='' ;;
 esac
-printf '%s=%s\\n' "$output_property" "$value"
+if [ "\${INJECT_EXTRA_ENV_FILE:-}" = "1" ]; then
+  value="$value /tmp/unapproved.env (ignore_errors=no)"
+fi
+printf 'EnvironmentFile=%s\\n' "$value"
 `,
         "utf8",
       );
@@ -1073,6 +1071,21 @@ printf '%s=%s\\n' "$output_property" "$value"
       );
 
       assert.equal(result.status, 0, outputOf(result));
+
+      const dynamicUser = sourceAndRun(
+        "assert_clean_systemd_execution_surface sentelligent-backend.service",
+        {
+          env: {
+            INJECT_DYNAMIC_USER: "yes",
+            PATH: `${toBashPath(fakeBin)}:/usr/bin:/bin`,
+          },
+        },
+      );
+      assert.notEqual(
+        dynamicUser.status,
+        0,
+        "accepted DynamicUser=yes on a project service",
+      );
 
       for (const service of [
         "sentelligent-backend.service",
