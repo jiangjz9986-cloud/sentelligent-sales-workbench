@@ -1001,6 +1001,75 @@ describe("controlled production cutover", () => {
     );
   });
 
+  it("accepts the hardened production unit surface and isolates environment files", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-surface-"));
+    const fakeBin = join(root, "bin");
+    try {
+      mkdirSync(fakeBin, { recursive: true });
+      const fakeSystemctl = join(fakeBin, "systemctl");
+      writeFileSync(
+        fakeSystemctl,
+        `#!/bin/sh
+service="$2"
+property="\${3#--property=}"
+output_property="$property"
+case "$property" in
+  PrivateTmp) value=yes ;;
+  PrivateDevices|DynamicUser) value=no ;;
+  ProtectSystem|ProtectHome) value=no ;;
+  Environment)
+    if [ "$service" = "sentelligent-weixin-agent.service" ]; then value='HOME=/opt/sentelligent-sales-workbench/weixin-session'; else value=''; fi
+    ;;
+  EnvironmentFiles)
+    output_property=EnvironmentFile
+    case "$service" in
+      sentelligent-backend.service|sentelligent-weixin-agent.service) value='/opt/sentelligent-sales-workbench/config/backend.env (ignore_errors=no)' ;;
+      sentelligent-frontend.service) value='/opt/sentelligent-sales-workbench/config/frontend.env (ignore_errors=no)' ;;
+      *) value='' ;;
+    esac
+    if [ "\${INJECT_EXTRA_ENV_FILE:-}" = "1" ]; then
+      value="$value /tmp/unapproved.env (ignore_errors=no)"
+    fi
+    ;;
+  *) value='' ;;
+esac
+printf '%s=%s\\n' "$output_property" "$value"
+`,
+        "utf8",
+      );
+      chmodSync(fakeSystemctl, 0o755);
+
+      const result = sourceAndRun(
+        "assert_clean_systemd_execution_surface sentelligent-frontend.service && assert_clean_systemd_execution_surface sentelligent-weixin-agent.service",
+        { env: { PATH: `${toBashPath(fakeBin)}:/usr/bin:/bin` } },
+      );
+
+      assert.equal(result.status, 0, outputOf(result));
+
+      for (const service of [
+        "sentelligent-backend.service",
+        "sentelligent-frontend.service",
+      ]) {
+        const injected = sourceAndRun(
+          `assert_clean_systemd_execution_surface ${service}`,
+          {
+            env: {
+              INJECT_EXTRA_ENV_FILE: "1",
+              PATH: `${toBashPath(fakeBin)}:/usr/bin:/bin`,
+            },
+          },
+        );
+        assert.notEqual(
+          injected.status,
+          0,
+          `${service} accepted an additional EnvironmentFile`,
+        );
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("implements fail-closed maintenance, offline backups, atomic current, and rollback", () => {
     for (const required of [
       /\.maintenance-lock/,

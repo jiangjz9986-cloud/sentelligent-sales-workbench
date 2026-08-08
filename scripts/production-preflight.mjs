@@ -381,7 +381,7 @@ export function inspectInvoiceExtractionTools(
     !isRecord(backendService) ||
     typeof backendService.user !== "string" ||
     backendService.dynamicUser !== false ||
-    backendService.group !== "" ||
+    !["", backendService.user].includes(backendService.group) ||
     !Array.isArray(backendService.supplementaryGroups) ||
     backendService.supplementaryGroups.length !== 0 ||
     !isRecord(request.ocr) ||
@@ -465,7 +465,7 @@ export function inspectInvoiceExtractionTools(
     successfulToolRun(pdfVersion) &&
     /^pdftotext version\s+\d/iu.test(`${pdfVersion.stdout}\n${pdfVersion.stderr}`.trim());
   const availableLanguages = successfulToolRun(ocrLanguages)
-    ? listedTesseractLanguages(ocrLanguages.stdout)
+    ? listedTesseractLanguages(`${ocrLanguages.stdout}\n${ocrLanguages.stderr}`)
     : new Set();
 
   return {
@@ -1306,7 +1306,10 @@ export function validateImmutableReleaseEntryMetadata(
 
 function collectReleaseFiles(
   releaseDirectoryPath,
-  { enforcePosix = process.platform !== "win32" } = {},
+  {
+    enforcePosix = process.platform !== "win32",
+    allowLegacyOwnership = false,
+  } = {},
 ) {
   const requestedRoot = resolve(releaseDirectoryPath);
   const root = realpathSync.native(requestedRoot);
@@ -1314,12 +1317,16 @@ function collectReleaseFiles(
     throw new Error("release root or one of its ancestors is redirected");
   }
   const rootMetadata = lstatSync(root, { bigint: true });
-  if (
-    !validateImmutableReleaseEntryMetadata(rootMetadata, {
-      directory: true,
-      enforcePosix,
-    })
-  ) {
+  const validRoot = validateImmutableReleaseEntryMetadata(rootMetadata, {
+    directory: true,
+    enforcePosix,
+  });
+  const validLegacyRoot =
+    allowLegacyOwnership &&
+    rootMetadata.isDirectory() &&
+    !rootMetadata.isSymbolicLink() &&
+    (rootMetadata.mode & 0o022n) === 0n;
+  if (!validRoot && !validLegacyRoot) {
     throw new Error("release root is not a directory");
   }
   const files = [];
@@ -1346,22 +1353,26 @@ function collectReleaseFiles(
       }
       const metadata = lstatSync(filePath, { bigint: true });
       if (entry.isDirectory()) {
-        if (
-          !validateImmutableReleaseEntryMetadata(metadata, {
-            directory: true,
-            enforcePosix,
-          })
-        ) {
+        const validDirectory = validateImmutableReleaseEntryMetadata(metadata, {
+          directory: true,
+          enforcePosix,
+        });
+        const validLegacyDirectory =
+          allowLegacyOwnership && (metadata.mode & 0o022n) === 0n;
+        if (!validDirectory && !validLegacyDirectory) {
           throw new Error("release contains a mutable directory");
         }
         visit(filePath, relativePath);
       } else if (entry.isFile()) {
-        if (
-          !validateImmutableReleaseEntryMetadata(metadata, {
-            directory: false,
-            enforcePosix,
-          })
-        ) {
+        const validFile = validateImmutableReleaseEntryMetadata(metadata, {
+          directory: false,
+          enforcePosix,
+        });
+        const validLegacyFile =
+          allowLegacyOwnership &&
+          metadata.nlink === 1n &&
+          (metadata.mode & 0o022n) === 0n;
+        if (!validFile && !validLegacyFile) {
           throw new Error("release contains a mutable or hard-linked file");
         }
         files.push(relativePath);
@@ -1520,6 +1531,92 @@ function verifyReleaseContents(
   }
 }
 
+function verifyLegacyReleaseContents(
+  manifest,
+  releaseDirectoryPath,
+  { enforcePosix = process.platform !== "win32" } = {},
+) {
+  try {
+    const buildSection = manifest.buildHashes;
+    const migrationSection = manifest.migrationChecksums;
+    const sourceSection = manifest.sourceHashes;
+    if (
+      !validHashSection(buildSection, (file) =>
+        file.startsWith(RELEASE_BUILD_PREFIX),
+      ) ||
+      !validHashSection(migrationSection, (file) =>
+        file.startsWith(RELEASE_MIGRATION_PREFIX),
+      ) ||
+      !validHashSection(sourceSection, (file) =>
+        file !== RELEASE_MANIFEST_FILE &&
+        !file.startsWith(RELEASE_BUILD_PREFIX),
+      )
+    ) {
+      return { valid: false, message: "Legacy release manifest hash sections are invalid." };
+    }
+    const { root, files } = collectReleaseFiles(releaseDirectoryPath, {
+      enforcePosix,
+      allowLegacyOwnership: true,
+    });
+    if (
+      !files.includes(RELEASE_MANIFEST_FILE) ||
+      manifest.archive?.packagedFiles !== files.length
+    ) {
+      return {
+        valid: false,
+        message: "Legacy release manifest packaged file count does not match the release directory.",
+      };
+    }
+    const packagedFiles = new Set(files.filter((file) => file !== RELEASE_MANIFEST_FILE));
+    const expectedFiles = new Set([
+      ...Object.keys(buildSection.files),
+      ...Object.keys(migrationSection.files),
+      ...Object.keys(sourceSection.files),
+    ]);
+    const unexpectedFiles = [...packagedFiles].filter(
+      (file) => !expectedFiles.has(file) && !file.startsWith("backend/node_modules/"),
+    );
+    if (unexpectedFiles.length > 0) {
+      return { valid: false, message: "Legacy release contains files outside its verified hash inventory." };
+    }
+    const hashFor = (file) =>
+      readStableRegularFile(resolve(root, ...file.split("/")), {
+        label: `legacy release file ${file}`,
+      }).sha256;
+    const actualBuild = Object.fromEntries(
+      Object.keys(buildSection.files).map((file) => [file, hashFor(file)]),
+    );
+    const actualMigration = Object.fromEntries(
+      Object.keys(migrationSection.files).map((file) => [file, hashFor(file)]),
+    );
+    const actualSource = Object.fromEntries(
+      Object.keys(sourceSection.files).map((file) => [file, hashFor(file)]),
+    );
+    if (
+      !sameFileHashes(buildSection.files, actualBuild) ||
+      !sameFileHashes(migrationSection.files, actualMigration) ||
+      !sameFileHashes(sourceSection.files, actualSource) ||
+      !Object.hasOwn(actualSource, "backend/src/server.js") ||
+      !Object.hasOwn(actualSource, "backend/src/weixin/worker.js") ||
+      !Object.hasOwn(actualSource, "outputs/product-design-prototype/scripts/static-server.mjs")
+    ) {
+      return { valid: false, message: "Legacy release file hashes do not match the manifest inventory." };
+    }
+    if (
+      sourceSection.treeSha256 &&
+      sourceSection.treeSha256 !== sourceTreeSha256(actualSource)
+    ) {
+      return { valid: false, message: "Legacy release source tree hash does not match the manifest inventory." };
+    }
+    return { valid: true };
+  } catch {
+    return {
+      valid: false,
+      message: "Legacy release directory could not be read as a complete regular-file package.",
+    };
+  }
+}
+
 export function validateReleaseIdentity({
   manifest,
   manifestPath,
@@ -1527,6 +1624,8 @@ export function validateReleaseIdentity({
   expectedCommit,
   servicePlan,
   enforcePosix = process.platform !== "win32",
+  allowLegacyCurrent = false,
+  currentReleasePath = "",
 } = {}) {
   if (!/^[a-f0-9]{40}$/.test(String(expectedCommit ?? ""))) {
     return {
@@ -1540,10 +1639,6 @@ export function validateReleaseIdentity({
       message: "Release manifest source commit must exactly match the expected commit.",
     };
   }
-  const shapeError = manifestShapeError(manifest, expectedCommit);
-  if (shapeError !== null) {
-    return { valid: false, message: shapeError };
-  }
   const releasePath = immutableReleaseRoot(manifestPath);
   if (releasePath === null) {
     return {
@@ -1551,6 +1646,28 @@ export function validateReleaseIdentity({
       message:
         "Release manifest must resolve to /opt/sentelligent-sales-workbench/releases/<safe-id>/release-manifest.json.",
     };
+  }
+  const legacyCurrent =
+    allowLegacyCurrent &&
+    manifest.schemaVersion === 2 &&
+    currentReleasePath === releasePath;
+  if (!legacyCurrent) {
+    const shapeError = manifestShapeError(manifest, expectedCommit);
+    if (shapeError !== null) {
+      return { valid: false, message: shapeError };
+    }
+  } else if (
+    manifest.product !== RELEASE_PRODUCT ||
+    !isRecord(manifest.source) ||
+    manifest.source.commit !== expectedCommit ||
+    manifest.source.clean !== true ||
+    !isRecord(manifest.archive) ||
+    manifest.archive.format !== "tar.gz" ||
+    manifest.archive.rootDirectory !==
+      `${RELEASE_PRODUCT}-${expectedCommit.slice(0, 12)}` ||
+    !Number.isSafeInteger(manifest.archive.packagedFiles)
+  ) {
+    return { valid: false, message: "Legacy current release identity is incomplete." };
   }
 
   const services = Array.isArray(servicePlan?.projectServices)
@@ -1579,7 +1696,7 @@ export function validateReleaseIdentity({
     }
   }
 
-  const releaseContents = verifyReleaseContents(
+  const releaseContents = (legacyCurrent ? verifyLegacyReleaseContents : verifyReleaseContents)(
     manifest,
     releaseDirectoryPath ?? dirname(resolve(manifestPath)),
     { enforcePosix },
@@ -1723,9 +1840,7 @@ const EMPTY_SYSTEMD_ARRAY_FIELDS = Object.freeze([
   "ExecStartPre",
   "ExecStartPost",
   "ExecStop",
-  "ExecReload",
   "DropInPaths",
-  "Environment",
   "BindPaths",
   "BindReadOnlyPaths",
   "ReadWritePaths",
@@ -1746,9 +1861,50 @@ export function validateSystemdExecutionSurface(service) {
     service.RootImage !== "" ||
     service.ProtectSystem !== "no" ||
     service.ProtectHome !== "no" ||
-    service.PrivateTmp !== false ||
+    (service.name === "sentelligent-caddy.service"
+      ? service.PrivateTmp !== false
+      : service.PrivateTmp !== true) ||
     service.PrivateDevices !== false ||
     !Array.isArray(service.EnvironmentFiles)
+  ) {
+    return false;
+  }
+  const reloads = Array.isArray(service.ExecReload) ? service.ExecReload : null;
+  if (reloads === null) return false;
+  if (service.name === "sentelligent-caddy.service") {
+    const allowedReloads = new Set([
+      "/usr/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force",
+      "/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force",
+    ]);
+    const reload = reloads[0] ?? "";
+    const structuredReload = reload.match(
+      /^\{ path=(\/usr\/(?:local\/)?bin\/caddy) ; argv\[\]=(.+?) ; ignore_errors=no ; .* \}$/u,
+    );
+    if (
+      reloads.length !== 1 ||
+      (!allowedReloads.has(reload) &&
+        !(structuredReload &&
+          allowedReloads.has(`${structuredReload[1]} ${structuredReload[2]}`)))
+    ) {
+      return false;
+    }
+  } else if (reloads.length !== 0) {
+    return false;
+  }
+  const environment = Array.isArray(service.Environment)
+    ? service.Environment
+    : null;
+  const expectedEnvironment =
+    service.name === "sentelligent-weixin-agent.service"
+      ? ["HOME=/opt/sentelligent-sales-workbench/weixin-session"]
+      : service.name === "sentelligent-caddy.service"
+        ? [
+            "HOME=/var/lib/caddy XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/etc/caddy",
+          ]
+        : [];
+  if (
+    environment === null ||
+    JSON.stringify(environment) !== JSON.stringify(expectedEnvironment)
   ) {
     return false;
   }
@@ -1759,6 +1915,19 @@ export function validateSystemdExecutionSurface(service) {
     return (
       typeof service.EnvironmentFile === "string" &&
       service.EnvironmentFile.length > 0 &&
+      service.EnvironmentFiles.length === 1 &&
+      service.EnvironmentFiles[0] === service.EnvironmentFile
+    );
+  }
+  if (service.name === "sentelligent-frontend.service") {
+    if (
+      typeof service.EnvironmentFile !== "string" ||
+      !service.EnvironmentFile.endsWith("/config/frontend.env") ||
+      service.EnvironmentFile.includes("/backend.env")
+    ) {
+      return false;
+    }
+    return (
       service.EnvironmentFiles.length === 1 &&
       service.EnvironmentFiles[0] === service.EnvironmentFile
     );
@@ -1981,12 +2150,20 @@ export async function runProductionPreflight({
   const servicePlanResult = safeReadServicePlan(servicePlanPath);
   const servicePlan = servicePlanResult.value;
   const releaseManifestResult = safeReadReleaseManifest(releaseManifestPath);
+  let currentReleasePath = "";
+  try {
+    currentReleasePath = realpathSync.native(PROJECT_CURRENT_PATH);
+  } catch {
+    currentReleasePath = "";
+  }
   const releaseIdentity = releaseManifestResult.error === null
     ? validateReleaseIdentity({
         manifest: releaseManifestResult.value,
         manifestPath: releaseManifestResult.manifestPath,
         expectedCommit,
         servicePlan,
+        allowLegacyCurrent: true,
+        currentReleasePath,
       })
     : {
         valid: false,

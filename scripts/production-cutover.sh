@@ -326,8 +326,16 @@ validate_arguments() {
 systemctl_property() {
   local service=$1
   local property=$2
-  systemctl show "$service" "--property=$property" |
-    sed -n "s/^${property}=//p"
+  if [[ "$property" == "EnvironmentFiles" ]]; then
+    # CentOS 7 systemd accepts the plural property selector but emits the
+    # legacy singular key. Read both spellings; duplicate output remains a
+    # newline-delimited value and is rejected by the exact checks below.
+    systemctl show "$service" "--property=$property" |
+      sed -n -e 's/^EnvironmentFiles=//p' -e 's/^EnvironmentFile=//p'
+  else
+    systemctl show "$service" "--property=$property" |
+      sed -n "s/^${property}=//p"
+  fi
 }
 
 assert_clean_systemd_execution_surface() {
@@ -335,7 +343,7 @@ assert_clean_systemd_execution_surface() {
   local property value
   local -a empty_properties=(
     ExecCondition ExecStartPre ExecStartPost ExecStop ExecReload DropInPaths
-    Environment RootDirectory RootImage BindPaths BindReadOnlyPaths
+    RootDirectory RootImage BindPaths BindReadOnlyPaths
     ReadWritePaths ReadOnlyPaths InaccessiblePaths ExecPaths NoExecPaths
     TemporaryFileSystem
   )
@@ -350,18 +358,30 @@ assert_clean_systemd_execution_surface() {
     [[ "$value" == "no" ]] ||
       fail "$service has an unexpected systemd $property value"
   done
-  for property in PrivateTmp PrivateDevices DynamicUser; do
+  value="$(systemctl_property "$service" PrivateTmp)"
+  [[ "$value" == "yes" ]] ||
+    fail "$service has an unexpected systemd PrivateTmp value"
+  for property in PrivateDevices DynamicUser; do
     value="$(systemctl_property "$service" "$property")"
     [[ "$value" == "no" ]] ||
       fail "$service has an unexpected systemd $property value"
   done
 
+  value="$(systemctl_property "$service" Environment)"
+  if [[ "$service" == "sentelligent-weixin-agent.service" ]]; then
+    [[ "$value" == "HOME=$PROJECT_ROOT/weixin-session" ]] ||
+      fail "$service has an unexpected systemd Environment assignment"
+  else
+    [[ -z "$value" ]] ||
+      fail "$service has an unexpected systemd Environment assignment"
+  fi
+
   value="$(systemctl_property "$service" EnvironmentFiles)"
   if [[ "$service" == "sentelligent-frontend.service" ]]; then
-    [[ -z "$value" ]] ||
-      fail "$service must not consume the private backend environment"
+    [[ "$value" == "$PROJECT_ROOT/config/frontend.env (ignore_errors=no)" ]] ||
+      fail "$service must consume only the public frontend environment"
   else
-    [[ -n "$value" && "$value" != *$'\n'* ]] ||
+    [[ "$value" == "$PROJECT_ROOT/config/backend.env (ignore_errors=no)" ]] ||
       fail "$service must identify exactly one production EnvironmentFile"
   fi
 }

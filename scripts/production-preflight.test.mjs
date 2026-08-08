@@ -193,10 +193,35 @@ function validLegacyServiceSnapshot() {
       ExecStartPre: [],
       ExecStartPost: [],
       ExecStop: [],
-      ExecReload: [],
+      ExecReload:
+        name === "sentelligent-caddy.service"
+          ? [
+              "/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force",
+            ]
+          : [],
       DropInPaths: [],
-      Environment: [],
-      EnvironmentFiles: [],
+      Environment:
+        name === "sentelligent-weixin-agent.service"
+          ? [`HOME=${projectRoot}/weixin-session`]
+          : name === "sentelligent-caddy.service"
+            ? [
+                "HOME=/var/lib/caddy XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/etc/caddy",
+              ]
+            : [],
+      EnvironmentFile:
+        name === "sentelligent-frontend.service"
+          ? `${projectRoot}/config/frontend.env`
+          : name === "sentelligent-backend.service" ||
+              name === "sentelligent-weixin-agent.service"
+            ? `${projectRoot}/config/backend.env`
+            : "",
+      EnvironmentFiles:
+        name === "sentelligent-frontend.service"
+          ? [`${projectRoot}/config/frontend.env`]
+          : name === "sentelligent-backend.service" ||
+              name === "sentelligent-weixin-agent.service"
+            ? [`${projectRoot}/config/backend.env`]
+            : [],
       RootDirectory: "",
       RootImage: "",
       BindPaths: [],
@@ -209,7 +234,7 @@ function validLegacyServiceSnapshot() {
       TemporaryFileSystem: [],
       ProtectSystem: "no",
       ProtectHome: "no",
-      PrivateTmp: false,
+      PrivateTmp: name === "sentelligent-caddy.service" ? false : true,
       PrivateDevices: false,
     })),
     unrelatedServices: [
@@ -574,6 +599,73 @@ async function loadPreflightModule() {
 }
 
 describe("production preflight", () => {
+  it("accepts the hardened project unit execution surface without backend-env leakage", async () => {
+    const { validateSystemdExecutionSurface } = await loadPreflightModule();
+    const plan = validLegacyServiceSnapshot();
+    const backend = plan.projectServices.find(
+      ({ name }) => name === "sentelligent-backend.service",
+    );
+    const frontend = plan.projectServices.find(
+      ({ name }) => name === "sentelligent-frontend.service",
+    );
+    const weixin = plan.projectServices.find(
+      ({ name }) => name === "sentelligent-weixin-agent.service",
+    );
+    for (const service of [backend, frontend, weixin]) service.PrivateTmp = true;
+    frontend.EnvironmentFile = "/opt/sentelligent-sales-workbench/config/frontend.env";
+    frontend.EnvironmentFiles = [frontend.EnvironmentFile];
+    backend.EnvironmentFile = "/opt/sentelligent-sales-workbench/config/backend.env";
+    backend.EnvironmentFiles = [backend.EnvironmentFile];
+    weixin.EnvironmentFile = backend.EnvironmentFile;
+    weixin.EnvironmentFiles = [backend.EnvironmentFile];
+    weixin.Environment = [
+      "HOME=/opt/sentelligent-sales-workbench/weixin-session",
+    ];
+
+    assert.equal(validateSystemdExecutionSurface(backend), true);
+    assert.equal(validateSystemdExecutionSurface(frontend), true);
+    assert.equal(validateSystemdExecutionSurface(weixin), true);
+  });
+
+  it("accepts an explicitly pinned service primary group when probing invoice tools", async () => {
+    const { inspectInvoiceExtractionTools } = await loadPreflightModule();
+    const result = inspectInvoiceExtractionTools(
+      {
+        backendService: {
+          user: "sentzx",
+          group: "sentzx",
+          supplementaryGroups: [],
+          dynamicUser: false,
+        },
+        ocr: { command: "/usr/bin/tesseract", requiredLanguages: ["chi_sim", "eng"] },
+        pdfText: { command: "/usr/bin/pdftotext" },
+      },
+      {
+        inspectSecureExecutable: (path) => ({
+          regularFile: true,
+          secureOwnership: true,
+          resolvedPath: path,
+        }),
+        runAsServiceUser: ({ command, args }) => {
+          if (command === "/usr/bin/test") return { status: 0, stdout: "", stderr: "" };
+          if (command === "/usr/bin/tesseract" && args?.[0] === "--version") {
+            return { status: 0, stdout: "tesseract 3.04.00", stderr: "" };
+          }
+          if (command === "/usr/bin/tesseract" && args?.[0] === "--list-langs") {
+            return { status: 0, stdout: "", stderr: "List of available languages (2):\neng\nchi_sim\n" };
+          }
+          if (command === "/usr/bin/pdftotext") {
+            return { status: 0, stdout: "", stderr: "pdftotext version 0.26.5" };
+          }
+          return { status: 1, stdout: "", stderr: "" };
+        },
+      },
+    );
+    assert.equal(result.serviceIdentityResolved, true);
+    assert.equal(result.ocr.requiredLanguagesAvailable, true);
+    assert.equal(result.pdfText.identity, "poppler-pdftotext");
+  });
+
   it("keeps all core checks compatible while failing a release without identity evidence", async () => {
     const workspace = makeWorkspace();
     try {
@@ -1328,6 +1420,29 @@ describe("production preflight", () => {
       }
     } finally {
       workspace.cleanup();
+    }
+  });
+
+  it("allows a legacy schema-2 manifest only for the pre-cutover current release", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const legacyManifest = structuredClone(fixture.manifest);
+      legacyManifest.schemaVersion = 2;
+      delete legacyManifest.buildProvenance;
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const result = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        enforcePosix: false,
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(result.valid, true, result.message);
+    } finally {
+      fixture.cleanup();
     }
   });
 
