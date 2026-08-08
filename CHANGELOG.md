@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-08
+
+### CentOS 7 cutover compatibility
+
+- Read each project unit through one complete `systemctl show <service>` snapshot before extracting the allowlisted properties, avoiding CentOS 7 failures on single-property selectors for newer systemd fields.
+- Treat an absent `DynamicUser` field on systemd 219 as unsupported and therefore disabled, while continuing to reject `DynamicUser=yes` or any unknown value.
+- Continue accepting the legacy singular `EnvironmentFile=` output key while rejecting missing, duplicate, or additional environment bindings.
+- Preserve every v0.4.2 release-integrity, immutable-ownership, database, service-scope, rollback, and protected-service gate; this patch does not change business APIs, database migrations, or user-facing workflows.
+- Require a new immutable v0.4.3 release and fresh production evidence; the staged v0.4.2 candidate and its preflight evidence are not reusable.
+
 ## [0.4.2] - 2026-08-08
 
 ### Production preflight hardening
@@ -245,7 +255,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.3
 [0.4.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.2
 [0.4.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.0

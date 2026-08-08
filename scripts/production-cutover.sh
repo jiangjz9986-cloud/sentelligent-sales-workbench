@@ -326,14 +326,16 @@ validate_arguments() {
 systemctl_property() {
   local service=$1
   local property=$2
+  local snapshot
+  snapshot="$(systemctl show "$service")"
   if [[ "$property" == "EnvironmentFiles" ]]; then
-    # CentOS 7 systemd accepts the plural property selector but emits the
-    # legacy singular key. Read both spellings; duplicate output remains a
-    # newline-delimited value and is rejected by the exact checks below.
-    systemctl show "$service" "--property=$property" |
+    # CentOS 7 rejects selectors for newer properties and emits the legacy
+    # singular EnvironmentFile key. Parse one complete successful snapshot;
+    # duplicate spellings remain newline-delimited and fail the exact checks.
+    printf '%s\n' "$snapshot" |
       sed -n -e 's/^EnvironmentFiles=//p' -e 's/^EnvironmentFile=//p'
   else
-    systemctl show "$service" "--property=$property" |
+    printf '%s\n' "$snapshot" |
       sed -n "s/^${property}=//p"
   fi
 }
@@ -361,11 +363,12 @@ assert_clean_systemd_execution_surface() {
   value="$(systemctl_property "$service" PrivateTmp)"
   [[ "$value" == "yes" ]] ||
     fail "$service has an unexpected systemd PrivateTmp value"
-  for property in PrivateDevices DynamicUser; do
-    value="$(systemctl_property "$service" "$property")"
-    [[ "$value" == "no" ]] ||
-      fail "$service has an unexpected systemd $property value"
-  done
+  value="$(systemctl_property "$service" PrivateDevices)"
+  [[ "$value" == "no" ]] ||
+    fail "$service has an unexpected systemd PrivateDevices value"
+  value="$(systemctl_property "$service" DynamicUser)"
+  [[ -z "$value" || "$value" == "no" ]] ||
+    fail "$service has an unexpected systemd DynamicUser value"
 
   value="$(systemctl_property "$service" Environment)"
   if [[ "$service" == "sentelligent-weixin-agent.service" ]]; then
