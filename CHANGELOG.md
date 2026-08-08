@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-08
+
+### Production hardening
+
+- Corrected the production service-surface contract to accept the existing `PrivateTmp=true` hardening, the isolated public `frontend.env`, and the fixed non-secret WeChat `HOME` assignment.
+- Added CentOS 7 compatibility for the singular `EnvironmentFile=` key emitted by `systemctl show`, while requiring one exact environment file per service.
+- Kept backend/weixin environment binding strict and continued rejecting backend credentials from the frontend or unexpected systemd execution surfaces.
+- Added regression coverage for the real CentOS 7 unit contract before the patch release.
+
 ## [0.4.0] - 2026-08-08
 
 ### 新增
@@ -227,7 +236,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.1
 [0.4.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.0
 [0.3.6]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.6
 [0.3.5]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.3.5
