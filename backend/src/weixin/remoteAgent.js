@@ -33,7 +33,21 @@ function optionalIdentifier(value, name, max = 500) {
 function normalizeBackendUrl(value) {
   const url = String(value ?? "").trim().replace(/\/+$/u, "");
   if (!url) throw new RemoteAgentError("REMOTE_AGENT_NOT_CONFIGURED");
-  return url;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_BACKEND", "The remote backend URL is invalid");
+  }
+  if (parsed.username || parsed.password || !["http:", "https:"].includes(parsed.protocol)) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_BACKEND", "The remote backend URL is invalid");
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/gu, "");
+  const loopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (parsed.protocol === "http:" && !loopback) {
+    throw new RemoteAgentError("REMOTE_AGENT_INSECURE_BACKEND", "HTTPS is required for non-loopback remote backends");
+  }
+  return parsed.toString().replace(/\/+$/u, "");
 }
 
 function digestFor({ conversationId, text, mediaSha256 }) {

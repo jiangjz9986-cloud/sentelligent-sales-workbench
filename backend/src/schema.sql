@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
 
 CREATE TABLE IF NOT EXISTS quick_records (
   id TEXT PRIMARY KEY,
+  owner TEXT,
   raw_content TEXT NOT NULL,
   occurred_at TEXT,
   source_channel TEXT,

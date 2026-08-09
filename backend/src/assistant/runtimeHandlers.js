@@ -64,6 +64,7 @@ function quickRecordFromRow(row) {
   return {
     id: row.id,
     version: Number(row.version ?? 1),
+    owner: row.owner ?? null,
     rawContent: row.raw_content,
     occurredAt: row.occurred_at,
     sourceChannel: row.source_channel,
@@ -147,17 +148,46 @@ export function createAssistantToolHandlers({
     },
 
     async "visit-capture.confirm"(_args, context) {
+      const actionId = safeText(context.actionId);
+      if (actionId) {
+        const existingRow = db.prepare(
+          "SELECT * FROM quick_records WHERE id = $id AND owner = $owner",
+        ).get({ $id: actionId, $owner: context.owner });
+        if (existingRow) {
+          const existing = quickRecordFromRow(existingRow);
+          const insight = insightFromRow(db.prepare(`
+            SELECT * FROM ai_insights
+            WHERE quick_record_id = $quickRecordId
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+          `).get({ $quickRecordId: existing.id }));
+          try {
+            const conversation = conversationRecord(sessionRepository, context);
+            sessionRepository.clearDraftParts?.(conversation.id);
+          } catch {
+            // Recovery remains idempotent even if draft cleanup is retried later.
+          }
+          return {
+            text: `已录入系统，记录 ID：${existing.id}\nAI 分析已保存，可在系统内人工确认客户、商机和行动。`,
+            status: "recorded",
+            record: existing,
+            insight,
+          };
+        }
+      }
       const content = draftText(sessionRepository, context);
       if (!content) return { text: "当前没有待录入内容，请先发送记录内容。", status: "empty" };
       const now = clock();
       const occurredAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
       const analysis = await analyzeQuickRecord(content, config, { fetchImpl });
       const persisted = withImmediateTransaction(db, () => {
-        const recordId = randomUUID();
+        const recordId = actionId || randomUUID();
         db.prepare(`
           INSERT INTO quick_records (id, raw_content, occurred_at, source_channel)
           VALUES ($id, $rawContent, $occurredAt, '微信助手')
         `).run({ $id: recordId, $rawContent: content, $occurredAt: occurredAt });
+        db.prepare("UPDATE quick_records SET owner = $owner WHERE id = $id")
+          .run({ $id: recordId, $owner: context.owner });
         const created = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: recordId }));
         insertAudit(db, {
           action: "quick_record.create",
@@ -214,17 +244,18 @@ export function createAssistantToolHandlers({
       };
     },
 
-    async "customer.search"(args) {
+    async "customer.search"(args, context) {
       const query = safeText(args.query);
       const like = `%${query}%`;
       const rows = db.prepare(`
         SELECT id, name, region, owner, level, type
         FROM customers
         WHERE deleted_at IS NULL
+          AND owner = $owner
           AND ($query = '' OR name LIKE $like OR region LIKE $like OR owner LIKE $like OR type LIKE $like)
         ORDER BY updated_at DESC, id
         LIMIT 10
-      `).all({ $query: query, $like: like });
+      `).all({ $owner: context.owner, $query: query, $like: like });
       const text = rows.length === 0
         ? `未找到客户：${query || "（未提供关键词）"}`
         : [`找到 ${rows.length} 个客户：`, ...rows.map((row) => `- ${row.name} / ${row.region ?? "-"} / ${row.owner ?? "-"}`)].join("\n");
@@ -354,14 +385,15 @@ export function createAssistantToolHandlers({
       return { text: `报销周汇总预览（${week}）：${Number(rows.expense_count)} 笔费用，实付 ${(Number(rows.paid_cents) / 100).toFixed(2)} 元。`, status: "preview", summary: rows };
     },
 
-    async "sales-report.preview"(args) {
+    async "sales-report.preview"(args, context) {
       const week = reportWeekStart(args, clock);
       const row = db.prepare(`
         SELECT COUNT(*) AS record_count
         FROM quick_records
-        WHERE voided_at IS NULL
+        WHERE owner = $owner
+          AND voided_at IS NULL
           AND date(COALESCE(occurred_at, created_at)) BETWEEN $week AND date($week, '+6 days')
-      `).get({ $week: week });
+      `).get({ $owner: context.owner, $week: week });
       return { text: `销售周报预览（${week}）：当前共有 ${Number(row.record_count)} 条快速记录，详情可在系统内继续编辑。`, status: "preview" };
     },
   };

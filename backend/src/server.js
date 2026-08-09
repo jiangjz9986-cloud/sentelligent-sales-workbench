@@ -521,6 +521,7 @@ function quickRecordFromRow(row) {
   return {
     id: row.id,
     version: Number(row.version ?? 1),
+    owner: row.owner ?? null,
     rawContent: row.raw_content,
     occurredAt: row.occurred_at,
     sourceChannel: row.source_channel,
@@ -2335,10 +2336,19 @@ export function createServer(options = {}) {
   });
 
   const assistantClock = options.assistantClock ?? options.now ?? (() => new Date());
-  const assistantConfirmationSecret = options.assistantConfirmationSecret
-    ?? (config.authSessionSecret.length >= 32
-      ? Buffer.from(config.authSessionSecret, "utf8")
-      : createHash("sha256").update(String(config.authSessionSecret || "assistant-runtime"), "utf8").digest());
+  const configuredAssistantConfirmationSecret = options.assistantConfirmationSecret ?? config.assistantConfirmationSecret;
+  const assistantConfirmationSecret = typeof configuredAssistantConfirmationSecret === "string" && configuredAssistantConfirmationSecret.trim()
+    ? configuredAssistantConfirmationSecret
+    : (configuredAssistantConfirmationSecret instanceof Buffer
+      ? configuredAssistantConfirmationSecret
+      : (config.nodeEnv === "production"
+        ? null
+        : (config.authSessionSecret.length >= 32
+          ? Buffer.from(config.authSessionSecret, "utf8")
+          : createHash("sha256").update(String(config.authSessionSecret || "assistant-runtime"), "utf8").digest())));
+  if (!assistantConfirmationSecret) {
+    throw new Error("ASSISTANT_CONFIRMATION_SECRET is required before starting the production assistant runtime");
+  }
   const assistantEventRepository = options.assistantEventRepository
     ?? createAssistantEventRepository(db, { clock: assistantClock });
   const assistantSessionRepository = options.assistantSessionRepository
@@ -4823,12 +4833,13 @@ export function createServer(options = {}) {
           run(
             db,
             `INSERT INTO quick_records (
-              id, raw_content, occurred_at, source_channel, customer_id, opportunity_id
+              id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id
             ) VALUES (
-              $id, $rawContent, $occurredAt, $sourceChannel, $customerId, $opportunityId
+              $id, $owner, $rawContent, $occurredAt, $sourceChannel, $customerId, $opportunityId
             )`,
             {
               $id: id,
+              $owner: request.authContext.account,
               $rawContent: rawContent,
               $occurredAt: body.occurredAt ?? null,
               $sourceChannel: body.sourceChannel ?? "快速记录",

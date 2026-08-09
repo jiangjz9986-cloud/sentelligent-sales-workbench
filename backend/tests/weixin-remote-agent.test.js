@@ -30,6 +30,14 @@ afterEach(async () => {
 });
 
 describe("remote Clawbot agent adapter", () => {
+  it("rejects plaintext remote backends while allowing loopback test endpoints", () => {
+    assert.throws(
+      () => createRemoteClawbotAgent({ backendUrl: "http://backend.example.test", apiToken: "token" }),
+      /HTTPS|secure|TLS/i,
+    );
+    assert.doesNotThrow(() => createRemoteClawbotAgent({ backendUrl: "http://127.0.0.1:8787", apiToken: "token" }));
+  });
+
   it("posts text and normalized media bytes without local-only fields", async () => {
     const calls = [];
     const filePath = await mediaPath();

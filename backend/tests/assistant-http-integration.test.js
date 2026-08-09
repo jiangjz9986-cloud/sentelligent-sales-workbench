@@ -237,6 +237,20 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.equal(eventRows.some((row) => String(row.response_json).includes(pending.body.confirmationCode)), false);
     persisted.close();
 
+    const renewed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:visit-confirm-renew"),
+      body: JSON.stringify(eventBody({
+        sourceMessageId: "visit-confirm-renew",
+        text: "纭",
+        pendingActionId: pending.body.actionId,
+      })),
+    });
+    assert.equal(renewed.response.status, 200);
+    assert.equal(renewed.body.status, "confirmation_required");
+    assert.match(renewed.body.confirmationCode, /^\d{6}$/);
+    assert.notEqual(renewed.body.confirmationCode, pending.body.confirmationCode);
+
     const confirmed = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin:visit-confirmed"),
@@ -244,12 +258,59 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
         sourceMessageId: "visit-confirmed",
         text: "确认",
         pendingActionId: pending.body.actionId,
-        confirmationCode: pending.body.confirmationCode,
+        confirmationCode: renewed.body.confirmationCode,
       })),
     });
     assert.equal(confirmed.response.status, 200);
     assert.equal(confirmed.body.status, "ok");
     assert.match(confirmed.body.text, /已录入系统/);
+  });
+
+  it("reuses the action id when a visit write committed before its tool result", async () => {
+    const collect = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:crash-window-collect"),
+      body: JSON.stringify(eventBody({
+        sourceMessageId: "crash-window-collect",
+        text: "拜访 crash-window-marker",
+      })),
+    });
+    assert.equal(collect.response.status, 200);
+    const pending = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:crash-window-pending"),
+      body: JSON.stringify(eventBody({ sourceMessageId: "crash-window-pending", text: "录入" })),
+    });
+    assert.equal(pending.response.status, 200);
+
+    const recoveryDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    recoveryDb.prepare(`
+      INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, status)
+      VALUES ($id, 'assistant-owner', '拜访 crash-window-marker', '2026-08-05T09:00:00.000Z', 'recovery-test', 'analyzed')
+    `).run({ $id: pending.body.actionId });
+    recoveryDb.prepare(`
+      INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
+      VALUES ('crash-window-insight', $quickRecordId, 'mock', 88, '{"summary":{}}')
+    `).run({ $quickRecordId: pending.body.actionId });
+    recoveryDb.close();
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:crash-window-confirm"),
+      body: JSON.stringify(eventBody({
+        sourceMessageId: "crash-window-confirm",
+        text: "确认",
+        pendingActionId: pending.body.actionId,
+        confirmationCode: pending.body.confirmationCode,
+      })),
+    });
+    assert.equal(confirmed.response.status, 200);
+    const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(
+      verifyDb.prepare("SELECT COUNT(*) AS count FROM quick_records WHERE owner = 'assistant-owner' AND raw_content LIKE '%crash-window-marker%'").get().count,
+      1,
+    );
+    verifyDb.close();
   });
 
   it("restores the same assistant conversation after the server process is reopened", async () => {
@@ -318,6 +379,45 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.equal(reimbursement.response.status, 200);
     assert.match(sales.body.text, /销售周报预览/);
     assert.match(reimbursement.body.text, /报销周汇总预览/);
+  });
+
+  it("scopes assistant customer search and sales reports to the machine owner", async () => {
+    const scopedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    scopedDb.exec(`
+      INSERT INTO customers (id, name, owner, updated_at)
+      VALUES ('assistant-owner-customer', 'Owner A Hospital', 'assistant-owner', CURRENT_TIMESTAMP);
+      INSERT INTO customers (id, name, owner, updated_at)
+      VALUES ('other-owner-customer', 'Owner B Hospital', 'other-owner', CURRENT_TIMESTAMP);
+      INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel)
+      VALUES ('assistant-owner-record', 'assistant-owner', 'owner a record', '2026-08-05T09:00:00.000Z', 'test');
+      INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel)
+      VALUES ('other-owner-record', 'other-owner', 'owner b record', '2026-08-05T09:00:00.000Z', 'test');
+    `);
+    scopedDb.close();
+
+    const customers = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:owner-scoped-customer-search"),
+      body: JSON.stringify(eventBody({
+        sourceMessageId: "owner-scoped-customer-search",
+        text: "/customer.search Hospital",
+      })),
+    });
+    assert.equal(customers.response.status, 200);
+    assert.match(customers.body.text, /Owner A Hospital/);
+    assert.doesNotMatch(customers.body.text, /Owner B Hospital/);
+
+    const report = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:owner-scoped-sales-report"),
+      body: JSON.stringify(eventBody({
+        sourceMessageId: "owner-scoped-sales-report",
+        text: "/sales-report.preview 2026-08-03 2026-08-09",
+      })),
+    });
+    assert.equal(report.response.status, 200);
+    assert.match(report.body.text, /1 条/);
+    assert.doesNotMatch(report.body.text, /2 条/);
   });
 
   it("isolates assistant drafts when two senders reuse the same conversation id", async () => {

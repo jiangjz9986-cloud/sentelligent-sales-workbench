@@ -1909,6 +1909,7 @@ describe("portable release package", () => {
         "DATABASE_URL",
         "AUTH_PASSWORD_HASH",
         "AUTH_SESSION_SECRET",
+         "ASSISTANT_CONFIRMATION_SECRET",
         "AUTH_COOKIE_SECURE",
         "CORS_ALLOWED_ORIGINS",
         "SOLUTION_WRITES_ENABLED",

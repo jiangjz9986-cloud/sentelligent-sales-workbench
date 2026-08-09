@@ -25,6 +25,22 @@ function requestDigest(input) {
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalValue(value[key])]));
+  }
+  return value;
+}
+
+function actionToolRunDigest({ actionId, toolName, arguments: argumentsValue }) {
+  return createHash("sha256").update(JSON.stringify(canonicalValue({
+    actionId,
+    toolName,
+    arguments: argumentsValue,
+  })), "utf8").digest("hex");
+}
+
 function makeContext(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("context is required");
   for (const key of VALID_CONTEXT) requiredText(value[key], `context.${key}`, 500);
@@ -160,28 +176,69 @@ export function createAssistantOrchestrator({
       return response(status, body);
     };
 
+    let actionLease = null;
     try {
       let pendingPlan;
+      let pendingAction;
       if (pendingActionId) {
-        const action = pendingActionRepository?.get?.(pendingActionId, { owner: context.owner, channel: context.channel });
-        if (!action) return finish(404, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
-        if (action.status === "executed") return finish(200, { status: "ok", actionId: pendingActionId, result: action.result ?? null });
-        pendingPlan = action.payload?.plan || action.payload;
+        pendingAction = pendingActionRepository?.get?.(pendingActionId, {
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: conversation?.id,
+        });
+        if (!pendingAction) return finish(404, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+        if (pendingAction.status === "executed") return finish(200, { status: "ok", actionId: pendingActionId, result: pendingAction.result ?? null });
+        if (["expired", "cancelled", "failed"].includes(pendingAction.status)) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+        pendingPlan = pendingAction.payload?.plan || pendingAction.payload;
+        if (input.confirmationCode === undefined && typeof pendingActionRepository?.renewConfirmation === "function") {
+          try {
+            const replacementCode = requiredText(String(confirmationCodeFactory()), "confirmationCode", 100);
+            const renewed = pendingActionRepository.renewConfirmation(pendingActionId, {
+              owner: context.owner,
+              channel: context.channel,
+              conversationId: conversation?.id,
+              confirmationCode: replacementCode,
+            });
+            const replacementBody = {
+              status: "confirmation_required",
+              actionId: pendingActionId,
+              toolName: pendingAction.actionType,
+              risk: pendingPlan.risk,
+              confirmationCode: renewed.confirmationCode,
+              message: "Confirmation code reissued; send it with the action id to continue.",
+            };
+            const storedReplacement = { ...replacementBody };
+            delete storedReplacement.confirmationCode;
+            return finish(200, replacementBody, storedReplacement);
+          } catch {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+          }
+        }
+        if (!pendingPlan || typeof pendingPlan !== "object" || Array.isArray(pendingPlan)) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
         if (input.confirmationCode === undefined) return finish(409, { status: "confirmation_required", actionId: pendingActionId, message: "请提供确认码后再执行。" });
         try {
-          const confirmed = pendingActionRepository?.confirm?.(pendingActionId, { owner: context.owner, channel: context.channel, confirmationCode: String(input.confirmationCode) });
+          const confirmed = pendingActionRepository?.confirm?.(pendingActionId, {
+            owner: context.owner,
+            channel: context.channel,
+            conversationId: conversation?.id,
+            confirmationCode: String(input.confirmationCode),
+          });
           if (confirmed?.expired) return finish(410, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+          if (confirmed?.inProgress) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+          pendingAction = confirmed?.item ?? pendingAction;
+          pendingPlan = pendingAction.payload?.plan || pendingAction.payload;
         } catch {
           return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
         }
       }
 
-      const plan = router.route({
-        text,
-        confidence,
-        pendingPlan,
-        mediaRef: serverData.media?.sourceRef,
-      });
+      const plan = pendingActionId
+        ? { ...pendingPlan, status: "planned", confirmed: true }
+        : router.route({
+          text,
+          confidence,
+          mediaRef: serverData.media?.sourceRef,
+        });
       if (["help", "clarify", "unknown", "cancelled", "cancel"].includes(plan.status)) {
         return finish(200, { status: plan.status === "cancelled" || plan.status === "cancel" ? "cancel" : plan.status, message: safeText(plan), question: plan.question });
       }
@@ -189,6 +246,7 @@ export function createAssistantOrchestrator({
       const tool = registry.getTool(plan.toolName);
       if (!tool) return finish(400, { status: "error", message: "该功能暂不可用。" });
       if (tool.policy?.denied || getToolPolicy(tool.name).denied) return finish(403, { status: "error", message: "该操作不在允许范围内。" });
+      if (pendingActionId && pendingAction?.actionType !== tool.name) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
       const invocation = validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: plan.arguments || {} });
 
       if (isRisky(plan) && !plan.confirmed && !pendingActionId) {
@@ -227,8 +285,16 @@ export function createAssistantOrchestrator({
 
       const handler = toolHandlers[tool.name];
       if (typeof handler !== "function") return finish(400, { status: "error", message: "该功能暂不可用。" });
-      if (pendingActionId && typeof pendingActionRepository?.markExecuted !== "function") {
-        return finish(500, { status: "error", message: SAFE_FAILURE });
+      if (pendingActionId) {
+        if (typeof pendingActionRepository?.claimExecution !== "function") return finish(500, { status: "error", message: SAFE_FAILURE });
+        const claimedAction = pendingActionRepository.claimExecution(pendingActionId, {
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: conversation?.id,
+        });
+        if (claimedAction.replayed) return finish(200, { status: "ok", actionId: pendingActionId, result: claimedAction.item.result ?? null });
+        if (claimedAction.inProgress) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+        actionLease = { leaseToken: claimedAction.leaseToken };
       }
       let toolRun = null;
       if (
@@ -237,10 +303,12 @@ export function createAssistantOrchestrator({
         && typeof eventRepository.completeToolRun === "function"
       ) {
         const finishToolReplay = (output) => {
-          if (pendingActionId) {
-            pendingActionRepository.markExecuted(pendingActionId, {
+          if (pendingActionId && actionLease) {
+            pendingActionRepository.completeExecution(pendingActionId, {
               owner: context.owner,
               channel: context.channel,
+              conversationId: conversation?.id,
+              leaseToken: actionLease.leaseToken,
               result: output,
             });
           }
@@ -249,9 +317,11 @@ export function createAssistantOrchestrator({
         const createdRun = eventRepository.createToolRun({
           owner: context.owner,
           channel: context.channel,
-          eventId: context.event,
+          eventId: pendingActionId ? `assistant-action:${pendingActionId}` : context.event,
           toolName: tool.name,
-          requestHash,
+          requestHash: pendingActionId
+            ? actionToolRunDigest({ actionId: pendingActionId, toolName: tool.name, arguments: invocation.arguments })
+            : requestHash,
           input: invocation.arguments,
         });
         if (createdRun.replayed && createdRun.item?.output) {
@@ -263,15 +333,35 @@ export function createAssistantOrchestrator({
         }
         toolRun = { id: createdRun.item.id, leaseToken: claimedRun.leaseToken };
       }
-      const result = await handler(Object.freeze({ ...invocation.arguments }), context, serverData);
+      const handlerContext = pendingActionId
+        ? Object.freeze({ ...context, actionId: pendingActionId })
+        : context;
+      const result = await handler(Object.freeze({ ...invocation.arguments }), handlerContext, serverData);
       if (toolRun) {
         eventRepository.completeToolRun(toolRun.id, { leaseToken: toolRun.leaseToken, output: result });
       }
-      if (pendingActionId) {
-        pendingActionRepository.markExecuted(pendingActionId, { owner: context.owner, channel: context.channel, result });
+      if (pendingActionId && actionLease) {
+        pendingActionRepository.completeExecution(pendingActionId, {
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: conversation?.id,
+          leaseToken: actionLease.leaseToken,
+          result,
+        });
       }
       return finish(200, { status: "ok", toolName: tool.name, result });
     } catch (error) {
+      if (pendingActionId && actionLease && typeof pendingActionRepository?.releaseExecution === "function") {
+        try {
+          pendingActionRepository.releaseExecution(pendingActionId, {
+            owner: context.owner,
+            channel: context.channel,
+            conversationId: conversation?.id,
+            leaseToken: actionLease.leaseToken,
+            errorCode: "ASSISTANT_ACTION_EXECUTION_FAILED",
+          });
+        } catch { /* preserve the safe outward response */ }
+      }
       return fail(error);
     }
   }

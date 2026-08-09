@@ -54,16 +54,56 @@ function fakeRuntime() {
     },
     get(id, scope) {
       const action = pending.get(id);
-      return action && action.owner === scope.owner && action.channel === scope.channel ? action : null;
+      const conversationId = scope.conversationId ?? scope.conversation;
+      return action
+        && action.owner === scope.owner
+        && action.channel === scope.channel
+        && (conversationId === undefined || action.conversationId === conversationId)
+        ? action
+        : null;
     },
-    confirm(id, { owner, channel, confirmationCode }) {
-      const action = this.get(id, { owner, channel });
+    confirm(id, { owner, channel, conversationId, confirmationCode }) {
+      const action = this.get(id, { owner, channel, conversationId });
       if (!action || action.confirmationCode !== confirmationCode) throw Object.assign(new Error("invalid"), { status: 409 });
+      if (action.status === "processing") return { item: action, replayed: true, inProgress: true };
+      if (action.status === "executed") return { item: action, replayed: true };
       action.status = "confirmed";
       return { item: action, replayed: false };
     },
-    markExecuted(id, { owner, channel, result }) {
-      const action = this.get(id, { owner, channel });
+    renewConfirmation(id, { owner, channel, conversationId, confirmationCode }) {
+      const action = this.get(id, { owner, channel, conversationId });
+      if (!action) throw Object.assign(new Error("missing"), { status: 404 });
+      action.confirmationCode = confirmationCode;
+      action.status = "pending";
+      return { item: action, confirmationCode };
+    },
+    claimExecution(id, { owner, channel, conversationId }) {
+      const action = this.get(id, { owner, channel, conversationId });
+      if (!action) throw Object.assign(new Error("missing"), { status: 404 });
+      if (action.status === "executed") return { item: action, replayed: true };
+      if (action.status === "processing") return { item: action, replayed: false, inProgress: true };
+      if (action.status !== "confirmed") throw Object.assign(new Error("not-confirmed"), { status: 409 });
+      action.status = "processing";
+      action.leaseToken = `action-lease-${id}`;
+      return { item: action, replayed: false, leaseToken: action.leaseToken };
+    },
+    completeExecution(id, { owner, channel, conversationId, leaseToken, result }) {
+      const action = this.get(id, { owner, channel, conversationId });
+      if (!action) throw Object.assign(new Error("missing"), { status: 404 });
+      if (action.status === "executed") return { item: action, replayed: true };
+      if (action.status !== "processing" || action.leaseToken !== leaseToken) throw Object.assign(new Error("lease"), { status: 409 });
+      action.status = "executed";
+      action.result = result;
+      return { item: action, replayed: false };
+    },
+    releaseExecution(id, { owner, channel, conversationId, leaseToken }) {
+      const action = this.get(id, { owner, channel, conversationId });
+      if (!action || action.status !== "processing" || action.leaseToken !== leaseToken) return { replayed: true, item: action };
+      action.status = "confirmed";
+      return { replayed: false, item: action };
+    },
+    markExecuted(id, { owner, channel, conversationId, result }) {
+      const action = this.get(id, { owner, channel, conversationId });
       if (!action) throw Object.assign(new Error("missing"), { status: 404 });
       if (action.status === "executed") return { item: action, replayed: true };
       action.status = "executed";
@@ -135,6 +175,126 @@ describe("assistant orchestrator", () => {
     assert.equal(calls, 0);
     const confirmed = await orchestrator.handle({ context: { ...context, event: "event-b", requestId: "request-b" }, input: { text: "confirm", pendingActionId: pending.body.actionId, confirmationCode: "482913" } });
     assert.deepEqual(confirmed.body.result, { saved: true });
+    assert.equal(calls, 1);
+  });
+
+  it("reissues a lost confirmation code through a new scoped event", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
+    const codes = ["482913", "731604"];
+    let calls = 0;
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => codes.shift(),
+      toolHandlers: { [plan.toolName]: () => { calls += 1; return { saved: true }; } },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    const renewed = await orchestrator.handle({
+      context: { ...context, event: "event-renew-code", requestId: "request-renew-code" },
+      input: { text: "confirm", pendingActionId: pending.body.actionId },
+    });
+    assert.equal(renewed.status, 200);
+    assert.equal(renewed.body.status, "confirmation_required");
+    assert.equal(renewed.body.confirmationCode, "731604");
+    const confirmed = await orchestrator.handle({
+      context: { ...context, event: "event-renew-confirm", requestId: "request-renew-confirm" },
+      input: { text: "confirm", pendingActionId: pending.body.actionId, confirmationCode: "731604" },
+    });
+    assert.equal(confirmed.status, 200);
+    assert.equal(calls, 1);
+  });
+
+  it("executes the persisted confirmation plan even when the confirmation text tries to change it", async () => {
+    const runtime = fakeRuntime();
+    const storedPlan = {
+      status: "confirmation_required",
+      toolName: "visit-capture.confirm",
+      agentId: "test-agent",
+      arguments: { value: "draft-original" },
+      risk: "R2",
+      confirmation: "simple",
+    };
+    let handlerArgs;
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(storedPlan.toolName, "R2", "simple"),
+      router: {
+        route({ text }) {
+          if (text === "save") return { ...storedPlan };
+          return {
+            ...storedPlan,
+            status: "planned",
+            confirmed: true,
+            arguments: { value: "draft-attacker" },
+          };
+        },
+      },
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: {
+        [storedPlan.toolName]: (args) => {
+          handlerArgs = args;
+          return { saved: true };
+        },
+      },
+    });
+
+    const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    const confirmed = await orchestrator.handle({
+      context: { ...context, event: "event-confirm-bound", requestId: "request-confirm-bound" },
+      input: {
+        text: "把另一个草稿写入系统",
+        pendingActionId: pending.body.actionId,
+        confirmationCode: "482913",
+      },
+    });
+
+    assert.equal(confirmed.status, 200);
+    assert.deepEqual(handlerArgs, { value: "draft-original" });
+  });
+
+  it("returns a controlled conflict while a confirmed action is leased by another request", async () => {
+    const runtime = fakeRuntime();
+    const plan = {
+      status: "confirmation_required",
+      toolName: "visit-capture.confirm",
+      agentId: "test-agent",
+      arguments: { value: "draft-1" },
+      risk: "R2",
+      confirmation: "simple",
+    };
+    let release;
+    const firstStarted = new Promise((resolve) => { release = resolve; });
+    let calls = 0;
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: {
+        [plan.toolName]: async () => {
+          calls += 1;
+          await firstStarted;
+          return { saved: true };
+        },
+      },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    const first = orchestrator.handle({
+      context: { ...context, event: "event-confirm-lease-1", requestId: "request-confirm-lease-1" },
+      input: { text: "confirm", pendingActionId: pending.body.actionId, confirmationCode: "482913" },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = orchestrator.handle({
+      context: { ...context, event: "event-confirm-lease-2", requestId: "request-confirm-lease-2" },
+      input: { text: "confirm", pendingActionId: pending.body.actionId, confirmationCode: "482913" },
+    });
+    release();
+    const firstResult = await first;
+    const secondResult = await second;
+    assert.equal(firstResult.status, 200);
+    assert.equal(secondResult.status, 409);
     assert.equal(calls, 1);
   });
 
@@ -238,6 +398,46 @@ describe("assistant orchestrator", () => {
     assert.equal(runs[2][2].leaseToken, "lease-tool-run-1");
   });
 
+  it("uses the pending action identity as the durable tool-run key", async () => {
+    const runtime = fakeRuntime();
+    const plan = {
+      status: "confirmation_required",
+      toolName: "visit-capture.confirm",
+      agentId: "test-agent",
+      arguments: { value: "draft-1" },
+      risk: "R2",
+      confirmation: "simple",
+    };
+    let createdInput;
+    runtime.eventRepository.createToolRun = (input) => {
+      createdInput = input;
+      return { item: { id: "tool-run-action", status: "queued" }, replayed: false };
+    };
+    runtime.eventRepository.claimToolRun = () => ({
+      item: { id: "tool-run-action", status: "running" },
+      replayed: false,
+      leaseToken: "test-machine-token",
+    });
+    runtime.eventRepository.completeToolRun = () => ({
+      item: { id: "tool-run-action", status: "completed", output: { saved: true } },
+      replayed: false,
+    });
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => ({ saved: true }) },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    await orchestrator.handle({
+      context: { ...context, event: "event-action-tool-run", requestId: "request-action-tool-run" },
+      input: { text: "confirm", pendingActionId: pending.body.actionId, confirmationCode: "482913" },
+    });
+    assert.equal(createdInput.eventId, `assistant-action:${pending.body.actionId}`);
+    assert.match(createdInput.requestHash, /^[0-9a-f]{64}$/);
+  });
+
   it("marks a confirmed action executed when its durable tool result is replayed", async () => {
     const runtime = fakeRuntime();
     const plan = {
@@ -286,7 +486,11 @@ describe("assistant orchestrator", () => {
     assert.deepEqual(replay.body.result, { saved: true });
     assert.equal(handlerCalls, 0);
     assert.equal(
-      runtime.pendingActionRepository.get(pending.body.actionId, context).status,
+      runtime.pendingActionRepository.get(pending.body.actionId, {
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: `${context.owner}:${context.channel}:${context.conversation}`,
+      }).status,
       "executed",
     );
   });

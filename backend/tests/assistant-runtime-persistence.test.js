@@ -266,6 +266,251 @@ describe("assistant runtime persistence", () => {
     assert.deepEqual(replay.item.result, { expenseId: "expense-1" });
   });
 
+  it("atomically leases a confirmed action and fences a second executor", () => {
+    const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
+    const conversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-lease-action" });
+    const actions = createAssistantPendingActionRepository(db, {
+      idFactory: () => nextId("action"),
+      clock: now,
+      confirmationSecret,
+    });
+    const action = actions.create({
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      actionType: "create_expense",
+      payload: { plan: { toolName: "create_expense", arguments: { amountCents: 5000 } } },
+      confirmationCode: "482913",
+      expiresAt: "2026-08-09T01:05:00.000Z",
+    });
+    actions.confirm(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      confirmationCode: "482913",
+    });
+
+    const first = actions.claimExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseMs: 60_000,
+    });
+    assert.equal(first.replayed, false);
+    assert.equal(first.item.status, "processing");
+    const second = actions.claimExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseMs: 60_000,
+    });
+    assert.equal(second.inProgress, true);
+
+    const completed = actions.completeExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseToken: first.leaseToken,
+      result: { expenseId: "expense-1" },
+    });
+    assert.equal(completed.item.status, "executed");
+    const replay = actions.claimExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseMs: 60_000,
+    });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(replay.item.result, { expenseId: "expense-1" });
+  });
+
+  it("reclaims an expired execution lease through confirmation", () => {
+    const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
+    const conversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-expired-lease" });
+    const actions = createAssistantPendingActionRepository(db, {
+      idFactory: () => nextId("action"),
+      clock: now,
+      confirmationSecret,
+    });
+    const action = actions.create({
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      actionType: "create_expense",
+      payload: { plan: { toolName: "create_expense", arguments: { amountCents: 5000 } } },
+      confirmationCode: "482913",
+      expiresAt: "2026-08-09T01:05:00.000Z",
+    });
+    actions.confirm(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      confirmationCode: "482913",
+    });
+    const first = actions.claimExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseMs: 60_000,
+    });
+    clockNow = "2026-08-09T01:02:00.000Z";
+
+    const reconfirmed = actions.confirm(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      confirmationCode: "482913",
+    });
+    assert.equal(reconfirmed.inProgress, false);
+    const reclaimed = actions.claimExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseMs: 60_000,
+    });
+    assert.equal(reclaimed.replayed, false);
+    assert.equal(reclaimed.inProgress, undefined);
+    assert.notEqual(reclaimed.leaseToken, first.leaseToken);
+    assert.throws(
+      () => actions.completeExecution(action.id, {
+        owner: "owner-a",
+        channel: "weixin",
+        conversationId: conversation.id,
+        leaseToken: first.leaseToken,
+        result: { expenseId: "stale" },
+      }),
+      /lease/i,
+    );
+    const completed = actions.completeExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseToken: reclaimed.leaseToken,
+      result: { expenseId: "expense-reclaimed" },
+    });
+    assert.equal(completed.item.status, "executed");
+  });
+
+  it("reissues a lost confirmation code after an execution lease expires", () => {
+    const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
+    const conversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-expired-renew" });
+    const actions = createAssistantPendingActionRepository(db, {
+      idFactory: () => nextId("action"),
+      clock: now,
+      confirmationSecret,
+    });
+    const action = actions.create({
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      actionType: "create_expense",
+      payload: { plan: { toolName: "create_expense", arguments: { amountCents: 5000 } } },
+      confirmationCode: "482913",
+      expiresAt: "2026-08-09T01:05:00.000Z",
+    });
+    actions.confirm(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      confirmationCode: "482913",
+    });
+    actions.claimExecution(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      leaseMs: 60_000,
+    });
+    clockNow = "2026-08-09T01:02:00.000Z";
+
+    const renewed = actions.renewConfirmation(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      confirmationCode: "731604",
+    });
+    assert.equal(renewed.item.status, "pending");
+    assert.throws(
+      () => actions.confirm(action.id, {
+        owner: "owner-a",
+        channel: "weixin",
+        conversationId: conversation.id,
+        confirmationCode: "482913",
+      }),
+      /invalid/i,
+    );
+    const confirmed = actions.confirm(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: conversation.id,
+      confirmationCode: "731604",
+    });
+    assert.equal(confirmed.item.status, "confirmed");
+  });
+
+  it("does not expose a conversation-bound action through another conversation", () => {
+    const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
+    const firstConversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-owner-scope-a" });
+    const secondConversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-owner-scope-b" });
+    const actions = createAssistantPendingActionRepository(db, {
+      idFactory: () => nextId("action"),
+      clock: now,
+      confirmationSecret,
+    });
+    const action = actions.create({
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: firstConversation.id,
+      actionType: "create_expense",
+      payload: { amountCents: 5000 },
+      confirmationCode: "482913",
+      expiresAt: "2026-08-09T01:05:00.000Z",
+    });
+    assert.equal(actions.get(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: secondConversation.id,
+    }), null);
+    assert.throws(
+      () => actions.confirm(action.id, {
+        owner: "owner-a",
+        channel: "weixin",
+        conversationId: secondConversation.id,
+        confirmationCode: "482913",
+      }),
+      (error) => error instanceof HttpError && error.status === 404,
+    );
+  });
+
+  it("issues a replacement confirmation code without persisting it in plaintext", () => {
+    const actions = createAssistantPendingActionRepository(db, {
+      idFactory: () => nextId("action"),
+      clock: now,
+      confirmationSecret,
+    });
+    const action = actions.create({
+      owner: "owner-a",
+      channel: "weixin",
+      actionType: "create_expense",
+      payload: { amountCents: 5000 },
+      confirmationCode: "482913",
+      expiresAt: "2026-08-09T01:05:00.000Z",
+    });
+    const renewed = actions.renewConfirmation(action.id, {
+      owner: "owner-a",
+      channel: "weixin",
+      confirmationCode: "731604",
+    });
+    assert.equal(renewed.confirmationCode, "731604");
+    assert.equal(renewed.item.status, "pending");
+    const stored = db.prepare("SELECT * FROM assistant_pending_actions WHERE id = $id").get({ $id: action.id });
+    assert.doesNotMatch(JSON.stringify(stored), /731604/);
+    assert.throws(
+      () => actions.confirm(action.id, { owner: "owner-a", channel: "weixin", confirmationCode: "482913" }),
+      (error) => error instanceof HttpError && error.status === 409,
+    );
+    assert.doesNotThrow(() => actions.confirm(action.id, { owner: "owner-a", channel: "weixin", confirmationCode: "731604" }));
+  });
+
   it("clears a completed conversation draft without deleting the conversation identity", () => {
     const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
     const conversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-clear-draft" });

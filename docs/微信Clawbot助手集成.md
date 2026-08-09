@@ -70,3 +70,12 @@ npm run scan:secrets
 ```
 
 真实设备往返、生产环境 Token 配置和生产部署仍需单独授权；本版本代码验证不等于已完成生产发布。
+## v0.5 security boundary
+
+Production must configure an independent `ASSISTANT_CONFIRMATION_SECRET`. Generate it separately from `AUTH_SESSION_SECRET`, `WEIXIN_AGENT_API_TOKEN`, model keys, and the iCost token, using at least 32 bytes of canonical base64url data. Never place real values in source, logs, or chat.
+
+Confirmation actions are bound to the persisted tool name, arguments, owner, channel, and conversation. New text in a confirmation request cannot replace the stored plan. A one-time execution lease fences concurrent requests; later requests replay the durable result or receive a controlled conflict.
+
+If the first confirmation code is lost, send a new event with the same `pendingActionId` and no `confirmationCode`. The service rotates and returns a new six-digit code; use a new `sourceMessageId`, and the old code is invalidated. Only an HMAC is stored.
+
+Non-loopback Clawbot backends must use HTTPS. Plain HTTP is accepted only for local test endpoints (`127.0.0.1`, `localhost`, or `::1`).

@@ -120,6 +120,8 @@ describe("backend model configuration", () => {
       Buffer.alloc(64, 9).toString("base64url"),
     ].join("$");
     const validSessionSecret = Buffer.alloc(32, 5).toString("base64url");
+    const validMachineToken = Buffer.alloc(32, 6).toString("base64url");
+    const validConfirmationSecret = Buffer.alloc(32, 8).toString("base64url");
     const valid = {
       envFile,
       NODE_ENV: " Production ",
@@ -127,6 +129,8 @@ describe("backend model configuration", () => {
       AUTH_ACCOUNT: " jiangjz ",
       AUTH_PASSWORD_HASH: validPasswordHash,
       AUTH_SESSION_SECRET: validSessionSecret,
+      WEIXIN_AGENT_API_TOKEN: validMachineToken,
+      ASSISTANT_CONFIRMATION_SECRET: validConfirmationSecret,
       AUTH_COOKIE_SECURE: "true",
       CORS_ALLOWED_ORIGINS: "https://sales.example.test/,https://sales.example.test",
     };
@@ -135,6 +139,8 @@ describe("backend model configuration", () => {
     assert.equal(config.nodeEnv, "production");
     assert.equal(config.authAccount, "jiangjz");
     assert.equal(config.authCookieSecure, true);
+    assert.equal(config.weixinAgentApiToken, validMachineToken);
+    assert.equal(config.assistantConfirmationSecret, validConfirmationSecret);
     assert.deepEqual(config.corsAllowedOrigins, ["https://sales.example.test"]);
 
     for (const [field, message] of [
@@ -151,6 +157,16 @@ describe("backend model configuration", () => {
     assert.throws(() => loadConfig({ ...valid, AUTH_SESSION_SECRET: "too-short" }), /AUTH_SESSION_SECRET/);
     assert.throws(() => loadConfig({ ...valid, AUTH_REQUIRED: "false" }), /AUTH_REQUIRED/);
     assert.throws(() => loadConfig({ ...valid, AUTH_PASSWORD: "legacy-plaintext" }), /AUTH_PASSWORD/);
+    assert.throws(
+      () => loadConfig({ ...valid, ...Object.fromEntries([["WEIXIN_AGENT_API_TOKEN", "short"]]) }),
+      /WEIXIN_AGENT_API_TOKEN/,
+    );
+    assert.throws(
+      () => loadConfig({ ...valid, ...Object.fromEntries([["ASSISTANT_CONFIRMATION_SECRET", "short"]]) }),
+      /ASSISTANT_CONFIRMATION_SECRET/,
+    );
+    assert.throws(() => loadConfig({ ...valid, ASSISTANT_CONFIRMATION_SECRET: validSessionSecret }), /independent|ASSISTANT_CONFIRMATION_SECRET/);
+    assert.throws(() => loadConfig({ ...valid, WEIXIN_AGENT_API_TOKEN: validSessionSecret }), /independent|WEIXIN_AGENT_API_TOKEN/);
   });
 
   it("rejects malformed environment, boolean, origin, and body-limit values", () => {
