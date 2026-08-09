@@ -92,7 +92,7 @@ Required:
   --backup-dir=<path>        Controlled backup output root
   --evidence-dir=<path>      Controlled evidence output root
   --weixin-session-dir=<path> WeChat session state directory
-  --preflight-report=<path>  Fresh passed 24/24 production preflight report
+  --preflight-report=<path>  Fresh passed 25/25 production preflight report
   --preflight-report-sha256=<sha256> Exact report SHA-256
 
 Optional:
@@ -459,6 +459,7 @@ verify_preflight_report() {
         "env.authRequired",
         "env.authHash",
         "env.sessionSecret",
+        "env.assistantSecrets",
         "env.secureCookie",
         "env.cors",
         "env.solutionWrites",
@@ -487,14 +488,14 @@ verify_preflight_report() {
         report.schemaVersion !== 2 ||
         report.product !== "sentelligent-sales-workbench" ||
         report.status !== "passed" ||
-        report.summary?.total !== 24 ||
-        report.summary?.passed !== 24 ||
+        report.summary?.total !== 25 ||
+        report.summary?.passed !== 25 ||
         report.summary?.failed !== 0
       ) {
-        throw new Error("Preflight report must be an exact passed 24/24 result");
+        throw new Error("Preflight report must be an exact passed 25/25 result");
       }
-      if (!Array.isArray(report.checks) || report.checks.length !== 24) {
-        throw new Error("Preflight report must contain exactly 24 checks");
+      if (!Array.isArray(report.checks) || report.checks.length !== 25) {
+        throw new Error("Preflight report must contain exactly 25 checks");
       }
       const observedChecks = report.checks.map((check) => check?.id).sort();
       if (

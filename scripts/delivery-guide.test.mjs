@@ -85,7 +85,7 @@ describe("production release staging guide", () => {
       "chown -R root:root",
       "trusted_manifest_sha=",
       "旧生产 release",
-      "重新执行 24/24",
+      "重新执行 25/25",
     ]) {
       assert.match(content, literalPattern(required));
     }
