@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-09
+
+### Pre-cutover release compatibility
+
+- Allow the pre-cutover validator to inspect the existing v0.4.4 schema-3 current release whose manifest predates `ASSISTANT_CONFIRMATION_SECRET`.
+- Keep the relaxed environment-name set bound to the canonical `current` release only; every candidate immutable release still requires the complete current manifest contract.
+- Verify the legacy tree with the normal schema-3 archive, dependency, source, migration, and ownership hashes; no release-integrity gate is relaxed.
+
+### Release boundary
+
+- This patch supersedes the unpublished v0.5.1 candidate for deployment. Production remains unchanged until a fresh backup, migration rehearsal, 25/25 preflight, controlled cutover, HTTPS smoke, and browser/WeChat acceptance pass.
+- No token, password, private key, cookie, model response, database content, or business attachment is recorded in Git or chat.
+
 ## [0.5.1] - 2026-08-09
 
 ### Production cutover contract

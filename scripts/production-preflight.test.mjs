@@ -1466,6 +1466,47 @@ describe("production preflight", () => {
     }
   });
 
+  it("allows the pre-assistant schema-3 environment contract only for the current release", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const legacyManifest = structuredClone(fixture.manifest);
+      legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
+        (name) => name !== "ASSISTANT_CONFIRMATION_SECRET",
+      );
+      writeFileSync(
+        fixture.filePath("release-manifest.json"),
+        `${JSON.stringify(legacyManifest, null, 2)}\n`,
+      );
+      hardenReleaseFixturePermissions(fixture.releaseDirectoryPath);
+
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const currentResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(currentResult.valid, true, currentResult.message);
+
+      const candidateResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: `${immutableReleaseRoot}-other`,
+      });
+      assert.equal(candidateResult.valid, false);
+      assert.match(candidateResult.message, /environment names|contract/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("rejects deployment-installed dependencies outside a legacy schema-2 archive inventory", async () => {
     const fixture = makeLegacyReleaseFixture();
     try {
