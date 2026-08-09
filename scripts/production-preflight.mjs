@@ -20,6 +20,15 @@ import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
+// v0.5.0 added the assistant confirmation secret to the manifest contract.
+// A pre-cutover report must still be able to authenticate the already-running
+// schema-3 release from v0.4.4, but that relaxed set is valid only for the
+// canonical current release path. Candidate releases always use the complete
+// current REQUIRED_ENV_NAMES contract.
+const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
+  REQUIRED_ENV_NAMES.filter((name) => name !== "ASSISTANT_CONFIRMATION_SECRET"),
+);
+
 export const REQUIRED_PROJECT_SERVICES = Object.freeze([
   "sentelligent-backend.service",
   "sentelligent-frontend.service",
@@ -1182,6 +1191,20 @@ function hasRequiredEnvironmentContract(value) {
   );
 }
 
+function hasLegacyCurrentEnvironmentContract(value) {
+  if (
+    !Array.isArray(value) ||
+    value.length !== LEGACY_CURRENT_REQUIRED_ENV_NAMES.length
+  ) {
+    return false;
+  }
+  const names = new Set(value);
+  return (
+    names.size === LEGACY_CURRENT_REQUIRED_ENV_NAMES.length &&
+    LEGACY_CURRENT_REQUIRED_ENV_NAMES.every((name) => names.has(name))
+  );
+}
+
 function hasExactFrontendBuildProvenance(manifest) {
   const frontend = manifest?.buildProvenance?.frontend;
   const lockfile = frontend?.lockfile;
@@ -1266,7 +1289,11 @@ function hasExactBackendDependencyProvenance(manifest) {
   );
 }
 
-function manifestShapeError(manifest, expectedCommit) {
+function manifestShapeError(
+  manifest,
+  expectedCommit,
+  { allowLegacyCurrentEnvironmentNames = false } = {},
+) {
   if (
     !isRecord(manifest) ||
     manifest.schemaVersion !== RELEASE_MANIFEST_SCHEMA_VERSION ||
@@ -1281,7 +1308,13 @@ function manifestShapeError(manifest, expectedCommit) {
   ) {
     return "Release manifest source must identify the exact commit and a clean packaged worktree.";
   }
-  if (!hasRequiredEnvironmentContract(manifest.requiredEnvNames)) {
+  if (
+    !(
+      allowLegacyCurrentEnvironmentNames
+        ? hasLegacyCurrentEnvironmentContract(manifest.requiredEnvNames)
+        : hasRequiredEnvironmentContract(manifest.requiredEnvNames)
+    )
+  ) {
     return "Release manifest required environment names must exactly match the release packager contract.";
   }
   if (!hasExactFrontendBuildProvenance(manifest)) {
@@ -1654,27 +1687,44 @@ export function validateReleaseIdentity({
         "Release manifest must resolve to /opt/sentelligent-sales-workbench/releases/<safe-id>/release-manifest.json.",
     };
   }
-  const legacyCurrent =
+  const legacySchema2 =
     allowLegacyCurrent &&
     manifest.schemaVersion === 2 &&
     currentReleasePath === releasePath;
-  if (!legacyCurrent) {
+  const legacySchema3 =
+    allowLegacyCurrent &&
+    manifest.schemaVersion === RELEASE_MANIFEST_SCHEMA_VERSION &&
+    currentReleasePath === releasePath &&
+    hasLegacyCurrentEnvironmentContract(manifest.requiredEnvNames);
+  if (!legacySchema2 && !legacySchema3) {
     const shapeError = manifestShapeError(manifest, expectedCommit);
     if (shapeError !== null) {
       return { valid: false, message: shapeError };
     }
-  } else if (
-    manifest.product !== RELEASE_PRODUCT ||
-    !isRecord(manifest.source) ||
-    manifest.source.commit !== expectedCommit ||
-    manifest.source.clean !== true ||
-    !isRecord(manifest.archive) ||
-    manifest.archive.format !== "tar.gz" ||
-    manifest.archive.rootDirectory !==
-      `${RELEASE_PRODUCT}-${expectedCommit.slice(0, 12)}` ||
-    !Number.isSafeInteger(manifest.archive.packagedFiles)
-  ) {
-    return { valid: false, message: "Legacy current release identity is incomplete." };
+  } else if (legacySchema2) {
+    if (
+      manifest.product !== RELEASE_PRODUCT ||
+      !isRecord(manifest.source) ||
+      manifest.source.commit !== expectedCommit ||
+      manifest.source.clean !== true ||
+      !isRecord(manifest.archive) ||
+      manifest.archive.format !== "tar.gz" ||
+      manifest.archive.rootDirectory !==
+        `${RELEASE_PRODUCT}-${expectedCommit.slice(0, 12)}` ||
+      !Number.isSafeInteger(manifest.archive.packagedFiles)
+    ) {
+      return {
+        valid: false,
+        message: "Legacy current release identity is incomplete.",
+      };
+    }
+  } else {
+    const shapeError = manifestShapeError(manifest, expectedCommit, {
+      allowLegacyCurrentEnvironmentNames: true,
+    });
+    if (shapeError !== null) {
+      return { valid: false, message: shapeError };
+    }
   }
 
   const services = Array.isArray(servicePlan?.projectServices)
@@ -1703,7 +1753,7 @@ export function validateReleaseIdentity({
     }
   }
 
-  const releaseContents = (legacyCurrent ? verifyLegacyReleaseContents : verifyReleaseContents)(
+  const releaseContents = (legacySchema2 ? verifyLegacyReleaseContents : verifyReleaseContents)(
     manifest,
     releaseDirectoryPath ?? dirname(resolve(manifestPath)),
     { enforcePosix },
