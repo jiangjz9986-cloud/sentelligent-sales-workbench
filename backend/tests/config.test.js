@@ -26,6 +26,10 @@ describe("backend model configuration", () => {
         "AUTH_SESSION_SECRET=session-secret-from-env-file",
         "WEIXIN_AGENT_API_TOKEN=machine-token-from-env-file",
         "WEIXIN_AGENT_BACKEND_URL=https://example.test",
+        "WEIXIN_AGENT_SENDER_ID=sender-from-env-file",
+        "WEIXIN_AGENT_CHAT_TYPE=direct",
+        "WEIXIN_ALLOWED_SENDER_IDS=sender-from-env-file,sender-two",
+        "WEIXIN_ALLOW_GROUPS=false",
         "ICOST_WEBHOOK_TOKEN=icost-token-from-env-file",
         "ICOST_WEBHOOK_OWNER=jiangjz",
         "ICOST_WEBHOOK_RATE_LIMIT=18",
@@ -53,6 +57,10 @@ describe("backend model configuration", () => {
       assert.equal(config.authSessionSecret, "session-secret-from-env-file");
       assert.equal(config.weixinAgentApiToken, "machine-token-from-env-file");
       assert.equal(config.weixinAgentBackendUrl, "https://example.test");
+      assert.equal(config.weixinAgentSenderId, "sender-from-env-file");
+      assert.equal(config.weixinAgentChatType, "direct");
+      assert.deepEqual(config.weixinAllowedSenderIds, ["sender-from-env-file", "sender-two"]);
+      assert.equal(config.weixinAllowGroups, false);
       assert.equal(config.icostWebhookToken, "icost-token-from-env-file");
       assert.equal(config.icostWebhookOwner, "jiangjz");
       assert.equal(config.icostWebhookRateLimit, 18);
@@ -112,6 +120,8 @@ describe("backend model configuration", () => {
       Buffer.alloc(64, 9).toString("base64url"),
     ].join("$");
     const validSessionSecret = Buffer.alloc(32, 5).toString("base64url");
+    const validMachineToken = Buffer.alloc(32, 6).toString("base64url");
+    const validConfirmationSecret = Buffer.alloc(32, 8).toString("base64url");
     const valid = {
       envFile,
       NODE_ENV: " Production ",
@@ -119,6 +129,8 @@ describe("backend model configuration", () => {
       AUTH_ACCOUNT: " jiangjz ",
       AUTH_PASSWORD_HASH: validPasswordHash,
       AUTH_SESSION_SECRET: validSessionSecret,
+      WEIXIN_AGENT_API_TOKEN: validMachineToken,
+      ASSISTANT_CONFIRMATION_SECRET: validConfirmationSecret,
       AUTH_COOKIE_SECURE: "true",
       CORS_ALLOWED_ORIGINS: "https://sales.example.test/,https://sales.example.test",
     };
@@ -127,6 +139,8 @@ describe("backend model configuration", () => {
     assert.equal(config.nodeEnv, "production");
     assert.equal(config.authAccount, "jiangjz");
     assert.equal(config.authCookieSecure, true);
+    assert.equal(config.weixinAgentApiToken, validMachineToken);
+    assert.equal(config.assistantConfirmationSecret, validConfirmationSecret);
     assert.deepEqual(config.corsAllowedOrigins, ["https://sales.example.test"]);
 
     for (const [field, message] of [
@@ -143,6 +157,16 @@ describe("backend model configuration", () => {
     assert.throws(() => loadConfig({ ...valid, AUTH_SESSION_SECRET: "too-short" }), /AUTH_SESSION_SECRET/);
     assert.throws(() => loadConfig({ ...valid, AUTH_REQUIRED: "false" }), /AUTH_REQUIRED/);
     assert.throws(() => loadConfig({ ...valid, AUTH_PASSWORD: "legacy-plaintext" }), /AUTH_PASSWORD/);
+    assert.throws(
+      () => loadConfig({ ...valid, ...Object.fromEntries([["WEIXIN_AGENT_API_TOKEN", "short"]]) }),
+      /WEIXIN_AGENT_API_TOKEN/,
+    );
+    assert.throws(
+      () => loadConfig({ ...valid, ...Object.fromEntries([["ASSISTANT_CONFIRMATION_SECRET", "short"]]) }),
+      /ASSISTANT_CONFIRMATION_SECRET/,
+    );
+    assert.throws(() => loadConfig({ ...valid, ASSISTANT_CONFIRMATION_SECRET: validSessionSecret }), /independent|ASSISTANT_CONFIRMATION_SECRET/);
+    assert.throws(() => loadConfig({ ...valid, WEIXIN_AGENT_API_TOKEN: validSessionSecret }), /independent|WEIXIN_AGENT_API_TOKEN/);
   });
 
   it("rejects malformed environment, boolean, origin, and body-limit values", () => {
@@ -163,6 +187,7 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
+    assert.throws(() => loadConfig({ ...base, WEIXIN_AGENT_CHAT_TYPE: "unknown" }), /WEIXIN_AGENT_CHAT_TYPE/);
   });
 
   it("emits the plaintext development-password warning once without leaking its value", () => {

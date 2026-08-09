@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-09
+
+### Persistent Clawbot assistant runtime
+
+- Upgrade the WeChat Clawbot path to a SQLite-backed assistant runtime with durable conversations, drafts, pending confirmations, tool-run replay, and the first-slice visit, customer-search, sales-report, reimbursement, payment-proof, and invoice agents.
+- Keep model routing deterministic and server-owned: the model can select only an allowlisted tool and validated arguments; unknown, transport, shell, database, and unsupported write paths fail closed.
+- Preserve the existing natural-week personal reimbursement workflow and lossless original PDF/image storage. Company over-limit rules and automatic financial writeback remain outside this version.
+
+### Security and recovery hardening
+
+- Bind a confirmation to its persisted plan, owner, channel, and conversation; confirmation text cannot replace the stored tool or arguments.
+- Add one-time execution leases, stable action-scoped tool-run identities, crash-window idempotency, expired-lease takeover, and confirmation-code rotation. Only hashes are persisted.
+- Add owner isolation for quick records and assistant read queries, with a forward-only migration and a safe `legacy` fallback for unverifiable historical rows.
+- Require independent high-entropy production secrets for the WeChat machine boundary and assistant confirmations, and require HTTPS for non-loopback remote Clawbot backends.
+
+### Release boundary
+
+- This entry describes the v0.5.0 code candidate on the GitHub development branch. Production remains on v0.4.4 until a separately authorized backup, migration rehearsal, preflight, atomic cutover, and real WeChat/browser acceptance are completed.
+- No token, password, private key, cookie, model response, database content, or business attachment is recorded in Git or chat.
+
 ## [0.4.4] - 2026-08-08
 
 ### Sales decision reasoning budget
@@ -268,7 +288,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.4
 [0.4.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.3
 [0.4.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.2

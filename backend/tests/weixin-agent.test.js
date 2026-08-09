@@ -580,4 +580,30 @@ describe("weixin sales workbench agent", () => {
     assert.match(reply.text, /暂时上传失败，请稍后重试/);
     assert.doesNotMatch(reply.text, /internal-backend-sentinel|secret|token=|invoice\.png/i);
   });
+
+  it("uses an injected session store so drafts can survive outside the process", async () => {
+    const sessions = new Map();
+    const calls = [];
+    const sessionStore = {
+      get(key) { calls.push(["get", key]); return sessions.get(key); },
+      set(key, value) { calls.push(["set", key]); sessions.set(key, value); },
+      delete(key) { calls.push(["delete", key]); return sessions.delete(key); },
+    };
+    const agent = createSalesWorkbenchWeixinAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "machine-token",
+      sessionStore,
+      fetchImpl: async () => jsonResponse({
+        item: {
+          customer: { value: "日照中医医院" },
+          opportunity: { value: "规划" },
+          summary: { request: { text: "材料" }, risk: { text: "待确认" }, action: { text: "跟进" } },
+        },
+      }),
+    });
+
+    await agent.chat({ conversationId: "persistent-session", text: "拜访日照中医医院" });
+    assert.ok(calls.some(([method, key]) => method === "set" && key === "persistent-session"));
+    assert.ok(sessions.has("persistent-session"));
+  });
 });

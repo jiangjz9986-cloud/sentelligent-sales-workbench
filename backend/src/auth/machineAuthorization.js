@@ -4,10 +4,12 @@ import { HttpError } from "../http/errors.js";
 
 const ALLOWED_MACHINE_ROUTES = new Set([
   "GET /api/customers",
+  "POST /api/quick-records/preview",
   "POST /api/quick-records",
   "POST /api/reports/weekly/draft",
   "POST /api/travel-expense-document-inbox",
   "POST /api/invoices",
+  "POST /api/integrations/weixin-agent/events",
 ]);
 const QUICK_RECORD_ANALYZE_ROUTE = /^POST \/api\/quick-records\/[^/]+\/analyze$/;
 

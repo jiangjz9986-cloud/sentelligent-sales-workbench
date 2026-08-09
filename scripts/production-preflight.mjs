@@ -167,6 +167,25 @@ function isStrongSessionValue(value) {
   return decoded !== null && decoded.length >= 32;
 }
 
+function isStrongAssistantSecret(value) {
+  return isStrongSessionValue(value) || (typeof value === "string" && /^[A-Za-z0-9_-]{64,}$/.test(value));
+}
+
+function hasAssistantSecretConfiguration(environment) {
+  const session = environment.AUTH_SESSION_SECRET;
+  const machine = environment.WEIXIN_AGENT_API_TOKEN;
+  const confirmation = environment.ASSISTANT_CONFIRMATION_SECRET;
+  return (
+    isStrongAssistantSecret(machine) &&
+    isStrongAssistantSecret(confirmation) &&
+    new Set([session, machine, confirmation]).size === 3 &&
+    machine !== environment.MODEL_API_KEY &&
+    machine !== environment.ICOST_WEBHOOK_TOKEN &&
+    confirmation !== environment.MODEL_API_KEY &&
+    confirmation !== environment.ICOST_WEBHOOK_TOKEN
+  );
+}
+
 function isPositiveSafeIntegerText(value) {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return false;
   const parsed = Number(value);
@@ -210,6 +229,7 @@ function hasProductionModelConfiguration(environment) {
   const isolated = [
     environment.AUTH_SESSION_SECRET,
     environment.WEIXIN_AGENT_API_TOKEN,
+    environment.ASSISTANT_CONFIRMATION_SECRET,
     environment.ICOST_WEBHOOK_TOKEN,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
@@ -233,6 +253,7 @@ function hasIsolatedIcostWebhookToken(environment) {
     environment.MODEL_API_KEY,
     environment.DEEPSEEK_API_KEY,
     environment.WEIXIN_AGENT_API_TOKEN,
+    environment.ASSISTANT_CONFIRMATION_SECRET,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .every((value) => value !== token);
@@ -2243,6 +2264,12 @@ export async function runProductionPreflight({
       isStrongSessionValue(environment.AUTH_SESSION_SECRET),
       "Session signing value is canonical base64url with at least 32 bytes.",
       "Session signing value must be canonical base64url with at least 32 bytes.",
+    ),
+    makeCheck(
+      "env.assistantSecrets",
+      hasAssistantSecretConfiguration(environment),
+      "WeChat machine and assistant confirmation secrets are strong and independent.",
+      "WEIXIN_AGENT_API_TOKEN and ASSISTANT_CONFIRMATION_SECRET must contain at least 32 bytes of high-entropy data and must not be reused.",
     ),
     makeCheck(
       "env.secureCookie",

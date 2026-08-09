@@ -92,9 +92,8 @@ function validEnvironment(origin, databaseUrl) {
   const modelApiKey = createHash("sha256")
     .update("fixture-model-api-key")
     .digest("hex");
-  const weixinAgentApiToken = createHash("sha256")
-    .update("fixture-weixin-agent-token")
-    .digest("hex");
+  const weixinAgentApiToken = Buffer.alloc(32, 4).toString("base64url");
+  const assistantConfirmationSecret = Buffer.alloc(32, 5).toString("base64url");
   const icostWebhookToken = createHash("sha256")
     .update("fixture-icost-webhook-token")
     .digest("hex");
@@ -121,6 +120,7 @@ function validEnvironment(origin, databaseUrl) {
       "MODEL_NAME=deepseek-v4-flash",
       "MODEL_TIMEOUT_MS=120000",
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
+      `ASSISTANT_CONFIRMATION_SECRET=${assistantConfirmationSecret}`,
       `ICOST_WEBHOOK_TOKEN=${icostWebhookToken}`,
       `ICOST_WEBHOOK_OWNER=${icostWebhookOwner}`,
       "ICOST_WEBHOOK_RATE_LIMIT=37",
@@ -135,6 +135,7 @@ function validEnvironment(origin, databaseUrl) {
     sessionValue,
     modelApiKey,
     weixinAgentApiToken,
+    assistantConfirmationSecret,
     icostWebhookToken,
     icostWebhookOwner,
     invoiceOcrCommand,
@@ -725,8 +726,8 @@ describe("production preflight", () => {
       }
 
       assert.equal(report.status, "failed");
-      assert.equal(report.summary.total, 24);
-      assert.equal(report.summary.passed, 23);
+      assert.equal(report.summary.total, 25);
+      assert.equal(report.summary.passed, 24);
       assert.equal(report.summary.failed, 1);
       assert.equal(
         report.checks.find((check) => check.id === "release.identity")?.status,
@@ -742,6 +743,7 @@ describe("production preflight", () => {
         "env.production",
         "env.authHash",
         "env.sessionSecret",
+        "env.assistantSecrets",
         "env.secureCookie",
         "env.cors",
         "env.solutionWrites",

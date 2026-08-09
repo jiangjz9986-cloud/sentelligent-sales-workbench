@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "../config.js";
-import { createSalesWorkbenchWeixinAgent } from "./agentBridge.js";
+import { createRemoteClawbotAgent } from "./remoteAgent.js";
 
 function backendUrlFromConfig(config) {
   return config.weixinAgentBackendUrl || `http://${config.host}:${config.port}`;
@@ -19,7 +19,8 @@ function printUsage() {
       "  WEIXIN_AGENT_API_TOKEN",
       "Optional:",
       "  WEIXIN_AGENT_BACKEND_URL",
-      "  WEIXIN_AGENT_OWNER",
+      "  WEIXIN_AGENT_SENDER_ID (otherwise conversationId is used)",
+      "  WEIXIN_AGENT_CHAT_TYPE",
     ].join("\n") + "\n",
   );
 }
@@ -53,11 +54,24 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
     throw new Error("WEIXIN_AGENT_API_TOKEN is required before starting the WeChat worker");
   }
 
-  const agent = createSalesWorkbenchWeixinAgent({
+  const remoteAgent = createRemoteClawbotAgent({
     backendUrl: backendUrlFromConfig(config),
     apiToken: config.weixinAgentApiToken,
-    owner: config.weixinAgentOwner || config.authAccount || "weixin-agent",
+    senderId: config.weixinAgentSenderId,
+    fetchImpl: options.fetchImpl ?? fetch,
   });
+  const agent = {
+    async chat(request = {}) {
+      return remoteAgent.chat({
+        ...request,
+        // weixin-agent-sdk@0.5 does not expose sender/message metadata yet.
+        // Its conversation id is the only stable sender identity available to
+        // the allowlist; a future SDK can provide a stronger senderId.
+        senderId: request.senderId || config.weixinAgentSenderId || request.conversationId,
+        chatType: request.chatType || config.weixinAgentChatType || "direct",
+      });
+    },
+  };
   const bot = sdk.start(agent);
   process.stdout.write(`WeChat worker started. Backend: ${backendUrlFromConfig(config)}\n`);
   await bot.wait();

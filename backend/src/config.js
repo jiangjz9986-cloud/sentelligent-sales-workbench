@@ -94,10 +94,32 @@ function invoiceOcrLanguagesValue(value) {
   return normalized;
 }
 
+function identifierList(value, name) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value ?? "").split(",");
+  const result = [];
+  for (const raw of values) {
+    if (typeof raw !== "string") throw new Error(`${name} contains an invalid identifier`);
+    const item = raw.trim();
+    if (!item) continue;
+    if (item.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(item)) {
+      throw new Error(`${name} contains an invalid identifier`);
+    }
+    if (!result.includes(item)) result.push(item);
+  }
+  return result;
+}
+
 function isStrongSessionSecret(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
   return decoded.length >= 32 && decoded.toString("base64url") === value;
+}
+
+function isStrongIndependentSecret(value) {
+  if (isStrongSessionSecret(value)) return true;
+  return typeof value === "string" && /^[A-Za-z0-9_-]{64,}$/.test(value);
 }
 
 function validateProductionConfig(config, { explicitAllowedOrigins }) {
@@ -110,6 +132,19 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   }
   if (!isStrongSessionSecret(config.authSessionSecret)) {
     throw new Error("AUTH_SESSION_SECRET must be canonical base64url encoding of at least 32 bytes in production");
+  }
+  if (!isStrongIndependentSecret(config.weixinAgentApiToken)) {
+    throw new Error("WEIXIN_AGENT_API_TOKEN must contain at least 32 bytes of high-entropy data in production");
+  }
+  if (!isStrongIndependentSecret(config.assistantConfirmationSecret)) {
+    throw new Error("ASSISTANT_CONFIRMATION_SECRET must contain at least 32 bytes of high-entropy data in production");
+  }
+  if (new Set([
+    config.authSessionSecret,
+    config.weixinAgentApiToken,
+    config.assistantConfirmationSecret,
+  ]).size !== 3) {
+    throw new Error("Production session, machine, and confirmation secrets must be independent");
   }
   if (!config.authCookieSecure) throw new Error("AUTH_COOKIE_SECURE must be true in production");
   if (!explicitAllowedOrigins || config.corsAllowedOrigins.length === 0) {
@@ -155,6 +190,20 @@ export function loadConfig(overrides = {}) {
     env.invoiceTextExtractionTimeoutMs ?? env.INVOICE_TEXT_EXTRACTION_TIMEOUT_MS ?? 30_000,
     "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
   );
+  const weixinAllowedSenderIds = identifierList(
+    env.weixinAllowedSenderIds ?? env.WEIXIN_ALLOWED_SENDER_IDS,
+    "WEIXIN_ALLOWED_SENDER_IDS",
+  );
+  const weixinAllowedGroupIds = identifierList(
+    env.weixinAllowedGroupIds ?? env.WEIXIN_ALLOWED_GROUP_IDS,
+    "WEIXIN_ALLOWED_GROUP_IDS",
+  );
+  const weixinAgentChatType = String(
+    env.weixinAgentChatType ?? env.WEIXIN_AGENT_CHAT_TYPE ?? "direct",
+  ).trim().toLowerCase();
+  if (!["direct", "group"].includes(weixinAgentChatType)) {
+    throw new Error("WEIXIN_AGENT_CHAT_TYPE must be direct or group");
+  }
 
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
@@ -189,9 +238,21 @@ export function loadConfig(overrides = {}) {
     jsonBodyLimitBytes,
     nodeEnv,
     weixinAgentApiToken: env.weixinAgentApiToken ?? env.WEIXIN_AGENT_API_TOKEN ?? "",
+    assistantConfirmationSecret: String(
+      env.assistantConfirmationSecret ?? env.ASSISTANT_CONFIRMATION_SECRET ?? "",
+    ).trim(),
     weixinAgentBackendUrl: env.weixinAgentBackendUrl ?? env.WEIXIN_AGENT_BACKEND_URL ?? "",
     weixinAgentOwner: env.weixinAgentOwner ?? env.WEIXIN_AGENT_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "",
+    weixinAgentSenderId: String(env.weixinAgentSenderId ?? env.WEIXIN_AGENT_SENDER_ID ?? "").trim(),
+    weixinAgentChatType,
     weixinAgentSessionHome: env.weixinAgentSessionHome ?? env.WEIXIN_AGENT_SESSION_HOME ?? "",
+    weixinAllowedSenderIds,
+    weixinAllowedGroupIds,
+    weixinAllowGroups: booleanValue(
+      env.weixinAllowGroups ?? env.WEIXIN_ALLOW_GROUPS,
+      false,
+      "WEIXIN_ALLOW_GROUPS",
+    ),
     icostWebhookToken: String(env.icostWebhookToken ?? env.ICOST_WEBHOOK_TOKEN ?? "").trim(),
     icostWebhookOwner: String(
       env.icostWebhookOwner ?? env.ICOST_WEBHOOK_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "icost",
