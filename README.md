@@ -109,7 +109,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 涉及生产发布时还要完成：
 
 - 一致性数据库备份、`quick_check`、外键检查和 SHA-256
-- 生产预检 `24/24`，其中 `env.aiModel` 强制正式 DeepSeek 模式、端点、模型和独立密钥；`release.identity` 绑定 manifest、完整 commit 和三个项目服务；`database.environmentBinding` 绑定 `DATABASE_URL`、实际数据库以及 backend/WeChat 的同一 `EnvironmentFile` 路径和 SHA-256
+- 生产预检 `25/25`，其中 `env.assistantSecrets` 强制微信机器边界和助手确认密钥独立且具有足够熵，`env.aiModel` 强制正式 DeepSeek 模式、端点、模型和独立密钥；`release.identity` 绑定 manifest、完整 commit 和三个项目服务；`database.environmentBinding` 绑定 `DATABASE_URL`、实际数据库以及 backend/WeChat 的同一 `EnvironmentFile` 路径和 SHA-256
 - 公开 HTTPS 冒烟 `25/25`
 - Chrome 桌面与移动视口验收
 - 三个项目服务、共享 Caddy 和受保护服务盘点

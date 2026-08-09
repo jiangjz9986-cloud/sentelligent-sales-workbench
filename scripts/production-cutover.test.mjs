@@ -27,6 +27,7 @@ const preflightCheckIds = [
   "env.authRequired",
   "env.authHash",
   "env.sessionSecret",
+  "env.assistantSecrets",
   "env.secureCookie",
   "env.cors",
   "env.solutionWrites",
@@ -76,7 +77,7 @@ function validPreflightReport({
       hostname: "sentelligent-production-01",
       machineIdSha256: "e".repeat(64),
     },
-    summary: { total: 24, passed: 24, failed: 0 },
+    summary: { total: 25, passed: 25, failed: 0 },
     checks: preflightCheckIds.map((id) => ({
       id,
       status: "passed",
@@ -641,7 +642,7 @@ describe("controlled production cutover", () => {
     }
   });
 
-  it("accepts only a fresh exact 24/24 preflight report bound to this cutover", () => {
+  it("accepts only a fresh exact 25/25 preflight report bound to this cutover", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-"));
     const reportPath = join(root, "preflight.json");
     const releasePath = `${projectRoot}/releases/release-candidate`;
@@ -682,13 +683,24 @@ describe("controlled production cutover", () => {
           /fresh|age/i,
         ],
         [
-          "not 24\/24",
+          "not 25\/25",
           {
             ...validPreflightReport(),
             status: "failed",
-            summary: { total: 24, passed: 23, failed: 1 },
+            summary: { total: 25, passed: 24, failed: 1 },
           },
-          /24\/24|passed/i,
+          /25\/25|passed/i,
+        ],
+        [
+          "legacy 24\/24 report without the assistant secret gate",
+          {
+            ...validPreflightReport(),
+            summary: { total: 24, passed: 24, failed: 0 },
+            checks: validPreflightReport().checks.filter(
+              (check) => check.id !== "env.assistantSecrets",
+            ),
+          },
+          /25\/25/i,
         ],
         [
           "wrong release",

@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-09
+
+### Production cutover contract
+
+- Align the guarded cutover validator with the v0.5.0 preflight contract by requiring and validating the independent `env.assistantSecrets` check.
+- Raise the exact preflight gate from `24/24` to `25/25`; a report that omits the machine/confirmation-secret gate is rejected before any service mutation.
+- Add regression coverage proving a valid 25-check report is accepted and stale, incomplete, or incorrectly bound reports remain fail-closed.
+
+### Release boundary
+
+- This patch is a new immutable release candidate. Production remains unchanged until a fresh backup, migration rehearsal, 25/25 preflight, controlled cutover, HTTPS smoke, and real browser/WeChat acceptance are complete.
+- No token, password, private key, cookie, model response, database content, or business attachment is recorded in Git or chat.
+
 ## [0.5.0] - 2026-08-09
 
 ### Persistent Clawbot assistant runtime
