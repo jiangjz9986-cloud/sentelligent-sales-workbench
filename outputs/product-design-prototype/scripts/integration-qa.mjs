@@ -10,7 +10,11 @@ import {
   createWindowsProcessFingerprint,
   stopOwnedWindowsProcess,
 } from "../../../scripts/local-dev.mjs";
-import { stopOwnedPosixProcess } from "../../../scripts/owned-posix-process.mjs";
+import {
+  registerOwnedPosixChildProcess,
+  stopOwnedPosixChildProcess,
+  stopOwnedPosixProcess,
+} from "../../../scripts/owned-posix-process.mjs";
 import { hashPassword } from "../../../backend/src/auth/password.js";
 
 const appRoot = process.cwd();
@@ -126,14 +130,26 @@ function spawnManaged(command, args, options = {}) {
   child.stderr.on("data", (chunk) => {
     child.output += chunk.toString();
   });
+  const fingerprint = createWindowsProcessFingerprint({ command, args });
+  const posixCommandTokens = fingerprint.commandTokens.filter((token) =>
+    !/^[A-Za-z_][A-Za-z0-9_]*=/.test(token));
   child.runtimeProcess = {
     pid: child.pid,
     fingerprint: {
-      ...createWindowsProcessFingerprint({ command, args }),
+      ...fingerprint,
       cwd: processCwd,
       allowExecutableWrapper: options.allowExecutableWrapper === true,
     },
   };
+  if (process.platform !== "win32" && Number.isSafeInteger(child.pid) && child.pid > 0) {
+    registerOwnedPosixChildProcess(child, {
+      detached: true,
+      pgid: child.pid,
+      cwd: processCwd,
+      executable: command,
+      commandTokens: posixCommandTokens,
+    });
+  }
   return child;
 }
 
@@ -170,10 +186,10 @@ async function waitForHttp(url, timeoutMs = 20000) {
 
 async function stopProcessTree(child) {
   if (!child?.pid) return { status: "not_running", pid: null };
-  const runtimeProcess = child.runtimeProcess ?? { pid: child.pid };
-  return process.platform === "win32"
-    ? stopOwnedWindowsProcess(runtimeProcess)
-    : stopOwnedPosixProcess(runtimeProcess);
+  if (process.platform === "win32") {
+    return stopOwnedWindowsProcess(child.runtimeProcess ?? { pid: child.pid });
+  }
+  return stopOwnedPosixChildProcess(child);
 }
 
 async function assertOwnedWslListener(port, { backendWslPath, databaseUrl }, { terminate = false } = {}) {
@@ -496,37 +512,74 @@ async function waitForDevTools(profilePath) {
 
 async function openChromeCdp() {
   const profilePath = mkdtempSync(join(tmpdir(), "sent-zx-integration-chrome-"));
-  const chrome = spawnManaged(chromePath, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--remote-debugging-port=0",
-    `--user-data-dir=${profilePath}`,
-    "about:blank",
-  ], { allowExecutableWrapper: true });
+  let chrome;
+  try {
+    chrome = spawnManaged(chromePath, [
+      "--headless=new",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--remote-debugging-port=0",
+      `--user-data-dir=${profilePath}`,
+      "about:blank",
+    ], { allowExecutableWrapper: true });
 
-  const port = await waitForDevTools(profilePath);
-  const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
-  const page = pages.find((item) => item.type === "page");
-  if (!page) throw new Error("No Chrome page target found for integration QA.");
-  const cdp = await connectCdp(page.webSocketDebuggerUrl);
-  await cdp.send("Page.enable");
-  await cdp.send("Runtime.enable");
-  await cdp.send("Log.enable");
-  await cdp.send("Network.enable");
+    const port = await waitForDevTools(profilePath);
+    const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then((response) => response.json());
+    const page = pages.find((item) => item.type === "page");
+    if (!page) throw new Error("No Chrome page target found for integration QA.");
+    const cdp = await connectCdp(page.webSocketDebuggerUrl);
+    await cdp.send("Page.enable");
+    await cdp.send("Runtime.enable");
+    await cdp.send("Log.enable");
+    await cdp.send("Network.enable");
 
-  return {
-    ...cdp,
-    async close() {
-      cdp.ws.close();
-      const stopResult = await stopProcessTree(chrome);
-      await removeDirectoryWhenReleased(profilePath);
-      if (!["terminated", "not_running"].includes(stopResult.status)) {
-        throw new Error(`Refused unverified browser cleanup for PID ${chrome.pid}: ${stopResult.status}`);
+    return {
+      ...cdp,
+      async close() {
+        const cleanupErrors = [];
+        try {
+          cdp.ws.close();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        try {
+          const stopResult = await stopProcessTree(chrome);
+          if (!["terminated", "already_closed", "not_running"].includes(stopResult.status)) {
+            cleanupErrors.push(new Error(`Refused unverified browser cleanup for PID ${chrome.pid}: ${stopResult.status}`));
+          }
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        try {
+          await removeDirectoryWhenReleased(profilePath);
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        if (cleanupErrors.length === 1) throw cleanupErrors[0];
+        if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "Browser cleanup failed");
+      },
+    };
+  } catch (error) {
+    const cleanupErrors = [error];
+    if (chrome) {
+      try {
+        const stopResult = await stopProcessTree(chrome);
+        if (!["terminated", "already_closed", "not_running"].includes(stopResult.status)) {
+          cleanupErrors.push(new Error(`Refused unverified browser cleanup for PID ${chrome.pid}: ${stopResult.status}`));
+        }
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
       }
-    },
-  };
+    }
+    try {
+      await removeDirectoryWhenReleased(profilePath);
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (cleanupErrors.length === 1) throw error;
+    throw new AggregateError(cleanupErrors, "Chrome bootstrap failed and cleanup was incomplete");
+  }
 }
 
 async function evaluate(cdp, expression) {

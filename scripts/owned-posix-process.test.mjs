@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { describe, it } from "node:test";
 
 import {
   matchesPosixProcessFingerprint,
+  registerOwnedPosixChildProcess,
+  stopOwnedPosixChildProcess,
   stopOwnedPosixProcess,
 } from "./owned-posix-process.mjs";
 
@@ -150,5 +153,30 @@ describe("owned POSIX process cleanup", () => {
     assert.equal(result.status, "termination_failed");
     assert.equal(result.pid, 42);
     assert.match(result.message, /did not exit/i);
+  });
+
+  it("terminates a registered detached child and closes its output pipes", async () => {
+    const child = spawn(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      "setInterval(() => {}, 1000)",
+    ], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    registerOwnedPosixChildProcess(child, {
+      detached: true,
+      pgid: child.pid,
+      cwd: process.cwd(),
+      executable: process.execPath,
+      commandTokens: ["--input-type=module", "--eval"],
+    });
+
+    const result = await stopOwnedPosixChildProcess(child, { timeoutMs: 1000 });
+
+    assert.equal(result.status, "terminated");
+    assert.equal(child.stdout.destroyed, true);
+    assert.equal(child.stderr.destroyed, true);
   });
 });
