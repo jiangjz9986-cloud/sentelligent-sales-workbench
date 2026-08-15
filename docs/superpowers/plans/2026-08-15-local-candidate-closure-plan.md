@@ -62,14 +62,27 @@
 - [ ] 运行 StageStrip focused tests、前端 `qa:local`，确认无残留进程/临时 profile。
 - [ ] 再运行 `qa:integration` 与 `qa:webkit`，保存报告和退出码。
 
-### Task 4: 主控集成与最终门禁
+### Task 3B: Chrome integration cleanup 正常退出
 
 **Files:**
-- Modify only by cherry-pick from reviewed Task 1–3 commits plus the existing four-file candidate.
+- Inspect/modify only `outputs/product-design-prototype/scripts/integration-qa.mjs`, `scripts/owned-posix-process.mjs`, `scripts/owned-posix-process.test.mjs`, and `scripts/release-boundary.test.mjs`.
 
 **Steps:**
 
-- [ ] 按 Task 1→Task 2→Task 3 顺序 cherry-pick 到集成 worktree，逐次运行 focused tests。
+- [ ] 在显式 `CHROME_PATH` 和 native runtime 下运行 `qa:integration`，记录业务 JSON 输出后的具体等待点、被拥有 PID/进程组、profile 和监听端口。
+- [ ] 为确认的 cleanup 根因写最小 RED 回归测试，验证未完成清理会使命令挂起或留下拥有进程。
+- [ ] 实现有界、指纹校验的 cleanup 修复；不得 broad-kill、忽略 cleanup error 或强制 `process.exit(0)`。
+- [ ] 运行 focused lifecycle tests、`qa:integration`，要求业务报告通过且 shell 正常 exit `0`，并证明无 backend/frontend/Chrome/profile 残留。
+- [ ] 运行 `node --test scripts/release-boundary.test.mjs scripts/owned-posix-process.test.mjs` 与 `git diff --check`，提交精确文件清单。
+
+### Task 4: 主控集成与最终门禁
+
+**Files:**
+- Modify only by cherry-pick from reviewed Task 1–3B commits plus the existing four-file candidate.
+
+**Steps:**
+
+- [ ] 按 Task 1→Task 2→Task 3→Task 3B 顺序 cherry-pick 到集成 worktree，逐次运行 focused tests。
 - [ ] 运行 `node --test backend/tests/capability-catalog.test.js backend/tests/project-analysis.test.js`、`npm --prefix backend test`。
 - [ ] 运行 `npm run scan:secrets`、`node --test scripts/*.test.mjs`、前端 `qa:local`、`qa:integration`、`qa:webkit` 和 `npm run qa:full`。
 - [ ] 运行 `git diff --check`、精确 changed-file inventory、tracked-sensitive audit 和最终 diff review。
