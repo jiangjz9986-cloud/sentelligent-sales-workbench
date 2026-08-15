@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -643,7 +644,7 @@ describe("controlled production cutover", () => {
   });
 
   it("accepts only a fresh exact 25/25 preflight report bound to this cutover", () => {
-    const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-")));
     const reportPath = join(root, "preflight.json");
     const releasePath = `${projectRoot}/releases/release-candidate`;
     const currentReleasePath = `${projectRoot}/releases/current-release`;

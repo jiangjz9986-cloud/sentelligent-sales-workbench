@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -34,7 +35,7 @@ const projectNodeExecutable =
   "/opt/sentelligent-sales-workbench/runtime/node-v24/bin/node";
 
 function makeWorkspace() {
-  const root = mkdtempSync(join(tmpdir(), "sentelligent-preflight-"));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "sentelligent-preflight-")));
   return {
     root,
     write(relativePath, content) {

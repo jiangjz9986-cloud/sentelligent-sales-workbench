@@ -55,6 +55,7 @@ const WINDOWS_IMPLICIT_BUILD_ENV_NAMES = Object.freeze([
   "USERNAME",
   "USERPROFILE",
 ]);
+const DARWIN_IMPLICIT_BUILD_ENV_NAMES = Object.freeze(["__CF_USER_TEXT_ENCODING"]);
 
 export const REQUIRED_ENV_NAMES = Object.freeze([
   "NODE_ENV",
@@ -994,6 +995,9 @@ function frontendBuildAllowedNames(environment) {
   const names = new Set(Object.keys(environment));
   if (process.platform === "win32") {
     for (const name of WINDOWS_IMPLICIT_BUILD_ENV_NAMES) names.add(name);
+  }
+  if (process.platform === "darwin") {
+    for (const name of DARWIN_IMPLICIT_BUILD_ENV_NAMES) names.add(name);
   }
   return [...names].sort(compareUtf8Paths);
 }
