@@ -247,6 +247,7 @@ const testFixtureMarkers = new Set([
   "analysis",
   "audit",
   "blocked",
+  "closure",
   "csrf",
   "dev",
   "development",
@@ -262,10 +263,14 @@ const testFixtureMarkers = new Set([
   "qa",
   "sample",
   "secret",
+  "synthetic",
   "test",
+  "tests",
   "token",
   "unit",
+  "vendor",
   "visual",
+  "worker",
   "wrong",
 ]);
 
@@ -307,13 +312,22 @@ const placeholderWords = new Set([
   ...testFixtureMarkers,
   "a",
   "access",
+  "account",
+  "and",
   "api",
+  "at",
   "backend",
   "be",
+  "bytes",
+  "clear",
   "client",
   "conflict",
+  "confirmation",
+  "context",
   "credential",
   "current",
+  "delivery",
+  "direct",
   "env",
   "existing",
   "expired",
@@ -322,33 +336,51 @@ const placeholderWords = new Set([
   "export",
   "extra",
   "failure",
+  "file",
+  "files",
   "for",
+  "forwarded",
   "from",
   "hash",
   "here",
   "in",
+  "independent",
   "icost",
+  "is",
   "key",
+  "least",
   "login",
   "logout",
   "me",
+  "message",
   "methods",
+  "name",
   "new",
   "old",
   "only",
+  "other",
   "plaintext",
   "private",
   "production",
   "provider",
   "restore",
   "restored",
+  "real",
+  "runtime",
   "session",
   "shared",
   "short",
+  "scope",
+  "single",
   "stale",
+  "synthetic",
   "tests",
+  "thirty",
+  "two",
+  "upstream",
   "used",
   "value",
+  "vendor",
   "webhook",
   "weixin",
 ]);
@@ -361,11 +393,13 @@ function isTestSourcePath(filePath) {
   );
 }
 
-function placeholderParts(value) {
+function placeholderParts(value, { maxParts = 8 } = {}) {
   const normalized = value.replace(/([a-z0-9])([A-Z])/g, "$1-$2");
   if (
     normalized.length > 96 ||
-    !/^[A-Za-z0-9]+(?:[-_ ][A-Za-z0-9]+){0,7}$/.test(normalized)
+    !new RegExp(
+      `^[A-Za-z0-9]+(?:[-_ ][A-Za-z0-9]+){0,${maxParts - 1}}$`,
+    ).test(normalized)
   ) {
     return null;
   }
@@ -384,7 +418,7 @@ function isExplicitPlaceholderLabel(value) {
 
 function isExplicitTestFixtureLabel(value, filePath) {
   if (!isTestSourcePath(filePath)) return false;
-  const parts = placeholderParts(value);
+  const parts = placeholderParts(value, { maxParts: 12 });
   return parts !== null && parts.some((part) => testFixtureMarkers.has(part));
 }
 

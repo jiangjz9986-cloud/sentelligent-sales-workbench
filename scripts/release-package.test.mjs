@@ -2156,6 +2156,8 @@ describe("portable release package", () => {
           'const icostWebhookToken = "qa-icost-webhook-token";',
           'const modelApiKey = "test-expense-analysis-key";',
           'const providerSecret = "test-provider-error-secret";',
+          'const contextSecret = "synthetic-direct-context-value";',
+          'const closureSecret = "closure-confirmation-secret-for-synthetic-direct-message-delivery-tests-only";',
           "",
         ].join("\n"),
       );
@@ -2208,7 +2210,7 @@ describe("portable release package", () => {
     const sensitiveFixtures = [
       {
         path: "config/runtime-placeholder.yaml",
-        value: "machine-secret",
+        value: "synthetic-direct-context-value",
         content(value) {
           return `clientSecret: ${value}\n`;
         },
