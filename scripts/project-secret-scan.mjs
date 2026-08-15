@@ -170,6 +170,22 @@ function isTestSourcePath(filePath) {
   );
 }
 
+function isDocumentationPath(filePath) {
+  const normalized = String(filePath ?? "").replaceAll("\\", "/");
+  const fileName = basename(normalized).toLowerCase();
+  return (
+    /(?:^|\/)(?:docs?|documentation)(?:\/|$)/i.test(normalized) ||
+    /^(?:readme|changelog|contributing|code_of_conduct|security)(?:\.(?:md|mdx|txt|rst|adoc))?$/i.test(
+      fileName,
+    )
+  );
+}
+
+function allowsBoundedPlaceholderContext(filePath, source = "working-tree") {
+  return source !== "git-history-message" &&
+    (isTestSourcePath(filePath) || isDocumentationPath(filePath));
+}
+
 function isExplicitTestFixtureValue(value, filePath) {
   if (!isTestSourcePath(filePath)) return false;
   return [
@@ -317,25 +333,28 @@ function boundedPlaceholderParts(value) {
     : null;
 }
 
-function isBoundedPlaceholderLabel(value, filePath) {
+function isBoundedPlaceholderLabel(value, { allowBoundedPlaceholder = false } = {}) {
   const parts = boundedPlaceholderParts(value);
   if (parts === null) return false;
+  if (!allowBoundedPlaceholder) return false;
   if (boundedPlaceholderSafeLeadWords.has(parts[0])) return true;
   if (parts.slice(0, 3).join("-") === "must-not-be") return true;
-  return (
-    isTestSourcePath(filePath) &&
-    parts.some((part) => boundedPlaceholderStrongMarkers.has(part))
-  );
+  return parts.some((part) => boundedPlaceholderStrongMarkers.has(part));
 }
 
-function isExplicitPlaceholderValue(value) {
-  return [
+function isExplicitPlaceholderValue(value, { allowBoundedPlaceholder = false } = {}) {
+  const patterns = [
     /^(?:change[-_ ]?me|replace[-_ ]?me|placeholder|redacted|unset|tbd|todo)$/i,
-    /^(?:example|fixture|dummy|fake|sample|mock|test)(?:[-_ ][a-z]+){0,5}$/i,
-    /^(?:test|fixture)\d{1,4}$/i,
     /^[a-z]+[-_]from[-_]env(?:[-_][a-z]+){0,3}$/i,
     /^(?:set[-_]in|your[-_])(?:[-_][a-z]+){1,4}$/i,
-  ].some((pattern) => pattern.test(value));
+  ];
+  if (allowBoundedPlaceholder) {
+    patterns.push(
+      /^(?:example|fixture|dummy|fake|sample|mock|test)(?:[-_ ][a-z]+){0,5}$/i,
+      /^(?:test|fixture)\d{1,4}$/i,
+    );
+  }
+  return patterns.some((pattern) => pattern.test(value));
 }
 
 function isJavaScriptExpressionValue(value, { allowObjectOrArray = false } = {}) {
@@ -365,6 +384,7 @@ function isPlaceholderValue(
   assignmentKey = "",
   {
     allowJavaScriptExpression = true,
+    allowBoundedPlaceholder = false,
   } = {},
 ) {
   const value = String(rawValue ?? "").trim();
@@ -385,9 +405,10 @@ function isPlaceholderValue(
     return true;
   }
   return (
-    isExplicitPlaceholderValue(value) ||
-    isBoundedPlaceholderLabel(value, filePath) ||
-    (/(?:test|fixture|synthetic)/i.test(assignmentKey) &&
+    isExplicitPlaceholderValue(value, { allowBoundedPlaceholder }) ||
+    isBoundedPlaceholderLabel(value, { allowBoundedPlaceholder }) ||
+    (allowBoundedPlaceholder &&
+      /(?:test|fixture|synthetic)/i.test(assignmentKey) &&
       boundedPlaceholderParts(value) !== null)
   );
 }
@@ -581,7 +602,11 @@ function maskSourceComments(text, filePath) {
   return masked.join("");
 }
 
-function shouldReportAssignment(match, filePath, { commentOnly = false } = {}) {
+function shouldReportAssignment(
+  match,
+  filePath,
+  { commentOnly = false, source = "working-tree" } = {},
+) {
   if (!isSensitiveAssignmentKey(match[1])) return false;
   const quotedValue = match[2] ?? match[3] ?? match[6];
   const value = quotedValue ?? match[4] ?? match[5] ?? match[7] ?? "";
@@ -593,9 +618,11 @@ function shouldReportAssignment(match, filePath, { commentOnly = false } = {}) {
   if (commentOnly && /[\\/]/u.test(value) && !/[A-Z0-9]/u.test(value)) {
     return false;
   }
+  const allowBoundedPlaceholder = allowsBoundedPlaceholderContext(filePath, source);
   return (
     !isPlaceholderValue(value, filePath, match[1], {
       allowJavaScriptExpression: quotedValue === undefined,
+      allowBoundedPlaceholder,
     }) &&
     (isCredentialLikeLiteral(value) ||
       (!isTestSourcePath(filePath) && boundedPlaceholderParts(value) !== null))
@@ -618,7 +645,7 @@ function scanText(text, metadata) {
     const assignmentLine = assignmentLines[index] ?? line;
     sensitiveAssignmentPattern.lastIndex = 0;
     for (const match of assignmentLine.matchAll(sensitiveAssignmentPattern)) {
-      if (shouldReportAssignment(match, metadata.file)) {
+      if (shouldReportAssignment(match, metadata.file, { source: metadata.source })) {
         findings.push({ ...metadata, line: index + 1, pattern: "API key assignment" });
       }
     }
@@ -636,7 +663,10 @@ function scanText(text, metadata) {
         if (
           maskedFragment.length === match[0].length &&
           /^\s*$/u.test(maskedFragment) &&
-          shouldReportAssignment(match, metadata.file, { commentOnly: true })
+          shouldReportAssignment(match, metadata.file, {
+            commentOnly: true,
+            source: metadata.source,
+          })
         ) {
           findings.push({ ...metadata, line: index + 1, pattern: "API key assignment" });
         }

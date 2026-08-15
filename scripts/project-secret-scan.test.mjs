@@ -647,7 +647,7 @@ describe("project secret scan", () => {
         ].join("\n"),
       );
       workspace.write(
-        "vendor/upstream.mjs",
+        "docs/vendor/upstream.mjs",
         [
           [
             "const apiToken",
@@ -729,6 +729,56 @@ describe("project secret scan", () => {
     }
   });
 
+  it("reports bounded safe-lead assignments in production config while allowing test and docs fixtures", () => {
+    const workspace = makeWorkspace();
+    const boundedValues = {
+      synthetic: ["synthetic", "direct", "context", "value"].join("-"),
+      vendor: ["vendor", "public", "placeholder", "token", "name"].join("-"),
+      fixture: ["fixture", "api", "token", "name"].join("-"),
+    };
+    try {
+      workspace.write(
+        "tests/bounded-labels.test.js",
+        [
+          ["const authSecret", JSON.stringify(boundedValues.synthetic)].join(" = ") + ";",
+          ["const apiToken", JSON.stringify(boundedValues.vendor)].join(" = ") + ";",
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "docs/secret-fixtures.md",
+        [
+          ["AUTH_SECRET", boundedValues.synthetic].join("="),
+          ["API_TOKEN", boundedValues.fixture].join("="),
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "config/production.env",
+        [
+          ["AUTH_SECRET", boundedValues.synthetic].join("="),
+          ["API_TOKEN", boundedValues.vendor].join("="),
+          ["TEST_SECRET", boundedValues.fixture].join("="),
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root, includeGitHistory: false });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.file, item.line, item.pattern]),
+        [
+          ["config/production.env", 1, "API key assignment"],
+          ["config/production.env", 2, "API key assignment"],
+          ["config/production.env", 3, "API key assignment"],
+        ],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("ignores synthetic cursor retry context only in historical test paths", () => {
     const workspace = makeWorkspace();
     const syntheticContext = ["synthetic", "cursor", "retry", "context"].join("-");
@@ -785,6 +835,85 @@ describe("project secret scan", () => {
       assert.deepEqual(
         result.findings.map((item) => [item.source, item.file, item.pattern]),
         [["working-tree", "config/production.env", "API key assignment"]],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("reports bounded safe-lead assignments in history blobs and commit messages outside test/docs contexts", () => {
+    const workspace = makeWorkspace();
+    const boundedValues = {
+      synthetic: ["synthetic", "direct", "context", "value"].join("-"),
+      vendor: ["vendor", "public", "placeholder", "token", "name"].join("-"),
+      fixture: ["fixture", "api", "token", "name"].join("-"),
+    };
+    try {
+      initializeRepository(workspace);
+      workspace.write(
+        "tests/bounded-labels.test.js",
+        [
+          ["const authSecret", JSON.stringify(boundedValues.synthetic)].join(" = ") + ";",
+          ["const apiToken", JSON.stringify(boundedValues.vendor)].join(" = ") + ";",
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "docs/secret-fixtures.md",
+        [
+          ["AUTH_SECRET", boundedValues.synthetic].join("="),
+          ["API_TOKEN", boundedValues.fixture].join("="),
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "config/production.env",
+        [
+          ["AUTH_SECRET", boundedValues.synthetic].join("="),
+          ["API_TOKEN", boundedValues.vendor].join("="),
+          ["TEST_SECRET", boundedValues.fixture].join("="),
+          "",
+        ].join("\n"),
+      );
+      commitAll(
+        workspace,
+        [
+          "bounded fixture labels",
+          ["AUTH_SECRET", boundedValues.synthetic].join("="),
+          ["API_TOKEN", boundedValues.vendor].join("="),
+          "",
+        ].join("\n"),
+      );
+      git(
+        workspace.root,
+        "rm",
+        "tests/bounded-labels.test.js",
+        "docs/secret-fixtures.md",
+        "config/production.env",
+      );
+      git(workspace.root, "commit", "-m", "remove bounded fixtures");
+
+      const result = scanProjectSecrets({ root: workspace.root });
+      const historyBlobFindings = result.findings.filter((item) => item.source === "git-history");
+      const historyMessageFindings = result.findings.filter(
+        (item) => item.source === "git-history-message",
+      );
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        historyBlobFindings.map((item) => [item.file, item.line, item.pattern]),
+        [
+          ["config/production.env", 1, "API key assignment"],
+          ["config/production.env", 2, "API key assignment"],
+          ["config/production.env", 3, "API key assignment"],
+        ],
+      );
+      assert.equal(historyMessageFindings.length, 2);
+      assert.ok(historyMessageFindings.every((item) => item.messageType === "commit"));
+      assert.ok(
+        result.findings.every(
+          (item) => !item.file.startsWith("tests/") && !item.file.startsWith("docs/"),
+        ),
       );
     } finally {
       workspace.cleanup();
