@@ -41,7 +41,9 @@ describe("Phase 1 release boundary", () => {
     assert.match(localDev, /stopOwnedWindowsProcess/);
     assert.match(localDev, /fingerprint/);
     assert.match(integrationQa, /stopOwnedWindowsProcess/);
-    assert.match(integrationQa, /stopOwnedPosixProcess/);
+    assert.match(integrationQa, /registerOwnedPosixChildProcess/);
+    assert.match(integrationQa, /stopOwnedPosixChildProcess/);
+    assert.doesNotMatch(integrationQa, /stopOwnedPosixProcess/);
     assert.match(integrationQa, /process\.platform\s*===\s*["']win32["']/);
     assert.match(integrationQa, /assertOwnedWslListener/);
   });
@@ -77,6 +79,15 @@ describe("Phase 1 release boundary", () => {
     assert.match(integrationQa, /AggregateError/);
     assert.doesNotMatch(integrationQa, /stopWslPort\([^\n]+\.catch\(\(\) => \{\}\)/);
     assert.doesNotMatch(integrationQa, /runProcess\("wsl\.exe", \[[\s\S]{0,300}\]\)\.catch\(\(\) => \{\}\)/);
+  });
+
+  it("accepts an already-closed owned child as a valid cleanup terminal state", () => {
+    const integrationQa = sources.get("outputs/product-design-prototype/scripts/integration-qa.mjs");
+
+    assert.match(
+      integrationQa,
+      /if \(result && !\["terminated", "already_closed", "not_running"\]\.includes\(result\.status\)\)/,
+    );
   });
 
   it("runs the WSL ownership check in a non-login shell", () => {

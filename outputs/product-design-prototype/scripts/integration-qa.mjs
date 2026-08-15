@@ -13,7 +13,6 @@ import {
 import {
   registerOwnedPosixChildProcess,
   stopOwnedPosixChildProcess,
-  stopOwnedPosixProcess,
 } from "../../../scripts/owned-posix-process.mjs";
 import { hashPassword } from "../../../backend/src/auth/password.js";
 
@@ -3088,7 +3087,7 @@ async function main() {
       }
     };
     const assertStopped = (label, result) => {
-      if (result && !["terminated", "not_running"].includes(result.status)) {
+      if (result && !["terminated", "already_closed", "not_running"].includes(result.status)) {
         cleanupErrors.push(new Error(`${label}: refused process cleanup (${result.status})`));
       }
     };
