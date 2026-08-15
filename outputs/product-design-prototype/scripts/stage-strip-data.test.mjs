@@ -8,7 +8,10 @@ import { after, before, describe, it } from "node:test";
 
 import { createServer } from "vite";
 
-import { resolveStageStripBrowserTimeoutMs } from "./stage-strip-timeout.mjs";
+import {
+  resolveStageStripBrowserTimeoutMs,
+  waitForChildProcess,
+} from "./stage-strip-timeout.mjs";
 
 const chromePath = [
   process.env.CHROME_PATH,
@@ -69,56 +72,6 @@ async function terminateChildProcess(child) {
   });
 }
 
-function waitForChildProcess(child, { timeoutMs, terminate, cleanup }) {
-  return new Promise((resolveCompletion, rejectCompletion) => {
-    let settled = false;
-    let timeout;
-
-    async function finish({ code, error, shouldTerminate = false }) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      child.off("close", handleClose);
-      child.off("error", handleError);
-
-      let finalError = error;
-      if (shouldTerminate) {
-        try {
-          await terminate();
-        } catch (terminationError) {
-          finalError ??= terminationError;
-        }
-      }
-
-      try {
-        await cleanup();
-      } catch (cleanupError) {
-        finalError ??= cleanupError;
-      }
-
-      if (finalError) rejectCompletion(finalError);
-      else resolveCompletion(code);
-    }
-
-    function handleClose(code) {
-      void finish({ code });
-    }
-
-    function handleError(error) {
-      void finish({ error, shouldTerminate: true });
-    }
-
-    child.once("close", handleClose);
-    child.once("error", handleError);
-    timeout = setTimeout(() => {
-      void finish({
-        error: new Error(`Headless browser timed out after ${timeoutMs} ms`),
-        shouldTerminate: true,
-      });
-    }, timeoutMs);
-  });
-}
-
 async function renderFixture(name) {
   const browserTimeoutMs = resolveStageStripBrowserTimeoutMs();
   const userDataDir = mkdtempSync(join(tmpdir(), "stage-strip-test-"));
@@ -149,19 +102,27 @@ async function renderFixture(name) {
     throw error;
   }
 
-  const completion = waitForChildProcess(browser, {
-    timeoutMs: browserTimeoutMs,
-    cleanup,
-    terminate: () => terminateChildProcess(browser),
-  });
   let stdout = "";
   let stderr = "";
+  const snapshotPattern = /data-stage-strip-snapshot="([^"]+)"/;
+  let resolveSnapshotOutput;
+  const snapshotOutput = new Promise((resolve) => {
+    resolveSnapshotOutput = resolve;
+  });
 
   browser.stdout.on("data", (chunk) => {
     stdout += chunk.toString();
+    if (snapshotPattern.test(stdout)) resolveSnapshotOutput();
   });
   browser.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
+  });
+
+  const completion = waitForChildProcess(browser, {
+    timeoutMs: browserTimeoutMs,
+    cleanup,
+    successSignal: snapshotOutput,
+    terminate: () => terminateChildProcess(browser),
   });
 
   const code = await completion;
@@ -169,7 +130,7 @@ async function renderFixture(name) {
     throw new Error(`Headless browser exited with ${code}: ${stderr}`);
   }
 
-  const encodedSnapshot = stdout.match(/data-stage-strip-snapshot="([^"]+)"/)?.[1];
+  const encodedSnapshot = stdout.match(snapshotPattern)?.[1];
   if (!encodedSnapshot) {
     throw new Error(`StageStrip fixture did not render. Browser output: ${stdout}\n${stderr}`);
   }

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
   DEFAULT_STAGE_STRIP_BROWSER_TIMEOUT_MS,
   resolveStageStripBrowserTimeoutMs,
+  waitForChildProcess,
 } from "./stage-strip-timeout.mjs";
 
 const stageStripDataTestSource = readFileSync(
@@ -54,4 +56,32 @@ test("validates the timeout before creating a temp directory or launching Chrome
   assert.ok(timeoutResolution > renderFixtureStart, "renderFixture must resolve the timeout");
   assert.ok(timeoutResolution < tempDirectoryCreation, "timeout validation must happen before temp directory creation");
   assert.ok(timeoutResolution < chromeLaunch, "timeout validation must happen before Chrome launch");
+});
+
+test("finishes after a success signal before the browser process closes", async () => {
+  const child = new EventEmitter();
+  let resolveSuccess;
+  let cleanupCalls = 0;
+  let terminateCalls = 0;
+  const successSignal = new Promise((resolve) => {
+    resolveSuccess = resolve;
+  });
+  const completion = waitForChildProcess(child, {
+    timeoutMs: 20,
+    cleanup: async () => {
+      cleanupCalls += 1;
+    },
+    successSignal,
+    terminate: async () => {
+      terminateCalls += 1;
+    },
+  });
+
+  resolveSuccess();
+  child.emit("close", 1);
+  child.emit("error", new Error("late child error"));
+
+  assert.equal(await completion, 0);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(terminateCalls, 1);
 });
