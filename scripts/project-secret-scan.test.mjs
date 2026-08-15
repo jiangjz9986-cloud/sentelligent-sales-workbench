@@ -428,6 +428,31 @@ describe("project secret scan", () => {
     }
   });
 
+  it("ignores synthetic cursor retry context only in historical test paths", () => {
+    const workspace = makeWorkspace();
+    const syntheticContext = ["synthetic", "cursor", "retry", "context"].join("-");
+    try {
+      initializeRepository(workspace);
+      workspace.write(
+        "backend/tests/weixin-vendor-adapter.test.js",
+        `const payload = { context_token: ${JSON.stringify(syntheticContext)} };\n`,
+      );
+      workspace.write("config/production.env", `CONTEXT_TOKEN="${syntheticContext}"\n`);
+      commitAll(workspace, "synthetic cursor retry fixture");
+      git(workspace.root, "rm", "backend/tests/weixin-vendor-adapter.test.js", "config/production.env");
+      git(workspace.root, "commit", "-m", "remove synthetic fixture");
+
+      const result = scanProjectSecrets({ root: workspace.root });
+      const historyFindings = result.findings.filter((item) => item.source === "git-history");
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(historyFindings.map((item) => item.file), ["config/production.env"]);
+      assert.equal(historyFindings[0]?.pattern, "API key assignment");
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("scans commit, annotated tag, and Git notes messages", () => {
     const workspace = makeWorkspace();
     const commitPassword = ["Commit", "735280", "!"].join("");

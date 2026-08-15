@@ -167,6 +167,7 @@ function isExplicitTestFixtureValue(value, filePath) {
     /^(?:machine|model)[-_](?:secret|key)$/i,
     /^(?:session|wx)[-_]token$/i,
     /^(?:wx|machine|visual|analysis|secret)[-_](?:[a-z]+[-_]){0,2}(?:token|csrf|secret|key)$/i,
+    /^synthetic[-_]cursor[-_]retry[-_]context$/i,
     /^legacy[-_]plaintext$/i,
     /^(?:must[-_]not[-_]be[-_]used|too[-_]short|not[-_]a[-_]hash)$/i,
   ].some((pattern) => pattern.test(value));
