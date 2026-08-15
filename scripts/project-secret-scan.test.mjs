@@ -101,6 +101,25 @@ describe("project secret scan", () => {
     }
   });
 
+  it("finds OpenAI-style provider keys in TypeScript module declaration files", () => {
+    const workspace = makeWorkspace();
+    try {
+      workspace.write(
+        "src/runtime-config.mts",
+        `export declare const apiKey: "${sampleProviderKey}";\n`,
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.ok(result.findings.some((item) =>
+        item.file === "src/runtime-config.mts" && item.pattern === "OpenAI-style key",
+      ));
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("ignores dependency and generated folders", () => {
     const workspace = makeWorkspace();
     try {
@@ -218,6 +237,14 @@ describe("project secret scan", () => {
         ].join("\n"),
       );
       workspace.write(
+        "integrations/icost-shortcut/verify-shortcut.mjs",
+        [
+          "const TOKEN_ACTION = ",
+          JSON.stringify(["is", "workflow", "actions", "gettext"].join(".")),
+          ";\n",
+        ].join(""),
+      );
+      workspace.write(
         "scripts/integration-qa.mjs",
         'const config = { AUTH_SESSION_SECRET: "qa-session-secret" };\n',
       );
@@ -256,6 +283,45 @@ describe("project secret scan", () => {
     }
   });
 
+  it("does not treat quoted JSON or array literals as JavaScript expressions", () => {
+    const workspace = makeWorkspace();
+    const objectCredential = ["Obj", "735280", "!"].join("");
+    const arrayCredential = ["Arr", "864291", "!"].join("");
+    try {
+      workspace.write(
+        "src/config.js",
+        [
+          [
+            "const authSecret = '",
+            JSON.stringify({ token: objectCredential }),
+            "';",
+          ].join(""),
+          [
+            "const apiToken = '",
+            JSON.stringify([arrayCredential]),
+            "';",
+          ].join(""),
+          [
+            "const escapedSecret = ",
+            JSON.stringify(JSON.stringify({ token: objectCredential })),
+            ";",
+          ].join(""),
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.equal(
+        result.findings.filter((item) => item.pattern === "API key assignment").length,
+        3,
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("finds credential-like literal assignments in configuration files", () => {
     const workspace = makeWorkspace();
     const samplePassword = ["local", "735280"].join("");
@@ -266,6 +332,232 @@ describe("project secret scan", () => {
 
       assert.equal(result.status, "failed");
       assert.equal(result.findings[0]?.pattern, "API key assignment");
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("does not let action identifiers or local paths hide sensitive literals", () => {
+    const workspace = makeWorkspace();
+    try {
+      workspace.write(
+        "config/app.env",
+        [
+          "AUTH_SECRET=com.Prod735280!",
+          "AUTH_PASSWORD=/home/Prod735280!",
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "src/config.js",
+        [
+          "const password = ",
+          JSON.stringify(["/home/Prod", "735280!"].join("")),
+          ";\n",
+        ].join(""),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.equal(result.findings.length, 3);
+      assert.ok(result.findings.every((item) => item.pattern === "API key assignment"));
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("finds sensitive assignments inside comments while preserving strings", () => {
+    const workspace = makeWorkspace();
+    const sensitiveKey = ["AUTH", "PASSWORD"].join("_");
+    const commentPath = ["/home/Prod", "735280!"].join("");
+    const realSecret = ["Prod", "735280!"].join("");
+    const urlSecret = ["https://example.invalid/", realSecret].join("");
+    const commentProviderKey = ["sk", "C".repeat(24)].join("-");
+    try {
+      workspace.write(
+        "src/comments.js",
+        [
+          [
+            "const marker = 1; // trailing comment ",
+            sensitiveKey,
+            "=",
+            JSON.stringify(commentPath),
+          ].join(""),
+          [
+            "const blockMarker = 2; /* same-line block comment ",
+            sensitiveKey,
+            "=",
+            JSON.stringify(commentPath),
+            " */",
+          ].join(""),
+          [
+            "const multiLineMarker = 3; /* comment begins here ",
+            sensitiveKey,
+            "=",
+            JSON.stringify(commentPath),
+          ].join(""),
+          [
+            sensitiveKey,
+            "=",
+            JSON.stringify(commentPath),
+            " still in the block comment */",
+          ].join(""),
+          [
+            "const actualSecret = ",
+            JSON.stringify(realSecret),
+            ";",
+          ].join(""),
+          [
+            "const urlContainingSecret = ",
+            JSON.stringify(urlSecret),
+            ";",
+          ].join(""),
+          [
+            "const slashContainingSecret = ",
+            JSON.stringify(["value//", realSecret].join("")),
+            ";",
+          ].join(""),
+          [
+            "const blockMarkerContainingSecret = ",
+            JSON.stringify(["value/*", realSecret, "*/"].join("")),
+            ";",
+          ].join(""),
+          [
+            "const escapedQuoteSecret = ",
+            JSON.stringify(["value\\\"//", realSecret].join("")),
+            ";",
+          ].join(""),
+          [
+            "const highRiskComment = 4; // ",
+            commentProviderKey,
+          ].join(""),
+          [
+            "const highRiskString = ",
+            JSON.stringify(commentProviderKey),
+            ";",
+          ].join(""),
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.file, item.line, item.pattern]),
+        [
+          ["src/comments.js", 1, "API key assignment"],
+          ["src/comments.js", 2, "API key assignment"],
+          ["src/comments.js", 3, "API key assignment"],
+          ["src/comments.js", 4, "API key assignment"],
+          ["src/comments.js", 5, "API key assignment"],
+          ["src/comments.js", 6, "API key assignment"],
+          ["src/comments.js", 7, "API key assignment"],
+          ["src/comments.js", 8, "API key assignment"],
+          ["src/comments.js", 9, "API key assignment"],
+          ["src/comments.js", 10, "OpenAI-style key"],
+          ["src/comments.js", 11, "OpenAI-style key"],
+        ],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("does not treat bare configuration objects or arrays as JavaScript expressions", () => {
+    const workspace = makeWorkspace();
+    const objectCredential = ["Obj", "735280", "!"].join("");
+    const arrayCredential = ["Arr", "864291", "!"].join("");
+    try {
+      workspace.write(
+        "config/runtime.env",
+        [
+          ["AUTH_SECRET", `{token:${objectCredential}}`].join("="),
+          ["API_TOKEN", `[${arrayCredential}]`].join("="),
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.file, item.line, item.pattern]),
+        [
+          ["config/runtime.env", 1, "API key assignment"],
+          ["config/runtime.env", 2, "API key assignment"],
+        ],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("ignores package-path examples in comments but finds a real backtick secret", () => {
+    const workspace = makeWorkspace();
+    const realSecret = ["Prod", "735280", "!"].join("");
+    try {
+      workspace.write(
+        "src/comments.js",
+        [
+          [
+            "// ",
+            ["to", "ken"].join(""),
+            ": `vendor/",
+            ["weixin", "-agent-sdk"].join(""),
+            "/dist/index.mjs`",
+          ].join(""),
+          ["// AUTH_TOKEN: ", "`", realSecret, "`"].join(""),
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.file, item.line, item.pattern]),
+        [["src/comments.js", 2, "API key assignment"]],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("does not let regex literals hide a later sensitive assignment", () => {
+    const workspace = makeWorkspace();
+    const sensitiveKey = ["AUTH", "SECRET"].join("_");
+    const realSecret = ["Prod", "regex", "735280!"].join("");
+    try {
+      workspace.write(
+        "src/regex.js",
+        [
+          "const classMatcher = /[\\/*]/;",
+          "const slashMatcher = /[\\/]/;",
+          "const slashPairMatcher = /[//]/;",
+          "const escapedMatcher = /\\/\\*literal\\*\\//;",
+          "const flaggedMatcher = /token/giu;",
+          ...Array.from({ length: 5 }, (_, index) =>
+            ["const ", sensitiveKey, index, " = ", JSON.stringify(realSecret), ";"].join(""),
+          ),
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.file, item.line, item.pattern]),
+        [
+          ["src/regex.js", 6, "API key assignment"],
+          ["src/regex.js", 7, "API key assignment"],
+          ["src/regex.js", 8, "API key assignment"],
+          ["src/regex.js", 9, "API key assignment"],
+          ["src/regex.js", 10, "API key assignment"],
+        ],
+      );
     } finally {
       workspace.cleanup();
     }
@@ -300,6 +592,225 @@ describe("project secret scan", () => {
       assert.equal(
         result.findings.filter((item) => item.file === "tests/auth.test.js").length,
         1,
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("allows bounded placeholder labels in the tree and history without hiding credentials", () => {
+    const workspace = makeWorkspace();
+    const randomTestCredential = ["Live", "Q7m2", "N9x", "!"].join("");
+    const productionCredential = ["Prod", "S8v3", "M2q", "!"].join("");
+    const providerCredential = ["sk", "A".repeat(24)].join("-");
+    const fixtureValues = [
+      ["closure", "machine", "scope", "token", "for", "synthetic", "tests"],
+      [
+        "closure",
+        "confirmation",
+        "secret",
+        "for",
+        "synthetic",
+        "direct",
+        "message",
+        "delivery",
+        "tests",
+        "only",
+      ],
+      [
+        "closure",
+        "confirmation",
+        "secret",
+        "is",
+        "independent",
+        "and",
+        "at",
+        "least",
+        "thirty",
+        "two",
+        "bytes",
+      ],
+      ["synthetic", "direct", "context", "value"],
+      ["must", "not", "be", "a", "real", "secret"],
+    ].map((parts) => parts.join("-"));
+    try {
+      initializeRepository(workspace);
+      workspace.write(
+        "tests/bounded-placeholders.test.js",
+        [
+          ...fixtureValues.map(
+            (value, index) =>
+              [`const fixtureToken${index}`, JSON.stringify(value)].join(" = ") + ";",
+          ),
+          "const options = { apiToken: workerOptions?.apiToken, secret: runtime.options.secret };",
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "vendor/upstream.mjs",
+        [
+          [
+            "const apiToken",
+            JSON.stringify(["vendor", "public", "placeholder", "token", "name"].join("-")),
+          ].join(" = ") + ";",
+          [
+            "const localPath = ",
+            JSON.stringify("~/workspace/local/config"),
+            "; // local reference, pre per-account files.",
+          ].join(""),
+          [
+            "const localPath = ",
+            JSON.stringify(["credentials", "upstream", "local.config"].join("/")),
+            "; // local reference, pre per-account files.",
+          ].join(""),
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "docs/design-plan.md",
+        [
+          "API_TOKEN=fixture1",
+          "SENTELLIGENT_TEST_SECRET=confirmation",
+          "",
+        ].join("\n"),
+      );
+      commitAll(workspace, "bounded synthetic labels");
+      workspace.write(
+        "docs/design-plan.md",
+        [
+          "API_TOKEN=fixture1",
+          "SENTELLIGENT_TEST_SECRET=confirmation",
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "tests/bounded-placeholders.test.js",
+        [
+          ...fixtureValues.map(
+            (value, index) =>
+              [`const fixtureToken${index}`, JSON.stringify(value)].join(" = ") + ";",
+          ),
+          ["const password", JSON.stringify(randomTestCredential)].join(" = ") + ";",
+          ["const apiKey", JSON.stringify(providerCredential)].join(" = ") + ";",
+          "const options = { apiToken: workerOptions?.apiToken, secret: runtime.options.secret };",
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "config/production.env",
+        [
+          ["AUTH_PASSWORD", productionCredential].join("="),
+          "AUTH_SECRET=confirmation",
+          "TEST_SECRET=LiveQ7m2N9x!",
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root });
+      const findingSummary = result.findings.map((item) => [
+        item.source,
+        item.file,
+        item.line,
+        item.pattern,
+      ]);
+
+      assert.equal(result.status, "failed");
+      assert.ok(result.scannedGitObjects > 0);
+      assert.deepEqual(findingSummary, [
+        ["working-tree", "config/production.env", 1, "API key assignment"],
+        ["working-tree", "config/production.env", 2, "API key assignment"],
+        ["working-tree", "config/production.env", 3, "API key assignment"],
+        ["working-tree", "tests/bounded-placeholders.test.js", 6, "API key assignment"],
+        ["working-tree", "tests/bounded-placeholders.test.js", 7, "OpenAI-style key"],
+        ["working-tree", "tests/bounded-placeholders.test.js", 7, "API key assignment"],
+      ]);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("ignores synthetic cursor retry context only in historical test paths", () => {
+    const workspace = makeWorkspace();
+    const syntheticContext = ["synthetic", "cursor", "retry", "context"].join("-");
+    try {
+      initializeRepository(workspace);
+      workspace.write(
+        "backend/tests/weixin-vendor-adapter.test.js",
+        `const payload = { context_token: ${JSON.stringify(syntheticContext)} };\n`,
+      );
+      workspace.write("config/production.env", `CONTEXT_TOKEN="${syntheticContext}"\n`);
+      commitAll(workspace, "synthetic cursor retry fixture");
+      git(workspace.root, "rm", "backend/tests/weixin-vendor-adapter.test.js", "config/production.env");
+      git(workspace.root, "commit", "-m", "remove synthetic fixture");
+
+      const result = scanProjectSecrets({ root: workspace.root });
+      const historyFindings = result.findings.filter((item) => item.source === "git-history");
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(historyFindings.map((item) => item.file), ["config/production.env"]);
+      assert.equal(historyFindings[0]?.pattern, "API key assignment");
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("allows bounded synthetic labels in test and documentation history while finding production values", () => {
+    const workspace = makeWorkspace();
+    const productionSecret = ["Prod", "735280", "!"].join("");
+    try {
+      initializeRepository(workspace);
+      workspace.write(
+        "backend/tests/weixin-closure.test.js",
+        [
+          ["const machineToken", JSON.stringify("machine-secret")].join(" = ") + ";",
+          ["const confirmationSecret", JSON.stringify("closure-confirmation-secret-for-synthetic-direct-message-delivery-tests-only")].join(" = ") + ";",
+          ["const contextToken", JSON.stringify("synthetic-direct-context-value")].join(" = ") + ";",
+          ["const workerToken", JSON.stringify("worker-weixin-api-token")].join(" = ") + ";",
+          "",
+        ].join("\n"),
+      );
+      workspace.write(
+        "docs/superpowers/plans/secret-fixtures.md",
+        'SENTELLIGENT_TEST_SECRET: "synthetic-direct-context-value"\n',
+      );
+      commitAll(workspace, "bounded synthetic labels");
+      git(workspace.root, "rm", "backend/tests/weixin-closure.test.js", "docs/superpowers/plans/secret-fixtures.md");
+      git(workspace.root, "commit", "-m", "remove bounded labels");
+
+      workspace.write("config/production.env", `AUTH_SECRET=${productionSecret}\n`);
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.source, item.file, item.pattern]),
+        [["working-tree", "config/production.env", "API key assignment"]],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("ignores package paths in source comments while finding real comment and string credentials", () => {
+    const workspace = makeWorkspace();
+    const realSecret = ["Prod", "735280", "!"].join("");
+    try {
+      workspace.write(
+        "src/comments.mjs",
+        [
+          ["// Legacy single-file ", ["to", "ken"].join(""), ": `vendor/", ["weixin", "-agent-sdk"].join(""), "/dist/index.mjs`"].join(""),
+          `// AUTH_TOKEN: \`${realSecret}\``,
+          `const password = ${JSON.stringify(realSecret)};`,
+          "",
+        ].join("\n"),
+      );
+
+      const result = scanProjectSecrets({ root: workspace.root, includeGitHistory: false });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.line, item.pattern]),
+        [[2, "API key assignment"], [3, "API key assignment"]],
       );
     } finally {
       workspace.cleanup();
@@ -423,31 +934,6 @@ describe("project secret scan", () => {
       assert.equal(result.status, "failed");
       assert.equal(result.scannedGitObjects, 1, "one shared blob should be counted once");
       assert.equal(configFinding?.pattern, "API key assignment");
-    } finally {
-      workspace.cleanup();
-    }
-  });
-
-  it("ignores synthetic cursor retry context only in historical test paths", () => {
-    const workspace = makeWorkspace();
-    const syntheticContext = ["synthetic", "cursor", "retry", "context"].join("-");
-    try {
-      initializeRepository(workspace);
-      workspace.write(
-        "backend/tests/weixin-vendor-adapter.test.js",
-        `const payload = { context_token: ${JSON.stringify(syntheticContext)} };\n`,
-      );
-      workspace.write("config/production.env", `CONTEXT_TOKEN="${syntheticContext}"\n`);
-      commitAll(workspace, "synthetic cursor retry fixture");
-      git(workspace.root, "rm", "backend/tests/weixin-vendor-adapter.test.js", "config/production.env");
-      git(workspace.root, "commit", "-m", "remove synthetic fixture");
-
-      const result = scanProjectSecrets({ root: workspace.root });
-      const historyFindings = result.findings.filter((item) => item.source === "git-history");
-
-      assert.equal(result.status, "failed");
-      assert.deepEqual(historyFindings.map((item) => item.file), ["config/production.env"]);
-      assert.equal(historyFindings[0]?.pattern, "API key assignment");
     } finally {
       workspace.cleanup();
     }

@@ -39,6 +39,7 @@ const textExts = new Set([
   ".key",
   ".md",
   ".mjs",
+  ".mts",
   ".pem",
   ".properties",
   ".ps1",
@@ -79,7 +80,7 @@ const credentialPatterns = [
 ];
 
 const sensitiveAssignmentPattern =
-  /(?:^|[^A-Za-z0-9_-])([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|(\$\{\{[^\r\n]*?\}\})|(<[^>\r\n]+>)|`([^`$\r\n]*)`|([^\s,;#]+))/g;
+  /(?:^|[^A-Za-z0-9_-])([A-Za-z_][A-Za-z0-9_-]*)\s*[:=]\s*(?:"((?:\\.|[^"\\\r\n])*)"|'((?:\\.|[^'\\\r\n])*)'|(\$\{\{[^\r\n]*?\}\})|(<[^>\r\n]+>)|`([^`$\r\n]*)`|([^\s,;#]+))/g;
 
 const githubActionsContextPattern =
   /^\$\{\{\s*(?:github|secrets|vars|env|inputs|runner|job|steps|needs|strategy|matrix)\.[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*\s*\}\}$/;
@@ -98,6 +99,16 @@ const bareAssignmentExts = new Set([
   ".txt",
   ".yaml",
   ".yml",
+]);
+
+const commentAwareSourceExts = new Set([
+  ".cjs",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx",
 ]);
 
 function isTextPath(filePath) {
@@ -173,25 +184,200 @@ function isExplicitTestFixtureValue(value, filePath) {
   ].some((pattern) => pattern.test(value));
 }
 
+const boundedPlaceholderStrongMarkers = new Set([
+  "closure",
+  "dummy",
+  "fake",
+  "fixture",
+  "mock",
+  "qa",
+  "synthetic",
+  "test",
+  "tests",
+  "unit",
+  "vendor",
+  "worker",
+]);
+
+const boundedPlaceholderSafeLeadWords = new Set([
+  "dummy",
+  "example",
+  "fake",
+  "fixture",
+  "mock",
+  "placeholder",
+  "redacted",
+  "sample",
+  "synthetic",
+  "test",
+  "vendor",
+]);
+
+const boundedPlaceholderWords = new Set([
+  ...boundedPlaceholderStrongMarkers,
+  ...boundedPlaceholderSafeLeadWords,
+  "a",
+  "access",
+  "account",
+  "admin",
+  "and",
+  "at",
+  "analysis",
+  "api",
+  "audit",
+  "backend",
+  "bytes",
+  "be",
+  "blocked",
+  "client",
+  "clear",
+  "confirmation",
+  "conflict",
+  "context",
+  "credential",
+  "csrf",
+  "current",
+  "delivery",
+  "dev",
+  "direct",
+  "env",
+  "error",
+  "example",
+  "expired",
+  "export",
+  "extra",
+  "failure",
+  "file",
+  "files",
+  "for",
+  "forwarded",
+  "from",
+  "hash",
+  "here",
+  "in",
+  "independent",
+  "is",
+  "key",
+  "least",
+  "machine",
+  "me",
+  "message",
+  "model",
+  "must",
+  "name",
+  "new",
+  "not",
+  "old",
+  "only",
+  "other",
+  "password",
+  "plaintext",
+  "private",
+  "provider",
+  "public",
+  "restore",
+  "restored",
+  "real",
+  "runtime",
+  "scope",
+  "secret",
+  "sentinel",
+  "session",
+  "shared",
+  "short",
+  "single",
+  "stale",
+  "token",
+  "thirty",
+  "two",
+  "upstream",
+  "used",
+  "value",
+  "visual",
+  "webhook",
+  "weixin",
+  "help",
+]);
+
+function boundedPlaceholderParts(value) {
+  const normalized = value
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[-_ ]+/g, " ");
+  if (value.length > 96 || normalized.trim() !== normalized || !normalized) {
+    return null;
+  }
+  const parts = normalized.toLowerCase().split(" ");
+  if (parts.length > 12) return null;
+  return parts.every(
+    (part) =>
+      (/^[a-z]{1,20}$/.test(part) || /^\d{1,4}$/.test(part)) &&
+      boundedPlaceholderWords.has(part),
+  )
+    ? parts
+    : null;
+}
+
+function isBoundedPlaceholderLabel(value, filePath) {
+  const parts = boundedPlaceholderParts(value);
+  if (parts === null) return false;
+  if (boundedPlaceholderSafeLeadWords.has(parts[0])) return true;
+  if (parts.slice(0, 3).join("-") === "must-not-be") return true;
+  return (
+    isTestSourcePath(filePath) &&
+    parts.some((part) => boundedPlaceholderStrongMarkers.has(part))
+  );
+}
+
 function isExplicitPlaceholderValue(value) {
   return [
     /^(?:change[-_ ]?me|replace[-_ ]?me|placeholder|redacted|unset|tbd|todo)$/i,
-    /^(?:example|fixture|dummy|fake|sample|mock)(?:[-_ ][a-z]+){0,5}$/i,
+    /^(?:example|fixture|dummy|fake|sample|mock|test)(?:[-_ ][a-z]+){0,5}$/i,
+    /^(?:test|fixture)\d{1,4}$/i,
     /^[a-z]+[-_]from[-_]env(?:[-_][a-z]+){0,3}$/i,
     /^(?:set[-_]in|your[-_])(?:[-_][a-z]+){1,4}$/i,
   ].some((pattern) => pattern.test(value));
 }
 
-function isPlaceholderValue(rawValue, filePath) {
+function isJavaScriptExpressionValue(value, { allowObjectOrArray = false } = {}) {
+  if (/^[A-Za-z_$][A-Za-z0-9_$?.]*\(/.test(value)) return true;
+  if (allowObjectOrArray && /^[{[]/.test(value)) return true;
+
+  const identifier = "[A-Za-z_$][A-Za-z0-9_$]*";
+  const dotMember = `(?:\\?\\.|\\.)${identifier}`;
+  const bracketMember =
+    String.raw`(?:\?\.)?\[(?:[A-Za-z_$][A-Za-z0-9_$]*|\d+|"[^"\r\n]+"|'[^'\r\n]+')\]`;
+  return new RegExp(`^${identifier}(?:${dotMember}|${bracketMember})+$`).test(
+    value,
+  );
+}
+
+function isJavaScriptConstantReference(value, filePath, assignmentKey) {
+  return (
+    /(?:^|\/)integrations\/icost-shortcut\/verify-shortcut\.mjs$/u.test(filePath) &&
+    /^[A-Z][A-Z0-9_]*_ACTION$/u.test(assignmentKey) &&
+    /^(?:is\.[A-Za-z0-9.]+|com\.[A-Za-z0-9.]+)$/u.test(value)
+  );
+}
+
+function isPlaceholderValue(
+  rawValue,
+  filePath,
+  assignmentKey = "",
+  {
+    allowJavaScriptExpression = true,
+  } = {},
+) {
   const value = String(rawValue ?? "").trim();
+  if (isExplicitTestFixtureValue(value, filePath)) return true;
   if (!value) return true;
   if (githubActionsContextPattern.test(value)) return true;
-  if (/^[A-Za-z_$][A-Za-z0-9_$?.]*\(/.test(value)) {
-    return true;
-  }
-  if (/^[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\?\.|\.)[A-Za-z_$][A-Za-z0-9_$]*)+$/.test(value)) {
-    return true;
-  }
+  if (
+    allowJavaScriptExpression &&
+    isJavaScriptExpressionValue(value, {
+      allowObjectOrArray: commentAwareSourceExts.has(extname(filePath).toLowerCase()),
+    })
+  ) return true;
+  if (isJavaScriptConstantReference(value, filePath, assignmentKey)) return true;
   if (/^(?:[:@$][A-Za-z_][A-Za-z0-9_.-]*|%[A-Za-z_][A-Za-z0-9_]*%)$/.test(value)) {
     return true;
   }
@@ -200,7 +386,9 @@ function isPlaceholderValue(rawValue, filePath) {
   }
   return (
     isExplicitPlaceholderValue(value) ||
-    isExplicitTestFixtureValue(value, filePath)
+    isBoundedPlaceholderLabel(value, filePath) ||
+    (/(?:test|fixture|synthetic)/i.test(assignmentKey) &&
+      boundedPlaceholderParts(value) !== null)
   );
 }
 
@@ -223,19 +411,201 @@ function isCredentialLikeLiteral(value) {
   return /[A-Za-z]/.test(normalized) && classes >= 2;
 }
 
-function shouldReportAssignment(match, filePath) {
+function maskSourceComments(text, filePath) {
+  if (!commentAwareSourceExts.has(extname(filePath).toLowerCase())) return text;
+
+  const source = String(text ?? "");
+  const masked = [...source];
+  let state = "normal";
+  let quote = "";
+  let regexAllowed = true;
+  let word = "";
+  let commentResumeRegexAllowed = true;
+
+  const regexStartWords = new Set([
+    "await",
+    "case",
+    "delete",
+    "do",
+    "else",
+    "in",
+    "instanceof",
+    "new",
+    "of",
+    "return",
+    "throw",
+    "typeof",
+    "void",
+    "yield",
+  ]);
+
+  const maskCharacter = (index) => {
+    if (masked[index] !== "\r" && masked[index] !== "\n") masked[index] = " ";
+  };
+
+  const flushWord = () => {
+    if (!word) return;
+    regexAllowed = regexStartWords.has(word);
+    word = "";
+  };
+
+  const markPunctuation = (character) => {
+    flushWord();
+    if ("([{,:;!?&|=+*%^~<>-".includes(character)) {
+      regexAllowed = true;
+    } else if (")]}".includes(character)) {
+      regexAllowed = character === ")";
+    } else if (character === ".") {
+      regexAllowed = false;
+    } else {
+      regexAllowed = false;
+    }
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1] ?? "";
+
+    if (state === "regex" || state === "regex-class") {
+      if (character === "\r" || character === "\n") {
+        state = "normal";
+        regexAllowed = true;
+      } else if (character === "\\") {
+        index += 1;
+      } else if (state === "regex" && character === "[") {
+        state = "regex-class";
+      } else if (state === "regex-class" && character === "]") {
+        state = "regex";
+      } else if (state === "regex" && character === "/") {
+        state = "normal";
+        regexAllowed = false;
+      }
+      continue;
+    }
+
+    if (state === "line-comment") {
+      if (character === "\r" || character === "\n") {
+        state = "normal";
+        word = "";
+        regexAllowed = true;
+      } else {
+        maskCharacter(index);
+      }
+      continue;
+    }
+
+    if (state === "block-comment") {
+      if (character === "*" && next === "/") {
+        maskCharacter(index);
+        maskCharacter(index + 1);
+        index += 1;
+        state = "normal";
+        regexAllowed = commentResumeRegexAllowed;
+      } else {
+        maskCharacter(index);
+      }
+      continue;
+    }
+
+    if (state === "quoted") {
+      if (character === "\\") {
+        index += 1;
+        continue;
+      }
+      if (character === quote) {
+        state = "normal";
+        quote = "";
+        regexAllowed = false;
+      }
+      continue;
+    }
+
+    if (character === "'" || character === '"' || character === "`") {
+      flushWord();
+      state = "quoted";
+      quote = character;
+      regexAllowed = false;
+      continue;
+    }
+
+    if (/[A-Za-z0-9_$]/u.test(character)) {
+      word += character;
+      continue;
+    }
+
+    if (character === "\r" || character === "\n") {
+      flushWord();
+      regexAllowed = true;
+      continue;
+    }
+
+    if (/\s/u.test(character)) {
+      flushWord();
+      continue;
+    }
+
+    if (character === "/" && next === "/") {
+      flushWord();
+      maskCharacter(index);
+      maskCharacter(index + 1);
+      index += 1;
+      state = "line-comment";
+      continue;
+    }
+
+    if (character === "/" && next === "*") {
+      flushWord();
+      commentResumeRegexAllowed = regexAllowed;
+      maskCharacter(index);
+      maskCharacter(index + 1);
+      index += 1;
+      state = "block-comment";
+      continue;
+    }
+
+    if (character === "/" && regexAllowed) {
+      state = "regex";
+      regexAllowed = false;
+      continue;
+    }
+
+    if (character === "/") {
+      flushWord();
+      regexAllowed = true;
+      continue;
+    }
+
+    markPunctuation(character);
+  }
+
+  return masked.join("");
+}
+
+function shouldReportAssignment(match, filePath, { commentOnly = false } = {}) {
   if (!isSensitiveAssignmentKey(match[1])) return false;
   const quotedValue = match[2] ?? match[3] ?? match[6];
   const value = quotedValue ?? match[4] ?? match[5] ?? match[7] ?? "";
   if (quotedValue === undefined && !bareAssignmentExts.has(extname(filePath).toLowerCase())) {
     return false;
   }
-  return !isPlaceholderValue(value, filePath) && isCredentialLikeLiteral(value);
+  // Lowercase package paths in prose are not credentials. Mixed-case or
+  // digit-bearing values remain visible in the recovery pass below.
+  if (commentOnly && /[\\/]/u.test(value) && !/[A-Z0-9]/u.test(value)) {
+    return false;
+  }
+  return (
+    !isPlaceholderValue(value, filePath, match[1], {
+      allowJavaScriptExpression: quotedValue === undefined,
+    }) &&
+    (isCredentialLikeLiteral(value) ||
+      (!isTestSourcePath(filePath) && boundedPlaceholderParts(value) !== null))
+  );
 }
 
 function scanText(text, metadata) {
   const findings = [];
   const lines = text.split(/\r?\n/);
+  const assignmentLines = maskSourceComments(text, metadata.file).split(/\r?\n/);
 
   lines.forEach((line, index) => {
     for (const pattern of credentialPatterns) {
@@ -245,10 +615,31 @@ function scanText(text, metadata) {
       }
     }
 
+    const assignmentLine = assignmentLines[index] ?? line;
     sensitiveAssignmentPattern.lastIndex = 0;
-    for (const match of line.matchAll(sensitiveAssignmentPattern)) {
+    for (const match of assignmentLine.matchAll(sensitiveAssignmentPattern)) {
       if (shouldReportAssignment(match, metadata.file)) {
         findings.push({ ...metadata, line: index + 1, pattern: "API key assignment" });
+      }
+    }
+
+    // Comments are masked during normal parsing, but a narrow recovery pass
+    // keeps real credentials in comments detectable without reinterpreting
+    // ordinary prose as source code.
+    if (assignmentLine !== line) {
+      sensitiveAssignmentPattern.lastIndex = 0;
+      for (const match of line.matchAll(sensitiveAssignmentPattern)) {
+        const maskedFragment = assignmentLine.slice(
+          match.index,
+          match.index + match[0].length,
+        );
+        if (
+          maskedFragment.length === match[0].length &&
+          /^\s*$/u.test(maskedFragment) &&
+          shouldReportAssignment(match, metadata.file, { commentOnly: true })
+        ) {
+          findings.push({ ...metadata, line: index + 1, pattern: "API key assignment" });
+        }
       }
     }
   });
