@@ -125,8 +125,9 @@ describe("vendored Weixin inbound adapter", () => {
   it("rejects two different non-empty upstream id candidates", () => {
     assert.throws(
       () => normalizeInboundUpdate(textUpdate({
-        message_id: "synthetic-message-a",
-        msg_id: "synthetic-message-b",
+        message_id: undefined,
+        msg_id: "synthetic-message-a",
+        client_id: "synthetic-message-b",
       }), { deliveryKey: DELIVERY_KEY }),
       /upstream.*id|message.*id|ambiguous/iu,
     );
@@ -140,6 +141,19 @@ describe("vendored Weixin inbound adapter", () => {
       DELIVERY_DOMAIN,
       "synthetic-sender-a",
       "synthetic-message-a",
+    ]));
+  });
+
+  it("uses the numeric provider message_id before an auxiliary client_id", () => {
+    const request = normalizeInboundUpdate(textUpdate({
+      message_id: 123456789,
+      client_id: "synthetic-client-generated-id",
+    }), { deliveryKey: DELIVERY_KEY });
+
+    assert.equal(request.messageId, expectedDeliveryId([
+      DELIVERY_DOMAIN,
+      "synthetic-sender-a",
+      "123456789",
     ]));
   });
 

@@ -1101,21 +1101,32 @@ function requireInboundIdentifier(value, name) {
 	if (typeof value !== "string" || value.length === 0 || value.length > MAX_INBOUND_IDENTIFIER_LENGTH || CONTROL_CHARACTER_RE.test(value)) throw new TypeError(`invalid ${name}`);
 	return value;
 }
+function optionalUpstreamIdentifier(value, name) {
+	if (value === void 0 || value === null || value === "") return null;
+	if (typeof value === "number") {
+		if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`invalid ${name}`);
+		value = String(value);
+	}
+	return requireInboundIdentifier(value, name);
+}
 function validateRawUpdate(full) {
 	if (full === null || typeof full !== "object" || Array.isArray(full)) throw new TypeError("invalid raw update");
 	requireInboundIdentifier(full.from_user_id, "sender id");
 	if (!Number.isSafeInteger(full.create_time_ms) || full.create_time_ms <= 0) throw new TypeError("invalid delivery timestamp");
 	if (!Array.isArray(full.item_list) || full.item_list.length === 0) throw new TypeError("invalid item list");
-	for (const name of ["message_id", "msg_id", "client_id"]) {
-		const value = full[name];
-		if (value !== void 0 && value !== null && value !== "") requireInboundIdentifier(value, "upstream message id");
-	}
+	oneCanonicalUpstreamId(full);
 }
 function oneCanonicalUpstreamId(full) {
-	const candidates = [full.message_id, full.msg_id, full.client_id].filter((value) => value !== void 0 && value !== null && value !== "");
-	if (candidates.length === 0) return null;
-	if (new Set(candidates).size !== 1) throw new TypeError("ambiguous upstream message id");
-	return candidates[0];
+	// The provider's server-issued message_id is canonical and may be numeric;
+	// msg_id/client_id are lower-priority compatibility aliases. Only compare
+	// the aliases when the canonical field is absent, preserving fail-closed
+	// behavior for genuinely ambiguous fallback metadata.
+	const messageId = optionalUpstreamIdentifier(full.message_id, "upstream message id");
+	const msgId = optionalUpstreamIdentifier(full.msg_id, "upstream message id");
+	const clientId = optionalUpstreamIdentifier(full.client_id, "upstream message id");
+	if (messageId !== null) return messageId;
+	if (msgId !== null && clientId !== null && msgId !== clientId) throw new TypeError("ambiguous upstream message id");
+	return msgId ?? clientId;
 }
 function hasUnrecognizedGroupSignal(full) {
 	return ["group_id", "room_id", "chat_type", "is_group"].some((name) => Object.hasOwn(full, name));
