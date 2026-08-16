@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-16
+
+### WeChat confirmation closure
+
+- Complete the private-chat confirmation boundary for assistant writes: confirmations are scoped to the persisted plan, owner, sender, channel, and conversation; the user replies with exactly six ASCII digits, while exact `取消` and `重发确认码` commands cancel or rotate a code.
+- Show each confirmation code once, persist only its HMAC, lock actions after five incorrect attempts, and retain one-time execution leases and durable tool-run identities for replay and crash recovery.
+- Bind delivery identity to the reviewed vendored `weixin-agent-sdk` metadata and the machine token; production remains private-chat only and rejects group traffic. Token rotation must drain and seal the old cursor before enabling the new token.
+
+### Capability metadata and project analysis
+
+- Add a pure, descriptive capability catalog exposing readiness, tool/API mappings, dependencies, integration points, confirmation level, and source references without changing executable agent or router ownership.
+- Add bounded, deterministic project-analysis helpers that distinguish open/closed actions and risks, preserve source references, and return safe summaries for assistant-facing analysis.
+
+### QA and release-boundary hardening
+
+- Harden browser/integration QA process ownership and cleanup with bounded waits, verified child identities, explicit already-closed terminal states, and fail-closed cleanup reporting.
+- Keep release and secret-scan fixtures portable on macOS and scoped to their intended synthetic cases; historical facts remain unchanged.
+
+### Release boundary
+
+- This entry describes a local v0.5.3 code candidate. It is not a GitHub Release, tag, cloud upload, production cutover, or real-device acceptance result.
+- Production facts remain those documented in the existing deployment evidence; production is unchanged until a separately authorized release and fresh deployment evidence are complete.
+
 ## [0.5.2] - 2026-08-09
 
 ### Pre-cutover release compatibility
@@ -314,7 +337,9 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.2...v0.5.3
+[0.5.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.1...v0.5.2
 [0.5.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.4
 [0.4.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.3

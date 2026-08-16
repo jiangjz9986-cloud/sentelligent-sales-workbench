@@ -1,81 +1,61 @@
 # 微信 Clawbot 助手集成说明
 
-## 当前交付范围
+## v0.5.3 候选边界
 
-本版本复用现有 `weixin-agent-sdk` 扫码和收发链路，把后端入口升级为持久化助手事件 API：
+本说明描述当前本地 v0.5.3 代码候选，不构成 GitHub Release、云端上传、生产切换或真实设备验收证据。现有生产事实仍以部署记录和服务器 evidence 为准；v0.5.3 尚未部署。
+
+## 入站事件与身份
+
+候选使用 vendored `weixin-agent-sdk@0.5.0-sentelligent.1` 的受限入站元数据调用：
 
 ```text
 POST /api/integrations/weixin-agent/events
 Authorization: Bearer <WEIXIN_AGENT_API_TOKEN>
-Idempotency-Key: <sourceMessageId 或 weixin:sourceMessageId>
+Idempotency-Key: <opaque sourceMessageId>
 ```
 
-机器 Token 只允许这一个事件路由，以及既有的快速记录预览、待处理区上传路由。owner 由服务端机器身份配置，正文不能覆盖 owner、actor、URL、SQL、路径或 Token。
+适配层取得 `senderId`、`chatType`、`conversationId`、消息身份和投递时间，并以机器 Token 派生不透明 delivery ID。缺少可验证 sender、聊天类型、稳定投递 ID 或投递时间时，在请求后端前失败关闭；生产不把 conversation 当作 sender，也不把会话/文本摘要当作消息身份。
 
-## 请求字段
+请求正文必填 `conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`）；群聊时可带 `groupId`。媒体只接收原始 Base64、文件名、MIME 和可选 SHA-256，服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
 
-必填：
+## 私聊确认闭环
 
-- `conversationId`：Clawbot 会话标识
-- `text`：文本或命令，最多 20,000 字符
-- `sourceMessageId`：来源消息标识；若 SDK 没有真实消息 ID，由 worker 用会话、文本和媒体 SHA-256 稳定生成
-- `senderId`：发送者身份，必须命中 `WEIXIN_ALLOWED_SENDER_IDS`
-- `chatType`：`direct` 或 `group`
+生产只接受 `WEIXIN_ALLOWED_SENDER_IDS` 中的 sender，并拒绝群聊（`WEIXIN_ALLOW_GROUPS=false`、群白名单为空）。需要写入时，服务端将待确认动作绑定到持久化工具名、参数、owner、sender、channel 和 private conversation。
 
-可选：
+- 确认：在产生动作的同一私聊中直接回复恰好六位 ASCII 数字，例如 `012345`，无需 action ID。
+- 取消：原始文本必须精确等于 `取消`。
+- 重发：原始文本必须精确等于 `重发确认码`，旧码立即失效，新码只展示一次。
 
-- `groupId`：群聊时必填；群聊默认拒绝
-- `pendingActionId`、`confirmationCode`：人工确认门的后续请求；确认码只接受六位数字
-- `media`：`type`、`fileName`、`mimeType`/`mediaType`、`contentBase64`，可带 `sha256` 和 `sourceRef`
+命令不做 trim 或 Unicode 数字归一化；前后空格、换行、全角数字、`确认 012345` 或附加文字均不匹配。连续五次错误确认后动作锁定。确认码只在生成的微信回复中展示一次，SQLite 仅保存 HMAC；事件、响应投影、会话、草稿、待确认动作、工具结果和日志不得包含明文确认码。执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
 
-图片/PDF 会在服务端重新做 canonical Base64、魔数、MIME、文件名、12 MiB 和 SHA-256 校验，再按现有无损文档仓库保存。不会把媒体重编码成有损格式。
+## 运行配置与轮换
 
-## 会话和写入规则
-
-- 普通“拜访/电话/会议/沟通”文本进入 `visit-capture.collect`，只写持久化草稿。
-- “记录”进入预览；“录入”创建人工确认动作，收到确认码后才写入快速记录和 AI 分析。
-- `/客户` 或“查询客户”是只读查询。
-- `/付款凭证` 和 `/发票` 先进入待处理区/发票仓库，不要求确认；正式关联、匹配、无票确认仍在确认门之后完成。
-- “销售周报”和“报销周汇总”分开路由，不能猜测歧义。
-- `solution`、`personal-finance` Agent 仍保持禁用。
-
-所有事件、会话、草稿、待确认动作和工具运行结果写入 SQLite `0011` 迁移新增的助手运行时表。事件按 owner/channel/source 消息幂等；同一消息 ID 携带不同正文返回 409。确认码仅以 HMAC 形式保存在待确认表，首次响应后重放不再返回明文确认码。
-
-## 运行配置
-
-在私有环境文件中配置（不要提交 Git）：
+真实值只配置在私有环境文件中，不进入 Git、日志或聊天：
 
 ```text
-WEIXIN_AGENT_API_TOKEN=<森特智行专用机器 Token>
-WEIXIN_AGENT_BACKEND_URL=https://<森特智行公网基址>
-WEIXIN_AGENT_SENDER_ID=<可选，SDK 没有 sender 字段时的默认值>
-WEIXIN_AGENT_CHAT_TYPE=direct
+WEIXIN_AGENT_API_TOKEN=<独立机器 Token>
+WEIXIN_AGENT_BACKEND_URL=https://<公网基址>
 WEIXIN_ALLOWED_SENDER_IDS=<逗号分隔的 sender ID>
 WEIXIN_ALLOW_GROUPS=false
-WEIXIN_ALLOWED_GROUP_IDS=<可选的群 ID 白名单>
+WEIXIN_ALLOWED_GROUP_IDS=
+ASSISTANT_CONFIRMATION_SECRET=<独立的至少 32 字节 canonical base64url 密钥>
 ```
 
-森特智行和轻氧智能门店必须继续使用独立 URL、Token、数据库和审计，不能复用任何密钥或 owner。
+`ASSISTANT_CONFIRMATION_SECRET` 必须独立于 session、机器 Token、模型密钥和 iCost Token；非 loopback 后端必须使用 HTTPS。森特智行和轻氧继续使用独立 URL、Token、owner、数据库和审计。
 
-## SDK 兼容边界
+机器 Token 轮换时：
 
-当前 `weixin-agent-sdk@0.5` 的 `ChatRequest` 只提供 `conversationId`、`text` 和本地媒体路径，不提供真实 `senderId`、`messageId` 或群聊元数据。worker 因此默认用 `conversationId` 作为 sender 身份，默认按 `direct` 发送；没有命中 sender 白名单的请求会被服务端拒绝。升级 SDK 后应优先把真实 sender/message/chat 元数据映射到上述字段，并重新做真实微信设备验收。
+1. 停止旧 Token 对应的 worker 接收新消息；
+2. 排空并封存旧 worker 的 polling cursor；
+3. 确认旧 Token/cursor 不再消费后启用新 Token 和新 worker；
+4. 禁止新旧 Token 或 cursor 并行消费。
 
-## 本地验收
+## 本地验收与发布边界
 
-```powershell
+```bash
 npm --prefix backend test
-node --test backend/tests/assistant-http-integration.test.js
+node --test backend/tests/assistant-http-integration.test.js backend/tests/weixin-confirmation-closure.test.js
 npm run scan:secrets
 ```
 
-真实设备往返、生产环境 Token 配置和生产部署仍需单独授权；本版本代码验证不等于已完成生产发布。
-## v0.5 security boundary
-
-Production must configure an independent `ASSISTANT_CONFIRMATION_SECRET`. Generate it separately from `AUTH_SESSION_SECRET`, `WEIXIN_AGENT_API_TOKEN`, model keys, and the iCost token, using at least 32 bytes of canonical base64url data. Never place real values in source, logs, or chat.
-
-Confirmation actions are bound to the persisted tool name, arguments, owner, channel, and conversation. New text in a confirmation request cannot replace the stored plan. A one-time execution lease fences concurrent requests; later requests replay the durable result or receive a controlled conflict.
-
-If the first confirmation code is lost, send a new event with the same `pendingActionId` and no `confirmationCode`. The service rotates and returns a new six-digit code; use a new `sourceMessageId`, and the old code is invalidated. Only an HMAC is stored.
-
-Non-loopback Clawbot backends must use HTTPS. Plain HTTP is accepted only for local test endpoints (`127.0.0.1`, `localhost`, or `::1`).
+这些检查通过只说明代码候选满足本地契约。真实微信设备往返、生产 Token 配置、发布归档、受控切换、fresh preflight 与 post-check 必须另行授权并取得当次证据。

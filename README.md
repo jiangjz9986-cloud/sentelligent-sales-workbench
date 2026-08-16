@@ -15,6 +15,8 @@
 | Release 归档 SHA-256 | `7c3c3cac77c20eb4a7d99125f2af0ef1f73505e19a75228a8841af5bb0e8803d` |
 | 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_6c90de28a5c0` |
 | 回滚 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_504fa81a30cf` |
+| 当前代码候选 | `v0.5.3`；本地/隔离检查通过只表示候选代码，不表示已发布或已部署 |
+| `v0.5.3` 生产边界 | 候选尚未部署；必须另行授权发布、受控切换，并取得新的部署与真实微信设备证据 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
 上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-08` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.4.4 版本说明](docs/releases/v0.4.4.md)。
@@ -139,9 +141,13 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 
 提交前必须运行密钥扫描。发现凭据进入 Git 后，先撤销和轮换，再清理历史；只删除工作区文件不算处理完成。详见 [SECURITY.md](SECURITY.md)。
 
+## v0.5.3 助手能力元数据
+
+候选版本新增只读的 capability catalog 和 bounded project-analysis helpers：目录描述每项能力的 readiness、工具/API 映射、依赖、集成点、确认级别和来源引用；项目分析按受限输入区分开放/关闭的行动与风险并保留来源引用。它们是描述性元数据和纯函数，不改变 agent registry、tool registry、router 或业务写入边界；`ready` 也只表示代码已接线，不表示生产已验收。
+
 ## 微信 Clawbot 助手事件契约
 
-现有 `weixin-agent-sdk` worker 通过独立机器 Token 调用：
+候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.1` worker 通过独立机器 Token 调用：
 
 ```text
 POST /api/integrations/weixin-agent/events
@@ -151,9 +157,9 @@ Idempotency-Key: <稳定重试键>
 
 请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和六位 `confirmationCode`。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
 
-sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`；群聊默认拒绝，只有同时设置 `WEIXIN_ALLOW_GROUPS=true`（以及需要时的 `WEIXIN_ALLOWED_GROUP_IDS`）才会放行。owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。重复事件返回第一次保存的响应；同一消息 ID 携带不同正文返回 409。
+sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊。确认回复必须来自同一 sender、channel 和 private conversation：恰好六位 ASCII 数字确认，原始文本精确等于 `取消` 或 `重发确认码` 才执行取消或轮换；前后空格、换行、全角数字和附加文字均不匹配。确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定；执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
 
-当前 `weixin-agent-sdk@0.5` 不暴露真实 `senderId`、`messageId` 或群聊元数据。worker 暂以 `conversationId` 作为 sender 身份，并以稳定的会话/文本/媒体 SHA-256 生成 `sourceMessageId`；因此完全相同的重复文本会被视为重放。升级 SDK 或接入能提供真实消息元数据的适配器后，应优先替换这两个临时映射，再进行真实设备验收。
+owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。机器 Token 派生投递身份；轮换 Token 时必须先停止旧 worker、排空并封存旧 polling cursor，再启用新 Token，禁止并行消费。真实设备往返和生产切换仍需另行授权；本地候选检查不构成生产证据。
 
 ## 文档索引
 
