@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-08-16
+
+### WeChat inbound compatibility
+
+- Normalize safe-integer provider `message_id` values before deriving the delivery identity used by the WeChat worker.
+- Prefer the provider's canonical `message_id` over lower-priority `msg_id` and `client_id` aliases; retain fail-closed ambiguity checks when no canonical ID is present.
+- Preserve sender, timestamp, item, control-character, length, and delivery-key validation boundaries.
+
+### Release boundary
+
+- This patch addresses the production-observed case where real WeChat updates were received but failed during inbound normalization before the reply path.
+- The candidate must pass the complete local quality gate, immutable release verification, fresh 25/25 production preflight, controlled cutover, HTTPS smoke, and a real `/clear` round trip before production status is updated.
+- No sender ID, password, token, cookie, private key, database content, or business message is recorded in Git or release evidence.
+
 ## [0.5.4] - 2026-08-16
 
 ### Production configuration compatibility
@@ -350,7 +364,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.1...v0.5.2
