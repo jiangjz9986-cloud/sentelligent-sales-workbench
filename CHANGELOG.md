@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-08-16
+
+### WeChat 64-bit inbound IDs
+
+- Preserve the exact JSON numeric source for provider `message_id`, `msg_id`, and `client_id` fields before JavaScript number rounding can occur.
+- Accept canonical 64-bit decimal IDs through the same bounded identifier and delivery-key validation; reject negative numeric identifiers.
+- Add a real-shape worker regression covering a 19-digit provider message ID and its stable delivery identity.
+
+### Release boundary
+
+- This patch supersedes v0.5.5, which normalized safe integer IDs but was insufficient for the provider's 19-digit numeric form observed in production.
+- Production acceptance remains pending until the new immutable release, 25/25 preflight, controlled cutover, HTTPS smoke, and a real WeChat `/clear` reply all pass.
+- No sender ID, password, token, cookie, private key, database content, or business message is recorded in Git or release evidence.
+
 ## [0.5.5] - 2026-08-16
 
 ### WeChat inbound compatibility
@@ -364,7 +378,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.2...v0.5.3

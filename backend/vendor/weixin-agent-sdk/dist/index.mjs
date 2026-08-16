@@ -458,7 +458,10 @@ async function getUpdates(params) {
 			label: "getUpdates",
 			abortSignal: params.abortSignal
 		});
-		return JSON.parse(rawText);
+		return JSON.parse(rawText, (key, value, context) => {
+			if (["message_id", "msg_id", "client_id"].includes(key) && typeof context?.source === "string" && /^-?\d+$/u.test(context.source)) return context.source;
+			return value;
+		});
 	} catch (err) {
 		if (err instanceof Error && err.name === "AbortError") {
 			logger.debug(`getUpdates: client-side timeout after ${timeout}ms, returning empty response`);
@@ -1107,6 +1110,7 @@ function optionalUpstreamIdentifier(value, name) {
 		if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`invalid ${name}`);
 		value = String(value);
 	}
+	if (typeof value === "string" && /^-\d+$/u.test(value)) throw new TypeError(`invalid ${name}`);
 	return requireInboundIdentifier(value, name);
 }
 function validateRawUpdate(full) {

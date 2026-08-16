@@ -157,6 +157,56 @@ describe("vendored Weixin inbound adapter", () => {
     ]));
   });
 
+  it("preserves an unsafe 64-bit provider message_id before normalization", async () => {
+    await withSyntheticAccount("numeric-provider-id", async ({ accountId }) => {
+      const abortController = new AbortController();
+      const providerMessageId = "1234567890123456789";
+      let request;
+      let updatePolls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          if (updatePolls === 1) {
+            const raw = JSON.stringify({
+              ret: 0,
+              get_updates_buf: "synthetic-numeric-provider-id-cursor",
+              msgs: [textUpdate({
+                message_id: "synthetic-numeric-provider-id-placeholder",
+                client_id: "synthetic-client-generated-id",
+              })],
+            }).replace('"synthetic-numeric-provider-id-placeholder"', providerMessageId);
+            return new Response(raw, { status: 200 });
+          }
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        if (endpoint.endsWith("/sendmessage")) return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      const bot = start({
+        async chat(value) {
+          request = value;
+          return { text: "synthetic numeric-id reply" };
+        },
+      }, {
+        accountId,
+        abortSignal: abortController.signal,
+        deliveryKey: DELIVERY_KEY,
+        log() {},
+      });
+      await bot.wait();
+
+      assert.equal(request.messageId, expectedDeliveryId([
+        DELIVERY_DOMAIN,
+        "synthetic-sender-a",
+        providerMessageId,
+      ]));
+    });
+  });
+
   it("falls back to sender timestamp ordered item types text media sha and normalized filename", () => {
     const decomposedName = "../private/cafe\u0301.png";
     const media = {
