@@ -12,10 +12,11 @@
 - Keep the v0.5.6 exact 64-bit numeric `message_id` preservation and bounded delivery-identity validation unchanged.
 - Add a real-shape regression for a direct update carrying `group_id: ""`, which previously caused the worker to retry the same update forever before replying.
 
-### Release boundary
+### Production acceptance
 
-- This hotfix supersedes the deployed-but-not-yet-accepted v0.5.6 candidate; production acceptance remains pending until a fresh immutable release, 25/25 preflight, controlled cutover, HTTPS smoke, and a real WeChat `/clear` reply all pass.
-- No sender ID, password, token, cookie, private key, database content, or business message is recorded in Git or release evidence.
+- Published from `main` as the immutable `v0.5.7` GitHub Release and deployed to a new release directory, with fresh pre-cutover and post-cutover `25/25` preflight reports and `rollbackStatus=not-required`.
+- The first HTTPS smoke retained a clean database after a transient model-preview failure; a second independent run passed `25/25` with `cleanup=clean`, `quick_check=ok`, zero foreign-key violations, and zero smoke-marker residuals.
+- The bound real WeChat device successfully completed a `/clear` round trip; the worker advanced its cursor without update or message failures. No sender ID, password, token, cookie, private key, database content, or business message is recorded in Git or release evidence.
 
 ## [0.5.6] - 2026-08-16
 

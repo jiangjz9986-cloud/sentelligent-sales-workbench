@@ -8,20 +8,20 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前生产版本 | `v0.5.4` |
-| 生产提交 | `cce04a2e1f60a17be3b4491cc26dddb6b02292f9` |
-| 注释标签 | `v0.5.4` |
-| GitHub Release | [森特智行 v0.5.4](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.5.4) |
-| Release 归档 SHA-256 | `5e389b692907e70552b93863cd8177c9f328d28fecae70634ceb8d920e20ccfb` |
-| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.5.4-20260816T050311Z_cce04a2e1f6` |
-| 回滚 release | `/opt/sentelligent-sales-workbench/releases/2026-08-09_4eb6a8540ba3` |
-| 当前代码候选 | `v0.5.4`；已完成 GitHub Release、受控切换和线上 25/25 HTTPS smoke |
+| 当前生产版本 | `v0.5.7` |
+| 生产提交 | `d4fcb56504c5a64bda703db5817c43e546db1b4f` |
+| 注释标签 | `v0.5.7` |
+| GitHub Release | [森特智行 v0.5.7](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.5.7) |
+| Release 归档 SHA-256 | `3338cb09aa9398e7b5353b8d74a4fb0256c93b270c247919643df672a03fa07f` |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.5.7-20260816T094633Z_d4fcb56504c5` |
+| 回滚 release | `/opt/sentelligent-sales-workbench/releases/v0.5.6-20260816T084503Z_e3265946cd64` |
+| 当前生产代码 | `v0.5.7` 已完成 GitHub Release、受控切换、前后 `25/25` 生产预检和线上 `25/25` HTTPS smoke |
 | `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
-| `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；受控切换、25/25 预检、25/25 HTTPS smoke 和清理均通过 |
-| 生产数据库校验 | 14 张业务/审计表合计 `71` 行，与切换前离线备份逐表一致；`quick_check=ok`、外键违规 `0` |
+| `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；已由后续版本取代 |
+| `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-16` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.5.4 版本说明](docs/releases/v0.5.4.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-16` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.5.7 版本说明](docs/releases/v0.5.7.md)。
 
 ## 功能状态
 
@@ -38,7 +38,7 @@
 | iCost 快捷指令 | iCost 成功记账后按账本名精确分流；“出差报销”只写森特智行，其他账本不进入本系统 | 只写文本 Webhook，独立 URL、独立 Token、幂等和审计；未知账本不发送 |
 | 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
 | 知识库 | 模块内搜索、条目维护和引用 | 后续可继续扩展检索与引用质量评估 |
-| 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF接入 | 机器身份只获得声明的写入路由；真实微信设备往返验收仍需在部署前完成 |
+| 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF 接入；已完成真实设备 `/clear` 往返验收 | 机器身份只获得声明的写入路由；更多业务场景仍按人工确认边界扩展 |
 | 方案辅助 | 只读兼容入口 | 按当前产品决定暂停写入和 AI 调用 |
 
 ## 技术结构
