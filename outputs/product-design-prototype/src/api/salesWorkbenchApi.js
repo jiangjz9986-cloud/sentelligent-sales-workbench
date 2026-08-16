@@ -170,6 +170,14 @@ function assertInvoiceCandidate(value, path = "invoiceCandidate") {
   return candidate;
 }
 
+function assertHospitalTenderNotice(value, path = "hospitalTenderNotice") {
+  return assertApiEntity("hospitalTenderNotice", value, path);
+}
+
+function assertHospitalTenderSource(value, path = "hospitalTenderSource") {
+  return assertApiEntity("hospitalTenderSource", value, path);
+}
+
 function idempotencyHeaders(options, label) {
   const key = String(options?.idempotencyKey ?? "");
   if (!key || key.trim() !== key) throw new TypeError(`A valid ${label} Idempotency-Key is required`);
@@ -521,6 +529,35 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     async getDashboardSummary() {
       const summary = await requestApi("/api/dashboard/summary");
       return assertApiEntity("dashboardSummary", summary.item);
+    },
+
+    async listHospitalTenders(filters = {}, { signal } = {}) {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(filters ?? {})) {
+        if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+      }
+      const response = await requestApi(`/api/hospital-tenders${query.size ? `?${query}` : ""}`, { signal });
+      return assertApiCollection("hospitalTenderNotice", response.items ?? [], "hospitalTenders.items");
+    },
+
+    async getHospitalTender(id, { signal } = {}) {
+      const response = await requestApi(`/api/hospital-tenders/${encodeURIComponent(id)}`, { signal });
+      return assertHospitalTenderNotice(response.item);
+    },
+
+    async getHospitalTenderSummary({ signal } = {}) {
+      const response = await requestApi("/api/hospital-tenders/summary", { signal });
+      return assertApiEntity("hospitalTenderSummary", response.item);
+    },
+
+    async listHospitalTenderSources({ signal } = {}) {
+      const response = await requestApi("/api/hospital-tenders/sources", { signal });
+      return assertApiCollection("hospitalTenderSource", response.items ?? [], "hospitalTenderSources.items");
+    },
+
+    async getHospitalTenderHealth({ signal } = {}) {
+      const response = await requestApi("/api/hospital-tenders/health", { signal });
+      return assertApiEntity("hospitalTenderHealth", response.item);
     },
 
     async listVisitItineraries({ status, signal } = {}) {

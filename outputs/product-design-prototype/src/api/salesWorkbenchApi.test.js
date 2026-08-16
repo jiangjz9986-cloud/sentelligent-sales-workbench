@@ -2840,4 +2840,72 @@ describe("sales workbench API client", () => {
       },
     ]);
   });
+
+  it("loads hospital tender notices, summary, sources, and health through read-only calls", async () => {
+    const notice = {
+      id: "notice-1",
+      identityKey: "source-a:item-1",
+      sourceId: "source-a",
+      sourceName: "公开采购平台",
+      city: "日照市",
+      title: "日照中医医院信息化采购",
+      url: "https://example.test/notices/1",
+      publishedAt: "2026-08-16T08:00:00.000Z",
+      noticeType: "tender",
+      purchaser: "日照中医医院",
+      projectCode: "",
+      budgetText: "",
+      deadlineText: "",
+      contentText: "",
+      hospitalNames: ["日照中医医院"],
+      sourceItemId: "item-1",
+      contentSha256: "a".repeat(64),
+      relevance: "high",
+      matchedCustomerIds: ["rizhao"],
+      matchedCustomerNames: ["日照中医医院"],
+      matchReasons: { rizhao: ["hospital_name"] },
+      matchedNeeds: { rizhao: ["PACS"] },
+      matchScore: 85,
+      revision: 1,
+      firstSeenAt: "2026-08-16T10:00:00.000Z",
+      lastSeenAt: "2026-08-16T10:00:00.000Z",
+    };
+    const source = {
+      sourceId: "source-a",
+      sourceName: "公开采购平台",
+      city: "",
+      status: "healthy",
+      lastRunAt: "2026-08-16T09:00:00.000Z",
+      lastSuccessAt: "2026-08-16T09:00:00.000Z",
+      itemCount: 1,
+      lastUpsertedCount: 1,
+      lastRejectedCount: 0,
+      lastError: null,
+      updatedAt: "2026-08-16T10:00:00.000Z",
+    };
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.includes("/api/hospital-tenders?") || url.endsWith("/api/hospital-tenders")) return jsonResponse({ items: [notice] });
+        if (url.endsWith("/api/hospital-tenders/summary")) return jsonResponse({ item: { totalNotices: 1, matchedNotices: 1, byNoticeType: { tender: 1 }, byRelevance: { high: 1 }, latestRun: null } });
+        if (url.endsWith("/api/hospital-tenders/sources")) return jsonResponse({ items: [source] });
+        if (url.endsWith("/api/hospital-tenders/health")) return jsonResponse({ item: { status: "healthy", sourceCount: 1, staleCount: 0, latestRun: null } });
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const notices = await api.listHospitalTenders({ customerId: "rizhao" });
+    const summary = await api.getHospitalTenderSummary();
+    const sources = await api.listHospitalTenderSources();
+    const health = await api.getHospitalTenderHealth();
+    assert.equal(notices[0].matchedCustomerIds[0], "rizhao");
+    assert.equal(summary.totalNotices, 1);
+    assert.equal(sources[0].status, "healthy");
+    assert.equal(health.staleCount, 0);
+    assert.match(calls[0].url, /customerId=rizhao/);
+    assert.equal(calls.every(({ options }) => (options.method ?? "GET") === "GET"), true);
+  });
 });

@@ -36,6 +36,7 @@ const pages = [
   { name: "knowledge", testId: "page-knowledge" },
   { name: "kanban", testId: "page-kanban" },
   { name: "weixin", testId: "page-weixin" },
+  { name: "hospital-tenders", testId: "hospital-tender-page" },
 ];
 
 function findChrome() {

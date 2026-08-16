@@ -53,6 +53,7 @@ import {
 } from "./features/salesWorkbench/pages.jsx";
 import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage.jsx";
 import { TravelExpensePage } from "./features/travelExpense/TravelExpensePage.jsx";
+import { HospitalTenderPage } from "./features/hospitalTender/HospitalTenderPage.jsx";
 import { mergeEntityByVersion } from "./quickRecordModel.js";
 import { getCurrentWeekRange } from "./weekRange.js";
 
@@ -144,6 +145,10 @@ function resolveHeadingContext({
       return { title: selectedItinerary?.title ?? "智能拜访行程" };
     }
     return { title: "智能拜访行程" };
+  }
+
+  if (active === "hospital-tenders") {
+    return { title: "医院招标监测" };
   }
 
   return null;
@@ -1144,6 +1149,14 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               <WeixinBindingPage
                 apiClient={apiClient}
                 backendStatus={backendStatus}
+              />
+            )}
+            {active === "hospital-tenders" && (
+              <HospitalTenderPage
+                apiClient={apiClient}
+                backendStatus={backendStatus}
+                customers={workbenchCustomers}
+                onSelectCustomer={(customerId) => openCustomerDetail(customerId)}
               />
             )}
               </>

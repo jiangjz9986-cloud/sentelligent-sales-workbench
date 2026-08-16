@@ -10,17 +10,25 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Panel } from "../../components/primitives.jsx";
 
 const TYPE_LABELS = {
+  tender: "招标公告",
+  procurement_notice: "采购公告",
+  purchase_intent: "采购意向",
+  clarification: "变更/澄清",
+  bid_result: "中标/成交",
+  bid_cancelled: "废标/终止",
+  contract_award: "合同公示",
+  qualification: "资格预审",
+  other: "其他公告",
   medical_device: "医疗器械",
   medical_consumable: "医用耗材",
   service: "医院服务",
   construction: "工程建设",
   information: "信息化",
-  other: "其他",
 };
 
 const RELEVANCE_LABELS = {
@@ -45,6 +53,13 @@ function firstText(...values) {
 function normalizeType(value) {
   const type = firstText(value).toLowerCase();
   if (TYPE_LABELS[type]) return type;
+  if (/采购意向|项目计划|计划/.test(type)) return "purchase_intent";
+  if (/招标|采购公告|公开采购/.test(type)) return "tender";
+  if (/变更|澄清|更正/.test(type)) return "clarification";
+  if (/中标|成交|结果/.test(type)) return "bid_result";
+  if (/合同/.test(type)) return "contract_award";
+  if (/单一来源/.test(type)) return "tender";
+  if (/废标|终止/.test(type)) return "bid_cancelled";
   if (/器械/.test(type)) return "medical_device";
   if (/耗材/.test(type)) return "medical_consumable";
   if (/服务/.test(type)) return "service";
@@ -56,6 +71,8 @@ function normalizeType(value) {
 function normalizeRelevance(value) {
   const relevance = firstText(value).toLowerCase();
   if (RELEVANCE_LABELS[relevance]) return relevance;
+  if (relevance === "possible" || /可能|中/.test(relevance)) return "medium";
+  if (relevance === "irrelevant" || /无关|低/.test(relevance)) return "low";
   if (/高|重点|urgent|important/.test(relevance)) return "high";
   if (/低|一般|weak/.test(relevance)) return "low";
   return "medium";
@@ -72,20 +89,37 @@ function safeHref(value) {
   }
 }
 
-function normalizeNotice(notice, index) {
+function normalizeNotice(notice, index, customerNameById) {
   const item = notice && typeof notice === "object" ? notice : {};
+  const matchedCustomerIds = Array.isArray(item.matchedCustomerIds)
+    ? item.matchedCustomerIds
+    : [];
+  const matchedCustomerNames = Array.isArray(item.matchedCustomerNames)
+    ? item.matchedCustomerNames
+    : [];
+  const customerId = firstText(item.customerId, item.customer_id, matchedCustomerIds[0]);
+  const summary = firstText(item.summary, item.description, item.abstract, item.contentText, "暂未提供公告摘要");
   return {
     id: firstText(item.id, item.noticeId, `notice-${index}`),
     title: firstText(item.title, item.name, "未命名招标公告"),
-    type: normalizeType(item.type ?? item.category),
+    type: normalizeType(item.noticeType ?? item.type ?? item.category),
     relevance: normalizeRelevance(item.relevance ?? item.priority),
-    customerId: firstText(item.customerId, item.customer_id),
-    customerName: firstText(item.customerName, item.customer, item.hospitalName, item.hospital),
+    customerId,
+    customerName: firstText(
+      item.customerName,
+      item.customer,
+      matchedCustomerNames[0],
+      customerId ? customerNameById.get(customerId) : "",
+      item.hospitalName,
+      item.hospital,
+    ),
     publishedAt: firstText(item.publishedAt, item.publishDate, item.date, "待确认"),
-    deadline: firstText(item.deadline, item.bidDeadline, item.endAt, "未注明"),
-    summary: firstText(item.summary, item.description, item.abstract, "暂未提供公告摘要"),
+    deadline: firstText(item.deadline, item.deadlineText, item.bidDeadline, item.endAt, "未注明"),
+    summary: summary.length > 800 ? `${summary.slice(0, 800)}…` : summary,
     sourceName: firstText(item.sourceName, item.source, "公开招标平台"),
     sourceUrl: safeHref(item.sourceUrl ?? item.url ?? item.link),
+    matchReasons: item.matchReasons ?? {},
+    matchedNeeds: item.matchedNeeds ?? {},
   };
 }
 
@@ -115,6 +149,8 @@ function metricValue(summary, keys, fallback) {
 }
 
 function NoticeDetail({ notice, onClose, onSelectCustomer }) {
+  const matchReasons = [...new Set(Object.values(notice.matchReasons ?? {}).flat().filter(Boolean))];
+  const matchedNeeds = [...new Set(Object.values(notice.matchedNeeds ?? {}).flat().filter(Boolean))];
   return (
     <div
       className="expense-drawer-backdrop"
@@ -156,6 +192,13 @@ function NoticeDetail({ notice, onClose, onSelectCustomer }) {
               </button>
             </section>
           ) : null}
+          {(matchReasons.length > 0 || matchedNeeds.length > 0) ? (
+            <section className="detail-surface" style={{ minWidth: 0 }}>
+              <h3>匹配依据</h3>
+              {matchReasons.length > 0 ? <p>{matchReasons.map((reason) => ({ hospital_name: "客户名称", city: "地区", need: "客户需求", keyword: "关键词" }[reason] ?? reason)).join("、")}</p> : null}
+              {matchedNeeds.length > 0 ? <small className="muted-copy">命中需求：{matchedNeeds.join("、")}</small> : null}
+            </section>
+          ) : null}
           <div className="detail-actions">
             {notice.sourceUrl ? (
               <a className="primary-button" href={notice.sourceUrl} target="_blank" rel="noreferrer">
@@ -174,7 +217,14 @@ function HealthSummary({ sources, health }) {
   const sourceItems = Array.isArray(sources) ? sources : [];
   const healthItems = Array.isArray(health)
     ? health
-    : Object.entries(health && typeof health === "object" ? health : {}).map(([name, value]) => ({ name, ...(value && typeof value === "object" ? value : { status: value }) }));
+    : Array.isArray(health?.sources)
+      ? health.sources
+      : health && typeof health === "object" && !("sourceCount" in health)
+        ? Object.entries(health).map(([name, value]) => ({
+          name,
+          ...(value && typeof value === "object" ? value : { status: value }),
+        }))
+        : [];
   const items = healthItems.length ? healthItems : sourceItems;
 
   return (
@@ -197,6 +247,8 @@ function HealthSummary({ sources, health }) {
 }
 
 export function HospitalTenderPage({
+  apiClient = null,
+  backendStatus = "connected",
   notices = [],
   summary = {},
   sources = [],
@@ -212,7 +264,49 @@ export function HospitalTenderPage({
   const [customerFilter, setCustomerFilter] = useState("");
   const [selectedNotice, setSelectedNotice] = useState(null);
 
-  const normalizedNotices = useMemo(() => (Array.isArray(notices) ? notices : []).map(normalizeNotice), [notices]);
+  const [remoteState, setRemoteState] = useState({
+    loading: false,
+    error: "",
+    notices: null,
+    summary: null,
+    sources: null,
+    health: null,
+  });
+  const refreshRemote = useCallback(async () => {
+    if (!apiClient || backendStatus === "offline") return;
+    setRemoteState((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const [nextNotices, nextSummary, nextSources, nextHealth] = await Promise.all([
+        apiClient.listHospitalTenders(),
+        apiClient.getHospitalTenderSummary(),
+        apiClient.listHospitalTenderSources(),
+        apiClient.getHospitalTenderHealth(),
+      ]);
+      setRemoteState({ loading: false, error: "", notices: nextNotices, summary: nextSummary, sources: nextSources, health: nextHealth });
+    } catch (error) {
+      setRemoteState((current) => ({ ...current, loading: false, error: String(error?.message ?? "招标公告加载失败") }));
+    }
+  }, [apiClient, backendStatus]);
+
+  useEffect(() => {
+    if (apiClient && backendStatus === "connected") void refreshRemote();
+  }, [apiClient, backendStatus, refreshRemote]);
+
+  const effectiveNotices = remoteState.notices ?? notices;
+  const effectiveSummary = remoteState.summary ?? summary;
+  const effectiveSources = remoteState.sources ?? sources;
+  const effectiveHealth = remoteState.health ?? health;
+  const effectiveLoading = Boolean(loading || remoteState.loading || (apiClient && backendStatus === "connecting"));
+  const effectiveError = remoteState.error || error;
+  const customerNameById = useMemo(
+    () => new Map((Array.isArray(customers) ? customers : []).map((customer) => [customerValue(customer), customerLabel(customer)])),
+    [customers],
+  );
+
+  const normalizedNotices = useMemo(
+    () => (Array.isArray(effectiveNotices) ? effectiveNotices : []).map((notice, index) => normalizeNotice(notice, index, customerNameById)),
+    [customerNameById, effectiveNotices],
+  );
   const typeOptions = useMemo(() => [...new Set(normalizedNotices.map((notice) => notice.type))], [normalizedNotices]);
   const customerOptions = useMemo(() => {
     const values = new Map();
@@ -233,9 +327,9 @@ export function HospitalTenderPage({
   )), [customerFilter, normalizedNotices, relevanceFilter, typeFilter]);
 
   const metrics = [
-    ["公告总数", metricValue(summary, ["total", "noticeCount", "count"], normalizedNotices.length)],
-    ["高相关", metricValue(summary, ["highRelevance", "highCount", "priorityCount"], normalizedNotices.filter((notice) => notice.relevance === "high").length)],
-    ["临近截止", metricValue(summary, ["deadlineSoon", "dueSoon", "expiringCount"], "—")],
+    ["公告总数", metricValue(effectiveSummary, ["total", "totalNotices", "noticeCount", "count"], normalizedNotices.length)],
+    ["高相关", metricValue(effectiveSummary, ["highRelevance", "highCount", "priorityCount"], normalizedNotices.filter((notice) => notice.relevance === "high").length)],
+    ["临近截止", metricValue(effectiveSummary, ["deadlineSoon", "dueSoon", "expiringCount"], "—")],
   ];
 
   return (
@@ -246,13 +340,13 @@ export function HospitalTenderPage({
           <h1>医院招标监测</h1>
           <p className="muted-copy">聚合公开公告，辅助销售识别医院采购机会。</p>
         </div>
-        <button className="ghost-button" type="button" onClick={onRefresh} disabled={loading}>
-          {loading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
-          {loading ? "正在刷新" : "刷新数据"}
+        <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading}>
+          {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
+          {effectiveLoading ? "正在刷新" : "刷新数据"}
         </button>
       </div>
 
-      {error ? <div className="expense-page-alert" role="alert"><CircleAlert size={17} /><span>{error}</span><button className="ghost-button" type="button" onClick={onRefresh}>重试</button></div> : null}
+      {effectiveError ? <div className="expense-page-alert" role="alert"><CircleAlert size={17} /><span>{effectiveError}</span><button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }}>重试</button></div> : null}
 
       <div className="detail-metrics hospital-tender-metrics" style={{ minWidth: 0 }}>
         {metrics.map(([label, value]) => <section className="metric-inline" key={label}><span>{label}</span><strong>{value}</strong></section>)}
@@ -267,8 +361,8 @@ export function HospitalTenderPage({
             <label className="itinerary-filter"><span>客户</span><select aria-label="筛选客户" value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)}><option value="">全部客户</option>{customerOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
           </div>
 
-          {loading && normalizedNotices.length === 0 ? <div className="expense-loading" role="status"><LoaderCircle className="state-spinner" size={21} />正在读取招标公告</div> : null}
-          {!loading && filteredNotices.length === 0 ? <p className="empty-list">没有符合条件的招标公告</p> : null}
+          {effectiveLoading && normalizedNotices.length === 0 ? <div className="expense-loading" role="status"><LoaderCircle className="state-spinner" size={21} />正在读取招标公告</div> : null}
+          {!effectiveLoading && filteredNotices.length === 0 ? <p className="empty-list">没有符合条件的招标公告</p> : null}
           <div className="list-stack" style={{ minWidth: 0 }}>
             {filteredNotices.map((notice) => (
               <article className="compact-item hospital-tender-row" key={notice.id} style={{ alignItems: "flex-start", minWidth: 0 }}>
@@ -284,7 +378,7 @@ export function HospitalTenderPage({
             ))}
           </div>
         </Panel>
-        <HealthSummary sources={sources} health={health} />
+        <HealthSummary sources={effectiveSources} health={effectiveHealth} />
       </div>
 
       {selectedNotice ? <NoticeDetail notice={selectedNotice} onClose={() => setSelectedNotice(null)} onSelectCustomer={onSelectCustomer} /> : null}

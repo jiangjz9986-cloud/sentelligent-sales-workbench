@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { openDatabase } from "../src/db.js";
+import { createConnection } from "../src/db/connection.js";
 import {
   NOTICE_TYPES,
   RELEVANCE_LEVELS,
@@ -93,7 +93,7 @@ function notice(overrides = {}) {
 }
 
 beforeEach(() => {
-  db = openDatabase({ databaseUrl: ":memory:" });
+  db = createConnection({ databaseUrl: ":memory:" });
   createTables();
   idCounter = 0;
   now = "2026-08-16T10:00:00.000Z";
@@ -156,6 +156,28 @@ describe("hospital tender repository", () => {
     assert.equal(summary.byRelevance[RELEVANCE_LEVELS[0]], 1);
   });
 
+  it("applies customer and keyword filters before pagination", () => {
+    repository.upsertNotice(notice({
+      identityKey: "source-a:item-1",
+      title: "无关公告",
+    }), { matchedCustomerIds: ["customer-a"] });
+    repository.upsertNotice(notice({
+      id: "notice-2",
+      identityKey: "source-a:item-2",
+      url: "https://example.com/notices/2",
+      publishedAt: "2026-08-15T08:00:00.000Z",
+      title: "目标医院 PACS 招标公告",
+    }), { matchedCustomerIds: ["customer-b"] });
+
+    const customerMatches = repository.listNotices({ customerId: "customer-b", limit: 1 });
+    assert.equal(customerMatches.length, 1);
+    assert.equal(customerMatches[0].identityKey, "source-a:item-2");
+    assert.equal(
+      repository.listNotices({ query: "目标医院", limit: 1 })[0].identityKey,
+      "source-a:item-2",
+    );
+  });
+
   it("records source health and run summaries without touching customer or opportunity tables", () => {
     const crmTablesBefore = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('customers', 'opportunities') ORDER BY name").all();
     repository.upsertSourceHealth({
@@ -187,5 +209,30 @@ describe("hospital tender repository", () => {
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('customers', 'opportunities') ORDER BY name").all(),
       crmTablesBefore,
     );
+  });
+
+  it("replays the same run idempotently", () => {
+    const first = repository.recordRun({
+      id: "run-1",
+      sourceId: "source-a",
+      startedAt: now,
+      finishedAt: now,
+      status: "success",
+      fetchedCount: 1,
+      upsertedCount: 1,
+      rejectedCount: 0,
+    });
+    const replay = repository.recordRun({
+      id: "run-1",
+      sourceId: "source-a",
+      startedAt: now,
+      finishedAt: now,
+      status: "success",
+      fetchedCount: 1,
+      upsertedCount: 1,
+      rejectedCount: 0,
+    });
+    assert.equal(replay.id, first.id);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM hospital_tender_runs").get().count, 1);
   });
 });

@@ -124,6 +124,13 @@ import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
+import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
+import {
+  ingestHospitalTenderSnapshot,
+  normalizeHospitalTenderSyncPayload,
+  serializeHospitalTenderNotice,
+  serializeHospitalTenderSource,
+} from "./hospitalTender/sync.js";
 import {
   partialSchema,
   requestSchemas,
@@ -646,6 +653,13 @@ function riskFromRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function hospitalTenderCustomerNameMap(db) {
+  return new Map(
+    all(db, "SELECT id, name FROM customers WHERE deleted_at IS NULL ORDER BY id ASC")
+      .map((row) => [row.id, row.name]),
+  );
 }
 
 function numberFromText(value) {
@@ -2232,6 +2246,10 @@ function buildSalesDecisionContext(db, body) {
 export function createServer(options = {}) {
   const config = loadConfig(options);
   const db = openDatabase({ databaseUrl: config.databaseUrl });
+  const hospitalTenderRepository = createHospitalTenderRepository(db, {
+    clock: options.hospitalTenderClock ?? (() => new Date()),
+    ...(options.hospitalTenderIdFactory ? { idFactory: options.hospitalTenderIdFactory } : {}),
+  });
   const databaseIdentity = config.authSessionSecret.length >= 32
     ? createDatabaseIdentity({
         databaseUrl: config.databaseUrl,
@@ -2434,8 +2452,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/auth/login") {
-        if (authenticateMachineRequest(request.headers.authorization, config)) {
-          assertMachineRouteAllowed(request.method, url.pathname);
+        const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
+        if (machineIdentity) {
+          assertMachineRouteAllowed(request.method, url.pathname, machineIdentity.integration);
         }
         if (!isAuthEnabled(config)) {
           throw new HttpError(
@@ -2557,7 +2576,7 @@ export function createServer(options = {}) {
         }
         const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
         if (!machineIdentity) return unauthorized(response);
-        assertMachineRouteAllowed(request.method, url.pathname);
+        assertMachineRouteAllowed(request.method, url.pathname, machineIdentity.integration);
         const idempotencyKey = parseIdempotencyKey(request);
         const rawBody = await readJson(request, { maxBytes: TRAVEL_EXPENSE_ATTACHMENT_JSON_MAX_BYTES });
         let body;
@@ -2638,6 +2657,92 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (
+        url.pathname === "/api/integrations/hospital-tenders/sync"
+        || url.pathname === "/api/integrations/hospital-tenders/health"
+      ) {
+        const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
+        if (!machineIdentity || machineIdentity.integration !== "hospital-tender-monitor") {
+          return unauthorized(response);
+        }
+        assertMachineRouteAllowed(request.method, url.pathname, machineIdentity.integration);
+        if (url.pathname.endsWith("/health")) {
+          if (request.method !== "GET") {
+            sendHttpError(
+              response,
+              new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for the hospital tender health endpoint"),
+              responseOptions(response, { Allow: "GET" }),
+            );
+            return;
+          }
+          const health = hospitalTenderRepository.health();
+          sendJson(response, 200, {
+            item: {
+              status: health.status,
+              sourceCount: health.sourceCount,
+              staleCount: health.unhealthySourceCount + health.degradedSourceCount,
+              latestRun: hospitalTenderRepository.summary().latestRun,
+            },
+          });
+          return;
+        }
+        if (request.method !== "POST") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for the hospital tender sync endpoint"),
+            responseOptions(response, { Allow: "POST" }),
+          );
+          return;
+        }
+        let payload;
+        try {
+          payload = normalizeHospitalTenderSyncPayload(await readJson(request, {
+            maxBytes: Math.min(config.jsonBodyLimitBytes, 8 * 1024 * 1024),
+          }));
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { snapshot: error.message });
+        }
+        const customers = all(
+          db,
+          "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY id ASC",
+        ).map(customerFromRow);
+        const customerNameById = new Map(customers.map((customer) => [customer.id, customer.name]));
+        const result = withImmediateTransaction(db, () => {
+          const syncResult = ingestHospitalTenderSnapshot({
+            repository: hospitalTenderRepository,
+            payload,
+            customers,
+          });
+          insertAudit(db, {
+            action: "hospital_tender.sync",
+            entityType: "hospital_tender_snapshot",
+            entityId: payload.generatedAt,
+            actor: machineIdentity.account,
+            requestId,
+            before: null,
+            after: null,
+            metadata: {
+              integration: machineIdentity.integration,
+              acceptedCount: syncResult.acceptedCount,
+              rejectedCount: syncResult.rejectedCount,
+              sourceCount: payload.sources.length,
+            },
+          });
+          return syncResult;
+        });
+        sendJson(response, 200, {
+          item: {
+            generatedAt: result.generatedAt,
+            acceptedCount: result.acceptedCount,
+            rejectedCount: result.rejectedCount,
+            summary: hospitalTenderRepository.summary(),
+            notices: result.notices.map((item) => serializeHospitalTenderNotice(item, customerNameById)),
+          },
+        });
+        return;
+      }
+
       if (isAuthMisconfigured(config) && url.pathname.startsWith("/api/")) {
         throw new HttpError(
           503,
@@ -2651,10 +2756,14 @@ export function createServer(options = {}) {
         requestIdentity = authenticateRequest(db, config, request);
         if (!requestIdentity) return unauthorized(response);
         if (requestIdentity.kind === "machine") {
-          assertMachineRouteAllowed(request.method, url.pathname);
+          assertMachineRouteAllowed(request.method, url.pathname, requestIdentity.integration);
         } else if (isCookieWrite(request.method)) {
           assertCsrfToken(request.headers["x-csrf-token"], requestIdentity.csrfToken);
         }
+      } else if (url.pathname.startsWith("/api/") && request.headers.authorization) {
+        requestIdentity = authenticateMachineRequest(request.headers.authorization, config);
+        if (!requestIdentity) return unauthorized(response);
+        assertMachineRouteAllowed(request.method, url.pathname, requestIdentity.integration);
       }
       request.authContext = requestIdentity;
 
@@ -2681,6 +2790,85 @@ export function createServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/api/dashboard/summary") {
         sendJson(response, 200, { item: dashboardSummaryFromDb(db) });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/hospital-tenders") {
+        const rawLimit = url.searchParams.get("limit");
+        const rawOffset = url.searchParams.get("offset");
+        const limit = rawLimit === null ? 50 : Number(rawLimit);
+        const offset = rawOffset === null ? 0 : Number(rawOffset);
+        const customerId = url.searchParams.get("customerId");
+        const query = url.searchParams.get("q")?.trim() ?? "";
+        if (customerId && (customerId.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(customerId))) {
+          throw new HttpError(422, "VALIDATION_ERROR", "客户筛选条件无效", { customerId: "identifier" });
+        }
+        if (query.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(query)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "关键词筛选条件无效", { q: "max" });
+        }
+        const filters = {
+          sourceId: url.searchParams.get("sourceId") || undefined,
+          noticeType: url.searchParams.get("noticeType") || undefined,
+          relevance: url.searchParams.get("relevance") || undefined,
+          city: url.searchParams.get("city") || undefined,
+          customerId: customerId || undefined,
+          query: query || undefined,
+          publishedFrom: url.searchParams.get("publishedFrom") || undefined,
+          publishedTo: url.searchParams.get("publishedTo") || undefined,
+          limit,
+          offset,
+        };
+        let items;
+        try {
+          items = hospitalTenderRepository.listNotices(filters);
+        } catch (error) {
+          throw new HttpError(422, "VALIDATION_ERROR", "招标公告筛选条件无效", { filters: error.message });
+        }
+        const customerNames = hospitalTenderCustomerNameMap(db);
+        sendJson(response, 200, {
+          items: items.map((item) => serializeHospitalTenderNotice(item, customerNames)),
+        });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 3
+        && parts[0] === "api"
+        && parts[1] === "hospital-tenders"
+        && parts[2]
+        && !new Set(["summary", "sources", "health"]).has(parts[2])
+      ) {
+        const item = hospitalTenderRepository.getNotice(parts[2]);
+        if (!item) return notFound(response);
+        sendJson(response, 200, {
+          item: serializeHospitalTenderNotice(item, hospitalTenderCustomerNameMap(db)),
+        });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/hospital-tenders/summary") {
+        sendJson(response, 200, { item: hospitalTenderRepository.summary() });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/hospital-tenders/sources") {
+        sendJson(response, 200, {
+          items: hospitalTenderRepository.listSources().map(serializeHospitalTenderSource),
+        });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/hospital-tenders/health") {
+        const health = hospitalTenderRepository.health();
+        sendJson(response, 200, {
+          item: {
+            status: health.status,
+            sourceCount: health.sourceCount,
+            staleCount: health.unhealthySourceCount + health.degradedSourceCount,
+            latestRun: hospitalTenderRepository.summary().latestRun,
+          },
+        });
         return;
       }
 

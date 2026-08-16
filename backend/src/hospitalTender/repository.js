@@ -10,6 +10,7 @@ export const NOTICE_TYPES = Object.freeze([
   "purchase_intent",
   "clarification",
   "bid_result",
+  "bid_cancelled",
   "contract_award",
   "qualification",
   "other",
@@ -350,6 +351,8 @@ function normalizeListFilters(filters = {}) {
     "noticeType",
     "relevance",
     "city",
+    "customerId",
+    "query",
     "publishedFrom",
     "publishedTo",
     "limit",
@@ -366,6 +369,8 @@ function normalizeListFilters(filters = {}) {
       ? null
       : enumValue(filters.relevance, RELEVANCE_LEVELS, "relevance"),
     city: optionalText(filters.city, "city", NOTICE_FIELD_LIMITS.city),
+    customerId: optionalText(filters.customerId, "customerId", NOTICE_FIELD_LIMITS.customerId),
+    query: optionalText(filters.query, "query", 200),
     publishedFrom: filters.publishedFrom === undefined || filters.publishedFrom === null || filters.publishedFrom === ""
       ? null
       : dateTime(filters.publishedFrom, "publishedFrom"),
@@ -380,6 +385,11 @@ function normalizeListFilters(filters = {}) {
   }
   if (!Number.isSafeInteger(normalized.offset) || normalized.offset < 0 || normalized.offset > 1_000_000) {
     throw new TypeError("offset must be a non-negative safe integer");
+  }
+  for (const [name, value] of [["customerId", normalized.customerId], ["query", normalized.query]]) {
+    if (value !== null && /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+      throw new TypeError(`${name} contains control characters`);
+    }
   }
   if (normalized.publishedFrom && normalized.publishedTo && normalized.publishedFrom > normalized.publishedTo) {
     throw new TypeError("publishedFrom cannot be after publishedTo");
@@ -409,6 +419,25 @@ function noticeWhere(filters, { pagination = true } = {}) {
   if (filters.city !== null) {
     clauses.push("city = $city");
     params.$city = filters.city;
+  }
+  if (filters.customerId !== null) {
+    clauses.push(`EXISTS (
+      SELECT 1
+      FROM json_each(hospital_tender_notices.match_customer_ids_json)
+      WHERE json_each.value = $customerId
+    )`);
+    params.$customerId = filters.customerId;
+  }
+  if (filters.query !== null) {
+    clauses.push(`instr(
+      lower(
+        coalesce(title, '') || ' ' || coalesce(purchaser, '') || ' '
+        || coalesce(project_code, '') || ' ' || coalesce(city, '') || ' '
+        || coalesce(content_text, '')
+      ),
+      lower($query)
+    ) > 0`);
+    params.$query = filters.query;
   }
   if (filters.publishedFrom !== null) {
     clauses.push("published_at >= $publishedFrom");
@@ -656,6 +685,15 @@ export function createHospitalTenderRepository(db, {
         $id, $sourceId, $startedAt, $finishedAt, $status, $fetchedCount,
         $upsertedCount, $rejectedCount, $errorText, $createdAt
       )
+      ON CONFLICT(id) DO UPDATE SET
+        source_id = excluded.source_id,
+        started_at = excluded.started_at,
+        finished_at = excluded.finished_at,
+        status = excluded.status,
+        fetched_count = excluded.fetched_count,
+        upserted_count = excluded.upserted_count,
+        rejected_count = excluded.rejected_count,
+        error_text = excluded.error_text
     `).run({
       $id: id,
       $sourceId: sourceId,

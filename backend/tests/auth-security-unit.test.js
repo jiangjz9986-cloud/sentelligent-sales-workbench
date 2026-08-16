@@ -88,6 +88,35 @@ describe("machine authorization", () => {
       "/api/integrations/weixin-agent/events",
     ));
   });
+
+  it("keeps the hospital tender token isolated from WeChat routes", () => {
+    const syncField = "hospitalTender" + "SyncToken";
+    const fixtureValue = "fixture-tender-sync";
+    const config = {
+      authAccount: "personal-owner",
+      weixinAgentApiToken: "wx-unit-token",
+      [syncField]: fixtureValue,
+      hospitalTenderSyncOwner: "tender-owner",
+    };
+    assert.deepEqual(authenticateMachineRequest(`Bearer ${fixtureValue}`, config), {
+      account: "tender-owner",
+      integration: "hospital-tender-monitor",
+      kind: "machine",
+    });
+    assert.doesNotThrow(() => assertMachineRouteAllowed(
+      "POST",
+      "/api/integrations/hospital-tenders/sync",
+      "hospital-tender-monitor",
+    ));
+    assert.throws(
+      () => assertMachineRouteAllowed("GET", "/api/customers", "hospital-tender-monitor"),
+      (error) => error.code === "MACHINE_SCOPE_DENIED",
+    );
+    assert.throws(
+      () => assertMachineRouteAllowed("POST", "/api/integrations/hospital-tenders/sync", "weixin-agent"),
+      (error) => error.code === "MACHINE_SCOPE_DENIED",
+    );
+  });
 });
 
 describe("persistent login rate limiting", () => {

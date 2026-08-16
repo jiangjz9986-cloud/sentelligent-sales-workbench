@@ -181,6 +181,11 @@ const routeCases = [
   ],
   ["/kanban", expectedRoute({ page: "kanban", active: "kanban" }), "/kanban"],
   [
+    "/hospital-tenders",
+    expectedRoute({ page: "hospital-tenders", active: "hospital-tenders", readOnly: true }),
+    "/hospital-tenders",
+  ],
+  [
     "/settings/weixin",
     expectedRoute({ page: "settings/weixin", active: "weixin" }),
     "/settings/weixin",
