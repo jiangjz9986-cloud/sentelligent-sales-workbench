@@ -209,7 +209,7 @@ class AppConfig:
         return (
             "AppConfig("
             f"project_root={self.project_root!r}, database_path={self.database_path!r}, "
-            "pushplus_token='[REDACTED]', "
+            f"notifications_configured={bool(self.pushplus_token)!r}, "
             f"sources={self.sources!r}, keywords={self.keywords!r}, "
             f"customer_hospitals={len(self.customer_hospitals)!r}, "
             f"timezone={self.timezone!r}, schedule_time={self.schedule_time!r}, "

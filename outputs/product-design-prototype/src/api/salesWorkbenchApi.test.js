@@ -2937,7 +2937,7 @@ describe("sales workbench API client", () => {
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
-    api.setSession({ csrfToken: "csrf-settings" });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
 
     assert.equal((await api.getSecuritySettings()).icost.configured, false);
     assert.equal((await api.rotateIcostToken()).token, syntheticToken);
