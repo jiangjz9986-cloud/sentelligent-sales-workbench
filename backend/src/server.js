@@ -2287,7 +2287,7 @@ export function createServer(options = {}) {
     // value. The environment fallback remains for legacy non-production/test
     // deployments that have not enabled persisted settings yet.
     modelApiKeyProvider: () => secureSettingsRepository
-      ? secureSettingsRepository.readSecret(DEEPSEEK_SETTING_KEY)
+      ? (secureSettingsRepository.readSecret(DEEPSEEK_SETTING_KEY) || config.modelApiKey)
       : config.modelApiKey,
   };
   const hospitalTenderRepository = createHospitalTenderRepository(db, {
@@ -2590,7 +2590,11 @@ export function createServer(options = {}) {
         const integrationIdentity = authenticateIcostWebhook(
           request.headers.authorization,
           secureSettingsRepository
-            ? { ...config, icostWebhookToken: secureSettingsRepository.readSecret(ICOST_SETTING_KEY) }
+            ? {
+              ...config,
+              icostWebhookToken: secureSettingsRepository.readSecret(ICOST_SETTING_KEY)
+                || config.icostWebhookToken,
+            }
             : config,
         );
         if (!integrationIdentity) return unauthorized(response);
@@ -2900,6 +2904,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/settings/security") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
         const repository = requireSecureSettings(secureSettingsRepository);
         let item;
         try {
@@ -2915,6 +2920,7 @@ export function createServer(options = {}) {
         request.method === "POST"
         && (url.pathname === "/api/settings/icost-token" || url.pathname === "/api/settings/icost-token/rotate")
       ) {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
         await validateEmptyBody(request);
         const repository = requireSecureSettings(secureSettingsRepository);
         const result = withImmediateTransaction(db, () => {
@@ -2950,6 +2956,7 @@ export function createServer(options = {}) {
         (request.method === "PUT" || request.method === "POST")
         && (url.pathname === "/api/settings/deepseek-key" || url.pathname === "/api/settings/deepseek-api-key")
       ) {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
         const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
         const repository = requireSecureSettings(secureSettingsRepository);
         const item = withImmediateTransaction(db, () => {
@@ -2978,6 +2985,7 @@ export function createServer(options = {}) {
         request.method === "DELETE"
         && (url.pathname === "/api/settings/deepseek-key" || url.pathname === "/api/settings/deepseek-api-key")
       ) {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
         const confirmation = validateSecureSettingBody(
           await readJson(request),
           { field: "confirmation", max: 32 },

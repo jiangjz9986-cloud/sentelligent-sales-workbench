@@ -205,6 +205,28 @@ describe("sales decision agent v1", () => {
     assert.equal(requestBody.max_tokens, 12_000);
   });
 
+  it("uses the runtime model key provider for persisted settings", async () => {
+    const context = baseContext();
+    let authorization;
+    await analyzeSalesDecision(
+      context,
+      {
+        aiAnalysisMode: "model",
+        modelApiKey: "fixture",
+        modelApiKeyProvider: () => "stored-fixture",
+        modelBaseUrl: "https://example.invalid",
+        modelName: "deepseek-v4-flash",
+      },
+      {
+        fetchImpl: async (_url, options) => {
+          authorization = options.headers.Authorization;
+          return modelResponse(overconfidentModelAnalysis(context));
+        },
+      },
+    );
+    assert.equal(authorization, "Bearer stored-fixture");
+  });
+
   it("falls back safely when the configured model returns invalid JSON", async () => {
     const result = await analyzeSalesDecision(
       baseContext(),

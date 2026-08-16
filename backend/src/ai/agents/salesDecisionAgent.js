@@ -534,6 +534,13 @@ function completionUrl(baseUrl) {
   return `${String(baseUrl ?? "https://api.deepseek.com").replace(/\/+$/, "")}/chat/completions`;
 }
 
+function resolveModelApiKey(config = {}) {
+  if (typeof config.modelApiKeyProvider === "function") {
+    return String(config.modelApiKeyProvider() ?? "");
+  }
+  return String(config.modelApiKey ?? "");
+}
+
 function stripJsonFence(content) {
   const text = String(content ?? "").trim();
   const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
@@ -563,11 +570,12 @@ function sanitizeWritebackPreview(value) {
 }
 
 async function callSalesDecisionModel(context, config, fetchImpl) {
+  const apiKey = resolveModelApiKey(config);
   const response = await fetchImpl(completionUrl(config.modelBaseUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.modelApiKey}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       model: config.modelName ?? "deepseek-v4-flash",
@@ -593,7 +601,7 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
     { source },
   );
   if (config.aiAnalysisMode !== "model") return fallback("mock");
-  if (!config.modelApiKey) return fallback("mock_missing_model_key");
+  if (!resolveModelApiKey(config)) return fallback("mock_missing_model_key");
 
   try {
     const parsed = await callSalesDecisionModel(

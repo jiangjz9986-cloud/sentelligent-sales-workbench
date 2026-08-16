@@ -73,6 +73,12 @@ afterEach(async () => {
 });
 
 describe("secure system settings API", () => {
+  it("requires a user session even when the legacy global API auth switch is off", async () => {
+    await startServer({ authRequired: false });
+    const result = await request("/api/settings/security");
+    assert.equal(result.response.status, 401);
+  });
+
   it("requires an encryption key before exposing persisted settings", async () => {
     await startServer({ settingsEncryptionKey: "" });
     const auth = await login();
