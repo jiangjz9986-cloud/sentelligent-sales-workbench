@@ -560,6 +560,14 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("hospitalTenderHealth", response.item);
     },
 
+    async runHospitalTenderMonitor() {
+      const response = await requestApi("/api/hospital-tenders/run", {
+        method: "POST",
+        body: "{}",
+      });
+      return response.item;
+    },
+
     async listVisitItineraries({ status, signal } = {}) {
       const query = status ? `?status=${encodeURIComponent(status)}` : "";
       const response = await requestApi(`/api/itineraries${query}`, { signal });

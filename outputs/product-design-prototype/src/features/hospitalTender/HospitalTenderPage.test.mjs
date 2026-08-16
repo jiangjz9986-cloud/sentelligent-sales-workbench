@@ -8,7 +8,7 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   const source = await readFile(pagePath, "utf8");
 
   assert.match(source, /export function HospitalTenderPage\s*\(/);
-  for (const prop of ["notices", "summary", "sources", "health", "customers", "loading", "error", "onRefresh", "onSelectCustomer"]) {
+  for (const prop of ["apiClient", "notices", "summary", "sources", "health", "customers", "loading", "error", "onRefresh", "onSelectCustomer"]) {
     assert.match(source, new RegExp(`\\b${prop}\\b`), `missing prop ${prop}`);
   }
   assert.match(source, /筛选公告类型/);
@@ -18,6 +18,8 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   assert.match(source, /原文|查看原文/);
   assert.match(source, /来源健康|数据源健康/);
   assert.match(source, /匹配依据/);
+  assert.match(source, /立即检测/);
+  assert.match(source, /runHospitalTenderMonitor/);
   assert.match(source, /role="dialog"|aria-label="公告详情"/);
 });
 

@@ -2895,6 +2895,7 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/hospital-tenders/summary")) return jsonResponse({ item: { totalNotices: 1, matchedNotices: 1, byNoticeType: { tender: 1 }, byRelevance: { high: 1 }, latestRun: null } });
         if (url.endsWith("/api/hospital-tenders/sources")) return jsonResponse({ items: [source] });
         if (url.endsWith("/api/hospital-tenders/health")) return jsonResponse({ item: { status: "healthy", sourceCount: 1, staleCount: 0, latestRun: null } });
+        if (url.endsWith("/api/hospital-tenders/run")) return jsonResponse({ item: { acceptedCount: 1, rejectedCount: 0 } });
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
@@ -2904,12 +2905,15 @@ describe("sales workbench API client", () => {
     const summary = await api.getHospitalTenderSummary();
     const sources = await api.listHospitalTenderSources();
     const health = await api.getHospitalTenderHealth();
+    const run = await api.runHospitalTenderMonitor();
     assert.equal(notices[0].matchedCustomerIds[0], "rizhao");
     assert.equal(summary.totalNotices, 1);
     assert.equal(sources[0].status, "healthy");
     assert.equal(health.staleCount, 0);
+    assert.equal(run.acceptedCount, 1);
     assert.match(calls[0].url, /customerId=rizhao/);
-    assert.equal(calls.every(({ options }) => (options.method ?? "GET") === "GET"), true);
+    assert.equal(calls.at(-1).options.method, "POST");
+    assert.equal(calls.at(-1).options.headers["X-CSRF-Token"], "fixture-csrf-token");
   });
 
   it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {

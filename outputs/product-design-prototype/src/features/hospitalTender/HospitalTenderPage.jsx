@@ -272,6 +272,7 @@ export function HospitalTenderPage({
     sources: null,
     health: null,
   });
+  const [runState, setRunState] = useState({ busy: false, error: "", notice: "" });
   const refreshRemote = useCallback(async () => {
     if (!apiClient || backendStatus === "offline") return;
     setRemoteState((current) => ({ ...current, loading: true, error: "" }));
@@ -290,6 +291,18 @@ export function HospitalTenderPage({
 
   useEffect(() => {
     if (apiClient && backendStatus === "connected") void refreshRemote();
+  }, [apiClient, backendStatus, refreshRemote]);
+
+  const runInternalMonitor = useCallback(async () => {
+    if (!apiClient?.runHospitalTenderMonitor || backendStatus !== "connected") return;
+    setRunState({ busy: true, error: "", notice: "" });
+    try {
+      await apiClient.runHospitalTenderMonitor();
+      setRunState({ busy: false, error: "", notice: "检测完成，公告和客户匹配已更新。" });
+      await refreshRemote();
+    } catch {
+      setRunState({ busy: false, error: "检测未完成，请稍后重试。", notice: "" });
+    }
   }, [apiClient, backendStatus, refreshRemote]);
 
   const effectiveNotices = remoteState.notices ?? notices;
@@ -340,13 +353,21 @@ export function HospitalTenderPage({
           <h1>医院招标监测</h1>
           <p className="muted-copy">聚合公开公告，辅助销售识别医院采购机会。</p>
         </div>
-        <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading}>
-          {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
-          {effectiveLoading ? "正在刷新" : "刷新数据"}
-        </button>
+        <div className="settings-button-row" style={{ justifyContent: "flex-end" }}>
+          <button className="primary-button" type="button" onClick={() => { void runInternalMonitor(); }} disabled={effectiveLoading || runState.busy || backendStatus !== "connected"}>
+            {runState.busy ? <LoaderCircle className="state-spinner" size={16} /> : <BellRing size={16} />}
+            {runState.busy ? "检测中" : "立即检测"}
+          </button>
+          <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading || runState.busy}>
+            {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
+            {effectiveLoading ? "正在刷新" : "刷新数据"}
+          </button>
+        </div>
       </div>
 
       {effectiveError ? <div className="expense-page-alert" role="alert"><CircleAlert size={17} /><span>{effectiveError}</span><button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }}>重试</button></div> : null}
+      {runState.error ? <div className="expense-page-alert" role="alert"><CircleAlert size={17} /><span>{runState.error}</span><button className="ghost-button" type="button" onClick={() => { void runInternalMonitor(); }}>重试检测</button></div> : null}
+      {runState.notice ? <p className="settings-feedback" role="status">{runState.notice}</p> : null}
 
       <div className="detail-metrics hospital-tender-metrics" style={{ minWidth: 0 }}>
         {metrics.map(([label, value]) => <section className="metric-inline" key={label}><span>{label}</span><strong>{value}</strong></section>)}
