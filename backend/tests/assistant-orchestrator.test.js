@@ -1,12 +1,29 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
-import { createAssistantOrchestrator } from "../src/assistant/orchestrator.js";
+import {
+  confirmationRequestDigest,
+  createAssistantOrchestrator,
+} from "../src/assistant/orchestrator.js";
+
+const confirmationSecret = Buffer.alloc(32, 0x41);
+
+function lengthPrefixed(parts) {
+  return Buffer.concat(parts.map((part) => {
+    const value = Buffer.from(part, "utf8");
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(value.length);
+    return Buffer.concat([length, value]);
+  }));
+}
 
 function fakeRuntime() {
   const events = new Map();
   const pending = new Map();
+  const confirmationCodes = new Map();
+  const confirmationAttempts = new Map();
+  const confirmationFailures = [];
   const parts = [];
   let sequence = 0;
   const eventRepository = {
@@ -14,7 +31,7 @@ function fakeRuntime() {
       const key = `${input.owner}:${input.channel}:${input.eventId}`;
       const existing = events.get(key);
       if (existing) return { item: existing, replayed: true };
-      const item = { id: `event-${++sequence}`, status: "received", response: null };
+      const item = { id: `event-${++sequence}`, status: "received", response: null, received: structuredClone(input) };
       events.set(key, item);
       return { item, replayed: false };
     },
@@ -48,32 +65,62 @@ function fakeRuntime() {
   };
   const pendingActionRepository = {
     create(input) {
-      const action = { id: `action-${++sequence}`, ...input, status: "pending" };
+      const planDigest = createHash("sha256").update(JSON.stringify(input.payload?.plan ?? input.payload), "utf8").digest("hex");
+      const action = { id: `action-${++sequence}`, ...input, planDigest, status: "pending" };
+      confirmationCodes.set(action.id, action.confirmationCode);
+      confirmationAttempts.set(action.id, 0);
+      delete action.confirmationCode;
       pending.set(action.id, action);
       return action;
     },
     get(id, scope) {
+      if (!Object.hasOwn(scope, "conversationId")) throw new TypeError("conversationId is required");
       const action = pending.get(id);
-      const conversationId = scope.conversationId ?? scope.conversation;
       return action
         && action.owner === scope.owner
         && action.channel === scope.channel
-        && (conversationId === undefined || action.conversationId === conversationId)
+        && action.conversationId === scope.conversationId
         ? action
         : null;
     },
+    findActiveByConversation({ owner, channel, conversationId }) {
+      const matches = [...pending.values()].filter((action) => (
+        action.owner === owner
+        && action.channel === channel
+        && action.conversationId === conversationId
+        && ["pending", "confirmed", "processing"].includes(action.status)
+      ));
+      if (matches.length > 1) throw Object.assign(new Error("invariant"), { status: 500 });
+      return matches[0] ?? null;
+    },
     confirm(id, { owner, channel, conversationId, confirmationCode }) {
       const action = this.get(id, { owner, channel, conversationId });
-      if (!action || action.confirmationCode !== confirmationCode) throw Object.assign(new Error("invalid"), { status: 409 });
+      if (!action || confirmationCodes.get(id) !== confirmationCode) throw Object.assign(new Error("invalid"), { status: 409, code: "ASSISTANT_CONFIRMATION_INVALID" });
       if (action.status === "processing") return { item: action, replayed: true, inProgress: true };
       if (action.status === "executed") return { item: action, replayed: true };
       action.status = "confirmed";
       return { item: action, replayed: false };
     },
+    recordConfirmationFailure(id, { owner, channel, conversationId, eventId }) {
+      const action = this.get(id, { owner, channel, conversationId });
+      if (!action) throw Object.assign(new Error("missing"), { status: 404 });
+      if (confirmationFailures.some((entry) => entry.id === id && entry.eventId === eventId)) {
+        return { item: action, counted: false, locked: false };
+      }
+      confirmationFailures.push({ id, owner, channel, conversationId, eventId });
+      confirmationAttempts.set(id, confirmationAttempts.get(id) + 1);
+      return { item: action, counted: true, locked: false };
+    },
+    cancel(id, { owner, channel, conversationId }) {
+      const action = this.get(id, { owner, channel, conversationId });
+      if (!action) throw Object.assign(new Error("missing"), { status: 404 });
+      action.status = "cancelled";
+      return { item: action, replayed: false };
+    },
     renewConfirmation(id, { owner, channel, conversationId, confirmationCode }) {
       const action = this.get(id, { owner, channel, conversationId });
       if (!action) throw Object.assign(new Error("missing"), { status: 404 });
-      action.confirmationCode = confirmationCode;
+      confirmationCodes.set(id, confirmationCode);
       action.status = "pending";
       return { item: action, confirmationCode };
     },
@@ -111,19 +158,52 @@ function fakeRuntime() {
       return { item: action, replayed: false };
     },
   };
-  return { eventRepository, sessionRepository, pendingActionRepository, parts };
+  return {
+    eventRepository,
+    sessionRepository,
+    pendingActionRepository,
+    confirmationSecret,
+    events,
+    pending,
+    parts,
+    confirmationAttempts,
+    confirmationFailures,
+  };
 }
 
 const context = Object.freeze({ owner: "owner-a", channel: "weixin", conversation: "conversation-a", event: "event-a", requestId: "request-a" });
 
 function registryFor(toolName, risk, confirmation = "none") {
-  const tool = { name: toolName, agentId: "test-agent", arguments: { value: { type: "string", required: true } }, policy: { risk, confirmation } };
+  const tool = { name: toolName, agentId: "test-agent", description: "确认写入拜访记录", arguments: { value: { type: "string", required: true } }, policy: { risk, confirmation } };
   return { getTool(name) { return name === toolName ? tool : null; } };
 }
 
 function routerFor(plan) { return { route() { return { ...plan }; } }; }
 
 describe("assistant orchestrator", () => {
+  it("binds confirmation request digests to the exact scoped code and media domain", () => {
+    const input = {
+      owner: "owner-a",
+      channel: "weixin",
+      conversation: "conversation-a",
+      code: "482913",
+      mediaSha256: "a".repeat(64),
+      confirmationSecret,
+    };
+    const expected = createHmac("sha256", confirmationSecret).update(lengthPrefixed([
+      "sentelligent/assistant-confirmation-request/v1",
+      input.owner,
+      input.channel,
+      input.conversation,
+      input.code,
+      input.mediaSha256,
+    ])).digest("hex");
+
+    assert.equal(confirmationRequestDigest(input), expected);
+    assert.notEqual(confirmationRequestDigest({ ...input, conversation: "conversation-b" }), expected);
+    assert.notEqual(confirmationRequestDigest({ ...input, mediaSha256: null }), expected);
+  });
+
   it("uses only server context and executes an R0 tool with immutable context", async () => {
     const runtime = fakeRuntime();
     let received;
@@ -157,7 +237,7 @@ describe("assistant orchestrator", () => {
     assert.equal(calls, 1);
   });
 
-  it("creates one pending action for unconfirmed R2 and executes only after confirmation", async () => {
+  it("shows the first confirmation code live once while persisting only safe projections", async () => {
     const runtime = fakeRuntime();
     let calls = 0;
     const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
@@ -172,13 +252,32 @@ describe("assistant orchestrator", () => {
     assert.equal(pending.status, 200);
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.confirmationCode, "482913");
+    assert.equal(pending.body.text, [
+      "待确认操作：确认写入拜访记录",
+      "确认码：482913",
+      "有效期：10 分钟",
+      "请在同一微信会话中直接回复这六位数字；不要转发给其他会话。",
+      "回复“取消”可放弃本次操作，回复“重发确认码”可轮换确认码。",
+    ].join("\n"));
     assert.equal(calls, 0);
-    const confirmed = await orchestrator.handle({ context: { ...context, event: "event-b", requestId: "request-b" }, input: { text: "confirm", pendingActionId: pending.body.actionId, confirmationCode: "482913" } });
+    assert.equal(JSON.stringify([...runtime.events.values()]).includes("482913"), false);
+    assert.equal(JSON.stringify([...runtime.pending.values()]).includes("482913"), false);
+    assert.equal(JSON.stringify(runtime.parts).includes("482913"), false);
+
+    const replay = await orchestrator.handle({ context, input: { text: "save" } });
+    assert.equal(Object.hasOwn(replay.body, "confirmationCode"), false);
+    assert.equal(replay.body.text, "确认码不会重复展示，请在同一会话回复“重发确认码”或“取消”。");
+    assert.equal(JSON.stringify(replay.body).includes("482913"), false);
+
+    const confirmed = await orchestrator.handle({ context: { ...context, event: "event-b", requestId: "request-b" }, input: { text: "482913" } });
     assert.deepEqual(confirmed.body.result, { saved: true });
     assert.equal(calls, 1);
+    assert.equal(runtime.parts.at(-1).text, "确认信息已处理。");
+    assert.equal(JSON.stringify([...runtime.events.values()]).includes("482913"), false);
+    assert.equal(JSON.stringify(runtime.parts).includes("482913"), false);
   });
 
-  it("reissues a lost confirmation code through a new scoped event", async () => {
+  it("reissues a scoped code without changing expiry or attempts and stores no code", async () => {
     const runtime = fakeRuntime();
     const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
     const codes = ["482913", "731604"];
@@ -191,19 +290,147 @@ describe("assistant orchestrator", () => {
       toolHandlers: { [plan.toolName]: () => { calls += 1; return { saved: true }; } },
     });
     const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    const before = structuredClone(runtime.pending.get(pending.body.actionId));
     const renewed = await orchestrator.handle({
       context: { ...context, event: "event-renew-code", requestId: "request-renew-code" },
-      input: { text: "confirm", pendingActionId: pending.body.actionId },
+      input: { text: "重发确认码" },
     });
     assert.equal(renewed.status, 200);
     assert.equal(renewed.body.status, "confirmation_required");
     assert.equal(renewed.body.confirmationCode, "731604");
+    assert.match(renewed.body.text, /确认码：731604/);
+    assert.equal(runtime.pending.get(pending.body.actionId).expiresAt, before.expiresAt);
+    assert.equal(runtime.confirmationAttempts.get(pending.body.actionId), 0);
+    assert.equal(JSON.stringify([...runtime.events.values()]).includes("731604"), false);
+    assert.equal(JSON.stringify(runtime.parts).includes("731604"), false);
     const confirmed = await orchestrator.handle({
       context: { ...context, event: "event-renew-confirm", requestId: "request-renew-confirm" },
-      input: { text: "confirm", pendingActionId: pending.body.actionId, confirmationCode: "731604" },
+      input: { text: "731604" },
     });
     assert.equal(confirmed.status, 200);
     assert.equal(calls, 1);
+  });
+
+  it("does not treat near-match text as confirmation or increment attempts", async () => {
+    for (const [index, text] of [" 482913", "482913 ", "４８２９１３", "确认 482913"].entries()) {
+      const runtime = fakeRuntime();
+      const plan = { status: "unknown", toolName: null, agentId: "system-router", arguments: {} };
+      const orchestrator = createAssistantOrchestrator({ ...runtime, router: routerFor(plan) });
+      runtime.pendingActionRepository.create({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: `${context.owner}:${context.channel}:${context.conversation}`,
+        actionType: "visit-capture.confirm",
+        payload: { plan: { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2" } },
+        confirmationCode: "482913",
+        expiresAt: "2026-08-12T01:10:00.000Z",
+      });
+      const result = await orchestrator.handle({
+        context: { ...context, event: `ordinary-${index}`, requestId: `ordinary-${index}` },
+        input: { text },
+      });
+      assert.equal(result.body.status, "unknown");
+      assert.equal(runtime.confirmationFailures.length, 0);
+    }
+  });
+
+  it("counts one wrong strict scoped code per event and returns only the generic failure", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => ({ saved: true }) },
+    });
+    await orchestrator.handle({ context, input: { text: "save" } });
+    const failed = await orchestrator.handle({
+      context: { ...context, event: "wrong-code-event", requestId: "wrong-code-event" },
+      input: { text: "111222" },
+    });
+    assert.equal(failed.status, 409);
+    assert.deepEqual(failed.body, { status: "error", message: "确认信息无效或已过期，请重新发起操作。" });
+    assert.equal(runtime.confirmationFailures.length, 1);
+    assert.equal(runtime.confirmationFailures[0].eventId, "wrong-code-event");
+    await orchestrator.handle({
+      context: { ...context, event: "wrong-code-event", requestId: "wrong-code-event" },
+      input: { text: "111222" },
+    });
+    assert.equal(runtime.confirmationFailures.length, 1);
+  });
+
+  it("stores only safe draft and event projections when confirmed execution fails", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => { throw new Error("secret internal failure"); } },
+    });
+    await orchestrator.handle({ context, input: { text: "save" } });
+    const failed = await orchestrator.handle({
+      context: { ...context, event: "confirmed-failure", requestId: "confirmed-failure" },
+      input: { text: "482913" },
+    });
+    assert.equal(failed.status, 500);
+    assert.equal(runtime.parts.at(-1).text, "确认信息已处理。");
+    assert.equal(JSON.stringify([...runtime.events.values()]).includes("482913"), false);
+    assert.doesNotMatch(JSON.stringify([...runtime.events.values()]), /secret internal failure/);
+  });
+
+  it("cancels a scoped active action and otherwise preserves ordinary draft-clear cancellation", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    const cancelled = await orchestrator.handle({
+      context: { ...context, event: "cancel-action", requestId: "cancel-action" },
+      input: { text: "取消" },
+    });
+    assert.equal(cancelled.body.status, "cancel");
+    assert.equal(runtime.pending.get(pending.body.actionId).status, "cancelled");
+
+    const emptyRuntime = fakeRuntime();
+    const empty = createAssistantOrchestrator({ ...emptyRuntime, router: routerFor({ status: "cancelled", agentId: "system-router", arguments: {} }) });
+    const cleared = await empty.handle({ context: { ...context, event: "cancel-empty", requestId: "cancel-empty" }, input: { text: "取消" } });
+    assert.equal(cleared.body.status, "cancel");
+    assert.equal(cleared.body.message, "已取消当前操作。");
+  });
+
+  it("rejects mismatched structured action and strict structured code without trying either code", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
+    let calls = 0;
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => { calls += 1; return { saved: true }; } },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    for (const [index, input] of [
+      { text: "482913", pendingActionId: "different-action", confirmationCode: "482913" },
+      { text: "482913", pendingActionId: pending.body.actionId, confirmationCode: " 482913" },
+      { text: "482913", pendingActionId: pending.body.actionId, confirmationCode: "731604" },
+    ].entries()) {
+      const result = await orchestrator.handle({
+        context: { ...context, event: `structured-${index}`, requestId: `structured-${index}` },
+        input,
+      });
+      assert.equal(result.status, 409);
+      assert.equal(result.body.message, "确认信息无效或已过期，请重新发起操作。");
+    }
+    assert.equal(calls, 0);
+    assert.equal(runtime.confirmationFailures.length, 0);
   });
 
   it("executes the persisted confirmation plan even when the confirmation text tries to change it", async () => {
@@ -241,6 +468,7 @@ describe("assistant orchestrator", () => {
     });
 
     const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    const planDigest = runtime.pending.get(pending.body.actionId).planDigest;
     const confirmed = await orchestrator.handle({
       context: { ...context, event: "event-confirm-bound", requestId: "request-confirm-bound" },
       input: {
@@ -252,6 +480,7 @@ describe("assistant orchestrator", () => {
 
     assert.equal(confirmed.status, 200);
     assert.deepEqual(handlerArgs, { value: "draft-original" });
+    assert.equal(runtime.pending.get(pending.body.actionId).planDigest, planDigest);
   });
 
   it("returns a controlled conflict while a confirmed action is leased by another request", async () => {
@@ -321,6 +550,20 @@ describe("assistant orchestrator", () => {
     assert.deepEqual(first.body.result, { saved: true });
     assert.deepEqual(replay.body.result, { saved: true });
     assert.equal(calls, 1);
+
+    const wrong = await orchestrator.handle({
+      context: { ...context, event: "event-confirm-replay-wrong", requestId: "request-confirm-replay-wrong" },
+      input: { text: "111222", pendingActionId: pending.body.actionId },
+    });
+    assert.equal(wrong.status, 409);
+    assert.equal(wrong.body.message, "确认信息无效或已过期，请重新发起操作。");
+
+    const cancelled = await orchestrator.handle({
+      context: { ...context, event: "event-confirm-replay-cancel", requestId: "request-confirm-replay-cancel" },
+      input: { text: "取消", pendingActionId: pending.body.actionId },
+    });
+    assert.equal(cancelled.status, 409);
+    assert.equal(cancelled.body.message, "确认信息无效或已过期，请重新发起操作。");
   });
 
   it("keeps help, cancel, clarify, and unknown as safe text responses", async () => {

@@ -26,10 +26,9 @@ describe("backend model configuration", () => {
         "AUTH_SESSION_SECRET=session-secret-from-env-file",
         "WEIXIN_AGENT_API_TOKEN=machine-token-from-env-file",
         "WEIXIN_AGENT_BACKEND_URL=https://example.test",
-        "WEIXIN_AGENT_SENDER_ID=sender-from-env-file",
-        "WEIXIN_AGENT_CHAT_TYPE=direct",
         "WEIXIN_ALLOWED_SENDER_IDS=sender-from-env-file,sender-two",
         "WEIXIN_ALLOW_GROUPS=false",
+        "WEIXIN_ALLOWED_GROUP_IDS=",
         "ICOST_WEBHOOK_TOKEN=icost-token-from-env-file",
         "ICOST_WEBHOOK_OWNER=jiangjz",
         "ICOST_WEBHOOK_RATE_LIMIT=18",
@@ -57,10 +56,11 @@ describe("backend model configuration", () => {
       assert.equal(config.authSessionSecret, "session-secret-from-env-file");
       assert.equal(config.weixinAgentApiToken, "machine-token-from-env-file");
       assert.equal(config.weixinAgentBackendUrl, "https://example.test");
-      assert.equal(config.weixinAgentSenderId, "sender-from-env-file");
-      assert.equal(config.weixinAgentChatType, "direct");
+      assert.equal(Object.hasOwn(config, "weixinAgentSenderId"), false);
+      assert.equal(Object.hasOwn(config, "weixinAgentChatType"), false);
       assert.deepEqual(config.weixinAllowedSenderIds, ["sender-from-env-file", "sender-two"]);
       assert.equal(config.weixinAllowGroups, false);
+      assert.deepEqual(config.weixinAllowedGroupIds, []);
       assert.equal(config.icostWebhookToken, "icost-token-from-env-file");
       assert.equal(config.icostWebhookOwner, "jiangjz");
       assert.equal(config.icostWebhookRateLimit, 18);
@@ -131,6 +131,9 @@ describe("backend model configuration", () => {
       AUTH_SESSION_SECRET: validSessionSecret,
       WEIXIN_AGENT_API_TOKEN: validMachineToken,
       ASSISTANT_CONFIRMATION_SECRET: validConfirmationSecret,
+      WEIXIN_ALLOWED_SENDER_IDS: "production-sender",
+      WEIXIN_ALLOW_GROUPS: "false",
+      WEIXIN_ALLOWED_GROUP_IDS: "",
       AUTH_COOKIE_SECURE: "true",
       CORS_ALLOWED_ORIGINS: "https://sales.example.test/,https://sales.example.test",
     };
@@ -141,6 +144,9 @@ describe("backend model configuration", () => {
     assert.equal(config.authCookieSecure, true);
     assert.equal(config.weixinAgentApiToken, validMachineToken);
     assert.equal(config.assistantConfirmationSecret, validConfirmationSecret);
+    assert.deepEqual(config.weixinAllowedSenderIds, ["production-sender"]);
+    assert.equal(config.weixinAllowGroups, false);
+    assert.deepEqual(config.weixinAllowedGroupIds, []);
     assert.deepEqual(config.corsAllowedOrigins, ["https://sales.example.test"]);
 
     for (const [field, message] of [
@@ -167,6 +173,23 @@ describe("backend model configuration", () => {
     );
     assert.throws(() => loadConfig({ ...valid, ASSISTANT_CONFIRMATION_SECRET: validSessionSecret }), /independent|ASSISTANT_CONFIRMATION_SECRET/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_AGENT_API_TOKEN: validSessionSecret }), /independent|WEIXIN_AGENT_API_TOKEN/);
+    assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOWED_SENDER_IDS: "" }), /WEIXIN_ALLOWED_SENDER_IDS/);
+    assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOW_GROUPS: "true" }), /WEIXIN_ALLOW_GROUPS/);
+    assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOWED_GROUP_IDS: "production-group" }), /WEIXIN_ALLOWED_GROUP_IDS/);
+  });
+
+  it("allows synthetic group policy only outside production when explicitly configured", () => {
+    const config = loadConfig({
+      envFile: join(tmpdir(), "sent-zx-explicit-test-groups-missing.env"),
+      NODE_ENV: "test",
+      WEIXIN_ALLOWED_SENDER_IDS: "synthetic-sender",
+      WEIXIN_ALLOW_GROUPS: "true",
+      WEIXIN_ALLOWED_GROUP_IDS: "synthetic-group",
+    });
+
+    assert.deepEqual(config.weixinAllowedSenderIds, ["synthetic-sender"]);
+    assert.equal(config.weixinAllowGroups, true);
+    assert.deepEqual(config.weixinAllowedGroupIds, ["synthetic-group"]);
   });
 
   it("rejects malformed environment, boolean, origin, and body-limit values", () => {
@@ -187,7 +210,6 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
-    assert.throws(() => loadConfig({ ...base, WEIXIN_AGENT_CHAT_TYPE: "unknown" }), /WEIXIN_AGENT_CHAT_TYPE/);
   });
 
   it("emits the plaintext development-password warning once without leaking its value", () => {

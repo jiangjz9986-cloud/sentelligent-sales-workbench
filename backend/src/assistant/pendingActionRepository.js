@@ -11,6 +11,12 @@ function text(value, name, max = 5000) {
   return normalized;
 }
 
+function exactText(value, name, max = 5000) {
+  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${name} is required`);
+  if (value.length > max) throw new TypeError(`${name} is too long`);
+  return value;
+}
+
 function confirmationKey(value) {
   const key = typeof value === "string" ? Buffer.from(value, "utf8") : value;
   if (!Buffer.isBuffer(key) || key.length < 32) {
@@ -20,7 +26,28 @@ function confirmationKey(value) {
 }
 
 function confirmationHash(key, value) {
-  return createHmac("sha256", key).update(text(value, "confirmationCode", 100), "utf8").digest("hex");
+  const code = exactText(value, "confirmationCode", 100);
+  if (!/^\d{6}$/u.test(code)) throw new TypeError("confirmationCode must contain exactly six digits");
+  return createHmac("sha256", key).update(code, "utf8").digest("hex");
+}
+
+function encodeLengthPrefixed(parts) {
+  return Buffer.concat(parts.map((part) => {
+    const value = Buffer.from(part, "utf8");
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(value.byteLength);
+    return Buffer.concat([length, value]);
+  }));
+}
+
+function confirmationAttemptHash(key, { owner, channel, conversationId, eventId }) {
+  return createHmac("sha256", key).update(encodeLengthPrefixed([
+    "sentelligent/assistant-confirmation-attempt/v1",
+    owner,
+    channel,
+    conversationId ?? "",
+    eventId,
+  ])).digest("hex");
 }
 
 function canonicalValue(value) {
@@ -94,6 +121,7 @@ export function createAssistantPendingActionRepository(db, {
   const selectByScope = db.prepare(`
     SELECT * FROM assistant_pending_actions
     WHERE id = $id AND owner = $owner AND channel = $channel
+      AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
   `);
   const selectConversation = db.prepare(`
     SELECT id FROM assistant_conversations
@@ -105,20 +133,33 @@ export function createAssistantPendingActionRepository(db, {
       AND status IN ('pending', 'processing', 'confirmed')
     LIMIT 1
   `);
+  const selectActiveRowsByConversation = db.prepare(`
+    SELECT * FROM assistant_pending_actions
+    WHERE owner = $owner AND channel = $channel AND conversation_id = $conversationId
+      AND status IN ('pending', 'processing', 'confirmed')
+    ORDER BY created_at, id
+    LIMIT 2
+  `);
 
   function scope(input = {}) {
     const owner = text(input.owner, "owner", 200);
     const channel = text(input.channel, "channel", 100);
     const conversationProvided = Object.hasOwn(input, "conversationId");
-    const conversationId = conversationProvided && input.conversationId !== null && input.conversationId !== undefined
-      ? text(input.conversationId, "conversationId", 200)
-      : null;
+    if (!conversationProvided) throw new TypeError("conversationId is required");
+    const conversationId = input.conversationId === null
+      ? null
+      : text(input.conversationId, "conversationId", 200);
     return { owner, channel, conversationProvided, conversationId };
   }
 
   function scopedRow(id, input = {}) {
     const values = scope(input);
-    const row = selectByScope.get({ $id: id, $owner: values.owner, $channel: values.channel });
+    const row = selectByScope.get({
+      $id: id,
+      $owner: values.owner,
+      $channel: values.channel,
+      $conversationId: values.conversationId,
+    });
     if (!row) return { values, row: null };
     if (values.conversationProvided && row.conversation_id !== values.conversationId) {
       return { values, row: null };
@@ -131,8 +172,10 @@ export function createAssistantPendingActionRepository(db, {
     const channel = text(input.channel, "channel", 100);
     const actionType = text(input.actionType, "actionType", 200);
     const confirmationCodeHash = confirmationHash(codeKey, input.confirmationCode);
-    const expiresAt = text(input.expiresAt, "expiresAt", 100);
-    if (!Number.isFinite(Date.parse(expiresAt))) throw new TypeError("expiresAt must be an ISO date-time");
+    const expiresAtInput = text(input.expiresAt, "expiresAt", 100);
+    const expiresAtMs = Date.parse(expiresAtInput);
+    if (!Number.isFinite(expiresAtMs)) throw new TypeError("expiresAt must be an ISO date-time");
+    const expiresAt = new Date(expiresAtMs).toISOString();
     const payloadJson = json(input.payload, "payload");
     const payloadValue = input.payload === undefined ? {} : input.payload;
     const storedPlanDigest = input.planDigest === undefined || input.planDigest === null
@@ -155,7 +198,7 @@ export function createAssistantPendingActionRepository(db, {
         throw new HttpError(409, "ASSISTANT_ACTION_PENDING", "The conversation already has a pending assistant action");
       }
       const id = text(input.id ?? idFactory(), "generated action id", 200);
-      db.prepare(`
+      const updated = db.prepare(`
         INSERT INTO assistant_pending_actions (
           id, owner, channel, conversation_id, action_type, payload_json, plan_digest,
           status, version, confirmation_code_hash, expires_at, created_at, updated_at
@@ -174,6 +217,149 @@ export function createAssistantPendingActionRepository(db, {
     });
   }
 
+  function exactScope(input = {}) {
+    const owner = text(input.owner, "owner", 200);
+    const channel = text(input.channel, "channel", 100);
+    if (!Object.hasOwn(input, "conversationId")) throw new TypeError("conversationId is required");
+    const conversationId = input.conversationId === null
+      ? null
+      : text(input.conversationId, "conversationId", 200);
+    return { owner, channel, conversationId };
+  }
+
+  function findActiveByConversation(input = {}) {
+    const { owner, channel, conversationId } = exactScope(input);
+    if (!conversationId) throw new TypeError("conversationId is required");
+    const now = iso(clock);
+    return withImmediateTransaction(db, () => {
+      db.prepare(`
+        UPDATE assistant_pending_actions
+        SET status = 'expired', version = version + 1, updated_at = $now
+        WHERE owner = $owner AND channel = $channel AND conversation_id = $conversationId
+          AND status IN ('pending', 'confirmed') AND datetime(expires_at) <= datetime($now)
+      `).run({ $owner: owner, $channel: channel, $conversationId: conversationId, $now: now });
+      const rows = selectActiveRowsByConversation.all({
+        $owner: owner,
+        $channel: channel,
+        $conversationId: conversationId,
+      });
+      if (rows.length > 1) {
+        throw new HttpError(500, "ASSISTANT_ACTION_INVARIANT", "Assistant action state is invalid");
+      }
+      return item(rows[0]);
+    });
+  }
+
+  function recordConfirmationFailure(idValue, input = {}) {
+    const id = text(idValue, "id", 200);
+    const { owner, channel, conversationId } = exactScope(input);
+    const eventId = exactText(input.eventId, "eventId", 500);
+    const eventIdHash = confirmationAttemptHash(codeKey, { owner, channel, conversationId, eventId });
+    const now = iso(clock);
+    return withImmediateTransaction(db, () => {
+      const current = db.prepare(`
+        SELECT * FROM assistant_pending_actions
+        WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+      `).get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
+      if (!current) {
+        throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
+      }
+      if (current.status === "failed" && current.error_code === "ASSISTANT_CONFIRMATION_LOCKED") {
+        return { item: item(current), counted: false, locked: true };
+      }
+      if (current.status === "expired" || Date.parse(current.expires_at) <= Date.parse(now)) {
+        db.prepare(`
+          UPDATE assistant_pending_actions
+          SET status = 'expired', version = version + 1, updated_at = $now
+          WHERE id = $id AND owner = $owner AND channel = $channel
+            AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+            AND status IN ('pending', 'confirmed')
+        `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $now: now });
+        throw new HttpError(410, "ASSISTANT_ACTION_EXPIRED", "The assistant action confirmation window has expired");
+      }
+      if (!["pending", "confirmed"].includes(current.status)) {
+        throw new HttpError(409, "ASSISTANT_ACTION_STATE_CONFLICT", "The assistant action cannot accept confirmation attempts");
+      }
+      const inserted = db.prepare(`
+        INSERT OR IGNORE INTO assistant_confirmation_attempts (action_id, event_id_hash, created_at)
+        VALUES ($actionId, $eventIdHash, $now)
+      `).run({ $actionId: id, $eventIdHash: eventIdHash, $now: now });
+      if (inserted.changes !== 1) {
+        return { item: item(current), counted: false, locked: current.confirmation_attempts >= 5 };
+      }
+      const updated = db.prepare(`
+        UPDATE assistant_pending_actions
+        SET confirmation_attempts = confirmation_attempts + 1,
+            status = CASE WHEN confirmation_attempts + 1 = 5 THEN 'failed' ELSE status END,
+            error_code = CASE WHEN confirmation_attempts + 1 = 5 THEN 'ASSISTANT_CONFIRMATION_LOCKED' ELSE error_code END,
+            confirmation_locked_at = CASE WHEN confirmation_attempts + 1 = 5 THEN $now ELSE confirmation_locked_at END,
+            lease_token_hash = CASE WHEN confirmation_attempts + 1 = 5 THEN NULL ELSE lease_token_hash END,
+            lease_expires_at = CASE WHEN confirmation_attempts + 1 = 5 THEN NULL ELSE lease_expires_at END,
+            version = version + 1, updated_at = $now
+        WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+          AND status IN ('pending', 'confirmed') AND confirmation_attempts < 5
+      `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $now: now });
+      if (updated.changes !== 1) {
+        throw new HttpError(500, "ASSISTANT_ACTION_INVARIANT", "Assistant action state is invalid");
+      }
+      const next = selectById.get({ $id: id });
+      return { item: item(next), counted: true, locked: next.confirmation_attempts === 5 };
+    });
+  }
+
+  function cancel(idValue, input = {}) {
+    const id = text(idValue, "id", 200);
+    const { owner, channel, conversationId } = exactScope(input);
+    const now = iso(clock);
+    return withImmediateTransaction(db, () => {
+      const current = db.prepare(`
+        SELECT * FROM assistant_pending_actions
+        WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+      `).get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
+      if (!current) {
+        throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
+      }
+      if (current.status === "cancelled") return { item: item(current), replayed: true };
+      const activeLease = current.status === "processing"
+        && current.lease_expires_at
+        && Date.parse(current.lease_expires_at) > Date.parse(now);
+      if (activeLease) {
+        throw new HttpError(409, "ASSISTANT_ACTION_IN_PROGRESS", "The assistant action is already being executed");
+      }
+      if (!["pending", "confirmed", "processing"].includes(current.status)) {
+        throw new HttpError(409, "ASSISTANT_ACTION_STATE_CONFLICT", "The assistant action cannot be cancelled");
+      }
+      const updated = db.prepare(`
+        UPDATE assistant_pending_actions
+        SET status = 'cancelled', version = version + 1,
+            lease_token_hash = NULL, lease_expires_at = NULL, updated_at = $now
+        WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+          AND (
+            status IN ('pending', 'confirmed')
+            OR (status = 'processing' AND (lease_expires_at IS NULL OR lease_expires_at <= $now))
+          )
+      `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $now: now });
+      if (updated.changes !== 1) {
+        throw new HttpError(409, "ASSISTANT_ACTION_IN_PROGRESS", "The assistant action is already being executed");
+      }
+      insertAudit(db, {
+        action: "assistant.action.cancel",
+        entityType: "assistant_pending_action",
+        entityId: id,
+        actor: owner,
+        requestId: id,
+        before: { status: current.status, version: current.version },
+        after: { status: "cancelled", version: current.version + 1 },
+        metadata: { owner, channel },
+      });
+      return { item: item(selectById.get({ $id: id })), replayed: false };
+    });
+  }
+
   function confirm(idValue, input = {}) {
     const id = text(idValue, "id", 200);
     const { owner, channel, conversationProvided, conversationId } = scope(input);
@@ -181,10 +367,13 @@ export function createAssistantPendingActionRepository(db, {
     const codeHash = confirmationHash(codeKey, confirmationCode);
     const now = iso(clock);
     const result = withImmediateTransaction(db, () => {
-      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel });
+      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
       if (!current) throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
       if (conversationProvided && current.conversation_id !== conversationId) {
         throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
+      }
+      if (current.status === "failed" && current.error_code === "ASSISTANT_CONFIRMATION_LOCKED") {
+        throw new HttpError(409, "ASSISTANT_CONFIRMATION_LOCKED", "The assistant action confirmation is locked");
       }
       if (!sameDigest(current.confirmation_code_hash, codeHash)) {
         throw new HttpError(409, "ASSISTANT_CONFIRMATION_INVALID", "The confirmation code is invalid");
@@ -197,14 +386,25 @@ export function createAssistantPendingActionRepository(db, {
         return { item: item(current), replayed: true, inProgress: Boolean(leaseActive) };
       }
       if (current.status === "expired" || Date.parse(current.expires_at) <= Date.parse(now)) {
-        db.prepare("UPDATE assistant_pending_actions SET status = 'expired', version = version + 1, updated_at = $now WHERE id = $id AND status NOT IN ('executed', 'expired')").run({ $id: id, $now: now });
+        db.prepare(`
+          UPDATE assistant_pending_actions
+          SET status = 'expired', version = version + 1, updated_at = $now
+          WHERE id = $id AND owner = $owner AND channel = $channel
+            AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+            AND status NOT IN ('executed', 'expired')
+        `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $now: now });
         return { expired: true };
       }
-      db.prepare(`
+      const updated = db.prepare(`
         UPDATE assistant_pending_actions
         SET status = 'confirmed', version = version + 1, updated_at = $now
-        WHERE id = $id AND status = 'pending' AND confirmation_code_hash = $confirmationCodeHash
-      `).run({ $id: id, $confirmationCodeHash: codeHash, $now: now });
+        WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+          AND status = 'pending' AND confirmation_code_hash = $confirmationCodeHash
+      `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $confirmationCodeHash: codeHash, $now: now });
+      if (updated.changes !== 1) {
+        throw new HttpError(409, "ASSISTANT_CONFIRMATION_INVALID", "The confirmation code is invalid");
+      }
       insertAudit(db, {
         action: "assistant.action.confirm",
         entityType: "assistant_pending_action",
@@ -225,13 +425,17 @@ export function createAssistantPendingActionRepository(db, {
 
   function renewConfirmation(idValue, input = {}) {
     const id = text(idValue, "id", 200);
-    const { owner, channel, conversationProvided, conversationId } = scope(input);
-    const confirmationCode = text(input.confirmationCode, "confirmationCode", 100);
+    const { owner, channel, conversationId } = exactScope(input);
+    const confirmationCode = exactText(input.confirmationCode, "confirmationCode", 100);
     const confirmationCodeHash = confirmationHash(codeKey, confirmationCode);
     const now = iso(clock);
     return withImmediateTransaction(db, () => {
-      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel });
-      if (!current || (conversationProvided && current.conversation_id !== conversationId)) {
+      const current = db.prepare(`
+        SELECT * FROM assistant_pending_actions
+        WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+      `).get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
+      if (!current) {
         throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
       }
       if (current.status === "executed") {
@@ -246,15 +450,22 @@ export function createAssistantPendingActionRepository(db, {
       if (current.status === "expired" || Date.parse(current.expires_at) <= Date.parse(now)) {
         throw new HttpError(410, "ASSISTANT_ACTION_EXPIRED", "The assistant action confirmation window has expired");
       }
-      db.prepare(`
+      const updated = db.prepare(`
         UPDATE assistant_pending_actions
         SET status = 'pending', version = version + 1,
             confirmation_code_hash = $confirmationCodeHash,
             lease_token_hash = NULL, lease_expires_at = NULL,
-            error_code = NULL, updated_at = $now
+            updated_at = $now
         WHERE id = $id AND owner = $owner AND channel = $channel
-          AND status IN ('pending', 'processing', 'confirmed')
-      `).run({ $id: id, $owner: owner, $channel: channel, $confirmationCodeHash: confirmationCodeHash, $now: now });
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+          AND (
+            status IN ('pending', 'confirmed')
+            OR (status = 'processing' AND (lease_expires_at IS NULL OR lease_expires_at <= $now))
+          )
+      `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $confirmationCodeHash: confirmationCodeHash, $now: now });
+      if (updated.changes !== 1) {
+        throw new HttpError(409, "ASSISTANT_ACTION_IN_PROGRESS", "The assistant action is already being executed");
+      }
       insertAudit(db, {
         action: "assistant.action.renew",
         entityType: "assistant_pending_action",
@@ -271,11 +482,11 @@ export function createAssistantPendingActionRepository(db, {
 
   function expire(nowValue = iso(clock)) {
     const now = text(nowValue, "now", 100);
-    return db.prepare(`
-      UPDATE assistant_pending_actions
-      SET status = 'expired', version = version + 1, updated_at = $now
-      WHERE status = 'pending' AND expires_at <= $now
-    `).run({ $now: now }).changes;
+    return withImmediateTransaction(db, () => db.prepare(`
+        UPDATE assistant_pending_actions
+        SET status = 'expired', version = version + 1, updated_at = $now
+        WHERE status = 'pending' AND expires_at <= $now
+      `).run({ $now: now }).changes);
   }
 
   function markExecuted(idValue, input = {}) {
@@ -285,7 +496,7 @@ export function createAssistantPendingActionRepository(db, {
     const resultJson = json(result, "result");
     const now = iso(clock);
     return withImmediateTransaction(db, () => {
-      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel });
+      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
       if (!current) throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
       if (conversationProvided && current.conversation_id !== conversationId) {
         throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
@@ -297,8 +508,10 @@ export function createAssistantPendingActionRepository(db, {
       db.prepare(`
         UPDATE assistant_pending_actions
         SET status = 'executed', version = version + 1, result_json = $resultJson, updated_at = $now
-        WHERE id = $id AND owner = $owner AND channel = $channel AND status = 'confirmed'
-      `).run({ $id: id, $owner: owner, $channel: channel, $resultJson: resultJson, $now: now });
+        WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+          AND status = 'confirmed'
+      `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $resultJson: resultJson, $now: now });
       insertAudit(db, {
         action: "assistant.action.execute",
         entityType: "assistant_pending_action",
@@ -323,7 +536,7 @@ export function createAssistantPendingActionRepository(db, {
     const now = iso(clock);
     const nowMs = Date.parse(now);
     return withImmediateTransaction(db, () => {
-      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel });
+      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
       if (!current || (conversationProvided && current.conversation_id !== conversationId)) {
         throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
       }
@@ -339,8 +552,13 @@ export function createAssistantPendingActionRepository(db, {
       }
       if (current.status === "executed") return { item: item(current), replayed: true };
       if (current.status === "expired" || Date.parse(current.expires_at) <= nowMs) {
-        db.prepare("UPDATE assistant_pending_actions SET status = 'expired', version = version + 1, updated_at = $now WHERE id = $id AND status NOT IN ('executed', 'expired')")
-          .run({ $id: id, $now: now });
+        db.prepare(`
+          UPDATE assistant_pending_actions
+          SET status = 'expired', version = version + 1, updated_at = $now
+          WHERE id = $id AND owner = $owner AND channel = $channel
+            AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
+            AND status NOT IN ('executed', 'expired')
+        `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $now: now });
         throw new HttpError(410, "ASSISTANT_ACTION_EXPIRED", "The assistant action confirmation window has expired");
       }
       if (!["confirmed", "processing"].includes(current.status)) {
@@ -358,11 +576,13 @@ export function createAssistantPendingActionRepository(db, {
             lease_token_hash = $leaseTokenHash, lease_expires_at = $leaseExpiresAt,
             updated_at = $now
         WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
           AND status IN ('confirmed', 'processing')
       `).run({
         $id: id,
         $owner: owner,
         $channel: channel,
+        $conversationId: conversationId,
         $leaseTokenHash: leaseHash(leaseToken),
         $leaseExpiresAt: leaseExpiresAt,
         $now: now,
@@ -379,7 +599,7 @@ export function createAssistantPendingActionRepository(db, {
     const tokenHash = leaseHash(leaseToken);
     const now = iso(clock);
     return withImmediateTransaction(db, () => {
-      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel });
+      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
       if (!current || (conversationProvided && current.conversation_id !== conversationId)) {
         throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
       }
@@ -393,8 +613,9 @@ export function createAssistantPendingActionRepository(db, {
             lease_token_hash = NULL, lease_expires_at = NULL,
             result_json = $resultJson, updated_at = $now
         WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
           AND status = 'processing' AND lease_token_hash = $leaseTokenHash
-      `).run({ $id: id, $owner: owner, $channel: channel, $leaseTokenHash: tokenHash, $resultJson: resultJson, $now: now });
+      `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $leaseTokenHash: tokenHash, $resultJson: resultJson, $now: now });
       insertAudit(db, {
         action: "assistant.action.execute",
         entityType: "assistant_pending_action",
@@ -416,7 +637,7 @@ export function createAssistantPendingActionRepository(db, {
     const tokenHash = leaseHash(leaseToken);
     const now = iso(clock);
     return withImmediateTransaction(db, () => {
-      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel });
+      const current = selectByScope.get({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId });
       if (!current || (conversationProvided && current.conversation_id !== conversationId)) {
         throw new HttpError(404, "ASSISTANT_ACTION_NOT_FOUND", "Assistant pending action was not found");
       }
@@ -429,8 +650,9 @@ export function createAssistantPendingActionRepository(db, {
             lease_token_hash = NULL, lease_expires_at = NULL,
             error_code = $errorCode, updated_at = $now
         WHERE id = $id AND owner = $owner AND channel = $channel
+          AND (conversation_id = $conversationId OR (conversation_id IS NULL AND $conversationId IS NULL))
           AND status = 'processing' AND lease_token_hash = $leaseTokenHash
-      `).run({ $id: id, $owner: owner, $channel: channel, $leaseTokenHash: tokenHash, $errorCode: input.errorCode ?? null, $now: now });
+      `).run({ $id: id, $owner: owner, $channel: channel, $conversationId: conversationId, $leaseTokenHash: tokenHash, $errorCode: input.errorCode ?? null, $now: now });
       return { item: item(selectById.get({ $id: id })), replayed: false };
     });
   }
@@ -441,5 +663,18 @@ export function createAssistantPendingActionRepository(db, {
     return item(row);
   }
 
-  return { create, confirm, renewConfirmation, expire, markExecuted, claimExecution, completeExecution, releaseExecution, get };
+  return {
+    create,
+    findActiveByConversation,
+    confirm,
+    recordConfirmationFailure,
+    cancel,
+    renewConfirmation,
+    expire,
+    markExecuted,
+    claimExecution,
+    completeExecution,
+    releaseExecution,
+    get,
+  };
 }

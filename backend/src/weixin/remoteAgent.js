@@ -19,15 +19,57 @@ export class RemoteAgentError extends Error {
 }
 
 function requiredText(value, name, max = 5000) {
-  if (typeof value !== "string" || !value.trim() || value.length > max) {
+  if (typeof value !== "string" || value.length === 0 || value.length > max) {
     throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", `${name} is required`);
   }
-  return value.trim();
+  return value;
 }
 
-function optionalIdentifier(value, name, max = 500) {
-  if (value === undefined || value === null || value === "") return null;
-  return requiredText(value, name, max);
+function requiredIdentifier(value, name, max = 500) {
+  const identifier = requiredText(value, name, max);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(identifier)) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", `${name} is invalid`);
+  }
+  return identifier;
+}
+
+function requiredDeliveryMetadata(request) {
+  const conversationId = requiredIdentifier(request.conversationId, "conversationId");
+  const senderId = requiredIdentifier(request.senderId, "senderId");
+  if (typeof request.messageId !== "string" || !/^weixin:delivery:v1:[0-9a-f]{64}$/.test(request.messageId)) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "messageId is invalid");
+  }
+  if (!Number.isSafeInteger(request.deliveryTimestampMs) || request.deliveryTimestampMs <= 0) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "deliveryTimestampMs is invalid");
+  }
+  if (!['direct', 'group'].includes(request.chatType)) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "chatType is invalid");
+  }
+  if (request.chatType === "direct") {
+    if (request.groupId !== undefined && request.groupId !== null) {
+      throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "groupId is invalid");
+    }
+    return { conversationId, senderId, messageId: request.messageId, chatType: request.chatType, groupId: null };
+  }
+  return {
+    conversationId,
+    senderId,
+    messageId: request.messageId,
+    chatType: request.chatType,
+    groupId: requiredIdentifier(request.groupId, "groupId"),
+  };
+}
+
+function optionalSyntheticMetadata(request) {
+  const hasAnyMetadata = [
+    request.senderId,
+    request.messageId,
+    request.chatType,
+    request.deliveryTimestampMs,
+    request.groupId,
+  ].some((value) => value !== undefined && value !== null);
+  if (!hasAnyMetadata) return null;
+  return requiredDeliveryMetadata(request);
 }
 
 function normalizeBackendUrl(value) {
@@ -99,35 +141,31 @@ export function createRemoteClawbotAgent(options = {}) {
   if (!apiToken) throw new RemoteAgentError("REMOTE_AGENT_NOT_CONFIGURED");
   const fetchImpl = options.fetchImpl ?? fetch;
   if (typeof fetchImpl !== "function") throw new RemoteAgentError("REMOTE_AGENT_NOT_CONFIGURED");
+  const allowSyntheticIdentity = options.allowSyntheticIdentity === true;
 
   return Object.freeze({
     async chat(request = {}) {
       if (!request || typeof request !== "object" || Array.isArray(request)) {
         throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "请求格式无效");
       }
-      const conversationId = requiredText(request.conversationId, "conversationId", 500);
+      const metadata = allowSyntheticIdentity
+        ? optionalSyntheticMetadata(request)
+        : requiredDeliveryMetadata(request);
+      const conversationId = metadata?.conversationId ?? requiredIdentifier(request.conversationId, "conversationId");
       const text = requiredText(request.text, "text", 20000);
       const media = await normalizeMedia(request);
       const digest = digestFor({ conversationId, text, mediaSha256: media?.sha256 });
-      const sourceMessageId = optionalIdentifier(request.messageId, "messageId") ?? `weixin:${digest}`;
+      const sourceMessageId = metadata?.messageId ?? `weixin:${digest}`;
       const body = {
         conversationId,
         text,
         sourceMessageId,
       };
-      const senderId = optionalIdentifier(request.senderId ?? options.senderId, "senderId");
-      const chatType = request.chatType === undefined ? undefined : request.chatType;
-      if (senderId) body.senderId = senderId;
-      if (chatType !== undefined) {
-        if (!["direct", "group"].includes(chatType)) throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "chatType is invalid");
-        body.chatType = chatType;
+      if (metadata) {
+        body.senderId = metadata.senderId;
+        body.chatType = metadata.chatType;
+        if (metadata.groupId) body.groupId = metadata.groupId;
       }
-      const groupId = optionalIdentifier(request.groupId, "groupId");
-      if (groupId) body.groupId = groupId;
-      const pendingActionId = optionalIdentifier(request.pendingActionId, "pendingActionId", 300);
-      const confirmationCode = optionalIdentifier(request.confirmationCode, "confirmationCode", 100);
-      if (pendingActionId) body.pendingActionId = pendingActionId;
-      if (confirmationCode) body.confirmationCode = confirmationCode;
       if (media) body.media = media;
 
       let response;

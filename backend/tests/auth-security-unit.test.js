@@ -73,12 +73,20 @@ describe("machine authorization", () => {
       ["GET", "/api/audit-logs"],
       ["GET", "/api/reports/weekly/report-1/export"],
       ["POST", "/api/integrations/weixin-agent/login"],
+      ["GET", "/api/integrations/weixin-agent/events"],
+      ["POST", "/api/integrations/weixin-agent/events/"],
+      ["POST", "/api/integrations/weixin-agent/events/extra"],
     ]) {
       assert.throws(
         () => assertMachineRouteAllowed(method, pathname),
         (error) => error.status === 403 && error.code === "MACHINE_SCOPE_DENIED",
       );
     }
+
+    assert.doesNotThrow(() => assertMachineRouteAllowed(
+      "POST",
+      "/api/integrations/weixin-agent/events",
+    ));
   });
 });
 

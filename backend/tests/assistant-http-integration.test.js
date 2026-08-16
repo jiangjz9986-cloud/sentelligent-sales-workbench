@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +44,16 @@ function eventHeaders(key = "weixin:message-http-1") {
     Authorization: `Bearer ${machineToken}`,
     "Idempotency-Key": key,
   };
+}
+
+function confirmationCodeFrom(text) {
+  const matches = String(text).match(/(?<!\d)\d{6}(?!\d)/gu) ?? [];
+  assert.equal(matches.length, 1, "the live confirmation text must contain exactly one code");
+  return matches[0];
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 beforeEach(async () => {
@@ -110,7 +121,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.equal(conflict.body.error.code, "ASSISTANT_EVENT_CONFLICT");
   });
 
-  it("accepts a lossless Base64 image for invoice ingestion without accepting owner or path fields", async () => {
+  it("accepts a lossless Base64 image while rejecting caller-owned identity, action, connection, token, and path fields", async () => {
     const body = eventBody({
       text: "/发票",
       sourceMessageId: "message-invoice-1",
@@ -131,13 +142,25 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.match(result.body.text, /发票/);
     assert.doesNotMatch(JSON.stringify(result.body), /filePath|assistant-owner/);
 
-    const forbidden = await request("/api/integrations/weixin-agent/events", {
-      method: "POST",
-      headers: eventHeaders("weixin:message-invoice-2"),
-      body: JSON.stringify({ ...body, sourceMessageId: "message-invoice-2", owner: "attacker" }),
-    });
-    assert.equal(forbidden.response.status, 422);
-    assert.equal(forbidden.body.error.code, "VALIDATION_ERROR");
+    for (const [index, forbiddenField] of [
+      ["owner", "caller-owner"],
+      ["channel", "caller-channel"],
+      ["actionPayload", { unsafe: true }],
+      ["rawActionPayload", { unsafe: true }],
+      ["url", "https://caller.invalid/private"],
+      ["token", "caller-token"],
+      ["filePath", "/caller/private/file"],
+    ].entries()) {
+      const sourceMessageId = `message-invoice-forbidden-${index}`;
+      const forbidden = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(`weixin:${sourceMessageId}`),
+        body: JSON.stringify({ ...body, sourceMessageId, [forbiddenField[0]]: forbiddenField[1] }),
+      });
+      assert.equal(forbidden.response.status, 422, `${forbiddenField[0]} must remain forbidden`);
+      assert.equal(forbidden.body.error.code, "VALIDATION_ERROR");
+      assert.equal(JSON.stringify(forbidden.body).includes(String(forbiddenField[1])), false);
+    }
   });
 
   it("returns a bounded validation error for malformed remote media", async () => {
@@ -171,6 +194,22 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     assert.equal(group.response.status, 403);
     assert.equal(group.body.error.code, "WEIXIN_GROUP_NOT_ALLOWED");
+
+    const missingGroupId = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:group-id-missing"),
+      body: JSON.stringify(eventBody({ chatType: "group", sourceMessageId: "group-id-missing" })),
+    });
+    assert.equal(missingGroupId.response.status, 422);
+    assert.equal(missingGroupId.body.error.fields.groupId, "required");
+
+    const directWithGroupId = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:direct-with-group"),
+      body: JSON.stringify(eventBody({ groupId: "group-1", sourceMessageId: "direct-with-group" })),
+    });
+    assert.equal(directWithGroupId.response.status, 422);
+    assert.equal(directWithGroupId.body.error.fields.groupId, "forbidden");
   });
 
   it("requires the exact machine token and idempotency header", async () => {
@@ -222,7 +261,8 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     assert.equal(pending.response.status, 200);
     assert.equal(pending.body.status, "confirmation_required");
-    assert.match(pending.body.confirmationCode, /^\d{6}$/);
+    assert.deepEqual(Object.keys(pending.body).sort(), ["actionId", "risk", "status", "text", "toolName"]);
+    const pendingCode = confirmationCodeFrom(pending.body.text);
 
     const pendingReplay = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
@@ -234,7 +274,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     const persisted = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     const eventRows = persisted.prepare("SELECT response_json FROM assistant_inbound_events WHERE response_json LIKE '%confirmation_required%'").all();
     assert.ok(eventRows.length >= 1);
-    assert.equal(eventRows.some((row) => String(row.response_json).includes(pending.body.confirmationCode)), false);
+    assert.equal(eventRows.some((row) => String(row.response_json).includes(pendingCode)), false);
     persisted.close();
 
     const renewed = await request("/api/integrations/weixin-agent/events", {
@@ -242,23 +282,21 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       headers: eventHeaders("weixin:visit-confirm-renew"),
       body: JSON.stringify(eventBody({
         sourceMessageId: "visit-confirm-renew",
-        text: "纭",
-        pendingActionId: pending.body.actionId,
+        text: "重发确认码",
       })),
     });
     assert.equal(renewed.response.status, 200);
     assert.equal(renewed.body.status, "confirmation_required");
-    assert.match(renewed.body.confirmationCode, /^\d{6}$/);
-    assert.notEqual(renewed.body.confirmationCode, pending.body.confirmationCode);
+    assert.deepEqual(Object.keys(renewed.body).sort(), ["actionId", "risk", "status", "text", "toolName"]);
+    const renewedCode = confirmationCodeFrom(renewed.body.text);
+    assert.notEqual(renewedCode, pendingCode);
 
     const confirmed = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin:visit-confirmed"),
       body: JSON.stringify(eventBody({
         sourceMessageId: "visit-confirmed",
-        text: "确认",
-        pendingActionId: pending.body.actionId,
-        confirmationCode: renewed.body.confirmationCode,
+        text: renewedCode,
       })),
     });
     assert.equal(confirmed.response.status, 200);
@@ -282,6 +320,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       body: JSON.stringify(eventBody({ sourceMessageId: "crash-window-pending", text: "录入" })),
     });
     assert.equal(pending.response.status, 200);
+    const confirmationCode = confirmationCodeFrom(pending.body.text);
 
     const recoveryDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     recoveryDb.prepare(`
@@ -299,9 +338,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       headers: eventHeaders("weixin:crash-window-confirm"),
       body: JSON.stringify(eventBody({
         sourceMessageId: "crash-window-confirm",
-        text: "确认",
-        pendingActionId: pending.body.actionId,
-        confirmationCode: pending.body.confirmationCode,
+        text: confirmationCode,
       })),
     });
     assert.equal(confirmed.response.status, 200);
@@ -353,11 +390,13 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     const agent = createRemoteClawbotAgent({
       backendUrl: baseUrl,
       apiToken: machineToken,
-      senderId: "sender-1",
     });
     const reply = await agent.chat({
       conversationId: "remote-end-to-end",
-      messageId: "remote-message-1",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1_786_500_000_123,
       text: "拜访青岛市立医院，客户需要会议纪要。",
     });
     assert.equal(reply.status, "ok");
@@ -443,6 +482,180 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     assert.equal(senderOnePreview.response.status, 200);
     assert.match(senderOnePreview.body.text, /待确认记录/);
+  });
+
+  it("derives exact owner, channel, sender, chat, group, and conversation scope without persisting raw WeChat identities or codes", async () => {
+    await new Promise((resolve) => server.close(resolve));
+    const databaseUrl = join(tempDir, "assistant.sqlite");
+    server = createServer({
+      databaseUrl,
+      seed: false,
+      nodeEnv: "test",
+      authRequired: true,
+      authAccount: "assistant-owner",
+      authPassword: "",
+      authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
+      authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
+      authCookieSecure: false,
+      weixinAgentApiToken: machineToken,
+      weixinAgentOwner: "assistant-owner",
+      weixinAllowedSenderIds: "sender-1,sender-2",
+      weixinAllowGroups: true,
+      weixinAllowedGroupIds: "group-privacy-1",
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const conversationId = "conversation-privacy-sentinel";
+    const senderId = "sender-1";
+    const groupId = "group-privacy-1";
+    const direct = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:scope-direct-collect"),
+      body: JSON.stringify(eventBody({
+        conversationId,
+        senderId,
+        sourceMessageId: "scope-direct-collect",
+        text: "拜访合成范围隔离医院。",
+      })),
+    });
+    assert.equal(direct.response.status, 200);
+
+    const groupPreview = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:scope-group-preview"),
+      body: JSON.stringify(eventBody({
+        conversationId,
+        senderId,
+        chatType: "group",
+        groupId,
+        sourceMessageId: "scope-group-preview",
+        text: "记录",
+      })),
+    });
+    assert.equal(groupPreview.response.status, 200);
+    assert.match(groupPreview.body.text, /当前没有暂存内容/);
+
+    const directPreview = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:scope-direct-preview"),
+      body: JSON.stringify(eventBody({ conversationId, senderId, sourceMessageId: "scope-direct-preview", text: "记录" })),
+    });
+    assert.match(directPreview.body.text, /待确认记录/);
+    const pending = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:scope-direct-pending"),
+      body: JSON.stringify(eventBody({ conversationId, senderId, sourceMessageId: "scope-direct-pending", text: "录入" })),
+    });
+    const code = confirmationCodeFrom(pending.body.text);
+    assert.equal(Object.hasOwn(pending.body, "confirmationCode"), false);
+    const replay = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:scope-direct-pending"),
+      body: JSON.stringify(eventBody({ conversationId, senderId, sourceMessageId: "scope-direct-pending", text: "录入" })),
+    });
+    assert.equal(JSON.stringify(replay.body).includes(code), false);
+
+    const groupAttempt = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:scope-group-confirm"),
+      body: JSON.stringify(eventBody({
+        conversationId,
+        senderId,
+        chatType: "group",
+        groupId,
+        sourceMessageId: "scope-group-confirm",
+        text: code,
+      })),
+    });
+    assert.equal(groupAttempt.response.status, 409);
+    assert.equal(JSON.stringify(groupAttempt.body).includes(code), false);
+    for (const forbidden of [senderId, groupId, conversationId]) {
+      assert.equal(JSON.stringify(groupAttempt.body).includes(forbidden), false);
+    }
+
+    const db = openDatabase({ databaseUrl });
+    try {
+      const directScope = `weixin:conversation:v1:${sha256(JSON.stringify([
+        "assistant-owner", "weixin", senderId, "direct", null, conversationId,
+      ]))}`;
+      const groupScope = `weixin:conversation:v1:${sha256(JSON.stringify([
+        "assistant-owner", "weixin", senderId, "group", groupId, conversationId,
+      ]))}`;
+      const conversationHashes = db.prepare(
+        "SELECT conversation_id_hash FROM assistant_conversations ORDER BY conversation_id_hash",
+      ).all().map((row) => row.conversation_id_hash);
+      assert.deepEqual(conversationHashes, [sha256(directScope), sha256(groupScope)].sort());
+
+      const directEvent = `weixin:event:v1:${sha256(JSON.stringify([
+        "assistant-owner", "weixin", senderId, "scope-direct-collect",
+      ]))}`;
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM assistant_inbound_events WHERE event_id_hash = ?")
+          .get(sha256(directEvent)).count,
+        1,
+      );
+
+      const persisted = JSON.stringify({
+        events: db.prepare("SELECT payload_json, response_json FROM assistant_inbound_events").all(),
+        drafts: db.prepare("SELECT text, metadata_json FROM assistant_draft_parts").all(),
+        audit: db.prepare("SELECT before_json, after_json, metadata_json FROM audit_logs").all(),
+      });
+      for (const forbidden of [code, senderId, groupId, conversationId]) {
+        assert.equal(persisted.includes(forbidden), false);
+      }
+      assert.equal(
+        db.prepare("SELECT status FROM assistant_pending_actions WHERE id = ?").get(pending.body.actionId).status,
+        "pending",
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("does not let another sender or conversation confirm, cancel, or resend a pending action", async () => {
+    const conversationId = "isolated-action-conversation";
+    await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:isolation-collect"),
+      body: JSON.stringify(eventBody({ conversationId, sourceMessageId: "isolation-collect", text: "拜访合成确认隔离医院。" })),
+    });
+    await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:isolation-preview"),
+      body: JSON.stringify(eventBody({ conversationId, sourceMessageId: "isolation-preview", text: "记录" })),
+    });
+    const pending = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:isolation-pending"),
+      body: JSON.stringify(eventBody({ conversationId, sourceMessageId: "isolation-pending", text: "录入" })),
+    });
+    const code = confirmationCodeFrom(pending.body.text);
+
+    for (const [index, scope] of [
+      { senderId: "sender-1", conversationId: "other-conversation" },
+      { senderId: "sender-2", conversationId },
+    ].entries()) {
+      for (const [commandIndex, text] of [code, "取消", "重发确认码"].entries()) {
+        const sourceMessageId = `isolation-${index}-${commandIndex}`;
+        const result = await request("/api/integrations/weixin-agent/events", {
+          method: "POST",
+          headers: eventHeaders(`weixin:${sourceMessageId}`),
+          body: JSON.stringify(eventBody({ ...scope, sourceMessageId, text })),
+        });
+        assert.equal(JSON.stringify(result.body).includes(code), false);
+      }
+    }
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(
+        db.prepare("SELECT status FROM assistant_pending_actions WHERE id = ?").get(pending.body.actionId).status,
+        "pending",
+      );
+    } finally {
+      db.close();
+    }
   });
 
   it("rolls back an assistant invoice upload when its audit write fails", async () => {

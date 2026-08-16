@@ -13,6 +13,7 @@ import { apply as applyLosslessDocumentBlobs } from "./migrations/0009_lossless_
 import { apply as applyIdempotencyClaimLeases } from "./migrations/0010_idempotency_claim_leases.mjs";
 import { apply as applyAssistantRuntimePersistence } from "./migrations/0011_assistant_runtime_persistence.mjs";
 import { apply as applyAssistantOwnerAndPlanDigest } from "./migrations/0012_assistant_owner_and_plan_digest.mjs";
+import { apply as applyAssistantConfirmationClosure } from "./migrations/0013_assistant_confirmation_closure.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -80,6 +81,12 @@ const migrations = [
     path: resolve(here, "migrations", "0012_assistant_owner_and_plan_digest.mjs"),
     type: "module",
     apply: applyAssistantOwnerAndPlanDigest,
+  },
+  {
+    version: "0013",
+    path: resolve(here, "migrations", "0013_assistant_confirmation_closure.mjs"),
+    type: "module",
+    apply: applyAssistantConfirmationClosure,
   },
 ];
 

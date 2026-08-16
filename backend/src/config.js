@@ -139,6 +139,15 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!isStrongIndependentSecret(config.assistantConfirmationSecret)) {
     throw new Error("ASSISTANT_CONFIRMATION_SECRET must contain at least 32 bytes of high-entropy data in production");
   }
+  if (config.weixinAllowedSenderIds.length === 0) {
+    throw new Error("WEIXIN_ALLOWED_SENDER_IDS must contain at least one sender in production");
+  }
+  if (config.weixinAllowGroups) {
+    throw new Error("WEIXIN_ALLOW_GROUPS must be false in production");
+  }
+  if (config.weixinAllowedGroupIds.length > 0) {
+    throw new Error("WEIXIN_ALLOWED_GROUP_IDS must be empty in production");
+  }
   if (new Set([
     config.authSessionSecret,
     config.weixinAgentApiToken,
@@ -198,13 +207,6 @@ export function loadConfig(overrides = {}) {
     env.weixinAllowedGroupIds ?? env.WEIXIN_ALLOWED_GROUP_IDS,
     "WEIXIN_ALLOWED_GROUP_IDS",
   );
-  const weixinAgentChatType = String(
-    env.weixinAgentChatType ?? env.WEIXIN_AGENT_CHAT_TYPE ?? "direct",
-  ).trim().toLowerCase();
-  if (!["direct", "group"].includes(weixinAgentChatType)) {
-    throw new Error("WEIXIN_AGENT_CHAT_TYPE must be direct or group");
-  }
-
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
     port: Number(env.port ?? env.PORT ?? 8787),
@@ -243,8 +245,6 @@ export function loadConfig(overrides = {}) {
     ).trim(),
     weixinAgentBackendUrl: env.weixinAgentBackendUrl ?? env.WEIXIN_AGENT_BACKEND_URL ?? "",
     weixinAgentOwner: env.weixinAgentOwner ?? env.WEIXIN_AGENT_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "",
-    weixinAgentSenderId: String(env.weixinAgentSenderId ?? env.WEIXIN_AGENT_SENDER_ID ?? "").trim(),
-    weixinAgentChatType,
     weixinAgentSessionHome: env.weixinAgentSessionHome ?? env.WEIXIN_AGENT_SESSION_HOME ?? "",
     weixinAllowedSenderIds,
     weixinAllowedGroupIds,

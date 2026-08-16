@@ -162,7 +162,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 11);
+      assert.equal(firstMigrations.length, 12);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -174,6 +174,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[8].version, "0010");
       assert.equal(firstMigrations[9].version, "0011");
       assert.equal(firstMigrations[10].version, "0012");
+      assert.equal(firstMigrations[11].version, "0013");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -195,6 +196,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0010_idempotency_claim_leases.mjs",
         "../src/db/migrations/0011_assistant_runtime_persistence.mjs",
         "../src/db/migrations/0012_assistant_owner_and_plan_digest.mjs",
+        "../src/db/migrations/0013_assistant_confirmation_closure.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -207,12 +209,165 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[8].checksum, migrationChecksum(migrationSources[8]));
       assert.equal(firstMigrations[9].checksum, migrationChecksum(migrationSources[9]));
       assert.equal(firstMigrations[10].checksum, migrationChecksum(migrationSources[10]));
+      assert.equal(firstMigrations[11].checksum, migrationChecksum(migrationSources[11]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
       first?.close();
     }
   });
+});
+
+test("migration 0013 adds constrained assistant confirmation closure state", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      const attempts = columnInfo(db, "assistant_pending_actions", "confirmation_attempts");
+      assert.deepEqual(
+        { type: attempts?.type, notnull: attempts?.notnull, defaultValue: attempts?.dflt_value },
+        { type: "INTEGER", notnull: 1, defaultValue: "0" },
+      );
+      assert.equal(columnInfo(db, "assistant_pending_actions", "confirmation_locked_at")?.type, "TEXT");
+      assert.deepEqual(columnNames(db, "assistant_pending_actions"), [
+        "id", "owner", "channel", "conversation_id", "action_type", "payload_json", "status",
+        "version", "confirmation_code_hash", "lease_token_hash", "lease_expires_at", "expires_at",
+        "result_json", "error_code", "created_at", "updated_at", "plan_digest",
+        "confirmation_attempts", "confirmation_locked_at",
+      ]);
+      assert.deepEqual(indexColumns(db, "idx_assistant_actions_status"), [
+        "owner", "channel", "status", "expires_at",
+      ]);
+      assert.deepEqual(indexColumns(db, "idx_assistant_actions_one_active_per_conversation"), [
+        "owner", "channel", "conversation_id",
+      ]);
+      const activeIndexSql = all(db, `
+        SELECT sql FROM sqlite_master
+        WHERE type = 'index' AND name = 'idx_assistant_actions_one_active_per_conversation'
+      `)[0]?.sql;
+      assert.match(activeIndexSql, /WHERE conversation_id IS NOT NULL AND status IN \('pending', 'processing', 'confirmed'\)/i);
+
+      const pendingSql = all(db, `
+        SELECT sql FROM sqlite_master
+        WHERE type = 'table' AND name = 'assistant_pending_actions'
+      `)[0]?.sql;
+      assert.match(pendingSql, /CHECK\s*\(confirmation_attempts BETWEEN 0 AND 5\)/i);
+      assert.throws(
+        () => run(db, `
+          INSERT INTO assistant_pending_actions (
+            id, owner, channel, action_type, payload_json, confirmation_code_hash,
+            expires_at, confirmation_attempts
+          ) VALUES (
+            'constraint-probe', 'synthetic-owner', 'weixin', 'create_expense', '{}',
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            '2026-08-12T12:00:00.000Z', 6
+          )
+        `),
+        /CHECK constraint failed/i,
+      );
+
+      assert.deepEqual(
+        all(db, "PRAGMA table_info(assistant_confirmation_attempts)")
+          .filter((column) => column.pk > 0)
+          .sort((left, right) => left.pk - right.pk)
+          .map((column) => column.name),
+        ["action_id", "event_id_hash"],
+      );
+      const foreignKey = all(db, "PRAGMA foreign_key_list(assistant_confirmation_attempts)")[0];
+      assert.deepEqual(
+        { table: foreignKey?.table, from: foreignKey?.from, to: foreignKey?.to, onDelete: foreignKey?.on_delete },
+        { table: "assistant_pending_actions", from: "action_id", to: "id", onDelete: "CASCADE" },
+      );
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("migration 0013 preserves a legacy assistant action payload and plan digest", async () => {
+  const syntheticLeaseDigest = "c".repeat(64);
+  assert.match(syntheticLeaseDigest, /^[0-9a-f]{64}$/);
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE assistant_conversations (id TEXT PRIMARY KEY);
+      CREATE TABLE assistant_pending_actions (
+        id TEXT PRIMARY KEY NOT NULL,
+        owner TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        conversation_id TEXT REFERENCES assistant_conversations(id) ON DELETE SET NULL,
+        action_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'confirmed', 'executed', 'expired', 'cancelled', 'failed')),
+        version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+        confirmation_code_hash TEXT NOT NULL CHECK (length(confirmation_code_hash) = 64 AND confirmation_code_hash NOT GLOB '*[^0-9a-f]*'),
+        lease_token_hash TEXT CHECK (lease_token_hash IS NULL OR (length(lease_token_hash) = 64 AND lease_token_hash NOT GLOB '*[^0-9a-f]*')),
+        lease_expires_at TEXT,
+        expires_at TEXT NOT NULL,
+        result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
+        error_code TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        plan_digest TEXT
+      );
+      CREATE INDEX idx_assistant_actions_status ON assistant_pending_actions(owner, channel, status, expires_at);
+      CREATE UNIQUE INDEX idx_assistant_actions_one_active_per_conversation
+        ON assistant_pending_actions(owner, channel, conversation_id)
+        WHERE conversation_id IS NOT NULL AND status IN ('pending', 'processing', 'confirmed');
+      INSERT INTO assistant_conversations (id) VALUES ('synthetic-conversation');
+      INSERT INTO assistant_pending_actions (
+        id, owner, channel, conversation_id, action_type, payload_json, status, version,
+        confirmation_code_hash, lease_token_hash, lease_expires_at, expires_at, result_json,
+        error_code, created_at, updated_at, plan_digest
+      ) VALUES (
+        'synthetic-action', 'synthetic-owner', 'weixin', 'synthetic-conversation', 'create_expense',
+        '{"plan":{"toolName":"create_expense","arguments":{"amountCents":12850}}}', 'processing', 7,
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        '${syntheticLeaseDigest}',
+        '2026-08-12T11:01:00.000Z', '2026-08-12T12:00:00.000Z',
+        '{"syntheticResult":true}', 'SYNTHETIC_ERROR',
+        '2026-08-12T10:00:00.000Z', '2026-08-12T11:00:00.000Z',
+        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      );
+    `);
+
+    const { apply } = await import("../src/db/migrations/0013_assistant_confirmation_closure.mjs");
+    apply(db);
+
+    const row = db.prepare("SELECT * FROM assistant_pending_actions WHERE id = 'synthetic-action'").get();
+    assert.equal(row.confirmation_attempts, 0);
+    assert.equal(row.confirmation_locked_at, null);
+    assert.deepEqual({ ...row }, {
+      id: "synthetic-action",
+      owner: "synthetic-owner",
+      channel: "weixin",
+      conversation_id: "synthetic-conversation",
+      action_type: "create_expense",
+      payload_json: '{"plan":{"toolName":"create_expense","arguments":{"amountCents":12850}}}',
+      status: "processing",
+      version: 7,
+      confirmation_code_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      lease_token_hash: syntheticLeaseDigest,
+      lease_expires_at: "2026-08-12T11:01:00.000Z",
+      expires_at: "2026-08-12T12:00:00.000Z",
+      result_json: '{"syntheticResult":true}',
+      error_code: "SYNTHETIC_ERROR",
+      created_at: "2026-08-12T10:00:00.000Z",
+      updated_at: "2026-08-12T11:00:00.000Z",
+      plan_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      confirmation_attempts: 0,
+      confirmation_locked_at: null,
+    });
+
+    db.prepare(`
+      INSERT INTO assistant_confirmation_attempts (action_id, event_id_hash, created_at)
+      VALUES ('synthetic-action', $hash, '2026-08-12T01:00:00.000Z')
+    `).run({ $hash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" });
+    db.prepare("DELETE FROM assistant_pending_actions WHERE id = 'synthetic-action'").run();
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM assistant_confirmation_attempts").get().count, 0);
+  } finally {
+    db.close();
+  }
 });
 
 test("migration 0003 reconciles active quick-record risk duplicates and enforces partial uniqueness", () => {
@@ -436,7 +591,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013"],
       );
     } finally {
       migrated.close();
@@ -630,7 +785,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 11);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 12);
     } finally {
       db.close();
     }
@@ -694,7 +849,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013"],
       );
     } finally {
       db.close();

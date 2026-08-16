@@ -2376,6 +2376,7 @@ export function createServer(options = {}) {
       sessionRepository: assistantSessionRepository,
       pendingActionRepository: assistantPendingActionRepository,
       toolHandlers: assistantToolHandlers,
+      confirmationSecret: assistantConfirmationSecret,
       clock: assistantClock,
     });
 
@@ -2571,11 +2572,25 @@ export function createServer(options = {}) {
         }
         assertWeixinSenderAllowed(config, body);
         const senderHash = createHash("sha256").update(body.senderId, "utf8").digest("hex");
-        const conversationScope = `weixin:${createHash("sha256")
-          .update(`${body.senderId}\u0000${body.conversationId}`, "utf8")
+        const conversationTuple = JSON.stringify([
+          machineIdentity.account,
+          "weixin",
+          body.senderId,
+          body.chatType,
+          body.groupId ?? null,
+          body.conversationId,
+        ]);
+        const conversationScope = `weixin:conversation:v1:${createHash("sha256")
+          .update(conversationTuple, "utf8")
           .digest("hex")}`;
-        const eventId = `weixin:${createHash("sha256")
-          .update(`${body.senderId}\u0000${body.sourceMessageId}`, "utf8")
+        const eventTuple = JSON.stringify([
+          machineIdentity.account,
+          "weixin",
+          body.senderId,
+          body.sourceMessageId,
+        ]);
+        const eventId = `weixin:event:v1:${createHash("sha256")
+          .update(eventTuple, "utf8")
           .digest("hex")}`;
         const auditMetadata = {
           senderHash,
@@ -2608,15 +2623,16 @@ export function createServer(options = {}) {
           : {};
         const publicBody = {
           status: runtimeBody.status ?? (result.status >= 400 ? "error" : "ok"),
-          text: typeof toolResult.text === "string"
-            ? toolResult.text
+          text: typeof runtimeBody.text === "string"
+            ? runtimeBody.text
+            : typeof toolResult.text === "string"
+              ? toolResult.text
             : typeof runtimeBody.message === "string"
               ? runtimeBody.message
               : "处理完成。",
           ...(runtimeBody.toolName ? { toolName: runtimeBody.toolName } : {}),
           ...(runtimeBody.actionId ? { actionId: runtimeBody.actionId } : {}),
           ...(runtimeBody.risk ? { risk: runtimeBody.risk } : {}),
-          ...(runtimeBody.confirmationCode ? { confirmationCode: runtimeBody.confirmationCode } : {}),
         };
         sendJson(response, result.status, publicBody);
         return;

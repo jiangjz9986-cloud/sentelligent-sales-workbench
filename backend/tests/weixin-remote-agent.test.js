@@ -50,10 +50,16 @@ describe("remote Clawbot agent adapter", () => {
       },
     });
 
+    const messageId = `weixin:delivery:v1:${"a".repeat(64)}`;
     const result = await agent.chat({
       conversationId: "conversation-1",
-      text: "午餐 48.50 元",
+      text: " 午餐 48.50 元 ",
+      senderId: "sender-1",
+      messageId,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
       owner: "must-not-be-forwarded",
+      rawUpdate: { secret: "must-not-be-forwarded" },
       media: { type: "image", filePath, mimeType: "image/*", fileName: "receipt.png" },
     });
 
@@ -62,12 +68,14 @@ describe("remote Clawbot agent adapter", () => {
     assert.equal(calls[0].url, "https://sales.example.test/api/integrations/weixin-agent/events");
     assert.equal(calls[0].options.method, "POST");
     assert.equal(calls[0].options.headers.Authorization, "Bearer test-machine-token");
-    assert.match(calls[0].options.headers["Idempotency-Key"], /^weixin:[0-9a-f]{64}$/);
+    assert.equal(calls[0].options.headers["Idempotency-Key"], messageId);
     const body = JSON.parse(calls[0].options.body);
     assert.deepEqual(body, {
       conversationId: "conversation-1",
-      text: "午餐 48.50 元",
-      sourceMessageId: body.sourceMessageId,
+      text: " 午餐 48.50 元 ",
+      sourceMessageId: messageId,
+      senderId: "sender-1",
+      chatType: "direct",
       media: {
         fileName: "receipt.png",
         mediaType: "image/png",
@@ -76,15 +84,16 @@ describe("remote Clawbot agent adapter", () => {
         sourceRef: body.media.sourceRef,
       },
     });
-    assert.doesNotMatch(calls[0].options.body, /must-not-be-forwarded|filePath|test-machine-token|[A-Z]:\\/i);
+    assert.doesNotMatch(calls[0].options.body, /must-not-be-forwarded|rawUpdate|filePath|test-machine-token|[A-Z]:\\/i);
   });
 
-  it("derives stable source and replay keys from conversation, text, and media hash", async () => {
+  it("keeps the legacy digest fallback available only when explicitly injected for tests", async () => {
     const calls = [];
     const filePath = await mediaPath();
     const agent = createRemoteClawbotAgent({
       backendUrl: "https://sales.example.test",
       apiToken: "token",
+      allowSyntheticIdentity: true,
       fetchImpl: async (url, options) => {
         calls.push({ url, options });
         return jsonResponse({ status: "ok" });
@@ -104,6 +113,59 @@ describe("remote Clawbot agent adapter", () => {
     assert.notEqual(calls[0].options.headers["Idempotency-Key"], calls[2].options.headers["Idempotency-Key"]);
   });
 
+  it("rejects production requests missing verified delivery metadata before fetch", async () => {
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => assert.fail("invalid delivery must not reach fetch"),
+    });
+    const delivery = {
+      conversationId: "synthetic-conversation",
+      text: "synthetic text",
+      senderId: "synthetic-sender",
+      messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+    for (const missingField of ["senderId", "messageId", "chatType", "deliveryTimestampMs"]) {
+      const request = { ...delivery };
+      delete request[missingField];
+      await assert.rejects(agent.chat(request), (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_INVALID_REQUEST");
+        assert.doesNotMatch(error.message, /test-secret-token|[0-9a-f]{64}/i);
+        return true;
+      });
+    }
+  });
+
+  it("rejects malformed direct/group delivery metadata before media normalization", async () => {
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "token",
+      fetchImpl: async () => assert.fail("invalid delivery must not reach fetch"),
+    });
+    const delivery = {
+      conversationId: "synthetic-conversation",
+      text: " synthetic text ",
+      senderId: "synthetic-sender",
+      messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+      media: { type: "image", filePath: "/must-not-be-read" },
+    };
+    for (const invalid of [
+      { groupId: "forbidden-for-direct" },
+      { chatType: "group", groupId: undefined },
+      { senderId: "sender\ncontrol" },
+      { conversationId: "c".repeat(501) },
+      { conversationId: "" },
+      { messageId: "weixin:delivery:v1:not-a-digest" },
+      { deliveryTimestampMs: 0 },
+    ]) {
+      await assert.rejects(agent.chat({ ...delivery, ...invalid }), { code: "REMOTE_AGENT_INVALID_REQUEST" });
+    }
+  });
+
   it("rejects non-JSON or non-2xx responses with a safe error", async () => {
     const agent = createRemoteClawbotAgent({
       backendUrl: "https://sales.example.test",
@@ -112,7 +174,14 @@ describe("remote Clawbot agent adapter", () => {
     });
 
     await assert.rejects(
-      agent.chat({ conversationId: "c-1", text: "hello" }),
+      agent.chat({
+        conversationId: "c-1",
+        text: "hello",
+        senderId: "sender-1",
+        messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+        chatType: "direct",
+        deliveryTimestampMs: 1786500000123,
+      }),
       (error) => {
         assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
         assert.equal(error.message, "远程助手暂时不可用，请稍后重试");
@@ -127,7 +196,6 @@ describe("remote Clawbot agent adapter", () => {
     const agent = createRemoteClawbotAgent({
       backendUrl: "https://sales.example.test",
       apiToken: "token",
-      senderId: "sender-1",
       fetchImpl: async (_url, options) => {
         requestBody = JSON.parse(options.body);
         return jsonResponse({ status: "ok", text: "received" });
@@ -140,7 +208,8 @@ describe("remote Clawbot agent adapter", () => {
       senderId: "sender-from-message",
       chatType: "group",
       groupId: "group-1",
-      messageId: "wx-message-1",
+      messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+      deliveryTimestampMs: 1786500000123,
       pendingActionId: "action-1",
       confirmationCode: "482913",
       owner: "attacker-owner",
@@ -150,9 +219,9 @@ describe("remote Clawbot agent adapter", () => {
     assert.equal(requestBody.senderId, "sender-from-message");
     assert.equal(requestBody.chatType, "group");
     assert.equal(requestBody.groupId, "group-1");
-    assert.equal(requestBody.sourceMessageId, "wx-message-1");
-    assert.equal(requestBody.pendingActionId, "action-1");
-    assert.equal(requestBody.confirmationCode, "482913");
+    assert.equal(requestBody.sourceMessageId, `weixin:delivery:v1:${"a".repeat(64)}`);
+    assert.equal(Object.hasOwn(requestBody, "pendingActionId"), false);
+    assert.equal(Object.hasOwn(requestBody, "confirmationCode"), false);
     assert.equal(Object.hasOwn(requestBody, "owner"), false);
   });
 });

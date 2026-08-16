@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "../config.js";
@@ -19,10 +20,14 @@ function printUsage() {
       "  WEIXIN_AGENT_API_TOKEN",
       "Optional:",
       "  WEIXIN_AGENT_BACKEND_URL",
-      "  WEIXIN_AGENT_SENDER_ID (otherwise conversationId is used)",
-      "  WEIXIN_AGENT_CHAT_TYPE",
     ].join("\n") + "\n",
   );
+}
+
+export function deriveWeixinDeliveryKey(apiToken) {
+  return createHmac("sha256", Buffer.from(apiToken, "utf8"))
+    .update("sentelligent/weixin-delivery-key/v1", "utf8")
+    .digest();
 }
 
 async function loadSdk() {
@@ -53,26 +58,19 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
   if (!config.weixinAgentApiToken) {
     throw new Error("WEIXIN_AGENT_API_TOKEN is required before starting the WeChat worker");
   }
+  const deliveryKey = deriveWeixinDeliveryKey(config.weixinAgentApiToken);
 
   const remoteAgent = createRemoteClawbotAgent({
     backendUrl: backendUrlFromConfig(config),
     apiToken: config.weixinAgentApiToken,
-    senderId: config.weixinAgentSenderId,
     fetchImpl: options.fetchImpl ?? fetch,
   });
   const agent = {
-    async chat(request = {}) {
-      return remoteAgent.chat({
-        ...request,
-        // weixin-agent-sdk@0.5 does not expose sender/message metadata yet.
-        // Its conversation id is the only stable sender identity available to
-        // the allowlist; a future SDK can provide a stronger senderId.
-        senderId: request.senderId || config.weixinAgentSenderId || request.conversationId,
-        chatType: request.chatType || config.weixinAgentChatType || "direct",
-      });
+    async chat(request) {
+      return remoteAgent.chat(request);
     },
   };
-  const bot = sdk.start(agent);
+  const bot = sdk.start(agent, { deliveryKey });
   process.stdout.write(`WeChat worker started. Backend: ${backendUrlFromConfig(config)}\n`);
   await bot.wait();
   return { status: "stopped" };

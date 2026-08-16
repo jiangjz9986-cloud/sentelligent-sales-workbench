@@ -37,9 +37,23 @@ function requiredText(value, field, max = MAX_IDENTIFIER_LENGTH) {
   return normalized;
 }
 
+function requiredEventText(value) {
+  if (typeof value !== "string" || !value.trim()) validation({ text: "required" });
+  if (value.length > MAX_TEXT_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) {
+    validation({ text: "format" });
+  }
+  return value;
+}
+
 function optionalText(value, field, max = MAX_IDENTIFIER_LENGTH) {
   if (value === undefined || value === null || value === "") return null;
   return requiredText(value, field, max);
+}
+
+function optionalExactText(value, field, max = MAX_IDENTIFIER_LENGTH) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > max) validation({ [field]: "format" });
+  return value;
 }
 
 function plainObject(value, field) {
@@ -85,11 +99,18 @@ export function assertWeixinSenderAllowed(config, event) {
   }
 }
 
+export function classifyWeixinConfirmationText(rawText) {
+  if (/^[0-9]{6}$/u.test(rawText)) return { kind: "code", code: rawText };
+  if (rawText === "取消") return { kind: "cancel" };
+  if (rawText === "重发确认码") return { kind: "resend" };
+  return { kind: "ordinary" };
+}
+
 export async function validateWeixinAssistantEvent(value) {
   const body = plainObject(value, "body");
   checkKeys(body, EVENT_KEYS, "body");
   const conversationId = requiredText(body.conversationId, "conversationId");
-  const text = requiredText(body.text, "text", MAX_TEXT_LENGTH);
+  const text = requiredEventText(body.text);
   const sourceMessageId = requiredText(body.sourceMessageId, "sourceMessageId");
   const senderId = validateAllowlistId(body.senderId, "senderId");
   const chatType = normalizeChatType(body.chatType);
@@ -97,8 +118,8 @@ export async function validateWeixinAssistantEvent(value) {
   if (chatType === "group" && !groupId) validation({ groupId: "required" });
   if (chatType === "direct" && groupId) validation({ groupId: "forbidden" });
   const pendingActionId = optionalText(body.pendingActionId, "pendingActionId", 300);
-  const confirmationCode = optionalText(body.confirmationCode, "confirmationCode", 100);
-  if (confirmationCode && !/^\d{6}$/u.test(confirmationCode)) validation({ confirmationCode: "format" });
+  const confirmationCode = optionalExactText(body.confirmationCode, "confirmationCode", 100);
+  if (confirmationCode && !/^[0-9]{6}$/u.test(confirmationCode)) validation({ confirmationCode: "format" });
 
   let media = null;
   if (body.media !== undefined && body.media !== null) {

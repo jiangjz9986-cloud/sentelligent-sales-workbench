@@ -1,13 +1,15 @@
-import { createHash, randomInt } from "node:crypto";
+import { createHash, createHmac, randomInt } from "node:crypto";
 
 import { createAssistantRouter } from "./router.js";
 import { createAgentRegistry } from "./agentRegistry.js";
 import { validateToolInvocation } from "./contracts.js";
 import { getToolPolicy } from "./policy.js";
+import { classifyWeixinConfirmationText } from "./weixinEvent.js";
 
 const SAFE_FAILURE = "处理失败，请稍后重试。";
 const SAFE_CONFIRMATION_FAILURE = "确认信息无效或已过期，请重新发起操作。";
 const VALID_CONTEXT = ["owner", "channel", "conversation", "event", "requestId"];
+const STORED_CONFIRMATION_TEXT = "确认码不会重复展示，请在同一会话回复“重发确认码”或“取消”。";
 
 function requiredText(value, name, max = 5000) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new TypeError(`${name} is required`);
@@ -23,6 +25,41 @@ function requestDigest(input) {
     mediaSha256: input.mediaSha256 ?? null,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+function confirmationKey(value) {
+  const key = typeof value === "string" ? Buffer.from(value, "utf8") : value;
+  if (!Buffer.isBuffer(key) || key.length < 32) {
+    throw new TypeError("confirmationSecret must contain at least 32 bytes");
+  }
+  return Buffer.from(key);
+}
+
+function encodeLengthPrefixed(parts) {
+  return Buffer.concat(parts.map((part) => {
+    const value = Buffer.from(part, "utf8");
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(value.byteLength);
+    return Buffer.concat([length, value]);
+  }));
+}
+
+export function confirmationRequestDigest({
+  owner,
+  channel,
+  conversation,
+  code,
+  mediaSha256,
+  confirmationSecret,
+}) {
+  return createHmac("sha256", confirmationKey(confirmationSecret)).update(encodeLengthPrefixed([
+    "sentelligent/assistant-confirmation-request/v1",
+    requiredText(owner, "owner", 500),
+    requiredText(channel, "channel", 500),
+    requiredText(conversation, "conversation", 500),
+    code,
+    mediaSha256 ?? "",
+  ])).digest("hex");
 }
 
 function canonicalValue(value) {
@@ -106,6 +143,22 @@ function defaultCode() {
   return String(randomInt(100000, 1000000));
 }
 
+function exactConfirmationCode(value) {
+  return typeof value === "string" && /^[0-9]{6}$/u.test(value) ? value : null;
+}
+
+export function safePendingResponse(tool, { code }) {
+  return {
+    text: [
+      `待确认操作：${tool.description}`,
+      `确认码：${code}`,
+      "有效期：10 分钟",
+      "请在同一微信会话中直接回复这六位数字；不要转发给其他会话。",
+      "回复“取消”可放弃本次操作，回复“重发确认码”可轮换确认码。",
+    ].join("\n"),
+  };
+}
+
 /**
  * Deterministic assistant execution boundary. The HTTP layer supplies context;
  * model text can select only a registered tool and validated JSON arguments.
@@ -118,12 +171,14 @@ export function createAssistantOrchestrator({
   pendingActionRepository,
   toolHandlers = {},
   confirmationCodeFactory = defaultCode,
+  confirmationSecret,
   clock = () => new Date(),
   pendingTtlMs = 10 * 60 * 1000,
 } = {}) {
   if (!eventRepository || typeof eventRepository.receive !== "function" || typeof eventRepository.claim !== "function") {
     throw new TypeError("eventRepository must support receive and claim");
   }
+  const confirmationDigestKey = confirmationKey(confirmationSecret);
 
   async function handle({ context: rawContext, input: rawInput = {}, serverData: rawServerData } = {}) {
     const context = makeContext(rawContext);
@@ -132,13 +187,28 @@ export function createAssistantOrchestrator({
     const text = typeof input.text === "string" ? input.text : "";
     const confidence = input.confidence === undefined ? undefined : Number(input.confidence);
     const pendingActionId = input.pendingActionId === undefined ? null : requiredText(input.pendingActionId, "pendingActionId", 300);
-    const requestHash = requestDigest({
-      text,
-      confidence,
-      pendingActionId,
-      confirmationCode: input.confirmationCode,
-      mediaSha256: serverData.media?.sha256,
-    });
+    const textClassification = classifyWeixinConfirmationText(text);
+    const structuredCodePresent = input.confirmationCode !== undefined && input.confirmationCode !== null;
+    const structuredCode = structuredCodePresent ? exactConfirmationCode(input.confirmationCode) : null;
+    const confirmationContext = textClassification.kind === "code" || structuredCodePresent;
+    const code = textClassification.kind === "code" ? textClassification.code : structuredCode;
+    const persistedText = confirmationContext ? "<confirmation-code>" : text;
+    const requestHash = confirmationContext && code
+      ? confirmationRequestDigest({
+        owner: context.owner,
+        channel: context.channel,
+        conversation: context.conversation,
+        code,
+        mediaSha256: serverData.media?.sha256 ?? null,
+        confirmationSecret: confirmationDigestKey,
+      })
+      : requestDigest({
+        text: persistedText,
+        confidence,
+        pendingActionId,
+        confirmationCode: structuredCodePresent ? "<confirmation-code>" : undefined,
+        mediaSha256: serverData.media?.sha256,
+      });
     const received = eventRepository.receive({
       owner: context.owner,
       channel: context.channel,
@@ -146,7 +216,7 @@ export function createAssistantOrchestrator({
       requestHash,
       auditMetadata: serverData.auditMetadata,
       payload: {
-        text,
+        text: persistedText,
         confidence: Number.isFinite(confidence) ? confidence : null,
         pendingActionId,
         ...(serverData.auditMetadata ? { auditMetadata: serverData.auditMetadata } : {}),
@@ -160,16 +230,20 @@ export function createAssistantOrchestrator({
     const eventId = received.item.id;
     const conversation = sessionRepository?.getOrCreate?.({ owner: context.owner, channel: context.channel, conversationId: context.conversation });
     const append = (role, value) => sessionRepository?.appendDraftPart?.(conversation?.id, { role, text: String(value), metadata: { requestId: context.requestId, event: context.event } });
-    append("user", text || "(empty)");
+    append("user", persistedText || "(empty)");
 
-    const finish = (status, body, storedBody = body) => {
-      append("assistant", body.message || body.status || "completed");
+    const finish = (status, liveBody, {
+      storedBody = liveBody,
+      draftText = storedBody.message ?? storedBody.text ?? storedBody.status,
+    } = {}) => {
+      append("assistant", draftText);
       eventRepository.complete(eventId, { leaseToken, responseStatus: status, response: storedBody });
-      return response(status, body);
+      return response(status, liveBody);
     };
     const fail = (error, status = 500) => {
       const body = genericFailure(status).body;
       try {
+        append("assistant", confirmationContext ? "确认信息已处理。" : body.message);
         if (typeof eventRepository.fail === "function") eventRepository.fail(eventId, { leaseToken, responseStatus: status, response: body, errorCode: "ASSISTANT_INTERNAL_ERROR" });
         else eventRepository.complete(eventId, { leaseToken, responseStatus: status, response: body });
       } catch { /* preserve the safe outward response */ }
@@ -177,62 +251,99 @@ export function createAssistantOrchestrator({
     };
 
     let actionLease = null;
+    let resolvedActionId = pendingActionId;
     try {
       let pendingPlan;
       let pendingAction;
-      if (pendingActionId) {
-        pendingAction = pendingActionRepository?.get?.(pendingActionId, {
-          owner: context.owner,
-          channel: context.channel,
-          conversationId: conversation?.id,
-        });
-        if (!pendingAction) return finish(404, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
-        if (pendingAction.status === "executed") return finish(200, { status: "ok", actionId: pendingActionId, result: pendingAction.result ?? null });
-        if (["expired", "cancelled", "failed"].includes(pendingAction.status)) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
-        pendingPlan = pendingAction.payload?.plan || pendingAction.payload;
-        if (input.confirmationCode === undefined && typeof pendingActionRepository?.renewConfirmation === "function") {
-          try {
-            const replacementCode = requiredText(String(confirmationCodeFactory()), "confirmationCode", 100);
-            const renewed = pendingActionRepository.renewConfirmation(pendingActionId, {
-              owner: context.owner,
-              channel: context.channel,
-              conversationId: conversation?.id,
-              confirmationCode: replacementCode,
-            });
-            const replacementBody = {
-              status: "confirmation_required",
-              actionId: pendingActionId,
-              toolName: pendingAction.actionType,
-              risk: pendingPlan.risk,
-              confirmationCode: renewed.confirmationCode,
-              message: "Confirmation code reissued; send it with the action id to continue.",
-            };
-            const storedReplacement = { ...replacementBody };
-            delete storedReplacement.confirmationCode;
-            return finish(200, replacementBody, storedReplacement);
-          } catch {
-            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+      const scope = { owner: context.owner, channel: context.channel, conversationId: conversation?.id };
+      const scopedCommand = ["code", "cancel", "resend"].includes(textClassification.kind) || structuredCodePresent;
+      if (scopedCommand) {
+        if (structuredCodePresent && !structuredCode) {
+          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        }
+        if (textClassification.kind === "code" && structuredCodePresent && structuredCode !== textClassification.code) {
+          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        }
+        try {
+          pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+        } catch {
+          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        }
+        if (!pendingAction && pendingActionId) {
+          const completed = pendingActionRepository?.get?.(pendingActionId, scope);
+          if (completed?.status === "executed" && code && textClassification.kind !== "cancel" && textClassification.kind !== "resend") {
+            try {
+              pendingActionRepository.confirm(pendingActionId, { ...scope, confirmationCode: code });
+              return finish(200, { status: "ok", actionId: pendingActionId, result: completed.result ?? null }, { draftText: "确认信息已处理。" });
+            } catch {
+              return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+            }
           }
         }
-        if (!pendingPlan || typeof pendingPlan !== "object" || Array.isArray(pendingPlan)) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
-        if (input.confirmationCode === undefined) return finish(409, { status: "confirmation_required", actionId: pendingActionId, message: "请提供确认码后再执行。" });
-        try {
-          const confirmed = pendingActionRepository?.confirm?.(pendingActionId, {
-            owner: context.owner,
-            channel: context.channel,
-            conversationId: conversation?.id,
-            confirmationCode: String(input.confirmationCode),
-          });
-          if (confirmed?.expired) return finish(410, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
-          if (confirmed?.inProgress) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
-          pendingAction = confirmed?.item ?? pendingAction;
+        if (pendingActionId && pendingAction?.id !== pendingActionId) {
+          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        }
+        resolvedActionId = pendingAction?.id ?? null;
+
+        if (textClassification.kind === "cancel") {
+          if (pendingAction) {
+            try {
+              pendingActionRepository.cancel(resolvedActionId, scope);
+              return finish(200, { status: "cancel", message: "已取消当前操作。" }, { draftText: "确认信息已处理。" });
+            } catch {
+              return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+            }
+          }
+        } else if (textClassification.kind === "resend") {
+          if (!pendingAction) {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
+          try {
+            const replacementCode = exactConfirmationCode(String(confirmationCodeFactory()));
+            if (!replacementCode) throw new TypeError("confirmationCode must contain exactly six digits");
+            const renewed = pendingActionRepository.renewConfirmation(resolvedActionId, { ...scope, confirmationCode: replacementCode });
+            const tool = registry.getTool(pendingAction.actionType);
+            if (!tool) throw new TypeError("pending action tool is unavailable");
+            const liveBody = {
+              status: "confirmation_required",
+              actionId: resolvedActionId,
+              toolName: tool.name,
+              risk: (pendingAction.payload?.plan || pendingAction.payload)?.risk,
+              confirmationCode: renewed.confirmationCode,
+              ...safePendingResponse(tool, { code: renewed.confirmationCode }),
+            };
+            const storedBody = { ...liveBody, text: STORED_CONFIRMATION_TEXT };
+            delete storedBody.confirmationCode;
+            return finish(200, liveBody, { storedBody, draftText: "等待用户确认。" });
+          } catch {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
+        } else {
+          if (!pendingAction || !code) {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
+          try {
+            const confirmed = pendingActionRepository.confirm(resolvedActionId, { ...scope, confirmationCode: code });
+            if (confirmed?.expired || confirmed?.inProgress) {
+              return finish(confirmed?.expired ? 410 : 409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+            }
+            pendingAction = confirmed?.item ?? pendingAction;
+          } catch (error) {
+            if (error?.code === "ASSISTANT_CONFIRMATION_INVALID") {
+              try {
+                pendingActionRepository.recordConfirmationFailure(resolvedActionId, { ...scope, eventId: context.event });
+              } catch { /* preserve the uniform confirmation failure */ }
+            }
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
           pendingPlan = pendingAction.payload?.plan || pendingAction.payload;
-        } catch {
-          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+          if (!pendingPlan || typeof pendingPlan !== "object" || Array.isArray(pendingPlan)) {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
         }
       }
 
-      const plan = pendingActionId
+      const plan = resolvedActionId
         ? { ...pendingPlan, status: "planned", confirmed: true }
         : router.route({
           text,
@@ -246,12 +357,13 @@ export function createAssistantOrchestrator({
       const tool = registry.getTool(plan.toolName);
       if (!tool) return finish(400, { status: "error", message: "该功能暂不可用。" });
       if (tool.policy?.denied || getToolPolicy(tool.name).denied) return finish(403, { status: "error", message: "该操作不在允许范围内。" });
-      if (pendingActionId && pendingAction?.actionType !== tool.name) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+      if (resolvedActionId && pendingAction?.actionType !== tool.name) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
       const invocation = validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: plan.arguments || {} });
 
-      if (isRisky(plan) && !plan.confirmed && !pendingActionId) {
+      if (isRisky(plan) && !plan.confirmed && !resolvedActionId) {
         if (!pendingActionRepository?.create) return finish(500, { status: "error", message: SAFE_FAILURE });
-        const code = requiredText(String(confirmationCodeFactory()), "confirmationCode", 100);
+        const code = exactConfirmationCode(String(confirmationCodeFactory()));
+        if (!code) return finish(500, { status: "error", message: SAFE_FAILURE });
         const expiresAt = new Date(clock().getTime() + pendingTtlMs).toISOString();
         let action;
         try {
@@ -276,24 +388,24 @@ export function createAssistantOrchestrator({
           toolName: tool.name,
           risk: plan.risk,
           confirmationCode: code,
-          message: "该操作需要确认，请回复确认码。",
+          ...safePendingResponse(tool, { code }),
         };
-        const storedBody = { ...publicBody };
+        const storedBody = { ...publicBody, text: STORED_CONFIRMATION_TEXT };
         delete storedBody.confirmationCode;
-        return finish(200, publicBody, storedBody);
+        return finish(200, publicBody, { storedBody, draftText: "等待用户确认。" });
       }
 
       const handler = toolHandlers[tool.name];
       if (typeof handler !== "function") return finish(400, { status: "error", message: "该功能暂不可用。" });
-      if (pendingActionId) {
+      if (resolvedActionId) {
         if (typeof pendingActionRepository?.claimExecution !== "function") return finish(500, { status: "error", message: SAFE_FAILURE });
-        const claimedAction = pendingActionRepository.claimExecution(pendingActionId, {
+        const claimedAction = pendingActionRepository.claimExecution(resolvedActionId, {
           owner: context.owner,
           channel: context.channel,
           conversationId: conversation?.id,
         });
-        if (claimedAction.replayed) return finish(200, { status: "ok", actionId: pendingActionId, result: claimedAction.item.result ?? null });
-        if (claimedAction.inProgress) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
+        if (claimedAction.replayed) return finish(200, { status: "ok", actionId: resolvedActionId, result: claimedAction.item.result ?? null });
+        if (claimedAction.inProgress) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
         actionLease = { leaseToken: claimedAction.leaseToken };
       }
       let toolRun = null;
@@ -303,8 +415,8 @@ export function createAssistantOrchestrator({
         && typeof eventRepository.completeToolRun === "function"
       ) {
         const finishToolReplay = (output) => {
-          if (pendingActionId && actionLease) {
-            pendingActionRepository.completeExecution(pendingActionId, {
+          if (resolvedActionId && actionLease) {
+            pendingActionRepository.completeExecution(resolvedActionId, {
               owner: context.owner,
               channel: context.channel,
               conversationId: conversation?.id,
@@ -312,15 +424,17 @@ export function createAssistantOrchestrator({
               result: output,
             });
           }
-          return finish(200, { status: "ok", toolName: tool.name, result: output });
+          return finish(200, { status: "ok", toolName: tool.name, result: output }, {
+            draftText: confirmationContext ? "确认信息已处理。" : "ok",
+          });
         };
         const createdRun = eventRepository.createToolRun({
           owner: context.owner,
           channel: context.channel,
-          eventId: pendingActionId ? `assistant-action:${pendingActionId}` : context.event,
+          eventId: resolvedActionId ? `assistant-action:${resolvedActionId}` : context.event,
           toolName: tool.name,
-          requestHash: pendingActionId
-            ? actionToolRunDigest({ actionId: pendingActionId, toolName: tool.name, arguments: invocation.arguments })
+          requestHash: resolvedActionId
+            ? actionToolRunDigest({ actionId: resolvedActionId, toolName: tool.name, arguments: invocation.arguments })
             : requestHash,
           input: invocation.arguments,
         });
@@ -333,15 +447,15 @@ export function createAssistantOrchestrator({
         }
         toolRun = { id: createdRun.item.id, leaseToken: claimedRun.leaseToken };
       }
-      const handlerContext = pendingActionId
-        ? Object.freeze({ ...context, actionId: pendingActionId })
+      const handlerContext = resolvedActionId
+        ? Object.freeze({ ...context, actionId: resolvedActionId })
         : context;
       const result = await handler(Object.freeze({ ...invocation.arguments }), handlerContext, serverData);
       if (toolRun) {
         eventRepository.completeToolRun(toolRun.id, { leaseToken: toolRun.leaseToken, output: result });
       }
-      if (pendingActionId && actionLease) {
-        pendingActionRepository.completeExecution(pendingActionId, {
+      if (resolvedActionId && actionLease) {
+        pendingActionRepository.completeExecution(resolvedActionId, {
           owner: context.owner,
           channel: context.channel,
           conversationId: conversation?.id,
@@ -349,11 +463,13 @@ export function createAssistantOrchestrator({
           result,
         });
       }
-      return finish(200, { status: "ok", toolName: tool.name, result });
+      return finish(200, { status: "ok", toolName: tool.name, result }, {
+        draftText: confirmationContext ? "确认信息已处理。" : "ok",
+      });
     } catch (error) {
-      if (pendingActionId && actionLease && typeof pendingActionRepository?.releaseExecution === "function") {
+      if (resolvedActionId && actionLease && typeof pendingActionRepository?.releaseExecution === "function") {
         try {
-          pendingActionRepository.releaseExecution(pendingActionId, {
+          pendingActionRepository.releaseExecution(resolvedActionId, {
             owner: context.owner,
             channel: context.channel,
             conversationId: conversation?.id,

@@ -300,6 +300,8 @@ describe("cookie authentication protocol", () => {
       ["POST", "/api/invoices/invoice-1/match"],
       ["POST", "/api/travel-expenses/EXP-1/attachments"],
       ["GET", "/api/integrations/weixin-agent/events"],
+      ["POST", "/api/integrations/weixin-agent/events/"],
+      ["POST", "/api/integrations/weixin-agent/events/extra"],
     ]) {
       assert.equal(isMachineRouteAllowed(method, path), false, `${method} ${path} must remain denied`);
     }
