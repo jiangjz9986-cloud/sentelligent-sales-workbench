@@ -1,0 +1,580 @@
+{
+  "hospitals": [
+    {
+      "id": "dongying-shengli-central",
+      "name": "胜利油田中心医院",
+      "city": "东营",
+      "region": "东营",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-city",
+      "name": "东营市人民医院",
+      "city": "东营",
+      "region": "东营",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-tcm",
+      "name": "东营市中医院",
+      "city": "东营",
+      "region": "东营",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-district",
+      "name": "东营区人民医院",
+      "city": "东营",
+      "region": "东营区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-honggang",
+      "name": "东营鸿港医院",
+      "city": "东营",
+      "region": "东营",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-district-central",
+      "name": "东营区中心医院",
+      "city": "东营",
+      "region": "东营区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-district-shengli-first",
+      "name": "东营区胜利第一医院",
+      "city": "东营",
+      "region": "东营区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "guangrao-city",
+      "name": "广饶县人民医院",
+      "city": "东营",
+      "region": "广饶县",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-second",
+      "name": "东营市第二人民医院",
+      "city": "东营",
+      "region": "东营",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "guangrao-tcm",
+      "name": "广饶县中医院",
+      "city": "东营",
+      "region": "广饶县",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-fifth",
+      "name": "东营市第五人民医院",
+      "city": "东营",
+      "region": "东营",
+      "status": "direct",
+      "source_ids": ["hospital-dongying-fifth"],
+      "aliases": []
+    },
+    {
+      "id": "kenli-tcm",
+      "name": "垦利区中医院",
+      "city": "东营",
+      "region": "垦利区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "hekou-city",
+      "name": "河口区人民医院",
+      "city": "东营",
+      "region": "河口区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "hekou-second",
+      "name": "河口区第二人民医院",
+      "city": "东营",
+      "region": "河口区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "hekou-maternal",
+      "name": "河口区妇幼保健院",
+      "city": "东营",
+      "region": "河口区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "dongying-port-central",
+      "name": "东营港经济开发区中心医院",
+      "city": "东营",
+      "region": "东营港经济开发区",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "lijin-city",
+      "name": "利津县人民医院",
+      "city": "东营",
+      "region": "利津县",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "lijin-tcm",
+      "name": "利津县中医院",
+      "city": "东营",
+      "region": "利津县",
+      "status": "indirect",
+      "source_ids": ["dongying-ggzy"],
+      "aliases": []
+    },
+    {
+      "id": "huangdao-city",
+      "name": "黄岛区人民医院",
+      "city": "青岛",
+      "region": "黄岛区",
+      "status": "direct",
+      "source_ids": ["hospital-huangdao-city"],
+      "aliases": ["青岛市黄岛区人民医院", "青岛西海岸新区人民医院"]
+    },
+    {
+      "id": "huangdao-central",
+      "name": "黄岛区中心医院",
+      "city": "青岛",
+      "region": "黄岛区",
+      "status": "direct",
+      "source_ids": ["hospital-huangdao-central"],
+      "aliases": ["青岛市黄岛区中心医院", "青岛西海岸新区中心医院"]
+    },
+    {
+      "id": "huangdao-tcm",
+      "name": "黄岛区中医院",
+      "city": "青岛",
+      "region": "黄岛区",
+      "status": "direct",
+      "source_ids": ["hospital-huangdao-tcm"],
+      "aliases": ["黄岛区中医医院", "青岛市黄岛区中医医院", "青岛西海岸新区中医医院"]
+    },
+    {
+      "id": "huangdao-second-tcm",
+      "name": "黄岛区第二中医院",
+      "city": "青岛",
+      "region": "黄岛区",
+      "status": "direct",
+      "source_ids": ["hospital-huangdao-second-tcm"],
+      "aliases": ["黄岛区第二中医医院", "青岛市黄岛区第二中医医院", "青岛西海岸新区第二中医医院"]
+    },
+    {
+      "id": "huangdao-li",
+      "name": "黄岛区立医院",
+      "city": "青岛",
+      "region": "黄岛区",
+      "status": "direct",
+      "source_ids": ["hospital-huangdao-li"],
+      "aliases": ["青岛市黄岛区区立医院", "青岛西海岸新区区立医院"]
+    },
+    {
+      "id": "qingdao-medical-group-huangdao",
+      "name": "青岛大学医疗集团第二医院（妇幼黄岛分院）",
+      "city": "青岛",
+      "region": "黄岛区",
+      "status": "indirect",
+      "source_ids": ["qingdao-ggzy"],
+      "aliases": ["青岛大学医疗集团第二医院", "妇幼黄岛分院"]
+    },
+    {
+      "id": "jiaozhou-central",
+      "name": "青岛市胶州中心医院",
+      "city": "青岛",
+      "region": "胶州市",
+      "status": "direct",
+      "source_ids": ["hospital-jiaozhou-central"],
+      "aliases": ["胶州中心医院"]
+    },
+    {
+      "id": "jiaozhou-oriental",
+      "name": "同济大学附属东方医院胶州医院",
+      "city": "青岛",
+      "region": "胶州市",
+      "status": "indirect",
+      "source_ids": ["qingdao-ggzy"],
+      "aliases": ["东方医院胶州医院", "同济大学附属东方医院（胶州）"]
+    },
+    {
+      "id": "jiaozhou-tcm",
+      "name": "胶州市中医院",
+      "city": "青岛",
+      "region": "胶州市",
+      "status": "indirect",
+      "source_ids": ["qingdao-ggzy"],
+      "aliases": ["胶州市中医医院"]
+    },
+    {
+      "id": "jiaozhou-maternal",
+      "name": "胶州市妇幼保健医院",
+      "city": "青岛",
+      "region": "胶州市",
+      "status": "indirect",
+      "source_ids": ["qingdao-ggzy"],
+      "aliases": ["胶州市妇幼保健院", "胶州市妇幼保健计划生育服务中心"]
+    },
+    {
+      "id": "jining-medical-university-affiliated",
+      "name": "济宁医学院附属医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["济宁医科大学附属医院"]
+    },
+    {
+      "id": "jining-first",
+      "name": "济宁市第一人民医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "direct",
+      "source_ids": ["hospital-jining-first"],
+      "aliases": ["济宁第一人民"]
+    },
+    {
+      "id": "jining-tcm",
+      "name": "济宁市中医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "direct",
+      "source_ids": ["hospital-jining-tcm"],
+      "aliases": ["济宁中医", "西苑医院济宁医院"]
+    },
+    {
+      "id": "jining-tumor",
+      "name": "济宁市肿瘤医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["济宁肿瘤"]
+    },
+    {
+      "id": "jining-maternal",
+      "name": "济宁市妇幼保健院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["济宁妇幼"]
+    },
+    {
+      "id": "jining-daizhuang",
+      "name": "济宁市戴庄医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["戴庄医院"]
+    },
+    {
+      "id": "jining-fourth",
+      "name": "济宁市第四人民医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["济宁四院"]
+    },
+    {
+      "id": "jining-integrated-tcm",
+      "name": "济宁市中西医结合医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["济宁市中西医"]
+    },
+    {
+      "id": "jining-digestive",
+      "name": "济宁消化病医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["济宁消化病院"]
+    },
+    {
+      "id": "jining-second",
+      "name": "济宁市第二人民医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["济宁二院"]
+    },
+    {
+      "id": "jiaxiang-city",
+      "name": "嘉祥县人民医院",
+      "city": "济宁",
+      "region": "嘉祥县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["嘉祥人民"]
+    },
+    {
+      "id": "jiaxiang-tcm",
+      "name": "嘉祥县中医院",
+      "city": "济宁",
+      "region": "嘉祥县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["嘉祥中医"]
+    },
+    {
+      "id": "jiaxiang-maternal",
+      "name": "嘉祥县妇幼保健院",
+      "city": "济宁",
+      "region": "嘉祥县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["嘉祥妇幼"]
+    },
+    {
+      "id": "liangshan-city",
+      "name": "梁山县人民医院",
+      "city": "济宁",
+      "region": "梁山县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["梁山人民"]
+    },
+    {
+      "id": "liangshan-tcm",
+      "name": "梁山县中医院",
+      "city": "济宁",
+      "region": "梁山县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["梁山中医"]
+    },
+    {
+      "id": "qufu-city",
+      "name": "曲阜市人民医院",
+      "city": "济宁",
+      "region": "曲阜市",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["曲阜人民"]
+    },
+    {
+      "id": "qufu-tcm",
+      "name": "曲阜市中医院",
+      "city": "济宁",
+      "region": "曲阜市",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["曲阜中医"]
+    },
+    {
+      "id": "qufu-maternal",
+      "name": "曲阜市妇幼保健院",
+      "city": "济宁",
+      "region": "曲阜市",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["曲阜妇幼"]
+    },
+    {
+      "id": "yutai-city",
+      "name": "鱼台县人民医院",
+      "city": "济宁",
+      "region": "鱼台县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["鱼台人民"]
+    },
+    {
+      "id": "wenshang-city",
+      "name": "汶上县人民医院",
+      "city": "济宁",
+      "region": "汶上县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["汶上人民"]
+    },
+    {
+      "id": "wenshang-tcm",
+      "name": "汶上县中医院",
+      "city": "济宁",
+      "region": "汶上县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["汶上中医"]
+    },
+    {
+      "id": "jinxiang-city",
+      "name": "金乡县人民医院",
+      "city": "济宁",
+      "region": "金乡县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["金乡人民"]
+    },
+    {
+      "id": "jinxiang-tcm",
+      "name": "金乡县中医院",
+      "city": "济宁",
+      "region": "金乡县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["金乡中医"]
+    },
+    {
+      "id": "jinxiang-maternal",
+      "name": "金乡县妇幼保健院",
+      "city": "济宁",
+      "region": "金乡县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["金乡妇幼"]
+    },
+    {
+      "id": "zoucheng-city",
+      "name": "邹城市人民医院",
+      "city": "济宁",
+      "region": "邹城市",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["邹城人民"]
+    },
+    {
+      "id": "zoucheng-tcm",
+      "name": "邹城市中医院",
+      "city": "济宁",
+      "region": "邹城市",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["邹城中医"]
+    },
+    {
+      "id": "zoucheng-maternal",
+      "name": "邹城市妇幼保健院",
+      "city": "济宁",
+      "region": "邹城市",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["邹城妇幼"]
+    },
+    {
+      "id": "yankuang-new-mileage",
+      "name": "兖矿新里程总医院",
+      "city": "济宁",
+      "region": "济宁市区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["兖矿新里程"]
+    },
+    {
+      "id": "weishan-lake",
+      "name": "微山县微山湖医院",
+      "city": "济宁",
+      "region": "微山县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["微山湖医院"]
+    },
+    {
+      "id": "weishan-tcm",
+      "name": "微山县中医院",
+      "city": "济宁",
+      "region": "微山县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["微山中医"]
+    },
+    {
+      "id": "weishan-city",
+      "name": "微山县人民医院",
+      "city": "济宁",
+      "region": "微山县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["微山人民"]
+    },
+    {
+      "id": "sishui-city",
+      "name": "泗水县人民医院",
+      "city": "济宁",
+      "region": "泗水县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["泗水人民"]
+    },
+    {
+      "id": "sishui-tcm",
+      "name": "泗水县中医院",
+      "city": "济宁",
+      "region": "泗水县",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["泗水中医"]
+    },
+    {
+      "id": "yanzhou-city",
+      "name": "济宁市兖州区人民医院",
+      "city": "济宁",
+      "region": "兖州区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["兖州人民"]
+    },
+    {
+      "id": "yanzhou-tcm",
+      "name": "济宁市兖州区中医院",
+      "city": "济宁",
+      "region": "兖州区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["兖州中医"]
+    },
+    {
+      "id": "yanzhou-jiuyi",
+      "name": "济宁市兖州区九一医院",
+      "city": "济宁",
+      "region": "兖州区",
+      "status": "indirect",
+      "source_ids": ["jining-ggzy"],
+      "aliases": ["兖州九一"]
+    }
+  ]
+}

@@ -131,6 +131,7 @@ import {
   serializeHospitalTenderNotice,
   serializeHospitalTenderSource,
 } from "./hospitalTender/sync.js";
+import { createInternalHospitalTenderRunner } from "./hospitalTender/internalRunner.js";
 import {
   partialSchema,
   requestSchemas,
@@ -2250,6 +2251,9 @@ export function createServer(options = {}) {
     clock: options.hospitalTenderClock ?? (() => new Date()),
     ...(options.hospitalTenderIdFactory ? { idFactory: options.hospitalTenderIdFactory } : {}),
   });
+  const hospitalTenderInternalRunner = options.hospitalTenderInternalRunner
+    ?? createInternalHospitalTenderRunner(options.hospitalTenderInternalRunnerOptions);
+  let hospitalTenderInternalRunPromise = null;
   const databaseIdentity = config.authSessionSecret.length >= 32
     ? createDatabaseIdentity({
         databaseUrl: config.databaseUrl,
@@ -2412,6 +2416,54 @@ export function createServer(options = {}) {
       });
     } catch (error) {
       return itineraryMapFailure(error);
+    }
+  }
+
+  async function runInternalHospitalTender({ actor, requestId }) {
+    if (hospitalTenderInternalRunPromise) {
+      throw new HttpError(409, "HOSPITAL_TENDER_RUN_IN_PROGRESS", "医院招标监测任务正在运行");
+    }
+    hospitalTenderInternalRunPromise = (async () => {
+      const collected = await hospitalTenderInternalRunner.run();
+      const customers = all(
+        db,
+        "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY id ASC",
+      ).map(customerFromRow);
+      const customerNameById = new Map(customers.map((customer) => [customer.id, customer.name]));
+      return withImmediateTransaction(db, () => {
+        const syncResult = ingestHospitalTenderSnapshot({
+          repository: hospitalTenderRepository,
+          payload: collected.payload,
+          customers,
+        });
+        insertAudit(db, {
+          action: "hospital_tender.internal_run",
+          entityType: "hospital_tender_snapshot",
+          entityId: collected.payload.generatedAt,
+          actor,
+          requestId,
+          before: null,
+          after: null,
+          metadata: {
+            source: "bundled-public-collector",
+            acceptedCount: syncResult.acceptedCount,
+            rejectedCount: syncResult.rejectedCount,
+            sourceCount: collected.payload.sources.length,
+          },
+        });
+        return {
+          generatedAt: syncResult.generatedAt,
+          acceptedCount: syncResult.acceptedCount,
+          rejectedCount: syncResult.rejectedCount,
+          summary: hospitalTenderRepository.summary(),
+          notices: syncResult.notices.map((item) => serializeHospitalTenderNotice(item, customerNameById)),
+        };
+      });
+    })();
+    try {
+      return await hospitalTenderInternalRunPromise;
+    } finally {
+      hospitalTenderInternalRunPromise = null;
     }
   }
 
@@ -2766,6 +2818,17 @@ export function createServer(options = {}) {
         assertMachineRouteAllowed(request.method, url.pathname, requestIdentity.integration);
       }
       request.authContext = requestIdentity;
+
+      if (request.method === "POST" && url.pathname === "/api/hospital-tenders/run") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        await validateEmptyBody(request);
+        const result = await runInternalHospitalTender({
+          actor: requestIdentity.account,
+          requestId,
+        });
+        sendJson(response, 200, { item: result });
+        return;
+      }
 
       if (request.method === "GET" && url.pathname === "/api/auth/session") {
         if (requestIdentity.kind !== "user") return unauthorized(response);
