@@ -8,19 +8,20 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前生产版本 | `v0.4.4` |
-| 生产提交 | `6c90de28a5c0eea33c31fdd3a41966764167956f` |
-| 注释标签 | `v0.4.4` |
-| GitHub Release | [森特智行 v0.4.4](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.4.4) |
-| Release 归档 SHA-256 | `7c3c3cac77c20eb4a7d99125f2af0ef1f73505e19a75228a8841af5bb0e8803d` |
-| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_6c90de28a5c0` |
-| 回滚 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_504fa81a30cf` |
-| 当前代码候选 | `v0.5.4`；本地检查通过只表示候选代码，不表示已部署 |
-| `v0.5.3` 生产边界 | 已发布但生产切换因缺少 sender 白名单自动回滚；生产仍保持 `v0.5.2` |
-| `v0.5.4` 生产边界 | 修复未绑定微信时的 fail-closed 启动兼容性；需完成新的发布、受控切换和 HTTPS/清理证据 |
+| 当前生产版本 | `v0.5.4` |
+| 生产提交 | `cce04a2e1f60a17be3b4491cc26dddb6b02292f9` |
+| 注释标签 | `v0.5.4` |
+| GitHub Release | [森特智行 v0.5.4](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.5.4) |
+| Release 归档 SHA-256 | `5e389b692907e70552b93863cd8177c9f328d28fecae70634ceb8d920e20ccfb` |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.5.4-20260816T050311Z_cce04a2e1f6` |
+| 回滚 release | `/opt/sentelligent-sales-workbench/releases/2026-08-09_4eb6a8540ba3` |
+| 当前代码候选 | `v0.5.4`；已完成 GitHub Release、受控切换和线上 25/25 HTTPS smoke |
+| `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
+| `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；受控切换、25/25 预检、25/25 HTTPS smoke 和清理均通过 |
+| 生产数据库校验 | 14 张业务/审计表合计 `71` 行，与切换前离线备份逐表一致；`quick_check=ok`、外键违规 `0` |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-08` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.4.4 版本说明](docs/releases/v0.4.4.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-16` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.5.4 版本说明](docs/releases/v0.5.4.md)。
 
 ## 功能状态
 

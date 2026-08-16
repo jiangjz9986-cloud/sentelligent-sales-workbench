@@ -14,7 +14,8 @@
 
 ### Release boundary
 
-- This patch supersedes the v0.5.3 deployment attempt; production remains on v0.5.2 until a fresh backup, preflight, controlled cutover, HTTPS smoke, and cleanup evidence pass.
+- This patch supersedes the v0.5.3 deployment attempt. It was published as `v0.5.4`, passed the fresh backup, 25/25 preflight, controlled cutover, 25/25 HTTPS smoke, and cleanup gates, and is now the production baseline.
+- Real WeChat sender binding remains intentionally absent; the empty allowlist keeps inbound messages fail-closed until a sender is explicitly configured.
 
 ## [0.5.3] - 2026-08-16
 
@@ -349,7 +350,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.1...v0.5.2
 [0.5.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.4.4...v0.5.0
