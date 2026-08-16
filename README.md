@@ -15,8 +15,9 @@
 | Release 归档 SHA-256 | `7c3c3cac77c20eb4a7d99125f2af0ef1f73505e19a75228a8841af5bb0e8803d` |
 | 当前生产 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_6c90de28a5c0` |
 | 回滚 release | `/opt/sentelligent-sales-workbench/releases/2026-08-08_504fa81a30cf` |
-| 当前代码候选 | `v0.5.3`；本地/隔离检查通过只表示候选代码，不表示已发布或已部署 |
-| `v0.5.3` 生产边界 | 候选尚未部署；必须另行授权发布、受控切换，并取得新的部署与真实微信设备证据 |
+| 当前代码候选 | `v0.5.4`；本地检查通过只表示候选代码，不表示已部署 |
+| `v0.5.3` 生产边界 | 已发布但生产切换因缺少 sender 白名单自动回滚；生产仍保持 `v0.5.2` |
+| `v0.5.4` 生产边界 | 修复未绑定微信时的 fail-closed 启动兼容性；需完成新的发布、受控切换和 HTTPS/清理证据 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
 上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-08` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.4.4 版本说明](docs/releases/v0.4.4.md)。

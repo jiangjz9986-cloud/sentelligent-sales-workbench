@@ -1,8 +1,8 @@
 # 微信 Clawbot 助手集成说明
 
-## v0.5.3 候选边界
+## v0.5.4 候选边界
 
-本说明描述当前本地 v0.5.3 代码候选，不构成 GitHub Release、云端上传、生产切换或真实设备验收证据。现有生产事实仍以部署记录和服务器 evidence 为准；v0.5.3 尚未部署。
+本说明描述当前 v0.5.4 热修复候选，不构成生产切换或真实设备验收证据。v0.5.3 的生产切换曾因未配置 sender 白名单自动回滚；现有生产事实仍以部署记录和服务器 evidence 为准。
 
 ## 入站事件与身份
 
@@ -20,7 +20,7 @@ Idempotency-Key: <opaque sourceMessageId>
 
 ## 私聊确认闭环
 
-生产只接受 `WEIXIN_ALLOWED_SENDER_IDS` 中的 sender，并拒绝群聊（`WEIXIN_ALLOW_GROUPS=false`、群白名单为空）。需要写入时，服务端将待确认动作绑定到持久化工具名、参数、owner、sender、channel 和 private conversation。
+生产只接受 `WEIXIN_ALLOWED_SENDER_IDS` 中的 sender，并拒绝群聊（`WEIXIN_ALLOW_GROUPS=false`、群白名单为空）。首次部署且尚未绑定微信时允许该列表为空；此时服务正常启动，但所有微信入站事件都会被拒绝，直到配置真实 sender ID。需要写入时，服务端将待确认动作绑定到持久化工具名、参数、owner、sender、channel 和 private conversation。
 
 - 确认：在产生动作的同一私聊中直接回复恰好六位 ASCII 数字，例如 `012345`，无需 action ID。
 - 取消：原始文本必须精确等于 `取消`。
@@ -35,7 +35,7 @@ Idempotency-Key: <opaque sourceMessageId>
 ```text
 WEIXIN_AGENT_API_TOKEN=<独立机器 Token>
 WEIXIN_AGENT_BACKEND_URL=https://<公网基址>
-WEIXIN_ALLOWED_SENDER_IDS=<逗号分隔的 sender ID>
+WEIXIN_ALLOWED_SENDER_IDS=<逗号分隔的 sender ID；未绑定时留空，所有入站都会被拒绝>
 WEIXIN_ALLOW_GROUPS=false
 WEIXIN_ALLOWED_GROUP_IDS=
 ASSISTANT_CONFIRMATION_SECRET=<独立的至少 32 字节 canonical base64url 密钥>

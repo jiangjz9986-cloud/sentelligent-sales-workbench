@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-08-16
+
+### Production configuration compatibility
+
+- Allow an intentionally unbound production WeChat installation to start with an empty `WEIXIN_ALLOWED_SENDER_IDS` list.
+- Keep the event boundary fail-closed: every inbound sender is rejected until a real sender ID is configured.
+- Preserve the v0.5.3 tag and publish this behavior as a separate hotfix release after the full release gates pass.
+
+### Release boundary
+
+- This patch supersedes the v0.5.3 deployment attempt; production remains on v0.5.2 until a fresh backup, preflight, controlled cutover, HTTPS smoke, and cleanup evidence pass.
+
 ## [0.5.3] - 2026-08-16
 
 ### WeChat confirmation closure

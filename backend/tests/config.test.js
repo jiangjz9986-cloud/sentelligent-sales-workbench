@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { loadConfig } from "../src/config.js";
+import { assertWeixinSenderAllowed } from "../src/assistant/weixinEvent.js";
 
 describe("backend model configuration", () => {
   it("loads model provider settings from backend env without changing the public default", () => {
@@ -173,7 +174,12 @@ describe("backend model configuration", () => {
     );
     assert.throws(() => loadConfig({ ...valid, ASSISTANT_CONFIRMATION_SECRET: validSessionSecret }), /independent|ASSISTANT_CONFIRMATION_SECRET/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_AGENT_API_TOKEN: validSessionSecret }), /independent|WEIXIN_AGENT_API_TOKEN/);
-    assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOWED_SENDER_IDS: "" }), /WEIXIN_ALLOWED_SENDER_IDS/);
+    const unbound = loadConfig({ ...valid, WEIXIN_ALLOWED_SENDER_IDS: "" });
+    assert.deepEqual(unbound.weixinAllowedSenderIds, []);
+    assert.throws(
+      () => assertWeixinSenderAllowed(unbound, { senderId: "not-yet-bound", chatType: "direct" }),
+      (error) => error?.code === "WEIXIN_SENDER_NOT_ALLOWED",
+    );
     assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOW_GROUPS: "true" }), /WEIXIN_ALLOW_GROUPS/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOWED_GROUP_IDS: "production-group" }), /WEIXIN_ALLOWED_GROUP_IDS/);
   });

@@ -139,9 +139,9 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!isStrongIndependentSecret(config.assistantConfirmationSecret)) {
     throw new Error("ASSISTANT_CONFIRMATION_SECRET must contain at least 32 bytes of high-entropy data in production");
   }
-  if (config.weixinAllowedSenderIds.length === 0) {
-    throw new Error("WEIXIN_ALLOWED_SENDER_IDS must contain at least one sender in production");
-  }
+  // An empty sender allowlist is an intentional unbound state during the
+  // initial production rollout. The event boundary still rejects every
+  // sender until an operator configures a real WeChat sender ID.
   if (config.weixinAllowGroups) {
     throw new Error("WEIXIN_ALLOW_GROUPS must be false in production");
   }
