@@ -1133,7 +1133,11 @@ function oneCanonicalUpstreamId(full) {
 	return msgId ?? clientId;
 }
 function hasUnrecognizedGroupSignal(full) {
-	return ["group_id", "room_id", "chat_type", "is_group"].some((name) => Object.hasOwn(full, name));
+	return ["group_id", "room_id", "chat_type", "is_group"].some((name) => {
+		if (!Object.hasOwn(full, name)) return false;
+		const value = full[name];
+		return value !== void 0 && value !== null && value !== "";
+	});
 }
 function chatIdentityFromUpdate(full, chatMetadata) {
 	const senderId = requireInboundIdentifier(full.from_user_id, "sender id");

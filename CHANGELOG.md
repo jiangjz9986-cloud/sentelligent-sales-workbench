@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-08-16
+
+### WeChat direct-message compatibility
+
+- Accept the provider's empty `group_id`, `room_id`, or `chat_type` placeholders on a direct message while continuing to reject any non-empty unrecognized group signal.
+- Keep the v0.5.6 exact 64-bit numeric `message_id` preservation and bounded delivery-identity validation unchanged.
+- Add a real-shape regression for a direct update carrying `group_id: ""`, which previously caused the worker to retry the same update forever before replying.
+
+### Release boundary
+
+- This hotfix supersedes the deployed-but-not-yet-accepted v0.5.6 candidate; production acceptance remains pending until a fresh immutable release, 25/25 preflight, controlled cutover, HTTPS smoke, and a real WeChat `/clear` reply all pass.
+- No sender ID, password, token, cookie, private key, database content, or business message is recorded in Git or release evidence.
+
 ## [0.5.6] - 2026-08-16
 
 ### WeChat 64-bit inbound IDs
@@ -378,7 +391,8 @@
 - 确认 Apple Design 风格一。
 - 完成第一阶段安全、数据、备份和认证设计。
 
-[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.3...v0.5.4

@@ -174,6 +174,7 @@ describe("vendored Weixin inbound adapter", () => {
               msgs: [textUpdate({
                 message_id: "synthetic-numeric-provider-id-placeholder",
                 client_id: "synthetic-client-generated-id",
+                group_id: "",
               })],
             }).replace('"synthetic-numeric-provider-id-placeholder"', providerMessageId);
             return new Response(raw, { status: 200 });
@@ -298,6 +299,18 @@ describe("vendored Weixin inbound adapter", () => {
     const request = normalizeInboundUpdate(textUpdate(), { deliveryKey: DELIVERY_KEY });
     assert.equal(request.chatType, "direct");
     assert.equal("groupId" in request, false);
+
+    for (const placeholder of [
+      { group_id: "" },
+      { room_id: null },
+      { chat_type: undefined },
+    ]) {
+      const placeholderRequest = normalizeInboundUpdate(textUpdate(placeholder), {
+        deliveryKey: DELIVERY_KEY,
+      });
+      assert.equal(placeholderRequest.chatType, "direct");
+      assert.equal("groupId" in placeholderRequest, false);
+    }
 
     for (const signal of [
       { group_id: "synthetic-group-a" },
