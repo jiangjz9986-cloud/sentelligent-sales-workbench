@@ -47,7 +47,17 @@ describe("internal hospital tender runner", () => {
       },
     });
 
-    const result = await runner.run();
+    const result = await runner.run({
+      customerHospitals: [{
+        id: "customer-1",
+        name: "示例医院",
+        city: "东营",
+        region: "东营",
+        status: "direct",
+        source_ids: [],
+        aliases: ["PACS"],
+      }],
+    });
 
     assert.deepEqual(result.payload, validSnapshot());
     assert.equal(invocation.command, "python3");
@@ -58,6 +68,7 @@ describe("internal hospital tender runner", () => {
     assert.equal("HOSPITAL_TENDER_SYNC_TOKEN" in invocation.options.env, false);
     assert.equal("SENTELLIGENT_HOSPITAL_TENDER_SYNC_URL" in invocation.options.env, false);
     assert.equal("PUSHPLUS_TOKEN" in invocation.options.env, false);
+    assert.match(invocation.options.env.HOSPITAL_TENDER_MONITOR_CUSTOMER_HOSPITALS_PATH, /customer_hospitals\.json$/u);
   });
 
   it("fails closed when the collector exits unsuccessfully", async () => {

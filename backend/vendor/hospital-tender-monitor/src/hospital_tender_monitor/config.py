@@ -228,7 +228,10 @@ def load_config(env: Mapping[str, str], project_root: Path) -> AppConfig:
     config_dir = root / "config"
     raw_sources = _read_json(config_dir / "sources.json", "sources")
     raw_keywords = _read_json(config_dir / "keywords.json", "strong")
-    customer_hospitals = _load_customer_hospitals(config_dir / "customer_hospitals.json")
+    customer_hospitals_path = str(env.get("HOSPITAL_TENDER_MONITOR_CUSTOMER_HOSPITALS_PATH", "")).strip()
+    customer_hospitals = _load_customer_hospitals(
+        Path(customer_hospitals_path) if customer_hospitals_path else config_dir / "customer_hospitals.json"
+    )
     if not isinstance(raw_sources, list):
         raise ValueError("sources.json sources must be a list")
     if not isinstance(raw_keywords, list):

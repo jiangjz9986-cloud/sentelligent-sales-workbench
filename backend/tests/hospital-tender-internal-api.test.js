@@ -10,6 +10,7 @@ let tempDir;
 let server;
 let baseUrl;
 let runnerCalls;
+let runnerOptions;
 
 async function request(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -25,6 +26,7 @@ async function request(path, options = {}) {
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "sentelligent-hospital-tender-internal-api-"));
   runnerCalls = 0;
+  runnerOptions = null;
   server = createServer({
     databaseUrl: join(tempDir, "test.sqlite"),
     seed: true,
@@ -34,8 +36,9 @@ beforeEach(async () => {
     authPassword: "password",
     ["authSession" + "Secret"]: "test-session-secret-0123456789012345",
     hospitalTenderInternalRunner: {
-      async run() {
+      async run(options) {
         runnerCalls += 1;
+        runnerOptions = options;
         return {
           source: "internal",
           payload: {
@@ -90,5 +93,6 @@ describe("internal hospital tender run API", () => {
     assert.equal(run.response.status, 200);
     assert.equal(run.body.item.acceptedCount, 0);
     assert.equal(runnerCalls, 1);
+    assert.equal(Array.isArray(runnerOptions.customerHospitals), true);
   });
 });

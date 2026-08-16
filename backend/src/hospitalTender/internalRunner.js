@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,7 @@ function safePositiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-function commandEnvironment({ collectorRoot, dataDir, env = process.env }) {
+function commandEnvironment({ collectorRoot, dataDir, customerHospitalsPath, env = process.env }) {
   // Only pass runtime basics. In particular, do not inherit sync URLs, bearer
   // tokens, PushPlus credentials, cookies, or model keys into the collector.
   const path = typeof env.PATH === "string" ? env.PATH : "";
@@ -33,6 +33,9 @@ function commandEnvironment({ collectorRoot, dataDir, env = process.env }) {
     PYTHONIOENCODING: "utf-8",
     HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS: "1",
     HOSPITAL_TENDER_MONITOR_DATA_DIR: dataDir,
+    ...(customerHospitalsPath
+      ? { HOSPITAL_TENDER_MONITOR_CUSTOMER_HOSPITALS_PATH: customerHospitalsPath }
+      : {}),
   };
 }
 
@@ -80,16 +83,34 @@ export function createInternalHospitalTenderRunner(options = {}) {
 
   return {
     collectorRoot,
-    async run({ signal } = {}) {
+    async run({ signal, customerHospitals } = {}) {
       const runDir = await mkdtemp(join(tmpdir(), "sentelligent-hospital-tender-"));
       const dataDir = join(runDir, "data");
       const outputPath = join(runDir, "snapshot.json");
+      let customerHospitalsPath = "";
+      if (customerHospitals !== undefined) {
+        if (!Array.isArray(customerHospitals) || customerHospitals.length > 200) {
+          throw new InternalHospitalTenderRunError("Internal hospital customer registry is invalid");
+        }
+        customerHospitalsPath = join(runDir, "customer_hospitals.json");
+        await writeFile(
+          customerHospitalsPath,
+          `${JSON.stringify({ hospitals: customerHospitals })}\n`,
+          { encoding: "utf8", mode: 0o600 },
+        );
+        await chmod(customerHospitalsPath, 0o600).catch(() => {});
+      }
       const child = spawnImpl(
         pythonExecutable,
         ["-m", "hospital_tender_monitor.cli", "--project-root", collectorRoot, "run-and-export", "--output", outputPath],
         {
           cwd: collectorRoot,
-          env: commandEnvironment({ collectorRoot, dataDir, env: environment }),
+          env: commandEnvironment({
+            collectorRoot,
+            dataDir,
+            customerHospitalsPath,
+            env: environment,
+          }),
           stdio: ["ignore", "ignore", "pipe"],
           signal,
         },

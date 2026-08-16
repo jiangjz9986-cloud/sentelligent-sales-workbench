@@ -2467,11 +2467,38 @@ export function createServer(options = {}) {
       throw new HttpError(409, "HOSPITAL_TENDER_RUN_IN_PROGRESS", "医院招标监测任务正在运行");
     }
     hospitalTenderInternalRunPromise = (async () => {
-      const collected = await hospitalTenderInternalRunner.run();
       const customers = all(
         db,
         "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY id ASC",
       ).map(customerFromRow);
+      const customerHospitals = customers.map((customer) => {
+        const summaryTerms = typeof customer.summary === "string"
+          ? customer.summary
+            .split(/[，。；,.;\s]+/u)
+            .map((item) => item.trim())
+            .filter(Boolean)
+          : [];
+        const aliases = [
+          ...(Array.isArray(customer.needs) ? customer.needs : []),
+          ...(Array.isArray(customer.opportunities) ? customer.opportunities : []),
+          ...summaryTerms,
+        ]
+          .filter((item) => typeof item === "string" && item.trim())
+          .map((item) => item.trim().slice(0, 200))
+          .filter((item, index, values) => values.indexOf(item) === index)
+          .slice(0, 30);
+        const region = String(customer.region ?? "").trim() || "全国";
+        return {
+          id: String(customer.id ?? "").trim().slice(0, 200),
+          name: String(customer.name ?? "").trim().slice(0, 200),
+          city: region.slice(0, 100),
+          region: region.slice(0, 100),
+          status: "direct",
+          source_ids: [],
+          aliases,
+        };
+      });
+      const collected = await hospitalTenderInternalRunner.run({ customerHospitals });
       const customerNameById = new Map(customers.map((customer) => [customer.id, customer.name]));
       return withImmediateTransaction(db, () => {
         const syncResult = ingestHospitalTenderSnapshot({
