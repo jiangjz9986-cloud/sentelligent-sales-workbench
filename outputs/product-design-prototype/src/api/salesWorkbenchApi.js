@@ -1186,5 +1186,35 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       const binding = await requestApi("/api/integrations/weixin-agent/login", { method: "DELETE" });
       return binding.item;
     },
+
+    async getSecuritySettings() {
+      const response = await requestApi("/api/settings/security");
+      return response.item;
+    },
+
+    async rotateIcostToken() {
+      const response = await requestApi("/api/settings/icost-token/rotate", {
+        method: "POST",
+        body: "{}",
+      });
+      return response.item;
+    },
+
+    async saveDeepSeekApiKey(apiKey) {
+      if (typeof apiKey !== "string" || !apiKey.trim()) throw new TypeError("DeepSeek API Key is required");
+      const response = await requestApi("/api/settings/deepseek-key", {
+        method: "PUT",
+        body: JSON.stringify({ apiKey: apiKey.trim() }),
+      });
+      return response.item;
+    },
+
+    async clearDeepSeekApiKey() {
+      const response = await requestApi("/api/settings/deepseek-key", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: "CLEAR" }),
+      });
+      return response.item;
+    },
   };
 }

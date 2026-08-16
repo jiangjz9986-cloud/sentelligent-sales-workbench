@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { validatePasswordHashEncoding } from "./auth/password.js";
+import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
 
 export function loadEnvFile(filePath = resolve(process.cwd(), ".env")) {
   if (!existsSync(filePath)) return {};
@@ -133,6 +134,9 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!isStrongSessionSecret(config.authSessionSecret)) {
     throw new Error("AUTH_SESSION_SECRET must be canonical base64url encoding of at least 32 bytes in production");
   }
+  if (!isValidSettingsEncryptionKey(config.settingsEncryptionKey)) {
+    throw new Error("SETTINGS_ENCRYPTION_KEY must be canonical base64url encoding of exactly 32 bytes in production");
+  }
   if (!isStrongIndependentSecret(config.weixinAgentApiToken)) {
     throw new Error("WEIXIN_AGENT_API_TOKEN must contain at least 32 bytes of high-entropy data in production");
   }
@@ -153,11 +157,12 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   }
   if (new Set([
     config.authSessionSecret,
+    config.settingsEncryptionKey,
     config.weixinAgentApiToken,
     config.assistantConfirmationSecret,
     ...(config.hospitalTenderSyncToken ? [config.hospitalTenderSyncToken] : []),
-  ]).size !== (config.hospitalTenderSyncToken ? 4 : 3)) {
-    throw new Error("Production session, machine, and confirmation secrets must be independent");
+  ]).size !== (config.hospitalTenderSyncToken ? 5 : 4)) {
+    throw new Error("Production session, settings, machine, and confirmation secrets must be independent");
   }
   if (!config.authCookieSecure) throw new Error("AUTH_COOKIE_SECURE must be true in production");
   if (!explicitAllowedOrigins || config.corsAllowedOrigins.length === 0) {
@@ -221,6 +226,9 @@ export function loadConfig(overrides = {}) {
     modelBaseUrl: env.modelBaseUrl ?? env.MODEL_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
     modelName: env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL ?? "deepseek-v4-flash",
     modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
+    settingsEncryptionKey: String(
+      env.settingsEncryptionKey ?? env.SETTINGS_ENCRYPTION_KEY ?? "",
+    ).trim(),
     amapWebServiceKey: String(env.amapWebServiceKey ?? env.AMAP_WEB_SERVICE_KEY ?? "").trim(),
     amapTimeoutMs,
     solutionWritesEnabled: booleanValue(

@@ -15,6 +15,7 @@ import { apply as applyAssistantRuntimePersistence } from "./migrations/0011_ass
 import { apply as applyAssistantOwnerAndPlanDigest } from "./migrations/0012_assistant_owner_and_plan_digest.mjs";
 import { apply as applyAssistantConfirmationClosure } from "./migrations/0013_assistant_confirmation_closure.mjs";
 import { apply as applyHospitalTenderMonitor } from "./migrations/0014_hospital_tender_monitor.mjs";
+import { apply as applySecureSettings } from "./migrations/0015_secure_settings.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -94,6 +95,12 @@ const migrations = [
     path: resolve(here, "migrations", "0014_hospital_tender_monitor.mjs"),
     type: "module",
     apply: applyHospitalTenderMonitor,
+  },
+  {
+    version: "0015",
+    path: resolve(here, "migrations", "0015_secure_settings.mjs"),
+    type: "module",
+    apply: applySecureSettings,
   },
 ];
 

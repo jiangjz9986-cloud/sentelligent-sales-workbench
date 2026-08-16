@@ -14,6 +14,9 @@ import {
 } from "./salesWorkbenchApi.js";
 import * as salesWorkbenchApiModule from "./salesWorkbenchApi.js";
 
+const syntheticToken = "synthetic-token";
+const syntheticKey = "synthetic-deepseek-key";
+
 function responseHeaders(values = {}) {
   const entries = new Map(
     Object.entries(values).map(([name, value]) => [name.toLowerCase(), String(value)]),
@@ -2907,5 +2910,39 @@ describe("sales workbench API client", () => {
     assert.equal(health.staleCount, 0);
     assert.match(calls[0].url, /customerId=rizhao/);
     assert.equal(calls.every(({ options }) => (options.method ?? "GET") === "GET"), true);
+  });
+
+  it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/api/settings/security")) {
+          return jsonResponse({ item: { icost: { configured: false }, deepseek: { configured: false } } });
+        }
+        if (url.endsWith("/api/settings/icost-token/rotate")) {
+          return jsonResponse({ item: { token: syntheticToken, masked: "icos••••once", status: "active" } });
+        }
+        if (url.endsWith("/api/settings/deepseek-key") && options.method === "PUT") {
+          return jsonResponse({ item: { configured: true, masked: "synt••••test", status: "active" } });
+        }
+        if (url.endsWith("/api/settings/deepseek-key") && options.method === "DELETE") {
+          return jsonResponse({ item: { configured: false, masked: null, status: "cleared" } });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "csrf-settings" });
+
+    assert.equal((await api.getSecuritySettings()).icost.configured, false);
+    assert.equal((await api.rotateIcostToken()).token, syntheticToken);
+    await api.saveDeepSeekApiKey(syntheticKey);
+    await api.clearDeepSeekApiKey();
+
+    assert.equal(calls[1].options.method, "POST");
+    assert.equal(calls[1].options.headers["X-CSRF-Token"], "csrf-settings");
+    assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
+    assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
 });

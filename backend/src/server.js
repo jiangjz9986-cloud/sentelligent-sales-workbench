@@ -125,6 +125,8 @@ import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
+import { createSecureSettingsRepository, DEEPSEEK_SETTING_KEY, ICOST_SETTING_KEY } from "./settings/repository.js";
+import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
 import {
   ingestHospitalTenderSnapshot,
   normalizeHospitalTenderSyncPayload,
@@ -182,20 +184,26 @@ function modelCompletionUrl(baseUrl) {
 
 function createExpenseModelClient(config, fetchImpl) {
   if (config.aiAnalysisMode !== "model") return null;
-  if (!config.modelApiKey) {
-    return async () => {
-      throw new Error("model_not_configured");
-    };
+  return async ({ signal, ...request }) => {
+    const apiKey = resolveRuntimeModelApiKey(config);
+    if (!apiKey) throw new Error("model_not_configured");
+    return fetchImpl(modelCompletionUrl(config.modelBaseUrl), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(request),
+      signal,
+    });
+  };
+}
+
+function resolveRuntimeModelApiKey(config) {
+  if (typeof config.modelApiKeyProvider === "function") {
+    return String(config.modelApiKeyProvider() ?? "");
   }
-  return async ({ signal, ...request }) => fetchImpl(modelCompletionUrl(config.modelBaseUrl), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.modelApiKey}`,
-    },
-    body: JSON.stringify(request),
-    signal,
-  });
+  return String(config.modelApiKey ?? "");
 }
 
 function icostResponseItem(item, replayed) {
@@ -883,6 +891,26 @@ async function readValidatedJson(request, schema, options) {
 
 async function validateEmptyBody(request) {
   await readValidatedJson(request, {}, { allowEmpty: true });
+}
+
+function requireSecureSettings(repository) {
+  if (!repository) {
+    throw new HttpError(
+      503,
+      "SECURE_SETTINGS_NOT_CONFIGURED",
+      "Secure settings storage is not configured",
+    );
+  }
+  return repository;
+}
+
+function validateSecureSettingBody(value, { field, max = 500 } = {}) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set([field]));
+  if (typeof body[field] !== "string" || !body[field].trim() || body[field].length > max) {
+    validationFailure(field, "format");
+  }
+  return body[field].trim();
 }
 
 function validationFailure(field, rule = "reference") {
@@ -2247,6 +2275,21 @@ function buildSalesDecisionContext(db, body) {
 export function createServer(options = {}) {
   const config = loadConfig(options);
   const db = openDatabase({ databaseUrl: config.databaseUrl });
+  const secureSettingsRepository = isValidSettingsEncryptionKey(config.settingsEncryptionKey)
+    ? createSecureSettingsRepository(db, {
+        masterKey: config.settingsEncryptionKey,
+        clock: options.settingsClock ?? (() => new Date()),
+      })
+    : null;
+  const runtimeConfig = {
+    ...config,
+    // Once the encrypted store is configured, runtime model calls use only its
+    // value. The environment fallback remains for legacy non-production/test
+    // deployments that have not enabled persisted settings yet.
+    modelApiKeyProvider: () => secureSettingsRepository
+      ? secureSettingsRepository.readSecret(DEEPSEEK_SETTING_KEY)
+      : config.modelApiKey,
+  };
   const hospitalTenderRepository = createHospitalTenderRepository(db, {
     clock: options.hospitalTenderClock ?? (() => new Date()),
     ...(options.hospitalTenderIdFactory ? { idFactory: options.hospitalTenderIdFactory } : {}),
@@ -2315,7 +2358,7 @@ export function createServer(options = {}) {
     windowMs: config.icostWebhookWindowMs,
     clock: options.icostRateLimitClock ?? Date.now,
   });
-  const expenseModelClient = createExpenseModelClient(config, options.fetchImpl ?? fetch);
+  const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
   const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => (
     recognizePaymentProofDocument(file, {
       typedEvidence: recognitionOptions.typedEvidence,
@@ -2409,7 +2452,7 @@ export function createServer(options = {}) {
     try {
       return await planVisitItinerary(body, {
         amapClient,
-        modelConfig: config,
+        modelConfig: runtimeConfig,
         fetchImpl: options.fetchImpl,
         clock: options.itineraryClock ?? (() => new Date()),
         ...(options.itineraryEnhanceOrder ? { enhanceOrder: options.itineraryEnhanceOrder } : {}),
@@ -2496,7 +2539,7 @@ export function createServer(options = {}) {
           aiAnalysisMode: config.aiAnalysisMode,
           modelProvider: config.modelProvider,
           modelName: config.modelName,
-          modelReady: config.aiAnalysisMode === "model" && Boolean(config.modelApiKey),
+          modelReady: config.aiAnalysisMode === "model" && Boolean(resolveRuntimeModelApiKey(runtimeConfig)),
           invoiceTextTools,
           authEnabled: isAuthEnabled(config),
         });
@@ -2544,7 +2587,12 @@ export function createServer(options = {}) {
           );
           return;
         }
-        const integrationIdentity = authenticateIcostWebhook(request.headers.authorization, config);
+        const integrationIdentity = authenticateIcostWebhook(
+          request.headers.authorization,
+          secureSettingsRepository
+            ? { ...config, icostWebhookToken: secureSettingsRepository.readSecret(ICOST_SETTING_KEY) }
+            : config,
+        );
         if (!integrationIdentity) return unauthorized(response);
 
         const remoteAddress = request.socket?.remoteAddress ?? "unknown";
@@ -2848,6 +2896,111 @@ export function createServer(options = {}) {
         sendJson(response, 204, null, {
           "Set-Cookie": buildSessionCookie(config, "", { clear: true }),
         });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/settings/security") {
+        const repository = requireSecureSettings(secureSettingsRepository);
+        let item;
+        try {
+          item = repository.listMetadata();
+        } catch {
+          throw new HttpError(503, "SECURE_SETTINGS_UNAVAILABLE", "Secure settings storage is unavailable");
+        }
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && (url.pathname === "/api/settings/icost-token" || url.pathname === "/api/settings/icost-token/rotate")
+      ) {
+        await validateEmptyBody(request);
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const result = withImmediateTransaction(db, () => {
+          const rotated = repository.rotateIcostToken();
+          insertAudit(db, {
+            action: "settings.icost_token.rotate",
+            entityType: "secure_setting",
+            entityId: ICOST_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: {
+              status: rotated.item.status,
+              masked: rotated.item.masked,
+              createdAt: rotated.item.createdAt,
+              rotatedAt: rotated.item.rotatedAt,
+            },
+            metadata: { setting: ICOST_SETTING_KEY },
+          });
+          return rotated;
+        });
+        sendJson(response, 201, {
+          item: {
+            ...result.item,
+            // This is the only endpoint that returns the generated token.
+            token: result.token,
+          },
+        });
+        return;
+      }
+
+      if (
+        (request.method === "PUT" || request.method === "POST")
+        && (url.pathname === "/api/settings/deepseek-key" || url.pathname === "/api/settings/deepseek-api-key")
+      ) {
+        const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const item = withImmediateTransaction(db, () => {
+          const saved = repository.setSecret(DEEPSEEK_SETTING_KEY, value);
+          insertAudit(db, {
+            action: "settings.deepseek_key.save",
+            entityType: "secure_setting",
+            entityId: DEEPSEEK_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: {
+              status: saved.status,
+              masked: saved.masked,
+              updatedAt: saved.updatedAt,
+            },
+            metadata: { setting: DEEPSEEK_SETTING_KEY },
+          });
+          return saved;
+        });
+        sendJson(response, 200, { item });
+        return;
+      }
+
+      if (
+        request.method === "DELETE"
+        && (url.pathname === "/api/settings/deepseek-key" || url.pathname === "/api/settings/deepseek-api-key")
+      ) {
+        const confirmation = validateSecureSettingBody(
+          await readJson(request),
+          { field: "confirmation", max: 32 },
+        );
+        if (confirmation !== "CLEAR") {
+          throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear the DeepSeek key");
+        }
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const item = withImmediateTransaction(db, () => {
+          const cleared = repository.clearSecret(DEEPSEEK_SETTING_KEY);
+          insertAudit(db, {
+            action: "settings.deepseek_key.clear",
+            entityType: "secure_setting",
+            entityId: DEEPSEEK_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: { status: cleared.status, updatedAt: cleared.updatedAt },
+            metadata: { setting: DEEPSEEK_SETTING_KEY, confirmation: "provided" },
+          });
+          return cleared;
+        });
+        sendJson(response, 200, { item });
         return;
       }
 
@@ -5076,7 +5229,7 @@ export function createServer(options = {}) {
         const body = await readValidatedJson(request, requestSchemas.quickRecordPreview);
         const rawContent = String(body.rawContent ?? "").trim();
 
-        const analysis = await analyzeQuickRecord(rawContent, config, {
+        const analysis = await analyzeQuickRecord(rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
@@ -5149,7 +5302,7 @@ export function createServer(options = {}) {
         );
         if (!quickRecord) return notFound(response);
 
-        const analysis = await analyzeQuickRecord(quickRecord.rawContent, config, {
+        const analysis = await analyzeQuickRecord(quickRecord.rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
@@ -5316,7 +5469,7 @@ export function createServer(options = {}) {
         const body = await readValidatedJson(request, requestSchemas.salesDecisionAnalyze);
         const context = buildSalesDecisionContext(db, body);
         const inputSnapshot = buildSalesDecisionInputSnapshot(context);
-        const analysis = await analyzeSalesDecision(context, config, {
+        const analysis = await analyzeSalesDecision(context, runtimeConfig, {
           fetchImpl: options.fetchImpl,
         });
         const item = withImmediateTransaction(db, () => {
@@ -5372,7 +5525,7 @@ export function createServer(options = {}) {
             title,
             context: body.context && typeof body.context === "object" ? body.context : {},
           },
-          config,
+          runtimeConfig,
           { fetchImpl: options.fetchImpl },
         );
         const item = withImmediateTransaction(db, () => {
@@ -5688,7 +5841,7 @@ export function createServer(options = {}) {
             records,
             knowledge,
           },
-          config,
+          runtimeConfig,
           { fetchImpl: options.fetchImpl },
         );
 
@@ -5896,7 +6049,7 @@ export function createServer(options = {}) {
             actions,
             knowledge,
           },
-          config,
+          runtimeConfig,
           { fetchImpl: options.fetchImpl },
         );
 

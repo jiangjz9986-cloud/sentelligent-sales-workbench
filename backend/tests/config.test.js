@@ -123,6 +123,7 @@ describe("backend model configuration", () => {
     const validSessionSecret = Buffer.alloc(32, 5).toString("base64url");
     const validMachineToken = Buffer.alloc(32, 6).toString("base64url");
     const validConfirmationSecret = Buffer.alloc(32, 8).toString("base64url");
+    const validSettingsEncryptionKey = Buffer.alloc(32, 10).toString("base64url");
     const valid = {
       envFile,
       NODE_ENV: " Production ",
@@ -132,6 +133,7 @@ describe("backend model configuration", () => {
       AUTH_SESSION_SECRET: validSessionSecret,
       WEIXIN_AGENT_API_TOKEN: validMachineToken,
       ASSISTANT_CONFIRMATION_SECRET: validConfirmationSecret,
+      SETTINGS_ENCRYPTION_KEY: validSettingsEncryptionKey,
       WEIXIN_ALLOWED_SENDER_IDS: "production-sender",
       WEIXIN_ALLOW_GROUPS: "false",
       WEIXIN_ALLOWED_GROUP_IDS: "",

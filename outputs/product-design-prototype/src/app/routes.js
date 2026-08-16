@@ -16,6 +16,7 @@ const PAGE_META = Object.freeze({
   knowledge: Object.freeze({ active: "knowledge", defaultMode: "list", readOnly: false }),
   kanban: Object.freeze({ active: "kanban", defaultMode: "index", readOnly: false }),
   "settings/weixin": Object.freeze({ active: "weixin", defaultMode: "index", readOnly: false }),
+  "settings/config": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "hospital-tenders": Object.freeze({ active: "hospital-tenders", defaultMode: "index", readOnly: true }),
   solutions: Object.freeze({ active: "solution", defaultMode: "list", readOnly: true }),
 });
@@ -147,6 +148,9 @@ function matchRoute(segments) {
   }
   if (page === "settings" && segments.length === 2 && segments[1] === "weixin") {
     return routeState("settings/weixin", "index");
+  }
+  if (page === "settings" && segments.length === 2 && segments[1] === "config") {
+    return routeState("settings/config", "index");
   }
   if (page === "solutions") {
     if (segments.length === 1) return routeState(page, "list");
@@ -525,7 +529,7 @@ function pathForRoute(route) {
     throw new TypeError("Invalid route mode");
   }
   if (
-    (page === "travel-expenses" || page === "weekly-reports" || page === "kanban" || page === "settings/weixin" || page === "hospital-tenders") &&
+    (page === "travel-expenses" || page === "weekly-reports" || page === "kanban" || page === "settings/weixin" || page === "settings/config" || page === "hospital-tenders") &&
     mode === "index"
   ) {
     assertNoEntityId(route);

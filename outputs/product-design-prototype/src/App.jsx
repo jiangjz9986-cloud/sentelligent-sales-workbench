@@ -54,6 +54,8 @@ import {
 import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage.jsx";
 import { TravelExpensePage } from "./features/travelExpense/TravelExpensePage.jsx";
 import { HospitalTenderPage } from "./features/hospitalTender/HospitalTenderPage.jsx";
+import { SystemSettingsPage } from "./features/settings/SystemSettingsPage.jsx";
+import { buildWorkbenchUrl, parseWorkbenchRoute } from "./app/routes.js";
 import { mergeEntityByVersion } from "./quickRecordModel.js";
 import { getCurrentWeekRange } from "./weekRange.js";
 
@@ -149,6 +151,10 @@ function resolveHeadingContext({
 
   if (active === "hospital-tenders") {
     return { title: "医院招标监测" };
+  }
+
+  if (active === "settings") {
+    return { title: "系统配置" };
   }
 
   return null;
@@ -415,7 +421,32 @@ export function App() {
 }
 
 function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
-  const [active, setActive] = useState("overview");
+  const initialRoute = useMemo(
+    () => (typeof window === "undefined" ? null : parseWorkbenchRoute({
+      pathname: window.location.pathname,
+      search: window.location.search,
+      hash: window.location.hash,
+    })),
+    [],
+  );
+  const routeActive = initialRoute?.active;
+  const routeToActive = {
+    overview: "overview",
+    quick: "quick",
+    customer: "customer",
+    opportunity: "opportunity",
+    actions: "actions",
+    itinerary: "itinerary",
+    expense: "expense",
+    weekly: "weekly",
+    risk: "risk",
+    knowledge: "knowledge",
+    kanban: "kanban",
+    weixin: "weixin",
+    settings: "settings",
+    "hospital-tenders": "hospital-tenders",
+  };
+  const [active, setActive] = useState(routeToActive[routeActive] ?? "overview");
   const [workbenchState, setWorkbenchState] = useState(createLoadingWorkbenchState);
   const [backendStatus, setBackendStatus] = useState(apiClient.isEnabled ? "connecting" : "offline");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
@@ -468,7 +499,42 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   function navigateTo(nextActive) {
     if (nextActive === "quick") setRecordMode("voice");
     setActive(nextActive);
+    if (typeof window !== "undefined") {
+      const routeByActive = {
+        overview: { page: "overview", mode: "index" },
+        quick: { page: "quick-records", mode: "new" },
+        customer: { page: "customers", mode: "list" },
+        opportunity: { page: "opportunities", mode: "list" },
+        actions: { page: "actions", mode: "list" },
+        itinerary: { page: "itineraries", mode: "list" },
+        expense: { page: "travel-expenses", mode: "index" },
+        weekly: { page: "weekly-reports", mode: "index" },
+        risk: { page: "risks", mode: "list" },
+        knowledge: { page: "knowledge", mode: "list" },
+        kanban: { page: "kanban", mode: "index" },
+        weixin: { page: "settings/weixin", mode: "index" },
+        settings: { page: "settings/config", mode: "index" },
+        "hospital-tenders": { page: "hospital-tenders", mode: "index" },
+      };
+      const route = routeByActive[nextActive];
+      if (route) window.history.pushState(route, "", buildWorkbenchUrl(route));
+    }
   }
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const onPopState = () => {
+      const route = parseWorkbenchRoute({
+        pathname: window.location.pathname,
+        search: window.location.search,
+        hash: window.location.hash,
+      });
+      const next = routeToActive[route.active];
+      if (next) setActive(next);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   function setWorkbenchOpportunities(nextValue) {
     updateWorkbenchCollection("opportunities", nextValue);
@@ -864,10 +930,11 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       (refreshed.opportunities ?? []).reduce((items, item) => mergeById(items, item), current));
   }
 
-  const blockedByBootstrap =
+  const blockedByBootstrap = active !== "settings" && (
     bootstrapStatus === "loading" ||
     bootstrapStatus === "error" ||
-    (bootstrapStatus === "empty" && active === "overview");
+    (bootstrapStatus === "empty" && active === "overview")
+  );
   const visibleBootstrapStatus =
     bootstrapStatus === "loading" || bootstrapStatus === "error" ? bootstrapStatus : "empty";
 
@@ -970,6 +1037,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             ) : (
               <>
+            {active === "settings" && (
+              <SystemSettingsPage apiClient={apiClient} backendStatus={backendStatus} />
+            )}
             {active === "overview" && (
               <Overview
                 actions={workbenchActions}

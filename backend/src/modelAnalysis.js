@@ -103,7 +103,7 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.modelApiKey}`,
+      Authorization: `Bearer ${resolveModelApiKey(config)}`,
     },
     body: JSON.stringify({
       model: config.modelName ?? "deepseek-v4-flash",
@@ -137,8 +137,15 @@ async function callModel(rawContent, config, fetchImpl) {
   return parseModelAnalysisContent(content, config.modelProvider ?? "model");
 }
 
+export function resolveModelApiKey(config = {}) {
+  if (typeof config.modelApiKeyProvider === "function") {
+    return String(config.modelApiKeyProvider() ?? "");
+  }
+  return String(config.modelApiKey ?? "");
+}
+
 function shouldUseModel(config) {
-  return config.aiAnalysisMode === "model" && Boolean(config.modelApiKey);
+  return config.aiAnalysisMode === "model" && Boolean(resolveModelApiKey(config));
 }
 
 function parseModelDraftContent(content) {
@@ -414,7 +421,7 @@ export async function analyzeQuickRecord(rawContent, config = {}, options = {}) 
     return fallbackAnalysis(text, "mock");
   }
 
-  if (!config.modelApiKey) {
+  if (!resolveModelApiKey(config)) {
     return fallbackAnalysis(text, "mock_missing_model_key");
   }
 

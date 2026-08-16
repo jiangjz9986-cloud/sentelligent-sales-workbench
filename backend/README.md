@@ -78,6 +78,7 @@ cp .env.example .env
 - `DEEPSEEK_MODEL`: 默认 `deepseek-v4-flash`
 - `DEEPSEEK_API_KEY`: 仅放后端 `.env`，不要进入前端、文档正文或日志
 - `MODEL_TIMEOUT_MS`: 默认 `30000`
+- `SETTINGS_ENCRYPTION_KEY`: 配置页密钥库的 32 字节 base64url 主密钥；只放在后端环境文件或进程环境，不进入 SQLite、前端或 Git。未配置时系统配置 API fail-closed。
 
 Model mode example:
 
@@ -86,6 +87,12 @@ AI_ANALYSIS_MODE=model npm start
 ```
 
 当前模型模式覆盖快速记录结构化分析、周报提炼和方案草稿生成。模型密钥只放后端 `.env` 或后端进程环境变量，不能进入前端、文档正文或日志。
+
+## System settings security boundary
+
+登录后的 `/settings/config` 页面通过 `/api/settings/security` 查看 iCost 和 DeepSeek 的非敏感状态。`POST /api/settings/icost-token/rotate` 生成的 iCost 令牌只在该次成功响应出现一次；后续响应仅包含掩码、时间和状态。DeepSeek API Key 只能由服务端接收、使用 AES-256-GCM 信封加密后保存，普通 API 和前端永远不能读取明文；替换不会回显旧值，清除要求请求体提供精确的 `confirmation: "CLEAR"`。
+
+SQLite 的 `secure_settings` 表只保存版本化密文和时间元数据。解密主密钥由 `SETTINGS_ENCRYPTION_KEY` 提供，服务启动时不把它写入数据库；若主密钥缺失或格式不正确，配置读写接口返回 `503 SECURE_SETTINGS_NOT_CONFIGURED`，不会退回到明文数据库字段。运行时模型和 iCost webhook 每次从服务端密钥库读取，令牌/Key 不进入审计快照、错误正文、HTML 或 `localStorage`。
 
 如果后端 `.env` 未配置 `DEEPSEEK_API_KEY`，快速记录分析会返回 `source=mock_missing_model_key` 的确定性分析结果，周报和方案草稿会安全降级到本地确定性草稿，前端流程不受影响。
 
