@@ -87,4 +87,20 @@ describe("internal hospital tender runner", () => {
     });
     await assert.rejects(runner.run(), /snapshot is invalid/);
   });
+
+  it("fails within the configured timeout when the child never exits", async () => {
+    let killed = [];
+    const runner = createInternalHospitalTenderRunner({
+      timeoutMs: 15,
+      spawnImpl() {
+        const child = fakeChild();
+        child.kill = (signal) => { killed.push(signal); };
+        return child;
+      },
+    });
+    const startedAt = Date.now();
+    await assert.rejects(runner.run(), /timed out/);
+    assert.ok(Date.now() - startedAt < 500);
+    assert.deepEqual(killed, ["SIGTERM", "SIGKILL"]);
+  });
 });

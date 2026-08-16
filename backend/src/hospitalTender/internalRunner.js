@@ -36,15 +36,34 @@ function commandEnvironment({ collectorRoot, dataDir, env = process.env }) {
   };
 }
 
-function collectOutput(child) {
+function collectOutput(child, timeoutMs) {
   return new Promise((resolveOutput, rejectOutput) => {
     let stderr = "";
+    let settled = false;
+    let timer;
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      callback(value);
+    };
     child.stderr?.setEncoding?.("utf8");
     child.stderr?.on?.("data", (chunk) => {
       stderr = `${stderr}${String(chunk)}`.slice(-2_000);
     });
-    child.once("error", (error) => rejectOutput(error));
-    child.once("close", (code, signal) => resolveOutput({ code, signal, stderr }));
+    child.once("error", (error) => settle(rejectOutput, error));
+    child.once("close", (code, signal) => settle(resolveOutput, { code, signal, stderr }));
+    timer = setTimeout(() => {
+      // Do not wait for a misbehaving collector to honor SIGTERM. The HTTP
+      // request must fail closed within the configured bound.
+      try {
+        child.kill?.("SIGTERM");
+        child.kill?.("SIGKILL");
+      } catch {
+        // The process may already have exited; the timeout result is enough.
+      }
+      settle(rejectOutput, new InternalHospitalTenderRunError("Internal hospital tender monitor timed out"));
+    }, timeoutMs);
   });
 }
 
@@ -75,10 +94,8 @@ export function createInternalHospitalTenderRunner(options = {}) {
           signal,
         },
       );
-      let timer;
       try {
-        timer = setTimeout(() => child.kill?.("SIGTERM"), timeoutMs);
-        const result = await collectOutput(child);
+        const result = await collectOutput(child, timeoutMs);
         if (result.code !== 0 || result.signal) {
           throw new InternalHospitalTenderRunError("Internal hospital tender monitor failed");
         }
@@ -98,7 +115,6 @@ export function createInternalHospitalTenderRunner(options = {}) {
         if (error instanceof InternalHospitalTenderRunError) throw error;
         throw new InternalHospitalTenderRunError("Internal hospital tender monitor failed", { cause: error });
       } finally {
-        if (timer) clearTimeout(timer);
         await rm(runDir, { recursive: true, force: true }).catch(() => {});
       }
     },
