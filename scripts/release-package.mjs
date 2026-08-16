@@ -1524,6 +1524,7 @@ function installBackendProductionDependencies({
       "ci",
       "--ignore-scripts",
       "--omit=dev",
+      "--install-links",
       "--no-audit",
       "--no-fund",
       "--cache",

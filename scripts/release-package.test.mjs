@@ -1996,7 +1996,7 @@ describe("portable release package", () => {
           'import { join } from "node:path";',
           'const args = process.argv.slice(2);',
           'if (args[0] === "--version") { console.log("10.9.7"); process.exit(0); }',
-          'if (args[0] !== "ci" || !args.includes("--ignore-scripts") || !args.includes("--omit=dev")) process.exit(30);',
+          'if (args[0] !== "ci" || !args.includes("--ignore-scripts") || !args.includes("--omit=dev") || !args.includes("--install-links")) process.exit(30);',
           'const packageRoot = join(process.cwd(), "node_modules", "production-only");',
           'mkdirSync(packageRoot, { recursive: true });',
           'writeFileSync(join(packageRoot, "package.json"), "{\\"name\\":\\"production-only\\",\\"version\\":\\"1.0.0\\"}\\n");',
