@@ -76,7 +76,7 @@ function collectOutput(child, timeoutMs) {
  */
 export function createInternalHospitalTenderRunner(options = {}) {
   const collectorRoot = resolve(options.collectorRoot ?? DEFAULT_COLLECTOR_ROOT);
-  const pythonExecutable = options.pythonExecutable ?? "python3";
+  const pythonExecutable = options.pythonExecutable ?? process.env.HOSPITAL_TENDER_PYTHON ?? "python3";
   const timeoutMs = safePositiveInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS);
   const spawnImpl = options.spawnImpl ?? nodeSpawn;
   const environment = options.environment ?? process.env;

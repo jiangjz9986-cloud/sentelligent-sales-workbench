@@ -112,6 +112,14 @@ function identifierList(value, name) {
   return result;
 }
 
+function executableValue(value, name) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized || normalized.length > 300 || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)) {
+    throw new Error(`${name} must be a bounded executable path`);
+  }
+  return normalized;
+}
+
 function isStrongSessionSecret(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
@@ -226,6 +234,10 @@ export function loadConfig(overrides = {}) {
     modelBaseUrl: env.modelBaseUrl ?? env.MODEL_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
     modelName: env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL ?? "deepseek-v4-flash",
     modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
+    hospitalTenderPython: executableValue(
+      env.hospitalTenderPython ?? env.HOSPITAL_TENDER_PYTHON ?? "python3",
+      "HOSPITAL_TENDER_PYTHON",
+    ),
     settingsEncryptionKey: String(
       env.settingsEncryptionKey ?? env.SETTINGS_ENCRYPTION_KEY ?? "",
     ).trim(),

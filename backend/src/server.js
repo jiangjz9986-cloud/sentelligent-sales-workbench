@@ -2295,7 +2295,11 @@ export function createServer(options = {}) {
     ...(options.hospitalTenderIdFactory ? { idFactory: options.hospitalTenderIdFactory } : {}),
   });
   const hospitalTenderInternalRunner = options.hospitalTenderInternalRunner
-    ?? createInternalHospitalTenderRunner(options.hospitalTenderInternalRunnerOptions);
+    ?? createInternalHospitalTenderRunner({
+      ...(options.hospitalTenderInternalRunnerOptions ?? {}),
+      pythonExecutable: options.hospitalTenderInternalRunnerOptions?.pythonExecutable
+        ?? config.hospitalTenderPython,
+    });
   let hospitalTenderInternalRunPromise = null;
   const databaseIdentity = config.authSessionSecret.length >= 32
     ? createDatabaseIdentity({

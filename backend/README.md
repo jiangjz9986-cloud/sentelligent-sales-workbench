@@ -78,6 +78,7 @@ cp .env.example .env
 - `DEEPSEEK_MODEL`: 默认 `deepseek-v4-flash`
 - `DEEPSEEK_API_KEY`: 仅放后端 `.env`，不要进入前端、文档正文或日志
 - `MODEL_TIMEOUT_MS`: 默认 `30000`
+- `HOSPITAL_TENDER_PYTHON`: 内置医院招标采集器使用的 Python 3.11+ 可执行文件；默认 `python3`，如果系统默认 Python 版本较旧，请填入受保护环境中的绝对路径。
 - `SETTINGS_ENCRYPTION_KEY`: 配置页密钥库的 32 字节 base64url 主密钥；只放在后端环境文件或进程环境，不进入 SQLite、前端或 Git。未配置时系统配置 API fail-closed。
 
 Model mode example:
