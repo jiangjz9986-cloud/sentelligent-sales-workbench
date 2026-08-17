@@ -10,6 +10,7 @@ import { HttpError } from "../src/http/errors.js";
 import { createAssistantEventRepository } from "../src/assistant/eventRepository.js";
 import { createAssistantSessionRepository } from "../src/assistant/sessionRepository.js";
 import { createAssistantPendingActionRepository } from "../src/assistant/pendingActionRepository.js";
+import { createAssistantToolHandlers } from "../src/assistant/runtimeHandlers.js";
 
 let db;
 let tempDir;
@@ -57,6 +58,44 @@ afterEach(() => {
 });
 
 describe("assistant runtime persistence", () => {
+  it("uses the persisted runtime model-key provider for assistant quick-record previews", async () => {
+    const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
+    const conversation = sessions.getOrCreate({
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: "wx-runtime-provider",
+    });
+    sessions.appendDraftPart(conversation.id, { role: "user", text: "客户需要确认预算和决策链" });
+    let authorization;
+    const handlers = createAssistantToolHandlers({
+      db,
+      config: {
+        aiAnalysisMode: "model",
+        modelProvider: "deepseek",
+        modelApiKey: "unit-fixture-key",
+        modelApiKeyProvider: () => "stored-fixture",
+        modelBaseUrl: "https://example.invalid",
+        modelName: "deepseek-v4-flash",
+      },
+      sessionRepository: sessions,
+      fetchImpl: async (_url, options) => {
+        authorization = options.headers.Authorization;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ choices: [{ message: { content: "{}" } }] }),
+        };
+      },
+    });
+
+    await handlers["visit-capture.preview"]({}, {
+      owner: "owner-a",
+      channel: "weixin",
+      conversation: "wx-runtime-provider",
+    });
+    assert.equal(authorization, "Bearer stored-fixture");
+  });
+
   it("replays an inbound event and rejects the same event with a changed request hash", () => {
     const repository = createAssistantEventRepository(db, { idFactory: () => nextId("event"), clock: now });
     const input = {

@@ -2430,7 +2430,9 @@ export function createServer(options = {}) {
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
-      config,
+      // Assistant-triggered quick-record analysis must use the same
+      // server-owned persisted model-key provider as browser API calls.
+      config: runtimeConfig,
       sessionRepository: assistantSessionRepository,
       travelExpenseDocumentInboxRepository,
       invoiceRepository,

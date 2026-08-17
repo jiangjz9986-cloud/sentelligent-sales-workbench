@@ -2945,7 +2945,7 @@ describe("sales workbench API client", () => {
     await api.clearDeepSeekApiKey();
 
     assert.equal(calls[1].options.method, "POST");
-    assert.equal(calls[1].options.headers["X-CSRF-Token"], "csrf-settings");
+    assert.equal(calls[1].options.headers["X-CSRF-Token"], "fixture-csrf-token");
     assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
     assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
