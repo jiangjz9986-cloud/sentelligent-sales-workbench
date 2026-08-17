@@ -38,7 +38,8 @@
 - `v0.6.0` 已从 `main` 创建不可移动 tag 并发布 GitHub Release；Release workflow `31998568637` 成功，归档 SHA-256 为 `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371`。
 - 已完成生产服务器的 Python 3.12.14 运行时准备、`SETTINGS_ENCRYPTION_KEY` 注入、`0014`/`0015`/`0016` 迁移、不可变 release 切换和页面回归。当前生产 release 为 `/opt/sentelligent-sales-workbench/releases/v0.6.0-20260817T124347Z_4c45656647f5`。
 - 切换前后生产预检均为 `25/25`，后端/前端健康检查为 `200`，SQLite `quick_check=ok`、外键违规为 `0`；只重启三个项目服务，共享 Caddy、轻氧、账户保险库和 Mihomo 未重启。
-- HTTPS smoke 仍未闭合：本机可用的两个钥匙串候选均返回登录 `401`，每次仅通过 `3/25`，未创建或残留合成业务数据。取得当前生产密码后需重新执行并记录 `25/25`、`cleanup=clean`。
+- HTTPS smoke 已完成：run ID `f19df464-c651-4378-ae06-d46fa198897b`，`25/25`，`failed=0`，`blocked=0`，`cleanup=clean`；报告为 `/opt/sentelligent-sales-workbench/evidence/v0.6.0-20260817T124347Z/smoke/production-https-smoke-20260817T140107Z.json`，SHA-256 为 `45de5d14e8f732d9c162f62e79ebea61d2f5080deb03a31b52620f3cd795a150`。
+- 清理后 customers、opportunities、quick records、AI insights、sales decisions、itineraries、weekly reports、audit logs、sessions 和 idempotency keys 残留均为 `0`；SQLite `quick_check=ok`、外键违规 `0`。
 - 发布合同保持现有 25 项预检数量；会同时校验密钥独立性、固定 `60/10` 调度、非符号链接 Python 路径以及后端服务账号实际运行身份。
 
 ## [0.5.7] - 2026-08-16
