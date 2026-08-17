@@ -8,7 +8,9 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前代码 / GitHub Release | `v0.6.0`（已正式发布） |
+| 当前代码 / GitHub Release | `v0.6.1`（已正式发布，尚未切生产） |
+| v0.6.1 Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
+| v0.6.1 Release 状态 | 正式 Release 已发布；本版本只增加快捷指令 Token 验证边界，生产仍保持 `v0.6.0` |
 | v0.6.0 Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
 | v0.6.0 Release 归档 SHA-256 | `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371` |
 | 当前生产版本 | `v0.6.0`（已完成第二次受控切换；HTTPS smoke 尚待补齐） |
@@ -25,7 +27,7 @@
 | `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-17` 复核；v0.6.0 已完成生产切换。唯一未闭合项是使用当前生产登录凭据重新执行 HTTPS smoke；此前两次认证均返回 `401`，没有创建或残留合成业务数据。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.6.0 版本说明](docs/releases/v0.6.0.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-17` 复核；当前代码已推进到 v0.6.1，生产仍锁定 v0.6.0。v0.6.0 唯一未闭合项是使用当前生产登录凭据重新执行 HTTPS smoke；此前两次认证均返回 `401`，没有创建或残留合成业务数据。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.6.0 版本说明](docs/releases/v0.6.0.md) 与 [v0.6.1 版本说明](docs/releases/v0.6.1.md)。
 
 ## 功能状态
 
