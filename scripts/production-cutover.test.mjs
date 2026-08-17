@@ -643,6 +643,34 @@ describe("controlled production cutover", () => {
     }
   });
 
+  it("rejects a candidate manifest without the complete v0.6.0 environment contract", () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const manifestPath = join(fixture.root, "release-manifest.json");
+      const manifest = structuredClone(fixture.manifest);
+      manifest.requiredEnvNames = manifest.requiredEnvNames.filter(
+        (name) => name !== "SETTINGS_ENCRYPTION_KEY",
+      );
+      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+      const result = runBash(
+        [
+          "-c",
+          'source "$1"\nNEW_RELEASE=$2\nEXPECTED_COMMIT=$3\nverify_release_manifest',
+          "production-cutover-test",
+          toBashPath(scriptPath),
+          fixture.root.replaceAll("\\", "/"),
+          fixture.manifest.source.commit,
+        ],
+        { env: { NODE_BIN: toBashPath(process.execPath) } },
+      );
+
+      assert.notEqual(result.status, 0, outputOf(result));
+      assert.match(outputOf(result), /environment contract/i);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("accepts only a fresh exact 25/25 preflight report bound to this cutover", () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-")));
     const reportPath = join(root, "preflight.json");

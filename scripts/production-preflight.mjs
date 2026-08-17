@@ -20,13 +20,20 @@ import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
-// v0.5.0 added the assistant confirmation secret to the manifest contract.
-// A pre-cutover report must still be able to authenticate the already-running
-// schema-3 release from v0.4.4, but that relaxed set is valid only for the
-// canonical current release path. Candidate releases always use the complete
-// current REQUIRED_ENV_NAMES contract.
+// v0.6.0 added the encrypted settings key and hospital-tender scheduler
+// settings to the manifest contract. A pre-cutover report must still be able
+// to authenticate the already-running v0.5.7 schema-3 release, but that
+// relaxed set is valid only for the canonical current release path. Candidate
+// releases always use the complete current REQUIRED_ENV_NAMES contract.
+const V060_REQUIRED_ENV_NAMES = new Set([
+  "SETTINGS_ENCRYPTION_KEY",
+  "HOSPITAL_TENDER_PYTHON",
+  "HOSPITAL_TENDER_AUTO_RUN",
+  "HOSPITAL_TENDER_INTERVAL_MINUTES",
+  "HOSPITAL_TENDER_BATCH_SIZE",
+]);
 const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
-  REQUIRED_ENV_NAMES.filter((name) => name !== "ASSISTANT_CONFIRMATION_SECRET"),
+  REQUIRED_ENV_NAMES.filter((name) => !V060_REQUIRED_ENV_NAMES.has(name)),
 );
 
 export const REQUIRED_PROJECT_SERVICES = Object.freeze([
@@ -184,14 +191,40 @@ function hasAssistantSecretConfiguration(environment) {
   const session = environment.AUTH_SESSION_SECRET;
   const machine = environment.WEIXIN_AGENT_API_TOKEN;
   const confirmation = environment.ASSISTANT_CONFIRMATION_SECRET;
+  const settings = environment.SETTINGS_ENCRYPTION_KEY;
+  const tenderSync = environment.HOSPITAL_TENDER_SYNC_TOKEN;
+  const tenderSyncConfigured = typeof tenderSync === "string" && tenderSync.length > 0;
+  const independentSecrets = [
+    session,
+    machine,
+    confirmation,
+    settings,
+    ...(tenderSyncConfigured ? [tenderSync] : []),
+  ];
   return (
     isStrongAssistantSecret(machine) &&
     isStrongAssistantSecret(confirmation) &&
-    new Set([session, machine, confirmation]).size === 3 &&
+    decodeCanonicalBase64Url(settings, 32) !== null &&
+    (!tenderSyncConfigured || isStrongAssistantSecret(tenderSync)) &&
+    new Set(independentSecrets).size === independentSecrets.length &&
     machine !== environment.MODEL_API_KEY &&
     machine !== environment.ICOST_WEBHOOK_TOKEN &&
     confirmation !== environment.MODEL_API_KEY &&
-    confirmation !== environment.ICOST_WEBHOOK_TOKEN
+    confirmation !== environment.ICOST_WEBHOOK_TOKEN &&
+    settings !== environment.MODEL_API_KEY &&
+    settings !== environment.ICOST_WEBHOOK_TOKEN &&
+    (!tenderSyncConfigured || (
+      tenderSync !== environment.MODEL_API_KEY &&
+      tenderSync !== environment.ICOST_WEBHOOK_TOKEN
+    ))
+  );
+}
+
+function hasHospitalTenderSchedulerConfiguration(environment) {
+  return (
+    environment.HOSPITAL_TENDER_AUTO_RUN === "true" &&
+    environment.HOSPITAL_TENDER_INTERVAL_MINUTES === "60" &&
+    environment.HOSPITAL_TENDER_BATCH_SIZE === "10"
   );
 }
 
@@ -240,6 +273,8 @@ function hasProductionModelConfiguration(environment) {
     environment.WEIXIN_AGENT_API_TOKEN,
     environment.ASSISTANT_CONFIRMATION_SECRET,
     environment.ICOST_WEBHOOK_TOKEN,
+    environment.SETTINGS_ENCRYPTION_KEY,
+    environment.HOSPITAL_TENDER_SYNC_TOKEN,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .every((value) => value !== modelKey);
@@ -263,6 +298,8 @@ function hasIsolatedIcostWebhookToken(environment) {
     environment.DEEPSEEK_API_KEY,
     environment.WEIXIN_AGENT_API_TOKEN,
     environment.ASSISTANT_CONFIRMATION_SECRET,
+    environment.SETTINGS_ENCRYPTION_KEY,
+    environment.HOSPITAL_TENDER_SYNC_TOKEN,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .every((value) => value !== token);
@@ -308,6 +345,72 @@ function inspectSecureExecutable(value) {
       secureOwnership: false,
       resolvedPath: "",
     };
+  }
+}
+
+export function inspectCanonicalSecureExecutable(
+  value,
+  {
+    lstat = lstatSync,
+    realpath = realpathSync.native,
+    resolvePath = resolve,
+    dirnamePath = dirname,
+  } = {},
+) {
+  const failed = {
+    regularFile: false,
+    secureOwnership: false,
+    canonicalPath: false,
+    secureAncestors: false,
+    resolvedPath: "",
+  };
+  try {
+    if (
+      typeof value !== "string" ||
+      !isAbsolute(value) ||
+      resolvePath(value) !== value
+    ) {
+      return failed;
+    }
+    const lexical = lstat(value);
+    const resolvedPath = realpath(value);
+    const canonicalPath =
+      resolvedPath === value &&
+      lexical.isFile() &&
+      !lexical.isSymbolicLink();
+    const secureOwnership =
+      canonicalPath && lexical.uid === 0 && (lexical.mode & 0o6022) === 0;
+    if (!canonicalPath || !secureOwnership) {
+      return { ...failed, canonicalPath, secureOwnership };
+    }
+
+    let directory = dirnamePath(value);
+    let secureAncestors = true;
+    while (true) {
+      const directoryMetadata = lstat(directory);
+      if (
+        realpath(directory) !== directory ||
+        !directoryMetadata.isDirectory() ||
+        directoryMetadata.isSymbolicLink() ||
+        directoryMetadata.uid !== 0 ||
+        (directoryMetadata.mode & 0o022) !== 0
+      ) {
+        secureAncestors = false;
+        break;
+      }
+      const parent = dirnamePath(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+    return {
+      regularFile: true,
+      secureOwnership: true,
+      canonicalPath: true,
+      secureAncestors,
+      resolvedPath: value,
+    };
+  } catch {
+    return failed;
   }
 }
 
@@ -374,6 +477,107 @@ export function runToolAsServiceUser(
 
 function successfulToolRun(result) {
   return isRecord(result) && result.status === 0;
+}
+
+function parsePythonRuntimeEvidence(output) {
+  const match = /^(\d+)\.(\d+)(?:\.\d+)?\|(\d+)\|(\d+)\|(\d+)\|(\d+)\|([0-9a-f]+)$/iu.exec(
+    String(output ?? "").trim(),
+  );
+  if (!match) {
+    return { versionAtLeast311: false, serviceIdentityPreserved: false };
+  }
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  const realUid = Number(match[3]);
+  const effectiveUid = Number(match[4]);
+  const realGid = Number(match[5]);
+  const effectiveGid = Number(match[6]);
+  const versionAtLeast311 = major > 3 || (major === 3 && minor >= 11);
+  const serviceIdentityPreserved =
+    Number.isSafeInteger(realUid) &&
+    realUid === effectiveUid &&
+    Number.isSafeInteger(realGid) &&
+    realGid === effectiveGid &&
+    /^0+$/u.test(match[7]);
+  return { versionAtLeast311, serviceIdentityPreserved };
+}
+
+export function inspectHospitalTenderPython(
+  request,
+  {
+    inspectSecureExecutable: inspect = inspectCanonicalSecureExecutable,
+    runAsServiceUser = runToolAsServiceUser,
+  } = {},
+) {
+  const emptyEvidence = {
+    serviceIdentityResolved: false,
+    regularFile: false,
+    executableByServiceUser: false,
+    identity: "unknown",
+    versionAtLeast311: false,
+    serviceIdentityPreserved: false,
+  };
+  const backendService = request?.backendService;
+  if (
+    !isRecord(request) ||
+    !isRecord(backendService) ||
+    typeof backendService.user !== "string" ||
+    backendService.dynamicUser !== false ||
+    !["", backendService.user].includes(backendService.group) ||
+    !Array.isArray(backendService.supplementaryGroups) ||
+    backendService.supplementaryGroups.length !== 0 ||
+    typeof request.command !== "string"
+  ) {
+    return emptyEvidence;
+  }
+
+  let inspection;
+  try {
+    inspection = inspect(request.command);
+  } catch {
+    return emptyEvidence;
+  }
+  const regularFile =
+    isRecord(inspection) &&
+    inspection.regularFile === true &&
+    inspection.secureOwnership === true &&
+    inspection.canonicalPath === true &&
+    inspection.secureAncestors === true &&
+    typeof inspection.resolvedPath === "string" &&
+    inspection.resolvedPath.length > 0;
+  if (!regularFile) return emptyEvidence;
+
+  const executableByServiceUser = successfulToolRun(runAsServiceUser({
+    user: backendService.user,
+    command: "/usr/bin/test",
+    args: ["-x", inspection.resolvedPath],
+  }));
+  const version = executableByServiceUser
+    ? runAsServiceUser({
+        user: backendService.user,
+        command: inspection.resolvedPath,
+        args: [
+          "-I",
+          "-S",
+          "-c",
+          "import os,sys; lines=open('/proc/self/status',encoding='ascii').read().splitlines(); cap=next((line.split(':',1)[1].strip() for line in lines if line.startswith('CapEff:')),''); print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{os.getuid()}|{os.geteuid()}|{os.getgid()}|{os.getegid()}|{cap}')",
+        ],
+      })
+    : failedToolRun();
+  const versionOutput = `${version.stdout}\n${version.stderr}`.trim();
+  const runtimeEvidence = successfulToolRun(version)
+    ? parsePythonRuntimeEvidence(versionOutput)
+    : { versionAtLeast311: false, serviceIdentityPreserved: false };
+  const versionAtLeast311 =
+    runtimeEvidence.versionAtLeast311 && runtimeEvidence.serviceIdentityPreserved;
+  return {
+    serviceIdentityResolved: executableByServiceUser,
+    regularFile: true,
+    executableByServiceUser,
+    identity: versionAtLeast311 ? "python" : "unknown",
+    versionAtLeast311,
+    serviceIdentityPreserved: runtimeEvidence.serviceIdentityPreserved,
+  };
 }
 
 function listedTesseractLanguages(output) {
@@ -604,6 +808,37 @@ function hasInvoiceExtractionConfiguration(
       evidence.pdfText.regularFile === true &&
       evidence.pdfText.executableByServiceUser === true &&
       evidence.pdfText.identity === "poppler-pdftotext"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasHospitalTenderPythonRuntime(
+  environment,
+  servicePlan,
+  inspector = inspectHospitalTenderPython,
+) {
+  const command = environment.HOSPITAL_TENDER_PYTHON;
+  const backendService = backendServiceInspectionIdentity(servicePlan);
+  if (
+    !isProductionToolCommand(command) ||
+    !command.startsWith("/") ||
+    backendService === null ||
+    typeof inspector !== "function"
+  ) {
+    return false;
+  }
+  try {
+    const evidence = inspector({ backendService, command });
+    return (
+      isRecord(evidence) &&
+      evidence.serviceIdentityResolved === true &&
+      evidence.regularFile === true &&
+      evidence.executableByServiceUser === true &&
+      evidence.identity === "python" &&
+      evidence.versionAtLeast311 === true &&
+      evidence.serviceIdentityPreserved === true
     );
   } catch {
     return false;
@@ -2198,6 +2433,7 @@ export async function runProductionPreflight({
   nodeVersion = process.versions.node,
   createdAt = new Date().toISOString(),
   invoiceToolInspector = inspectInvoiceExtractionTools,
+  hospitalTenderPythonInspector = inspectHospitalTenderPython,
   expectedHostIdentity,
   hostIdentityInspector = inspectHostIdentity,
 } = {}) {
@@ -2274,6 +2510,11 @@ export async function runProductionPreflight({
   const expectedOriginList = Array.isArray(expectedOrigins)
     ? expectedOrigins
     : [];
+  const hospitalTenderPythonRuntimeValid = hasHospitalTenderPythonRuntime(
+    environment,
+    servicePlan,
+    hospitalTenderPythonInspector,
+  );
 
   const checks = [
     makeCheck(
@@ -2285,15 +2526,18 @@ export async function runProductionPreflight({
     ),
     makeCheck(
       "node.version",
-      nodeMajor(nodeVersion) >= 24,
-      "Node.js runtime is version 24 or newer.",
-      "Node.js 24 or newer is required.",
+      nodeMajor(nodeVersion) >= 24 && hospitalTenderPythonRuntimeValid,
+      "Node.js is version 24 or newer and hospital tender Python 3.11+ is executable by the backend service user.",
+      "Node.js 24+ and an absolute, protected Python 3.11+ executable available to the backend service user are required.",
     ),
     makeCheck(
       "env.production",
-      environmentResult.error === null && environment.NODE_ENV === "production",
-      "Environment is explicitly production.",
-      environmentResult.error ?? "NODE_ENV must be production.",
+      environmentResult.error === null &&
+        environment.NODE_ENV === "production" &&
+        hasHospitalTenderSchedulerConfiguration(environment),
+      "Environment is explicitly production with the v0.6.0 automatic tender schedule enabled at 60 minutes and 10 customers.",
+      environmentResult.error ??
+        "NODE_ENV must be production and hospital tender auto-run must be true with the fixed 60-minute/10-customer schedule.",
     ),
     makeCheck(
       "env.authRequired",
@@ -2318,8 +2562,8 @@ export async function runProductionPreflight({
     makeCheck(
       "env.assistantSecrets",
       hasAssistantSecretConfiguration(environment),
-      "WeChat machine and assistant confirmation secrets are strong and independent.",
-      "WEIXIN_AGENT_API_TOKEN and ASSISTANT_CONFIRMATION_SECRET must contain at least 32 bytes of high-entropy data and must not be reused.",
+      "WeChat machine, assistant confirmation, settings encryption, and optional tender sync secrets are strong and independent.",
+      "WEIXIN_AGENT_API_TOKEN, ASSISTANT_CONFIRMATION_SECRET, SETTINGS_ENCRYPTION_KEY, and any HOSPITAL_TENDER_SYNC_TOKEN must be canonical strong independent values and must not be reused.",
     ),
     makeCheck(
       "env.secureCookie",

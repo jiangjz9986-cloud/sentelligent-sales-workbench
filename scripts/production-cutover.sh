@@ -779,6 +779,46 @@ verify_release_manifest() {
         "sentelligent-frontend.service",
         "sentelligent-weixin-agent.service",
       ];
+      const expectedEnvironmentNames = [
+        "NODE_ENV",
+        "HOST",
+        "PORT",
+        "DATABASE_URL",
+        "AUTH_REQUIRED",
+        "AUTH_ACCOUNT",
+        "AUTH_PASSWORD_HASH",
+        "AUTH_SESSION_SECRET",
+        "ASSISTANT_CONFIRMATION_SECRET",
+        "AUTH_COOKIE_NAME",
+        "AUTH_COOKIE_SECURE",
+        "CORS_ALLOWED_ORIGINS",
+        "JSON_BODY_LIMIT_BYTES",
+        "SOLUTION_WRITES_ENABLED",
+        "AI_ANALYSIS_MODE",
+        "MODEL_PROVIDER",
+        "MODEL_API_KEY",
+        "MODEL_BASE_URL",
+        "MODEL_NAME",
+        "MODEL_TIMEOUT_MS",
+        "SETTINGS_ENCRYPTION_KEY",
+        "HOSPITAL_TENDER_PYTHON",
+        "HOSPITAL_TENDER_AUTO_RUN",
+        "HOSPITAL_TENDER_INTERVAL_MINUTES",
+        "HOSPITAL_TENDER_BATCH_SIZE",
+        "VOICE_RECORDINGS_DIR",
+        "WEIXIN_AGENT_API_TOKEN",
+        "WEIXIN_AGENT_BACKEND_URL",
+        "WEIXIN_AGENT_OWNER",
+        "WEIXIN_AGENT_SESSION_HOME",
+        "ICOST_WEBHOOK_TOKEN",
+        "ICOST_WEBHOOK_OWNER",
+        "ICOST_WEBHOOK_RATE_LIMIT",
+        "ICOST_WEBHOOK_WINDOW_MS",
+        "INVOICE_OCR_COMMAND",
+        "INVOICE_PDF_TEXT_COMMAND",
+        "INVOICE_OCR_LANGUAGES",
+        "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
+      ];
 
       if (
         manifest.schemaVersion !== 3 ||
@@ -790,6 +830,18 @@ verify_release_manifest() {
       }
       if (JSON.stringify(manifest.rollback?.serviceUnits) !== JSON.stringify(expectedUnits)) {
         throw new Error("Candidate release service-unit contract mismatch");
+      }
+      const actualEnvironmentNames = manifest.requiredEnvNames;
+      const actualEnvironmentNameSet = new Set(
+        Array.isArray(actualEnvironmentNames) ? actualEnvironmentNames : [],
+      );
+      if (
+        !Array.isArray(actualEnvironmentNames) ||
+        actualEnvironmentNames.length !== expectedEnvironmentNames.length ||
+        actualEnvironmentNameSet.size !== expectedEnvironmentNames.length ||
+        !expectedEnvironmentNames.every((name) => actualEnvironmentNameSet.has(name))
+      ) {
+        throw new Error("Candidate release environment contract mismatch");
       }
 
       const groups = [

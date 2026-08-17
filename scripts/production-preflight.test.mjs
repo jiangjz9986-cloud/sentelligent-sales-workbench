@@ -95,6 +95,8 @@ function validEnvironment(origin, databaseUrl) {
     .digest("hex");
   const weixinAgentApiToken = Buffer.alloc(32, 4).toString("base64url");
   const assistantConfirmationSecret = Buffer.alloc(32, 5).toString("base64url");
+  const settingsEncryptionKey = Buffer.alloc(32, 6).toString("base64url");
+  const hospitalTenderSyncToken = Buffer.alloc(32, 7).toString("base64url");
   const icostWebhookToken = createHash("sha256")
     .update("fixture-icost-webhook-token")
     .digest("hex");
@@ -120,6 +122,12 @@ function validEnvironment(origin, databaseUrl) {
       "MODEL_BASE_URL=https://api.deepseek.com",
       "MODEL_NAME=deepseek-v4-flash",
       "MODEL_TIMEOUT_MS=120000",
+      `SETTINGS_ENCRYPTION_KEY=${settingsEncryptionKey}`,
+      "HOSPITAL_TENDER_PYTHON=/opt/sentelligent-tools/python3.12-fixture",
+      "HOSPITAL_TENDER_AUTO_RUN=true",
+      "HOSPITAL_TENDER_INTERVAL_MINUTES=60",
+      "HOSPITAL_TENDER_BATCH_SIZE=10",
+      `HOSPITAL_TENDER_SYNC_TOKEN=${hospitalTenderSyncToken}`,
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
       `ASSISTANT_CONFIRMATION_SECRET=${assistantConfirmationSecret}`,
       `ICOST_WEBHOOK_TOKEN=${icostWebhookToken}`,
@@ -137,6 +145,8 @@ function validEnvironment(origin, databaseUrl) {
     modelApiKey,
     weixinAgentApiToken,
     assistantConfirmationSecret,
+    settingsEncryptionKey,
+    hospitalTenderSyncToken,
     icostWebhookToken,
     icostWebhookOwner,
     invoiceOcrCommand,
@@ -613,6 +623,22 @@ async function loadPreflightModule() {
               },
             };
           }),
+          hospitalTenderPythonInspector:
+            options?.hospitalTenderPythonInspector ?? ((request) => {
+              const commandValid = request?.command ===
+                "/opt/sentelligent-tools/python3.12-fixture";
+              const userValid = ["root", "sentelligent", "sentzx"].includes(
+                request?.backendService?.user,
+              );
+              return {
+                serviceIdentityResolved: userValid,
+                regularFile: commandValid,
+                executableByServiceUser: commandValid && userValid,
+                identity: commandValid ? "python" : "unknown",
+                versionAtLeast311: commandValid,
+                serviceIdentityPreserved: commandValid && userValid,
+              };
+            }),
         });
       },
     };
@@ -778,6 +804,8 @@ describe("production preflight", () => {
         environment.invoiceOcrCommand,
         environment.invoicePdfTextCommand,
         environment.invoiceOcrLanguages,
+        environment.settingsEncryptionKey,
+        environment.hospitalTenderSyncToken,
       ]) {
         assert.ok(!serialized.includes(value), "preflight report must not expose environment values");
       }
@@ -930,6 +958,204 @@ describe("production preflight", () => {
     } finally {
       workspace.cleanup();
     }
+  });
+
+  it("fails closed for missing or malformed v0.6.0 settings and hospital tender runtime values", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      const cases = [
+        ["missing settings key", "SETTINGS_ENCRYPTION_KEY", "", "env.assistantSecrets"],
+        ["short settings key", "SETTINGS_ENCRYPTION_KEY", "short", "env.assistantSecrets"],
+        ["reused settings key", "SETTINGS_ENCRYPTION_KEY", environment.sessionValue, "env.assistantSecrets"],
+        ["weak optional sync token", "HOSPITAL_TENDER_SYNC_TOKEN", "short", "env.assistantSecrets"],
+        ["sync token reused as settings key", "HOSPITAL_TENDER_SYNC_TOKEN", environment.settingsEncryptionKey, "env.assistantSecrets"],
+        ["relative Python path", "HOSPITAL_TENDER_PYTHON", "python3", "node.version"],
+        ["unverified Python path", "HOSPITAL_TENDER_PYTHON", "/opt/sentelligent-tools/python3.10", "node.version"],
+        ["disabled automatic scheduler", "HOSPITAL_TENDER_AUTO_RUN", "false", "env.production"],
+        ["wrong scheduler interval", "HOSPITAL_TENDER_INTERVAL_MINUTES", "61", "env.production"],
+        ["wrong scheduler batch size", "HOSPITAL_TENDER_BATCH_SIZE", "11", "env.production"],
+      ];
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      for (const [name, variable, value, failedCheck] of cases) {
+        const source = environment.source.replace(
+          new RegExp(`^${variable}=.*$`, "m"),
+          `${variable}=${value}`,
+        );
+        const envFile = workspace.write(`unsafe-${variable}-${name}.env`, source);
+        const servicePlanPath = workspace.write(
+          `service-plan-${variable}-${name}.json`,
+          JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+        );
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        assert.equal(
+          report.checks.find((check) => check.id === failedCheck)?.status,
+          "failed",
+          name,
+        );
+        assert.ok(
+          !JSON.stringify(report).includes(environment.settingsEncryptionKey),
+          `${name} must not expose the settings key`,
+        );
+      }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("verifies Python 3.11+ as the backend service user", async () => {
+    const { inspectHospitalTenderPython } = await loadPreflightModule();
+    assert.equal(typeof inspectHospitalTenderPython, "function");
+    const request = {
+      backendService: {
+        user: "sentelligent",
+        group: "sentelligent",
+        supplementaryGroups: [],
+        dynamicUser: false,
+      },
+      command: "/opt/sentelligent-tools/python3.12",
+    };
+    const inspectSecureExecutable = () => ({
+      regularFile: true,
+      secureOwnership: true,
+      canonicalPath: true,
+      secureAncestors: true,
+      resolvedPath: request.command,
+    });
+    const runAsServiceUser = ({ command, args }) => {
+      if (command === "/usr/bin/test" && args[0] === "-x") {
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      assert.deepEqual(args.slice(0, 3), ["-I", "-S", "-c"]);
+      return {
+        status: 0,
+        stdout: "3.12.13|1001|1001|1001|1001|0000000000000000\n",
+        stderr: "",
+      };
+    };
+    const accepted = inspectHospitalTenderPython(request, {
+      inspectSecureExecutable,
+      runAsServiceUser,
+    });
+    assert.equal(accepted.executableByServiceUser, true);
+    assert.equal(accepted.identity, "python");
+    assert.equal(accepted.versionAtLeast311, true);
+
+    const rejected = inspectHospitalTenderPython(request, {
+      inspectSecureExecutable,
+      runAsServiceUser({ command, args }) {
+        if (command === "/usr/bin/test" && args[0] === "-x") {
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        return {
+          status: 0,
+          stdout: "3.10.16|1001|1001|1001|1001|0000000000000000\n",
+          stderr: "",
+        };
+      },
+    });
+    assert.equal(rejected.versionAtLeast311, false);
+
+    const spoofedVersionFlag = inspectHospitalTenderPython(request, {
+      inspectSecureExecutable,
+      runAsServiceUser({ command, args }) {
+        if (command === "/usr/bin/test" && args[0] === "-x") {
+          return { status: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "--version") {
+          return { status: 0, stdout: "Python 3.12.13\n", stderr: "" };
+        }
+        return { status: 1, stdout: "", stderr: "" };
+      },
+    });
+    assert.equal(spoofedVersionFlag.versionAtLeast311, false);
+
+    for (const privilegedOutput of [
+      "3.12.13|1001|0|1001|1001|0000000000000000\n",
+      "3.12.13|1001|1001|1001|1001|0000000000000400\n",
+    ]) {
+      const privileged = inspectHospitalTenderPython(request, {
+        inspectSecureExecutable,
+        runAsServiceUser({ command, args }) {
+          if (command === "/usr/bin/test" && args[0] === "-x") {
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          return { status: 0, stdout: privilegedOutput, stderr: "" };
+        },
+      });
+      assert.equal(privileged.serviceIdentityPreserved, false);
+      assert.equal(privileged.versionAtLeast311, false);
+    }
+  });
+
+  it("rejects symlinked or writable-ancestor Python executable paths", async () => {
+    const { inspectCanonicalSecureExecutable } = await loadPreflightModule();
+    assert.equal(typeof inspectCanonicalSecureExecutable, "function");
+    const executable = "/opt/sentelligent-tools/python3.12";
+    const metadata = ({ file = false, directory = false, symbolicLink = false, mode = 0o755 } = {}) => ({
+      uid: 0,
+      mode,
+      isFile: () => file,
+      isDirectory: () => directory,
+      isSymbolicLink: () => symbolicLink,
+    });
+    const lstat = (path) => path === executable
+      ? metadata({ file: true })
+      : metadata({ directory: true });
+    const dependencies = {
+      lstat,
+      stat: () => metadata({ file: true }),
+      realpath: (path) => path,
+    };
+    const accepted = inspectCanonicalSecureExecutable(executable, dependencies);
+    assert.equal(accepted.canonicalPath, true);
+    assert.equal(accepted.secureAncestors, true);
+
+    const symlinked = inspectCanonicalSecureExecutable(executable, {
+      ...dependencies,
+      lstat: (path) => path === executable
+        ? metadata({ symbolicLink: true })
+        : metadata({ directory: true }),
+    });
+    assert.equal(symlinked.canonicalPath, false);
+
+    const redirected = inspectCanonicalSecureExecutable(executable, {
+      ...dependencies,
+      realpath: (path) => path === executable ? "/usr/bin/python3.12" : path,
+    });
+    assert.equal(redirected.canonicalPath, false);
+
+    const writableAncestor = inspectCanonicalSecureExecutable(executable, {
+      ...dependencies,
+      lstat: (path) => path === executable
+        ? metadata({ file: true })
+        : metadata({ directory: true, mode: path === "/opt/sentelligent-tools" ? 0o777 : 0o755 }),
+    });
+    assert.equal(writableAncestor.secureAncestors, false);
+
+    const setuidExecutable = inspectCanonicalSecureExecutable(executable, {
+      ...dependencies,
+      lstat: (path) => path === executable
+        ? metadata({ file: true, mode: 0o4755 })
+        : metadata({ directory: true }),
+    });
+    assert.equal(setuidExecutable.secureOwnership, false);
   });
 
   it("rejects legacy boolean-only invoice tool evidence for the backend service user", async () => {
@@ -1467,12 +1693,19 @@ describe("production preflight", () => {
     }
   });
 
-  it("allows the pre-assistant schema-3 environment contract only for the current release", async () => {
+  it("allows the v0.5.7 schema-3 environment contract only for the current release", async () => {
     const fixture = makeReleaseFixture();
     try {
       const legacyManifest = structuredClone(fixture.manifest);
+      const v060EnvironmentNames = new Set([
+        "SETTINGS_ENCRYPTION_KEY",
+        "HOSPITAL_TENDER_PYTHON",
+        "HOSPITAL_TENDER_AUTO_RUN",
+        "HOSPITAL_TENDER_INTERVAL_MINUTES",
+        "HOSPITAL_TENDER_BATCH_SIZE",
+      ]);
       legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
-        (name) => name !== "ASSISTANT_CONFIRMATION_SECRET",
+        (name) => !v060EnvironmentNames.has(name),
       );
       writeFileSync(
         fixture.filePath("release-manifest.json"),
