@@ -4570,6 +4570,10 @@ textarea:focus {
 }
 
 @media (max-width: 760px) {
+  .hospital-tender-page .page-heading > div:first-child > .muted-copy {
+    display: none;
+  }
+
   .weixin-binding-grid {
     grid-template-columns: 1fr;
   }

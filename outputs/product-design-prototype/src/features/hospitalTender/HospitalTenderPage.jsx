@@ -407,16 +407,17 @@ export function HospitalTenderPage({
           <h1>医院招标监测</h1>
           <p className="muted-copy">聚合公开公告，辅助销售识别医院采购机会。</p>
         </div>
-        <div className="settings-button-row" style={{ justifyContent: "flex-end" }}>
-          <button className="primary-button" type="button" onClick={() => { void runInternalMonitor(); }} disabled={effectiveLoading || runState.busy || backendStatus !== "connected"}>
-            {runState.busy ? <LoaderCircle className="state-spinner" size={16} /> : <BellRing size={16} />}
-            {runState.busy ? "轮巡中" : "立即检测下一批"}
-          </button>
-          <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading || runState.busy}>
-            {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
-            {effectiveLoading ? "正在刷新" : "刷新数据"}
-          </button>
-        </div>
+      </div>
+
+      <div className="settings-button-row hospital-tender-actions" style={{ justifyContent: "flex-end" }}>
+        <button className="primary-button" type="button" onClick={() => { void runInternalMonitor(); }} disabled={effectiveLoading || runState.busy || backendStatus !== "connected"}>
+          {runState.busy ? <LoaderCircle className="state-spinner" size={16} /> : <BellRing size={16} />}
+          {runState.busy ? "轮巡中" : "立即检测下一批"}
+        </button>
+        <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading || runState.busy}>
+          {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
+          {effectiveLoading ? "正在刷新" : "刷新数据"}
+        </button>
       </div>
 
       {effectiveError ? <div className="expense-page-alert" role="alert"><CircleAlert size={17} /><span>{effectiveError}</span><button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }}>重试</button></div> : null}
