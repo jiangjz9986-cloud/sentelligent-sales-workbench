@@ -10,6 +10,16 @@
 - 出差报销支出写入森特差旅费用和支付记录；biubiu 通过固定 loopback 地址与独立 bridge credential 写轻氧，远端未确认时 fail closed。
 - Token 验证只有在写入链路配置完整时返回 `bookkeepingReady=true`；生产 preflight 扩展为 `27/27` 并校验桥接凭据隔离。
 
+### 医院招标真实来源采集
+
+- 加固东营、济宁及医院公开页面采集器，兼容真实来源的响应包裹、日期格式和单条坏行；单源失败不会丢弃同批可用公告。
+- 保留每小时/每批 10 客户的持久化轮巡、稳定游标、来源快照复用、去重和 PushPlus 聚合通知语义；本机受限 DNS 只作为失败诊断，不放宽 SSRF 防护。
+
+### 小小统一助手运行时
+
+- 将小小能力目录、项目分析和现有业务工具接入统一只读/确认边界；执行真源仍是 registry、policy 和 router。
+- 微信机器必须显式绑定业务 owner，缺失或不匹配时 fail-closed；机器客户读取和周报草稿按 owner 隔离，保留 `sales-decision.preview` 的 `partial` 状态。
+
 ## [0.6.1] - 2026-08-17
 
 ### iOS 快捷指令 Token 验证
