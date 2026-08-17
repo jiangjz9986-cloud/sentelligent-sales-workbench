@@ -191,6 +191,11 @@ const routeCases = [
     "/settings/weixin",
   ],
   [
+    "/settings/shortcuts",
+    expectedRoute({ page: "settings/shortcuts", active: "shortcut" }),
+    "/settings/shortcuts",
+  ],
+  [
     "/settings/config",
     expectedRoute({ page: "settings/config", active: "settings" }),
     "/settings/config",

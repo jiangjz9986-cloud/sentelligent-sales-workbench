@@ -34,6 +34,10 @@ describe("backend model configuration", () => {
         "ICOST_WEBHOOK_OWNER=jiangjz",
         "ICOST_WEBHOOK_RATE_LIMIT=18",
         "ICOST_WEBHOOK_WINDOW_MS=90000",
+        "SHORTCUT_WEBHOOK_TOKEN=shortcut-token-from-env-file",
+        "SHORTCUT_WEBHOOK_OWNER=jiangjz",
+        "SHORTCUT_WEBHOOK_RATE_LIMIT=19",
+        "SHORTCUT_WEBHOOK_WINDOW_MS=91000",
         "INVOICE_OCR_COMMAND=C:/Tools/tesseract.exe",
         "INVOICE_PDF_TEXT_COMMAND=C:/Tools/pdftotext.exe",
         "INVOICE_OCR_LANGUAGES=chi_sim+eng",
@@ -69,6 +73,10 @@ describe("backend model configuration", () => {
       assert.equal(config.icostWebhookOwner, "jiangjz");
       assert.equal(config.icostWebhookRateLimit, 18);
       assert.equal(config.icostWebhookWindowMs, 90_000);
+      assert.equal(config.shortcutWebhookToken, "shortcut-token-from-env-file");
+      assert.equal(config.shortcutWebhookOwner, "jiangjz");
+      assert.equal(config.shortcutWebhookRateLimit, 19);
+      assert.equal(config.shortcutWebhookWindowMs, 91_000);
       assert.equal(config.invoiceOcrCommand, "C:/Tools/tesseract.exe");
       assert.equal(config.invoicePdfTextCommand, "C:/Tools/pdftotext.exe");
       assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
@@ -109,6 +117,10 @@ describe("backend model configuration", () => {
     assert.equal(config.icostWebhookOwner, "jiangjz");
     assert.equal(config.icostWebhookRateLimit, 30);
     assert.equal(config.icostWebhookWindowMs, 300_000);
+    assert.equal(config.shortcutWebhookToken, "");
+    assert.equal(config.shortcutWebhookOwner, "jiangjz");
+    assert.equal(config.shortcutWebhookRateLimit, 60);
+    assert.equal(config.shortcutWebhookWindowMs, 300_000);
     assert.equal(config.invoiceOcrCommand, "");
     assert.equal(config.invoicePdfTextCommand, "");
     assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
@@ -185,6 +197,10 @@ describe("backend model configuration", () => {
     );
     assert.throws(() => loadConfig({ ...valid, ASSISTANT_CONFIRMATION_SECRET: validSessionSecret }), /independent|ASSISTANT_CONFIRMATION_SECRET/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_AGENT_API_TOKEN: validSessionSecret }), /independent|WEIXIN_AGENT_API_TOKEN/);
+    assert.throws(
+      () => loadConfig({ ...valid, SHORTCUT_WEBHOOK_TOKEN: Buffer.alloc(32, 4).toString("base64url") }),
+      /SHORTCUT_WEBHOOK_TOKEN.*not allowed in production/,
+    );
     const unbound = loadConfig({ ...valid, WEIXIN_ALLOWED_SENDER_IDS: "" });
     assert.deepEqual(unbound.weixinAllowedSenderIds, []);
     assert.throws(
@@ -224,6 +240,8 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, AMAP_TIMEOUT_MS: value }), /AMAP_TIMEOUT_MS/);
       assert.throws(() => loadConfig({ ...base, ICOST_WEBHOOK_RATE_LIMIT: value }), /ICOST_WEBHOOK_RATE_LIMIT/);
       assert.throws(() => loadConfig({ ...base, ICOST_WEBHOOK_WINDOW_MS: value }), /ICOST_WEBHOOK_WINDOW_MS/);
+      assert.throws(() => loadConfig({ ...base, SHORTCUT_WEBHOOK_RATE_LIMIT: value }), /SHORTCUT_WEBHOOK_RATE_LIMIT/);
+      assert.throws(() => loadConfig({ ...base, SHORTCUT_WEBHOOK_WINDOW_MS: value }), /SHORTCUT_WEBHOOK_WINDOW_MS/);
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);

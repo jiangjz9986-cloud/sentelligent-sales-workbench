@@ -51,6 +51,7 @@ import {
   WeixinBindingPage,
   WeeklyPage,
 } from "./features/salesWorkbench/pages.jsx";
+import { ShortcutTokenPage } from "./features/salesWorkbench/ShortcutTokenPage.jsx";
 import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage.jsx";
 import { TravelExpensePage } from "./features/travelExpense/TravelExpensePage.jsx";
 import { HospitalTenderPage } from "./features/hospitalTender/HospitalTenderPage.jsx";
@@ -1219,6 +1220,13 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               <WeixinBindingPage
                 apiClient={apiClient}
                 backendStatus={backendStatus}
+              />
+            )}
+            {active === "shortcut" && (
+              <ShortcutTokenPage
+                apiClient={apiClient}
+                backendStatus={backendStatus}
+                account={authSession.account}
               />
             )}
             {active === "hospital-tenders" && (

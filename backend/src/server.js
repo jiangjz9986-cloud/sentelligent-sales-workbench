@@ -80,6 +80,13 @@ import {
   isIcostWebhookRouteAllowed,
   validateIcostTextPayload,
 } from "./integrations/icostWebhook.js";
+import {
+  authenticateShortcutWebhook,
+  SHORTCUT_BOOKKEEPING_CATALOG_ROUTE,
+  SHORTCUT_BOOKKEEPING_VERIFY_ROUTE,
+  shortcutCatalogResponse,
+} from "./integrations/shortcutBookkeeping.js";
+import { createShortcutWebhookTokenRepository } from "./integrations/shortcutWebhookTokenRepository.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import {
@@ -217,6 +224,17 @@ function icostResponseItem(item, replayed) {
     paymentId: item.paymentId,
     expenseReferenceCode: item.expenseReferenceCode,
     replayed,
+  };
+}
+
+function shortcutVerificationResponse({ tokenValid, error = null } = {}) {
+  return {
+    status: "error",
+    integration: "shortcut",
+    tokenValid: Boolean(tokenValid),
+    bookkeepingReady: false,
+    protocolVersion: 1,
+    ...(error ? { error } : {}),
   };
 }
 
@@ -2384,10 +2402,20 @@ export function createServer(options = {}) {
       ? { idFactory: options.travelExpenseIngestionIdFactory }
       : {}),
   });
+  const shortcutWebhookTokenRepository = createShortcutWebhookTokenRepository(db, {
+    ...(options.shortcutWebhookTokenIdFactory ? { idFactory: options.shortcutWebhookTokenIdFactory } : {}),
+    ...(options.shortcutWebhookTokenFactory ? { tokenFactory: options.shortcutWebhookTokenFactory } : {}),
+    ...(options.shortcutWebhookTokenClock ? { clock: options.shortcutWebhookTokenClock } : {}),
+  });
   const icostRateLimiter = options.icostRateLimiter ?? createFixedWindowLimiter({
     limit: config.icostWebhookRateLimit,
     windowMs: config.icostWebhookWindowMs,
     clock: options.icostRateLimitClock ?? Date.now,
+  });
+  const shortcutVerifyRateLimiter = options.shortcutVerifyRateLimiter ?? createFixedWindowLimiter({
+    limit: config.shortcutWebhookRateLimit,
+    windowMs: config.shortcutWebhookWindowMs,
+    clock: options.shortcutVerifyRateLimitClock ?? Date.now,
   });
   const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
   const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => (
@@ -2649,6 +2677,95 @@ export function createServer(options = {}) {
           "Set-Cookie": buildSessionCookie(config, session.cookieValue),
         });
         return;
+      }
+
+      // The catalog contains public labels only. It is deliberately available
+      // before cookie authentication so Shortcut clients can compare the
+      // canonical choices without receiving account data or credentials.
+      if (request.method === "GET" && url.pathname === SHORTCUT_BOOKKEEPING_CATALOG_ROUTE) {
+        sendJson(response, 200, shortcutCatalogResponse(), { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (url.pathname === SHORTCUT_BOOKKEEPING_VERIFY_ROUTE) {
+        if (request.method !== "GET") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for Shortcut Token verification"),
+            responseOptions(response, { Allow: "GET", "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
+        const rateLimit = shortcutVerifyRateLimiter.consume(`verify\u0000${remoteAddress}`);
+        if (!rateLimit.allowed) {
+          sendHttpError(
+            response,
+            new HttpError(429, "RATE_LIMITED", "Too many Shortcut Token verification attempts"),
+            responseOptions(response, {
+              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
+              "Cache-Control": "no-store",
+            }),
+          );
+          return;
+        }
+
+        let integrationIdentity;
+        try {
+          integrationIdentity = authenticateShortcutWebhook(
+            request.headers,
+            config,
+            (token) => shortcutWebhookTokenRepository.resolve(token),
+          );
+        } catch {
+          sendHttpError(
+            response,
+            new HttpError(
+              503,
+              "SHORTCUT_VERIFICATION_UNAVAILABLE",
+              "快捷指令 Token 验证暂时不可用，请稍后重试",
+            ),
+            responseOptions(response, { "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        if (!integrationIdentity) {
+          const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
+          const code = supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED";
+          const message = supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token";
+          if (request.headers["x-shortcut-verification-mode"] === "explain") {
+            sendJson(response, 200, shortcutVerificationResponse({
+              tokenValid: false,
+              error: { code, message },
+            }), { "Cache-Control": "no-store" });
+            return;
+          }
+          sendHttpError(
+            response,
+            new HttpError(401, code, message),
+            responseOptions(response, { "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+
+        // This release verifies identity only. Keep status non-ok so the V4
+        // Shortcut stops before its POST action, which is intentionally not
+        // registered until cross-system bookkeeping routing is safe.
+        sendJson(response, 200, shortcutVerificationResponse({
+          tokenValid: true,
+          error: {
+            code: "SHORTCUT_BOOKKEEPING_NOT_READY",
+            message: "Token 验证成功，但记账写入功能尚未开放",
+          },
+        }), { "Cache-Control": "no-store" });
+        return;
+      }
+
+      // Keep the write boundary explicitly absent in this release. Resolve it
+      // before generic machine authentication so an unregistered route remains
+      // a stable 404 even when a caller sends an old integration credential.
+      if (url.pathname === "/api/integrations/shortcut/bookkeeping") {
+        notFound();
       }
 
       if (url.pathname === ICOST_EXPENSE_ROUTE) {
@@ -2943,6 +3060,49 @@ export function createServer(options = {}) {
         assertMachineRouteAllowed(request.method, url.pathname, requestIdentity.integration);
       }
       request.authContext = requestIdentity;
+
+      const shortcutManagementRoute = "/api/integrations/shortcut/tokens";
+      if (
+        (request.method === "GET" && url.pathname === shortcutManagementRoute)
+        || (request.method === "POST" && url.pathname === shortcutManagementRoute)
+        || (request.method === "DELETE"
+          && parts[0] === "api"
+          && parts[1] === "integrations"
+          && parts[2] === "shortcut"
+          && parts[3] === "tokens"
+          && parts[4]
+          && parts.length === 5)
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        if (request.method === "GET") {
+          sendJson(response, 200, {
+            items: shortcutWebhookTokenRepository.list({ account: request.authContext.account }),
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (request.method === "POST") {
+          const body = plainObject(await readJson(request));
+          allowedPayloadKeys(body, new Set(["label"]));
+          const label = body.label === undefined ? "iOS 快捷指令" : body.label;
+          if (typeof label !== "string") validationFailure("label", "string");
+          if (!label.trim() || label.trim().length > 100) {
+            validationFailure("label", label.trim() ? "maxLength" : "required");
+          }
+          const created = shortcutWebhookTokenRepository.create({
+            account: request.authContext.account,
+            label,
+          });
+          sendJson(response, 201, { item: created }, { "Cache-Control": "no-store" });
+          return;
+        }
+        const revoked = shortcutWebhookTokenRepository.revoke({
+          account: request.authContext.account,
+          id: parts[4],
+        });
+        if (!revoked) return notFound();
+        sendJson(response, 200, { item: revoked }, { "Cache-Control": "no-store" });
+        return;
+      }
 
       if (request.method === "POST" && url.pathname === "/api/hospital-tenders/run") {
         if (requestIdentity.kind !== "user") return unauthorized(response);

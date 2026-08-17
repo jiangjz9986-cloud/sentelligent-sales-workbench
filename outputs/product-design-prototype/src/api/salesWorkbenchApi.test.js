@@ -2955,4 +2955,80 @@ describe("sales workbench API client", () => {
     assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
     assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
+
+  it("manages Shortcut tokens with cookie credentials and never treats the list as a secret source", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (options.method === "POST") {
+          return jsonResponse({
+            item: {
+              id: "token-1",
+              label: "iPhone 截图记账",
+              account: "jiangjz",
+              token: "test-token",
+              tokenPrefix: "AAAAAAAA",
+              createdAt: "2026-08-16T12:00:00.000Z",
+              lastUsedAt: null,
+              revokedAt: null,
+            },
+          }, 201);
+        }
+        if (options.method === "DELETE") {
+          return jsonResponse({ item: { id: "token-1", revokedAt: "2026-08-16T12:01:00.000Z" } });
+        }
+        return jsonResponse({
+          items: [{
+            id: "token-1",
+            label: "iPhone 截图记账",
+            account: "jiangjz",
+            tokenPrefix: "AAAAAAAA",
+            createdAt: "2026-08-16T12:00:00.000Z",
+            lastUsedAt: null,
+            revokedAt: null,
+          }],
+        });
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const created = await api.createShortcutToken({ label: "iPhone 截图记账" });
+    const listed = await api.listShortcutTokens();
+    const revoked = await api.revokeShortcutToken("token-1");
+
+    assert.equal(created.token, "test-token");
+    assert.equal(listed[0].token, undefined);
+    assert.equal(revoked.revokedAt, "2026-08-16T12:01:00.000Z");
+    assert.deepEqual(calls.map(({ url, options }) => ({
+      url,
+      method: options.method ?? "GET",
+      csrf: headerValue(options, "X-CSRF-Token"),
+      credentials: options.credentials,
+      body: options.body ? JSON.parse(options.body) : undefined,
+    })), [
+      {
+        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens",
+        method: "POST",
+        csrf: "fixture-csrf-token",
+        credentials: "include",
+        body: { label: "iPhone 截图记账" },
+      },
+      {
+        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens",
+        method: "GET",
+        csrf: undefined,
+        credentials: "include",
+        body: undefined,
+      },
+      {
+        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens/token-1",
+        method: "DELETE",
+        csrf: "fixture-csrf-token",
+        credentials: "include",
+        body: undefined,
+      },
+    ]);
+  });
 });

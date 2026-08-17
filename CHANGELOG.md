@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-17
+
+### iOS 快捷指令 Token 验证
+
+- 新增账号级快捷指令 Token 管理页：Token 由后端生成，只保存 SHA-256 哈希，完整值仅在创建成功时显示一次；列表只显示前缀，支持撤销。
+- 新增公开账本目录和 `GET /api/integrations/shortcut/verify` 验证接口，验证请求按 IP 限流并使用 `Cache-Control: no-store`；Token 会映射到所属账号，不接受客户端传入账号。
+- 当前版本只发布身份验证和 fail-closed 提示；跨森特智行/轻氧的记账写入路由尚未开放，验证成功不会创建账目、差旅费用或支付记录，也不会继续快捷指令的截图上传步骤。
+- 迁移编号顺延为 `0017`，保留 v0.6.0 的医院招标、系统配置和安全设置迁移不变。
+
 ## [0.6.0] - 2026-08-17
 
 ### 系统配置与安全密钥
@@ -414,6 +423,7 @@
 - 完成第一阶段安全、数据、备份和认证设计。
 
 [Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.7...HEAD
+[0.6.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.7...HEAD
 [0.5.7]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.5...v0.5.6
