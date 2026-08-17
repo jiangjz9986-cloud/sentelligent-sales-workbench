@@ -67,7 +67,7 @@ async function withDb(testBody) {
 
 function setup(db, options = {}) {
   const baseTenderRepository = createHospitalTenderRepository(db, {
-    clock: () => new Date("2026-08-17T00:00:00.000Z"),
+    clock: options.tenderClock ?? (() => new Date("2026-08-17T00:00:00.000Z")),
   });
   const tenderRepository = options.tenderRepository?.(baseTenderRepository) ?? baseTenderRepository;
   const schedulerRepository = createHospitalTenderSchedulerRepository(db, {
@@ -131,6 +131,125 @@ describe("hospital tender scheduler", () => {
     });
   });
 
+  it("accepts a usable partial-source snapshot and preserves degraded health", async () => {
+    await withDb(async (db) => {
+      const payload = snapshot();
+      payload.sources = [
+        {
+          sourceId: "jining-ggzy",
+          sourceName: "济宁市公共资源交易公共服务平台",
+          status: "healthy",
+          lastRunAt: "2026-08-17T00:00:00.000Z",
+          lastSuccessAt: "2026-08-17T00:00:00.000Z",
+          lastItemCount: 1,
+          lastUpsertedCount: 1,
+          lastRejectedCount: 0,
+          lastError: null,
+        },
+        {
+          sourceId: "hospital-jining-first",
+          sourceName: "济宁市第一人民医院",
+          status: "error",
+          lastRunAt: "2026-08-17T00:00:00.000Z",
+          lastSuccessAt: null,
+          lastItemCount: 0,
+          lastUpsertedCount: 0,
+          lastRejectedCount: 0,
+          lastError: "source failure",
+        },
+      ];
+      payload.runs = [{
+        id: "run-partial-1",
+        sourceId: "aggregate",
+        startedAt: "2026-08-17T00:00:00.000Z",
+        finishedAt: "2026-08-17T00:00:01.000Z",
+        status: "partial",
+        fetchedCount: 1,
+        upsertedCount: 1,
+        rejectedCount: 1,
+        errorText: "source failure",
+      }];
+      const { scheduler, schedulerRepository, tenderRepository } = setup(db, {
+        customers: customers(1),
+        runner: { run: async () => ({ payload, source: "test" }) },
+      });
+
+      const result = await scheduler.runNext({ force: true });
+
+      assert.equal(result.status, "partial");
+      assert.equal(schedulerRepository.getState().cursorCustomerId, null);
+      assert.equal(schedulerRepository.getState().lastStatus, "partial");
+      assert.equal(schedulerRepository.getState().lastError, "部分公开来源失败");
+      assert.equal(tenderRepository.listSources().find((item) => item.sourceId === "hospital-jining-first").status, "error");
+      assert.equal(
+        db.prepare("SELECT status FROM hospital_tender_runs ORDER BY started_at DESC LIMIT 1").get().status,
+        "partial",
+      );
+    });
+  });
+
+  it("rechecks failed sources next cycle and does not duplicate a prior notification", async () => {
+    await withDb(async (db) => {
+      let cycle = 0;
+      let tenderNow = "2026-08-17T00:01:00.000Z";
+      const deliveries = [];
+      const runner = {
+        run: async () => {
+          cycle += 1;
+          const payload = snapshot();
+          payload.generatedAt = cycle === 1
+            ? "2026-08-17T00:00:00.000Z"
+            : "2026-08-17T01:00:00.000Z";
+          payload.sources = [{
+            sourceId: "hospital-jining-first",
+            sourceName: "济宁市第一人民医院",
+            status: cycle === 1 ? "error" : "healthy",
+            lastRunAt: payload.generatedAt,
+            lastSuccessAt: cycle === 1 ? null : payload.generatedAt,
+            lastItemCount: cycle === 1 ? 0 : 1,
+            lastUpsertedCount: cycle === 1 ? 0 : 1,
+            lastRejectedCount: 0,
+            lastError: cycle === 1 ? "source failure" : null,
+          }];
+          payload.runs = [{
+            id: `run-cycle-${cycle}`,
+            sourceId: "aggregate",
+            startedAt: payload.generatedAt,
+            finishedAt: payload.generatedAt,
+            status: cycle === 1 ? "partial" : "success",
+            fetchedCount: 1,
+            upsertedCount: 1,
+            rejectedCount: 0,
+            errorText: cycle === 1 ? "source failure" : null,
+          }];
+          return { payload, source: "test" };
+        },
+      };
+      const { scheduler, schedulerRepository, tenderRepository } = setup(db, {
+        customers: customers(1),
+        runner,
+        tenderClock: () => new Date(tenderNow),
+        notifier: async ({ notices }) => {
+          deliveries.push(notices.map((notice) => notice.identityKey));
+          return notices.length;
+        },
+      });
+
+      const first = await scheduler.runNext({ force: true });
+      assert.equal(first.status, "partial");
+      assert.equal(schedulerRepository.getState().lastStatus, "partial");
+      assert.equal(deliveries.length, 1);
+
+      tenderNow = "2026-08-17T01:01:00.000Z";
+      const second = await scheduler.runNext({ force: true });
+      assert.equal(second.status, "success");
+      assert.equal(schedulerRepository.getState().lastStatus, "success");
+      assert.equal(tenderRepository.listSources()[0].status, "healthy");
+      assert.deepEqual(schedulerRepository.listRuns().map((run) => run.status), ["success", "partial"]);
+      assert.equal(deliveries.length, 1);
+    });
+  });
+
   it("merges customer matches across batches instead of clearing prior evidence", async () => {
     await withDb(async (db) => {
       const list = customers(12);
@@ -164,7 +283,7 @@ describe("hospital tender scheduler", () => {
 
   it("retains the current batch when any notice is rejected", async () => {
     await withDb(async (db) => {
-      const { scheduler, schedulerRepository } = setup(db, {
+      const { scheduler, schedulerRepository, tenderRepository } = setup(db, {
         tenderRepository: (base) => ({
           ...base,
           upsertNotice() {
@@ -178,6 +297,47 @@ describe("hospital tender scheduler", () => {
       assert.equal(schedulerRepository.getState().cursorCustomerId, null);
       assert.equal(schedulerRepository.getState().cycleProcessedCount, 0);
       assert.ok(schedulerRepository.getState().snapshotId);
+      assert.equal(tenderRepository.listNotices({ limit: 10, offset: 0 }).length, 0);
+    });
+  });
+
+  it("rolls back accepted notices with a rejected notice and notifies once after recovery", async () => {
+    await withDb(async (db) => {
+      const payload = snapshot();
+      payload.notices.push({
+        ...payload.notices[0],
+        identityKey: "source-a:item-2",
+        title: "胜利油田中心医院 第二个信息化项目",
+        url: "https://example.com/b",
+        sourceItemId: "item-2",
+        contentSha256: "b".repeat(64),
+      });
+      let failSecond = true;
+      const deliveries = [];
+      const { scheduler, tenderRepository } = setup(db, {
+        customers: customers(1),
+        runner: { run: async () => ({ payload, source: "test" }) },
+        tenderRepository: (base) => ({
+          ...base,
+          upsertNotice(notice, ...args) {
+            if (notice.identityKey === "source-a:item-2" && failSecond) {
+              failSecond = false;
+              throw new Error("synthetic transient persistence failure");
+            }
+            return base.upsertNotice(notice, ...args);
+          },
+        }),
+        notifier: async ({ notices }) => {
+          deliveries.push(notices.map((notice) => notice.identityKey).sort());
+          return notices.length;
+        },
+      });
+
+      assert.equal((await scheduler.runNext({ force: true })).status, "partial");
+      assert.equal(tenderRepository.listNotices({ limit: 10, offset: 0 }).length, 0);
+      assert.equal((await scheduler.runNext({ force: true })).status, "success");
+      assert.deepEqual(deliveries, [["source-a:item-1", "source-a:item-2"]]);
+      assert.equal(tenderRepository.listNotices({ limit: 10, offset: 0 }).length, 2);
     });
   });
 
@@ -191,6 +351,18 @@ describe("hospital tender scheduler", () => {
       assert.equal(schedulerRepository.getState().cursorCustomerId, null);
       assert.equal(schedulerRepository.getState().lastError, "招标通知发送失败");
       assert.equal(schedulerRepository.getState().lastHighRelevanceCount, 1);
+    });
+  });
+
+  it("does not advance the cursor when a notifier reports an incomplete batch", async () => {
+    await withDb(async (db) => {
+      const { scheduler, schedulerRepository } = setup(db, {
+        notifier: async () => 0,
+      });
+      const result = await scheduler.runNext({ force: true });
+      assert.equal(result.status, "partial");
+      assert.equal(schedulerRepository.getState().cursorCustomerId, null);
+      assert.equal(schedulerRepository.getState().lastError, "招标通知发送失败");
     });
   });
 

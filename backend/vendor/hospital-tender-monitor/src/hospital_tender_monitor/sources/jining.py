@@ -34,6 +34,7 @@ class JiningAdapter(SourceAdapter):
         if not tenant:
             return SourceResult(success=False, error="invalid source response")
         notices: list[TenderNotice] = []
+        seen: set[str] = set()
         try:
             for category_value in categories:
                 category = str(category_value)
@@ -48,7 +49,8 @@ class JiningAdapter(SourceAdapter):
                     raise ValueError("records")
                 for record in records:
                     notice = self._notice(record, CATEGORY_TYPES.get(category, NoticeType.UNKNOWN))
-                    if notice is not None:
+                    if notice is not None and notice.identity_key not in seen:
+                        seen.add(notice.identity_key)
                         notices.append(notice)
         except (HttpError, ValueError, json.JSONDecodeError, TypeError):
             return SourceResult(success=False, error="invalid source response")

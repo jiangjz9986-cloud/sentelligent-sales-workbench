@@ -457,7 +457,11 @@ class Repository:
         try:
             conn = self._open_for("database source health write failed")
             conn.execute("BEGIN")
-            conn.execute("INSERT INTO sources(source_id,updated_at) VALUES(?,?) ON CONFLICT(source_id) DO UPDATE SET updated_at=excluded.updated_at", (health.source_id, stamp))
+            source_name = str(health.source_name or health.source_id).strip()[:200]
+            city = str(health.city or "").strip()[:100]
+            if not source_name:
+                raise ValueError("invalid source health")
+            conn.execute("INSERT INTO sources(source_id,source_name,city,updated_at) VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_name=excluded.source_name, city=excluded.city, updated_at=excluded.updated_at", (health.source_id, source_name, city, stamp))
             conn.execute("INSERT INTO source_health_history(source_id,checked_at,success,item_count,error) VALUES(?,?,?,?,?)", (health.source_id, stamp, int(health.success), health.item_count, _safe_error(health.error, "source failure")))
             conn.commit()
         except sqlite3.Error:
@@ -607,12 +611,15 @@ class Repository:
 
             runs = []
             for row in conn.execute("SELECT * FROM runs ORDER BY finished_at DESC, id DESC LIMIT 20").fetchall():
+                status = "success" if bool(row["success"]) else (
+                    "partial" if int(row["successful_source_count"]) > 0 else "failed"
+                )
                 runs.append({
                     "id": f"run-{row['id']}",
                     "sourceId": "aggregate",
                     "startedAt": row["started_at"],
                     "finishedAt": row["finished_at"],
-                    "status": "success" if bool(row["success"]) else "failed",
+                    "status": status,
                     "fetchedCount": int(row["notice_count"]),
                     "upsertedCount": int(row["inserted_count"] + row["revised_count"]),
                     "rejectedCount": int(row["failed_source_count"]),

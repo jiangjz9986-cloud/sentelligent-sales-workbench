@@ -27,6 +27,7 @@ from .storage import Repository, RepositoryError, RunRecord
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_REQUEST_INTERVAL_SECONDS = 0.2
 
 
 class LockBusyError(RuntimeError):
@@ -102,7 +103,11 @@ class MonitorRunner:
     ) -> None:
         self.config = config
         self.repository = repository or Repository(config.database_path)
-        self.http_client = http_client or HttpClient(config.timeout_seconds)
+        self.http_client = http_client or HttpClient(
+            config.timeout_seconds,
+            max_attempts=min(5, max(1, config.retries)),
+            min_interval_seconds=DEFAULT_REQUEST_INTERVAL_SECONDS,
+        )
         self.notifier = notifier or (
             PushPlusNotifier(self.http_client, config.pushplus_token)
             if config.pushplus_token
@@ -210,10 +215,26 @@ class MonitorRunner:
                             outcome = self.repository.save_notice(item, seen_at=self._now())
                             inserted += int(outcome.inserted)
                             revised += int(outcome.revised)
-                    health = SourceHealth(source_id, self._now(), True, len(notices), "")
+                    health = SourceHealth(
+                        source_id,
+                        self._now(),
+                        True,
+                        len(notices),
+                        "",
+                        str(source.get("name", "")).strip(),
+                        str(source.get("city", "")).strip(),
+                    )
                 except Exception as exc:
                     failed += 1
-                    health = SourceHealth(source_id, self._now(), False, 0, _safe_source_error(exc))
+                    health = SourceHealth(
+                        source_id,
+                        self._now(),
+                        False,
+                        0,
+                        _safe_source_error(exc),
+                        str(source.get("name", "")).strip(),
+                        str(source.get("city", "")).strip(),
+                    )
                     logger.warning("source failed source_id=%s error=%s", source_id, health.error)
                 health_rows.append(health)
                 if not dry_run:
@@ -239,14 +260,19 @@ class MonitorRunner:
                         notification_failed = True
                         logger.warning("notification failed pending_count=%s", len(pending))
             finished = self._now()
-            success = failed == 0 and not notification_failed
-            error = "" if success else ("notification failure" if notification_failed else "source failure")
+            usable_collection = failed == 0 or successful > 0
+            success = usable_collection and not notification_failed
+            error = "notification failure" if notification_failed else ("source failure" if failed else "")
             if not dry_run:
                 self.repository.record_run(RunRecord(
                     run_id=0,
                     started_at=started,
                     finished_at=finished,
-                    success=success,
+                    # The persisted collector run describes complete source
+                    # health.  A partially usable snapshot remains a failed
+                    # collector run and is exported to the main system as
+                    # partial, while RunSummary.success permits the snapshot.
+                    success=failed == 0 and not notification_failed,
                     source_count=len(sources),
                     successful_source_count=successful,
                     failed_source_count=failed,

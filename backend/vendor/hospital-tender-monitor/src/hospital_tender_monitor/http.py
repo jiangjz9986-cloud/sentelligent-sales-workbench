@@ -21,6 +21,8 @@ from .config import validate_public_url
 
 USER_AGENT = "hospital-it-tender-monitor/0.1"
 _SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization", "x-api-key", "x-auth-token"}
+_MAX_ATTEMPTS = 5
+_MAX_RETRY_AFTER_SECONDS = 5.0
 
 
 class HttpError(RuntimeError):
@@ -116,7 +118,11 @@ class _HostLockedRedirectHandler(HTTPRedirectHandler):
 
 
 class HttpClient:
-    """Make at most two public, anonymous, size-bounded HTTP requests."""
+    """Make bounded, anonymous, size-limited public HTTP requests.
+
+    Each request uses at most ``max_attempts`` attempts (capped at five), with
+    transient failures retried using bounded backoff and optional Retry-After.
+    """
 
     def __init__(
         self,
@@ -126,11 +132,22 @@ class HttpClient:
         opener: _Opener | None = None,
         resolver: Callable[..., list[tuple[object, ...]]] = socket.getaddrinfo,
         sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        max_attempts: int = 2,
+        min_interval_seconds: float = 0.0,
     ) -> None:
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.max_response_bytes = max(1, int(max_response_bytes))
+        if type(max_attempts) is not int or not 1 <= max_attempts <= _MAX_ATTEMPTS:
+            raise ValueError("max_attempts must be between 1 and 5")
+        if not isinstance(min_interval_seconds, (int, float)) or not 0 <= min_interval_seconds <= 10:
+            raise ValueError("min_interval_seconds must be between 0 and 10")
+        self.max_attempts = max_attempts
+        self.min_interval_seconds = float(min_interval_seconds)
         self._resolver = resolver
         self._sleeper = sleeper
+        self._monotonic = monotonic
+        self._last_request_at: float | None = None
         self._redirect_handler = _HostLockedRedirectHandler(resolver)
         if opener is None:
             urllib_opener = build_opener(self._redirect_handler)
@@ -153,25 +170,45 @@ class HttpClient:
         except (TypeError, ValueError, HttpError) as exc:
             raise HttpError("request failed") from exc
 
-        for attempt in range(2):
+        for attempt in range(self.max_attempts):
+            self._wait_for_request_slot()
             try:
                 response = self._opener(request, timeout=self.timeout_seconds)
                 return self._read_response(response)
             except HttpError:
                 raise
             except UrlHttpError as exc:
-                if 500 <= exc.code < 600 and attempt == 0:
-                    self._sleeper(0.25)
+                if (exc.code == 429 or 500 <= exc.code < 600) and attempt < self.max_attempts - 1:
+                    self._sleeper(self._retry_delay(attempt, exc))
                     continue
                 raise HttpError("request failed") from exc
             except (URLError, TimeoutError, socket.timeout, OSError) as exc:
-                if attempt == 0:
-                    self._sleeper(0.25)
+                if attempt < self.max_attempts - 1:
+                    self._sleeper(self._retry_delay(attempt))
                     continue
                 raise HttpError("request failed") from exc
             except Exception as exc:
                 raise HttpError("request failed") from exc
         raise HttpError("request failed")
+
+    def _wait_for_request_slot(self) -> None:
+        now = self._monotonic()
+        if self._last_request_at is not None:
+            remaining = self.min_interval_seconds - (now - self._last_request_at)
+            if remaining > 0:
+                self._sleeper(remaining)
+        self._last_request_at = self._monotonic()
+
+    def _retry_delay(self, attempt: int, error: UrlHttpError | None = None) -> float:
+        fallback = min(0.25 * (2**attempt), _MAX_RETRY_AFTER_SECONDS)
+        if error is None or error.code != 429:
+            return fallback
+        try:
+            raw = error.headers.get("Retry-After", "")
+            delay = float(str(raw).strip())
+        except (AttributeError, TypeError, ValueError):
+            return fallback
+        return min(max(delay, 0.0), _MAX_RETRY_AFTER_SECONDS)
 
     def _request_headers(self, headers: Mapping[str, str] | None) -> dict[str, str]:
         safe_headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}

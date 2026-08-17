@@ -330,19 +330,55 @@ export function createHospitalTenderScheduler({
 
       let result;
       try {
-        result = transaction(db, () => ingestHospitalTenderSnapshot({
-          repository: tenderRepository,
-          payload: snapshot.payload,
-          customers: batch,
-          // The first batch starts a fresh match sidecar for the new source
-          // snapshot. Later batches merge into that same cycle only.
-          mergeMatches: Boolean(current.cursorCustomerId),
-          persistSources: !current.cursorCustomerId,
-          persistRuns: !current.cursorCustomerId,
-          persistAggregateRun: !current.cursorCustomerId,
-        }));
+        result = transaction(db, () => {
+          const ingested = ingestHospitalTenderSnapshot({
+            repository: tenderRepository,
+            payload: snapshot.payload,
+            customers: batch,
+            // The first batch starts a fresh match sidecar for the new source
+            // snapshot. Later batches merge into that same cycle only.
+            mergeMatches: Boolean(current.cursorCustomerId),
+            persistSources: !current.cursorCustomerId,
+            persistRuns: !current.cursorCustomerId,
+            persistAggregateRun: !current.cursorCustomerId,
+          });
+          if (ingested.rejectedCount > 0) {
+            const rejectedBatch = new Error("部分公告未能入库");
+            rejectedBatch.code = "HOSPITAL_TENDER_BATCH_REJECTED";
+            rejectedBatch.acceptedCount = ingested.acceptedCount;
+            rejectedBatch.rejectedCount = ingested.rejectedCount;
+            throw rejectedBatch;
+          }
+          return ingested;
+        });
       } catch (error) {
         const finishedAt = now().toISOString();
+        if (error?.code === "HOSPITAL_TENDER_BATCH_REJECTED") {
+          repository.updateRun(runId, {
+            finishedAt,
+            status: "partial",
+            acceptedCount: 0,
+            rejectedCount: error.rejectedCount,
+            errorText: "部分公告未能入库",
+          });
+          const rejectedState = repository.updateState({
+            lastFinishedAt: finishedAt,
+            lastStatus: "partial",
+            lastError: "部分公告未能入库",
+            lastAcceptedCount: 0,
+            lastRejectedCount: error.rejectedCount,
+            lastHighRelevanceCount: 0,
+            notificationCount: 0,
+            nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
+          });
+          return {
+            status: "partial",
+            error: "部分公告未能入库",
+            acceptedCount: 0,
+            rejectedCount: error.rejectedCount,
+            state: rejectedState,
+          };
+        }
         repository.updateRun(runId, {
           finishedAt,
           status: "failed",
@@ -357,34 +393,10 @@ export function createHospitalTenderScheduler({
         throw error;
       }
 
-      if (result.rejectedCount > 0) {
-        const finishedAt = now().toISOString();
-        const errorText = "部分公告未能入库";
-        repository.updateRun(runId, {
-          finishedAt,
-          status: "partial",
-          acceptedCount: result.acceptedCount,
-          rejectedCount: result.rejectedCount,
-          errorText,
-        });
-        repository.updateState({
-          lastFinishedAt: finishedAt,
-          lastStatus: "partial",
-          lastError: errorText,
-          lastAcceptedCount: result.acceptedCount,
-          lastRejectedCount: result.rejectedCount,
-          lastHighRelevanceCount: 0,
-          notificationCount: 0,
-          nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
-        });
-        return {
-          status: "partial",
-          error: errorText,
-          acceptedCount: result.acceptedCount,
-          rejectedCount: result.rejectedCount,
-          state: state(),
-        };
-      }
+      const sourceFailureCount = snapshot.payload.sources.filter((source) => (
+        source.status === "error" || source.status === "degraded"
+      )).length;
+      const partialSourceSnapshot = sourceFailureCount > 0 || snapshot.payload.runs.some((run) => run.status === "partial");
 
       const batchCustomerIds = new Set(batch.map((item) => item.id));
       const retryingNotification = current.lastStatus === "partial"
@@ -407,6 +419,9 @@ export function createHospitalTenderScheduler({
           notificationCount = Number.isSafeInteger(notified) && notified >= 0
             ? notified
             : newHighNotices.length;
+          if (notificationCount !== newHighNotices.length) {
+            throw new Error("notification incomplete");
+          }
         } catch (error) {
           const finishedAt = now().toISOString();
           // Notification provider details stay out of persisted state and API
@@ -443,8 +458,8 @@ export function createHospitalTenderScheduler({
         snapshotId: hasNext ? snapshot.id : null,
         cursorCustomerId: hasNext ? batch.at(-1).id : null,
         lastFinishedAt: finishedAt,
-        lastStatus: "success",
-        lastError: null,
+        lastStatus: partialSourceSnapshot ? "partial" : "success",
+        lastError: partialSourceSnapshot ? "部分公开来源失败" : null,
         lastBatchStartCustomerId: batch[0].id,
         lastBatchEndCustomerId: batch.at(-1).id,
         lastBatchCount: batch.length,
@@ -460,20 +475,21 @@ export function createHospitalTenderScheduler({
       });
       repository.updateRun(runId, {
         finishedAt,
-        status: "success",
+        status: partialSourceSnapshot ? "partial" : "success",
         acceptedCount: result.acceptedCount,
         rejectedCount: result.rejectedCount,
         highRelevanceCount: newHighNotices.length,
         notificationCount,
-        errorText: null,
+        errorText: partialSourceSnapshot ? "部分公开来源失败" : null,
       });
       return {
-        status: "success",
+        status: partialSourceSnapshot ? "partial" : "success",
         cycleNumber: current.cycleNumber,
         batchCustomerIds: batch.map((item) => item.id),
         acceptedCount: result.acceptedCount,
         rejectedCount: result.rejectedCount,
         notificationCount,
+        ...(partialSourceSnapshot ? { error: "部分公开来源失败", sourceFailureCount } : {}),
         state: updated,
       };
     } catch (error) {

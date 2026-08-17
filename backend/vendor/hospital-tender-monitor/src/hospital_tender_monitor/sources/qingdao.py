@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import time
 from html.parser import HTMLParser
 from typing import Mapping
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
@@ -25,8 +24,6 @@ DEFAULT_AREA_CODES = ("0214", "0209")
 _DEFAULT_MAX_PAGES = 10
 _HARD_MAX_PAGES = 100
 _MAX_AREA_CODES = 8
-_REQUEST_ATTEMPTS = 3
-_RETRY_DELAYS = (0.5, 1.0)
 _DETAIL_PREFIX = "/TradeDetals-ZtbShow/"
 _CONTRACT_DETAIL_PREFIX = "/Contact-HTGS/"
 _DETAIL_PREFIXES = (_DETAIL_PREFIX, _CONTRACT_DETAIL_PREFIX)
@@ -180,9 +177,7 @@ class QingdaoAdapter(SourceAdapter):
                         if page in seen_pages:
                             raise ValueError("pagination loop")
                         seen_pages.add(page)
-                        response = self._request_with_retry(
-                            self._list_url(area_code, flag, page)
-                        )
+                        response = self.http.request("GET", self._list_url(area_code, flag, page))
                         if (
                             not isinstance(response.text, str)
                             or response.status < 200
@@ -215,23 +210,6 @@ class QingdaoAdapter(SourceAdapter):
         except (HttpError, ValueError, TypeError, AttributeError):
             return SourceResult(success=False, error="invalid source response")
         return SourceResult(notices=tuple(notices))
-
-    def _request_with_retry(self, url: str):
-        """Retry transient transport failures before failing the source.
-
-        The Qingdao contract endpoint occasionally resets an otherwise valid
-        connection.  Keep the retry local to this adapter so other sources do
-        not inherit a longer request budget, and preserve the generic error
-        boundary used by the runner.
-        """
-        for attempt in range(_REQUEST_ATTEMPTS):
-            try:
-                return self.http.request("GET", url)
-            except HttpError:
-                if attempt >= _REQUEST_ATTEMPTS - 1:
-                    raise
-                time.sleep(_RETRY_DELAYS[attempt])
-        raise HttpError("request failed")
 
     def _list_url(self, area_code: str, flag: str, page: int) -> str:
         path = f"/Tradeinfo-GGGSList/1-1-{flag}"

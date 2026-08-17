@@ -129,3 +129,5 @@ class SourceHealth:
     success: bool
     item_count: int = 0
     error: str = ""
+    source_name: str = ""
+    city: str = ""

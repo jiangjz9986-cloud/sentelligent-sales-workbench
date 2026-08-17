@@ -32,6 +32,7 @@ class DongyingAdapter(SourceAdapter):
 
     def fetch(self) -> SourceResult:
         notices: list[TenderNotice] = []
+        seen: set[str] = set()
         endpoint = urljoin(source_text(self.source, "url"), _PATH)
         try:
             for category, notice_type in CATEGORIES:
@@ -53,7 +54,8 @@ class DongyingAdapter(SourceAdapter):
                 records = _records(response.text)
                 for record in records:
                     notice = self._notice(record, notice_type)
-                    if notice is not None:
+                    if notice is not None and notice.identity_key not in seen:
+                        seen.add(notice.identity_key)
                         notices.append(notice)
         except (HttpError, ValueError, json.JSONDecodeError, TypeError):
             return SourceResult(success=False, error="invalid source response")

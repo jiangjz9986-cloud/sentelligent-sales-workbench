@@ -1,0 +1,11 @@
+{
+  "config": {"itemsPerPage": 20, "currentPage": 1},
+  "data": [
+    {
+      "title": "示例医院信息系统采购公告",
+      "url": "fixture-item-1",
+      "date": "2026-08-17",
+      "newest": true
+    }
+  ]
+}
