@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { openDatabase } from "../src/db.js";
+import { createHospitalTenderNotifier } from "../src/hospitalTender/notifier.js";
 import { createHospitalTenderRepository } from "../src/hospitalTender/repository.js";
 import { createHospitalTenderSchedulerRepository } from "../src/hospitalTender/schedulerRepository.js";
 import { collectorCustomers, createHospitalTenderScheduler } from "../src/hospitalTender/scheduler.js";
@@ -383,6 +384,45 @@ describe("hospital tender scheduler", () => {
       assert.equal(attempts, 2);
       assert.equal(schedulerRepository.getState().cursorCustomerId, "customer-10");
       assert.equal(schedulerRepository.listRuns()[0].highRelevanceCount, 1);
+    });
+  });
+
+  it("eventually delivers an oversized chunked notification batch before advancing", async () => {
+    await withDb(async (db) => {
+      const payload = snapshot();
+      payload.notices = Array.from({ length: 120 }, (_, index) => ({
+        ...payload.notices[0],
+        identityKey: `source-a:item-${index + 1}`,
+        title: `胜利油田中心医院 信息化项目 ${index + 1}`,
+        url: `https://example.com/notices/${index + 1}`,
+        sourceItemId: `item-${index + 1}`,
+        contentSha256: (index + 1).toString(16).padStart(64, "0"),
+      }));
+      let calls = 0;
+      const notifier = createHospitalTenderNotifier({
+        token: ["fixture", "chunked", "value"].join("-"),
+        fetchImpl: async () => {
+          calls += 1;
+          if (calls === 2) return new Response("provider-private", { status: 503 });
+          return new Response(JSON.stringify({ code: "200" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      });
+      const { scheduler, schedulerRepository, tenderRepository } = setup(db, {
+        runner: { run: async () => ({ payload, source: "test" }) },
+        notifier,
+      });
+
+      assert.equal((await scheduler.runNext({ force: true })).status, "partial");
+      assert.equal(schedulerRepository.getState().cursorCustomerId, null);
+      const recovered = await scheduler.runNext({ force: true });
+      assert.equal(recovered.status, "success");
+      assert.equal(recovered.notificationCount, 120);
+      assert.equal(schedulerRepository.getState().cursorCustomerId, "customer-10");
+      assert.equal(tenderRepository.listNotices({ limit: 200, offset: 0 }).length, 120);
+      assert.equal(calls, 4);
     });
   });
 
