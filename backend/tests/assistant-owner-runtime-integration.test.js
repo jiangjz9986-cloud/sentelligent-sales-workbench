@@ -7,7 +7,7 @@ import { afterEach, describe, it } from "node:test";
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 
-const runtimeCredential = "owner-runtime-machine-token";
+const machineHeader = "fixture-machine-header";
 let tempDir;
 let server;
 
@@ -31,7 +31,7 @@ describe("assistant runtime business-owner wiring", () => {
       nodeEnv: "test",
       authRequired: false,
       authSessionSecret: Buffer.alloc(32, 21).toString("base64url"),
-      weixinAgentApiToken: runtimeCredential,
+      weixinAgentApiToken: machineHeader,
       weixinAgentOwner: "machine-account",
       resolveBusinessOwner: (account) => account === "machine-account" ? "business-owner" : null,
       weixinAllowedSenderIds: "owner-runtime-sender",
@@ -41,7 +41,7 @@ describe("assistant runtime business-owner wiring", () => {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/integrations/weixin-agent/events`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${runtimeCredential}`,
+        Authorization: `Bearer ${machineHeader}`,
         "Content-Type": "application/json",
         "Idempotency-Key": "owner-runtime-search",
       },
@@ -77,13 +77,13 @@ describe("assistant runtime business-owner wiring", () => {
       nodeEnv: "test",
       authRequired: false,
       authSessionSecret: Buffer.alloc(32, 22).toString("base64url"),
-      weixinAgentApiToken: runtimeCredential,
+      weixinAgentApiToken: machineHeader,
       weixinAgentOwner: "business-owner",
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
     const customers = await fetch(`http://127.0.0.1:${server.address().port}/api/customers`, {
-      headers: { Authorization: `Bearer ${runtimeCredential}` },
+      headers: { Authorization: `Bearer ${machineHeader}` },
     });
     const customerBody = await customers.json();
     assert.equal(customers.status, 200);
@@ -92,7 +92,7 @@ describe("assistant runtime business-owner wiring", () => {
     const forged = await fetch(`http://127.0.0.1:${server.address().port}/api/reports/weekly/draft`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${runtimeCredential}`,
+        Authorization: `Bearer ${machineHeader}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
