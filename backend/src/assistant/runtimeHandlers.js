@@ -5,6 +5,7 @@ import { withImmediateTransaction } from "../db/transaction.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { analyzeQuickRecord } from "../modelAnalysis.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
+import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
 
@@ -102,20 +103,37 @@ function boundedRecognition(recognition) {
   return { ...recognition, extractedText };
 }
 
-function weekStartFor(value) {
-  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  const day = (date.getDay() + 6) % 7;
-  date.setHours(0, 0, 0, 0);
-  date.setDate(date.getDate() - day);
-  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+function moneyFromCents(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? `${(value / 100).toFixed(2)} 元` : "金额待确认";
 }
 
-function reportWeekStart(args, clock) {
-  const explicit = safeText(args?.week);
-  if (/^\d{4}-\d{2}-\d{2}$/u.test(explicit)) return explicit;
-  if (/^\d{4}-\d{2}-\d{2}$/u.test(safeText(args?.periodStart))) return safeText(args.periodStart);
-  return weekStartFor(clock());
+function projectAnalysisText(analysis) {
+  const metrics = analysis.metrics ?? {};
+  const opportunity = metrics.opportunity ?? {};
+  const freshness = metrics.evidenceFreshness ?? {};
+  const lines = [
+    "项目分析预览（事实、推断与未知已分开）：",
+    `阶段：${opportunity.stage ?? "待确认"}`,
+    `金额：${opportunity.amount ?? "待确认"}`,
+    `概率：${opportunity.probability === null || opportunity.probability === undefined ? "待确认" : `${opportunity.probability}%`}`,
+    `未完成动作：${metrics.actions?.open ?? 0}，活跃风险：${metrics.risks?.active ?? 0}`,
+    `关联客户费用：${moneyFromCents(metrics.expense?.actualPaidCents)}，可报销 ${moneyFromCents(metrics.expense?.reimbursementCents)}`,
+    `证据新鲜度：${freshness.status ?? "unknown"}`,
+  ];
+  if (analysis.inferences?.length) lines.push(`推断：${analysis.inferences[0].statement}`);
+  if (analysis.unknowns?.length) {
+    lines.push(`待补充：${analysis.unknowns.slice(0, 3).map((item) => item.question).join("；")}`);
+  }
+  return lines.join("\n");
+}
+
+function ambiguousEntityResult(label, items) {
+  return {
+    text: `找到多个${label}，请补充更具体的名称或内部标识：${items.slice(0, 5).map((item) => item.name).filter(Boolean).join("、")}`,
+    status: "clarify",
+    question: `请确认要查看哪个${label}。`,
+    items,
+  };
 }
 
 export function createAssistantToolHandlers({
@@ -126,12 +144,140 @@ export function createAssistantToolHandlers({
   invoiceRepository,
   paymentProofRecognizer,
   invoiceRecognizer,
+  businessSnapshotAdapter = null,
+  resolveBusinessOwner = (owner) => owner,
   clock = () => new Date(),
   fetchImpl = fetch,
 } = {}) {
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
+  const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
 
   const handlers = {
+    async "dashboard.summary"(_args, context) {
+      const summary = snapshotAdapter.dashboardSummary({ owner: context.owner });
+      const counts = summary.counts;
+      return {
+        text: [
+          `战情总览（截至 ${summary.asOf}）：`,
+          `客户 ${counts.customers}，商机 ${counts.opportunities}`,
+          `未完成动作 ${counts.openActions}，活跃风险 ${counts.activeRisks}`,
+          `待执行行程 ${counts.upcomingItineraries}，本周差旅 ${counts.currentWeekExpenses} 笔`,
+        ].join("\n"),
+        status: "ok",
+        summary,
+      };
+    },
+
+    async "customer.detail"(args, context) {
+      let customer = snapshotAdapter.customerDetail({ owner: context.owner, customerId: args.customerId });
+      if (!customer) {
+        const matches = snapshotAdapter.customerSearch({ owner: context.owner, query: args.customerId }).items;
+        if (matches.length > 1) return ambiguousEntityResult("客户", matches);
+        customer = matches[0] ?? null;
+      }
+      if (!customer) return { text: "未找到该客户，或当前账号无权查看。", status: "not_found" };
+      return {
+        text: [
+          `客户：${customer.name ?? "名称待确认"}`,
+          `区域：${customer.region ?? "待确认"}`,
+          `类型：${customer.type ?? "待确认"}`,
+          `级别：${customer.level ?? "待确认"}`,
+        ].join("\n"),
+        status: "ok",
+        customer,
+      };
+    },
+
+    async "opportunity.detail"(args, context) {
+      let opportunity = snapshotAdapter.opportunityDetail({
+        owner: context.owner,
+        opportunityId: args.opportunityId,
+      });
+      if (!opportunity) {
+        const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: args.opportunityId }).items;
+        if (matches.length > 1) return ambiguousEntityResult("商机", matches);
+        opportunity = matches[0] ?? null;
+      }
+      if (!opportunity) return { text: "未找到该商机，或当前账号无权查看。", status: "not_found" };
+      return {
+        text: [
+          `商机：${opportunity.name ?? "名称待确认"}`,
+          `阶段：${opportunity.stage ?? "待确认"}`,
+          `金额：${opportunity.amount ?? "待确认"}`,
+          `成交概率：${opportunity.probability === null ? "待确认" : `${opportunity.probability}%`}`,
+          `下一步：${opportunity.next ?? "待补充"}`,
+        ].join("\n"),
+        status: "ok",
+        opportunity,
+      };
+    },
+
+    async "sales-decision.preview"(args, context) {
+      let opportunityId = args.opportunityId;
+      if (!snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId })) {
+        const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: opportunityId }).items;
+        if (matches.length > 1) return ambiguousEntityResult("商机", matches);
+        opportunityId = matches[0]?.id ?? opportunityId;
+      }
+      const analysis = snapshotAdapter.projectAnalysis({
+        owner: context.owner,
+        opportunityId,
+      });
+      if (!analysis) return { text: "未找到该项目，或当前账号无权分析。", status: "not_found" };
+      return { text: projectAnalysisText(analysis), status: "preview", analysis };
+    },
+
+    async "action-risk.summary"(args, context) {
+      const summary = snapshotAdapter.actionRiskSummary({
+        owner: context.owner,
+        customerId: args.customerId,
+        opportunityId: args.opportunityId,
+      });
+      return {
+        text: [
+          `动作风险摘要：未完成动作 ${summary.actions.length} 项，活跃风险 ${summary.risks.length} 项。`,
+          ...summary.actions.slice(0, 3).map((item) => `- 动作：${item.title ?? "待补充"}${item.due ? `（截止 ${item.due}）` : ""}`),
+          ...summary.risks.slice(0, 3).map((item) => `- 风险：${item.title ?? "待补充"}（${item.severity ?? "等级待确认"}）`),
+        ].join("\n"),
+        status: "ok",
+        summary,
+      };
+    },
+
+    async "itinerary.summary"(_args, context) {
+      const summary = snapshotAdapter.itinerarySummary({ owner: context.owner });
+      return {
+        text: summary.items.length
+          ? [`行程摘要：共 ${summary.items.length} 条。`, ...summary.items.slice(0, 5).map((item) => `- ${item.visitDate} ${item.title ?? "未命名行程"}（${item.status}）`)].join("\n")
+          : "当前没有可见行程。",
+        status: "ok",
+        summary,
+      };
+    },
+
+    async "travel-expense.summary"(args, context) {
+      const summary = snapshotAdapter.travelExpenseSummary({
+        owner: context.owner,
+        weekStart: args.periodStart ?? args.week,
+      });
+      return {
+        text: `差旅汇总（${summary.weekStart}）：${summary.summary.count} 笔，实付 ${moneyFromCents(summary.summary.actualPaidCents)}，可报销 ${moneyFromCents(summary.summary.reimbursementCents)}。`,
+        status: "ok",
+        summary,
+      };
+    },
+
+    async "knowledge.search"(args) {
+      const result = snapshotAdapter.knowledgeSearch({ query: args.query });
+      return {
+        text: result.items.length
+          ? [`知识检索结果：${result.items.length} 条。`, ...result.items.map((item) => `- ${item.title}：${item.summary ?? "暂无摘要"}（来源：${item.source ?? "待确认"}）`)].join("\n")
+          : `未找到相关知识：${safeText(args.query)}`,
+        status: "ok",
+        items: result.items,
+      };
+    },
+
     async "visit-capture.collect"(args, context) {
       const { parts } = draftParts(sessionRepository, context);
       return {
@@ -246,20 +392,14 @@ export function createAssistantToolHandlers({
 
     async "customer.search"(args, context) {
       const query = safeText(args.query);
-      const like = `%${query}%`;
-      const rows = db.prepare(`
-        SELECT id, name, region, owner, level, type
-        FROM customers
-        WHERE deleted_at IS NULL
-          AND owner = $owner
-          AND ($query = '' OR name LIKE $like OR region LIKE $like OR owner LIKE $like OR type LIKE $like)
-        ORDER BY updated_at DESC, id
-        LIMIT 10
-      `).all({ $owner: context.owner, $query: query, $like: like });
-      const text = rows.length === 0
+      const result = snapshotAdapter.customerSearch({ owner: context.owner, query: query || "客户" });
+      const text = result.items.length === 0
         ? `未找到客户：${query || "（未提供关键词）"}`
-        : [`找到 ${rows.length} 个客户：`, ...rows.map((row) => `- ${row.name} / ${row.region ?? "-"} / ${row.owner ?? "-"}`)].join("\n");
-      return { text, status: "ok", items: rows };
+        : [
+          `找到 ${result.items.length}${result.truncated ? "+" : ""} 个客户：`,
+          ...result.items.map((item) => `- ${item.name ?? "名称待确认"} [${item.id}] / ${item.region ?? "-"}`),
+        ].join("\n");
+      return { text, status: "ok", items: result.items, truncated: result.truncated };
     },
 
     async "invoice.ingest"(args, context, serverData) {
@@ -374,27 +514,23 @@ export function createAssistantToolHandlers({
     },
 
     async "reimbursement-report.preview"(args, context) {
-      const week = reportWeekStart(args, clock);
-      const rows = db.prepare(`
-        SELECT COUNT(*) AS expense_count, COALESCE(SUM(payment.amount_cents), 0) AS paid_cents
-        FROM travel_expenses expense
-        LEFT JOIN travel_expense_payments payment ON payment.expense_id = expense.id
-        WHERE expense.owner = $owner AND expense.deleted_at IS NULL
-          AND expense.occurred_on BETWEEN $week AND date($week, '+6 days')
-      `).get({ $owner: context.owner, $week: week });
-      return { text: `报销周汇总预览（${week}）：${Number(rows.expense_count)} 笔费用，实付 ${(Number(rows.paid_cents) / 100).toFixed(2)} 元。`, status: "preview", summary: rows };
+      const summary = snapshotAdapter.travelExpenseSummary({
+        owner: context.owner,
+        weekStart: args.periodStart ?? args.week,
+      });
+      return {
+        text: `报销周汇总预览（${summary.weekStart}）：${summary.summary.count} 笔费用，实付 ${moneyFromCents(summary.summary.actualPaidCents)}，可报销 ${moneyFromCents(summary.summary.reimbursementCents)}。`,
+        status: "preview",
+        summary,
+      };
     },
 
     async "sales-report.preview"(args, context) {
-      const week = reportWeekStart(args, clock);
-      const row = db.prepare(`
-        SELECT COUNT(*) AS record_count
-        FROM quick_records
-        WHERE owner = $owner
-          AND voided_at IS NULL
-          AND date(COALESCE(occurred_at, created_at)) BETWEEN $week AND date($week, '+6 days')
-      `).get({ $owner: context.owner, $week: week });
-      return { text: `销售周报预览（${week}）：当前共有 ${Number(row.record_count)} 条快速记录，详情可在系统内继续编辑。`, status: "preview" };
+      const summary = snapshotAdapter.salesReportSummary({
+        owner: context.owner,
+        weekStart: args.periodStart ?? args.week,
+      });
+      return { text: `销售周报预览（${summary.weekStart}）：当前共有 ${summary.recordCount} 条快速记录，详情可在系统内继续编辑。`, status: "preview", summary };
     },
   };
 

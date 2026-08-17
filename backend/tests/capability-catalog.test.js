@@ -48,6 +48,8 @@ describe("小小 capability metadata catalog", () => {
     assert.ok(byId.get("customer.search").mappings.tools.includes("customer.search"));
     assert.ok(byId.get("visit-capture").mappings.tools.includes("visit-capture.collect"));
     assert.ok(byId.get("reimbursement-report").mappings.tools.includes("reimbursement-report.preview"));
+    assert.equal(byId.get("sales-decision.preview").status, "partial");
+    assert.match(byId.get("sales-decision.preview").unavailableReason, /尚未接入/);
   });
 
   it("returns isolated snapshots so callers cannot mutate the internal catalog", () => {

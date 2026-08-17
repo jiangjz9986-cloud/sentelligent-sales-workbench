@@ -33,7 +33,21 @@ const tool = (name, agentId, description, argumentsSchema) => Object.freeze({
 });
 
 export const TOOL_DEFINITIONS = Object.freeze([
+  tool("dashboard.summary", "dashboard", "查询当前账号的业务战情总览", {}),
   tool("customer.search", "customer", "按关键词查询客户", { query: { type: "string", required: true } }),
+  tool("customer.detail", "customer", "查询一个客户的限界详情", { customerId: { type: "string", required: true } }),
+  tool("opportunity.detail", "opportunity", "查询一个商机的限界详情", { opportunityId: { type: "string", required: true } }),
+  tool("sales-decision.preview", "sales-decision", "基于限界业务快照预览项目分析", { opportunityId: { type: "string", required: true } }),
+  tool("action-risk.summary", "action-risk", "查询未完成动作和活跃风险摘要", {
+    customerId: { type: "string", required: false },
+    opportunityId: { type: "string", required: false },
+  }),
+  tool("itinerary.summary", "itinerary", "查询当前账号的行程摘要", {}),
+  tool("travel-expense.summary", "travel-expense", "查询自然周差旅和报销金额摘要", {
+    week: { type: "string", required: false },
+    periodStart: { type: "string", required: false },
+  }),
+  tool("knowledge.search", "knowledge", "按关键词只读检索知识摘要", { query: { type: "string", required: true } }),
   tool("visit-capture.collect", "visit-capture", "创建拜访记录草稿", { text: { type: "string", required: true } }),
   tool("visit-capture.preview", "visit-capture", "预览拜访记录草稿", { draftId: { type: "string", required: true } }),
   tool("visit-capture.confirm", "visit-capture", "确认写入拜访记录", { draftId: { type: "string", required: true } }),

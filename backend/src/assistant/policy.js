@@ -4,7 +4,15 @@ export const DENY_LIST = new Set([
 ]);
 
 const TOOL_POLICIES = new Map([
+  ["dashboard.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["customer.search", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["customer.detail", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["opportunity.detail", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["sales-decision.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
+  ["action-risk.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["itinerary.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["travel-expense.summary", { risk: "R1", confirmation: "none", reason: "read_only" }],
+  ["knowledge.search", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["visit-capture.collect", { risk: "R1", confirmation: "none", reason: "draft_only" }],
   ["visit-capture.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
   ["visit-capture.confirm", { risk: "R2", confirmation: "simple", reason: "ordinary_write" }],

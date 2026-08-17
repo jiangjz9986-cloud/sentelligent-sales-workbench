@@ -4,7 +4,7 @@ import { evaluatePolicy } from "./policy.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：客户查询、拜访记录、实付凭证、发票、报销周汇总、销售周报。涉及写入或财务操作需要明确确认。";
+const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
 
 function clean(value) { return String(value ?? "").trim(); }
 
@@ -55,30 +55,43 @@ function reportArguments(args) {
   return dateRange(args);
 }
 
+function directArguments(toolName, args, mediaRef) {
+  if (toolName === "dashboard.summary" || toolName === "itinerary.summary") return {};
+  if (toolName === "customer.search" || toolName === "knowledge.search") return { query: args };
+  if (toolName === "customer.detail") return { customerId: args };
+  if (toolName === "opportunity.detail" || toolName === "sales-decision.preview") {
+    return { opportunityId: args };
+  }
+  if (toolName === "action-risk.summary") return {};
+  if (toolName === "travel-expense.summary") return { week: clean(args) || "current" };
+  if (toolName.includes("report.preview")) return reportArguments(args) ?? {};
+  if (toolName === "visit-capture.collect") return { text: args };
+  if (toolName === "visit-capture.preview" || toolName === "visit-capture.confirm") return { draftId: args };
+  if (toolName === "invoice.ingest" || toolName === "payment-proof.ingest") return { mediaRef: args || mediaRef };
+  return {};
+}
+
 function explicitPlan(command, args, registry, { mediaRef } = {}) {
   const normalized = command.replace(/^\//, "");
   if (normalized === "help" || normalized === "帮助" || normalized === "h") return { kind: "intent_plan", status: "help", toolName: null, agentId: "system-router", arguments: {}, message: HELP };
   if (normalized === "cancel" || normalized === "取消") return { kind: "intent_plan", status: "cancelled", toolName: null, agentId: "system-router", arguments: {} };
   const direct = registry.getTool(normalized);
   if (direct) {
-    const input = normalized === "customer.search"
-      ? { query: args }
-      : normalized.includes("report.preview")
-        ? (reportArguments(args) ?? {})
-        : normalized === "visit-capture.collect"
-          ? { text: args }
-          : normalized === "visit-capture.preview" || normalized === "visit-capture.confirm"
-            ? { draftId: args }
-        : normalized === "invoice.ingest"
-          ? { mediaRef: args || mediaRef }
-          : normalized === "payment-proof.ingest"
-            ? { mediaRef: args || mediaRef }
-            : { text: args, draftId: args };
+    const input = directArguments(normalized, args, mediaRef);
     return makePlan({ tool: direct, arguments: input, source: "explicit" });
   }
   const aliases = {
+    战情: ["dashboard.summary", () => ({})],
+    战情总览: ["dashboard.summary", () => ({})],
     客户: ["customer.search", (value) => ({ query: value })],
     "客户查询": ["customer.search", (value) => ({ query: value })],
+    "客户详情": ["customer.detail", (value) => ({ customerId: value })],
+    "商机详情": ["opportunity.detail", (value) => ({ opportunityId: value })],
+    "项目分析": ["sales-decision.preview", (value) => ({ opportunityId: value })],
+    "动作风险": ["action-risk.summary", () => ({})],
+    "行程摘要": ["itinerary.summary", () => ({})],
+    "差旅汇总": ["travel-expense.summary", (value) => ({ week: clean(value) || "current" })],
+    "知识检索": ["knowledge.search", (value) => ({ query: value })],
     拜访: ["visit-capture.collect", (value) => ({ text: value })],
     "拜访预览": ["visit-capture.preview", (value) => ({ draftId: value })],
     "拜访确认": ["visit-capture.confirm", (value) => ({ draftId: value })],
@@ -106,6 +119,59 @@ function naturalPlan(text, confidence, registry) {
     return makePlan({ tool: registry.getTool("reimbursement-report.preview"), arguments: { week: "current" }, confidence, source: "natural" });
   }
   if (/周报|周汇总/.test(value)) return clarify("你要生成销售周报，还是报销周汇总？", confidence);
+  if (/^(?:战情(?:总览)?|工作台总览)$/u.test(value)) {
+    return makePlan({ tool: registry.getTool("dashboard.summary"), arguments: {}, confidence, source: "natural" });
+  }
+  const customerDetail = value.match(/^客户详情(?:\s+(.+))?$/u);
+  if (customerDetail) {
+    return makePlan({
+      tool: registry.getTool("customer.detail"),
+      arguments: { customerId: customerDetail[1] ?? "" },
+      confidence,
+      source: "natural",
+    });
+  }
+  const opportunityDetail = value.match(/^商机详情(?:\s+(.+))?$/u);
+  if (opportunityDetail) {
+    return makePlan({
+      tool: registry.getTool("opportunity.detail"),
+      arguments: { opportunityId: opportunityDetail[1] ?? "" },
+      confidence,
+      source: "natural",
+    });
+  }
+  const projectAnalysis = value.match(/^项目分析(?:\s+(.+))?$/u);
+  if (projectAnalysis) {
+    return makePlan({
+      tool: registry.getTool("sales-decision.preview"),
+      arguments: { opportunityId: projectAnalysis[1] ?? "" },
+      confidence,
+      source: "natural",
+    });
+  }
+  if (/^(?:动作风险|行动风险|风险动作)(?:摘要)?$/u.test(value)) {
+    return makePlan({ tool: registry.getTool("action-risk.summary"), arguments: {}, confidence, source: "natural" });
+  }
+  if (/^(?:行程|行程摘要|拜访行程)$/u.test(value)) {
+    return makePlan({ tool: registry.getTool("itinerary.summary"), arguments: {}, confidence, source: "natural" });
+  }
+  if (/^(?:差旅汇总|差旅费用(?:摘要|汇总)?)$/u.test(value)) {
+    return makePlan({
+      tool: registry.getTool("travel-expense.summary"),
+      arguments: { week: "current" },
+      confidence,
+      source: "natural",
+    });
+  }
+  const knowledgeSearch = value.match(/^知识(?:检索|查询)(?:\s+(.+))?$/u);
+  if (knowledgeSearch) {
+    return makePlan({
+      tool: registry.getTool("knowledge.search"),
+      arguments: { query: knowledgeSearch[1] ?? "" },
+      confidence,
+      source: "natural",
+    });
+  }
   if (value === "记录") {
     return makePlan({
       tool: registry.getTool("visit-capture.preview"),

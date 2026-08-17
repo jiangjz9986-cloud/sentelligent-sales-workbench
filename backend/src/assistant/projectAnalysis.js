@@ -160,6 +160,8 @@ function normalizeSnapshot(snapshot) {
     itineraries: arrayOf(input.itinerary ?? input.itineraries),
     expenses: arrayOf(input.expense ?? input.expenses),
     reports: arrayOf(input.report ?? input.reports),
+    itineraryProvided: Object.prototype.hasOwnProperty.call(input, "itinerary") || Object.prototype.hasOwnProperty.call(input, "itineraries"),
+    reportProvided: Object.prototype.hasOwnProperty.call(input, "report") || Object.prototype.hasOwnProperty.call(input, "reports"),
   };
 }
 
@@ -371,6 +373,13 @@ export function analyzeProjectSnapshot(snapshot = {}) {
     const date = firstEvidenceDate(item.updatedAt, item.createdAt);
     if (date) datedSources.push(date);
     addSourceRef(sourceRefs, "report", item, index);
+  }
+
+  if (!input.itineraryProvided) {
+    pushUnknown(unknowns, "itinerary.evidence", "需要提供与项目关联的行程证据。", "当前快照未接入项目范围内的行程数据。");
+  }
+  if (!input.reportProvided) {
+    pushUnknown(unknowns, "report.evidence", "需要提供与项目关联的周报证据。", "当前快照未接入项目范围内的周报数据。");
   }
 
   const freshness = evidenceFreshness(snapshot, datedSources);
