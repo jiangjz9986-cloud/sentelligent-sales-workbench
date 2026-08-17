@@ -8,24 +8,24 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前代码 / GitHub Release | `v0.6.0`（已正式发布，生产待切换） |
+| 当前代码 / GitHub Release | `v0.6.0`（已正式发布） |
 | v0.6.0 Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
 | v0.6.0 Release 归档 SHA-256 | `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371` |
-| 当前生产版本 | `v0.5.7` |
-| 生产提交 | `d4fcb56504c5a64bda703db5817c43e546db1b4f` |
-| 注释标签 | `v0.5.7` |
+| 当前生产版本 | `v0.6.0`（已完成第二次受控切换；HTTPS smoke 尚待补齐） |
+| 生产提交 | `4c45656647f5d6d4c28e011fd58eb954735cad64` |
+| 注释标签 | `v0.6.0` |
 | 上一生产 GitHub Release | [森特智行 v0.5.7](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.5.7) |
 | Release 归档 SHA-256 | `3338cb09aa9398e7b5353b8d74a4fb0256c93b270c247919643df672a03fa07f` |
-| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.5.7-20260816T094633Z_d4fcb56504c5` |
-| 回滚 release | `/opt/sentelligent-sales-workbench/releases/v0.5.6-20260816T084503Z_e3265946cd64` |
-| v0.6.0 生产状态 | 尚未切换：服务器缺少 Python 3.11+ 运行时；当前生产仍保持 `v0.5.7`，未改配置、数据库或服务 |
-| 当前生产代码 | `v0.5.7` 已完成 GitHub Release、受控切换、前后 `25/25` 生产预检和线上 `25/25` HTTPS smoke |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.6.0-20260817T124347Z_4c45656647f5` |
+| 回滚 release | `/opt/sentelligent-sales-workbench/releases/v0.5.7-20260816T094633Z_d4fcb56504c5` |
+| v0.6.0 生产状态 | 已切换；切换前后生产预检均 `25/25`，健康检查和 Chrome 页面回归通过；HTTPS smoke 因当前登录凭据未能完成认证，尚未形成 `25/25` 证据 |
+| 当前生产代码 | `v0.6.0` 已完成不可变发布、数据库迁移、受控切换和页面回归；未把未完成的 HTTPS smoke 宣称为正式验收 |
 | `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
 | `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；已由后续版本取代 |
 | `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-16` 复核；v0.6.0 GitHub Release 于 `2026-08-17` 完成，尚未切换生产。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.6.0 版本说明](docs/releases/v0.6.0.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-17` 复核；v0.6.0 已完成生产切换。唯一未闭合项是使用当前生产登录凭据重新执行 HTTPS smoke；此前两次认证均返回 `401`，没有创建或残留合成业务数据。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.6.0 版本说明](docs/releases/v0.6.0.md)。
 
 ## 功能状态
 
@@ -44,7 +44,7 @@
 | 知识库 | 模块内搜索、条目维护和引用 | 后续可继续扩展检索与引用质量评估 |
 | 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF 接入；已完成真实设备 `/clear` 往返验收 | 机器身份只获得声明的写入路由；更多业务场景仍按人工确认边界扩展 |
 | 系统配置 | 独立配置页生成/轮换 iCost Token，并加密保存 DeepSeek API Key；运行时统一读取服务端密钥提供器 | 主加密密钥只允许进入后端受保护环境；页面不回显已保存明文 |
-| 医院招标监测 | `v0.6.0` 候选内置公开来源采集，按每小时一批 10 个客户自动轮巡，持久化游标/快照/锁，展示公告、匹配证据、来源健康和轮巡进度 | 当前仍是代码候选；不依赖额外招标 API，不自动修改客户或商机，生产启用需完成发布门禁 |
+| 医院招标监测 | `v0.6.0` 已内置公开来源采集，按每小时一批 10 个客户自动轮巡，持久化游标/快照/锁，展示公告、匹配证据、来源健康和轮巡进度 | 已随生产切换启用；当前 scheduler 初始状态为 `idle`、轮次 `0`，首批真实轮巡和通知仍需观察；不依赖额外招标 API，不自动修改客户或商机 |
 | 方案辅助 | 只读兼容入口 | 按当前产品决定暂停写入和 AI 调用 |
 
 ## 技术结构
