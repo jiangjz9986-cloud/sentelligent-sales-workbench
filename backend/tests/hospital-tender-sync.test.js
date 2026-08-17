@@ -53,6 +53,13 @@ describe("hospital tender sync contract", () => {
     );
   });
 
+  it("accepts the collector's explicit empty optional content field", () => {
+    const normalized = normalizeHospitalTenderSyncPayload(payload({
+      notices: [notice({ contentText: "", contentSha256: "e".repeat(64) })],
+    }));
+    assert.equal(normalized.notices[0].contentText, null);
+  });
+
   it("fails closed for invalid schema, URL and oversized arrays", () => {
     assert.throws(() => normalizeHospitalTenderSyncPayload(payload({ schemaVersion: "v2" })), /schemaVersion/i);
     assert.throws(() => normalizeHospitalTenderSyncPayload(payload({ notices: [notice({ url: "javascript:alert(1)" })] })), /url/i);

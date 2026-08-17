@@ -114,7 +114,7 @@ function assertAllowedKeys(value, allowed, name) {
 function normalizeIncomingNotice(input) {
   assertPlainObject(input, "notice");
   assertAllowedKeys(input, NOTICE_INPUT_KEYS, "notice");
-  const contentText = input.contentText === undefined || input.contentText === null
+  const contentText = input.contentText === undefined || input.contentText === null || input.contentText === ""
     ? ""
     : text(input.contentText, "contentText", NOTICE_FIELD_LIMITS.contentText);
   const normalized = normalizeNoticeSnapshot({
