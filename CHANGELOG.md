@@ -16,7 +16,9 @@
 ### 发布边界
 
 - tag：`v0.6.1`，合并提交：`c461d6a60253d9a59cd8b187edec57e47a480e94`；GitHub Release workflow `32035210686` 已成功，Release 已发布。
-- v0.6.1 尚未切换生产；当前生产继续使用 v0.6.0 的不可变 release，待单独完成候选部署预检和线上验收后再切换。
+- 已完成受控生产切换，当前 release 为 `/opt/sentelligent-sales-workbench/releases/v0.6.1-20260817T134944Z_c461d6a60253`，`0017` 已应用，回滚目标保留为 v0.6.0。
+- 切换前后预检均为 `25/25`；正式 HTTPS smoke run `0a00efbc-f349-424f-9700-0f3f08cda157` 为 `25/25`、`cleanup=clean`，所有合成业务记录、会话和幂等键残留均为 `0`。
+- 生产登录凭据已受控轮换：随机密码只进入 macOS 钥匙串，服务器只保存 canonical scrypt 哈希；轮换后只重启后端服务，未修改共享服务或业务数据。
 
 ## [0.6.0] - 2026-08-17
 
