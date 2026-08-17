@@ -57,6 +57,8 @@ describe("自有截图记账快捷指令", () => {
       ]),
     );
     assert.deepEqual(BOOKKEEPING_CATALOG, backendLabels);
+    assert.ok(Object.hasOwn(BOOKKEEPING_CATALOG.biubiu.支出, "员工薪资"));
+    assert.equal(Object.hasOwn(BOOKKEEPING_CATALOG.biubiu.支出, "員工薪資"), false);
   });
 
   it("builds a canonical compact OCR/category workflow with Token verification", async () => {
@@ -66,10 +68,11 @@ describe("自有截图记账快捷指令", () => {
     const { report } = await buildBookkeepingShortcut({ outputPath });
 
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
-    assert.equal(report.actionCount, 17);
+    assert.equal(report.actionCount, 21);
     assert.equal(report.menuCount, 0);
     assert.equal(report.selectionOptionCount, BOOKKEEPING_SELECTION_OPTIONS.length);
-    assert.equal(report.selectionOptionCount, 31);
+    assert.equal(report.selectionOptionCount, 27);
+    assert.equal(report.hasCancellationGate, true);
     assert.equal(report.hasTokenVerification, true);
     assert.equal(report.canonicalMetadata, true);
     assert.equal(report.hasIcostAction, false);
@@ -88,6 +91,7 @@ describe("自有截图记账快捷指令", () => {
     assert.doesNotMatch(xml, /is\.workflow\.actions\.choosefrommenu/u);
     assert.doesNotMatch(xml, /is\.workflow\.actions\.setvariable/u);
     assert.match(xml, /备注（可选，直接点完成跳过）/u);
+    assert.match(xml, /已取消，不会上传任何记账数据/u);
     const plist = parsePlistXml(xml);
     assert.equal(
       plist.WFWorkflowActions[2].WFWorkflowActionParameters.CustomOutputName,
@@ -97,6 +101,36 @@ describe("自有截图记账快捷指令", () => {
       plist.WFWorkflowActions[3].WFWorkflowActionParameters.WFInput.Variable.Value.OutputName,
       VERIFICATION_STATUS_OUTPUT_NAME,
     );
+  });
+
+  it("keeps every business request inside the non-empty selection branch", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "shortcut-bookkeeping-"));
+    temporaryDirectories.push(directory);
+    const outputPath = join(directory, "bookkeeping.unsigned.shortcut");
+    await buildBookkeepingShortcut({ outputPath });
+    const plist = parsePlistXml(await readFile(outputPath, "utf8"));
+    const actions = plist.WFWorkflowActions;
+    const selection = actions.findIndex(
+      (entry) => entry.WFWorkflowActionIdentifier === "is.workflow.actions.choosefromlist",
+    );
+    const cancellationGate = actions.findIndex(
+      (entry, index) => index > selection
+        && entry.WFWorkflowActionIdentifier === "is.workflow.actions.conditional"
+        && entry.WFWorkflowActionParameters?.WFControlFlowMode === 0,
+    );
+    const businessRequest = actions.findIndex(
+      (entry) => entry.WFWorkflowActionIdentifier === "is.workflow.actions.downloadurl"
+        && new URL(entry.WFWorkflowActionParameters.WFURL).pathname
+          === "/api/integrations/shortcut/bookkeeping",
+    );
+    const cancellationElse = actions.findIndex(
+      (entry, index) => index > cancellationGate
+        && entry.WFWorkflowActionIdentifier === "is.workflow.actions.conditional"
+        && entry.WFWorkflowActionParameters?.WFControlFlowMode === 1,
+    );
+    assert.ok(selection < cancellationGate);
+    assert.ok(cancellationGate < businessRequest);
+    assert.ok(businessRequest < cancellationElse);
   });
 
   it("rejects an accidental iCost action or non-POST payload", async () => {

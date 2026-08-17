@@ -162,7 +162,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 16);
+      assert.equal(firstMigrations.length, 17);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -179,6 +179,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[13].version, "0015");
       assert.equal(firstMigrations[14].version, "0016");
       assert.equal(firstMigrations[15].version, "0017");
+      assert.equal(firstMigrations[16].version, "0018");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -205,6 +206,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0015_secure_settings.mjs",
         "../src/db/migrations/0016_hospital_tender_scheduler.mjs",
         "../src/db/migrations/0017_shortcut_webhook_tokens.mjs",
+        "../src/db/migrations/0018_shortcut_bookkeeping_entries.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -222,10 +224,81 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[13].checksum, migrationChecksum(migrationSources[13]));
       assert.equal(firstMigrations[14].checksum, migrationChecksum(migrationSources[14]));
       assert.equal(firstMigrations[15].checksum, migrationChecksum(migrationSources[15]));
+      assert.equal(firstMigrations[16].checksum, migrationChecksum(migrationSources[16]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
       first?.close();
+    }
+  });
+});
+
+test("migration 0018 creates the isolated Shortcut bookkeeping ledger with remote identity fields", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      const columns = all(db, "PRAGMA table_info(shortcut_bookkeeping_entries)").map((row) => row.name);
+      for (const column of [
+        "id",
+        "owner",
+        "target_system",
+        "ledger_name",
+        "idempotency_key_hash",
+        "request_hash",
+        "status",
+        "attempt_count",
+        "remote_id",
+        "remote_reference",
+        "remote_status",
+        "expense_id",
+        "payment_id",
+      ]) assert.equal(columns.includes(column), true, column);
+      const indexes = all(db, "PRAGMA index_list(shortcut_bookkeeping_entries)")
+        .map((row) => row.name);
+      for (const index of [
+        "idx_shortcut_bookkeeping_remote_identity",
+        "idx_shortcut_bookkeeping_target",
+        "idx_shortcut_bookkeeping_owner_status",
+      ]) assert.equal(indexes.includes(index), true, index);
+      assert.equal(
+        all(db, "SELECT version FROM schema_migrations WHERE version = '0018'").length,
+        1,
+      );
+      assert.match(
+        all(db, "SELECT checksum FROM schema_migrations WHERE version = '0018'")[0].checksum,
+        /^[a-f0-9]{64}$/u,
+      );
+      const insertEntry = db.prepare(`
+        INSERT INTO shortcut_bookkeeping_entries (
+          id, owner, actor, target_system, ledger_name, entry_type, category,
+          idempotency_key_hash, request_hash, raw_text, status
+        ) VALUES (
+          $id, 'owner-a', 'actor-a', 'sentelligent', '出差报销', $entryType, '交通',
+          $idempotencyKeyHash, $requestHash, 'synthetic text', $status
+        )
+      `);
+      assert.throws(
+        () => insertEntry.run({
+          $id: "invalid-income",
+          $entryType: "income",
+          $idempotencyKeyHash: "a".repeat(64),
+          $requestHash: "b".repeat(64),
+          $status: "received",
+        }),
+        /CHECK constraint failed/i,
+      );
+      assert.throws(
+        () => insertEntry.run({
+          $id: "invalid-accepted-without-finance-records",
+          $entryType: "expense",
+          $idempotencyKeyHash: "c".repeat(64),
+          $requestHash: "d".repeat(64),
+          $status: "accepted",
+        }),
+        /CHECK constraint failed/i,
+      );
+    } finally {
+      db.close();
     }
   });
 });
@@ -603,7 +676,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018"],
       );
     } finally {
       migrated.close();
@@ -797,7 +870,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 16);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 17);
     } finally {
       db.close();
     }
@@ -861,7 +934,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018"],
       );
     } finally {
       db.close();

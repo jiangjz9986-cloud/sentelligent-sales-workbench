@@ -12,11 +12,10 @@ export const SHORTCUT_SELECTION_SEPARATOR = " · ";
 const CATALOG = {
   "出差报销": {
     targetSystem: "sentelligent",
-    income: {
-      "工资": [],
-      "奖金": [],
-      "出差": ["报销", "借款"],
-    },
+    // v0.6.2 deliberately opens only the existing travel-expense model. An
+    // empty income catalog makes unsupported income fail validation instead
+    // of being mislabeled as an accepted financial write.
+    income: {},
     expense: {
       "餐饮": ["早餐", "午餐", "晚餐"],
       "住宿费": [],

@@ -742,6 +742,47 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertTravelExpenseDocumentInbox(response?.item, "travelExpenseDocumentInbox.item");
     },
 
+    async listShortcutBookkeepingReviews({ status = "review_required", signal } = {}) {
+      const response = await requestApi(
+        queryPath("/api/integrations/shortcut/bookkeeping/review", { status }),
+        { signal },
+      );
+      if (!Array.isArray(response?.items)) throw new TypeError("shortcutBookkeepingReviews.items must be an array");
+      return response.items;
+    },
+
+    async getShortcutBookkeepingReview(reviewId, { signal } = {}) {
+      const response = await requestApi(
+        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}`,
+        { signal },
+      );
+      return response?.item ?? null;
+    },
+
+    async confirmShortcutBookkeepingReview(reviewId, analysis) {
+      const response = await requestApi(
+        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`,
+        { method: "POST", body: JSON.stringify({ analysis }) },
+      );
+      return response?.item ?? null;
+    },
+
+    async rejectShortcutBookkeepingReview(reviewId, reason) {
+      const response = await requestApi(
+        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/reject`,
+        { method: "POST", body: JSON.stringify({ reason }) },
+      );
+      return response?.item ?? null;
+    },
+
+    async retryShortcutBookkeepingReview(reviewId) {
+      const response = await requestApi(
+        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
+        { method: "POST", body: "{}" },
+      );
+      return response?.item ?? null;
+    },
+
     async listTravelExpenseAdvances({ weekStart, signal } = {}) {
       const query = weekStart ? `?weekStart=${encodeURIComponent(weekStart)}` : "";
       const response = await requestApi(`/api/travel-expense-advances${query}`, { signal });

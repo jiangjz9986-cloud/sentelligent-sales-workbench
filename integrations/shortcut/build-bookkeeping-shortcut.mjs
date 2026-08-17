@@ -20,7 +20,7 @@ export const VERIFICATION_STATUS_OUTPUT_NAME = "Token验证状态";
 
 export const BOOKKEEPING_CATALOG = Object.freeze({
   "出差报销": {
-    收入: { 工资: [], 奖金: [], 出差: ["报销", "借款"] },
+    收入: {},
     支出: {
       餐饮: ["早餐", "午餐", "晚餐"],
       住宿费: [],
@@ -161,8 +161,9 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
   const ocr = allocator.action();
   const options = allocator.action();
   const selection = allocator.action();
+      const selectionGroup = allocator.grouping();
   const note = allocator.action();
-  const idText = allocator.action();
+      const idText = allocator.action();
   const hash = allocator.action();
   const request = allocator.action();
 
@@ -215,6 +216,12 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
       WFChooseFromListActionPrompt: "选择账本 · 收支 · 分类 · 子分类",
       WFInput: attachment(options, "合法记账分类"),
     }, selection),
+    controlAction("is.workflow.actions.conditional", {
+      GroupingIdentifier: selectionGroup,
+      WFCondition: 100,
+      WFControlFlowMode: 0,
+      WFInput: conditionalInput(selection, "本次记账分类"),
+    }),
     action("is.workflow.actions.ask", {
       CustomOutputName: "备注",
       WFAskActionPrompt: "备注（可选，直接点完成跳过）",
@@ -224,7 +231,6 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
       CustomOutputName: "幂等键原文",
       WFTextActionText: textWithAttachments([
         { OutputUUID: ocr, Type: "ActionOutput" },
-        { Type: "CurrentDate" },
         { OutputUUID: selection, Type: "ActionOutput" },
         { OutputUUID: note, Type: "ActionOutput" },
       ]),
@@ -256,6 +262,17 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
     controlAction("is.workflow.actions.showresult", {
       Text: actionOutputText(request, "记账结果"),
     }),
+    controlAction("is.workflow.actions.conditional", {
+      GroupingIdentifier: selectionGroup,
+      WFControlFlowMode: 1,
+    }),
+    controlAction("is.workflow.actions.showresult", {
+      Text: literalToken("已取消，不会上传任何记账数据"),
+    }),
+    action("is.workflow.actions.conditional", {
+      GroupingIdentifier: selectionGroup,
+      WFControlFlowMode: 2,
+    }, allocator.action()),
     controlAction("is.workflow.actions.conditional", {
       GroupingIdentifier: verificationGroup,
       WFControlFlowMode: 1,

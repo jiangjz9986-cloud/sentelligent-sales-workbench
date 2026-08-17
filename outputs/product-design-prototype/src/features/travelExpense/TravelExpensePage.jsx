@@ -15,6 +15,7 @@ import { InvoicePrintPreview } from "./InvoicePrintPreview.jsx";
 import { PaymentProofCenter } from "./PaymentProofCenter.jsx";
 import { PaymentRecordPrintPreview } from "./PaymentRecordPrintPreview.jsx";
 import { ReimbursementOrganizer } from "./ReimbursementOrganizer.jsx";
+import { ShortcutReviewCenter } from "./ShortcutReviewCenter.jsx";
 import { WeeklyExpenseOverview } from "./WeeklyExpenseOverview.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import {
@@ -78,6 +79,7 @@ export function TravelExpensePage({
   const [expenses, setExpenses] = useState([]);
   const [advances, setAdvances] = useState([]);
   const [documentInbox, setDocumentInbox] = useState([]);
+  const [shortcutReviews, setShortcutReviews] = useState([]);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
@@ -106,7 +108,7 @@ export function TravelExpensePage({
     setStatus("loading");
     setError("");
     try {
-      const [nextExpenses, nextAdvances, nextDocumentInbox] = await Promise.all([
+      const [nextExpenses, nextAdvances, nextDocumentInbox, nextShortcutReviews] = await Promise.all([
         apiClient.listTravelExpenses({ weekStart: week.start, signal }),
         apiClient.listTravelExpenseAdvances({ weekStart: week.start, signal }),
         apiClient.listTravelExpenseDocumentInbox({
@@ -114,11 +116,15 @@ export function TravelExpensePage({
           documentKind: "payment_proof",
           signal,
         }),
+        typeof apiClient.listShortcutBookkeepingReviews === "function"
+          ? apiClient.listShortcutBookkeepingReviews({ status: "review_required", signal })
+          : Promise.resolve([]),
       ]);
       if (signal?.aborted) return;
       setExpenses(nextExpenses);
       setAdvances(nextAdvances);
       setDocumentInbox(nextDocumentInbox);
+      setShortcutReviews(nextShortcutReviews);
       setStatus("ready");
     } catch (loadError) {
       if (signal?.aborted) return;
@@ -270,6 +276,10 @@ export function TravelExpensePage({
     }
   }
 
+  function refreshShortcutReviews() {
+    setReloadToken((value) => value + 1);
+  }
+
   async function saveAdvance(advance) {
     setAdvancePending(true);
     try {
@@ -329,7 +339,7 @@ export function TravelExpensePage({
         <div className="expense-view-stage" id={`expense-panel-${activeTab}`} role="tabpanel" aria-labelledby={`expense-tab-${activeTab}`} tabIndex={0}>
           {activeTab === "overview" ? <WeeklyExpenseOverview summary={summary} week={week} onNavigate={navigate} /> : null}
           {activeTab === "ledger" ? <ExpenseLedger expenses={expenses} initialCategory={ledgerCategory} onEdit={(expense) => { setEditingExpense(expense); setEditorOpen(true); }} onDelete={deleteExpense} /> : null}
-          {activeTab === "proofs" ? <PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} /> : null}
+          {activeTab === "proofs" ? <><PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} /><ShortcutReviewCenter reviews={shortcutReviews} apiClient={apiClient} onChanged={refreshShortcutReviews} /></> : null}
           {activeTab === "invoices" ? <InvoiceManager apiClient={apiClient} week={week} expenses={expenses} onOpenPrint={(items) => setInvoicePrintItems(items)} onExpenseChanged={() => setReloadToken((value) => value + 1)} /> : null}
           {activeTab === "settlement" ? <AdvanceSettlement week={week} summary={summary} advances={advances} onSave={saveAdvance} onDelete={deleteAdvance} pending={advancePending} /> : null}
           {activeTab === "organize" ? <ReimbursementOrganizer expenses={expenses} summary={summary} week={week} owner={owner} getAttachmentUrl={getAttachmentUrl} onOpenPrint={() => setPrintOpen(true)} onRefresh={() => setReloadToken((value) => value + 1)} /> : null}

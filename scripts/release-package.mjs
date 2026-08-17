@@ -93,6 +93,9 @@ export const REQUIRED_ENV_NAMES = Object.freeze([
   "ICOST_WEBHOOK_OWNER",
   "ICOST_WEBHOOK_RATE_LIMIT",
   "ICOST_WEBHOOK_WINDOW_MS",
+  "QINGYANG_BOOKKEEPING_BRIDGE_URL",
+  "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
+  "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
   "INVOICE_OCR_COMMAND",
   "INVOICE_PDF_TEXT_COMMAND",
   "INVOICE_OCR_LANGUAGES",
@@ -620,7 +623,9 @@ export function shouldExcludeReleasePath(filePath) {
       lowerPath.startsWith("outputs/logo/") ||
       lowerPath === "森特透明底logo 800 800.png" ||
       lowerPath ===
-        "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut";
+        "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut" ||
+      lowerPath ===
+        "integrations/shortcut/shortcut-bookkeeping.unsigned.shortcut";
     if (!allowedMedia) return true;
   }
   return false;

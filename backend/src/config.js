@@ -137,6 +137,18 @@ function isStrongIndependentSecret(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]{64,}$/.test(value);
 }
 
+export const QINGYANG_BOOKKEEPING_BRIDGE_URL =
+  "http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping";
+
+function qingyangBridgeUrl(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  if (normalized !== QINGYANG_BOOKKEEPING_BRIDGE_URL) {
+    throw new Error(`QINGYANG_BOOKKEEPING_BRIDGE_URL must be exactly ${QINGYANG_BOOKKEEPING_BRIDGE_URL}`);
+  }
+  return normalized;
+}
+
 function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (config.nodeEnv !== "production") return;
   if (!config.authRequired) throw new Error("AUTH_REQUIRED must be true in production");
@@ -183,6 +195,22 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   }
   if (config.shortcutWebhookToken) {
     throw new Error("SHORTCUT_WEBHOOK_TOKEN is not allowed in production; use account-bound database tokens");
+  }
+  if (config.qingyangBookkeepingBridgeUrl !== QINGYANG_BOOKKEEPING_BRIDGE_URL) {
+    throw new Error("QINGYANG_BOOKKEEPING_BRIDGE_URL is required in production");
+  }
+  if (!isStrongIndependentSecret(config.qingyangBookkeepingBridgeToken)) {
+    throw new Error("QINGYANG_BOOKKEEPING_BRIDGE_TOKEN must contain at least 32 bytes of high-entropy data in production");
+  }
+  if (new Set([
+    config.authSessionSecret,
+    config.settingsEncryptionKey,
+    config.weixinAgentApiToken,
+    config.assistantConfirmationSecret,
+    config.qingyangBookkeepingBridgeToken,
+    ...(config.hospitalTenderSyncToken ? [config.hospitalTenderSyncToken] : []),
+  ]).size !== (config.hospitalTenderSyncToken ? 6 : 5)) {
+    throw new Error("Production session, settings, machine, confirmation, and Qingyang bridge secrets must be independent");
   }
   if (!config.authCookieSecure) throw new Error("AUTH_COOKIE_SECURE must be true in production");
   if (!explicitAllowedOrigins || config.corsAllowedOrigins.length === 0) {
@@ -231,6 +259,13 @@ export function loadConfig(overrides = {}) {
   const shortcutWebhookWindowMs = positiveInteger(
     env.shortcutWebhookWindowMs ?? env.SHORTCUT_WEBHOOK_WINDOW_MS ?? 300_000,
     "SHORTCUT_WEBHOOK_WINDOW_MS",
+  );
+  const qingyangBookkeepingBridgeTimeoutMs = boundedPositiveInteger(
+    env.qingyangBookkeepingBridgeTimeoutMs
+      ?? env.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS
+      ?? 10_000,
+    "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
+    30_000,
   );
   const invoiceTextExtractionTimeoutMs = positiveInteger(
     env.invoiceTextExtractionTimeoutMs ?? env.INVOICE_TEXT_EXTRACTION_TIMEOUT_MS ?? 30_000,
@@ -345,6 +380,13 @@ export function loadConfig(overrides = {}) {
     ).trim(),
     shortcutWebhookRateLimit,
     shortcutWebhookWindowMs,
+    qingyangBookkeepingBridgeUrl: qingyangBridgeUrl(
+      env.qingyangBookkeepingBridgeUrl ?? env.QINGYANG_BOOKKEEPING_BRIDGE_URL,
+    ),
+    qingyangBookkeepingBridgeToken: String(
+      env.qingyangBookkeepingBridgeToken ?? env.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN ?? "",
+    ).trim(),
+    qingyangBookkeepingBridgeTimeoutMs,
     invoiceOcrCommand: String(env.invoiceOcrCommand ?? env.INVOICE_OCR_COMMAND ?? "").trim(),
     invoicePdfTextCommand: String(
       env.invoicePdfTextCommand ?? env.INVOICE_PDF_TEXT_COMMAND ?? "",

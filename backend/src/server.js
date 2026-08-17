@@ -82,11 +82,19 @@ import {
 } from "./integrations/icostWebhook.js";
 import {
   authenticateShortcutWebhook,
+  isShortcutBookkeepingRouteAllowed,
+  SHORTCUT_BOOKKEEPING_ROUTE,
   SHORTCUT_BOOKKEEPING_CATALOG_ROUTE,
   SHORTCUT_BOOKKEEPING_VERIFY_ROUTE,
   shortcutCatalogResponse,
+  validateShortcutBookkeepingPayload,
 } from "./integrations/shortcutBookkeeping.js";
+import {
+  applyShortcutSelectionAnalysis,
+  createShortcutBookkeepingRepository,
+} from "./integrations/shortcutBookkeepingRepository.js";
 import { createShortcutWebhookTokenRepository } from "./integrations/shortcutWebhookTokenRepository.js";
+import { createQingyangBookkeepingBridge } from "./integrations/qingyangBookkeepingBridge.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import {
@@ -229,12 +237,47 @@ function icostResponseItem(item, replayed) {
   };
 }
 
-function shortcutVerificationResponse({ tokenValid, error = null } = {}) {
+function shortcutResponseItem(item, replayed) {
   return {
-    status: "error",
+    id: item.id,
+    status: item.status,
+    targetSystem: item.targetSystem,
+    ledgerName: item.ledgerName,
+    entryType: item.entryType,
+    category: item.category,
+    subcategory: item.subcategory,
+    note: item.note,
+    warnings: item.warnings,
+    expenseId: item.expenseId,
+    paymentId: item.paymentId,
+    expenseReferenceCode: item.expenseReferenceCode,
+    remoteId: item.remoteId,
+    remoteReference: item.remoteReference,
+    remoteStatus: item.remoteStatus,
+    replayed,
+  };
+}
+
+function shortcutReviewResponseItem(item, replayed = false) {
+  return {
+    ...shortcutResponseItem(item, replayed),
+    rawText: item.rawText,
+    analysis: item.analysis,
+    analysisProvider: item.analysisProvider,
+    analysisModel: item.analysisModel,
+    errorCode: item.errorCode,
+    attemptCount: item.attemptCount,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  };
+}
+
+function shortcutVerificationResponse({ tokenValid, bookkeepingReady = false, error = null } = {}) {
+  return {
+    status: tokenValid && bookkeepingReady ? "ok" : "error",
     integration: "shortcut",
     tokenValid: Boolean(tokenValid),
-    bookkeepingReady: false,
+    bookkeepingReady: Boolean(bookkeepingReady),
     protocolVersion: 1,
     ...(error ? { error } : {}),
   };
@@ -337,6 +380,19 @@ function validateInvoiceUploadPayload(value) {
     content: decodeStrictBase64(body.contentBase64),
     sourceRef: payloadText(body.sourceRef, "sourceRef", { optional: true, max: 500 }),
   };
+}
+
+function validateShortcutReviewConfirmPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["analysis"]));
+  const analysis = plainObject(body.analysis, "analysis");
+  return { analysis };
+}
+
+function validateShortcutReviewRejectPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["reason"]));
+  return { reason: payloadText(body.reason, "reason", { max: 1_000 }) };
 }
 
 function validateTravelExpenseDocumentInboxPayload(value) {
@@ -2419,6 +2475,17 @@ export function createServer(options = {}) {
     ...(options.shortcutWebhookTokenFactory ? { tokenFactory: options.shortcutWebhookTokenFactory } : {}),
     ...(options.shortcutWebhookTokenClock ? { clock: options.shortcutWebhookTokenClock } : {}),
   });
+  const shortcutBookkeepingRepository = createShortcutBookkeepingRepository(db, {
+    ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
+    ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
+  });
+  const qingyangBookkeepingBridge = options.qingyangBookkeepingBridge
+    ?? createQingyangBookkeepingBridge({
+      url: config.qingyangBookkeepingBridgeUrl,
+      token: config.qingyangBookkeepingBridgeToken,
+      timeoutMs: config.qingyangBookkeepingBridgeTimeoutMs,
+      fetchImpl: options.fetchImpl ?? fetch,
+    });
   const icostRateLimiter = options.icostRateLimiter ?? createFixedWindowLimiter({
     limit: config.icostWebhookRateLimit,
     windowMs: config.icostWebhookWindowMs,
@@ -2428,6 +2495,11 @@ export function createServer(options = {}) {
     limit: config.shortcutWebhookRateLimit,
     windowMs: config.shortcutWebhookWindowMs,
     clock: options.shortcutVerifyRateLimitClock ?? Date.now,
+  });
+  const shortcutWriteRateLimiter = options.shortcutWriteRateLimiter ?? createFixedWindowLimiter({
+    limit: config.shortcutWebhookRateLimit,
+    windowMs: config.shortcutWebhookWindowMs,
+    clock: options.shortcutWriteRateLimitClock ?? Date.now,
   });
   const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
   const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => (
@@ -2766,24 +2838,161 @@ export function createServer(options = {}) {
           return;
         }
 
-        // This release verifies identity only. Keep status non-ok so the V4
-        // Shortcut stops before its POST action, which is intentionally not
-        // registered until cross-system bookkeeping routing is safe.
+        const bookkeepingReady = qingyangBookkeepingBridge.isConfigured();
         sendJson(response, 200, shortcutVerificationResponse({
           tokenValid: true,
-          error: {
-            code: "SHORTCUT_BOOKKEEPING_NOT_READY",
-            message: "Token 验证成功，但记账写入功能尚未开放",
-          },
+          bookkeepingReady,
+          ...(bookkeepingReady ? {} : {
+            error: {
+              code: "SHORTCUT_BOOKKEEPING_NOT_READY",
+              message: "Token 验证成功，但记账服务尚未完成配置",
+            },
+          }),
         }), { "Cache-Control": "no-store" });
         return;
       }
 
-      // Keep the write boundary explicitly absent in this release. Resolve it
-      // before generic machine authentication so an unregistered route remains
-      // a stable 404 even when a caller sends an old integration credential.
-      if (url.pathname === "/api/integrations/shortcut/bookkeeping") {
-        notFound();
+      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE) {
+        if (!isShortcutBookkeepingRouteAllowed(request.method, url.pathname)) {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut bookkeeping"),
+            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        let integrationIdentity;
+        try {
+          integrationIdentity = authenticateShortcutWebhook(
+            request.headers,
+            config,
+            (token) => shortcutWebhookTokenRepository.resolve(token),
+          );
+        } catch {
+          throw new HttpError(
+            503,
+            "SHORTCUT_AUTHENTICATION_UNAVAILABLE",
+            "快捷指令身份验证暂时不可用，请稍后重试",
+          );
+        }
+        if (!integrationIdentity) {
+          const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
+          unauthorized(
+            response,
+            supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token",
+            supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED",
+          );
+        }
+        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
+        const rateLimit = shortcutWriteRateLimiter.consume(
+          `${integrationIdentity.account}\u0000${remoteAddress}`,
+        );
+        if (!rateLimit.allowed) {
+          sendHttpError(
+            response,
+            new HttpError(429, "RATE_LIMITED", "Too many Shortcut bookkeeping requests"),
+            responseOptions(response, {
+              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
+              "Cache-Control": "no-store",
+            }),
+          );
+          return;
+        }
+        const body = validateShortcutBookkeepingPayload(await readJson(request));
+        const received = shortcutBookkeepingRepository.receive({
+          owner: integrationIdentity.account,
+          actor: integrationIdentity.account,
+          ledgerName: body.ledgerName,
+          entryType: body.entryType,
+          category: body.category,
+          subcategory: body.subcategory,
+          note: body.note,
+          idempotencyKey: body.idempotencyKey,
+          requestHash: requestHash(body),
+          rawText: body.text,
+          capturedAt: body.capturedAt,
+          sourceId: body.sourceId,
+        });
+        if (received.replayed && ["accepted", "review_required"].includes(received.item.status)) {
+          sendJson(response, 200, {
+            item: shortcutResponseItem(received.item, true),
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (received.replayed && received.item.status === "rejected") {
+          throw new HttpError(
+            409,
+            "QINGYANG_REMOTE_TERMINAL",
+            "轻氧已拒绝或作废这笔记账请求，不能自动重试",
+          );
+        }
+        const claimed = shortcutBookkeepingRepository.claim(received.item.id);
+        if (claimed.replayed) {
+          sendJson(response, 200, {
+            item: shortcutResponseItem(claimed.item, true),
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+
+        try {
+          if (body.targetSystem === "sentelligent") {
+            const analyzed = applyShortcutSelectionAnalysis(
+              await travelExpenseAnalyzer(body.text),
+              body,
+            );
+            const completed = shortcutBookkeepingRepository.completeLocal(received.item.id, {
+              analysis: analyzed,
+              leaseToken: claimed.leaseToken,
+            });
+            sendJson(response, 201, {
+              item: shortcutResponseItem(completed.item, completed.replayed),
+            }, { "Cache-Control": "no-store" });
+            return;
+          }
+
+          const remote = await qingyangBookkeepingBridge.forward({
+            owner: integrationIdentity.account,
+            text: body.text,
+            capturedAt: body.capturedAt,
+            idempotencyKey: body.idempotencyKey,
+            entryType: body.entryType,
+            category: body.category,
+            subcategory: body.subcategory,
+            note: body.note,
+          });
+          if (remote.status === "failed") {
+            throw new HttpError(
+              503,
+              "QINGYANG_REMOTE_RETRYABLE_FAILURE",
+              "轻氧尚未完成这笔记账，请稍后使用同一请求重试",
+            );
+          }
+          if (["rejected", "voided"].includes(remote.status)) {
+            shortcutBookkeepingRepository.completeRemoteTerminal(received.item.id, {
+              remote,
+              leaseToken: claimed.leaseToken,
+            });
+            throw new HttpError(
+              409,
+              "QINGYANG_REMOTE_TERMINAL",
+              "轻氧已拒绝或作废这笔记账请求，不能自动重试",
+            );
+          }
+          const completed = shortcutBookkeepingRepository.completeRemote(received.item.id, {
+            remote,
+            leaseToken: claimed.leaseToken,
+          });
+          sendJson(response, 202, {
+            item: shortcutResponseItem(completed.item, completed.replayed),
+          }, { "Cache-Control": "no-store" });
+          return;
+        } catch (error) {
+          shortcutBookkeepingRepository.release(received.item.id, {
+            leaseToken: claimed.leaseToken,
+            errorCode: error instanceof HttpError ? error.code : "SHORTCUT_PROCESSING_FAILED",
+          });
+          throw error;
+        }
       }
 
       if (url.pathname === ICOST_EXPENSE_ROUTE) {
@@ -3120,6 +3329,123 @@ export function createServer(options = {}) {
         if (!revoked) return notFound();
         sendJson(response, 200, { item: revoked }, { "Cache-Control": "no-store" });
         return;
+      }
+
+      const shortcutReviewRoute = "/api/integrations/shortcut/bookkeeping/review";
+      const shortcutReviewParts = url.pathname.split("/");
+      const isShortcutReviewPath = url.pathname === shortcutReviewRoute
+        || (shortcutReviewParts[0] === ""
+          && shortcutReviewParts[1] === "api"
+          && shortcutReviewParts[2] === "integrations"
+          && shortcutReviewParts[3] === "shortcut"
+          && shortcutReviewParts[4] === "bookkeeping"
+          && shortcutReviewParts[5] === "review");
+      if (isShortcutReviewPath) {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const owner = request.authContext.account;
+        if (request.method === "GET" && url.pathname === shortcutReviewRoute) {
+          const status = url.searchParams.get("status") || "review_required";
+          const limitText = url.searchParams.get("limit");
+          const limit = limitText ? Number(limitText) : 100;
+          const items = shortcutBookkeepingRepository.listReview({ owner, status, limit });
+          sendJson(response, 200, {
+            items: items.map((item) => shortcutReviewResponseItem(item)),
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        const reviewId = shortcutReviewParts[6];
+        if (!reviewId || shortcutReviewParts.length > 8) return notFound();
+        if (request.method === "GET" && shortcutReviewParts.length === 7) {
+          const item = shortcutBookkeepingRepository.getReview(reviewId, { owner });
+          if (!item) return notFound();
+          sendJson(response, 200, { item: shortcutReviewResponseItem(item) }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (request.method !== "POST" || shortcutReviewParts.length !== 8) {
+          sendHttpError(response, new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET and POST are allowed for Shortcut review"));
+          return;
+        }
+        const action = shortcutReviewParts[7];
+        if (action === "reject") {
+          const { reason } = validateShortcutReviewRejectPayload(await readJson(request));
+          const result = shortcutBookkeepingRepository.rejectReview(reviewId, {
+            owner,
+            actor: owner,
+            reason,
+          });
+          sendJson(response, result.replayed ? 200 : 200, {
+            item: shortcutReviewResponseItem(result.item, result.replayed),
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (action === "confirm") {
+          const { analysis } = validateShortcutReviewConfirmPayload(await readJson(request));
+          const claimed = shortcutBookkeepingRepository.claimReview(reviewId, { owner });
+          if (claimed.replayed) {
+            sendJson(response, 200, { item: shortcutReviewResponseItem(claimed.item, true) }, { "Cache-Control": "no-store" });
+            return;
+          }
+          try {
+            const completed = shortcutBookkeepingRepository.completeLocal(reviewId, {
+              analysis,
+              leaseToken: claimed.leaseToken,
+            });
+            sendJson(response, completed.replayed ? 200 : 201, {
+              item: shortcutReviewResponseItem(completed.item, completed.replayed),
+            }, { "Cache-Control": "no-store" });
+          } catch (error) {
+            shortcutBookkeepingRepository.release(reviewId, {
+              leaseToken: claimed.leaseToken,
+              errorCode: "MANUAL_CONFIRM_FAILED",
+            });
+            if (error instanceof TypeError) {
+              throw new HttpError(422, "VALIDATION_ERROR", "Review confirmation is invalid", { body: error.message });
+            }
+            throw error;
+          }
+          return;
+        }
+        if (action === "retry") {
+          const retried = shortcutBookkeepingRepository.retryReview(reviewId, { owner, actor: owner });
+          if (retried.replayed) {
+            sendJson(response, 200, { item: shortcutReviewResponseItem(retried.item, true) }, { "Cache-Control": "no-store" });
+            return;
+          }
+          const claimed = shortcutBookkeepingRepository.claim(reviewId);
+          try {
+            const current = claimed.item;
+            let analyzed;
+            try {
+              analyzed = applyShortcutSelectionAnalysis(
+                await travelExpenseAnalyzer(current.rawText),
+                current,
+              );
+            } catch {
+              analyzed = {
+                status: "review_required",
+                confidence: 0,
+                expense: null,
+                warnings: ["model_error"],
+                source: { provider: config.modelProvider || "deepseek", model: config.modelName || null },
+              };
+            }
+            const completed = shortcutBookkeepingRepository.completeLocal(reviewId, {
+              analysis: analyzed,
+              leaseToken: claimed.leaseToken,
+            });
+            sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
+              item: shortcutReviewResponseItem(completed.item, completed.replayed),
+            }, { "Cache-Control": "no-store" });
+          } catch (error) {
+            shortcutBookkeepingRepository.release(reviewId, {
+              leaseToken: claimed.leaseToken,
+              errorCode: "SHORTCUT_REVIEW_RETRY_FAILED",
+            });
+            throw error;
+          }
+          return;
+        }
+        return notFound();
       }
 
       if (request.method === "POST" && url.pathname === "/api/hospital-tenders/run") {

@@ -35,6 +35,8 @@ const preflightCheckIds = [
   "env.aiModel",
   "env.icostWebhook",
   "env.icostIsolation",
+  "env.qingyangBridge",
+  "env.qingyangBridgeIsolation",
   "env.invoiceExtraction",
   "database.environmentBinding",
   "database.quickCheck",
@@ -78,7 +80,7 @@ function validPreflightReport({
       hostname: "sentelligent-production-01",
       machineIdSha256: "e".repeat(64),
     },
-    summary: { total: 25, passed: 25, failed: 0 },
+    summary: { total: 27, passed: 27, failed: 0 },
     checks: preflightCheckIds.map((id) => ({
       id,
       status: "passed",
@@ -671,7 +673,7 @@ describe("controlled production cutover", () => {
     }
   });
 
-  it("accepts only a fresh exact 25/25 preflight report bound to this cutover", () => {
+  it("accepts only a fresh exact 27/27 preflight report bound to this cutover", () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-")));
     const reportPath = join(root, "preflight.json");
     const releasePath = `${projectRoot}/releases/release-candidate`;
@@ -712,13 +714,13 @@ describe("controlled production cutover", () => {
           /fresh|age/i,
         ],
         [
-          "not 25\/25",
+          "not 27\/27",
           {
             ...validPreflightReport(),
             status: "failed",
-            summary: { total: 25, passed: 24, failed: 1 },
+            summary: { total: 27, passed: 26, failed: 1 },
           },
-          /25\/25|passed/i,
+          /27\/27|passed/i,
         ],
         [
           "legacy 24\/24 report without the assistant secret gate",
@@ -729,7 +731,7 @@ describe("controlled production cutover", () => {
               (check) => check.id !== "env.assistantSecrets",
             ),
           },
-          /25\/25/i,
+          /27\/27/i,
         ],
         [
           "wrong release",

@@ -105,6 +105,7 @@ function validEnvironment(origin, databaseUrl) {
   const icostWebhookToken = createHash("sha256")
     .update("fixture-icost-webhook-token")
     .digest("hex");
+  const qingyangBookkeepingBridgeToken = Buffer.alloc(32, 8).toString("base64url");
   const icostWebhookOwner = "fixture-owner";
   const invoiceOcrCommand = "/opt/sentelligent-tools/tesseract-fixture";
   const invoicePdfTextCommand = "/opt/sentelligent-tools/pdftotext-fixture";
@@ -141,6 +142,9 @@ function validEnvironment(origin, databaseUrl) {
       `ICOST_WEBHOOK_OWNER=${icostWebhookOwner}`,
       "ICOST_WEBHOOK_RATE_LIMIT=37",
       "ICOST_WEBHOOK_WINDOW_MS=271828",
+      "QINGYANG_BOOKKEEPING_BRIDGE_URL=http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping",
+      `QINGYANG_BOOKKEEPING_BRIDGE_TOKEN=${qingyangBookkeepingBridgeToken}`,
+      "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS=10000",
       `INVOICE_OCR_COMMAND=${invoiceOcrCommand}`,
       `INVOICE_PDF_TEXT_COMMAND=${invoicePdfTextCommand}`,
       `INVOICE_OCR_LANGUAGES=${invoiceOcrLanguages}`,
@@ -156,6 +160,7 @@ function validEnvironment(origin, databaseUrl) {
     hospitalTenderSyncToken,
     hospitalTenderPushplusToken,
     icostWebhookToken,
+    qingyangBookkeepingBridgeToken,
     icostWebhookOwner,
     invoiceOcrCommand,
     invoicePdfTextCommand,
@@ -761,8 +766,8 @@ describe("production preflight", () => {
       }
 
       assert.equal(report.status, "failed");
-      assert.equal(report.summary.total, 25);
-      assert.equal(report.summary.passed, 24);
+      assert.equal(report.summary.total, 27);
+      assert.equal(report.summary.passed, 26);
       assert.equal(report.summary.failed, 1);
       assert.equal(
         report.checks.find((check) => check.id === "release.identity")?.status,
@@ -785,6 +790,8 @@ describe("production preflight", () => {
         "env.aiModel",
         "env.icostWebhook",
         "env.icostIsolation",
+        "env.qingyangBridge",
+        "env.qingyangBridgeIsolation",
         "env.invoiceExtraction",
         "database.environmentBinding",
         "database.quickCheck",
@@ -808,6 +815,7 @@ describe("production preflight", () => {
         environment.modelApiKey,
         environment.weixinAgentApiToken,
         environment.icostWebhookToken,
+        environment.qingyangBookkeepingBridgeToken,
         environment.icostWebhookOwner,
         environment.invoiceOcrCommand,
         environment.invoicePdfTextCommand,
@@ -925,6 +933,10 @@ describe("production preflight", () => {
         ["fractional iCost window", "ICOST_WEBHOOK_WINDOW_MS", "1.5", "env.icostWebhook"],
         ["reused model token", "ICOST_WEBHOOK_TOKEN", environment.modelApiKey, "env.icostIsolation"],
         ["reused WeChat token", "ICOST_WEBHOOK_TOKEN", environment.weixinAgentApiToken, "env.icostIsolation"],
+        ["unsafe bridge URL", "QINGYANG_BOOKKEEPING_BRIDGE_URL", "https://example.test/bridge", "env.qingyangBridge"],
+        ["short bridge token", "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN", "short", "env.qingyangBridge"],
+        ["oversized bridge timeout", "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS", "30001", "env.qingyangBridge"],
+        ["reused iCost bridge token", "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN", environment.icostWebhookToken, "env.qingyangBridgeIsolation"],
         ["missing OCR command", "INVOICE_OCR_COMMAND", "", "env.invoiceExtraction"],
         ["relative OCR path", "INVOICE_OCR_COMMAND", "../tesseract", "env.invoiceExtraction"],
         ["nonexistent OCR executable", "INVOICE_OCR_COMMAND", "/opt/sentelligent-tools/missing-tesseract", "env.invoiceExtraction"],
@@ -1704,20 +1716,23 @@ describe("production preflight", () => {
     }
   });
 
-  it("allows the v0.5.7 schema-3 environment contract only for the current release", async () => {
+  it("allows the v0.6.1 schema-3 environment contract only for the current release", async () => {
     const fixture = makeReleaseFixture();
     try {
       const legacyManifest = structuredClone(fixture.manifest);
-      const v060EnvironmentNames = new Set([
+      const legacyExcludedEnvironmentNames = new Set([
         "SETTINGS_ENCRYPTION_KEY",
         "HOSPITAL_TENDER_PYTHON",
         "HOSPITAL_TENDER_AUTO_RUN",
         "HOSPITAL_TENDER_INTERVAL_MINUTES",
         "HOSPITAL_TENDER_BATCH_SIZE",
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
+        "QINGYANG_BOOKKEEPING_BRIDGE_URL",
+        "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
+        "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
       ]);
       legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
-        (name) => !v060EnvironmentNames.has(name),
+        (name) => !legacyExcludedEnvironmentNames.has(name),
       );
       writeFileSync(
         fixture.filePath("release-manifest.json"),

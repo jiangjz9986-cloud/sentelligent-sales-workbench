@@ -291,6 +291,7 @@ describe("portable release package", () => {
       "outputs/logo/sent-zhixing-transparent-logo.png",
       "森特透明底LOGO 800 800.png",
       "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut",
+      "integrations/shortcut/shortcut-bookkeeping.unsigned.shortcut",
     ]) {
       assert.equal(shouldExcludeReleasePath(file), false, `${file} must be preserved`);
     }

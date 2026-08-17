@@ -92,7 +92,7 @@ Required:
   --backup-dir=<path>        Controlled backup output root
   --evidence-dir=<path>      Controlled evidence output root
   --weixin-session-dir=<path> WeChat session state directory
-  --preflight-report=<path>  Fresh passed 25/25 production preflight report
+  --preflight-report=<path>  Fresh passed 27/27 production preflight report
   --preflight-report-sha256=<sha256> Exact report SHA-256
 
 Optional:
@@ -466,6 +466,8 @@ verify_preflight_report() {
         "env.aiModel",
         "env.icostWebhook",
         "env.icostIsolation",
+        "env.qingyangBridge",
+        "env.qingyangBridgeIsolation",
         "env.invoiceExtraction",
         "database.environmentBinding",
         "database.quickCheck",
@@ -488,14 +490,14 @@ verify_preflight_report() {
         report.schemaVersion !== 2 ||
         report.product !== "sentelligent-sales-workbench" ||
         report.status !== "passed" ||
-        report.summary?.total !== 25 ||
-        report.summary?.passed !== 25 ||
+        report.summary?.total !== 27 ||
+        report.summary?.passed !== 27 ||
         report.summary?.failed !== 0
       ) {
-        throw new Error("Preflight report must be an exact passed 25/25 result");
+        throw new Error("Preflight report must be an exact passed 27/27 result");
       }
-      if (!Array.isArray(report.checks) || report.checks.length !== 25) {
-        throw new Error("Preflight report must contain exactly 25 checks");
+      if (!Array.isArray(report.checks) || report.checks.length !== 27) {
+        throw new Error("Preflight report must contain exactly 27 checks");
       }
       const observedChecks = report.checks.map((check) => check?.id).sort();
       if (
@@ -815,6 +817,9 @@ verify_release_manifest() {
         "ICOST_WEBHOOK_OWNER",
         "ICOST_WEBHOOK_RATE_LIMIT",
         "ICOST_WEBHOOK_WINDOW_MS",
+        "QINGYANG_BOOKKEEPING_BRIDGE_URL",
+        "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
+        "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
         "INVOICE_OCR_COMMAND",
         "INVOICE_PDF_TEXT_COMMAND",
         "INVOICE_OCR_LANGUAGES",

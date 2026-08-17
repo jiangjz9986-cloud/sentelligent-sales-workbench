@@ -124,7 +124,7 @@ describe("Shortcut webhook token management API", () => {
     assert.equal(verified.body.tokenValid, true);
     assert.equal(verified.body.bookkeepingReady, false);
     assert.equal(verified.body.error.code, "SHORTCUT_BOOKKEEPING_NOT_READY");
-    assert.equal(verified.body.error.message, "Token 验证成功，但记账写入功能尚未开放");
+    assert.equal(verified.body.error.message, "Token 验证成功，但记账服务尚未完成配置");
 
     const listed = await request("/api/integrations/shortcut/tokens", {
       headers: { Cookie: session.cookie },

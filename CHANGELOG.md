@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### iOS 快捷指令真实记账
+
+- 新增 `0018` 快捷记账台账和 `POST /api/integrations/shortcut/bookkeeping`，支持账号全局幂等、处理租约、失败恢复和审计。
+- 出差报销支出写入森特差旅费用和支付记录；biubiu 通过固定 loopback 地址与独立 bridge credential 写轻氧，远端未确认时 fail closed。
+- Token 验证只有在写入链路配置完整时返回 `bookkeepingReady=true`；生产 preflight 扩展为 `27/27` 并校验桥接凭据隔离。
+
 ## [0.6.1] - 2026-08-17
 
 ### iOS 快捷指令 Token 验证

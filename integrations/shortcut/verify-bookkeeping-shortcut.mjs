@@ -101,6 +101,7 @@ function assertActionShape(actions) {
     ACTIONS.ocr,
     ACTIONS.list,
     ACTIONS.choose,
+    ACTIONS.conditional,
     ACTIONS.ask,
     ACTIONS.text,
     ACTIONS.hash,
@@ -109,23 +110,42 @@ function assertActionShape(actions) {
     ACTIONS.conditional,
     ACTIONS.showResult,
     ACTIONS.conditional,
+    ACTIONS.conditional,
+    ACTIONS.showResult,
+    ACTIONS.conditional,
   ];
   requireValue(
     JSON.stringify(actions.map(identifier)) === JSON.stringify(expected),
-    "快捷指令必须保持 17 动作兼容流程",
+    "快捷指令必须保持 21 动作安全流程",
   );
 
   const controlGroup = params(actions[3]).GroupingIdentifier;
   requireValue(controlGroup && params(actions[3]).WFControlFlowMode === 0, "Token 验证条件起点不正确");
-  requireValue(params(actions[14]).GroupingIdentifier === controlGroup, "Token 验证否则分支不匹配");
-  requireValue(params(actions[14]).WFControlFlowMode === 1, "Token 验证否则分支模式不正确");
-  requireValue(params(actions[16]).GroupingIdentifier === controlGroup, "Token 验证条件结束标记不匹配");
-  requireValue(params(actions[16]).WFControlFlowMode === 2, "Token 验证条件未正确结束");
-  requireValue(!uuid(actions[3]) && !uuid(actions[14]), "Apple 条件起点和否则分支不得写入 UUID");
-  requireValue(uuid(actions[16]), "Apple 条件结束标记必须有 UUID");
-  requireValue(!uuid(actions[13]) && !uuid(actions[15]), "显示结果动作应保持 Apple 基线格式");
+  requireValue(params(actions[18]).GroupingIdentifier === controlGroup, "Token 验证否则分支不匹配");
+  requireValue(params(actions[18]).WFControlFlowMode === 1, "Token 验证否则分支模式不正确");
+  requireValue(params(actions[20]).GroupingIdentifier === controlGroup, "Token 验证条件结束标记不匹配");
+  requireValue(params(actions[20]).WFControlFlowMode === 2, "Token 验证条件未正确结束");
 
-  const expectedUuidActions = actions.filter((_, index) => ![3, 13, 14, 15].includes(index));
+  const selectionGroup = params(actions[9]).GroupingIdentifier;
+  requireValue(selectionGroup && params(actions[9]).WFControlFlowMode === 0, "取消门禁条件起点不正确");
+  requireValue(params(actions[9]).WFCondition === 100, "取消门禁必须检查分类选择是否有值");
+  requireValue(params(actions[15]).GroupingIdentifier === selectionGroup, "取消门禁否则分支不匹配");
+  requireValue(params(actions[15]).WFControlFlowMode === 1, "取消门禁否则分支模式不正确");
+  requireValue(params(actions[17]).GroupingIdentifier === selectionGroup, "取消门禁条件结束标记不匹配");
+  requireValue(params(actions[17]).WFControlFlowMode === 2, "取消门禁条件未正确结束");
+  requireValue(
+    !uuid(actions[3]) && !uuid(actions[9]) && !uuid(actions[15]) && !uuid(actions[18]),
+    "Apple 条件起点和否则分支不得写入 UUID",
+  );
+  requireValue(uuid(actions[17]) && uuid(actions[20]), "Apple 条件结束标记必须有 UUID");
+  requireValue(
+    !uuid(actions[14]) && !uuid(actions[16]) && !uuid(actions[19]),
+    "显示结果动作应保持 Apple 基线格式",
+  );
+
+  const expectedUuidActions = actions.filter(
+    (_, index) => ![3, 9, 14, 15, 16, 18, 19].includes(index),
+  );
   requireValue(expectedUuidActions.every((entry) => uuid(entry)), "可输出动作和条件结束标记必须有 UUID");
   const ids = expectedUuidActions.map(uuid);
   requireValue(new Set(ids).size === ids.length, "动作 UUID 不得重复");
@@ -179,16 +199,24 @@ export function inspectBookkeepingShortcutXml(xml) {
   requireValue(JSON.stringify(options) === JSON.stringify(BOOKKEEPING_SELECTION_OPTIONS), "合法分类列表与账本目录不一致");
   requireValue(outputUuid(params(actions[8]).WFInput) === uuid(actions[7]), "分类选择未绑定合法分类列表");
   requireValue(params(actions[8]).WFChooseFromListActionPrompt === "选择账本 · 收支 · 分类 · 子分类", "分类选择提示不正确");
+  requireValue(
+    params(actions[9]).WFInput?.Variable?.Value?.OutputUUID === uuid(actions[8]),
+    "取消门禁必须绑定分类选择输出",
+  );
 
-  requireValue(params(actions[9]).WFAskActionPrompt === "备注（可选，直接点完成跳过）", "备注必须明确为可选");
-  requireValue(params(actions[11]).WFHashType === "SHA256", "幂等键必须使用 SHA-256");
-  requireValue(outputUuid(params(actions[11]).WFInput) === uuid(actions[10]), "SHA-256 未绑定幂等键原文");
-  const idAttachments = params(actions[10]).WFTextActionText?.Value?.attachmentsByRange ?? {};
-  for (const expectedUuid of [uuid(actions[6]), uuid(actions[8]), uuid(actions[9])]) {
+  requireValue(params(actions[10]).WFAskActionPrompt === "备注（可选，直接点完成跳过）", "备注必须明确为可选");
+  requireValue(params(actions[12]).WFHashType === "SHA256", "幂等键必须使用 SHA-256");
+  requireValue(outputUuid(params(actions[12]).WFInput) === uuid(actions[11]), "SHA-256 未绑定幂等键原文");
+  const idAttachments = params(actions[11]).WFTextActionText?.Value?.attachmentsByRange ?? {};
+  for (const expectedUuid of [uuid(actions[6]), uuid(actions[8]), uuid(actions[10])]) {
     requireValue(Object.values(idAttachments).some((entry) => entry?.OutputUUID === expectedUuid), "幂等键原文缺少 OCR、分类或备注");
   }
+  requireValue(
+    !Object.values(idAttachments).some((entry) => entry?.Type === "CurrentDate"),
+    "幂等键不得依赖每次运行都会变化的 CurrentDate",
+  );
 
-  const writeRequest = actions[12];
+  const writeRequest = actions[13];
   const writeParams = params(writeRequest);
   requireValue(writeParams.WFHTTPMethod === "POST", "记账请求必须使用 POST");
   requireValue(writeParams.WFHTTPBodyType === "JSON", "记账请求必须使用 JSON");
@@ -203,9 +231,10 @@ export function inspectBookkeepingShortcutXml(xml) {
   requireValue(JSON.stringify([...body.keys()]) === JSON.stringify(expectedKeys), "记账请求字段必须符合兼容版契约");
   requireValue(outputUuid(body.get("text")) === uuid(actions[6]), "text 必须引用 OCR 输出");
   requireValue(outputUuid(body.get("selection_path")) === uuid(actions[8]), "selection_path 必须引用分类选择输出");
-  requireValue(outputUuid(body.get("note")) === uuid(actions[9]), "note 必须引用备注输出");
-  requireValue(outputUuid(body.get("idempotency_key")) === uuid(actions[11]), "idempotency_key 必须引用 SHA-256");
+  requireValue(outputUuid(body.get("note")) === uuid(actions[10]), "note 必须引用备注输出");
+  requireValue(outputUuid(body.get("idempotency_key")) === uuid(actions[12]), "idempotency_key 必须引用 SHA-256");
   requireValue(literal(body.get("source")) === "shortcut", "source 必须是 shortcut");
+  requireValue(literal(params(actions[16]).Text) === "已取消，不会上传任何记账数据", "取消分支必须明确不上传");
 
   const importQuestions = plist.WFWorkflowImportQuestions;
   requireValue(Array.isArray(importQuestions) && importQuestions.length === 1, "兼容版只能保留一个 Token 导入问题");
@@ -223,6 +252,7 @@ export function inspectBookkeepingShortcutXml(xml) {
     verifyEndpoint: params(verifyRequest).WFURL,
     hasIcostAction: false,
     hasTokenVerification: true,
+    hasCancellationGate: true,
     ledgerOptions: Object.keys(BOOKKEEPING_CATALOG),
     selectionOptionCount: BOOKKEEPING_SELECTION_OPTIONS.length,
     menuCount: 0,

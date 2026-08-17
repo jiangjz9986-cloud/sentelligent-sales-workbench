@@ -20,22 +20,25 @@ import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
-// v0.6.0 added the encrypted settings key and hospital-tender scheduler; the
-// PushPlus notification contract is part of the same candidate-release gate.
-// settings to the manifest contract. A pre-cutover report must still be able
-// to authenticate the already-running v0.5.7 schema-3 release, but that
-// relaxed set is valid only for the canonical current release path. Candidate
-// releases always use the complete current REQUIRED_ENV_NAMES contract.
-const V060_REQUIRED_ENV_NAMES = new Set([
+// A pre-cutover report may inspect the already-running release whose manifest
+// predates the latest settings, hospital-tender, or Qingyang bridge names.
+// This relaxed set is valid only for the canonical current release path;
+// candidate releases always use the complete REQUIRED_ENV_NAMES contract.
+const LEGACY_CURRENT_EXCLUDED_ENV_NAMES = new Set([
   "SETTINGS_ENCRYPTION_KEY",
   "HOSPITAL_TENDER_PYTHON",
   "HOSPITAL_TENDER_AUTO_RUN",
   "HOSPITAL_TENDER_INTERVAL_MINUTES",
   "HOSPITAL_TENDER_BATCH_SIZE",
   "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
+  "QINGYANG_BOOKKEEPING_BRIDGE_URL",
+  "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
+  "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
 ]);
 const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
-  REQUIRED_ENV_NAMES.filter((name) => !V060_REQUIRED_ENV_NAMES.has(name)),
+  REQUIRED_ENV_NAMES.filter(
+    (name) => !LEGACY_CURRENT_EXCLUDED_ENV_NAMES.has(name),
+  ),
 );
 
 export const REQUIRED_PROJECT_SERVICES = Object.freeze([
@@ -343,6 +346,34 @@ function hasIsolatedIcostWebhookToken(environment) {
     environment.ASSISTANT_CONFIRMATION_SECRET,
     environment.SETTINGS_ENCRYPTION_KEY,
     environment.HOSPITAL_TENDER_SYNC_TOKEN,
+  ]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .every((value) => value !== token);
+}
+
+function hasQingyangBookkeepingBridgeConfiguration(environment) {
+  return (
+    environment.QINGYANG_BOOKKEEPING_BRIDGE_URL ===
+      "http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping" &&
+    isStrongAssistantSecret(environment.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN) &&
+    isPositiveSafeIntegerText(environment.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS) &&
+    Number(environment.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS) <= 30_000
+  );
+}
+
+function hasIsolatedQingyangBookkeepingBridgeToken(environment) {
+  const token = environment.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN;
+  if (!isStrongAssistantSecret(token)) return false;
+  return [
+    environment.AUTH_SESSION_SECRET,
+    environment.MODEL_API_KEY,
+    environment.DEEPSEEK_API_KEY,
+    environment.WEIXIN_AGENT_API_TOKEN,
+    environment.ASSISTANT_CONFIRMATION_SECRET,
+    environment.SETTINGS_ENCRYPTION_KEY,
+    environment.HOSPITAL_TENDER_SYNC_TOKEN,
+    environment.ICOST_WEBHOOK_TOKEN,
+    environment.SHORTCUT_WEBHOOK_TOKEN,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .every((value) => value !== token);
@@ -2658,6 +2689,18 @@ export async function runProductionPreflight({
       hasIsolatedIcostWebhookToken(environment),
       "The iCost webhook token is isolated from other project credentials.",
       "The iCost webhook token must not reuse the session, model, or WeChat credential.",
+    ),
+    makeCheck(
+      "env.qingyangBridge",
+      hasQingyangBookkeepingBridgeConfiguration(environment),
+      "The Qingyang bookkeeping bridge uses the approved loopback endpoint, a strong server-only credential, and a bounded timeout.",
+      "The Qingyang bookkeeping bridge requires the exact loopback endpoint, a strong server-only credential, and a timeout from 1 to 30000 milliseconds.",
+    ),
+    makeCheck(
+      "env.qingyangBridgeIsolation",
+      hasIsolatedQingyangBookkeepingBridgeToken(environment),
+      "The Qingyang bookkeeping bridge credential is isolated from user, iCost, model, session, and machine credentials.",
+      "The Qingyang bookkeeping bridge credential must not reuse any user, iCost, model, session, settings, confirmation, or machine credential.",
     ),
     makeCheck(
       "env.invoiceExtraction",
