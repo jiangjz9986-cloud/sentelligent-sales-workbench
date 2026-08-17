@@ -21,12 +21,12 @@ node integrations/shortcut/sign-bookkeeping-shortcut.mjs \
   --input=/tmp/shortcut-bookkeeping.unsigned.shortcut \
   --output=/tmp/自有截图记账（兼容版V4修复）.shortcut \
   --mode=anyone
-node integrations/shortcut/verify-bookkeeping-shortcut.mjs \
-  /tmp/自有截图记账（兼容版V4修复）.shortcut
+xxd -l 4 /tmp/自有截图记账（兼容版V4修复）.shortcut
+stat -f '%Sp %z %N' /tmp/自有截图记账（兼容版V4修复）.shortcut
 node --test backend/tests/shortcut-bookkeeping.test.js
 ```
 
-签名命令只在可信 macOS 上调用 Apple 自带的 `/usr/bin/shortcuts sign`。把签名后的 `.shortcut` 通过 AirDrop、iCloud Drive 或本机 Finder 发送到 iPhone，点开后由“快捷指令”App 安装，并在导入配置中填入系统配置页刚生成的账号 Token。不要使用在线签名站，也不要把已填入 Token 的安装副本提交到 Git 或转发给其他人。
+签名命令只在可信 macOS 上调用 Apple 自带的 `/usr/bin/shortcuts sign`；签名前的 unsigned plist 由 verifier 校验，签名脚本再检查 Apple 归档魔数 `AEA1`、非空输出和 `0600` 权限。把签名后的 `.shortcut` 通过 AirDrop、iCloud Drive 或本机 Finder 发送到 iPhone，点开后由“快捷指令”App 安装，并在导入配置中填入系统配置页刚生成的账号 Token。不要使用在线签名站，也不要把已填入 Token 的安装副本提交到 Git 或转发给其他人。
 
 V4 请求 JSON 字段严格为：`text`、`selection_path`、`note`、`idempotency_key`、`source`。`source` 固定为 `shortcut`，`note` 可以为空字符串。后端仍兼容旧版的展开字段：`ledger_name`、`entry_type`、`category`、`subcategory`。
 
