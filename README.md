@@ -8,21 +8,24 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前本地代码候选 | `v0.6.0`（尚未推送、打标签或部署） |
+| 当前代码 / GitHub Release | `v0.6.0`（已正式发布，生产待切换） |
+| v0.6.0 Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
+| v0.6.0 Release 归档 SHA-256 | `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371` |
 | 当前生产版本 | `v0.5.7` |
 | 生产提交 | `d4fcb56504c5a64bda703db5817c43e546db1b4f` |
 | 注释标签 | `v0.5.7` |
-| GitHub Release | [森特智行 v0.5.7](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.5.7) |
+| 上一生产 GitHub Release | [森特智行 v0.5.7](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.5.7) |
 | Release 归档 SHA-256 | `3338cb09aa9398e7b5353b8d74a4fb0256c93b270c247919643df672a03fa07f` |
 | 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.5.7-20260816T094633Z_d4fcb56504c5` |
 | 回滚 release | `/opt/sentelligent-sales-workbench/releases/v0.5.6-20260816T084503Z_e3265946cd64` |
+| v0.6.0 生产状态 | 尚未切换：服务器缺少 Python 3.11+ 运行时；当前生产仍保持 `v0.5.7`，未改配置、数据库或服务 |
 | 当前生产代码 | `v0.5.7` 已完成 GitHub Release、受控切换、前后 `25/25` 生产预检和线上 `25/25` HTTPS smoke |
 | `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
 | `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；已由后续版本取代 |
 | `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-16` 复核。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.5.7 版本说明](docs/releases/v0.5.7.md)。
+上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-16` 复核；v0.6.0 GitHub Release 于 `2026-08-17` 完成，尚未切换生产。生产部署细节见 [部署记录](docs/部署记录.md)，版本边界和验收说明见 [v0.6.0 版本说明](docs/releases/v0.6.0.md)。
 
 ## 功能状态
 
