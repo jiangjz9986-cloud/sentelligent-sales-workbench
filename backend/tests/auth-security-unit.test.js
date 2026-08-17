@@ -53,7 +53,25 @@ describe("machine authorization", () => {
     assert.equal(authenticateMachineRequest("Bearer wx-unit-token", {
       weixinAgentApiToken: "wx-unit-token",
       authAccount: "personal-owner",
-    }).account, "personal-owner");
+    }), null);
+  });
+
+  it("fails closed when a WeChat machine token has no explicit owner mapping", () => {
+    const config = {
+      weixinAgentApiToken: "wx-unit-token",
+      weixinAgentOwner: "",
+      authAccount: "personal-owner",
+    };
+    assert.equal(authenticateMachineRequest("Bearer wx-unit-token", config), null);
+  });
+
+  it("fails closed when the explicit WeChat owner mapping is malformed", () => {
+    for (const weixinAgentOwner of ["owner\u0000x", "x".repeat(201), " owner "]) {
+      assert.equal(authenticateMachineRequest("Bearer wx-unit-token", {
+        weixinAgentApiToken: "wx-unit-token",
+        weixinAgentOwner,
+      }), null);
+    }
   });
 
   it("allows only the declared machine capabilities", () => {

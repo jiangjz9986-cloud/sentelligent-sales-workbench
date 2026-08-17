@@ -157,6 +157,9 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!isStrongIndependentSecret(config.assistantConfirmationSecret)) {
     throw new Error("ASSISTANT_CONFIRMATION_SECRET must contain at least 32 bytes of high-entropy data in production");
   }
+  if (!config.weixinAgentOwner) {
+    throw new Error("WEIXIN_AGENT_OWNER is required in production");
+  }
   if (config.hospitalTenderSyncToken && !isStrongIndependentSecret(config.hospitalTenderSyncToken)) {
     throw new Error("HOSPITAL_TENDER_SYNC_TOKEN must contain at least 32 bytes of high-entropy data in production");
   }
@@ -312,7 +315,7 @@ export function loadConfig(overrides = {}) {
       env.assistantConfirmationSecret ?? env.ASSISTANT_CONFIRMATION_SECRET ?? "",
     ).trim(),
     weixinAgentBackendUrl: env.weixinAgentBackendUrl ?? env.WEIXIN_AGENT_BACKEND_URL ?? "",
-    weixinAgentOwner: env.weixinAgentOwner ?? env.WEIXIN_AGENT_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "",
+    weixinAgentOwner: String(env.weixinAgentOwner ?? env.WEIXIN_AGENT_OWNER ?? "").trim(),
     weixinAgentSessionHome: env.weixinAgentSessionHome ?? env.WEIXIN_AGENT_SESSION_HOME ?? "",
     weixinAllowedSenderIds,
     weixinAllowedGroupIds,

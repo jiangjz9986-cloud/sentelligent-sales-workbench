@@ -220,6 +220,19 @@ function hasAssistantSecretConfiguration(environment) {
   );
 }
 
+function hasWeixinOwnerConfiguration(environment, database) {
+  const owner = environment.WEIXIN_AGENT_OWNER;
+  return (
+    typeof owner === "string" &&
+    owner.length > 0 &&
+    owner.length <= 200 &&
+    owner === owner.trim() &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(owner) &&
+    Array.isArray(database?.businessOwners) &&
+    database.businessOwners.includes(owner)
+  );
+}
+
 function hasHospitalTenderSchedulerConfiguration(environment) {
   return (
     environment.HOSPITAL_TENDER_AUTO_RUN === "true" &&
@@ -1006,9 +1019,24 @@ export async function inspectSqlite(
           const foreignKeyViolations = database
             .prepare("PRAGMA foreign_key_check")
             .all();
+          const tableNames = new Set(database
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all()
+            .map((row) => row.name));
+          const businessOwners = tableNames.has("customers") || tableNames.has("opportunities")
+            ? [...new Set([
+                ...(tableNames.has("customers")
+                  ? database.prepare("SELECT owner FROM customers WHERE owner IS NOT NULL AND owner <> ''").all().map((row) => row.owner)
+                  : []),
+                ...(tableNames.has("opportunities")
+                  ? database.prepare("SELECT owner FROM opportunities WHERE owner IS NOT NULL AND owner <> ''").all().map((row) => row.owner)
+                  : []),
+              ])].sort()
+            : [];
           return {
             quickCheck,
             foreignKeyViolations: foreignKeyViolations.length,
+            businessOwners,
           };
         } finally {
           database.close();
@@ -2561,9 +2589,9 @@ export async function runProductionPreflight({
     ),
     makeCheck(
       "env.assistantSecrets",
-      hasAssistantSecretConfiguration(environment),
-      "WeChat machine, assistant confirmation, settings encryption, and optional tender sync secrets are strong and independent.",
-      "WEIXIN_AGENT_API_TOKEN, ASSISTANT_CONFIRMATION_SECRET, SETTINGS_ENCRYPTION_KEY, and any HOSPITAL_TENDER_SYNC_TOKEN must be canonical strong independent values and must not be reused.",
+      hasAssistantSecretConfiguration(environment) && hasWeixinOwnerConfiguration(environment, database),
+      "WeChat machine owner and assistant secrets are explicitly configured, strong, independent, and match a historical business owner.",
+      "WEIXIN_AGENT_OWNER must be explicit and match a historical customer or opportunity owner; machine, confirmation, settings, and optional tender secrets must also be canonical strong independent values.",
     ),
     makeCheck(
       "env.secureCookie",

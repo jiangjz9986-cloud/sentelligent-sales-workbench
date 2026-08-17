@@ -35,13 +35,26 @@ function tokenDigest(token) {
   return createHash("sha256").update(token, "utf8").digest();
 }
 
+function validMachineOwner(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 200 &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
+  );
+}
+
 function configuredMachineCredentials(config) {
   const credentials = [];
-  if (typeof config?.weixinAgentApiToken === "string" && config.weixinAgentApiToken.length > 0) {
+  if (
+    typeof config?.weixinAgentApiToken === "string" && config.weixinAgentApiToken.length > 0
+    && validMachineOwner(config.weixinAgentOwner)
+  ) {
     credentials.push({
       token: config.weixinAgentApiToken,
       integration: "weixin-agent",
-      owner: config.weixinAgentOwner,
+      owner: config.weixinAgentOwner.trim(),
     });
   }
   if (typeof config?.hospitalTenderSyncToken === "string" && config.hospitalTenderSyncToken.length > 0) {

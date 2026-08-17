@@ -66,6 +66,10 @@ function makeDatabase(filePath, { foreignKeyViolation = false } = {}) {
         1,
         ${foreignKeyViolation ? 999 : 1}
       );
+      CREATE TABLE customers (id TEXT PRIMARY KEY, owner TEXT);
+      CREATE TABLE opportunities (id TEXT PRIMARY KEY, owner TEXT);
+      INSERT INTO customers (id, owner) VALUES ('fixture-customer', 'fixture-owner');
+      INSERT INTO opportunities (id, owner) VALUES ('fixture-opportunity', 'fixture-owner');
     `);
   } finally {
     db.close();
@@ -129,6 +133,7 @@ function validEnvironment(origin, databaseUrl) {
       "HOSPITAL_TENDER_BATCH_SIZE=10",
       `HOSPITAL_TENDER_SYNC_TOKEN=${hospitalTenderSyncToken}`,
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
+      "WEIXIN_AGENT_OWNER=fixture-owner",
       `ASSISTANT_CONFIRMATION_SECRET=${assistantConfirmationSecret}`,
       `ICOST_WEBHOOK_TOKEN=${icostWebhookToken}`,
       `ICOST_WEBHOOK_OWNER=${icostWebhookOwner}`,

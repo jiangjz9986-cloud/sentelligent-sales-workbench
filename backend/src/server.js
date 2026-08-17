@@ -129,6 +129,7 @@ import { createAssistantSessionRepository } from "./assistant/sessionRepository.
 import { createAssistantPendingActionRepository } from "./assistant/pendingActionRepository.js";
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
+import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
@@ -2482,6 +2483,11 @@ export function createServer(options = {}) {
       clock: assistantClock,
       confirmationSecret: assistantConfirmationSecret,
     });
+  const assistantBusinessOwnerResolver = typeof options.resolveBusinessOwner === "function"
+    ? options.resolveBusinessOwner
+    : createBusinessOwnerResolver({
+        businessOwner: config.weixinAgentOwner,
+      });
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -2493,6 +2499,7 @@ export function createServer(options = {}) {
       invoiceRepository,
       paymentProofRecognizer,
       invoiceRecognizer,
+      resolveBusinessOwner: assistantBusinessOwnerResolver,
       clock: assistantClock,
       fetchImpl: options.fetchImpl ?? fetch,
     });
@@ -5100,7 +5107,13 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/customers") {
-        const rows = all(db, "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY created_at ASC");
+        const rows = request.authContext.kind === "machine"
+          ? all(
+            db,
+            "SELECT * FROM customers WHERE deleted_at IS NULL AND owner = $owner ORDER BY created_at ASC",
+            { $owner: request.authContext.account },
+          )
+          : all(db, "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY created_at ASC");
         sendJson(response, 200, { items: rows.map(customerFromRow) });
         return;
       }
@@ -6122,6 +6135,12 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/reports/weekly/draft") {
         const body = await readValidatedJson(request, requestSchemas.weeklyDraft);
+        if (request.authContext.kind === "machine" && body.owner !== request.authContext.account) {
+          throw new HttpError(403, "OWNER_SCOPE_DENIED", "Machine identity cannot select another business owner");
+        }
+        const draftOwner = request.authContext.kind === "machine"
+          ? request.authContext.account
+          : body.owner;
         const knowledgeIds = normalizeKnowledgeIds(body.knowledgeIds);
         if (knowledgeIds === null) {
           validationFailure("knowledgeIds", "array");
@@ -6139,11 +6158,13 @@ export function createServer(options = {}) {
            LEFT JOIN ai_insights ai ON ai.quick_record_id = qr.id
            WHERE date(substr(COALESCE(qr.occurred_at, qr.created_at), 1, 10))
              BETWEEN date($periodStart) AND date($periodEnd)
+             AND ($owner IS NULL OR qr.owner = $owner)
            GROUP BY qr.id
            ORDER BY COALESCE(qr.occurred_at, qr.created_at) ASC`,
           {
             $periodStart: body.periodStart,
             $periodEnd: body.periodEnd,
+            $owner: request.authContext.kind === "machine" ? draftOwner : null,
           },
         );
 
@@ -6152,7 +6173,7 @@ export function createServer(options = {}) {
           analysis: parseJson(row.analysis_json, null),
         }));
         const fallbackDraft = buildWeeklyDraft({
-          owner: body.owner,
+          owner: draftOwner,
           periodStart: body.periodStart,
           periodEnd: body.periodEnd,
           records,
@@ -6161,7 +6182,7 @@ export function createServer(options = {}) {
         const draft = await enhanceWeeklyDraftWithModel(
           fallbackDraft,
           {
-            owner: body.owner,
+            owner: draftOwner,
             periodStart: body.periodStart,
             periodEnd: body.periodEnd,
             records,
@@ -6182,7 +6203,7 @@ export function createServer(options = {}) {
              VALUES ($id, $owner, $periodStart, $periodEnd, 'draft', $content, $sourceRefs)`,
             {
               $id: id,
-              $owner: body.owner,
+              $owner: draftOwner,
               $periodStart: body.periodStart,
               $periodEnd: body.periodEnd,
               $content: draft.content,

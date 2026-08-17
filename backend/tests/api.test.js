@@ -234,6 +234,7 @@ describe("sales workbench backend API", () => {
       authPasswordHash: await hashPassword("unit-secret", { salt: Buffer.alloc(16, 8) }),
       authSessionSecret: "unit-session-secret",
       weixinAgentApiToken: "wx-token",
+      weixinAgentOwner: "继振",
     });
     await new Promise((resolve) => {
       server.listen(0, "127.0.0.1", resolve);

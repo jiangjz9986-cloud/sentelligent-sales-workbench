@@ -29,6 +29,7 @@ async function startServer(overrides = {}) {
     authSessionSecret: Buffer.alloc(32, 5).toString("base64url"),
     authCookieSecure: false,
     corsAllowedOrigins: [allowedOrigin],
+    weixinAgentOwner: "继振",
     ...overrides,
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));

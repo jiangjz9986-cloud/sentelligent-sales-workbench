@@ -299,7 +299,7 @@ test("sends typed errors with security, CORS, and request ID headers", () => {
 });
 
 test("validates the WeChat machine token and enforces its fixed route allowlist", () => {
-  const config = { weixinAgentApiToken: "machine-secret" };
+  const config = { weixinAgentApiToken: "machine-secret", weixinAgentOwner: "weixin-agent" };
   assert.deepEqual(verifyMachineToken("machine-secret", config), {
     account: "weixin-agent",
     integration: "weixin-agent",
