@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -179,7 +179,11 @@ class MonitorRunner:
         """Collect and process all enabled direct sources once."""
         started = self._now()
         include_possible = self.config.notify_possible if include_possible is None else bool(include_possible)
-        with self._run_lock():
+        # Dry-run/smoke is intentionally side-effect free: no SQLite setup and
+        # no lock-file creation. Persisted runs still take the process lock so
+        # two scheduled collectors cannot overlap.
+        lock_context = nullcontext() if dry_run else self._run_lock()
+        with lock_context:
             if not dry_run:
                 self.repository.initialize()
             rules = self._rules()

@@ -48,7 +48,12 @@ class JiningAdapter(SourceAdapter):
                 if not isinstance(records, list):
                     raise ValueError("records")
                 for record in records:
-                    notice = self._notice(record, CATEGORY_TYPES.get(category, NoticeType.UNKNOWN))
+                    try:
+                        notice = self._notice(record, CATEGORY_TYPES.get(category, NoticeType.UNKNOWN))
+                    except (TypeError, ValueError):
+                        # Ignore malformed individual rows while preserving
+                        # the rest of this category and the other categories.
+                        continue
                     if notice is not None and notice.identity_key not in seen:
                         seen.add(notice.identity_key)
                         notices.append(notice)

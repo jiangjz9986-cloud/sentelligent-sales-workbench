@@ -7,6 +7,7 @@ from hospital_tender_monitor.http import HttpResponse
 from hospital_tender_monitor.sources.dongying import DongyingAdapter
 from hospital_tender_monitor.sources.hospital_html import HospitalHtmlAdapter
 from hospital_tender_monitor.sources.jining import JiningAdapter
+from hospital_tender_monitor.sources.base import parse_published_at
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -23,6 +24,14 @@ class _Http:
 
 
 class SourceFixtureTests(TestCase):
+    def test_published_date_parser_accepts_common_public_site_spellings(self) -> None:
+        self.assertIsNotNone(parse_published_at("2026年8月17日"))
+        self.assertIsNotNone(parse_published_at("20260817"))
+        self.assertEqual(
+            parse_published_at("2026/08/17 12:30").isoformat(),
+            "2026-08-17T12:30:00+00:00",
+        )
+
     def test_dongying_categories_deduplicate_the_same_public_notice(self) -> None:
         source = {
             "id": "dongying-ggzy",
@@ -33,6 +42,20 @@ class SourceFixtureTests(TestCase):
             "vname": "/dongying",
         }
         result = DongyingAdapter(source, _Http((FIXTURES / "dongying_search.json").read_text(encoding="utf-8"))).fetch()
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.notices), 1)
+
+    def test_dongying_accepts_direct_record_envelope(self) -> None:
+        source = {
+            "id": "dongying-ggzy",
+            "name": "东营市公共资源交易网",
+            "city": "东营",
+            "url": "http://ggzy.dongying.gov.cn/",
+            "site_guid": "fixture-guid",
+            "vname": "/dongying",
+        }
+        body = '[{"title":"示例医院信息化采购公告","date":"2026年8月17日","href":"/notices/example-1.html","index":"example-1"}]'
+        result = DongyingAdapter(source, _Http(body)).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
 

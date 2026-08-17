@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -130,3 +131,16 @@ class RunnerIsolationTests(TestCase):
         self.assertFalse(summary.success)
         self.assertEqual(summary.successful_source_count, 0)
         self.assertEqual(summary.failed_source_count, 1)
+
+    def test_dry_run_does_not_create_a_persistent_lock_or_database(self) -> None:
+        config = _Config()
+        config.sources = ()
+        with patch("hospital_tender_monitor.runner.source_factory"):
+            with TemporaryDirectory(prefix="hospital-tender-dry-run-") as root:
+                config.database_path = Path(root) / "collector.sqlite3"
+                lock_path = Path(root) / "collector.lock"
+                runner = MonitorRunner(config, repository=_Repository(), lock_path=lock_path)
+                summary = runner.run(dry_run=True)
+                self.assertTrue(summary.success)
+                self.assertFalse(lock_path.exists())
+                self.assertFalse(config.database_path.exists())

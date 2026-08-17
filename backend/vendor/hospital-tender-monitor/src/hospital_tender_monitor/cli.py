@@ -29,6 +29,10 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("list-sources", help="list enabled configured sources")
     sub.add_parser("list-customers", help="list configured customer hospitals and coverage states")
     sub.add_parser("dry-run", help="fetch and classify without database or notification writes")
+    sub.add_parser(
+        "smoke",
+        help="run a credential-free live-source smoke and emit a safe summary",
+    )
     run = sub.add_parser("run", help="collect, persist, and notify once")
     run.add_argument("--possible", action="store_true", help="include possible matches in notifications")
     sub.add_parser("health", help="show persisted source health")
@@ -99,6 +103,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "dry-run":
             summary = runner.run(dry_run=True)
             print(_json(_present(asdict(summary))))
+            return 0 if summary.success else 1
+        if args.command == "smoke":
+            # The smoke deliberately uses the same adapters, resolver checks,
+            # retry budget, and parser path as production.  It never writes
+            # the collector database or sends notifications. A partial run is
+            # useful evidence (and recoverable by the scheduler); only an
+            # all-source failure is a hard smoke failure.
+            summary = runner.run(dry_run=True)
+            result = {
+                "status": "ok" if summary.success and summary.failed_source_count == 0 else (
+                    "partial" if summary.success else "failed"
+                ),
+                "sourceCount": summary.source_count,
+                "successfulSourceCount": summary.successful_source_count,
+                "failedSourceCount": summary.failed_source_count,
+                "noticeCount": summary.notice_count,
+            }
+            print(_json(result))
             return 0 if summary.success else 1
         if args.command == "run":
             summary = runner.run(include_possible=args.possible)

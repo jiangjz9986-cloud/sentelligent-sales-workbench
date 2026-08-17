@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Mapping
+import re
 from urllib.parse import urljoin
 
 from hospital_tender_monitor.config import validate_public_url
@@ -50,11 +51,26 @@ def public_link(base_url: str, value: object) -> str:
     return validate_public_url(candidate)
 
 
+_DATE_REPLACEMENTS = (
+    (re.compile(r"^(\d{4})[年./-](\d{1,2})[月./-](\d{1,2})日?$"), r"\1-\2-\3"),
+    (re.compile(r"^(\d{4})(\d{2})(\d{2})$"), r"\1-\2-\3"),
+)
+
+
 def parse_published_at(value: object) -> datetime | None:
     raw = str(value or "").strip().replace("Z", "+00:00")
     if not raw:
         return None
-    for candidate in (raw, raw.replace("/", "-")):
+    candidates = [raw, raw.replace("/", "-")]
+    date_part = raw.split(" ", 1)[0].split("T", 1)[0]
+    for pattern, replacement in _DATE_REPLACEMENTS:
+        normalized = pattern.sub(replacement, date_part)
+        if normalized != date_part:
+            year, month, day = normalized.split("-", 2)
+            normalized = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            suffix = raw[len(date_part):]
+            candidates.append(f"{normalized}{suffix}")
+    for candidate in candidates:
         try:
             parsed = datetime.fromisoformat(candidate)
         except ValueError:

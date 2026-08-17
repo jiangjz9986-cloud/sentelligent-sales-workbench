@@ -102,18 +102,23 @@ class HospitalHtmlAdapter(SourceAdapter):
                 if canonical_link in seen:
                     continue
                 seen.add(canonical_link)
-                notices.append(TenderNotice(
-                    source_id=source_text(self.source, "id"),
-                    source_name=source_text(self.source, "name"),
-                    city=source_text(self.source, "city"),
-                    title=title,
-                    url=link,
-                    published_at=published_at,
-                    notice_type=NoticeType.UNKNOWN,
-                    content_text=title,
-                    hospital_names=tuple(str(name) for name in names),
-                    raw_content=title,
-                ))
+                try:
+                    notices.append(TenderNotice(
+                        source_id=source_text(self.source, "id"),
+                        source_name=source_text(self.source, "name"),
+                        city=source_text(self.source, "city"),
+                        title=title,
+                        url=link,
+                        published_at=published_at,
+                        notice_type=NoticeType.UNKNOWN,
+                        content_text=title,
+                        hospital_names=tuple(str(name) for name in names),
+                        raw_content=title,
+                    ))
+                except (TypeError, ValueError):
+                    # One malformed public row should not suppress valid rows
+                    # from the same hospital page.
+                    continue
             return SourceResult(notices=tuple(notices))
         except (HttpError, ValueError, TypeError, AttributeError):
             return SourceResult(success=False, error="invalid source response")

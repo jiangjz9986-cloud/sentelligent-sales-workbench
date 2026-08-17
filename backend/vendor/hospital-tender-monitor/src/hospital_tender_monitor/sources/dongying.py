@@ -53,7 +53,12 @@ class DongyingAdapter(SourceAdapter):
                 )
                 records = _records(response.text)
                 for record in records:
-                    notice = self._notice(record, notice_type)
+                    try:
+                        notice = self._notice(record, notice_type)
+                    except (TypeError, ValueError):
+                        # A malformed row must not discard otherwise usable
+                        # notices from the same public category response.
+                        continue
                     if notice is not None and notice.identity_key not in seen:
                         seen.add(notice.identity_key)
                         notices.append(notice)
@@ -87,11 +92,19 @@ class DongyingAdapter(SourceAdapter):
 
 def _records(text: str) -> list[object]:
     outer = json.loads(text)
+    # Epoint deployments have returned both the documented wrapper and a
+    # direct list in the wild. Keep the parser strict about the record shape,
+    # but accept either envelope so a harmless upstream wrapper change does
+    # not turn an otherwise healthy source into a failed run.
+    if isinstance(outer, list):
+        return outer
     if not isinstance(outer, dict):
         raise ValueError("outer response")
     candidate = outer.get("data", outer.get("custom"))
     if isinstance(candidate, str):
         candidate = json.loads(candidate)
+    if isinstance(candidate, list):
+        return candidate
     if not isinstance(candidate, dict):
         raise ValueError("inner response")
     records = candidate.get("data")

@@ -207,7 +207,12 @@ class JiaozhouCentralHospitalAdapter(SourceAdapter):
                     raise ValueError("repeated page")
                 seen_fingerprints.add(fingerprint)
                 for record in parser.records:
-                    notice = self._notice(record)
+                    try:
+                        notice = self._notice(record)
+                    except (TypeError, ValueError):
+                        # A broken detail link or date in one row must not
+                        # discard the valid rows on this page or later pages.
+                        continue
                     if notice is None or notice.identity_key in seen:
                         continue
                     seen.add(notice.identity_key)

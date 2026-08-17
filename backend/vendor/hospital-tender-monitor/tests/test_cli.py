@@ -35,6 +35,30 @@ class _PartialRunner:
 
 
 class CliPartialExportTests(TestCase):
+    def test_smoke_reports_partial_source_health_without_writes(self) -> None:
+        now = datetime(2026, 8, 17, tzinfo=timezone.utc)
+        summary = RunSummary(
+            started_at=now,
+            finished_at=now,
+            success=True,
+            source_count=2,
+            successful_source_count=1,
+            failed_source_count=1,
+            notice_count=1,
+            error="source failure",
+            dry_run=True,
+        )
+        with TemporaryDirectory(prefix="hospital-tender-cli-smoke-") as root:
+            runner = _PartialRunner(Repository(Path(root) / "collector.sqlite3"))
+            runner.run = lambda *, include_possible=False, dry_run=False: summary
+            stdout = io.StringIO()
+            with patch("hospital_tender_monitor.cli.load_config", return_value=object()), \
+                    patch("hospital_tender_monitor.cli.MonitorRunner", return_value=runner), \
+                    redirect_stdout(stdout):
+                exit_code = main(["--project-root", root, "smoke"])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["status"], "partial")
+
     def test_run_and_export_keeps_partial_status_while_exiting_successfully(self) -> None:
         with TemporaryDirectory(prefix="hospital-tender-cli-") as root:
             repository = Repository(Path(root) / "collector.sqlite3")

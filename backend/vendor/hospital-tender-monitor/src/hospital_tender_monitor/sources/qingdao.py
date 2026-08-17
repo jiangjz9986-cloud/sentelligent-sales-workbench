@@ -196,7 +196,12 @@ class QingdaoAdapter(SourceAdapter):
                             raise ValueError("repeated page")
                         seen_fingerprints.add(fingerprint)
                         for record in parser.records:
-                            notice = self._notice(record, notice_type, flag)
+                            try:
+                                notice = self._notice(record, notice_type, flag)
+                            except (TypeError, ValueError):
+                                # Keep a malformed row local to the row; the
+                                # page and the remaining flags remain useful.
+                                continue
                             if notice is None or notice.identity_key in seen_notices:
                                 continue
                             seen_notices.add(notice.identity_key)

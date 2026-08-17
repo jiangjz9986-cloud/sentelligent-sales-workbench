@@ -190,6 +190,18 @@ def _boolean(env: Mapping[str, str], name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _source_text(source: Mapping[str, Any], key: str, *, required: bool = True) -> str:
+    value = source.get(key, "")
+    if not isinstance(value, str):
+        raise ValueError(f"source {key} must be a string")
+    normalized = value.strip()
+    if required and not normalized:
+        raise ValueError(f"source {key} is required")
+    if len(normalized) > 300 or any(ord(char) < 0x20 or ord(char) == 0x7F for char in normalized):
+        raise ValueError(f"source {key} is invalid")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     project_root: Path
@@ -237,11 +249,33 @@ def load_config(env: Mapping[str, str], project_root: Path) -> AppConfig:
     if not isinstance(raw_keywords, list):
         raise ValueError("keywords.json strong must be a list")
     sources: list[Mapping[str, Any]] = []
+    source_ids: set[str] = set()
     for source in raw_sources:
         if not isinstance(source, dict):
             raise ValueError("each source must be an object")
+        source_id = _source_text(source, "id")
+        _source_text(source, "name")
+        adapter = _source_text(source, "adapter")
+        enabled = source.get("enabled", True)
+        if type(enabled) is not bool:
+            raise ValueError("source enabled must be a boolean")
+        if source_id in source_ids:
+            raise ValueError("source ids must be unique")
+        source_ids.add(source_id)
         url = source.get("url")
         validate_public_url(url)
+        coverage = source.get("coverage")
+        if coverage is not None and coverage not in {"direct", "indirect", "disabled", "failing"}:
+            raise ValueError("source coverage is invalid")
+        if adapter.casefold() in {
+            "hospital", "hospital_html", "hospital-html", "generic_html",
+            "jiaozhou_central_hospital", "jiaozhou-central-hospital", "jiaozhou_hospital", "qdjzch",
+        }:
+            names = source.get("hospital_names")
+            if not isinstance(names, list) or not names or any(
+                not isinstance(name, str) or not name.strip() for name in names
+            ):
+                raise ValueError("hospital source hospital_names are required")
         sources.append(_freeze(source))
     data_dir = Path(env.get("HOSPITAL_TENDER_MONITOR_DATA_DIR", root / "data"))
     database_path = Path(
