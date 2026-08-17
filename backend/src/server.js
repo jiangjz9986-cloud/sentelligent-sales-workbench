@@ -144,6 +144,7 @@ import {
   serializeHospitalTenderSource,
 } from "./hospitalTender/sync.js";
 import { createInternalHospitalTenderRunner } from "./hospitalTender/internalRunner.js";
+import { createHospitalTenderNotifier } from "./hospitalTender/notifier.js";
 import {
   partialSchema,
   requestSchemas,
@@ -2328,6 +2329,16 @@ export function createServer(options = {}) {
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
       : {}),
   });
+  const hospitalTenderNotifier = options.hospitalTenderNotifier !== undefined
+    ? options.hospitalTenderNotifier
+    : createHospitalTenderNotifier({
+        token: config.hospitalTenderPushplusToken,
+        fetchImpl: options.fetchImpl ?? fetch,
+      });
+  const hospitalTenderNotificationState = () => ({
+    status: hospitalTenderNotifier ? "enabled" : "disabled",
+    provider: "pushplus",
+  });
   const hospitalTenderScheduler = createHospitalTenderScheduler({
     db,
     repository: hospitalTenderSchedulerRepository,
@@ -2337,7 +2348,7 @@ export function createServer(options = {}) {
       db,
       "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY id ASC",
     ).map(customerFromRow),
-    ...(options.hospitalTenderNotifier ? { notifier: options.hospitalTenderNotifier } : {}),
+    notifier: hospitalTenderNotifier,
     clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
     ...(options.hospitalTenderSchedulerIdFactory
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
@@ -3331,6 +3342,7 @@ export function createServer(options = {}) {
             sourceCount: health.sourceCount,
             staleCount: health.unhealthySourceCount + health.degradedSourceCount,
             latestRun: hospitalTenderRepository.summary().latestRun,
+            notification: hospitalTenderNotificationState(),
           },
         });
         return;
@@ -3345,6 +3357,7 @@ export function createServer(options = {}) {
           item: hospitalTenderScheduler.getState(),
           runs: hospitalTenderScheduler.listRuns(10),
           lock: hospitalTenderSchedulerRepository.lockState(),
+          notification: hospitalTenderNotificationState(),
         });
         return;
       }
@@ -3366,6 +3379,7 @@ export function createServer(options = {}) {
             ...(result.acceptedCount !== undefined ? { acceptedCount: result.acceptedCount } : {}),
             ...(result.rejectedCount !== undefined ? { rejectedCount: result.rejectedCount } : {}),
             ...(result.notificationCount !== undefined ? { notificationCount: result.notificationCount } : {}),
+            notification: hospitalTenderNotificationState(),
             state: hospitalTenderScheduler.getState(),
           },
         });
@@ -3411,7 +3425,10 @@ export function createServer(options = {}) {
           hospitalTenderScheduler.start();
         }
         if (!item.enabled && hospitalTenderScheduler.isStarted()) hospitalTenderScheduler.stop();
-        sendJson(response, 200, { item: hospitalTenderScheduler.getState() });
+        sendJson(response, 200, {
+          item: hospitalTenderScheduler.getState(),
+          notification: hospitalTenderNotificationState(),
+        });
         return;
       }
 

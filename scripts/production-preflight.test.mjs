@@ -101,6 +101,7 @@ function validEnvironment(origin, databaseUrl) {
   const assistantConfirmationSecret = Buffer.alloc(32, 5).toString("base64url");
   const settingsEncryptionKey = Buffer.alloc(32, 6).toString("base64url");
   const hospitalTenderSyncToken = Buffer.alloc(32, 7).toString("base64url");
+  const hospitalTenderPushplusToken = Buffer.alloc(24, 8).toString("base64url");
   const icostWebhookToken = createHash("sha256")
     .update("fixture-icost-webhook-token")
     .digest("hex");
@@ -131,6 +132,7 @@ function validEnvironment(origin, databaseUrl) {
       "HOSPITAL_TENDER_AUTO_RUN=true",
       "HOSPITAL_TENDER_INTERVAL_MINUTES=60",
       "HOSPITAL_TENDER_BATCH_SIZE=10",
+      `HOSPITAL_TENDER_PUSHPLUS_TOKEN=${hospitalTenderPushplusToken}`,
       `HOSPITAL_TENDER_SYNC_TOKEN=${hospitalTenderSyncToken}`,
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
       "WEIXIN_AGENT_OWNER=fixture-owner",
@@ -152,6 +154,7 @@ function validEnvironment(origin, databaseUrl) {
     assistantConfirmationSecret,
     settingsEncryptionKey,
     hospitalTenderSyncToken,
+    hospitalTenderPushplusToken,
     icostWebhookToken,
     icostWebhookOwner,
     invoiceOcrCommand,
@@ -982,6 +985,9 @@ describe("production preflight", () => {
         ["reused settings key", "SETTINGS_ENCRYPTION_KEY", environment.sessionValue, "env.assistantSecrets"],
         ["weak optional sync token", "HOSPITAL_TENDER_SYNC_TOKEN", "short", "env.assistantSecrets"],
         ["sync token reused as settings key", "HOSPITAL_TENDER_SYNC_TOKEN", environment.settingsEncryptionKey, "env.assistantSecrets"],
+        ["missing PushPlus token", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", "", "env.production"],
+        ["short PushPlus token", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", "short", "env.production"],
+        ["PushPlus token reused as model key", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", environment.modelApiKey, "env.production"],
         ["relative Python path", "HOSPITAL_TENDER_PYTHON", "python3", "node.version"],
         ["unverified Python path", "HOSPITAL_TENDER_PYTHON", "/opt/sentelligent-tools/python3.10", "node.version"],
         ["disabled automatic scheduler", "HOSPITAL_TENDER_AUTO_RUN", "false", "env.production"],
@@ -1708,6 +1714,7 @@ describe("production preflight", () => {
         "HOSPITAL_TENDER_AUTO_RUN",
         "HOSPITAL_TENDER_INTERVAL_MINUTES",
         "HOSPITAL_TENDER_BATCH_SIZE",
+        "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
       ]);
       legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
         (name) => !v060EnvironmentNames.has(name),

@@ -20,7 +20,8 @@ import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
-// v0.6.0 added the encrypted settings key and hospital-tender scheduler
+// v0.6.0 added the encrypted settings key and hospital-tender scheduler; the
+// PushPlus notification contract is part of the same candidate-release gate.
 // settings to the manifest contract. A pre-cutover report must still be able
 // to authenticate the already-running v0.5.7 schema-3 release, but that
 // relaxed set is valid only for the canonical current release path. Candidate
@@ -31,6 +32,7 @@ const V060_REQUIRED_ENV_NAMES = new Set([
   "HOSPITAL_TENDER_AUTO_RUN",
   "HOSPITAL_TENDER_INTERVAL_MINUTES",
   "HOSPITAL_TENDER_BATCH_SIZE",
+  "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
 ]);
 const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
   REQUIRED_ENV_NAMES.filter((name) => !V060_REQUIRED_ENV_NAMES.has(name)),
@@ -237,8 +239,36 @@ function hasHospitalTenderSchedulerConfiguration(environment) {
   return (
     environment.HOSPITAL_TENDER_AUTO_RUN === "true" &&
     environment.HOSPITAL_TENDER_INTERVAL_MINUTES === "60" &&
-    environment.HOSPITAL_TENDER_BATCH_SIZE === "10"
+    environment.HOSPITAL_TENDER_BATCH_SIZE === "10" &&
+    hasHospitalTenderNotificationConfiguration(environment)
   );
+}
+
+function isStrongHospitalTenderPushplusToken(value) {
+  return (
+    typeof value === "string" &&
+    value.length >= 32 &&
+    value.length <= 512 &&
+    value === value.trim() &&
+    /^[A-Za-z0-9_-]+$/u.test(value) &&
+    !/^(?:fixture|test|example|change|replace|your|dummy|sample)/iu.test(value)
+  );
+}
+
+function hasHospitalTenderNotificationConfiguration(environment) {
+  const token = environment.HOSPITAL_TENDER_PUSHPLUS_TOKEN;
+  const schedulerEnabled = environment.HOSPITAL_TENDER_AUTO_RUN === "true";
+  if (!schedulerEnabled) return true;
+  const otherSecrets = [
+    environment.AUTH_SESSION_SECRET,
+    environment.WEIXIN_AGENT_API_TOKEN,
+    environment.ASSISTANT_CONFIRMATION_SECRET,
+    environment.SETTINGS_ENCRYPTION_KEY,
+    environment.MODEL_API_KEY,
+    environment.ICOST_WEBHOOK_TOKEN,
+    environment.HOSPITAL_TENDER_SYNC_TOKEN,
+  ].filter((value) => typeof value === "string" && value.length > 0);
+  return isStrongHospitalTenderPushplusToken(token) && !otherSecrets.includes(token);
 }
 
 function isPositiveSafeIntegerText(value) {
@@ -2565,7 +2595,7 @@ export async function runProductionPreflight({
         hasHospitalTenderSchedulerConfiguration(environment),
       "Environment is explicitly production with the v0.6.0 automatic tender schedule enabled at 60 minutes and 10 customers.",
       environmentResult.error ??
-        "NODE_ENV must be production and hospital tender auto-run must be true with the fixed 60-minute/10-customer schedule.",
+        "NODE_ENV must be production, hospital tender auto-run must be true with the fixed 60-minute/10-customer schedule, and HOSPITAL_TENDER_PUSHPLUS_TOKEN must be a dedicated strong value.",
     ),
     makeCheck(
       "env.authRequired",

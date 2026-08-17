@@ -1919,6 +1919,7 @@ describe("portable release package", () => {
         "HOSPITAL_TENDER_AUTO_RUN",
         "HOSPITAL_TENDER_INTERVAL_MINUTES",
         "HOSPITAL_TENDER_BATCH_SIZE",
+        "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
         "WEIXIN_AGENT_API_TOKEN",
         "ICOST_WEBHOOK_TOKEN",
         "ICOST_WEBHOOK_OWNER",

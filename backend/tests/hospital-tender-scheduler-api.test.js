@@ -84,6 +84,7 @@ describe("hospital tender scheduler API", () => {
     assert.equal(initial.body.item.intervalMinutes, 60);
     assert.equal(initial.body.item.batchSize, 10);
     assert.equal(Array.isArray(initial.body.runs), true);
+    assert.deepEqual(initial.body.notification, { status: "disabled", provider: "pushplus" });
 
     const updated = await request("/api/hospital-tenders/scheduler", {
       method: "PATCH",

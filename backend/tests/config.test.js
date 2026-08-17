@@ -46,6 +46,7 @@ describe("backend model configuration", () => {
         "HOSPITAL_TENDER_AUTO_RUN=true",
         "HOSPITAL_TENDER_INTERVAL_MINUTES=120",
         "HOSPITAL_TENDER_BATCH_SIZE=8",
+        "HOSPITAL_TENDER_PUSHPLUS_TOKEN=fixture-pushplus-token",
       ].join("\n"),
       "utf8",
     );
@@ -85,6 +86,7 @@ describe("backend model configuration", () => {
       assert.equal(config.hospitalTenderAutoRun, true);
       assert.equal(config.hospitalTenderIntervalMinutes, 120);
       assert.equal(config.hospitalTenderBatchSize, 8);
+      assert.equal(config.hospitalTenderPushplusToken, "fixture-pushplus-token");
       assert.equal(config.port, 8788);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -129,6 +131,7 @@ describe("backend model configuration", () => {
     assert.equal(config.hospitalTenderAutoRun, false);
     assert.equal(config.hospitalTenderIntervalMinutes, 60);
     assert.equal(config.hospitalTenderBatchSize, 10);
+    assert.equal(config.hospitalTenderPushplusToken, "");
     assert.equal(config.nodeEnv, "development");
   });
 

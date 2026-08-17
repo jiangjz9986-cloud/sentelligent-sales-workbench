@@ -275,6 +275,9 @@ export function loadConfig(overrides = {}) {
     ),
     hospitalTenderIntervalMinutes,
     hospitalTenderBatchSize,
+    hospitalTenderPushplusToken: String(
+      env.hospitalTenderPushplusToken ?? env.HOSPITAL_TENDER_PUSHPLUS_TOKEN ?? "",
+    ).trim(),
     settingsEncryptionKey: String(
       env.settingsEncryptionKey ?? env.SETTINGS_ENCRYPTION_KEY ?? "",
     ).trim(),

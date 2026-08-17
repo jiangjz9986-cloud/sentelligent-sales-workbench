@@ -82,6 +82,7 @@ cp .env.example .env
 - `HOSPITAL_TENDER_AUTO_RUN`: 是否启动自动轮巡；生产默认开启，开发默认关闭。
 - `HOSPITAL_TENDER_INTERVAL_MINUTES`: 自动轮巡间隔，默认 `60` 分钟。
 - `HOSPITAL_TENDER_BATCH_SIZE`: 每次匹配客户数量，默认 `10`；批次游标和未完成快照保存在 SQLite 中，服务重启后继续。
+- `HOSPITAL_TENDER_PUSHPLUS_TOKEN`: 开发环境可选，仅由后端读取，用于把本批新增高相关公告聚合推送到 PushPlus；缺省时仍采集但通知状态为 `disabled`，不会传给 Python 采集器、前端或 SQLite。生产自动轮巡 preflight 会要求专用的强 Token。
 - `SETTINGS_ENCRYPTION_KEY`: 配置页密钥库的 32 字节 base64url 主密钥；只放在后端环境文件或进程环境，不进入 SQLite、前端或 Git。未配置时系统配置 API fail-closed。
 
 Model mode example:
