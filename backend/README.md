@@ -79,6 +79,9 @@ cp .env.example .env
 - `DEEPSEEK_API_KEY`: 仅放后端 `.env`，不要进入前端、文档正文或日志
 - `MODEL_TIMEOUT_MS`: 默认 `30000`
 - `HOSPITAL_TENDER_PYTHON`: 内置医院招标采集器使用的 Python 3.11+ 可执行文件；默认 `python3`，如果系统默认 Python 版本较旧，请填入受保护环境中的绝对路径。
+- `HOSPITAL_TENDER_AUTO_RUN`: 是否启动自动轮巡；生产默认开启，开发默认关闭。
+- `HOSPITAL_TENDER_INTERVAL_MINUTES`: 自动轮巡间隔，默认 `60` 分钟。
+- `HOSPITAL_TENDER_BATCH_SIZE`: 每次匹配客户数量，默认 `10`；批次游标和未完成快照保存在 SQLite 中，服务重启后继续。
 - `SETTINGS_ENCRYPTION_KEY`: 配置页密钥库的 32 字节 base64url 主密钥；只放在后端环境文件或进程环境，不进入 SQLite、前端或 Git。未配置时系统配置 API fail-closed。
 
 Model mode example:

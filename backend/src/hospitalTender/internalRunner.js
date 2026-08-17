@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { normalizeHospitalTenderSyncPayload } from "./sync.js";
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const MAX_CUSTOMER_HOSPITALS = 2_000;
+const MAX_CUSTOMER_REGISTRY_BYTES = 8 * 1024 * 1024;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_COLLECTOR_ROOT = resolve(MODULE_DIR, "../../vendor/hospital-tender-monitor");
 
@@ -87,35 +89,39 @@ export function createInternalHospitalTenderRunner(options = {}) {
       const runDir = await mkdtemp(join(tmpdir(), "sentelligent-hospital-tender-"));
       const dataDir = join(runDir, "data");
       const outputPath = join(runDir, "snapshot.json");
-      let customerHospitalsPath = "";
-      if (customerHospitals !== undefined) {
-        if (!Array.isArray(customerHospitals) || customerHospitals.length > 200) {
-          throw new InternalHospitalTenderRunError("Internal hospital customer registry is invalid");
-        }
-        customerHospitalsPath = join(runDir, "customer_hospitals.json");
-        await writeFile(
-          customerHospitalsPath,
-          `${JSON.stringify({ hospitals: customerHospitals })}\n`,
-          { encoding: "utf8", mode: 0o600 },
-        );
-        await chmod(customerHospitalsPath, 0o600).catch(() => {});
-      }
-      const child = spawnImpl(
-        pythonExecutable,
-        ["-m", "hospital_tender_monitor.cli", "--project-root", collectorRoot, "run-and-export", "--output", outputPath],
-        {
-          cwd: collectorRoot,
-          env: commandEnvironment({
-            collectorRoot,
-            dataDir,
-            customerHospitalsPath,
-            env: environment,
-          }),
-          stdio: ["ignore", "ignore", "pipe"],
-          signal,
-        },
-      );
       try {
+        let customerHospitalsPath = "";
+        if (customerHospitals !== undefined) {
+          if (!Array.isArray(customerHospitals) || customerHospitals.length > MAX_CUSTOMER_HOSPITALS) {
+            throw new InternalHospitalTenderRunError("Internal hospital customer registry is invalid");
+          }
+          const serializedCustomerHospitals = `${JSON.stringify({ hospitals: customerHospitals })}\n`;
+          if (Buffer.byteLength(serializedCustomerHospitals, "utf8") > MAX_CUSTOMER_REGISTRY_BYTES) {
+            throw new InternalHospitalTenderRunError("Internal hospital customer registry is invalid");
+          }
+          customerHospitalsPath = join(runDir, "customer_hospitals.json");
+          await writeFile(
+            customerHospitalsPath,
+            serializedCustomerHospitals,
+            { encoding: "utf8", mode: 0o600 },
+          );
+          await chmod(customerHospitalsPath, 0o600).catch(() => {});
+        }
+        const child = spawnImpl(
+          pythonExecutable,
+          ["-m", "hospital_tender_monitor.cli", "--project-root", collectorRoot, "run-and-export", "--output", outputPath],
+          {
+            cwd: collectorRoot,
+            env: commandEnvironment({
+              collectorRoot,
+              dataDir,
+              customerHospitalsPath,
+              env: environment,
+            }),
+            stdio: ["ignore", "ignore", "pipe"],
+            signal,
+          },
+        );
         const result = await collectOutput(child, timeoutMs);
         if (result.code !== 0 || result.signal) {
           throw new InternalHospitalTenderRunError("Internal hospital tender monitor failed");

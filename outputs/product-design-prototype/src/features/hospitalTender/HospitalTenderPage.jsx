@@ -148,6 +148,19 @@ function metricValue(summary, keys, fallback) {
   return fallback;
 }
 
+function formatSchedulerDate(value, fallback) {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 function NoticeDetail({ notice, onClose, onSelectCustomer }) {
   const matchReasons = [...new Set(Object.values(notice.matchReasons ?? {}).flat().filter(Boolean))];
   const matchedNeeds = [...new Set(Object.values(notice.matchedNeeds ?? {}).flat().filter(Boolean))];
@@ -246,6 +259,42 @@ function HealthSummary({ sources, health }) {
   );
 }
 
+function SchedulerProgress({ scheduler }) {
+  const state = scheduler?.item ?? scheduler ?? null;
+  const runs = Array.isArray(scheduler?.runs) ? scheduler.runs : [];
+  if (!state) return null;
+  const processedFromRuns = runs
+    .filter((run) => run.snapshotId && run.snapshotId === state.snapshotId && ["success", "partial"].includes(run.status))
+    .reduce((total, run) => total + (Number(run.batchCount) || 0), 0);
+  const processed = Number.isSafeInteger(state.cycleProcessedCount)
+    ? state.cycleProcessedCount
+    : processedFromRuns;
+  const total = Number(state.cycleCustomerCount) || 0;
+  const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+  const statusLabel = {
+    idle: "等待首轮",
+    waiting: "等待下次轮巡",
+    running: "正在处理",
+    success: "最近一批成功",
+    partial: "最近一批部分完成",
+    failed: "最近一批失败",
+    disabled: "已停用",
+  }[state.lastStatus] ?? state.lastStatus;
+  return (
+    <Panel title="自动轮巡" meta={state.enabled ? `每 ${state.intervalMinutes} 分钟` : "已停用"} className="hospital-tender-scheduler">
+      <div className="list-stack tiny" style={{ minWidth: 0 }}>
+        <div className="compact-item"><span className={`mini-icon ${state.lastStatus === "failed" ? "danger" : "success"}`}><CalendarClock size={15} /></span><span><strong>{statusLabel}</strong><small>第 {state.cycleNumber} 轮 · 每批 {state.batchSize} 家客户</small></span></div>
+        {state.snapshotId ? <div className="detail-surface"><strong>本轮进度 {processed} / {total}</strong><progress value={percent} max="100" aria-label="医院招标轮巡进度" style={{ width: "100%" }}>{percent}%</progress></div> : null}
+        <small className="muted-copy">最近批次：{state.lastBatchCount || 0} 家客户 · 入库 {state.lastAcceptedCount || 0} 条 · 异常 {state.lastRejectedCount || 0} 条</small>
+        <small className="muted-copy">最近完成：{formatSchedulerDate(state.lastFinishedAt, "尚未运行")}</small>
+        <small className="muted-copy">下次运行：{formatSchedulerDate(state.nextRunAt, state.enabled ? "等待排期" : "已停用")}</small>
+        <small className="muted-copy">本批新增高相关：{Number(state.lastHighRelevanceCount) || 0} 条</small>
+        {state.lastError ? <p className="expense-page-alert" role="alert"><CircleAlert size={15} />{state.lastError}</p> : null}
+      </div>
+    </Panel>
+  );
+}
+
 export function HospitalTenderPage({
   apiClient = null,
   backendStatus = "connected",
@@ -271,19 +320,23 @@ export function HospitalTenderPage({
     summary: null,
     sources: null,
     health: null,
+    scheduler: null,
   });
   const [runState, setRunState] = useState({ busy: false, error: "", notice: "" });
   const refreshRemote = useCallback(async () => {
     if (!apiClient || backendStatus === "offline") return;
     setRemoteState((current) => ({ ...current, loading: true, error: "" }));
     try {
-      const [nextNotices, nextSummary, nextSources, nextHealth] = await Promise.all([
+      const [nextNotices, nextSummary, nextSources, nextHealth, nextScheduler] = await Promise.all([
         apiClient.listHospitalTenders(),
         apiClient.getHospitalTenderSummary(),
         apiClient.listHospitalTenderSources(),
         apiClient.getHospitalTenderHealth(),
+        apiClient.getHospitalTenderScheduler
+          ? apiClient.getHospitalTenderScheduler().catch(() => null)
+          : Promise.resolve(null),
       ]);
-      setRemoteState({ loading: false, error: "", notices: nextNotices, summary: nextSummary, sources: nextSources, health: nextHealth });
+      setRemoteState({ loading: false, error: "", notices: nextNotices, summary: nextSummary, sources: nextSources, health: nextHealth, scheduler: nextScheduler });
     } catch (error) {
       setRemoteState((current) => ({ ...current, loading: false, error: String(error?.message ?? "招标公告加载失败") }));
     }
@@ -294,11 +347,12 @@ export function HospitalTenderPage({
   }, [apiClient, backendStatus, refreshRemote]);
 
   const runInternalMonitor = useCallback(async () => {
-    if (!apiClient?.runHospitalTenderMonitor || backendStatus !== "connected") return;
+    if ((!apiClient?.runHospitalTenderScheduler && !apiClient?.runHospitalTenderMonitor) || backendStatus !== "connected") return;
     setRunState({ busy: true, error: "", notice: "" });
     try {
-      await apiClient.runHospitalTenderMonitor();
-      setRunState({ busy: false, error: "", notice: "检测完成，公告和客户匹配已更新。" });
+      if (apiClient.runHospitalTenderScheduler) await apiClient.runHospitalTenderScheduler();
+      else await apiClient.runHospitalTenderMonitor();
+      setRunState({ busy: false, error: "", notice: "本批检测完成，公告和客户匹配已更新。" });
       await refreshRemote();
     } catch {
       setRunState({ busy: false, error: "检测未完成，请稍后重试。", notice: "" });
@@ -356,7 +410,7 @@ export function HospitalTenderPage({
         <div className="settings-button-row" style={{ justifyContent: "flex-end" }}>
           <button className="primary-button" type="button" onClick={() => { void runInternalMonitor(); }} disabled={effectiveLoading || runState.busy || backendStatus !== "connected"}>
             {runState.busy ? <LoaderCircle className="state-spinner" size={16} /> : <BellRing size={16} />}
-            {runState.busy ? "检测中" : "立即检测"}
+            {runState.busy ? "轮巡中" : "立即检测下一批"}
           </button>
           <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading || runState.busy}>
             {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
@@ -400,6 +454,7 @@ export function HospitalTenderPage({
           </div>
         </Panel>
         <HealthSummary sources={effectiveSources} health={effectiveHealth} />
+        <SchedulerProgress scheduler={remoteState.scheduler} />
       </div>
 
       {selectedNotice ? <NoticeDetail notice={selectedNotice} onClose={() => setSelectedNotice(null)} onSelectCustomer={onSelectCustomer} /> : null}

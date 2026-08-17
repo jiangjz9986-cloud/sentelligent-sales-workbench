@@ -272,6 +272,36 @@ export function normalizeNoticeMatch(input = {}) {
   return { matchedCustomerIds, matchReasons, matchedNeeds, matchScore };
 }
 
+/**
+ * Merge one customer batch into a previously persisted notice match.
+ * Batch runs share one immutable source snapshot, so customer evidence must
+ * accumulate instead of being replaced by the latest ten-customer slice.
+ */
+export function mergeNoticeMatches(previous = {}, next = {}) {
+  const before = normalizeNoticeMatch(previous);
+  const after = normalizeNoticeMatch(next);
+  const matchedCustomerIds = [...new Set([
+    ...before.matchedCustomerIds,
+    ...after.matchedCustomerIds,
+  ])].slice(0, 100);
+  const mergeMap = (left, right, itemLimit) => {
+    const output = {};
+    for (const customerId of new Set([...Object.keys(left), ...Object.keys(right)])) {
+      output[customerId] = [...new Set([
+        ...(Array.isArray(left[customerId]) ? left[customerId] : []),
+        ...(Array.isArray(right[customerId]) ? right[customerId] : []),
+      ])].slice(0, itemLimit);
+    }
+    return output;
+  };
+  return normalizeNoticeMatch({
+    matchedCustomerIds,
+    matchReasons: mergeMap(before.matchReasons, after.matchReasons, NOTICE_FIELD_LIMITS.matchReasonsPerCustomer),
+    matchedNeeds: mergeMap(before.matchedNeeds, after.matchedNeeds, NOTICE_FIELD_LIMITS.matchedNeedsPerCustomer),
+    matchScore: Math.max(before.matchScore, after.matchScore),
+  });
+}
+
 function fromNoticeRow(row) {
   if (!row) return null;
   return {
@@ -482,12 +512,17 @@ export function createHospitalTenderRepository(db, {
     return fromNoticeRow(db.prepare("SELECT * FROM hospital_tender_notices WHERE id = $id").get({ $id: noticeId }));
   }
 
-  function upsertNotice(input, match = {}) {
+  function upsertNotice(input, match = {}, options = {}) {
     const snapshot = normalizeNoticeSnapshot(input);
-    const normalizedMatch = normalizeNoticeMatch(match);
+    if (!isPlainObject(options)) throw new TypeError("options must be an object");
+    assertKnownKeys(options, new Set(["mergeExistingMatch"]), "options");
     const existing = db.prepare(
       "SELECT id, first_seen_at FROM hospital_tender_notices WHERE identity_key = $identityKey",
     ).get({ $identityKey: snapshot.identityKey });
+    const existingNotice = existing ? getNotice(existing.id) : null;
+    const normalizedMatch = options.mergeExistingMatch
+      ? mergeNoticeMatches(existingNotice?.match ?? {}, match)
+      : normalizeNoticeMatch(match);
     const id = existing?.id ?? snapshot.id ?? generatedId(idFactory, "generated notice id");
     const now = nowIso(clock);
     db.prepare(`

@@ -87,6 +87,12 @@ function positiveInteger(value, name) {
   return parsed;
 }
 
+function boundedPositiveInteger(value, name, max) {
+  const parsed = positiveInteger(value, name);
+  if (parsed > max) throw new Error(`${name} must be no greater than ${max}`);
+  return parsed;
+}
+
 function invoiceOcrLanguagesValue(value) {
   const normalized = String(value ?? "chi_sim+eng").trim();
   if (!/^[A-Za-z0-9_.+-]{1,100}$/.test(normalized)) {
@@ -224,6 +230,16 @@ export function loadConfig(overrides = {}) {
     env.weixinAllowedGroupIds ?? env.WEIXIN_ALLOWED_GROUP_IDS,
     "WEIXIN_ALLOWED_GROUP_IDS",
   );
+  const hospitalTenderIntervalMinutes = boundedPositiveInteger(
+    env.hospitalTenderIntervalMinutes ?? env.HOSPITAL_TENDER_INTERVAL_MINUTES ?? 60,
+    "HOSPITAL_TENDER_INTERVAL_MINUTES",
+    1440,
+  );
+  const hospitalTenderBatchSize = boundedPositiveInteger(
+    env.hospitalTenderBatchSize ?? env.HOSPITAL_TENDER_BATCH_SIZE ?? 10,
+    "HOSPITAL_TENDER_BATCH_SIZE",
+    200,
+  );
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
     port: Number(env.port ?? env.PORT ?? 8787),
@@ -238,6 +254,13 @@ export function loadConfig(overrides = {}) {
       env.hospitalTenderPython ?? env.HOSPITAL_TENDER_PYTHON ?? "python3",
       "HOSPITAL_TENDER_PYTHON",
     ),
+    hospitalTenderAutoRun: booleanValue(
+      env.hospitalTenderAutoRun ?? env.HOSPITAL_TENDER_AUTO_RUN,
+      nodeEnv === "production",
+      "HOSPITAL_TENDER_AUTO_RUN",
+    ),
+    hospitalTenderIntervalMinutes,
+    hospitalTenderBatchSize,
     settingsEncryptionKey: String(
       env.settingsEncryptionKey ?? env.SETTINGS_ENCRYPTION_KEY ?? "",
     ).trim(),

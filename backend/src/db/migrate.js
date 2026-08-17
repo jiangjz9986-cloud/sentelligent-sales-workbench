@@ -16,6 +16,7 @@ import { apply as applyAssistantOwnerAndPlanDigest } from "./migrations/0012_ass
 import { apply as applyAssistantConfirmationClosure } from "./migrations/0013_assistant_confirmation_closure.mjs";
 import { apply as applyHospitalTenderMonitor } from "./migrations/0014_hospital_tender_monitor.mjs";
 import { apply as applySecureSettings } from "./migrations/0015_secure_settings.mjs";
+import { apply as applyHospitalTenderScheduler } from "./migrations/0016_hospital_tender_scheduler.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -101,6 +102,12 @@ const migrations = [
     path: resolve(here, "migrations", "0015_secure_settings.mjs"),
     type: "module",
     apply: applySecureSettings,
+  },
+  {
+    version: "0016",
+    path: resolve(here, "migrations", "0016_hospital_tender_scheduler.mjs"),
+    type: "module",
+    apply: applyHospitalTenderScheduler,
   },
 ];
 

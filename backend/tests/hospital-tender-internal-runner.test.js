@@ -114,4 +114,30 @@ describe("internal hospital tender runner", () => {
     assert.ok(Date.now() - startedAt < 500);
     assert.deepEqual(killed, ["SIGTERM", "SIGKILL"]);
   });
+
+  it("accepts a bounded registry larger than one matching batch", async () => {
+    let customerRegistryPath;
+    const runner = createInternalHospitalTenderRunner({
+      spawnImpl(_command, args, options) {
+        customerRegistryPath = options.env.HOSPITAL_TENDER_MONITOR_CUSTOMER_HOSPITALS_PATH;
+        const child = fakeChild();
+        const output = args[args.indexOf("--output") + 1];
+        void writeFile(output, `${JSON.stringify(validSnapshot())}\n`, "utf8").then(() => {
+          queueMicrotask(() => child.emit("close", 0, null));
+        });
+        return child;
+      },
+    });
+    const registry = Array.from({ length: 201 }, (_, index) => ({
+      id: `customer-${index + 1}`,
+      name: `医院 ${index + 1}`,
+      city: "东营",
+      region: "东营",
+      status: "direct",
+      source_ids: [],
+      aliases: [],
+    }));
+    await runner.run({ customerHospitals: registry });
+    assert.match(customerRegistryPath, /customer_hospitals\.json$/u);
+  });
 });

@@ -288,7 +288,15 @@ export function serializeHospitalTenderSource(item) {
   };
 }
 
-export function ingestHospitalTenderSnapshot({ repository, payload, customers = [] } = {}) {
+export function ingestHospitalTenderSnapshot({
+  repository,
+  payload,
+  customers = [],
+  mergeMatches = false,
+  persistSources = true,
+  persistRuns = true,
+  persistAggregateRun = true,
+} = {}) {
   if (!repository || typeof repository.upsertNotice !== "function") {
     throw new TypeError("repository is required");
   }
@@ -300,18 +308,22 @@ export function ingestHospitalTenderSnapshot({ repository, payload, customers = 
   for (const notice of snapshot.notices) {
     try {
       const match = matchNoticeToCustomers(notice, customerSnapshots);
-      accepted.push(repository.upsertNotice(notice, match));
+      accepted.push(repository.upsertNotice(notice, match, { mergeExistingMatch: mergeMatches }));
     } catch (error) {
       rejected.push({ identityKey: notice.identityKey, code: "invalid_notice", message: error.message });
     }
   }
-  for (const source of snapshot.sources) {
-    repository.upsertSourceHealth(source);
+  if (persistSources) {
+    for (const source of snapshot.sources) {
+      repository.upsertSourceHealth(source);
+    }
   }
-  for (const run of snapshot.runs) {
-    repository.recordRun(run);
+  if (persistRuns) {
+    for (const run of snapshot.runs) {
+      repository.recordRun(run);
+    }
   }
-  if (snapshot.runs.length === 0) {
+  if (persistAggregateRun && persistRuns && snapshot.runs.length === 0) {
     repository.recordRun({
       id: `sync-${Date.parse(snapshot.generatedAt)}`,
       sourceId: "aggregate",

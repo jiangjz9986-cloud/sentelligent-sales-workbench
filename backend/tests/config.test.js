@@ -38,6 +38,9 @@ describe("backend model configuration", () => {
         "INVOICE_PDF_TEXT_COMMAND=C:/Tools/pdftotext.exe",
         "INVOICE_OCR_LANGUAGES=chi_sim+eng",
         "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS=45678",
+        "HOSPITAL_TENDER_AUTO_RUN=true",
+        "HOSPITAL_TENDER_INTERVAL_MINUTES=120",
+        "HOSPITAL_TENDER_BATCH_SIZE=8",
       ].join("\n"),
       "utf8",
     );
@@ -70,6 +73,9 @@ describe("backend model configuration", () => {
       assert.equal(config.invoicePdfTextCommand, "C:/Tools/pdftotext.exe");
       assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
       assert.equal(config.invoiceTextExtractionTimeoutMs, 45_678);
+      assert.equal(config.hospitalTenderAutoRun, true);
+      assert.equal(config.hospitalTenderIntervalMinutes, 120);
+      assert.equal(config.hospitalTenderBatchSize, 8);
       assert.equal(config.port, 8788);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -107,6 +113,9 @@ describe("backend model configuration", () => {
     assert.equal(config.invoicePdfTextCommand, "");
     assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
     assert.equal(config.invoiceTextExtractionTimeoutMs, 30_000);
+    assert.equal(config.hospitalTenderAutoRun, false);
+    assert.equal(config.hospitalTenderIntervalMinutes, 60);
+    assert.equal(config.hospitalTenderBatchSize, 10);
     assert.equal(config.nodeEnv, "development");
   });
 
@@ -218,6 +227,9 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
+    assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_AUTO_RUN: "yes" }), /HOSPITAL_TENDER_AUTO_RUN/);
+    assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_INTERVAL_MINUTES: 1441 }), /HOSPITAL_TENDER_INTERVAL_MINUTES/);
+    assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_BATCH_SIZE: 201 }), /HOSPITAL_TENDER_BATCH_SIZE/);
   });
 
   it("emits the plaintext development-password warning once without leaking its value", () => {

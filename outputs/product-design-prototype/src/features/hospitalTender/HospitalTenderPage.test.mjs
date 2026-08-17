@@ -20,6 +20,14 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   assert.match(source, /匹配依据/);
   assert.match(source, /立即检测/);
   assert.match(source, /runHospitalTenderMonitor/);
+  assert.match(source, /自动轮巡/);
+  assert.match(source, /每批/);
+  assert.match(source, /最近批次/);
+  assert.match(source, /下次运行/);
+  assert.match(source, /runHospitalTenderScheduler/);
+  assert.match(source, /getHospitalTenderScheduler/);
+  assert.match(source, /轮巡进度/);
+  assert.match(source, /本批新增高相关/);
   assert.match(source, /role="dialog"|aria-label="公告详情"/);
 });
 

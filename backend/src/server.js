@@ -125,6 +125,8 @@ import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
+import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
+import { createHospitalTenderScheduler } from "./hospitalTender/scheduler.js";
 import { createSecureSettingsRepository, DEEPSEEK_SETTING_KEY, ICOST_SETTING_KEY } from "./settings/repository.js";
 import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
 import {
@@ -2301,6 +2303,31 @@ export function createServer(options = {}) {
         ?? config.hospitalTenderPython,
     });
   let hospitalTenderInternalRunPromise = null;
+  const hospitalTenderSchedulerRepository = createHospitalTenderSchedulerRepository(db, {
+    clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
+    ...(options.hospitalTenderSchedulerIdFactory
+      ? { idFactory: options.hospitalTenderSchedulerIdFactory }
+      : {}),
+  });
+  const hospitalTenderScheduler = createHospitalTenderScheduler({
+    db,
+    repository: hospitalTenderSchedulerRepository,
+    tenderRepository: hospitalTenderRepository,
+    runner: hospitalTenderInternalRunner,
+    customersProvider: () => all(
+      db,
+      "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY id ASC",
+    ).map(customerFromRow),
+    ...(options.hospitalTenderNotifier ? { notifier: options.hospitalTenderNotifier } : {}),
+    clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
+    ...(options.hospitalTenderSchedulerIdFactory
+      ? { idFactory: options.hospitalTenderSchedulerIdFactory }
+      : {}),
+    intervalMinutes: config.hospitalTenderIntervalMinutes,
+    batchSize: config.hospitalTenderBatchSize,
+  });
+  const hospitalTenderAutoRun = options.hospitalTenderAutoRun ?? config.hospitalTenderAutoRun;
+  if (hospitalTenderAutoRun && options.hospitalTenderSchedulerEnabled !== false) hospitalTenderScheduler.start();
   const databaseIdentity = config.authSessionSecret.length >= 32
     ? createDatabaseIdentity({
         databaseUrl: config.databaseUrl,
@@ -2472,6 +2499,18 @@ export function createServer(options = {}) {
     if (hospitalTenderInternalRunPromise) {
       throw new HttpError(409, "HOSPITAL_TENDER_RUN_IN_PROGRESS", "医院招标监测任务正在运行");
     }
+    const schedulerClock = options.hospitalTenderSchedulerClock ?? (() => new Date());
+    const lockStartedAt = schedulerClock();
+    if (!(lockStartedAt instanceof Date) || Number.isNaN(lockStartedAt.getTime())) {
+      throw new Error("hospital tender scheduler clock is invalid");
+    }
+    const manualLockOwner = `hospital-tender-manual-${randomUUID()}`;
+    if (!hospitalTenderSchedulerRepository.tryAcquireLock(
+      manualLockOwner,
+      new Date(lockStartedAt.getTime() + 30 * 60_000).toISOString(),
+    )) {
+      throw new HttpError(409, "HOSPITAL_TENDER_RUN_IN_PROGRESS", "医院招标监测任务正在运行");
+    }
     hospitalTenderInternalRunPromise = (async () => {
       const customers = all(
         db,
@@ -2540,6 +2579,7 @@ export function createServer(options = {}) {
       return await hospitalTenderInternalRunPromise;
     } finally {
       hospitalTenderInternalRunPromise = null;
+      hospitalTenderSchedulerRepository.releaseLock(manualLockOwner);
     }
   }
 
@@ -3094,7 +3134,7 @@ export function createServer(options = {}) {
         && parts[0] === "api"
         && parts[1] === "hospital-tenders"
         && parts[2]
-        && !new Set(["summary", "sources", "health"]).has(parts[2])
+        && !new Set(["summary", "sources", "health", "scheduler"]).has(parts[2])
       ) {
         const item = hospitalTenderRepository.getNotice(parts[2]);
         if (!item) return notFound(response);
@@ -3126,6 +3166,91 @@ export function createServer(options = {}) {
             latestRun: hospitalTenderRepository.summary().latestRun,
           },
         });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && (url.pathname === "/api/hospital-tenders/scheduler" || url.pathname === "/api/hospital-tenders/scheduler/status")
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        sendJson(response, 200, {
+          item: hospitalTenderScheduler.getState(),
+          runs: hospitalTenderScheduler.listRuns(10),
+          lock: hospitalTenderSchedulerRepository.lockState(),
+        });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && (url.pathname === "/api/hospital-tenders/scheduler/run-next" || url.pathname === "/api/hospital-tenders/scheduler/run")
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        await validateEmptyBody(request);
+        const result = await hospitalTenderScheduler.runNext({ force: true });
+        sendJson(response, result.status === "skipped" && result.reason === "locked" ? 409 : 200, {
+          item: {
+            status: result.status,
+            ...(result.reason ? { reason: result.reason } : {}),
+            ...(result.error ? { error: result.error } : {}),
+            ...(result.cycleNumber !== undefined ? { cycleNumber: result.cycleNumber } : {}),
+            ...(result.batchCustomerIds ? { batchCustomerIds: result.batchCustomerIds } : {}),
+            ...(result.acceptedCount !== undefined ? { acceptedCount: result.acceptedCount } : {}),
+            ...(result.rejectedCount !== undefined ? { rejectedCount: result.rejectedCount } : {}),
+            ...(result.notificationCount !== undefined ? { notificationCount: result.notificationCount } : {}),
+            state: hospitalTenderScheduler.getState(),
+          },
+        });
+        return;
+      }
+
+      if (request.method === "PATCH" && url.pathname === "/api/hospital-tenders/scheduler") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const body = await readJson(request);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "轮巡配置必须是对象");
+        }
+        const allowedFields = new Set(["enabled", "intervalMinutes", "batchSize"]);
+        if (Object.keys(body).some((key) => !allowedFields.has(key))) {
+          throw new HttpError(422, "VALIDATION_ERROR", "轮巡配置包含未知字段");
+        }
+        const patch = {};
+        if (Object.hasOwn(body, "enabled")) {
+          if (typeof body.enabled !== "boolean") throw new HttpError(422, "VALIDATION_ERROR", "enabled 必须是布尔值");
+          patch.enabled = body.enabled;
+        }
+        if (Object.hasOwn(body, "intervalMinutes")) {
+          if (!Number.isSafeInteger(body.intervalMinutes) || body.intervalMinutes < 1 || body.intervalMinutes > 1440) {
+            throw new HttpError(422, "VALIDATION_ERROR", "intervalMinutes 必须在 1-1440 之间");
+          }
+          patch.intervalMinutes = body.intervalMinutes;
+        }
+        if (Object.hasOwn(body, "batchSize")) {
+          if (!Number.isSafeInteger(body.batchSize) || body.batchSize < 1 || body.batchSize > 200) {
+            throw new HttpError(422, "VALIDATION_ERROR", "batchSize 必须在 1-200 之间");
+          }
+          patch.batchSize = body.batchSize;
+        }
+        if (Object.keys(patch).length === 0) throw new HttpError(422, "VALIDATION_ERROR", "未提供可更新配置");
+        const item = hospitalTenderSchedulerRepository.updateState({
+          ...patch,
+          ...(patch.enabled === false || Object.hasOwn(patch, "intervalMinutes") ? { nextRunAt: null } : {}),
+        });
+        if (item.enabled && Object.hasOwn(patch, "intervalMinutes")) {
+          hospitalTenderScheduler.stop();
+          hospitalTenderScheduler.start();
+        } else if (item.enabled && !hospitalTenderScheduler.isStarted()) {
+          hospitalTenderScheduler.start();
+        }
+        if (!item.enabled && hospitalTenderScheduler.isStarted()) hospitalTenderScheduler.stop();
+        sendJson(response, 200, { item: hospitalTenderScheduler.getState() });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/hospital-tenders/scheduler/runs") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        sendJson(response, 200, { items: hospitalTenderScheduler.listRuns(50) });
         return;
       }
 
@@ -6208,7 +6333,12 @@ export function createServer(options = {}) {
     }
   });
 
-  server.on("close", () => db.close());
+  server.on("close", () => {
+    hospitalTenderScheduler.stop();
+    db.close();
+  });
+  server.hospitalTenderScheduler = hospitalTenderScheduler;
+  server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
   return server;
 }
 

@@ -568,6 +568,19 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return response.item;
     },
 
+    async getHospitalTenderScheduler({ signal } = {}) {
+      const response = await requestApi("/api/hospital-tenders/scheduler", { signal });
+      return response;
+    },
+
+    async runHospitalTenderScheduler() {
+      const response = await requestApi("/api/hospital-tenders/scheduler/run-next", {
+        method: "POST",
+        body: "{}",
+      });
+      return response.item;
+    },
+
     async listVisitItineraries({ status, signal } = {}) {
       const query = status ? `?status=${encodeURIComponent(status)}` : "";
       const response = await requestApi(`/api/itineraries${query}`, { signal });
