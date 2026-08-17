@@ -5188,3 +5188,311 @@ textarea:focus {
     padding: 18px;
   }
 }
+
+/* iOS Shortcut token management */
+.shortcut-token-page {
+  max-width: 1120px;
+}
+
+.shortcut-token-panel {
+  padding: 20px;
+}
+
+.shortcut-token-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(47, 107, 255, 0.16);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(235, 241, 255, 0.82), rgba(242, 251, 255, 0.92));
+}
+
+.shortcut-token-intro-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--blue-deep);
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+.shortcut-token-intro h2 {
+  margin: 0;
+  color: #101828;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.shortcut-token-intro p {
+  max-width: 760px;
+  margin: 5px 0 0;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.shortcut-token-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.shortcut-token-main,
+.shortcut-token-guide {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 250, 255, 0.92));
+}
+
+.shortcut-token-main {
+  display: grid;
+  gap: 16px;
+}
+
+.shortcut-token-create {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.shortcut-token-create .form-field {
+  flex: 1 1 auto;
+}
+
+.shortcut-token-create .primary-button {
+  flex: 0 0 auto;
+}
+
+.shortcut-token-secret {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(22, 163, 74, 0.2);
+  border-radius: 8px;
+  background: var(--green-soft);
+}
+
+.shortcut-token-secret-head,
+.shortcut-token-list-head,
+.shortcut-token-row-title,
+.shortcut-token-guide-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shortcut-token-secret-head {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.shortcut-token-secret-head strong {
+  color: #166534;
+  font-size: 13px;
+}
+
+.shortcut-token-secret-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #15803d;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.shortcut-token-secret code,
+.shortcut-token-row code {
+  display: block;
+  overflow-x: auto;
+  padding: 9px 10px;
+  border: 1px solid rgba(16, 24, 40, 0.1);
+  border-radius: 7px;
+  color: #1d2939;
+  background: rgba(255, 255, 255, 0.88);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.shortcut-token-secret .ghost-button {
+  width: fit-content;
+}
+
+.shortcut-token-error,
+.shortcut-token-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 700;
+}
+
+.shortcut-token-error {
+  color: #b42318;
+}
+
+.shortcut-token-notice {
+  color: #15803d;
+}
+
+.shortcut-token-list-head {
+  justify-content: space-between;
+  padding-top: 2px;
+  border-top: 1px solid rgba(16, 24, 40, 0.08);
+}
+
+.shortcut-token-list-head h3 {
+  margin: 14px 0 3px;
+  color: #101828;
+  font-size: 15px;
+}
+
+.shortcut-token-list-head p,
+.shortcut-token-row small,
+.shortcut-token-empty {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.shortcut-token-list-head .compact-icon {
+  flex: 0 0 44px;
+  width: 44px;
+  min-width: 44px;
+  padding: 0;
+  margin-top: 12px;
+}
+
+.shortcut-token-list {
+  display: grid;
+  gap: 8px;
+}
+
+.shortcut-token-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.shortcut-token-row.revoked {
+  opacity: 0.68;
+  background: #f8fafc;
+}
+
+.shortcut-token-row-main {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.shortcut-token-row-title strong {
+  color: #1d2939;
+  font-size: 13px;
+}
+
+.shortcut-token-row-title svg {
+  color: var(--blue);
+}
+
+.shortcut-token-row code {
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 0;
+  color: #475467;
+  background: #f2f4f7;
+  font-size: 11px;
+}
+
+.shortcut-token-row .compact-icon {
+  flex: 0 0 auto;
+  min-width: 40px;
+  padding: 0 10px;
+}
+
+.shortcut-token-guide {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.shortcut-token-guide-head {
+  color: #101828;
+  font-size: 15px;
+}
+
+.shortcut-token-guide-head svg {
+  color: var(--blue);
+}
+
+.shortcut-token-guide ol {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 22px;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.shortcut-token-guide-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 10px;
+  border-radius: 7px;
+  color: #166534;
+  background: var(--green-soft);
+  font-size: 12px;
+  line-height: 1.55;
+  font-weight: 650;
+}
+
+.shortcut-token-guide-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.spin {
+  animation: shortcut-token-spin 0.9s linear infinite;
+}
+
+@keyframes shortcut-token-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 760px) {
+  .shortcut-token-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .shortcut-token-create {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .shortcut-token-create .primary-button {
+    width: 100%;
+  }
+
+  .shortcut-token-panel {
+    padding: 14px;
+  }
+}

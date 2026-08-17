@@ -96,6 +96,7 @@ function pageTitle(active) {
     knowledge: "销售知识库",
     kanban: "商机看板",
     weixin: "微信机器人绑定",
+    shortcut: "快捷指令 Token",
   };
   return titles[active];
 }

@@ -6,6 +6,7 @@ import {
   CalendarClock,
   Command,
   FileText,
+  KeyRound,
   Mic,
   MapPinned,
   PanelLeft,
@@ -37,6 +38,7 @@ export const navItems = [
   { id: "knowledge", label: "知识库", icon: BookOpen },
   { id: "kanban", label: "商机看板", icon: PanelLeft },
   { id: "weixin", label: "微信绑定", icon: Bot },
+  { id: "shortcut", label: "快捷指令", icon: KeyRound },
   { id: "settings", label: "系统配置", icon: Settings },
   { id: "hospital-tenders", label: "医院招标监测", icon: BellRing },
 ];

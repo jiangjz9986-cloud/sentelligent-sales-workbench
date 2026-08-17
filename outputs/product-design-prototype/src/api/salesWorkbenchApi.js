@@ -1208,6 +1208,38 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return binding.item;
     },
 
+    async listShortcutTokens() {
+      const response = await requestApi("/api/integrations/shortcut/tokens");
+      if (!Array.isArray(response?.items)) {
+        throw new TypeError("快捷指令 Token 响应缺少 items");
+      }
+      return response.items;
+    },
+
+    async createShortcutToken({ label } = {}) {
+      const body = {};
+      if (label !== undefined) body.label = label;
+      const response = await requestApi("/api/integrations/shortcut/tokens", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!response?.item || typeof response.item.token !== "string") {
+        throw new TypeError("快捷指令 Token 创建响应缺少一次性 Token");
+      }
+      return response.item;
+    },
+
+    async revokeShortcutToken(id) {
+      const normalizedId = String(id ?? "").trim();
+      if (!normalizedId) throw new TypeError("快捷指令 Token id 不能为空");
+      const response = await requestApi(
+        `/api/integrations/shortcut/tokens/${encodeURIComponent(normalizedId)}`,
+        { method: "DELETE" },
+      );
+      if (!response?.item) throw new TypeError("快捷指令 Token 撤销响应缺少 item");
+      return response.item;
+    },
+
     async getSecuritySettings() {
       const response = await requestApi("/api/settings/security");
       return response.item;

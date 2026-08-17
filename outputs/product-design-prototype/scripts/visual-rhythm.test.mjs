@@ -36,6 +36,7 @@ const pages = [
   { name: "knowledge", testId: "page-knowledge" },
   { name: "kanban", testId: "page-kanban" },
   { name: "weixin", testId: "page-weixin" },
+  { name: "shortcut", testId: "page-shortcut" },
   { name: "settings", testId: "page-settings" },
   { name: "hospital-tenders", testId: "hospital-tender-page" },
 ];
