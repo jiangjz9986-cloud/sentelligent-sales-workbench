@@ -2348,6 +2348,7 @@ async function main() {
     : join(tmpdir(), `sent-zx-integration-${Date.now()}.sqlite`);
   const backendWslPath = toWslPath(backendDir);
   const authPasswordHash = await hashPassword("qa-login", { salt: Buffer.alloc(16, 23) });
+  const settingsEncryptionKey = Buffer.alloc(32, 94).toString("base64url");
   let backend;
   let frontend;
   let cdp;
@@ -2394,6 +2395,7 @@ async function main() {
       AUTH_ACCOUNT: "jiangjz",
       AUTH_PASSWORD_HASH: authPasswordHash,
       AUTH_SESSION_SECRET: "qa-session-secret",
+      SETTINGS_ENCRYPTION_KEY: settingsEncryptionKey,
       CORS_ALLOWED_ORIGINS: frontendUrl,
       AUTH_COOKIE_SECURE: "false",
       SOLUTION_WRITES_ENABLED: "false",
@@ -2497,6 +2499,22 @@ async function main() {
       assert.deepEqual(browserItineraryWrites, [], "reading saved itinerary history must not trigger replanning writes");
     }
 
+    // The viewport sweep intentionally ends on the quick-record route. Return to
+    // the protected overview before reloading so this assertion tests session
+    // restoration rather than assuming every deep link resolves to overview.
+    await evaluate(cdp, `
+      (async () => {
+        const overviewNav = document.querySelector('[data-testid="nav-overview"]');
+        if (!overviewNav) throw new Error('Missing overview navigation before refresh');
+        overviewNav.click();
+        const started = Date.now();
+        while (Date.now() - started < 5000) {
+          if (document.querySelector('[data-testid="page-overview"]')) return true;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        throw new Error('Overview did not open before refresh');
+      })()
+    `);
     const refreshStart = cdp.networkResponses.length;
     await cdp.send("Page.reload", { ignoreCache: true });
     const refreshState = await evaluate(cdp, `

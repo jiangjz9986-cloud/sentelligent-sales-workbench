@@ -799,6 +799,7 @@ p {
 
 .itinerary-filter {
   min-width: 156px;
+  min-height: 38px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
@@ -5132,7 +5133,7 @@ textarea:focus {
 
 .settings-key-form input {
   width: 100%;
-  min-height: 42px;
+  min-height: 44px;
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 10px;

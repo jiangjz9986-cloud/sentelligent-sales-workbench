@@ -61,6 +61,8 @@ describe("Phase 1 release boundary", () => {
     );
     assert.match(integrationQa, /NODE_ENV=test/);
     assert.match(integrationQa, /AUTH_PASSWORD_HASH["']?\s*(?::|=)/);
+    assert.match(integrationQa, /SETTINGS_ENCRYPTION_KEY["']?\s*(?::|=)\s*settingsEncryptionKey/);
+    assert.match(integrationQa, /Buffer\.alloc\(32,[\s\S]{0,80}\.toString\(["']base64url["']\)/);
     assert.doesNotMatch(integrationQa, /["'`]AUTH_PASSWORD=/);
   });
 
@@ -103,6 +105,7 @@ describe("Phase 1 release boundary", () => {
     assert.match(integrationQa, /scripts\/static-server\.mjs/);
     assert.match(integrationQa, /--dist-path=/);
     assert.match(integrationQa, /--api-base-url=/);
+    assert.match(integrationQa, /nav-overview[\s\S]{0,1200}Page\.reload/);
     assert.doesNotMatch(integrationQa, /node_modules\/vite\/bin\/vite\.js/);
     assert.doesNotMatch(integrationQa, /import\(['"]\/scripts\//);
   });
