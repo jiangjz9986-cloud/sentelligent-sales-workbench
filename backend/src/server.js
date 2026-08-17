@@ -2944,7 +2944,7 @@ export function createServer(options = {}) {
               analysis: analyzed,
               leaseToken: claimed.leaseToken,
             });
-            sendJson(response, 201, {
+            sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
               item: shortcutResponseItem(completed.item, completed.replayed),
             }, { "Cache-Control": "no-store" });
             return;

@@ -36,7 +36,7 @@ async function login() {
   return { cookie: cookiePair(response.response), csrf: response.body.csrfToken };
 }
 
-async function startServer() {
+async function startServer(serverOptions = {}) {
   tempDir = await mkdtemp(join(tmpdir(), "shortcut-webhook-token-api-"));
   server = createServer({
     databaseUrl: join(tempDir, "test.sqlite"),
@@ -49,7 +49,7 @@ async function startServer() {
     authCookieSecure: false,
     corsAllowedOrigins: [],
     shortcutWebhookToken: legacyToken,
-    shortcutWebhookOwner: "legacy-owner",
+    shortcutWebhookOwner: account,
     travelExpenseAnalyzer: async () => ({
       status: "ready",
       confidence: 1,
@@ -66,6 +66,7 @@ async function startServer() {
       warnings: [],
       source: { provider: "test", model: null },
     }),
+    ...serverOptions,
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -81,6 +82,81 @@ afterEach(async () => {
 });
 
 describe("Shortcut webhook token management API", () => {
+  it("exposes owner-scoped Shortcut review list/detail and manual confirmation", async () => {
+    const staleTempDir = tempDir;
+    await new Promise((resolve) => server.close(resolve));
+    server = null;
+    await startServer({
+      travelExpenseAnalyzer: async () => ({
+        status: "review_required",
+        confidence: 0,
+        expense: null,
+        warnings: ["missing_amount"],
+        source: { provider: "test", model: null },
+      }),
+    });
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${legacyToken}` },
+      body: JSON.stringify({
+        text: "缺少金额的差旅记录",
+        selection_path: "出差报销 · 支出 · 交通 · 打车",
+        note: "待复核",
+        idempotency_key: "shortcut-review-api-1",
+        source: "shortcut",
+      }),
+    });
+    assert.equal(created.response.status, 202);
+    assert.equal(created.body.item.status, "review_required");
+
+    const session = await login();
+    const list = await request("/api/integrations/shortcut/bookkeeping/review?status=review_required", {
+      headers: { Cookie: session.cookie },
+    });
+    assert.equal(list.response.status, 200);
+    assert.equal(list.body.items.length, 1);
+    assert.equal(list.body.items[0].rawText, "缺少金额的差旅记录");
+
+    const detail = await request(`/api/integrations/shortcut/bookkeeping/review/${created.body.item.id}`, {
+      headers: { Cookie: session.cookie },
+    });
+    assert.equal(detail.response.status, 200);
+    assert.equal(detail.body.item.id, created.body.item.id);
+
+    const confirmed = await request(`/api/integrations/shortcut/bookkeeping/review/${created.body.item.id}/confirm`, {
+      method: "POST",
+      headers: { Cookie: session.cookie, "X-CSRF-Token": session.csrf },
+      body: JSON.stringify({
+        analysis: {
+          status: "ready",
+          confidence: 1,
+          expense: {
+            occurredOn: "2026-08-18",
+            amountCents: 1280,
+            reimbursementCents: 1280,
+            purpose: "人工确认打车",
+            merchant: "示例商户",
+          },
+          warnings: [],
+          source: { provider: "manual", model: null },
+        },
+      }),
+    });
+    assert.equal(confirmed.response.status, 201);
+    assert.equal(confirmed.body.item.status, "accepted");
+    assert.ok(confirmed.body.item.expenseId);
+    assert.ok(confirmed.body.item.paymentId);
+
+    const replay = await request(`/api/integrations/shortcut/bookkeeping/review/${created.body.item.id}/confirm`, {
+      method: "POST",
+      headers: { Cookie: session.cookie, "X-CSRF-Token": session.csrf },
+      body: JSON.stringify({ analysis: confirmed.body.item.analysis ?? {} }),
+    });
+    assert.equal(replay.response.status, 200);
+    assert.equal(replay.body.item.expenseId, confirmed.body.item.expenseId);
+    await rm(staleTempDir, { recursive: true, force: true });
+  });
+
   it("requires a cookie session and CSRF for management writes", async () => {
     assert.equal((await request("/api/integrations/shortcut/tokens")).response.status, 401);
     const session = await login();
