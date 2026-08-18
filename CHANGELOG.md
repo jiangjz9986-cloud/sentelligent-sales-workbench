@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-19
+
+### 统一助手与森特本地记账
+
+- 将小小能力目录、项目分析、客户/商机/拜访/动作风险/行程/差旅/周报只读工具接入同一微信助手运行时；写入仍要求作用域一致和确认码。
+- 快捷指令只保留森特本地出差报销支出：识别草稿先进入微信复核，结构化确认码冲突会在财务写入前拒绝；accepted 条目支持安全对账恢复，不重复创建费用或付款记录。
+- 明确森特与轻氧完全割裂；运行时、配置、发布门禁和当前快捷产物不再调用远端桥接。
+
+### 医院招标轮巡与发布门禁
+
+- 保留公开来源采集、每小时/每批 10 客户稳定游标轮巡、快照复用、SQLite 锁/重启恢复、来源失败保留批次和 PushPlus 高相关公告聚合通知。
+- 修正生产切换预检的 26/26 合同，并让全历史密钥扫描正确排除已归档的 `refs/codex/turn-diffs/**`。
+- 本版本是本地候选；生产切换、GitHub Release 和真实站点/PushPlus 证据需以本候选的最终门禁结果为准。
+
 ### iOS 快捷指令真实记账
 
 - 新增 `0018` 快捷记账台账和 `POST /api/integrations/shortcut/bookkeeping`，支持账号全局幂等、处理租约、失败恢复和审计。
@@ -450,6 +464,7 @@
 - 完成第一阶段安全、数据、备份和认证设计。
 
 [Unreleased]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.7...HEAD
+[0.6.3]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.6.1...v0.6.3
 [0.6.1]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.7...HEAD
 [0.5.7]: https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/compare/v0.5.6...v0.5.7
