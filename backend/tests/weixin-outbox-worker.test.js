@@ -15,7 +15,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
       if (options.method === "GET") {
         return response(200, JSON.stringify({
           item: { id: "outbox-1", owner: "owner", conversationId: "conversation-1", message: "金额 18.50 元\n确认码：123456" },
-          leaseToken: "lease-1",
+          leaseToken: "test-token",
         }));
       }
       return response(200, JSON.stringify({ item: { id: "outbox-1", status: "sent" } }));
@@ -41,7 +41,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
     const bodies = [];
     const fetchImpl = async (_url, options) => {
       if (options.method === "POST") bodies.push(JSON.parse(options.body));
-      if (options.method === "GET") return response(200, JSON.stringify({ item: { id: "outbox-2", owner: "owner", conversationId: "c", message: "draft" }, leaseToken: "lease-2" }));
+      if (options.method === "GET") return response(200, JSON.stringify({ item: { id: "outbox-2", owner: "owner", conversationId: "c", message: "draft" }, leaseToken: "test-token" }));
       return response(200, JSON.stringify({ item: { id: "outbox-2", status: "queued", lastErrorCode: "WEIXIN_SEND_FAILED" } }));
     };
     const client = createWeixinOutboxHttpClient({ backendUrl: "http://127.0.0.1:8787", apiToken: "machine-secret", fetchImpl });

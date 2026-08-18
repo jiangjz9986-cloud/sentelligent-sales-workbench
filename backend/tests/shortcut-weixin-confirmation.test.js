@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 
-const shortcutToken = "test-shortcut-token";
+const shortcutToken = "test-local-token";
 const machineToken = "test-machine-token";
 const owner = "assistant-owner";
 const sender = "sender-1";
