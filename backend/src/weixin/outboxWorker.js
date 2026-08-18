@@ -8,7 +8,6 @@ function normalizeBackendUrl(value) {
   if (url.protocol === "http:" && !["127.0.0.1", "localhost", "::1"].includes(url.hostname.replace(/^\[|\]$/gu, ""))) throw new TypeError("HTTPS is required for a non-loopback backend");
   return normalized;
 }
-
 function boundedText(value, name, max = 20_000) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new TypeError(`${name} is invalid`);
   return value;
@@ -92,4 +91,3 @@ export async function runWeixinOutboxPump({
     }
   }
 }
-

@@ -708,14 +708,23 @@ function isGitRepository(root) {
   return result.status === 0 && result.stdout.trim() === "true";
 }
 
-function listHistoricalBlobs(root) {
+function publishableHistoryRefs(root) {
+  return runGit(root, [
+    "rev-parse",
+    `--exclude=${nonPublishableGitRefGlob}`,
+    "--all",
+  ])
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter((value) => /^[0-9a-f]{40,64}$/u.test(value));
+}
+
+function listHistoricalBlobs(root, refs = publishableHistoryRefs(root)) {
+  if (refs.length === 0) return [];
   const listing = runGit(root, [
     "-c",
     "core.quotePath=false",
-    "rev-list",
-    `--exclude=${nonPublishableGitRefGlob}`,
-    "--objects",
-    "--all",
+    "rev-list", "--objects", ...refs,
   ]);
   const pathsByObject = new Map();
 
@@ -736,13 +745,12 @@ function listHistoricalBlobs(root) {
     "-c",
     "core.quotePath=false",
     "log",
-    `--exclude=${nonPublishableGitRefGlob}`,
-    "--all",
     "--format=",
     "--raw",
     "--root",
     "--no-abbrev",
     "--no-renames",
+    ...refs,
   ]);
   for (const line of rawHistory.split(/\r?\n/)) {
     const match = line.match(
@@ -839,7 +847,8 @@ function decodeGitText(content) {
   }
 }
 
-function scanGitHistoryMessages(root) {
+function scanGitHistoryMessages(root, refs = publishableHistoryRefs(root)) {
+  if (refs.length === 0) return { findings: [], scannedGitMessages: 0 };
   const messages = [];
   const recordMessage = ({ messageType, object, text, ref = null }) => {
     if (!text) return;
@@ -848,9 +857,8 @@ function scanGitHistoryMessages(root) {
 
   const commitLog = runGit(root, [
     "log",
-    `--exclude=${nonPublishableGitRefGlob}`,
-    "--all",
     "--format=%H%x1f%B%x1e",
+    ...refs,
   ]);
   for (const rawRecord of commitLog.split("\x1e")) {
     const record = rawRecord.replace(/^\s+/, "");
@@ -931,7 +939,8 @@ function scanGitHistory(root) {
     throw new Error("Git history scan requires a complete, non-shallow checkout");
   }
 
-  const blobs = listHistoricalBlobs(root);
+  const refs = publishableHistoryRefs(root);
+  const blobs = listHistoricalBlobs(root, refs);
   const findings = [];
   const scannedObjects = new Set();
 
@@ -953,7 +962,7 @@ function scanGitHistory(root) {
     }
   }
 
-  const messages = scanGitHistoryMessages(root);
+  const messages = scanGitHistoryMessages(root, refs);
   findings.push(...messages.findings);
 
   return {
