@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadConfig } from "../config.js";
 import { createRemoteClawbotAgent } from "./remoteAgent.js";
+import { createWeixinOutboxHttpClient, runWeixinOutboxPump } from "./outboxWorker.js";
 
 function backendUrlFromConfig(config) {
   return config.weixinAgentBackendUrl || `http://${config.host}:${config.port}`;
@@ -72,7 +73,26 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
   };
   const bot = sdk.start(agent, { deliveryKey });
   process.stdout.write(`WeChat worker started. Backend: ${backendUrlFromConfig(config)}\n`);
-  await bot.wait();
+  const pumpAbort = new AbortController();
+  const outboxClient = createWeixinOutboxHttpClient({
+    backendUrl: backendUrlFromConfig(config),
+    apiToken: config.weixinAgentApiToken,
+    fetchImpl: options.fetchImpl ?? fetch,
+    workerId: config.weixinAgentOwner || "weixin-worker",
+  });
+  const pump = runWeixinOutboxPump({
+    client: outboxClient,
+    bot,
+    pollMs: config.weixinOutboxPollMs,
+    abortSignal: pumpAbort.signal,
+    log: (message) => process.stdout.write(`${message}\n`),
+  });
+  try {
+    await bot.wait();
+  } finally {
+    pumpAbort.abort();
+    await pump.catch(() => {});
+  }
   return { status: "stopped" };
 }
 

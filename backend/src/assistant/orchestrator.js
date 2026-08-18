@@ -147,6 +147,52 @@ function exactConfirmationCode(value) {
   return typeof value === "string" && /^[0-9]{6}$/u.test(value) ? value : null;
 }
 
+function contextIdentifier(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (
+    !normalized
+    || normalized.length > 200
+    || normalized.startsWith("synthetic:")
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)
+  ) return null;
+  return normalized;
+}
+
+function normalizedConversationContext(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const customerId = contextIdentifier(value.customerId);
+  const opportunityId = contextIdentifier(value.opportunityId);
+  return {
+    ...(customerId ? { customerId } : {}),
+    ...(opportunityId ? { opportunityId } : {}),
+  };
+}
+
+function nextConversationContext(previous, toolName, argumentsValue, result) {
+  const current = normalizedConversationContext(previous);
+  if (!result || typeof result !== "object" || Array.isArray(result)) return current;
+  if (toolName === "customer.detail" && result.status === "ok" && result.customer?.id) {
+    return { customerId: contextIdentifier(result.customer.id) };
+  }
+  if (toolName === "opportunity.detail" && result.status === "ok" && result.opportunity?.id) {
+    return {
+      ...(contextIdentifier(result.opportunity.customerId) ? { customerId: contextIdentifier(result.opportunity.customerId) } : {}),
+      opportunityId: contextIdentifier(result.opportunity.id),
+    };
+  }
+  if (toolName === "sales-decision.preview" && result.status === "preview") {
+    const card = result.analysis?.projectCard;
+    const opportunityId = contextIdentifier(card?.projectId) ?? contextIdentifier(argumentsValue?.opportunityId);
+    const customerId = contextIdentifier(card?.customerId) ?? current.customerId;
+    return {
+      ...(customerId ? { customerId } : {}),
+      ...(opportunityId ? { opportunityId } : {}),
+    };
+  }
+  return current;
+}
+
 export function safePendingResponse(tool, { code }) {
   return {
     text: [
@@ -174,6 +220,7 @@ export function createAssistantOrchestrator({
   confirmationSecret,
   clock = () => new Date(),
   pendingTtlMs = 10 * 60 * 1000,
+  pendingActionHandler = null,
 } = {}) {
   if (!eventRepository || typeof eventRepository.receive !== "function" || typeof eventRepository.claim !== "function") {
     throw new TypeError("eventRepository must support receive and claim");
@@ -229,14 +276,24 @@ export function createAssistantOrchestrator({
     const leaseToken = claimed.leaseToken;
     const eventId = received.item.id;
     const conversation = sessionRepository?.getOrCreate?.({ owner: context.owner, channel: context.channel, conversationId: context.conversation });
-    const append = (role, value) => sessionRepository?.appendDraftPart?.(conversation?.id, { role, text: String(value), metadata: { requestId: context.requestId, event: context.event } });
+    const conversationContext = conversation?.id
+      ? normalizedConversationContext(sessionRepository?.getContext?.(conversation.id) ?? sessionRepository?.getConversationContext?.(conversation.id))
+      : {};
+    const append = (role, value, metadata = {}) => sessionRepository?.appendDraftPart?.(conversation?.id, {
+      role,
+      text: String(value),
+      metadata: { requestId: context.requestId, event: context.event, ...metadata },
+    });
     append("user", persistedText || "(empty)");
 
     const finish = (status, liveBody, {
       storedBody = liveBody,
       draftText = storedBody.message ?? storedBody.text ?? storedBody.status,
+      assistantContext,
     } = {}) => {
-      append("assistant", draftText);
+      append("assistant", draftText, assistantContext && Object.keys(assistantContext).length > 0
+        ? { assistantContext }
+        : {});
       eventRepository.complete(eventId, { leaseToken, responseStatus: status, response: storedBody });
       return response(status, liveBody);
     };
@@ -256,6 +313,45 @@ export function createAssistantOrchestrator({
       let pendingPlan;
       let pendingAction;
       const scope = { owner: context.owner, channel: context.channel, conversationId: conversation?.id };
+      // Validate structured confirmation metadata before dispatching any
+      // specialized pending-action handler. Specialized handlers may perform
+      // side effects, so a malformed or conflicting second representation
+      // must fail closed at the common boundary first.
+      if (structuredCodePresent && !structuredCode) {
+        return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+      }
+      if (textClassification.kind === "code" && structuredCodePresent && structuredCode !== textClassification.code) {
+        return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+      }
+      if (typeof pendingActionHandler === "function") {
+        try {
+          pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+        } catch {
+          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        }
+        if (pendingAction) {
+          const specialized = await pendingActionHandler({
+            action: pendingAction,
+            scope,
+            context,
+            text,
+            textClassification,
+            confirmationCode: code,
+            pendingActionId,
+            serverData,
+          });
+          if (specialized) {
+            return finish(
+              specialized.status ?? 200,
+              specialized.body ?? { status: "ok", text: "已处理。" },
+              {
+                ...(specialized.storedBody ? { storedBody: specialized.storedBody } : {}),
+                ...(specialized.draftText ? { draftText: specialized.draftText } : {}),
+              },
+            );
+          }
+        }
+      }
       const scopedCommand = ["code", "cancel", "resend"].includes(textClassification.kind) || structuredCodePresent;
       if (scopedCommand) {
         if (structuredCodePresent && !structuredCode) {
@@ -264,10 +360,12 @@ export function createAssistantOrchestrator({
         if (textClassification.kind === "code" && structuredCodePresent && structuredCode !== textClassification.code) {
           return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
         }
-        try {
-          pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
-        } catch {
-          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        if (!pendingAction) {
+          try {
+            pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+          } catch {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
         }
         if (!pendingAction && pendingActionId) {
           const completed = pendingActionRepository?.get?.(pendingActionId, scope);
@@ -349,6 +447,7 @@ export function createAssistantOrchestrator({
           text,
           confidence,
           mediaRef: serverData.media?.sourceRef,
+          context: conversationContext,
         });
       if (["help", "clarify", "unknown", "cancelled", "cancel"].includes(plan.status)) {
         return finish(200, { status: plan.status === "cancelled" || plan.status === "cancel" ? "cancel" : plan.status, message: safeText(plan), question: plan.question });
@@ -424,8 +523,10 @@ export function createAssistantOrchestrator({
               result: output,
             });
           }
+          const outputContext = nextConversationContext(conversationContext, tool.name, invocation.arguments, output);
           return finish(200, { status: "ok", toolName: tool.name, result: output }, {
             draftText: confirmationContext ? "确认信息已处理。" : "ok",
+            assistantContext: outputContext,
           });
         };
         const createdRun = eventRepository.createToolRun({
@@ -463,8 +564,10 @@ export function createAssistantOrchestrator({
           result,
         });
       }
+      const outputContext = nextConversationContext(conversationContext, tool.name, invocation.arguments, result);
       return finish(200, { status: "ok", toolName: tool.name, result }, {
         draftText: confirmationContext ? "确认信息已处理。" : "ok",
+        assistantContext: outputContext,
       });
     } catch (error) {
       if (resolvedActionId && actionLease && typeof pendingActionRepository?.releaseExecution === "function") {

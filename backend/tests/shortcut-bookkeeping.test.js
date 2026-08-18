@@ -57,8 +57,7 @@ describe("自有截图记账快捷指令", () => {
       ]),
     );
     assert.deepEqual(BOOKKEEPING_CATALOG, backendLabels);
-    assert.ok(Object.hasOwn(BOOKKEEPING_CATALOG.biubiu.支出, "员工薪资"));
-    assert.equal(Object.hasOwn(BOOKKEEPING_CATALOG.biubiu.支出, "員工薪資"), false);
+    assert.deepEqual(Object.keys(BOOKKEEPING_CATALOG), ["出差报销"]);
   });
 
   it("builds a canonical compact OCR/category workflow with Token verification", async () => {
@@ -71,12 +70,12 @@ describe("自有截图记账快捷指令", () => {
     assert.equal(report.actionCount, 21);
     assert.equal(report.menuCount, 0);
     assert.equal(report.selectionOptionCount, BOOKKEEPING_SELECTION_OPTIONS.length);
-    assert.equal(report.selectionOptionCount, 27);
+    assert.equal(report.selectionOptionCount, 12);
     assert.equal(report.hasCancellationGate, true);
     assert.equal(report.hasTokenVerification, true);
     assert.equal(report.canonicalMetadata, true);
     assert.equal(report.hasIcostAction, false);
-    assert.deepEqual(report.ledgerOptions, ["出差报销", "biubiu"]);
+    assert.deepEqual(report.ledgerOptions, ["出差报销"]);
     assert.deepEqual(report.payloadKeys, [
       "text", "selection_path", "note", "idempotency_key", "source",
     ]);

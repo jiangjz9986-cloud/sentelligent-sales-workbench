@@ -3,11 +3,15 @@ import {
   CalendarClock,
   ChevronRight,
   CircleAlert,
+  Clock3,
   ExternalLink,
+  FileText,
   Filter,
   HeartPulse,
   LoaderCircle,
   RefreshCw,
+  Search,
+  Target,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -161,6 +165,61 @@ function formatSchedulerDate(value, fallback) {
   }).format(date);
 }
 
+function userFacingTenderError(value, fallback = "招标数据暂时不可用，请稍后重试。") {
+  const message = firstText(value);
+  if (!message) return fallback;
+  if (/internal|snapshot|payload|schema|invalid|database|sqlite|stack|exception/i.test(message)) return fallback;
+  return message.length > 180 ? `${message.slice(0, 180)}…` : message;
+}
+
+function deadlineTimestamp(value) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : Number.POSITIVE_INFINITY;
+}
+
+function localDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const year = String(date.getFullYear()).padStart(4, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function publishedToday(value, now = Date.now()) {
+  const today = localDateKey(now);
+  const text = firstText(value);
+  const parsed = /^\d{4}-\d{2}-\d{2}/u.test(text) ? localDateKey(text) : null;
+  if (parsed) return parsed === today;
+  return Boolean(today && text && text.includes(today.slice(5)));
+}
+
+function deadlineWithinNextSevenDays(value, now = Date.now()) {
+  const timestamp = deadlineTimestamp(value);
+  if (!Number.isFinite(timestamp)) return false;
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  return timestamp >= today.getTime() && timestamp <= today.getTime() + (7 * 24 * 60 * 60 * 1000);
+}
+
+function relevanceRank(value) {
+  return value === "high" ? 0 : value === "medium" ? 1 : 2;
+}
+
+function noticeDateLabel(value, { compact = false } = {}) {
+  const message = firstText(value);
+  if (!message) return "待确认";
+  const date = new Date(message);
+  if (!Number.isNaN(date.getTime())) {
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      ...(compact ? { hour: "2-digit", minute: "2-digit", hour12: false } : {}),
+    }).format(date).replace(/\//g, "-");
+  }
+  return message.replace(/\s+/g, " ");
+}
+
 function NoticeDetail({ notice, onClose, onSelectCustomer }) {
   const matchReasons = [...new Set(Object.values(notice.matchReasons ?? {}).flat().filter(Boolean))];
   const matchedNeeds = [...new Set(Object.values(notice.matchedNeeds ?? {}).flat().filter(Boolean))];
@@ -177,7 +236,7 @@ function NoticeDetail({ notice, onClose, onSelectCustomer }) {
           <div>
             <span className="expense-kicker">公告详情</span>
             <h2 id="hospital-tender-detail-title">{notice.title}</h2>
-            <p>{notice.sourceName} · {notice.publishedAt}</p>
+            <p>{notice.sourceName} · {noticeDateLabel(notice.publishedAt, { compact: true })}</p>
           </div>
           <button className="icon-button" type="button" aria-label="关闭公告详情" onClick={onClose}>
             <X size={20} />
@@ -241,16 +300,16 @@ function HealthSummary({ sources, health }) {
   const items = healthItems.length ? healthItems : sourceItems;
 
   return (
-    <Panel title="来源健康" meta={`${items.length} 个数据源`} className="hospital-tender-health">
-      <div className="list-stack tiny" style={{ minWidth: 0 }}>
+    <Panel title="来源健康" meta={`${items.length} 个数据源`} className="hospital-tender-health hospital-tender-status-panel">
+      <div className="hospital-tender-health-list">
         {items.length === 0 ? <p className="empty-list">暂无数据源健康信息</p> : null}
         {items.map((item, index) => {
           const name = firstText(item?.name, item?.sourceName, item?.label, `数据源 ${index + 1}`);
           const status = statusClass(item?.status ?? item?.state ?? item?.health);
           return (
-            <div className="compact-item" key={`${name}-${index}`} style={{ minWidth: 0 }}>
+            <div className="hospital-tender-health-row" key={`${name}-${index}`}>
               <span className={`mini-icon ${status === "healthy" ? "success" : status === "down" ? "danger" : "warning"}`}><HeartPulse size={15} /></span>
-              <span style={{ minWidth: 0 }}><strong>{name}</strong><small>{HEALTH_LABELS[item?.status] ?? HEALTH_LABELS[status] ?? "状态待确认"}{item?.lastChecked ? ` · ${item.lastChecked}` : ""}</small></span>
+              <span><strong>{name}</strong><small>{HEALTH_LABELS[item?.status] ?? HEALTH_LABELS[status] ?? "状态待确认"}{item?.lastChecked ? ` · ${item.lastChecked}` : ""}</small></span>
             </div>
           );
         })}
@@ -281,17 +340,72 @@ function SchedulerProgress({ scheduler }) {
     disabled: "已停用",
   }[state.lastStatus] ?? state.lastStatus;
   return (
-    <Panel title="自动轮巡" meta={state.enabled ? `每 ${state.intervalMinutes} 分钟` : "已停用"} className="hospital-tender-scheduler">
-      <div className="list-stack tiny" style={{ minWidth: 0 }}>
-        <div className="compact-item"><span className={`mini-icon ${state.lastStatus === "failed" ? "danger" : "success"}`}><CalendarClock size={15} /></span><span><strong>{statusLabel}</strong><small>第 {state.cycleNumber} 轮 · 每批 {state.batchSize} 家客户</small></span></div>
-        {state.snapshotId ? <div className="detail-surface"><strong>本轮进度 {processed} / {total}</strong><progress value={percent} max="100" aria-label="医院招标轮巡进度" style={{ width: "100%" }}>{percent}%</progress></div> : null}
-        <small className="muted-copy">最近批次：{state.lastBatchCount || 0} 家客户 · 入库 {state.lastAcceptedCount || 0} 条 · 异常 {state.lastRejectedCount || 0} 条</small>
+    <Panel title="自动轮巡" meta={state.enabled ? `每 ${state.intervalMinutes} 分钟` : "已停用"} className="hospital-tender-scheduler hospital-tender-status-panel">
+      <div className="hospital-tender-scheduler-summary">
+        <div className="hospital-tender-scheduler-state"><span className={`mini-icon ${state.lastStatus === "failed" ? "danger" : "success"}`}><CalendarClock size={15} /></span><span><strong>{statusLabel}</strong><small>第 {state.cycleNumber || "—"} 轮 · 每批 {state.batchSize || "—"} 家客户</small></span></div>
+        {state.snapshotId ? <div className="hospital-tender-progress"><strong>本轮进度 {processed} / {total}</strong><progress value={percent} max="100" aria-label="医院招标轮巡进度">{percent}%</progress></div> : null}
+        <div className="hospital-tender-scheduler-facts">
+          <span>最近批次 <strong>{state.lastBatchCount || 0}</strong> 家客户</span>
+          <span>入库 <strong>{state.lastAcceptedCount || 0}</strong> 条</span>
+          <span>异常 <strong>{state.lastRejectedCount || 0}</strong> 条</span>
+        </div>
         <small className="muted-copy">最近完成：{formatSchedulerDate(state.lastFinishedAt, "尚未运行")}</small>
         <small className="muted-copy">下次运行：{formatSchedulerDate(state.nextRunAt, state.enabled ? "等待排期" : "已停用")}</small>
-        <small className="muted-copy">本批新增高相关：{Number(state.lastHighRelevanceCount) || 0} 条</small>
-        {state.lastError ? <p className="expense-page-alert" role="alert"><CircleAlert size={15} />{state.lastError}</p> : null}
+        {Number(state.lastHighRelevanceCount) > 0 ? <small className="muted-copy">本批新增高相关：{Number(state.lastHighRelevanceCount)} 条</small> : null}
+        {state.lastError ? <p className="expense-page-alert" role="alert"><CircleAlert size={15} />{userFacingTenderError(state.lastError, "最近一批检测未完成，请稍后重试。")}</p> : null}
       </div>
     </Panel>
+  );
+}
+
+function PriorityMetric({ label, value, detail, tone, icon: Icon }) {
+  return (
+    <section className={`hospital-tender-priority-metric ${tone}`}>
+      <span className="hospital-tender-priority-icon"><Icon size={18} /></span>
+      <span><small>{label}</small><strong>{value}</strong><em>{detail}</em></span>
+    </section>
+  );
+}
+
+function NoticeMeta({ notice, compact = false }) {
+  return (
+    <>
+      <span className="hospital-tender-notice-meta">{notice.customerName || "未关联客户"}</span>
+      {!compact ? <span className="hospital-tender-notice-meta">{notice.sourceName}</span> : null}
+    </>
+  );
+}
+
+function PriorityNoticeRow({ notice, onSelect }) {
+  const relevanceLabel = RELEVANCE_LABELS[notice.relevance] ?? "待确认";
+  const isUrgent = notice.relevance === "high";
+  return (
+    <article className={`hospital-tender-priority-row ${isUrgent ? "urgent" : ""}`}>
+      <span className={`hospital-tender-priority-row-icon ${isUrgent ? "danger" : notice.relevance === "medium" ? "warning" : "success"}`} aria-hidden="true">
+        {isUrgent ? <Target size={17} /> : <FileText size={17} />}
+      </span>
+      <button className="hospital-tender-row-main" type="button" onClick={() => onSelect(notice)}>
+        <strong>{notice.title}</strong>
+        <span><NoticeMeta notice={notice} /></span>
+      </button>
+      <span className="hospital-tender-deadline"><small>截止时间</small><strong>{noticeDateLabel(notice.deadline)}</strong></span>
+      <span className={`pill ${isUrgent ? "danger" : notice.relevance === "medium" ? "warning" : "success"}`}>{relevanceLabel}</span>
+      <button className="hospital-tender-row-arrow" type="button" aria-label={`查看${notice.title}详情`} onClick={() => onSelect(notice)}><ChevronRight size={17} /></button>
+    </article>
+  );
+}
+
+function AllNoticeRow({ notice, onSelect }) {
+  return (
+    <article className="hospital-tender-all-row">
+      <span className={`hospital-tender-all-dot ${notice.relevance}`} aria-hidden="true" />
+      <button className="hospital-tender-all-main" type="button" onClick={() => onSelect(notice)}>
+        <strong>{notice.title}</strong>
+        <span><NoticeMeta notice={notice} compact /></span>
+      </button>
+      <span className="hospital-tender-all-date">{noticeDateLabel(notice.publishedAt, { compact: true })}</span>
+      <button className="hospital-tender-row-arrow" type="button" aria-label={`查看${notice.title}详情`} onClick={() => onSelect(notice)}><ChevronRight size={16} /></button>
+    </article>
   );
 }
 
@@ -393,69 +507,84 @@ export function HospitalTenderPage({
     && (!customerFilter || notice.customerId === customerFilter || notice.customerName === customerFilter)
   )), [customerFilter, normalizedNotices, relevanceFilter, typeFilter]);
 
-  const metrics = [
-    ["公告总数", metricValue(effectiveSummary, ["total", "totalNotices", "noticeCount", "count"], normalizedNotices.length)],
-    ["高相关", metricValue(effectiveSummary, ["highRelevance", "highCount", "priorityCount"], normalizedNotices.filter((notice) => notice.relevance === "high").length)],
-    ["临近截止", metricValue(effectiveSummary, ["deadlineSoon", "dueSoon", "expiringCount"], "—")],
-  ];
+  const highRelevanceCount = metricValue(
+    effectiveSummary,
+    ["highRelevance", "highCount", "priorityCount"],
+    normalizedNotices.filter((notice) => notice.relevance === "high").length,
+  );
+  const deadlineSoonCount = metricValue(
+    effectiveSummary,
+    ["deadlineSoon", "dueSoon", "expiringCount"],
+    normalizedNotices.filter((notice) => deadlineWithinNextSevenDays(notice.deadline)).length,
+  );
+  const todayNewCount = metricValue(
+    effectiveSummary,
+    ["todayNew", "newToday", "todayCount"],
+    normalizedNotices.filter((notice) => publishedToday(notice.publishedAt)).length,
+  );
+  const priorityNotices = useMemo(
+    () => [...filteredNotices].sort((left, right) => relevanceRank(left.relevance) - relevanceRank(right.relevance) || deadlineTimestamp(left.deadline) - deadlineTimestamp(right.deadline)).slice(0, 5),
+    [filteredNotices],
+  );
+  const effectiveErrorMessage = userFacingTenderError(effectiveError);
 
   return (
-    <section className="screen-grid hospital-tender-page" data-testid="hospital-tender-page" style={{ minWidth: 0, display: "grid", gap: 12 }}>
-      <div className="page-heading compact-heading" style={{ minWidth: 0 }}>
-        <div>
+    <section className="hospital-tender-page" data-testid="hospital-tender-page">
+      <header className="hospital-tender-header">
+        <div className="hospital-tender-title">
           <span className="eyebrow">商机情报</span>
           <h1>医院招标监测</h1>
-          <p className="muted-copy">聚合公开公告，辅助销售识别医院采购机会。</p>
+          <p>聚合公开公告，辅助销售识别医院采购机会。</p>
+          <span className="hospital-tender-updated"><Clock3 size={14} />最近更新：{formatSchedulerDate(effectiveSummary?.latestRun?.finishedAt ?? effectiveSummary?.updatedAt, "等待同步")}</span>
         </div>
+        <div className="hospital-tender-actions">
+          <button className="primary-button" type="button" onClick={() => { void runInternalMonitor(); }} disabled={effectiveLoading || runState.busy || backendStatus !== "connected"}>
+            {runState.busy ? <LoaderCircle className="state-spinner" size={16} /> : <BellRing size={16} />}
+            {runState.busy ? "轮巡中" : "立即检测下一批"}
+          </button>
+          <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading || runState.busy}>
+            {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
+            {effectiveLoading ? "正在刷新" : "刷新数据"}
+          </button>
+        </div>
+      </header>
+
+      {effectiveError ? <div className="hospital-tender-alert" role="alert"><CircleAlert size={17} /><span>{effectiveErrorMessage}</span><button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }}>重试</button></div> : null}
+      {runState.error ? <div className="hospital-tender-alert" role="alert"><CircleAlert size={17} /><span>{runState.error}</span><button className="ghost-button" type="button" onClick={() => { void runInternalMonitor(); }}>重试检测</button></div> : null}
+      {runState.notice ? <p className="hospital-tender-feedback" role="status">{runState.notice}</p> : null}
+
+      <div className="hospital-tender-priority-strip" aria-label="医院招标概览">
+        <PriorityMetric label="高相关" value={highRelevanceCount} detail="重点机会" tone="danger" icon={Target} />
+        <PriorityMetric label="临近截止" value={deadlineSoonCount} detail="7 天内截止" tone="warning" icon={Clock3} />
+        <PriorityMetric label="今日新增" value={todayNewCount} detail="较昨日新增" tone="blue" icon={FileText} />
       </div>
 
-      <div className="settings-button-row hospital-tender-actions" style={{ justifyContent: "flex-end" }}>
-        <button className="primary-button" type="button" onClick={() => { void runInternalMonitor(); }} disabled={effectiveLoading || runState.busy || backendStatus !== "connected"}>
-          {runState.busy ? <LoaderCircle className="state-spinner" size={16} /> : <BellRing size={16} />}
-          {runState.busy ? "轮巡中" : "立即检测下一批"}
-        </button>
-        <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading || runState.busy}>
-          {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
-          {effectiveLoading ? "正在刷新" : "刷新数据"}
-        </button>
-      </div>
-
-      {effectiveError ? <div className="expense-page-alert" role="alert"><CircleAlert size={17} /><span>{effectiveError}</span><button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }}>重试</button></div> : null}
-      {runState.error ? <div className="expense-page-alert" role="alert"><CircleAlert size={17} /><span>{runState.error}</span><button className="ghost-button" type="button" onClick={() => { void runInternalMonitor(); }}>重试检测</button></div> : null}
-      {runState.notice ? <p className="settings-feedback" role="status">{runState.notice}</p> : null}
-
-      <div className="detail-metrics hospital-tender-metrics" style={{ minWidth: 0 }}>
-        {metrics.map(([label, value]) => <section className="metric-inline" key={label}><span>{label}</span><strong>{value}</strong></section>)}
-      </div>
-
-      <div className="hospital-tender-layout" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))", gap: 12, minWidth: 0 }}>
-        <Panel title="招标公告" meta={`${filteredNotices.length} / ${normalizedNotices.length} 条`} className="hospital-tender-list">
-          <div className="itinerary-list-toolbar" style={{ flexWrap: "wrap", minWidth: 0 }}>
-            <span className="muted-copy"><Filter size={15} />筛选</span>
-            <label className="itinerary-filter"><span>公告类型</span><select aria-label="筛选公告类型" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="">全部</option>{typeOptions.map((type) => <option value={type} key={type}>{TYPE_LABELS[type] ?? type}</option>)}</select></label>
-            <label className="itinerary-filter"><span>相关性</span><select aria-label="筛选相关性" value={relevanceFilter} onChange={(event) => setRelevanceFilter(event.target.value)}><option value="">全部</option>{Object.entries(RELEVANCE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-            <label className="itinerary-filter"><span>客户</span><select aria-label="筛选客户" value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)}><option value="">全部客户</option>{customerOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+      <div className="hospital-tender-content-grid">
+        <Panel title="重点机会" meta={`共 ${priorityNotices.length} 条`} className="hospital-tender-priority-panel">
+          <div className="hospital-tender-table-head hospital-tender-priority-head"><span>公告标题</span><span>客户</span><span>截止时间</span><span>相关性</span><span aria-hidden="true" /></div>
+          {effectiveLoading && normalizedNotices.length === 0 ? <div className="hospital-tender-loading" role="status"><LoaderCircle className="state-spinner" size={21} />正在读取招标公告</div> : null}
+          {!effectiveLoading && priorityNotices.length === 0 ? <p className="hospital-tender-empty">暂时没有符合条件的重点机会，调整筛选条件或点击“立即检测下一批”。</p> : null}
+          <div className="hospital-tender-priority-list">
+            {priorityNotices.map((notice) => <PriorityNoticeRow key={notice.id} notice={notice} onSelect={setSelectedNotice} />)}
           </div>
-
-          {effectiveLoading && normalizedNotices.length === 0 ? <div className="expense-loading" role="status"><LoaderCircle className="state-spinner" size={21} />正在读取招标公告</div> : null}
-          {!effectiveLoading && filteredNotices.length === 0 ? <p className="empty-list">没有符合条件的招标公告</p> : null}
-          <div className="list-stack" style={{ minWidth: 0 }}>
-            {filteredNotices.map((notice) => (
-              <article className="compact-item hospital-tender-row" key={notice.id} style={{ alignItems: "flex-start", minWidth: 0 }}>
-                <span className="mini-icon warning"><BellRing size={15} /></span>
-                <button className="row-main-button" type="button" onClick={() => setSelectedNotice(notice)} style={{ minWidth: 0, flex: "1 1 auto", textAlign: "left" }}>
-                  <strong>{notice.title}</strong>
-                  <small>{notice.customerName || "未关联客户"} · {notice.sourceName}</small>
-                  <small><CalendarClock size={13} /> 发布 {notice.publishedAt} · 截止 {notice.deadline}</small>
-                </button>
-                <span className={`pill ${notice.relevance === "high" ? "danger" : notice.relevance === "low" ? "muted" : "warning"}`}>{RELEVANCE_LABELS[notice.relevance]}</span>
-                <button className="ghost-button compact-icon" type="button" aria-label={`查看${notice.title}详情`} onClick={() => setSelectedNotice(notice)}><ChevronRight size={16} /></button>
-              </article>
-            ))}
-          </div>
+          {priorityNotices.length > 0 ? <p className="hospital-tender-note"><Target size={14} />相关性基于客户历史合作、产品匹配度、采购金额及项目阶段综合计算，仅供参考。</p> : null}
         </Panel>
-        <HealthSummary sources={effectiveSources} health={effectiveHealth} />
-        <SchedulerProgress scheduler={remoteState.scheduler} />
+
+        <aside className="hospital-tender-side-column">
+          <Panel title="全部公告" meta={`共 ${filteredNotices.length} 条`} className="hospital-tender-all-panel">
+            <div className="hospital-tender-filter-bar">
+              <span className="hospital-tender-filter-label"><Filter size={14} />筛选</span>
+              <label className="hospital-tender-filter"><span>公告类型</span><select aria-label="筛选公告类型" value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}><option value="">全部公告</option>{typeOptions.map((type) => <option value={type} key={type}>{TYPE_LABELS[type] ?? type}</option>)}</select></label>
+              <label className="hospital-tender-filter"><span>相关性</span><select aria-label="筛选相关性" value={relevanceFilter} onChange={(event) => setRelevanceFilter(event.target.value)}><option value="">全部</option>{Object.entries(RELEVANCE_LABELS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+              <label className="hospital-tender-filter"><span>客户</span><select aria-label="筛选客户" value={customerFilter} onChange={(event) => setCustomerFilter(event.target.value)}><option value="">全部客户</option>{customerOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+            </div>
+            <div className="hospital-tender-search"><Search size={15} /><span>筛选条件已应用于公告列表</span></div>
+            {!effectiveLoading && filteredNotices.length === 0 ? <p className="hospital-tender-empty">没有符合条件的公告</p> : null}
+            <div className="hospital-tender-all-list">{filteredNotices.slice(0, 8).map((notice) => <AllNoticeRow key={notice.id} notice={notice} onSelect={setSelectedNotice} />)}</div>
+          </Panel>
+          <HealthSummary sources={effectiveSources} health={effectiveHealth} />
+          <SchedulerProgress scheduler={remoteState.scheduler} />
+        </aside>
       </div>
 
       {selectedNotice ? <NoticeDetail notice={selectedNotice} onClose={() => setSelectedNotice(null)} onSelectCustomer={onSelectCustomer} /> : null}

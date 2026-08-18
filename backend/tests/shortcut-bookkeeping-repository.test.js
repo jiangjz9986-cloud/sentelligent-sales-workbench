@@ -16,21 +16,6 @@ function repositoryHarness() {
   return { db, repository };
 }
 
-function receiveQingyang(repository, suffix) {
-  const received = repository.receive({
-    owner: "owner-a",
-    actor: "actor-a",
-    ledgerName: "biubiu",
-    entryType: "income",
-    category: "营收",
-    subcategory: "美团",
-    idempotencyKey: `remote-${suffix}`,
-    requestHash: REQUEST_HASH,
-    rawText: "synthetic bookkeeping text",
-  });
-  return repository.claim(received.item.id);
-}
-
 describe("Shortcut bookkeeping repository invariants", () => {
   it("rejects an internally corrupted Sentelligent income entry before accepting it", () => {
     const { db, repository } = repositoryHarness();
@@ -84,29 +69,6 @@ describe("Shortcut bookkeeping repository invariants", () => {
     }
   });
 
-  it("keeps failed remote results retryable instead of completing them", () => {
-    const { db, repository } = repositoryHarness();
-    try {
-      const claimed = receiveQingyang(repository, "failed");
-      assert.throws(
-        () => repository.completeRemote(claimed.item.id, {
-          leaseToken: claimed.leaseToken,
-          remote: { id: "remote-failed", reference: "reference-failed", status: "failed" },
-        }),
-        /failed must be released/u,
-      );
-      assert.equal(repository.release(claimed.item.id, {
-        leaseToken: claimed.leaseToken,
-        errorCode: "QINGYANG_REMOTE_RETRYABLE_FAILURE",
-      }), true);
-      const retried = repository.claim(claimed.item.id);
-      assert.equal(retried.item.status, "processing");
-      assert.equal(retried.item.attemptCount, 1);
-    } finally {
-      db.close();
-    }
-  });
-
   it("provides owner-scoped review list/detail and idempotent manual reject", () => {
     const { db, repository } = repositoryHarness();
     try {
@@ -129,6 +91,83 @@ describe("Shortcut bookkeeping repository invariants", () => {
       const replayed = repository.rejectReview(received.item.id, { owner: "owner-a", actor: "owner-a", reason: "重复点击" });
       assert.equal(replayed.replayed, true);
       assert.equal(replayed.item.errorCode, "MANUAL_REJECTED");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("applies only a catalog-validated category, subcategory, and note review patch", () => {
+    const { db, repository } = repositoryHarness();
+    try {
+      const received = repository.receive({
+        owner: "owner-a", actor: "owner-a", ledgerName: "出差报销", entryType: "expense",
+        category: "交通", subcategory: "打车", idempotencyKey: "review-patch-fields",
+        requestHash: REQUEST_HASH, note: "原始备注", rawText: "待复核差旅记录",
+      });
+      const claimed = repository.claim(received.item.id);
+      const reviewed = repository.completeLocal(received.item.id, {
+        leaseToken: claimed.leaseToken,
+        reviewPatch: { category: "餐饮", subcategory: "午餐", note: "修改后的备注" },
+        analysis: { status: "review_required", confidence: 0, expense: null, warnings: ["model_review"], source: { provider: "test" } },
+      });
+      assert.equal(reviewed.item.status, "review_required");
+      assert.equal(reviewed.item.category, "餐饮");
+      assert.equal(reviewed.item.subcategory, "午餐");
+      assert.equal(reviewed.item.note, "修改后的备注");
+
+      const reviewClaim = repository.claimReview(received.item.id, { owner: "owner-a" });
+      const completed = repository.completeLocal(received.item.id, {
+        leaseToken: reviewClaim.leaseToken,
+        reviewPatch: { category: "餐饮", subcategory: "午餐", note: "最终备注" },
+        analysis: {
+          status: "ready", confidence: 1,
+          expense: { occurredOn: "2026-08-17", amountCents: 1280, reimbursementCents: 1280, purpose: "午餐" },
+          warnings: [], source: { provider: "manual" },
+        },
+      });
+      assert.equal(completed.item.status, "accepted");
+      assert.equal(completed.item.category, "餐饮");
+      assert.equal(completed.item.subcategory, "午餐");
+      assert.equal(completed.item.note, "最终备注");
+      assert.equal(db.prepare("SELECT category, notes FROM travel_expenses").get().category, "lunch");
+      assert.equal(db.prepare("SELECT notes FROM travel_expenses").get().notes, "最终备注");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects unknown, identity, invalid-category, and invalid-subcategory review patches before mutation", () => {
+    const { db, repository } = repositoryHarness();
+    try {
+      const received = repository.receive({
+        owner: "owner-a", actor: "owner-a", ledgerName: "出差报销", entryType: "expense",
+        category: "交通", subcategory: "打车", idempotencyKey: "review-patch-reject",
+        requestHash: REQUEST_HASH, rawText: "待复核差旅记录",
+      });
+      const claimed = repository.claim(received.item.id);
+      repository.completeLocal(received.item.id, {
+        leaseToken: claimed.leaseToken,
+        analysis: { status: "review_required", confidence: 0, expense: null, warnings: ["model_review"], source: { provider: "test" } },
+      });
+      const reviewClaim = repository.claimReview(received.item.id, { owner: "owner-a" });
+      for (const reviewPatch of [
+        { owner: "owner-b" },
+        { paymentId: "payment-forged" },
+        { category: "不存在" },
+        { category: "交通", subcategory: "午餐" },
+      ]) {
+        assert.throws(
+          () => repository.completeLocal(received.item.id, {
+            leaseToken: reviewClaim.leaseToken,
+            reviewPatch,
+            analysis: { status: "review_required", confidence: 0, expense: null, warnings: ["still_review"], source: { provider: "test" } },
+          }),
+          /reviewPatch|notAllowed|not allowed|validation failed/u,
+        );
+        const row = db.prepare("SELECT status, category, subcategory, note FROM shortcut_bookkeeping_entries WHERE id = ?").get(received.item.id);
+        assert.deepEqual({ ...row }, { status: "processing", category: "交通", subcategory: "打车", note: null });
+      }
+      repository.release(received.item.id, { leaseToken: reviewClaim.leaseToken, errorCode: "TEST_REVIEW_PATCH_REJECTED" });
     } finally {
       db.close();
     }
@@ -196,33 +235,4 @@ describe("Shortcut bookkeeping repository invariants", () => {
     }
   });
 
-  for (const terminalStatus of ["rejected", "voided"]) {
-    it(`requires ${terminalStatus} remote results to use the terminal completion path`, () => {
-      const { db, repository } = repositoryHarness();
-      try {
-        const claimed = receiveQingyang(repository, terminalStatus);
-        const remote = {
-          id: `remote-${terminalStatus}`,
-          reference: `reference-${terminalStatus}`,
-          status: terminalStatus,
-        };
-        assert.throws(
-          () => repository.completeRemote(claimed.item.id, {
-            leaseToken: claimed.leaseToken,
-            remote,
-          }),
-          /must use completeRemoteTerminal/u,
-        );
-        const completed = repository.completeRemoteTerminal(claimed.item.id, {
-          leaseToken: claimed.leaseToken,
-          remote,
-        });
-        assert.equal(completed.item.status, "rejected");
-        assert.equal(completed.item.remoteStatus, terminalStatus);
-        assert.equal(completed.item.errorCode, "QINGYANG_REMOTE_TERMINAL");
-      } finally {
-        db.close();
-      }
-    });
-  }
 });

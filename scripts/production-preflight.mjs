@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
 // A pre-cutover report may inspect the already-running release whose manifest
-// predates the latest settings, hospital-tender, or Qingyang bridge names.
+// predates the latest settings or hospital-tender names.
 // This relaxed set is valid only for the canonical current release path;
 // candidate releases always use the complete REQUIRED_ENV_NAMES contract.
 const LEGACY_CURRENT_EXCLUDED_ENV_NAMES = new Set([
@@ -31,9 +31,10 @@ const LEGACY_CURRENT_EXCLUDED_ENV_NAMES = new Set([
   "HOSPITAL_TENDER_INTERVAL_MINUTES",
   "HOSPITAL_TENDER_BATCH_SIZE",
   "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
-  "QINGYANG_BOOKKEEPING_BRIDGE_URL",
-  "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
-  "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
+  "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+  "WEIXIN_BOOKKEEPING_OWNER",
+  "WEIXIN_BOOKKEEPING_SENDER_ID",
+  "WEIXIN_OUTBOX_POLL_MS",
 ]);
 const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
   REQUIRED_ENV_NAMES.filter(
@@ -238,6 +239,24 @@ function hasWeixinOwnerConfiguration(environment, database) {
   );
 }
 
+function hasShortcutWeixinConfirmationConfiguration(environment) {
+  const owner = environment.WEIXIN_BOOKKEEPING_OWNER;
+  const sender = environment.WEIXIN_BOOKKEEPING_SENDER_ID;
+  const allowedSenders = typeof environment.WEIXIN_ALLOWED_SENDER_IDS === "string"
+    ? environment.WEIXIN_ALLOWED_SENDER_IDS.split(",").map((item) => item.trim()).filter(Boolean)
+    : [];
+  const pollMs = Number(environment.WEIXIN_OUTBOX_POLL_MS);
+  return (
+    environment.SHORTCUT_WEIXIN_CONFIRMATION_ENABLED === "true" &&
+    typeof owner === "string" && owner.length > 0 && owner.length <= 200 && owner === owner.trim() &&
+    owner === environment.WEIXIN_AGENT_OWNER &&
+    typeof sender === "string" && sender.length > 0 && sender.length <= 200 && sender === sender.trim() &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(sender) &&
+    allowedSenders.includes(sender) &&
+    Number.isSafeInteger(pollMs) && pollMs >= 500 && pollMs <= 60_000
+  );
+}
+
 function hasHospitalTenderSchedulerConfiguration(environment) {
   return (
     environment.HOSPITAL_TENDER_AUTO_RUN === "true" &&
@@ -346,34 +365,6 @@ function hasIsolatedIcostWebhookToken(environment) {
     environment.ASSISTANT_CONFIRMATION_SECRET,
     environment.SETTINGS_ENCRYPTION_KEY,
     environment.HOSPITAL_TENDER_SYNC_TOKEN,
-  ]
-    .filter((value) => typeof value === "string" && value.length > 0)
-    .every((value) => value !== token);
-}
-
-function hasQingyangBookkeepingBridgeConfiguration(environment) {
-  return (
-    environment.QINGYANG_BOOKKEEPING_BRIDGE_URL ===
-      "http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping" &&
-    isStrongAssistantSecret(environment.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN) &&
-    isPositiveSafeIntegerText(environment.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS) &&
-    Number(environment.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS) <= 30_000
-  );
-}
-
-function hasIsolatedQingyangBookkeepingBridgeToken(environment) {
-  const token = environment.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN;
-  if (!isStrongAssistantSecret(token)) return false;
-  return [
-    environment.AUTH_SESSION_SECRET,
-    environment.MODEL_API_KEY,
-    environment.DEEPSEEK_API_KEY,
-    environment.WEIXIN_AGENT_API_TOKEN,
-    environment.ASSISTANT_CONFIRMATION_SECRET,
-    environment.SETTINGS_ENCRYPTION_KEY,
-    environment.HOSPITAL_TENDER_SYNC_TOKEN,
-    environment.ICOST_WEBHOOK_TOKEN,
-    environment.SHORTCUT_WEBHOOK_TOKEN,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .every((value) => value !== token);
@@ -2655,6 +2646,12 @@ export async function runProductionPreflight({
       "WEIXIN_AGENT_OWNER must be explicit and match a historical customer or opportunity owner; machine, confirmation, settings, and optional tender secrets must also be canonical strong independent values.",
     ),
     makeCheck(
+      "env.shortcutWeixinConfirmation",
+      hasShortcutWeixinConfirmationConfiguration(environment),
+      "Shortcut bookkeeping confirmation is enabled for the bound owner and direct-message sender with a bounded outbox poll interval.",
+      "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.",
+    ),
+    makeCheck(
       "env.secureCookie",
       environment.AUTH_COOKIE_SECURE === "true",
       "Secure cookies are enabled.",
@@ -2689,18 +2686,6 @@ export async function runProductionPreflight({
       hasIsolatedIcostWebhookToken(environment),
       "The iCost webhook token is isolated from other project credentials.",
       "The iCost webhook token must not reuse the session, model, or WeChat credential.",
-    ),
-    makeCheck(
-      "env.qingyangBridge",
-      hasQingyangBookkeepingBridgeConfiguration(environment),
-      "The Qingyang bookkeeping bridge uses the approved loopback endpoint, a strong server-only credential, and a bounded timeout.",
-      "The Qingyang bookkeeping bridge requires the exact loopback endpoint, a strong server-only credential, and a timeout from 1 to 30000 milliseconds.",
-    ),
-    makeCheck(
-      "env.qingyangBridgeIsolation",
-      hasIsolatedQingyangBookkeepingBridgeToken(environment),
-      "The Qingyang bookkeeping bridge credential is isolated from user, iCost, model, session, and machine credentials.",
-      "The Qingyang bookkeeping bridge credential must not reuse any user, iCost, model, session, settings, confirmation, or machine credential.",
     ),
     makeCheck(
       "env.invoiceExtraction",

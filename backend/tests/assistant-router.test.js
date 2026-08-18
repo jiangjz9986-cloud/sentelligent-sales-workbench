@@ -73,4 +73,37 @@ describe("assistant deterministic router", () => {
     assert.equal(router.route({ text: "客户 医院", confidence: 0.2 }).status, "clarify");
     assert.equal(router.route({ text: "客户 医院", confidence: 0.9 }).toolName, "customer.search");
   });
+
+  it("continues a customer or project conversation from the server-owned context", () => {
+    const customer = router.route({
+      text: "客户详情",
+      context: { customerId: "customer-a" },
+    });
+    assert.equal(customer.status, "planned");
+    assert.deepEqual(customer.arguments, { customerId: "customer-a" });
+
+    const project = router.route({
+      text: "项目分析",
+      context: { opportunityId: "opportunity-a" },
+    });
+    assert.equal(project.status, "planned");
+    assert.deepEqual(project.arguments, { opportunityId: "opportunity-a" });
+
+    const followUp = router.route({
+      text: "还有哪些跟进动作？",
+      context: { opportunityId: "opportunity-a" },
+    });
+    assert.equal(followUp.status, "planned");
+    assert.equal(followUp.toolName, "action-risk.summary");
+    assert.deepEqual(followUp.arguments, { opportunityId: "opportunity-a" });
+  });
+
+  it("does not guess a project when context only identifies a customer", () => {
+    const plan = router.route({
+      text: "项目分析",
+      context: { customerId: "customer-a" },
+    });
+    assert.equal(plan.status, "clarify");
+    assert.match(plan.question, /商机|项目/);
+  });
 });

@@ -29,6 +29,15 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   assert.match(source, /轮巡进度/);
   assert.match(source, /本批新增高相关/);
   assert.match(source, /role="dialog"|aria-label="公告详情"/);
+  assert.match(source, /hospital-tender-priority-strip/);
+  assert.match(source, /hospital-tender-content-grid/);
+  assert.match(source, /重点机会/);
+  assert.match(source, /全部公告/);
+  assert.match(source, /pill \$\{isUrgent \? "danger"/);
+  assert.match(source, /userFacingTenderError/);
+  assert.match(source, /publishedToday/);
+  assert.match(source, /deadlineWithinNextSevenDays/);
+  assert.doesNotMatch(source, /2026-08-18/);
 });
 
 test("hospital tender page avoids rendering raw payloads or credential-like fields", async () => {

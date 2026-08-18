@@ -7,8 +7,9 @@
 ### iOS 快捷指令真实记账
 
 - 新增 `0018` 快捷记账台账和 `POST /api/integrations/shortcut/bookkeeping`，支持账号全局幂等、处理租约、失败恢复和审计。
-- 出差报销支出写入森特差旅费用和支付记录；biubiu 通过固定 loopback 地址与独立 bridge credential 写轻氧，远端未确认时 fail closed。
-- Token 验证只有在写入链路配置完整时返回 `bookkeepingReady=true`；生产 preflight 扩展为 `27/27` 并校验桥接凭据隔离。
+- 森特出差报销支出先进入 `review_required` 草稿；微信小小助手可展示、修改日期/金额/商户/用途/分类/备注，只有最新确认码通过后才创建森特差旅费用和付款记录。
+- 本版本不包含 biubiu、轻氧桥接或跨系统凭据；Token 验证只检查森特本地复核链路，生产门禁不要求任何远端记账配置。
+- 新增 durable 微信确认 outbox、重试和 sender/owner 白名单门禁；确认码与凭据不落库。
 
 ### 医院招标真实来源采集
 

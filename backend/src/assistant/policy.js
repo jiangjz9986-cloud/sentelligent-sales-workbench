@@ -12,6 +12,7 @@ const TOOL_POLICIES = new Map([
   ["action-risk.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["itinerary.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["travel-expense.summary", { risk: "R1", confirmation: "none", reason: "read_only" }],
+  ["shortcut-bookkeeping.confirm", { risk: "R3", confirmation: "explicit_code", reason: "financial_write" }],
   ["knowledge.search", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["visit-capture.collect", { risk: "R1", confirmation: "none", reason: "draft_only" }],
   ["visit-capture.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],

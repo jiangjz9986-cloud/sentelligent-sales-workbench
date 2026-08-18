@@ -4,9 +4,22 @@ import { evaluatePolicy } from "./policy.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
+const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、快捷记账微信复核、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
 
 function clean(value) { return String(value ?? "").trim(); }
+
+function conversationContext(input) {
+  const value = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const context = value.context && typeof value.context === "object" && !Array.isArray(value.context)
+    ? value.context
+    : {};
+  const customerId = clean(context.customerId);
+  const opportunityId = clean(context.opportunityId);
+  return {
+    customerId: customerId || null,
+    opportunityId: opportunityId || null,
+  };
+}
 
 function parseExplicit(text) {
   const match = clean(text).match(/^\/([^\s]+)\s*(.*)$/s);
@@ -55,14 +68,18 @@ function reportArguments(args) {
   return dateRange(args);
 }
 
-function directArguments(toolName, args, mediaRef) {
+function directArguments(toolName, args, mediaRef, context = {}) {
   if (toolName === "dashboard.summary" || toolName === "itinerary.summary") return {};
   if (toolName === "customer.search" || toolName === "knowledge.search") return { query: args };
-  if (toolName === "customer.detail") return { customerId: args };
+  if (toolName === "customer.detail") return { customerId: clean(args) || context.customerId || "" };
   if (toolName === "opportunity.detail" || toolName === "sales-decision.preview") {
-    return { opportunityId: args };
+    return { opportunityId: clean(args) || context.opportunityId || "" };
   }
-  if (toolName === "action-risk.summary") return {};
+  if (toolName === "action-risk.summary") return {
+    ...(clean(args) ? { customerId: clean(args) } : {}),
+    ...(!clean(args) && context.opportunityId ? { opportunityId: context.opportunityId } : {}),
+    ...(!clean(args) && !context.opportunityId && context.customerId ? { customerId: context.customerId } : {}),
+  };
   if (toolName === "travel-expense.summary") return { week: clean(args) || "current" };
   if (toolName.includes("report.preview")) return reportArguments(args) ?? {};
   if (toolName === "visit-capture.collect") return { text: args };
@@ -71,13 +88,14 @@ function directArguments(toolName, args, mediaRef) {
   return {};
 }
 
-function explicitPlan(command, args, registry, { mediaRef } = {}) {
+function explicitPlan(command, args, registry, { mediaRef, context: rawContext } = {}) {
+  const context = conversationContext({ context: rawContext });
   const normalized = command.replace(/^\//, "");
   if (normalized === "help" || normalized === "帮助" || normalized === "h") return { kind: "intent_plan", status: "help", toolName: null, agentId: "system-router", arguments: {}, message: HELP };
   if (normalized === "cancel" || normalized === "取消") return { kind: "intent_plan", status: "cancelled", toolName: null, agentId: "system-router", arguments: {} };
   const direct = registry.getTool(normalized);
   if (direct) {
-    const input = directArguments(normalized, args, mediaRef);
+    const input = directArguments(normalized, args, mediaRef, context);
     return makePlan({ tool: direct, arguments: input, source: "explicit" });
   }
   const aliases = {
@@ -107,11 +125,20 @@ function explicitPlan(command, args, registry, { mediaRef } = {}) {
   if (!tool) return clarify("该功能尚未开放，请联系管理员。", 1);
   const parsed = alias[1](args);
   if (!parsed) return clarify("请提供完整的开始日期和结束日期。", 1);
+  if (alias[0] === "customer.detail" && !clean(parsed.customerId)) parsed.customerId = context.customerId ?? "";
+  if ((alias[0] === "opportunity.detail" || alias[0] === "sales-decision.preview") && !clean(parsed.opportunityId)) {
+    parsed.opportunityId = context.opportunityId ?? "";
+  }
+  if (alias[0] === "action-risk.summary" && Object.keys(parsed).length === 0) {
+    if (context.opportunityId) parsed.opportunityId = context.opportunityId;
+    else if (context.customerId) parsed.customerId = context.customerId;
+  }
   return makePlan({ tool, arguments: parsed, source: "explicit" });
 }
 
-function naturalPlan(text, confidence, registry) {
+function naturalPlan(text, confidence, registry, rawContext = {}) {
   const value = clean(text);
+  const context = conversationContext({ context: rawContext });
   if (/销售周报/.test(value)) {
     return makePlan({ tool: registry.getTool("sales-report.preview"), arguments: { week: "current" }, confidence, source: "natural" });
   }
@@ -126,7 +153,7 @@ function naturalPlan(text, confidence, registry) {
   if (customerDetail) {
     return makePlan({
       tool: registry.getTool("customer.detail"),
-      arguments: { customerId: customerDetail[1] ?? "" },
+      arguments: { customerId: customerDetail[1] ?? context.customerId ?? "" },
       confidence,
       source: "natural",
     });
@@ -135,22 +162,39 @@ function naturalPlan(text, confidence, registry) {
   if (opportunityDetail) {
     return makePlan({
       tool: registry.getTool("opportunity.detail"),
-      arguments: { opportunityId: opportunityDetail[1] ?? "" },
+      arguments: { opportunityId: opportunityDetail[1] ?? context.opportunityId ?? "" },
       confidence,
       source: "natural",
     });
   }
   const projectAnalysis = value.match(/^项目分析(?:\s+(.+))?$/u);
   if (projectAnalysis) {
+    if (!projectAnalysis[1] && !context.opportunityId && context.customerId) {
+      return clarify("当前客户未指定商机，请补充商机名称或标识。", confidence);
+    }
     return makePlan({
       tool: registry.getTool("sales-decision.preview"),
-      arguments: { opportunityId: projectAnalysis[1] ?? "" },
+      arguments: { opportunityId: projectAnalysis[1] ?? context.opportunityId ?? "" },
       confidence,
       source: "natural",
     });
   }
   if (/^(?:动作风险|行动风险|风险动作)(?:摘要)?$/u.test(value)) {
-    return makePlan({ tool: registry.getTool("action-risk.summary"), arguments: {}, confidence, source: "natural" });
+    return makePlan({
+      tool: registry.getTool("action-risk.summary"),
+      arguments: context.opportunityId ? { opportunityId: context.opportunityId } : (context.customerId ? { customerId: context.customerId } : {}),
+      confidence,
+      source: "natural",
+    });
+  }
+  const followUpText = value.replace(/[？?。.!！]+$/u, "");
+  if (/^(?:(?:这个|当前|该)?(?:项目|商机|客户)?(?:还有哪些|还有|有哪些|有什么|当前有哪些)?(?:跟进动作|待办|行动|风险|下一步))$/u.test(followUpText)) {
+    return makePlan({
+      tool: registry.getTool("action-risk.summary"),
+      arguments: context.opportunityId ? { opportunityId: context.opportunityId } : (context.customerId ? { customerId: context.customerId } : {}),
+      confidence,
+      source: "natural",
+    });
   }
   if (/^(?:行程|行程摘要|拜访行程)$/u.test(value)) {
     return makePlan({ tool: registry.getTool("itinerary.summary"), arguments: {}, confidence, source: "natural" });
@@ -162,6 +206,9 @@ function naturalPlan(text, confidence, registry) {
       confidence,
       source: "natural",
     });
+  }
+  if (/快捷记账|记账复核|记账确认/u.test(value)) {
+    return clarify("快捷指令提交后，小小助手会把识别草稿发到绑定的微信会话；请直接在同一会话回复六位确认码或说明要修改的字段。", confidence);
   }
   const knowledgeSearch = value.match(/^知识(?:检索|查询)(?:\s+(.+))?$/u);
   if (knowledgeSearch) {
@@ -238,7 +285,7 @@ export function createAssistantRouter({ registry = createAgentRegistry(), confid
       if (input.mediaRef && ["发票", "付款凭证"].includes(text)) {
         return explicitPlan(text, "", registry, input);
       }
-      return naturalPlan(text, confidence, registry);
+      return naturalPlan(text, confidence, registry, conversationContext(input));
     },
   });
 }

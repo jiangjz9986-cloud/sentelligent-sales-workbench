@@ -29,10 +29,6 @@ export const BOOKKEEPING_CATALOG = Object.freeze({
       "招待/礼品": [],
     },
   },
-  biubiu: {
-    收入: { 营收: ["美团", "淘宝闪购", "京东", "收钱吧", "其他"], 退税: [], 其他收入: [] },
-    支出: { 房租: [], 设备: [], 水电费: [], 进货采购: ["水果", "耗材"], 员工薪资: [], 交税: [], 运营: [] },
-  },
 });
 
 export const BOOKKEEPING_SELECTION_OPTIONS = Object.freeze(

@@ -10,6 +10,8 @@ const ALLOWED_MACHINE_ROUTES = new Set([
   "POST /api/travel-expense-document-inbox",
   "POST /api/invoices",
   "POST /api/integrations/weixin-agent/events",
+  "GET /api/integrations/weixin-agent/confirmation-outbox",
+  "POST /api/integrations/weixin-agent/confirmation-outbox",
   "POST /api/integrations/hospital-tenders/sync",
   "GET /api/integrations/hospital-tenders/health",
 ]);
@@ -24,6 +26,8 @@ const INTEGRATION_ROUTES = Object.freeze({
     "POST /api/travel-expense-document-inbox",
     "POST /api/invoices",
     "POST /api/integrations/weixin-agent/events",
+    "GET /api/integrations/weixin-agent/confirmation-outbox",
+    "POST /api/integrations/weixin-agent/confirmation-outbox",
   ]),
   "hospital-tender-monitor": new Set([
     "POST /api/integrations/hospital-tenders/sync",

@@ -226,7 +226,7 @@ export function ShortcutTokenPage({ apiClient, backendStatus, account }) {
               <li>在这里生成 Token，并点击复制。</li>
               <li>打开桌面上的「自有截图记账（兼容版V4修复）」快捷指令。</li>
               <li>把 Token 填入“系统配置页生成的快捷指令 Token”参数。</li>
-              <li>首次运行会先验证 Token；验证成功后选择分类并提交截图文字。出差报销暂只支持支出，biubiu 由服务器安全转发。</li>
+              <li>首次运行会先验证 Token；验证成功后选择分类并提交截图文字。出差报销暂只支持支出，提交后由微信“小小”助手复核，确认后写入森特本地账本。</li>
             </ol>
             <div className="shortcut-token-guide-note">
               <ShieldCheck size={16} />

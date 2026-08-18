@@ -92,7 +92,7 @@ Required:
   --backup-dir=<path>        Controlled backup output root
   --evidence-dir=<path>      Controlled evidence output root
   --weixin-session-dir=<path> WeChat session state directory
-  --preflight-report=<path>  Fresh passed 27/27 production preflight report
+  --preflight-report=<path>  Fresh passed 26/26 production preflight report
   --preflight-report-sha256=<sha256> Exact report SHA-256
 
 Optional:
@@ -460,14 +460,13 @@ verify_preflight_report() {
         "env.authHash",
         "env.sessionSecret",
         "env.assistantSecrets",
+        "env.shortcutWeixinConfirmation",
         "env.secureCookie",
         "env.cors",
         "env.solutionWrites",
         "env.aiModel",
         "env.icostWebhook",
         "env.icostIsolation",
-        "env.qingyangBridge",
-        "env.qingyangBridgeIsolation",
         "env.invoiceExtraction",
         "database.environmentBinding",
         "database.quickCheck",
@@ -490,14 +489,14 @@ verify_preflight_report() {
         report.schemaVersion !== 2 ||
         report.product !== "sentelligent-sales-workbench" ||
         report.status !== "passed" ||
-        report.summary?.total !== 27 ||
-        report.summary?.passed !== 27 ||
+        report.summary?.total !== 26 ||
+        report.summary?.passed !== 26 ||
         report.summary?.failed !== 0
       ) {
-        throw new Error("Preflight report must be an exact passed 27/27 result");
+        throw new Error("Preflight report must be an exact passed 26/26 result");
       }
-      if (!Array.isArray(report.checks) || report.checks.length !== 27) {
-        throw new Error("Preflight report must contain exactly 27 checks");
+      if (!Array.isArray(report.checks) || report.checks.length !== 26) {
+        throw new Error("Preflight report must contain exactly 26 checks");
       }
       const observedChecks = report.checks.map((check) => check?.id).sort();
       if (
@@ -813,13 +812,14 @@ verify_release_manifest() {
         "WEIXIN_AGENT_BACKEND_URL",
         "WEIXIN_AGENT_OWNER",
         "WEIXIN_AGENT_SESSION_HOME",
+        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+        "WEIXIN_BOOKKEEPING_OWNER",
+        "WEIXIN_BOOKKEEPING_SENDER_ID",
+        "WEIXIN_OUTBOX_POLL_MS",
         "ICOST_WEBHOOK_TOKEN",
         "ICOST_WEBHOOK_OWNER",
         "ICOST_WEBHOOK_RATE_LIMIT",
         "ICOST_WEBHOOK_WINDOW_MS",
-        "QINGYANG_BOOKKEEPING_BRIDGE_URL",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
         "INVOICE_OCR_COMMAND",
         "INVOICE_PDF_TEXT_COMMAND",
         "INVOICE_OCR_LANGUAGES",

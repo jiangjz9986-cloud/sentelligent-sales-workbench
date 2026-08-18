@@ -1,7 +1,9 @@
 import { analyzeProjectSnapshot } from "./projectAnalysis.js";
+import { buildWeeklyDraft } from "../weeklyDraft.js";
 
 const MAX_ITEMS = 100;
 const BUSINESS_TIME_ZONE = "Asia/Shanghai";
+const WEEKLY_REPORT_STATUSES = new Set(["draft", "saved", "ready"]);
 
 function createBusinessDateFormatter(timeZone) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -49,6 +51,59 @@ function asSafeInteger(value) {
 
 function asCount(value) {
   return asSafeInteger(value) ?? 0;
+}
+
+function boundedSourceRefs(value) {
+  if (typeof value !== "string") return [];
+  let parsed;
+  try { parsed = JSON.parse(value); } catch { return []; }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.slice(0, MAX_ITEMS).flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const type = optionalText(item.type, 80);
+    const id = optionalText(item.id, 200);
+    return type && id ? [{ type, id }] : [];
+  });
+}
+
+function derivedInvoiceStatus({ reimbursementCents, confirmedCoverageCents, noInvoiceConfirmedCents }) {
+  if (reimbursementCents === null || confirmedCoverageCents === null || noInvoiceConfirmedCents === null) return null;
+  if (reimbursementCents > 0 && confirmedCoverageCents >= reimbursementCents) return "covered";
+  if (confirmedCoverageCents > 0) return "partial";
+  if (noInvoiceConfirmedCents > 0) return "missing";
+  return "pending";
+}
+
+function parseJsonObject(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function boundedAnalysis(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const match = (item) => item && typeof item === "object" && !Array.isArray(item)
+    ? {
+        id: optionalText(item.id, 200),
+        value: optionalText(item.value, 200),
+        meta: optionalText(item.meta, 200),
+      }
+    : null;
+  const summaryItem = (item) => item && typeof item === "object" && !Array.isArray(item)
+    ? { title: optionalText(item.title, 200), text: optionalText(item.text, 2000) }
+    : null;
+  return {
+    customer: match(value.customer),
+    opportunity: match(value.opportunity),
+    summary: {
+      action: summaryItem(value.summary?.action),
+      risk: summaryItem(value.summary?.risk),
+    },
+  };
 }
 
 function isoNow(value) {
@@ -403,7 +458,7 @@ export function createAssistantBusinessSnapshotAdapter({
       createdAt: trustedDatabaseTimestamp(row.created_at),
       updatedAt: trustedDatabaseTimestamp(row.updated_at),
     }));
-    const expenses = scoped.customerId ? db.prepare(`
+    const expenseRows = scoped.customerId ? db.prepare(`
       SELECT expense.id, expense.occurred_on, expense.invoice_status, expense.created_at, expense.updated_at,
              COALESCE(SUM(payment.amount_cents), 0) AS actual_paid_cents,
              COALESCE(SUM(payment.reimbursement_cents), 0) AS reimbursement_cents
@@ -412,8 +467,9 @@ export function createAssistantBusinessSnapshotAdapter({
       WHERE expense.owner = $owner AND expense.customer_id = $customerId AND expense.deleted_at IS NULL
       GROUP BY expense.id
       ORDER BY expense.occurred_on DESC, expense.id
-      LIMIT ${MAX_ITEMS}
-    `).all({ $owner: params.$owner, $customerId: scoped.customerId }).map((row) => ({
+      LIMIT ${MAX_ITEMS + 1}
+    `).all({ $owner: params.$owner, $customerId: scoped.customerId }) : [];
+    const expenses = expenseRows.slice(0, MAX_ITEMS).map((row) => ({
       id: row.id,
       occurredOn: row.occurred_on,
       invoiceStatus: row.invoice_status,
@@ -421,7 +477,7 @@ export function createAssistantBusinessSnapshotAdapter({
       reimbursementCents: asSafeInteger(row.reimbursement_cents),
       createdAt: trustedDatabaseTimestamp(row.created_at),
       updatedAt: trustedDatabaseTimestamp(row.updated_at),
-    })) : [];
+    }));
 
     const actionResult = actionRows(scoped);
     const riskResult = riskRows(scoped);
@@ -449,6 +505,11 @@ export function createAssistantBusinessSnapshotAdapter({
       key: "risk.truncated",
       question: "需要确认是否还有未纳入分析的风险。",
       reason: `风险超过 ${MAX_ITEMS} 条分析上限。`,
+    });
+    if (expenseRows.length > MAX_ITEMS) truncationUnknowns.push({
+      key: "expense.truncated",
+      question: "需要确认是否还有未纳入分析的费用。",
+      reason: `费用超过 ${MAX_ITEMS} 条分析上限。`,
     });
     return truncationUnknowns.length > 0
       ? { ...analysis, unknowns: [...truncationUnknowns, ...analysis.unknowns].slice(0, 100) }
@@ -494,14 +555,44 @@ export function createAssistantBusinessSnapshotAdapter({
     const normalizedWeek = normalizeWeekStart(weekStart, now, businessDateFormatter);
     if (!normalizedOwner) return {
       weekStart: normalizedWeek,
-      summary: { count: 0, actualPaidCents: 0, reimbursementCents: 0, invalidAmountCount: 0 },
+      summary: {
+        count: 0,
+        actualPaidCents: 0,
+        reimbursementCents: 0,
+        confirmedCoverageCents: 0,
+        missingInvoiceCents: 0,
+        noInvoiceConfirmedCents: 0,
+        unacknowledgedMissingCents: 0,
+        missingInvoiceCount: 0,
+        invalidAmountCount: 0,
+      },
       items: [],
       truncated: false,
+      partial: false,
+      preparation: { ready: true, blockers: [] },
     };
     const rows = db.prepare(`
       SELECT expense.id, expense.occurred_on, expense.category, expense.purpose, expense.invoice_status,
              COALESCE(SUM(payment.amount_cents), 0) AS actual_paid_cents,
-             COALESCE(SUM(payment.reimbursement_cents), 0) AS reimbursement_cents
+             COALESCE(SUM(payment.reimbursement_cents), 0) AS reimbursement_cents,
+             COALESCE((
+               SELECT SUM(match.allocated_cents)
+               FROM invoice_matches match
+               INNER JOIN invoice_documents invoice
+                 ON invoice.id = match.invoice_id
+                AND invoice.owner = match.owner
+                AND invoice.deleted_at IS NULL
+               WHERE match.owner = expense.owner
+                 AND match.expense_id = expense.id
+                 AND match.state = 'confirmed'
+             ), 0) AS confirmed_coverage_cents,
+             COALESCE((
+               SELECT SUM(confirmation.amount_snapshot_cents)
+               FROM travel_expense_no_invoice_confirmations confirmation
+               WHERE confirmation.owner = expense.owner
+                 AND confirmation.expense_id = expense.id
+                 AND confirmation.revoked_at IS NULL
+             ), 0) AS no_invoice_confirmed_cents
       FROM travel_expenses expense
       LEFT JOIN travel_expense_payments payment ON payment.expense_id = expense.id
       WHERE expense.owner = $owner AND expense.deleted_at IS NULL
@@ -510,45 +601,97 @@ export function createAssistantBusinessSnapshotAdapter({
       ORDER BY expense.occurred_on, expense.id
       LIMIT ${MAX_ITEMS + 1}
     `).all({ $owner: normalizedOwner, $weekStart: normalizedWeek });
-    const items = rows.slice(0, MAX_ITEMS).map((row) => ({
-      id: row.id,
-      occurredOn: row.occurred_on,
-      category: row.category,
-      purpose: optionalText(row.purpose, 500),
-      invoiceStatus: row.invoice_status,
-      actualPaidCents: asSafeInteger(row.actual_paid_cents),
-      reimbursementCents: asSafeInteger(row.reimbursement_cents),
-    }));
+    const items = rows.slice(0, MAX_ITEMS).map((row) => {
+      const actualPaidCents = asSafeInteger(row.actual_paid_cents);
+      const reimbursementCents = asSafeInteger(row.reimbursement_cents);
+      const confirmedCoverageCents = asSafeInteger(row.confirmed_coverage_cents);
+      const noInvoiceTotalCents = asSafeInteger(row.no_invoice_confirmed_cents);
+      const validPair = actualPaidCents !== null
+        && reimbursementCents !== null
+        && reimbursementCents <= actualPaidCents
+        && confirmedCoverageCents !== null
+        && noInvoiceTotalCents !== null;
+      const boundedCoverage = validPair ? Math.min(reimbursementCents, confirmedCoverageCents) : null;
+      const missingInvoiceCents = validPair ? Math.max(0, reimbursementCents - boundedCoverage) : null;
+      const noInvoiceConfirmedCents = validPair ? Math.min(missingInvoiceCents, noInvoiceTotalCents) : null;
+      return {
+        id: row.id,
+        occurredOn: row.occurred_on,
+        category: row.category,
+        purpose: optionalText(row.purpose, 500),
+        invoiceStatus: derivedInvoiceStatus({ reimbursementCents, confirmedCoverageCents: boundedCoverage, noInvoiceConfirmedCents }),
+        actualPaidCents,
+        reimbursementCents,
+        confirmedCoverageCents: boundedCoverage,
+        missingInvoiceCents,
+        noInvoiceConfirmedCents,
+        unacknowledgedMissingCents: missingInvoiceCents === null || noInvoiceConfirmedCents === null
+          ? null
+          : Math.max(0, missingInvoiceCents - noInvoiceConfirmedCents),
+      };
+    });
     let actualPaidCents = 0;
     let reimbursementCents = 0;
+    let confirmedCoverageCents = 0;
+    let missingInvoiceCents = 0;
+    let noInvoiceConfirmedCents = 0;
+    let unacknowledgedMissingCents = 0;
+    let missingInvoiceCount = 0;
     let invalidAmountCount = 0;
     for (const item of items) {
       const validPair = item.actualPaidCents !== null
         && item.reimbursementCents !== null
-        && item.reimbursementCents <= item.actualPaidCents;
+        && item.reimbursementCents <= item.actualPaidCents
+        && item.confirmedCoverageCents !== null
+        && item.missingInvoiceCents !== null
+        && item.noInvoiceConfirmedCents !== null
+        && item.unacknowledgedMissingCents !== null;
       if (!validPair) {
         invalidAmountCount += 1;
         continue;
       }
       const nextActualPaid = actualPaidCents + item.actualPaidCents;
       const nextReimbursement = reimbursementCents + item.reimbursementCents;
-      if (!Number.isSafeInteger(nextActualPaid) || !Number.isSafeInteger(nextReimbursement)) {
+      const nextConfirmedCoverage = confirmedCoverageCents + item.confirmedCoverageCents;
+      const nextMissingInvoice = missingInvoiceCents + item.missingInvoiceCents;
+      const nextNoInvoiceConfirmed = noInvoiceConfirmedCents + item.noInvoiceConfirmedCents;
+      const nextUnacknowledgedMissing = unacknowledgedMissingCents + item.unacknowledgedMissingCents;
+      if (![nextActualPaid, nextReimbursement, nextConfirmedCoverage, nextMissingInvoice, nextNoInvoiceConfirmed, nextUnacknowledgedMissing]
+        .every(Number.isSafeInteger)) {
         invalidAmountCount += 1;
         continue;
       }
       actualPaidCents = nextActualPaid;
       reimbursementCents = nextReimbursement;
+      confirmedCoverageCents = nextConfirmedCoverage;
+      missingInvoiceCents = nextMissingInvoice;
+      noInvoiceConfirmedCents = nextNoInvoiceConfirmed;
+      unacknowledgedMissingCents = nextUnacknowledgedMissing;
+      if (item.missingInvoiceCents > 0) missingInvoiceCount += 1;
     }
+    const truncated = rows.length > MAX_ITEMS;
+    const summary = {
+      count: items.length,
+      actualPaidCents: invalidAmountCount > 0 ? null : actualPaidCents,
+      reimbursementCents: invalidAmountCount > 0 ? null : reimbursementCents,
+      confirmedCoverageCents: invalidAmountCount > 0 ? null : confirmedCoverageCents,
+      missingInvoiceCents: invalidAmountCount > 0 ? null : missingInvoiceCents,
+      noInvoiceConfirmedCents: invalidAmountCount > 0 ? null : noInvoiceConfirmedCents,
+      unacknowledgedMissingCents: invalidAmountCount > 0 ? null : unacknowledgedMissingCents,
+      missingInvoiceCount,
+      invalidAmountCount,
+    };
+    const blockers = [];
+    if (summary.invalidAmountCount > 0) blockers.push("invalid_amount");
+    if (summary.unacknowledgedMissingCents === null || summary.unacknowledgedMissingCents > 0) blockers.push("missing_invoice");
+    if (truncated) blockers.push("truncated");
     return {
       weekStart: normalizedWeek,
-      summary: {
-        count: items.length,
-        actualPaidCents: invalidAmountCount > 0 ? null : actualPaidCents,
-        reimbursementCents: invalidAmountCount > 0 ? null : reimbursementCents,
-        invalidAmountCount,
-      },
+      summary,
       items,
-      truncated: rows.length > MAX_ITEMS,
+      truncated,
+      partial: truncated,
+      preparation: { ready: blockers.length === 0, blockers },
     };
   }
 
@@ -557,15 +700,124 @@ export function createAssistantBusinessSnapshotAdapter({
     const normalizedOwner = typeof resolvedOwner === "string" ? resolvedOwner.trim() : "";
     const now = validClockDate(clock);
     const normalizedWeek = normalizeWeekStart(weekStart, now, businessDateFormatter);
-    if (!normalizedOwner) return { weekStart: normalizedWeek, recordCount: 0 };
-    const row = db.prepare(`
-      SELECT COUNT(*) AS record_count
-      FROM quick_records
+    if (!normalizedOwner) {
+      return {
+        weekStart: normalizedWeek,
+        reportCount: 0,
+        statusCounts: { draft: 0, saved: 0, ready: 0 },
+        items: [],
+        truncated: false,
+        partial: false,
+        preparation: { ready: false, blockers: ["no_weekly_report"] },
+        preview: {
+          persisted: false,
+          sourceRecordCount: 0,
+          content: null,
+          sourceRefs: [],
+          truncated: false,
+          preparation: { ready: false, blockers: ["no_business_owner"] },
+        },
+      };
+    }
+    const rows = db.prepare(`
+      SELECT id, period_start, period_end, status, source_refs, created_at, updated_at
+      FROM weekly_reports
       WHERE owner = $owner
-        AND voided_at IS NULL
-        AND date(COALESCE(occurred_at, created_at)) BETWEEN $weekStart AND date($weekStart, '+6 days')
-    `).get({ $owner: normalizedOwner, $weekStart: normalizedWeek });
-    return { weekStart: normalizedWeek, recordCount: asCount(row.record_count) };
+        AND deleted_at IS NULL
+        AND status IN ('draft', 'saved', 'ready')
+        AND period_start <= date($weekStart, '+6 days')
+        AND period_end >= $weekStart
+      ORDER BY period_start DESC, updated_at DESC, id
+      LIMIT ${MAX_ITEMS + 1}
+    `).all({ $owner: normalizedOwner, $weekStart: normalizedWeek });
+    const items = rows.slice(0, MAX_ITEMS).map((row) => {
+      const sourceRefs = boundedSourceRefs(row.source_refs);
+      return {
+        id: row.id,
+        periodStart: row.period_start,
+        periodEnd: row.period_end,
+        status: WEEKLY_REPORT_STATUSES.has(row.status) ? row.status : null,
+        sourceRefs,
+        sourceRefCount: sourceRefs.length,
+        createdAt: trustedDatabaseTimestamp(row.created_at),
+        updatedAt: trustedDatabaseTimestamp(row.updated_at),
+      };
+    });
+    const statusCounts = { draft: 0, saved: 0, ready: 0 };
+    for (const item of items) if (item.status) statusCounts[item.status] += 1;
+    const truncated = rows.length > MAX_ITEMS;
+    const blockers = [];
+    if (items.length === 0) blockers.push("no_weekly_report");
+    if (truncated) blockers.push("truncated");
+
+    const sourceRows = db.prepare(`
+      SELECT qr.id, qr.occurred_at, qr.source_channel, ai.analysis_json
+      FROM quick_records qr
+      LEFT JOIN ai_insights ai ON ai.id = (
+        SELECT latest.id
+        FROM ai_insights latest
+        WHERE latest.quick_record_id = qr.id
+        ORDER BY latest.created_at DESC, latest.id DESC
+        LIMIT 1
+      )
+      WHERE qr.owner = $owner
+        AND qr.voided_at IS NULL
+        AND qr.status = 'analyzed'
+        AND date(substr(COALESCE(qr.occurred_at, qr.created_at), 1, 10))
+          BETWEEN $weekStart AND date($weekStart, '+6 days')
+        AND (
+          qr.source_channel = '微信助手'
+          OR EXISTS (
+            SELECT 1
+            FROM manual_confirmations confirmation
+            WHERE confirmation.quick_record_id = qr.id
+              AND confirmation.target = 'weekly'
+          )
+        )
+      ORDER BY COALESCE(qr.occurred_at, qr.created_at), qr.id
+      LIMIT ${MAX_ITEMS + 1}
+    `).all({ $owner: normalizedOwner, $weekStart: normalizedWeek });
+    const sourceRecords = sourceRows.slice(0, MAX_ITEMS).map((row) => ({
+      id: row.id,
+      occurredAt: row.occurred_at,
+      sourceChannel: optionalText(row.source_channel, 100),
+      analysis: boundedAnalysis(parseJsonObject(row.analysis_json)),
+    }));
+    const sourceTruncated = sourceRows.length > MAX_ITEMS;
+    const previewEndDate = new Date(`${normalizedWeek}T00:00:00.000Z`);
+    previewEndDate.setUTCDate(previewEndDate.getUTCDate() + 6);
+    const draft = buildWeeklyDraft({
+      owner: normalizedOwner,
+      periodStart: normalizedWeek,
+      periodEnd: formatDateOnlyUtc(previewEndDate),
+      records: sourceRecords,
+      knowledge: [],
+    });
+    const previewRefs = draft.sourceRefs.slice(0, MAX_ITEMS).flatMap((item) => {
+      const type = optionalText(item?.type, 80);
+      const id = optionalText(item?.id, 200);
+      return type && id ? [{ type, id }] : [];
+    });
+    const previewBlockers = [];
+    if (sourceRecords.length === 0) previewBlockers.push("no_confirmed_records");
+    if (sourceTruncated) previewBlockers.push("truncated");
+    return {
+      weekStart: normalizedWeek,
+      reportCount: items.length,
+      statusCounts,
+      items,
+      truncated,
+      partial: truncated,
+      preparation: { ready: blockers.length === 0, blockers },
+      preview: {
+        persisted: false,
+        sourceRecordCount: sourceRecords.length,
+        content: draft.content.slice(0, 20_000),
+        sourceRefs: previewRefs,
+        truncated: sourceTruncated,
+        preparation: { ready: previewBlockers.length === 0, blockers: previewBlockers },
+      },
+    };
   }
 
   function knowledgeSearch({ query }) {

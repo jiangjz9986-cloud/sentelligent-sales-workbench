@@ -94,7 +94,6 @@ import {
   createShortcutBookkeepingRepository,
 } from "./integrations/shortcutBookkeepingRepository.js";
 import { createShortcutWebhookTokenRepository } from "./integrations/shortcutWebhookTokenRepository.js";
-import { createQingyangBookkeepingBridge } from "./integrations/qingyangBookkeepingBridge.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import {
@@ -138,7 +137,9 @@ import { createAssistantPendingActionRepository } from "./assistant/pendingActio
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
+import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
+import { createWeixinConfirmationOutboxRepository } from "./weixin/outboxRepository.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
 import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
@@ -183,6 +184,7 @@ const DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH = 200_000;
 const EXTRACTED_TEXT_TRUNCATED_WARNING = "EXTRACTED_TEXT_TRUNCATED";
 const ICOST_EXPENSE_ROUTE = "/api/integrations/icost/expenses";
 const WEIXIN_ASSISTANT_EVENT_ROUTE = "/api/integrations/weixin-agent/events";
+const WEIXIN_OUTBOX_ROUTE = "/api/integrations/weixin-agent/confirmation-outbox";
 
 function boundPaymentProofRecognition(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
@@ -237,7 +239,7 @@ function icostResponseItem(item, replayed) {
   };
 }
 
-function shortcutResponseItem(item, replayed) {
+function shortcutResponseItem(item, replayed, extra = {}) {
   return {
     id: item.id,
     status: item.status,
@@ -251,10 +253,8 @@ function shortcutResponseItem(item, replayed) {
     expenseId: item.expenseId,
     paymentId: item.paymentId,
     expenseReferenceCode: item.expenseReferenceCode,
-    remoteId: item.remoteId,
-    remoteReference: item.remoteReference,
-    remoteStatus: item.remoteStatus,
     replayed,
+    ...extra,
   };
 }
 
@@ -272,12 +272,13 @@ function shortcutReviewResponseItem(item, replayed = false) {
   };
 }
 
-function shortcutVerificationResponse({ tokenValid, bookkeepingReady = false, error = null } = {}) {
+function shortcutVerificationResponse({ tokenValid, bookkeepingReady = false, weixinConfirmationReady = false, error = null } = {}) {
   return {
     status: tokenValid && bookkeepingReady ? "ok" : "error",
     integration: "shortcut",
     tokenValid: Boolean(tokenValid),
     bookkeepingReady: Boolean(bookkeepingReady),
+    ...(weixinConfirmationReady ? { weixinConfirmationReady: true } : {}),
     protocolVersion: 1,
     ...(error ? { error } : {}),
   };
@@ -393,6 +394,19 @@ function validateShortcutReviewRejectPayload(value) {
   const body = plainObject(value);
   allowedPayloadKeys(body, new Set(["reason"]));
   return { reason: payloadText(body.reason, "reason", { max: 1_000 }) };
+}
+
+function validateWeixinOutboxAckPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["id", "leaseToken", "ok", "providerMessageId", "errorCode"]));
+  if (typeof body.ok !== "boolean") validationFailure("ok", "boolean");
+  return {
+    id: payloadText(body.id, "id", { max: 200 }),
+    leaseToken: payloadText(body.leaseToken, "leaseToken", { max: 200 }),
+    ok: body.ok,
+    providerMessageId: payloadText(body.providerMessageId, "providerMessageId", { optional: true, max: 200 }),
+    errorCode: payloadText(body.errorCode, "errorCode", { optional: true, max: 100 }),
+  };
 }
 
 function validateTravelExpenseDocumentInboxPayload(value) {
@@ -2479,12 +2493,10 @@ export function createServer(options = {}) {
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
     ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
   });
-  const qingyangBookkeepingBridge = options.qingyangBookkeepingBridge
-    ?? createQingyangBookkeepingBridge({
-      url: config.qingyangBookkeepingBridgeUrl,
-      token: config.qingyangBookkeepingBridgeToken,
-      timeoutMs: config.qingyangBookkeepingBridgeTimeoutMs,
-      fetchImpl: options.fetchImpl ?? fetch,
+  const weixinConfirmationOutboxRepository = options.weixinConfirmationOutboxRepository
+    ?? createWeixinConfirmationOutboxRepository(db, {
+      ...(options.weixinConfirmationOutboxIdFactory ? { idFactory: options.weixinConfirmationOutboxIdFactory } : {}),
+      ...(options.weixinConfirmationOutboxClock ? { clock: options.weixinConfirmationOutboxClock } : {}),
     });
   const icostRateLimiter = options.icostRateLimiter ?? createFixedWindowLimiter({
     limit: config.icostWebhookRateLimit,
@@ -2566,11 +2578,33 @@ export function createServer(options = {}) {
       clock: assistantClock,
       confirmationSecret: assistantConfirmationSecret,
     });
+  const configuredBusinessOwnerResolver = createBusinessOwnerResolver({
+    businessOwner: config.weixinAgentOwner,
+  });
+  const shortcutBookkeepingAssistantRuntime = options.shortcutBookkeepingAssistantRuntime
+    ?? createShortcutBookkeepingAssistantRuntime({
+      db,
+      config,
+      shortcutBookkeepingRepository,
+      pendingActionRepository: assistantPendingActionRepository,
+      sessionRepository: assistantSessionRepository,
+      outboxRepository: weixinConfirmationOutboxRepository,
+      confirmationSecret: assistantConfirmationSecret,
+      ...(options.shortcutBookkeepingAssistantIdFactory ? { idFactory: options.shortcutBookkeepingAssistantIdFactory } : {}),
+      clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
+    });
   const assistantBusinessOwnerResolver = typeof options.resolveBusinessOwner === "function"
     ? options.resolveBusinessOwner
-    : createBusinessOwnerResolver({
-        businessOwner: config.weixinAgentOwner,
-      });
+    : (account) => {
+        const owner = configuredBusinessOwnerResolver(account);
+        if (!owner) return null;
+        const ownerRow = db.prepare(`
+          SELECT 1 AS present
+          WHERE EXISTS (SELECT 1 FROM customers WHERE owner = $owner AND deleted_at IS NULL)
+             OR EXISTS (SELECT 1 FROM opportunities WHERE owner = $owner AND deleted_at IS NULL)
+        `).get({ $owner: owner });
+        return ownerRow ? owner : null;
+      };
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -2594,6 +2628,7 @@ export function createServer(options = {}) {
       toolHandlers: assistantToolHandlers,
       confirmationSecret: assistantConfirmationSecret,
       clock: assistantClock,
+      pendingActionHandler: shortcutBookkeepingAssistantRuntime.handlePending,
     });
 
   async function buildItineraryPlan(body) {
@@ -2838,10 +2873,14 @@ export function createServer(options = {}) {
           return;
         }
 
-        const bookkeepingReady = qingyangBookkeepingBridge.isConfigured();
+        const localWeixinReady = shortcutBookkeepingAssistantRuntime.enabled
+          && Boolean(shortcutBookkeepingAssistantRuntime.senderId)
+          && Boolean(shortcutBookkeepingAssistantRuntime.owner);
+        const bookkeepingReady = localWeixinReady;
         sendJson(response, 200, shortcutVerificationResponse({
           tokenValid: true,
           bookkeepingReady,
+          ...(localWeixinReady ? { weixinConfirmationReady: true } : {}),
           ...(bookkeepingReady ? {} : {
             error: {
               code: "SHORTCUT_BOOKKEEPING_NOT_READY",
@@ -2913,6 +2952,20 @@ export function createServer(options = {}) {
           capturedAt: body.capturedAt,
           sourceId: body.sourceId,
         });
+        if (received.replayed && received.item.status === "review_required"
+          && body.targetSystem === "sentelligent" && shortcutBookkeepingAssistantRuntime.enabled) {
+          const pending = shortcutBookkeepingAssistantRuntime.startReview({
+            account: integrationIdentity.account,
+            entry: received.item,
+          });
+          sendJson(response, 202, {
+            item: shortcutResponseItem(received.item, true, {
+              confirmationPending: true,
+              assistantActionId: pending.action.id,
+            }),
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
         if (received.replayed && ["accepted", "review_required"].includes(received.item.status)) {
           sendJson(response, 200, {
             item: shortcutResponseItem(received.item, true),
@@ -2920,14 +2973,25 @@ export function createServer(options = {}) {
           return;
         }
         if (received.replayed && received.item.status === "rejected") {
-          throw new HttpError(
-            409,
-            "QINGYANG_REMOTE_TERMINAL",
-            "轻氧已拒绝或作废这笔记账请求，不能自动重试",
-          );
+          throw new HttpError(409, "SHORTCUT_BOOKKEEPING_REJECTED", "这笔快捷记账已被拒绝，不能自动重试");
         }
         const claimed = shortcutBookkeepingRepository.claim(received.item.id);
         if (claimed.replayed) {
+          if (claimed.item.status === "review_required"
+            && body.targetSystem === "sentelligent"
+            && shortcutBookkeepingAssistantRuntime.enabled) {
+            const pending = shortcutBookkeepingAssistantRuntime.startReview({
+              account: integrationIdentity.account,
+              entry: claimed.item,
+            });
+            sendJson(response, 202, {
+              item: shortcutResponseItem(claimed.item, true, {
+                confirmationPending: true,
+                assistantActionId: pending.action.id,
+              }),
+            }, { "Cache-Control": "no-store" });
+            return;
+          }
           sendJson(response, 200, {
             item: shortcutResponseItem(claimed.item, true),
           }, { "Cache-Control": "no-store" });
@@ -2935,54 +2999,35 @@ export function createServer(options = {}) {
         }
 
         try {
-          if (body.targetSystem === "sentelligent") {
-            const analyzed = applyShortcutSelectionAnalysis(
-              await travelExpenseAnalyzer(body.text),
-              body,
-            );
-            const completed = shortcutBookkeepingRepository.completeLocal(received.item.id, {
-              analysis: analyzed,
-              leaseToken: claimed.leaseToken,
+          let analyzed = applyShortcutSelectionAnalysis(
+            await travelExpenseAnalyzer(body.text),
+            body,
+          );
+          if (shortcutBookkeepingAssistantRuntime.enabled) {
+            analyzed = {
+              ...analyzed,
+              status: "review_required",
+              warnings: [...new Set([...(analyzed.warnings ?? []), "WEIXIN_CONFIRMATION_REQUIRED"])],
+            };
+          }
+          const completed = shortcutBookkeepingRepository.completeLocal(received.item.id, {
+            analysis: analyzed,
+            leaseToken: claimed.leaseToken,
+          });
+          if (shortcutBookkeepingAssistantRuntime.enabled) {
+            const pending = shortcutBookkeepingAssistantRuntime.startReview({
+              account: integrationIdentity.account,
+              entry: completed.item,
             });
-            sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
-              item: shortcutResponseItem(completed.item, completed.replayed),
+            sendJson(response, 202, {
+              item: shortcutResponseItem(completed.item, completed.replayed, {
+                confirmationPending: true,
+                assistantActionId: pending.action.id,
+              }),
             }, { "Cache-Control": "no-store" });
             return;
           }
-
-          const remote = await qingyangBookkeepingBridge.forward({
-            owner: integrationIdentity.account,
-            text: body.text,
-            capturedAt: body.capturedAt,
-            idempotencyKey: body.idempotencyKey,
-            entryType: body.entryType,
-            category: body.category,
-            subcategory: body.subcategory,
-            note: body.note,
-          });
-          if (remote.status === "failed") {
-            throw new HttpError(
-              503,
-              "QINGYANG_REMOTE_RETRYABLE_FAILURE",
-              "轻氧尚未完成这笔记账，请稍后使用同一请求重试",
-            );
-          }
-          if (["rejected", "voided"].includes(remote.status)) {
-            shortcutBookkeepingRepository.completeRemoteTerminal(received.item.id, {
-              remote,
-              leaseToken: claimed.leaseToken,
-            });
-            throw new HttpError(
-              409,
-              "QINGYANG_REMOTE_TERMINAL",
-              "轻氧已拒绝或作废这笔记账请求，不能自动重试",
-            );
-          }
-          const completed = shortcutBookkeepingRepository.completeRemote(received.item.id, {
-            remote,
-            leaseToken: claimed.leaseToken,
-          });
-          sendJson(response, 202, {
+          sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
             item: shortcutResponseItem(completed.item, completed.replayed),
           }, { "Cache-Control": "no-store" });
           return;
@@ -3086,6 +3131,62 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (url.pathname === WEIXIN_OUTBOX_ROUTE) {
+        const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
+        if (!machineIdentity) return unauthorized(response);
+        assertMachineRouteAllowed(request.method, url.pathname, machineIdentity.integration);
+        if (request.method === "GET") {
+          const workerId = typeof request.headers["x-weixin-worker-id"] === "string"
+            ? request.headers["x-weixin-worker-id"].trim().slice(0, 200)
+            : "weixin-worker";
+          const lease = weixinConfirmationOutboxRepository.leaseNext({
+            workerId: workerId || "weixin-worker",
+            renderMessage: shortcutBookkeepingAssistantRuntime.renderOutboxMessage,
+          });
+          if (!lease) {
+            response.statusCode = 204;
+            response.removeHeader("Content-Type");
+            response.end();
+            return;
+          }
+          sendJson(response, 200, {
+            item: {
+              id: lease.item.id,
+              owner: lease.item.owner,
+              conversationId: lease.item.conversationId,
+              status: lease.item.status,
+              message: lease.message,
+            },
+            leaseToken: lease.leaseToken,
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (request.method === "POST") {
+          const body = validateWeixinOutboxAckPayload(await readJson(request));
+          const item = body.ok
+            ? weixinConfirmationOutboxRepository.ackSuccess(body.id, {
+                leaseToken: body.leaseToken,
+                providerMessageId: body.providerMessageId,
+              })
+            : weixinConfirmationOutboxRepository.ackFailure(body.id, {
+                leaseToken: body.leaseToken,
+                errorCode: body.errorCode ?? "WEIXIN_SEND_FAILED",
+              });
+          sendJson(response, 200, {
+            item: {
+              id: item.id,
+              status: item.status,
+              attemptCount: item.attemptCount,
+              lastErrorCode: item.lastErrorCode,
+              providerMessageId: item.providerMessageId,
+            },
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        sendHttpError(response, new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET and POST are allowed for the WeChat outbox"), responseOptions(response, { Allow: "GET, POST" }));
+        return;
+      }
+
       if (url.pathname === WEIXIN_ASSISTANT_EVENT_ROUTE) {
         if (request.method !== "POST") {
           sendHttpError(
@@ -3120,9 +3221,15 @@ export function createServer(options = {}) {
           body.groupId ?? null,
           body.conversationId,
         ]);
-        const conversationScope = `weixin:conversation:v1:${createHash("sha256")
-          .update(conversationTuple, "utf8")
-          .digest("hex")}`;
+        const shortcutConversation = shortcutBookkeepingAssistantRuntime.enabled
+          && body.chatType === "direct"
+          && body.senderId === shortcutBookkeepingAssistantRuntime.senderId
+          && machineIdentity.account === shortcutBookkeepingAssistantRuntime.owner;
+        const conversationScope = shortcutConversation
+          ? shortcutBookkeepingAssistantRuntime.conversationFor(machineIdentity.account, body.senderId)
+          : `weixin:conversation:v1:${createHash("sha256")
+            .update(conversationTuple, "utf8")
+            .digest("hex")}`;
         const eventTuple = JSON.stringify([
           machineIdentity.account,
           "weixin",

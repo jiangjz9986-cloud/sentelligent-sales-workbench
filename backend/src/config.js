@@ -118,6 +118,16 @@ function identifierList(value, name) {
   return result;
 }
 
+function optionalIdentifier(value, name) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string") throw new Error(`${name} contains an invalid identifier`);
+  const item = value.trim();
+  if (!item || item.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(item)) {
+    throw new Error(`${name} contains an invalid identifier`);
+  }
+  return item;
+}
+
 function executableValue(value, name) {
   const normalized = String(value ?? "").trim();
   if (!normalized || normalized.length > 300 || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)) {
@@ -135,18 +145,6 @@ function isStrongSessionSecret(value) {
 function isStrongIndependentSecret(value) {
   if (isStrongSessionSecret(value)) return true;
   return typeof value === "string" && /^[A-Za-z0-9_-]{64,}$/.test(value);
-}
-
-export const QINGYANG_BOOKKEEPING_BRIDGE_URL =
-  "http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping";
-
-function qingyangBridgeUrl(value) {
-  const normalized = String(value ?? "").trim();
-  if (!normalized) return "";
-  if (normalized !== QINGYANG_BOOKKEEPING_BRIDGE_URL) {
-    throw new Error(`QINGYANG_BOOKKEEPING_BRIDGE_URL must be exactly ${QINGYANG_BOOKKEEPING_BRIDGE_URL}`);
-  }
-  return normalized;
 }
 
 function validateProductionConfig(config, { explicitAllowedOrigins }) {
@@ -172,6 +170,17 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!config.weixinAgentOwner) {
     throw new Error("WEIXIN_AGENT_OWNER is required in production");
   }
+  if (config.shortcutWeixinConfirmationEnabled) {
+    if (!config.weixinBookkeepingSenderId) {
+      throw new Error("WEIXIN_BOOKKEEPING_SENDER_ID is required when Shortcut WeChat confirmation is enabled");
+    }
+    if (!config.weixinAllowedSenderIds.includes(config.weixinBookkeepingSenderId)) {
+      throw new Error("WEIXIN_BOOKKEEPING_SENDER_ID must be present in WEIXIN_ALLOWED_SENDER_IDS");
+    }
+    if (config.weixinBookkeepingOwner !== config.weixinAgentOwner) {
+      throw new Error("WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER in production");
+    }
+  }
   if (config.hospitalTenderSyncToken && !isStrongIndependentSecret(config.hospitalTenderSyncToken)) {
     throw new Error("HOSPITAL_TENDER_SYNC_TOKEN must contain at least 32 bytes of high-entropy data in production");
   }
@@ -195,22 +204,6 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   }
   if (config.shortcutWebhookToken) {
     throw new Error("SHORTCUT_WEBHOOK_TOKEN is not allowed in production; use account-bound database tokens");
-  }
-  if (config.qingyangBookkeepingBridgeUrl !== QINGYANG_BOOKKEEPING_BRIDGE_URL) {
-    throw new Error("QINGYANG_BOOKKEEPING_BRIDGE_URL is required in production");
-  }
-  if (!isStrongIndependentSecret(config.qingyangBookkeepingBridgeToken)) {
-    throw new Error("QINGYANG_BOOKKEEPING_BRIDGE_TOKEN must contain at least 32 bytes of high-entropy data in production");
-  }
-  if (new Set([
-    config.authSessionSecret,
-    config.settingsEncryptionKey,
-    config.weixinAgentApiToken,
-    config.assistantConfirmationSecret,
-    config.qingyangBookkeepingBridgeToken,
-    ...(config.hospitalTenderSyncToken ? [config.hospitalTenderSyncToken] : []),
-  ]).size !== (config.hospitalTenderSyncToken ? 6 : 5)) {
-    throw new Error("Production session, settings, machine, confirmation, and Qingyang bridge secrets must be independent");
   }
   if (!config.authCookieSecure) throw new Error("AUTH_COOKIE_SECURE must be true in production");
   if (!explicitAllowedOrigins || config.corsAllowedOrigins.length === 0) {
@@ -260,13 +253,12 @@ export function loadConfig(overrides = {}) {
     env.shortcutWebhookWindowMs ?? env.SHORTCUT_WEBHOOK_WINDOW_MS ?? 300_000,
     "SHORTCUT_WEBHOOK_WINDOW_MS",
   );
-  const qingyangBookkeepingBridgeTimeoutMs = boundedPositiveInteger(
-    env.qingyangBookkeepingBridgeTimeoutMs
-      ?? env.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS
-      ?? 10_000,
-    "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
-    30_000,
+  const weixinOutboxPollMs = boundedPositiveInteger(
+    env.weixinOutboxPollMs ?? env.WEIXIN_OUTBOX_POLL_MS ?? 5_000,
+    "WEIXIN_OUTBOX_POLL_MS",
+    60_000,
   );
+  if (weixinOutboxPollMs < 500) throw new Error("WEIXIN_OUTBOX_POLL_MS must be at least 500 milliseconds");
   const invoiceTextExtractionTimeoutMs = positiveInteger(
     env.invoiceTextExtractionTimeoutMs ?? env.INVOICE_TEXT_EXTRACTION_TIMEOUT_MS ?? 30_000,
     "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
@@ -278,6 +270,10 @@ export function loadConfig(overrides = {}) {
   const weixinAllowedGroupIds = identifierList(
     env.weixinAllowedGroupIds ?? env.WEIXIN_ALLOWED_GROUP_IDS,
     "WEIXIN_ALLOWED_GROUP_IDS",
+  );
+  const weixinBookkeepingSenderId = optionalIdentifier(
+    env.weixinBookkeepingSenderId ?? env.WEIXIN_BOOKKEEPING_SENDER_ID,
+    "WEIXIN_BOOKKEEPING_SENDER_ID",
   );
   const hospitalTenderIntervalMinutes = boundedPositiveInteger(
     env.hospitalTenderIntervalMinutes ?? env.HOSPITAL_TENDER_INTERVAL_MINUTES ?? 60,
@@ -354,7 +350,21 @@ export function loadConfig(overrides = {}) {
     ).trim(),
     weixinAgentBackendUrl: env.weixinAgentBackendUrl ?? env.WEIXIN_AGENT_BACKEND_URL ?? "",
     weixinAgentOwner: String(env.weixinAgentOwner ?? env.WEIXIN_AGENT_OWNER ?? "").trim(),
+    weixinBookkeepingOwner: String(
+      env.weixinBookkeepingOwner
+      ?? env.WEIXIN_BOOKKEEPING_OWNER
+      ?? env.AUTH_ACCOUNT
+      ?? env.authAccount
+      ?? "",
+    ).trim(),
+    weixinBookkeepingSenderId,
+    shortcutWeixinConfirmationEnabled: booleanValue(
+      env.shortcutWeixinConfirmationEnabled ?? env.SHORTCUT_WEIXIN_CONFIRMATION_ENABLED,
+      false,
+      "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+    ),
     weixinAgentSessionHome: env.weixinAgentSessionHome ?? env.WEIXIN_AGENT_SESSION_HOME ?? "",
+    weixinOutboxPollMs,
     weixinAllowedSenderIds,
     weixinAllowedGroupIds,
     weixinAllowGroups: booleanValue(
@@ -380,13 +390,6 @@ export function loadConfig(overrides = {}) {
     ).trim(),
     shortcutWebhookRateLimit,
     shortcutWebhookWindowMs,
-    qingyangBookkeepingBridgeUrl: qingyangBridgeUrl(
-      env.qingyangBookkeepingBridgeUrl ?? env.QINGYANG_BOOKKEEPING_BRIDGE_URL,
-    ),
-    qingyangBookkeepingBridgeToken: String(
-      env.qingyangBookkeepingBridgeToken ?? env.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN ?? "",
-    ).trim(),
-    qingyangBookkeepingBridgeTimeoutMs,
     invoiceOcrCommand: String(env.invoiceOcrCommand ?? env.INVOICE_OCR_COMMAND ?? "").trim(),
     invoicePdfTextCommand: String(
       env.invoicePdfTextCommand ?? env.INVOICE_PDF_TEXT_COMMAND ?? "",

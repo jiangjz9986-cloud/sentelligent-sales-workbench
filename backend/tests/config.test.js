@@ -39,9 +39,10 @@ describe("backend model configuration", () => {
         "SHORTCUT_WEBHOOK_OWNER=jiangjz",
         "SHORTCUT_WEBHOOK_RATE_LIMIT=19",
         "SHORTCUT_WEBHOOK_WINDOW_MS=91000",
-        "QINGYANG_BOOKKEEPING_BRIDGE_URL=http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN=qingyang-bridge-token-from-env-file",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS=12000",
+        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED=true",
+        "WEIXIN_BOOKKEEPING_OWNER=jiangjz",
+        "WEIXIN_BOOKKEEPING_SENDER_ID=sender-from-env-file",
+        "WEIXIN_OUTBOX_POLL_MS=5000",
         "INVOICE_OCR_COMMAND=C:/Tools/tesseract.exe",
         "INVOICE_PDF_TEXT_COMMAND=C:/Tools/pdftotext.exe",
         "INVOICE_OCR_LANGUAGES=chi_sim+eng",
@@ -82,12 +83,10 @@ describe("backend model configuration", () => {
       assert.equal(config.shortcutWebhookOwner, "jiangjz");
       assert.equal(config.shortcutWebhookRateLimit, 19);
       assert.equal(config.shortcutWebhookWindowMs, 91_000);
-      assert.equal(
-        config.qingyangBookkeepingBridgeUrl,
-        "http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping",
-      );
-      assert.equal(config.qingyangBookkeepingBridgeToken, "qingyang-bridge-token-from-env-file");
-      assert.equal(config.qingyangBookkeepingBridgeTimeoutMs, 12_000);
+      assert.equal(config.shortcutWeixinConfirmationEnabled, true);
+      assert.equal(config.weixinBookkeepingOwner, "jiangjz");
+      assert.equal(config.weixinBookkeepingSenderId, "sender-from-env-file");
+      assert.equal(config.weixinOutboxPollMs, 5_000);
       assert.equal(config.invoiceOcrCommand, "C:/Tools/tesseract.exe");
       assert.equal(config.invoicePdfTextCommand, "C:/Tools/pdftotext.exe");
       assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
@@ -133,9 +132,10 @@ describe("backend model configuration", () => {
     assert.equal(config.shortcutWebhookOwner, "jiangjz");
     assert.equal(config.shortcutWebhookRateLimit, 60);
     assert.equal(config.shortcutWebhookWindowMs, 300_000);
-    assert.equal(config.qingyangBookkeepingBridgeUrl, "");
-    assert.equal(config.qingyangBookkeepingBridgeToken, "");
-    assert.equal(config.qingyangBookkeepingBridgeTimeoutMs, 10_000);
+    assert.equal(config.shortcutWeixinConfirmationEnabled, false);
+    assert.equal(config.weixinBookkeepingOwner, "jiangjz");
+    assert.equal(config.weixinBookkeepingSenderId, "");
+    assert.equal(config.weixinOutboxPollMs, 5_000);
     assert.equal(config.invoiceOcrCommand, "");
     assert.equal(config.invoicePdfTextCommand, "");
     assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
@@ -161,7 +161,6 @@ describe("backend model configuration", () => {
     const validMachineToken = Buffer.alloc(32, 6).toString("base64url");
     const validConfirmationSecret = Buffer.alloc(32, 8).toString("base64url");
     const validSettingsEncryptionKey = Buffer.alloc(32, 10).toString("base64url");
-    const validBridgeToken = Buffer.alloc(32, 11).toString("base64url");
     const valid = {
       envFile,
       NODE_ENV: " Production ",
@@ -171,6 +170,10 @@ describe("backend model configuration", () => {
       AUTH_SESSION_SECRET: validSessionSecret,
       WEIXIN_AGENT_API_TOKEN: validMachineToken,
       WEIXIN_AGENT_OWNER: "jiangjz",
+      SHORTCUT_WEIXIN_CONFIRMATION_ENABLED: "true",
+      WEIXIN_BOOKKEEPING_OWNER: "jiangjz",
+      WEIXIN_BOOKKEEPING_SENDER_ID: "production-sender",
+      WEIXIN_OUTBOX_POLL_MS: "5000",
       ASSISTANT_CONFIRMATION_SECRET: validConfirmationSecret,
       SETTINGS_ENCRYPTION_KEY: validSettingsEncryptionKey,
       WEIXIN_ALLOWED_SENDER_IDS: "production-sender",
@@ -178,9 +181,6 @@ describe("backend model configuration", () => {
       WEIXIN_ALLOWED_GROUP_IDS: "",
       AUTH_COOKIE_SECURE: "true",
       CORS_ALLOWED_ORIGINS: "https://sales.example.test/,https://sales.example.test",
-      QINGYANG_BOOKKEEPING_BRIDGE_URL:
-        "http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping",
-      QINGYANG_BOOKKEEPING_BRIDGE_TOKEN: validBridgeToken,
     };
 
     const config = loadConfig(valid);
@@ -193,7 +193,8 @@ describe("backend model configuration", () => {
     assert.equal(config.weixinAllowGroups, false);
     assert.deepEqual(config.weixinAllowedGroupIds, []);
     assert.deepEqual(config.corsAllowedOrigins, ["https://sales.example.test"]);
-    assert.equal(config.qingyangBookkeepingBridgeToken, validBridgeToken);
+    assert.equal(config.shortcutWeixinConfirmationEnabled, true);
+    assert.equal(config.weixinBookkeepingOwner, "jiangjz");
 
     for (const [field, message] of [
       ["AUTH_ACCOUNT", /AUTH_ACCOUNT/],
@@ -223,23 +224,11 @@ describe("backend model configuration", () => {
       () => loadConfig({ ...valid, SHORTCUT_WEBHOOK_TOKEN: Buffer.alloc(32, 4).toString("base64url") }),
       /SHORTCUT_WEBHOOK_TOKEN.*not allowed in production/,
     );
-    assert.throws(
-      () => loadConfig({ ...valid, QINGYANG_BOOKKEEPING_BRIDGE_TOKEN: ["sh", "ort"].join("") }),
-      /QINGYANG_BOOKKEEPING_BRIDGE_TOKEN/,
-    );
-    assert.throws(
-      () => loadConfig({ ...valid, QINGYANG_BOOKKEEPING_BRIDGE_TOKEN: validSessionSecret }),
-      /independent/,
-    );
-    assert.throws(
-      () => loadConfig({
-        ...valid,
-        QINGYANG_BOOKKEEPING_BRIDGE_URL:
-          "https://82.156.210.199/qingyang/api/integrations/sentelligent/bookkeeping",
-      }),
-      /QINGYANG_BOOKKEEPING_BRIDGE_URL/,
-    );
-    const unbound = loadConfig({ ...valid, WEIXIN_ALLOWED_SENDER_IDS: "" });
+    const unbound = loadConfig({
+      ...valid,
+      SHORTCUT_WEIXIN_CONFIRMATION_ENABLED: "false",
+      WEIXIN_ALLOWED_SENDER_IDS: "",
+    });
     assert.deepEqual(unbound.weixinAllowedSenderIds, []);
     assert.throws(
       () => assertWeixinSenderAllowed(unbound, { senderId: "not-yet-bound", chatType: "direct" }),
@@ -280,10 +269,7 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, ICOST_WEBHOOK_WINDOW_MS: value }), /ICOST_WEBHOOK_WINDOW_MS/);
       assert.throws(() => loadConfig({ ...base, SHORTCUT_WEBHOOK_RATE_LIMIT: value }), /SHORTCUT_WEBHOOK_RATE_LIMIT/);
       assert.throws(() => loadConfig({ ...base, SHORTCUT_WEBHOOK_WINDOW_MS: value }), /SHORTCUT_WEBHOOK_WINDOW_MS/);
-      assert.throws(
-        () => loadConfig({ ...base, QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS: value }),
-        /QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS/,
-      );
+      assert.throws(() => loadConfig({ ...base, WEIXIN_OUTBOX_POLL_MS: value }), /WEIXIN_OUTBOX_POLL_MS/);
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
