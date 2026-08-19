@@ -19,6 +19,7 @@ import { apply as applySecureSettings } from "./migrations/0015_secure_settings.
 import { apply as applyHospitalTenderScheduler } from "./migrations/0016_hospital_tender_scheduler.mjs";
 import { apply as applyShortcutWebhookTokens } from "./migrations/0017_shortcut_webhook_tokens.mjs";
 import { apply as applyShortcutBookkeepingEntries } from "./migrations/0018_shortcut_bookkeeping_entries.mjs";
+import { apply as applyAssistantAgentRuns } from "./migrations/0020_assistant_agent_runs.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -122,6 +123,12 @@ const migrations = [
     path: resolve(here, "migrations", "0018_shortcut_bookkeeping_entries.mjs"),
     type: "module",
     apply: applyShortcutBookkeepingEntries,
+  },
+  {
+    version: "0020",
+    path: resolve(here, "migrations", "0020_assistant_agent_runs.mjs"),
+    type: "module",
+    apply: applyAssistantAgentRuns,
   },
 ];
 
