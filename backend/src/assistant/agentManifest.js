@@ -254,9 +254,42 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "run deterministic sales-decision guardrails on the same snapshot", status: "fallback" },
   }),
   manifestDefinition("action-risk", {
+    contractVersion: "action-risk-v1",
+    modelPolicy: "none",
     taskTypes: ["summary", "prioritize", "follow_up_preview", "status_change_preview"],
     tools: ["action-risk.summary"],
     confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: {
+        taskType: "enum",
+        customerId: "string",
+        opportunityId: "string",
+        actionId: "string",
+        riskId: "string",
+        changes: "object",
+      },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "action-risk-v1",
+        actions: "array",
+        risks: "array",
+        prioritization: "object",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行行动与风险 Agent。",
+      "只使用 owner-scoped 服务端行动和风险摘要，保留服务端排序及来源引用。",
+      "可以区分事实和未知，但不得把排序伪装成销售推进建议，也不得猜测责任人、截止日或风险处置结果。",
+      "状态、截止日和优先级变更只能生成预览，不能执行写回，且必须经过本人确认。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped action and risk summary", status: "fallback" },
   }),
   manifestDefinition("itinerary", {
     taskTypes: ["summary", "plan_preview", "optimize_order", "change_preview"],
