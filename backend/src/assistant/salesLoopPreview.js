@@ -163,6 +163,22 @@ function weekRange(value, clock) {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
+function reportRange(input, clock) {
+  if ((input.periodStart !== undefined && input.periodStart !== null && input.periodStart !== "")
+    || (input.periodEnd !== undefined && input.periodEnd !== null && input.periodEnd !== "")) {
+    const start = dateOnly(input.periodStart, "periodStart");
+    const end = dateOnly(input.periodEnd, "periodEnd");
+    const startDate = new Date(`${start}T00:00:00.000Z`);
+    const endDate = new Date(`${end}T00:00:00.000Z`);
+    const days = Math.round((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
+    if (start > end || days < 1 || days > 31) {
+      throw new AssistantContractError("report period is invalid", "invalid_sales_loop_preview");
+    }
+    return { start, end };
+  }
+  return weekRange(input.weekStart ?? input.week ?? "current", clock);
+}
+
 function boundedInsight(value) {
   const parsed = isPlainObject(value) ? value : {};
   const match = (item) => isPlainObject(item)
@@ -512,7 +528,7 @@ function dataOwner(value) {
     input = requestObject(input);
     const normalizedOwner = owner(input.owner);
     const scopedOwner = dataOwner(normalizedOwner);
-    const range = weekRange(input.weekStart ?? input.week ?? "current", clock);
+    const range = reportRange(input, clock);
     if (!scopedOwner) {
       return {
         status: "owner_scope_denied",

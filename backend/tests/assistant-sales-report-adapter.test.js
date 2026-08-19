@@ -61,6 +61,7 @@ describe("sales-report assistant adapter", () => {
         const body = JSON.parse(options.body);
         assert.match(body.messages[0].content, /销售周报 Agent/);
         assert.doesNotMatch(JSON.stringify(body.messages), /owner-1/);
+        assert.match(body.messages[1].content, /record-1/);
         return modelResponse("# 模型周报\n\n## 本周重点进展\n基于已确认记录整理。\n");
       },
       runRepository: runs,
@@ -138,6 +139,32 @@ describe("sales-report assistant adapter", () => {
     assert.equal(stored.status, "fallback");
     assert.equal(stored.fallbackReason, "weekly_draft_model_failure");
     db.close();
+  });
+
+  it("rejects model prose that falsely claims the report was saved or published", async () => {
+    const adapter = createSalesReportAssistantAdapter({
+      snapshotProvider: () => snapshot(),
+      config: { aiAnalysisMode: "model", modelApiKey: "fixture", modelBaseUrl: "https://example.invalid" },
+      fetchImpl: async () => modelResponse("周报已保存并发布到系统。"),
+    });
+    const result = await adapter.analyze({ owner: "owner-1", taskType: "weekly_preview" });
+    assert.equal(result.source, "fallback");
+    assert.doesNotMatch(result.content, /已保存并发布/);
+    assert.match(result.content, /销售周报/);
+    assert.equal(result.writebackPreview.save, false);
+    assert.equal(result.writebackPreview.publish, false);
+  });
+
+  it("rejects citation tokens that are not present in the server snapshot", async () => {
+    const adapter = createSalesReportAssistantAdapter({
+      snapshotProvider: () => snapshot(),
+      config: { aiAnalysisMode: "model", modelApiKey: "fixture", modelBaseUrl: "https://example.invalid" },
+      fetchImpl: async () => modelResponse("本周进展见[来源:quick_record/forged-record]。"),
+    });
+    const result = await adapter.analyze({ owner: "owner-1", taskType: "source_review" });
+    assert.equal(result.source, "fallback");
+    assert.doesNotMatch(result.content, /forged-record/);
+    assert.ok(result.sourceRefs.some((item) => item.id === "record-1"));
   });
 
   it("replays a completed event without invoking the model twice", async () => {

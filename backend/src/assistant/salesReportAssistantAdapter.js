@@ -9,6 +9,7 @@ const MAX_TEXT = 20_000;
 const MAX_SOURCE_REFS = 100;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/u;
 const TASK_TYPES = new Set(["weekly_preview", "meeting_digest", "source_review", "save_preview"]);
+const FALSE_EXECUTION_CLAIM = /(?:已|已经)(?:保存|发布|提交|写入)(?:周报|报告|系统|业务)?/u;
 
 function isPlainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -266,6 +267,34 @@ function outputSummary(snapshot, content, sourceRefs, source, runId) {
   };
 }
 
+function hasUnknownCitation(content, sourceRefs) {
+  const known = new Set(sourceRefs.map((item) => `${item.type}\u0000${item.id}`));
+  const pattern = /\[来源[:：]\s*([\u4e00-\u9fffA-Za-z0-9_.-]+)[/:]([\u4e00-\u9fffA-Za-z0-9_.:-]+)\]/gu;
+  for (const match of content.matchAll(pattern)) {
+    if (!known.has(`${match[1]}\u0000${match[2]}`)) return true;
+  }
+  return false;
+}
+
+function guardedComposition(composed, fallbackDraft, sourceRefs) {
+  const source = String(composed?.source ?? "deterministic");
+  const candidate = multiline(composed?.content, "content", MAX_TEXT);
+  if (candidate && !FALSE_EXECUTION_CLAIM.test(candidate) && !hasUnknownCitation(candidate, sourceRefs)) {
+    return { ...composed, content: candidate, source };
+  }
+  const fallbackContent = multiline(fallbackDraft?.content, "content", MAX_TEXT);
+  return {
+    ...fallbackDraft,
+    content: fallbackContent,
+    source: source === "deterministic" ? "deterministic" : "fallback",
+    fallbackReason: !candidate
+      ? "weekly_draft_invalid_model_output"
+      : FALSE_EXECUTION_CLAIM.test(candidate)
+        ? "weekly_draft_false_execution_claim"
+        : "weekly_draft_unknown_source_reference",
+  };
+}
+
 function restoreRun(run) {
   const item = run?.item ?? run;
   if (!item || !isPlainObject(item) || item.agentId !== AGENT_ID || !isPlainObject(item.output)) return null;
@@ -278,7 +307,9 @@ function restoreRun(run) {
 }
 
 export function createSalesReportAssistantAdapter({
-  snapshotProvider,
+  snapshotProvider = null,
+  previewService = null,
+  salesLoopPreviewService = null,
   config = {},
   fetchImpl = fetch,
   runRepository = null,
@@ -286,7 +317,12 @@ export function createSalesReportAssistantAdapter({
 } = {}) {
   const manifest = getAgentManifest(AGENT_ID);
   if (!manifest) throw new TypeError("sales-report manifest is unavailable");
-  if (typeof snapshotProvider !== "function") throw new TypeError("snapshotProvider is required");
+  const provider = typeof snapshotProvider === "function"
+    ? snapshotProvider
+    : (previewService ?? salesLoopPreviewService)?.buildSalesReportSnapshot
+      ? ({ owner, weekStart, knowledgeQuery, taskType }) => (previewService ?? salesLoopPreviewService).buildSalesReportSnapshot({ owner, weekStart, knowledgeQuery, taskType })
+      : null;
+  if (typeof provider !== "function") throw new TypeError("snapshotProvider is required");
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
   if (typeof clock !== "function") throw new TypeError("clock must be a function");
 
@@ -297,13 +333,22 @@ export function createSalesReportAssistantAdapter({
     eventId = null,
     taskType = "weekly_preview",
     weekStart = "current",
+    periodStart = null,
+    periodEnd = null,
     knowledgeQuery = null,
   } = {}) {
     const normalizedOwner = text(owner, "owner", 200);
     if (!TASK_TYPES.has(taskType) || !manifest.taskTypes.includes(taskType)) {
       throw new AssistantContractError("taskType is not registered for sales-report", "invalid_sales_report_input");
     }
-    const rawSnapshot = await snapshotProvider({ owner: normalizedOwner, weekStart, knowledgeQuery, taskType });
+    const rawSnapshot = await provider({
+      owner: normalizedOwner,
+      weekStart: periodStart ?? weekStart,
+      periodStart,
+      periodEnd,
+      knowledgeQuery,
+      taskType,
+    });
     const snapshot = normalizeSnapshot(rawSnapshot);
     if (snapshot.status !== "ok") {
       return {
@@ -349,7 +394,7 @@ export function createSalesReportAssistantAdapter({
     }
 
     try {
-      const composed = snapshot.records.length > 0
+      const rawComposition = snapshot.records.length > 0
         ? await composeWeeklyDraftWithModel(
           snapshot.fallbackDraft,
           {
@@ -357,11 +402,13 @@ export function createSalesReportAssistantAdapter({
             periodEnd: snapshot.period.end,
             records: snapshot.records,
             knowledge: snapshot.knowledge,
+            sourceRefs: snapshot.sourceRefs,
           },
           config,
           { fetchImpl, systemPrompt: manifest.systemPrompt },
         )
         : { ...snapshot.fallbackDraft, source: "deterministic", fallbackReason: null };
+      const composed = guardedComposition(rawComposition, snapshot.fallbackDraft, snapshot.sourceRefs);
       const source = composed.source ?? "deterministic";
       const persistedSource = source === "fallback"
         ? "fallback"
@@ -441,7 +488,7 @@ export function createSalesReportAssistantAdapter({
     }
   }
 
-  return Object.freeze({ analyze, restore: restoreRun });
+  return Object.freeze({ analyze, preview: analyze, restore: restoreRun });
 }
 
 export { normalizeSnapshot as normalizeSalesReportSnapshot, restoreRun as restoreSalesReportRun };

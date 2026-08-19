@@ -175,16 +175,17 @@ function buildWeeklyDraftMessages(context) {
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 content 字段，content 为中文 Markdown 周报正文。",
         "必须保留人工确认后的事实，不要编造客户、金额或承诺。",
+        "只能引用下方 sourceRefs 中存在的来源标识；不要声称周报已保存、发布、提交或写入。",
       ].join("\n"),
     },
     {
       role: "user",
       content: JSON.stringify({
-        owner: context.owner,
         periodStart: context.periodStart,
         periodEnd: context.periodEnd,
         records,
         knowledge: context.knowledge ?? [],
+        sourceRefs: context.sourceRefs ?? [],
         fallbackContent: compact(context.fallbackDraft?.content, 1600),
       }),
     },
@@ -373,7 +374,9 @@ export async function enhanceWeeklyDraftWithModel(fallbackDraft, context, config
  */
 export async function composeWeeklyDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
   if (!shouldUseModel(config)) {
-    return { ...fallbackDraft, source: "deterministic", fallbackReason: null };
+    return config.aiAnalysisMode === "model"
+      ? { ...fallbackDraft, source: "fallback", fallbackReason: "weekly_draft_missing_model_key" }
+      : { ...fallbackDraft, source: "deterministic", fallbackReason: null };
   }
   try {
     const content = await callChatCompletion({

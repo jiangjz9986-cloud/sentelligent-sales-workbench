@@ -274,4 +274,21 @@ describe("wired sales loop assistant runtime", () => {
     assert.equal(run.input_json.includes(`"owner"`), false);
     db.close();
   });
+
+  it("replays a sales-report event without a second Agent run", async () => {
+    const sourceMessageId = `runtime-${++sequence}-sales-report-replay`;
+    const first = await event("销售周报", sourceMessageId);
+    assert.equal(first.response.status, 200);
+    const db = openDatabase({ databaseUrl });
+    const before = db.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id = 'sales-report'").get({ $owner: owner }).count;
+    db.close();
+
+    const replay = await event("销售周报", sourceMessageId);
+    assert.equal(replay.response.status, 200);
+    assert.deepEqual(replay.body, first.body);
+    const afterDb = openDatabase({ databaseUrl });
+    const after = afterDb.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id = 'sales-report'").get({ $owner: owner }).count;
+    assert.equal(after, before);
+    afterDb.close();
+  });
 });

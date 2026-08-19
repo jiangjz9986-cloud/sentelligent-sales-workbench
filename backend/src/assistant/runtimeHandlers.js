@@ -277,11 +277,11 @@ export function createAssistantToolHandlers({
     fetchImpl,
     runRepository: agentRunRepository,
     clock,
-    snapshotProvider: ({ owner, weekStart, knowledgeQuery }) => {
+    snapshotProvider: ({ owner, weekStart, periodStart, periodEnd, knowledgeQuery }) => {
       if (!salesLoopPreviewService || typeof salesLoopPreviewService.buildSalesReportSnapshot !== "function") {
         return { status: "owner_scope_denied", period: { start: weekStart, end: weekStart } };
       }
-      return salesLoopPreviewService.buildSalesReportSnapshot({ owner, weekStart, knowledgeQuery });
+      return salesLoopPreviewService.buildSalesReportSnapshot({ owner, weekStart, periodStart, periodEnd, knowledgeQuery });
     },
   });
 
@@ -736,6 +736,8 @@ export function createAssistantToolHandlers({
         eventId: context.event,
         taskType: "weekly_preview",
         weekStart: args.periodStart ?? args.week,
+        periodStart: args.periodStart ?? null,
+        periodEnd: args.periodEnd ?? null,
       });
       if (result.status !== "preview") {
         return {

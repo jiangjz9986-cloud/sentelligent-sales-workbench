@@ -2621,9 +2621,11 @@ export function createServer(options = {}) {
       fetchImpl: options.fetchImpl ?? fetch,
       runRepository: assistantAgentRunRepository,
       clock: assistantClock,
-      snapshotProvider: ({ owner, weekStart, knowledgeQuery }) => assistantSalesLoopPreviewService.buildSalesReportSnapshot({
+      snapshotProvider: ({ owner, weekStart, periodStart, periodEnd, knowledgeQuery }) => assistantSalesLoopPreviewService.buildSalesReportSnapshot({
         owner,
         weekStart,
+        periodStart,
+        periodEnd,
         knowledgeQuery,
       }),
     });
