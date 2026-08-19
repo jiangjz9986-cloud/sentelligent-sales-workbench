@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { openDatabase } from "../src/db.js";
 import { createAssistantAgentRunRepository } from "../src/assistant/agentRunRepository.js";
 import { createAdvanceSettlementAssistantAdapter } from "../src/assistant/advanceSettlementAssistantAdapter.js";
+import { createTravelExpenseRepository } from "../src/travelExpense/repository.js";
 
 function advance(overrides = {}) {
   return {
@@ -134,6 +135,45 @@ describe("advance-settlement assistant adapter", () => {
     assert.equal(replay.runId, first.runId);
     assert.equal(runs.get(first.runId, { owner: "owner-1" }).item.input.owner, undefined);
     assert.equal(runs.get(first.runId, { owner: "owner-1" }).item.contractVersion, "advance-settlement-v1");
+    db.close();
+  });
+
+  it("reads the real owner-scoped advance repository without exposing its owner field", async () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const repository = createTravelExpenseRepository(db, {
+      idFactory: (() => {
+        let index = 0;
+        return () => `advance-repository-${++index}`;
+      })(),
+      clock: () => new Date("2026-08-20T01:00:00.000Z"),
+    });
+    const first = repository.createAdvance({
+      actor: "owner-a",
+      weekStart: "2026-08-17",
+      status: "received",
+      requestedCents: 120000,
+      receivedCents: 100000,
+      requestedOn: "2026-08-16",
+      receivedOn: "2026-08-17",
+      purpose: "真实仓储测试",
+      notes: "只读适配器",
+    });
+    repository.createAdvance({
+      actor: "owner-b",
+      weekStart: "2026-08-17",
+      status: "requested",
+      requestedCents: 80000,
+      receivedCents: 0,
+      purpose: "另一账号",
+    });
+
+    const adapter = createAdvanceSettlementAssistantAdapter({ advanceRepository: repository });
+    const result = await adapter.analyze({ owner: "owner-a", weekStart: "2026-08-17" });
+
+    assert.deepEqual(result.advances.map((item) => item.id), [first.id]);
+    assert.equal(result.advances[0].receivedCents, 100000);
+    assert.equal(result.advances[0].owner, undefined);
+    assert.deepEqual(result.sourceRefs, [{ type: "travel_expense_advance", id: first.id }]);
     db.close();
   });
 
