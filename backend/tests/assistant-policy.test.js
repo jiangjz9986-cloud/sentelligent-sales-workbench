@@ -12,6 +12,8 @@ describe("assistant execution policy", () => {
   it("classifies read, preview, ordinary write, and financial tools", () => {
     assert.equal(getToolPolicy("customer.search").risk, RISK_LEVELS.R0);
     assert.equal(getToolPolicy("reimbursement-report.preview").risk, RISK_LEVELS.R1);
+    assert.equal(getToolPolicy("advance-settlement.preview").risk, RISK_LEVELS.R1);
+    assert.equal(getToolPolicy("advance-settlement.preview").confirmation, "none");
     assert.equal(getToolPolicy("visit-capture.confirm").risk, RISK_LEVELS.R2);
     assert.equal(getToolPolicy("invoice.ingest").risk, RISK_LEVELS.R1);
     assert.equal(getToolPolicy("invoice.ingest").confirmation, "none");

@@ -15,6 +15,7 @@ const REQUIRED_CAPABILITY_IDS = [
   "visit-capture",
   "travel-expense.summary",
   "reimbursement-report",
+  "advance-settlement",
   "sales-decision.preview",
   "sales-report",
   "action-risk",
@@ -50,6 +51,9 @@ describe("小小 capability metadata catalog", () => {
     assert.ok(byId.get("reimbursement-report").mappings.tools.includes("reimbursement-report.preview"));
     assert.equal(byId.get("sales-decision.preview").status, "ready");
     assert.equal(byId.get("sales-decision.preview").unavailableReason, null);
+    assert.equal(byId.get("advance-settlement").status, "ready");
+    assert.equal(byId.get("advance-settlement").unavailableReason, null);
+    assert.ok(byId.get("advance-settlement").mappings.tools.includes("advance-settlement.preview"));
   });
 
   it("returns isolated snapshots so callers cannot mutate the internal catalog", () => {
@@ -87,6 +91,7 @@ describe("小小 capability metadata catalog", () => {
       "sales-report": [],
       "action-risk": ["GET /api/actions", "GET /api/risks"],
       "knowledge.search": ["POST /api/knowledge/search"],
+      "advance-settlement": ["GET /api/travel-expense-advances", "GET /api/travel-expenses"],
     };
 
     for (const [id, apis] of Object.entries(expectedApis)) {

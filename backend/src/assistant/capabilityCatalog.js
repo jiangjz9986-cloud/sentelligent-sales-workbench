@@ -218,6 +218,18 @@ export const CAPABILITY_CATALOG = deepFreeze([
     confirmationLevel: "none",
     sourceRefs: ["agentRegistry:knowledge", "toolRegistry:knowledge.search"],
   }),
+  capability({
+    id: "advance-settlement",
+    name: "请款结算与多退少补预览",
+    description: "基于 owner-scoped 请款、到账、费用、资金来源和票据证据，预览公司应补、个人应退或平衡方向；不记录退款/补款交易。",
+    status: "ready",
+    mappings: { tools: ["advance-settlement.preview"], apis: ["GET /api/travel-expense-advances", "GET /api/travel-expenses"] },
+    dependencies: ["settlement snapshot adapter", "travel expense repository", "invoice evidence contract", "manual confirmation boundary"],
+    integrationPoints: ["assistant router", "assistant runtime handlers", "advanceSettlementAssistantAdapter.js"],
+    confirmationLevel: "preview",
+    unavailableReason: null,
+    sourceRefs: ["agentRegistry:advance-settlement", "toolRegistry:advance-settlement.preview", "settlementSnapshotAdapter.js", "advanceSettlementAssistantAdapter.js"],
+  }),
 ]);
 
 const CAPABILITY_BY_ID = new Map(CAPABILITY_CATALOG.map((item) => [item.id, item]));

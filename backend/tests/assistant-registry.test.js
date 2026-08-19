@@ -21,11 +21,12 @@ describe("assistant agent and tool registry", () => {
     }
     assert.equal(registry.getAgent("solution").enabled, false);
     assert.equal(registry.getAgent("personal-finance").enabled, false);
+    assert.match(registry.getAgent("advance-settlement").instructions, /退款\/补款流水/u);
   });
 
   it("exposes first-slice tool contracts without executable handlers", () => {
     const registry = createAgentRegistry();
-    for (const name of ["customer.search", "visit-capture.collect", "visit-capture.preview", "visit-capture.confirm", "payment-proof.ingest", "invoice.ingest", "reimbursement-report.preview", "sales-report.preview"]) {
+    for (const name of ["customer.search", "visit-capture.collect", "visit-capture.preview", "visit-capture.confirm", "payment-proof.ingest", "invoice.ingest", "reimbursement-report.preview", "sales-report.preview", "advance-settlement.preview"]) {
       const tool = registry.getTool(name);
       assert.equal(tool.name, name);
       assert.equal(typeof tool.execute, "undefined");
