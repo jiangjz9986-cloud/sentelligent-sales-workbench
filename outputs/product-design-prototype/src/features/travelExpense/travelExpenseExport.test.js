@@ -5,6 +5,8 @@ import {
   buildExpenseListRows,
   buildPaymentRecordCsv,
   buildPaymentRecordRows,
+  assessPrintImageResolution,
+  expandInvoicePrintItems,
   paginateInvoicePrint,
   paginatePaymentRecord,
   paymentRecordFilename,
@@ -202,6 +204,24 @@ describe("actual payment print pagination", () => {
 });
 
 describe("invoice print pagination", () => {
+  it("expands every PDF page into an ordered fixed-slot print item", () => {
+    const invoices = [
+      { id: "pdf-1", fileName: "multi-page.pdf", mediaType: "application/pdf" },
+      { id: "image-1", fileName: "receipt.png", mediaType: "image/png" },
+      { id: "pdf-2", fileName: "unknown-pages.pdf", mediaType: "application/pdf" },
+    ];
+
+    const items = expandInvoicePrintItems(invoices, { "pdf-1": 3 });
+
+    assert.deepEqual(items.map((item) => [item.invoice.id, item.pageNumber, item.pageCount]), [
+      ["pdf-1", 1, 3],
+      ["pdf-1", 2, 3],
+      ["pdf-1", 3, 3],
+      ["image-1", null, 1],
+    ]);
+    assert.equal(items.some((item) => item.invoice.id === "pdf-2"), false);
+  });
+
   it("keeps four fixed invoice slots on every landscape A4 page", () => {
     const invoices = Array.from({ length: 5 }, (_, index) => ({
       id: `invoice-${index + 1}`,
@@ -247,6 +267,36 @@ describe("invoice print pagination", () => {
       /发票原件加载失败/,
     );
     assert.equal(selector, ".invoice-print-document img");
+  });
+
+  it("flags low-resolution originals instead of silently replacing them", async () => {
+    assert.equal(assessPrintImageResolution({
+      naturalWidth: 479,
+      naturalHeight: 800,
+      minNaturalWidth: 480,
+      minNaturalHeight: 300,
+    }), "low_resolution");
+    assert.equal(assessPrintImageResolution({
+      naturalWidth: 1200,
+      naturalHeight: 800,
+      minNaturalWidth: 480,
+      minNaturalHeight: 300,
+    }), "ready");
+
+    const documentRef = {
+      querySelectorAll: () => [{ complete: true, naturalWidth: 479, naturalHeight: 800 }],
+    };
+    await assert.rejects(
+      printWhenImagesReady({
+        documentRef,
+        print: () => assert.fail("low-resolution original must not print automatically"),
+        selector: ".invoice-print-document img",
+        minNaturalWidth: 480,
+        minNaturalHeight: 300,
+        errorMessage: "发票原件加载失败，请重新检查后打印。",
+      }),
+      /分辨率不足/,
+    );
   });
 });
 

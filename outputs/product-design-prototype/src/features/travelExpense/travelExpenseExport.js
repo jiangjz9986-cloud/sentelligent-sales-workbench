@@ -139,11 +139,15 @@ function chunk(items, size) {
 
 const PRINT_IMAGE_ERROR_MESSAGE = "付款凭证加载失败，请检查网络或凭证文件后重新打印。";
 
-function waitForPrintImage(image, errorMessage) {
+function waitForPrintImage(image, errorMessage, { minNaturalWidth = 0, minNaturalHeight = 0 } = {}) {
   if (image.complete) {
-    return image.naturalWidth === 0
-      ? Promise.reject(new Error(errorMessage))
-      : Promise.resolve();
+    if (image.naturalWidth === 0) return Promise.reject(new Error(errorMessage));
+    if (image.naturalWidth < minNaturalWidth || image.naturalHeight < minNaturalHeight) {
+      return Promise.reject(new Error(
+        `${errorMessage}（原图分辨率不足 ${minNaturalWidth}×${minNaturalHeight}，系统未覆盖原件）`,
+      ));
+    }
+    return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -153,6 +157,11 @@ function waitForPrintImage(image, errorMessage) {
     const handleLoad = () => {
       cleanup();
       if (image.naturalWidth === 0) reject(new Error(errorMessage));
+      else if (image.naturalWidth < minNaturalWidth || image.naturalHeight < minNaturalHeight) {
+        reject(new Error(
+          `${errorMessage}（原图分辨率不足 ${minNaturalWidth}×${minNaturalHeight}，系统未覆盖原件）`,
+        ));
+      }
       else resolve();
     };
     const handleError = () => {
@@ -164,18 +173,32 @@ function waitForPrintImage(image, errorMessage) {
   });
 }
 
+export function assessPrintImageResolution({ naturalWidth, naturalHeight, minNaturalWidth = 0, minNaturalHeight = 0 } = {}) {
+  if (!Number.isSafeInteger(naturalWidth) || naturalWidth < 1) return "unavailable";
+  if (!Number.isSafeInteger(naturalHeight) || naturalHeight < 1) return "unavailable";
+  if (!Number.isSafeInteger(minNaturalWidth) || minNaturalWidth < 0) throw new TypeError("minNaturalWidth must be a non-negative integer");
+  if (!Number.isSafeInteger(minNaturalHeight) || minNaturalHeight < 0) throw new TypeError("minNaturalHeight must be a non-negative integer");
+  return naturalWidth >= minNaturalWidth && naturalHeight >= minNaturalHeight
+    ? "ready"
+    : "low_resolution";
+}
+
 export async function printWhenImagesReady({
   documentRef,
   print,
   selector = ".expense-print-document img",
   errorMessage = PRINT_IMAGE_ERROR_MESSAGE,
+  minNaturalWidth = 0,
+  minNaturalHeight = 0,
 } = {}) {
   if (!documentRef?.querySelectorAll) throw new TypeError("documentRef must support querySelectorAll");
   if (typeof print !== "function") throw new TypeError("print must be a function");
   if (typeof selector !== "string" || !selector.trim()) throw new TypeError("selector must be a non-empty string");
   if (typeof errorMessage !== "string" || !errorMessage.trim()) throw new TypeError("errorMessage must be a non-empty string");
+  if (!Number.isSafeInteger(minNaturalWidth) || minNaturalWidth < 0) throw new TypeError("minNaturalWidth must be a non-negative integer");
+  if (!Number.isSafeInteger(minNaturalHeight) || minNaturalHeight < 0) throw new TypeError("minNaturalHeight must be a non-negative integer");
   const images = [...documentRef.querySelectorAll(selector)];
-  await Promise.all(images.map((image) => waitForPrintImage(image, errorMessage)));
+  await Promise.all(images.map((image) => waitForPrintImage(image, errorMessage, { minNaturalWidth, minNaturalHeight })));
   print();
 }
 
@@ -188,6 +211,37 @@ export function paginateInvoicePrint(invoices = []) {
     totalPages,
     slots: [...pageInvoices, ...Array(4 - pageInvoices.length).fill(null)],
   }));
+}
+
+/**
+ * Expands a printable invoice list so every PDF page gets its own fixed slot.
+ *
+ * The original invoice object is kept on each item instead of being copied into
+ * the public invoice shape. This keeps the API response lossless while letting
+ * the print renderer address a particular PDF page. An image (or a PDF whose
+ * page count is not known yet) is never guessed or silently reduced to page 1.
+ */
+export function expandInvoicePrintItems(invoices = [], pageCounts = {}) {
+  if (!Array.isArray(invoices)) throw new TypeError("invoices must be an array");
+  if (pageCounts === null || typeof pageCounts !== "object" || Array.isArray(pageCounts)) {
+    throw new TypeError("pageCounts must be an object");
+  }
+
+  return invoices.flatMap((invoice) => {
+    if (!invoice || typeof invoice !== "object") throw new TypeError("invoice must be an object");
+    const mediaType = String(invoice.mediaType ?? "").trim().toLowerCase();
+    const isPdf = mediaType === "application/pdf"
+      || (!mediaType && String(invoice.fileName ?? "").trim().toLowerCase().endsWith(".pdf"));
+    if (!isPdf) return [{ invoice, pageNumber: null, pageCount: 1 }];
+
+    const pageCount = pageCounts[invoice.id];
+    if (!Number.isSafeInteger(pageCount) || pageCount < 1) return [];
+    return Array.from({ length: pageCount }, (_, index) => ({
+      invoice,
+      pageNumber: index + 1,
+      pageCount,
+    }));
+  });
 }
 
 export function paginateExpenseList({ rows = [], rowsPerPage = 18 } = {}) {
