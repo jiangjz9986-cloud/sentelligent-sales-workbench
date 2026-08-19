@@ -353,6 +353,16 @@ function buildOutput({
     risks: [],
     note: "只允许在本人确认后创建快速记录；不会自动写客户、商机、行动或风险。",
   };
+  const safeMatch = (legacyMatch, candidate, fallbackLabel) => ({
+    ...legacyMatch,
+    id: candidate?.id ?? null,
+    value: candidate?.id && candidate?.status !== "ambiguous" && candidate?.status !== "unknown"
+      ? candidate.name
+      : fallbackLabel,
+    meta: candidate?.id
+      ? `${candidate.status === "context_verified" ? "服务端上下文已验证" : "服务端候选，待本人确认"}`
+      : "待确认",
+  });
 
   return {
     schemaVersion: "visit-capture-v1",
@@ -369,8 +379,8 @@ function buildOutput({
     },
     source,
     confidence: legacy.confidence,
-    customer: legacy.customer,
-    opportunity: legacy.opportunity,
+    customer: safeMatch(legacy.customer, customerCandidate, "待匹配客户"),
+    opportunity: safeMatch(legacy.opportunity, opportunityCandidate, "待确认商机"),
     weekly: legacy.weekly,
     summary: legacy.summary,
     customerCandidate,

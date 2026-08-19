@@ -119,6 +119,8 @@ describe("visit-capture assistant adapter", () => {
     assert.equal(result.persistedSource, "fallback");
     assert.equal(result.customerCandidate.id, null);
     assert.equal(result.opportunityCandidate.id, null);
+    assert.equal(result.customer.id, null);
+    assert.equal(result.opportunity.id, null);
     assert.ok(result.unknowns.some((item) => item.key === "customer"));
     assert.ok(result.unknowns.some((item) => item.key === "opportunity"));
     const stored = runs.get(result.runId, { owner: "owner-1" }).item;

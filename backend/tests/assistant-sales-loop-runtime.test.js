@@ -99,6 +99,64 @@ afterEach(async () => {
 });
 
 describe("wired sales loop assistant runtime", () => {
+  it("routes visit capture through its fixed adapter, persists separate preview/capture runs, and keeps writes gated", async () => {
+    const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
+    assert.equal(collected.response.status, 200);
+    assert.match(collected.body.text, /已暂存/);
+
+    const preview = await event("记录", `runtime-${++sequence}-visit-preview`);
+    assert.equal(preview.response.status, 200);
+    assert.match(preview.body.text, /待确认记录/);
+
+    let db = openDatabase({ databaseUrl });
+    let runs = db.prepare(`
+      SELECT agent_id, task_type, status, source, confirmation_status, input_json
+      FROM assistant_agent_runs WHERE owner = $owner ORDER BY created_at, id
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 1);
+    assert.deepEqual({
+      agentId: runs[0].agent_id,
+      taskType: runs[0].task_type,
+      status: runs[0].status,
+      source: runs[0].source,
+      confirmationStatus: runs[0].confirmation_status,
+    }, {
+      agentId: "visit-capture",
+      taskType: "preview",
+      status: "succeeded",
+      source: "mock",
+      confirmationStatus: "preview",
+    });
+    assert.equal(runs[0].input_json.includes("weixin:conversation"), false);
+    db.close();
+
+    const pending = await event("录入", `runtime-${++sequence}-visit-confirm-request`);
+    assert.equal(pending.response.status, 200);
+    assert.equal(pending.body.status, "confirmation_required");
+    const code = pending.body.text.match(/确认码：(\d{6})/)?.[1];
+    assert.match(code ?? "", /^\d{6}$/);
+
+    const confirmed = await event(code, `runtime-${++sequence}-visit-confirm-code`);
+    assert.equal(confirmed.response.status, 200);
+    assert.match(confirmed.body.text, /已录入系统/);
+
+    db = openDatabase({ databaseUrl });
+    runs = db.prepare(`
+      SELECT agent_id, task_type, status, source, confirmation_status
+      FROM assistant_agent_runs WHERE owner = $owner ORDER BY created_at, id
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 2);
+    const captureRun = runs.find((item) => item.task_type === "capture");
+    assert.ok(captureRun);
+    assert.equal(captureRun.agent_id, "visit-capture");
+    assert.equal(captureRun.status, "succeeded");
+    assert.equal(captureRun.confirmation_status, "preview");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM quick_records WHERE owner = $owner").get({ $owner: owner }).count, 2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM action_items WHERE source_record_id IS NOT NULL").get().count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM risk_items WHERE source_type = 'quick_record'").get().count, 0);
+    db.close();
+  });
+
   it("persists verified context, routes an implicit project analysis to sales-decision-v1, and keeps business rows read-only", async () => {
     const detail = await event("/opportunity.detail opportunity-runtime", `runtime-${++sequence}-detail`);
     assert.equal(detail.response.status, 200);

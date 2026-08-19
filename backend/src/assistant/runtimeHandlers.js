@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
-import { analyzeQuickRecord } from "../modelAnalysis.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
+import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
 
@@ -43,11 +43,25 @@ function draftText(sessionRepository, context) {
 }
 
 function previewText(analysis) {
-  const customer = safeText(analysis?.customer?.value, "待匹配客户");
-  const opportunity = safeText(analysis?.opportunity?.value, "待确认商机");
+  const customer = safeText(
+    analysis?.customerCandidate?.id ? analysis.customerCandidate.name : analysis?.customer?.value,
+    "待匹配客户",
+  );
+  const opportunity = safeText(
+    analysis?.opportunityCandidate?.id ? analysis.opportunityCandidate.name : analysis?.opportunity?.value,
+    "待确认商机",
+  );
   const request = safeText(analysis?.summary?.request?.text, "待补充");
   const risk = safeText(analysis?.summary?.risk?.text, "待确认");
   const action = safeText(analysis?.summary?.action?.text, "待确认");
+  const customerCandidate = analysis?.customerCandidate;
+  const opportunityCandidate = analysis?.opportunityCandidate;
+  const candidateLine = [
+    customerCandidate?.status === "ambiguous" ? "客户候选不唯一" : null,
+    opportunityCandidate?.status === "ambiguous" ? "商机候选不唯一" : null,
+    customerCandidate?.status === "unknown" ? "客户待匹配" : null,
+    opportunityCandidate?.status === "unknown" ? "商机待匹配" : null,
+  ].filter(Boolean).join("；");
   return [
     "待确认记录：",
     `客户：${customer}`,
@@ -55,6 +69,8 @@ function previewText(analysis) {
     `诉求：${request.slice(0, 160)}`,
     `风险：${risk.slice(0, 160)}`,
     `建议：${action.slice(0, 160)}`,
+    ...(candidateLine ? [`候选校验：${candidateLine}`] : []),
+    ...(analysis?.runId ? [`运行记录：${analysis.runId}`] : []),
     "",
     "确认无误后回复“录入”，再使用返回的确认码完成写入。",
   ].join("\n");
@@ -204,6 +220,8 @@ export function createAssistantToolHandlers({
   paymentProofRecognizer,
   invoiceRecognizer,
   businessSnapshotAdapter = null,
+  visitCaptureAssistantAdapter = null,
+  agentRunRepository = null,
   salesLoopPreviewService = null,
   resolveBusinessOwner = (owner) => owner,
   clock = () => new Date(),
@@ -211,6 +229,13 @@ export function createAssistantToolHandlers({
 } = {}) {
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
+  const visitCaptureAdapter = visitCaptureAssistantAdapter ?? createVisitCaptureAssistantAdapter({
+    config,
+    fetchImpl,
+    runRepository: agentRunRepository,
+    businessSnapshotAdapter: snapshotAdapter,
+    clock,
+  });
 
   const handlers = {
     async "dashboard.summary"(_args, context) {
@@ -395,8 +420,20 @@ export function createAssistantToolHandlers({
     async "visit-capture.preview"(_args, context) {
       const content = draftText(sessionRepository, context);
       if (!content) return { text: "当前没有暂存内容，请先发送拜访、电话或会议内容。", status: "empty" };
-      const analysis = await analyzeQuickRecord(content, config, { fetchImpl });
-      return { text: previewText(analysis), status: "preview", analysis };
+      const analysis = await visitCaptureAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "preview",
+        rawContent: content,
+        sourceChannel: "微信助手",
+        // The session primary key is an internal implementation detail; it is
+        // deliberately not exposed as an evidence/source reference.
+        draftId: null,
+        businessContext: context.businessContext,
+      });
+      return { text: previewText(analysis), status: analysis.status, analysis, runId: analysis.runId };
     },
 
     async "visit-capture.confirm"(_args, context) {
@@ -431,7 +468,17 @@ export function createAssistantToolHandlers({
       if (!content) return { text: "当前没有待录入内容，请先发送记录内容。", status: "empty" };
       const now = clock();
       const occurredAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
-      const analysis = await analyzeQuickRecord(content, config, { fetchImpl });
+      const analysis = await visitCaptureAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.actionId ? `assistant-action:${context.actionId}` : context.event,
+        taskType: "capture",
+        rawContent: content,
+        sourceChannel: "微信助手",
+        draftId: null,
+        businessContext: context.businessContext,
+      });
       const persisted = withImmediateTransaction(db, () => {
         const recordId = actionId || randomUUID();
         db.prepare(`
