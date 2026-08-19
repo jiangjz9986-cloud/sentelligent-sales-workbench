@@ -109,6 +109,10 @@ describe("hospital tender monitor API", () => {
     assert.equal(list.response.status, 200);
     assertApiCollection("hospitalTenderNotice", list.body.items);
     assert.equal(list.body.items.length, 1);
+    assert.equal(list.body.total, 1);
+    assert.equal(list.body.limit, 50);
+    assert.equal(list.body.offset, 0);
+    assert.equal(list.body.hasMore, false);
     assert.equal(list.body.items[0].noticeType, "bid_result");
     assert.deepEqual(list.body.items[0].matchedCustomerIds, ["rizhao"]);
 
@@ -120,6 +124,9 @@ describe("hospital tender monitor API", () => {
     assert.equal(summary.response.status, 200);
     assertApiEntity("hospitalTenderSummary", summary.body.item);
     assert.equal(summary.body.item.totalNotices, 1);
+    assert.equal(summary.body.item.highRelevanceCount, 1);
+    assert.equal(Number.isSafeInteger(summary.body.item.deadlineSoonCount), true);
+    assert.equal(Number.isSafeInteger(summary.body.item.todayNewCount), true);
 
     const sources = await request("/api/hospital-tenders/sources");
     assert.equal(sources.response.status, 200);
