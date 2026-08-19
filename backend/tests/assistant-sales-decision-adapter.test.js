@@ -169,4 +169,29 @@ describe("小小 sales-decision assistant adapter", () => {
     assert.equal(stored.owner, "server-owner");
     db.close();
   });
+
+  it("drops model-invented source references instead of presenting them as evidence", async () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const runs = createAssistantAgentRunRepository(db, { idFactory: () => "sales-run-source-safe" });
+    const adapter = createSalesDecisionAssistantAdapter({
+      config: { aiAnalysisMode: "model", modelApiKey: "fixture", modelBaseUrl: "https://example.invalid" },
+      fetchImpl: async () => {
+        const analysis = buildDeterministicSalesDecision({
+          analysisType: "opportunity_diagnosis",
+          industry: "medical",
+          ...fixture(),
+        });
+        analysis.facts = [
+          ...analysis.facts,
+          { claim: "模型虚构事实", sourceType: "opportunity", sourceId: "forged-opportunity", occurredAt: null, confidence: 90 },
+        ];
+        return modelResponse(analysis);
+      },
+      runRepository: runs,
+    });
+    const result = await adapter.analyze({ owner: "owner-1", eventId: "event-source-safe", businessSnapshot: fixture() });
+    assert.equal(result.sourceRefs.some((item) => item.id === "forged-opportunity"), false);
+    assert.equal(runs.get(result.runId, { owner: "owner-1" }).item.sourceRefs.some((item) => item.id === "forged-opportunity"), false);
+    db.close();
+  });
 });

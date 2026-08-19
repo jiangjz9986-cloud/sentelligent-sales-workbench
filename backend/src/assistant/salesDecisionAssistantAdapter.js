@@ -204,8 +204,9 @@ function sourceClass(source) {
 
 function outputSourceRefs(result, inputRefs) {
   const refs = [...inputRefs];
+  const known = new Set(inputRefs.map((item) => `${item.type}\u0000${item.id}`));
   const add = (type, id) => {
-    if (!id || refs.some((item) => item.type === type && item.id === id) || refs.length >= MAX_SOURCE_REFS) return;
+    if (!id || !known.has(`${type}\u0000${id}`) || refs.some((item) => item.type === type && item.id === id) || refs.length >= MAX_SOURCE_REFS) return;
     refs.push({ type, id });
   };
   for (const item of result?.facts ?? []) add(item.sourceType, item.sourceId);
