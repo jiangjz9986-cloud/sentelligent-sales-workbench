@@ -60,6 +60,28 @@ describe("customer assistant adapter", () => {
     assert.equal(result.matches.length, 2);
     assert.ok(result.unknowns.some((item) => item.key === "ambiguity"));
     assert.equal(result.sourceRefs.length, 2);
+    assert.equal(result.truncated, false);
+  });
+
+  it("preserves a bounded source truncation marker", async () => {
+    const source = snapshotAdapter();
+    const adapter = createCustomerAssistantAdapter({
+      snapshotAdapter: {
+        ...source,
+        customerSearch() {
+          return {
+            items: Array.from({ length: 100 }, (_, index) => ({
+              id: `customer-${index}`,
+              name: `客户 ${index}`,
+            })),
+            truncated: true,
+          };
+        },
+      },
+    });
+    const result = await adapter.analyze({ owner: "owner-1", taskType: "search", query: "客户" });
+    assert.equal(result.matches.length, 100);
+    assert.equal(result.truncated, true);
   });
 
   it("creates a bounded change preview but cannot execute it", async () => {

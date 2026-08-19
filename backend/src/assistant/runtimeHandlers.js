@@ -5,6 +5,7 @@ import { withImmediateTransaction } from "../db/transaction.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
+import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
 
@@ -255,6 +256,7 @@ export function createAssistantToolHandlers({
   paymentProofRecognizer,
   invoiceRecognizer,
   businessSnapshotAdapter = null,
+  customerAssistantAdapter = null,
   visitCaptureAssistantAdapter = null,
   salesReportAssistantAdapter = null,
   agentRunRepository = null,
@@ -265,6 +267,11 @@ export function createAssistantToolHandlers({
 } = {}) {
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
+  const customerAdapter = customerAssistantAdapter ?? createCustomerAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
   const visitCaptureAdapter = visitCaptureAssistantAdapter ?? createVisitCaptureAssistantAdapter({
     config,
     fetchImpl,
@@ -302,13 +309,27 @@ export function createAssistantToolHandlers({
     },
 
     async "customer.detail"(args, context) {
-      let customer = snapshotAdapter.customerDetail({ owner: context.owner, customerId: args.customerId });
-      if (!customer) {
-        const matches = snapshotAdapter.customerSearch({ owner: context.owner, query: args.customerId }).items;
-        if (matches.length > 1) return ambiguousEntityResult("客户", matches);
-        customer = matches[0] ?? null;
-      }
-      if (!customer) return { text: "未找到该客户，或当前账号无权查看。", status: "not_found" };
+      const result = await customerAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "detail",
+        customerId: args.customerId,
+        query: args.customerId,
+      });
+      if (result.status === "clarify") return {
+        ...ambiguousEntityResult("客户", result.matches),
+        customerResult: result,
+        runId: result.runId,
+      };
+      if (result.status === "not_found" || !result.customer) return {
+        text: "未找到该客户，或当前账号无权查看。",
+        status: "not_found",
+        customerResult: result,
+        runId: result.runId,
+      };
+      const customer = result.customer;
       return {
         text: [
           `客户：${customer.name ?? "名称待确认"}`,
@@ -318,6 +339,8 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         customer,
+        customerResult: result,
+        runId: result.runId,
         contextUpdate: {
           customerId: customer.id,
           opportunityId: null,
@@ -595,14 +618,30 @@ export function createAssistantToolHandlers({
 
     async "customer.search"(args, context) {
       const query = safeText(args.query);
-      const result = snapshotAdapter.customerSearch({ owner: context.owner, query: query || "客户" });
-      const text = result.items.length === 0
+      const result = await customerAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "search",
+        query: query || "客户",
+      });
+      const items = result.matches ?? [];
+      const truncated = result.truncated === true;
+      const text = items.length === 0
         ? `未找到客户：${query || "（未提供关键词）"}`
         : [
-          `找到 ${result.items.length}${result.truncated ? "+" : ""} 个客户：`,
-          ...result.items.map((item) => `- ${item.name ?? "名称待确认"} [${item.id}] / ${item.region ?? "-"}`),
+          `找到 ${items.length}${truncated ? "+" : ""} 个客户：`,
+          ...items.map((item) => `- ${item.name ?? "名称待确认"} [${item.id}] / ${item.region ?? "-"}`),
         ].join("\n");
-      return { text, status: "ok", items: result.items, truncated: result.truncated };
+      return {
+        text,
+        status: "ok",
+        items,
+        truncated,
+        customerResult: result,
+        runId: result.runId,
+      };
     },
 
     async "invoice.ingest"(args, context, serverData) {

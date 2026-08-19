@@ -81,6 +81,14 @@ function normalizeMatches(value) {
   return value.slice(0, MAX_ITEMS).map(normalizeCustomer).filter(Boolean);
 }
 
+function normalizeSearchResult(value) {
+  const items = Array.isArray(value?.items) ? value.items : [];
+  return {
+    matches: normalizeMatches(items),
+    truncated: value?.truncated === true || items.length > MAX_ITEMS,
+  };
+}
+
 function factsFor(customer) {
   if (!customer) return [];
   const ref = sourceRef(customer.id);
@@ -135,7 +143,7 @@ function changePreview(customer, changes) {
   };
 }
 
-function outputBase({ status, taskType, customer, matches, sourceRefs, facts, unknowns, change }) {
+function outputBase({ status, taskType, customer, matches, truncated, sourceRefs, facts, unknowns, change }) {
   const textSummary = customer
     ? `${customer.name ?? "客户"}（${customer.region ?? "区域待确认"}，${customer.type ?? "类型待确认"}，${customer.level ?? "级别待确认"}）`
     : "当前没有唯一客户结果。";
@@ -146,6 +154,7 @@ function outputBase({ status, taskType, customer, matches, sourceRefs, facts, un
     status,
     customer,
     matches,
+    truncated,
     headline: textSummary,
     facts,
     inferences: customer ? [{ claim: "当前仅能确认服务端返回的客户基础字段，不能据此推断关系或决策权。", sourceRefs }] : [],
@@ -182,7 +191,7 @@ export function createCustomerAssistantAdapter({
 
   function search(owner, query) {
     const result = snapshotAdapter.customerSearch({ owner, query: text(query, "query", 200) });
-    return normalizeMatches(result?.items);
+    return normalizeSearchResult(result);
   }
 
   async function analyze({
@@ -223,7 +232,12 @@ export function createCustomerAssistantAdapter({
         ? normalizeCustomer(snapshotAdapter.customerDetail({ owner: normalizedOwner, customerId: normalizedId }))
         : null;
       let matches = [];
-      if (!customer && normalizedQuery) matches = search(normalizedOwner, normalizedQuery);
+      let truncated = false;
+      if (!customer && normalizedQuery) {
+        const searchResult = search(normalizedOwner, normalizedQuery);
+        matches = searchResult.matches;
+        truncated = searchResult.truncated;
+      }
       if (!customer && matches.length === 1) customer = matches[0];
       const refs = uniqueRefs([
         customer ? sourceRef(customer.id) : null,
@@ -240,6 +254,7 @@ export function createCustomerAssistantAdapter({
         taskType,
         customer,
         matches,
+        truncated,
         sourceRefs: refs,
         facts: factsFor(customer),
         unknowns: status === "clarify"
