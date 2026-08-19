@@ -45,7 +45,7 @@
 | 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
 | 知识库 | 模块内搜索、条目维护和引用 | 后续可继续扩展检索与引用质量评估 |
 | 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF 接入；已完成真实设备 `/clear` 往返验收 | 机器身份只获得声明的写入路由；更多业务场景仍按人工确认边界扩展 |
-| 系统配置 | 独立配置页生成/轮换 iCost Token，并加密保存 DeepSeek API Key；运行时统一读取服务端密钥提供器 | 主加密密钥只允许进入后端受保护环境；页面不回显已保存明文 |
+| 系统配置 | 独立配置页生成/轮换 iCost Token，加密保存 DeepSeek API Key 与医院招标 PushPlus Token，并支持脱敏状态、清除和测试通知；运行时统一读取服务端密钥提供器 | 主加密密钥只允许进入后端受保护环境；页面不回显已保存明文，测试通知不携带客户数据 |
 | 医院招标监测 | `v0.6.0` 已内置公开来源采集，按每小时一批 10 个客户自动轮巡，持久化游标/快照/锁，展示公告、匹配证据、来源健康和轮巡进度 | 已随生产切换启用；当前 scheduler 初始状态为 `idle`、轮次 `0`，首批真实轮巡和通知仍需观察；不依赖额外招标 API，不自动修改客户或商机 |
 | 方案辅助 | 只读兼容入口 | 按当前产品决定暂停写入和 AI 调用 |
 
@@ -157,7 +157,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 
 ## 微信 Clawbot 助手事件契约
 
-候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.1` worker 通过独立机器 Token 调用：
+候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.2` worker 通过独立机器 Token 调用：
 
 ```text
 POST /api/integrations/weixin-agent/events
@@ -167,7 +167,7 @@ Idempotency-Key: <稳定重试键>
 
 请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和六位 `confirmationCode`。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
 
-sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊。确认回复必须来自同一 sender、channel 和 private conversation：恰好六位 ASCII 数字确认，原始文本精确等于 `取消` 或 `重发确认码` 才执行取消或轮换；前后空格、换行、全角数字和附加文字均不匹配。确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定；执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
+sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊；worker 会在读取配置或下载媒体前执行同一 allowlist。入站媒体通过流式 12 MiB 上限，处理完成后删除临时文件；永久拒绝会推进 polling cursor，网络或服务端临时失败仍保留重试。确认回复必须来自同一 sender、channel 和 private conversation：恰好六位 ASCII 数字确认，原始文本精确等于 `取消` 或 `重发确认码` 才执行取消或轮换；前后空格、换行、全角数字和附加文字均不匹配。确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定；执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
 
 owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。机器 Token 派生投递身份；轮换 Token 时必须先停止旧 worker、排空并封存旧 polling cursor，再启用新 Token，禁止并行消费。真实设备往返和生产切换仍需另行授权；本地候选检查不构成生产证据。
 

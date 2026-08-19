@@ -537,6 +537,14 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia("(max-width: 760px)").matches) return;
+    document.querySelector(`[data-testid="nav-${active}"]`)?.scrollIntoView({
+      block: "nearest",
+      inline: "center",
+    });
+  }, [active]);
+
   function setWorkbenchOpportunities(nextValue) {
     updateWorkbenchCollection("opportunities", nextValue);
   }
@@ -988,6 +996,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                   key={item.id}
                   className={`nav-item ${active === item.id ? "active" : ""}`}
                   data-testid={`nav-${item.id}`}
+                  aria-label={item.label}
+                  title={item.label}
                   type="button"
                   onClick={() => {
                     if (item.id === "customer") setCustomerViewMode("list");

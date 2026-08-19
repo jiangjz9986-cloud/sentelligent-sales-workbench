@@ -51,6 +51,11 @@ type LoginOptions = {
   /** Override the API base URL. */baseUrl?: string; /** Log callback (defaults to console.log). */
   log?: (msg: string) => void;
 };
+type InboundAuthorizationMetadata = {
+  /** Provider sender identifier validated by the bounded inbound projection. */senderId: string;
+  /** Conversation kind after bounded metadata classification. */chatType: "direct" | "group";
+  /** Present only for a classified group conversation. */groupId?: string;
+};
 type StartOptions = {
   /** Account ID to use. Auto-selects the first registered account if omitted. */accountId?: string; /** AbortSignal to stop the bot. */
   abortSignal?: AbortSignal; /** Log callback (defaults to console.log). */
@@ -62,6 +67,8 @@ type StartOptions = {
     chatType: "direct" | "group";
     groupId?: string;
   } | null | undefined;
+  /** Fail-closed host authorization hook invoked before config lookup or media download. */
+  authorizeInbound?: (metadata: Readonly<InboundAuthorizationMetadata>) => boolean | Promise<boolean>;
 };
 type InboundMedia = {
   sha256: string;
@@ -146,4 +153,4 @@ declare function normalizeInboundUpdate(full: Record<string, unknown>, opts: {
   chatMetadata?: InboundChatMetadata | null;
 }): ChatRequest;
 //#endregion
-export { type Agent, Bot, type ChatRequest, type ChatResponse, type InboundChatMetadata, type InboundMedia, type LoginOptions, type StartOptions, isLoggedIn, login, logout, normalizeInboundUpdate, start };
+export { type Agent, Bot, type ChatRequest, type ChatResponse, type InboundAuthorizationMetadata, type InboundChatMetadata, type InboundMedia, type LoginOptions, type StartOptions, isLoggedIn, login, logout, normalizeInboundUpdate, start };

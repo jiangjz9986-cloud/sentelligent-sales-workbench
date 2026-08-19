@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { readBoundedResponseText } from "../http/request.js";
 import {
   readWeixinDocument,
   WeixinDocumentError,
@@ -11,10 +12,11 @@ const SAFE_FAILURE_MESSAGE = "远程助手暂时不可用，请稍后重试";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 export class RemoteAgentError extends Error {
-  constructor(code, message = SAFE_FAILURE_MESSAGE) {
+  constructor(code, message = SAFE_FAILURE_MESSAGE, { permanent = false } = {}) {
     super(message);
     this.name = "RemoteAgentError";
     this.code = code;
+    this.permanent = permanent || ["REMOTE_AGENT_INVALID_REQUEST", "REMOTE_AGENT_MEDIA_INVALID"].includes(code);
   }
 }
 
@@ -188,11 +190,21 @@ export function createRemoteClawbotAgent(options = {}) {
       }
       let responseText;
       try {
-        responseText = await response.text();
+        responseText = await readBoundedResponseText(response, {
+          maxBytes: MAX_RESPONSE_BYTES,
+          errorMessage: "Remote agent response body is too large",
+        });
       } catch {
         throw new RemoteAgentError("REMOTE_AGENT_INVALID_RESPONSE");
       }
-      if (!response.ok) throw new RemoteAgentError("REMOTE_AGENT_REQUEST_FAILED");
+      if (!response.ok) {
+        const status = Number(response.status);
+        const permanent = Number.isInteger(status)
+          && status >= 400
+          && status < 500
+          && ![408, 429].includes(status);
+        throw new RemoteAgentError("REMOTE_AGENT_REQUEST_FAILED", SAFE_FAILURE_MESSAGE, { permanent });
+      }
       try {
         return parseResponseBody(responseText);
       } catch (error) {

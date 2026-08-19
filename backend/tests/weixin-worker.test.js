@@ -30,6 +30,7 @@ describe("WeChat worker wiring", () => {
         authSessionSecret: Buffer.alloc(32, 14).toString("base64url"),
         weixinAgentApiToken: syntheticLabel("worker", "token", "sentinel"),
         weixinAgentBackendUrl: "https://sales.example.test",
+        weixinAllowedSenderIds: ["sender-1"],
       },
     };
     const result = await runWeixinWorker(["start"], workerOptions);
@@ -49,6 +50,19 @@ describe("WeChat worker wiring", () => {
     assert.deepEqual(capturedStarts[0].options.deliveryKey, expectedDeliveryKey);
     assert.deepEqual(capturedStarts[0].options.deliveryKey, capturedStarts[1].options.deliveryKey);
     assert.notDeepEqual(capturedStarts[0].options.deliveryKey, capturedStarts[2].options.deliveryKey);
+    assert.equal(capturedStarts[0].options.authorizeInbound({
+      senderId: "sender-1",
+      chatType: "direct",
+    }), true);
+    assert.equal(capturedStarts[0].options.authorizeInbound({
+      senderId: "unlisted-sender",
+      chatType: "direct",
+    }), false);
+    assert.equal(capturedStarts[0].options.authorizeInbound({
+      senderId: "sender-1",
+      chatType: "group",
+      groupId: "unlisted-group",
+    }), false);
 
     const reply = await capturedStarts[0].agent.chat({
       conversationId: "worker-conversation",
