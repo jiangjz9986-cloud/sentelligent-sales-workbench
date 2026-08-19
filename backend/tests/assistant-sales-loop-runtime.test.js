@@ -240,6 +240,75 @@ describe("wired sales loop assistant runtime", () => {
     db.close();
   });
 
+  it("routes opportunity detail through opportunity-v1, validates its customer relation, and replays safely", async () => {
+    let db = openDatabase({ databaseUrl });
+    db.exec(`
+      INSERT INTO customers (id, name, region, owner)
+      VALUES ('customer-opportunity-other', '其他商机归属医院', '济南', 'other-owner');
+      INSERT INTO opportunities (id, customer_id, name, stage, amount, owner, probability)
+      VALUES ('opportunity-broken-relation', 'customer-opportunity-other', '关系异常项目', '方案', '10 万', '${owner}', 20);
+    `);
+    db.close();
+
+    const detailMessageId = `runtime-${++sequence}-opportunity-detail`;
+    const detail = await event("/opportunity.detail opportunity-runtime", detailMessageId);
+    assert.equal(detail.response.status, 200);
+    assert.match(detail.body.text, /运行时升级项目/);
+
+    db = openDatabase({ databaseUrl });
+    let runs = db.prepare(`
+      SELECT agent_id, task_type, contract_version, status, source, input_json, output_json, source_refs_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'opportunity'
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 1);
+    assert.deepEqual({
+      agentId: runs[0].agent_id,
+      taskType: runs[0].task_type,
+      contractVersion: runs[0].contract_version,
+      status: runs[0].status,
+      source: runs[0].source,
+    }, {
+      agentId: "opportunity",
+      taskType: "detail",
+      contractVersion: "opportunity-v1",
+      status: "succeeded",
+      source: "deterministic",
+    });
+    const input = JSON.parse(runs[0].input_json);
+    const output = JSON.parse(runs[0].output_json);
+    assert.equal(Object.hasOwn(input, "owner"), false);
+    assert.deepEqual(output.relationship, { valid: true, customerId: "customer-runtime", reason: null });
+    assert.equal(output.salesDecisionAdvice, null);
+    assert.equal(output.writebackAllowed, false);
+    assert.deepEqual(JSON.parse(runs[0].source_refs_json), [
+      { type: "customer", id: "customer-runtime" },
+      { type: "opportunity", id: "opportunity-runtime" },
+    ]);
+    db.close();
+
+    const replay = await event("/opportunity.detail opportunity-runtime", detailMessageId);
+    assert.equal(replay.response.status, 200);
+    assert.deepEqual(replay.body, detail.body);
+
+    const broken = await event("/opportunity.detail opportunity-broken-relation", `runtime-${++sequence}-opportunity-broken`);
+    assert.equal(broken.response.status, 200);
+    assert.match(broken.body.text, /无法核验/);
+
+    db = openDatabase({ databaseUrl });
+    runs = db.prepare(`
+      SELECT output_json, source_refs_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'opportunity'
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 2);
+    const brokenOutput = JSON.parse(runs.find((run) => JSON.parse(run.output_json).status === "review_required").output_json);
+    assert.equal(brokenOutput.opportunity, null);
+    assert.deepEqual(brokenOutput.facts, []);
+    assert.deepEqual(JSON.parse(runs.find((run) => JSON.parse(run.output_json).status === "review_required").source_refs_json), []);
+    db.close();
+  });
+
   it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
     const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
     assert.equal(collected.response.status, 200);
@@ -345,7 +414,7 @@ describe("wired sales loop assistant runtime", () => {
     const run = db.prepare(`
       SELECT agent_id, task_type, status, source, confirmation_status
       FROM assistant_agent_runs
-      WHERE owner = $owner
+      WHERE owner = $owner AND agent_id = 'sales-decision'
       ORDER BY created_at DESC, id DESC LIMIT 1
     `).get({ $owner: owner });
     assert.deepEqual({

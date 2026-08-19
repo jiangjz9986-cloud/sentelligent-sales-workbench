@@ -6,6 +6,7 @@ import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
+import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
 
@@ -257,6 +258,7 @@ export function createAssistantToolHandlers({
   invoiceRecognizer,
   businessSnapshotAdapter = null,
   customerAssistantAdapter = null,
+  opportunityAssistantAdapter = null,
   visitCaptureAssistantAdapter = null,
   salesReportAssistantAdapter = null,
   agentRunRepository = null,
@@ -268,6 +270,11 @@ export function createAssistantToolHandlers({
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
   const customerAdapter = customerAssistantAdapter ?? createCustomerAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const opportunityAdapter = opportunityAssistantAdapter ?? createOpportunityAssistantAdapter({
     snapshotAdapter,
     runRepository: agentRunRepository,
     clock,
@@ -351,16 +358,33 @@ export function createAssistantToolHandlers({
     },
 
     async "opportunity.detail"(args, context) {
-      let opportunity = snapshotAdapter.opportunityDetail({
+      const result = await opportunityAdapter.analyze({
         owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "detail",
         opportunityId: args.opportunityId,
+        query: args.opportunityId,
       });
-      if (!opportunity) {
-        const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: args.opportunityId }).items;
-        if (matches.length > 1) return ambiguousEntityResult("商机", matches);
-        opportunity = matches[0] ?? null;
-      }
-      if (!opportunity) return { text: "未找到该商机，或当前账号无权查看。", status: "not_found" };
+      if (result.status === "clarify") return {
+        ...ambiguousEntityResult("商机", result.matches),
+        opportunityResult: result,
+        runId: result.runId,
+      };
+      if (result.status === "review_required" && !result.opportunity) return {
+        text: "商机与关联客户无法核验，请先在系统中确认关系。",
+        status: "review_required",
+        opportunityResult: result,
+        runId: result.runId,
+      };
+      if (result.status === "not_found" || !result.opportunity) return {
+        text: "未找到该商机，或当前账号无权查看。",
+        status: "not_found",
+        opportunityResult: result,
+        runId: result.runId,
+      };
+      const opportunity = result.opportunity;
       return {
         text: [
           `商机：${opportunity.name ?? "名称待确认"}`,
@@ -371,6 +395,8 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         opportunity,
+        opportunityResult: result,
+        runId: result.runId,
         contextUpdate: {
           customerId: opportunity.customerId ?? null,
           opportunityId: opportunity.id,
