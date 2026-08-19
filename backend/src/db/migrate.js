@@ -20,6 +20,7 @@ import { apply as applyHospitalTenderScheduler } from "./migrations/0016_hospita
 import { apply as applyShortcutWebhookTokens } from "./migrations/0017_shortcut_webhook_tokens.mjs";
 import { apply as applyShortcutBookkeepingEntries } from "./migrations/0018_shortcut_bookkeeping_entries.mjs";
 import { apply as applyAssistantAgentRuns } from "./migrations/0020_assistant_agent_runs.mjs";
+import { apply as applyAssistantBusinessContext } from "./migrations/0021_assistant_business_context.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -129,6 +130,12 @@ const migrations = [
     path: resolve(here, "migrations", "0020_assistant_agent_runs.mjs"),
     type: "module",
     apply: applyAssistantAgentRuns,
+  },
+  {
+    version: "0021",
+    path: resolve(here, "migrations", "0021_assistant_business_context.mjs"),
+    type: "module",
+    apply: applyAssistantBusinessContext,
   },
 ];
 
