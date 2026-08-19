@@ -400,6 +400,57 @@ describe("wired sales loop assistant runtime", () => {
     db.close();
   });
 
+  it("routes itinerary and travel-expense summaries through fixed read-only agents", async () => {
+    let db = openDatabase({ databaseUrl });
+    db.exec(`
+      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
+      VALUES ('itinerary-runtime', '运行时拜访行程', '2026-08-22', 'planned', '{}', '{}', '${owner}', '${owner}');
+      INSERT INTO travel_expenses (id, reference_code, owner, occurred_on, category, purpose, customer_id, invoice_status, created_by, updated_by)
+      VALUES ('expense-runtime', 'EXP-RUNTIME-001', '${owner}', '2026-08-17', 'transport', '运行时拜访', 'customer-runtime', 'pending', '${owner}', '${owner}');
+      INSERT INTO travel_expense_payments (id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method)
+      VALUES ('payment-runtime', 'expense-runtime', 1, '2026-08-17T10:00:00+08:00', 8800, 7000, 'personal', 'wechat');
+    `);
+    db.close();
+
+    const itineraryMessageId = `runtime-${++sequence}-itinerary`;
+    const itinerary = await event("/itinerary.summary", itineraryMessageId);
+    assert.equal(itinerary.response.status, 200);
+    assert.match(itinerary.body.text, /运行时拜访行程/);
+
+    const expenseMessageId = `runtime-${++sequence}-travel-expense`;
+    const expense = await event("/travel-expense.summary 2026-08-17", expenseMessageId);
+    assert.equal(expense.response.status, 200);
+    assert.match(expense.body.text, /1 笔/);
+    assert.match(expense.body.text, /88\.00/);
+
+    db = openDatabase({ databaseUrl });
+    const runs = db.prepare(`
+      SELECT agent_id, task_type, contract_version, status, source, input_json, output_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id IN ('itinerary', 'travel-expense')
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 2);
+    for (const run of runs) {
+      assert.equal(run.status, "succeeded");
+      assert.equal(run.source, "deterministic");
+      assert.equal(Object.hasOwn(JSON.parse(run.input_json), "owner"), false);
+      assert.equal(JSON.parse(run.output_json).writebackAllowed, false);
+    }
+    assert.equal(runs.find((run) => run.agent_id === "itinerary").contract_version, "itinerary-v1");
+    assert.equal(runs.find((run) => run.agent_id === "travel-expense").contract_version, "travel-expense-v1");
+    db.close();
+
+    const itineraryReplay = await event("/itinerary.summary", itineraryMessageId);
+    const expenseReplay = await event("/travel-expense.summary 2026-08-17", expenseMessageId);
+    assert.deepEqual(itineraryReplay.body, itinerary.body);
+    assert.deepEqual(expenseReplay.body, expense.body);
+    db = openDatabase({ databaseUrl });
+    assert.equal(db.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id IN ('itinerary', 'travel-expense')",
+    ).get({ $owner: owner }).count, 2);
+    db.close();
+  });
+
   it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
     const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
     assert.equal(collected.response.status, 200);

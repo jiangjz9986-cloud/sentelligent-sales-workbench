@@ -7,9 +7,11 @@ import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobSto
 import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
+import { createItineraryAssistantAdapter } from "./itineraryAssistantAdapter.js";
 import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js";
 import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
+import { createTravelExpenseAssistantAdapter } from "./travelExpenseAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
@@ -263,6 +265,8 @@ export function createAssistantToolHandlers({
   actionRiskAssistantAdapter = null,
   knowledgeAssistantAdapter = null,
   opportunityAssistantAdapter = null,
+  itineraryAssistantAdapter = null,
+  travelExpenseAssistantAdapter = null,
   visitCaptureAssistantAdapter = null,
   salesReportAssistantAdapter = null,
   agentRunRepository = null,
@@ -289,6 +293,16 @@ export function createAssistantToolHandlers({
     clock,
   });
   const knowledgeAdapter = knowledgeAssistantAdapter ?? createKnowledgeAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const itineraryAdapter = itineraryAssistantAdapter ?? createItineraryAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const travelExpenseAdapter = travelExpenseAssistantAdapter ?? createTravelExpenseAssistantAdapter({
     snapshotAdapter,
     runRepository: agentRunRepository,
     clock,
@@ -498,25 +512,45 @@ export function createAssistantToolHandlers({
     },
 
     async "itinerary.summary"(_args, context) {
-      const summary = snapshotAdapter.itinerarySummary({ owner: context.owner });
+      const result = await itineraryAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "summary",
+      });
+      const summary = { items: result.items, truncated: result.truncated };
       return {
         text: summary.items.length
           ? [`行程摘要：共 ${summary.items.length} 条。`, ...summary.items.slice(0, 5).map((item) => `- ${item.visitDate} ${item.title ?? "未命名行程"}（${item.status}）`)].join("\n")
           : "当前没有可见行程。",
         status: "ok",
         summary,
+        itineraryResult: result,
+        runId: result.runId,
       };
     },
 
     async "travel-expense.summary"(args, context) {
-      const summary = snapshotAdapter.travelExpenseSummary({
+      const result = await travelExpenseAdapter.analyze({
         owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "weekly_summary",
         weekStart: args.periodStart ?? args.week,
       });
       return {
-        text: `差旅汇总（${summary.weekStart}）：${summary.summary.count} 笔，实付 ${moneyFromCents(summary.summary.actualPaidCents)}，可报销 ${moneyFromCents(summary.summary.reimbursementCents)}。`,
+        text: `差旅汇总（${result.weekStart}）：${result.summary.count} 笔，实付 ${moneyFromCents(result.summary.actualPaidCents)}，可报销 ${moneyFromCents(result.summary.reimbursementCents)}。`,
         status: "ok",
-        summary,
+        summary: {
+          weekStart: result.weekStart,
+          summary: result.summary,
+          items: result.items,
+          truncated: result.truncated,
+        },
+        travelExpenseResult: result,
+        runId: result.runId,
       };
     },
 
