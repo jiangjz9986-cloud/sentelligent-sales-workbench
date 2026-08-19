@@ -476,7 +476,7 @@ function dataOwner(value) {
 
   function weeklySourceRows(ownerValue, range) {
     return db.prepare(`
-      SELECT qr.id, qr.occurred_at, qr.source_channel, ai.analysis_json
+      SELECT qr.id, qr.raw_content, qr.occurred_at, qr.source_channel, ai.analysis_json
       FROM quick_records qr
       LEFT JOIN ai_insights ai ON ai.id = (
         SELECT latest.id FROM ai_insights latest
@@ -508,29 +508,15 @@ function dataOwner(value) {
     return Number.isSafeInteger(count) && count >= 0 ? count : 0;
   }
 
-  function previewSalesReport(input = {}) {
+  function buildSalesReportSnapshot(input = {}) {
     input = requestObject(input);
     const normalizedOwner = owner(input.owner);
     const scopedOwner = dataOwner(normalizedOwner);
     const range = weekRange(input.weekStart ?? input.week ?? "current", clock);
     if (!scopedOwner) {
       return {
-        status: "preview",
-        writebackAllowed: false,
-        weekStart: range.start,
-        periodEnd: range.end,
-        reportCount: 0,
-        candidateRecordCount: 0,
-        statusCounts: { draft: 0, saved: 0, ready: 0 },
-        reports: [],
-        preview: {
-          persisted: false,
-          content: "",
-          sourceRecordCount: 0,
-          sourceRefs: [],
-          truncated: false,
-          preparation: { ready: false, blockers: ["owner_scope_denied"] },
-        },
+        status: "owner_scope_denied",
+        period: { start: range.start, end: range.end },
       };
     }
     const reports = weeklyReportRows(scopedOwner, range);
@@ -538,6 +524,7 @@ function dataOwner(value) {
     const candidateRecordCount = weeklyCandidateRecordCount(scopedOwner, range);
     const sourceRecords = sourceRows.slice(0, MAX_ITEMS).map((row) => ({
       id: row.id,
+      rawContent: boundedMultilineText(row.raw_content, MAX_TEXT) ?? "",
       occurredAt: row.occurred_at,
       sourceChannel: boundedText(row.source_channel, 100) ?? "manual",
       analysis: boundedInsight(parseJson(row.analysis_json, {})),
@@ -555,7 +542,9 @@ function dataOwner(value) {
       ? snapshotAdapter.knowledgeSearch({ query: requiredText(input.knowledgeQuery, "knowledgeQuery", 200) }).items
       : [];
     const draft = buildWeeklyDraft({
-      owner: scopedOwner,
+      // The business owner is an authorization boundary, not report prose or
+      // model input. Use a neutral heading in the deterministic draft.
+      owner: "销售团队",
       periodStart: range.start,
       periodEnd: range.end,
       records: sourceRecords,
@@ -569,21 +558,64 @@ function dataOwner(value) {
     const statusCounts = { draft: 0, saved: 0, ready: 0 };
     for (const item of reportItems) if (Object.hasOwn(statusCounts, item.status)) statusCounts[item.status] += 1;
     return {
-      status: "preview",
-      writebackAllowed: false,
-      weekStart: range.start,
-      periodEnd: range.end,
-      reportCount: reportItems.length,
+      status: "ok",
+      period: { start: range.start, end: range.end },
+      asOf: new Date(clock()).toISOString(),
+      sourceRecords,
+      knowledge,
+      reports: reportItems,
       candidateRecordCount,
       statusCounts,
-      reports: reportItems,
+      deterministicDraft: {
+        content: boundedMultilineText(draft.content, 20_000) ?? "",
+        sourceRefs: refs,
+      },
+      sourceRefs: refs,
+      truncated: sourceRows.length > MAX_ITEMS || reports.length > MAX_ITEMS,
+      sourceTruncated: sourceRows.length > MAX_ITEMS,
+      reportsTruncated: reports.length > MAX_ITEMS,
+      preparation: { ready: blockers.length === 0, blockers },
+    };
+  }
+
+  function previewSalesReport(input = {}) {
+    const snapshot = buildSalesReportSnapshot(input);
+    if (snapshot.status === "owner_scope_denied") {
+      return {
+        status: "preview",
+        writebackAllowed: false,
+        weekStart: snapshot.period.start,
+        periodEnd: snapshot.period.end,
+        reportCount: 0,
+        candidateRecordCount: 0,
+        statusCounts: { draft: 0, saved: 0, ready: 0 },
+        reports: [],
+        preview: {
+          persisted: false,
+          content: "",
+          sourceRecordCount: 0,
+          sourceRefs: [],
+          truncated: false,
+          preparation: { ready: false, blockers: ["owner_scope_denied"] },
+        },
+      };
+    }
+    return {
+      status: "preview",
+      writebackAllowed: false,
+      weekStart: snapshot.period.start,
+      periodEnd: snapshot.period.end,
+      reportCount: snapshot.reports.length,
+      candidateRecordCount: snapshot.candidateRecordCount,
+      statusCounts: snapshot.statusCounts,
+      reports: snapshot.reports,
       preview: {
         persisted: false,
-        content: boundedMultilineText(draft.content, 20_000) ?? "",
-        sourceRecordCount: sourceRecords.length,
-        sourceRefs: refs,
-        truncated: sourceRows.length > MAX_ITEMS,
-        preparation: { ready: blockers.length === 0, blockers },
+        content: snapshot.deterministicDraft.content,
+        sourceRecordCount: snapshot.sourceRecords.length,
+        sourceRefs: snapshot.sourceRefs,
+        truncated: snapshot.sourceTruncated === true,
+        preparation: snapshot.preparation,
       },
     };
   }
@@ -606,5 +638,5 @@ function dataOwner(value) {
     };
   }
 
-  return Object.freeze({ buildSnapshot, previewSalesDecision, previewSalesReport, projectPreview, rememberContext });
+  return Object.freeze({ buildSnapshot, buildSalesReportSnapshot, previewSalesDecision, previewSalesReport, projectPreview, rememberContext });
 }

@@ -147,6 +147,27 @@ describe("sales loop preview service", () => {
     db.close();
   });
 
+  it("exposes a bounded owner-scoped sales-report snapshot without trusting caller source refs", () => {
+    const db = fixtureDb();
+    const { service } = createService(db);
+    const snapshot = service.buildSalesReportSnapshot({
+      owner: "owner-a",
+      weekStart: "2026-08-17",
+      knowledgeQuery: "采购",
+      sourceRefs: [{ type: "forged", id: "forged-source" }],
+    });
+    assert.equal(snapshot.status, "ok");
+    assert.deepEqual(snapshot.period, { start: "2026-08-17", end: "2026-08-23" });
+    assert.equal(snapshot.sourceRecords.length, 1);
+    assert.equal(snapshot.sourceRecords[0].id, "record-a");
+    assert.equal(snapshot.sourceRecords[0].rawContent, "客户确认平台稳定性需要提升。");
+    assert.ok(snapshot.sourceRefs.some((item) => item.type === "quick_record" && item.id === "record-a"));
+    assert.ok(snapshot.sourceRefs.some((item) => item.type === "knowledge" && item.id === "knowledge-a"));
+    assert.equal(snapshot.sourceRefs.some((item) => item.id === "forged-source"), false);
+    assert.equal(JSON.stringify(snapshot).includes("owner-a"), false);
+    db.close();
+  });
+
   it("returns a bounded review result when sales decision evidence is incomplete", async () => {
     const db = fixtureDb();
     const fake = {

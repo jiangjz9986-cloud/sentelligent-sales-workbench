@@ -136,6 +136,7 @@ function normalizeRecord(value, index) {
   if (!id) throw new AssistantContractError(`sourceRecords[${index}].id is required`, "invalid_sales_report_input");
   return {
     id,
+    rawContent: multiline(value.rawContent, `sourceRecords[${index}].rawContent`, 5_000),
     occurredAt: optionalText(value.occurredAt, `sourceRecords[${index}].occurredAt`, 100),
     sourceChannel: optionalText(value.sourceChannel, `sourceRecords[${index}].sourceChannel`, 100) ?? "manual",
     analysis: normalizeAnalysis(value.analysis),
@@ -377,6 +378,9 @@ export function createSalesReportAssistantAdapter({
         taskType,
         period: snapshot.period,
         asOf: snapshot.asOf,
+        candidateRecordCount: snapshot.candidateRecordCount,
+        sourceRecordCount: snapshot.records.length,
+        statusCounts: snapshot.statusCounts,
         executiveSummary: snapshot.records.length
           ? `本周期纳入 ${snapshot.records.length} 条已确认销售记录，报告正文仅作预览。`
           : "本周期没有已确认销售记录，暂不生成进展结论。",

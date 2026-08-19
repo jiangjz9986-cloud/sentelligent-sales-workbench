@@ -253,5 +253,25 @@ describe("wired sales loop assistant runtime", () => {
     assert.match(report.body.text, /尚未写入周报/);
     assert.match(report.body.text, /运行时医院/);
     assert.doesNotMatch(report.body.text, /报销周汇总/);
+    const db = openDatabase({ databaseUrl });
+    const run = db.prepare(`
+      SELECT agent_id, task_type, status, source, confirmation_status, input_json
+      FROM assistant_agent_runs WHERE owner = $owner ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get({ $owner: owner });
+    assert.deepEqual({
+      agentId: run.agent_id,
+      taskType: run.task_type,
+      status: run.status,
+      source: run.source,
+      confirmationStatus: run.confirmation_status,
+    }, {
+      agentId: "sales-report",
+      taskType: "weekly_preview",
+      status: "succeeded",
+      source: "deterministic",
+      confirmationStatus: "preview",
+    });
+    assert.equal(run.input_json.includes(`"owner"`), false);
+    db.close();
   });
 });

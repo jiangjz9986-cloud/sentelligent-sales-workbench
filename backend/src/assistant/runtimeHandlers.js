@@ -5,6 +5,7 @@ import { withImmediateTransaction } from "../db/transaction.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
+import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
@@ -255,6 +256,7 @@ export function createAssistantToolHandlers({
   invoiceRecognizer,
   businessSnapshotAdapter = null,
   visitCaptureAssistantAdapter = null,
+  salesReportAssistantAdapter = null,
   agentRunRepository = null,
   salesLoopPreviewService = null,
   resolveBusinessOwner = (owner) => owner,
@@ -269,6 +271,18 @@ export function createAssistantToolHandlers({
     runRepository: agentRunRepository,
     businessSnapshotAdapter: snapshotAdapter,
     clock,
+  });
+  const salesReportAdapter = salesReportAssistantAdapter ?? createSalesReportAssistantAdapter({
+    config,
+    fetchImpl,
+    runRepository: agentRunRepository,
+    clock,
+    snapshotProvider: ({ owner, weekStart, knowledgeQuery }) => {
+      if (!salesLoopPreviewService || typeof salesLoopPreviewService.buildSalesReportSnapshot !== "function") {
+        return { status: "owner_scope_denied", period: { start: weekStart, end: weekStart } };
+      }
+      return salesLoopPreviewService.buildSalesReportSnapshot({ owner, weekStart, knowledgeQuery });
+    },
   });
 
   const handlers = {
@@ -715,20 +729,35 @@ export function createAssistantToolHandlers({
     },
 
     async "sales-report.preview"(args, context) {
-      if (salesLoopPreviewService) {
-        const summary = salesLoopPreviewService.previewSalesReport({
-          owner: context.owner,
-          channel: context.channel,
-          conversationId: context.conversation,
-          weekStart: args.periodStart ?? args.week,
-        });
-        return { text: salesReportSummaryText(summary), status: "preview", summary };
-      }
-      const summary = snapshotAdapter.salesReportSummary({
+      const result = await salesReportAdapter.analyze({
         owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "weekly_preview",
         weekStart: args.periodStart ?? args.week,
       });
-      return { text: `销售周报预览（${summary.weekStart}）：当前共有 ${summary.recordCount} 条快速记录，详情可在系统内继续编辑。`, status: "preview", summary };
+      if (result.status !== "preview") {
+        return {
+          text: result.status === "not_found" ? "未找到当前账号可见的销售周报数据。" : "销售周报暂需人工补充资料。",
+          status: result.status,
+          report: result,
+        };
+      }
+      return {
+        text: salesReportSummaryText({
+          weekStart: result.period.start,
+          periodEnd: result.period.end,
+          reportCount: result.persistedReportRefs?.length ?? 0,
+          candidateRecordCount: result.candidateRecordCount ?? result.sourceRecordCount ?? 0,
+          preview: result.summary,
+          statusCounts: result.statusCounts ?? { draft: 0, saved: 0, ready: 0 },
+        }),
+        status: "preview",
+        summary: result.summary,
+        report: result,
+        runId: result.runId,
+      };
     },
   };
 
