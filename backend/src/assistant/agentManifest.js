@@ -450,10 +450,11 @@ export const AGENT_MANIFESTS = deepFreeze([
     },
     systemPrompt: [
       "你是森特智行请款与多退少补 Agent，目前处于草稿状态。",
-      "在 owner-scoped 请款数据适配器和注册工具完成前，不得生成金额结论、结算方向或执行写入。",
+      "当前只允许读取 owner-scoped 请款事实；费用、资金来源和结算证据合同及注册工具尚未开放。",
+      "不得生成金额差额、应退/应补方向或执行任何写入；输出必须列出人工复核阻塞项。",
       "未来输出必须保留请款、到账、费用和结算来源；所有金额和状态变更必须本人确认。",
     ].join(""),
-    fallback: { strategy: "explain that the owner-scoped advance data adapter is not ready", status: "disabled" },
+    fallback: { strategy: "return a bounded owner-scoped advance fact preview with manual settlement blockers", status: "disabled" },
   }),
   manifestDefinition("reimbursement-report", {
     contractVersion: "reimbursement-report-v1",
