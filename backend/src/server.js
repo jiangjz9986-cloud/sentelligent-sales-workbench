@@ -135,9 +135,13 @@ import { createWeixinLoginBinding } from "./weixin/loginBinding.js";
 import { createAssistantEventRepository } from "./assistant/eventRepository.js";
 import { createAssistantSessionRepository } from "./assistant/sessionRepository.js";
 import { createAssistantPendingActionRepository } from "./assistant/pendingActionRepository.js";
+import { createAssistantAgentRunRepository } from "./assistant/agentRunRepository.js";
+import { createAssistantBusinessSnapshotAdapter } from "./assistant/businessSnapshotAdapter.js";
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
+import { createSalesLoopContextRepository } from "./assistant/salesLoopContextRepository.js";
+import { createSalesLoopPreviewService } from "./assistant/salesLoopPreview.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
@@ -2571,6 +2575,45 @@ export function createServer(options = {}) {
     : createBusinessOwnerResolver({
         businessOwner: config.weixinAgentOwner,
       });
+  const assistantBusinessSnapshotAdapter = options.assistantBusinessSnapshotAdapter
+    ?? createAssistantBusinessSnapshotAdapter({
+      db,
+      clock: assistantClock,
+      resolveBusinessOwner: assistantBusinessOwnerResolver,
+    });
+  const assistantBusinessContextRepository = options.assistantBusinessContextRepository
+    ?? createSalesLoopContextRepository(db, {
+      clock: assistantClock,
+      ...(options.assistantBusinessContextIdFactory
+        ? { idFactory: options.assistantBusinessContextIdFactory }
+        : {}),
+      resolveEntities: ({ owner, customerId, opportunityId }) => ({
+        customer: customerId
+          ? assistantBusinessSnapshotAdapter.customerDetail({ owner, customerId })
+          : null,
+        opportunity: opportunityId
+          ? assistantBusinessSnapshotAdapter.opportunityDetail({ owner, opportunityId })
+          : null,
+      }),
+    });
+  const assistantAgentRunRepository = options.assistantAgentRunRepository
+    ?? createAssistantAgentRunRepository(db, {
+      clock: assistantClock,
+      ...(options.assistantAgentRunIdFactory
+        ? { idFactory: options.assistantAgentRunIdFactory }
+        : {}),
+    });
+  const assistantSalesLoopPreviewService = options.assistantSalesLoopPreviewService
+    ?? createSalesLoopPreviewService({
+      db,
+      businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
+      contextRepository: assistantBusinessContextRepository,
+      runRepository: assistantAgentRunRepository,
+      config: runtimeConfig,
+      fetchImpl: options.fetchImpl ?? fetch,
+      resolveBusinessOwner: assistantBusinessOwnerResolver,
+      clock: assistantClock,
+    });
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -2582,6 +2625,8 @@ export function createServer(options = {}) {
       invoiceRepository,
       paymentProofRecognizer,
       invoiceRecognizer,
+      businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
+      salesLoopPreviewService: assistantSalesLoopPreviewService,
       resolveBusinessOwner: assistantBusinessOwnerResolver,
       clock: assistantClock,
       fetchImpl: options.fetchImpl ?? fetch,
@@ -2591,6 +2636,7 @@ export function createServer(options = {}) {
       eventRepository: assistantEventRepository,
       sessionRepository: assistantSessionRepository,
       pendingActionRepository: assistantPendingActionRepository,
+      businessContextRepository: assistantBusinessContextRepository,
       toolHandlers: assistantToolHandlers,
       confirmationSecret: assistantConfirmationSecret,
       clock: assistantClock,

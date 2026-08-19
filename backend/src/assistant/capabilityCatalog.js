@@ -148,14 +148,13 @@ export const CAPABILITY_CATALOG = deepFreeze([
   capability({
     id: "sales-decision.preview",
     name: "销售决策预览",
-    description: "基于限界证据生成本地项目分析预览，区分事实、推断、未知和需要确认的下一步。",
-    status: "partial",
+    description: "基于 owner-scoped 客户、商机、拜访、行动、风险和知识快照调用 sales-decision-v1，区分事实、推断、未知和需要确认的下一步。",
+    status: "ready",
     mappings: { tools: ["sales-decision.preview"], apis: ["POST /api/ai/sales-decisions"] },
-    dependencies: ["bounded project snapshot", "human confirmation for writeback", "sales-decision agent/API integration pending"],
+    dependencies: ["bounded sales loop snapshot", "versioned agent run record", "human confirmation for writeback"],
     integrationPoints: ["assistant agentRegistry.sales-decision", "sales decision API"],
     confirmationLevel: "preview",
-    unavailableReason: "当前助手执行本地纯函数项目分析，尚未接入现有销售决策 agent/API；不得将本地分析视为已持久化销售决策。",
-    sourceRefs: ["agentRegistry:sales-decision", "toolRegistry:sales-decision.preview", "projectAnalysis:project-analysis-v1"],
+    sourceRefs: ["agentRegistry:sales-decision", "toolRegistry:sales-decision.preview", "salesLoopPreview:sales-decision-v1", "assistant_agent_runs"],
   }),
   capability({
     id: "sales-report",

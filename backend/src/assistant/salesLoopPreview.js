@@ -497,6 +497,17 @@ function dataOwner(value) {
     `).all({ $owner: ownerValue, $start: range.start, $end: range.end });
   }
 
+  function weeklyCandidateRecordCount(ownerValue, range) {
+    const row = db.prepare(`
+      SELECT COUNT(*) AS record_count
+      FROM quick_records
+      WHERE owner = $owner AND voided_at IS NULL
+        AND date(substr(COALESCE(occurred_at, created_at), 1, 10)) BETWEEN $start AND $end
+    `).get({ $owner: ownerValue, $start: range.start, $end: range.end });
+    const count = Number(row?.record_count ?? 0);
+    return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+  }
+
   function previewSalesReport(input = {}) {
     input = requestObject(input);
     const normalizedOwner = owner(input.owner);
@@ -509,6 +520,7 @@ function dataOwner(value) {
         weekStart: range.start,
         periodEnd: range.end,
         reportCount: 0,
+        candidateRecordCount: 0,
         statusCounts: { draft: 0, saved: 0, ready: 0 },
         reports: [],
         preview: {
@@ -523,6 +535,7 @@ function dataOwner(value) {
     }
     const reports = weeklyReportRows(scopedOwner, range);
     const sourceRows = weeklySourceRows(scopedOwner, range);
+    const candidateRecordCount = weeklyCandidateRecordCount(scopedOwner, range);
     const sourceRecords = sourceRows.slice(0, MAX_ITEMS).map((row) => ({
       id: row.id,
       occurredAt: row.occurred_at,
@@ -561,6 +574,7 @@ function dataOwner(value) {
       weekStart: range.start,
       periodEnd: range.end,
       reportCount: reportItems.length,
+      candidateRecordCount,
       statusCounts,
       reports: reportItems,
       preview: {
