@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
@@ -8,9 +8,11 @@ import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.j
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
 import { createDashboardAssistantAdapter } from "./dashboardAssistantAdapter.js";
+import { createInvoiceAssistantAdapter } from "./invoiceAssistantAdapter.js";
 import { createItineraryAssistantAdapter } from "./itineraryAssistantAdapter.js";
 import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js";
 import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
+import { createPaymentProofAssistantAdapter } from "./paymentProofAssistantAdapter.js";
 import { createReimbursementReportAssistantAdapter } from "./reimbursementReportAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
 import { createTravelExpenseAssistantAdapter } from "./travelExpenseAssistantAdapter.js";
@@ -125,6 +127,17 @@ function insightFromRow(row) {
 
 function mediaBuffer(media) {
   return decodeCanonicalBase64(media.contentBase64, { maxDecodedBytes: MAX_DOCUMENT_BYTES });
+}
+
+function mediaAgentDocument(media, content) {
+  const sha256 = typeof media?.sha256 === "string" && /^[0-9a-f]{64}$/iu.test(media.sha256)
+    ? media.sha256.toLowerCase()
+    : createHash("sha256").update(content).digest("hex");
+  return {
+    mediaType: media?.mediaType,
+    sizeBytes: content.byteLength,
+    sha256,
+  };
 }
 
 function boundedRecognition(recognition) {
@@ -265,9 +278,11 @@ export function createAssistantToolHandlers({
   businessSnapshotAdapter = null,
   customerAssistantAdapter = null,
   dashboardAssistantAdapter = null,
+  invoiceAssistantAdapter = null,
   actionRiskAssistantAdapter = null,
   knowledgeAssistantAdapter = null,
   opportunityAssistantAdapter = null,
+  paymentProofAssistantAdapter = null,
   itineraryAssistantAdapter = null,
   reimbursementReportAssistantAdapter = null,
   travelExpenseAssistantAdapter = null,
@@ -291,8 +306,16 @@ export function createAssistantToolHandlers({
     runRepository: agentRunRepository,
     clock,
   });
+  const invoiceAdapter = invoiceAssistantAdapter ?? createInvoiceAssistantAdapter({
+    runRepository: agentRunRepository,
+    clock,
+  });
   const opportunityAdapter = opportunityAssistantAdapter ?? createOpportunityAssistantAdapter({
     snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const paymentProofAdapter = paymentProofAssistantAdapter ?? createPaymentProofAssistantAdapter({
     runRepository: agentRunRepository,
     clock,
   });
@@ -779,6 +802,21 @@ export function createAssistantToolHandlers({
       } catch {
         recognition = { status: "review_required", extractedText: null, warnings: ["RECOGNITION_FAILED"], conflicts: [], fields: {} };
       }
+      let invoiceResult = null;
+      try {
+        invoiceResult = await invoiceAdapter.analyze({
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: context.conversation,
+          eventId: context.event,
+          taskType: "ingest",
+          document: mediaAgentDocument(media, content),
+          recognition,
+        });
+      } catch {
+        // Recognition preview persistence must not weaken the existing
+        // lossless invoice repository transaction.
+      }
       let item;
       try {
         item = await withDocumentBlobWritePreflight(db, {
@@ -811,11 +849,22 @@ export function createAssistantToolHandlers({
         }));
       } catch (error) {
         if (error?.code === "DUPLICATE_INVOICE") {
-          return { text: "这张发票已经在发票仓库中，无需重复上传。", status: "duplicate" };
+          return {
+            text: "这张发票已经在发票仓库中，无需重复上传。",
+            status: "duplicate",
+            invoiceResult,
+            runId: invoiceResult?.runId ?? null,
+          };
         }
         throw error;
       }
-      return { text: `发票已存入发票仓库，编号：${item.id}。无需先匹配费用，可在系统内人工复核。`, status: "received", item };
+      return {
+        text: `发票已存入发票仓库，编号：${item.id}。无需先匹配费用，可在系统内人工复核。`,
+        status: "received",
+        item,
+        invoiceResult,
+        runId: invoiceResult?.runId ?? null,
+      };
     },
 
     async "payment-proof.ingest"(args, context, serverData) {
@@ -833,6 +882,21 @@ export function createAssistantToolHandlers({
         recognition = { evidence: null, candidates: [], warnings: ["RECOGNITION_FAILED"] };
       }
       const candidates = Array.isArray(recognition?.candidates) ? recognition.candidates.slice(0, 10) : [];
+      let paymentProofResult = null;
+      try {
+        paymentProofResult = await paymentProofAdapter.analyze({
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: context.conversation,
+          eventId: context.event,
+          taskType: "ingest",
+          document: mediaAgentDocument(media, content),
+          recognition: { ...recognition, candidates },
+        });
+      } catch {
+        // The redacted Agent run is auxiliary to the existing atomic inbox
+        // write and must never make original-byte capture less reliable.
+      }
       let item;
       try {
         item = await withDocumentBlobWritePreflight(db, {
@@ -869,11 +933,22 @@ export function createAssistantToolHandlers({
         }));
       } catch (error) {
         if (error?.code === "DUPLICATE_DOCUMENT") {
-          return { text: "这张付款凭证已经在待处理区，无需重复上传。", status: "duplicate" };
+          return {
+            text: "这张付款凭证已经在待处理区，无需重复上传。",
+            status: "duplicate",
+            paymentProofResult,
+            runId: paymentProofResult?.runId ?? null,
+          };
         }
         throw error;
       }
-      return { text: `付款凭证已上传到待处理区，候选付款 ${candidates.length} 笔，请在系统内人工确认关联。`, status: "received", item };
+      return {
+        text: `付款凭证已上传到待处理区，候选付款 ${candidates.length} 笔，请在系统内人工确认关联。`,
+        status: "received",
+        item,
+        paymentProofResult,
+        runId: paymentProofResult?.runId ?? null,
+      };
     },
 
     async "reimbursement-report.preview"(args, context) {

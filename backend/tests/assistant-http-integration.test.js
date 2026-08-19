@@ -163,6 +163,93 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     }
   });
 
+  it("records redacted invoice and payment-proof Agent previews without changing lossless inbox replay", async () => {
+    const invoiceBody = eventBody({
+      text: "/invoice.ingest",
+      sourceMessageId: "agent-invoice-1",
+      media: {
+        type: "image",
+        fileName: "invoice-agent.png",
+        mimeType: "image/png",
+        contentBase64: VALID_PNG.toString("base64"),
+      },
+    });
+    const invoice = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:agent-invoice-1"),
+      body: JSON.stringify(invoiceBody),
+    });
+    assert.equal(invoice.response.status, 200);
+    assert.match(invoice.body.text, /发票已存入/);
+
+    const paymentBody = eventBody({
+      text: "/payment-proof.ingest",
+      sourceMessageId: "agent-payment-proof-1",
+      media: {
+        type: "image",
+        fileName: "payment-agent.png",
+        mimeType: "image/png",
+        contentBase64: VALID_PNG.toString("base64"),
+      },
+    });
+    const payment = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:agent-payment-proof-1"),
+      body: JSON.stringify(paymentBody),
+    });
+    assert.equal(payment.response.status, 200);
+    assert.match(payment.body.text, /付款凭证已上传/);
+
+    let db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    let runs = db.prepare(`
+      SELECT agent_id, contract_version, status, source, input_json, output_json, source_refs_json
+      FROM assistant_agent_runs
+      WHERE owner = 'assistant-owner' AND agent_id IN ('invoice', 'payment-proof')
+    `).all();
+    assert.equal(runs.length, 2);
+    const expectedContracts = new Map([
+      ["invoice", "invoice-v1"],
+      ["payment-proof", "payment-proof-v1"],
+    ]);
+    for (const run of runs) {
+      assert.equal(run.contract_version, expectedContracts.get(run.agent_id));
+      assert.equal(run.status, "succeeded");
+      assert.equal(run.source, "deterministic");
+      assert.equal(run.input_json.includes("owner"), false);
+      assert.equal(run.input_json.includes("fileName"), false);
+      assert.equal(run.input_json.includes("contentBase64"), false);
+      assert.equal(run.output_json.includes('"extractedText":'), false);
+      assert.equal(run.output_json.includes('"model":'), false);
+      assert.equal(run.output_json.includes('"ocr":'), false);
+      assert.equal(JSON.parse(run.output_json).writebackAllowed, false);
+      assert.equal(JSON.parse(run.source_refs_json)[0].id, sha256(VALID_PNG));
+    }
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_document_inbox").get().count, 1);
+    db.close();
+
+    const invoiceReplay = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:agent-invoice-1"),
+      body: JSON.stringify(invoiceBody),
+    });
+    const paymentReplay = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:agent-payment-proof-1"),
+      body: JSON.stringify(paymentBody),
+    });
+    assert.deepEqual(invoiceReplay.body, invoice.body);
+    assert.deepEqual(paymentReplay.body, payment.body);
+    db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    runs = db.prepare(
+      "SELECT id FROM assistant_agent_runs WHERE owner = 'assistant-owner' AND agent_id IN ('invoice', 'payment-proof')",
+    ).all();
+    assert.equal(runs.length, 2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_document_inbox").get().count, 1);
+    db.close();
+  });
+
   it("returns a bounded validation error for malformed remote media", async () => {
     const result = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
