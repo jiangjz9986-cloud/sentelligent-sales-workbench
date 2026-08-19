@@ -21,6 +21,7 @@ describe("assistant agent and tool registry", () => {
     }
     assert.equal(registry.getAgent("solution").enabled, false);
     assert.equal(registry.getAgent("personal-finance").enabled, false);
+    assert.match(registry.getAgent("advance-settlement").instructions, /结算方向和所有金额\/状态写入暂不执行/u);
   });
 
   it("exposes first-slice tool contracts without executable handlers", () => {

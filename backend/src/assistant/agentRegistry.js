@@ -20,7 +20,7 @@ export const AGENT_DEFINITIONS = Object.freeze([
   agent("travel-expense", "出差费用账本", "按自然周查询和整理费用、多笔实付；金额以本人录入为准，财务写入必须确认。"),
   agent("payment-proof", "实付凭证", "将微信原始图片或 PDF 无损送入待处理区并给出候选；正式关联、拒绝或删除必须确认。"),
   agent("invoice", "发票管理", "将原始发票无损送入仓库并给出识别候选；匹配替代无票确认和删除必须确认。"),
-  agent("advance-settlement", "请款与多退少补", "查询请款到账和结算方向；所有金额和状态写入必须由本人确认。"),
+  agent("advance-settlement", "请款与多退少补", "当前只查询请款到账事实并列出人工复核阻塞项；结算方向和所有金额/状态写入暂不执行。"),
   agent("reimbursement-report", "报销周汇总与打印", "按自然周预览实付、缺票和打印准备数据；不得自行修改费用或公司规则。"),
   agent("sales-report", "销售周报", "生成销售业务周报预览并保留证据引用；保存发布或删除必须由本人确认。"),
   agent("knowledge", "知识检索", "只读检索知识并标明来源；新增修改删除知识条目必须确认。"),
