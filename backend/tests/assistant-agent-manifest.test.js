@@ -14,6 +14,7 @@ describe("versioned assistant agent manifests", () => {
     const manifests = registry.list();
 
     assert.equal(manifests.length, 17);
+    assert.equal(new Set(manifests.map((manifest) => manifest.contractVersion)).size, manifests.length);
     for (const manifest of manifests) {
       assert.match(manifest.id, /^[a-z][a-z0-9-]+$/);
       assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
@@ -25,6 +26,8 @@ describe("versioned assistant agent manifests", () => {
       assert.ok(manifest.fallback.strategy.length > 0);
     }
     assert.equal(registry.get("sales-decision").version, "1.0.0");
+    assert.equal(registry.get("system-router").contractVersion, "system-router-v1");
+    assert.equal(registry.get("visit-capture").contractVersion, "visit-capture-v1");
     assert.equal(registry.get("opportunity").contractVersion, "opportunity-v1");
     assert.equal(registry.get("opportunity").modelPolicy, "none");
     assert.equal(registry.get("action-risk").contractVersion, "action-risk-v1");
@@ -43,6 +46,10 @@ describe("versioned assistant agent manifests", () => {
     assert.equal(registry.get("payment-proof").modelPolicy, "required_with_deterministic_fallback");
     assert.equal(registry.get("invoice").contractVersion, "invoice-v1");
     assert.equal(registry.get("invoice").modelPolicy, "required_with_deterministic_fallback");
+    assert.equal(registry.get("advance-settlement").contractVersion, "advance-settlement-v1");
+    assert.equal(registry.get("advance-settlement").lifecycle, "draft");
+    assert.equal(registry.get("solution").contractVersion, "solution-v1");
+    assert.equal(registry.get("personal-finance").contractVersion, "personal-finance-v1");
     assert.equal(registry.get("solution").enabled, false);
     assert.equal(registry.get("personal-finance").enabled, false);
   });

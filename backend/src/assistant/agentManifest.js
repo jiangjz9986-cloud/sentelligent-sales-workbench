@@ -131,6 +131,7 @@ function manifestDefinition(id, options = {}) {
 
 export const AGENT_MANIFESTS = deepFreeze([
   manifestDefinition("system-router", {
+    contractVersion: "system-router-v1",
     modelPolicy: "none",
     taskTypes: ["route_intent", "clarify", "help", "cancel", "confirm"],
     confirmation: { preview: "none", write: "none" },
@@ -164,11 +165,29 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "return deterministic owner-scoped counts and unknowns", status: "fallback" },
   }),
   manifestDefinition("visit-capture", {
+    contractVersion: "visit-capture-v1",
     modelPolicy: "required_with_deterministic_fallback",
     taskTypes: ["capture", "normalize", "preview", "link_candidates"],
     tools: ["visit-capture.collect", "visit-capture.preview", "visit-capture.confirm"],
     confirmation: { preview: "preview", write: "explicit" },
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs", "rawContent"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType", "rawContent"],
+      properties: { taskType: "enum", rawContent: "string", occurredAt: "iso_datetime", sourceChannel: "string", draftId: "string", context: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "visit-capture-v1", customerCandidate: "object", opportunityCandidate: "object", summary: "object" },
+    },
+    systemPrompt: [
+      "你是森特智行拜访记录 Agent。",
+      "只整理本人提交的拜访、电话或会议内容；客户和商机候选必须通过 owner-scoped 服务端快照验证。",
+      "严格区分原始事实、推断和未知，不得信任模型生成的实体 ID、金额、阶段或权限。",
+      "输出先形成可修改预览；只有本人明确确认后，现有写入工具才能创建快速记录。",
+    ].join(""),
+    fallback: { strategy: "return a bounded deterministic visit preview with unverified links cleared", status: "fallback" },
   }),
   manifestDefinition("customer", {
     contractVersion: "customer-v1",
@@ -413,8 +432,28 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "return a redacted review-required invoice preview", status: "fallback" },
   }),
   manifestDefinition("advance-settlement", {
+    contractVersion: "advance-settlement-v1",
+    lifecycle: "draft",
+    modelPolicy: "disabled_until_data_boundary_approved",
     taskTypes: ["advance_summary", "settlement_preview", "direction_explanation"],
     confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", weekStart: "date", advanceId: "string" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "advance-settlement-v1", advances: "array", settlementPreview: "object|null" },
+    },
+    systemPrompt: [
+      "你是森特智行请款与多退少补 Agent，目前处于草稿状态。",
+      "在 owner-scoped 请款数据适配器和注册工具完成前，不得生成金额结论、结算方向或执行写入。",
+      "未来输出必须保留请款、到账、费用和结算来源；所有金额和状态变更必须本人确认。",
+    ].join(""),
+    fallback: { strategy: "explain that the owner-scoped advance data adapter is not ready", status: "disabled" },
   }),
   manifestDefinition("reimbursement-report", {
     contractVersion: "reimbursement-report-v1",
@@ -511,19 +550,51 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "return bounded source-backed knowledge metadata and unknowns", status: "fallback" },
   }),
   manifestDefinition("solution", {
+    contractVersion: "solution-v1",
     lifecycle: "disabled",
     modelPolicy: "disabled_until_approved",
     taskTypes: ["solution_outline", "meeting_agenda", "proposal_draft"],
     confirmation: { preview: "preview", write: "explicit" },
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", customerId: "string", opportunityId: "string", sourceRefs: "array" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "solution-v1", outline: "object|null", agenda: "object|null", draft: "object|null" },
+    },
+    systemPrompt: [
+      "你是森特智行方案 Agent，当前功能关闭。",
+      "启用前只能说明功能未开放，不得调用工具、读取未授权材料、生成正式方案或声称已保存。",
+      "未来所有草稿必须基于 owner-scoped 客户、商机、知识和会议证据并保留来源。",
+    ].join(""),
     fallback: { strategy: "explain that the feature is disabled", status: "disabled" },
   }),
   manifestDefinition("personal-finance", {
+    contractVersion: "personal-finance-v1",
     lifecycle: "disabled",
     modelPolicy: "disabled_until_data_boundary_approved",
     taskTypes: ["ledger_summary", "cashflow_review", "personal_budget"],
     confirmation: { preview: "preview", write: "explicit" },
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", weekStart: "date" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "personal-finance-v1", ledger: "object|null", cashflow: "object|null", budget: "object|null" },
+    },
+    systemPrompt: [
+      "你是个人财务 Agent，当前功能关闭。",
+      "在个人账本数据边界、权限和确认机制完成前，只能说明未开放，不得读取或创建任何个人财务记录。",
+      "未来金额、分类、账户和预算必须来自 owner-scoped 数据并由本人确认写入。",
+    ].join(""),
     fallback: { strategy: "explain that the feature is disabled", status: "disabled" },
   }),
 ]);
