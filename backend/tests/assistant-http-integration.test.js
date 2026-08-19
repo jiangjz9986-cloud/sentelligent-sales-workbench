@@ -507,6 +507,60 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.match(reimbursement.body.text, /报销周汇总预览/);
   });
 
+  it("routes a request-settlement preview through the HTTP runtime without recording a transaction or crossing owners", async () => {
+    const scopedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    scopedDb.exec(`
+      INSERT INTO travel_expenses (
+        id, reference_code, owner, occurred_on, category, purpose, invoice_status, created_by, updated_by
+      ) VALUES ('settlement-http-expense', 'EXP-SETTLEMENT-HTTP-1', 'assistant-owner', '2026-08-18', 'transport', 'HTTP 结算测试', 'pending', 'assistant-owner', 'assistant-owner');
+      INSERT INTO travel_expense_payments (
+        id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method
+      ) VALUES ('settlement-http-payment', 'settlement-http-expense', 1, '2026-08-18T10:00:00+08:00', 12000, 10000, 'personal', 'wechat');
+      INSERT INTO travel_expense_advances (
+        id, owner, week_start, status, requested_cents, received_cents, requested_on, received_on, purpose, created_by, updated_by
+      ) VALUES ('settlement-http-advance', 'assistant-owner', '2026-08-17', 'received', 5000, 5000, '2026-08-17', '2026-08-17', 'HTTP 结算备用金', 'assistant-owner', 'assistant-owner');
+      INSERT INTO travel_expenses (
+        id, reference_code, owner, occurred_on, category, purpose, invoice_status, created_by, updated_by
+      ) VALUES ('settlement-http-other-expense', 'EXP-SETTLEMENT-HTTP-2', 'other-owner', '2026-08-18', 'transport', '另一 owner 费用', 'pending', 'other-owner', 'other-owner');
+      INSERT INTO travel_expense_payments (
+        id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method
+      ) VALUES ('settlement-http-other-payment', 'settlement-http-other-expense', 1, '2026-08-18T10:00:00+08:00', 9900, 9000, 'personal', 'wechat');
+      INSERT INTO travel_expense_advances (
+        id, owner, week_start, status, requested_cents, received_cents, requested_on, received_on, purpose, created_by, updated_by
+      ) VALUES ('settlement-http-other-advance', 'other-owner', '2026-08-17', 'received', 9000, 9000, '2026-08-17', '2026-08-17', '另一 owner 备用金', 'other-owner', 'other-owner');
+    `);
+    scopedDb.close();
+
+    const preview = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-preview"),
+      body: JSON.stringify(eventBody({ sourceMessageId: "settlement-preview", text: "多退少补 2026-08-17" })),
+    });
+    assert.equal(preview.response.status, 200);
+    assert.equal(preview.body.toolName, "advance-settlement.preview");
+    assert.match(preview.body.text, /请款结算预览/);
+    assert.match(preview.body.text, /公司应补/);
+    assert.match(preview.body.text, /尚未记录退款或补款交易/);
+
+    const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const run = verifyDb.prepare(`
+      SELECT output_json, input_json
+      FROM assistant_agent_runs
+      WHERE owner = 'assistant-owner' AND agent_id = 'advance-settlement'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get();
+    assert.ok(run);
+    const output = JSON.parse(run.output_json);
+    assert.equal(output.settlementPreview.direction, "company_reimburses");
+    assert.equal(output.settlementPreview.transaction.recorded, false);
+    assert.equal(output.settlementPreview.writebackAllowed, false);
+    assert.equal(output.advances.some((item) => item.id === "settlement-http-other-advance"), false);
+    assert.equal(run.input_json.includes("assistant-owner"), false);
+    assert.equal(verifyDb.prepare("SELECT COUNT(*) AS count FROM travel_expense_advances").get().count, 2);
+    verifyDb.close();
+  });
+
   it("scopes assistant customer search and sales reports to the machine owner", async () => {
     const scopedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     scopedDb.exec(`

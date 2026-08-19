@@ -4,7 +4,7 @@ import { evaluatePolicy } from "./policy.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
+const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
 
 function clean(value) { return String(value ?? "").trim(); }
 
@@ -87,6 +87,7 @@ function directArguments(toolName, args, mediaRef, context = {}) {
     ...(!clean(args) && !context.opportunityId && context.customerId ? { customerId: context.customerId } : {}),
   };
   if (toolName === "travel-expense.summary") return { week: clean(args) || "current" };
+  if (toolName === "advance-settlement.preview") return { week: clean(args) || "current" };
   if (toolName.includes("report.preview")) return reportArguments(args) ?? {};
   if (toolName === "visit-capture.collect") return { text: args };
   if (toolName === "visit-capture.preview" || toolName === "visit-capture.confirm") return { draftId: args };
@@ -123,6 +124,9 @@ function explicitPlan(command, args, registry, { mediaRef, context: rawContext }
     发票: ["invoice.ingest", (value) => ({ mediaRef: value || mediaRef })],
     报销周报: ["reimbursement-report.preview", reportArguments],
     报销周汇总: ["reimbursement-report.preview", reportArguments],
+    请款结算: ["advance-settlement.preview", (value) => ({ week: clean(value) || "current" })],
+    请款汇总: ["advance-settlement.preview", (value) => ({ week: clean(value) || "current" })],
+    多退少补: ["advance-settlement.preview", (value) => ({ week: clean(value) || "current" })],
     销售周报: ["sales-report.preview", reportArguments],
   };
   const alias = aliases[normalized];
@@ -150,6 +154,15 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
   }
   if (/报销(?:周报|周汇总)/.test(value)) {
     return makePlan({ tool: registry.getTool("reimbursement-report.preview"), arguments: { week: "current" }, confidence, source: "natural" });
+  }
+  const settlementPreview = value.match(/^(?:请款(?:结算|汇总)?|多退少补)(?:\s+(.+))?$/u);
+  if (settlementPreview) {
+    return makePlan({
+      tool: registry.getTool("advance-settlement.preview"),
+      arguments: { week: settlementPreview[1] ?? "current" },
+      confidence,
+      source: "natural",
+    });
   }
   if (/周报|周汇总/.test(value)) return clarify("你要生成销售周报，还是报销周汇总？", confidence);
   if (/^(?:战情(?:总览)?|工作台总览)$/u.test(value)) {

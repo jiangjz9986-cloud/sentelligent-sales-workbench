@@ -20,7 +20,7 @@ export const AGENT_DEFINITIONS = Object.freeze([
   agent("travel-expense", "出差费用账本", "按自然周查询和整理费用、多笔实付；金额以本人录入为准，财务写入必须确认。"),
   agent("payment-proof", "实付凭证", "将微信原始图片或 PDF 无损送入待处理区并给出候选；正式关联、拒绝或删除必须确认。"),
   agent("invoice", "发票管理", "将原始发票无损送入仓库并给出识别候选；匹配替代无票确认和删除必须确认。"),
-  agent("advance-settlement", "请款与多退少补", "当前只查询请款到账事实并列出人工复核阻塞项；结算方向和所有金额/状态写入暂不执行。"),
+  agent("advance-settlement", "请款与多退少补", "读取 owner-scoped 请款、到账、费用、资金来源和票据证据，生成可追溯的结算方向预览；不得创建退款/补款流水或修改任何财务事实。"),
   agent("reimbursement-report", "报销周汇总与打印", "按自然周预览实付、缺票和打印准备数据；不得自行修改费用或公司规则。"),
   agent("sales-report", "销售周报", "生成销售业务周报预览并保留证据引用；保存发布或删除必须由本人确认。"),
   agent("knowledge", "知识检索", "只读检索知识并标明来源；新增修改删除知识条目必须确认。"),
@@ -55,6 +55,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
   tool("invoice.ingest", "invoice", "接收并识别发票", { expenseId: { type: "string", required: false }, mediaRef: { type: "string", required: true } }),
   tool("reimbursement-report.preview", "reimbursement-report", "预览报销周汇总", { week: { type: "string", required: false }, periodStart: { type: "string", required: false }, periodEnd: { type: "string", required: false } }),
   tool("sales-report.preview", "sales-report", "预览销售业务周报", { week: { type: "string", required: false }, periodStart: { type: "string", required: false }, periodEnd: { type: "string", required: false } }),
+  tool("advance-settlement.preview", "advance-settlement", "预览请款结算方向和多退少补金额", { week: { type: "string", required: false }, advanceId: { type: "string", required: false } }),
 ]);
 
 export function createAgentRegistry({ agents = AGENT_DEFINITIONS, tools = TOOL_DEFINITIONS } = {}) {

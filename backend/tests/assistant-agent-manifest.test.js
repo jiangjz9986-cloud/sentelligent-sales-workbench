@@ -47,9 +47,10 @@ describe("versioned assistant agent manifests", () => {
     assert.equal(registry.get("invoice").contractVersion, "invoice-v1");
     assert.equal(registry.get("invoice").modelPolicy, "required_with_deterministic_fallback");
     assert.equal(registry.get("advance-settlement").contractVersion, "advance-settlement-v1");
-    assert.equal(registry.get("advance-settlement").lifecycle, "draft");
-    assert.deepEqual(registry.get("advance-settlement").tools, []);
-    assert.match(registry.get("advance-settlement").systemPrompt, /不得生成金额差额、应退\/应补方向/u);
+    assert.equal(registry.get("advance-settlement").lifecycle, "active");
+    assert.equal(registry.get("advance-settlement").modelPolicy, "none");
+    assert.deepEqual(registry.get("advance-settlement").tools, ["advance-settlement.preview"]);
+    assert.match(registry.get("advance-settlement").systemPrompt, /非公司直付的可报销金额/u);
     assert.equal(registry.get("solution").contractVersion, "solution-v1");
     assert.equal(registry.get("personal-finance").contractVersion, "personal-finance-v1");
     assert.equal(registry.get("solution").enabled, false);

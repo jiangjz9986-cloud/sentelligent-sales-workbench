@@ -137,6 +137,7 @@ import { createAssistantSessionRepository } from "./assistant/sessionRepository.
 import { createAssistantPendingActionRepository } from "./assistant/pendingActionRepository.js";
 import { createAssistantAgentRunRepository } from "./assistant/agentRunRepository.js";
 import { createAssistantBusinessSnapshotAdapter } from "./assistant/businessSnapshotAdapter.js";
+import { createAssistantSettlementSnapshotAdapter } from "./assistant/settlementSnapshotAdapter.js";
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
@@ -2582,6 +2583,12 @@ export function createServer(options = {}) {
       clock: assistantClock,
       resolveBusinessOwner: assistantBusinessOwnerResolver,
     });
+  const assistantSettlementSnapshotAdapter = options.assistantSettlementSnapshotAdapter
+    ?? createAssistantSettlementSnapshotAdapter({
+      db,
+      clock: assistantClock,
+      resolveBusinessOwner: assistantBusinessOwnerResolver,
+    });
   const assistantBusinessContextRepository = options.assistantBusinessContextRepository
     ?? createSalesLoopContextRepository(db, {
       clock: assistantClock,
@@ -2641,6 +2648,7 @@ export function createServer(options = {}) {
       paymentProofRecognizer,
       invoiceRecognizer,
       businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
+      settlementSnapshotAdapter: assistantSettlementSnapshotAdapter,
       agentRunRepository: assistantAgentRunRepository,
       salesReportAssistantAdapter: assistantSalesReportAdapter,
       salesLoopPreviewService: assistantSalesLoopPreviewService,

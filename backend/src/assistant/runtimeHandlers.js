@@ -5,7 +5,9 @@ import { withImmediateTransaction } from "../db/transaction.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
 import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
+import { createAdvanceSettlementAssistantAdapter } from "./advanceSettlementAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
+import { createAssistantSettlementSnapshotAdapter } from "./settlementSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
 import { createDashboardAssistantAdapter } from "./dashboardAssistantAdapter.js";
 import { createInvoiceAssistantAdapter } from "./invoiceAssistantAdapter.js";
@@ -231,6 +233,29 @@ function salesReportSummaryText(summary) {
   return lines.join("\n");
 }
 
+function settlementDirectionText(direction) {
+  return direction === "company_reimburses"
+    ? "公司应补"
+    : direction === "individual_returns"
+      ? "个人应退"
+      : direction === "balanced"
+        ? "已平衡"
+        : "方向待确认";
+}
+
+function settlementPreviewText(result) {
+  const preview = result?.settlementPreview ?? {};
+  const formula = preview.formula ?? {};
+  const lines = [
+    `请款结算预览（${result?.weekStart ?? "待确认"}）：${settlementDirectionText(preview.direction)}，金额 ${moneyFromCents(preview.amountCents)}。`,
+    `公式：非公司直付的可报销金额 ${moneyFromCents(formula.settlementEligibleCents)} - 已收到请款金额 ${moneyFromCents(formula.advanceReceivedCents)} = ${Number.isSafeInteger(formula.personalSettlementCents) ? `${formula.personalSettlementCents < 0 ? "-" : ""}${moneyFromCents(Math.abs(formula.personalSettlementCents))}` : "待确认"}。`,
+    "本次仅生成待人工确认预览，尚未记录退款或补款交易。",
+  ];
+  const blockers = Array.isArray(preview.blockers) ? preview.blockers : [];
+  if (blockers.length) lines.push(`待人工复核：${blockers.slice(0, 4).map((item) => item.question).join("；")}`);
+  return lines.join("\n");
+}
+
 function ambiguousEntityResult(label, items) {
   return {
     text: `找到多个${label}，请补充更具体的名称或内部标识：${items.slice(0, 5).map((item) => item.name).filter(Boolean).join("、")}`,
@@ -276,6 +301,7 @@ export function createAssistantToolHandlers({
   paymentProofRecognizer,
   invoiceRecognizer,
   businessSnapshotAdapter = null,
+  settlementSnapshotAdapter = null,
   customerAssistantAdapter = null,
   dashboardAssistantAdapter = null,
   invoiceAssistantAdapter = null,
@@ -286,6 +312,7 @@ export function createAssistantToolHandlers({
   itineraryAssistantAdapter = null,
   reimbursementReportAssistantAdapter = null,
   travelExpenseAssistantAdapter = null,
+  advanceSettlementAssistantAdapter = null,
   visitCaptureAssistantAdapter = null,
   salesReportAssistantAdapter = null,
   agentRunRepository = null,
@@ -296,6 +323,11 @@ export function createAssistantToolHandlers({
 } = {}) {
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
+  const settlementSnapshot = settlementSnapshotAdapter ?? createAssistantSettlementSnapshotAdapter({
+    db,
+    clock,
+    resolveBusinessOwner,
+  });
   const customerAdapter = customerAssistantAdapter ?? createCustomerAssistantAdapter({
     snapshotAdapter,
     runRepository: agentRunRepository,
@@ -336,6 +368,11 @@ export function createAssistantToolHandlers({
   });
   const travelExpenseAdapter = travelExpenseAssistantAdapter ?? createTravelExpenseAssistantAdapter({
     snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const advanceSettlementAdapter = advanceSettlementAssistantAdapter ?? createAdvanceSettlementAssistantAdapter({
+    settlementSnapshotAdapter: settlementSnapshot,
     runRepository: agentRunRepository,
     clock,
   });
@@ -971,6 +1008,31 @@ export function createAssistantToolHandlers({
         status: "preview",
         summary,
         report: result,
+        runId: result.runId,
+      };
+    },
+
+    async "advance-settlement.preview"(args, context) {
+      const result = await advanceSettlementAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "settlement_preview",
+        weekStart: args.week ?? args.periodStart ?? null,
+        advanceId: args.advanceId ?? null,
+      });
+      return {
+        text: settlementPreviewText(result),
+        status: result.status,
+        settlementPreview: result.settlementPreview,
+        summary: {
+          weekStart: result.weekStart,
+          summary: result.summary,
+          settlementEvidence: result.settlementEvidence,
+          truncated: result.truncated,
+        },
+        settlementResult: result,
         runId: result.runId,
       };
     },

@@ -35,7 +35,7 @@ function sourceFor(records = [advance()]) {
 }
 
 describe("advance-settlement assistant adapter", () => {
-  it("returns owner-scoped advance facts while keeping settlement direction blocked", async () => {
+  it("returns owner-scoped advance facts and a blocked settlement preview when evidence is unavailable", async () => {
     const source = sourceFor([
       advance(),
       advance({
@@ -54,16 +54,22 @@ describe("advance-settlement assistant adapter", () => {
     });
 
     assert.equal(result.schemaVersion, "advance-settlement-v1");
-    assert.equal(result.lifecycle, "draft");
+    assert.equal(result.lifecycle, "active");
     assert.equal(result.status, "review_required");
     assert.equal(result.advances.length, 2);
     assert.equal(result.advances[0].requestedCents, 100000);
     assert.equal(result.advances[0].receivedCents, 80000);
     assert.equal(result.advances[0].owner, undefined);
-    assert.equal(result.settlementPreview, null);
+    assert.equal(result.settlementPreview.status, "review_required");
+    assert.equal(result.settlementPreview.direction, null);
+    assert.equal(result.settlementPreview.amountCents, null);
+    assert.equal(result.settlementPreview.formula.personalSettlementCents, null);
+    assert.ok(result.settlementPreview.blockers.some((item) => item.key === "settlement_evidence"));
+    assert.ok(result.settlementPreview.blockers.some((item) => item.key === "settlement_transaction"));
+    assert.equal(result.settlementPreview.transaction.recorded, false);
     assert.equal(result.writebackAllowed, false);
     assert.equal(result.writebackPreview.allowed, false);
-    assert.ok(result.unknowns.some((item) => item.key === "settlement_direction"));
+    assert.ok(result.unknowns.some((item) => item.key === "settlement_evidence"));
     assert.deepEqual(result.sourceRefs, [
       { type: "travel_expense_advance", id: "advance-1" },
       { type: "travel_expense_advance", id: "advance-2" },
@@ -103,12 +109,117 @@ describe("advance-settlement assistant adapter", () => {
 
     assert.equal(result.weekStart, "2026-08-17");
     assert.equal(result.advances.length, 100);
-    assert.equal(result.truncated, true);
+    assert.deepEqual(result.truncated, { expenses: false, advances: true });
     assert.equal(result.advances[0].status, null);
     assert.equal(result.advances[0].requestedCents, null);
-    assert.equal(result.advances[0].notes, null);
+    assert.equal(Object.hasOwn(result.advances[0], "owner"), false);
     assert.ok(result.unknowns.some((item) => item.key === "truncated"));
     assert.deepEqual(source.calls, [{ owner: "owner-1", weekStart: "2026-08-17" }]);
+  });
+
+  it("returns a source-backed direction preview without recording a refund or top-up transaction", async () => {
+    const source = {
+      settlementSummary({ owner, weekStart }) {
+        assert.equal(owner, "owner-1");
+        assert.equal(weekStart, "2026-08-17");
+        return {
+          asOf: "2026-08-20T01:00:00.000Z",
+          weekStart,
+          expenses: [{
+            id: "expense-1",
+            version: 3,
+            occurredOn: weekStart,
+            category: "transport",
+            purpose: "客户拜访交通",
+            invoiceStatus: "covered",
+            payments: [{
+              id: "payment-1",
+              amountCents: 12000,
+              reimbursementCents: 10000,
+              fundingSource: "personal",
+              paidAt: "2026-08-18T10:00:00+08:00",
+            }],
+            actualPaidCents: 12000,
+            reimbursementCents: 10000,
+            settlementEligibleCents: 10000,
+            personalPaidCents: 12000,
+            companyDirectPaidCents: 0,
+            companyDirectReimbursementCents: 0,
+            advanceFundedCents: 0,
+            invoiceCoverage: {
+              confirmedCents: 10000,
+              missingCents: 0,
+              noInvoiceConfirmedCents: 0,
+              unacknowledgedMissingCents: 0,
+            },
+          }],
+          advances: [{
+            id: "advance-1",
+            version: 2,
+            weekStart,
+            status: "received",
+            requestedCents: 5000,
+            receivedCents: 5000,
+            requestedOn: weekStart,
+            receivedOn: weekStart,
+            purpose: "本周备用金",
+          }],
+          summary: {
+            expenseCount: 1,
+            paymentCount: 1,
+            actualPaidCents: 12000,
+            reimbursementCents: 10000,
+            personalPaidCents: 12000,
+            companyDirectPaidCents: 0,
+            companyDirectReimbursementCents: 0,
+            advanceFundedCents: 0,
+            settlementEligibleCents: 10000,
+            advanceReceivedCents: 5000,
+            personalSettlementCents: 5000,
+            settlementDirection: "company_reimburses",
+          },
+          invoiceCoverage: {
+            reimbursementCents: 10000,
+            confirmedCents: 10000,
+            missingCents: 0,
+            noInvoiceConfirmedCents: 0,
+            unacknowledgedMissingCents: 0,
+            complete: true,
+          },
+          evidence: {
+            advances: { count: 1, complete: true },
+            expenses: { count: 1, complete: true },
+            fundingSources: { complete: true, unknownCount: 0 },
+            invoiceCoverage: { complete: true, unacknowledgedMissingCents: 0 },
+            settlement: { arithmeticComplete: true, transactionRecorded: false },
+          },
+          issues: [],
+          truncated: { expenses: false, advances: false },
+          sourceRefs: [
+            { type: "travel_expense", id: "expense-1" },
+            { type: "travel_expense_advance", id: "advance-1" },
+          ],
+        };
+      },
+    };
+    const adapter = createAdvanceSettlementAssistantAdapter({ settlementSnapshotAdapter: source });
+    const result = await adapter.analyze({ owner: "owner-1", taskType: "settlement_preview", weekStart: "2026-08-17" });
+
+    assert.equal(result.status, "review_required");
+    assert.equal(result.settlementPreview.direction, "company_reimburses");
+    assert.equal(result.settlementPreview.amountCents, 5000);
+    assert.equal(result.settlementPreview.signedAmountCents, 5000);
+    assert.deepEqual(result.settlementPreview.formula, {
+      settlementEligibleCents: 10000,
+      advanceReceivedCents: 5000,
+      personalSettlementCents: 5000,
+      expression: "非公司直付的可报销金额 - 已收到请款金额",
+    });
+    assert.ok(result.settlementPreview.blockers.some((item) => item.key === "settlement_transaction"));
+    assert.equal(result.settlementPreview.transaction.recorded, false);
+    assert.equal(result.settlementPreview.transaction.type, null);
+    assert.equal(result.writebackPreview.allowed, false);
+    assert.equal(result.writebackAllowed, false);
   });
 
   it("replays a deterministic read without querying the advance source twice", async () => {
@@ -186,6 +297,10 @@ describe("advance-settlement assistant adapter", () => {
     );
     await assert.rejects(
       () => adapter.analyze({ owner: "owner-1", taskType: "write_money", weekStart: "2026-08-17" }),
+      (error) => error.code === "invalid_advance_settlement_input",
+    );
+    await assert.rejects(
+      () => adapter.analyze({ owner: "owner-1", advanceId: "/all", weekStart: "2026-08-17" }),
       (error) => error.code === "invalid_advance_settlement_input",
     );
     assert.deepEqual(source.calls, []);

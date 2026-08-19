@@ -92,8 +92,9 @@ describe("小小 capability metadata catalog", () => {
     assert.ok(byId.get("reimbursement-report").mappings.tools.includes("reimbursement-report.preview"));
     assert.equal(byId.get("sales-decision.preview").status, "ready");
     assert.equal(byId.get("sales-decision.preview").unavailableReason, null);
-    assert.equal(byId.get("advance-settlement").status, "partial");
-    assert.match(byId.get("advance-settlement").unavailableReason, /draft|应退\/应补/u);
+    assert.equal(byId.get("advance-settlement").status, "ready");
+    assert.equal(byId.get("advance-settlement").unavailableReason, null);
+    assert.ok(byId.get("advance-settlement").mappings.tools.includes("advance-settlement.preview"));
     assert.equal(byId.get("solution").status, "disabled");
     assert.equal(byId.get("personal-finance").status, "disabled");
     assert.equal(byId.get("payment-proof").mappings.tools[0], "payment-proof.ingest");
@@ -138,7 +139,7 @@ describe("小小 capability metadata catalog", () => {
       "system-router": [],
       "payment-proof": ["POST /api/travel-expense-document-inbox", "GET /api/travel-expense-document-inbox"],
       invoice: ["POST /api/invoices", "GET /api/invoices"],
-      "advance-settlement": ["GET /api/travel-expense-advances"],
+      "advance-settlement": ["GET /api/travel-expense-advances", "GET /api/travel-expenses"],
       solution: [],
       "personal-finance": [],
     };
