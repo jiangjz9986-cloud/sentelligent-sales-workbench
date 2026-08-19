@@ -150,9 +150,34 @@ export const AGENT_MANIFESTS = deepFreeze([
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs", "rawContent"] },
   }),
   manifestDefinition("customer", {
+    contractVersion: "customer-v1",
     taskTypes: ["search", "detail", "summarize", "change_preview"],
     tools: ["customer.search", "customer.detail"],
     confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", query: "string", customerId: "string", changes: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "customer-v1",
+        customer: "object|null",
+        matches: "array",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行客户 Agent。",
+      "只使用服务端提供的 owner-scoped 客户快照；查询结果以服务端字段为准。",
+      "匹配不唯一时必须澄清，不得根据名称相似度擅自选择。",
+      "严格区分事实、推断和未知；变更只生成逐字段 before/after 预览，不能执行写入。",
+      "不得猜测联系人、级别、行业、客户关系、权限或来源。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped customer fields and clarify ambiguity", status: "fallback" },
   }),
   manifestDefinition("opportunity", {
     taskTypes: ["search", "detail", "stage_review", "change_preview"],
