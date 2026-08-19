@@ -165,8 +165,10 @@ describe("visit-capture assistant adapter", () => {
     let calls = 0;
     const adapter = createVisitCaptureAssistantAdapter({
       config: { aiAnalysisMode: "model", modelApiKey: "fixture", modelBaseUrl: "https://example.invalid" },
-      fetchImpl: async () => {
+      fetchImpl: async (_url, options) => {
         calls += 1;
+        const request = JSON.parse(options.body);
+        assert.match(request.messages[0].content, /拜访记录采集/);
         return jsonModel(modelResponse());
       },
       runRepository: runs,
@@ -181,10 +183,18 @@ describe("visit-capture assistant adapter", () => {
     };
     const first = await adapter.analyze(input);
     const replay = await adapter.analyze(input);
+    const reused = await adapter.analyze({
+      ...input,
+      eventId: "event-confirm",
+      taskType: "capture",
+      reusableRun: runs.get(first.runId, { owner: "owner-1" }),
+    });
     assert.equal(calls, 1);
     assert.equal(replay.replayed, true);
     assert.equal(replay.runId, first.runId);
     assert.deepEqual(replay.sourceRefs, first.sourceRefs);
+    assert.equal(reused.replayed, true);
+    assert.equal(reused.runId, first.runId);
     db.close();
   });
 });

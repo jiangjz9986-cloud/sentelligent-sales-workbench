@@ -68,12 +68,12 @@ export function parseModelAnalysisContent(content, provider = "model") {
   };
 }
 
-function buildMessages(rawContent) {
+function buildMessages(rawContent, systemPrompt = null) {
   return [
     {
       role: "system",
       content: [
-        "你是森特智行 AI 销售作战台的销售记录分析器。",
+        systemPrompt || "你是森特智行 AI 销售作战台的销售记录分析器。",
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 customer、opportunity、weekly、summary。",
         "summary 必须包含 request、feedback、risk、action，每项都有 title 和 text。",
@@ -127,9 +127,9 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
   return content;
 }
 
-async function callModel(rawContent, config, fetchImpl) {
+async function callModel(rawContent, config, fetchImpl, systemPrompt = null) {
   const content = await callChatCompletion({
-    messages: buildMessages(rawContent),
+    messages: buildMessages(rawContent, systemPrompt),
     config,
     fetchImpl,
     maxTokens: 3200,
@@ -426,7 +426,7 @@ export async function analyzeQuickRecord(rawContent, config = {}, options = {}) 
   }
 
   try {
-    return await callModel(text, config, options.fetchImpl ?? fetch);
+    return await callModel(text, config, options.fetchImpl ?? fetch, options.systemPrompt ?? null);
   } catch {
     return fallbackAnalysis(text, "mock_model_fallback");
   }

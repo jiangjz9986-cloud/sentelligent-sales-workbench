@@ -35,6 +35,17 @@ function optionalText(value, name, max = MAX_TEXT) {
 function safeIdentifier(value) {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
+  if (
+    !normalized
+    || normalized.length > 200
+    || !/^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u.test(normalized)
+  ) return null;
+  return normalized;
+}
+
+function safeName(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
   if (!normalized || normalized.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)) return null;
   return normalized;
 }
@@ -97,7 +108,7 @@ function normalizeContext(value) {
 
 function candidateName(value) {
   if (!isPlainObject(value)) return null;
-  return safeIdentifier(value.value ?? value.name);
+  return safeName(value.value ?? value.name);
 }
 
 function candidateId(value) {
@@ -295,7 +306,7 @@ function proposal(type, summaryItem, refs) {
   };
 }
 
-function buildTextFacts({ legacy, customerCandidate, opportunityCandidate, occurredAt, sourceChannel, refs }) {
+function buildTextFacts({ customerCandidate, opportunityCandidate, occurredAt, sourceChannel, refs }) {
   const facts = [];
   if (customerCandidate?.id) facts.push(fact("customer_candidate", customerCandidate.name, sourceRef("customer", customerCandidate.id), customerCandidate.confidence));
   if (opportunityCandidate?.id) facts.push(fact("opportunity_candidate", opportunityCandidate.name, sourceRef("opportunity", opportunityCandidate.id), opportunityCandidate.confidence));
@@ -319,7 +330,8 @@ function buildOutput({
 }) {
   const fallback = sourceClass(source) === "fallback";
   const refs = uniqueSourceRefs([
-    sourceRef("quick_record_draft", draftId),
+    // A draft id is a presentation handle, not evidence. Only entities
+    // returned by the owner-scoped server snapshot may become source refs.
     customerCandidate?.sourceRef,
     opportunityCandidate?.sourceRef,
   ]);
@@ -345,6 +357,13 @@ function buildOutput({
   const writebackPreview = {
     requiresHumanConfirmation: true,
     creates: ["quick_record"],
+    quickRecord: {
+      rawContent,
+      occurredAt,
+      sourceChannel,
+      customerId: null,
+      opportunityId: null,
+    },
     customerId: null,
     opportunityId: null,
     customerFields: [],
@@ -385,7 +404,7 @@ function buildOutput({
     summary: legacy.summary,
     customerCandidate,
     opportunityCandidate,
-    facts: buildTextFacts({ legacy, customerCandidate, opportunityCandidate, occurredAt, sourceChannel, refs }),
+    facts: buildTextFacts({ customerCandidate, opportunityCandidate, occurredAt, sourceChannel, refs }),
     inferences,
     unknowns,
     actions,
@@ -405,6 +424,21 @@ function storedResult(run) {
     persistedSource: run.source,
     replayed: true,
   };
+}
+
+function restoreRun(run) {
+  return storedResult(run?.item ?? run);
+}
+
+function reusableRunForInput(run, { owner, channel, rawContent, context } = {}) {
+  const item = run?.item ?? run;
+  if (!item || !isPlainObject(item) || item.agentId !== AGENT_ID) return null;
+  if (item.owner && item.owner !== owner) return null;
+  if (item.channel && item.channel !== channel) return null;
+  if (!item.output || item.input?.rawContent !== rawContent) return null;
+  if ((item.input?.context?.customerId ?? null) !== (context?.customerId ?? null)) return null;
+  if ((item.input?.context?.opportunityId ?? null) !== (context?.opportunityId ?? null)) return null;
+  return storedResult(item);
 }
 
 export function createVisitCaptureAssistantAdapter({
@@ -430,6 +464,7 @@ export function createVisitCaptureAssistantAdapter({
     sourceChannel = "assistant",
     draftId = null,
     businessContext = null,
+    reusableRun = null,
   } = {}) {
     const normalizedOwner = text(owner, "owner", 200);
     const normalizedContent = text(rawContent, "rawContent", MAX_TEXT);
@@ -448,6 +483,14 @@ export function createVisitCaptureAssistantAdapter({
       taskType,
       context,
     };
+
+    const reused = reusableRunForInput(reusableRun, {
+      owner: normalizedOwner,
+      channel,
+      rawContent: normalizedContent,
+      context,
+    });
+    if (reused) return reused;
 
     let run = null;
     if (runRepository) {
@@ -469,7 +512,10 @@ export function createVisitCaptureAssistantAdapter({
     try {
       let modelResult;
       try {
-        modelResult = await analyzeQuickRecord(normalizedContent, config, { fetchImpl });
+        modelResult = await analyzeQuickRecord(normalizedContent, config, {
+          fetchImpl,
+          systemPrompt: manifest.systemPrompt,
+        });
       } catch {
         modelResult = null;
       }
@@ -553,7 +599,7 @@ export function createVisitCaptureAssistantAdapter({
     }
   }
 
-  return Object.freeze({ analyze });
+  return Object.freeze({ analyze, restore: restoreRun });
 }
 
-export { buildOutput as buildVisitCaptureOutput, minimalLegacyAnalysis };
+export { buildOutput as buildVisitCaptureOutput, minimalLegacyAnalysis, restoreRun as restoreVisitCaptureRun };

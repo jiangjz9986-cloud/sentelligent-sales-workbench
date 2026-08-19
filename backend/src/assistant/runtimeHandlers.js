@@ -28,8 +28,15 @@ function draftParts(sessionRepository, context) {
   return { conversation, parts };
 }
 
+const CONTROL_MESSAGES = new Set([
+  "记录", "录入", "确认", "取消", "帮助", "help", "/帮助", "/help",
+  // The orchestrator persists confirmation deliveries as this placeholder so
+  // the original code never enters the business draft.
+  "<confirmation-code>",
+]);
+
 function isControlMessage(text) {
-  return new Set(["记录", "录入", "确认", "取消", "帮助", "help", "/帮助", "/help"]).has(text);
+  return CONTROL_MESSAGES.has(text);
 }
 
 function draftText(sessionRepository, context) {
@@ -209,6 +216,33 @@ function ambiguousEntityResult(label, items) {
     question: `请确认要查看哪个${label}。`,
     items,
   };
+}
+
+function reusableVisitRun(repository, context, content) {
+  if (!repository) return null;
+  try {
+    const byEvent = context.event && typeof repository.getByEvent === "function"
+      ? repository.getByEvent({ owner: context.owner, channel: context.channel, eventId: context.event })
+      : null;
+    const byConversation = typeof repository.getLatest === "function"
+      ? repository.getLatest({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        agentId: "visit-capture",
+      })
+      : null;
+    for (const scoped of [byEvent, byConversation]) {
+      const input = scoped?.item?.input;
+      if (!scoped?.item?.output || input?.rawContent !== content) continue;
+      if ((input?.context?.customerId ?? null) !== (context.businessContext?.customerId ?? null)) continue;
+      if ((input?.context?.opportunityId ?? null) !== (context.businessContext?.opportunityId ?? null)) continue;
+      return scoped;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export function createAssistantToolHandlers({
@@ -468,6 +502,7 @@ export function createAssistantToolHandlers({
       if (!content) return { text: "当前没有待录入内容，请先发送记录内容。", status: "empty" };
       const now = clock();
       const occurredAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+      const reusableRun = reusableVisitRun(agentRunRepository, context, content);
       const analysis = await visitCaptureAdapter.analyze({
         owner: context.owner,
         channel: context.channel,
@@ -478,6 +513,7 @@ export function createAssistantToolHandlers({
         sourceChannel: "微信助手",
         draftId: null,
         businessContext: context.businessContext,
+        reusableRun,
       });
       const persisted = withImmediateTransaction(db, () => {
         const recordId = actionId || randomUUID();
