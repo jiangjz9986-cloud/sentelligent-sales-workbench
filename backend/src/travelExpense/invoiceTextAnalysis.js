@@ -1,4 +1,4 @@
-import { boundModelText } from "./modelTextBound.js";
+import { boundModelText, readBoundedModelResponseText } from "./modelTextBound.js";
 
 class InvoiceModelError extends Error {
   constructor(code, message) {
@@ -27,7 +27,7 @@ function stripJsonFence(value) {
 async function completionContent(response) {
   let body = response;
   if (body && typeof body.text === "function") {
-    const text = await body.text();
+    const text = await readBoundedModelResponseText(body);
     if (body.ok === false) throw stableError("MODEL_PROVIDER_ERROR");
     try {
       body = text ? JSON.parse(text) : {};

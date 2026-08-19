@@ -86,6 +86,9 @@ function setup(db, options = {}) {
     customersProvider: () => list,
     runner: options.runner ?? { run: async () => ({ payload: snapshot(), source: "test" }) },
     notifier: options.notifier ?? null,
+    ...(options.notificationEnabled
+      ? { notificationEnabled: options.notificationEnabled }
+      : {}),
     intervalMinutes: 60,
     batchSize: 10,
     clock: () => new Date("2026-08-17T00:00:00.000Z"),
@@ -129,6 +132,25 @@ describe("hospital tender scheduler", () => {
       assert.equal(schedulerRepository.getState().cycleProcessedCount, 12);
       assert.equal(schedulerRepository.listRuns().length, 2);
       assert.equal(tenderRepository.getNotice("nonexistent"), null);
+    });
+  });
+
+  it("continues collection without marking a batch failed when notification is disabled", async () => {
+    await withDb(async (db) => {
+      let delivered = false;
+      const { scheduler, schedulerRepository } = setup(db, {
+        notifier: async () => {
+          delivered = true;
+          return 1;
+        },
+        notificationEnabled: () => false,
+      });
+      const result = await scheduler.runNext({ force: true });
+      assert.equal(result.status, "success");
+      assert.equal(delivered, false);
+      assert.equal(result.notificationCount, 0);
+      assert.equal(schedulerRepository.getState().cursorCustomerId, "customer-10");
+      assert.equal(schedulerRepository.getState().lastError, null);
     });
   });
 

@@ -2945,6 +2945,15 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "DELETE") {
           return jsonResponse({ item: { configured: false, masked: null, status: "cleared" } });
         }
+        if (url.endsWith("/api/settings/pushplus-token") && options.method === "PUT") {
+          return jsonResponse({ item: { configured: true, masked: "push••••test", status: "active", source: "settings" } });
+        }
+        if (url.endsWith("/api/settings/pushplus-token") && options.method === "DELETE") {
+          return jsonResponse({ item: { configured: false, masked: null, status: "cleared", source: "settings" } });
+        }
+        if (url.endsWith("/api/settings/pushplus/test")) {
+          return jsonResponse({ item: { status: "sent", notificationCount: 1, testedAt: "2026-08-20T00:00:00.000Z" } });
+        }
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
@@ -2954,11 +2963,18 @@ describe("sales workbench API client", () => {
     assert.equal((await api.rotateIcostToken()).token, syntheticToken);
     await api.saveDeepSeekApiKey(syntheticKey);
     await api.clearDeepSeekApiKey();
+    await api.savePushplusToken(syntheticToken);
+    await api.testPushplusToken();
+    await api.clearPushplusToken();
 
     assert.equal(calls[1].options.method, "POST");
     assert.equal(calls[1].options.headers["X-CSRF-Token"], "fixture-csrf-token");
     assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
     assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
+    assert.equal(calls[4].options.body, JSON.stringify({ token: syntheticToken }));
+    assert.equal(calls[5].options.method, "POST");
+    assert.equal(calls[5].options.headers["X-CSRF-Token"], "fixture-csrf-token");
+    assert.equal(calls[6].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
 
   it("manages Shortcut tokens with cookie credentials and never treats the list as a secret source", async () => {

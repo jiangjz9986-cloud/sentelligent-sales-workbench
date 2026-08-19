@@ -149,8 +149,13 @@ import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
 import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
 import { createHospitalTenderScheduler } from "./hospitalTender/scheduler.js";
-import { createSecureSettingsRepository, DEEPSEEK_SETTING_KEY, ICOST_SETTING_KEY } from "./settings/repository.js";
-import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
+import {
+  createSecureSettingsRepository,
+  DEEPSEEK_SETTING_KEY,
+  ICOST_SETTING_KEY,
+  PUSHPLUS_SETTING_KEY,
+} from "./settings/repository.js";
+import { isValidSettingsEncryptionKey, maskSecret } from "./settings/secretBox.js";
 import {
   ingestHospitalTenderSnapshot,
   normalizeHospitalTenderSyncPayload,
@@ -375,6 +380,10 @@ function encodeContentDispositionFileName(fileName) {
 
 function inlineContentDisposition(fileName) {
   return `inline; filename*=UTF-8''${encodeContentDispositionFileName(fileName)}`;
+}
+
+function attachmentContentDisposition(fileName) {
+  return `attachment; filename*=UTF-8''${encodeContentDispositionFileName(fileName)}`;
 }
 
 function validateInvoiceUploadPayload(value) {
@@ -997,6 +1006,19 @@ function validateSecureSettingBody(value, { field, max = 500 } = {}) {
   return body[field].trim();
 }
 
+function pushplusDeliveryErrorCode(error) {
+  const code = String(error?.message ?? "notification_failed");
+  return new Set([
+    "notification unavailable",
+    "notification rejected",
+    "notification response invalid",
+    "notification content too large",
+    "notification batch too large",
+  ]).has(code)
+    ? code.replaceAll(" ", "_")
+    : "notification_failed";
+}
+
 function validationFailure(field, rule = "reference") {
   throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", {
     [field]: rule,
@@ -1051,6 +1073,7 @@ function runVersionedUpdate(db, {
   expectedVersion,
   setSql,
   params,
+  extraWhereSql = "",
   softDeletable = true,
 }) {
   const result = run(
@@ -1059,8 +1082,9 @@ function runVersionedUpdate(db, {
      SET ${setSql},
          version = version + 1,
          updated_at = CURRENT_TIMESTAMP
-     WHERE id = $id
+       WHERE id = $id
        AND version = $expectedVersion
+       ${extraWhereSql}
        ${softDeletable ? "AND deleted_at IS NULL" : ""}`,
     {
       ...params,
@@ -1135,23 +1159,27 @@ function softDeleteRecord(db, {
   });
 }
 
-function activeCustomerRow(db, id) {
+function activeCustomerRow(db, id, owner) {
   if (!id) return null;
+  const ownerClause = owner === undefined || owner === null ? "" : " AND owner = $owner";
   return get(
     db,
-    "SELECT id, name FROM customers WHERE id = $id AND deleted_at IS NULL",
-    { $id: id },
+    `SELECT id, name FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause}`,
+    owner === undefined || owner === null ? { $id: id } : { $id: id, $owner: owner },
   );
 }
 
-function activeOpportunityRow(db, id) {
+function activeOpportunityRow(db, id, owner) {
   if (!id) return null;
-  const row = activeOpportunityEntityRow(db, id);
+  const row = activeOpportunityEntityRow(db, id, owner);
   return row ? { id: row.id, customerId: row.customer_id } : null;
 }
 
-function activeOpportunityEntityRow(db, id) {
+function activeOpportunityEntityRow(db, id, owner) {
   if (!id) return null;
+  const ownerClause = owner === undefined || owner === null
+    ? ""
+    : " AND opportunities.owner = $owner AND customers.owner = $owner";
   return get(
     db,
     `SELECT opportunities.*
@@ -1159,8 +1187,8 @@ function activeOpportunityEntityRow(db, id) {
      INNER JOIN customers ON customers.id = opportunities.customer_id
      WHERE opportunities.id = $id
        AND opportunities.deleted_at IS NULL
-       AND customers.deleted_at IS NULL`,
-    { $id: id },
+       AND customers.deleted_at IS NULL${ownerClause}`,
+    owner === undefined || owner === null ? { $id: id } : { $id: id, $owner: owner },
   );
 }
 
@@ -1198,25 +1226,41 @@ function activeSolutionDraftRows(db) {
   );
 }
 
-function requireActiveCustomer(db, id) {
-  const customer = activeCustomerRow(db, id);
+function requireActiveCustomer(db, id, owner) {
+  const customer = activeCustomerRow(db, id, owner);
   if (!customer) validationFailure("customerId");
   return customer;
 }
 
-function requireActiveOpportunity(db, id) {
-  const opportunity = activeOpportunityRow(db, id);
+function requireActiveOpportunity(db, id, owner) {
+  const opportunity = activeOpportunityRow(db, id, owner);
   if (!opportunity) validationFailure("opportunityId");
   return opportunity;
 }
 
-function validateCustomerOpportunityPair(db, customerId, opportunityId) {
-  if (customerId) requireActiveCustomer(db, customerId);
+function validateCustomerOpportunityPair(db, customerId, opportunityId, { owner } = {}) {
+  if (customerId) requireActiveCustomer(db, customerId, owner);
   if (!opportunityId) return;
-  const opportunity = requireActiveOpportunity(db, opportunityId);
+  const opportunity = requireActiveOpportunity(db, opportunityId, owner);
   if (customerId && opportunity.customerId !== customerId) {
     validationFailure("opportunityId", "relationship");
   }
+}
+
+function quickRecordOwnerScope(requestIdentity, alias = "") {
+  if (
+    !requestIdentity
+    || requestIdentity.kind === "anonymous"
+    || typeof requestIdentity.account !== "string"
+    || !requestIdentity.account.trim()
+  ) {
+    return { clause: "", params: {} };
+  }
+  const prefix = alias ? `${alias}.` : "";
+  return {
+    clause: ` AND ${prefix}owner = $owner`,
+    params: { $owner: requestIdentity.account },
+  };
 }
 
 function createCustomer(db, body) {
@@ -2132,7 +2176,7 @@ function authenticateRequest(db, config, request, now = Date.now()) {
 }
 
 function isCookieWrite(method) {
-  return method === "POST" || method === "PATCH" || method === "DELETE";
+  return method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
 }
 
 function itineraryAuditSnapshot(item) {
@@ -2371,7 +2415,7 @@ export function createServer(options = {}) {
     // value. The environment fallback remains for legacy non-production/test
     // deployments that have not enabled persisted settings yet.
     modelApiKeyProvider: () => secureSettingsRepository
-      ? (secureSettingsRepository.readSecret(DEEPSEEK_SETTING_KEY) || config.modelApiKey)
+      ? secureSettingsRepository.resolveSecret(DEEPSEEK_SETTING_KEY, config.modelApiKey)
       : config.modelApiKey,
   };
   const hospitalTenderRepository = createHospitalTenderRepository(db, {
@@ -2391,14 +2435,69 @@ export function createServer(options = {}) {
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
       : {}),
   });
+  const resolvePushplusToken = () => secureSettingsRepository
+    ? secureSettingsRepository.resolveSecret(PUSHPLUS_SETTING_KEY, config.hospitalTenderPushplusToken)
+    : config.hospitalTenderPushplusToken;
+  const secureSettingMetadata = (key, fallback = "") => {
+    const stored = secureSettingsRepository?.has(key) ?? false;
+    if (stored) {
+      const item = secureSettingsRepository.metadata(key);
+      return {
+        ...item,
+        // A cleared row is an explicit suppression of the legacy environment
+        // fallback, so it must not be presented as an active settings value.
+        source: item.status === "active" ? "settings" : "none",
+        fallbackSuppressed: item.status === "cleared",
+      };
+    }
+    const environmentSecret = String(fallback ?? "").trim();
+    const item = secureSettingsRepository?.metadata(key) ?? {
+      configured: false,
+      masked: null,
+      createdAt: null,
+      rotatedAt: null,
+      updatedAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastErrorCode: null,
+      lastDeliveryCount: null,
+      lastChunkCount: null,
+      status: "not_configured",
+    };
+    return {
+      ...item,
+      configured: Boolean(environmentSecret),
+      masked: environmentSecret ? maskSecret(environmentSecret) : null,
+      status: environmentSecret ? "active" : "not_configured",
+      source: environmentSecret ? "environment" : "none",
+      fallbackSuppressed: false,
+    };
+  };
   const hospitalTenderNotifier = options.hospitalTenderNotifier !== undefined
     ? options.hospitalTenderNotifier
     : createHospitalTenderNotifier({
-        token: config.hospitalTenderPushplusToken,
+        ...(secureSettingsRepository
+          ? { tokenProvider: resolvePushplusToken }
+          : { token: config.hospitalTenderPushplusToken }),
         fetchImpl: options.fetchImpl ?? fetch,
+        onSuccess: ({ count, chunkCount }) => {
+          if (!secureSettingsRepository || !secureSettingsRepository.has(PUSHPLUS_SETTING_KEY)) return;
+          try {
+            secureSettingsRepository.recordDeliverySuccess(PUSHPLUS_SETTING_KEY, {
+              count,
+              chunkCount,
+            });
+          } catch {}
+        },
+        onFailure: ({ errorCode }) => {
+          if (!secureSettingsRepository || !secureSettingsRepository.has(PUSHPLUS_SETTING_KEY)) return;
+          try {
+            secureSettingsRepository.recordDeliveryFailure(PUSHPLUS_SETTING_KEY, { errorCode });
+          } catch {}
+        },
       });
   const hospitalTenderNotificationState = () => ({
-    status: hospitalTenderNotifier ? "enabled" : "disabled",
+    status: hospitalTenderNotifier && resolvePushplusToken() ? "enabled" : "disabled",
     provider: "pushplus",
   });
   const hospitalTenderScheduler = createHospitalTenderScheduler({
@@ -2411,6 +2510,11 @@ export function createServer(options = {}) {
       "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY id ASC",
     ).map(customerFromRow),
     notifier: hospitalTenderNotifier,
+    // The notifier is intentionally constructed once so a newly saved or
+    // cleared encrypted setting takes effect without restarting the scheduler.
+    // A missing/cleared token disables delivery while allowing collection and
+    // durable matching to continue normally.
+    notificationEnabled: () => Boolean(resolvePushplusToken()),
     clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
     ...(options.hospitalTenderSchedulerIdFactory
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
@@ -3080,8 +3184,10 @@ export function createServer(options = {}) {
           secureSettingsRepository
             ? {
               ...config,
-              icostWebhookToken: secureSettingsRepository.readSecret(ICOST_SETTING_KEY)
-                || config.icostWebhookToken,
+              icostWebhookToken: secureSettingsRepository.resolveSecret(
+                ICOST_SETTING_KEY,
+                config.icostWebhookToken,
+              ),
             }
             : config,
         );
@@ -3556,11 +3662,18 @@ export function createServer(options = {}) {
         const repository = requireSecureSettings(secureSettingsRepository);
         let item;
         try {
-          item = repository.listMetadata();
+          item = {
+            icost: secureSettingMetadata(ICOST_SETTING_KEY, config.icostWebhookToken),
+            deepseek: secureSettingMetadata(DEEPSEEK_SETTING_KEY, config.modelApiKey),
+            pushplus: secureSettingMetadata(
+              PUSHPLUS_SETTING_KEY,
+              config.hospitalTenderPushplusToken,
+            ),
+          };
         } catch {
           throw new HttpError(503, "SECURE_SETTINGS_UNAVAILABLE", "Secure settings storage is unavailable");
         }
-        sendJson(response, 200, { item });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -3596,7 +3709,7 @@ export function createServer(options = {}) {
             // This is the only endpoint that returns the generated token.
             token: result.token,
           },
-        });
+        }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -3625,7 +3738,7 @@ export function createServer(options = {}) {
           });
           return saved;
         });
-        sendJson(response, 200, { item });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -3656,7 +3769,121 @@ export function createServer(options = {}) {
           });
           return cleared;
         });
-        sendJson(response, 200, { item });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        (request.method === "PUT" || request.method === "POST")
+        && (url.pathname === "/api/settings/pushplus-token" || url.pathname === "/api/settings/pushplus")
+      ) {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const value = validateSecureSettingBody(await readJson(request), { field: "token", max: 512 });
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const item = withImmediateTransaction(db, () => {
+          const saved = repository.setSecret(PUSHPLUS_SETTING_KEY, value);
+          insertAudit(db, {
+            action: "settings.pushplus_token.save",
+            entityType: "secure_setting",
+            entityId: PUSHPLUS_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: {
+              status: saved.status,
+              masked: saved.masked,
+              updatedAt: saved.updatedAt,
+            },
+            metadata: { setting: PUSHPLUS_SETTING_KEY },
+          });
+          return saved;
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "DELETE"
+        && (url.pathname === "/api/settings/pushplus-token" || url.pathname === "/api/settings/pushplus")
+      ) {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const confirmation = validateSecureSettingBody(
+          await readJson(request),
+          { field: "confirmation", max: 32 },
+        );
+        if (confirmation !== "CLEAR") {
+          throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear the PushPlus token");
+        }
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const item = withImmediateTransaction(db, () => {
+          const cleared = repository.clearSecret(PUSHPLUS_SETTING_KEY);
+          insertAudit(db, {
+            action: "settings.pushplus_token.clear",
+            entityType: "secure_setting",
+            entityId: PUSHPLUS_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: { status: cleared.status, updatedAt: cleared.updatedAt },
+            metadata: { setting: PUSHPLUS_SETTING_KEY, confirmation: "provided" },
+          });
+          return cleared;
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/settings/pushplus/test") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        await validateEmptyBody(request);
+        const repository = requireSecureSettings(secureSettingsRepository);
+        if (!resolvePushplusToken()) {
+          throw new HttpError(409, "PUSHPLUS_NOT_CONFIGURED", "PushPlus Token 尚未配置");
+        }
+        if (typeof hospitalTenderNotifier !== "function") {
+          throw new HttpError(503, "PUSHPLUS_UNAVAILABLE", "PushPlus 通知服务暂不可用");
+        }
+        try {
+          const count = await hospitalTenderNotifier({
+            cycleNumber: 0,
+            batchCustomerIds: [],
+            notices: [{
+              title: "森特智行测试通知",
+              sourceName: "系统配置",
+              publishedAt: new Date().toISOString(),
+            }],
+          });
+          insertAudit(db, {
+            action: "settings.pushplus_token.test",
+            entityType: "secure_setting",
+            entityId: PUSHPLUS_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: { status: "sent", notificationCount: count },
+            metadata: { setting: PUSHPLUS_SETTING_KEY },
+          });
+          sendJson(response, 200, {
+            item: {
+              status: "sent",
+              notificationCount: count,
+              testedAt: new Date().toISOString(),
+            },
+          }, { "Cache-Control": "no-store" });
+        } catch (error) {
+          const errorCode = pushplusDeliveryErrorCode(error);
+          insertAudit(db, {
+            action: "settings.pushplus_token.test_failed",
+            entityType: "secure_setting",
+            entityId: PUSHPLUS_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: { status: "failed", errorCode },
+            metadata: { setting: PUSHPLUS_SETTING_KEY },
+          });
+          throw new HttpError(502, "PUSHPLUS_TEST_FAILED", "PushPlus 测试通知失败，请检查 Token 或稍后重试");
+        }
         return;
       }
 
@@ -4024,7 +4251,7 @@ export function createServer(options = {}) {
           });
           return documentInboxResponseItem(matchedInbox);
         }));
-        sendJson(response, 200, { item });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -5983,7 +6210,14 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/quick-records") {
-        const rows = all(db, "SELECT * FROM quick_records WHERE voided_at IS NULL ORDER BY created_at DESC");
+        const ownerScope = quickRecordOwnerScope(request.authContext);
+        const rows = all(
+          db,
+          `SELECT * FROM quick_records
+           WHERE voided_at IS NULL${ownerScope.clause}
+           ORDER BY created_at DESC`,
+          ownerScope.params,
+        );
         sendJson(response, 200, { items: rows.map((row) => quickRecordHistoryFromRow(db, row)) });
         return;
       }
@@ -6011,7 +6245,9 @@ export function createServer(options = {}) {
         const body = await readValidatedJson(request, requestSchemas.quickRecordCreate);
         const rawContent = String(body.rawContent ?? "").trim();
         const item = withImmediateTransaction(db, () => {
-          validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
+          validateCustomerOpportunityPair(db, body.customerId, body.opportunityId, {
+            owner: request.authContext.kind === "machine" ? request.authContext.account : undefined,
+          });
           const id = randomUUID();
           run(
             db,
@@ -6060,8 +6296,13 @@ export function createServer(options = {}) {
         parts[3] === "analyze"
       ) {
         await validateEmptyBody(request);
+        const ownerScope = quickRecordOwnerScope(request.authContext);
         const quickRecord = quickRecordFromRow(
-          get(db, "SELECT * FROM quick_records WHERE id = $id", { $id: parts[2] }),
+          get(
+            db,
+            `SELECT * FROM quick_records WHERE id = $id${ownerScope.clause}`,
+            { $id: parts[2], ...ownerScope.params },
+          ),
         );
         if (!quickRecord) return notFound(response);
 
@@ -6073,8 +6314,8 @@ export function createServer(options = {}) {
         const result = withImmediateTransaction(db, () => {
           const current = quickRecordFromRow(get(
             db,
-            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
-            { $id: quickRecord.id },
+            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
+            { $id: quickRecord.id, ...ownerScope.params },
           ));
           if (!current) notFound();
 
@@ -6091,13 +6332,16 @@ export function createServer(options = {}) {
               $analysisJson: JSON.stringify(analysis),
             },
           );
-          run(db, "UPDATE quick_records SET status = 'analyzed', updated_at = CURRENT_TIMESTAMP WHERE id = $id", {
+          run(db, `UPDATE quick_records
+            SET status = 'analyzed', updated_at = CURRENT_TIMESTAMP
+            WHERE id = $id${ownerScope.clause}`, {
             $id: current.id,
+            ...ownerScope.params,
           });
           const updatedRecord = quickRecordFromRow(get(
             db,
-            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
-            { $id: current.id },
+            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
+            { $id: current.id, ...ownerScope.params },
           ));
           const insight = insightFromRow(get(db, "SELECT * FROM ai_insights WHERE id = $id", { $id: id }));
           insertAudit(db, {
@@ -6128,12 +6372,13 @@ export function createServer(options = {}) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.quickRecordAnalysisPatch);
         if (Object.keys(body.summary).length === 0) validationFailure("summary", "minKeys");
+        const ownerScope = quickRecordOwnerScope(request.authContext);
 
         const result = withImmediateTransaction(db, () => {
           const beforeRecord = quickRecordFromRow(get(
             db,
-            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
-            { $id: parts[2] },
+            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
+            { $id: parts[2], ...ownerScope.params },
           ));
           if (!beforeRecord) notFound();
           const insightRow = getLatestInsightRow(db, beforeRecord.id);
@@ -6161,8 +6406,9 @@ export function createServer(options = {}) {
             id: beforeRecord.id,
             expectedVersion,
             softDeletable: false,
+            extraWhereSql: ownerScope.clause,
             setSql: "status = $status",
-            params: { $status: beforeRecord.status },
+            params: { $status: beforeRecord.status, ...ownerScope.params },
           });
           run(
             db,
@@ -6175,8 +6421,8 @@ export function createServer(options = {}) {
 
           const quickRecord = quickRecordFromRow(get(
             db,
-            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
-            { $id: beforeRecord.id },
+            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
+            { $id: beforeRecord.id, ...ownerScope.params },
           ));
           const beforeAnalysis = insightFromRow(insightRow);
           const analysis = insightFromRow(get(
@@ -6346,6 +6592,7 @@ export function createServer(options = {}) {
           key: idempotencyKey,
           hash: requestHash(body),
         };
+        const ownerScope = quickRecordOwnerScope(request.authContext);
 
         const result = withImmediateTransaction(db, () => {
           const claim = claimIdempotency(db, idempotencyScope);
@@ -6353,8 +6600,8 @@ export function createServer(options = {}) {
 
           const quickRecord = quickRecordFromRow(get(
             db,
-            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
-            { $id: parts[2] },
+            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
+            { $id: parts[2], ...ownerScope.params },
           ));
           if (!quickRecord) notFound();
           if (quickRecord.version !== expectedQuickRecordVersion) {
@@ -6381,12 +6628,18 @@ export function createServer(options = {}) {
           const finalCustomer = nextCustomerId
             ? customerFromRow(get(
               db,
-              "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL",
-              { $id: nextCustomerId },
+              `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${request.authContext.kind === "machine" ? " AND owner = $owner" : ""}`,
+              request.authContext.kind === "machine"
+                ? { $id: nextCustomerId, $owner: request.authContext.account }
+                : { $id: nextCustomerId },
             ))
             : null;
           const finalOpportunity = nextOpportunityId
-            ? opportunityFromRow(activeOpportunityEntityRow(db, nextOpportunityId))
+            ? opportunityFromRow(activeOpportunityEntityRow(
+              db,
+              nextOpportunityId,
+              request.authContext.kind === "machine" ? request.authContext.account : undefined,
+            ))
             : null;
           if (nextCustomerId && !finalCustomer) validationFailure("customerId");
           if (nextOpportunityId && !finalOpportunity) validationFailure("opportunityId");
@@ -6442,18 +6695,20 @@ export function createServer(options = {}) {
             id: quickRecord.id,
             expectedVersion: expectedQuickRecordVersion,
             softDeletable: false,
+            extraWhereSql: ownerScope.clause,
             setSql: `status = 'confirmed',
                  customer_id = $customerId,
                  opportunity_id = $opportunityId`,
             params: {
               $customerId: nextCustomerId ?? null,
               $opportunityId: nextOpportunityId ?? null,
+              ...ownerScope.params,
             },
           });
           const updatedRecord = quickRecordFromRow(get(
             db,
-            "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
-            { $id: quickRecord.id },
+            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
+            { $id: quickRecord.id, ...ownerScope.params },
           ));
           const updatedCustomer = customerBefore
             ? syncCustomerFromQuickRecord(
@@ -6672,7 +6927,7 @@ export function createServer(options = {}) {
         const fileName = `weekly-report-${item.periodStart}-${item.periodEnd}.doc`;
         sendDocument(response, 200, buildWeeklyWordDocument(item), {
           "Content-Type": "application/msword; charset=utf-8",
-          "Content-Disposition": `attachment; filename="${fileName}"`,
+          "Content-Disposition": attachmentContentDisposition(fileName),
         });
         return;
       }

@@ -1335,5 +1335,30 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       });
       return response.item;
     },
+
+    async savePushplusToken(token) {
+      if (typeof token !== "string" || !token.trim()) throw new TypeError("PushPlus Token is required");
+      const response = await requestApi("/api/settings/pushplus-token", {
+        method: "PUT",
+        body: JSON.stringify({ token: token.trim() }),
+      });
+      return response.item;
+    },
+
+    async clearPushplusToken() {
+      const response = await requestApi("/api/settings/pushplus-token", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: "CLEAR" }),
+      });
+      return response.item;
+    },
+
+    async testPushplusToken() {
+      const response = await requestApi("/api/settings/pushplus/test", {
+        method: "POST",
+        body: "{}",
+      });
+      return response.item;
+    },
   };
 }

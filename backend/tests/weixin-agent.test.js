@@ -606,4 +606,33 @@ describe("weixin sales workbench agent", () => {
     assert.ok(calls.some(([method, key]) => method === "set" && key === "persistent-session"));
     assert.ok(sessions.has("persistent-session"));
   });
+
+  it("bounds chunked workbench responses before buffering them in memory", async () => {
+    const chunk = new Uint8Array(600 * 1024);
+    let reads = 0;
+    let cancelled = false;
+    const agent = createSalesWorkbenchWeixinAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "machine-token",
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        body: {
+          getReader: () => ({
+            read: async () => (reads++ < 2 ? { value: chunk, done: false } : { value: undefined, done: true }),
+            cancel: async () => { cancelled = true; },
+            releaseLock: () => {},
+          }),
+        },
+        text: async () => assert.fail("streaming responses must not fall back to text()"),
+      }),
+    });
+
+    await assert.rejects(
+      agent.chat({ conversationId: "bounded-response", text: "查询医院" }),
+      /Backend response body is too large/,
+    );
+    assert.equal(cancelled, true);
+  });
 });

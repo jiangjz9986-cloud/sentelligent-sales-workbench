@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import { assertWeixinSenderAllowed } from "../assistant/weixinEvent.js";
 import { loadConfig } from "../config.js";
 import { createRemoteClawbotAgent } from "./remoteAgent.js";
 
@@ -28,6 +29,16 @@ export function deriveWeixinDeliveryKey(apiToken) {
   return createHmac("sha256", Buffer.from(apiToken, "utf8"))
     .update("sentelligent/weixin-delivery-key/v1", "utf8")
     .digest();
+}
+
+function isInboundAllowed(config, metadata) {
+  try {
+    assertWeixinSenderAllowed(config, metadata);
+    return true;
+  } catch (error) {
+    if (["WEIXIN_SENDER_NOT_ALLOWED", "WEIXIN_GROUP_NOT_ALLOWED"].includes(error?.code)) return false;
+    throw error;
+  }
 }
 
 async function loadSdk() {
@@ -70,7 +81,10 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
       return remoteAgent.chat(request);
     },
   };
-  const bot = sdk.start(agent, { deliveryKey });
+  const bot = sdk.start(agent, {
+    deliveryKey,
+    authorizeInbound: (metadata) => isInboundAllowed(config, metadata),
+  });
   process.stdout.write(`WeChat worker started. Backend: ${backendUrlFromConfig(config)}\n`);
   await bot.wait();
   return { status: "stopped" };

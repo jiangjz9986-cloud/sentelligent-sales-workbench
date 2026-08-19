@@ -1555,13 +1555,59 @@ function getRemainingPauseMs(accountId) {
 }
 //#endregion
 //#region src/cdn/pic-decrypt.ts
+const CDN_DOWNLOAD_TIMEOUT_MS = 60 * 1e3;
+class InboundMediaError extends Error {
+	constructor(message, { permanent = false } = {}) {
+		super(message);
+		this.name = "InboundMediaError";
+		this.permanent = permanent;
+	}
+}
+function mediaTooLarge(label) {
+	return new InboundMediaError(`${label}: media exceeds the allowed size`, { permanent: true });
+}
+async function readBoundedCdnResponse(res, maxBytes, label) {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("maxBytes must be a positive safe integer");
+	const contentLength = res.headers?.get?.("content-length");
+	if (typeof contentLength === "string" && /^\d+$/u.test(contentLength.trim())) {
+		const declaredBytes = Number(contentLength.trim());
+		if (!Number.isSafeInteger(declaredBytes) || declaredBytes > maxBytes) {
+			try {
+				await res.body?.cancel();
+			} catch {}
+			throw mediaTooLarge(label);
+		}
+	}
+	if (!res.body || typeof res.body.getReader !== "function") throw new Error(`${label}: CDN response body is unavailable`);
+	const reader = res.body.getReader();
+	const chunks = [];
+	let totalBytes = 0;
+	try {
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			if (!(value instanceof Uint8Array)) throw new Error(`${label}: CDN response chunk is invalid`);
+			if (value.byteLength > maxBytes - totalBytes) {
+				try {
+					await reader.cancel();
+				} catch {}
+				throw mediaTooLarge(label);
+			}
+			chunks.push(Buffer.from(value));
+			totalBytes += value.byteLength;
+		}
+	} finally {
+		reader.releaseLock?.();
+	}
+	return Buffer.concat(chunks, totalBytes);
+}
 /**
 * Download raw bytes from the CDN (no decryption).
 */
-async function fetchCdnBytes(url, label) {
+async function fetchCdnBytes(url, label, maxBytes) {
 	let res;
 	try {
-		res = await fetch(url);
+		res = await fetch(url, { signal: AbortSignal.timeout(CDN_DOWNLOAD_TIMEOUT_MS) });
 	} catch (err) {
 		logger.error(`${label} category=cdn-download status=network-error durationMs=0`);
 		throw err;
@@ -1571,7 +1617,7 @@ async function fetchCdnBytes(url, label) {
 		logger.error(`${label} category=cdn-download status=${res.status} durationMs=0`);
 		throw new Error(`${label}: CDN download HTTP ${res.status}`);
 	}
-	return Buffer.from(await res.arrayBuffer());
+	return readBoundedCdnResponse(res, maxBytes, label);
 }
 /**
 * Parse CDNMedia.aes_key into a raw 16-byte AES key.
@@ -1588,27 +1634,33 @@ function parseAesKey(aesKeyBase64, label) {
 	if (decoded.length === 16) return decoded;
 	if (decoded.length === 32 && /^[0-9a-fA-F]{32}$/.test(decoded.toString("ascii"))) return Buffer.from(decoded.toString("ascii"), "hex");
 	logger.error(`${label} category=media-key bytes=${decoded.length} status=invalid durationMs=0`);
-	throw new Error(`${label}: invalid media key`);
+	throw new InboundMediaError(`${label}: invalid media key`, { permanent: true });
 }
 /**
 * Download and AES-128-ECB decrypt a CDN media file. Returns plaintext Buffer.
 * aesKeyBase64: CDNMedia.aes_key JSON field (see parseAesKey for supported formats).
 */
-async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl) {
+async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl, maxBytes) {
 	const key = parseAesKey(aesKeyBase64, label);
 	const url = fullUrl || buildCdnDownloadUrl(encryptedQueryParam, cdnBaseUrl);
-	const encrypted = await fetchCdnBytes(url, label);
+	const encrypted = await fetchCdnBytes(url, label, aesEcbPaddedSize(maxBytes));
 	logger.debug(`${label}: downloaded ${encrypted.byteLength} bytes, decrypting`);
-	const decrypted = decryptAesEcb(encrypted, key);
+	let decrypted;
+	try {
+		decrypted = decryptAesEcb(encrypted, key);
+	} catch {
+		throw new InboundMediaError(`${label}: media decryption failed`, { permanent: true });
+	}
+	if (decrypted.length > maxBytes) throw mediaTooLarge(label);
 	logger.debug(`${label}: decrypted ${decrypted.length} bytes`);
 	return decrypted;
 }
 /**
 * Download plain (unencrypted) bytes from the CDN. Returns the raw Buffer.
 */
-async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl) {
+async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl, maxBytes) {
 	const url = fullUrl || buildCdnDownloadUrl(encryptedQueryParam, cdnBaseUrl);
-	return fetchCdnBytes(url, label);
+	return fetchCdnBytes(url, label, maxBytes);
 }
 //#endregion
 //#region src/media/silk-transcode.ts
@@ -1675,7 +1727,10 @@ async function silkToWav(silkBuf) {
 }
 //#endregion
 //#region src/media/media-download.ts
-const WEIXIN_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
+const WEIXIN_MEDIA_MAX_BYTES = 12 * 1024 * 1024;
+function recordMediaFailure(result, error) {
+	result.failureKind = error instanceof InboundMediaError && error.permanent === true ? "permanent" : "transient";
+}
 /**
 * Download and decrypt media from a single MessageItem.
 * Returns the populated WeixinInboundMediaOpts fields; empty object on unsupported type or failure.
@@ -1689,12 +1744,13 @@ async function downloadMediaFromItem(item, deps) {
 		const aesKeyBase64 = img.aeskey ? Buffer.from(img.aeskey, "hex").toString("base64") : img.media.aes_key;
 		logger.debug(`${label} category=media type=image status=downloading durationMs=0`);
 		try {
-			const saved = await saveMedia(aesKeyBase64 ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url) : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url), void 0, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+			const saved = await saveMedia(aesKeyBase64 ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES) : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES), void 0, "inbound", WEIXIN_MEDIA_MAX_BYTES);
 			result.decryptedPicPath = saved.path;
 			result.sha256 = saved.sha256;
 			result.fileName = saved.fileName;
 			logger.debug(`${label} category=media type=image status=saved durationMs=0`);
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=image status=failed durationMs=0`);
 			errLog(`weixin category=media type=image status=failed durationMs=0`);
 		}
@@ -1702,7 +1758,7 @@ async function downloadMediaFromItem(item, deps) {
 		const voice = item.voice_item;
 		if (!voice?.media?.encrypt_query_param && !voice?.media?.full_url || !voice?.media?.aes_key) return result;
 		try {
-			const silkBuf = await downloadAndDecryptBuffer(voice.media.encrypt_query_param ?? "", voice.media.aes_key, cdnBaseUrl, `${label} voice`, voice.media.full_url);
+			const silkBuf = await downloadAndDecryptBuffer(voice.media.encrypt_query_param ?? "", voice.media.aes_key, cdnBaseUrl, `${label} voice`, voice.media.full_url, WEIXIN_MEDIA_MAX_BYTES);
 			const decryptedSha256 = crypto.createHash("sha256").update(silkBuf).digest("hex");
 			logger.debug(`${label} category=media type=audio bytes=${silkBuf.length} status=decrypted durationMs=0`);
 			const wavBuf = await silkToWav(silkBuf);
@@ -1722,6 +1778,7 @@ async function downloadMediaFromItem(item, deps) {
 				logger.debug(`${label} category=media type=audio status=saved-fallback durationMs=0`);
 			}
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=audio status=failed durationMs=0`);
 			errLog("weixin category=media type=audio status=failed durationMs=0");
 		}
@@ -1729,7 +1786,7 @@ async function downloadMediaFromItem(item, deps) {
 		const fileItem = item.file_item;
 		if (!fileItem?.media?.encrypt_query_param && !fileItem?.media?.full_url || !fileItem?.media?.aes_key) return result;
 		try {
-			const buf = await downloadAndDecryptBuffer(fileItem.media.encrypt_query_param ?? "", fileItem.media.aes_key, cdnBaseUrl, `${label} file`, fileItem.media.full_url);
+			const buf = await downloadAndDecryptBuffer(fileItem.media.encrypt_query_param ?? "", fileItem.media.aes_key, cdnBaseUrl, `${label} file`, fileItem.media.full_url, WEIXIN_MEDIA_MAX_BYTES);
 			const mime = getMimeFromFilename(fileItem.file_name ?? "file.bin");
 			const saved = await saveMedia(buf, mime, "inbound", WEIXIN_MEDIA_MAX_BYTES, fileItem.file_name ?? void 0);
 			result.decryptedFilePath = saved.path;
@@ -1738,6 +1795,7 @@ async function downloadMediaFromItem(item, deps) {
 			result.fileName = saved.fileName;
 			logger.debug(`${label} category=media type=file status=saved durationMs=0`);
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=file status=failed durationMs=0`);
 			errLog("weixin category=media type=file status=failed durationMs=0");
 		}
@@ -1745,12 +1803,13 @@ async function downloadMediaFromItem(item, deps) {
 		const videoItem = item.video_item;
 		if (!videoItem?.media?.encrypt_query_param && !videoItem?.media?.full_url || !videoItem?.media?.aes_key) return result;
 		try {
-			const saved = await saveMedia(await downloadAndDecryptBuffer(videoItem.media.encrypt_query_param ?? "", videoItem.media.aes_key, cdnBaseUrl, `${label} video`, videoItem.media.full_url), "video/mp4", "inbound", WEIXIN_MEDIA_MAX_BYTES);
+			const saved = await saveMedia(await downloadAndDecryptBuffer(videoItem.media.encrypt_query_param ?? "", videoItem.media.aes_key, cdnBaseUrl, `${label} video`, videoItem.media.full_url, WEIXIN_MEDIA_MAX_BYTES), "video/mp4", "inbound", WEIXIN_MEDIA_MAX_BYTES);
 			result.decryptedVideoPath = saved.path;
 			result.sha256 = saved.sha256;
 			result.fileName = saved.fileName;
 			logger.debug(`${label} category=media type=video status=saved durationMs=0`);
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=video status=failed durationMs=0`);
 			errLog("weixin category=media type=video status=failed durationMs=0");
 		}
@@ -1830,7 +1889,11 @@ async function handleSlashCommand(content, ctx) {
 //#region src/messaging/process-message.ts
 const MEDIA_TEMP_DIR$1 = path.join(os.tmpdir(), "weixin-agent/media");
 /** Save a buffer to a temporary file, returning the file path. */
-async function saveMediaBuffer(buffer, contentType, subdir, _maxBytes, originalFilename) {
+async function saveMediaBuffer(buffer, contentType, subdir, maxBytes, originalFilename) {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("maxBytes must be a positive safe integer");
+	if (!(buffer instanceof Uint8Array)) throw new TypeError("media buffer must be bytes");
+	if (buffer.byteLength > maxBytes) throw mediaTooLarge("inbound media");
+	const bytes = Buffer.from(buffer);
 	const dir = path.join(MEDIA_TEMP_DIR$1, subdir ?? "");
 	await fs$1.mkdir(dir, { recursive: true });
 	let ext = ".bin";
@@ -1838,10 +1901,15 @@ async function saveMediaBuffer(buffer, contentType, subdir, _maxBytes, originalF
 	else if (contentType) ext = getExtensionFromMime(contentType);
 	const name = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
 	const filePath = path.join(dir, name);
-	await fs$1.writeFile(filePath, buffer);
+	try {
+		await fs$1.writeFile(filePath, bytes);
+	} catch (error) {
+		await fs$1.rm(filePath, { force: true }).catch(() => {});
+		throw error;
+	}
 	return {
 		path: filePath,
-		sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+		sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
 		fileName: originalFilename
 	};
 }
@@ -1861,133 +1929,167 @@ function findMediaItem(itemList) {
 }
 /**
 * Process a single inbound message:
-*   slash command check → download media → call agent → send reply.
+*   authorization → slash command check → bounded media download → call agent → send reply.
 */
 async function processOneMessage(full, deps) {
-	const textBody = extractTextBody(full.item_list);
-	const contextToken = full.context_token;
-	let inboundMedia = null;
-	const mediaItem = findMediaItem(full.item_list);
-	if (mediaItem) try {
-		const downloaded = await downloadMediaFromItem(mediaItem, {
-			cdnBaseUrl: deps.cdnBaseUrl,
-			saveMedia: saveMediaBuffer,
-			log: deps.log,
-			errLog: deps.errLog,
-			label: "inbound"
-		});
-		let requestMedia;
-		if (downloaded.decryptedPicPath) requestMedia = { type: "image", filePath: downloaded.decryptedPicPath, mimeType: "image/*" };
-		else if (downloaded.decryptedVideoPath) requestMedia = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };
-		else if (downloaded.decryptedFilePath) requestMedia = {
-			type: "file",
-			filePath: downloaded.decryptedFilePath,
-			mimeType: downloaded.fileMediaType ?? "application/octet-stream",
-			...normalizedFileName(downloaded.fileName) ? { fileName: normalizedFileName(downloaded.fileName) } : {}
-		};
-		else if (downloaded.decryptedVoicePath) requestMedia = { type: "audio", filePath: downloaded.decryptedVoicePath, mimeType: downloaded.voiceMediaType ?? "audio/wav" };
-		if (requestMedia && downloaded.sha256) inboundMedia = {
-			sha256: downloaded.sha256,
-			fileName: downloaded.fileName,
-			requestMedia
-		};
-	} catch (err) {
-		deps.errLog("[weixin] category=media status=failed durationMs=0");
-	}
-	if (mediaItem && !inboundMedia) {
-		deps.errLog("[weixin] category=media status=failed durationMs=0");
-		return false;
-	}
-	const classifierInput = Object.freeze({});
-	const chatMetadata = deps.classifyChat?.(classifierInput) ?? null;
-	const request = normalizeInboundUpdate(full, {
-		deliveryKey: deps.deliveryKey,
-		media: inboundMedia,
-		chatMetadata
-	});
-	if (contextToken) setContextToken(deps.accountId, request.senderId, contextToken);
-	if (textBody.startsWith("/")) {
-		const slashResult = await handleSlashCommand(textBody, {
-			to: request.conversationId,
-			contextToken,
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			accountId: deps.accountId,
-			log: deps.log,
-			errLog: deps.errLog,
-			onClear: () => deps.agent.clearSession?.(request.conversationId)
-		});
-		if (slashResult.handled) return slashResult.succeeded === true;
-	}
-	const to = request.conversationId;
-	let typingTimer;
-	const startTyping = () => {
-		if (!deps.typingTicket) return;
-		sendTyping({
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			body: {
-				ilink_user_id: to,
-				typing_ticket: deps.typingTicket,
-				status: TypingStatus.TYPING
-			}
-		}).catch(() => {});
-	};
-	if (deps.typingTicket) {
-		startTyping();
-		typingTimer = setInterval(startTyping, 1e4);
-	}
+	let inboundMediaPath = null;
 	try {
-		const response = await deps.agent.chat(request);
-		if (response.media) {
-			let filePath;
-			const mediaUrl = response.media.url;
-			if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR$1, "outbound"));
-			else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
-			await sendWeixinMediaFile({
-				filePath,
+		let chatMetadata;
+		let identity;
+		try {
+			validateRawUpdate(full);
+			const classifierInput = Object.freeze({});
+			chatMetadata = deps.classifyChat?.(classifierInput) ?? null;
+			identity = chatIdentityFromUpdate(full, chatMetadata);
+		} catch {
+			deps.errLog("[weixin] category=authorization status=invalid durationMs=0");
+			return true;
+		}
+		const authorizationMetadata = Object.freeze({
+			senderId: identity.senderId,
+			chatType: identity.chatType,
+			...identity.groupId ? { groupId: identity.groupId } : {}
+		});
+		if (deps.authorizeInbound && await deps.authorizeInbound(authorizationMetadata) !== true) {
+			deps.errLog("[weixin] category=authorization status=denied durationMs=0");
+			return true;
+		}
+
+		const textBody = extractTextBody(full.item_list);
+		const contextToken = full.context_token;
+		let inboundMedia = null;
+		let mediaFailureKind = null;
+		const mediaItem = findMediaItem(full.item_list);
+		if (mediaItem) try {
+			const downloaded = await downloadMediaFromItem(mediaItem, {
+				cdnBaseUrl: deps.cdnBaseUrl,
+				saveMedia: saveMediaBuffer,
+				log: deps.log,
+				errLog: deps.errLog,
+				label: "inbound"
+			});
+			mediaFailureKind = downloaded.failureKind ?? null;
+			let requestMedia;
+			if (downloaded.decryptedPicPath) requestMedia = { type: "image", filePath: downloaded.decryptedPicPath, mimeType: "image/*" };
+			else if (downloaded.decryptedVideoPath) requestMedia = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };
+			else if (downloaded.decryptedFilePath) requestMedia = {
+				type: "file",
+				filePath: downloaded.decryptedFilePath,
+				mimeType: downloaded.fileMediaType ?? "application/octet-stream",
+				...normalizedFileName(downloaded.fileName) ? { fileName: normalizedFileName(downloaded.fileName) } : {}
+			};
+			else if (downloaded.decryptedVoicePath) requestMedia = { type: "audio", filePath: downloaded.decryptedVoicePath, mimeType: downloaded.voiceMediaType ?? "audio/wav" };
+			inboundMediaPath = requestMedia?.filePath ?? null;
+			if (requestMedia && downloaded.sha256) inboundMedia = {
+				sha256: downloaded.sha256,
+				fileName: downloaded.fileName,
+				requestMedia
+			};
+		} catch {
+			mediaFailureKind = "transient";
+			deps.errLog("[weixin] category=media status=failed durationMs=0");
+		}
+		if (mediaItem && !inboundMedia) {
+			deps.errLog(`[weixin] category=media status=${mediaFailureKind === "permanent" ? "rejected" : "failed"} durationMs=0`);
+			return mediaFailureKind === "permanent";
+		}
+		const request = normalizeInboundUpdate(full, {
+			deliveryKey: deps.deliveryKey,
+			media: inboundMedia,
+			chatMetadata
+		});
+		if (contextToken) setContextToken(deps.accountId, request.senderId, contextToken);
+		if (textBody.startsWith("/")) {
+			const slashResult = await handleSlashCommand(textBody, {
+				to: request.conversationId,
+				contextToken,
+				baseUrl: deps.baseUrl,
+				token: deps.token,
+				accountId: deps.accountId,
+				log: deps.log,
+				errLog: deps.errLog,
+				onClear: () => deps.agent.clearSession?.(request.conversationId)
+			});
+			if (slashResult.handled) return slashResult.succeeded === true;
+		}
+		const to = request.conversationId;
+		const resolvedTypingTicket = deps.getTypingTicket ? await deps.getTypingTicket() : deps.typingTicket;
+		const typingTicket = typeof resolvedTypingTicket === "string" ? resolvedTypingTicket : "";
+		let typingTimer;
+		const startTyping = () => {
+			if (!typingTicket) return;
+			sendTyping({
+				baseUrl: deps.baseUrl,
+				token: deps.token,
+				body: {
+					ilink_user_id: to,
+					typing_ticket: typingTicket,
+					status: TypingStatus.TYPING
+				}
+			}).catch(() => {});
+		};
+		if (typingTicket) {
+			startTyping();
+			typingTimer = setInterval(startTyping, 1e4);
+		}
+		try {
+			const response = await deps.agent.chat(request);
+			if (response.media) {
+				let filePath;
+				const mediaUrl = response.media.url;
+				if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR$1, "outbound"));
+				else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
+				await sendWeixinMediaFile({
+					filePath,
+					to,
+					text: response.text ? markdownToPlainText(response.text) : "",
+					opts: {
+						baseUrl: deps.baseUrl,
+						token: deps.token,
+						contextToken
+					},
+					cdnBaseUrl: deps.cdnBaseUrl
+				});
+			} else if (response.text) await sendMessageWeixin({
 				to,
-				text: response.text ? markdownToPlainText(response.text) : "",
+				text: markdownToPlainText(response.text),
 				opts: {
 					baseUrl: deps.baseUrl,
 					token: deps.token,
 					contextToken
-				},
-				cdnBaseUrl: deps.cdnBaseUrl
+				}
 			});
-		} else if (response.text) await sendMessageWeixin({
-			to,
-			text: markdownToPlainText(response.text),
-			opts: {
+		} catch (err) {
+			deps.errLog("[weixin] category=message status=failed durationMs=0");
+			sendWeixinErrorNotice({
+				to,
+				contextToken,
+				message: "⚠️ 处理消息失败",
 				baseUrl: deps.baseUrl,
 				token: deps.token,
-				contextToken
-			}
-		});
-	} catch (err) {
-		deps.errLog("[weixin] category=message status=failed durationMs=0");
-		sendWeixinErrorNotice({
-			to,
-			contextToken,
-			message: "⚠️ 处理消息失败",
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			errLog: deps.errLog
-		});
-		return false;
+				errLog: deps.errLog
+			});
+			return err?.permanent === true;
+		} finally {
+			if (typingTimer) clearInterval(typingTimer);
+			if (typingTicket) sendTyping({
+				baseUrl: deps.baseUrl,
+				token: deps.token,
+				body: {
+					ilink_user_id: to,
+					typing_ticket: typingTicket,
+					status: TypingStatus.CANCEL
+				}
+			}).catch(() => {});
+		}
+		return true;
 	} finally {
-		if (typingTimer) clearInterval(typingTimer);
-		if (deps.typingTicket) sendTyping({
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			body: {
-				ilink_user_id: to,
-				typing_ticket: deps.typingTicket,
-				status: TypingStatus.CANCEL
-			}
-		}).catch(() => {});
+		if (inboundMediaPath) try {
+			await fs$1.rm(inboundMediaPath, { force: true });
+		} catch {
+			deps.errLog("[weixin] category=media-cleanup status=failed durationMs=0");
+		}
 	}
-	return true;
 }
 //#endregion
 //#region src/storage/sync-buf.ts
@@ -2048,7 +2150,7 @@ const RETRY_DELAY_MS = 2e3;
 * Runs until aborted.
 */
 async function monitorWeixinProvider(opts) {
-	const { baseUrl, cdnBaseUrl, token, accountId, agent, abortSignal, longPollTimeoutMs, deliveryKey, classifyChat } = opts;
+	const { baseUrl, cdnBaseUrl, token, accountId, agent, abortSignal, longPollTimeoutMs, deliveryKey, classifyChat, authorizeInbound } = opts;
 	const log = opts.log ?? ((msg) => console.log(msg));
 	const errLog = (msg) => {
 		log(msg);
@@ -2112,7 +2214,8 @@ async function monitorWeixinProvider(opts) {
 				token,
 				deliveryKey,
 				classifyChat,
-				typingTicket: (await configManager.getForUser(fromUserId, full.context_token)).typingTicket,
+				authorizeInbound,
+				getTypingTicket: async () => (await configManager.getForUser(fromUserId, full.context_token)).typingTicket,
 				log,
 				errLog
 			});
@@ -2297,6 +2400,7 @@ var Bot = class {
 function start(agent, opts) {
 	const log = opts?.log ?? console.log;
 	if (!(opts?.deliveryKey instanceof Uint8Array) || opts.deliveryKey.byteLength !== 32) throw new TypeError("deliveryKey must be 32 bytes");
+	if (opts.authorizeInbound !== void 0 && typeof opts.authorizeInbound !== "function") throw new TypeError("authorizeInbound must be a function");
 	const deliveryKey = new Uint8Array(opts.deliveryKey);
 	let accountId = opts?.accountId;
 	if (!accountId) {
@@ -2318,6 +2422,7 @@ function start(agent, opts) {
 		agent,
 		deliveryKey,
 		classifyChat: opts.classifyChat,
+		authorizeInbound: opts.authorizeInbound,
 		abortSignal: opts?.abortSignal,
 		log
 	});
