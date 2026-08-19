@@ -39,6 +39,10 @@ describe("versioned assistant agent manifests", () => {
     assert.equal(registry.get("dashboard").modelPolicy, "none");
     assert.equal(registry.get("reimbursement-report").contractVersion, "reimbursement-report-v1");
     assert.equal(registry.get("reimbursement-report").modelPolicy, "none");
+    assert.equal(registry.get("payment-proof").contractVersion, "payment-proof-v1");
+    assert.equal(registry.get("payment-proof").modelPolicy, "required_with_deterministic_fallback");
+    assert.equal(registry.get("invoice").contractVersion, "invoice-v1");
+    assert.equal(registry.get("invoice").modelPolicy, "required_with_deterministic_fallback");
     assert.equal(registry.get("solution").enabled, false);
     assert.equal(registry.get("personal-finance").enabled, false);
   });
