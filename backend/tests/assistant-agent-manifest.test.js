@@ -31,6 +31,10 @@ describe("versioned assistant agent manifests", () => {
     assert.equal(registry.get("action-risk").modelPolicy, "none");
     assert.equal(registry.get("knowledge").contractVersion, "knowledge-v1");
     assert.equal(registry.get("knowledge").modelPolicy, "none");
+    assert.equal(registry.get("itinerary").contractVersion, "itinerary-v1");
+    assert.equal(registry.get("itinerary").modelPolicy, "none");
+    assert.equal(registry.get("travel-expense").contractVersion, "travel-expense-v1");
+    assert.equal(registry.get("travel-expense").modelPolicy, "none");
     assert.equal(registry.get("solution").enabled, false);
     assert.equal(registry.get("personal-finance").enabled, false);
   });
