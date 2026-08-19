@@ -7,9 +7,11 @@ import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobSto
 import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
+import { createDashboardAssistantAdapter } from "./dashboardAssistantAdapter.js";
 import { createItineraryAssistantAdapter } from "./itineraryAssistantAdapter.js";
 import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js";
 import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
+import { createReimbursementReportAssistantAdapter } from "./reimbursementReportAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
 import { createTravelExpenseAssistantAdapter } from "./travelExpenseAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
@@ -262,10 +264,12 @@ export function createAssistantToolHandlers({
   invoiceRecognizer,
   businessSnapshotAdapter = null,
   customerAssistantAdapter = null,
+  dashboardAssistantAdapter = null,
   actionRiskAssistantAdapter = null,
   knowledgeAssistantAdapter = null,
   opportunityAssistantAdapter = null,
   itineraryAssistantAdapter = null,
+  reimbursementReportAssistantAdapter = null,
   travelExpenseAssistantAdapter = null,
   visitCaptureAssistantAdapter = null,
   salesReportAssistantAdapter = null,
@@ -278,6 +282,11 @@ export function createAssistantToolHandlers({
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
   const customerAdapter = customerAssistantAdapter ?? createCustomerAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const dashboardAdapter = dashboardAssistantAdapter ?? createDashboardAssistantAdapter({
     snapshotAdapter,
     runRepository: agentRunRepository,
     clock,
@@ -307,6 +316,11 @@ export function createAssistantToolHandlers({
     runRepository: agentRunRepository,
     clock,
   });
+  const reimbursementReportAdapter = reimbursementReportAssistantAdapter ?? createReimbursementReportAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
   const visitCaptureAdapter = visitCaptureAssistantAdapter ?? createVisitCaptureAssistantAdapter({
     config,
     fetchImpl,
@@ -329,7 +343,18 @@ export function createAssistantToolHandlers({
 
   const handlers = {
     async "dashboard.summary"(_args, context) {
-      const summary = snapshotAdapter.dashboardSummary({ owner: context.owner });
+      const result = await dashboardAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "daily_overview",
+      });
+      const summary = {
+        asOf: result.asOf,
+        weekStart: result.weekStart,
+        counts: result.counts,
+      };
       const counts = summary.counts;
       return {
         text: [
@@ -340,6 +365,8 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         summary,
+        dashboardResult: result,
+        runId: result.runId,
       };
     },
 
@@ -850,14 +877,26 @@ export function createAssistantToolHandlers({
     },
 
     async "reimbursement-report.preview"(args, context) {
-      const summary = snapshotAdapter.travelExpenseSummary({
+      const result = await reimbursementReportAdapter.analyze({
         owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "weekly_summary",
         weekStart: args.periodStart ?? args.week,
       });
+      const summary = {
+        weekStart: result.weekStart,
+        summary: result.summary,
+        items: result.items,
+        truncated: result.truncated,
+      };
       return {
         text: `报销周汇总预览（${summary.weekStart}）：${summary.summary.count} 笔费用，实付 ${moneyFromCents(summary.summary.actualPaidCents)}，可报销 ${moneyFromCents(summary.summary.reimbursementCents)}。`,
         status: "preview",
         summary,
+        report: result,
+        runId: result.runId,
       };
     },
 

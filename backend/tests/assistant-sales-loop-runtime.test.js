@@ -451,6 +451,65 @@ describe("wired sales loop assistant runtime", () => {
     db.close();
   });
 
+  it("keeps dashboard and reimbursement report as separate replay-safe read-only agents", async () => {
+    let db = openDatabase({ databaseUrl });
+    db.exec(`
+      INSERT INTO travel_expenses (id, reference_code, owner, occurred_on, category, purpose, customer_id, invoice_status, created_by, updated_by)
+      VALUES ('expense-report-runtime', 'EXP-REPORT-001', '${owner}', '2026-08-17', 'transport', '报销周汇总测试', 'customer-runtime', 'pending', '${owner}', '${owner}');
+      INSERT INTO travel_expense_payments (id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method)
+      VALUES ('payment-report-runtime', 'expense-report-runtime', 1, '2026-08-17T10:00:00+08:00', 8800, 7000, 'personal', 'wechat');
+    `);
+    db.close();
+
+    const dashboardMessageId = `runtime-${++sequence}-dashboard`;
+    const dashboard = await event("/dashboard.summary", dashboardMessageId);
+    assert.equal(dashboard.response.status, 200);
+    assert.match(dashboard.body.text, /客户 1，商机 1/);
+
+    const reportMessageId = `runtime-${++sequence}-reimbursement`;
+    const report = await event("/reimbursement-report.preview 2026-08-17 2026-08-23", reportMessageId);
+    assert.equal(report.response.status, 200);
+    assert.match(report.body.text, /报销周汇总预览/);
+    assert.match(report.body.text, /1 笔费用/);
+
+    db = openDatabase({ databaseUrl });
+    const runs = db.prepare(`
+      SELECT agent_id, task_type, contract_version, status, source, confirmation_status, input_json, output_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id IN ('dashboard', 'reimbursement-report')
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 2);
+    const dashboardRun = runs.find((run) => run.agent_id === "dashboard");
+    const reportRun = runs.find((run) => run.agent_id === "reimbursement-report");
+    assert.equal(dashboardRun.contract_version, "dashboard-v1");
+    assert.equal(dashboardRun.task_type, "daily_overview");
+    assert.equal(dashboardRun.confirmation_status, "not_required");
+    assert.equal(reportRun.contract_version, "reimbursement-report-v1");
+    assert.equal(reportRun.task_type, "weekly_summary");
+    assert.equal(reportRun.confirmation_status, "preview");
+    assert.equal(dashboardRun.status, "succeeded");
+    assert.equal(reportRun.status, "succeeded");
+    assert.equal(dashboardRun.source, "deterministic");
+    assert.equal(reportRun.source, "deterministic");
+    assert.equal(Object.hasOwn(JSON.parse(dashboardRun.input_json), "owner"), false);
+    assert.equal(Object.hasOwn(JSON.parse(reportRun.input_json), "owner"), false);
+    const reportOutput = JSON.parse(reportRun.output_json);
+    assert.equal(reportOutput.printReadiness.ready, null);
+    assert.equal(reportOutput.writebackAllowed, false);
+    assert.deepEqual(reportOutput.sourceRefs, [{ type: "travel_expense", id: "expense-report-runtime" }]);
+    db.close();
+
+    const dashboardReplay = await event("/dashboard.summary", dashboardMessageId);
+    const reportReplay = await event("/reimbursement-report.preview 2026-08-17 2026-08-23", reportMessageId);
+    assert.deepEqual(dashboardReplay.body, dashboard.body);
+    assert.deepEqual(reportReplay.body, report.body);
+    db = openDatabase({ databaseUrl });
+    assert.equal(db.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id IN ('dashboard', 'reimbursement-report')",
+    ).get({ $owner: owner }).count, 2);
+    db.close();
+  });
+
   it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
     const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
     assert.equal(collected.response.status, 200);
