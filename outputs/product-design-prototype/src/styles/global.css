@@ -5499,6 +5499,7 @@ textarea:focus {
 
 /* Hospital tender monitoring redesign: priority-first, responsive layout. */
 .hospital-tender-page {
+  --muted: #66728a;
   min-width: 0;
   display: grid;
   gap: 16px;
@@ -6159,11 +6160,6 @@ textarea:focus {
     min-height: 76px;
   }
 
-  .hospital-tender-deadline,
-  .hospital-tender-priority-row > .pill {
-    display: none;
-  }
-
   .hospital-tender-filter-bar {
     grid-template-columns: 1fr;
   }
@@ -6174,5 +6170,327 @@ textarea:focus {
 
   .hospital-tender-filter {
     grid-template-columns: 58px minmax(0, 1fr);
+  }
+}
+
+/* Hospital tender monitoring: dense, status-first presentation overrides. */
+.hospital-tender-freshness {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  color: var(--body);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.hospital-tender-freshness > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.hospital-tender-freshness svg {
+  color: var(--muted);
+}
+
+.hospital-tender-run-progress {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(47, 107, 255, 0.2);
+  border-radius: 10px;
+  color: var(--blue-deep);
+  background: var(--blue-soft);
+}
+
+.hospital-tender-run-progress > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+
+.hospital-tender-run-progress strong {
+  font-size: 13px;
+}
+
+.hospital-tender-run-progress small {
+  color: var(--body);
+  font-size: 11px;
+}
+
+.hospital-tender-run-progress b {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.hospital-tender-feedback.warning {
+  border-color: rgba(217, 119, 6, 0.24);
+  color: #8a4b08;
+  background: var(--amber-soft);
+}
+
+.hospital-tender-feedback.danger {
+  border-color: rgba(220, 38, 38, 0.22);
+  color: #a61b1b;
+  background: var(--red-soft);
+}
+
+.hospital-tender-page .hospital-tender-priority-panel,
+.hospital-tender-page .hospital-tender-all-panel,
+.hospital-tender-page .hospital-tender-status-panel {
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.hospital-tender-page .hospital-tender-priority-row {
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.hospital-tender-page .hospital-tender-priority-row:hover {
+  box-shadow: 0 4px 12px rgba(13, 27, 62, 0.07);
+}
+
+.hospital-tender-row-main strong,
+.hospital-tender-all-main strong {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+}
+
+.hospital-tender-deadline.urgent strong,
+.hospital-tender-deadline.overdue strong {
+  color: var(--red);
+}
+
+.hospital-tender-deadline.soon strong {
+  color: var(--amber);
+}
+
+.hospital-tender-deadline.overdue small {
+  color: var(--red);
+}
+
+.hospital-tender-search {
+  min-width: 0;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--subtle);
+}
+
+.hospital-tender-search input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 12px;
+}
+
+.hospital-tender-search input::placeholder {
+  color: var(--muted);
+}
+
+.hospital-tender-search:focus-within {
+  border-color: rgba(47, 107, 255, 0.42);
+  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.1);
+}
+
+.hospital-tender-search button {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--body);
+  background: transparent;
+}
+
+.hospital-tender-search button:hover {
+  color: var(--text);
+  background: var(--gray-soft);
+}
+
+.hospital-tender-clear-filter {
+  min-height: 32px;
+  padding-inline: 9px;
+  color: var(--blue-deep);
+  font-size: 11px;
+}
+
+.hospital-tender-list-footer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.hospital-tender-list-footer > span {
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.hospital-tender-list-footer .ghost-button {
+  min-height: 30px;
+  flex: 0 0 auto;
+  padding-inline: 10px;
+  color: var(--blue-deep);
+  font-size: 11px;
+}
+
+.hospital-tender-health-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -3px 0 10px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  color: var(--body);
+  background: var(--gray-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.hospital-tender-health-summary.warning {
+  color: #8a4b08;
+  background: var(--amber-soft);
+}
+
+.hospital-tender-health-summary.down {
+  color: #a61b1b;
+  background: var(--red-soft);
+}
+
+.hospital-tender-health-row > .hospital-tender-health-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.hospital-tender-health-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hospital-tender-page .mini-icon.success {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.hospital-tender-page .mini-icon.warning {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.hospital-tender-page .mini-icon.danger,
+.hospital-tender-page .mini-icon.down {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.hospital-tender-page .mini-icon.blue {
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+
+.hospital-tender-page .mini-icon.neutral {
+  color: var(--body);
+  background: var(--gray-soft);
+}
+
+.hospital-tender-page .detail-actions {
+  position: sticky;
+  bottom: -18px;
+  z-index: 2;
+  margin-inline: -2px;
+  padding: 12px 2px 2px;
+  background: linear-gradient(180deg, rgba(246, 248, 252, 0), #f6f8fc 35%);
+}
+
+@media (max-width: 760px) {
+  .hospital-tender-freshness {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .hospital-tender-run-progress {
+    align-items: flex-start;
+  }
+
+  .hospital-tender-priority-row {
+    grid-template-columns: auto minmax(0, 1fr) minmax(72px, auto) 24px;
+    grid-template-rows: auto auto;
+    align-items: center;
+    min-height: 88px;
+    gap: 5px 8px;
+  }
+
+  .hospital-tender-priority-row-icon {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .hospital-tender-row-main {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+  }
+
+  .hospital-tender-deadline {
+    display: grid;
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    align-self: center;
+  }
+
+  .hospital-tender-priority-row > .pill {
+    display: inline-flex;
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    min-height: 22px;
+  }
+
+  .hospital-tender-row-arrow {
+    grid-column: 4;
+    grid-row: 1 / span 2;
+  }
+
+  .hospital-tender-list-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hospital-tender-list-footer .ghost-button {
+    width: 100%;
+  }
+
+  .hospital-tender-search input {
+    font-size: 16px;
   }
 }
