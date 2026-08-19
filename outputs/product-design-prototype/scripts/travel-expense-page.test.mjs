@@ -43,10 +43,15 @@ describe("travel expense feature boundary", () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const editor = await source("src/features/travelExpense/ExpenseEditorDrawer.jsx");
     const organizer = await source("src/features/travelExpense/ReimbursementOrganizer.jsx");
+    const listPrint = await source("src/features/travelExpense/ExpenseListPrintPreview.jsx");
 
     assert.match(page, /记一笔/);
     assert.match(organizer, /打印实际付款记录/);
+    assert.match(organizer, /打印费用清单/);
     assert.match(organizer, /导出表格/);
+    assert.match(listPrint, /费用清单/);
+    assert.match(listPrint, /A4 纵向预览/);
+    assert.match(listPrint, /window\.print/);
     assert.match(editor, /<label/);
     assert.match(editor, /差额原因/);
     assert.match(editor, /个人垫付/);
@@ -72,9 +77,13 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /重新加载/);
     assert.match(page, /type="week"/);
     assert.match(overview, /规则待配置/);
+    assert.match(overview, /本周发票统计/);
+    assert.match(overview, /电子发票覆盖/);
+    assert.match(overview, /替票覆盖/);
+    assert.match(overview, /尚缺发票/);
     assert.match(ledger, /仅看待核对/);
-    assert.match(ledger, /搜索费用事由或收款方/);
-    assert.match(ledger, /expense\.referenceCode/);
+    assert.match(ledger, /搜索备注、日期或账单编号/);
+    assert.match(ledger, /row\.referenceCode/);
     assert.match(ledger, /navigator\.clipboard\.writeText/);
     assert.match(ledger, /复制账单编号/);
     assert.match(proofs, /上传付款凭证/);
@@ -109,6 +118,21 @@ describe("travel expense feature boundary", () => {
     assert.match(settlement, /公司应补/);
     assert.match(settlement, /个人应退/);
     assert.match(settlement, /公司直付不计入个人结算/);
+  });
+
+  it("keeps the main ledger to the six confirmed business fields", async () => {
+    const ledger = await source("src/features/travelExpense/ExpenseLedger.jsx");
+
+    assert.match(ledger, /buildExpenseLedgerRows/);
+    assert.match(ledger, /<th>日期<\/th>/);
+    assert.match(ledger, /<th>费用类别<\/th>/);
+    assert.match(ledger, /<th>金额<\/th>/);
+    assert.match(ledger, /<th>付款凭证<\/th>/);
+    assert.match(ledger, /<th>发票状态<\/th>/);
+    assert.match(ledger, /<th>备注<\/th>/);
+    assert.doesNotMatch(ledger, /<th>事由 \/ 收款方<\/th>/);
+    assert.doesNotMatch(ledger, /<th>计入报销<\/th>/);
+    assert.doesNotMatch(ledger, /<th>付款<\/th>/);
   });
 
   it("gives the six work views keyboard tab semantics", async () => {
@@ -193,6 +217,15 @@ describe("travel expense feature boundary", () => {
     assert.match(css, /\.invoice-print-media canvas/);
     assert.match(css, /\.invoice-print-grid\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*grid-template-rows:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
     assert.match(css, /\.invoice-print-slot\s*\{[^}]*min-width:\s*0/s);
+  });
+
+  it("wires the six-field expense list preview without expanding the shared app shell", async () => {
+    const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
+    assert.match(page, /import \{ ExpenseListPrintPreview \}/);
+    assert.match(page, /expenseListPrintOpen/);
+    assert.match(page, /onOpenExpenseListPrint/);
+    assert.match(page, /listInvoiceMatches\(\{ state: "confirmed"/);
+    assert.match(page, /listNoInvoiceConfirmations\(\{ weekStart: week\.start/);
   });
 
   it("uses the same payment rows for on-screen organization and A4 print pages", async () => {

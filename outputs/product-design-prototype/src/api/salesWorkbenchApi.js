@@ -152,7 +152,7 @@ function assertNoInvoiceConfirmation(value, path = "noInvoiceConfirmation") {
 function assertInvoiceCoverage(value, path = "invoiceCoverage") {
   const coverage = apiObject(value, path);
   requiredApiString(coverage.weekStart, `${path}.weekStart`);
-  for (const field of ["reimbursementCents", "confirmedCoverageCents", "noInvoiceConfirmedCents", "missingInvoiceCents"]) {
+  for (const field of ["reimbursementCents", "confirmedCoverageCents", "electronicInvoiceCoverageCents", "substituteInvoiceCoverageCents", "noInvoiceConfirmedCents", "missingInvoiceCents", "invoiceWarehouseAvailableCents"]) {
     nullableApiCents(coverage[field], `${path}.${field}`);
   }
   return coverage;

@@ -1,4 +1,5 @@
 import {
+  buildExpenseLedgerRows,
   flattenPaymentRows,
   formatCny,
   formatTravelExpenseDateTime,
@@ -17,6 +18,13 @@ const INVOICE_STATUS_LABELS = Object.freeze({
   covered: "已覆盖",
   partial: "部分覆盖",
   missing: "缺少票据",
+});
+
+const EXPENSE_INVOICE_STATE_LABELS = Object.freeze({
+  electronic_invoice: "电子发票",
+  substitute_invoice: "替票",
+  no_invoice: "无票",
+  invoice_pending: "待补发票",
 });
 
 function csvCell(value) {
@@ -91,6 +99,35 @@ export function paymentRecordFilename(weekStart) {
   return `实际付款记录-${weekStart}.csv`;
 }
 
+export function buildExpenseListRows(expenses = [], context = {}) {
+  return buildExpenseLedgerRows(expenses, context).map((row, index) => {
+    const stateLabels = row.visible.invoiceStates
+      .map((state) => EXPENSE_INVOICE_STATE_LABELS[state.id] ?? state.label)
+      .filter(Boolean);
+    return {
+      sequence: index + 1,
+      expenseId: row.id,
+      referenceCode: row.referenceCode,
+      dateLabel: row.visible.date,
+      categoryLabel: row.visible.category,
+      amountCents: row.visible.amountCents,
+      amountLabel: formatCny(row.visible.amountCents),
+      paymentProofLabel: row.visible.paymentProofs.length > 0
+        ? `${row.visible.paymentProofs.length} 张`
+        : "未上传",
+      invoiceStatusLabel: stateLabels.join("、") || "待补发票",
+      notes: row.visible.notes,
+    };
+  });
+}
+
+export function expenseListFilename(weekStart) {
+  if (typeof weekStart !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
+    throw new TypeError("weekStart must use YYYY-MM-DD format");
+  }
+  return `费用清单-${weekStart}.pdf`;
+}
+
 function chunk(items, size) {
   if (!Number.isSafeInteger(size) || size < 1) throw new TypeError("page size must be positive");
   const pages = [];
@@ -150,6 +187,25 @@ export function paginateInvoicePrint(invoices = []) {
     pageNumber: index + 1,
     totalPages,
     slots: [...pageInvoices, ...Array(4 - pageInvoices.length).fill(null)],
+  }));
+}
+
+export function paginateExpenseList({ rows = [], rowsPerPage = 18 } = {}) {
+  if (!Array.isArray(rows)) throw new TypeError("rows must be an array");
+  const pages = chunk(rows, rowsPerPage);
+  const totalPages = pages.length;
+  return pages.map((pageRows, index) => ({
+    kind: "expense-list",
+    pageNumber: index + 1,
+    totalPages,
+    rows: pageRows,
+    totalCents: pageRows.reduce((total, row) => {
+      const amount = row?.amountCents;
+      if (!Number.isSafeInteger(amount) || amount < 0) throw new TypeError("expense list amount is invalid");
+      const next = total + amount;
+      if (!Number.isSafeInteger(next)) throw new RangeError("expense list total exceeds the safe integer range");
+      return next;
+    }, 0),
   }));
 }
 

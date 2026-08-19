@@ -2691,7 +2691,7 @@ describe("sales workbench API client", () => {
         if (url.includes("/api/travel-expense-no-invoice-confirmations?")) return jsonResponse({ items: [sampleNoInvoiceConfirmation()] });
         if (url.endsWith("/api/travel-expenses/expense-1/no-invoice") && options.method === "POST") return jsonResponse({ item: sampleNoInvoiceConfirmation() }, 201);
         if (url.endsWith("/api/travel-expenses/expense-1/no-invoice") && options.method === "DELETE") return jsonResponse({ item: sampleNoInvoiceConfirmation({ version: 2, revokedAt: "2026-08-05T02:00:00.000Z" }) });
-        if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-coverage")) return jsonResponse({ item: { weekStart: "2026-08-03", reimbursementCents: 10000, confirmedCoverageCents: 0, noInvoiceConfirmedCents: 6800, missingInvoiceCents: 10000 } });
+        if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-coverage")) return jsonResponse({ item: { weekStart: "2026-08-03", reimbursementCents: 10000, confirmedCoverageCents: 0, electronicInvoiceCoverageCents: 0, substituteInvoiceCoverageCents: 0, noInvoiceConfirmedCents: 6800, missingInvoiceCents: 10000, invoiceWarehouseAvailableCents: 24000 } });
         if (url.includes("/api/travel-expense-weeks/2026-08-03/invoice-suggestions?")) return jsonResponse({ items: [sampleInvoiceCandidate()] });
         if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-suggestions")) return jsonResponse({ items: [sampleInvoiceCandidate()] }, 201);
         if (url.endsWith("/api/invoice-match-candidates/candidate-1/accept")) return jsonResponse({ item: sampleInvoiceCandidate({ status: "accepted" }) });
@@ -2728,6 +2728,7 @@ describe("sales workbench API client", () => {
     assert.equal(confirmedNoInvoice.expenseId, "expense-1");
     assert.ok(revokedNoInvoice.revokedAt);
     assert.equal(coverage.missingInvoiceCents, 10000);
+    assert.equal(coverage.invoiceWarehouseAvailableCents, 24000);
     assert.equal(candidates[0].status, "suggested");
     assert.equal(generated.length, 1);
     assert.equal(accepted.status, "accepted");

@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  buildExpenseListRows,
   buildPaymentRecordCsv,
   buildPaymentRecordRows,
   paginateInvoicePrint,
   paginatePaymentRecord,
   paymentRecordFilename,
+  expenseListFilename,
+  paginateExpenseList,
   printWhenImagesReady,
 } from "./travelExpenseExport.js";
 
@@ -244,5 +247,50 @@ describe("invoice print pagination", () => {
       /发票原件加载失败/,
     );
     assert.equal(selector, ".invoice-print-document img");
+  });
+});
+
+describe("six-field expense list export", () => {
+  it("uses the confirmed seven-column expense list without leaking payment details", () => {
+    const rows = buildExpenseListRows(expenses);
+    assert.deepEqual(Object.keys(rows[0]), [
+      "sequence",
+      "expenseId",
+      "referenceCode",
+      "dateLabel",
+      "categoryLabel",
+      "amountCents",
+      "amountLabel",
+      "paymentProofLabel",
+      "invoiceStatusLabel",
+      "notes",
+    ]);
+    assert.equal(rows[0].dateLabel, "2026-08-03");
+    assert.equal(rows[0].categoryLabel, "早餐");
+    assert.equal(rows[0].amountCents, 4000);
+    assert.equal(rows[0].paymentProofLabel, "3 张");
+    assert.match(rows[0].invoiceStatusLabel, /电子发票/);
+    assert.equal("merchant" in rows[0], false);
+    assert.equal("paidAt" in rows[0], false);
+  });
+
+  it("paginates complete expense rows and calculates a recomputed total", () => {
+    const rows = buildExpenseListRows(Array.from({ length: 19 }, (_, index) => ({
+      ...expenses[1],
+      id: `expense-${index}`,
+      referenceCode: `EXP-20260804-${String(index).padStart(8, "0")}`,
+      payments: [{
+        ...expenses[1].payments[0],
+        id: `payment-${index}`,
+        amountCents: 100,
+        reimbursementCents: 100,
+      }],
+    })));
+    const pages = paginateExpenseList({ rows, rowsPerPage: 10 });
+    assert.deepEqual(pages.map((page) => page.rows.length), [10, 9]);
+    assert.equal(pages[0].totalCents, 1000);
+    assert.equal(pages[1].totalCents, 900);
+    assert.equal(pages[0].totalPages, 2);
+    assert.equal(expenseListFilename("2026-08-03"), "费用清单-2026-08-03.pdf");
   });
 });

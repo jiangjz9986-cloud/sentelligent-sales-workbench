@@ -27,21 +27,18 @@ const CATEGORY_ICONS = {
   other: ReceiptText,
 };
 
-export function WeeklyExpenseOverview({ summary, week, onNavigate }) {
+export function WeeklyExpenseOverview({ summary, coverage = null, week, onNavigate }) {
   const settlementLabel = summary.settlementDirection === "company_reimburses"
     ? "公司应补"
     : summary.settlementDirection === "individual_returns"
       ? "个人应退"
       : "本周已结平";
-  const receiptComplete = summary.invoiceStatusCounts.covered;
-  const receiptPending = summary.expenseCount - receiptComplete;
-
   return (
     <div className="expense-overview-view">
       <section className="expense-summary-strip" aria-label="本周费用摘要">
         <article><span className="expense-summary-icon blue"><CircleDollarSign size={18} /></span><div><small>申报金额</small><strong>{formatCny(summary.reimbursementCents)}</strong><p>{summary.expenseCount} 条费用 · {summary.paymentCount} 笔付款</p></div></article>
         <article><span className="expense-summary-icon teal"><WalletCards size={18} /></span><div><small>实际支付</small><strong>{formatCny(summary.actualPaidCents)}</strong><p>公司直付实付 {formatCny(summary.companyDirectPaidCents)}</p></div></article>
-        <article><span className="expense-summary-icon green"><BadgeCheck size={18} /></span><div><small>付款凭证</small><strong>{summary.paymentProofCount} 张</strong><p>{receiptComplete} 条已覆盖，{receiptPending} 条待处理</p></div></article>
+        <article><span className="expense-summary-icon green"><BadgeCheck size={18} /></span><div><small>付款凭证</small><strong>{summary.paymentProofCount} 张</strong><p>{summary.paymentProofMissingCount} 条待补凭证，已上传记录不等于发票覆盖</p></div></article>
         <article className={summary.personalSettlementCents < 0 ? "negative" : ""}><span className="expense-summary-icon amber"><ReceiptText size={18} /></span><div><small>{settlementLabel}</small><strong>{formatSignedCny(summary.personalSettlementCents)}</strong><p>提前请款 {formatCny(summary.advanceReceivedCents)}</p></div></article>
       </section>
 
@@ -66,6 +63,17 @@ export function WeeklyExpenseOverview({ summary, week, onNavigate }) {
           <div className="expense-category-copy"><strong>报销规则</strong><p>餐费、住宿、招待等额度尚未录入</p><b>规则待配置</b></div>
           <button className="expense-text-button" type="button" onClick={() => onNavigate("organize")}>人工核对<ArrowRight size={14} /></button>
         </article>
+      </section>
+
+      <section className="expense-invoice-week-summary" aria-label="本周发票统计">
+        <header><div><strong>本周发票统计</strong><p>发票、替票和无票分别记录；候选组合仍需人工确认。</p></div><button className="expense-text-button" type="button" onClick={() => onNavigate("invoices")}>查看发票管理<ArrowRight size={14} /></button></header>
+        <div className="invoice-coverage-strip">
+          <span><small>电子发票覆盖</small><strong>{formatCny(coverage?.electronicInvoiceCoverageCents ?? 0)}</strong></span>
+          <span><small>替票覆盖</small><strong>{formatCny(coverage?.substituteInvoiceCoverageCents ?? 0)}</strong></span>
+          <span><small>无票金额</small><strong>{formatCny(coverage?.noInvoiceConfirmedCents ?? 0)}</strong></span>
+          <span className="warning"><small>尚缺发票</small><strong>{formatCny(coverage?.missingInvoiceCents ?? 0)}</strong></span>
+          <span><small>仓库可用</small><strong>{formatCny(coverage?.invoiceWarehouseAvailableCents ?? 0)}</strong></span>
+        </div>
       </section>
 
       <section className="expense-overview-note">
