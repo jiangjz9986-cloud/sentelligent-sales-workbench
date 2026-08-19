@@ -359,9 +359,35 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "use the deterministic source-backed weekly draft and mark composition as fallback", status: "fallback" },
   }),
   manifestDefinition("knowledge", {
+    contractVersion: "knowledge-v1",
+    modelPolicy: "none",
     taskTypes: ["search", "answer_with_sources", "compare", "maintenance_preview"],
     tools: ["knowledge.search"],
     confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType", "query"],
+      properties: { taskType: "enum", query: "string", knowledgeId: "string", changes: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "knowledge-v1",
+        items: "array",
+        answer: "object|null",
+        comparison: "object|null",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行知识 Agent。",
+      "只读检索有界知识元数据和摘要，所有结论必须保留来源引用。",
+      "没有来源时必须返回未知，不得把完整正文、外部链接或猜测当作事实。",
+      "回答、比较和维护都只能基于当前返回条目；知识写入仅生成预览并等待本人确认。",
+    ].join(""),
+    fallback: { strategy: "return bounded source-backed knowledge metadata and unknowns", status: "fallback" },
   }),
   manifestDefinition("solution", {
     lifecycle: "disabled",
