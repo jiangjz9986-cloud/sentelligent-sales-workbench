@@ -18,6 +18,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
+import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import {
   calculateInvoiceMatchAllocation,
@@ -465,7 +466,7 @@ export function InvoiceManager({
               <div className="invoice-detail-scroll">
                 <section className="invoice-original-preview">
                   {selectedInvoice.mediaType.startsWith("image/")
-                    ? <img src={apiClient.getInvoiceContentUrl(selectedInvoice.id)} alt={selectedInvoice.fileName} />
+                    ? <AuthenticatedImageFrame resourceKey={selectedInvoice.id} loadImage={({ signal }) => apiClient.getInvoiceContentResponse(selectedInvoice.id, { signal, accept: "application/pdf,image/*" })} title={`${selectedInvoice.fileName}原件预览`} variant="preview" />
                     : <AuthenticatedPdfFrame resourceKey={selectedInvoice.id} loadPdf={({ signal }) => apiClient.getInvoiceContentResponse(selectedInvoice.id, { signal })} title={`${selectedInvoice.fileName}原件预览`} renderWidth={1200} />}
                 </section>
 

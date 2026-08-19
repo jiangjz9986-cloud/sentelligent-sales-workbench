@@ -92,6 +92,31 @@ describe("authenticated PDF loading", () => {
     assert.equal(blobRead, false);
   });
 
+  it("loads authenticated image bytes only when the response declares an image", async () => {
+    const pdf = await loadAuthenticatedPdfModule();
+    assert.equal(typeof pdf.loadAuthenticatedImageBlob, "function");
+    const responseBlob = new Blob(["image-bytes"], { type: "image/png" });
+    const blob = await pdf.loadAuthenticatedImageBlob(async () => ({
+      ok: true,
+      status: 200,
+      redirected: false,
+      headers: new Headers({ "Content-Type": "image/png" }),
+      blob: async () => responseBlob,
+    }));
+    assert.equal(blob, responseBlob);
+
+    await assert.rejects(
+      pdf.loadAuthenticatedImageBlob(async () => ({
+        ok: true,
+        status: 200,
+        redirected: false,
+        headers: new Headers({ "Content-Type": "application/pdf" }),
+        blob: async () => new Blob(["pdf"], { type: "application/pdf" }),
+      })),
+      /Content-Type|图片/i,
+    );
+  });
+
   it("aborts stale work and exposes PDF.js canvas readiness", () => {
     const componentPath = fileURLToPath(componentUrl);
     const source = existsSync(componentPath) ? readFileSync(componentPath, "utf8") : "";

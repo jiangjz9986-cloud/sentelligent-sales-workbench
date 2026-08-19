@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
+import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import { loadAuthenticatedPdfBlob } from "./authenticatedPdf.js";
 import {
   expandInvoicePrintItems,
@@ -76,7 +77,7 @@ function invoiceMeta(invoice) {
   ].join(" · ");
 }
 
-function InvoiceSlot({ printItem, slotNumber, getInvoiceContentUrl, getInvoiceContentResponse, onPdfStatusChange }) {
+function InvoiceSlot({ printItem, slotNumber, getInvoiceContentUrl, getInvoiceContentResponse, onMediaStatusChange, onPdfPageCount }) {
   if (!printItem) {
     return (
       <figure className="invoice-print-slot is-empty" aria-label={`第 ${slotNumber} 个空白版位`}>
@@ -89,14 +90,22 @@ function InvoiceSlot({ printItem, slotNumber, getInvoiceContentUrl, getInvoiceCo
   const invoice = printItem.invoice ?? printItem;
   const pageNumber = Number.isSafeInteger(printItem.pageNumber) ? printItem.pageNumber : null;
   const pageCount = Number.isSafeInteger(printItem.pageCount) ? printItem.pageCount : null;
-  const contentUrl = getInvoiceContentUrl(invoice.id);
   const image = isTravelExpenseImage(invoice);
   const pdf = isTravelExpensePdf(invoice);
   const pdfResourceKey = `${invoice.id}:${pageNumber ?? 1}`;
   return (
     <figure className="invoice-print-slot">
       <div className="invoice-print-media">
-        {image ? <img src={contentUrl} alt={invoice.fileName} /> : null}
+        {image && typeof getInvoiceContentResponse === "function" ? (
+          <AuthenticatedImageFrame
+            resourceKey={`${invoice.id}:image`}
+            loadImage={({ signal }) => getInvoiceContentResponse(invoice.id, { signal, accept: "application/pdf,image/*" })}
+            title={invoice.fileName}
+            variant="print"
+            onStatusChange={(status) => onMediaStatusChange(`${invoice.id}:image`, status)}
+          />
+        ) : null}
+        {image && typeof getInvoiceContentResponse !== "function" ? <img src={getInvoiceContentUrl(invoice.id)} alt={invoice.fileName} /> : null}
         {pdf ? (
           <AuthenticatedPdfFrame
             resourceKey={pdfResourceKey}
@@ -104,7 +113,8 @@ function InvoiceSlot({ printItem, slotNumber, getInvoiceContentUrl, getInvoiceCo
             pageNumber={pageNumber ?? 1}
             title={`${invoice.fileName} PDF 发票第 ${pageNumber ?? 1} 页`}
             renderWidth={1440}
-            onStatusChange={(status) => onPdfStatusChange(pdfResourceKey, status)}
+            onPageCountChange={(count) => onPdfPageCount(invoice.id, count)}
+            onStatusChange={(status) => onMediaStatusChange(pdfResourceKey, status)}
           />
         ) : null}
         {!image && !pdf ? <div className="invoice-print-file-fallback"><FileText size={42} aria-hidden="true" /><strong>发票文件</strong><span>{invoice.fileName}</span></div> : null}
@@ -117,7 +127,7 @@ function InvoiceSlot({ printItem, slotNumber, getInvoiceContentUrl, getInvoiceCo
   );
 }
 
-function InvoicePage({ page, week, owner, getInvoiceContentUrl, getInvoiceContentResponse, onPdfStatusChange }) {
+function InvoicePage({ page, week, owner, getInvoiceContentUrl, getInvoiceContentResponse, onMediaStatusChange, onPdfPageCount }) {
   return (
     <article className="expense-print-sheet invoice-print-sheet">
       <header className="invoice-print-page-head">
@@ -132,7 +142,8 @@ function InvoicePage({ page, week, owner, getInvoiceContentUrl, getInvoiceConten
             slotNumber={((page.pageNumber - 1) * 4) + index + 1}
             getInvoiceContentUrl={getInvoiceContentUrl}
             getInvoiceContentResponse={getInvoiceContentResponse}
-            onPdfStatusChange={onPdfStatusChange}
+            onMediaStatusChange={onMediaStatusChange}
+            onPdfPageCount={onPdfPageCount}
           />
         ))}
       </div>
@@ -154,7 +165,7 @@ export function InvoicePrintPreview({
 }) {
   const [printing, setPrinting] = useState(false);
   const [printError, setPrintError] = useState("");
-  const [pdfStatuses, setPdfStatuses] = useState({});
+  const [mediaStatuses, setMediaStatuses] = useState({});
   const imageCount = invoices.filter(isTravelExpenseImage).length;
   const pdfCount = invoices.filter(isTravelExpensePdf).length;
   const pdfInvoices = useMemo(() => invoices.filter(isTravelExpensePdf), [invoices]);
@@ -189,7 +200,9 @@ export function InvoicePrintPreview({
         setPdfPageCountStatuses((current) => ({ ...current, [invoice.id]: "ready" }));
       }).catch((error) => {
         if (controller.signal.aborted || error?.name === "AbortError") return;
-        setPdfPageCountStatuses((current) => ({ ...current, [invoice.id]: "error" }));
+        setPdfPageCountStatuses((current) => current[invoice.id] === "ready"
+          ? current
+          : { ...current, [invoice.id]: "error" });
       });
     });
 
@@ -199,9 +212,17 @@ export function InvoicePrintPreview({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getInvoiceContentResponse, pdfIds, pdfInvoices, pdfPageCountAttempt]);
 
+  const printablePageCounts = useMemo(() => Object.fromEntries(
+    pdfInvoices.map((invoice) => [
+      invoice.id,
+      Number.isSafeInteger(pdfPageCounts[invoice.id]) && pdfPageCounts[invoice.id] > 0
+        ? pdfPageCounts[invoice.id]
+        : 1,
+    ]),
+  ), [pdfInvoices, pdfPageCounts]);
   const printItems = useMemo(
-    () => expandInvoicePrintItems(invoices, pdfPageCounts),
-    [invoices, pdfPageCounts],
+    () => expandInvoicePrintItems(invoices, printablePageCounts),
+    [invoices, printablePageCounts],
   );
   const pages = useMemo(() => paginateInvoicePrint(printItems), [printItems]);
   const pdfPageKeys = useMemo(
@@ -215,19 +236,42 @@ export function InvoicePrintPreview({
       && Number.isSafeInteger(pdfPageCounts[invoiceId])
       && pdfPageCounts[invoiceId] > 0
   ));
-  const pdfsReady = pdfPageCountsReady && pdfPageKeys.every((key) => pdfStatuses[key] === "ready");
-  const pdfLoadFailed = pdfIds.some((invoiceId) => pdfPageCountStatuses[invoiceId] === "error")
-    || pdfPageKeys.some((key) => pdfStatuses[key] === "error");
+  const imageKeys = useMemo(
+    () => typeof getInvoiceContentResponse === "function" ? printItems
+      .filter((item) => !Number.isSafeInteger(item.pageNumber))
+      .map((item) => `${item.invoice.id}:image`) : [],
+    [getInvoiceContentResponse, printItems],
+  );
+  const mediaReady = pdfPageCountsReady
+    && pdfPageKeys.every((key) => mediaStatuses[key] === "ready")
+    && imageKeys.every((key) => mediaStatuses[key] === "ready");
+  // Kept as a descriptive compatibility alias for the existing print QA
+  // contract; readiness now covers both PDF canvases and image variants.
+  const pdfsReady = mediaReady;
+  const pdfPageCountFailed = pdfIds.some((invoiceId) => pdfPageCountStatuses[invoiceId] === "error");
+  const mediaRenderFailed = pdfPageKeys.some((key) => mediaStatuses[key] === "error")
+    || imageKeys.some((key) => mediaStatuses[key] === "error");
+  const pdfLoadFailed = pdfPageCountFailed || mediaRenderFailed;
 
   function retryPdfPageCounts() {
     setPrintError("");
     setPdfPageCountAttempt((current) => current + 1);
   }
 
-  const handlePdfStatusChange = useCallback((resourceKey, status) => {
-    setPdfStatuses((current) => current[resourceKey] === status
+  const handleMediaStatusChange = useCallback((resourceKey, status) => {
+    setMediaStatuses((current) => current[resourceKey] === status
       ? current
       : { ...current, [resourceKey]: status });
+  }, []);
+
+  const handlePdfPageCount = useCallback((invoiceId, pageCount) => {
+    if (!Number.isSafeInteger(pageCount) || pageCount < 1) return;
+    setPdfPageCounts((current) => current[invoiceId] === pageCount
+      ? current
+      : { ...current, [invoiceId]: pageCount });
+    setPdfPageCountStatuses((current) => current[invoiceId] === "ready"
+      ? current
+      : { ...current, [invoiceId]: "ready" });
   }, []);
 
   useEffect(() => {
@@ -239,10 +283,10 @@ export function InvoicePrintPreview({
   }, [onClose]);
 
   async function printDocument() {
-    if (!pdfsReady) {
+    if (!mediaReady) {
       setPrintError(pdfLoadFailed
-        ? "PDF 发票加载失败，请在对应版位重新加载后再打印。"
-        : "PDF 发票正在加载，请稍后再打印。");
+        ? "发票原件加载失败，请在对应版位重新加载后再打印。"
+        : "发票原件正在加载，请稍后再打印。");
       return;
     }
     setPrinting(true);
@@ -267,9 +311,9 @@ export function InvoicePrintPreview({
     <section className="expense-print-preview invoice-print-preview" data-testid="invoice-print-preview">
       <header className="expense-print-preview-toolbar invoice-print-preview-toolbar no-print">
         <div><button className="ghost-button" type="button" onClick={onClose}><ArrowLeft size={16} />返回发票管理</button><div><strong>发票四联打印</strong><span>发票管理 / A4 横向预览</span></div></div>
-        <button className="primary-button" type="button" onClick={printDocument} disabled={printing || pages.length === 0 || !pdfsReady}><Printer size={16} />{printing ? "准备打印" : !pdfsReady ? "加载 PDF" : "打印"}</button>
+        <button className="primary-button" type="button" onClick={printDocument} disabled={printing || pages.length === 0 || !pdfsReady}><Printer size={16} />{printing ? "准备打印" : !pdfsReady ? (pdfCount ? "加载 PDF" : "加载图片") : "打印"}</button>
       </header>
-      {printError ? <div className="expense-page-alert no-print" role="alert"><span>{printError}</span><button className="ghost-button" type="button" onClick={pdfLoadFailed ? retryPdfPageCounts : printDocument} disabled={printing}>{pdfLoadFailed ? "重新读取 PDF" : "重新检查并打印"}</button></div> : null}
+      {printError ? <div className="expense-page-alert no-print" role="alert"><span>{printError}</span><button className="ghost-button" type="button" onClick={pdfPageCountFailed ? retryPdfPageCounts : printDocument} disabled={printing}>{pdfPageCountFailed ? "重新读取 PDF" : "重新检查并打印"}</button></div> : null}
 
       <div className="expense-print-layout invoice-print-layout">
         <aside className="expense-print-settings no-print">
@@ -280,7 +324,7 @@ export function InvoicePrintPreview({
         </aside>
 
         <div className="expense-print-document invoice-print-document">
-          {pages.map((page) => <InvoicePage key={page.pageNumber} page={page} week={week} owner={owner} getInvoiceContentUrl={getInvoiceContentUrl} getInvoiceContentResponse={getInvoiceContentResponse} onPdfStatusChange={handlePdfStatusChange} />)}
+          {pages.map((page) => <InvoicePage key={page.pageNumber} page={page} week={week} owner={owner} getInvoiceContentUrl={getInvoiceContentUrl} getInvoiceContentResponse={getInvoiceContentResponse} onMediaStatusChange={handleMediaStatusChange} onPdfPageCount={handlePdfPageCount} />)}
           {pages.length === 0 ? <div className="invoice-print-empty" role="status"><FileText size={24} /><strong>{pdfCount && !pdfPageCountsReady ? (pdfLoadFailed ? "PDF 页数读取失败" : "正在读取 PDF 页数") : "本周暂无已匹配发票"}</strong><span>{pdfCount && !pdfPageCountsReady ? (pdfLoadFailed ? "请重新读取后再继续打印。" : "读取完成后将按每页一个版位展开。") : "返回发票管理完成匹配后再打印。"}</span>{pdfLoadFailed ? <button className="ghost-button" type="button" onClick={retryPdfPageCounts}>重新读取 PDF</button> : null}</div> : null}
         </div>
       </div>

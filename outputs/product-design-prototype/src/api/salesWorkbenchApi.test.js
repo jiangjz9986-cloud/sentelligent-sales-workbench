@@ -2417,6 +2417,9 @@ describe("sales workbench API client", () => {
     assert.equal(headerValue(calls[0].options, "Accept"), "application/pdf");
     assert.equal(headerValue(calls[0].options, "Content-Type"), undefined);
     assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+
+    await api.getInvoiceContentResponse("invoice-image-1", { accept: "application/pdf,image/*" });
+    assert.equal(headerValue(calls[1].options, "Accept"), "application/pdf,image/*");
   });
 
   it("lists, reads, confirms, and rejects the protected payment-proof review inbox", async () => {

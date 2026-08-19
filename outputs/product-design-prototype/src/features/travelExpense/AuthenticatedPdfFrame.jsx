@@ -46,12 +46,14 @@ export function AuthenticatedPdfFrame({
   renderWidth = 1200,
   className = "",
   onStatusChange,
+  onPageCountChange,
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState(initialState);
   const canvasRef = useRef(null);
   const loadPdfRef = useRef(loadPdf);
   const statusCallbackRef = useRef(onStatusChange);
+  const pageCountCallbackRef = useRef(onPageCountChange);
 
   useEffect(() => {
     loadPdfRef.current = loadPdf;
@@ -60,6 +62,10 @@ export function AuthenticatedPdfFrame({
   useEffect(() => {
     statusCallbackRef.current = onStatusChange;
   }, [onStatusChange]);
+
+  useEffect(() => {
+    pageCountCallbackRef.current = onPageCountChange;
+  }, [onPageCountChange]);
 
   function publishStatus(status) {
     statusCallbackRef.current?.(status);
@@ -141,6 +147,7 @@ export function AuthenticatedPdfFrame({
         pageCount: documentProxy.numPages,
         requiresPageReload: false,
       });
+      pageCountCallbackRef.current?.(documentProxy.numPages);
       publishStatus("ready");
     })().catch((error) => {
       if (
