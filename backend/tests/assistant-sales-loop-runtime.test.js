@@ -309,6 +309,97 @@ describe("wired sales loop assistant runtime", () => {
     db.close();
   });
 
+  it("routes action-risk and knowledge reads through fixed agents with replay-safe runs", async () => {
+    let db = openDatabase({ databaseUrl });
+    db.prepare(`
+      INSERT INTO knowledge_items (id, title, category, summary, content, source)
+      VALUES ('knowledge-runtime', '运行时采购知识', '销售', '采购摘要', '不应返回的完整正文', '内部知识库')
+    `).run();
+    const before = businessCounts(db);
+    db.close();
+
+    const actionMessageId = `runtime-${++sequence}-action-risk`;
+    const action = await event("/action-risk.summary", actionMessageId);
+    assert.equal(action.response.status, 200);
+    assert.match(action.body.text, /未完成动作 1 项/);
+    assert.match(action.body.text, /预算未确认/);
+
+    db = openDatabase({ databaseUrl });
+    let actionRun = db.prepare(`
+      SELECT agent_id, task_type, contract_version, status, source, input_json, output_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'action-risk'
+    `).get({ $owner: owner });
+    assert.deepEqual({
+      agentId: actionRun.agent_id,
+      taskType: actionRun.task_type,
+      contractVersion: actionRun.contract_version,
+      status: actionRun.status,
+      source: actionRun.source,
+    }, {
+      agentId: "action-risk",
+      taskType: "summary",
+      contractVersion: "action-risk-v1",
+      status: "succeeded",
+      source: "deterministic",
+    });
+    assert.equal(Object.hasOwn(JSON.parse(actionRun.input_json), "owner"), false);
+    const actionOutput = JSON.parse(actionRun.output_json);
+    assert.equal(actionOutput.writebackAllowed, false);
+    assert.deepEqual(actionOutput.sourceRefs, [
+      { type: "customer", id: "customer-runtime" },
+      { type: "opportunity", id: "opportunity-runtime" },
+      { type: "action", id: "action-runtime" },
+      { type: "risk", id: "risk-runtime" },
+    ]);
+    db.close();
+
+    const actionReplay = await event("/action-risk.summary", actionMessageId);
+    assert.equal(actionReplay.response.status, 200);
+    assert.deepEqual(actionReplay.body, action.body);
+
+    const knowledgeMessageId = `runtime-${++sequence}-knowledge`;
+    const knowledge = await event("/knowledge.search 运行时采购", knowledgeMessageId);
+    assert.equal(knowledge.response.status, 200);
+    assert.match(knowledge.body.text, /运行时采购知识/);
+    assert.doesNotMatch(knowledge.body.text, /不应返回的完整正文/);
+
+    db = openDatabase({ databaseUrl });
+    const knowledgeRun = db.prepare(`
+      SELECT agent_id, task_type, contract_version, status, source, input_json, output_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'knowledge'
+    `).get({ $owner: owner });
+    assert.deepEqual({
+      agentId: knowledgeRun.agent_id,
+      taskType: knowledgeRun.task_type,
+      contractVersion: knowledgeRun.contract_version,
+      status: knowledgeRun.status,
+      source: knowledgeRun.source,
+    }, {
+      agentId: "knowledge",
+      taskType: "search",
+      contractVersion: "knowledge-v1",
+      status: "succeeded",
+      source: "deterministic",
+    });
+    assert.equal(Object.hasOwn(JSON.parse(knowledgeRun.input_json), "owner"), false);
+    const knowledgeOutput = JSON.parse(knowledgeRun.output_json);
+    assert.deepEqual(knowledgeOutput.sourceRefs, [{ type: "knowledge", id: "knowledge-runtime" }]);
+    assert.equal(JSON.stringify(knowledgeOutput).includes("不应返回的完整正文"), false);
+    db.close();
+
+    const knowledgeReplay = await event("/knowledge.search 运行时采购", knowledgeMessageId);
+    assert.equal(knowledgeReplay.response.status, 200);
+    assert.deepEqual(knowledgeReplay.body, knowledge.body);
+    db = openDatabase({ databaseUrl });
+    assert.equal(db.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id IN ('action-risk', 'knowledge')",
+    ).get({ $owner: owner }).count, 2);
+    assert.deepEqual(businessCounts(db), before);
+    db.close();
+  });
+
   it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
     const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
     assert.equal(collected.response.status, 200);

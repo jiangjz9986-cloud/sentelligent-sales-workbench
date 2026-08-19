@@ -4,8 +4,10 @@ import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
+import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
+import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js";
 import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
@@ -258,6 +260,8 @@ export function createAssistantToolHandlers({
   invoiceRecognizer,
   businessSnapshotAdapter = null,
   customerAssistantAdapter = null,
+  actionRiskAssistantAdapter = null,
+  knowledgeAssistantAdapter = null,
   opportunityAssistantAdapter = null,
   visitCaptureAssistantAdapter = null,
   salesReportAssistantAdapter = null,
@@ -275,6 +279,16 @@ export function createAssistantToolHandlers({
     clock,
   });
   const opportunityAdapter = opportunityAssistantAdapter ?? createOpportunityAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const actionRiskAdapter = actionRiskAssistantAdapter ?? createActionRiskAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const knowledgeAdapter = knowledgeAssistantAdapter ?? createKnowledgeAssistantAdapter({
     snapshotAdapter,
     runRepository: agentRunRepository,
     clock,
@@ -456,11 +470,20 @@ export function createAssistantToolHandlers({
     },
 
     async "action-risk.summary"(args, context) {
-      const summary = snapshotAdapter.actionRiskSummary({
+      const result = await actionRiskAdapter.analyze({
         owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "summary",
         customerId: args.customerId,
         opportunityId: args.opportunityId,
       });
+      const summary = {
+        actions: result.actions,
+        risks: result.risks,
+        truncated: result.truncated,
+      };
       return {
         text: [
           `动作风险摘要：未完成动作 ${summary.actions.length} 项，活跃风险 ${summary.risks.length} 项。`,
@@ -469,6 +492,8 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         summary,
+        actionRiskResult: result,
+        runId: result.runId,
       };
     },
 
@@ -495,14 +520,23 @@ export function createAssistantToolHandlers({
       };
     },
 
-    async "knowledge.search"(args) {
-      const result = snapshotAdapter.knowledgeSearch({ query: args.query });
+    async "knowledge.search"(args, context) {
+      const result = await knowledgeAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "search",
+        query: args.query,
+      });
       return {
         text: result.items.length
           ? [`知识检索结果：${result.items.length} 条。`, ...result.items.map((item) => `- ${item.title}：${item.summary ?? "暂无摘要"}（来源：${item.source ?? "待确认"}）`)].join("\n")
           : `未找到相关知识：${safeText(args.query)}`,
         status: "ok",
         items: result.items,
+        knowledgeResult: result,
+        runId: result.runId,
       };
     },
 
