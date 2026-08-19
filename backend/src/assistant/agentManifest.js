@@ -180,9 +180,37 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "return deterministic owner-scoped customer fields and clarify ambiguity", status: "fallback" },
   }),
   manifestDefinition("opportunity", {
+    contractVersion: "opportunity-v1",
+    modelPolicy: "none",
     taskTypes: ["search", "detail", "stage_review", "change_preview"],
     tools: ["opportunity.detail"],
     confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", query: "string", opportunityId: "string", changes: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "relationship", "writebackPreview"],
+      properties: {
+        schemaVersion: "opportunity-v1",
+        opportunity: "object|null",
+        matches: "array",
+        relationship: "object",
+        stageReview: "object|null",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行商机 Agent。",
+      "只使用服务端提供的 owner-scoped 商机和客户快照，并先校验商机与客户关系。",
+      "阶段、金额和概率只能作为服务端事实陈述，不得猜测或修改；金额和版本不得由模型生成。",
+      "不得混入 sales-decision 的推进策略；阶段评审只报告当前值和未知项。",
+      "变更仅生成逐字段预览，不能执行写入，且必须拒绝客户关系、阶段、金额、概率和版本字段。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped opportunity facts and clarify ambiguity", status: "fallback" },
   }),
   manifestDefinition("sales-decision", {
     contractVersion: "sales-decision-v1",
