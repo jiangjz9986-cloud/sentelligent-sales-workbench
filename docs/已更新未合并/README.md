@@ -18,7 +18,7 @@
 | 编号 | 功能 | 状态 | 来源分支 | 来源提交 | 验证 | 说明 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `xiaoxiao-advance-settlement` | 小小助手：请款结算与多退少补预览 | 已开发 / 待合并 | `codex/xiaoxiao-agent-suite` | `35a6c0f` | 后端 `877/877` | 只读预览；不创建退款/补款流水 |
-| `hospital-tender-monitoring-polish` | 医院招标监测与界面优化 | 评审中 | `agent/hospital-tender-monitoring-polish` | `7a66745` | 专项 `51/51`；前端 `66/66`；视觉 `10/10` | 已纳入聚合分支；远端前端 CI 待处理 |
+| `hospital-tender-monitoring-polish` | 医院招标监测与界面优化 | 评审中 / CI 待重新验证 | `agent/hospital-tender-monitoring-polish` | `7a66745` | 专项 `51/51`；前端 `66/66`；视觉 `10/10` | 已纳入聚合分支；等待 #38 新一轮 CI |
 
 详细说明见：[小小助手-请款结算-Agent.md](./小小助手-请款结算-Agent.md)。
 
