@@ -4,9 +4,11 @@ import {
   SALES_DECISION_STAGES,
 } from "./salesDecisionSchema.js";
 import { resolveSalesDecisionPlaybook } from "./salesDecisionPlaybooks.js";
+import { readBoundedResponseText } from "../../http/request.js";
 
 const IMPACT_PATTERN = /影响|导致|成本|效率|故障|风险|收入|停机|合规|患者|恢复|损失|压力/;
 const MINIMUM_SALES_DECISION_MODEL_TIMEOUT_MS = 120_000;
+const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
 const COMPLIANCE_PATTERNS = [
   { pattern: /回扣|返点|红包|利益输送|不当宴请/, flag: "疑似不当利益安排" },
   { pattern: /围标|串标|陪标|泄露标底|操纵采购/, flag: "疑似采购不当或围标串标" },
@@ -587,7 +589,10 @@ async function callSalesDecisionModel(context, config, fetchImpl) {
     }),
     signal: AbortSignal.timeout(resolveSalesDecisionModelTimeoutMs(config)),
   });
-  const bodyText = await response.text();
+  const bodyText = await readBoundedResponseText(response, {
+    maxBytes: MAX_MODEL_RESPONSE_BYTES,
+    errorMessage: "Sales decision model response is too large",
+  });
   if (!response.ok) throw new Error(`sales decision model returned ${response.status}`);
   const body = bodyText ? JSON.parse(bodyText) : {};
   const content = body.choices?.[0]?.message?.content;

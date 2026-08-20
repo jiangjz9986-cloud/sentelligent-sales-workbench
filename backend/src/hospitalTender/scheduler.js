@@ -109,6 +109,7 @@ export function createHospitalTenderScheduler({
   runner,
   customersProvider,
   notifier = null,
+  notificationEnabled = () => notifier !== null,
   clock = () => new Date(),
   idFactory = randomUUID,
   intervalMinutes = DEFAULT_INTERVAL_MINUTES,
@@ -120,6 +121,7 @@ export function createHospitalTenderScheduler({
   }
   if (typeof customersProvider !== "function") throw new TypeError("customersProvider is required");
   if (typeof notifier !== "function" && notifier !== null) throw new TypeError("notifier must be a function");
+  if (typeof notificationEnabled !== "function") throw new TypeError("notificationEnabled must be a function");
   const configuredInterval = Number.isSafeInteger(intervalMinutes) && intervalMinutes > 0
     ? intervalMinutes
     : DEFAULT_INTERVAL_MINUTES;
@@ -409,7 +411,13 @@ export function createHospitalTenderScheduler({
         && notice.match?.matchedCustomerIds?.some((id) => batchCustomerIds.has(id))
       ));
       let notificationCount = 0;
-      if (notifier && newHighNotices.length > 0) {
+      let notificationsEnabled = false;
+      try {
+        notificationsEnabled = Boolean(notificationEnabled());
+      } catch {
+        notificationsEnabled = false;
+      }
+      if (notifier && notificationsEnabled && newHighNotices.length > 0) {
         try {
           const notified = await notifier({
             cycleNumber: current.cycleNumber,

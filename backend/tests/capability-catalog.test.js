@@ -6,6 +6,7 @@ import {
   getCapability,
   listCapabilities,
 } from "../src/assistant/capabilityCatalog.js";
+import { createAgentManifestRegistry } from "../src/assistant/agentManifest.js";
 
 const REQUIRED_CAPABILITY_IDS = [
   "dashboard",
@@ -19,9 +20,50 @@ const REQUIRED_CAPABILITY_IDS = [
   "sales-report",
   "action-risk",
   "knowledge.search",
+  "system-router",
+  "payment-proof",
+  "invoice",
+  "advance-settlement",
+  "solution",
+  "personal-finance",
 ];
 
+const AGENT_CAPABILITIES = {
+  "system-router": ["system-router"],
+  dashboard: ["dashboard"],
+  "visit-capture": ["visit-capture"],
+  customer: ["customer.search", "customer.detail"],
+  opportunity: ["opportunity.detail"],
+  "sales-decision": ["sales-decision.preview"],
+  "action-risk": ["action-risk"],
+  itinerary: ["itinerary.summary"],
+  "travel-expense": ["travel-expense.summary"],
+  "payment-proof": ["payment-proof"],
+  invoice: ["invoice"],
+  "advance-settlement": ["advance-settlement"],
+  "reimbursement-report": ["reimbursement-report"],
+  "sales-report": ["sales-report"],
+  knowledge: ["knowledge.search"],
+  solution: ["solution"],
+  "personal-finance": ["personal-finance"],
+};
+
 describe("小小 capability metadata catalog", () => {
+  it("has at least one descriptive capability for every fixed Agent", () => {
+    const manifests = createAgentManifestRegistry().list();
+    for (const manifest of manifests) {
+      const capabilityIds = AGENT_CAPABILITIES[manifest.id];
+      assert.ok(capabilityIds, `missing capability mapping for ${manifest.id}`);
+      for (const id of capabilityIds) assert.ok(getCapability(id), `${manifest.id} -> ${id}`);
+      if (manifest.lifecycle === "disabled") {
+        assert.ok(capabilityIds.every((id) => getCapability(id).status === "disabled"), manifest.id);
+      }
+      if (manifest.lifecycle === "draft") {
+        assert.ok(capabilityIds.some((id) => getCapability(id).status === "partial"), manifest.id);
+      }
+    }
+  });
+
   it("lists the reviewed capabilities with stable readiness metadata", () => {
     const capabilities = listCapabilities();
     assert.ok(Array.isArray(capabilities));
@@ -48,8 +90,15 @@ describe("小小 capability metadata catalog", () => {
     assert.ok(byId.get("customer.search").mappings.tools.includes("customer.search"));
     assert.ok(byId.get("visit-capture").mappings.tools.includes("visit-capture.collect"));
     assert.ok(byId.get("reimbursement-report").mappings.tools.includes("reimbursement-report.preview"));
-    assert.equal(byId.get("sales-decision.preview").status, "partial");
-    assert.match(byId.get("sales-decision.preview").unavailableReason, /尚未接入/);
+    assert.equal(byId.get("sales-decision.preview").status, "ready");
+    assert.equal(byId.get("sales-decision.preview").unavailableReason, null);
+    assert.equal(byId.get("advance-settlement").status, "ready");
+    assert.equal(byId.get("advance-settlement").unavailableReason, null);
+    assert.ok(byId.get("advance-settlement").mappings.tools.includes("advance-settlement.preview"));
+    assert.equal(byId.get("solution").status, "disabled");
+    assert.equal(byId.get("personal-finance").status, "disabled");
+    assert.equal(byId.get("payment-proof").mappings.tools[0], "payment-proof.ingest");
+    assert.equal(byId.get("invoice").mappings.tools[0], "invoice.ingest");
   });
 
   it("returns isolated snapshots so callers cannot mutate the internal catalog", () => {
@@ -87,6 +136,12 @@ describe("小小 capability metadata catalog", () => {
       "sales-report": [],
       "action-risk": ["GET /api/actions", "GET /api/risks"],
       "knowledge.search": ["POST /api/knowledge/search"],
+      "system-router": [],
+      "payment-proof": ["POST /api/travel-expense-document-inbox", "GET /api/travel-expense-document-inbox"],
+      invoice: ["POST /api/invoices", "GET /api/invoices"],
+      "advance-settlement": ["GET /api/travel-expense-advances", "GET /api/travel-expenses"],
+      solution: [],
+      "personal-finance": [],
     };
 
     for (const [id, apis] of Object.entries(expectedApis)) {

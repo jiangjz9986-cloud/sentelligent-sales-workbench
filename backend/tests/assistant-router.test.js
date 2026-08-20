@@ -47,6 +47,18 @@ describe("assistant deterministic router", () => {
     assert.deepEqual(reimbursement.arguments, { week: "current" });
   });
 
+  it("routes request-settlement and multi-refund/top-up phrases to a read-only preview", () => {
+    const explicit = router.route({ text: "/advance-settlement.preview 2026-08-17" });
+    assert.equal(explicit.status, "planned");
+    assert.equal(explicit.toolName, "advance-settlement.preview");
+    assert.deepEqual(explicit.arguments, { week: "2026-08-17" });
+
+    const natural = router.route({ text: "多退少补" });
+    assert.equal(natural.status, "planned");
+    assert.equal(natural.toolName, "advance-settlement.preview");
+    assert.deepEqual(natural.arguments, { week: "current" });
+  });
+
   it("keeps payment-proof and invoice inbox uploads compatible without confirmation", () => {
     assert.equal(router.route({ text: "/invoice.ingest invoice-ref-1" }).status, "planned");
     assert.equal(router.route({ text: "/payment-proof.ingest proof-ref-1" }).status, "planned");

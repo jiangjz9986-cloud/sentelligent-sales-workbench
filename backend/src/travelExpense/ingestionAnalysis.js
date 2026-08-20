@@ -1,3 +1,5 @@
+import { readBoundedModelResponseText } from "./modelTextBound.js";
+
 const CATEGORY_RULES = [
   ["breakfast", /早餐|早饭|早点/],
   ["lunch", /午餐|午饭|中餐/],
@@ -230,7 +232,7 @@ function optionalEnum(value, allowed) {
 async function responseContent(response) {
   let body = response;
   if (body && typeof body.text === "function") {
-    const text = await body.text();
+    const text = await readBoundedModelResponseText(body);
     try {
       body = text ? JSON.parse(text) : {};
     } catch {

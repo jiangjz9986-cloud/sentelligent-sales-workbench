@@ -1,5 +1,8 @@
 import { buildQuickRecordAnalysis } from "./quickRecordAnalysis.js";
 import { analyzeSalesDecision as analyzeSalesDecisionAgent } from "./ai/agents/salesDecisionAgent.js";
+import { readBoundedResponseText } from "./http/request.js";
+
+const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
 
 function fallbackAnalysis(rawContent, source) {
   const analysis = buildQuickRecordAnalysis(rawContent);
@@ -68,12 +71,12 @@ export function parseModelAnalysisContent(content, provider = "model") {
   };
 }
 
-function buildMessages(rawContent) {
+function buildMessages(rawContent, systemPrompt = null) {
   return [
     {
       role: "system",
       content: [
-        "你是森特智行 AI 销售作战台的销售记录分析器。",
+        systemPrompt || "你是森特智行 AI 销售作战台的销售记录分析器。",
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 customer、opportunity、weekly、summary。",
         "summary 必须包含 request、feedback、risk、action，每项都有 title 和 text。",
@@ -116,7 +119,10 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
     signal: AbortSignal.timeout(config.modelTimeoutMs ?? 30000),
   });
 
-  const text = await response.text();
+  const text = await readBoundedResponseText(response, {
+    maxBytes: MAX_MODEL_RESPONSE_BYTES,
+    errorMessage: "Model provider response is too large",
+  });
   const body = text ? JSON.parse(text) : {};
   if (!response.ok) {
     throw new Error(`model provider returned ${response.status}`);
@@ -127,9 +133,9 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
   return content;
 }
 
-async function callModel(rawContent, config, fetchImpl) {
+async function callModel(rawContent, config, fetchImpl, systemPrompt = null) {
   const content = await callChatCompletion({
-    messages: buildMessages(rawContent),
+    messages: buildMessages(rawContent, systemPrompt),
     config,
     fetchImpl,
     maxTokens: 3200,
@@ -171,20 +177,21 @@ function buildWeeklyDraftMessages(context) {
     {
       role: "system",
       content: [
-        "你是森特智行 AI 销售作战台的周报提炼助手。",
+        context.systemPrompt || "你是森特智行 AI 销售作战台的周报提炼助手。",
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 content 字段，content 为中文 Markdown 周报正文。",
         "必须保留人工确认后的事实，不要编造客户、金额或承诺。",
+        "只能引用下方 sourceRefs 中存在的来源标识；不要声称周报已保存、发布、提交或写入。",
       ].join("\n"),
     },
     {
       role: "user",
       content: JSON.stringify({
-        owner: context.owner,
         periodStart: context.periodStart,
         periodEnd: context.periodEnd,
         records,
         knowledge: context.knowledge ?? [],
+        sourceRefs: context.sourceRefs ?? [],
         fallbackContent: compact(context.fallbackDraft?.content, 1600),
       }),
     },
@@ -365,6 +372,40 @@ export async function enhanceWeeklyDraftWithModel(fallbackDraft, context, config
   );
 }
 
+/**
+ * Compose a source-backed weekly draft while retaining whether the model was
+ * actually used. The ordinary enhancer above intentionally keeps its legacy
+ * return shape; the assistant adapter needs this explicit provenance to
+ * persist a truthful Agent run.
+ */
+export async function composeWeeklyDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
+  if (!shouldUseModel(config)) {
+    return config.aiAnalysisMode === "model"
+      ? { ...fallbackDraft, source: "fallback", fallbackReason: "weekly_draft_missing_model_key" }
+      : { ...fallbackDraft, source: "deterministic", fallbackReason: null };
+  }
+  try {
+    const content = await callChatCompletion({
+      messages: buildWeeklyDraftMessages({ ...context, fallbackDraft, systemPrompt: options.systemPrompt }),
+      config,
+      fetchImpl: options.fetchImpl ?? fetch,
+      maxTokens: 2600,
+    });
+    return {
+      ...fallbackDraft,
+      content: parseModelDraftContent(content),
+      source: config.modelProvider ?? "model",
+      fallbackReason: null,
+    };
+  } catch {
+    return {
+      ...fallbackDraft,
+      source: "fallback",
+      fallbackReason: "weekly_draft_model_failure",
+    };
+  }
+}
+
 export async function enhanceSolutionDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
   return enhanceDraftWithModel(
     fallbackDraft,
@@ -426,7 +467,7 @@ export async function analyzeQuickRecord(rawContent, config = {}, options = {}) 
   }
 
   try {
-    return await callModel(text, config, options.fetchImpl ?? fetch);
+    return await callModel(text, config, options.fetchImpl ?? fetch, options.systemPrompt ?? null);
   } catch {
     return fallbackAnalysis(text, "mock_model_fallback");
   }

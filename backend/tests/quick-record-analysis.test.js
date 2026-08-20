@@ -99,16 +99,16 @@ function seedPersistedHistory(databaseUrl) {
   inspectDatabase(databaseUrl, (db) => {
     db.exec(`
       INSERT INTO quick_records (
-        id, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status,
+        id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status,
         version, created_at, updated_at
       ) VALUES
-        ('qr-history', '真实历史记录', '2026-07-18T09:00:00+08:00', 'test', 'rizhao', 'op-rizhao-plan', 'confirmed', 4, '2026-07-18 01:00:00', '2026-07-18 01:05:00'),
-        ('qr-no-analysis', '尚未分析记录', '2026-07-18T08:00:00+08:00', 'test', NULL, NULL, 'recorded', 1, '2026-07-18 00:00:00', '2026-07-18 00:00:00');
+        ('qr-history', 'quick-record-editor', '真实历史记录', '2026-07-18T09:00:00+08:00', 'test', 'rizhao', 'op-rizhao-plan', 'confirmed', 4, '2026-07-18 01:00:00', '2026-07-18 01:05:00'),
+        ('qr-no-analysis', 'quick-record-editor', '尚未分析记录', '2026-07-18T08:00:00+08:00', 'test', NULL, NULL, 'recorded', 1, '2026-07-18 00:00:00', '2026-07-18 00:00:00');
 
       INSERT INTO quick_records (
-        id, raw_content, status, version, voided_at, voided_by, void_reason, created_at, updated_at
+        id, owner, raw_content, status, version, voided_at, voided_by, void_reason, created_at, updated_at
       ) VALUES (
-        'qr-voided', 'voided record', 'recorded', 2, '2026-07-18 02:00:00', 'quick-record-editor',
+        'qr-voided', 'quick-record-editor', 'voided record', 'recorded', 2, '2026-07-18 02:00:00', 'quick-record-editor',
         'superseded', '2026-07-18 00:30:00', '2026-07-18 02:00:00'
       );
 
@@ -164,6 +164,69 @@ function summaryPatch(requestText) {
 }
 
 describe("persisted quick-record analysis", () => {
+  it("keeps WeChat machine quick-record reads and writes inside the machine owner scope", async () => {
+    const machineOwnerCredential = ["machine", "owner", "token"].join("-");
+    await withHarness({
+      weixinAgentApiToken: machineOwnerCredential,
+      weixinAgentOwner: "wechat-owner",
+    }, async ({ databaseUrl, rawRequest, request }) => {
+      inspectDatabase(databaseUrl, (db) => {
+        db.prepare(`
+          INSERT INTO quick_records (id, owner, raw_content, status)
+          VALUES ($id, $owner, $rawContent, 'recorded')
+        `).run({
+          $id: "qr-other-owner",
+          $owner: "different-owner",
+          $rawContent: "不应被微信机器身份读取的内容",
+        });
+        db.prepare(`
+          INSERT INTO quick_records (id, owner, raw_content, status)
+          VALUES ($id, $owner, $rawContent, 'recorded')
+        `).run({
+          $id: "qr-wechat-owner",
+          $owner: "wechat-owner",
+          $rawContent: "微信机器身份自己的记录",
+        });
+        db.prepare(`
+          INSERT INTO customers (id, name, owner)
+          VALUES ($id, $name, $owner)
+        `).run({
+          $id: "customer-other-owner",
+          $name: "其他 owner 客户",
+          $owner: "different-owner",
+        });
+      });
+
+      const machineHeaders = {
+        Authorization: `Bearer ${machineOwnerCredential}`,
+        "Content-Type": "application/json",
+      };
+      const browserDenied = await request("/api/quick-records/qr-other-owner/analyze", {
+        method: "POST",
+        body: "{}",
+      });
+      assert.equal(browserDenied.response.status, 404);
+
+      const denied = await rawRequest("/api/quick-records/qr-other-owner/analyze", {
+        method: "POST",
+        headers: machineHeaders,
+        body: "{}",
+      });
+      assert.equal(denied.response.status, 404);
+
+      const crossOwnerCreate = await rawRequest("/api/quick-records", {
+        method: "POST",
+        headers: machineHeaders,
+        body: JSON.stringify({
+          rawContent: "不应绑定其他 owner 客户",
+          customerId: "customer-other-owner",
+          sourceChannel: "wechat_text",
+        }),
+      });
+      assert.equal(crossOwnerCreate.response.status, 422);
+    });
+  });
+
   it("lists the latest saved analysis and confirmation state without calling the model", async () => {
     await withHarness({ aiAnalysisMode: "model", modelApiKey: "test-model-key" }, async ({
       databaseUrl,

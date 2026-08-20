@@ -58,6 +58,12 @@ function insertFixtures() {
   `);
   insertPayment.run({ $id: "payment-a", $expenseId: "expense-a", $amount: 8800, $reimbursement: 7000 });
   insertPayment.run({ $id: "payment-b", $expenseId: "expense-b", $amount: 9900, $reimbursement: 9000 });
+  db.prepare(`
+    INSERT INTO travel_expense_advances (
+      id, owner, week_start, status, requested_cents, received_cents, requested_on,
+      received_on, purpose, created_by, updated_by
+    ) VALUES ('advance-a', 'owner-a', '2026-08-17', 'received', 5000, 5000, '2026-08-17', '2026-08-17', 'A 项目备用金', 'owner-a', 'owner-a')
+  `).run();
 
   db.prepare(`
     INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content)
@@ -226,6 +232,7 @@ describe("assistant bounded business snapshot adapter", () => {
       ["action-risk.summary", {}],
       ["itinerary.summary", {}],
       ["travel-expense.summary", { week: "current" }],
+      ["advance-settlement.preview", { week: "2026-08-17" }],
       ["knowledge.search", { query: "采购" }],
     ]) {
       assert.equal(typeof handlers[toolName], "function", toolName);
@@ -233,6 +240,19 @@ describe("assistant bounded business snapshot adapter", () => {
       assert.equal(typeof output.text, "string", toolName);
       assert.ok(output.text.length > 0, toolName);
     }
+    const settlement = await handlers["advance-settlement.preview"]({ week: "2026-08-17" }, context, {});
+    assert.equal(settlement.status, "review_required");
+    assert.equal(settlement.settlementPreview.direction, "company_reimburses");
+    assert.equal(settlement.settlementPreview.transaction.recorded, false);
+    assert.equal(settlement.settlementResult.advances[0].id, "advance-a");
+    assert.equal(settlement.settlementResult.advances[0].owner, undefined);
+    const otherOwnerSettlement = await handlers["advance-settlement.preview"](
+      { week: "2026-08-17" },
+      { ...context, owner: "owner-b", conversation: "conversation-b" },
+      {},
+    );
+    assert.deepEqual(otherOwnerSettlement.settlementResult.advances, []);
+    assert.equal(db.prepare("SELECT total_changes() AS count").get().count, before);
     const denied = await handlers["customer.detail"]({ customerId: "customer-b" }, context, {});
     assert.equal(denied.status, "not_found");
     assert.equal((await handlers["customer.detail"]({ customerId: "A医院" }, context, {})).customer.name, "A医院");

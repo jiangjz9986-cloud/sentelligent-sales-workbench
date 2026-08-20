@@ -191,6 +191,70 @@ describe("remote Clawbot agent adapter", () => {
     );
   });
 
+  it("marks permanent backend authorization responses so one message cannot poison retries", async () => {
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse({ error: { code: "WEIXIN_SENDER_NOT_ALLOWED" } }, 403),
+    });
+
+    await assert.rejects(
+      agent.chat({
+        conversationId: "c-1",
+        text: "hello",
+        senderId: "sender-1",
+        messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+        chatType: "direct",
+        deliveryTimestampMs: 1786500000123,
+      }),
+      (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
+        assert.equal(error.permanent, true);
+        return true;
+      },
+    );
+  });
+
+  it("bounds chunked backend responses before buffering them in memory", async () => {
+    const chunk = new Uint8Array(600 * 1024);
+    let reads = 0;
+    let cancelled = false;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        body: {
+          getReader: () => ({
+            read: async () => (reads++ < 2 ? { value: chunk, done: false } : { value: undefined, done: true }),
+            cancel: async () => { cancelled = true; },
+            releaseLock: () => {},
+          }),
+        },
+        text: async () => assert.fail("streaming responses must not fall back to text()"),
+      }),
+    });
+
+    await assert.rejects(
+      agent.chat({
+        conversationId: "c-1",
+        text: "hello",
+        senderId: "sender-1",
+        messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+        chatType: "direct",
+        deliveryTimestampMs: 1786500000123,
+      }),
+      (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_INVALID_RESPONSE");
+        assert.equal(error.message, "远程助手暂时不可用，请稍后重试");
+        return true;
+      },
+    );
+    assert.equal(cancelled, true);
+  });
+
   it("forwards sender and chat metadata while keeping the owner server-owned", async () => {
     let requestBody;
     const agent = createRemoteClawbotAgent({

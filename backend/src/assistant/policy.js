@@ -20,6 +20,7 @@ const TOOL_POLICIES = new Map([
   ["invoice.ingest", { risk: "R1", confirmation: "none", reason: "inbox_capture" }],
   ["reimbursement-report.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
   ["sales-report.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
+  ["advance-settlement.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
   ["travel-expense.create", { risk: "R3", confirmation: "explicit_code", reason: "financial_write" }],
 ]);
 

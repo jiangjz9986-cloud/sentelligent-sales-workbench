@@ -732,7 +732,9 @@ describe("sales workbench backend API", () => {
     const exportedText = await exported.text();
     assert.equal(exported.status, 200);
     assert.match(exported.headers.get("content-type") ?? "", /application\/msword/);
-    assert.match(exported.headers.get("content-disposition") ?? "", /weekly-report-.*\.doc/);
+    const contentDisposition = exported.headers.get("content-disposition") ?? "";
+    assert.match(contentDisposition, /^attachment; filename\*=UTF-8''weekly-report-.*\.doc$/);
+    assert.doesNotMatch(contentDisposition, /[\r\n"]/);
     assert.match(exportedText, /已确认周报/);
     assert.match(exportedText, /日照中医医院十五五规划材料已补齐/);
 
