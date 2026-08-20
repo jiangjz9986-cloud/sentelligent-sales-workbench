@@ -5,6 +5,7 @@
 | 状态 | 已开发，未合并，未推送生产，未部署 |
 | 记录时间 | 2026-08-20T02:22:06Z |
 | 代码分支 | `codex/v063-travel-expense-core` |
+| Draft PR | [#39](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/pull/39) |
 | 基线 | `a497c5f8a03391f106d382f2ec2be7d15ac8a09c` |
 | 最新提交 | `1a3233eff488181adb3910a96bed9944876c4570` |
 | 独立工作区 | `/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/travel-expense-core-v063` |
@@ -86,4 +87,3 @@ db75243
 c0217f0
 1a3233e
 ```
-

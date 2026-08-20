@@ -13,7 +13,7 @@
 
 | 条目 | 代码分支 | 最新提交 | 状态 |
 | --- | --- | --- | --- |
-| [差旅报销核心 v0.6.3](./travel-expense-core-v063.md) | `codex/v063-travel-expense-core` | `1a3233e` | 已开发 / 待主控审查 |
+| [差旅报销核心 v0.6.3](./travel-expense-core-v063.md) | `codex/v063-travel-expense-core` | `1a3233e` | [Draft PR #39](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/pull/39) · 已开发 / 待主控审查 |
 
 ## 新增条目模板
 
@@ -26,4 +26,3 @@
 5. 合并前置条件、阻塞项和建议的 cherry-pick 顺序。
 
 所有条目不得写入密码、Token、Cookie、真实附件、客户原文或财务原件。
-
