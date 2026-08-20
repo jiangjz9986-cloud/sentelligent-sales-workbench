@@ -9,7 +9,7 @@
 - 来源提交：`35a6c0f`
 - 聚合分支：`codex/unmerged-updates`
 - 目标分支：`main`
-- Draft PR：创建后回填
+- Draft PR：[PR #38](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/pull/38)，状态：Open / Draft / 未合并
 
 ## 这次更新了什么
 

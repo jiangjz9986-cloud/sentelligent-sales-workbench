@@ -9,6 +9,7 @@
 - 聚合分支：`codex/unmerged-updates`
 - 目标分支：`main`
 - 发布方式：Draft PR，标题统一使用 `[未合并更新]`
+- 当前 Draft PR：[PR #38](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/pull/38)
 - 当前状态：已开发，待逐项评审和合并
 - 最近登记：2026-08-20
 
