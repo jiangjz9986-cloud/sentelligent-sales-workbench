@@ -197,6 +197,11 @@ function isExplicitTestFixtureValue(value, filePath) {
     /^synthetic[-_]cursor[-_]retry[-_]context$/i,
     /^legacy[-_]plaintext$/i,
     /^(?:must[-_]not[-_]be[-_]used|too[-_]short|not[-_]a[-_]hash)$/i,
+    // Historical assistant tests used these fixed, human-readable sentinels.
+    // Keep the allowlist exact so similarly named production values are not
+    // treated as placeholders.
+    /^sales[-_]loop[-_]machine[-_]token$/i,
+    /^must[-_]not[-_]enter$/i,
   ].some((pattern) => pattern.test(value));
 }
 
@@ -213,6 +218,7 @@ const boundedPlaceholderStrongMarkers = new Set([
   "unit",
   "vendor",
   "worker",
+  "wrong",
 ]);
 
 const boundedPlaceholderSafeLeadWords = new Set([
@@ -313,6 +319,14 @@ const boundedPlaceholderWords = new Set([
   "webhook",
   "weixin",
   "help",
+  // These words occur in historical, deliberately synthetic security-test
+  // labels (for example, sales-loop-machine-token). Keeping them in the
+  // bounded vocabulary lets the complete-history scan distinguish those
+  // labels from high-entropy credentials without weakening production paths.
+  "enter",
+  "inline",
+  "loop",
+  "sales",
 ]);
 
 function boundedPlaceholderParts(value) {
