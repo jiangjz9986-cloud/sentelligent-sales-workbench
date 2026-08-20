@@ -18,6 +18,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
+import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import {
   calculateInvoiceMatchAllocation,
@@ -465,7 +466,7 @@ export function InvoiceManager({
               <div className="invoice-detail-scroll">
                 <section className="invoice-original-preview">
                   {selectedInvoice.mediaType.startsWith("image/")
-                    ? <img src={apiClient.getInvoiceContentUrl(selectedInvoice.id)} alt={selectedInvoice.fileName} />
+                    ? <AuthenticatedImageFrame resourceKey={selectedInvoice.id} loadImage={({ signal }) => apiClient.getInvoiceContentResponse(selectedInvoice.id, { signal, accept: "application/pdf,image/*" })} title={`${selectedInvoice.fileName}原件预览`} variant="preview" />
                     : <AuthenticatedPdfFrame resourceKey={selectedInvoice.id} loadPdf={({ signal }) => apiClient.getInvoiceContentResponse(selectedInvoice.id, { signal })} title={`${selectedInvoice.fileName}原件预览`} renderWidth={1200} />}
                 </section>
 
@@ -527,9 +528,11 @@ export function InvoiceManager({
           {resource.noInvoice.status === "ready" ? <>
             <div className="invoice-coverage-strip">
               <span><small>本周应报销</small><strong>{formatCny(coverage?.reimbursementCents ?? 0)}</strong></span>
-              <span><small>已覆盖</small><strong>{formatCny(coverage?.confirmedCoverageCents ?? 0)}</strong></span>
+              <span><small>电子发票</small><strong>{formatCny(coverage?.electronicInvoiceCoverageCents ?? coverage?.confirmedCoverageCents ?? 0)}</strong></span>
+              <span><small>替票覆盖</small><strong>{formatCny(coverage?.substituteInvoiceCoverageCents ?? 0)}</strong></span>
               <span><small>确认无票</small><strong>{formatCny(coverage?.noInvoiceConfirmedCents ?? 0)}</strong></span>
               <span className="warning"><small>仍缺发票</small><strong>{formatCny(coverage?.missingInvoiceCents ?? 0)}</strong></span>
+              <span><small>仓库可用</small><strong>{formatCny(coverage?.invoiceWarehouseAvailableCents ?? 0)}</strong></span>
             </div>
             <div className="invoice-no-ticket-form">
               <label><span>费用</span><select value={noInvoiceExpenseId} onChange={(event) => { setNoInvoiceExpenseId(event.target.value); setNoInvoicePaymentId(""); }}><option value="">请选择费用</option>{expenses.map((expense) => <option value={expense.id} key={expense.id}>{expense.occurredOn} · {expense.purpose}</option>)}</select></label>

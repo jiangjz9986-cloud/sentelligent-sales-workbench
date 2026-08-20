@@ -12,6 +12,7 @@ import {
   withDocumentBlobWritePreflightSync,
 } from "./documentBlobStore.js";
 import { inspectInvoiceFile } from "./invoiceRecognition.js";
+import { chooseBestInvoiceReplacement } from "./invoiceReplacement.js";
 
 const SOURCES = new Set(["manual", "weixin"]);
 const STATUSES = new Set(["received", "processing", "review_required", "unmatched", "matched", "rejected"]);
@@ -1016,10 +1017,27 @@ export function createInvoiceRepository(db, {
     `).all({ $owner: normalizedOwner, $weekStart: normalizedWeekStart });
     let reimbursementCents = 0;
     let confirmedCoverageCents = 0;
+    let electronicInvoiceCoverageCents = 0;
+    let substituteInvoiceCoverageCents = 0;
     let noInvoiceConfirmedCents = 0;
     for (const expense of expenses) {
       const reimbursement = Number(expense.reimbursement_cents);
-      const confirmed = Math.min(reimbursement, confirmedExpenseCoverageCents(expense.id));
+      const methodCoverage = db.prepare(`
+        SELECT
+          COALESCE(SUM(CASE WHEN match.match_method = 'rule_candidate' THEN match.allocated_cents ELSE 0 END), 0) AS substitute_cents,
+          COALESCE(SUM(CASE WHEN match.match_method <> 'rule_candidate' THEN match.allocated_cents ELSE 0 END), 0) AS electronic_cents
+        FROM invoice_matches match
+        JOIN invoice_documents invoice
+          ON invoice.id = match.invoice_id
+         AND invoice.owner = match.owner
+         AND invoice.deleted_at IS NULL
+        WHERE match.owner = $owner
+          AND match.expense_id = $expenseId
+          AND match.state = 'confirmed'
+      `).get({ $owner: normalizedOwner, $expenseId: expense.id });
+      const electronic = Number(methodCoverage.electronic_cents);
+      const substitute = Number(methodCoverage.substitute_cents);
+      const confirmed = Math.min(reimbursement, electronic + substitute);
       const missing = Math.max(0, reimbursement - confirmed);
       const acknowledged = Number(db.prepare(`
         SELECT COALESCE(SUM(amount_snapshot_cents), 0) AS total
@@ -1028,16 +1046,50 @@ export function createInvoiceRepository(db, {
       `).get({ $expenseId: expense.id }).total);
       reimbursementCents += reimbursement;
       confirmedCoverageCents += confirmed;
+      electronicInvoiceCoverageCents += Math.min(reimbursement, electronic);
+      substituteInvoiceCoverageCents += Math.min(
+        Math.max(0, reimbursement - Math.min(reimbursement, electronic)),
+        substitute,
+      );
       noInvoiceConfirmedCents += Math.min(missing, acknowledged);
     }
     const missingInvoiceCents = Math.max(0, reimbursementCents - confirmedCoverageCents);
+    const invoiceWarehouseAvailableCents = Number(db.prepare(`
+      SELECT COALESCE(SUM(
+        MAX(0,
+          invoice.total_cents
+          - COALESCE((
+              SELECT SUM(confirmed.allocated_cents)
+              FROM invoice_matches confirmed
+              WHERE confirmed.owner = invoice.owner
+                AND confirmed.invoice_id = invoice.id
+                AND confirmed.state = 'confirmed'
+            ), 0)
+          - COALESCE((
+              SELECT SUM(candidate.proposed_cents)
+              FROM invoice_match_candidates candidate
+              WHERE candidate.owner = invoice.owner
+                AND candidate.invoice_id = invoice.id
+                AND candidate.status = 'suggested'
+            ), 0)
+        )
+      ), 0) AS available_cents
+      FROM invoice_documents invoice
+      WHERE invoice.owner = $owner
+        AND invoice.deleted_at IS NULL
+        AND invoice.status IN ('unmatched', 'matched')
+        AND invoice.total_cents > 0
+    `).get({ $owner: normalizedOwner }).available_cents);
     return {
       weekStart: normalizedWeekStart,
       reimbursementCents,
       confirmedCoverageCents,
+      electronicInvoiceCoverageCents,
+      substituteInvoiceCoverageCents,
       missingInvoiceCents,
       noInvoiceConfirmedCents,
       unacknowledgedMissingCents: Math.max(0, missingInvoiceCents - noInvoiceConfirmedCents),
+      invoiceWarehouseAvailableCents,
       expenseCount: expenses.length,
     };
   }
@@ -1155,9 +1207,42 @@ export function createInvoiceRepository(db, {
             || String(first.invoice.issued_on).localeCompare(String(second.invoice.issued_on))
             || String(first.invoice.id).localeCompare(String(second.invoice.id)));
 
-        for (const rankedInvoice of ranked) {
+        const replacement = chooseBestInvoiceReplacement({
+          targetCents: remaining,
+          target,
+          invoices: ranked.map((item) => ({
+            id: item.invoice.id,
+            totalCents: item.invoiceRemaining,
+            availableCents: item.invoiceRemaining,
+            issuedOn: item.invoice.issued_on,
+            suggestedCategory: item.invoice.suggested_category,
+          })),
+        });
+        const selected = replacement
+          ? (() => {
+            const selectedRanked = replacement.invoiceIds
+              .map((invoiceId) => ranked.find((item) => item.invoice.id === invoiceId))
+              .filter(Boolean)
+              .sort((left, right) => right.score - left.score
+                || String(left.invoice.issued_on).localeCompare(String(right.invoice.issued_on))
+                || String(left.invoice.id).localeCompare(String(right.invoice.id)));
+            let allocationRemaining = remaining;
+            return selectedRanked.map((rankedInvoice) => {
+              const proposedCents = Math.min(allocationRemaining, rankedInvoice.invoiceRemaining);
+              allocationRemaining -= proposedCents;
+              return { rankedInvoice, proposedCents, combination: replacement };
+            });
+          })()
+          : ranked.map((rankedInvoice) => ({
+            rankedInvoice,
+            proposedCents: Math.min(remaining, rankedInvoice.invoiceRemaining),
+            combination: null,
+          }));
+
+        for (const selection of selected) {
           if (remaining <= 0) break;
-          const proposedCents = Math.min(remaining, rankedInvoice.invoiceRemaining);
+          const rankedInvoice = selection.rankedInvoice;
+          const proposedCents = Math.min(remaining, selection.proposedCents);
           if (proposedCents <= 0) continue;
           const id = generatedId(candidateIdFactory);
           db.prepare(`
@@ -1177,7 +1262,16 @@ export function createInvoiceRepository(db, {
             $paymentId: target.payment_id,
             $proposedCents: proposedCents,
             $score: rankedInvoice.score,
-            $rationaleJson: JSON.stringify(rankedInvoice.rationale),
+            $rationaleJson: JSON.stringify([
+              ...rankedInvoice.rationale,
+              ...(selection.combination
+                ? [
+                    selection.combination.exact ? "combination_exact" : "combination_smallest_overage",
+                    `combination_count_${selection.combination.invoiceCount}`,
+                    `combination_waste_cents_${selection.combination.wasteCents}`,
+                  ]
+                : []),
+            ]),
             $actor: actor,
             $now: timestamp,
           });
