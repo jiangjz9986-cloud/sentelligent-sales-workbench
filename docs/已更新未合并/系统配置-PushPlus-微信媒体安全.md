@@ -53,7 +53,7 @@
 - 迁移顺序已验证为 `0019 → 0020 → 0021`，保留医院招标和小小助手已有迁移。
 - Node 语法检查、冲突标记检查和 `git diff --check`：通过。
 - 聚合工作树与最新 CI 均命中小小助手既有测试中的 2 条 API-key assignment 模式；这不是本次新增凭据，需人工复核后重新取得 CI，未放宽扫描规则。
-- 聚合 Draft PR #38 最新 GitHub Actions：失败，失败步骤为 `Scan current source for secrets`；详情：[Actions run 32327592481](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/actions/runs/32327592481)。
+- 聚合 Draft PR #38 最新 GitHub Actions：失败，失败步骤为 `Scan current source for secrets`；详情以 PR #38 的最新检查记录为准。
 
 来源 Draft PR #36 的远端证据：
 
