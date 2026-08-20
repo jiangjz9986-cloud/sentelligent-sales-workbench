@@ -10,7 +10,7 @@
 - 目标分支：`main`
 - 发布方式：Draft PR，标题统一使用 `[未合并更新]`
 - 当前 Draft PR：[PR #38](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/pull/38)
-- 当前状态：已开发，待逐项评审、聚合 CI 和手动合并
+- 当前状态：已开发，远端 secret scan 阻塞，待逐项评审和手动合并
 - 最近登记：2026-08-20
 
 ## 已登记功能
@@ -19,7 +19,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | `xiaoxiao-advance-settlement` | 小小助手：请款结算与多退少补预览 | 已开发 / 待合并 | `codex/xiaoxiao-agent-suite` | `35a6c0f` | 后端 `877/877` | 只读预览；不创建退款/补款流水 |
 | `hospital-tender-monitoring-polish` | 医院招标监测与界面优化 | 评审中 / 远端扫描阻塞 | `agent/hospital-tender-monitoring-polish` | `7a66745` | 专项 `51/51`；前端 `66/66`；视觉 `10/10` | 已纳入聚合分支；阻塞来自其他既有文件的秘密扫描命中 |
-| `settings-config-pushplus` | 系统配置、PushPlus 与微信媒体安全 | 评审中 / 聚合 CI 待验证 | `codex/settings-config-pushplus` | `bd4fca2` | 后端 `789/789`；前端 API `59/59`；工作树 secret scan `0` | 已纳入聚合分支；来源 PR 历史 secret scan 曾阻塞 |
+| `settings-config-pushplus` | 系统配置、PushPlus 与微信媒体安全 | 评审中 / 远端扫描阻塞 | `codex/settings-config-pushplus` | `bd4fca2` | 后端 `789/789`；前端 API `59/59`；工作树 secret scan `0` | 聚合 CI 命中小小助手既有测试中的 2 条模式 |
 
 详细说明见：[小小助手-请款结算-Agent.md](./小小助手-请款结算-Agent.md)。
 
