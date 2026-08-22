@@ -21,19 +21,15 @@ import { fileURLToPath } from "node:url";
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
 // A pre-cutover report may inspect the already-running release whose manifest
-// predates the latest settings, hospital-tender, or Qingyang bridge names.
-// This relaxed set is valid only for the canonical current release path;
-// candidate releases always use the complete REQUIRED_ENV_NAMES contract.
+// predates the five shortcut-confirmation and PushPlus names. This relaxed set
+// is valid only for the canonical current release path; candidate releases
+// always use the complete contract.
 const LEGACY_CURRENT_EXCLUDED_ENV_NAMES = new Set([
-  "SETTINGS_ENCRYPTION_KEY",
-  "HOSPITAL_TENDER_PYTHON",
-  "HOSPITAL_TENDER_AUTO_RUN",
-  "HOSPITAL_TENDER_INTERVAL_MINUTES",
-  "HOSPITAL_TENDER_BATCH_SIZE",
   "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
-  "QINGYANG_BOOKKEEPING_BRIDGE_URL",
-  "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
-  "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
+  "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+  "WEIXIN_BOOKKEEPING_OWNER",
+  "WEIXIN_BOOKKEEPING_SENDER_ID",
+  "WEIXIN_OUTBOX_POLL_MS",
 ]);
 const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
   REQUIRED_ENV_NAMES.filter(
@@ -46,6 +42,35 @@ export const REQUIRED_PROJECT_SERVICES = Object.freeze([
   "sentelligent-frontend.service",
   "sentelligent-caddy.service",
   "sentelligent-weixin-agent.service",
+]);
+
+export const PRODUCTION_PREFLIGHT_CHECK_IDS = Object.freeze([
+  "release.identity",
+  "node.version",
+  "env.production",
+  "env.authRequired",
+  "env.authHash",
+  "env.sessionSecret",
+  "env.assistantSecrets",
+  "env.shortcutWeixinConfirmation",
+  "env.secureCookie",
+  "env.cors",
+  "env.solutionWrites",
+  "env.aiModel",
+  "env.icostWebhook",
+  "env.icostIsolation",
+  "env.invoiceExtraction",
+  "database.environmentBinding",
+  "database.quickCheck",
+  "database.foreignKeys",
+  "backup.identity",
+  "backup.sha256",
+  "backup.quickCheck",
+  "backup.foreignKeys",
+  "services.snapshot",
+  "services.project",
+  "services.commands",
+  "services.unrelatedProtection",
 ]);
 
 const ALLOWED_SERVICE_ACTIONS = Object.freeze([
@@ -238,9 +263,39 @@ function hasWeixinOwnerConfiguration(environment, database) {
   );
 }
 
-function hasHospitalTenderSchedulerConfiguration(environment) {
+function hasShortcutWeixinConfirmationConfiguration(environment) {
+  const owner = environment.WEIXIN_BOOKKEEPING_OWNER;
+  const sender = environment.WEIXIN_BOOKKEEPING_SENDER_ID;
+  const allowedSenders = typeof environment.WEIXIN_ALLOWED_SENDER_IDS === "string"
+    ? environment.WEIXIN_ALLOWED_SENDER_IDS
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+    : [];
+  const pollMs = Number(environment.WEIXIN_OUTBOX_POLL_MS);
   return (
-    environment.HOSPITAL_TENDER_AUTO_RUN === "true" &&
+    environment.SHORTCUT_WEIXIN_CONFIRMATION_ENABLED === "true" &&
+    typeof owner === "string" &&
+    owner.length > 0 &&
+    owner.length <= 200 &&
+    owner === owner.trim() &&
+    owner === environment.WEIXIN_AGENT_OWNER &&
+    typeof sender === "string" &&
+    sender.length > 0 &&
+    sender.length <= 200 &&
+    sender === sender.trim() &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(sender) &&
+    allowedSenders.includes(sender) &&
+    Number.isSafeInteger(pollMs) &&
+    pollMs >= 500 &&
+    pollMs <= 60_000
+  );
+}
+
+function hasHospitalTenderSchedulerConfiguration(environment) {
+  const schedulerMode = environment.HOSPITAL_TENDER_AUTO_RUN;
+  return (
+    (schedulerMode === "true" || schedulerMode === "false") &&
     environment.HOSPITAL_TENDER_INTERVAL_MINUTES === "60" &&
     environment.HOSPITAL_TENDER_BATCH_SIZE === "10" &&
     hasHospitalTenderNotificationConfiguration(environment)
@@ -346,34 +401,6 @@ function hasIsolatedIcostWebhookToken(environment) {
     environment.ASSISTANT_CONFIRMATION_SECRET,
     environment.SETTINGS_ENCRYPTION_KEY,
     environment.HOSPITAL_TENDER_SYNC_TOKEN,
-  ]
-    .filter((value) => typeof value === "string" && value.length > 0)
-    .every((value) => value !== token);
-}
-
-function hasQingyangBookkeepingBridgeConfiguration(environment) {
-  return (
-    environment.QINGYANG_BOOKKEEPING_BRIDGE_URL ===
-      "http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping" &&
-    isStrongAssistantSecret(environment.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN) &&
-    isPositiveSafeIntegerText(environment.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS) &&
-    Number(environment.QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS) <= 30_000
-  );
-}
-
-function hasIsolatedQingyangBookkeepingBridgeToken(environment) {
-  const token = environment.QINGYANG_BOOKKEEPING_BRIDGE_TOKEN;
-  if (!isStrongAssistantSecret(token)) return false;
-  return [
-    environment.AUTH_SESSION_SECRET,
-    environment.MODEL_API_KEY,
-    environment.DEEPSEEK_API_KEY,
-    environment.WEIXIN_AGENT_API_TOKEN,
-    environment.ASSISTANT_CONFIRMATION_SECRET,
-    environment.SETTINGS_ENCRYPTION_KEY,
-    environment.HOSPITAL_TENDER_SYNC_TOKEN,
-    environment.ICOST_WEBHOOK_TOKEN,
-    environment.SHORTCUT_WEBHOOK_TOKEN,
   ]
     .filter((value) => typeof value === "string" && value.length > 0)
     .every((value) => value !== token);
@@ -1580,7 +1607,10 @@ function hasExactFrontendBuildProvenance(manifest) {
   );
 }
 
-function hasExactBackendDependencyProvenance(manifest) {
+function hasExactBackendDependencyProvenance(
+  manifest,
+  { allowLegacyDarwinArm64 = false } = {},
+) {
   const backend = manifest?.buildProvenance?.backend;
   const lockfile = backend?.lockfile;
   const runtime = backend?.runtime;
@@ -1604,8 +1634,16 @@ function hasExactBackendDependencyProvenance(manifest) {
       "node-lib-adjacent",
       "PATH",
     ].includes(runtime.npmResolutionSource) &&
-    runtime.platform === "linux" &&
-    runtime.architecture === "x64" &&
+    // Formal candidates must be built on Linux x64. The sole exception is
+    // the already-running pre-cutover release, which was intentionally
+    // packaged on the maintainer's Darwin arm64 workstation and is accepted
+    // only while it remains the canonical current release.
+    (
+      (runtime.platform === "linux" && runtime.architecture === "x64") ||
+      (allowLegacyDarwinArm64 &&
+        runtime.platform === "darwin" &&
+        runtime.architecture === "arm64")
+    ) &&
     isRecord(install) &&
     install.command === "npm ci" &&
     install.ignoreScripts === true &&
@@ -1616,7 +1654,10 @@ function hasExactBackendDependencyProvenance(manifest) {
 function manifestShapeError(
   manifest,
   expectedCommit,
-  { allowLegacyCurrentEnvironmentNames = false } = {},
+  {
+    allowLegacyCurrentEnvironmentNames = false,
+    allowLegacyDarwinArm64BackendProvenance = false,
+  } = {},
 ) {
   if (
     !isRecord(manifest) ||
@@ -1644,7 +1685,11 @@ function manifestShapeError(
   if (!hasExactFrontendBuildProvenance(manifest)) {
     return "Release manifest must bind the frontend build to its committed lockfile, npm runtime, isolated install, and allowlisted environment.";
   }
-  if (!hasExactBackendDependencyProvenance(manifest)) {
+  if (
+    !hasExactBackendDependencyProvenance(manifest, {
+      allowLegacyDarwinArm64: allowLegacyDarwinArm64BackendProvenance,
+    })
+  ) {
     return "Release manifest must bind the packaged backend production dependency tree to its committed lockfile and isolated production-only install.";
   }
   if (
@@ -2011,15 +2056,17 @@ export function validateReleaseIdentity({
         "Release manifest must resolve to /opt/sentelligent-sales-workbench/releases/<safe-id>/release-manifest.json.",
     };
   }
+  const legacyCurrentPath =
+    allowLegacyCurrent && currentReleasePath === releasePath;
   const legacySchema2 =
-    allowLegacyCurrent &&
-    manifest.schemaVersion === 2 &&
-    currentReleasePath === releasePath;
+    legacyCurrentPath && manifest.schemaVersion === 2;
+  // The current v0.6.3 release was packaged on Darwin/arm64 before the
+  // Linux release builder was introduced. Keep the exception tied to this
+  // exact current path; all candidates and all other release paths remain
+  // subject to the normal Linux/x64 provenance rule.
   const legacySchema3 =
-    allowLegacyCurrent &&
-    manifest.schemaVersion === RELEASE_MANIFEST_SCHEMA_VERSION &&
-    currentReleasePath === releasePath &&
-    hasLegacyCurrentEnvironmentContract(manifest.requiredEnvNames);
+    legacyCurrentPath &&
+    manifest.schemaVersion === RELEASE_MANIFEST_SCHEMA_VERSION;
   if (!legacySchema2 && !legacySchema3) {
     const shapeError = manifestShapeError(manifest, expectedCommit);
     if (shapeError !== null) {
@@ -2044,7 +2091,10 @@ export function validateReleaseIdentity({
     }
   } else {
     const shapeError = manifestShapeError(manifest, expectedCommit, {
-      allowLegacyCurrentEnvironmentNames: true,
+      allowLegacyCurrentEnvironmentNames: hasLegacyCurrentEnvironmentContract(
+        manifest.requiredEnvNames,
+      ),
+      allowLegacyDarwinArm64BackendProvenance: true,
     });
     if (shapeError !== null) {
       return { valid: false, message: shapeError };
@@ -2453,6 +2503,16 @@ function makeCheck(id, passed, passedMessage, failedMessage, details) {
   };
 }
 
+function assertPreflightCheckContract(checks) {
+  const actualIds = checks.map((check) => check.id);
+  if (
+    new Set(actualIds).size !== actualIds.length ||
+    JSON.stringify(actualIds) !== JSON.stringify(PRODUCTION_PREFLIGHT_CHECK_IDS)
+  ) {
+    throw new Error("Production preflight check contract is inconsistent");
+  }
+}
+
 function safeReadEnvironment(envFile) {
   try {
     const stable = readStableRegularFile(envFile, {
@@ -2624,9 +2684,9 @@ export async function runProductionPreflight({
       environmentResult.error === null &&
         environment.NODE_ENV === "production" &&
         hasHospitalTenderSchedulerConfiguration(environment),
-      "Environment is explicitly production with the v0.6.0 automatic tender schedule enabled at 60 minutes and 10 customers.",
+      "Environment is explicitly production with the fixed 60-minute/10-customer tender schedule; automatic execution may be explicitly enabled or disabled, and enabled notification requires a dedicated PushPlus token.",
       environmentResult.error ??
-        "NODE_ENV must be production, hospital tender auto-run must be true with the fixed 60-minute/10-customer schedule, and HOSPITAL_TENDER_PUSHPLUS_TOKEN must be a dedicated strong value.",
+        "NODE_ENV must be production, hospital tender auto-run must be explicitly true or false with the fixed 60-minute/10-customer schedule, and enabled execution requires a dedicated strong PushPlus value.",
     ),
     makeCheck(
       "env.authRequired",
@@ -2653,6 +2713,12 @@ export async function runProductionPreflight({
       hasAssistantSecretConfiguration(environment) && hasWeixinOwnerConfiguration(environment, database),
       "WeChat machine owner and assistant secrets are explicitly configured, strong, independent, and match a historical business owner.",
       "WEIXIN_AGENT_OWNER must be explicit and match a historical customer or opportunity owner; machine, confirmation, settings, and optional tender secrets must also be canonical strong independent values.",
+    ),
+    makeCheck(
+      "env.shortcutWeixinConfirmation",
+      hasShortcutWeixinConfirmationConfiguration(environment),
+      "Shortcut bookkeeping confirmation is enabled for the bound owner and direct-message sender with a bounded outbox poll interval.",
+      "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.",
     ),
     makeCheck(
       "env.secureCookie",
@@ -2689,18 +2755,6 @@ export async function runProductionPreflight({
       hasIsolatedIcostWebhookToken(environment),
       "The iCost webhook token is isolated from other project credentials.",
       "The iCost webhook token must not reuse the session, model, or WeChat credential.",
-    ),
-    makeCheck(
-      "env.qingyangBridge",
-      hasQingyangBookkeepingBridgeConfiguration(environment),
-      "The Qingyang bookkeeping bridge uses the approved loopback endpoint, a strong server-only credential, and a bounded timeout.",
-      "The Qingyang bookkeeping bridge requires the exact loopback endpoint, a strong server-only credential, and a timeout from 1 to 30000 milliseconds.",
-    ),
-    makeCheck(
-      "env.qingyangBridgeIsolation",
-      hasIsolatedQingyangBookkeepingBridgeToken(environment),
-      "The Qingyang bookkeeping bridge credential is isolated from user, iCost, model, session, and machine credentials.",
-      "The Qingyang bookkeeping bridge credential must not reuse any user, iCost, model, session, settings, confirmation, or machine credential.",
     ),
     makeCheck(
       "env.invoiceExtraction",
@@ -2799,6 +2853,7 @@ export async function runProductionPreflight({
         "Unrelated services must be protected and broad process or service commands are forbidden.",
     ),
   ];
+  assertPreflightCheckContract(checks);
   const passed = checks.filter((check) => check.status === "passed").length;
   const failed = checks.length - passed;
   return {

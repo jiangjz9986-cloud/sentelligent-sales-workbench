@@ -105,7 +105,6 @@ function validEnvironment(origin, databaseUrl) {
   const icostWebhookToken = createHash("sha256")
     .update("fixture-icost-webhook-token")
     .digest("hex");
-  const qingyangBookkeepingBridgeToken = Buffer.alloc(32, 8).toString("base64url");
   const icostWebhookOwner = "fixture-owner";
   const invoiceOcrCommand = "/opt/sentelligent-tools/tesseract-fixture";
   const invoicePdfTextCommand = "/opt/sentelligent-tools/pdftotext-fixture";
@@ -137,14 +136,16 @@ function validEnvironment(origin, databaseUrl) {
       `HOSPITAL_TENDER_SYNC_TOKEN=${hospitalTenderSyncToken}`,
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
       "WEIXIN_AGENT_OWNER=fixture-owner",
+      "WEIXIN_ALLOWED_SENDER_IDS=fixture-sender",
+      "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED=true",
+      "WEIXIN_BOOKKEEPING_OWNER=fixture-owner",
+      "WEIXIN_BOOKKEEPING_SENDER_ID=fixture-sender",
+      "WEIXIN_OUTBOX_POLL_MS=5000",
       `ASSISTANT_CONFIRMATION_SECRET=${assistantConfirmationSecret}`,
       `ICOST_WEBHOOK_TOKEN=${icostWebhookToken}`,
       `ICOST_WEBHOOK_OWNER=${icostWebhookOwner}`,
       "ICOST_WEBHOOK_RATE_LIMIT=37",
       "ICOST_WEBHOOK_WINDOW_MS=271828",
-      "QINGYANG_BOOKKEEPING_BRIDGE_URL=http://127.0.0.1:8797/api/integrations/sentelligent/bookkeeping",
-      `QINGYANG_BOOKKEEPING_BRIDGE_TOKEN=${qingyangBookkeepingBridgeToken}`,
-      "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS=10000",
       `INVOICE_OCR_COMMAND=${invoiceOcrCommand}`,
       `INVOICE_PDF_TEXT_COMMAND=${invoicePdfTextCommand}`,
       `INVOICE_OCR_LANGUAGES=${invoiceOcrLanguages}`,
@@ -160,7 +161,6 @@ function validEnvironment(origin, databaseUrl) {
     hospitalTenderSyncToken,
     hospitalTenderPushplusToken,
     icostWebhookToken,
-    qingyangBookkeepingBridgeToken,
     icostWebhookOwner,
     invoiceOcrCommand,
     invoicePdfTextCommand,
@@ -749,9 +749,14 @@ describe("production preflight", () => {
       assert.ok(existsSync(`${databasePath}-wal`));
 
       let report;
+      let expectedCheckIds;
       try {
-        const { runProductionPreflight } = await loadPreflightModule();
+        const {
+          PRODUCTION_PREFLIGHT_CHECK_IDS,
+          runProductionPreflight,
+        } = await loadPreflightModule();
         assert.equal(typeof runProductionPreflight, "function");
+        expectedCheckIds = PRODUCTION_PREFLIGHT_CHECK_IDS;
         report = await runProductionPreflight({
           envFile,
           databasePath,
@@ -766,9 +771,14 @@ describe("production preflight", () => {
       }
 
       assert.equal(report.status, "failed");
-      assert.equal(report.summary.total, 27);
-      assert.equal(report.summary.passed, 26);
+      assert.equal(report.summary.total, expectedCheckIds.length);
+      assert.equal(report.summary.passed, expectedCheckIds.length - 1);
       assert.equal(report.summary.failed, 1);
+      assert.deepEqual(
+        report.checks.map((check) => check.id),
+        expectedCheckIds,
+        "the emitted checks must be the canonical preflight contract",
+      );
       assert.equal(
         report.checks.find((check) => check.id === "release.identity")?.status,
         "failed",
@@ -784,14 +794,13 @@ describe("production preflight", () => {
         "env.authHash",
         "env.sessionSecret",
         "env.assistantSecrets",
+        "env.shortcutWeixinConfirmation",
         "env.secureCookie",
         "env.cors",
         "env.solutionWrites",
         "env.aiModel",
         "env.icostWebhook",
         "env.icostIsolation",
-        "env.qingyangBridge",
-        "env.qingyangBridgeIsolation",
         "env.invoiceExtraction",
         "database.environmentBinding",
         "database.quickCheck",
@@ -815,7 +824,6 @@ describe("production preflight", () => {
         environment.modelApiKey,
         environment.weixinAgentApiToken,
         environment.icostWebhookToken,
-        environment.qingyangBookkeepingBridgeToken,
         environment.icostWebhookOwner,
         environment.invoiceOcrCommand,
         environment.invoicePdfTextCommand,
@@ -933,10 +941,6 @@ describe("production preflight", () => {
         ["fractional iCost window", "ICOST_WEBHOOK_WINDOW_MS", "1.5", "env.icostWebhook"],
         ["reused model token", "ICOST_WEBHOOK_TOKEN", environment.modelApiKey, "env.icostIsolation"],
         ["reused WeChat token", "ICOST_WEBHOOK_TOKEN", environment.weixinAgentApiToken, "env.icostIsolation"],
-        ["unsafe bridge URL", "QINGYANG_BOOKKEEPING_BRIDGE_URL", "https://example.test/bridge", "env.qingyangBridge"],
-        ["short bridge token", "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN", "short", "env.qingyangBridge"],
-        ["oversized bridge timeout", "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS", "30001", "env.qingyangBridge"],
-        ["reused iCost bridge token", "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN", environment.icostWebhookToken, "env.qingyangBridgeIsolation"],
         ["missing OCR command", "INVOICE_OCR_COMMAND", "", "env.invoiceExtraction"],
         ["relative OCR path", "INVOICE_OCR_COMMAND", "../tesseract", "env.invoiceExtraction"],
         ["nonexistent OCR executable", "INVOICE_OCR_COMMAND", "/opt/sentelligent-tools/missing-tesseract", "env.invoiceExtraction"],
@@ -980,6 +984,60 @@ describe("production preflight", () => {
     }
   });
 
+  it("fails closed when shortcut WeChat confirmation is disabled or misbound", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+
+      const cases = [
+        ["disabled", "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED", "false"],
+        ["owner mismatch", "WEIXIN_BOOKKEEPING_OWNER", "another-owner"],
+        ["blank sender", "WEIXIN_BOOKKEEPING_SENDER_ID", ""],
+        ["sender not allowlisted", "WEIXIN_BOOKKEEPING_SENDER_ID", "other-sender"],
+        ["poll below floor", "WEIXIN_OUTBOX_POLL_MS", "499"],
+        ["poll above ceiling", "WEIXIN_OUTBOX_POLL_MS", "60001"],
+        ["fractional poll", "WEIXIN_OUTBOX_POLL_MS", "500.5"],
+      ];
+
+      const { runProductionPreflight } = await loadPreflightModule();
+      for (const [name, variable, value] of cases) {
+        const source = environment.source.replace(
+          new RegExp(`^${variable}=.*$`, "m"),
+          `${variable}=${value}`,
+        );
+        const envFile = workspace.write(`unsafe-shortcut-${name}.env`, source);
+        const servicePlanPath = workspace.write(
+          `service-plan-shortcut-${name}.json`,
+          JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+        );
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        assert.equal(
+          report.checks.find(
+            (check) => check.id === "env.shortcutWeixinConfirmation",
+          )?.status,
+          "failed",
+          name,
+        );
+      }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("fails closed for missing or malformed v0.6.0 settings and hospital tender runtime values", async () => {
     const workspace = makeWorkspace();
     try {
@@ -997,12 +1055,11 @@ describe("production preflight", () => {
         ["reused settings key", "SETTINGS_ENCRYPTION_KEY", environment.sessionValue, "env.assistantSecrets"],
         ["weak optional sync token", "HOSPITAL_TENDER_SYNC_TOKEN", "short", "env.assistantSecrets"],
         ["sync token reused as settings key", "HOSPITAL_TENDER_SYNC_TOKEN", environment.settingsEncryptionKey, "env.assistantSecrets"],
-        ["missing PushPlus token", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", "", "env.production"],
-        ["short PushPlus token", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", "short", "env.production"],
-        ["PushPlus token reused as model key", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", environment.modelApiKey, "env.production"],
+        ["missing PushPlus token while enabled", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", "", "env.production"],
+        ["short PushPlus token while enabled", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", "short", "env.production"],
+        ["PushPlus token reused as model key while enabled", "HOSPITAL_TENDER_PUSHPLUS_TOKEN", environment.modelApiKey, "env.production"],
         ["relative Python path", "HOSPITAL_TENDER_PYTHON", "python3", "node.version"],
         ["unverified Python path", "HOSPITAL_TENDER_PYTHON", "/opt/sentelligent-tools/python3.10", "node.version"],
-        ["disabled automatic scheduler", "HOSPITAL_TENDER_AUTO_RUN", "false", "env.production"],
         ["wrong scheduler interval", "HOSPITAL_TENDER_INTERVAL_MINUTES", "61", "env.production"],
         ["wrong scheduler batch size", "HOSPITAL_TENDER_BATCH_SIZE", "11", "env.production"],
       ];
@@ -1037,6 +1094,40 @@ describe("production preflight", () => {
           `${name} must not expose the settings key`,
         );
       }
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("accepts an explicitly disabled hospital tender scheduler without a notification token", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const source = environment.source
+        .replace(/^HOSPITAL_TENDER_AUTO_RUN=.*$/m, "HOSPITAL_TENDER_AUTO_RUN=false")
+        .replace(/^HOSPITAL_TENDER_PUSHPLUS_TOKEN=.*$/m, "HOSPITAL_TENDER_PUSHPLUS_TOKEN=");
+      const envFile = workspace.write("disabled-hospital-tender.env", source);
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      makeDatabase(databasePath);
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const servicePlanPath = workspace.write(
+        "service-plan-disabled-hospital-tender.json",
+        JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+      );
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+      assert.equal(report.checks.find((check) => check.id === "env.production")?.status, "passed");
     } finally {
       workspace.cleanup();
     }
@@ -1716,20 +1807,16 @@ describe("production preflight", () => {
     }
   });
 
-  it("allows the v0.6.1 schema-3 environment contract only for the current release", async () => {
+  it("allows the exact legacy schema-3 environment contract only for the current release", async () => {
     const fixture = makeReleaseFixture();
     try {
       const legacyManifest = structuredClone(fixture.manifest);
       const legacyExcludedEnvironmentNames = new Set([
-        "SETTINGS_ENCRYPTION_KEY",
-        "HOSPITAL_TENDER_PYTHON",
-        "HOSPITAL_TENDER_AUTO_RUN",
-        "HOSPITAL_TENDER_INTERVAL_MINUTES",
-        "HOSPITAL_TENDER_BATCH_SIZE",
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
-        "QINGYANG_BOOKKEEPING_BRIDGE_URL",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
+        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+        "WEIXIN_BOOKKEEPING_OWNER",
+        "WEIXIN_BOOKKEEPING_SENDER_ID",
+        "WEIXIN_OUTBOX_POLL_MS",
       ]);
       legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
         (name) => !legacyExcludedEnvironmentNames.has(name),
@@ -1763,6 +1850,79 @@ describe("production preflight", () => {
       });
       assert.equal(candidateResult.valid, false);
       assert.match(candidateResult.message, /environment names|contract/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("allows only the existing Darwin arm64 dependency provenance for a legacy current release", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const legacyManifest = structuredClone(fixture.manifest);
+      legacyManifest.buildProvenance.backend.runtime.platform = "darwin";
+      legacyManifest.buildProvenance.backend.runtime.architecture = "arm64";
+
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const currentResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(currentResult.valid, true, currentResult.message);
+
+      const candidateResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: `${immutableReleaseRoot}-other`,
+      });
+      assert.equal(candidateResult.valid, false);
+      assert.match(candidateResult.message, /backend production dependency|provenance/i);
+
+      const legacyExcludedEnvironmentNames = new Set([
+        "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
+        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+        "WEIXIN_BOOKKEEPING_OWNER",
+        "WEIXIN_BOOKKEEPING_SENDER_ID",
+        "WEIXIN_OUTBOX_POLL_MS",
+      ]);
+      legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
+        (name) => !legacyExcludedEnvironmentNames.has(name),
+      );
+      const currentLegacyEnvironmentResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(
+        currentLegacyEnvironmentResult.valid,
+        true,
+        currentLegacyEnvironmentResult.message,
+      );
+
+      legacyManifest.buildProvenance.backend.runtime.architecture = "x64";
+      const wrongArchitectureResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(wrongArchitectureResult.valid, false);
+      assert.match(wrongArchitectureResult.message, /backend production dependency|provenance/i);
     } finally {
       fixture.cleanup();
     }

@@ -17,39 +17,13 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 
 import { buildReleaseManifest } from "./release-package.mjs";
+import { PRODUCTION_PREFLIGHT_CHECK_IDS } from "./production-preflight.mjs";
 
 const scriptPath = resolve("scripts", "production-cutover.sh");
 const source = existsSync(scriptPath) ? readFileSync(scriptPath, "utf8") : "";
 const projectRoot = "/opt/sentelligent-sales-workbench";
-const preflightCheckIds = [
-  "release.identity",
-  "node.version",
-  "env.production",
-  "env.authRequired",
-  "env.authHash",
-  "env.sessionSecret",
-  "env.assistantSecrets",
-  "env.secureCookie",
-  "env.cors",
-  "env.solutionWrites",
-  "env.aiModel",
-  "env.icostWebhook",
-  "env.icostIsolation",
-  "env.qingyangBridge",
-  "env.qingyangBridgeIsolation",
-  "env.invoiceExtraction",
-  "database.environmentBinding",
-  "database.quickCheck",
-  "database.foreignKeys",
-  "backup.identity",
-  "backup.sha256",
-  "backup.quickCheck",
-  "backup.foreignKeys",
-  "services.snapshot",
-  "services.project",
-  "services.commands",
-  "services.unrelatedProtection",
-];
+const preflightCheckIds = [...PRODUCTION_PREFLIGHT_CHECK_IDS];
+const preflightCheckTotal = preflightCheckIds.length;
 const validArguments = [
   `--new-release=${projectRoot}/releases/release-candidate`,
   `--expected-commit=${"a".repeat(40)}`,
@@ -80,7 +54,11 @@ function validPreflightReport({
       hostname: "sentelligent-production-01",
       machineIdSha256: "e".repeat(64),
     },
-    summary: { total: 27, passed: 27, failed: 0 },
+    summary: {
+      total: preflightCheckTotal,
+      passed: preflightCheckTotal,
+      failed: 0,
+    },
     checks: preflightCheckIds.map((id) => ({
       id,
       status: "passed",
@@ -645,7 +623,7 @@ describe("controlled production cutover", () => {
     }
   });
 
-  it("rejects a candidate manifest without the complete v0.6.0 environment contract", () => {
+  it("rejects a candidate manifest without the complete environment contract", () => {
     const fixture = makeReleaseFixture();
     try {
       const manifestPath = join(fixture.root, "release-manifest.json");
@@ -673,7 +651,7 @@ describe("controlled production cutover", () => {
     }
   });
 
-  it("accepts only a fresh exact 27/27 preflight report bound to this cutover", () => {
+  it("accepts only a fresh exact canonical preflight report bound to this cutover", () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-")));
     const reportPath = join(root, "preflight.json");
     const releasePath = `${projectRoot}/releases/release-candidate`;
@@ -714,13 +692,17 @@ describe("controlled production cutover", () => {
           /fresh|age/i,
         ],
         [
-          "not 27\/27",
+          "not a complete canonical report",
           {
             ...validPreflightReport(),
             status: "failed",
-            summary: { total: 27, passed: 26, failed: 1 },
+            summary: {
+              total: preflightCheckTotal,
+              passed: preflightCheckTotal - 1,
+              failed: 1,
+            },
           },
-          /27\/27|passed/i,
+          new RegExp(`${preflightCheckTotal}/${preflightCheckTotal}|passed`, "i"),
         ],
         [
           "legacy 24\/24 report without the assistant secret gate",
@@ -731,7 +713,7 @@ describe("controlled production cutover", () => {
               (check) => check.id !== "env.assistantSecrets",
             ),
           },
-          /27\/27/i,
+          new RegExp(`${preflightCheckTotal}/${preflightCheckTotal}`, "i"),
         ],
         [
           "wrong release",

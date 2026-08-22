@@ -11,6 +11,7 @@ readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly DATABASE_ROOT="/var/lib/sentelligent-sales-workbench"
 readonly FRONTEND_ENV="$PROJECT_ROOT/config/frontend.env"
 readonly CUTOVER_LOCK="$PROJECT_ROOT/.production-cutover.lock"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 readonly -a PROJECT_SERVICES=(
   "sentelligent-backend.service"
@@ -92,7 +93,7 @@ Required:
   --backup-dir=<path>        Controlled backup output root
   --evidence-dir=<path>      Controlled evidence output root
   --weixin-session-dir=<path> WeChat session state directory
-  --preflight-report=<path>  Fresh passed 27/27 production preflight report
+  --preflight-report=<path>  Fresh passed report matching this release's preflight contract
   --preflight-report-sha256=<sha256> Exact report SHA-256
 
 Optional:
@@ -398,6 +399,7 @@ verify_preflight_report() {
   PREFLIGHT_REPORT_EXPECTED_SHA256="$PREFLIGHT_REPORT_SHA256" \
   PREFLIGHT_EXPECTED_RELEASE="$OLD_RELEASE" \
   PREFLIGHT_EXPECTED_DATABASE="$DATABASE_PATH" \
+  PREFLIGHT_CONTRACT_MODULE="$SCRIPT_DIR/production-preflight.mjs" \
     "$NODE_BIN" --input-type=module --eval '
       import { createHash } from "node:crypto";
       import {
@@ -410,6 +412,7 @@ verify_preflight_report() {
         realpathSync,
       } from "node:fs";
       import { resolve } from "node:path";
+      import { pathToFileURL } from "node:url";
 
       const requestedPath = resolve(process.env.PREFLIGHT_REPORT_PATH);
       const normalize = (value) =>
@@ -452,35 +455,21 @@ verify_preflight_report() {
       }
 
       const report = JSON.parse(content.toString("utf8"));
-      const requiredChecks = [
-        "release.identity",
-        "node.version",
-        "env.production",
-        "env.authRequired",
-        "env.authHash",
-        "env.sessionSecret",
-        "env.assistantSecrets",
-        "env.secureCookie",
-        "env.cors",
-        "env.solutionWrites",
-        "env.aiModel",
-        "env.icostWebhook",
-        "env.icostIsolation",
-        "env.qingyangBridge",
-        "env.qingyangBridgeIsolation",
-        "env.invoiceExtraction",
-        "database.environmentBinding",
-        "database.quickCheck",
-        "database.foreignKeys",
-        "backup.identity",
-        "backup.sha256",
-        "backup.quickCheck",
-        "backup.foreignKeys",
-        "services.snapshot",
-        "services.project",
-        "services.commands",
-        "services.unrelatedProtection",
-      ].sort();
+      const contractModulePath = resolve(process.env.PREFLIGHT_CONTRACT_MODULE);
+      const contract = await import(pathToFileURL(contractModulePath).href);
+      const contractIds = contract.PRODUCTION_PREFLIGHT_CHECK_IDS;
+      if (
+        !Array.isArray(contractIds) ||
+        contractIds.length === 0 ||
+        new Set(contractIds).size !== contractIds.length ||
+        contractIds.some(
+          (id) => typeof id !== "string" || !/^[a-z][A-Za-z0-9.]+$/.test(id),
+        )
+      ) {
+        throw new Error("Production preflight check contract is invalid");
+      }
+      const requiredChecks = [...contractIds].sort();
+      const requiredTotal = requiredChecks.length;
       const generatedAt = Date.parse(report.generatedAt ?? "");
       const age = Date.now() - generatedAt;
       if (!Number.isFinite(generatedAt) || age < -5 * 60_000 || age > 15 * 60_000) {
@@ -490,14 +479,18 @@ verify_preflight_report() {
         report.schemaVersion !== 2 ||
         report.product !== "sentelligent-sales-workbench" ||
         report.status !== "passed" ||
-        report.summary?.total !== 27 ||
-        report.summary?.passed !== 27 ||
+        report.summary?.total !== requiredTotal ||
+        report.summary?.passed !== requiredTotal ||
         report.summary?.failed !== 0
       ) {
-        throw new Error("Preflight report must be an exact passed 27/27 result");
+        throw new Error(
+          `Preflight report must be an exact passed ${requiredTotal}/${requiredTotal} result`,
+        );
       }
-      if (!Array.isArray(report.checks) || report.checks.length !== 27) {
-        throw new Error("Preflight report must contain exactly 27 checks");
+      if (!Array.isArray(report.checks) || report.checks.length !== requiredTotal) {
+        throw new Error(
+          `Preflight report must contain exactly ${requiredTotal} checks`,
+        );
       }
       const observedChecks = report.checks.map((check) => check?.id).sort();
       if (
@@ -766,10 +759,12 @@ assert_protected_unchanged() {
 
 verify_release_manifest() {
   RELEASE_DIRECTORY="$NEW_RELEASE" EXPECTED_RELEASE_COMMIT="$EXPECTED_COMMIT" \
+  RELEASE_CONTRACT_MODULE="$SCRIPT_DIR/release-package.mjs" \
     "$NODE_BIN" --input-type=module --eval '
       import { createHash } from "node:crypto";
       import { lstatSync, readFileSync, readdirSync } from "node:fs";
       import { isAbsolute, relative, resolve, sep } from "node:path";
+      import { pathToFileURL } from "node:url";
 
       const root = resolve(process.env.RELEASE_DIRECTORY);
       const manifestPath = resolve(root, "release-manifest.json");
@@ -781,50 +776,16 @@ verify_release_manifest() {
         "sentelligent-frontend.service",
         "sentelligent-weixin-agent.service",
       ];
-      const expectedEnvironmentNames = [
-        "NODE_ENV",
-        "HOST",
-        "PORT",
-        "DATABASE_URL",
-        "AUTH_REQUIRED",
-        "AUTH_ACCOUNT",
-        "AUTH_PASSWORD_HASH",
-        "AUTH_SESSION_SECRET",
-        "ASSISTANT_CONFIRMATION_SECRET",
-        "AUTH_COOKIE_NAME",
-        "AUTH_COOKIE_SECURE",
-        "CORS_ALLOWED_ORIGINS",
-        "JSON_BODY_LIMIT_BYTES",
-        "SOLUTION_WRITES_ENABLED",
-        "AI_ANALYSIS_MODE",
-        "MODEL_PROVIDER",
-        "MODEL_API_KEY",
-        "MODEL_BASE_URL",
-        "MODEL_NAME",
-        "MODEL_TIMEOUT_MS",
-        "SETTINGS_ENCRYPTION_KEY",
-        "HOSPITAL_TENDER_PYTHON",
-        "HOSPITAL_TENDER_AUTO_RUN",
-        "HOSPITAL_TENDER_INTERVAL_MINUTES",
-        "HOSPITAL_TENDER_BATCH_SIZE",
-        "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
-        "VOICE_RECORDINGS_DIR",
-        "WEIXIN_AGENT_API_TOKEN",
-        "WEIXIN_AGENT_BACKEND_URL",
-        "WEIXIN_AGENT_OWNER",
-        "WEIXIN_AGENT_SESSION_HOME",
-        "ICOST_WEBHOOK_TOKEN",
-        "ICOST_WEBHOOK_OWNER",
-        "ICOST_WEBHOOK_RATE_LIMIT",
-        "ICOST_WEBHOOK_WINDOW_MS",
-        "QINGYANG_BOOKKEEPING_BRIDGE_URL",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
-        "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
-        "INVOICE_OCR_COMMAND",
-        "INVOICE_PDF_TEXT_COMMAND",
-        "INVOICE_OCR_LANGUAGES",
-        "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS",
-      ];
+      const releaseContractPath = resolve(process.env.RELEASE_CONTRACT_MODULE);
+      const releaseContract = await import(pathToFileURL(releaseContractPath).href);
+      const expectedEnvironmentNames = releaseContract.REQUIRED_ENV_NAMES;
+      if (
+        !Array.isArray(expectedEnvironmentNames) ||
+        expectedEnvironmentNames.length === 0 ||
+        new Set(expectedEnvironmentNames).size !== expectedEnvironmentNames.length
+      ) {
+        throw new Error("Candidate release environment contract is invalid");
+      }
 
       if (
         manifest.schemaVersion !== 3 ||

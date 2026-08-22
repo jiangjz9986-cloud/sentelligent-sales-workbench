@@ -89,13 +89,14 @@ export const REQUIRED_ENV_NAMES = Object.freeze([
   "WEIXIN_AGENT_BACKEND_URL",
   "WEIXIN_AGENT_OWNER",
   "WEIXIN_AGENT_SESSION_HOME",
+  "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+  "WEIXIN_BOOKKEEPING_OWNER",
+  "WEIXIN_BOOKKEEPING_SENDER_ID",
+  "WEIXIN_OUTBOX_POLL_MS",
   "ICOST_WEBHOOK_TOKEN",
   "ICOST_WEBHOOK_OWNER",
   "ICOST_WEBHOOK_RATE_LIMIT",
   "ICOST_WEBHOOK_WINDOW_MS",
-  "QINGYANG_BOOKKEEPING_BRIDGE_URL",
-  "QINGYANG_BOOKKEEPING_BRIDGE_TOKEN",
-  "QINGYANG_BOOKKEEPING_BRIDGE_TIMEOUT_MS",
   "INVOICE_OCR_COMMAND",
   "INVOICE_PDF_TEXT_COMMAND",
   "INVOICE_OCR_LANGUAGES",
@@ -427,6 +428,13 @@ function isExplicitPlaceholderLabel(value) {
 
 function isExplicitTestFixtureLabel(value, filePath) {
   if (!isTestSourcePath(filePath)) return false;
+  if (
+    /^(?:inline[-_]test[-_]password|wrong[-_]password|fixture[-_]passphrase|wrong[-_]passphrase|sales[-_]loop[-_]machine[-_]token|must[-_]not[-_]enter)$/i.test(
+      value,
+    )
+  ) {
+    return true;
+  }
   const parts = placeholderParts(value, { maxParts: 12 });
   return parts !== null && parts.some((part) => testFixtureMarkers.has(part));
 }
@@ -640,7 +648,8 @@ function compareUtf8Paths(left, right) {
 }
 
 function runGit(root, args) {
-  return spawnSync("git", ["-C", root, ...args], {
+  return spawnSync("git", args, {
+    cwd: root,
     encoding: "buffer",
     maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
     windowsHide: true,
@@ -692,7 +701,9 @@ function detectGitInfo(root) {
   const commit = gitText(root, ["rev-parse", "HEAD"], "Git commit lookup");
   const clean = gitText(
     root,
-    ["status", "--porcelain=v1", "--untracked-files=all"],
+    // Git 1.8 (the CentOS 7 system Git) accepts --porcelain but not the
+    // later --porcelain=v1 spelling; --porcelain is the v1 format here.
+    ["status", "--porcelain", "--untracked-files=all"],
     "Git status lookup",
   ) === "";
   if (!clean) {
@@ -830,8 +841,6 @@ function assertSafeCheckoutMaterialization(root) {
   const attributes = spawnSync(
     "git",
     [
-      "-C",
-      root,
       "-c",
       "core.quotepath=false",
       "check-attr",
@@ -842,6 +851,7 @@ function assertSafeCheckoutMaterialization(root) {
     ],
     {
       encoding: "buffer",
+      cwd: root,
       input: Buffer.from(`${files.join("\0")}\0`, "utf8"),
       maxBuffer: GIT_OUTPUT_LIMIT_BYTES,
       windowsHide: true,
@@ -913,7 +923,7 @@ function createCommitWorktree(root, commit) {
   const checkoutRoot = join(temporaryRoot, "checkout");
   const hooksRoot = join(temporaryRoot, "empty-git-hooks");
   mkdirSync(hooksRoot, { recursive: true });
-  const worktree = { temporaryRoot, checkoutRoot };
+  const worktree = { temporaryRoot, checkoutRoot, materialization: "none" };
   try {
     const result = runGit(root, [
       "-c",
@@ -928,9 +938,55 @@ function createCommitWorktree(root, commit) {
     ]);
     if (result.status !== 0) {
       const message = result.stderr.toString("utf8").trim();
-      throw new Error(
-        `Exact release commit checkout failed${message ? `: ${message}` : ""}`,
-      );
+      if (!/['\"]?worktree['\"]?\s+is not a git command|unknown command.*worktree/i.test(message)) {
+        throw new Error(
+          `Exact release commit checkout failed${message ? `: ${message}` : ""}`,
+        );
+      }
+
+      // CentOS 7 ships Git 1.8, which has no `git worktree`. Use an isolated
+      // no-hardlinks clone only for that legacy Git capability gap; the clone
+      // is still checked against the exact commit and removed after packaging.
+      const cloneResult = runGit(root, [
+        "clone",
+        "--no-hardlinks",
+        "--no-checkout",
+        root,
+        checkoutRoot,
+      ]);
+      if (cloneResult.status !== 0) {
+        const cloneMessage = cloneResult.stderr.toString("utf8").trim();
+        throw new Error(
+          `Exact release commit checkout failed${cloneMessage ? `: ${cloneMessage}` : ""}`,
+        );
+      }
+      worktree.materialization = "clone";
+      for (const [name, value] of [
+        ["core.hooksPath", hooksRoot],
+        ["core.autocrlf", "false"],
+      ]) {
+        const configResult = runGit(checkoutRoot, ["config", name, value]);
+        if (configResult.status !== 0) {
+          const configMessage = configResult.stderr.toString("utf8").trim();
+          throw new Error(
+            `Exact release commit checkout configuration failed${configMessage ? `: ${configMessage}` : ""}`,
+          );
+        }
+      }
+      const checkoutResult = runGit(checkoutRoot, [
+        "checkout",
+        "--quiet",
+        "--detach",
+        commit,
+      ]);
+      if (checkoutResult.status !== 0) {
+        const checkoutMessage = checkoutResult.stderr.toString("utf8").trim();
+        throw new Error(
+          `Exact release commit checkout failed${checkoutMessage ? `: ${checkoutMessage}` : ""}`,
+        );
+      }
+    } else {
+      worktree.materialization = "worktree";
     }
     const checkedOutCommit = gitText(
       checkoutRoot,
@@ -954,23 +1010,27 @@ function createCommitWorktree(root, commit) {
 
 function removeCommitWorktree(root, worktree) {
   const failures = [];
-  const removeResult = runGit(root, [
-    "worktree",
-    "remove",
-    "--force",
-    worktree.checkoutRoot,
-  ]);
-  if (removeResult.status !== 0) {
-    failures.push(removeResult.stderr.toString("utf8").trim());
+  if (worktree.materialization === "worktree") {
+    const removeResult = runGit(root, [
+      "worktree",
+      "remove",
+      "--force",
+      worktree.checkoutRoot,
+    ]);
+    if (removeResult.status !== 0) {
+      failures.push(removeResult.stderr.toString("utf8").trim());
+    }
   }
   try {
     rmSync(worktree.temporaryRoot, { recursive: true, force: true });
   } catch (error) {
     failures.push(error.message);
   }
-  const pruneResult = runGit(root, ["worktree", "prune"]);
-  if (pruneResult.status !== 0) {
-    failures.push(pruneResult.stderr.toString("utf8").trim());
+  if (worktree.materialization === "worktree") {
+    const pruneResult = runGit(root, ["worktree", "prune"]);
+    if (pruneResult.status !== 0) {
+      failures.push(pruneResult.stderr.toString("utf8").trim());
+    }
   }
   if (failures.length > 0) {
     const message = failures.find(Boolean);
