@@ -323,6 +323,44 @@ describe("production service-plan generator", () => {
     );
   });
 
+  it("accepts the CentOS 7 Caddy snapshot when the empty EnvironmentFile property is omitted", () => {
+    const fixture = makeFixture({
+      mutateShow: ({ serviceName, result }) =>
+        serviceName === "sentelligent-caddy.service"
+          ? result.replace(/^EnvironmentFiles=\n/m, "")
+          : result,
+    });
+    const plan = createProductionServicePlan(fixture.options);
+    const caddy = plan.projectServices.find(
+      ({ name }) => name === "sentelligent-caddy.service",
+    );
+
+    assertCompatiblePlan(plan);
+    assert.equal(caddy.EnvironmentFile, "");
+    assert.deepEqual(caddy.EnvironmentFiles, []);
+  });
+
+  it("still rejects non-empty or duplicate Caddy EnvironmentFile properties", () => {
+    for (const mutate of [
+      (result) => result.replace(
+        /^EnvironmentFiles=\n/m,
+        "EnvironmentFile=/tmp/unexpected.env (ignore_errors=no)\n",
+      ),
+      (result) => `${result}EnvironmentFile=\n`,
+    ]) {
+      const fixture = makeFixture({
+        mutateShow: ({ serviceName, result }) =>
+          serviceName === "sentelligent-caddy.service"
+            ? mutate(result)
+            : result,
+      });
+      assert.throws(
+        () => createProductionServicePlan(fixture.options),
+        /environment-file surface/,
+      );
+    }
+  });
+
   it("does not propagate command-runner diagnostics into an error", () => {
     const fixture = makeFixture({
       mutateRunner: ({ command, args, result }) => {

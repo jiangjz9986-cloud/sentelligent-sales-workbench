@@ -399,12 +399,18 @@ function normalizeEnvironmentFiles(properties, serviceName) {
     ...(properties.get("EnvironmentFiles") ?? []),
     ...(properties.get("EnvironmentFile") ?? []),
   ];
-  if (values.length !== 1) {
-    throw genericFailure(`${serviceName} environment-file surface`);
-  }
   const expectedPath = EXPECTED_ENVIRONMENT_FILE[serviceName];
-  const expectedValue = expectedPath ? `${expectedPath} (ignore_errors=no)` : "";
-  if (values[0] !== expectedValue) {
+  if (!expectedPath) {
+    if (values.length > 1 || (values.length === 1 && values[0] !== "")) {
+      throw genericFailure(`${serviceName} environment-file surface`);
+    }
+    return {
+      EnvironmentFile: "",
+      EnvironmentFiles: [],
+    };
+  }
+  const expectedValue = `${expectedPath} (ignore_errors=no)`;
+  if (values.length !== 1 || values[0] !== expectedValue) {
     throw genericFailure(`${serviceName} environment-file surface`);
   }
   return {
