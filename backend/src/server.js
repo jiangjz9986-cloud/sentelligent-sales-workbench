@@ -496,6 +496,17 @@ function shortcutConfirmationDelivery({ runtime, outbox = null, worker, account 
   return { status: "queued" };
 }
 
+function assertShortcutSubmissionDelivery(delivery) {
+  if (delivery?.status === "failed") {
+    throw new HttpError(
+      503,
+      "SHORTCUT_WEIXIN_DELIVERY_FAILED",
+      "小小记账确认消息投递失败，请稍后重试或在系统中重新投递",
+    );
+  }
+  return delivery;
+}
+
 function validateTravelExpenseDocumentInboxPayload(value) {
   const body = plainObject(value);
   allowedPayloadKeys(body, new Set([
@@ -3305,7 +3316,9 @@ export function createServer(options = {}) {
             item: shortcutResponseItem(received.item, true, {
               confirmationPending: true,
               assistantActionId: pending.action.id,
-              confirmationDelivery: shortcutDelivery(pending.outbox, integrationIdentity.account),
+              confirmationDelivery: assertShortcutSubmissionDelivery(
+                shortcutDelivery(pending.outbox, integrationIdentity.account),
+              ),
             }),
           }, { "Cache-Control": "no-store" });
           return;
@@ -3336,7 +3349,9 @@ export function createServer(options = {}) {
               item: shortcutResponseItem(claimed.item, true, {
                 confirmationPending: true,
                 assistantActionId: pending.action.id,
-                confirmationDelivery: shortcutDelivery(pending.outbox, integrationIdentity.account),
+                confirmationDelivery: assertShortcutSubmissionDelivery(
+                  shortcutDelivery(pending.outbox, integrationIdentity.account),
+                ),
               }),
             }, { "Cache-Control": "no-store" });
             return;
@@ -3372,7 +3387,9 @@ export function createServer(options = {}) {
               item: shortcutResponseItem(completed.item, completed.replayed, {
                 confirmationPending: true,
                 assistantActionId: pending.action.id,
-                confirmationDelivery: shortcutDelivery(pending.outbox, integrationIdentity.account),
+                confirmationDelivery: assertShortcutSubmissionDelivery(
+                  shortcutDelivery(pending.outbox, integrationIdentity.account),
+                ),
               }),
             }, { "Cache-Control": "no-store" });
             return;

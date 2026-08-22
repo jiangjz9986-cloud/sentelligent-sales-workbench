@@ -115,7 +115,7 @@ export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
             </article>
           );
         })}
-        {reviews.length === 0 ? <div className="expense-inbox-empty" role="status"><Check size={18} /><span><strong>没有待复核的快捷指令记账</strong><small>{pendingLabel || "快捷记账需通过微信确认码或网页人工复核后入账。"}</small></span></div> : null}
+        {reviews.length === 0 ? <div className="expense-inbox-empty" role="status"><Check size={18} /><span><strong>没有待复核的快捷指令记账</strong><small>{pendingLabel || "快捷记账需通过微信回复“确认 / 修改 / 取消”或网页人工复核后入账。"}</small></span></div> : null}
       </div>
     </section>
   );

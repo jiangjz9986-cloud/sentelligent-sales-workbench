@@ -146,7 +146,7 @@ function assertActionShape(actions) {
   ];
   requireValue(
     JSON.stringify(actions.map(identifier)) === JSON.stringify(expected),
-    "快捷指令必须保持账号配对和服务端六位确认码安全流程",
+    "快捷指令必须保持账号配对和服务端微信自然语言确认流程",
   );
 
   const expectedUuidActions = actions.filter(

@@ -45,7 +45,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
     assert.doesNotMatch(String(calls[2].options.body), /123456|machine-secret/u);
   });
 
-  it("acks a bounded retry code when the SDK cannot send", async () => {
+  it("acks a bounded retry code when the SDK reports provider rejection", async () => {
     const bodies = [];
     const fetchImpl = async (_url, options) => {
       if (options.method === "POST") {
@@ -63,7 +63,13 @@ describe("WeChat confirmation outbox worker boundary", () => {
       client,
       bot: {
         getDeliveryStatus() { return { ready: true, status: "ready" }; },
-        async sendMessage() { attempts += 1; controller.abort(); throw new Error("private provider detail"); },
+        async sendMessage() {
+          attempts += 1;
+          controller.abort();
+          const error = new Error("private provider detail");
+          error.code = "WEIXIN_PROVIDER_REJECTED";
+          throw error;
+        },
       },
       pollMs: 500,
       abortSignal: controller.signal,

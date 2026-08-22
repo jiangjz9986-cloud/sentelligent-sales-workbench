@@ -135,7 +135,8 @@ describe("Shortcut webhook token management API", () => {
       headers: workerHeaders(),
     });
     assert.equal(staleDraft.response.status, 200);
-    assert.match(staleDraft.body.item.message, /(?:^|\n)\d{6}(?:\n|$)/u);
+    assert.match(staleDraft.body.item.message, /回复“确认”/u);
+    assert.doesNotMatch(staleDraft.body.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
 
     const session = await login();
     const list = await request("/api/integrations/shortcut/bookkeeping/review?status=review_required", {
@@ -235,7 +236,7 @@ describe("Shortcut webhook token management API", () => {
     await rm(staleTempDir, { recursive: true, force: true });
   });
 
-  it("cancels a sent WeChat code after Web rejection and frees the next bookkeeping draft", async () => {
+  it("cancels a sent WeChat draft after Web rejection and frees the next bookkeeping draft", async () => {
     const created = await request("/api/integrations/shortcut/bookkeeping", {
       method: "POST",
       headers: { Authorization: `Bearer ${legacyToken}` },
@@ -252,8 +253,8 @@ describe("Shortcut webhook token management API", () => {
       headers: workerHeaders(),
     });
     assert.equal(draft.response.status, 200);
-    const code = draft.body.item.message.match(/(?:^|\n)(\d{6})(?:\n|$)/u)?.[1];
-    assert.ok(code);
+    assert.match(draft.body.item.message, /回复“确认”/u);
+    assert.doesNotMatch(draft.body.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     const draftAck = await request("/api/integrations/weixin-agent/confirmation-outbox", {
       method: "POST",
       headers: { Authorization: `Bearer ${machineToken}` },
@@ -270,7 +271,7 @@ describe("Shortcut webhook token management API", () => {
     assert.equal(rejected.response.status, 200);
     assert.equal(rejected.body.item.status, "rejected");
 
-    const oldCode = await request("/api/integrations/weixin-agent/events", {
+    const staleConfirmation = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${machineToken}`,
@@ -278,13 +279,13 @@ describe("Shortcut webhook token management API", () => {
       },
       body: JSON.stringify({
         conversationId: "web-reject-old-code",
-        text: code,
+        text: "确认",
         sourceMessageId: "web-reject-old-code",
         senderId: sender,
         chatType: "direct",
       }),
     });
-    assert.notEqual(oldCode.body?.status, "ok");
+    assert.notEqual(staleConfirmation.body?.status, "ok");
 
     const cancellation = await request("/api/integrations/weixin-agent/confirmation-outbox", {
       headers: workerHeaders(),

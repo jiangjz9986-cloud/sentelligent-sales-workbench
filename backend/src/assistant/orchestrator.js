@@ -456,7 +456,7 @@ export function createAssistantOrchestrator({
       if (tool.name === "shortcut-bookkeeping.confirm" && !resolvedActionId) {
         return finish(409, {
           status: "clarify",
-          message: "请先运行自有截图记账快捷指令提交草稿，再在绑定的微信会话中回复最新六位确认码、明确修改字段或取消。",
+          message: "请先运行自有截图记账快捷指令提交草稿，再在绑定的微信会话中回复“确认”、以“修改”开头说明修改内容，或回复“取消”。",
         }, { draftText: "等待快捷指令记账草稿。" });
       }
 

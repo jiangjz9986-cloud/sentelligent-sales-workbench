@@ -505,9 +505,41 @@ async function getUploadUrl(params) {
 	});
 	return JSON.parse(rawText);
 }
+function sendMessageProviderError(code, message) {
+	const error = new Error(message);
+	error.code = code;
+	return error;
+}
+/**
+* Validate the provider's JSON-level acknowledgement without surfacing its
+* response body. iLink deployments use either `ret` or `errcode` for business
+* status; at least one status must be present and every returned status must
+* be numeric zero.
+*/
+function assertSendMessageAccepted(rawText) {
+	let response;
+	try {
+		response = JSON.parse(rawText);
+	} catch {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (response === null || typeof response !== "object" || Array.isArray(response)) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	const hasRet = Object.hasOwn(response, "ret");
+	const hasErrcode = Object.hasOwn(response, "errcode");
+	if (!hasRet && !hasErrcode) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	const retRejected = hasRet && response.ret !== 0;
+	const errcodeRejected = hasErrcode && response.errcode !== 0;
+	if (retRejected || errcodeRejected) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request");
+	}
+}
 /** Send a single message downstream. */
 async function sendMessage(params) {
-	await apiFetch({
+	const rawText = await apiFetch({
 		baseUrl: params.baseUrl,
 		endpoint: "ilink/bot/sendmessage",
 		body: JSON.stringify({
@@ -518,6 +550,7 @@ async function sendMessage(params) {
 		timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
 		label: "sendMessage"
 	});
+	assertSendMessageAccepted(rawText);
 }
 /** Fetch bot config (includes typing_ticket) for a given user. */
 async function getConfig(params) {

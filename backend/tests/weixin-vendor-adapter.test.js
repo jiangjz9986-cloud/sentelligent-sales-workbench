@@ -443,6 +443,16 @@ describe("vendored Weixin inbound adapter", () => {
 
       const secondAbort = new AbortController();
       const proactiveBodies = [];
+      const proactiveResponses = [
+        { ret: 0 },
+        { errcode: 0, errmsg: "ok" },
+        {},
+        { ret: -14, errmsg: "synthetic-private-ret-detail" },
+        { errcode: 40013, errmsg: "synthetic-private-errcode-detail" },
+        { ret: 0, errcode: -1, errmsg: "synthetic-private-conflicting-detail" },
+        "synthetic-private-malformed-response",
+      ];
+      const internalLogOffsets = await snapshotInternalLogs();
       globalThis.fetch = async (url, init) => {
         const endpoint = new URL(url).pathname;
         if (endpoint.endsWith("/getupdates")) {
@@ -451,7 +461,11 @@ describe("vendored Weixin inbound adapter", () => {
         }
         if (endpoint.endsWith("/sendmessage")) {
           proactiveBodies.push(JSON.parse(init.body));
-          return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+          const response = proactiveResponses.shift();
+          return new Response(
+            typeof response === "string" ? response : JSON.stringify(response),
+            { status: 200 },
+          );
         }
         throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
       };
@@ -467,9 +481,33 @@ describe("vendored Weixin inbound adapter", () => {
         (error) => error?.code === "WEIXIN_DELIVERY_TARGET_MISMATCH",
       );
       await restored.sendMessageTo("synthetic-bot-user", "synthetic proactive delivery");
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic errcode success");
+      for (const expected of [
+        ["WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response"],
+        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
+        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
+        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
+        ["WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response"],
+      ]) {
+        await assert.rejects(
+          restored.sendMessageTo("synthetic-bot-user", "synthetic rejected delivery"),
+          (error) => {
+            assert.equal(error?.code, expected[0]);
+            assert.equal(error?.message, expected[1]);
+            return true;
+          },
+        );
+      }
       await restored.wait();
-      assert.equal(proactiveBodies.length, 1);
+      assert.equal(proactiveBodies.length, 7);
       assert.equal(proactiveBodies[0].msg.context_token, contextToken);
+      const providerErrorLogs = await readInternalLogDelta(internalLogOffsets);
+      for (const secret of [
+        "synthetic-private-ret-detail",
+        "synthetic-private-errcode-detail",
+        "synthetic-private-conflicting-detail",
+        "synthetic-private-malformed-response",
+      ]) assert.equal(providerErrorLogs.includes(secret), false);
 
       const tamperedRecord = JSON.parse(encryptedRecord);
       tamperedRecord.expiresAt = "2099-01-01T00:00:00.000Z";

@@ -63,8 +63,8 @@ async function confirmLatest(suffix) {
     headers: workerHeaders(),
   }));
   assert.equal(leased.response.status, 200);
-  const code = leased.body.item.message.match(/(?:^|\n)(\d{6})(?:\n|$)/u)?.[1];
-  assert.ok(code);
+  assert.match(leased.body.item.message, /回复“确认”/u);
+  assert.doesNotMatch(leased.body.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
   const ack = await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
     method: "POST",
     headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
@@ -80,7 +80,7 @@ async function confirmLatest(suffix) {
     },
     body: JSON.stringify({
       conversationId: `provider-${suffix}`,
-      text: code,
+      text: "确认",
       sourceMessageId: suffix,
       senderId: bookkeepingSender,
       chatType: "direct",

@@ -71,12 +71,15 @@ function fieldText(value, fallback = "待确认") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
-export function deriveShortcutConfirmationCode(actionId, version, confirmationSecret) {
+function deriveShortcutStateCredential(actionId, version, confirmationSecret) {
   const id = requiredText(actionId, "actionId", 200);
   if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive safe integer");
   const digest = createHmac("sha256", secretBuffer(confirmationSecret))
     .update(`sentelligent/shortcut-weixin-confirmation/v1\u0000${id}\u0000${version}`, "utf8")
     .digest();
+  // The shared pending-action repository still stores a six-digit hash. This
+  // credential is an internal state-transition fence only: it is never shown
+  // to the user and user-supplied six-digit values are never accepted here.
   return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, "0");
 }
 
@@ -119,7 +122,7 @@ function draftFromEntry(entry) {
   });
 }
 
-function renderDraftMessage(entry, action, code, { prefix = "检测到一笔新记账，请确认！" } = {}) {
+function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确认！" } = {}) {
   const draft = draftFromEntry(entry);
   const fields = draft.fields;
   const entryType = entry.entryType === "income" ? "收入" : "支出";
@@ -134,16 +137,20 @@ function renderDraftMessage(entry, action, code, { prefix = "检测到一笔新�
   ];
   if (draft.warnings.length) lines.push(`待补充：${draft.warnings.slice(0, 4).join("、")}`);
   lines.push(
-    "确认无误后，请在同一微信会话回复下面六位确认码：",
-    code,
-    "需要修改可直接回复：金额改为 18.50 元；时间改为 2026-08-19T10:20:00+08:00；分类改为交通。修改后我会重新发送最新信息。",
-    "回复“取消”放弃本次记账，回复“重发确认码”重新发送。",
+    "确认无误请回复“确认”。",
+    "需要修改请以“修改”开头，例如：修改金额为 18.50 元；修改时间为 2026-08-19T10:20:00+08:00；修改费用类别为交通；修改备注为客户拜访。修改后我会重新发送最新信息。",
+    "回复“取消”放弃本次记账。",
   );
   return lines.join("\n").slice(0, MAX_MESSAGE_LENGTH);
 }
 
 function resultMessage(entry) {
   return `已确认并录入森特智行：${entry.expenseReferenceCode ?? entry.expenseId ?? entry.id}，金额 ${formatMoney(entry.amountCents)}。`;
+}
+
+function explicitModification(value) {
+  const match = /^修改(?:[：:\s]+)?(.+)$/su.exec(String(value ?? ""));
+  return match?.[1]?.trim() || null;
 }
 
 function acceptedResult(entry) {
@@ -186,7 +193,7 @@ function reviewAnalysis(entry, nextFields) {
 }
 
 function correctionHelp() {
-  return "我只接受明确字段修改，例如“金额改为 18.50 元”“时间改为 2026-08-19T10:20:00+08:00”“商户改为济南客户”“用途改为客户拜访”。账号、账本、幂等键和确认码不能修改。";
+  return "请以“修改”开头并明确字段，例如“修改金额为 18.50 元”“修改时间为 2026-08-19T10:20:00+08:00”“修改费用类别为交通”“修改备注为客户拜访”。账号、账本、幂等键和系统身份不能修改。";
 }
 
 export function createShortcutBookkeepingAssistantRuntime({
@@ -440,7 +447,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       throw new HttpError(409, "ASSISTANT_ACTION_PENDING", "已有一笔快捷记账草稿待确认，请先确认、修改或取消后再提交下一笔。");
     }
     const actionId = requiredText(idFactory(), "actionId", 200);
-    const code = deriveShortcutConfirmationCode(actionId, 1, secret);
+    const stateCredential = deriveShortcutStateCredential(actionId, 1, secret);
     const expiresAt = new Date(Date.parse(iso(clock)) + 10 * 60 * 1000).toISOString();
     const action = pendingActionRepository.create({
       id: actionId,
@@ -449,7 +456,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       conversationId: conversation.id,
       actionType: SHORTCUT_BOOKKEEPING_ACTION,
       payload: { entryId: entry.id },
-      confirmationCode: code,
+      confirmationCode: stateCredential,
       expiresAt,
     });
     const outbox = enqueue(account, conversation.id, action, entry.id, "confirmation");
@@ -502,8 +509,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       throw stale;
     }
     if (payload.kind === "cancelled") return `已取消快捷记账 ${entry.id}，未写入费用和付款凭证。`;
-    const code = deriveShortcutConfirmationCode(action.id, action.version, secret);
-    return renderDraftMessage(entry, action, code, {
+    return renderDraftMessage(entry, {
       prefix: payload.kind === "confirmation"
         ? "检测到一笔新记账，请确认！"
         : "记账信息已修改，请重新确认！",
@@ -620,14 +626,37 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
   }
 
-  async function confirm({ action, account, scope, code }) {
+  function deliveredCurrentDraft({ account, action, entryId }) {
+    if (typeof outboxRepository.latestForEntry !== "function") {
+      return { payload: { version: Number(action.version) } };
+    }
+    const latest = outboxRepository.latestForEntry({ owner: account, entryId });
+    const payload = latest?.payload;
+    const version = Number(payload?.version);
+    const delivered = latest?.status === "sent"
+      && payload?.actionId === action.id
+      && payload?.entryId === entryId
+      && Number.isSafeInteger(version)
+      && version > 0
+      && version <= Number(action.version)
+      && !["accepted", "cancelled"].includes(payload?.kind);
+    if (!delivered) return null;
+    // While pending, a version gap means the internal state fence rotated but
+    // the corresponding corrected draft was never delivered. Confirmed or
+    // processing actions may legitimately have newer execution-state versions
+    // after a transient write failure; their delivered draft remains valid.
+    if (action.status === "pending" && version !== Number(action.version)) return null;
+    return latest;
+  }
+
+  async function confirm({ action, account, scope }) {
     const target = actionPayload(action);
-    if (!target || !code) return { status: 409, body: { status: "error", text: "确认码无效或草稿已过期。" }, draftText: "确认信息已处理。" };
+    if (!target) return { status: 409, body: { status: "error", text: "待确认记账草稿无效或已过期。" }, draftText: "确认信息已处理。" };
     const entry = shortcutBookkeepingRepository.getReview(target.entryId, { owner: account });
     if (!entry) return { status: 200, body: { status: "ok", text: "这笔记账已经完成。" }, draftText: "确认信息已处理。" };
     if (entry.status === "rejected") {
       settleFromWeb({ account, entry, decision: "rejected" });
-      return { status: 410, body: { status: "cancel", text: "这笔记账已经取消，旧确认码已失效。" }, draftText: "确认信息已处理。" };
+      return { status: 410, body: { status: "cancel", text: "这笔记账已经取消。" }, draftText: "确认信息已处理。" };
     }
     if (entry.status === "accepted") {
       return reconcileAcceptedEntry({ action, account, scope, entry });
@@ -635,25 +664,24 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (entry.status !== "review_required") {
       return { status: 409, body: { status: "error", text: "这笔记账当前不能确认。" }, draftText: "确认信息已处理。" };
     }
+    const deliveredDraft = deliveredCurrentDraft({ account, action, entryId: target.entryId });
+    if (!deliveredDraft) {
+      return { status: 409, body: { status: "review_required", text: "请先查看小小发送的最新记账草稿，再回复“确认”。" }, draftText: "等待当前版本草稿送达。" };
+    }
     if (!isFinalizable(entry)) return { status: 409, body: { status: "review_required", text: `当前草稿还有待确认字段。${correctionHelp()}` }, draftText: "仍需补充记账字段。" };
     let confirmed;
     try {
-      confirmed = pendingActionRepository.confirm(action.id, { ...scope, confirmationCode: code });
+      confirmed = pendingActionRepository.confirm(action.id, {
+        ...scope,
+        confirmationCode: deriveShortcutStateCredential(action.id, Number(deliveredDraft.payload.version), secret),
+      });
     } catch (error) {
       if (error?.code === "ASSISTANT_ACTION_EXPIRED") {
-        return { status: 410, body: { status: "error", text: "确认码已过期，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
+        return { status: 410, body: { status: "error", text: "这笔记账草稿已过期，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
       }
-      if (error?.code === "ASSISTANT_CONFIRMATION_INVALID") {
-        try {
-          pendingActionRepository.recordConfirmationFailure(action.id, {
-            ...scope,
-            eventId: `shortcut:${target.entryId}:${code}`,
-          });
-        } catch { /* bounded failure path */ }
-      }
-      return { status: 409, body: { status: "error", text: "确认码无效或已过期，请使用最新消息中的确认码。" }, draftText: "确认信息已处理。" };
+      return { status: 409, body: { status: "error", text: "当前草稿确认状态已变化，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
     }
-    if (confirmed?.expired) return { status: 410, body: { status: "error", text: "确认码已过期，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
+    if (confirmed?.expired) return { status: 410, body: { status: "error", text: "这笔记账草稿已过期，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
     if (confirmed?.inProgress) return { status: 409, body: { status: "error", text: "这笔记账正在处理中，请稍后查看。" }, draftText: "确认信息已处理。" };
     if (entry.status === "accepted") return reconcileAcceptedEntry({ action: confirmed.item ?? action, account, scope, entry });
     const currentAction = confirmed.item ?? action;
@@ -731,26 +759,13 @@ export function createShortcutBookkeepingAssistantRuntime({
     return { status: 200, body: { status: "cancel", text: "已取消当前快捷记账，未写入费用。" }, draftText: "已取消快捷记账。" };
   }
 
-  async function resend({ action, account, scope }) {
-    const target = actionPayload(action);
-    if (!target) return { status: 409, body: { status: "error", text: "待确认操作无效。" }, draftText: "确认信息已处理。" };
-    const nextCode = deriveShortcutConfirmationCode(action.id, Number(action.version) + 1, secret);
-    const renewed = pendingActionRepository.renewConfirmation(action.id, { ...scope, confirmationCode: nextCode });
-    closePendingOutbox({
-      account,
-      conversationId: outboxScopeConversation(scope),
-      actionId: action.id,
-      entryId: target.entryId,
-      errorCode: "WEIXIN_OUTBOX_CODE_ROTATED",
-    });
-    enqueue(account, outboxScopeConversation(scope), renewed.item, target.entryId, "resend");
-    return { status: 200, body: { status: "confirmation_required", text: "已重新生成确认码，请查看微信中的最新草稿消息。" }, draftText: "已重新发送确认码。" };
-  }
-
   async function revise({ action, account, scope, text }) {
     const target = actionPayload(action);
     if (!target) return { status: 409, body: { status: "error", text: "待确认操作无效。" }, draftText: "确认信息已处理。" };
-    const correction = parseShortcutBookkeepingCorrection(text);
+    const correction = parseShortcutBookkeepingCorrection(text, {
+      friendlyDates: true,
+      now: clock(),
+    });
     if (correction.status !== "accepted") {
       return { status: 200, body: { status: "clarify", text: correctionHelp() }, draftText: "等待明确的字段修改。" };
     }
@@ -770,8 +785,11 @@ export function createShortcutBookkeepingAssistantRuntime({
           .filter((field) => Object.hasOwn(nextDraft.fields, field))
           .map((field) => [field, nextDraft.fields[field]]),
       );
-      const nextCode = deriveShortcutConfirmationCode(action.id, Number(action.version) + 1, secret);
-      const renewed = pendingActionRepository.renewConfirmation(action.id, { ...scope, confirmationCode: nextCode });
+      const nextStateCredential = deriveShortcutStateCredential(action.id, Number(action.version) + 1, secret);
+      const renewed = pendingActionRepository.renewConfirmation(action.id, {
+        ...scope,
+        confirmationCode: nextStateCredential,
+      });
       const updated = shortcutBookkeepingRepository.completeLocal(target.entryId, {
         analysis,
         leaseToken: claimed.leaseToken,
@@ -785,7 +803,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         errorCode: "WEIXIN_OUTBOX_CORRECTED",
       });
       enqueue(account, outboxScopeConversation(scope), renewed.item, target.entryId, "correction");
-      return { status: 200, body: { status: "review_required", text: "已按你的修改更新草稿，请查看微信中的最新识别结果并回复确认码。", item: { id: updated.item.id, status: updated.item.status } }, draftText: "已更新快捷记账草稿。" };
+      return { status: 200, body: { status: "review_required", text: "已按你的修改更新草稿，请查看微信中的最新识别结果并回复“确认”。", item: { id: updated.item.id, status: updated.item.status } }, draftText: "已更新快捷记账草稿。" };
     } catch (error) {
       try { shortcutBookkeepingRepository.release(target.entryId, { leaseToken: claimed.leaseToken, errorCode: "WEIXIN_CORRECTION_FAILED" }); } catch { /* preserve safe response */ }
       throw error;
@@ -798,15 +816,16 @@ export function createShortcutBookkeepingAssistantRuntime({
       return { status: 409, body: { status: "error", text: "当前会话的待确认操作已变化，请查看最新微信消息。" }, draftText: "确认信息已处理。" };
     }
     const account = context.owner;
-    if (textClassification.kind === "code" || confirmationCode) {
-      return confirm({ action, account, scope, code: confirmationCode ?? text });
+    if ((confirmationCode !== undefined && confirmationCode !== null)
+      || textClassification.kind === "code"
+      || textClassification.kind === "resend") {
+      return { status: 200, body: { status: "clarify", text: "快捷记账不使用六位确认码，请回复“确认”、以“修改”开头说明修改内容，或回复“取消”。" }, draftText: "等待明确的自然语言指令。" };
     }
     if (textClassification.kind === "cancel") return cancel({ action, account, scope });
-    if (textClassification.kind === "resend") return resend({ action, account, scope });
-    if (/^(?:确认|confirm|确认入账)$/iu.test(String(text).trim())) {
-      return { status: 200, body: { status: "confirmation_required", text: "请回复最新消息中的六位确认码，确认后才会写入费用和付款凭证。" }, draftText: "等待六位确认码。" };
-    }
-    return revise({ action, account, scope, text });
+    if (text === "确认") return confirm({ action, account, scope });
+    const modification = explicitModification(text);
+    if (modification) return revise({ action, account, scope, text: modification });
+    return { status: 200, body: { status: "clarify", text: `快捷记账只接受“确认”、“修改…”或“取消”。${correctionHelp()}` }, draftText: "等待明确的自然语言指令。" };
   }
 
   return Object.freeze({

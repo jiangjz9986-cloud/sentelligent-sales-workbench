@@ -83,12 +83,6 @@ function eventHeaders(id) {
   };
 }
 
-function codeFromMessage(message) {
-  const match = String(message).match(/(?:^|\n)(\d{6})(?:\n|$)/u);
-  assert.ok(match, "outbox message must contain a standalone six-digit confirmation code");
-  return match[1];
-}
-
 function workerHeaders() {
   return {
     Authorization: `Bearer ${machineToken}`,
@@ -174,8 +168,8 @@ afterEach(async () => {
   tempDir = null;
 });
 
-describe("快捷指令—小小—微信六位确认码闭环", () => {
-  it("holds a recognized expense, keeps the code out of storage, and writes only after the latest code", async () => {
+describe("快捷指令—小小—微信自然语言确认闭环", () => {
+  it("holds a recognized expense and writes only after an explicit confirmation", async () => {
     const received = await request("/api/integrations/shortcut/bookkeeping", {
       method: "POST",
       headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
@@ -205,8 +199,10 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     assert.match(lease.item.message, /费用类别：支出 \/ 交通 \/ 打车/u);
     assert.match(lease.item.message, /备注：客户拜访/u);
     assert.doesNotMatch(lease.item.message, /商户：|用途：/u);
-    assert.match(lease.item.message, /六位确认码/u);
-    const code = codeFromMessage(lease.item.message);
+    assert.match(lease.item.message, /回复“确认”/u);
+    assert.match(lease.item.message, /以“修改”开头/u);
+    assert.match(lease.item.message, /回复“取消”/u);
+    assert.doesNotMatch(lease.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     await ackOutbox(lease);
     assert.equal((await deliveryStatus(received.body.item.id)).body.item.confirmationDelivery.status, "sent");
 
@@ -215,7 +211,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
       headers: eventHeaders("shortcut-confirmation-event-1"),
       body: JSON.stringify({
         conversationId: "provider-conversation-1",
-        text: code,
+        text: "确认",
         sourceMessageId: "shortcut-confirmation-event-1",
         senderId: sender,
         chatType: "direct",
@@ -230,6 +226,49 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     assert.equal(after.prepare("SELECT status FROM shortcut_bookkeeping_entries").get().status, "accepted");
     assert.equal(after.prepare("SELECT status FROM assistant_pending_actions").get().status, "executed");
     after.close();
+  });
+
+  it("requires the current draft to be delivered before accepting '确认'", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-current-draft-gate")),
+    });
+    assert.equal(created.response.status, 202);
+    const lease = await leaseOutbox();
+
+    const premature = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-current-draft-premature"),
+      body: JSON.stringify({
+        conversationId: "current-draft-gate",
+        text: "确认",
+        sourceMessageId: "shortcut-current-draft-premature",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(premature.response.status, 409);
+    assert.equal(premature.body.status, "review_required");
+    assert.match(premature.body.text, /最新记账草稿/u);
+    const before = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(before.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    before.close();
+
+    await ackOutbox(lease);
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-current-draft-confirmed"),
+      body: JSON.stringify({
+        conversationId: "current-draft-gate",
+        text: "确认",
+        sourceMessageId: "shortcut-current-draft-confirmed",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200);
+    assert.equal(confirmed.body.status, "ok");
   });
 
   it("confirms an income record without creating travel-expense rows", async () => {
@@ -252,7 +291,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
       headers: eventHeaders("shortcut-income-confirmation-event"),
       body: JSON.stringify({
         conversationId: "provider-income-conversation",
-        text: codeFromMessage(lease.item.message),
+        text: "确认",
         sourceMessageId: "shortcut-income-confirmation-event",
         senderId: sender,
         chatType: "direct",
@@ -281,7 +320,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     });
     assert.equal(created.response.status, 202);
     const first = await leaseOutbox();
-    const firstCode = codeFromMessage(first.item.message);
+    assert.doesNotMatch(first.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     await ackOutbox(first);
 
     const denied = await request("/api/integrations/weixin-agent/events", {
@@ -289,7 +328,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
       headers: eventHeaders("shortcut-confirmation-denied"),
       body: JSON.stringify({
         conversationId: "provider-conversation-other",
-        text: firstCode,
+        text: "确认",
         sourceMessageId: "shortcut-confirmation-denied",
         senderId: "not-allowlisted",
         chatType: "direct",
@@ -297,12 +336,27 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     });
     assert.equal(denied.response.status, 403);
 
+    const missingPrefix = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-confirmation-correction-missing-prefix"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-2",
+        text: "金额改为 18.50 元",
+        sourceMessageId: "shortcut-confirmation-correction-missing-prefix",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(missingPrefix.response.status, 200);
+    assert.equal(missingPrefix.body.status, "clarify");
+    assert.match(missingPrefix.body.text, /“修改…”/u);
+
     const corrected = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("shortcut-confirmation-correction"),
       body: JSON.stringify({
         conversationId: "provider-conversation-2",
-        text: "金额改为 18.50 元",
+        text: "修改金额为 18.50 元",
         sourceMessageId: "shortcut-confirmation-correction",
         senderId: sender,
         chatType: "direct",
@@ -313,8 +367,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
 
     const second = await leaseOutbox();
     assert.match(second.item.message, /18\.50 元/);
-    const secondCode = codeFromMessage(second.item.message);
-    assert.notEqual(secondCode, firstCode);
+    assert.doesNotMatch(second.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     await ackOutbox(second);
 
     const confirmed = await request("/api/integrations/weixin-agent/events", {
@@ -322,7 +375,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
       headers: eventHeaders("shortcut-confirmation-final"),
       body: JSON.stringify({
         conversationId: "provider-conversation-3",
-        text: secondCode,
+        text: "确认",
         sourceMessageId: "shortcut-confirmation-final",
         senderId: sender,
         chatType: "direct",
@@ -345,7 +398,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     assert.equal(created.response.status, 202);
 
     const lease = await leaseOutbox();
-    codeFromMessage(lease.item.message);
+    assert.doesNotMatch(lease.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     await ackOutbox(lease);
 
     const cancelled = await request("/api/integrations/weixin-agent/events", {
@@ -397,6 +450,14 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     assert.equal(failed.response.status, 200);
     assert.equal((await deliveryStatus(created.body.item.id)).body.item.confirmationDelivery.status, "failed");
 
+    const replayedSubmission = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-explicit-delivery-retry")),
+    });
+    assert.equal(replayedSubmission.response.status, 503);
+    assert.equal(replayedSubmission.body.error.code, "SHORTCUT_WEIXIN_DELIVERY_FAILED");
+
     const retried = await retryDelivery(created.body.item.id);
     assert.equal(retried.response.status, 200);
     assert.deepEqual(retried.body.item.confirmationDelivery, { status: "queued" });
@@ -406,7 +467,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     assert.equal((await deliveryStatus(created.body.item.id)).body.item.confirmationDelivery.status, "sent");
   });
 
-  it("does not treat natural-language confirmation as a financial write", async () => {
+  it("rejects broad affirmative language and writes only for the exact command '确认'", async () => {
     const created = await request("/api/integrations/shortcut/bookkeeping", {
       method: "POST",
       headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
@@ -414,33 +475,35 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     });
     assert.equal(created.response.status, 202);
     const lease = await leaseOutbox();
-    const code = codeFromMessage(lease.item.message);
     await ackOutbox(lease);
 
-    const clarified = await request("/api/integrations/weixin-agent/events", {
-      method: "POST",
-      headers: eventHeaders("shortcut-text-confirm-rejected-event"),
-      body: JSON.stringify({
-        conversationId: "text-confirm-rejected",
-        text: "确认",
-        sourceMessageId: "shortcut-text-confirm-rejected-event",
-        senderId: sender,
-        chatType: "direct",
-      }),
-    });
-    assert.equal(clarified.response.status, 200);
-    assert.equal(clarified.body.status, "confirmation_required");
+    for (const [index, text] of ["好的", "同意", "确认入账", "确认。", " 确认", "确认 ", "确认\n"].entries()) {
+      const clarified = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(`shortcut-text-confirm-rejected-event-${index}`),
+        body: JSON.stringify({
+          conversationId: "text-confirm-rejected",
+          text,
+          sourceMessageId: `shortcut-text-confirm-rejected-event-${index}`,
+          senderId: sender,
+          chatType: "direct",
+        }),
+      });
+      assert.equal(clarified.response.status, 200);
+      assert.equal(clarified.body.status, "clarify");
+      assert.match(clarified.body.text, /只接受“确认”、“修改…”或“取消”/u);
+    }
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
     db.close();
 
     const accepted = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
-      headers: eventHeaders("shortcut-text-confirm-code-event"),
+      headers: eventHeaders("shortcut-text-confirm-explicit-event"),
       body: JSON.stringify({
         conversationId: "text-confirm-rejected",
-        text: code,
-        sourceMessageId: "shortcut-text-confirm-code-event",
+        text: "确认",
+        sourceMessageId: "shortcut-text-confirm-explicit-event",
         senderId: sender,
         chatType: "direct",
       }),
@@ -449,7 +512,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     assert.equal(accepted.body.status, "ok");
   });
 
-  it("rejects the wrong structured code and accepts the latest one", async () => {
+  it("explains that typed and structured six-digit codes are not used", async () => {
     const created = await request("/api/integrations/shortcut/bookkeeping", {
       method: "POST",
       headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
@@ -457,35 +520,34 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     });
     assert.equal(created.response.status, 202);
     const lease = await leaseOutbox();
-    const code = codeFromMessage(lease.item.message);
-    const wrongCode = code === "000000" ? "999999" : "000000";
     await ackOutbox(lease);
 
     const rejected = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
-      headers: eventHeaders("shortcut-structured-code-wrong"),
+      headers: eventHeaders("shortcut-structured-code-rejected"),
       body: JSON.stringify({
         conversationId: "structured-code",
-        text: wrongCode,
-        confirmationCode: wrongCode,
-        sourceMessageId: "shortcut-structured-code-wrong",
+        text: "123456",
+        confirmationCode: "123456",
+        sourceMessageId: "shortcut-structured-code-rejected",
         senderId: sender,
         chatType: "direct",
       }),
     });
-    assert.equal(rejected.response.status, 409);
+    assert.equal(rejected.response.status, 200);
+    assert.equal(rejected.body.status, "clarify");
+    assert.match(rejected.body.text, /不使用六位确认码/u);
     const before = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(before.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
     before.close();
 
     const accepted = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
-      headers: eventHeaders("shortcut-structured-code-correct"),
+      headers: eventHeaders("shortcut-structured-code-explicit-confirm"),
       body: JSON.stringify({
         conversationId: "structured-code",
-        text: code,
-        confirmationCode: code,
-        sourceMessageId: "shortcut-structured-code-correct",
+        text: "确认",
+        sourceMessageId: "shortcut-structured-code-explicit-confirm",
         senderId: sender,
         chatType: "direct",
       }),
@@ -530,7 +592,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
       headers: eventHeaders("shortcut-stale-correction-event"),
       body: JSON.stringify({
         conversationId: "stale-correction",
-        text: "金额改为 18.50 元",
+        text: "修改金额为 18.50 元",
         sourceMessageId: "shortcut-stale-correction-event",
         senderId: sender,
         chatType: "direct",
@@ -540,7 +602,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
     const correctedLease = await leaseOutbox();
     assert.match(correctedLease.item.message, /18\.50 元/u);
     assert.doesNotMatch(correctedLease.item.message, /12\.80 元/u);
-    const correctedCode = codeFromMessage(correctedLease.item.message);
+    assert.doesNotMatch(correctedLease.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     await ackOutbox(correctedLease);
 
     const finishFirst = await request("/api/integrations/weixin-agent/events", {
@@ -548,7 +610,7 @@ describe("快捷指令—小小—微信六位确认码闭环", () => {
       headers: eventHeaders("shortcut-stale-correction-finish"),
       body: JSON.stringify({
         conversationId: "stale-correction",
-        text: correctedCode,
+        text: "确认",
         sourceMessageId: "shortcut-stale-correction-finish",
         senderId: sender,
         chatType: "direct",

@@ -1,10 +1,12 @@
 # 自有截图记账快捷指令
 
-正式交付只包含账号配对版 V7（可撤销设备凭据）。V7 提交后由“小小”发送草稿和六位确认码，只有在同一微信会话回复最新码才完成记账。现有已安装的 V9 仍可暂时调用 `POST /api/integrations/shortcut/bookkeeping-inline`，但仓库不再提供 V9 的生成、验证或签名工具；该兼容路由只用于完成真机迁移，不能用于新安装。
+正式交付以手动账号密码、三级菜单和微信自然语言确认的 V9 为准；V7 设备凭据版仍保留用于兼容。两者都不使用六位确认码。
 
-## 现有 V9 的临时兼容边界
+## V9（手动常量、三级菜单）
 
-V9 会在每次请求中提交用户手动保存在本机快捷指令里的账号和密码。服务端先校验、限流，并在创建任何记账记录前丢弃密码；认证失败返回 401 且零落库。由于该模式缺少设备级撤销和轮换能力，应尽快迁移到 V7，迁移完成后移除兼容路由。
+V9 不读取凭据文件、不弹出配对窗口，也不依赖设备 Token。导入后在快捷指令顶部编辑 `森特账号常量（请编辑）` 和 `森特密码常量（请编辑）` 两个“文本”动作。快捷指令依次完成截图、裁剪、OCR、收入/支出 → 类别 → 子类别三级选择和可选备注，再调用 `POST /api/integrations/shortcut/bookkeeping-inline`。服务端先校验和限流，并在创建任何业务记录前丢弃密码；认证失败返回 401 且零落库。
+
+成功提交后快捷指令保持静默，只等待“小小”微信消息；服务端返回错误 JSON 时会在 iPhone 明确显示失败提示。网络层或 HTTP 层直接中断时，由快捷指令系统显示运行错误。未收到小小确认前不能认为已经记账，也不要盲目重复提交。每次运行使用当前设备时间 `yyyyMMddHHmmss` 作为请求 ID。
 
 ## V7 账号配对版使用流程
 
@@ -21,13 +23,13 @@ V9 会在每次请求中提交用户手动保存在本机快捷指令里的账�
 
 ## 微信确认闭环
 
-小小助手会把识别草稿发到绑定的微信私聊：
+小小助手会把识别草稿发到绑定的微信私聊，V9 快捷记账只接受三个明确指令：
 
-- 在同一会话回复最新消息中的六位 ASCII 数字确认码，才写入费用和付款记录；
-- 回复“金额改为 18.50 元”“时间改为 2026-08-19T10:20:00+08:00”“商户改为济南客户”“备注改为 客户拜访”等严格 parser 支持的字段修改，旧码立即失效，助手重新发送最新草稿和新码；
-- 原始文本精确回复“取消”会作废本次草稿且不创建正式费用；精确回复“重发确认码”会使旧码失效并发送新码。
+- 只回复“确认”，才写入费用和付款记录；
+- 以“修改”开头并说明字段，例如“修改金额为 18.50 元”“修改日期为 2026-08-19”“修改备注为客户拜访”，修改后重新发送最新草稿；
+- 只回复“取消”，本次草稿作废，不创建正式费用。
 
-回复“确认”或其他肯定语句不会直接入账。前后空格、换行、全角数字、附加文字和旧确认码均不匹配，必须使用最新六位码。
+“好的”“同意”“确认入账”“确认。”和带问号的询问都不会入账；快捷记账流程不向用户生成或接受六位确认码。
 
 ## 生成、验证和签名
 
@@ -41,6 +43,18 @@ node integrations/shortcut/build-bookkeeping-shortcut.mjs \
 node integrations/shortcut/verify-bookkeeping-shortcut.mjs \
   /tmp/shortcut-bookkeeping.unsigned.shortcut
 
+node integrations/shortcut/build-bookkeeping-inline-shortcut.mjs \
+  --endpoint=https://82.156.210.199/api/integrations/shortcut/bookkeeping-inline \
+  --output=/tmp/shortcut-bookkeeping-inline.unsigned.shortcut
+
+node integrations/shortcut/verify-bookkeeping-inline-shortcut.mjs \
+  /tmp/shortcut-bookkeeping-inline.unsigned.shortcut
+
+node integrations/shortcut/sign-bookkeeping-inline-shortcut.mjs \
+  --input=/tmp/shortcut-bookkeeping-inline.unsigned.shortcut \
+  --output=/tmp/自有截图记账（三级菜单微信确认版V9）.shortcut \
+  --mode=anyone
+
 node integrations/shortcut/sign-bookkeeping-shortcut.mjs \
   --input=/tmp/shortcut-bookkeeping.unsigned.shortcut \
   --output=/tmp/自有截图记账（账号配对版V7）.shortcut \
@@ -51,6 +65,6 @@ node integrations/shortcut/sign-bookkeeping-shortcut.mjs \
 
 ## 目录和数据边界
 
-账本目录固化在 `build-bookkeeping-shortcut.mjs` 的 `BOOKKEEPING_CATALOG`，后端会再次校验同一目录；收入和支出都先进入 `review_required`，只有在绑定微信私聊回复最新六位确认码后才完成记账。支出确认后创建差旅费用和付款记录；收入确认后保存在快捷记账流水中，不创建支出付款行。幂等键对 OCR 文本、完整分类路径和备注拼接后的原文计算 SHA-256，不依赖 `CurrentDate`。
+账本目录固化在 `build-bookkeeping-shortcut.mjs` 的 `BOOKKEEPING_CATALOG`，后端会再次校验同一目录；收入和支出都先进入 `review_required`，只有在绑定微信私聊完成自然语言确认后才完成记账。支出确认后创建差旅费用和付款记录；收入确认后保存在快捷记账流水中，不创建支出付款行。V9 幂等键使用快捷指令生成的当前时间 ID。
 
-V7 凭据和微信 outbox 不保存密码或明文确认码；待确认动作只保存确认码 HMAC。V9 兼容只接受既有客户端，不再生成新安装资产；服务端认证后立即丢弃密码。
+V7 设备凭据和微信 outbox 不保存密码；V9 会在本机快捷指令中保存用户手动填写的两个常量，并只通过 HTTPS 提交。服务端认证后立即丢弃密码，不得把密码写入业务数据、审计、日志或错误响应。不要把填写过真实凭据的快捷指令资产提交到 Git、聊天或公共网盘。

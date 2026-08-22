@@ -208,7 +208,7 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
     });
   }
   if (/快捷记账|记账复核|记账确认/u.test(value)) {
-    return clarify("快捷指令提交后，小小助手会把识别草稿发到绑定的微信会话；请直接在同一会话回复六位确认码或说明要修改的字段。", confidence);
+    return clarify("快捷指令提交后，小小助手会把识别草稿发到绑定的微信会话；请在同一会话回复“确认”、以“修改”开头说明修改内容，或回复“取消”。", confidence);
   }
   const knowledgeSearch = value.match(/^知识(?:检索|查询)(?:\s+(.+))?$/u);
   if (knowledgeSearch) {

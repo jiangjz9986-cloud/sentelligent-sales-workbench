@@ -2,32 +2,32 @@
 
 森特智行 AI 销售作战台是一套面向个人复杂型 B2B 销售的业务系统。它把沟通记录、客户、商机、行动、风险、拜访行程、知识和周报放在同一套数据链路中，减少重复录入，也避免 AI 结果停留在一次性对话里。
 
-系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，常规发布只允许来自已验证的 `main` 和 GitHub Release。v0.6.5 经项目所有者明确授权采用一次性本地 exact-commit 直发生产路径；生产数据库、录音、微信状态、密钥和备份不进入 Git。
+系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，常规发布只允许来自已验证的 `main` 和 GitHub Release。v0.6.5 已按项目所有者授权采用本地 exact-commit 路径切入生产；v0.6.6 继续使用同一例外修复 V9 快捷记账，不同步 GitHub。生产数据库、录音、微信状态、密钥和备份不进入 Git。
 
 ## 代码、发布与生产状态
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前开发候选 | `v0.6.5`（本地 exact-commit 候选，尚未切生产） |
-| v0.6.5 发布方式 | 不同步 GitHub；本地完整门禁、注释标签、不可变归档、manifest、SHA-256 与生产 evidence |
+| 当前开发候选 | `v0.6.6`（V9 快捷记账本地 exact-commit 修复候选） |
+| v0.6.6 发布方式 | 不同步 GitHub；本地完整门禁、注释标签、不可变归档、manifest、SHA-256 与生产 evidence |
 | v0.6.1 Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
 | v0.6.1 Release 状态 | 正式 Release 已发布；生产切换、`0017` 迁移、切换前后预检和 HTTPS smoke 均已完成 |
 | v0.6.0 Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
 | v0.6.0 Release 归档 SHA-256 | `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371` |
-| 当前生产源码版本 | `v0.6.3`（现网 release 目录标识为 v0.6.4） |
-| 生产提交 | `eea2d89c5916ed56a920f7505c05e9a67ad67269` |
-| 当前生产身份说明 | detached 生产对象；以服务器 manifest、不可变目录和迁移证据为准 |
+| 当前生产源码版本 | `v0.6.5` |
+| 生产提交 | `bd2efe9f9b1827f97ef423c0b0eb3c122c249d44` |
+| 当前生产身份说明 | 本地 exact-commit 不可变 release；以服务器 manifest、服务路径和生产 evidence 为准 |
 | 最新公开 GitHub Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
-| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.6.4-20260820T152845Z_eea2d89c5916` |
-| 本次回滚基线 | 切换前的 current，即 `eea2d89c5916` 不可变 release；切换脚本还会生成 fresh 数据库和微信会话备份 |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.6.5-20260822T043834Z_bd2efe9f9b18` |
+| 本次回滚基线 | 当前 v0.6.5 不可变 release；切换脚本还会生成 fresh 数据库和微信会话备份 |
 | v0.6.1 历史生产状态 | 当时切换前后预检均 `25/25`，HTTPS smoke `25/25`、`cleanup=clean`，数据库完整性通过 |
-| 当前生产代码 | `eea2d89c5916` 已运行；其旧预检已过时，不能替代 v0.6.5 的 fresh 证据 |
+| 当前生产代码 | `bd2efe9f9b18` 已运行；其旧预检不能替代 v0.6.6 的 fresh 证据 |
 | `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
 | `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；已由后续版本取代 |
 | `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网提交、release 路径、迁移校验和、数据库完整性及服务状态已于 `2026-08-22` 只读复核。SQLite `quick_check=ok`、外键违规为 `0`；旧预检和旧 smoke 不能作为 v0.6.5 的部署证据。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选边界见 [v0.6.5 版本说明](docs/releases/v0.6.5.md)。
+上述现网提交、release 路径、迁移校验和、数据库完整性及服务状态已于 `2026-08-22` 只读复核。SQLite `quick_check=ok`、外键违规为 `0`；旧预检和旧 smoke 不能作为 v0.6.6 的部署证据。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选边界见 [v0.6.6 版本说明](docs/releases/v0.6.6.md)。
 
 ## 功能状态
 
@@ -42,7 +42,7 @@
 | 智能拜访行程 | 高德地址解析、路线、时间、里程、过路费、顺序优化、地图和历史快照 | 历史读取不重复调用地图或模型 |
 | 差旅报销 | 按自然周管理费用、多笔实付、提前请款、多退少补、付款凭证、发票仓库、人工匹配和 A4 打印 | 单账号个人使用；自动识别结果进入 owner-scoped 复核队列，不包含审批流和财务付款 |
 | iCost 快捷指令 | iCost 成功记账后按账本名精确分流；“出差报销”只写森特智行，其他账本不进入本系统 | 只写文本 Webhook，独立 URL、独立 Token、幂等和审计；未知账本不发送 |
-| 自有 iOS 快捷指令 | 一个森特账号凭据、一次收支/分类选择和截图文字上传；收入与支出都只进入森特，先由微信“小小”复核再完成记账 | 账号密码常量版仅作短期兼容；正式路径使用可撤销的账号绑定设备凭据，不再跨系统写入轻氧 |
+| 自有 iOS 快捷指令 | V9 使用本机账号密码常量、截图 OCR、收入/支出 → 类别 → 子类别三级菜单和可选备注；收入与支出都只进入森特，先由微信“小小”复核 | 只接受“确认”“修改…”或“取消”，不使用六位码；V7 设备凭据版保留兼容，不跨系统写入轻氧 |
 | 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
 | 知识库 | 模块内搜索、条目维护和引用 | 后续可继续扩展检索与引用质量评估 |
 | 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF 接入；已完成真实设备 `/clear` 往返验收 | 机器身份只获得声明的写入路由；更多业务场景仍按人工确认边界扩展 |
@@ -158,7 +158,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 
 ## 微信 Clawbot 助手事件契约
 
-候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.3` worker 通过独立机器 Token 调用：
+候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.4` worker 通过独立机器 Token 调用：
 
 ```text
 POST /api/integrations/weixin-agent/events
@@ -166,9 +166,9 @@ Authorization: Bearer <森特智行专用 WEIXIN_AGENT_API_TOKEN>
 Idempotency-Key: <稳定重试键>
 ```
 
-请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和六位 `confirmationCode`。快捷记账草稿也必须在同一会话回复最新消息中的六位确认码；明确修改字段后旧码立即失效，助手会发送带新码的最新草稿。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
+请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和通用助手使用的六位 `confirmationCode`。快捷记账专属动作不读取六位码，而是在同一会话中只接受“确认”、以“修改”开头的明确字段修改或“取消”；修改后助手会发送最新草稿，只有该版本确认消息送达后才能入账。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
 
-sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊。所有高风险确认回复都必须来自同一 sender、channel 和 private conversation：恰好六位 ASCII 数字确认，原始文本精确等于 `取消` 或 `重发确认码` 才执行取消或轮换；前后空格、换行、全角数字和附加文字均不匹配。确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定；执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
+sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊。所有高风险确认回复都必须来自同一 sender、channel 和 private conversation。通用高风险助手仍使用其六码策略；快捷记账使用独立的三指令策略，并拒绝六码、“好的”“同意”“确认入账”“确认。”等模糊或扩展表达。执行租约、当前草稿投递门禁和稳定工具运行身份负责并发、重试和崩溃恢复。
 
 owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。机器 Token 派生投递身份；轮换 Token 时必须先停止旧 worker、排空并封存旧 polling cursor，再启用新 Token，禁止并行消费。真实设备往返和生产切换仍需另行授权；本地候选检查不构成生产证据。
 
