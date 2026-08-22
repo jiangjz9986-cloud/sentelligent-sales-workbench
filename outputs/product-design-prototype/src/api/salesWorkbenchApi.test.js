@@ -2891,8 +2891,8 @@ describe("sales workbench API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
-        if (url.includes("/api/hospital-tenders?") || url.endsWith("/api/hospital-tenders")) return jsonResponse({ items: [notice] });
-        if (url.endsWith("/api/hospital-tenders/summary")) return jsonResponse({ item: { totalNotices: 1, matchedNotices: 1, byNoticeType: { tender: 1 }, byRelevance: { high: 1 }, latestRun: null } });
+        if (url.includes("/api/hospital-tenders?") || url.endsWith("/api/hospital-tenders")) return jsonResponse({ items: [notice], total: 1, limit: 100, offset: 0, hasMore: false });
+        if (url.endsWith("/api/hospital-tenders/summary")) return jsonResponse({ item: { totalNotices: 1, matchedNotices: 1, highRelevanceCount: 1, deadlineSoonCount: 0, todayNewCount: 0, byNoticeType: { tender: 1 }, byRelevance: { high: 1 }, latestRun: null } });
         if (url.endsWith("/api/hospital-tenders/sources")) return jsonResponse({ items: [source] });
         if (url.endsWith("/api/hospital-tenders/health")) return jsonResponse({ item: { status: "healthy", sourceCount: 1, staleCount: 0, latestRun: null } });
         if (url.endsWith("/api/hospital-tenders/scheduler")) return jsonResponse({ item: { enabled: true, intervalMinutes: 60, batchSize: 10, lastStatus: "waiting" }, runs: [] });
@@ -2904,6 +2904,7 @@ describe("sales workbench API client", () => {
     api.setSession({ csrfToken: "fixture-csrf-token" });
 
     const notices = await api.listHospitalTenders({ customerId: "rizhao" });
+    const noticePage = await api.listHospitalTenderPage({ customerId: "rizhao", limit: 100 });
     const summary = await api.getHospitalTenderSummary();
     const sources = await api.listHospitalTenderSources();
     const health = await api.getHospitalTenderHealth();
@@ -2911,6 +2912,10 @@ describe("sales workbench API client", () => {
     const scheduler = await api.getHospitalTenderScheduler();
     const schedulerRun = await api.runHospitalTenderScheduler();
     assert.equal(notices[0].matchedCustomerIds[0], "rizhao");
+    assert.equal(noticePage.total, 1);
+    assert.equal(noticePage.hasMore, false);
+    assert.equal(noticePage.items[0].id, notice.id);
+    assert.match(calls.find((call) => call.url.includes("limit=100"))?.url ?? "", /customerId=rizhao/);
     assert.equal(summary.totalNotices, 1);
     assert.equal(sources[0].status, "healthy");
     assert.equal(health.staleCount, 0);

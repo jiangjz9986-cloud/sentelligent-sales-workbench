@@ -373,6 +373,36 @@ function nonNegativeCount(value, name) {
   return value;
 }
 
+function localDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return [
+    String(date.getFullYear()).padStart(4, "0"),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function parsedTimestamp(value) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function isPublishedToday(value, now) {
+  const current = localDateKey(now);
+  return Boolean(current && localDateKey(value) === current);
+}
+
+function isDeadlineSoon(value, now) {
+  const timestamp = parsedTimestamp(value);
+  if (timestamp === null) return false;
+  const start = new Date(now);
+  if (Number.isNaN(start.getTime())) return false;
+  start.setHours(0, 0, 0, 0);
+  return timestamp >= start.getTime()
+    && timestamp <= start.getTime() + (7 * 24 * 60 * 60 * 1000);
+}
+
 function normalizeListFilters(filters = {}) {
   assertPlainObject(filters, "filters");
   const allowed = new Set([
@@ -601,6 +631,13 @@ export function createHospitalTenderRepository(db, {
     `).all(params).map(fromNoticeRow);
   }
 
+  function countNotices(inputFilters = {}) {
+    const filters = normalizeListFilters(inputFilters);
+    const { where, params } = noticeWhere(filters, { pagination: false });
+    const row = db.prepare(`SELECT COUNT(*) AS count FROM hospital_tender_notices WHERE ${where}`).get(params);
+    return Number(row?.count ?? 0);
+  }
+
   function summary(inputFilters = {}) {
     const filters = normalizeListFilters({ ...inputFilters, limit: 200, offset: 0 });
     const { where, params } = noticeWhere(filters, { pagination: false });
@@ -610,6 +647,9 @@ export function createHospitalTenderRepository(db, {
     const bySourceId = {};
     let matchedNotices = 0;
     let latestPublishedAt = null;
+    const now = clock();
+    let todayNewCount = 0;
+    let deadlineSoonCount = 0;
     for (const row of rows) {
       if (Object.hasOwn(byNoticeType, row.notice_type)) byNoticeType[row.notice_type] += 1;
       if (Object.hasOwn(byRelevance, row.relevance)) byRelevance[row.relevance] += 1;
@@ -617,6 +657,8 @@ export function createHospitalTenderRepository(db, {
       const matched = jsonValue(row.match_customer_ids_json, "matchedCustomerIds", []);
       if (Array.isArray(matched) && matched.length > 0) matchedNotices += 1;
       if (!latestPublishedAt || row.published_at > latestPublishedAt) latestPublishedAt = row.published_at;
+      if (isPublishedToday(row.published_at, now)) todayNewCount += 1;
+      if (isDeadlineSoon(row.deadline_text, now)) deadlineSoonCount += 1;
     }
     let latestRun = null;
     if (tableExists(db, "hospital_tender_runs")) {
@@ -634,6 +676,10 @@ export function createHospitalTenderRepository(db, {
       byRelevance,
       bySourceId,
       latestPublishedAt,
+      highRelevanceCount: byRelevance.high,
+      deadlineSoonCount,
+      todayNewCount,
+      asOf: now instanceof Date && !Number.isNaN(now.getTime()) ? now.toISOString() : null,
       latestRun,
     };
   }
@@ -772,6 +818,7 @@ export function createHospitalTenderRepository(db, {
     getNotice,
     upsertNotice,
     listNotices,
+    countNotices,
     summary,
     listSources,
     health,

@@ -540,6 +540,31 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiCollection("hospitalTenderNotice", response.items ?? [], "hospitalTenders.items");
     },
 
+    async listHospitalTenderPage(filters = {}, { signal } = {}) {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(filters ?? {})) {
+        if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+      }
+      const response = await requestApi(`/api/hospital-tenders${query.size ? `?${query}` : ""}`, { signal });
+      const items = assertApiCollection("hospitalTenderNotice", response.items ?? [], "hospitalTenders.items");
+      const total = Number.isSafeInteger(response.total) && response.total >= 0
+        ? response.total
+        : items.length;
+      const limit = Number.isSafeInteger(response.limit) && response.limit > 0
+        ? response.limit
+        : (Number.isSafeInteger(filters.limit) && filters.limit > 0 ? filters.limit : items.length || 1);
+      const offset = Number.isSafeInteger(response.offset) && response.offset >= 0
+        ? response.offset
+        : (Number.isSafeInteger(filters.offset) && filters.offset >= 0 ? filters.offset : 0);
+      return {
+        items,
+        total,
+        limit,
+        offset,
+        hasMore: response.hasMore === undefined ? offset + items.length < total : Boolean(response.hasMore),
+      };
+    },
+
     async getHospitalTender(id, { signal } = {}) {
       const response = await requestApi(`/api/hospital-tenders/${encodeURIComponent(id)}`, { signal });
       return assertHospitalTenderNotice(response.item);
