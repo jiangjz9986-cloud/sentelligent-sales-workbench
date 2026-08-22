@@ -13,7 +13,7 @@ const CONDITIONAL_ACTION = "is.workflow.actions.conditional";
 
 export const CAPTURE_DEVICE_ENDPOINT =
   "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture";
-export const CAPTURE_SHORTCUT_NAME = "智能截图记账（设备直连版V3）";
+export const CAPTURE_SHORTCUT_NAME = "智能截图记账（设备直连版V4）";
 export const CAPTURE_DEVICE_MARKER = "__SHORTCUT_DEVICE__";
 export const CAPTURE_FAILURE_MESSAGE =
   "截图提交失败：服务器未接受本次请求。请检查网络；未收到小小微信草稿前不要认为已经记账。";
@@ -36,6 +36,26 @@ const textAttachment = (outputUuid, outputName) => ({
   },
   WFSerializationType: "WFTextTokenString",
 });
+const interpolatedText = (parts) => {
+  let string = "";
+  const attachmentsByRange = {};
+  for (const part of parts) {
+    if (typeof part === "string") {
+      string += part;
+      continue;
+    }
+    attachmentsByRange[`{${string.length}, 1}`] = {
+      OutputUUID: part.outputUuid,
+      OutputName: part.outputName,
+      Type: "ActionOutput",
+    };
+    string += "\uFFFC";
+  }
+  return {
+    Value: { attachmentsByRange, string },
+    WFSerializationType: "WFTextTokenString",
+  };
+};
 const dictionaryField = (entries) => ({
   Value: {
     WFDictionaryFieldValueItems: entries.map(([key, value]) => ({
@@ -94,10 +114,14 @@ function assertLegacyPrefix(actions) {
 
 function convertedActions(sourceActions, endpoint, deviceToken) {
   assertLegacyPrefix(sourceActions);
-  const currentDate = uuid(1);
-  const timeId = uuid(2);
-  const request = uuid(3);
-  const responseError = uuid(4);
+  const ocrText = uuid(1);
+  const currentDate = uuid(2);
+  const timeId = uuid(3);
+  const identifierText = uuid(4);
+  const request = uuid(5);
+  const responseError = uuid(6);
+  const responseCode = uuid(7);
+  const responseFields = uuid(8);
   const responseGuard = uuid(0x2000);
   // Preserve the exact text-token wrapper used by the legacy iCost App
   // Intent. The OCR action can otherwise arrive in a Shortcut JSON body as a
@@ -105,6 +129,10 @@ function convertedActions(sourceActions, endpoint, deviceToken) {
   const icostRawText = structuredClone(sourceActions[3].WFWorkflowActionParameters.rawText);
   return [
     ...structuredClone(sourceActions.slice(0, 3)),
+    action("is.workflow.actions.gettext", {
+      CustomOutputName: "OCR纯文本",
+      WFTextActionText: icostRawText,
+    }, ocrText),
     action("is.workflow.actions.date", {
       CustomOutputName: "本次截图时间",
       WFDateActionMode: "Current Date",
@@ -116,6 +144,10 @@ function convertedActions(sourceActions, endpoint, deviceToken) {
       WFDateFormat: "yyyyMMddHHmmssSSS",
       WFTimeFormatStyle: "None",
     }, timeId),
+    action("is.workflow.actions.gettext", {
+      CustomOutputName: "截图记账ID纯文本",
+      WFTextActionText: textAttachment(timeId, "截图记账ID"),
+    }, identifierText),
     action(REQUEST_ACTION, {
       CustomOutputName: "已提交小小确认",
       WFHTTPMethod: "POST",
@@ -126,9 +158,9 @@ function convertedActions(sourceActions, endpoint, deviceToken) {
         ["Authorization", `Bearer ${deviceToken}`],
       ]),
       WFJSONValues: dictionaryField([
-        ["text", icostRawText],
-        ["idempotency_key", textAttachment(timeId, "截图记账ID")],
-        ["source_id", textAttachment(timeId, "截图记账ID")],
+        ["text", textAttachment(ocrText, "OCR纯文本")],
+        ["idempotency_key", textAttachment(identifierText, "截图记账ID纯文本")],
+        ["source_id", textAttachment(identifierText, "截图记账ID纯文本")],
         ["source", "shortcut"],
       ]),
     }, request),
@@ -143,12 +175,28 @@ function convertedActions(sourceActions, endpoint, deviceToken) {
       WFControlFlowMode: 0,
       WFInput: { Type: "Variable", Variable: attachment(responseError, "截图提交错误") },
     }),
+    action("is.workflow.actions.getvalueforkey", {
+      CustomOutputName: "截图提交错误码",
+      WFDictionaryKey: "code",
+      WFInput: attachment(responseError, "截图提交错误"),
+    }, responseCode),
+    action("is.workflow.actions.getvalueforkey", {
+      CustomOutputName: "截图提交错误字段",
+      WFDictionaryKey: "fields",
+      WFInput: attachment(responseError, "截图提交错误"),
+    }, responseFields),
     controlAction("is.workflow.actions.showresult", {
-      Text: literalToken(CAPTURE_FAILURE_MESSAGE),
+      Text: interpolatedText([
+        "截图提交失败（",
+        { outputUuid: responseCode, outputName: "截图提交错误码" },
+        "），字段：",
+        { outputUuid: responseFields, outputName: "截图提交错误字段" },
+        `。${CAPTURE_FAILURE_MESSAGE}`,
+      ]),
     }),
     controlAction(CONDITIONAL_ACTION, {
       GroupingIdentifier: responseGuard,
-      UUID: uuid(5),
+      UUID: uuid(9),
       WFControlFlowMode: 2,
     }),
   ];
@@ -157,7 +205,7 @@ function convertedActions(sourceActions, endpoint, deviceToken) {
 export function inspectConvertedIcostCaptureShortcutXml(xml) {
   const plist = parsePlistXml(xml);
   const actions = plist.WFWorkflowActions;
-  requireValue(Array.isArray(actions) && actions.length === 10, "智能截图记账动作数量不正确");
+  requireValue(Array.isArray(actions) && actions.length === 14, "智能截图记账动作数量不正确");
   requireValue(actions.slice(0, 3).map((entry) => entry.WFWorkflowActionIdentifier).join("|")
     === [SCREENSHOT_ACTION, CROP_ACTION, OCR_ACTION].join("|"), "截屏、裁剪、OCR 前缀未保留");
   requireValue(!actions.some((entry) => entry.WFWorkflowActionIdentifier === ICOST_ACTION), "转换后不得保留 iCost 写入动作");
@@ -177,7 +225,22 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
   requireValue(JSON.stringify([...body.keys()]) === JSON.stringify([
     "text", "idempotency_key", "source_id", "source",
   ]), "自动截图请求字段不正确");
-  requireValue(outputUuid(body.get("text")) === actions[2].WFWorkflowActionParameters.UUID, "自动截图未绑定原 OCR 输出");
+  const ocrText = actions.find((entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "OCR纯文本");
+  const identifierText = actions.find(
+    (entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "截图记账ID纯文本",
+  );
+  requireValue(ocrText?.WFWorkflowActionIdentifier === "is.workflow.actions.gettext",
+    "自动截图缺少 OCR 显式文本转换");
+  requireValue(identifierText?.WFWorkflowActionIdentifier === "is.workflow.actions.gettext",
+    "自动截图缺少时间 ID 显式文本转换");
+  requireValue(outputUuid(ocrText.WFWorkflowActionParameters.WFTextActionText)
+    === actions[2].WFWorkflowActionParameters.UUID, "OCR 文本转换未绑定原 OCR 输出");
+  requireValue(outputUuid(body.get("text")) === ocrText.WFWorkflowActionParameters.UUID,
+    "自动截图请求未绑定 OCR 纯文本输出");
+  requireValue(outputUuid(body.get("idempotency_key")) === identifierText.WFWorkflowActionParameters.UUID,
+    "自动截图幂等键未绑定纯文本输出");
+  requireValue(outputUuid(body.get("source_id")) === identifierText.WFWorkflowActionParameters.UUID,
+    "自动截图 source_id 未绑定纯文本输出");
   requireValue(body.get("text")?.WFSerializationType === "WFTextTokenString",
     "自动截图 OCR 输出必须强制转换为文本字符串");
   requireValue(body.get("idempotency_key")?.WFSerializationType === "WFTextTokenString",
@@ -187,15 +250,22 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
   requireValue(literal(body.get("source")) === "shortcut", "自动截图 source 不正确");
   requireValue(actions.filter((entry) => entry.WFWorkflowActionIdentifier === "is.workflow.actions.showresult").length === 1,
     "自动截图只能在失败时显示一次提示");
+  requireValue(actions.filter((entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "截图提交错误码").length === 1,
+    "自动截图失败分支缺少安全错误码");
+  requireValue(actions.filter((entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "截图提交错误字段").length === 1,
+    "自动截图失败分支缺少安全错误字段");
   return {
     actionCount: actions.length,
     endpoint: parameters.WFURL,
     preservesCapturePrefix: true,
     preservesIcostOcrText: true,
+    coercesOcrThroughTextAction: true,
+    coercesIdentifiersThroughTextAction: true,
     removesIcostWrite: true,
     hasInlineCredentials: false,
     hasDeviceCredential: true,
     hasFailureNotice: true,
+    hasSafeFailureDiagnostics: true,
     hasSuccessReceipt: false,
     payloadKeys: [...body.keys()],
   };

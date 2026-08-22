@@ -59,14 +59,17 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     const { report } = await convertIcostCaptureShortcut({ inputPath, outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     assert.deepEqual(report, {
-      actionCount: 10,
+      actionCount: 14,
       endpoint: CAPTURE_DEVICE_ENDPOINT,
       preservesCapturePrefix: true,
       preservesIcostOcrText: true,
+      coercesOcrThroughTextAction: true,
+      coercesIdentifiersThroughTextAction: true,
       removesIcostWrite: true,
       hasInlineCredentials: false,
       hasDeviceCredential: true,
       hasFailureNotice: true,
+      hasSafeFailureDiagnostics: true,
       hasSuccessReceipt: false,
       payloadKeys: ["text", "idempotency_key", "source_id", "source"],
     });
