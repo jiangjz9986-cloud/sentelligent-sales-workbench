@@ -60,6 +60,26 @@ function partFromRow(row) {
   };
 }
 
+function assistantContextFromPart(part) {
+  const value = part?.metadata?.assistantContext;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const contextIdentifier = (candidate) => {
+    if (typeof candidate !== "string") return null;
+    const normalized = candidate.trim();
+    if (
+      !normalized
+      || normalized.length > 200
+      || normalized.startsWith("synthetic:")
+      || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)
+    ) return null;
+    return normalized;
+  };
+  const customerId = contextIdentifier(value.customerId);
+  const opportunityId = contextIdentifier(value.opportunityId);
+  if (!customerId && !opportunityId) return null;
+  return { customerId, opportunityId };
+}
+
 export function createAssistantSessionRepository(db, { idFactory = randomUUID, clock = () => new Date() } = {}) {
   if (!db || typeof db.prepare !== "function") throw new TypeError("A synchronous SQLite connection is required");
   const selectConversation = db.prepare("SELECT * FROM assistant_conversations WHERE id = $id");
@@ -154,12 +174,24 @@ export function createAssistantSessionRepository(db, { idFactory = randomUUID, c
     });
   }
 
+  function getContext(conversationIdValue) {
+    const conversationId = text(conversationIdValue, "conversationId", 200);
+    const parts = listDraftParts(conversationId);
+    for (let index = parts.length - 1; index >= 0; index -= 1) {
+      const context = assistantContextFromPart(parts[index]);
+      if (context) return context;
+    }
+    return {};
+  }
+
   return {
     getOrCreate,
     getByExternalId,
     appendDraftPart,
     listDraftParts,
     clearDraftParts,
+    getContext,
+    getConversationContext: getContext,
     get: (id) => conversationFromRow(selectConversation.get({ $id: text(id, "id", 200) })),
   };
 }

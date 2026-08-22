@@ -202,10 +202,107 @@ describe("assistant bounded business snapshot adapter", () => {
     assert.deepEqual(actionRisk.actions.map((item) => item.id), ["action-a"]);
     assert.deepEqual(actionRisk.risks.map((item) => item.id), ["risk-a"]);
     assert.deepEqual(itineraries.items.map((item) => item.id), ["itinerary-a"]);
-    assert.deepEqual(expenses.summary, { count: 1, actualPaidCents: 8800, reimbursementCents: 7000, invalidAmountCount: 0 });
+    assert.deepEqual(expenses.summary, {
+      count: 1,
+      actualPaidCents: 8800,
+      reimbursementCents: 7000,
+      confirmedCoverageCents: 0,
+      missingInvoiceCents: 7000,
+      noInvoiceConfirmedCents: 0,
+      unacknowledgedMissingCents: 7000,
+      missingInvoiceCount: 1,
+      invalidAmountCount: 0,
+    });
     assert.deepEqual(knowledge.items.map((item) => item.id), ["knowledge-a"]);
     assert.equal(JSON.stringify(knowledge).includes("完整知识正文"), false);
     assert.equal(after, before);
+  });
+
+  it("keeps reimbursement readiness truthful when invoices are missing", () => {
+    const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
+    const expenses = adapter.travelExpenseSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+
+    assert.equal(expenses.summary.reimbursementCents, 7000);
+    assert.equal(expenses.summary.confirmedCoverageCents, 0);
+    assert.equal(expenses.summary.missingInvoiceCents, 7000);
+    assert.equal(expenses.summary.unacknowledgedMissingCents, 7000);
+    assert.equal(expenses.summary.missingInvoiceCount, 1);
+    assert.equal(expenses.items[0].missingInvoiceCents, 7000);
+    assert.equal(expenses.items[0].confirmedCoverageCents, 0);
+    assert.equal(expenses.preparation.ready, false);
+    assert.ok(expenses.preparation.blockers.includes("missing_invoice"));
+  });
+
+  it("marks bounded expense and weekly-report snapshots as partial", () => {
+    const insertExpense = db.prepare(`
+      INSERT INTO travel_expenses (
+        id, reference_code, owner, occurred_on, category, purpose, customer_id, invoice_status, created_by, updated_by
+      ) VALUES ($id, $referenceCode, 'owner-a', '2026-08-17', 'transport', 'extra expense', 'customer-a', 'pending', 'owner-a', 'owner-a')
+    `);
+    const insertPayment = db.prepare(`
+      INSERT INTO travel_expense_payments (
+        id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method
+      ) VALUES ($id, $expenseId, 1, '2026-08-17T10:00:00+08:00', 100, 100, 'personal', 'wechat')
+    `);
+    for (let index = 0; index < 101; index += 1) {
+      const id = `expense-extra-${index}`;
+      insertExpense.run({ $id: id, $referenceCode: `EXP-EXTRA-${String(index).padStart(3, "0")}` });
+      insertPayment.run({ $id: `payment-extra-${index}`, $expenseId: id });
+    }
+    const insertReport = db.prepare(`
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
+      VALUES ($id, 'owner-a', '2026-08-17', '2026-08-23', 'ready', 'report', '[]')
+    `);
+    for (let index = 0; index < 101; index += 1) insertReport.run({ $id: `report-extra-${index}` });
+
+    const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
+    const expenses = adapter.travelExpenseSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+    const reports = adapter.salesReportSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+
+    assert.equal(expenses.truncated, true);
+    assert.equal(expenses.partial, true);
+    assert.equal(reports.truncated, true);
+    assert.equal(reports.partial, true);
+  });
+
+  it("counts only real weekly report rows and keeps report previews separate from expenses", async () => {
+    db.prepare("UPDATE weekly_reports SET status = 'archived' WHERE id = 'report-a'").run();
+    db.prepare(`
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
+      VALUES ('report-draft', 'owner-a', '2026-08-17', '2026-08-23', 'draft', '草稿正文', '[{"type":"quick_record","id":"record-a"}]')
+    `).run();
+    db.prepare(`
+      INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, status)
+      VALUES ('record-outside-report', 'owner-a', '未形成周报的记录', '2026-08-17T10:00:00Z', 'test', 'analyzed')
+    `).run();
+
+    const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
+    const reports = adapter.salesReportSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+    assert.equal(reports.reportCount, 1);
+    assert.equal(reports.statusCounts.draft, 1);
+    assert.equal(reports.statusCounts.ready, 0);
+    assert.equal(reports.items[0].id, "report-draft");
+    assert.equal("content" in reports.items[0], false);
+
+    const sessions = createAssistantSessionRepository(db, { clock: () => new Date("2026-08-17T12:00:00Z") });
+    const handlers = createAssistantToolHandlers({
+      db,
+      config: { aiAnalysisMode: "mock" },
+      sessionRepository: sessions,
+      clock: () => new Date("2026-08-17T12:00:00Z"),
+    });
+    const context = { owner: "owner-a", channel: "weixin", conversation: "conversation-report", requestId: "request-report" };
+    const output = await handlers["sales-report.preview"]({ week: "2026-08-17" }, context, {});
+    assert.match(output.text, /销售周报预览/);
+    assert.match(output.text, /已保存周报 1 条/);
+    assert.doesNotMatch(output.text, /报销|费用|实付/);
+    assert.equal(output.summary.reportCount, 1);
+
+    const reimbursement = await handlers["reimbursement-report.preview"]({ week: "2026-08-17" }, context, {});
+    assert.match(reimbursement.text, /登记可报销 70\.00 元/);
+    assert.match(reimbursement.text, /缺票 70\.00 元/);
+    assert.match(reimbursement.text, /确认前待处理/);
+    assert.doesNotMatch(reimbursement.text, /可报销 70\.00 元，/);
   });
 
   it("exposes the adapter through registered read-only runtime handlers", async () => {
