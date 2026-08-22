@@ -2,31 +2,32 @@
 
 森特智行 AI 销售作战台是一套面向个人复杂型 B2B 销售的业务系统。它把沟通记录、客户、商机、行动、风险、拜访行程、知识和周报放在同一套数据链路中，减少重复录入，也避免 AI 结果停留在一次性对话里。
 
-系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，`main` 是唯一可部署来源；生产数据库、录音、微信状态、密钥和备份不进入 Git。
+系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，常规发布只允许来自已验证的 `main` 和 GitHub Release。v0.6.5 经项目所有者明确授权采用一次性本地 exact-commit 直发生产路径；生产数据库、录音、微信状态、密钥和备份不进入 Git。
 
 ## 代码、发布与生产状态
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前开发候选 | `v0.6.2`（本地实现与验收中，尚未发布或切生产） |
+| 当前开发候选 | `v0.6.5`（本地 exact-commit 候选，尚未切生产） |
+| v0.6.5 发布方式 | 不同步 GitHub；本地完整门禁、注释标签、不可变归档、manifest、SHA-256 与生产 evidence |
 | v0.6.1 Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
 | v0.6.1 Release 状态 | 正式 Release 已发布；生产切换、`0017` 迁移、切换前后预检和 HTTPS smoke 均已完成 |
 | v0.6.0 Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
 | v0.6.0 Release 归档 SHA-256 | `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371` |
-| 当前生产版本 | `v0.6.1`（受控切换与线上验收已完成） |
-| 生产提交 | `c461d6a60253d9a59cd8b187edec57e47a480e94` |
-| 注释标签 | `v0.6.1` |
-| 上一生产 GitHub Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
-| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.6.1-20260817T134944Z_c461d6a60253` |
-| 回滚 release | `/opt/sentelligent-sales-workbench/releases/v0.6.0-20260817T124347Z_4c45656647f5` |
-| v0.6.1 生产状态 | 已切换；切换前后预检均 `25/25`，HTTPS smoke `25/25`、`cleanup=clean`，数据库完整性通过 |
-| 当前生产代码 | `v0.6.1` 已完成不可变发布、数据库迁移、受控切换和正式线上验收 |
+| 当前生产源码版本 | `v0.6.3`（现网 release 目录标识为 v0.6.4） |
+| 生产提交 | `eea2d89c5916ed56a920f7505c05e9a67ad67269` |
+| 当前生产身份说明 | detached 生产对象；以服务器 manifest、不可变目录和迁移证据为准 |
+| 最新公开 GitHub Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
+| 当前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.6.4-20260820T152845Z_eea2d89c5916` |
+| 本次回滚基线 | 切换前的 current，即 `eea2d89c5916` 不可变 release；切换脚本还会生成 fresh 数据库和微信会话备份 |
+| v0.6.1 历史生产状态 | 当时切换前后预检均 `25/25`，HTTPS smoke `25/25`、`cleanup=clean`，数据库完整性通过 |
+| 当前生产代码 | `eea2d89c5916` 已运行；其旧预检已过时，不能替代 v0.6.5 的 fresh 证据 |
 | `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
 | `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；已由后续版本取代 |
 | `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述现网版本、release 路径、服务状态和健康接口已于 `2026-08-17` 复核。v0.6.1 HTTPS smoke run `0a00efbc-f349-424f-9700-0f3f08cda157` 通过 `25/25`，`cleanup=clean`，清理后无合成数据残留；SQLite `quick_check=ok`、外键违规 `0`。生产部署细节见 [部署记录](docs/部署记录.md)，候选边界见 [v0.6.2 版本说明](docs/releases/v0.6.2.md)。
+上述现网提交、release 路径、迁移校验和、数据库完整性及服务状态已于 `2026-08-22` 只读复核。SQLite `quick_check=ok`、外键违规为 `0`；旧预检和旧 smoke 不能作为 v0.6.5 的部署证据。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选边界见 [v0.6.5 版本说明](docs/releases/v0.6.5.md)。
 
 ## 功能状态
 

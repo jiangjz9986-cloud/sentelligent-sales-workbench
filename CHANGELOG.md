@@ -1,14 +1,33 @@
 # 变更日志
 
-本项目按语义化版本记录代码变更。版本条目表示对应代码已经冻结，不自动表示 tag、GitHub Release 或生产部署已经完成。条目时间使用 ISO 8601 和 `Asia/Shanghai` 时区；正式发布以 GitHub Release 的 `publishedAt`、标签提交和资产 SHA-256 为准，生产状态以部署记录和服务器 evidence 为准。
+本项目按语义化版本记录代码变更。版本条目表示对应代码已经冻结，不自动表示标签、制品封存或生产部署已经完成。条目时间使用 ISO 8601 和 `Asia/Shanghai` 时区；常规发布以 GitHub Release 为准。经项目所有者明确授权的直接生产发布，必须以本地注释标签、exact-commit 不可变归档、manifest、SHA-256 和服务器 evidence 共同确认身份。
 
 ## [Unreleased]
 
-### iOS 快捷指令真实记账
+## [0.6.5] - 2026-08-22
 
-- 新增 `0018` 快捷记账台账和 `POST /api/integrations/shortcut/bookkeeping`，支持账号全局幂等、处理租约、失败恢复和审计。
-- 出差报销支出写入森特差旅费用和支付记录；biubiu 通过固定 loopback 地址与独立 bridge credential 写轻氧，远端未确认时 fail closed。
-- Token 验证只有在写入链路配置完整时返回 `bookkeepingReady=true`；生产 preflight 扩展为 `27/27` 并校验桥接凭据隔离。
+### 小小与快捷记账可靠闭环
+
+- 正式路径使用可撤销的 V7 设备配对凭据；保留既有 V9 真机的限界迁移兼容，不保存账号密码。
+- 收入和支出均先形成 owner-scoped 草稿；只有绑定微信私聊中的最新六位 ASCII 确认码可以入账，“确认”等自然语言只返回安全提示。
+- 微信 context token、确认 outbox、delivery scope 和 accepted/rejected 回执均持久化；重启、租约丢失和“财务成功但回执中断”可对账恢复，固定幂等键避免重复回执。
+- Web 人工确认/拒绝与微信处理使用终态守卫和 lease fencing，旧草稿会 terminal 化，不阻塞下一笔快捷记账。
+
+### 差旅报销与医院招标
+
+- 恢复六字段费用账本、替票组合、认证图片/PDF 预览、分辨率门禁、费用清单打印和多页发票固定槽位打印。
+- 恢复医院公告分页、搜索、客户/类型/相关性筛选、重点机会、新鲜度、运行反馈、来源健康和 PushPlus 状态；移动端筛选与搜索控件保持至少 44px 触控目标。
+
+### 小小销售上下文与安全边界
+
+- 恢复持久化客户/商机上下文、拜访实体关联、限界项目卡、票据覆盖、报销阻塞、真实来源周报状态和已确认拜访预览。
+- 保持 owner/sender/conversation 隔离、人工确认和只读预览边界；不允许模型自主写业务或财务记录。
+
+### 发布边界
+
+- 项目所有者因 GitHub Actions 用量上限明确授权本版本不再同步 GitHub，改由本地完整门禁、注释标签、exact-commit 归档、manifest 和 SHA-256 直接交付生产。
+- 本条目只冻结候选范围；只有 fresh 生产备份、迁移演练、切换前后预检、受保护服务不变性检查和 HTTPS smoke 全部通过后，才可标记为已部署。
+- 仅允许切换 backend、frontend 和 weixin-agent；Caddy、轻氧、账户保险库和 Mihomo 不得重启或改写。
 
 ### 医院招标真实来源采集
 
