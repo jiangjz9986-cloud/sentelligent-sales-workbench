@@ -10,7 +10,7 @@ import { createServer } from "../src/server.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 
 const account = "inline-test-account";
-const password = "test-inline-password";
+const password = "inline-test-password";
 const machineToken = "test-machine-token";
 
 let tempDir;
