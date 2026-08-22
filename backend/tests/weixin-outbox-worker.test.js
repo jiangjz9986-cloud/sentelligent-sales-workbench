@@ -30,7 +30,11 @@ describe("WeChat confirmation outbox worker boundary", () => {
       client,
       bot: {
         getDeliveryStatus() { return { ready: true, status: "ready" }; },
-        async sendMessage(message) { sent.push(message); controller.abort(); },
+        async sendMessage(message) {
+          sent.push(message);
+          controller.abort();
+          return { messageId: "provider-outbound-1" };
+        },
       },
       pollMs: 500,
       abortSignal: controller.signal,
@@ -43,6 +47,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
     assert.equal(calls[0].options.headers["X-Weixin-Delivery-Status"], "ready");
     assert.doesNotMatch(String(calls[1].options.body), /123456|machine-secret/u);
     assert.doesNotMatch(String(calls[2].options.body), /123456|machine-secret/u);
+    assert.equal(JSON.parse(calls[2].options.body).providerMessageId, "provider-outbound-1");
   });
 
   it("acks a bounded retry code when the SDK reports provider rejection", async () => {

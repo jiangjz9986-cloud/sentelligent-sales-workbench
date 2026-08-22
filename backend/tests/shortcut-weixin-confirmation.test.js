@@ -122,11 +122,16 @@ async function leaseOutbox() {
   return leased.body;
 }
 
-async function ackOutbox(lease, ok = true) {
+async function ackOutbox(lease, ok = true, providerMessageId = null) {
   const ack = await request("/api/integrations/weixin-agent/confirmation-outbox", {
     method: "POST",
     headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ id: lease.item.id, leaseToken: lease.leaseToken, ok }),
+    body: JSON.stringify({
+      id: lease.item.id,
+      leaseToken: lease.leaseToken,
+      ok,
+      ...(providerMessageId ? { providerMessageId } : {}),
+    }),
   });
   assert.equal(ack.response.status, 200);
 }
@@ -556,7 +561,7 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
     assert.equal(accepted.body.status, "ok");
   });
 
-  it("does not leave an orphan draft when a second expense arrives before the first is closed", async () => {
+  it("keeps multiple drafts pending and applies a quoted decision only to the referenced draft", async () => {
     const first = await request("/api/integrations/shortcut/bookkeeping", {
       method: "POST",
       headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
@@ -568,15 +573,69 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
       headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
       body: JSON.stringify(shortcutBody("shortcut-pending-second", "2026-08-18 停车 20元")),
     });
-    assert.equal(second.response.status, 409);
-    assert.equal(second.body.error.code, "ASSISTANT_ACTION_PENDING");
+    assert.equal(second.response.status, 202);
+    const firstLease = await leaseOutbox();
+    const firstReference = /BK-[0-9A-F]{12}/u.exec(firstLease.item.message)?.[0];
+    assert.ok(firstReference);
+    await ackOutbox(firstLease, true, "provider-draft-first");
+    const secondLease = await leaseOutbox();
+    const secondReference = /BK-[0-9A-F]{12}/u.exec(secondLease.item.message)?.[0];
+    assert.ok(secondReference);
+    await ackOutbox(secondLease, true, "provider-draft-second");
+
+    const ambiguous = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-pending-ambiguous"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-pending",
+        text: "确认",
+        sourceMessageId: "shortcut-pending-ambiguous",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(ambiguous.response.status, 409);
+    assert.equal(ambiguous.body.status, "clarify");
+    assert.match(ambiguous.body.text, /多笔待确认|引用/u);
+
+    const confirmedFirst = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-pending-confirm-first"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-pending",
+        text: "确认",
+        quotedMessageId: "provider-draft-first",
+        quotedText: `检测到一笔新记账，请确认！\n待确认编号：${firstReference}`,
+        sourceMessageId: "shortcut-pending-confirm-first",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(confirmedFirst.response.status, 200);
+    assert.equal(confirmedFirst.body.status, "ok");
+
+    const cancelledSecond = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-pending-cancel-second"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-pending",
+        text: "取消",
+        quotedText: `检测到一笔新记账，请确认！\n待确认编号：${secondReference}`,
+        sourceMessageId: "shortcut-pending-cancel-second",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(cancelledSecond.response.status, 200);
+    assert.equal(cancelledSecond.body.status, "cancel");
+
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
-    const rows = db.prepare("SELECT status, raw_text, analysis_json FROM shortcut_bookkeeping_entries ORDER BY id").all();
-    assert.equal(rows.length, 2);
-    assert.equal(rows.filter((row) => row.status === "review_required").length, 1);
-    const rejected = rows.find((row) => row.status === "rejected");
-    assert.equal(rejected.raw_text, "[已取消]");
-    assert.equal(rejected.analysis_json, null);
+    const rows = db.prepare("SELECT id, status FROM shortcut_bookkeeping_entries ORDER BY id").all();
+    assert.deepEqual(rows.map((row) => ({ ...row })), [
+      { id: first.body.item.id, status: "accepted" },
+      { id: second.body.item.id, status: "rejected" },
+    ]);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
     db.close();
   });
 

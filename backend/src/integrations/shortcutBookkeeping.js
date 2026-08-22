@@ -8,6 +8,7 @@ export const SHORTCUT_BOOKKEEPING_ROUTE = "/api/integrations/shortcut/bookkeepin
 // OCR payload without exposing account/password fields on the phone and still
 // enters the same owner-scoped WeChat confirmation pipeline.
 export const SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE = "/api/integrations/shortcut/bookkeeping-capture";
+export const SHORTCUT_BOOKKEEPING_CAPTURE_PREVIEW_ROUTE = "/api/integrations/shortcut/bookkeeping-capture-preview";
 // Development/internal fallback: the Shortcut carries two editable constants
 // and the server validates them before accepting the business payload. Keep it
 // as a separate route so the account-bound device-token contract remains
@@ -33,10 +34,10 @@ const CATALOG = {
     },
     expense: {
       "餐饮": ["早餐", "午餐", "晚餐"],
-      "住宿": [],
-      "交通": ["打车", "火车", "代驾", "停车", "路桥"],
-      "招待": [],
-      "礼品": [],
+      "住宿费": [],
+      "交通": ["火车", "路桥费", "打车", "代驾", "停车"],
+      "汽车维保": ["维修", "保养"],
+      "招待/礼品": [],
       "其他": [],
     },
   },
@@ -76,12 +77,20 @@ const ALLOWED_KEYS = new Set([
 
 const CAPTURE_ALLOWED_KEYS = new Set([
   "text",
+  "selection_path",
+  "ledger_name",
+  "entry_type",
+  "category",
+  "subcategory",
+  "amount_cents",
   "note",
   "idempotency_key",
   "source",
   "captured_at",
   "source_id",
 ]);
+
+const CAPTURE_PREVIEW_ALLOWED_KEYS = new Set(["text", "source"]);
 
 function validationError(fields) {
   throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", fields);
@@ -116,8 +125,75 @@ function assertDateTime(value, field) {
   return value.trim();
 }
 
-function captureIdempotencyKey(text) {
-  return `capture-v1-${createHash("sha256").update(text, "utf8").digest("hex")}`;
+function captureIdempotencyKey(value, version = 1) {
+  const encoded = typeof value === "string" ? value : JSON.stringify(value);
+  return `capture-v${version}-${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+}
+
+function positiveCents(value, field = "amount_cents") {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 999_999_999_99) {
+    validationError({ [field]: "positiveInteger" });
+  }
+  return value;
+}
+
+function normalizedOcrLines(value) {
+  return value
+    .replace(/\r\n?/gu, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[\t\u00a0]+/gu, " ").replace(/\s{2,}/gu, " ").trim())
+    .filter(Boolean)
+    .slice(0, 300);
+}
+
+function moneyCandidates(lines) {
+  const candidates = [];
+  const patterns = [
+    /(?:[¥￥]\s*|人民币\s*)(\d{1,9}(?:[.,]\d{1,2})?)/gu,
+    /(\d{1,9}(?:[.,]\d{1,2})?)\s*元(?:整)?/gu,
+  ];
+  lines.forEach((line, lineIndex) => {
+    for (const pattern of patterns) {
+      pattern.lastIndex = 0;
+      for (const match of line.matchAll(pattern)) {
+        const amount = Number(match[1].replace(",", "."));
+        const amountCents = Math.round(amount * 100);
+        if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || amountCents > 999_999_999_99) continue;
+        const context = lines.slice(Math.max(0, lineIndex - 1), lineIndex + 2).join(" ");
+        const positive = /(支付|付款|交易金额|实付|收款|到账|消费|金额)/u.test(context) ? 8 : 0;
+        const payment = /(支付宝|微信支付|储蓄卡|信用卡|银行卡|招商银行|银联|账单)/u.test(context) ? 4 : 0;
+        const reminder = /(应还|还款|余额|提醒|额度|分期)/u.test(context) ? -10 : 0;
+        candidates.push({ amountCents, lineIndex, index: match.index ?? 0, score: positive + payment + reminder });
+      }
+    }
+  });
+  return candidates.sort((left, right) => right.score - left.score
+    || left.lineIndex - right.lineIndex
+    || left.index - right.index);
+}
+
+export function previewShortcutCapturePayload(body, { clock = () => new Date() } = {}) {
+  if (!plainObject(body)) validationError({ body: "object" });
+  const unknown = Object.keys(body).find((key) => !CAPTURE_PREVIEW_ALLOWED_KEYS.has(key));
+  if (unknown) validationError({ [unknown]: "unknown" });
+  const text = requiredText(body.text, "text", 12_000);
+  if (body.source !== SHORTCUT_BOOKKEEPING_SOURCE) validationError({ source: "notAllowed" });
+  const lines = normalizedOcrLines(text);
+  const candidate = moneyCandidates(lines)[0];
+  if (!candidate) validationError({ amount_cents: "notRecognized" });
+  const relevantLines = lines
+    .slice(Math.max(0, candidate.lineIndex - 1), Math.min(lines.length, candidate.lineIndex + 2))
+    .join("\n")
+    .slice(0, 800);
+  const captured = clock();
+  const capturedAt = captured instanceof Date ? captured : new Date(captured);
+  if (Number.isNaN(capturedAt.getTime())) throw new TypeError("clock must return a valid Date");
+  return {
+    amountCents: candidate.amountCents,
+    amountText: (candidate.amountCents / 100).toFixed(2),
+    summaryText: relevantLines || `金额 ¥${(candidate.amountCents / 100).toFixed(2)}`,
+    capturedAt: capturedAt.toISOString(),
+  };
 }
 
 export function resolveShortcutCategory({ ledgerName, entryType, category, subcategory = null } = {}) {
@@ -222,6 +298,28 @@ export function validateShortcutCapturePayload(body) {
   if (unknown) validationError({ [unknown]: "unknown" });
   const text = requiredText(body.text, "text", 12_000);
   const note = optionalText(body.note, "note", 1_000);
+  const hasSelectionPath = body.selection_path !== undefined
+    && body.selection_path !== null
+    && body.selection_path !== "";
+  const hasExpandedSelection = ["ledger_name", "entry_type", "category", "subcategory"]
+    .some((key) => body[key] !== undefined);
+  if (hasSelectionPath && hasExpandedSelection) validationError({ selection_path: "conflict" });
+  const explicitSelection = hasSelectionPath || hasExpandedSelection;
+  const resolved = explicitSelection
+    ? hasSelectionPath
+      ? resolveShortcutSelectionPath(body.selection_path)
+      : resolveShortcutCategory({
+          ledgerName: requiredText(body.ledger_name, "ledger_name", 50),
+          entryType: requiredText(body.entry_type, "entry_type", 20),
+          category: requiredText(body.category, "category", 100),
+          subcategory: optionalText(body.subcategory, "subcategory", 100),
+        })
+    : resolveShortcutCategory({
+        ledgerName: DEFAULT_SHORTCUT_LEDGER,
+        entryType: DEFAULT_SHORTCUT_ENTRY_TYPE,
+        category: "其他",
+      });
+  const amountCents = explicitSelection ? positiveCents(body.amount_cents) : null;
   const suppliedIdempotencyKey = optionalText(body.idempotency_key, "idempotency_key", 200);
   if (suppliedIdempotencyKey !== null
     && (body.idempotency_key !== suppliedIdempotencyKey
@@ -231,7 +329,20 @@ export function validateShortcutCapturePayload(body) {
   // The screenshot-only Shortcut intentionally avoids constructing identifiers
   // from iOS rich values. A domain-separated digest makes retries of the same
   // OCR payload idempotent without persisting or exposing the financial text.
-  const idempotencyKey = suppliedIdempotencyKey ?? captureIdempotencyKey(text);
+  const idempotencyKey = suppliedIdempotencyKey ?? captureIdempotencyKey(
+    explicitSelection
+      ? {
+          text,
+          ledgerName: resolved.ledgerName,
+          entryType: resolved.entryType,
+          category: resolved.category,
+          subcategory: resolved.subcategory,
+          note,
+          amountCents,
+        }
+      : text,
+    explicitSelection ? 2 : 1,
+  );
   if (body.source !== SHORTCUT_BOOKKEEPING_SOURCE) validationError({ source: "notAllowed" });
   const capturedAt = body.captured_at === undefined || body.captured_at === null || body.captured_at === ""
     ? null
@@ -242,17 +353,19 @@ export function validateShortcutCapturePayload(body) {
   }
   return {
     text,
-    ledgerName: DEFAULT_SHORTCUT_LEDGER,
-    entryType: DEFAULT_SHORTCUT_ENTRY_TYPE,
-    category: "其他",
-    subcategory: null,
+    ledgerName: resolved.ledgerName,
+    entryType: resolved.entryType,
+    category: resolved.category,
+    subcategory: resolved.subcategory,
+    amountCents,
     note,
     idempotencyKey,
     source: SHORTCUT_BOOKKEEPING_SOURCE,
     capturedAt,
     sourceId,
-    targetSystem: "sentelligent",
-    automaticCategorization: true,
+    targetSystem: resolved.targetSystem,
+    automaticCategorization: !explicitSelection,
+    explicitCapture: explicitSelection,
   };
 }
 
@@ -317,7 +430,11 @@ export function authenticateShortcutWebhook(headers = {}, config = {}, tokenReso
 
 export function isShortcutBookkeepingRouteAllowed(method, path) {
   return String(method ?? "").toUpperCase() === "POST"
-    && [SHORTCUT_BOOKKEEPING_ROUTE, SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE].includes(path);
+    && [
+      SHORTCUT_BOOKKEEPING_ROUTE,
+      SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE,
+      SHORTCUT_BOOKKEEPING_CAPTURE_PREVIEW_ROUTE,
+    ].includes(path);
 }
 
 export function shortcutCatalogResponse() {

@@ -59,8 +59,9 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     const { report } = await convertIcostCaptureShortcut({ inputPath, outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     assert.deepEqual(report, {
-      actionCount: 11,
+      actionCount: 82,
       endpoint: CAPTURE_DEVICE_ENDPOINT,
+      previewEndpoint: "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture-preview",
       preservesCapturePrefix: true,
       preservesIcostOcrText: true,
       coercesOcrThroughTextAction: true,
@@ -69,9 +70,12 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
       hasInlineCredentials: false,
       hasDeviceCredential: true,
       hasFailureNotice: true,
-      hasSafeFailureDiagnostics: true,
+      hasThreeLevelMenus: true,
+      hasOptionalNote: true,
+      hasLocalFinalConfirmation: true,
+      finalSubmissionUsesSummaryOnly: true,
       hasSuccessReceipt: false,
-      payloadKeys: ["text", "source"],
+      payloadKeys: ["text", "selection_path", "amount_cents", "note", "captured_at", "source"],
     });
     const xml = await readFile(outputPath, "utf8");
     assert.match(xml, new RegExp(CAPTURE_DEVICE_MARKER, "u"));

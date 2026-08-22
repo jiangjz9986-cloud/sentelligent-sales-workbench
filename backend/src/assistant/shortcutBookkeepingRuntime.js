@@ -15,6 +15,8 @@ export const SHORTCUT_BOOKKEEPING_CHANNEL = "weixin";
 
 const CONFIRMATION_WARNING = "WEIXIN_CONFIRMATION_REQUIRED";
 const MAX_MESSAGE_LENGTH = 20_000;
+const SHORTCUT_PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DRAFT_REFERENCE_RE = /BK-[0-9A-F]{12}/u;
 
 function requiredText(value, name, max = 500) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new TypeError(`${name} is required`);
@@ -83,6 +85,17 @@ function deriveShortcutStateCredential(actionId, version, confirmationSecret) {
   return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, "0");
 }
 
+function deriveDraftReference(actionId, entryId, version, confirmationSecret) {
+  const id = requiredText(actionId, "actionId", 200);
+  const entry = requiredText(entryId, "entryId", 200);
+  if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive safe integer");
+  return `BK-${createHmac("sha256", secretBuffer(confirmationSecret))
+    .update(`sentelligent/shortcut-weixin-draft-reference/v1\u0000${id}\u0000${entry}\u0000${version}`, "utf8")
+    .digest("hex")
+    .slice(0, 12)
+    .toUpperCase()}`;
+}
+
 function actionPayload(action) {
   const payload = action?.payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
@@ -122,7 +135,7 @@ function draftFromEntry(entry) {
   });
 }
 
-function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确认！" } = {}) {
+function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确认！", reference = null } = {}) {
   const draft = draftFromEntry(entry);
   const fields = draft.fields;
   const entryType = entry.entryType === "income" ? "收入" : "支出";
@@ -130,6 +143,7 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
   const note = fields.note || fields.purpose;
   const lines = [
     prefix,
+    ...(reference ? [`待确认编号：${reference}`] : []),
     `时间：${formatBookkeepingTime(fields.occurredOn)}`,
     `金额：${formatMoney(fields.amountCents)}`,
     `费用类别：${fieldText(category)}`,
@@ -137,9 +151,9 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
   ];
   if (draft.warnings.length) lines.push(`待补充：${draft.warnings.slice(0, 4).join("、")}`);
   lines.push(
-    "确认无误请回复“确认”。",
+    "确认无误时，请引用这条草稿并回复“确认”。",
     "需要修改请以“修改”开头，例如：修改金额为 18.50 元；修改时间为 2026-08-19T10:20:00+08:00；修改费用类别为交通；修改备注为客户拜访。修改后我会重新发送最新信息。",
-    "回复“取消”放弃本次记账。",
+    "需要修改或取消时，也请引用这条草稿回复“修改…”或回复“取消”。",
   );
   return lines.join("\n").slice(0, MAX_MESSAGE_LENGTH);
 }
@@ -272,6 +286,54 @@ export function createShortcutBookkeepingAssistantRuntime({
     });
   }
 
+  function getShortcutAction(account, actionId) {
+    const row = db.prepare(`
+      SELECT id, conversation_id FROM assistant_pending_actions
+      WHERE id = $id AND owner = $owner AND channel = $channel AND action_type = $actionType
+    `).get({
+      $id: requiredText(actionId, "actionId", 200),
+      $owner: requiredText(account, "account", 200),
+      $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+    });
+    if (!row) return null;
+    return pendingActionRepository.get(row.id, {
+      owner: account,
+      channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      conversationId: row.conversation_id,
+    });
+  }
+
+  function activeShortcutActions(account, { limit = 3 } = {}) {
+    const normalizedAccount = requiredText(account, "account", 200);
+    const now = iso(clock);
+    withImmediateTransaction(db, () => {
+      db.prepare(`
+        UPDATE assistant_pending_actions
+        SET status = 'expired', version = version + 1, updated_at = $now
+        WHERE owner = $owner AND channel = $channel AND action_type = $actionType
+          AND status IN ('pending', 'confirmed') AND datetime(expires_at) <= datetime($now)
+      `).run({
+        $owner: normalizedAccount,
+        $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+        $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+        $now: now,
+      });
+    });
+    return db.prepare(`
+      SELECT id FROM assistant_pending_actions
+      WHERE owner = $owner AND channel = $channel AND action_type = $actionType
+        AND status IN ('pending', 'confirmed', 'processing')
+      ORDER BY created_at ASC, id ASC
+      LIMIT $limit
+    `).all({
+      $owner: normalizedAccount,
+      $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+      $limit: limit,
+    }).map((row) => getShortcutAction(normalizedAccount, row.id)).filter(Boolean);
+  }
+
   function enqueue(account, conversationId, action, entryId, kind = "confirmation") {
     const accepted = kind === "accepted";
     const version = accepted ? 1 : Number(action?.version ?? 1);
@@ -308,6 +370,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
     const action = findLatestActionForEntry(normalizedAccount, entryId);
     if (!action) return { action: null, outbox: null, replayed: true };
+    const deliveryConversationId = conversationFor(normalizedAccount);
     const targetStatus = decision === "accepted" ? "executed" : "cancelled";
     const terminalKind = decision === "accepted" ? "accepted" : "cancelled";
     const result = decision === "accepted"
@@ -387,7 +450,7 @@ export function createShortcutBookkeepingAssistantRuntime({
             NOT IN ('accepted', 'cancelled')
       `).run({
         $owner: normalizedAccount,
-        $conversationId: action.conversationId,
+        $conversationId: deliveryConversationId,
         $actionId: action.id,
         $entryId: entryId,
         $errorCode: decision === "accepted"
@@ -406,7 +469,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     try {
       outbox = enqueue(
         normalizedAccount,
-        action.conversationId,
+        deliveryConversationId,
         settledAction ?? action,
         entryId,
         terminalKind,
@@ -423,32 +486,16 @@ export function createShortcutBookkeepingAssistantRuntime({
     const conversation = sessionRepository.getOrCreate({
       owner: account,
       channel: SHORTCUT_BOOKKEEPING_CHANNEL,
-      conversationId,
+      conversationId: `${conversationId}:entry:${requiredText(entry?.id, "entryId", 200)}`,
     });
     const existing = findActionForEntry(account, entry.id);
     if (existing) {
-      const outbox = enqueue(account, existing.conversationId, existing, entry.id, "confirmation");
+      const outbox = enqueue(account, conversationId, existing, entry.id, "confirmation");
       return { action: existing, conversationId, outbox, replayed: true };
-    }
-    const active = pendingActionRepository.findActiveByConversation?.({
-      owner: account,
-      channel: SHORTCUT_BOOKKEEPING_CHANNEL,
-      conversationId: conversation.id,
-    });
-    if (active) {
-      try {
-        shortcutBookkeepingRepository.rejectReview(entry.id, {
-          owner: account,
-          actor: account,
-          reason: "已有快捷记账草稿待确认",
-          purge: true,
-        });
-      } catch { /* preserve the explicit conflict response */ }
-      throw new HttpError(409, "ASSISTANT_ACTION_PENDING", "已有一笔快捷记账草稿待确认，请先确认、修改或取消后再提交下一笔。");
     }
     const actionId = requiredText(idFactory(), "actionId", 200);
     const stateCredential = deriveShortcutStateCredential(actionId, 1, secret);
-    const expiresAt = new Date(Date.parse(iso(clock)) + 10 * 60 * 1000).toISOString();
+    const expiresAt = new Date(Date.parse(iso(clock)) + SHORTCUT_PENDING_TTL_MS).toISOString();
     const action = pendingActionRepository.create({
       id: actionId,
       owner: account,
@@ -459,7 +506,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       confirmationCode: stateCredential,
       expiresAt,
     });
-    const outbox = enqueue(account, conversation.id, action, entry.id, "confirmation");
+    const outbox = enqueue(account, conversationId, action, entry.id, "confirmation");
     return { action, conversationId, outbox, replayed: false };
   }
 
@@ -490,11 +537,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       stale.code = "WEIXIN_OUTBOX_STALE";
       throw stale;
     }
-    const action = pendingActionRepository.get(payload.actionId, {
-      owner: outboxItem.owner,
-      channel: SHORTCUT_BOOKKEEPING_CHANNEL,
-      conversationId: outboxItem.conversationId,
-    });
+    const action = getShortcutAction(outboxItem.owner, payload.actionId);
     if (!action) throw new Error("action_not_found");
     if (payload.kind !== "cancelled" && payload.kind !== "accepted"
       && Number(payload.version) !== Number(action.version)) {
@@ -513,6 +556,12 @@ export function createShortcutBookkeepingAssistantRuntime({
       prefix: payload.kind === "confirmation"
         ? "检测到一笔新记账，请确认！"
         : "记账信息已修改，请重新确认！",
+      reference: deriveDraftReference(
+        action.id,
+        payload.entryId,
+        Number(payload.version),
+        secret,
+      ),
     });
   }
 
@@ -528,7 +577,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     try {
       enqueue(
         account,
-        outboxScopeConversation(scope),
+        conversationFor(account),
         { ...action, version: Number(action.version) + 1 },
         entry.id,
         "accepted",
@@ -577,9 +626,9 @@ export function createShortcutBookkeepingAssistantRuntime({
       if (!entry || entry.status !== row.entry_status) return null;
       const targetActionStatus = entry.status === "accepted" ? "executed" : "cancelled";
       if (row.action_status === targetActionStatus) {
-        return enqueue(
-          row.owner,
-          row.conversation_id,
+          return enqueue(
+            row.owner,
+            conversationFor(row.owner),
           { id: row.action_id, version: Number(row.version) },
           row.entry_id,
           entry.status === "accepted" ? "accepted" : "cancelled",
@@ -691,7 +740,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (claimedAction.inProgress) return { status: 409, body: { status: "error", text: "这笔记账正在处理中，请稍后查看。" }, draftText: "确认信息已处理。" };
     closePendingOutbox({
       account,
-      conversationId: outboxScopeConversation(scope),
+      conversationId: conversationFor(account),
       actionId: action.id,
       entryId: target.entryId,
       errorCode: "WEIXIN_OUTBOX_CONFIRMED",
@@ -715,7 +764,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         result: { status: "accepted", entryId: target.entryId, expenseId: completed.item.expenseId, paymentId: completed.item.paymentId },
       });
       const accepted = shortcutBookkeepingRepository.getReview(target.entryId, { owner: account }) ?? completed.item;
-      try { enqueue(account, outboxScopeConversation(scope), { ...action, version: Number(action.version) + 1 }, target.entryId, "accepted"); } catch { /* financial write remains durable; replay can enqueue again */ }
+      try { enqueue(account, conversationFor(account), { ...action, version: Number(action.version) + 1 }, target.entryId, "accepted"); } catch { /* financial write remains durable; replay can enqueue again */ }
       return {
         status: 200,
         body: { status: "ok", text: resultMessage(accepted), result: { entryId: target.entryId, expenseId: completed.item.expenseId, paymentId: completed.item.paymentId } },
@@ -730,10 +779,6 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
   }
 
-  function outboxScopeConversation(scope) {
-    return requiredText(scope.conversationId, "conversationId", 200);
-  }
-
   async function cancel({ action, account, scope }) {
     const target = actionPayload(action);
     if (!target) return { status: 409, body: { status: "error", text: "待确认操作无效。" }, draftText: "确认信息已处理。" };
@@ -741,7 +786,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (!cancelled.replayed) {
       closePendingOutbox({
         account,
-        conversationId: outboxScopeConversation(scope),
+        conversationId: conversationFor(account),
         actionId: action.id,
         entryId: target.entryId,
         errorCode: "WEIXIN_OUTBOX_CANCELLED",
@@ -754,7 +799,7 @@ export function createShortcutBookkeepingAssistantRuntime({
           purge: true,
         });
       } catch { /* already terminal is idempotent */ }
-      try { enqueue(account, outboxScopeConversation(scope), action, target.entryId, "cancelled"); } catch { /* best effort */ }
+      try { enqueue(account, conversationFor(account), action, target.entryId, "cancelled"); } catch { /* best effort */ }
     }
     return { status: 200, body: { status: "cancel", text: "已取消当前快捷记账，未写入费用。" }, draftText: "已取消快捷记账。" };
   }
@@ -797,12 +842,12 @@ export function createShortcutBookkeepingAssistantRuntime({
       });
       closePendingOutbox({
         account,
-        conversationId: outboxScopeConversation(scope),
+        conversationId: conversationFor(account),
         actionId: action.id,
         entryId: target.entryId,
         errorCode: "WEIXIN_OUTBOX_CORRECTED",
       });
-      enqueue(account, outboxScopeConversation(scope), renewed.item, target.entryId, "correction");
+      enqueue(account, conversationFor(account), renewed.item, target.entryId, "correction");
       return { status: 200, body: { status: "review_required", text: "已按你的修改更新草稿，请查看微信中的最新识别结果并回复“确认”。", item: { id: updated.item.id, status: updated.item.status } }, draftText: "已更新快捷记账草稿。" };
     } catch (error) {
       try { shortcutBookkeepingRepository.release(target.entryId, { leaseToken: claimed.leaseToken, errorCode: "WEIXIN_CORRECTION_FAILED" }); } catch { /* preserve safe response */ }
@@ -810,21 +855,109 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
   }
 
-  async function handlePending({ action, scope, context, text, textClassification, confirmationCode, pendingActionId }) {
-    if (!action || action.actionType !== SHORTCUT_BOOKKEEPING_ACTION) return null;
-    if (pendingActionId && pendingActionId !== action.id) {
+  function quotedOutbox(account, quote) {
+    if (!quote || typeof quote !== "object") return null;
+    const deliveryConversationId = conversationFor(account);
+    const providerMessageId = typeof quote.providerMessageId === "string"
+      ? quote.providerMessageId.trim()
+      : "";
+    let row = null;
+    if (providerMessageId) {
+      const rows = db.prepare(`
+        SELECT * FROM weixin_confirmation_outbox
+        WHERE owner = $owner AND conversation_id = $conversationId
+          AND status = 'sent' AND provider_message_id = $providerMessageId
+        ORDER BY sent_at DESC, id DESC
+        LIMIT 2
+      `).all({
+        $owner: account,
+        $conversationId: deliveryConversationId,
+        $providerMessageId: providerMessageId,
+      });
+      if (rows.length === 1) row = rows[0];
+      if (rows.length > 1) return null;
+    }
+    if (!row) {
+      const reference = typeof quote.text === "string" ? quote.text.match(DRAFT_REFERENCE_RE)?.[0] : null;
+      if (!reference) return null;
+      const candidates = db.prepare(`
+        SELECT * FROM weixin_confirmation_outbox
+        WHERE owner = $owner AND conversation_id = $conversationId AND status = 'sent'
+        ORDER BY sent_at DESC, id DESC
+        LIMIT 200
+      `).all({ $owner: account, $conversationId: deliveryConversationId });
+      const matches = candidates.filter((candidate) => {
+        let payload;
+        try { payload = JSON.parse(candidate.payload_json); } catch { return false; }
+        if (!payload?.actionId || !payload?.entryId || ["accepted", "cancelled"].includes(payload.kind)) return false;
+        const version = Number(payload.version);
+        if (!Number.isSafeInteger(version) || version < 1) return false;
+        return deriveDraftReference(payload.actionId, payload.entryId, version, secret) === reference;
+      });
+      if (matches.length !== 1) return null;
+      [row] = matches;
+    }
+    let payload;
+    try { payload = JSON.parse(row.payload_json); } catch { return null; }
+    if (!payload?.actionId || !payload?.entryId || ["accepted", "cancelled"].includes(payload.kind)) return null;
+    const action = getShortcutAction(account, payload.actionId);
+    if (!action || !["pending", "confirmed", "processing"].includes(action.status)) return null;
+    const version = Number(payload.version);
+    if (!Number.isSafeInteger(version) || version !== Number(action.version)) return null;
+    const latest = outboxRepository.latestForEntry?.({ owner: account, entryId: payload.entryId });
+    if (!latest || latest.id !== row.id || latest.status !== "sent") return null;
+    return { action, outbox: latest };
+  }
+
+  function commandTargetsShortcut(text, textClassification, pendingActionId, quote) {
+    return Boolean(
+      pendingActionId
+      || quote
+      || text === "确认"
+      || textClassification.kind !== "ordinary"
+      || explicitModification(text)
+      || /^(?:确认|修改|取消)/u.test(String(text ?? "")),
+    );
+  }
+
+  async function handlePending({ action, context, text, textClassification, confirmationCode, pendingActionId, serverData }) {
+    const account = context.owner;
+    const quote = serverData?.quote ?? null;
+    let targetAction = null;
+    if (quote) {
+      targetAction = quotedOutbox(account, quote)?.action ?? null;
+      if (!targetAction) {
+        return { status: 409, body: { status: "error", text: "引用的记账草稿不是当前可确认版本，请引用小小发送的对应最新草稿。" }, draftText: "引用草稿无效或已过期。" };
+      }
+    } else if (pendingActionId) {
+      targetAction = getShortcutAction(account, pendingActionId);
+    } else if (action?.actionType === SHORTCUT_BOOKKEEPING_ACTION) {
+      targetAction = action;
+    } else {
+      const active = activeShortcutActions(account, { limit: 3 });
+      if (active.length === 1) [targetAction] = active;
+      else if (active.length > 1 && commandTargetsShortcut(text, textClassification, pendingActionId, quote)) {
+        return { status: 409, body: { status: "clarify", text: "当前有多笔待确认记账，请引用对应的小小草稿后回复“确认”“修改…”或“取消”。" }, draftText: "等待引用具体记账草稿。" };
+      }
+    }
+    if (!targetAction) return null;
+    if (pendingActionId && pendingActionId !== targetAction.id) {
       return { status: 409, body: { status: "error", text: "当前会话的待确认操作已变化，请查看最新微信消息。" }, draftText: "确认信息已处理。" };
     }
-    const account = context.owner;
+    const scope = {
+      owner: account,
+      channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      conversationId: targetAction.conversationId,
+    };
     if ((confirmationCode !== undefined && confirmationCode !== null)
       || textClassification.kind === "code"
       || textClassification.kind === "resend") {
       return { status: 200, body: { status: "clarify", text: "快捷记账不使用六位确认码，请回复“确认”、以“修改”开头说明修改内容，或回复“取消”。" }, draftText: "等待明确的自然语言指令。" };
     }
-    if (textClassification.kind === "cancel") return cancel({ action, account, scope });
-    if (text === "确认") return confirm({ action, account, scope });
+    if (textClassification.kind === "cancel") return cancel({ action: targetAction, account, scope });
+    if (text === "确认") return confirm({ action: targetAction, account, scope });
     const modification = explicitModification(text);
-    if (modification) return revise({ action, account, scope, text: modification });
+    if (modification) return revise({ action: targetAction, account, scope, text: modification });
     return { status: 200, body: { status: "clarify", text: `快捷记账只接受“确认”、“修改…”或“取消”。${correctionHelp()}` }, draftText: "等待明确的自然语言指令。" };
   }
 

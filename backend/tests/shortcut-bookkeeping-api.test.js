@@ -172,7 +172,7 @@ describe("自有快捷指令记账 API", () => {
     assert.deepEqual(catalog.body.ledgers.map((item) => item.name), ["出差报销"]);
     assert.deepEqual(
       catalog.body.ledgers[0].entryTypes.expense.find((item) => item.category === "交通").subcategories,
-      ["打车", "火车", "代驾", "停车", "路桥"],
+      ["火车", "路桥费", "打车", "代驾", "停车"],
     );
     assert.deepEqual(
       catalog.body.ledgers[0].entryTypes.income.find((item) => item.category === "出差").subcategories,

@@ -177,8 +177,16 @@ export async function runWeixinOutboxPump({
         continue;
       }
       try {
-        await bot.sendMessage(lease.item.message);
-        await client.ack({ id: lease.item.id, leaseToken: lease.leaseToken, ok: true });
+        const sent = await bot.sendMessage(lease.item.message);
+        const providerMessageId = typeof sent?.messageId === "string" && sent.messageId.trim()
+          ? sent.messageId.trim().slice(0, 200)
+          : null;
+        await client.ack({
+          id: lease.item.id,
+          leaseToken: lease.leaseToken,
+          ok: true,
+          ...(providerMessageId ? { providerMessageId } : {}),
+        });
       } catch (error) {
         const terminalScopeFailure = [
           "WEIXIN_DELIVERY_SCOPE_MISMATCH",

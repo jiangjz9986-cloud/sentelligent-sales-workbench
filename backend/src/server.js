@@ -85,6 +85,7 @@ import {
   isShortcutBookkeepingRouteAllowed,
   SHORTCUT_BOOKKEEPING_ROUTE,
   SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE,
+  SHORTCUT_BOOKKEEPING_CAPTURE_PREVIEW_ROUTE,
   SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE,
   SHORTCUT_BOOKKEEPING_INLINE_ROUTE,
   SHORTCUT_BOOKKEEPING_CATALOG_ROUTE,
@@ -93,6 +94,7 @@ import {
   validateShortcutInlineCredentials,
   validateShortcutBookkeepingPayload,
   validateShortcutCapturePayload,
+  previewShortcutCapturePayload,
 } from "./integrations/shortcutBookkeeping.js";
 import {
   applyShortcutAutomaticAnalysis,
@@ -3198,6 +3200,7 @@ export function createServer(options = {}) {
       // hashing so the password never enters business storage or audit data.
       const captureInlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE;
       const captureTokenShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE;
+      const capturePreviewShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_PREVIEW_ROUTE;
       const inlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_INLINE_ROUTE
         || captureInlineShortcutRoute;
       let inlineShortcutBody = null;
@@ -3251,7 +3254,10 @@ export function createServer(options = {}) {
         };
       }
 
-      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE || captureTokenShortcutRoute || inlineShortcutRoute) {
+      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE
+        || captureTokenShortcutRoute
+        || capturePreviewShortcutRoute
+        || inlineShortcutRoute) {
         if (!inlineShortcutRoute && !isShortcutBookkeepingRouteAllowed(request.method, url.pathname)) {
           sendHttpError(
             response,
@@ -3284,7 +3290,6 @@ export function createServer(options = {}) {
             );
           }
         }
-        assertShortcutDeliveryReady(integrationIdentity.account);
         const remoteAddress = request.socket?.remoteAddress ?? "unknown";
         const rateLimit = shortcutWriteRateLimiter.consume(
           `${integrationIdentity.account}\u0000${remoteAddress}`,
@@ -3300,6 +3305,19 @@ export function createServer(options = {}) {
           );
           return;
         }
+        if (capturePreviewShortcutRoute) {
+          const preview = previewShortcutCapturePayload(await readJson(request), {
+            clock: options.shortcutBookkeepingClock ?? options.now ?? (() => new Date()),
+          });
+          sendJson(response, 200, {
+            amount_cents: preview.amountCents,
+            amount_text: preview.amountText,
+            summary_text: preview.summaryText,
+            captured_at: preview.capturedAt,
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        assertShortcutDeliveryReady(integrationIdentity.account);
         const body = inlineShortcutBody ?? (captureTokenShortcutRoute
           ? validateShortcutCapturePayload(await readJson(request))
           : validateShortcutBookkeepingPayload(await readJson(request)));
@@ -3374,7 +3392,24 @@ export function createServer(options = {}) {
         }
 
         try {
-          const rawAnalysis = await travelExpenseAnalyzer(body.text);
+          const rawAnalysis = body.explicitCapture === true
+            ? {
+                status: "ready",
+                confidence: 1,
+                expense: {
+                  occurredOn: (body.capturedAt ?? new Date().toISOString()).slice(0, 10),
+                  paidAt: body.capturedAt ?? new Date().toISOString(),
+                  amountCents: body.amountCents,
+                  reimbursementCents: body.amountCents,
+                  purpose: body.note || `${body.category}${body.subcategory ? `-${body.subcategory}` : ""}`,
+                  merchant: null,
+                  fundingSource: "personal",
+                  paymentMethod: "other",
+                },
+                warnings: [],
+                source: { provider: "shortcut-preview", model: null },
+              }
+            : await travelExpenseAnalyzer(body.text);
           let reviewPatch;
           let analyzed;
           if (body.automaticCategorization === true) {
@@ -3687,6 +3722,14 @@ export function createServer(options = {}) {
           serverData: {
             auditMetadata,
             ...(body.media ? { media: body.media } : {}),
+            ...((body.quotedMessageId || body.quotedText)
+              ? {
+                  quote: {
+                    ...(body.quotedMessageId ? { providerMessageId: body.quotedMessageId } : {}),
+                    ...(body.quotedText ? { text: body.quotedText } : {}),
+                  },
+                }
+              : {}),
           },
         });
         const runtimeBody = result.body && typeof result.body === "object" ? result.body : {};

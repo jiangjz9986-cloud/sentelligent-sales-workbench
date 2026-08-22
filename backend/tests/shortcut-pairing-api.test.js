@@ -92,7 +92,9 @@ afterEach(async () => {
 
 describe("快捷指令账号密码配对", () => {
   it("authenticates once, returns a device credential only in the pairing response, and maps it to the account", async () => {
-    await startServer();
+    await startServer({
+      shortcutBookkeepingClock: () => new Date("2026-08-22T15:15:00.000Z"),
+    });
     const paired = await pair({ account, ["password"]: pairingSecret, label: "iPhone 记账" });
     assert.equal(paired.response.status, 201);
     assert.equal(paired.response.headers.get("cache-control"), "no-store");
@@ -130,6 +132,32 @@ describe("快捷指令账号密码配对", () => {
     assert.equal(verified.body.bookkeepingReady, false);
     assert.equal(verified.body.confirmationDelivery.reason, "worker_unavailable");
 
+    const preview = await read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture-preview`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${paired.body.device.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: [
+          "分付还款提醒",
+          "应还金额 ¥309.57",
+          "请提前储备资金",
+          "链动小铺",
+          "使用招商银行储蓄卡支付",
+          "¥14.42",
+          "账单详情",
+        ].join("\n"),
+        source: "shortcut",
+      }),
+    }));
+    assert.equal(preview.response.status, 200);
+    assert.equal(preview.body.amount_cents, 1442);
+    assert.equal(preview.body.amount_text, "14.42");
+    assert.equal(preview.body.captured_at, "2026-08-22T15:15:00.000Z");
+    assert.match(preview.body.summary_text, /招商银行|14\.42/u);
+    assert.doesNotMatch(preview.body.summary_text, /309\.57|还款提醒/u);
+
     const heartbeat = await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
       headers: {
         Authorization: `Bearer ${machineCredential}`,
@@ -149,7 +177,11 @@ describe("快捷指令账号密码配对", () => {
     assert.deepEqual(activated.body.confirmationDelivery, { status: "ready" });
 
     const captureBody = {
-      text: "2026-08-22 链动小铺 招商银行卡支付 14.42 元",
+      text: preview.body.summary_text,
+      selection_path: "支出 · 餐饮 · 早餐",
+      amount_cents: preview.body.amount_cents,
+      note: "出差早餐",
+      captured_at: preview.body.captured_at,
       source: "shortcut",
     };
     const captured = await read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture`, {
@@ -197,13 +229,15 @@ describe("快捷指令账号密码配对", () => {
     const captureDb = openDatabase({ databaseUrl: join(tempDir, "pairing.sqlite") });
     try {
       const row = captureDb.prepare(`
-        SELECT owner, category, subcategory, raw_text, source_id, status
+        SELECT owner, category, subcategory, raw_text, amount_cents, captured_at, source_id, status
         FROM shortcut_bookkeeping_entries
       `).get();
       assert.equal(row.owner, account);
-      assert.equal(row.category, "其他");
-      assert.equal(row.subcategory, null);
-      assert.equal(row.raw_text, "2026-08-22 链动小铺 招商银行卡支付 14.42 元");
+      assert.equal(row.category, "餐饮");
+      assert.equal(row.subcategory, "早餐");
+      assert.equal(row.raw_text, preview.body.summary_text);
+      assert.equal(row.amount_cents, 1442);
+      assert.equal(row.captured_at, "2026-08-22T15:15:00.000Z");
       assert.equal(row.source_id, null);
       assert.equal(row.status, "review_required");
       assert.equal(captureDb.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 1);

@@ -23,6 +23,8 @@ function requestDigest(input) {
     pendingActionId: input.pendingActionId === undefined ? null : input.pendingActionId,
     confirmationCode: input.confirmationCode === undefined ? null : String(input.confirmationCode),
     mediaSha256: input.mediaSha256 ?? null,
+    quoteProviderMessageId: input.quoteProviderMessageId ?? null,
+    quoteTextHash: input.quoteTextHash ?? null,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
@@ -87,7 +89,7 @@ function makeContext(value) {
 function makeServerData(value) {
   if (value === undefined || value === null) return Object.freeze({});
   if (typeof value !== "object" || Array.isArray(value)) throw new TypeError("serverData must be an object");
-  if (Object.keys(value).some((key) => !["media", "auditMetadata"].includes(key))) throw new TypeError("serverData contains an unsupported field");
+  if (Object.keys(value).some((key) => !["media", "auditMetadata", "quote"].includes(key))) throw new TypeError("serverData contains an unsupported field");
   const result = {};
   if (value.auditMetadata !== undefined && value.auditMetadata !== null) {
     const metadata = value.auditMetadata;
@@ -101,6 +103,25 @@ function makeServerData(value) {
       normalizedMetadata[key] = metadata[key];
     }
     result.auditMetadata = Object.freeze(normalizedMetadata);
+  }
+  if (value.quote !== undefined && value.quote !== null) {
+    const quote = value.quote;
+    if (typeof quote !== "object" || Array.isArray(quote)) throw new TypeError("serverData.quote must be an object");
+    const allowedQuote = new Set(["providerMessageId", "text"]);
+    if (Object.keys(quote).some((key) => !allowedQuote.has(key))) throw new TypeError("serverData.quote contains an unsupported field");
+    const providerMessageId = typeof quote.providerMessageId === "string" ? quote.providerMessageId.trim() : "";
+    const quotedText = typeof quote.text === "string" ? quote.text : "";
+    if (providerMessageId && (providerMessageId.length > 500 || /[\u0000-\u001f\u007f-\u009f]/u.test(providerMessageId))) {
+      throw new TypeError("serverData.quote.providerMessageId is invalid");
+    }
+    if (quotedText && (quotedText.length > 20_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(quotedText))) {
+      throw new TypeError("serverData.quote.text is invalid");
+    }
+    if (!providerMessageId && !quotedText) throw new TypeError("serverData.quote is incomplete");
+    result.quote = Object.freeze({
+      ...(providerMessageId ? { providerMessageId } : {}),
+      ...(quotedText ? { text: quotedText } : {}),
+    });
   }
   if (value.media === undefined || value.media === null) return Object.freeze(result);
   const media = value.media;
@@ -255,6 +276,10 @@ export function createAssistantOrchestrator({
         pendingActionId,
         confirmationCode: structuredCodePresent ? "<confirmation-code>" : undefined,
         mediaSha256: serverData.media?.sha256,
+        quoteProviderMessageId: serverData.quote?.providerMessageId,
+        quoteTextHash: serverData.quote?.text
+          ? createHash("sha256").update(serverData.quote.text, "utf8").digest("hex")
+          : null,
       });
     const received = eventRepository.receive({
       owner: context.owner,
@@ -319,27 +344,25 @@ export function createAssistantOrchestrator({
         } catch {
           return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
         }
-        if (pendingAction) {
-          const specialized = await pendingActionHandler({
-            action: pendingAction,
-            scope,
-            context,
-            text,
-            textClassification,
-            confirmationCode: code,
-            pendingActionId,
-            serverData,
-          });
-          if (specialized) {
-            return finish(
-              specialized.status ?? 200,
-              specialized.body ?? { status: "ok", text: "已处理。" },
-              {
-                ...(specialized.storedBody ? { storedBody: specialized.storedBody } : {}),
-                ...(specialized.draftText ? { draftText: specialized.draftText } : {}),
-              },
-            );
-          }
+        const specialized = await pendingActionHandler({
+          action: pendingAction,
+          scope,
+          context,
+          text,
+          textClassification,
+          confirmationCode: code,
+          pendingActionId,
+          serverData,
+        });
+        if (specialized) {
+          return finish(
+            specialized.status ?? 200,
+            specialized.body ?? { status: "ok", text: "已处理。" },
+            {
+              ...(specialized.storedBody ? { storedBody: specialized.storedBody } : {}),
+              ...(specialized.draftText ? { draftText: specialized.draftText } : {}),
+            },
+          );
         }
       }
       const scopedCommand = ["code", "cancel", "resend"].includes(textClassification.kind) || structuredCodePresent;

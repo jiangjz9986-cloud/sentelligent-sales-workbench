@@ -720,14 +720,16 @@
             <string>出差报销 · 支出 · 餐饮 · 早餐</string>
             <string>出差报销 · 支出 · 餐饮 · 午餐</string>
             <string>出差报销 · 支出 · 餐饮 · 晚餐</string>
-            <string>出差报销 · 支出 · 住宿 · 无</string>
-            <string>出差报销 · 支出 · 交通 · 打车</string>
+            <string>出差报销 · 支出 · 住宿费 · 无</string>
             <string>出差报销 · 支出 · 交通 · 火车</string>
+            <string>出差报销 · 支出 · 交通 · 路桥费</string>
+            <string>出差报销 · 支出 · 交通 · 打车</string>
             <string>出差报销 · 支出 · 交通 · 代驾</string>
             <string>出差报销 · 支出 · 交通 · 停车</string>
-            <string>出差报销 · 支出 · 交通 · 路桥</string>
-            <string>出差报销 · 支出 · 招待 · 无</string>
-            <string>出差报销 · 支出 · 礼品 · 无</string>
+            <string>出差报销 · 支出 · 汽车维保 · 维修</string>
+            <string>出差报销 · 支出 · 汽车维保 · 保养</string>
+            <string>出差报销 · 支出 · 招待/礼品 · 无</string>
+            <string>出差报销 · 支出 · 其他 · 无</string>
           </array>
         </dict>
       </dict>

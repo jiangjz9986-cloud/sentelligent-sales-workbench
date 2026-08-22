@@ -84,7 +84,7 @@ describe("自有截图记账快捷指令", () => {
     assert.equal(report.actionCount, 35);
     assert.equal(report.menuCount, 0);
     assert.equal(report.selectionOptionCount, BOOKKEEPING_SELECTION_OPTIONS.length);
-    assert.equal(report.selectionOptionCount, 16);
+    assert.equal(report.selectionOptionCount, 17);
     assert.equal(report.hasCancellationGate, true);
     assert.equal(report.hasTokenVerification, true);
     assert.equal(report.hasCredentialPairing, true);

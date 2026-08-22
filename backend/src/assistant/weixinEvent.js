@@ -13,6 +13,8 @@ const EVENT_KEYS = new Set([
   "media",
   "pendingActionId",
   "confirmationCode",
+  "quotedMessageId",
+  "quotedText",
 ]);
 const MEDIA_KEYS = new Set([
   "type",
@@ -53,6 +55,15 @@ function optionalText(value, field, max = MAX_IDENTIFIER_LENGTH) {
 function optionalExactText(value, field, max = MAX_IDENTIFIER_LENGTH) {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "string" || value.length > max) validation({ [field]: "format" });
+  return value;
+}
+
+function optionalEventText(value, field, max = MAX_TEXT_LENGTH) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > max
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) {
+    validation({ [field]: "format" });
+  }
   return value;
 }
 
@@ -120,6 +131,8 @@ export async function validateWeixinAssistantEvent(value) {
   const pendingActionId = optionalText(body.pendingActionId, "pendingActionId", 300);
   const confirmationCode = optionalExactText(body.confirmationCode, "confirmationCode", 100);
   if (confirmationCode && !/^[0-9]{6}$/u.test(confirmationCode)) validation({ confirmationCode: "format" });
+  const quotedMessageId = optionalText(body.quotedMessageId, "quotedMessageId", MAX_IDENTIFIER_LENGTH);
+  const quotedText = optionalEventText(body.quotedText, "quotedText");
 
   let media = null;
   if (body.media !== undefined && body.media !== null) {
@@ -152,6 +165,8 @@ export async function validateWeixinAssistantEvent(value) {
     ...(groupId ? { groupId } : {}),
     ...(pendingActionId ? { pendingActionId } : {}),
     ...(confirmationCode ? { confirmationCode } : {}),
+    ...(quotedMessageId ? { quotedMessageId } : {}),
+    ...(quotedText ? { quotedText } : {}),
     ...(media ? { media } : {}),
   };
 }

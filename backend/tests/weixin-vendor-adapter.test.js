@@ -157,6 +157,29 @@ describe("vendored Weixin inbound adapter", () => {
     ]));
   });
 
+  it("keeps the reply command separate from the quoted outbound draft identity", () => {
+    const request = normalizeInboundUpdate(textUpdate({
+      message_id: "synthetic-reply-message",
+      item_list: [{
+        type: 1,
+        text_item: { text: "确认" },
+        ref_msg: {
+          client_id: "synthetic-outbound-draft",
+          title: "小小记账草稿",
+          message_item: {
+            type: 1,
+            text_item: { text: "检测到一笔新记账\n待确认编号：BK-0123456789AB" },
+          },
+        },
+      }],
+    }), { deliveryKey: DELIVERY_KEY });
+
+    assert.equal(request.text, "确认");
+    assert.equal(request.quotedMessageId, "synthetic-outbound-draft");
+    assert.equal(request.quotedText, "小小记账草稿\n检测到一笔新记账\n待确认编号：BK-0123456789AB");
+    assert.doesNotMatch(request.text, /BK-|引用/u);
+  });
+
   it("preserves an unsafe 64-bit provider message_id before normalization", async () => {
     await withSyntheticAccount("numeric-provider-id", async ({ accountId }) => {
       const abortController = new AbortController();

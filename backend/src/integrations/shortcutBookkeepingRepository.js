@@ -106,9 +106,9 @@ function legacyCategory(input = {}) {
           : subcategory === "晚餐" ? "dinner"
             : "other";
     }
-    if (category === "住宿") return "lodging";
-    if (category === "交通") return "transport";
-    if (category === "招待" || category === "礼品") return "hospitality";
+    if (category === "住宿" || category === "住宿费") return "lodging";
+    if (category === "交通" || category === "交通费") return "transport";
+    if (category === "招待" || category === "礼品" || category === "招待/礼品") return "hospitality";
   }
   return "other";
 }
@@ -327,11 +327,40 @@ function normalizeReviewPatch(value, row) {
   };
 }
 
+function dateOnlyInShanghai(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${valueOf("year")}-${valueOf("month")}-${valueOf("day")}`;
+}
+
 export function applyShortcutSelectionAnalysis(value, selection) {
   const analysis = isPlainObject(value) ? { ...value } : {};
   const warnings = Array.isArray(analysis.warnings) ? [...analysis.warnings] : [];
   const expense = isPlainObject(analysis.expense) ? { ...analysis.expense } : {};
   expense.category = legacyCategory(selection);
+  if (Number.isSafeInteger(selection?.amountCents) && selection.amountCents > 0) {
+    expense.amountCents = selection.amountCents;
+    expense.reimbursementCents = selection.amountCents;
+    for (const warning of ["missing_amount", "invalid_amount", "missing_amountCents", "invalid_amountCents"]) {
+      const index = warnings.indexOf(warning);
+      if (index >= 0) warnings.splice(index, 1);
+    }
+  }
+  if (typeof selection?.capturedAt === "string" && Number.isFinite(Date.parse(selection.capturedAt))) {
+    expense.occurredOn = dateOnlyInShanghai(selection.capturedAt);
+    expense.paidAt = selection.capturedAt;
+    for (const warning of ["missing_date", "invalid_date"]) {
+      const index = warnings.indexOf(warning);
+      if (index >= 0) warnings.splice(index, 1);
+    }
+  }
   if (!expense.purpose || !String(expense.purpose).trim()) {
     expense.purpose = `${selection.category}${selection.subcategory ? `-${selection.subcategory}` : ""}`;
     const index = warnings.indexOf("missing_purpose");
@@ -339,7 +368,7 @@ export function applyShortcutSelectionAnalysis(value, selection) {
   }
   const categoryWarning = warnings.indexOf("missing_category");
   if (categoryWarning >= 0) warnings.splice(categoryWarning, 1);
-  const hasCoreFields = isPlainObject(analysis.expense)
+  const hasCoreFields = (isPlainObject(analysis.expense) || selection?.explicitCapture === true)
     && (expense.occurredOn ?? expense.occurred_on)
     && (expense.amountCents ?? expense.amount_cents) !== null
     && (expense.amountCents ?? expense.amount_cents) !== undefined;

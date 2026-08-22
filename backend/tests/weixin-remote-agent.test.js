@@ -224,4 +224,32 @@ describe("remote Clawbot agent adapter", () => {
     assert.equal(Object.hasOwn(requestBody, "confirmationCode"), false);
     assert.equal(Object.hasOwn(requestBody, "owner"), false);
   });
+
+  it("forwards only bounded structured quote fields for precise pending-draft selection", async () => {
+    let requestBody;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "token",
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return jsonResponse({ status: "ok", text: "received" });
+      },
+    });
+
+    await agent.chat({
+      conversationId: "c-quote",
+      text: "确认",
+      quotedMessageId: "provider-outbound-1",
+      quotedText: "检测到一笔新记账\n待确认编号：BK-0123456789AB",
+      senderId: "sender-from-message",
+      chatType: "direct",
+      messageId: `weixin:delivery:v1:${"b".repeat(64)}`,
+      deliveryTimestampMs: 1786500000123,
+      rawUpdate: { private: "must-not-be-forwarded" },
+    });
+
+    assert.equal(requestBody.quotedMessageId, "provider-outbound-1");
+    assert.equal(requestBody.quotedText, "检测到一笔新记账\n待确认编号：BK-0123456789AB");
+    assert.equal(Object.hasOwn(requestBody, "rawUpdate"), false);
+  });
 });

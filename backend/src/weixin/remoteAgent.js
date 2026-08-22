@@ -33,6 +33,23 @@ function requiredIdentifier(value, name, max = 500) {
   return identifier;
 }
 
+function optionalQuote(request) {
+  const providerMessageId = request?.quotedMessageId === undefined || request?.quotedMessageId === null
+    ? ""
+    : requiredIdentifier(request.quotedMessageId, "quotedMessageId", 500);
+  const quotedText = request?.quotedText === undefined || request?.quotedText === null
+    ? ""
+    : requiredText(request.quotedText, "quotedText", 20000);
+  if (!providerMessageId && !quotedText) return null;
+  if (quotedText && /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(quotedText)) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "quotedText is invalid");
+  }
+  return {
+    ...(providerMessageId ? { quotedMessageId: providerMessageId } : {}),
+    ...(quotedText ? { quotedText } : {}),
+  };
+}
+
 function requiredDeliveryMetadata(request) {
   const conversationId = requiredIdentifier(request.conversationId, "conversationId");
   const senderId = requiredIdentifier(request.senderId, "senderId");
@@ -153,6 +170,7 @@ export function createRemoteClawbotAgent(options = {}) {
         : requiredDeliveryMetadata(request);
       const conversationId = metadata?.conversationId ?? requiredIdentifier(request.conversationId, "conversationId");
       const text = requiredText(request.text, "text", 20000);
+      const quote = optionalQuote(request);
       const media = await normalizeMedia(request);
       const digest = digestFor({ conversationId, text, mediaSha256: media?.sha256 });
       const sourceMessageId = metadata?.messageId ?? `weixin:${digest}`;
@@ -167,6 +185,7 @@ export function createRemoteClawbotAgent(options = {}) {
         if (metadata.groupId) body.groupId = metadata.groupId;
       }
       if (media) body.media = media;
+      if (quote) Object.assign(body, quote);
 
       let response;
       try {

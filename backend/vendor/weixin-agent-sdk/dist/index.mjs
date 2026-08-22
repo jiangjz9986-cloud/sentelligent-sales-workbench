@@ -1231,6 +1231,14 @@ function bodyFromItemList(itemList) {
 	}
 	return "";
 }
+function directBodyFromItemList(itemList) {
+	if (!itemList?.length) return "";
+	for (const item of itemList) {
+		if (item.type === MessageItemType.TEXT && item.text_item?.text != null) return String(item.text_item.text);
+		if (item.type === MessageItemType.VOICE && item.voice_item?.text) return String(item.voice_item.text);
+	}
+	return "";
+}
 
 // Bounded, pure inbound projection.  This deliberately accepts only the
 // delivery fields the host needs; provider tokens and CDN metadata never cross
@@ -1270,6 +1278,30 @@ function oneCanonicalUpstreamId(full) {
 	if (msgId !== null && clientId !== null && msgId !== clientId) throw new TypeError("ambiguous upstream message id");
 	return msgId ?? clientId;
 }
+function quotedReferenceFromItemList(itemList) {
+	if (!itemList?.length) return null;
+	const ref = itemList.find((item) => item?.type === MessageItemType.TEXT && item.ref_msg)?.ref_msg;
+	if (!ref || typeof ref !== "object" || Array.isArray(ref)) return null;
+	let quotedMessageId = null;
+	try {
+		quotedMessageId = oneCanonicalUpstreamId(ref);
+	} catch {
+		throw new TypeError("ambiguous quoted message id");
+	}
+	const parts = [];
+	if (typeof ref.title === "string" && ref.title.trim()) parts.push(ref.title.trim());
+	if (ref.message_item) {
+		const body = bodyFromItemList([ref.message_item]).trim();
+		if (body) parts.push(body);
+	}
+	const quotedText = parts.join("\n").slice(0, 2e4);
+	if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(quotedText)) throw new TypeError("invalid quoted text");
+	if (!quotedMessageId && !quotedText) return null;
+	return {
+		...quotedMessageId ? { quotedMessageId } : {},
+		...quotedText ? { quotedText } : {}
+	};
+}
 function hasUnrecognizedGroupSignal(full) {
 	return ["group_id", "room_id", "chat_type", "is_group"].some((name) => {
 		if (!Object.hasOwn(full, name)) return false;
@@ -1301,13 +1333,19 @@ function normalizedFileName(fileName) {
 function canonicalMessageMaterial(itemList, media) {
 	const itemTypes = itemList.map((item) => item?.type);
 	if (itemTypes.some((type) => !Number.isSafeInteger(type))) throw new TypeError("invalid message item type");
-	const material = { itemTypes, text: bodyFromItemList(itemList) };
+	const quote = quotedReferenceFromItemList(itemList);
+	const material = {
+		itemTypes,
+		text: directBodyFromItemList(itemList),
+		...quote?.quotedMessageId ? { quotedMessageId: quote.quotedMessageId } : {},
+		...quote?.quotedText ? { quotedText: quote.quotedText } : {}
+	};
 	if (media !== null && media !== void 0) {
 		if (typeof media !== "object" || !/^[0-9a-f]{64}$/u.test(media.sha256 ?? "")) throw new TypeError("invalid media sha256");
 		material.mediaSha256 = media.sha256;
 		material.fileName = normalizedFileName(media.fileName);
 	}
-	return { text: material.text, canonicalJson: JSON.stringify(material) };
+	return { text: material.text, quote, canonicalJson: JSON.stringify(material) };
 }
 function encodeDeliveryIdParts(parts) {
 	return Buffer.concat(parts.map((part) => {
@@ -1329,6 +1367,8 @@ function normalizeInboundUpdate(full, { deliveryKey, media = null, chatMetadata 
 	return Object.freeze({
 		conversationId: identity.conversationId,
 		text: material.text,
+		...material.quote?.quotedMessageId ? { quotedMessageId: material.quote.quotedMessageId } : {},
+		...material.quote?.quotedText ? { quotedText: material.quote.quotedText } : {},
 		...media?.requestMedia ? { media: media.requestMedia } : {},
 		senderId: identity.senderId,
 		messageId: deliveryIdFromUpdate({ senderId: identity.senderId, upstreamId: oneCanonicalUpstreamId(full), deliveryTimestampMs: full.create_time_ms, material: material.canonicalJson }, deliveryKey),
@@ -2541,22 +2581,21 @@ var Bot = class {
 			const mediaUrl = response.media.url;
 			if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR, "outbound"));
 			else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
-			await sendWeixinMediaFile({
+			const sent = await sendWeixinMediaFile({
 				filePath,
 				to: this._userId,
 				text: response.text ? markdownToPlainText(response.text) : "",
 				opts: apiOpts,
 				cdnBaseUrl: this._cdnBaseUrl
 			});
-			return;
+			return sent;
 		}
 		if (response.text) {
-			await sendMessageWeixin({
+			return sendMessageWeixin({
 				to: this._userId,
 				text: markdownToPlainText(response.text),
 				opts: apiOpts
 			});
-			return;
 		}
 		throw new Error("消息必须包含 text 或 media");
 	}

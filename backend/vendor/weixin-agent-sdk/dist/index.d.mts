@@ -34,6 +34,10 @@ interface ChatRequest {
   groupId?: string;
   /** Provider delivery time in safe epoch milliseconds. */
   deliveryTimestampMs: number;
+  /** Provider id of the quoted message when the inbound message is a reply. */
+  quotedMessageId?: string;
+  /** Bounded text projection of the quoted message. */
+  quotedText?: string;
 }
 interface ChatResponse {
   /** Reply text (may contain markdown — will be converted to plain text before sending). */
@@ -135,7 +139,7 @@ declare class Bot {
   /** Return whether proactive delivery is bound to this exact recipient. */
   isDeliveryTarget(recipientId: string): boolean;
   /** Send only when the explicit recipient matches the current login. */
-  sendMessageTo(recipientId: string, message: string | ChatResponse): Promise<void>;
+  sendMessageTo(recipientId: string, message: string | ChatResponse): Promise<{ messageId: string }>;
   /**
    * Proactively send a message to the logged-in WeChat user.
    *
@@ -145,7 +149,7 @@ declare class Bot {
    * Requires at least one inbound message to have been received so that a
    * valid `context_token` is cached (tokens are valid for ~24 hours).
    */
-  sendMessage(message: string | ChatResponse): Promise<void>;
+  sendMessage(message: string | ChatResponse): Promise<{ messageId: string }>;
 }
 /**
  * Start the bot — long-polls for new messages and dispatches them to the agent.
