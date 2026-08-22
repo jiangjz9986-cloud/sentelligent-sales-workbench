@@ -841,6 +841,35 @@ describe("project secret scan", () => {
     }
   });
 
+  it("allows public domain-separation labels without hiding credentials", () => {
+    const workspace = makeWorkspace();
+    const productionCredential = ["Prod", "D7q4", "V9m", "!"].join("");
+    try {
+      initializeRepository(workspace);
+      workspace.write(
+        "backend/vendor/example-sdk/index.mjs",
+        [
+          'const CONTEXT_TOKEN_DOMAIN = "sentelligent/weixin-context-token/v1";',
+          ["const AUTH_TOKEN_DOMAIN", JSON.stringify(productionCredential)].join(" = ") + ";",
+          "",
+        ].join("\n"),
+      );
+      commitAll(workspace, "domain separation fixture");
+      git(workspace.root, "rm", "backend/vendor/example-sdk/index.mjs");
+      git(workspace.root, "commit", "-m", "remove domain separation fixture");
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.source, item.file, item.line, item.pattern]),
+        [["git-history", "backend/vendor/example-sdk/index.mjs", 2, "API key assignment"]],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("reports bounded safe-lead assignments in history blobs and commit messages outside test/docs contexts", () => {
     const workspace = makeWorkspace();
     const boundedValues = {

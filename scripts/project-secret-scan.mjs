@@ -392,6 +392,15 @@ function isJavaScriptConstantReference(value, filePath, assignmentKey) {
   );
 }
 
+function isPublicDomainSeparationValue(value, filePath, assignmentKey) {
+  if (!commentAwareSourceExts.has(extname(filePath).toLowerCase())) return false;
+  if (!/(?:^|_)DOMAIN(?:_SEPARATOR)?$/u.test(String(assignmentKey))) return false;
+  if (value.length > 128) return false;
+  return /^[a-z][a-z0-9.-]{0,31}(?:\/[a-z][a-z0-9.-]{0,31}){1,7}\/v[1-9][0-9]{0,3}$/u.test(
+    value,
+  );
+}
+
 function isPlaceholderValue(
   rawValue,
   filePath,
@@ -412,6 +421,7 @@ function isPlaceholderValue(
     })
   ) return true;
   if (isJavaScriptConstantReference(value, filePath, assignmentKey)) return true;
+  if (isPublicDomainSeparationValue(value, filePath, assignmentKey)) return true;
   if (/^(?:[:@$][A-Za-z_][A-Za-z0-9_.-]*|%[A-Za-z_][A-Za-z0-9_]*%)$/.test(value)) {
     return true;
   }
