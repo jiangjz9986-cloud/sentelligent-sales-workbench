@@ -105,4 +105,38 @@ describe("assistant runtime business-owner wiring", () => {
     assert.equal(forged.status, 403);
     assert.equal(forgedBody.error.code, "OWNER_SCOPE_DENIED");
   });
+
+  it("fails closed when the configured business owner has no active business rows", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "sentelligent-owner-runtime-missing-"));
+    const databaseUrl = join(tempDir, "assistant.sqlite");
+    server = createServer({
+      databaseUrl,
+      nodeEnv: "test",
+      authRequired: false,
+      authSessionSecret: Buffer.alloc(32, 23).toString("base64url"),
+      weixinAgentApiToken: machineHeader,
+      weixinAgentOwner: "unbound-business-owner",
+      weixinAllowedSenderIds: "owner-runtime-sender",
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/integrations/weixin-agent/events`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${machineHeader}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "owner-runtime-missing",
+      },
+      body: JSON.stringify({
+        conversationId: "owner-runtime-missing-conversation",
+        text: "/customer.search 任意客户",
+        sourceMessageId: "owner-runtime-missing",
+        senderId: "owner-runtime-sender",
+        chatType: "direct",
+      }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.match(body.text, /未找到客户/);
+  });
 });

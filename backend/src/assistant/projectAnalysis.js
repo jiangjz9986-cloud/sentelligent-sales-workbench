@@ -390,8 +390,26 @@ export function analyzeProjectSnapshot(snapshot = {}) {
     pushUnknown(unknowns, "evidenceFreshness.futureEvidence", "需要确认未来时间证据。", "未来发生或更新时间不能作为当前新鲜度依据。");
   }
 
+  const projectCard = {
+    schemaVersion: "project-card-v1",
+    projectId: identifier(opportunity?.id),
+    projectName: strictText(opportunity?.name, 200),
+    customerId: identifier(customer?.id),
+    customerName: strictText(customer?.name, 200),
+    stage: opportunityStage,
+    amount: opportunityAmount,
+    probability: opportunityProbability,
+    openActionCount: openActions,
+    overdueActionCount: overdueActions,
+    activeRiskCount: activeRisks,
+    nextActionId: nextActions[0]?.sourceId ?? null,
+    topRiskId: risks[0]?.sourceId ?? null,
+    evidenceFreshnessStatus: freshness.status,
+  };
+
   return {
     schemaVersion: SCHEMA_VERSION,
+    projectCard,
     facts: facts.slice(0, MAX_OUTPUT_ITEMS),
     inferences: inferences.slice(0, MAX_OUTPUT_ITEMS),
     unknowns: unknowns.slice(0, MAX_OUTPUT_ITEMS),

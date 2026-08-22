@@ -134,13 +134,13 @@ export const CAPABILITY_CATALOG = deepFreeze([
   capability({
     id: "reimbursement-report",
     name: "报销周汇总",
-    description: "预览自然周实付、缺票和报销准备信息，不修改费用或公司规则。",
+    description: "预览自然周实付、登记可报销金额、已匹配发票、缺票及确认前阻塞，不修改费用或公司规则。",
     status: "ready",
     mappings: {
       tools: ["reimbursement-report.preview"],
       apis: ["GET /api/travel-expenses"],
     },
-    dependencies: ["reimbursement-report agent", "natural-week aggregation", "read-only report handler"],
+    dependencies: ["reimbursement-report agent", "natural-week aggregation", "invoice coverage truth", "read-only report handler"],
     integrationPoints: ["assistant router", "assistant runtime handlers"],
     confirmationLevel: "preview",
     sourceRefs: ["agentRegistry:reimbursement-report", "toolRegistry:reimbursement-report.preview"],
@@ -160,13 +160,13 @@ export const CAPABILITY_CATALOG = deepFreeze([
   capability({
     id: "sales-report",
     name: "销售周报",
-    description: "按自然周生成带证据引用的销售业务周报预览。",
+    description: "基于已确认拜访记录生成未保存的销售周报预览，并读取 weekly_reports 的草稿、已保存或就绪记录；保留证据引用，不与报销摘要混用。",
     status: "ready",
     mappings: {
       tools: ["sales-report.preview"],
       apis: [],
     },
-    dependencies: ["sales-report agent", "weekly report draft", "source reference preservation"],
+    dependencies: ["sales-report agent", "confirmed visit snapshot", "weekly_reports owner scope", "weekly report status filter", "source reference preservation"],
     integrationPoints: ["assistant router", "assistant runtime handlers"],
     confirmationLevel: "preview",
     sourceRefs: ["agentRegistry:sales-report", "toolRegistry:sales-report.preview"],

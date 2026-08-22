@@ -24,6 +24,7 @@ function fakeRuntime() {
   const confirmationCodes = new Map();
   const confirmationAttempts = new Map();
   const confirmationFailures = [];
+  const conversationContexts = new Map();
   const parts = [];
   let sequence = 0;
   const eventRepository = {
@@ -61,7 +62,11 @@ function fakeRuntime() {
   };
   const sessionRepository = {
     getOrCreate(input) { return { id: `${input.owner}:${input.channel}:${input.conversationId}` }; },
-    appendDraftPart(conversationId, part) { parts.push({ conversationId, ...part }); },
+    getContext(conversationId) { return conversationContexts.get(conversationId) ?? {}; },
+    appendDraftPart(conversationId, part) {
+      parts.push({ conversationId, ...part });
+      if (part.metadata?.assistantContext) conversationContexts.set(conversationId, structuredClone(part.metadata.assistantContext));
+    },
   };
   const pendingActionRepository = {
     create(input) {
@@ -168,6 +173,7 @@ function fakeRuntime() {
     parts,
     confirmationAttempts,
     confirmationFailures,
+    conversationContexts,
   };
 }
 
@@ -220,6 +226,34 @@ describe("assistant orchestrator", () => {
     assert.equal(received.safeContext.channel, "weixin");
     assert.equal(received.safeContext.requestId, "request-a");
     assert.equal(received.safeContext.owner, context.owner);
+  });
+
+  it("passes the persisted entity context to the next turn without trusting caller input", async () => {
+    const runtime = fakeRuntime();
+    const tools = new Map([
+      ["customer.detail", { name: "customer.detail", agentId: "customer", description: "客户详情", arguments: {}, policy: { risk: "R0", confirmation: "none" } }],
+      ["action-risk.summary", { name: "action-risk.summary", agentId: "action-risk", description: "动作风险", arguments: {}, policy: { risk: "R0", confirmation: "none" } }],
+    ]);
+    const seenContexts = [];
+    const plans = [
+      { status: "planned", toolName: "customer.detail", agentId: "customer", arguments: { customerId: "customer-a" }, risk: "R0" },
+      { status: "planned", toolName: "action-risk.summary", agentId: "action-risk", arguments: { customerId: "customer-a" }, risk: "R0" },
+    ];
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: { getTool(name) { return tools.get(name) ?? null; } },
+      router: { route(input) { seenContexts.push(input.context); return plans.shift(); } },
+      toolHandlers: {
+        "customer.detail": () => ({ status: "ok", customer: { id: "customer-a" } }),
+        "action-risk.summary": () => ({ status: "ok", summary: {} }),
+      },
+    });
+    await orchestrator.handle({ context, input: { text: "客户详情" } });
+    await orchestrator.handle({
+      context: { ...context, event: "event-context-follow-up", requestId: "request-context-follow-up" },
+      input: { text: "还有哪些跟进动作？", context: { customerId: "attacker-owned-customer" } },
+    });
+    assert.deepEqual(seenContexts, [{}, { customerId: "customer-a" }]);
   });
 
   it("returns the stored response for a replay without running the handler twice", async () => {

@@ -431,6 +431,10 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       VALUES ('assistant-owner-record', 'assistant-owner', 'owner a record', '2026-08-05T09:00:00.000Z', 'test');
       INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel)
       VALUES ('other-owner-record', 'other-owner', 'owner b record', '2026-08-05T09:00:00.000Z', 'test');
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
+      VALUES ('assistant-owner-report', 'assistant-owner', '2026-08-03', '2026-08-09', 'ready', 'owner a report', '[]');
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
+      VALUES ('other-owner-report', 'other-owner', '2026-08-03', '2026-08-09', 'ready', 'owner b report', '[]');
     `);
     scopedDb.close();
 

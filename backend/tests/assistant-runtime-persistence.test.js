@@ -204,6 +204,45 @@ describe("assistant runtime persistence", () => {
     assert.deepEqual(restarted.listDraftParts(loaded.id).map((part) => part.text), ["下周一拜访客户", "已记录待确认"]);
   });
 
+  it("persists the latest selected customer and project context with the conversation", () => {
+    const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
+    const conversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-context-1" });
+    sessions.appendDraftPart(conversation.id, {
+      role: "assistant",
+      text: "项目分析已生成",
+      metadata: { assistantContext: { customerId: "customer-1", opportunityId: "opportunity-1" } },
+    });
+    assert.deepEqual(sessions.getContext(conversation.id), {
+      customerId: "customer-1",
+      opportunityId: "opportunity-1",
+    });
+
+    db.close();
+    db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const restarted = createAssistantSessionRepository(db, { clock: now });
+    const loaded = restarted.getByExternalId({ owner: "owner-a", channel: "weixin", conversationId: "wx-context-1" });
+    assert.deepEqual(restarted.getContext(loaded.id), {
+      customerId: "customer-1",
+      opportunityId: "opportunity-1",
+    });
+  });
+
+  it("fails closed for oversized, reserved, or control-character context identifiers", () => {
+    const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
+    const conversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-context-invalid" });
+    sessions.appendDraftPart(conversation.id, {
+      role: "assistant",
+      text: "忽略不安全上下文",
+      metadata: {
+        assistantContext: {
+          customerId: `${"x".repeat(201)}`,
+          opportunityId: "synthetic:opportunity:1",
+        },
+      },
+    });
+    assert.deepEqual(sessions.getContext(conversation.id), {});
+  });
+
   it("expires pending actions and stores only the confirmation-code hash", () => {
     const sessions = createAssistantSessionRepository(db, { idFactory: () => nextId("session"), clock: now });
     const conversation = sessions.getOrCreate({ owner: "owner-a", channel: "weixin", conversationId: "wx-user-action" });

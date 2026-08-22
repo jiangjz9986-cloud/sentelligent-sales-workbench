@@ -105,12 +105,29 @@ describe("pure project analysis", () => {
       "inferences",
       "metrics",
       "nextActions",
+      "projectCard",
       "risks",
       "schemaVersion",
       "sourceRefs",
       "unknowns",
     ]);
     assert.equal(result.schemaVersion, "project-analysis-v1");
+    assert.deepEqual(result.projectCard, {
+      schemaVersion: "project-card-v1",
+      projectId: "opportunity-1",
+      projectName: "数据中心升级",
+      customerId: "customer-1",
+      customerName: "示例医院",
+      stage: "proposal",
+      amount: "120 万",
+      probability: 65,
+      openActionCount: 1,
+      overdueActionCount: 0,
+      activeRiskCount: 1,
+      nextActionId: "action-1",
+      topRiskId: "risk-1",
+      evidenceFreshnessStatus: "unknown_reference",
+    });
     assert.ok(result.facts.some((item) => item.key === "opportunity.stage" && item.value === "proposal"));
     assert.deepEqual(fact(result, "opportunity.amount"), {
       key: "opportunity.amount",

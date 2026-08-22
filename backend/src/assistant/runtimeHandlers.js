@@ -107,6 +107,92 @@ function moneyFromCents(value) {
   return Number.isSafeInteger(value) && value >= 0 ? `${(value / 100).toFixed(2)} 元` : "金额待确认";
 }
 
+function safeEntityHint(value, max = 200) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (
+    !normalized
+    || normalized.length > max
+    || normalized.startsWith("synthetic:")
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)
+  ) return null;
+  return normalized;
+}
+
+function usableEntityLabel(value) {
+  const normalized = safeEntityHint(value, 500);
+  if (!normalized || /^(?:待匹配客户|待确认商机|未命名|未知|待补充)$/u.test(normalized)) return null;
+  return normalized;
+}
+
+function resolveQuickRecordLinks(snapshotAdapter, owner, analysis) {
+  const customerHint = analysis?.customer ?? {};
+  const opportunityHint = analysis?.opportunity ?? {};
+  let customer = null;
+  let opportunity = null;
+
+  const customerId = safeEntityHint(customerHint.id);
+  if (customerId) customer = snapshotAdapter.customerDetail({ owner, customerId });
+  if (!customer) {
+    const customerName = usableEntityLabel(customerHint.value);
+    if (customerName) {
+      const matches = snapshotAdapter.customerSearch({ owner, query: customerName }).items;
+      if (matches.length === 1) customer = matches[0];
+    }
+  }
+
+  const opportunityId = safeEntityHint(opportunityHint.id);
+  if (opportunityId) opportunity = snapshotAdapter.opportunityDetail({ owner, opportunityId });
+  if (!opportunity) {
+    const opportunityName = usableEntityLabel(opportunityHint.value);
+    if (opportunityName) {
+      const matches = snapshotAdapter.opportunitySearch({ owner, query: opportunityName }).items;
+      if (matches.length === 1) opportunity = matches[0];
+    }
+  }
+
+  if (opportunity && customer && opportunity.customerId !== customer.id) {
+    // A model-provided pair that does not match the database relationship is
+    // not safe to persist. Keep the independently verified customer only.
+    opportunity = null;
+  }
+  if (opportunity && !customer && opportunity.customerId) {
+    customer = snapshotAdapter.customerDetail({ owner, customerId: opportunity.customerId });
+  }
+
+  return {
+    customerId: customer?.id ?? null,
+    opportunityId: opportunity?.id ?? null,
+  };
+}
+
+function expenseSummaryText(summary, label) {
+  const lines = [
+    `${label}（${summary.weekStart}）：${summary.summary.count} 笔，实付 ${moneyFromCents(summary.summary.actualPaidCents)}，登记可报销 ${moneyFromCents(summary.summary.reimbursementCents)}。`,
+    `已匹配发票 ${moneyFromCents(summary.summary.confirmedCoverageCents)}，缺票 ${moneyFromCents(summary.summary.missingInvoiceCents)}。`,
+  ];
+  if (summary.summary.noInvoiceConfirmedCents > 0) {
+    lines.push(`其中已确认无票 ${moneyFromCents(summary.summary.noInvoiceConfirmedCents)}，尚未说明缺票 ${moneyFromCents(summary.summary.unacknowledgedMissingCents)}。`);
+  }
+  if (summary.summary.invalidAmountCount > 0) lines.push(`有 ${summary.summary.invalidAmountCount} 笔金额待确认。`);
+  if (summary.truncated) lines.push("当前只展示前 100 笔，属于部分摘要。 ".trim());
+  return lines.join("\n");
+}
+
+function salesReportSummaryText(summary) {
+  const counts = summary.statusCounts ?? { draft: 0, saved: 0, ready: 0 };
+  const preview = summary.preview ?? {};
+  const text = `销售周报预览（${summary.weekStart}）：已保存周报 ${summary.reportCount} 条（草稿 ${counts.draft}、已保存 ${counts.saved}、就绪 ${counts.ready}）。`;
+  if (summary.truncated) return `${text}\n当前只展示前 100 条，属于部分摘要。`;
+  const previewText = preview.sourceRecordCount > 0
+    ? `已基于 ${preview.sourceRecordCount}${preview.truncated ? "+" : ""} 条已确认拜访记录生成未保存预览。`
+    : "当前没有可用于生成周报预览的已确认拜访记录。";
+  const content = typeof preview.content === "string" && preview.content.trim()
+    ? `\n\n${preview.content.slice(0, 4_000)}${preview.content.length > 4_000 ? "\n（正文已限界，完整内容请在系统内查看。）" : ""}`
+    : "";
+  return `${text}\n${previewText}\n${preview.persisted === false ? "本次仅预览，尚未写入周报。" : "已保留来源引用，可用于确认前准备。"}${content}`;
+}
+
 function projectAnalysisText(analysis) {
   const metrics = analysis.metrics ?? {};
   const opportunity = metrics.opportunity ?? {};
@@ -261,7 +347,7 @@ export function createAssistantToolHandlers({
         weekStart: args.periodStart ?? args.week,
       });
       return {
-        text: `差旅汇总（${summary.weekStart}）：${summary.summary.count} 笔，实付 ${moneyFromCents(summary.summary.actualPaidCents)}，可报销 ${moneyFromCents(summary.summary.reimbursementCents)}。`,
+        text: expenseSummaryText(summary, "差旅汇总"),
         status: "ok",
         summary,
       };
@@ -326,12 +412,19 @@ export function createAssistantToolHandlers({
       const now = clock();
       const occurredAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
       const analysis = await analyzeQuickRecord(content, config, { fetchImpl });
+      const links = resolveQuickRecordLinks(snapshotAdapter, context.owner, analysis);
       const persisted = withImmediateTransaction(db, () => {
         const recordId = actionId || randomUUID();
         db.prepare(`
-          INSERT INTO quick_records (id, raw_content, occurred_at, source_channel)
-          VALUES ($id, $rawContent, $occurredAt, '微信助手')
-        `).run({ $id: recordId, $rawContent: content, $occurredAt: occurredAt });
+          INSERT INTO quick_records (id, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
+          VALUES ($id, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
+        `).run({
+          $id: recordId,
+          $rawContent: content,
+          $occurredAt: occurredAt,
+          $customerId: links.customerId,
+          $opportunityId: links.opportunityId,
+        });
         db.prepare("UPDATE quick_records SET owner = $owner WHERE id = $id")
           .run({ $id: recordId, $owner: context.owner });
         const created = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: recordId }));
@@ -344,7 +437,11 @@ export function createAssistantToolHandlers({
           before: null,
           after: created,
           entityVersion: created.version,
-          metadata: { sourceChannel: created.sourceChannel },
+          metadata: {
+            sourceChannel: created.sourceChannel,
+            customerId: created.customerId,
+            opportunityId: created.opportunityId,
+          },
         });
         const id = randomUUID();
         db.prepare(`
@@ -518,8 +615,11 @@ export function createAssistantToolHandlers({
         owner: context.owner,
         weekStart: args.periodStart ?? args.week,
       });
+      const preparation = summary.preparation?.ready
+        ? "确认前准备：金额与票据状态完整。"
+        : `确认前待处理：${(summary.preparation?.blockers ?? []).join("、") || "资料不完整"}。`;
       return {
-        text: `报销周汇总预览（${summary.weekStart}）：${summary.summary.count} 笔费用，实付 ${moneyFromCents(summary.summary.actualPaidCents)}，可报销 ${moneyFromCents(summary.summary.reimbursementCents)}。`,
+        text: `${expenseSummaryText(summary, "报销周汇总预览")}\n${preparation}`,
         status: "preview",
         summary,
       };
@@ -530,7 +630,7 @@ export function createAssistantToolHandlers({
         owner: context.owner,
         weekStart: args.periodStart ?? args.week,
       });
-      return { text: `销售周报预览（${summary.weekStart}）：当前共有 ${summary.recordCount} 条快速记录，详情可在系统内继续编辑。`, status: "preview", summary };
+      return { text: salesReportSummaryText(summary), status: "preview", summary };
     },
   };
 
