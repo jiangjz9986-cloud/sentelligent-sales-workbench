@@ -361,6 +361,88 @@ describe("production service-plan generator", () => {
     }
   });
 
+  it("accepts CentOS 7 snapshots that omit expected-empty project service properties", () => {
+    const fixture = makeFixture({
+      mutateShow: ({ serviceName, result }) => {
+        if (!PROJECT_SERVICES.includes(serviceName)) return result;
+        let adjusted = result.replace(/^SupplementaryGroups=\n/m, "");
+        if (
+          serviceName === "sentelligent-backend.service" ||
+          serviceName === "sentelligent-frontend.service"
+        ) {
+          adjusted = adjusted.replace(/^Environment=\n/m, "");
+        }
+        if (serviceName === "sentelligent-caddy.service") {
+          adjusted = adjusted.replace(/^WorkingDirectory=\n/m, "");
+        }
+        return adjusted;
+      },
+    });
+    const plan = createProductionServicePlan(fixture.options);
+
+    assertCompatiblePlan(plan);
+    for (const service of plan.projectServices) {
+      assert.deepEqual(service.SupplementaryGroups, []);
+    }
+    for (const serviceName of [
+      "sentelligent-backend.service",
+      "sentelligent-frontend.service",
+    ]) {
+      assert.deepEqual(
+        plan.projectServices.find(({ name }) => name === serviceName).Environment,
+        [],
+      );
+    }
+    assert.equal(
+      plan.projectServices.find(
+        ({ name }) => name === "sentelligent-caddy.service",
+      ).WorkingDirectory,
+      "",
+    );
+  });
+
+  it("still rejects non-empty or duplicate expected-empty project service properties", () => {
+    const cases = [
+      {
+        serviceName: "sentelligent-backend.service",
+        pattern: /^SupplementaryGroups=\n/m,
+        replacement: "SupplementaryGroups=unexpected-group\n",
+        duplicate: "SupplementaryGroups=\n",
+        error: /SupplementaryGroups/,
+      },
+      {
+        serviceName: "sentelligent-frontend.service",
+        pattern: /^Environment=\n/m,
+        replacement: "Environment=UNEXPECTED=value\n",
+        duplicate: "Environment=\n",
+        error: /environment surface/,
+      },
+      {
+        serviceName: "sentelligent-caddy.service",
+        pattern: /^WorkingDirectory=\n/m,
+        replacement: "WorkingDirectory=/tmp/unexpected\n",
+        duplicate: "WorkingDirectory=\n",
+        error: /WorkingDirectory/,
+      },
+    ];
+
+    for (const testCase of cases) {
+      for (const mutate of [
+        (result) => result.replace(testCase.pattern, testCase.replacement),
+        (result) => `${result}${testCase.duplicate}`,
+      ]) {
+        const fixture = makeFixture({
+          mutateShow: ({ serviceName, result }) =>
+            serviceName === testCase.serviceName ? mutate(result) : result,
+        });
+        assert.throws(
+          () => createProductionServicePlan(fixture.options),
+          testCase.error,
+        );
+      }
+    }
+  });
+
   it("does not propagate command-runner diagnostics into an error", () => {
     const fixture = makeFixture({
       mutateRunner: ({ command, args, result }) => {

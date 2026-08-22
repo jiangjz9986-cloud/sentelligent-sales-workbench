@@ -271,6 +271,20 @@ function exactProperty(properties, name, label) {
   return values[0];
 }
 
+function exactExpectedProperty(properties, name, expected, label) {
+  const values = properties.get(name) ?? [];
+  if (expected === "") {
+    if (values.length > 1 || (values.length === 1 && values[0] !== "")) {
+      throw genericFailure(label);
+    }
+    return "";
+  }
+  if (values.length !== 1 || values[0] !== expected) {
+    throw genericFailure(label);
+  }
+  return expected;
+}
+
 function optionalProperty(properties, name, label) {
   const values = properties.get(name) ?? [];
   if (values.length > 1) throw genericFailure(label);
@@ -382,15 +396,13 @@ function validateUnitPath(value, serviceName) {
 }
 
 function normalizeEnvironment(properties, serviceName) {
-  const actual = exactProperty(
+  const expected = EXPECTED_ENVIRONMENT[serviceName];
+  exactExpectedProperty(
     properties,
     "Environment",
+    expected,
     `${serviceName} environment surface`,
   );
-  const expected = EXPECTED_ENVIRONMENT[serviceName];
-  if (actual !== expected) {
-    throw genericFailure(`${serviceName} environment surface`);
-  }
   return expected ? [expected] : [];
 }
 
@@ -544,19 +556,27 @@ function collectProjectService(runner, serviceName) {
       { allowEmpty: true },
     ),
     SupplementaryGroups: parseSafeNameList(
-      exactProperty(
+      exactExpectedProperty(
         properties,
         "SupplementaryGroups",
+        "",
         `${serviceName} SupplementaryGroups`,
       ),
       `${serviceName} SupplementaryGroups`,
     ),
     DynamicUser: false,
-    WorkingDirectory: exactProperty(
-      properties,
-      "WorkingDirectory",
-      `${serviceName} WorkingDirectory`,
-    ),
+    WorkingDirectory: serviceName === "sentelligent-caddy.service"
+      ? exactExpectedProperty(
+          properties,
+          "WorkingDirectory",
+          "",
+          `${serviceName} WorkingDirectory`,
+        )
+      : exactProperty(
+          properties,
+          "WorkingDirectory",
+          `${serviceName} WorkingDirectory`,
+        ),
     ...normalizeEmptyExecutionSurface(properties, serviceName),
     ExecReload: execReload,
     Environment: normalizeEnvironment(properties, serviceName),
