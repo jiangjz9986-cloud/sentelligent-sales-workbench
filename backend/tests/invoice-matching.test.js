@@ -314,9 +314,12 @@ describe("invoice matching and weekly coverage", () => {
       weekStart: "2026-08-03",
       reimbursementCents: 20000,
       confirmedCoverageCents: 10000,
+      electronicInvoiceCoverageCents: 10000,
+      substituteInvoiceCoverageCents: 0,
       missingInvoiceCents: 10000,
       noInvoiceConfirmedCents: 0,
       unacknowledgedMissingCents: 10000,
+      invoiceWarehouseAvailableCents: 0,
       expenseCount: 1,
     });
   });
@@ -344,6 +347,51 @@ describe("invoice matching and weekly coverage", () => {
       (error) => error?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE",
     );
     assert.ok(expenseRepository.getExpense(expense.id, { owner: "owner-a" }));
+  });
+
+  it("separates electronic and substitute coverage and reports unused warehouse value", () => {
+    const expense = createExpense({
+      purpose: "电子票与替票混合住宿",
+      payments: [payment({ amountCents: 10000, reimbursementCents: 10000 })],
+    });
+    const electronic = createInvoice("coverage-electronic", { totalCents: 3000 });
+    const substitute = createInvoice("coverage-substitute", { totalCents: 2000 });
+    createInvoice("coverage-warehouse", { totalCents: 8000 });
+
+    confirmMatch({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: electronic.id,
+      expenseReferenceCode: expense.referenceCode,
+      paymentId: expense.payments[0].id,
+      allocatedCents: 3000,
+      matchMethod: "manual_selection",
+    });
+    confirmMatch({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: substitute.id,
+      expenseReferenceCode: expense.referenceCode,
+      paymentId: expense.payments[0].id,
+      allocatedCents: 2000,
+      matchMethod: "rule_candidate",
+    });
+
+    assert.deepEqual(invoiceRepository.getWeekInvoiceCoverage({
+      owner: "owner-a",
+      weekStart: "2026-08-03",
+    }), {
+      weekStart: "2026-08-03",
+      reimbursementCents: 10000,
+      confirmedCoverageCents: 5000,
+      electronicInvoiceCoverageCents: 3000,
+      substituteInvoiceCoverageCents: 2000,
+      missingInvoiceCents: 5000,
+      noInvoiceConfirmedCents: 0,
+      unacknowledgedMissingCents: 5000,
+      invoiceWarehouseAvailableCents: 8000,
+      expenseCount: 1,
+    });
   });
 
   it("rejects review and deletion of an invoice with confirmed matches", () => {
@@ -537,9 +585,12 @@ describe("invoice matching and weekly coverage", () => {
       weekStart: "2026-08-03",
       reimbursementCents: 15000,
       confirmedCoverageCents: 3000,
+      electronicInvoiceCoverageCents: 3000,
+      substituteInvoiceCoverageCents: 0,
       missingInvoiceCents: 12000,
       noInvoiceConfirmedCents: 5000,
       unacknowledgedMissingCents: 7000,
+      invoiceWarehouseAvailableCents: 0,
       expenseCount: 2,
     });
 

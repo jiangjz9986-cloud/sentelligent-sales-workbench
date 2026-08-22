@@ -392,9 +392,12 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     weekStart: "string",
     reimbursementCents: "nonNegativeInteger",
     confirmedCoverageCents: "nonNegativeInteger",
+    electronicInvoiceCoverageCents: "nonNegativeInteger",
+    substituteInvoiceCoverageCents: "nonNegativeInteger",
     missingInvoiceCents: "nonNegativeInteger",
     noInvoiceConfirmedCents: "nonNegativeInteger",
     unacknowledgedMissingCents: "nonNegativeInteger",
+    invoiceWarehouseAvailableCents: "nonNegativeInteger",
     expenseCount: "nonNegativeInteger",
   },
   hospitalTenderNotice: {

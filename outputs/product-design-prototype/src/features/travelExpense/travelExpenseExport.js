@@ -1,4 +1,5 @@
 import {
+  buildExpenseLedgerRows,
   flattenPaymentRows,
   formatCny,
   formatTravelExpenseDateTime,
@@ -17,6 +18,13 @@ const INVOICE_STATUS_LABELS = Object.freeze({
   covered: "已覆盖",
   partial: "部分覆盖",
   missing: "缺少票据",
+});
+
+const EXPENSE_INVOICE_STATE_LABELS = Object.freeze({
+  electronic_invoice: "电子发票",
+  substitute_invoice: "替票",
+  no_invoice: "无票",
+  invoice_pending: "待补发票",
 });
 
 function csvCell(value) {
@@ -91,6 +99,35 @@ export function paymentRecordFilename(weekStart) {
   return `实际付款记录-${weekStart}.csv`;
 }
 
+export function buildExpenseListRows(expenses = [], context = {}) {
+  return buildExpenseLedgerRows(expenses, context).map((row, index) => {
+    const stateLabels = row.visible.invoiceStates
+      .map((state) => EXPENSE_INVOICE_STATE_LABELS[state.id] ?? state.label)
+      .filter(Boolean);
+    return {
+      sequence: index + 1,
+      expenseId: row.id,
+      referenceCode: row.referenceCode,
+      dateLabel: row.visible.date,
+      categoryLabel: row.visible.category,
+      amountCents: row.visible.amountCents,
+      amountLabel: formatCny(row.visible.amountCents),
+      paymentProofLabel: row.visible.paymentProofs.length > 0
+        ? `${row.visible.paymentProofs.length} 张`
+        : "未上传",
+      invoiceStatusLabel: stateLabels.join("、") || "待补发票",
+      notes: row.visible.notes,
+    };
+  });
+}
+
+export function expenseListFilename(weekStart) {
+  if (typeof weekStart !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
+    throw new TypeError("weekStart must use YYYY-MM-DD format");
+  }
+  return `费用清单-${weekStart}.pdf`;
+}
+
 function chunk(items, size) {
   if (!Number.isSafeInteger(size) || size < 1) throw new TypeError("page size must be positive");
   const pages = [];
@@ -102,11 +139,15 @@ function chunk(items, size) {
 
 const PRINT_IMAGE_ERROR_MESSAGE = "付款凭证加载失败，请检查网络或凭证文件后重新打印。";
 
-function waitForPrintImage(image, errorMessage) {
+function waitForPrintImage(image, errorMessage, { minNaturalWidth = 0, minNaturalHeight = 0 } = {}) {
   if (image.complete) {
-    return image.naturalWidth === 0
-      ? Promise.reject(new Error(errorMessage))
-      : Promise.resolve();
+    if (image.naturalWidth === 0) return Promise.reject(new Error(errorMessage));
+    if (image.naturalWidth < minNaturalWidth || image.naturalHeight < minNaturalHeight) {
+      return Promise.reject(new Error(
+        `${errorMessage}（原图分辨率不足 ${minNaturalWidth}×${minNaturalHeight}，系统未覆盖原件）`,
+      ));
+    }
+    return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -116,6 +157,11 @@ function waitForPrintImage(image, errorMessage) {
     const handleLoad = () => {
       cleanup();
       if (image.naturalWidth === 0) reject(new Error(errorMessage));
+      else if (image.naturalWidth < minNaturalWidth || image.naturalHeight < minNaturalHeight) {
+        reject(new Error(
+          `${errorMessage}（原图分辨率不足 ${minNaturalWidth}×${minNaturalHeight}，系统未覆盖原件）`,
+        ));
+      }
       else resolve();
     };
     const handleError = () => {
@@ -127,18 +173,32 @@ function waitForPrintImage(image, errorMessage) {
   });
 }
 
+export function assessPrintImageResolution({ naturalWidth, naturalHeight, minNaturalWidth = 0, minNaturalHeight = 0 } = {}) {
+  if (!Number.isSafeInteger(naturalWidth) || naturalWidth < 1) return "unavailable";
+  if (!Number.isSafeInteger(naturalHeight) || naturalHeight < 1) return "unavailable";
+  if (!Number.isSafeInteger(minNaturalWidth) || minNaturalWidth < 0) throw new TypeError("minNaturalWidth must be a non-negative integer");
+  if (!Number.isSafeInteger(minNaturalHeight) || minNaturalHeight < 0) throw new TypeError("minNaturalHeight must be a non-negative integer");
+  return naturalWidth >= minNaturalWidth && naturalHeight >= minNaturalHeight
+    ? "ready"
+    : "low_resolution";
+}
+
 export async function printWhenImagesReady({
   documentRef,
   print,
   selector = ".expense-print-document img",
   errorMessage = PRINT_IMAGE_ERROR_MESSAGE,
+  minNaturalWidth = 0,
+  minNaturalHeight = 0,
 } = {}) {
   if (!documentRef?.querySelectorAll) throw new TypeError("documentRef must support querySelectorAll");
   if (typeof print !== "function") throw new TypeError("print must be a function");
   if (typeof selector !== "string" || !selector.trim()) throw new TypeError("selector must be a non-empty string");
   if (typeof errorMessage !== "string" || !errorMessage.trim()) throw new TypeError("errorMessage must be a non-empty string");
+  if (!Number.isSafeInteger(minNaturalWidth) || minNaturalWidth < 0) throw new TypeError("minNaturalWidth must be a non-negative integer");
+  if (!Number.isSafeInteger(minNaturalHeight) || minNaturalHeight < 0) throw new TypeError("minNaturalHeight must be a non-negative integer");
   const images = [...documentRef.querySelectorAll(selector)];
-  await Promise.all(images.map((image) => waitForPrintImage(image, errorMessage)));
+  await Promise.all(images.map((image) => waitForPrintImage(image, errorMessage, { minNaturalWidth, minNaturalHeight })));
   print();
 }
 
@@ -150,6 +210,56 @@ export function paginateInvoicePrint(invoices = []) {
     pageNumber: index + 1,
     totalPages,
     slots: [...pageInvoices, ...Array(4 - pageInvoices.length).fill(null)],
+  }));
+}
+
+/**
+ * Expands a printable invoice list so every PDF page gets its own fixed slot.
+ *
+ * The original invoice object is kept on each item instead of being copied into
+ * the public invoice shape. This keeps the API response lossless while letting
+ * the print renderer address a particular PDF page. An image (or a PDF whose
+ * page count is not known yet) is never guessed or silently reduced to page 1.
+ */
+export function expandInvoicePrintItems(invoices = [], pageCounts = {}) {
+  if (!Array.isArray(invoices)) throw new TypeError("invoices must be an array");
+  if (pageCounts === null || typeof pageCounts !== "object" || Array.isArray(pageCounts)) {
+    throw new TypeError("pageCounts must be an object");
+  }
+
+  return invoices.flatMap((invoice) => {
+    if (!invoice || typeof invoice !== "object") throw new TypeError("invoice must be an object");
+    const mediaType = String(invoice.mediaType ?? "").trim().toLowerCase();
+    const isPdf = mediaType === "application/pdf"
+      || (!mediaType && String(invoice.fileName ?? "").trim().toLowerCase().endsWith(".pdf"));
+    if (!isPdf) return [{ invoice, pageNumber: null, pageCount: 1 }];
+
+    const pageCount = pageCounts[invoice.id];
+    if (!Number.isSafeInteger(pageCount) || pageCount < 1) return [];
+    return Array.from({ length: pageCount }, (_, index) => ({
+      invoice,
+      pageNumber: index + 1,
+      pageCount,
+    }));
+  });
+}
+
+export function paginateExpenseList({ rows = [], rowsPerPage = 18 } = {}) {
+  if (!Array.isArray(rows)) throw new TypeError("rows must be an array");
+  const pages = chunk(rows, rowsPerPage);
+  const totalPages = pages.length;
+  return pages.map((pageRows, index) => ({
+    kind: "expense-list",
+    pageNumber: index + 1,
+    totalPages,
+    rows: pageRows,
+    totalCents: pageRows.reduce((total, row) => {
+      const amount = row?.amountCents;
+      if (!Number.isSafeInteger(amount) || amount < 0) throw new TypeError("expense list amount is invalid");
+      const next = total + amount;
+      if (!Number.isSafeInteger(next)) throw new RangeError("expense list total exceeds the safe integer range");
+      return next;
+    }, 0),
   }));
 }
 
