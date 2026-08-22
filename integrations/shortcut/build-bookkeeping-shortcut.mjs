@@ -9,29 +9,37 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultOutputPath = resolve(scriptDirectory, "shortcut-bookkeeping.unsigned.shortcut");
 const DEFAULT_ENDPOINT = "https://82.156.210.199/api/integrations/shortcut/bookkeeping";
 const DEFAULT_VERIFY_ENDPOINT = "https://82.156.210.199/api/integrations/shortcut/verify";
-export const SHORTCUT_TOKEN_PLACEHOLDER = "REPLACE_ME";
-export const BOOKKEEPING_SHORTCUT_NAME = "自有截图记账（兼容版V4修复）";
+export const DEFAULT_PAIR_ENDPOINT = "https://82.156.210.199/api/integrations/shortcut/pair";
+// Apple Shortcuts 15/macOS 26 resolves the document-picker path relative to
+// its default Shortcuts folder. Adding a storage service or the `Shortcuts/`
+// prefix imports the filename as an empty parameter and forces re-pairing.
+export const SHORTCUT_CREDENTIAL_FILE_NAME = "森特智行快捷指令凭据.txt";
+export const SHORTCUT_CREDENTIAL_FILE_PATH = `Shortcuts/${SHORTCUT_CREDENTIAL_FILE_NAME}`;
+export const SHORTCUT_CREDENTIAL_SAVE_PATH = `/${SHORTCUT_CREDENTIAL_FILE_NAME}`;
+export const BOOKKEEPING_SHORTCUT_NAME = "自有截图记账（账号配对版V7）";
 export const BOOKKEEPING_SHORTCUT_NAME_PREFIX = "自有截图记账";
 export const SHORTCUT_SELECTION_SEPARATOR = " · ";
 // A generated output name is required here.  Without it, Shortcuts imports
 // the action but cannot resolve the output token used by the following
 // conditional action, leaving the condition in an invalid red state.
-export const VERIFICATION_STATUS_OUTPUT_NAME = "Token验证状态";
+export const VERIFICATION_STATUS_OUTPUT_NAME = "快捷指令验证状态";
+export const VERIFICATION_STATUS_TEXT_OUTPUT_NAME = "快捷指令验证状态文本";
+export const CREDENTIAL_OUTPUT_NAME = "森特智行设备凭据";
 
 export const BOOKKEEPING_CATALOG = Object.freeze({
   "出差报销": {
-    收入: {},
+    收入: {
+      工资: [],
+      奖金: [],
+      出差: ["报销", "借款"],
+    },
     支出: {
       餐饮: ["早餐", "午餐", "晚餐"],
-      住宿费: [],
-      交通: ["火车", "路桥费", "打车", "代驾", "停车"],
-      汽车维修: ["维修", "保养"],
-      "招待/礼品": [],
+      住宿: [],
+      交通: ["打车", "火车", "代驾", "停车", "路桥"],
+      招待: [],
+      礼品: [],
     },
-  },
-  biubiu: {
-    收入: { 营收: ["美团", "淘宝闪购", "京东", "收钱吧", "其他"], 退税: [], 其他收入: [] },
-    支出: { 房租: [], 设备: [], 水电费: [], 进货采购: ["水果", "耗材"], 员工薪资: [], 交税: [], 运营: [] },
   },
 });
 
@@ -46,6 +54,40 @@ export const BOOKKEEPING_SELECTION_OPTIONS = Object.freeze(
     ))
   )),
 );
+
+// User-facing hierarchy for the internal shortcut: the ledger name is an
+// implementation detail, so the first level is the entry type and the second
+// level is category plus subcategory. The server restores the sole supported
+// ledger when it receives this compact path.
+export const BOOKKEEPING_ENTRY_TYPE_OPTIONS = Object.freeze(
+  Object.entries(BOOKKEEPING_CATALOG).flatMap(([, entryTypes]) => (
+    Object.entries(entryTypes)
+      .filter(([, categories]) => Object.keys(categories).length > 0)
+      .map(([entryType]) => entryType)
+  )),
+);
+export const BOOKKEEPING_COMPACT_SELECTION_OPTIONS = Object.freeze(
+  Object.entries(BOOKKEEPING_CATALOG).flatMap(([, entryTypes]) => (
+    Object.entries(entryTypes).flatMap(([, categories]) => (
+      Object.entries(categories).flatMap(([category, subcategories]) => (
+        (subcategories.length ? subcategories : ["无"]).map((subcategory) => (
+          [category, subcategory].join(SHORTCUT_SELECTION_SEPARATOR)
+        ))
+      ))
+    ))
+  )),
+);
+
+export const BOOKKEEPING_CATEGORY_OPTIONS = Object.freeze({
+  收入: Object.freeze(Object.keys(BOOKKEEPING_CATALOG.出差报销.收入)),
+  支出: Object.freeze(Object.keys(BOOKKEEPING_CATALOG.出差报销.支出)),
+});
+
+export const BOOKKEEPING_SUBCATEGORY_OPTIONS = Object.freeze({
+  餐饮: Object.freeze([...BOOKKEEPING_CATALOG.出差报销.支出.餐饮]),
+  交通: Object.freeze([...BOOKKEEPING_CATALOG.出差报销.支出.交通]),
+  出差: Object.freeze([...BOOKKEEPING_CATALOG.出差报销.收入.出差]),
+});
 
 const STANDARD_INPUT_CONTENT_CLASSES = Object.freeze([
   "WFAppContentItem",
@@ -150,51 +192,160 @@ function conditionalInput(outputUuid, outputName) {
   };
 }
 
-function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERIFY_ENDPOINT } = {}) {
+function authorizationHeader(outputUuid, outputName = CREDENTIAL_OUTPUT_NAME) {
+  const credentialValue = outputUuid
+    ? { OutputUUID: outputUuid, OutputName: outputName, Type: "ActionOutput" }
+    : { Type: "Variable", VariableName: outputName };
+  return {
+    Value: {
+      string: "Bearer ￼",
+      attachmentsByRange: { "{7, 1}": credentialValue },
+    },
+    WFSerializationType: "WFTextTokenString",
+  };
+}
+
+function setVariableParameters(variableName, input) {
+  return {
+    CustomOutputName: variableName,
+    WFVariableName: variableName,
+    WFInput: input,
+  };
+}
+
+function buildPlist({
+  endpoint = DEFAULT_ENDPOINT,
+  verifyEndpoint = DEFAULT_VERIFY_ENDPOINT,
+  pairEndpoint = DEFAULT_PAIR_ENDPOINT,
+} = {}) {
   const allocator = createIdAllocator();
-  const token = allocator.action();
+  const credentialFile = allocator.action();
+  const credentialGroup = allocator.grouping();
+  const credentialText = allocator.action();
+  const credentialFromFile = allocator.action();
+  const pairAccount = allocator.action();
+  const pairPassword = allocator.action();
+  const pairRequest = allocator.action();
+  const pairDevice = allocator.action();
+  const pairToken = allocator.action();
+  const credentialFromPair = allocator.action();
+  const saveCredential = allocator.action();
+  const credentialEnd = allocator.action();
   const verification = allocator.action();
   const verificationStatus = allocator.action();
+  const verificationStatusText = allocator.action();
   const verificationGroup = allocator.grouping();
   const screenshot = allocator.action();
   const crop = allocator.action();
   const ocr = allocator.action();
   const options = allocator.action();
   const selection = allocator.action();
-      const selectionGroup = allocator.grouping();
+  const selectionGroup = allocator.grouping();
   const note = allocator.action();
-      const idText = allocator.action();
+  const idText = allocator.action();
   const hash = allocator.action();
   const request = allocator.action();
 
   const actions = [
-    action("is.workflow.actions.gettext", {
-      CustomOutputName: "系统配置页生成的快捷指令 Token",
-      WFTextActionText: SHORTCUT_TOKEN_PLACEHOLDER,
-    }, token),
+    action("is.workflow.actions.documentpicker.open", {
+      CustomOutputName: "森特智行设备凭据文件",
+      WFGetFilePath: SHORTCUT_CREDENTIAL_FILE_NAME,
+      WFFileErrorIfNotFound: false,
+    }, credentialFile),
+    controlAction("is.workflow.actions.conditional", {
+      GroupingIdentifier: credentialGroup,
+      WFCondition: 100,
+      WFControlFlowMode: 0,
+      WFInput: conditionalInput(credentialFile, "森特智行设备凭据文件"),
+    }),
+    action("is.workflow.actions.detect.text", {
+      CustomOutputName: CREDENTIAL_OUTPUT_NAME,
+      WFInput: attachment(credentialFile, "森特智行设备凭据文件"),
+    }, credentialText),
+    action("is.workflow.actions.setvariable", setVariableParameters(
+      CREDENTIAL_OUTPUT_NAME,
+      attachment(credentialText, CREDENTIAL_OUTPUT_NAME),
+    ), credentialFromFile),
+    controlAction("is.workflow.actions.conditional", {
+      GroupingIdentifier: credentialGroup,
+      WFControlFlowMode: 1,
+    }),
+    action("is.workflow.actions.ask", {
+      CustomOutputName: "森特账号",
+      WFAskActionPrompt: "首次使用请输入森特账号",
+      WFInputType: 0,
+    }, pairAccount),
+    action("is.workflow.actions.ask", {
+      CustomOutputName: "森特密码",
+      WFAskActionPrompt: "请输入森特密码（只用于本次配对，不会保存）",
+      WFInputType: 0,
+    }, pairPassword),
     action("is.workflow.actions.downloadurl", {
-      CustomOutputName: "Token验证响应",
+      CustomOutputName: "快捷指令配对响应",
+      WFHTTPMethod: "POST",
+      WFHTTPBodyType: "JSON",
+      WFURL: pairEndpoint,
+      WFHTTPHeaders: dictionaryField([
+        ["Content-Type", "application/json"],
+      ]),
+      WFJSONValues: dictionaryField([
+        ["account", attachment(pairAccount, "森特账号")],
+        ["password", attachment(pairPassword, "森特密码")],
+        ["label", "iPhone 森特截图记账"],
+      ]),
+    }, pairRequest),
+    action("is.workflow.actions.getvalueforkey", {
+      CustomOutputName: "配对设备信息",
+      WFDictionaryKey: "device",
+      WFInput: attachment(pairRequest, "快捷指令配对响应"),
+    }, pairDevice),
+    action("is.workflow.actions.getvalueforkey", {
+      CustomOutputName: CREDENTIAL_OUTPUT_NAME,
+      WFDictionaryKey: "token",
+      WFInput: attachment(pairDevice, "配对设备信息"),
+    }, pairToken),
+    action("is.workflow.actions.setvariable", setVariableParameters(
+      CREDENTIAL_OUTPUT_NAME,
+      attachment(pairToken, CREDENTIAL_OUTPUT_NAME),
+    ), credentialFromPair),
+    action("is.workflow.actions.documentpicker.save", {
+      CustomOutputName: "已保存森特设备凭据",
+      WFInput: attachment(pairToken, CREDENTIAL_OUTPUT_NAME),
+      WFAskWhereToSave: false,
+      WFFileDestinationPath: SHORTCUT_CREDENTIAL_SAVE_PATH,
+      WFSaveFileOverwrite: true,
+    }, saveCredential),
+    controlAction("is.workflow.actions.showresult", {
+      Text: literalToken("已完成首次配对，设备凭据已保存到 iCloud Drive；以后无需再次输入账号密码。"),
+    }),
+    action("is.workflow.actions.conditional", {
+      GroupingIdentifier: credentialGroup,
+      WFControlFlowMode: 2,
+    }, credentialEnd),
+    action("is.workflow.actions.downloadurl", {
+      CustomOutputName: "快捷指令验证响应",
       WFHTTPMethod: "GET",
       WFURL: verifyEndpoint,
       WFHTTPHeaders: dictionaryField([
-        ["Authorization", {
-          Value: { string: "Bearer ￼", attachmentsByRange: { "{7, 1}": { OutputUUID: token, Type: "ActionOutput" } } },
-          WFSerializationType: "WFTextTokenString",
-        }],
+        ["Authorization", authorizationHeader(null, CREDENTIAL_OUTPUT_NAME)],
         ["X-Shortcut-Verification-Mode", "explain"],
       ]),
     }, verification),
     action("is.workflow.actions.getvalueforkey", {
       CustomOutputName: VERIFICATION_STATUS_OUTPUT_NAME,
       WFDictionaryKey: "status",
-      WFInput: attachment(verification, "Token验证响应"),
+      WFInput: attachment(verification, "快捷指令验证响应"),
     }, verificationStatus),
+    action("is.workflow.actions.gettext", {
+      CustomOutputName: VERIFICATION_STATUS_TEXT_OUTPUT_NAME,
+      WFTextActionText: actionOutputText(verificationStatus, VERIFICATION_STATUS_OUTPUT_NAME),
+    }, verificationStatusText),
     controlAction("is.workflow.actions.conditional", {
       GroupingIdentifier: verificationGroup,
       WFCondition: 4,
       WFConditionalActionString: "ok",
       WFControlFlowMode: 0,
-      WFInput: conditionalInput(verificationStatus, VERIFICATION_STATUS_OUTPUT_NAME),
+      WFInput: conditionalInput(verificationStatusText, VERIFICATION_STATUS_TEXT_OUTPUT_NAME),
     }),
     action("is.workflow.actions.takescreenshot", {}, screenshot),
     action("is.workflow.actions.image.crop", {
@@ -246,10 +397,7 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
       WFHTTPBodyType: "JSON",
       WFURL: endpoint,
       WFHTTPHeaders: dictionaryField([
-        ["Authorization", {
-          Value: { string: "Bearer ￼", attachmentsByRange: { "{7, 1}": { OutputUUID: token, Type: "ActionOutput" } } },
-          WFSerializationType: "WFTextTokenString",
-        }],
+        ["Authorization", authorizationHeader(null, CREDENTIAL_OUTPUT_NAME)],
       ]),
       WFJSONValues: dictionaryField([
         ["text", attachment(ocr, "图像中的文本")],
@@ -278,7 +426,7 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
       WFControlFlowMode: 1,
     }),
     controlAction("is.workflow.actions.showresult", {
-      Text: actionOutputText(verification, "Token验证响应"),
+      Text: actionOutputText(verification, "快捷指令验证响应"),
     }),
     action("is.workflow.actions.conditional", {
       GroupingIdentifier: verificationGroup,
@@ -289,22 +437,15 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
   return {
     WFQuickActionSurfaces: [],
     WFWorkflowActions: actions,
-    WFWorkflowClientVersion: "4033.0.3.5",
+    // Keep this in sync with the current macOS Shortcuts archive format so
+    // current document-picker parameters survive import unchanged.
+    WFWorkflowClientVersion: "4711",
     WFWorkflowHasOutputFallback: false,
     WFWorkflowHasShortcutInputVariables: false,
     WFWorkflowIcon: { WFWorkflowIconStartColor: -20702977, WFWorkflowIconGlyphNumber: 61523 },
-    WFWorkflowImportQuestions: [
-      {
-        ActionIndex: 0,
-        Category: "Parameter",
-        DefaultValue: SHORTCUT_TOKEN_PLACEHOLDER,
-        ParameterKey: "WFTextActionText",
-        Text: "系统配置页生成的快捷指令 Token",
-      },
-    ],
     WFWorkflowInputContentItemClasses: [...STANDARD_INPUT_CONTENT_CLASSES],
-    WFWorkflowMinimumClientVersion: 900,
-    WFWorkflowMinimumClientVersionString: "900",
+    WFWorkflowMinimumClientVersion: 1106,
+    WFWorkflowMinimumClientVersionString: "1106",
     WFWorkflowOutputContentItemClasses: [],
     WFWorkflowTypes: ["Watch", "WFWorkflowTypeShowInSearch"],
   };
@@ -313,9 +454,10 @@ function buildPlist({ endpoint = DEFAULT_ENDPOINT, verifyEndpoint = DEFAULT_VERI
 export async function buildBookkeepingShortcut({
   endpoint = DEFAULT_ENDPOINT,
   verifyEndpoint = DEFAULT_VERIFY_ENDPOINT,
+  pairEndpoint = DEFAULT_PAIR_ENDPOINT,
   outputPath = defaultOutputPath,
 } = {}) {
-  const plist = buildPlist({ endpoint, verifyEndpoint });
+  const plist = buildPlist({ endpoint, verifyEndpoint, pairEndpoint });
   const xml = serializePlistXml(plist);
   const report = inspectBookkeepingShortcutXml(xml);
   await writeFile(outputPath, xml, { encoding: "utf8", mode: 0o600 });
@@ -326,10 +468,11 @@ export async function buildBookkeepingShortcut({
 function parseCliArguments(argv) {
   const values = {};
   for (const argument of argv) {
-    const match = /^--(endpoint|verify-endpoint|output)=(.+)$/u.exec(argument);
+    const match = /^--(endpoint|verify-endpoint|pair-endpoint|output)=(.+)$/u.exec(argument);
     if (!match) throw new Error(`Unknown argument: ${argument}`);
     if (match[1] === "output") values.outputPath = resolve(match[2]);
     else if (match[1] === "verify-endpoint") values.verifyEndpoint = match[2];
+    else if (match[1] === "pair-endpoint") values.pairEndpoint = match[2];
     else values.endpoint = match[2];
   }
   return values;

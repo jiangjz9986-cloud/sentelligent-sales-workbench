@@ -5,11 +5,15 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
+import { openDatabase } from "../src/db.js";
 import { createServer } from "../src/server.js";
+import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 
 const password = "test-token-api-password";
 const account = "jiangjz";
 const legacyToken = "test-token";
+const machineToken = "test-machine-token";
+const sender = "shortcut-sender";
 
 let tempDir;
 let server;
@@ -25,6 +29,15 @@ async function request(path, options = {}) {
 
 function cookiePair(response) {
   return String(response.headers.get("set-cookie") ?? "").split(";", 1)[0];
+}
+
+function workerHeaders() {
+  return {
+    Authorization: `Bearer ${machineToken}`,
+    "X-Weixin-Worker-Id": "review-test-worker",
+    "X-Weixin-Delivery-Status": "ready",
+    "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(account, sender),
+  };
 }
 
 async function login() {
@@ -50,6 +63,12 @@ async function startServer(serverOptions = {}) {
     corsAllowedOrigins: [],
     shortcutWebhookToken: legacyToken,
     shortcutWebhookOwner: account,
+    shortcutWeixinConfirmationEnabled: true,
+    weixinAgentApiToken: machineToken,
+    weixinAgentOwner: account,
+    weixinBookkeepingOwner: account,
+    weixinBookkeepingSenderId: sender,
+    weixinAllowedSenderIds: [sender],
     travelExpenseAnalyzer: async () => ({
       status: "ready",
       confidence: 1,
@@ -70,6 +89,10 @@ async function startServer(serverOptions = {}) {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const heartbeat = await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
+    headers: workerHeaders(),
+  });
+  assert.equal(heartbeat.status, 204);
 }
 
 beforeEach(startServer);
@@ -108,6 +131,11 @@ describe("Shortcut webhook token management API", () => {
     });
     assert.equal(created.response.status, 202);
     assert.equal(created.body.item.status, "review_required");
+    const staleDraft = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(staleDraft.response.status, 200);
+    assert.match(staleDraft.body.item.message, /(?:^|\n)\d{6}(?:\n|$)/u);
 
     const session = await login();
     const list = await request("/api/integrations/shortcut/bookkeeping/review?status=review_required", {
@@ -147,6 +175,35 @@ describe("Shortcut webhook token management API", () => {
     assert.ok(confirmed.body.item.expenseId);
     assert.ok(confirmed.body.item.paymentId);
 
+    const staleLease = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${machineToken}` },
+      body: JSON.stringify({
+        id: staleDraft.body.item.id,
+        leaseToken: staleDraft.body.leaseToken,
+        check: true,
+      }),
+    });
+    assert.equal(staleLease.response.status, 200);
+    assert.equal(staleLease.body.current, false);
+
+    const receipt = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(receipt.response.status, 200);
+    assert.match(receipt.body.item.message, /已确认并录入森特智行/u);
+    assert.doesNotMatch(receipt.body.item.message, /(?:^|\n)\d{6}(?:\n|$)/u);
+    const receiptAck = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${machineToken}` },
+      body: JSON.stringify({
+        id: receipt.body.item.id,
+        leaseToken: receipt.body.leaseToken,
+        ok: true,
+      }),
+    });
+    assert.equal(receiptAck.response.status, 200);
+
     const replay = await request(`/api/integrations/shortcut/bookkeeping/review/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: { Cookie: session.cookie, "X-CSRF-Token": session.csrf },
@@ -154,7 +211,185 @@ describe("Shortcut webhook token management API", () => {
     });
     assert.equal(replay.response.status, 200);
     assert.equal(replay.body.item.expenseId, confirmed.body.item.expenseId);
+
+    const next = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${legacyToken}` },
+      body: JSON.stringify({
+        text: "下一笔待复核差旅记录",
+        selection_path: "出差报销 · 支出 · 餐饮 · 午餐",
+        note: "下一笔",
+        idempotency_key: "shortcut-review-api-next",
+        source: "shortcut",
+      }),
+    });
+    assert.equal(next.response.status, 202);
+    assert.notEqual(next.body.error?.code, "ASSISTANT_ACTION_PENDING");
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "test.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM assistant_pending_actions WHERE status = 'executed'").get().count, 1);
+    assert.equal(db.prepare("SELECT status FROM weixin_confirmation_outbox WHERE id = ?").get(staleDraft.body.item.id).status, "failed");
+    db.close();
     await rm(staleTempDir, { recursive: true, force: true });
+  });
+
+  it("cancels a sent WeChat code after Web rejection and frees the next bookkeeping draft", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${legacyToken}` },
+      body: JSON.stringify({
+        text: "2026-08-16 打车 12.80 元",
+        selection_path: "出差报销 · 支出 · 交通 · 打车",
+        note: "网页拒绝测试",
+        idempotency_key: "shortcut-web-reject",
+        source: "shortcut",
+      }),
+    });
+    assert.equal(created.response.status, 202);
+    const draft = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(draft.response.status, 200);
+    const code = draft.body.item.message.match(/(?:^|\n)(\d{6})(?:\n|$)/u)?.[1];
+    assert.ok(code);
+    const draftAck = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${machineToken}` },
+      body: JSON.stringify({ id: draft.body.item.id, leaseToken: draft.body.leaseToken, ok: true }),
+    });
+    assert.equal(draftAck.response.status, 200);
+
+    const session = await login();
+    const rejected = await request(`/api/integrations/shortcut/bookkeeping/review/${created.body.item.id}/reject`, {
+      method: "POST",
+      headers: { Cookie: session.cookie, "X-CSRF-Token": session.csrf },
+      body: JSON.stringify({ reason: "网页人工拒绝" }),
+    });
+    assert.equal(rejected.response.status, 200);
+    assert.equal(rejected.body.item.status, "rejected");
+
+    const oldCode = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${machineToken}`,
+        "Idempotency-Key": "weixin:web-reject-old-code",
+      },
+      body: JSON.stringify({
+        conversationId: "web-reject-old-code",
+        text: code,
+        sourceMessageId: "web-reject-old-code",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.notEqual(oldCode.body?.status, "ok");
+
+    const cancellation = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(cancellation.response.status, 200);
+    assert.match(cancellation.body.item.message, /已取消快捷记账/u);
+    assert.doesNotMatch(cancellation.body.item.message, /(?:^|\n)\d{6}(?:\n|$)/u);
+
+    const replay = await request(`/api/integrations/shortcut/bookkeeping/review/${created.body.item.id}/reject`, {
+      method: "POST",
+      headers: { Cookie: session.cookie, "X-CSRF-Token": session.csrf },
+      body: JSON.stringify({ reason: "网页人工拒绝" }),
+    });
+    assert.equal(replay.response.status, 200);
+    assert.equal(replay.body.item.status, "rejected");
+
+    const next = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${legacyToken}` },
+      body: JSON.stringify({
+        text: "2026-08-17 早餐 18 元",
+        selection_path: "出差报销 · 支出 · 餐饮 · 早餐",
+        note: "拒绝后的下一笔",
+        idempotency_key: "shortcut-after-web-reject",
+        source: "shortcut",
+      }),
+    });
+    assert.equal(next.response.status, 202);
+    assert.notEqual(next.body.error?.code, "ASSISTANT_ACTION_PENDING");
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "test.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 0);
+    assert.equal(db.prepare("SELECT status FROM assistant_pending_actions ORDER BY created_at, id LIMIT 1").get().status, "cancelled");
+    db.close();
+  });
+
+  it("reconciles an accepted receipt after Web settlement is interrupted post-write", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${legacyToken}` },
+      body: JSON.stringify({
+        text: "2026-08-16 午餐 28 元",
+        selection_path: "出差报销 · 支出 · 餐饮 · 午餐",
+        note: "网页结算恢复测试",
+        idempotency_key: "shortcut-web-settlement-recovery",
+        source: "shortcut",
+      }),
+    });
+    assert.equal(created.response.status, 202);
+    const session = await login();
+    const faultDb = openDatabase({ databaseUrl: join(tempDir, "test.sqlite") });
+    faultDb.exec(`
+      CREATE TRIGGER fail_web_review_settlement
+      BEFORE UPDATE ON assistant_pending_actions
+      WHEN NEW.status = 'executed' AND OLD.status <> 'executed'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced web review settlement failure');
+      END;
+    `);
+    faultDb.close();
+
+    const interrupted = await request(`/api/integrations/shortcut/bookkeeping/review/${created.body.item.id}/confirm`, {
+      method: "POST",
+      headers: { Cookie: session.cookie, "X-CSRF-Token": session.csrf },
+      body: JSON.stringify({
+        analysis: {
+          status: "ready",
+          confidence: 1,
+          expense: {
+            occurredOn: "2026-08-16",
+            amountCents: 2800,
+            reimbursementCents: 2800,
+            purpose: "客户拜访午餐",
+            merchant: "示例餐厅",
+          },
+          warnings: [],
+          source: { provider: "manual", model: null },
+        },
+      }),
+    });
+    assert.ok(interrupted.response.status >= 400);
+
+    const beforeRecovery = openDatabase({ databaseUrl: join(tempDir, "test.sqlite") });
+    assert.equal(beforeRecovery.prepare("SELECT status FROM shortcut_bookkeeping_entries WHERE id = ?").get(created.body.item.id).status, "accepted");
+    assert.equal(beforeRecovery.prepare("SELECT status FROM assistant_pending_actions").get().status, "pending");
+    assert.equal(beforeRecovery.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
+    assert.equal(beforeRecovery.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+    assert.equal(beforeRecovery.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox WHERE json_extract(payload_json, '$.kind') = 'accepted'").get().count, 0);
+    beforeRecovery.exec("DROP TRIGGER fail_web_review_settlement");
+    beforeRecovery.close();
+
+    const receipt = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(receipt.response.status, 200);
+    assert.match(receipt.body.item.message, /已确认并录入森特智行/u);
+    assert.doesNotMatch(receipt.body.item.message, /(?:^|\n)\d{6}(?:\n|$)/u);
+
+    const recovered = openDatabase({ databaseUrl: join(tempDir, "test.sqlite") });
+    assert.equal(recovered.prepare("SELECT status FROM assistant_pending_actions").get().status, "executed");
+    assert.equal(recovered.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
+    assert.equal(recovered.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+    assert.equal(recovered.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox WHERE json_extract(payload_json, '$.kind') = 'accepted'").get().count, 1);
+    recovered.close();
   });
 
   it("requires a cookie session and CSRF for management writes", async () => {
@@ -196,11 +431,11 @@ describe("Shortcut webhook token management API", () => {
       },
     });
     assert.equal(verified.response.status, 200);
-    assert.equal(verified.body.status, "error");
+    assert.equal(verified.body.status, "ok");
     assert.equal(verified.body.tokenValid, true);
-    assert.equal(verified.body.bookkeepingReady, false);
-    assert.equal(verified.body.error.code, "SHORTCUT_BOOKKEEPING_NOT_READY");
-    assert.equal(verified.body.error.message, "Token 验证成功，但记账服务尚未完成配置");
+    assert.equal(verified.body.bookkeepingReady, true);
+    assert.equal(verified.body.weixinConfirmationReady, true);
+    assert.deepEqual(verified.body.confirmationDelivery, { status: "ready" });
 
     const listed = await request("/api/integrations/shortcut/tokens", {
       headers: { Cookie: session.cookie },
@@ -237,7 +472,8 @@ describe("Shortcut webhook token management API", () => {
     });
     assert.equal(response.response.status, 200);
     assert.equal(response.body.tokenValid, true);
-    assert.equal(response.body.bookkeepingReady, false);
-    assert.equal(response.body.error.code, "SHORTCUT_BOOKKEEPING_NOT_READY");
+    assert.equal(response.body.bookkeepingReady, true);
+    assert.equal(response.body.weixinConfirmationReady, true);
+    assert.deepEqual(response.body.confirmationDelivery, { status: "ready" });
   });
 });

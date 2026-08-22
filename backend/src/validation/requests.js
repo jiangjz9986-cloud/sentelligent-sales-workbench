@@ -185,6 +185,11 @@ export const requestSchemas = freezeSchema({
     account: text(100, { required: true }),
     password: text(1000, { required: true }),
   },
+  shortcutPairing: {
+    account: text(100, { required: true }),
+    password: text(1000, { required: true }),
+    label: text(100, { nullable: true }),
+  },
   customerCreate: {
     name: text(200, { required: true }), region: text(100, { nullable: true }), type: text(100, { nullable: true }),
     level: text(50, { nullable: true }), owner: text(100, { nullable: true }), contact: text(500, { nullable: true }),

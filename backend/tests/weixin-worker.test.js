@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
 import { runWeixinWorker } from "../src/weixin/worker.js";
+import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 
 function syntheticLabel(...parts) {
   return parts.join("-");
@@ -30,6 +31,7 @@ describe("WeChat worker wiring", () => {
         authSessionSecret: Buffer.alloc(32, 14).toString("base64url"),
         weixinAgentApiToken: syntheticLabel("worker", "token", "sentinel"),
         weixinAgentBackendUrl: "https://sales.example.test",
+        weixinAllowedSenderIds: ["sender-1"],
       },
     };
     const result = await runWeixinWorker(["start"], workerOptions);
@@ -49,6 +51,19 @@ describe("WeChat worker wiring", () => {
     assert.deepEqual(capturedStarts[0].options.deliveryKey, expectedDeliveryKey);
     assert.deepEqual(capturedStarts[0].options.deliveryKey, capturedStarts[1].options.deliveryKey);
     assert.notDeepEqual(capturedStarts[0].options.deliveryKey, capturedStarts[2].options.deliveryKey);
+    assert.equal(capturedStarts[0].options.authorizeInbound({
+      senderId: "sender-1",
+      chatType: "direct",
+    }), true);
+    assert.equal(capturedStarts[0].options.authorizeInbound({
+      senderId: "unlisted-sender",
+      chatType: "direct",
+    }), false);
+    assert.equal(capturedStarts[0].options.authorizeInbound({
+      senderId: "sender-1",
+      chatType: "group",
+      groupId: "unlisted-group",
+    }), false);
 
     const reply = await capturedStarts[0].agent.chat({
       conversationId: "worker-conversation",
@@ -59,9 +74,10 @@ describe("WeChat worker wiring", () => {
       deliveryTimestampMs: 1786500000123,
     });
     assert.equal(reply.text, "已处理");
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, "https://sales.example.test/api/integrations/weixin-agent/events");
-    assert.equal(JSON.parse(requests[0].options.body).senderId, "sender-1");
+    const eventRequests = requests.filter(({ url }) => url.endsWith("/api/integrations/weixin-agent/events"));
+    assert.equal(eventRequests.length, 1);
+    assert.equal(eventRequests[0].url, "https://sales.example.test/api/integrations/weixin-agent/events");
+    assert.equal(JSON.parse(eventRequests[0].options.body).senderId, "sender-1");
   });
 
   it("fails closed for missing SDK delivery metadata without leaking worker secrets", async () => {
@@ -100,6 +116,119 @@ describe("WeChat worker wiring", () => {
         return true;
       });
     }
+  });
+
+  it("binds an outbox lease to the configured SDK recipient before sending", async () => {
+    let releaseWait;
+    const waitForAck = new Promise((resolve) => { releaseWait = resolve; });
+    const sent = [];
+    const requests = [];
+    let leaseReturned = false;
+    const sdk = {
+      start() {
+        return {
+          getDeliveryStatus() { return { ready: true, status: "ready" }; },
+          isDeliveryTarget(senderId) { return senderId === "sender-1"; },
+          async sendMessageTo(senderId, message) { sent.push({ senderId, message }); },
+          async wait() { await waitForAck; },
+        };
+      },
+    };
+    await runWeixinWorker(["start"], {
+      sdk,
+      fetchImpl: async (url, options) => {
+        requests.push({ url, options });
+        if (url.endsWith("/api/integrations/weixin-agent/confirmation-outbox") && options.method === "GET") {
+          if (leaseReturned) return new Response(null, { status: 204 });
+          leaseReturned = true;
+          return new Response(JSON.stringify({
+            item: {
+              id: "outbox-bound",
+              owner: "assistant-owner",
+              conversationId: shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
+              deliveryScope: shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
+              message: "synthetic bookkeeping draft",
+            },
+            leaseToken: syntheticLabel("lease", "bound"),
+          }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        if (url.endsWith("/api/integrations/weixin-agent/confirmation-outbox") && options.method === "POST") {
+          if (JSON.parse(options.body).check === true) {
+            return new Response(JSON.stringify({ current: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          releaseWait();
+          return new Response(JSON.stringify({ item: { id: "outbox-bound", status: "sent" } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error(`unexpected worker request: ${url}`);
+      },
+      configOverrides: {
+        nodeEnv: "test",
+        authRequired: false,
+        authSessionSecret: Buffer.alloc(32, 16).toString("base64url"),
+        weixinAgentApiToken: syntheticLabel("worker", "bound", "token"),
+        weixinAgentBackendUrl: "https://sales.example.test",
+        weixinAgentOwner: "assistant-owner",
+        shortcutWeixinConfirmationEnabled: true,
+        weixinBookkeepingOwner: "assistant-owner",
+        weixinBookkeepingSenderId: "sender-1",
+        weixinAllowedSenderIds: ["sender-1"],
+      },
+    });
+    assert.deepEqual(sent, [{ senderId: "sender-1", message: "synthetic bookkeeping draft" }]);
+    const leaseRequest = requests.find(({ options }) => options.method === "GET");
+    assert.equal(leaseRequest.options.headers["X-Weixin-Delivery-Status"], "ready");
+    assert.equal(
+      leaseRequest.options.headers["X-Weixin-Delivery-Scope"],
+      shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
+    );
+  });
+
+  it("reports recipient mismatch and never sends or acknowledges a leased message", async () => {
+    let releaseWait;
+    const waitForPoll = new Promise((resolve) => { releaseWait = resolve; });
+    let sendCalls = 0;
+    const requests = [];
+    const sdk = {
+      start() {
+        return {
+          getDeliveryStatus() { return { ready: true, status: "ready" }; },
+          isDeliveryTarget() { return false; },
+          async sendMessageTo() { sendCalls += 1; },
+          async wait() { await waitForPoll; },
+        };
+      },
+    };
+    await runWeixinWorker(["start"], {
+      sdk,
+      fetchImpl: async (url, options) => {
+        requests.push({ url, options });
+        releaseWait();
+        return new Response(null, { status: 204 });
+      },
+      configOverrides: {
+        nodeEnv: "test",
+        authRequired: false,
+        authSessionSecret: Buffer.alloc(32, 17).toString("base64url"),
+        weixinAgentApiToken: syntheticLabel("worker", "mismatch", "token"),
+        weixinAgentBackendUrl: "https://sales.example.test",
+        weixinAgentOwner: "assistant-owner",
+        shortcutWeixinConfirmationEnabled: true,
+        weixinBookkeepingOwner: "assistant-owner",
+        weixinBookkeepingSenderId: "sender-1",
+        weixinAllowedSenderIds: ["sender-1"],
+      },
+    });
+    assert.equal(sendCalls, 0);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].options.method, "GET");
+    assert.equal(requests[0].options.headers["X-Weixin-Delivery-Status"], "not_ready");
+    assert.equal(requests[0].options.headers["X-Weixin-Delivery-Reason"], "recipient_mismatch");
   });
 
   it("keeps help and worker errors free of tokens, keys, and deprecated fallback names", async () => {

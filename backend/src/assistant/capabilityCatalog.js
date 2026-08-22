@@ -132,6 +132,21 @@ export const CAPABILITY_CATALOG = deepFreeze([
     sourceRefs: ["agentRegistry:travel-expense", "toolRegistry:travel-expense.summary"],
   }),
   capability({
+    id: "shortcut-bookkeeping.confirmation",
+    name: "快捷记账微信复核",
+    description: "接收 iOS 快捷指令识别结果，经小小助手在同一微信会话展示、修改并确认后写入差旅费用和付款凭证。",
+    status: "partial",
+    mappings: {
+      tools: ["shortcut-bookkeeping.confirm"],
+      apis: ["POST /api/integrations/shortcut/bookkeeping", "POST /api/integrations/weixin-agent/events"],
+    },
+    dependencies: ["Shortcut device credential", "iCloud device credential file", "WEIXIN_AGENT_OWNER", "allowlisted direct sender", "durable confirmation outbox", "six-digit human confirmation"],
+    integrationPoints: ["shortcut bookkeeping webhook", "assistant pending action", "WeChat worker outbox"],
+    confirmationLevel: "explicit",
+    unavailableReason: "启用前必须配置明确的微信 sender 白名单并保持 WeChat worker 在线；未收到入站上下文时只排队，不会假称已发送。",
+    sourceRefs: ["agentRegistry:shortcut-bookkeeping.confirm", "assistant:shortcutBookkeepingRuntime", "weixin:confirmation-outbox"],
+  }),
+  capability({
     id: "reimbursement-report",
     name: "报销周汇总",
     description: "预览自然周实付、登记可报销金额、已匹配发票、缺票及确认前阻塞，不修改费用或公司规则。",

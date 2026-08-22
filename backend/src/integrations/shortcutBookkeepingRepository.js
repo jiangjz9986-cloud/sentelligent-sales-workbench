@@ -8,12 +8,6 @@ import { resolveShortcutCategory } from "./shortcutBookkeeping.js";
 const COMPLETED_STATUSES = new Set(["accepted", "review_required", "rejected"]);
 const FUNDING_SOURCES = new Set(["personal", "company", "advance"]);
 const PAYMENT_METHODS = new Set(["wechat", "alipay", "card", "cash", "other"]);
-const REMOTE_COMPLETION_STATUSES = new Set([
-  "pending",
-  "processing",
-  "review",
-  "confirmed",
-]);
 
 function isPlainObject(value) {
   return value !== null
@@ -100,7 +94,10 @@ function referenceCode(occurredOn, id) {
   return `EXP-${occurredOn.replaceAll("-", "")}-${hashValue(id).slice(0, 8).toUpperCase()}`;
 }
 
-function legacyCategory({ ledgerName, entryType, category, subcategory }) {
+function legacyCategory(input = {}) {
+  const ledgerName = input.ledgerName ?? input.ledger_name;
+  const entryType = input.entryType ?? input.entry_type;
+  const { category, subcategory } = input;
   if (entryType === "income") return "other";
   if (ledgerName === "出差报销") {
     if (category === "餐饮") {
@@ -109,9 +106,9 @@ function legacyCategory({ ledgerName, entryType, category, subcategory }) {
           : subcategory === "晚餐" ? "dinner"
             : "other";
     }
-    if (category === "住宿费") return "lodging";
-    if (category === "交通" || category === "汽车维修") return "transport";
-    if (category === "招待/礼品") return "hospitality";
+    if (category === "住宿") return "lodging";
+    if (category === "交通") return "transport";
+    if (category === "招待" || category === "礼品") return "hospitality";
   }
   return "other";
 }
@@ -223,15 +220,55 @@ function normalizeAnalysis(value, row) {
     : "review_required";
   const confidence = Number(value.confidence);
   const expense = normalizeExpense(value.expense, { required: status === "ready" });
+  const category = requiredText(value.category ?? row.category, "analysis.category", 100);
+  const subcategory = optionalText(value.subcategory ?? row.subcategory, "analysis.subcategory", 100);
+  const resolvedSelection = resolveShortcutCategory({
+    ledgerName: row.ledger_name,
+    entryType: row.entry_type,
+    category,
+    subcategory,
+  });
+  const note = optionalText(value.note ?? row.note, "analysis.note", 1_000);
   if (status === "ready" && !expense.purpose) {
-    expense.purpose = `${row.category}${row.subcategory ? `-${row.subcategory}` : ""}`;
+    expense.purpose = `${resolvedSelection.category}${resolvedSelection.subcategory ? `-${resolvedSelection.subcategory}` : ""}`;
   }
   return {
     status,
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
+    category: resolvedSelection.category,
+    subcategory: resolvedSelection.subcategory,
+    note,
     expense,
     warnings: normalizeWarnings(value.warnings),
     source: normalizeSource(value.source),
+  };
+}
+
+function normalizeReviewPatch(value, row) {
+  if (value === undefined) return null;
+  if (!isPlainObject(value)) throw new TypeError("reviewPatch must be an object");
+  const allowed = new Set(["category", "subcategory", "note"]);
+  const unknown = Object.keys(value).find((key) => !allowed.has(key));
+  if (unknown) throw new TypeError(`reviewPatch.${unknown} is not allowed`);
+  const category = Object.hasOwn(value, "category")
+    ? requiredText(value.category, "reviewPatch.category", 100)
+    : requiredText(row.category, "stored category", 100);
+  const subcategory = Object.hasOwn(value, "subcategory")
+    ? optionalText(value.subcategory, "reviewPatch.subcategory", 100)
+    : optionalText(row.subcategory, "stored subcategory", 100);
+  const note = Object.hasOwn(value, "note")
+    ? optionalText(value.note, "reviewPatch.note", 1_000)
+    : optionalText(row.note, "stored note", 1_000);
+  const resolved = resolveShortcutCategory({
+    ledgerName: row.ledger_name,
+    entryType: row.entry_type,
+    category,
+    subcategory,
+  });
+  return {
+    category: resolved.category,
+    subcategory: resolved.subcategory,
+    note,
   };
 }
 
@@ -456,7 +493,7 @@ export function createShortcutBookkeepingRepository(db, {
     });
   }
 
-  function rejectReview(idValue, { owner, actor, reason } = {}) {
+  function rejectReview(idValue, { owner, actor, reason, purge = false } = {}) {
     const id = requiredText(idValue, "id", 200);
     const normalizedOwner = requiredText(owner, "owner", 200);
     const normalizedActor = requiredText(actor ?? owner, "actor", 200);
@@ -471,12 +508,23 @@ export function createShortcutBookkeepingRepository(db, {
         throw new HttpError(409, "SHORTCUT_BOOKKEEPING_REVIEW_STATE_CONFLICT", "Shortcut review item is not awaiting review");
       }
       const now = nowIso(clock);
-      db.prepare(`
-        UPDATE shortcut_bookkeeping_entries
-        SET status = 'rejected', lease_started_at = NULL, error_code = 'MANUAL_REJECTED',
-            updated_at = $now, warnings_json = json_insert(warnings_json, '$[#]', $reason)
-        WHERE id = $id AND owner = $owner AND status = 'review_required'
-      `).run({ $id: id, $owner: normalizedOwner, $now: now, $reason: normalizedReason });
+      const statement = purge
+        ? `
+          UPDATE shortcut_bookkeeping_entries
+          SET status = 'rejected', lease_started_at = NULL, error_code = 'MANUAL_REJECTED',
+              raw_text = '[已取消]', analysis_json = NULL, analysis_provider = NULL,
+              analysis_model = NULL, occurred_on = NULL, amount_cents = NULL,
+              merchant = NULL, purpose = NULL, note = NULL,
+              updated_at = $now, warnings_json = json_insert(warnings_json, '$[#]', $reason)
+          WHERE id = $id AND owner = $owner AND status = 'review_required'
+        `
+        : `
+          UPDATE shortcut_bookkeeping_entries
+          SET status = 'rejected', lease_started_at = NULL, error_code = 'MANUAL_REJECTED',
+              updated_at = $now, warnings_json = json_insert(warnings_json, '$[#]', $reason)
+          WHERE id = $id AND owner = $owner AND status = 'review_required'
+        `;
+      db.prepare(statement).run({ $id: id, $owner: normalizedOwner, $now: now, $reason: normalizedReason });
       insertAudit(db, {
         action: "shortcut_bookkeeping.manual_reject",
         entityType: "shortcut_bookkeeping_entry",
@@ -551,15 +599,32 @@ export function createShortcutBookkeepingRepository(db, {
     return { id, current, replayed: false };
   }
 
-  function completeLocal(idValue, { analysis: analysisValue, leaseToken } = {}) {
+  function completeLocal(idValue, { analysis: analysisValue, leaseToken, reviewPatch } = {}) {
     return withImmediateTransaction(db, () => {
       const state = currentProcessing(idValue, leaseToken, "sentelligent");
       if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
       const { id, current } = state;
-      if (current.ledger_name !== "出差报销" || current.entry_type !== "expense") {
-        throw new TypeError("Sentelligent Shortcut bookkeeping only supports 出差报销 expense entries");
+      if (current.ledger_name !== "出差报销"
+        || !["income", "expense"].includes(current.entry_type)) {
+        throw new TypeError("Sentelligent Shortcut bookkeeping entry type is invalid");
       }
-      const analysis = normalizeAnalysis(analysisValue, current);
+      const normalizedReviewPatch = normalizeReviewPatch(reviewPatch, current);
+      const effectiveCurrent = normalizedReviewPatch
+        ? { ...current, ...normalizedReviewPatch }
+        : current;
+      if (normalizedReviewPatch) {
+        db.prepare(`
+          UPDATE shortcut_bookkeeping_entries
+          SET category = $category, subcategory = $subcategory, note = $note
+          WHERE id = $id AND status = 'processing'
+        `).run({
+          $id: id,
+          $category: normalizedReviewPatch.category,
+          $subcategory: normalizedReviewPatch.subcategory,
+          $note: normalizedReviewPatch.note,
+        });
+      }
+      const analysis = normalizeAnalysis(analysisValue, effectiveCurrent);
       const now = nowIso(clock);
       const stored = {
         $id: id,
@@ -571,6 +636,9 @@ export function createShortcutBookkeepingRepository(db, {
         $amountCents: analysis.expense?.amountCents ?? null,
         $merchant: analysis.expense?.merchant ?? null,
         $purpose: analysis.expense?.purpose ?? null,
+        $category: effectiveCurrent.category,
+        $subcategory: effectiveCurrent.subcategory,
+        $note: effectiveCurrent.note,
         $now: now,
       };
       if (analysis.status === "review_required") {
@@ -580,7 +648,9 @@ export function createShortcutBookkeepingRepository(db, {
               lease_started_at = NULL, analysis_provider = $provider, analysis_model = $model,
               analysis_json = $analysisJson, warnings_json = $warningsJson,
               occurred_on = $occurredOn, amount_cents = $amountCents,
-              merchant = $merchant, purpose = $purpose, error_code = NULL, updated_at = $now
+              merchant = $merchant, purpose = $purpose,
+              category = $category, subcategory = $subcategory, note = $note,
+              error_code = NULL, updated_at = $now
           WHERE id = $id
         `).run(stored);
         insertAudit(db, {
@@ -592,6 +662,43 @@ export function createShortcutBookkeepingRepository(db, {
           before: { status: current.status },
           after: { status: "review_required", warningCount: analysis.warnings.length },
           metadata: { owner: current.owner, ledgerName: current.ledger_name, targetSystem: current.target_system },
+        });
+        return { item: itemFromRow(selectById.get({ $id: id })), replayed: false };
+      }
+
+      if (current.entry_type === "income") {
+        db.prepare(`
+          UPDATE shortcut_bookkeeping_entries
+          SET status = 'accepted', attempt_count = attempt_count + 1, lease_started_at = NULL,
+              analysis_provider = $provider, analysis_model = $model,
+              analysis_json = $analysisJson, warnings_json = $warningsJson,
+              occurred_on = $occurredOn, amount_cents = $amountCents,
+              merchant = $merchant, purpose = $purpose,
+              category = $category, subcategory = $subcategory, note = $note,
+              expense_id = NULL, payment_id = NULL,
+              error_code = NULL, updated_at = $now
+          WHERE id = $id
+        `).run(stored);
+        insertAudit(db, {
+          action: "shortcut_bookkeeping.accept",
+          entityType: "shortcut_bookkeeping_entry",
+          entityId: id,
+          actor: current.actor,
+          requestId: current.source_id,
+          before: { status: current.status },
+          after: {
+            status: "accepted",
+            entryType: "income",
+            amountCents: analysis.expense.amountCents,
+          },
+          metadata: {
+            owner: effectiveCurrent.owner,
+            targetSystem: current.target_system,
+            ledgerName: current.ledger_name,
+            entryType: current.entry_type,
+            category: effectiveCurrent.category,
+            subcategory: effectiveCurrent.subcategory,
+          },
         });
         return { item: itemFromRow(selectById.get({ $id: id })), replayed: false };
       }
@@ -613,10 +720,10 @@ export function createShortcutBookkeepingRepository(db, {
           $referenceCode: referenceCode(expense.occurredOn, expenseId),
           $owner: current.owner,
           $occurredOn: expense.occurredOn,
-          $category: legacyCategory(current),
+          $category: legacyCategory(effectiveCurrent),
           $purpose: expense.purpose,
           $merchant: expense.merchant,
-          $notes: current.note,
+          $notes: effectiveCurrent.note,
           $actor: current.actor,
           $now: now,
       });
@@ -646,6 +753,7 @@ export function createShortcutBookkeepingRepository(db, {
             analysis_json = $analysisJson, warnings_json = $warningsJson,
             occurred_on = $occurredOn, amount_cents = $amountCents,
             merchant = $merchant, purpose = $purpose,
+            category = $category, subcategory = $subcategory, note = $note,
             expense_id = $expenseId, payment_id = $paymentId,
             error_code = NULL, updated_at = $now
         WHERE id = $id
@@ -658,112 +766,16 @@ export function createShortcutBookkeepingRepository(db, {
         requestId: current.source_id,
         before: { status: current.status },
         after: { status: "accepted", expenseId, paymentId, amountCents: expense.amountCents },
-        metadata: {
-          owner: current.owner,
+          metadata: {
+          owner: effectiveCurrent.owner,
           targetSystem: current.target_system,
           ledgerName: current.ledger_name,
           entryType: current.entry_type,
-          category: current.category,
-          subcategory: current.subcategory,
+          category: effectiveCurrent.category,
+          subcategory: effectiveCurrent.subcategory,
         },
       });
       return { item: itemFromRow(selectById.get({ $id: id })), replayed: false };
-    });
-  }
-
-  function completeRemote(idValue, { remote, leaseToken } = {}) {
-    return withImmediateTransaction(db, () => {
-      const state = currentProcessing(idValue, leaseToken, "qingyang");
-      if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
-      if (!isPlainObject(remote)) throw new TypeError("remote result must be an object");
-      const remoteId = requiredText(remote.id, "remote.id", 200);
-      const remoteReference = requiredText(remote.reference, "remote.reference", 200);
-      const remoteStatus = requiredText(remote.status, "remote.status", 50);
-      if (!REMOTE_COMPLETION_STATUSES.has(remoteStatus)) {
-        throw new TypeError(
-          "remote.status must be pending, processing, review, or confirmed; "
-          + "failed must be released and rejected/voided must use completeRemoteTerminal",
-        );
-      }
-      const now = nowIso(clock);
-      const localStatus = remoteStatus === "confirmed" ? "accepted" : "review_required";
-      db.prepare(`
-        UPDATE shortcut_bookkeeping_entries
-        SET status = $localStatus, attempt_count = attempt_count + 1,
-            lease_started_at = NULL, remote_id = $remoteId,
-            remote_reference = $remoteReference, remote_status = $remoteStatus,
-            error_code = NULL, updated_at = $now
-        WHERE id = $id
-      `).run({
-        $id: state.id,
-        $localStatus: localStatus,
-        $remoteId: remoteId,
-        $remoteReference: remoteReference,
-        $remoteStatus: remoteStatus,
-        $now: now,
-      });
-      insertAudit(db, {
-        action: "shortcut_bookkeeping.bridge_accept",
-        entityType: "shortcut_bookkeeping_entry",
-        entityId: state.id,
-        actor: state.current.actor,
-        requestId: state.current.source_id,
-        before: { status: state.current.status },
-        after: { status: localStatus, remoteId, remoteReference, remoteStatus },
-        metadata: {
-          owner: state.current.owner,
-          targetSystem: state.current.target_system,
-          ledgerName: state.current.ledger_name,
-          entryType: state.current.entry_type,
-          category: state.current.category,
-          subcategory: state.current.subcategory,
-        },
-      });
-      return { item: itemFromRow(selectById.get({ $id: state.id })), replayed: false };
-    });
-  }
-
-  function completeRemoteTerminal(idValue, { remote, leaseToken } = {}) {
-    return withImmediateTransaction(db, () => {
-      const state = currentProcessing(idValue, leaseToken, "qingyang");
-      if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
-      if (!isPlainObject(remote)) throw new TypeError("remote result must be an object");
-      const remoteId = requiredText(remote.id, "remote.id", 200);
-      const remoteReference = requiredText(remote.reference, "remote.reference", 200);
-      const remoteStatus = requiredText(remote.status, "remote.status", 50);
-      if (!new Set(["rejected", "voided"]).has(remoteStatus)) {
-        throw new TypeError("remote.status must be rejected or voided");
-      }
-      const now = nowIso(clock);
-      db.prepare(`
-        UPDATE shortcut_bookkeeping_entries
-        SET status = 'rejected', attempt_count = attempt_count + 1,
-            lease_started_at = NULL, remote_id = $remoteId,
-            remote_reference = $remoteReference, remote_status = $remoteStatus,
-            error_code = 'QINGYANG_REMOTE_TERMINAL', updated_at = $now
-        WHERE id = $id
-      `).run({
-        $id: state.id,
-        $remoteId: remoteId,
-        $remoteReference: remoteReference,
-        $remoteStatus: remoteStatus,
-        $now: now,
-      });
-      insertAudit(db, {
-        action: "shortcut_bookkeeping.bridge_reject",
-        entityType: "shortcut_bookkeeping_entry",
-        entityId: state.id,
-        actor: state.current.actor,
-        requestId: state.current.source_id,
-        before: { status: state.current.status },
-        after: { status: "rejected", remoteId, remoteReference, remoteStatus },
-        metadata: {
-          owner: state.current.owner,
-          targetSystem: state.current.target_system,
-          ledgerName: state.current.ledger_name,
-        },
-      });
-      return { item: itemFromRow(selectById.get({ $id: state.id })), replayed: false };
     });
   }
 
@@ -806,8 +818,6 @@ export function createShortcutBookkeepingRepository(db, {
     rejectReview,
     retryReview,
     completeLocal,
-    completeRemote,
-    completeRemoteTerminal,
     release,
   };
 }

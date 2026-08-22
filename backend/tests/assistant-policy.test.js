@@ -18,6 +18,7 @@ describe("assistant execution policy", () => {
     assert.equal(getToolPolicy("visit-capture.confirm").confirmation, "simple");
     assert.equal(getToolPolicy("travel-expense.create").risk, RISK_LEVELS.R3);
     assert.equal(getToolPolicy("travel-expense.create").confirmation, "explicit_code");
+    assert.equal(getToolPolicy("shortcut-bookkeeping.confirm").confirmation, "explicit_code");
   });
 
   it("denies transport, shell, and database tools", () => {

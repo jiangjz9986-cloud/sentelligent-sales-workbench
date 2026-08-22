@@ -9,6 +9,7 @@ import {
   BOOKKEEPING_SELECTION_OPTIONS,
   buildBookkeepingShortcut,
   VERIFICATION_STATUS_OUTPUT_NAME,
+  VERIFICATION_STATUS_TEXT_OUTPUT_NAME,
 } from "../../integrations/shortcut/build-bookkeeping-shortcut.mjs";
 import { parsePlistXml, serializePlistXml } from "../../integrations/icost-shortcut/plist-xml.mjs";
 import { inspectBookkeepingShortcutXml } from "../../integrations/shortcut/verify-bookkeeping-shortcut.mjs";
@@ -57,26 +58,27 @@ describe("自有截图记账快捷指令", () => {
       ]),
     );
     assert.deepEqual(BOOKKEEPING_CATALOG, backendLabels);
-    assert.ok(Object.hasOwn(BOOKKEEPING_CATALOG.biubiu.支出, "员工薪资"));
-    assert.equal(Object.hasOwn(BOOKKEEPING_CATALOG.biubiu.支出, "員工薪資"), false);
+    assert.deepEqual(Object.keys(BOOKKEEPING_CATALOG), ["出差报销"]);
   });
 
-  it("builds a canonical compact OCR/category workflow with Token verification", async () => {
+  it("builds a canonical OCR/category workflow with account pairing and credential persistence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "shortcut-bookkeeping-"));
     temporaryDirectories.push(directory);
     const outputPath = join(directory, "bookkeeping.unsigned.shortcut");
     const { report } = await buildBookkeepingShortcut({ outputPath });
 
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
-    assert.equal(report.actionCount, 21);
+    assert.equal(report.actionCount, 35);
     assert.equal(report.menuCount, 0);
     assert.equal(report.selectionOptionCount, BOOKKEEPING_SELECTION_OPTIONS.length);
-    assert.equal(report.selectionOptionCount, 27);
+    assert.equal(report.selectionOptionCount, 15);
     assert.equal(report.hasCancellationGate, true);
     assert.equal(report.hasTokenVerification, true);
+    assert.equal(report.hasCredentialPairing, true);
+    assert.equal(report.hasCredentialPersistence, true);
     assert.equal(report.canonicalMetadata, true);
     assert.equal(report.hasIcostAction, false);
-    assert.deepEqual(report.ledgerOptions, ["出差报销", "biubiu"]);
+    assert.deepEqual(report.ledgerOptions, ["出差报销"]);
     assert.deepEqual(report.payloadKeys, [
       "text", "selection_path", "note", "idempotency_key", "source",
     ]);
@@ -86,20 +88,38 @@ describe("自有截图记账快捷指令", () => {
     assert.doesNotMatch(xml, /Bearer\s+[A-Za-z0-9_-]{12,}/u);
     assert.match(xml, /选择账本 · 收支 · 分类 · 子分类/u);
     assert.match(xml, /\/api\/integrations\/shortcut\/verify/u);
+    assert.match(xml, /\/api\/integrations\/shortcut\/pair/u);
+    assert.match(xml, /is\.workflow\.actions\.documentpicker\.open/u);
+    assert.match(xml, /is\.workflow\.actions\.documentpicker\.save/u);
+    assert.match(xml, /WFFileErrorIfNotFound/u);
+    assert.match(xml, /森特智行快捷指令凭据\.txt/u);
     assert.match(xml, /WFControlFlowMode/u);
     assert.match(xml, /is\.workflow\.actions\.choosefromlist/u);
     assert.doesNotMatch(xml, /is\.workflow\.actions\.choosefrommenu/u);
-    assert.doesNotMatch(xml, /is\.workflow\.actions\.setvariable/u);
+    assert.match(xml, /is\.workflow\.actions\.setvariable/u);
+    assert.doesNotMatch(xml, /is\.workflow\.actions\.getvariable/u);
+    assert.match(xml, /<key>VariableName<\/key>\s*<string>森特智行设备凭据<\/string>/u);
+    assert.match(xml, /首次使用请输入森特账号/u);
+    assert.doesNotMatch(xml, /六位|确认码|REPLACE_ME/u);
     assert.match(xml, /备注（可选，直接点完成跳过）/u);
     assert.match(xml, /已取消，不会上传任何记账数据/u);
     const plist = parsePlistXml(xml);
     assert.equal(
-      plist.WFWorkflowActions[2].WFWorkflowActionParameters.CustomOutputName,
+      plist.WFWorkflowActions[0].WFWorkflowActionParameters.WFFileErrorIfNotFound,
+      false,
+    );
+    assert.equal(
+      plist.WFWorkflowActions[15].WFWorkflowActionParameters.CustomOutputName,
       VERIFICATION_STATUS_OUTPUT_NAME,
     );
     assert.equal(
-      plist.WFWorkflowActions[3].WFWorkflowActionParameters.WFInput.Variable.Value.OutputName,
+      plist.WFWorkflowActions[16].WFWorkflowActionParameters.WFTextActionText
+        .Value.attachmentsByRange["{0, 1}"].OutputName,
       VERIFICATION_STATUS_OUTPUT_NAME,
+    );
+    assert.equal(
+      plist.WFWorkflowActions[17].WFWorkflowActionParameters.WFInput.Variable.Value.OutputName,
+      VERIFICATION_STATUS_TEXT_OUTPUT_NAME,
     );
   });
 
@@ -145,7 +165,7 @@ describe("自有截图记账快捷指令", () => {
     );
     assert.throws(
       () => inspectBookkeepingShortcutXml(xml.replace("<string>POST</string>", "<string>GET</string>")),
-      /必须使用 POST/u,
+      /JSON POST|必须使用 POST/u,
     );
   });
 

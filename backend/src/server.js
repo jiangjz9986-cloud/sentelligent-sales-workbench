@@ -84,9 +84,11 @@ import {
   authenticateShortcutWebhook,
   isShortcutBookkeepingRouteAllowed,
   SHORTCUT_BOOKKEEPING_ROUTE,
+  SHORTCUT_BOOKKEEPING_INLINE_ROUTE,
   SHORTCUT_BOOKKEEPING_CATALOG_ROUTE,
   SHORTCUT_BOOKKEEPING_VERIFY_ROUTE,
   shortcutCatalogResponse,
+  validateShortcutInlineCredentials,
   validateShortcutBookkeepingPayload,
 } from "./integrations/shortcutBookkeeping.js";
 import {
@@ -94,7 +96,6 @@ import {
   createShortcutBookkeepingRepository,
 } from "./integrations/shortcutBookkeepingRepository.js";
 import { createShortcutWebhookTokenRepository } from "./integrations/shortcutWebhookTokenRepository.js";
-import { createQingyangBookkeepingBridge } from "./integrations/qingyangBookkeepingBridge.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import {
@@ -138,7 +139,10 @@ import { createAssistantPendingActionRepository } from "./assistant/pendingActio
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
+import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
+import { createWeixinConfirmationOutboxRepository } from "./weixin/outboxRepository.js";
+import { createWeixinDeliveryReadiness } from "./weixin/deliveryReadiness.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
 import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
@@ -183,6 +187,9 @@ const DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH = 200_000;
 const EXTRACTED_TEXT_TRUNCATED_WARNING = "EXTRACTED_TEXT_TRUNCATED";
 const ICOST_EXPENSE_ROUTE = "/api/integrations/icost/expenses";
 const WEIXIN_ASSISTANT_EVENT_ROUTE = "/api/integrations/weixin-agent/events";
+const WEIXIN_OUTBOX_ROUTE = "/api/integrations/weixin-agent/confirmation-outbox";
+const SHORTCUT_BOOKKEEPING_STATUS_ROUTE = "/api/integrations/shortcut/bookkeeping/status";
+const SHORTCUT_BOOKKEEPING_DELIVERY_RETRY_ROUTE = "/api/integrations/shortcut/bookkeeping/delivery-retry";
 
 function boundPaymentProofRecognition(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
@@ -237,7 +244,7 @@ function icostResponseItem(item, replayed) {
   };
 }
 
-function shortcutResponseItem(item, replayed) {
+function shortcutResponseItem(item, replayed, extra = {}) {
   return {
     id: item.id,
     status: item.status,
@@ -255,6 +262,7 @@ function shortcutResponseItem(item, replayed) {
     remoteReference: item.remoteReference,
     remoteStatus: item.remoteStatus,
     replayed,
+    ...extra,
   };
 }
 
@@ -272,12 +280,20 @@ function shortcutReviewResponseItem(item, replayed = false) {
   };
 }
 
-function shortcutVerificationResponse({ tokenValid, bookkeepingReady = false, error = null } = {}) {
+function shortcutVerificationResponse({
+  tokenValid,
+  bookkeepingReady = false,
+  weixinConfirmationReady = false,
+  confirmationDelivery = null,
+  error = null,
+} = {}) {
   return {
     status: tokenValid && bookkeepingReady ? "ok" : "error",
     integration: "shortcut",
     tokenValid: Boolean(tokenValid),
     bookkeepingReady: Boolean(bookkeepingReady),
+    ...(weixinConfirmationReady ? { weixinConfirmationReady: true } : {}),
+    ...(confirmationDelivery ? { confirmationDelivery } : {}),
     protocolVersion: 1,
     ...(error ? { error } : {}),
   };
@@ -393,6 +409,91 @@ function validateShortcutReviewRejectPayload(value) {
   const body = plainObject(value);
   allowedPayloadKeys(body, new Set(["reason"]));
   return { reason: payloadText(body.reason, "reason", { max: 1_000 }) };
+}
+
+function validateWeixinOutboxAckPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["id", "leaseToken", "ok", "providerMessageId", "errorCode", "terminal", "check"]));
+  if (body.check === true) {
+    if (body.ok !== undefined || body.providerMessageId !== undefined || body.errorCode !== undefined || body.terminal !== undefined) {
+      validationFailure("check", "exclusive");
+    }
+    return {
+      id: payloadText(body.id, "id", { max: 200 }),
+      leaseToken: payloadText(body.leaseToken, "leaseToken", { max: 200 }),
+      check: true,
+    };
+  }
+  if (body.check !== undefined) validationFailure("check", "true_or_omitted");
+  if (typeof body.ok !== "boolean") validationFailure("ok", "boolean");
+  if (body.terminal !== undefined && typeof body.terminal !== "boolean") validationFailure("terminal", "boolean");
+  if (body.ok && body.terminal === true) validationFailure("terminal", "false_when_ok");
+  return {
+    id: payloadText(body.id, "id", { max: 200 }),
+    leaseToken: payloadText(body.leaseToken, "leaseToken", { max: 200 }),
+    ok: body.ok,
+    check: false,
+    terminal: body.terminal === true,
+    providerMessageId: payloadText(body.providerMessageId, "providerMessageId", { optional: true, max: 200 }),
+    errorCode: payloadText(body.errorCode, "errorCode", { optional: true, max: 100 }),
+  };
+}
+
+function validateShortcutDeliveryRetryPayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["entryId"]));
+  return { entryId: payloadText(body.entryId, "entryId", { max: 200 }) };
+}
+
+function weixinDeliveryReportFromHeaders(headers, expectedScope = null) {
+  const rawStatus = headers["x-weixin-delivery-status"];
+  if (rawStatus === undefined) return { status: "not_ready", reason: "worker_status_missing" };
+  if (typeof rawStatus !== "string" || !["ready", "not_ready"].includes(rawStatus)) {
+    validationFailure("X-Weixin-Delivery-Status", "ready_or_not_ready");
+  }
+  const rawReason = headers["x-weixin-delivery-reason"];
+  if (rawReason !== undefined && (
+    typeof rawReason !== "string"
+    || !/^[a-z0-9_]{1,64}$/u.test(rawReason)
+  )) validationFailure("X-Weixin-Delivery-Reason", "safe_reason");
+  if (rawStatus === "ready") {
+    const rawScope = headers["x-weixin-delivery-scope"];
+    if (typeof expectedScope !== "string" || !expectedScope) {
+      return { status: "not_ready", reason: "configuration_incomplete" };
+    }
+    if (rawScope === undefined) return { status: "not_ready", reason: "worker_scope_missing" };
+    if (typeof rawScope !== "string" || rawScope !== expectedScope) {
+      return { status: "not_ready", reason: "delivery_scope_mismatch" };
+    }
+  }
+  return {
+    status: rawStatus,
+    ...(rawStatus === "not_ready" ? { reason: rawReason ?? "status_unspecified" } : {}),
+  };
+}
+
+function shortcutConfirmationDelivery({ runtime, outbox = null, worker, account = null }) {
+  if (!runtime.enabled) return { status: "disabled" };
+  const accountReady = typeof runtime.isReadyFor === "function"
+    ? runtime.isReadyFor(account)
+    : runtime.ready;
+  if (!accountReady) return { status: "not_ready", reason: "configuration_incomplete" };
+  if (outbox?.status === "sent") {
+    return { status: "sent", ...(outbox.sentAt ? { sentAt: outbox.sentAt } : {}) };
+  }
+  if (outbox?.status === "failed") {
+    return {
+      status: "failed",
+      attemptCount: Number(outbox.attemptCount ?? 0),
+      ...(outbox.lastErrorCode ? { errorCode: outbox.lastErrorCode } : {}),
+    };
+  }
+  if (outbox?.status === "processing") return { status: "sending" };
+  if (worker?.status !== "ready") {
+    return { status: "not_ready", reason: worker?.reason ?? "worker_unavailable" };
+  }
+  if (!outbox) return { status: "ready" };
+  return { status: "queued" };
 }
 
 function validateTravelExpenseDocumentInboxPayload(value) {
@@ -2098,16 +2199,22 @@ async function authenticateLogin(db, config, body, remoteAddress, now = Date.now
   pruneLoginRateLimits(db, now);
   for (const limiterKey of limiterKeys) assertLoginAllowed(db, limiterKey, now);
 
-  const passwordMatches = validatePasswordHashEncoding(config.authPasswordHash)
-    ? await verifyPassword(body?.password, config.authPasswordHash)
-    : constantTimeEqual(body?.password, config.authPassword);
-  if (account !== config.authAccount || !passwordMatches) {
+  const credentialsValid = await configuredCredentialsMatch(config, body);
+  if (!credentialsValid) {
     for (const limiterKey of limiterKeys) recordLoginFailure(db, limiterKey, now);
     return null;
   }
 
   for (const limiterKey of limiterKeys) clearLoginFailures(db, limiterKey);
   return createSession(db, config, { account: config.authAccount, now });
+}
+
+async function configuredCredentialsMatch(config, body) {
+  const account = typeof body?.account === "string" ? body.account.trim() : "";
+  const passwordMatches = validatePasswordHashEncoding(config.authPasswordHash)
+    ? await verifyPassword(body?.password, config.authPasswordHash)
+    : constantTimeEqual(body?.password, config.authPassword);
+  return account === config.authAccount && passwordMatches;
 }
 
 function authenticateRequest(db, config, request, now = Date.now()) {
@@ -2479,12 +2586,15 @@ export function createServer(options = {}) {
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
     ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
   });
-  const qingyangBookkeepingBridge = options.qingyangBookkeepingBridge
-    ?? createQingyangBookkeepingBridge({
-      url: config.qingyangBookkeepingBridgeUrl,
-      token: config.qingyangBookkeepingBridgeToken,
-      timeoutMs: config.qingyangBookkeepingBridgeTimeoutMs,
-      fetchImpl: options.fetchImpl ?? fetch,
+  const weixinConfirmationOutboxRepository = options.weixinConfirmationOutboxRepository
+    ?? createWeixinConfirmationOutboxRepository(db, {
+      ...(options.weixinConfirmationOutboxIdFactory ? { idFactory: options.weixinConfirmationOutboxIdFactory } : {}),
+      ...(options.weixinConfirmationOutboxClock ? { clock: options.weixinConfirmationOutboxClock } : {}),
+    });
+  const weixinDeliveryReadiness = options.weixinDeliveryReadiness
+    ?? createWeixinDeliveryReadiness({
+      clock: options.weixinDeliveryReadinessClock ?? Date.now,
+      staleMs: Math.max(15_000, Math.min(10 * 60_000, config.weixinOutboxPollMs * 4)),
     });
   const icostRateLimiter = options.icostRateLimiter ?? createFixedWindowLimiter({
     limit: config.icostWebhookRateLimit,
@@ -2495,6 +2605,13 @@ export function createServer(options = {}) {
     limit: config.shortcutWebhookRateLimit,
     windowMs: config.shortcutWebhookWindowMs,
     clock: options.shortcutVerifyRateLimitClock ?? Date.now,
+  });
+  const shortcutPairRateLimiter = options.shortcutPairRateLimiter ?? createFixedWindowLimiter({
+    // Pairing accepts a password, so keep it behind the same bounded abuse
+    // budget as the existing Shortcut verification endpoint.
+    limit: Math.max(5, Math.min(config.shortcutWebhookRateLimit, 20)),
+    windowMs: config.shortcutWebhookWindowMs,
+    clock: options.shortcutPairRateLimitClock ?? Date.now,
   });
   const shortcutWriteRateLimiter = options.shortcutWriteRateLimiter ?? createFixedWindowLimiter({
     limit: config.shortcutWebhookRateLimit,
@@ -2566,6 +2683,36 @@ export function createServer(options = {}) {
       clock: assistantClock,
       confirmationSecret: assistantConfirmationSecret,
     });
+  const shortcutBookkeepingAssistantRuntime = options.shortcutBookkeepingAssistantRuntime
+    ?? createShortcutBookkeepingAssistantRuntime({
+      db,
+      config,
+      shortcutBookkeepingRepository,
+      pendingActionRepository: assistantPendingActionRepository,
+      sessionRepository: assistantSessionRepository,
+      outboxRepository: weixinConfirmationOutboxRepository,
+      confirmationSecret: assistantConfirmationSecret,
+      ...(options.shortcutBookkeepingAssistantIdFactory ? { idFactory: options.shortcutBookkeepingAssistantIdFactory } : {}),
+      clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
+    });
+  const shortcutDelivery = (outbox = null, account = null) => shortcutConfirmationDelivery({
+    runtime: shortcutBookkeepingAssistantRuntime,
+    outbox,
+    worker: weixinDeliveryReadiness.snapshot(),
+    account,
+  });
+  const assertShortcutDeliveryReady = (account) => {
+    shortcutBookkeepingAssistantRuntime.assertReadyFor(account);
+    const delivery = weixinDeliveryReadiness.snapshot();
+    if (delivery.status !== "ready") {
+      throw new HttpError(
+        503,
+        "SHORTCUT_WEIXIN_CONFIRMATION_NOT_READY",
+        "微信确认通道尚未就绪，请先向小小发送一条私聊消息后重试",
+      );
+    }
+    return delivery;
+  };
   const assistantBusinessOwnerResolver = typeof options.resolveBusinessOwner === "function"
     ? options.resolveBusinessOwner
     : createBusinessOwnerResolver({
@@ -2594,6 +2741,7 @@ export function createServer(options = {}) {
       toolHandlers: assistantToolHandlers,
       confirmationSecret: assistantConfirmationSecret,
       clock: assistantClock,
+      pendingActionHandler: shortcutBookkeepingAssistantRuntime.handlePending,
     });
 
   async function buildItineraryPlan(body) {
@@ -2769,6 +2917,69 @@ export function createServer(options = {}) {
         return;
       }
 
+      // Shortcut pairing is a one-time password exchange. It deliberately
+      // does not create a browser session: the returned account-bound device
+      // credential is scoped to the Shortcut webhook endpoints and can be
+      // revoked independently from the user's browser sessions.
+      if (url.pathname === "/api/integrations/shortcut/pair") {
+        if (request.method !== "POST") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut pairing"),
+            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        if (!isAuthEnabled(config)) {
+          throw new HttpError(
+            503,
+            "AUTH_NOT_CONFIGURED",
+            "Authentication is required but not fully configured",
+          );
+        }
+        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
+        const rateLimit = shortcutPairRateLimiter.consume(`pair\u0000${remoteAddress}`);
+        if (!rateLimit.allowed) {
+          sendHttpError(
+            response,
+            new HttpError(429, "RATE_LIMITED", "Too many Shortcut pairing attempts"),
+            responseOptions(response, {
+              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
+              "Cache-Control": "no-store",
+            }),
+          );
+          return;
+        }
+        const body = await readValidatedJson(request, requestSchemas.shortcutPairing);
+        const account = typeof body.account === "string" ? body.account.trim() : "";
+        const limiterKeys = [
+          loginRateLimitKey(config.authSessionSecret, account || "<missing>", remoteAddress),
+          loginRateLimitKey(config.authSessionSecret, "<all-accounts>", remoteAddress),
+        ];
+        const now = Date.now();
+        pruneLoginRateLimits(db, now);
+        for (const limiterKey of limiterKeys) assertLoginAllowed(db, limiterKey, now);
+        const credentialsValid = await configuredCredentialsMatch(config, body);
+        if (!credentialsValid) {
+          for (const limiterKey of limiterKeys) recordLoginFailure(db, limiterKey, now);
+          throw new HttpError(401, "INVALID_CREDENTIALS", "Account or password is incorrect");
+        }
+        for (const limiterKey of limiterKeys) clearLoginFailures(db, limiterKey);
+        const created = shortcutWebhookTokenRepository.create({
+          account: config.authAccount,
+          label: body.label?.trim() || "iOS 快捷指令",
+        });
+        sendJson(response, 201, {
+          status: "paired",
+          account: config.authAccount,
+          device: created,
+          // Keep the response explicit so the Shortcut can distinguish a
+          // successful first pairing from a normal verification response.
+          credentialType: "shortcut-device",
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
       // The catalog contains public labels only. It is deliberately available
       // before cookie authentication so Shortcut clients can compare the
       // canonical choices without receiving account data or credentials.
@@ -2838,10 +3049,14 @@ export function createServer(options = {}) {
           return;
         }
 
-        const bookkeepingReady = qingyangBookkeepingBridge.isConfigured();
+        const localWeixinReady = shortcutBookkeepingAssistantRuntime.isReadyFor(integrationIdentity.account);
+        const confirmationDelivery = shortcutDelivery(null, integrationIdentity.account);
+        const bookkeepingReady = localWeixinReady && confirmationDelivery.status === "ready";
         sendJson(response, 200, shortcutVerificationResponse({
           tokenValid: true,
           bookkeepingReady,
+          ...(bookkeepingReady ? { weixinConfirmationReady: true } : {}),
+          confirmationDelivery,
           ...(bookkeepingReady ? {} : {
             error: {
               code: "SHORTCUT_BOOKKEEPING_NOT_READY",
@@ -2852,29 +3067,20 @@ export function createServer(options = {}) {
         return;
       }
 
-      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE) {
-        if (!isShortcutBookkeepingRouteAllowed(request.method, url.pathname)) {
+      if (url.pathname === SHORTCUT_BOOKKEEPING_STATUS_ROUTE) {
+        if (request.method !== "GET") {
           sendHttpError(
             response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut bookkeeping"),
-            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for Shortcut bookkeeping status"),
+            responseOptions(response, { Allow: "GET", "Cache-Control": "no-store" }),
           );
           return;
         }
-        let integrationIdentity;
-        try {
-          integrationIdentity = authenticateShortcutWebhook(
-            request.headers,
-            config,
-            (token) => shortcutWebhookTokenRepository.resolve(token),
-          );
-        } catch {
-          throw new HttpError(
-            503,
-            "SHORTCUT_AUTHENTICATION_UNAVAILABLE",
-            "快捷指令身份验证暂时不可用，请稍后重试",
-          );
-        }
+        const integrationIdentity = authenticateShortcutWebhook(
+          request.headers,
+          config,
+          (token) => shortcutWebhookTokenRepository.resolve(token),
+        );
         if (!integrationIdentity) {
           const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
           unauthorized(
@@ -2883,6 +3089,182 @@ export function createServer(options = {}) {
             supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED",
           );
         }
+        const entryIds = url.searchParams.getAll("entryId");
+        if (entryIds.length !== 1 || [...url.searchParams.keys()].some((key) => key !== "entryId")) {
+          validationFailure("entryId", "single_query_value");
+        }
+        const entryId = payloadText(entryIds[0], "entryId", { max: 200 });
+        const entry = shortcutBookkeepingRepository.getReview(entryId, {
+          owner: integrationIdentity.account,
+        });
+        if (!entry) notFound();
+        const outbox = typeof weixinConfirmationOutboxRepository.latestForEntry === "function"
+          ? weixinConfirmationOutboxRepository.latestForEntry({
+              owner: integrationIdentity.account,
+              entryId,
+            })
+          : null;
+        sendJson(response, 200, {
+          item: {
+            id: entry.id,
+            status: entry.status,
+            confirmationDelivery: shortcutDelivery(outbox, integrationIdentity.account),
+          },
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (url.pathname === SHORTCUT_BOOKKEEPING_DELIVERY_RETRY_ROUTE) {
+        if (request.method !== "POST") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut delivery retry"),
+            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        const integrationIdentity = authenticateShortcutWebhook(
+          request.headers,
+          config,
+          (token) => shortcutWebhookTokenRepository.resolve(token),
+        );
+        if (!integrationIdentity) {
+          const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
+          unauthorized(
+            response,
+            supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token",
+            supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED",
+          );
+        }
+        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
+        const rateLimit = shortcutWriteRateLimiter.consume(
+          `${integrationIdentity.account}\u0000delivery-retry\u0000${remoteAddress}`,
+        );
+        if (!rateLimit.allowed) {
+          sendHttpError(
+            response,
+            new HttpError(429, "RATE_LIMITED", "Too many Shortcut delivery retry requests"),
+            responseOptions(response, {
+              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
+              "Cache-Control": "no-store",
+            }),
+          );
+          return;
+        }
+        assertShortcutDeliveryReady(integrationIdentity.account);
+        const body = validateShortcutDeliveryRetryPayload(await readJson(request));
+        const entry = shortcutBookkeepingRepository.getReview(body.entryId, {
+          owner: integrationIdentity.account,
+        });
+        if (!entry) notFound();
+        const outbox = typeof weixinConfirmationOutboxRepository.latestForEntry === "function"
+          ? weixinConfirmationOutboxRepository.latestForEntry({
+              owner: integrationIdentity.account,
+              entryId: body.entryId,
+            })
+          : null;
+        if (!outbox) {
+          throw new HttpError(409, "WEIXIN_OUTBOX_NOT_FOUND", "No delivery exists for this bookkeeping entry");
+        }
+        const retried = weixinConfirmationOutboxRepository.requeueFailed(outbox.id);
+        sendJson(response, 200, {
+          item: {
+            id: entry.id,
+            status: entry.status,
+            confirmationDelivery: shortcutDelivery(retried, integrationIdentity.account),
+          },
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      // Internal/manual-constants mode. The Shortcut carries account/password
+      // text constants and this server validates them before the normal
+      // bookkeeping pipeline runs. Strip both fields before validation and
+      // hashing so the password never enters business storage or audit data.
+      const inlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_INLINE_ROUTE;
+      let inlineShortcutBody = null;
+      let inlineShortcutIdentity = null;
+      if (inlineShortcutRoute) {
+        if (request.method !== "POST") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for inline Shortcut bookkeeping"),
+            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        if (!isAuthEnabled(config)) {
+          throw new HttpError(
+            503,
+            "AUTH_NOT_CONFIGURED",
+            "Authentication is required but not fully configured",
+          );
+        }
+        const rawInlineBody = await readJson(request);
+        const inlineCredentials = validateShortcutInlineCredentials(rawInlineBody);
+        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
+        const rateLimit = shortcutPairRateLimiter.consume(`inline\u0000${remoteAddress}`);
+        if (!rateLimit.allowed) {
+          sendHttpError(
+            response,
+            new HttpError(429, "RATE_LIMITED", "Too many inline Shortcut credential attempts"),
+            responseOptions(response, {
+              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
+              "Cache-Control": "no-store",
+            }),
+          );
+          return;
+        }
+        const credentialsValid = await configuredCredentialsMatch(config, inlineCredentials);
+        if (!credentialsValid) {
+          throw new HttpError(401, "INVALID_CREDENTIALS", "Account or password is incorrect");
+        }
+        const businessBody = { ...rawInlineBody };
+        delete businessBody.account;
+        delete businessBody.password;
+        inlineShortcutBody = validateShortcutBookkeepingPayload(businessBody);
+        inlineShortcutIdentity = {
+          account: config.authAccount,
+          integration: "shortcut",
+          kind: "integration",
+          scheme: "inline-credentials",
+        };
+      }
+
+      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE || inlineShortcutRoute) {
+        if (!inlineShortcutRoute && !isShortcutBookkeepingRouteAllowed(request.method, url.pathname)) {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut bookkeeping"),
+            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        let integrationIdentity = inlineShortcutIdentity;
+        if (!integrationIdentity) {
+          try {
+            integrationIdentity = authenticateShortcutWebhook(
+              request.headers,
+              config,
+              (token) => shortcutWebhookTokenRepository.resolve(token),
+            );
+          } catch {
+            throw new HttpError(
+              503,
+              "SHORTCUT_AUTHENTICATION_UNAVAILABLE",
+              "快捷指令身份验证暂时不可用，请稍后重试",
+            );
+          }
+          if (!integrationIdentity) {
+            const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
+            unauthorized(
+              response,
+              supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token",
+              supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED",
+            );
+          }
+        }
+        assertShortcutDeliveryReady(integrationIdentity.account);
         const remoteAddress = request.socket?.remoteAddress ?? "unknown";
         const rateLimit = shortcutWriteRateLimiter.consume(
           `${integrationIdentity.account}\u0000${remoteAddress}`,
@@ -2898,7 +3280,7 @@ export function createServer(options = {}) {
           );
           return;
         }
-        const body = validateShortcutBookkeepingPayload(await readJson(request));
+        const body = inlineShortcutBody ?? validateShortcutBookkeepingPayload(await readJson(request));
         const received = shortcutBookkeepingRepository.receive({
           owner: integrationIdentity.account,
           actor: integrationIdentity.account,
@@ -2913,6 +3295,21 @@ export function createServer(options = {}) {
           capturedAt: body.capturedAt,
           sourceId: body.sourceId,
         });
+        if (received.replayed && received.item.status === "review_required"
+          && body.targetSystem === "sentelligent" && shortcutBookkeepingAssistantRuntime.enabled) {
+          const pending = shortcutBookkeepingAssistantRuntime.startReview({
+            account: integrationIdentity.account,
+            entry: received.item,
+          });
+          sendJson(response, 202, {
+            item: shortcutResponseItem(received.item, true, {
+              confirmationPending: true,
+              assistantActionId: pending.action.id,
+              confirmationDelivery: shortcutDelivery(pending.outbox, integrationIdentity.account),
+            }),
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
         if (received.replayed && ["accepted", "review_required"].includes(received.item.status)) {
           sendJson(response, 200, {
             item: shortcutResponseItem(received.item, true),
@@ -2922,12 +3319,28 @@ export function createServer(options = {}) {
         if (received.replayed && received.item.status === "rejected") {
           throw new HttpError(
             409,
-            "QINGYANG_REMOTE_TERMINAL",
-            "轻氧已拒绝或作废这笔记账请求，不能自动重试",
+            "SHORTCUT_BOOKKEEPING_REJECTED",
+            "这笔快捷记账已被拒绝，不能自动重试",
           );
         }
         const claimed = shortcutBookkeepingRepository.claim(received.item.id);
         if (claimed.replayed) {
+          if (claimed.item.status === "review_required"
+            && body.targetSystem === "sentelligent"
+            && shortcutBookkeepingAssistantRuntime.enabled) {
+            const pending = shortcutBookkeepingAssistantRuntime.startReview({
+              account: integrationIdentity.account,
+              entry: claimed.item,
+            });
+            sendJson(response, 202, {
+              item: shortcutResponseItem(claimed.item, true, {
+                confirmationPending: true,
+                assistantActionId: pending.action.id,
+                confirmationDelivery: shortcutDelivery(pending.outbox, integrationIdentity.account),
+              }),
+            }, { "Cache-Control": "no-store" });
+            return;
+          }
           sendJson(response, 200, {
             item: shortcutResponseItem(claimed.item, true),
           }, { "Cache-Control": "no-store" });
@@ -2935,54 +3348,36 @@ export function createServer(options = {}) {
         }
 
         try {
-          if (body.targetSystem === "sentelligent") {
-            const analyzed = applyShortcutSelectionAnalysis(
-              await travelExpenseAnalyzer(body.text),
-              body,
-            );
-            const completed = shortcutBookkeepingRepository.completeLocal(received.item.id, {
-              analysis: analyzed,
-              leaseToken: claimed.leaseToken,
+          let analyzed = applyShortcutSelectionAnalysis(
+            await travelExpenseAnalyzer(body.text),
+            body,
+          );
+          if (shortcutBookkeepingAssistantRuntime.enabled) {
+            analyzed = {
+              ...analyzed,
+              status: "review_required",
+              warnings: [...new Set([...(analyzed.warnings ?? []), "WEIXIN_CONFIRMATION_REQUIRED"])],
+            };
+          }
+          const completed = shortcutBookkeepingRepository.completeLocal(received.item.id, {
+            analysis: analyzed,
+            leaseToken: claimed.leaseToken,
+          });
+          if (shortcutBookkeepingAssistantRuntime.enabled) {
+            const pending = shortcutBookkeepingAssistantRuntime.startReview({
+              account: integrationIdentity.account,
+              entry: completed.item,
             });
-            sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
-              item: shortcutResponseItem(completed.item, completed.replayed),
+            sendJson(response, 202, {
+              item: shortcutResponseItem(completed.item, completed.replayed, {
+                confirmationPending: true,
+                assistantActionId: pending.action.id,
+                confirmationDelivery: shortcutDelivery(pending.outbox, integrationIdentity.account),
+              }),
             }, { "Cache-Control": "no-store" });
             return;
           }
-
-          const remote = await qingyangBookkeepingBridge.forward({
-            owner: integrationIdentity.account,
-            text: body.text,
-            capturedAt: body.capturedAt,
-            idempotencyKey: body.idempotencyKey,
-            entryType: body.entryType,
-            category: body.category,
-            subcategory: body.subcategory,
-            note: body.note,
-          });
-          if (remote.status === "failed") {
-            throw new HttpError(
-              503,
-              "QINGYANG_REMOTE_RETRYABLE_FAILURE",
-              "轻氧尚未完成这笔记账，请稍后使用同一请求重试",
-            );
-          }
-          if (["rejected", "voided"].includes(remote.status)) {
-            shortcutBookkeepingRepository.completeRemoteTerminal(received.item.id, {
-              remote,
-              leaseToken: claimed.leaseToken,
-            });
-            throw new HttpError(
-              409,
-              "QINGYANG_REMOTE_TERMINAL",
-              "轻氧已拒绝或作废这笔记账请求，不能自动重试",
-            );
-          }
-          const completed = shortcutBookkeepingRepository.completeRemote(received.item.id, {
-            remote,
-            leaseToken: claimed.leaseToken,
-          });
-          sendJson(response, 202, {
+          sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
             item: shortcutResponseItem(completed.item, completed.replayed),
           }, { "Cache-Control": "no-store" });
           return;
@@ -3086,6 +3481,99 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (url.pathname === WEIXIN_OUTBOX_ROUTE) {
+        const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
+        if (!machineIdentity) return unauthorized(response);
+        assertMachineRouteAllowed(request.method, url.pathname, machineIdentity.integration);
+        if (request.method === "GET") {
+          const expectedDeliveryScope = shortcutBookkeepingAssistantRuntime.ready
+            ? shortcutBookkeepingAssistantRuntime.conversationFor(shortcutBookkeepingAssistantRuntime.owner)
+            : null;
+          const deliveryReport = weixinDeliveryReportFromHeaders(
+            request.headers,
+            expectedDeliveryScope,
+          );
+          weixinDeliveryReadiness.report(deliveryReport);
+          if (deliveryReport.status !== "ready") {
+            response.statusCode = 204;
+            response.removeHeader("Content-Type");
+            response.end();
+            return;
+          }
+          shortcutBookkeepingAssistantRuntime.reconcileAcceptedReceipts();
+          const workerId = typeof request.headers["x-weixin-worker-id"] === "string"
+            ? request.headers["x-weixin-worker-id"].trim().slice(0, 200)
+            : "weixin-worker";
+          const lease = weixinConfirmationOutboxRepository.leaseNext({
+            workerId: workerId || "weixin-worker",
+            renderMessage: shortcutBookkeepingAssistantRuntime.renderOutboxMessage,
+          });
+          if (!lease) {
+            response.statusCode = 204;
+            response.removeHeader("Content-Type");
+            response.end();
+            return;
+          }
+          if (!shortcutBookkeepingAssistantRuntime.isReadyFor(lease.item.owner)) {
+            weixinConfirmationOutboxRepository.discardLeased(lease.item.id, {
+              leaseToken: lease.leaseToken,
+              errorCode: "WEIXIN_DELIVERY_SCOPE_MISMATCH",
+            });
+            response.statusCode = 204;
+            response.removeHeader("Content-Type");
+            response.end();
+            return;
+          }
+          sendJson(response, 200, {
+            item: {
+              id: lease.item.id,
+              owner: lease.item.owner,
+              conversationId: lease.item.conversationId,
+              deliveryScope: shortcutBookkeepingAssistantRuntime.conversationFor(lease.item.owner),
+              status: lease.item.status,
+              message: lease.message,
+            },
+            leaseToken: lease.leaseToken,
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (request.method === "POST") {
+          const body = validateWeixinOutboxAckPayload(await readJson(request));
+          if (body.check) {
+            sendJson(response, 200, {
+              current: weixinConfirmationOutboxRepository.isLeaseCurrent(body.id, body.leaseToken),
+            }, { "Cache-Control": "no-store" });
+            return;
+          }
+          const item = body.ok
+            ? weixinConfirmationOutboxRepository.ackSuccess(body.id, {
+                leaseToken: body.leaseToken,
+                providerMessageId: body.providerMessageId,
+              })
+            : body.terminal
+              ? weixinConfirmationOutboxRepository.discardLeased(body.id, {
+                  leaseToken: body.leaseToken,
+                  errorCode: body.errorCode ?? "WEIXIN_SEND_FAILED",
+                })
+              : weixinConfirmationOutboxRepository.ackFailure(body.id, {
+                  leaseToken: body.leaseToken,
+                  errorCode: body.errorCode ?? "WEIXIN_SEND_FAILED",
+                });
+          sendJson(response, 200, {
+            item: {
+              id: item.id,
+              status: item.status,
+              attemptCount: item.attemptCount,
+              lastErrorCode: item.lastErrorCode,
+              providerMessageId: item.providerMessageId,
+            },
+          }, { "Cache-Control": "no-store" });
+          return;
+        }
+        sendHttpError(response, new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET and POST are allowed for the WeChat outbox"), responseOptions(response, { Allow: "GET, POST" }));
+        return;
+      }
+
       if (url.pathname === WEIXIN_ASSISTANT_EVENT_ROUTE) {
         if (request.method !== "POST") {
           sendHttpError(
@@ -3120,9 +3608,15 @@ export function createServer(options = {}) {
           body.groupId ?? null,
           body.conversationId,
         ]);
-        const conversationScope = `weixin:conversation:v1:${createHash("sha256")
-          .update(conversationTuple, "utf8")
-          .digest("hex")}`;
+        const shortcutConversation = shortcutBookkeepingAssistantRuntime.enabled
+          && body.chatType === "direct"
+          && body.senderId === shortcutBookkeepingAssistantRuntime.senderId
+          && machineIdentity.account === shortcutBookkeepingAssistantRuntime.owner;
+        const conversationScope = shortcutConversation
+          ? shortcutBookkeepingAssistantRuntime.conversationFor(machineIdentity.account, body.senderId)
+          : `weixin:conversation:v1:${createHash("sha256")
+            .update(conversationTuple, "utf8")
+            .digest("hex")}`;
         const eventTuple = JSON.stringify([
           machineIdentity.account,
           "weixin",
@@ -3366,6 +3860,14 @@ export function createServer(options = {}) {
           return;
         }
         const action = shortcutReviewParts[7];
+        const settleShortcutWebReview = (item) => {
+          if (!["accepted", "rejected"].includes(item?.status)) return null;
+          return shortcutBookkeepingAssistantRuntime.settleFromWeb({
+            account: owner,
+            entry: item,
+            decision: item.status,
+          });
+        };
         if (action === "reject") {
           const { reason } = validateShortcutReviewRejectPayload(await readJson(request));
           const result = shortcutBookkeepingRepository.rejectReview(reviewId, {
@@ -3373,6 +3875,7 @@ export function createServer(options = {}) {
             actor: owner,
             reason,
           });
+          settleShortcutWebReview(result.item);
           sendJson(response, result.replayed ? 200 : 200, {
             item: shortcutReviewResponseItem(result.item, result.replayed),
           }, { "Cache-Control": "no-store" });
@@ -3382,6 +3885,7 @@ export function createServer(options = {}) {
           const { analysis } = validateShortcutReviewConfirmPayload(await readJson(request));
           const claimed = shortcutBookkeepingRepository.claimReview(reviewId, { owner });
           if (claimed.replayed) {
+            settleShortcutWebReview(claimed.item);
             sendJson(response, 200, { item: shortcutReviewResponseItem(claimed.item, true) }, { "Cache-Control": "no-store" });
             return;
           }
@@ -3390,6 +3894,7 @@ export function createServer(options = {}) {
               analysis,
               leaseToken: claimed.leaseToken,
             });
+            settleShortcutWebReview(completed.item);
             sendJson(response, completed.replayed ? 200 : 201, {
               item: shortcutReviewResponseItem(completed.item, completed.replayed),
             }, { "Cache-Control": "no-store" });

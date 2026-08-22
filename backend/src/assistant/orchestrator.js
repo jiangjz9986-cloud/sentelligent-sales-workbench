@@ -220,6 +220,7 @@ export function createAssistantOrchestrator({
   confirmationSecret,
   clock = () => new Date(),
   pendingTtlMs = 10 * 60 * 1000,
+  pendingActionHandler = null,
 } = {}) {
   if (!eventRepository || typeof eventRepository.receive !== "function" || typeof eventRepository.claim !== "function") {
     throw new TypeError("eventRepository must support receive and claim");
@@ -312,6 +313,35 @@ export function createAssistantOrchestrator({
       let pendingPlan;
       let pendingAction;
       const scope = { owner: context.owner, channel: context.channel, conversationId: conversation?.id };
+      if (typeof pendingActionHandler === "function") {
+        try {
+          pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+        } catch {
+          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        }
+        if (pendingAction) {
+          const specialized = await pendingActionHandler({
+            action: pendingAction,
+            scope,
+            context,
+            text,
+            textClassification,
+            confirmationCode: code,
+            pendingActionId,
+            serverData,
+          });
+          if (specialized) {
+            return finish(
+              specialized.status ?? 200,
+              specialized.body ?? { status: "ok", text: "已处理。" },
+              {
+                ...(specialized.storedBody ? { storedBody: specialized.storedBody } : {}),
+                ...(specialized.draftText ? { draftText: specialized.draftText } : {}),
+              },
+            );
+          }
+        }
+      }
       const scopedCommand = ["code", "cancel", "resend"].includes(textClassification.kind) || structuredCodePresent;
       if (scopedCommand) {
         if (structuredCodePresent && !structuredCode) {
@@ -320,10 +350,12 @@ export function createAssistantOrchestrator({
         if (textClassification.kind === "code" && structuredCodePresent && structuredCode !== textClassification.code) {
           return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
         }
-        try {
-          pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
-        } catch {
-          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        if (!pendingAction) {
+          try {
+            pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+          } catch {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
         }
         if (!pendingAction && pendingActionId) {
           const completed = pendingActionRepository?.get?.(pendingActionId, scope);
@@ -416,6 +448,17 @@ export function createAssistantOrchestrator({
       if (tool.policy?.denied || getToolPolicy(tool.name).denied) return finish(403, { status: "error", message: "该操作不在允许范围内。" });
       if (resolvedActionId && pendingAction?.actionType !== tool.name) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
       const invocation = validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: plan.arguments || {} });
+
+      // Shortcut bookkeeping actions are created only after the authenticated
+      // Shortcut endpoint has persisted an owner-scoped draft. A generic
+      // assistant plan has no entry id and must not create a second pending
+      // financial action or confirmation code.
+      if (tool.name === "shortcut-bookkeeping.confirm" && !resolvedActionId) {
+        return finish(409, {
+          status: "clarify",
+          message: "请先运行自有截图记账快捷指令提交草稿，再在绑定的微信会话中回复最新六位确认码、明确修改字段或取消。",
+        }, { draftText: "等待快捷指令记账草稿。" });
+      }
 
       if (isRisky(plan) && !plan.confirmed && !resolvedActionId) {
         if (!pendingActionRepository?.create) return finish(500, { status: "error", message: SAFE_FAILURE });

@@ -51,6 +51,11 @@ type LoginOptions = {
   /** Override the API base URL. */baseUrl?: string; /** Log callback (defaults to console.log). */
   log?: (msg: string) => void;
 };
+type InboundAuthorizationMetadata = {
+  /** Provider sender identifier validated by the bounded inbound projection. */senderId: string;
+  /** Conversation kind after bounded metadata classification. */chatType: "direct" | "group";
+  /** Present only for a classified group conversation. */groupId?: string;
+};
 type StartOptions = {
   /** Account ID to use. Auto-selects the first registered account if omitted. */accountId?: string; /** AbortSignal to stop the bot. */
   abortSignal?: AbortSignal; /** Log callback (defaults to console.log). */
@@ -62,6 +67,8 @@ type StartOptions = {
     chatType: "direct" | "group";
     groupId?: string;
   } | null | undefined;
+  /** Fail-closed host authorization hook invoked before config lookup or media download. */
+  authorizeInbound?: (metadata: Readonly<InboundAuthorizationMetadata>) => boolean | Promise<boolean>;
 };
 type InboundMedia = {
   sha256: string;
@@ -118,6 +125,17 @@ declare class Bot {
    * aborted, and for surfacing unrecoverable monitor errors to the caller.
    */
   wait(): Promise<void>;
+  /** Credential-free readiness for proactive delivery. */
+  getDeliveryStatus(): Readonly<{
+    ready: boolean;
+    status: "ready" | "not_ready";
+    reason?: "context_token_missing" | "context_token_expired";
+    expiresAt?: string;
+  }>;
+  /** Return whether proactive delivery is bound to this exact recipient. */
+  isDeliveryTarget(recipientId: string): boolean;
+  /** Send only when the explicit recipient matches the current login. */
+  sendMessageTo(recipientId: string, message: string | ChatResponse): Promise<void>;
   /**
    * Proactively send a message to the logged-in WeChat user.
    *
@@ -146,4 +164,4 @@ declare function normalizeInboundUpdate(full: Record<string, unknown>, opts: {
   chatMetadata?: InboundChatMetadata | null;
 }): ChatRequest;
 //#endregion
-export { type Agent, Bot, type ChatRequest, type ChatResponse, type InboundChatMetadata, type InboundMedia, type LoginOptions, type StartOptions, isLoggedIn, login, logout, normalizeInboundUpdate, start };
+export { type Agent, Bot, type ChatRequest, type ChatResponse, type InboundAuthorizationMetadata, type InboundChatMetadata, type InboundMedia, type LoginOptions, type StartOptions, isLoggedIn, login, logout, normalizeInboundUpdate, start };

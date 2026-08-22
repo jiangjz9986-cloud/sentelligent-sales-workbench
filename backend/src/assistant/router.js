@@ -4,7 +4,7 @@ import { evaluatePolicy } from "./policy.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
+const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、快捷记账微信复核、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
 
 function clean(value) { return String(value ?? "").trim(); }
 
@@ -206,6 +206,9 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
       confidence,
       source: "natural",
     });
+  }
+  if (/快捷记账|记账复核|记账确认/u.test(value)) {
+    return clarify("快捷指令提交后，小小助手会把识别草稿发到绑定的微信会话；请直接在同一会话回复六位确认码或说明要修改的字段。", confidence);
   }
   const knowledgeSearch = value.match(/^知识(?:检索|查询)(?:\s+(.+))?$/u);
   if (knowledgeSearch) {

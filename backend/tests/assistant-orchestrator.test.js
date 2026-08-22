@@ -311,6 +311,29 @@ describe("assistant orchestrator", () => {
     assert.equal(JSON.stringify(runtime.parts).includes("482913"), false);
   });
 
+  it("does not create a generic six-digit confirmation for direct Shortcut bookkeeping plans", async () => {
+    const runtime = fakeRuntime();
+    const plan = {
+      status: "planned",
+      toolName: "shortcut-bookkeeping.confirm",
+      agentId: "test-agent",
+      arguments: { value: "entry-1" },
+      risk: "R3",
+    };
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R3", "explicit_code"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => ({ saved: true }) },
+    });
+    const response = await orchestrator.handle({ context, input: { text: "快捷记账" } });
+    assert.equal(response.status, 409);
+    assert.equal(response.body.status, "clarify");
+    assert.equal(Object.hasOwn(response.body, "confirmationCode"), false);
+    assert.equal(runtime.pending.size, 0);
+  });
+
   it("reissues a scoped code without changing expiry or attempts and stores no code", async () => {
     const runtime = fakeRuntime();
     const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };

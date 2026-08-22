@@ -47,6 +47,9 @@ export const TOOL_DEFINITIONS = Object.freeze([
     week: { type: "string", required: false },
     periodStart: { type: "string", required: false },
   }),
+  tool("shortcut-bookkeeping.confirm", "travel-expense", "确认快捷指令识别的差旅费用并写入账本", {
+    entryId: { type: "string", required: true },
+  }),
   tool("knowledge.search", "knowledge", "按关键词只读检索知识摘要", { query: { type: "string", required: true } }),
   tool("visit-capture.collect", "visit-capture", "创建拜访记录草稿", { text: { type: "string", required: true } }),
   tool("visit-capture.preview", "visit-capture", "预览拜访记录草稿", { draftId: { type: "string", required: true } }),

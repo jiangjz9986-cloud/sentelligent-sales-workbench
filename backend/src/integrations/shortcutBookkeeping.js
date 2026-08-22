@@ -2,43 +2,34 @@ import { HttpError } from "../http/errors.js";
 import { constantTimeEqual } from "../http/security.js";
 
 export const SHORTCUT_BOOKKEEPING_ROUTE = "/api/integrations/shortcut/bookkeeping";
+// Development/internal fallback: the Shortcut carries two editable constants
+// and the server validates them before accepting the business payload. Keep it
+// as a separate route so the account-bound device-token contract remains
+// unchanged and can be rolled back independently.
+export const SHORTCUT_BOOKKEEPING_INLINE_ROUTE = "/api/integrations/shortcut/bookkeeping-inline";
 export const SHORTCUT_BOOKKEEPING_CATALOG_ROUTE = "/api/integrations/shortcut/catalog";
 export const SHORTCUT_BOOKKEEPING_VERIFY_ROUTE = "/api/integrations/shortcut/verify";
 export const SHORTCUT_BOOKKEEPING_SOURCE = "shortcut";
 export const SHORTCUT_SELECTION_SEPARATOR = " · ";
+export const DEFAULT_SHORTCUT_LEDGER = "出差报销";
+export const DEFAULT_SHORTCUT_ENTRY_TYPE = "expense";
 
 // The same catalog drives API validation, the catalog response, and the
 // Shortcut builder. Keep these visible Chinese labels stable.
 const CATALOG = {
   "出差报销": {
     targetSystem: "sentelligent",
-    // v0.6.2 deliberately opens only the existing travel-expense model. An
-    // empty income catalog makes unsupported income fail validation instead
-    // of being mislabeled as an accepted financial write.
-    income: {},
+    income: {
+      "工资": [],
+      "奖金": [],
+      "出差": ["报销", "借款"],
+    },
     expense: {
       "餐饮": ["早餐", "午餐", "晚餐"],
-      "住宿费": [],
-      "交通": ["火车", "路桥费", "打车", "代驾", "停车"],
-      "汽车维修": ["维修", "保养"],
-      "招待/礼品": [],
-    },
-  },
-  biubiu: {
-    targetSystem: "qingyang",
-    income: {
-      "营收": ["美团", "淘宝闪购", "京东", "收钱吧", "其他"],
-      "退税": [],
-      "其他收入": [],
-    },
-    expense: {
-      "房租": [],
-      "设备": [],
-      "水电费": [],
-      "进货采购": ["水果", "耗材"],
-      "员工薪资": [],
-      "交税": [],
-      "运营": [],
+      "住宿": [],
+      "交通": ["打车", "火车", "代驾", "停车", "路桥"],
+      "招待": [],
+      "礼品": [],
     },
   },
 };
@@ -137,10 +128,14 @@ export function resolveShortcutCategory({ ledgerName, entryType, category, subca
 export function resolveShortcutSelectionPath(value) {
   const selectionPath = requiredText(value, "selection_path", 400);
   const parts = selectionPath.split(SHORTCUT_SELECTION_SEPARATOR);
-  if (parts.length !== 4 || parts.some((part) => !part)) {
+  if (![2, 3, 4].includes(parts.length) || parts.some((part) => !part)) {
     validationError({ selection_path: "format" });
   }
-  const [ledgerName, entryType, category, subcategory] = parts;
+  const [ledgerName, entryType, category, subcategory] = parts.length === 4
+    ? parts
+    : parts.length === 3
+      ? [DEFAULT_SHORTCUT_LEDGER, ...parts]
+      : [DEFAULT_SHORTCUT_LEDGER, DEFAULT_SHORTCUT_ENTRY_TYPE, ...parts];
   return {
     selectionPath,
     ...resolveShortcutCategory({ ledgerName, entryType, category, subcategory }),
@@ -197,6 +192,19 @@ export function validateShortcutBookkeepingPayload(body) {
     capturedAt,
     sourceId,
     targetSystem: resolved.targetSystem,
+  };
+}
+
+/**
+ * Validate the two inline constants without ever returning them as part of the
+ * business payload. Callers must remove these fields before hashing or
+ * persisting a bookkeeping request.
+ */
+export function validateShortcutInlineCredentials(body) {
+  if (!plainObject(body)) validationError({ body: "object" });
+  return {
+    account: requiredText(body.account, "account", 100),
+    password: requiredText(body.password, "password", 1000),
   };
 }
 

@@ -41,7 +41,7 @@
 | 智能拜访行程 | 高德地址解析、路线、时间、里程、过路费、顺序优化、地图和历史快照 | 历史读取不重复调用地图或模型 |
 | 差旅报销 | 按自然周管理费用、多笔实付、提前请款、多退少补、付款凭证、发票仓库、人工匹配和 A4 打印 | 单账号个人使用；自动识别结果进入 owner-scoped 复核队列，不包含审批流和财务付款 |
 | iCost 快捷指令 | iCost 成功记账后按账本名精确分流；“出差报销”只写森特智行，其他账本不进入本系统 | 只写文本 Webhook，独立 URL、独立 Token、幂等和审计；未知账本不发送 |
-| 自有 iOS 快捷指令 | 一个账号 Token、一次账本/分类选择、截图文字上传；出差报销支出写森特，biubiu 经独立服务桥接写轻氧 | v0.6.2 候选尚未发布；出差报销收入暂不开放，跨系统远端未确认、配置不完整或请求失败时一律不返回成功 |
+| 自有 iOS 快捷指令 | 一个森特账号凭据、一次收支/分类选择和截图文字上传；收入与支出都只进入森特，先由微信“小小”复核再完成记账 | 账号密码常量版仅作短期兼容；正式路径使用可撤销的账号绑定设备凭据，不再跨系统写入轻氧 |
 | 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
 | 知识库 | 模块内搜索、条目维护和引用 | 后续可继续扩展检索与引用质量评估 |
 | 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF 接入；已完成真实设备 `/clear` 往返验收 | 机器身份只获得声明的写入路由；更多业务场景仍按人工确认边界扩展 |
@@ -157,7 +157,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 
 ## 微信 Clawbot 助手事件契约
 
-候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.1` worker 通过独立机器 Token 调用：
+候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.3` worker 通过独立机器 Token 调用：
 
 ```text
 POST /api/integrations/weixin-agent/events
@@ -165,9 +165,9 @@ Authorization: Bearer <森特智行专用 WEIXIN_AGENT_API_TOKEN>
 Idempotency-Key: <稳定重试键>
 ```
 
-请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和六位 `confirmationCode`。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
+请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和六位 `confirmationCode`。快捷记账草稿也必须在同一会话回复最新消息中的六位确认码；明确修改字段后旧码立即失效，助手会发送带新码的最新草稿。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
 
-sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊。确认回复必须来自同一 sender、channel 和 private conversation：恰好六位 ASCII 数字确认，原始文本精确等于 `取消` 或 `重发确认码` 才执行取消或轮换；前后空格、换行、全角数字和附加文字均不匹配。确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定；执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
+sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊。所有高风险确认回复都必须来自同一 sender、channel 和 private conversation：恰好六位 ASCII 数字确认，原始文本精确等于 `取消` 或 `重发确认码` 才执行取消或轮换；前后空格、换行、全角数字和附加文字均不匹配。确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定；执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
 
 owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。机器 Token 派生投递身份；轮换 Token 时必须先停止旧 worker、排空并封存旧 polling cursor，再启用新 Token，禁止并行消费。真实设备往返和生产切换仍需另行授权；本地候选检查不构成生产证据。
 

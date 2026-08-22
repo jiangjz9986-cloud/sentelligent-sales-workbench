@@ -1,0 +1,586 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
+
+import { createServer } from "../src/server.js";
+import { openDatabase } from "../src/db.js";
+import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
+
+const shortcutToken = "test-shortcut-token";
+const machineToken = "weixin-machine-test-token";
+const owner = "assistant-owner";
+const sender = "sender-1";
+const confirmationSecret = ["test", "shortcut", "confirmation", "secret"].join("-");
+
+let tempDir;
+let server;
+let baseUrl;
+let entrySequence;
+let actionSequence;
+let outboxSequence;
+
+async function read(response) {
+  const text = await response.text();
+  return { response, body: text ? JSON.parse(text) : null };
+}
+
+function analysis(overrides = {}) {
+  return {
+    status: "ready",
+    confidence: 0.98,
+    expense: {
+      occurredOn: "2026-08-18",
+      amountCents: 1280,
+      reimbursementCents: 1280,
+      purpose: "客户拜访交通",
+      merchant: "济南出租车",
+      paidAt: "2026-08-18T12:00:00+08:00",
+      fundingSource: "personal",
+      paymentMethod: "wechat",
+    },
+    warnings: [],
+    source: { provider: "test", model: null },
+    ...overrides,
+  };
+}
+
+async function request(path, options = {}) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...options,
+    headers: { ...(options.headers ?? {}) },
+  });
+  return read(response);
+}
+
+function shortcutBody(idempotencyKey, text = "2026-08-18 打车 12.80元") {
+  return {
+    text,
+    selection_path: "出差报销 · 支出 · 交通 · 打车",
+    note: "客户拜访",
+    idempotency_key: idempotencyKey,
+    source: "shortcut",
+  };
+}
+
+function incomeBody(idempotencyKey, text = "2026-08-18 收到出差报销 12.80元") {
+  return {
+    text,
+    selection_path: "出差报销 · 收入 · 出差 · 报销",
+    note: "差旅款到账",
+    idempotency_key: idempotencyKey,
+    source: "shortcut",
+  };
+}
+
+function eventHeaders(id) {
+  return {
+    Authorization: `Bearer ${machineToken}`,
+    "Content-Type": "application/json",
+    "Idempotency-Key": `weixin:${id}`,
+  };
+}
+
+function codeFromMessage(message) {
+  const match = String(message).match(/(?:^|\n)(\d{6})(?:\n|$)/u);
+  assert.ok(match, "outbox message must contain a standalone six-digit confirmation code");
+  return match[1];
+}
+
+function workerHeaders() {
+  return {
+    Authorization: `Bearer ${machineToken}`,
+    "X-Weixin-Worker-Id": "test-worker",
+    "X-Weixin-Delivery-Status": "ready",
+    "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(owner, sender),
+  };
+}
+
+async function reportWorkerReady() {
+  const reported = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+    headers: workerHeaders(),
+  });
+  assert.equal(reported.response.status, 204);
+}
+
+async function deliveryStatus(entryId) {
+  return request(`/api/integrations/shortcut/bookkeeping/status?entryId=${encodeURIComponent(entryId)}`, {
+    headers: { Authorization: `Bearer ${shortcutToken}` },
+  });
+}
+
+async function retryDelivery(entryId) {
+  return request("/api/integrations/shortcut/bookkeeping/delivery-retry", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ entryId }),
+  });
+}
+
+async function leaseOutbox() {
+  const leased = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+    headers: workerHeaders(),
+  });
+  assert.equal(leased.response.status, 200);
+  assert.ok(leased.body.leaseToken);
+  return leased.body;
+}
+
+async function ackOutbox(lease, ok = true) {
+  const ack = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ id: lease.item.id, leaseToken: lease.leaseToken, ok }),
+  });
+  assert.equal(ack.response.status, 200);
+}
+
+beforeEach(async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "shortcut-weixin-confirmation-"));
+  entrySequence = 0;
+  actionSequence = 0;
+  outboxSequence = 0;
+  server = createServer({
+    databaseUrl: join(tempDir, "assistant.sqlite"),
+    seed: false,
+    nodeEnv: "test",
+    authRequired: false,
+    shortcutWebhookToken: shortcutToken,
+    shortcutWebhookOwner: owner,
+    shortcutWeixinConfirmationEnabled: true,
+    weixinAgentApiToken: machineToken,
+    weixinAgentOwner: owner,
+    weixinBookkeepingOwner: owner,
+    weixinBookkeepingSenderId: sender,
+    weixinAllowedSenderIds: sender,
+    weixinAllowGroups: false,
+    assistantConfirmationSecret: confirmationSecret,
+    shortcutBookkeepingIdFactory: () => `entry-${++entrySequence}`,
+    shortcutBookkeepingAssistantIdFactory: () => `action-${++actionSequence}`,
+    weixinConfirmationOutboxIdFactory: () => `outbox-${++outboxSequence}`,
+    travelExpenseAnalyzer: async () => analysis(),
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+  await reportWorkerReady();
+});
+
+afterEach(async () => {
+  if (server) await new Promise((resolve) => server.close(resolve));
+  server = null;
+  if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  tempDir = null;
+});
+
+describe("快捷指令—小小—微信六位确认码闭环", () => {
+  it("holds a recognized expense, keeps the code out of storage, and writes only after the latest code", async () => {
+    const received = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-confirmation-1")),
+    });
+    assert.equal(received.response.status, 202);
+    assert.equal(received.body.item.status, "review_required");
+    assert.equal(received.body.item.confirmationPending, true);
+    assert.deepEqual(received.body.item.confirmationDelivery, { status: "queued" });
+    assert.ok(received.body.item.assistantActionId);
+
+    const queued = await deliveryStatus(received.body.item.id);
+    assert.equal(queued.response.status, 200);
+    assert.deepEqual(queued.body.item.confirmationDelivery, { status: "queued" });
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    const rawOutbox = db.prepare("SELECT payload_json FROM weixin_confirmation_outbox").get().payload_json;
+    assert.doesNotMatch(rawOutbox, /\d{6}/u);
+    db.close();
+
+    const lease = await leaseOutbox();
+    assert.deepEqual((await deliveryStatus(received.body.item.id)).body.item.confirmationDelivery, { status: "sending" });
+    assert.match(lease.item.message, /^检测到一笔新记账，请确认！/u);
+    assert.match(lease.item.message, /时间：2026年08月18日 12:00/u);
+    assert.match(lease.item.message, /12\.80 元/);
+    assert.match(lease.item.message, /费用类别：支出 \/ 交通 \/ 打车/u);
+    assert.match(lease.item.message, /备注：客户拜访/u);
+    assert.doesNotMatch(lease.item.message, /商户：|用途：/u);
+    assert.match(lease.item.message, /六位确认码/u);
+    const code = codeFromMessage(lease.item.message);
+    await ackOutbox(lease);
+    assert.equal((await deliveryStatus(received.body.item.id)).body.item.confirmationDelivery.status, "sent");
+
+    const event = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-confirmation-event-1"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-1",
+        text: code,
+        sourceMessageId: "shortcut-confirmation-event-1",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(event.response.status, 200);
+    assert.match(event.body.text, /已确认并录入森特智行/);
+
+    const after = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(after.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
+    assert.equal(after.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+    assert.equal(after.prepare("SELECT status FROM shortcut_bookkeeping_entries").get().status, "accepted");
+    assert.equal(after.prepare("SELECT status FROM assistant_pending_actions").get().status, "executed");
+    after.close();
+  });
+
+  it("confirms an income record without creating travel-expense rows", async () => {
+    const received = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(incomeBody("shortcut-income-confirmation")),
+    });
+    assert.equal(received.response.status, 202);
+    assert.equal(received.body.item.entryType, "income");
+
+    const lease = await leaseOutbox();
+    assert.match(lease.item.message, /^检测到一笔新记账，请确认！/u);
+    assert.match(lease.item.message, /费用类别：收入 \/ 出差 \/ 报销/u);
+    assert.match(lease.item.message, /备注：差旅款到账/u);
+    await ackOutbox(lease);
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-income-confirmation-event"),
+      body: JSON.stringify({
+        conversationId: "provider-income-conversation",
+        text: codeFromMessage(lease.item.message),
+        sourceMessageId: "shortcut-income-confirmation-event",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const entry = db.prepare("SELECT status, entry_type, expense_id, payment_id FROM shortcut_bookkeeping_entries").get();
+    assert.deepEqual({ ...entry }, {
+      status: "accepted",
+      entry_type: "income",
+      expense_id: null,
+      payment_id: null,
+    });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 0);
+    db.close();
+  });
+
+  it("applies an explicit amount correction, resends the draft, and rejects a different sender", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-confirmation-2")),
+    });
+    assert.equal(created.response.status, 202);
+    const first = await leaseOutbox();
+    const firstCode = codeFromMessage(first.item.message);
+    await ackOutbox(first);
+
+    const denied = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-confirmation-denied"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-other",
+        text: firstCode,
+        sourceMessageId: "shortcut-confirmation-denied",
+        senderId: "not-allowlisted",
+        chatType: "direct",
+      }),
+    });
+    assert.equal(denied.response.status, 403);
+
+    const corrected = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-confirmation-correction"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-2",
+        text: "金额改为 18.50 元",
+        sourceMessageId: "shortcut-confirmation-correction",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(corrected.response.status, 200);
+    assert.match(corrected.body.text, /更新草稿|最新识别结果/);
+
+    const second = await leaseOutbox();
+    assert.match(second.item.message, /18\.50 元/);
+    const secondCode = codeFromMessage(second.item.message);
+    assert.notEqual(secondCode, firstCode);
+    await ackOutbox(second);
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-confirmation-final"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-3",
+        text: secondCode,
+        sourceMessageId: "shortcut-confirmation-final",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT amount_cents FROM shortcut_bookkeeping_entries").get().amount_cents, 1850);
+    assert.equal(db.prepare("SELECT amount_cents FROM travel_expense_payments").get().amount_cents, 1850);
+    db.close();
+  });
+
+  it("cancels a pending draft without any financial write", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-confirmation-structured-mismatch")),
+    });
+    assert.equal(created.response.status, 202);
+
+    const lease = await leaseOutbox();
+    codeFromMessage(lease.item.message);
+    await ackOutbox(lease);
+
+    const cancelled = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-confirmation-structured-mismatch"),
+      body: JSON.stringify({
+        conversationId: "provider-conversation-structured-mismatch",
+        text: "取消",
+        sourceMessageId: "shortcut-confirmation-structured-mismatch",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(cancelled.response.status, 200);
+    assert.equal(cancelled.body.status, "cancel");
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    const rejected = db.prepare("SELECT status, raw_text, analysis_json, amount_cents, merchant, purpose, note FROM shortcut_bookkeeping_entries").get();
+    assert.equal(rejected.status, "rejected");
+    assert.equal(rejected.raw_text, "[已取消]");
+    assert.equal(rejected.analysis_json, null);
+    assert.equal(rejected.amount_cents, null);
+    assert.equal(rejected.merchant, null);
+    assert.equal(rejected.purpose, null);
+    assert.equal(rejected.note, null);
+    db.close();
+  });
+
+  it("requeues only an explicitly selected transient delivery failure", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-explicit-delivery-retry")),
+    });
+    assert.equal(created.response.status, 202);
+    const lease = await leaseOutbox();
+    const failed = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: lease.item.id,
+        leaseToken: lease.leaseToken,
+        ok: false,
+        terminal: true,
+        errorCode: "WEIXIN_SEND_FAILED",
+      }),
+    });
+    assert.equal(failed.response.status, 200);
+    assert.equal((await deliveryStatus(created.body.item.id)).body.item.confirmationDelivery.status, "failed");
+
+    const retried = await retryDelivery(created.body.item.id);
+    assert.equal(retried.response.status, 200);
+    assert.deepEqual(retried.body.item.confirmationDelivery, { status: "queued" });
+    const retryLease = await leaseOutbox();
+    assert.equal(retryLease.item.id, lease.item.id);
+    await ackOutbox(retryLease);
+    assert.equal((await deliveryStatus(created.body.item.id)).body.item.confirmationDelivery.status, "sent");
+  });
+
+  it("does not treat natural-language confirmation as a financial write", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-text-confirm-rejected")),
+    });
+    assert.equal(created.response.status, 202);
+    const lease = await leaseOutbox();
+    const code = codeFromMessage(lease.item.message);
+    await ackOutbox(lease);
+
+    const clarified = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-text-confirm-rejected-event"),
+      body: JSON.stringify({
+        conversationId: "text-confirm-rejected",
+        text: "确认",
+        sourceMessageId: "shortcut-text-confirm-rejected-event",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(clarified.response.status, 200);
+    assert.equal(clarified.body.status, "confirmation_required");
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    db.close();
+
+    const accepted = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-text-confirm-code-event"),
+      body: JSON.stringify({
+        conversationId: "text-confirm-rejected",
+        text: code,
+        sourceMessageId: "shortcut-text-confirm-code-event",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(accepted.response.status, 200);
+    assert.equal(accepted.body.status, "ok");
+  });
+
+  it("rejects the wrong structured code and accepts the latest one", async () => {
+    const created = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-structured-code")),
+    });
+    assert.equal(created.response.status, 202);
+    const lease = await leaseOutbox();
+    const code = codeFromMessage(lease.item.message);
+    const wrongCode = code === "000000" ? "999999" : "000000";
+    await ackOutbox(lease);
+
+    const rejected = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-structured-code-wrong"),
+      body: JSON.stringify({
+        conversationId: "structured-code",
+        text: wrongCode,
+        confirmationCode: wrongCode,
+        sourceMessageId: "shortcut-structured-code-wrong",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(rejected.response.status, 409);
+    const before = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(before.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    before.close();
+
+    const accepted = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-structured-code-correct"),
+      body: JSON.stringify({
+        conversationId: "structured-code",
+        text: code,
+        confirmationCode: code,
+        sourceMessageId: "shortcut-structured-code-correct",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(accepted.response.status, 200);
+    assert.equal(accepted.body.status, "ok");
+  });
+
+  it("does not leave an orphan draft when a second expense arrives before the first is closed", async () => {
+    const first = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-pending-first")),
+    });
+    assert.equal(first.response.status, 202);
+    const second = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-pending-second", "2026-08-18 停车 20元")),
+    });
+    assert.equal(second.response.status, 409);
+    assert.equal(second.body.error.code, "ASSISTANT_ACTION_PENDING");
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const rows = db.prepare("SELECT status, raw_text, analysis_json FROM shortcut_bookkeeping_entries ORDER BY id").all();
+    assert.equal(rows.length, 2);
+    assert.equal(rows.filter((row) => row.status === "review_required").length, 1);
+    const rejected = rows.find((row) => row.status === "rejected");
+    assert.equal(rejected.raw_text, "[已取消]");
+    assert.equal(rejected.analysis_json, null);
+    db.close();
+  });
+
+  it("supersedes an unleased draft when it is corrected or cancelled", async () => {
+    const corrected = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-stale-correction")),
+    });
+    assert.equal(corrected.response.status, 202);
+    const correction = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-stale-correction-event"),
+      body: JSON.stringify({
+        conversationId: "stale-correction",
+        text: "金额改为 18.50 元",
+        sourceMessageId: "shortcut-stale-correction-event",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(correction.response.status, 200);
+    const correctedLease = await leaseOutbox();
+    assert.match(correctedLease.item.message, /18\.50 元/u);
+    assert.doesNotMatch(correctedLease.item.message, /12\.80 元/u);
+    const correctedCode = codeFromMessage(correctedLease.item.message);
+    await ackOutbox(correctedLease);
+
+    const finishFirst = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-stale-correction-finish"),
+      body: JSON.stringify({
+        conversationId: "stale-correction",
+        text: correctedCode,
+        sourceMessageId: "shortcut-stale-correction-finish",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(finishFirst.response.status, 200);
+    const acceptedLease = await leaseOutbox();
+    assert.match(acceptedLease.item.message, /已确认并录入森特智行/u);
+    await ackOutbox(acceptedLease);
+
+    const cancelled = await request("/api/integrations/shortcut/bookkeeping", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(shortcutBody("shortcut-stale-cancel")),
+    });
+    assert.equal(cancelled.response.status, 202);
+    const cancellation = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("shortcut-stale-cancel-event"),
+      body: JSON.stringify({
+        conversationId: "stale-cancel",
+        text: "取消",
+        sourceMessageId: "shortcut-stale-cancel-event",
+        senderId: sender,
+        chatType: "direct",
+      }),
+    });
+    assert.equal(cancellation.response.status, 200);
+    assert.equal(cancellation.body.status, "cancel");
+    const cancellationLease = await leaseOutbox();
+    assert.match(cancellationLease.item.message, /已取消快捷记账/u);
+    assert.doesNotMatch(cancellationLease.item.message, /待确认快捷记账/u);
+    await ackOutbox(cancellationLease);
+  });
+});
