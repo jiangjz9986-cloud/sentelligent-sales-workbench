@@ -16,6 +16,7 @@ import { inspectBookkeepingShortcutXml } from "../../integrations/shortcut/verif
 import {
   SHORTCUT_BOOKKEEPING_CATALOG,
   authenticateShortcutWebhook,
+  validateShortcutCapturePayload,
 } from "../src/integrations/shortcutBookkeeping.js";
 
 const temporaryDirectories = [];
@@ -25,6 +26,18 @@ afterEach(async () => {
 });
 
 describe("自有截图记账快捷指令", () => {
+  it("derives a stable opaque idempotency key when iOS sends only OCR text", () => {
+    const first = validateShortcutCapturePayload({ text: " 同一张截图 14.42 元 ", source: "shortcut" });
+    const replay = validateShortcutCapturePayload({ text: "同一张截图 14.42 元", source: "shortcut" });
+    const different = validateShortcutCapturePayload({ text: "另一张截图 14.42 元", source: "shortcut" });
+
+    assert.match(first.idempotencyKey, /^capture-v1-[a-f0-9]{64}$/u);
+    assert.equal(first.idempotencyKey, replay.idempotencyKey);
+    assert.notEqual(first.idempotencyKey, different.idempotencyKey);
+    assert.doesNotMatch(first.idempotencyKey, /同一张截图|14\.42/u);
+    assert.equal(first.sourceId, null);
+  });
+
   it("allows the legacy environment token only outside production", () => {
     const headers = { authorization: `Bearer ${"test-token"}` };
     const baseConfig = {

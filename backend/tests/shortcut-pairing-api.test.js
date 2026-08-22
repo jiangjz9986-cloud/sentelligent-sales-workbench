@@ -148,23 +148,33 @@ describe("快捷指令账号密码配对", () => {
     assert.equal(activated.body.bookkeepingReady, true);
     assert.deepEqual(activated.body.confirmationDelivery, { status: "ready" });
 
+    const captureBody = {
+      text: "2026-08-22 链动小铺 招商银行卡支付 14.42 元",
+      source: "shortcut",
+    };
     const captured = await read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${paired.body.device.token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        text: "2026-08-22 链动小铺 招商银行卡支付 14.42 元",
-        idempotency_key: "device-capture-20260822214400000",
-        source_id: "device-capture-20260822214400000",
-        source: "shortcut",
-      }),
+      body: JSON.stringify(captureBody),
     }));
     assert.equal(captured.response.status, 202);
     assert.equal(captured.body.item.status, "review_required");
     assert.equal(captured.body.item.confirmationPending, true);
     assert.equal(captured.body.item.confirmationDelivery.status, "queued");
+
+    const replayedCapture = await read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${paired.body.device.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(captureBody),
+    }));
+    assert.equal(replayedCapture.response.status, 202);
+    assert.equal(replayedCapture.body.item.id, captured.body.item.id);
 
     const captureWithoutToken = await read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture`, {
       method: "POST",
@@ -194,8 +204,9 @@ describe("快捷指令账号密码配对", () => {
       assert.equal(row.category, "其他");
       assert.equal(row.subcategory, null);
       assert.equal(row.raw_text, "2026-08-22 链动小铺 招商银行卡支付 14.42 元");
-      assert.equal(row.source_id, "device-capture-20260822214400000");
+      assert.equal(row.source_id, null);
       assert.equal(row.status, "review_required");
+      assert.equal(captureDb.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 1);
       assert.doesNotMatch(JSON.stringify(row), /password|fixture-passphrase/u);
     } finally {
       captureDb.close();

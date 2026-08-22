@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { HttpError } from "../http/errors.js";
 import { constantTimeEqual } from "../http/security.js";
 
@@ -114,6 +116,10 @@ function assertDateTime(value, field) {
   return value.trim();
 }
 
+function captureIdempotencyKey(text) {
+  return `capture-v1-${createHash("sha256").update(text, "utf8").digest("hex")}`;
+}
+
 export function resolveShortcutCategory({ ledgerName, entryType, category, subcategory = null } = {}) {
   const ledger = SHORTCUT_BOOKKEEPING_CATALOG[ledgerName];
   if (!ledger) validationError({ ledger_name: "notAllowed" });
@@ -216,11 +222,16 @@ export function validateShortcutCapturePayload(body) {
   if (unknown) validationError({ [unknown]: "unknown" });
   const text = requiredText(body.text, "text", 12_000);
   const note = optionalText(body.note, "note", 1_000);
-  const idempotencyKey = requiredText(body.idempotency_key, "idempotency_key", 200);
-  if (body.idempotency_key !== idempotencyKey
-    || /[\u0000-\u001f\u007f-\u009f,]/u.test(idempotencyKey)) {
+  const suppliedIdempotencyKey = optionalText(body.idempotency_key, "idempotency_key", 200);
+  if (suppliedIdempotencyKey !== null
+    && (body.idempotency_key !== suppliedIdempotencyKey
+      || /[\u0000-\u001f\u007f-\u009f,]/u.test(suppliedIdempotencyKey))) {
     validationError({ idempotency_key: "format" });
   }
+  // The screenshot-only Shortcut intentionally avoids constructing identifiers
+  // from iOS rich values. A domain-separated digest makes retries of the same
+  // OCR payload idempotent without persisting or exposing the financial text.
+  const idempotencyKey = suppliedIdempotencyKey ?? captureIdempotencyKey(text);
   if (body.source !== SHORTCUT_BOOKKEEPING_SOURCE) validationError({ source: "notAllowed" });
   const capturedAt = body.captured_at === undefined || body.captured_at === null || body.captured_at === ""
     ? null

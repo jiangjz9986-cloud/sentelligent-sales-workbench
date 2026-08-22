@@ -59,23 +59,24 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     const { report } = await convertIcostCaptureShortcut({ inputPath, outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     assert.deepEqual(report, {
-      actionCount: 14,
+      actionCount: 11,
       endpoint: CAPTURE_DEVICE_ENDPOINT,
       preservesCapturePrefix: true,
       preservesIcostOcrText: true,
       coercesOcrThroughTextAction: true,
-      coercesIdentifiersThroughTextAction: true,
+      usesServerDerivedIdempotency: true,
       removesIcostWrite: true,
       hasInlineCredentials: false,
       hasDeviceCredential: true,
       hasFailureNotice: true,
       hasSafeFailureDiagnostics: true,
       hasSuccessReceipt: false,
-      payloadKeys: ["text", "idempotency_key", "source_id", "source"],
+      payloadKeys: ["text", "source"],
     });
     const xml = await readFile(outputPath, "utf8");
     assert.match(xml, new RegExp(CAPTURE_DEVICE_MARKER, "u"));
     assert.doesNotMatch(xml, /森特账号|森特密码|bookkeeping-capture-inline/u);
+    assert.doesNotMatch(xml, /idempotency_key|source_id|截图记账ID|format\.date/u);
     assert.doesNotMatch(xml, /ICAISnapshotShortcutV7/u);
     assert.match(xml, /WFTextTokenString/u);
     assert.deepEqual(inspectConvertedIcostCaptureShortcutXml(xml), report);
