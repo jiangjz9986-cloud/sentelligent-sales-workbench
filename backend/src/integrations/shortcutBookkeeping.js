@@ -2,6 +2,10 @@ import { HttpError } from "../http/errors.js";
 import { constantTimeEqual } from "../http/security.js";
 
 export const SHORTCUT_BOOKKEEPING_ROUTE = "/api/integrations/shortcut/bookkeeping";
+// Device-token capture mode for the screenshot-only Shortcut. It accepts the
+// OCR payload without exposing account/password fields on the phone and still
+// enters the same owner-scoped WeChat confirmation pipeline.
+export const SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE = "/api/integrations/shortcut/bookkeeping-capture";
 // Development/internal fallback: the Shortcut carries two editable constants
 // and the server validates them before accepting the business payload. Keep it
 // as a separate route so the account-bound device-token contract remains
@@ -301,7 +305,8 @@ export function authenticateShortcutWebhook(headers = {}, config = {}, tokenReso
 }
 
 export function isShortcutBookkeepingRouteAllowed(method, path) {
-  return String(method ?? "").toUpperCase() === "POST" && path === SHORTCUT_BOOKKEEPING_ROUTE;
+  return String(method ?? "").toUpperCase() === "POST"
+    && [SHORTCUT_BOOKKEEPING_ROUTE, SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE].includes(path);
 }
 
 export function shortcutCatalogResponse() {

@@ -6,9 +6,8 @@ import { afterEach, describe, it } from "node:test";
 
 import { serializePlistXml } from "../../integrations/icost-shortcut/plist-xml.mjs";
 import {
-  CAPTURE_ACCOUNT_PLACEHOLDER,
-  CAPTURE_INLINE_ENDPOINT,
-  CAPTURE_PASSWORD_PLACEHOLDER,
+  CAPTURE_DEVICE_ENDPOINT,
+  CAPTURE_DEVICE_MARKER,
   convertIcostCaptureShortcut,
   inspectConvertedIcostCaptureShortcutXml,
 } from "../../integrations/shortcut/convert-icost-capture-shortcut.mjs";
@@ -60,22 +59,46 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     const { report } = await convertIcostCaptureShortcut({ inputPath, outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     assert.deepEqual(report, {
-      actionCount: 12,
-      endpoint: CAPTURE_INLINE_ENDPOINT,
+      actionCount: 10,
+      endpoint: CAPTURE_DEVICE_ENDPOINT,
       preservesCapturePrefix: true,
       preservesIcostOcrText: true,
       removesIcostWrite: true,
-      hasInlineCredentials: true,
+      hasInlineCredentials: false,
+      hasDeviceCredential: true,
       hasFailureNotice: true,
       hasSuccessReceipt: false,
-      payloadKeys: ["account", "password", "text", "idempotency_key", "source_id", "source"],
+      payloadKeys: ["text", "idempotency_key", "source_id", "source"],
     });
     const xml = await readFile(outputPath, "utf8");
-    assert.match(xml, new RegExp(CAPTURE_ACCOUNT_PLACEHOLDER, "u"));
-    assert.match(xml, new RegExp(CAPTURE_PASSWORD_PLACEHOLDER, "u"));
+    assert.match(xml, new RegExp(CAPTURE_DEVICE_MARKER, "u"));
+    assert.doesNotMatch(xml, /森特账号|森特密码|bookkeeping-capture-inline/u);
     assert.doesNotMatch(xml, /ICAISnapshotShortcutV7/u);
     assert.match(xml, /WFTextTokenString/u);
     assert.deepEqual(inspectConvertedIcostCaptureShortcutXml(xml), report);
+  });
+
+  it("embeds a valid device credential without account or password fields", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "shortcut-icost-device-converter-"));
+    temporaryDirectories.push(directory);
+    const inputPath = join(directory, "source.shortcut");
+    const outputPath = join(directory, "converted.shortcut");
+    const fixture = "d".repeat(43);
+    await writeFile(inputPath, serializePlistXml(sourcePlist()), { mode: 0o600 });
+    const { report } = await convertIcostCaptureShortcut({
+      inputPath,
+      outputPath,
+      deviceToken: fixture,
+    });
+    const xml = await readFile(outputPath, "utf8");
+    assert.equal(report.hasDeviceCredential, true);
+    assert.match(xml, new RegExp(`Bearer ${fixture}`, "u"));
+    assert.doesNotMatch(xml, /<string>account<\/string>|<string>password<\/string>/u);
+    await assert.rejects(() => convertIcostCaptureShortcut({
+      inputPath,
+      outputPath,
+      deviceToken: "too-short",
+    }), /deviceToken/u);
   });
 
   it("rejects extra actions and non-canonical endpoints", async () => {

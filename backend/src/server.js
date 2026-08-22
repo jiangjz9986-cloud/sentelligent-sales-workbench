@@ -84,6 +84,7 @@ import {
   authenticateShortcutWebhook,
   isShortcutBookkeepingRouteAllowed,
   SHORTCUT_BOOKKEEPING_ROUTE,
+  SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE,
   SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE,
   SHORTCUT_BOOKKEEPING_INLINE_ROUTE,
   SHORTCUT_BOOKKEEPING_CATALOG_ROUTE,
@@ -3196,6 +3197,7 @@ export function createServer(options = {}) {
       // bookkeeping pipeline runs. Strip both fields before validation and
       // hashing so the password never enters business storage or audit data.
       const captureInlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE;
+      const captureTokenShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE;
       const inlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_INLINE_ROUTE
         || captureInlineShortcutRoute;
       let inlineShortcutBody = null;
@@ -3249,7 +3251,7 @@ export function createServer(options = {}) {
         };
       }
 
-      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE || inlineShortcutRoute) {
+      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE || captureTokenShortcutRoute || inlineShortcutRoute) {
         if (!inlineShortcutRoute && !isShortcutBookkeepingRouteAllowed(request.method, url.pathname)) {
           sendHttpError(
             response,
@@ -3298,7 +3300,9 @@ export function createServer(options = {}) {
           );
           return;
         }
-        const body = inlineShortcutBody ?? validateShortcutBookkeepingPayload(await readJson(request));
+        const body = inlineShortcutBody ?? (captureTokenShortcutRoute
+          ? validateShortcutCapturePayload(await readJson(request))
+          : validateShortcutBookkeepingPayload(await readJson(request)));
         const received = shortcutBookkeepingRepository.receive({
           owner: integrationIdentity.account,
           actor: integrationIdentity.account,

@@ -42,6 +42,23 @@ async function startServer(overrides = {}) {
     weixinBookkeepingOwner: account,
     weixinBookkeepingSenderId: "sender-1",
     weixinAllowedSenderIds: "sender-1",
+    travelExpenseAnalyzer: async () => ({
+      status: "ready",
+      confidence: 1,
+      expense: {
+        occurredOn: "2026-08-22",
+        amountCents: 1442,
+        reimbursementCents: 1442,
+        purpose: "打车",
+        category: "transport",
+        merchant: "测试商户",
+        paidAt: "2026-08-22T21:44:00+08:00",
+        fundingSource: "personal",
+        paymentMethod: "card",
+      },
+      warnings: [],
+      source: { provider: "test", model: null },
+    }),
     ...overrides,
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -130,6 +147,59 @@ describe("快捷指令账号密码配对", () => {
     }));
     assert.equal(activated.body.bookkeepingReady, true);
     assert.deepEqual(activated.body.confirmationDelivery, { status: "ready" });
+
+    const captured = await read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${paired.body.device.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: "2026-08-22 链动小铺 招商银行卡支付 14.42 元",
+        idempotency_key: "device-capture-20260822214400000",
+        source_id: "device-capture-20260822214400000",
+        source: "shortcut",
+      }),
+    }));
+    assert.equal(captured.response.status, 202);
+    assert.equal(captured.body.item.status, "review_required");
+    assert.equal(captured.body.item.confirmationPending, true);
+    assert.equal(captured.body.item.confirmationDelivery.status, "queued");
+
+    const captureWithoutToken = await read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "未授权请求",
+        idempotency_key: "device-capture-missing-token",
+        source: "shortcut",
+      }),
+    }));
+    assert.equal(captureWithoutToken.response.status, 401);
+    assert.equal(captureWithoutToken.body.error.code, "SHORTCUT_TOKEN_REQUIRED");
+
+    const invalidMethod = await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${paired.body.device.token}` },
+    });
+    assert.equal(invalidMethod.status, 405);
+
+    const captureDb = openDatabase({ databaseUrl: join(tempDir, "pairing.sqlite") });
+    try {
+      const row = captureDb.prepare(`
+        SELECT owner, category, subcategory, raw_text, source_id, status
+        FROM shortcut_bookkeeping_entries
+      `).get();
+      assert.equal(row.owner, account);
+      assert.equal(row.category, "其他");
+      assert.equal(row.subcategory, null);
+      assert.equal(row.raw_text, "2026-08-22 链动小铺 招商银行卡支付 14.42 元");
+      assert.equal(row.source_id, "device-capture-20260822214400000");
+      assert.equal(row.status, "review_required");
+      assert.doesNotMatch(JSON.stringify(row), /password|fixture-passphrase/u);
+    } finally {
+      captureDb.close();
+    }
   });
 
   it("rejects wrong credentials, malformed methods, and incomplete authentication configuration", async () => {
