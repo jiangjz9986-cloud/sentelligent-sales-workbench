@@ -380,6 +380,7 @@ const placeholderWords = new Set([
   "session",
   "shared",
   "short",
+  "shortcut",
   "scope",
   "single",
   "stale",
@@ -526,7 +527,7 @@ function lineNumberAt(content, index) {
   return content.slice(0, index).split("\n").length;
 }
 
-function assertNoReleaseSecrets(files, contentByPath) {
+export function assertNoReleaseSecrets(files, contentByPath) {
   for (const file of files) {
     const content = textContent(file, contentByPath.get(file));
     if (content === null) continue;

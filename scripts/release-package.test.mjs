@@ -2187,6 +2187,41 @@ describe("portable release package", () => {
     }
   });
 
+  it("keeps domain-led Shortcut and WeChat fixture labels limited to test source", async () => {
+    const { assertNoReleaseSecrets } = await loadReleaseModule();
+    const testContent = [
+      'const shortcutToken = "test-shortcut-token";',
+      'const machineToken = "weixin-machine-test-token";',
+      "",
+    ].join("\n");
+
+    assert.doesNotThrow(() =>
+      assertNoReleaseSecrets(
+        ["backend/tests/shortcut-confirmation.test.js"],
+        new Map([["backend/tests/shortcut-confirmation.test.js", Buffer.from(testContent)]]),
+      ),
+    );
+    const sourceContent = [
+      [
+        "const shortcutToken",
+        JSON.stringify(["shortcut", "machine", "test", "token"].join("-")),
+      ].join(" = ") + ";",
+      [
+        "const machineToken",
+        JSON.stringify(["weixin", "machine", "test", "token"].join("-")),
+      ].join(" = ") + ";",
+      "",
+    ].join("\n");
+    assert.throws(
+      () =>
+        assertNoReleaseSecrets(
+          ["backend/src/shortcut-confirmation.js"],
+          new Map([["backend/src/shortcut-confirmation.js", Buffer.from(sourceContent)]]),
+        ),
+      /credential-assignment/,
+    );
+  });
+
   it("allows GitHub Actions context references without treating them as credential values", async () => {
     const workspace = makeWorkspace("sentelligent-github-context-");
     const output = makeWorkspace("sentelligent-github-context-output-");
