@@ -3625,9 +3625,19 @@ export function createServer(options = {}) {
         } catch (error) {
           throw new HttpError(422, "VALIDATION_ERROR", "招标公告筛选条件无效", { filters: error.message });
         }
+        let total;
+        try {
+          total = hospitalTenderRepository.countNotices(filters);
+        } catch (error) {
+          throw new HttpError(422, "VALIDATION_ERROR", "招标公告筛选条件无效", { filters: error.message });
+        }
         const customerNames = hospitalTenderCustomerNameMap(db);
         sendJson(response, 200, {
           items: items.map((item) => serializeHospitalTenderNotice(item, customerNames)),
+          total,
+          limit,
+          offset,
+          hasMore: offset + items.length < total,
         });
         return;
       }
