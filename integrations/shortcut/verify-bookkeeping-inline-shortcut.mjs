@@ -116,6 +116,39 @@ function indexOfAction(actions, target) {
   return index;
 }
 
+function conditionalMarker(actions, group, mode, label) {
+  const matches = actions.filter(
+    (entry) => identifier(entry) === ACTIONS.conditional
+      && params(entry).GroupingIdentifier === group
+      && params(entry).WFControlFlowMode === mode,
+  );
+  requireValue(matches.length === 1, `${label}条件分组必须恰好包含一个模式 ${mode} 标记`);
+  return matches[0];
+}
+
+function assertCancellationBranch(actions, {
+  guard,
+  cancelled,
+  label,
+  trueBranchTail,
+}) {
+  const group = params(guard).GroupingIdentifier;
+  const otherwise = conditionalMarker(actions, group, 1, label);
+  const end = conditionalMarker(actions, group, 2, label);
+  const guardIndex = indexOfAction(actions, guard);
+  const otherwiseIndex = indexOfAction(actions, otherwise);
+  const cancelledIndex = indexOfAction(actions, cancelled);
+  const endIndex = indexOfAction(actions, end);
+  requireValue(
+    guardIndex < indexOfAction(actions, trueBranchTail)
+      && indexOfAction(actions, trueBranchTail) + 1 === otherwiseIndex
+      && otherwiseIndex + 1 === cancelledIndex
+      && cancelledIndex + 1 === endIndex,
+    `${label}取消分支结构不正确`,
+  );
+  return { end, endIndex };
+}
+
 export function inspectBookkeepingInlineShortcutXml(xml) {
   const plist = parsePlistXml(xml);
   const actions = plist.WFWorkflowActions;
@@ -126,7 +159,7 @@ export function inspectBookkeepingInlineShortcutXml(xml) {
   requireValue(!xml.includes("出差报销"), "快捷指令可见分类列表不得包含内部账本名称");
   assertMetadata(plist);
 
-  requireValue(actions.length === 58, "三级菜单快捷指令动作数量不正确");
+  requireValue(actions.length === 59, "三级菜单快捷指令动作数量不正确");
   requireValue(actions[0] && actions[1], "账号密码常量动作缺失");
   requireValue(identifier(actions[0]) === ACTIONS.text && identifier(actions[1]) === ACTIONS.text, "账号密码常量必须位于最顶部");
   requireValue(!actions.some((entry) => identifier(entry) === ACTIONS.hash), "快捷指令不得复用内容哈希");
@@ -182,6 +215,9 @@ export function inspectBookkeepingInlineShortcutXml(xml) {
   const selectionPath = findByOutputName(actions, "三级记账路径");
   const requestAction = findByOutputName(actions, "已提交微信确认");
   const responseError = findByOutputName(actions, "记账提交错误");
+  const cancelledSubcategory = findByOutputName(actions, "已取消三级分类");
+  const cancelledCategory = findByOutputName(actions, "已取消费用类别");
+  const cancelledEntry = findByOutputName(actions, "已取消收支类型");
 
   requireValue(JSON.stringify(params(entryOptions).WFItems) === JSON.stringify(BOOKKEEPING_ENTRY_TYPE_OPTIONS), "第一层收支列表不一致");
   requireValue(JSON.stringify(params(entryOptions).WFItems) === JSON.stringify(["收入", "支出"]), "第一层必须先收入后支出");
@@ -269,11 +305,45 @@ export function inspectBookkeepingInlineShortcutXml(xml) {
       && params(entry).GroupingIdentifier === responseErrorGroup
       && params(entry).WFControlFlowMode === 1,
   ), "成功分支必须保持静默，不得加入接口回执");
-  for (const guard of cancellationGuards) {
-    const group = params(guard).GroupingIdentifier;
-    const otherwise = actions.findIndex((entry) => params(entry).GroupingIdentifier === group && params(entry).WFControlFlowMode === 1);
-    requireValue(indexOfAction(actions, guard) < requestIndex && requestIndex < otherwise, "记账请求必须位于全部非空选择分支内");
-  }
+  requireValue(responseErrorIndex + 1 === responseErrorGuardIndex
+    && responseErrorGuardIndex + 1 === indexOfAction(actions, responseErrorNotice)
+    && indexOfAction(actions, responseErrorNotice) + 1 === indexOfAction(actions, responseErrorEnd),
+  "提交失败提示分支必须紧邻请求响应且完整闭合");
+
+  const entryGuard = cancellationGuards.find(
+    (entry) => outputUuid(params(entry).WFInput?.Variable) === uuid(entrySelection),
+  );
+  const categoryGuard = cancellationGuards.find(
+    (entry) => outputUuid(params(entry).WFInput?.Variable) === uuid(categoryResult),
+  );
+  const subcategoryGuard = cancellationGuards.find(
+    (entry) => outputUuid(params(entry).WFInput?.Variable) === uuid(subcategoryResult),
+  );
+  requireValue(entryGuard && categoryGuard && subcategoryGuard, "三级菜单取消门禁未绑定对应选择输出");
+
+  const subcategoryBranch = assertCancellationBranch(actions, {
+    guard: subcategoryGuard,
+    cancelled: cancelledSubcategory,
+    label: "三级分类",
+    trueBranchTail: responseErrorEnd,
+  });
+  const categoryBranch = assertCancellationBranch(actions, {
+    guard: categoryGuard,
+    cancelled: cancelledCategory,
+    label: "费用类别",
+    trueBranchTail: subcategoryBranch.end,
+  });
+  const entryBranch = assertCancellationBranch(actions, {
+    guard: entryGuard,
+    cancelled: cancelledEntry,
+    label: "收支类型",
+    trueBranchTail: categoryBranch.end,
+  });
+  requireValue(entryBranch.endIndex === actions.length - 1, "收支类型取消分支必须是快捷指令的最终闭合动作");
+  requireValue(indexOfAction(actions, entryGuard) < indexOfAction(actions, categoryGuard)
+    && indexOfAction(actions, categoryGuard) < indexOfAction(actions, subcategoryGuard)
+    && indexOfAction(actions, subcategoryGuard) < requestIndex,
+  "记账请求必须严格位于三级非空选择分支内");
 
   return {
     actionCount: actions.length,

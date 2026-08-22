@@ -16,7 +16,7 @@ import {
   BOOKKEEPING_ENTRY_TYPE_OPTIONS,
   BOOKKEEPING_SUBCATEGORY_OPTIONS,
 } from "../../integrations/shortcut/build-bookkeeping-shortcut.mjs";
-import { parsePlistXml } from "../../integrations/icost-shortcut/plist-xml.mjs";
+import { parsePlistXml, serializePlistXml } from "../../integrations/icost-shortcut/plist-xml.mjs";
 import { inspectBookkeepingInlineShortcutXml } from "../../integrations/shortcut/verify-bookkeeping-inline-shortcut.mjs";
 
 const temporaryDirectories = [];
@@ -32,7 +32,7 @@ describe("手动账号密码版快捷指令生成器", () => {
     const outputPath = join(directory, "inline.unsigned.shortcut");
     const { report } = await buildBookkeepingInlineShortcut({ outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
-    assert.equal(report.actionCount, 58);
+    assert.equal(report.actionCount, 59);
     assert.equal(report.hasInlineCredentials, true);
     assert.equal(report.hasPairing, false);
     assert.equal(report.hasTokenVerification, false);
@@ -67,6 +67,26 @@ describe("手动账号密码版快捷指令生成器", () => {
     assert.equal(report.hasShortcutReceipt, false);
     assert.equal(report.hasFailureNotice, true);
     assert.equal(report.usesTimeId, true);
+
+    const cancellation = plist.WFWorkflowActions.findIndex(
+      (entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "已取消三级分类",
+    );
+    const otherwise = plist.WFWorkflowActions.findIndex(
+      (entry) => entry.WFWorkflowActionIdentifier === "is.workflow.actions.conditional"
+        && entry.WFWorkflowActionParameters?.WFControlFlowMode === 1
+        && entry.WFWorkflowActionParameters?.GroupingIdentifier
+          === plist.WFWorkflowActions[cancellation - 1]?.WFWorkflowActionParameters?.GroupingIdentifier,
+    );
+    assert.equal(otherwise + 1, cancellation);
+    const malformed = structuredClone(plist);
+    [malformed.WFWorkflowActions[otherwise], malformed.WFWorkflowActions[cancellation]] = [
+      malformed.WFWorkflowActions[cancellation],
+      malformed.WFWorkflowActions[otherwise],
+    ];
+    assert.throws(
+      () => inspectBookkeepingInlineShortcutXml(serializePlistXml(malformed)),
+      /取消分支结构不正确/u,
+    );
 
     for (const unsafeEndpoint of [
       "https://evil.example/api/integrations/shortcut/bookkeeping-inline",

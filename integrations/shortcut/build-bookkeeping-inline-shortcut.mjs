@@ -428,13 +428,17 @@ function buildPlist({ endpoint = INLINE_BOOKKEEPING_ENDPOINT } = {}) {
       GroupingIdentifier: responseErrorGuard,
       WFControlFlowMode: 2,
     }),
+    controlAction("is.workflow.actions.conditional", {
+      GroupingIdentifier: subcategoryGuard,
+      WFControlFlowMode: 1,
+    }),
     action("is.workflow.actions.gettext", {
       CustomOutputName: "已取消三级分类",
       WFTextActionText: literalToken("已取消，不上传"),
     }, cancelledSubcategory),
     controlAction("is.workflow.actions.conditional", {
       GroupingIdentifier: subcategoryGuard,
-      WFControlFlowMode: 1,
+      WFControlFlowMode: 2,
     }),
     controlAction("is.workflow.actions.conditional", {
       GroupingIdentifier: categoryGuard,
