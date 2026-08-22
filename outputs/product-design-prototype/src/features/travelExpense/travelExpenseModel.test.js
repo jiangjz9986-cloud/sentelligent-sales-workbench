@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  buildExpenseLedgerRows,
+  deriveExpenseInvoiceStates,
   EXPENSE_CATEGORIES,
   flattenPaymentRows,
   formatCny,
@@ -207,5 +209,102 @@ describe("payment rows", () => {
       ["shared-proof"],
       ["shared-proof"],
     ]);
+  });
+});
+
+describe("six-field expense ledger", () => {
+  const payments = [
+    {
+      id: "payment-1",
+      paidAt: "2026-08-04T12:00:00+08:00",
+      amountCents: 3100,
+      reimbursementCents: 3000,
+      fundingSource: "personal",
+    },
+    {
+      id: "payment-2",
+      paidAt: "2026-08-04T12:05:00+08:00",
+      amountCents: 900,
+      reimbursementCents: 900,
+      fundingSource: "personal",
+    },
+  ];
+
+  it("exposes exactly the six confirmed business fields while retaining technical identity separately", () => {
+    const [row] = buildExpenseLedgerRows([
+      expenseWithPayments(payments, {
+        referenceCode: "EXP-20260804-ABC12345",
+        occurredOn: "2026-08-04",
+        endedOn: "2026-08-06",
+        category: "lodging",
+        purpose: "济南住宿",
+        notes: "客户拜访住宿",
+        attachments: [
+          { id: "proof-1", kind: "payment_proof", paymentIds: ["payment-1"] },
+          { id: "proof-1", kind: "payment_proof", paymentIds: ["payment-2"] },
+        ],
+      }),
+    ]);
+
+    assert.deepEqual(Object.keys(row.visible), [
+      "date",
+      "category",
+      "amountCents",
+      "paymentProofs",
+      "invoiceStates",
+      "notes",
+    ]);
+    assert.equal(row.visible.date, "2026-08-04—2026-08-06");
+    assert.equal(row.visible.category, "住宿");
+    assert.equal(row.visible.amountCents, 4000);
+    assert.deepEqual(row.visible.paymentProofs.map((item) => item.id), ["proof-1"]);
+    assert.equal(row.referenceCode, "EXP-20260804-ABC12345");
+    assert.equal("merchant" in row.visible, false);
+    assert.equal("paidAt" in row.visible, false);
+  });
+
+  it("derives electronic, substitute, no-invoice, and still-missing states without auto-confirming", () => {
+    const expense = expenseWithPayments(payments, { id: "expense-states" });
+    const states = deriveExpenseInvoiceStates(expense, {
+      matches: [
+        {
+          id: "direct-match",
+          expenseId: expense.id,
+          state: "confirmed",
+          matchMethod: "manual_selection",
+          allocatedCents: 1500,
+        },
+        {
+          id: "substitute-match",
+          expenseId: expense.id,
+          state: "confirmed",
+          matchMethod: "rule_candidate",
+          allocatedCents: 1000,
+        },
+      ],
+      noInvoiceConfirmations: [
+        {
+          id: "no-invoice-1",
+          expenseId: expense.id,
+          amountSnapshotCents: 900,
+          revokedAt: null,
+        },
+      ],
+    });
+
+    assert.deepEqual(states.map((item) => item.id), [
+      "electronic_invoice",
+      "substitute_invoice",
+      "no_invoice",
+      "invoice_pending",
+    ]);
+    assert.equal(states.find((item) => item.id === "invoice_pending").amountCents, 500);
+  });
+
+  it("falls back to the legacy purpose when older rows have no notes", () => {
+    const [row] = buildExpenseLedgerRows([
+      expenseWithPayments(payments, { purpose: "旧版住宿说明", notes: "" }),
+    ]);
+    assert.equal(row.visible.notes, "旧版住宿说明");
   });
 });

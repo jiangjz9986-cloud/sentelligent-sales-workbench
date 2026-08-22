@@ -18,7 +18,7 @@
     "test:sales-decision-page": "node --test scripts/sales-decision-page.test.mjs",
     "test:itinerary": "node --test src/features/visitItinerary/visitItineraryModel.test.js src/features/visitItinerary/amapGeocoder.test.js",
     "test:itinerary-page": "node --test scripts/itinerary-page.test.mjs",
-    "test:travel-expense": "node --test src/api/salesWorkbenchApi.test.js src/features/travelExpense/authenticatedPdf.test.js src/features/travelExpense/invoiceMatchingModel.test.js src/features/travelExpense/paymentProofModel.test.js src/features/travelExpense/travelExpenseDocument.test.js src/features/travelExpense/travelExpenseModel.test.js src/features/travelExpense/travelExpenseExport.test.js scripts/travel-expense-page.test.mjs scripts/authenticated-pdf-browser.test.mjs",
+    "test:travel-expense": "node --test src/api/salesWorkbenchApi.test.js src/features/travelExpense/authenticatedPdf.test.js src/features/travelExpense/documentVariant.test.js src/features/travelExpense/invoiceMatchingModel.test.js src/features/travelExpense/paymentProofModel.test.js src/features/travelExpense/travelExpenseDocument.test.js src/features/travelExpense/travelExpenseModel.test.js src/features/travelExpense/travelExpenseExport.test.js scripts/travel-expense-page.test.mjs scripts/authenticated-pdf-browser.test.mjs",
     "test:list-actions": "node --test scripts/list-action-layout.test.mjs",
     "test:contract": "node scripts/customer-opportunity-contract.test.mjs",
     "test:static": "node --test scripts/static-server.test.mjs",

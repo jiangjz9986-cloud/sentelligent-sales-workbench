@@ -36,6 +36,7 @@ export function ReimbursementOrganizer({
   week,
   owner,
   getAttachmentUrl,
+  onOpenExpenseListPrint = () => {},
   onOpenPrint,
   onRefresh,
 }) {
@@ -69,6 +70,7 @@ export function ReimbursementOrganizer({
         <div className="expense-organizer-actions">
           <button className="ghost-button" type="button" onClick={onRefresh}><RefreshCw size={16} />刷新</button>
           <button className="ghost-button" type="button" onClick={exportCsv} disabled={exporting || rows.length === 0}><Download size={16} />{exporting ? "导出中" : "导出表格"}</button>
+          <button className="ghost-button" type="button" onClick={onOpenExpenseListPrint} disabled={rows.length === 0}><FileText size={16} />打印费用清单</button>
           <button className="primary-button" type="button" onClick={onOpenPrint} disabled={rows.length === 0}><Printer size={16} />打印实际付款记录</button>
         </div>
       </header>

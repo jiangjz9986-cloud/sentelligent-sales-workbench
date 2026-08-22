@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  buildExpenseListRows,
   buildPaymentRecordCsv,
   buildPaymentRecordRows,
+  assessPrintImageResolution,
+  expandInvoicePrintItems,
   paginateInvoicePrint,
   paginatePaymentRecord,
   paymentRecordFilename,
+  expenseListFilename,
+  paginateExpenseList,
   printWhenImagesReady,
 } from "./travelExpenseExport.js";
 
@@ -199,6 +204,24 @@ describe("actual payment print pagination", () => {
 });
 
 describe("invoice print pagination", () => {
+  it("expands every PDF page into an ordered fixed-slot print item", () => {
+    const invoices = [
+      { id: "pdf-1", fileName: "multi-page.pdf", mediaType: "application/pdf" },
+      { id: "image-1", fileName: "receipt.png", mediaType: "image/png" },
+      { id: "pdf-2", fileName: "unknown-pages.pdf", mediaType: "application/pdf" },
+    ];
+
+    const items = expandInvoicePrintItems(invoices, { "pdf-1": 3 });
+
+    assert.deepEqual(items.map((item) => [item.invoice.id, item.pageNumber, item.pageCount]), [
+      ["pdf-1", 1, 3],
+      ["pdf-1", 2, 3],
+      ["pdf-1", 3, 3],
+      ["image-1", null, 1],
+    ]);
+    assert.equal(items.some((item) => item.invoice.id === "pdf-2"), false);
+  });
+
   it("keeps four fixed invoice slots on every landscape A4 page", () => {
     const invoices = Array.from({ length: 5 }, (_, index) => ({
       id: `invoice-${index + 1}`,
@@ -244,5 +267,80 @@ describe("invoice print pagination", () => {
       /发票原件加载失败/,
     );
     assert.equal(selector, ".invoice-print-document img");
+  });
+
+  it("flags low-resolution originals instead of silently replacing them", async () => {
+    assert.equal(assessPrintImageResolution({
+      naturalWidth: 479,
+      naturalHeight: 800,
+      minNaturalWidth: 480,
+      minNaturalHeight: 300,
+    }), "low_resolution");
+    assert.equal(assessPrintImageResolution({
+      naturalWidth: 1200,
+      naturalHeight: 800,
+      minNaturalWidth: 480,
+      minNaturalHeight: 300,
+    }), "ready");
+
+    const documentRef = {
+      querySelectorAll: () => [{ complete: true, naturalWidth: 479, naturalHeight: 800 }],
+    };
+    await assert.rejects(
+      printWhenImagesReady({
+        documentRef,
+        print: () => assert.fail("low-resolution original must not print automatically"),
+        selector: ".invoice-print-document img",
+        minNaturalWidth: 480,
+        minNaturalHeight: 300,
+        errorMessage: "发票原件加载失败，请重新检查后打印。",
+      }),
+      /分辨率不足/,
+    );
+  });
+});
+
+describe("six-field expense list export", () => {
+  it("uses the confirmed seven-column expense list without leaking payment details", () => {
+    const rows = buildExpenseListRows(expenses);
+    assert.deepEqual(Object.keys(rows[0]), [
+      "sequence",
+      "expenseId",
+      "referenceCode",
+      "dateLabel",
+      "categoryLabel",
+      "amountCents",
+      "amountLabel",
+      "paymentProofLabel",
+      "invoiceStatusLabel",
+      "notes",
+    ]);
+    assert.equal(rows[0].dateLabel, "2026-08-03");
+    assert.equal(rows[0].categoryLabel, "早餐");
+    assert.equal(rows[0].amountCents, 4000);
+    assert.equal(rows[0].paymentProofLabel, "3 张");
+    assert.match(rows[0].invoiceStatusLabel, /电子发票/);
+    assert.equal("merchant" in rows[0], false);
+    assert.equal("paidAt" in rows[0], false);
+  });
+
+  it("paginates complete expense rows and calculates a recomputed total", () => {
+    const rows = buildExpenseListRows(Array.from({ length: 19 }, (_, index) => ({
+      ...expenses[1],
+      id: `expense-${index}`,
+      referenceCode: `EXP-20260804-${String(index).padStart(8, "0")}`,
+      payments: [{
+        ...expenses[1].payments[0],
+        id: `payment-${index}`,
+        amountCents: 100,
+        reimbursementCents: 100,
+      }],
+    })));
+    const pages = paginateExpenseList({ rows, rowsPerPage: 10 });
+    assert.deepEqual(pages.map((page) => page.rows.length), [10, 9]);
+    assert.equal(pages[0].totalCents, 1000);
+    assert.equal(pages[1].totalCents, 900);
+    assert.equal(pages[0].totalPages, 2);
+    assert.equal(expenseListFilename("2026-08-03"), "费用清单-2026-08-03.pdf");
   });
 });
