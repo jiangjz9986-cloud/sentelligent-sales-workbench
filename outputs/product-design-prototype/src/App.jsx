@@ -452,6 +452,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [backendStatus, setBackendStatus] = useState(apiClient.isEnabled ? "connecting" : "offline");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const bootstrapGenerationRef = useRef(0);
+  const workspaceRef = useRef(null);
   const [selectedCustomerId, setSelectedCustomerId] = useState(null);
   const [selectedOpportunityId, setSelectedOpportunityId] = useState(null);
   const [selectedActionId, setSelectedActionId] = useState(null);
@@ -536,6 +537,19 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !workspaceRef.current) return;
+    const revealActiveNavigation = () => {
+      if (!window.matchMedia?.("(max-width: 760px)").matches) return;
+      const activeButton = [...workspaceRef.current.querySelectorAll(".sidebar .nav-item")]
+        .find((button) => button.dataset.testid === `nav-${active}`);
+      activeButton?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: "auto" });
+    };
+    revealActiveNavigation();
+    window.addEventListener("resize", revealActiveNavigation);
+    return () => window.removeEventListener("resize", revealActiveNavigation);
+  }, [active]);
 
   function setWorkbenchOpportunities(nextValue) {
     updateWorkbenchCollection("opportunities", nextValue);
@@ -978,7 +992,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
           </div>
         </header>
 
-        <div className="workspace">
+        <div ref={workspaceRef} className="workspace">
           <aside className="sidebar">
             <div className="nav-kicker">工作区</div>
             {navItems.map((item) => {
