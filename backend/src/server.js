@@ -84,14 +84,17 @@ import {
   authenticateShortcutWebhook,
   isShortcutBookkeepingRouteAllowed,
   SHORTCUT_BOOKKEEPING_ROUTE,
+  SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE,
   SHORTCUT_BOOKKEEPING_INLINE_ROUTE,
   SHORTCUT_BOOKKEEPING_CATALOG_ROUTE,
   SHORTCUT_BOOKKEEPING_VERIFY_ROUTE,
   shortcutCatalogResponse,
   validateShortcutInlineCredentials,
   validateShortcutBookkeepingPayload,
+  validateShortcutCapturePayload,
 } from "./integrations/shortcutBookkeeping.js";
 import {
+  applyShortcutAutomaticAnalysis,
   applyShortcutSelectionAnalysis,
   createShortcutBookkeepingRepository,
 } from "./integrations/shortcutBookkeepingRepository.js";
@@ -3192,7 +3195,9 @@ export function createServer(options = {}) {
       // text constants and this server validates them before the normal
       // bookkeeping pipeline runs. Strip both fields before validation and
       // hashing so the password never enters business storage or audit data.
-      const inlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_INLINE_ROUTE;
+      const captureInlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE;
+      const inlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_INLINE_ROUTE
+        || captureInlineShortcutRoute;
       let inlineShortcutBody = null;
       let inlineShortcutIdentity = null;
       if (inlineShortcutRoute) {
@@ -3233,7 +3238,9 @@ export function createServer(options = {}) {
         const businessBody = { ...rawInlineBody };
         delete businessBody.account;
         delete businessBody.password;
-        inlineShortcutBody = validateShortcutBookkeepingPayload(businessBody);
+        inlineShortcutBody = captureInlineShortcutRoute
+          ? validateShortcutCapturePayload(businessBody)
+          : validateShortcutBookkeepingPayload(businessBody);
         inlineShortcutIdentity = {
           account: config.authAccount,
           integration: "shortcut",
@@ -3363,10 +3370,19 @@ export function createServer(options = {}) {
         }
 
         try {
-          let analyzed = applyShortcutSelectionAnalysis(
-            await travelExpenseAnalyzer(body.text),
-            body,
-          );
+          const rawAnalysis = await travelExpenseAnalyzer(body.text);
+          let reviewPatch;
+          let analyzed;
+          if (body.automaticCategorization === true) {
+            const automatic = applyShortcutAutomaticAnalysis(rawAnalysis, {
+              text: body.text,
+              note: body.note,
+            });
+            analyzed = automatic.analysis;
+            reviewPatch = automatic.reviewPatch;
+          } else {
+            analyzed = applyShortcutSelectionAnalysis(rawAnalysis, body);
+          }
           if (shortcutBookkeepingAssistantRuntime.enabled) {
             analyzed = {
               ...analyzed,
@@ -3377,6 +3393,7 @@ export function createServer(options = {}) {
           const completed = shortcutBookkeepingRepository.completeLocal(received.item.id, {
             analysis: analyzed,
             leaseToken: claimed.leaseToken,
+            ...(reviewPatch ? { reviewPatch } : {}),
           });
           if (shortcutBookkeepingAssistantRuntime.enabled) {
             const pending = shortcutBookkeepingAssistantRuntime.startReview({

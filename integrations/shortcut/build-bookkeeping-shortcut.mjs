@@ -39,6 +39,7 @@ export const BOOKKEEPING_CATALOG = Object.freeze({
       交通: ["打车", "火车", "代驾", "停车", "路桥"],
       招待: [],
       礼品: [],
+      其他: [],
     },
   },
 });

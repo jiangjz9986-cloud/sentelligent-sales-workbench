@@ -113,6 +113,61 @@ function legacyCategory(input = {}) {
   return "other";
 }
 
+function automaticShortcutSelection(value, rawText = "") {
+  const category = value?.expense?.category;
+  if (["breakfast", "lunch", "dinner"].includes(category)) {
+    return {
+      category: "餐饮",
+      subcategory: category === "breakfast" ? "早餐" : category === "lunch" ? "午餐" : "晚餐",
+    };
+  }
+  if (category === "lodging") return { category: "住宿", subcategory: null };
+  if (category === "hospitality") return { category: "招待", subcategory: null };
+  if (category === "transport") {
+    const text = String(rawText ?? "");
+    const subcategory = /代驾/u.test(text) ? "代驾"
+      : /停车/u.test(text) ? "停车"
+        : /过路|路桥|高速/u.test(text) ? "路桥"
+          : /火车|高铁|铁路/u.test(text) ? "火车"
+            : /打车|滴滴|出租车|网约车/u.test(text) ? "打车"
+              : null;
+    return { category: subcategory ? "交通" : "其他", subcategory };
+  }
+  return { category: "其他", subcategory: null };
+}
+
+export function applyShortcutAutomaticAnalysis(value, { text = "", note = null } = {}) {
+  const source = isPlainObject(value) ? { ...value } : {};
+  const expense = isPlainObject(source.expense) ? { ...source.expense } : {};
+  const selection = automaticShortcutSelection(source, text);
+  const warnings = Array.isArray(source.warnings) ? [...source.warnings] : [];
+  if (expense.category && selection.category !== "其他") {
+    const index = warnings.indexOf("missing_category");
+    if (index >= 0) warnings.splice(index, 1);
+  }
+  if (!expense.purpose || !String(expense.purpose).trim()) {
+    expense.purpose = `${selection.category}${selection.subcategory ? `-${selection.subcategory}` : ""}`;
+    const index = warnings.indexOf("missing_purpose");
+    if (index >= 0) warnings.splice(index, 1);
+  }
+  const hasCoreFields = isPlainObject(source.expense)
+    && (expense.occurredOn ?? expense.occurred_on)
+    && (expense.amountCents ?? expense.amount_cents) !== null
+    && (expense.amountCents ?? expense.amount_cents) !== undefined;
+  return {
+    analysis: {
+      ...source,
+      status: hasCoreFields && warnings.length === 0 ? "ready" : "review_required",
+      category: selection.category,
+      subcategory: selection.subcategory,
+      note,
+      expense,
+      warnings: [...new Set(warnings)],
+    },
+    reviewPatch: { ...selection, note },
+  };
+}
+
 function parseJson(value, fallback) {
   if (value === null || value === undefined || value === "") return fallback;
   try {

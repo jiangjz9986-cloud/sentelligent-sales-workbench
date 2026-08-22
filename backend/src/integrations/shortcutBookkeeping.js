@@ -7,6 +7,7 @@ export const SHORTCUT_BOOKKEEPING_ROUTE = "/api/integrations/shortcut/bookkeepin
 // as a separate route so the account-bound device-token contract remains
 // unchanged and can be rolled back independently.
 export const SHORTCUT_BOOKKEEPING_INLINE_ROUTE = "/api/integrations/shortcut/bookkeeping-inline";
+export const SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE = "/api/integrations/shortcut/bookkeeping-capture-inline";
 export const SHORTCUT_BOOKKEEPING_CATALOG_ROUTE = "/api/integrations/shortcut/catalog";
 export const SHORTCUT_BOOKKEEPING_VERIFY_ROUTE = "/api/integrations/shortcut/verify";
 export const SHORTCUT_BOOKKEEPING_SOURCE = "shortcut";
@@ -30,6 +31,7 @@ const CATALOG = {
       "交通": ["打车", "火车", "代驾", "停车", "路桥"],
       "招待": [],
       "礼品": [],
+      "其他": [],
     },
   },
 };
@@ -59,6 +61,15 @@ const ALLOWED_KEYS = new Set([
   "entry_type",
   "category",
   "subcategory",
+  "note",
+  "idempotency_key",
+  "source",
+  "captured_at",
+  "source_id",
+]);
+
+const CAPTURE_ALLOWED_KEYS = new Set([
+  "text",
   "note",
   "idempotency_key",
   "source",
@@ -192,6 +203,41 @@ export function validateShortcutBookkeepingPayload(body) {
     capturedAt,
     sourceId,
     targetSystem: resolved.targetSystem,
+  };
+}
+
+export function validateShortcutCapturePayload(body) {
+  if (!plainObject(body)) validationError({ body: "object" });
+  const unknown = Object.keys(body).find((key) => !CAPTURE_ALLOWED_KEYS.has(key));
+  if (unknown) validationError({ [unknown]: "unknown" });
+  const text = requiredText(body.text, "text", 12_000);
+  const note = optionalText(body.note, "note", 1_000);
+  const idempotencyKey = requiredText(body.idempotency_key, "idempotency_key", 200);
+  if (body.idempotency_key !== idempotencyKey
+    || /[\u0000-\u001f\u007f-\u009f,]/u.test(idempotencyKey)) {
+    validationError({ idempotency_key: "format" });
+  }
+  if (body.source !== SHORTCUT_BOOKKEEPING_SOURCE) validationError({ source: "notAllowed" });
+  const capturedAt = body.captured_at === undefined || body.captured_at === null || body.captured_at === ""
+    ? null
+    : assertDateTime(body.captured_at, "captured_at");
+  const sourceId = optionalText(body.source_id, "source_id", 200);
+  if (sourceId && /[\u0000-\u001f\u007f-\u009f]/u.test(sourceId)) {
+    validationError({ source_id: "format" });
+  }
+  return {
+    text,
+    ledgerName: DEFAULT_SHORTCUT_LEDGER,
+    entryType: DEFAULT_SHORTCUT_ENTRY_TYPE,
+    category: "其他",
+    subcategory: null,
+    note,
+    idempotencyKey,
+    source: SHORTCUT_BOOKKEEPING_SOURCE,
+    capturedAt,
+    sourceId,
+    targetSystem: "sentelligent",
+    automaticCategorization: true,
   };
 }
 

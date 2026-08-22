@@ -43,6 +43,26 @@ async function request(payload) {
   }));
 }
 
+async function captureRequest(payload) {
+  return read(await fetch(`${baseUrl}/api/integrations/shortcut/bookkeeping-capture-inline`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }));
+}
+
+async function announceReadyWorker() {
+  const heartbeat = await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
+    headers: {
+      Authorization: `Bearer ${machineToken}`,
+      "X-Weixin-Worker-Id": "inline-test-worker",
+      "X-Weixin-Delivery-Status": "ready",
+      "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(account, "synthetic-sender"),
+    },
+  });
+  assert.equal(heartbeat.status, 204);
+}
+
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "shortcut-inline-credentials-"));
   const passwordHash = await hashPassword(password, { salt: Buffer.alloc(16, 3) });
@@ -69,6 +89,7 @@ beforeEach(async () => {
         amountCents: 1280,
         reimbursementCents: 1280,
         purpose: "打车",
+        category: "transport",
         merchant: "测试商户",
         paidAt: "2026-08-20T12:00:00+08:00",
         fundingSource: "personal",
@@ -104,15 +125,7 @@ describe("手动账号密码常量版快捷记账 API", () => {
   });
 
   it("validates constants, strips them before persistence, and enters the normal review flow", async () => {
-    const heartbeat = await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
-      headers: {
-        Authorization: `Bearer ${machineToken}`,
-        "X-Weixin-Worker-Id": "inline-test-worker",
-        "X-Weixin-Delivery-Status": "ready",
-        "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(account, "synthetic-sender"),
-      },
-    });
-    assert.equal(heartbeat.status, 204);
+    await announceReadyWorker();
     const result = await request(body());
     assert.equal(result.response.status, 202);
     assert.equal(result.body.item.status, "review_required");
@@ -120,6 +133,33 @@ describe("手动账号密码常量版快捷记账 API", () => {
     const db = openDatabase({ databaseUrl: join(tempDir, "test.sqlite") });
     try {
       const row = db.prepare("SELECT raw_text, note, request_hash FROM shortcut_bookkeeping_entries").get();
+      assert.equal(row.raw_text.includes(password), false);
+      assert.equal(row.note.includes(password), false);
+      assert.equal(row.request_hash.includes(password), false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("accepts the legacy iCost screenshot shape without a menu and derives its category", async () => {
+    await announceReadyWorker();
+    const payload = body();
+    delete payload.selection_path;
+    const result = await captureRequest(payload);
+    assert.equal(result.response.status, 202);
+    assert.equal(result.body.item.status, "review_required");
+    assert.equal(result.body.item.category, "交通");
+    assert.equal(result.body.item.subcategory, "打车");
+    assert.equal(result.body.item.confirmationDelivery.status, "queued");
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "test.sqlite") });
+    try {
+      const row = db.prepare(`
+        SELECT category, subcategory, raw_text, note, request_hash
+        FROM shortcut_bookkeeping_entries
+      `).get();
+      assert.equal(row.category, "交通");
+      assert.equal(row.subcategory, "打车");
       assert.equal(row.raw_text.includes(password), false);
       assert.equal(row.note.includes(password), false);
       assert.equal(row.request_hash.includes(password), false);
