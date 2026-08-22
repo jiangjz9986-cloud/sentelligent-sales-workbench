@@ -55,7 +55,14 @@ function literal(value) {
 }
 
 function outputUuid(value) {
-  return value?.WFSerializationType === "WFTextTokenAttachment" ? value.Value?.OutputUUID : null;
+  if (value?.WFSerializationType === "WFTextTokenAttachment") {
+    return value.Value?.OutputUUID ?? null;
+  }
+  if (value?.WFSerializationType !== "WFTextTokenString") return null;
+  const attachments = value.Value?.attachmentsByRange;
+  if (!attachments || typeof attachments !== "object" || Array.isArray(attachments)) return null;
+  const values = Object.values(attachments);
+  return values.length === 1 ? values[0]?.OutputUUID ?? null : null;
 }
 
 function dictionaryMap(field) {
@@ -71,6 +78,10 @@ function assertLegacyPrefix(actions) {
   requireValue(actions[2]?.WFWorkflowActionIdentifier === OCR_ACTION, "参考快捷指令第三个动作不是 OCR");
   requireValue(actions[3]?.WFWorkflowActionIdentifier === ICOST_ACTION, "参考快捷指令末尾不是 iCost V7 动作");
   requireValue(actions[2].WFWorkflowActionParameters?.UUID, "OCR 动作缺少 UUID");
+  const rawText = actions[3].WFWorkflowActionParameters?.rawText;
+  requireValue(rawText?.WFSerializationType === "WFTextTokenString", "iCost OCR 原文不是文本字符串");
+  requireValue(outputUuid(rawText) === actions[2].WFWorkflowActionParameters.UUID,
+    "iCost OCR 原文未绑定 OCR 动作输出");
 }
 
 function convertedActions(sourceActions, endpoint) {
@@ -83,6 +94,10 @@ function convertedActions(sourceActions, endpoint) {
   const responseError = uuid(6);
   const responseGuard = uuid(0x2000);
   const ocr = sourceActions[2].WFWorkflowActionParameters.UUID;
+  // Preserve the exact text-token wrapper used by the legacy iCost App
+  // Intent. The OCR action can otherwise arrive in a Shortcut JSON body as a
+  // rich value instead of a string, which the server correctly rejects.
+  const icostRawText = structuredClone(sourceActions[3].WFWorkflowActionParameters.rawText);
   return [
     ...structuredClone(sourceActions.slice(0, 3)),
     action("is.workflow.actions.gettext", {
@@ -113,7 +128,7 @@ function convertedActions(sourceActions, endpoint) {
       WFJSONValues: dictionaryField([
         ["account", attachment(account, "森特账号常量（请编辑）")],
         ["password", attachment(password, "森特密码常量（请编辑）")],
-        ["text", attachment(ocr, "图像中的文本")],
+        ["text", icostRawText],
         ["idempotency_key", attachment(timeId, "截图记账ID")],
         ["source_id", attachment(timeId, "截图记账ID")],
         ["source", "shortcut"],
@@ -158,6 +173,8 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
     "account", "password", "text", "idempotency_key", "source_id", "source",
   ]), "自动截图请求字段不正确");
   requireValue(outputUuid(body.get("text")) === actions[2].WFWorkflowActionParameters.UUID, "自动截图未绑定原 OCR 输出");
+  requireValue(body.get("text")?.WFSerializationType === "WFTextTokenString",
+    "自动截图 OCR 输出必须强制转换为文本字符串");
   requireValue(literal(body.get("source")) === "shortcut", "自动截图 source 不正确");
   requireValue(actions.filter((entry) => entry.WFWorkflowActionIdentifier === "is.workflow.actions.showresult").length === 1,
     "自动截图只能在失败时显示一次提示");
@@ -165,6 +182,7 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
     actionCount: actions.length,
     endpoint: parameters.WFURL,
     preservesCapturePrefix: true,
+    preservesIcostOcrText: true,
     removesIcostWrite: true,
     hasInlineCredentials: true,
     hasFailureNotice: true,

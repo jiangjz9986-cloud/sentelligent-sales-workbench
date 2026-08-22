@@ -25,7 +25,25 @@ function sourcePlist() {
       { WFWorkflowActionIdentifier: "is.workflow.actions.takescreenshot", WFWorkflowActionParameters: { UUID: "source-screen" } },
       { WFWorkflowActionIdentifier: "is.workflow.actions.image.crop", WFWorkflowActionParameters: { UUID: "source-crop" } },
       { WFWorkflowActionIdentifier: "is.workflow.actions.extracttextfromimage", WFWorkflowActionParameters: { UUID: "source-ocr" } },
-      { WFWorkflowActionIdentifier: "com.gostraight.smallAccountBook.ICAISnapshotShortcutV7", WFWorkflowActionParameters: { UUID: "source-icost" } },
+      {
+        WFWorkflowActionIdentifier: "com.gostraight.smallAccountBook.ICAISnapshotShortcutV7",
+        WFWorkflowActionParameters: {
+          UUID: "source-icost",
+          rawText: {
+            Value: {
+              attachmentsByRange: {
+                "{0, 1}": {
+                  OutputName: "图像中的文本",
+                  OutputUUID: "source-ocr",
+                  Type: "ActionOutput",
+                },
+              },
+              string: "￼",
+            },
+            WFSerializationType: "WFTextTokenString",
+          },
+        },
+      },
     ],
     WFWorkflowClientVersion: "4711",
     WFWorkflowTypes: ["Watch", "WFWorkflowTypeShowInSearch"],
@@ -45,6 +63,7 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
       actionCount: 12,
       endpoint: CAPTURE_INLINE_ENDPOINT,
       preservesCapturePrefix: true,
+      preservesIcostOcrText: true,
       removesIcostWrite: true,
       hasInlineCredentials: true,
       hasFailureNotice: true,
@@ -55,6 +74,7 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     assert.match(xml, new RegExp(CAPTURE_ACCOUNT_PLACEHOLDER, "u"));
     assert.match(xml, new RegExp(CAPTURE_PASSWORD_PLACEHOLDER, "u"));
     assert.doesNotMatch(xml, /ICAISnapshotShortcutV7/u);
+    assert.match(xml, /WFTextTokenString/u);
     assert.deepEqual(inspectConvertedIcostCaptureShortcutXml(xml), report);
   });
 
@@ -75,5 +95,19 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
       outputPath,
       endpoint: "https://evil.example/capture",
     }), /canonical production/u);
+  });
+
+  it("rejects a legacy iCost action whose OCR value is not wrapped as text", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "shortcut-icost-converter-rich-value-"));
+    temporaryDirectories.push(directory);
+    const inputPath = join(directory, "source.shortcut");
+    const outputPath = join(directory, "converted.shortcut");
+    const plist = sourcePlist();
+    plist.WFWorkflowActions[3].WFWorkflowActionParameters.rawText = {
+      Value: { OutputUUID: "source-ocr", OutputName: "图像中的文本", Type: "ActionOutput" },
+      WFSerializationType: "WFTextTokenAttachment",
+    };
+    await writeFile(inputPath, serializePlistXml(plist), { mode: 0o600 });
+    await assert.rejects(() => convertIcostCaptureShortcut({ inputPath, outputPath }), /不是文本字符串/u);
   });
 });
