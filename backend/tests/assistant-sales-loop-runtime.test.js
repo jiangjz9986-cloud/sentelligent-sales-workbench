@@ -438,6 +438,38 @@ describe("wired sales loop assistant runtime", () => {
     db.close();
   });
 
+  it("routes dashboard summary through a replay-safe read-only agent", async () => {
+    const dashboardMessageId = `runtime-${++sequence}-dashboard`;
+    const dashboard = await event("/dashboard.summary", dashboardMessageId);
+    assert.equal(dashboard.response.status, 200);
+    assert.match(dashboard.body.text, /客户 1，商机 1/);
+
+    let db = openDatabase({ databaseUrl });
+    const runs = db.prepare(`
+      SELECT agent_id, task_type, contract_version, status, source, confirmation_status, input_json, output_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'dashboard'
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 1);
+    const [dashboardRun] = runs;
+    assert.equal(dashboardRun.contract_version, "dashboard-v1");
+    assert.equal(dashboardRun.task_type, "daily_overview");
+    assert.equal(dashboardRun.confirmation_status, "not_required");
+    assert.equal(dashboardRun.status, "succeeded");
+    assert.equal(dashboardRun.source, "deterministic");
+    assert.equal(Object.hasOwn(JSON.parse(dashboardRun.input_json), "owner"), false);
+    assert.equal(JSON.parse(dashboardRun.output_json).writebackAllowed, false);
+    db.close();
+
+    const dashboardReplay = await event("/dashboard.summary", dashboardMessageId);
+    assert.deepEqual(dashboardReplay.body, dashboard.body);
+    db = openDatabase({ databaseUrl });
+    assert.equal(db.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id = 'dashboard'",
+    ).get({ $owner: owner }).count, 1);
+    db.close();
+  });
+
   it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
     const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
     assert.equal(collected.response.status, 200);

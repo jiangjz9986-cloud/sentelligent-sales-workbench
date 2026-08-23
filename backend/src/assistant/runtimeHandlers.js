@@ -7,6 +7,7 @@ import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobSto
 import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
+import { createDashboardAssistantAdapter } from "./dashboardAssistantAdapter.js";
 import { createItineraryAssistantAdapter } from "./itineraryAssistantAdapter.js";
 import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js";
 import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
@@ -333,6 +334,7 @@ export function createAssistantToolHandlers({
   invoiceRecognizer,
   businessSnapshotAdapter = null,
   customerAssistantAdapter = null,
+  dashboardAssistantAdapter = null,
   actionRiskAssistantAdapter = null,
   knowledgeAssistantAdapter = null,
   opportunityAssistantAdapter = null,
@@ -348,6 +350,11 @@ export function createAssistantToolHandlers({
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
   const customerAdapter = customerAssistantAdapter ?? createCustomerAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const dashboardAdapter = dashboardAssistantAdapter ?? createDashboardAssistantAdapter({
     snapshotAdapter,
     runRepository: agentRunRepository,
     clock,
@@ -394,7 +401,18 @@ export function createAssistantToolHandlers({
 
   const handlers = {
     async "dashboard.summary"(_args, context) {
-      const summary = snapshotAdapter.dashboardSummary({ owner: context.owner });
+      const result = await dashboardAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "daily_overview",
+      });
+      const summary = {
+        asOf: result.asOf,
+        weekStart: result.weekStart,
+        counts: result.counts,
+      };
       const counts = summary.counts;
       return {
         text: [
@@ -405,6 +423,8 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         summary,
+        dashboardResult: result,
+        runId: result.runId,
       };
     },
 

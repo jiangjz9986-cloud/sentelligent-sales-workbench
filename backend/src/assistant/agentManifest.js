@@ -139,8 +139,29 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "return unknown or clarify without executing a tool", status: "clarify" },
   }),
   manifestDefinition("dashboard", {
+    contractVersion: "dashboard-v1",
+    modelPolicy: "none",
     taskTypes: ["daily_overview", "weekly_overview", "focus_summary"],
     tools: ["dashboard.summary"],
+    confirmation: { preview: "none", write: "none" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "dashboard-v1", asOf: "iso_datetime", weekStart: "date", counts: "object" },
+    },
+    systemPrompt: [
+      "你是森特智行工作台总览 Agent。",
+      "只使用 owner-scoped 服务端总览快照，计数和截至时间必须原样保留。",
+      "不得根据计数猜测客户、商机、行动、风险、行程或费用明细。",
+      "总览只读，不执行任何业务写入。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped counts and unknowns", status: "fallback" },
   }),
   manifestDefinition("visit-capture", {
     modelPolicy: "required_with_deterministic_fallback",
