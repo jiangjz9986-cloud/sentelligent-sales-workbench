@@ -8,6 +8,7 @@ import { parsePlistXml, serializePlistXml } from "../../integrations/icost-short
 import {
   CAPTURE_DEVICE_ENDPOINT,
   CAPTURE_DEVICE_MARKER,
+  CAPTURE_SHORTCUT_NAME,
   convertIcostCaptureShortcut,
   inspectConvertedIcostCaptureShortcutXml,
 } from "../../integrations/shortcut/convert-icost-capture-shortcut.mjs";
@@ -51,6 +52,7 @@ function sourcePlist() {
 
 describe("旧 iCost 智能截图快捷指令转换器", () => {
   it("preserves screenshot OCR and replaces only the final iCost write", async () => {
+    assert.equal(CAPTURE_SHORTCUT_NAME, "智能截图记账（三级菜单待确认版V8·全屏OCR）");
     const directory = await mkdtemp(join(tmpdir(), "shortcut-icost-converter-"));
     temporaryDirectories.push(directory);
     const inputPath = join(directory, "source.shortcut");

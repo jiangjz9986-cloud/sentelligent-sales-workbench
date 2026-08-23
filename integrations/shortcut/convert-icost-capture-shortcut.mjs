@@ -21,7 +21,7 @@ const GET_VARIABLE_ACTION = "is.workflow.actions.getvariable";
 
 export const CAPTURE_DEVICE_ENDPOINT = "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture";
 export const CAPTURE_PREVIEW_ENDPOINT = "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture-preview";
-export const CAPTURE_SHORTCUT_NAME = "智能截图记账（三级菜单待确认版V7）";
+export const CAPTURE_SHORTCUT_NAME = "智能截图记账（三级菜单待确认版V8·全屏OCR）";
 export const CAPTURE_DEVICE_MARKER = "__SHORTCUT_DEVICE__";
 export const CAPTURE_FAILURE_MESSAGE = "截图提交失败：服务器未接受本次请求。请检查网络；未收到小小微信草稿前不要认为已经记账。";
 export const CAPTURE_CANCEL_MESSAGE = "已取消，不会上传这笔记账。";
