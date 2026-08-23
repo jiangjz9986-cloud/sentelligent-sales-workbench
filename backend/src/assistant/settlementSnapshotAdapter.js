@@ -1,5 +1,9 @@
-const MAX_ITEMS = 100;
+import { createHash } from "node:crypto";
+
+const MAX_ENTITIES = 50;
 const MAX_PAYMENTS_PER_EXPENSE = 25;
+const MAX_INVOICE_MATCHES_PER_EXPENSE = 100;
+const MAX_NO_INVOICE_CONFIRMATIONS_PER_EXPENSE = 100;
 const BUSINESS_TIME_ZONE = "Asia/Shanghai";
 const EXPENSE_CATEGORIES = new Set(["breakfast", "lunch", "dinner", "lodging", "transport", "hospitality", "other"]);
 const FUNDING_SOURCES = new Set(["personal", "company", "advance"]);
@@ -62,8 +66,28 @@ function asSafeInteger(value) {
 }
 
 function safeAdd(left, right) {
+  if (!Number.isSafeInteger(left) || !Number.isSafeInteger(right)) return null;
   const result = left + right;
   return Number.isSafeInteger(result) ? result : null;
+}
+
+function deterministicHash(value) {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function projectRow(row, fields) {
+  return Object.fromEntries(fields.map((field) => [field, row?.[field] ?? null]));
+}
+
+function sumRows(rows, field) {
+  let total = 0;
+  for (const row of rows) {
+    const value = asSafeInteger(row?.[field]);
+    if (value === null) return null;
+    total = safeAdd(total, value);
+    if (total === null) return null;
+  }
+  return total;
 }
 
 function formatDateOnlyUtc(date) {
@@ -95,12 +119,11 @@ function normalizeWeekStart(value, clock, formatter) {
   return date;
 }
 
-function refsForExpenses(expenses) {
-  return expenses.slice(0, MAX_ITEMS).map((item) => ({ type: "travel_expense", id: item.id }));
-}
-
-function refsForAdvances(advances) {
-  return advances.slice(0, MAX_ITEMS).map((item) => ({ type: "travel_expense_advance", id: item.id }));
+function refsFor(expenses, advances) {
+  return [
+    ...expenses.map((item) => ({ type: "travel_expense", id: item.id })),
+    ...advances.map((item) => ({ type: "travel_expense_advance", id: item.id })),
+  ].slice(0, MAX_ENTITIES);
 }
 
 function normalizeAdvance(row) {
@@ -135,7 +158,7 @@ function normalizeAdvance(row) {
 }
 
 function normalizePayment(row) {
-  const id = safeIdentifier(row.id, "payment.id");
+  safeIdentifier(row.id, "payment.id");
   const amountCents = asSafeInteger(row.amount_cents);
   const reimbursementCents = asSafeInteger(row.reimbursement_cents);
   const fundingSource = FUNDING_SOURCES.has(row.funding_source) ? row.funding_source : null;
@@ -148,11 +171,9 @@ function normalizePayment(row) {
   if (!fundingSource) issues.push("invalid_funding_source");
   return {
     item: {
-      id,
       amountCents,
       reimbursementCents,
       fundingSource,
-      paidAt: boundedText(row.paid_at, 100),
     },
     issues,
   };
@@ -215,7 +236,7 @@ function normalizeExpense(row, payments, coverage) {
       category,
       purpose: boundedText(row.purpose, 500),
       invoiceStatus,
-      payments: normalizedPayments.map((payment) => payment.item),
+      paymentCount: normalizedPayments.length,
       actualPaidCents,
       reimbursementCents,
       settlementEligibleCents,
@@ -254,77 +275,148 @@ export function createAssistantSettlementSnapshotAdapter({
       return emptySnapshot(normalizedWeekStart, asOf);
     }
 
-    const expenseRows = db.prepare(`
-      SELECT id, reference_code, version, occurred_on, category, purpose, invoice_status
+    const expenseCandidates = db.prepare(`
+      SELECT id, reference_code, version, occurred_on, category, purpose, invoice_status,
+             created_at, updated_at
       FROM travel_expenses
       WHERE owner = $owner AND deleted_at IS NULL
         AND occurred_on BETWEEN $weekStart AND date($weekStart, '+6 days')
       ORDER BY occurred_on, created_at, id
-      LIMIT ${MAX_ITEMS + 1}
+      LIMIT ${MAX_ENTITIES + 1}
     `).all({ $owner: normalizedOwner, $weekStart: normalizedWeekStart });
-    const advanceRows = db.prepare(`
+    const advanceCandidates = db.prepare(`
       SELECT id, version, week_start, status, requested_cents, received_cents,
-             requested_on, received_on, purpose
+             requested_on, received_on, purpose, created_at, updated_at
       FROM travel_expense_advances
       WHERE owner = $owner AND deleted_at IS NULL AND week_start = $weekStart
       ORDER BY created_at, id
-      LIMIT ${MAX_ITEMS + 1}
+      LIMIT ${MAX_ENTITIES + 1}
     `).all({ $owner: normalizedOwner, $weekStart: normalizedWeekStart });
 
+    // Advances are retained first because their absence must never be confused
+    // with a received amount of zero. Any overflow still fails the arithmetic
+    // closed, so this ordering only controls the bounded review payload.
+    const advanceRows = advanceCandidates.slice(0, MAX_ENTITIES);
+    const expenseRows = expenseCandidates.slice(0, MAX_ENTITIES - advanceRows.length);
     const truncated = {
-      expenses: expenseRows.length > MAX_ITEMS,
-      advances: advanceRows.length > MAX_ITEMS,
+      expenses: expenseCandidates.length > expenseRows.length,
+      advances: advanceCandidates.length > advanceRows.length,
     };
-    const advanceResults = advanceRows.slice(0, MAX_ITEMS).map(normalizeAdvance);
+    const advanceResults = advanceRows.map(normalizeAdvance);
     const advances = advanceResults.map((result) => result.item);
     const advanceIssues = advanceResults.flatMap((result) => result.issues);
-    const expenseResults = expenseRows.slice(0, MAX_ITEMS).map((row) => {
+    const calculationRows = {
+      schemaVersion: "assistant-settlement-calculation-rows-v1",
+      scope: { owner: normalizedOwner, weekStart: normalizedWeekStart },
+      entityWindow: {
+        selectedExpenses: expenseRows.length,
+        selectedAdvances: advanceRows.length,
+        expenseOverflowObserved: truncated.expenses,
+        advanceOverflowObserved: truncated.advances,
+      },
+      expenses: expenseRows.map((row) => projectRow(row, [
+        "id", "reference_code", "version", "occurred_on", "category", "purpose",
+        "invoice_status", "created_at", "updated_at",
+      ])),
+      advances: advanceRows.map((row) => projectRow(row, [
+        "id", "version", "week_start", "status", "requested_cents", "received_cents",
+        "requested_on", "received_on", "purpose", "created_at", "updated_at",
+      ])),
+      payments: [],
+      invoiceMatches: [],
+      noInvoiceConfirmations: [],
+      perExpenseOverflow: [],
+    };
+    const expenseResults = expenseRows.map((row) => {
       const payments = db.prepare(`
-        SELECT id, amount_cents, reimbursement_cents, funding_source, paid_at
+        SELECT id, expense_id, sequence, paid_at, merchant, amount_cents,
+               reimbursement_cents, funding_source, payment_method, account_last4,
+               difference_reason, created_at, updated_at
         FROM travel_expense_payments
         WHERE expense_id = $expenseId
         ORDER BY sequence, id
         LIMIT ${MAX_PAYMENTS_PER_EXPENSE + 1}
       `).all({ $expenseId: row.id });
       const paymentTruncated = payments.length > MAX_PAYMENTS_PER_EXPENSE;
-      const coverage = db.prepare(`
-        SELECT
-          COALESCE((
-            SELECT SUM(match.allocated_cents)
-            FROM invoice_matches match
-            JOIN invoice_documents invoice
-              ON invoice.id = match.invoice_id
-             AND invoice.owner = match.owner
-             AND invoice.deleted_at IS NULL
-            WHERE match.owner = $owner
-              AND match.expense_id = expense.id
-              AND match.state = 'confirmed'
-          ), 0) AS confirmed_cents,
-          COALESCE((
-            SELECT SUM(confirmation.amount_snapshot_cents)
-            FROM travel_expense_no_invoice_confirmations confirmation
-            WHERE confirmation.owner = $owner
-              AND confirmation.expense_id = expense.id
-              AND confirmation.revoked_at IS NULL
-          ), 0) AS no_invoice_confirmed_cents
-        FROM travel_expenses expense
-        WHERE expense.id = $expenseId AND expense.owner = $owner AND expense.deleted_at IS NULL
-      `).get({ $owner: normalizedOwner, $expenseId: row.id }) ?? { confirmed_cents: 0, no_invoice_confirmed_cents: 0 };
-      const normalized = normalizeExpense(row, payments.slice(0, MAX_PAYMENTS_PER_EXPENSE), {
-        confirmedCents: asSafeInteger(coverage.confirmed_cents) ?? -1,
-        noInvoiceConfirmedCents: asSafeInteger(coverage.no_invoice_confirmed_cents) ?? -1,
+      const boundedPayments = payments.slice(0, MAX_PAYMENTS_PER_EXPENSE);
+      const invoiceMatches = db.prepare(`
+        SELECT match.id, match.version, match.invoice_id, match.expense_id,
+               match.payment_id, match.allocated_cents, match.match_method,
+               match.state, match.confirmed_at, match.revoked_at,
+               match.created_at, match.updated_at,
+               invoice.version AS invoice_version,
+               invoice.status AS invoice_status,
+               invoice.sha256 AS invoice_sha256,
+               invoice.updated_at AS invoice_updated_at
+        FROM invoice_matches match
+        JOIN invoice_documents invoice
+          ON invoice.id = match.invoice_id
+         AND invoice.owner = match.owner
+         AND invoice.deleted_at IS NULL
+        WHERE match.owner = $owner
+          AND match.expense_id = $expenseId
+          AND match.state = 'confirmed'
+        ORDER BY match.id
+        LIMIT ${MAX_INVOICE_MATCHES_PER_EXPENSE + 1}
+      `).all({ $owner: normalizedOwner, $expenseId: row.id });
+      const noInvoiceConfirmations = db.prepare(`
+        SELECT id, version, expense_id, payment_id, amount_snapshot_cents,
+               reason, confirmed_by, confirmed_at, revoked_at, created_at, updated_at
+        FROM travel_expense_no_invoice_confirmations
+        WHERE owner = $owner
+          AND expense_id = $expenseId
+          AND revoked_at IS NULL
+        ORDER BY id
+        LIMIT ${MAX_NO_INVOICE_CONFIRMATIONS_PER_EXPENSE + 1}
+      `).all({ $owner: normalizedOwner, $expenseId: row.id });
+      const invoiceMatchesTruncated = invoiceMatches.length > MAX_INVOICE_MATCHES_PER_EXPENSE;
+      const noInvoiceConfirmationsTruncated = noInvoiceConfirmations.length > MAX_NO_INVOICE_CONFIRMATIONS_PER_EXPENSE;
+      const boundedInvoiceMatches = invoiceMatches.slice(0, MAX_INVOICE_MATCHES_PER_EXPENSE);
+      const boundedNoInvoiceConfirmations = noInvoiceConfirmations.slice(0, MAX_NO_INVOICE_CONFIRMATIONS_PER_EXPENSE);
+      calculationRows.perExpenseOverflow.push({
+        expenseId: row.id,
+        paymentOverflowObserved: paymentTruncated,
+        invoiceMatchOverflowObserved: invoiceMatchesTruncated,
+        noInvoiceConfirmationOverflowObserved: noInvoiceConfirmationsTruncated,
+      });
+      calculationRows.payments.push(...boundedPayments.map((payment) => projectRow(payment, [
+        "id", "expense_id", "sequence", "paid_at", "merchant", "amount_cents",
+        "reimbursement_cents", "funding_source", "payment_method", "account_last4",
+        "difference_reason", "created_at", "updated_at",
+      ])));
+      calculationRows.invoiceMatches.push(...boundedInvoiceMatches.map((match) => projectRow(match, [
+        "id", "version", "invoice_id", "expense_id", "payment_id", "allocated_cents",
+        "match_method", "state", "confirmed_at", "revoked_at", "created_at", "updated_at",
+        "invoice_version", "invoice_status", "invoice_sha256", "invoice_updated_at",
+      ])));
+      calculationRows.noInvoiceConfirmations.push(...boundedNoInvoiceConfirmations.map((confirmation) => projectRow(confirmation, [
+        "id", "version", "expense_id", "payment_id", "amount_snapshot_cents", "reason",
+        "confirmed_by", "confirmed_at", "revoked_at", "created_at", "updated_at",
+      ])));
+      const normalized = normalizeExpense(row, boundedPayments, {
+        confirmedCents: sumRows(boundedInvoiceMatches, "allocated_cents") ?? -1,
+        noInvoiceConfirmedCents: sumRows(boundedNoInvoiceConfirmations, "amount_snapshot_cents") ?? -1,
       });
       if (paymentTruncated) normalized.issues.push("payment_truncated");
+      if (invoiceMatchesTruncated) normalized.issues.push("invoice_match_truncated");
+      if (noInvoiceConfirmationsTruncated) normalized.issues.push("no_invoice_confirmation_truncated");
       return normalized;
     });
     const expenses = expenseResults.map((result) => result.item);
     const expenseIssues = expenseResults.flatMap((result) => result.issues);
-    const issues = [...new Set([...advanceIssues, ...expenseIssues])];
-    const allFactsComplete = !truncated.expenses && !truncated.advances && issues.length === 0;
+    const issues = [...new Set([
+      ...advanceIssues,
+      ...expenseIssues,
+      ...(!advances.length ? ["missing_advance_record"] : []),
+    ])];
+    const allFactsComplete = !truncated.expenses
+      && !truncated.advances
+      && advances.length > 0
+      && issues.length === 0;
 
     let summary = {
       expenseCount: expenses.length,
-      paymentCount: expenses.reduce((sum, item) => sum + item.payments.length, 0),
+      paymentCount: expenses.reduce((sum, item) => sum + item.paymentCount, 0),
       actualPaidCents: 0,
       reimbursementCents: 0,
       personalPaidCents: 0,
@@ -373,10 +465,15 @@ export function createAssistantSettlementSnapshotAdapter({
       noInvoiceConfirmedCents: 0,
       unacknowledgedMissingCents: 0,
     });
-    const sourceRefs = [...refsForExpenses(expenses), ...refsForAdvances(advances)].slice(0, MAX_ITEMS);
+    const sourceRefs = refsFor(expenses, advances);
+    const sourcesComplete = !truncated.expenses
+      && !truncated.advances
+      && sourceRefs.length === expenses.length + advances.length;
+    const settlementSnapshotHash = deterministicHash(calculationRows);
     return {
       asOf,
       weekStart: normalizedWeekStart,
+      settlementSnapshotHash,
       expenses,
       advances,
       summary,
@@ -385,6 +482,7 @@ export function createAssistantSettlementSnapshotAdapter({
         complete: allFactsComplete && invoiceCoverage.unacknowledgedMissingCents === 0,
       },
       evidence: {
+        sources: { count: sourceRefs.length, complete: sourcesComplete },
         advances: { count: advances.length, complete: !truncated.advances && advanceIssues.length === 0 },
         expenses: { count: expenses.length, complete: !truncated.expenses && expenseIssues.length === 0 },
         fundingSources: {
@@ -407,9 +505,26 @@ export function createAssistantSettlementSnapshotAdapter({
   }
 
   function emptySnapshot(weekStart, asOf) {
+    const settlementSnapshotHash = deterministicHash({
+      schemaVersion: "assistant-settlement-calculation-rows-v1",
+      scope: { owner: null, weekStart },
+      entityWindow: {
+        selectedExpenses: 0,
+        selectedAdvances: 0,
+        expenseOverflowObserved: false,
+        advanceOverflowObserved: false,
+      },
+      expenses: [],
+      advances: [],
+      payments: [],
+      invoiceMatches: [],
+      noInvoiceConfirmations: [],
+      perExpenseOverflow: [],
+    });
     return {
       asOf,
       weekStart,
+      settlementSnapshotHash,
       expenses: [],
       advances: [],
       summary: {
@@ -435,6 +550,7 @@ export function createAssistantSettlementSnapshotAdapter({
         complete: false,
       },
       evidence: {
+        sources: { count: 0, complete: false },
         advances: { count: 0, complete: true },
         expenses: { count: 0, complete: true },
         fundingSources: { complete: true, unknownCount: 0 },

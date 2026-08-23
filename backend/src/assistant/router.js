@@ -4,7 +4,7 @@ import { evaluatePolicy } from "./policy.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、快捷记账微信复核、知识检索、销售周报。涉及写入或财务操作需要明确确认。";
+const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、快捷记账微信复核、知识检索、销售周报。业务写入需要明确确认；请款结算仅供核对，不接受确认写入。";
 
 function clean(value) { return String(value ?? "").trim(); }
 

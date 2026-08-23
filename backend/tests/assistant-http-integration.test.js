@@ -56,6 +56,54 @@ function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+const SETTLEMENT_PREVIEW_RUNTIME_TABLES = new Set([
+  "assistant_agent_runs",
+  "assistant_conversations",
+  "assistant_draft_parts",
+  "assistant_inbound_events",
+  "assistant_tool_runs",
+  "audit_logs",
+]);
+
+function businessTableSnapshot(db) {
+  const tables = db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+  `).all();
+  return Object.fromEntries(tables
+    .filter(({ name }) => !SETTLEMENT_PREVIEW_RUNTIME_TABLES.has(name))
+    .map(({ name }) => {
+      const quotedName = `"${name.replaceAll('"', '""')}"`;
+      return [name, db.prepare(`SELECT * FROM ${quotedName} ORDER BY rowid`).all()];
+    }));
+}
+
+async function restartAssistantServer(overrides = {}) {
+  if (server) await new Promise((resolve) => server.close(resolve));
+  server = createServer({
+    databaseUrl: join(tempDir, "assistant.sqlite"),
+    seed: false,
+    nodeEnv: "test",
+    authRequired: true,
+    authAccount: "assistant-owner",
+    authPassword: "",
+    authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
+    authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
+    authCookieSecure: false,
+    weixinAgentApiToken: machineToken,
+    weixinAgentOwner: "assistant-owner",
+    weixinAllowedSenderIds: "sender-1,sender-2",
+    weixinAllowGroups: false,
+    weixinBookkeepingOwner: "assistant-owner",
+    weixinBookkeepingSenderId: "sender-1",
+    ...overrides,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+}
+
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "sentelligent-assistant-http-"));
   server = createServer({
@@ -72,6 +120,8 @@ beforeEach(async () => {
     weixinAgentOwner: "assistant-owner",
     weixinAllowedSenderIds: "sender-1,sender-2",
     weixinAllowGroups: false,
+    weixinBookkeepingOwner: "assistant-owner",
+    weixinBookkeepingSenderId: "sender-1",
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -150,6 +200,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       ["url", "https://caller.invalid/private"],
       ["token", "caller-token"],
       ["filePath", "/caller/private/file"],
+      ["financialScope", true],
     ].entries()) {
       const sourceMessageId = `message-invoice-forbidden-${index}`;
       const forbidden = await request("/api/integrations/weixin-agent/events", {
@@ -442,6 +493,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
         id, owner, week_start, status, requested_cents, received_cents, requested_on, received_on, purpose, created_by, updated_by
       ) VALUES ('settlement-http-other-advance', 'other-owner', '2026-08-17', 'received', 9000, 9000, '2026-08-17', '2026-08-17', '另一 owner 备用金', 'other-owner', 'other-owner');
     `);
+    const beforeBusiness = businessTableSnapshot(scopedDb);
     scopedDb.close();
 
     const preview = await request("/api/integrations/weixin-agent/events", {
@@ -453,7 +505,9 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.equal(preview.body.toolName, "advance-settlement.preview");
     assert.match(preview.body.text, /请款结算预览/);
     assert.match(preview.body.text, /公司应补/);
-    assert.match(preview.body.text, /尚未记录退款或补款交易/);
+    assert.match(preview.body.text, /仅供人工核对/);
+    assert.match(preview.body.text, /不接受确认写入/);
+    assert.match(preview.body.text, /不会生成退款或补款交易/);
 
     const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     const run = verifyDb.prepare(`
@@ -468,10 +522,151 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.equal(output.settlementPreview.direction, "company_reimburses");
     assert.equal(output.settlementPreview.transaction.recorded, false);
     assert.equal(output.settlementPreview.writebackAllowed, false);
+    assert.match(output.settlementSnapshotHash, /^[0-9a-f]{64}$/u);
+    assert.equal(output.requiresHumanReview, true);
+    assert.equal(output.acceptsConfirmation, false);
+    assert.equal(output.writebackAllowed, false);
     assert.equal(output.advances.some((item) => item.id === "settlement-http-other-advance"), false);
     assert.equal(run.input_json.includes("assistant-owner"), false);
     assert.equal(verifyDb.prepare("SELECT COUNT(*) AS count FROM travel_expense_advances").get().count, 2);
+    assert.deepEqual(businessTableSnapshot(verifyDb), beforeBusiness);
+    const toolRunCount = verifyDb.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE tool_name = 'advance-settlement.preview'",
+    ).get().count;
+    const agentRunCount = verifyDb.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'",
+    ).get().count;
     verifyDb.close();
+
+    // The durable event id intentionally excludes raw chat identifiers. Its
+    // request hash must therefore bind the server-owned chat/financial scope,
+    // or a group delivery reusing the same provider message id could replay a
+    // previously authorized direct-message result.
+    await restartAssistantServer({
+      weixinAllowGroups: true,
+      weixinAllowedGroupIds: "group-settlement-replay",
+    });
+    const groupReplay = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-preview"),
+      body: JSON.stringify(eventBody({
+        chatType: "group",
+        groupId: "group-settlement-replay",
+        sourceMessageId: "settlement-preview",
+        text: "多退少补 2026-08-17",
+      })),
+    });
+    assert.equal(groupReplay.response.status, 409);
+    assert.equal(groupReplay.body.error.code, "ASSISTANT_EVENT_CONFLICT");
+    assert.doesNotMatch(JSON.stringify(groupReplay.body), /公司应补|HTTP 结算备用金|5000|10000/u);
+
+    const replayDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(
+        replayDb.prepare("SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE tool_name = 'advance-settlement.preview'").get().count,
+        toolRunCount,
+      );
+      assert.equal(
+        replayDb.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'").get().count,
+        agentRunCount,
+      );
+      assert.deepEqual(businessTableSnapshot(replayDb), beforeBusiness);
+    } finally {
+      replayDb.close();
+    }
+  });
+
+  it("denies unbound sender, group, and missing owner before finance reads or tool and agent runs", async () => {
+    let settlementReads = 0;
+    const settlementAdapter = {
+      advanceSettlementSummary() {
+        settlementReads += 1;
+        throw new Error("settlement snapshot must not be read for a denied caller");
+      },
+    };
+    await restartAssistantServer({
+      weixinAllowGroups: true,
+      weixinAllowedGroupIds: "group-settlement-denied",
+      assistantSettlementSnapshotAdapter: settlementAdapter,
+    });
+
+    const scopedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    scopedDb.exec(`
+      INSERT INTO travel_expense_advances (
+        id, owner, week_start, status, requested_cents, received_cents, requested_on, received_on, purpose, created_by, updated_by
+      ) VALUES (
+        'settlement-denied-sentinel', 'assistant-owner', '2026-08-17', 'received', 987654, 987654,
+        '2026-08-17', '2026-08-17', 'DENIED-SETTLEMENT-SENTINEL', 'assistant-owner', 'assistant-owner'
+      );
+    `);
+    const beforeBusiness = businessTableSnapshot(scopedDb);
+    scopedDb.close();
+
+    const attempts = [
+      eventBody({
+        senderId: "sender-2",
+        sourceMessageId: "settlement-denied-sender",
+        text: "多退少补 2026-08-17",
+      }),
+      eventBody({
+        chatType: "group",
+        groupId: "group-settlement-denied",
+        sourceMessageId: "settlement-denied-group",
+        text: "多退少补 2026-08-17",
+      }),
+    ];
+    for (const body of attempts) {
+      const denied = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(`weixin:${body.sourceMessageId}`),
+        body: JSON.stringify(body),
+      });
+      assert.equal(denied.response.status, 403);
+      assert.deepEqual(denied.body, {
+        status: "error",
+        text: "该财务预览仅限已绑定账号本人的微信私聊。",
+      });
+    }
+
+    await restartAssistantServer({
+      weixinBookkeepingOwner: "",
+      assistantSettlementSnapshotAdapter: settlementAdapter,
+    });
+    const missingOwner = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-denied-owner"),
+      body: JSON.stringify(eventBody({
+        sourceMessageId: "settlement-denied-owner",
+        text: "多退少补 2026-08-17",
+      })),
+    });
+    assert.equal(missingOwner.response.status, 403);
+    assert.deepEqual(missingOwner.body, {
+      status: "error",
+      text: "该财务预览仅限已绑定账号本人的微信私聊。",
+    });
+
+    const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(settlementReads, 0);
+      assert.equal(
+        verifyDb.prepare("SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE tool_name = 'advance-settlement.preview'").get().count,
+        0,
+      );
+      assert.equal(
+        verifyDb.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'").get().count,
+        0,
+      );
+      assert.deepEqual(businessTableSnapshot(verifyDb), beforeBusiness);
+      const serializedEvents = JSON.stringify(
+        verifyDb.prepare("SELECT response_json FROM assistant_inbound_events ORDER BY created_at, id").all(),
+      );
+      for (const secret of ["987654", "DENIED-SETTLEMENT-SENTINEL", "settlement-denied-sentinel"]) {
+        assert.equal(serializedEvents.includes(secret), false);
+      }
+    } finally {
+      verifyDb.close();
+    }
   });
 
   it("scopes assistant customer search and sales reports to the machine owner", async () => {
@@ -560,6 +755,8 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       weixinAllowedSenderIds: "sender-1,sender-2",
       weixinAllowGroups: true,
       weixinAllowedGroupIds: "group-privacy-1",
+      weixinBookkeepingOwner: "assistant-owner",
+      weixinBookkeepingSenderId: "sender-1",
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     baseUrl = `http://127.0.0.1:${server.address().port}`;

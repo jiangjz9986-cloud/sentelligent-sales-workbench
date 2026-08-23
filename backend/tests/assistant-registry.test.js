@@ -32,6 +32,10 @@ describe("assistant agent and tool registry", () => {
       assert.equal(typeof tool.execute, "undefined");
       assert.equal(typeof tool.arguments, "object");
     }
+    assert.deepEqual(registry.getTool("advance-settlement.preview").arguments, {
+      week: { type: "string", required: false },
+    });
+    assert.equal(Object.hasOwn(registry.getTool("advance-settlement.preview").arguments, "advanceId"), false);
     assert.ok(AGENT_DEFINITIONS.length >= 17);
     assert.ok(TOOL_DEFINITIONS.length >= 7);
   });

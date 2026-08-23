@@ -158,14 +158,13 @@ describe("assistant agent run repository", () => {
     db.close();
   });
 
-  it("rejects versioned runs for financial agents outside this release boundary", () => {
+  it("rejects versioned runs for financial agents that remain outside this release boundary", () => {
     const db = openDatabase({ databaseUrl: ":memory:" });
     const repository = createAssistantAgentRunRepository(db);
     for (const [agentId, taskType] of [
       ["travel-expense", "weekly_summary"],
       ["payment-proof", "ingest"],
       ["invoice", "ingest"],
-      ["advance-settlement", "advance_summary"],
       ["reimbursement-report", "weekly_summary"],
     ]) {
       assert.throws(

@@ -61,7 +61,8 @@ describe("assistant settlement snapshot adapter", () => {
     assert.equal(result.weekStart, "2026-08-17");
     assert.equal(result.expenses.length, 1);
     assert.equal(result.expenses[0].id, createdExpense.id);
-    assert.equal(result.expenses[0].payments[0].fundingSource, "personal");
+    assert.equal(result.expenses[0].paymentCount, 1);
+    assert.equal(Object.hasOwn(result.expenses[0], "payments"), false);
     assert.deepEqual(result.advances.map((item) => item.id), [advance.id]);
     assert.equal(result.summary.settlementEligibleCents, 7000);
     assert.equal(result.summary.advanceReceivedCents, 5000);
@@ -69,6 +70,8 @@ describe("assistant settlement snapshot adapter", () => {
     assert.equal(result.summary.settlementDirection, "company_reimburses");
     assert.equal(result.evidence.settlement.arithmeticComplete, true);
     assert.equal(result.evidence.settlement.transactionRecorded, false);
+    assert.deepEqual(result.evidence.sources, { count: 2, complete: true });
+    assert.match(result.settlementSnapshotHash, /^[0-9a-f]{64}$/u);
     assert.equal(result.invoiceCoverage.unacknowledgedMissingCents, 7000);
     assert.equal(result.invoiceCoverage.complete, false);
     assert.deepEqual(result.sourceRefs, [
@@ -84,6 +87,16 @@ describe("assistant settlement snapshot adapter", () => {
     const db = openDatabase({ databaseUrl: ":memory:" });
     const { travel, invoices, clock } = createRepositories(db);
     const created = travel.createExpense(expense("owner-a"));
+    travel.createAdvance({
+      actor: "owner-a",
+      weekStart: "2026-08-17",
+      status: "received",
+      requestedCents: 0,
+      receivedCents: 0,
+      requestedOn: "2026-08-17",
+      receivedOn: "2026-08-17",
+      purpose: "本周无预支金额",
+    });
     invoices.confirmNoInvoice({
       owner: "owner-a",
       actor: "owner-a",
@@ -102,6 +115,88 @@ describe("assistant settlement snapshot adapter", () => {
     db.close();
   });
 
+  it("keeps direction and amount unknown when the week has expenses but no advance record", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const { travel, clock } = createRepositories(db);
+    travel.createExpense(expense("owner-a"));
+    const adapter = createAssistantSettlementSnapshotAdapter({ db, clock });
+    const result = adapter.advanceSettlementSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+
+    assert.equal(result.expenses.length, 1);
+    assert.equal(result.advances.length, 0);
+    assert.equal(result.summary.personalSettlementCents, null);
+    assert.equal(result.summary.settlementDirection, null);
+    assert.equal(result.evidence.settlement.arithmeticComplete, false);
+    assert.ok(result.issues.includes("missing_advance_record"));
+    db.close();
+  });
+
+  it("bounds the combined entity payload at 50 and fails closed on truncation", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const { travel, clock } = createRepositories(db);
+    for (let index = 0; index < 30; index += 1) {
+      travel.createAdvance({
+        actor: "owner-a",
+        weekStart: "2026-08-17",
+        status: "received",
+        requestedCents: 1000,
+        receivedCents: 1000,
+        requestedOn: "2026-08-17",
+        receivedOn: "2026-08-17",
+        purpose: `请款 ${index + 1}`,
+      });
+      travel.createExpense(expense("owner-a", { purpose: `费用 ${index + 1}` }));
+    }
+    const adapter = createAssistantSettlementSnapshotAdapter({ db, clock });
+    const result = adapter.advanceSettlementSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+
+    assert.equal(result.advances.length + result.expenses.length, 50);
+    assert.deepEqual(result.truncated, { expenses: true, advances: false });
+    assert.equal(result.sourceRefs.length, 50);
+    assert.equal(result.sourceRefs.length, result.advances.length + result.expenses.length);
+    assert.equal(result.evidence.sources.complete, false);
+    assert.equal(result.summary.personalSettlementCents, null);
+    assert.equal(result.summary.settlementDirection, null);
+    assert.equal(result.evidence.settlement.arithmeticComplete, false);
+    db.close();
+  });
+
+  it("produces a deterministic hash that binds every selected raw calculation row", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const { travel } = createRepositories(db);
+    const created = travel.createExpense(expense("owner-a"));
+    travel.createAdvance({
+      actor: "owner-a",
+      weekStart: "2026-08-17",
+      status: "received",
+      requestedCents: 5000,
+      receivedCents: 5000,
+      requestedOn: "2026-08-17",
+      receivedOn: "2026-08-17",
+      purpose: "本周备用金",
+    });
+    const firstAdapter = createAssistantSettlementSnapshotAdapter({
+      db,
+      clock: () => new Date("2026-08-20T01:00:00.000Z"),
+    });
+    const laterAdapter = createAssistantSettlementSnapshotAdapter({
+      db,
+      clock: () => new Date("2026-08-20T05:00:00.000Z"),
+    });
+    const first = firstAdapter.advanceSettlementSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+    const later = laterAdapter.advanceSettlementSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+    assert.notEqual(first.asOf, later.asOf);
+    assert.equal(first.settlementSnapshotHash, later.settlementSnapshotHash);
+
+    db.prepare("UPDATE travel_expense_payments SET merchant = $merchant WHERE id = $id").run({
+      $id: created.payments[0].id,
+      $merchant: "更正后的交通商户",
+    });
+    const changed = laterAdapter.advanceSettlementSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+    assert.notEqual(changed.settlementSnapshotHash, first.settlementSnapshotHash);
+    db.close();
+  });
+
   it("fails closed for a mapped-empty owner and marks missing transaction history", () => {
     const db = openDatabase({ databaseUrl: ":memory:" });
     const { clock } = createRepositories(db);
@@ -115,6 +210,8 @@ describe("assistant settlement snapshot adapter", () => {
     assert.deepEqual(result.advances, []);
     assert.equal(result.summary.personalSettlementCents, null);
     assert.equal(result.evidence.settlement.transactionRecorded, false);
+    assert.equal(result.evidence.sources.complete, false);
+    assert.match(result.settlementSnapshotHash, /^[0-9a-f]{64}$/u);
     assert.deepEqual(result.issues, ["owner_scope_empty"]);
     db.close();
   });

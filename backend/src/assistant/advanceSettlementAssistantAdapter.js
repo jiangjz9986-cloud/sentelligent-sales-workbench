@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { AssistantContractError } from "./contracts.js";
 import { getAgentManifest } from "./agentManifest.js";
 
@@ -6,7 +8,8 @@ const CONTRACT_VERSION = "advance-settlement-v1";
 const TASK_TYPES = new Set(["advance_summary", "settlement_preview", "direction_explanation"]);
 const ADVANCE_STATUSES = new Set(["draft", "requested", "received", "closed"]);
 const DIRECTIONS = new Set(["company_reimburses", "individual_returns", "balanced"]);
-const MAX_ITEMS = 100;
+const MAX_ENTITIES = 50;
+const SHA256 = /^[0-9a-f]{64}$/u;
 
 function isPlainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -21,20 +24,6 @@ function text(value, name, max = 5000) {
   const normalized = value.trim();
   if (normalized.length > max) {
     throw new AssistantContractError(`${name} is too long`, "invalid_advance_settlement_input");
-  }
-  return normalized;
-}
-
-function optionalText(value, name, max = 5000) {
-  if (value === undefined || value === null || value === "") return null;
-  return text(value, name, max);
-}
-
-function identifier(value, name = "id") {
-  const normalized = optionalText(value, name, 200);
-  if (!normalized) return null;
-  if (!/^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u.test(normalized) || normalized.startsWith("synthetic:")) {
-    throw new AssistantContractError(`${name} is invalid`, "invalid_advance_settlement_input");
   }
   return normalized;
 }
@@ -72,6 +61,10 @@ function count(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
+function deterministicHash(value) {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
 function currentWeekStart(clock) {
   const value = clock();
   if (!(value instanceof Date) || Number.isNaN(value.getTime())) throw new TypeError("clock must return a valid Date");
@@ -101,7 +94,11 @@ function normalizeWeekStart(value, clock) {
 
 function restoreRun(run) {
   const item = run?.item ?? run;
-  if (!item || !isPlainObject(item) || item.agentId !== AGENT_ID || !isPlainObject(item.output)) return null;
+  if (!item
+    || !isPlainObject(item)
+    || item.agentId !== AGENT_ID
+    || !["succeeded", "fallback"].includes(item.status)
+    || !isPlainObject(item.output)) return null;
   return { ...item.output, runId: item.id, inputSnapshotHash: item.inputSnapshotHash, replayed: true };
 }
 
@@ -109,12 +106,12 @@ function refsFor(expenses, advances) {
   const refs = [];
   const seen = new Set();
   for (const item of expenses) {
-    if (!item.id || seen.has(`travel_expense:${item.id}`) || refs.length >= MAX_ITEMS) continue;
+    if (!item.id || seen.has(`travel_expense:${item.id}`) || refs.length >= MAX_ENTITIES) continue;
     seen.add(`travel_expense:${item.id}`);
     refs.push({ type: "travel_expense", id: item.id });
   }
   for (const item of advances) {
-    if (!item.id || seen.has(`travel_expense_advance:${item.id}`) || refs.length >= MAX_ITEMS) continue;
+    if (!item.id || seen.has(`travel_expense_advance:${item.id}`) || refs.length >= MAX_ENTITIES) continue;
     seen.add(`travel_expense_advance:${item.id}`);
     refs.push({ type: "travel_expense_advance", id: item.id });
   }
@@ -138,19 +135,6 @@ function normalizeAdvance(value) {
   };
 }
 
-function normalizePayment(value) {
-  if (!isPlainObject(value)) return null;
-  const id = safeIdentifier(value.id);
-  if (!id) return null;
-  return {
-    id,
-    amountCents: nonNegativeMoney(value.amountCents),
-    reimbursementCents: nonNegativeMoney(value.reimbursementCents),
-    fundingSource: boundedText(value.fundingSource, 40),
-    paidAt: boundedText(value.paidAt, 100),
-  };
-}
-
 function normalizeExpense(value) {
   if (!isPlainObject(value)) return null;
   const id = safeIdentifier(value.id);
@@ -163,7 +147,9 @@ function normalizeExpense(value) {
     category: boundedText(value.category, 80),
     purpose: boundedText(value.purpose, 500),
     invoiceStatus: boundedText(value.invoiceStatus, 40),
-    payments: Array.isArray(value.payments) ? value.payments.slice(0, 25).map(normalizePayment).filter(Boolean) : [],
+    paymentCount: Number.isSafeInteger(value.paymentCount) && value.paymentCount >= 0 && value.paymentCount <= 25
+      ? value.paymentCount
+      : Array.isArray(value.payments) ? Math.min(value.payments.length, 25) : 0,
     actualPaidCents: nonNegativeMoney(value.actualPaidCents),
     reimbursementCents: nonNegativeMoney(value.reimbursementCents),
     settlementEligibleCents: nonNegativeMoney(value.settlementEligibleCents),
@@ -201,6 +187,7 @@ function normalizeEvidence(value) {
   const item = isPlainObject(value) ? value : {};
   const group = (entry) => ({ count: count(entry?.count), complete: entry?.complete === true });
   return {
+    sources: group(item.sources),
     advances: group(item.advances),
     expenses: group(item.expenses),
     fundingSources: {
@@ -220,35 +207,83 @@ function normalizeEvidence(value) {
 
 function normalizeSnapshot(snapshot, requestedWeekStart) {
   const value = isPlainObject(snapshot) ? snapshot : {};
-  const expenses = Array.isArray(value.expenses) ? value.expenses.slice(0, MAX_ITEMS).map(normalizeExpense).filter(Boolean) : [];
-  const advances = Array.isArray(value.advances) ? value.advances.slice(0, MAX_ITEMS).map(normalizeAdvance).filter(Boolean) : [];
+  const rawAdvances = Array.isArray(value.advances) ? value.advances : [];
+  const rawExpenses = Array.isArray(value.expenses) ? value.expenses : [];
+  const selectedAdvances = rawAdvances.slice(0, MAX_ENTITIES);
+  const selectedExpenses = rawExpenses.slice(0, Math.max(0, MAX_ENTITIES - selectedAdvances.length));
+  const advances = selectedAdvances.map(normalizeAdvance).filter(Boolean);
+  const expenses = selectedExpenses.map(normalizeExpense).filter(Boolean);
+  const truncated = {
+    expenses: value.truncated?.expenses === true || rawExpenses.length > selectedExpenses.length,
+    advances: value.truncated?.advances === true || rawAdvances.length > selectedAdvances.length,
+  };
+  const normalizedEvidence = normalizeEvidence(value.evidence);
+  const normalizedIssues = Array.isArray(value.issues)
+    ? [...new Set(value.issues
+      .filter((item) => typeof item === "string")
+      .map((item) => item.trim().replace(/[^A-Za-z0-9]+/gu, "_").replace(/^_+|_+$/gu, "").toUpperCase())
+      .filter((item) => /^[A-Z0-9_]+$/u.test(item))
+      .slice(0, 50))]
+    : [];
+  if (advances.length !== selectedAdvances.length) normalizedIssues.push("INVALID_ADVANCE_SOURCE_ROW");
+  if (expenses.length !== selectedExpenses.length) normalizedIssues.push("INVALID_EXPENSE_SOURCE_ROW");
+  const suppliedHash = typeof value.settlementSnapshotHash === "string"
+    ? value.settlementSnapshotHash.trim().toLowerCase()
+    : "";
+  const hashTrusted = SHA256.test(suppliedHash);
+  if (!hashTrusted) normalizedIssues.push("SETTLEMENT_SNAPSHOT_HASH_MISSING");
+  const summary = normalizeSummary(value.summary);
+  const invoiceCoverage = {
+    reimbursementCents: nonNegativeMoney(value.invoiceCoverage?.reimbursementCents),
+    confirmedCents: nonNegativeMoney(value.invoiceCoverage?.confirmedCents),
+    missingCents: nonNegativeMoney(value.invoiceCoverage?.missingCents),
+    noInvoiceConfirmedCents: nonNegativeMoney(value.invoiceCoverage?.noInvoiceConfirmedCents),
+    unacknowledgedMissingCents: nonNegativeMoney(value.invoiceCoverage?.unacknowledgedMissingCents),
+    complete: value.invoiceCoverage?.complete === true,
+  };
+  const sourceRefs = refsFor(expenses, advances);
+  const sourcesComplete = normalizedEvidence.sources.complete
+    && !truncated.expenses
+    && !truncated.advances
+    && advances.length === selectedAdvances.length
+    && expenses.length === selectedExpenses.length
+    && sourceRefs.length === advances.length + expenses.length
+    && hashTrusted;
+  normalizedEvidence.sources = { count: sourceRefs.length, complete: sourcesComplete };
+  const mustHideArithmetic = !advances.length
+    || truncated.expenses
+    || truncated.advances
+    || !sourcesComplete
+    || !normalizedEvidence.settlement.arithmeticComplete;
+  if (mustHideArithmetic) {
+    summary.personalSettlementCents = null;
+    summary.settlementDirection = null;
+    normalizedEvidence.settlement.arithmeticComplete = false;
+  }
+  const fallbackHash = deterministicHash({
+    schemaVersion: "advance-settlement-normalized-snapshot-v1",
+    weekStart: dateOnly(value.weekStart) ?? requestedWeekStart,
+    advances,
+    expenses,
+    summary,
+    invoiceCoverage,
+    evidence: normalizedEvidence,
+    issues: normalizedIssues,
+    truncated,
+    sourceRefs,
+  });
   return {
     asOf: boundedText(value.asOf, 100),
     weekStart: dateOnly(value.weekStart) ?? requestedWeekStart,
+    settlementSnapshotHash: hashTrusted ? suppliedHash : fallbackHash,
     expenses,
     advances,
-    summary: normalizeSummary(value.summary),
-    invoiceCoverage: {
-      reimbursementCents: nonNegativeMoney(value.invoiceCoverage?.reimbursementCents),
-      confirmedCents: nonNegativeMoney(value.invoiceCoverage?.confirmedCents),
-      missingCents: nonNegativeMoney(value.invoiceCoverage?.missingCents),
-      noInvoiceConfirmedCents: nonNegativeMoney(value.invoiceCoverage?.noInvoiceConfirmedCents),
-      unacknowledgedMissingCents: nonNegativeMoney(value.invoiceCoverage?.unacknowledgedMissingCents),
-      complete: value.invoiceCoverage?.complete === true,
-    },
-    evidence: normalizeEvidence(value.evidence),
-    issues: Array.isArray(value.issues)
-      ? [...new Set(value.issues
-        .filter((item) => typeof item === "string")
-        .map((item) => item.trim().replace(/[^A-Za-z0-9]+/gu, "_").replace(/^_+|_+$/gu, "").toUpperCase())
-        .filter((item) => /^[A-Z0-9_]+$/u.test(item))
-        .slice(0, 50))]
-      : [],
-    truncated: {
-      expenses: value.truncated?.expenses === true,
-      advances: value.truncated?.advances === true,
-    },
-    sourceRefs: refsFor(expenses, advances),
+    summary,
+    invoiceCoverage,
+    evidence: normalizedEvidence,
+    issues: [...new Set(normalizedIssues)].slice(0, 50),
+    truncated,
+    sourceRefs,
   };
 }
 
@@ -267,7 +302,7 @@ function sourceReader({ settlementSnapshotAdapter, snapshotAdapter, advanceSnaps
       return {
         weekStart,
         advances,
-        truncated: { expenses: false, advances: Array.isArray(advances) && advances.length > MAX_ITEMS },
+        truncated: { expenses: false, advances: Array.isArray(advances) && advances.length > MAX_ENTITIES },
         issues: ["SETTLEMENT_EVIDENCE_UNAVAILABLE"],
       };
     };
@@ -278,7 +313,7 @@ function sourceReader({ settlementSnapshotAdapter, snapshotAdapter, advanceSnaps
       return {
         weekStart,
         advances,
-        truncated: { expenses: false, advances: Array.isArray(advances) && advances.length > MAX_ITEMS },
+        truncated: { expenses: false, advances: Array.isArray(advances) && advances.length > MAX_ENTITIES },
         issues: ["SETTLEMENT_EVIDENCE_UNAVAILABLE"],
       };
     };
@@ -301,6 +336,9 @@ function blockersFor(snapshot) {
   if (snapshot.issues.includes("SETTLEMENT_EVIDENCE_UNAVAILABLE")) {
     add("settlement_evidence", "请先读取完整的费用和票据结算快照。", "当前数据源只提供请款记录，不能安全推导结算方向。");
   }
+  if (snapshot.issues.includes("SETTLEMENT_SNAPSHOT_HASH_MISSING")) {
+    add("settlement_snapshot_hash", "请重新读取带有完整计算来源哈希的结算快照。", "当前快照未提供可信的 settlementSnapshotHash，不能证明计算来源未变化。");
+  }
   if (snapshot.truncated.expenses || snapshot.truncated.advances) {
     add("truncated", "请在费用系统中分批查看全部记录。", "结算快照达到单次返回上限，Agent 不会静默截断。");
   }
@@ -309,6 +347,9 @@ function blockersFor(snapshot) {
   }
   if (!snapshot.evidence.expenses.complete || !snapshot.evidence.advances.complete) {
     add("invalid_evidence", "请先人工核对费用或请款记录中的异常字段。", "服务端快照存在日期、金额、状态、版本或关联字段异常。");
+  }
+  if (!snapshot.evidence.sources.complete) {
+    add("source_completeness", "请重新读取来源完整且未截断的结算快照。", "并非所有计算实体都有完整、可校验的来源记录。");
   }
   if (!snapshot.evidence.fundingSources.complete) {
     add("funding_source", "请先确认每笔付款的资金来源。", "存在无法识别为个人垫付、公司直付或请款资金的付款。");
@@ -323,7 +364,7 @@ function blockersFor(snapshot) {
     add("invoice_coverage", "请补齐发票覆盖或完成无票人工确认。", "仍有可报销金额没有已确认发票或有效无票确认。");
   }
   if (!snapshot.evidence.settlement.transactionRecorded) {
-    add("settlement_transaction", "方向仅为待人工确认预览，尚未记录退款或补款交易。", "系统当前没有由 Agent 写入的退款/补款流水。");
+    add("settlement_transaction", "该结果仅供核对，不接受确认写入，也不产生退款或补款交易。", "系统当前没有且不会由该 Agent 写入退款/补款流水。");
   }
   return blockers;
 }
@@ -331,7 +372,7 @@ function blockersFor(snapshot) {
 function factsFor(snapshot) {
   const expenseRefs = snapshot.expenses.map((item) => ({ type: "travel_expense", id: item.id }));
   const advanceRefs = snapshot.advances.map((item) => ({ type: "travel_expense_advance", id: item.id }));
-  const summaryRefs = [...expenseRefs, ...advanceRefs].slice(0, MAX_ITEMS);
+  const summaryRefs = [...expenseRefs, ...advanceRefs].slice(0, MAX_ENTITIES);
   const summary = snapshot.summary;
   const facts = [
     ["summary.expenseCount", "费用笔数", summary.expenseCount],
@@ -374,28 +415,36 @@ function factsFor(snapshot) {
 
 function makeSettlementPreview(snapshot, blockers) {
   const summary = snapshot.summary;
-  const direction = summary.personalSettlementCents === null ? null : summary.settlementDirection;
-  const amountCents = summary.personalSettlementCents === null ? null : Math.abs(summary.personalSettlementCents);
+  const arithmeticUsable = snapshot.advances.length > 0
+    && !snapshot.truncated.expenses
+    && !snapshot.truncated.advances
+    && snapshot.evidence.sources.complete
+    && snapshot.evidence.settlement.arithmeticComplete
+    && summary.personalSettlementCents !== null
+    && DIRECTIONS.has(summary.settlementDirection);
+  const personalSettlementCents = arithmeticUsable ? summary.personalSettlementCents : null;
+  const direction = arithmeticUsable ? summary.settlementDirection : null;
+  const amountCents = personalSettlementCents === null ? null : Math.abs(personalSettlementCents);
   return {
-    status: direction && blockers.length === 1 && blockers[0].key === "settlement_transaction"
-      ? "ready_for_manual_confirmation"
-      : "review_required",
+    status: direction ? "review_only" : "review_required",
     direction,
     amountCents,
-    signedAmountCents: summary.personalSettlementCents,
+    signedAmountCents: personalSettlementCents,
     formula: {
       settlementEligibleCents: summary.settlementEligibleCents,
       advanceReceivedCents: summary.advanceReceivedCents,
-      personalSettlementCents: summary.personalSettlementCents,
+      personalSettlementCents,
       expression: "非公司直付的可报销金额 - 已收到请款金额",
     },
     blockers,
     transaction: {
       recorded: false,
       type: null,
-      note: "系统当前只生成方向预览，不记录退款或补款流水。",
+      note: "仅供核对；不接受确认写入，也不产生退款或补款交易。",
     },
-    requiresHumanConfirmation: true,
+    requiresHumanReview: true,
+    requiresHumanConfirmation: false,
+    acceptsConfirmation: false,
     writebackAllowed: false,
   };
 }
@@ -420,15 +469,13 @@ export function createAdvanceSettlementAssistantAdapter({
     eventId = null,
     taskType = "advance_summary",
     weekStart = null,
-    advanceId = null,
   } = {}) {
     const normalizedOwner = text(owner, "owner", 200);
     if (!TASK_TYPES.has(taskType) || !manifest.taskTypes.includes(taskType)) {
       throw new AssistantContractError("taskType is not registered for advance-settlement", "invalid_advance_settlement_input");
     }
     const normalizedWeekStart = normalizeWeekStart(weekStart, clock);
-    const normalizedAdvanceId = identifier(advanceId, "advanceId");
-    const input = { taskType, weekStart: normalizedWeekStart, advanceId: normalizedAdvanceId };
+    const input = { taskType, weekStart: normalizedWeekStart };
     let run = null;
     if (runRepository) {
       run = runRepository.create({
@@ -442,22 +489,19 @@ export function createAdvanceSettlementAssistantAdapter({
         contractVersion: manifest.contractVersion,
         input,
       });
-      const replay = run.replayed ? restoreRun(run.item) : null;
-      if (replay) return replay;
+      if (run.replayed) {
+        const replay = restoreRun(run.item);
+        if (replay) return replay;
+        throw new AssistantContractError(
+          "A prior settlement run is not replayable",
+          "advance_settlement_replay_unavailable",
+        );
+      }
     }
     try {
       const snapshot = normalizeSnapshot(await readSnapshot({ owner: normalizedOwner, weekStart: normalizedWeekStart }), normalizedWeekStart);
-      const filteredAdvances = normalizedAdvanceId
-        ? snapshot.advances.filter((item) => item.id === normalizedAdvanceId)
-        : snapshot.advances;
-      const filteredSnapshot = normalizedAdvanceId
-        ? { ...snapshot, advances: filteredAdvances, sourceRefs: refsFor(snapshot.expenses, filteredAdvances) }
-        : snapshot;
-      const blockers = blockersFor(filteredSnapshot);
-      if (normalizedAdvanceId && !filteredAdvances.length) {
-        blockers.push(blocker("advance_not_found", "请确认请款编号和自然周。", "owner-scoped 请款快照中没有匹配记录。"));
-      }
-      const status = filteredSnapshot.expenses.length || filteredSnapshot.advances.length
+      const blockers = blockersFor(snapshot);
+      const status = snapshot.expenses.length || snapshot.advances.length
         ? (blockers.length ? "review_required" : "preview")
         : "not_found";
       const output = {
@@ -466,29 +510,36 @@ export function createAdvanceSettlementAssistantAdapter({
         lifecycle: manifest.lifecycle,
         taskType,
         status,
-        asOf: filteredSnapshot.asOf,
-        weekStart: filteredSnapshot.weekStart,
-        advances: filteredSnapshot.advances,
-        expenses: filteredSnapshot.expenses,
-        summary: filteredSnapshot.summary,
+        asOf: snapshot.asOf,
+        weekStart: snapshot.weekStart,
+        settlementSnapshotHash: snapshot.settlementSnapshotHash,
+        requiresHumanReview: true,
+        acceptsConfirmation: false,
+        advances: snapshot.advances,
+        expenses: snapshot.expenses,
+        summary: snapshot.summary,
         settlementEvidence: {
-          advances: filteredSnapshot.evidence.advances,
-          expenses: filteredSnapshot.evidence.expenses,
-          fundingSources: filteredSnapshot.evidence.fundingSources,
-          invoiceCoverage: filteredSnapshot.invoiceCoverage,
-          settlement: filteredSnapshot.evidence.settlement,
+          sources: snapshot.evidence.sources,
+          advances: snapshot.evidence.advances,
+          expenses: snapshot.evidence.expenses,
+          fundingSources: snapshot.evidence.fundingSources,
+          invoiceCoverage: snapshot.invoiceCoverage,
+          settlement: snapshot.evidence.settlement,
+          settlementSnapshotHash: snapshot.settlementSnapshotHash,
         },
-        settlementPreview: makeSettlementPreview(filteredSnapshot, blockers),
-        truncated: filteredSnapshot.truncated,
-        facts: factsFor(filteredSnapshot),
+        settlementPreview: makeSettlementPreview(snapshot, blockers),
+        truncated: snapshot.truncated,
+        facts: factsFor(snapshot),
         inferences: [],
         unknowns: blockers,
-        sourceRefs: filteredSnapshot.sourceRefs,
+        sourceRefs: snapshot.sourceRefs,
         writebackPreview: {
-          requiresHumanConfirmation: true,
+          requiresHumanReview: true,
+          requiresHumanConfirmation: false,
+          acceptsConfirmation: false,
           allowed: false,
           changedFields: [],
-          note: "请款结算 Agent 只生成来源可追溯的预览；不创建、修改、删除或记录退款/补款流水。",
+          note: "请款结算 Agent 输出仅供核对；不接受确认写入，也不创建、修改、删除或产生退款/补款交易。",
         },
         writebackAllowed: false,
       };
@@ -497,8 +548,8 @@ export function createAdvanceSettlementAssistantAdapter({
           owner: normalizedOwner,
           output,
           source: "deterministic",
-          sourceRefs: filteredSnapshot.sourceRefs,
-          confirmationStatus: "preview",
+          sourceRefs: snapshot.sourceRefs,
+          confirmationStatus: "not_required",
         });
       }
       return { ...output, runId: run?.item?.id ?? null, inputSnapshotHash: run?.item?.inputSnapshotHash ?? null };

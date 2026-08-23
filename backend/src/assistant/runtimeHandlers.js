@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
+import { HttpError } from "../http/errors.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
 import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
@@ -17,6 +18,7 @@ import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
+const FINANCIAL_SCOPE_DENIED = "该财务预览仅限已绑定账号本人的微信私聊。";
 
 function safeText(value, fallback = "") {
   const text = typeof value === "string" ? value.trim() : "";
@@ -306,7 +308,7 @@ function settlementPreviewText(result) {
   const lines = [
     `请款结算预览（${result?.weekStart ?? "待确认"}）：${settlementDirectionText(preview.direction)}，金额 ${moneyFromCents(preview.amountCents)}。`,
     `公式：非公司直付的可报销金额 ${moneyFromCents(formula.settlementEligibleCents)} - 已收到请款金额 ${moneyFromCents(formula.advanceReceivedCents)} = ${Number.isSafeInteger(formula.personalSettlementCents) ? `${formula.personalSettlementCents < 0 ? "-" : ""}${moneyFromCents(Math.abs(formula.personalSettlementCents))}` : "待确认"}。`,
-    "本次仅生成待人工确认预览，尚未记录退款或补款交易。",
+    "本次结果仅供人工核对，不接受确认写入，也不会生成退款或补款交易。",
   ];
   const blockers = Array.isArray(preview.blockers) ? preview.blockers : [];
   if (blockers.length) lines.push(`待人工复核：${blockers.slice(0, 4).map((item) => item.question).join("；")}`);
@@ -987,7 +989,10 @@ export function createAssistantToolHandlers({
       };
     },
 
-    async "advance-settlement.preview"(args, context) {
+    async "advance-settlement.preview"(args, context, serverData = {}) {
+      if (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true) {
+        throw new HttpError(403, "ASSISTANT_FINANCIAL_SCOPE_DENIED", FINANCIAL_SCOPE_DENIED);
+      }
       const result = await advanceSettlementAdapter.analyze({
         owner: context.owner,
         channel: context.channel,
@@ -995,7 +1000,6 @@ export function createAssistantToolHandlers({
         eventId: context.event,
         taskType: "settlement_preview",
         weekStart: args.week ?? args.periodStart ?? null,
-        advanceId: args.advanceId ?? null,
       });
       return {
         text: settlementPreviewText(result),

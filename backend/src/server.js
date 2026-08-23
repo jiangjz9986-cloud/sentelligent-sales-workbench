@@ -3876,9 +3876,15 @@ export function createServer(options = {}) {
         const eventId = `weixin:event:v1:${createHash("sha256")
           .update(eventTuple, "utf8")
           .digest("hex")}`;
+        const financialScope = body.chatType === "direct"
+          && Boolean(config.weixinBookkeepingSenderId)
+          && body.senderId === config.weixinBookkeepingSenderId
+          && Boolean(config.weixinBookkeepingOwner)
+          && machineIdentity.account === config.weixinBookkeepingOwner;
         const auditMetadata = {
           senderHash,
           chatType: body.chatType,
+          financialScope,
           ...(body.groupId
             ? { groupHash: createHash("sha256").update(body.groupId, "utf8").digest("hex") }
             : {}),

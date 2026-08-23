@@ -8,6 +8,7 @@ import { classifyWeixinConfirmationText } from "./weixinEvent.js";
 
 const SAFE_FAILURE = "处理失败，请稍后重试。";
 const SAFE_CONFIRMATION_FAILURE = "确认信息无效或已过期，请重新发起操作。";
+const SAFE_FINANCIAL_SCOPE_FAILURE = "该财务预览仅限已绑定账号本人的微信私聊。";
 const VALID_CONTEXT = ["owner", "channel", "conversation", "event", "requestId"];
 const STORED_CONFIRMATION_TEXT = "确认码不会重复展示，请在同一会话回复“重发确认码”或“取消”。";
 
@@ -25,6 +26,10 @@ function requestDigest(input) {
     mediaSha256: input.mediaSha256 ?? null,
     quoteProviderMessageId: input.quoteProviderMessageId ?? null,
     quoteTextHash: input.quoteTextHash ?? null,
+    senderHash: input.senderHash ?? null,
+    groupHash: input.groupHash ?? null,
+    chatType: input.chatType ?? null,
+    financialScope: input.financialScope ?? null,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
@@ -94,13 +99,17 @@ function makeServerData(value) {
   if (value.auditMetadata !== undefined && value.auditMetadata !== null) {
     const metadata = value.auditMetadata;
     if (typeof metadata !== "object" || Array.isArray(metadata)) throw new TypeError("serverData.auditMetadata must be an object");
-    const allowedMetadata = new Set(["senderHash", "groupHash", "chatType"]);
+    const allowedMetadata = new Set(["senderHash", "groupHash", "chatType", "financialScope"]);
     if (Object.keys(metadata).some((key) => !allowedMetadata.has(key))) throw new TypeError("serverData.auditMetadata contains an unsupported field");
     const normalizedMetadata = {};
-    for (const key of allowedMetadata) {
+    for (const key of ["senderHash", "groupHash", "chatType"]) {
       if (metadata[key] === undefined || metadata[key] === null) continue;
       if (typeof metadata[key] !== "string" || !metadata[key].trim()) throw new TypeError(`serverData.auditMetadata.${key} is invalid`);
       normalizedMetadata[key] = metadata[key];
+    }
+    if (metadata.financialScope !== undefined && metadata.financialScope !== null) {
+      if (typeof metadata.financialScope !== "boolean") throw new TypeError("serverData.auditMetadata.financialScope is invalid");
+      normalizedMetadata.financialScope = metadata.financialScope;
     }
     result.auditMetadata = Object.freeze(normalizedMetadata);
   }
@@ -332,6 +341,10 @@ export function createAssistantOrchestrator({
         quoteTextHash: serverData.quote?.text
           ? createHash("sha256").update(serverData.quote.text, "utf8").digest("hex")
           : null,
+        senderHash: serverData.auditMetadata?.senderHash,
+        groupHash: serverData.auditMetadata?.groupHash,
+        chatType: serverData.auditMetadata?.chatType,
+        financialScope: serverData.auditMetadata?.financialScope,
       });
     const received = eventRepository.receive({
       owner: context.owner,
@@ -525,6 +538,21 @@ export function createAssistantOrchestrator({
       if (tool.policy?.denied || getToolPolicy(tool.name).denied) return finish(403, { status: "error", message: "该操作不在允许范围内。" });
       if (resolvedActionId && pendingAction?.actionType !== tool.name) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
       const invocation = validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: plan.arguments || {} });
+
+      // The HTTP boundary derives this bit from the authenticated machine
+      // owner, exact configured bookkeeping sender, and direct-chat state.
+      // Reject before pending actions, durable tool runs, or the settlement
+      // handler can read any finance data or create an agent run.
+      if (
+        tool.name === "advance-settlement.preview"
+        && context.channel === "weixin"
+        && serverData.auditMetadata?.financialScope !== true
+      ) {
+        return finish(403, {
+          status: "error",
+          message: SAFE_FINANCIAL_SCOPE_FAILURE,
+        }, { draftText: "财务预览访问被拒绝。" });
+      }
 
       // Shortcut bookkeeping actions are created only after the authenticated
       // Shortcut endpoint has persisted an owner-scoped draft. A generic

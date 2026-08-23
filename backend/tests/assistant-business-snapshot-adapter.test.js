@@ -333,11 +333,18 @@ describe("assistant bounded business snapshot adapter", () => {
       ["knowledge.search", { query: "采购" }],
     ]) {
       assert.equal(typeof handlers[toolName], "function", toolName);
-      const output = await handlers[toolName](args, context, {});
+      const serverData = toolName === "advance-settlement.preview"
+        ? { auditMetadata: { financialScope: true } }
+        : {};
+      const output = await handlers[toolName](args, context, serverData);
       assert.equal(typeof output.text, "string", toolName);
       assert.ok(output.text.length > 0, toolName);
     }
-    const settlement = await handlers["advance-settlement.preview"]({ week: "2026-08-17" }, context, {});
+    const settlement = await handlers["advance-settlement.preview"](
+      { week: "2026-08-17" },
+      context,
+      { auditMetadata: { financialScope: true } },
+    );
     assert.equal(settlement.status, "review_required");
     assert.equal(settlement.settlementPreview.direction, "company_reimburses");
     assert.equal(settlement.settlementPreview.transaction.recorded, false);
@@ -346,7 +353,7 @@ describe("assistant bounded business snapshot adapter", () => {
     const otherOwnerSettlement = await handlers["advance-settlement.preview"](
       { week: "2026-08-17" },
       { ...context, owner: "owner-b", conversation: "conversation-b" },
-      {},
+      { auditMetadata: { financialScope: true } },
     );
     assert.deepEqual(otherOwnerSettlement.settlementResult.advances, []);
     assert.equal(db.prepare("SELECT total_changes() AS count").get().count, before);
@@ -356,6 +363,43 @@ describe("assistant bounded business snapshot adapter", () => {
     assert.equal((await handlers["opportunity.detail"]({ opportunityId: "A项目" }, context, {})).opportunity.name, "A项目");
     assert.equal((await handlers["sales-decision.preview"]({ opportunityId: "A项目" }, context, {})).status, "preview");
     assert.equal(db.prepare("SELECT total_changes() AS count").get().count, before);
+  });
+
+  it("denies a direct WeChat settlement handler before reading its snapshot", async () => {
+    const sessions = createAssistantSessionRepository(db, { clock: () => new Date("2026-08-17T12:00:00Z") });
+    let settlementReads = 0;
+    const handlers = createAssistantToolHandlers({
+      db,
+      config: { aiAnalysisMode: "mock" },
+      sessionRepository: sessions,
+      settlementSnapshotAdapter: {
+        advanceSettlementSummary() {
+          settlementReads += 1;
+          throw new Error("denied handlers must not read settlement data");
+        },
+      },
+      clock: () => new Date("2026-08-17T12:00:00Z"),
+    });
+
+    await assert.rejects(
+      handlers["advance-settlement.preview"](
+        { week: "2026-08-17" },
+        { owner: "owner-a", channel: "weixin", conversation: "conversation-denied", requestId: "request-denied" },
+        { auditMetadata: { financialScope: false } },
+      ),
+      (error) => {
+        assert.equal(error.name, "HttpError");
+        assert.equal(error.status, 403);
+        assert.equal(error.code, "ASSISTANT_FINANCIAL_SCOPE_DENIED");
+        assert.equal(error.message, "该财务预览仅限已绑定账号本人的微信私聊。");
+        return true;
+      },
+    );
+    assert.equal(settlementReads, 0);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'").get().count,
+      0,
+    );
   });
 
   it("clarifies ambiguous names instead of guessing an entity", async () => {

@@ -58,7 +58,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
   tool("invoice.ingest", "invoice", "接收并识别发票", { expenseId: { type: "string", required: false }, mediaRef: { type: "string", required: true } }),
   tool("reimbursement-report.preview", "reimbursement-report", "预览报销周汇总", { week: { type: "string", required: false }, periodStart: { type: "string", required: false }, periodEnd: { type: "string", required: false } }),
   tool("sales-report.preview", "sales-report", "预览销售业务周报", { week: { type: "string", required: false }, periodStart: { type: "string", required: false }, periodEnd: { type: "string", required: false } }),
-  tool("advance-settlement.preview", "advance-settlement", "预览请款结算方向和多退少补金额", { week: { type: "string", required: false }, advanceId: { type: "string", required: false } }),
+  tool("advance-settlement.preview", "advance-settlement", "预览请款结算方向和多退少补金额", { week: { type: "string", required: false } }),
 ]);
 
 export function createAgentRegistry({ agents = AGENT_DEFINITIONS, tools = TOOL_DEFINITIONS } = {}) {

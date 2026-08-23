@@ -39,11 +39,22 @@ describe("versioned assistant agent manifests", () => {
       assert.equal(registry.get(id).lifecycle, "disabled", id);
       assert.equal(registry.get(id).modelPolicy, "disabled_until_data_boundary_approved", id);
     }
-    assert.equal(registry.get("advance-settlement").contractVersion, "advance-settlement-v1");
-    assert.equal(registry.get("advance-settlement").lifecycle, "active");
-    assert.equal(registry.get("advance-settlement").modelPolicy, "none");
-    assert.deepEqual(registry.get("advance-settlement").tools, ["advance-settlement.preview"]);
-    assert.match(registry.get("advance-settlement").systemPrompt, /非公司直付的可报销金额/u);
+    const settlement = registry.get("advance-settlement");
+    assert.equal(settlement.contractVersion, "advance-settlement-v1");
+    assert.equal(settlement.lifecycle, "active");
+    assert.equal(settlement.modelPolicy, "none");
+    assert.deepEqual(settlement.tools, ["advance-settlement.preview"]);
+    assert.equal(settlement.confirmation.write, "explicit");
+    assert.equal(Object.hasOwn(settlement.inputSchema.properties, "advanceId"), false);
+    for (const field of ["settlementSnapshotHash", "requiresHumanReview", "acceptsConfirmation", "writebackAllowed"]) {
+      assert.ok(settlement.outputSchema.required.includes(field), field);
+    }
+    assert.equal(settlement.outputSchema.properties.settlementSnapshotHash, "sha256");
+    assert.equal(settlement.outputSchema.properties.requiresHumanReview, "boolean");
+    assert.equal(settlement.outputSchema.properties.acceptsConfirmation, "boolean");
+    assert.equal(settlement.outputSchema.properties.writebackAllowed, "boolean");
+    assert.match(settlement.systemPrompt, /非公司直付的可报销金额/u);
+    assert.match(settlement.systemPrompt, /不接受确认或写回/u);
     assert.equal(registry.get("solution").enabled, false);
     assert.equal(registry.get("personal-finance").enabled, false);
   });

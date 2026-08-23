@@ -59,6 +59,25 @@ describe("assistant deterministic router", () => {
     assert.deepEqual(natural.arguments, { week: "current" });
   });
 
+  it("does not confuse reimbursement, bookkeeping, proof, or confirmation commands with settlement preview", () => {
+    const cases = [
+      "报销周汇总",
+      "整理报销",
+      "快捷记账",
+      "付款凭证",
+      "确认",
+      "修改金额为 2 元",
+      "取消",
+    ];
+    for (const text of cases) {
+      assert.notEqual(router.route({ text }).toolName, "advance-settlement.preview", text);
+    }
+    assert.equal(router.route({ text: "报销周汇总" }).toolName, "reimbursement-report.preview");
+    assert.equal(router.route({ text: "快捷记账" }).status, "clarify");
+    assert.equal(router.route({ text: "确认" }).status, "clarify");
+    assert.equal(router.route({ text: "取消" }).status, "cancelled");
+  });
+
   it("keeps payment-proof and invoice inbox uploads compatible without confirmation", () => {
     assert.equal(router.route({ text: "/invoice.ingest invoice-ref-1" }).status, "planned");
     assert.equal(router.route({ text: "/payment-proof.ingest proof-ref-1" }).status, "planned");
