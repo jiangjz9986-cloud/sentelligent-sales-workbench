@@ -5088,6 +5088,11 @@ textarea:focus {
   background: #dff7fb;
 }
 
+.settings-card-icon.pushplus {
+  color: #9a3412;
+  background: #ffedd5;
+}
+
 .settings-facts {
   display: grid;
   gap: 9px;
@@ -5129,6 +5134,92 @@ textarea:focus {
 .settings-key-form label > span {
   color: var(--muted);
   font-size: 13px;
+}
+
+.settings-inline-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.settings-status-card {
+  align-content: start;
+}
+
+.settings-status-list {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.settings-status-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 13px;
+  background: var(--surface);
+}
+
+.settings-status-item + .settings-status-item {
+  border-top: 1px solid var(--line-soft);
+}
+
+.settings-status-item > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.settings-status-item strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.settings-status-item span:not(.settings-status-value) {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-status-value {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.settings-status-value.success {
+  color: var(--green);
+}
+
+.settings-status-value.warning {
+  color: #a16207;
+}
+
+.settings-status-value.warning svg {
+  animation: settings-status-spin 1.2s linear infinite;
+}
+
+.settings-status-value.danger {
+  color: #b42318;
+}
+
+.settings-status-value.neutral {
+  color: var(--muted);
+}
+
+@keyframes settings-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .settings-key-form input {
@@ -5186,6 +5277,15 @@ textarea:focus {
 
   .settings-intro {
     padding: 18px;
+  }
+
+  .settings-status-item {
+    align-items: flex-start;
+  }
+
+  .settings-status-value {
+    white-space: normal;
+    text-align: right;
   }
 }
 

@@ -501,6 +501,176 @@ describe("vendored Weixin inbound adapter", () => {
     });
   });
 
+  it("authorizes before config or CDN access and advances past denied media", async () => {
+    await withSyntheticAccount("media-preauthorization", async ({ accountId, stateDir }) => {
+      const abortController = new AbortController();
+      const allowedSender = "synthetic-allowed-sender";
+      const deniedSender = "synthetic-denied-sender";
+      const nextCursor = "synthetic-preauthorization-cursor";
+      const syncFilePath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.sync.json`);
+      const authorized = [];
+      const requests = [];
+      let updatePolls = 0;
+      let configCalls = 0;
+      let cdnCalls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: nextCursor,
+            msgs: [
+              textUpdate({
+                from_user_id: deniedSender,
+                message_id: "synthetic-denied-media-message",
+                item_list: [{
+                  type: 2,
+                  image_item: { media: { full_url: "https://cdn.invalid/denied-media" } },
+                }],
+              }),
+              textUpdate({
+                from_user_id: allowedSender,
+                context_token: syntheticLabel("synthetic", "allowed", "context"),
+                message_id: "synthetic-allowed-text-message",
+                item_list: [{ type: 1, text_item: { text: "synthetic allowed text" } }],
+              }),
+            ],
+          }), { status: 200 });
+          assert.deepEqual(JSON.parse(await readFile(syncFilePath, "utf8")), { get_updates_buf: nextCursor });
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) {
+          configCalls += 1;
+          return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        }
+        if (endpoint.endsWith("/sendmessage")) return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        if (url === "https://cdn.invalid/denied-media") {
+          cdnCalls += 1;
+          return new Response(Buffer.from("must not be downloaded"), { status: 200 });
+        }
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      const bot = start({
+        async chat(request) {
+          requests.push(request);
+          return { text: "synthetic allowed reply" };
+        },
+      }, {
+        accountId,
+        abortSignal: abortController.signal,
+        deliveryKey: DELIVERY_KEY,
+        authorizeInbound(metadata) {
+          authorized.push(metadata);
+          return metadata.senderId === allowedSender;
+        },
+        log() {},
+      });
+      await bot.wait();
+
+      assert.deepEqual(authorized.map((item) => item.senderId), [deniedSender, allowedSender]);
+      assert.equal(authorized.every((item) => Object.isFrozen(item)), true);
+      assert.equal(cdnCalls, 0);
+      assert.equal(configCalls, 1);
+      assert.deepEqual(requests.map((item) => item.senderId), [allowedSender]);
+    });
+  });
+
+  it("cancels chunked media above 12 MiB and continues with later messages", async () => {
+    await withSyntheticAccount("media-stream-limit", async ({ accountId, stateDir }) => {
+      const abortController = new AbortController();
+      const mediaUrl = "https://cdn.invalid/synthetic-oversized-media";
+      const nextCursor = "synthetic-stream-limit-cursor";
+      const syncFilePath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.sync.json`);
+      const chunk = new Uint8Array(7 * 1024 * 1024);
+      const requestMediaPaths = [];
+      const requests = [];
+      let cancelled = false;
+      let updatePolls = 0;
+      let configCalls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: nextCursor,
+            msgs: [
+              textUpdate({
+                message_id: "synthetic-oversized-media-message",
+                item_list: [{
+                  type: 2,
+                  image_item: { media: { full_url: mediaUrl } },
+                }],
+              }),
+              textUpdate({
+                context_token: syntheticLabel("synthetic", "after", "oversized", "context"),
+                message_id: "synthetic-after-oversized-message",
+                item_list: [{ type: 1, text_item: { text: "synthetic after oversized" } }],
+              }),
+            ],
+          }), { status: 200 });
+          assert.deepEqual(JSON.parse(await readFile(syncFilePath, "utf8")), { get_updates_buf: nextCursor });
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) {
+          configCalls += 1;
+          return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        }
+        if (endpoint.endsWith("/sendmessage")) return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        if (url === mediaUrl) {
+          let reads = 0;
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            body: {
+              getReader() {
+                return {
+                  async read() {
+                    reads += 1;
+                    return reads <= 2
+                      ? { value: chunk, done: false }
+                      : { value: undefined, done: true };
+                  },
+                  async cancel() { cancelled = true; },
+                  releaseLock() {},
+                };
+              },
+            },
+          };
+        }
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      try {
+        const bot = start({
+          async chat(request) {
+            requests.push(request);
+            if (request.media?.filePath) requestMediaPaths.push(request.media.filePath);
+            return request.media ? {} : { text: "synthetic continued reply" };
+          },
+        }, {
+          accountId,
+          abortSignal: abortController.signal,
+          deliveryKey: DELIVERY_KEY,
+          log() {},
+        });
+        await bot.wait();
+      } finally {
+        await Promise.all(requestMediaPaths.map((filePath) => rm(filePath, { force: true })));
+      }
+
+      assert.equal(cancelled, true);
+      assert.equal(configCalls, 1);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].text, "synthetic after oversized");
+    });
+  });
+
   it("keeps the previous polling cursor until a failed batch is retried successfully", async () => {
     await withSyntheticAccount("cursor-retry", async ({ accountId, stateDir }) => {
       const abortController = new AbortController();
@@ -640,6 +810,10 @@ describe("vendored Weixin inbound adapter", () => {
         }),
       ]));
       assert.equal(requests[0].media.filePath.includes("synthetic decrypted"), false);
+      await assert.rejects(
+        stat(requests[0].media.filePath),
+        (error) => error?.code === "ENOENT",
+      );
     });
   });
 

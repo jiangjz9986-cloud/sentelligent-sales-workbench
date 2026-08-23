@@ -105,12 +105,18 @@ async function readBoundedResponseText(response) {
 /** Backend-only PushPlus notifier for aggregated high-relevance batches. */
 export function createHospitalTenderNotifier({
   token = "",
+  tokenProvider = null,
   endpoint = DEFAULT_ENDPOINT,
   fetchImpl = fetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  onSuccess = null,
+  onFailure = null,
 } = {}) {
-  const normalizedToken = safeText(token, 500);
-  if (!normalizedToken) return null;
+  const normalizedToken = safeText(token, 512);
+  if (tokenProvider !== null && typeof tokenProvider !== "function") {
+    throw new TypeError("tokenProvider must be a function");
+  }
+  if (!normalizedToken && tokenProvider === null) return null;
   if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl must be a function");
   if (typeof endpoint !== "string" || !/^https:\/\//u.test(endpoint)) {
     throw new TypeError("notifier endpoint must use HTTPS");
@@ -118,56 +124,91 @@ export function createHospitalTenderNotifier({
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000) {
     throw new TypeError("timeoutMs must be between 1 and 60000");
   }
+  if (onSuccess !== null && typeof onSuccess !== "function") {
+    throw new TypeError("onSuccess must be a function");
+  }
+  if (onFailure !== null && typeof onFailure !== "function") {
+    throw new TypeError("onFailure must be a function");
+  }
 
   return async function notify({ cycleNumber = 0, batchCustomerIds = [], notices = [] } = {}) {
     if (!Array.isArray(notices) || notices.length === 0) return 0;
     if (notices.length > MAX_BATCH_NOTICES) throw new Error("notification batch too large");
     const chunks = chunkLines(notices.map(noticeLine));
-    for (const [chunkIndex, lines] of chunks.entries()) {
-      const content = chunkContent({
-        cycleNumber,
-        batchCustomerIds,
-        lines,
-        chunkIndex,
-        chunkCount: chunks.length,
-        totalCount: notices.length,
-      });
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      timeout.unref?.();
-      let response;
-      try {
-        try {
-          response = await fetchImpl(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Accept: "application/json" },
-            body: JSON.stringify({
-              token: normalizedToken,
-              title: `医院招标监测：新增 ${notices.length} 条（${chunkIndex + 1}/${chunks.length}）`,
-              content,
-              template: "markdown",
-            }),
-            redirect: "error",
-            signal: controller.signal,
-          });
-        } catch {
-          throw new Error("notification unavailable");
-        }
-        if (!response?.ok || response.redirected === true) throw new Error("notification rejected");
-        const rawBody = await readBoundedResponseText(response);
-        let body;
-        try {
-          body = rawBody ? JSON.parse(rawBody) : {};
-        } catch {
-          throw new Error("notification response invalid");
-        }
-        if (body?.code !== undefined && String(body.code) !== "200") {
-          throw new Error("notification rejected");
-        }
-      } finally {
-        clearTimeout(timeout);
-      }
+    let currentToken;
+    try {
+      currentToken = safeText(
+        tokenProvider === null ? normalizedToken : tokenProvider(),
+        512,
+      );
+    } catch {
+      currentToken = "";
     }
+    if (!currentToken) {
+      const error = new Error("notification unavailable");
+      try { onFailure?.({ errorCode: error.message, count: notices.length, chunkCount: chunks.length }); } catch {}
+      throw error;
+    }
+
+    try {
+      for (const [chunkIndex, lines] of chunks.entries()) {
+        const content = chunkContent({
+          cycleNumber,
+          batchCustomerIds,
+          lines,
+          chunkIndex,
+          chunkCount: chunks.length,
+          totalCount: notices.length,
+        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        timeout.unref?.();
+        let response;
+        try {
+          try {
+            response = await fetchImpl(endpoint, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({
+                token: currentToken,
+                title: `医院招标监测：新增 ${notices.length} 条（${chunkIndex + 1}/${chunks.length}）`,
+                content,
+                template: "markdown",
+              }),
+              redirect: "error",
+              signal: controller.signal,
+            });
+          } catch {
+            throw new Error("notification unavailable");
+          }
+          if (!response?.ok || response.redirected === true) throw new Error("notification rejected");
+          const rawBody = await readBoundedResponseText(response);
+          let body;
+          try {
+            body = rawBody ? JSON.parse(rawBody) : {};
+          } catch {
+            throw new Error("notification response invalid");
+          }
+          if (body?.code !== undefined && String(body.code) !== "200") {
+            throw new Error("notification rejected");
+          }
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+    } catch (error) {
+      try {
+        onFailure?.({
+          errorCode: error?.message || "notification_failed",
+          count: notices.length,
+          chunkCount: chunks.length,
+        });
+      } catch {}
+      throw error;
+    }
+    try {
+      onSuccess?.({ count: notices.length, chunkCount: chunks.length });
+    } catch {}
     // Chunks are deliberately at-least-once. If a later chunk fails, the
     // scheduler retains the batch and retries every chunk on the next tick.
     return notices.length;

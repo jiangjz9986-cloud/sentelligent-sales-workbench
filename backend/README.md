@@ -95,9 +95,9 @@ AI_ANALYSIS_MODE=model npm start
 
 ## System settings security boundary
 
-登录后的 `/settings/config` 页面通过 `/api/settings/security` 查看 iCost 和 DeepSeek 的非敏感状态。`POST /api/settings/icost-token/rotate` 生成的 iCost 令牌只在该次成功响应出现一次；后续响应仅包含掩码、时间和状态。DeepSeek API Key 只能由服务端接收、使用 AES-256-GCM 信封加密后保存，普通 API 和前端永远不能读取明文；替换不会回显旧值，清除要求请求体提供精确的 `confirmation: "CLEAR"`。
+登录后的 `/settings/config` 页面通过 `/api/settings/security` 查看 iCost、DeepSeek 和 PushPlus 的非敏感状态。`POST /api/settings/icost-token/rotate` 生成的 iCost 令牌只在该次成功响应出现一次；后续响应仅包含掩码、时间和状态。DeepSeek API Key 与 PushPlus Token 只能由服务端接收、使用 AES-256-GCM 信封加密后保存，普通 API 和前端永远不能读取明文；替换不会回显旧值，清除要求请求体提供精确的 `confirmation: "CLEAR"`。PushPlus 可通过 `PUT /api/settings/pushplus-token` 设置或替换、`DELETE /api/settings/pushplus-token` 清除，并通过 `POST /api/settings/pushplus/test` 发送一条不含客户数据的测试通知。配置页保存的 PushPlus 值会覆盖部署环境中的旧兼容值；清除会显式停用该兼容回退。
 
-SQLite 的 `secure_settings` 表只保存版本化密文和时间元数据。解密主密钥由 `SETTINGS_ENCRYPTION_KEY` 提供，服务启动时不把它写入数据库；若主密钥缺失或格式不正确，配置读写接口返回 `503 SECURE_SETTINGS_NOT_CONFIGURED`，不会退回到明文数据库字段。运行时模型和 iCost webhook 每次从服务端密钥库读取，令牌/Key 不进入审计快照、错误正文、HTML 或 `localStorage`。
+SQLite 的 `secure_settings` 表只保存版本化密文和时间元数据。解密主密钥由 `SETTINGS_ENCRYPTION_KEY` 提供，服务启动时不把它写入数据库；若主密钥缺失或格式不正确，配置读写接口返回 `503 SECURE_SETTINGS_NOT_CONFIGURED`，不会退回到明文数据库字段。运行时模型、iCost webhook 和医院招标 PushPlus notifier 每次从服务端密钥库读取；配置页的显式清除会抑制同名部署环境回退。令牌/Key 不进入审计快照、错误正文、HTML 或 `localStorage`。PushPlus 最近成功/失败时间、发送条数和安全错误码只保存为元数据。
 
 如果后端 `.env` 未配置 `DEEPSEEK_API_KEY`，快速记录分析会返回 `source=mock_missing_model_key` 的确定性分析结果，周报和方案草稿会安全降级到本地确定性草稿，前端流程不受影响。
 
@@ -222,5 +222,7 @@ The bridge accepts:
 - `/客户 关键词`: searches existing customers.
 - `/周报`: creates the current week report draft.
 - `/帮助`: shows the command list.
+
+Inbound sender/group authorization runs in the worker before WeChat config or CDN media access. Downloaded media is stream-bounded to 12 MiB and removed after processing; permanent authorization or media-validation failures advance the provider cursor, while transient failures remain retryable.
 
 The worker never directly writes customer or opportunity changes. It creates quick records and AI suggestions first; final writes still require manual confirmation in the sales workbench.

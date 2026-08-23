@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 
+import { readBoundedResponseText } from "../http/request.js";
 import {
   parsePaymentProofCommandArgs,
   readWeixinDocument,
   WeixinDocumentError,
   weixinDocumentSourceRef,
 } from "../travelExpense/documentInboxMedia.js";
+
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 const helpText = [
   "森特智行微信助手",
@@ -186,7 +189,10 @@ class SalesWorkbenchClient {
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
-    const text = await response.text();
+    const text = await readBoundedResponseText(response, {
+      maxBytes: MAX_RESPONSE_BYTES,
+      errorMessage: "Backend response body is too large",
+    });
     const body = parseJsonResponse(text);
     if (!response.ok) {
       const message = body?.message || body?.error || `backend returned ${response.status}`;
