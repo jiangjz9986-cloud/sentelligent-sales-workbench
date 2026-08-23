@@ -452,6 +452,7 @@ function dataOwner(value) {
         runId: result.runId,
         source: result.source,
         inputSnapshotHash: result.inputSnapshotHash,
+        currentStageLabel: prepared.snapshot.opportunity?.stage ?? null,
         analysis: result.analysis,
       };
     } catch (error) {

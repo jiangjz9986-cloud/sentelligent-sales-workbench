@@ -128,6 +128,26 @@ describe("sales decision agent v1", () => {
     assert.equal(result.stage.gatePassed, false);
   });
 
+  it("uses bounded fallback evidence for persisted stakeholders without evidence text", () => {
+    const context = baseContext();
+    context.customer = {
+      ...context.customer,
+      stakeholders: [{
+        name: "信息主任",
+        role: "unknown",
+        stance: "unknown",
+        influence: "unknown",
+        confidence: 40,
+        evidence: "",
+      }],
+    };
+
+    const result = buildDeterministicSalesDecision(context);
+
+    assert.equal(result.stakeholders.length, 1);
+    assert.equal(result.stakeholders[0].evidence, "已有客户记录，仍需在下一次沟通中确认。");
+  });
+
   it("escalates compliance signals instead of suggesting sales tactics", () => {
     const result = buildDeterministicSalesDecision(baseContext({
       quickRecord: {

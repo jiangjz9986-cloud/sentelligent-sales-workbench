@@ -235,9 +235,9 @@ function salesDecisionPreviewText(result) {
   const stage = analysis.stage ?? {};
   const score = analysis.score ?? {};
   const lines = [
-    "销售决策预览（sales-decision-v1，未写回）：",
+    "项目分析预览（销售决策预览，sales-decision-v1，未写回）：",
     `判断：${decision.code ?? "待确认"}（置信度 ${Number.isSafeInteger(decision.confidence) ? decision.confidence : "待确认"}）`,
-    `阶段：当前 ${stage.current ?? "待确认"}，建议 ${stage.recommended ?? "待确认"}${stage.gatePassed === true ? "（阶段门槛已满足）" : "（阶段门槛未满足）"}`,
+    `阶段：当前 ${result?.currentStageLabel ?? stage.current ?? "待确认"}，建议 ${stage.recommended ?? "待确认"}${stage.gatePassed === true ? "（阶段门槛已满足）" : "（阶段门槛未满足）"}`,
     `评分：${Number.isSafeInteger(score.total) ? score.total : "待确认"}`,
     `结论：${String(analysis.headline ?? decision.reason ?? "待补充证据").slice(0, 500)}`,
   ];
@@ -386,18 +386,19 @@ export function createAssistantToolHandlers({
     businessSnapshotAdapter: snapshotAdapter,
     clock,
   });
-  const salesReportAdapter = salesReportAssistantAdapter ?? createSalesReportAssistantAdapter({
-    config,
-    fetchImpl,
-    runRepository: agentRunRepository,
-    clock,
-    snapshotProvider: ({ owner, weekStart, periodStart, periodEnd, knowledgeQuery }) => {
-      if (!salesLoopPreviewService || typeof salesLoopPreviewService.buildSalesReportSnapshot !== "function") {
-        return { status: "owner_scope_denied", period: { start: weekStart, end: weekStart } };
-      }
-      return salesLoopPreviewService.buildSalesReportSnapshot({ owner, weekStart, periodStart, periodEnd, knowledgeQuery });
-    },
-  });
+  const salesReportAdapter = salesReportAssistantAdapter ?? (
+    salesLoopPreviewService && typeof salesLoopPreviewService.buildSalesReportSnapshot === "function"
+      ? createSalesReportAssistantAdapter({
+          config,
+          fetchImpl,
+          runRepository: agentRunRepository,
+          clock,
+          snapshotProvider: ({ owner, weekStart, periodStart, periodEnd, knowledgeQuery }) => (
+            salesLoopPreviewService.buildSalesReportSnapshot({ owner, weekStart, periodStart, periodEnd, knowledgeQuery })
+          ),
+        })
+      : null
+  );
 
   const handlers = {
     async "dashboard.summary"(_args, context) {
@@ -950,6 +951,13 @@ export function createAssistantToolHandlers({
     },
 
     async "sales-report.preview"(args, context) {
+      if (!salesReportAdapter) {
+        const summary = snapshotAdapter.salesReportSummary({
+          owner: context.owner,
+          weekStart: args.periodStart ?? args.week,
+        });
+        return { text: salesReportSummaryText(summary), status: "preview", summary };
+      }
       const result = await salesReportAdapter.analyze({
         owner: context.owner,
         channel: context.channel,

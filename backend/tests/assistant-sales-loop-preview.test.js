@@ -105,6 +105,7 @@ describe("sales loop preview service", () => {
     });
     assert.equal(result.status, "preview");
     assert.equal(result.writebackAllowed, false);
+    assert.equal(result.currentStageLabel, "初步发现");
     assert.equal(result.analysis.schemaVersion, "sales-decision-v1");
     assert.equal(result.analysis.writebackPreview.requiresHumanConfirmation, true);
     assert.equal(result.runId, "run-preview-1");

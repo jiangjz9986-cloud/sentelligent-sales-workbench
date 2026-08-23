@@ -175,7 +175,7 @@ function stakeholderEntries(context) {
         stance: ["supportive", "neutral", "opposed"].includes(item?.stance) ? item.stance : "unknown",
         influence: ["high", "medium", "low"].includes(item?.influence) ? item.influence : "unknown",
         confidence: Number.isSafeInteger(item?.confidence) ? Math.max(0, Math.min(100, item.confidence)) : 40,
-        evidence: String(item?.evidence ?? "已有客户记录，仍需在下一次沟通中确认。").trim(),
+        evidence: String(item?.evidence ?? "").trim() || "已有客户记录，仍需在下一次沟通中确认。",
       };
     })
     .filter((item) => item.name);
