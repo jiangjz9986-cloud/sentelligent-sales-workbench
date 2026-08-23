@@ -152,7 +152,7 @@ function assertNoInvoiceConfirmation(value, path = "noInvoiceConfirmation") {
 function assertInvoiceCoverage(value, path = "invoiceCoverage") {
   const coverage = apiObject(value, path);
   requiredApiString(coverage.weekStart, `${path}.weekStart`);
-  for (const field of ["reimbursementCents", "confirmedCoverageCents", "noInvoiceConfirmedCents", "missingInvoiceCents"]) {
+  for (const field of ["reimbursementCents", "confirmedCoverageCents", "electronicInvoiceCoverageCents", "substituteInvoiceCoverageCents", "noInvoiceConfirmedCents", "missingInvoiceCents", "invoiceWarehouseAvailableCents"]) {
     nullableApiCents(coverage[field], `${path}.${field}`);
   }
   return coverage;
@@ -834,12 +834,13 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return url(`/api/invoices/${encodeURIComponent(invoiceId)}/content`);
     },
 
-    async getInvoiceContentResponse(invoiceId, { signal } = {}) {
+    async getInvoiceContentResponse(invoiceId, { signal, accept = "application/pdf" } = {}) {
+      if (typeof accept !== "string" || !accept.trim()) throw new TypeError("invoice content Accept header must be a non-empty string");
       return requestApiResponse(`/api/invoices/${encodeURIComponent(invoiceId)}/content`, {
         method: "GET",
         credentials: "include",
         redirect: "error",
-        headers: { Accept: "application/pdf" },
+        headers: { Accept: accept },
         signal,
       });
     },

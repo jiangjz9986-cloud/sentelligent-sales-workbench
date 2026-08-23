@@ -23,6 +23,13 @@ export const INVOICE_STATUSES = Object.freeze([
   Object.freeze({ id: "missing", label: "缺少票据" }),
 ]);
 
+export const EXPENSE_INVOICE_STATES = Object.freeze([
+  Object.freeze({ id: "electronic_invoice", label: "电子发票" }),
+  Object.freeze({ id: "substitute_invoice", label: "替票" }),
+  Object.freeze({ id: "no_invoice", label: "无票" }),
+  Object.freeze({ id: "invoice_pending", label: "待补发票" }),
+]);
+
 const CATEGORY_IDS = new Set(EXPENSE_CATEGORIES.map((item) => item.id));
 const FUNDING_IDS = new Set(FUNDING_SOURCES.map((item) => item.id));
 const INVOICE_STATUS_IDS = new Set(INVOICE_STATUSES.map((item) => item.id));
@@ -92,6 +99,103 @@ function attachmentPaymentIds(attachment) {
   if (Array.isArray(attachment?.paymentIds)) return attachment.paymentIds;
   if (attachment?.paymentId) return [attachment.paymentId];
   return [];
+}
+
+function activeNoInvoiceConfirmation(confirmation) {
+  return confirmation?.revokedAt === undefined || confirmation.revokedAt === null;
+}
+
+function uniqueAttachments(attachments) {
+  const unique = new Map();
+  for (const attachment of attachments) {
+    const key = attachment?.id ?? attachment;
+    if (!unique.has(key)) unique.set(key, attachment);
+  }
+  return [...unique.values()];
+}
+
+function expenseDateLabel(expense) {
+  const start = dateKey(toDate(expense?.occurredOn));
+  const rawEnd = expense?.endedOn ?? expense?.occurredEndOn;
+  if (!rawEnd) return start;
+  const end = dateKey(toDate(rawEnd));
+  if (end < start) throw new TypeError("expense end date cannot precede its start date");
+  return end === start ? start : `${start}—${end}`;
+}
+
+function expenseReimbursementCents(expense) {
+  return safeItems(expense?.payments ?? [], "payments").reduce((total, payment) => safeAdd(
+    total,
+    assertCents(payment?.reimbursementCents, "reimbursementCents"),
+    "expenseReimbursementCents",
+  ), 0);
+}
+
+function stateDefinition(id, amountCents) {
+  const definition = EXPENSE_INVOICE_STATES.find((item) => item.id === id);
+  return amountCents === undefined ? definition : { ...definition, amountCents };
+}
+
+export function deriveExpenseInvoiceStates(expense, {
+  matches = [],
+  noInvoiceConfirmations = [],
+} = {}) {
+  if (!expense || typeof expense !== "object" || Array.isArray(expense)) {
+    throw new TypeError("expense is required");
+  }
+  const expenseMatches = safeItems(matches, "matches").filter((match) => (
+    match?.expenseId === expense.id && match.state === "confirmed"
+  ));
+  const confirmations = safeItems(noInvoiceConfirmations, "noInvoiceConfirmations").filter((confirmation) => (
+    confirmation?.expenseId === expense.id && activeNoInvoiceConfirmation(confirmation)
+  ));
+  const attachments = safeItems(expense.attachments ?? [], "attachments");
+  const hasSubstitute = expenseMatches.some((match) => match.matchMethod === "rule_candidate")
+    || attachments.some((attachment) => attachment.kind === "substitute");
+  const hasElectronic = expenseMatches.some((match) => match.matchMethod !== "rule_candidate")
+    || attachments.some((attachment) => attachment.kind === "invoice");
+
+  let confirmedCents = 0;
+  for (const match of expenseMatches) {
+    confirmedCents = safeAdd(
+      confirmedCents,
+      assertCents(match.allocatedCents ?? 0, "allocatedCents"),
+      "confirmedInvoiceCents",
+    );
+  }
+  let noInvoiceCents = 0;
+  for (const confirmation of confirmations) {
+    noInvoiceCents = safeAdd(
+      noInvoiceCents,
+      assertCents(confirmation.amountSnapshotCents ?? 0, "amountSnapshotCents"),
+      "noInvoiceCents",
+    );
+  }
+
+  const reimbursementCents = expenseReimbursementCents(expense);
+  const hasDetailedEvidence = expenseMatches.length > 0 || confirmations.length > 0;
+  let pendingCents = Math.max(0, reimbursementCents - confirmedCents - noInvoiceCents);
+  let electronic = hasElectronic;
+
+  // Older responses expose only the aggregate coverage status. Preserve that
+  // compatibility while newer callers provide exact match/confirmation facts.
+  if (!hasDetailedEvidence && !hasElectronic && !hasSubstitute) {
+    if (expense.invoiceStatus === "covered") {
+      electronic = true;
+      pendingCents = 0;
+    } else if (expense.invoiceStatus === "partial") {
+      electronic = true;
+    }
+  }
+
+  const states = [];
+  if (electronic) states.push(stateDefinition("electronic_invoice"));
+  if (hasSubstitute) states.push(stateDefinition("substitute_invoice"));
+  if (confirmations.length > 0) states.push(stateDefinition("no_invoice", noInvoiceCents));
+  if (pendingCents > 0 || states.length === 0) {
+    states.push(stateDefinition("invoice_pending", pendingCents));
+  }
+  return states;
 }
 
 export function naturalWeekFor(value) {
@@ -168,6 +272,50 @@ export function flattenPaymentRows(expenses = []) {
   ));
 }
 
+export function buildExpenseLedgerRows(expenses = [], context = {}) {
+  return safeItems(expenses, "expenses").map((expense) => {
+    const paymentRows = flattenPaymentRows([expense]);
+    const amountCents = paymentRows.reduce((total, row) => safeAdd(
+      total,
+      row.amountCents,
+      "expenseAmountCents",
+    ), 0);
+    const paymentProofs = uniqueAttachments(
+      safeItems(expense.attachments ?? [], "attachments")
+        .filter((attachment) => attachment.kind === "payment_proof"),
+    );
+    const invoiceStates = deriveExpenseInvoiceStates(expense, context);
+    const notes = String(expense.notes ?? "").trim()
+      || String(expense.purpose ?? "").trim()
+      || "—";
+
+    return {
+      id: expense.id,
+      referenceCode: expense.referenceCode ?? "",
+      categoryId: expense.category,
+      coverageStatus: expense.invoiceStatus ?? "pending",
+      needsReview: invoiceStates.some((state) => state.id === "invoice_pending")
+        || paymentRows.some((row) => row.differenceCents > 0),
+      searchText: [expense.referenceCode, expense.occurredOn, notes]
+        .map((value) => String(value ?? "").toLowerCase())
+        .join("\n"),
+      visible: {
+        date: expenseDateLabel(expense),
+        category: categoryLabel(expense.category),
+        amountCents,
+        paymentProofs,
+        invoiceStates,
+        notes,
+      },
+      source: expense,
+    };
+  }).sort((left, right) => (
+    left.visible.date.localeCompare(right.visible.date)
+    || String(left.referenceCode).localeCompare(String(right.referenceCode))
+    || String(left.id).localeCompare(String(right.id))
+  ));
+}
+
 export function summarizeTravelExpenses(expenses = [], advances = []) {
   const rows = flattenPaymentRows(expenses);
   const summary = {
@@ -187,6 +335,7 @@ export function summarizeTravelExpenses(expenses = [], advances = []) {
     advanceRecorded: advances.length > 0,
     attachmentCount: 0,
     paymentProofCount: 0,
+    paymentProofMissingCount: 0,
     categoryTotals: Object.fromEntries(EXPENSE_CATEGORIES.map((item) => [item.id, {
       id: item.id,
       label: item.label,
@@ -211,6 +360,13 @@ export function summarizeTravelExpenses(expenses = [], advances = []) {
       (expense.attachments ?? []).filter((item) => item.kind === "payment_proof").length,
       "paymentProofCount",
     );
+    if (!(expense.attachments ?? []).some((item) => item.kind === "payment_proof")) {
+      summary.paymentProofMissingCount = safeAdd(
+        summary.paymentProofMissingCount,
+        1,
+        "paymentProofMissingCount",
+      );
+    }
     const invoiceStatus = expense.invoiceStatus ?? "pending";
     if (!Object.hasOwn(summary.invoiceStatusCounts, invoiceStatus)) throw new TypeError("invoiceStatus is invalid");
     summary.invoiceStatusCounts[invoiceStatus] += 1;

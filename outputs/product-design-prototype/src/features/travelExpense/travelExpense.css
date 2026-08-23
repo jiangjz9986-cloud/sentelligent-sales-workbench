@@ -409,6 +409,42 @@
   background: #f7f9ff;
 }
 
+.expense-invoice-week-summary {
+  overflow: hidden;
+  border: 1px solid var(--expense-line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.expense-invoice-week-summary > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  border-bottom: 1px solid var(--expense-soft-line);
+}
+
+.expense-invoice-week-summary > header strong,
+.expense-invoice-week-summary > header p {
+  display: block;
+}
+
+.expense-invoice-week-summary > header strong {
+  color: #17294d;
+  font-size: 13px;
+}
+
+.expense-invoice-week-summary > header p {
+  margin: 4px 0 0;
+  color: #7b879d;
+  font-size: 11px;
+}
+
+.expense-invoice-week-summary .invoice-coverage-strip {
+  border-bottom: 0;
+}
+
 .expense-overview-note strong,
 .expense-overview-note span {
   display: block;
@@ -1918,6 +1954,179 @@
   font-size: 9px;
 }
 
+/* Six-field expense list: a compact, portrait-safe formal output. */
+.expense-list-print-preview {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.expense-list-print-layout {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+.expense-list-print-document {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.expense-list-print-sheet {
+  width: 100%;
+  min-width: 0;
+  aspect-ratio: 1 / 1.414;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid rgba(16, 35, 75, 0.12);
+  background: #fff;
+  box-shadow: 0 8px 28px rgba(16, 35, 75, 0.12);
+  font-family: "Songti SC", "SimSun", serif;
+}
+
+.expense-list-print-title h2 {
+  margin: 0 0 12px;
+  color: #0d1b34;
+  font-size: 23px;
+  text-align: center;
+}
+
+.expense-list-print-title dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+  color: #2c3544;
+  font-size: 10.5px;
+}
+
+.expense-list-print-title dl div {
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+}
+
+.expense-list-print-title dt {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.expense-list-print-title dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.expense-list-print-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  color: #111;
+  font-size: 9.5px;
+}
+
+.expense-list-print-table th,
+.expense-list-print-table td {
+  padding: 7px 5px;
+  border: 1px solid #737373;
+  text-align: center;
+  vertical-align: middle;
+  line-height: 1.4;
+}
+
+.expense-list-print-table th {
+  background: #f5f5f5;
+  font-weight: 700;
+}
+
+.expense-list-print-table th:nth-child(1) { width: 7%; }
+.expense-list-print-table th:nth-child(2) { width: 16%; }
+.expense-list-print-table th:nth-child(3) { width: 13%; }
+.expense-list-print-table th:nth-child(4) { width: 13%; }
+.expense-list-print-table th:nth-child(5) { width: 13%; }
+.expense-list-print-table th:nth-child(6) { width: 18%; }
+.expense-list-print-table th:nth-child(7) { width: 20%; }
+
+.expense-list-print-table td:last-child {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.expense-list-print-total {
+  display: flex;
+  justify-content: flex-end;
+  gap: 18px;
+  padding: 8px 10px;
+  border: 1px solid #737373;
+  color: #111;
+  font-size: 10px;
+}
+
+.expense-list-print-total span {
+  min-width: 90px;
+  text-align: right;
+  font-weight: 750;
+}
+
+.expense-ledger-proofs,
+.expense-ledger-invoice-states {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.expense-ledger-proofs img,
+.expense-ledger-proofs a {
+  width: 30px;
+  height: 36px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--expense-line);
+  border-radius: 4px;
+  color: #315de8;
+  background: #f4f7ff;
+  object-fit: cover;
+  font-size: 8px;
+  text-decoration: none;
+}
+
+.expense-ledger-proofs img { object-fit: cover; }
+.expense-ledger-proofs > span,
+.expense-ledger-proof-empty {
+  color: #7b879d;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.expense-ledger-proof-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.expense-invoice-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.expense-invoice-state.electronic_invoice { color: #138342; background: #e9f7ee; }
+.expense-invoice-state.substitute_invoice { color: #315de8; background: #edf2ff; }
+.expense-invoice-state.no_invoice { color: #c65d00; background: #fff1df; }
+.expense-invoice-state.invoice_pending { color: #c63d3d; background: #fff0f0; }
+
+.expense-ledger-notes { min-width: 130px; }
+.expense-ledger-notes strong { overflow-wrap: anywhere; }
+
 .expense-attachment-sheet {
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
@@ -3104,6 +3313,60 @@
   overflow: hidden;
 }
 
+.authenticated-image-frame {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.authenticated-image-frame > img,
+.authenticated-image-frame > .authenticated-image-frame-state {
+  grid-area: 1 / 1;
+}
+
+.authenticated-image-frame > img {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: block;
+  object-fit: contain;
+  background: #fff;
+}
+
+.authenticated-image-frame-state {
+  min-width: 0;
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  padding: 18px;
+  color: var(--expense-muted);
+  text-align: center;
+  font-size: 11px;
+}
+
+.authenticated-image-frame-state.is-error {
+  color: #a23d32;
+}
+
+.authenticated-image-frame-state button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+  color: inherit;
+  background: #fff;
+  cursor: pointer;
+}
+
 .authenticated-pdf-frame > canvas,
 .authenticated-pdf-frame > .authenticated-pdf-frame-state {
   grid-area: 1 / 1;
@@ -3427,7 +3690,7 @@
 
 .invoice-coverage-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   border-bottom: 1px solid var(--expense-soft-line);
   background: #fbfcff;
 }
@@ -3440,6 +3703,14 @@
 
 .invoice-coverage-strip > span:last-child {
   border-right: 0;
+}
+
+.invoice-coverage-strip > span:nth-child(3n) {
+  border-right: 0;
+}
+
+.invoice-coverage-strip > span:nth-child(n + 4) {
+  border-top: 1px solid var(--expense-soft-line);
 }
 
 .invoice-coverage-strip small,
@@ -3696,7 +3967,8 @@
   background: #fff;
 }
 
-.invoice-print-media > .authenticated-pdf-frame {
+.invoice-print-media > .authenticated-pdf-frame,
+.invoice-print-media > .authenticated-image-frame {
   align-self: stretch;
   justify-self: stretch;
 }
@@ -3915,7 +4187,8 @@
   .invoice-detail-head a,
   .invoice-detail-head button { width: 100%; }
   .invoice-coverage-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .invoice-coverage-strip > span:nth-child(2) { border-right: 0; }
+  .invoice-coverage-strip > span { border-right: 1px solid var(--expense-soft-line); }
+  .invoice-coverage-strip > span:nth-child(2n) { border-right: 0; }
   .invoice-coverage-strip > span:nth-child(n + 3) { border-top: 1px solid var(--expense-soft-line); }
   .invoice-candidate-list article { grid-template-columns: 48px minmax(0, 1fr); }
   .invoice-candidate-list nav { grid-column: 1 / -1; }
@@ -3987,6 +4260,11 @@
   margin: 10mm;
 }
 
+@page expense-list {
+  size: A4 portrait;
+  margin: 12mm;
+}
+
 @media print {
   html,
   body {
@@ -4025,6 +4303,44 @@
   .expense-print-document {
     display: block !important;
     overflow: visible !important;
+  }
+
+  .expense-list-print-preview {
+    page: expense-list;
+  }
+
+  .expense-list-print-layout,
+  .expense-list-print-document {
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  .expense-list-print-sheet {
+    width: 100% !important;
+    min-width: 0 !important;
+    height: auto !important;
+    min-height: 250mm !important;
+    aspect-ratio: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .expense-list-print-sheet:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .expense-list-print-table thead {
+    display: table-header-group;
+  }
+
+  .expense-list-print-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 
   .expense-print-sheet {
