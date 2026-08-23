@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
-import { serializePlistXml } from "../../integrations/icost-shortcut/plist-xml.mjs";
+import { parsePlistXml, serializePlistXml } from "../../integrations/icost-shortcut/plist-xml.mjs";
 import {
   CAPTURE_DEVICE_ENDPOINT,
   CAPTURE_DEVICE_MARKER,
@@ -59,7 +59,7 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     const { report } = await convertIcostCaptureShortcut({ inputPath, outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     assert.deepEqual(report, {
-      actionCount: 82,
+      actionCount: 100,
       endpoint: CAPTURE_DEVICE_ENDPOINT,
       previewEndpoint: "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture-preview",
       preservesCapturePrefix: true,
@@ -70,6 +70,7 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
       hasInlineCredentials: false,
       hasDeviceCredential: true,
       hasFailureNotice: true,
+      hasManualAmountFallback: true,
       hasThreeLevelMenus: true,
       hasOptionalNote: true,
       hasLocalFinalConfirmation: true,
@@ -83,6 +84,17 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     assert.doesNotMatch(xml, /idempotency_key|source_id|截图记账ID|format\.date/u);
     assert.doesNotMatch(xml, /ICAISnapshotShortcutV7/u);
     assert.match(xml, /WFTextTokenString/u);
+    const converted = parsePlistXml(xml);
+    const previewRequest = converted.WFWorkflowActions.find(
+      (entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "金额预览响应",
+    );
+    const previewText = previewRequest.WFWorkflowActionParameters.WFJSONValues
+      .Value.WFDictionaryFieldValueItems[0].WFValue;
+    assert.equal(previewText.WFSerializationType, "WFTextTokenString");
+    assert.equal(
+      previewText.Value.attachmentsByRange["{0, 1}"].OutputName,
+      "OCR纯文本",
+    );
     assert.deepEqual(inspectConvertedIcostCaptureShortcutXml(xml), report);
   });
 
@@ -140,5 +152,34 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     };
     await writeFile(inputPath, serializePlistXml(plist), { mode: 0o600 });
     await assert.rejects(() => convertIcostCaptureShortcut({ inputPath, outputPath }), /不是文本字符串/u);
+  });
+
+  it("rejects broken V7 control-flow grouping or preview-response variables", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "shortcut-icost-converter-flow-"));
+    temporaryDirectories.push(directory);
+    const inputPath = join(directory, "source.shortcut");
+    const outputPath = join(directory, "converted.shortcut");
+    await writeFile(inputPath, serializePlistXml(sourcePlist()), { mode: 0o600 });
+    await convertIcostCaptureShortcut({ inputPath, outputPath });
+    const converted = parsePlistXml(await readFile(outputPath, "utf8"));
+
+    const wrongVariable = structuredClone(converted);
+    wrongVariable.WFWorkflowActions.find(
+      (entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "最终预览响应",
+    ).WFWorkflowActionParameters.WFVariableName = "wrong_preview_response";
+    assert.throws(
+      () => inspectConvertedIcostCaptureShortcutXml(serializePlistXml(wrongVariable)),
+      /预览响应变量必须一致/u,
+    );
+
+    const brokenGrouping = structuredClone(converted);
+    const lastConditional = brokenGrouping.WFWorkflowActions.findLast(
+      (entry) => entry.WFWorkflowActionIdentifier === "is.workflow.actions.conditional",
+    );
+    lastConditional.WFWorkflowActionParameters.GroupingIdentifier = "broken-group";
+    assert.throws(
+      () => inspectConvertedIcostCaptureShortcutXml(serializePlistXml(brokenGrouping)),
+      /嵌套或分组标识不匹配/u,
+    );
   });
 });

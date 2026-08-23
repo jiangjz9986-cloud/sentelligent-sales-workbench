@@ -16,10 +16,12 @@ const REQUEST_ACTION = "is.workflow.actions.downloadurl";
 const DICTIONARY_VALUE_ACTION = "is.workflow.actions.getvalueforkey";
 const CONDITIONAL_ACTION = "is.workflow.actions.conditional";
 const SHOW_RESULT_ACTION = "is.workflow.actions.showresult";
+const SET_VARIABLE_ACTION = "is.workflow.actions.setvariable";
+const GET_VARIABLE_ACTION = "is.workflow.actions.getvariable";
 
 export const CAPTURE_DEVICE_ENDPOINT = "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture";
 export const CAPTURE_PREVIEW_ENDPOINT = "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture-preview";
-export const CAPTURE_SHORTCUT_NAME = "智能截图记账（三级菜单待确认版V6）";
+export const CAPTURE_SHORTCUT_NAME = "智能截图记账（三级菜单待确认版V7）";
 export const CAPTURE_DEVICE_MARKER = "__SHORTCUT_DEVICE__";
 export const CAPTURE_FAILURE_MESSAGE = "截图提交失败：服务器未接受本次请求。请检查网络；未收到小小微信草稿前不要认为已经记账。";
 export const CAPTURE_CANCEL_MESSAGE = "已取消，不会上传这笔记账。";
@@ -27,6 +29,15 @@ export const CAPTURE_CANCEL_MESSAGE = "已取消，不会上传这笔记账。";
 const uuid = (suffix) => `7B73F100-2EA8-4A20-9C73-${BigInt(suffix).toString(16).padStart(12, "0")}`;
 const literalToken = (string) => ({ Value: { string }, WFSerializationType: "WFTextTokenString" });
 const attachment = (outputUuid, outputName) => ({ Value: { OutputUUID: outputUuid, OutputName: outputName, Type: "ActionOutput" }, WFSerializationType: "WFTextTokenAttachment" });
+const textAttachment = (outputUuid, outputName) => ({
+  Value: {
+    attachmentsByRange: {
+      "{0, 1}": { OutputUUID: outputUuid, OutputName: outputName, Type: "ActionOutput" },
+    },
+    string: "\uFFFC",
+  },
+  WFSerializationType: "WFTextTokenString",
+});
 const interpolatedText = (parts) => {
   let string = "";
   const attachmentsByRange = {};
@@ -60,6 +71,59 @@ function dictionaryMap(field) {
   requireValue(field?.WFSerializationType === "WFDictionaryFieldValue" && Array.isArray(items), "请求字典无效");
   return new Map(items.map((item) => [literal(item.WFKey), item.WFValue]));
 }
+function conditionalRanges(actions) {
+  const stack = [];
+  const ranges = new Map();
+  actions.forEach((entry, index) => {
+    if (entry.WFWorkflowActionIdentifier !== CONDITIONAL_ACTION) return;
+    const parameters = entry.WFWorkflowActionParameters ?? {};
+    const group = parameters.GroupingIdentifier;
+    const mode = parameters.WFControlFlowMode;
+    requireValue(typeof group === "string" && group.length > 0, "条件动作缺少分组标识");
+    if (mode === 0) {
+      requireValue(!ranges.has(group) && !stack.some((item) => item.group === group), "条件分组标识重复");
+      stack.push({ group, start: index, otherwise: null });
+      return;
+    }
+    const current = stack.at(-1);
+    requireValue(current?.group === group, "条件动作嵌套或分组标识不匹配");
+    if (mode === 1) {
+      requireValue(current.otherwise === null, "条件分组包含重复的否则分支");
+      current.otherwise = index;
+      return;
+    }
+    requireValue(mode === 2, "条件动作控制模式无效");
+    stack.pop();
+    ranges.set(group, { ...current, end: index });
+  });
+  requireValue(stack.length === 0, "条件动作缺少结束动作");
+  return ranges;
+}
+function actionIndex(actions, outputName) {
+  const indexes = actions
+    .map((entry, index) => entry.WFWorkflowActionParameters?.CustomOutputName === outputName ? index : -1)
+    .filter((index) => index >= 0);
+  requireValue(indexes.length === 1, `${outputName}动作缺失或重复`);
+  return indexes[0];
+}
+function guardRange(actions, ranges, guardedIndex) {
+  const guardedUuid = actions[guardedIndex]?.WFWorkflowActionParameters?.UUID;
+  const starts = actions
+    .map((entry, index) => entry.WFWorkflowActionIdentifier === CONDITIONAL_ACTION
+      && entry.WFWorkflowActionParameters?.WFControlFlowMode === 0
+      && outputUuid(entry.WFWorkflowActionParameters?.WFInput?.Variable) === guardedUuid
+      ? index
+      : -1)
+    .filter((index) => index >= 0);
+  requireValue(starts.length === 1, "值守卫条件动作缺失或重复");
+  return ranges.get(actions[starts[0]].WFWorkflowActionParameters.GroupingIdentifier);
+}
+function requireInThenBranch(index, range, message) {
+  requireValue(range && index > range.start && index < (range.otherwise ?? range.end), message);
+}
+function requireInElseBranch(index, range, message) {
+  requireValue(range?.otherwise !== null && index > range.otherwise && index < range.end, message);
+}
 function assertLegacyPrefix(actions) {
   requireValue(actions.length === 4, "参考快捷指令必须恰好包含截屏、裁剪、OCR 和 iCost 四个动作");
   requireValue(actions[0]?.WFWorkflowActionIdentifier === SCREENSHOT_ACTION, "参考快捷指令首个动作不是截屏");
@@ -81,6 +145,15 @@ export function convertedActions(sourceActions, previewEndpoint, captureEndpoint
   const previewError = id();
   const previewErrorCode = id();
   const previewErrorFields = id();
+  const manualAmount = id();
+  const manualAmountText = id();
+  const manualPreviewRequest = id();
+  const manualPreviewError = id();
+  const manualPreviewErrorCode = id();
+  const manualPreviewErrorFields = id();
+  const previewResponseFromManual = id();
+  const previewResponseFromAutomatic = id();
+  const previewResponse = id();
   const amountCents = id();
   const amountText = id();
   const summaryText = id();
@@ -127,24 +200,46 @@ export function convertedActions(sourceActions, previewEndpoint, captureEndpoint
   const subcategoryGuard = uuid(0x2008);
   const confirmGuard = uuid(0x2009);
   const finalErrorGuard = uuid(0x200a);
-  const categoryVariable = "shortcut_category_v6";
-  const subcategoryVariable = "shortcut_subcategory_v6";
+  const manualAmountGuard = uuid(0x200b);
+  const manualPreviewErrorGuard = uuid(0x200c);
+  const previewResponseGuard = uuid(0x200d);
+  const categoryVariable = "shortcut_category_v7";
+  const subcategoryVariable = "shortcut_subcategory_v7";
+  const previewResponseVariable = "shortcut_preview_response_v7";
   const conditionalInput = (outputUuid, outputName) => ({ Type: "Variable", Variable: attachment(outputUuid, outputName) });
   const icostRawText = structuredClone(sourceActions[3].WFWorkflowActionParameters.rawText);
   const actions = [
     ...structuredClone(sourceActions.slice(0, 3)),
     action(TEXT_ACTION, { CustomOutputName: "OCR纯文本", WFTextActionText: icostRawText }, ocrText),
-    action(REQUEST_ACTION, { CustomOutputName: "金额预览响应", WFHTTPMethod: "POST", WFHTTPBodyType: "JSON", WFURL: previewEndpoint, WFHTTPHeaders: dictionaryField([["Content-Type", "application/json"], ["Authorization", `Bearer ${deviceToken}`]]), WFJSONValues: dictionaryField([["text", attachment(ocrText, "OCR纯文本")], ["source", "shortcut"]]) }, previewRequest),
+    action(REQUEST_ACTION, { CustomOutputName: "金额预览响应", WFHTTPMethod: "POST", WFHTTPBodyType: "JSON", WFURL: previewEndpoint, WFHTTPHeaders: dictionaryField([["Content-Type", "application/json"], ["Authorization", `Bearer ${deviceToken}`]]), WFJSONValues: dictionaryField([["text", textAttachment(ocrText, "OCR纯文本")], ["source", "shortcut"]]) }, previewRequest),
     action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "预览错误", WFDictionaryKey: "error", WFInput: attachment(previewRequest, "金额预览响应") }, previewError),
     action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "预览错误码", WFDictionaryKey: "code", WFInput: attachment(previewError, "预览错误") }, previewErrorCode),
     action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "预览错误字段", WFDictionaryKey: "fields", WFInput: attachment(previewError, "预览错误") }, previewErrorFields),
     controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: previewGuard, WFCondition: 100, WFControlFlowMode: 0, WFInput: conditionalInput(previewError, "预览错误") }),
-    controlAction(SHOW_RESULT_ACTION, { Text: interpolatedText(["截图预览失败（", { outputUuid: previewErrorCode, outputName: "预览错误码" }, "），字段：", { outputUuid: previewErrorFields, outputName: "预览错误字段" }, `。${CAPTURE_FAILURE_MESSAGE}`]) }),
+    action(ASK_ACTION, { CustomOutputName: "手动金额", WFAskActionPrompt: "未自动识别到支付金额，请输入金额（例如 5.24）；取消则不会上传", WFInputType: 0 }, manualAmount),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: manualAmountGuard, WFCondition: 100, WFControlFlowMode: 0, WFInput: conditionalInput(manualAmount, "手动金额") }),
+    action(TEXT_ACTION, { CustomOutputName: "手动金额校验文本", WFTextActionText: interpolatedText(["支付金额 ", { outputUuid: manualAmount, outputName: "手动金额" }, " 元"]) }, manualAmountText),
+    action(REQUEST_ACTION, { CustomOutputName: "手动金额预览响应", WFHTTPMethod: "POST", WFHTTPBodyType: "JSON", WFURL: previewEndpoint, WFHTTPHeaders: dictionaryField([["Content-Type", "application/json"], ["Authorization", `Bearer ${deviceToken}`]]), WFJSONValues: dictionaryField([["text", textAttachment(manualAmountText, "手动金额校验文本")], ["source", "shortcut"]]) }, manualPreviewRequest),
+    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "手动预览错误", WFDictionaryKey: "error", WFInput: attachment(manualPreviewRequest, "手动金额预览响应") }, manualPreviewError),
+    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "手动预览错误码", WFDictionaryKey: "code", WFInput: attachment(manualPreviewError, "手动预览错误") }, manualPreviewErrorCode),
+    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "手动预览错误字段", WFDictionaryKey: "fields", WFInput: attachment(manualPreviewError, "手动预览错误") }, manualPreviewErrorFields),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: manualPreviewErrorGuard, WFCondition: 100, WFControlFlowMode: 0, WFInput: conditionalInput(manualPreviewError, "手动预览错误") }),
+    controlAction(SHOW_RESULT_ACTION, { Text: interpolatedText(["手动金额校验失败（", { outputUuid: manualPreviewErrorCode, outputName: "手动预览错误码" }, "），字段：", { outputUuid: manualPreviewErrorFields, outputName: "手动预览错误字段" }, `。${CAPTURE_FAILURE_MESSAGE}`]) }),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: manualPreviewErrorGuard, WFControlFlowMode: 1 }),
+    action("is.workflow.actions.setvariable", { CustomOutputName: "记录手动预览响应", WFVariableName: previewResponseVariable, WFInput: attachment(manualPreviewRequest, "手动金额预览响应") }, previewResponseFromManual),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: manualPreviewErrorGuard, WFControlFlowMode: 2 }),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: manualAmountGuard, WFControlFlowMode: 1 }),
+    controlAction(SHOW_RESULT_ACTION, { Text: literalToken("已取消手动输入，不会上传这笔记账。") }),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: manualAmountGuard, WFControlFlowMode: 2 }),
     controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: previewGuard, WFControlFlowMode: 1 }),
-    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "金额分", WFDictionaryKey: "amount_cents", WFInput: attachment(previewRequest, "金额预览响应") }, amountCents),
-    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "金额", WFDictionaryKey: "amount_text", WFInput: attachment(previewRequest, "金额预览响应") }, amountText),
-    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "金额摘要", WFDictionaryKey: "summary_text", WFInput: attachment(previewRequest, "金额预览响应") }, summaryText),
-    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "截图时间", WFDictionaryKey: "captured_at", WFInput: attachment(previewRequest, "金额预览响应") }, capturedAt),
+    action("is.workflow.actions.setvariable", { CustomOutputName: "记录自动预览响应", WFVariableName: previewResponseVariable, WFInput: attachment(previewRequest, "金额预览响应") }, previewResponseFromAutomatic),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: previewGuard, WFControlFlowMode: 2 }),
+    action("is.workflow.actions.getvariable", { CustomOutputName: "最终预览响应", WFVariableName: previewResponseVariable }, previewResponse),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: previewResponseGuard, WFCondition: 100, WFControlFlowMode: 0, WFInput: conditionalInput(previewResponse, "最终预览响应") }),
+    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "金额分", WFDictionaryKey: "amount_cents", WFInput: attachment(previewResponse, "最终预览响应") }, amountCents),
+    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "金额", WFDictionaryKey: "amount_text", WFInput: attachment(previewResponse, "最终预览响应") }, amountText),
+    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "金额摘要", WFDictionaryKey: "summary_text", WFInput: attachment(previewResponse, "最终预览响应") }, summaryText),
+    action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "截图时间", WFDictionaryKey: "captured_at", WFInput: attachment(previewResponse, "最终预览响应") }, capturedAt),
     action(LIST_ACTION, { CustomOutputName: "第一层收支", WFItems: ["支出", "收入"] }, entryOptions),
     action(CHOOSE_ACTION, { CustomOutputName: "已选收支", WFChooseFromListActionPrompt: "第一层：选择支出或收入", WFInput: attachment(entryOptions, "第一层收支") }, entrySelection),
     controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: entryGuard, WFCondition: 100, WFControlFlowMode: 0, WFInput: conditionalInput(entrySelection, "已选收支") }),
@@ -195,7 +290,7 @@ export function convertedActions(sourceActions, previewEndpoint, captureEndpoint
     controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: entryGuard, WFControlFlowMode: 1 }),
     controlAction(SHOW_RESULT_ACTION, { Text: literalToken("已取消收支选择，不会上传。") }),
     controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: entryGuard, WFControlFlowMode: 2 }),
-    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: previewGuard, WFControlFlowMode: 2 }),
+    controlAction(CONDITIONAL_ACTION, { GroupingIdentifier: previewResponseGuard, WFControlFlowMode: 2 }),
   ];
   return actions;
 }
@@ -217,12 +312,15 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
   requireValue(actions.slice(0, 3).map((entry) => entry.WFWorkflowActionIdentifier).join("|") === [SCREENSHOT_ACTION, CROP_ACTION, OCR_ACTION].join("|"), "截屏、裁剪、OCR 前缀未保留");
   requireValue(!actions.some((entry) => entry.WFWorkflowActionIdentifier === ICOST_ACTION), "转换后不得保留 iCost 写入动作");
   requireValue(!xml.includes("森特账号") && !xml.includes("森特密码") && !xml.includes("bookkeeping-capture-inline"), "快捷指令不得包含账号密码验证");
+  const ranges = conditionalRanges(actions);
   const requests = actions.filter((entry) => entry.WFWorkflowActionIdentifier === REQUEST_ACTION);
-  requireValue(requests.length === 2, "必须分别包含金额预览和最终提交两个请求");
+  requireValue(requests.length === 3, "必须包含自动预览、手动金额兜底和最终提交三个请求");
   const preview = requests.find((entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "金额预览响应");
+  const manualPreview = requests.find((entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "手动金额预览响应");
   const final = requests.find((entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "已提交小小待确认");
-  requireValue(preview && final, "预览或最终提交请求缺失");
+  requireValue(preview && manualPreview && final, "自动预览、手动兜底或最终提交请求缺失");
   requireValue(preview.WFWorkflowActionParameters.WFURL === CAPTURE_PREVIEW_ENDPOINT, "金额预览接口地址不正确");
+  requireValue(manualPreview.WFWorkflowActionParameters.WFURL === CAPTURE_PREVIEW_ENDPOINT, "手动金额校验接口地址不正确");
   requireValue(final.WFWorkflowActionParameters.WFURL === CAPTURE_DEVICE_ENDPOINT, "最终提交接口地址不正确");
   for (const request of requests) {
     const parameters = request.WFWorkflowActionParameters;
@@ -233,6 +331,43 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
   }
   const previewBody = dictionaryMap(preview.WFWorkflowActionParameters.WFJSONValues);
   requireValue(JSON.stringify([...previewBody.keys()]) === JSON.stringify(["text", "source"]), "预览请求字段不正确");
+  requireValue(previewBody.get("text")?.WFSerializationType === "WFTextTokenString", "OCR 预览必须强制包装为文本字符串");
+  requireValue(outputUuid(previewBody.get("text")) === actions[3].WFWorkflowActionParameters.UUID, "OCR 预览文本未绑定显式文本动作");
+  const manualPreviewBody = dictionaryMap(manualPreview.WFWorkflowActionParameters.WFJSONValues);
+  requireValue(JSON.stringify([...manualPreviewBody.keys()]) === JSON.stringify(["text", "source"]), "手动金额校验请求字段不正确");
+  requireValue(manualPreviewBody.get("text")?.WFSerializationType === "WFTextTokenString", "手动金额校验必须包装为文本字符串");
+  const manualAmountTextAction = actions.find((entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "手动金额校验文本");
+  requireValue(outputUuid(manualPreviewBody.get("text")) === manualAmountTextAction?.WFWorkflowActionParameters?.UUID, "手动金额校验请求未绑定本机输入");
+  const previewErrorIndex = actionIndex(actions, "预览错误");
+  const manualAmountIndex = actionIndex(actions, "手动金额");
+  const manualPreviewIndex = actionIndex(actions, "手动金额预览响应");
+  const manualPreviewErrorIndex = actionIndex(actions, "手动预览错误");
+  const manualSetIndex = actionIndex(actions, "记录手动预览响应");
+  const automaticSetIndex = actionIndex(actions, "记录自动预览响应");
+  const previewResponseIndex = actionIndex(actions, "最终预览响应");
+  const previewGuardRange = guardRange(actions, ranges, previewErrorIndex);
+  const manualAmountGuardRange = guardRange(actions, ranges, manualAmountIndex);
+  const manualPreviewErrorGuardRange = guardRange(actions, ranges, manualPreviewErrorIndex);
+  const previewResponseGuardRange = guardRange(actions, ranges, previewResponseIndex);
+  requireInThenBranch(manualAmountIndex, previewGuardRange, "手动金额输入必须位于自动预览失败分支");
+  requireInThenBranch(manualPreviewIndex, manualAmountGuardRange, "手动金额请求必须位于非空输入分支");
+  requireInElseBranch(manualSetIndex, manualPreviewErrorGuardRange, "手动预览响应只能在校验成功分支保存");
+  requireInElseBranch(automaticSetIndex, previewGuardRange, "自动预览响应只能在无错误分支保存");
+  requireValue(previewResponseIndex > previewGuardRange.end, "最终预览响应必须在自动与手动分支结束后读取");
+  const manualSet = actions[manualSetIndex].WFWorkflowActionParameters;
+  const automaticSet = actions[automaticSetIndex].WFWorkflowActionParameters;
+  const previewResponseGet = actions[previewResponseIndex].WFWorkflowActionParameters;
+  requireValue(actions[manualSetIndex].WFWorkflowActionIdentifier === SET_VARIABLE_ACTION
+    && actions[automaticSetIndex].WFWorkflowActionIdentifier === SET_VARIABLE_ACTION
+    && actions[previewResponseIndex].WFWorkflowActionIdentifier === GET_VARIABLE_ACTION,
+  "预览响应变量动作类型不正确");
+  requireValue(manualSet.WFVariableName === automaticSet.WFVariableName
+    && automaticSet.WFVariableName === previewResponseGet.WFVariableName
+    && previewResponseGet.WFVariableName === "shortcut_preview_response_v7",
+  "自动、手动和最终预览响应变量必须一致");
+  requireValue(actions.filter((entry) => entry.WFWorkflowActionIdentifier === SET_VARIABLE_ACTION
+    && entry.WFWorkflowActionParameters?.WFVariableName === previewResponseGet.WFVariableName).length === 2,
+  "预览响应变量只能由自动成功和手动成功两个分支赋值");
   const finalBody = dictionaryMap(final.WFWorkflowActionParameters.WFJSONValues);
   requireValue(JSON.stringify([...finalBody.keys()]) === JSON.stringify(["text", "selection_path", "amount_cents", "note", "captured_at", "source"]), "最终请求字段不正确");
   const lists = new Map(actions.filter((entry) => entry.WFWorkflowActionIdentifier === LIST_ACTION).map((entry) => [entry.WFWorkflowActionParameters.CustomOutputName, entry]));
@@ -246,7 +381,13 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
   requireValue(finalChoose && outputUuids(finalChoose.WFWorkflowActionParameters.WFChooseFromListActionPrompt).length >= 5, "最终确认卡必须显示金额、分类、备注和时间");
   requireValue(actions.some((entry) => entry.WFWorkflowActionIdentifier === ASK_ACTION && entry.WFWorkflowActionParameters?.WFAskActionPrompt === "最后一步：备注（可选，点完成可跳过）"), "备注输入必须是最后确认前的可选步骤");
   requireValue(outputUuid(finalBody.get("text")) && outputUuid(finalBody.get("text")) !== outputUuid(previewBody.get("text")), "最终提交不得再次上传整段 OCR 原文");
-  return { actionCount: actions.length, endpoint: final.WFWorkflowActionParameters.WFURL, previewEndpoint: preview.WFWorkflowActionParameters.WFURL, preservesCapturePrefix: true, preservesIcostOcrText: true, coercesOcrThroughTextAction: true, usesServerDerivedIdempotency: true, removesIcostWrite: true, hasInlineCredentials: false, hasDeviceCredential: true, hasFailureNotice: true, hasThreeLevelMenus: true, hasOptionalNote: true, hasLocalFinalConfirmation: true, finalSubmissionUsesSummaryOnly: true, hasSuccessReceipt: false, payloadKeys: [...finalBody.keys()] };
+  requireValue(actions.some((entry) => entry.WFWorkflowActionIdentifier === ASK_ACTION && entry.WFWorkflowActionParameters?.CustomOutputName === "手动金额"), "自动识别失败时必须提供本机手动金额兜底");
+  const finalIndex = actionIndex(actions, "已提交小小待确认");
+  const confirmIndex = actionIndex(actions, "本机最终确认");
+  const confirmGuardRange = guardRange(actions, ranges, confirmIndex);
+  requireInThenBranch(finalIndex, previewResponseGuardRange, "最终提交必须位于有效预览响应守卫内");
+  requireInThenBranch(finalIndex, confirmGuardRange, "最终提交必须位于本机确定记录分支内");
+  return { actionCount: actions.length, endpoint: final.WFWorkflowActionParameters.WFURL, previewEndpoint: preview.WFWorkflowActionParameters.WFURL, preservesCapturePrefix: true, preservesIcostOcrText: true, coercesOcrThroughTextAction: true, usesServerDerivedIdempotency: true, removesIcostWrite: true, hasInlineCredentials: false, hasDeviceCredential: true, hasFailureNotice: true, hasManualAmountFallback: true, hasThreeLevelMenus: true, hasOptionalNote: true, hasLocalFinalConfirmation: true, finalSubmissionUsesSummaryOnly: true, hasSuccessReceipt: false, payloadKeys: [...finalBody.keys()] };
 }
 
 export async function convertIcostCaptureShortcut({ inputPath, outputPath, endpoint = CAPTURE_DEVICE_ENDPOINT, deviceToken = CAPTURE_DEVICE_MARKER } = {}) {

@@ -16,6 +16,7 @@ import { inspectBookkeepingShortcutXml } from "../../integrations/shortcut/verif
 import {
   SHORTCUT_BOOKKEEPING_CATALOG,
   authenticateShortcutWebhook,
+  previewShortcutCapturePayload,
   validateShortcutCapturePayload,
 } from "../src/integrations/shortcutBookkeeping.js";
 
@@ -26,6 +27,83 @@ afterEach(async () => {
 });
 
 describe("自有截图记账快捷指令", () => {
+  it("recognizes iPhone OCR payment amounts despite common currency formatting drift", () => {
+    const samples = [
+      "使用招商银行储蓄卡（4755）支付\n¥5.24\n交易详情",
+      "使用招商银行储蓄卡（4755）支付\n￥ ５．２４\n交易详情",
+      "使用招商银行储蓄卡（4755）支付\nY 5.24\n交易详情",
+      "使用招商银行储蓄卡（4755）支付\n¥ 5. 24\n交易详情",
+      "使用招商银行储蓄卡（4755）支付\n¥\n5.24\n交易详情",
+      "使用招商银行储蓄卡（4755）支付\n¥\u200B5.24\n交易详情",
+      "使用招商银行储蓄卡（4755）支付\n¥\u20615.24\n交易详情",
+      "使用招商银行储蓄卡（4755）支付\n5.24\n交易详情",
+    ];
+    for (const text of samples) {
+      assert.equal(
+        previewShortcutCapturePayload({ text, source: "shortcut" }).amountCents,
+        524,
+        text,
+      );
+    }
+  });
+
+  it("does not treat timestamps, dates, card suffixes or battery values as an amount", () => {
+    for (const text of [
+      "10:13\n招商银行储蓄卡 4755",
+      "2026.08.23\n账单详情",
+      "电量 100%\n卡号尾号 4755",
+      "5.24",
+      "Y2026.08",
+      "账单支付日期\n2026.08",
+      "支付时间\n10.28",
+      "分付还款提醒\n应还金额 ¥309.57",
+      "账户余额 ¥309.57",
+      "使用招商银行储蓄卡支付\n¥ 5 24",
+      "使用招商银行储蓄卡支付\n¥5\u200B24",
+      "使用招商银行储蓄卡支付\n¥5.240",
+      "使用招商银行储蓄卡支付\n¥5.2.4",
+      "¥5:24",
+      "¥5/24",
+      "¥5-24",
+      "¥5’24",
+      "5:240元",
+      "5/240元",
+      "1234567890元",
+      "1234567890.12元",
+      "5.241元",
+      "5.240元",
+      "-5.24元",
+      "+5.24元",
+      "-¥5.24",
+      "- ¥5.24",
+      "−¥5.24",
+      "金额-5.24元",
+      "5元5角",
+      "5元 5角",
+      "¥5元5角",
+      "人民币5元 24",
+      "RMB5元5角",
+      "CNY 5元5分",
+      "SCNY5.24",
+      "ARMB 5.24",
+    ]) {
+      assert.throws(
+        () => previewShortcutCapturePayload({ text, source: "shortcut" }),
+        (error) => error?.status === 422
+          && error?.code === "VALIDATION_ERROR"
+          && error?.fields?.amount_cents === "notRecognized",
+      );
+    }
+  });
+
+  it("prefers the payment amount over a repayment reminder in the same screenshot", () => {
+    const preview = previewShortcutCapturePayload({
+      text: "分付还款提醒\n应还金额 ¥309.57\n使用招商银行储蓄卡（4755）支付\n¥\n5.24\n交易详情",
+      source: "shortcut",
+    });
+    assert.equal(preview.amountCents, 524);
+  });
+
   it("derives a stable opaque idempotency key when iOS sends only OCR text", () => {
     const first = validateShortcutCapturePayload({ text: " 同一张截图 14.42 元 ", source: "shortcut" });
     const replay = validateShortcutCapturePayload({ text: "同一张截图 14.42 元", source: "shortcut" });

@@ -139,6 +139,10 @@ function positiveCents(value, field = "amount_cents") {
 
 function normalizedOcrLines(value) {
   return value
+    .normalize("NFKC")
+    // Preserve a boundary when Vision inserts invisible formatting characters:
+    // deleting them could turn `5<ZWSP>24` into the valid-looking integer 524.
+    .replace(/\p{Cf}/gu, " ")
     .replace(/\r\n?/gu, "\n")
     .split("\n")
     .map((line) => line.replace(/[\t\u00a0]+/gu, " ").replace(/\s{2,}/gu, " ").trim())
@@ -146,25 +150,84 @@ function normalizedOcrLines(value) {
     .slice(0, 300);
 }
 
+function amountFromOcrToken(value) {
+  let normalized = value.replace(/\s+/gu, "").replace(/[。·]/gu, ".");
+  if (normalized.includes(".") && normalized.includes(",")) {
+    normalized = normalized.replaceAll(",", "");
+  } else {
+    normalized = normalized.replace(",", ".");
+  }
+  const amount = Number(normalized);
+  const amountCents = Math.round(amount * 100);
+  return Number.isSafeInteger(amountCents)
+    && amountCents > 0
+    && amountCents <= 999_999_999_99
+    ? amountCents
+    : null;
+}
+
 function moneyCandidates(lines) {
   const candidates = [];
   const patterns = [
-    /(?:[¥￥]\s*|人民币\s*)(\d{1,9}(?:[.,]\d{1,2})?)/gu,
-    /(\d{1,9}(?:[.,]\d{1,2})?)\s*元(?:整)?/gu,
+    {
+      expression: /(?:[¥￥]\s*|人民币\s*)(\d{1,9}(?:\s*[.,。·]\s*\d{1,2})?)(?![\s.,。·]*\d)/gu,
+      baseScore: 6,
+    },
+    {
+      expression: /(?<![\p{L}\p{N}])(?:RMB|CNY)\s*(\d{1,9}(?:\s*[.,。·]\s*\d{1,2})?)(?![\s.,。·]*\d)/giu,
+      baseScore: 6,
+    },
+    {
+      expression: /(?<![\d.,。·+\-])(\d{1,9}(?:\s*[.,。·]\s*\d{1,2})?)\s*元(?:整)?(?![\s.,。·]*\d)/gu,
+      baseScore: 6,
+    },
   ];
   lines.forEach((line, lineIndex) => {
-    for (const pattern of patterns) {
-      pattern.lastIndex = 0;
-      for (const match of line.matchAll(pattern)) {
-        const amount = Number(match[1].replace(",", "."));
-        const amountCents = Math.round(amount * 100);
-        if (!Number.isSafeInteger(amountCents) || amountCents <= 0 || amountCents > 999_999_999_99) continue;
-        const context = lines.slice(Math.max(0, lineIndex - 1), lineIndex + 2).join(" ");
-        const positive = /(支付|付款|交易金额|实付|收款|到账|消费|金额)/u.test(context) ? 8 : 0;
-        const payment = /(支付宝|微信支付|储蓄卡|信用卡|银行卡|招商银行|银联|账单)/u.test(context) ? 4 : 0;
-        const reminder = /(应还|还款|余额|提醒|额度|分期)/u.test(context) ? -10 : 0;
-        candidates.push({ amountCents, lineIndex, index: match.index ?? 0, score: positive + payment + reminder });
+    const context = lines.slice(Math.max(0, lineIndex - 1), lineIndex + 2).join(" ");
+    const positive = /(支付|付款|交易金额|实付|收款|到账|消费|金额)/u.test(context) ? 8 : 0;
+    const payment = /(支付宝|微信支付|储蓄卡|信用卡|银行卡|招商银行|银联|账单)/u.test(context) ? 4 : 0;
+    const reminder = /(应还|还款|余额|提醒|额度|分期)/u.test(context) ? -20 : 0;
+    const pushCandidate = (match, baseScore) => {
+      const rawPrefix = line.slice(0, match.index ?? 0);
+      const prefix = rawPrefix.trimEnd();
+      if (/[+\-−]$/u.test(prefix)) return;
+      const remainder = line.slice((match.index ?? 0) + match[0].length);
+      if (/^\d/u.test(match[0].trimStart()) && /\d\s*[\p{P}\p{S}]\s*$/u.test(rawPrefix)) return;
+      if (/^\s*[\p{P}\p{S}]\s*\d/u.test(remainder)) return;
+      if (/^\s*元\s*(?:[.,。·]?\s*\d|\d+\s*[角分])/u.test(remainder)) return;
+      const amountCents = amountFromOcrToken(match[1]);
+      if (amountCents === null) return;
+      candidates.push({
+        amountCents,
+        lineIndex,
+        index: match.index ?? 0,
+        score: baseScore + positive + payment + reminder,
+      });
+    };
+
+    for (const { expression, baseScore } of patterns) {
+      expression.lastIndex = 0;
+      for (const match of line.matchAll(expression)) {
+        pushCandidate(match, baseScore);
       }
+    }
+
+    // iOS Vision occasionally drops or substitutes the currency sign while
+    // keeping the decimal amount. Accept that fallback only when the line is
+    // amount-shaped and its immediate context still identifies a payment (or
+    // when the sign became the common OCR confusable "Y"). This deliberately
+    // excludes timestamps, card suffixes, battery percentages and dates.
+    const decimal = /(?<![\d.,。·])(\d{1,9}\s*[.,。·]\s*\d{1,2})(?![\d.,。·])/gu;
+    const amountShaped = /^[¥￥Yy]?\s*\d{1,9}\s*[.,。·]\s*\d{1,2}\s*(?:元)?$/u.test(line);
+    const adjacentCurrency = /(?:[¥￥]|人民币|RMB|CNY)\s*$/iu.test(lines[lineIndex - 1] ?? "");
+    const paymentContext = positive > 0 || payment > 0;
+    const nonAmountContext = /(日期|时间|卡号|尾号|电量|电池|余额|额度|应还|还款|提醒|分期|账期|有效期|账单日|还款日)/u.test(context);
+    if (amountShaped && !nonAmountContext && (paymentContext || adjacentCurrency)) {
+      // A currency-only preceding OCR observation is a stronger signal than a
+      // generic decimal on a payment screen. Keep it above nearby reminder
+      // amounts whose context can otherwise leak into the following row.
+      const fallbackScore = adjacentCurrency ? 10 : 2;
+      for (const match of line.matchAll(decimal)) pushCandidate(match, fallbackScore);
     }
   });
   return candidates.sort((left, right) => right.score - left.score
@@ -180,7 +243,7 @@ export function previewShortcutCapturePayload(body, { clock = () => new Date() }
   if (body.source !== SHORTCUT_BOOKKEEPING_SOURCE) validationError({ source: "notAllowed" });
   const lines = normalizedOcrLines(text);
   const candidate = moneyCandidates(lines)[0];
-  if (!candidate) validationError({ amount_cents: "notRecognized" });
+  if (!candidate || candidate.score < 6) validationError({ amount_cents: "notRecognized" });
   const relevantLines = lines
     .slice(Math.max(0, candidate.lineIndex - 1), Math.min(lines.length, candidate.lineIndex + 2))
     .join("\n")
