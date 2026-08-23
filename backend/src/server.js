@@ -2894,6 +2894,7 @@ export function createServer(options = {}) {
       paymentProofRecognizer,
       invoiceRecognizer,
       businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
+      agentRunRepository: assistantAgentRunRepository,
       salesLoopPreviewService: assistantSalesLoopPreviewService,
       resolveBusinessOwner: assistantBusinessOwnerResolver,
       clock: assistantClock,

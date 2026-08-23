@@ -85,6 +85,44 @@ describe("assistant agent run repository", () => {
     db.close();
   });
 
+  it("finds the latest run by hashed conversation scope without exposing the external id", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const repository = createAssistantAgentRunRepository(db, {
+      idFactory: (() => {
+        let count = 0;
+        return () => `run-${++count}`;
+      })(),
+    });
+    repository.create(runInput({ eventId: "event-old", taskType: "opportunity_diagnosis" }));
+    repository.complete("run-1", {
+      owner: "owner-1",
+      output: { status: "preview" },
+      source: "mock",
+      confirmationStatus: "preview",
+    });
+    repository.create(runInput({ eventId: "event-new", input: { opportunity: { id: "opp-2" } } }));
+
+    const latest = repository.getLatest({
+      owner: "owner-1",
+      channel: "desktop",
+      conversationId: "conversation-1",
+      agentId: "sales-decision",
+      taskType: "opportunity_diagnosis",
+    });
+    assert.equal(latest.item.id, "run-2");
+    assert.equal(latest.item.input.opportunity.id, "opp-2");
+    assert.equal(latest.item.conversationIdHash.length, 64);
+    assert.equal(JSON.stringify(latest.item).includes("conversation-1"), false);
+    assert.equal(repository.getLatest({
+      owner: "other-owner",
+      channel: "desktop",
+      conversationId: "conversation-1",
+      agentId: "sales-decision",
+      taskType: "opportunity_diagnosis",
+    }), null);
+    db.close();
+  });
+
   it("enforces owner scope and durable failure state", () => {
     const db = openDatabase({ databaseUrl: ":memory:" });
     const repository = createAssistantAgentRunRepository(db, { idFactory: () => "run-1" });

@@ -99,6 +99,80 @@ afterEach(async () => {
 });
 
 describe("wired sales loop assistant runtime", () => {
+  it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
+    const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
+    assert.equal(collected.response.status, 200);
+    assert.match(collected.body.text, /已暂存/);
+
+    const preview = await event("记录", `runtime-${++sequence}-visit-preview`);
+    assert.equal(preview.response.status, 200);
+    assert.match(preview.body.text, /待确认记录/);
+
+    let db = openDatabase({ databaseUrl });
+    let runs = db.prepare(`
+      SELECT agent_id, task_type, status, source, confirmation_status, input_json
+      FROM assistant_agent_runs WHERE owner = $owner ORDER BY created_at, id
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 1);
+    assert.deepEqual({
+      agentId: runs[0].agent_id,
+      taskType: runs[0].task_type,
+      status: runs[0].status,
+      source: runs[0].source,
+      confirmationStatus: runs[0].confirmation_status,
+    }, {
+      agentId: "visit-capture",
+      taskType: "preview",
+      status: "succeeded",
+      source: "mock",
+      confirmationStatus: "preview",
+    });
+    assert.equal(runs[0].input_json.includes("weixin:conversation"), false);
+    db.close();
+
+    const pending = await event("录入", `runtime-${++sequence}-visit-confirm-request`);
+    assert.equal(pending.response.status, 200);
+    assert.equal(pending.body.status, "confirmation_required");
+    const code = pending.body.text.match(/确认码：(\d{6})/)?.[1];
+    assert.match(code ?? "", /^\d{6}$/);
+
+    const confirmed = await event(code, `runtime-${++sequence}-visit-confirm-code`);
+    assert.equal(confirmed.response.status, 200);
+    assert.match(confirmed.body.text, /已录入系统/);
+
+    db = openDatabase({ databaseUrl });
+    runs = db.prepare(`
+      SELECT agent_id, task_type, status, source, confirmation_status
+      FROM assistant_agent_runs WHERE owner = $owner ORDER BY created_at, id
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].agent_id, "visit-capture");
+    assert.equal(runs[0].task_type, "preview");
+    assert.equal(runs[0].status, "succeeded");
+    assert.equal(runs[0].confirmation_status, "preview");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM quick_records WHERE owner = $owner").get({ $owner: owner }).count, 2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM action_items WHERE source_record_id IS NOT NULL").get().count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM risk_items WHERE source_type = 'quick_record'").get().count, 0);
+    db.close();
+
+    // If the user skips the explicit preview command, confirmation still
+    // creates one capture run and does not silently bypass the adapter.
+    const direct = await event("电话运行时医院，确认下周回访。", `runtime-${++sequence}-visit-direct`);
+    assert.equal(direct.response.status, 200);
+    const directPending = await event("录入", `runtime-${++sequence}-visit-direct-request`);
+    const directCode = directPending.body.text.match(/确认码：(\d{6})/)?.[1];
+    assert.match(directCode ?? "", /^\d{6}$/);
+    const directConfirmed = await event(directCode, `runtime-${++sequence}-visit-direct-code`);
+    assert.equal(directConfirmed.response.status, 200);
+    db = openDatabase({ databaseUrl });
+    const taskTypes = db.prepare(
+      "SELECT task_type FROM assistant_agent_runs WHERE owner = $owner ORDER BY created_at, id",
+    ).all({ $owner: owner }).map((item) => item.task_type);
+    assert.equal(taskTypes.filter((item) => item === "preview").length, 1);
+    assert.equal(taskTypes.filter((item) => item === "capture").length, 1);
+    db.close();
+  });
+
   it("persists verified context, routes an implicit project analysis to sales-decision-v1, and keeps business rows read-only", async () => {
     const detail = await event("/opportunity.detail opportunity-runtime", `runtime-${++sequence}-detail`);
     assert.equal(detail.response.status, 200);

@@ -437,5 +437,36 @@ export function createAssistantAgentRunRepository(
     return row ? { item: itemFromRow(row) } : null;
   }
 
-  return Object.freeze({ create, complete, fail, get, list, getByEvent });
+  // The external conversation identifier is never stored in plaintext. This
+  // lookup lets a confirmation step reuse the latest preview for the same
+  // owner/channel/conversation without widening the persistence boundary.
+  function getLatest({ owner, channel, conversationId, agentId = null, taskType = null } = {}) {
+    const identity = normalizeIdentity({ owner, channel, conversationId });
+    if (!identity.conversationIdHash) return null;
+    const clauses = [
+      "owner = $owner",
+      "channel = $channel",
+      "conversation_id_hash = $conversationIdHash",
+    ];
+    const params = {
+      $owner: identity.owner,
+      $channel: identity.channel,
+      $conversationIdHash: identity.conversationIdHash,
+    };
+    if (agentId !== null && agentId !== undefined) {
+      params.$agentId = text(agentId, "agentId", 100);
+      clauses.push("agent_id = $agentId");
+    }
+    if (taskType !== null && taskType !== undefined) {
+      params.$taskType = text(taskType, "taskType", 100);
+      clauses.push("task_type = $taskType");
+    }
+    const row = db.prepare(
+      "SELECT * FROM assistant_agent_runs WHERE " + clauses.join(" AND ") +
+      " ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(params);
+    return row ? { item: itemFromRow(row) } : null;
+  }
+
+  return Object.freeze({ create, complete, fail, get, list, getByEvent, getLatest });
 }
