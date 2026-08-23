@@ -1,5 +1,38 @@
 const AMAP_ORIGIN = "https://restapi.amap.com";
 const MAX_ROUTE_LOCATIONS = 9;
+const MAX_RESPONSE_BYTES = 512 * 1024;
+
+async function readBoundedResponseText(response) {
+  const contentLength = response?.headers?.get?.("content-length");
+  if (contentLength && (!/^\d+$/u.test(contentLength) || Number(contentLength) > MAX_RESPONSE_BYTES)) {
+    try { await response?.body?.cancel?.(); } catch {}
+    throw new Error("response too large");
+  }
+  const reader = response?.body?.getReader?.();
+  if (!reader) {
+    const text = await response.text();
+    if (Buffer.byteLength(String(text ?? ""), "utf8") > MAX_RESPONSE_BYTES) throw new Error("response too large");
+    return String(text ?? "");
+  }
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new Error("invalid response");
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        try { await reader.cancel(); } catch {}
+        throw new Error("response too large");
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
 
 export class AmapServiceError extends Error {
   constructor(code, message) {
@@ -127,7 +160,7 @@ export function createAmapClient({
 
     let body;
     try {
-      body = JSON.parse(await response.text());
+      body = JSON.parse(await readBoundedResponseText(response));
     } catch {
       throw serviceError("AMAP_INVALID_RESPONSE", "Amap returned an invalid response");
     }

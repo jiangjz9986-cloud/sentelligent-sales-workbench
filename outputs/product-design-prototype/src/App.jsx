@@ -1002,6 +1002,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                   key={item.id}
                   className={`nav-item ${active === item.id ? "active" : ""}`}
                   data-testid={`nav-${item.id}`}
+                  aria-label={item.label}
+                  title={item.label}
                   type="button"
                   onClick={() => {
                     if (item.id === "customer") setCustomerViewMode("list");

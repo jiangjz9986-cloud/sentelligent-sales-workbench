@@ -98,6 +98,7 @@ describe("secure system settings API", () => {
       body: "{}",
     });
     assert.equal(rotated.response.status, 201);
+    assert.equal(rotated.response.headers.get("cache-control"), "no-store");
     assert.match(rotated.body.item.token, /^icost_[A-Za-z0-9_-]{43}$/);
     const token = rotated.body.item.token;
 
@@ -124,6 +125,29 @@ describe("secure system settings API", () => {
     assert.doesNotMatch(row.ciphertext, /icost_/);
   });
 
+  it("reports active environment fallbacks without exposing their values", async () => {
+    const environmentFallbacks = {
+      icost: ["environment", "icost", "token"].join("-"),
+      deepseek: ["environment", "deepseek", "key"].join("-"),
+    };
+    await startServer({
+      icostWebhookToken: environmentFallbacks.icost,
+      modelApiKey: environmentFallbacks.deepseek,
+    });
+    const auth = await login();
+    const listed = await request("/api/settings/security", {
+      headers: { Cookie: auth.cookie },
+    });
+    assert.equal(listed.response.status, 200);
+    assert.equal(listed.response.headers.get("cache-control"), "no-store");
+    assert.equal(listed.body.item.icost.source, "environment");
+    assert.equal(listed.body.item.icost.configured, true);
+    assert.equal(listed.body.item.deepseek.source, "environment");
+    assert.equal(listed.body.item.deepseek.configured, true);
+    assert.equal(JSON.stringify(listed.body).includes(environmentFallbacks.icost), false);
+    assert.equal(JSON.stringify(listed.body).includes(environmentFallbacks.deepseek), false);
+  });
+
   it("never returns a DeepSeek key and requires explicit confirmation to clear it", async () => {
     await startServer();
     const auth = await login();
@@ -136,6 +160,7 @@ describe("secure system settings API", () => {
       body: JSON.stringify({ apiKey: fixtureValue }),
     });
     assert.equal(saved.response.status, 200);
+    assert.equal(saved.response.headers.get("cache-control"), "no-store");
     assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(fixtureValue));
     assert.equal(saved.body.item.configured, true);
     assert.equal(saved.body.item.masked.includes(fixtureValue), false);
@@ -153,9 +178,95 @@ describe("secure system settings API", () => {
       body: JSON.stringify({ confirmation: "CLEAR" }),
     });
     assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.response.headers.get("cache-control"), "no-store");
     assert.equal(cleared.body.item.configured, false);
 
     const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
     assert.equal(listed.body.item.deepseek.status, "cleared");
+  });
+
+  it("stores PushPlus securely, supports an explicit test notification, and lets clear override the environment fallback", async () => {
+    const fixtureToken = "synthetic-token";
+    const alternateFixtureToken = "synthetic-token-two";
+    const requests = [];
+    await startServer({
+      hospitalTenderPushplusToken: fixtureToken,
+      fetchImpl: async (url, options) => {
+        requests.push({ url, options });
+        return new Response(JSON.stringify({ code: "200" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+
+    const initial = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(initial.response.status, 200);
+    assert.equal(initial.body.item.pushplus.source, "environment");
+    assert.equal(initial.body.item.pushplus.configured, true);
+    assert.equal(initial.body.item.pushplus.masked.includes(fixtureToken), false);
+
+    const saved = await request("/api/settings/pushplus-token", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token: fixtureToken }),
+    });
+    assert.equal(saved.response.status, 200);
+    assert.equal(saved.body.item.configured, true);
+    assert.equal(saved.body.item.masked.includes(fixtureToken), false);
+    assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(fixtureToken));
+
+    const missingCsrf = await request("/api/settings/pushplus-token", {
+      method: "PUT",
+      headers: { Cookie: auth.cookie },
+      body: JSON.stringify({ token: alternateFixtureToken }),
+    });
+    assert.equal(missingCsrf.response.status, 403);
+
+    const tested = await request("/api/settings/pushplus/test", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+    assert.equal(tested.response.status, 200);
+    assert.equal(tested.body.item.status, "sent");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "https://www.pushplus.plus/send");
+    assert.equal(JSON.parse(requests[0].options.body).token, fixtureToken);
+
+    const afterTest = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(afterTest.body.item.pushplus.source, "settings");
+    assert.equal(afterTest.body.item.pushplus.lastDeliveryCount, 1);
+    assert.equal(afterTest.body.item.pushplus.lastChunkCount, 1);
+
+    const replaced = await request("/api/settings/pushplus-token", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token: alternateFixtureToken }),
+    });
+    assert.equal(replaced.response.status, 200);
+    assert.equal(replaced.body.item.lastSuccessAt, null);
+    assert.equal(replaced.body.item.lastDeliveryCount, null);
+
+    const cleared = await request("/api/settings/pushplus-token", {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({ confirmation: "CLEAR" }),
+    });
+    assert.equal(cleared.response.status, 200);
+    const afterClear = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(afterClear.body.item.pushplus.configured, false);
+    assert.equal(afterClear.body.item.pushplus.status, "cleared");
+    assert.equal(afterClear.body.item.pushplus.lastSuccessAt, null);
+    assert.equal(afterClear.body.item.pushplus.lastDeliveryCount, null);
+    const disabledTest = await request("/api/settings/pushplus/test", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+    assert.equal(disabledTest.response.status, 409);
+    assert.equal(disabledTest.body.error.code, "PUSHPLUS_NOT_CONFIGURED");
   });
 });

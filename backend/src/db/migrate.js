@@ -21,6 +21,7 @@ import { apply as applyShortcutWebhookTokens } from "./migrations/0017_shortcut_
 import { apply as applyShortcutBookkeepingEntries } from "./migrations/0018_shortcut_bookkeeping_entries.mjs";
 import { apply as applyShortcutWeixinConfirmation } from "./migrations/0019_shortcut_weixin_confirmation.mjs";
 import { apply as applyShortcutIncomeEntries } from "./migrations/0020_shortcut_income_entries.mjs";
+import { apply as applySecureSettingsPushplus } from "./migrations/0021_secure_settings_pushplus.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -137,6 +138,12 @@ const migrations = [
     type: "module",
     apply: applyShortcutIncomeEntries,
   },
+  {
+    version: "0021",
+    path: resolve(here, "migrations", "0021_secure_settings_pushplus.mjs"),
+    type: "module",
+    apply: applySecureSettingsPushplus,
+  },
 ];
 
 const baselineRepairs = [
@@ -146,12 +153,81 @@ const baselineRepairs = [
   { table: "solution_drafts", column: "artifact_type", definition: "TEXT NOT NULL DEFAULT 'solution_framework'" }
 ];
 
+const LEGACY_SETTINGS_VERSION = "0019";
+const CANONICAL_SETTINGS_VERSION = "0021";
+
 export function canonicalMigrationSource(source) {
   return source.replace(/\r\n/g, "\n");
 }
 
 export function migrationChecksum(source) {
   return createHash("sha256").update(canonicalMigrationSource(source)).digest("hex");
+}
+
+function hasPushplusSettingsSchema(db) {
+  const columns = new Set(
+    db.prepare("PRAGMA table_info(secure_settings)").all().map((column) => column.name),
+  );
+  const requiredColumns = [
+    "setting_key",
+    "ciphertext",
+    "status",
+    "created_at",
+    "rotated_at",
+    "updated_at",
+    "last_success_at",
+    "last_failure_at",
+    "last_error_code",
+    "last_delivery_count",
+    "last_chunk_count",
+  ];
+  if (!requiredColumns.every((column) => columns.has(column))) return false;
+  const table = db.prepare(`
+    SELECT sql FROM sqlite_master
+    WHERE type = 'table' AND name = 'secure_settings'
+  `).get();
+  return typeof table?.sql === "string"
+    && table.sql.includes("hospital_tender_pushplus_token");
+}
+
+function reconcileLegacySettingsVersionCollision(db) {
+  const legacy = db.prepare(
+    "SELECT version, checksum FROM schema_migrations WHERE version = :version",
+  ).get({ version: LEGACY_SETTINGS_VERSION });
+  if (!legacy) return;
+
+  const canonicalMigration = migrations.find(
+    (migration) => migration.version === CANONICAL_SETTINGS_VERSION,
+  );
+  const canonicalChecksum = migrationChecksum(
+    readFileSync(canonicalMigration.path, "utf8"),
+  );
+  // A Shortcut database also has version 0019. Only the exact checksum from
+  // the former settings branch is eligible for this one-time ledger repair;
+  // every unknown checksum remains subject to the normal fail-closed check.
+  if (legacy.checksum !== canonicalChecksum) return;
+  if (!hasPushplusSettingsSchema(db)) {
+    throw new Error("Cannot reconcile legacy migration 0019 without the PushPlus settings schema");
+  }
+
+  const canonical = db.prepare(
+    "SELECT version, checksum FROM schema_migrations WHERE version = :version",
+  ).get({ version: CANONICAL_SETTINGS_VERSION });
+  if (canonical && canonical.checksum !== canonicalChecksum) {
+    throw new Error(`Checksum mismatch for migration ${CANONICAL_SETTINGS_VERSION}`);
+  }
+  if (canonical) {
+    db.prepare("DELETE FROM schema_migrations WHERE version = :version")
+      .run({ version: LEGACY_SETTINGS_VERSION });
+  } else {
+    db.prepare(`
+      UPDATE schema_migrations SET version = :canonicalVersion
+      WHERE version = :legacyVersion
+    `).run({
+      canonicalVersion: CANONICAL_SETTINGS_VERSION,
+      legacyVersion: LEGACY_SETTINGS_VERSION,
+    });
+  }
 }
 
 function repairBaselineColumns(db) {
@@ -194,6 +270,8 @@ export function migrateDatabase(db) {
         applied_at TEXT NOT NULL
       )
     `);
+
+    reconcileLegacySettingsVersionCollision(db);
 
     const findMigration = db.prepare(
       "SELECT checksum FROM schema_migrations WHERE version = :version"

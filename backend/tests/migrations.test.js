@@ -16,6 +16,7 @@ import {
   migrationChecksum,
 } from "../src/db/migrate.js";
 import { apply as applyPhase1WriteIntegrity } from "../src/db/migrations/0002_phase1_write_integrity.mjs";
+import { apply as applySecureSettingsPushplus } from "../src/db/migrations/0021_secure_settings_pushplus.mjs";
 
 const businessTables = [
   "customers",
@@ -162,7 +163,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 19);
+      assert.equal(firstMigrations.length, 20);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -182,6 +183,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[16].version, "0018");
       assert.equal(firstMigrations[17].version, "0019");
       assert.equal(firstMigrations[18].version, "0020");
+      assert.equal(firstMigrations[19].version, "0021");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -211,6 +213,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0018_shortcut_bookkeeping_entries.mjs",
         "../src/db/migrations/0019_shortcut_weixin_confirmation.mjs",
         "../src/db/migrations/0020_shortcut_income_entries.mjs",
+        "../src/db/migrations/0021_secure_settings_pushplus.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -231,6 +234,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[16].checksum, migrationChecksum(migrationSources[16]));
       assert.equal(firstMigrations[17].checksum, migrationChecksum(migrationSources[17]));
       assert.equal(firstMigrations[18].checksum, migrationChecksum(migrationSources[18]));
+      assert.equal(firstMigrations[19].checksum, migrationChecksum(migrationSources[19]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -314,6 +318,148 @@ test("migration 0020 preserves the Shortcut ledger and permits accepted income w
           $status: "accepted",
         }),
         /CHECK constraint failed/i,
+      );
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("migration 0021 preserves encrypted settings and adds bounded PushPlus delivery metadata", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      CREATE TABLE secure_settings (
+        setting_key TEXT PRIMARY KEY NOT NULL CHECK (setting_key IN ('icost_webhook_token', 'deepseek_api_key')),
+        ciphertext TEXT CHECK (ciphertext IS NULL OR length(ciphertext) > 0),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
+        created_at TEXT NOT NULL,
+        rotated_at TEXT,
+        updated_at TEXT NOT NULL,
+        CHECK ((status = 'active' AND ciphertext IS NOT NULL) OR (status = 'cleared' AND ciphertext IS NULL))
+      );
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('deepseek_api_key', 'ciphertext-fixture', 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    `);
+
+    applySecureSettingsPushplus(db);
+
+    assert.deepEqual(columnNames(db, "secure_settings"), [
+      "setting_key", "ciphertext", "status", "created_at", "rotated_at", "updated_at",
+      "last_success_at", "last_failure_at", "last_error_code", "last_delivery_count", "last_chunk_count",
+    ]);
+    assert.deepEqual(
+      {
+        ...db.prepare("SELECT setting_key, ciphertext, status FROM secure_settings WHERE setting_key = 'deepseek_api_key'").get(),
+      },
+      { setting_key: "deepseek_api_key", ciphertext: "ciphertext-fixture", status: "active" },
+    );
+
+    db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('hospital_tender_pushplus_token', 'pushplus-ciphertext', 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')
+    `).run();
+    db.prepare(`
+      UPDATE secure_settings
+      SET last_delivery_count = 1, last_chunk_count = 1, last_error_code = 'notification_failed'
+      WHERE setting_key = 'hospital_tender_pushplus_token'
+    `).run();
+
+    assert.throws(
+      () => db.prepare(`
+        INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+        VALUES ('hospital_tender_pushplus_token', NULL, 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')
+      `).run(),
+      /UNIQUE constraint failed|CHECK constraint failed/i,
+    );
+    assert.throws(
+      () => db.prepare(`
+        INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+        VALUES ('invalid-setting', 'ciphertext', 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')
+      `).run(),
+      /CHECK constraint failed/i,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("reconciles the former settings migration 0019 before applying Shortcut migrations", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      const settingsPath = fileURLToPath(
+        new URL("../src/db/migrations/0021_secure_settings_pushplus.mjs", import.meta.url),
+      );
+      const legacySettingsChecksum = migrationChecksum(readFileSync(settingsPath, "utf8"));
+      db.exec(`
+        DROP TABLE weixin_confirmation_outbox;
+        DELETE FROM schema_migrations WHERE version IN ('0019', '0020', '0021');
+      `);
+      db.prepare(`
+        INSERT INTO schema_migrations (version, checksum, applied_at)
+        VALUES ('0019', $checksum, '2026-08-20T00:00:00.000Z')
+      `).run({ $checksum: legacySettingsChecksum });
+
+      migrateDatabase(db);
+
+      const reconciled = db.prepare(`
+        SELECT version, checksum FROM schema_migrations
+        WHERE version IN ('0019', '0020', '0021')
+        ORDER BY version
+      `).all();
+      assert.deepEqual(reconciled.map((row) => row.version), ["0019", "0020", "0021"]);
+      assert.equal(reconciled[2].checksum, legacySettingsChecksum);
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count,
+        0,
+      );
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
+        20,
+      );
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("refuses to relabel settings-as-0019 when the expected PushPlus schema is absent", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      const settingsPath = fileURLToPath(
+        new URL("../src/db/migrations/0021_secure_settings_pushplus.mjs", import.meta.url),
+      );
+      const legacySettingsChecksum = migrationChecksum(readFileSync(settingsPath, "utf8"));
+      db.exec(`
+        DELETE FROM schema_migrations WHERE version IN ('0019', '0021');
+        DROP TABLE secure_settings;
+        CREATE TABLE secure_settings (
+          setting_key TEXT PRIMARY KEY NOT NULL,
+          ciphertext TEXT,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          rotated_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      db.prepare(`
+        INSERT INTO schema_migrations (version, checksum, applied_at)
+        VALUES ('0019', $checksum, '2026-08-20T00:00:00.000Z')
+      `).run({ $checksum: legacySettingsChecksum });
+
+      assert.throws(
+        () => migrateDatabase(db),
+        /Cannot reconcile legacy migration 0019/u,
+      );
+      assert.equal(
+        db.prepare("SELECT version FROM schema_migrations WHERE version = '0019'").get().version,
+        "0019",
+      );
+      assert.equal(
+        db.prepare("SELECT version FROM schema_migrations WHERE version = '0021'").get(),
+        undefined,
       );
     } finally {
       db.close();
@@ -694,7 +840,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021"],
       );
     } finally {
       migrated.close();
@@ -888,7 +1034,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 19);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 20);
     } finally {
       db.close();
     }
@@ -952,7 +1098,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021"],
       );
     } finally {
       db.close();

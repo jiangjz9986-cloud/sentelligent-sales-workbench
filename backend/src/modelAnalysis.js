@@ -1,5 +1,8 @@
 import { buildQuickRecordAnalysis } from "./quickRecordAnalysis.js";
 import { analyzeSalesDecision as analyzeSalesDecisionAgent } from "./ai/agents/salesDecisionAgent.js";
+import { readBoundedResponseText } from "./http/request.js";
+
+const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
 
 function fallbackAnalysis(rawContent, source) {
   const analysis = buildQuickRecordAnalysis(rawContent);
@@ -116,7 +119,10 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
     signal: AbortSignal.timeout(config.modelTimeoutMs ?? 30000),
   });
 
-  const text = await response.text();
+  const text = await readBoundedResponseText(response, {
+    maxBytes: MAX_MODEL_RESPONSE_BYTES,
+    errorMessage: "Model provider response is too large",
+  });
   const body = text ? JSON.parse(text) : {};
   if (!response.ok) {
     throw new Error(`model provider returned ${response.status}`);
