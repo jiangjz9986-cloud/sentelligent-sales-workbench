@@ -99,6 +99,147 @@ afterEach(async () => {
 });
 
 describe("wired sales loop assistant runtime", () => {
+  it("routes customer detail and search through customer-v1 runs and replays without duplicate work", async () => {
+    const detailMessageId = `runtime-${++sequence}-customer-detail`;
+    const detail = await event("/customer.detail customer-runtime", detailMessageId);
+    assert.equal(detail.response.status, 200);
+    assert.match(detail.body.text, /运行时医院/);
+
+    let db = openDatabase({ databaseUrl });
+    const before = businessCounts(db);
+    let runs = db.prepare(`
+      SELECT owner, agent_id, task_type, contract_version, status, source,
+             confirmation_status, input_json, output_json, source_refs_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'customer'
+      ORDER BY created_at, id
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 1);
+    assert.deepEqual({
+      owner: runs[0].owner,
+      agentId: runs[0].agent_id,
+      taskType: runs[0].task_type,
+      contractVersion: runs[0].contract_version,
+      status: runs[0].status,
+      source: runs[0].source,
+      confirmationStatus: runs[0].confirmation_status,
+    }, {
+      owner,
+      agentId: "customer",
+      taskType: "detail",
+      contractVersion: "customer-v1",
+      status: "succeeded",
+      source: "deterministic",
+      confirmationStatus: "preview",
+    });
+    const detailInput = JSON.parse(runs[0].input_json);
+    const detailOutput = JSON.parse(runs[0].output_json);
+    assert.equal(Object.hasOwn(detailInput, "owner"), false);
+    assert.equal(detailInput.customerId, "customer-runtime");
+    assert.equal(detailOutput.customer.id, "customer-runtime");
+    assert.equal(detailOutput.writebackAllowed, false);
+    assert.deepEqual(JSON.parse(runs[0].source_refs_json), [{ type: "customer", id: "customer-runtime" }]);
+    db.close();
+
+    const detailReplay = await event("/customer.detail customer-runtime", detailMessageId);
+    assert.equal(detailReplay.response.status, 200);
+    assert.deepEqual(detailReplay.body, detail.body);
+
+    const searchMessageId = `runtime-${++sequence}-customer-search`;
+    const search = await event("/customer.search 运行时医院", searchMessageId);
+    assert.equal(search.response.status, 200);
+    assert.match(search.body.text, /customer-runtime/);
+
+    db = openDatabase({ databaseUrl });
+    runs = db.prepare(`
+      SELECT task_type, contract_version, status, source, input_json, output_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'customer'
+      ORDER BY created_at, id
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 2);
+    const searchRun = runs.find((item) => item.task_type === "search");
+    assert.ok(searchRun);
+    assert.equal(searchRun.contract_version, "customer-v1");
+    assert.equal(searchRun.status, "succeeded");
+    assert.equal(searchRun.source, "deterministic");
+    const searchInput = JSON.parse(searchRun.input_json);
+    const searchOutput = JSON.parse(searchRun.output_json);
+    assert.equal(Object.hasOwn(searchInput, "owner"), false);
+    assert.equal(searchInput.query, "运行时医院");
+    assert.deepEqual(searchOutput.matches.map((item) => item.id), ["customer-runtime"]);
+    assert.deepEqual(businessCounts(db), before);
+    db.close();
+
+    const searchReplay = await event("/customer.search 运行时医院", searchMessageId);
+    assert.equal(searchReplay.response.status, 200);
+    assert.deepEqual(searchReplay.body, search.body);
+    db = openDatabase({ databaseUrl });
+    assert.equal(db.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id = 'customer'",
+    ).get({ $owner: owner }).count, 2);
+    assert.deepEqual(businessCounts(db), before);
+    db.close();
+  });
+
+  it("keeps customer Agent reads owner-scoped and clarifies ambiguous names", async () => {
+    let db = openDatabase({ databaseUrl });
+    db.exec(`
+      INSERT INTO customers (id, name, region, owner)
+      VALUES ('customer-other-owner', '其他归属医院', '济南', 'other-owner');
+      INSERT INTO customers (id, name, region, owner)
+      VALUES ('customer-ambiguous-a', '同名运行时医院', '青岛', '${owner}');
+      INSERT INTO customers (id, name, region, owner)
+      VALUES ('customer-ambiguous-b', '同名运行时医院', '济南', '${owner}');
+    `);
+    const before = businessCounts(db);
+    db.close();
+
+    const denied = await event("/customer.detail customer-other-owner", `runtime-${++sequence}-customer-denied`);
+    assert.equal(denied.response.status, 200);
+    assert.match(denied.body.text, /未找到/);
+    assert.doesNotMatch(denied.body.text, /其他归属医院/);
+
+    const ambiguous = await event("/customer.detail 同名运行时医院", `runtime-${++sequence}-customer-ambiguous`);
+    assert.equal(ambiguous.response.status, 200);
+    assert.match(ambiguous.body.text, /找到多个客户/);
+
+    db = openDatabase({ databaseUrl });
+    const runs = db.prepare(`
+      SELECT task_type, output_json, source_refs_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'customer'
+      ORDER BY created_at, id
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 2);
+    const decodedRuns = runs.map((run) => ({
+      ...run,
+      output: JSON.parse(run.output_json),
+      sourceRefs: JSON.parse(run.source_refs_json),
+    }));
+    const deniedRun = decodedRuns.find((run) => run.output.status === "not_found");
+    const ambiguousRun = decodedRuns.find((run) => run.output.status === "clarify");
+    assert.ok(deniedRun);
+    assert.ok(ambiguousRun);
+    const deniedOutput = deniedRun.output;
+    assert.equal(deniedOutput.status, "not_found");
+    assert.equal(deniedOutput.customer, null);
+    assert.deepEqual(deniedRun.sourceRefs, []);
+    const ambiguousOutput = ambiguousRun.output;
+    assert.equal(ambiguousOutput.status, "clarify");
+    assert.equal(ambiguousOutput.customer, null);
+    assert.deepEqual(ambiguousOutput.matches.map((item) => item.id), ["customer-ambiguous-a", "customer-ambiguous-b"]);
+    assert.deepEqual(ambiguousRun.sourceRefs, [
+      { type: "customer", id: "customer-ambiguous-a" },
+      { type: "customer", id: "customer-ambiguous-b" },
+    ]);
+    assert.equal(db.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = 'other-owner' AND agent_id = 'customer'",
+    ).get().count, 0);
+    assert.deepEqual(businessCounts(db), before);
+    db.close();
+  });
+
   it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
     const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
     assert.equal(collected.response.status, 200);
