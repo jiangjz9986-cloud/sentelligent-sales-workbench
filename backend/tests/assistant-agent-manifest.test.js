@@ -25,6 +25,8 @@ describe("versioned assistant agent manifests", () => {
       assert.ok(manifest.fallback.strategy.length > 0);
     }
     assert.equal(registry.get("sales-decision").version, "1.0.0");
+    assert.equal(registry.get("opportunity").contractVersion, "opportunity-v1");
+    assert.equal(registry.get("opportunity").modelPolicy, "none");
     assert.equal(registry.get("solution").enabled, false);
     assert.equal(registry.get("personal-finance").enabled, false);
   });
