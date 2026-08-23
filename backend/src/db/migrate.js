@@ -22,6 +22,7 @@ import { apply as applyShortcutBookkeepingEntries } from "./migrations/0018_shor
 import { apply as applyShortcutWeixinConfirmation } from "./migrations/0019_shortcut_weixin_confirmation.mjs";
 import { apply as applyShortcutIncomeEntries } from "./migrations/0020_shortcut_income_entries.mjs";
 import { apply as applySecureSettingsPushplus } from "./migrations/0021_secure_settings_pushplus.mjs";
+import { apply as applyAssistantAgentRuns } from "./migrations/0022_assistant_agent_runs.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -143,6 +144,12 @@ const migrations = [
     path: resolve(here, "migrations", "0021_secure_settings_pushplus.mjs"),
     type: "module",
     apply: applySecureSettingsPushplus,
+  },
+  {
+    version: "0022",
+    path: resolve(here, "migrations", "0022_assistant_agent_runs.mjs"),
+    type: "module",
+    apply: applyAssistantAgentRuns,
   },
 ];
 
