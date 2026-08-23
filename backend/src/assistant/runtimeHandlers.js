@@ -7,6 +7,7 @@ import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobSto
 import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
 import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
+import { createItineraryAssistantAdapter } from "./itineraryAssistantAdapter.js";
 import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js";
 import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
@@ -335,6 +336,7 @@ export function createAssistantToolHandlers({
   actionRiskAssistantAdapter = null,
   knowledgeAssistantAdapter = null,
   opportunityAssistantAdapter = null,
+  itineraryAssistantAdapter = null,
   visitCaptureAssistantAdapter = null,
   salesReportAssistantAdapter = null,
   agentRunRepository = null,
@@ -361,6 +363,11 @@ export function createAssistantToolHandlers({
     clock,
   });
   const knowledgeAdapter = knowledgeAssistantAdapter ?? createKnowledgeAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const itineraryAdapter = itineraryAssistantAdapter ?? createItineraryAssistantAdapter({
     snapshotAdapter,
     runRepository: agentRunRepository,
     clock,
@@ -570,13 +577,22 @@ export function createAssistantToolHandlers({
     },
 
     async "itinerary.summary"(_args, context) {
-      const summary = snapshotAdapter.itinerarySummary({ owner: context.owner });
+      const result = await itineraryAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "summary",
+      });
+      const summary = { items: result.items, truncated: result.truncated };
       return {
         text: summary.items.length
           ? [`行程摘要：共 ${summary.items.length} 条。`, ...summary.items.slice(0, 5).map((item) => `- ${item.visitDate} ${item.title ?? "未命名行程"}（${item.status}）`)].join("\n")
           : "当前没有可见行程。",
         status: "ok",
         summary,
+        itineraryResult: result,
+        runId: result.runId,
       };
     },
 

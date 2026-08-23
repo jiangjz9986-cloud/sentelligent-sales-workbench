@@ -400,6 +400,44 @@ describe("wired sales loop assistant runtime", () => {
     db.close();
   });
 
+  it("routes itinerary summaries through a fixed read-only agent", async () => {
+    let db = openDatabase({ databaseUrl });
+    db.exec(`
+      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
+      VALUES ('itinerary-runtime', '运行时拜访行程', '2026-08-22', 'planned', '{}', '{}', '${owner}', '${owner}');
+    `);
+    db.close();
+
+    const itineraryMessageId = `runtime-${++sequence}-itinerary`;
+    const itinerary = await event("/itinerary.summary", itineraryMessageId);
+    assert.equal(itinerary.response.status, 200);
+    assert.match(itinerary.body.text, /运行时拜访行程/);
+
+    db = openDatabase({ databaseUrl });
+    const runs = db.prepare(`
+      SELECT agent_id, task_type, contract_version, status, source, input_json, output_json
+      FROM assistant_agent_runs
+      WHERE owner = $owner AND agent_id = 'itinerary'
+    `).all({ $owner: owner });
+    assert.equal(runs.length, 1);
+    for (const run of runs) {
+      assert.equal(run.status, "succeeded");
+      assert.equal(run.source, "deterministic");
+      assert.equal(Object.hasOwn(JSON.parse(run.input_json), "owner"), false);
+      assert.equal(JSON.parse(run.output_json).writebackAllowed, false);
+    }
+    assert.equal(runs[0].contract_version, "itinerary-v1");
+    db.close();
+
+    const itineraryReplay = await event("/itinerary.summary", itineraryMessageId);
+    assert.deepEqual(itineraryReplay.body, itinerary.body);
+    db = openDatabase({ databaseUrl });
+    assert.equal(db.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE owner = $owner AND agent_id = 'itinerary'",
+    ).get({ $owner: owner }).count, 1);
+    db.close();
+  });
+
   it("routes visit capture through its fixed adapter, reuses the preview run at confirmation, and keeps writes gated", async () => {
     const collected = await event("拜访运行时医院，讨论升级项目。", `runtime-${++sequence}-visit`);
     assert.equal(collected.response.status, 200);

@@ -292,9 +292,29 @@ export const AGENT_MANIFESTS = deepFreeze([
     fallback: { strategy: "return deterministic owner-scoped action and risk summary", status: "fallback" },
   }),
   manifestDefinition("itinerary", {
+    contractVersion: "itinerary-v1",
+    modelPolicy: "none",
     taskTypes: ["summary", "plan_preview", "optimize_order", "change_preview"],
     tools: ["itinerary.summary"],
     confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", itineraryId: "string", changes: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "itinerary-v1", items: "array", planPreview: "object|null", changePreview: "object|null" },
+    },
+    systemPrompt: [
+      "你是森特智行行程 Agent。",
+      "只使用 owner-scoped 行程快照，日期和状态以服务端记录为准。",
+      "没有路线输入时不得猜地址、顺序、里程或到达时间；规划和排序只能返回待确认预览。",
+      "保存、修改、删除和路线变更都不能直接执行，必须由本人确认。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped itinerary facts and an empty plan preview", status: "fallback" },
   }),
   manifestDefinition("travel-expense", {
     taskTypes: ["weekly_summary", "expense_review", "entry_preview"],
