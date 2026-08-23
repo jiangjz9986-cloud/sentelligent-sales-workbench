@@ -177,20 +177,21 @@ function buildWeeklyDraftMessages(context) {
     {
       role: "system",
       content: [
-        "你是森特智行 AI 销售作战台的周报提炼助手。",
+        context.systemPrompt || "你是森特智行 AI 销售作战台的周报提炼助手。",
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 content 字段，content 为中文 Markdown 周报正文。",
         "必须保留人工确认后的事实，不要编造客户、金额或承诺。",
+        "只能引用下方 sourceRefs 中存在的来源标识；不要声称周报已保存、发布、提交或写入。",
       ].join("\n"),
     },
     {
       role: "user",
       content: JSON.stringify({
-        owner: context.owner,
         periodStart: context.periodStart,
         periodEnd: context.periodEnd,
         records,
         knowledge: context.knowledge ?? [],
+        sourceRefs: context.sourceRefs ?? [],
         fallbackContent: compact(context.fallbackDraft?.content, 1600),
       }),
     },
@@ -369,6 +370,40 @@ export async function enhanceWeeklyDraftWithModel(fallbackDraft, context, config
     config,
     options,
   );
+}
+
+/**
+ * Compose a source-backed weekly draft while retaining whether the model was
+ * actually used. The ordinary enhancer above intentionally keeps its legacy
+ * return shape; the assistant adapter needs this explicit provenance to
+ * persist a truthful Agent run.
+ */
+export async function composeWeeklyDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
+  if (!shouldUseModel(config)) {
+    return config.aiAnalysisMode === "model"
+      ? { ...fallbackDraft, source: "fallback", fallbackReason: "weekly_draft_missing_model_key" }
+      : { ...fallbackDraft, source: "deterministic", fallbackReason: null };
+  }
+  try {
+    const content = await callChatCompletion({
+      messages: buildWeeklyDraftMessages({ ...context, fallbackDraft, systemPrompt: options.systemPrompt }),
+      config,
+      fetchImpl: options.fetchImpl ?? fetch,
+      maxTokens: 2600,
+    });
+    return {
+      ...fallbackDraft,
+      content: parseModelDraftContent(content),
+      source: config.modelProvider ?? "model",
+      fallbackReason: null,
+    };
+  } catch {
+    return {
+      ...fallbackDraft,
+      source: "fallback",
+      fallbackReason: "weekly_draft_model_failure",
+    };
+  }
 }
 
 export async function enhanceSolutionDraftWithModel(fallbackDraft, context, config = {}, options = {}) {

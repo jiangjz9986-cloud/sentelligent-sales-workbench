@@ -235,11 +235,42 @@ export const AGENT_MANIFESTS = deepFreeze([
     confirmation: { preview: "preview", write: "none" },
   }),
   manifestDefinition("sales-report", {
+    contractVersion: "sales-report-v1",
     modelPolicy: "required_with_deterministic_fallback",
     taskTypes: ["weekly_preview", "meeting_digest", "source_review", "save_preview"],
     tools: ["sales-report.preview"],
     confirmation: { preview: "preview", write: "explicit" },
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs", "period"] },
+    inputSchema: {
+      type: "object",
+      required: ["period", "sourceRecords"],
+      properties: {
+        period: "object",
+        sourceRecords: "array",
+        knowledge: "array",
+        taskType: "enum",
+      },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "period", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "sales-report-v1",
+        executiveSummary: "string",
+        customerUpdates: "array",
+        opportunityUpdates: "array",
+        actions: "array",
+        risks: "array",
+        preparation: "object",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行销售周报 Agent。",
+      "只使用服务端提供的已确认拜访记录、客户、商机、行动、风险和知识引用组织周报。",
+      "不得编造客户进展、金额、承诺、完成状态或来源；没有证据的内容必须标记为未知或省略。",
+      "严格区分事实、推断、未知和建议；输出只是预览，不代表周报已保存、发布或写回任何业务数据。",
+    ].join(""),
+    fallback: { strategy: "use the deterministic source-backed weekly draft and mark composition as fallback", status: "fallback" },
   }),
   manifestDefinition("knowledge", {
     taskTypes: ["search", "answer_with_sources", "compare", "maintenance_preview"],

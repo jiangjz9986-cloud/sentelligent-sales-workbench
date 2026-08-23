@@ -150,6 +150,7 @@ import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.j
 import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
 import { createSalesLoopContextRepository } from "./assistant/salesLoopContextRepository.js";
 import { createSalesLoopPreviewService } from "./assistant/salesLoopPreview.js";
+import { createSalesReportAssistantAdapter } from "./assistant/salesReportAssistantAdapter.js";
 import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
 import { createWeixinConfirmationOutboxRepository } from "./weixin/outboxRepository.js";
 import { createWeixinDeliveryReadiness } from "./weixin/deliveryReadiness.js";
@@ -2882,6 +2883,20 @@ export function createServer(options = {}) {
       resolveBusinessOwner: assistantBusinessOwnerResolver,
       clock: assistantClock,
     });
+  const assistantSalesReportAdapter = options.assistantSalesReportAdapter
+    ?? createSalesReportAssistantAdapter({
+      config: runtimeConfig,
+      fetchImpl: options.fetchImpl ?? fetch,
+      runRepository: assistantAgentRunRepository,
+      clock: assistantClock,
+      snapshotProvider: ({ owner, weekStart, periodStart, periodEnd, knowledgeQuery }) => assistantSalesLoopPreviewService.buildSalesReportSnapshot({
+        owner,
+        weekStart,
+        periodStart,
+        periodEnd,
+        knowledgeQuery,
+      }),
+    });
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -2895,6 +2910,7 @@ export function createServer(options = {}) {
       invoiceRecognizer,
       businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
       agentRunRepository: assistantAgentRunRepository,
+      salesReportAssistantAdapter: assistantSalesReportAdapter,
       salesLoopPreviewService: assistantSalesLoopPreviewService,
       resolveBusinessOwner: assistantBusinessOwnerResolver,
       clock: assistantClock,
