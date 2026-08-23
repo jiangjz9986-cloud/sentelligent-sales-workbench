@@ -179,20 +179,6 @@ function expenseSummaryText(summary, label) {
   return lines.join("\n");
 }
 
-function salesReportSummaryText(summary) {
-  const counts = summary.statusCounts ?? { draft: 0, saved: 0, ready: 0 };
-  const preview = summary.preview ?? {};
-  const text = `销售周报预览（${summary.weekStart}）：已保存周报 ${summary.reportCount} 条（草稿 ${counts.draft}、已保存 ${counts.saved}、就绪 ${counts.ready}）。`;
-  if (summary.truncated) return `${text}\n当前只展示前 100 条，属于部分摘要。`;
-  const previewText = preview.sourceRecordCount > 0
-    ? `已基于 ${preview.sourceRecordCount}${preview.truncated ? "+" : ""} 条已确认拜访记录生成未保存预览。`
-    : "当前没有可用于生成周报预览的已确认拜访记录。";
-  const content = typeof preview.content === "string" && preview.content.trim()
-    ? `\n\n${preview.content.slice(0, 4_000)}${preview.content.length > 4_000 ? "\n（正文已限界，完整内容请在系统内查看。）" : ""}`
-    : "";
-  return `${text}\n${previewText}\n${preview.persisted === false ? "本次仅预览，尚未写入周报。" : "已保留来源引用，可用于确认前准备。"}${content}`;
-}
-
 function projectAnalysisText(analysis) {
   const metrics = analysis.metrics ?? {};
   const opportunity = metrics.opportunity ?? {};
@@ -210,6 +196,65 @@ function projectAnalysisText(analysis) {
   if (analysis.unknowns?.length) {
     lines.push(`待补充：${analysis.unknowns.slice(0, 3).map((item) => item.question).join("；")}`);
   }
+  return lines.join("\n");
+}
+
+function salesDecisionPreviewText(result) {
+  const analysis = result?.analysis ?? {};
+  const decision = analysis.decision ?? {};
+  const stage = analysis.stage ?? {};
+  const score = analysis.score ?? {};
+  const lines = [
+    "销售决策预览（sales-decision-v1，未写回）：",
+    `判断：${decision.code ?? "待确认"}（置信度 ${Number.isSafeInteger(decision.confidence) ? decision.confidence : "待确认"}）`,
+    `阶段：当前 ${stage.current ?? "待确认"}，建议 ${stage.recommended ?? "待确认"}${stage.gatePassed === true ? "（阶段门槛已满足）" : "（阶段门槛未满足）"}`,
+    `评分：${Number.isSafeInteger(score.total) ? score.total : "待确认"}`,
+    `结论：${String(analysis.headline ?? decision.reason ?? "待补充证据").slice(0, 500)}`,
+  ];
+  if (analysis.compliance?.status === "review_required") {
+    lines.push(`合规：需要人工审查${analysis.compliance.flags?.length ? `（${analysis.compliance.flags.slice(0, 3).join("、")}）` : ""}`);
+  }
+  if (Array.isArray(analysis.unknowns) && analysis.unknowns.length > 0) {
+    lines.push(`待确认：${analysis.unknowns.slice(0, 3).map((item) => item.question).join("；")}`);
+  }
+  if (Array.isArray(analysis.nextActions) && analysis.nextActions.length > 0) {
+    lines.push(`下一步：${analysis.nextActions.slice(0, 3).map((item) => item.action).join("；")}`);
+  }
+  if (result?.runId) lines.push(`运行记录：${result.runId}（来源 ${result.source ?? "待确认"}）`);
+  return lines.join("\n");
+}
+
+function salesLoopStatusText(result, fallback) {
+  if (result?.status === "clarify") return result.question ?? fallback;
+  if (result?.status === "not_found") return "未找到该项目，或当前账号无权查看。";
+  if (result?.status === "review_required") {
+    const reason = result.message ?? ((result.blockers ?? []).join("、") || "证据不足");
+    return `销售决策暂需人工复核：${reason}`;
+  }
+  return fallback;
+}
+
+function salesReportSummaryText(summary) {
+  const counts = summary?.statusCounts ?? { draft: 0, saved: 0, ready: 0 };
+  const preview = summary?.preview ?? {};
+  const lines = [
+    `销售周报预览（${summary?.weekStart ?? "待确认"}）：已保存周报 ${summary?.reportCount ?? 0} 条（草稿 ${counts.draft}、已保存 ${counts.saved}、就绪 ${counts.ready}）。`,
+  ];
+  if (Number.isSafeInteger(summary?.candidateRecordCount) && summary.candidateRecordCount !== summary?.preview?.sourceRecordCount) {
+    lines.push(`本周可见快速记录 ${summary.candidateRecordCount} 条，其中 ${preview.sourceRecordCount ?? 0} 条已确认进入预览。`);
+  } else if (preview.sourceRecordCount > 0) {
+    lines.push(`已基于 ${preview.sourceRecordCount}${preview.truncated ? "+" : ""} 条已确认拜访记录生成未保存预览。`);
+  } else {
+    lines.push("当前没有可用于生成周报预览的已确认拜访记录。");
+  }
+  if (preview.preparation?.ready === false) {
+    lines.push(`确认前待处理：${(preview.preparation.blockers ?? []).join("、") || "资料不完整"}。`);
+  }
+  const content = typeof preview.content === "string" && preview.content.trim()
+    ? preview.content.slice(0, 4_000)
+    : "";
+  if (content) lines.push("", content, ...(preview.content.length > 4_000 ? ["（正文已限界，完整内容请在系统内查看。）"] : []));
+  lines.push("本次仅预览，尚未写入周报。");
   return lines.join("\n");
 }
 
@@ -231,6 +276,7 @@ export function createAssistantToolHandlers({
   paymentProofRecognizer,
   invoiceRecognizer,
   businessSnapshotAdapter = null,
+  salesLoopPreviewService = null,
   resolveBusinessOwner = (owner) => owner,
   clock = () => new Date(),
   fetchImpl = fetch,
@@ -271,6 +317,12 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         customer,
+        contextUpdate: {
+          customerId: customer.id,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: customer.id }],
+        },
       };
     },
 
@@ -295,10 +347,50 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         opportunity,
+        contextUpdate: {
+          customerId: opportunity.customerId ?? null,
+          opportunityId: opportunity.id,
+          source: "verified_entity",
+          sourceRefs: [
+            ...(opportunity.customerId ? [{ type: "customer", id: opportunity.customerId }] : []),
+            { type: "opportunity", id: opportunity.id },
+          ],
+        },
       };
     },
 
     async "sales-decision.preview"(args, context) {
+      if (salesLoopPreviewService) {
+        let opportunityId = safeText(args.opportunityId);
+        if (opportunityId && !snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId })) {
+          const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: opportunityId }).items;
+          if (matches.length > 1) return ambiguousEntityResult("商机", matches);
+          opportunityId = matches[0]?.id ?? opportunityId;
+        }
+        const result = await salesLoopPreviewService.previewSalesDecision({
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: context.conversation,
+          eventId: context.event,
+          ...(opportunityId ? { opportunityId } : {}),
+        });
+        if (result.status !== "preview") {
+          return { ...result, text: salesLoopStatusText(result, "请先指定一个客户或商机。") };
+        }
+        return {
+          text: salesDecisionPreviewText(result),
+          status: "preview",
+          analysis: result.analysis,
+          salesDecision: result,
+          sourceRefs: result.sourceRefs,
+          contextUpdate: {
+            customerId: result.context?.customerId ?? null,
+            opportunityId: result.context?.opportunityId ?? null,
+            source: "analysis",
+            sourceRefs: result.sourceRefs,
+          },
+        };
+      }
       let opportunityId = args.opportunityId;
       if (!snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId })) {
         const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: opportunityId }).items;
@@ -626,6 +718,15 @@ export function createAssistantToolHandlers({
     },
 
     async "sales-report.preview"(args, context) {
+      if (salesLoopPreviewService) {
+        const summary = salesLoopPreviewService.previewSalesReport({
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: context.conversation,
+          weekStart: args.periodStart ?? args.week,
+        });
+        return { text: salesReportSummaryText(summary), status: "preview", summary };
+      }
       const summary = snapshotAdapter.salesReportSummary({
         owner: context.owner,
         weekStart: args.periodStart ?? args.week,

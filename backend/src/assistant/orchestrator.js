@@ -176,6 +176,7 @@ function contextIdentifier(value) {
     || normalized.length > 200
     || normalized.startsWith("synthetic:")
     || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)
+    || !/^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u.test(normalized)
   ) return null;
   return normalized;
 }
@@ -214,6 +215,56 @@ function nextConversationContext(previous, toolName, argumentsValue, result) {
   return current;
 }
 
+function normalizedBusinessContext(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return {
+    ...(contextIdentifier(value.customerId) ? { customerId: contextIdentifier(value.customerId) } : {}),
+    ...(contextIdentifier(value.opportunityId) ? { opportunityId: contextIdentifier(value.opportunityId) } : {}),
+  };
+}
+
+function contextUpdateFromResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !value.contextUpdate) return null;
+  const update = value.contextUpdate;
+  if (!update || typeof update !== "object" || Array.isArray(update)) return null;
+  const hasCustomer = Object.hasOwn(update, "customerId");
+  const hasOpportunity = Object.hasOwn(update, "opportunityId");
+  if (!hasCustomer && !hasOpportunity) return null;
+  return {
+    ...(hasCustomer ? { customerId: contextIdentifier(update.customerId) } : {}),
+    ...(hasOpportunity ? { opportunityId: contextIdentifier(update.opportunityId) } : {}),
+    source: typeof update.source === "string" ? update.source : "verified_entity",
+    sourceRefs: Array.isArray(update.sourceRefs) ? update.sourceRefs : [],
+  };
+}
+
+function readBusinessContext(repository, context) {
+  if (!repository || typeof repository.get !== "function") return {};
+  try {
+    return normalizedBusinessContext(repository.get({
+      owner: context.owner,
+      channel: context.channel,
+      conversationId: context.conversation,
+    }));
+  } catch {
+    return {};
+  }
+}
+
+function persistBusinessContext(repository, context, update) {
+  if (!repository || typeof repository.set !== "function" || !update) return null;
+  return repository.set({
+    owner: context.owner,
+    channel: context.channel,
+    conversationId: context.conversation,
+    customerId: update.customerId ?? null,
+    opportunityId: update.opportunityId ?? null,
+    source: update.source,
+    sourceRefs: update.sourceRefs,
+    requestId: context.requestId,
+  });
+}
+
 export function safePendingResponse(tool, { code }) {
   return {
     text: [
@@ -236,6 +287,7 @@ export function createAssistantOrchestrator({
   eventRepository,
   sessionRepository,
   pendingActionRepository,
+  businessContextRepository = null,
   toolHandlers = {},
   confirmationCodeFactory = defaultCode,
   confirmationSecret,
@@ -304,6 +356,8 @@ export function createAssistantOrchestrator({
     const conversationContext = conversation?.id
       ? normalizedConversationContext(sessionRepository?.getContext?.(conversation.id) ?? sessionRepository?.getConversationContext?.(conversation.id))
       : {};
+    const businessContext = readBusinessContext(businessContextRepository, context);
+    const routingContext = { ...conversationContext, ...businessContext };
     const append = (role, value, metadata = {}) => sessionRepository?.appendDraftPart?.(conversation?.id, {
       role,
       text: String(value),
@@ -460,7 +514,7 @@ export function createAssistantOrchestrator({
           text,
           confidence,
           mediaRef: serverData.media?.sourceRef,
-          context: conversationContext,
+          context: routingContext,
         });
       if (["help", "clarify", "unknown", "cancelled", "cancel"].includes(plan.status)) {
         return finish(200, { status: plan.status === "cancelled" || plan.status === "cancel" ? "cancel" : plan.status, message: safeText(plan), question: plan.question });
@@ -547,7 +601,12 @@ export function createAssistantOrchestrator({
               result: output,
             });
           }
-          const outputContext = nextConversationContext(conversationContext, tool.name, invocation.arguments, output);
+          const contextUpdate = contextUpdateFromResult(output);
+          persistBusinessContext(businessContextRepository, context, contextUpdate);
+          const outputContext = {
+            ...nextConversationContext(routingContext, tool.name, invocation.arguments, output),
+            ...normalizedBusinessContext(contextUpdate),
+          };
           return finish(200, { status: "ok", toolName: tool.name, result: output }, {
             draftText: confirmationContext ? "确认信息已处理。" : "ok",
             assistantContext: outputContext,
@@ -572,10 +631,13 @@ export function createAssistantOrchestrator({
         }
         toolRun = { id: createdRun.item.id, leaseToken: claimedRun.leaseToken };
       }
-      const handlerContext = resolvedActionId
-        ? Object.freeze({ ...context, actionId: resolvedActionId })
-        : context;
+      const handlerContext = Object.freeze({
+        ...context,
+        businessContext: routingContext,
+        ...(resolvedActionId ? { actionId: resolvedActionId } : {}),
+      });
       const result = await handler(Object.freeze({ ...invocation.arguments }), handlerContext, serverData);
+      persistBusinessContext(businessContextRepository, context, contextUpdateFromResult(result));
       if (toolRun) {
         eventRepository.completeToolRun(toolRun.id, { leaseToken: toolRun.leaseToken, output: result });
       }
@@ -588,7 +650,10 @@ export function createAssistantOrchestrator({
           result,
         });
       }
-      const outputContext = nextConversationContext(conversationContext, tool.name, invocation.arguments, result);
+      const outputContext = {
+        ...nextConversationContext(routingContext, tool.name, invocation.arguments, result),
+        ...normalizedBusinessContext(contextUpdateFromResult(result)),
+      };
       return finish(200, { status: "ok", toolName: tool.name, result }, {
         draftText: confirmationContext ? "确认信息已处理。" : "ok",
         assistantContext: outputContext,

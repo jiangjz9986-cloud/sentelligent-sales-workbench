@@ -8,16 +8,22 @@ const HELP = "可用：战情总览、客户查询与详情、商机详情与项
 
 function clean(value) { return String(value ?? "").trim(); }
 
+function contextIdentifier(value) {
+  const normalized = clean(value);
+  return normalized && normalized.length <= 200 && !normalized.startsWith("synthetic:")
+    && /^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u.test(normalized)
+    ? normalized
+    : null;
+}
+
 function conversationContext(input) {
   const value = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   const context = value.context && typeof value.context === "object" && !Array.isArray(value.context)
     ? value.context
     : {};
-  const customerId = clean(context.customerId);
-  const opportunityId = clean(context.opportunityId);
   return {
-    customerId: customerId || null,
-    opportunityId: opportunityId || null,
+    customerId: contextIdentifier(context.customerId),
+    opportunityId: contextIdentifier(context.opportunityId),
   };
 }
 

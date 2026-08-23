@@ -87,7 +87,7 @@ describe("unified 小小 assistant routing", () => {
     for (const [capabilityId, toolName] of Object.entries(expected)) {
       const capability = getCapability(capabilityId);
       assert.ok(capability, capabilityId);
-      assert.equal(capability.status, capabilityId === "sales-decision.preview" ? "partial" : "ready", capabilityId);
+      assert.equal(capability.status, "ready", capabilityId);
       assert.ok(capability.mappings.tools.includes(toolName), capabilityId);
       assert.equal("handler" in capability, false);
       assert.equal("execute" in capability, false);
