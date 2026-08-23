@@ -140,6 +140,12 @@ export function convertedActions(sourceActions, previewEndpoint, captureEndpoint
   assertLegacyPrefix(sourceActions);
   let nextId = 10;
   const id = () => uuid(nextId++);
+  // iCost receives the original screenshot as `content` in addition to the
+  // cropped OCR text.  Keep that same signal available to our preview path:
+  // iOS Vision can occasionally omit the payment amount from the cropped
+  // result even though it is present in the full screenshot.  A second OCR
+  // pass over the original image is merged below before the HTTP request.
+  const fullScreenshotOcr = id();
   const ocrText = id();
   const previewRequest = id();
   const previewError = id();
@@ -207,10 +213,25 @@ export function convertedActions(sourceActions, previewEndpoint, captureEndpoint
   const subcategoryVariable = "shortcut_subcategory_v7";
   const previewResponseVariable = "shortcut_preview_response_v7";
   const conditionalInput = (outputUuid, outputName) => ({ Type: "Variable", Variable: attachment(outputUuid, outputName) });
-  const icostRawText = structuredClone(sourceActions[3].WFWorkflowActionParameters.rawText);
+  const screenshotUuid = sourceActions[0].WFWorkflowActionParameters.UUID;
+  const croppedOcrUuid = sourceActions[2].WFWorkflowActionParameters.UUID;
   const actions = [
     ...structuredClone(sourceActions.slice(0, 3)),
-    action(TEXT_ACTION, { CustomOutputName: "OCR纯文本", WFTextActionText: icostRawText }, ocrText),
+    // Mirror iCost's full-image `content` input.  Keep the legacy cropped OCR
+    // attachment as the first part so the server's line-context scoring still
+    // prefers the payment card over unrelated reminder amounts.
+    action(OCR_ACTION, {
+      CustomOutputName: "全屏OCR",
+      WFImage: attachment(screenshotUuid, "截屏"),
+    }, fullScreenshotOcr),
+    action(TEXT_ACTION, {
+      CustomOutputName: "OCR纯文本",
+      WFTextActionText: interpolatedText([
+        { outputUuid: croppedOcrUuid, outputName: "图像中的文本" },
+        "\n",
+        { outputUuid: fullScreenshotOcr, outputName: "全屏OCR" },
+      ]),
+    }, ocrText),
     action(REQUEST_ACTION, { CustomOutputName: "金额预览响应", WFHTTPMethod: "POST", WFHTTPBodyType: "JSON", WFURL: previewEndpoint, WFHTTPHeaders: dictionaryField([["Content-Type", "application/json"], ["Authorization", `Bearer ${deviceToken}`]]), WFJSONValues: dictionaryField([["text", textAttachment(ocrText, "OCR纯文本")], ["source", "shortcut"]]) }, previewRequest),
     action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "预览错误", WFDictionaryKey: "error", WFInput: attachment(previewRequest, "金额预览响应") }, previewError),
     action(DICTIONARY_VALUE_ACTION, { CustomOutputName: "预览错误码", WFDictionaryKey: "code", WFInput: attachment(previewError, "预览错误") }, previewErrorCode),
@@ -332,7 +353,24 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
   const previewBody = dictionaryMap(preview.WFWorkflowActionParameters.WFJSONValues);
   requireValue(JSON.stringify([...previewBody.keys()]) === JSON.stringify(["text", "source"]), "预览请求字段不正确");
   requireValue(previewBody.get("text")?.WFSerializationType === "WFTextTokenString", "OCR 预览必须强制包装为文本字符串");
-  requireValue(outputUuid(previewBody.get("text")) === actions[3].WFWorkflowActionParameters.UUID, "OCR 预览文本未绑定显式文本动作");
+  const fullScreenshotOcrIndex = actionIndex(actions, "全屏OCR");
+  const fullScreenshotOcr = actions[fullScreenshotOcrIndex];
+  requireValue(fullScreenshotOcr.WFWorkflowActionIdentifier === OCR_ACTION, "全屏 OCR 动作类型不正确");
+  const screenshotUuid = actions[0].WFWorkflowActionParameters?.UUID;
+  requireValue(
+    outputUuid(fullScreenshotOcr.WFWorkflowActionParameters?.WFImage) === screenshotUuid,
+    "全屏 OCR 必须绑定原始截屏输出",
+  );
+  requireValue(fullScreenshotOcrIndex > 2, "全屏 OCR 必须位于保留的截屏、裁剪和 OCR 前缀之后");
+  const ocrTextIndex = actionIndex(actions, "OCR纯文本");
+  const ocrTextAction = actions[ocrTextIndex];
+  requireValue(ocrTextAction.WFWorkflowActionIdentifier === TEXT_ACTION, "OCR 文本动作类型不正确");
+  requireValue(
+    outputUuids(ocrTextAction.WFWorkflowActionParameters?.WFTextActionText).includes(actions[2].WFWorkflowActionParameters?.UUID)
+      && outputUuids(ocrTextAction.WFWorkflowActionParameters?.WFTextActionText).includes(fullScreenshotOcr.WFWorkflowActionParameters?.UUID),
+    "OCR 纯文本必须合并裁剪 OCR 与全屏 OCR 输出",
+  );
+  requireValue(outputUuid(previewBody.get("text")) === ocrTextAction.WFWorkflowActionParameters.UUID, "OCR 预览文本未绑定显式文本动作");
   const manualPreviewBody = dictionaryMap(manualPreview.WFWorkflowActionParameters.WFJSONValues);
   requireValue(JSON.stringify([...manualPreviewBody.keys()]) === JSON.stringify(["text", "source"]), "手动金额校验请求字段不正确");
   requireValue(manualPreviewBody.get("text")?.WFSerializationType === "WFTextTokenString", "手动金额校验必须包装为文本字符串");
@@ -387,7 +425,7 @@ export function inspectConvertedIcostCaptureShortcutXml(xml) {
   const confirmGuardRange = guardRange(actions, ranges, confirmIndex);
   requireInThenBranch(finalIndex, previewResponseGuardRange, "最终提交必须位于有效预览响应守卫内");
   requireInThenBranch(finalIndex, confirmGuardRange, "最终提交必须位于本机确定记录分支内");
-  return { actionCount: actions.length, endpoint: final.WFWorkflowActionParameters.WFURL, previewEndpoint: preview.WFWorkflowActionParameters.WFURL, preservesCapturePrefix: true, preservesIcostOcrText: true, coercesOcrThroughTextAction: true, usesServerDerivedIdempotency: true, removesIcostWrite: true, hasInlineCredentials: false, hasDeviceCredential: true, hasFailureNotice: true, hasManualAmountFallback: true, hasThreeLevelMenus: true, hasOptionalNote: true, hasLocalFinalConfirmation: true, finalSubmissionUsesSummaryOnly: true, hasSuccessReceipt: false, payloadKeys: [...finalBody.keys()] };
+  return { actionCount: actions.length, endpoint: final.WFWorkflowActionParameters.WFURL, previewEndpoint: preview.WFWorkflowActionParameters.WFURL, preservesCapturePrefix: true, preservesIcostOcrText: true, coercesOcrThroughTextAction: true, usesFullScreenshotOcrFallback: true, usesServerDerivedIdempotency: true, removesIcostWrite: true, hasInlineCredentials: false, hasDeviceCredential: true, hasFailureNotice: true, hasManualAmountFallback: true, hasThreeLevelMenus: true, hasOptionalNote: true, hasLocalFinalConfirmation: true, finalSubmissionUsesSummaryOnly: true, hasSuccessReceipt: false, payloadKeys: [...finalBody.keys()] };
 }
 
 export async function convertIcostCaptureShortcut({ inputPath, outputPath, endpoint = CAPTURE_DEVICE_ENDPOINT, deviceToken = CAPTURE_DEVICE_MARKER } = {}) {

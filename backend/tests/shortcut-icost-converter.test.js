@@ -59,12 +59,13 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     const { report } = await convertIcostCaptureShortcut({ inputPath, outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     assert.deepEqual(report, {
-      actionCount: 100,
+      actionCount: 101,
       endpoint: CAPTURE_DEVICE_ENDPOINT,
       previewEndpoint: "https://82.156.210.199/api/integrations/shortcut/bookkeeping-capture-preview",
       preservesCapturePrefix: true,
       preservesIcostOcrText: true,
       coercesOcrThroughTextAction: true,
+      usesFullScreenshotOcrFallback: true,
       usesServerDerivedIdempotency: true,
       removesIcostWrite: true,
       hasInlineCredentials: false,
@@ -94,6 +95,23 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
     assert.equal(
       previewText.Value.attachmentsByRange["{0, 1}"].OutputName,
       "OCR纯文本",
+    );
+    const convertedActions = converted.WFWorkflowActions;
+    const fullScreenshotOcr = convertedActions.find(
+      (entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "全屏OCR",
+    );
+    assert.equal(fullScreenshotOcr.WFWorkflowActionIdentifier, "is.workflow.actions.extracttextfromimage");
+    assert.equal(
+      fullScreenshotOcr.WFWorkflowActionParameters.WFImage.Value.OutputUUID,
+      convertedActions[0].WFWorkflowActionParameters.UUID,
+    );
+    const mergedText = convertedActions.find(
+      (entry) => entry.WFWorkflowActionParameters?.CustomOutputName === "OCR纯文本",
+    );
+    assert.deepEqual(
+      Object.values(mergedText.WFWorkflowActionParameters.WFTextActionText.Value.attachmentsByRange)
+        .map((item) => item.OutputUUID),
+      [convertedActions[2].WFWorkflowActionParameters.UUID, fullScreenshotOcr.WFWorkflowActionParameters.UUID],
     );
     assert.deepEqual(inspectConvertedIcostCaptureShortcutXml(xml), report);
   });
