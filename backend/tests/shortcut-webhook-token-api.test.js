@@ -135,7 +135,7 @@ describe("Shortcut webhook token management API", () => {
       headers: workerHeaders(),
     });
     assert.equal(staleDraft.response.status, 200);
-    assert.match(staleDraft.body.item.message, /回复“确认”/u);
+    assert.match(staleDraft.body.item.message, /请引用本消息并回复(?:\n|$)/u);
     assert.doesNotMatch(staleDraft.body.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
 
     const session = await login();
@@ -253,7 +253,7 @@ describe("Shortcut webhook token management API", () => {
       headers: workerHeaders(),
     });
     assert.equal(draft.response.status, 200);
-    assert.match(draft.body.item.message, /回复“确认”/u);
+    assert.match(draft.body.item.message, /请引用本消息并回复(?:\n|$)/u);
     assert.doesNotMatch(draft.body.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     const draftAck = await request("/api/integrations/weixin-agent/confirmation-outbox", {
       method: "POST",
