@@ -354,7 +354,7 @@ describe("官方 iCost URL bridge 快捷指令", () => {
 
   it("rejects different credentials across the three Sentelligent requests", async () => {
     const { plist } = await buildTemporaryBridge("shortcut-icost-url-bridge-mixed-token", {
-      deviceToken: "A".repeat(43),
+      deviceToken: repeatChars("A"),
     });
     const requestActions = plist.WFWorkflowActions.filter(
       (entry) => entry.WFWorkflowActionIdentifier === "is.workflow.actions.downloadurl",
@@ -592,7 +592,7 @@ describe("官方 iCost URL bridge 快捷指令", () => {
     await buildIcostUrlBridgeShortcut({
       inputPath,
       outputPath: unsignedPath,
-      deviceToken: "E".repeat(43),
+      deviceToken: repeatChars("E"),
     });
     const report = await signIcostUrlBridgeShortcut({
       inputPath: unsignedPath,
