@@ -6,7 +6,10 @@ import { afterEach, describe, it } from "node:test";
 
 import { parsePlistXml, serializePlistXml } from "../../integrations/icost-shortcut/plist-xml.mjs";
 import {
+  ICOST_URL_BRIDGE_BASE_NAME,
+  ICOST_URL_BRIDGE_BASE_VERSION,
   ICOST_URL_BRIDGE_OPTIONS,
+  ICOST_URL_BRIDGE_SHORTCUT_NAME,
   ICOST_URL_DUPLICATE_OPTIONS,
   buildIcostUrlBridgeShortcut,
   inspectIcostUrlBridgeShortcutXml,
@@ -154,6 +157,12 @@ describe("官方 iCost URL bridge 快捷指令", () => {
     const { report } = await buildIcostUrlBridgeShortcut({ inputPath, outputPath });
     assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
     assert.equal(report.actionCount, 141);
+    assert.equal(report.baseActionCount, 101);
+    assert.equal(report.baseShortcutName, "智能截图记账（三级菜单待确认版V8·全屏OCR）");
+    assert.equal(report.baseVersion, "V8");
+    assert.equal(ICOST_URL_BRIDGE_SHORTCUT_NAME, "智能截图记账（V8·全屏OCR·官方iCost桥接版）");
+    assert.equal(ICOST_URL_BRIDGE_BASE_NAME, report.baseShortcutName);
+    assert.equal(ICOST_URL_BRIDGE_BASE_VERSION, report.baseVersion);
     assert.equal(report.iCostOpenAttempted, true);
     assert.equal(report.iCostReadback, false);
     assert.equal(report.iCostAtomicWithCapture, false);
@@ -179,6 +188,8 @@ describe("官方 iCost URL bridge 快捷指令", () => {
     const xml = await readFile(outputPath, "utf8");
     const inspected = inspectIcostUrlBridgeShortcutXml(xml);
     assert.equal(inspected.actionCount, 141);
+    assert.equal(inspected.baseActionCount, 101);
+    assert.equal(inspected.baseVersion, "V8");
     assert.equal(inspected.bridgeActionCount, 39);
     assert.deepEqual(inspected.iCostUrls, ["iCost支出URL", "iCost收入URL"]);
     assert.doesNotMatch(xml, /ICAISnapshotShortcutV7/u);

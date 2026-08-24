@@ -19,19 +19,21 @@ V8 的 HTTPS 链路是：
 
 只有森特返回非空 `item.id` 且 `item.status=review_required` 时才显示该选择；若森特请求失败、响应畸形或已重放，默认先取消 iCost 写入。继续后仅把已选金额、分类、账本 `出差报销` 和备注逐项 URL Encode 后交给 iCost，不发送 OCR 原文、截图或设备凭据；两边写入不是原子事务，iCost 是否保存必须在 iCost 内单独确认。该桥接不进入“整理报销”会话，也不改变森特的微信确认状态。
 
-桥接版仍使用 V8 的设备凭据，不恢复账号/密码验证；真实凭据只能通过受保护的本机环境变量注入，不能出现在命令参数、日志、归档或 GitHub。签名前 verifier 必须报告 `deviceCredentialMode=bound`，`placeholder` 仅供结构测试，不能真机使用。
+桥接版仍使用 V8 的设备凭据，不恢复账号/密码验证；真实凭据只能通过受保护的本机环境变量注入，不能出现在命令参数、日志、归档或 GitHub。签名前 verifier 必须报告 `deviceCredentialMode=bound`，`placeholder` 仅供结构测试，不能真机使用。它只尝试打开 iCost 的预填页面，不会声称 iCost 已保存。
+
+构建前必须先把 Apple AEA1 源文件在可信本机验签并解包为 XML plist。设备凭据只通过受保护的本机环境变量传入；命令行明确不接受 `--device-token`，避免落入 shell history 或进程参数：
 
 ```bash
 read -r -s SHORTCUT_DEVICE_TOKEN
 export SHORTCUT_DEVICE_TOKEN
 node integrations/shortcut/build-icost-url-bridge-shortcut.mjs \
   --input="/path/to/智能截图记账(3).unsigned.shortcut" \
-  --output=/tmp/智能截图记账（V8·官方iCost桥接版）.unsigned.shortcut
+  --output=/tmp/智能截图记账（V8·全屏OCR·官方iCost桥接版）.unsigned.shortcut
 node integrations/shortcut/verify-icost-url-bridge-shortcut.mjs \
-  /tmp/智能截图记账（V8·官方iCost桥接版）.unsigned.shortcut
+  /tmp/智能截图记账（V8·全屏OCR·官方iCost桥接版）.unsigned.shortcut
 node integrations/shortcut/sign-icost-url-bridge-shortcut.mjs \
-  --input=/tmp/智能截图记账（V8·官方iCost桥接版）.unsigned.shortcut \
-  --output=/tmp/智能截图记账（V8·官方iCost桥接版）.shortcut \
+  --input=/tmp/智能截图记账（V8·全屏OCR·官方iCost桥接版）.unsigned.shortcut \
+  --output=/tmp/智能截图记账（V8·全屏OCR·官方iCost桥接版）.shortcut \
   --mode=anyone
 unset SHORTCUT_DEVICE_TOKEN
 ```

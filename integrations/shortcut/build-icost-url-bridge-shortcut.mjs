@@ -41,8 +41,9 @@ const ICOST_DUPLICATE_CANCEL_NOTICE = "已取消 iCost 写入；森特待确认�
 const ICOST_SKIP_NOTICE = "已提交森特待确认，未打开 iCost。";
 const ICOST_INVALID_RESPONSE_NOTICE = "森特响应缺少有效记账条目，未打开 iCost；请勿重复提交，并检查小小是否收到待确认草稿。";
 
-export const ICOST_URL_BRIDGE_SHORTCUT_NAME = "智能截图记账（官方iCost桥接版V1·全屏OCR）";
+export const ICOST_URL_BRIDGE_SHORTCUT_NAME = "智能截图记账（V8·全屏OCR·官方iCost桥接版）";
 export const ICOST_URL_BRIDGE_BASE_NAME = CAPTURE_SHORTCUT_NAME;
+export const ICOST_URL_BRIDGE_BASE_VERSION = "V8";
 export const ICOST_URL_BRIDGE_OPTIONS = Object.freeze([ICOST_BRIDGE_SKIP, ICOST_BRIDGE_CHOICE]);
 export const ICOST_URL_DUPLICATE_OPTIONS = Object.freeze([
   ICOST_DUPLICATE_CANCEL,
@@ -598,6 +599,8 @@ function bridgeActions(actions) {
     report: {
       actionCount: updated.length,
       baseActionCount: actions.length,
+      baseShortcutName: ICOST_URL_BRIDGE_BASE_NAME,
+      baseVersion: ICOST_URL_BRIDGE_BASE_VERSION,
       preservesFullOcrBase: true,
       preservesLocalFinalConfirmation: true,
       captureBeforeIcostChoice: true,
@@ -1091,6 +1094,9 @@ export function inspectIcostUrlBridgeShortcutXml(xml) {
   return {
     ...baseReport,
     actionCount: actual.length,
+    baseActionCount: baseActions.length,
+    baseShortcutName: ICOST_URL_BRIDGE_BASE_NAME,
+    baseVersion: ICOST_URL_BRIDGE_BASE_VERSION,
     bridgeActionCount: finalErrorRange.end - (finalErrorRange.otherwise + 1),
     iCostOpenAttempted: true,
     iCostReadback: false,
