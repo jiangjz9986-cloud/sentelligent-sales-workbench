@@ -8,6 +8,34 @@ V8 的 HTTPS 链路是：
 
 预览接口只返回金额、摘要和截图时间；最终提交不会再次上传整段 OCR 原文。服务端仍按设备 Token 映射本人账号，生成服务端幂等键，并只创建微信待确认草稿。
 
+## 官方 iCost URL 桥接版（可选、未部署）
+
+官方 iCost 文档公开的是 `iCost://expense?...`、`iCost://income?...` 等“打开添加账单页面”的 URL Scheme；没有公开的记录查询、JSON 回传、保存回执或账单 ID 回调。因此 URL 只能作为森特提交成功后的可选预填入口，不能用来读取 iCost 已有记账，也不能把“打开页面”当作“已保存”。
+
+`build-icost-url-bridge-shortcut.mjs` 在现有 V8 双路 OCR、三级菜单、本机最终确认和森特待确认提交之后增加二次选择：
+
+- `仅提交森特（不打开 iCost）`
+- `同时打开 iCost 添加账单`
+
+只有森特返回非空 `item.id` 且 `item.status=review_required` 时才显示该选择；若森特请求失败、响应畸形或已重放，默认先取消 iCost 写入。继续后仅把已选金额、分类、账本 `出差报销` 和备注逐项 URL Encode 后交给 iCost，不发送 OCR 原文、截图或设备凭据；两边写入不是原子事务，iCost 是否保存必须在 iCost 内单独确认。该桥接不进入“整理报销”会话，也不改变森特的微信确认状态。
+
+桥接版仍使用 V8 的设备凭据，不恢复账号/密码验证；真实凭据只能通过受保护的本机环境变量注入，不能出现在命令参数、日志、归档或 GitHub。签名前 verifier 必须报告 `deviceCredentialMode=bound`，`placeholder` 仅供结构测试，不能真机使用。
+
+```bash
+read -r -s SHORTCUT_DEVICE_TOKEN
+export SHORTCUT_DEVICE_TOKEN
+node integrations/shortcut/build-icost-url-bridge-shortcut.mjs \
+  --input="/path/to/智能截图记账(3).unsigned.shortcut" \
+  --output=/tmp/智能截图记账（V8·官方iCost桥接版）.unsigned.shortcut
+node integrations/shortcut/verify-icost-url-bridge-shortcut.mjs \
+  /tmp/智能截图记账（V8·官方iCost桥接版）.unsigned.shortcut
+node integrations/shortcut/sign-icost-url-bridge-shortcut.mjs \
+  --input=/tmp/智能截图记账（V8·官方iCost桥接版）.unsigned.shortcut \
+  --output=/tmp/智能截图记账（V8·官方iCost桥接版）.shortcut \
+  --mode=anyone
+unset SHORTCUT_DEVICE_TOKEN
+```
+
 ## 微信待确认消息
 
 小小发送的草稿固定为以下字段顺序（编号为发生时间的 `YYYYMMDDHHmm`，周期为发生日期所在周一至周日）：
