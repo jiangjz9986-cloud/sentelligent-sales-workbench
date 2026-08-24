@@ -72,8 +72,15 @@ function normalizeOccurredOn(value, warnings) {
   const normalized = value.trim();
   // A date-only or local date-time is rejected so the assistant never guesses
   // a timezone on behalf of the user.
+  const datePart = normalized.match(/^(\d{4})-(\d{2})-(\d{2})/u);
+  let calendarValid = false;
+  if (datePart) {
+    const date = new Date(Date.UTC(Number(datePart[1]), Number(datePart[2]) - 1, Number(datePart[3])));
+    calendarValid = !Number.isNaN(date.getTime())
+      && date.toISOString().slice(0, 10) === datePart.slice(1).join("-");
+  }
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/u.test(normalized)
-      || !Number.isFinite(Date.parse(normalized))) {
+      || !calendarValid || !Number.isFinite(Date.parse(normalized))) {
     warnings.push("invalid_occurredOn");
     return null;
   }
@@ -167,7 +174,13 @@ function findCorrectionField(label) {
 function friendlyDateValue(value, warnings, options = {}) {
   const normalized = String(value ?? "").trim();
   const isoMatch = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?)(Z|[+-]\d{2}:\d{2}))$/u.exec(normalized);
-  if (isoMatch && Number.isFinite(Date.parse(normalized))) return normalized;
+  if (isoMatch) {
+    const [year, month, day] = isoMatch[1].split("-").map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (!Number.isNaN(date.getTime())
+      && date.toISOString().slice(0, 10) === isoMatch[1]
+      && Number.isFinite(Date.parse(normalized))) return normalized;
+  }
   const dateMatch = /^(\d{4})[-年](\d{1,2})[-月](\d{1,2})日?$/u.exec(normalized)
     ?? /^(\d{4})年(\d{1,2})月(\d{1,2})日$/u.exec(normalized);
   let year;

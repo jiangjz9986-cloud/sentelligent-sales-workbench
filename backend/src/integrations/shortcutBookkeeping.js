@@ -119,10 +119,18 @@ function optionalText(value, field, max) {
 }
 
 function assertDateTime(value, field) {
-  if (typeof value !== "string" || !value.trim() || !Number.isFinite(Date.parse(value))) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  const datePart = normalized.match(/^(\d{4})-(\d{2})-(\d{2})/u);
+  let calendarValid = false;
+  if (datePart) {
+    const date = new Date(Date.UTC(Number(datePart[1]), Number(datePart[2]) - 1, Number(datePart[3])));
+    calendarValid = !Number.isNaN(date.getTime())
+      && date.toISOString().slice(0, 10) === datePart.slice(1).join("-");
+  }
+  if (!normalized || !datePart || !calendarValid || !Number.isFinite(Date.parse(normalized))) {
     validationError({ [field]: "dateTime" });
   }
-  return value.trim();
+  return normalized;
 }
 
 function captureIdempotencyKey(value, version = 1) {

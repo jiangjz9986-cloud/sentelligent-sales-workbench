@@ -140,7 +140,7 @@ export const CAPABILITY_CATALOG = deepFreeze([
       tools: ["shortcut-bookkeeping.confirm"],
       apis: ["POST /api/integrations/shortcut/bookkeeping", "POST /api/integrations/weixin-agent/events"],
     },
-    dependencies: ["Shortcut device credential", "iCloud device credential file", "WEIXIN_AGENT_OWNER", "allowlisted direct sender", "durable confirmation outbox", "six-digit human confirmation"],
+    dependencies: ["Shortcut device credential", "iCloud device credential file", "WEIXIN_AGENT_OWNER", "allowlisted direct sender", "durable confirmation outbox", "constrained natural-language confirmation", "quote/latest-version gate"],
     integrationPoints: ["shortcut bookkeeping webhook", "assistant pending action", "WeChat worker outbox"],
     confirmationLevel: "explicit",
     unavailableReason: "启用前必须配置明确的微信 sender 白名单并保持 WeChat worker 在线；未收到入站上下文时只排队，不会假称已发送。",

@@ -11,6 +11,7 @@ import {
   CAPTURE_SHORTCUT_NAME,
   convertIcostCaptureShortcut,
   inspectConvertedIcostCaptureShortcutXml,
+  verifyConvertedIcostCaptureShortcutFile,
 } from "../../integrations/shortcut/convert-icost-capture-shortcut.mjs";
 
 const temporaryDirectories = [];
@@ -116,6 +117,7 @@ describe("旧 iCost 智能截图快捷指令转换器", () => {
       [convertedActions[2].WFWorkflowActionParameters.UUID, fullScreenshotOcr.WFWorkflowActionParameters.UUID],
     );
     assert.deepEqual(inspectConvertedIcostCaptureShortcutXml(xml), report);
+    assert.deepEqual(await verifyConvertedIcostCaptureShortcutFile(outputPath), report);
   });
 
   it("embeds a valid device credential without account or password fields", async () => {

@@ -21,6 +21,7 @@ let baseUrl;
 let entrySequence;
 let actionSequence;
 let outboxSequence;
+let latestQuoteMessageId;
 
 async function read(response) {
   const text = await response.text();
@@ -48,9 +49,19 @@ function analysis(overrides = {}) {
 }
 
 async function request(path, options = {}) {
+  let requestOptions = options;
+  if (path === "/api/integrations/weixin-agent/events" && typeof options.body === "string") {
+    const body = JSON.parse(options.body);
+    const suppressQuote = body.suppressQuote === true;
+    delete body.suppressQuote;
+    if (!suppressQuote && !body.quotedMessageId && !body.quotedText && latestQuoteMessageId) {
+      body.quotedMessageId = latestQuoteMessageId;
+    }
+    requestOptions = { ...options, body: JSON.stringify(body) };
+  }
   const response = await fetch(`${baseUrl}${path}`, {
-    ...options,
-    headers: { ...(options.headers ?? {}) },
+    ...requestOptions,
+    headers: { ...(requestOptions.headers ?? {}) },
   });
   return read(response);
 }
@@ -123,6 +134,7 @@ async function leaseOutbox() {
 }
 
 async function ackOutbox(lease, ok = true, providerMessageId = null) {
+  const deliveredMessageId = providerMessageId ?? `provider-${lease.item.id}`;
   const ack = await request("/api/integrations/weixin-agent/confirmation-outbox", {
     method: "POST",
     headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
@@ -130,10 +142,11 @@ async function ackOutbox(lease, ok = true, providerMessageId = null) {
       id: lease.item.id,
       leaseToken: lease.leaseToken,
       ok,
-      ...(providerMessageId ? { providerMessageId } : {}),
+      providerMessageId: deliveredMessageId,
     }),
   });
   assert.equal(ack.response.status, 200);
+  if (ok) latestQuoteMessageId = deliveredMessageId;
 }
 
 beforeEach(async () => {
@@ -141,6 +154,7 @@ beforeEach(async () => {
   entrySequence = 0;
   actionSequence = 0;
   outboxSequence = 0;
+  latestQuoteMessageId = null;
   server = createServer({
     databaseUrl: join(tempDir, "assistant.sqlite"),
     seed: false,
@@ -198,15 +212,15 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
 
     const lease = await leaseOutbox();
     assert.deepEqual((await deliveryStatus(received.body.item.id)).body.item.confirmationDelivery, { status: "sending" });
-    assert.match(lease.item.message, /^检测到一笔新记账，请确认！/u);
-    assert.match(lease.item.message, /时间：2026年08月18日 12:00/u);
+    assert.match(lease.item.message, /^【小小提醒！新增一条待记账信息】/u);
+    assert.match(lease.item.message, /编号：202608181200/u);
     assert.match(lease.item.message, /12\.80 元/);
-    assert.match(lease.item.message, /费用类别：支出 \/ 交通 \/ 打车/u);
+    assert.match(lease.item.message, /费用类别：交通-打车/u);
     assert.match(lease.item.message, /备注：客户拜访/u);
     assert.doesNotMatch(lease.item.message, /商户：|用途：/u);
-    assert.match(lease.item.message, /回复“确认”/u);
-    assert.match(lease.item.message, /以“修改”开头/u);
-    assert.match(lease.item.message, /回复“取消”/u);
+    assert.match(lease.item.message, /请引用本消息并回复/u);
+    assert.match(lease.item.message, /修改/u);
+    assert.match(lease.item.message, /取消/u);
     assert.doesNotMatch(lease.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
     await ackOutbox(lease);
     assert.equal((await deliveryStatus(received.body.item.id)).body.item.confirmationDelivery.status, "sent");
@@ -251,10 +265,11 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
         sourceMessageId: "shortcut-current-draft-premature",
         senderId: sender,
         chatType: "direct",
+        suppressQuote: true,
       }),
     });
     assert.equal(premature.response.status, 409);
-    assert.equal(premature.body.status, "review_required");
+    assert.equal(premature.body.status, "clarify");
     assert.match(premature.body.text, /最新记账草稿/u);
     const before = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(before.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
@@ -286,8 +301,8 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
     assert.equal(received.body.item.entryType, "income");
 
     const lease = await leaseOutbox();
-    assert.match(lease.item.message, /^检测到一笔新记账，请确认！/u);
-    assert.match(lease.item.message, /费用类别：收入 \/ 出差 \/ 报销/u);
+    assert.match(lease.item.message, /^【小小提醒！新增一条待记账信息】/u);
+    assert.match(lease.item.message, /费用类别：出差-报销/u);
     assert.match(lease.item.message, /备注：差旅款到账/u);
     await ackOutbox(lease);
 
@@ -350,11 +365,12 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
         sourceMessageId: "shortcut-confirmation-correction-missing-prefix",
         senderId: sender,
         chatType: "direct",
+        suppressQuote: true,
       }),
     });
-    assert.equal(missingPrefix.response.status, 200);
+    assert.equal(missingPrefix.response.status, 409);
     assert.equal(missingPrefix.body.status, "clarify");
-    assert.match(missingPrefix.body.text, /“修改…”/u);
+    assert.match(missingPrefix.body.text, /最新记账草稿/u);
 
     const corrected = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
@@ -472,7 +488,7 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
     assert.equal((await deliveryStatus(created.body.item.id)).body.item.confirmationDelivery.status, "sent");
   });
 
-  it("rejects broad affirmative language and writes only for the exact command '确认'", async () => {
+  it("accepts constrained natural-language confirmation but keeps weak acknowledgements review-only", async () => {
     const created = await request("/api/integrations/shortcut/bookkeeping", {
       method: "POST",
       headers: { Authorization: `Bearer ${shortcutToken}`, "Content-Type": "application/json" },
@@ -482,7 +498,7 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
     const lease = await leaseOutbox();
     await ackOutbox(lease);
 
-    for (const [index, text] of ["好的", "同意", "确认入账", "确认。", " 确认", "确认 ", "确认\n"].entries()) {
+    for (const [index, text] of ["好的", "收到", "谢谢"].entries()) {
       const clarified = await request("/api/integrations/weixin-agent/events", {
         method: "POST",
         headers: eventHeaders(`shortcut-text-confirm-rejected-event-${index}`),
@@ -496,7 +512,7 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
       });
       assert.equal(clarified.response.status, 200);
       assert.equal(clarified.body.status, "clarify");
-      assert.match(clarified.body.text, /只接受“确认”、“修改…”或“取消”/u);
+      assert.match(clarified.body.text, /确认|修改|取消/u);
     }
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
@@ -507,7 +523,7 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
       headers: eventHeaders("shortcut-text-confirm-explicit-event"),
       body: JSON.stringify({
         conversationId: "text-confirm-rejected",
-        text: "确认",
+        text: "好的，确认入账",
         sourceMessageId: "shortcut-text-confirm-explicit-event",
         senderId: sender,
         chatType: "direct",
@@ -575,11 +591,11 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
     });
     assert.equal(second.response.status, 202);
     const firstLease = await leaseOutbox();
-    const firstReference = /BK-[0-9A-F]{12}/u.exec(firstLease.item.message)?.[0];
+    const firstReference = /编号：([0-9]{12})/u.exec(firstLease.item.message)?.[1];
     assert.ok(firstReference);
     await ackOutbox(firstLease, true, "provider-draft-first");
     const secondLease = await leaseOutbox();
-    const secondReference = /BK-[0-9A-F]{12}/u.exec(secondLease.item.message)?.[0];
+    const secondReference = /编号：([0-9]{12})/u.exec(secondLease.item.message)?.[1];
     assert.ok(secondReference);
     await ackOutbox(secondLease, true, "provider-draft-second");
 
@@ -592,6 +608,7 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
         sourceMessageId: "shortcut-pending-ambiguous",
         senderId: sender,
         chatType: "direct",
+        suppressQuote: true,
       }),
     });
     assert.equal(ambiguous.response.status, 409);
@@ -605,7 +622,7 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
         conversationId: "provider-conversation-pending",
         text: "确认",
         quotedMessageId: "provider-draft-first",
-        quotedText: `检测到一笔新记账，请确认！\n待确认编号：${firstReference}`,
+        quotedText: `【小小提醒！新增一条待记账信息】\n编号：${firstReference}`,
         sourceMessageId: "shortcut-pending-confirm-first",
         senderId: sender,
         chatType: "direct",
@@ -620,7 +637,8 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
       body: JSON.stringify({
         conversationId: "provider-conversation-pending",
         text: "取消",
-        quotedText: `检测到一笔新记账，请确认！\n待确认编号：${secondReference}`,
+        quotedMessageId: "provider-draft-second",
+        quotedText: `【小小提醒！新增一条待记账信息】\n编号：${secondReference}`,
         sourceMessageId: "shortcut-pending-cancel-second",
         senderId: sender,
         chatType: "direct",
@@ -646,6 +664,8 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
       body: JSON.stringify(shortcutBody("shortcut-stale-correction")),
     });
     assert.equal(corrected.response.status, 202);
+    const initialLease = await leaseOutbox();
+    await ackOutbox(initialLease);
     const correction = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("shortcut-stale-correction-event"),
@@ -686,12 +706,15 @@ describe("快捷指令—小小—微信自然语言确认闭环", () => {
       body: JSON.stringify(shortcutBody("shortcut-stale-cancel")),
     });
     assert.equal(cancelled.response.status, 202);
+    const cancellationDraft = await leaseOutbox();
+    await ackOutbox(cancellationDraft, true, "provider-cancellation-draft");
     const cancellation = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("shortcut-stale-cancel-event"),
       body: JSON.stringify({
         conversationId: "stale-cancel",
         text: "取消",
+        quotedMessageId: "provider-cancellation-draft",
         sourceMessageId: "shortcut-stale-cancel-event",
         senderId: sender,
         chatType: "direct",

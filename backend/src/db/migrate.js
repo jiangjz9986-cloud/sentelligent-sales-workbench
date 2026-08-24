@@ -24,6 +24,7 @@ import { apply as applyShortcutIncomeEntries } from "./migrations/0020_shortcut_
 import { apply as applySecureSettingsPushplus } from "./migrations/0021_secure_settings_pushplus.mjs";
 import { apply as applyAssistantAgentRuns } from "./migrations/0022_assistant_agent_runs.mjs";
 import { apply as applyAssistantBusinessContext } from "./migrations/0023_assistant_business_context.mjs";
+import { apply as applyShortcutAdvanceAllocation } from "./migrations/0024_shortcut_advance_allocation.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -157,6 +158,12 @@ const migrations = [
     path: resolve(here, "migrations", "0023_assistant_business_context.mjs"),
     type: "module",
     apply: applyAssistantBusinessContext,
+  },
+  {
+    version: "0024",
+    path: resolve(here, "migrations", "0024_shortcut_advance_allocation.mjs"),
+    type: "module",
+    apply: applyShortcutAdvanceAllocation,
   },
 ];
 

@@ -68,7 +68,14 @@ function dateTime(value, name, { nullable = false } = {}) {
   if (typeof value !== "string" || !value.trim() || Number.isNaN(Date.parse(value))) {
     throw new TypeError(`${name} must be an ISO date-time`);
   }
-  return value.trim();
+  const normalized = value.trim();
+  const datePart = normalized.match(/^(\d{4})-(\d{2})-(\d{2})(?:T|\s|$)/u);
+  if (!datePart) throw new TypeError(`${name} must contain a real calendar date`);
+  const date = new Date(Date.UTC(Number(datePart[1]), Number(datePart[2]) - 1, Number(datePart[3])));
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== datePart.slice(1).join("-")) {
+    throw new TypeError(`${name} must contain a real calendar date`);
+  }
+  return normalized;
 }
 
 function nonNegativeCents(value, name, { nullable = false } = {}) {
@@ -207,6 +214,12 @@ function itemFromRow(row) {
     expenseId: row.expense_id,
     paymentId: row.payment_id,
     expenseReferenceCode: row.expense_reference_code ?? null,
+    advanceId: row.advance_id ?? null,
+    advanceSourceId: row.advance_source_id ?? null,
+    advanceWeekStart: row.advance_week_start ?? null,
+    advanceReceivedCents: row.advance_received_cents === null || row.advance_received_cents === undefined
+      ? null
+      : Number(row.advance_received_cents),
     remoteId: row.remote_id,
     remoteReference: row.remote_reference,
     remoteStatus: row.remote_status,
@@ -328,7 +341,12 @@ function normalizeReviewPatch(value, row) {
 }
 
 function dateOnlyInShanghai(value) {
-  const date = new Date(value);
+  const normalized = typeof value === "string" ? value.trim() : "";
+  const datePart = normalized.match(/^(\d{4})-(\d{2})-(\d{2})(?:T|\s|$)/u);
+  if (!datePart) return null;
+  const calendarDate = new Date(Date.UTC(Number(datePart[1]), Number(datePart[2]) - 1, Number(datePart[3])));
+  if (Number.isNaN(calendarDate.getTime()) || calendarDate.toISOString().slice(0, 10) !== datePart.slice(1).join("-")) return null;
+  const date = new Date(normalized);
   if (Number.isNaN(date.getTime())) return null;
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -338,6 +356,16 @@ function dateOnlyInShanghai(value) {
   }).formatToParts(date);
   const valueOf = (type) => parts.find((part) => part.type === type)?.value ?? "";
   return `${valueOf("year")}-${valueOf("month")}-${valueOf("day")}`;
+}
+
+function mondayInShanghai(value) {
+  const day = dateOnlyInShanghai(value);
+  if (!day) return null;
+  const date = new Date(`${day}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  const offset = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - offset);
+  return date.toISOString().slice(0, 10);
 }
 
 export function applyShortcutSelectionAnalysis(value, selection) {
@@ -392,14 +420,28 @@ export function createShortcutBookkeepingRepository(db, {
 
   const selectById = db.prepare(`
     SELECT entry.*, expense.reference_code AS expense_reference_code
+           , advance_source.id AS advance_source_id
+           , advance.id AS advance_id
+           , advance.week_start AS advance_week_start
+           , advance.received_cents AS advance_received_cents
     FROM shortcut_bookkeeping_entries entry
     LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+    LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+      AND advance_source.status = 'active'
+    LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
     WHERE entry.id = $id
   `);
   const selectByKey = db.prepare(`
     SELECT entry.*, expense.reference_code AS expense_reference_code
+           , advance_source.id AS advance_source_id
+           , advance.id AS advance_id
+           , advance.week_start AS advance_week_start
+           , advance.received_cents AS advance_received_cents
     FROM shortcut_bookkeeping_entries entry
     LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+    LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+      AND advance_source.status = 'active'
+    LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
     WHERE entry.owner = $owner AND entry.idempotency_key_hash = $idempotencyKeyHash
   `);
 
@@ -527,8 +569,15 @@ export function createShortcutBookkeepingRepository(db, {
     if (!allowedStatuses.has(status)) throw new TypeError("status is invalid");
     const rows = db.prepare(`
       SELECT entry.*, expense.reference_code AS expense_reference_code
+             , advance_source.id AS advance_source_id
+             , advance.id AS advance_id
+             , advance.week_start AS advance_week_start
+             , advance.received_cents AS advance_received_cents
       FROM shortcut_bookkeeping_entries entry
       LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+      LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+        AND advance_source.status = 'active'
+      LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
       WHERE entry.owner = $owner AND entry.target_system = 'sentelligent' AND entry.status = $status
       ORDER BY entry.updated_at DESC, entry.id DESC
       LIMIT $limit
@@ -541,8 +590,15 @@ export function createShortcutBookkeepingRepository(db, {
     const normalizedOwner = requiredText(owner, "owner", 200);
     const row = db.prepare(`
       SELECT entry.*, expense.reference_code AS expense_reference_code
+             , advance_source.id AS advance_source_id
+             , advance.id AS advance_id
+             , advance.week_start AS advance_week_start
+             , advance.received_cents AS advance_received_cents
       FROM shortcut_bookkeeping_entries entry
       LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+      LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+        AND advance_source.status = 'active'
+      LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
       WHERE entry.id = $id AND entry.owner = $owner AND entry.target_system = 'sentelligent'
     `).get({ $id: id, $owner: normalizedOwner });
     return itemFromRow(row);
@@ -683,7 +739,97 @@ export function createShortcutBookkeepingRepository(db, {
     return { id, current, replayed: false };
   }
 
-  function completeLocal(idValue, { analysis: analysisValue, leaseToken, reviewPatch } = {}) {
+  function ensureAdvanceForLoanIncome(current, analysis, now) {
+    if (current.entry_type !== "income" || current.category !== "出差" || current.subcategory !== "借款") {
+      return null;
+    }
+    const amountCents = analysis.expense?.amountCents;
+    if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
+      throw new TypeError("loan income amount must be positive");
+    }
+    const receivedOn = dateOnlyInShanghai(analysis.expense?.paidAt ?? analysis.expense?.occurredOn);
+    const weekStart = mondayInShanghai(receivedOn);
+    if (!receivedOn || !weekStart) throw new TypeError("loan income date is invalid");
+    const existing = db.prepare(`
+      SELECT source.*, advance.received_cents AS advance_received_cents,
+             advance.week_start AS advance_week_start
+      FROM travel_expense_advance_sources source
+      JOIN travel_expense_advances advance ON advance.id = source.advance_id
+      WHERE source.entry_id = $entryId
+    `).get({ $entryId: current.id });
+    if (existing) {
+      if (Number(existing.amount_cents) !== amountCents || existing.status !== "active") {
+        throw new HttpError(409, "SHORTCUT_ADVANCE_SOURCE_CONFLICT", "Loan income already has a conflicting advance source");
+      }
+      return {
+        sourceId: existing.id,
+        advanceId: existing.advance_id,
+        weekStart: existing.advance_week_start,
+        receivedCents: Number(existing.advance_received_cents),
+        replayed: true,
+      };
+    }
+    const digest = hashValue(current.id).slice(0, 24);
+    const advanceId = `shortcut-advance-${digest}`;
+    const sourceId = `shortcut-advance-source-${digest}`;
+    const purpose = current.note || analysis.expense?.purpose || "出差借款";
+    db.prepare(`
+      INSERT INTO travel_expense_advances (
+        id, version, owner, week_start, status, requested_cents, received_cents,
+        requested_on, received_on, purpose, notes, created_by, updated_by, created_at, updated_at
+      ) VALUES (
+        $advanceId, 1, $owner, $weekStart, 'received', $amountCents, $amountCents,
+        $receivedOn, $receivedOn, $purpose, $notes, $actor, $actor, $now, $now
+      )
+    `).run({
+      $advanceId: advanceId,
+      $owner: current.owner,
+      $weekStart: weekStart,
+      $amountCents: amountCents,
+      $receivedOn: receivedOn,
+      $purpose: purpose,
+      $notes: current.raw_text === "[已取消]" ? null : current.note,
+      $actor: current.actor,
+      $now: now,
+    });
+    db.prepare(`
+      INSERT INTO travel_expense_advance_sources (
+        id, owner, entry_id, advance_id, amount_cents, received_on, week_start,
+        status, created_by, created_at
+      ) VALUES (
+        $sourceId, $owner, $entryId, $advanceId, $amountCents, $receivedOn, $weekStart,
+        'active', $actor, $now
+      )
+    `).run({
+      $sourceId: sourceId,
+      $owner: current.owner,
+      $entryId: current.id,
+      $advanceId: advanceId,
+      $amountCents: amountCents,
+      $receivedOn: receivedOn,
+      $weekStart: weekStart,
+      $actor: current.actor,
+      $now: now,
+    });
+    insertAudit(db, {
+      action: "shortcut_bookkeeping.advance_received",
+      entityType: "travel_expense_advance",
+      entityId: advanceId,
+      actor: current.actor,
+      requestId: current.source_id,
+      before: null,
+      after: { status: "received", amountCents, weekStart, sourceEntryId: current.id },
+      metadata: { owner: current.owner, source: "shortcut_bookkeeping_income" },
+    });
+    return { sourceId, advanceId, weekStart, receivedCents: amountCents, replayed: false };
+  }
+
+  function completeLocal(idValue, {
+    analysis: analysisValue,
+    leaseToken,
+    reviewPatch,
+    revisionSource = "capture",
+  } = {}) {
     return withImmediateTransaction(db, () => {
       const state = currentProcessing(idValue, leaseToken, "sentelligent");
       if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
@@ -708,8 +854,49 @@ export function createShortcutBookkeepingRepository(db, {
           $note: normalizedReviewPatch.note,
         });
       }
-      const analysis = normalizeAnalysis(analysisValue, effectiveCurrent);
+      let analysis = normalizeAnalysis(analysisValue, effectiveCurrent);
+      // Shortcut expense captures use the consumption amount as the
+      // reimbursable amount by product rule. Keep the invariant at the
+      // repository boundary too, so a legacy analyzer or a Web correction
+      // cannot silently create a lower reimbursement value.
+      if (current.entry_type === "expense" && analysis.expense
+        && Number.isSafeInteger(analysis.expense.amountCents)) {
+        analysis = {
+          ...analysis,
+          expense: {
+            ...analysis.expense,
+            reimbursementCents: analysis.expense.amountCents,
+            fundingSource: "personal",
+          },
+        };
+      }
       const now = nowIso(clock);
+      if (!["capture", "weixin_correction", "system"].includes(revisionSource)) {
+        throw new TypeError("revisionSource is invalid");
+      }
+      const revisionVersion = Number(db.prepare(
+        "SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM shortcut_bookkeeping_revisions WHERE entry_id = $entryId",
+      ).get({ $entryId: id }).next_version);
+      const revisionId = `shortcut-revision-${hashValue(`${id}:${revisionVersion}`).slice(0, 24)}`;
+      db.prepare(`
+        INSERT INTO shortcut_bookkeeping_revisions (
+          id, owner, entry_id, version, changes_json, source, created_by, created_at
+        ) VALUES ($revisionId, $owner, $entryId, $version, $changesJson, $source, $actor, $now)
+      `).run({
+        $revisionId: revisionId,
+        $owner: current.owner,
+        $entryId: id,
+        $version: revisionVersion,
+        $changesJson: JSON.stringify({
+          category: effectiveCurrent.category,
+          subcategory: effectiveCurrent.subcategory,
+          note: effectiveCurrent.note,
+          analysis,
+        }),
+        $source: revisionSource,
+        $actor: current.actor,
+        $now: now,
+      });
       const stored = {
         $id: id,
         $provider: analysis.source.provider,
@@ -763,6 +950,11 @@ export function createShortcutBookkeepingRepository(db, {
               error_code = NULL, updated_at = $now
           WHERE id = $id
         `).run(stored);
+        const advance = ensureAdvanceForLoanIncome(
+          { ...current, ...effectiveCurrent },
+          analysis,
+          now,
+        );
         insertAudit(db, {
           action: "shortcut_bookkeeping.accept",
           entityType: "shortcut_bookkeeping_entry",
@@ -784,7 +976,11 @@ export function createShortcutBookkeepingRepository(db, {
             subcategory: effectiveCurrent.subcategory,
           },
         });
-        return { item: itemFromRow(selectById.get({ $id: id })), replayed: false };
+        return {
+          item: itemFromRow(selectById.get({ $id: id })),
+          ...(advance ? { advance } : {}),
+          replayed: false,
+        };
       }
 
       const expense = analysis.expense;

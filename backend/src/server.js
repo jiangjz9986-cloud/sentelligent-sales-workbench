@@ -102,6 +102,7 @@ import {
   createShortcutBookkeepingRepository,
 } from "./integrations/shortcutBookkeepingRepository.js";
 import { createShortcutWebhookTokenRepository } from "./integrations/shortcutWebhookTokenRepository.js";
+import { createShortcutAdvanceAllocationRepository } from "./integrations/shortcutAdvanceAllocationRepository.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import {
@@ -2713,6 +2714,11 @@ export function createServer(options = {}) {
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
     ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
   });
+  const shortcutAdvanceAllocationRepository = options.shortcutAdvanceAllocationRepository
+    ?? createShortcutAdvanceAllocationRepository(db, {
+      ...(options.shortcutAdvanceAllocationIdFactory ? { idFactory: options.shortcutAdvanceAllocationIdFactory } : {}),
+      ...(options.shortcutAdvanceAllocationClock ? { clock: options.shortcutAdvanceAllocationClock } : {}),
+    });
   const weixinConfirmationOutboxRepository = options.weixinConfirmationOutboxRepository
     ?? createWeixinConfirmationOutboxRepository(db, {
       ...(options.weixinConfirmationOutboxIdFactory ? { idFactory: options.weixinConfirmationOutboxIdFactory } : {}),
@@ -2815,6 +2821,7 @@ export function createServer(options = {}) {
       db,
       config,
       shortcutBookkeepingRepository,
+      advanceAllocationRepository: shortcutAdvanceAllocationRepository,
       pendingActionRepository: assistantPendingActionRepository,
       sessionRepository: assistantSessionRepository,
       outboxRepository: weixinConfirmationOutboxRepository,
@@ -3282,10 +3289,15 @@ export function createServer(options = {}) {
           );
         }
         const entryIds = url.searchParams.getAll("entryId");
-        if (entryIds.length !== 1 || [...url.searchParams.keys()].some((key) => key !== "entryId")) {
+        const weekStarts = url.searchParams.getAll("weekStart");
+        if (entryIds.length !== 1
+          || weekStarts.length > 1
+          || [...url.searchParams.keys()].some((key) => !["entryId", "weekStart"].includes(key))) {
           validationFailure("entryId", "single_query_value");
         }
         const entryId = payloadText(entryIds[0], "entryId", { max: 200 });
+        const requestedWeekStart = weekStarts[0] ? payloadText(weekStarts[0], "weekStart", { max: 10 }) : null;
+        if (requestedWeekStart) validateTravelExpenseWeekStart(requestedWeekStart);
         const entry = shortcutBookkeepingRepository.getReview(entryId, {
           owner: integrationIdentity.account,
         });
@@ -3296,11 +3308,36 @@ export function createServer(options = {}) {
               entryId,
             })
           : null;
+        let advanceSummary = null;
+        if (typeof shortcutAdvanceAllocationRepository?.summary === "function") {
+          const summaryWeekStart = requestedWeekStart || entry.advanceWeekStart;
+          if (summaryWeekStart) {
+            try {
+              advanceSummary = shortcutAdvanceAllocationRepository.summary({
+                owner: integrationIdentity.account,
+                weekStart: summaryWeekStart,
+              });
+            } catch {
+              advanceSummary = null;
+            }
+          }
+        }
         sendJson(response, 200, {
           item: {
             id: entry.id,
             status: entry.status,
             confirmationDelivery: shortcutDelivery(outbox, integrationIdentity.account),
+            ...(advanceSummary ? {
+              advanceSummary: {
+                weekStart: advanceSummary.weekStart,
+                requestedCents: advanceSummary.requestedCents,
+                allocatedCents: advanceSummary.allocatedCents,
+                remainingCents: advanceSummary.remainingCents,
+                uncoveredCents: advanceSummary.uncoveredCents,
+                overageCents: advanceSummary.overageCents,
+                planHash: advanceSummary.planHash,
+              },
+            } : {}),
           },
         }, { "Cache-Control": "no-store" });
         return;
@@ -3596,6 +3633,23 @@ export function createServer(options = {}) {
             reviewPatch = automatic.reviewPatch;
           } else {
             analyzed = applyShortcutSelectionAnalysis(rawAnalysis, body);
+          }
+          // A Shortcut capture never silently consumes a loan pool. Until the
+          // owner explicitly assigns a received loan through the WeChat
+          // allocation flow, every expense remains personal-paid. The
+          // allocation overlay later records any advance-funded portion
+          // without rewriting the original payment fact.
+          if (body.entryType === "expense" && analyzed?.expense) {
+            analyzed = {
+              ...analyzed,
+              expense: {
+                ...analyzed.expense,
+                fundingSource: "personal",
+                ...(Number.isSafeInteger(analyzed.expense.amountCents)
+                  ? { reimbursementCents: analyzed.expense.amountCents }
+                  : {}),
+              },
+            };
           }
           if (shortcutBookkeepingAssistantRuntime.enabled) {
             analyzed = {

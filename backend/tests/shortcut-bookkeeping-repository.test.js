@@ -65,6 +65,50 @@ describe("Shortcut bookkeeping repository invariants", () => {
     }
   });
 
+  it("turns a confirmed 出差借款 income into one received weekly advance pool", () => {
+    const { db, repository } = repositoryHarness();
+    try {
+      const received = repository.receive({
+        owner: "owner-a",
+        actor: "actor-a",
+        ledgerName: "出差报销",
+        entryType: "income",
+        category: "出差",
+        subcategory: "借款",
+        idempotencyKey: "income-loan-entry-probe",
+        requestHash: REQUEST_HASH,
+        rawText: "2026-08-17 收到出差借款 2000 元",
+      });
+      const claimed = repository.claim(received.item.id);
+      const completed = repository.completeLocal(received.item.id, {
+        leaseToken: claimed.leaseToken,
+        analysis: {
+          status: "ready",
+          confidence: 1,
+          expense: {
+            occurredOn: "2026-08-17",
+            amountCents: 200000,
+            reimbursementCents: 200000,
+            purpose: "出差借款",
+            paidAt: "2026-08-19T09:30:00+08:00",
+          },
+          warnings: [],
+          source: { provider: "test" },
+        },
+      });
+      assert.equal(completed.item.entryType, "income");
+      assert.ok(completed.item.advanceId);
+      const advance = db.prepare("SELECT * FROM travel_expense_advances WHERE id = $id").get({ $id: completed.item.advanceId });
+      assert.equal(advance.status, "received");
+      assert.equal(advance.received_cents, 200000);
+      assert.equal(advance.week_start, "2026-08-17");
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_advance_sources WHERE entry_id = $id").get({ $id: received.item.id }).count, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_revisions WHERE entry_id = $id").get({ $id: received.item.id }).count, 1);
+    } finally {
+      db.close();
+    }
+  });
+
   it("provides owner-scoped review list/detail and idempotent manual reject", () => {
     const { db, repository } = repositoryHarness();
     try {

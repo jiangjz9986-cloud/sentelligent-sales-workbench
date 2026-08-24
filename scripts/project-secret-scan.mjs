@@ -202,6 +202,15 @@ function isExplicitTestFixtureValue(value, filePath) {
     // treated as placeholders.
     /^sales[-_]loop[-_]machine[-_]token$/i,
     /^must[-_]not[-_]enter$/i,
+    // Older Shortcut/WeChat tests predate the bounded vocabulary above. These
+    // exact labels are synthetic fixtures; the required `test` marker and
+    // fixed numeric suffix keep real credentials out of this exception.
+    /^shortcut(?:[-_]machine)?[-_]test[-_]token$/i,
+    /^weixin[-_]machine[-_]test[-_]token$/i,
+    /^shortcut[-_]weixin[-_]confirmation[-_]test[-_]secret[-_]\d{30,}$/i,
+    /^shortcut[-_]bookkeeping[-_]safety[-_]test[-_]secret[-_]\d{30,}$/i,
+    /^action[-_]lease$/i,
+    /^entry[-_]lease$/i,
   ].some((pattern) => pattern.test(value));
 }
 

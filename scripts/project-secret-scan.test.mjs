@@ -258,6 +258,28 @@ describe("project secret scan", () => {
     }
   });
 
+  it("allows only the exact historical Shortcut/WeChat fixture labels", () => {
+    const workspace = makeWorkspace();
+    try {
+      workspace.write(
+        "backend/tests/historical-shortcut-fixtures.test.js",
+        [
+          'const shortcutToken = "shortcut-test-token";',
+          'const machineToken = "weixin-machine-test-token";',
+          'const shortcutMachineToken = "shortcut-machine-test-token";',
+          'const confirmationSecret = "shortcut-weixin-confirmation-test-secret-012345678901234567890123456789";',
+          'const safetySecret = "shortcut-bookkeeping-safety-test-secret-012345678901234567890123456789";',
+          "",
+        ].join("\\n"),
+      );
+      const result = scanProjectSecrets({ root: workspace.root, includeGitHistory: false });
+      assert.equal(result.status, "passed");
+      assert.deepEqual(result.findings, []);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("ignores code expressions, documentation placeholders, and integration QA fixtures", () => {
     const workspace = makeWorkspace();
     try {

@@ -63,12 +63,19 @@ async function confirmLatest(suffix) {
     headers: workerHeaders(),
   }));
   assert.equal(leased.response.status, 200);
-  assert.match(leased.body.item.message, /回复“确认”/u);
+  assert.match(leased.body.item.message, /^【小小提醒！新增一条待记账信息】/u);
+  assert.match(leased.body.item.message, /请引用本消息并回复/u);
   assert.doesNotMatch(leased.body.item.message, /六位|确认码|(?:^|\n)\d{6}(?:\n|$)/u);
+  const providerMessageId = `provider-${suffix}`;
   const ack = await fetch(`${baseUrl}/api/integrations/weixin-agent/confirmation-outbox`, {
     method: "POST",
     headers: { Authorization: `Bearer ${machineToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ id: leased.body.item.id, leaseToken: leased.body.leaseToken, ok: true }),
+    body: JSON.stringify({
+      id: leased.body.item.id,
+      leaseToken: leased.body.leaseToken,
+      ok: true,
+      providerMessageId,
+    }),
   });
   assert.equal(ack.status, 200);
   const event = await read(await fetch(`${baseUrl}/api/integrations/weixin-agent/events`, {
@@ -81,6 +88,7 @@ async function confirmLatest(suffix) {
     body: JSON.stringify({
       conversationId: `provider-${suffix}`,
       text: "确认",
+      quotedMessageId: providerMessageId,
       sourceMessageId: suffix,
       senderId: bookkeepingSender,
       chatType: "direct",

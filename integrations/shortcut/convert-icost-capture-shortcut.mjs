@@ -441,6 +441,13 @@ export async function convertIcostCaptureShortcut({ inputPath, outputPath, endpo
   return { outputPath, report };
 }
 
+/** Verify an unsigned V8 XML plist without reading or printing its values. */
+export async function verifyConvertedIcostCaptureShortcutFile(filePath) {
+  if (!filePath) throw new Error("filePath is required");
+  const xml = await readFile(filePath, "utf8");
+  return inspectConvertedIcostCaptureShortcutXml(xml);
+}
+
 function parseCliArguments(argv) {
   const result = {};
   for (const argument of argv) {
