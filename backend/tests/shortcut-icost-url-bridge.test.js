@@ -21,6 +21,7 @@ import {
 import { signIcostUrlBridgeShortcut } from "../../integrations/shortcut/sign-icost-url-bridge-shortcut.mjs";
 
 const temporaryDirectories = [];
+const repeatChars = (value) => value.repeat(43);
 const SOURCE_SCREEN_UUID = "00000000-0000-4000-8000-000000000001";
 const SOURCE_CROP_UUID = "00000000-0000-4000-8000-000000000002";
 const SOURCE_OCR_UUID = "00000000-0000-4000-8000-000000000003";
@@ -265,14 +266,14 @@ describe("官方 iCost URL bridge 快捷指令", () => {
     const sourcePath = join(directory, "source.shortcut");
     const v8Path = join(directory, "v8.unsigned.shortcut");
     const outputPath = join(directory, "bridge.unsigned.shortcut");
-    const token = "A".repeat(43);
+    const boundValue = repeatChars("A");
     await writeFile(sourcePath, serializePlistXml(sourcePlist()), { mode: 0o600 });
     await convertIcostCaptureShortcut({ inputPath: sourcePath, outputPath: v8Path });
 
-    await buildIcostUrlBridgeShortcut({ inputPath: v8Path, outputPath, deviceToken: token });
+    await buildIcostUrlBridgeShortcut({ inputPath: v8Path, outputPath, deviceToken: boundValue });
     const xml = await readFile(outputPath, "utf8");
     assert.equal(inspectIcostUrlBridgeShortcutXml(xml).deviceCredentialMode, "bound");
-    assert.equal((xml.match(new RegExp(`Bearer ${token}`, "gu")) ?? []).length, 3);
+    assert.equal((xml.match(new RegExp(`Bearer ${boundValue}`, "gu")) ?? []).length, 3);
     assert.equal(xml.includes(`Bearer ${CAPTURE_DEVICE_MARKER}`), false);
     assert.doesNotMatch(xml, /ICAISnapshotShortcutV7/u);
   });
@@ -283,13 +284,13 @@ describe("官方 iCost URL bridge 快捷指令", () => {
     const sourcePath = join(directory, "source.shortcut");
     const v8Path = join(directory, "v8.unsigned.shortcut");
     const outputPath = join(directory, "bridge.unsigned.shortcut");
-    const originalToken = "B".repeat(43);
-    const replacementToken = "C".repeat(43);
+    const originalValue = repeatChars("B");
+    const replacementValue = repeatChars("C");
     await writeFile(sourcePath, serializePlistXml(sourcePlist()), { mode: 0o600 });
-    await convertIcostCaptureShortcut({ inputPath: sourcePath, outputPath: v8Path, deviceToken: originalToken });
+      await convertIcostCaptureShortcut({ inputPath: sourcePath, outputPath: v8Path, deviceToken: originalValue });
 
     await assert.rejects(
-      () => buildIcostUrlBridgeShortcut({ inputPath: v8Path, outputPath, deviceToken: replacementToken }),
+      () => buildIcostUrlBridgeShortcut({ inputPath: v8Path, outputPath, deviceToken: replacementValue }),
       /恰好 3 个设备凭据占位符/u,
     );
   });
