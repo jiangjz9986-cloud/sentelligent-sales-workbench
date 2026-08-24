@@ -778,8 +778,8 @@ export function createShortcutBookkeepingRepository(db, {
         id, version, owner, week_start, status, requested_cents, received_cents,
         requested_on, received_on, purpose, notes, created_by, updated_by, created_at, updated_at
       ) VALUES (
-        $advanceId, 1, $owner, $weekStart, 'received', $amountCents, $amountCents,
-        $receivedOn, $receivedOn, $purpose, $notes, $actor, $actor, $now, $now
+        $advanceId, 1, $owner, $weekStart, 'received', 0, $amountCents,
+        NULL, $receivedOn, $purpose, $notes, $actor, $actor, $now, $now
       )
     `).run({
       $advanceId: advanceId,

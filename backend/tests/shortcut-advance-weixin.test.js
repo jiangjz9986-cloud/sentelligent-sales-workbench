@@ -205,7 +205,10 @@ test("loan income creates a pool and natural-language week assignment allocates 
   const db = openDatabase({ databaseUrl: join(dir, "assistant.sqlite") });
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_advance_allocations WHERE status = 'active'").get().count, 1);
   assert.equal(db.prepare("SELECT allocated_cents FROM travel_expense_advance_allocations WHERE status = 'active'").get().allocated_cents, 50000);
-  assert.equal(db.prepare("SELECT received_cents FROM travel_expense_advances").get().received_cents, 200000);
+  const advanceFacts = db.prepare("SELECT requested_cents, requested_on, received_cents FROM travel_expense_advances").get();
+  assert.equal(advanceFacts.requested_cents, 0);
+  assert.equal(advanceFacts.requested_on, null);
+  assert.equal(advanceFacts.received_cents, 200000);
   db.close();
 });
 

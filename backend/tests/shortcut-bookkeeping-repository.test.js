@@ -100,6 +100,8 @@ describe("Shortcut bookkeeping repository invariants", () => {
       assert.ok(completed.item.advanceId);
       const advance = db.prepare("SELECT * FROM travel_expense_advances WHERE id = $id").get({ $id: completed.item.advanceId });
       assert.equal(advance.status, "received");
+      assert.equal(advance.requested_cents, 0);
+      assert.equal(advance.requested_on, null);
       assert.equal(advance.received_cents, 200000);
       assert.equal(advance.week_start, "2026-08-17");
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_advance_sources WHERE entry_id = $id").get({ $id: received.item.id }).count, 1);
