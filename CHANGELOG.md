@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.6.20] - 2026-08-25
+
+### 生产 PDF 视觉渲染兼容热修
+
+- 保留图片与 PDF 使用 `deepseek-v4-flash-vision-exp`、纯文字继续使用 `deepseek-v4-flash` 的模型路由合同。
+- 移除生产 Poppler 0.26.5 不支持的 `pdftoppm -jpegopt` 参数；PDF 仍先有界渲染最多四页 JPEG，再交给视觉模型。
+- 新增精确参数回归，禁止重新引入旧版生产命令不支持的 JPEG 质量参数；本版无数据库迁移，不同步 GitHub。
+
+## [0.6.19] - 2026-08-25
+
+### 小小视觉记账与单次投递热修
+
+- 图片付款凭证、图片发票和 PDF 发票改用 `deepseek-v4-flash-vision-exp`；其他模型任务继续使用 `deepseek-v4-flash`。
+- 微信 provider 的空成功回执和零状态回执按成功处理，同一 outbox 重试复用稳定客户端幂等标识，终止重复确认消息。
+- 本版无数据库迁移；按项目所有者授权使用本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.6.18] - 2026-08-25
 
 ### 微信远程媒体类型热修

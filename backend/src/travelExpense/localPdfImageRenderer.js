@@ -98,7 +98,6 @@ export function createLocalPdfImageRenderer(options = {}) {
             "-l", String(maxPages),
             "-scale-to", "2048",
             "-jpeg",
-            "-jpegopt", "quality=88",
             inputPath,
             outputPrefix,
           ],

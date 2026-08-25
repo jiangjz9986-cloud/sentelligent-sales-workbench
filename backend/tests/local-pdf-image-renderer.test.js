@@ -24,8 +24,15 @@ describe("local PDF image renderer", () => {
       const pages = await renderer.render(VALID_PDF);
 
       assert.equal(captured.command, "/usr/bin/pdftoppm");
-      assert.deepEqual(captured.args.slice(0, 6), ["-f", "1", "-l", "4", "-scale-to", "2048"]);
-      assert.equal(captured.args.includes("-jpeg"), true);
+      assert.deepEqual(captured.args, [
+        "-f", "1",
+        "-l", "4",
+        "-scale-to", "2048",
+        "-jpeg",
+        captured.inputPath,
+        captured.outputPrefix,
+      ]);
+      assert.equal(captured.args.includes("-jpegopt"), false);
       assert.equal(pages.length, 2);
       assert.deepEqual(pages[0], { mediaType: "image/jpeg", buffer: VALID_JPEG });
       assert.deepEqual(await import("node:fs/promises").then(({ readdir }) => readdir(root)), []);
