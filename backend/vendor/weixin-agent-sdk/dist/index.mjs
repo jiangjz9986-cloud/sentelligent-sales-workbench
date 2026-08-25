@@ -2211,43 +2211,54 @@ async function processOneMessage(full, deps) {
 			typingTimer = setInterval(startTyping, 1e4);
 		}
 		try {
-			const response = await deps.agent.chat(request);
-			if (response.media) {
-				let filePath;
-				const mediaUrl = response.media.url;
-				if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR$1, "outbound"));
-				else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
-				await sendWeixinMediaFile({
-					filePath,
+			let response;
+			try {
+				response = await deps.agent.chat(request);
+			} catch (err) {
+				deps.errLog("[weixin] category=message status=failed durationMs=0");
+				sendWeixinErrorNotice({
 					to,
-					text: response.text ? markdownToPlainText(response.text) : "",
+					contextToken,
+					message: "⚠️ 处理消息失败",
+					baseUrl: deps.baseUrl,
+					token: deps.token,
+					errLog: deps.errLog
+				});
+				return err?.permanent === true;
+			}
+			try {
+				if (response.media) {
+					let filePath;
+					const mediaUrl = response.media.url;
+					if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR$1, "outbound"));
+					else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
+					await sendWeixinMediaFile({
+						filePath,
+						to,
+						text: response.text ? markdownToPlainText(response.text) : "",
+						opts: {
+							baseUrl: deps.baseUrl,
+							token: deps.token,
+							contextToken
+						},
+						cdnBaseUrl: deps.cdnBaseUrl
+					});
+				} else if (response.text) await sendMessageWeixin({
+					to,
+					text: markdownToPlainText(response.text),
 					opts: {
 						baseUrl: deps.baseUrl,
 						token: deps.token,
 						contextToken
-					},
-					cdnBaseUrl: deps.cdnBaseUrl
+					}
 				});
-			} else if (response.text) await sendMessageWeixin({
-				to,
-				text: markdownToPlainText(response.text),
-				opts: {
-					baseUrl: deps.baseUrl,
-					token: deps.token,
-					contextToken
-				}
-			});
-		} catch (err) {
-			deps.errLog("[weixin] category=message status=failed durationMs=0");
-			sendWeixinErrorNotice({
-				to,
-				contextToken,
-				message: "⚠️ 处理消息失败",
-				baseUrl: deps.baseUrl,
-				token: deps.token,
-				errLog: deps.errLog
-			});
-			return err?.permanent === true;
+			} catch {
+				// The agent result may already contain durable business effects. A reply
+				// transport failure must not replay that event or block later messages in
+				// the same provider batch; record the delivery failure and advance.
+				deps.errLog("[weixin] category=delivery status=failed durationMs=0");
+				return true;
+			}
 		} finally {
 			if (typingTimer) clearInterval(typingTimer);
 			if (typingTicket) sendTyping({

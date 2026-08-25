@@ -940,6 +940,77 @@ describe("vendored Weixin inbound adapter", () => {
     });
   });
 
+  it("advances past a durable inbound result when only its Weixin reply delivery fails", async () => {
+    await withSyntheticAccount("reply-delivery-failure", async ({ accountId, stateDir }) => {
+      const abortController = new AbortController();
+      const oldCursor = "synthetic-reply-failure-old-cursor";
+      const newCursor = "synthetic-reply-failure-new-cursor";
+      const syncFilePath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.sync.json`);
+      await writeFile(syncFilePath, JSON.stringify({ get_updates_buf: oldCursor }));
+      const requestedCursors = [];
+      const chatTexts = [];
+      const logLines = [];
+      let updatePolls = 0;
+      let sendCalls = 0;
+      let persistedCursorOnNextPoll = null;
+      globalThis.fetch = async (url, init) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          requestedCursors.push(JSON.parse(init.body).get_updates_buf);
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: newCursor,
+            msgs: [
+              textUpdate({
+                message_id: "synthetic-reply-failure-message-a",
+                context_token: syntheticLabel("synthetic", "old", "reply", "context"),
+                item_list: [{ type: 1, text_item: { text: "synthetic durable first" } }],
+              }),
+              textUpdate({
+                message_id: "synthetic-reply-failure-message-b",
+                context_token: syntheticLabel("synthetic", "fresh", "reply", "context"),
+                item_list: [{ type: 1, text_item: { text: "synthetic following second" } }],
+              }),
+            ],
+          }), { status: 200 });
+          persistedCursorOnNextPoll = JSON.parse(await readFile(syncFilePath, "utf8")).get_updates_buf;
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) {
+          return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        }
+        if (endpoint.endsWith("/sendmessage")) {
+          sendCalls += 1;
+          if (sendCalls === 1) return new Response("synthetic delivery unavailable", { status: 503 });
+          return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        }
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      const bot = start({
+        async chat(request) {
+          chatTexts.push(request.text);
+          return { text: `synthetic reply for ${request.text}` };
+        },
+      }, {
+        accountId,
+        abortSignal: abortController.signal,
+        deliveryKey: DELIVERY_KEY,
+        log(message) { logLines.push(message); },
+      });
+      await bot.wait();
+
+      assert.deepEqual(chatTexts, ["synthetic durable first", "synthetic following second"]);
+      assert.deepEqual(requestedCursors, [oldCursor, newCursor], logLines.join("\n"));
+      assert.equal(sendCalls, 2);
+      assert.equal(persistedCursorOnNextPoll, newCursor);
+      assert.match(logLines.join("\n"), /category=delivery status=failed/u);
+      assert.doesNotMatch(logLines.join("\n"), /category=updates status=error/u);
+    });
+  });
+
   it("normalizes downloadable media only after decrypting, saving, and hashing it", async () => {
     await withSyntheticAccount("media-success", async ({ accountId }) => {
       const abortController = new AbortController();
