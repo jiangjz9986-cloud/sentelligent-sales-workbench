@@ -9,6 +9,10 @@ const COMPLETED_STATUSES = new Set(["accepted", "review_required", "rejected"]);
 const FUNDING_SOURCES = new Set(["personal", "company", "advance"]);
 const PAYMENT_METHODS = new Set(["wechat", "alipay", "card", "cash", "other"]);
 
+function runTransaction(db, work) {
+  return db.isTransaction ? work() : withImmediateTransaction(db, work);
+}
+
 function isPlainObject(value) {
   return value !== null
     && typeof value === "object"
@@ -182,6 +186,51 @@ function normalizeSource(value) {
   };
 }
 
+function normalizeNoteAutomation(value) {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value) || value.kind !== "meal") {
+    throw new TypeError("analysis.noteAutomation is invalid");
+  }
+  const tripRegionSource = value.tripRegionSource === null || value.tripRegionSource === undefined
+    ? null
+    : value.tripRegionSource;
+  if (tripRegionSource !== null && !["text", "itinerary"].includes(tripRegionSource)) {
+    throw new TypeError("analysis.noteAutomation.tripRegionSource is invalid");
+  }
+  const paidTime = value.paidTime === null || value.paidTime === undefined
+    ? null
+    : value.paidTime;
+  if (paidTime !== null && (typeof paidTime !== "string" || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(paidTime))) {
+    throw new TypeError("analysis.noteAutomation.paidTime is invalid");
+  }
+  return {
+    kind: "meal",
+    tripRegion: optionalText(value.tripRegion, "analysis.noteAutomation.tripRegion", 100),
+    tripRegionSource,
+    paidTime,
+  };
+}
+
+function normalizeCategoryAutomation(value) {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value) || value.kind !== "contextual") {
+    throw new TypeError("analysis.categoryAutomation is invalid");
+  }
+  return {
+    kind: "contextual",
+    sourceCategory: optionalText(
+      value.sourceCategory,
+      "analysis.categoryAutomation.sourceCategory",
+      100,
+    ),
+    sourceSubcategory: optionalText(
+      value.sourceSubcategory,
+      "analysis.categoryAutomation.sourceSubcategory",
+      100,
+    ),
+  };
+}
+
 function normalizeWarnings(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.slice(0, 50).map(
@@ -251,6 +300,8 @@ function normalizeAnalysis(value, row) {
     category: resolvedSelection.category,
     subcategory: resolvedSelection.subcategory,
     note,
+    noteAutomation: normalizeNoteAutomation(value.noteAutomation),
+    categoryAutomation: normalizeCategoryAutomation(value.categoryAutomation),
     expense,
     warnings: normalizeWarnings(value.warnings),
     source: normalizeSource(value.source),
@@ -389,6 +440,31 @@ export function createShortcutBookkeepingRepository(db, {
     LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
     WHERE entry.owner = $owner AND entry.idempotency_key_hash = $idempotencyKeyHash
   `);
+  const selectBySource = db.prepare(`
+    SELECT entry.*, expense.reference_code AS expense_reference_code
+           , advance_source.id AS advance_source_id
+           , advance.id AS advance_id
+           , advance.week_start AS advance_week_start
+           , advance.received_cents AS advance_received_cents
+    FROM shortcut_bookkeeping_entries entry
+    LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+    LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+      AND advance_source.status = 'active'
+    LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
+    WHERE entry.owner = $owner AND entry.target_system = 'sentelligent'
+      AND entry.source_id = $sourceId
+    ORDER BY entry.created_at ASC, entry.id ASC
+    LIMIT 20
+  `);
+
+  function listBySource({ owner, sourceId } = {}) {
+    const normalizedOwner = requiredText(owner, "owner", 200);
+    const normalizedSourceId = requiredText(sourceId, "sourceId", 200);
+    return selectBySource.all({
+      $owner: normalizedOwner,
+      $sourceId: normalizedSourceId,
+    }).map(itemFromRow);
+  }
 
   function receive(input = {}) {
     const owner = requiredText(input.owner, "owner", 200);
@@ -406,7 +482,7 @@ export function createShortcutBookkeepingRepository(db, {
     const capturedAt = dateTime(input.capturedAt, "capturedAt", { nullable: true });
     const now = nowIso(clock);
 
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const existing = selectByKey.get({ $owner: owner, $idempotencyKeyHash: idempotencyKeyHash });
       if (existing) {
         if (existing.request_hash !== normalizedRequestHash) {
@@ -472,7 +548,7 @@ export function createShortcutBookkeepingRepository(db, {
       throw new TypeError("leaseMs must be positive");
     }
     const now = nowIso(clock);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current) {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_NOT_FOUND", "Shortcut bookkeeping entry was not found");
@@ -554,7 +630,7 @@ export function createShortcutBookkeepingRepository(db, {
     const normalizedOwner = requiredText(owner, "owner", 200);
     if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new TypeError("leaseMs must be positive");
     const now = nowIso(clock);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current || current.owner !== normalizedOwner || current.target_system !== "sentelligent") {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
@@ -583,7 +659,7 @@ export function createShortcutBookkeepingRepository(db, {
     const normalizedOwner = requiredText(owner, "owner", 200);
     const normalizedActor = requiredText(actor ?? owner, "actor", 200);
     const normalizedReason = requiredText(reason, "reason", 1_000);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current || current.owner !== normalizedOwner || current.target_system !== "sentelligent") {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
@@ -628,7 +704,7 @@ export function createShortcutBookkeepingRepository(db, {
     const id = requiredText(idValue, "id", 200);
     const normalizedOwner = requiredText(owner, "owner", 200);
     const normalizedActor = requiredText(actor ?? owner, "actor", 200);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current || current.owner !== normalizedOwner || current.target_system !== "sentelligent") {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
@@ -775,7 +851,7 @@ export function createShortcutBookkeepingRepository(db, {
     reviewPatch,
     revisionSource = "capture",
   } = {}) {
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const state = currentProcessing(idValue, leaseToken, "sentelligent");
       if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
       const { id, current } = state;
@@ -1005,7 +1081,7 @@ export function createShortcutBookkeepingRepository(db, {
   }
 
   function release(idValue, { leaseToken, errorCode = "PROCESSING_FAILED" } = {}) {
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const id = requiredText(idValue, "id", 200);
       const normalizedLease = dateTime(leaseToken, "leaseToken", { nullable: true });
       const normalizedError = requiredText(errorCode, "errorCode", 200);
@@ -1036,6 +1112,7 @@ export function createShortcutBookkeepingRepository(db, {
 
   return {
     receive,
+    listBySource,
     claim,
     listReview,
     getReview,

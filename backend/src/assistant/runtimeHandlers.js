@@ -22,6 +22,7 @@ import {
   classifyBookkeepingEntry,
   extractBookkeepingRows,
 } from "./bookkeepingCapture.js";
+import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
 const FINANCIAL_SCOPE_DENIED = "该财务预览仅限已绑定账号本人的微信私聊。";
@@ -141,6 +142,44 @@ function boundedRecognition(recognition) {
     ? recognition.extractedText.slice(0, 200_000)
     : recognition.extractedText ?? null;
   return { ...recognition, extractedText };
+}
+
+function visionTransactionRows(recognition) {
+  const transactions = recognition?.transactions;
+  if (!Array.isArray(transactions) || transactions.length < 1 || transactions.length > 20) return [];
+  return transactions.flatMap((transaction, index) => {
+    if (!transaction || typeof transaction !== "object" || Array.isArray(transaction)) return [];
+    const amountCents = Number.isSafeInteger(transaction.amountCents) && transaction.amountCents > 0
+      ? transaction.amountCents
+      : null;
+    if (amountCents === null) return [];
+    const occurredOn = /^\d{4}-\d{2}-\d{2}$/u.test(safeText(transaction.occurredOn))
+      ? safeText(transaction.occurredOn)
+      : null;
+    const paidTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(safeText(transaction.paidTime))
+      ? safeText(transaction.paidTime)
+      : null;
+    const merchant = safeText(transaction.merchant) || null;
+    const paymentMethod = safeText(transaction.paymentMethod) || null;
+    return [{
+      index,
+      amountCents,
+      entryType: null,
+      merchant,
+      occurredOn,
+      paidTime,
+      paymentMethod,
+      text: [
+        merchant ? `商户：${merchant}` : null,
+        occurredOn ? `交易日期：${occurredOn}` : null,
+        paidTime ? `支付时间：${paidTime}` : null,
+        `金额：${(amountCents / 100).toFixed(2)} 元`,
+        paymentMethod ? `支付方式：${paymentMethod}` : null,
+      ].filter(Boolean).join("\n").slice(0, 12_000),
+      warnings: [],
+      visionTransaction: true,
+    }];
+  });
 }
 
 function moneyFromCents(value) {
@@ -521,6 +560,31 @@ export function createAssistantToolHandlers({
       }
 
       const content = media ? mediaBuffer(media) : null;
+      const sourceRef = media?.sourceRef
+        ?? `weixin:text:${safeText(context.event) || safeText(context.requestId) || createHash("sha256").update(rawText, "utf8").digest("hex")}`;
+      if (media && typeof bookkeepingRepository.listBySource === "function") {
+        const existingItems = bookkeepingRepository.listBySource({
+          owner: context.owner,
+          sourceId: sourceRef,
+        });
+        if (existingItems.length > 0) {
+          const existingResults = existingItems.map((item) => ({
+            item,
+            pending: item.status === "review_required"
+              ? bookkeepingRuntime.startReview({ account: context.owner, entry: item })
+              : null,
+          }));
+          const countText = existingItems.length > 1 ? `，共识别 ${existingItems.length} 笔` : "";
+          return {
+            text: `这张付款凭证已经收到${countText}，已保留原来的记账状态。`,
+            status: "duplicate",
+            item: existingItems[0] ?? null,
+            items: existingItems,
+            pending: existingResults[0]?.pending ?? null,
+            pendingItems: existingResults.map((result) => result.pending).filter(Boolean),
+          };
+        }
+      }
       let recognition = {};
       if (media) {
         try {
@@ -547,9 +611,12 @@ export function createAssistantToolHandlers({
       const splitRows = media
         ? extractBookkeepingRows(extractedText, { layout: recognition?.layout })
         : [];
+      const transactionRows = media ? visionTransactionRows(recognition) : [];
       const rowInputs = splitRows.length > 1
         ? splitRows
-        : [{
+        : transactionRows.length > 1
+          ? transactionRows
+          : [{
             index: 0,
             text: extractedText || rawText,
             amountCents: recognition?.evidence?.amountCents ?? null,
@@ -571,20 +638,24 @@ export function createAssistantToolHandlers({
             expenseAnalysis = { warnings: ["ANALYSIS_FAILED"], expense: null, source: { provider: "rules", model: null } };
           }
         }
-        const combinedText = `${rawText}\n${rowText}`.trim();
+        const combinedText = row.visionTransaction
+          ? `${rowText}\n${rawText}`.trim()
+          : `${rawText}\n${rowText}`.trim();
         const entryType = classifyBookkeepingEntry({
           text: combinedText,
           entryType: explicitEntryType ?? row.entryType ?? args?.entryType,
         });
-        const rowRecognition = splitRows.length > 1
+        const rowRecognition = rowInputs.length > 1
           ? {
               extractedText: rowText,
               evidence: {
                 amountCents: row.amountCents,
-                occurredOn: null,
-                paidTime: null,
+                occurredOn: row.visionTransaction ? row.occurredOn : null,
+                paidTime: row.visionTransaction ? row.paidTime : null,
                 merchant: row.merchant,
-                paymentMethod: recognition?.evidence?.paymentMethod ?? null,
+                paymentMethod: row.visionTransaction
+                  ? row.paymentMethod
+                  : recognition?.evidence?.paymentMethod ?? null,
               },
               confidence: recognition?.confidence ?? null,
               warnings: [...new Set([
@@ -600,11 +671,13 @@ export function createAssistantToolHandlers({
           text: combinedText,
           entryType,
           now: receivedAt,
+          tripRegionResolver: ({ occurredOn }) => resolveItineraryTripRegion(db, {
+            owner: context.owner,
+            occurredOn,
+          }),
         });
         analyzedRows.push({ row, rowText, entryType, analysis });
       }
-      const sourceRef = media?.sourceRef
-        ?? `weixin:text:${safeText(context.event) || safeText(context.requestId) || createHash("sha256").update(rawText, "utf8").digest("hex")}`;
       let inbox = null;
       if (media && travelExpenseDocumentInboxRepository) {
         try {
@@ -633,57 +706,70 @@ export function createAssistantToolHandlers({
             : null;
         }
       }
-      const results = [];
-      for (const { row, rowText, entryType, analysis } of analyzedRows) {
-        const rowSignature = createHash("sha256")
-          .update(`${row.index}\u0000${rowText}\u0000${row.amountCents ?? ""}`, "utf8")
-          .digest("hex")
-          .slice(0, 20);
-        const idempotencySource = analyzedRows.length > 1
-          ? `${sourceRef}:row:${row.index + 1}:${rowSignature}`
-          : sourceRef;
-        const requestHash = createHash("sha256").update(JSON.stringify({
-          sourceRef,
-          rowIndex: row.index,
-          rowText,
-          rawText,
-          entryType,
-        }), "utf8").digest("hex");
-        const received = bookkeepingRepository.receive({
-          owner: context.owner,
-          actor: context.owner,
-          ledgerName: "出差报销",
-          entryType,
-          category: analysis.category,
-          subcategory: analysis.subcategory,
-          note: analysis.note ?? null,
-          idempotencyKey: `weixin-bookkeeping:${idempotencySource}`,
-          requestHash,
-          sourceId: sourceRef,
-          rawText: rowText || rawText || media?.fileName || "微信图片记账",
-          capturedAt: analysis.expense?.paidAt ?? receivedAt.toISOString(),
-        });
-        if (received.replayed) {
-          const pending = received.item.status === "review_required"
-            ? bookkeepingRuntime.startReview({ account: context.owner, entry: received.item })
-            : null;
-          results.push({ item: received.item, pending, replayed: true });
-          continue;
+      // Persist the complete source batch atomically. Repository write methods
+      // join this outer transaction, so a crash cannot leave row 1 durable
+      // while row 2 is absent. The in-transaction source recheck also closes
+      // the concurrent-first-request window after asynchronous recognition.
+      const capturedResults = withImmediateTransaction(db, () => {
+        if (media && typeof bookkeepingRepository.listBySource === "function") {
+          const concurrentExisting = bookkeepingRepository.listBySource({
+            owner: context.owner,
+            sourceId: sourceRef,
+          });
+          if (concurrentExisting.length > 0) {
+            return concurrentExisting.map((item) => ({ item, replayed: true }));
+          }
         }
-        const claimed = bookkeepingRepository.claim(received.item.id);
-        let completed;
-        try {
-          completed = bookkeepingRepository.completeLocal(received.item.id, {
+        const batch = [];
+        for (const { row, rowText, entryType, analysis } of analyzedRows) {
+          const rowOrdinal = row.index + 1;
+          const idempotencySource = media
+            ? `${sourceRef}:row:${rowOrdinal}`
+            : analyzedRows.length > 1
+              ? `${sourceRef}:row:${rowOrdinal}`
+              : sourceRef;
+          const requestHash = createHash("sha256").update(JSON.stringify(media
+            ? { sourceRef, rowOrdinal, media: true }
+            : {
+                sourceRef,
+                rowIndex: row.index,
+                rowText,
+                rawText,
+                entryType,
+              }), "utf8").digest("hex");
+          const received = bookkeepingRepository.receive({
+            owner: context.owner,
+            actor: context.owner,
+            ledgerName: "出差报销",
+            entryType,
+            category: analysis.category,
+            subcategory: analysis.subcategory,
+            note: analysis.note ?? null,
+            idempotencyKey: `weixin-bookkeeping:${idempotencySource}`,
+            requestHash,
+            sourceId: sourceRef,
+            rawText: rowText || rawText || media?.fileName || "微信图片记账",
+            capturedAt: analysis.expense?.paidAt ?? receivedAt.toISOString(),
+          });
+          if (received.replayed) {
+            batch.push({ item: received.item, replayed: true });
+            continue;
+          }
+          const claimed = bookkeepingRepository.claim(received.item.id);
+          const completed = bookkeepingRepository.completeLocal(received.item.id, {
             analysis,
             leaseToken: claimed.leaseToken,
           });
-        } catch (error) {
-          try { bookkeepingRepository.release(received.item.id, { leaseToken: claimed.leaseToken, errorCode: "WEIXIN_BOOKKEEPING_CAPTURE_FAILED" }); } catch { /* preserve original error */ }
-          throw error;
+          batch.push({ item: completed.item, replayed: false });
         }
-        const pending = bookkeepingRuntime.startReview({ account: context.owner, entry: completed.item });
-        results.push({ item: completed.item, pending, replayed: false });
-      }
+        return batch;
+      });
+      const results = capturedResults.map((result) => ({
+        ...result,
+        pending: result.item.status === "review_required"
+          ? bookkeepingRuntime.startReview({ account: context.owner, entry: result.item })
+          : null,
+      }));
       const pendingCount = results.filter((result) => result.pending).length;
       const replayed = results.every((result) => result.replayed);
       const countText = results.length > 1 ? `，共识别 ${results.length} 笔` : "";

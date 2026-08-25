@@ -26,9 +26,16 @@ function makeRuntimeHarness({
       id: "entry-1",
       owner: "assistant-owner",
       status: "review_required",
+      ledgerName: "出差报销",
+      entryType: "expense",
+      category: "交通",
+      subcategory: null,
+      note: null,
       amountCents: 1280,
       analysis: {
         status: "ready",
+        category: "交通",
+        subcategory: null,
         warnings: [],
         expense: {
           occurredOn: "2026-08-18",

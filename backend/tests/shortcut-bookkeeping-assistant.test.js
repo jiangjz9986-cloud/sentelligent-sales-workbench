@@ -113,6 +113,14 @@ describe("快捷记账→小小助手纯能力层", () => {
     });
   });
 
+  it("rejects a zero-yuan correction because a bookkeeping amount must be positive", () => {
+    assert.deepEqual(parseShortcutBookkeepingCorrection("修改金额为0元"), {
+      status: "review_required",
+      changes: {},
+      warnings: ["invalid_amountCents"],
+    });
+  });
+
   it("parses date, merchant, purpose, note, category and subcategory corrections", () => {
     const correction = parseShortcutBookkeepingCorrection(
       "时间改为 2026-08-19T10:20:00+08:00；商户改为 济南客户；用途改为 客户拜访；备注改为 需要发票；分类改为 交通；子分类改为 打车",
@@ -128,6 +136,14 @@ describe("快捷记账→小小助手纯能力层", () => {
     });
   });
 
+  it("parses the full 费用类别 label before the shorter amount label 费用", () => {
+    assert.deepEqual(parseShortcutBookkeepingCorrection("修改费用类别为交通"), {
+      status: "accepted",
+      changes: { category: "交通" },
+      warnings: [],
+    });
+  });
+
   it("parses the Chinese correction forms used in the WeChat flow", () => {
     const correction = parseShortcutBookkeepingCorrection(
       "修改日期为 8月19日；修改金额为 18.50 元；商户改成 济南客户；加备注 客户拜访",
@@ -139,6 +155,18 @@ describe("快捷记账→小小助手纯能力层", () => {
       amountCents: 1850,
       merchant: "济南客户",
       note: "客户拜访",
+    });
+  });
+
+  it("parses a time-only correction against the current draft date", () => {
+    const correction = parseShortcutBookkeepingCorrection("修改时间为18:00", {
+      friendlyDates: true,
+      currentOccurredOn: "2026-08-25T12:00:00+08:00",
+    });
+    assert.deepEqual(correction, {
+      status: "accepted",
+      changes: { occurredOn: "2026-08-25T18:00:00+08:00" },
+      warnings: [],
     });
   });
 

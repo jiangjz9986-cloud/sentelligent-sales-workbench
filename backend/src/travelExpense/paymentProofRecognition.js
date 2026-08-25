@@ -6,10 +6,19 @@ const MODEL_FIELDS = new Set([
   "paidTime",
   "merchant",
   "paymentMethod",
+  "transactions",
   "documentKind",
   "confidence",
   "warnings",
 ]);
+const TRANSACTION_FIELDS = new Set([
+  "amountCents",
+  "occurredOn",
+  "paidTime",
+  "merchant",
+  "paymentMethod",
+]);
+const MAX_TRANSACTIONS = 20;
 const EVIDENCE_FIELDS = ["amountCents", "occurredOn", "paidTime"];
 const PAYMENT_METHODS = new Set(["wechat", "alipay", "bank_card", "cash", "other"]);
 
@@ -162,6 +171,30 @@ function warningCodes(value) {
   return [...new Set(normalized)];
 }
 
+function normalizeTransactions(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > MAX_TRANSACTIONS) {
+    throw stableModelError("MODEL_INVALID_RESPONSE");
+  }
+  return value.map((transaction) => {
+    if (transaction === null || typeof transaction !== "object" || Array.isArray(transaction)) {
+      throw stableModelError("MODEL_INVALID_RESPONSE");
+    }
+    for (const key of Object.keys(transaction)) {
+      if (!TRANSACTION_FIELDS.has(key)) throw stableModelError("MODEL_INVALID_RESPONSE");
+    }
+    const amountCents = optionalMoneyCents(transaction.amountCents);
+    if (amountCents === null) throw stableModelError("MODEL_INVALID_RESPONSE");
+    return {
+      amountCents,
+      occurredOn: optionalDate(transaction.occurredOn),
+      paidTime: optionalTime(transaction.paidTime),
+      merchant: optionalText(transaction.merchant),
+      paymentMethod: optionalPaymentMethod(transaction.paymentMethod),
+    };
+  });
+}
+
 function normalizeModelFields(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw stableModelError("MODEL_INVALID_RESPONSE");
@@ -169,12 +202,15 @@ function normalizeModelFields(value) {
   for (const key of Object.keys(value)) {
     if (!MODEL_FIELDS.has(key)) throw stableModelError("MODEL_INVALID_RESPONSE");
   }
+  const transactions = normalizeTransactions(value.transactions);
+  const firstTransaction = transactions[0] ?? null;
   return {
-    amountCents: optionalMoneyCents(value.amountCents),
-    occurredOn: optionalDate(value.occurredOn),
-    paidTime: optionalTime(value.paidTime),
-    merchant: optionalText(value.merchant),
-    paymentMethod: optionalPaymentMethod(value.paymentMethod),
+    amountCents: optionalMoneyCents(value.amountCents) ?? firstTransaction?.amountCents ?? null,
+    occurredOn: optionalDate(value.occurredOn) ?? firstTransaction?.occurredOn ?? null,
+    paidTime: optionalTime(value.paidTime) ?? firstTransaction?.paidTime ?? null,
+    merchant: optionalText(value.merchant) ?? firstTransaction?.merchant ?? null,
+    paymentMethod: optionalPaymentMethod(value.paymentMethod) ?? firstTransaction?.paymentMethod ?? null,
+    ...(transactions.length > 0 ? { transactions } : {}),
     ...(Object.hasOwn(value, "documentKind")
       ? { documentKind: optionalDocumentKind(value.documentKind) }
       : {}),
@@ -220,6 +256,9 @@ function completedRecognition(analyzed, typedEvidence, source, extra = {}) {
       ...(conflicts.length > 0 ? ["EVIDENCE_CONFLICT"] : []),
     ])],
     source,
+    ...(Array.isArray(analyzed.transactions) && analyzed.transactions.length > 0
+      ? { transactions: analyzed.transactions }
+      : {}),
     ...extra,
   };
 }
@@ -262,9 +301,11 @@ function modelMessages(extractedText) {
       content: [
         "你是付款凭证字段提取器，只处理服务器本地 OCR 或 PDF 文本提取所得的纯文本。",
         "只输出合法 JSON，不输出解释、Markdown 或猜测内容。",
-        "仅允许字段 amountCents、occurredOn、paidTime、merchant、paymentMethod、confidence、warnings。",
+        "顶层仅允许字段 amountCents、occurredOn、paidTime、merchant、paymentMethod、transactions、confidence、warnings。",
         "amountCents 为正整数分；occurredOn 为 YYYY-MM-DD；paidTime 为 HH:mm。",
         "paymentMethod 只能为 wechat、alipay、bank_card、cash、other。",
+        "transactions 仅用于多笔独立付款，按文本出现顺序最多返回 20 笔；每项只能包含 amountCents、occurredOn、paidTime、merchant、paymentMethod，且 amountCents 必须为正整数分。",
+        "原价、优惠、折扣、合计与实付属于同一付款详情时不能拆成多笔，只取最终实付金额。",
         "文本没有明确依据的字段必须返回 null。",
       ].join("\n"),
     },
@@ -304,7 +345,7 @@ export async function analyzePaymentProofText(value, options = {}) {
       messages: modelMessages(modelText),
       response_format: { type: "json_object" },
       temperature: 0,
-      max_tokens: 500,
+      max_tokens: 1_600,
       stream: false,
       signal,
     }), timeoutMs);

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { createServer } from "../src/server.js";
+import { resolveItineraryTripRegion } from "../src/assistant/bookkeepingTripRegion.js";
 import { openDatabase } from "../src/db.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
@@ -24,6 +25,9 @@ let actionSequence;
 let outboxSequence;
 let latestQuoteMessageId;
 let lastRecognitionOptions;
+let driftingRecognitionCalls;
+let concurrentRecognitionCalls;
+let concurrentRecognitionWaiters;
 
 async function read(response) {
   const text = await response.text();
@@ -38,8 +42,8 @@ function analysis(overrides = {}) {
       occurredOn: "2026-08-18",
       amountCents: 1280,
       reimbursementCents: 1280,
-      purpose: "客户拜访交通",
-      merchant: "济南出租车",
+      purpose: "出差消费",
+      merchant: "合成商户",
       paidAt: "2026-08-18T12:00:00+08:00",
       fundingSource: "personal",
       paymentMethod: "wechat",
@@ -75,12 +79,12 @@ function multiRowRecognition() {
   });
   return {
     extractedText: [
-      "合成商户甲 -12.34",
+      "合成包子铺 -12.34",
       "8月18日 09:10",
-      "合成商户乙 -56.78",
+      "合成烧烤店 -56.78",
       "8月18日 18:20",
     ].join("\n"),
-    evidence: { amountCents: 1234, occurredOn: null, paidTime: null, merchant: "合成商户甲", paymentMethod: "bank_card" },
+    evidence: { amountCents: 1234, occurredOn: null, paidTime: null, merchant: "合成包子铺", paymentMethod: "bank_card" },
     confidence: 0.98,
     warnings: [],
     source: { provider: "test", model: null },
@@ -88,11 +92,11 @@ function multiRowRecognition() {
       pageWidth: 1280,
       pageHeight: 520,
       tokens: [
-        token("合成商户甲", 240, 45, 220, 1, 1),
+        token("合成包子铺", 240, 45, 220, 1, 1),
         token("-12.34", 1120, 45, 120, 1, 2),
         token("8月18日", 240, 105, 140, 2, 1),
         token("09:10", 400, 105, 100, 2, 2),
-        token("合成商户乙", 240, 290, 220, 3, 1),
+        token("合成烧烤店", 240, 290, 220, 3, 1),
         token("-56.78", 1120, 290, 120, 3, 2),
         token("8月18日", 240, 355, 140, 4, 1),
         token("18:20", 400, 355, 100, 4, 2),
@@ -157,6 +161,9 @@ beforeEach(async () => {
   outboxSequence = 0;
   latestQuoteMessageId = null;
   lastRecognitionOptions = null;
+  driftingRecognitionCalls = 0;
+  concurrentRecognitionCalls = 0;
+  concurrentRecognitionWaiters = [];
   server = createServer({
     databaseUrl: join(tempDir, "assistant.sqlite"),
     seed: false,
@@ -179,6 +186,68 @@ beforeEach(async () => {
     paymentProofRecognizer: async ({ fileName }, recognitionOptions = {}) => {
       lastRecognitionOptions = recognitionOptions;
       if (fileName === "multi.png") return multiRowRecognition();
+      if (fileName === "drift.png") {
+        driftingRecognitionCalls += 1;
+        return driftingRecognitionCalls === 1
+          ? {
+              documentKind: "payment_proof",
+              extractedText: null,
+              evidence: {
+                amountCents: 1800,
+                occurredOn: "2026-08-25",
+                paidTime: "09:00",
+                merchant: "合成早餐店",
+                paymentMethod: "wechat",
+              },
+              transactions: [
+                { amountCents: 1800, occurredOn: "2026-08-25", paidTime: "09:00", merchant: "合成早餐店", paymentMethod: "wechat" },
+                { amountCents: 2800, occurredOn: "2026-08-25", paidTime: "12:00", merchant: "合成午餐店", paymentMethod: "wechat" },
+              ],
+              confidence: 0.99,
+              warnings: [],
+              source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+            }
+          : {
+              documentKind: "payment_proof",
+              extractedText: null,
+              evidence: {
+                amountCents: 9900,
+                occurredOn: "2026-08-25",
+                paidTime: "22:00",
+                merchant: "漂移商户",
+                paymentMethod: "alipay",
+              },
+              confidence: 0.5,
+              warnings: [],
+              source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+            };
+      }
+      if (fileName === "concurrent.png") {
+        concurrentRecognitionCalls += 1;
+        const call = concurrentRecognitionCalls;
+        await new Promise((resolve) => {
+          concurrentRecognitionWaiters.push(resolve);
+          if (concurrentRecognitionWaiters.length === 2) {
+            for (const release of concurrentRecognitionWaiters.splice(0)) release();
+          }
+        });
+        const transactions = [
+          { amountCents: 1100, occurredOn: "2026-08-25", paidTime: "09:00", merchant: "并发早餐", paymentMethod: "wechat" },
+          { amountCents: 2200, occurredOn: "2026-08-25", paidTime: "12:00", merchant: "并发午餐", paymentMethod: "wechat" },
+          ...(call === 2
+            ? [{ amountCents: 3300, occurredOn: "2026-08-25", paidTime: "18:00", merchant: "并发晚餐", paymentMethod: "wechat" }]
+            : []),
+        ];
+        return {
+          documentKind: "payment_proof",
+          extractedText: null,
+          evidence: transactions[0],
+          transactions,
+          confidence: 0.99,
+          warnings: [],
+          source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+        };
+      }
       if (fileName === "visual-document.png") return {
         documentKind: "invoice",
         extractedText: null,
@@ -199,6 +268,34 @@ beforeEach(async () => {
         },
         confidence: 0.99,
         warnings: [],
+        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+      };
+      if (fileName === "reclass.png") return {
+        documentKind: "payment_proof",
+        extractedText: null,
+        evidence: {
+          amountCents: 3000,
+          occurredOn: "2026-08-25",
+          paidTime: "12:00",
+          merchant: "合成商贸",
+          paymentMethod: "wechat",
+        },
+        confidence: 0.99,
+        warnings: [],
+        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+      };
+      if (fileName === "stale-category-warning.png") return {
+        documentKind: "payment_proof",
+        extractedText: "2026年8月25日 支付时间12:00 合成商贸 50元 出差消费",
+        evidence: {
+          amountCents: 5000,
+          occurredOn: "2026-08-25",
+          paidTime: "12:00",
+          merchant: "合成商贸",
+          paymentMethod: "wechat",
+        },
+        confidence: 0.99,
+        warnings: ["missing_category", "invalid_category"],
         source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
       };
       if (fileName === "generic-invoice.png") return {
@@ -273,6 +370,43 @@ afterEach(async () => {
 });
 
 describe("小小微信图片记账与自然语言确认闭环", () => {
+  it("resolves only one active owner/date itinerary city and fails closed on ambiguity or overflow", () => {
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const insert = ({ id, rowOwner = owner, date = "2026-08-20", status = "planned", city = "济宁", deletedAt = null }) => {
+      db.prepare(`
+        INSERT INTO visit_itineraries (
+          id, title, visit_date, status, request_json, plan_json,
+          created_by, updated_by, created_at, updated_at, deleted_at, deleted_by
+        ) VALUES (
+          $id, '合成行程', $date, $status, $request, $plan,
+          $owner, $owner, '2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z',
+          $deletedAt, $deletedBy
+        )
+      `).run({
+        $id: id,
+        $date: date,
+        $status: status,
+        $request: JSON.stringify({ stops: [{ city }] }),
+        $plan: JSON.stringify({ stops: [{ city }] }),
+        $owner: rowOwner,
+        $deletedAt: deletedAt,
+        $deletedBy: deletedAt ? rowOwner : null,
+      });
+    };
+    insert({ id: "region-active" });
+    insert({ id: "region-other-owner", rowOwner: "other-owner", city: "青岛" });
+    insert({ id: "region-other-date", date: "2026-08-21", city: "枣庄" });
+    insert({ id: "region-cancelled", status: "cancelled", city: "临沂" });
+    insert({ id: "region-deleted", deletedAt: "2026-08-19T01:00:00.000Z", city: "泰安" });
+    assert.equal(resolveItineraryTripRegion(db, { owner, occurredOn: "2026-08-20" }), "济宁");
+    insert({ id: "region-ambiguous", city: "潍坊" });
+    assert.equal(resolveItineraryTripRegion(db, { owner, occurredOn: "2026-08-20" }), null);
+    db.prepare("UPDATE visit_itineraries SET deleted_at = '2026-08-19T02:00:00.000Z', deleted_by = $owner WHERE id = 'region-ambiguous'").run({ $owner: owner });
+    for (let index = 0; index < 20; index += 1) insert({ id: `region-overflow-${index}` });
+    assert.equal(resolveItineraryTripRegion(db, { owner, occurredOn: "2026-08-20" }), null);
+    db.close();
+  });
+
   it("carries a real JPEG file through the remote agent and local HTTP server into a bookkeeping draft", async () => {
     const filePath = join(tempDir, "remote-payment.jpg");
     await writeFile(filePath, VALID_JPEG);
@@ -308,6 +442,35 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
   });
 
   it("uses vision-only evidence without OCR text and supplies the Shanghai reference date", async () => {
+    const itineraryDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    itineraryDb.prepare(`
+      INSERT INTO visit_itineraries (
+        id, title, visit_date, status, request_json, plan_json,
+        created_by, updated_by, created_at, updated_at
+      ) VALUES (
+        'meal-itinerary', '合成出差行程', '2026-08-20', 'planned', $request, $plan,
+        $owner, $owner, '2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z'
+      )
+    `).run({
+      $owner: owner,
+      $request: JSON.stringify({ stops: [{ city: "济宁" }] }),
+      $plan: JSON.stringify({ stops: [{ city: "济宁" }] }),
+    });
+    itineraryDb.prepare(`
+      INSERT INTO visit_itineraries (
+        id, title, visit_date, status, request_json, plan_json,
+        created_by, updated_by, created_at, updated_at
+      ) VALUES (
+        'meal-itinerary-next-day', '合成次日出差行程', '2026-08-21', 'planned', $request, $plan,
+        $owner, $owner, '2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z'
+      )
+    `).run({
+      $owner: owner,
+      $request: JSON.stringify({ stops: [{ city: "枣庄" }] }),
+      $plan: JSON.stringify({ stops: [{ city: "枣庄" }] }),
+    });
+    itineraryDb.close();
+
     const received = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin-vision-only-proof"),
@@ -331,14 +494,318 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     const draft = await leaseOutbox();
     assert.match(draft.item.message, /编号：202608201129/u);
     assert.match(draft.item.message, /金额：37\.10 元/u);
-    assert.match(draft.item.message, /备注：无/u);
+    assert.match(draft.item.message, /费用类别：餐饮/u);
+    assert.doesNotMatch(draft.item.message, /费用类别：餐饮-午餐/u);
+    assert.match(draft.item.message, /备注：8\.20济宁午餐/u);
     assert.match(draft.item.message, /周期：20260817-20260823/u);
     assert.match(draft.item.message, /AI 状态：已识别，待你确认/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
-    const row = db.prepare("SELECT amount_cents, occurred_on, note FROM shortcut_bookkeeping_entries").get();
+    const row = db.prepare("SELECT amount_cents, occurred_on, category, subcategory, note FROM shortcut_bookkeeping_entries").get();
     assert.equal(row.amount_cents, 3710);
     assert.equal(row.occurred_on, "2026-08-20");
-    assert.equal(row.note, null);
+    assert.equal(row.category, "餐饮");
+    assert.equal(row.subcategory, "午餐");
+    assert.equal(row.note, "8.20济宁午餐");
+    db.close();
+
+    await ackOutbox(draft, true, "provider-meal-original");
+    const changedDate = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-change-date"),
+      body: JSON.stringify({
+        conversationId: "conversation-vision-only-proof",
+        text: "修改日期为2026-08-21",
+        sourceMessageId: "weixin-meal-change-date",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-meal-original",
+      }),
+    });
+    assert.equal(changedDate.response.status, 200, JSON.stringify(changedDate.body));
+    const dateDraft = await leaseOutbox();
+    assert.match(dateDraft.item.message, /备注：8\.21枣庄午餐/u);
+    await ackOutbox(dateDraft, true, "provider-meal-date");
+
+    const changedMeal = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-change-subcategory"),
+      body: JSON.stringify({
+        conversationId: "conversation-vision-only-proof",
+        text: "修改小类为晚餐",
+        sourceMessageId: "weixin-meal-change-subcategory",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-meal-date",
+      }),
+    });
+    assert.equal(changedMeal.response.status, 200, JSON.stringify(changedMeal.body));
+    const mealDraft = await leaseOutbox();
+    assert.match(mealDraft.item.message, /备注：8\.21枣庄晚餐/u);
+    await ackOutbox(mealDraft, true, "provider-meal-subcategory");
+
+    const invalidCategory = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-invalid-category"),
+      body: JSON.stringify({
+        conversationId: "conversation-vision-only-proof",
+        text: "修改费用类别为不存在",
+        sourceMessageId: "weixin-meal-invalid-category",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-meal-subcategory",
+      }),
+    });
+    assert.equal(invalidCategory.response.status, 200, JSON.stringify(invalidCategory.body));
+    assert.equal(invalidCategory.body.status, "clarify");
+    const unchangedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(unchangedDb.prepare("SELECT status FROM shortcut_bookkeeping_entries").get().status, "review_required");
+    assert.equal(unchangedDb.prepare("SELECT status FROM assistant_pending_actions").get().status, "pending");
+    unchangedDb.close();
+    const noInvalidDraft = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(noInvalidDraft.response.status, 204);
+
+    const changedCategory = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-change-category"),
+      body: JSON.stringify({
+        conversationId: "conversation-vision-only-proof",
+        text: "修改费用类别为交通",
+        sourceMessageId: "weixin-meal-change-category",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-meal-subcategory",
+      }),
+    });
+    assert.equal(changedCategory.response.status, 200, JSON.stringify(changedCategory.body));
+    const categoryDraft = await leaseOutbox();
+    assert.match(categoryDraft.item.message, /费用类别：交通/u);
+    assert.match(categoryDraft.item.message, /备注：无/u);
+    await ackOutbox(categoryDraft, true, "provider-meal-category");
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-confirm"),
+      body: JSON.stringify({
+        conversationId: "conversation-vision-only-proof",
+        text: "确认",
+        sourceMessageId: "weixin-meal-confirm",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-meal-category",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+    const acceptedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.deepEqual(
+      { ...acceptedDb.prepare(`
+        SELECT expense.category, expense.notes, payment.paid_at
+        FROM travel_expenses expense
+        JOIN travel_expense_payments payment ON payment.expense_id = expense.id
+      `).get() },
+      { category: "transport", notes: null, paid_at: "2026-08-21T11:29:00+08:00" },
+    );
+    acceptedDb.close();
+  });
+
+  it("re-runs automatic meal classification after amount/time corrections but honors a manual category", async () => {
+    const received = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-reclass-proof"),
+      body: JSON.stringify({
+        conversationId: "conversation-meal-reclass-proof",
+        text: "",
+        sourceMessageId: "weixin-meal-reclass-proof",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "reclass.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(received.response.status, 200, JSON.stringify(received.body));
+    const initial = await leaseOutbox();
+    assert.match(initial.item.message, /费用类别：餐饮/u);
+    assert.match(initial.item.message, /备注：8\.25午餐/u);
+    await ackOutbox(initial, true, "provider-reclass-initial");
+
+    const zeroAmount = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-reclass-zero"),
+      body: JSON.stringify({
+        conversationId: "conversation-meal-reclass-proof",
+        text: "修改金额为0元",
+        sourceMessageId: "weixin-meal-reclass-zero",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-reclass-initial",
+      }),
+    });
+    assert.equal(zeroAmount.response.status, 200, JSON.stringify(zeroAmount.body));
+    assert.equal(zeroAmount.body.status, "clarify");
+    const zeroDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.deepEqual(
+      { ...zeroDb.prepare(`
+        SELECT entry.amount_cents, entry.status, action.version AS action_version
+        FROM shortcut_bookkeeping_entries entry
+        JOIN assistant_pending_actions action
+          ON json_extract(action.payload_json, '$.entryId') = entry.id
+      `).get() },
+      { amount_cents: 3000, status: "review_required", action_version: 1 },
+    );
+    zeroDb.close();
+    const noZeroDraft = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(noZeroDraft.response.status, 204);
+
+    const revise = async ({ id, text, quotedMessageId }) => {
+      const response = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(id),
+        body: JSON.stringify({
+          conversationId: "conversation-meal-reclass-proof",
+          text,
+          sourceMessageId: id,
+          senderId: sender,
+          chatType: "direct",
+          quotedMessageId,
+        }),
+      });
+      assert.equal(response.response.status, 200, JSON.stringify(response.body));
+      return leaseOutbox();
+    };
+
+    const overLimit = await revise({
+      id: "weixin-meal-reclass-over-limit",
+      text: "修改金额为40.01元",
+      quotedMessageId: "provider-reclass-initial",
+    });
+    assert.match(overLimit.item.message, /费用类别：其他/u);
+    assert.match(overLimit.item.message, /备注：无/u);
+    await ackOutbox(overLimit, true, "provider-reclass-over-limit");
+
+    const lowAmount = await revise({
+      id: "weixin-meal-reclass-low",
+      text: "修改金额为30元",
+      quotedMessageId: "provider-reclass-over-limit",
+    });
+    assert.match(lowAmount.item.message, /费用类别：餐饮/u);
+    assert.match(lowAmount.item.message, /备注：8\.25午餐/u);
+    await ackOutbox(lowAmount, true, "provider-reclass-low");
+
+    const dinner = await revise({
+      id: "weixin-meal-reclass-time",
+      text: "修改时间为18:00",
+      quotedMessageId: "provider-reclass-low",
+    });
+    assert.match(dinner.item.message, /费用类别：餐饮/u);
+    assert.match(dinner.item.message, /备注：8\.25晚餐/u);
+    await ackOutbox(dinner, true, "provider-reclass-time");
+
+    const manualCategory = await revise({
+      id: "weixin-meal-reclass-manual",
+      text: "修改费用类别为交通",
+      quotedMessageId: "provider-reclass-time",
+    });
+    assert.match(manualCategory.item.message, /费用类别：交通/u);
+    assert.match(manualCategory.item.message, /备注：无/u);
+    await ackOutbox(manualCategory, true, "provider-reclass-manual");
+
+    const afterManual = await revise({
+      id: "weixin-meal-reclass-after-manual",
+      text: "修改金额为20元",
+      quotedMessageId: "provider-reclass-manual",
+    });
+    assert.match(afterManual.item.message, /费用类别：交通/u);
+    assert.match(afterManual.item.message, /备注：无/u);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const stored = db.prepare(`
+      SELECT category, subcategory, note, amount_cents, analysis_json
+      FROM shortcut_bookkeeping_entries
+    `).get();
+    assert.deepEqual(
+      {
+        category: stored.category,
+        subcategory: stored.subcategory,
+        note: stored.note,
+        amountCents: stored.amount_cents,
+        categoryAutomation: JSON.parse(stored.analysis_json).categoryAutomation,
+      },
+      {
+        category: "交通",
+        subcategory: null,
+        note: null,
+        amountCents: 2000,
+        categoryAutomation: null,
+      },
+    );
+    db.close();
+  });
+
+  it("clears stale category warnings when an amount correction reclassifies 50 yuan at noon as lunch", async () => {
+    const received = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-stale-category-proof"),
+      body: JSON.stringify({
+        conversationId: "conversation-meal-stale-category-proof",
+        text: "",
+        sourceMessageId: "weixin-meal-stale-category-proof",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "stale-category-warning.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(received.response.status, 200, JSON.stringify(received.body));
+    const initial = await leaseOutbox();
+    assert.match(initial.item.message, /金额：50\.00 元/u);
+    assert.match(initial.item.message, /费用类别：其他/u);
+    assert.match(initial.item.message, /AI 状态：待复核：信息待补充/u);
+    await ackOutbox(initial, true, "provider-stale-category-initial");
+
+    const revised = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-meal-stale-category-correction"),
+      body: JSON.stringify({
+        conversationId: "conversation-meal-stale-category-proof",
+        text: "修改金额为30元",
+        sourceMessageId: "weixin-meal-stale-category-correction",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-stale-category-initial",
+      }),
+    });
+    assert.equal(revised.response.status, 200, JSON.stringify(revised.body));
+    assert.equal(revised.body.status, "review_required");
+    const revisedDraft = await leaseOutbox();
+    assert.match(revisedDraft.item.message, /金额：30\.00 元/u);
+    assert.match(revisedDraft.item.message, /费用类别：餐饮/u);
+    assert.match(revisedDraft.item.message, /备注：8\.25午餐/u);
+    assert.match(revisedDraft.item.message, /AI 状态：待复核：出差区域待确认/u);
+    assert.doesNotMatch(revisedDraft.item.message, /信息待补充/u);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const stored = db.prepare(`
+      SELECT category, subcategory, analysis_json
+      FROM shortcut_bookkeeping_entries
+    `).get();
+    const storedWarnings = JSON.parse(stored.analysis_json).warnings;
+    assert.deepEqual(
+      { category: stored.category, subcategory: stored.subcategory },
+      { category: "餐饮", subcategory: "午餐" },
+    );
+    assert.equal(storedWarnings.includes("missing_category"), false);
+    assert.equal(storedWarnings.includes("invalid_category"), false);
     db.close();
   });
 
@@ -928,12 +1395,14 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
 
     const first = await leaseOutbox();
     assert.match(first.item.message, /金额：12\.34 元/u);
-    assert.match(first.item.message, /备注：无/u);
+    assert.match(first.item.message, /费用类别：餐饮/u);
+    assert.match(first.item.message, /备注：8\.18早餐/u);
     assert.match(first.item.message, /周期：20260817-20260823/u);
     await ackOutbox(first, true, "multi-draft-1");
     const second = await leaseOutbox();
     assert.match(second.item.message, /金额：56\.78 元/u);
-    assert.match(second.item.message, /备注：无/u);
+    assert.match(second.item.message, /费用类别：餐饮/u);
+    assert.match(second.item.message, /备注：8\.18晚餐/u);
     await ackOutbox(second, true, "multi-draft-2");
 
     for (const [index, quotedMessageId] of ["multi-draft-1", "multi-draft-2"].entries()) {
@@ -962,6 +1431,100 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_attachments WHERE kind = 'payment_proof'").get().count, 2);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_document_inbox").get().count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM document_blobs").get().count, 1);
+    assert.deepEqual(
+      db.prepare("SELECT category, notes FROM travel_expenses ORDER BY rowid").all().map((row) => ({ ...row })),
+      [
+        { category: "breakfast", notes: "8.18早餐" },
+        { category: "dinner", notes: "8.18晚餐" },
+      ],
+    );
+    db.close();
+  });
+
+  it("freezes the first content-addressed draft set when repeated vision output would drift", async () => {
+    const sendImage = (sourceMessageId) => request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders(sourceMessageId),
+      body: JSON.stringify({
+        conversationId: "conversation-drift-image",
+        text: "",
+        sourceMessageId,
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+        media: {
+          type: "image",
+          fileName: "drift.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+
+    const first = await sendImage("weixin-drift-image-1");
+    assert.equal(first.response.status, 200, JSON.stringify(first.body));
+    assert.match(first.body.text, /共识别 2 笔/u);
+    assert.equal(driftingRecognitionCalls, 1);
+
+    const replay = await sendImage("weixin-drift-image-2");
+    assert.equal(replay.response.status, 200, JSON.stringify(replay.body));
+    assert.match(replay.body.text, /共识别 2 笔/u);
+    assert.equal(driftingRecognitionCalls, 1);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.deepEqual(
+      db.prepare(`
+        SELECT amount_cents, category, subcategory
+        FROM shortcut_bookkeeping_entries
+        ORDER BY created_at, id
+      `).all().map((row) => ({ ...row })),
+      [
+        { amount_cents: 1800, category: "餐饮", subcategory: "早餐" },
+        { amount_cents: 2800, category: "餐饮", subcategory: "午餐" },
+      ],
+    );
+    db.close();
+  });
+
+  it("commits only one complete source batch when concurrent first vision results disagree", async () => {
+    const sendImage = (sourceMessageId) => request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders(sourceMessageId),
+      body: JSON.stringify({
+        conversationId: "conversation-concurrent-image",
+        text: "",
+        sourceMessageId,
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+        media: {
+          type: "image",
+          fileName: "concurrent.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+
+    const [left, right] = await Promise.all([
+      sendImage("weixin-concurrent-image-1"),
+      sendImage("weixin-concurrent-image-2"),
+    ]);
+    assert.equal(left.response.status, 200, JSON.stringify(left.body));
+    assert.equal(right.response.status, 200, JSON.stringify(right.body));
+    assert.equal(concurrentRecognitionCalls, 2);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const rows = db.prepare(`
+      SELECT amount_cents FROM shortcut_bookkeeping_entries ORDER BY created_at, id
+    `).all().map((row) => row.amount_cents);
+    assert.ok(
+      JSON.stringify(rows) === JSON.stringify([1100, 2200])
+        || JSON.stringify(rows) === JSON.stringify([1100, 2200, 3300]),
+      JSON.stringify(rows),
+    );
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_document_inbox").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(DISTINCT source_id) AS count FROM shortcut_bookkeeping_entries").get().count, 1);
     db.close();
   });
 
@@ -1002,7 +1565,10 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(ambiguous.body.status, "clarify");
     assert.match(ambiguous.body.text, /多笔待确认/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
-    assert.deepEqual(db.prepare("SELECT note FROM shortcut_bookkeeping_entries").all().map((row) => row.note), [null, null]);
+    assert.deepEqual(
+      db.prepare("SELECT note FROM shortcut_bookkeeping_entries").all().map((row) => row.note),
+      ["8.18早餐", "8.18晚餐"],
+    );
     assert.deepEqual(db.prepare("SELECT version FROM assistant_pending_actions").all().map((row) => row.version), [1, 1]);
     db.close();
   });

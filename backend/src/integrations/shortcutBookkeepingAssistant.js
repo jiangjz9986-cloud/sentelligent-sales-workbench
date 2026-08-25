@@ -88,7 +88,7 @@ function normalizeOccurredOn(value, warnings) {
 }
 
 function normalizeAmount(value, warnings) {
-  if (!Number.isSafeInteger(value) || value < 0 || String(value).length > FIELD_LIMITS.amountCents) {
+  if (!Number.isSafeInteger(value) || value <= 0 || String(value).length > FIELD_LIMITS.amountCents) {
     warnings.push("invalid_amountCents");
     return null;
   }
@@ -164,7 +164,7 @@ function parseAmountText(value) {
   const match = /^(?:¥|￥)?\s*(\d{1,12})(?:\.(\d{1,2}))?\s*(?:元|块|人民币)?$/u.exec(value);
   if (!match) return null;
   const cents = Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0") || 0);
-  return Number.isSafeInteger(cents) ? cents : null;
+  return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
 }
 
 function findCorrectionField(label) {
@@ -173,6 +173,13 @@ function findCorrectionField(label) {
 
 function friendlyDateValue(value, warnings, options = {}) {
   const normalized = String(value ?? "").trim();
+  const timeOnly = /^(?:[01]\d|2[0-3]):[0-5]\d$/u.exec(normalized);
+  const currentDate = typeof options.currentOccurredOn === "string"
+    ? options.currentOccurredOn.slice(0, 10)
+    : "";
+  if (timeOnly && /^\d{4}-\d{2}-\d{2}$/u.test(currentDate)) {
+    return `${currentDate}T${normalized}:00+08:00`;
+  }
   const isoMatch = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?)(Z|[+-]\d{2}:\d{2}))$/u.exec(normalized);
   if (isoMatch) {
     const [year, month, day] = isoMatch[1].split("-").map(Number);
@@ -240,7 +247,10 @@ function correctionParts(clause) {
   if (noteColon) return { label: "备注", value: noteColon[1].trim(), appendNote: false };
   const explicit = /^(.+?)\s*(?:改为|改成|修改为|调整为|设置为|设为|换成)\s*(.+)$/u.exec(normalized);
   if (explicit) return { label: normalizedCorrectionLabel(explicit[1]), value: explicit[2].trim(), appendNote: false };
-  const shorthand = /^(?:修改|更改|调整|设置)?\s*(日期|时间|发生时间|记账时间|金额|花费|费用|商户|商家|店铺|用途|事由|备注|说明|子分类|小类|费用类别|分类|大类)\s*(?:为|是|[:：])?\s*(.+)$/u.exec(normalized);
+  // Longest labels must precede their prefixes: otherwise “费用类别” is
+  // consumed as the amount label “费用” and a valid category correction is
+  // rejected as invalid_amountCents.
+  const shorthand = /^(?:修改|更改|调整|设置)?\s*(发生时间|记账时间|费用类别|日期|时间|金额|花费|费用|商户|商家|店铺|用途|事由|备注|说明|子分类|小类|分类|大类)\s*(?:为|是|[:：])?\s*(.+)$/u.exec(normalized);
   if (shorthand) return { label: shorthand[1], value: shorthand[2].trim(), appendNote: false };
   return null;
 }

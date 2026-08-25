@@ -76,6 +76,100 @@ describe("payment-proof recognition", () => {
     assert.equal(result.evidence.amountCents, null);
   });
 
+  it("normalizes bounded vision transactions and derives missing top-level evidence from the first row", async () => {
+    const result = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          documentKind: "payment_proof",
+          amountCents: null,
+          occurredOn: null,
+          paidTime: null,
+          merchant: null,
+          paymentMethod: null,
+          transactions: [
+            {
+              amountCents: 2_900,
+              occurredOn: "2026-08-24",
+              paidTime: "08:12",
+              merchant: "示例早餐店",
+              paymentMethod: "wechat",
+            },
+            {
+              amountCents: 3_100,
+              occurredOn: "2026-08-24",
+              paidTime: "12:26",
+              merchant: "示例午餐店",
+              paymentMethod: "alipay",
+            },
+          ],
+          confidence: 0.96,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+    });
+
+    assert.deepEqual(result.evidence, {
+      amountCents: 2_900,
+      occurredOn: "2026-08-24",
+      paidTime: "08:12",
+      merchant: "示例早餐店",
+      paymentMethod: "wechat",
+    });
+    assert.deepEqual(result.transactions, [
+      {
+        amountCents: 2_900,
+        occurredOn: "2026-08-24",
+        paidTime: "08:12",
+        merchant: "示例早餐店",
+        paymentMethod: "wechat",
+      },
+      {
+        amountCents: 3_100,
+        occurredOn: "2026-08-24",
+        paidTime: "12:26",
+        merchant: "示例午餐店",
+        paymentMethod: "alipay",
+      },
+    ]);
+
+    const overflow = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          transactions: Array.from({ length: 21 }, (_, index) => ({
+            amountCents: index + 1,
+            occurredOn: null,
+            paidTime: null,
+            merchant: null,
+            paymentMethod: null,
+          })),
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+    });
+    assert.equal(overflow.evidence, null);
+    assert.equal(Object.hasOwn(overflow, "transactions"), false);
+    assert.deepEqual(overflow.warnings, ["MODEL_INVALID_RESPONSE"]);
+
+    const unexpectedField = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          transactions: [{
+            amountCents: 100,
+            occurredOn: null,
+            paidTime: null,
+            merchant: null,
+            paymentMethod: null,
+            unsupported: true,
+          }],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+    });
+    assert.equal(unexpectedField.evidence, null);
+    assert.deepEqual(unexpectedField.warnings, ["MODEL_INVALID_RESPONSE"]);
+  });
+
   it("extracts locally and sends only the extracted text to DeepSeek", async () => {
     let extractorInput;
     let analyzerInput;

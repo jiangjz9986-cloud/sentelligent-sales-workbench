@@ -10,10 +10,14 @@ export const DEFAULT_DOCUMENT_VISION_MODEL = "deepseek-v4-flash-vision-exp";
 const DOCUMENT_PROMPTS = Object.freeze({
   payment_proof: [
     "识别这些付款凭证页面，只输出合法 JSON，不输出解释或 Markdown。",
-    "仅允许字段 documentKind、amountCents、occurredOn、paidTime、merchant、paymentMethod、confidence、warnings。",
+    "顶层仅允许字段 documentKind、amountCents、occurredOn、paidTime、merchant、paymentMethod、transactions、confidence、warnings。",
     "documentKind 只能为 payment_proof 或 invoice；只有画面明确包含正式发票要素（如发票号码、购买方、销售方、税额或价税合计）时才返回 invoice，否则返回 payment_proof。",
     "amountCents 必须是正整数分且使用 JSON 数字；occurredOn 为 YYYY-MM-DD；paidTime 为 HH:mm。",
     "paymentMethod 只能为 wechat、alipay、bank_card、cash、other。",
+    "transactions 只用于同一附件中清晰存在的多笔独立付款，按页面及画面从上到下顺序返回，最多 20 笔；否则返回空数组。",
+    "transactions 每一项只能包含 amountCents、occurredOn、paidTime、merchant、paymentMethod；amountCents 必须为正整数分，其余字段没有清晰依据时返回 null。",
+    "手机或系统状态栏时间绝不是支付时间，必须忽略；paidTime 只能取带有支付、付款、交易、成交或消费语义的时间，没有这类依据时返回 null。",
+    "单一付款详情页中的原价、优惠、折扣、合计和实付是同一笔付款，不能拆成多笔 transactions；该页只取最终实付金额。",
     "没有清晰视觉依据的字段返回 null；warnings 只能包含大写下划线代码。",
   ].join("\n"),
   invoice: [
@@ -227,7 +231,7 @@ export async function analyzeDocumentWithVision(file, options = {}) {
       response_format: { type: "json_object" },
       thinking: { type: "disabled" },
       temperature: 0,
-      max_tokens: documentKind === "invoice" ? 900 : 700,
+      max_tokens: documentKind === "invoice" ? 900 : 1_600,
       stream: false,
       signal,
     }), timeoutMs);

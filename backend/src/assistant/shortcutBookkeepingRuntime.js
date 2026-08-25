@@ -3,6 +3,7 @@ import { createHash, createHmac, randomUUID } from "node:crypto";
 import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
+import { resolveBookkeepingCategory } from "../bookkeeping/categoryCatalog.js";
 import {
   applyShortcutBookkeepingCorrection,
   parseShortcutBookkeepingCorrection,
@@ -10,6 +11,8 @@ import {
 } from "../integrations/shortcutBookkeepingAssistant.js";
 import { parseShortcutBookkeepingIntent } from "../integrations/shortcutBookkeepingIntent.js";
 import { shortcutBookkeepingConversationId } from "../weixin/bookkeepingDeliveryScope.js";
+import { buildAutomaticMealNote, buildBookkeepingAnalysis } from "./bookkeepingCapture.js";
+import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
 
 export const SHORTCUT_BOOKKEEPING_ACTION = "shortcut-bookkeeping.confirm";
 export const SHORTCUT_BOOKKEEPING_CHANNEL = "weixin";
@@ -99,6 +102,22 @@ function shanghaiParts(value) {
   return result;
 }
 
+function correctedPaidAt(originalPaidAt, correctedValue, {
+  explicitDateTime = false,
+  fallbackPaidTime = null,
+} = {}) {
+  if (typeof correctedValue !== "string" || !correctedValue.trim()) return originalPaidAt ?? null;
+  if (explicitDateTime) return correctedValue.trim();
+  const correctedDate = correctedValue.slice(0, 10);
+  if (dateOnly(correctedDate) && /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(fallbackPaidTime)) {
+    return `${correctedDate}T${fallbackPaidTime}:00+08:00`;
+  }
+  const original = shanghaiParts(originalPaidAt);
+  return original && dateOnly(correctedDate)
+    ? `${correctedDate}T${original.hour}:${original.minute}:00+08:00`
+    : correctedValue.trim();
+}
+
 function naturalWeek(value) {
   const parts = shanghaiParts(value);
   if (!parts) return null;
@@ -145,6 +164,8 @@ function warningText(value) {
     missing_date: "发生日期待确认",
     missing_amount: "金额待确认",
     missing_purpose: "用途待确认",
+    missing_trip_region: "出差区域待确认",
+    large_meal_context_unknown: "大额用餐场景待确认",
     RECOGNITION_FAILED: "图片识别未完成",
     TEXT_EXTRACTION_FAILED: "图片文字提取未完成",
     MODEL_PROVIDER_ERROR: "AI 字段分析未完成",
@@ -229,7 +250,9 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
   const { analysis } = entryAnalysis(entry);
   const fields = draft.fields;
   const entryType = entry.entryType === "income" ? "收入" : "支出";
-  const category = [fields.category, fields.subcategory].filter(Boolean).join("-");
+  const category = fields.category === "餐饮"
+    ? "餐饮"
+    : [fields.category, fields.subcategory].filter(Boolean).join("-");
   const note = fields.note;
   const week = naturalWeek(fields.occurredOn);
   const number = draftTimestampReference(entry) ?? reference ?? "待确认";
@@ -288,20 +311,141 @@ function isFinalizable(entry) {
     && purpose.trim());
 }
 
-function reviewAnalysis(entry, nextFields) {
+function reviewAnalysis(entry, nextFields, changedFields = {}, {
+  tripRegionResolver = null,
+  explicitDateTimeCorrection = false,
+} = {}) {
   const { analysis, expense } = entryAnalysis(entry);
   const occurredOn = typeof nextFields.occurredOn === "string" ? nextFields.occurredOn.slice(0, 10) : expense.occurredOn ?? entry.occurredOn ?? null;
   const nextExpense = {
       ...expense,
       ...(occurredOn ? { occurredOn } : {}),
-      ...(typeof nextFields.occurredOn === "string" ? { paidAt: nextFields.occurredOn } : {}),
+      ...(Object.hasOwn(changedFields, "occurredOn")
+        ? {
+            paidAt: correctedPaidAt(expense.paidAt ?? entry.capturedAt, nextFields.occurredOn, {
+              explicitDateTime: explicitDateTimeCorrection,
+              fallbackPaidTime: analysis.noteAutomation?.paidTime,
+            }),
+          }
+        : {}),
       ...(Object.hasOwn(nextFields, "amountCents") ? { amountCents: nextFields.amountCents, reimbursementCents: nextFields.amountCents } : {}),
       ...(Object.hasOwn(nextFields, "merchant") ? { merchant: nextFields.merchant } : {}),
     ...(Object.hasOwn(nextFields, "purpose") ? { purpose: nextFields.purpose } : {}),
   };
+  const manualCategoryCorrection = Object.hasOwn(changedFields, "category")
+    || Object.hasOwn(changedFields, "subcategory");
+  let categoryAutomation = manualCategoryCorrection
+    ? null
+    : analysis.categoryAutomation?.kind === "contextual"
+      ? { ...analysis.categoryAutomation }
+      : null;
+  let category = nextFields.category ?? analysis.category ?? entry.category;
+  const categoryChanged = Object.hasOwn(changedFields, "category")
+    && changedFields.category !== (analysis.category ?? entry.category);
+  let subcategory = Object.hasOwn(changedFields, "subcategory")
+    ? nextFields.subcategory ?? null
+    : categoryChanged
+      ? null
+      : Object.hasOwn(nextFields, "subcategory")
+        ? nextFields.subcategory
+        : analysis.subcategory ?? entry.subcategory ?? null;
+  const contextualFieldChanged = ["occurredOn", "amountCents", "merchant", "purpose"]
+    .some((field) => Object.hasOwn(changedFields, field));
+  let reclassified = null;
+  if (entry.entryType === "expense" && categoryAutomation && contextualFieldChanged) {
+    const paidParts = shanghaiParts(nextExpense.paidAt);
+    reclassified = buildBookkeepingAnalysis({
+      recognition: {
+        // Corrections are the newest evidence. Do not re-feed historical OCR
+        // text here: an old labeled clock or merchant token must not outrank
+        // the user's corrected time, merchant, or purpose.
+        extractedText: null,
+        evidence: {
+          amountCents: nextExpense.amountCents ?? null,
+          occurredOn,
+          paidTime: paidParts ? `${paidParts.hour}:${paidParts.minute}` : null,
+          merchant: nextExpense.merchant ?? null,
+          paymentMethod: nextExpense.paymentMethod ?? null,
+        },
+        warnings: [],
+        source: analysis.source ?? { provider: "rules", model: null },
+      },
+      expenseAnalysis: {
+        expense: {
+          category: categoryAutomation.sourceCategory,
+          subcategory: categoryAutomation.sourceSubcategory,
+          purpose: nextExpense.purpose ?? null,
+          merchant: nextExpense.merchant ?? null,
+          paidAt: nextExpense.paidAt ?? null,
+          paymentMethod: nextExpense.paymentMethod ?? null,
+        },
+        warnings: [],
+      },
+      text: "",
+      entryType: entry.entryType,
+      now: entry.capturedAt ?? entry.createdAt ?? new Date(),
+      tripRegionResolver: typeof tripRegionResolver === "function"
+        ? ({ occurredOn: resolvedDate }) => tripRegionResolver(resolvedDate)
+        : null,
+    });
+    category = reclassified.category;
+    subcategory = reclassified.subcategory;
+    categoryAutomation = reclassified.categoryAutomation;
+  }
+  const mealKey = category === "餐饮"
+    ? subcategory === "早餐" ? "breakfast"
+      : subcategory === "午餐" ? "lunch"
+        : subcategory === "晚餐" ? "dinner"
+          : null
+    : null;
+  const manualNote = Object.hasOwn(changedFields, "note");
+  const priorNoteAutomation = analysis.noteAutomation?.kind === "meal"
+    ? { ...analysis.noteAutomation }
+    : null;
+  const preserveManualNote = !priorNoteAutomation
+    && typeof (entry.note ?? analysis.note) === "string"
+    && Boolean((entry.note ?? analysis.note).trim());
+  let noteAutomation = reclassified
+    ? reclassified.noteAutomation
+    : priorNoteAutomation;
+  let note = manualNote
+    ? nextFields.note ?? null
+    : entry.note ?? analysis.note ?? null;
+  if (manualNote) {
+    noteAutomation = null;
+  } else if (preserveManualNote) {
+    noteAutomation = null;
+  } else if (reclassified) {
+    note = reclassified.note;
+  } else if (noteAutomation) {
+    if (Object.hasOwn(changedFields, "occurredOn") && explicitDateTimeCorrection) {
+      const correctedTime = shanghaiParts(nextFields.occurredOn);
+      if (correctedTime) noteAutomation.paidTime = `${correctedTime.hour}:${correctedTime.minute}`;
+    }
+    if (Object.hasOwn(changedFields, "occurredOn")
+      && noteAutomation.tripRegionSource === "itinerary"
+      && typeof tripRegionResolver === "function") {
+      try {
+        noteAutomation.tripRegion = tripRegionResolver(occurredOn) ?? null;
+      } catch {
+        noteAutomation.tripRegion = null;
+      }
+    }
+    note = mealKey
+      ? buildAutomaticMealNote({
+          occurredOn,
+          tripRegion: noteAutomation.tripRegion,
+          mealKey,
+        })
+      : null;
+    if (!note) noteAutomation = null;
+  }
   const warnings = (Array.isArray(analysis.warnings)
     ? analysis.warnings.filter((item) => item !== CONFIRMATION_WARNING)
     : []).filter((warning) => {
+      if (reclassified && ["missing_trip_region", "large_meal_context_unknown"].includes(warning)) return false;
+      if (reclassified && category !== "其他"
+        && ["missing_category", "invalid_category"].includes(warning)) return false;
       if (Number.isSafeInteger(nextExpense.amountCents) && nextExpense.amountCents > 0
         && /(?:amount|amountCents)/iu.test(warning)) return false;
       if (dateOnly(nextExpense.occurredOn)
@@ -310,16 +454,24 @@ function reviewAnalysis(entry, nextFields) {
         && /purpose/iu.test(warning)) return false;
       if (typeof nextExpense.merchant === "string" && nextExpense.merchant.trim()
         && /merchant/iu.test(warning)) return false;
+      if (warning === "missing_trip_region" && noteAutomation?.tripRegion) return false;
+      if (!mealKey && ["missing_trip_region", "large_meal_context_unknown"].includes(warning)) return false;
       return true;
     });
+  if (reclassified) {
+    warnings.push(...reclassified.warnings.filter(
+      (warning) => ["missing_trip_region", "large_meal_context_unknown"].includes(warning),
+    ));
+  }
+  if (mealKey && noteAutomation && !noteAutomation.tripRegion) warnings.push("missing_trip_region");
   return {
     ...analysis,
     status: "review_required",
-    category: nextFields.category ?? analysis.category ?? entry.category,
-    subcategory: Object.hasOwn(nextFields, "subcategory")
-      ? nextFields.subcategory
-      : analysis.subcategory ?? entry.subcategory ?? null,
-    note: Object.hasOwn(nextFields, "note") ? nextFields.note : entry.note ?? null,
+    category,
+    subcategory,
+    note,
+    noteAutomation,
+    categoryAutomation,
     expense: nextExpense,
     warnings: [...new Set([...warnings, CONFIRMATION_WARNING])],
   };
@@ -1394,29 +1546,50 @@ export function createShortcutBookkeepingAssistantRuntime({
   async function revise({ action, account, scope, text }) {
     const target = actionPayload(action);
     if (!target) return { status: 409, body: { status: "error", text: "待确认操作无效。" }, draftText: "确认信息已处理。" };
+    const entry = shortcutBookkeepingRepository.getReview(target.entryId, { owner: account });
+    if (!entry || entry.status !== "review_required") return { status: 409, body: { status: "error", text: "这笔草稿已结束，不能再修改。" }, draftText: "草稿状态已变化。" };
+    const currentDraft = draftFromEntry(entry);
     const correction = parseShortcutBookkeepingCorrection(text, {
       friendlyDates: true,
       now: clock(),
+      currentOccurredOn: currentDraft.fields.occurredOn,
     });
     if (correction.status !== "accepted") {
       return { status: 200, body: { status: "clarify", text: correctionHelp() }, draftText: "等待明确的字段修改。" };
     }
-    const entry = shortcutBookkeepingRepository.getReview(target.entryId, { owner: account });
-    if (!entry || entry.status !== "review_required") return { status: 409, body: { status: "error", text: "这笔草稿已结束，不能再修改。" }, draftText: "草稿状态已变化。" };
-    const currentDraft = draftFromEntry(entry);
     const nextDraft = applyShortcutBookkeepingCorrection(currentDraft, correction);
     if (nextDraft.status !== "ready" && nextDraft.status !== "review_required") {
       return { status: 200, body: { status: "clarify", text: correctionHelp() }, draftText: "修改未通过字段校验。" };
     }
-    const analysis = reviewAnalysis(entry, nextDraft.fields);
+    const analysis = reviewAnalysis(entry, nextDraft.fields, correction.changes, {
+      tripRegionResolver: (occurredOn) => resolveItineraryTripRegion(db, {
+        owner: account,
+        occurredOn,
+      }),
+      explicitDateTimeCorrection: /(?:\d{4}-\d{2}-\d{2}T)?(?:[01]\d|2[0-3]):[0-5]\d/u.test(text),
+    });
+    try {
+      resolveBookkeepingCategory({
+        ledgerName: entry.ledgerName,
+        entryType: entry.entryType,
+        category: analysis.category,
+        subcategory: analysis.subcategory,
+      });
+    } catch {
+      return {
+        status: 200,
+        body: { status: "clarify", text: "费用类别或小类不在当前三级记账菜单中，请重新明确修改。" },
+        draftText: "等待有效的费用类别修改。",
+      };
+    }
     const claimed = shortcutBookkeepingRepository.claimReview(target.entryId, { owner: account });
     if (claimed.replayed) return { status: 409, body: { status: "error", text: "这笔草稿已结束，不能再修改。" }, draftText: "草稿状态已变化。" };
     try {
-      const reviewPatch = Object.fromEntries(
-        ["category", "subcategory", "note"]
-          .filter((field) => Object.hasOwn(nextDraft.fields, field))
-          .map((field) => [field, nextDraft.fields[field]]),
-      );
+      const reviewPatch = {
+        category: analysis.category,
+        subcategory: analysis.subcategory,
+        note: analysis.note,
+      };
       const nextStateCredential = deriveShortcutStateCredential(action.id, Number(action.version) + 1, secret);
       const renewed = pendingActionRepository.renewConfirmation(action.id, {
         ...scope,

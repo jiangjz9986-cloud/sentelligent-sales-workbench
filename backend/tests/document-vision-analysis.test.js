@@ -43,8 +43,13 @@ describe("document vision analysis", () => {
     assert.equal(captured.messages[1].content[1].image_url.detail, "high");
     assert.doesNotMatch(JSON.stringify(captured.messages[0]), /deepseek-v4-flash(?!-vision)/u);
     assert.match(captured.messages[0].content, /documentKind/u);
+    assert.match(captured.messages[0].content, /transactions/u);
+    assert.match(captured.messages[0].content, /最多 20 笔/u);
+    assert.match(captured.messages[0].content, /手机或系统状态栏时间绝不是支付时间/u);
+    assert.match(captured.messages[0].content, /原价、优惠、折扣、合计和实付是同一笔付款/u);
     assert.match(captured.messages[0].content, /参考日期是 2026-08-25/u);
     assert.match(captured.messages[0].content, /不能用参考日期代替/u);
+    assert.equal(captured.max_tokens, 1_600);
     assert.equal(result.amountCents, 200);
   });
 

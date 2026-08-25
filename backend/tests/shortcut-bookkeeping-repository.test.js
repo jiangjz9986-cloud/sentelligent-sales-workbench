@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { openDatabase } from "../src/db.js";
+import { withImmediateTransaction } from "../src/db/transaction.js";
 import { createShortcutBookkeepingRepository } from "../src/integrations/shortcutBookkeepingRepository.js";
 
 const REQUEST_HASH = "a".repeat(64);
@@ -17,6 +18,44 @@ function repositoryHarness() {
 }
 
 describe("Shortcut bookkeeping repository invariants", () => {
+  it("rolls back an incomplete multi-row source batch as one transaction", () => {
+    const { db, repository } = repositoryHarness();
+    try {
+      assert.throws(() => withImmediateTransaction(db, () => {
+        const first = repository.receive({
+          owner: "owner-a", actor: "owner-a", ledgerName: "出差报销", entryType: "expense",
+          category: "餐饮", subcategory: "早餐", idempotencyKey: "atomic-source:row:1",
+          requestHash: REQUEST_HASH, sourceId: "atomic-source", rawText: "第一笔",
+          capturedAt: "2026-08-25T09:00:00+08:00",
+        });
+        const claimed = repository.claim(first.item.id);
+        repository.completeLocal(first.item.id, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "review_required",
+            confidence: 1,
+            category: "餐饮",
+            subcategory: "早餐",
+            expense: {
+              occurredOn: "2026-08-25",
+              amountCents: 1800,
+              reimbursementCents: 1800,
+              purpose: "早餐",
+              paidAt: "2026-08-25T09:00:00+08:00",
+            },
+            warnings: ["WEIXIN_CONFIRMATION_REQUIRED"],
+            source: { provider: "test" },
+          },
+        });
+        throw new Error("synthetic crash before row 2");
+      }), /synthetic crash/u);
+      assert.deepEqual(repository.listBySource({ owner: "owner-a", sourceId: "atomic-source" }), []);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_revisions").get().count, 0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("accepts an income entry without creating a travel expense or payment", () => {
     const { db, repository } = repositoryHarness();
     try {
