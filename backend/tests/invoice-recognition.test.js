@@ -40,6 +40,31 @@ function normalizedFields(overrides = {}) {
 }
 
 describe("invoice recognition", () => {
+  it("uses document vision directly for PDF evidence and skips local text extraction", async () => {
+    let extractorCalled = false;
+    let visionInput;
+    const result = await recognizeInvoiceDocument({
+      fileName: "住宿发票.pdf",
+      mediaType: "application/pdf",
+      buffer: PDF,
+    }, {
+      textExtractor: { async extract() { extractorCalled = true; return "must-not-run"; } },
+      async analyzeText() { throw new Error("must-not-run"); },
+      async analyzeDocument(input) {
+        visionInput = input;
+        return normalizedFields();
+      },
+    });
+
+    assert.equal(extractorCalled, false);
+    assert.equal(visionInput.mediaType, "application/pdf");
+    assert.deepEqual(visionInput.buffer, PDF);
+    assert.equal(result.status, "unmatched");
+    assert.equal(result.extractedText, "");
+    assert.equal(result.fields.totalCents, 10000);
+    assert.equal(result.ocr, null);
+  });
+
   it("detects supported image and PDF signatures", () => {
     assert.equal(detectDocumentType(VALID_PNG), "image/png");
     assert.equal(detectDocumentType(VALID_JPEG), "image/jpeg");

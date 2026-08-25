@@ -15,6 +15,67 @@ const file = {
 };
 
 describe("payment-proof recognition", () => {
+  it("uses document vision directly and never invokes local OCR for image evidence", async () => {
+    let ocrCalled = false;
+    let visionInput;
+    let visionOptions;
+    const result = await recognizePaymentProofDocument(file, {
+      typedEvidence: { amountCents: null, occurredOn: null, paidTime: null },
+      textExtractor: { async extract() { ocrCalled = true; return "must-not-run"; } },
+      async analyzeDocument(input, runtimeOptions) {
+        visionInput = input;
+        visionOptions = runtimeOptions;
+        return {
+          documentKind: "payment_proof",
+          amountCents: 200,
+          occurredOn: "2026-08-25",
+          paidTime: "14:23",
+          merchant: "测试商户",
+          paymentMethod: "wechat",
+          confidence: 0.98,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+      referenceDate: "2026-08-25",
+    });
+
+    assert.equal(ocrCalled, false);
+    assert.equal(visionInput.mediaType, "image/png");
+    assert.deepEqual(visionInput.buffer, VALID_PNG);
+    assert.deepEqual(visionOptions, { referenceDate: "2026-08-25" });
+    assert.equal(result.extractedText, null);
+    assert.equal(result.documentKind, "payment_proof");
+    assert.equal(result.evidence.amountCents, 200);
+    assert.deepEqual(result.source, {
+      provider: "deepseek",
+      model: "deepseek-v4-flash-vision-exp",
+    });
+    assert.deepEqual(result.warnings, []);
+  });
+
+  it("preserves a vision-only invoice classification for assistant routing", async () => {
+    const result = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          documentKind: "invoice",
+          amountCents: null,
+          occurredOn: null,
+          paidTime: null,
+          merchant: null,
+          paymentMethod: null,
+          confidence: 0.97,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+    });
+
+    assert.equal(result.documentKind, "invoice");
+    assert.equal(result.extractedText, null);
+    assert.equal(result.evidence.amountCents, null);
+  });
+
   it("extracts locally and sends only the extracted text to DeepSeek", async () => {
     let extractorInput;
     let analyzerInput;

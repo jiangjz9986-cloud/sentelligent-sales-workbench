@@ -177,7 +177,7 @@ export async function runWeixinOutboxPump({
         continue;
       }
       try {
-        const sent = await bot.sendMessage(lease.item.message);
+        const sent = await bot.sendMessage(lease.item.message, lease.item.id);
         const providerMessageId = typeof sent?.messageId === "string" && sent.messageId.trim()
           ? sent.messageId.trim().slice(0, 200)
           : null;

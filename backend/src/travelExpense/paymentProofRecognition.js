@@ -6,6 +6,7 @@ const MODEL_FIELDS = new Set([
   "paidTime",
   "merchant",
   "paymentMethod",
+  "documentKind",
   "confidence",
   "warnings",
 ]);
@@ -133,6 +134,14 @@ function optionalPaymentMethod(value) {
   return value;
 }
 
+function optionalDocumentKind(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (value !== "payment_proof" && value !== "invoice") {
+    throw stableModelError("MODEL_INVALID_RESPONSE");
+  }
+  return value;
+}
+
 function optionalConfidence(value) {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
@@ -166,6 +175,9 @@ function normalizeModelFields(value) {
     paidTime: optionalTime(value.paidTime),
     merchant: optionalText(value.merchant),
     paymentMethod: optionalPaymentMethod(value.paymentMethod),
+    ...(Object.hasOwn(value, "documentKind")
+      ? { documentKind: optionalDocumentKind(value.documentKind) }
+      : {}),
     confidence: optionalConfidence(value.confidence),
     warnings: warningCodes(value.warnings),
   };
@@ -179,6 +191,36 @@ function normalizeTypedEvidence(value = {}) {
     amountCents: optionalMoneyCents(value.amountCents),
     occurredOn: optionalDate(value.occurredOn),
     paidTime: optionalTime(value.paidTime),
+  };
+}
+
+function completedRecognition(analyzed, typedEvidence, source, extra = {}) {
+  const evidence = {
+    amountCents: analyzed.amountCents,
+    occurredOn: analyzed.occurredOn,
+    paidTime: analyzed.paidTime,
+    merchant: analyzed.merchant,
+    paymentMethod: analyzed.paymentMethod,
+  };
+  const conflicts = EVIDENCE_FIELDS.flatMap((field) => {
+    const typedValue = typedEvidence[field];
+    const recognizedValue = evidence[field];
+    return typedValue !== null && recognizedValue !== null && typedValue !== recognizedValue
+      ? [{ field, typedValue, recognizedValue }]
+      : [];
+  });
+  return {
+    documentKind: analyzed.documentKind ?? null,
+    evidence,
+    typedEvidence,
+    conflicts,
+    confidence: analyzed.confidence,
+    warnings: [...new Set([
+      ...analyzed.warnings,
+      ...(conflicts.length > 0 ? ["EVIDENCE_CONFLICT"] : []),
+    ])],
+    source,
+    ...extra,
   };
 }
 
@@ -279,14 +321,43 @@ export async function recognizePaymentProofDocument(file, options = {}) {
   const mediaType = String(file.mediaType ?? "").trim().toLowerCase();
   const buffer = Buffer.isBuffer(file.buffer) ? file.buffer : Buffer.from(file.buffer ?? []);
   if (!buffer.length) throw new TypeError("payment proof buffer is required");
-  if (!options.textExtractor || typeof options.textExtractor.extract !== "function") {
-    throw new TypeError("textExtractor.extract is required");
-  }
   const typedEvidence = normalizeTypedEvidence(options.typedEvidence);
   const source = {
     provider: String(options.modelProvider ?? "deepseek"),
     model: String(options.modelName ?? "deepseek-v4-flash"),
   };
+
+  if (typeof options.analyzeDocument === "function") {
+    const timeoutMs = Number.isSafeInteger(options.modelTimeoutMs) && options.modelTimeoutMs > 0
+      ? options.modelTimeoutMs
+      : 30_000;
+    try {
+      const analyzed = normalizeModelFields(await withTimeout(
+        () => options.analyzeDocument({
+          fileName: String(file.fileName ?? "payment-proof"),
+          mediaType,
+          buffer,
+        }, { referenceDate: options.referenceDate }),
+        timeoutMs,
+      ));
+      return completedRecognition(analyzed, typedEvidence, source, { extractedText: null });
+    } catch (error) {
+      return {
+        extractedText: null,
+        evidence: null,
+        typedEvidence,
+        conflicts: [],
+        confidence: null,
+        warnings: [stableWarning(error, "VISION_MODEL_PROVIDER_ERROR")],
+        documentKind: null,
+        source,
+      };
+    }
+  }
+
+  if (!options.textExtractor || typeof options.textExtractor.extract !== "function") {
+    throw new TypeError("textExtractor.extract is required");
+  }
 
   let extractedText;
   let layout = null;
@@ -337,32 +408,8 @@ export async function recognizePaymentProofDocument(file, options = {}) {
     };
   }
 
-  const evidence = {
-    amountCents: analyzed.amountCents,
-    occurredOn: analyzed.occurredOn,
-    paidTime: analyzed.paidTime,
-    merchant: analyzed.merchant,
-    paymentMethod: analyzed.paymentMethod,
-  };
-  const conflicts = EVIDENCE_FIELDS.flatMap((field) => {
-    const typedValue = typedEvidence[field];
-    const recognizedValue = evidence[field];
-    return typedValue !== null && recognizedValue !== null && typedValue !== recognizedValue
-      ? [{ field, typedValue, recognizedValue }]
-      : [];
-  });
-  const warnings = [...new Set([
-    ...analyzed.warnings,
-    ...(conflicts.length > 0 ? ["EVIDENCE_CONFLICT"] : []),
-  ])];
-  return {
+  return completedRecognition(analyzed, typedEvidence, source, {
     extractedText,
-    evidence,
-    typedEvidence,
-    conflicts,
-    confidence: analyzed.confidence,
-    warnings,
-    source,
     ...(layout ? { layout } : {}),
-  };
+  });
 }

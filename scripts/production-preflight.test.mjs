@@ -105,6 +105,7 @@ function validEnvironment(origin, databaseUrl) {
   const fixtureOwner = "fixture-owner";
   const invoiceOcrCommand = "/opt/sentelligent-tools/tesseract-fixture";
   const invoicePdfTextCommand = "/opt/sentelligent-tools/pdftotext-fixture";
+  const invoicePdfImageCommand = "/opt/sentelligent-tools/pdftoppm-fixture";
   const invoiceOcrLanguages = "chi_sim+eng";
 
   return {
@@ -123,6 +124,7 @@ function validEnvironment(origin, databaseUrl) {
       `MODEL_API_KEY=${modelApiKey}`,
       "MODEL_BASE_URL=https://api.deepseek.com",
       "MODEL_NAME=deepseek-v4-flash",
+      "MODEL_VISION_NAME=deepseek-v4-flash-vision-exp",
       "MODEL_TIMEOUT_MS=120000",
       `SETTINGS_ENCRYPTION_KEY=${settingsEncryptionKey}`,
       "HOSPITAL_TENDER_PYTHON=/opt/sentelligent-tools/python3.12-fixture",
@@ -141,6 +143,7 @@ function validEnvironment(origin, databaseUrl) {
       `ASSISTANT_CONFIRMATION_SECRET=${assistantConfirmationSecret}`,
       `INVOICE_OCR_COMMAND=${invoiceOcrCommand}`,
       `INVOICE_PDF_TEXT_COMMAND=${invoicePdfTextCommand}`,
+      `INVOICE_PDF_IMAGE_COMMAND=${invoicePdfImageCommand}`,
       `INVOICE_OCR_LANGUAGES=${invoiceOcrLanguages}`,
       "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS=45679",
       "",
@@ -156,6 +159,7 @@ function validEnvironment(origin, databaseUrl) {
     fixtureOwner,
     invoiceOcrCommand,
     invoicePdfTextCommand,
+    invoicePdfImageCommand,
     invoiceOcrLanguages,
   };
 }
@@ -610,6 +614,9 @@ async function loadPreflightModule() {
             const pdfValid =
               request?.pdfText?.command ===
               "/opt/sentelligent-tools/pdftotext-fixture";
+            const pdfImageValid =
+              request?.pdfImage?.command ===
+              "/opt/sentelligent-tools/pdftoppm-fixture";
             const userValid = ["root", "sentelligent", "sentzx"].includes(
               request?.backendService?.user,
             );
@@ -625,6 +632,11 @@ async function loadPreflightModule() {
                 regularFile: pdfValid,
                 executableByServiceUser: pdfValid && userValid,
                 identity: pdfValid ? "poppler-pdftotext" : "unknown",
+              },
+              pdfImage: {
+                regularFile: pdfImageValid,
+                executableByServiceUser: pdfImageValid && userValid,
+                identity: pdfImageValid ? "poppler-pdftoppm" : "unknown",
               },
             };
           }),
@@ -693,6 +705,7 @@ describe("production preflight", () => {
         },
         ocr: { command: "/usr/bin/tesseract", requiredLanguages: ["chi_sim", "eng"] },
         pdfText: { command: "/usr/bin/pdftotext" },
+        pdfImage: { command: "/usr/bin/pdftoppm" },
       },
       {
         inspectSecureExecutable: (path) => ({
@@ -711,6 +724,9 @@ describe("production preflight", () => {
           if (command === "/usr/bin/pdftotext") {
             return { status: 0, stdout: "", stderr: "pdftotext version 0.26.5" };
           }
+          if (command === "/usr/bin/pdftoppm") {
+            return { status: 0, stdout: "", stderr: "pdftoppm version 0.26.5" };
+          }
           return { status: 1, stdout: "", stderr: "" };
         },
       },
@@ -718,6 +734,7 @@ describe("production preflight", () => {
     assert.equal(result.serviceIdentityResolved, true);
     assert.equal(result.ocr.requiredLanguagesAvailable, true);
     assert.equal(result.pdfText.identity, "poppler-pdftotext");
+    assert.equal(result.pdfImage.identity, "poppler-pdftoppm");
   });
 
   it("keeps all core checks compatible while failing a release without identity evidence", async () => {
@@ -1365,6 +1382,11 @@ describe("production preflight", () => {
               executableByServiceUser: true,
               identity: "poppler-pdftotext",
             },
+            pdfImage: {
+              regularFile: true,
+              executableByServiceUser: true,
+              identity: "poppler-pdftoppm",
+            },
           };
         },
       });
@@ -1378,6 +1400,10 @@ describe("production preflight", () => {
       assert.equal(
         inspectionRequest.pdfText.command,
         environment.invoicePdfTextCommand,
+      );
+      assert.equal(
+        inspectionRequest.pdfImage.command,
+        environment.invoicePdfImageCommand,
       );
     } finally {
       workspace.cleanup();
@@ -1448,6 +1474,9 @@ describe("production preflight", () => {
         pdfText: {
           command: "/usr/bin/pdftotext",
         },
+        pdfImage: {
+          command: "/usr/bin/pdftoppm",
+        },
       },
       {
         inspectSecureExecutable(command) {
@@ -1479,6 +1508,13 @@ describe("production preflight", () => {
               stderr: "pdftotext version 24.02.0\n",
             };
           }
+          if (call.command === "/usr/bin/pdftoppm" && call.args[0] === "-v") {
+            return {
+              status: 0,
+              stdout: "",
+              stderr: "pdftoppm version 24.02.0\n",
+            };
+          }
           return { status: 1, stdout: "", stderr: "unexpected probe" };
         },
       },
@@ -1496,6 +1532,11 @@ describe("production preflight", () => {
         regularFile: true,
         executableByServiceUser: true,
         identity: "poppler-pdftotext",
+      },
+      pdfImage: {
+        regularFile: true,
+        executableByServiceUser: true,
+        identity: "poppler-pdftoppm",
       },
     });
     assert.ok(calls.length >= 5);
@@ -1857,6 +1898,67 @@ describe("production preflight", () => {
       });
       assert.equal(candidateResult.valid, false);
       assert.match(candidateResult.message, /environment names|contract/i);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("allows the exact v0.6.18 environment contract only for the canonical current release", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const legacyManifest = structuredClone(fixture.manifest);
+      legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
+        (name) =>
+          name !== "MODEL_VISION_NAME" &&
+          name !== "INVOICE_PDF_IMAGE_COMMAND",
+      );
+      writeFileSync(
+        fixture.filePath("release-manifest.json"),
+        `${JSON.stringify(legacyManifest, null, 2)}\n`,
+      );
+      hardenReleaseFixturePermissions(fixture.releaseDirectoryPath);
+
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const currentResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(currentResult.valid, true, currentResult.message);
+
+      const candidateResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: `${immutableReleaseRoot}-other`,
+      });
+      assert.equal(candidateResult.valid, false);
+      assert.match(candidateResult.message, /environment names|contract/i);
+
+      legacyManifest.requiredEnvNames = legacyManifest.requiredEnvNames.filter(
+        (name) => name !== "MODEL_NAME",
+      );
+      const arbitraryMissingCurrentResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(arbitraryMissingCurrentResult.valid, false);
+      assert.match(
+        arbitraryMissingCurrentResult.message,
+        /environment names|contract/i,
+      );
     } finally {
       fixture.cleanup();
     }

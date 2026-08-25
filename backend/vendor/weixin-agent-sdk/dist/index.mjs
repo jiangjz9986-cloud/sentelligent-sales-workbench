@@ -512,9 +512,9 @@ function sendMessageProviderError(code, message) {
 }
 /**
 * Validate the provider's JSON-level acknowledgement without surfacing its
-* response body. iLink deployments use either `ret` or `errcode` for business
-* status; at least one status must be present and every returned status must
-* be numeric zero.
+* response body. iLink deployments may return an empty JSON object after an
+* accepted text send, or expose business status through top-level/nested
+* `ret` and `errcode` fields. Every status that is present must be numeric zero.
 */
 function assertSendMessageAccepted(rawText) {
 	let response;
@@ -526,15 +526,24 @@ function assertSendMessageAccepted(rawText) {
 	if (response === null || typeof response !== "object" || Array.isArray(response)) {
 		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
 	}
-	const hasRet = Object.hasOwn(response, "ret");
-	const hasErrcode = Object.hasOwn(response, "errcode");
-	if (!hasRet && !hasErrcode) {
+	const baseResponse = response.base_resp;
+	if (baseResponse !== void 0 && (baseResponse === null || typeof baseResponse !== "object" || Array.isArray(baseResponse))) {
 		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
 	}
-	const retRejected = hasRet && response.ret !== 0;
-	const errcodeRejected = hasErrcode && response.errcode !== 0;
-	if (retRejected || errcodeRejected) {
+	const statuses = [
+		Object.hasOwn(response, "ret") ? response.ret : void 0,
+		Object.hasOwn(response, "errcode") ? response.errcode : void 0,
+		baseResponse && Object.hasOwn(baseResponse, "ret") ? baseResponse.ret : void 0,
+		baseResponse && Object.hasOwn(baseResponse, "errcode") ? baseResponse.errcode : void 0
+	].filter((value) => value !== void 0);
+	if (statuses.some((value) => typeof value !== "number" || !Number.isSafeInteger(value))) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (statuses.some((value) => value !== 0)) {
 		throw sendMessageProviderError("WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request");
+	}
+	if (statuses.length === 0 && Object.keys(response).length !== 0) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
 	}
 }
 /** Send a single message downstream. */
@@ -1433,7 +1442,10 @@ async function sendMessageWeixin(params) {
 		logger.error("sendMessageWeixin category=send status=missing-context durationMs=0");
 		throw new Error("sendMessageWeixin: contextToken is required");
 	}
-	const clientId = generateClientId();
+	const clientId = opts.clientId ?? generateClientId();
+	if (typeof clientId !== "string" || !clientId || clientId.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(clientId)) {
+		throw new TypeError("sendMessageWeixin: clientId is invalid");
+	}
 	const req = buildSendMessageReq({
 		to,
 		contextToken: opts.contextToken,
@@ -2572,13 +2584,13 @@ var Bot = class {
 	* The recipient must match the immutable user attached to this login. This
 	* keeps the delivery target and its context token in the same SDK boundary.
 	*/
-	async sendMessageTo(recipientId, message) {
+	async sendMessageTo(recipientId, message, options = {}) {
 		if (!this.isDeliveryTarget(recipientId)) {
 			const error = new Error("微信主动发送目标与当前登录用户不匹配");
 			error.code = "WEIXIN_DELIVERY_TARGET_MISMATCH";
 			throw error;
 		}
-		return this.sendMessage(message);
+		return this.sendMessage(message, options);
 	}
 	/**
 	* Proactively send a message to the logged-in WeChat user.
@@ -2589,7 +2601,8 @@ var Bot = class {
 	* Requires at least one inbound message to have been received so that a
 	* valid `context_token` is cached (tokens are valid for ~24 hours).
 	*/
-	async sendMessage(message) {
+	async sendMessage(message, options = {}) {
+		if (options === null || typeof options !== "object" || Array.isArray(options)) throw new TypeError("sendMessage options are invalid");
 		const response = typeof message === "string" ? { text: message } : message;
 		const contextToken = getContextToken(this._accountId, this._userId);
 		if (!contextToken) {
@@ -2600,7 +2613,8 @@ var Bot = class {
 		const apiOpts = {
 			baseUrl: this._baseUrl,
 			token: this._token,
-			contextToken
+			contextToken,
+			...options.clientId ? { clientId: options.clientId } : {}
 		};
 		if (response.media) {
 			let filePath;

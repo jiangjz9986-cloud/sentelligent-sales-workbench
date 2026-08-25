@@ -615,6 +615,41 @@ function warningCode(error, fallback) {
 
 export async function recognizeInvoiceDocument(file, options = {}) {
   const inspected = inspectInvoiceFile(file);
+  if (typeof options.analyzeDocument === "function") {
+    try {
+      const model = parseModelResult(await options.analyzeDocument({
+        fileName: inspected.fileName,
+        mediaType: inspected.mediaType,
+        buffer: inspected.buffer,
+      }));
+      const compared = compareRecognitionSources({ extractedText: "", model });
+      return {
+        document: {
+          fileName: inspected.fileName,
+          mediaType: inspected.mediaType,
+          sizeBytes: inspected.sizeBytes,
+          sha256: inspected.sha256,
+        },
+        ...compared,
+      };
+    } catch (error) {
+      return {
+        document: {
+          fileName: inspected.fileName,
+          mediaType: inspected.mediaType,
+          sizeBytes: inspected.sizeBytes,
+          sha256: inspected.sha256,
+        },
+        status: "review_required",
+        extractedText: null,
+        fields: null,
+        ocr: null,
+        model: null,
+        conflicts: [],
+        warnings: [warningCode(error, "VISION_MODEL_PROVIDER_ERROR")],
+      };
+    }
+  }
   if (!options.textExtractor || typeof options.textExtractor.extract !== "function") {
     throw new TypeError("textExtractor.extract is required");
   }

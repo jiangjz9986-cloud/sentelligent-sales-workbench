@@ -136,6 +136,14 @@ function executableValue(value, name) {
   return normalized;
 }
 
+function modelIdentifierValue(value, fallback, name) {
+  const normalized = String(value ?? fallback).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(normalized)) {
+    throw new Error(`${name} must be a bounded model identifier`);
+  }
+  return normalized;
+}
+
 function isStrongSessionSecret(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
@@ -274,7 +282,16 @@ export function loadConfig(overrides = {}) {
     modelProvider: env.modelProvider ?? env.MODEL_PROVIDER ?? "deepseek",
     modelApiKey: env.modelApiKey ?? env.MODEL_API_KEY ?? env.DEEPSEEK_API_KEY ?? "",
     modelBaseUrl: env.modelBaseUrl ?? env.MODEL_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
-    modelName: env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL ?? "deepseek-v4-flash",
+    modelName: modelIdentifierValue(
+      env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL,
+      "deepseek-v4-flash",
+      "MODEL_NAME",
+    ),
+    modelVisionName: modelIdentifierValue(
+      env.modelVisionName ?? env.MODEL_VISION_NAME ?? env.DEEPSEEK_VISION_MODEL,
+      "deepseek-v4-flash-vision-exp",
+      "MODEL_VISION_NAME",
+    ),
     modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
     hospitalTenderPython: executableValue(
       env.hospitalTenderPython ?? env.HOSPITAL_TENDER_PYTHON ?? "python3",
@@ -358,6 +375,10 @@ export function loadConfig(overrides = {}) {
     invoicePdfTextCommand: String(
       env.invoicePdfTextCommand ?? env.INVOICE_PDF_TEXT_COMMAND ?? "",
     ).trim(),
+    invoicePdfImageCommand: executableValue(
+      env.invoicePdfImageCommand ?? env.INVOICE_PDF_IMAGE_COMMAND ?? "pdftoppm",
+      "INVOICE_PDF_IMAGE_COMMAND",
+    ),
     invoiceOcrLanguages: invoiceOcrLanguagesValue(
       env.invoiceOcrLanguages ?? env.INVOICE_OCR_LANGUAGES,
     ),

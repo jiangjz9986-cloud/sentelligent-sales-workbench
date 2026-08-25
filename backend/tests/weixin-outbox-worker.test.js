@@ -30,8 +30,8 @@ describe("WeChat confirmation outbox worker boundary", () => {
       client,
       bot: {
         getDeliveryStatus() { return { ready: true, status: "ready" }; },
-        async sendMessage(message) {
-          sent.push(message);
+        async sendMessage(message, outboxId) {
+          sent.push({ message, outboxId });
           controller.abort();
           return { messageId: "provider-outbound-1" };
         },
@@ -40,7 +40,10 @@ describe("WeChat confirmation outbox worker boundary", () => {
       abortSignal: controller.signal,
     });
     await pump;
-    assert.deepEqual(sent, ["金额 18.50 元\n确认码：123456"]);
+    assert.deepEqual(sent, [{
+      message: "金额 18.50 元\n确认码：123456",
+      outboxId: "outbox-1",
+    }]);
     assert.equal(calls.length, 3);
     assert.equal(calls[0].options.headers.Authorization, "Bearer machine-secret");
     assert.equal(calls[0].options.headers["X-Weixin-Worker-Id"], "worker-1");

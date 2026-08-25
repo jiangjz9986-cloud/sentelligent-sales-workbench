@@ -23,6 +23,7 @@ let entrySequence;
 let actionSequence;
 let outboxSequence;
 let latestQuoteMessageId;
+let lastRecognitionOptions;
 
 async function read(response) {
   const text = await response.text();
@@ -155,6 +156,7 @@ beforeEach(async () => {
   actionSequence = 0;
   outboxSequence = 0;
   latestQuoteMessageId = null;
+  lastRecognitionOptions = null;
   server = createServer({
     databaseUrl: join(tempDir, "assistant.sqlite"),
     seed: false,
@@ -168,20 +170,44 @@ beforeEach(async () => {
     weixinAllowedSenderIds: [sender, "sender-2"],
     weixinAllowGroups: false,
     assistantConfirmationSecret: confirmationSecret,
+    assistantClock: () => new Date("2026-08-25T06:24:00.000Z"),
     shortcutBookkeepingIdFactory: () => `entry-${++entrySequence}`,
     shortcutBookkeepingAssistantIdFactory: () => `action-${++actionSequence}`,
     weixinConfirmationOutboxIdFactory: () => `outbox-${++outboxSequence}`,
     travelExpenseAnalyzer: async () => analysis(),
-    paymentProofRecognizer: async ({ fileName }) => fileName === "multi.png"
-      ? multiRowRecognition()
-      : fileName === "generic-invoice.png" ? ({
+    paymentProofRecognizer: async ({ fileName }, recognitionOptions = {}) => {
+      lastRecognitionOptions = recognitionOptions;
+      if (fileName === "multi.png") return multiRowRecognition();
+      if (fileName === "visual-document.png") return {
+        documentKind: "invoice",
+        extractedText: null,
+        evidence: null,
+        confidence: 0.99,
+        warnings: [],
+        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+      };
+      if (fileName === "vision-only.png") return {
+        documentKind: "payment_proof",
+        extractedText: null,
+        evidence: {
+          amountCents: 3710,
+          occurredOn: "2026-08-20",
+          paidTime: "11:29",
+          merchant: "合成平台",
+          paymentMethod: "bank_card",
+        },
+        confidence: 0.99,
+        warnings: [],
+        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+      };
+      if (fileName === "generic-invoice.png") return {
           extractedText: "电子发票 发票号码 00000000 购买方 合成公司 销售方 合成商户 价税合计 219.00",
           evidence: null,
           confidence: 0.99,
           warnings: [],
           source: { provider: "test", model: null },
-        })
-      : fileName === "income.png" ? ({
+        };
+      if (fileName === "income.png") return {
           extractedText: "2026年8月20日 收到出差借款 +2000.00",
           evidence: {
             amountCents: 200000,
@@ -193,25 +219,28 @@ beforeEach(async () => {
           confidence: 0.99,
           warnings: [],
           source: { provider: "test", model: null },
-        }) : fileName === "scan.png" ? ({
+        };
+      if (fileName === "scan.png") return {
           extractedText: "电子发票 发票号码 000001 购买方 合成公司 销售方 合成商户 价税合计 219.00",
           evidence: { amountCents: 21900, occurredOn: null, paidTime: null, merchant: "合成商户", paymentMethod: null },
           confidence: 0.95,
           warnings: [],
           source: { provider: "test", model: null },
-        }) : ({
-      extractedText: "华住酒店集团 2026年8月18日 17:36 -219.00",
-      evidence: {
-        amountCents: 21900,
-        occurredOn: "2026-08-18",
-        paidTime: "17:36",
-        merchant: "华住酒店集团",
-        paymentMethod: "bank_card",
-      },
-      confidence: 0.99,
-      warnings: [],
-      source: { provider: "test", model: null },
-        }),
+        };
+      return {
+        extractedText: "华住酒店集团 2026年8月18日 17:36 -219.00",
+        evidence: {
+          amountCents: 21900,
+          occurredOn: "2026-08-18",
+          paidTime: "17:36",
+          merchant: "华住酒店集团",
+          paymentMethod: "bank_card",
+        },
+        confidence: 0.99,
+        warnings: [],
+        source: { provider: "test", model: null },
+      };
+    },
     invoiceRecognizer: async () => ({
       status: "unmatched",
       extractedText: "电子发票 华住酒店集团 219.00",
@@ -274,6 +303,69 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.match(draft.item.message, /金额：219\.00 元/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 1);
+    db.close();
+  });
+
+  it("uses vision-only evidence without OCR text and supplies the Shanghai reference date", async () => {
+    const received = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-vision-only-proof"),
+      body: JSON.stringify({
+        conversationId: "conversation-vision-only-proof",
+        text: "",
+        sourceMessageId: "weixin-vision-only-proof",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "vision-only.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+
+    assert.equal(received.response.status, 200, JSON.stringify(received.body));
+    assert.deepEqual(lastRecognitionOptions, { referenceDate: "2026-08-25" });
+    const draft = await leaseOutbox();
+    assert.match(draft.item.message, /编号：202608201129/u);
+    assert.match(draft.item.message, /金额：37\.10 元/u);
+    assert.match(draft.item.message, /备注：合成平台/u);
+    assert.match(draft.item.message, /周期：20260817-20260823/u);
+    assert.match(draft.item.message, /AI 状态：已识别，待你确认/u);
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const row = db.prepare("SELECT amount_cents, occurred_on, note FROM shortcut_bookkeeping_entries").get();
+    assert.equal(row.amount_cents, 3710);
+    assert.equal(row.occurred_on, "2026-08-20");
+    assert.equal(row.note, "合成平台");
+    db.close();
+  });
+
+  it("routes a vision-only formal invoice classification to invoice ingestion", async () => {
+    const received = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-vision-only-invoice"),
+      body: JSON.stringify({
+        conversationId: "conversation-vision-only-invoice",
+        text: "",
+        sourceMessageId: "weixin-vision-only-invoice",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "visual-document.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+
+    assert.equal(received.response.status, 200, JSON.stringify(received.body));
+    assert.match(received.body.text, /发票已存入/u);
+    assert.deepEqual(lastRecognitionOptions, { referenceDate: "2026-08-25" });
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 0);
     db.close();
   });
 

@@ -139,7 +139,7 @@ declare class Bot {
   /** Return whether proactive delivery is bound to this exact recipient. */
   isDeliveryTarget(recipientId: string): boolean;
   /** Send only when the explicit recipient matches the current login. */
-  sendMessageTo(recipientId: string, message: string | ChatResponse): Promise<{ messageId: string }>;
+  sendMessageTo(recipientId: string, message: string | ChatResponse, options?: { clientId?: string }): Promise<{ messageId: string }>;
   /**
    * Proactively send a message to the logged-in WeChat user.
    *
@@ -149,7 +149,7 @@ declare class Bot {
    * Requires at least one inbound message to have been received so that a
    * valid `context_token` is cached (tokens are valid for ~24 hours).
    */
-  sendMessage(message: string | ChatResponse): Promise<{ messageId: string }>;
+  sendMessage(message: string | ChatResponse, options?: { clientId?: string }): Promise<{ messageId: string }>;
 }
 /**
  * Start the bot — long-polls for new messages and dispatches them to the agent.

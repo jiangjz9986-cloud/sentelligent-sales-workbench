@@ -10,7 +10,7 @@ import {
 } from "../../shared/salesWorkbenchApiContract.mjs";
 import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
-import { minimalPdf, VALID_PDF } from "./helpers/image-fixtures.js";
+import { minimalPdf, VALID_JPEG, VALID_PDF } from "./helpers/image-fixtures.js";
 
 const account = "invoice-owner";
 const loginPassword = "fixture-password-for-tests";
@@ -167,20 +167,20 @@ describe("authenticated invoice API", () => {
     assert.doesNotMatch(JSON.stringify(health.body), /tesseract|pdftotext|secret-version-output/i);
   });
 
-  it("uses local extracted text with the configured model without sending the original document", async () => {
+  it("routes PDF reading through rendered pages and the dedicated vision model", async () => {
     let modelRequest;
     await startHarness({
       invoiceRecognizer: undefined,
-      invoiceTextExtractor: {
-        async extract(mediaType, buffer) {
-          assert.equal(mediaType, "application/pdf");
+      invoicePdfImageRenderer: {
+        async render(buffer) {
           assert.deepEqual(buffer, PDF);
-          return "发票日期 2026-08-04 合计 100.00 元";
+          return [{ mediaType: "image/jpeg", buffer: VALID_JPEG }];
         },
       },
       aiAnalysisMode: "model",
       modelApiKey: "test-provider-key",
-      modelName: "deepseek-chat",
+      modelName: "deepseek-v4-flash",
+      modelVisionName: "deepseek-v4-flash-vision-exp",
       fetchImpl: async (_url, options) => {
         modelRequest = JSON.parse(options.body);
         return {
@@ -202,7 +202,10 @@ describe("authenticated invoice API", () => {
     assert.equal(uploaded.response.status, 201);
     assert.equal(uploaded.body.item.status, "unmatched");
     assert.equal(uploaded.body.item.totalCents, 10000);
-    assert.equal(modelRequest.messages[1].content, "发票日期 2026-08-04 合计 100.00 元");
+    assert.equal(modelRequest.model, "deepseek-v4-flash-vision-exp");
+    assert.deepEqual(modelRequest.thinking, { type: "disabled" });
+    assert.equal(modelRequest.messages[1].content[1].type, "image_url");
+    assert.match(modelRequest.messages[1].content[1].image_url.url, /^data:image\/jpeg;base64,/u);
     assert.doesNotMatch(JSON.stringify(modelRequest), new RegExp(PDF.toString("base64")));
   });
 

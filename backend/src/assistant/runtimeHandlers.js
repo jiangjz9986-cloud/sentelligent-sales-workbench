@@ -163,6 +163,20 @@ function shanghaiWeekStart(value) {
   return day.toISOString().slice(0, 10);
 }
 
+function shanghaiDate(value) {
+  const date = value instanceof Date ? value : new Date(value ?? Date.now());
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  const normalized = `${valueOf("year")}-${valueOf("month")}-${valueOf("day")}`;
+  return /^\d{4}-\d{2}-\d{2}$/u.test(normalized) ? normalized : null;
+}
+
 function looksLikeInvoiceDocument({ fileName, mediaType, text } = {}) {
   const name = safeText(fileName);
   const value = safeText(text);
@@ -485,6 +499,7 @@ export function createAssistantToolHandlers({
     async "bookkeeping.ingest"(args, context, serverData) {
       const media = serverData.media;
       const rawText = safeText(args?.text);
+      const receivedAt = clock();
       if (!media && !rawText) {
         return { text: "请发送付款截图，或直接说明金额、日期和用途。", status: "clarify" };
       }
@@ -513,17 +528,20 @@ export function createAssistantToolHandlers({
             fileName: media.fileName,
             mediaType: media.mediaType,
             buffer: content,
-          }));
+          }, { referenceDate: shanghaiDate(receivedAt) }));
         } catch {
           recognition = { extractedText: null, evidence: null, warnings: ["RECOGNITION_FAILED"], source: { provider: "rules", model: null } };
         }
       }
       const extractedText = safeText(recognition?.extractedText) || rawText;
-      if (media && !rawText && looksLikeInvoiceDocument({
-        fileName: media.fileName,
-        mediaType: media.mediaType,
-        text: extractedText,
-      })) {
+      if (media && !rawText && (
+        recognition?.documentKind === "invoice"
+        || looksLikeInvoiceDocument({
+          fileName: media.fileName,
+          mediaType: media.mediaType,
+          text: extractedText,
+        })
+      )) {
         return handlers["invoice.ingest"]({ mediaRef: media.sourceRef }, context, serverData);
       }
       const splitRows = media
@@ -581,7 +599,7 @@ export function createAssistantToolHandlers({
           expenseAnalysis,
           text: combinedText,
           entryType,
-          now: clock(),
+          now: receivedAt,
         });
         analyzedRows.push({ row, rowText, entryType, analysis });
       }
@@ -643,7 +661,7 @@ export function createAssistantToolHandlers({
           requestHash,
           sourceId: sourceRef,
           rawText: rowText || rawText || media?.fileName || "微信图片记账",
-          capturedAt: analysis.expense?.paidAt ?? clock().toISOString(),
+          capturedAt: analysis.expense?.paidAt ?? receivedAt.toISOString(),
         });
         if (received.replayed) {
           const pending = received.item.status === "review_required"

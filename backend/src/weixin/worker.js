@@ -36,6 +36,21 @@ export function deriveWeixinDeliveryKey(apiToken) {
     .digest();
 }
 
+export function deriveWeixinProviderClientId(deliveryKey, outboxId) {
+  if (!(deliveryKey instanceof Uint8Array) || deliveryKey.byteLength !== 32) {
+    throw new TypeError("deliveryKey must contain exactly 32 bytes");
+  }
+  const id = String(outboxId ?? "").trim();
+  if (!id || id.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(id)) {
+    throw new TypeError("outboxId is invalid");
+  }
+  return `sentelligent:${createHmac("sha256", Buffer.from(deliveryKey))
+    .update("sentelligent/weixin-provider-client-id/v1", "utf8")
+    .update("\0", "utf8")
+    .update(id, "utf8")
+    .digest("hex")}`;
+}
+
 function isInboundAllowed(config, metadata) {
   try {
     assertWeixinSenderAllowed(config, metadata);
@@ -123,13 +138,15 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
       )
     : null;
   const outboxBot = {
-    async sendMessage(message) {
+    async sendMessage(message, outboxId) {
       if (!bookkeepingDeliveryScope || !deliveryTargetMatches()) {
         const error = new Error("WeChat proactive delivery target is not bound");
         error.code = "WEIXIN_DELIVERY_SCOPE_MISMATCH";
         throw error;
       }
-      return bot.sendMessageTo(bookkeepingDeliveryScope.senderId, message);
+      return bot.sendMessageTo(bookkeepingDeliveryScope.senderId, message, {
+        clientId: deriveWeixinProviderClientId(deliveryKey, outboxId),
+      });
     },
     getDeliveryStatus() {
       if (!configuredBookkeepingDeliveryScope) {

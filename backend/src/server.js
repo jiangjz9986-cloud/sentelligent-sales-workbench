@@ -48,6 +48,8 @@ import {
   createLocalDocumentTextExtractor,
   probeLocalDocumentTextTools,
 } from "./travelExpense/localDocumentTextExtractor.js";
+import { createDocumentVisionAnalyzer } from "./travelExpense/documentVisionAnalysis.js";
+import { createLocalPdfImageRenderer } from "./travelExpense/localPdfImageRenderer.js";
 import {
   DocumentInboxDuplicateError,
   DocumentInboxNotFoundError,
@@ -2589,6 +2591,7 @@ export function createServer(options = {}) {
       ? { candidateIdFactory: options.invoiceCandidateIdFactory }
       : {}),
   });
+  const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
   const invoiceTextTools = options.invoiceTextTools ?? probeLocalDocumentTextTools({
     ocrCommand: config.invoiceOcrCommand,
     pdfTextCommand: config.invoicePdfTextCommand,
@@ -2599,6 +2602,18 @@ export function createServer(options = {}) {
     ocrLanguages: config.invoiceOcrLanguages,
     timeoutMs: config.invoiceTextExtractionTimeoutMs,
   });
+  const invoicePdfImageRenderer = options.invoicePdfImageRenderer ?? createLocalPdfImageRenderer({
+    command: config.invoicePdfImageCommand,
+    timeoutMs: config.invoiceTextExtractionTimeoutMs,
+  });
+  const documentVisionAnalyzer = options.documentVisionAnalyzer ?? (expenseModelClient
+    ? createDocumentVisionAnalyzer({
+        modelClient: expenseModelClient,
+        modelName: config.modelVisionName,
+        modelTimeoutMs: config.modelTimeoutMs,
+        pdfRenderer: invoicePdfImageRenderer,
+      })
+    : null);
   const invoiceRecognizer = options.invoiceRecognizer ?? ((file) => recognizeInvoiceDocument(file, {
     textExtractor: invoiceTextExtractor,
     analyzeText: options.invoiceTextAnalyzer ?? ((text) => analyzeInvoiceText(text, {
@@ -2606,6 +2621,9 @@ export function createServer(options = {}) {
       modelName: config.modelName,
       modelTimeoutMs: config.modelTimeoutMs,
     })),
+    ...(documentVisionAnalyzer
+      ? { analyzeDocument: options.invoiceDocumentVisionAnalyzer ?? documentVisionAnalyzer.analyzeInvoice }
+      : {}),
   }));
   const shortcutBookkeepingRepository = createShortcutBookkeepingRepository(db, {
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
@@ -2626,18 +2644,24 @@ export function createServer(options = {}) {
       clock: options.weixinDeliveryReadinessClock ?? Date.now,
       staleMs: Math.max(15_000, Math.min(10 * 60_000, config.weixinOutboxPollMs * 4)),
     });
-  const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
   const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => (
     recognizePaymentProofDocument(file, {
       typedEvidence: recognitionOptions.typedEvidence,
+      referenceDate: recognitionOptions.referenceDate,
       textExtractor: invoiceTextExtractor,
       analyzeText: options.paymentProofTextAnalyzer ?? ((text) => analyzePaymentProofText(text, {
         modelClient: expenseModelClient,
         modelName: config.modelName,
         modelTimeoutMs: config.modelTimeoutMs,
       })),
+      ...(documentVisionAnalyzer
+        ? {
+            analyzeDocument: options.paymentProofDocumentVisionAnalyzer
+              ?? documentVisionAnalyzer.analyzePaymentProof,
+          }
+        : {}),
       modelProvider: config.modelProvider,
-      modelName: config.modelName,
+      modelName: documentVisionAnalyzer ? config.modelVisionName : config.modelName,
       modelTimeoutMs: config.modelTimeoutMs,
     })
   ));

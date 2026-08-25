@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
-import { runWeixinWorker } from "../src/weixin/worker.js";
+import { deriveWeixinProviderClientId, runWeixinWorker } from "../src/weixin/worker.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 
 function syntheticLabel(...parts) {
@@ -129,7 +129,7 @@ describe("WeChat worker wiring", () => {
         return {
           getDeliveryStatus() { return { ready: true, status: "ready" }; },
           isDeliveryTarget(senderId) { return senderId === "sender-1"; },
-          async sendMessageTo(senderId, message) { sent.push({ senderId, message }); },
+          async sendMessageTo(senderId, message, options) { sent.push({ senderId, message, options }); },
           async wait() { await waitForAck; },
         };
       },
@@ -180,7 +180,17 @@ describe("WeChat worker wiring", () => {
         weixinAllowedSenderIds: ["sender-1"],
       },
     });
-    assert.deepEqual(sent, [{ senderId: "sender-1", message: "synthetic bookkeeping draft" }]);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].senderId, "sender-1");
+    assert.equal(sent[0].message, "synthetic bookkeeping draft");
+    const deliveryKey = createHmac("sha256", Buffer.from(syntheticLabel("worker", "bound", "token"), "utf8"))
+      .update("sentelligent/weixin-delivery-key/v1", "utf8")
+      .digest();
+    assert.equal(
+      sent[0].options.clientId,
+      deriveWeixinProviderClientId(deliveryKey, "outbox-bound"),
+    );
+    assert.match(sent[0].options.clientId, /^sentelligent:[0-9a-f]{64}$/u);
     const leaseRequest = requests.find(({ options }) => options.method === "GET");
     assert.equal(leaseRequest.options.headers["X-Weixin-Delivery-Status"], "ready");
     assert.equal(

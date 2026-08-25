@@ -20,6 +20,7 @@ describe("backend model configuration", () => {
         "DEEPSEEK_API_KEY=secret-from-env-file",
         "DEEPSEEK_BASE_URL=https://api.deepseek.com",
         "DEEPSEEK_MODEL=deepseek-v4-flash",
+        "MODEL_VISION_NAME=deepseek-v4-flash-vision-exp",
         "AMAP_WEB_SERVICE_KEY=amap-secret-from-env-file",
         "AMAP_TIMEOUT_MS=12345",
         "AUTH_ACCOUNT=jiangjz",
@@ -36,6 +37,7 @@ describe("backend model configuration", () => {
         "WEIXIN_BOOKKEEPING_SENDER_ID=sender-from-env-file",
         "INVOICE_OCR_COMMAND=C:/Tools/tesseract.exe",
         "INVOICE_PDF_TEXT_COMMAND=C:/Tools/pdftotext.exe",
+        "INVOICE_PDF_IMAGE_COMMAND=C:/Tools/pdftoppm.exe",
         "INVOICE_OCR_LANGUAGES=chi_sim+eng",
         "INVOICE_TEXT_EXTRACTION_TIMEOUT_MS=45678",
         "HOSPITAL_TENDER_AUTO_RUN=true",
@@ -53,6 +55,7 @@ describe("backend model configuration", () => {
       assert.equal(config.modelProvider, "deepseek");
       assert.equal(config.modelBaseUrl, "https://api.deepseek.com");
       assert.equal(config.modelName, "deepseek-v4-flash");
+      assert.equal(config.modelVisionName, "deepseek-v4-flash-vision-exp");
       assert.equal(config.modelApiKey, "secret-from-env-file");
       assert.equal(config.amapWebServiceKey, "amap-secret-from-env-file");
       assert.equal(config.amapTimeoutMs, 12345);
@@ -71,6 +74,7 @@ describe("backend model configuration", () => {
       assert.equal(config.weixinBookkeepingSenderId, "sender-from-env-file");
       assert.equal(config.invoiceOcrCommand, "C:/Tools/tesseract.exe");
       assert.equal(config.invoicePdfTextCommand, "C:/Tools/pdftotext.exe");
+      assert.equal(config.invoicePdfImageCommand, "C:/Tools/pdftoppm.exe");
       assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
       assert.equal(config.invoiceTextExtractionTimeoutMs, 45_678);
       assert.equal(config.hospitalTenderAutoRun, true);
@@ -111,6 +115,8 @@ describe("backend model configuration", () => {
     assert.equal(config.weixinBookkeepingSenderId, "");
     assert.equal(config.invoiceOcrCommand, "");
     assert.equal(config.invoicePdfTextCommand, "");
+    assert.equal(config.invoicePdfImageCommand, "pdftoppm");
+    assert.equal(config.modelVisionName, "deepseek-v4-flash-vision-exp");
     assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
     assert.equal(config.invoiceTextExtractionTimeoutMs, 30_000);
     assert.equal(config.hospitalTenderAutoRun, false);
@@ -227,6 +233,8 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
     }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
+    assert.throws(() => loadConfig({ ...base, MODEL_VISION_NAME: "vision model" }), /MODEL_VISION_NAME/);
+    assert.throws(() => loadConfig({ ...base, INVOICE_PDF_IMAGE_COMMAND: "" }), /INVOICE_PDF_IMAGE_COMMAND/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_AUTO_RUN: "yes" }), /HOSPITAL_TENDER_AUTO_RUN/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_INTERVAL_MINUTES: 1441 }), /HOSPITAL_TENDER_INTERVAL_MINUTES/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_BATCH_SIZE: 201 }), /HOSPITAL_TENDER_BATCH_SIZE/);

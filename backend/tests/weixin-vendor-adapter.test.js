@@ -480,9 +480,11 @@ describe("vendored Weixin inbound adapter", () => {
         { ret: 0 },
         { errcode: 0, errmsg: "ok" },
         {},
+        { base_resp: { ret: 0 } },
         { ret: -14, errmsg: "synthetic-private-ret-detail" },
         { errcode: 40013, errmsg: "synthetic-private-errcode-detail" },
         { ret: 0, errcode: -1, errmsg: "synthetic-private-conflicting-detail" },
+        { message: "synthetic-private-unrecognized-response" },
         "synthetic-private-malformed-response",
       ];
       const internalLogOffsets = await snapshotInternalLogs();
@@ -515,11 +517,19 @@ describe("vendored Weixin inbound adapter", () => {
       );
       await restored.sendMessageTo("synthetic-bot-user", "synthetic proactive delivery");
       await restored.sendMessageTo("synthetic-bot-user", "synthetic errcode success");
+      const stableClientId = `sentelligent:${"a".repeat(64)}`;
+      const emptyAcknowledgement = await restored.sendMessageTo(
+        "synthetic-bot-user",
+        "synthetic empty-object success",
+        { clientId: stableClientId },
+      );
+      assert.equal(emptyAcknowledgement.messageId, stableClientId);
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic nested-status success");
       for (const expected of [
+        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
+        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
+        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
         ["WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response"],
-        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
-        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
-        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
         ["WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response"],
       ]) {
         await assert.rejects(
@@ -532,13 +542,15 @@ describe("vendored Weixin inbound adapter", () => {
         );
       }
       await restored.wait();
-      assert.equal(proactiveBodies.length, 7);
+      assert.equal(proactiveBodies.length, 9);
       assert.equal(proactiveBodies[0].msg.context_token, contextToken);
+      assert.equal(proactiveBodies[2].msg.client_id, stableClientId);
       const providerErrorLogs = await readInternalLogDelta(internalLogOffsets);
       for (const secret of [
         "synthetic-private-ret-detail",
         "synthetic-private-errcode-detail",
         "synthetic-private-conflicting-detail",
+        "synthetic-private-unrecognized-response",
         "synthetic-private-malformed-response",
       ]) assert.equal(providerErrorLogs.includes(secret), false);
 

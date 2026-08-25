@@ -36,6 +36,18 @@ const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
     (name) => !LEGACY_CURRENT_EXCLUDED_ENV_NAMES.has(name),
   ),
 );
+// v0.6.18 is the immediate rollback/current baseline for v0.6.19. Its
+// immutable manifest predates only the dedicated document-vision model and
+// PDF-renderer environment names. Accept that exact historical contract only
+// while the release is the canonical current path; candidates still require
+// the complete v0.6.19 contract.
+const LEGACY_V0618_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
+  REQUIRED_ENV_NAMES.filter(
+    (name) =>
+      name !== "MODEL_VISION_NAME" &&
+      name !== "INVOICE_PDF_IMAGE_COMMAND",
+  ),
+);
 // v0.6.14 is the immediate rollback/current baseline for v0.6.15. Its
 // immutable manifest records the retired Shortcut/iCost names even though the
 // cutover environment must remove those values before the new services start.
@@ -159,6 +171,7 @@ const BACKEND_ENVIRONMENT_SERVICES = Object.freeze([
 ]);
 const APPROVED_MODEL_PROVIDER = "deepseek";
 const APPROVED_MODEL_NAME = "deepseek-v4-flash";
+const APPROVED_VISION_MODEL_NAME = "deepseek-v4-flash-vision-exp";
 const APPROVED_MODEL_BASE_URL = "https://api.deepseek.com";
 const IMMUTABLE_RELEASE_SERVICE_ENTRIES = Object.freeze({
   "sentelligent-backend.service": {
@@ -370,6 +383,7 @@ function hasProductionModelConfiguration(environment) {
     environment.AI_ANALYSIS_MODE === "model" &&
     environment.MODEL_PROVIDER === APPROVED_MODEL_PROVIDER &&
     environment.MODEL_NAME === APPROVED_MODEL_NAME &&
+    environment.MODEL_VISION_NAME === APPROVED_VISION_MODEL_NAME &&
     baseUrl === APPROVED_MODEL_BASE_URL &&
     isPositiveSafeIntegerText(environment.MODEL_TIMEOUT_MS) &&
     isProductionModelKey(modelKey) &&
@@ -695,6 +709,11 @@ export function inspectInvoiceExtractionTools(
       executableByServiceUser: false,
       identity: "unknown",
     },
+    pdfImage: {
+      regularFile: false,
+      executableByServiceUser: false,
+      identity: "unknown",
+    },
   };
   const backendService = request?.backendService;
   if (
@@ -714,16 +733,20 @@ export function inspectInvoiceExtractionTools(
         /^[A-Za-z0-9_.-]+$/.test(language),
     ) ||
     !isRecord(request.pdfText) ||
-    typeof request.pdfText.command !== "string"
+    typeof request.pdfText.command !== "string" ||
+    !isRecord(request.pdfImage) ||
+    typeof request.pdfImage.command !== "string"
   ) {
     return emptyEvidence;
   }
 
   let ocrInspection;
   let pdfInspection;
+  let pdfImageInspection;
   try {
     ocrInspection = inspect(request.ocr.command);
     pdfInspection = inspect(request.pdfText.command);
+    pdfImageInspection = inspect(request.pdfImage.command);
   } catch {
     return emptyEvidence;
   }
@@ -739,11 +762,18 @@ export function inspectInvoiceExtractionTools(
     pdfInspection.secureOwnership === true &&
     typeof pdfInspection.resolvedPath === "string" &&
     pdfInspection.resolvedPath.length > 0;
-  if (!ocrRegular || !pdfRegular) {
+  const pdfImageRegular =
+    isRecord(pdfImageInspection) &&
+    pdfImageInspection.regularFile === true &&
+    pdfImageInspection.secureOwnership === true &&
+    typeof pdfImageInspection.resolvedPath === "string" &&
+    pdfImageInspection.resolvedPath.length > 0;
+  if (!ocrRegular || !pdfRegular || !pdfImageRegular) {
     return {
       ...emptyEvidence,
       ocr: { ...emptyEvidence.ocr, regularFile: ocrRegular },
       pdfText: { ...emptyEvidence.pdfText, regularFile: pdfRegular },
+      pdfImage: { ...emptyEvidence.pdfImage, regularFile: pdfImageRegular },
     };
   }
 
@@ -757,7 +787,12 @@ export function inspectInvoiceExtractionTools(
     command: "/usr/bin/test",
     args: ["-x", pdfInspection.resolvedPath],
   }));
-  const serviceIdentityResolved = ocrExecutable || pdfExecutable;
+  const pdfImageExecutable = successfulToolRun(runAsServiceUser({
+    user: backendService.user,
+    command: "/usr/bin/test",
+    args: ["-x", pdfImageInspection.resolvedPath],
+  }));
+  const serviceIdentityResolved = ocrExecutable || pdfExecutable || pdfImageExecutable;
   const ocrVersion = ocrExecutable
     ? runAsServiceUser({
         user: backendService.user,
@@ -779,12 +814,22 @@ export function inspectInvoiceExtractionTools(
         args: ["-v"],
       })
     : failedToolRun();
+  const pdfImageVersion = pdfImageExecutable
+    ? runAsServiceUser({
+        user: backendService.user,
+        command: pdfImageInspection.resolvedPath,
+        args: ["-v"],
+      })
+    : failedToolRun();
   const ocrIdentity =
     successfulToolRun(ocrVersion) &&
     /^tesseract\s+\d/iu.test(`${ocrVersion.stdout}\n${ocrVersion.stderr}`.trim());
   const pdfIdentity =
     successfulToolRun(pdfVersion) &&
     /^pdftotext version\s+\d/iu.test(`${pdfVersion.stdout}\n${pdfVersion.stderr}`.trim());
+  const pdfImageIdentity =
+    successfulToolRun(pdfImageVersion) &&
+    /^pdftoppm version\s+\d/iu.test(`${pdfImageVersion.stdout}\n${pdfImageVersion.stderr}`.trim());
   const availableLanguages = successfulToolRun(ocrLanguages)
     ? listedTesseractLanguages(`${ocrLanguages.stdout}\n${ocrLanguages.stderr}`)
     : new Set();
@@ -805,6 +850,11 @@ export function inspectInvoiceExtractionTools(
       regularFile: true,
       executableByServiceUser: pdfExecutable,
       identity: pdfIdentity ? "poppler-pdftotext" : "unknown",
+    },
+    pdfImage: {
+      regularFile: true,
+      executableByServiceUser: pdfImageExecutable,
+      identity: pdfImageIdentity ? "poppler-pdftoppm" : "unknown",
     },
   };
 }
@@ -863,6 +913,8 @@ function hasInvoiceExtractionConfiguration(
     !environment.INVOICE_OCR_COMMAND.startsWith("/") ||
     !isProductionToolCommand(environment.INVOICE_PDF_TEXT_COMMAND) ||
     !environment.INVOICE_PDF_TEXT_COMMAND.startsWith("/") ||
+    !isProductionToolCommand(environment.INVOICE_PDF_IMAGE_COMMAND) ||
+    !environment.INVOICE_PDF_IMAGE_COMMAND.startsWith("/") ||
     requiredLanguages === null ||
     !isPositiveSafeIntegerText(environment.INVOICE_TEXT_EXTRACTION_TIMEOUT_MS) ||
     backendService === null ||
@@ -881,6 +933,9 @@ function hasInvoiceExtractionConfiguration(
       pdfText: {
         command: environment.INVOICE_PDF_TEXT_COMMAND,
       },
+      pdfImage: {
+        command: environment.INVOICE_PDF_IMAGE_COMMAND,
+      },
     });
     return (
       isRecord(evidence) &&
@@ -893,7 +948,11 @@ function hasInvoiceExtractionConfiguration(
       isRecord(evidence.pdfText) &&
       evidence.pdfText.regularFile === true &&
       evidence.pdfText.executableByServiceUser === true &&
-      evidence.pdfText.identity === "poppler-pdftotext"
+      evidence.pdfText.identity === "poppler-pdftotext" &&
+      isRecord(evidence.pdfImage) &&
+      evidence.pdfImage.regularFile === true &&
+      evidence.pdfImage.executableByServiceUser === true &&
+      evidence.pdfImage.identity === "poppler-pdftoppm"
     );
   } catch {
     return false;
@@ -1533,6 +1592,7 @@ function hasLegacyCurrentEnvironmentContract(value) {
   if (names.size !== value.length) return false;
   return [
     LEGACY_CURRENT_REQUIRED_ENV_NAMES,
+    LEGACY_V0618_CURRENT_REQUIRED_ENV_NAMES,
     LEGACY_SHORTCUT_CURRENT_REQUIRED_ENV_NAMES,
   ].some(
     (expected) =>
