@@ -142,6 +142,16 @@ describe("快捷记账→小小助手纯能力层", () => {
     });
   });
 
+  it("parses the compact note correction used in the real WeChat reply", () => {
+    const correction = parseShortcutBookkeepingCorrection("修改备注8.18晚餐：继振、宫涛");
+
+    assert.deepEqual(correction, {
+      status: "accepted",
+      changes: { note: "8.18晚餐：继振、宫涛" },
+      warnings: [],
+    });
+  });
+
   it("fails closed on ambiguous, unknown, protected, duplicate, negative, and timezone-less corrections", () => {
     for (const text of [
       "金额改为 -5 元",

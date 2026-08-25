@@ -271,6 +271,95 @@ describe("remote Clawbot agent adapter", () => {
     );
   });
 
+  it("returns only strict bounded 409 business replies to WeChat", async () => {
+    let reply = { status: "clarify", text: "请引用对应的最新记账草稿。" };
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse(reply, 409),
+    });
+    const request = {
+      conversationId: "c-1",
+      text: "修改备注为客户拜访",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+
+    for (const status of ["clarify", "review_required", "error"]) {
+      reply = { status, text: `bounded-${status}` };
+      assert.deepEqual(await agent.chat(request), reply);
+    }
+  });
+
+  it("rejects malformed or expanded 409 response shapes as permanent safe errors", async () => {
+    let responseBody = { status: "clarify", text: "valid", debug: { path: "/private/db" } };
+    let rawResponse = null;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => rawResponse ?? jsonResponse(responseBody, 409),
+    });
+    const request = {
+      conversationId: "c-1",
+      text: "修改备注为客户拜访",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"b".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+    const invalidBodies = [
+      responseBody,
+      { status: "ok", text: "not-allowlisted" },
+      { status: "clarify", text: "" },
+      { status: "clarify", text: "   " },
+      { status: "clarify", text: "contains\ncontrol" },
+      { status: "clarify", text: "x".repeat(20_001) },
+      { status: "clarify" },
+      ["clarify", "text"],
+    ];
+
+    for (const invalidBody of invalidBodies) {
+      responseBody = invalidBody;
+      await assert.rejects(agent.chat(request), (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
+        assert.equal(error.message, "远程助手暂时不可用，请稍后重试");
+        assert.equal(error.permanent, true);
+        return true;
+      });
+    }
+
+    rawResponse = { ok: false, status: 409, text: async () => "{not-json" };
+    await assert.rejects(agent.chat(request), { code: "REMOTE_AGENT_REQUEST_FAILED", permanent: true });
+  });
+
+  it("keeps authorization and server failures exceptional", async () => {
+    let backendStatus = 401;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse({ status: "clarify", text: "must not be returned" }, backendStatus),
+    });
+    const request = {
+      conversationId: "c-1",
+      text: "hello",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"c".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+
+    for (const status of [401, 403, 500]) {
+      backendStatus = status;
+      await assert.rejects(agent.chat(request), (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
+        assert.equal(error.permanent, status < 500);
+        return true;
+      });
+    }
+  });
+
   it("marks permanent backend authorization responses so one message cannot poison retries", async () => {
     const agent = createRemoteClawbotAgent({
       backendUrl: "https://sales.example.test",

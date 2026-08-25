@@ -10,6 +10,9 @@ import {
 const EVENT_PATH = "/api/integrations/weixin-agent/events";
 const SAFE_FAILURE_MESSAGE = "远程助手暂时不可用，请稍后重试";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_BUSINESS_REPLY_TEXT_LENGTH = 20_000;
+const BUSINESS_REPLY_STATUSES = new Set(["clarify", "review_required", "error"]);
+const CONTROL_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export class RemoteAgentError extends Error {
   constructor(code, message = SAFE_FAILURE_MESSAGE, { permanent = false } = {}) {
@@ -145,6 +148,25 @@ function parseResponseBody(value) {
   return body;
 }
 
+function parseSafeConflictReply(value) {
+  let body;
+  try {
+    body = parseResponseBody(value);
+  } catch {
+    return null;
+  }
+  const keys = Object.keys(body).sort();
+  if (keys.length !== 2 || keys[0] !== "status" || keys[1] !== "text") return null;
+  if (!BUSINESS_REPLY_STATUSES.has(body.status)) return null;
+  if (
+    typeof body.text !== "string"
+    || !body.text.trim()
+    || body.text.length > MAX_BUSINESS_REPLY_TEXT_LENGTH
+    || CONTROL_CHARACTER_RE.test(body.text)
+  ) return null;
+  return { status: body.status, text: body.text };
+}
+
 async function normalizeMedia(request) {
   if (!request.media) return null;
   try {
@@ -239,6 +261,10 @@ export function createRemoteClawbotAgent(options = {}) {
       }
       if (!response.ok) {
         const status = Number(response.status);
+        if (status === 409) {
+          const conflictReply = parseSafeConflictReply(responseText);
+          if (conflictReply) return conflictReply;
+        }
         const permanent = Number.isInteger(status)
           && status >= 400
           && status < 500

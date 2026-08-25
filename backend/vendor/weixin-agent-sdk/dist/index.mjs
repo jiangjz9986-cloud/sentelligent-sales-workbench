@@ -512,11 +512,13 @@ function sendMessageProviderError(code, message) {
 }
 /**
 * Validate the provider's JSON-level acknowledgement without surfacing its
-* response body. iLink deployments may return an empty JSON object after an
-* accepted text send, or expose business status through top-level/nested
-* `ret` and `errcode` fields. Every status that is present must be numeric zero.
+* response body. iLink deployments may return an empty/whitespace-only HTTP
+* body or an empty JSON object after an accepted text send, or expose business
+* status through top-level/nested `ret` and `errcode` fields. Every status that
+* is present must be numeric zero.
 */
 function assertSendMessageAccepted(rawText) {
+	if (typeof rawText === "string" && rawText.trim() === "") return;
 	let response;
 	try {
 		response = JSON.parse(rawText);
@@ -1293,7 +1295,18 @@ function quotedReferenceFromItemList(itemList) {
 	if (!ref || typeof ref !== "object" || Array.isArray(ref)) return null;
 	let quotedMessageId = null;
 	try {
-		quotedMessageId = oneCanonicalUpstreamId(ref);
+		// Proactive Sentelligent drafts are persisted by their caller-supplied
+		// client_id. A quoted Weixin reference may also carry a numeric
+		// message_id, but that provider id is not the durable outbox identity.
+		// Validate every candidate, then prefer only the exact namespaced client
+		// id shape; ordinary inbound identity keeps oneCanonicalUpstreamId's
+		// message_id-first behavior.
+		optionalUpstreamIdentifier(ref.message_id, "quoted message id");
+		optionalUpstreamIdentifier(ref.msg_id, "quoted message id");
+		const clientId = optionalUpstreamIdentifier(ref.client_id, "quoted message id");
+		quotedMessageId = /^sentelligent:[0-9a-f]{64}$/u.test(clientId ?? "")
+			? clientId
+			: oneCanonicalUpstreamId(ref);
 	} catch {
 		throw new TypeError("ambiguous quoted message id");
 	}

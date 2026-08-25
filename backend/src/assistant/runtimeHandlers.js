@@ -656,7 +656,7 @@ export function createAssistantToolHandlers({
           entryType,
           category: analysis.category,
           subcategory: analysis.subcategory,
-          note: analysis.note ?? analysis.expense?.merchant ?? null,
+          note: analysis.note ?? null,
           idempotencyKey: `weixin-bookkeeping:${idempotencySource}`,
           requestHash,
           sourceId: sourceRef,

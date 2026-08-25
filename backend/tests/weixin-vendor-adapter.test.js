@@ -190,6 +190,48 @@ describe("vendored Weixin inbound adapter", () => {
     assert.doesNotMatch(request.text, /BK-|引用/u);
   });
 
+  it("prefers a strict Sentelligent outbound client id only for quoted draft identity", () => {
+    const outboundClientId = `sentelligent:${"a".repeat(64)}`;
+    const request = normalizeInboundUpdate(textUpdate({
+      message_id: "synthetic-reply-message-with-provider-id",
+      client_id: "synthetic-reply-client-id",
+      item_list: [{
+        type: 1,
+        text_item: { text: "修改备注为合成晚餐" },
+        ref_msg: {
+          message_id: 123456789,
+          client_id: outboundClientId,
+          title: "小小记账草稿",
+          message_item: {
+            type: 1,
+            text_item: { text: "【小小提醒！新增一条待记账信息】\n编号：202608182251" },
+          },
+        },
+      }],
+    }), { deliveryKey: DELIVERY_KEY });
+
+    assert.equal(request.quotedMessageId, outboundClientId);
+    assert.equal(request.text, "修改备注为合成晚餐");
+    assert.equal(request.messageId, expectedDeliveryId([
+      DELIVERY_DOMAIN,
+      "synthetic-sender-a",
+      "synthetic-reply-message-with-provider-id",
+    ]));
+
+    const ordinaryQuote = normalizeInboundUpdate(textUpdate({
+      message_id: "synthetic-ordinary-reply-message",
+      item_list: [{
+        type: 1,
+        text_item: { text: "确认" },
+        ref_msg: {
+          message_id: 987654321,
+          client_id: "synthetic-namespaced-lookalike",
+        },
+      }],
+    }), { deliveryKey: DELIVERY_KEY });
+    assert.equal(ordinaryQuote.quotedMessageId, "987654321");
+  });
+
   it("preserves an unsafe 64-bit provider message_id before normalization", async () => {
     await withSyntheticAccount("numeric-provider-id", async ({ accountId }) => {
       const abortController = new AbortController();
@@ -481,6 +523,8 @@ describe("vendored Weixin inbound adapter", () => {
         { errcode: 0, errmsg: "ok" },
         {},
         { base_resp: { ret: 0 } },
+        "",
+        " \n\t",
         { ret: -14, errmsg: "synthetic-private-ret-detail" },
         { errcode: 40013, errmsg: "synthetic-private-errcode-detail" },
         { ret: 0, errcode: -1, errmsg: "synthetic-private-conflicting-detail" },
@@ -525,6 +569,8 @@ describe("vendored Weixin inbound adapter", () => {
       );
       assert.equal(emptyAcknowledgement.messageId, stableClientId);
       await restored.sendMessageTo("synthetic-bot-user", "synthetic nested-status success");
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic empty-body success");
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic whitespace-body success");
       for (const expected of [
         ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
         ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
@@ -542,7 +588,7 @@ describe("vendored Weixin inbound adapter", () => {
         );
       }
       await restored.wait();
-      assert.equal(proactiveBodies.length, 9);
+      assert.equal(proactiveBodies.length, 11);
       assert.equal(proactiveBodies[0].msg.context_token, contextToken);
       assert.equal(proactiveBodies[2].msg.client_id, stableClientId);
       const providerErrorLogs = await readInternalLogDelta(internalLogOffsets);

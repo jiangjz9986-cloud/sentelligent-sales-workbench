@@ -95,15 +95,11 @@ function createSend(agent, deliveryKey, deliveryState) {
   };
 }
 
-async function expectSafeRemoteFailure(operation) {
-  try {
-    await operation;
-  } catch (error) {
-    assert.equal(error?.code, "REMOTE_AGENT_REQUEST_FAILED");
-    assert.equal(error?.message, "远程助手暂时不可用，请稍后重试");
-    return error.testRequest;
-  }
-  assert.fail("the real remote adapter must reject a non-2xx confirmation response");
+async function expectSafeRemoteConflict(operation) {
+  const result = await operation;
+  assert.equal(result.reply.status, "error");
+  assert.equal(result.reply.text, "确认信息无效或已过期，请重新发起操作。");
+  return result.request;
 }
 
 function count(db, sql, params = {}) {
@@ -239,17 +235,17 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     const retryPending = await sendAfterRestart({ text: "录入" });
     const retryCode = codeFrom(retryPending.reply.text);
     for (let attempt = 1; attempt <= 4; attempt += 1) {
-      const wrongRequest = await expectSafeRemoteFailure(
+      const wrongRequest = await expectSafeRemoteConflict(
         sendAfterRestart({ text: differentCode(retryCode) }),
       );
       if (attempt === 1) {
-        await expectSafeRemoteFailure(
+        await expectSafeRemoteConflict(
           sendAfterRestart({ text: differentCode(retryCode), replay: wrongRequest }),
         );
       }
     }
     assert.equal(pendingRow(databaseUrl, retryPending.reply.actionId).confirmation_attempts, 4);
-    await expectSafeRemoteFailure(sendAfterRestart({ text: differentCode(retryCode) }));
+    await expectSafeRemoteConflict(sendAfterRestart({ text: differentCode(retryCode) }));
     const lockedRow = pendingRow(databaseUrl, retryPending.reply.actionId);
     assert.equal(lockedRow.confirmation_attempts, 5);
     assert.equal(lockedRow.status, "failed");
@@ -270,8 +266,8 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     const scopedCode = codeFrom(scopedPending.reply.text);
     const groupDraft = await sendAfterRestart({ text: "记录", chatType: "group", group: groupId });
     assert.match(groupDraft.reply.text, /当前没有暂存内容/);
-    await expectSafeRemoteFailure(sendAfterRestart({ senderId: senderB, text: scopedCode }));
-    await expectSafeRemoteFailure(
+    await expectSafeRemoteConflict(sendAfterRestart({ senderId: senderB, text: scopedCode }));
+    await expectSafeRemoteConflict(
       sendAfterRestart({ text: scopedCode, chatType: "group", group: groupId }),
     );
     assert.equal(pendingRow(databaseUrl, scopedPending.reply.actionId).status, "pending");
@@ -281,7 +277,7 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     assert.equal(Object.hasOwn(renewal.reply, "confirmationCode"), false);
     const renewedCode = codeFrom(renewal.reply.text);
     assert.notEqual(renewedCode, scopedCode);
-    await expectSafeRemoteFailure(sendAfterRestart({ text: scopedCode }));
+    await expectSafeRemoteConflict(sendAfterRestart({ text: scopedCode }));
     const renewed = await sendAfterRestart({ text: renewedCode });
     assert.equal(renewed.reply.status, "ok");
     assert.match(renewed.reply.text, /已录入系统/);

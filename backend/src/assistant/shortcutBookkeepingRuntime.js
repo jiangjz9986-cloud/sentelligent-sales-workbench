@@ -19,6 +19,8 @@ const CONFIRMATION_WARNING = "WEIXIN_CONFIRMATION_REQUIRED";
 const MAX_MESSAGE_LENGTH = 20_000;
 const SHORTCUT_PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DRAFT_REFERENCE_RE = /BK-[0-9A-F]{12}|(?:编号\s*[：:]\s*)([0-9]{12})/u;
+const IMPLICIT_CURRENT_WINDOW_MS = 15 * 60 * 1000;
+const IMPLICIT_CURRENT_GAP_MS = 60 * 60 * 1000;
 
 function requiredText(value, name, max = 500) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new TypeError(`${name} is required`);
@@ -228,7 +230,7 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
   const fields = draft.fields;
   const entryType = entry.entryType === "income" ? "收入" : "支出";
   const category = [fields.category, fields.subcategory].filter(Boolean).join("-");
-  const note = fields.note || fields.purpose;
+  const note = fields.note;
   const week = naturalWeek(fields.occurredOn);
   const number = draftTimestampReference(entry) ?? reference ?? "待确认";
   const reviewWarnings = [...new Set([
@@ -313,6 +315,11 @@ function reviewAnalysis(entry, nextFields) {
   return {
     ...analysis,
     status: "review_required",
+    category: nextFields.category ?? analysis.category ?? entry.category,
+    subcategory: Object.hasOwn(nextFields, "subcategory")
+      ? nextFields.subcategory
+      : analysis.subcategory ?? entry.subcategory ?? null,
+    note: Object.hasOwn(nextFields, "note") ? nextFields.note : entry.note ?? null,
     expense: nextExpense,
     warnings: [...new Set([...warnings, CONFIRMATION_WARNING])],
   };
@@ -684,7 +691,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       SELECT id FROM assistant_pending_actions
       WHERE owner = $owner AND channel = $channel AND action_type = $actionType
         AND status IN ('pending', 'confirmed', 'processing')
-      ORDER BY created_at ASC, id ASC
+      ORDER BY updated_at DESC, created_at DESC, id DESC
       LIMIT $limit
     `).all({
       $owner: normalizedAccount,
@@ -692,6 +699,35 @@ export function createShortcutBookkeepingAssistantRuntime({
       $actionType: SHORTCUT_BOOKKEEPING_ACTION,
       $limit: limit,
     }).map((row) => getShortcutAction(normalizedAccount, row.id)).filter(Boolean);
+  }
+
+  function implicitCurrentAction(actions, { allowUndelivered = false } = {}) {
+    const candidates = actions
+      .filter((action) => actionPayload(action)?.kind !== SHORTCUT_ADVANCE_ALLOCATION_KIND)
+      .map((action) => ({
+        action,
+        updatedMs: Date.parse(action.updatedAt ?? action.createdAt ?? ""),
+      }))
+      .filter((candidate) => Number.isFinite(candidate.updatedMs))
+      .sort((left, right) => right.updatedMs - left.updatedMs || right.action.id.localeCompare(left.action.id));
+    if (candidates.length === 0) return null;
+    let selected = null;
+    if (candidates.length === 1) {
+      selected = candidates[0].action;
+    } else {
+      const nowMs = Date.parse(iso(clock));
+      const newest = candidates[0];
+      const next = candidates[1];
+      if (nowMs - newest.updatedMs <= IMPLICIT_CURRENT_WINDOW_MS
+        && newest.updatedMs - next.updatedMs >= IMPLICIT_CURRENT_GAP_MS) {
+        selected = newest.action;
+      }
+    }
+    if (!selected || allowUndelivered) return selected;
+    const payload = actionPayload(selected);
+    if (!payload?.entryId || typeof outboxRepository.latestForEntry !== "function") return null;
+    const latest = outboxRepository.latestForEntry({ owner: selected.owner, entryId: payload.entryId });
+    return latest?.status === "sent" ? selected : null;
   }
 
   function activeAdvanceAllocationActions(account, { limit = 3 } = {}) {
@@ -1796,6 +1832,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         || /^(?:记账|支出|收入|借款到账|收到(?:出差)?借款|工资到账|奖金到账)(?:[：:\s]|$)/u.test(text));
     if (newCapture) return null;
     let targetAction = null;
+    let implicitTarget = false;
     const allocationCandidates = intent.intent === "loan_assignment" && !pendingActionId && !action
       ? activeAdvanceAllocationActions(account, { limit: 3 })
       : [];
@@ -1827,12 +1864,29 @@ export function createShortcutBookkeepingAssistantRuntime({
       targetAction = action;
     } else {
       const active = activeShortcutActions(account, { limit: 3 });
-      if (active.length === 1) [targetAction] = active;
-      else if (active.length > 1 && commandTargetsShortcut(text, textClassification, pendingActionId, quote)) {
+      const draftOnlyCorrection = intent.intent === "correction" || Boolean(explicitModification(text));
+      const implicit = implicitCurrentAction(active, { allowUndelivered: draftOnlyCorrection });
+      if (implicit) {
+        targetAction = implicit;
+        implicitTarget = true;
+      } else if (active.length > 1 && commandTargetsShortcut(text, textClassification, pendingActionId, quote)) {
         return { status: 409, body: { status: "clarify", text: "当前有多笔待确认记账，请引用对应的小小草稿后回复“确认”“修改…”或“取消”。" }, draftText: "等待引用具体记账草稿。" };
+      } else if (active.length === 1 && commandTargetsShortcut(text, textClassification, pendingActionId, quote)) {
+        return { status: 200, body: { status: "clarify", text: "最新记账草稿尚未确认送达，请等待小小发出草稿后再回复。" }, draftText: "等待最新记账草稿送达。" };
       }
     }
     if (!targetAction) return null;
+    // Implicit draft selection is deliberately owner-scoped so it can recover
+    // from providers that omit quote metadata. Re-apply the exact sender and
+    // direct-chat gate after selection so another allowlisted sender or an
+    // allowed group cannot operate the owner's financial draft.
+    if (!financialEventScopeAllowed(context, serverData)) {
+      return {
+        status: 403,
+        body: { status: "error", text: "当前微信会话不属于小小记账绑定的本人私聊，未执行任何财务操作。" },
+        draftText: "财务操作访问被拒绝。",
+      };
+    }
     if (pendingActionId && pendingActionId !== targetAction.id) {
       return { status: 409, body: { status: "error", text: "当前会话的待确认操作已变化，请查看最新微信消息。" }, draftText: "确认信息已处理。" };
     }
@@ -1841,6 +1895,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (context?.channel === SHORTCUT_BOOKKEEPING_CHANNEL
       && targetAction
       && !quote
+      && !implicitTarget
       && (isFinancialCommand || textClassification.kind === "cancel" || text === "确认")) {
       return quoteRequiredResponse();
     }

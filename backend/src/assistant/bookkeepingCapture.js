@@ -340,7 +340,9 @@ export function buildBookkeepingAnalysis({
       : Number.isFinite(expenseAnalysis?.confidence) ? expenseAnalysis.confidence : 0,
     category: selection.category,
     subcategory: selection.subcategory,
-    note: merchant,
+    // A recognized merchant belongs to the dedicated merchant field. Notes are
+    // user-authored context and must remain empty until the user supplies one.
+    note: null,
     expense: {
       occurredOn,
       amountCents,

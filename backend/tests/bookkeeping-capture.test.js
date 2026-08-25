@@ -31,6 +31,28 @@ describe("微信小小记账识别", () => {
     assert.equal(analysis.expense.fundingSource, "other");
   });
 
+  it("keeps a recognized merchant and purpose separate while defaulting note to empty", () => {
+    const analysis = buildBookkeepingAnalysis({
+      recognition: {
+        evidence: {
+          amountCents: 1850,
+          occurredOn: "2026-08-24",
+          paidTime: "18:20",
+          merchant: "合成商户",
+          paymentMethod: "wechat",
+        },
+      },
+      expenseAnalysis: {
+        expense: { purpose: "客户晚餐" },
+      },
+      entryType: "expense",
+    });
+
+    assert.equal(analysis.note, null);
+    assert.equal(analysis.expense.merchant, "合成商户");
+    assert.equal(analysis.expense.purpose, "客户晚餐");
+  });
+
   it("splits a two-row payment list by the shared right amount column", () => {
     const token = (text, left, top, width, line, word) => ({
       page: 1,
