@@ -2931,6 +2931,31 @@ describe("sales workbench API client", () => {
     assert.equal(calls.at(-1).options.headers["X-CSRF-Token"], "fixture-csrf-token");
   });
 
+  it("uses the Xiaoxiao WeChat review API for the human confirmation fallback", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (options.method === "POST") return jsonResponse({ item: { id: "entry-1", status: "review_required" } });
+        if (url.includes("/api/integrations/weixin/bookkeeping/review?")) return jsonResponse({ items: [{ id: "entry-1" }] });
+        return jsonResponse({ item: { id: "entry-1" } });
+      },
+    });
+    const items = await api.listWeixinBookkeepingReviews({ status: "review_required" });
+    const item = await api.getWeixinBookkeepingReview("entry-1");
+    const confirmed = await api.confirmWeixinBookkeepingReview("entry-1", { status: "ready" });
+    const rejected = await api.rejectWeixinBookkeepingReview("entry-1", "无法核实");
+    const retried = await api.retryWeixinBookkeepingReview("entry-1");
+    assert.equal(items[0].id, "entry-1");
+    assert.equal(item.id, "entry-1");
+    assert.equal(confirmed.status, "review_required");
+    assert.equal(rejected.id, "entry-1");
+    assert.equal(retried.id, "entry-1");
+    assert.match(calls[0].url, /\/api\/integrations\/weixin\/bookkeeping\/review\?status=review_required/u);
+    assert.match(calls.at(-1).url, /\/api\/integrations\/weixin\/bookkeeping\/review\/entry-1\/retry/u);
+  });
+
   it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
@@ -2938,10 +2963,7 @@ describe("sales workbench API client", () => {
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
         if (url.endsWith("/api/settings/security")) {
-          return jsonResponse({ item: { icost: { configured: false }, deepseek: { configured: false } } });
-        }
-        if (url.endsWith("/api/settings/icost-token/rotate")) {
-          return jsonResponse({ item: { token: syntheticToken, masked: "icos••••once", status: "active" } });
+          return jsonResponse({ item: { deepseek: { configured: false } } });
         }
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "PUT") {
           return jsonResponse({ item: { configured: true, masked: "synt••••test", status: "active" } });
@@ -2963,97 +2985,19 @@ describe("sales workbench API client", () => {
     });
     api.setSession({ csrfToken: "fixture-csrf-token" });
 
-    assert.equal((await api.getSecuritySettings()).icost.configured, false);
-    assert.equal((await api.rotateIcostToken()).token, syntheticToken);
+    assert.equal((await api.getSecuritySettings()).deepseek.configured, false);
     await api.saveDeepSeekApiKey(syntheticKey);
     await api.clearDeepSeekApiKey();
     await api.savePushplusToken(syntheticToken);
     await api.testPushplusToken();
     await api.clearPushplusToken();
-
-    assert.equal(calls[1].options.method, "POST");
+    assert.equal(calls.length, 6);
+    assert.equal(calls[1].options.body, JSON.stringify({ apiKey: syntheticKey }));
     assert.equal(calls[1].options.headers["X-CSRF-Token"], "fixture-csrf-token");
-    assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
-    assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
-    assert.equal(calls[4].options.body, JSON.stringify({ token: syntheticToken }));
-    assert.equal(calls[5].options.method, "POST");
-    assert.equal(calls[5].options.headers["X-CSRF-Token"], "fixture-csrf-token");
-    assert.equal(calls[6].options.body, JSON.stringify({ confirmation: "CLEAR" }));
-  });
-
-  it("manages Shortcut tokens with cookie credentials and never treats the list as a secret source", async () => {
-    const calls = [];
-    const api = createSalesWorkbenchApi({
-      baseUrl: "http://127.0.0.1:8787",
-      fetchImpl: async (url, options = {}) => {
-        calls.push({ url, options });
-        if (options.method === "POST") {
-          return jsonResponse({
-            item: {
-              id: "token-1",
-              label: "iPhone 截图记账",
-              account: "jiangjz",
-              token: "test-token",
-              tokenPrefix: "AAAAAAAA",
-              createdAt: "2026-08-16T12:00:00.000Z",
-              lastUsedAt: null,
-              revokedAt: null,
-            },
-          }, 201);
-        }
-        if (options.method === "DELETE") {
-          return jsonResponse({ item: { id: "token-1", revokedAt: "2026-08-16T12:01:00.000Z" } });
-        }
-        return jsonResponse({
-          items: [{
-            id: "token-1",
-            label: "iPhone 截图记账",
-            account: "jiangjz",
-            tokenPrefix: "AAAAAAAA",
-            createdAt: "2026-08-16T12:00:00.000Z",
-            lastUsedAt: null,
-            revokedAt: null,
-          }],
-        });
-      },
-    });
-    api.setSession({ csrfToken: "fixture-csrf-token" });
-
-    const created = await api.createShortcutToken({ label: "iPhone 截图记账" });
-    const listed = await api.listShortcutTokens();
-    const revoked = await api.revokeShortcutToken("token-1");
-
-    assert.equal(created.token, "test-token");
-    assert.equal(listed[0].token, undefined);
-    assert.equal(revoked.revokedAt, "2026-08-16T12:01:00.000Z");
-    assert.deepEqual(calls.map(({ url, options }) => ({
-      url,
-      method: options.method ?? "GET",
-      csrf: headerValue(options, "X-CSRF-Token"),
-      credentials: options.credentials,
-      body: options.body ? JSON.parse(options.body) : undefined,
-    })), [
-      {
-        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens",
-        method: "POST",
-        csrf: "fixture-csrf-token",
-        credentials: "include",
-        body: { label: "iPhone 截图记账" },
-      },
-      {
-        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens",
-        method: "GET",
-        csrf: undefined,
-        credentials: "include",
-        body: undefined,
-      },
-      {
-        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens/token-1",
-        method: "DELETE",
-        csrf: "fixture-csrf-token",
-        credentials: "include",
-        body: undefined,
-      },
-    ]);
+    assert.equal(calls[2].options.body, JSON.stringify({ confirmation: "CLEAR" }));
+    assert.equal(calls[3].options.body, JSON.stringify({ token: syntheticToken }));
+    assert.equal(calls[4].options.method, "POST");
+    assert.equal(calls[4].options.headers["X-CSRF-Token"], "fixture-csrf-token");
+    assert.equal(calls[5].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
 });

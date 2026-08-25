@@ -1,13 +1,9 @@
-import { randomBytes } from "node:crypto";
-
 import { decryptSecret, encryptSecret, maskSecret } from "./secretBox.js";
 
-export const ICOST_SETTING_KEY = "icost_webhook_token";
 export const DEEPSEEK_SETTING_KEY = "deepseek_api_key";
 export const PUSHPLUS_SETTING_KEY = "hospital_tender_pushplus_token";
 
 const ALLOWED_KEYS = new Set([
-  ICOST_SETTING_KEY,
   DEEPSEEK_SETTING_KEY,
   PUSHPLUS_SETTING_KEY,
 ]);
@@ -152,12 +148,6 @@ export function createSecureSettingsRepository(db, { masterKey, clock = () => ne
     return metadata(key);
   }
 
-  function rotateIcostToken() {
-    const token = `icost_${randomBytes(32).toString("base64url")}`;
-    const item = setSecret(ICOST_SETTING_KEY, token);
-    return { item, token };
-  }
-
   return {
     readSecret,
     resolveSecret,
@@ -169,10 +159,8 @@ export function createSecureSettingsRepository(db, { masterKey, clock = () => ne
     clearSecret,
     recordDeliverySuccess,
     recordDeliveryFailure,
-    rotateIcostToken,
     listMetadata() {
       return {
-        icost: metadata(ICOST_SETTING_KEY),
         deepseek: metadata(DEEPSEEK_SETTING_KEY),
         pushplus: metadata(PUSHPLUS_SETTING_KEY),
       };

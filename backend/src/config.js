@@ -170,9 +170,9 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!config.weixinAgentOwner) {
     throw new Error("WEIXIN_AGENT_OWNER is required in production");
   }
-  if (config.shortcutWeixinConfirmationEnabled) {
+  if (config.weixinBookkeepingConfirmationEnabled) {
     if (!config.weixinBookkeepingSenderId) {
-      throw new Error("WEIXIN_BOOKKEEPING_SENDER_ID is required when Shortcut WeChat confirmation is enabled");
+      throw new Error("WEIXIN_BOOKKEEPING_SENDER_ID is required when WeChat bookkeeping confirmation is enabled");
     }
     if (!config.weixinAllowedSenderIds.includes(config.weixinBookkeepingSenderId)) {
       throw new Error("WEIXIN_BOOKKEEPING_SENDER_ID must be present in WEIXIN_ALLOWED_SENDER_IDS");
@@ -201,9 +201,6 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
     ...(config.hospitalTenderSyncToken ? [config.hospitalTenderSyncToken] : []),
   ]).size !== (config.hospitalTenderSyncToken ? 5 : 4)) {
     throw new Error("Production session, settings, machine, and confirmation secrets must be independent");
-  }
-  if (config.shortcutWebhookToken) {
-    throw new Error("SHORTCUT_WEBHOOK_TOKEN is not allowed in production; use account-bound database tokens");
   }
   if (!config.authCookieSecure) throw new Error("AUTH_COOKIE_SECURE must be true in production");
   if (!explicitAllowedOrigins || config.corsAllowedOrigins.length === 0) {
@@ -236,22 +233,6 @@ export function loadConfig(overrides = {}) {
   const amapTimeoutMs = positiveInteger(
     env.amapTimeoutMs ?? env.AMAP_TIMEOUT_MS ?? 10_000,
     "AMAP_TIMEOUT_MS",
-  );
-  const icostWebhookRateLimit = positiveInteger(
-    env.icostWebhookRateLimit ?? env.ICOST_WEBHOOK_RATE_LIMIT ?? 30,
-    "ICOST_WEBHOOK_RATE_LIMIT",
-  );
-  const icostWebhookWindowMs = positiveInteger(
-    env.icostWebhookWindowMs ?? env.ICOST_WEBHOOK_WINDOW_MS ?? 300_000,
-    "ICOST_WEBHOOK_WINDOW_MS",
-  );
-  const shortcutWebhookRateLimit = positiveInteger(
-    env.shortcutWebhookRateLimit ?? env.SHORTCUT_WEBHOOK_RATE_LIMIT ?? 60,
-    "SHORTCUT_WEBHOOK_RATE_LIMIT",
-  );
-  const shortcutWebhookWindowMs = positiveInteger(
-    env.shortcutWebhookWindowMs ?? env.SHORTCUT_WEBHOOK_WINDOW_MS ?? 300_000,
-    "SHORTCUT_WEBHOOK_WINDOW_MS",
   );
   const weixinOutboxPollMs = boundedPositiveInteger(
     env.weixinOutboxPollMs ?? env.WEIXIN_OUTBOX_POLL_MS ?? 5_000,
@@ -358,10 +339,11 @@ export function loadConfig(overrides = {}) {
       ?? "",
     ).trim(),
     weixinBookkeepingSenderId,
-    shortcutWeixinConfirmationEnabled: booleanValue(
-      env.shortcutWeixinConfirmationEnabled ?? env.SHORTCUT_WEIXIN_CONFIRMATION_ENABLED,
+    weixinBookkeepingConfirmationEnabled: booleanValue(
+      env.weixinBookkeepingConfirmationEnabled
+        ?? env.WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED,
       false,
-      "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+      "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
     ),
     weixinAgentSessionHome: env.weixinAgentSessionHome ?? env.WEIXIN_AGENT_SESSION_HOME ?? "",
     weixinOutboxPollMs,
@@ -372,24 +354,6 @@ export function loadConfig(overrides = {}) {
       false,
       "WEIXIN_ALLOW_GROUPS",
     ),
-    icostWebhookToken: String(env.icostWebhookToken ?? env.ICOST_WEBHOOK_TOKEN ?? "").trim(),
-    icostWebhookOwner: String(
-      env.icostWebhookOwner ?? env.ICOST_WEBHOOK_OWNER ?? env.AUTH_ACCOUNT ?? env.authAccount ?? "icost",
-    ).trim(),
-    icostWebhookRateLimit,
-    icostWebhookWindowMs,
-    shortcutWebhookToken: String(
-      env.shortcutWebhookToken ?? env.SHORTCUT_WEBHOOK_TOKEN ?? "",
-    ).trim(),
-    shortcutWebhookOwner: String(
-      env.shortcutWebhookOwner
-        ?? env.SHORTCUT_WEBHOOK_OWNER
-        ?? env.AUTH_ACCOUNT
-        ?? env.authAccount
-        ?? "shortcut",
-    ).trim(),
-    shortcutWebhookRateLimit,
-    shortcutWebhookWindowMs,
     invoiceOcrCommand: String(env.invoiceOcrCommand ?? env.INVOICE_OCR_COMMAND ?? "").trim(),
     invoicePdfTextCommand: String(
       env.invoicePdfTextCommand ?? env.INVOICE_PDF_TEXT_COMMAND ?? "",

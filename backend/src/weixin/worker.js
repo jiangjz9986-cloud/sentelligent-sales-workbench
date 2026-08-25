@@ -90,7 +90,7 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
     deliveryKey,
     authorizeInbound: (metadata) => isInboundAllowed(config, metadata),
   });
-  const configuredBookkeepingDeliveryScope = config.shortcutWeixinConfirmationEnabled
+  const configuredBookkeepingDeliveryScope = config.weixinBookkeepingConfirmationEnabled
     && config.weixinBookkeepingOwner
     && config.weixinBookkeepingSenderId
     && isInboundAllowed(config, {

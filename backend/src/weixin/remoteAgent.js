@@ -27,6 +27,19 @@ function requiredText(value, name, max = 5000) {
   return value;
 }
 
+function messageText(value, { mediaPresent = false } = {}) {
+  if (value === undefined || value === null || value === "") {
+    if (mediaPresent) return "";
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "text is required");
+  }
+  if (typeof value !== "string" || value.length > 20000) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "text is invalid");
+  }
+  if (!value.trim() && mediaPresent) return "";
+  if (!value.trim()) throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "text is required");
+  return value;
+}
+
 function requiredIdentifier(value, name, max = 500) {
   const identifier = requiredText(value, name, max);
   if (/[\u0000-\u001f\u007f-\u009f]/u.test(identifier)) {
@@ -171,9 +184,12 @@ export function createRemoteClawbotAgent(options = {}) {
         ? optionalSyntheticMetadata(request)
         : requiredDeliveryMetadata(request);
       const conversationId = metadata?.conversationId ?? requiredIdentifier(request.conversationId, "conversationId");
-      const text = requiredText(request.text, "text", 20000);
       const quote = optionalQuote(request);
       const media = await normalizeMedia(request);
+      // A native WeChat image message has no text body. Allow that one shape
+      // through so the server can classify it as a bookkeeping capture; keep
+      // text mandatory for text-only messages.
+      const text = messageText(request.text, { mediaPresent: Boolean(media) });
       const digest = digestFor({ conversationId, text, mediaSha256: media?.sha256 });
       const sourceMessageId = metadata?.messageId ?? `weixin:${digest}`;
       const body = {

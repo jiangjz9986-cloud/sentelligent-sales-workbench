@@ -36,7 +36,7 @@ function reviewAnalysis(item, draft) {
   };
 }
 
-export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
+export function WeixinBookkeepingReviewCenter({ reviews = [], apiClient, onChanged }) {
   const [drafts, setDrafts] = useState({});
   const [pendingId, setPendingId] = useState(null);
   const [errors, setErrors] = useState({});
@@ -47,7 +47,7 @@ export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
     setPendingId(item.id);
     setErrors((current) => ({ ...current, [item.id]: "" }));
     try {
-      await apiClient.confirmShortcutBookkeepingReview(item.id, reviewAnalysis(item, getDraft(item)));
+      await apiClient.confirmWeixinBookkeepingReview(item.id, reviewAnalysis(item, getDraft(item)));
       onChanged?.();
     } catch (error) {
       setErrors((current) => ({ ...current, [item.id]: error.message || "确认失败，请重试。" }));
@@ -60,7 +60,7 @@ export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
     const reason = globalThis.prompt?.("请输入拒绝原因", "信息无法核实") || "信息无法核实";
     setPendingId(item.id);
     try {
-      await apiClient.rejectShortcutBookkeepingReview(item.id, reason);
+      await apiClient.rejectWeixinBookkeepingReview(item.id, reason);
       onChanged?.();
     } catch (error) {
       setErrors((current) => ({ ...current, [item.id]: error.message || "拒绝失败，请重试。" }));
@@ -72,7 +72,7 @@ export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
   async function retry(item) {
     setPendingId(item.id);
     try {
-      await apiClient.retryShortcutBookkeepingReview(item.id);
+      await apiClient.retryWeixinBookkeepingReview(item.id);
       onChanged?.();
     } catch (error) {
       setErrors((current) => ({ ...current, [item.id]: error.message || "重试失败，请重试。" }));
@@ -82,9 +82,9 @@ export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
   }
 
   return (
-    <section className="expense-inbox-review shortcut-review-center" aria-labelledby="shortcut-review-title">
+    <section className="expense-inbox-review weixin-bookkeeping-review-center" aria-labelledby="weixin-bookkeeping-review-title">
       <header>
-        <div><AlertTriangle size={18} aria-hidden="true" /><span><strong id="shortcut-review-title">快捷指令待复核</strong><small>信息不足的出差报销会停在这里，确认后才创建正式费用和付款记录。</small></span></div>
+        <div><AlertTriangle size={18} aria-hidden="true" /><span><strong id="weixin-bookkeeping-review-title">小小待确认记账</strong><small>微信发送的付款凭证或记账文字会先停在这里，确认后才创建正式费用和付款记录。</small></span></div>
         <b>{reviews.length}</b>
       </header>
       <div className="expense-inbox-list">
@@ -93,7 +93,7 @@ export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
           const update = (field, value) => setDrafts((current) => ({ ...current, [item.id]: { ...draft, [field]: value } }));
           const pending = pendingId === item.id;
           return (
-            <article className="expense-inbox-item shortcut-review-item" key={item.id}>
+            <article className="expense-inbox-item weixin-bookkeeping-review-item" key={item.id}>
               <div className="expense-inbox-evidence">
                 <strong>原始文字</strong>
                 <p>{item.rawText || "未保存原始文字"}</p>
@@ -115,7 +115,7 @@ export function ShortcutReviewCenter({ reviews = [], apiClient, onChanged }) {
             </article>
           );
         })}
-        {reviews.length === 0 ? <div className="expense-inbox-empty" role="status"><Check size={18} /><span><strong>没有待复核的快捷指令记账</strong><small>{pendingLabel || "快捷记账需通过微信回复“确认 / 修改 / 取消”或网页人工复核后入账。"}</small></span></div> : null}
+        {reviews.length === 0 ? <div className="expense-inbox-empty" role="status"><Check size={18} /><span><strong>没有待确认的小小记账</strong><small>{pendingLabel || "请在微信中回复“确认 / 修改 / 取消”，或在此完成网页人工复核。"}</small></span></div> : null}
       </div>
     </section>
   );

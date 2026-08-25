@@ -102,10 +102,7 @@ function validEnvironment(origin, databaseUrl) {
   const settingsEncryptionKey = Buffer.alloc(32, 6).toString("base64url");
   const hospitalTenderSyncToken = Buffer.alloc(32, 7).toString("base64url");
   const hospitalTenderPushplusToken = Buffer.alloc(24, 8).toString("base64url");
-  const icostWebhookToken = createHash("sha256")
-    .update("fixture-icost-webhook-token")
-    .digest("hex");
-  const icostWebhookOwner = "fixture-owner";
+  const fixtureOwner = "fixture-owner";
   const invoiceOcrCommand = "/opt/sentelligent-tools/tesseract-fixture";
   const invoicePdfTextCommand = "/opt/sentelligent-tools/pdftotext-fixture";
   const invoiceOcrLanguages = "chi_sim+eng";
@@ -115,7 +112,7 @@ function validEnvironment(origin, databaseUrl) {
       "NODE_ENV=production",
       `DATABASE_URL=${databaseUrl}`,
       "AUTH_REQUIRED=true",
-      `AUTH_ACCOUNT=${icostWebhookOwner}`,
+      `AUTH_ACCOUNT=${fixtureOwner}`,
       `AUTH_PASSWORD_HASH=${passwordHash}`,
       `AUTH_SESSION_SECRET=${sessionValue}`,
       "AUTH_COOKIE_SECURE=true",
@@ -137,15 +134,11 @@ function validEnvironment(origin, databaseUrl) {
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
       "WEIXIN_AGENT_OWNER=fixture-owner",
       "WEIXIN_ALLOWED_SENDER_IDS=fixture-sender",
-      "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED=true",
+      "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED=true",
       "WEIXIN_BOOKKEEPING_OWNER=fixture-owner",
       "WEIXIN_BOOKKEEPING_SENDER_ID=fixture-sender",
       "WEIXIN_OUTBOX_POLL_MS=5000",
       `ASSISTANT_CONFIRMATION_SECRET=${assistantConfirmationSecret}`,
-      `ICOST_WEBHOOK_TOKEN=${icostWebhookToken}`,
-      `ICOST_WEBHOOK_OWNER=${icostWebhookOwner}`,
-      "ICOST_WEBHOOK_RATE_LIMIT=37",
-      "ICOST_WEBHOOK_WINDOW_MS=271828",
       `INVOICE_OCR_COMMAND=${invoiceOcrCommand}`,
       `INVOICE_PDF_TEXT_COMMAND=${invoicePdfTextCommand}`,
       `INVOICE_OCR_LANGUAGES=${invoiceOcrLanguages}`,
@@ -160,8 +153,7 @@ function validEnvironment(origin, databaseUrl) {
     settingsEncryptionKey,
     hospitalTenderSyncToken,
     hospitalTenderPushplusToken,
-    icostWebhookToken,
-    icostWebhookOwner,
+    fixtureOwner,
     invoiceOcrCommand,
     invoicePdfTextCommand,
     invoiceOcrLanguages,
@@ -794,13 +786,12 @@ describe("production preflight", () => {
         "env.authHash",
         "env.sessionSecret",
         "env.assistantSecrets",
-        "env.shortcutWeixinConfirmation",
+        "env.weixinBookkeepingConfirmation",
         "env.secureCookie",
         "env.cors",
         "env.solutionWrites",
         "env.aiModel",
-        "env.icostWebhook",
-        "env.icostIsolation",
+        "env.retiredBookkeepingIntegrations",
         "env.invoiceExtraction",
         "database.environmentBinding",
         "database.quickCheck",
@@ -823,8 +814,6 @@ describe("production preflight", () => {
         environment.sessionValue,
         environment.modelApiKey,
         environment.weixinAgentApiToken,
-        environment.icostWebhookToken,
-        environment.icostWebhookOwner,
         environment.invoiceOcrCommand,
         environment.invoicePdfTextCommand,
         environment.invoiceOcrLanguages,
@@ -923,7 +912,7 @@ describe("production preflight", () => {
     }
   });
 
-  it("fails closed for missing, malformed, cross-owner, or reused iCost and invoice extraction settings", async () => {
+  it("fails closed for retired bookkeeping variables or malformed invoice extraction settings", async () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
@@ -934,13 +923,13 @@ describe("production preflight", () => {
       mkdirSync(dirname(backupPath), { recursive: true });
       copyFileSync(databasePath, backupPath);
 
-      const cases = [
-        ["short iCost token", "ICOST_WEBHOOK_TOKEN", "short", "env.icostWebhook"],
-        ["cross-owner binding", "ICOST_WEBHOOK_OWNER", "another-owner", "env.icostWebhook"],
-        ["zero iCost rate limit", "ICOST_WEBHOOK_RATE_LIMIT", "0", "env.icostWebhook"],
-        ["fractional iCost window", "ICOST_WEBHOOK_WINDOW_MS", "1.5", "env.icostWebhook"],
-        ["reused model token", "ICOST_WEBHOOK_TOKEN", environment.modelApiKey, "env.icostIsolation"],
-        ["reused WeChat token", "ICOST_WEBHOOK_TOKEN", environment.weixinAgentApiToken, "env.icostIsolation"],
+      const retiredCases = [
+        ["iCost token", "ICOST_WEBHOOK_TOKEN", "retired-token"],
+        ["iCost owner", "ICOST_WEBHOOK_OWNER", "fixture-owner"],
+        ["Shortcut token", "SHORTCUT_WEBHOOK_TOKEN", "retired-token"],
+        ["Shortcut confirmation alias", "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED", "retired-alias"],
+      ];
+      const extractionCases = [
         ["missing OCR command", "INVOICE_OCR_COMMAND", "", "env.invoiceExtraction"],
         ["relative OCR path", "INVOICE_OCR_COMMAND", "../tesseract", "env.invoiceExtraction"],
         ["nonexistent OCR executable", "INVOICE_OCR_COMMAND", "/opt/sentelligent-tools/missing-tesseract", "env.invoiceExtraction"],
@@ -950,7 +939,30 @@ describe("production preflight", () => {
       ];
 
       const { runProductionPreflight } = await loadPreflightModule();
-      for (const [name, variable, value, failedCheck] of cases) {
+      for (const [name, variable, value] of retiredCases) {
+        const source = `${environment.source}${variable}=${value}\n`;
+        const envFile = workspace.write(`retired-${variable}-${name}.env`, source);
+        const servicePlanPath = workspace.write(
+          `service-plan-${variable}-${name}.json`,
+          JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+        );
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+        assert.equal(
+          report.checks.find((check) => check.id === "env.retiredBookkeepingIntegrations")?.status,
+          "failed",
+          name,
+        );
+        assert.ok(!JSON.stringify(report).includes(value), `${name} must not expose the retired value`);
+      }
+      for (const [name, variable, value, failedCheck] of extractionCases) {
         const source = environment.source.replace(
           new RegExp(`^${variable}=.*$`, "m"),
           `${variable}=${value}`,
@@ -974,17 +986,13 @@ describe("production preflight", () => {
           "failed",
           name,
         );
-        assert.ok(
-          !JSON.stringify(report).includes(environment.icostWebhookToken),
-          `${name} must not expose the valid iCost token`,
-        );
       }
     } finally {
       workspace.cleanup();
     }
   });
 
-  it("fails closed when shortcut WeChat confirmation is disabled or misbound", async () => {
+  it("fails closed when WeChat bookkeeping confirmation is disabled or misbound", async () => {
     const workspace = makeWorkspace();
     try {
       const origin = "https://sales.example.test";
@@ -996,7 +1004,7 @@ describe("production preflight", () => {
       copyFileSync(databasePath, backupPath);
 
       const cases = [
-        ["disabled", "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED", "false"],
+        ["disabled", "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED", "false"],
         ["owner mismatch", "WEIXIN_BOOKKEEPING_OWNER", "another-owner"],
         ["blank sender", "WEIXIN_BOOKKEEPING_SENDER_ID", ""],
         ["sender not allowlisted", "WEIXIN_BOOKKEEPING_SENDER_ID", "other-sender"],
@@ -1011,9 +1019,9 @@ describe("production preflight", () => {
           new RegExp(`^${variable}=.*$`, "m"),
           `${variable}=${value}`,
         );
-        const envFile = workspace.write(`unsafe-shortcut-${name}.env`, source);
+        const envFile = workspace.write(`unsafe-weixin-bookkeeping-${name}.env`, source);
         const servicePlanPath = workspace.write(
-          `service-plan-shortcut-${name}.json`,
+          `service-plan-weixin-bookkeeping-${name}.json`,
           JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
         );
         const report = await runProductionPreflight({
@@ -1027,7 +1035,7 @@ describe("production preflight", () => {
         });
         assert.equal(
           report.checks.find(
-            (check) => check.id === "env.shortcutWeixinConfirmation",
+            (check) => check.id === "env.weixinBookkeepingConfirmation",
           )?.status,
           "failed",
           name,
@@ -1655,7 +1663,6 @@ describe("production preflight", () => {
         ["missing model key", "MODEL_API_KEY", ""],
         ["model key reused from session", "MODEL_API_KEY", environment.sessionValue],
         ["model key reused from WeChat", "MODEL_API_KEY", environment.weixinAgentApiToken],
-        ["model key reused from iCost", "MODEL_API_KEY", environment.icostWebhookToken],
       ];
 
       const { runProductionPreflight } = await loadPreflightModule();
@@ -1813,7 +1820,7 @@ describe("production preflight", () => {
       const legacyManifest = structuredClone(fixture.manifest);
       const legacyExcludedEnvironmentNames = new Set([
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
-        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+        "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
         "WEIXIN_BOOKKEEPING_OWNER",
         "WEIXIN_BOOKKEEPING_SENDER_ID",
         "WEIXIN_OUTBOX_POLL_MS",
@@ -1855,6 +1862,66 @@ describe("production preflight", () => {
     }
   });
 
+  it("allows the exact v0.6.14 Shortcut/iCost manifest contract only for the canonical current release", async () => {
+    const fixture = makeReleaseFixture();
+    try {
+      const legacyManifest = structuredClone(fixture.manifest);
+      legacyManifest.requiredEnvNames = [
+        ...legacyManifest.requiredEnvNames.filter(
+          (name) => name !== "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
+        ),
+        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+        "ICOST_WEBHOOK_TOKEN",
+        "ICOST_WEBHOOK_OWNER",
+        "ICOST_WEBHOOK_RATE_LIMIT",
+        "ICOST_WEBHOOK_WINDOW_MS",
+      ];
+      writeFileSync(
+        fixture.filePath("release-manifest.json"),
+        `${JSON.stringify(legacyManifest, null, 2)}\n`,
+      );
+      hardenReleaseFixturePermissions(fixture.releaseDirectoryPath);
+
+      const { validateReleaseIdentity } = await loadPreflightModule();
+      const currentResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(currentResult.valid, true, currentResult.message);
+
+      const candidateResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: `${immutableReleaseRoot}-other`,
+      });
+      assert.equal(candidateResult.valid, false);
+      assert.match(candidateResult.message, /environment names|contract/i);
+
+      legacyManifest.requiredEnvNames.push("UNEXPECTED_LEGACY_NAME");
+      const expandedCurrentResult = validateReleaseIdentity({
+        manifest: legacyManifest,
+        manifestPath: fixture.manifestPath,
+        releaseDirectoryPath: fixture.releaseDirectoryPath,
+        expectedCommit: expectedReleaseCommit,
+        servicePlan: validImmutableReleaseSnapshot(),
+        allowLegacyCurrent: true,
+        currentReleasePath: immutableReleaseRoot,
+      });
+      assert.equal(expandedCurrentResult.valid, false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("allows only the existing Darwin arm64 dependency provenance for a legacy current release", async () => {
     const fixture = makeReleaseFixture();
     try {
@@ -1888,7 +1955,7 @@ describe("production preflight", () => {
 
       const legacyExcludedEnvironmentNames = new Set([
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
-        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+        "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
         "WEIXIN_BOOKKEEPING_OWNER",
         "WEIXIN_BOOKKEEPING_SENDER_ID",
         "WEIXIN_OUTBOX_POLL_MS",
@@ -2091,7 +2158,7 @@ describe("production preflight", () => {
       const { validateReleaseIdentity } = await loadPreflightModule();
       const manifest = structuredClone(fixture.manifest);
       manifest.requiredEnvNames = manifest.requiredEnvNames.filter(
-        (name) => name !== "ICOST_WEBHOOK_TOKEN",
+        (name) => name !== "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
       );
       const result = validateReleaseIdentity({
         manifest,

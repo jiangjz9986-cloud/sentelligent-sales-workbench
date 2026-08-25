@@ -89,14 +89,10 @@ export const REQUIRED_ENV_NAMES = Object.freeze([
   "WEIXIN_AGENT_BACKEND_URL",
   "WEIXIN_AGENT_OWNER",
   "WEIXIN_AGENT_SESSION_HOME",
-  "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+  "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
   "WEIXIN_BOOKKEEPING_OWNER",
   "WEIXIN_BOOKKEEPING_SENDER_ID",
   "WEIXIN_OUTBOX_POLL_MS",
-  "ICOST_WEBHOOK_TOKEN",
-  "ICOST_WEBHOOK_OWNER",
-  "ICOST_WEBHOOK_RATE_LIMIT",
-  "ICOST_WEBHOOK_WINDOW_MS",
   "INVOICE_OCR_COMMAND",
   "INVOICE_PDF_TEXT_COMMAND",
   "INVOICE_OCR_LANGUAGES",
@@ -630,11 +626,7 @@ export function shouldExcludeReleasePath(filePath) {
       lowerPath.startsWith(`${productDist}/`) ||
       lowerPath.startsWith("outputs/product-design-prototype/public/") ||
       lowerPath.startsWith("outputs/logo/") ||
-      lowerPath === "森特透明底logo 800 800.png" ||
-      lowerPath ===
-        "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut" ||
-      lowerPath ===
-        "integrations/shortcut/shortcut-bookkeeping.unsigned.shortcut";
+      lowerPath === "森特透明底logo 800 800.png";
     if (!allowedMedia) return true;
   }
   return false;

@@ -182,6 +182,37 @@ function normalizeTypedEvidence(value = {}) {
   };
 }
 
+function normalizeLayout(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const pageWidth = Number(value.pageWidth);
+  const pageHeight = Number(value.pageHeight);
+  if (!Number.isFinite(pageWidth) || pageWidth < 1 || !Number.isFinite(pageHeight) || pageHeight < 1) return null;
+  if (!Array.isArray(value.tokens)) return null;
+  const tokens = value.tokens.slice(0, 4000).flatMap((token) => {
+    if (!token || typeof token !== "object" || Array.isArray(token)) return [];
+    const normalized = {
+      page: Number(token.page),
+      block: Number(token.block),
+      paragraph: Number(token.paragraph),
+      line: Number(token.line),
+      word: Number(token.word),
+      left: Number(token.left),
+      top: Number(token.top),
+      width: Number(token.width),
+      height: Number(token.height),
+      confidence: Number(token.confidence),
+      text: typeof token.text === "string" ? token.text.trim().slice(0, 500) : "",
+    };
+    if (!normalized.text
+      || [normalized.page, normalized.block, normalized.paragraph, normalized.line, normalized.word,
+        normalized.left, normalized.top, normalized.width, normalized.height, normalized.confidence]
+        .some((item) => !Number.isFinite(item))
+      || normalized.left < 0 || normalized.top < 0 || normalized.width < 1 || normalized.height < 1) return [];
+    return [normalized];
+  });
+  return tokens.length ? { pageWidth, pageHeight, tokens } : null;
+}
+
 function modelMessages(extractedText) {
   return [
     {
@@ -258,9 +289,15 @@ export async function recognizePaymentProofDocument(file, options = {}) {
   };
 
   let extractedText;
+  let layout = null;
   try {
-    const extracted = await options.textExtractor.extract(mediaType, buffer);
-    extractedText = typeof extracted === "string" ? extracted.trim() : "";
+    const extracted = typeof options.textExtractor.extractLayout === "function"
+      ? await options.textExtractor.extractLayout(mediaType, buffer)
+      : await options.textExtractor.extract(mediaType, buffer);
+    extractedText = typeof extracted === "string"
+      ? extracted.trim()
+      : typeof extracted?.text === "string" ? extracted.text.trim() : "";
+    layout = normalizeLayout(extracted);
     if (!extractedText) throw Object.assign(new Error("No text was extracted"), { code: "TEXT_EMPTY" });
   } catch (error) {
     return {
@@ -271,6 +308,7 @@ export async function recognizePaymentProofDocument(file, options = {}) {
       confidence: null,
       warnings: [stableWarning(error, "TEXT_EXTRACTION_FAILED")],
       source,
+      ...(layout ? { layout } : {}),
     };
   }
 
@@ -295,6 +333,7 @@ export async function recognizePaymentProofDocument(file, options = {}) {
       confidence: null,
       warnings: [stableWarning(error, "MODEL_PROVIDER_ERROR")],
       source,
+      ...(layout ? { layout } : {}),
     };
   }
 
@@ -324,5 +363,6 @@ export async function recognizePaymentProofDocument(file, options = {}) {
     confidence: analyzed.confidence,
     warnings,
     source,
+    ...(layout ? { layout } : {}),
   };
 }

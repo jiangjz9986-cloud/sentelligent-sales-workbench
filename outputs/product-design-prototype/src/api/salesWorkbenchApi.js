@@ -767,42 +767,42 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertTravelExpenseDocumentInbox(response?.item, "travelExpenseDocumentInbox.item");
     },
 
-    async listShortcutBookkeepingReviews({ status = "review_required", signal } = {}) {
+    async listWeixinBookkeepingReviews({ status = "review_required", signal } = {}) {
       const response = await requestApi(
-        queryPath("/api/integrations/shortcut/bookkeeping/review", { status }),
+        queryPath("/api/integrations/weixin/bookkeeping/review", { status }),
         { signal },
       );
-      if (!Array.isArray(response?.items)) throw new TypeError("shortcutBookkeepingReviews.items must be an array");
+      if (!Array.isArray(response?.items)) throw new TypeError("weixinBookkeepingReviews.items must be an array");
       return response.items;
     },
 
-    async getShortcutBookkeepingReview(reviewId, { signal } = {}) {
+    async getWeixinBookkeepingReview(reviewId, { signal } = {}) {
       const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}`,
+        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}`,
         { signal },
       );
       return response?.item ?? null;
     },
 
-    async confirmShortcutBookkeepingReview(reviewId, analysis) {
+    async confirmWeixinBookkeepingReview(reviewId, analysis) {
       const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`,
+        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`,
         { method: "POST", body: JSON.stringify({ analysis }) },
       );
       return response?.item ?? null;
     },
 
-    async rejectShortcutBookkeepingReview(reviewId, reason) {
+    async rejectWeixinBookkeepingReview(reviewId, reason) {
       const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/reject`,
+        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/reject`,
         { method: "POST", body: JSON.stringify({ reason }) },
       );
       return response?.item ?? null;
     },
 
-    async retryShortcutBookkeepingReview(reviewId) {
+    async retryWeixinBookkeepingReview(reviewId) {
       const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
+        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
         { method: "POST", body: "{}" },
       );
       return response?.item ?? null;
@@ -1275,48 +1275,8 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return binding.item;
     },
 
-    async listShortcutTokens() {
-      const response = await requestApi("/api/integrations/shortcut/tokens");
-      if (!Array.isArray(response?.items)) {
-        throw new TypeError("快捷指令 Token 响应缺少 items");
-      }
-      return response.items;
-    },
-
-    async createShortcutToken({ label } = {}) {
-      const body = {};
-      if (label !== undefined) body.label = label;
-      const response = await requestApi("/api/integrations/shortcut/tokens", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      if (!response?.item || typeof response.item.token !== "string") {
-        throw new TypeError("快捷指令 Token 创建响应缺少一次性 Token");
-      }
-      return response.item;
-    },
-
-    async revokeShortcutToken(id) {
-      const normalizedId = String(id ?? "").trim();
-      if (!normalizedId) throw new TypeError("快捷指令 Token id 不能为空");
-      const response = await requestApi(
-        `/api/integrations/shortcut/tokens/${encodeURIComponent(normalizedId)}`,
-        { method: "DELETE" },
-      );
-      if (!response?.item) throw new TypeError("快捷指令 Token 撤销响应缺少 item");
-      return response.item;
-    },
-
     async getSecuritySettings() {
       const response = await requestApi("/api/settings/security");
-      return response.item;
-    },
-
-    async rotateIcostToken() {
-      const response = await requestApi("/api/settings/icost-token/rotate", {
-        method: "POST",
-        body: "{}",
-      });
       return response.item;
     },
 

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
@@ -16,6 +16,12 @@ import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js"
 import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
 import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
+import { reconcileWeixinInvoiceAttachments } from "./weixinInvoiceAttachment.js";
+import {
+  buildBookkeepingAnalysis,
+  classifyBookkeepingEntry,
+  extractBookkeepingRows,
+} from "./bookkeepingCapture.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
 const FINANCIAL_SCOPE_DENIED = "该财务预览仅限已绑定账号本人的微信私聊。";
@@ -139,6 +145,38 @@ function boundedRecognition(recognition) {
 
 function moneyFromCents(value) {
   return Number.isSafeInteger(value) && value >= 0 ? `${(value / 100).toFixed(2)} 元` : "金额待确认";
+}
+
+function shanghaiWeekStart(value) {
+  const date = value instanceof Date ? value : new Date(value ?? Date.now());
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  const day = new Date(`${valueOf("year")}-${valueOf("month")}-${valueOf("day")}T00:00:00.000Z`);
+  if (Number.isNaN(day.getTime())) return null;
+  day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7));
+  return day.toISOString().slice(0, 10);
+}
+
+function looksLikeInvoiceDocument({ fileName, mediaType, text } = {}) {
+  const name = safeText(fileName);
+  const value = safeText(text);
+  if (/(?:发票|invoice)/iu.test(name)) return true;
+  if (mediaType === "application/pdf" && !/(?:付款|支付|交易|账单)/u.test(name)) return true;
+  const markers = [
+    /(?:电子)?发票/u,
+    /发票(?:代码|号码)/u,
+    /购买方/u,
+    /销售方/u,
+    /价税合计/u,
+    /税额/u,
+  ].filter((pattern) => pattern.test(value)).length;
+  return markers >= 2;
 }
 
 function safeEntityHint(value, max = 200) {
@@ -356,6 +394,10 @@ export function createAssistantToolHandlers({
   config,
   sessionRepository,
   travelExpenseDocumentInboxRepository,
+  bookkeepingRepository = null,
+  bookkeepingRuntime = null,
+  travelExpenseRepository = null,
+  travelExpenseAnalyzer = null,
   invoiceRepository,
   paymentProofRecognizer,
   invoiceRecognizer,
@@ -440,6 +482,206 @@ export function createAssistantToolHandlers({
   );
 
   const handlers = {
+    async "bookkeeping.ingest"(args, context, serverData) {
+      const media = serverData.media;
+      const rawText = safeText(args?.text);
+      if (!media && !rawText) {
+        return { text: "请发送付款截图，或直接说明金额、日期和用途。", status: "clarify" };
+      }
+      if (!bookkeepingRepository || !bookkeepingRuntime) {
+        return { text: "记账助手尚未完成配置，当前没有写入任何费用。", status: "error" };
+      }
+      if (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true) {
+        return { text: FINANCIAL_SCOPE_DENIED, status: "denied" };
+      }
+      if (media && media.sourceRef !== args?.mediaRef) {
+        return { text: "这张图片的来源标识已变化，请重新发送。", status: "error" };
+      }
+      if (media && !rawText && looksLikeInvoiceDocument({
+        fileName: media.fileName,
+        mediaType: media.mediaType,
+        text: "",
+      })) {
+        return handlers["invoice.ingest"]({ mediaRef: media.sourceRef }, context, serverData);
+      }
+
+      const content = media ? mediaBuffer(media) : null;
+      let recognition = {};
+      if (media) {
+        try {
+          recognition = boundedRecognition(await paymentProofRecognizer({
+            fileName: media.fileName,
+            mediaType: media.mediaType,
+            buffer: content,
+          }));
+        } catch {
+          recognition = { extractedText: null, evidence: null, warnings: ["RECOGNITION_FAILED"], source: { provider: "rules", model: null } };
+        }
+      }
+      const extractedText = safeText(recognition?.extractedText) || rawText;
+      if (media && !rawText && looksLikeInvoiceDocument({
+        fileName: media.fileName,
+        mediaType: media.mediaType,
+        text: extractedText,
+      })) {
+        return handlers["invoice.ingest"]({ mediaRef: media.sourceRef }, context, serverData);
+      }
+      const splitRows = media
+        ? extractBookkeepingRows(extractedText, { layout: recognition?.layout })
+        : [];
+      const rowInputs = splitRows.length > 1
+        ? splitRows
+        : [{
+            index: 0,
+            text: extractedText || rawText,
+            amountCents: recognition?.evidence?.amountCents ?? null,
+            entryType: null,
+            merchant: recognition?.evidence?.merchant ?? null,
+            warnings: [],
+          }];
+      const explicitEntryType = /收入|借款|借支|预借|到账|工资|奖金/u.test(rawText)
+        ? "income"
+        : /支出|消费|付款/u.test(rawText) ? "expense" : null;
+      const analyzedRows = [];
+      for (const row of rowInputs) {
+        const rowText = safeText(row.text) || extractedText || rawText;
+        let expenseAnalysis = null;
+        if (rowText && typeof travelExpenseAnalyzer === "function") {
+          try {
+            expenseAnalysis = await travelExpenseAnalyzer(rowText);
+          } catch {
+            expenseAnalysis = { warnings: ["ANALYSIS_FAILED"], expense: null, source: { provider: "rules", model: null } };
+          }
+        }
+        const combinedText = `${rawText}\n${rowText}`.trim();
+        const entryType = classifyBookkeepingEntry({
+          text: combinedText,
+          entryType: explicitEntryType ?? row.entryType ?? args?.entryType,
+        });
+        const rowRecognition = splitRows.length > 1
+          ? {
+              extractedText: rowText,
+              evidence: {
+                amountCents: row.amountCents,
+                occurredOn: null,
+                paidTime: null,
+                merchant: row.merchant,
+                paymentMethod: recognition?.evidence?.paymentMethod ?? null,
+              },
+              confidence: recognition?.confidence ?? null,
+              warnings: [...new Set([
+                ...(Array.isArray(recognition?.warnings) ? recognition.warnings : []),
+                ...(Array.isArray(row.warnings) ? row.warnings : []),
+              ])],
+              source: recognition?.source ?? { provider: "rules", model: null },
+            }
+          : recognition;
+        const analysis = buildBookkeepingAnalysis({
+          recognition: rowRecognition,
+          expenseAnalysis,
+          text: combinedText,
+          entryType,
+          now: clock(),
+        });
+        analyzedRows.push({ row, rowText, entryType, analysis });
+      }
+      const sourceRef = media?.sourceRef
+        ?? `weixin:text:${safeText(context.event) || safeText(context.requestId) || createHash("sha256").update(rawText, "utf8").digest("hex")}`;
+      let inbox = null;
+      if (media && travelExpenseDocumentInboxRepository) {
+        try {
+          inbox = await withDocumentBlobWritePreflight(db, {
+            owner: context.owner,
+            content,
+          }, (encodedDocumentBlob) => withImmediateTransaction(db, () => travelExpenseDocumentInboxRepository.createDocument({
+            owner: context.owner,
+            actor: context.owner,
+            source: "weixin",
+            sourceRef,
+            documentKind: "payment_proof",
+            fileName: media.fileName,
+            mediaType: media.mediaType,
+            content,
+            encodedDocumentBlob,
+            status: "review_required",
+            extractedText: recognition?.extractedText ?? null,
+            recognition: { ...recognition, bookkeepingCapture: true },
+            errorCode: recognition?.warnings?.[0] ?? null,
+          })));
+        } catch (error) {
+          if (error?.code !== "DUPLICATE_DOCUMENT") throw error;
+          inbox = error.existingId
+            ? travelExpenseDocumentInboxRepository.getDocument(error.existingId, { owner: context.owner })
+            : null;
+        }
+      }
+      const results = [];
+      for (const { row, rowText, entryType, analysis } of analyzedRows) {
+        const rowSignature = createHash("sha256")
+          .update(`${row.index}\u0000${rowText}\u0000${row.amountCents ?? ""}`, "utf8")
+          .digest("hex")
+          .slice(0, 20);
+        const idempotencySource = analyzedRows.length > 1
+          ? `${sourceRef}:row:${row.index + 1}:${rowSignature}`
+          : sourceRef;
+        const requestHash = createHash("sha256").update(JSON.stringify({
+          sourceRef,
+          rowIndex: row.index,
+          rowText,
+          rawText,
+          entryType,
+        }), "utf8").digest("hex");
+        const received = bookkeepingRepository.receive({
+          owner: context.owner,
+          actor: context.owner,
+          ledgerName: "出差报销",
+          entryType,
+          category: analysis.category,
+          subcategory: analysis.subcategory,
+          note: analysis.note ?? analysis.expense?.merchant ?? null,
+          idempotencyKey: `weixin-bookkeeping:${idempotencySource}`,
+          requestHash,
+          sourceId: sourceRef,
+          rawText: rowText || rawText || media?.fileName || "微信图片记账",
+          capturedAt: analysis.expense?.paidAt ?? clock().toISOString(),
+        });
+        if (received.replayed) {
+          const pending = received.item.status === "review_required"
+            ? bookkeepingRuntime.startReview({ account: context.owner, entry: received.item })
+            : null;
+          results.push({ item: received.item, pending, replayed: true });
+          continue;
+        }
+        const claimed = bookkeepingRepository.claim(received.item.id);
+        let completed;
+        try {
+          completed = bookkeepingRepository.completeLocal(received.item.id, {
+            analysis,
+            leaseToken: claimed.leaseToken,
+          });
+        } catch (error) {
+          try { bookkeepingRepository.release(received.item.id, { leaseToken: claimed.leaseToken, errorCode: "WEIXIN_BOOKKEEPING_CAPTURE_FAILED" }); } catch { /* preserve original error */ }
+          throw error;
+        }
+        const pending = bookkeepingRuntime.startReview({ account: context.owner, entry: completed.item });
+        results.push({ item: completed.item, pending, replayed: false });
+      }
+      const pendingCount = results.filter((result) => result.pending).length;
+      const replayed = results.every((result) => result.replayed);
+      const countText = results.length > 1 ? `，共识别 ${results.length} 笔` : "";
+      return {
+        text: replayed
+          ? `这张付款凭证已经收到${countText}，已保留原来的记账状态。`
+          : `已收到付款凭证${countText}，正在逐笔发送待确认记账信息。请分别引用小小的消息回复。`,
+        status: pendingCount > 0 ? "review_required" : "duplicate",
+        item: results[0]?.item ?? null,
+        items: results.map((result) => result.item),
+        pending: results[0]?.pending ?? null,
+        pendingItems: results.map((result) => result.pending).filter(Boolean),
+        ...(inbox ? { documentInboxId: inbox.id } : {}),
+      };
+    },
+
     async "dashboard.summary"(_args, context) {
       const result = await dashboardAdapter.analyze({
         owner: context.owner,
@@ -866,6 +1108,9 @@ export function createAssistantToolHandlers({
     async "invoice.ingest"(args, context, serverData) {
       const media = serverData.media;
       if (!media || media.sourceRef !== args.mediaRef) return { text: "请把发票图片或 PDF 与命令一起发送。", status: "empty" };
+      if (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true) {
+        return { text: FINANCIAL_SCOPE_DENIED, status: "denied" };
+      }
       const content = mediaBuffer(media);
       let recognition;
       try {
@@ -878,6 +1123,7 @@ export function createAssistantToolHandlers({
         recognition = { status: "review_required", extractedText: null, warnings: ["RECOGNITION_FAILED"], conflicts: [], fields: {} };
       }
       let item;
+      let duplicate = false;
       try {
         item = await withDocumentBlobWritePreflight(db, {
           owner: context.owner,
@@ -909,11 +1155,69 @@ export function createAssistantToolHandlers({
         }));
       } catch (error) {
         if (error?.code === "DUPLICATE_INVOICE") {
-          return { text: "这张发票已经在发票仓库中，无需重复上传。", status: "duplicate" };
+          item = invoiceRepository.getInvoice(error.existingInvoiceId, { owner: context.owner });
+          if (!item) throw error;
+          duplicate = true;
+        } else {
+          throw error;
         }
-        throw error;
       }
-      return { text: `发票已存入发票仓库，编号：${item.id}。无需先匹配费用，可在系统内人工复核。`, status: "received", item };
+      let match = null;
+      if (typeof invoiceRepository.autoMatchInvoice === "function") {
+        try {
+          match = invoiceRepository.autoMatchInvoice({
+            owner: context.owner,
+            actor: context.owner,
+            invoiceId: item.id,
+            priorityWeekStart: shanghaiWeekStart(clock()),
+          });
+          if (match?.status === "matched" && match.invoice) item = match.invoice;
+        } catch {
+          match = { status: "review_required", reason: "automatic_match_failed", candidates: [] };
+        }
+      }
+      if (match?.status === "matched") {
+        const confirmedMatches = invoiceRepository.listMatches({
+          owner: context.owner,
+          invoiceId: item.id,
+          state: "confirmed",
+        });
+        const activeMatch = match.match ?? confirmedMatches[0] ?? null;
+        const reconciliation = reconcileWeixinInvoiceAttachments({
+          db,
+          invoiceRepository,
+          travelExpenseRepository,
+          owner: context.owner,
+          actor: context.owner,
+          invoiceId: item.id,
+          requestIdPrefix: context.requestId ?? "weixin-invoice",
+        });
+        const attachmentResult = activeMatch
+          ? reconciliation.find((result) => result.matchId === activeMatch.id) ?? null
+          : null;
+        const expenseAttachment = attachmentResult?.attachment ?? null;
+        const attachmentPending = reconciliation.some((result) => result.status === "pending");
+        return {
+          text: attachmentPending
+            ? `发票金额已自动匹配费用：${match.selected?.expenseReferenceCode ?? activeMatch?.expenseId ?? "待确认"}，但报销附件正在后台补传。`
+            : `发票${duplicate ? "已存在并" : "已存入并"}自动绑定费用：${match.selected?.expenseReferenceCode ?? activeMatch?.expenseId ?? "待确认"}，金额 ${moneyFromCents(activeMatch?.allocatedCents)}。`,
+          status: attachmentPending ? "review_required" : "matched",
+          item,
+          match: { ...match, match: activeMatch },
+          attachmentStatus: attachmentPending ? "pending" : expenseAttachment ? "attached" : "already_attached",
+          attachmentReconciliation: reconciliation,
+          ...(expenseAttachment ? { expenseAttachment } : {}),
+        };
+      }
+      const candidateText = Array.isArray(match?.candidates) && match.candidates.length
+        ? `候选：${match.candidates.slice(0, 3).map((candidate) => `${candidate.expenseReferenceCode}（${candidate.occurredOn}，${moneyFromCents(candidate.paymentRemainingCents)}）`).join("；")}`
+        : "当前没有唯一金额候选";
+      return {
+        text: `发票${duplicate ? "已在" : "已存入"}发票仓库，编号：${item.id}。${candidateText}。当前未形成唯一自动匹配，请在系统内人工复核。`,
+        status: duplicate ? "duplicate" : "review_required",
+        item,
+        match,
+      };
     },
 
     async "payment-proof.ingest"(args, context, serverData) {

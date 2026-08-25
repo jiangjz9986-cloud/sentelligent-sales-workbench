@@ -129,6 +129,30 @@ function fieldText(value, fallback = "待确认") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+function warningText(value) {
+  const labels = {
+    missing_occurredOn: "发生日期待确认",
+    invalid_occurredOn: "发生日期待确认",
+    missing_amountCents: "金额待确认",
+    invalid_amountCents: "金额待确认",
+    invalid_merchant: "商户待确认",
+    invalid_purpose: "用途待确认",
+    invalid_note: "备注待确认",
+    merchant_partial: "商户名称可能被截断",
+    year_inferred: "年份由发送时间推断",
+    missing_date: "发生日期待确认",
+    missing_amount: "金额待确认",
+    missing_purpose: "用途待确认",
+    RECOGNITION_FAILED: "图片识别未完成",
+    TEXT_EXTRACTION_FAILED: "图片文字提取未完成",
+    MODEL_PROVIDER_ERROR: "AI 字段分析未完成",
+    MODEL_UNAVAILABLE: "AI 字段分析未完成",
+  };
+  if (labels[value]) return labels[value];
+  if (typeof value === "string" && value.startsWith("missing_")) return "信息待补充";
+  return "识别结果需复核";
+}
+
 function deriveShortcutStateCredential(actionId, version, confirmationSecret) {
   const id = requiredText(actionId, "actionId", 200);
   if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("version must be a positive safe integer");
@@ -184,10 +208,9 @@ function draftFromEntry(entry) {
     fields: {
       occurredOn: assistantDateTime(
         expense.paidAt
-          ?? entry.capturedAt
-          ?? entry.createdAt
           ?? expense.occurredOn
-          ?? entry.occurredOn,
+          ?? entry.occurredOn
+          ?? null,
       ),
       amountCents: expense.amountCents ?? entry.amountCents,
       merchant: expense.merchant ?? entry.merchant,
@@ -201,13 +224,22 @@ function draftFromEntry(entry) {
 
 function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确认！", reference = null } = {}) {
   const draft = draftFromEntry(entry);
+  const { analysis } = entryAnalysis(entry);
   const fields = draft.fields;
   const entryType = entry.entryType === "income" ? "收入" : "支出";
   const category = [fields.category, fields.subcategory].filter(Boolean).join("-");
   const note = fields.note || fields.purpose;
   const week = naturalWeek(fields.occurredOn);
   const number = draftTimestampReference(entry) ?? reference ?? "待确认";
-  const aiStatus = draft.warnings.length ? `待补充：${draft.warnings.slice(0, 4).join("、")}` : "已识别，待你确认";
+  const reviewWarnings = [...new Set([
+    ...draft.warnings,
+    ...(Array.isArray(analysis.warnings)
+      ? analysis.warnings.filter((warning) => warning !== CONFIRMATION_WARNING)
+      : []),
+  ])];
+  const aiStatus = reviewWarnings.length
+    ? `待复核：${[...new Set(reviewWarnings.slice(0, 4).map(warningText))].join("、")}`
+    : "已识别，待你确认";
   const lines = [
     "【小小提醒！新增一条待记账信息】",
     `编号：${number}`,
@@ -221,8 +253,6 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
   lines.push(
     "",
     "请引用本消息并回复",
-    "需要修改请以“修改”开头并明确字段，例如：修改金额为 18.50 元；修改日期为 2026-08-19；修改费用类别为交通；修改备注为客户拜访。修改后我会重新发送最新信息。",
-    "需要取消请引用本消息回复“取消”。",
   );
   return lines.join("\n").slice(0, MAX_MESSAGE_LENGTH);
 }
@@ -245,12 +275,15 @@ function acceptedResult(entry) {
 }
 
 function isFinalizable(entry) {
-  const { analysis, expense } = entryAnalysis(entry);
+  const { expense } = entryAnalysis(entry);
   const occurredOn = dateOnly(expense.occurredOn ?? entry.occurredOn);
   const amountCents = expense.amountCents ?? entry.amountCents;
   const purpose = expense.purpose ?? entry.purpose;
-  const warnings = Array.isArray(analysis.warnings) ? analysis.warnings.filter((item) => item !== CONFIRMATION_WARNING) : [];
-  return Boolean(occurredOn && Number.isSafeInteger(amountCents) && amountCents > 0 && typeof purpose === "string" && purpose.trim() && warnings.length === 0);
+  return Boolean(occurredOn
+    && Number.isSafeInteger(amountCents)
+    && amountCents > 0
+    && typeof purpose === "string"
+    && purpose.trim());
 }
 
 function reviewAnalysis(entry, nextFields) {
@@ -264,9 +297,19 @@ function reviewAnalysis(entry, nextFields) {
       ...(Object.hasOwn(nextFields, "merchant") ? { merchant: nextFields.merchant } : {}),
     ...(Object.hasOwn(nextFields, "purpose") ? { purpose: nextFields.purpose } : {}),
   };
-  const warnings = Array.isArray(analysis.warnings)
+  const warnings = (Array.isArray(analysis.warnings)
     ? analysis.warnings.filter((item) => item !== CONFIRMATION_WARNING)
-    : [];
+    : []).filter((warning) => {
+      if (Number.isSafeInteger(nextExpense.amountCents) && nextExpense.amountCents > 0
+        && /(?:amount|amountCents)/iu.test(warning)) return false;
+      if (dateOnly(nextExpense.occurredOn)
+        && /(?:date|occurredOn)/iu.test(warning)) return false;
+      if (typeof nextExpense.purpose === "string" && nextExpense.purpose.trim()
+        && /purpose/iu.test(warning)) return false;
+      if (typeof nextExpense.merchant === "string" && nextExpense.merchant.trim()
+        && /merchant/iu.test(warning)) return false;
+      return true;
+    });
   return {
     ...analysis,
     status: "review_required",
@@ -283,6 +326,8 @@ export function createShortcutBookkeepingAssistantRuntime({
   db,
   config,
   shortcutBookkeepingRepository,
+  travelExpenseRepository = null,
+  travelExpenseDocumentInboxRepository = null,
   advanceAllocationRepository = null,
   pendingActionRepository,
   sessionRepository,
@@ -295,7 +340,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     throw new TypeError("Shortcut WeChat assistant runtime dependencies are required");
   }
   const secret = secretBuffer(confirmationSecret);
-  const enabled = config?.shortcutWeixinConfirmationEnabled === true;
+  const enabled = config?.weixinBookkeepingConfirmationEnabled === true;
   const senderId = String(config?.weixinBookkeepingSenderId ?? "").trim()
     || (Array.isArray(config?.weixinAllowedSenderIds) && config.weixinAllowedSenderIds.length === 1 ? config.weixinAllowedSenderIds[0] : "");
   const owner = String(config?.weixinBookkeepingOwner ?? config?.weixinAgentOwner ?? "").trim();
@@ -308,15 +353,15 @@ export function createShortcutBookkeepingAssistantRuntime({
   }
 
   function assertReadyFor(account) {
-    if (!enabled) throw new HttpError(503, "SHORTCUT_WEIXIN_CONFIRMATION_DISABLED", "快捷记账微信复核尚未启用");
+    if (!enabled) throw new HttpError(503, "WEIXIN_BOOKKEEPING_CONFIRMATION_DISABLED", "小小微信记账复核尚未启用");
     if (!isReadyFor(account)) {
-      throw new HttpError(503, "SHORTCUT_WEIXIN_CONFIRMATION_NOT_READY", "快捷记账微信复核尚未完成绑定");
+      throw new HttpError(503, "WEIXIN_BOOKKEEPING_CONFIRMATION_NOT_READY", "小小微信记账复核尚未完成绑定");
     }
   }
 
   function conversationFor(account, requestedSender = senderId) {
     assertReadyFor(account);
-    if (requestedSender !== senderId) throw new HttpError(403, "WEIXIN_SENDER_NOT_ALLOWED", "This WeChat sender is not allowed for Shortcut confirmation");
+    if (requestedSender !== senderId) throw new HttpError(403, "WEIXIN_SENDER_NOT_ALLOWED", "This WeChat sender is not allowed for WeChat bookkeeping confirmation");
     return shortcutBookkeepingConversationId(account, senderId);
   }
 
@@ -334,6 +379,228 @@ export function createShortcutBookkeepingAssistantRuntime({
       channel: SHORTCUT_BOOKKEEPING_CHANNEL,
       conversationId: row.conversation_id,
     });
+  }
+
+  function sourceDocumentFor(entry, account) {
+    if (!travelExpenseDocumentInboxRepository || entry?.entryType !== "expense" || !entry?.sourceId) return null;
+    const row = db.prepare(`
+      SELECT id FROM travel_expense_document_inbox
+      WHERE owner = $owner AND document_kind = 'payment_proof'
+        AND source_message_id = $sourceRef
+        AND status IN ('received', 'review_required', 'matched')
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get({ $owner: account, $sourceRef: entry.sourceId });
+    const item = row
+      ? travelExpenseDocumentInboxRepository.getDocument(row.id, { owner: account })
+      : null;
+    if (!item) return null;
+    const content = travelExpenseDocumentInboxRepository.getDocumentContent(item.id, { owner: account });
+    if (!content) return null;
+    return {
+      item,
+      inboxId: item.id,
+      inboxVersion: item.version,
+      fileName: content.fileName,
+      mediaType: content.mediaType,
+      content: content.content,
+    };
+  }
+
+  // The bookkeeping state transition and the travel-expense attachment use
+  // separate repositories with separate document-blob transaction guards.
+  // Complete the financial record first, then attach the already-received
+  // proof outside that transaction. This keeps a blob preflight from opening
+  // a nested SQLite transaction and leaves the accepted expense durable if a
+  // later attachment/match retry is needed.
+  function attachSourceDocumentAfterAcceptance({ account, entry, accepted, requestId }) {
+    if (!travelExpenseRepository
+      || !travelExpenseDocumentInboxRepository
+      || entry?.entryType !== "expense"
+      || !accepted?.expenseId
+      || !accepted?.paymentId) {
+      return { status: "not_applicable" };
+    }
+    const sourceDocument = sourceDocumentFor(entry, account);
+    if (!sourceDocument) return { status: "not_available" };
+    try {
+      let expense = travelExpenseRepository.getExpense(accepted.expenseId, { owner: account });
+      if (!expense) return { status: "not_available" };
+      const marker = "微信图片记账:" + sourceDocument.inboxId;
+      let attachment = expense.attachments.find((candidate) => (
+        candidate.kind === "payment_proof"
+        && candidate.notes === marker
+      ));
+      if (!attachment) {
+        const updated = travelExpenseRepository.addAttachment(accepted.expenseId, {
+          owner: account,
+          actor: account,
+          expectedVersion: expense.version,
+          paymentIds: [accepted.paymentId],
+          kind: "payment_proof",
+          fileName: sourceDocument.fileName,
+          mediaType: sourceDocument.mediaType,
+          content: sourceDocument.content,
+          coveredCents: expense.payments.find((payment) => payment.id === accepted.paymentId)?.reimbursementCents ?? 0,
+          notes: marker,
+        });
+        const beforeIds = new Set(expense.attachments.map((candidate) => candidate.id));
+        attachment = updated.attachments.find((candidate) => !beforeIds.has(candidate.id));
+        expense = updated;
+      }
+      if (!attachment) throw new Error("BOOKKEEPING_PAYMENT_PROOF_ATTACHMENT_MISSING");
+      const inbox = travelExpenseDocumentInboxRepository.getDocument(sourceDocument.inboxId, { owner: account });
+      if (!inbox) return { status: "not_available" };
+      if (inbox.status === "matched") {
+        return { status: "matched", attachmentId: attachment.id, inboxId: sourceDocument.inboxId, replayed: true };
+      }
+      if (inbox.status !== "review_required") return { status: "pending", code: "DOCUMENT_INBOX_STATE_CONFLICT" };
+      const matched = withImmediateTransaction(db, () => {
+        const result = travelExpenseDocumentInboxRepository.markMatched(sourceDocument.inboxId, {
+          owner: account,
+          actor: account,
+          expectedVersion: inbox.version,
+          matchedExpenseId: expense.id,
+          matchedPaymentId: accepted.paymentId,
+          attachmentId: attachment.id,
+        });
+        insertAudit(db, {
+          action: "travel_expense.attachment_add",
+          entityType: "travel_expense_attachment",
+          entityId: attachment.id,
+          actor: account,
+          requestId: requestId ?? entry.id,
+          before: null,
+          after: {
+            id: attachment.id,
+            expenseId: expense.id,
+            paymentId: accepted.paymentId,
+            kind: attachment.kind,
+            sizeBytes: attachment.sizeBytes,
+            sha256: createHash("sha256").update(sourceDocument.content).digest("hex"),
+          },
+          entityVersion: expense.version,
+          metadata: { source: "weixin_bookkeeping", documentInboxId: sourceDocument.inboxId },
+        });
+        insertAudit(db, {
+          action: "travel_expense_document_inbox.match",
+          entityType: "travel_expense_document_inbox",
+          entityId: result.id,
+          actor: account,
+          requestId: requestId ?? entry.id,
+          before: { status: inbox.status, version: inbox.version },
+          after: { status: result.status, version: result.version },
+          entityVersion: result.version,
+          metadata: {
+            source: "weixin_bookkeeping",
+            expenseId: expense.id,
+            paymentId: accepted.paymentId,
+            attachmentId: attachment.id,
+          },
+        });
+        return result;
+      });
+      return { status: "matched", attachmentId: attachment.id, inboxId: sourceDocument.inboxId, inbox: matched };
+    } catch (error) {
+      // The expense acceptance is authoritative. Keep the inbox item for a
+      // later reconciliation pass and expose only a bounded status to the
+      // caller; never leak provider/SQLite details into WeChat.
+      return { status: "pending", code: typeof error?.code === "string" ? error.code : "ATTACHMENT_MATCH_PENDING" };
+    }
+  }
+
+  function rejectSourceDocumentAfterCancellation({ account, entry, requestId }) {
+    if (!travelExpenseDocumentInboxRepository
+      || entry?.entryType !== "expense"
+      || !entry?.sourceId) return { status: "not_applicable" };
+    const activeSibling = db.prepare(`
+      SELECT 1
+      FROM shortcut_bookkeeping_entries
+      WHERE owner = $owner AND source_id = $sourceRef
+        AND entry_type = 'expense' AND status <> 'rejected'
+      LIMIT 1
+    `).get({ $owner: account, $sourceRef: entry.sourceId });
+    if (activeSibling) return { status: "shared_active" };
+    const row = db.prepare(`
+      SELECT id
+      FROM travel_expense_document_inbox
+      WHERE owner = $owner AND document_kind = 'payment_proof'
+        AND source_message_id = $sourceRef AND status = 'review_required'
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get({ $owner: account, $sourceRef: entry.sourceId });
+    if (!row) return { status: "not_available" };
+    try {
+      const inbox = travelExpenseDocumentInboxRepository.getDocument(row.id, { owner: account });
+      if (!inbox || inbox.status !== "review_required") return { status: "not_available" };
+      const rejected = withImmediateTransaction(db, () => {
+        const result = travelExpenseDocumentInboxRepository.rejectDocument(row.id, {
+          owner: account,
+          actor: account,
+          expectedVersion: inbox.version,
+        });
+        insertAudit(db, {
+          action: "travel_expense_document_inbox.reject",
+          entityType: "travel_expense_document_inbox",
+          entityId: result.id,
+          actor: account,
+          requestId: requestId ?? entry.id,
+          before: { status: inbox.status, version: inbox.version },
+          after: { status: result.status, version: result.version },
+          entityVersion: result.version,
+          metadata: { source: "weixin_bookkeeping_cancelled" },
+        });
+        return result;
+      });
+      return { status: "rejected", inbox: rejected };
+    } catch (error) {
+      return { status: "pending", code: typeof error?.code === "string" ? error.code : "DOCUMENT_REJECT_PENDING" };
+    }
+  }
+
+  function reconcileAcceptedAttachments({ limit = 20 } = {}) {
+    if (!ready || !travelExpenseRepository || !travelExpenseDocumentInboxRepository) return [];
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError("limit must be a positive safe integer no greater than 100");
+    }
+    const rows = db.prepare(`
+      SELECT entry.id
+      FROM shortcut_bookkeeping_entries entry
+      JOIN travel_expense_document_inbox inbox
+        ON inbox.owner = entry.owner
+       AND inbox.document_kind = 'payment_proof'
+       AND inbox.source_message_id = entry.source_id
+       AND inbox.status IN ('review_required', 'matched')
+      WHERE entry.owner = $owner
+        AND entry.status = 'accepted'
+        AND entry.entry_type = 'expense'
+        AND entry.expense_id IS NOT NULL
+        AND entry.payment_id IS NOT NULL
+        AND (
+          inbox.status = 'review_required'
+          OR NOT EXISTS (
+            SELECT 1
+            FROM travel_expense_attachments attachment
+            JOIN travel_expense_attachment_payments link
+              ON link.attachment_id = attachment.id
+            WHERE attachment.expense_id = entry.expense_id
+              AND attachment.kind = 'payment_proof'
+              AND attachment.notes = '微信图片记账:' || inbox.id
+              AND link.payment_id = entry.payment_id
+          )
+        )
+      ORDER BY entry.updated_at ASC, entry.id ASC
+      LIMIT $limit
+    `).all({ $owner: owner, $limit: limit });
+    return rows.map((row) => {
+      const entry = shortcutBookkeepingRepository.getReview(row.id, { owner });
+      if (!entry || entry.status !== "accepted") return null;
+      return attachSourceDocumentAfterAcceptance({
+        account: owner,
+        entry,
+        accepted: acceptedResult(entry),
+        requestId: `reconcile:${entry.id}`,
+      });
+    }).filter(Boolean);
   }
 
   function findLatestActionForEntry(account, entryId) {
@@ -752,7 +1019,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       stale.code = "WEIXIN_OUTBOX_STALE";
       throw stale;
     }
-    if (payload.kind === "cancelled") return `已取消快捷记账 ${entry.id}，未写入费用和付款凭证。`;
+    if (payload.kind === "cancelled") return `已取消小小记账 ${entry.id}，未写入费用和付款凭证。`;
     return renderDraftMessage(entry, {
       prefix: payload.kind === "confirmation"
         ? "检测到一笔新记账，请确认！"
@@ -793,6 +1060,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new TypeError("limit must be a positive safe integer no greater than 100");
     }
+    reconcileAcceptedAttachments({ limit });
     const rows = db.prepare(`
       SELECT action.id AS action_id, action.owner, action.conversation_id,
              action.version, action.status AS action_status,
@@ -890,6 +1158,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       throw error;
     }
     if (claimed.replayed) {
+      attachSourceDocumentAfterAcceptance({ account, entry, accepted: acceptedResult(entry), requestId: action.id });
       enqueueAcceptedReceipt({ account, scope, action: claimed.item ?? action, entry });
       return acceptedResponse(entry);
     }
@@ -902,6 +1171,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         leaseToken: claimed.leaseToken,
         result: { status: "accepted", ...acceptedResult(entry) },
       });
+      attachSourceDocumentAfterAcceptance({ account, entry, accepted: acceptedResult(entry), requestId: action.id });
       enqueueAcceptedReceipt({ account, scope, action, entry });
       return acceptedResponse(entry);
     } catch (error) {
@@ -967,11 +1237,11 @@ export function createShortcutBookkeepingAssistantRuntime({
       });
     } catch (error) {
       if (error?.code === "ASSISTANT_ACTION_EXPIRED") {
-        return { status: 410, body: { status: "error", text: "这笔记账草稿已过期，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
+        return { status: 410, body: { status: "error", text: "这笔记账草稿已过期，请重新发给小小。" }, draftText: "确认信息已处理。" };
       }
-      return { status: 409, body: { status: "error", text: "当前草稿确认状态已变化，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
+      return { status: 409, body: { status: "error", text: "当前草稿确认状态已变化，请重新发送给小小。" }, draftText: "确认信息已处理。" };
     }
-    if (confirmed?.expired) return { status: 410, body: { status: "error", text: "这笔记账草稿已过期，请重新发起快捷记账。" }, draftText: "确认信息已处理。" };
+    if (confirmed?.expired) return { status: 410, body: { status: "error", text: "这笔记账草稿已过期，请重新发给小小。" }, draftText: "确认信息已处理。" };
     if (confirmed?.inProgress) return { status: 409, body: { status: "error", text: "这笔记账正在处理中，请稍后查看。" }, draftText: "确认信息已处理。" };
     if (entry.status === "accepted") return reconcileAcceptedEntry({ action: confirmed.item ?? action, account, scope, entry });
     const currentAction = confirmed.item ?? action;
@@ -1005,6 +1275,12 @@ export function createShortcutBookkeepingAssistantRuntime({
         result: { status: "accepted", entryId: target.entryId, expenseId: completed.item.expenseId, paymentId: completed.item.paymentId },
       });
       const accepted = shortcutBookkeepingRepository.getReview(target.entryId, { owner: account }) ?? completed.item;
+      const attachment = attachSourceDocumentAfterAcceptance({
+        account,
+        entry: accepted,
+        accepted: completed.item,
+        requestId: action.id,
+      });
       try { enqueue(account, conversationFor(account), { ...action, version: Number(action.version) + 1 }, target.entryId, "accepted"); } catch { /* financial write remains durable; replay can enqueue again */ }
       if (completed.advance || accepted.advanceId) {
         try {
@@ -1025,7 +1301,16 @@ export function createShortcutBookkeepingAssistantRuntime({
       }
       return {
         status: 200,
-        body: { status: "ok", text: resultMessage(accepted), result: { entryId: target.entryId, expenseId: completed.item.expenseId, paymentId: completed.item.paymentId } },
+        body: {
+          status: "ok",
+          text: resultMessage(accepted),
+          result: {
+            entryId: target.entryId,
+            expenseId: completed.item.expenseId,
+            paymentId: completed.item.paymentId,
+            attachmentStatus: attachment.status,
+          },
+        },
         draftText: "已确认并完成记账。",
       };
     } catch (error) {
@@ -1040,6 +1325,7 @@ export function createShortcutBookkeepingAssistantRuntime({
   async function cancel({ action, account, scope }) {
     const target = actionPayload(action);
     if (!target) return { status: 409, body: { status: "error", text: "待确认操作无效。" }, draftText: "确认信息已处理。" };
+    const entry = shortcutBookkeepingRepository.getReview(target.entryId, { owner: account });
     const cancelled = pendingActionRepository.cancel(action.id, scope);
     if (!cancelled.replayed) {
       closePendingOutbox({
@@ -1057,9 +1343,16 @@ export function createShortcutBookkeepingAssistantRuntime({
           purge: true,
         });
       } catch { /* already terminal is idempotent */ }
+      if (entry) {
+        rejectSourceDocumentAfterCancellation({
+          account,
+          entry,
+          requestId: action.id,
+        });
+      }
       try { enqueue(account, conversationFor(account), action, target.entryId, "cancelled"); } catch { /* best effort */ }
     }
-    return { status: 200, body: { status: "cancel", text: "已取消当前快捷记账，未写入费用。" }, draftText: "已取消快捷记账。" };
+    return { status: 200, body: { status: "cancel", text: "已取消当前小小记账，未写入费用。" }, draftText: "已取消小小记账。" };
   }
 
   async function revise({ action, account, scope, text }) {
@@ -1114,7 +1407,7 @@ export function createShortcutBookkeepingAssistantRuntime({
           text: "已按你的修改更新草稿，请查看微信中的最新识别结果；如需继续修改请以“修改…”开头，确认请回复“确认”。",
           item: { id: updated.item.id, status: updated.item.status },
         },
-        draftText: "已更新快捷记账草稿。",
+        draftText: "已更新小小记账草稿。",
       };
     } catch (error) {
       try { shortcutBookkeepingRepository.release(target.entryId, { leaseToken: claimed.leaseToken, errorCode: "WEIXIN_CORRECTION_FAILED" }); } catch { /* preserve safe response */ }
@@ -1493,10 +1786,15 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (shortcutSignal && !financialEventScopeAllowed(context, serverData)) {
       return {
         status: 403,
-        body: { status: "error", text: "当前微信会话不属于快捷记账绑定的本人私聊，未执行任何财务操作。" },
+        body: { status: "error", text: "当前微信会话不属于小小记账绑定的本人私聊，未执行任何财务操作。" },
         draftText: "财务操作访问被拒绝。",
       };
     }
+    const newCapture = !quote
+      && !pendingActionId
+      && (Boolean(serverData?.media)
+        || /^(?:记账|支出|收入|借款到账|收到(?:出差)?借款|工资到账|奖金到账)(?:[：:\s]|$)/u.test(text));
+    if (newCapture) return null;
     let targetAction = null;
     const allocationCandidates = intent.intent === "loan_assignment" && !pendingActionId && !action
       ? activeAdvanceAllocationActions(account, { limit: 3 })
@@ -1577,7 +1875,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     if ((confirmationCode !== undefined && confirmationCode !== null)
       || textClassification.kind === "code"
       || textClassification.kind === "resend") {
-      return { status: 200, body: { status: "clarify", text: "快捷记账不使用六位确认码，请回复“确认”、以“修改”开头说明修改内容，或回复“取消”。" }, draftText: "等待明确的自然语言指令。" };
+      return { status: 200, body: { status: "clarify", text: "小小记账不使用六位确认码，请回复“确认”、以“修改”开头说明修改内容，或回复“取消”。" }, draftText: "等待明确的自然语言指令。" };
     }
     if (textClassification.kind === "cancel" || intent.intent === "cancel") {
       return cancel({ action: targetAction, account, scope });
@@ -1611,7 +1909,14 @@ export function createShortcutBookkeepingAssistantRuntime({
     conversationFor,
     startReview,
     settleFromWeb,
+    attachAcceptedEntryAttachments: ({ account, entry, requestId } = {}) => attachSourceDocumentAfterAcceptance({
+      account,
+      entry,
+      accepted: acceptedResult(entry),
+      requestId,
+    }),
     renderOutboxMessage,
+    reconcileAcceptedAttachments,
     reconcileAcceptedReceipts,
     handlePending,
   });

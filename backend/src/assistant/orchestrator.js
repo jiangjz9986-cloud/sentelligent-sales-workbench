@@ -554,15 +554,15 @@ export function createAssistantOrchestrator({
         }, { draftText: "财务预览访问被拒绝。" });
       }
 
-      // Shortcut bookkeeping actions are created only after the authenticated
-      // Shortcut endpoint has persisted an owner-scoped draft. A generic
+      // Bookkeeping confirmation actions are created only after the authenticated
+      // WeChat image/text event has persisted an owner-scoped draft. A generic
       // assistant plan has no entry id and must not create a second pending
       // financial action or confirmation code.
-      if (tool.name === "shortcut-bookkeeping.confirm" && !resolvedActionId) {
+      if ((tool.name === "bookkeeping.confirm" || tool.name === "shortcut-bookkeeping.confirm") && !resolvedActionId) {
         return finish(409, {
           status: "clarify",
-          message: "请先运行自有截图记账快捷指令提交草稿，再在绑定的微信会话中回复“确认”、以“修改”开头说明修改内容，或回复“取消”。",
-        }, { draftText: "等待快捷指令记账草稿。" });
+          message: "请先在绑定的微信会话中发送付款截图或记账文字；收到待确认信息后回复“确认”、以“修改”开头说明修改内容，或回复“取消”。",
+        }, { draftText: "等待微信图片或文字记账草稿。" });
       }
 
       if (isRisky(plan) && !plan.confirmed && !resolvedActionId) {

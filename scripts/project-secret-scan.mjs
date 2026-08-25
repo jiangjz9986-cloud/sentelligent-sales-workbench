@@ -393,7 +393,11 @@ function isJavaScriptExpressionValue(value, { allowObjectOrArray = false } = {})
   );
 }
 
-function isJavaScriptConstantReference(value, filePath, assignmentKey) {
+// Git-history scans still encounter the retired iCost verifier blob. Its
+// *_ACTION constants contain public Apple/App-Intent identifiers, not keys.
+// Keep this path- and shape-bounded exception even though the source file is
+// no longer shipped in the working tree or release archive.
+function isRetiredShortcutActionIdentifier(value, filePath, assignmentKey) {
   return (
     /(?:^|\/)integrations\/icost-shortcut\/verify-shortcut\.mjs$/u.test(filePath) &&
     /^[A-Z][A-Z0-9_]*_ACTION$/u.test(assignmentKey) &&
@@ -429,7 +433,7 @@ function isPlaceholderValue(
       allowObjectOrArray: commentAwareSourceExts.has(extname(filePath).toLowerCase()),
     })
   ) return true;
-  if (isJavaScriptConstantReference(value, filePath, assignmentKey)) return true;
+  if (isRetiredShortcutActionIdentifier(value, filePath, assignmentKey)) return true;
   if (isPublicDomainSeparationValue(value, filePath, assignmentKey)) return true;
   if (/^(?:[:@$][A-Za-z_][A-Za-z0-9_.-]*|%[A-Za-z_][A-Za-z0-9_]*%)$/.test(value)) {
     return true;

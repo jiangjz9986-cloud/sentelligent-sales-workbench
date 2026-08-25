@@ -4,7 +4,7 @@ import { evaluatePolicy } from "./policy.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：战情总览、客户查询与详情、商机详情与项目分析、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、快捷记账微信复核、知识检索、销售周报。业务写入需要明确确认；请款结算仅供核对，不接受确认写入。";
+const HELP = "可用：战情总览、客户查询与详情、记支出/收入、发送付款凭证或发票、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、知识检索、销售周报。财务写入会先发送待确认信息；请款结算仅供核对。";
 
 function clean(value) { return String(value ?? "").trim(); }
 
@@ -92,6 +92,12 @@ function directArguments(toolName, args, mediaRef, context = {}) {
   if (toolName === "visit-capture.collect") return { text: args };
   if (toolName === "visit-capture.preview" || toolName === "visit-capture.confirm") return { draftId: args };
   if (toolName === "invoice.ingest" || toolName === "payment-proof.ingest") return { mediaRef: args || mediaRef };
+  if (toolName === "bookkeeping.ingest") {
+    return {
+      ...(args ? { text: args } : {}),
+      ...(mediaRef ? { mediaRef } : {}),
+    };
+  }
   return {};
 }
 
@@ -122,6 +128,10 @@ function explicitPlan(command, args, registry, { mediaRef, context: rawContext }
     "拜访确认": ["visit-capture.confirm", (value) => ({ draftId: value })],
     付款凭证: ["payment-proof.ingest", (value) => ({ mediaRef: value || mediaRef })],
     发票: ["invoice.ingest", (value) => ({ mediaRef: value || mediaRef })],
+    记账: ["bookkeeping.ingest", (value) => ({ ...(value ? { text: value } : {}), ...(mediaRef ? { mediaRef } : {}) })],
+    支出: ["bookkeeping.ingest", (value) => ({ text: value, ...(mediaRef ? { mediaRef } : {}) })],
+    收入: ["bookkeeping.ingest", (value) => ({ text: value, ...(mediaRef ? { mediaRef } : {}) })],
+    借款: ["bookkeeping.ingest", (value) => ({ text: value, ...(mediaRef ? { mediaRef } : {}) })],
     报销周报: ["reimbursement-report.preview", reportArguments],
     报销周汇总: ["reimbursement-report.preview", reportArguments],
     请款结算: ["advance-settlement.preview", (value) => ({ week: clean(value) || "current" })],
@@ -165,6 +175,9 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
     });
   }
   if (/周报|周汇总/.test(value)) return clarify("你要生成销售周报，还是报销周汇总？", confidence);
+  if (/^快捷记账(?:复核|确认)?$/u.test(value)) {
+    return clarify("现在请直接把付款截图或记账文字发给小小，不再使用快捷指令；我会先发送待确认信息。", confidence);
+  }
   if (/^(?:战情(?:总览)?|工作台总览)$/u.test(value)) {
     return makePlan({ tool: registry.getTool("dashboard.summary"), arguments: {}, confidence, source: "natural" });
   }
@@ -226,8 +239,11 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
       source: "natural",
     });
   }
-  if (/快捷记账|记账复核|记账确认/u.test(value)) {
-    return clarify("快捷指令提交后，小小助手会把识别草稿发到绑定的微信会话；请在同一会话回复“确认”、以“修改”开头说明修改内容，或回复“取消”。", confidence);
+  if (/记账|支出|收入|借款到账/u.test(value)) {
+    const tool = registry.getTool("bookkeeping.ingest");
+    return tool
+      ? makePlan({ tool, arguments: { text: value }, confidence, source: "natural" })
+      : clarify("记账功能尚未开放，请稍后重试。", confidence);
   }
   const knowledgeSearch = value.match(/^知识(?:检索|查询)(?:\s+(.+))?$/u);
   if (knowledgeSearch) {
@@ -301,8 +317,16 @@ export function createAssistantRouter({ registry = createAgentRegistry(), confid
       }
       const confidence = input.confidence === undefined ? 1 : Number(input.confidence);
       if (confidence < confidenceThreshold) return clarify("我不确定你的意图，请使用明确命令或补充说明。", confidence);
+      if (input.mediaRef && !text) {
+        const tool = registry.getTool("bookkeeping.ingest");
+        if (tool) return makePlan({ tool, arguments: { mediaRef: input.mediaRef }, confidence: 1, source: "media" });
+      }
       if (input.mediaRef && ["发票", "付款凭证"].includes(text)) {
         return explicitPlan(text, "", registry, input);
+      }
+      if (input.mediaRef && /(?:记账|支出|收入|借款|到账)/u.test(text)) {
+        const tool = registry.getTool("bookkeeping.ingest");
+        if (tool) return makePlan({ tool, arguments: { text, mediaRef: input.mediaRef }, confidence: 1, source: "media" });
       }
       return naturalPlan(text, confidence, registry, conversationContext(input));
     },

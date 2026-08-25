@@ -169,7 +169,7 @@ function makeRuntimeHarness({
   const runtime = createShortcutBookkeepingAssistantRuntime({
     db,
     config: {
-      shortcutWeixinConfirmationEnabled: true,
+      weixinBookkeepingConfirmationEnabled: true,
       weixinBookkeepingSenderId: "sender-1",
       weixinBookkeepingOwner: "assistant-owner",
       weixinAllowedSenderIds: ["sender-1"],

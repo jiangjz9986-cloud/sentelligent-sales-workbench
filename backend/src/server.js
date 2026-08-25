@@ -40,7 +40,6 @@ import {
 } from "./travelExpense/repository.js";
 import { analyzeExpenseText } from "./travelExpense/ingestionAnalysis.js";
 import { analyzeInvoiceText } from "./travelExpense/invoiceTextAnalysis.js";
-import { createTravelExpenseIngestionRepository } from "./travelExpense/ingestionRepository.js";
 import {
   recognizeInvoiceDocument,
   validateDocumentFileName,
@@ -75,33 +74,9 @@ import {
   validateTravelExpenseWeekStart,
 } from "./travelExpense/validation.js";
 import {
-  authenticateIcostWebhook,
-  createFixedWindowLimiter,
-  isIcostWebhookRouteAllowed,
-  validateIcostTextPayload,
-} from "./integrations/icostWebhook.js";
-import {
-  authenticateShortcutWebhook,
-  isShortcutBookkeepingRouteAllowed,
-  SHORTCUT_BOOKKEEPING_ROUTE,
-  SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE,
-  SHORTCUT_BOOKKEEPING_CAPTURE_PREVIEW_ROUTE,
-  SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE,
-  SHORTCUT_BOOKKEEPING_INLINE_ROUTE,
-  SHORTCUT_BOOKKEEPING_CATALOG_ROUTE,
-  SHORTCUT_BOOKKEEPING_VERIFY_ROUTE,
-  shortcutCatalogResponse,
-  validateShortcutInlineCredentials,
-  validateShortcutBookkeepingPayload,
-  validateShortcutCapturePayload,
-  previewShortcutCapturePayload,
-} from "./integrations/shortcutBookkeeping.js";
-import {
-  applyShortcutAutomaticAnalysis,
   applyShortcutSelectionAnalysis,
   createShortcutBookkeepingRepository,
 } from "./integrations/shortcutBookkeepingRepository.js";
-import { createShortcutWebhookTokenRepository } from "./integrations/shortcutWebhookTokenRepository.js";
 import { createShortcutAdvanceAllocationRepository } from "./integrations/shortcutAdvanceAllocationRepository.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
@@ -150,6 +125,7 @@ import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
 import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
+import { reconcileWeixinInvoiceAttachments } from "./assistant/weixinInvoiceAttachment.js";
 import { createSalesLoopContextRepository } from "./assistant/salesLoopContextRepository.js";
 import { createSalesLoopPreviewService } from "./assistant/salesLoopPreview.js";
 import { createSalesReportAssistantAdapter } from "./assistant/salesReportAssistantAdapter.js";
@@ -163,7 +139,6 @@ import { createHospitalTenderScheduler } from "./hospitalTender/scheduler.js";
 import {
   createSecureSettingsRepository,
   DEEPSEEK_SETTING_KEY,
-  ICOST_SETTING_KEY,
   PUSHPLUS_SETTING_KEY,
 } from "./settings/repository.js";
 import { isValidSettingsEncryptionKey, maskSecret } from "./settings/secretBox.js";
@@ -203,11 +178,16 @@ const INVOICE_UPLOAD_JSON_MAX_BYTES = 17 * 1024 * 1024;
 const DOCUMENT_UPLOAD_MAX_BYTES = 12 * 1024 * 1024;
 const DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH = 200_000;
 const EXTRACTED_TEXT_TRUNCATED_WARNING = "EXTRACTED_TEXT_TRUNCATED";
-const ICOST_EXPENSE_ROUTE = "/api/integrations/icost/expenses";
 const WEIXIN_ASSISTANT_EVENT_ROUTE = "/api/integrations/weixin-agent/events";
 const WEIXIN_OUTBOX_ROUTE = "/api/integrations/weixin-agent/confirmation-outbox";
-const SHORTCUT_BOOKKEEPING_STATUS_ROUTE = "/api/integrations/shortcut/bookkeeping/status";
-const SHORTCUT_BOOKKEEPING_DELIVERY_RETRY_ROUTE = "/api/integrations/shortcut/bookkeeping/delivery-retry";
+
+export function isRetiredBookkeepingPath(pathname) {
+  const value = typeof pathname === "string" ? pathname : "";
+  return value === "/api/integrations/icost/expenses"
+    || value.startsWith("/api/integrations/shortcut/")
+    || value === "/api/settings/icost-token"
+    || value === "/api/settings/icost-token/rotate";
+}
 
 function boundPaymentProofRecognition(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
@@ -250,18 +230,6 @@ function resolveRuntimeModelApiKey(config) {
   return String(config.modelApiKey ?? "");
 }
 
-function icostResponseItem(item, replayed) {
-  return {
-    id: item.id,
-    status: item.status,
-    warnings: item.warnings,
-    expenseId: item.expenseId,
-    paymentId: item.paymentId,
-    expenseReferenceCode: item.expenseReferenceCode,
-    replayed,
-  };
-}
-
 function shortcutResponseItem(item, replayed, extra = {}) {
   return {
     id: item.id,
@@ -295,25 +263,6 @@ function shortcutReviewResponseItem(item, replayed = false) {
     attemptCount: item.attemptCount,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
-  };
-}
-
-function shortcutVerificationResponse({
-  tokenValid,
-  bookkeepingReady = false,
-  weixinConfirmationReady = false,
-  confirmationDelivery = null,
-  error = null,
-} = {}) {
-  return {
-    status: tokenValid && bookkeepingReady ? "ok" : "error",
-    integration: "shortcut",
-    tokenValid: Boolean(tokenValid),
-    bookkeepingReady: Boolean(bookkeepingReady),
-    ...(weixinConfirmationReady ? { weixinConfirmationReady: true } : {}),
-    ...(confirmationDelivery ? { confirmationDelivery } : {}),
-    protocolVersion: 1,
-    ...(error ? { error } : {}),
   };
 }
 
@@ -461,12 +410,6 @@ function validateWeixinOutboxAckPayload(value) {
   };
 }
 
-function validateShortcutDeliveryRetryPayload(value) {
-  const body = plainObject(value);
-  allowedPayloadKeys(body, new Set(["entryId"]));
-  return { entryId: payloadText(body.entryId, "entryId", { max: 200 }) };
-}
-
 function weixinDeliveryReportFromHeaders(headers, expectedScope = null) {
   const rawStatus = headers["x-weixin-delivery-status"];
   if (rawStatus === undefined) return { status: "not_ready", reason: "worker_status_missing" };
@@ -492,41 +435,6 @@ function weixinDeliveryReportFromHeaders(headers, expectedScope = null) {
     status: rawStatus,
     ...(rawStatus === "not_ready" ? { reason: rawReason ?? "status_unspecified" } : {}),
   };
-}
-
-function shortcutConfirmationDelivery({ runtime, outbox = null, worker, account = null }) {
-  if (!runtime.enabled) return { status: "disabled" };
-  const accountReady = typeof runtime.isReadyFor === "function"
-    ? runtime.isReadyFor(account)
-    : runtime.ready;
-  if (!accountReady) return { status: "not_ready", reason: "configuration_incomplete" };
-  if (outbox?.status === "sent") {
-    return { status: "sent", ...(outbox.sentAt ? { sentAt: outbox.sentAt } : {}) };
-  }
-  if (outbox?.status === "failed") {
-    return {
-      status: "failed",
-      attemptCount: Number(outbox.attemptCount ?? 0),
-      ...(outbox.lastErrorCode ? { errorCode: outbox.lastErrorCode } : {}),
-    };
-  }
-  if (outbox?.status === "processing") return { status: "sending" };
-  if (worker?.status !== "ready") {
-    return { status: "not_ready", reason: worker?.reason ?? "worker_unavailable" };
-  }
-  if (!outbox) return { status: "ready" };
-  return { status: "queued" };
-}
-
-function assertShortcutSubmissionDelivery(delivery) {
-  if (delivery?.status === "failed") {
-    throw new HttpError(
-      503,
-      "SHORTCUT_WEIXIN_DELIVERY_FAILED",
-      "小小记账确认消息投递失败，请稍后重试或在系统中重新投递",
-    );
-  }
-  return delivery;
 }
 
 function validateTravelExpenseDocumentInboxPayload(value) {
@@ -2699,17 +2607,6 @@ export function createServer(options = {}) {
       modelTimeoutMs: config.modelTimeoutMs,
     })),
   }));
-  const travelExpenseIngestionRepository = createTravelExpenseIngestionRepository(db, {
-    clock: options.travelExpenseIngestionClock ?? options.travelExpenseClock ?? (() => new Date()),
-    ...(options.travelExpenseIngestionIdFactory
-      ? { idFactory: options.travelExpenseIngestionIdFactory }
-      : {}),
-  });
-  const shortcutWebhookTokenRepository = createShortcutWebhookTokenRepository(db, {
-    ...(options.shortcutWebhookTokenIdFactory ? { idFactory: options.shortcutWebhookTokenIdFactory } : {}),
-    ...(options.shortcutWebhookTokenFactory ? { tokenFactory: options.shortcutWebhookTokenFactory } : {}),
-    ...(options.shortcutWebhookTokenClock ? { clock: options.shortcutWebhookTokenClock } : {}),
-  });
   const shortcutBookkeepingRepository = createShortcutBookkeepingRepository(db, {
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
     ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
@@ -2729,28 +2626,6 @@ export function createServer(options = {}) {
       clock: options.weixinDeliveryReadinessClock ?? Date.now,
       staleMs: Math.max(15_000, Math.min(10 * 60_000, config.weixinOutboxPollMs * 4)),
     });
-  const icostRateLimiter = options.icostRateLimiter ?? createFixedWindowLimiter({
-    limit: config.icostWebhookRateLimit,
-    windowMs: config.icostWebhookWindowMs,
-    clock: options.icostRateLimitClock ?? Date.now,
-  });
-  const shortcutVerifyRateLimiter = options.shortcutVerifyRateLimiter ?? createFixedWindowLimiter({
-    limit: config.shortcutWebhookRateLimit,
-    windowMs: config.shortcutWebhookWindowMs,
-    clock: options.shortcutVerifyRateLimitClock ?? Date.now,
-  });
-  const shortcutPairRateLimiter = options.shortcutPairRateLimiter ?? createFixedWindowLimiter({
-    // Pairing accepts a password, so keep it behind the same bounded abuse
-    // budget as the existing Shortcut verification endpoint.
-    limit: Math.max(5, Math.min(config.shortcutWebhookRateLimit, 20)),
-    windowMs: config.shortcutWebhookWindowMs,
-    clock: options.shortcutPairRateLimitClock ?? Date.now,
-  });
-  const shortcutWriteRateLimiter = options.shortcutWriteRateLimiter ?? createFixedWindowLimiter({
-    limit: config.shortcutWebhookRateLimit,
-    windowMs: config.shortcutWebhookWindowMs,
-    clock: options.shortcutWriteRateLimitClock ?? Date.now,
-  });
   const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
   const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => (
     recognizePaymentProofDocument(file, {
@@ -2821,6 +2696,8 @@ export function createServer(options = {}) {
       db,
       config,
       shortcutBookkeepingRepository,
+      travelExpenseRepository,
+      travelExpenseDocumentInboxRepository,
       advanceAllocationRepository: shortcutAdvanceAllocationRepository,
       pendingActionRepository: assistantPendingActionRepository,
       sessionRepository: assistantSessionRepository,
@@ -2829,24 +2706,6 @@ export function createServer(options = {}) {
       ...(options.shortcutBookkeepingAssistantIdFactory ? { idFactory: options.shortcutBookkeepingAssistantIdFactory } : {}),
       clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
     });
-  const shortcutDelivery = (outbox = null, account = null) => shortcutConfirmationDelivery({
-    runtime: shortcutBookkeepingAssistantRuntime,
-    outbox,
-    worker: weixinDeliveryReadiness.snapshot(),
-    account,
-  });
-  const assertShortcutDeliveryReady = (account) => {
-    shortcutBookkeepingAssistantRuntime.assertReadyFor(account);
-    const delivery = weixinDeliveryReadiness.snapshot();
-    if (delivery.status !== "ready") {
-      throw new HttpError(
-        503,
-        "SHORTCUT_WEIXIN_CONFIRMATION_NOT_READY",
-        "微信确认通道尚未就绪，请先向小小发送一条私聊消息后重试",
-      );
-    }
-    return delivery;
-  };
   const assistantBusinessOwnerResolver = typeof options.resolveBusinessOwner === "function"
     ? options.resolveBusinessOwner
     : createBusinessOwnerResolver({
@@ -2919,6 +2778,10 @@ export function createServer(options = {}) {
       config: runtimeConfig,
       sessionRepository: assistantSessionRepository,
       travelExpenseDocumentInboxRepository,
+      bookkeepingRepository: shortcutBookkeepingRepository,
+      bookkeepingRuntime: shortcutBookkeepingAssistantRuntime,
+      travelExpenseRepository,
+      travelExpenseAnalyzer: travelExpenseAnalyzer,
       invoiceRepository,
       paymentProofRecognizer,
       invoiceRecognizer,
@@ -3063,6 +2926,15 @@ export function createServer(options = {}) {
       const url = new URL(request.url, `http://${request.headers.host ?? "127.0.0.1"}`);
       const parts = splitPath(url.pathname);
 
+      if (isRetiredBookkeepingPath(url.pathname)) {
+        sendHttpError(
+          response,
+          new HttpError(410, "LEGACY_BOOKKEEPING_RETIRED", "iOS 快捷指令和 iCost 记账入口已停用，请直接向小小发送图片或记账文字。"),
+          responseOptions(response, { "Cache-Control": "no-store" }),
+        );
+        return;
+      }
+
       if (request.method === "OPTIONS") {
         sendJson(response, 204, null);
         return;
@@ -3116,675 +2988,6 @@ export function createServer(options = {}) {
         return;
       }
 
-      // Shortcut pairing is a one-time password exchange. It deliberately
-      // does not create a browser session: the returned account-bound device
-      // credential is scoped to the Shortcut webhook endpoints and can be
-      // revoked independently from the user's browser sessions.
-      if (url.pathname === "/api/integrations/shortcut/pair") {
-        if (request.method !== "POST") {
-          sendHttpError(
-            response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut pairing"),
-            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-        if (!isAuthEnabled(config)) {
-          throw new HttpError(
-            503,
-            "AUTH_NOT_CONFIGURED",
-            "Authentication is required but not fully configured",
-          );
-        }
-        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
-        const rateLimit = shortcutPairRateLimiter.consume(`pair\u0000${remoteAddress}`);
-        if (!rateLimit.allowed) {
-          sendHttpError(
-            response,
-            new HttpError(429, "RATE_LIMITED", "Too many Shortcut pairing attempts"),
-            responseOptions(response, {
-              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
-              "Cache-Control": "no-store",
-            }),
-          );
-          return;
-        }
-        const body = await readValidatedJson(request, requestSchemas.shortcutPairing);
-        const account = typeof body.account === "string" ? body.account.trim() : "";
-        const limiterKeys = [
-          loginRateLimitKey(config.authSessionSecret, account || "<missing>", remoteAddress),
-          loginRateLimitKey(config.authSessionSecret, "<all-accounts>", remoteAddress),
-        ];
-        const now = Date.now();
-        pruneLoginRateLimits(db, now);
-        for (const limiterKey of limiterKeys) assertLoginAllowed(db, limiterKey, now);
-        const credentialsValid = await configuredCredentialsMatch(config, body);
-        if (!credentialsValid) {
-          for (const limiterKey of limiterKeys) recordLoginFailure(db, limiterKey, now);
-          throw new HttpError(401, "INVALID_CREDENTIALS", "Account or password is incorrect");
-        }
-        for (const limiterKey of limiterKeys) clearLoginFailures(db, limiterKey);
-        const created = shortcutWebhookTokenRepository.create({
-          account: config.authAccount,
-          label: body.label?.trim() || "iOS 快捷指令",
-        });
-        sendJson(response, 201, {
-          status: "paired",
-          account: config.authAccount,
-          device: created,
-          // Keep the response explicit so the Shortcut can distinguish a
-          // successful first pairing from a normal verification response.
-          credentialType: "shortcut-device",
-        }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      // The catalog contains public labels only. It is deliberately available
-      // before cookie authentication so Shortcut clients can compare the
-      // canonical choices without receiving account data or credentials.
-      if (request.method === "GET" && url.pathname === SHORTCUT_BOOKKEEPING_CATALOG_ROUTE) {
-        sendJson(response, 200, shortcutCatalogResponse(), { "Cache-Control": "no-store" });
-        return;
-      }
-
-      if (url.pathname === SHORTCUT_BOOKKEEPING_VERIFY_ROUTE) {
-        if (request.method !== "GET") {
-          sendHttpError(
-            response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for Shortcut Token verification"),
-            responseOptions(response, { Allow: "GET", "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
-        const rateLimit = shortcutVerifyRateLimiter.consume(`verify\u0000${remoteAddress}`);
-        if (!rateLimit.allowed) {
-          sendHttpError(
-            response,
-            new HttpError(429, "RATE_LIMITED", "Too many Shortcut Token verification attempts"),
-            responseOptions(response, {
-              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
-              "Cache-Control": "no-store",
-            }),
-          );
-          return;
-        }
-
-        let integrationIdentity;
-        try {
-          integrationIdentity = authenticateShortcutWebhook(
-            request.headers,
-            config,
-            (token) => shortcutWebhookTokenRepository.resolve(token),
-          );
-        } catch {
-          sendHttpError(
-            response,
-            new HttpError(
-              503,
-              "SHORTCUT_VERIFICATION_UNAVAILABLE",
-              "快捷指令 Token 验证暂时不可用，请稍后重试",
-            ),
-            responseOptions(response, { "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-        if (!integrationIdentity) {
-          const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
-          const code = supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED";
-          const message = supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token";
-          if (request.headers["x-shortcut-verification-mode"] === "explain") {
-            sendJson(response, 200, shortcutVerificationResponse({
-              tokenValid: false,
-              error: { code, message },
-            }), { "Cache-Control": "no-store" });
-            return;
-          }
-          sendHttpError(
-            response,
-            new HttpError(401, code, message),
-            responseOptions(response, { "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-
-        const localWeixinReady = shortcutBookkeepingAssistantRuntime.isReadyFor(integrationIdentity.account);
-        const confirmationDelivery = shortcutDelivery(null, integrationIdentity.account);
-        const bookkeepingReady = localWeixinReady && confirmationDelivery.status === "ready";
-        sendJson(response, 200, shortcutVerificationResponse({
-          tokenValid: true,
-          bookkeepingReady,
-          ...(bookkeepingReady ? { weixinConfirmationReady: true } : {}),
-          confirmationDelivery,
-          ...(bookkeepingReady ? {} : {
-            error: {
-              code: "SHORTCUT_BOOKKEEPING_NOT_READY",
-              message: "Token 验证成功，但记账服务尚未完成配置",
-            },
-          }),
-        }), { "Cache-Control": "no-store" });
-        return;
-      }
-
-      if (url.pathname === SHORTCUT_BOOKKEEPING_STATUS_ROUTE) {
-        if (request.method !== "GET") {
-          sendHttpError(
-            response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for Shortcut bookkeeping status"),
-            responseOptions(response, { Allow: "GET", "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-        const integrationIdentity = authenticateShortcutWebhook(
-          request.headers,
-          config,
-          (token) => shortcutWebhookTokenRepository.resolve(token),
-        );
-        if (!integrationIdentity) {
-          const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
-          unauthorized(
-            response,
-            supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token",
-            supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED",
-          );
-        }
-        const entryIds = url.searchParams.getAll("entryId");
-        const weekStarts = url.searchParams.getAll("weekStart");
-        if (entryIds.length !== 1
-          || weekStarts.length > 1
-          || [...url.searchParams.keys()].some((key) => !["entryId", "weekStart"].includes(key))) {
-          validationFailure("entryId", "single_query_value");
-        }
-        const entryId = payloadText(entryIds[0], "entryId", { max: 200 });
-        const requestedWeekStart = weekStarts[0] ? payloadText(weekStarts[0], "weekStart", { max: 10 }) : null;
-        if (requestedWeekStart) validateTravelExpenseWeekStart(requestedWeekStart);
-        const entry = shortcutBookkeepingRepository.getReview(entryId, {
-          owner: integrationIdentity.account,
-        });
-        if (!entry) notFound();
-        const outbox = typeof weixinConfirmationOutboxRepository.latestForEntry === "function"
-          ? weixinConfirmationOutboxRepository.latestForEntry({
-              owner: integrationIdentity.account,
-              entryId,
-            })
-          : null;
-        let advanceSummary = null;
-        if (typeof shortcutAdvanceAllocationRepository?.summary === "function") {
-          const summaryWeekStart = requestedWeekStart || entry.advanceWeekStart;
-          if (summaryWeekStart) {
-            try {
-              advanceSummary = shortcutAdvanceAllocationRepository.summary({
-                owner: integrationIdentity.account,
-                weekStart: summaryWeekStart,
-              });
-            } catch {
-              advanceSummary = null;
-            }
-          }
-        }
-        sendJson(response, 200, {
-          item: {
-            id: entry.id,
-            status: entry.status,
-            confirmationDelivery: shortcutDelivery(outbox, integrationIdentity.account),
-            ...(advanceSummary ? {
-              advanceSummary: {
-                weekStart: advanceSummary.weekStart,
-                requestedCents: advanceSummary.requestedCents,
-                allocatedCents: advanceSummary.allocatedCents,
-                remainingCents: advanceSummary.remainingCents,
-                uncoveredCents: advanceSummary.uncoveredCents,
-                overageCents: advanceSummary.overageCents,
-                planHash: advanceSummary.planHash,
-              },
-            } : {}),
-          },
-        }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      if (url.pathname === SHORTCUT_BOOKKEEPING_DELIVERY_RETRY_ROUTE) {
-        if (request.method !== "POST") {
-          sendHttpError(
-            response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut delivery retry"),
-            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-        const integrationIdentity = authenticateShortcutWebhook(
-          request.headers,
-          config,
-          (token) => shortcutWebhookTokenRepository.resolve(token),
-        );
-        if (!integrationIdentity) {
-          const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
-          unauthorized(
-            response,
-            supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token",
-            supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED",
-          );
-        }
-        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
-        const rateLimit = shortcutWriteRateLimiter.consume(
-          `${integrationIdentity.account}\u0000delivery-retry\u0000${remoteAddress}`,
-        );
-        if (!rateLimit.allowed) {
-          sendHttpError(
-            response,
-            new HttpError(429, "RATE_LIMITED", "Too many Shortcut delivery retry requests"),
-            responseOptions(response, {
-              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
-              "Cache-Control": "no-store",
-            }),
-          );
-          return;
-        }
-        assertShortcutDeliveryReady(integrationIdentity.account);
-        const body = validateShortcutDeliveryRetryPayload(await readJson(request));
-        const entry = shortcutBookkeepingRepository.getReview(body.entryId, {
-          owner: integrationIdentity.account,
-        });
-        if (!entry) notFound();
-        const outbox = typeof weixinConfirmationOutboxRepository.latestForEntry === "function"
-          ? weixinConfirmationOutboxRepository.latestForEntry({
-              owner: integrationIdentity.account,
-              entryId: body.entryId,
-            })
-          : null;
-        if (!outbox) {
-          throw new HttpError(409, "WEIXIN_OUTBOX_NOT_FOUND", "No delivery exists for this bookkeeping entry");
-        }
-        const retried = weixinConfirmationOutboxRepository.requeueFailed(outbox.id);
-        sendJson(response, 200, {
-          item: {
-            id: entry.id,
-            status: entry.status,
-            confirmationDelivery: shortcutDelivery(retried, integrationIdentity.account),
-          },
-        }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      // Internal/manual-constants mode. The Shortcut carries account/password
-      // text constants and this server validates them before the normal
-      // bookkeeping pipeline runs. Strip both fields before validation and
-      // hashing so the password never enters business storage or audit data.
-      const captureInlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_INLINE_ROUTE;
-      const captureTokenShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_ROUTE;
-      const capturePreviewShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_CAPTURE_PREVIEW_ROUTE;
-      const inlineShortcutRoute = url.pathname === SHORTCUT_BOOKKEEPING_INLINE_ROUTE
-        || captureInlineShortcutRoute;
-      let inlineShortcutBody = null;
-      let inlineShortcutIdentity = null;
-      if (inlineShortcutRoute) {
-        if (request.method !== "POST") {
-          sendHttpError(
-            response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for inline Shortcut bookkeeping"),
-            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-        if (!isAuthEnabled(config)) {
-          throw new HttpError(
-            503,
-            "AUTH_NOT_CONFIGURED",
-            "Authentication is required but not fully configured",
-          );
-        }
-        const rawInlineBody = await readJson(request);
-        const inlineCredentials = validateShortcutInlineCredentials(rawInlineBody);
-        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
-        const rateLimit = shortcutPairRateLimiter.consume(`inline\u0000${remoteAddress}`);
-        if (!rateLimit.allowed) {
-          sendHttpError(
-            response,
-            new HttpError(429, "RATE_LIMITED", "Too many inline Shortcut credential attempts"),
-            responseOptions(response, {
-              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
-              "Cache-Control": "no-store",
-            }),
-          );
-          return;
-        }
-        const credentialsValid = await configuredCredentialsMatch(config, inlineCredentials);
-        if (!credentialsValid) {
-          throw new HttpError(401, "INVALID_CREDENTIALS", "Account or password is incorrect");
-        }
-        const businessBody = { ...rawInlineBody };
-        delete businessBody.account;
-        delete businessBody.password;
-        inlineShortcutBody = captureInlineShortcutRoute
-          ? validateShortcutCapturePayload(businessBody)
-          : validateShortcutBookkeepingPayload(businessBody);
-        inlineShortcutIdentity = {
-          account: config.authAccount,
-          integration: "shortcut",
-          kind: "integration",
-          scheme: "inline-credentials",
-        };
-      }
-
-      if (url.pathname === SHORTCUT_BOOKKEEPING_ROUTE
-        || captureTokenShortcutRoute
-        || capturePreviewShortcutRoute
-        || inlineShortcutRoute) {
-        if (!inlineShortcutRoute && !isShortcutBookkeepingRouteAllowed(request.method, url.pathname)) {
-          sendHttpError(
-            response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for Shortcut bookkeeping"),
-            responseOptions(response, { Allow: "POST", "Cache-Control": "no-store" }),
-          );
-          return;
-        }
-        let integrationIdentity = inlineShortcutIdentity;
-        if (!integrationIdentity) {
-          try {
-            integrationIdentity = authenticateShortcutWebhook(
-              request.headers,
-              config,
-              (token) => shortcutWebhookTokenRepository.resolve(token),
-            );
-          } catch {
-            throw new HttpError(
-              503,
-              "SHORTCUT_AUTHENTICATION_UNAVAILABLE",
-              "快捷指令身份验证暂时不可用，请稍后重试",
-            );
-          }
-          if (!integrationIdentity) {
-            const supplied = Boolean(request.headers.authorization || request.headers["x-shortcut-webhook-token"]);
-            unauthorized(
-              response,
-              supplied ? "Token 无效或已撤销" : "请填写快捷指令 Token",
-              supplied ? "SHORTCUT_TOKEN_INVALID" : "SHORTCUT_TOKEN_REQUIRED",
-            );
-          }
-        }
-        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
-        const rateLimit = shortcutWriteRateLimiter.consume(
-          `${integrationIdentity.account}\u0000${remoteAddress}`,
-        );
-        if (!rateLimit.allowed) {
-          sendHttpError(
-            response,
-            new HttpError(429, "RATE_LIMITED", "Too many Shortcut bookkeeping requests"),
-            responseOptions(response, {
-              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
-              "Cache-Control": "no-store",
-            }),
-          );
-          return;
-        }
-        if (capturePreviewShortcutRoute) {
-          const preview = previewShortcutCapturePayload(await readJson(request), {
-            clock: options.shortcutBookkeepingClock ?? options.now ?? (() => new Date()),
-          });
-          sendJson(response, 200, {
-            amount_cents: preview.amountCents,
-            amount_text: preview.amountText,
-            summary_text: preview.summaryText,
-            captured_at: preview.capturedAt,
-          }, { "Cache-Control": "no-store" });
-          return;
-        }
-        assertShortcutDeliveryReady(integrationIdentity.account);
-        const body = inlineShortcutBody ?? (captureTokenShortcutRoute
-          ? validateShortcutCapturePayload(await readJson(request))
-          : validateShortcutBookkeepingPayload(await readJson(request)));
-        const received = shortcutBookkeepingRepository.receive({
-          owner: integrationIdentity.account,
-          actor: integrationIdentity.account,
-          ledgerName: body.ledgerName,
-          entryType: body.entryType,
-          category: body.category,
-          subcategory: body.subcategory,
-          note: body.note,
-          idempotencyKey: body.idempotencyKey,
-          requestHash: requestHash(body),
-          rawText: body.text,
-          capturedAt: body.capturedAt,
-          sourceId: body.sourceId,
-        });
-        if (received.replayed && received.item.status === "review_required"
-          && body.targetSystem === "sentelligent" && shortcutBookkeepingAssistantRuntime.enabled) {
-          const pending = shortcutBookkeepingAssistantRuntime.startReview({
-            account: integrationIdentity.account,
-            entry: received.item,
-          });
-          sendJson(response, 202, {
-            item: shortcutResponseItem(received.item, true, {
-              confirmationPending: true,
-              assistantActionId: pending.action.id,
-              confirmationDelivery: assertShortcutSubmissionDelivery(
-                shortcutDelivery(pending.outbox, integrationIdentity.account),
-              ),
-            }),
-          }, { "Cache-Control": "no-store" });
-          return;
-        }
-        if (received.replayed && ["accepted", "review_required"].includes(received.item.status)) {
-          sendJson(response, 200, {
-            item: shortcutResponseItem(received.item, true),
-          }, { "Cache-Control": "no-store" });
-          return;
-        }
-        if (received.replayed && received.item.status === "rejected") {
-          throw new HttpError(
-            409,
-            "SHORTCUT_BOOKKEEPING_REJECTED",
-            "这笔快捷记账已被拒绝，不能自动重试",
-          );
-        }
-        const claimed = shortcutBookkeepingRepository.claim(received.item.id);
-        if (claimed.replayed) {
-          if (claimed.item.status === "review_required"
-            && body.targetSystem === "sentelligent"
-            && shortcutBookkeepingAssistantRuntime.enabled) {
-            const pending = shortcutBookkeepingAssistantRuntime.startReview({
-              account: integrationIdentity.account,
-              entry: claimed.item,
-            });
-            sendJson(response, 202, {
-              item: shortcutResponseItem(claimed.item, true, {
-                confirmationPending: true,
-                assistantActionId: pending.action.id,
-                confirmationDelivery: assertShortcutSubmissionDelivery(
-                  shortcutDelivery(pending.outbox, integrationIdentity.account),
-                ),
-              }),
-            }, { "Cache-Control": "no-store" });
-            return;
-          }
-          sendJson(response, 200, {
-            item: shortcutResponseItem(claimed.item, true),
-          }, { "Cache-Control": "no-store" });
-          return;
-        }
-
-        try {
-          const rawAnalysis = body.explicitCapture === true
-            ? {
-                status: "ready",
-                confidence: 1,
-                expense: {
-                  occurredOn: (body.capturedAt ?? new Date().toISOString()).slice(0, 10),
-                  paidAt: body.capturedAt ?? new Date().toISOString(),
-                  amountCents: body.amountCents,
-                  reimbursementCents: body.amountCents,
-                  purpose: body.note || `${body.category}${body.subcategory ? `-${body.subcategory}` : ""}`,
-                  merchant: null,
-                  fundingSource: "personal",
-                  paymentMethod: "other",
-                },
-                warnings: [],
-                source: { provider: "shortcut-preview", model: null },
-              }
-            : await travelExpenseAnalyzer(body.text);
-          let reviewPatch;
-          let analyzed;
-          if (body.automaticCategorization === true) {
-            const automatic = applyShortcutAutomaticAnalysis(rawAnalysis, {
-              text: body.text,
-              note: body.note,
-            });
-            analyzed = automatic.analysis;
-            reviewPatch = automatic.reviewPatch;
-          } else {
-            analyzed = applyShortcutSelectionAnalysis(rawAnalysis, body);
-          }
-          // A Shortcut capture never silently consumes a loan pool. Until the
-          // owner explicitly assigns a received loan through the WeChat
-          // allocation flow, every expense remains personal-paid. The
-          // allocation overlay later records any advance-funded portion
-          // without rewriting the original payment fact.
-          if (body.entryType === "expense" && analyzed?.expense) {
-            analyzed = {
-              ...analyzed,
-              expense: {
-                ...analyzed.expense,
-                fundingSource: "personal",
-                ...(Number.isSafeInteger(analyzed.expense.amountCents)
-                  ? { reimbursementCents: analyzed.expense.amountCents }
-                  : {}),
-              },
-            };
-          }
-          if (shortcutBookkeepingAssistantRuntime.enabled) {
-            analyzed = {
-              ...analyzed,
-              status: "review_required",
-              warnings: [...new Set([...(analyzed.warnings ?? []), "WEIXIN_CONFIRMATION_REQUIRED"])],
-            };
-          }
-          const completed = shortcutBookkeepingRepository.completeLocal(received.item.id, {
-            analysis: analyzed,
-            leaseToken: claimed.leaseToken,
-            ...(reviewPatch ? { reviewPatch } : {}),
-          });
-          if (shortcutBookkeepingAssistantRuntime.enabled) {
-            const pending = shortcutBookkeepingAssistantRuntime.startReview({
-              account: integrationIdentity.account,
-              entry: completed.item,
-            });
-            sendJson(response, 202, {
-              item: shortcutResponseItem(completed.item, completed.replayed, {
-                confirmationPending: true,
-                assistantActionId: pending.action.id,
-                confirmationDelivery: assertShortcutSubmissionDelivery(
-                  shortcutDelivery(pending.outbox, integrationIdentity.account),
-                ),
-              }),
-            }, { "Cache-Control": "no-store" });
-            return;
-          }
-          sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
-            item: shortcutResponseItem(completed.item, completed.replayed),
-          }, { "Cache-Control": "no-store" });
-          return;
-        } catch (error) {
-          shortcutBookkeepingRepository.release(received.item.id, {
-            leaseToken: claimed.leaseToken,
-            errorCode: error instanceof HttpError ? error.code : "SHORTCUT_PROCESSING_FAILED",
-          });
-          throw error;
-        }
-      }
-
-      if (url.pathname === ICOST_EXPENSE_ROUTE) {
-        if (!isIcostWebhookRouteAllowed(request.method, url.pathname)) {
-          sendHttpError(
-            response,
-            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for the iCost expense webhook"),
-            responseOptions(response, { Allow: "POST" }),
-          );
-          return;
-        }
-        const integrationIdentity = authenticateIcostWebhook(
-          request.headers.authorization,
-          secureSettingsRepository
-            ? {
-              ...config,
-              icostWebhookToken: secureSettingsRepository.resolveSecret(
-                ICOST_SETTING_KEY,
-                config.icostWebhookToken,
-              ),
-            }
-            : config,
-        );
-        if (!integrationIdentity) return unauthorized(response);
-
-        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
-        const rateLimit = icostRateLimiter.consume(`${integrationIdentity.account}\u0000${remoteAddress}`);
-        if (!rateLimit.allowed) {
-          sendHttpError(
-            response,
-            new HttpError(429, "RATE_LIMITED", "Too many iCost expense writes"),
-            responseOptions(response, {
-              "Retry-After": String(Math.max(1, Math.ceil(rateLimit.retryAfterMs / 1000))),
-            }),
-          );
-          return;
-        }
-
-        const body = validateIcostTextPayload(await readJson(request));
-        const received = travelExpenseIngestionRepository.receive({
-          owner: integrationIdentity.account,
-          actor: "icost-webhook",
-          source: "icost",
-          idempotencyKey: body.idempotencyKey,
-          requestHash: requestHash(body),
-          rawText: body.text,
-          capturedAt: body.capturedAt ?? null,
-          sourceId: body.sourceId ?? null,
-        });
-
-        if (received.replayed && ["accepted", "review_required"].includes(received.item.status)) {
-          sendJson(response, 200, { item: icostResponseItem(received.item, true) });
-          return;
-        }
-
-        const claimed = travelExpenseIngestionRepository.claim(received.item.id, {
-          leaseMs: Math.max(60_000, config.modelTimeoutMs * 2),
-        });
-        if (claimed.replayed) {
-          sendJson(response, 200, { item: icostResponseItem(claimed.item, true) });
-          return;
-        }
-
-        let analysis;
-        try {
-          analysis = await travelExpenseAnalyzer(body.text, {
-            capturedAt: body.capturedAt ?? null,
-            sourceId: body.sourceId ?? null,
-          });
-        } catch {
-          analysis = {
-            status: "review_required",
-            confidence: 0,
-            expense: null,
-            warnings: ["model_error"],
-            source: {
-              provider: config.modelProvider || "deepseek",
-              model: config.modelName || null,
-            },
-          };
-        }
-        const completed = travelExpenseIngestionRepository.complete(received.item.id, {
-          analysis,
-          leaseToken: claimed.leaseToken,
-        });
-        const replayed = received.replayed || completed.replayed;
-        const statusCode = replayed
-          ? 200
-          : completed.item.status === "accepted"
-            ? 201
-            : 202;
-        sendJson(response, statusCode, { item: icostResponseItem(completed.item, replayed) });
-        return;
-      }
-
       if (url.pathname === WEIXIN_OUTBOX_ROUTE) {
         const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
         if (!machineIdentity) return unauthorized(response);
@@ -3805,6 +3008,22 @@ export function createServer(options = {}) {
             return;
           }
           shortcutBookkeepingAssistantRuntime.reconcileAcceptedReceipts();
+          if (shortcutBookkeepingAssistantRuntime.ready) {
+            try {
+              reconcileWeixinInvoiceAttachments({
+                db,
+                invoiceRepository,
+                travelExpenseRepository,
+                owner: shortcutBookkeepingAssistantRuntime.owner,
+                actor: shortcutBookkeepingAssistantRuntime.owner,
+                requestIdPrefix: "weixin-worker-invoice-attachment",
+              });
+            } catch {
+              // Invoice and match rows remain the durable retry source. A
+              // transient attachment failure must not block confirmation
+              // message delivery; the next worker lease retries it.
+            }
+          }
           const workerId = typeof request.headers["x-weixin-worker-id"] === "string"
             ? request.headers["x-weixin-worker-id"].trim().slice(0, 200)
             : "weixin-worker";
@@ -4100,62 +3319,19 @@ export function createServer(options = {}) {
       }
       request.authContext = requestIdentity;
 
-      const shortcutManagementRoute = "/api/integrations/shortcut/tokens";
-      if (
-        (request.method === "GET" && url.pathname === shortcutManagementRoute)
-        || (request.method === "POST" && url.pathname === shortcutManagementRoute)
-        || (request.method === "DELETE"
-          && parts[0] === "api"
-          && parts[1] === "integrations"
-          && parts[2] === "shortcut"
-          && parts[3] === "tokens"
-          && parts[4]
-          && parts.length === 5)
-      ) {
-        if (request.authContext.kind !== "user") return unauthorized(response);
-        if (request.method === "GET") {
-          sendJson(response, 200, {
-            items: shortcutWebhookTokenRepository.list({ account: request.authContext.account }),
-          }, { "Cache-Control": "no-store" });
-          return;
-        }
-        if (request.method === "POST") {
-          const body = plainObject(await readJson(request));
-          allowedPayloadKeys(body, new Set(["label"]));
-          const label = body.label === undefined ? "iOS 快捷指令" : body.label;
-          if (typeof label !== "string") validationFailure("label", "string");
-          if (!label.trim() || label.trim().length > 100) {
-            validationFailure("label", label.trim() ? "maxLength" : "required");
-          }
-          const created = shortcutWebhookTokenRepository.create({
-            account: request.authContext.account,
-            label,
-          });
-          sendJson(response, 201, { item: created }, { "Cache-Control": "no-store" });
-          return;
-        }
-        const revoked = shortcutWebhookTokenRepository.revoke({
-          account: request.authContext.account,
-          id: parts[4],
-        });
-        if (!revoked) return notFound();
-        sendJson(response, 200, { item: revoked }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      const shortcutReviewRoute = "/api/integrations/shortcut/bookkeeping/review";
-      const shortcutReviewParts = url.pathname.split("/");
-      const isShortcutReviewPath = url.pathname === shortcutReviewRoute
-        || (shortcutReviewParts[0] === ""
-          && shortcutReviewParts[1] === "api"
-          && shortcutReviewParts[2] === "integrations"
-          && shortcutReviewParts[3] === "shortcut"
-          && shortcutReviewParts[4] === "bookkeeping"
-          && shortcutReviewParts[5] === "review");
-      if (isShortcutReviewPath) {
+      const weixinBookkeepingReviewRoute = "/api/integrations/weixin/bookkeeping/review";
+      const weixinBookkeepingReviewParts = url.pathname.split("/");
+      const isWeixinBookkeepingReviewPath = url.pathname === weixinBookkeepingReviewRoute
+        || (weixinBookkeepingReviewParts[0] === ""
+          && weixinBookkeepingReviewParts[1] === "api"
+          && weixinBookkeepingReviewParts[2] === "integrations"
+          && weixinBookkeepingReviewParts[3] === "weixin"
+          && weixinBookkeepingReviewParts[4] === "bookkeeping"
+          && weixinBookkeepingReviewParts[5] === "review");
+      if (isWeixinBookkeepingReviewPath) {
         if (requestIdentity.kind !== "user") return unauthorized(response);
         const owner = request.authContext.account;
-        if (request.method === "GET" && url.pathname === shortcutReviewRoute) {
+        if (request.method === "GET" && url.pathname === weixinBookkeepingReviewRoute) {
           const status = url.searchParams.get("status") || "review_required";
           const limitText = url.searchParams.get("limit");
           const limit = limitText ? Number(limitText) : 100;
@@ -4165,19 +3341,19 @@ export function createServer(options = {}) {
           }, { "Cache-Control": "no-store" });
           return;
         }
-        const reviewId = shortcutReviewParts[6];
-        if (!reviewId || shortcutReviewParts.length > 8) return notFound();
-        if (request.method === "GET" && shortcutReviewParts.length === 7) {
+        const reviewId = weixinBookkeepingReviewParts[6];
+        if (!reviewId || weixinBookkeepingReviewParts.length > 8) return notFound();
+        if (request.method === "GET" && weixinBookkeepingReviewParts.length === 7) {
           const item = shortcutBookkeepingRepository.getReview(reviewId, { owner });
           if (!item) return notFound();
           sendJson(response, 200, { item: shortcutReviewResponseItem(item) }, { "Cache-Control": "no-store" });
           return;
         }
-        if (request.method !== "POST" || shortcutReviewParts.length !== 8) {
-          sendHttpError(response, new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET and POST are allowed for Shortcut review"));
+        if (request.method !== "POST" || weixinBookkeepingReviewParts.length !== 8) {
+          sendHttpError(response, new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET and POST are allowed for WeChat bookkeeping review"));
           return;
         }
-        const action = shortcutReviewParts[7];
+        const action = weixinBookkeepingReviewParts[7];
         const settleShortcutWebReview = (item) => {
           if (!["accepted", "rejected"].includes(item?.status)) return null;
           return shortcutBookkeepingAssistantRuntime.settleFromWeb({
@@ -4204,6 +3380,11 @@ export function createServer(options = {}) {
           const claimed = shortcutBookkeepingRepository.claimReview(reviewId, { owner });
           if (claimed.replayed) {
             settleShortcutWebReview(claimed.item);
+            shortcutBookkeepingAssistantRuntime.attachAcceptedEntryAttachments({
+              account: owner,
+              entry: claimed.item,
+              requestId,
+            });
             sendJson(response, 200, { item: shortcutReviewResponseItem(claimed.item, true) }, { "Cache-Control": "no-store" });
             return;
           }
@@ -4213,6 +3394,11 @@ export function createServer(options = {}) {
               leaseToken: claimed.leaseToken,
             });
             settleShortcutWebReview(completed.item);
+            shortcutBookkeepingAssistantRuntime.attachAcceptedEntryAttachments({
+              account: owner,
+              entry: completed.item,
+              requestId,
+            });
             sendJson(response, completed.replayed ? 200 : 201, {
               item: shortcutReviewResponseItem(completed.item, completed.replayed),
             }, { "Cache-Control": "no-store" });
@@ -4255,6 +3441,11 @@ export function createServer(options = {}) {
             const completed = shortcutBookkeepingRepository.completeLocal(reviewId, {
               analysis: analyzed,
               leaseToken: claimed.leaseToken,
+            });
+            shortcutBookkeepingAssistantRuntime.attachAcceptedEntryAttachments({
+              account: owner,
+              entry: completed.item,
+              requestId,
             });
             sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
               item: shortcutReviewResponseItem(completed.item, completed.replayed),
@@ -4309,7 +3500,6 @@ export function createServer(options = {}) {
         let item;
         try {
           item = {
-            icost: secureSettingMetadata(ICOST_SETTING_KEY, config.icostWebhookToken),
             deepseek: secureSettingMetadata(DEEPSEEK_SETTING_KEY, config.modelApiKey),
             pushplus: secureSettingMetadata(
               PUSHPLUS_SETTING_KEY,
@@ -4320,42 +3510,6 @@ export function createServer(options = {}) {
           throw new HttpError(503, "SECURE_SETTINGS_UNAVAILABLE", "Secure settings storage is unavailable");
         }
         sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      if (
-        request.method === "POST"
-        && (url.pathname === "/api/settings/icost-token" || url.pathname === "/api/settings/icost-token/rotate")
-      ) {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
-        await validateEmptyBody(request);
-        const repository = requireSecureSettings(secureSettingsRepository);
-        const result = withImmediateTransaction(db, () => {
-          const rotated = repository.rotateIcostToken();
-          insertAudit(db, {
-            action: "settings.icost_token.rotate",
-            entityType: "secure_setting",
-            entityId: ICOST_SETTING_KEY,
-            actor: request.authContext.account,
-            requestId,
-            before: null,
-            after: {
-              status: rotated.item.status,
-              masked: rotated.item.masked,
-              createdAt: rotated.item.createdAt,
-              rotatedAt: rotated.item.rotatedAt,
-            },
-            metadata: { setting: ICOST_SETTING_KEY },
-          });
-          return rotated;
-        });
-        sendJson(response, 201, {
-          item: {
-            ...result.item,
-            // This is the only endpoint that returns the generated token.
-            token: result.token,
-          },
-        }, { "Cache-Control": "no-store" });
         return;
       }
 

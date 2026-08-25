@@ -45,6 +45,58 @@ function requiredBuffer(value) {
   throw new TypeError("document buffer is required");
 }
 
+function parseTesseractTsv(value) {
+  const rows = String(value ?? "").replace(/\r\n?/gu, "\n").split("\n");
+  if (!rows.length || !/^level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext$/u.test(rows[0])) {
+    throw toolError("OCR_LAYOUT_INVALID", "Local OCR layout output is invalid");
+  }
+  const tokens = [];
+  let pageWidth = 0;
+  let pageHeight = 0;
+  for (const row of rows.slice(1)) {
+    if (!row) continue;
+    const fields = row.split("\t");
+    if (fields.length < 12) continue;
+    const [level, page, block, paragraph, line, word, left, top, width, height, confidence] = fields.slice(0, 11).map(Number);
+    const text = fields.slice(11).join("\t").trim();
+    if ([level, page, block, paragraph, line, word, left, top, width, height, confidence].some((item) => !Number.isFinite(item))) continue;
+    if (level === 1) {
+      pageWidth = Math.max(pageWidth, width);
+      pageHeight = Math.max(pageHeight, height);
+    }
+    if (level !== 5 || !text || width <= 0 || height <= 0 || tokens.length >= 4000) continue;
+    tokens.push({ page, block, paragraph, line, word, left, top, width, height, confidence, text: text.slice(0, 500) });
+    pageWidth = Math.max(pageWidth, left + width);
+    pageHeight = Math.max(pageHeight, top + height);
+  }
+  if (!tokens.length) throw toolError("TEXT_EMPTY", "No text was extracted from the document");
+  tokens.sort((left, right) => left.page - right.page
+    || left.block - right.block
+    || left.paragraph - right.paragraph
+    || left.line - right.line
+    || left.word - right.word
+    || left.left - right.left);
+  const lines = [];
+  let key = null;
+  let words = [];
+  for (const token of tokens) {
+    const nextKey = `${token.page}:${token.block}:${token.paragraph}:${token.line}`;
+    if (key !== null && nextKey !== key) {
+      lines.push(words.join(" "));
+      words = [];
+    }
+    key = nextKey;
+    words.push(token.text);
+  }
+  if (words.length) lines.push(words.join(" "));
+  return {
+    text: lines.join("\n").trim(),
+    pageWidth,
+    pageHeight,
+    tokens,
+  };
+}
+
 function defaultRunner({ command, args, timeoutMs, failureCode }) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -124,8 +176,7 @@ export function createLocalDocumentTextExtractor(options = {}) {
   const tempRoot = options.tempRoot ?? tmpdir();
   const runner = options.runner ?? defaultRunner;
 
-  return {
-    async extract(mediaType, value) {
+  async function runExtraction(mediaType, value, { layout = false } = {}) {
       const buffer = requiredBuffer(value);
       const isImage = IMAGE_MEDIA_TYPES.has(mediaType);
       const isPdf = mediaType === "application/pdf";
@@ -147,19 +198,30 @@ export function createLocalDocumentTextExtractor(options = {}) {
         await writeFile(inputPath, buffer, { mode: 0o600 });
         const args = isPdf
           ? ["-layout", inputPath, "-"]
-          : [inputPath, "stdout", "-l", ocrLanguages, "--psm", "6"];
-        const text = String(await runner({
+          : [inputPath, "stdout", "-l", ocrLanguages, "--psm", "4", ...(layout ? ["tsv"] : [])];
+        const output = String(await runner({
           command,
           args,
           inputPath,
           timeoutMs,
           failureCode: isPdf ? "PDF_TEXT_FAILED" : "OCR_FAILED",
         })).trim();
-        if (!text) throw toolError("TEXT_EMPTY", "No text was extracted from the document");
-        return text;
+        if (!output) throw toolError("TEXT_EMPTY", "No text was extracted from the document");
+        return layout && isImage ? parseTesseractTsv(output) : output;
       } finally {
         await rm(workspace, { recursive: true, force: true });
       }
+  }
+
+  return {
+    extract(mediaType, value) {
+      return runExtraction(mediaType, value);
+    },
+    extractLayout(mediaType, value) {
+      if (!IMAGE_MEDIA_TYPES.has(mediaType)) {
+        return runExtraction(mediaType, value).then((text) => ({ text, pageWidth: 0, pageHeight: 0, tokens: [] }));
+      }
+      return runExtraction(mediaType, value, { layout: true });
     },
   };
 }

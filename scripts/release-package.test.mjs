@@ -290,10 +290,14 @@ describe("portable release package", () => {
       "outputs/product-design-prototype/dist/assets/sente-logo.png",
       "outputs/logo/sent-zhixing-transparent-logo.png",
       "森特透明底LOGO 800 800.png",
+    ]) {
+      assert.equal(shouldExcludeReleasePath(file), false, `${file} must be preserved`);
+    }
+    for (const file of [
       "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut",
       "integrations/shortcut/shortcut-bookkeeping.unsigned.shortcut",
     ]) {
-      assert.equal(shouldExcludeReleasePath(file), false, `${file} must be preserved`);
+      assert.equal(shouldExcludeReleasePath(file), true, `${file} is a retired integration asset`);
     }
   });
 
@@ -1922,14 +1926,10 @@ describe("portable release package", () => {
         "HOSPITAL_TENDER_BATCH_SIZE",
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
         "WEIXIN_AGENT_API_TOKEN",
-        "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+        "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
         "WEIXIN_BOOKKEEPING_OWNER",
         "WEIXIN_BOOKKEEPING_SENDER_ID",
         "WEIXIN_OUTBOX_POLL_MS",
-        "ICOST_WEBHOOK_TOKEN",
-        "ICOST_WEBHOOK_OWNER",
-        "ICOST_WEBHOOK_RATE_LIMIT",
-        "ICOST_WEBHOOK_WINDOW_MS",
         "INVOICE_OCR_COMMAND",
         "INVOICE_PDF_TEXT_COMMAND",
         "INVOICE_OCR_LANGUAGES",

@@ -21,12 +21,12 @@ import { fileURLToPath } from "node:url";
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 
 // A pre-cutover report may inspect the already-running release whose manifest
-// predates the five shortcut-confirmation and PushPlus names. This relaxed set
+// predates the WeChat-bookkeeping confirmation and PushPlus names. This relaxed set
 // is valid only for the canonical current release path; candidate releases
 // always use the complete contract.
 const LEGACY_CURRENT_EXCLUDED_ENV_NAMES = new Set([
   "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
-  "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+  "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
   "WEIXIN_BOOKKEEPING_OWNER",
   "WEIXIN_BOOKKEEPING_SENDER_ID",
   "WEIXIN_OUTBOX_POLL_MS",
@@ -36,6 +36,21 @@ const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
     (name) => !LEGACY_CURRENT_EXCLUDED_ENV_NAMES.has(name),
   ),
 );
+// v0.6.14 is the immediate rollback/current baseline for v0.6.15. Its
+// immutable manifest records the retired Shortcut/iCost names even though the
+// cutover environment must remove those values before the new services start.
+// Accept this exact historical manifest contract only while that release is
+// the canonical current path; candidates still require REQUIRED_ENV_NAMES.
+const LEGACY_SHORTCUT_CURRENT_REQUIRED_ENV_NAMES = Object.freeze([
+  ...REQUIRED_ENV_NAMES.filter(
+    (name) => name !== "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
+  ),
+  "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+  "ICOST_WEBHOOK_TOKEN",
+  "ICOST_WEBHOOK_OWNER",
+  "ICOST_WEBHOOK_RATE_LIMIT",
+  "ICOST_WEBHOOK_WINDOW_MS",
+]);
 
 export const REQUIRED_PROJECT_SERVICES = Object.freeze([
   "sentelligent-backend.service",
@@ -52,13 +67,12 @@ export const PRODUCTION_PREFLIGHT_CHECK_IDS = Object.freeze([
   "env.authHash",
   "env.sessionSecret",
   "env.assistantSecrets",
-  "env.shortcutWeixinConfirmation",
+  "env.weixinBookkeepingConfirmation",
   "env.secureCookie",
   "env.cors",
   "env.solutionWrites",
   "env.aiModel",
-  "env.icostWebhook",
-  "env.icostIsolation",
+  "env.retiredBookkeepingIntegrations",
   "env.invoiceExtraction",
   "database.environmentBinding",
   "database.quickCheck",
@@ -238,15 +252,9 @@ function hasAssistantSecretConfiguration(environment) {
     (!tenderSyncConfigured || isStrongAssistantSecret(tenderSync)) &&
     new Set(independentSecrets).size === independentSecrets.length &&
     machine !== environment.MODEL_API_KEY &&
-    machine !== environment.ICOST_WEBHOOK_TOKEN &&
     confirmation !== environment.MODEL_API_KEY &&
-    confirmation !== environment.ICOST_WEBHOOK_TOKEN &&
     settings !== environment.MODEL_API_KEY &&
-    settings !== environment.ICOST_WEBHOOK_TOKEN &&
-    (!tenderSyncConfigured || (
-      tenderSync !== environment.MODEL_API_KEY &&
-      tenderSync !== environment.ICOST_WEBHOOK_TOKEN
-    ))
+    (!tenderSyncConfigured || tenderSync !== environment.MODEL_API_KEY)
   );
 }
 
@@ -263,7 +271,7 @@ function hasWeixinOwnerConfiguration(environment, database) {
   );
 }
 
-function hasShortcutWeixinConfirmationConfiguration(environment) {
+function hasWeixinBookkeepingConfirmationConfiguration(environment) {
   const owner = environment.WEIXIN_BOOKKEEPING_OWNER;
   const sender = environment.WEIXIN_BOOKKEEPING_SENDER_ID;
   const allowedSenders = typeof environment.WEIXIN_ALLOWED_SENDER_IDS === "string"
@@ -274,7 +282,7 @@ function hasShortcutWeixinConfirmationConfiguration(environment) {
     : [];
   const pollMs = Number(environment.WEIXIN_OUTBOX_POLL_MS);
   return (
-    environment.SHORTCUT_WEIXIN_CONFIRMATION_ENABLED === "true" &&
+    environment.WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED === "true" &&
     typeof owner === "string" &&
     owner.length > 0 &&
     owner.length <= 200 &&
@@ -323,7 +331,6 @@ function hasHospitalTenderNotificationConfiguration(environment) {
     environment.ASSISTANT_CONFIRMATION_SECRET,
     environment.SETTINGS_ENCRYPTION_KEY,
     environment.MODEL_API_KEY,
-    environment.ICOST_WEBHOOK_TOKEN,
     environment.HOSPITAL_TENDER_SYNC_TOKEN,
   ].filter((value) => typeof value === "string" && value.length > 0);
   return isStrongHospitalTenderPushplusToken(token) && !otherSecrets.includes(token);
@@ -333,25 +340,6 @@ function isPositiveSafeIntegerText(value) {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return false;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0;
-}
-
-function isIcostWebhookToken(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_-]{64}$/.test(value);
-}
-
-function hasIcostWebhookConfiguration(environment) {
-  const owner = environment.ICOST_WEBHOOK_OWNER;
-  return (
-    isIcostWebhookToken(environment.ICOST_WEBHOOK_TOKEN) &&
-    typeof owner === "string" &&
-    owner.length > 0 &&
-    owner.length <= 200 &&
-    owner === owner.trim() &&
-    !/[\u0000-\u001f\u007f-\u009f]/u.test(owner) &&
-    owner === environment.AUTH_ACCOUNT &&
-    isPositiveSafeIntegerText(environment.ICOST_WEBHOOK_RATE_LIMIT) &&
-    isPositiveSafeIntegerText(environment.ICOST_WEBHOOK_WINDOW_MS)
-  );
 }
 
 function isProductionModelKey(value) {
@@ -373,7 +361,6 @@ function hasProductionModelConfiguration(environment) {
     environment.AUTH_SESSION_SECRET,
     environment.WEIXIN_AGENT_API_TOKEN,
     environment.ASSISTANT_CONFIRMATION_SECRET,
-    environment.ICOST_WEBHOOK_TOKEN,
     environment.SETTINGS_ENCRYPTION_KEY,
     environment.HOSPITAL_TENDER_SYNC_TOKEN,
   ]
@@ -390,20 +377,18 @@ function hasProductionModelConfiguration(environment) {
   );
 }
 
-function hasIsolatedIcostWebhookToken(environment) {
-  const token = environment.ICOST_WEBHOOK_TOKEN;
-  if (!isIcostWebhookToken(token)) return false;
+function hasNoRetiredBookkeepingVariables(environment) {
   return [
-    environment.AUTH_SESSION_SECRET,
-    environment.MODEL_API_KEY,
-    environment.DEEPSEEK_API_KEY,
-    environment.WEIXIN_AGENT_API_TOKEN,
-    environment.ASSISTANT_CONFIRMATION_SECRET,
-    environment.SETTINGS_ENCRYPTION_KEY,
-    environment.HOSPITAL_TENDER_SYNC_TOKEN,
-  ]
-    .filter((value) => typeof value === "string" && value.length > 0)
-    .every((value) => value !== token);
+    "ICOST_WEBHOOK_TOKEN",
+    "ICOST_WEBHOOK_OWNER",
+    "ICOST_WEBHOOK_RATE_LIMIT",
+    "ICOST_WEBHOOK_WINDOW_MS",
+    "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED",
+    "SHORTCUT_WEBHOOK_TOKEN",
+    "SHORTCUT_WEBHOOK_OWNER",
+    "SHORTCUT_WEBHOOK_RATE_LIMIT",
+    "SHORTCUT_WEBHOOK_WINDOW_MS",
+  ].every((name) => !String(environment?.[name] ?? "").trim());
 }
 
 function isProductionToolCommand(value) {
@@ -1543,16 +1528,16 @@ function hasRequiredEnvironmentContract(value) {
 }
 
 function hasLegacyCurrentEnvironmentContract(value) {
-  if (
-    !Array.isArray(value) ||
-    value.length !== LEGACY_CURRENT_REQUIRED_ENV_NAMES.length
-  ) {
-    return false;
-  }
+  if (!Array.isArray(value)) return false;
   const names = new Set(value);
-  return (
-    names.size === LEGACY_CURRENT_REQUIRED_ENV_NAMES.length &&
-    LEGACY_CURRENT_REQUIRED_ENV_NAMES.every((name) => names.has(name))
+  if (names.size !== value.length) return false;
+  return [
+    LEGACY_CURRENT_REQUIRED_ENV_NAMES,
+    LEGACY_SHORTCUT_CURRENT_REQUIRED_ENV_NAMES,
+  ].some(
+    (expected) =>
+      names.size === expected.length &&
+      expected.every((name) => names.has(name)),
   );
 }
 
@@ -2715,10 +2700,10 @@ export async function runProductionPreflight({
       "WEIXIN_AGENT_OWNER must be explicit and match a historical customer or opportunity owner; machine, confirmation, settings, and optional tender secrets must also be canonical strong independent values.",
     ),
     makeCheck(
-      "env.shortcutWeixinConfirmation",
-      hasShortcutWeixinConfirmationConfiguration(environment),
-      "Shortcut bookkeeping confirmation is enabled for the bound owner and direct-message sender with a bounded outbox poll interval.",
-      "SHORTCUT_WEIXIN_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.",
+      "env.weixinBookkeepingConfirmation",
+      hasWeixinBookkeepingConfirmationConfiguration(environment),
+      "WeChat bookkeeping confirmation is enabled for the bound owner and direct-message sender with a bounded outbox poll interval.",
+      "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.",
     ),
     makeCheck(
       "env.secureCookie",
@@ -2745,16 +2730,10 @@ export async function runProductionPreflight({
       "Production expense automation requires model mode, the approved DeepSeek provider, endpoint and model, a positive timeout, and an isolated non-empty MODEL_API_KEY.",
     ),
     makeCheck(
-      "env.icostWebhook",
-      hasIcostWebhookConfiguration(environment),
-      "The iCost write-only webhook has a strong token, bound owner, and positive rate limits.",
-      "The iCost write-only webhook requires a 64-character token, the authenticated owner, and positive integer rate limits.",
-    ),
-    makeCheck(
-      "env.icostIsolation",
-      hasIsolatedIcostWebhookToken(environment),
-      "The iCost webhook token is isolated from other project credentials.",
-      "The iCost webhook token must not reuse the session, model, or WeChat credential.",
+      "env.retiredBookkeepingIntegrations",
+      hasNoRetiredBookkeepingVariables(environment),
+      "Retired Shortcut and iCost write variables are absent from the production environment.",
+      "Remove ICOST_WEBHOOK_*, SHORTCUT_WEBHOOK_*, and SHORTCUT_WEIXIN_CONFIRMATION_ENABLED before release.",
     ),
     makeCheck(
       "env.invoiceExtraction",

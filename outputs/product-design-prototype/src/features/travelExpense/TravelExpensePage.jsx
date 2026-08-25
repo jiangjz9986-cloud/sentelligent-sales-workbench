@@ -16,7 +16,7 @@ import { InvoicePrintPreview } from "./InvoicePrintPreview.jsx";
 import { PaymentProofCenter } from "./PaymentProofCenter.jsx";
 import { PaymentRecordPrintPreview } from "./PaymentRecordPrintPreview.jsx";
 import { ReimbursementOrganizer } from "./ReimbursementOrganizer.jsx";
-import { ShortcutReviewCenter } from "./ShortcutReviewCenter.jsx";
+import { WeixinBookkeepingReviewCenter } from "./WeixinBookkeepingReviewCenter.jsx";
 import { WeeklyExpenseOverview } from "./WeeklyExpenseOverview.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import {
@@ -83,7 +83,7 @@ export function TravelExpensePage({
   const [invoiceMatches, setInvoiceMatches] = useState([]);
   const [noInvoiceConfirmations, setNoInvoiceConfirmations] = useState([]);
   const [invoiceCoverage, setInvoiceCoverage] = useState(null);
-  const [shortcutReviews, setShortcutReviews] = useState([]);
+  const [weixinBookkeepingReviews, setWeixinBookkeepingReviews] = useState([]);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
@@ -113,7 +113,7 @@ export function TravelExpensePage({
     setStatus("loading");
     setError("");
     try {
-      const [nextExpenses, nextAdvances, nextDocumentInbox, nextInvoiceMatches, nextNoInvoiceConfirmations, nextInvoiceCoverage, nextShortcutReviews] = await Promise.all([
+      const [nextExpenses, nextAdvances, nextDocumentInbox, nextInvoiceMatches, nextNoInvoiceConfirmations, nextInvoiceCoverage, nextWeixinBookkeepingReviews] = await Promise.all([
         apiClient.listTravelExpenses({ weekStart: week.start, signal }),
         apiClient.listTravelExpenseAdvances({ weekStart: week.start, signal }),
         apiClient.listTravelExpenseDocumentInbox({
@@ -124,8 +124,8 @@ export function TravelExpensePage({
         apiClient.listInvoiceMatches({ state: "confirmed", signal }),
         apiClient.listNoInvoiceConfirmations({ weekStart: week.start, signal }),
         apiClient.getWeekInvoiceCoverage(week.start, { signal }),
-        typeof apiClient.listShortcutBookkeepingReviews === "function"
-          ? apiClient.listShortcutBookkeepingReviews({ status: "review_required", signal })
+        typeof apiClient.listWeixinBookkeepingReviews === "function"
+          ? apiClient.listWeixinBookkeepingReviews({ status: "review_required", signal })
           : Promise.resolve([]),
       ]);
       if (signal?.aborted) return;
@@ -135,7 +135,7 @@ export function TravelExpensePage({
       setInvoiceMatches(nextInvoiceMatches);
       setNoInvoiceConfirmations(nextNoInvoiceConfirmations);
       setInvoiceCoverage(nextInvoiceCoverage);
-      setShortcutReviews(nextShortcutReviews);
+      setWeixinBookkeepingReviews(nextWeixinBookkeepingReviews);
       setStatus("ready");
     } catch (loadError) {
       if (signal?.aborted) return;
@@ -287,7 +287,7 @@ export function TravelExpensePage({
     }
   }
 
-  function refreshShortcutReviews() {
+  function refreshWeixinBookkeepingReviews() {
     setReloadToken((value) => value + 1);
   }
 
@@ -354,7 +354,7 @@ export function TravelExpensePage({
         <div className="expense-view-stage" id={`expense-panel-${activeTab}`} role="tabpanel" aria-labelledby={`expense-tab-${activeTab}`} tabIndex={0}>
           {activeTab === "overview" ? <WeeklyExpenseOverview summary={summary} coverage={invoiceCoverage} week={week} onNavigate={navigate} /> : null}
           {activeTab === "ledger" ? <ExpenseLedger expenses={expenses} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} getAttachmentUrl={getAttachmentUrl} initialCategory={ledgerCategory} onEdit={(expense) => { setEditingExpense(expense); setEditorOpen(true); }} onDelete={deleteExpense} /> : null}
-          {activeTab === "proofs" ? <><PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} /><ShortcutReviewCenter reviews={shortcutReviews} apiClient={apiClient} onChanged={refreshShortcutReviews} /></> : null}
+          {activeTab === "proofs" ? <><PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} /><WeixinBookkeepingReviewCenter reviews={weixinBookkeepingReviews} apiClient={apiClient} onChanged={refreshWeixinBookkeepingReviews} /></> : null}
           {activeTab === "invoices" ? <InvoiceManager apiClient={apiClient} week={week} expenses={expenses} onOpenPrint={(items) => setInvoicePrintItems(items)} onExpenseChanged={() => setReloadToken((value) => value + 1)} /> : null}
           {activeTab === "settlement" ? <AdvanceSettlement week={week} summary={summary} advances={advances} onSave={saveAdvance} onDelete={deleteAdvance} pending={advancePending} /> : null}
           {activeTab === "organize" ? <ReimbursementOrganizer expenses={expenses} summary={summary} week={week} owner={owner} getAttachmentUrl={getAttachmentUrl} onOpenExpenseListPrint={() => setExpenseListPrintOpen(true)} onOpenPrint={() => setPrintOpen(true)} onRefresh={() => setReloadToken((value) => value + 1)} /> : null}

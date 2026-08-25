@@ -16,7 +16,6 @@ const PAGE_META = Object.freeze({
   knowledge: Object.freeze({ active: "knowledge", defaultMode: "list", readOnly: false }),
   kanban: Object.freeze({ active: "kanban", defaultMode: "index", readOnly: false }),
   "settings/weixin": Object.freeze({ active: "weixin", defaultMode: "index", readOnly: false }),
-  "settings/shortcuts": Object.freeze({ active: "shortcut", defaultMode: "index", readOnly: false }),
   "settings/config": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "hospital-tenders": Object.freeze({ active: "hospital-tenders", defaultMode: "index", readOnly: true }),
   solutions: Object.freeze({ active: "solution", defaultMode: "list", readOnly: true }),
@@ -81,6 +80,12 @@ export function normalizeBasePath(basePath = "/") {
   const normalized = `/${encodedSegments.join("/")}/`;
   if (normalized.length > 1024) throw new TypeError("Invalid base path");
   return normalized;
+}
+
+// Keep the browser/router contract explicit so Vite's injected base and the
+// production static-server base use the same normalization path.
+export function resolvePublicBasePath(basePath = "/") {
+  return normalizeBasePath(basePath);
 }
 
 function routeState(page, mode, entityId = null, filters = {}, replace = false) {
@@ -149,9 +154,6 @@ function matchRoute(segments) {
   }
   if (page === "settings" && segments.length === 2 && segments[1] === "weixin") {
     return routeState("settings/weixin", "index");
-  }
-  if (page === "settings" && segments.length === 2 && segments[1] === "shortcuts") {
-    return routeState("settings/shortcuts", "index");
   }
   if (page === "settings" && segments.length === 2 && segments[1] === "config") {
     return routeState("settings/config", "index");
@@ -533,7 +535,7 @@ function pathForRoute(route) {
     throw new TypeError("Invalid route mode");
   }
   if (
-    (page === "travel-expenses" || page === "weekly-reports" || page === "kanban" || page === "settings/weixin" || page === "settings/shortcuts" || page === "settings/config" || page === "hospital-tenders") &&
+    (page === "travel-expenses" || page === "weekly-reports" || page === "kanban" || page === "settings/weixin" || page === "settings/config" || page === "hospital-tenders") &&
     mode === "index"
   ) {
     assertNoEntityId(route);

@@ -8,7 +8,6 @@ import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 
-const shortcutHeaderValue = "advance-shortcut-credential";
 const machineHeaderValue = "advance-machine-credential";
 const owner = "advance-owner";
 const sender = "advance-sender";
@@ -30,16 +29,26 @@ async function request(path, options = {}) {
   return read(await fetch(`${baseUrl}${path}`, options));
 }
 
-function shortcutHeaders() {
-  return { Authorization: `Bearer ${shortcutHeaderValue}`, "Content-Type": "application/json" };
-}
-
 function eventHeaders(id) {
   return {
     Authorization: `Bearer ${machineHeaderValue}`,
     "Content-Type": "application/json",
     "Idempotency-Key": `weixin:${id}`,
   };
+}
+
+async function sendBookkeeping(id, text) {
+  return request("/api/integrations/weixin-agent/events", {
+    method: "POST",
+    headers: eventHeaders(id),
+    body: JSON.stringify({
+      conversationId: "advance-conversation",
+      text,
+      sourceMessageId: id,
+      senderId: sender,
+      chatType: "direct",
+    }),
+  });
 }
 
 async function workerReady() {
@@ -85,9 +94,7 @@ beforeEach(async () => {
     seed: false,
     nodeEnv: "test",
     authRequired: false,
-    shortcutWebhookToken: shortcutHeaderValue,
-    shortcutWebhookOwner: owner,
-    shortcutWeixinConfirmationEnabled: true,
+    weixinBookkeepingConfirmationEnabled: true,
     weixinAgentApiToken: machineHeaderValue,
     weixinAgentOwner: owner,
     weixinBookkeepingOwner: owner,
@@ -127,17 +134,8 @@ afterEach(async () => {
 });
 
 test("loan income creates a pool and natural-language week assignment allocates it", async () => {
-  const expense = await request("/api/integrations/shortcut/bookkeeping", {
-    method: "POST",
-    headers: shortcutHeaders(),
-    body: JSON.stringify({
-      text: "2026-08-25 餐饮 500元",
-      selection_path: "出差报销 · 支出 · 餐饮 · 午餐",
-      idempotency_key: "advance-expense-1",
-      source: "shortcut",
-    }),
-  });
-  assert.equal(expense.response.status, 202);
+  const expense = await sendBookkeeping("advance-expense-1", "支出 2026-08-25 餐饮 500元");
+  assert.equal(expense.response.status, 200);
   const expenseDraft = await lease();
   await ack(expenseDraft, "expense-draft-message");
   const expenseConfirm = await request("/api/integrations/weixin-agent/events", {
@@ -156,17 +154,8 @@ test("loan income creates a pool and natural-language week assignment allocates 
   const expenseAcceptedReceipt = await lease();
   await ack(expenseAcceptedReceipt, "expense-accepted-message");
 
-  const loan = await request("/api/integrations/shortcut/bookkeeping", {
-    method: "POST",
-    headers: shortcutHeaders(),
-    body: JSON.stringify({
-      text: "2026-08-26 收到出差借款 2000元",
-      selection_path: "出差报销 · 收入 · 出差 · 借款",
-      idempotency_key: "advance-income-1",
-      source: "shortcut",
-    }),
-  });
-  assert.equal(loan.response.status, 202);
+  const loan = await sendBookkeeping("advance-income-1", "收入 2026-08-26 收到出差借款 2000元");
+  assert.equal(loan.response.status, 200);
   const loanDraft = await lease();
   await ack(loanDraft, "loan-draft-message");
   const loanConfirm = await request("/api/integrations/weixin-agent/events", {
@@ -213,17 +202,11 @@ test("loan income creates a pool and natural-language week assignment allocates 
 });
 
 test("cancelling the allocation follow-up defers only allocation and preserves received income", async () => {
-  const loan = await request("/api/integrations/shortcut/bookkeeping", {
-    method: "POST",
-    headers: shortcutHeaders(),
-    body: JSON.stringify({
-      text: "2026-08-26 收到出差借款 2000元",
-      selection_path: "出差报销 · 收入 · 出差 · 借款",
-      idempotency_key: "advance-income-cancel-allocation",
-      source: "shortcut",
-    }),
-  });
-  assert.equal(loan.response.status, 202);
+  const loan = await sendBookkeeping(
+    "advance-income-cancel-allocation",
+    "收入 2026-08-26 收到出差借款 2000元",
+  );
+  assert.equal(loan.response.status, 200);
   const loanDraft = await lease();
   await ack(loanDraft, "loan-cancel-draft-message");
   const loanConfirm = await request("/api/integrations/weixin-agent/events", {

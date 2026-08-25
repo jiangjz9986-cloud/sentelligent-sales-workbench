@@ -12,11 +12,14 @@ const TOOL_POLICIES = new Map([
   ["action-risk.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["itinerary.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["travel-expense.summary", { risk: "R1", confirmation: "none", reason: "read_only" }],
-  // Shortcut bookkeeping uses constrained natural-language confirmation at
+  // WeChat bookkeeping uses constrained natural-language confirmation at
   // the dedicated runtime boundary; it never exposes or accepts a user-facing
   // six-digit code. The sender/direct/owner/quote/latest-version gates remain
   // mandatory before this explicit language can execute a financial write.
+  ["bookkeeping.confirm", { risk: "R3", confirmation: "explicit_language", reason: "financial_write" }],
+  // Historical pending actions keep this alias for replay/recovery only.
   ["shortcut-bookkeeping.confirm", { risk: "R3", confirmation: "explicit_language", reason: "financial_write" }],
+  ["bookkeeping.ingest", { risk: "R1", confirmation: "none", reason: "draft_capture" }],
   ["knowledge.search", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["visit-capture.collect", { risk: "R1", confirmation: "none", reason: "draft_only" }],
   ["visit-capture.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],

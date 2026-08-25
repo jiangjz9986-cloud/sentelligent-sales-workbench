@@ -39,8 +39,12 @@ function requiredText(value, field, max = MAX_IDENTIFIER_LENGTH) {
   return normalized;
 }
 
-function requiredEventText(value) {
-  if (typeof value !== "string" || !value.trim()) validation({ text: "required" });
+function eventText(value, { mediaPresent = false } = {}) {
+  if (value === undefined || value === null || value === "") {
+    if (mediaPresent) return "";
+    validation({ text: "required" });
+  }
+  if (typeof value !== "string" || (!value.trim() && !mediaPresent)) validation({ text: "required" });
   if (value.length > MAX_TEXT_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) {
     validation({ text: "format" });
   }
@@ -121,7 +125,9 @@ export async function validateWeixinAssistantEvent(value) {
   const body = plainObject(value, "body");
   checkKeys(body, EVENT_KEYS, "body");
   const conversationId = requiredText(body.conversationId, "conversationId");
-  const text = requiredEventText(body.text);
+  const text = eventText(body.text, {
+    mediaPresent: body.media !== undefined && body.media !== null,
+  });
   const sourceMessageId = requiredText(body.sourceMessageId, "sourceMessageId");
   const senderId = validateAllowlistId(body.senderId, "senderId");
   const chatType = normalizeChatType(body.chatType);

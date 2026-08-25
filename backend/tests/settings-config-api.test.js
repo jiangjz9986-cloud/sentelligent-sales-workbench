@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
-import { openDatabase } from "../src/db.js";
 import { createServer } from "../src/server.js";
 
 const account = "settings-owner";
@@ -87,51 +86,11 @@ describe("secure system settings API", () => {
     assert.equal(result.body.error.code, "SECURE_SETTINGS_NOT_CONFIGURED");
   });
 
-  it("returns an iCost token once, then only metadata, while storing ciphertext", async () => {
-    await startServer();
-    const auth = await login();
-    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
-
-    const rotated = await request("/api/settings/icost-token/rotate", {
-      method: "POST",
-      headers,
-      body: "{}",
-    });
-    assert.equal(rotated.response.status, 201);
-    assert.equal(rotated.response.headers.get("cache-control"), "no-store");
-    assert.match(rotated.body.item.token, /^icost_[A-Za-z0-9_-]{43}$/);
-    const token = rotated.body.item.token;
-
-    const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
-    assert.equal(listed.response.status, 200);
-    assert.equal(listed.body.item.icost.configured, true);
-    assert.equal(listed.body.item.icost.masked.includes(token), false);
-    assert.equal("token" in listed.body.item.icost, false);
-
-    const second = await request("/api/settings/icost-token", {
-      method: "POST",
-      headers,
-      body: "{}",
-    });
-    assert.equal(second.response.status, 201);
-    assert.notEqual(second.body.item.token, token);
-
-    await new Promise((resolve) => server.close(resolve));
-    server = null;
-    const db = openDatabase({ databaseUrl });
-    const row = db.prepare("SELECT ciphertext FROM secure_settings WHERE setting_key = 'icost_webhook_token'").get();
-    db.close();
-    assert.ok(row.ciphertext);
-    assert.doesNotMatch(row.ciphertext, /icost_/);
-  });
-
   it("reports active environment fallbacks without exposing their values", async () => {
     const environmentFallbacks = {
-      icost: ["environment", "icost", "token"].join("-"),
       deepseek: ["environment", "deepseek", "key"].join("-"),
     };
     await startServer({
-      icostWebhookToken: environmentFallbacks.icost,
       modelApiKey: environmentFallbacks.deepseek,
     });
     const auth = await login();
@@ -140,11 +99,9 @@ describe("secure system settings API", () => {
     });
     assert.equal(listed.response.status, 200);
     assert.equal(listed.response.headers.get("cache-control"), "no-store");
-    assert.equal(listed.body.item.icost.source, "environment");
-    assert.equal(listed.body.item.icost.configured, true);
+    assert.equal(Object.hasOwn(listed.body.item, "icost"), false);
     assert.equal(listed.body.item.deepseek.source, "environment");
     assert.equal(listed.body.item.deepseek.configured, true);
-    assert.equal(JSON.stringify(listed.body).includes(environmentFallbacks.icost), false);
     assert.equal(JSON.stringify(listed.body).includes(environmentFallbacks.deepseek), false);
   });
 

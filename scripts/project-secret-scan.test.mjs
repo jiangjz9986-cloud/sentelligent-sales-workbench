@@ -237,16 +237,16 @@ describe("project secret scan", () => {
         ].join("\n"),
       );
       workspace.write(
+        "scripts/integration-qa.mjs",
+        'const config = { AUTH_SESSION_SECRET: "qa-session-secret" };\n',
+      );
+      workspace.write(
         "integrations/icost-shortcut/verify-shortcut.mjs",
         [
           "const TOKEN_ACTION = ",
           JSON.stringify(["is", "workflow", "actions", "gettext"].join(".")),
           ";\n",
         ].join(""),
-      );
-      workspace.write(
-        "scripts/integration-qa.mjs",
-        'const config = { AUTH_SESSION_SECRET: "qa-session-secret" };\n',
       );
 
       const result = scanProjectSecrets({ root: workspace.root });

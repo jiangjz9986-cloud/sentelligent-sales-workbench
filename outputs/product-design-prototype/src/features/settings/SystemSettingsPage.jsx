@@ -4,7 +4,6 @@ import {
   CircleAlert,
   KeyRound,
   LoaderCircle,
-  RefreshCw,
   Send,
   ShieldCheck,
   Trash2,
@@ -79,7 +78,6 @@ export function SystemSettingsPage({ apiClient, backendStatus }) {
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState("");
   const [pushplusToken, setPushplusToken] = useState("");
-  const [oneTimeToken, setOneTimeToken] = useState("");
   const [integrationStatus, setIntegrationStatus] = useState({
     loading: true,
     error: "",
@@ -168,22 +166,6 @@ export function SystemSettingsPage({ apiClient, backendStatus }) {
       disposed = true;
     };
   }, [apiClient, backendStatus]);
-
-  async function rotateIcost() {
-    setBusy("icost");
-    setNotice("");
-    try {
-      const result = await apiClient.rotateIcostToken();
-      setOneTimeToken(result.token ?? "");
-      const { token: _oneTimeToken, ...metadata } = result;
-      setSettings((current) => ({ ...(current ?? {}), icost: metadata }));
-      setNotice("新令牌只会在本次成功响应中显示；关闭提示后仅保留掩码。");
-    } catch {
-      setError("记账令牌生成失败，请稍后重试。");
-    } finally {
-      setBusy("");
-    }
-  }
 
   async function saveApiKey(event) {
     event.preventDefault();
@@ -288,7 +270,6 @@ export function SystemSettingsPage({ apiClient, backendStatus }) {
     }
   }
 
-  const icost = settings?.icost;
   const deepseek = settings?.deepseek;
   const pushplus = settings?.pushplus;
   const pushplusSourceLabel = pushplus?.source === "environment"
@@ -324,28 +305,6 @@ export function SystemSettingsPage({ apiClient, backendStatus }) {
         <section className="settings-loading" role="status">正在加载安全配置…</section>
       ) : (
         <div className="settings-grid">
-          <Panel title="iCost 记账令牌" meta={statusLabel(icost?.status)} className="settings-card">
-            <div className="settings-card-icon icost"><RefreshCw size={20} /></div>
-            <p className="settings-description">供记账快捷指令写入差旅报销。生成或轮换后只显示一次完整令牌。</p>
-            <dl className="settings-facts">
-              <div><dt>状态</dt><dd><CheckCircle2 size={15} /> {statusLabel(icost?.status)}</dd></div>
-              <div><dt>来源</dt><dd>{sourceLabel(icost?.source)}</dd></div>
-              <div><dt>当前掩码</dt><dd>{icost?.masked ?? "未配置"}</dd></div>
-              <div><dt>创建时间</dt><dd>{formatDate(icost?.createdAt)}</dd></div>
-              <div><dt>轮换时间</dt><dd>{formatDate(icost?.rotatedAt)}</dd></div>
-            </dl>
-            <button className="primary-button" type="button" onClick={rotateIcost} disabled={busy !== ""}>
-              <RefreshCw size={16} /> {busy === "icost" ? "生成中…" : icost?.configured ? "轮换令牌" : "生成令牌"}
-            </button>
-            {oneTimeToken ? (
-              <div className="one-time-secret" role="alert">
-                <strong>请立即复制并保存</strong>
-                <code>{oneTimeToken}</code>
-                <button className="ghost-button" type="button" onClick={() => setOneTimeToken("")}>我已保存，隐藏令牌</button>
-              </div>
-            ) : null}
-          </Panel>
-
           <Panel title="DeepSeek API Key" meta={statusLabel(deepseek?.status)} className="settings-card">
             <div className="settings-card-icon deepseek"><KeyRound size={20} /></div>
             <p className="settings-description">用于服务端 AI 分析。保存后只显示掩码和更新时间，不能从页面取回明文。</p>
