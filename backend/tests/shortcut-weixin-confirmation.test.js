@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
-import { minimalPdf, VALID_PNG } from "./helpers/image-fixtures.js";
+import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
+import { minimalPdf, VALID_JPEG, VALID_PNG } from "./helpers/image-fixtures.js";
 
 const machineToken = "weixin-machine-test-token";
 const owner = "assistant-owner";
@@ -242,6 +243,40 @@ afterEach(async () => {
 });
 
 describe("小小微信图片记账与自然语言确认闭环", () => {
+  it("carries a real JPEG file through the remote agent and local HTTP server into a bookkeeping draft", async () => {
+    const filePath = join(tempDir, "remote-payment.jpg");
+    await writeFile(filePath, VALID_JPEG);
+    const agent = createRemoteClawbotAgent({
+      backendUrl: baseUrl,
+      apiToken: machineToken,
+    });
+
+    const received = await agent.chat({
+      conversationId: "conversation-remote-image",
+      text: "",
+      senderId: sender,
+      messageId: `weixin:delivery:v1:${"c".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1_786_500_000_123,
+      media: {
+        type: "image",
+        filePath,
+        mimeType: "image/*",
+        fileName: "remote-payment.jpg",
+      },
+    });
+
+    assert.equal(received.status, "ok");
+    assert.match(received.text, /付款凭证/u);
+    const draft = await leaseOutbox();
+    assert.match(draft.item.message, /【小小提醒！新增一条待记账信息】/u);
+    assert.match(draft.item.message, /类型：支出/u);
+    assert.match(draft.item.message, /金额：219\.00 元/u);
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 1);
+    db.close();
+  });
+
   it("rejects an otherwise allowlisted but unbound sender before persisting a bookkeeping draft", async () => {
     const denied = await request("/api/integrations/weixin-agent/events", {
       method: "POST",

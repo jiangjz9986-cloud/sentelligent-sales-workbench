@@ -148,11 +148,16 @@ function parseResponseBody(value) {
 async function normalizeMedia(request) {
   if (!request.media) return null;
   try {
+    const type = request.media.type;
+    if (type !== "image" && type !== "file") {
+      throw new WeixinDocumentError("unsupported_media");
+    }
     const document = await readWeixinDocument(request.media);
     // Keep the existing source-reference semantics available to the receiving
     // service while deriving the event identity independently below.
     const sourceRef = weixinDocumentSourceRef({}, document.sha256);
     return {
+      type,
       fileName: document.fileName,
       mediaType: document.mediaType,
       contentBase64: document.contentBase64,

@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
+import { validateWeixinAssistantEvent } from "../src/assistant/weixinEvent.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
-import { VALID_PNG } from "./helpers/image-fixtures.js";
+import { VALID_JPEG, VALID_PNG } from "./helpers/image-fixtures.js";
 
 const temporaryDirectories = [];
 
@@ -14,6 +15,14 @@ async function mediaPath() {
   temporaryDirectories.push(directory);
   const filePath = join(directory, "receipt.png");
   await writeFile(filePath, VALID_PNG);
+  return filePath;
+}
+
+async function jpegMediaPath() {
+  const directory = await mkdtemp(join(tmpdir(), "sentelligent-remote-agent-jpeg-"));
+  temporaryDirectories.push(directory);
+  const filePath = join(directory, "payment-proof.jpg");
+  await writeFile(filePath, VALID_JPEG);
   return filePath;
 }
 
@@ -77,6 +86,7 @@ describe("remote Clawbot agent adapter", () => {
       senderId: "sender-1",
       chatType: "direct",
       media: {
+        type: "image",
         fileName: "receipt.png",
         mediaType: "image/png",
         contentBase64: VALID_PNG.toString("base64"),
@@ -85,6 +95,76 @@ describe("remote Clawbot agent adapter", () => {
       },
     });
     assert.doesNotMatch(calls[0].options.body, /must-not-be-forwarded|rawUpdate|filePath|test-machine-token|[A-Z]:\\/i);
+  });
+
+  it("carries a real file-path JPEG through the remote HTTP body and strict event validator", async () => {
+    const filePath = await jpegMediaPath();
+    let postedBody;
+    let validatedEvent;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-machine-token",
+      fetchImpl: async (_url, options) => {
+        postedBody = JSON.parse(options.body);
+        validatedEvent = await validateWeixinAssistantEvent(postedBody);
+        return jsonResponse({ status: "ok", reply: "received" });
+      },
+    });
+
+    const result = await agent.chat({
+      conversationId: "conversation-jpeg",
+      text: "",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"b".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1_786_500_000_123,
+      media: { type: "image", filePath, mimeType: "image/*", fileName: "payment-proof.jpg" },
+    });
+
+    assert.deepEqual(result, { status: "ok", reply: "received" });
+    assert.equal(postedBody.media.type, "image");
+    assert.equal(postedBody.media.mediaType, "image/jpeg");
+    assert.equal(postedBody.media.contentBase64, VALID_JPEG.toString("base64"));
+    assert.equal(validatedEvent.media.mediaType, "image/jpeg");
+    assert.equal(validatedEvent.media.contentBase64, VALID_JPEG.toString("base64"));
+    assert.equal(Object.hasOwn(postedBody.media, "filePath"), false);
+  });
+
+  it("preserves only the exact image and file media kinds at the remote boundary", async () => {
+    const filePath = await mediaPath();
+    const postedTypes = [];
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-machine-token",
+      fetchImpl: async (_url, options) => {
+        postedTypes.push(JSON.parse(options.body).media.type);
+        return jsonResponse({ status: "ok" });
+      },
+    });
+    const delivery = {
+      conversationId: "conversation-media-kind",
+      text: "",
+      senderId: "sender-1",
+      chatType: "direct",
+      deliveryTimestampMs: 1_786_500_000_123,
+    };
+
+    for (const [index, type] of ["image", "file"].entries()) {
+      await agent.chat({
+        ...delivery,
+        messageId: `weixin:delivery:v1:${String(index + 1).repeat(64)}`,
+        media: { type, filePath, mimeType: "image/png", fileName: "receipt.png" },
+      });
+    }
+    for (const [index, type] of [" image ", "IMAGE", "audio"].entries()) {
+      await assert.rejects(agent.chat({
+        ...delivery,
+        messageId: `weixin:delivery:v1:${String(index + 3).repeat(64)}`,
+        media: { type, filePath, mimeType: "image/png", fileName: "receipt.png" },
+      }), { code: "REMOTE_AGENT_MEDIA_INVALID" });
+    }
+
+    assert.deepEqual(postedTypes, ["image", "file"]);
   });
 
   it("keeps the legacy digest fallback available only when explicitly injected for tests", async () => {
