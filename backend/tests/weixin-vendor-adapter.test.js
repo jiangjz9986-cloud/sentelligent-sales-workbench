@@ -525,12 +525,29 @@ describe("vendored Weixin inbound adapter", () => {
         { base_resp: { ret: 0 } },
         "",
         " \n\t",
+        '{"message_id":1234567890123456789}',
         { ret: -14, errmsg: "synthetic-private-ret-detail" },
         { errcode: 40013, errmsg: "synthetic-private-errcode-detail" },
         { ret: 0, errcode: -1, errmsg: "synthetic-private-conflicting-detail" },
         { message: "synthetic-private-unrecognized-response" },
+        { message_id: "" },
+        { message_id: "1234567890123456789" },
+        { message_id: null },
+        { message_id: 0 },
+        { message_id: -1 },
+        '{"message_id":1.5}',
+        '{"message_id":1e3}',
+        { message_id: true },
+        { message_id: [] },
+        { message_id: {} },
+        '{"message_id":1,"message_id":2}',
+        { message_id: "123", unexpected: true },
+        { ret: 0, unexpected: true },
+        { base_resp: { ret: 0, unexpected: true } },
+        '{"message_id":18446744073709551616}',
         "synthetic-private-malformed-response",
       ];
+      const proactiveResponseCount = proactiveResponses.length;
       const internalLogOffsets = await snapshotInternalLogs();
       globalThis.fetch = async (url, init) => {
         const endpoint = new URL(url).pathname;
@@ -571,13 +588,18 @@ describe("vendored Weixin inbound adapter", () => {
       await restored.sendMessageTo("synthetic-bot-user", "synthetic nested-status success");
       await restored.sendMessageTo("synthetic-bot-user", "synthetic empty-body success");
       await restored.sendMessageTo("synthetic-bot-user", "synthetic whitespace-body success");
-      for (const expected of [
-        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
-        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
-        ["WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request"],
-        ["WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response"],
-        ["WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response"],
-      ]) {
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic numeric message-id success");
+      const expectedFailures = [
+        ...Array.from({ length: 3 }, () => [
+          "WEIXIN_PROVIDER_REJECTED",
+          "sendMessage: provider rejected request",
+        ]),
+        ...Array.from({ length: proactiveResponseCount - 7 - 3 }, () => [
+          "WEIXIN_PROVIDER_RESPONSE_INVALID",
+          "sendMessage: invalid provider response",
+        ]),
+      ];
+      for (const expected of expectedFailures) {
         await assert.rejects(
           restored.sendMessageTo("synthetic-bot-user", "synthetic rejected delivery"),
           (error) => {
@@ -588,7 +610,7 @@ describe("vendored Weixin inbound adapter", () => {
         );
       }
       await restored.wait();
-      assert.equal(proactiveBodies.length, 11);
+      assert.equal(proactiveBodies.length, proactiveResponseCount);
       assert.equal(proactiveBodies[0].msg.context_token, contextToken);
       assert.equal(proactiveBodies[2].msg.client_id, stableClientId);
       const providerErrorLogs = await readInternalLogDelta(internalLogOffsets);

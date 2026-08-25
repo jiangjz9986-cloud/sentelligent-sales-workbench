@@ -6,7 +6,7 @@
 
 ## 入站事件与身份
 
-候选使用 vendored `weixin-agent-sdk@0.5.0-sentelligent.5` 的受限入站元数据调用：
+候选使用 vendored `weixin-agent-sdk@0.5.0-sentelligent.10` 的受限入站元数据调用：
 
 ```text
 POST /api/integrations/weixin-agent/events

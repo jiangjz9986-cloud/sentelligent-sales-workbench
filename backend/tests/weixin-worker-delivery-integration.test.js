@@ -178,7 +178,7 @@ test("worker restores the encrypted context token after restart and delivers a r
       if (endpoint.endsWith("/sendmessage")) {
         proactiveBodies.push(JSON.parse(init.body));
         releaseProviderSend();
-        return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        return new Response('{"message_id":1234567890123456789}', { status: 200 });
       }
       throw new Error(`unexpected delivery endpoint: ${endpoint}`);
     };
@@ -196,8 +196,41 @@ test("worker restores the encrypted context token after restart and delivers a r
     assert.equal(proactiveBodies[0].msg.context_token, contextCredential);
 
     const db = openDatabase({ databaseUrl: join(tempDir, "backend.sqlite") });
-    assert.equal(db.prepare("SELECT status FROM weixin_confirmation_outbox WHERE id = 'synthetic-outbox'").get().status, "sent");
+    const delivered = db.prepare(
+      "SELECT status, attempt_count FROM weixin_confirmation_outbox WHERE id = 'synthetic-outbox'",
+    ).get();
+    assert.equal(delivered.status, "sent");
+    assert.equal(delivered.attempt_count, 0);
     db.close();
+
+    const verificationAbort = new AbortController();
+    let replayedProviderSends = 0;
+    globalThis.fetch = async (url) => {
+      const endpoint = new URL(url).pathname;
+      if (endpoint.endsWith("/getupdates")) {
+        await new Promise((resolve) => setTimeout(resolve, 650));
+        verificationAbort.abort();
+        throw new DOMException("aborted", "AbortError");
+      }
+      if (endpoint.endsWith("/getconfig")) {
+        return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+      }
+      if (endpoint.endsWith("/sendmessage")) {
+        replayedProviderSends += 1;
+        return new Response('{"message_id":1234567890123456789}', { status: 200 });
+      }
+      throw new Error(`unexpected verification endpoint: ${endpoint}`);
+    };
+    await runWeixinWorker(["start"], {
+      sdk: {
+        start(agent, options) {
+          return startVendoredWeixin(agent, { ...options, accountId, abortSignal: verificationAbort.signal });
+        },
+      },
+      fetchImpl: backendFetch,
+      configOverrides: workerConfig,
+    });
+    assert.equal(replayedProviderSends, 0);
   } finally {
     globalThis.fetch = providerFetch;
     if (previousStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;

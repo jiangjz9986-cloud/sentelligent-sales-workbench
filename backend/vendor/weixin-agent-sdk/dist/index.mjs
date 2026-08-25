@@ -510,15 +510,26 @@ function sendMessageProviderError(code, message) {
 	error.code = code;
 	return error;
 }
+function hasProviderMessageIdAcknowledgement(rawText) {
+	const matched = /^\s*\{\s*"message_id"\s*:\s*([1-9]\d{0,19})\s*\}\s*$/u.exec(rawText);
+	if (!matched) return false;
+	try {
+		return BigInt(matched[1]) <= 18446744073709551615n;
+	} catch {
+		return false;
+	}
+}
 /**
 * Validate the provider's JSON-level acknowledgement without surfacing its
 * response body. iLink deployments may return an empty/whitespace-only HTTP
-* body or an empty JSON object after an accepted text send, or expose business
-* status through top-level/nested `ret` and `errcode` fields. Every status that
-* is present must be numeric zero.
+* body, an empty JSON object, or a sole positive 64-bit-style `message_id`
+* after an accepted text send, or expose business status through top-level/
+* nested `ret` and `errcode` fields. Every status that is present must be
+* numeric zero.
 */
 function assertSendMessageAccepted(rawText) {
 	if (typeof rawText === "string" && rawText.trim() === "") return;
+	if (hasProviderMessageIdAcknowledgement(rawText)) return;
 	let response;
 	try {
 		response = JSON.parse(rawText);
@@ -528,9 +539,27 @@ function assertSendMessageAccepted(rawText) {
 	if (response === null || typeof response !== "object" || Array.isArray(response)) {
 		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
 	}
+	const topKeys = Object.keys(response);
+	if (topKeys.length === 0) return;
+	const topAllowed = new Set(["ret", "errcode", "errmsg", "base_resp"]);
+	if (topKeys.some((key) => !topAllowed.has(key))) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (Object.hasOwn(response, "errmsg") && typeof response.errmsg !== "string") {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
 	const baseResponse = response.base_resp;
 	if (baseResponse !== void 0 && (baseResponse === null || typeof baseResponse !== "object" || Array.isArray(baseResponse))) {
 		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (baseResponse !== void 0) {
+		const baseKeys = Object.keys(baseResponse);
+		const baseAllowed = new Set(["ret", "errcode", "errmsg"]);
+		if (baseKeys.some((key) => !baseAllowed.has(key))
+			|| !baseKeys.some((key) => key === "ret" || key === "errcode")
+			|| Object.hasOwn(baseResponse, "errmsg") && typeof baseResponse.errmsg !== "string") {
+			throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+		}
 	}
 	const statuses = [
 		Object.hasOwn(response, "ret") ? response.ret : void 0,
@@ -544,7 +573,7 @@ function assertSendMessageAccepted(rawText) {
 	if (statuses.some((value) => value !== 0)) {
 		throw sendMessageProviderError("WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request");
 	}
-	if (statuses.length === 0 && Object.keys(response).length !== 0) {
+	if (statuses.length === 0) {
 		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
 	}
 }
