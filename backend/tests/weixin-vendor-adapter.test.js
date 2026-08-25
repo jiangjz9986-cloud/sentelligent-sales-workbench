@@ -9,6 +9,8 @@ import {
   normalizeInboundUpdate,
   start,
 } from "../vendor/weixin-agent-sdk/dist/index.mjs";
+import { readWeixinDocument } from "../src/travelExpense/documentInboxMedia.js";
+import { VALID_JPEG } from "./helpers/image-fixtures.js";
 
 const DELIVERY_KEY = Buffer.alloc(32, 7);
 const DELIVERY_PREFIX = "weixin:delivery:v1:";
@@ -35,6 +37,14 @@ function expectedDeliveryId(parts, deliveryKey = DELIVERY_KEY) {
     return Buffer.concat([length, value]);
   }));
   return DELIVERY_PREFIX + createHmac("sha256", deliveryKey).update(encoded).digest("hex");
+}
+
+function jpegProviderTrailer(core, prefix = Buffer.from("347b7ad3", "hex")) {
+  return Buffer.concat([
+    prefix,
+    Buffer.alloc(4),
+    createHash("md5").update(core).digest(),
+  ]);
 }
 
 async function withSyntheticAccount(label, run) {
@@ -950,6 +960,12 @@ describe("vendored Weixin inbound adapter", () => {
       const requestedCursors = [];
       const chatTexts = [];
       const logLines = [];
+      const aesKey = Buffer.alloc(16, 8);
+      const mediaUrl = "https://cdn.invalid/synthetic-following-image";
+      const imageWithTrailer = Buffer.concat([VALID_JPEG, jpegProviderTrailer(VALID_JPEG)]);
+      const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+      const encryptedImage = Buffer.concat([cipher.update(imageWithTrailer), cipher.final()]);
+      let followingImageAccepted = false;
       let updatePolls = 0;
       let sendCalls = 0;
       let persistedCursorOnNextPoll = null;
@@ -970,7 +986,10 @@ describe("vendored Weixin inbound adapter", () => {
               textUpdate({
                 message_id: "synthetic-reply-failure-message-b",
                 context_token: syntheticLabel("synthetic", "fresh", "reply", "context"),
-                item_list: [{ type: 1, text_item: { text: "synthetic following second" } }],
+                item_list: [{
+                  type: 2,
+                  image_item: { media: { full_url: mediaUrl, aes_key: aesKey.toString("base64") } },
+                }],
               }),
             ],
           }), { status: 200 });
@@ -986,12 +1005,17 @@ describe("vendored Weixin inbound adapter", () => {
           if (sendCalls === 1) return new Response("synthetic delivery unavailable", { status: 503 });
           return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
         }
+        if (url === mediaUrl) return new Response(encryptedImage, { status: 200 });
         throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
       };
 
       const bot = start({
         async chat(request) {
           chatTexts.push(request.text);
+          if (request.media) {
+            const normalized = await readWeixinDocument(request.media);
+            followingImageAccepted = normalized.sha256 === createHash("sha256").update(VALID_JPEG).digest("hex");
+          }
           return { text: `synthetic reply for ${request.text}` };
         },
       }, {
@@ -1002,7 +1026,8 @@ describe("vendored Weixin inbound adapter", () => {
       });
       await bot.wait();
 
-      assert.deepEqual(chatTexts, ["synthetic durable first", "synthetic following second"]);
+      assert.deepEqual(chatTexts, ["synthetic durable first", ""]);
+      assert.equal(followingImageAccepted, true);
       assert.deepEqual(requestedCursors, [oldCursor, newCursor], logLines.join("\n"));
       assert.equal(sendCalls, 2);
       assert.equal(persistedCursorOnNextPoll, newCursor);
@@ -1076,6 +1101,107 @@ describe("vendored Weixin inbound adapter", () => {
         stat(requests[0].media.filePath),
         (error) => error?.code === "ENOENT",
       );
+    });
+  });
+
+  it("strips only a digest-and-zero-field verified 24-byte JPEG provider trailer before saving and hashing", async () => {
+    await withSyntheticAccount("jpeg-provider-trailer", async ({ accountId }) => {
+      const abortController = new AbortController();
+      const aesKey = Buffer.alloc(16, 9);
+      const jpegCore = VALID_JPEG;
+      const validTrailer = jpegProviderTrailer(jpegCore);
+      const valid = Buffer.concat([jpegCore, validTrailer]);
+      const validAlternatePrefix = Buffer.concat([
+        jpegCore,
+        jpegProviderTrailer(jpegCore, Buffer.from([0x53, 0x57, 0x42, 0x01])),
+      ]);
+      const badDigest = Buffer.from(valid);
+      badDigest[badDigest.length - 1] ^= 0x01;
+      const badZeroField = Buffer.from(valid);
+      badZeroField[jpegCore.length + 4] = 0x01;
+      const badSoiPosition = Buffer.from(valid);
+      badSoiPosition[0] = 0x00;
+      const badEoiPosition = Buffer.concat([jpegCore, Buffer.from([0x01]), validTrailer]);
+      const cases = [
+        { label: "valid", plaintext: valid, expected: jpegCore, accepted: true },
+        { label: "valid-alternate-prefix", plaintext: validAlternatePrefix, expected: jpegCore, accepted: true },
+        { label: "bad-digest", plaintext: badDigest, expected: badDigest, accepted: false },
+        { label: "bad-zero", plaintext: badZeroField, expected: badZeroField, accepted: false },
+        { label: "bad-soi-position", plaintext: badSoiPosition, expected: badSoiPosition, accepted: false },
+        { label: "bad-eoi-position", plaintext: badEoiPosition, expected: badEoiPosition, accepted: false },
+      ];
+      const encryptedByUrl = new Map(cases.map(({ label, plaintext }) => {
+        const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+        return [
+          `https://cdn.invalid/synthetic-${label}-image`,
+          Buffer.concat([cipher.update(plaintext), cipher.final()]),
+        ];
+      }));
+      const received = [];
+      let updatePolls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: "synthetic-jpeg-provider-trailer-cursor",
+            msgs: cases.map(({ label }, index) => textUpdate({
+              create_time_ms: 1786500000123 + index,
+              item_list: [{
+                type: 2,
+                image_item: {
+                  media: {
+                    full_url: `https://cdn.invalid/synthetic-${label}-image`,
+                    aes_key: aesKey.toString("base64"),
+                  },
+                },
+              }],
+            })),
+          }), { status: 200 });
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (encryptedByUrl.has(String(url))) return new Response(encryptedByUrl.get(String(url)), { status: 200 });
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      const bot = start({
+        async chat(request) {
+          const bytes = await readFile(request.media.filePath);
+          let normalizationCode = "accepted";
+          try {
+            await readWeixinDocument(request.media);
+          } catch (error) {
+            normalizationCode = error?.code ?? "unknown";
+          }
+          received.push({ bytes, messageId: request.messageId, normalizationCode });
+          return {};
+        },
+      }, {
+        accountId,
+        abortSignal: abortController.signal,
+        deliveryKey: DELIVERY_KEY,
+        log() {},
+      });
+      await bot.wait();
+
+      assert.equal(received.length, cases.length);
+      for (const [index, { expected, accepted }] of cases.entries()) {
+        assert.deepEqual(received[index].bytes, expected);
+        assert.equal(received[index].normalizationCode, accepted ? "accepted" : "invalid_magic");
+        assert.equal(received[index].messageId, expectedDeliveryId([
+          DELIVERY_DOMAIN,
+          "synthetic-sender-a",
+          String(1786500000123 + index),
+          JSON.stringify({
+            itemTypes: [2],
+            text: "",
+            mediaSha256: createHash("sha256").update(expected).digest("hex"),
+            fileName: null,
+          }),
+        ]));
+      }
     });
   });
 

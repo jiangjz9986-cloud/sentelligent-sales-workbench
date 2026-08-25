@@ -1906,6 +1906,18 @@ async function silkToWav(silkBuf) {
 //#endregion
 //#region src/media/media-download.ts
 const WEIXIN_MEDIA_MAX_BYTES = 12 * 1024 * 1024;
+const WEIXIN_JPEG_PROVIDER_TRAILER_BYTES = 24;
+function stripVerifiedJpegProviderTrailer(bytes) {
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const trailerOffset = buffer.length - WEIXIN_JPEG_PROVIDER_TRAILER_BYTES;
+	if (trailerOffset < 4 || buffer[0] !== 255 || buffer[1] !== 216 || buffer[trailerOffset - 2] !== 255 || buffer[trailerOffset - 1] !== 217) return buffer;
+	const trailer = buffer.subarray(trailerOffset);
+	if (!trailer.subarray(4, 8).every((byte) => byte === 0)) return buffer;
+	// The provider prefix varies; the zero field and core digest define the observed trailer contract.
+	const expectedDigest = crypto.createHash("md5").update(buffer.subarray(0, trailerOffset)).digest();
+	if (!crypto.timingSafeEqual(trailer.subarray(8, 24), expectedDigest)) return buffer;
+	return buffer.subarray(0, trailerOffset);
+}
 function recordMediaFailure(result, error) {
 	result.failureKind = error instanceof InboundMediaError && error.permanent === true ? "permanent" : "transient";
 }
@@ -1922,7 +1934,10 @@ async function downloadMediaFromItem(item, deps) {
 		const aesKeyBase64 = img.aeskey ? Buffer.from(img.aeskey, "hex").toString("base64") : img.media.aes_key;
 		logger.debug(`${label} category=media type=image status=downloading durationMs=0`);
 		try {
-			const saved = await saveMedia(aesKeyBase64 ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES) : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES), void 0, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+			const downloaded = aesKeyBase64 ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES) : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES);
+			const normalized = stripVerifiedJpegProviderTrailer(downloaded);
+			if (normalized.byteLength !== downloaded.byteLength) logger.debug(`${label} category=media-normalization status=provider-trailer-stripped bytes=24 durationMs=0`);
+			const saved = await saveMedia(normalized, void 0, "inbound", WEIXIN_MEDIA_MAX_BYTES);
 			result.decryptedPicPath = saved.path;
 			result.sha256 = saved.sha256;
 			result.fileName = saved.fileName;
