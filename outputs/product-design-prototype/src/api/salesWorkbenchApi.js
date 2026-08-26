@@ -86,6 +86,35 @@ function assertTravelExpenseDocumentInbox(value, path = "travelExpenseDocumentIn
   return item;
 }
 
+function assertShortcutBookkeepingLedgerReceipt(value, path = "shortcutBookkeepingLedgerReceipt") {
+  const receipt = assertApiEntity("shortcutBookkeepingLedgerReceipt", value, path);
+  if (!new Set(["matched", "pending", "not_available"]).has(receipt.attachmentStatus)) {
+    throw new TypeError(`${path}.attachmentStatus: expected matched, pending, or not_available`);
+  }
+  return receipt;
+}
+
+function assertWeixinBookkeepingReview(value, path = "shortcutBookkeepingReview") {
+  const item = assertApiEntity("shortcutBookkeepingReview", value, path);
+  if (item.status === "accepted" && item.entryType === "expense") {
+    assertShortcutBookkeepingLedgerReceipt(item.ledgerReceipt, `${path}.ledgerReceipt`);
+  } else if (item.ledgerReceipt !== null) {
+    throw new TypeError(`${path}.ledgerReceipt: only accepted expense records may expose a formal ledger receipt`);
+  }
+  return item;
+}
+
+function assertTravelExpenseWorkbench(value, path = "travelExpenseWorkbench") {
+  const workbench = assertApiEntity("travelExpenseWorkbench", value, path);
+  assertTravelExpenseCollection(workbench.expenses, `${path}.expenses`);
+  assertApiCollection("travelExpenseAdvance", workbench.advances, `${path}.advances`);
+  assertApiCollection("shortcutBookkeepingReview", workbench.bookkeepingReviews, `${path}.bookkeepingReviews`);
+  workbench.bookkeepingReviews.forEach((item, index) => (
+    assertWeixinBookkeepingReview(item, `${path}.bookkeepingReviews[${index}]`)
+  ));
+  return workbench;
+}
+
 function apiObject(value, path) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${path}: expected object`);
@@ -645,6 +674,14 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertTravelExpenseCollection(response?.items, "travelExpenses.items");
     },
 
+    async getTravelExpenseWorkbench({ weekStart, signal } = {}) {
+      const response = await requestApi(
+        queryPath("/api/travel-expense-workbench", { weekStart }),
+        { signal },
+      );
+      return assertTravelExpenseWorkbench(response?.item, "travelExpenseWorkbench.item");
+    },
+
     async getTravelExpense(expenseId, { signal } = {}) {
       const response = await requestApi(`/api/travel-expenses/${encodeURIComponent(expenseId)}`, { signal });
       return assertTravelExpense(response?.item, "travelExpense.item");
@@ -693,7 +730,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         method: "GET",
         credentials: "include",
         redirect: "error",
-        headers: { Accept: "application/pdf" },
+        headers: { Accept: "application/pdf,image/*" },
         signal,
       });
     },
@@ -772,8 +809,11 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         queryPath("/api/integrations/weixin/bookkeeping/review", { status }),
         { signal },
       );
-      if (!Array.isArray(response?.items)) throw new TypeError("weixinBookkeepingReviews.items must be an array");
-      return response.items;
+      return apiItems(
+        response?.items,
+        "weixinBookkeepingReviews.items",
+        assertWeixinBookkeepingReview,
+      );
     },
 
     async getWeixinBookkeepingReview(reviewId, { signal } = {}) {
@@ -781,7 +821,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}`,
         { signal },
       );
-      return response?.item ?? null;
+      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
     },
 
     async confirmWeixinBookkeepingReview(reviewId, analysis) {
@@ -789,7 +829,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`,
         { method: "POST", body: JSON.stringify({ analysis }) },
       );
-      return response?.item ?? null;
+      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
     },
 
     async rejectWeixinBookkeepingReview(reviewId, reason) {
@@ -797,7 +837,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/reject`,
         { method: "POST", body: JSON.stringify({ reason }) },
       );
-      return response?.item ?? null;
+      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
     },
 
     async retryWeixinBookkeepingReview(reviewId) {
@@ -805,7 +845,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
         { method: "POST", body: "{}" },
       );
-      return response?.item ?? null;
+      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
     },
 
     async listTravelExpenseAdvances({ weekStart, signal } = {}) {

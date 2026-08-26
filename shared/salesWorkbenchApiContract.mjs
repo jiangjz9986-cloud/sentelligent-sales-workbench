@@ -1,4 +1,4 @@
-export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-08-07";
+export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-08-26";
 
 export const SALES_WORKBENCH_API_SCHEMAS = {
   customer: {
@@ -252,6 +252,51 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     createdAt: "string",
     updatedAt: "string",
   },
+  shortcutBookkeepingLedgerReceipt: {
+    entryId: "string",
+    expenseId: "string",
+    paymentId: "string",
+    referenceCode: "string",
+    occurredOn: "string",
+    weekStart: "string",
+    amountCents: "nonNegativeInteger",
+    reimbursementCents: "nonNegativeInteger",
+    attachmentStatus: "string",
+  },
+  shortcutBookkeepingReview: {
+    id: "string",
+    status: "string",
+    targetSystem: "string",
+    ledgerName: "string",
+    entryType: "string",
+    category: "string",
+    subcategory: "nullableString",
+    note: "nullableString",
+    warnings: "array",
+    expenseId: "nullableString",
+    paymentId: "nullableString",
+    expenseReferenceCode: "nullableString",
+    remoteId: "nullableString",
+    remoteReference: "nullableString",
+    remoteStatus: "nullableString",
+    replayed: "boolean",
+    ledgerReceipt: "nullableObject",
+    rawText: "string",
+    analysis: "nullableObject",
+    analysisProvider: "nullableString",
+    analysisModel: "nullableString",
+    errorCode: "nullableString",
+    attemptCount: "nonNegativeInteger",
+    createdAt: "string",
+    updatedAt: "string",
+  },
+  travelExpenseWorkbench: {
+    weekStart: "string",
+    expenses: "array",
+    advances: "array",
+    bookkeepingReviews: "array",
+    generatedAt: "string",
+  },
   travelExpenseAdvance: {
     id: "string",
     version: "positiveInteger",
@@ -472,6 +517,7 @@ function isExpectedType(value, descriptor) {
   if (descriptor === "nonNegativeInteger") return Number.isSafeInteger(value) && value >= 0;
   if (descriptor === "nullableString") return value === null || typeof value === "string";
   if (descriptor === "nullableNumber") return value === null || (typeof value === "number" && Number.isFinite(value));
+  if (descriptor === "boolean") return typeof value === "boolean";
   throw new Error(`Unknown API contract descriptor: ${descriptor}`);
 }
 

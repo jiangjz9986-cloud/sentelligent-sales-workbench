@@ -1761,15 +1761,24 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           5000,
         );
         await waitUntil(() => !expensePage.querySelector('.expense-loading'), 10000);
-        const expectedExpenseTabs = ['overview', 'ledger', 'proofs', 'invoices', 'settlement', 'organize'];
+        const expectedExpenseTabs = ['ledger', 'invoices', 'export'];
         const expenseTabIds = [...expensePage.querySelectorAll('[data-testid^="expense-tab-"]')]
           .map((tab) => tab.getAttribute('data-testid')?.replace('expense-tab-', '') ?? '');
         const naturalWeekInput = expensePage.querySelector('input[type="week"]');
-        const organizeTab = expensePage.querySelector('[data-testid="expense-tab-organize"]');
-        if (!organizeTab) throw new Error('Missing travel expense organize tab');
-        organizeTab.click();
+        const ledgerTab = expensePage.querySelector('[data-testid="expense-tab-ledger"]');
+        if (!ledgerTab) throw new Error('Missing travel expense ledger tab');
+        const ledgerWorkbench = await waitUntil(
+          () => expensePage.querySelector('[data-testid="expense-ledger-workbench"]'),
+          3000,
+        );
+        const ledgerOpened = ledgerTab.getAttribute('aria-selected') === 'true'
+          && Boolean(ledgerWorkbench);
+        const ledgerChildFunctionCount = expensePage.querySelectorAll('.expense-ledger-child-card').length;
+        const exportTab = expensePage.querySelector('[data-testid="expense-tab-export"]');
+        if (!exportTab) throw new Error('Missing travel expense export tab');
+        exportTab.click();
         await waitUntil(
-          () => organizeTab.getAttribute('aria-selected') === 'true'
+          () => exportTab.getAttribute('aria-selected') === 'true'
             && expensePage.querySelector('.expense-organizer-view'),
           3000,
         );
@@ -1805,7 +1814,9 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           naturalWeekInput: naturalWeekInput?.type === 'week'
             && /^\\d{4}-W\\d{2}$/.test(naturalWeekInput.value),
           weekValue: naturalWeekInput?.value ?? '',
-          organizeOpened: organizeTab.getAttribute('aria-selected') === 'true'
+          ledgerOpened,
+          ledgerChildFunctionsPresent: ledgerChildFunctionCount === 3,
+          exportOpened: exportTab.getAttribute('aria-selected') === 'true'
             && Boolean(expensePage.querySelector('.expense-organizer-view')),
           editorOpened: Boolean(expenseEditor),
           editorControlCount: expenseEditorControls.length,
@@ -2895,12 +2906,14 @@ async function main() {
         assert.equal(result.expenseFlow.loadedWithoutAlert, true, "desktop travel expense page should finish loading without an error alert");
         assert.deepEqual(
           result.expenseFlow.tabIds,
-          ['overview', 'ledger', 'proofs', 'invoices', 'settlement', 'organize'],
-          "desktop travel expense page should expose all six reimbursement tabs",
+          ['ledger', 'invoices', 'export'],
+          "desktop travel expense page should expose the three scheme-three workspaces",
         );
         assert.equal(result.expenseFlow.tabsPresent, true, "desktop travel expense page should expose exactly the expected reimbursement tabs");
         assert.equal(result.expenseFlow.naturalWeekInput, true, "desktop travel expense page should use a populated natural-week input");
-        assert.equal(result.expenseFlow.organizeOpened, true, "desktop travel expense organize tab should open the payment record workbench");
+        assert.equal(result.expenseFlow.ledgerOpened, true, "desktop travel expense page should open the scheme-three ledger workspace by default");
+        assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain reviews, payment proofs, and advances as three child functions");
+        assert.equal(result.expenseFlow.exportOpened, true, "desktop travel expense export tab should open the reimbursement output workbench");
         assert.equal(result.expenseFlow.editorOpened, true, "desktop travel expense create action should open the expense editor");
         assert.ok(result.expenseFlow.editorControlCount > 0, "desktop travel expense editor should render form controls");
         assert.equal(result.expenseFlow.editorLabelsComplete, true, "desktop travel expense editor controls should all have readable labels");

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
+import { openDatabase } from "../src/db.js";
+import { createShortcutBookkeepingRepository } from "../src/integrations/shortcutBookkeepingRepository.js";
 import { createServer } from "../src/server.js";
 import {
   SHORT_JPEG_ENVELOPE,
@@ -255,6 +257,223 @@ describe("authenticated travel expense API", () => {
         ["travel_expense.create", "travel_expense.delete", "travel_expense.update"],
       );
       assert.equal(audits.body.items.every((item) => item.actor === "travel-owner"), true);
+    });
+  });
+
+  it("returns one no-store formal-ledger projection without letting auxiliary resources hide the week", async () => {
+    await withHarness(async ({ raw, request }) => {
+      assert.equal((await raw("/api/travel-expense-workbench?weekStart=2026-08-03")).response.status, 401);
+
+      const createdExpense = await createExpense(request);
+      const createdAdvance = await request("/api/travel-expense-advances", {
+        method: "POST",
+        body: JSON.stringify(advance()),
+      });
+      assert.equal(createdAdvance.response.status, 201);
+
+      const received = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+      assert.equal(received.response.status, 200);
+      assert.equal(received.response.headers.get("cache-control"), "no-store");
+      assert.equal(received.body.item.weekStart, "2026-08-03");
+      assert.deepEqual(received.body.item.expenses, [createdExpense]);
+      assert.deepEqual(received.body.item.advances, [createdAdvance.body.item]);
+      assert.deepEqual(received.body.item.bookkeepingReviews, []);
+      assert.match(received.body.item.generatedAt, /^\d{4}-\d{2}-\d{2}T/u);
+
+      const invalidWeek = await request("/api/travel-expense-workbench?weekStart=2026-08-02");
+      assert.equal(invalidWeek.response.status, 422);
+      assert.equal(invalidWeek.body.error.code, "VALIDATION_ERROR");
+    });
+  });
+
+  it("reads the workbench snapshot while another connection owns the SQLite write reservation", async () => {
+    await withHarness(async ({ databaseUrl, request }) => {
+      const createdExpense = await createExpense(request);
+      const writer = openDatabase({ databaseUrl });
+      writer.exec("BEGIN IMMEDIATE");
+      try {
+        const received = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+        assert.equal(received.response.status, 200);
+        assert.deepEqual(received.body.item.expenses, [createdExpense]);
+        assert.deepEqual(received.body.item.advances, []);
+        assert.deepEqual(received.body.item.bookkeepingReviews, []);
+        assert.equal(writer.isTransaction, true);
+      } finally {
+        writer.exec("ROLLBACK");
+        writer.close();
+      }
+    });
+  });
+
+  it("returns the same canonical formal-ledger receipt after Web confirmation and replay", async () => {
+    await withHarness(async ({ databaseUrl, request }) => {
+      const fixtureDb = openDatabase({ databaseUrl });
+      let reviewId;
+      try {
+        const repository = createShortcutBookkeepingRepository(fixtureDb, {
+          idFactory: () => "web-review-entry-1",
+          clock: () => new Date("2026-08-04T04:30:00.000Z"),
+        });
+        const received = repository.receive({
+          owner: "travel-owner",
+          actor: "travel-owner",
+          ledgerName: "出差报销",
+          entryType: "expense",
+          category: "餐饮",
+          subcategory: "午餐",
+          idempotencyKey: "web-review-canonical-receipt",
+          requestHash: "a".repeat(64),
+          rawText: "2026-08-04 午餐 68 元",
+        });
+        reviewId = received.item.id;
+        const claimed = repository.claim(reviewId);
+        repository.completeLocal(reviewId, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "review_required",
+            confidence: 0.7,
+            expense: null,
+            warnings: ["manual_confirmation_required"],
+            source: { provider: "test" },
+          },
+        });
+      } finally {
+        fixtureDb.close();
+      }
+
+      const analysis = {
+        status: "ready",
+        confidence: 1,
+        expense: {
+          occurredOn: "2026-08-04",
+          amountCents: 6800,
+          reimbursementCents: 6800,
+          purpose: "出差午餐",
+          merchant: null,
+          fundingSource: "personal",
+          paymentMethod: "wechat",
+        },
+        warnings: [],
+        source: { provider: "manual", model: null },
+      };
+      const path = `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`;
+      const confirmed = await request(path, {
+        method: "POST",
+        body: JSON.stringify({ analysis }),
+      });
+      assert.equal(confirmed.response.status, 201);
+      assert.equal(confirmed.body.item.status, "accepted");
+      assert.deepEqual(confirmed.body.item.ledgerReceipt, {
+        entryId: reviewId,
+        expenseId: confirmed.body.item.expenseId,
+        paymentId: confirmed.body.item.paymentId,
+        referenceCode: confirmed.body.item.expenseReferenceCode,
+        occurredOn: "2026-08-04",
+        weekStart: "2026-08-03",
+        amountCents: 6800,
+        reimbursementCents: 6800,
+        attachmentStatus: "not_available",
+      });
+
+      const replayed = await request(path, {
+        method: "POST",
+        body: JSON.stringify({ analysis }),
+      });
+      assert.equal(replayed.response.status, 200);
+      assert.equal(replayed.body.item.replayed, true);
+      assert.deepEqual(replayed.body.item.ledgerReceipt, confirmed.body.item.ledgerReceipt);
+
+      const projection = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+      assert.equal(projection.body.item.expenses.length, 1);
+      assert.equal(projection.body.item.expenses[0].id, confirmed.body.item.ledgerReceipt.expenseId);
+      assert.deepEqual(projection.body.item.bookkeepingReviews, []);
+
+      const probeDb = openDatabase({ databaseUrl });
+      try {
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+      } finally {
+        probeDb.close();
+      }
+    });
+  });
+
+  it("keeps a ready retry in human review without creating formal ledger rows", async () => {
+    await withHarness(async ({ databaseUrl, request }) => {
+      const fixtureDb = openDatabase({ databaseUrl });
+      let reviewId;
+      try {
+        const repository = createShortcutBookkeepingRepository(fixtureDb, {
+          idFactory: () => "web-review-retry-ready-1",
+          clock: () => new Date("2026-08-04T04:30:00.000Z"),
+        });
+        const received = repository.receive({
+          owner: "travel-owner",
+          actor: "travel-owner",
+          ledgerName: "出差报销",
+          entryType: "expense",
+          category: "餐饮",
+          subcategory: "午餐",
+          idempotencyKey: "web-review-retry-ready",
+          requestHash: "b".repeat(64),
+          rawText: "2026-08-04 午餐 68 元",
+        });
+        reviewId = received.item.id;
+        const claimed = repository.claim(reviewId);
+        repository.completeLocal(reviewId, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "review_required",
+            confidence: 0,
+            expense: null,
+            warnings: ["model_error"],
+            source: { provider: "test" },
+          },
+        });
+      } finally {
+        fixtureDb.close();
+      }
+
+      const retried = await request(
+        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
+        { method: "POST", body: "{}" },
+      );
+      assert.equal(retried.response.status, 202);
+      assert.equal(retried.body.item.status, "review_required");
+      assert.equal(retried.body.item.ledgerReceipt, null);
+      assert.equal(retried.body.item.analysis.expense.occurredOn, "2026-08-04");
+      assert.equal(retried.body.item.analysis.expense.amountCents, 6800);
+
+      const projection = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+      assert.deepEqual(projection.body.item.expenses, []);
+      assert.deepEqual(
+        projection.body.item.bookkeepingReviews.map((item) => item.id),
+        [reviewId],
+      );
+
+      const probeDb = openDatabase({ databaseUrl });
+      try {
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 0);
+      } finally {
+        probeDb.close();
+      }
+    }, {
+      travelExpenseAnalyzer: async () => ({
+        status: "ready",
+        confidence: 1,
+        expense: {
+          occurredOn: "2026-08-04",
+          amountCents: 6800,
+          reimbursementCents: 6800,
+          purpose: "出差午餐",
+          merchant: null,
+          fundingSource: "personal",
+          paymentMethod: "wechat",
+        },
+        warnings: [],
+        source: { provider: "test", model: "ready-retry" },
+      }),
     });
   });
 

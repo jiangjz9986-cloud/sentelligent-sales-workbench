@@ -341,6 +341,64 @@ function sampleTravelExpenseAdvance(overrides = {}) {
   };
 }
 
+function sampleShortcutBookkeepingLedgerReceipt(overrides = {}) {
+  return {
+    entryId: "entry-1",
+    expenseId: "expense-1",
+    paymentId: "payment-1",
+    referenceCode: "EXP-20260804-ABC12345",
+    occurredOn: "2026-08-04",
+    weekStart: "2026-08-03",
+    amountCents: 6800,
+    reimbursementCents: 6800,
+    attachmentStatus: "matched",
+    ...overrides,
+  };
+}
+
+function sampleShortcutBookkeepingReview(overrides = {}) {
+  const status = overrides.status ?? "review_required";
+  return {
+    id: "entry-1",
+    status,
+    targetSystem: "sentelligent",
+    ledgerName: "出差报销",
+    entryType: "expense",
+    category: "餐饮",
+    subcategory: "午餐",
+    note: null,
+    warnings: [],
+    expenseId: status === "accepted" ? "expense-1" : null,
+    paymentId: status === "accepted" ? "payment-1" : null,
+    expenseReferenceCode: status === "accepted" ? "EXP-20260804-ABC12345" : null,
+    remoteId: null,
+    remoteReference: null,
+    remoteStatus: null,
+    replayed: false,
+    ledgerReceipt: status === "accepted" ? sampleShortcutBookkeepingLedgerReceipt() : null,
+    rawText: "支付 68 元",
+    analysis: { status: "review_required", expense: null },
+    analysisProvider: "rules",
+    analysisModel: null,
+    errorCode: null,
+    attemptCount: 1,
+    createdAt: "2026-08-04T12:31:00.000Z",
+    updatedAt: "2026-08-04T12:31:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleTravelExpenseWorkbench(overrides = {}) {
+  return {
+    weekStart: "2026-08-03",
+    expenses: [sampleTravelExpense()],
+    advances: [sampleTravelExpenseAdvance()],
+    bookkeepingReviews: [sampleShortcutBookkeepingReview()],
+    generatedAt: "2026-08-04T12:33:00.000Z",
+    ...overrides,
+  };
+}
+
 function sampleInvoice(overrides = {}) {
   return {
     id: "invoice-1",
@@ -2179,11 +2237,14 @@ describe("sales workbench API client", () => {
   });
 
   it("publishes strict travel-expense response contracts with integer-cent amounts", () => {
-    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-08-07");
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-08-26");
     assertApiEntity("travelExpensePayment", sampleTravelExpensePayment());
     assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment());
     assertApiEntity("travelExpense", sampleTravelExpense());
     assertApiEntity("travelExpenseAdvance", sampleTravelExpenseAdvance());
+    assertApiEntity("shortcutBookkeepingLedgerReceipt", sampleShortcutBookkeepingLedgerReceipt());
+    assertApiEntity("shortcutBookkeepingReview", sampleShortcutBookkeepingReview());
+    assertApiEntity("travelExpenseWorkbench", sampleTravelExpenseWorkbench());
 
     assert.throws(
       () => assertApiEntity("travelExpensePayment", sampleTravelExpensePayment({ amountCents: 68.5 })),
@@ -2196,6 +2257,13 @@ describe("sales workbench API client", () => {
     assert.throws(
       () => assertApiEntity("travelExpense", sampleTravelExpense({ referenceCode: undefined })),
       /referenceCode: expected string/,
+    );
+    assert.throws(
+      () => assertApiEntity(
+        "shortcutBookkeepingLedgerReceipt",
+        sampleShortcutBookkeepingLedgerReceipt({ amountCents: 68.5 }),
+      ),
+      /amountCents: expected nonNegativeInteger/,
     );
   });
 
@@ -2328,6 +2396,45 @@ describe("sales workbench API client", () => {
     assert.deepEqual(calls[4].body, {});
   });
 
+  it("loads one strict owner-scoped ledger workbench projection for the selected natural week", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        return jsonResponse({ item: sampleTravelExpenseWorkbench() });
+      },
+    });
+    const controller = new AbortController();
+    const workbench = await api.getTravelExpenseWorkbench({
+      weekStart: "2026-08-03",
+      signal: controller.signal,
+    });
+
+    assert.equal(workbench.weekStart, "2026-08-03");
+    assert.equal(workbench.expenses[0].referenceCode, "EXP-20260804-ABC12345");
+    assert.equal(workbench.advances[0].receivedCents, 180000);
+    assert.equal(workbench.bookkeepingReviews[0].ledgerReceipt, null);
+    assert.equal(calls[0].url, "https://example.test/api/travel-expense-workbench?weekStart=2026-08-03");
+    assert.equal(calls[0].options.signal, controller.signal);
+
+    const invalidApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        item: sampleTravelExpenseWorkbench({
+          bookkeepingReviews: [sampleShortcutBookkeepingReview({
+            status: "accepted",
+            ledgerReceipt: sampleShortcutBookkeepingLedgerReceipt({ attachmentStatus: "unknown" }),
+          })],
+        }),
+      }),
+    });
+    await assert.rejects(
+      () => invalidApi.getTravelExpenseWorkbench({ weekStart: "2026-08-03" }),
+      /attachmentStatus: expected matched, pending, or not_available/,
+    );
+  });
+
   it("adds and deletes expense attachments and builds an authenticated encoded content URL", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
@@ -2393,7 +2500,7 @@ describe("sales workbench API client", () => {
     ]);
   });
 
-  it("loads protected travel-expense attachment PDF content with Cookie credentials", async () => {
+  it("loads protected travel-expense attachment PDF or image content with Cookie credentials", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
       baseUrl: "https://example.test",
@@ -2414,7 +2521,7 @@ describe("sales workbench API client", () => {
     assert.equal(calls[0].options.method, "GET");
     assert.equal(calls[0].options.credentials, "include");
     assert.equal(calls[0].options.redirect, "error");
-    assert.equal(headerValue(calls[0].options, "Accept"), "application/pdf");
+    assert.equal(headerValue(calls[0].options, "Accept"), "application/pdf,image/*");
     assert.equal(headerValue(calls[0].options, "Content-Type"), undefined);
     assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
 
@@ -2937,9 +3044,19 @@ describe("sales workbench API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
-        if (options.method === "POST") return jsonResponse({ item: { id: "entry-1", status: "review_required" } });
-        if (url.includes("/api/integrations/weixin/bookkeeping/review?")) return jsonResponse({ items: [{ id: "entry-1" }] });
-        return jsonResponse({ item: { id: "entry-1" } });
+        if (url.endsWith("/confirm")) {
+          return jsonResponse({ item: sampleShortcutBookkeepingReview({ status: "accepted" }) }, 201);
+        }
+        if (url.endsWith("/reject")) {
+          return jsonResponse({ item: sampleShortcutBookkeepingReview({ status: "rejected" }) });
+        }
+        if (url.endsWith("/retry")) {
+          return jsonResponse({ item: sampleShortcutBookkeepingReview() }, 202);
+        }
+        if (url.includes("/api/integrations/weixin/bookkeeping/review?")) {
+          return jsonResponse({ items: [sampleShortcutBookkeepingReview()] });
+        }
+        return jsonResponse({ item: sampleShortcutBookkeepingReview() });
       },
     });
     const items = await api.listWeixinBookkeepingReviews({ status: "review_required" });
@@ -2949,11 +3066,59 @@ describe("sales workbench API client", () => {
     const retried = await api.retryWeixinBookkeepingReview("entry-1");
     assert.equal(items[0].id, "entry-1");
     assert.equal(item.id, "entry-1");
-    assert.equal(confirmed.status, "review_required");
+    assert.equal(confirmed.status, "accepted");
+    assert.equal(confirmed.ledgerReceipt.referenceCode, "EXP-20260804-ABC12345");
     assert.equal(rejected.id, "entry-1");
     assert.equal(retried.id, "entry-1");
     assert.match(calls[0].url, /\/api\/integrations\/weixin\/bookkeeping\/review\?status=review_required/u);
     assert.match(calls.at(-1).url, /\/api\/integrations\/weixin\/bookkeeping\/review\/entry-1\/retry/u);
+  });
+
+  it("enforces formal ledger receipts only for accepted Xiaoxiao expense reviews", async () => {
+    const acceptedIncome = sampleShortcutBookkeepingReview({
+      id: "income-entry-1",
+      status: "accepted",
+      entryType: "income",
+      category: "借款到账",
+      subcategory: null,
+      expenseId: null,
+      paymentId: null,
+      expenseReferenceCode: null,
+      ledgerReceipt: null,
+    });
+    const acceptedIncomeApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({ item: acceptedIncome }),
+    });
+    const loadedIncome = await acceptedIncomeApi.getWeixinBookkeepingReview("income-entry-1");
+    assert.equal(loadedIncome.status, "accepted");
+    assert.equal(loadedIncome.entryType, "income");
+    assert.equal(loadedIncome.ledgerReceipt, null);
+
+    const acceptedExpenseWithoutReceiptApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        item: sampleShortcutBookkeepingReview({ status: "accepted", ledgerReceipt: null }),
+      }),
+    });
+    await assert.rejects(
+      () => acceptedExpenseWithoutReceiptApi.getWeixinBookkeepingReview("entry-1"),
+      /ledgerReceipt: expected object/u,
+    );
+
+    const unacceptedWithReceiptApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        item: sampleShortcutBookkeepingReview({
+          status: "review_required",
+          ledgerReceipt: sampleShortcutBookkeepingLedgerReceipt(),
+        }),
+      }),
+    });
+    await assert.rejects(
+      () => unacceptedWithReceiptApi.getWeixinBookkeepingReview("entry-1"),
+      /only accepted expense records may expose a formal ledger receipt/u,
+    );
   });
 
   it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {

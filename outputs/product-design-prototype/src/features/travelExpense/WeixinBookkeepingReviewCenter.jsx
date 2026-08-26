@@ -47,8 +47,8 @@ export function WeixinBookkeepingReviewCenter({ reviews = [], apiClient, onChang
     setPendingId(item.id);
     setErrors((current) => ({ ...current, [item.id]: "" }));
     try {
-      await apiClient.confirmWeixinBookkeepingReview(item.id, reviewAnalysis(item, getDraft(item)));
-      onChanged?.();
+      const confirmed = await apiClient.confirmWeixinBookkeepingReview(item.id, reviewAnalysis(item, getDraft(item)));
+      onChanged?.(confirmed);
     } catch (error) {
       setErrors((current) => ({ ...current, [item.id]: error.message || "确认失败，请重试。" }));
     } finally {
@@ -60,8 +60,8 @@ export function WeixinBookkeepingReviewCenter({ reviews = [], apiClient, onChang
     const reason = globalThis.prompt?.("请输入拒绝原因", "信息无法核实") || "信息无法核实";
     setPendingId(item.id);
     try {
-      await apiClient.rejectWeixinBookkeepingReview(item.id, reason);
-      onChanged?.();
+      const rejected = await apiClient.rejectWeixinBookkeepingReview(item.id, reason);
+      onChanged?.(rejected);
     } catch (error) {
       setErrors((current) => ({ ...current, [item.id]: error.message || "拒绝失败，请重试。" }));
     } finally {
@@ -72,8 +72,8 @@ export function WeixinBookkeepingReviewCenter({ reviews = [], apiClient, onChang
   async function retry(item) {
     setPendingId(item.id);
     try {
-      await apiClient.retryWeixinBookkeepingReview(item.id);
-      onChanged?.();
+      const retried = await apiClient.retryWeixinBookkeepingReview(item.id);
+      onChanged?.(retried);
     } catch (error) {
       setErrors((current) => ({ ...current, [item.id]: error.message || "重试失败，请重试。" }));
     } finally {

@@ -254,9 +254,10 @@ function shortcutResponseItem(item, replayed, extra = {}) {
   };
 }
 
-function shortcutReviewResponseItem(item, replayed = false) {
+function shortcutReviewResponseItem(item, replayed = false, ledgerReceipt = null) {
   return {
     ...shortcutResponseItem(item, replayed),
+    ledgerReceipt,
     rawText: item.rawText,
     analysis: item.analysis,
     analysisProvider: item.analysisProvider,
@@ -1123,6 +1124,32 @@ function runVersionedUpdate(db, {
   );
   if (result.changes !== 1) {
     throwVersionFailure(db, { table, id, softDeletable });
+  }
+}
+
+function withConsistentReadSnapshot(db, work) {
+  if (db.isTransaction) return work();
+  db.exec("BEGIN DEFERRED");
+  try {
+    const result = work();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch (rollbackError) {
+      if (error instanceof Error) {
+        try {
+          Object.defineProperty(error, "rollbackError", {
+            value: rollbackError,
+            configurable: true,
+          });
+        } catch {
+          // Preserve the original read failure even when it cannot be extended.
+        }
+      }
+    }
+    throw error;
   }
 }
 
@@ -3355,13 +3382,20 @@ export function createServer(options = {}) {
       if (isWeixinBookkeepingReviewPath) {
         if (requestIdentity.kind !== "user") return unauthorized(response);
         const owner = request.authContext.account;
+        const reviewResponseItem = (item, replayed = false) => shortcutReviewResponseItem(
+          item,
+          replayed,
+          item?.status === "accepted"
+            ? shortcutBookkeepingRepository.getLedgerReceipt(item.id, { owner })
+            : null,
+        );
         if (request.method === "GET" && url.pathname === weixinBookkeepingReviewRoute) {
           const status = url.searchParams.get("status") || "review_required";
           const limitText = url.searchParams.get("limit");
           const limit = limitText ? Number(limitText) : 100;
           const items = shortcutBookkeepingRepository.listReview({ owner, status, limit });
           sendJson(response, 200, {
-            items: items.map((item) => shortcutReviewResponseItem(item)),
+            items: items.map((item) => reviewResponseItem(item)),
           }, { "Cache-Control": "no-store" });
           return;
         }
@@ -3370,7 +3404,7 @@ export function createServer(options = {}) {
         if (request.method === "GET" && weixinBookkeepingReviewParts.length === 7) {
           const item = shortcutBookkeepingRepository.getReview(reviewId, { owner });
           if (!item) return notFound();
-          sendJson(response, 200, { item: shortcutReviewResponseItem(item) }, { "Cache-Control": "no-store" });
+          sendJson(response, 200, { item: reviewResponseItem(item) }, { "Cache-Control": "no-store" });
           return;
         }
         if (request.method !== "POST" || weixinBookkeepingReviewParts.length !== 8) {
@@ -3395,7 +3429,7 @@ export function createServer(options = {}) {
           });
           settleShortcutWebReview(result.item);
           sendJson(response, result.replayed ? 200 : 200, {
-            item: shortcutReviewResponseItem(result.item, result.replayed),
+            item: reviewResponseItem(result.item, result.replayed),
           }, { "Cache-Control": "no-store" });
           return;
         }
@@ -3409,7 +3443,7 @@ export function createServer(options = {}) {
               entry: claimed.item,
               requestId,
             });
-            sendJson(response, 200, { item: shortcutReviewResponseItem(claimed.item, true) }, { "Cache-Control": "no-store" });
+            sendJson(response, 200, { item: reviewResponseItem(claimed.item, true) }, { "Cache-Control": "no-store" });
             return;
           }
           try {
@@ -3424,7 +3458,7 @@ export function createServer(options = {}) {
               requestId,
             });
             sendJson(response, completed.replayed ? 200 : 201, {
-              item: shortcutReviewResponseItem(completed.item, completed.replayed),
+              item: reviewResponseItem(completed.item, completed.replayed),
             }, { "Cache-Control": "no-store" });
           } catch (error) {
             shortcutBookkeepingRepository.release(reviewId, {
@@ -3441,7 +3475,7 @@ export function createServer(options = {}) {
         if (action === "retry") {
           const retried = shortcutBookkeepingRepository.retryReview(reviewId, { owner, actor: owner });
           if (retried.replayed) {
-            sendJson(response, 200, { item: shortcutReviewResponseItem(retried.item, true) }, { "Cache-Control": "no-store" });
+            sendJson(response, 200, { item: reviewResponseItem(retried.item, true) }, { "Cache-Control": "no-store" });
             return;
           }
           const claimed = shortcutBookkeepingRepository.claim(reviewId);
@@ -3462,6 +3496,13 @@ export function createServer(options = {}) {
                 source: { provider: config.modelProvider || "deepseek", model: config.modelName || null },
               };
             }
+            // Retry means "analyze again", not "confirm". Even a complete
+            // ready result must return to the human-review state; only the
+            // explicit /confirm route is allowed to create formal ledger rows.
+            analyzed = {
+              ...analyzed,
+              status: "review_required",
+            };
             const completed = shortcutBookkeepingRepository.completeLocal(reviewId, {
               analysis: analyzed,
               leaseToken: claimed.leaseToken,
@@ -3472,7 +3513,7 @@ export function createServer(options = {}) {
               requestId,
             });
             sendJson(response, completed.item.status === "accepted" ? 201 : 202, {
-              item: shortcutReviewResponseItem(completed.item, completed.replayed),
+              item: reviewResponseItem(completed.item, completed.replayed),
             }, { "Cache-Control": "no-store" });
           } catch (error) {
             shortcutBookkeepingRepository.release(reviewId, {
@@ -3484,6 +3525,35 @@ export function createServer(options = {}) {
           return;
         }
         return notFound();
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/travel-expense-workbench") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const owner = request.authContext.account;
+        const weekStart = validateTravelExpenseWeekStart(url.searchParams.get("weekStart"));
+        // Read the formal rows and the human-review queue from one SQLite
+        // snapshot. Without this boundary, a concurrent confirmation between
+        // SELECTs could make a record disappear from one projection cycle.
+        const item = withConsistentReadSnapshot(db, () => {
+          const expenses = travelExpenseRepository.listExpenses({ owner, weekStart });
+          const advances = travelExpenseRepository.listAdvances({ owner, weekStart });
+          const bookkeepingReviews = shortcutBookkeepingRepository.listReview({
+            owner,
+            status: "review_required",
+            limit: 100,
+          });
+          return {
+            weekStart,
+            expenses,
+            advances,
+            bookkeepingReviews: bookkeepingReviews.map((review) => shortcutReviewResponseItem(review)),
+            generatedAt: new Date().toISOString(),
+          };
+        });
+        sendJson(response, 200, {
+          item,
+        }, { "Cache-Control": "no-store" });
+        return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/hospital-tenders/run") {

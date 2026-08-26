@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 
 import { openDatabase } from "../src/db.js";
@@ -15,6 +16,38 @@ function repositoryHarness() {
     clock: () => new Date("2026-08-17T08:00:00.000Z"),
   });
   return { db, repository };
+}
+
+function insertPaymentProofInbox(db, { owner, sourceMessageId }) {
+  const content = Buffer.from("proof");
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  db.prepare(`
+    INSERT INTO document_blobs (
+      id, owner, sha256, encoding, original_size_bytes, stored_size_bytes, content_blob
+    ) VALUES ($id, $owner, $sha256, 'identity', $sizeBytes, $sizeBytes, $content)
+  `).run({
+    $id: sha256,
+    $owner: owner,
+    $sha256: sha256,
+    $sizeBytes: content.length,
+    $content: content,
+  });
+  db.prepare(`
+    INSERT INTO travel_expense_document_inbox (
+      id, owner, actor, source, source_message_id, document_kind,
+      file_name, media_type, size_bytes, sha256, status, document_blob_id
+    ) VALUES (
+      'proof-inbox', $owner, $owner, 'weixin', $sourceMessageId, 'payment_proof',
+      'proof.png', 'image/png', $sizeBytes, $sha256, 'review_required', $documentBlobId
+    )
+  `).run({
+    $owner: owner,
+    $sourceMessageId: sourceMessageId,
+    $sizeBytes: content.length,
+    $sha256: sha256,
+    $documentBlobId: sha256,
+  });
+  return { documentBlobId: sha256, sizeBytes: content.length };
 }
 
 describe("Shortcut bookkeeping repository invariants", () => {
@@ -257,11 +290,13 @@ describe("Shortcut bookkeeping repository invariants", () => {
   it("confirms a review with a lease and creates exactly one expense/payment pair", () => {
     const { db, repository } = repositoryHarness();
     try {
+      const sourceId = "manual-review-confirm-source";
       const received = repository.receive({
         owner: "owner-a", actor: "owner-a", ledgerName: "出差报销", entryType: "expense",
         category: "交通", subcategory: "打车", idempotencyKey: "manual-review-confirm",
-        requestHash: REQUEST_HASH, rawText: "请人工补齐金额",
+        requestHash: REQUEST_HASH, sourceId, rawText: "请人工补齐金额",
       });
+      const proof = insertPaymentProofInbox(db, { owner: "owner-a", sourceMessageId: sourceId });
       const claimed = repository.claim(received.item.id);
       repository.completeLocal(received.item.id, {
         leaseToken: claimed.leaseToken,
@@ -281,9 +316,99 @@ describe("Shortcut bookkeeping repository invariants", () => {
       assert.ok(completed.item.paymentId);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+      const expense = db.prepare(`
+        SELECT reference_code, occurred_on FROM travel_expenses WHERE id = $id
+      `).get({ $id: completed.item.expenseId });
+      assert.deepEqual(completed.ledgerReceipt, {
+        entryId: received.item.id,
+        expenseId: completed.item.expenseId,
+        paymentId: completed.item.paymentId,
+        referenceCode: expense.reference_code,
+        occurredOn: "2026-08-17",
+        weekStart: "2026-08-17",
+        amountCents: 1280,
+        reimbursementCents: 1280,
+        attachmentStatus: "pending",
+      });
+
+      const completionReplay = repository.completeLocal(received.item.id, {
+        leaseToken: reviewClaim.leaseToken,
+      });
+      assert.equal(completionReplay.replayed, true);
+      assert.deepEqual(completionReplay.ledgerReceipt, completed.ledgerReceipt);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+
       const replay = repository.claimReview(received.item.id, { owner: "owner-a" });
       assert.equal(replay.replayed, true);
       assert.equal(replay.item.expenseId, completed.item.expenseId);
+      assert.deepEqual(replay.ledgerReceipt, completed.ledgerReceipt);
+
+      db.prepare(`
+        INSERT INTO travel_expense_attachments (
+          id, expense_id, sequence, kind, file_name, media_type, size_bytes,
+          document_blob_id, covered_cents, notes, created_by
+        ) VALUES (
+          'proof-attachment', $expenseId, 1, 'payment_proof', 'proof.png', 'image/png',
+          $sizeBytes, $documentBlobId, 1280, 'test proof', 'owner-a'
+        )
+      `).run({
+        $expenseId: completed.item.expenseId,
+        $sizeBytes: proof.sizeBytes,
+        $documentBlobId: proof.documentBlobId,
+      });
+      db.prepare(`
+        INSERT INTO travel_expense_attachment_payments (attachment_id, payment_id)
+        VALUES ('proof-attachment', $paymentId)
+      `).run({ $paymentId: completed.item.paymentId });
+      assert.deepEqual(repository.getLedgerReceipt(received.item.id, { owner: "owner-a" }), {
+        ...completed.ledgerReceipt,
+        attachmentStatus: "matched",
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("never fabricates an accepted receipt when the canonical expense rows cannot be read", () => {
+    const { db, repository } = repositoryHarness();
+    try {
+      const received = repository.receive({
+        owner: "owner-a", actor: "owner-a", ledgerName: "出差报销", entryType: "expense",
+        category: "交通", subcategory: "打车", idempotencyKey: "missing-canonical-ledger-row",
+        requestHash: REQUEST_HASH, rawText: "确认后一致性探针",
+      });
+      const claimed = repository.claim(received.item.id);
+      const completed = repository.completeLocal(received.item.id, {
+        leaseToken: claimed.leaseToken,
+        analysis: {
+          status: "ready", confidence: 1,
+          expense: { occurredOn: "2026-08-18", amountCents: 2500, reimbursementCents: 2500, purpose: "打车" },
+          warnings: [], source: { provider: "test" },
+        },
+      });
+      assert.equal(completed.ledgerReceipt.referenceCode, completed.item.expenseReferenceCode);
+
+      db.exec("PRAGMA foreign_keys = OFF");
+      try {
+        db.prepare("DELETE FROM travel_expense_payments WHERE id = $id").run({ $id: completed.item.paymentId });
+        db.prepare("DELETE FROM travel_expenses WHERE id = $id").run({ $id: completed.item.expenseId });
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON");
+      }
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 0);
+
+      for (const readReceipt of [
+        () => repository.getLedgerReceipt(received.item.id, { owner: "owner-a" }),
+        () => repository.completeLocal(received.item.id, { leaseToken: claimed.leaseToken }),
+      ]) {
+        assert.throws(readReceipt, (error) => {
+          assert.equal(error?.status, 409);
+          assert.equal(error?.code, "SHORTCUT_LEDGER_RECEIPT_INCOMPLETE");
+          return true;
+        });
+      }
     } finally {
       db.close();
     }

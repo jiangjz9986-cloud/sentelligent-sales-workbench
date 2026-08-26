@@ -21,10 +21,55 @@ const INVOICE_STATUS_LABELS = Object.freeze({
 });
 
 const EXPENSE_INVOICE_STATE_LABELS = Object.freeze({
-  electronic_invoice: "电子发票",
+  electronic_invoice: "电子",
   substitute_invoice: "替票",
-  no_invoice: "无票",
-  invoice_pending: "待补发票",
+  no_invoice: "无票确认",
+  invoice_pending: "待补",
+});
+
+const EXPENSE_LIST_PURPOSE_LABELS = Object.freeze({
+  breakfast: "餐费",
+  lunch: "餐费",
+  dinner: "餐费",
+  lodging: "住宿",
+  transport: "交通",
+  hospitality: "招待",
+  other: "其他",
+});
+
+/**
+ * The reimbursement list is an intentionally small, user-confirmed contract.
+ * Internal ledger fields remain available in the Web product, but exporters
+ * must not append them to this list.
+ */
+export const EXPENSE_LIST_COLUMNS = Object.freeze([
+  Object.freeze({ id: "sequence", label: "序号", kind: "integer" }),
+  Object.freeze({ id: "date", label: "日期", kind: "text" }),
+  Object.freeze({ id: "purpose", label: "用途", kind: "text" }),
+  Object.freeze({ id: "amount", label: "金额", kind: "currency" }),
+  Object.freeze({ id: "paymentRecord", label: "付款记录", kind: "thumbnail_stack" }),
+  Object.freeze({ id: "invoice", label: "发票", kind: "text" }),
+  Object.freeze({ id: "notes", label: "备注", kind: "text" }),
+]);
+
+export const EXPENSE_LIST_FORMAT_CAPABILITIES = Object.freeze({
+  xlsx: Object.freeze({ standardOutput: true, embedsPaymentRecordThumbnails: true }),
+  pdf: Object.freeze({ standardOutput: true, embedsPaymentRecordThumbnails: true }),
+  print: Object.freeze({ standardOutput: true, embedsPaymentRecordThumbnails: true }),
+  csv: Object.freeze({
+    standardOutput: false,
+    embedsPaymentRecordThumbnails: false,
+    notice: "CSV 仅供数据交换，不能嵌入付款凭证缩略图，不作为最终标准费用清单。",
+  }),
+});
+
+const PAYMENT_RECORD_THUMBNAIL_POLICY = Object.freeze({
+  format: "image/jpeg",
+  fit: "contain",
+  maxWidthPx: 360,
+  maxHeightPx: 240,
+  quality: 0.72,
+  stripMetadata: true,
 });
 
 function csvCell(value) {
@@ -99,6 +144,39 @@ export function paymentRecordFilename(weekStart) {
   return `实际付款记录-${weekStart}.csv`;
 }
 
+function safeAddCents(total, amount, name) {
+  if (!Number.isSafeInteger(amount) || amount < 0) {
+    throw new TypeError(`${name} must be a non-negative integer number of cents`);
+  }
+  const next = total + amount;
+  if (!Number.isSafeInteger(next)) throw new RangeError(`${name} exceeds the safe integer range`);
+  return next;
+}
+
+function buildPaymentRecordCell(paymentProofs = []) {
+  if (!Array.isArray(paymentProofs)) throw new TypeError("paymentProofs must be an array");
+  const thumbnails = paymentProofs.map((attachment, index) => {
+    const attachmentId = String(attachment?.id ?? "").trim();
+    if (!attachmentId) throw new TypeError("payment proof attachment id is required");
+    return {
+      attachmentId,
+      lineNumber: index + 1,
+      altText: `付款凭证 ${index + 1}/${paymentProofs.length}`,
+      thumbnailPolicy: PAYMENT_RECORD_THUMBNAIL_POLICY,
+    };
+  });
+  return {
+    type: "thumbnail_stack",
+    thumbnails,
+    missing: thumbnails.length === 0,
+  };
+}
+
+function expenseListPurposeLabel(row) {
+  return EXPENSE_LIST_PURPOSE_LABELS[row.categoryId]
+    ?? (String(row.visible.category ?? "").trim() || "其他");
+}
+
 export function buildExpenseListRows(expenses = [], context = {}) {
   return buildExpenseLedgerRows(expenses, context).map((row, index) => {
     const stateLabels = row.visible.invoiceStates
@@ -109,23 +187,92 @@ export function buildExpenseListRows(expenses = [], context = {}) {
       expenseId: row.id,
       referenceCode: row.referenceCode,
       dateLabel: row.visible.date,
-      categoryLabel: row.visible.category,
+      purposeLabel: expenseListPurposeLabel(row),
+      // Kept as a compatibility alias while the existing print component is
+      // migrated to the user-confirmed “用途” header.
+      categoryLabel: expenseListPurposeLabel(row),
       amountCents: row.visible.amountCents,
       amountLabel: formatCny(row.visible.amountCents),
+      paymentRecord: buildPaymentRecordCell(row.visible.paymentProofs),
       paymentProofLabel: row.visible.paymentProofs.length > 0
         ? `${row.visible.paymentProofs.length} 张`
         : "未上传",
-      invoiceStatusLabel: stateLabels.join("、") || "待补发票",
-      notes: row.visible.notes,
+      invoiceLabel: stateLabels.join("、") || "待补",
+      // Kept as a compatibility alias for the existing print renderer.
+      invoiceStatusLabel: stateLabels.join("、") || "待补",
+      // Remarks are a distinct user field. Do not silently copy purpose or
+      // merchant text into the final reimbursement list.
+      notes: String(row.source?.notes ?? "").trim(),
     };
   });
 }
 
-export function expenseListFilename(weekStart) {
+export function buildExpenseListTotals(rows = [], { matches = [] } = {}) {
+  if (!Array.isArray(rows)) throw new TypeError("rows must be an array");
+  if (!Array.isArray(matches)) throw new TypeError("matches must be an array");
+  const includedExpenseIds = new Set(rows.map((row) => row?.expenseId).filter(Boolean));
+  const expenseTotalCents = rows.reduce((total, row) => (
+    safeAddCents(total, row?.amountCents, "expenseTotalCents")
+  ), 0);
+  const substituteInvoiceTotalCents = matches.reduce((total, match) => {
+    if (match?.state !== "confirmed" || match?.matchMethod !== "rule_candidate") return total;
+    if (!includedExpenseIds.has(match.expenseId)) return total;
+    return safeAddCents(total, match.allocatedCents, "substituteInvoiceTotalCents");
+  }, 0);
+  return {
+    expenseTotalTitle: "费用合计",
+    expenseTotalCents,
+    expenseTotalLabel: formatCny(expenseTotalCents),
+    substituteInvoiceTotalTitle: "替票合计金额",
+    substituteInvoiceTotalCents,
+    substituteInvoiceTotalLabel: formatCny(substituteInvoiceTotalCents),
+  };
+}
+
+/**
+ * Produces the renderer-neutral reimbursement list used by Web preview, Excel,
+ * PDF and print generators. Only `cells` defines visible columns; IDs and layout
+ * hints are non-printing metadata. Payment proof descriptors intentionally keep
+ * only attachment IDs plus compression policy, so file names, original URLs and
+ * storage metadata never enter the export model.
+ */
+export function buildExpenseListExport({ expenses = [], context = {} } = {}) {
+  const rows = buildExpenseListRows(expenses, context);
+  return {
+    schemaVersion: 1,
+    columns: EXPENSE_LIST_COLUMNS,
+    rows: rows.map((row) => {
+      const physicalRowCount = Math.max(1, row.paymentRecord.thumbnails.length);
+      return {
+        expenseId: row.expenseId,
+        physicalRowCount,
+        mergeCellIds: physicalRowCount > 1
+          ? ["sequence", "date", "purpose", "amount", "invoice", "notes"]
+          : [],
+        cells: {
+          sequence: { type: "integer", value: row.sequence },
+          date: { type: "text", value: row.dateLabel },
+          purpose: { type: "text", value: row.purposeLabel },
+          amount: { type: "currency", cents: row.amountCents, label: row.amountLabel },
+          paymentRecord: row.paymentRecord,
+          invoice: { type: "text", value: row.invoiceLabel },
+          notes: { type: "text", value: row.notes },
+        },
+      };
+    }),
+    totals: buildExpenseListTotals(rows, context),
+    formatCapabilities: EXPENSE_LIST_FORMAT_CAPABILITIES,
+  };
+}
+
+export function expenseListFilename(weekStart, format = "pdf") {
   if (typeof weekStart !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(weekStart)) {
     throw new TypeError("weekStart must use YYYY-MM-DD format");
   }
-  return `费用清单-${weekStart}.pdf`;
+  if (format !== "pdf" && format !== "xlsx") {
+    throw new TypeError("expense list format must be pdf or xlsx");
+  }
+  return `费用清单-${weekStart}.${format}`;
 }
 
 function chunk(items, size) {
@@ -244,22 +391,146 @@ export function expandInvoicePrintItems(invoices = [], pageCounts = {}) {
   });
 }
 
+function normalizeExpenseListPrintRow(row, logicalRowIndex) {
+  if (row?.cells && typeof row.cells === "object" && !Array.isArray(row.cells)) return row;
+  if (!row?.paymentRecord || !Array.isArray(row.paymentRecord.thumbnails)) {
+    throw new TypeError(`expense list row ${logicalRowIndex + 1} cells are required`);
+  }
+  return {
+    ...row,
+    physicalRowCount: row.physicalRowCount
+      ?? Math.max(1, row.paymentRecord.thumbnails.length),
+    cells: {
+      sequence: { type: "integer", value: row.sequence },
+      date: { type: "text", value: row.dateLabel },
+      purpose: { type: "text", value: row.purposeLabel ?? row.categoryLabel },
+      amount: { type: "currency", cents: row.amountCents, label: row.amountLabel },
+      paymentRecord: row.paymentRecord,
+      invoice: { type: "text", value: row.invoiceLabel ?? row.invoiceStatusLabel },
+      notes: { type: "text", value: row.notes },
+    },
+  };
+}
+
+/**
+ * Paginates the strict seven-column list by rendered table rows rather than by
+ * logical expenses. Each payment proof occupies one physical E-column row. The
+ * other six cells are rendered once per same-page segment with `rowSpan`; when
+ * an expense crosses a page boundary those cells are repeated at the start of
+ * the next page segment.
+ *
+ * `totalCents` deliberately counts a logical expense only on its first physical
+ * row. Consumers may therefore sum all page totals without double-counting an
+ * expense whose proofs span multiple pages.
+ */
 export function paginateExpenseList({ rows = [], rowsPerPage = 18 } = {}) {
   if (!Array.isArray(rows)) throw new TypeError("rows must be an array");
-  const pages = chunk(rows, rowsPerPage);
-  const totalPages = pages.length;
-  return pages.map((pageRows, index) => ({
+  if (!Number.isSafeInteger(rowsPerPage) || rowsPerPage < 1) {
+    throw new TypeError("rowsPerPage must be a positive integer");
+  }
+
+  const draftPages = [];
+  let pageRows = [];
+  let pageTotalCents = 0;
+
+  const finishPage = () => {
+    if (pageRows.length === 0) return;
+    draftPages.push({ rows: pageRows, totalCents: pageTotalCents });
+    pageRows = [];
+    pageTotalCents = 0;
+  };
+
+  rows.forEach((sourceRow, logicalRowIndex) => {
+    if (!sourceRow || typeof sourceRow !== "object" || Array.isArray(sourceRow)) {
+      throw new TypeError(`expense list row ${logicalRowIndex + 1} is invalid`);
+    }
+    const row = normalizeExpenseListPrintRow(sourceRow, logicalRowIndex);
+    const expenseId = String(row.expenseId ?? "").trim();
+    if (!expenseId) throw new TypeError(`expense list row ${logicalRowIndex + 1} expenseId is required`);
+    if (!row.cells || typeof row.cells !== "object" || Array.isArray(row.cells)) {
+      throw new TypeError(`expense list row ${logicalRowIndex + 1} cells are required`);
+    }
+    const paymentRecord = row.cells.paymentRecord;
+    if (!paymentRecord || !Array.isArray(paymentRecord.thumbnails)) {
+      throw new TypeError(`expense list row ${logicalRowIndex + 1} paymentRecord is invalid`);
+    }
+    const thumbnails = paymentRecord.thumbnails;
+    const physicalRowCount = Math.max(1, thumbnails.length);
+    if (row.physicalRowCount !== undefined && row.physicalRowCount !== physicalRowCount) {
+      throw new TypeError(`expense list row ${logicalRowIndex + 1} physicalRowCount is invalid`);
+    }
+    const amountCents = row.cells.amount?.cents;
+    if (!Number.isSafeInteger(amountCents) || amountCents < 0) {
+      throw new TypeError(`expense list row ${logicalRowIndex + 1} amount is invalid`);
+    }
+
+    // Keep a normal-sized expense together when it can fit on a clean page.
+    // Only an expense that is itself taller than the page capacity must be
+    // split; this avoids needlessly repeating its six shared cells.
+    const remainingRows = rowsPerPage - pageRows.length;
+    if (
+      pageRows.length > 0
+      && physicalRowCount <= rowsPerPage
+      && physicalRowCount > remainingRows
+    ) {
+      finishPage();
+    }
+
+    let expenseRowOffset = 0;
+    while (expenseRowOffset < physicalRowCount) {
+      if (pageRows.length === rowsPerPage) finishPage();
+      const segmentRowCount = Math.min(
+        rowsPerPage - pageRows.length,
+        physicalRowCount - expenseRowOffset,
+      );
+      const continuedFromPreviousPage = expenseRowOffset > 0;
+      const continuesOnNextPage = expenseRowOffset + segmentRowCount < physicalRowCount;
+
+      for (let segmentOffset = 0; segmentOffset < segmentRowCount; segmentOffset += 1) {
+        const expensePhysicalRowIndex = expenseRowOffset + segmentOffset;
+        const countsTowardTotal = expensePhysicalRowIndex === 0;
+        const thumbnail = thumbnails[expensePhysicalRowIndex] ?? null;
+        const rendersSharedCells = segmentOffset === 0;
+        const amountContributionCents = countsTowardTotal ? amountCents : 0;
+        pageRows.push({
+          key: `${expenseId}:${logicalRowIndex + 1}:${expensePhysicalRowIndex + 1}`,
+          expenseId,
+          cells: row.cells,
+          amountCents,
+          amountContributionCents,
+          countsTowardTotal,
+          physicalRowNumber: expensePhysicalRowIndex + 1,
+          physicalRowCount,
+          paymentRecord: {
+            missing: thumbnails.length === 0,
+            thumbnail,
+          },
+          sharedCells: {
+            render: rendersSharedCells,
+            rowSpan: rendersSharedCells ? segmentRowCount : 0,
+            continuedFromPreviousPage: rendersSharedCells && continuedFromPreviousPage,
+            continuesOnNextPage: rendersSharedCells && continuesOnNextPage,
+          },
+        });
+        if (countsTowardTotal) {
+          pageTotalCents = safeAddCents(pageTotalCents, amountCents, "expense list page total");
+        }
+      }
+
+      expenseRowOffset += segmentRowCount;
+      if (pageRows.length === rowsPerPage) finishPage();
+    }
+  });
+  finishPage();
+
+  const totalPages = draftPages.length;
+  return draftPages.map((page, index) => ({
     kind: "expense-list",
     pageNumber: index + 1,
     totalPages,
-    rows: pageRows,
-    totalCents: pageRows.reduce((total, row) => {
-      const amount = row?.amountCents;
-      if (!Number.isSafeInteger(amount) || amount < 0) throw new TypeError("expense list amount is invalid");
-      const next = total + amount;
-      if (!Number.isSafeInteger(next)) throw new RangeError("expense list total exceeds the safe integer range");
-      return next;
-    }, 0),
+    physicalRowCount: page.rows.length,
+    rows: page.rows,
+    totalCents: page.totalCents,
   }));
 }
 

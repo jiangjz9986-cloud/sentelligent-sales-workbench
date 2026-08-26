@@ -13,6 +13,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     base: resolvePublicBasePath(configuredBasePath),
+    resolve: {
+      preserveSymlinks: true,
+    },
     optimizeDeps: {
       include: ["react", "react-dom/client"],
     },

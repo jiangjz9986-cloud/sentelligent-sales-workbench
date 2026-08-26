@@ -456,6 +456,102 @@ export function createShortcutBookkeepingRepository(db, {
     ORDER BY entry.created_at ASC, entry.id ASC
     LIMIT 20
   `);
+  const selectLedgerReceiptByEntryId = db.prepare(`
+    SELECT entry.id AS entry_id,
+           expense.id AS expense_id,
+           payment.id AS payment_id,
+           expense.reference_code,
+           expense.occurred_on,
+           payment.amount_cents,
+           payment.reimbursement_cents,
+           CASE
+             WHEN EXISTS (
+               SELECT 1
+               FROM travel_expense_attachments attachment
+               JOIN travel_expense_attachment_payments attachment_payment
+                 ON attachment_payment.attachment_id = attachment.id
+               WHERE attachment.expense_id = expense.id
+                 AND attachment.kind = 'payment_proof'
+                 AND attachment_payment.payment_id = payment.id
+             ) THEN 'matched'
+             WHEN entry.source_id IS NOT NULL AND EXISTS (
+               SELECT 1
+               FROM travel_expense_document_inbox inbox
+               WHERE inbox.owner = entry.owner
+                 AND inbox.document_kind = 'payment_proof'
+                 AND inbox.source_message_id = entry.source_id
+                 AND inbox.status IN ('received', 'processing', 'review_required', 'matched')
+             ) THEN 'pending'
+             ELSE 'not_available'
+           END AS attachment_status
+    FROM shortcut_bookkeeping_entries entry
+    JOIN travel_expenses expense
+      ON expense.id = entry.expense_id
+     AND expense.owner = entry.owner
+     AND expense.deleted_at IS NULL
+    JOIN travel_expense_payments payment
+      ON payment.id = entry.payment_id
+     AND payment.expense_id = expense.id
+    WHERE entry.id = $id
+      AND entry.target_system = 'sentelligent'
+      AND entry.entry_type = 'expense'
+      AND entry.status = 'accepted'
+  `);
+
+  function ledgerReceiptFromAcceptedRow(row) {
+    if (!row || row.status !== "accepted" || row.entry_type !== "expense") return null;
+    const receipt = selectLedgerReceiptByEntryId.get({ $id: row.id });
+    if (!receipt) {
+      throw new HttpError(
+        409,
+        "SHORTCUT_LEDGER_RECEIPT_INCOMPLETE",
+        "Accepted bookkeeping entry is missing its canonical expense or payment",
+      );
+    }
+    const weekStart = mondayInShanghai(receipt.occurred_on);
+    if (!weekStart) {
+      throw new HttpError(
+        409,
+        "SHORTCUT_LEDGER_RECEIPT_INCOMPLETE",
+        "Accepted bookkeeping entry has an invalid canonical occurrence date",
+      );
+    }
+    return {
+      entryId: requiredText(receipt.entry_id, "ledger receipt entry id", 200),
+      expenseId: requiredText(receipt.expense_id, "ledger receipt expense id", 200),
+      paymentId: requiredText(receipt.payment_id, "ledger receipt payment id", 200),
+      referenceCode: requiredText(receipt.reference_code, "ledger receipt reference code", 200),
+      occurredOn: dateOnly(receipt.occurred_on, "ledger receipt occurredOn"),
+      weekStart,
+      amountCents: nonNegativeCents(Number(receipt.amount_cents), "ledger receipt amountCents"),
+      reimbursementCents: nonNegativeCents(
+        Number(receipt.reimbursement_cents),
+        "ledger receipt reimbursementCents",
+      ),
+      attachmentStatus: receipt.attachment_status,
+    };
+  }
+
+  function completedResult(row, { replayed, ...extra } = {}) {
+    const ledgerReceipt = ledgerReceiptFromAcceptedRow(row);
+    return {
+      item: itemFromRow(row),
+      ...(ledgerReceipt ? { ledgerReceipt } : {}),
+      ...extra,
+      replayed: replayed === true,
+    };
+  }
+
+  function getLedgerReceipt(idValue, { owner } = {}) {
+    const id = requiredText(idValue, "id", 200);
+    const normalizedOwner = requiredText(owner, "owner", 200);
+    const row = selectById.get({ $id: id });
+    if (!row || row.owner !== normalizedOwner || row.target_system !== "sentelligent") {
+      throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
+    }
+    if (row.status !== "accepted" || row.entry_type !== "expense") return null;
+    return ledgerReceiptFromAcceptedRow(row);
+  }
 
   function listBySource({ owner, sourceId } = {}) {
     const normalizedOwner = requiredText(owner, "owner", 200);
@@ -554,7 +650,7 @@ export function createShortcutBookkeepingRepository(db, {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_NOT_FOUND", "Shortcut bookkeeping entry was not found");
       }
       if (COMPLETED_STATUSES.has(current.status)) {
-        return { item: itemFromRow(current), replayed: true };
+        return completedResult(current, { replayed: true });
       }
       if (current.status === "processing") {
         const started = Date.parse(current.lease_started_at);
@@ -636,7 +732,7 @@ export function createShortcutBookkeepingRepository(db, {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
       }
       if (current.status === "accepted" || current.status === "rejected") {
-        return { item: itemFromRow(current), replayed: true };
+        return completedResult(current, { replayed: true });
       }
       if (current.status !== "review_required") {
         throw new HttpError(409, "SHORTCUT_BOOKKEEPING_REVIEW_STATE_CONFLICT", "Shortcut review item is not awaiting review");
@@ -709,7 +805,7 @@ export function createShortcutBookkeepingRepository(db, {
       if (!current || current.owner !== normalizedOwner || current.target_system !== "sentelligent") {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
       }
-      if (current.status === "accepted") return { item: itemFromRow(current), replayed: true };
+      if (current.status === "accepted") return completedResult(current, { replayed: true });
       if (current.status === "rejected") {
         throw new HttpError(409, "SHORTCUT_BOOKKEEPING_REVIEW_TERMINAL", "Rejected shortcut review item cannot be retried");
       }
@@ -853,7 +949,7 @@ export function createShortcutBookkeepingRepository(db, {
   } = {}) {
     return runTransaction(db, () => {
       const state = currentProcessing(idValue, leaseToken, "sentelligent");
-      if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
+      if (state.replayed) return completedResult(state.current, { replayed: true });
       const { id, current } = state;
       if (current.ledger_name !== "出差报销"
         || !["income", "expense"].includes(current.entry_type)) {
@@ -1076,7 +1172,7 @@ export function createShortcutBookkeepingRepository(db, {
           subcategory: effectiveCurrent.subcategory,
         },
       });
-      return { item: itemFromRow(selectById.get({ $id: id })), replayed: false };
+      return completedResult(selectById.get({ $id: id }), { replayed: false });
     });
   }
 
@@ -1119,6 +1215,7 @@ export function createShortcutBookkeepingRepository(db, {
     claimReview,
     rejectReview,
     retryReview,
+    getLedgerReceipt,
     completeLocal,
     release,
   };

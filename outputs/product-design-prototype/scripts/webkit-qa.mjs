@@ -21,7 +21,7 @@ const appRoot = resolve(here, "..");
 const workspaceRoot = resolve(appRoot, "..", "..");
 const distPath = resolve(appRoot, "dist");
 const loginPassword = "qa-login-password";
-const expenseTabs = ["overview", "ledger", "proofs", "invoices", "settlement", "organize"];
+const expenseTabs = ["ledger", "invoices", "export"];
 
 function listen(server, port) {
   return new Promise((resolveListen, reject) => {
@@ -96,6 +96,15 @@ async function assertExpensePageReady(page) {
     await tab.waitFor();
     assert.equal(await tab.count(), 1, `expense tab ${tabId} should render once`);
   }
+
+  const ledgerTab = page.getByTestId("expense-tab-ledger");
+  assert.equal(await ledgerTab.getAttribute("aria-selected"), "true");
+  await expensePage.getByTestId("expense-ledger-workbench").waitFor();
+  assert.equal(
+    await expensePage.locator(".expense-ledger-child-card").count(),
+    3,
+    "scheme-three ledger should keep reviews, payment proofs, and received advances as child tools",
+  );
 
   const naturalWeekInput = expensePage.locator('input[type="week"]');
   await naturalWeekInput.waitFor();
@@ -301,6 +310,12 @@ async function main() {
     assert.deepEqual(desktopExpenseMetrics.undersized, []);
     const desktopExpenseScreenshotPath = resolve(evidenceDirectory, "webkit-expense-1440x900.png");
     await page.screenshot({ path: desktopExpenseScreenshotPath, fullPage: false });
+
+    await page.getByTestId("expense-tab-export").click();
+    await page.locator(".expense-organizer-view").waitFor();
+    assert.equal(await page.getByTestId("expense-tab-export").getAttribute("aria-selected"), "true");
+    await page.getByTestId("expense-tab-ledger").click();
+    await page.getByTestId("expense-ledger-workbench").waitFor();
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByTestId("nav-expense").click();
