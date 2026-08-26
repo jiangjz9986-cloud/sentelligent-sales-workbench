@@ -13,7 +13,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   createPaymentProofSelection,
@@ -91,6 +91,8 @@ export function PaymentProofCenter({
   onUpload,
   onDelete,
   pendingAttachmentId,
+  focusExpenseId = null,
+  onFocusExpenseHandled,
 }) {
   const [selections, setSelections] = useState({});
   const [selectionErrors, setSelectionErrors] = useState({});
@@ -100,6 +102,25 @@ export function PaymentProofCenter({
   const proofCount = useMemo(() => expenses.reduce((total, expense) => (
     total + expense.attachments.filter((attachment) => attachment.kind === "payment_proof").length
   ), 0), [expenses]);
+
+  useEffect(() => {
+    if (!focusExpenseId) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const expense = expenses.find((item) => item.id === focusExpenseId);
+      const target = [...document.querySelectorAll("[data-proof-expense-id]")]
+        .find((element) => element.dataset.proofExpenseId === focusExpenseId);
+      if (!target) {
+        onFocusExpenseHandled?.({ expenseId: focusExpenseId, referenceCode: expense?.referenceCode, found: false });
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      const focusTarget = target.querySelector("[data-proof-open]") ?? target;
+      if (focusTarget instanceof HTMLElement) focusTarget.focus({ preventScroll: true });
+      onFocusExpenseHandled?.({ expenseId: focusExpenseId, referenceCode: expense?.referenceCode, found: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [expenses, focusExpenseId, onFocusExpenseHandled]);
 
   function selectedFor(expense) {
     return selections[expense.id] ?? createPaymentProofSelection(expense);
@@ -260,7 +281,7 @@ export function PaymentProofCenter({
           const proofs = expense.attachments.filter((attachment) => attachment.kind === "payment_proof");
           const pending = pendingAttachmentId === expense.id;
           return (
-            <article className="expense-proof-card" key={expense.id}>
+            <article className="expense-proof-card" key={expense.id} data-proof-expense-id={expense.id} tabIndex={-1} aria-label={`${expense.referenceCode} 的付款凭证`}>
               <header className="expense-proof-card-head">
                 <div>
                   <span>{expense.occurredOn}</span>
@@ -326,7 +347,7 @@ export function PaymentProofCenter({
                         <strong title={attachment.fileName}>{attachment.fileName}</strong>
                         <small>{proofPaymentSummary(attachment, expense)}</small>
                         <nav aria-label={`${attachment.fileName}文件操作`}>
-                          <a href={getAttachmentUrl(attachment.id)} target="_blank" rel="noreferrer"><ExternalLink size={14} />打开</a>
+                          <a href={getAttachmentUrl(attachment.id)} target="_blank" rel="noreferrer" data-proof-open><ExternalLink size={14} />打开</a>
                           <a href={getAttachmentUrl(attachment.id)} download={attachment.fileName}><Download size={14} />下载</a>
                           <button type="button" disabled={pendingAttachmentId === attachment.id} onClick={() => onDelete(expense, attachment)}><Trash2 size={14} />删除</button>
                         </nav>

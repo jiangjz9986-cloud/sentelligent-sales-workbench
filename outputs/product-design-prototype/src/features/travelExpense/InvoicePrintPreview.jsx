@@ -310,7 +310,7 @@ export function InvoicePrintPreview({
   return (
     <section className="expense-print-preview invoice-print-preview" data-testid="invoice-print-preview">
       <header className="expense-print-preview-toolbar invoice-print-preview-toolbar no-print">
-        <div><button className="ghost-button" type="button" onClick={onClose}><ArrowLeft size={16} />返回发票管理</button><div><strong>发票四联打印</strong><span>发票管理 / A4 横向预览</span></div></div>
+        <div><button className="ghost-button" type="button" data-testid="invoice-print-preview-back" onClick={onClose}><ArrowLeft size={16} />返回发票管理</button><div><strong>发票四联打印</strong><span>发票管理 / A4 横向预览</span></div></div>
         <button className="primary-button" type="button" onClick={printDocument} disabled={printing || pages.length === 0 || !pdfsReady}><Printer size={16} />{printing ? "准备打印" : !pdfsReady ? (pdfCount ? "加载 PDF" : "加载图片") : "打印"}</button>
       </header>
       {printError ? <div className="expense-page-alert no-print" role="alert"><span>{printError}</span><button className="ghost-button" type="button" onClick={pdfPageCountFailed ? retryPdfPageCounts : printDocument} disabled={printing}>{pdfPageCountFailed ? "重新读取 PDF" : "重新检查并打印"}</button></div> : null}

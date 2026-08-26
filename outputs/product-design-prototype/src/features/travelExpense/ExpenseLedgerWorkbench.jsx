@@ -105,7 +105,7 @@ function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
     );
   }
   if (first && isTravelExpensePdf(first)) {
-    return <div className="ledger-proof-preview is-pdf"><span className="ledger-proof-pdf-mark">PDF</span><span><strong>共 {item.paymentProofCount} 份</strong><button type="button" onClick={() => onOpenProof?.(item.original, item)}>查看</button></span></div>;
+    return <div className="ledger-proof-preview is-pdf"><span className="ledger-proof-pdf-mark">PDF</span><span><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span></div>;
   }
   const Icon = item.proofState === "attached" || item.proofState === "system"
     ? CheckCircle2
@@ -128,6 +128,7 @@ function ActionButton({ item, onOpenItem, onReviewItem }) {
       type="button"
       disabled={typeof action !== "function"}
       aria-label={`${item.action}：${itemAccessibleLabel(item)}`}
+      data-ledger-primary-action={item.kind === "expense" ? item.sourceId : undefined}
       onClick={() => action?.(item.original, item)}
     >
       {item.action}
@@ -156,7 +157,7 @@ function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewIte
           {items.map((item) => {
             const highlighted = item.kind === "expense" && item.sourceId === highlightExpenseId;
             return (
-            <tr key={item.id} className={`${item.formal ? "is-formal" : "is-pending"}${highlighted ? " is-highlighted" : ""}`} data-ledger-state={item.formal ? "formal" : "pending"} data-highlighted={highlighted || undefined}>
+            <tr key={item.id} className={`${item.formal ? "is-formal" : "is-pending"}${highlighted ? " is-highlighted" : ""}`} data-ledger-state={item.formal ? "formal" : "pending"} data-ledger-expense-id={item.kind === "expense" ? item.sourceId : undefined} data-highlighted={highlighted || undefined}>
               <td><time dateTime={`${item.date}T${item.time === "--:--" ? "00:00" : item.time}`}>{item.time}</time></td>
               <td><TransactionType item={item} /></td>
               <td><CategoryCopy item={item} /></td>
@@ -183,7 +184,7 @@ function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem
       {items.map((item) => {
         const highlighted = item.kind === "expense" && item.sourceId === highlightExpenseId;
         return (
-        <li key={item.id} className={`${item.formal ? "is-formal" : "is-pending"}${highlighted ? " is-highlighted" : ""}`} data-ledger-state={item.formal ? "formal" : "pending"} data-highlighted={highlighted || undefined}>
+        <li key={item.id} className={`${item.formal ? "is-formal" : "is-pending"}${highlighted ? " is-highlighted" : ""}`} data-ledger-state={item.formal ? "formal" : "pending"} data-ledger-expense-id={item.kind === "expense" ? item.sourceId : undefined} data-highlighted={highlighted || undefined}>
           <article aria-label={itemAccessibleLabel(item)}>
             <header>
               <div><time dateTime={`${item.date}T${item.time === "--:--" ? "00:00" : item.time}`}>{item.time}</time><TransactionType item={item} /></div>
@@ -230,7 +231,7 @@ function SummaryStrip({ summary, onOpenExpenseListPrint, onExportExpenseList, ex
         <div><dt>发票缺失</dt><dd>{summary.missingInvoiceCount}</dd></div>
       </dl>
       <div className="ledger-workbench-output-actions" data-testid="ledger-reimbursement-actions">
-        <button type="button" onClick={() => onOpenExpenseListPrint?.()} disabled={typeof onOpenExpenseListPrint !== "function"}><ReceiptText size={17} aria-hidden="true" />打印费用清单</button>
+        <button type="button" data-testid="expense-list-print-trigger" onClick={() => onOpenExpenseListPrint?.()} disabled={typeof onOpenExpenseListPrint !== "function"}><ReceiptText size={17} aria-hidden="true" />打印费用清单</button>
         <button type="button" onClick={() => onExportExpenseList?.()} disabled={typeof onExportExpenseList !== "function" || exporting}><FileCheck2 size={17} aria-hidden="true" />{exporting ? "生成 Excel 中" : "导出费用清单"}</button>
       </div>
     </footer>

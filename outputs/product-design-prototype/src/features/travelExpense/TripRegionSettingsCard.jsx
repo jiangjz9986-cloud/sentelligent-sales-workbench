@@ -31,6 +31,33 @@ function userMessage(error, fallback) {
   return error instanceof Error ? error.message : fallback;
 }
 
+function connectedHtmlElement(value) {
+  const HTMLElementConstructor = value?.ownerDocument?.defaultView?.HTMLElement;
+  return HTMLElementConstructor
+    && value instanceof HTMLElementConstructor
+    && value.isConnected
+    ? value
+    : null;
+}
+
+function scheduleNextFrame(target, callback) {
+  const targetWindow = target.ownerDocument?.defaultView;
+  if (typeof targetWindow?.requestAnimationFrame === "function") {
+    const frameId = targetWindow.requestAnimationFrame(callback);
+    return () => targetWindow.cancelAnimationFrame?.(frameId);
+  }
+
+  const timeoutId = globalThis.setTimeout(callback, 0);
+  return () => globalThis.clearTimeout(timeoutId);
+}
+
+function focusReturnTarget(opener) {
+  const connectedOpener = connectedHtmlElement(opener);
+  if (connectedOpener) return connectedOpener;
+  const document = opener?.ownerDocument ?? globalThis.document;
+  return connectedHtmlElement(document?.querySelector?.("[data-trip-region-focus-fallback]"));
+}
+
 export function TripRegionSettingsCard({
   open,
   profile,
@@ -42,6 +69,41 @@ export function TripRegionSettingsCard({
   const [cityInput, setCityInput] = useState("");
   const [error, setError] = useState("");
   const inputRef = useRef(null);
+  const openerRef = useRef(null);
+  const openCycleRef = useRef(0);
+  const cancelFocusRestoreRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    cancelFocusRestoreRef.current?.();
+    cancelFocusRestoreRef.current = null;
+    const openCycle = openCycleRef.current + 1;
+    openCycleRef.current = openCycle;
+    openerRef.current = connectedHtmlElement(document.activeElement);
+
+    return () => {
+      const opener = openerRef.current;
+      const scheduledTarget = focusReturnTarget(opener);
+      if (!scheduledTarget) {
+        if (openCycleRef.current === openCycle) openerRef.current = null;
+        return;
+      }
+
+      cancelFocusRestoreRef.current = scheduleNextFrame(scheduledTarget, () => {
+        cancelFocusRestoreRef.current = null;
+        if (openCycleRef.current !== openCycle) return;
+        if (openerRef.current !== opener) return;
+        const target = focusReturnTarget(opener);
+        if (!target) {
+          openerRef.current = null;
+          return;
+        }
+        target.focus({ preventScroll: true });
+        openerRef.current = null;
+      });
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open || !profile) return;

@@ -104,12 +104,27 @@ export function TravelExpensePage({
   const [invoicePrintItems, setInvoicePrintItems] = useState(null);
   const [selectedLedgerDate, setSelectedLedgerDate] = useState(null);
   const [highlightExpenseId, setHighlightExpenseId] = useState(null);
+  const [locationAnnouncement, setLocationAnnouncement] = useState("");
+  const [locationFailure, setLocationFailure] = useState(null);
+  const [proofFocusExpenseId, setProofFocusExpenseId] = useState(null);
   const tabsRef = useRef(null);
   const loadedWeekStartRef = useRef(null);
+  const pendingLedgerLocationRef = useRef(null);
+  const locationFailureActionRef = useRef(null);
+  const previewReturnRef = useRef(null);
+  const previewCycleRef = useRef(0);
+  const previewRestoreFrameRef = useRef(null);
 
   const revealActiveTab = useCallback(() => {
-    const selectedTab = tabsRef.current?.querySelector('[aria-selected="true"]');
-    selectedTab?.scrollIntoView({ block: "nearest", inline: "center" });
+    const tabsElement = tabsRef.current;
+    const selectedTab = tabsElement?.querySelector('[aria-selected="true"]');
+    if (!(tabsElement instanceof HTMLElement) || !(selectedTab instanceof HTMLElement)) return;
+
+    const tabsRect = tabsElement.getBoundingClientRect();
+    const selectedRect = selectedTab.getBoundingClientRect();
+    const horizontalDelta = (selectedRect.left + (selectedRect.width / 2))
+      - (tabsRect.left + (tabsRect.width / 2));
+    if (Math.abs(horizontalDelta) > 1) tabsElement.scrollLeft += horizontalDelta;
   }, []);
 
   const loadWeek = useCallback(async (signal) => {
@@ -216,6 +231,77 @@ export function TravelExpensePage({
     return () => window.removeEventListener("resize", revealActiveTab);
   }, [revealActiveTab]);
 
+  useEffect(() => {
+    const request = pendingLedgerLocationRef.current;
+    if (!request
+      || status !== "ready"
+      || loadedWeekStartRef.current !== week.start
+      || activeTab !== "ledger"
+      || expenseListPrintOpen
+      || invoicePrintItems) return undefined;
+
+    // An explicit ledger-location request outranks the preview's old return
+    // position and trigger focus. Cancel either queued restore frame so it
+    // cannot overwrite the target scroll/focus after the preview closes.
+    if (previewRestoreFrameRef.current !== null) {
+      window.cancelAnimationFrame(previewRestoreFrameRef.current);
+      previewRestoreFrameRef.current = null;
+    }
+    if (previewReturnRef.current !== null) {
+      previewCycleRef.current += 1;
+      previewReturnRef.current = null;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      if (pendingLedgerLocationRef.current !== request) return;
+      const candidates = [...document.querySelectorAll("[data-ledger-expense-id]")]
+        .filter((element) => element.dataset.ledgerExpenseId === request.expenseId);
+      const target = candidates.find((element) => element.getClientRects().length > 0);
+      if (!target && candidates.length > 0) {
+        setLocationAnnouncement(`目标账目 ${request.referenceCode} 暂不可见，正在等待账本恢复。`);
+        return;
+      }
+      if (!target) {
+        pendingLedgerLocationRef.current = null;
+        setLocationFailure(request);
+        setLocationAnnouncement(`已切换到 ${request.occurredOn}，但未找到目标账目。可重新加载并再次定位。`);
+        window.requestAnimationFrame(() => {
+          if (pendingLedgerLocationRef.current === null) {
+            locationFailureActionRef.current?.focus({ preventScroll: true });
+          }
+        });
+        return;
+      }
+
+      pendingLedgerLocationRef.current = null;
+      setLocationFailure(null);
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      const action = target.querySelector("[data-ledger-primary-action]");
+      if (action instanceof HTMLElement) action.focus({ preventScroll: true });
+      setLocationAnnouncement(`已定位到 ${request.referenceCode}，发生日期 ${request.occurredOn}。`);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeTab, expenseListPrintOpen, expenses, invoicePrintItems, status, week.start]);
+
+  useEffect(() => {
+    const previewType = expenseListPrintOpen ? "expense-list" : invoicePrintItems ? "invoice" : null;
+    if (!previewType) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const content = document.querySelector(".content");
+      if (content instanceof HTMLElement) content.scrollTop = 0;
+      else window.scrollTo({ top: 0, behavior: "auto" });
+      const backButton = document.querySelector(`[data-testid="${previewType}-print-preview-back"]`);
+      if (backButton instanceof HTMLElement) backButton.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [expenseListPrintOpen, invoicePrintItems]);
+
+  useEffect(() => () => {
+    if (previewRestoreFrameRef.current !== null) {
+      window.cancelAnimationFrame(previewRestoreFrameRef.current);
+    }
+  }, []);
+
   const receivedAdvances = useMemo(() => advances.filter((advance) => (
     advance?.status === "received"
       && Number.isSafeInteger(advance?.receivedCents)
@@ -236,6 +322,10 @@ export function TravelExpensePage({
   function selectWeek(value) {
     setSelectedLedgerDate(null);
     setHighlightExpenseId(null);
+    setProofFocusExpenseId(null);
+    setLocationAnnouncement("");
+    setLocationFailure(null);
+    pendingLedgerLocationRef.current = null;
     // Invalidate the projection synchronously so no old-week region, receipt,
     // or open settings card can be displayed or saved while the new week is
     // loading. The effect below will repopulate all week-scoped data.
@@ -369,6 +459,13 @@ export function TravelExpensePage({
       setWeek(naturalWeekFor(new Date(`${receipt.occurredOn}T12:00:00`)));
       setSelectedLedgerDate(receipt.occurredOn);
       setHighlightExpenseId(receipt.expenseId);
+      pendingLedgerLocationRef.current = {
+        expenseId: receipt.expenseId,
+        referenceCode: receipt.referenceCode ?? receipt.expenseId,
+        occurredOn: receipt.occurredOn,
+      };
+      setLocationFailure(null);
+      setLocationAnnouncement(`正在定位 ${receipt.referenceCode ?? receipt.expenseId}。`);
       setActiveTab("ledger");
     } else if (item?.status === "accepted" && item?.entryType === "income") {
       const occurredOn = item?.analysis?.expense?.occurredOn ?? item?.analysis?.expense?.occurred_on;
@@ -443,6 +540,62 @@ export function TravelExpensePage({
     }
   }
 
+  function capturePreviewReturn(type) {
+    if (previewRestoreFrameRef.current !== null) {
+      window.cancelAnimationFrame(previewRestoreFrameRef.current);
+      previewRestoreFrameRef.current = null;
+    }
+    const content = document.querySelector(".content");
+    const cycle = previewCycleRef.current + 1;
+    previewCycleRef.current = cycle;
+    previewReturnRef.current = {
+      type,
+      cycle,
+      contentScrollTop: content instanceof HTMLElement ? content.scrollTop : null,
+      windowScrollY: window.scrollY,
+    };
+  }
+
+  function restorePreviewReturn(type) {
+    const state = previewReturnRef.current;
+    if (!state || state.type !== type) return;
+    previewRestoreFrameRef.current = window.requestAnimationFrame(() => {
+      previewRestoreFrameRef.current = window.requestAnimationFrame(() => {
+        previewRestoreFrameRef.current = null;
+        if (previewCycleRef.current !== state.cycle || previewReturnRef.current !== state) return;
+        const content = document.querySelector(".content");
+        if (content instanceof HTMLElement && state.contentScrollTop !== null) {
+          content.scrollTop = state.contentScrollTop;
+        } else {
+          window.scrollTo({ top: state.windowScrollY, behavior: "auto" });
+        }
+        const trigger = document.querySelector(`[data-testid="${type}-print-trigger"]`);
+        if (trigger instanceof HTMLElement) trigger.focus({ preventScroll: true });
+        previewReturnRef.current = null;
+      });
+    });
+  }
+
+  function openExpenseListPrint() {
+    capturePreviewReturn("expense-list");
+    setExpenseListPrintOpen(true);
+  }
+
+  function closeExpenseListPrint() {
+    setExpenseListPrintOpen(false);
+    restorePreviewReturn("expense-list");
+  }
+
+  function openInvoicePrint(items) {
+    capturePreviewReturn("invoice");
+    setInvoicePrintItems(items);
+  }
+
+  function closeInvoicePrint() {
+    setInvoicePrintItems(null);
+    restorePreviewReturn("invoice");
+  }
+
   function locateRecentReceipt(receipt) {
     loadedWeekStartRef.current = null;
     setRegionProfile(null);
@@ -451,31 +604,51 @@ export function TravelExpensePage({
     setWeek(naturalWeekFor(new Date(`${receipt.occurredOn}T12:00:00`)));
     setSelectedLedgerDate(receipt.occurredOn);
     setHighlightExpenseId(receipt.expenseId);
+    pendingLedgerLocationRef.current = {
+      expenseId: receipt.expenseId,
+      referenceCode: receipt.referenceCode,
+      occurredOn: receipt.occurredOn,
+    };
+    setLocationFailure(null);
+    setLocationAnnouncement(`正在定位 ${receipt.referenceCode}。`);
     setActiveTab("ledger");
   }
+
+  function retryLedgerLocation() {
+    if (!locationFailure) return;
+    pendingLedgerLocationRef.current = locationFailure;
+    setLocationFailure(null);
+    setLocationAnnouncement(`正在重新加载并定位 ${locationFailure.referenceCode}。`);
+    setReloadToken((value) => value + 1);
+  }
+
+  const handleProofFocusHandled = useCallback(({ expenseId, referenceCode, found }) => {
+    setProofFocusExpenseId(null);
+    setLocationAnnouncement(found
+      ? `已定位到账目 ${referenceCode ?? expenseId} 的付款凭证。`
+      : "未找到对应付款凭证区域，请重新加载。");
+  }, []);
 
   const crossWeekReceipts = useMemo(() => (
     selectCrossWeekLedgerReceipts(recentLedgerReceipts, week.start)
   ), [recentLedgerReceipts, week.start]);
 
   const getAttachmentUrl = (attachmentId) => apiClient.getTravelExpenseAttachmentContentUrl(attachmentId);
-
-  if (expenseListPrintOpen) {
-    return <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={() => setExpenseListPrintOpen(false)} />;
-  }
-
-  if (invoicePrintItems) {
-    return <InvoicePrintPreview invoices={invoicePrintItems} week={week} owner={owner} getInvoiceContentUrl={apiClient.getInvoiceContentUrl} getInvoiceContentResponse={apiClient.getInvoiceContentResponse} onClose={() => setInvoicePrintItems(null)} />;
-  }
-
+  const printPreview = expenseListPrintOpen
+    ? <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={closeExpenseListPrint} />
+    : invoicePrintItems
+      ? <InvoicePrintPreview invoices={invoicePrintItems} week={week} owner={owner} getInvoiceContentUrl={apiClient.getInvoiceContentUrl} getInvoiceContentResponse={apiClient.getInvoiceContentResponse} onClose={closeInvoicePrint} />
+      : null;
   const selectedWeekLoaded = loadedWeekStartRef.current === week.start;
 
   return (
-    <section className="expense-page" data-testid="page-expense">
+    <>
+      {printPreview}
+      <section className="expense-page" data-testid="page-expense" hidden={Boolean(printPreview)} style={printPreview ? { display: "none" } : undefined}>
       <header className="expense-page-toolbar">
         <div className="expense-page-title"><span>个人工作台</span><h1>费用账本</h1></div>
         <nav ref={tabsRef} className="expense-tabs" aria-label="差旅报销功能" role="tablist">
-          {TABS.map((tab, index) => <button key={tab.id} id={`expense-tab-${tab.id}`} className={activeTab === tab.id ? "active" : ""} data-testid={`expense-tab-${tab.id}`} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`expense-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => navigate(tab.id)} onKeyDown={(event) => handleTabKeyDown(event, index)}>{tab.label}</button>)}
+          {TABS.map((tab, index) => <button key={tab.id} id={`expense-tab-${tab.id}`} className={activeTab === tab.id ? "active" : ""} data-testid={`expense-tab-${tab.id}`} data-trip-region-focus-fallback={tab.id === "ledger" || undefined} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`expense-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => navigate(tab.id)} onKeyDown={(event) => handleTabKeyDown(event, index)}>{tab.label}</button>)}
         </nav>
         <button className="primary-button" type="button" onClick={() => { setEditingExpense(null); setEditorOpen(true); }}><Plus size={16} />手工记一笔</button>
       </header>
@@ -489,6 +662,8 @@ export function TravelExpensePage({
       </section>
 
       {error ? <div className="expense-page-alert" role="alert"><CircleAlert size={18} /><span>{error}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重新加载</button></div> : null}
+      <p className="sr-only" role="status" aria-live="polite">{locationAnnouncement}</p>
+      {locationFailure ? <div className="expense-page-alert is-warning" role="status" data-testid="ledger-location-failure"><CircleAlert size={18} /><span>未找到 {locationFailure.referenceCode}，账目可能尚未同步或已经变更。</span><button ref={locationFailureActionRef} className="ghost-button" type="button" onClick={retryLedgerLocation}>重新加载并定位</button></div> : null}
       {auxiliaryWarning ? <div className="expense-page-alert is-warning" role="status"><CircleAlert size={18} /><span>{auxiliaryWarning}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重试辅助数据</button></div> : null}
       {selectedWeekLoaded && regionProfile && !regionProfile.defaultCity && regionProfile.dateOverrides.length === 0 ? <div className="expense-page-alert is-warning expense-region-callout" role="status"><MapPin size={18} /><span>本周还没有设置出差区域。小小收到付款凭证后会先询问区域，设置后可直接按发生日期匹配。</span><button className="ghost-button" type="button" onClick={() => setRegionSettingsOpen(true)}>设置本周区域</button></div> : null}
       {selectedWeekLoaded && crossWeekReceipts.length > 0 ? <div className="expense-page-alert expense-recent-receipt" role="status"><CheckCircle2 size={18} /><div><span>小小最近录入了其他自然周的账目：</span>{crossWeekReceipts.map((receipt) => <div className="expense-recent-receipt-row" key={`${receipt.expenseId}-${receipt.occurredOn}`}><span>{receipt.referenceCode} · {receipt.weekStart}{receipt.attachmentStatus === "pending" ? " · 付款凭证仍在关联中" : ""}</span><button className="ghost-button" type="button" onClick={() => locateRecentReceipt(receipt)}>查看这笔账目</button></div>)}</div></div> : null}
@@ -517,15 +692,16 @@ export function TravelExpensePage({
                 document.getElementById("expense-ledger-advances")?.scrollIntoView({ behavior: "smooth", block: "start" });
               }}
               onReviewItem={() => document.getElementById("expense-ledger-reviews")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-              onOpenProof={() => {
+              onOpenProof={(expense, projection) => {
                 const details = document.getElementById("expense-ledger-proofs");
                 if (details) details.open = true;
-                details?.scrollIntoView({ behavior: "smooth", block: "start" });
+                const expenseId = projection?.sourceId ?? expense?.id;
+                setProofFocusExpenseId(expenseId ?? null);
               }}
               onOpenRegionSettings={() => setRegionSettingsOpen(true)}
               getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse}
               onRetry={() => setReloadToken((value) => value + 1)}
-              onOpenExpenseListPrint={() => setExpenseListPrintOpen(true)}
+              onOpenExpenseListPrint={openExpenseListPrint}
               onExportExpenseList={() => void exportExpenseList()}
               exporting={expenseListExporting}
             />
@@ -536,7 +712,7 @@ export function TravelExpensePage({
               </section>
               <details id="expense-ledger-proofs" className="expense-ledger-child-card">
                 <summary><span><strong>付款凭证</strong><small>导入、人工关联和查看已附付款原件</small></span><b>{documentInbox.length} 待处理</b></summary>
-                <PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} />
+                <PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} focusExpenseId={proofFocusExpenseId} onFocusExpenseHandled={handleProofFocusHandled} />
               </details>
               <details id="expense-ledger-advances" className="expense-ledger-child-card">
                 <summary><span><strong>借款到账</strong><small>只记录实际到账的“收入 / 出差借款”</small></span><b>{receivedAdvances.length} 笔</b></summary>
@@ -544,12 +720,13 @@ export function TravelExpensePage({
               </details>
             </div>
           </> : null}
-          {activeTab === "invoices" ? <InvoiceManager apiClient={apiClient} week={week} expenses={expenses} onOpenPrint={(items) => setInvoicePrintItems(items)} onExpenseChanged={() => setReloadToken((value) => value + 1)} /> : null}
+          {activeTab === "invoices" ? <InvoiceManager apiClient={apiClient} week={week} expenses={expenses} onOpenPrint={openInvoicePrint} onExpenseChanged={() => setReloadToken((value) => value + 1)} /> : null}
         </div>
       ) : null}
 
       <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); }} onSave={saveExpense} />
       <TripRegionSettingsCard open={selectedWeekLoaded && regionSettingsOpen} profile={regionProfile} pending={regionSaving} onClose={() => setRegionSettingsOpen(false)} onSave={saveRegionProfile} />
-    </section>
+      </section>
+    </>
   );
 }
