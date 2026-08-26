@@ -2,32 +2,32 @@
 
 森特智行 AI 销售作战台是一套面向个人复杂型 B2B 销售的业务系统。它把沟通记录、客户、商机、行动、风险、拜访行程、知识和周报放在同一套数据链路中，减少重复录入，也避免 AI 结果停留在一次性对话里。
 
-系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，常规发布只允许来自已验证的 `main` 和 GitHub Release；本次 `v0.6.23` 按项目所有者授权继续采用本地 exact-commit 路径，不同步 GitHub。生产数据库、录音、微信状态、密钥和备份不进入 Git。
+系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，常规发布只允许来自已验证的 `main` 和 GitHub Release；本次 `v0.6.24` 按项目所有者授权继续采用本地 exact-commit 路径，不同步 GitHub。生产数据库、录音、微信状态、密钥和备份不进入 Git。
 
 ## 代码、发布与生产状态
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前开发候选 | `v0.6.23`（小小餐饮时段、商户、行程区域与备注自动分类候选） |
-| v0.6.23 发布方式 | 不同步 GitHub；本地完整门禁、注释标签、不可变归档、manifest、SHA-256 与生产 evidence |
+| 当前开发候选 | `v0.6.24`（差旅费用账本、发票与严格七列报销输出工作流候选） |
+| v0.6.24 发布方式 | 不同步 GitHub；本地完整门禁、注释标签、不可变归档、manifest、SHA-256 与生产 evidence |
 | v0.6.1 Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
 | v0.6.1 Release 状态 | 正式 Release 已发布；生产切换、`0017` 迁移、切换前后预检和 HTTPS smoke 均已完成 |
 | v0.6.0 Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
 | v0.6.0 Release 归档 SHA-256 | `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371` |
-| 本次发布前生产源码版本 | `v0.6.22` |
-| 本次发布前生产提交 | `434a78060fbd3edb593bd3885d9d82920afcc12e` |
+| 本次发布前生产源码版本 | 以切换前服务器 `current` 与 manifest 的 fresh 快照为准 |
+| 本次发布前生产提交 | 以切换前服务器 manifest 的完整 commit 为准 |
 | 当前生产身份说明 | 本地 exact-commit 不可变 release；以服务器 manifest、服务路径和生产 evidence 为准 |
 | 最新公开 GitHub Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
-| 本次发布前生产 release | `/opt/sentelligent-sales-workbench/releases/v0.6.22-20260825T110323Z_434a78060fbd` |
-| 本次回滚基线 | v0.6.22 不可变 release；切换脚本还会生成 fresh 数据库和微信会话备份 |
+| 本次发布前生产 release | 以切换前服务器 `current` 真实路径为准 |
+| 本次回滚基线 | 切换前已验收的不可变 release；切换脚本还会生成 fresh 数据库和微信会话备份 |
 | v0.6.1 历史生产状态 | 当时切换前后预检均 `25/25`，HTTPS smoke `25/25`、`cleanup=clean`，数据库完整性通过 |
-| 发布前生产代码 | `434a78060fbd` 已运行；其旧预检不能替代 v0.6.23 的 fresh 证据 |
+| 发布前生产代码 | 以 fresh 服务器快照为准；任何旧预检都不能替代 v0.6.24 的 fresh 证据 |
 | `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
 | `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；已由后续版本取代 |
 | `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
 | `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
 
-上述历史现网字段不能替代本次 v0.6.23 的 fresh 生产证据；切换前必须重新采集数据库、服务、主机身份和受保护服务快照。生产部署细节见 [部署记录](docs/部署记录.md)，本次候选边界见 [v0.6.23 版本说明](docs/releases/v0.6.23.md)。
+上述历史现网字段不能替代本次 v0.6.24 的 fresh 生产证据；切换前必须重新采集数据库、服务、主机身份和受保护服务快照。生产部署细节见 [部署记录](docs/部署记录.md)，餐饮自动分类基线见 [v0.6.23 版本说明](docs/releases/v0.6.23.md)，本次候选边界见 [v0.6.24 版本说明](docs/releases/v0.6.24.md)。
 
 ## 功能状态
 
@@ -132,7 +132,7 @@ npm --prefix outputs/product-design-prototype run qa:webkit
 
 - 使用语义化版本，源文件版本写入 `VERSION` 和三个 `package.json`。常规正式发布以 tag、GitHub Release 和部署证据为准；项目所有者已明确授权的本地发布还必须具备 final exact commit、本地注释标签、不可变归档、manifest、独立 SHA-256 和服务器 evidence。
 - `v*` 标签触发 GitHub Release workflow，重新运行质量门并生成 `.tar.gz`、`release-result.json` 和 `SHA256SUMS`。
-- 生产默认只部署已合并到 `main` 且已打标签的提交；本次 `v0.6.23` 是不推 GitHub 的明确授权例外，仍必须从干净 final exact commit 和唯一注释标签生成制品。
+- 生产默认只部署已合并到 `main` 且已打标签的提交；本次 `v0.6.24` 是不推 GitHub 的明确授权例外，仍必须从干净 final exact commit 和唯一注释标签生成制品。
 - GitHub Release 归档已包含质量门验证过的前端 `dist`；生产直接使用该目录，不在服务器重新构建前端。
 - 每个 release 使用独立目录。systemd 单元直接固定到真实 release 路径，`current` 只作人工识别，不作为服务启动依据。
 - 回滚只切换三个项目服务到上一已验收 release。共享 Caddy 和同机其他系统不随应用回滚重启。
