@@ -8,7 +8,7 @@ async function source(name) {
   return readFile(new URL(name, folder), "utf8");
 }
 
-describe("scheme-three expense ledger workbench shell", () => {
+describe("expense ledger workbench shell", () => {
   it("renders the Monday-to-Sunday day selector with accessible tab behavior", async () => {
     const component = await source("ExpenseLedgerWorkbench.jsx");
 
@@ -65,7 +65,9 @@ describe("scheme-three expense ledger workbench shell", () => {
     assert.match(component, /onReviewItem/);
     assert.match(component, /onOpenItem/);
     assert.match(component, /onOpenRegionSettings/);
-    assert.match(component, /onStartReimbursement/);
+    assert.match(component, /onOpenExpenseListPrint/);
+    assert.match(component, /onExportExpenseList/);
+    assert.match(component, /getAttachmentContentResponse/);
   });
 
   it("keeps the confirmed summary and loan income visible without adding pending totals", async () => {
@@ -78,7 +80,23 @@ describe("scheme-three expense ledger workbench shell", () => {
     assert.match(component, /超额个人垫付/);
     assert.match(component, /凭证缺失/);
     assert.match(component, /发票缺失/);
-    assert.match(component, /整理报销/);
+    assert.match(component, /打印费用清单/);
+    assert.match(component, /导出费用清单/);
+  });
+
+  it("renders authenticated first-proof previews in desktop rows and mobile cards", async () => {
+    const component = await source("ExpenseLedgerWorkbench.jsx");
+    const css = await source("expenseLedgerWorkbench.css");
+
+    assert.match(component, /AuthenticatedImageFrame/);
+    assert.match(component, /paymentProofs\?\.\[0\]/);
+    assert.match(component, /共 \{item\.paymentProofCount\} 份/);
+    assert.match(component, /ledger-proof-pdf-mark/);
+    assert.match(component, /未上传/);
+    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: contain/s);
+    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width: 48px[^}]*height: 54px[^}]*flex: 0 0 48px/s);
+    assert.match(component, /共 \{item\.paymentProofCount\} 份/);
+    assert.match(component, /aria-label=\{`查看\$\{item\.paymentProofCount\}份付款凭证`\}/);
   });
 
   it("loads only its isolated stylesheet and leaves the existing page stylesheet untouched", async () => {

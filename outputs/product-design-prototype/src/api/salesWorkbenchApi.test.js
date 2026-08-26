@@ -310,6 +310,8 @@ function sampleTravelExpense(overrides = {}) {
     customerId: "customer-1",
     invoiceStatus: "covered",
     notes: null,
+    tripRegion: null,
+    tripRegionSource: null,
     payments: [sampleTravelExpensePayment()],
     attachments: [sampleTravelExpenseAttachment()],
     createdBy: "jiangjz",
@@ -394,6 +396,19 @@ function sampleTravelExpenseWorkbench(overrides = {}) {
     expenses: [sampleTravelExpense()],
     advances: [sampleTravelExpenseAdvance()],
     bookkeepingReviews: [sampleShortcutBookkeepingReview()],
+    regionProfile: {
+      weekStart: "2026-08-03",
+      weekEnd: "2026-08-09",
+      version: 0,
+      cities: [],
+      defaultCity: null,
+      dateOverrides: [],
+      createdAt: null,
+      updatedAt: null,
+    },
+    recentLedgerReceipts: [sampleShortcutBookkeepingLedgerReceipt({
+      acceptedAt: "2026-08-04T12:32:30.000Z",
+    })],
     generatedAt: "2026-08-04T12:33:00.000Z",
     ...overrides,
   };
@@ -2433,6 +2448,52 @@ describe("sales workbench API client", () => {
       () => invalidApi.getTravelExpenseWorkbench({ weekStart: "2026-08-03" }),
       /attachmentStatus: expected matched, pending, or not_available/,
     );
+  });
+
+  it("loads and saves the owner-scoped weekly region profile with first-write optimistic locking", async () => {
+    const calls = [];
+    const empty = sampleTravelExpenseWorkbench().regionProfile;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          ifMatch: headerValue(options, "If-Match"),
+          csrf: headerValue(options, "X-CSRF-Token"),
+          body: options.body ? JSON.parse(options.body) : null,
+        });
+        return jsonResponse({
+          item: options.method === "PUT"
+            ? { ...empty, version: 1, cities: ["济宁"], defaultCity: "济宁", updatedAt: "2026-08-04T12:34:00.000Z" }
+            : empty,
+        });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-test" });
+
+    const loaded = await api.getTravelExpenseRegionProfile({ weekStart: "2026-08-03" });
+    const saved = await api.saveTravelExpenseRegionProfile({
+      version: loaded.version,
+      weekStart: loaded.weekStart,
+      cities: ["济宁"],
+      defaultCity: "济宁",
+      dateOverrides: [],
+      owner: "must-not-be-sent",
+    });
+
+    assert.equal(loaded.version, 0);
+    assert.equal(saved.version, 1);
+    assert.equal(calls[0].url, "https://example.test/api/travel-expense-region-profile?weekStart=2026-08-03");
+    assert.equal(calls[1].method, "PUT");
+    assert.equal(calls[1].ifMatch, '"0"');
+    assert.equal(calls[1].csrf, "csrf-test");
+    assert.deepEqual(calls[1].body, {
+      weekStart: "2026-08-03",
+      cities: ["济宁"],
+      defaultCity: "济宁",
+      dateOverrides: [],
+    });
   });
 
   it("adds and deletes expense attachments and builds an authenticated encoded content URL", async () => {

@@ -278,11 +278,217 @@ describe("authenticated travel expense API", () => {
       assert.deepEqual(received.body.item.expenses, [createdExpense]);
       assert.deepEqual(received.body.item.advances, [createdAdvance.body.item]);
       assert.deepEqual(received.body.item.bookkeepingReviews, []);
+      assert.deepEqual(received.body.item.regionProfile, {
+        weekStart: "2026-08-03",
+        weekEnd: "2026-08-09",
+        version: 0,
+        cities: [],
+        defaultCity: null,
+        dateOverrides: [],
+        createdAt: null,
+        updatedAt: null,
+      });
+      assert.deepEqual(received.body.item.recentLedgerReceipts, []);
       assert.match(received.body.item.generatedAt, /^\d{4}-\d{2}-\d{2}T/u);
 
       const invalidWeek = await request("/api/travel-expense-workbench?weekStart=2026-08-02");
       assert.equal(invalidWeek.response.status, 422);
       assert.equal(invalidWeek.body.error.code, "VALIDATION_ERROR");
+    });
+  });
+
+  it("reads and version-saves one owner-scoped natural-week region profile", async () => {
+    await withHarness(async ({ csrf, request }) => {
+      const empty = await request("/api/travel-expense-region-profile?weekStart=2026-08-24");
+      assert.equal(empty.response.status, 200);
+      assert.equal(empty.response.headers.get("cache-control"), "no-store");
+      assert.equal(empty.body.item.version, 0);
+
+      const payload = {
+        weekStart: "2026-08-24",
+        cities: ["济南", "青岛"],
+        defaultCity: "济南",
+        dateOverrides: [{ date: "2026-08-27", city: "青岛" }],
+      };
+      const missingVersion = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(missingVersion.response.status, 428);
+
+      const saved = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(saved.response.status, 200);
+      assert.equal(saved.response.headers.get("etag"), '"1"');
+      assert.deepEqual(saved.body.item.cities, ["济南", "青岛"]);
+      assert.equal(saved.body.item.defaultCity, "济南");
+      assert.deepEqual(saved.body.item.dateOverrides, [{ date: "2026-08-27", city: "青岛" }]);
+
+      const stale = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify({ ...payload, defaultCity: "青岛" }),
+      });
+      assert.equal(stale.response.status, 409);
+      assert.equal(stale.body.error.fields.currentVersion, 1);
+
+      const invalid = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"1"' },
+        body: JSON.stringify({ ...payload, owner: "other-owner" }),
+      });
+      assertValidation(invalid, "owner");
+
+      const projected = await request("/api/travel-expense-workbench?weekStart=2026-08-24");
+      assert.deepEqual(projected.body.item.regionProfile, saved.body.item);
+      const inherited = await request("/api/travel-expense-region-profile?weekStart=2026-08-31");
+      assert.deepEqual(inherited.body.item, {
+        weekStart: "2026-08-31",
+        weekEnd: "2026-09-06",
+        version: 0,
+        cities: ["济南", "青岛"],
+        defaultCity: null,
+        dateOverrides: [],
+        createdAt: null,
+        updatedAt: null,
+      });
+    });
+  });
+
+  it("reports a committed region save as successful when pending-draft refresh is deferred", async () => {
+    const refreshCalls = [];
+    await withHarness(async ({ csrf, request }) => {
+      const payload = {
+        weekStart: "2026-08-24",
+        cities: ["济南"],
+        defaultCity: "济南",
+        dateOverrides: [],
+      };
+      const saved = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(saved.response.status, 200, JSON.stringify(saved.body));
+      assert.equal(saved.body.item.version, 1);
+      assert.deepEqual(saved.body.draftRefresh, {
+        status: "deferred",
+        refreshedCount: 0,
+        errorCode: "REGION_DRAFT_REFRESH_DEFERRED",
+      });
+      assert.deepEqual(refreshCalls, [{ account: "travel-owner", weekStart: "2026-08-24" }]);
+
+      const persisted = await request("/api/travel-expense-region-profile?weekStart=2026-08-24");
+      assert.equal(persisted.response.status, 200);
+      assert.equal(persisted.body.item.version, 1);
+      assert.equal(persisted.body.item.defaultCity, "济南");
+
+      const staleRetry = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(staleRetry.response.status, 409);
+      assert.equal(staleRetry.body.error.fields.currentVersion, 1);
+    }, {
+      shortcutBookkeepingAssistantRuntime: {
+        refreshRegionDependentDrafts(input) {
+          refreshCalls.push(input);
+          throw new Error("synthetic draft refresh failure");
+        },
+      },
+    });
+  });
+
+  it("refreshes a profile-derived pending meal when Web clears the weekly region", async () => {
+    await withHarness(async ({ csrf, databaseUrl, request }) => {
+      const fixtureDb = openDatabase({ databaseUrl });
+      let reviewId;
+      try {
+        const repository = createShortcutBookkeepingRepository(fixtureDb, {
+          idFactory: () => "web-region-clear-review",
+          clock: () => new Date("2026-08-25T04:00:00.000Z"),
+        });
+        const received = repository.receive({
+          owner: "travel-owner",
+          actor: "travel-owner",
+          ledgerName: "出差报销",
+          entryType: "expense",
+          category: "餐饮",
+          subcategory: "午餐",
+          idempotencyKey: "web-region-clear-review",
+          requestHash: "b".repeat(64),
+          rawText: "合成午餐",
+        });
+        reviewId = received.item.id;
+        const claimed = repository.claim(reviewId);
+        repository.completeLocal(reviewId, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "review_required",
+            confidence: 1,
+            category: "餐饮",
+            subcategory: "午餐",
+            note: "8.25济南午餐",
+            noteAutomation: {
+              kind: "meal",
+              mealKey: "lunch",
+              paidTime: "12:00",
+              tripRegion: "济南",
+              tripRegionSource: "week_default",
+            },
+            expense: {
+              occurredOn: "2026-08-25",
+              amountCents: 3000,
+              reimbursementCents: 3000,
+              purpose: "合成午餐",
+              merchant: null,
+              fundingSource: "personal",
+              paymentMethod: "wechat",
+            },
+            warnings: ["WEIXIN_CONFIRMATION_REQUIRED"],
+            source: { provider: "test", model: null },
+          },
+        });
+      } finally {
+        fixtureDb.close();
+      }
+
+      const saved = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify({
+          weekStart: "2026-08-24", cities: ["济南"], defaultCity: "济南", dateOverrides: [],
+        }),
+      });
+      assert.equal(saved.response.status, 200);
+      const cleared = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"1"' },
+        body: JSON.stringify({
+          weekStart: "2026-08-24", cities: [], defaultCity: null, dateOverrides: [],
+        }),
+      });
+      assert.equal(cleared.response.status, 200);
+
+      const verifiedDb = openDatabase({ databaseUrl });
+      try {
+        const row = verifiedDb.prepare(`
+          SELECT note, analysis_json FROM shortcut_bookkeeping_entries WHERE id = $id
+        `).get({ $id: reviewId });
+        const analysis = JSON.parse(row.analysis_json);
+        assert.equal(row.note, null);
+        assert.equal(analysis.noteAutomation.tripRegion, null);
+        assert.equal(analysis.noteAutomation.tripRegionSource, null);
+        assert.ok(analysis.warnings.includes("missing_trip_region"));
+        assert.equal(verifiedDb.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+      } finally {
+        verifiedDb.close();
+      }
     });
   });
 
@@ -387,6 +593,10 @@ describe("authenticated travel expense API", () => {
       assert.equal(projection.body.item.expenses.length, 1);
       assert.equal(projection.body.item.expenses[0].id, confirmed.body.item.ledgerReceipt.expenseId);
       assert.deepEqual(projection.body.item.bookkeepingReviews, []);
+      assert.deepEqual(projection.body.item.recentLedgerReceipts, [{
+        ...confirmed.body.item.ledgerReceipt,
+        acceptedAt: confirmed.body.item.updatedAt,
+      }]);
 
       const probeDb = openDatabase({ databaseUrl });
       try {
@@ -710,6 +920,17 @@ describe("authenticated travel expense API", () => {
         body: JSON.stringify(advance()),
       });
       assert.equal(createdAdvance.response.status, 201);
+      const region = await first.request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "If-Match": '"0"', "X-CSRF-Token": first.csrf },
+        body: JSON.stringify({
+          weekStart: "2026-08-03",
+          cities: ["济南"],
+          defaultCity: "济南",
+          dateOverrides: [],
+        }),
+      });
+      assert.equal(region.response.status, 200);
       await closeServer(first.server);
       first = null;
 
@@ -723,6 +944,10 @@ describe("authenticated travel expense API", () => {
       assert.equal((await second.request(`/api/travel-expenses/${encodeURIComponent(createdExpense.id)}`)).response.status, 404);
       assert.equal((await second.authenticatedFetch(contentUrl)).status, 404);
       assert.deepEqual((await second.request("/api/travel-expense-advances?weekStart=2026-08-03")).body.items, []);
+      assert.deepEqual(
+        (await second.request("/api/travel-expense-region-profile?weekStart=2026-08-03")).body.item.cities,
+        [],
+      );
       const foreignPatch = await second.request(`/api/travel-expenses/${encodeURIComponent(createdExpense.id)}`, {
         method: "PATCH",
         headers: { "If-Match": '"2"' },

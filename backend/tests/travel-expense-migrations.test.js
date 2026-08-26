@@ -29,6 +29,7 @@ describe("travel expense migration", () => {
         "travel_expense_ingestions",
         "travel_expense_no_invoice_confirmations",
         "travel_expense_payments",
+        "travel_expense_region_profiles",
         "travel_expenses",
       ]);
 
@@ -36,6 +37,7 @@ describe("travel expense migration", () => {
         "id", "version", "owner", "occurred_on", "category", "purpose", "merchant",
         "itinerary_id", "customer_id", "invoice_status", "notes", "created_by", "updated_by",
         "created_at", "updated_at", "deleted_at", "deleted_by", "reference_code",
+        "trip_region", "trip_region_source",
       ]);
       assert.deepEqual(columns(db, "travel_expense_payments").map((column) => column.name), [
         "id", "expense_id", "sequence", "paid_at", "merchant", "amount_cents",

@@ -1761,7 +1761,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           5000,
         );
         await waitUntil(() => !expensePage.querySelector('.expense-loading'), 10000);
-        const expectedExpenseTabs = ['ledger', 'invoices', 'export'];
+        const expectedExpenseTabs = ['ledger', 'invoices'];
         const expenseTabIds = [...expensePage.querySelectorAll('[data-testid^="expense-tab-"]')]
           .map((tab) => tab.getAttribute('data-testid')?.replace('expense-tab-', '') ?? '');
         const naturalWeekInput = expensePage.querySelector('input[type="week"]');
@@ -1774,14 +1774,25 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const ledgerOpened = ledgerTab.getAttribute('aria-selected') === 'true'
           && Boolean(ledgerWorkbench);
         const ledgerChildFunctionCount = expensePage.querySelectorAll('.expense-ledger-child-card').length;
-        const exportTab = expensePage.querySelector('[data-testid="expense-tab-export"]');
-        if (!exportTab) throw new Error('Missing travel expense export tab');
-        exportTab.click();
-        await waitUntil(
-          () => exportTab.getAttribute('aria-selected') === 'true'
-            && expensePage.querySelector('.expense-organizer-view'),
+        const legacyExportAbsent = !expensePage.querySelector('[data-testid="expense-tab-export"]')
+          && !expensePage.querySelector('.expense-organizer-view');
+        const reimbursementActions = expensePage.querySelector('[data-testid="ledger-reimbursement-actions"]');
+        const reimbursementActionsPresent = Boolean(reimbursementActions)
+          && reimbursementActions.querySelectorAll('button').length === 2
+          && reimbursementActions.textContent.includes('打印费用清单')
+          && reimbursementActions.textContent.includes('导出费用清单');
+        const openRegionButton = expensePage.querySelector('[aria-label="编辑我的负责区域"]')
+          ?? [...expensePage.querySelectorAll('button')].find((button) => button.textContent.includes('设置本周区域'));
+        if (!openRegionButton) throw new Error('Missing weekly region settings button');
+        openRegionButton.click();
+        const regionDialog = await waitUntil(
+          () => document.querySelector('[data-testid="trip-region-settings-layer"] [role="dialog"]'),
           3000,
         );
+        const closeRegionButton = regionDialog.querySelector('[aria-label="关闭区域设置"]');
+        if (!closeRegionButton) throw new Error('Missing weekly region settings close button');
+        closeRegionButton.click();
+        await waitUntil(() => !document.querySelector('[data-testid="trip-region-settings-layer"]'), 3000);
         const openExpenseEditorButton = [...expensePage.querySelectorAll('button')]
           .find((button) => button.textContent.includes('记一笔'));
         if (!openExpenseEditorButton) throw new Error('Missing travel expense create button');
@@ -1807,7 +1818,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         window.__qaExpense = {
           pageOpened: Boolean(expensePage),
           loadedWithoutAlert: !expensePage.querySelector('.expense-loading')
-            && !expensePage.querySelector('.expense-page-alert'),
+            && !expensePage.querySelector('.expense-page-alert[role="alert"]'),
           tabsPresent: expectedExpenseTabs.every((tabId) => expenseTabIds.includes(tabId))
             && expenseTabIds.length === expectedExpenseTabs.length,
           tabIds: expenseTabIds,
@@ -1816,8 +1827,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           weekValue: naturalWeekInput?.value ?? '',
           ledgerOpened,
           ledgerChildFunctionsPresent: ledgerChildFunctionCount === 3,
-          exportOpened: exportTab.getAttribute('aria-selected') === 'true'
-            && Boolean(expensePage.querySelector('.expense-organizer-view')),
+          legacyExportAbsent,
+          reimbursementActionsPresent,
+          regionSettingsOpened: Boolean(regionDialog),
+          regionSettingsClosed: !document.querySelector('[data-testid="trip-region-settings-layer"]'),
           editorOpened: Boolean(expenseEditor),
           editorControlCount: expenseEditorControls.length,
           editorLabelsComplete: expenseEditorLabelsComplete,
@@ -2906,14 +2919,17 @@ async function main() {
         assert.equal(result.expenseFlow.loadedWithoutAlert, true, "desktop travel expense page should finish loading without an error alert");
         assert.deepEqual(
           result.expenseFlow.tabIds,
-          ['ledger', 'invoices', 'export'],
-          "desktop travel expense page should expose the three scheme-three workspaces",
+          ['ledger', 'invoices'],
+          "desktop travel expense page should expose only ledger and invoice workspaces",
         );
         assert.equal(result.expenseFlow.tabsPresent, true, "desktop travel expense page should expose exactly the expected reimbursement tabs");
         assert.equal(result.expenseFlow.naturalWeekInput, true, "desktop travel expense page should use a populated natural-week input");
         assert.equal(result.expenseFlow.ledgerOpened, true, "desktop travel expense page should open the scheme-three ledger workspace by default");
         assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain reviews, payment proofs, and advances as three child functions");
-        assert.equal(result.expenseFlow.exportOpened, true, "desktop travel expense export tab should open the reimbursement output workbench");
+        assert.equal(result.expenseFlow.legacyExportAbsent, true, "desktop travel expense page must not expose a standalone reimbursement output tab");
+        assert.equal(result.expenseFlow.reimbursementActionsPresent, true, "desktop ledger should expose only print and Excel expense-list actions");
+        assert.equal(result.expenseFlow.regionSettingsOpened, true, "desktop ledger should open the weekly region settings card");
+        assert.equal(result.expenseFlow.regionSettingsClosed, true, "desktop weekly region settings card should close without saving");
         assert.equal(result.expenseFlow.editorOpened, true, "desktop travel expense create action should open the expense editor");
         assert.ok(result.expenseFlow.editorControlCount > 0, "desktop travel expense editor should render form controls");
         assert.equal(result.expenseFlow.editorLabelsComplete, true, "desktop travel expense editor controls should all have readable labels");

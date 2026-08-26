@@ -302,6 +302,8 @@ export function createTravelExpenseRepository(db, {
       customerId: row.customer_id,
       invoiceStatus: row.invoice_status,
       notes: row.notes,
+      tripRegion: row.trip_region ?? null,
+      tripRegionSource: row.trip_region_source ?? null,
       payments,
       attachments,
       actualPaidCents: payments.reduce((sum, item) => sum + item.amountCents, 0),

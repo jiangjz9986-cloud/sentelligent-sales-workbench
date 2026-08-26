@@ -31,7 +31,7 @@ describe("travel expense feature boundary", () => {
     assert.match(app, /<TravelExpensePage/);
     assert.doesNotMatch(app, /实际付款记录表/);
     assert.match(page, /data-testid="page-expense"/);
-    const labels = ["账本", "发票", "报销输出"];
+    const labels = ["账本", "发票"];
     const positions = labels.map((label) => page.indexOf(`label: "${label}"`));
     assert.equal(positions.every((position) => position >= 0), true);
     assert.deepEqual([...positions].sort((left, right) => left - right), positions);
@@ -47,10 +47,10 @@ describe("travel expense feature boundary", () => {
     const listPrint = await source("src/features/travelExpense/ExpenseListPrintPreview.jsx");
 
     assert.match(page, /记一笔/);
-    assert.match(organizer, /打印实际付款记录/);
     assert.match(organizer, /打印费用清单/);
-    assert.match(organizer, /导出付款明细 CSV/);
     assert.match(organizer, /导出费用清单 Excel/);
+    assert.doesNotMatch(organizer, /导出付款明细 CSV/);
+    assert.doesNotMatch(organizer, /打印实际付款记录/);
     assert.match(listPrint, /费用清单/);
     assert.match(listPrint, /A4 纵向预览/);
     assert.match(listPrint, /window\.print/);
@@ -61,16 +61,18 @@ describe("travel expense feature boundary", () => {
     assert.match(editor, /请款资金/);
   });
 
-  it("implements the three scheme-three workspaces while retaining child tools and settlement language", async () => {
+  it("implements the two canonical workspaces while retaining ledger child tools and settlement language", async () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const ledger = await source("src/features/travelExpense/ExpenseLedgerWorkbench.jsx");
+    const ledgerCss = await source("src/features/travelExpense/expenseLedgerWorkbench.css");
     const proofs = await source("src/features/travelExpense/PaymentProofCenter.jsx");
     const invoices = await source("src/features/travelExpense/InvoiceManager.jsx");
     const settlement = await source("src/features/travelExpense/AdvanceSettlement.jsx");
 
     assert.match(page, /\{ id: "ledger", label: "账本" \}/);
     assert.match(page, /\{ id: "invoices", label: "发票" \}/);
-    assert.match(page, /\{ id: "export", label: "报销输出" \}/);
+    assert.doesNotMatch(page, /\{ id: "export", label: "报销输出" \}/);
+    assert.doesNotMatch(page, /expense-tab-export/);
     assert.match(page, /data-testid=\{`expense-tab-\$\{tab\.id\}`\}/);
     assert.match(page, /重新加载/);
     assert.match(page, /type="week"/);
@@ -78,7 +80,8 @@ describe("travel expense feature boundary", () => {
     assert.match(ledger, /按周一至周日查看费用账本/);
     assert.match(ledger, /待确认内容不会计入本周合计/);
     assert.match(ledger, /借款收入/);
-    assert.match(ledger, /整理报销/);
+    assert.match(ledger, /打印费用清单/);
+    assert.match(ledger, /导出费用清单/);
     assert.match(proofs, /上传付款凭证/);
     assert.match(proofs, /至少选择一笔付款/);
     assert.match(proofs, /type="checkbox"/);
@@ -126,7 +129,7 @@ describe("travel expense feature boundary", () => {
     assert.match(ledger, /尚未计入本周合计/);
   });
 
-  it("gives the three primary workspaces keyboard tab semantics", async () => {
+  it("gives the two primary workspaces keyboard tab semantics", async () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
 
     assert.match(page, /role="tablist"/);
@@ -149,7 +152,10 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /loadedWeekStartRef\.current = week\.start/);
     assert.match(page, /const selectedWeekLoaded = loadedWeekStartRef\.current === week\.start/);
     assert.match(page, /status !== "loading" && selectedWeekLoaded/);
-    assert.match(page, /function selectWeek\(value\) \{\s*setSelectedLedgerDate\(null\);\s*setHighlightExpenseId\(null\);\s*setWeek\(weekFromInput\(value\)\);\s*\}/s);
+    assert.match(page, /function selectWeek\(value\) \{[\s\S]*?loadedWeekStartRef\.current = null;[\s\S]*?setRegionProfile\(null\);[\s\S]*?setRecentLedgerReceipts\(\[\]\);[\s\S]*?setRegionSettingsOpen\(false\);[\s\S]*?setWeek\(weekFromInput\(value\)\);\s*\}/);
+    assert.match(page, /changingWeek[\s\S]*?setRegionProfile\(null\);[\s\S]*?setRecentLedgerReceipts\(\[\]\);[\s\S]*?setRegionSettingsOpen\(false\);/);
+    assert.match(page, /canSaveRegionProfileForWeek/);
+    assert.match(page, /open=\{selectedWeekLoaded && regionSettingsOpen\}/);
     assert.match(page, /item\?\.status === "accepted" && item\?\.entryType === "income"/);
     assert.match(page, /item\?\.analysis\?\.expense\?\.occurredOn \?\? item\?\.analysis\?\.expense\?\.occurred_on/);
     assert.match(page, /setSelectedLedgerDate\(occurredOn\)/);
@@ -182,25 +188,13 @@ describe("travel expense feature boundary", () => {
     assert.doesNotMatch(settlement, /录入请款|申请金额|申请日期/);
   });
 
-  it("keeps integration QA aligned with the tab selection contract", async () => {
+  it("keeps integration QA aligned with the two-tab contract", async () => {
     const integrationQa = await source("scripts/integration-qa.mjs");
 
+    assert.match(integrationQa, /const legacyExportAbsent = !expensePage\.querySelector\('\[data-testid="expense-tab-export"\]'\)/);
     assert.match(
       integrationQa,
-      /exportTab\.getAttribute\('aria-selected'\) === 'true'/,
-    );
-    assert.doesNotMatch(
-      integrationQa,
-      /exportTab\.getAttribute\('aria-current'\)/,
-    );
-  });
-
-  it("expects the current scheme-three reimbursement tabs in integration QA", async () => {
-    const integrationQa = await source("scripts/integration-qa.mjs");
-
-    assert.match(
-      integrationQa,
-      /assert\.deepEqual\([\s\S]*?result\.expenseFlow\.tabIds,[\s\S]*?\['ledger', 'invoices', 'export'\]/,
+      /assert\.deepEqual\([\s\S]*?result\.expenseFlow\.tabIds,[\s\S]*?\['ledger', 'invoices'\]/,
     );
   });
 
@@ -277,6 +271,33 @@ describe("travel expense feature boundary", () => {
     assert.match(css, /\.expense-list-print-totals/);
   });
 
+  it("shows authenticated payment thumbnails, cross-week receipts, and editable weekly regions", async () => {
+    const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
+    const ledger = await source("src/features/travelExpense/ExpenseLedgerWorkbench.jsx");
+    const ledgerCss = await source("src/features/travelExpense/expenseLedgerWorkbench.css");
+    const model = await source("src/features/travelExpense/expenseLedgerWorkbenchModel.js");
+    const regionCard = await source("src/features/travelExpense/TripRegionSettingsCard.jsx");
+    const regionCss = await source("src/features/travelExpense/tripRegionSettingsCard.css");
+
+    assert.match(page, /selectCrossWeekLedgerReceipts\(recentLedgerReceipts, week\.start\)/);
+    assert.match(page, /crossWeekReceipts\.map\(\(receipt\) =>/);
+    assert.match(page, /onClick=\{\(\) => locateRecentReceipt\(receipt\)\}/);
+    assert.match(page, /setSelectedLedgerDate\(receipt\.occurredOn\)/);
+    assert.match(page, /setHighlightExpenseId\(receipt\.expenseId\)/);
+    assert.match(page, /selectedWeekLoaded && regionProfile/);
+    assert.match(page, /<TripRegionSettingsCard/);
+    assert.match(page, /saveTravelExpenseRegionProfile/);
+    assert.match(model, /paymentProofs: ledgerRow\.visible\.paymentProofs/);
+    assert.match(ledger, /<AuthenticatedImageFrame/);
+    assert.match(ledgerCss, /object-fit: contain/);
+    assert.match(ledger, /共 \{item\.paymentProofCount\} 份/);
+    assert.match(regionCard, /role="dialog"/);
+    assert.match(regionCard, /逐日覆盖/);
+    assert.match(regionCard, /区域设置已在其他窗口更新/);
+    assert.match(regionCss, /position: fixed/);
+    assert.match(regionCss, /@media \(max-width: 620px\)/);
+  });
+
   it("keeps failed payment thumbnails retryable without leaking partial object URLs", async () => {
     const preview = await source("src/features/travelExpense/ExpenseListPrintPreview.jsx");
 
@@ -287,26 +308,19 @@ describe("travel expense feature boundary", () => {
     assert.match(preview, /重新生成付款记录/);
   });
 
-  it("uses the same payment rows for on-screen organization and A4 print pages", async () => {
+  it("keeps reimbursement output inside the ledger and removes legacy output entry points", async () => {
+    const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const organizer = await source("src/features/travelExpense/ReimbursementOrganizer.jsx");
-    const preview = await source("src/features/travelExpense/PaymentRecordPrintPreview.jsx");
-    const css = await source("src/features/travelExpense/travelExpense.css");
+    const preview = await source("src/features/travelExpense/ExpenseListPrintPreview.jsx");
 
-    assert.match(organizer, /buildPaymentRecordRows/);
-    assert.match(organizer, /buildPaymentRecordCsv/);
-    assert.match(organizer, /付款主体\/方式/);
-    assert.match(organizer, /row\.expenseReferenceCode/);
-    assert.doesNotMatch(organizer, /PAY-\{row\.occurredOn/);
-    assert.match(preview, /paginatePaymentRecord/);
-    assert.match(preview, /row\.expenseReferenceCode/);
-    assert.match(preview, /含凭证附件/);
-    assert.match(preview, /紧凑无图/);
-    assert.match(preview, /凭证附页/);
-    assert.match(preview, /window\.print/);
-    assert.match(css, /@page\s*\{[^}]*size:\s*A4 landscape/s);
-    assert.match(css, /\.topbar/);
-    assert.match(css, /\.product-window[\s\S]*height:\s*auto\s*!important/);
-    assert.match(css, /\.expense-print-row[\s\S]*break-inside:\s*avoid/);
+    assert.match(page, /downloadExpenseListXlsx/);
+    assert.match(page, /onOpenExpenseListPrint/);
+    assert.doesNotMatch(page, /PaymentRecordPrintPreview/);
+    assert.doesNotMatch(page, /activeTab === "export"/);
+    assert.match(organizer, /账本是唯一费用视图/);
+    assert.doesNotMatch(organizer, /buildPaymentRecordRows|buildPaymentRecordCsv|付款主体\/方式/);
+    assert.match(preview, /返回账本/);
+    assert.match(preview, /账本 \/ A4 纵向预览/);
   });
 
   it("keeps the travel-expense root grid shrinkable on narrow screens", async () => {
@@ -348,6 +362,7 @@ describe("travel expense feature boundary", () => {
       "src/features/travelExpense/paymentProofThumbnail.test.js",
       "src/features/travelExpense/expenseListXlsx.test.js",
       "src/features/travelExpense/ReimbursementOrganizer.test.js",
+      "src/features/travelExpense/responsibleRegionModel.test.js",
     ]) {
       assert.match(gate, new RegExp(testPath.replaceAll(".", "\\.")));
     }
@@ -411,7 +426,8 @@ describe("travel expense feature boundary", () => {
     assert.match(proofs, /validatePaymentProofSelection/);
     assert.match(invoices, /prepareTravelExpenseDocument/);
     assert.match(invoices, /application\/pdf/);
-    assert.match(organizer, /isTravelExpensePdf/);
+    assert.match(proofs, /AuthenticatedImageFrame/);
+    assert.match(proofs, /getAttachmentContentResponse/);
     assert.match(preview, /isTravelExpensePdf/);
     assert.match(preview, /AuthenticatedPdfFrame/);
     assert.match(preview, /getAttachmentContentResponse/);

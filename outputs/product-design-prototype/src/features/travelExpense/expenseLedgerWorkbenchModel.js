@@ -48,6 +48,7 @@ const REGION_SOURCE_LABELS = Object.freeze({
   itinerary: "行程",
   payment_text: "付款凭证",
   ai_candidate: "AI 候选",
+  user_correction: "用户修正",
   unresolved: "待确认",
 });
 
@@ -229,7 +230,8 @@ function dayRegion(date, expenses, regionProfile, overrides) {
     return { city: overrides.get(date), source: "date_override", sourceLabel: REGION_SOURCE_LABELS.date_override };
   }
   const weeklyDefault = String(
-    regionProfile?.weeklyDefaultCity
+    regionProfile?.defaultCity
+      ?? regionProfile?.weeklyDefaultCity
       ?? regionProfile?.weekDefaultCity
       ?? regionProfile?.weekly_default_city
       ?? "",
@@ -293,6 +295,8 @@ function expenseItem(expense, ledgerRow, fallbackRegion) {
     regionSourceLabel: region.city ? region.sourceLabel : fallbackRegion.sourceLabel,
     proofState: proofAttached ? "attached" : "missing",
     proofLabel: proofAttached ? "已附凭证" : "缺付款凭证",
+    paymentProofs: ledgerRow.visible.paymentProofs,
+    paymentProofCount: ledgerRow.visible.paymentProofs.length,
     invoiceState: invoicePending ? "pending" : "ready",
     invoiceLabel: ledgerRow.visible.invoiceStates.map((state) => state.label).join("、"),
     action: invoicePending ? "补票" : "查看",
@@ -330,6 +334,8 @@ function pendingItem(review, fallbackRegion) {
     regionSourceLabel: region.city ? region.sourceLabel : fallbackRegion.sourceLabel,
     proofState: "pending",
     proofLabel: "待确认",
+    paymentProofs: [],
+    paymentProofCount: 0,
     invoiceState: "unknown",
     invoiceLabel: "确认后判断",
     action: "核对入账",
@@ -364,6 +370,8 @@ function advanceItem(advance) {
     regionSourceLabel: region.sourceLabel,
     proofState: "system",
     proofLabel: "系统入账",
+    paymentProofs: [],
+    paymentProofCount: 0,
     invoiceState: "not_applicable",
     invoiceLabel: "—",
     action: "查看",
@@ -395,7 +403,8 @@ function selectedDayKey(days, requested, currentToday) {
 
 function regionRuleSummary(regionProfile, overrideCount) {
   const weeklyDefault = String(
-    regionProfile?.weeklyDefaultCity
+    regionProfile?.defaultCity
+      ?? regionProfile?.weeklyDefaultCity
       ?? regionProfile?.weekDefaultCity
       ?? regionProfile?.weekly_default_city
       ?? "",

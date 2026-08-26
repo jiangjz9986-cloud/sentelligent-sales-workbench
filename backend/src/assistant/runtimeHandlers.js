@@ -450,6 +450,7 @@ export function createAssistantToolHandlers({
   bookkeepingRepository = null,
   bookkeepingRuntime = null,
   travelExpenseRepository = null,
+  travelExpenseRegionRepository = null,
   travelExpenseAnalyzer = null,
   invoiceRepository,
   paymentProofRecognizer,
@@ -671,11 +672,28 @@ export function createAssistantToolHandlers({
           text: combinedText,
           entryType,
           now: receivedAt,
-          tripRegionResolver: ({ occurredOn }) => resolveItineraryTripRegion(db, {
-            owner: context.owner,
-            occurredOn,
-          }),
+          tripRegionResolver: ({ occurredOn }) => (
+            travelExpenseRegionRepository?.resolveRegion({
+              owner: context.owner,
+              occurredOn,
+            })?.city
+            ?? resolveItineraryTripRegion(db, {
+              owner: context.owner,
+              occurredOn,
+            })
+          ),
         });
+        const profileRegion = travelExpenseRegionRepository?.resolveRegion({
+          owner: context.owner,
+          occurredOn: analysis.expense?.occurredOn,
+        }) ?? null;
+        if (profileRegion?.city && analysis.noteAutomation?.kind === "meal") {
+          analysis.noteAutomation = {
+            ...analysis.noteAutomation,
+            tripRegion: profileRegion.city,
+            tripRegionSource: profileRegion.source,
+          };
+        }
         analyzedRows.push({ row, rowText, entryType, analysis });
       }
       let inbox = null;

@@ -291,10 +291,10 @@ describe("ReimbursementOrganizer standard XLSX export", () => {
     assert.equal(downloadCalls, 0);
   });
 
-  it("labels the standard XLSX and legacy data-exchange CSV actions explicitly", async () => {
+  it("keeps only the standard seven-column XLSX and print actions", async () => {
     const source = await readFile(sourcePath, "utf8");
-    assert.match(source, /"导出费用清单 Excel"/);
-    assert.match(source, /"导出付款明细 CSV"/);
+    assert.match(source, /导出费用清单 Excel/);
+    assert.doesNotMatch(source, /导出付款明细 CSV|打印实际付款记录/);
     assert.doesNotMatch(source, /"导出表格"/);
     assert.match(source, /createThumbnail\(source, \{ output: "uint8array" \}\)/);
     assert.match(source, /buildWorkbook\(\{/);

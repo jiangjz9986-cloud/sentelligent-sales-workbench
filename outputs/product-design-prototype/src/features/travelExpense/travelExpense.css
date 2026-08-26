@@ -228,6 +228,32 @@
   min-height: 32px;
 }
 
+.expense-region-callout .ghost-button,
+.expense-recent-receipt .ghost-button {
+  min-height: 44px;
+}
+
+.expense-recent-receipt > div {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 6px;
+}
+
+.expense-recent-receipt-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(217, 119, 6, 0.16);
+}
+
+.expense-recent-receipt-row > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .expense-loading {
   min-height: 300px;
   display: grid;
@@ -2455,11 +2481,19 @@
 }
 
 .expense-inbox-original > img,
+.expense-inbox-original > .authenticated-image-frame,
 .expense-inbox-original > .authenticated-pdf-frame {
   width: 100%;
   height: 252px;
   object-fit: contain;
   background: #f2f4f7;
+}
+
+.expense-inbox-original > .authenticated-image-frame img,
+.expense-proof-file-preview .authenticated-image-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .expense-inbox-original > span {

@@ -4,6 +4,7 @@ import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
 import { resolveBookkeepingCategory } from "../bookkeeping/categoryCatalog.js";
+import { resolveTravelExpenseRegionFromDatabase } from "../travelExpense/regionRepository.js";
 
 const COMPLETED_STATUSES = new Set(["accepted", "review_required", "rejected"]);
 const FUNDING_SOURCES = new Set(["personal", "company", "advance"]);
@@ -194,7 +195,9 @@ function normalizeNoteAutomation(value) {
   const tripRegionSource = value.tripRegionSource === null || value.tripRegionSource === undefined
     ? null
     : value.tripRegionSource;
-  if (tripRegionSource !== null && !["text", "itinerary"].includes(tripRegionSource)) {
+  if (tripRegionSource !== null && ![
+    "text", "itinerary", "week_default", "date_override", "user_correction",
+  ].includes(tripRegionSource)) {
     throw new TypeError("analysis.noteAutomation.tripRegionSource is invalid");
   }
   const paidTime = value.paidTime === null || value.paidTime === undefined
@@ -551,6 +554,29 @@ export function createShortcutBookkeepingRepository(db, {
     }
     if (row.status !== "accepted" || row.entry_type !== "expense") return null;
     return ledgerReceiptFromAcceptedRow(row);
+  }
+
+  function listRecentLedgerReceipts({ owner, limit = 50 } = {}) {
+    const normalizedOwner = requiredText(owner, "owner", 200);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+      throw new TypeError("limit must be between 1 and 50");
+    }
+    return db.prepare(`
+      SELECT id, status, entry_type, updated_at
+      FROM shortcut_bookkeeping_entries
+      WHERE owner = $owner
+        AND target_system = 'sentelligent'
+        AND entry_type = 'expense'
+        AND status = 'accepted'
+      ORDER BY updated_at DESC, id DESC
+      LIMIT $limit
+    `).all({ $owner: normalizedOwner, $limit: limit }).flatMap((row) => {
+      const receipt = ledgerReceiptFromAcceptedRow(row);
+      return receipt ? [{
+        ...receipt,
+        acceptedAt: dateTime(row.updated_at, "acceptedAt"),
+      }] : [];
+    });
   }
 
   function listBySource({ owner, sourceId } = {}) {
@@ -1104,13 +1130,29 @@ export function createShortcutBookkeepingRepository(db, {
       const expenseId = generatedId(idFactory, "generated expense id");
       const paymentId = generatedId(idFactory, "generated payment id");
       const paidAt = expense.paidAt ?? current.captured_at ?? `${expense.occurredOn}T12:00:00+08:00`;
+      const automatedRegion = analysis.noteAutomation?.tripRegion
+        && ["text", "user_correction", "itinerary"].includes(analysis.noteAutomation.tripRegionSource)
+        ? {
+            city: analysis.noteAutomation.tripRegion,
+            source: analysis.noteAutomation.tripRegionSource === "text"
+              ? "payment_text"
+              : analysis.noteAutomation.tripRegionSource,
+          }
+        : null;
+      const profileRegion = resolveTravelExpenseRegionFromDatabase(db, {
+        owner: current.owner,
+        occurredOn: expense.occurredOn,
+      });
+      const resolvedRegion = automatedRegion ?? profileRegion;
       db.prepare(`
           INSERT INTO travel_expenses (
             id, reference_code, owner, occurred_on, category, purpose, merchant,
-            invoice_status, notes, created_by, updated_by, created_at, updated_at
+            invoice_status, notes, trip_region, trip_region_source,
+            created_by, updated_by, created_at, updated_at
           ) VALUES (
             $id, $referenceCode, $owner, $occurredOn, $category, $purpose, $merchant,
-            'pending', $notes, $actor, $actor, $now, $now
+            'pending', $notes, $tripRegion, $tripRegionSource,
+            $actor, $actor, $now, $now
           )
       `).run({
           $id: expenseId,
@@ -1121,6 +1163,8 @@ export function createShortcutBookkeepingRepository(db, {
           $purpose: expense.purpose,
           $merchant: expense.merchant,
           $notes: effectiveCurrent.note,
+          $tripRegion: resolvedRegion?.city ?? null,
+          $tripRegionSource: resolvedRegion?.source ?? null,
           $actor: current.actor,
           $now: now,
       });
@@ -1216,6 +1260,7 @@ export function createShortcutBookkeepingRepository(db, {
     rejectReview,
     retryReview,
     getLedgerReceipt,
+    listRecentLedgerReceipts,
     completeLocal,
     release,
   };

@@ -29,6 +29,7 @@ describe("payment-proof recognition", () => {
           documentKind: "payment_proof",
           amountCents: 200,
           occurredOn: "2026-08-25",
+          occurredOnYearExplicit: true,
           paidTime: "14:23",
           merchant: "测试商户",
           paymentMethod: "wechat",
@@ -61,6 +62,7 @@ describe("payment-proof recognition", () => {
           documentKind: "invoice",
           amountCents: null,
           occurredOn: null,
+          occurredOnYearExplicit: false,
           paidTime: null,
           merchant: null,
           paymentMethod: null,
@@ -83,6 +85,7 @@ describe("payment-proof recognition", () => {
           documentKind: "payment_proof",
           amountCents: null,
           occurredOn: null,
+          occurredOnYearExplicit: false,
           paidTime: null,
           merchant: null,
           paymentMethod: null,
@@ -90,6 +93,7 @@ describe("payment-proof recognition", () => {
             {
               amountCents: 2_900,
               occurredOn: "2026-08-24",
+              occurredOnYearExplicit: true,
               paidTime: "08:12",
               merchant: "示例早餐店",
               paymentMethod: "wechat",
@@ -97,6 +101,7 @@ describe("payment-proof recognition", () => {
             {
               amountCents: 3_100,
               occurredOn: "2026-08-24",
+              occurredOnYearExplicit: true,
               paidTime: "12:26",
               merchant: "示例午餐店",
               paymentMethod: "alipay",
@@ -115,6 +120,7 @@ describe("payment-proof recognition", () => {
       paidTime: "08:12",
       merchant: "示例早餐店",
       paymentMethod: "wechat",
+      occurredOnYearExplicit: true,
     });
     assert.deepEqual(result.transactions, [
       {
@@ -123,6 +129,7 @@ describe("payment-proof recognition", () => {
         paidTime: "08:12",
         merchant: "示例早餐店",
         paymentMethod: "wechat",
+        occurredOnYearExplicit: true,
       },
       {
         amountCents: 3_100,
@@ -130,6 +137,7 @@ describe("payment-proof recognition", () => {
         paidTime: "12:26",
         merchant: "示例午餐店",
         paymentMethod: "alipay",
+        occurredOnYearExplicit: true,
       },
     ]);
 
@@ -139,6 +147,7 @@ describe("payment-proof recognition", () => {
           transactions: Array.from({ length: 21 }, (_, index) => ({
             amountCents: index + 1,
             occurredOn: null,
+            occurredOnYearExplicit: false,
             paidTime: null,
             merchant: null,
             paymentMethod: null,
@@ -157,6 +166,7 @@ describe("payment-proof recognition", () => {
           transactions: [{
             amountCents: 100,
             occurredOn: null,
+            occurredOnYearExplicit: false,
             paidTime: null,
             merchant: null,
             paymentMethod: null,
@@ -168,6 +178,207 @@ describe("payment-proof recognition", () => {
     });
     assert.equal(unexpectedField.evidence, null);
     assert.deepEqual(unexpectedField.warnings, ["MODEL_INVALID_RESPONSE"]);
+  });
+
+  it("replaces a non-explicit model year with the closest month-day not after the reference date", async () => {
+    const sameYear = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          documentKind: "payment_proof",
+          amountCents: 2_900,
+          occurredOn: "2025-08-24",
+          occurredOnYearExplicit: false,
+          paidTime: "08:12",
+          merchant: "示例早餐店",
+          paymentMethod: "wechat",
+          confidence: 0.96,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+      referenceDate: "2026-08-26",
+    });
+    assert.equal(sameYear.evidence.occurredOn, "2026-08-24");
+    assert.equal(sameYear.evidence.occurredOnYearExplicit, false);
+    assert.deepEqual(sameYear.warnings, []);
+
+    const previousYear = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          amountCents: 3_100,
+          occurredOn: "2026-12-31",
+          occurredOnYearExplicit: false,
+          paidTime: "12:26",
+          merchant: null,
+          paymentMethod: "alipay",
+          confidence: 0.92,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+      referenceDate: "2026-01-02",
+    });
+    assert.equal(previousYear.evidence.occurredOn, "2025-12-31");
+    assert.equal(previousYear.evidence.occurredOnYearExplicit, false);
+
+    const leapDay = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          amountCents: 3_100,
+          occurredOn: "02-29",
+          occurredOnYearExplicit: false,
+          paidTime: "12:26",
+          merchant: null,
+          paymentMethod: "alipay",
+          confidence: 0.92,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+      referenceDate: "2025-02-28",
+    });
+    assert.equal(leapDay.evidence.occurredOn, "2024-02-29");
+    assert.equal(leapDay.evidence.occurredOnYearExplicit, false);
+  });
+
+  it("does not trust a non-explicit model year when no reference date is available", async () => {
+    const result = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          amountCents: 2_900,
+          occurredOn: "2025-08-24",
+          occurredOnYearExplicit: false,
+          paidTime: "08:12",
+          merchant: null,
+          paymentMethod: "wechat",
+          confidence: 0.9,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+    });
+    assert.equal(result.evidence.occurredOn, null);
+    assert.equal(result.evidence.occurredOnYearExplicit, false);
+    assert.deepEqual(result.warnings, ["OCCURRED_ON_REFERENCE_REQUIRED"]);
+  });
+
+  it("normalizes explicit and implicit years independently for multi-transaction vision results", async () => {
+    const result = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          documentKind: "payment_proof",
+          amountCents: null,
+          occurredOn: null,
+          occurredOnYearExplicit: false,
+          paidTime: null,
+          merchant: null,
+          paymentMethod: null,
+          transactions: [
+            {
+              amountCents: 2_900,
+              occurredOn: "2025-08-24",
+              occurredOnYearExplicit: false,
+              paidTime: "08:12",
+              merchant: "示例早餐店",
+              paymentMethod: "wechat",
+            },
+            {
+              amountCents: 3_100,
+              occurredOn: "2025-08-23",
+              occurredOnYearExplicit: true,
+              paidTime: "12:26",
+              merchant: "示例午餐店",
+              paymentMethod: "alipay",
+            },
+          ],
+          confidence: 0.96,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+      referenceDate: "2026-08-26",
+    });
+
+    assert.equal(result.evidence.occurredOn, "2026-08-24");
+    assert.equal(result.evidence.occurredOnYearExplicit, false);
+    assert.deepEqual(result.transactions.map(({ occurredOn, occurredOnYearExplicit }) => ({
+      occurredOn,
+      occurredOnYearExplicit,
+    })), [
+      { occurredOn: "2026-08-24", occurredOnYearExplicit: false },
+      { occurredOn: "2025-08-23", occurredOnYearExplicit: true },
+    ]);
+  });
+
+  it("keeps no-date evidence null and rejects missing or non-boolean year evidence", async () => {
+    const noDate = await recognizePaymentProofDocument(file, {
+      async analyzeDocument() {
+        return {
+          amountCents: 2_900,
+          occurredOn: null,
+          occurredOnYearExplicit: false,
+          paidTime: null,
+          merchant: null,
+          paymentMethod: null,
+          confidence: 0.8,
+          warnings: [],
+        };
+      },
+      modelName: "deepseek-v4-flash-vision-exp",
+      referenceDate: "2026-08-26",
+    });
+    assert.equal(noDate.evidence.occurredOn, null);
+    assert.equal(noDate.evidence.occurredOnYearExplicit, false);
+
+    for (const invalidResult of [
+      { amountCents: 2_900, occurredOn: "2025-08-24", paidTime: null },
+      { amountCents: 2_900, occurredOn: "2025-08-24", occurredOnYearExplicit: "false", paidTime: null },
+      { amountCents: 2_900, occurredOn: null, occurredOnYearExplicit: true, paidTime: null },
+      {
+        amountCents: null,
+        occurredOn: null,
+        occurredOnYearExplicit: false,
+        transactions: [{
+          amountCents: 2_900,
+          occurredOn: "2025-08-24",
+          paidTime: "08:12",
+          merchant: null,
+          paymentMethod: null,
+        }],
+      },
+    ]) {
+      const invalid = await recognizePaymentProofDocument(file, {
+        async analyzeDocument() { return invalidResult; },
+        modelName: "deepseek-v4-flash-vision-exp",
+        referenceDate: "2026-08-26",
+      });
+      assert.equal(invalid.evidence, null);
+      assert.deepEqual(invalid.warnings, ["MODEL_INVALID_RESPONSE"]);
+    }
+  });
+
+  it("preserves explicit outlier dates and adds a review warning instead of rewriting them", async () => {
+    for (const occurredOn of ["2023-08-24", "2028-08-24"]) {
+      const result = await recognizePaymentProofDocument(file, {
+        async analyzeDocument() {
+          return {
+            amountCents: 2_900,
+            occurredOn,
+            occurredOnYearExplicit: true,
+            paidTime: "08:12",
+            merchant: null,
+            paymentMethod: "wechat",
+            confidence: 0.9,
+            warnings: [],
+          };
+        },
+        modelName: "deepseek-v4-flash-vision-exp",
+        referenceDate: "2026-08-26",
+      });
+      assert.equal(result.evidence.occurredOn, occurredOn);
+      assert.equal(result.evidence.occurredOnYearExplicit, true);
+      assert.deepEqual(result.warnings, ["OCCURRED_ON_OUTSIDE_REFERENCE_WINDOW"]);
+    }
   });
 
   it("extracts locally and sends only the extracted text to DeepSeek", async () => {

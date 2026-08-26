@@ -191,7 +191,7 @@ export function ExpenseListPrintPreview({
   return (
     <section className="expense-list-print-preview" data-testid="expense-list-print-preview">
       <header className="expense-print-preview-toolbar expense-list-print-toolbar no-print">
-        <div><button className="ghost-button" type="button" onClick={onClose}><ArrowLeft size={16} />返回报销输出</button><div><strong>费用清单</strong><span>报销输出 / A4 纵向预览</span></div></div>
+        <div><button className="ghost-button" type="button" onClick={onClose}><ArrowLeft size={16} />返回账本</button><div><strong>费用清单</strong><span>账本 / A4 纵向预览</span></div></div>
         <button className="primary-button" type="button" onClick={() => void printDocument()} disabled={printing || thumbnailBusy || pages.length === 0}><Printer size={16} />{thumbnailLoading ? "准备凭证" : printing ? "准备打印" : "打印费用清单"}</button>
       </header>
       {printError || thumbnailState.error ? <div className="expense-page-alert no-print" role="alert"><span>{printError || thumbnailState.error}</span><button className="ghost-button" type="button" onClick={() => { setPrintError(""); setThumbnailAttempt((value) => value + 1); }} disabled={printing || thumbnailLoading}>重新生成付款记录</button></div> : null}

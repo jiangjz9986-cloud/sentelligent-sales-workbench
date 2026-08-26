@@ -407,6 +407,461 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     db.close();
   });
 
+  it("requires a natural-week region before confirming a meal and refreshes the automatic note after assignment", async () => {
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-required-capture"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-required",
+        text: "",
+        sourceMessageId: "weixin-region-required-capture",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "reclass.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(captured.response.status, 200);
+    const initialDraft = await leaseOutbox();
+    assert.match(initialDraft.item.message, /出差区域待确认/u);
+    assert.match(initialDraft.item.message, /这笔餐饮还没有唯一出差区域，当前不能确认/u);
+    assert.match(initialDraft.item.message, /请先回复“20260824-20260830区域是济南”/u);
+    assert.match(initialDraft.item.message, /多城市时请同时说明各日期范围和城市/u);
+    assert.match(initialDraft.item.message, /请引用最新消息回复“确认”/u);
+    assert.match(initialDraft.item.message, /请引用本消息并回复/u);
+    assert.doesNotMatch(initialDraft.item.message, /“本周区域是济南”/u);
+    await ackOutbox(initialDraft, true, "provider-region-required-initial");
+
+    const blocked = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-required-confirm-blocked"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-required",
+        text: "确认",
+        sourceMessageId: "weixin-region-required-confirm-blocked",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-region-required-initial",
+      }),
+    });
+    assert.equal(blocked.response.status, 409);
+    assert.equal(blocked.body.status, "review_required");
+    assert.match(blocked.body.text, /区域/u);
+
+    const configured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-required-assign"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-required",
+        text: "本周区域是济南",
+        sourceMessageId: "weixin-region-required-assign",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(configured.response.status, 200);
+    assert.equal(configured.body.status, "review_required");
+    assert.match(configured.body.text, /2026-08-24/u);
+    assert.match(configured.body.text, /济南/u);
+
+    const refreshedDraft = await leaseOutbox();
+    assert.match(refreshedDraft.item.message, /备注：8\.25济南午餐/u);
+    assert.match(refreshedDraft.item.message, /请引用本消息并回复/u);
+    assert.doesNotMatch(refreshedDraft.item.message, /请先回复出差区域/u);
+    await ackOutbox(refreshedDraft, true, "provider-region-required-refreshed");
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-required-confirmed"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-required",
+        text: "确认",
+        sourceMessageId: "weixin-region-required-confirmed",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-region-required-refreshed",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200);
+    assert.equal(confirmed.body.status, "ok");
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      const profile = db.prepare(`
+        SELECT version, cities_json, default_city
+        FROM travel_expense_region_profiles
+        WHERE owner = $owner AND week_start = '2026-08-24'
+      `).get({ $owner: owner });
+      assert.equal(profile.version, 1);
+      assert.deepEqual(JSON.parse(profile.cities_json), ["济南"]);
+      assert.equal(profile.default_city, "济南");
+      const expense = db.prepare(`
+        SELECT notes, trip_region, trip_region_source FROM travel_expenses
+      `).get();
+      assert.deepEqual({ ...expense }, {
+        notes: "8.25济南午餐",
+        trip_region: "济南",
+        trip_region_source: "week_default",
+      });
+    } finally {
+      db.close();
+    }
+
+  });
+
+  it("rotates a pending meal draft when WeChat changes its weekly region", async () => {
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-change-capture"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-change",
+        text: "",
+        sourceMessageId: "weixin-region-change-capture",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "reclass.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(captured.response.status, 200);
+    const initial = await leaseOutbox();
+    await ackOutbox(initial, true, "provider-region-change-initial");
+
+    for (const [city, id] of [["济南", "jn"], ["青岛", "qd"]]) {
+      const configured = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(`weixin-region-change-${id}`),
+        body: JSON.stringify({
+          conversationId: "conversation-region-change",
+          text: `本周区域是${city}`,
+          sourceMessageId: `weixin-region-change-${id}`,
+          senderId: sender,
+          chatType: "direct",
+          suppressQuote: true,
+        }),
+      });
+      assert.equal(configured.response.status, 200);
+      const refreshed = await leaseOutbox();
+      assert.match(refreshed.item.message, new RegExp(`备注：8\\.25${city}午餐`, "u"));
+      await ackOutbox(refreshed, true, `provider-region-change-${id}`);
+    }
+
+    const stale = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-change-stale-confirm"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-change",
+        text: "确认",
+        sourceMessageId: "weixin-region-change-stale-confirm",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-region-change-jn",
+      }),
+    });
+    assert.equal(stale.response.status, 409);
+    const beforeConfirmDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.equal(beforeConfirmDb.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+    beforeConfirmDb.close();
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-change-current-confirm"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-change",
+        text: "确认",
+        sourceMessageId: "weixin-region-change-current-confirm",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-region-change-qd",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200);
+    const acceptedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const expense = acceptedDb.prepare("SELECT notes, trip_region, trip_region_source FROM travel_expenses").get();
+    assert.deepEqual({ ...expense }, {
+      notes: "8.25青岛午餐",
+      trip_region: "青岛",
+      trip_region_source: "week_default",
+    });
+    acceptedDb.close();
+  });
+
+  it("reopens a transiently failed refreshed draft before allowing confirmation", async () => {
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-recovery-capture"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-recovery",
+        text: "",
+        sourceMessageId: "weixin-region-recovery-capture",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "reclass.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(captured.response.status, 200);
+    const initial = await leaseOutbox();
+    await ackOutbox(initial, true, "provider-region-recovery-initial");
+
+    const configured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-recovery-assign"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-recovery",
+        text: "本周区域是济南",
+        sourceMessageId: "weixin-region-recovery-assign",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(configured.response.status, 200, JSON.stringify(configured.body));
+    const refreshed = await leaseOutbox();
+    assert.match(refreshed.item.message, /备注：8\.25济南午餐/u);
+    await ackOutbox(refreshed, true, "provider-region-recovery-refreshed");
+
+    const failedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    failedDb.prepare(`
+      UPDATE weixin_confirmation_outbox
+      SET status = 'failed', last_error_code = 'WEIXIN_SEND_FAILED',
+          lease_proof_hash = NULL, lease_until = NULL, updated_at = '2026-08-25T06:30:00.000Z'
+      WHERE id = $id
+    `).run({ $id: refreshed.item.id });
+    const failed = failedDb.prepare("SELECT status, last_error_code FROM weixin_confirmation_outbox WHERE id = $id").get({ $id: refreshed.item.id });
+    assert.deepEqual({ ...failed }, { status: "failed", last_error_code: "WEIXIN_SEND_FAILED" });
+    failedDb.close();
+
+    // Repeating the same region assignment must reopen the failed row and make
+    // the current-version draft deliverable again; merely replaying a failed
+    // idempotency key would leave confirmation blocked forever.
+    const retried = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-recovery-retry"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-recovery",
+        text: "本周区域是济南",
+        sourceMessageId: "weixin-region-recovery-retry",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(retried.response.status, 200, JSON.stringify(retried.body));
+    const recovered = await leaseOutbox();
+    assert.equal(recovered.item.id, refreshed.item.id);
+    assert.equal(recovered.item.status, "processing");
+    await ackOutbox(recovered, true, "provider-region-recovery-retried");
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-recovery-confirm"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-recovery",
+        text: "确认",
+        sourceMessageId: "weixin-region-recovery-confirm",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-region-recovery-retried",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+    assert.match(confirmed.body.text, /已确认并录入/u);
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const expense = db.prepare("SELECT notes, trip_region FROM travel_expenses").get();
+    assert.deepEqual({ ...expense }, { notes: "8.25济南午餐", trip_region: "济南" });
+    db.close();
+  });
+
+  it("does not overwrite a manually corrected meal note when a week region is assigned", async () => {
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-manual-note-capture"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-manual-note",
+        text: "",
+        sourceMessageId: "weixin-region-manual-note-capture",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "reclass.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(captured.response.status, 200);
+    const draft = await leaseOutbox();
+    await ackOutbox(draft, true, "provider-region-manual-note-initial");
+
+    const corrected = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-manual-note-correct"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-manual-note",
+        text: "修改备注为客户自定义",
+        sourceMessageId: "weixin-region-manual-note-correct",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-region-manual-note-initial",
+      }),
+    });
+    assert.equal(corrected.response.status, 200);
+    const correctedDraft = await leaseOutbox();
+    assert.match(correctedDraft.item.message, /备注：客户自定义/u);
+    await ackOutbox(correctedDraft, true, "provider-region-manual-note-corrected");
+
+    const configured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-manual-note-assign"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-manual-note",
+        text: "本周区域是青岛",
+        sourceMessageId: "weixin-region-manual-note-assign",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(configured.response.status, 200);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      const entry = db.prepare(`
+        SELECT note, analysis_json FROM shortcut_bookkeeping_entries
+        WHERE owner = $owner AND status = 'review_required'
+      `).get({ $owner: owner });
+      assert.equal(entry.note, "客户自定义");
+      assert.equal(JSON.parse(entry.analysis_json).noteAutomation, null);
+    } finally {
+      db.close();
+    }
+
+    const confirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-manual-note-confirm"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-manual-note",
+        text: "确认",
+        sourceMessageId: "weixin-region-manual-note-confirm",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "provider-region-manual-note-corrected",
+      }),
+    });
+    assert.equal(confirmed.response.status, 200);
+    const acceptedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      const expense = acceptedDb.prepare("SELECT notes, trip_region, trip_region_source FROM travel_expenses").get();
+      assert.deepEqual({ ...expense }, {
+        notes: "客户自定义",
+        trip_region: "青岛",
+        trip_region_source: "week_default",
+      });
+    } finally {
+      acceptedDb.close();
+    }
+  });
+
+  it("applies an explicit last-week region to only that week's pending meal drafts", async () => {
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-last-week-region-capture"),
+      body: JSON.stringify({
+        conversationId: "conversation-last-week-region",
+        text: "",
+        sourceMessageId: "weixin-last-week-region-capture",
+        senderId: sender,
+        chatType: "direct",
+        media: {
+          type: "image",
+          fileName: "vision-only.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(captured.response.status, 200);
+    const initial = await leaseOutbox();
+    assert.match(initial.item.message, /周期：20260817-20260823/u);
+    assert.match(initial.item.message, /这笔餐饮还没有唯一出差区域，当前不能确认/u);
+    assert.match(initial.item.message, /请先回复“20260817-20260823区域是济南”/u);
+    assert.doesNotMatch(initial.item.message, /“本周区域是济南”/u);
+    await ackOutbox(initial, true, "provider-last-week-region-initial");
+
+    const configured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-last-week-region-assign"),
+      body: JSON.stringify({
+        conversationId: "conversation-last-week-region",
+        text: "上周的区域是济南",
+        sourceMessageId: "weixin-last-week-region-assign",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(configured.response.status, 200);
+    assert.match(configured.body.text, /2026-08-17/u);
+    assert.match(configured.body.text, /2026-08-23/u);
+    const refreshed = await leaseOutbox();
+    assert.match(refreshed.item.message, /备注：8\.20济南午餐/u);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM travel_expense_region_profiles
+        WHERE owner = $owner AND week_start = '2026-08-17' AND default_city = '济南'
+      `).get({ $owner: owner }).count, 1);
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM travel_expense_region_profiles
+        WHERE owner = $owner AND week_start = '2026-08-24'
+      `).get({ $owner: owner }).count, 0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects a week-region command from another allowlisted sender and a group chat", async () => {
+    for (const [id, scope] of [
+      ["other-sender", { senderId: "sender-2", chatType: "direct" }],
+      ["group", { senderId: sender, chatType: "group", groupId: "allowed-bookkeeping-test-group" }],
+    ]) {
+      const result = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(`weixin-region-denied-${id}`),
+        body: JSON.stringify({
+          conversationId: `conversation-region-denied-${id}`,
+          text: "本周区域是济南",
+          sourceMessageId: `weixin-region-denied-${id}`,
+          ...scope,
+          suppressQuote: true,
+        }),
+      });
+      assert.equal(result.response.status, 403);
+    }
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_region_profiles").get().count, 0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("carries a real JPEG file through the remote agent and local HTTP server into a bookkeeping draft", async () => {
     const filePath = join(tempDir, "remote-payment.jpg");
     await writeFile(filePath, VALID_JPEG);
@@ -792,6 +1247,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.match(revisedDraft.item.message, /费用类别：餐饮/u);
     assert.match(revisedDraft.item.message, /备注：8\.25午餐/u);
     assert.match(revisedDraft.item.message, /AI 状态：待复核：出差区域待确认/u);
+    assert.match(revisedDraft.item.message, /请先回复“20260824-20260830区域是济南”/u);
     assert.doesNotMatch(revisedDraft.item.message, /信息待补充/u);
 
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
@@ -1393,16 +1849,31 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(received.response.status, 200);
     assert.match(received.body.text, /共识别 2 笔/u);
 
+    const configured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-multi-region"),
+      body: JSON.stringify({
+        conversationId: "conversation-multi-image",
+        text: "上周区域是济南",
+        sourceMessageId: "weixin-multi-region",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(configured.response.status, 200);
+    assert.match(configured.body.text, /已刷新 2 条/u);
+
     const first = await leaseOutbox();
     assert.match(first.item.message, /金额：12\.34 元/u);
     assert.match(first.item.message, /费用类别：餐饮/u);
-    assert.match(first.item.message, /备注：8\.18早餐/u);
+    assert.match(first.item.message, /备注：8\.18济南早餐/u);
     assert.match(first.item.message, /周期：20260817-20260823/u);
     await ackOutbox(first, true, "multi-draft-1");
     const second = await leaseOutbox();
     assert.match(second.item.message, /金额：56\.78 元/u);
     assert.match(second.item.message, /费用类别：餐饮/u);
-    assert.match(second.item.message, /备注：8\.18晚餐/u);
+    assert.match(second.item.message, /备注：8\.18济南晚餐/u);
     await ackOutbox(second, true, "multi-draft-2");
 
     for (const [index, quotedMessageId] of ["multi-draft-1", "multi-draft-2"].entries()) {
@@ -1434,8 +1905,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.deepEqual(
       db.prepare("SELECT category, notes FROM travel_expenses ORDER BY rowid").all().map((row) => ({ ...row })),
       [
-        { category: "breakfast", notes: "8.18早餐" },
-        { category: "dinner", notes: "8.18晚餐" },
+        { category: "breakfast", notes: "8.18济南早餐" },
+        { category: "dinner", notes: "8.18济南晚餐" },
       ],
     );
     db.close();

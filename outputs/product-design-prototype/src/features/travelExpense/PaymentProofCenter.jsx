@@ -21,6 +21,7 @@ import {
   validatePaymentProofSelection,
 } from "./paymentProofModel.js";
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
+import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import {
   isTravelExpenseImage,
   isTravelExpensePdf,
@@ -81,6 +82,7 @@ export function PaymentProofCenter({
   expenses,
   inboxItems = [],
   getAttachmentUrl,
+  getAttachmentContentResponse,
   getInboxContentUrl,
   getInboxContentResponse,
   onConfirmInbox,
@@ -94,7 +96,6 @@ export function PaymentProofCenter({
   const [selectionErrors, setSelectionErrors] = useState({});
   const [inboxSelections, setInboxSelections] = useState({});
   const [inboxErrors, setInboxErrors] = useState({});
-  const [brokenImages, setBrokenImages] = useState(() => new Set());
 
   const proofCount = useMemo(() => expenses.reduce((total, expense) => (
     total + expense.attachments.filter((attachment) => attachment.kind === "payment_proof").length
@@ -213,13 +214,12 @@ export function PaymentProofCenter({
             const pending = pendingInboxId === item.id;
             const isImage = isTravelExpenseImage(item);
             const isPdf = isTravelExpensePdf(item);
-            const broken = brokenImages.has(item.id);
             return (
               <article className="expense-inbox-item" key={item.id}>
                 <div className="expense-inbox-original">
-                  {isImage && !broken ? <img src={getInboxContentUrl(item.id)} alt={item.fileName} onError={() => setBrokenImages((current) => new Set(current).add(item.id))} /> : null}
+                  {isImage ? <AuthenticatedImageFrame resourceKey={item.id} loadImage={({ signal }) => getInboxContentResponse(item.id, { signal })} title={item.fileName} maxDimension={900} /> : null}
                   {isPdf ? <AuthenticatedPdfFrame resourceKey={item.id} loadPdf={({ signal }) => getInboxContentResponse(item.id, { signal })} title={`${item.fileName} PDF 付款凭证原件`} renderWidth={900} /> : null}
-                  {(!isImage && !isPdf) || broken ? <span><ImageOff size={24} /><strong>{broken ? "预览失败" : "原件文件"}</strong></span> : null}
+                  {!isImage && !isPdf ? <span><ImageOff size={24} /><strong>原件文件</strong></span> : null}
                   <a href={getInboxContentUrl(item.id)} target="_blank" rel="noreferrer"><ExternalLink size={14} />打开原件</a>
                 </div>
 
@@ -313,16 +313,15 @@ export function PaymentProofCenter({
                 {proofs.map((attachment) => {
                   const isImage = isTravelExpenseImage(attachment);
                   const isPdf = isTravelExpensePdf(attachment);
-                  const broken = brokenImages.has(attachment.id);
                   return (
                     <article className="expense-proof-file" key={attachment.id}>
-                      <a className="expense-proof-file-preview" href={getAttachmentUrl(attachment.id)} target="_blank" rel="noreferrer" aria-label={`打开${attachment.fileName}`}>
-                        {isImage && !broken ? (
-                          <img src={getAttachmentUrl(attachment.id)} alt={attachment.fileName} onError={() => setBrokenImages((current) => new Set(current).add(attachment.id))} />
+                      <div className="expense-proof-file-preview" aria-label={`${attachment.fileName}预览`}>
+                        {isImage ? (
+                          <AuthenticatedImageFrame resourceKey={attachment.id} loadImage={({ signal }) => getAttachmentContentResponse(attachment.id, { signal })} title={attachment.fileName} maxDimension={360} />
                         ) : (
-                          <span>{broken ? <ImageOff size={22} /> : <FileText size={24} />}<strong>{isPdf ? "PDF" : broken ? "预览失败" : "文件"}</strong></span>
+                          <span><FileText size={24} /><strong>{isPdf ? "PDF" : "文件"}</strong></span>
                         )}
-                      </a>
+                      </div>
                       <div>
                         <strong title={attachment.fileName}>{attachment.fileName}</strong>
                         <small>{proofPaymentSummary(attachment, expense)}</small>

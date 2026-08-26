@@ -128,6 +128,16 @@ describe("formal entries and pending reviews", () => {
     assert.notEqual(item.notes, "不应成为默认备注的商户");
   });
 
+  it("localizes user-corrected region sources", () => {
+    const model = buildExpenseLedgerWorkbenchModel({
+      week: WEEK,
+      expenses: [expense({ tripRegion: "济南", tripRegionSource: "user_correction" })],
+      selectedDate: "2026-08-25",
+      today: "2026-08-25",
+    });
+    assert.equal(model.selectedDay.items[0].regionSourceLabel, "用户修正");
+  });
+
   it("keeps reviews with no valid date outside all seven day totals", () => {
     const undated = review({
       id: "review-undated",

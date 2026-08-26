@@ -25,6 +25,7 @@ import { apply as applySecureSettingsPushplus } from "./migrations/0021_secure_s
 import { apply as applyAssistantAgentRuns } from "./migrations/0022_assistant_agent_runs.mjs";
 import { apply as applyAssistantBusinessContext } from "./migrations/0023_assistant_business_context.mjs";
 import { apply as applyShortcutAdvanceAllocation } from "./migrations/0024_shortcut_advance_allocation.mjs";
+import { apply as applyTravelExpenseRegionProfiles } from "./migrations/0025_travel_expense_region_profiles.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -164,6 +165,12 @@ const migrations = [
     path: resolve(here, "migrations", "0024_shortcut_advance_allocation.mjs"),
     type: "module",
     apply: applyShortcutAdvanceAllocation,
+  },
+  {
+    version: "0025",
+    path: resolve(here, "migrations", "0025_travel_expense_region_profiles.mjs"),
+    type: "module",
+    apply: applyTravelExpenseRegionProfiles,
   },
 ];
 

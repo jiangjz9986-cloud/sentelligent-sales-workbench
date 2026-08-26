@@ -34,6 +34,7 @@ const WRITABLE_FIELDS = Object.freeze({
   travelExpenseAdvance: Object.freeze([
     "weekStart", "status", "requestedCents", "receivedCents", "requestedOn", "receivedOn", "purpose", "notes",
   ]),
+  travelExpenseRegionProfile: Object.freeze(["weekStart", "cities", "defaultCity", "dateOverrides"]),
   invoiceUpload: Object.freeze(["fileName", "mediaType", "contentBase64", "sourceRef"]),
   invoiceReview: Object.freeze([
     "invoiceCode", "invoiceNumber", "issuedOn", "sellerName", "buyerName",
@@ -112,6 +113,13 @@ function assertTravelExpenseWorkbench(value, path = "travelExpenseWorkbench") {
   workbench.bookkeepingReviews.forEach((item, index) => (
     assertWeixinBookkeepingReview(item, `${path}.bookkeepingReviews[${index}]`)
   ));
+  assertTravelExpenseRegionProfile(workbench.regionProfile, `${path}.regionProfile`);
+  if (!Array.isArray(workbench.recentLedgerReceipts)) {
+    throw new TypeError(`${path}.recentLedgerReceipts: expected array`);
+  }
+  workbench.recentLedgerReceipts.forEach((item, index) => (
+    assertRecentLedgerReceipt(item, `${path}.recentLedgerReceipts[${index}]`)
+  ));
   return workbench;
 }
 
@@ -136,6 +144,49 @@ function nullableApiCents(value, path) {
   if (value === null || value === undefined) return value;
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${path}: expected non-negative integer cents`);
   return value;
+}
+
+function requiredDateOnly(value, path) {
+  requiredApiString(value, path);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (!match) throw new TypeError(`${path}: expected YYYY-MM-DD`);
+  const parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  if (parsed.toISOString().slice(0, 10) !== value) throw new TypeError(`${path}: expected real calendar date`);
+  return value;
+}
+
+function assertTravelExpenseRegionProfile(value, path = "travelExpenseRegionProfile") {
+  const profile = apiObject(value, path);
+  requiredDateOnly(profile.weekStart, `${path}.weekStart`);
+  requiredDateOnly(profile.weekEnd, `${path}.weekEnd`);
+  if (!Number.isSafeInteger(profile.version) || profile.version < 0) {
+    throw new TypeError(`${path}.version: expected non-negative integer`);
+  }
+  if (!Array.isArray(profile.cities)) throw new TypeError(`${path}.cities: expected array`);
+  profile.cities.forEach((city, index) => requiredApiString(city, `${path}.cities[${index}]`));
+  if (profile.defaultCity !== null) requiredApiString(profile.defaultCity, `${path}.defaultCity`);
+  if (!Array.isArray(profile.dateOverrides)) throw new TypeError(`${path}.dateOverrides: expected array`);
+  profile.dateOverrides.forEach((override, index) => {
+    const item = apiObject(override, `${path}.dateOverrides[${index}]`);
+    requiredDateOnly(item.date, `${path}.dateOverrides[${index}].date`);
+    requiredApiString(item.city, `${path}.dateOverrides[${index}].city`);
+  });
+  return profile;
+}
+
+function assertRecentLedgerReceipt(value, path = "recentLedgerReceipt") {
+  const receipt = apiObject(value, path);
+  for (const field of ["entryId", "expenseId", "paymentId", "referenceCode", "acceptedAt"]) {
+    requiredApiString(receipt[field], `${path}.${field}`);
+  }
+  requiredDateOnly(receipt.occurredOn, `${path}.occurredOn`);
+  requiredDateOnly(receipt.weekStart, `${path}.weekStart`);
+  nullableApiCents(receipt.amountCents, `${path}.amountCents`);
+  nullableApiCents(receipt.reimbursementCents, `${path}.reimbursementCents`);
+  if (!new Set(["matched", "pending", "not_available"]).has(receipt.attachmentStatus)) {
+    throw new TypeError(`${path}.attachmentStatus: expected matched, pending, or not_available`);
+  }
+  return receipt;
 }
 
 function apiItems(values, path, assertItem) {
@@ -225,6 +276,13 @@ function queryPath(path, values) {
 function versionHeaders(version) {
   if (!Number.isSafeInteger(version) || version <= 0) {
     throw new TypeError("A positive integer entity version is required");
+  }
+  return { "If-Match": `"${version}"` };
+}
+
+function nonNegativeVersionHeaders(version) {
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw new TypeError("A non-negative integer entity version is required");
   }
   return { "If-Match": `"${version}"` };
 }
@@ -680,6 +738,23 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         { signal },
       );
       return assertTravelExpenseWorkbench(response?.item, "travelExpenseWorkbench.item");
+    },
+
+    async getTravelExpenseRegionProfile({ weekStart, signal } = {}) {
+      const response = await requestApi(
+        queryPath("/api/travel-expense-region-profile", { weekStart }),
+        { signal },
+      );
+      return assertTravelExpenseRegionProfile(response?.item, "travelExpenseRegionProfile.item");
+    },
+
+    async saveTravelExpenseRegionProfile(profile) {
+      const response = await requestApi("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: nonNegativeVersionHeaders(profile?.version),
+        body: JSON.stringify(pickOwnFields(profile, WRITABLE_FIELDS.travelExpenseRegionProfile)),
+      });
+      return assertTravelExpenseRegionProfile(response?.item, "travelExpenseRegionProfile.item");
     },
 
     async getTravelExpense(expenseId, { signal } = {}) {

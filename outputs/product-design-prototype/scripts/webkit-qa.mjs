@@ -21,7 +21,7 @@ const appRoot = resolve(here, "..");
 const workspaceRoot = resolve(appRoot, "..", "..");
 const distPath = resolve(appRoot, "dist");
 const loginPassword = "qa-login-password";
-const expenseTabs = ["ledger", "invoices", "export"];
+const expenseTabs = ["ledger", "invoices"];
 
 function listen(server, port) {
   return new Promise((resolveListen, reject) => {
@@ -89,7 +89,7 @@ async function assertExpensePageReady(page) {
   const expensePage = page.locator('.expense-page[data-testid="page-expense"]');
   await expensePage.waitFor();
   await expensePage.locator(".expense-loading").waitFor({ state: "detached" });
-  assert.equal(await expensePage.locator(".expense-page-alert").count(), 0);
+  assert.equal(await expensePage.locator('.expense-page-alert[role="alert"]').count(), 0);
 
   for (const tabId of expenseTabs) {
     const tab = page.getByTestId(`expense-tab-${tabId}`);
@@ -311,11 +311,19 @@ async function main() {
     const desktopExpenseScreenshotPath = resolve(evidenceDirectory, "webkit-expense-1440x900.png");
     await page.screenshot({ path: desktopExpenseScreenshotPath, fullPage: false });
 
-    await page.getByTestId("expense-tab-export").click();
-    await page.locator(".expense-organizer-view").waitFor();
-    assert.equal(await page.getByTestId("expense-tab-export").getAttribute("aria-selected"), "true");
-    await page.getByTestId("expense-tab-ledger").click();
-    await page.getByTestId("expense-ledger-workbench").waitFor();
+    assert.equal(await page.getByTestId("expense-tab-export").count(), 0);
+    const reimbursementActions = page.getByTestId("ledger-reimbursement-actions");
+    await reimbursementActions.waitFor();
+    assert.equal(await reimbursementActions.getByRole("button").count(), 2);
+    assert.equal(await reimbursementActions.getByText("打印费用清单", { exact: true }).count(), 1);
+    assert.equal(await reimbursementActions.getByText(/导出费用清单/).count(), 1);
+
+    await page.getByRole("button", { name: "编辑我的负责区域" }).click();
+    await page.getByTestId("trip-region-settings-layer").waitFor();
+    const desktopRegionScreenshotPath = resolve(evidenceDirectory, "webkit-expense-region-1440x900.png");
+    await page.screenshot({ path: desktopRegionScreenshotPath, fullPage: false });
+    await page.getByRole("button", { name: "关闭区域设置" }).click();
+    await page.getByTestId("trip-region-settings-layer").waitFor({ state: "detached" });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByTestId("nav-expense").click();
@@ -325,6 +333,12 @@ async function main() {
     assert.deepEqual(mobileExpenseMetrics.undersized, []);
     const mobileExpenseScreenshotPath = resolve(evidenceDirectory, "webkit-expense-390x844.png");
     await page.screenshot({ path: mobileExpenseScreenshotPath, fullPage: false });
+    await page.getByRole("button", { name: "编辑我的负责区域" }).click();
+    await page.getByTestId("trip-region-settings-layer").waitFor();
+    const mobileRegionScreenshotPath = resolve(evidenceDirectory, "webkit-expense-region-390x844.png");
+    await page.screenshot({ path: mobileRegionScreenshotPath, fullPage: false });
+    await page.getByRole("button", { name: "关闭区域设置" }).click();
+    await page.getByTestId("trip-region-settings-layer").waitFor({ state: "detached" });
 
     await page.getByTestId("nav-quick").click();
     await page.getByTestId("page-quick").waitFor();
@@ -407,6 +421,7 @@ async function main() {
         expenseTabs,
         expenseNaturalWeek: true,
         expenseNoAlert: true,
+        expenseRegionSettings: true,
         voiceFallback: true,
         customerReadOnly: true,
         customerCancel: true,
@@ -417,7 +432,9 @@ async function main() {
       screenshots: {
         desktopItinerary: desktopScreenshotPath,
         desktopExpense: desktopExpenseScreenshotPath,
+        desktopExpenseRegion: desktopRegionScreenshotPath,
         mobileExpense: mobileExpenseScreenshotPath,
+        mobileExpenseRegion: mobileRegionScreenshotPath,
         mobileItinerary: screenshotPath,
       },
     };

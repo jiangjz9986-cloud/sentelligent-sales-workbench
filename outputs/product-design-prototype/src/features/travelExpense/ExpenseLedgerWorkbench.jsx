@@ -10,6 +10,7 @@ import {
   FileCheck2,
   FileClock,
   FileWarning,
+  ImageOff,
   Landmark,
   LoaderCircle,
   MapPin,
@@ -23,6 +24,8 @@ import {
 import { useId, useMemo, useState } from "react";
 
 import { buildExpenseLedgerWorkbenchModel } from "./expenseLedgerWorkbenchModel.js";
+import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
+import { isTravelExpenseImage, isTravelExpensePdf } from "./travelExpenseDocument.js";
 import { formatCny, formatSignedCny } from "./travelExpenseModel.js";
 import "./expenseLedgerWorkbench.css";
 
@@ -84,11 +87,30 @@ function SourceState({ item }) {
   return <span className="ledger-workbench-source"><Icon size={16} aria-hidden="true" />{item.sourceLabel}</span>;
 }
 
-function ProofState({ item }) {
+function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
+  const first = item.paymentProofs?.[0];
+  if (first && isTravelExpenseImage(first) && typeof getAttachmentContentResponse === "function") {
+    return (
+      <div className="ledger-proof-preview">
+        <AuthenticatedImageFrame
+          resourceKey={first.id}
+          loadImage={({ signal }) => getAttachmentContentResponse(first.id, { signal })}
+          title={first.fileName || "付款凭证"}
+          variant="thumbnail"
+          maxDimension={180}
+          className="ledger-proof-preview-image"
+        />
+        <span><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span>
+      </div>
+    );
+  }
+  if (first && isTravelExpensePdf(first)) {
+    return <div className="ledger-proof-preview is-pdf"><span className="ledger-proof-pdf-mark">PDF</span><span><strong>共 {item.paymentProofCount} 份</strong><button type="button" onClick={() => onOpenProof?.(item.original, item)}>查看</button></span></div>;
+  }
   const Icon = item.proofState === "attached" || item.proofState === "system"
     ? CheckCircle2
     : item.proofState === "pending" ? FileClock : FileWarning;
-  return <span className={`ledger-workbench-state is-${item.proofState}`}><Icon size={15} aria-hidden="true" />{item.proofLabel}</span>;
+  return <span className={`ledger-workbench-state is-${item.proofState}`}>{item.proofState === "missing" ? <ImageOff size={15} aria-hidden="true" /> : <Icon size={15} aria-hidden="true" />}{item.proofState === "missing" ? "未上传" : item.proofLabel}</span>;
 }
 
 function InvoiceState({ item }) {
@@ -113,7 +135,7 @@ function ActionButton({ item, onOpenItem, onReviewItem }) {
   );
 }
 
-function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewItem }) {
+function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewItem, onOpenProof, getAttachmentContentResponse }) {
   return (
     <div className="ledger-workbench-desktop-table">
       <table>
@@ -143,7 +165,7 @@ function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewIte
                 {!item.formal ? <small className="ledger-workbench-not-counted">尚未计入本周合计</small> : null}
               </td>
               <td><SourceState item={item} /></td>
-              <td><ProofState item={item} /></td>
+              <td><ProofState item={item} getAttachmentContentResponse={getAttachmentContentResponse} onOpenProof={onOpenProof} /></td>
               <td><InvoiceState item={item} /></td>
               <td><ActionButton item={item} onOpenItem={onOpenItem} onReviewItem={onReviewItem} /></td>
             </tr>
@@ -155,7 +177,7 @@ function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewIte
   );
 }
 
-function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem }) {
+function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem, onOpenProof, getAttachmentContentResponse }) {
   return (
     <ul className="ledger-workbench-mobile-list" aria-label="所选日期账目卡片">
       {items.map((item) => {
@@ -170,7 +192,7 @@ function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem
             <CategoryCopy item={item} />
             <dl>
               <div><dt>来源</dt><dd><SourceState item={item} /></dd></div>
-              <div><dt>付款凭证</dt><dd><ProofState item={item} /></dd></div>
+              <div><dt>付款凭证</dt><dd><ProofState item={item} getAttachmentContentResponse={getAttachmentContentResponse} onOpenProof={onOpenProof} /></dd></div>
               <div><dt>发票</dt><dd><InvoiceState item={item} /></dd></div>
             </dl>
             {!item.formal ? <p className="ledger-workbench-pending-note"><CircleAlert size={14} aria-hidden="true" />待确认内容不会计入本周合计</p> : null}
@@ -193,7 +215,7 @@ function EmptyDay({ day }) {
   );
 }
 
-function SummaryStrip({ summary, onStartReimbursement }) {
+function SummaryStrip({ summary, onOpenExpenseListPrint, onExportExpenseList, exporting }) {
   const balanceLabel = summary.advanceBalanceState === "remaining"
     ? "借款剩余"
     : summary.advanceBalanceState === "overspent" ? "超额个人垫付" : "借款已结平";
@@ -207,9 +229,10 @@ function SummaryStrip({ summary, onStartReimbursement }) {
         <div><dt>凭证缺失</dt><dd>{summary.missingProofCount}</dd></div>
         <div><dt>发票缺失</dt><dd>{summary.missingInvoiceCount}</dd></div>
       </dl>
-      <button type="button" onClick={() => onStartReimbursement?.()} disabled={typeof onStartReimbursement !== "function"}>
-        <ReceiptText size={17} aria-hidden="true" />整理报销
-      </button>
+      <div className="ledger-workbench-output-actions" data-testid="ledger-reimbursement-actions">
+        <button type="button" onClick={() => onOpenExpenseListPrint?.()} disabled={typeof onOpenExpenseListPrint !== "function"}><ReceiptText size={17} aria-hidden="true" />打印费用清单</button>
+        <button type="button" onClick={() => onExportExpenseList?.()} disabled={typeof onExportExpenseList !== "function" || exporting}><FileCheck2 size={17} aria-hidden="true" />{exporting ? "生成 Excel 中" : "导出费用清单"}</button>
+      </div>
     </footer>
   );
 }
@@ -229,10 +252,14 @@ export function ExpenseLedgerWorkbench({
   error = "",
   onSelectDate,
   onOpenItem,
+  onOpenProof,
   onReviewItem,
   onOpenRegionSettings,
+  getAttachmentContentResponse,
   onRetry,
-  onStartReimbursement,
+  onOpenExpenseListPrint,
+  onExportExpenseList,
+  exporting = false,
 }) {
   const uid = useId().replaceAll(":", "");
   const [localSelectedDate, setLocalSelectedDate] = useState(selectedDate ?? null);
@@ -340,13 +367,13 @@ export function ExpenseLedgerWorkbench({
 
         {model.selectedDay.items.length > 0 ? (
           <>
-            <LedgerDesktopTable items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} />
-            <LedgerMobileCards items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} />
+            <LedgerDesktopTable items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} onOpenProof={onOpenProof} getAttachmentContentResponse={getAttachmentContentResponse} />
+            <LedgerMobileCards items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} onOpenProof={onOpenProof} getAttachmentContentResponse={getAttachmentContentResponse} />
           </>
         ) : <EmptyDay day={model.selectedDay} />}
       </section>
 
-      <SummaryStrip summary={model.summary} onStartReimbursement={onStartReimbursement} />
+      <SummaryStrip summary={model.summary} onOpenExpenseListPrint={onOpenExpenseListPrint} onExportExpenseList={onExportExpenseList} exporting={exporting} />
     </section>
   );
 }

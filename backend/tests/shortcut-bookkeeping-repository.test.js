@@ -330,6 +330,12 @@ describe("Shortcut bookkeeping repository invariants", () => {
         reimbursementCents: 1280,
         attachmentStatus: "pending",
       });
+      assert.deepEqual(repository.listRecentLedgerReceipts({ owner: "owner-a" }), [{
+        ...completed.ledgerReceipt,
+        acceptedAt: completed.item.updatedAt,
+      }]);
+      assert.deepEqual(repository.listRecentLedgerReceipts({ owner: "owner-b" }), []);
+      assert.throws(() => repository.listRecentLedgerReceipts({ owner: "owner-a", limit: 51 }), /between 1 and 50/u);
 
       const completionReplay = repository.completeLocal(received.item.id, {
         leaseToken: reviewClaim.leaseToken,
@@ -365,6 +371,10 @@ describe("Shortcut bookkeeping repository invariants", () => {
         ...completed.ledgerReceipt,
         attachmentStatus: "matched",
       });
+      assert.equal(
+        repository.listRecentLedgerReceipts({ owner: "owner-a" })[0].attachmentStatus,
+        "matched",
+      );
     } finally {
       db.close();
     }

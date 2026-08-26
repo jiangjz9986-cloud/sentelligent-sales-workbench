@@ -18,6 +18,7 @@ describe("document vision analysis", () => {
           choices: [{ message: { content: JSON.stringify({
             amountCents: 200,
             occurredOn: "2026-08-25",
+            occurredOnYearExplicit: true,
             paidTime: "14:23",
             merchant: "测试商户",
             paymentMethod: "wechat",
@@ -45,12 +46,16 @@ describe("document vision analysis", () => {
     assert.match(captured.messages[0].content, /documentKind/u);
     assert.match(captured.messages[0].content, /transactions/u);
     assert.match(captured.messages[0].content, /最多 20 笔/u);
+    assert.match(captured.messages[0].content, /occurredOnYearExplicit/u);
+    assert.match(captured.messages[0].content, /年份是否在凭证画面中明确出现/u);
+    assert.match(captured.messages[0].content, /服务端根据参考日期确定年份/u);
     assert.match(captured.messages[0].content, /手机或系统状态栏时间绝不是支付时间/u);
     assert.match(captured.messages[0].content, /原价、优惠、折扣、合计和实付是同一笔付款/u);
     assert.match(captured.messages[0].content, /参考日期是 2026-08-25/u);
     assert.match(captured.messages[0].content, /不能用参考日期代替/u);
     assert.equal(captured.max_tokens, 1_600);
     assert.equal(result.amountCents, 200);
+    assert.equal(result.occurredOnYearExplicit, true);
   });
 
   it("rejects a malformed reference date before invoking the vision model", async () => {
@@ -71,6 +76,39 @@ describe("document vision analysis", () => {
       (error) => error?.code === "VISION_INPUT_INVALID",
     );
     assert.equal(called, false);
+  });
+
+  it("strictly requires boolean year evidence at the top level and in every transaction", async () => {
+    for (const modelResult of [
+      { amountCents: 200, occurredOn: "08-25", paidTime: "14:23", transactions: [] },
+      {
+        amountCents: null,
+        occurredOn: null,
+        occurredOnYearExplicit: false,
+        transactions: [{ amountCents: 200, occurredOn: "08-25", paidTime: "14:23" }],
+      },
+      {
+        amountCents: 200,
+        occurredOn: null,
+        occurredOnYearExplicit: true,
+        transactions: [],
+      },
+    ]) {
+      await assert.rejects(
+        analyzeDocumentWithVision({
+          fileName: "proof.png",
+          mediaType: "image/png",
+          buffer: VALID_PNG,
+        }, {
+          documentKind: "payment_proof",
+          referenceDate: "2026-08-26",
+          async modelClient() {
+            return { choices: [{ message: { content: JSON.stringify(modelResult) } }] };
+          },
+        }),
+        (error) => error?.code === "VISION_MODEL_INVALID_RESPONSE",
+      );
+    }
   });
 
   it("renders PDF pages to bounded images before calling the vision model", async () => {

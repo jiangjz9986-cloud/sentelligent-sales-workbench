@@ -1,7 +1,9 @@
 import {
   CalendarDays,
   CircleAlert,
+  CheckCircle2,
   LoaderCircle,
+  MapPin,
   Plus,
   RefreshCw,
 } from "lucide-react";
@@ -14,10 +16,14 @@ import { ExpenseListPrintPreview } from "./ExpenseListPrintPreview.jsx";
 import { InvoiceManager } from "./InvoiceManager.jsx";
 import { InvoicePrintPreview } from "./InvoicePrintPreview.jsx";
 import { PaymentProofCenter } from "./PaymentProofCenter.jsx";
-import { PaymentRecordPrintPreview } from "./PaymentRecordPrintPreview.jsx";
-import { ReimbursementOrganizer } from "./ReimbursementOrganizer.jsx";
+import { downloadExpenseListXlsx } from "./ReimbursementOrganizer.jsx";
+import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
 import { WeixinBookkeepingReviewCenter } from "./WeixinBookkeepingReviewCenter.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
+import {
+  canSaveRegionProfileForWeek,
+  selectCrossWeekLedgerReceipts,
+} from "./travelExpensePageState.js";
 import {
   naturalWeekFor,
   summarizeTravelExpenses,
@@ -26,7 +32,6 @@ import {
 const TABS = [
   { id: "ledger", label: "账本" },
   { id: "invoices", label: "发票" },
-  { id: "export", label: "报销输出" },
 ];
 
 function isoWeekInput(weekStart) {
@@ -80,6 +85,8 @@ export function TravelExpensePage({
   const [noInvoiceConfirmations, setNoInvoiceConfirmations] = useState([]);
   const [invoiceCoverage, setInvoiceCoverage] = useState(null);
   const [weixinBookkeepingReviews, setWeixinBookkeepingReviews] = useState([]);
+  const [regionProfile, setRegionProfile] = useState(null);
+  const [recentLedgerReceipts, setRecentLedgerReceipts] = useState([]);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
   const [auxiliaryWarning, setAuxiliaryWarning] = useState("");
@@ -90,8 +97,10 @@ export function TravelExpensePage({
   const [pendingAttachmentId, setPendingAttachmentId] = useState(null);
   const [pendingInboxId, setPendingInboxId] = useState(null);
   const [advancePending, setAdvancePending] = useState(false);
-  const [printOpen, setPrintOpen] = useState(false);
   const [expenseListPrintOpen, setExpenseListPrintOpen] = useState(false);
+  const [expenseListExporting, setExpenseListExporting] = useState(false);
+  const [regionSettingsOpen, setRegionSettingsOpen] = useState(false);
+  const [regionSaving, setRegionSaving] = useState(false);
   const [invoicePrintItems, setInvoicePrintItems] = useState(null);
   const [selectedLedgerDate, setSelectedLedgerDate] = useState(null);
   const [highlightExpenseId, setHighlightExpenseId] = useState(null);
@@ -117,6 +126,9 @@ export function TravelExpensePage({
       setInvoiceMatches([]);
       setNoInvoiceConfirmations([]);
       setInvoiceCoverage(null);
+      setRegionProfile(null);
+      setRecentLedgerReceipts([]);
+      setRegionSettingsOpen(false);
     }
     setError("");
     setAuxiliaryWarning("");
@@ -138,6 +150,8 @@ export function TravelExpensePage({
       setExpenses(workbenchResult.value.expenses);
       setAdvances(workbenchResult.value.advances);
       setWeixinBookkeepingReviews(workbenchResult.value.bookkeepingReviews);
+      setRegionProfile(workbenchResult.value.regionProfile);
+      setRecentLedgerReceipts(workbenchResult.value.recentLedgerReceipts);
       const auxiliaryFailures = [];
       if (documentInboxResult.status === "fulfilled") setDocumentInbox(documentInboxResult.value);
       else auxiliaryFailures.push("付款凭证待处理");
@@ -222,6 +236,13 @@ export function TravelExpensePage({
   function selectWeek(value) {
     setSelectedLedgerDate(null);
     setHighlightExpenseId(null);
+    // Invalidate the projection synchronously so no old-week region, receipt,
+    // or open settings card can be displayed or saved while the new week is
+    // loading. The effect below will repopulate all week-scoped data.
+    loadedWeekStartRef.current = null;
+    setRegionProfile(null);
+    setRecentLedgerReceipts([]);
+    setRegionSettingsOpen(false);
     setWeek(weekFromInput(value));
   }
 
@@ -385,11 +406,59 @@ export function TravelExpensePage({
     }
   }
 
-  const getAttachmentUrl = (attachmentId) => apiClient.getTravelExpenseAttachmentContentUrl(attachmentId);
-
-  if (printOpen) {
-    return <PaymentRecordPrintPreview expenses={expenses} summary={summary} week={week} owner={owner} itineraryLabel={itineraryLabel} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={() => setPrintOpen(false)} />;
+  async function saveRegionProfile(draft) {
+    if (!canSaveRegionProfileForWeek({
+      loadedWeekStart: loadedWeekStartRef.current,
+      selectedWeekStart: week.start,
+      draftWeekStart: draft?.weekStart,
+    })) {
+      throw new Error("当前自然周尚未同步完成，请重新加载后再保存区域。");
+    }
+    setRegionSaving(true);
+    try {
+      const saved = await apiClient.saveTravelExpenseRegionProfile(draft);
+      setRegionProfile(saved);
+      setRegionSettingsOpen(false);
+      return saved;
+    } finally {
+      setRegionSaving(false);
+    }
   }
+
+  async function exportExpenseList() {
+    setExpenseListExporting(true);
+    setError("");
+    try {
+      await downloadExpenseListXlsx({
+        expenses,
+        week,
+        matches: invoiceMatches,
+        noInvoiceConfirmations,
+        getAttachmentContentResponse: apiClient.getTravelExpenseAttachmentContentResponse,
+      });
+    } catch (exportError) {
+      setError(expenseErrorMessage(exportError, "费用清单 Excel 导出失败，请稍后重试。"));
+    } finally {
+      setExpenseListExporting(false);
+    }
+  }
+
+  function locateRecentReceipt(receipt) {
+    loadedWeekStartRef.current = null;
+    setRegionProfile(null);
+    setRecentLedgerReceipts([]);
+    setRegionSettingsOpen(false);
+    setWeek(naturalWeekFor(new Date(`${receipt.occurredOn}T12:00:00`)));
+    setSelectedLedgerDate(receipt.occurredOn);
+    setHighlightExpenseId(receipt.expenseId);
+    setActiveTab("ledger");
+  }
+
+  const crossWeekReceipts = useMemo(() => (
+    selectCrossWeekLedgerReceipts(recentLedgerReceipts, week.start)
+  ), [recentLedgerReceipts, week.start]);
+
+  const getAttachmentUrl = (attachmentId) => apiClient.getTravelExpenseAttachmentContentUrl(attachmentId);
 
   if (expenseListPrintOpen) {
     return <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={() => setExpenseListPrintOpen(false)} />;
@@ -421,6 +490,8 @@ export function TravelExpensePage({
 
       {error ? <div className="expense-page-alert" role="alert"><CircleAlert size={18} /><span>{error}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重新加载</button></div> : null}
       {auxiliaryWarning ? <div className="expense-page-alert is-warning" role="status"><CircleAlert size={18} /><span>{auxiliaryWarning}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重试辅助数据</button></div> : null}
+      {selectedWeekLoaded && regionProfile && !regionProfile.defaultCity && regionProfile.dateOverrides.length === 0 ? <div className="expense-page-alert is-warning expense-region-callout" role="status"><MapPin size={18} /><span>本周还没有设置出差区域。小小收到付款凭证后会先询问区域，设置后可直接按发生日期匹配。</span><button className="ghost-button" type="button" onClick={() => setRegionSettingsOpen(true)}>设置本周区域</button></div> : null}
+      {selectedWeekLoaded && crossWeekReceipts.length > 0 ? <div className="expense-page-alert expense-recent-receipt" role="status"><CheckCircle2 size={18} /><div><span>小小最近录入了其他自然周的账目：</span>{crossWeekReceipts.map((receipt) => <div className="expense-recent-receipt-row" key={`${receipt.expenseId}-${receipt.occurredOn}`}><span>{receipt.referenceCode} · {receipt.weekStart}{receipt.attachmentStatus === "pending" ? " · 付款凭证仍在关联中" : ""}</span><button className="ghost-button" type="button" onClick={() => locateRecentReceipt(receipt)}>查看这笔账目</button></div>)}</div></div> : null}
       {status === "loading" ? <div className="expense-loading" role="status"><LoaderCircle className="state-spinner" size={24} /><strong>正在读取本周费用</strong><p>费用、付款凭证、发票和借款到账记录正在同步。</p></div> : null}
 
       {status !== "loading" && selectedWeekLoaded ? (
@@ -433,6 +504,7 @@ export function TravelExpensePage({
               reviews={weixinBookkeepingReviews}
               matches={invoiceMatches}
               noInvoiceConfirmations={noInvoiceConfirmations}
+              regionProfile={regionProfile}
               selectedDate={selectedLedgerDate}
               highlightExpenseId={highlightExpenseId}
               onSelectDate={setSelectedLedgerDate}
@@ -445,17 +517,26 @@ export function TravelExpensePage({
                 document.getElementById("expense-ledger-advances")?.scrollIntoView({ behavior: "smooth", block: "start" });
               }}
               onReviewItem={() => document.getElementById("expense-ledger-reviews")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              onOpenProof={() => {
+                const details = document.getElementById("expense-ledger-proofs");
+                if (details) details.open = true;
+                details?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }}
+              onOpenRegionSettings={() => setRegionSettingsOpen(true)}
+              getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse}
               onRetry={() => setReloadToken((value) => value + 1)}
-              onStartReimbursement={() => setActiveTab("export")}
+              onOpenExpenseListPrint={() => setExpenseListPrintOpen(true)}
+              onExportExpenseList={() => void exportExpenseList()}
+              exporting={expenseListExporting}
             />
             <div className="expense-ledger-child-functions">
               <section id="expense-ledger-reviews" className="expense-ledger-child-card">
                 <header><div><strong>小小待确认</strong><span>确认后才会写入正式账本；确认回执会定位到真实 EXP 账单。</span></div><b>{weixinBookkeepingReviews.length}</b></header>
                 <WeixinBookkeepingReviewCenter reviews={weixinBookkeepingReviews} apiClient={apiClient} onChanged={refreshWeixinBookkeepingReviews} />
               </section>
-              <details className="expense-ledger-child-card">
+              <details id="expense-ledger-proofs" className="expense-ledger-child-card">
                 <summary><span><strong>付款凭证</strong><small>导入、人工关联和查看已附付款原件</small></span><b>{documentInbox.length} 待处理</b></summary>
-                <PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} />
+                <PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} />
               </details>
               <details id="expense-ledger-advances" className="expense-ledger-child-card">
                 <summary><span><strong>借款到账</strong><small>只记录实际到账的“收入 / 出差借款”</small></span><b>{receivedAdvances.length} 笔</b></summary>
@@ -464,11 +545,11 @@ export function TravelExpensePage({
             </div>
           </> : null}
           {activeTab === "invoices" ? <InvoiceManager apiClient={apiClient} week={week} expenses={expenses} onOpenPrint={(items) => setInvoicePrintItems(items)} onExpenseChanged={() => setReloadToken((value) => value + 1)} /> : null}
-          {activeTab === "export" ? <ReimbursementOrganizer expenses={expenses} summary={summary} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onOpenExpenseListPrint={() => setExpenseListPrintOpen(true)} onOpenPrint={() => setPrintOpen(true)} onRefresh={() => setReloadToken((value) => value + 1)} /> : null}
         </div>
       ) : null}
 
       <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); }} onSave={saveExpense} />
+      <TripRegionSettingsCard open={selectedWeekLoaded && regionSettingsOpen} profile={regionProfile} pending={regionSaving} onClose={() => setRegionSettingsOpen(false)} onSave={saveRegionProfile} />
     </section>
   );
 }

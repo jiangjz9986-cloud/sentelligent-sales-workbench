@@ -99,8 +99,8 @@
 }
 
 .ledger-workbench-region-rule button {
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   justify-content: center;
   border: 0;
   border-radius: 9px;
@@ -466,6 +466,80 @@
   color: #8a94a7;
 }
 
+.ledger-proof-preview {
+  max-width: 100%;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px;
+  border: 0;
+  border-radius: 8px;
+  color: #304361;
+  text-align: left;
+  background: transparent;
+}
+
+.ledger-proof-preview:hover { background: #f1f5fb; }
+.ledger-proof-preview-image,
+.ledger-proof-pdf-mark {
+  width: 48px;
+  height: 54px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid #dce3ed;
+  border-radius: 7px;
+  background: #f5f7fa;
+}
+
+/* The authenticated frame also carries a global width/height:100% rule for
+ * full-size previews. Keep ledger thumbnails as a fixed flex item so the
+ * attachment count and view action remain visible beside the image. */
+.ledger-proof-preview-image.authenticated-image-frame {
+  width: 48px;
+  height: 54px;
+  min-width: 48px;
+  min-height: 54px;
+  flex: 0 0 48px;
+}
+
+.ledger-proof-preview-image > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #f7f8fa;
+}
+
+.ledger-proof-preview-image > .authenticated-image-frame-state {
+  min-height: 52px;
+  padding: 3px;
+  font-size: 0;
+}
+
+.ledger-proof-preview-image > .authenticated-image-frame-state svg { width: 15px; height: 15px; }
+.ledger-proof-preview-image > .authenticated-image-frame-state button {
+  min-width: 0;
+  min-height: 28px;
+  padding: 3px;
+  font-size: 0;
+}
+
+.ledger-proof-pdf-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #c34343;
+  background: #fff3f3;
+  font-size: 11px;
+  font-weight: 820;
+}
+
+.ledger-proof-preview > span:last-child { min-width: 0; display: grid; gap: 3px; }
+.ledger-proof-preview > span:last-child strong,
+.ledger-proof-preview > span:last-child button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ledger-proof-preview > span:last-child strong { color: #27405e; font-size: 10.5px; }
+.ledger-proof-preview > span:last-child button { min-height: 28px; padding: 2px 0; border: 0; color: #2862d5; background: transparent; font-size: 9.5px; text-align: left; }
+
 .ledger-workbench-link,
 .ledger-workbench-review-button {
   min-height: 36px;
@@ -499,7 +573,7 @@
 
 .ledger-workbench-link:disabled,
 .ledger-workbench-review-button:disabled,
-.ledger-workbench-summary > button:disabled,
+.ledger-workbench-output-actions button:disabled,
 .ledger-workbench-state-panel button:disabled {
   cursor: default;
   opacity: 0.48;
@@ -594,7 +668,7 @@
   color: #d24d3e;
 }
 
-.ledger-workbench-summary > button,
+.ledger-workbench-output-actions button,
 .ledger-workbench-state-panel button {
   min-width: 132px;
   min-height: 44px;
@@ -612,11 +686,22 @@
   white-space: nowrap;
 }
 
-.ledger-workbench-summary > button:hover,
+.ledger-workbench-output-actions button:hover,
 .ledger-workbench-state-panel button:hover {
   border-color: rgba(47, 107, 255, 0.45);
   color: var(--ledger-blue);
   background: var(--ledger-blue-soft);
+}
+
+.ledger-workbench-output-actions {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.ledger-workbench-output-actions button {
+  min-width: 130px;
 }
 
 .ledger-workbench-state-panel {
@@ -698,7 +783,7 @@
     border-left: 0;
   }
 
-  .ledger-workbench-summary > button {
+  .ledger-workbench-output-actions {
     margin-left: auto;
   }
 }
@@ -887,10 +972,12 @@
     border-left: 0;
   }
 
-  .ledger-workbench-summary > button {
+  .ledger-workbench-output-actions {
     width: 100%;
     margin: 0;
   }
+
+  .ledger-workbench-output-actions button { min-width: 0; }
 }
 
 @media (max-width: 430px) {
@@ -950,7 +1037,7 @@
 
 @media print {
   .ledger-workbench-region-rule button,
-  .ledger-workbench-summary > button,
+  .ledger-workbench-output-actions,
   .ledger-workbench-link,
   .ledger-workbench-review-button {
     display: none !important;

@@ -24,6 +24,7 @@ const SHORTCUT_PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DRAFT_REFERENCE_RE = /BK-[0-9A-F]{12}|(?:编号\s*[：:]\s*)([0-9]{12})/u;
 const IMPLICIT_CURRENT_WINDOW_MS = 15 * 60 * 1000;
 const IMPLICIT_CURRENT_GAP_MS = 60 * 60 * 1000;
+const EXPLICIT_TRIP_REGION_SOURCES = new Set(["text", "user_correction"]);
 
 function requiredText(value, name, max = 500) {
   if (typeof value !== "string" || !value.trim() || value.length > max) throw new TypeError(`${name} is required`);
@@ -255,6 +256,9 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
     : [fields.category, fields.subcategory].filter(Boolean).join("-");
   const note = fields.note;
   const week = naturalWeek(fields.occurredOn);
+  const weekReference = week
+    ? `${week.start.replaceAll("-", "")}-${week.end.replaceAll("-", "")}`
+    : null;
   const number = draftTimestampReference(entry) ?? reference ?? "待确认";
   const reviewWarnings = [...new Set([
     ...draft.warnings,
@@ -272,13 +276,21 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
     `金额：${formatMoney(fields.amountCents)}`,
     `费用类别：${fieldText(category)}`,
     `备注：${fieldText(note, "无")}`,
-    `周期：${week ? `${week.start.replaceAll("-", "")}-${week.end.replaceAll("-", "")}` : "待确认"}`,
+    `周期：${weekReference ?? "待确认"}`,
     `AI 状态：${aiStatus}`,
   ];
   lines.push(
     "",
     "请引用本消息并回复",
   );
+  if (reviewWarnings.includes("missing_trip_region")) {
+    lines.push(
+      weekReference
+        ? `这笔餐饮还没有唯一出差区域，当前不能确认。请先回复“${weekReference}区域是济南”；多城市时请同时说明各日期范围和城市。`
+        : "这笔餐饮还没有唯一出差区域，当前不能确认。请先说明对应自然周和出差城市；多城市时请同时说明各日期范围和城市。",
+      "区域设置完成后，小小会发送更新后的记账消息；请引用最新消息回复“确认”。",
+    );
+  }
   return lines.join("\n").slice(0, MAX_MESSAGE_LENGTH);
 }
 
@@ -299,12 +311,27 @@ function acceptedResult(entry) {
   };
 }
 
-function isFinalizable(entry) {
-  const { expense } = entryAnalysis(entry);
+function isFinalizable(entry, { tripRegionResolver = null } = {}) {
+  const { analysis, expense } = entryAnalysis(entry);
   const occurredOn = dateOnly(expense.occurredOn ?? entry.occurredOn);
   const amountCents = expense.amountCents ?? entry.amountCents;
   const purpose = expense.purpose ?? entry.purpose;
-  return Boolean(occurredOn
+  let externallyResolvedRegion = null;
+  if (occurredOn && typeof tripRegionResolver === "function") {
+    try {
+      externallyResolvedRegion = tripRegionResolver(occurredOn);
+    } catch {
+      externallyResolvedRegion = null;
+    }
+  }
+  const mealNeedsRegion = entry.entryType === "expense"
+    && entry.category === "餐饮"
+    && ["早餐", "午餐", "晚餐"].includes(entry.subcategory)
+    && (!analysis.noteAutomation?.tripRegion && !externallyResolvedRegion
+      || (Array.isArray(analysis.warnings) && analysis.warnings.includes("missing_trip_region")));
+  const unresolvedMealRegion = mealNeedsRegion && !externallyResolvedRegion;
+  return Boolean(!unresolvedMealRegion
+    && occurredOn
     && Number.isSafeInteger(amountCents)
     && amountCents > 0
     && typeof purpose === "string"
@@ -486,6 +513,7 @@ export function createShortcutBookkeepingAssistantRuntime({
   config,
   shortcutBookkeepingRepository,
   travelExpenseRepository = null,
+  travelExpenseRegionRepository = null,
   travelExpenseDocumentInboxRepository = null,
   advanceAllocationRepository = null,
   pendingActionRepository,
@@ -563,6 +591,61 @@ export function createShortcutBookkeepingAssistantRuntime({
       mediaType: content.mediaType,
       content: content.content,
     };
+  }
+
+  function regionForDate(account, occurredOn) {
+    const profile = travelExpenseRegionRepository?.resolveRegion({ owner: account, occurredOn }) ?? null;
+    if (profile?.city) return profile;
+    const itinerary = resolveItineraryTripRegion(db, { owner: account, occurredOn });
+    return itinerary ? { city: itinerary, source: "itinerary" } : null;
+  }
+
+  function synchronizeMealRegion(entry, analysisOverride = null) {
+    const analysis = analysisOverride ?? entryAnalysis(entry).analysis;
+    if (analysis.noteAutomation?.kind !== "meal") return { analysis, changed: false };
+    const source = analysis.noteAutomation.tripRegionSource ?? null;
+    if (EXPLICIT_TRIP_REGION_SOURCES.has(source) && analysis.noteAutomation.tripRegion) {
+      return { analysis, changed: false };
+    }
+    const occurredOn = dateOnly(analysis.expense?.occurredOn ?? entry.occurredOn);
+    const resolved = occurredOn ? regionForDate(entry.owner, occurredOn) : null;
+    // A newly inferred meal that never had a resolved region already carries
+    // missing_trip_region and a date/meal-only note. Only erase a prior
+    // profile/itinerary-derived value when that external resolution went away.
+    if (!resolved?.city && (!source || source === "itinerary") && !analysis.noteAutomation.tripRegion) {
+      return { analysis, changed: false };
+    }
+    const subcategory = analysis.subcategory ?? entry.subcategory;
+    const mealKey = subcategory === "早餐" ? "breakfast"
+      : subcategory === "午餐" ? "lunch"
+        : subcategory === "晚餐" ? "dinner"
+          : null;
+    const nextNoteAutomation = {
+      ...analysis.noteAutomation,
+      tripRegion: resolved?.city ?? null,
+      tripRegionSource: resolved?.source ?? null,
+    };
+    const nextNote = resolved?.city && mealKey
+      ? buildAutomaticMealNote({ occurredOn, tripRegion: resolved.city, mealKey })
+      : null;
+    const warnings = (analysis.warnings ?? []).filter((warning) => warning !== "missing_trip_region");
+    if (!resolved?.city) warnings.push("missing_trip_region");
+    const nextAnalysis = {
+      ...analysis,
+      note: nextNote,
+      noteAutomation: nextNoteAutomation,
+      warnings: [...new Set(warnings)],
+    };
+    const changed = JSON.stringify({
+      note: analysis.note ?? null,
+      noteAutomation: analysis.noteAutomation,
+      warnings: analysis.warnings ?? [],
+    }) !== JSON.stringify({
+      note: nextAnalysis.note,
+      noteAutomation: nextAnalysis.noteAutomation,
+      warnings: nextAnalysis.warnings,
+    });
+    return { analysis: nextAnalysis, changed };
   }
 
   // The bookkeeping state transition and the travel-expense attachment use
@@ -1412,11 +1495,49 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (entry.status !== "review_required") {
       return { status: 409, body: { status: "error", text: "这笔记账当前不能确认。" }, draftText: "确认信息已处理。" };
     }
+    const entryWeek = naturalWeek(assistantDateTime(
+      entryAnalysis(entry).expense.occurredOn ?? entry.occurredOn,
+    ));
+    if (entryWeek) {
+      const refreshed = refreshRegionDependentDrafts({
+        account,
+        assignment: { weekStart: entryWeek.start },
+      });
+      if (refreshed.includes(entry.id)) {
+        return {
+          status: 409,
+          body: {
+            status: "review_required",
+            text: "出差区域规则已变化，小小已发送更新后的记账草稿。请引用最新草稿后再确认。",
+          },
+          draftText: "等待确认最新区域版本的记账草稿。",
+        };
+      }
+    }
     const deliveredDraft = deliveredCurrentDraft({ account, action, entryId: target.entryId });
     if (!deliveredDraft) {
+      try {
+        enqueue(account, conversationFor(account), action, target.entryId, "region_refresh");
+      } catch { /* the version fence remains closed; worker recovery may retry */ }
       return { status: 409, body: { status: "review_required", text: "请先查看小小发送的最新记账草稿，再回复“确认”。" }, draftText: "等待当前版本草稿送达。" };
     }
-    if (!isFinalizable(entry)) return { status: 409, body: { status: "review_required", text: `当前草稿还有待确认字段。${correctionHelp()}` }, draftText: "仍需补充记账字段。" };
+    if (!isFinalizable(entry, {
+      tripRegionResolver: (occurredOn) => regionForDate(account, occurredOn)?.city ?? null,
+    })) {
+      const { analysis } = entryAnalysis(entry);
+      const needsRegion = Array.isArray(analysis.warnings)
+        && analysis.warnings.includes("missing_trip_region");
+      return {
+        status: 409,
+        body: {
+          status: "review_required",
+          text: needsRegion
+            ? "这笔餐饮草稿还没有唯一出差区域，请先回复例如“本周区域是济南”；多区域时请说明日期范围。区域设置完成后小小会发送更新后的草稿，再由你确认。"
+            : `当前草稿还有待确认字段。${correctionHelp()}`,
+        },
+        draftText: needsRegion ? "等待确认出差区域。" : "仍需补充记账字段。",
+      };
+    }
     let confirmed;
     try {
       confirmed = pendingActionRepository.confirm(action.id, {
@@ -1561,13 +1682,11 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (nextDraft.status !== "ready" && nextDraft.status !== "review_required") {
       return { status: 200, body: { status: "clarify", text: correctionHelp() }, draftText: "修改未通过字段校验。" };
     }
-    const analysis = reviewAnalysis(entry, nextDraft.fields, correction.changes, {
-      tripRegionResolver: (occurredOn) => resolveItineraryTripRegion(db, {
-        owner: account,
-        occurredOn,
-      }),
+    let analysis = reviewAnalysis(entry, nextDraft.fields, correction.changes, {
+      tripRegionResolver: (occurredOn) => regionForDate(account, occurredOn)?.city ?? null,
       explicitDateTimeCorrection: /(?:\d{4}-\d{2}-\d{2}T)?(?:[01]\d|2[0-3]):[0-5]\d/u.test(text),
     });
+    analysis = synchronizeMealRegion(entry, analysis).analysis;
     try {
       resolveBookkeepingCategory({
         ledgerName: entry.ledgerName,
@@ -1975,6 +2094,148 @@ export function createShortcutBookkeepingAssistantRuntime({
     };
   }
 
+  function refreshRegionDependentDrafts({ account, assignment }) {
+    const profileStart = assignment.weekStart;
+    const profileEnd = naturalWeek(`${profileStart}T12:00:00+08:00`)?.end;
+    if (!profileEnd) return [];
+    const rows = db.prepare(`
+      SELECT id FROM shortcut_bookkeeping_entries
+      WHERE owner = $owner
+        AND target_system = 'sentelligent'
+        AND entry_type = 'expense'
+        AND status = 'review_required'
+        AND occurred_on BETWEEN $weekStart AND $weekEnd
+      ORDER BY updated_at ASC, id ASC
+      LIMIT 100
+    `).all({ $owner: account, $weekStart: profileStart, $weekEnd: profileEnd });
+    const refreshed = [];
+    for (const row of rows) {
+      const entry = shortcutBookkeepingRepository.getReview(row.id, { owner: account });
+      if (!entry || entry.status !== "review_required") continue;
+      const synchronized = synchronizeMealRegion(entry);
+      if (!synchronized.changed) {
+        const action = findActionForEntry(account, entry.id);
+        const latest = outboxRepository.latestForEntry?.({ owner: account, entryId: entry.id });
+        if (latest?.status === "failed" && typeof outboxRepository.requeueFailed === "function") {
+          try {
+            // A transient delivery failure keeps the same idempotency key. Reopen
+            // that row before enqueue/replay so a refresh can actually recover
+            // delivery instead of merely returning the terminal failed item.
+            outboxRepository.requeueFailed(latest.id);
+          } catch { /* terminal/superseded failures stay fenced */ }
+        }
+        if (action && ["pending", "confirmed"].includes(action.status)
+          && !(latest?.status === "sent" && Number(latest?.payload?.version) === Number(action.version))) {
+          try { enqueue(account, conversationFor(account), action, entry.id, "region_refresh"); } catch { /* retry later */ }
+        }
+        continue;
+      }
+      const nextAnalysis = synchronized.analysis;
+      const claimed = shortcutBookkeepingRepository.claimReview(entry.id, { owner: account });
+      if (claimed.replayed) continue;
+      try {
+        const action = findActionForEntry(account, entry.id);
+        let renewedAction = null;
+        if (action && ["pending", "confirmed"].includes(action.status)) {
+          const scope = {
+            owner: account,
+            channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+            conversationId: action.conversationId,
+          };
+          renewedAction = pendingActionRepository.renewConfirmation(action.id, {
+            ...scope,
+            confirmationCode: deriveShortcutStateCredential(action.id, Number(action.version) + 1, secret),
+          }).item;
+          // Fence the previously delivered draft before persisting the refreshed
+          // analysis. If persistence or enqueue later fails, no stale quote can
+          // cross the renewed action version; confirm() can re-enqueue recovery.
+          closePendingOutbox({
+            account,
+            conversationId: conversationFor(account),
+            actionId: action.id,
+            entryId: entry.id,
+            errorCode: "WEIXIN_OUTBOX_REGION_REFRESHED",
+          });
+        }
+        const updated = shortcutBookkeepingRepository.completeLocal(entry.id, {
+          analysis: nextAnalysis,
+          leaseToken: claimed.leaseToken,
+          reviewPatch: {
+            category: nextAnalysis.category,
+            subcategory: nextAnalysis.subcategory,
+            note: nextAnalysis.note,
+          },
+          revisionSource: "system",
+        });
+        if (renewedAction) {
+          enqueue(account, conversationFor(account), renewedAction, entry.id, "region_refresh");
+        }
+        refreshed.push(updated.item.id);
+      } catch (error) {
+        try {
+          shortcutBookkeepingRepository.release(entry.id, {
+            leaseToken: claimed.leaseToken,
+            errorCode: "WEIXIN_REGION_REFRESH_FAILED",
+          });
+        } catch {}
+        throw error;
+      }
+    }
+    return refreshed;
+  }
+
+  function assignRegion({ account, intent }) {
+    if (!travelExpenseRegionRepository || intent?.intent !== "region_assignment") {
+      return { status: 503, body: { status: "error", text: "出差区域配置暂不可用。" }, draftText: "区域配置不可用。" };
+    }
+    const assignment = intent.regionAssignment;
+    const current = travelExpenseRegionRepository.getProfile({
+      owner: account,
+      weekStart: assignment.weekStart,
+    });
+    const saved = withImmediateTransaction(db, () => {
+      const item = travelExpenseRegionRepository.putProfile({
+        ...assignment,
+        owner: account,
+        actor: account,
+        expectedVersion: current.version,
+      });
+      if (item.version !== current.version) {
+        insertAudit(db, {
+          action: "travel_expense.region_profile.save.weixin",
+          entityType: "travel_expense_region_profile",
+          entityId: `${account}:${assignment.weekStart}`,
+          actor: account,
+          requestId: `${account}:${assignment.weekStart}:weixin`,
+          before: current,
+          after: item,
+          entityVersion: item.version,
+          metadata: {
+            source: "weixin",
+            cityCount: item.cities.length,
+            overrideCount: item.dateOverrides.length,
+          },
+        });
+      }
+      return item;
+    });
+    const refreshed = refreshRegionDependentDrafts({ account, assignment: saved });
+    const summary = saved.defaultCity
+      ? saved.defaultCity
+      : saved.dateOverrides.length > 0
+        ? saved.dateOverrides.map((item) => `${item.date.slice(5).replace("-", ".")} ${item.city}`).join("、")
+        : saved.cities.join("、");
+    return {
+      status: 200,
+      body: {
+        status: "review_required",
+        text: `已记录 ${saved.weekStart} 至 ${saved.weekEnd} 的出差区域：${summary}。${refreshed.length > 0 ? `已刷新 ${refreshed.length} 条同周待确认记账，请查看最新草稿后再确认。` : "这只是区域设置，未确认或写入任何费用。"}`,
+        item: { regionProfile: saved, refreshedEntryIds: refreshed },
+      },
+      draftText: "已更新自然周出差区域。",
+    };
+  }
+
   async function handlePending({ action, context, text, textClassification, confirmationCode, pendingActionId, serverData }) {
     const account = context.owner;
     const quote = serverData?.quote ?? null;
@@ -1990,6 +2251,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       action?.actionType === SHORTCUT_BOOKKEEPING_ACTION
       || shortcutQuote
       || (intent.status === "accepted" && intent.intent === "loan_assignment")
+      || (intent.status === "accepted" && intent.intent === "region_assignment")
       || (pendingActionId && action?.actionType === SHORTCUT_BOOKKEEPING_ACTION),
     );
     if (shortcutSignal && !financialEventScopeAllowed(context, serverData)) {
@@ -1998,6 +2260,9 @@ export function createShortcutBookkeepingAssistantRuntime({
         body: { status: "error", text: "当前微信会话不属于小小记账绑定的本人私聊，未执行任何财务操作。" },
         draftText: "财务操作访问被拒绝。",
       };
+    }
+    if (intent.status === "accepted" && intent.intent === "region_assignment") {
+      return assignRegion({ account, intent });
     }
     const newCapture = !quote
       && !pendingActionId
@@ -2146,6 +2411,9 @@ export function createShortcutBookkeepingAssistantRuntime({
     renderOutboxMessage,
     reconcileAcceptedAttachments,
     reconcileAcceptedReceipts,
+    refreshRegionDependentDrafts: ({ account, weekStart } = {}) => (
+      refreshRegionDependentDrafts({ account, assignment: { weekStart } })
+    ),
     handlePending,
   });
 }

@@ -76,6 +76,11 @@ import {
   validateTravelExpenseWeekStart,
 } from "./travelExpense/validation.js";
 import {
+  TravelExpenseRegionProfileVersionConflictError,
+  createTravelExpenseRegionRepository,
+  normalizeTravelExpenseRegionProfileInput,
+} from "./travelExpense/regionRepository.js";
+import {
   applyShortcutSelectionAnalysis,
   createShortcutBookkeepingRepository,
 } from "./integrations/shortcutBookkeepingRepository.js";
@@ -1083,6 +1088,34 @@ function parseExpectedVersion(request) {
     throw new HttpError(428, "PRECONDITION_REQUIRED", "A current quoted entity version is required");
   }
   return version;
+}
+
+function parseRegionProfileExpectedVersion(request) {
+  const rawHeaderCount = Array.isArray(request.rawHeaders)
+    ? request.rawHeaders.filter((value, index) => index % 2 === 0 && String(value).toLowerCase() === "if-match").length
+    : 0;
+  const rawValue = request.headers["if-match"];
+  const match = rawHeaderCount === 1 && typeof rawValue === "string"
+    ? /^"(0|[1-9]\d*)"$/u.exec(rawValue)
+    : null;
+  const version = match ? Number(match[1]) : NaN;
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw new HttpError(428, "PRECONDITION_REQUIRED", "A current quoted region profile version is required");
+  }
+  return version;
+}
+
+function validateTravelExpenseRegionProfilePayload(value) {
+  const body = plainObject(value);
+  allowedPayloadKeys(body, new Set(["weekStart", "cities", "defaultCity", "dateOverrides"]));
+  try {
+    return normalizeTravelExpenseRegionProfileInput(body);
+  } catch (error) {
+    const message = String(error?.message ?? "");
+    const field = ["weekStart", "cities", "defaultCity", "dateOverrides"]
+      .find((candidate) => message.includes(candidate)) ?? "regionProfile";
+    validationFailure(field, "invalid");
+  }
 }
 
 function throwVersionFailure(db, { table, id, softDeletable }) {
@@ -2601,6 +2634,9 @@ export function createServer(options = {}) {
     clock: options.travelExpenseClock ?? (() => new Date()),
     ...(options.travelExpenseIdFactory ? { idFactory: options.travelExpenseIdFactory } : {}),
   });
+  const travelExpenseRegionRepository = createTravelExpenseRegionRepository(db, {
+    clock: options.travelExpenseRegionClock ?? options.travelExpenseClock ?? (() => new Date()),
+  });
   const travelExpenseDocumentInboxRepository = createTravelExpenseDocumentInboxRepository(db, {
     clock: options.travelExpenseDocumentInboxClock ?? options.travelExpenseClock ?? (() => new Date()),
     ...(options.travelExpenseDocumentInboxIdFactory
@@ -2748,6 +2784,7 @@ export function createServer(options = {}) {
       config,
       shortcutBookkeepingRepository,
       travelExpenseRepository,
+      travelExpenseRegionRepository,
       travelExpenseDocumentInboxRepository,
       advanceAllocationRepository: shortcutAdvanceAllocationRepository,
       pendingActionRepository: assistantPendingActionRepository,
@@ -2832,6 +2869,7 @@ export function createServer(options = {}) {
       bookkeepingRepository: shortcutBookkeepingRepository,
       bookkeepingRuntime: shortcutBookkeepingAssistantRuntime,
       travelExpenseRepository,
+      travelExpenseRegionRepository,
       travelExpenseAnalyzer: travelExpenseAnalyzer,
       invoiceRepository,
       paymentProofRecognizer,
@@ -3542,17 +3580,109 @@ export function createServer(options = {}) {
             status: "review_required",
             limit: 100,
           });
+          const regionProfile = travelExpenseRegionRepository.getProfile({ owner, weekStart });
+          const recentLedgerReceipts = shortcutBookkeepingRepository.listRecentLedgerReceipts({
+            owner,
+            limit: 50,
+          });
           return {
             weekStart,
             expenses,
             advances,
             bookkeepingReviews: bookkeepingReviews.map((review) => shortcutReviewResponseItem(review)),
+            regionProfile,
+            recentLedgerReceipts,
             generatedAt: new Date().toISOString(),
           };
         });
         sendJson(response, 200, {
           item,
         }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/travel-expense-region-profile") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const owner = request.authContext.account;
+        const weekStart = validateTravelExpenseWeekStart(url.searchParams.get("weekStart"));
+        const item = travelExpenseRegionRepository.getProfile({ owner, weekStart });
+        sendJson(response, 200, { item }, {
+          "Cache-Control": "no-store",
+          ETag: `"${item.version}"`,
+        });
+        return;
+      }
+
+      if (request.method === "PUT" && url.pathname === "/api/travel-expense-region-profile") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const expectedVersion = parseRegionProfileExpectedVersion(request);
+        const body = validateTravelExpenseRegionProfilePayload(await readJson(request));
+        const owner = request.authContext.account;
+        const item = withImmediateTransaction(db, () => {
+          const before = travelExpenseRegionRepository.getProfile({
+            owner,
+            weekStart: body.weekStart,
+          });
+          let saved;
+          try {
+            saved = travelExpenseRegionRepository.putProfile({
+              ...body,
+              owner,
+              actor: owner,
+              expectedVersion,
+            });
+          } catch (error) {
+            if (error instanceof TravelExpenseRegionProfileVersionConflictError) {
+              throw new HttpError(409, "VERSION_CONFLICT", "The region profile was updated by another request", {
+                currentVersion: error.currentVersion,
+              });
+            }
+            throw error;
+          }
+          if (saved.version !== before.version) {
+            insertAudit(db, {
+              action: "travel_expense.region_profile.save",
+              entityType: "travel_expense_region_profile",
+              entityId: `${owner}:${body.weekStart}`,
+              actor: owner,
+              requestId,
+              before,
+              after: saved,
+              entityVersion: saved.version,
+              metadata: {
+                weekStart: saved.weekStart,
+                cityCount: saved.cities.length,
+                overrideCount: saved.dateOverrides.length,
+              },
+            });
+          }
+          return saved;
+        });
+        let draftRefresh;
+        try {
+          const refreshedEntryIds = shortcutBookkeepingAssistantRuntime.refreshRegionDependentDrafts({
+            account: owner,
+            weekStart: item.weekStart,
+          });
+          draftRefresh = {
+            status: "completed",
+            refreshedCount: Array.isArray(refreshedEntryIds) ? refreshedEntryIds.length : 0,
+          };
+        } catch {
+          // The profile and its audit row are already durably committed. Do not
+          // report a false save failure that makes a client retry the old
+          // If-Match version. Pending confirmations remain version-gated and a
+          // later region refresh/confirmation attempt can recover the drafts.
+          draftRefresh = {
+            status: "deferred",
+            refreshedCount: 0,
+            errorCode: "REGION_DRAFT_REFRESH_DEFERRED",
+          };
+        }
+        sendJson(response, 200, { item, draftRefresh }, {
+          "Cache-Control": "no-store",
+          ETag: `"${item.version}"`,
+        });
         return;
       }
 
