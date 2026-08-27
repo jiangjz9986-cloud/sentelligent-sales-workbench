@@ -9,6 +9,7 @@ import {
   Play,
   Power,
   RefreshCw,
+  ScrollText,
   Send,
   ShieldCheck,
   Trash2,
@@ -72,6 +73,79 @@ function schedulerRunLabel(value) {
   }[value] ?? "未知";
 }
 
+const BOOKKEEPING_ACTION_LABELS = {
+  "travel_expense.create": "新增费用",
+  "travel_expense.update": "修改费用",
+  "travel_expense.delete": "删除费用",
+  "travel_expense.attachment_add": "关联付款凭证",
+  "travel_expense.attachment_delete": "移除付款凭证",
+  "travel_expense.no_invoice_confirm": "确认无需发票",
+  "travel_expense.no_invoice_revoke": "撤销无票确认",
+  "travel_expense.region_profile.save": "保存出差区域",
+  "travel_expense_advance.create": "新增借款",
+  "travel_expense_advance.update": "修改借款",
+  "travel_expense_advance.delete": "删除借款",
+  "travel_expense_document_inbox.create": "收到付款凭证",
+  "travel_expense_document_inbox.confirm": "确认付款凭证",
+  "travel_expense_document_inbox.reject": "拒绝付款凭证",
+  "invoice.create": "上传发票",
+  "invoice.delete": "删除发票",
+  "invoice.match_confirm": "确认发票匹配",
+  "invoice.match_revoke": "撤销发票匹配",
+  "invoice.candidate_accept": "采纳发票建议",
+  "invoice.candidate_reject": "拒绝发票建议",
+  "invoice.review_finalize": "完成发票复核",
+  "invoice.suggestions_generate": "生成发票建议",
+  "shortcut_bookkeeping.receive": "小小收到记账",
+  "shortcut_bookkeeping.accept": "小小确认入账",
+  "shortcut_bookkeeping.manual_reject": "拒绝小小记账",
+  "shortcut_bookkeeping.manual_retry": "重新识别记账",
+  "shortcut_bookkeeping.review_required": "记账待确认",
+  "shortcut_bookkeeping.advance_received": "借款到账",
+  "shortcut_bookkeeping.processing_failed": "记账识别失败",
+  "bookkeeping_client.print_expense_list": "打印费用清单",
+  "bookkeeping_client.print_invoices": "打印发票",
+  "bookkeeping_client.export_expense_xlsx": "导出费用 Excel",
+};
+
+function bookkeepingActionLabel(action) {
+  return BOOKKEEPING_ACTION_LABELS[action] ?? action ?? "未知操作";
+}
+
+function formatTimeOfDay(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function bookkeepingEntityShortId(item) {
+  const referenceCode = item?.metadata?.referenceCode;
+  if (typeof referenceCode === "string" && referenceCode) return referenceCode;
+  const entityId = String(item?.entityId ?? "");
+  return entityId ? entityId.slice(0, 8) : "";
+}
+
+function bookkeepingLogTone(action = "") {
+  if (action.endsWith(".delete") || action.includes("reject") || action.includes("failed")) return "failed";
+  if (action.startsWith("bookkeeping_client.")) return "waiting";
+  return "success";
+}
+
+function bookkeepingLogSummary(item) {
+  const source = (item?.after && typeof item.after === "object" ? item.after : null)
+    ?? (item?.metadata && typeof item.metadata === "object" ? item.metadata : null)
+    ?? {};
+  const parts = [];
+  const amountCents = Number.isSafeInteger(source.amountCents) ? source.amountCents : null;
+  if (amountCents !== null) parts.push(`¥${(amountCents / 100).toFixed(2)}`);
+  if (typeof source.occurredOn === "string" && source.occurredOn) parts.push(source.occurredOn);
+  if (typeof source.referenceCode === "string" && source.referenceCode) parts.push(source.referenceCode);
+  if (typeof source.weekStart === "string" && source.weekStart) parts.push(`${source.weekStart} 当周`);
+  if (Number.isSafeInteger(source.itemCount)) parts.push(`${source.itemCount} 条`);
+  if (typeof source.purpose === "string" && source.purpose) parts.push(source.purpose);
+  return parts.slice(0, 3).join(" · ");
+}
+
 function toneForStatus(value) {
   if (["healthy", "logged_in", "authenticated", "connected"].includes(value)) return "success";
   if (["degraded", "starting", "waiting_scan", "connecting"].includes(value)) return "warning";
@@ -106,9 +180,11 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [bookkeepingLog, setBookkeepingLog] = useState({ loading: true, error: "", items: [], updatedAt: null });
+  const [bookkeepingLogReloadToken, setBookkeepingLogReloadToken] = useState(0);
 
   async function loadSettings() {
-    if (section === "tender-schedule") {
+    if (section === "tender-schedule" || section === "bookkeeping-log") {
       setLoading(false);
       return;
     }
@@ -212,6 +288,32 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       disposed = true;
     };
   }, [apiClient, backendStatus, section]);
+
+  useEffect(() => {
+    if (section !== "bookkeeping-log") return undefined;
+    if (!apiClient?.isEnabled || backendStatus !== "connected" || typeof apiClient.listBookkeepingAuditLogs !== "function") {
+      setBookkeepingLog({ loading: false, error: "", items: [], updatedAt: null });
+      return undefined;
+    }
+    let disposed = false;
+    const load = async () => {
+      try {
+        const items = await apiClient.listBookkeepingAuditLogs({ limit: 80 });
+        if (disposed) return;
+        setBookkeepingLog({ loading: false, error: "", items, updatedAt: new Date().toISOString() });
+      } catch {
+        if (disposed) return;
+        setBookkeepingLog((current) => ({ ...current, loading: false, error: "记账日志暂时无法读取，将自动重试。" }));
+      }
+    };
+    setBookkeepingLog((current) => ({ ...current, loading: true }));
+    void load();
+    const timer = setInterval(() => { void load(); }, 10000);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
+  }, [apiClient, backendStatus, section, bookkeepingLogReloadToken]);
 
   async function saveApiKey(event) {
     event.preventDefault();
@@ -395,6 +497,12 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       title: "医院招标自动轮巡",
       description: "查看固定的每小时、每批 10 家客户轮巡状态，并控制启停或立即运行下一批。",
       icon: CalendarClock,
+    },
+    "bookkeeping-log": {
+      eyebrow: "记账审计",
+      title: "记账实时日志",
+      description: "记账、修改、取消、确认、发票、借款、打印与导出的每一步都会在这里留痕，每 10 秒自动刷新。",
+      icon: ScrollText,
     },
   }[section] ?? null;
   const SectionIcon = sectionMeta?.icon ?? ShieldCheck;
@@ -669,6 +777,49 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
             </Panel>
           </div>
           {integrationStatus.error ? <p className="settings-inline-note" role="status">{integrationStatus.error}</p> : null}
+        </section>
+      ) : null}
+
+      {!loading && section === "bookkeeping-log" ? (
+        <section className="settings-focused-section" data-testid="settings-bookkeeping-log-section">
+          <div className="settings-grid settings-grid-focused">
+            <Panel
+              title="最近记账动作"
+              meta={bookkeepingLog.loading ? "读取中" : `${bookkeepingLog.items.length} 条 · ${formatDate(bookkeepingLog.updatedAt)}`}
+              className="settings-card settings-bookkeeping-log"
+            >
+              <div className="settings-button-row">
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => setBookkeepingLogReloadToken((value) => value + 1)}
+                  disabled={bookkeepingLog.loading || backendStatus !== "connected"}
+                >
+                  <RefreshCw size={16} /> 刷新
+                </button>
+              </div>
+              {bookkeepingLog.error ? <p className="settings-feedback error" role="alert">{bookkeepingLog.error}</p> : null}
+              {bookkeepingLog.items.length ? (
+                <div className="settings-run-list" data-testid="bookkeeping-log-list">
+                  {bookkeepingLog.items.map((item) => (
+                    <div className="settings-run-item" key={item.id}>
+                      <span className={`settings-run-dot ${bookkeepingLogTone(item.action)}`} aria-hidden="true" />
+                      <div>
+                        <strong>{bookkeepingActionLabel(item.action)}</strong>
+                        <small>{formatTimeOfDay(item.createdAt)}{bookkeepingEntityShortId(item) ? ` · ${bookkeepingEntityShortId(item)}` : ""}</small>
+                      </div>
+                      <span>{bookkeepingLogSummary(item) || "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : !bookkeepingLog.loading ? (
+                <p className="settings-empty-state">还没有记账动作。小小入账、网页修改、打印或导出后会立即出现在这里。</p>
+              ) : (
+                <p className="settings-empty-state">正在读取记账日志…</p>
+              )}
+              <p className="settings-inline-note"><Clock3 size={14} aria-hidden="true" />日志来自服务端审计流水，只读展示；每 10 秒自动刷新，可随时对账。</p>
+            </Panel>
+          </div>
         </section>
       ) : null}
     </div>

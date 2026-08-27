@@ -10,6 +10,7 @@ import {
   MapPinned,
   PanelLeft,
   ReceiptText,
+  ScrollText,
   Settings,
   ShieldAlert,
   UsersRound,
@@ -52,6 +53,7 @@ export const moduleSubnavItems = {
     { id: "weixin", label: "微信绑定", icon: Bot },
     { id: "settings-notifications", label: "通知服务", icon: BellRing },
     { id: "settings-tender-schedule", label: "招标调度", icon: CalendarClock },
+    { id: "settings-bookkeeping-log", label: "记账日志", icon: ScrollText },
   ],
 };
 

@@ -226,6 +226,11 @@ const routeCases = [
     "/settings/tender-schedule",
   ],
   [
+    "/settings/bookkeeping-log",
+    expectedRoute({ page: "settings/bookkeeping-log", active: "settings" }),
+    "/settings/bookkeeping-log",
+  ],
+  [
     "/solutions",
     expectedRoute({ page: "solutions", active: "solution", mode: "list", readOnly: true }),
     "/solutions",

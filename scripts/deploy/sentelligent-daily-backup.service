@@ -1,0 +1,24 @@
+# v0.8.0 draft: oneshot service for the daily online SQLite backup.
+# Install target: /etc/systemd/system/sentelligent-daily-backup.service
+# The backup script is installed to a stable path outside the immutable
+# releases (never reference /opt/sentelligent-sales-workbench/current):
+#   /opt/sentelligent-sales-workbench/tools/daily-db-backup.sh
+# Triggered only by sentelligent-daily-backup.timer; no [Install] section on
+# purpose so the service cannot be enabled at boot by itself.
+# Full procedure: docs/superpowers/research/2026-08-27-v080-backup-design.md
+
+[Unit]
+Description=Sentelligent sales workbench daily SQLite online backup
+Documentation=file:///opt/sentelligent-sales-workbench/tools/daily-db-backup.sh
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Nice=10
+PrivateTmp=true
+# VACUUM INTO of a large database can exceed the systemd default start
+# timeout for oneshot units; allow up to 30 minutes before declaring failure.
+TimeoutStartSec=1800
+SyslogIdentifier=sentelligent-daily-backup
+ExecStart=/usr/bin/env bash /opt/sentelligent-sales-workbench/tools/daily-db-backup.sh

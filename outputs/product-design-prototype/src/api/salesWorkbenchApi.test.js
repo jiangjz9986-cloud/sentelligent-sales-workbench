@@ -3105,20 +3105,17 @@ describe("sales workbench API client", () => {
     assert.equal(calls.at(-1).options.headers["X-CSRF-Token"], "fixture-csrf-token");
   });
 
-  it("uses the Xiaoxiao WeChat review API for the human confirmation fallback", async () => {
+  it("keeps the Xiaoxiao WeChat review API read-only and reports client events", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
       baseUrl: "https://example.test",
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
-        if (url.endsWith("/confirm")) {
-          return jsonResponse({ item: sampleShortcutBookkeepingReview({ status: "accepted" }) }, 201);
+        if (url.includes("/api/audit-logs")) {
+          return jsonResponse({ items: [{ id: "audit-1", action: "travel_expense.create" }] });
         }
-        if (url.endsWith("/reject")) {
-          return jsonResponse({ item: sampleShortcutBookkeepingReview({ status: "rejected" }) });
-        }
-        if (url.endsWith("/retry")) {
-          return jsonResponse({ item: sampleShortcutBookkeepingReview() }, 202);
+        if (url.includes("/api/bookkeeping/client-events")) {
+          return jsonResponse({ recorded: true }, 201);
         }
         if (url.includes("/api/integrations/weixin/bookkeeping/review?")) {
           return jsonResponse({ items: [sampleShortcutBookkeepingReview()] });
@@ -3126,19 +3123,29 @@ describe("sales workbench API client", () => {
         return jsonResponse({ item: sampleShortcutBookkeepingReview() });
       },
     });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
     const items = await api.listWeixinBookkeepingReviews({ status: "review_required" });
     const item = await api.getWeixinBookkeepingReview("entry-1");
-    const confirmed = await api.confirmWeixinBookkeepingReview("entry-1", { status: "ready" });
-    const rejected = await api.rejectWeixinBookkeepingReview("entry-1", "无法核实");
-    const retried = await api.retryWeixinBookkeepingReview("entry-1");
     assert.equal(items[0].id, "entry-1");
     assert.equal(item.id, "entry-1");
-    assert.equal(confirmed.status, "accepted");
-    assert.equal(confirmed.ledgerReceipt.referenceCode, "EXP-20260804-ABC12345");
-    assert.equal(rejected.id, "entry-1");
-    assert.equal(retried.id, "entry-1");
-    assert.match(calls[0].url, /\/api\/integrations\/weixin\/bookkeeping\/review\?status=review_required/u);
-    assert.match(calls.at(-1).url, /\/api\/integrations\/weixin\/bookkeeping\/review\/entry-1\/retry/u);
+    assert.equal(api.confirmWeixinBookkeepingReview, undefined);
+    assert.equal(api.rejectWeixinBookkeepingReview, undefined);
+    assert.equal(api.retryWeixinBookkeepingReview, undefined);
+
+    const logs = await api.listBookkeepingAuditLogs({ limit: 50 });
+    assert.equal(logs[0].id, "audit-1");
+    assert.match(calls.at(-1).url, /\/api\/audit-logs\?scope=bookkeeping&limit=50/u);
+
+    await api.recordBookkeepingClientEvent("print_expense_list", { weekStart: "2026-08-24", itemCount: 6 });
+    const eventCall = calls.at(-1);
+    assert.match(eventCall.url, /\/api\/bookkeeping\/client-events/u);
+    assert.equal(eventCall.options.method, "POST");
+    assert.equal(eventCall.options.headers["X-CSRF-Token"], "fixture-csrf-token");
+    assert.deepEqual(JSON.parse(eventCall.options.body), {
+      event: "print_expense_list",
+      weekStart: "2026-08-24",
+      itemCount: 6,
+    });
   });
 
   it("enforces formal ledger receipts only for accepted Xiaoxiao expense reviews", async () => {

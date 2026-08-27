@@ -973,4 +973,61 @@ describe("authenticated travel expense API", () => {
       assert.deepEqual((await request("/api/audit-logs?entityType=travel_expense")).body.items, []);
     }, { failpoints: new Set(["travelExpense.create.afterWrite"]) });
   });
+
+  it("records allowlisted bookkeeping client events and scopes the realtime audit feed", async () => {
+    await withHarness(async ({ raw, request }) => {
+      assert.equal((await raw("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event: "print_expense_list" }),
+      })).response.status, 401);
+
+      await createExpense(request);
+
+      const unknownEvent = await request("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event: "drop_table" }),
+      });
+      assert.equal(unknownEvent.response.status, 422);
+      assert.equal(unknownEvent.body.error.code, "VALIDATION_ERROR");
+
+      const recorded = await request("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({
+          event: "print_expense_list",
+          weekStart: "2026-08-03",
+          itemCount: 4,
+          ignored: "field",
+        }),
+      });
+      assert.equal(recorded.response.status, 201);
+      assert.deepEqual(recorded.body, { recorded: true });
+
+      const exported = await request("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event: "export_expense_xlsx", weekStart: "bad-date", itemCount: -5 }),
+      });
+      assert.equal(exported.response.status, 201);
+
+      const unknownScope = await request("/api/audit-logs?scope=everything");
+      assert.equal(unknownScope.response.status, 422);
+
+      const scoped = await request("/api/audit-logs?scope=bookkeeping");
+      assert.equal(scoped.response.status, 200);
+      const actions = scoped.body.items.map((item) => item.action);
+      assert.equal(actions.includes("travel_expense.create"), true);
+      assert.equal(actions.includes("bookkeeping_client.print_expense_list"), true);
+      assert.equal(actions.includes("bookkeeping_client.export_expense_xlsx"), true);
+      assert.equal(actions.every((action) => /^(travel_expense|travel_expense_advance|travel_expense_document_inbox|invoice|shortcut_bookkeeping|bookkeeping_client)\./.test(action)), true);
+
+      const printEntry = scoped.body.items.find((item) => item.action === "bookkeeping_client.print_expense_list");
+      assert.equal(printEntry.entityType, "bookkeeping_client_event");
+      assert.equal(printEntry.metadata.weekStart, "2026-08-03");
+      assert.equal(printEntry.metadata.itemCount, 4);
+      assert.equal(printEntry.metadata.ignored, undefined);
+
+      const exportEntry = scoped.body.items.find((item) => item.action === "bookkeeping_client.export_expense_xlsx");
+      assert.equal(exportEntry.metadata.weekStart, undefined);
+      assert.equal(exportEntry.metadata.itemCount, undefined);
+    });
+  });
 });

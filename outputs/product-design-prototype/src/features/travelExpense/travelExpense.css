@@ -2926,75 +2926,61 @@
   padding: 14px;
 }
 
-.weixin-review-form {
+.weixin-review-summary {
+  margin: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 12px;
 }
 
-.weixin-review-form label,
-.weixin-review-category {
+.weixin-review-summary > div {
   min-width: 0;
   display: grid;
   gap: 5px;
+}
+
+.weixin-review-summary dt {
   color: #68758d;
   font-size: 12px;
   font-weight: 650;
+}
+
+.weixin-review-summary dd {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px dashed rgba(16, 35, 75, 0.16);
+  border-radius: 7px;
+  color: #243958;
+  background: #fbfcfe;
+  font-size: 12.5px;
+  font-weight: 640;
+  overflow-wrap: anywhere;
 }
 
 .weixin-review-wide {
   grid-column: 1 / -1;
 }
 
-.weixin-review-form input {
-  width: 100%;
-  min-width: 0;
-  min-height: 40px;
-  padding: 0 10px;
-  border: 1px solid rgba(16, 35, 75, 0.12);
-  border-radius: 7px;
-  color: #243958;
-  background: #fff;
-  font-size: 12.5px;
-}
-
-.weixin-review-form input:focus-visible {
-  outline: 0;
-  border-color: rgba(47, 107, 255, 0.48);
-  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.14);
-}
-
-.weixin-review-form input:disabled {
-  color: #8d97aa;
-  background: #f3f5f8;
-}
-
-.weixin-review-category b {
+.weixin-review-wechat-hint {
+  margin: 0;
   display: flex;
   align-items: center;
-  min-height: 40px;
-  padding: 0 10px;
-  border: 1px dashed rgba(16, 35, 75, 0.16);
-  border-radius: 7px;
-  color: #45536e;
-  background: #fbfcfe;
-  font-size: 12.5px;
-  font-weight: 650;
-}
-
-.weixin-review-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
   gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(38, 166, 91, 0.24);
+  border-radius: 9px;
+  color: #1f7a45;
+  background: rgba(38, 166, 91, 0.08);
+  font-size: 12.5px;
+  font-weight: 640;
+  line-height: 1.55;
 }
 
-.weixin-review-actions .primary-button,
-.weixin-review-actions .ghost-button {
-  min-height: 38px;
-  padding: 0 14px;
-  font-size: 12px;
+.weixin-review-wechat-hint svg {
+  flex: none;
 }
 
 .expense-proof-list {
@@ -4667,10 +4653,7 @@
   .expense-inbox-item,
   .weixin-bookkeeping-review-item { grid-template-columns: 1fr; }
   .weixin-review-source { border-right: 0; border-bottom: 1px solid #e2e8f1; }
-  .weixin-review-form { grid-template-columns: 1fr; }
-  .weixin-review-actions { justify-content: stretch; }
-  .weixin-review-actions .primary-button,
-  .weixin-review-actions .ghost-button { flex: 1 1 auto; }
+  .weixin-review-summary { grid-template-columns: 1fr; }
   .expense-inbox-original { min-height: 220px; border-right: 0; border-bottom: 1px solid #e2e8f1; }
   .expense-inbox-original > img,
   .expense-inbox-original > .authenticated-pdf-frame { height: 220px; }

@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-27
+
+### 记账确认唯一化与系统配置记账实时日志
+
+- 记账确认收敛为微信单一入口：差旅工作台"小小待确认记账"改为只读复核卡（识别摘要 dl 展示 + 微信引用回复引导），删除确认入账/重新识别/拒绝按钮与可编辑表单；同步移除跨周账目提示横幅及其数据链（`selectCrossWeekLedgerReceipts`/`locateRecentReceipt`/`refreshWeixinBookkeepingReviews`），周切换与保存费用的定位机制不变。
+- 前端 API 客户端裁撤 `confirmWeixinBookkeepingReview`/`rejectWeixinBookkeepingReview`/`retryWeixinBookkeepingReview`；微信 worker 使用的后端确认合同保持不变。
+- 后端 `GET /api/audit-logs` 新增 `scope=bookkeeping`：服务端常量前缀白名单（travel_expense/travel_expense_advance/travel_expense_document_inbox/invoice/shortcut_bookkeeping/bookkeeping_client），SQLite `GLOB` 前缀匹配避免 LIKE 下划线通配，未知 scope 422 fail-closed。
+- 新增 `POST /api/bookkeeping/client-events`（仅登录用户）：事件白名单 `print_expense_list`/`print_invoices`/`export_expense_xlsx`，`weekStart` 须 `YYYY-MM-DD`、`itemCount` 须 0–10000 安全整数、`context` ≤200 字符，非法值与未知字段丢弃 fail-closed，写入 `audit_logs`（`bookkeeping_client.*`）。
+- 差旅工作台三处埋点 fire-and-forget：打印费用清单、打印发票、导出费用 Excel；埋点失败静默，不阻塞主交互。
+- 系统配置新增"记账日志"子页（`/settings/bookkeeping-log`，子导航第 5 项）：每 10 秒轮询 scope 过滤的审计流水并支持手动刷新，动作中文标签映射、HH:mm:ss 时间、单据短标识与金额/摘要提取，空态/加载态/错误态齐全。
+- 修复上一候选遗留的 `setRecentLedgerReceipts` 残留调用导致差旅页运行时崩溃的问题；无数据库迁移；模型路由不变；后端全量 1030 项、前端 qa:local、Chrome/WebKit 集成、根发布测试与密钥扫描全部通过；按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.7.0] - 2026-08-27
 
 ### 小小助手：医院招标微信推送与白天轮巡窗口

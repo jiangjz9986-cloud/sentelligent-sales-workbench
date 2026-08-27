@@ -1,7 +1,6 @@
 import {
   CalendarDays,
   CircleAlert,
-  CheckCircle2,
   LoaderCircle,
   MapPin,
   Plus,
@@ -20,10 +19,7 @@ import { downloadExpenseListXlsx } from "./ReimbursementOrganizer.jsx";
 import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
 import { WeixinBookkeepingReviewCenter } from "./WeixinBookkeepingReviewCenter.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
-import {
-  canSaveRegionProfileForWeek,
-  selectCrossWeekLedgerReceipts,
-} from "./travelExpensePageState.js";
+import { canSaveRegionProfileForWeek } from "./travelExpensePageState.js";
 import {
   naturalWeekFor,
   summarizeTravelExpenses,
@@ -86,7 +82,6 @@ export function TravelExpensePage({
   const [invoiceCoverage, setInvoiceCoverage] = useState(null);
   const [weixinBookkeepingReviews, setWeixinBookkeepingReviews] = useState([]);
   const [regionProfile, setRegionProfile] = useState(null);
-  const [recentLedgerReceipts, setRecentLedgerReceipts] = useState([]);
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState("");
   const [auxiliaryWarning, setAuxiliaryWarning] = useState("");
@@ -142,7 +137,6 @@ export function TravelExpensePage({
       setNoInvoiceConfirmations([]);
       setInvoiceCoverage(null);
       setRegionProfile(null);
-      setRecentLedgerReceipts([]);
       setRegionSettingsOpen(false);
     }
     setError("");
@@ -166,7 +160,6 @@ export function TravelExpensePage({
       setAdvances(workbenchResult.value.advances);
       setWeixinBookkeepingReviews(workbenchResult.value.bookkeepingReviews);
       setRegionProfile(workbenchResult.value.regionProfile);
-      setRecentLedgerReceipts(workbenchResult.value.recentLedgerReceipts);
       const auxiliaryFailures = [];
       if (documentInboxResult.status === "fulfilled") setDocumentInbox(documentInboxResult.value);
       else auxiliaryFailures.push("付款凭证待处理");
@@ -331,7 +324,6 @@ export function TravelExpensePage({
     // loading. The effect below will repopulate all week-scoped data.
     loadedWeekStartRef.current = null;
     setRegionProfile(null);
-    setRecentLedgerReceipts([]);
     setRegionSettingsOpen(false);
     setWeek(weekFromInput(value));
   }
@@ -453,32 +445,6 @@ export function TravelExpensePage({
     }
   }
 
-  function refreshWeixinBookkeepingReviews(item) {
-    const receipt = item?.ledgerReceipt;
-    if (receipt?.weekStart && receipt?.occurredOn && receipt?.expenseId) {
-      setWeek(naturalWeekFor(new Date(`${receipt.occurredOn}T12:00:00`)));
-      setSelectedLedgerDate(receipt.occurredOn);
-      setHighlightExpenseId(receipt.expenseId);
-      pendingLedgerLocationRef.current = {
-        expenseId: receipt.expenseId,
-        referenceCode: receipt.referenceCode ?? receipt.expenseId,
-        occurredOn: receipt.occurredOn,
-      };
-      setLocationFailure(null);
-      setLocationAnnouncement(`正在定位 ${receipt.referenceCode ?? receipt.expenseId}。`);
-      setActiveTab("ledger");
-    } else if (item?.status === "accepted" && item?.entryType === "income") {
-      const occurredOn = item?.analysis?.expense?.occurredOn ?? item?.analysis?.expense?.occurred_on;
-      if (/^\d{4}-\d{2}-\d{2}$/.test(String(occurredOn ?? ""))) {
-        setWeek(naturalWeekFor(new Date(`${occurredOn}T12:00:00`)));
-        setSelectedLedgerDate(occurredOn);
-        setHighlightExpenseId(null);
-        setActiveTab("ledger");
-      }
-    }
-    setReloadToken((value) => value + 1);
-  }
-
   async function saveAdvance(advance) {
     setAdvancePending(true);
     try {
@@ -522,9 +488,19 @@ export function TravelExpensePage({
     }
   }
 
+  function reportBookkeepingClientEvent(event, itemCount) {
+    // Fire-and-forget telemetry: never block or break the primary interaction.
+    try {
+      apiClient.recordBookkeepingClientEvent?.(event, { weekStart: week.start, itemCount })?.catch?.(() => {});
+    } catch {
+      /* telemetry must never interrupt printing or exporting */
+    }
+  }
+
   async function exportExpenseList() {
     setExpenseListExporting(true);
     setError("");
+    reportBookkeepingClientEvent("export_expense_xlsx", expenses.length);
     try {
       await downloadExpenseListXlsx({
         expenses,
@@ -578,6 +554,7 @@ export function TravelExpensePage({
 
   function openExpenseListPrint() {
     capturePreviewReturn("expense-list");
+    reportBookkeepingClientEvent("print_expense_list", expenses.length);
     setExpenseListPrintOpen(true);
   }
 
@@ -588,30 +565,13 @@ export function TravelExpensePage({
 
   function openInvoicePrint(items) {
     capturePreviewReturn("invoice");
+    reportBookkeepingClientEvent("print_invoices", Array.isArray(items) ? items.length : 0);
     setInvoicePrintItems(items);
   }
 
   function closeInvoicePrint() {
     setInvoicePrintItems(null);
     restorePreviewReturn("invoice");
-  }
-
-  function locateRecentReceipt(receipt) {
-    loadedWeekStartRef.current = null;
-    setRegionProfile(null);
-    setRecentLedgerReceipts([]);
-    setRegionSettingsOpen(false);
-    setWeek(naturalWeekFor(new Date(`${receipt.occurredOn}T12:00:00`)));
-    setSelectedLedgerDate(receipt.occurredOn);
-    setHighlightExpenseId(receipt.expenseId);
-    pendingLedgerLocationRef.current = {
-      expenseId: receipt.expenseId,
-      referenceCode: receipt.referenceCode,
-      occurredOn: receipt.occurredOn,
-    };
-    setLocationFailure(null);
-    setLocationAnnouncement(`正在定位 ${receipt.referenceCode}。`);
-    setActiveTab("ledger");
   }
 
   function retryLedgerLocation() {
@@ -629,10 +589,6 @@ export function TravelExpensePage({
       : "未找到对应付款凭证区域，请重新加载。");
   }, []);
 
-  const crossWeekReceipts = useMemo(() => (
-    selectCrossWeekLedgerReceipts(recentLedgerReceipts, week.start)
-  ), [recentLedgerReceipts, week.start]);
-
   const getAttachmentUrl = (attachmentId) => apiClient.getTravelExpenseAttachmentContentUrl(attachmentId);
   const printPreview = expenseListPrintOpen
     ? <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={closeExpenseListPrint} />
@@ -642,7 +598,6 @@ export function TravelExpensePage({
   const selectedWeekLoaded = loadedWeekStartRef.current === week.start;
   const regionCalloutVisible = Boolean(selectedWeekLoaded && regionProfile
     && !regionProfile.defaultCity && regionProfile.dateOverrides.length === 0);
-  const crossWeekVisible = selectedWeekLoaded && crossWeekReceipts.length > 0;
 
   return (
     <>
@@ -665,13 +620,12 @@ export function TravelExpensePage({
       </section>
 
       <p className="sr-only" role="status" aria-live="polite">{locationAnnouncement}</p>
-      {error || locationFailure || auxiliaryWarning || regionCalloutVisible || crossWeekVisible ? (
+      {error || locationFailure || auxiliaryWarning || regionCalloutVisible ? (
         <div className="expense-page-alerts">
           {error ? <div className="expense-page-alert is-error" role="alert"><CircleAlert size={16} /><span>{error}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重新加载</button></div> : null}
           {locationFailure ? <div className="expense-page-alert is-warning" role="status" data-testid="ledger-location-failure"><CircleAlert size={16} /><span>未找到 {locationFailure.referenceCode}，账目可能尚未同步或已经变更。</span><button ref={locationFailureActionRef} className="ghost-button" type="button" onClick={retryLedgerLocation}>重新加载并定位</button></div> : null}
           {auxiliaryWarning ? <div className="expense-page-alert is-warning" role="status"><CircleAlert size={16} /><span>{auxiliaryWarning}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重试辅助数据</button></div> : null}
           {regionCalloutVisible ? <div className="expense-page-alert is-warning expense-region-callout" role="status"><MapPin size={16} /><span>本周还没有设置出差区域。小小收到付款凭证后会先询问区域，设置后可直接按发生日期匹配。</span><button className="ghost-button" type="button" onClick={() => setRegionSettingsOpen(true)}>设置本周区域</button></div> : null}
-          {crossWeekVisible ? crossWeekReceipts.map((receipt) => <div className="expense-page-alert expense-recent-receipt" role="status" key={`${receipt.expenseId}-${receipt.occurredOn}`}><CheckCircle2 size={16} /><span className="expense-recent-receipt-copy">小小录入了其他自然周的账目<code>{receipt.referenceCode}</code><b>{receipt.weekStart} 当周</b>{receipt.attachmentStatus === "pending" ? <em>付款凭证仍在关联中</em> : null}</span><button className="ghost-button" type="button" onClick={() => locateRecentReceipt(receipt)}>查看这笔账目</button></div>) : null}
         </div>
       ) : null}
       {status === "loading" ? <div className="expense-loading" role="status"><LoaderCircle className="state-spinner" size={24} /><strong>正在读取本周费用</strong><p>费用、付款凭证、发票和借款到账记录正在同步。</p></div> : null}
@@ -715,7 +669,7 @@ export function TravelExpensePage({
             <div className="expense-ledger-child-functions">
               <section id="expense-ledger-reviews" className="expense-ledger-child-card">
                 <header><div><strong>小小待确认</strong><span>确认后才会写入正式账本；确认回执会定位到真实 EXP 账单。</span></div><b>{weixinBookkeepingReviews.length}</b></header>
-                <WeixinBookkeepingReviewCenter reviews={weixinBookkeepingReviews} apiClient={apiClient} onChanged={refreshWeixinBookkeepingReviews} />
+                <WeixinBookkeepingReviewCenter reviews={weixinBookkeepingReviews} />
               </section>
               <details id="expense-ledger-proofs" className="expense-ledger-child-card">
                 <summary><span><strong>付款凭证</strong><small>导入、人工关联和查看已附付款原件</small></span><b>{documentInbox.length} 待处理</b></summary>

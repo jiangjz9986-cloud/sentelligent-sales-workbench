@@ -907,28 +907,22 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
     },
 
-    async confirmWeixinBookkeepingReview(reviewId, analysis) {
+    async listBookkeepingAuditLogs({ limit = 100, signal } = {}) {
       const response = await requestApi(
-        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`,
-        { method: "POST", body: JSON.stringify({ analysis }) },
+        `/api/audit-logs?scope=bookkeeping&limit=${encodeURIComponent(limit)}`,
+        { signal },
       );
-      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
+      if (!Array.isArray(response?.items)) {
+        throw new TypeError("auditLogs.items: expected array");
+      }
+      return response.items;
     },
 
-    async rejectWeixinBookkeepingReview(reviewId, reason) {
-      const response = await requestApi(
-        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/reject`,
-        { method: "POST", body: JSON.stringify({ reason }) },
-      );
-      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
-    },
-
-    async retryWeixinBookkeepingReview(reviewId) {
-      const response = await requestApi(
-        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
-        { method: "POST", body: "{}" },
-      );
-      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
+    async recordBookkeepingClientEvent(event, detail = {}) {
+      await requestApi("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event, ...detail }),
+      });
     },
 
     async listTravelExpenseAdvances({ weekStart, signal } = {}) {

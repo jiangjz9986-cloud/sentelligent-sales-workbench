@@ -38,7 +38,7 @@ describe("business module delivery coverage", () => {
       {
         customer: ["customer", "hospital-tenders"],
         opportunity: ["opportunity", "risk", "actions", "kanban"],
-        settings: ["settings", "weixin", "settings-notifications", "settings-tender-schedule"],
+        settings: ["settings", "weixin", "settings-notifications", "settings-tender-schedule", "settings-bookkeeping-log"],
       },
     );
   });

@@ -953,15 +953,56 @@ function softDeleteAuditSnapshot(entityType, entity, lifecycle = {}) {
   };
 }
 
+const auditScopeActionPrefixes = {
+  bookkeeping: [
+    "travel_expense.",
+    "travel_expense_advance.",
+    "travel_expense_document_inbox.",
+    "invoice.",
+    "shortcut_bookkeeping.",
+    "bookkeeping_client.",
+  ],
+};
+
+const bookkeepingClientEvents = new Set([
+  "print_expense_list",
+  "print_invoices",
+  "export_expense_xlsx",
+]);
+
+/** Allowed detail fields only; everything else is dropped fail-closed. */
+function bookkeepingClientEventMetadata(body, account) {
+  const metadata = { owner: account };
+  if (typeof body.weekStart === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.weekStart)) {
+    metadata.weekStart = body.weekStart;
+  }
+  if (Number.isSafeInteger(body.itemCount) && body.itemCount >= 0 && body.itemCount <= 10000) {
+    metadata.itemCount = body.itemCount;
+  }
+  if (typeof body.context === "string" && body.context.trim() && body.context.length <= 200) {
+    metadata.context = body.context.trim();
+  }
+  return metadata;
+}
+
 function listAuditLogs(db, searchParams, account) {
   const limit = Math.max(1, Math.min(Number(searchParams.get("limit")) || 100, 500));
+  const scope = searchParams.get("scope") || null;
+  if (scope !== null && !Object.hasOwn(auditScopeActionPrefixes, scope)) {
+    throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { scope: "allowlist" });
+  }
+  // Scope prefixes are server-side constants, never user input. GLOB keeps
+  // underscores literal (LIKE would treat them as single-char wildcards).
+  const scopeClause = scope === null ? "" : ` AND (${
+    auditScopeActionPrefixes[scope].map((prefix) => `action GLOB '${prefix}*'`).join(" OR ")
+  })`;
   return all(
     db,
     `SELECT * FROM audit_logs
      WHERE (actor = $account OR json_extract(metadata_json, '$.owner') = $account)
        AND ($action IS NULL OR action = $action)
        AND ($entityType IS NULL OR entity_type = $entityType)
-       AND ($entityId IS NULL OR entity_id = $entityId)
+       AND ($entityId IS NULL OR entity_id = $entityId)${scopeClause}
      ORDER BY created_at DESC
      LIMIT $limit`,
     {
@@ -4197,6 +4238,24 @@ export function createServer(options = {}) {
         sendJson(response, 200, {
           items: listAuditLogs(db, url.searchParams, request.authContext.account),
         });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/bookkeeping/client-events") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const body = plainObject(await readJson(request));
+        if (typeof body.event !== "string" || !bookkeepingClientEvents.has(body.event)) {
+          validationFailure("event", "allowlist");
+        }
+        const account = request.authContext.account;
+        insertAudit(db, {
+          action: `bookkeeping_client.${body.event}`,
+          entityType: "bookkeeping_client_event",
+          actor: account,
+          requestId,
+          metadata: bookkeepingClientEventMetadata(body, account),
+        });
+        sendJson(response, 201, { recorded: true });
         return;
       }
 

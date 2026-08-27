@@ -61,6 +61,17 @@ describe("travel expense feature boundary", () => {
     assert.match(editor, /请款资金/);
   });
 
+  it("reports print and export client events fire-and-forget without blocking the interaction", async () => {
+    const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
+
+    assert.match(page, /recordBookkeepingClientEvent\?\.\(event, \{ weekStart: week\.start, itemCount \}\)\?\.catch\?\.\(\(\) => \{\}\)/);
+    assert.match(page, /reportBookkeepingClientEvent\("print_expense_list", expenses\.length\)/);
+    assert.match(page, /reportBookkeepingClientEvent\("print_invoices", Array\.isArray\(items\) \? items\.length : 0\)/);
+    assert.match(page, /reportBookkeepingClientEvent\("export_expense_xlsx", expenses\.length\)/);
+    assert.doesNotMatch(page, /await reportBookkeepingClientEvent/);
+    assert.doesNotMatch(page, /await apiClient\.recordBookkeepingClientEvent/);
+  });
+
   it("implements the two canonical workspaces while retaining ledger child tools and settlement language", async () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const ledger = await source("src/features/travelExpense/ExpenseLedgerWorkbench.jsx");
@@ -168,7 +179,7 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /aria-labelledby=/);
   });
 
-  it("never renders a newly selected week with stale ledger data and relocates confirmed income", async () => {
+  it("never renders a newly selected week with stale ledger data", async () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
 
     assert.match(page, /const loadedWeekStartRef = useRef\(null\)/);
@@ -176,14 +187,10 @@ describe("travel expense feature boundary", () => {
     assert.match(page, /loadedWeekStartRef\.current = week\.start/);
     assert.match(page, /const selectedWeekLoaded = loadedWeekStartRef\.current === week\.start/);
     assert.match(page, /status !== "loading" && selectedWeekLoaded/);
-    assert.match(page, /function selectWeek\(value\) \{[\s\S]*?loadedWeekStartRef\.current = null;[\s\S]*?setRegionProfile\(null\);[\s\S]*?setRecentLedgerReceipts\(\[\]\);[\s\S]*?setRegionSettingsOpen\(false\);[\s\S]*?setWeek\(weekFromInput\(value\)\);\s*\}/);
-    assert.match(page, /changingWeek[\s\S]*?setRegionProfile\(null\);[\s\S]*?setRecentLedgerReceipts\(\[\]\);[\s\S]*?setRegionSettingsOpen\(false\);/);
+    assert.match(page, /function selectWeek\(value\) \{[\s\S]*?loadedWeekStartRef\.current = null;[\s\S]*?setRegionProfile\(null\);[\s\S]*?setRegionSettingsOpen\(false\);[\s\S]*?setWeek\(weekFromInput\(value\)\);\s*\}/);
+    assert.match(page, /changingWeek[\s\S]*?setRegionProfile\(null\);[\s\S]*?setRegionSettingsOpen\(false\);/);
     assert.match(page, /canSaveRegionProfileForWeek/);
     assert.match(page, /open=\{selectedWeekLoaded && regionSettingsOpen\}/);
-    assert.match(page, /item\?\.status === "accepted" && item\?\.entryType === "income"/);
-    assert.match(page, /item\?\.analysis\?\.expense\?\.occurredOn \?\? item\?\.analysis\?\.expense\?\.occurred_on/);
-    assert.match(page, /setSelectedLedgerDate\(occurredOn\)/);
-    assert.match(page, /setHighlightExpenseId\(null\)/);
     assert.match(page, /setActiveTab\("ledger"\)/);
   });
 
@@ -312,7 +319,7 @@ describe("travel expense feature boundary", () => {
     assert.match(css, /\.expense-list-print-totals/);
   });
 
-  it("shows authenticated payment thumbnails, cross-week receipts, and editable weekly regions", async () => {
+  it("shows authenticated payment thumbnails and editable weekly regions without web cross-week banners", async () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const ledger = await source("src/features/travelExpense/ExpenseLedgerWorkbench.jsx");
     const ledgerCss = await source("src/features/travelExpense/expenseLedgerWorkbench.css");
@@ -320,12 +327,12 @@ describe("travel expense feature boundary", () => {
     const regionCard = await source("src/features/travelExpense/TripRegionSettingsCard.jsx");
     const regionCss = await source("src/features/travelExpense/tripRegionSettingsCard.css");
 
-    assert.match(page, /selectCrossWeekLedgerReceipts\(recentLedgerReceipts, week\.start\)/);
-    assert.match(page, /crossWeekReceipts\.map\(\(receipt\) =>/);
-    assert.match(page, /onClick=\{\(\) => locateRecentReceipt\(receipt\)\}/);
-    assert.match(page, /setSelectedLedgerDate\(receipt\.occurredOn\)/);
-    assert.match(page, /setHighlightExpenseId\(receipt\.expenseId\)/);
-    assert.match(page, /pendingLedgerLocationRef\.current = \{/);
+    assert.doesNotMatch(page, /selectCrossWeekLedgerReceipts/);
+    assert.doesNotMatch(page, /crossWeekReceipts/);
+    assert.doesNotMatch(page, /locateRecentReceipt/);
+    assert.doesNotMatch(page, /RecentLedgerReceipts/);
+    assert.doesNotMatch(page, /小小录入了其他自然周的账目/);
+    assert.match(page, /pendingLedgerLocationRef\.current = locationFailure/);
     assert.match(page, /pendingLedgerLocationRef\.current !== request/);
     assert.match(page, /pendingLedgerLocationRef\.current = null;[\s\S]*?setLocationFailure\(request\)/);
     assert.match(page, /querySelectorAll\("\[data-ledger-expense-id\]"\)/);
