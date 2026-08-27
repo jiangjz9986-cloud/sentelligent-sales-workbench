@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { describe, it } from "node:test";
 import { buildReleaseManifest } from "./release-package.mjs";
+import { encryptSecret } from "../backend/src/settings/secretBox.js";
 
 const requiredProjectServices = [
   "sentelligent-backend.service",
@@ -1155,6 +1156,158 @@ describe("production preflight", () => {
       assert.equal(report.checks.find((check) => check.id === "env.production")?.status, "passed");
     } finally {
       workspace.cleanup();
+    }
+  });
+
+  it("accepts an active encrypted PushPlus setting when auto-run has no legacy env token", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const source = environment.source.replace(
+        /^HOSPITAL_TENDER_PUSHPLUS_TOKEN=.*$/m,
+        "HOSPITAL_TENDER_PUSHPLUS_TOKEN=",
+      );
+      const envFile = workspace.write("settings-backed-pushplus.env", source);
+      const token = Buffer.alloc(32, 21).toString("base64url");
+      let ciphertext = "";
+      makeDatabase(databasePath);
+      const database = new DatabaseSync(databasePath);
+      try {
+        database.exec(`
+          CREATE TABLE secure_settings (
+            setting_key TEXT PRIMARY KEY,
+            ciphertext TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        ciphertext = encryptSecret(token, environment.settingsEncryptionKey);
+        database.prepare(`
+          INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+          VALUES (?, ?, 'active', ?, ?)
+        `).run(
+          "hospital_tender_pushplus_token",
+          ciphertext,
+          "2026-08-27T00:00:00.000Z",
+          "2026-08-27T00:00:00.000Z",
+        );
+      } finally {
+        database.close();
+      }
+      const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const servicePlanPath = workspace.write(
+        "service-plan-settings-backed-pushplus.json",
+        JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+      );
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+
+      assert.equal(
+        report.checks.find((check) => check.id === "env.production")?.status,
+        "passed",
+      );
+      const serializedReport = JSON.stringify(report);
+      assert.ok(!serializedReport.includes(token));
+      assert.ok(!serializedReport.includes(ciphertext));
+      assert.ok(!serializedReport.includes(environment.settingsEncryptionKey));
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("does not fall back to the env token after a stored PushPlus setting is cleared or invalid", async () => {
+    for (const fixture of [
+      { name: "cleared", status: "cleared", ciphertext: null },
+      { name: "weak", status: "active", value: "short" },
+      { name: "corrupt", status: "active", ciphertext: "v1:not-valid" },
+      {
+        name: "wrong-key",
+        status: "active",
+        value: Buffer.alloc(32, 22).toString("base64url"),
+        encryptionKey: Buffer.alloc(32, 23).toString("base64url"),
+      },
+    ]) {
+      const workspace = makeWorkspace();
+      try {
+        const origin = "https://sales.example.test";
+        const databasePath = join(workspace.root, "sales-workbench.sqlite");
+        const environment = validEnvironment(origin, databasePath);
+        const envFile = workspace.write(`${fixture.name}-stored-pushplus.env`, environment.source);
+        let storedCiphertext = fixture.ciphertext;
+        makeDatabase(databasePath);
+        const database = new DatabaseSync(databasePath);
+        try {
+          database.exec(`
+            CREATE TABLE secure_settings (
+              setting_key TEXT PRIMARY KEY,
+              ciphertext TEXT,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+          `);
+          storedCiphertext = fixture.value
+            ? encryptSecret(
+                fixture.value,
+                fixture.encryptionKey ?? environment.settingsEncryptionKey,
+              )
+            : fixture.ciphertext;
+          database.prepare(`
+            INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+          `).run(
+            "hospital_tender_pushplus_token",
+            storedCiphertext,
+            fixture.status,
+            "2026-08-27T00:00:00.000Z",
+            "2026-08-27T00:00:00.000Z",
+          );
+        } finally {
+          database.close();
+        }
+        const backupPath = join(workspace.root, "backups", "sales-workbench.sqlite");
+        mkdirSync(dirname(backupPath), { recursive: true });
+        copyFileSync(databasePath, backupPath);
+        const servicePlanPath = workspace.write(
+          `service-plan-${fixture.name}-stored-pushplus.json`,
+          JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+        );
+        const { runProductionPreflight } = await loadPreflightModule();
+        const report = await runProductionPreflight({
+          envFile,
+          databasePath,
+          backupPath,
+          expectedBackupSha256: fileSha256(backupPath),
+          expectedOrigins: [origin],
+          servicePlanPath,
+          nodeVersion: "24.14.1",
+        });
+
+        assert.equal(
+          report.checks.find((check) => check.id === "env.production")?.status,
+          "failed",
+          fixture.name,
+        );
+        const serializedReport = JSON.stringify(report);
+        if (storedCiphertext) assert.ok(!serializedReport.includes(storedCiphertext));
+        if (fixture.value) assert.ok(!serializedReport.includes(fixture.value));
+        assert.ok(!serializedReport.includes(environment.settingsEncryptionKey));
+      } finally {
+        workspace.cleanup();
+      }
     }
   });
 

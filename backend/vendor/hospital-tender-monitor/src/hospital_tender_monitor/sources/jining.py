@@ -87,5 +87,6 @@ class JiningAdapter(SourceAdapter):
             published_at=published_at,
             notice_type=notice_type,
             source_item_id=source_item_id,
+            content_text=title,
             raw_content=title,
         )

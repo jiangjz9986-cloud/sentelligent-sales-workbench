@@ -6,6 +6,7 @@ same bound to connection establishment and subsequent socket reads.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import ipaddress
 import socket
 import time
@@ -148,12 +149,47 @@ class HttpClient:
         self._sleeper = sleeper
         self._monotonic = monotonic
         self._last_request_at: float | None = None
+        self._request_deadline: float | None = None
         self._redirect_handler = _HostLockedRedirectHandler(resolver)
         if opener is None:
             urllib_opener = build_opener(self._redirect_handler)
             self._opener: _Opener = urllib_opener.open
         else:
             self._opener = opener
+
+    @contextmanager
+    def request_budget(self, seconds: float):
+        """Bound all requests made by one source without weakening per-call limits."""
+        if not isinstance(seconds, (int, float)) or not 1 <= float(seconds) <= 300:
+            raise ValueError("request budget must be between 1 and 300 seconds")
+        previous = self._request_deadline
+        deadline = self._monotonic() + float(seconds)
+        self._request_deadline = deadline if previous is None else min(previous, deadline)
+        try:
+            yield
+        finally:
+            self._request_deadline = previous
+
+    def _remaining_budget(self) -> float | None:
+        if self._request_deadline is None:
+            return None
+        remaining = self._request_deadline - self._monotonic()
+        if remaining <= 0:
+            raise HttpError("request failed")
+        return remaining
+
+    def _check_completed_budget(self) -> None:
+        """Reject a response that finished after the shared deadline."""
+        if self._request_deadline is not None and self._monotonic() > self._request_deadline:
+            raise HttpError("request failed")
+
+    def _bounded_sleep(self, seconds: float) -> None:
+        remaining = self._remaining_budget()
+        if remaining is None:
+            self._sleeper(seconds)
+            return
+        self._sleeper(min(seconds, remaining))
+        self._remaining_budget()
 
     def request(
         self,
@@ -173,18 +209,26 @@ class HttpClient:
         for attempt in range(self.max_attempts):
             self._wait_for_request_slot()
             try:
-                response = self._opener(request, timeout=self.timeout_seconds)
-                return self._read_response(response)
+                remaining = self._remaining_budget()
+                timeout = self.timeout_seconds if remaining is None else min(self.timeout_seconds, remaining)
+                response = self._opener(request, timeout=timeout)
+                result = self._read_response(response)
+                # A socket timeout bounds individual reads, but a server can
+                # still stream many small chunks past the source deadline.
+                # Check the shared wall-clock budget after the body is fully
+                # consumed so one source cannot monopolize the run.
+                self._check_completed_budget()
+                return result
             except HttpError:
                 raise
             except UrlHttpError as exc:
                 if (exc.code == 429 or 500 <= exc.code < 600) and attempt < self.max_attempts - 1:
-                    self._sleeper(self._retry_delay(attempt, exc))
+                    self._bounded_sleep(self._retry_delay(attempt, exc))
                     continue
                 raise HttpError("request failed") from exc
             except (URLError, TimeoutError, socket.timeout, OSError) as exc:
                 if attempt < self.max_attempts - 1:
-                    self._sleeper(self._retry_delay(attempt))
+                    self._bounded_sleep(self._retry_delay(attempt))
                     continue
                 raise HttpError("request failed") from exc
             except Exception as exc:
@@ -196,7 +240,7 @@ class HttpClient:
         if self._last_request_at is not None:
             remaining = self.min_interval_seconds - (now - self._last_request_at)
             if remaining > 0:
-                self._sleeper(remaining)
+                self._bounded_sleep(remaining)
         self._last_request_at = self._monotonic()
 
     def _retry_delay(self, attempt: int, error: UrlHttpError | None = None) -> float:

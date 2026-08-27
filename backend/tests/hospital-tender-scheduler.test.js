@@ -463,6 +463,24 @@ describe("hospital tender scheduler", () => {
     });
   });
 
+  it("persists a bounded collector stage instead of a raw internal error", async () => {
+    await withDb(async (db) => {
+      const internalError = Object.assign(new Error("private collector detail"), {
+        code: "HOSPITAL_TENDER_INTERNAL_RUN_FAILED",
+        stage: "snapshot_normalize",
+      });
+      const { scheduler, schedulerRepository } = setup(db, {
+        customers: customers(1),
+        runner: { run: async () => { throw internalError; } },
+      });
+      await assert.rejects(() => scheduler.runNext({ force: true }), internalError);
+      const state = schedulerRepository.getState();
+      assert.equal(state.lastStatus, "failed");
+      assert.equal(state.lastError, "医院招标快照校验失败");
+      assert.doesNotMatch(state.lastError, /private/u);
+    });
+  });
+
   it("resumes a persisted snapshot after scheduler recreation", async () => {
     await withDb(async (db) => {
       const first = setup(db);

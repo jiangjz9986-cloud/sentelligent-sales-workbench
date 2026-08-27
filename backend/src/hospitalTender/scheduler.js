@@ -80,6 +80,20 @@ function collectorCustomers(customers) {
 }
 
 function safeError(error, fallback = "医院招标轮巡失败") {
+  if (error?.code === "HOSPITAL_TENDER_INTERNAL_RUN_FAILED") {
+    const stages = {
+      collector_spawn: "医院招标采集进程启动失败",
+      collector_process: "医院招标采集进程运行失败",
+      collector_exit: "医院招标采集进程退出失败",
+      collector_timeout: "医院招标采集进程超时",
+      customer_registry: "医院招标客户清单校验失败",
+      snapshot_read: "医院招标快照读取失败",
+      snapshot_parse: "医院招标快照解析失败",
+      snapshot_normalize: "医院招标快照校验失败",
+      runner: fallback,
+    };
+    return stages[error.stage] ?? fallback;
+  }
   const message = String(error?.message ?? "").trim();
   if (!message || message.length > 500 || /token|secret|bearer|password|key/i.test(message)) return fallback;
   return message;

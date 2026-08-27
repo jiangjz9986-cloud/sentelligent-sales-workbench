@@ -19,6 +19,7 @@ import { hostname as readHostname } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
+import { decryptSecret } from "../backend/src/settings/secretBox.js";
 
 // A pre-cutover report may inspect the already-running release whose manifest
 // predates the WeChat-bookkeeping confirmation and PushPlus names. This relaxed set
@@ -313,13 +314,13 @@ function hasWeixinBookkeepingConfirmationConfiguration(environment) {
   );
 }
 
-function hasHospitalTenderSchedulerConfiguration(environment) {
+function hasHospitalTenderSchedulerConfiguration(environment, database) {
   const schedulerMode = environment.HOSPITAL_TENDER_AUTO_RUN;
   return (
     (schedulerMode === "true" || schedulerMode === "false") &&
     environment.HOSPITAL_TENDER_INTERVAL_MINUTES === "60" &&
     environment.HOSPITAL_TENDER_BATCH_SIZE === "10" &&
-    hasHospitalTenderNotificationConfiguration(environment)
+    hasHospitalTenderNotificationConfiguration(environment, database)
   );
 }
 
@@ -334,7 +335,7 @@ function isStrongHospitalTenderPushplusToken(value) {
   );
 }
 
-function hasHospitalTenderNotificationConfiguration(environment) {
+function hasHospitalTenderNotificationConfiguration(environment, database) {
   const token = environment.HOSPITAL_TENDER_PUSHPLUS_TOKEN;
   const schedulerEnabled = environment.HOSPITAL_TENDER_AUTO_RUN === "true";
   if (!schedulerEnabled) return true;
@@ -346,6 +347,9 @@ function hasHospitalTenderNotificationConfiguration(environment) {
     environment.MODEL_API_KEY,
     environment.HOSPITAL_TENDER_SYNC_TOKEN,
   ].filter((value) => typeof value === "string" && value.length > 0);
+  const settingState = database?.hospitalTenderPushplusSettingState ?? "missing";
+  if (settingState === "active-valid") return true;
+  if (settingState !== "missing") return false;
   return isStrongHospitalTenderPushplusToken(token) && !otherSecrets.includes(token);
 }
 
@@ -1116,7 +1120,11 @@ export function readStableRegularFile(
 
 export async function inspectSqlite(
   filePath,
-  { requireNoSidecars = false } = {},
+  {
+    requireNoSidecars = false,
+    settingsEncryptionKey = "",
+    hospitalTenderSecretIsolationValues = [],
+  } = {},
 ) {
   const resolvedPath = resolve(filePath);
   if (!existsSync(resolvedPath)) {
@@ -1165,10 +1173,36 @@ export async function inspectSqlite(
                   : []),
               ])].sort()
             : [];
+          let hospitalTenderPushplusSettingState = "missing";
+          if (tableNames.has("secure_settings")) {
+            const setting = database.prepare(`
+              SELECT ciphertext, status
+              FROM secure_settings
+              WHERE setting_key = 'hospital_tender_pushplus_token'
+            `).get();
+            if (setting) {
+              if (setting.status !== "active" || !setting.ciphertext) {
+                hospitalTenderPushplusSettingState = "cleared";
+              } else {
+                try {
+                  const token = decryptSecret(setting.ciphertext, settingsEncryptionKey);
+                  const isolated = Array.isArray(hospitalTenderSecretIsolationValues)
+                    && !hospitalTenderSecretIsolationValues.includes(token);
+                  hospitalTenderPushplusSettingState =
+                    isStrongHospitalTenderPushplusToken(token) && isolated
+                      ? "active-valid"
+                      : "active-invalid";
+                } catch {
+                  hospitalTenderPushplusSettingState = "active-invalid";
+                }
+              }
+            }
+          }
           return {
             quickCheck,
             foreignKeyViolations: foreignKeyViolations.length,
             businessOwners,
+            hospitalTenderPushplusSettingState,
           };
         } finally {
           database.close();
@@ -2655,7 +2689,17 @@ export async function runProductionPreflight({
         valid: false,
         message: releaseManifestResult.error,
       };
-  const database = await inspectSqlite(databasePath ?? "");
+  const database = await inspectSqlite(databasePath ?? "", {
+    settingsEncryptionKey: environment.SETTINGS_ENCRYPTION_KEY,
+    hospitalTenderSecretIsolationValues: [
+      environment.AUTH_SESSION_SECRET,
+      environment.WEIXIN_AGENT_API_TOKEN,
+      environment.ASSISTANT_CONFIRMATION_SECRET,
+      environment.SETTINGS_ENCRYPTION_KEY,
+      environment.MODEL_API_KEY,
+      environment.HOSPITAL_TENDER_SYNC_TOKEN,
+    ].filter((value) => typeof value === "string" && value.length > 0),
+  });
   const backup = await inspectSqlite(backupPath ?? "", {
     requireNoSidecars: true,
   });
@@ -2728,7 +2772,7 @@ export async function runProductionPreflight({
       "env.production",
       environmentResult.error === null &&
         environment.NODE_ENV === "production" &&
-        hasHospitalTenderSchedulerConfiguration(environment),
+        hasHospitalTenderSchedulerConfiguration(environment, database),
       "Environment is explicitly production with the fixed 60-minute/10-customer tender schedule; automatic execution may be explicitly enabled or disabled, and enabled notification requires a dedicated PushPlus token.",
       environmentResult.error ??
         "NODE_ENV must be production, hospital tender auto-run must be explicitly true or false with the fixed 60-minute/10-customer schedule, and enabled execution requires a dedicated strong PushPlus value.",

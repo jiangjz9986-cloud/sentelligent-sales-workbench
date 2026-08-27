@@ -82,6 +82,20 @@ describe("hospital tender PushPlus notifier", () => {
     assert.equal(createHospitalTenderNotifier({ token: "" }), null);
   });
 
+  it("does not resolve configured secret metadata until a nonempty delivery", async () => {
+    let resolutions = 0;
+    const notifier = createHospitalTenderNotifier({
+      tokenProvider: () => {
+        resolutions += 1;
+        return fixtureValue;
+      },
+      fetchImpl: async () => providerResponse(),
+    });
+    assert.equal(resolutions, 0);
+    assert.equal(await notifier({ notices: [] }), 0);
+    assert.equal(resolutions, 0);
+  });
+
   it("splits an oversized aggregate into bounded requests without dropping notices", async () => {
     const requests = [];
     const notifier = createHospitalTenderNotifier({

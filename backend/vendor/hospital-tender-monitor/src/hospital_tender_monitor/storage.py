@@ -359,37 +359,57 @@ class Repository:
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (notice_id, revision_sha, revision_number, _to_db_timestamp(seen_at), _to_db_timestamp(n.published_at), n.source_name, n.city, n.title, n.url, n.source_item_id, n.purchaser, n.project_code, n.budget_text, n.deadline_text, n.content_text, _json_array(n.hospital_names), n.content_sha256, item.score, item.level.value, _json_array(item.matched_terms), _json_array(item.reasons)))
         return int(cur.lastrowid)
 
-    def save_notice(self, item: ClassifiedNotice, *, seen_at: datetime | None = None) -> SaveOutcome:
-        seen_at = datetime.now(timezone.utc) if seen_at is None else seen_at
-        _require_aware_datetime(seen_at, "seen_at")
+    def _save_notice_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        item: ClassifiedNotice,
+        *,
+        seen_at: datetime,
+    ) -> SaveOutcome:
         seen_ts = _to_db_timestamp(seen_at)
         n = item.notice
         revision_sha = _revision_fingerprint(n)
         identity_sha = hashlib.sha256(n.identity_key.encode("utf-8")).hexdigest()
+        conn.execute("INSERT INTO sources(source_id,source_name,city,updated_at) VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_name=excluded.source_name, city=excluded.city, updated_at=excluded.updated_at", (n.source_id, n.source_name, n.city, seen_ts))
+        row = conn.execute("SELECT * FROM notices WHERE identity_key=? AND notice_type=?", (n.identity_key, n.notice_type.value)).fetchone()
+        if row is None:
+            cur = conn.execute("INSERT INTO notices(identity_key,identity_sha256,notice_type,source_id,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?)", (n.identity_key, identity_sha, n.notice_type.value, n.source_id, seen_ts, seen_ts))
+            notice_id = int(cur.lastrowid)
+            revision_id = self._insert_revision(conn, notice_id, item, seen_at, revision_sha, 1)
+            return SaveOutcome(notice_id, revision_id, True, False, False)
+        notice_id = int(row["id"])
+        current = conn.execute("SELECT * FROM notice_revisions WHERE notice_id=? ORDER BY revision_number DESC LIMIT 1", (notice_id,)).fetchone()
+        conn.execute("UPDATE notices SET last_seen_at=MAX(last_seen_at, ?) WHERE id=?", (seen_ts, notice_id))
+        matching = conn.execute("SELECT * FROM notice_revisions WHERE notice_id=? AND revision_sha256=?", (notice_id, revision_sha)).fetchone()
+        if matching:
+            conn.execute("UPDATE notice_revisions SET score=?, level=?, matched_terms_json=?, reasons_json=? WHERE id=?", (item.score, item.level.value, _json_array(item.matched_terms), _json_array(item.reasons), matching["id"]))
+            return SaveOutcome(notice_id, int(matching["id"]), False, False, True)
+        revision_number = int(current["revision_number"]) + 1 if current else 1
+        revision_id = self._insert_revision(conn, notice_id, item, seen_at, revision_sha, revision_number)
+        return SaveOutcome(notice_id, revision_id, False, True, False)
+
+    def save_notices(
+        self,
+        items: Iterable[ClassifiedNotice],
+        *,
+        seen_at: datetime | None = None,
+    ) -> tuple[SaveOutcome, ...]:
+        """Persist one source batch atomically using one bounded SQLite transaction."""
+        batch = tuple(items)
+        if not batch:
+            return ()
+        seen_at = datetime.now(timezone.utc) if seen_at is None else seen_at
+        _require_aware_datetime(seen_at, "seen_at")
         conn: sqlite3.Connection | None = None
         try:
             conn = self._open_for("database notice save failed")
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("INSERT INTO sources(source_id,source_name,city,updated_at) VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_name=excluded.source_name, city=excluded.city, updated_at=excluded.updated_at", (n.source_id, n.source_name, n.city, seen_ts))
-            row = conn.execute("SELECT * FROM notices WHERE identity_key=? AND notice_type=?", (n.identity_key, n.notice_type.value)).fetchone()
-            if row is None:
-                cur = conn.execute("INSERT INTO notices(identity_key,identity_sha256,notice_type,source_id,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?)", (n.identity_key, identity_sha, n.notice_type.value, n.source_id, seen_ts, seen_ts))
-                notice_id = int(cur.lastrowid)
-                revision_id = self._insert_revision(conn, notice_id, item, seen_at, revision_sha, 1)
-                conn.commit()
-                return SaveOutcome(notice_id, revision_id, True, False, False)
-            notice_id = int(row["id"])
-            current = conn.execute("SELECT * FROM notice_revisions WHERE notice_id=? ORDER BY revision_number DESC LIMIT 1", (notice_id,)).fetchone()
-            conn.execute("UPDATE notices SET last_seen_at=MAX(last_seen_at, ?) WHERE id=?", (seen_ts, notice_id))
-            matching = conn.execute("SELECT * FROM notice_revisions WHERE notice_id=? AND revision_sha256=?", (notice_id, revision_sha)).fetchone()
-            if matching:
-                conn.execute("UPDATE notice_revisions SET score=?, level=?, matched_terms_json=?, reasons_json=? WHERE id=?", (item.score, item.level.value, _json_array(item.matched_terms), _json_array(item.reasons), matching["id"]))
-                conn.commit()
-                return SaveOutcome(notice_id, int(matching["id"]), False, False, True)
-            revision_number = int(current["revision_number"]) + 1 if current else 1
-            revision_id = self._insert_revision(conn, notice_id, item, seen_at, revision_sha, revision_number)
+            outcomes = tuple(
+                self._save_notice_in_transaction(conn, item, seen_at=seen_at)
+                for item in batch
+            )
             conn.commit()
-            return SaveOutcome(notice_id, revision_id, False, True, False)
+            return outcomes
         except sqlite3.Error:
             self._rollback_quietly(conn)
             raise RepositoryError("database notice save failed") from None
@@ -398,6 +418,9 @@ class Repository:
             raise
         finally:
             self._close(conn)
+
+    def save_notice(self, item: ClassifiedNotice, *, seen_at: datetime | None = None) -> SaveOutcome:
+        return self.save_notices((item,), seen_at=seen_at)[0]
 
     def _hydrate(self, row: sqlite3.Row) -> ClassifiedNotice:
         n = TenderNotice(source_id=row["source_id"], source_name=row["source_name"], city=row["city"], title=row["title"], url=row["url"], published_at=_from_db_timestamp(row["published_at"]), notice_type=NoticeType(row["notice_type"]), purchaser=row["purchaser"], project_code=row["project_code"], budget_text=row["budget_text"], deadline_text=row["deadline_text"], content_text=row["content_text"], hospital_names=_decode_array(row["hospital_names_json"]), source_item_id=row["source_item_id"])

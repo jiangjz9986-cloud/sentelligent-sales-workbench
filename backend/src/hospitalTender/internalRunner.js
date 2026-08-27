@@ -14,9 +14,11 @@ const DEFAULT_COLLECTOR_ROOT = resolve(MODULE_DIR, "../../vendor/hospital-tender
 
 export class InternalHospitalTenderRunError extends Error {
   constructor(message = "Internal hospital tender monitor failed", options = {}) {
-    super(message, options);
+    const { stage = "runner", ...errorOptions } = options;
+    super(message, errorOptions);
     this.name = "InternalHospitalTenderRunError";
     this.code = "HOSPITAL_TENDER_INTERNAL_RUN_FAILED";
+    this.stage = stage;
   }
 }
 
@@ -35,6 +37,11 @@ function commandEnvironment({ collectorRoot, dataDir, customerHospitalsPath, env
     PYTHONIOENCODING: "utf-8",
     HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS: "1",
     HOSPITAL_TENDER_MONITOR_DATA_DIR: dataDir,
+    // Python's macOS urllib otherwise discovers and silently uses the host's
+    // system proxy even though proxy URLs were excluded from this allowlist.
+    // Public-source collection is deliberately direct and credential-free.
+    NO_PROXY: "*",
+    no_proxy: "*",
     ...(customerHospitalsPath
       ? { HOSPITAL_TENDER_MONITOR_CUSTOMER_HOSPITALS_PATH: customerHospitalsPath }
       : {}),
@@ -67,7 +74,10 @@ function collectOutput(child, timeoutMs) {
       } catch {
         // The process may already have exited; the timeout result is enough.
       }
-      settle(rejectOutput, new InternalHospitalTenderRunError("Internal hospital tender monitor timed out"));
+      settle(rejectOutput, new InternalHospitalTenderRunError(
+        "Internal hospital tender monitor timed out",
+        { stage: "collector_timeout" },
+      ));
     }, timeoutMs);
   });
 }
@@ -93,11 +103,17 @@ export function createInternalHospitalTenderRunner(options = {}) {
         let customerHospitalsPath = "";
         if (customerHospitals !== undefined) {
           if (!Array.isArray(customerHospitals) || customerHospitals.length > MAX_CUSTOMER_HOSPITALS) {
-            throw new InternalHospitalTenderRunError("Internal hospital customer registry is invalid");
+            throw new InternalHospitalTenderRunError(
+              "Internal hospital customer registry is invalid",
+              { stage: "customer_registry" },
+            );
           }
           const serializedCustomerHospitals = `${JSON.stringify({ hospitals: customerHospitals })}\n`;
           if (Buffer.byteLength(serializedCustomerHospitals, "utf8") > MAX_CUSTOMER_REGISTRY_BYTES) {
-            throw new InternalHospitalTenderRunError("Internal hospital customer registry is invalid");
+            throw new InternalHospitalTenderRunError(
+              "Internal hospital customer registry is invalid",
+              { stage: "customer_registry" },
+            );
           }
           customerHospitalsPath = join(runDir, "customer_hospitals.json");
           await writeFile(
@@ -107,40 +123,78 @@ export function createInternalHospitalTenderRunner(options = {}) {
           );
           await chmod(customerHospitalsPath, 0o600).catch(() => {});
         }
-        const child = spawnImpl(
-          pythonExecutable,
-          ["-m", "hospital_tender_monitor.cli", "--project-root", collectorRoot, "run-and-export", "--output", outputPath],
-          {
-            cwd: collectorRoot,
-            env: commandEnvironment({
-              collectorRoot,
-              dataDir,
-              customerHospitalsPath,
-              env: environment,
-            }),
-            stdio: ["ignore", "ignore", "pipe"],
-            signal,
-          },
-        );
-        const result = await collectOutput(child, timeoutMs);
+        let child;
+        try {
+          child = spawnImpl(
+            pythonExecutable,
+            ["-m", "hospital_tender_monitor.cli", "--project-root", collectorRoot, "run-and-export", "--output", outputPath],
+            {
+              cwd: collectorRoot,
+              env: commandEnvironment({
+                collectorRoot,
+                dataDir,
+                customerHospitalsPath,
+                env: environment,
+              }),
+              stdio: ["ignore", "ignore", "pipe"],
+              signal,
+            },
+          );
+        } catch (error) {
+          throw new InternalHospitalTenderRunError(
+            "Internal hospital tender collector could not be started",
+            { stage: "collector_spawn", cause: error },
+          );
+        }
+        let result;
+        try {
+          result = await collectOutput(child, timeoutMs);
+        } catch (error) {
+          if (error instanceof InternalHospitalTenderRunError) throw error;
+          throw new InternalHospitalTenderRunError(
+            "Internal hospital tender collector process failed",
+            { stage: "collector_process", cause: error },
+          );
+        }
         if (result.code !== 0 || result.signal) {
-          throw new InternalHospitalTenderRunError("Internal hospital tender monitor failed");
+          throw new InternalHospitalTenderRunError(
+            "Internal hospital tender collector exited unsuccessfully",
+            { stage: "collector_exit" },
+          );
+        }
+        let rawSnapshot;
+        try {
+          rawSnapshot = await readFile(outputPath, "utf8");
+        } catch (error) {
+          throw new InternalHospitalTenderRunError(
+            "Internal hospital tender snapshot could not be read",
+            { stage: "snapshot_read", cause: error },
+          );
         }
         let payload;
         try {
-          payload = JSON.parse(await readFile(outputPath, "utf8"));
-        } catch {
-          throw new InternalHospitalTenderRunError("Internal hospital tender snapshot is invalid");
+          payload = JSON.parse(rawSnapshot);
+        } catch (error) {
+          throw new InternalHospitalTenderRunError(
+            "Internal hospital tender snapshot is not valid JSON",
+            { stage: "snapshot_parse", cause: error },
+          );
         }
         try {
           payload = normalizeHospitalTenderSyncPayload(payload);
-        } catch {
-          throw new InternalHospitalTenderRunError("Internal hospital tender snapshot is invalid");
+        } catch (error) {
+          throw new InternalHospitalTenderRunError(
+            "Internal hospital tender snapshot validation failed",
+            { stage: "snapshot_normalize", cause: error },
+          );
         }
         return { payload, source: "internal" };
       } catch (error) {
         if (error instanceof InternalHospitalTenderRunError) throw error;
-        throw new InternalHospitalTenderRunError("Internal hospital tender monitor failed", { cause: error });
+        throw new InternalHospitalTenderRunError(
+          "Internal hospital tender monitor failed",
+          { stage: "runner", cause: error },
+        );
       } finally {
         await rm(runDir, { recursive: true, force: true }).catch(() => {});
       }

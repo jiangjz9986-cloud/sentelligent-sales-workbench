@@ -32,6 +32,8 @@ describe("internal hospital tender runner", () => {
       collectorRoot: "/opt/sentelligent/vendor/hospital-tender-monitor",
       environment: {
         PATH: "/usr/bin",
+        HTTPS_PROXY: "http://host-proxy.invalid:8080",
+        ALL_PROXY: "socks5://host-proxy.invalid:1080",
         ["HOSPITAL_TENDER_" + "SYNC_TOKEN"]: "must-not-forward",
         ["SENTELLIGENT_HOSPITAL_TENDER_" + "SYNC_URL"]: "https://must-not-forward.example",
         ["PUSHPLUS_" + "TOKEN"]: "must-not-forward",
@@ -65,6 +67,10 @@ describe("internal hospital tender runner", () => {
       "-m", "hospital_tender_monitor.cli", "--project-root", "/opt/sentelligent/vendor/hospital-tender-monitor", "run-and-export",
     ]);
     assert.equal(invocation.options.env.HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS, "1");
+    assert.equal(invocation.options.env.NO_PROXY, "*");
+    assert.equal(invocation.options.env.no_proxy, "*");
+    assert.equal("HTTPS_PROXY" in invocation.options.env, false);
+    assert.equal("ALL_PROXY" in invocation.options.env, false);
     assert.equal("HOSPITAL_TENDER_SYNC_TOKEN" in invocation.options.env, false);
     assert.equal("SENTELLIGENT_HOSPITAL_TENDER_SYNC_URL" in invocation.options.env, false);
     assert.equal("PUSHPLUS_TOKEN" in invocation.options.env, false);
@@ -82,10 +88,12 @@ describe("internal hospital tender runner", () => {
     await assert.rejects(runner.run(), (error) => (
       error instanceof InternalHospitalTenderRunError
       && error.code === "HOSPITAL_TENDER_INTERNAL_RUN_FAILED"
+      && error.stage === "collector_exit"
+      && error.message === "Internal hospital tender collector exited unsuccessfully"
     ));
   });
 
-  it("rejects malformed snapshots even when the process succeeds", async () => {
+  it("classifies schema-invalid snapshots without exposing their contents", async () => {
     const runner = createInternalHospitalTenderRunner({
       spawnImpl(command, args) {
         const child = fakeChild();
@@ -96,7 +104,44 @@ describe("internal hospital tender runner", () => {
         return child;
       },
     });
-    await assert.rejects(runner.run(), /snapshot is invalid/);
+    await assert.rejects(runner.run(), (error) => (
+      error instanceof InternalHospitalTenderRunError
+      && error.stage === "snapshot_normalize"
+      && error.message === "Internal hospital tender snapshot validation failed"
+      && !error.message.includes("v2")
+    ));
+  });
+
+  it("distinguishes unreadable and malformed snapshot output", async () => {
+    const unreadable = createInternalHospitalTenderRunner({
+      spawnImpl() {
+        const child = fakeChild();
+        queueMicrotask(() => child.emit("close", 0, null));
+        return child;
+      },
+    });
+    await assert.rejects(unreadable.run(), (error) => (
+      error instanceof InternalHospitalTenderRunError
+      && error.stage === "snapshot_read"
+      && error.message === "Internal hospital tender snapshot could not be read"
+    ));
+
+    const malformed = createInternalHospitalTenderRunner({
+      spawnImpl(_command, args) {
+        const child = fakeChild();
+        const output = args[args.indexOf("--output") + 1];
+        void writeFile(output, "{not-json", "utf8").then(() => {
+          queueMicrotask(() => child.emit("close", 0, null));
+        });
+        return child;
+      },
+    });
+    await assert.rejects(malformed.run(), (error) => (
+      error instanceof InternalHospitalTenderRunError
+      && error.stage === "snapshot_parse"
+      && error.message === "Internal hospital tender snapshot is not valid JSON"
+      && !error.message.includes("not-json")
+    ));
   });
 
   it("fails within the configured timeout when the child never exits", async () => {
@@ -110,7 +155,11 @@ describe("internal hospital tender runner", () => {
       },
     });
     const startedAt = Date.now();
-    await assert.rejects(runner.run(), /timed out/);
+    await assert.rejects(runner.run(), (error) => (
+      error instanceof InternalHospitalTenderRunError
+      && error.stage === "collector_timeout"
+      && /timed out/u.test(error.message)
+    ));
     assert.ok(Date.now() - startedAt < 500);
     assert.deepEqual(killed, ["SIGTERM", "SIGKILL"]);
   });
