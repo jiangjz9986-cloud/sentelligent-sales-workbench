@@ -54,7 +54,7 @@ async function shellMetrics(page) {
     const interactive = [...document.querySelectorAll(
       "button, [role='button'], a[href], input:not([type='hidden']), select, textarea",
     )].filter((element) => {
-      const rect = element.closest(".search-box, .itinerary-filter, .voice-file-button")
+      const rect = element.closest(".search-box, .itinerary-filter")
         ?.getBoundingClientRect() ?? element.getBoundingClientRect();
       const style = getComputedStyle(element);
       return !element.disabled
@@ -66,7 +66,7 @@ async function shellMetrics(page) {
         && rect.top <= innerHeight;
     });
     const undersized = interactive.map((element) => {
-      const target = element.closest(".search-box, .itinerary-filter, .voice-file-button") ?? element;
+      const target = element.closest(".search-box, .itinerary-filter") ?? element;
       const rect = target.getBoundingClientRect();
       return {
         label: element.getAttribute("aria-label") || element.textContent?.trim() || element.title || "",
@@ -112,47 +112,9 @@ async function assertExpensePageReady(page) {
   assert.equal(await naturalWeekInput.getAttribute("type"), "week");
 }
 
-function installSafariVoiceFallback() {
+function installVoiceRecognitionUnavailable() {
   Object.defineProperty(window, "SpeechRecognition", { configurable: true, value: undefined });
   Object.defineProperty(window, "webkitSpeechRecognition", { configurable: true, value: undefined });
-
-  const track = { stop() {} };
-  const stream = { getTracks: () => [track] };
-  Object.defineProperty(navigator, "mediaDevices", {
-    configurable: true,
-    value: { getUserMedia: async () => stream },
-  });
-
-  class TestMediaRecorder {
-    static isTypeSupported() {
-      return true;
-    }
-
-    constructor(mediaStream) {
-      this.stream = mediaStream;
-      this.mimeType = "audio/webm";
-      this.state = "inactive";
-    }
-
-    start() {
-      this.state = "recording";
-      this.onstart?.();
-    }
-
-    stop() {
-      if (this.state === "inactive") return;
-      this.state = "inactive";
-      this.ondataavailable?.({
-        data: new Blob(["webkit-audio-fixture"], { type: this.mimeType }),
-      });
-      this.onstop?.();
-    }
-  }
-
-  Object.defineProperty(window, "MediaRecorder", {
-    configurable: true,
-    value: TestMediaRecorder,
-  });
 }
 
 async function main() {
@@ -253,7 +215,7 @@ async function main() {
       screen: { width: 390, height: 844 },
       locale: "zh-CN",
     });
-    await context.addInitScript(installSafariVoiceFallback);
+    await context.addInitScript(installVoiceRecognitionUnavailable);
     const page = await context.newPage();
     const failedResponses = [];
     page.on("response", (response) => {
@@ -350,11 +312,12 @@ async function main() {
     assert.match(initialMetrics.logoCurrentSrc, /sent-zhixing-icon\.png$/);
     assert.deepEqual(initialMetrics.undersized, []);
 
-    await page.getByRole("button", { name: /录音留存|开始转写/ }).click();
-    await page.getByRole("button", { name: "停止录音" }).click();
-    await page.getByTestId("voice-audio-card").waitFor();
-    assert.equal(await page.getByTestId("voice-audio-card").locator("audio").count(), 1);
-    assert.equal(await page.getByTestId("voice-audio-card").locator("a[download]").count(), 1);
+    await page.getByTestId("voice-status").waitFor();
+    assert.match(await page.getByTestId("voice-status").innerText(), /改用文本/);
+    assert.equal(await page.getByTestId("voice-audio-card").count(), 0);
+    assert.equal(await page.getByTestId("voice-upload-control").count(), 0);
+    assert.equal(await page.getByRole("button", { name: "录音留存" }).count(), 0);
+    await page.getByRole("button", { name: "改用文本" }).waitFor();
 
     await page.getByTestId("nav-customer").click();
     await page.getByTestId("customer-list-view").waitFor();

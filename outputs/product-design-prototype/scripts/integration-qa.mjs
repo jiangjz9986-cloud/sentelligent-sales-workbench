@@ -950,80 +950,18 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
 
         Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: undefined });
         Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: undefined });
-        window.__qaMediaRecorders = [];
-        window.__qaTrackStopped = false;
-        class FakeMediaRecorder {
-          constructor(stream) {
-            this.stream = stream;
-            this.mimeType = 'audio/mp4';
-            this.state = 'inactive';
-            window.__qaMediaRecorders.push(this);
-          }
-          start() {
-            this.state = 'recording';
-            this.onstart?.();
-          }
-          stop() {
-            this.state = 'inactive';
-            this.ondataavailable?.({
-              data: new Blob(['audio-bytes'], { type: this.mimeType }),
-            });
-            this.onstop?.();
-          }
-        }
-        Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: FakeMediaRecorder });
-        Object.defineProperty(navigator, 'mediaDevices', {
-          configurable: true,
-          value: {
-            getUserMedia: async () => ({
-              getTracks: () => [{
-                stop: () => {
-                  window.__qaTrackStopped = true;
-                },
-              }],
-            }),
-          },
-        });
-        [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '文本')?.click();
-        await wait(100);
-        [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音')?.click();
-        const safariStartButton = await waitUntil(
-          () => [...document.querySelectorAll('button')].find((button) => button.textContent.includes('录音留存')),
-          5000,
-        );
-        safariStartButton.click();
-        const safariRecorder = await waitUntil(
-          () => (window.__qaMediaRecorders[0]?.state === 'recording' ? window.__qaMediaRecorders[0] : null),
-          5000,
-        );
-        const safariStopButton = [...document.querySelectorAll('button')].find((button) => button.textContent.includes('停止录音'));
-        if (!safariStopButton) throw new Error('Missing Safari voice recording stop button');
-        safariStopButton.click();
-        await waitUntil(() => document.querySelector('[data-testid="voice-audio-card"]'), 5000);
-        window.__qaVoiceFallback = {
-          recordingStarted: Boolean(safariRecorder),
-          audioCardVisible: Boolean(document.querySelector('[data-testid="voice-audio-card"] audio')),
-          downloadVisible: document.querySelector('[data-testid="voice-audio-card"] a')?.textContent?.includes('下载录音') ?? false,
-          guidanceVisible: document.querySelector('[data-testid="voice-status"]')?.textContent?.includes('补录文字') ?? false,
-          trackStopped: window.__qaTrackStopped,
-        };
-
-        Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: undefined });
-        Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: undefined });
-        Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: undefined });
-        Object.defineProperty(navigator, 'mediaDevices', {
-          configurable: true,
-          value: undefined,
-        });
         [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '文本')?.click();
         await wait(100);
         [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音')?.click();
         await waitUntil(() => document.querySelector('[data-testid="voice-status"]'), 5000);
         const unavailableDirectText = document.querySelector('[data-testid="voice-status"]')?.textContent ?? '';
-        const uploadLabel = document.querySelector('[data-testid="voice-upload-control"]');
-        window.__qaVoiceUploadOnly = {
-          uploadVisible: uploadLabel?.textContent?.includes('上传录音') ?? false,
-          unavailableHidden: !unavailableDirectText.includes('不可用'),
+        window.__qaVoiceUnavailable = {
+          textGuidanceVisible: unavailableDirectText.includes('改用文本'),
+          recordingControlsAbsent:
+            ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('录音留存'))
+            && !document.querySelector('[data-testid="voice-audio-card"]')
+            && !document.querySelector('[data-testid="voice-upload-control"]'),
+          startTranscribeHidden: ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('开始转写')),
           textFallbackVisible: [...document.querySelectorAll('button')].some((button) => button.textContent.includes('改用文本')),
         };
 
@@ -2043,8 +1981,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         settingsIa: window.__qaSettingsIa ?? {},
         aiSuggestions: window.__qaAiSuggestions ?? {},
         voiceFlow: window.__qaVoiceFlow ?? {},
-        voiceFallback: window.__qaVoiceFallback ?? {},
-        voiceUploadOnly: window.__qaVoiceUploadOnly ?? {},
+        voiceUnavailable: window.__qaVoiceUnavailable ?? {},
         productionCopy: window.__qaProductionCopy ?? { forbiddenByPage: [] }
       };
     })()
@@ -3071,14 +3008,10 @@ async function main() {
         assert.equal(result.voiceFlow.resetToVoiceFromOverview, true, "desktop overview quick record entry should reset to voice mode");
         assert.equal(result.voiceFlow.transcriptInComposer, true, "desktop quick record voice mode should write transcript into composer");
         assert.equal(result.voiceFlow.stopped, true, "desktop quick record voice mode should stop browser speech recognition");
-        assert.equal(result.voiceFallback.recordingStarted, true, "desktop quick record voice mode should fall back to recording when speech recognition is unavailable");
-        assert.equal(result.voiceFallback.audioCardVisible, true, "desktop quick record Safari fallback should show a playable recording");
-        assert.equal(result.voiceFallback.downloadVisible, true, "desktop quick record Safari fallback should expose a recording download");
-        assert.equal(result.voiceFallback.guidanceVisible, true, "desktop quick record Safari fallback should guide manual transcription");
-        assert.equal(result.voiceFallback.trackStopped, true, "desktop quick record Safari fallback should release the microphone stream");
-        assert.equal(result.voiceUploadOnly.uploadVisible, true, "desktop quick record mobile fallback should expose recording upload when direct microphone access is unavailable");
-        assert.equal(result.voiceUploadOnly.unavailableHidden, true, "desktop quick record mobile fallback should not show an unavailable voice dead end");
-        assert.equal(result.voiceUploadOnly.textFallbackVisible, true, "desktop quick record mobile fallback should still allow text entry");
+        assert.equal(result.voiceUnavailable.textGuidanceVisible, true, "desktop quick record should guide users to text entry when speech recognition is unavailable");
+        assert.equal(result.voiceUnavailable.recordingControlsAbsent, true, "desktop quick record must not expose retired audio recording, playback, or upload controls");
+        assert.equal(result.voiceUnavailable.startTranscribeHidden, true, "desktop quick record should hide the transcribe trigger when speech recognition is unavailable");
+        assert.equal(result.voiceUnavailable.textFallbackVisible, true, "desktop quick record should still allow switching to text entry");
         assert.deepEqual(
           result.productionCopy.forbiddenByPage,
           [],

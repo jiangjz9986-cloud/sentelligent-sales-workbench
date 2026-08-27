@@ -71,7 +71,20 @@ export function parseModelAnalysisContent(content, provider = "model") {
   };
 }
 
-function buildMessages(rawContent, systemPrompt = null) {
+function buildKnowledgeContextLines(knowledgeItems = []) {
+  if (!Array.isArray(knowledgeItems) || knowledgeItems.length === 0) return [];
+  const entries = knowledgeItems.slice(0, 4).map((item, index) => ({
+    id: String(item?.id ?? `knowledge-${index + 1}`),
+    title: String(item?.title ?? "").slice(0, 120),
+    summary: String(item?.summary ?? "").slice(0, 240),
+  }));
+  return [
+    "可参考的销售知识库条目（仅当与记录内容相关时引用，不得虚构其他知识）：",
+    JSON.stringify(entries),
+  ];
+}
+
+function buildMessages(rawContent, systemPrompt = null, knowledgeItems = []) {
   return [
     {
       role: "system",
@@ -80,6 +93,7 @@ function buildMessages(rawContent, systemPrompt = null) {
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 customer、opportunity、weekly、summary。",
         "summary 必须包含 request、feedback、risk、action，每项都有 title 和 text。",
+        ...buildKnowledgeContextLines(knowledgeItems),
         "示例 JSON：",
         JSON.stringify({
           customer: { id: "rizhao", value: "日照中医医院", meta: "置信度 90%", tone: "blue" },
@@ -133,9 +147,9 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
   return content;
 }
 
-async function callModel(rawContent, config, fetchImpl, systemPrompt = null) {
+async function callModel(rawContent, config, fetchImpl, systemPrompt = null, knowledgeItems = []) {
   const content = await callChatCompletion({
-    messages: buildMessages(rawContent, systemPrompt),
+    messages: buildMessages(rawContent, systemPrompt, knowledgeItems),
     config,
     fetchImpl,
     maxTokens: 3200,
@@ -454,22 +468,50 @@ export async function enhanceItineraryOrderWithModel(fallback, context, config =
   }
 }
 
+function normalizeAnalysisKnowledgeItems(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => item && String(item.id ?? "").trim())
+    .slice(0, 4)
+    .map((item) => ({
+      id: String(item.id).trim(),
+      title: String(item.title ?? "").trim(),
+      summary: String(item.summary ?? "").trim(),
+    }));
+}
+
+function withKnowledgeRefs(analysis, knowledgeItems) {
+  if (!analysis || knowledgeItems.length === 0) return analysis;
+  return {
+    ...analysis,
+    knowledgeRefs: knowledgeItems.map((item) => ({
+      type: "knowledge",
+      id: item.id,
+      title: item.title,
+    })),
+  };
+}
+
 export async function analyzeQuickRecord(rawContent, config = {}, options = {}) {
   const text = String(rawContent ?? "").trim();
   if (!text) return null;
+  const knowledgeItems = normalizeAnalysisKnowledgeItems(options.knowledgeItems);
 
   if (config.aiAnalysisMode !== "model") {
-    return fallbackAnalysis(text, "mock");
+    return withKnowledgeRefs(fallbackAnalysis(text, "mock"), knowledgeItems);
   }
 
   if (!resolveModelApiKey(config)) {
-    return fallbackAnalysis(text, "mock_missing_model_key");
+    return withKnowledgeRefs(fallbackAnalysis(text, "mock_missing_model_key"), knowledgeItems);
   }
 
   try {
-    return await callModel(text, config, options.fetchImpl ?? fetch, options.systemPrompt ?? null);
+    return withKnowledgeRefs(
+      await callModel(text, config, options.fetchImpl ?? fetch, options.systemPrompt ?? null, knowledgeItems),
+      knowledgeItems,
+    );
   } catch {
-    return fallbackAnalysis(text, "mock_model_fallback");
+    return withKnowledgeRefs(fallbackAnalysis(text, "mock_model_fallback"), knowledgeItems);
   }
 }
 

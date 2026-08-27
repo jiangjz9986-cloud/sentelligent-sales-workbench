@@ -2646,24 +2646,6 @@ textarea:focus {
   text-align: left;
 }
 
-.voice-audio-card {
-  width: min(100%, 520px);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  border: 1px solid rgba(47, 107, 255, 0.14);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.78);
-}
-
-.voice-audio-card audio {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-}
-
 .voice-controls {
   display: flex;
   flex-wrap: wrap;
@@ -2671,27 +2653,34 @@ textarea:focus {
   gap: 8px;
 }
 
+.analysis-knowledge-refs {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid rgba(47, 107, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(47, 107, 255, 0.05);
+}
+
+.analysis-knowledge-refs .knowledge-refs-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-secondary, #51607a);
+}
+
+.analysis-knowledge-refs .knowledge-refs-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .voice-box .ghost-button,
-.voice-box .primary-button,
-.voice-file-button {
+.voice-box .primary-button {
   margin-top: 2px;
 }
 
 .voice-box .ghost-button {
   background: rgba(255, 255, 255, 0.74);
-}
-
-.voice-file-button {
-  position: relative;
-  min-height: 38px;
-  cursor: pointer;
-}
-
-.voice-file-button input {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  cursor: pointer;
 }
 
 .composer-actions {

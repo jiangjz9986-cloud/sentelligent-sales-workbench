@@ -94,6 +94,7 @@ function normalizeContext(context = {}) {
       evidence: compact(item.evidence, 800),
     })) : [],
     knowledge: Array.isArray(context.knowledge) ? context.knowledge.slice(0, 8).map((item) => ({
+      id: item.id ? compact(String(item.id), 64) : null,
       title: compact(item.title, 300),
       summary: compact(item.summary, 800),
     })) : [],
@@ -516,6 +517,7 @@ export function buildSalesDecisionMessages(inputContext = {}) {
         "score.dimensions 必须输出模板中的 8 个维度，max 固定且总和为 100；score、total 和所有 confidence 必须使用 0-100 整数。",
         "stakeholders 只能使用上下文中已有姓名；没有联系人证据时输出空数组。nextActions 最多 5 条且必须包含全部模板字段。",
         `当前行业 playbook：${playbook.label}；重点：${playbook.focus.join("、")}。`,
+        "context.knowledge 中的条目附有 id；引用知识库证据时，facts 条目使用 sourceType=\"knowledge\" 并把 sourceId 设为对应条目 id，不得虚构不存在的知识 id。",
         "writebackPreview.customerFields, opportunityFields, actions, and risks must be arrays of non-empty strings only; never output objects or placeholders in these arrays.",
         `JSON 形状：${JSON.stringify(SALES_DECISION_OUTPUT_SHAPE)}`,
       ].join("\n"),

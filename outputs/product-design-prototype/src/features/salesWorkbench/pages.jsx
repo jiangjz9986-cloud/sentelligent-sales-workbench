@@ -329,32 +329,9 @@ function canUseSpeechRecognition() {
   return window.isSecureContext !== false;
 }
 
-function getMediaRecorderConstructor() {
-  if (typeof window === "undefined") return null;
-  return window.MediaRecorder ?? null;
-}
-
-function canCaptureAudio() {
-  if (typeof window !== "undefined" && window.isSecureContext === false) return false;
-  return Boolean(
-    getMediaRecorderConstructor() &&
-    typeof navigator !== "undefined" &&
-    navigator.mediaDevices?.getUserMedia,
-  );
-}
-
-function audioExtension(type) {
-  if (type?.includes("mp4") || type?.includes("m4a")) return "m4a";
-  if (type?.includes("ogg")) return "ogg";
-  if (type?.includes("wav")) return "wav";
-  return "webm";
-}
-
 const voiceStatusText = {
   idle: "待录入",
   listening: "转写中",
-  recorded: "已保存",
-  upload: "上传录音",
   unsupported: "不可用",
   error: "需处理",
 };
@@ -395,6 +372,8 @@ export function QuickRecord({
   quickRecords = [],
   customersList,
   opportunitiesList,
+  routeHistoryId = null,
+  onHistoryRoute,
 }) {
   const [analysis, setAnalysis] = useState(null);
   const [quickRecord, setQuickRecord] = useState(null);
@@ -407,12 +386,7 @@ export function QuickRecord({
   const [voiceStatus, setVoiceStatus] = useState("idle");
   const [voiceMessage, setVoiceMessage] = useState("点击开始转写即可。");
   const [voiceInterim, setVoiceInterim] = useState("");
-  const [voiceAudio, setVoiceAudio] = useState(null);
   const recognitionRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const mediaStreamRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const voiceAudioUrlRef = useRef("");
   const voiceBaseTextRef = useRef("");
   const confirmationAttemptRef = useRef(null);
   if (!confirmationAttemptRef.current) {
@@ -425,23 +399,16 @@ export function QuickRecord({
   const quickRecordId = quickRecord?.id ?? null;
   const hasInput = recordText.trim().length > 0;
   const speechRecognitionAvailable = canUseSpeechRecognition();
-  const audioCaptureAvailable = canCaptureAudio();
-  const voiceUnavailable = !speechRecognitionAvailable && !audioCaptureAvailable;
+  const voiceUnavailable = !speechRecognitionAvailable;
   const voiceNeedsSecureOrigin = typeof window !== "undefined" && window.isSecureContext === false;
   const flowState = getQuickRecordFlow({
     hasInput,
     hasAnalysis: Boolean(analysisVisible && analysis),
     confirmedTargets,
   });
-  const isAudioCaptureMode = Boolean(mediaRecorderRef.current) || (!speechRecognitionAvailable && audioCaptureAvailable);
-  const shouldRecordInsteadOfTranscribe =
-    audioCaptureAvailable && (!speechRecognitionAvailable || voiceStatus === "unsupported");
-  const voicePrimaryLabel = shouldRecordInsteadOfTranscribe
-    ? "录音留存"
-    : "开始转写";
-  const visibleVoiceStatus = voiceUnavailable && voiceStatus === "idle" ? "upload" : voiceStatus;
+  const visibleVoiceStatus = voiceUnavailable && voiceStatus === "idle" ? "unsupported" : voiceStatus;
   const visibleVoiceMessage = voiceUnavailable && voiceStatus === "idle"
-    ? (voiceNeedsSecureOrigin ? "当前不是 HTTPS，请上传录音或改用文本。" : "请上传录音或改用文本。")
+    ? (voiceNeedsSecureOrigin ? "当前不是 HTTPS，无法使用语音转写，请改用文本录入。" : "当前浏览器不支持语音转写，请改用文本录入。")
     : voiceMessage;
 
   function resetAnalysis(status) {
@@ -457,36 +424,8 @@ export function QuickRecord({
     setSyncStatus(status);
   }
 
-  function stopMediaTracks() {
-    mediaStreamRef.current?.getTracks?.().forEach((track) => track.stop());
-    mediaStreamRef.current = null;
-  }
-
-  function clearVoiceAudio() {
-    if (voiceAudioUrlRef.current) {
-      URL.revokeObjectURL(voiceAudioUrlRef.current);
-      voiceAudioUrlRef.current = "";
-    }
-    setVoiceAudio(null);
-  }
-
-  function replaceVoiceAudio(blob, name) {
-    if (!blob?.size) return;
-    if (voiceAudioUrlRef.current) URL.revokeObjectURL(voiceAudioUrlRef.current);
-    const url = URL.createObjectURL(blob);
-    voiceAudioUrlRef.current = url;
-    setVoiceAudio({
-      url,
-      name: name || `quick-record-${Date.now()}.${audioExtension(blob.type)}`,
-      type: blob.type || "audio/webm",
-      size: blob.size,
-    });
-  }
-
   function startBlankRecord() {
     if (recognitionRef.current) stopVoiceRecognition();
-    if (mediaRecorderRef.current) stopVoiceRecognition();
-    clearVoiceAudio();
     confirmationAttemptRef.current.reset();
     setRecordMode("text");
     setRecordText("");
@@ -503,8 +442,6 @@ export function QuickRecord({
 
   function loadHistoricalRecord(item) {
     if (recognitionRef.current) stopVoiceRecognition();
-    if (mediaRecorderRef.current) stopVoiceRecognition();
-    clearVoiceAudio();
     confirmationAttemptRef.current.reset();
     const nextText = item.rawContent ?? `${item.customer}：${item.title}。${item.feedback}`;
     const nextAnalysis = item.analysis ?? null;
@@ -551,24 +488,6 @@ export function QuickRecord({
   }
 
   function stopVoiceRecognition() {
-    const mediaRecorder = mediaRecorderRef.current;
-    if (mediaRecorder) {
-      if (mediaRecorder.state !== "inactive") {
-        setVoiceMessage("正在停止录音采集");
-        try {
-          mediaRecorder.stop();
-        } catch {
-          mediaRecorderRef.current = null;
-          stopMediaTracks();
-          setVoiceStatus("idle");
-          setVoiceMessage("录音已停止。");
-        }
-        return;
-      }
-      mediaRecorderRef.current = null;
-      stopMediaTracks();
-    }
-
     const recognition = recognitionRef.current;
     if (!recognition) {
       setVoiceStatus("idle");
@@ -588,85 +507,16 @@ export function QuickRecord({
     }
   }
 
-  async function startVoiceAudioCapture() {
-    if (!audioCaptureAvailable) {
-      setVoiceStatus("unsupported");
-      setVoiceInterim("");
-      setVoiceMessage("请改用文本录入。");
-      setSyncStatus("语音不可用，请改用文本");
-      return;
-    }
-
-    if (mediaRecorderRef.current?.state === "recording") {
-      setVoiceMessage("正在录音。");
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const MediaRecorder = getMediaRecorderConstructor();
-      const recorder = new MediaRecorder(stream);
-      audioChunksRef.current = [];
-      mediaStreamRef.current = stream;
-      mediaRecorderRef.current = recorder;
-      voiceBaseTextRef.current = recordText.trim();
-      clearVoiceAudio();
-
-      recorder.ondataavailable = (event) => {
-        if (event.data?.size) audioChunksRef.current.push(event.data);
-      };
-
-      recorder.onstart = () => {
-        setVoiceStatus("listening");
-        setVoiceInterim("");
-        setVoiceMessage("正在录音。");
-        setSyncStatus("录音中，结束后补文字");
-      };
-
-      recorder.onstop = () => {
-        const type = recorder.mimeType || audioChunksRef.current[0]?.type || "audio/webm";
-        const blob = new Blob(audioChunksRef.current, { type });
-        mediaRecorderRef.current = null;
-        stopMediaTracks();
-        replaceVoiceAudio(blob, `quick-record-audio-${Date.now()}.${audioExtension(type)}`);
-        setVoiceStatus("recorded");
-        setVoiceInterim("");
-        setVoiceMessage("录音已保存，可补录文字。");
-        setSyncStatus("录音已保存，请补录文字后分析");
-      };
-
-      recorder.onerror = () => {
-        mediaRecorderRef.current = null;
-        stopMediaTracks();
-        setVoiceStatus("error");
-        setVoiceInterim("");
-        setVoiceMessage("录音失败，请检查权限。");
-        setSyncStatus("录音失败");
-      };
-
-      recorder.start();
-    } catch (error) {
-      mediaRecorderRef.current = null;
-      stopMediaTracks();
-      setVoiceStatus("error");
-      setVoiceInterim("");
-      if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
-        setVoiceMessage("请开启麦克风权限。");
-        setSyncStatus("麦克风权限未开启");
-        return;
-      }
-      setVoiceMessage("录音失败，请改用文本。");
-      setSyncStatus("录音启动失败");
-    }
-  }
-
-  async function startVoiceRecognition() {
+  function startVoiceRecognition() {
     const SpeechRecognition = getSpeechRecognitionConstructor();
     setRecordMode("voice");
 
     if (!SpeechRecognition) {
       recognitionRef.current = null;
-      await startVoiceAudioCapture();
+      setVoiceStatus("unsupported");
+      setVoiceInterim("");
+      setVoiceMessage("当前浏览器不支持语音转写，请改用文本录入。");
+      setSyncStatus("语音转写不可用，请改用文本");
       return;
     }
 
@@ -723,7 +573,7 @@ export function QuickRecord({
       }
       if (event.error === "service-not-allowed") {
         setVoiceStatus("unsupported");
-        setVoiceMessage(audioCaptureAvailable ? "实时转写不可用，可录音留存。" : "请改用文本。");
+        setVoiceMessage("实时转写不可用，请改用文本。");
         setSyncStatus("实时转写不可用");
         return;
       }
@@ -732,8 +582,7 @@ export function QuickRecord({
         setSyncStatus("没有识别到语音");
         return;
       }
-      if (audioCaptureAvailable) setVoiceStatus("unsupported");
-      setVoiceMessage(audioCaptureAvailable ? "实时转写不可用，可录音留存。" : "请改用文本。");
+      setVoiceMessage("实时转写不可用，请改用文本。");
       setSyncStatus("语音转写暂时不可用");
     };
 
@@ -756,33 +605,21 @@ export function QuickRecord({
     }
   }
 
-  function handleVoiceFileChange(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    replaceVoiceAudio(file, file.name || `quick-record-audio.${audioExtension(file.type)}`);
-    setVoiceStatus("recorded");
-    setVoiceInterim("");
-    setVoiceMessage("已上传录音，可补录文字。");
-    setSyncStatus("已选择录音文件，请补录文字后分析");
-    event.target.value = "";
-  }
-
   useEffect(() => () => {
     if (recognitionRef.current) {
       try {
         recognitionRef.current.abort();
       } catch {}
     }
-    if (mediaRecorderRef.current?.state === "recording") {
-      try {
-        mediaRecorderRef.current.stop();
-      } catch {}
-    }
-    stopMediaTracks();
-    if (voiceAudioUrlRef.current) URL.revokeObjectURL(voiceAudioUrlRef.current);
     recognitionRef.current = null;
-    mediaRecorderRef.current = null;
   }, []);
+
+  useEffect(() => {
+    if (!routeHistoryId || routeHistoryId === selectedHistoryId) return;
+    const routedItem = quickRecords.find((record) => record.id === routeHistoryId);
+    if (routedItem) loadHistoricalRecord(routedItem);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeHistoryId, quickRecords, selectedHistoryId]);
 
   async function confirmAnalysis() {
     if (!recordText.trim()) {
@@ -1018,12 +855,16 @@ export function QuickRecord({
 
   function switchToTextRecord() {
     if (recognitionRef.current) stopVoiceRecognition();
-    if (mediaRecorderRef.current) stopVoiceRecognition();
     setRecordMode("text");
     setVoiceStatus("idle");
     setVoiceInterim("");
     setVoiceMessage("已切换文本录入。");
     resetAnalysis("请继续在记录框内录入内容");
+  }
+
+  function startNewRecordFromUi() {
+    startBlankRecord();
+    if (onHistoryRoute && routeHistoryId) onHistoryRoute(null);
   }
 
   const historyItems = quickRecords.map((item) => ({ item, view: quickRecordHistoryView(item) }));
@@ -1081,25 +922,16 @@ export function QuickRecord({
               <small>{visibleVoiceMessage}</small>
             </div>
             {voiceInterim ? <p className="voice-interim">正在识别：{voiceInterim}</p> : null}
-            {voiceAudio ? (
-              <div className="voice-audio-card" data-testid="voice-audio-card">
-                <audio controls src={voiceAudio.url} aria-label="语音记录录音回放" />
-                <a className="ghost-button" href={voiceAudio.url} download={voiceAudio.name}>
-                  <Download size={15} />
-                  下载录音
-                </a>
-              </div>
-            ) : null}
             <div className="voice-controls">
               {!voiceUnavailable ? (
                 <button
                   className="primary-button"
                   type="button"
-                  onClick={shouldRecordInsteadOfTranscribe ? startVoiceAudioCapture : startVoiceRecognition}
+                  onClick={startVoiceRecognition}
                   disabled={voiceStatus === "listening"}
                 >
                   <Mic size={15} />
-                  {voicePrimaryLabel}
+                  开始转写
                 </button>
               ) : null}
               {voiceStatus === "listening" ? (
@@ -1109,23 +941,9 @@ export function QuickRecord({
                   onClick={stopVoiceRecognition}
                 >
                   <CircleStop size={15} />
-                  {isAudioCaptureMode ? "停止录音" : "停止转写"}
+                  停止转写
                 </button>
               ) : null}
-              <label
-                className={`${voiceUnavailable ? "primary-button" : "ghost-button"} voice-file-button`}
-                data-testid="voice-upload-control"
-              >
-                <FileText size={15} />
-                上传录音
-                <input
-                  accept="audio/*"
-                  aria-label="上传录音"
-                  capture="microphone"
-                  onChange={handleVoiceFileChange}
-                  type="file"
-                />
-              </label>
               <button className="ghost-button" type="button" onClick={switchToTextRecord}>
                 <MessageSquareText size={15} />
                 改用文本
@@ -1164,7 +982,7 @@ export function QuickRecord({
             className="ghost-button"
             type="button"
             data-testid="new-quick-record"
-            onClick={startBlankRecord}
+            onClick={startNewRecordFromUi}
           >
             <Plus size={16} />
             新建记录
@@ -1224,6 +1042,25 @@ export function QuickRecord({
               />
             ))}
           </div>
+          {Array.isArray(analysis.knowledgeRefs) && analysis.knowledgeRefs.length > 0 ? (
+            <div className="analysis-knowledge-refs" data-testid="analysis-knowledge-refs">
+              <span className="knowledge-refs-title">参考知识（来自知识库）</span>
+              <div className="knowledge-refs-list">
+                {analysis.knowledgeRefs.map((ref) => (
+                  <button
+                    key={ref.id}
+                    className="ghost-button"
+                    type="button"
+                    data-testid="analysis-knowledge-ref"
+                    onClick={() => setActive("knowledge", { mode: "detail", entityId: ref.id })}
+                  >
+                    <FileText size={14} />
+                    {ref.title || ref.id}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="composer-actions analysis-save-actions">
             <button
               className={analysisDirty ? "primary-button" : "ghost-button"}
@@ -1319,7 +1156,10 @@ export function QuickRecord({
               className={`list-button record-note tone-rail-${view.tone} ${selectedHistoryId === item.id ? "selected" : ""}`}
               key={item.id}
               type="button"
-              onClick={() => loadHistoricalRecord(item)}
+              onClick={() => {
+                if (onHistoryRoute) onHistoryRoute(item.id);
+                else loadHistoricalRecord(item);
+              }}
             >
               <span className={`date-chip ${statusTone[view.tone]}`}>
                 <b>{view.day}</b>

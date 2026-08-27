@@ -121,6 +121,59 @@ describe("model-backed quick record analysis", () => {
     assert.equal(result.customer.id, "huangdao-tcm");
   });
 
+  it("injects retrieved knowledge into the prompt and appends server-side knowledge refs", async () => {
+    const calls = [];
+    const result = await analyzeQuickRecord("日照中医医院需要移动云双活方案", {
+      aiAnalysisMode: "model",
+      modelProvider: "deepseek",
+      modelApiKey: "fixture",
+      modelName: "deepseek-v4-flash",
+    }, {
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return jsonResponse({ choices: [{ message: { content: modelContent() } }] });
+      },
+      knowledgeItems: [
+        { id: "kn-mobile-cloud", title: "移动云双活方案要点", summary: "双活机房与计费策略。" },
+        { id: "kn-hospital-case", title: "医院行业成功案例", summary: "地市医院上云案例。" },
+      ],
+    });
+
+    assert.equal(calls.length, 1);
+    const body = JSON.parse(calls[0].options.body);
+    const systemMessage = body.messages.find((message) => message.role === "system");
+    assert.match(systemMessage.content, /知识库条目/);
+    assert.match(systemMessage.content, /kn-mobile-cloud/);
+    assert.match(systemMessage.content, /移动云双活方案要点/);
+    assert.deepEqual(result.knowledgeRefs, [
+      { type: "knowledge", id: "kn-mobile-cloud", title: "移动云双活方案要点" },
+      { type: "knowledge", id: "kn-hospital-case", title: "医院行业成功案例" },
+    ]);
+  });
+
+  it("keeps knowledge refs on deterministic mock analysis and omits them without retrieval", async () => {
+    let called = false;
+    const mockResult = await analyzeQuickRecord("黄岛区中医院下周带售前做双活机房调研", {
+      aiAnalysisMode: "mock",
+    }, {
+      fetchImpl: async () => {
+        called = true;
+        throw new Error("must not call model in mock mode");
+      },
+      knowledgeItems: [{ id: "kn-dual-active", title: "双活机房调研清单", summary: "调研问题列表。" }],
+    });
+    assert.equal(called, false);
+    assert.equal(mockResult.source, "mock");
+    assert.deepEqual(mockResult.knowledgeRefs, [
+      { type: "knowledge", id: "kn-dual-active", title: "双活机房调研清单" },
+    ]);
+
+    const plainResult = await analyzeQuickRecord("黄岛区中医院下周带售前做双活机房调研", {
+      aiAnalysisMode: "mock",
+    }, {});
+    assert.equal(Object.hasOwn(plainResult, "knowledgeRefs"), false);
+  });
+
   it("rejects model JSON that is missing the required summary structure", () => {
     const invalid = JSON.parse(modelContent());
     invalid.summary.request = { title: "客户诉求" };

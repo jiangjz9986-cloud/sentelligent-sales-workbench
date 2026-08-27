@@ -1753,6 +1753,39 @@ function searchKnowledgeItems(db, { query = "", tags = [], limit = 8 } = {}) {
     .map((entry) => entry.item);
 }
 
+function searchKnowledgeForAnalysis(db, rawText, limit = 4) {
+  const text = String(rawText ?? "").toLowerCase();
+  if (!text.trim()) return [];
+  const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL ORDER BY updated_at DESC")
+    .map(knowledgeFromRow);
+  const maxItems = Math.max(1, Math.min(Number(limit) || 4, 8));
+  return rows
+    .map((item) => {
+      const exactNeedles = new Set();
+      const partialNeedles = new Set();
+      for (const term of splitSearchTerms(item.title, item.category, ...(item.tags ?? []))) {
+        exactNeedles.add(term);
+        if (term.length > 4 && /[\u4e00-\u9fff]/.test(term)) {
+          for (let index = 0; index + 4 <= term.length; index += 2) {
+            partialNeedles.add(term.slice(index, index + 4));
+          }
+        }
+      }
+      let score = 0;
+      for (const needle of exactNeedles) {
+        if (text.includes(needle)) score += 3;
+      }
+      for (const needle of partialNeedles) {
+        if (!exactNeedles.has(needle) && text.includes(needle)) score += 1;
+      }
+      return { item, score };
+    })
+    .filter((entry) => entry.score >= 2)
+    .sort((a, b) => b.score - a.score || a.item.title.localeCompare(b.item.title, "zh-Hans-CN"))
+    .slice(0, maxItems)
+    .map((entry) => entry.item);
+}
+
 function normalizeKnowledgeIds(value) {
   if (value === undefined) return [];
   if (!Array.isArray(value)) return null;
@@ -2474,10 +2507,11 @@ function buildSalesDecisionContext(db, body) {
       { $customerId: customerId, $opportunityId: opportunityId },
     ).map(riskFromRow)
     : [];
-  const knowledge = searchKnowledgeItems(db, {
-    query: [customer?.name, opportunity?.name, rawContent].filter(Boolean).join(" "),
-    limit: 6,
-  });
+  const knowledge = searchKnowledgeForAnalysis(
+    db,
+    [customer?.name, opportunity?.name, rawContent].filter(Boolean).join(" "),
+    6,
+  );
 
   return {
     analysisType: body.analysisType ?? "opportunity_diagnosis",
@@ -6250,8 +6284,10 @@ export function createServer(options = {}) {
         const body = await readValidatedJson(request, requestSchemas.quickRecordPreview);
         const rawContent = String(body.rawContent ?? "").trim();
 
+        const analysisKnowledge = searchKnowledgeForAnalysis(db, rawContent, 4);
         const analysis = await analyzeQuickRecord(rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
+          knowledgeItems: analysisKnowledge,
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
 
@@ -6330,8 +6366,10 @@ export function createServer(options = {}) {
         );
         if (!quickRecord) return notFound(response);
 
+        const analysisKnowledge = searchKnowledgeForAnalysis(db, quickRecord.rawContent, 4);
         const analysis = await analyzeQuickRecord(quickRecord.rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
+          knowledgeItems: analysisKnowledge,
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
 

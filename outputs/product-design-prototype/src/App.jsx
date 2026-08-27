@@ -380,6 +380,7 @@ const ROUTE_BY_ACTIVE = Object.freeze({
   weixin: Object.freeze({ page: "settings/weixin", mode: "index" }),
   "settings-notifications": Object.freeze({ page: "settings/notifications", mode: "index" }),
   "settings-tender-schedule": Object.freeze({ page: "settings/tender-schedule", mode: "index" }),
+  solution: Object.freeze({ page: "solutions", mode: "list" }),
 });
 
 const ACTIVE_BY_ROUTE_PAGE = Object.freeze({
@@ -528,9 +529,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const [selectedRiskId, setSelectedRiskId] = useState(() => (
     initialRoute?.page === "risks" ? initialRoute?.entityId : null
   ));
-  const [selectedKnowledgeId, setSelectedKnowledgeId] = useState(null);
-  const [selectedSolutionId, setSelectedSolutionId] = useState(null);
-  const [selectedItineraryId, setSelectedItineraryId] = useState(null);
+  const [selectedKnowledgeId, setSelectedKnowledgeId] = useState(() => (
+    initialRoute?.page === "knowledge" ? initialRoute?.entityId ?? null : null
+  ));
+  const [selectedSolutionId, setSelectedSolutionId] = useState(() => (
+    initialRoute?.page === "solutions" ? initialRoute?.entityId ?? null : null
+  ));
+  const [selectedItineraryId, setSelectedItineraryId] = useState(() => (
+    initialRoute?.page === "itineraries" ? initialRoute?.entityId ?? null : null
+  ));
   const [customerViewMode, setCustomerViewMode] = useState(() => editorModeFromRoute(initialRoute, "customers"));
   const [opportunityViewMode, setOpportunityViewMode] = useState(() => editorModeFromRoute(initialRoute, "opportunities"));
   const [actionViewMode, setActionViewMode] = useState(() => editorModeFromRoute(initialRoute, "actions"));
@@ -541,6 +548,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const selectedOpportunityIdRef = useRef(selectedOpportunityId);
   const selectedActionIdRef = useRef(selectedActionId);
   const selectedRiskIdRef = useRef(selectedRiskId);
+  const selectedKnowledgeIdRef = useRef(selectedKnowledgeId);
+  const selectedItineraryIdRef = useRef(selectedItineraryId);
   const [recordMode, setRecordMode] = useState("voice");
   const [recordText, setRecordText] = useState("");
   const [analysisVisible, setAnalysisVisible] = useState(false);
@@ -618,8 +627,51 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         setSelectedRiskId(route.entityId);
       }
     }
-    if (route?.page === "knowledge") setKnowledgeViewMode(editorModeFromRoute(route, "knowledge"));
-    if (route?.page === "itineraries") setItineraryViewMode(editorModeFromRoute(route, "itineraries"));
+    if (route?.page === "knowledge") {
+      setKnowledgeViewMode(editorModeFromRoute(route, "knowledge"));
+      if (route.entityId) {
+        selectedKnowledgeIdRef.current = route.entityId;
+        setSelectedKnowledgeId(route.entityId);
+      }
+    }
+    if (route?.page === "itineraries") {
+      setItineraryViewMode(editorModeFromRoute(route, "itineraries"));
+      if (route.entityId) {
+        selectedItineraryIdRef.current = route.entityId;
+        setSelectedItineraryId(route.entityId);
+      }
+    }
+    if (route?.page === "solutions" && route.entityId) {
+      setSelectedSolutionId(route.entityId);
+    }
+  }
+
+  function findContentElement() {
+    if (typeof document === "undefined") return null;
+    return workspaceRef.current?.querySelector?.(".content") ?? document.querySelector(".content");
+  }
+
+  function rememberContentScrollPosition() {
+    if (typeof window === "undefined") return;
+    const scrollTop = findContentElement()?.scrollTop ?? 0;
+    const currentState = window.history.state;
+    const nextState = currentState && typeof currentState === "object"
+      ? { ...currentState, contentScrollTop: scrollTop }
+      : { contentScrollTop: scrollTop };
+    window.history.replaceState(nextState, "", `${window.location.pathname}${window.location.search}`);
+  }
+
+  function restoreContentScrollPosition(scrollTop) {
+    if (typeof window === "undefined") return;
+    const applyScroll = () => {
+      const content = findContentElement();
+      if (content) content.scrollTop = scrollTop;
+    };
+    if (typeof window.requestAnimationFrame !== "function") {
+      applyScroll();
+      return;
+    }
+    window.requestAnimationFrame(() => window.requestAnimationFrame(applyScroll));
   }
 
   function writeBrowserRoute(route, { replace = false } = {}) {
@@ -627,13 +679,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const url = buildWorkbenchUrl(route);
     const currentUrl = `${window.location.pathname}${window.location.search}`;
     const shouldReplace = replace || currentUrl === url;
+    if (!shouldReplace) rememberContentScrollPosition();
     window.history[shouldReplace ? "replaceState" : "pushState"](route, "", url);
+    if (!shouldReplace) restoreContentScrollPosition(0);
   }
 
   function navigateTo(nextActive, { filters = {}, entityId, mode } = {}) {
     const baseRoute = ROUTE_BY_ACTIVE[nextActive];
     if (!baseRoute) return;
-    if (nextActive === "quick") setRecordMode("voice");
+    if (nextActive === "quick" && (mode ?? baseRoute.mode) !== "history") setRecordMode("voice");
     const route = {
       ...baseRoute,
       ...(mode ? { mode } : {}),
@@ -647,7 +701,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
     if (initialRoute?.replace) writeBrowserRoute(initialRoute, { replace: true });
-    const onPopState = () => {
+    const onPopState = (event) => {
       const route = parseWorkbenchRoute({
         pathname: window.location.pathname,
         search: window.location.search,
@@ -655,6 +709,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       });
       applyWorkbenchRoute(route);
       if (route.replace) writeBrowserRoute(route, { replace: true });
+      const restoredScrollTop = typeof event?.state?.contentScrollTop === "number"
+        ? event.state.contentScrollTop
+        : 0;
+      restoreContentScrollPosition(restoredScrollTop);
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -665,7 +723,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     selectedOpportunityIdRef.current = selectedOpportunityId;
     selectedActionIdRef.current = selectedActionId;
     selectedRiskIdRef.current = selectedRiskId;
-  }, [selectedActionId, selectedCustomerId, selectedOpportunityId, selectedRiskId]);
+    selectedKnowledgeIdRef.current = selectedKnowledgeId;
+    selectedItineraryIdRef.current = selectedItineraryId;
+  }, [selectedActionId, selectedCustomerId, selectedItineraryId, selectedKnowledgeId, selectedOpportunityId, selectedRiskId]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !workspaceRef.current) return;
@@ -745,9 +805,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         setSelectedRiskId((current) => (
           nextState.risks.some((item) => item.id === current) ? current : nextState.risks[0]?.id ?? null
         ));
-        setSelectedKnowledgeId(nextState.knowledge[0]?.id ?? null);
-        setSelectedSolutionId(nextState.solutionDocs[0]?.id ?? null);
-        setSelectedItineraryId(nextState.itineraries[0]?.id ?? null);
+        setSelectedKnowledgeId((current) => (
+          nextState.knowledge.some((item) => item.id === current) ? current : nextState.knowledge[0]?.id ?? null
+        ));
+        setSelectedSolutionId((current) => (
+          nextState.solutionDocs.some((item) => item.id === current) ? current : nextState.solutionDocs[0]?.id ?? null
+        ));
+        setSelectedItineraryId((current) => (
+          nextState.itineraries.some((item) => item.id === current) ? current : nextState.itineraries[0]?.id ?? null
+        ));
         setBackendStatus("connected");
       })
       .catch((error) => {
@@ -815,10 +881,16 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const selectedRisk = selectedRiskRecord ?? (
     active !== "risk" || riskViewMode === "list" ? scopedRisks[0] : null
   );
-  const selectedKnowledge =
-    workbenchKnowledge.find((item) => item.id === selectedKnowledgeId) ?? workbenchKnowledge[0];
+  const knowledgeLookupId = active === "knowledge" && routeEntityId ? routeEntityId : selectedKnowledgeId;
+  const selectedKnowledgeRecord = workbenchKnowledge.find((item) => item.id === knowledgeLookupId) ?? null;
+  const selectedKnowledge = selectedKnowledgeRecord ?? (
+    active !== "knowledge" || knowledgeViewMode === "list" || knowledgeViewMode === "create"
+      ? workbenchKnowledge[0]
+      : null
+  );
+  const itineraryLookupId = active === "itinerary" && routeEntityId ? routeEntityId : selectedItineraryId;
   const selectedItinerary =
-    workbenchItineraries.find((item) => item.id === selectedItineraryId) ?? null;
+    workbenchItineraries.find((item) => item.id === itineraryLookupId) ?? null;
   const headingContext = resolveHeadingContext({
     active,
     customerViewMode,
@@ -866,6 +938,16 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setSelectedRiskId(riskId);
   }
 
+  function selectKnowledge(knowledgeId) {
+    selectedKnowledgeIdRef.current = knowledgeId;
+    setSelectedKnowledgeId(knowledgeId);
+  }
+
+  function selectItinerary(itineraryId) {
+    selectedItineraryIdRef.current = itineraryId;
+    setSelectedItineraryId(itineraryId);
+  }
+
   function changeCustomerViewMode(mode) {
     setCustomerViewMode(mode);
     const entityId = selectedCustomerIdRef.current;
@@ -894,6 +976,44 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const entityId = selectedRiskIdRef.current;
     if (mode === "list") navigateTo("risk", { filters: routeFilters });
     else if (entityId) navigateTo("risk", { mode, entityId, filters: routeFilters });
+  }
+
+  function changeKnowledgeViewMode(mode) {
+    setKnowledgeViewMode(mode);
+    const entityId = selectedKnowledgeIdRef.current;
+    if (mode === "list") navigateTo("knowledge");
+    else if (mode === "create") navigateTo("knowledge", { mode: "new" });
+    else if (entityId) navigateTo("knowledge", { mode, entityId });
+  }
+
+  function openItineraryDetail(itineraryId) {
+    if (!itineraryId) return;
+    selectItinerary(itineraryId);
+    navigateTo("itinerary", { mode: "detail", entityId: itineraryId });
+  }
+
+  function openItineraryCreate() {
+    selectItinerary(null);
+    navigateTo("itinerary", { mode: "new" });
+  }
+
+  function openItineraryList() {
+    navigateTo("itinerary");
+  }
+
+  function openItineraryEdit() {
+    const entityId = selectedItineraryIdRef.current;
+    if (entityId) navigateTo("itinerary", { mode: "edit", entityId });
+  }
+
+  function openQuickHistoryRoute(recordId) {
+    if (recordId) {
+      navigateTo("quick", { mode: "history", entityId: recordId });
+      return;
+    }
+    const route = { ...ROUTE_BY_ACTIVE.quick, filters: {} };
+    applyWorkbenchRoute(route);
+    writeBrowserRoute(route);
   }
 
   function openCustomerDetail(customerId) {
@@ -986,7 +1106,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const currentEntity = draft.id ? workbenchKnowledge.find((item) => item.id === draft.id) : null;
     const saved = await apiClient.saveKnowledgeItem(currentEntity ? { ...draft, version: currentEntity.version } : draft);
     setWorkbenchKnowledge((current) => mergeById(current, saved));
-    setSelectedKnowledgeId(saved.id);
+    selectKnowledge(saved.id);
     return saved;
   }
 
@@ -1088,8 +1208,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     ensureBackend("保存拜访行程");
     const saved = await apiClient.saveVisitItinerary(draft);
     setWorkbenchItineraries((current) => mergeById(current, saved));
-    setSelectedItineraryId(saved.id);
-    setItineraryViewMode("detail");
+    selectItinerary(saved.id);
+    navigateTo("itinerary", { mode: "detail", entityId: saved.id });
     return saved;
   }
 
@@ -1101,8 +1221,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       selectedItinerary.version,
     );
     setWorkbenchItineraries((current) => removeEntityById(current, selectedItinerary.id));
-    setSelectedItineraryId(null);
-    setItineraryViewMode("list");
+    selectItinerary(null);
+    navigateTo("itinerary");
     return deleted;
   }
 
@@ -1126,7 +1246,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       setWeeklyDraft(draft);
       setWeeklyDraftText(draft.content);
       setWeeklyView("summary");
-      setActive("weekly");
+      navigateTo("weekly");
       return draft;
     }
 
@@ -1224,6 +1344,12 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   const riskEntityUnavailable = active === "risk"
     && ["detail", "edit"].includes(riskViewMode)
     && !selectedRisk;
+  const knowledgeEntityUnavailable = active === "knowledge"
+    && ["detail", "edit"].includes(knowledgeViewMode)
+    && !selectedKnowledge;
+  const itineraryEntityUnavailable = active === "itinerary"
+    && ["detail", "edit"].includes(itineraryViewMode)
+    && !selectedItinerary;
   const customerContextUnavailable = Boolean(
     active === "hospital-tenders"
     && tenderCustomerId
@@ -1402,6 +1528,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 customersList={workbenchCustomers}
                 opportunitiesList={workbenchOpportunities}
                 quickRecords={workbenchQuickRecords}
+                routeHistoryId={routeEntityId}
+                onHistoryRoute={openQuickHistoryRoute}
               />
             )}
             {active === "customer" && (
@@ -1457,21 +1585,17 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             )}
             {active === "itinerary" && (
-              <VisitItineraryPage
+              itineraryEntityUnavailable ? (
+                <EntityUnavailablePanel label="行程" onBack={() => navigateTo("itinerary")} />
+              ) : <VisitItineraryPage
                 items={workbenchItineraries}
                 selected={selectedItinerary}
                 customers={workbenchCustomers}
                 viewMode={itineraryViewMode}
-                onOpen={(id) => {
-                  setSelectedItineraryId(id);
-                  setItineraryViewMode("detail");
-                }}
-                onCreate={() => {
-                  setSelectedItineraryId(null);
-                  setItineraryViewMode("new");
-                }}
-                onBack={() => setItineraryViewMode("list")}
-                onEdit={() => setItineraryViewMode("edit")}
+                onOpen={openItineraryDetail}
+                onCreate={openItineraryCreate}
+                onBack={openItineraryList}
+                onEdit={openItineraryEdit}
                 onSave={handleSaveItinerary}
                 onDelete={handleDeleteItinerary}
               />
@@ -1488,7 +1612,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
             {active === "solution" && (
               <SolutionPage
                 selected={selectedDoc}
-                onSelect={setSelectedSolutionId}
+                onSelect={(id) => {
+                  setSelectedSolutionId(id);
+                  navigateTo("solution", { mode: "detail", entityId: id });
+                }}
                 solutionDocs={workbenchSolutionDocs}
               />
             )}
@@ -1519,12 +1646,14 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             )}
             {active === "knowledge" && (
-              <KnowledgePage
+              knowledgeEntityUnavailable ? (
+                <EntityUnavailablePanel label="知识" onBack={() => navigateTo("knowledge")} />
+              ) : <KnowledgePage
                 items={workbenchKnowledge}
                 selected={selectedKnowledge}
-                onSelect={setSelectedKnowledgeId}
+                onSelect={selectKnowledge}
                 viewMode={knowledgeViewMode}
-                setViewMode={setKnowledgeViewMode}
+                setViewMode={changeKnowledgeViewMode}
                 onSaveKnowledge={handleSaveKnowledge}
                 onDeleteKnowledge={handleDeleteKnowledge}
                 onSearchKnowledge={handleSearchKnowledge}

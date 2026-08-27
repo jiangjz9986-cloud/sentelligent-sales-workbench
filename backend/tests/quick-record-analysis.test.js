@@ -391,4 +391,46 @@ describe("persisted quick-record analysis", () => {
       assert.deepEqual(after.audits, []);
     });
   });
+
+  it("retrieves matching knowledge, persists knowledge refs, and keeps them after summary edits", async () => {
+    await withHarness({}, async ({ request }) => {
+      const knowledge = await request("/api/knowledge", {
+        method: "POST",
+        body: JSON.stringify({
+          title: "量子加密隧道专项方案",
+          category: "方案",
+          tags: ["量子加密隧道"],
+          summary: "面向医院专网的量子加密隧道设计要点。",
+          content: "量子加密隧道的部署步骤与计费模式说明。",
+          source: "售前沉淀",
+        }),
+      });
+      assert.equal(knowledge.response.status, 201);
+      const knowledgeId = knowledge.body.item.id;
+      const expectedRefs = [{ type: "knowledge", id: knowledgeId, title: "量子加密隧道专项方案" }];
+
+      const created = await request("/api/quick-records", {
+        method: "POST",
+        body: JSON.stringify({ rawContent: "客户询问量子加密隧道方案的落地路径和预算。" }),
+      });
+      assert.equal(created.response.status, 201);
+
+      const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+      assert.equal(analyzed.response.status, 201);
+      assert.deepEqual(analyzed.body.item.knowledgeRefs, expectedRefs);
+
+      const listed = await request("/api/quick-records");
+      assert.equal(listed.response.status, 200);
+      const persisted = listed.body.items.find((item) => item.id === created.body.item.id);
+      assert.deepEqual(persisted.analysis.knowledgeRefs, expectedRefs);
+
+      const patched = await request(`/api/quick-records/${created.body.item.id}/analysis`, {
+        method: "PATCH",
+        headers: { "If-Match": `"${analyzed.body.quickRecord.version}"` },
+        body: JSON.stringify(summaryPatch("人工修订后的诉求")),
+      });
+      assert.equal(patched.response.status, 200);
+      assert.deepEqual(patched.body.analysis.knowledgeRefs, expectedRefs);
+    });
+  });
 });
