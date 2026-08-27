@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-27
+
+### 小小助手：医院招标微信推送与白天轮巡窗口
+
+- 医院招标监测通知改为经微信助手"小小"主动推送：复用既有微信确认 outbox（幂等键 `hospital-tender:cycle:{n}:chunk:{i}:{内容哈希}`、租约重试、单实例投递、绑定本人私聊），有新的高相关公告才推送、无新公告不打扰；PushPlus 仅在微信投递未绑定时作为兜底通道保留。
+- 新增前向迁移 `0026_hospital_tender_active_window`：轮巡调度器增加 Asia/Shanghai 活动窗口（默认 9–20 点），窗口外不采集不推送，`next_run_at` 自动跳到下一窗口起点；`--force` 手动运行不受窗口限制。调度器 PATCH API 支持 `activeStartHour`/`activeEndHour`（0–23/1–24，start<end fail-closed），窗口或间隔变更即时生效。
+- 推送文案为有界纯文本分片（每条最多 20 条公告），payload 不含 token/密钥/正文以外内容；渲染 fail-closed，未知 outbox kind 行为不变，快捷记账链路不受影响。
+- 后端全量 1029 项、迁移与调度窗口回归、根发布测试全部通过；生产切换后需用 PATCH 将 `intervalMinutes` 设为 `120` 以启用"每 2 小时"节奏；按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.6.28] - 2026-08-27
 
 ### 差旅报销界面重设计
