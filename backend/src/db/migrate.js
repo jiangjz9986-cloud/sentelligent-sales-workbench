@@ -26,6 +26,7 @@ import { apply as applyAssistantAgentRuns } from "./migrations/0022_assistant_ag
 import { apply as applyAssistantBusinessContext } from "./migrations/0023_assistant_business_context.mjs";
 import { apply as applyShortcutAdvanceAllocation } from "./migrations/0024_shortcut_advance_allocation.mjs";
 import { apply as applyTravelExpenseRegionProfiles } from "./migrations/0025_travel_expense_region_profiles.mjs";
+import { apply as applyHospitalTenderActiveWindow } from "./migrations/0026_hospital_tender_active_window.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -171,6 +172,12 @@ const migrations = [
     path: resolve(here, "migrations", "0025_travel_expense_region_profiles.mjs"),
     type: "module",
     apply: applyTravelExpenseRegionProfiles,
+  },
+  {
+    version: "0026",
+    path: resolve(here, "migrations", "0026_hospital_tender_active_window.mjs"),
+    type: "module",
+    apply: applyHospitalTenderActiveWindow,
   },
 ];
 

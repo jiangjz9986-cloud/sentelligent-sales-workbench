@@ -47,6 +47,30 @@ function addMinutes(isoDate, minutes) {
   return new Date(Date.parse(isoDate) + minutes * 60_000).toISOString();
 }
 
+const SHANGHAI_UTC_OFFSET_MS = 8 * 3_600_000;
+
+/**
+ * Milliseconds to wait until the Asia/Shanghai active window `[start, end)`
+ * opens. Returns 0 when the window is currently open or the persisted bounds
+ * are unusable (fail-open keeps collection alive instead of silently halting).
+ */
+function activeWindowWaitMs(state, nowDate) {
+  const startHour = Number.isSafeInteger(state?.activeStartHour) ? state.activeStartHour : 9;
+  const endHour = Number.isSafeInteger(state?.activeEndHour) ? state.activeEndHour : 20;
+  if (startHour < 0 || startHour > 23 || endHour < 1 || endHour > 24 || startHour >= endHour) return 0;
+  const shanghai = new Date(nowDate.getTime() + SHANGHAI_UTC_OFFSET_MS);
+  const hour = shanghai.getUTCHours();
+  if (hour >= startHour && hour < endHour) return 0;
+  const shanghaiDayStartUtcMs = Date.UTC(
+    shanghai.getUTCFullYear(),
+    shanghai.getUTCMonth(),
+    shanghai.getUTCDate(),
+  ) - SHANGHAI_UTC_OFFSET_MS;
+  let windowStartMs = shanghaiDayStartUtcMs + startHour * 3_600_000;
+  if (windowStartMs <= nowDate.getTime()) windowStartMs += 24 * 3_600_000;
+  return windowStartMs - nowDate.getTime();
+}
+
 function collectorCustomers(customers) {
   const seenNames = new Set();
   return customers.flatMap((customer) => {
@@ -219,6 +243,14 @@ export function createHospitalTenderScheduler({
         return { status: "disabled", state: disabled };
       }
       const nowIso = startedAt;
+      const windowWaitMs = activeWindowWaitMs(current, now());
+      if (!force && windowWaitMs > 0) {
+        const waiting = repository.updateState({
+          lastStatus: "waiting",
+          nextRunAt: new Date(Date.parse(nowIso) + windowWaitMs).toISOString(),
+        });
+        return { status: "waiting", reason: "window", state: waiting };
+      }
       if (!force && current.nextRunAt && Date.parse(current.nextRunAt) > Date.parse(nowIso)) {
         return { status: "waiting", state: current };
       }

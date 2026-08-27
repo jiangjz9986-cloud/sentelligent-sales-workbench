@@ -91,7 +91,7 @@ function setup(db, options = {}) {
       : {}),
     intervalMinutes: 60,
     batchSize: 10,
-    clock: () => new Date("2026-08-17T00:00:00.000Z"),
+    clock: options.clock ?? (() => new Date("2026-08-17T00:00:00.000Z")),
     idFactory: (() => {
       let id = 100;
       return () => `scheduler-${++id}`;
@@ -541,6 +541,61 @@ describe("hospital tender scheduler", () => {
       assert.equal(second.status, "skipped");
       resolveRunner();
       assert.equal((await first).status, "success");
+    });
+  });
+
+  it("waits outside the Asia/Shanghai active window and resumes at the next window start", async () => {
+    await withDb(async (db) => {
+      // 2026-08-17T13:30:00Z is 21:30 in Asia/Shanghai, after the 9-20 window.
+      const { scheduler, schedulerRepository } = setup(db, {
+        clock: () => new Date("2026-08-17T13:30:00.000Z"),
+      });
+      const result = await scheduler.runNext();
+      assert.equal(result.status, "waiting");
+      assert.equal(result.reason, "window");
+      assert.equal(result.state.lastStatus, "waiting");
+      // Next window start is 09:00 Asia/Shanghai on 2026-08-18 = 01:00:00Z.
+      assert.equal(result.state.nextRunAt, "2026-08-18T01:00:00.000Z");
+      assert.equal(schedulerRepository.getState().nextRunAt, "2026-08-18T01:00:00.000Z");
+    });
+  });
+
+  it("runs inside the active window and honours force outside it", async () => {
+    await withDb(async (db) => {
+      // 2026-08-17T03:00:00Z is 11:00 in Asia/Shanghai, inside the window.
+      const inside = setup(db, { clock: () => new Date("2026-08-17T03:00:00.000Z") });
+      const insideResult = await inside.scheduler.runNext();
+      assert.equal(insideResult.status, "success");
+    });
+    await withDb(async (db) => {
+      // 22:00 Asia/Shanghai: a forced manual run must still collect.
+      const forced = setup(db, { clock: () => new Date("2026-08-17T14:00:00.000Z") });
+      const forcedResult = await forced.scheduler.runNext({ force: true });
+      assert.equal(forcedResult.status, "success");
+    });
+  });
+
+  it("persists and validates the configurable active window bounds", async () => {
+    await withDb(async (db) => {
+      const { schedulerRepository } = setup(db);
+      const defaults = schedulerRepository.getState();
+      assert.equal(defaults.activeStartHour, 9);
+      assert.equal(defaults.activeEndHour, 20);
+      const updated = schedulerRepository.updateState({ activeStartHour: 8, activeEndHour: 22 });
+      assert.equal(updated.activeStartHour, 8);
+      assert.equal(updated.activeEndHour, 22);
+      assert.throws(
+        () => schedulerRepository.updateState({ activeStartHour: 21, activeEndHour: 20 }),
+        /active window is invalid/,
+      );
+      assert.throws(
+        () => schedulerRepository.updateState({ activeStartHour: -1 }),
+        /activeStartHour/,
+      );
+      assert.throws(
+        () => schedulerRepository.updateState({ activeEndHour: 25 }),
+        /active window is invalid|activeEndHour/,
+      );
     });
   });
 });

@@ -157,6 +157,7 @@ import {
 } from "./hospitalTender/sync.js";
 import { createInternalHospitalTenderRunner } from "./hospitalTender/internalRunner.js";
 import { createHospitalTenderNotifier } from "./hospitalTender/notifier.js";
+import { createHospitalTenderWeixinNotifier } from "./hospitalTender/weixinNotifier.js";
 import {
   partialSchema,
   requestSchemas,
@@ -2602,9 +2603,7 @@ export function createServer(options = {}) {
       fallbackSuppressed: false,
     };
   };
-  const hospitalTenderNotifier = options.hospitalTenderNotifier !== undefined
-    ? options.hospitalTenderNotifier
-    : createHospitalTenderNotifier({
+  const hospitalTenderPushplusNotifier = createHospitalTenderNotifier({
         ...(secureSettingsRepository
           ? { tokenProvider: resolvePushplusToken }
           : { token: config.hospitalTenderPushplusToken }),
@@ -2625,9 +2624,46 @@ export function createServer(options = {}) {
           } catch {}
         },
       });
+  // WeChat "小小" push is the primary tender-notification channel. The
+  // shortcut-bookkeeping runtime and outbox repository are declared later in
+  // this scope, so readiness and the notifier itself resolve lazily at call
+  // time; PushPlus remains only as a fallback while the WeChat delivery scope
+  // is not bound.
+  const weixinTenderDeliveryReady = () => {
+    try {
+      return Boolean(
+        shortcutBookkeepingAssistantRuntime?.ready
+        && shortcutBookkeepingAssistantRuntime.isReadyFor(shortcutBookkeepingAssistantRuntime.owner),
+      );
+    } catch {
+      return false;
+    }
+  };
+  let hospitalTenderWeixinNotifierInstance = null;
+  const hospitalTenderWeixinNotify = async (batch) => {
+    if (!hospitalTenderWeixinNotifierInstance) {
+      hospitalTenderWeixinNotifierInstance = createHospitalTenderWeixinNotifier({
+        outboxRepository: weixinConfirmationOutboxRepository,
+        resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
+        resolveConversationId: () => shortcutBookkeepingAssistantRuntime.conversationFor(
+          shortcutBookkeepingAssistantRuntime.owner,
+        ),
+      });
+    }
+    return hospitalTenderWeixinNotifierInstance(batch);
+  };
+  const hospitalTenderNotifier = options.hospitalTenderNotifier !== undefined
+    ? options.hospitalTenderNotifier
+    : async (batch) => {
+      if (weixinTenderDeliveryReady()) return hospitalTenderWeixinNotify(batch);
+      if (hospitalTenderPushplusNotifier && resolvePushplusToken()) return hospitalTenderPushplusNotifier(batch);
+      throw new Error("notification unavailable");
+    };
   const hospitalTenderNotificationState = () => ({
-    status: hospitalTenderNotifier && resolvePushplusToken() ? "enabled" : "disabled",
-    provider: "pushplus",
+    status: weixinTenderDeliveryReady() || (hospitalTenderPushplusNotifier && resolvePushplusToken())
+      ? "enabled"
+      : "disabled",
+    provider: weixinTenderDeliveryReady() ? "weixin" : "pushplus",
   });
   const hospitalTenderScheduler = createHospitalTenderScheduler({
     db,
@@ -2643,7 +2679,7 @@ export function createServer(options = {}) {
     // cleared encrypted setting takes effect without restarting the scheduler.
     // A missing/cleared token disables delivery while allowing collection and
     // durable matching to continue normally.
-    notificationEnabled: () => Boolean(resolvePushplusToken()),
+    notificationEnabled: () => weixinTenderDeliveryReady() || Boolean(resolvePushplusToken()),
     clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
     ...(options.hospitalTenderSchedulerIdFactory
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
@@ -4105,12 +4141,39 @@ export function createServer(options = {}) {
           }
           patch.batchSize = body.batchSize;
         }
+        if (Object.hasOwn(body, "activeStartHour")) {
+          if (!Number.isSafeInteger(body.activeStartHour) || body.activeStartHour < 0 || body.activeStartHour > 23) {
+            throw new HttpError(422, "VALIDATION_ERROR", "activeStartHour 必须在 0-23 之间");
+          }
+          patch.activeStartHour = body.activeStartHour;
+        }
+        if (Object.hasOwn(body, "activeEndHour")) {
+          if (!Number.isSafeInteger(body.activeEndHour) || body.activeEndHour < 1 || body.activeEndHour > 24) {
+            throw new HttpError(422, "VALIDATION_ERROR", "activeEndHour 必须在 1-24 之间");
+          }
+          patch.activeEndHour = body.activeEndHour;
+        }
+        if (Object.hasOwn(patch, "activeStartHour") || Object.hasOwn(patch, "activeEndHour")) {
+          const currentWindowState = hospitalTenderSchedulerRepository.getState();
+          const nextStart = Object.hasOwn(patch, "activeStartHour")
+            ? patch.activeStartHour
+            : currentWindowState.activeStartHour;
+          const nextEnd = Object.hasOwn(patch, "activeEndHour")
+            ? patch.activeEndHour
+            : currentWindowState.activeEndHour;
+          if (nextStart >= nextEnd) {
+            throw new HttpError(422, "VALIDATION_ERROR", "activeStartHour 必须小于 activeEndHour");
+          }
+        }
         if (Object.keys(patch).length === 0) throw new HttpError(422, "VALIDATION_ERROR", "未提供可更新配置");
+        const windowChanged = Object.hasOwn(patch, "activeStartHour") || Object.hasOwn(patch, "activeEndHour");
         const item = hospitalTenderSchedulerRepository.updateState({
           ...patch,
-          ...(patch.enabled === false || Object.hasOwn(patch, "intervalMinutes") ? { nextRunAt: null } : {}),
+          ...(patch.enabled === false || Object.hasOwn(patch, "intervalMinutes") || windowChanged
+            ? { nextRunAt: null }
+            : {}),
         });
-        if (item.enabled && Object.hasOwn(patch, "intervalMinutes")) {
+        if (item.enabled && (Object.hasOwn(patch, "intervalMinutes") || windowChanged)) {
           hospitalTenderScheduler.stop();
           hospitalTenderScheduler.start();
         } else if (item.enabled && !hospitalTenderScheduler.isStarted()) {

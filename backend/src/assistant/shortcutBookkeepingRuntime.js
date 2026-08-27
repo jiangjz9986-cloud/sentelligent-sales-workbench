@@ -11,6 +11,7 @@ import {
 } from "../integrations/shortcutBookkeepingAssistant.js";
 import { parseShortcutBookkeepingIntent } from "../integrations/shortcutBookkeepingIntent.js";
 import { shortcutBookkeepingConversationId } from "../weixin/bookkeepingDeliveryScope.js";
+import { renderHospitalTenderNoticeMessage } from "../hospitalTender/weixinNotifier.js";
 import { buildAutomaticMealNote, buildBookkeepingAnalysis } from "./bookkeepingCapture.js";
 import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
 
@@ -1216,6 +1217,9 @@ export function createShortcutBookkeepingAssistantRuntime({
   function renderOutboxMessage(outboxItem) {
     const payload = outboxItem?.payload;
     if (!payload || typeof payload !== "object") throw new TypeError("outbox payload is invalid");
+    if (payload.kind === "hospital_tender_notice") {
+      return renderHospitalTenderNoticeMessage(payload);
+    }
     if (payload.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) {
       const row = db.prepare(`
         SELECT entry.id AS entry_id, entry.captured_at, entry.created_at,
