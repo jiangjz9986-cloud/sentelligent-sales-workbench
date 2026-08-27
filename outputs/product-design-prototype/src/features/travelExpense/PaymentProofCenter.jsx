@@ -37,9 +37,9 @@ const FUNDING_LABELS = {
   advance: "请款资金",
 };
 
-function paymentLabel(payment, index) {
+function paymentLabel(payment, index, expense) {
   const time = payment.paidAt ? formatTravelExpenseDateTime(payment.paidAt) : "时间待补";
-  const merchant = payment.merchant || "收款方待补";
+  const merchant = payment.merchant || expense?.merchant || "收款方待补";
   return `付款 ${index + 1} · ${merchant} · ${formatCny(payment.amountCents)} · ${time}`;
 }
 
@@ -211,11 +211,8 @@ export function PaymentProofCenter({
 
   return (
     <section className="expense-proof-center">
-      <header className="expense-section-intro">
-        <div>
-          <strong>付款凭证</strong>
-          <p>上传前先勾选凭证对应的付款记录；支持一张凭证关联一笔或多笔付款。</p>
-        </div>
+      <header className="expense-proof-center-note">
+        <p>上传前先勾选凭证对应的付款记录；支持一张凭证关联一笔或多笔付款。</p>
         <span>{proofCount} 份凭证</span>
       </header>
 
@@ -261,7 +258,7 @@ export function PaymentProofCenter({
 
                 <div className="expense-inbox-decision">
                   <label><span>账单编号</span><select value={selection.expenseId} onChange={(event) => chooseInboxExpense(item, event.target.value)}><option value="">请选择账单</option>{expenses.map((expense) => <option value={expense.id} key={expense.id}>{expense.referenceCode} · {expense.purpose}</option>)}</select></label>
-                  <label><span>付款记录</span><select value={selection.paymentId} disabled={!selectedExpense} onChange={(event) => { setInboxSelections((current) => ({ ...current, [item.id]: { ...selection, paymentId: event.target.value } })); setInboxErrors((current) => ({ ...current, [item.id]: "" })); }}><option value="">请选择付款</option>{selectedExpense?.payments.map((payment, index) => <option value={payment.id} key={payment.id}>{paymentLabel(payment, index)}</option>)}</select></label>
+                  <label><span>付款记录</span><select value={selection.paymentId} disabled={!selectedExpense} onChange={(event) => { setInboxSelections((current) => ({ ...current, [item.id]: { ...selection, paymentId: event.target.value } })); setInboxErrors((current) => ({ ...current, [item.id]: "" })); }}><option value="">请选择付款</option>{selectedExpense?.payments.map((payment, index) => <option value={payment.id} key={payment.id}>{paymentLabel(payment, index, selectedExpense)}</option>)}</select></label>
                   {inboxErrors[item.id] ? <p className="expense-inbox-error" role="alert"><CircleAlert size={15} />{inboxErrors[item.id]}</p> : null}
                   <div className="expense-inbox-actions">
                     <button type="button" className="primary" disabled={pending} onClick={() => void confirmInbox(item)}>{pending ? <LoaderCircle className="state-spinner" size={15} /> : <Check size={15} />}确认关联</button>
@@ -284,9 +281,11 @@ export function PaymentProofCenter({
             <article className="expense-proof-card" key={expense.id} data-proof-expense-id={expense.id} tabIndex={-1} aria-label={`${expense.referenceCode} 的付款凭证`}>
               <header className="expense-proof-card-head">
                 <div>
+                  <code>{expense.referenceCode}</code>
                   <span>{expense.occurredOn}</span>
                   <strong>{expense.purpose}</strong>
-                  <small>{formatCny(expense.reimbursementCents)} · {expense.payments.length} 笔付款 · {proofs.length} 份凭证</small>
+                  <b>{formatCny(expense.reimbursementCents)}</b>
+                  <small>{proofs.length} 份凭证</small>
                 </div>
                 <span className={proofs.length ? "is-ready" : "is-missing"}>{proofs.length ? "已有凭证" : "待上传"}</span>
               </header>
@@ -302,7 +301,7 @@ export function PaymentProofCenter({
                         onChange={() => togglePayment(expense, payment.id)}
                       />
                       <span>
-                        <strong>{paymentLabel(payment, index)}</strong>
+                        <strong>{paymentLabel(payment, index, expense)}</strong>
                         <small>{FUNDING_LABELS[payment.fundingSource] ?? payment.fundingSource} · 报销 {formatCny(payment.reimbursementCents)}</small>
                       </span>
                     </label>
@@ -312,10 +311,9 @@ export function PaymentProofCenter({
 
                 <div className="expense-proof-upload">
                   <label className="expense-upload-tile" data-enabled={selectedPaymentIds.length ? "true" : "false"} aria-disabled={!selectedPaymentIds.length || pending}>
-                    <Upload size={19} />
+                    <Upload size={17} />
                     <span>{pending ? "正在上传" : "上传付款凭证"}</span>
-                    <small>{selectedPaymentIds.length ? `已选 ${selectedPaymentIds.length} 笔付款` : "至少选择一笔付款"}</small>
-                    <small>图片 / PDF · 原文件最大 12 MiB</small>
+                    <small>{selectedPaymentIds.length ? `已选 ${selectedPaymentIds.length} 笔付款` : "至少选择一笔付款"} · 图片 / PDF · 原文件最大 12 MiB</small>
                     <input type="file"
                       accept="image/jpeg,image/png,image/webp,application/pdf"
                       disabled={!selectedPaymentIds.length || pending}

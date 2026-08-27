@@ -640,6 +640,9 @@ export function TravelExpensePage({
       ? <InvoicePrintPreview invoices={invoicePrintItems} week={week} owner={owner} getInvoiceContentUrl={apiClient.getInvoiceContentUrl} getInvoiceContentResponse={apiClient.getInvoiceContentResponse} onClose={closeInvoicePrint} />
       : null;
   const selectedWeekLoaded = loadedWeekStartRef.current === week.start;
+  const regionCalloutVisible = Boolean(selectedWeekLoaded && regionProfile
+    && !regionProfile.defaultCity && regionProfile.dateOverrides.length === 0);
+  const crossWeekVisible = selectedWeekLoaded && crossWeekReceipts.length > 0;
 
   return (
     <>
@@ -655,18 +658,22 @@ export function TravelExpensePage({
 
       <section className="expense-week-strip">
         <label><CalendarDays size={18} /><span>自然周</span><input type="week" value={isoWeekInput(week.start)} onChange={(event) => selectWeek(event.target.value)} /></label>
-        <div><small>当前范围</small><strong>{week.start}—{week.end}</strong></div>
-        <div><small>行程 / 说明</small><strong>{selectedWeekLoaded ? itineraryLabel : "正在同步"}</strong></div>
-        <div><small>费用与付款</small><strong>{selectedWeekLoaded ? `${summary.expenseCount} 条 · ${summary.paymentCount} 笔` : "—"}</strong></div>
+        <div className="expense-week-stat"><small>当前范围</small><strong>{week.start}—{week.end}</strong></div>
+        <div className="expense-week-stat"><small>行程 / 说明</small><strong>{selectedWeekLoaded ? itineraryLabel : "正在同步"}</strong></div>
+        <div className="expense-week-stat"><small>费用与付款</small><strong>{selectedWeekLoaded ? `${summary.expenseCount} 条 · ${summary.paymentCount} 笔` : "—"}</strong></div>
         <button className="icon-button" type="button" aria-label="重新加载本周费用" onClick={() => setReloadToken((value) => value + 1)}><RefreshCw size={17} /></button>
       </section>
 
-      {error ? <div className="expense-page-alert" role="alert"><CircleAlert size={18} /><span>{error}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重新加载</button></div> : null}
       <p className="sr-only" role="status" aria-live="polite">{locationAnnouncement}</p>
-      {locationFailure ? <div className="expense-page-alert is-warning" role="status" data-testid="ledger-location-failure"><CircleAlert size={18} /><span>未找到 {locationFailure.referenceCode}，账目可能尚未同步或已经变更。</span><button ref={locationFailureActionRef} className="ghost-button" type="button" onClick={retryLedgerLocation}>重新加载并定位</button></div> : null}
-      {auxiliaryWarning ? <div className="expense-page-alert is-warning" role="status"><CircleAlert size={18} /><span>{auxiliaryWarning}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重试辅助数据</button></div> : null}
-      {selectedWeekLoaded && regionProfile && !regionProfile.defaultCity && regionProfile.dateOverrides.length === 0 ? <div className="expense-page-alert is-warning expense-region-callout" role="status"><MapPin size={18} /><span>本周还没有设置出差区域。小小收到付款凭证后会先询问区域，设置后可直接按发生日期匹配。</span><button className="ghost-button" type="button" onClick={() => setRegionSettingsOpen(true)}>设置本周区域</button></div> : null}
-      {selectedWeekLoaded && crossWeekReceipts.length > 0 ? <div className="expense-page-alert expense-recent-receipt" role="status"><CheckCircle2 size={18} /><div><span>小小最近录入了其他自然周的账目：</span>{crossWeekReceipts.map((receipt) => <div className="expense-recent-receipt-row" key={`${receipt.expenseId}-${receipt.occurredOn}`}><span>{receipt.referenceCode} · {receipt.weekStart}{receipt.attachmentStatus === "pending" ? " · 付款凭证仍在关联中" : ""}</span><button className="ghost-button" type="button" onClick={() => locateRecentReceipt(receipt)}>查看这笔账目</button></div>)}</div></div> : null}
+      {error || locationFailure || auxiliaryWarning || regionCalloutVisible || crossWeekVisible ? (
+        <div className="expense-page-alerts">
+          {error ? <div className="expense-page-alert is-error" role="alert"><CircleAlert size={16} /><span>{error}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重新加载</button></div> : null}
+          {locationFailure ? <div className="expense-page-alert is-warning" role="status" data-testid="ledger-location-failure"><CircleAlert size={16} /><span>未找到 {locationFailure.referenceCode}，账目可能尚未同步或已经变更。</span><button ref={locationFailureActionRef} className="ghost-button" type="button" onClick={retryLedgerLocation}>重新加载并定位</button></div> : null}
+          {auxiliaryWarning ? <div className="expense-page-alert is-warning" role="status"><CircleAlert size={16} /><span>{auxiliaryWarning}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重试辅助数据</button></div> : null}
+          {regionCalloutVisible ? <div className="expense-page-alert is-warning expense-region-callout" role="status"><MapPin size={16} /><span>本周还没有设置出差区域。小小收到付款凭证后会先询问区域，设置后可直接按发生日期匹配。</span><button className="ghost-button" type="button" onClick={() => setRegionSettingsOpen(true)}>设置本周区域</button></div> : null}
+          {crossWeekVisible ? crossWeekReceipts.map((receipt) => <div className="expense-page-alert expense-recent-receipt" role="status" key={`${receipt.expenseId}-${receipt.occurredOn}`}><CheckCircle2 size={16} /><span className="expense-recent-receipt-copy">小小录入了其他自然周的账目<code>{receipt.referenceCode}</code><b>{receipt.weekStart} 当周</b>{receipt.attachmentStatus === "pending" ? <em>付款凭证仍在关联中</em> : null}</span><button className="ghost-button" type="button" onClick={() => locateRecentReceipt(receipt)}>查看这笔账目</button></div>) : null}
+        </div>
+      ) : null}
       {status === "loading" ? <div className="expense-loading" role="status"><LoaderCircle className="state-spinner" size={24} /><strong>正在读取本周费用</strong><p>费用、付款凭证、发票和借款到账记录正在同步。</p></div> : null}
 
       {status !== "loading" && selectedWeekLoaded ? (

@@ -72,12 +72,12 @@ function CategoryCopy({ item }) {
   const Icon = CATEGORY_ICONS[item.categoryId] ?? ReceiptText;
   return (
     <div className="ledger-workbench-category">
-      <Icon size={17} aria-hidden="true" />
-      <span>
+      <span className="ledger-workbench-category-main">
+        <Icon size={15} aria-hidden="true" />
         <strong>{item.categoryText}</strong>
-        <small>{item.notes}</small>
-        {item.region !== "—" ? <small className="ledger-workbench-region"><MapPin size={12} aria-hidden="true" />{item.region}<span>· {item.regionSourceLabel}</span></small> : null}
       </span>
+      <small>{item.notes}</small>
+      {item.region !== "—" ? <small className="ledger-workbench-region"><MapPin size={12} aria-hidden="true" />{item.region}<span>· {item.regionSourceLabel}</span></small> : null}
     </div>
   );
 }
@@ -222,17 +222,19 @@ function SummaryStrip({ summary, onOpenExpenseListPrint, onExportExpenseList, ex
     : summary.advanceBalanceState === "overspent" ? "超额个人垫付" : "借款已结平";
   return (
     <footer className="ledger-workbench-summary" aria-label="本周正式账本摘要">
-      <dl>
+      <dl className="ledger-workbench-summary-amounts">
         <div><dt>本周已确认支出</dt><dd>{formatCny(summary.formalExpenseCents)}</dd></div>
         <div><dt>可报销金额</dt><dd>{formatCny(summary.reimbursableCents)}</dd></div>
         <div className="is-income"><dt>借款收入</dt><dd>{formatCny(summary.advanceIncomeCents)}</dd></div>
         <div className={`is-${summary.advanceBalanceState}`}><dt>{balanceLabel}</dt><dd>{formatSignedCny(summary.advanceBalanceCents)}</dd></div>
-        <div><dt>凭证缺失</dt><dd>{summary.missingProofCount}</dd></div>
-        <div><dt>发票缺失</dt><dd>{summary.missingInvoiceCount}</dd></div>
+      </dl>
+      <dl className="ledger-workbench-summary-todos" aria-label="本周待补事项">
+        <div className={summary.missingProofCount > 0 ? "is-due-proof" : "is-clear"}><dt>凭证缺失</dt><dd>{summary.missingProofCount}</dd></div>
+        <div className={summary.missingInvoiceCount > 0 ? "is-due-invoice" : "is-clear"}><dt>发票缺失</dt><dd>{summary.missingInvoiceCount}</dd></div>
       </dl>
       <div className="ledger-workbench-output-actions" data-testid="ledger-reimbursement-actions">
-        <button type="button" data-testid="expense-list-print-trigger" onClick={() => onOpenExpenseListPrint?.()} disabled={typeof onOpenExpenseListPrint !== "function"}><ReceiptText size={17} aria-hidden="true" />打印费用清单</button>
-        <button type="button" onClick={() => onExportExpenseList?.()} disabled={typeof onExportExpenseList !== "function" || exporting}><FileCheck2 size={17} aria-hidden="true" />{exporting ? "生成 Excel 中" : "导出费用清单"}</button>
+        <button type="button" data-testid="expense-list-print-trigger" onClick={() => onOpenExpenseListPrint?.()} disabled={typeof onOpenExpenseListPrint !== "function"}><ReceiptText size={16} aria-hidden="true" />打印费用清单</button>
+        <button type="button" onClick={() => onExportExpenseList?.()} disabled={typeof onExportExpenseList !== "function" || exporting}><FileCheck2 size={16} aria-hidden="true" />{exporting ? "生成 Excel 中" : "导出费用清单"}</button>
       </div>
     </footer>
   );
@@ -339,9 +341,12 @@ export function ExpenseLedgerWorkbench({
               onClick={() => selectDay(day.date)}
               onKeyDown={(event) => handleDayKeyDown(event, index)}
             >
-              <span>{day.weekdayShort} <time dateTime={day.date}>{day.monthDay}</time>{day.isToday ? <b>今天</b> : null}</span>
-              <strong>{day.region}</strong>
-              <small>{day.formalCount} 条 / {day.pendingCount} 待</small>
+              <span className="ledger-workbench-day-head">{day.weekdayShort} <time dateTime={day.date}>{day.monthDay}</time>{day.isToday ? <b>今天</b> : null}</span>
+              <strong className="ledger-workbench-day-region" data-region-unset={day.region === "区域待确认" || undefined}>{day.region === "区域待确认" ? "—" : day.region}</strong>
+              <small className="ledger-workbench-day-counts">
+                <b data-count-zero={day.formalCount === 0 || undefined}>{day.formalCount} 条</b>
+                <b className="is-pending" data-count-zero={day.pendingCount === 0 || undefined}>{day.pendingCount} 待</b>
+              </small>
             </button>
           );
         })}
