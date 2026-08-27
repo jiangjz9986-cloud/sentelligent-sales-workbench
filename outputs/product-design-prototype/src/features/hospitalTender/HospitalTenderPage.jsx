@@ -1,6 +1,4 @@
 import {
-  BellRing,
-  CalendarClock,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -11,6 +9,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Search,
+  Settings2,
   Target,
   X,
 } from "lucide-react";
@@ -175,14 +174,6 @@ function formatSchedulerDate(value, fallback) {
   }).format(date);
 }
 
-function formatElapsed(value, fallback = "刚刚开始") {
-  const seconds = Math.max(0, Math.floor(Number(value) / 1000));
-  if (!Number.isFinite(seconds) || seconds <= 0) return fallback;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return minutes > 0 ? `${minutes} 分 ${String(remainder).padStart(2, "0")} 秒` : `${remainder} 秒`;
-}
-
 function relativeAge(value, now = Date.now()) {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return "时间待确认";
@@ -191,30 +182,6 @@ function relativeAge(value, now = Date.now()) {
   if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
   return `${Math.floor(seconds / 86400)} 天前`;
-}
-
-function runStatusTone(status) {
-  if (status === "success") return "success";
-  if (status === "partial") return "warning";
-  if (status === "failed") return "danger";
-  if (status === "disabled" || status === "idle" || status === "waiting") return "neutral";
-  return "blue";
-}
-
-function runStatusLabel(status) {
-  return {
-    idle: "等待首轮",
-    waiting: "等待下次轮巡",
-    running: "正在处理",
-    success: "最近一批成功",
-    partial: "最近一批部分完成",
-    failed: "最近一批失败",
-    disabled: "已停用",
-  }[status] ?? "状态待确认";
-}
-
-function notificationLabel(value) {
-  return value === "enabled" ? "已启用" : value === "disabled" ? "未配置" : "状态待确认";
 }
 
 function userFacingTenderError(value, fallback = "招标数据暂时不可用，请稍后重试。") {
@@ -456,42 +423,6 @@ function HealthSummary({ sources, health }) {
   );
 }
 
-function SchedulerProgress({ scheduler, busy = false, elapsedMs = 0, notification = null }) {
-  const state = scheduler?.item ?? scheduler ?? null;
-  const runs = Array.isArray(scheduler?.runs) ? scheduler.runs : [];
-  if (!state && !busy) return null;
-  const processedFromRuns = runs
-    .filter((run) => run.snapshotId && run.snapshotId === state?.snapshotId && ["success", "partial"].includes(run.status))
-    .reduce((total, run) => total + (Number(run.batchCount) || 0), 0);
-  const processed = Number.isSafeInteger(state?.cycleProcessedCount)
-    ? state.cycleProcessedCount
-    : processedFromRuns;
-  const total = Number(state?.cycleCustomerCount) || 0;
-  const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
-  const status = busy ? "running" : firstText(state?.lastStatus, "unknown");
-  const statusLabel = busy ? "正在检测" : runStatusLabel(status);
-  const tone = runStatusTone(status);
-  const notificationState = firstText(notification?.status, scheduler?.notification?.status);
-  return (
-    <Panel title="自动轮巡" meta={state?.enabled ? `每 ${state.intervalMinutes} 分钟` : "已停用"} className="hospital-tender-scheduler hospital-tender-status-panel">
-      <div className="hospital-tender-scheduler-summary">
-        <div className="hospital-tender-scheduler-state"><span className={`mini-icon ${tone}`}><CalendarClock size={15} /></span><span><strong>{statusLabel}</strong><small>第 {state?.cycleNumber || "—"} 轮 · 每批 {state?.batchSize || "—"} 家客户</small></span></div>
-        {state?.snapshotId || busy ? <div className="hospital-tender-progress"><strong>{total > 0 ? `本轮进度 ${processed} / ${total}` : "正在等待采集器反馈"}</strong><progress value={total > 0 ? percent : undefined} max="100" aria-label="医院招标轮巡进度">{total > 0 ? `${percent}%` : "进行中"}</progress>{busy ? <small>已运行 {formatElapsed(elapsedMs)}，检测期间不会重复提交</small> : null}</div> : null}
-        <div className="hospital-tender-scheduler-facts">
-          <span>最近批次 <strong>{state?.lastBatchCount || 0}</strong> 家客户</span>
-          <span>入库 <strong>{state?.lastAcceptedCount || 0}</strong> 条</span>
-          <span>异常 <strong>{state?.lastRejectedCount || 0}</strong> 条</span>
-        </div>
-        <small className="muted-copy">最近完成：{formatSchedulerDate(state?.lastFinishedAt, "尚未运行")}</small>
-        <small className="muted-copy">下次运行：{formatSchedulerDate(state?.nextRunAt, state?.enabled ? "等待排期" : "已停用")}</small>
-        {Number(state?.lastHighRelevanceCount) > 0 ? <small className="muted-copy">本批新增高相关：{Number(state.lastHighRelevanceCount)} 条</small> : null}
-        {notificationState ? <small className="muted-copy">PushPlus：{notificationLabel(notificationState)}{notificationState === "disabled" ? "（仅保存，不推送）" : ""}</small> : null}
-        {state?.lastError ? <p className="expense-page-alert" role="alert"><CircleAlert size={15} />{userFacingTenderError(state.lastError, "最近一批检测未完成，请稍后重试。")}</p> : null}
-      </div>
-    </Panel>
-  );
-}
-
 function PriorityMetric({ label, value, detail, tone, icon: Icon }) {
   return (
     <section className={`hospital-tender-priority-metric ${tone}`}>
@@ -555,20 +486,26 @@ export function HospitalTenderPage({
   sources = [],
   health = [],
   customers = [],
+  customerId = "",
   loading = false,
   error = "",
   onRefresh,
   onSelectCustomer,
+  onOpenSchedule,
 }) {
   const [typeFilter, setTypeFilter] = useState("");
   const [relevanceFilter, setRelevanceFilter] = useState("");
-  const [customerFilter, setCustomerFilter] = useState("");
+  const [customerFilter, setCustomerFilter] = useState(customerId);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [visibleNoticeCount, setVisibleNoticeCount] = useState(INITIAL_VISIBLE_NOTICE_COUNT);
   const [selectedNotice, setSelectedNotice] = useState(null);
   const lastNoticeTriggerRef = useRef(null);
   const refreshGenerationRef = useRef(0);
+
+  useEffect(() => {
+    setCustomerFilter(customerId);
+  }, [customerId]);
 
   const [remoteState, setRemoteState] = useState({
     loading: false,
@@ -579,18 +516,8 @@ export function HospitalTenderPage({
     summary: null,
     sources: null,
     health: null,
-    scheduler: null,
   });
   const [noticeLoadingMore, setNoticeLoadingMore] = useState(false);
-  const [runClock, setRunClock] = useState(Date.now());
-  const [runState, setRunState] = useState({
-    busy: false,
-    error: "",
-    notice: "",
-    tone: "",
-    status: "",
-    startedAt: null,
-  });
   const activeRemoteFilters = useMemo(() => ({
     ...(typeFilter ? { noticeType: typeFilter } : {}),
     ...(relevanceFilter ? { relevance: relevanceFilter } : {}),
@@ -618,32 +545,18 @@ export function HospitalTenderPage({
     }
   }, []);
 
-  const refreshScheduler = useCallback(async () => {
-    if (!apiClient?.getHospitalTenderScheduler || backendStatus !== "connected") return null;
-    try {
-      const nextScheduler = await apiClient.getHospitalTenderScheduler();
-      setRemoteState((current) => ({ ...current, scheduler: nextScheduler }));
-      return nextScheduler;
-    } catch {
-      return null;
-    }
-  }, [apiClient, backendStatus]);
-
   const refreshRemote = useCallback(async () => {
     if (!apiClient || backendStatus === "offline") return;
     const generation = ++refreshGenerationRef.current;
     setRemoteState((current) => ({ ...current, loading: true, error: "" }));
     try {
-      const [nextNoticePage, nextSummary, nextSources, nextHealth, nextScheduler] = await Promise.all([
+      const [nextNoticePage, nextSummary, nextSources, nextHealth] = await Promise.all([
         apiClient.listHospitalTenderPage
           ? apiClient.listHospitalTenderPage({ ...activeRemoteFilters, limit: NOTICE_PAGE_SIZE, offset: 0 })
           : apiClient.listHospitalTenders(activeRemoteFilters).then((items) => ({ items, total: items.length, hasMore: false })),
         apiClient.getHospitalTenderSummary(),
         apiClient.listHospitalTenderSources(),
         apiClient.getHospitalTenderHealth(),
-        apiClient.getHospitalTenderScheduler
-          ? apiClient.getHospitalTenderScheduler().catch(() => null)
-          : Promise.resolve(null),
       ]);
       if (generation !== refreshGenerationRef.current) return;
       setRemoteState({
@@ -655,7 +568,6 @@ export function HospitalTenderPage({
         summary: nextSummary,
         sources: nextSources,
         health: nextHealth,
-        scheduler: nextScheduler,
       });
       setVisibleNoticeCount(INITIAL_VISIBLE_NOTICE_COUNT);
     } catch (error) {
@@ -666,87 +578,6 @@ export function HospitalTenderPage({
 
   useEffect(() => {
     if (apiClient && backendStatus === "connected") void refreshRemote();
-  }, [apiClient, backendStatus, refreshRemote]);
-
-  useEffect(() => {
-    if (!runState.busy) return undefined;
-    const timer = globalThis.setInterval(() => setRunClock(Date.now()), 1000);
-    return () => globalThis.clearInterval(timer);
-  }, [runState.busy]);
-
-  useEffect(() => {
-    if (!runState.busy || !apiClient?.getHospitalTenderScheduler) return undefined;
-    let cancelled = false;
-    const poll = async () => {
-      if (!cancelled) await refreshScheduler();
-    };
-    void poll();
-    const timer = globalThis.setInterval(poll, 3000);
-    return () => {
-      cancelled = true;
-      globalThis.clearInterval(timer);
-    };
-  }, [apiClient, refreshScheduler, runState.busy]);
-
-  const runInternalMonitor = useCallback(async () => {
-    if ((!apiClient?.runHospitalTenderScheduler && !apiClient?.runHospitalTenderMonitor) || backendStatus !== "connected") return;
-    const startedAt = Date.now();
-    setRunClock(startedAt);
-    setRunState({ busy: true, error: "", notice: "", tone: "blue", status: "running", startedAt });
-    try {
-      const result = apiClient.runHospitalTenderScheduler
-        ? await apiClient.runHospitalTenderScheduler()
-        : await apiClient.runHospitalTenderMonitor();
-      const status = firstText(result?.status, result?.state?.lastStatus)
-        || (Number(result?.rejectedCount) > 0 ? "partial" : "success");
-      const accepted = Number(result?.acceptedCount ?? result?.state?.lastAcceptedCount ?? 0);
-      const rejected = Number(result?.rejectedCount ?? result?.state?.lastRejectedCount ?? 0);
-      if (status === "partial") {
-        setRunState({
-          busy: false,
-          error: "",
-          notice: `本批检测部分完成：已入库 ${accepted} 条，${rejected || "部分"} 条异常；失败来源会在下一轮重试。`,
-          tone: "warning",
-          status,
-          startedAt: null,
-        });
-      } else if (["failed", "error"].includes(status)) {
-        setRunState({ busy: false, error: "检测失败，请查看来源状态后重试。", notice: "", tone: "danger", status: "failed", startedAt: null });
-      } else if (["running", "waiting", "disabled", "skipped"].includes(status)) {
-        setRunState({
-          busy: false,
-          error: "",
-          notice: status === "disabled" ? "自动轮巡已停用，本次未启动检测。" : "检测任务尚未完成，当前状态已同步到自动轮巡。",
-          tone: status === "disabled" ? "" : "warning",
-          status,
-          startedAt: null,
-        });
-      } else {
-        setRunState({
-          busy: false,
-          error: "",
-          notice: `本批检测完成：已入库 ${accepted} 条公告，客户匹配已更新。`,
-          tone: "success",
-          status: "success",
-          startedAt: null,
-        });
-      }
-      await refreshRemote();
-    } catch (error) {
-      if (error?.status === 409 || error?.code === "HOSPITAL_TENDER_RUN_IN_PROGRESS") {
-        await refreshScheduler();
-        setRunState({
-          busy: false,
-          error: "",
-          notice: "已有检测任务正在运行，页面已切换为跟踪状态。",
-          tone: "warning",
-          status: "running",
-          startedAt: null,
-        });
-      } else {
-        setRunState({ busy: false, error: userFacingTenderError(error?.message, "检测未完成，请稍后重试。"), notice: "", tone: "danger", status: "failed", startedAt: null });
-      }
-    }
   }, [apiClient, backendStatus, refreshRemote]);
 
   const loadMoreNotices = useCallback(async () => {
@@ -781,7 +612,6 @@ export function HospitalTenderPage({
   const effectiveHealth = remoteState.health ?? health;
   const effectiveLoading = Boolean(loading || remoteState.loading || (apiClient && backendStatus === "connecting"));
   const effectiveError = remoteState.error || error;
-  const notificationState = effectiveHealth?.notification ?? remoteState.scheduler?.notification ?? null;
   const customerNameById = useMemo(
     () => new Map((Array.isArray(customers) ? customers : []).map((customer) => [customerValue(customer), customerLabel(customer)])),
     [customers],
@@ -848,9 +678,6 @@ export function HospitalTenderPage({
   const canShowMoreLoaded = filteredNotices.length > visibleNoticeCount;
   const canLoadMoreRemote = Boolean(remoteState.noticeHasMore);
   const latestPublishedAt = effectiveSummary?.latestPublishedAt;
-  const runStateItem = remoteState.scheduler?.item ?? remoteState.scheduler ?? null;
-  const elapsedMs = runState.startedAt ? runClock - runState.startedAt : 0;
-  const monitorBusy = runState.busy || runStateItem?.lastStatus === "running";
   const effectiveErrorMessage = userFacingTenderError(effectiveError);
 
   return (
@@ -866,11 +693,11 @@ export function HospitalTenderPage({
           </div>
         </div>
         <div className="hospital-tender-actions">
-          <button className="primary-button" type="button" onClick={() => { void runInternalMonitor(); }} disabled={effectiveLoading || monitorBusy || backendStatus !== "connected"}>
-            {monitorBusy ? <LoaderCircle className="state-spinner" size={16} /> : <BellRing size={16} />}
-            {monitorBusy ? "检测进行中" : "立即检测下一批"}
+          <button className="ghost-button" type="button" onClick={onOpenSchedule} disabled={!onOpenSchedule}>
+            <Settings2 size={16} />
+            调度设置
           </button>
-          <button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading || monitorBusy}>
+          <button className="primary-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }} disabled={effectiveLoading}>
             {effectiveLoading ? <LoaderCircle className="state-spinner" size={16} /> : <RefreshCw size={16} />}
             {effectiveLoading ? "正在刷新" : "刷新数据"}
           </button>
@@ -878,15 +705,6 @@ export function HospitalTenderPage({
       </header>
 
       {effectiveError ? <div className="hospital-tender-alert" role="alert"><CircleAlert size={17} /><span>{effectiveErrorMessage}</span><button className="ghost-button" type="button" onClick={() => { void refreshRemote(); onRefresh?.(); }}>重试</button></div> : null}
-      {runState.error ? <div className="hospital-tender-alert" role="alert"><CircleAlert size={17} /><span>{runState.error}</span><button className="ghost-button" type="button" onClick={() => { void runInternalMonitor(); }}>重试检测</button></div> : null}
-      {runState.busy ? (
-        <div className="hospital-tender-run-progress" role="status" aria-live="polite">
-          <LoaderCircle className="state-spinner" size={17} />
-          <span><strong>检测进行中</strong><small>已运行 {formatElapsed(elapsedMs)}{runStateItem?.cycleProcessedCount ? ` · 已处理 ${runStateItem.cycleProcessedCount} 家客户` : " · 正在等待来源反馈"}</small></span>
-          {runStateItem?.cycleCustomerCount ? <b>{runStateItem.cycleProcessedCount || 0} / {runStateItem.cycleCustomerCount}</b> : null}
-        </div>
-      ) : null}
-      {runState.notice ? <p className={`hospital-tender-feedback ${runState.tone}`} role="status"><span>{runState.notice}</span></p> : null}
 
       <div className="hospital-tender-priority-strip" aria-label="医院招标概览">
         <PriorityMetric label="高相关" value={highRelevanceCount} detail="重点机会" tone="danger" icon={Target} />
@@ -898,7 +716,7 @@ export function HospitalTenderPage({
         <Panel title="重点机会" meta={`显示 ${priorityNotices.length} 条`} className="hospital-tender-priority-panel">
           <div className="hospital-tender-table-head hospital-tender-priority-head"><span>公告标题</span><span>客户</span><span>截止时间</span><span>相关性</span><span aria-hidden="true" /></div>
           {effectiveLoading && normalizedNotices.length === 0 ? <div className="hospital-tender-loading" role="status"><LoaderCircle className="state-spinner" size={21} />正在读取招标公告</div> : null}
-          {!effectiveLoading && priorityNotices.length === 0 ? <p className="hospital-tender-empty">暂时没有符合条件的重点机会，调整筛选条件或点击“立即检测下一批”。</p> : null}
+          {!effectiveLoading && priorityNotices.length === 0 ? <p className="hospital-tender-empty">暂时没有符合条件的重点机会，可调整筛选条件或前往调度设置检查采集状态。</p> : null}
           <div className="hospital-tender-priority-list">
             {priorityNotices.map((notice) => <PriorityNoticeRow key={notice.id} notice={notice} onSelect={openNotice} />)}
           </div>
@@ -935,7 +753,6 @@ export function HospitalTenderPage({
             ) : null}
           </Panel>
           <HealthSummary sources={effectiveSources} health={effectiveHealth} />
-          <SchedulerProgress scheduler={remoteState.scheduler} busy={runState.busy} elapsedMs={elapsedMs} notification={notificationState} />
         </aside>
       </div>
 

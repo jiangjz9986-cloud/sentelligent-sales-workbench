@@ -28,16 +28,16 @@ const pages = [
   { name: "quick", testId: "page-quick" },
   { name: "customer", testId: "page-customer" },
   { name: "opportunity", testId: "page-opportunity" },
-  { name: "actions", testId: "page-actions" },
+  { name: "actions", parentNav: "opportunity", subnav: "actions", testId: "page-actions" },
   { name: "itinerary", testId: "page-itinerary" },
   { name: "expense", testId: "page-expense" },
   { name: "weekly", testId: "page-weekly" },
-  { name: "risk", testId: "page-risk" },
+  { name: "risk", parentNav: "opportunity", subnav: "risk", testId: "page-risk" },
   { name: "knowledge", testId: "page-knowledge" },
-  { name: "kanban", testId: "page-kanban" },
-  { name: "weixin", testId: "page-weixin" },
+  { name: "kanban", parentNav: "opportunity", subnav: "kanban", testId: "page-kanban" },
+  { name: "weixin", parentNav: "settings", subnav: "weixin", testId: "page-weixin" },
   { name: "settings", testId: "page-settings" },
-  { name: "hospital-tenders", testId: "hospital-tender-page" },
+  { name: "hospital-tenders", parentNav: "customer", subnav: "hospital-tenders", testId: "hospital-tender-page" },
 ];
 
 function findChrome() {
@@ -572,11 +572,19 @@ async function measureVisualRhythm(cdp, url, viewport) {
           return Boolean(visibleRect(child));
         });
       };
+      const openPage = async (page) => {
+        const parent = page.parentNav ?? page.name;
+        document.querySelector('[data-testid="nav-' + parent + '"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-' + parent + '"]') || document.querySelector('[data-testid="' + page.testId + '"]'));
+        if (page.subnav) {
+          document.querySelector('[data-testid="subnav-' + page.subnav + '"]')?.click();
+        }
+        await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
+      };
       const results = [];
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
       for (const page of pages) {
-        document.querySelector('[data-testid="nav-' + page.name + '"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
+        await openPage(page);
         await wait(180);
         const content = document.querySelector('[data-testid="' + page.testId + '"]');
         const heading = content?.querySelector('.page-heading');
@@ -634,11 +642,17 @@ async function measureDesktopListDensity(cdp, url) {
         }
         throw new Error('Timed out waiting for list density page condition');
       };
+      const openPage = async (page) => {
+        const parent = page.parentNav ?? page.name;
+        document.querySelector('[data-testid="nav-' + parent + '"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-' + parent + '"]') || document.querySelector('[data-testid="' + page.testId + '"]'));
+        if (page.subnav) document.querySelector('[data-testid="subnav-' + page.subnav + '"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
+      };
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
       const results = [];
       for (const page of listPages) {
-        document.querySelector('[data-testid="nav-' + page.name + '"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
+        await openPage(page);
         await wait(180);
         const content = document.querySelector('[data-testid="' + page.testId + '"]');
         const panel = content?.querySelector('.customer-list-panel, .opportunity-list-panel, .action-list-panel, .risk-list-panel, .knowledge-list-panel');

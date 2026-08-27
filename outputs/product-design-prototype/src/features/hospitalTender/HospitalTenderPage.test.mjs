@@ -11,7 +11,7 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   const appSource = await readFile(appPath, "utf8");
 
   assert.match(source, /export function HospitalTenderPage\s*\(/);
-  for (const prop of ["apiClient", "notices", "summary", "sources", "health", "customers", "loading", "error", "onRefresh", "onSelectCustomer"]) {
+  for (const prop of ["apiClient", "notices", "summary", "sources", "health", "customers", "loading", "error", "onRefresh", "onSelectCustomer", "onOpenSchedule"]) {
     assert.match(source, new RegExp(`\\b${prop}\\b`), `missing prop ${prop}`);
   }
   assert.match(source, /筛选公告类型/);
@@ -21,23 +21,19 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   assert.match(source, /原文|查看原文/);
   assert.match(source, /来源健康|数据源健康/);
   assert.match(source, /匹配依据/);
-  assert.match(source, /立即检测/);
-  assert.match(source, /runHospitalTenderMonitor/);
-  assert.match(source, /自动轮巡/);
-  assert.match(source, /每批/);
-  assert.match(source, /最近批次/);
-  assert.match(source, /下次运行/);
-  assert.match(source, /runHospitalTenderScheduler/);
-  assert.match(source, /getHospitalTenderScheduler/);
+  assert.match(source, /调度设置/);
+  assert.match(source, /onOpenSchedule/);
+  assert.match(appSource, /onOpenSchedule=\{\(\) => navigateTo\("settings-tender-schedule"\)\}/);
+  assert.doesNotMatch(source, /立即检测下一批/);
+  assert.doesNotMatch(source, /启用自动轮巡|停用自动轮巡/);
+  assert.doesNotMatch(source, /PushPlus/);
+  assert.doesNotMatch(source, /runHospitalTenderMonitor/);
+  assert.doesNotMatch(source, /runHospitalTenderScheduler/);
+  assert.doesNotMatch(source, /updateHospitalTenderScheduler/);
   assert.match(source, /listHospitalTenderPage/);
-  assert.match(source, /轮巡进度/);
-  assert.match(source, /本批新增高相关/);
-  assert.match(source, /检测部分完成/);
-  assert.match(source, /HOSPITAL_TENDER_RUN_IN_PROGRESS/);
   assert.match(source, /搜索公告/);
   assert.match(source, /清除筛选/);
   assert.match(source, /lastSuccessAt/);
-  assert.match(source, /PushPlus/);
   assert.match(appSource, /scrollIntoView/);
   assert.match(source, /focusableSelector/);
   assert.match(source, /role="dialog"|aria-label="公告详情"/);
@@ -72,4 +68,15 @@ test("hospital tender search and clear controls keep accessible touch targets", 
   assert.match(styles, /\.hospital-tender-search input\s*\{[^}]*min-height:\s*44px;/s);
   assert.match(styles, /\.hospital-tender-search button\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/s);
   assert.match(styles, /\.hospital-tender-clear-filter\s*\{[^}]*min-height:\s*44px;/s);
+});
+
+test("hospital tender can open in one customer context and return to the all-customer view", async () => {
+  const source = await readFile(pagePath, "utf8");
+
+  assert.match(source, /customerId\s*=\s*""/);
+  assert.match(source, /setCustomerFilter\(customerId\)/);
+  assert.match(source, /useState\(customerId\)/);
+  assert.match(source, /customerId:\s*customerFilter/);
+  assert.match(source, /<option value="">全部客户<\/option>/);
+  assert.match(source, /setCustomerFilter\(""\)/);
 });

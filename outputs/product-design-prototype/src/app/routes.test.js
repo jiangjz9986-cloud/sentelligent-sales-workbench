@@ -45,6 +45,27 @@ const routeCases = [
     "/customers",
   ],
   [
+    "/customers/tenders",
+    expectedRoute({
+      page: "hospital-tenders",
+      active: "customer",
+      mode: "index",
+      readOnly: true,
+    }),
+    "/customers/tenders",
+  ],
+  [
+    "/customers/customer-1/tenders",
+    expectedRoute({
+      page: "hospital-tenders",
+      active: "customer",
+      mode: "index",
+      entityId: "customer-1",
+      readOnly: true,
+    }),
+    "/customers/customer-1/tenders",
+  ],
+  [
     "/customers/new",
     expectedRoute({ page: "customers", active: "customer", mode: "new" }),
     "/customers/new",
@@ -100,29 +121,29 @@ const routeCases = [
     "/opportunities/opportunity-1/edit",
   ],
   [
-    "/actions",
-    expectedRoute({ page: "actions", active: "actions", mode: "list" }),
-    "/actions",
+    "/opportunities/actions",
+    expectedRoute({ page: "actions", active: "opportunity", mode: "list" }),
+    "/opportunities/actions",
   ],
   [
-    "/actions/action-1",
+    "/opportunities/actions/action-1",
     expectedRoute({
       page: "actions",
-      active: "actions",
+      active: "opportunity",
       mode: "detail",
       entityId: "action-1",
     }),
-    "/actions/action-1",
+    "/opportunities/actions/action-1",
   ],
   [
-    "/actions/action-1/edit",
+    "/opportunities/actions/action-1/edit",
     expectedRoute({
       page: "actions",
-      active: "actions",
+      active: "opportunity",
       mode: "edit",
       entityId: "action-1",
     }),
-    "/actions/action-1/edit",
+    "/opportunities/actions/action-1/edit",
   ],
   [
     "/weekly-reports",
@@ -135,19 +156,19 @@ const routeCases = [
     "/travel-expenses",
   ],
   [
-    "/risks",
-    expectedRoute({ page: "risks", active: "risk", mode: "list" }),
-    "/risks",
+    "/opportunities/risks",
+    expectedRoute({ page: "risks", active: "opportunity", mode: "list" }),
+    "/opportunities/risks",
   ],
   [
-    "/risks/risk-1",
-    expectedRoute({ page: "risks", active: "risk", mode: "detail", entityId: "risk-1" }),
-    "/risks/risk-1",
+    "/opportunities/risks/risk-1",
+    expectedRoute({ page: "risks", active: "opportunity", mode: "detail", entityId: "risk-1" }),
+    "/opportunities/risks/risk-1",
   ],
   [
-    "/risks/risk-1/edit",
-    expectedRoute({ page: "risks", active: "risk", mode: "edit", entityId: "risk-1" }),
-    "/risks/risk-1/edit",
+    "/opportunities/risks/risk-1/edit",
+    expectedRoute({ page: "risks", active: "opportunity", mode: "edit", entityId: "risk-1" }),
+    "/opportunities/risks/risk-1/edit",
   ],
   [
     "/knowledge",
@@ -179,21 +200,30 @@ const routeCases = [
     }),
     "/knowledge/knowledge-1/edit",
   ],
-  ["/kanban", expectedRoute({ page: "kanban", active: "kanban" }), "/kanban"],
   [
-    "/hospital-tenders",
-    expectedRoute({ page: "hospital-tenders", active: "hospital-tenders", readOnly: true }),
-    "/hospital-tenders",
+    "/opportunities/kanban",
+    expectedRoute({ page: "kanban", active: "opportunity" }),
+    "/opportunities/kanban",
   ],
   [
     "/settings/weixin",
-    expectedRoute({ page: "settings/weixin", active: "weixin" }),
+    expectedRoute({ page: "settings/weixin", active: "settings" }),
     "/settings/weixin",
   ],
   [
     "/settings/config",
     expectedRoute({ page: "settings/config", active: "settings" }),
     "/settings/config",
+  ],
+  [
+    "/settings/notifications",
+    expectedRoute({ page: "settings/notifications", active: "settings" }),
+    "/settings/notifications",
+  ],
+  [
+    "/settings/tender-schedule",
+    expectedRoute({ page: "settings/tender-schedule", active: "settings" }),
+    "/settings/tender-schedule",
   ],
   [
     "/solutions",
@@ -247,6 +277,89 @@ describe("workbench route parser and builder", () => {
 
     for (const [, state, canonicalUrl] of routeCases) {
       assert.equal(buildWorkbenchUrl(state), canonicalUrl, JSON.stringify(state));
+    }
+  });
+
+  it("preserves legacy deep links as replace-only redirects to the grouped module routes", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+    const aliases = [
+      ["/hospital-tenders", "/customers/tenders", "hospital-tenders", "customer"],
+      ["/actions", "/opportunities/actions", "actions", "opportunity"],
+      ["/actions/action-1", "/opportunities/actions/action-1", "actions", "opportunity"],
+      ["/risks", "/opportunities/risks", "risks", "opportunity"],
+      ["/risks/risk-1/edit", "/opportunities/risks/risk-1/edit", "risks", "opportunity"],
+      ["/kanban", "/opportunities/kanban", "kanban", "opportunity"],
+    ];
+
+    for (const [legacyUrl, canonicalUrl, page, active] of aliases) {
+      const parsed = parseWorkbenchRoute(legacyUrl);
+      assert.equal(parsed.page, page, legacyUrl);
+      assert.equal(parsed.active, active, legacyUrl);
+      assert.equal(parsed.replace, true, legacyUrl);
+      assert.equal(buildWorkbenchUrl(parsed), canonicalUrl, legacyUrl);
+    }
+  });
+
+  it("matches grouped fixed subroutes before dynamic customer and opportunity identifiers", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+
+    assert.equal(parseWorkbenchRoute("/customers/tenders").page, "hospital-tenders");
+    assert.deepEqual(
+      parseWorkbenchRoute("/customers/customer-1/tenders"),
+      expectedRoute({
+        page: "hospital-tenders",
+        active: "customer",
+        mode: "index",
+        entityId: "customer-1",
+        readOnly: true,
+      }),
+    );
+    assert.equal(parseWorkbenchRoute("/opportunities/actions").page, "actions");
+    assert.equal(parseWorkbenchRoute("/opportunities/risks").page, "risks");
+    assert.equal(parseWorkbenchRoute("/opportunities/kanban").page, "kanban");
+
+    assert.throws(
+      () => buildWorkbenchUrl({ page: "customers", mode: "detail", entityId: "tenders" }),
+      /entity/i,
+    );
+    for (const entityId of ["actions", "risks", "kanban"]) {
+      assert.throws(
+        () => buildWorkbenchUrl({ page: "opportunities", mode: "detail", entityId }),
+        /entity/i,
+        entityId,
+      );
+    }
+  });
+
+  it("round-trips selected opportunity context for grouped child pages", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+    const buildWorkbenchUrl = requireFunction(routeModule, "buildWorkbenchUrl");
+
+    for (const url of [
+      "/opportunities/actions?opportunityId=opportunity-1",
+      "/opportunities/risks?opportunityId=opportunity-1",
+      "/opportunities/kanban?opportunityId=opportunity-1",
+    ]) {
+      const parsed = parseWorkbenchRoute(url);
+      assert.deepEqual(parsed.filters, { opportunityId: ["opportunity-1"] }, url);
+      assert.equal(parsed.active, "opportunity", url);
+      assert.equal(parsed.replace, false, url);
+      assert.equal(buildWorkbenchUrl(parsed), url, url);
+    }
+  });
+
+  it("fails closed when a grouped opportunity child receives an ambiguous context", () => {
+    const parseWorkbenchRoute = requireFunction(routeModule, "parseWorkbenchRoute");
+
+    for (const page of ["actions", "risks", "kanban"]) {
+      const parsed = parseWorkbenchRoute(
+        `/opportunities/${page}?opportunityId=opportunity-1&opportunityId=opportunity-2`,
+      );
+      assert.equal(parsed.page, page);
+      assert.deepEqual(parsed.filters, {});
+      assert.equal(parsed.replace, true);
     }
   });
 

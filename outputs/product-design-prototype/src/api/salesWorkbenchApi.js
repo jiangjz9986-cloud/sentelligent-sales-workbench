@@ -685,6 +685,14 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return response;
     },
 
+    async updateHospitalTenderScheduler(patch) {
+      const response = await requestApi("/api/hospital-tenders/scheduler", {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      return response;
+    },
+
     async runHospitalTenderScheduler() {
       const response = await requestApi("/api/hospital-tenders/scheduler/run-next", {
         method: "POST",

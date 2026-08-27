@@ -1,5 +1,9 @@
 const RESERVED_FILTER_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const RESERVED_ENTITY_IDS = new Set(["new", "edit"]);
+const NESTED_ROUTE_SEGMENTS = Object.freeze({
+  customers: new Set(["tenders"]),
+  opportunities: new Set(["actions", "risks", "kanban"]),
+});
 const FILTER_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 
@@ -8,16 +12,18 @@ const PAGE_META = Object.freeze({
   "quick-records": Object.freeze({ active: "quick", defaultMode: "new", readOnly: false }),
   customers: Object.freeze({ active: "customer", defaultMode: "list", readOnly: false }),
   opportunities: Object.freeze({ active: "opportunity", defaultMode: "list", readOnly: false }),
-  actions: Object.freeze({ active: "actions", defaultMode: "list", readOnly: false }),
+  actions: Object.freeze({ active: "opportunity", defaultMode: "list", readOnly: false }),
   itineraries: Object.freeze({ active: "itinerary", defaultMode: "list", readOnly: false }),
   "travel-expenses": Object.freeze({ active: "expense", defaultMode: "index", readOnly: false }),
   "weekly-reports": Object.freeze({ active: "weekly", defaultMode: "index", readOnly: false }),
-  risks: Object.freeze({ active: "risk", defaultMode: "list", readOnly: false }),
+  risks: Object.freeze({ active: "opportunity", defaultMode: "list", readOnly: false }),
   knowledge: Object.freeze({ active: "knowledge", defaultMode: "list", readOnly: false }),
-  kanban: Object.freeze({ active: "kanban", defaultMode: "index", readOnly: false }),
-  "settings/weixin": Object.freeze({ active: "weixin", defaultMode: "index", readOnly: false }),
+  kanban: Object.freeze({ active: "opportunity", defaultMode: "index", readOnly: false }),
+  "settings/weixin": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "settings/config": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
-  "hospital-tenders": Object.freeze({ active: "hospital-tenders", defaultMode: "index", readOnly: true }),
+  "settings/notifications": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
+  "settings/tender-schedule": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
+  "hospital-tenders": Object.freeze({ active: "customer", defaultMode: "index", readOnly: true }),
   solutions: Object.freeze({ active: "solution", defaultMode: "list", readOnly: true }),
 });
 
@@ -47,9 +53,13 @@ function decodePathSegment(rawSegment, label = "route segment") {
   }
 }
 
-function encodeEntityId(entityId) {
+function isReservedEntityId(page, value) {
+  return RESERVED_ENTITY_IDS.has(value) || NESTED_ROUTE_SEGMENTS[page]?.has(value) === true;
+}
+
+function encodeEntityId(entityId, page) {
   const value = assertSafeDecodedSegment(entityId, "entity id");
-  if (RESERVED_ENTITY_IDS.has(value)) throw new TypeError("Invalid entity id");
+  if (isReservedEntityId(page, value)) throw new TypeError("Invalid entity id");
   return encodeURIComponent(value);
 }
 
@@ -112,14 +122,14 @@ function matchEntityRoute(page, segments, { allowNew = false, detailMode = "deta
   }
   if (
     segments.length === 2 &&
-    !RESERVED_ENTITY_IDS.has(segments[1])
+    !isReservedEntityId(page, segments[1])
   ) {
     return routeState(page, detailMode, segments[1]);
   }
   if (
     segments.length === 3 &&
     segments[2] === "edit" &&
-    !RESERVED_ENTITY_IDS.has(segments[1])
+    !isReservedEntityId(page, segments[1])
   ) {
     return routeState(page, "edit", segments[1]);
   }
@@ -140,6 +150,26 @@ function matchRoute(segments) {
     }
     return null;
   }
+  if (page === "customers" && segments.length === 2 && segments[1] === "tenders") {
+    return routeState("hospital-tenders", "index");
+  }
+  if (
+    page === "customers" &&
+    segments.length === 3 &&
+    segments[2] === "tenders" &&
+    !isReservedEntityId("customers", segments[1])
+  ) {
+    return routeState("hospital-tenders", "index", segments[1]);
+  }
+  if (page === "opportunities" && segments[1] === "actions") {
+    return matchEntityRoute("actions", ["actions", ...segments.slice(2)]);
+  }
+  if (page === "opportunities" && segments[1] === "risks") {
+    return matchEntityRoute("risks", ["risks", ...segments.slice(2)]);
+  }
+  if (page === "opportunities" && segments.length === 2 && segments[1] === "kanban") {
+    return routeState("kanban", "index");
+  }
   if (page === "customers" || page === "opportunities" || page === "knowledge" || page === "itineraries") {
     return matchEntityRoute(page, segments, { allowNew: true });
   }
@@ -157,6 +187,12 @@ function matchRoute(segments) {
   }
   if (page === "settings" && segments.length === 2 && segments[1] === "config") {
     return routeState("settings/config", "index");
+  }
+  if (page === "settings" && segments.length === 2 && segments[1] === "notifications") {
+    return routeState("settings/notifications", "index");
+  }
+  if (page === "settings" && segments.length === 2 && segments[1] === "tender-schedule") {
+    return routeState("settings/tender-schedule", "index");
   }
   if (page === "solutions") {
     if (segments.length === 1) return routeState(page, "list");
@@ -441,13 +477,24 @@ export function parseWorkbenchRoute(input, { basePath = "/" } = {}) {
   if (!matched) return overviewFallback();
 
   const { filters, invalid: invalidFilters } = parseFilters(rawSearch);
-  const state = { ...matched, filters };
+  let contextualFilters = filters;
+  let invalidContext = false;
+  if (["actions", "risks", "kanban"].includes(matched.page)) {
+    const opportunityIds = filters.opportunityId;
+    if (opportunityIds && (opportunityIds.length !== 1 || !opportunityIds[0])) {
+      contextualFilters = { ...filters };
+      delete contextualFilters.opportunityId;
+      invalidContext = true;
+    }
+  }
+  const state = { ...matched, filters: contextualFilters };
   const canonicalUrl = buildWorkbenchUrl(state, { basePath: normalizedBasePath });
   return {
     ...state,
     replace:
       hadTrailingSlash ||
       invalidFilters ||
+      invalidContext ||
       Boolean(rawHash) ||
       canonicalUrl !== originalPathSearch,
   };
@@ -509,7 +556,7 @@ function pathForRoute(route) {
       assertNoEntityId(route);
       return page;
     }
-    if (mode === "history") return `${page}/${encodeEntityId(route.entityId)}`;
+    if (mode === "history") return `${page}/${encodeEntityId(route.entityId, page)}`;
     throw new TypeError("Invalid route mode");
   }
   if (page === "customers" || page === "opportunities" || page === "knowledge" || page === "itineraries") {
@@ -521,32 +568,42 @@ function pathForRoute(route) {
       assertNoEntityId(route);
       return `${page}/new`;
     }
-    if (mode === "detail") return `${page}/${encodeEntityId(route.entityId)}`;
-    if (mode === "edit") return `${page}/${encodeEntityId(route.entityId)}/edit`;
+    if (mode === "detail") return `${page}/${encodeEntityId(route.entityId, page)}`;
+    if (mode === "edit") return `${page}/${encodeEntityId(route.entityId, page)}/edit`;
     throw new TypeError("Invalid route mode");
   }
   if (page === "actions" || page === "risks") {
+    const nestedPage = `opportunities/${page}`;
     if (mode === "list") {
       assertNoEntityId(route);
-      return page;
+      return nestedPage;
     }
-    if (mode === "detail") return `${page}/${encodeEntityId(route.entityId)}`;
-    if (mode === "edit") return `${page}/${encodeEntityId(route.entityId)}/edit`;
+    if (mode === "detail") return `${nestedPage}/${encodeEntityId(route.entityId, page)}`;
+    if (mode === "edit") return `${nestedPage}/${encodeEntityId(route.entityId, page)}/edit`;
     throw new TypeError("Invalid route mode");
   }
   if (
-    (page === "travel-expenses" || page === "weekly-reports" || page === "kanban" || page === "settings/weixin" || page === "settings/config" || page === "hospital-tenders") &&
+    (page === "travel-expenses" || page === "weekly-reports" || page === "settings/weixin" || page === "settings/config" || page === "settings/notifications" || page === "settings/tender-schedule") &&
     mode === "index"
   ) {
     assertNoEntityId(route);
     return page;
+  }
+  if (page === "kanban" && mode === "index") {
+    assertNoEntityId(route);
+    return "opportunities/kanban";
+  }
+  if (page === "hospital-tenders" && mode === "index") {
+    return route.entityId === undefined || route.entityId === null
+      ? "customers/tenders"
+      : `customers/${encodeEntityId(route.entityId, "customers")}/tenders`;
   }
   if (page === "solutions") {
     if (mode === "list") {
       assertNoEntityId(route);
       return page;
     }
-    if (mode === "detail") return `${page}/${encodeEntityId(route.entityId)}`;
+    if (mode === "detail") return `${page}/${encodeEntityId(route.entityId, page)}`;
     throw new TypeError("Invalid route mode");
   }
   throw new TypeError("Invalid route mode");

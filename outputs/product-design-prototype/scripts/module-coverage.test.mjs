@@ -16,12 +16,48 @@ function extractNavBlock(source) {
   return source.match(/export const navItems = \[([\s\S]*?)\];/)?.[1] ?? "";
 }
 
+function extractSubnavIds(source, parent) {
+  const block = source.match(new RegExp(`${parent}:\\s*\\[([\\s\\S]*?)\\](?:,|\\n\\})`))?.[1] ?? "";
+  return [...block.matchAll(/\{\s*id:\s*"([^"]+)"/g)].map((match) => match[1]);
+}
+
 function extractVisualPageNames(source) {
   const block = source.match(/const pages = \[([\s\S]*?)\];/)?.[1] ?? "";
   return [...block.matchAll(/\{\s*name:\s*"([^"]+)"/g)].map((match) => match[1]);
 }
 
 describe("business module delivery coverage", () => {
+  it("groups the workbench into nine top-level modules with the approved customer, opportunity, and settings children", () => {
+    const dataSource = read("src/data/salesWorkbenchData.js");
+    assert.deepEqual(
+      extractNavIds(dataSource),
+      ["overview", "quick", "customer", "opportunity", "itinerary", "expense", "weekly", "knowledge", "settings"],
+    );
+    assert.deepEqual(
+      Object.fromEntries(["customer", "opportunity", "settings"].map((parent) => [parent, extractSubnavIds(dataSource, parent)])),
+      {
+        customer: ["customer", "hospital-tenders"],
+        opportunity: ["opportunity", "risk", "actions", "kanban"],
+        settings: ["settings", "weixin", "settings-notifications", "settings-tender-schedule"],
+      },
+    );
+  });
+
+  it("wires grouped subnavigation to entity context rather than only restyling the sidebar", () => {
+    const appSource = read("src/App.jsx");
+    const subnavSource = read("src/components/ModuleSubnav.jsx");
+
+    assert.match(appSource, /<ModuleSubnav/);
+    assert.match(appSource, /customerId=\{tenderCustomerId\}/);
+    assert.match(appSource, /item\.opportunityId === scopedOpportunityId/);
+    assert.match(appSource, /setSelectedOpportunityId\(route\.entityId\)/);
+    assert.match(appSource, /route\.filters\?\.opportunityId/);
+    assert.match(appSource, /addEventListener\("popstate"/);
+    assert.match(subnavSource, /aria-current=\{isActive \? "page" : undefined\}/);
+    assert.match(subnavSource, /module-subnav-item/);
+    assert.match(subnavSource, /onClearContext/);
+  });
+
   it("renders a page branch for every sidebar module", () => {
     const navIds = extractNavIds(read("src/data/salesWorkbenchData.js"));
     const appSource = read("src/App.jsx");

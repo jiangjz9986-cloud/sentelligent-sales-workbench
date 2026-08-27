@@ -3067,6 +3067,7 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/hospital-tenders/summary")) return jsonResponse({ item: { totalNotices: 1, matchedNotices: 1, highRelevanceCount: 1, deadlineSoonCount: 0, todayNewCount: 0, byNoticeType: { tender: 1 }, byRelevance: { high: 1 }, latestRun: null } });
         if (url.endsWith("/api/hospital-tenders/sources")) return jsonResponse({ items: [source] });
         if (url.endsWith("/api/hospital-tenders/health")) return jsonResponse({ item: { status: "healthy", sourceCount: 1, staleCount: 0, latestRun: null } });
+        if (url.endsWith("/api/hospital-tenders/scheduler") && options.method === "PATCH") return jsonResponse({ item: { enabled: false, intervalMinutes: 60, batchSize: 10, lastStatus: "waiting" }, runs: [] });
         if (url.endsWith("/api/hospital-tenders/scheduler")) return jsonResponse({ item: { enabled: true, intervalMinutes: 60, batchSize: 10, lastStatus: "waiting" }, runs: [] });
         if (url.endsWith("/api/hospital-tenders/scheduler/run-next")) return jsonResponse({ item: { status: "success", state: { lastStatus: "success" } } });
         if (url.endsWith("/api/hospital-tenders/run")) return jsonResponse({ item: { acceptedCount: 1, rejectedCount: 0 } });
@@ -3082,6 +3083,7 @@ describe("sales workbench API client", () => {
     const health = await api.getHospitalTenderHealth();
     const run = await api.runHospitalTenderMonitor();
     const scheduler = await api.getHospitalTenderScheduler();
+    const schedulerUpdate = await api.updateHospitalTenderScheduler({ enabled: false });
     const schedulerRun = await api.runHospitalTenderScheduler();
     assert.equal(notices[0].matchedCustomerIds[0], "rizhao");
     assert.equal(noticePage.total, 1);
@@ -3093,6 +3095,10 @@ describe("sales workbench API client", () => {
     assert.equal(health.staleCount, 0);
     assert.equal(run.acceptedCount, 1);
     assert.equal(scheduler.item.batchSize, 10);
+    assert.equal(schedulerUpdate.item.enabled, false);
+    const schedulerUpdateCall = calls.find((call) => call.url.endsWith("/api/hospital-tenders/scheduler") && call.options.method === "PATCH");
+    assert.deepEqual(JSON.parse(schedulerUpdateCall.options.body), { enabled: false });
+    assert.equal(schedulerUpdateCall.options.headers["X-CSRF-Token"], "fixture-csrf-token");
     assert.equal(schedulerRun.status, "success");
     assert.match(calls[0].url, /customerId=rizhao/);
     assert.equal(calls.at(-1).options.method, "POST");

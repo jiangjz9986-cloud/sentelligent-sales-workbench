@@ -26,6 +26,7 @@ import {
 } from "./sessionAuth.js";
 import {
   compatibilityRouteMeta,
+  moduleSubnavItems,
   navItems,
 } from "./data/salesWorkbenchData.js";
 import {
@@ -55,6 +56,7 @@ import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage
 import { TravelExpensePage } from "./features/travelExpense/TravelExpensePage.jsx";
 import { HospitalTenderPage } from "./features/hospitalTender/HospitalTenderPage.jsx";
 import { SystemSettingsPage } from "./features/settings/SystemSettingsPage.jsx";
+import { ModuleSubnav } from "./components/ModuleSubnav.jsx";
 import { buildWorkbenchUrl, parseWorkbenchRoute } from "./app/routes.js";
 import { mergeEntityByVersion } from "./quickRecordModel.js";
 import { getCurrentWeekRange } from "./weekRange.js";
@@ -350,6 +352,81 @@ function WorkbenchStatePanel({ status, errorMessage, onRetry, onCreateCustomer }
   return null;
 }
 
+function EntityUnavailablePanel({ label, onBack }) {
+  return (
+    <section className="workbench-state-panel error" data-testid="route-entity-unavailable" role="alert">
+      <CircleAlert size={28} />
+      <strong>{label}不存在或已不可用</strong>
+      <p>当前链接没有对应的有效业务记录，系统没有替换成其他记录。</p>
+      <button className="ghost-button" type="button" onClick={onBack}>返回全部{label}</button>
+    </section>
+  );
+}
+
+const ROUTE_BY_ACTIVE = Object.freeze({
+  overview: Object.freeze({ page: "overview", mode: "index" }),
+  quick: Object.freeze({ page: "quick-records", mode: "new" }),
+  customer: Object.freeze({ page: "customers", mode: "list" }),
+  "hospital-tenders": Object.freeze({ page: "hospital-tenders", mode: "index" }),
+  opportunity: Object.freeze({ page: "opportunities", mode: "list" }),
+  actions: Object.freeze({ page: "actions", mode: "list" }),
+  risk: Object.freeze({ page: "risks", mode: "list" }),
+  kanban: Object.freeze({ page: "kanban", mode: "index" }),
+  itinerary: Object.freeze({ page: "itineraries", mode: "list" }),
+  expense: Object.freeze({ page: "travel-expenses", mode: "index" }),
+  weekly: Object.freeze({ page: "weekly-reports", mode: "index" }),
+  knowledge: Object.freeze({ page: "knowledge", mode: "list" }),
+  settings: Object.freeze({ page: "settings/config", mode: "index" }),
+  weixin: Object.freeze({ page: "settings/weixin", mode: "index" }),
+  "settings-notifications": Object.freeze({ page: "settings/notifications", mode: "index" }),
+  "settings-tender-schedule": Object.freeze({ page: "settings/tender-schedule", mode: "index" }),
+});
+
+const ACTIVE_BY_ROUTE_PAGE = Object.freeze({
+  overview: "overview",
+  "quick-records": "quick",
+  customers: "customer",
+  "hospital-tenders": "hospital-tenders",
+  opportunities: "opportunity",
+  actions: "actions",
+  risks: "risk",
+  kanban: "kanban",
+  itineraries: "itinerary",
+  "travel-expenses": "expense",
+  "weekly-reports": "weekly",
+  knowledge: "knowledge",
+  "settings/config": "settings",
+  "settings/weixin": "weixin",
+  "settings/notifications": "settings-notifications",
+  "settings/tender-schedule": "settings-tender-schedule",
+  solutions: "solution",
+});
+
+const PARENT_NAV_BY_ACTIVE = Object.freeze({
+  "hospital-tenders": "customer",
+  actions: "opportunity",
+  risk: "opportunity",
+  kanban: "opportunity",
+  weixin: "settings",
+  "settings-notifications": "settings",
+  "settings-tender-schedule": "settings",
+});
+
+function activeFromRoute(route) {
+  return ACTIVE_BY_ROUTE_PAGE[route?.page] ?? "overview";
+}
+
+function routeFilterValue(route, key) {
+  const value = route?.filters?.[key]?.[0];
+  return typeof value === "string" && value ? value : null;
+}
+
+function editorModeFromRoute(route, page) {
+  if (route?.page !== page) return "list";
+  if (route.mode === "new") return page === "itineraries" ? "new" : "create";
+  return ["list", "detail", "edit"].includes(route.mode) ? route.mode : "list";
+}
+
 export function App() {
   const [authPhase, setAuthPhase] = useState("checking");
   const [authSession, setAuthSession] = useState(null);
@@ -429,42 +506,41 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     })),
     [],
   );
-  const routeActive = initialRoute?.active;
-  const routeToActive = {
-    overview: "overview",
-    quick: "quick",
-    customer: "customer",
-    opportunity: "opportunity",
-    actions: "actions",
-    itinerary: "itinerary",
-    expense: "expense",
-    weekly: "weekly",
-    risk: "risk",
-    knowledge: "knowledge",
-    kanban: "kanban",
-    weixin: "weixin",
-    settings: "settings",
-    "hospital-tenders": "hospital-tenders",
-  };
-  const [active, setActive] = useState(routeToActive[routeActive] ?? "overview");
+  const [active, setActive] = useState(() => activeFromRoute(initialRoute));
+  const [routeFilters, setRouteFilters] = useState(() => initialRoute?.filters ?? {});
+  const [routeEntityId, setRouteEntityId] = useState(() => initialRoute?.entityId ?? null);
   const [workbenchState, setWorkbenchState] = useState(createLoadingWorkbenchState);
   const [backendStatus, setBackendStatus] = useState(apiClient.isEnabled ? "connecting" : "offline");
   const [bootstrapAttempt, setBootstrapAttempt] = useState(0);
   const bootstrapGenerationRef = useRef(0);
   const workspaceRef = useRef(null);
-  const [selectedCustomerId, setSelectedCustomerId] = useState(null);
-  const [selectedOpportunityId, setSelectedOpportunityId] = useState(null);
-  const [selectedActionId, setSelectedActionId] = useState(null);
-  const [selectedRiskId, setSelectedRiskId] = useState(null);
+  const [selectedCustomerId, setSelectedCustomerId] = useState(() => (
+    ["customers", "hospital-tenders"].includes(initialRoute?.page) ? initialRoute?.entityId : null
+  ));
+  const [selectedOpportunityId, setSelectedOpportunityId] = useState(() => (
+    initialRoute?.page === "opportunities"
+      ? initialRoute?.entityId
+      : routeFilterValue(initialRoute, "opportunityId")
+  ));
+  const [selectedActionId, setSelectedActionId] = useState(() => (
+    initialRoute?.page === "actions" ? initialRoute?.entityId : null
+  ));
+  const [selectedRiskId, setSelectedRiskId] = useState(() => (
+    initialRoute?.page === "risks" ? initialRoute?.entityId : null
+  ));
   const [selectedKnowledgeId, setSelectedKnowledgeId] = useState(null);
   const [selectedSolutionId, setSelectedSolutionId] = useState(null);
   const [selectedItineraryId, setSelectedItineraryId] = useState(null);
-  const [customerViewMode, setCustomerViewMode] = useState("list");
-  const [opportunityViewMode, setOpportunityViewMode] = useState("list");
-  const [actionViewMode, setActionViewMode] = useState("list");
-  const [riskViewMode, setRiskViewMode] = useState("list");
-  const [knowledgeViewMode, setKnowledgeViewMode] = useState("list");
-  const [itineraryViewMode, setItineraryViewMode] = useState("list");
+  const [customerViewMode, setCustomerViewMode] = useState(() => editorModeFromRoute(initialRoute, "customers"));
+  const [opportunityViewMode, setOpportunityViewMode] = useState(() => editorModeFromRoute(initialRoute, "opportunities"));
+  const [actionViewMode, setActionViewMode] = useState(() => editorModeFromRoute(initialRoute, "actions"));
+  const [riskViewMode, setRiskViewMode] = useState(() => editorModeFromRoute(initialRoute, "risks"));
+  const [knowledgeViewMode, setKnowledgeViewMode] = useState(() => editorModeFromRoute(initialRoute, "knowledge"));
+  const [itineraryViewMode, setItineraryViewMode] = useState(() => editorModeFromRoute(initialRoute, "itineraries"));
+  const selectedCustomerIdRef = useRef(selectedCustomerId);
+  const selectedOpportunityIdRef = useRef(selectedOpportunityId);
+  const selectedActionIdRef = useRef(selectedActionId);
+  const selectedRiskIdRef = useRef(selectedRiskId);
   const [recordMode, setRecordMode] = useState("voice");
   const [recordText, setRecordText] = useState("");
   const [analysisVisible, setAnalysisVisible] = useState(false);
@@ -497,52 +573,107 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     updateWorkbenchCollection("customers", nextValue);
   }
 
-  function navigateTo(nextActive) {
-    if (nextActive === "quick") setRecordMode("voice");
+  function applyWorkbenchRoute(route) {
+    const nextActive = activeFromRoute(route);
     setActive(nextActive);
-    if (typeof window !== "undefined") {
-      const routeByActive = {
-        overview: { page: "overview", mode: "index" },
-        quick: { page: "quick-records", mode: "new" },
-        customer: { page: "customers", mode: "list" },
-        opportunity: { page: "opportunities", mode: "list" },
-        actions: { page: "actions", mode: "list" },
-        itinerary: { page: "itineraries", mode: "list" },
-        expense: { page: "travel-expenses", mode: "index" },
-        weekly: { page: "weekly-reports", mode: "index" },
-        risk: { page: "risks", mode: "list" },
-        knowledge: { page: "knowledge", mode: "list" },
-        kanban: { page: "kanban", mode: "index" },
-        weixin: { page: "settings/weixin", mode: "index" },
-        settings: { page: "settings/config", mode: "index" },
-        "hospital-tenders": { page: "hospital-tenders", mode: "index" },
-      };
-      const route = routeByActive[nextActive];
-      if (route) window.history.pushState(route, "", buildWorkbenchUrl(route));
+    setRouteFilters(route?.filters ?? {});
+    setRouteEntityId(route?.entityId ?? null);
+
+    if (route?.page === "customers") {
+      setCustomerViewMode(editorModeFromRoute(route, "customers"));
+      if (route.entityId) {
+        selectedCustomerIdRef.current = route.entityId;
+        setSelectedCustomerId(route.entityId);
+      }
+    } else if (route?.page === "hospital-tenders" && route.entityId) {
+      selectedCustomerIdRef.current = route.entityId;
+      setSelectedCustomerId(route.entityId);
     }
+
+    if (route?.page === "opportunities") {
+      setOpportunityViewMode(editorModeFromRoute(route, "opportunities"));
+      if (route.entityId) {
+        selectedOpportunityIdRef.current = route.entityId;
+        setSelectedOpportunityId(route.entityId);
+      }
+    } else {
+      const opportunityId = route.filters?.opportunityId?.[0] ?? null;
+      if (opportunityId) {
+        selectedOpportunityIdRef.current = opportunityId;
+        setSelectedOpportunityId(opportunityId);
+      }
+    }
+
+    if (route?.page === "actions") {
+      setActionViewMode(editorModeFromRoute(route, "actions"));
+      if (route.entityId) {
+        selectedActionIdRef.current = route.entityId;
+        setSelectedActionId(route.entityId);
+      }
+    }
+    if (route?.page === "risks") {
+      setRiskViewMode(editorModeFromRoute(route, "risks"));
+      if (route.entityId) {
+        selectedRiskIdRef.current = route.entityId;
+        setSelectedRiskId(route.entityId);
+      }
+    }
+    if (route?.page === "knowledge") setKnowledgeViewMode(editorModeFromRoute(route, "knowledge"));
+    if (route?.page === "itineraries") setItineraryViewMode(editorModeFromRoute(route, "itineraries"));
+  }
+
+  function writeBrowserRoute(route, { replace = false } = {}) {
+    if (typeof window === "undefined") return;
+    const url = buildWorkbenchUrl(route);
+    const currentUrl = `${window.location.pathname}${window.location.search}`;
+    const shouldReplace = replace || currentUrl === url;
+    window.history[shouldReplace ? "replaceState" : "pushState"](route, "", url);
+  }
+
+  function navigateTo(nextActive, { filters = {}, entityId, mode } = {}) {
+    const baseRoute = ROUTE_BY_ACTIVE[nextActive];
+    if (!baseRoute) return;
+    if (nextActive === "quick") setRecordMode("voice");
+    const route = {
+      ...baseRoute,
+      ...(mode ? { mode } : {}),
+      ...(entityId ? { entityId } : {}),
+      filters,
+    };
+    applyWorkbenchRoute(route);
+    writeBrowserRoute(route);
   }
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
+    if (initialRoute?.replace) writeBrowserRoute(initialRoute, { replace: true });
     const onPopState = () => {
       const route = parseWorkbenchRoute({
         pathname: window.location.pathname,
         search: window.location.search,
         hash: window.location.hash,
       });
-      const next = routeToActive[route.active];
-      if (next) setActive(next);
+      applyWorkbenchRoute(route);
+      if (route.replace) writeBrowserRoute(route, { replace: true });
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   useEffect(() => {
+    selectedCustomerIdRef.current = selectedCustomerId;
+    selectedOpportunityIdRef.current = selectedOpportunityId;
+    selectedActionIdRef.current = selectedActionId;
+    selectedRiskIdRef.current = selectedRiskId;
+  }, [selectedActionId, selectedCustomerId, selectedOpportunityId, selectedRiskId]);
+
+  useEffect(() => {
     if (typeof window === "undefined" || !workspaceRef.current) return;
     const revealActiveNavigation = () => {
       if (!window.matchMedia?.("(max-width: 760px)").matches) return;
+      const activeParent = PARENT_NAV_BY_ACTIVE[active] ?? active;
       const activeButton = [...workspaceRef.current.querySelectorAll(".sidebar .nav-item")]
-        .find((button) => button.dataset.testid === `nav-${active}`);
+        .find((button) => button.dataset.testid === `nav-${activeParent}`);
       activeButton?.scrollIntoView?.({ block: "nearest", inline: "nearest", behavior: "auto" });
     };
     revealActiveNavigation();
@@ -602,10 +733,18 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
         )) return;
         const nextState = normalizeBootstrapData(data);
         setWorkbenchState(nextState);
-        setSelectedCustomerId(nextState.customers[0]?.id ?? null);
-        setSelectedOpportunityId(nextState.opportunities[0]?.id ?? null);
-        setSelectedActionId(nextState.actions[0]?.id ?? null);
-        setSelectedRiskId(nextState.risks[0]?.id ?? null);
+        setSelectedCustomerId((current) => (
+          nextState.customers.some((item) => item.id === current) ? current : nextState.customers[0]?.id ?? null
+        ));
+        setSelectedOpportunityId((current) => (
+          nextState.opportunities.some((item) => item.id === current) ? current : nextState.opportunities[0]?.id ?? null
+        ));
+        setSelectedActionId((current) => (
+          nextState.actions.some((item) => item.id === current) ? current : nextState.actions[0]?.id ?? null
+        ));
+        setSelectedRiskId((current) => (
+          nextState.risks.some((item) => item.id === current) ? current : nextState.risks[0]?.id ?? null
+        ));
         setSelectedKnowledgeId(nextState.knowledge[0]?.id ?? null);
         setSelectedSolutionId(nextState.solutionDocs[0]?.id ?? null);
         setSelectedItineraryId(nextState.itineraries[0]?.id ?? null);
@@ -618,10 +757,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
           controller.signal,
         )) return;
         setWorkbenchState(createErrorWorkbenchState(error));
-        setSelectedCustomerId(null);
-        setSelectedOpportunityId(null);
-        setSelectedActionId(null);
-        setSelectedRiskId(null);
         setSelectedKnowledgeId(null);
         setSelectedSolutionId(null);
         setSelectedItineraryId(null);
@@ -631,8 +766,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     return () => controller.abort();
   }, [apiClient, bootstrapAttempt]);
 
+  const activeParent = PARENT_NAV_BY_ACTIVE[active] ?? active;
   const activeMeta =
-    navItems.find((item) => item.id === active) ??
+    navItems.find((item) => item.id === activeParent) ??
     compatibilityRouteMeta[active] ??
     navItems[0];
   const apiStatusLabel = {
@@ -641,15 +777,44 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     offline: "离线",
   }[backendStatus];
 
-  const selectedCustomer =
-    workbenchCustomers.find((item) => item.id === selectedCustomerId) ?? workbenchCustomers[0];
-  const selectedOpportunity =
-    workbenchOpportunities.find((item) => item.id === selectedOpportunityId) ?? workbenchOpportunities[0];
-  const selectedAction =
-    workbenchActions.find((item) => item.id === selectedActionId) ?? workbenchActions[0];
+  const scopedOpportunityId = routeFilters?.opportunityId?.[0] ?? null;
+  const scopedActions = scopedOpportunityId
+    ? workbenchActions.filter((item) => item.opportunityId === scopedOpportunityId)
+    : workbenchActions;
+  const scopedRisks = scopedOpportunityId
+    ? workbenchRisks.filter((item) => item.opportunityId === scopedOpportunityId)
+    : workbenchRisks;
+  const scopedOpportunities = scopedOpportunityId
+    ? workbenchOpportunities.filter((item) => item.id === scopedOpportunityId)
+    : workbenchOpportunities;
+  const tenderCustomerId = active === "hospital-tenders" ? routeEntityId : null;
+  const customerLookupId = active === "customer" && routeEntityId ? routeEntityId : selectedCustomerId;
+  const opportunityLookupId = active === "opportunity" && routeEntityId
+    ? routeEntityId
+    : scopedOpportunityId ?? selectedOpportunityId;
+  const actionLookupId = active === "actions" && routeEntityId ? routeEntityId : selectedActionId;
+  const riskLookupId = active === "risk" && routeEntityId ? routeEntityId : selectedRiskId;
+  const selectedCustomerRecord = workbenchCustomers.find((item) => item.id === customerLookupId) ?? null;
+  const selectedOpportunityRecord = workbenchOpportunities.find((item) => item.id === opportunityLookupId) ?? null;
+  const selectedActionRecord = scopedActions.find((item) => item.id === actionLookupId) ?? null;
+  const selectedRiskRecord = scopedRisks.find((item) => item.id === riskLookupId) ?? null;
+  const selectedCustomer = selectedCustomerRecord ?? (
+    active !== "customer" || customerViewMode === "list" || customerViewMode === "create"
+      ? workbenchCustomers[0]
+      : null
+  );
+  const selectedOpportunity = selectedOpportunityRecord ?? (
+    active !== "opportunity" || opportunityViewMode === "list" || opportunityViewMode === "create"
+      ? workbenchOpportunities[0]
+      : null
+  );
+  const selectedAction = selectedActionRecord ?? (
+    active !== "actions" || actionViewMode === "list" ? scopedActions[0] : null
+  );
   const selectedDoc = workbenchSolutionDocs.find((item) => item.id === selectedSolutionId) ?? workbenchSolutionDocs[0];
-  const selectedRisk =
-    workbenchRisks.find((item) => item.id === selectedRiskId) ?? workbenchRisks[0];
+  const selectedRisk = selectedRiskRecord ?? (
+    active !== "risk" || riskViewMode === "list" ? scopedRisks[0] : null
+  );
   const selectedKnowledge =
     workbenchKnowledge.find((item) => item.id === selectedKnowledgeId) ?? workbenchKnowledge[0];
   const selectedItinerary =
@@ -681,43 +846,90 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
   })();
   const avatarInitial = String(authSession?.displayName ?? authSession?.account ?? "继").trim().slice(0, 1) || "继";
 
+  function selectCustomer(customerId) {
+    selectedCustomerIdRef.current = customerId;
+    setSelectedCustomerId(customerId);
+  }
+
+  function selectOpportunity(opportunityId) {
+    selectedOpportunityIdRef.current = opportunityId;
+    setSelectedOpportunityId(opportunityId);
+  }
+
+  function selectAction(actionId) {
+    selectedActionIdRef.current = actionId;
+    setSelectedActionId(actionId);
+  }
+
+  function selectRisk(riskId) {
+    selectedRiskIdRef.current = riskId;
+    setSelectedRiskId(riskId);
+  }
+
+  function changeCustomerViewMode(mode) {
+    setCustomerViewMode(mode);
+    const entityId = selectedCustomerIdRef.current;
+    if (mode === "list") navigateTo("customer");
+    else if (mode === "create") navigateTo("customer", { mode: "new" });
+    else if (entityId) navigateTo("customer", { mode, entityId });
+  }
+
+  function changeOpportunityViewMode(mode) {
+    setOpportunityViewMode(mode);
+    const entityId = selectedOpportunityIdRef.current;
+    if (mode === "list") navigateTo("opportunity");
+    else if (mode === "create") navigateTo("opportunity", { mode: "new" });
+    else if (entityId) navigateTo("opportunity", { mode, entityId });
+  }
+
+  function changeActionViewMode(mode) {
+    setActionViewMode(mode);
+    const entityId = selectedActionIdRef.current;
+    if (mode === "list") navigateTo("actions", { filters: routeFilters });
+    else if (entityId) navigateTo("actions", { mode, entityId, filters: routeFilters });
+  }
+
+  function changeRiskViewMode(mode) {
+    setRiskViewMode(mode);
+    const entityId = selectedRiskIdRef.current;
+    if (mode === "list") navigateTo("risk", { filters: routeFilters });
+    else if (entityId) navigateTo("risk", { mode, entityId, filters: routeFilters });
+  }
+
   function openCustomerDetail(customerId) {
-    if (customerId) setSelectedCustomerId(customerId);
-    setCustomerViewMode("detail");
-    setActive("customer");
+    if (!customerId) return;
+    selectCustomer(customerId);
+    navigateTo("customer", { mode: "detail", entityId: customerId });
   }
 
   function openOpportunityDetail(opportunityId) {
-    if (opportunityId) setSelectedOpportunityId(opportunityId);
-    setOpportunityViewMode("detail");
-    setActive("opportunity");
+    if (!opportunityId) return;
+    selectOpportunity(opportunityId);
+    navigateTo("opportunity", { mode: "detail", entityId: opportunityId });
   }
 
   function openOpportunityList() {
-    setOpportunityViewMode("list");
-    setActive("opportunity");
+    navigateTo("opportunity");
   }
 
   function openActionDetail(actionId) {
-    if (actionId) setSelectedActionId(actionId);
-    setActionViewMode("detail");
-    setActive("actions");
+    if (!actionId) return;
+    selectAction(actionId);
+    navigateTo("actions", { mode: "detail", entityId: actionId, filters: routeFilters });
   }
 
   function openActionList() {
-    setActionViewMode("list");
-    setActive("actions");
+    navigateTo("actions");
   }
 
   function openRiskDetail(riskId) {
-    if (riskId) setSelectedRiskId(riskId);
-    setRiskViewMode("detail");
-    setActive("risk");
+    if (!riskId) return;
+    selectRisk(riskId);
+    navigateTo("risk", { mode: "detail", entityId: riskId, filters: routeFilters });
   }
 
   function openRiskList() {
-    setRiskViewMode("list");
-    setActive("risk");
+    navigateTo("risk");
   }
 
   async function refreshOverviewSummary() {
@@ -745,7 +957,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const currentEntity = draft.id ? workbenchCustomers.find((item) => item.id === draft.id) : null;
     const saved = await apiClient.saveCustomer(currentEntity ? { ...draft, version: currentEntity.version } : draft);
     setWorkbenchCustomers((current) => mergeById(current, saved));
-    setSelectedCustomerId(saved.id);
+    selectCustomer(saved.id);
     await refreshOverviewSummary();
     return saved;
   }
@@ -755,7 +967,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     const currentEntity = draft.id ? workbenchOpportunities.find((item) => item.id === draft.id) : null;
     const saved = await apiClient.saveOpportunity(currentEntity ? { ...draft, version: currentEntity.version } : draft);
     setWorkbenchOpportunities((current) => mergeById(current, saved));
-    setSelectedOpportunityId(saved.id);
+    selectOpportunity(saved.id);
     setWorkbenchCustomers((current) =>
       current.map((customer) => {
         if (customer.id !== saved.customerId) return customer;
@@ -812,6 +1024,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setSelectedCustomerId((current) => current === id ? null : current);
     setSelectedOpportunityId(null);
     setCustomerViewMode("list");
+    navigateTo("customer");
     await refreshOverviewSummary();
     return deleted ?? { id };
   }
@@ -832,6 +1045,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     );
     setSelectedOpportunityId((current) => current === id ? null : current);
     setOpportunityViewMode("list");
+    navigateTo("opportunity");
     await refreshOverviewSummary();
     return deleted ?? { id };
   }
@@ -853,6 +1067,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setWorkbenchActions((current) => removeEntityById(current, id));
     setSelectedActionId((current) => current === id ? null : current);
     setActionViewMode("list");
+    navigateTo("actions", { filters: routeFilters });
     await refreshOverviewSummary();
     return deleted ?? { id };
   }
@@ -864,6 +1079,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setWorkbenchRisks((current) => removeEntityById(current, id));
     setSelectedRiskId((current) => current === id ? null : current);
     setRiskViewMode("list");
+    navigateTo("risk", { filters: routeFilters });
     await refreshOverviewSummary();
     return deleted ?? { id };
   }
@@ -944,7 +1160,87 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       (refreshed.opportunities ?? []).reduce((items, item) => mergeById(items, item), current));
   }
 
-  const blockedByBootstrap = active !== "settings" && (
+  const subnavItems = moduleSubnavItems[activeParent] ?? [];
+  const customerContextId = tenderCustomerId ?? (
+    active === "customer" && ["detail", "edit"].includes(customerViewMode)
+      ? routeEntityId ?? selectedCustomerId
+      : null
+  );
+  const opportunityContextId = scopedOpportunityId ?? (
+    active === "opportunity" && ["detail", "edit"].includes(opportunityViewMode)
+      ? routeEntityId ?? selectedOpportunityId
+      : null
+  );
+  const subnavContextLabel = activeParent === "customer" && customerContextId
+    ? `当前客户：${workbenchCustomers.find((item) => item.id === customerContextId)?.name ?? "记录不可用"}`
+    : activeParent === "opportunity" && opportunityContextId
+      ? `当前商机：${workbenchOpportunities.find((item) => item.id === opportunityContextId)?.name ?? "记录不可用"}`
+      : "";
+
+  function handleModuleSubnavNavigate(nextActive) {
+    if (activeParent === "customer") {
+      if (nextActive === "customer") {
+        if (customerContextId) openCustomerDetail(customerContextId);
+        else navigateTo("customer");
+        return;
+      }
+      navigateTo("hospital-tenders", customerContextId ? { entityId: customerContextId } : {});
+      return;
+    }
+
+    if (activeParent === "opportunity") {
+      if (nextActive === "opportunity") {
+        if (opportunityContextId) openOpportunityDetail(opportunityContextId);
+        else navigateTo("opportunity");
+        return;
+      }
+      const filters = opportunityContextId ? { opportunityId: [opportunityContextId] } : {};
+      navigateTo(nextActive, { filters });
+      return;
+    }
+
+    navigateTo(nextActive);
+  }
+
+  function clearModuleContext() {
+    if (activeParent === "customer") {
+      navigateTo(active === "hospital-tenders" ? "hospital-tenders" : "customer");
+      return;
+    }
+    if (activeParent === "opportunity") {
+      navigateTo(active === "opportunity" ? "opportunity" : active);
+    }
+  }
+
+  const customerEntityUnavailable = active === "customer"
+    && ["detail", "edit"].includes(customerViewMode)
+    && !selectedCustomer;
+  const opportunityEntityUnavailable = active === "opportunity"
+    && ["detail", "edit"].includes(opportunityViewMode)
+    && !selectedOpportunity;
+  const actionEntityUnavailable = active === "actions"
+    && ["detail", "edit"].includes(actionViewMode)
+    && !selectedAction;
+  const riskEntityUnavailable = active === "risk"
+    && ["detail", "edit"].includes(riskViewMode)
+    && !selectedRisk;
+  const customerContextUnavailable = Boolean(
+    active === "hospital-tenders"
+    && tenderCustomerId
+    && !workbenchCustomers.some((item) => item.id === tenderCustomerId),
+  );
+  const opportunityContextUnavailable = Boolean(
+    ["actions", "risk", "kanban"].includes(active)
+    && scopedOpportunityId
+    && scopedOpportunities.length === 0,
+  );
+  const settingsSection = {
+    settings: "security",
+    "settings-notifications": "notifications",
+    "settings-tender-schedule": "tender-schedule",
+  }[active] ?? "";
+
+  const blockedByBootstrap = activeParent !== "settings" && (
     bootstrapStatus === "loading" ||
     bootstrapStatus === "error" ||
     (bootstrapStatus === "empty" && active === "overview")
@@ -999,7 +1295,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               return (
                 <button
                   key={item.id}
-                  className={`nav-item ${active === item.id ? "active" : ""}`}
+                  className={`nav-item ${activeParent === item.id ? "active" : ""}`}
                   data-testid={`nav-${item.id}`}
                   aria-label={item.label}
                   title={item.label}
@@ -1007,8 +1303,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                   onClick={() => {
                     if (item.id === "customer") setCustomerViewMode("list");
                     if (item.id === "opportunity") setOpportunityViewMode("list");
-                    if (item.id === "actions") setActionViewMode("list");
-                    if (item.id === "risk") setRiskViewMode("list");
                     if (item.id === "knowledge") setKnowledgeViewMode("list");
                     if (item.id === "itinerary") setItineraryViewMode("list");
                     navigateTo(item.id);
@@ -1032,7 +1326,16 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
             className={`content ${active === "quick" ? "quick-content" : ""}`}
             data-testid={`page-${active}`}
             data-workbench-state={bootstrapStatus}
+            data-settings-section={settingsSection || undefined}
           >
+            <ModuleSubnav
+              label={activeMeta.label}
+              items={subnavItems}
+              activeId={active}
+              onNavigate={handleModuleSubnavNavigate}
+              contextLabel={subnavContextLabel}
+              onClearContext={subnavContextLabel ? clearModuleContext : undefined}
+            />
             <PageHeading
               active={active}
               activeMeta={activeMeta}
@@ -1046,15 +1349,18 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 status={visibleBootstrapStatus}
                 errorMessage={bootstrapErrorMessage}
                 onRetry={() => setBootstrapAttempt(incrementBootstrapAttempt)}
-                onCreateCustomer={() => {
-                  setCustomerViewMode("create");
-                  navigateTo("customer");
-                }}
+                onCreateCustomer={() => navigateTo("customer", { mode: "new" })}
               />
             ) : (
               <>
-            {active === "settings" && (
-              <SystemSettingsPage apiClient={apiClient} backendStatus={backendStatus} />
+            {settingsSection && (
+              <div className={`settings-section-view settings-section-${settingsSection}`}>
+                <SystemSettingsPage
+                  apiClient={apiClient}
+                  backendStatus={backendStatus}
+                  section={settingsSection}
+                />
+              </div>
             )}
             {active === "overview" && (
               <Overview
@@ -1099,10 +1405,12 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             )}
             {active === "customer" && (
-              <CustomerPage
+              customerEntityUnavailable ? (
+                <EntityUnavailablePanel label="客户" onBack={() => navigateTo("customer")} />
+              ) : <CustomerPage
                 items={workbenchCustomers}
                 selected={selectedCustomer}
-                onSelect={setSelectedCustomerId}
+                onSelect={selectCustomer}
                 setActive={navigateTo}
                 setSelectedOpportunityId={setSelectedOpportunityId}
                 openOpportunityDetail={openOpportunityDetail}
@@ -1110,20 +1418,22 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 onDeleteCustomer={handleDeleteCustomer}
                 opportunitiesList={workbenchOpportunities}
                 viewMode={customerViewMode}
-                setViewMode={setCustomerViewMode}
+                setViewMode={changeCustomerViewMode}
                 apiClient={apiClient}
                 backendStatus={backendStatus}
               />
             )}
             {active === "opportunity" && (
-              <OpportunityPage
+              opportunityEntityUnavailable ? (
+                <EntityUnavailablePanel label="商机" onBack={() => navigateTo("opportunity")} />
+              ) : <OpportunityPage
                 items={workbenchOpportunities}
                 selected={selectedOpportunity}
-                onSelect={setSelectedOpportunityId}
+                onSelect={selectOpportunity}
                 setActive={navigateTo}
                 setSelectedCustomerId={setSelectedCustomerId}
                 viewMode={opportunityViewMode}
-                setViewMode={setOpportunityViewMode}
+                setViewMode={changeOpportunityViewMode}
                 customersList={workbenchCustomers}
                 onSaveOpportunity={handleSaveOpportunity}
                 onDeleteOpportunity={handleDeleteOpportunity}
@@ -1132,13 +1442,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             )}
             {active === "actions" && (
-              <ActionsPage
-                items={workbenchActions}
+              opportunityContextUnavailable || actionEntityUnavailable ? (
+                <EntityUnavailablePanel label={opportunityContextUnavailable ? "商机" : "动作"} onBack={() => navigateTo("actions")} />
+              ) : <ActionsPage
+                items={scopedActions}
                 selected={selectedAction}
-                onSelect={setSelectedActionId}
+                onSelect={selectAction}
                 setActive={navigateTo}
                 viewMode={actionViewMode}
-                setViewMode={setActionViewMode}
+                setViewMode={changeActionViewMode}
                 onUpdateActionStatus={handleUpdateActionStatus}
                 onDeleteAction={handleDeleteAction}
                 backendStatus={backendStatus}
@@ -1193,12 +1505,14 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             )}
             {active === "risk" && (
-              <RiskPage
-                items={workbenchRisks}
+              opportunityContextUnavailable || riskEntityUnavailable ? (
+                <EntityUnavailablePanel label={opportunityContextUnavailable ? "商机" : "风险"} onBack={() => navigateTo("risk")} />
+              ) : <RiskPage
+                items={scopedRisks}
                 selected={selectedRisk}
-                onSelect={setSelectedRiskId}
+                onSelect={selectRisk}
                 viewMode={riskViewMode}
-                setViewMode={setRiskViewMode}
+                setViewMode={changeRiskViewMode}
                 onUpdateRiskStatus={handleUpdateRiskStatus}
                 onDeleteRisk={handleDeleteRisk}
                 backendStatus={backendStatus}
@@ -1222,8 +1536,10 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             )}
             {active === "kanban" && (
-              <KanbanPage
-                opportunitiesList={workbenchOpportunities}
+              opportunityContextUnavailable ? (
+                <EntityUnavailablePanel label="商机" onBack={() => navigateTo("kanban")} />
+              ) : <KanbanPage
+                opportunitiesList={scopedOpportunities}
                 setActive={navigateTo}
                 setSelectedOpportunityId={setSelectedOpportunityId}
                 openOpportunityDetail={openOpportunityDetail}
@@ -1238,11 +1554,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               />
             )}
             {active === "hospital-tenders" && (
-              <HospitalTenderPage
+              customerContextUnavailable ? (
+                <EntityUnavailablePanel label="客户" onBack={() => navigateTo("hospital-tenders")} />
+              ) : <HospitalTenderPage
                 apiClient={apiClient}
                 backendStatus={backendStatus}
                 customers={workbenchCustomers}
+                customerId={tenderCustomerId}
                 onSelectCustomer={(customerId) => openCustomerDetail(customerId)}
+                onOpenSchedule={() => navigateTo("settings-tender-schedule")}
               />
             )}
               </>

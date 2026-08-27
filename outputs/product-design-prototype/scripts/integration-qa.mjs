@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -1052,7 +1052,36 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const aiSuggestions = {};
         aiSuggestions.customer = await clickManualSuggestion('page-customer', '生成客户画像补全建议');
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('商机档案'))?.click();
+        const selectedCustomerUrl = new URL(window.location.href);
+        const selectedCustomerId = decodeURIComponent(selectedCustomerUrl.pathname.split('/').filter(Boolean).at(-1) || '');
+        const isTenderResource = (resourceUrl) => {
+          try {
+            return new URL(resourceUrl, window.location.origin).pathname === '/api/hospital-tenders';
+          } catch {
+            return false;
+          }
+        };
+        const tenderResourcesBefore = performance.getEntriesByType('resource')
+          .map((entry) => entry.name)
+          .filter(isTenderResource);
+        document.querySelector('[data-testid="subnav-hospital-tenders"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-hospital-tenders"]'), 5000);
+        const firstTenderRequest = await waitUntil(() => performance.getEntriesByType('resource')
+          .map((entry) => entry.name)
+          .filter(isTenderResource)[tenderResourcesBefore.length], 5000);
+        const firstTenderRequestUrl = new URL(firstTenderRequest, window.location.origin);
+        cardInteractions.customerTenderContext = {
+          selectedCustomerId,
+          requestCustomerId: firstTenderRequestUrl.searchParams.get('customerId'),
+          firstRequestScoped: firstTenderRequestUrl.searchParams.get('customerId') === selectedCustomerId,
+          canonicalPath: window.location.pathname === '/customers/' + encodeURIComponent(selectedCustomerId) + '/tenders',
+          businessPageHasScheduleLink: Boolean(document.querySelector('[data-testid="page-hospital-tenders"] button')?.textContent || document.querySelector('[data-testid="page-hospital-tenders"]')),
+        };
+        history.back();
+        await waitUntil(() => document.querySelector('[data-testid="customer-detail-view"]'), 5000);
+        cardInteractions.customerTenderContext.backRestored = window.location.pathname === selectedCustomerUrl.pathname;
+
+        document.querySelector('[data-testid="nav-opportunity"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-opportunity"]'), 5000);
         await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 5000);
         const opportunitySearch = document.querySelector('[data-testid="opportunity-local-search"]');
@@ -1184,8 +1213,26 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         cardInteractions.quickAiRequestsAfterHistory = quickAiRequestsAfterHistory;
         window.__qaCardInteractions = cardInteractions;
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('风险识别'))?.click();
+        document.querySelector('[data-testid="nav-opportunity"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 5000);
+        document.querySelector('[data-testid="opportunity-open-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"]'), 5000);
+        const scopedOpportunityPath = window.location.pathname;
+        const scopedOpportunityId = decodeURIComponent(scopedOpportunityPath.split('/').filter(Boolean).at(-1) || '');
+        document.querySelector('[data-testid="subnav-risk"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-risk"]'), 5000);
+        const riskContextUrl = new URL(window.location.href);
+        cardInteractions.opportunityContext = {
+          selectedOpportunityId: scopedOpportunityId,
+          riskScoped: riskContextUrl.searchParams.get('opportunityId') === scopedOpportunityId,
+          riskCanonicalPath: riskContextUrl.pathname === '/opportunities/risks',
+        };
+        history.back();
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"]'), 5000);
+        cardInteractions.opportunityContext.backRestored = window.location.pathname === scopedOpportunityPath;
+        history.forward();
+        await waitUntil(() => document.querySelector('[data-testid="page-risk"]'), 5000);
+        cardInteractions.opportunityContext.forwardRestored = new URL(window.location.href).searchParams.get('opportunityId') === scopedOpportunityId;
         const riskSearch = document.querySelector('[data-testid="risk-local-search"]');
         if (!riskSearch) throw new Error('Missing risk local search');
         setInputValue(riskSearch, '预算');
@@ -1236,8 +1283,9 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           text: document.querySelector('[data-testid="page-risk"]')?.textContent ?? '',
         };
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('下一步动作'))?.click();
+        document.querySelector('[data-testid="subnav-actions"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-actions"]'), 5000);
+        cardInteractions.opportunityContext.actionScoped = new URL(window.location.href).searchParams.get('opportunityId') === scopedOpportunityId;
         const actionsSearch = document.querySelector('[data-testid="actions-local-search"]');
         if (!actionsSearch) throw new Error('Missing actions local search');
         setInputValue(actionsSearch, '补齐');
@@ -1275,6 +1323,28 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           detailViewOpened: actionDetailViewOpened,
           text: document.querySelector('[data-testid="page-actions"]')?.textContent ?? '',
         };
+
+        document.querySelector('[data-testid="nav-settings"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="settings-security-section"]'), 5000);
+        const settingsIa = {
+          security: window.location.pathname === '/settings/config',
+          primaryHighlighted: document.querySelector('[data-testid="nav-settings"]')?.classList.contains('active') ?? false,
+        };
+        document.querySelector('[data-testid="subnav-weixin"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="weixin-binding-page"]'), 5000);
+        settingsIa.weixin = window.location.pathname === '/settings/weixin'
+          && ['生成二维码', '刷新状态', '停止'].every((label) =>
+            [...document.querySelectorAll('[data-testid="weixin-binding-page"] button')].some((button) => button.textContent.includes(label)));
+        document.querySelector('[data-testid="subnav-settings-notifications"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="settings-notifications-section"]'), 5000);
+        settingsIa.notifications = window.location.pathname === '/settings/notifications'
+          && document.querySelector('[data-testid="settings-notifications-section"]')?.textContent.includes('PushPlus');
+        document.querySelector('[data-testid="subnav-settings-tender-schedule"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="settings-tender-schedule-section"]'), 5000);
+        settingsIa.tenderSchedule = window.location.pathname === '/settings/tender-schedule'
+          && document.querySelector('[data-testid="settings-tender-schedule-section"]')?.textContent.includes('每小时处理下一批 10 家客户')
+          && document.querySelector('[data-testid="settings-tender-schedule-section"]')?.textContent.includes('立即检测下一批');
+        window.__qaSettingsIa = settingsIa;
 
         const setControlValue = (control, value) => {
           const prototype = control.tagName === 'TEXTAREA'
@@ -1383,7 +1453,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const customerDeleteConfirmed =
           !document.querySelector('[data-testid="customer-list-view"]')?.textContent?.includes('测试删除客户');
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('商机档案'))?.click();
+        document.querySelector('[data-testid="nav-opportunity"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-opportunity"]'), 5000);
         document.querySelector('[data-testid="opportunity-create-detail"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"] [data-testid="opportunity-editor"]'), 5000);
@@ -1439,8 +1509,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         linkedOpportunity.click();
         await waitUntil(() => document.querySelector('[data-testid="page-opportunity"]'), 5000);
         const linkedOpportunityOpened = document.querySelector('[data-testid="page-opportunity"] h1')?.textContent?.includes('测试集成客户规划调研') ?? false;
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('商机看板'))?.click();
+        const linkedOpportunityId = decodeURIComponent(window.location.pathname.split('/').filter(Boolean).at(-1) || '');
+        document.querySelector('[data-testid="subnav-kanban"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-kanban"]'), 5000);
+        cardInteractions.opportunityContext.kanbanScoped = new URL(window.location.href).searchParams.get('opportunityId') === linkedOpportunityId;
         const kanbanDynamicCard = [...document.querySelectorAll('[data-testid="page-kanban"] .deal-card')]
           .find((button) => button.textContent.includes('测试集成客户规划调研'));
         const kanbanShowsDynamicOpportunity = Boolean(kanbanDynamicCard);
@@ -1968,6 +2040,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         weeklyDraftText: window.__qaDrafts?.weekly ?? '',
         weeklyEditor: window.__qaWeeklyEditor ?? {},
         cardInteractions: window.__qaCardInteractions ?? {},
+        settingsIa: window.__qaSettingsIa ?? {},
         aiSuggestions: window.__qaAiSuggestions ?? {},
         voiceFlow: window.__qaVoiceFlow ?? {},
         voiceFallback: window.__qaVoiceFallback ?? {},
@@ -2001,8 +2074,7 @@ async function inspectSalesDecisionViewport(cdp, frontendUrl, viewport) {
       };
 
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
-      const opportunityNav = [...document.querySelectorAll('.nav-item')]
-        .find((button) => button.textContent.includes('商机档案'));
+      const opportunityNav = document.querySelector('[data-testid="nav-opportunity"]');
       if (!opportunityNav) throw new Error('Missing opportunity navigation');
       opportunityNav.click();
       await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'));
@@ -2948,6 +3020,9 @@ async function main() {
         assert.equal(result.cardInteractions.customerTemperature, true, "desktop customer temperature card should open customer detail");
         assert.equal(result.cardInteractions.customerLocalSearch, true, "desktop customer page should search only customer records");
         assert.equal(result.cardInteractions.customerDetailViewOpened, true, "desktop customer page should open detail as a sub view");
+        assert.equal(result.cardInteractions.customerTenderContext.firstRequestScoped, true, "desktop customer tender entry must scope its first notice request to the selected customer");
+        assert.equal(result.cardInteractions.customerTenderContext.canonicalPath, true, "desktop customer tender entry should use the canonical customer tender deep link");
+        assert.equal(result.cardInteractions.customerTenderContext.backRestored, true, "desktop customer tender history back should restore the exact customer detail");
         assert.equal(result.cardInteractions.rhythmCard, true, "desktop rhythm card should open its related module");
         assert.equal(result.cardInteractions.stageCard, true, "desktop stage card should open kanban");
         assert.equal(result.cardInteractions.weeklyStartsEmpty, true, "desktop weekly page should start from a real empty state");
@@ -2976,6 +3051,16 @@ async function main() {
         assert.equal(result.cardInteractions.opportunityLocalSearch, true, "desktop opportunity page should search only opportunity records");
         assert.equal(result.cardInteractions.opportunityDetailViewOpened, true, "desktop opportunity page should open detail as a sub view");
         assert.equal(result.cardInteractions.timelineExpanded, true, "desktop opportunity timeline item should expand details");
+        assert.equal(result.cardInteractions.opportunityContext.riskScoped, true, "desktop risk child page should keep the selected opportunity context");
+        assert.equal(result.cardInteractions.opportunityContext.actionScoped, true, "desktop action child page should keep the selected opportunity context");
+        assert.equal(result.cardInteractions.opportunityContext.kanbanScoped, true, "desktop kanban child page should keep the selected opportunity context");
+        assert.equal(result.cardInteractions.opportunityContext.backRestored, true, "desktop browser back should restore the exact opportunity detail");
+        assert.equal(result.cardInteractions.opportunityContext.forwardRestored, true, "desktop browser forward should restore the scoped risk page");
+        assert.equal(result.settingsIa.security, true, "desktop system settings should open the focused security and AI page");
+        assert.equal(result.settingsIa.primaryHighlighted, true, "desktop settings child pages should keep system settings highlighted");
+        assert.equal(result.settingsIa.weixin, true, "desktop WeChat settings child should preserve the complete binding controls");
+        assert.equal(result.settingsIa.notifications, true, "desktop notification settings child should expose PushPlus configuration");
+        assert.equal(result.settingsIa.tenderSchedule, true, "desktop tender scheduler settings child should expose fixed policy and run controls");
         assert.equal(result.aiSuggestions.customer, true, "desktop customer page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.opportunity, true, "desktop opportunity page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.knowledge, true, "desktop knowledge page should generate an AI suggestion through the UI");

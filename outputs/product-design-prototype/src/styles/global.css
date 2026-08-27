@@ -5024,6 +5024,112 @@ textarea:focus {
   }
 }
 
+.module-subnav {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid rgba(47, 107, 255, 0.12);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(47, 107, 255, 0.055), rgba(14, 165, 183, 0.025));
+}
+
+.module-subnav-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--body);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.module-subnav-heading > span:first-child {
+  flex: 0 0 auto;
+  color: var(--text);
+  letter-spacing: 0.04em;
+}
+
+.module-subnav-context {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.module-subnav-context strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--blue-deep);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.module-subnav-context button {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--blue-deep);
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.module-subnav-list {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.module-subnav-item {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--body);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.module-subnav-item:hover {
+  border-color: rgba(47, 107, 255, 0.14);
+  color: var(--blue-deep);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.module-subnav-item.active {
+  border-color: rgba(47, 107, 255, 0.2);
+  color: #fff;
+  background: linear-gradient(135deg, #3d78ff, var(--blue-deep));
+  box-shadow: 0 6px 16px -8px rgba(47, 107, 255, 0.7);
+}
+
+.module-subnav-item:focus-visible,
+.module-subnav-context button:focus-visible {
+  outline: 0;
+  border-color: rgba(47, 107, 255, 0.48);
+  box-shadow: 0 0 0 4px rgba(47, 107, 255, 0.14);
+}
+
 .system-settings-page {
   display: grid;
   gap: 18px;
@@ -5233,6 +5339,174 @@ textarea:focus {
   gap: 10px;
 }
 
+.settings-focused-section {
+  min-width: 0;
+}
+
+.settings-grid-focused {
+  align-items: start;
+}
+
+.settings-scheduler-grid .settings-scheduler-runs {
+  grid-column: 1 / -1;
+}
+
+.settings-schedule-policy {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(47, 107, 255, 0.16);
+  border-radius: 12px;
+  color: var(--blue-deep);
+  background: var(--blue-soft);
+}
+
+.settings-schedule-policy > svg {
+  flex: 0 0 auto;
+}
+
+.settings-schedule-policy strong,
+.settings-schedule-policy p {
+  margin: 0;
+}
+
+.settings-schedule-policy p {
+  margin-top: 5px;
+  color: var(--body);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.settings-scheduler-form {
+  align-content: start;
+}
+
+.settings-scheduler-actions > button {
+  min-height: 44px;
+}
+
+.settings-scheduler-progress {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--subtle);
+}
+
+.settings-scheduler-progress > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--body);
+  font-size: 13px;
+}
+
+.settings-scheduler-progress strong {
+  color: var(--text);
+}
+
+.settings-scheduler-progress progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  accent-color: var(--blue);
+  background: var(--gray-soft);
+}
+
+.settings-scheduler-facts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-scheduler-facts > div {
+  min-width: 0;
+}
+
+.settings-inline-note > svg {
+  margin-right: 5px;
+  vertical-align: -2px;
+}
+
+.settings-run-list {
+  display: grid;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.settings-run-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 10px minmax(180px, 1fr) minmax(190px, auto);
+  align-items: center;
+  gap: 11px;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+
+.settings-run-item + .settings-run-item {
+  border-top: 1px solid var(--line-soft);
+}
+
+.settings-run-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.settings-run-dot.success {
+  background: var(--green);
+}
+
+.settings-run-dot.partial,
+.settings-run-dot.skipped {
+  background: var(--amber);
+}
+
+.settings-run-dot.failed {
+  background: var(--red);
+}
+
+.settings-run-dot.running {
+  background: var(--blue);
+}
+
+.settings-run-item > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.settings-run-item strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.settings-run-item small,
+.settings-run-item > span:last-child,
+.settings-empty-state {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-run-item > span:last-child {
+  text-align: right;
+}
+
+.settings-empty-state {
+  margin: 0;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  text-align: center;
+}
+
 .settings-feedback,
 .settings-loading {
   margin: 0;
@@ -5266,6 +5540,38 @@ textarea:focus {
 }
 
 @media (max-width: 760px) {
+  .module-subnav {
+    margin-inline: -2px;
+    padding: 10px;
+  }
+
+  .module-subnav-heading {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .module-subnav-context {
+    justify-content: space-between;
+  }
+
+  .module-subnav-context strong {
+    white-space: normal;
+  }
+
+  .module-subnav-list {
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scroll-padding-inline: 4px;
+    scrollbar-width: thin;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .module-subnav-item {
+    flex: 0 0 auto;
+  }
+
   .settings-grid {
     grid-template-columns: 1fr;
   }
@@ -5281,6 +5587,19 @@ textarea:focus {
   .settings-status-value {
     white-space: normal;
     text-align: right;
+  }
+
+  .settings-scheduler-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-run-item {
+    grid-template-columns: 10px minmax(0, 1fr);
+  }
+
+  .settings-run-item > span:last-child {
+    grid-column: 2;
+    text-align: left;
   }
 }
 
