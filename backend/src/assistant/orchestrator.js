@@ -274,9 +274,11 @@ function persistBusinessContext(repository, context, update) {
   });
 }
 
-export function safePendingResponse(tool, { code }) {
+export function safePendingResponse(tool, { code, preview }) {
+  const previewText = typeof preview === "string" && preview.trim() ? preview.trim() : null;
   return {
     text: [
+      ...(previewText ? [previewText, ""] : []),
       `待确认操作：${tool.description}`,
       `确认码：${code}`,
       "有效期：10 分钟",
@@ -303,6 +305,7 @@ export function createAssistantOrchestrator({
   clock = () => new Date(),
   pendingTtlMs = 10 * 60 * 1000,
   pendingActionHandler = null,
+  pendingPreviewProviders = {},
 } = {}) {
   if (!eventRepository || typeof eventRepository.receive !== "function" || typeof eventRepository.claim !== "function") {
     throw new TypeError("eventRepository must support receive and claim");
@@ -482,13 +485,16 @@ export function createAssistantOrchestrator({
             const renewed = pendingActionRepository.renewConfirmation(resolvedActionId, { ...scope, confirmationCode: replacementCode });
             const tool = registry.getTool(pendingAction.actionType);
             if (!tool) throw new TypeError("pending action tool is unavailable");
+            const storedPreview = typeof pendingAction.payload?.preview === "string" && pendingAction.payload.preview.trim()
+              ? pendingAction.payload.preview.trim()
+              : null;
             const liveBody = {
               status: "confirmation_required",
               actionId: resolvedActionId,
               toolName: tool.name,
               risk: (pendingAction.payload?.plan || pendingAction.payload)?.risk,
               confirmationCode: renewed.confirmationCode,
-              ...safePendingResponse(tool, { code: renewed.confirmationCode }),
+              ...safePendingResponse(tool, { code: renewed.confirmationCode, preview: storedPreview }),
             };
             const storedBody = { ...liveBody, text: STORED_CONFIRMATION_TEXT };
             delete storedBody.confirmationCode;
@@ -567,6 +573,39 @@ export function createAssistantOrchestrator({
 
       if (isRisky(plan) && !plan.confirmed && !resolvedActionId) {
         if (!pendingActionRepository?.create) return finish(500, { status: "error", message: SAFE_FAILURE });
+        // A registered preview provider can disambiguate the target entity,
+        // pin server-owned facts (ids, expected versions, normalized changes)
+        // into the stored plan, and render a human preview before any pending
+        // action or confirmation code exists. A block result never creates an
+        // action; a provider failure falls through to the safe error response.
+        const previewProvider = pendingPreviewProviders[tool.name];
+        let enriched = null;
+        if (typeof previewProvider === "function") {
+          enriched = await previewProvider({
+            arguments: invocation.arguments,
+            context,
+            businessContext: routingContext,
+            serverData,
+          });
+          if (enriched?.block) {
+            const blockText = typeof enriched.text === "string" && enriched.text.trim()
+              ? enriched.text.trim()
+              : SAFE_FAILURE;
+            return finish(enriched.status ?? 200, {
+              status: enriched.bodyStatus ?? "clarify",
+              message: blockText,
+            }, { draftText: blockText });
+          }
+        }
+        const plannedArguments = enriched && enriched.arguments !== undefined
+          ? validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: enriched.arguments }).arguments
+          : invocation.arguments;
+        const previewText = typeof enriched?.previewText === "string" && enriched.previewText.trim()
+          ? enriched.previewText.trim()
+          : null;
+        const previewSummary = typeof enriched?.previewSummary === "string" && enriched.previewSummary.trim()
+          ? enriched.previewSummary.trim().slice(0, 2000)
+          : (previewText ? previewText.slice(0, 2000) : null);
         const code = exactConfirmationCode(String(confirmationCodeFactory()));
         if (!code) return finish(500, { status: "error", message: SAFE_FAILURE });
         const expiresAt = new Date(clock().getTime() + pendingTtlMs).toISOString();
@@ -577,7 +616,10 @@ export function createAssistantOrchestrator({
             channel: context.channel,
             conversationId: conversation?.id,
             actionType: tool.name,
-            payload: { plan: { ...plan, arguments: invocation.arguments } },
+            payload: {
+              plan: { ...plan, arguments: plannedArguments },
+              ...(previewSummary ? { preview: previewSummary } : {}),
+            },
             confirmationCode: code,
             expiresAt,
           });
@@ -593,7 +635,7 @@ export function createAssistantOrchestrator({
           toolName: tool.name,
           risk: plan.risk,
           confirmationCode: code,
-          ...safePendingResponse(tool, { code }),
+          ...safePendingResponse(tool, { code, preview: previewText ?? previewSummary }),
         };
         const storedBody = { ...publicBody, text: STORED_CONFIRMATION_TEXT };
         delete storedBody.confirmationCode;

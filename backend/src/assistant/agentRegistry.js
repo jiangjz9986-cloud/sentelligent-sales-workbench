@@ -36,6 +36,28 @@ export const TOOL_DEFINITIONS = Object.freeze([
   tool("dashboard.summary", "dashboard", "查询当前账号的业务战情总览", {}),
   tool("customer.search", "customer", "按关键词查询客户", { query: { type: "string", required: true } }),
   tool("customer.detail", "customer", "查询一个客户的限界详情", { customerId: { type: "string", required: true } }),
+  tool("customer.create", "customer", "新增客户档案", {
+    name: { type: "string", required: true },
+    region: { type: "string", required: false },
+    type: { type: "string", required: false },
+    level: { type: "string", required: false },
+    contact: { type: "string", required: false },
+    budget: { type: "string", required: false },
+    summary: { type: "string", required: false },
+    aliases: { type: "array", required: false },
+    tags: { type: "array", required: false },
+  }),
+  tool("customer.update", "customer", "修改客户档案", {
+    customerId: { type: "string", required: false },
+    query: { type: "string", required: false },
+    changes: { type: "object", required: true },
+    expectedVersion: { type: "number", required: false },
+  }),
+  tool("customer.delete", "customer", "删除客户档案（软删除）", {
+    customerId: { type: "string", required: false },
+    query: { type: "string", required: false },
+    expectedVersion: { type: "number", required: false },
+  }),
   tool("opportunity.detail", "opportunity", "查询一个商机的限界详情", { opportunityId: { type: "string", required: true } }),
   tool("sales-decision.preview", "sales-decision", "基于限界业务快照预览项目分析", { opportunityId: { type: "string", required: true } }),
   tool("action-risk.summary", "action-risk", "查询未完成动作和活跃风险摘要", {

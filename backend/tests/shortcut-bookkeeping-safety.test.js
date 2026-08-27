@@ -258,6 +258,66 @@ test("blocks confirmation when a failed modification has no delivered current-ve
   assert.equal(state.completeLocalCalls, 0);
 });
 
+test("yields codes, cancel, resend, and ordinary text to the generic boundary when a non-bookkeeping action is pending", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  const customerAction = {
+    ...structuredClone(state.action),
+    id: "customer-action-1",
+    actionType: "customer.update",
+  };
+  for (const text of ["482913", "取消", "重发确认码", "日照中医医院什么情况", "随便聊聊"]) {
+    const input = {
+      ...pendingInput(state, text),
+      action: structuredClone(customerAction),
+      textClassification: /^\d{6}$/u.test(text)
+        ? { kind: "code", code: text }
+        : text === "取消"
+          ? { kind: "cancel" }
+          : text === "重发确认码"
+            ? { kind: "resend" }
+            : { kind: "ordinary" },
+    };
+    assert.equal(await runtime.handlePending(input), null, text);
+  }
+  assert.equal(state.completeLocalCalls, 0);
+  assert.equal(state.entry.status, "review_required");
+});
+
+test("yields ordinary text to the router when no quote or pending id binds it to bookkeeping", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  for (const text of ["日照中医医院什么情况", "新建客户 莒县人民医院，区域日照", "删除客户 测试医院", "查询 人民医院", "录入"]) {
+    const input = { ...pendingInput(state, text), action: null };
+    assert.equal(await runtime.handlePending(input), null, text);
+  }
+  assert.equal(state.completeLocalCalls, 0);
+});
+
+test("keeps bookkeeping language bound to the draft when no other action is pending", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  const confirmed = await runtime.handlePending(pendingInput(state, "确认"));
+  assert.equal(confirmed.status, 200);
+  assert.equal(state.entry.status, "accepted");
+});
+
+test("a quoted bookkeeping draft keeps priority over a pending customer action", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  const customerAction = {
+    ...structuredClone(state.action),
+    id: "customer-action-2",
+    actionType: "customer.update",
+  };
+  const result = await runtime.handlePending({
+    ...pendingInput(state, "确认"),
+    action: customerAction,
+    context: { owner: "assistant-owner" },
+    serverData: { quote: { text: "编号：202608180001 待确认记账 BK-AAAAAAAAAAAA" } },
+  });
+  assert.notEqual(result, null, "a quoted draft must stay inside the bookkeeping runtime");
+  assert.equal(result.status, 409);
+  assert.match(result.body.text, /引用的记账草稿不是当前可确认版本/);
+  assert.equal(state.completeLocalCalls, 0);
+});
+
 test("retries a transient financial write from the already confirmed delivered draft", async () => {
   const { runtime, state } = makeRuntimeHarness({
     failCompletionOnce: false,

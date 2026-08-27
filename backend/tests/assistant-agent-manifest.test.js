@@ -59,6 +59,31 @@ describe("versioned assistant agent manifests", () => {
     assert.equal(registry.get("personal-finance").enabled, false);
   });
 
+  it("registers the customer write tools and preview task types on the customer manifest", () => {
+    const registry = createAgentManifestRegistry();
+    const customer = registry.get("customer");
+    assert.deepEqual(customer.tools, [
+      "customer.search",
+      "customer.detail",
+      "customer.create",
+      "customer.update",
+      "customer.delete",
+    ]);
+    assert.deepEqual(customer.taskTypes, [
+      "search",
+      "detail",
+      "summarize",
+      "change_preview",
+      "create_preview",
+      "delete_preview",
+    ]);
+    assert.equal(customer.confirmation.write, "explicit");
+    assert.equal(Object.hasOwn(customer.inputSchema.properties, "changes"), true);
+    assert.equal(Object.hasOwn(customer.inputSchema.properties, "expectedVersion"), true);
+    assert.match(customer.systemPrompt, /六位确认码/u);
+    assert.match(customer.systemPrompt, /服务端执行/u);
+  });
+
   it("returns isolated manifest snapshots", () => {
     const first = getAgentManifest("sales-decision");
     first.taskTypes.push("forged");

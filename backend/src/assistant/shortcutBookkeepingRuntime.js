@@ -2245,6 +2245,33 @@ export function createShortcutBookkeepingAssistantRuntime({
     const quote = serverData?.quote ?? null;
     const intent = parseShortcutBookkeepingIntent(text, { friendlyDates: true, now: clock() });
     const shortcutQuote = quoteLikelyTargetsShortcut(account, quote);
+    // Standalone Shortcut intents (loan allocation scope, weekly trip-region
+    // assignment) are owned by this runtime regardless of which pending
+    // action is active in the main conversation.
+    const standaloneShortcutIntent = intent.status === "accepted"
+      && (intent.intent === "loan_assignment" || intent.intent === "region_assignment");
+    // Yield-path guard 1: when the main conversation owns a non-bookkeeping
+    // pending action (for example a customer profile write awaiting its
+    // six-digit code) and the message does not quote a bookkeeping draft,
+    // codes/cancel/resend/ordinary text all belong to the generic
+    // confirmation boundary. Without this, an active bookkeeping draft could
+    // swallow the code for the unrelated action.
+    if (action && action.actionType !== SHORTCUT_BOOKKEEPING_ACTION && !shortcutQuote && !standaloneShortcutIntent) {
+      return null;
+    }
+    // Yield-path guard 2: without a quote or an explicit pending action id,
+    // only bookkeeping language may bind implicitly to an active draft.
+    // Ordinary text (customer questions, profile commands, chit-chat) goes
+    // back to the deterministic router instead of being hijacked by the
+    // implicit current-draft selector. Media capture still passes through to
+    // the newCapture handoff below.
+    const bookkeepingLanguage = intent.status === "accepted"
+      || Boolean(explicitModification(text))
+      || textClassification.kind !== "ordinary"
+      || text === "确认";
+    if (!quote && !pendingActionId && !bookkeepingLanguage && !serverData?.media) {
+      return null;
+    }
     // The pending-action hook is shared by every WeChat assistant capability.
     // Only a quote, an explicitly shortcut-owned action, or a loan-allocation
     // request should enter the stricter financial sender/direct gate.  A bare

@@ -23,6 +23,22 @@ describe("assistant execution policy", () => {
     assert.equal(getToolPolicy("shortcut-bookkeeping.confirm").confirmation, "explicit_language");
   });
 
+  it("classifies the customer profile write tools as code-confirmed writes", () => {
+    assert.deepEqual(getToolPolicy("customer.create"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("customer.update"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("customer.delete"), {
+      risk: "R3", confirmation: "explicit_code", reason: "destructive_write", denied: false,
+    });
+    for (const toolName of ["customer.create", "customer.update", "customer.delete"]) {
+      assert.equal(evaluatePolicy({ toolName }).requiresConfirmation, true, toolName);
+      assert.equal(evaluatePolicy({ toolName, confirmed: true }).requiresConfirmation, false, toolName);
+    }
+  });
+
   it("denies transport, shell, and database tools", () => {
     for (const name of ["http.request", "sql.query", "shell.exec"]) {
       assert.equal(DENY_LIST.has(name), true);

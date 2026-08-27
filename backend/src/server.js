@@ -130,6 +130,10 @@ import { createAssistantBusinessSnapshotAdapter } from "./assistant/businessSnap
 import { createAssistantSettlementSnapshotAdapter } from "./assistant/settlementSnapshotAdapter.js";
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
+import {
+  createCustomerAssistantAdapter,
+  createCustomerPendingPreviewProviders,
+} from "./assistant/customerAssistantAdapter.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
 import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
 import { reconcileWeixinInvoiceAttachments } from "./assistant/weixinInvoiceAttachment.js";
@@ -164,6 +168,12 @@ import {
   validateVisitItineraryRequest,
   validateObject,
 } from "./validation/requests.js";
+import {
+  createCustomer,
+  customerFromRow,
+  softDeleteCustomer,
+  updateCustomer,
+} from "./customers/customerStore.js";
 
 const jsonColumns = {
   customer: [
@@ -607,33 +617,6 @@ function parseJson(value, fallback = []) {
 
 function json(value) {
   return JSON.stringify(value ?? []);
-}
-
-function customerFromRow(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    version: Number(row.version ?? 1),
-    name: row.name,
-    region: row.region,
-    type: row.type,
-    level: row.level,
-    owner: row.owner,
-    contact: row.contact,
-    relation: row.relation,
-    stakeholders: parseJson(row.stakeholders),
-    decisionChain: parseJson(row.decision_chain),
-    historyProjects: parseJson(row.history_projects),
-    infrastructure: parseJson(row.infrastructure),
-    syncPreview: parseJson(row.sync_preview),
-    budget: row.budget,
-    summary: row.summary,
-    needs: parseJson(row.needs),
-    risks: parseJson(row.risks),
-    opportunities: parseJson(row.opportunities),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
 }
 
 function opportunityFromRow(row) {
@@ -1394,43 +1377,6 @@ function quickRecordOwnerScope(requestIdentity, alias = "") {
   };
 }
 
-function createCustomer(db, body) {
-  const id = randomUUID();
-  run(
-    db,
-    `INSERT INTO customers (
-      id, name, region, type, level, owner, contact, relation,
-      stakeholders, decision_chain, history_projects, infrastructure,
-      sync_preview, budget, summary, needs, risks, opportunities
-    ) VALUES (
-      $id, $name, $region, $type, $level, $owner, $contact, $relation,
-      $stakeholders, $decisionChain, $historyProjects, $infrastructure,
-      $syncPreview, $budget, $summary, $needs, $risks, $opportunities
-    )`,
-    {
-      $id: id,
-      $name: body.name,
-      $region: body.region ?? null,
-      $type: body.type ?? null,
-      $level: body.level ?? null,
-      $owner: body.owner ?? null,
-      $contact: body.contact ?? null,
-      $relation: body.relation ?? 0,
-      $stakeholders: json(body.stakeholders),
-      $decisionChain: json(body.decisionChain),
-      $historyProjects: json(body.historyProjects),
-      $infrastructure: json(body.infrastructure),
-      $syncPreview: json(body.syncPreview),
-      $budget: body.budget ?? null,
-      $summary: body.summary ?? null,
-      $needs: json(body.needs),
-      $risks: json(body.risks),
-      $opportunities: json(body.opportunities),
-    },
-  );
-  return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: id }));
-}
-
 function createOpportunity(db, body) {
   const id = randomUUID();
   run(
@@ -1472,55 +1418,6 @@ function patchValue(body, field, currentValue) {
 
 function patchJsonValue(body, field, currentValue) {
   return Object.hasOwn(body, field) ? json(body[field]) : json(currentValue);
-}
-
-function updateCustomer(db, id, body, expectedVersion) {
-  const current = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: id }));
-  if (!current) return null;
-
-  runVersionedUpdate(db, {
-    table: "customers",
-    id,
-    expectedVersion,
-    setSql: `name = $name,
-         region = $region,
-         type = $type,
-         level = $level,
-         owner = $owner,
-         contact = $contact,
-         relation = $relation,
-         stakeholders = $stakeholders,
-         decision_chain = $decisionChain,
-         history_projects = $historyProjects,
-         infrastructure = $infrastructure,
-         sync_preview = $syncPreview,
-         budget = $budget,
-         summary = $summary,
-         needs = $needs,
-         risks = $risks,
-         opportunities = $opportunities`,
-    params: {
-      $name: patchValue(body, "name", current.name),
-      $region: patchValue(body, "region", current.region),
-      $type: patchValue(body, "type", current.type),
-      $level: patchValue(body, "level", current.level),
-      $owner: patchValue(body, "owner", current.owner),
-      $contact: patchValue(body, "contact", current.contact),
-      $relation: patchValue(body, "relation", current.relation),
-      $stakeholders: patchJsonValue(body, "stakeholders", current.stakeholders),
-      $decisionChain: patchJsonValue(body, "decisionChain", current.decisionChain),
-      $historyProjects: patchJsonValue(body, "historyProjects", current.historyProjects),
-      $infrastructure: patchJsonValue(body, "infrastructure", current.infrastructure),
-      $syncPreview: patchJsonValue(body, "syncPreview", current.syncPreview),
-      $budget: patchValue(body, "budget", current.budget),
-      $summary: patchValue(body, "summary", current.summary),
-      $needs: patchJsonValue(body, "needs", current.needs),
-      $risks: patchJsonValue(body, "risks", current.risks),
-      $opportunities: patchJsonValue(body, "opportunities", current.opportunities),
-    },
-  });
-
-  return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
 function updateOpportunity(db, id, body, expectedVersion) {
@@ -2969,6 +2866,12 @@ export function createServer(options = {}) {
         knowledgeQuery,
       }),
     });
+  const assistantCustomerAdapter = options.assistantCustomerAdapter
+    ?? createCustomerAssistantAdapter({
+      snapshotAdapter: assistantBusinessSnapshotAdapter,
+      runRepository: assistantAgentRunRepository,
+      clock: assistantClock,
+    });
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -2987,6 +2890,7 @@ export function createServer(options = {}) {
       invoiceRecognizer,
       businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
       settlementSnapshotAdapter: assistantSettlementSnapshotAdapter,
+      customerAssistantAdapter: assistantCustomerAdapter,
       agentRunRepository: assistantAgentRunRepository,
       salesReportAssistantAdapter: assistantSalesReportAdapter,
       salesLoopPreviewService: assistantSalesLoopPreviewService,
@@ -3004,6 +2908,11 @@ export function createServer(options = {}) {
       confirmationSecret: assistantConfirmationSecret,
       clock: assistantClock,
       pendingActionHandler: shortcutBookkeepingAssistantRuntime.handlePending,
+      pendingPreviewProviders: createCustomerPendingPreviewProviders({
+        adapter: assistantCustomerAdapter,
+        db,
+        resolveBusinessOwner: assistantBusinessOwnerResolver,
+      }),
     });
 
   async function buildItineraryPlan(body) {
@@ -6009,16 +5918,11 @@ export function createServer(options = {}) {
       if (request.method === "DELETE" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         await validateEmptyBody(request);
-        const deleted = softDeleteRecord(db, {
-          table: "customers",
+        const deleted = softDeleteCustomer(db, {
           id: parts[2],
           expectedVersion,
-          fromRow: customerFromRow,
-          action: "customer.delete",
-          entityType: "customer",
           deletedBy: request.authContext.account,
           requestId,
-          metadata: (before) => ({ name: before.name, region: before.region, level: before.level }),
         });
         sendJson(response, 200, { deleted });
         return;

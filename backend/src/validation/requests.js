@@ -192,6 +192,7 @@ export const requestSchemas = freezeSchema({
     decisionChain: safeArray(), historyProjects: safeArray(), infrastructure: safeArray(),
     syncPreview: safeArray(), budget: text(500, { nullable: true }), summary: text(5000, { nullable: true }),
     needs: safeArray(), risks: safeArray(), opportunities: safeArray(),
+    aliases: stringArray(20, 120), tags: stringArray(20, 120),
   },
   opportunityCreate: {
     customerId: text(200, { required: true }), name: text(200, { required: true }), customer: text(200, { nullable: true }),

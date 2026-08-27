@@ -149,14 +149,34 @@ function likePattern(value) {
   return `%${text}%`;
 }
 
+function boundedStringArray(value, { maxItems = 20, maxLength = 120 } = {}) {
+  if (typeof value !== "string") return [];
+  let parsed;
+  try { parsed = JSON.parse(value); } catch { return []; }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .slice(0, maxItems)
+    .flatMap((item) => {
+      const text = optionalText(item, maxLength);
+      return text ? [text] : [];
+    });
+}
+
 function customerFromRow(row) {
   if (!row) return null;
+  const version = asSafeInteger(row.version);
   return {
     id: row.id,
+    version: version !== null && version >= 1 ? version : null,
     name: optionalText(row.name, 200),
     region: optionalText(row.region, 100),
     type: optionalText(row.type, 100),
     level: optionalText(row.level, 100),
+    contact: optionalText(row.contact, 500),
+    budget: optionalText(row.budget, 500),
+    summary: optionalText(row.summary, 5000),
+    aliases: boundedStringArray(row.aliases),
+    tags: boundedStringArray(row.tags),
     updatedAt: trustedDatabaseTimestamp(row.updated_at),
   };
 }
@@ -208,7 +228,7 @@ export function createAssistantBusinessSnapshotAdapter({
   const businessDateFormatter = createBusinessDateFormatter(BUSINESS_TIME_ZONE);
 
   const customerById = db.prepare(`
-    SELECT id, name, region, type, level, updated_at
+    SELECT id, version, name, region, type, level, contact, budget, summary, aliases, tags, updated_at
     FROM customers
     WHERE id = $customerId AND owner = $owner AND deleted_at IS NULL
   `);
@@ -238,10 +258,11 @@ export function createAssistantBusinessSnapshotAdapter({
     if (typeof normalizedOwner !== "string" || !normalizedOwner.trim()) return { items: [], truncated: false };
     const pattern = likePattern(query);
     const rows = db.prepare(`
-      SELECT id, name, region, type, level, updated_at
+      SELECT id, version, name, region, type, level, contact, budget, summary, aliases, tags, updated_at
       FROM customers
       WHERE owner = $owner AND deleted_at IS NULL
-        AND (name LIKE $pattern ESCAPE '\\' OR region LIKE $pattern ESCAPE '\\' OR type LIKE $pattern ESCAPE '\\')
+        AND (name LIKE $pattern ESCAPE '\\' OR region LIKE $pattern ESCAPE '\\' OR type LIKE $pattern ESCAPE '\\'
+          OR aliases LIKE $pattern ESCAPE '\\')
       ORDER BY updated_at DESC, id
       LIMIT ${MAX_ITEMS + 1}
     `).all({ $owner: normalizedOwner, $pattern: pattern });

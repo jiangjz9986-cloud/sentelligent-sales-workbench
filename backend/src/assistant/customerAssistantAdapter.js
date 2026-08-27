@@ -1,12 +1,39 @@
 import { AssistantContractError } from "./contracts.js";
 import { getAgentManifest } from "./agentManifest.js";
+import {
+  countActiveOpportunities,
+  findActiveCustomerByExactName,
+} from "../customers/customerStore.js";
 
 const AGENT_ID = "customer";
 const CONTRACT_VERSION = "customer-v1";
-const TASK_TYPES = new Set(["search", "detail", "summarize", "change_preview"]);
+const TASK_TYPES = new Set(["search", "detail", "summarize", "change_preview", "create_preview", "delete_preview"]);
 const MAX_ITEMS = 100;
 const MAX_TEXT = 2_000;
-const CHANGEABLE_FIELDS = new Set(["name", "region", "type", "level"]);
+const SCALAR_FIELD_LIMITS = Object.freeze({
+  name: 200,
+  region: 100,
+  type: 100,
+  level: 50,
+  contact: 500,
+  budget: 500,
+  summary: 5000,
+});
+const ARRAY_FIELDS = new Set(["aliases", "tags"]);
+const MAX_ARRAY_ITEMS = 20;
+const MAX_ARRAY_ITEM_LENGTH = 120;
+const CHANGEABLE_FIELDS = new Set([...Object.keys(SCALAR_FIELD_LIMITS), ...ARRAY_FIELDS]);
+const FIELD_LABELS = Object.freeze({
+  name: "名称",
+  region: "区域",
+  type: "类型",
+  level: "级别",
+  contact: "联系人",
+  budget: "预算",
+  summary: "摘要",
+  aliases: "别名",
+  tags: "标签",
+});
 
 function isPlainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -62,16 +89,33 @@ function uniqueRefs(items) {
   return result;
 }
 
+function boundedStringArray(value) {
+  if (!Array.isArray(value) || value.length > MAX_ARRAY_ITEMS) return null;
+  const items = [];
+  for (const item of value) {
+    const normalized = boundedText(item, MAX_ARRAY_ITEM_LENGTH);
+    if (!normalized) return null;
+    if (!items.includes(normalized)) items.push(normalized);
+  }
+  return items;
+}
+
 function normalizeCustomer(value) {
   if (!isPlainObject(value)) return null;
   const id = identifier(value.id, "customer.id");
   if (!id) return null;
   return {
     id,
+    version: Number.isSafeInteger(value.version) && value.version >= 1 ? value.version : null,
     name: boundedText(value.name, 300),
     region: boundedText(value.region, 120),
     type: boundedText(value.type, 120),
     level: boundedText(value.level, 120),
+    contact: boundedText(value.contact, 500),
+    budget: boundedText(value.budget, 500),
+    summary: boundedText(value.summary, 5000),
+    aliases: boundedStringArray(value.aliases) ?? [],
+    tags: boundedStringArray(value.tags) ?? [],
     updatedAt: boundedText(value.updatedAt, 100),
   };
 }
@@ -111,6 +155,23 @@ function unknownsFor(customer) {
   ].map(([key, question]) => ({ key, question, reason: "当前客户详情工具未提供该字段，不能由 Agent 猜测。" }));
 }
 
+function normalizeArrayChange(current, value) {
+  if (Array.isArray(value)) return boundedStringArray(value);
+  if (isPlainObject(value)) {
+    const keys = Object.keys(value);
+    if (keys.length === 0 || keys.some((key) => !["add", "remove"].includes(key))) return null;
+    const add = value.add === undefined ? [] : boundedStringArray(value.add);
+    const remove = value.remove === undefined ? [] : boundedStringArray(value.remove);
+    if (add === null || remove === null || (add.length === 0 && remove.length === 0)) return null;
+    const next = (Array.isArray(current) ? current : []).filter((item) => !remove.includes(item));
+    for (const item of add) {
+      if (!next.includes(item)) next.push(item);
+    }
+    return next.length > MAX_ARRAY_ITEMS ? null : next;
+  }
+  return null;
+}
+
 function changePreview(customer, changes) {
   if (!customer || !isPlainObject(changes)) return null;
   const changedFields = [];
@@ -122,7 +183,18 @@ function changePreview(customer, changes) {
       rejectedFields.push(key);
       continue;
     }
-    const next = boundedText(value, 300);
+    if (ARRAY_FIELDS.has(key)) {
+      const next = normalizeArrayChange(customer[key] ?? [], value);
+      if (next === null) {
+        rejectedFields.push(key);
+        continue;
+      }
+      before[key] = Array.isArray(customer[key]) ? customer[key] : [];
+      after[key] = next;
+      if (JSON.stringify(before[key]) !== JSON.stringify(next)) changedFields.push(key);
+      continue;
+    }
+    const next = boundedText(value, SCALAR_FIELD_LIMITS[key]);
     if (!next) {
       rejectedFields.push(key);
       continue;
@@ -134,7 +206,7 @@ function changePreview(customer, changes) {
   return {
     entity: "customer",
     customerId: customer.id,
-    expectedVersion: null,
+    expectedVersion: customer.version ?? null,
     before,
     after,
     changedFields,
@@ -246,7 +318,9 @@ export function createCustomerAssistantAdapter({
       let status = "ok";
       if (!customer && matches.length === 0) status = "not_found";
       if (!customer && matches.length > 1) status = "clarify";
-      if (taskType === "change_preview" && !customer) status = matches.length > 1 ? "clarify" : "not_found";
+      if ((taskType === "change_preview" || taskType === "delete_preview") && !customer) {
+        status = matches.length > 1 ? "clarify" : "not_found";
+      }
       const change = taskType === "change_preview" ? changePreview(customer, changes) : null;
       if (taskType === "change_preview" && customer && !change?.changedFields.length) status = "review_required";
       const output = outputBase({
@@ -281,6 +355,208 @@ export function createCustomerAssistantAdapter({
   }
 
   return Object.freeze({ analyze, search, detail: analyze, restore: restoreRun });
+}
+
+const TARGET_IDENTIFIER = /^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u;
+const PREVIEW_SUMMARY_MAX = 2_000;
+
+function block(text, { bodyStatus = "clarify", status = 200 } = {}) {
+  return { block: true, text, bodyStatus, status };
+}
+
+function displayValue(value, empty = "（空）") {
+  if (Array.isArray(value)) return value.length > 0 ? value.join("、") : empty;
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || empty;
+}
+
+function candidateLines(matches) {
+  return matches.slice(0, 5).map((item) => `- ${item.name ?? "名称待确认"} [${item.id}] / ${item.region ?? "-"}`);
+}
+
+function resolutionBlock(result, target) {
+  if (result.status === "clarify") {
+    return block([
+      `找到 ${result.matches.length} 个客户，请确认：`,
+      ...candidateLines(result.matches),
+      "请用更完整名称或客户 ID 重试。",
+    ].join("\n"));
+  }
+  if (result.status === "not_found" || !result.customer) {
+    return block(`未找到客户：${target ?? "（未提供）"}。可发送“新建客户 ${target ?? "…"}，区域…，类型…”建档。`);
+  }
+  return null;
+}
+
+function normalizedWriteTarget(argumentsValue) {
+  const rawId = typeof argumentsValue.customerId === "string" ? argumentsValue.customerId.trim() : "";
+  const rawQuery = typeof argumentsValue.query === "string" ? argumentsValue.query.trim() : "";
+  const target = rawQuery || rawId;
+  if (!target || target.length > 200) return null;
+  const customerId = rawId && rawId.length <= 200 && TARGET_IDENTIFIER.test(rawId) && !rawId.startsWith("synthetic:")
+    ? rawId
+    : (TARGET_IDENTIFIER.test(target) && !target.startsWith("synthetic:") ? target : null);
+  return { target, customerId };
+}
+
+function previewSummaryOf(previewText) {
+  return String(previewText).slice(0, PREVIEW_SUMMARY_MAX);
+}
+
+/**
+ * Pending-action preview providers for the three customer write tools. They
+ * run inside the orchestrator immediately before a pending action (and its
+ * six-digit confirmation code) is created: they gate direct-chat/owner scope,
+ * disambiguate the target customer, pin the optimistic-lock version, and
+ * render the human preview card. The returned preview text never contains a
+ * confirmation code.
+ */
+export function createCustomerPendingPreviewProviders({
+  adapter,
+  db,
+  resolveBusinessOwner,
+} = {}) {
+  if (!adapter || typeof adapter.analyze !== "function") throw new TypeError("customer adapter is required");
+  if (!db || typeof db.prepare !== "function") throw new TypeError("db must be a synchronous SQLite connection");
+  if (typeof resolveBusinessOwner !== "function") throw new TypeError("resolveBusinessOwner must be a function");
+
+  function writeGate({ context, serverData }) {
+    if (serverData?.auditMetadata?.chatType !== "direct") {
+      return { blocked: block("客户档案修改仅支持与小小的私聊。") };
+    }
+    const owner = resolveBusinessOwner(context.owner);
+    if (typeof owner !== "string" || !owner.trim()) {
+      return { blocked: block("当前账号未绑定业务负责人，暂不能修改客户档案。") };
+    }
+    return { owner: owner.trim() };
+  }
+
+  async function resolveCustomerPreview({ taskType, context, argumentsValue, changes = null }) {
+    const resolved = normalizedWriteTarget(argumentsValue);
+    if (!resolved) return { blocked: block("请说明客户名称或客户 ID。") };
+    const result = await adapter.analyze({
+      owner: context.owner,
+      channel: context.channel,
+      conversationId: context.conversation,
+      eventId: context.event,
+      taskType,
+      customerId: resolved.customerId,
+      query: resolved.target,
+      changes,
+    });
+    const blocked = resolutionBlock(result, resolved.target);
+    if (blocked) return { blocked };
+    if (!result.customer.version) {
+      return { blocked: block("客户资料版本无法确认，请稍后在系统网页中处理。") };
+    }
+    return { result, target: resolved.target };
+  }
+
+  return Object.freeze({
+    async "customer.create"({ arguments: argumentsValue, context, serverData }) {
+      const gate = writeGate({ context, serverData });
+      if (gate.blocked) return gate.blocked;
+      const fields = {};
+      for (const [key, limit] of Object.entries(SCALAR_FIELD_LIMITS)) {
+        const value = boundedText(argumentsValue[key], limit);
+        if (value) fields[key] = value;
+      }
+      for (const key of ARRAY_FIELDS) {
+        const value = argumentsValue[key] === undefined ? null : boundedStringArray(argumentsValue[key]);
+        if (value && value.length > 0) fields[key] = value;
+      }
+      if (!fields.name) return block("请提供客户名称，例如“新建客户 莒县人民医院，区域日照”。");
+      const duplicate = findActiveCustomerByExactName(db, { owner: gate.owner, name: fields.name });
+      if (duplicate) {
+        return block(`已存在同名客户 [${duplicate.id}]，如确需新建请在名称中加区分（如院区），或发送“修改客户 ${duplicate.name}，…”直接更新现有档案。`);
+      }
+      const previewText = [
+        "【客户建档待确认】",
+        `名称：${fields.name}`,
+        `区域：${displayValue(fields.region, "待补充")} ｜ 类型：${displayValue(fields.type, "待补充")} ｜ 级别：${displayValue(fields.level, "待补充")}`,
+        `联系人：${displayValue(fields.contact, "待补充")} ｜ 预算：${displayValue(fields.budget, "待补充")}`,
+        `别名：${displayValue(fields.aliases, "无")} ｜ 标签：${displayValue(fields.tags, "无")}`,
+        ...(fields.summary ? [`摘要：${fields.summary.slice(0, 200)}`] : []),
+        "未填字段确认后可发送“修改客户 …”补充。",
+      ].join("\n");
+      return {
+        arguments: fields,
+        previewText,
+        previewSummary: previewSummaryOf(previewText),
+      };
+    },
+
+    async "customer.update"({ arguments: argumentsValue, context, serverData }) {
+      const gate = writeGate({ context, serverData });
+      if (gate.blocked) return gate.blocked;
+      const changes = isPlainObject(argumentsValue.changes) ? argumentsValue.changes : null;
+      if (!changes || Object.keys(changes).length === 0) {
+        return block("请说明要修改的字段，可改：名称/区域/类型/级别/联系人/预算/摘要/别名/标签。");
+      }
+      const resolution = await resolveCustomerPreview({
+        taskType: "change_preview",
+        context,
+        argumentsValue,
+        changes,
+      });
+      if (resolution.blocked) return resolution.blocked;
+      const { result } = resolution;
+      const preview = result.changePreview;
+      const rejectedLabels = preview.rejectedFields.map((key) => FIELD_LABELS[key] ?? key);
+      if (preview.changedFields.length === 0) {
+        if (preview.rejectedFields.length > 0) {
+          return block(`暂不支持修改：${rejectedLabels.join("、")}。微信端可改：名称/区域/类型/级别/联系人/预算/摘要/别名/标签，其余请在系统网页中修改。`);
+        }
+        return block("内容与现有档案一致，无需修改。");
+      }
+      const changesToApply = Object.fromEntries(preview.changedFields.map((key) => [key, preview.after[key]]));
+      const previewText = [
+        `【客户改档待确认】${result.customer.name ?? "客户"} [${result.customer.id}]（当前 v${preview.expectedVersion}）`,
+        ...preview.changedFields.map((key) => (
+          `${FIELD_LABELS[key] ?? key}：${displayValue(preview.before[key])} → ${displayValue(preview.after[key])}`
+        )),
+        `不支持的字段：${rejectedLabels.length > 0 ? `${rejectedLabels.join("、")}（请在系统网页中修改）` : "无"}`,
+      ].join("\n");
+      return {
+        arguments: {
+          customerId: result.customer.id,
+          expectedVersion: preview.expectedVersion,
+          changes: changesToApply,
+        },
+        previewText,
+        previewSummary: previewSummaryOf(previewText),
+      };
+    },
+
+    async "customer.delete"({ arguments: argumentsValue, context, serverData }) {
+      const gate = writeGate({ context, serverData });
+      if (gate.blocked) return gate.blocked;
+      const resolution = await resolveCustomerPreview({
+        taskType: "delete_preview",
+        context,
+        argumentsValue,
+      });
+      if (resolution.blocked) return resolution.blocked;
+      const customer = resolution.result.customer;
+      const opportunityCount = countActiveOpportunities(db, customer.id);
+      const previewText = [
+        `【客户删档待确认】${customer.name ?? "客户"} [${customer.id}]（当前 v${customer.version}）`,
+        `区域：${displayValue(customer.region, "-")} ｜ 类型：${displayValue(customer.type, "-")} ｜ 级别：${displayValue(customer.level, "-")}`,
+        opportunityCount > 0
+          ? `关联商机 ${opportunityCount} 个将随档案一起隐藏（软删除，可由管理员恢复）。`
+          : "当前没有关联商机（软删除，可由管理员恢复）。",
+        "请确认这不是误操作。",
+      ].join("\n");
+      return {
+        arguments: {
+          customerId: customer.id,
+          expectedVersion: customer.version,
+        },
+        previewText,
+        previewSummary: previewSummaryOf(previewText),
+      };
+    },
+  });
 }
 
 export { restoreRun as restoreCustomerRun };

@@ -69,6 +69,173 @@ function dateRange(args) {
   return { periodStart, periodEnd };
 }
 
+const CUSTOMER_FIELD_KEYS = Object.freeze({
+  名称: "name",
+  区域: "region",
+  类型: "type",
+  级别: "level",
+  联系人: "contact",
+  预算: "budget",
+  摘要: "summary",
+  备注: "summary",
+  别名: "aliases",
+  标签: "tags",
+});
+const CUSTOMER_ARRAY_FIELDS = new Set(["aliases", "tags"]);
+const CUSTOMER_FIELD_HELP = "可改：名称/区域/类型/级别/联系人/预算/摘要/别名/标签";
+const CUSTOMER_SEGMENT_RE = /^(名称|区域|类型|级别|联系人|预算|摘要|备注|别名|标签)\s*[:：为是]?\s*(.+)$/u;
+const CUSTOMER_CLAUSE_VERB_RE = /^(?:再|又|并且?|顺便)?\s*(加|添加|新增|移除|去掉|删除)(?:一个|个)?(别名|标签)\s*[:：]?\s*(.+)$/u;
+const CUSTOMER_PRONOUN_RE = /^(?:它|这个客户|该客户|当前客户)$/u;
+
+function splitCustomerSegments(text) {
+  return String(text ?? "").split(/[，,；;]/u).map((part) => part.trim()).filter(Boolean);
+}
+
+function splitCustomerListValue(value) {
+  return String(value ?? "").split(/[、/]/u).map((part) => part.trim()).filter(Boolean);
+}
+
+function assignCustomerArrayChange(changes, field, patch) {
+  const current = changes[field];
+  if (Array.isArray(current)) return false;
+  if (Array.isArray(patch)) {
+    if (current !== undefined) return false;
+    changes[field] = patch;
+    return true;
+  }
+  const merged = current && typeof current === "object" ? current : { add: [], remove: [] };
+  for (const item of patch.add ?? []) if (!merged.add.includes(item)) merged.add.push(item);
+  for (const item of patch.remove ?? []) if (!merged.remove.includes(item)) merged.remove.push(item);
+  changes[field] = merged;
+  return true;
+}
+
+function applyCustomerSegment(changes, segment) {
+  const keyed = segment.match(CUSTOMER_SEGMENT_RE);
+  if (keyed) {
+    const field = CUSTOMER_FIELD_KEYS[keyed[1]];
+    const value = keyed[2].trim();
+    if (!value) return { ok: false, unknown: keyed[1] };
+    if (CUSTOMER_ARRAY_FIELDS.has(field)) {
+      return assignCustomerArrayChange(changes, field, splitCustomerListValue(value))
+        ? { ok: true }
+        : { ok: false, conflict: keyed[1] };
+    }
+    if (changes[field] !== undefined) return { ok: false, conflict: keyed[1] };
+    changes[field] = value;
+    return { ok: true };
+  }
+  const verb = segment.match(CUSTOMER_CLAUSE_VERB_RE);
+  if (verb) {
+    const field = CUSTOMER_FIELD_KEYS[verb[2]];
+    const items = splitCustomerListValue(verb[3]);
+    if (items.length === 0) return { ok: false, unknown: verb[2] };
+    const patch = ["加", "添加", "新增"].includes(verb[1]) ? { add: items } : { remove: items };
+    return assignCustomerArrayChange(changes, field, patch)
+      ? { ok: true }
+      : { ok: false, conflict: verb[2] };
+  }
+  return { ok: false, unknown: segment };
+}
+
+function customerSegmentFailure(failure, confidence) {
+  if (failure.conflict) {
+    return clarify(`「${failure.conflict}」在同一条指令中出现了冲突的修改，请拆成两条指令。`, confidence);
+  }
+  return clarify(`暂不支持修改「${failure.unknown}」，${CUSTOMER_FIELD_HELP}。`, confidence);
+}
+
+function customerWriteTarget(target, context) {
+  const normalized = clean(target);
+  if (CUSTOMER_PRONOUN_RE.test(normalized)) {
+    return context.customerId ? { customerId: context.customerId } : null;
+  }
+  if (!normalized || normalized.length > 200) return null;
+  return { query: normalized };
+}
+
+function customerCreatePlan(payload, registry, confidence) {
+  const tool = registry.getTool("customer.create");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const segments = splitCustomerSegments(payload);
+  if (segments.length === 0) return clarify("请说明客户名称，例如“新建客户 莒县人民医院，区域日照”。", confidence);
+  const changes = {};
+  let name = null;
+  for (const [index, segment] of segments.entries()) {
+    const keyed = segment.match(CUSTOMER_SEGMENT_RE);
+    if (!keyed && index === 0) {
+      name = segment;
+      continue;
+    }
+    const applied = applyCustomerSegment(changes, segment);
+    if (!applied.ok) return customerSegmentFailure(applied, confidence);
+  }
+  if (changes.name) {
+    if (name) return clarify("客户名称出现了两次，请只写一次。", confidence);
+    name = changes.name;
+    delete changes.name;
+  }
+  if (!name) return clarify("请说明客户名称，例如“新建客户 莒县人民医院，区域日照”。", confidence);
+  const argumentsValue = { name, ...changes };
+  for (const field of CUSTOMER_ARRAY_FIELDS) {
+    if (argumentsValue[field] && !Array.isArray(argumentsValue[field])) {
+      const merged = argumentsValue[field];
+      argumentsValue[field] = merged.add ?? [];
+    }
+  }
+  return makePlan({ tool, arguments: argumentsValue, confidence, source: "natural" });
+}
+
+function customerUpdatePlan(target, clauses, registry, confidence, context) {
+  const tool = registry.getTool("customer.update");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const resolvedTarget = customerWriteTarget(target, context);
+  if (!resolvedTarget) return clarify("请说明客户名称，例如“修改客户 莒县人民医院，级别A”。", confidence);
+  const changes = {};
+  const segments = Array.isArray(clauses) ? clauses : splitCustomerSegments(clauses);
+  if (segments.length === 0) return clarify(`请说明要修改的内容，${CUSTOMER_FIELD_HELP}。`, confidence);
+  for (const segment of segments) {
+    const applied = applyCustomerSegment(changes, segment);
+    if (!applied.ok) return customerSegmentFailure(applied, confidence);
+  }
+  if (Object.keys(changes).length === 0) return clarify(`请说明要修改的内容，${CUSTOMER_FIELD_HELP}。`, confidence);
+  return makePlan({ tool, arguments: { ...resolvedTarget, changes }, confidence, source: "natural" });
+}
+
+function customerDeletePlan(target, registry, confidence, context) {
+  const tool = registry.getTool("customer.delete");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const resolvedTarget = customerWriteTarget(target, context);
+  if (!resolvedTarget) return clarify("请说明要删除的客户名称或 ID。", confidence);
+  return makePlan({ tool, arguments: resolvedTarget, confidence, source: "natural" });
+}
+
+const CUSTOMER_WRITE_COMMAND_MODES = Object.freeze({
+  "customer.create": "create",
+  新建客户: "create",
+  新增客户: "create",
+  建档: "create",
+  客户建档: "create",
+  "customer.update": "update",
+  修改客户: "update",
+  更新客户: "update",
+  改档: "update",
+  客户改档: "update",
+  "customer.delete": "delete",
+  删除客户: "delete",
+  删档: "delete",
+  客户删档: "delete",
+});
+
+function customerWriteCommandPlan(mode, args, registry, context, confidence = 1) {
+  const payload = clean(args).replace(/^[:：]\s*/u, "");
+  if (mode === "create") return customerCreatePlan(payload, registry, confidence);
+  if (mode === "delete") return customerDeletePlan(payload, registry, confidence, context);
+  const segments = splitCustomerSegments(payload);
+  const target = segments.shift() ?? "";
+  return customerUpdatePlan(target, segments, registry, confidence, context);
+}
+
 function reportArguments(args) {
   if (!clean(args)) return { week: "current" };
   return dateRange(args);
@@ -106,6 +273,9 @@ function explicitPlan(command, args, registry, { mediaRef, context: rawContext }
   const normalized = command.replace(/^\//, "");
   if (normalized === "help" || normalized === "帮助" || normalized === "h") return { kind: "intent_plan", status: "help", toolName: null, agentId: "system-router", arguments: {}, message: HELP };
   if (normalized === "cancel" || normalized === "取消") return { kind: "intent_plan", status: "cancelled", toolName: null, agentId: "system-router", arguments: {} };
+  if (Object.hasOwn(CUSTOMER_WRITE_COMMAND_MODES, normalized)) {
+    return customerWriteCommandPlan(CUSTOMER_WRITE_COMMAND_MODES[normalized], args, registry, context);
+  }
   const direct = registry.getTool(normalized);
   if (direct) {
     const input = directArguments(normalized, args, mediaRef, context);
@@ -270,10 +440,63 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
       source: "explicit",
     });
   }
+  const customerCreate = value.match(/^(?:新建客户|新增客户|建档|客户建档)\s*[:：]?\s*(.+)$/u);
+  if (customerCreate) {
+    return customerCreatePlan(customerCreate[1], registry, confidence);
+  }
+  const customerUpdateExplicit = value.match(/^(?:修改客户|更新客户|改档|客户改档)\s*[:：]?\s*(.+)$/u);
+  if (customerUpdateExplicit) {
+    const segments = splitCustomerSegments(customerUpdateExplicit[1]);
+    const target = segments.shift() ?? "";
+    return customerUpdatePlan(target, segments, registry, confidence, context);
+  }
+  const customerDelete = value.match(/^(?:删除客户|删档|客户删档)\s*[:：]?\s*(.+)$/u);
+  if (customerDelete) {
+    return customerDeletePlan(customerDelete[1], registry, confidence, context);
+  }
+  const customerFieldChange = value.match(
+    /^(?:把|将)?(.{1,60}?)的?(名称|区域|类型|级别|联系人|预算|摘要|备注|别名|标签)(?:改成|改为|设为|设置为|更新为|换成)\s*(.+)$/u,
+  );
+  if (customerFieldChange) {
+    const [, subject, fieldLabel, remainder] = customerFieldChange;
+    const clauses = splitCustomerSegments(remainder);
+    const firstValue = clauses.shift() ?? "";
+    return customerUpdatePlan(subject, [`${fieldLabel}：${firstValue}`, ...clauses], registry, confidence, context);
+  }
+  const customerArrayChange = value.match(
+    /^(?:给|为)?(.{1,60}?)(加|添加|新增|移除|去掉|删除)(?:一个|个)?(别名|标签)\s*[:：]?\s*(.+)$/u,
+  );
+  if (customerArrayChange) {
+    const [, subject, verb, kind, remainder] = customerArrayChange;
+    const clauses = splitCustomerSegments(remainder);
+    const firstValue = clauses.shift() ?? "";
+    return customerUpdatePlan(subject, [`${verb}${kind} ${firstValue}`, ...clauses], registry, confidence, context);
+  }
   const customer = value.match(/^(?:客户|查询客户)\s+(.+)$/);
   if (customer) {
     const tool = registry.getTool("customer.search");
     return makePlan({ tool, arguments: { query: customer[1] }, confidence, source: "natural" });
+  }
+  const bareSearch = value.match(/^查询\s*(.+)$/u);
+  if (bareSearch) {
+    const tool = registry.getTool("customer.search");
+    return makePlan({ tool, arguments: { query: bareSearch[1] }, confidence, source: "natural" });
+  }
+  const customerProfile = value.match(
+    /^(.{2,60}?)(?:的)?(?:什么情况|情况怎么样|情况如何|近况|画像|资料|档案)\s*[?？]?$/u,
+  );
+  if (customerProfile) {
+    const subject = clean(customerProfile[1]);
+    const excluded = /(?:项目|商机|报销|周报|记账|请款|发票|凭证|行程|差旅|风险|待办|知识)$/u.test(subject);
+    if (!excluded) {
+      const target = CUSTOMER_PRONOUN_RE.test(subject) ? context.customerId ?? "" : subject;
+      return makePlan({
+        tool: registry.getTool("customer.detail"),
+        arguments: { customerId: target },
+        confidence,
+        source: "natural",
+      });
+    }
   }
   if (/(拜访|拜会|电话|会议|沟通|走访|客户现场)/u.test(value)) {
     return makePlan({

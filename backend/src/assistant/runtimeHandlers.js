@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { insertAudit } from "../audit/auditRepository.js";
+import {
+  countActiveOpportunities,
+  createCustomer,
+  getActiveCustomer,
+  softDeleteCustomer,
+  updateCustomer,
+} from "../customers/customerStore.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
@@ -854,12 +861,18 @@ export function createAssistantToolHandlers({
         runId: result.runId,
       };
       const customer = result.customer;
+      const listText = (items) => (Array.isArray(items) && items.length > 0 ? items.join("、") : null);
+      const opportunityCount = countActiveOpportunities(db, customer.id);
       return {
         text: [
-          `客户：${customer.name ?? "名称待确认"}`,
-          `区域：${customer.region ?? "待确认"}`,
-          `类型：${customer.type ?? "待确认"}`,
-          `级别：${customer.level ?? "待确认"}`,
+          `客户画像：${customer.name ?? "名称待确认"} [${customer.id}]`,
+          `区域：${customer.region ?? "待补充"} ｜ 类型：${customer.type ?? "待补充"} ｜ 级别：${customer.level ?? "待补充"}`,
+          `联系人：${customer.contact ?? "待补充"}`,
+          `预算：${customer.budget ?? "待补充"}`,
+          `别名：${listText(customer.aliases) ?? "无"} ｜ 标签：${listText(customer.tags) ?? "无"}`,
+          ...(customer.summary ? [`摘要：${customer.summary.slice(0, 300)}`] : []),
+          `在办商机 ${opportunityCount} 个；更新时间：${customer.updatedAt ?? "待确认"}`,
+          "（未录入的字段不会猜测，可发送“修改客户 …”补充。）",
         ].join("\n"),
         status: "ok",
         customer,
@@ -870,6 +883,193 @@ export function createAssistantToolHandlers({
           opportunityId: null,
           source: "verified_entity",
           sourceRefs: [{ type: "customer", id: customer.id }],
+        },
+      };
+    },
+
+    async "customer.create"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未创建客户档案。", status: "denied" };
+      }
+      const customerId = safeText(context.actionId) || randomUUID();
+      const existing = getActiveCustomer(db, customerId);
+      if (existing) {
+        return {
+          text: `已建档：${existing.name}（ID：${existing.id}，v${existing.version}）。发送“客户详情 ${existing.id}”可查看。`,
+          status: "created",
+          customer: existing,
+          replayed: true,
+          contextUpdate: {
+            customerId: existing.id,
+            opportunityId: null,
+            source: "verified_entity",
+            sourceRefs: [{ type: "customer", id: existing.id }],
+          },
+        };
+      }
+      const created = withImmediateTransaction(db, () => {
+        const item = createCustomer(db, {
+          name: safeText(args.name),
+          region: safeText(args.region) || null,
+          type: safeText(args.type) || null,
+          level: safeText(args.level) || null,
+          contact: safeText(args.contact) || null,
+          budget: safeText(args.budget) || null,
+          summary: safeText(args.summary) || null,
+          aliases: Array.isArray(args.aliases) ? args.aliases : [],
+          tags: Array.isArray(args.tags) ? args.tags : [],
+          owner: businessOwner,
+        }, { id: customerId });
+        insertAudit(db, {
+          action: "customer.create",
+          entityType: "customer",
+          entityId: item.id,
+          actor: context.owner,
+          requestId: context.requestId,
+          before: null,
+          after: item,
+          entityVersion: item.version,
+          metadata: {
+            name: item.name,
+            region: item.region,
+            level: item.level,
+            source: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+        return item;
+      });
+      return {
+        text: [
+          `已建档：${created.name}（ID：${created.id}，v${created.version}）。`,
+          `发送“客户详情 ${created.id}”可查看；后续可发送“修改客户 …”补充画像。`,
+        ].join("\n"),
+        status: "created",
+        customer: created,
+        contextUpdate: {
+          customerId: created.id,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: created.id }],
+        },
+      };
+    },
+
+    async "customer.update"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改客户档案。", status: "denied" };
+      }
+      const customerId = safeText(args.customerId);
+      const expectedVersion = Number(args.expectedVersion);
+      const changes = args.changes && typeof args.changes === "object" && !Array.isArray(args.changes)
+        ? args.changes
+        : null;
+      if (!customerId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !changes || Object.keys(changes).length === 0) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const before = getActiveCustomer(db, customerId);
+      if (!before || before.owner !== businessOwner) {
+        return { text: "客户不存在或已删除，未修改任何资料。", status: "not_found" };
+      }
+      let updated;
+      try {
+        updated = withImmediateTransaction(db, () => {
+          const item = updateCustomer(db, customerId, changes, expectedVersion);
+          if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          insertAudit(db, {
+            action: "customer.update",
+            entityType: "customer",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              changedFields: Object.keys(changes),
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "客户资料刚在其他端被修改，本次未写入。请重新发送修改指令查看最新资料。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "客户不存在或已删除，未修改任何资料。", status: "not_found" };
+        }
+        throw error;
+      }
+      const describe = (value) => (Array.isArray(value)
+        ? (value.length > 0 ? value.join("、") : "（空）")
+        : (typeof value === "string" && value.trim() ? value.trim() : "（空）"));
+      const fieldLabels = {
+        name: "名称", region: "区域", type: "类型", level: "级别",
+        contact: "联系人", budget: "预算", summary: "摘要", aliases: "别名", tags: "标签",
+      };
+      const changeLines = Object.keys(changes)
+        .map((key) => `${fieldLabels[key] ?? key} ${describe(before[key])}→${describe(updated[key])}`);
+      return {
+        text: `已更新：${updated.name}（v${updated.version}）。${changeLines.join("；")}。`,
+        status: "updated",
+        customer: updated,
+        contextUpdate: {
+          customerId: updated.id,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: updated.id }],
+        },
+      };
+    },
+
+    async "customer.delete"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未删除客户档案。", status: "denied" };
+      }
+      const customerId = safeText(args.customerId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!customerId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "删除请求不完整，请重新发送删除指令。", status: "error" };
+      }
+      const before = getActiveCustomer(db, customerId);
+      if (!before || before.owner !== businessOwner) {
+        return { text: "客户不存在或已删除，未执行任何操作。", status: "not_found" };
+      }
+      let deleted;
+      try {
+        deleted = softDeleteCustomer(db, {
+          id: customerId,
+          expectedVersion,
+          deletedBy: context.owner,
+          requestId: context.requestId,
+          metadata: {
+            source: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "客户资料刚在其他端被修改，本次未删除。请重新发送删除指令查看最新资料。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "客户不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: `已删除（归档）：${deleted.name}。原关联商机已随档案隐藏；如需恢复请联系管理员。`,
+        status: "deleted",
+        customer: deleted,
+        contextUpdate: {
+          customerId: null,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: deleted.id }],
         },
       };
     },

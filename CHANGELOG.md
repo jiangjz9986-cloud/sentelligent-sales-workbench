@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-28
+
+### 小小·客户画像 agent：查免确认、增改删六位码确认
+
+- 微信端新增三个客户写工具并注册进确定性编排器：`customer.create`（R2）、`customer.update`（R2）、`customer.delete`（R3，软删除），全部走既有六位码确认链（10 分钟 TTL、错码 5 次锁定、明文码不落库）；查询类（`customer.search`/`customer.detail`）保持 R0 免确认。写操作仅限与小小绑定的私聊（群聊 fail-closed 拒绝），owner 一律由服务端机器身份解析，模型与用户均不能指定归属。
+- 编排器新增可选 `pendingPreviewProviders` 钩子：建 pending action 之前先做客户消歧（唯一命中出预览卡、多命中列候选澄清、零命中引导建档）、建档重名保护、逐字段 before/after 变更预览，并把规范化参数与乐观锁版本钉进持久化计划；预览摘要随"重发确认码"一并重发；事件存档仍整体替换为占位文本，确认码与预览卡都不进 `assistant_inbound_events`。provider 抛错走既有安全失败响应，未注册 provider 的确认流字节级不变。
+- 修复记账运行时 `handlePending` 的两处让路缺陷：主会话存在非记账 pending action（如客户写操作）且未引用记账草稿时，六位码/取消/重发确认码/普通文本一律交回通用确认边界（此前六位码会被"小小记账不使用六位确认码"吞掉）；无引用、无 pendingActionId 时，非记账语言不再被隐式草稿绑定劫持（客户画像问答、建/改/删档指令在草稿活跃期正常工作）。引用草稿的确认/修改/取消、隐式"确认"、借款/区域意图与财务范围门全部保持不变。
+- 新增前向迁移 `0027_customer_profile_aliases`：customers 表加 `aliases`/`tags`（JSON 文本数组，默认 `[]`）；小小快照投影扩展 `version/contact/budget/summary/aliases/tags`，客户检索的 LIKE 条件加 `aliases`（"日照中医院"等俗称可查）；画像卡展示联系人/预算/别名/标签/摘要/在办商机数。Web `POST/PATCH /api/customers` 同步接受 `aliases`/`tags`（≤20 项、每项 ≤120 字），响应与审计快照新增这两个字段。
+- `server.js` 客户写路径抽取为共享模块 `backend/src/customers/customerStore.js`（create/update/softDelete/重名检查/在办商机计数），微信与 Web 走同一份 SQL 与审计快照；Web 端客户 CRUD 行为、审计 action（`customer.create/update/delete`）与乐观锁语义不变。微信来源审计以 `metadata.source="weixin-assistant"` + `metadata.actionId` 区分；`customer.create` 以 actionId 作实体主键实现重放安全，update/delete 以 `expectedVersion` 兜底防止二次写；`contact` 字段仍被审计脱敏器按键名剔除（预期行为，changedFields 可证明改动）。
+- 路由器新增确定性语式：建档（`新建客户/新增客户/建档：…` 键值段解析）、改档（`修改客户 X，级别A`、`把X的区域改成日照`、`给X加别名Y`、上下文代词`它/这个客户`回退）、删档（`删除客户/删档`）、`查询 X` 与画像句式（`X什么情况/近况/画像/资料/档案`，显式排除以项目/商机/报销等结尾的主语）；未知字段澄清提示可改字段清单。
+- 测试：后端全量 1072 项（较 v0.7.1 净增 42 项：路由语式、策略/manifest、变更预览与预览提供者、写 handler 幂等与版本冲突、HTTP 全链路建/改/删/锁定/换码/过期/群聊拒绝、记账草稿共存回归）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.7.1] - 2026-08-27
 
 ### 记账确认唯一化与系统配置记账实时日志

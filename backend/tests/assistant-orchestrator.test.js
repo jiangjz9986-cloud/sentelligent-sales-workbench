@@ -623,6 +623,155 @@ describe("assistant orchestrator", () => {
     assert.equal(cancelled.body.message, "确认信息无效或已过期，请重新发起操作。");
   });
 
+  it("lets a pending preview provider block without creating an action or code", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "customer.update", agentId: "customer", arguments: { query: "同名", changes: { level: "A" } }, risk: "R2", confirmation: "explicit_code" };
+    let handlerCalls = 0;
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "explicit_code"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => { handlerCalls += 1; return { saved: true }; } },
+      pendingPreviewProviders: {
+        "customer.update": () => ({ block: true, text: "找到 2 个客户，请确认。" }),
+      },
+    });
+    const result = await orchestrator.handle({ context, input: { text: "修改客户 同名，级别A" } });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.status, "clarify");
+    assert.equal(result.body.message, "找到 2 个客户，请确认。");
+    assert.equal(runtime.pending.size, 0);
+    assert.equal(handlerCalls, 0);
+    assert.equal(JSON.stringify([...runtime.events.values()]).includes("482913"), false);
+  });
+
+  it("stores provider-enriched arguments and executes them after confirmation", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "customer.update", agentId: "customer", arguments: { query: "示例医院", changes: { level: "A" } }, risk: "R2", confirmation: "explicit_code" };
+    let handlerArgs = null;
+    const previewText = "【客户改档待确认】示例医院 [customer-1]（当前 v3）\n级别：重点 → A";
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "explicit_code"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: {
+        [plan.toolName]: (args) => { handlerArgs = args; return { updated: true }; },
+      },
+      pendingPreviewProviders: {
+        "customer.update": ({ arguments: argumentsValue }) => ({
+          arguments: {
+            customerId: "customer-1",
+            expectedVersion: 3,
+            changes: argumentsValue.changes,
+          },
+          previewText,
+        }),
+      },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "修改客户 示例医院，级别A" } });
+    assert.equal(pending.status, 200);
+    assert.equal(pending.body.status, "confirmation_required");
+    assert.ok(pending.body.text.startsWith(previewText), "live text must begin with the preview card");
+    assert.match(pending.body.text, /确认码：482913/);
+    const storedAction = runtime.pending.get(pending.body.actionId);
+    assert.deepEqual(storedAction.payload.plan.arguments, {
+      customerId: "customer-1",
+      expectedVersion: 3,
+      changes: { level: "A" },
+    });
+    assert.equal(storedAction.payload.preview, previewText);
+    assert.equal(JSON.stringify([...runtime.events.values()]).includes("482913"), false);
+    const storedEvent = [...runtime.events.values()].find((event) => JSON.stringify(event.response ?? {}).includes("confirmation_required"));
+    assert.ok(storedEvent);
+    assert.equal(JSON.stringify(storedEvent.response).includes("【客户改档待确认】"), false);
+
+    const confirmed = await orchestrator.handle({
+      context: { ...context, event: "event-preview-confirm", requestId: "request-preview-confirm" },
+      input: { text: "482913" },
+    });
+    assert.equal(confirmed.status, 200);
+    assert.deepEqual(handlerArgs, {
+      customerId: "customer-1",
+      expectedVersion: 3,
+      changes: { level: "A" },
+    });
+  });
+
+  it("re-sends the stored preview with a renewed confirmation code", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "customer.delete", agentId: "customer", arguments: { query: "测试医院" }, risk: "R3", confirmation: "explicit_code" };
+    const codes = ["482913", "731604"];
+    const previewText = "【客户删档待确认】测试医院 [customer-9]（当前 v5）";
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R3", "explicit_code"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => codes.shift(),
+      toolHandlers: { [plan.toolName]: () => ({ deleted: true }) },
+      pendingPreviewProviders: {
+        "customer.delete": () => ({
+          arguments: { customerId: "customer-9", expectedVersion: 5 },
+          previewText,
+        }),
+      },
+    });
+    await orchestrator.handle({ context, input: { text: "删除客户 测试医院" } });
+    const renewed = await orchestrator.handle({
+      context: { ...context, event: "event-preview-renew", requestId: "request-preview-renew" },
+      input: { text: "重发确认码" },
+    });
+    assert.equal(renewed.status, 200);
+    assert.ok(renewed.body.text.startsWith(previewText), "renewed text must repeat the preview card");
+    assert.match(renewed.body.text, /确认码：731604/);
+    assert.equal(JSON.stringify([...runtime.events.values()]).includes("731604"), false);
+  });
+
+  it("fails closed when a pending preview provider throws", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "customer.update", agentId: "customer", arguments: { query: "示例医院", changes: { level: "A" } }, risk: "R2", confirmation: "explicit_code" };
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "explicit_code"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => ({ saved: true }) },
+      pendingPreviewProviders: {
+        "customer.update": () => { throw new Error("secret provider failure"); },
+      },
+    });
+    const result = await orchestrator.handle({ context, input: { text: "修改客户 示例医院，级别A" } });
+    assert.equal(result.status, 500);
+    assert.equal(result.body.message, "处理失败，请稍后重试。");
+    assert.equal(runtime.pending.size, 0);
+    assert.doesNotMatch(JSON.stringify([...runtime.events.values()]), /secret provider failure/);
+  });
+
+  it("keeps confirmation flows without a provider byte-identical to the previous contract", async () => {
+    const runtime = fakeRuntime();
+    const plan = { status: "confirmation_required", toolName: "visit-capture.confirm", agentId: "test-agent", arguments: { value: "draft-1" }, risk: "R2", confirmation: "simple" };
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => ({ saved: true }) },
+      pendingPreviewProviders: {
+        "customer.update": () => { throw new Error("must not be called for other tools"); },
+      },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "save" } });
+    assert.equal(pending.body.text, [
+      "待确认操作：确认写入拜访记录",
+      "确认码：482913",
+      "有效期：10 分钟",
+      "请在同一微信会话中直接回复这六位数字；不要转发给其他会话。",
+      "回复“取消”可放弃本次操作，回复“重发确认码”可轮换确认码。",
+    ].join("\n"));
+    assert.equal(Object.hasOwn(runtime.pending.get(pending.body.actionId).payload, "preview"), false);
+  });
+
   it("keeps help, cancel, clarify, and unknown as safe text responses", async () => {
     for (const status of ["help", "cancelled", "clarify", "unknown"]) {
       const runtime = fakeRuntime();
