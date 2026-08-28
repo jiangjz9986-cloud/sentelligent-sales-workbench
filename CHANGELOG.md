@@ -16,7 +16,7 @@
 - **接口与合同**：零新端点——扩展 `GET /api/dashboard/summary` 响应（`todayFocus`/`weeklyTrend` 新必需键 + `stageCounts[].amount`），`dashboardSummaryFromDb` 扩参接入已实例化的 `hospitalTenderRepository` 与上海时区周口径工具；`rhythm` 字段保留输出（合同兼容），web 端不再渲染。总览网格：今日焦点/周趋势各 span 6，最近记录/重点商机 span 4→6 补位，980/760 断点通栏名单同步；移除 `overview-rhythm`/`rhythm-*` 死样式。
 - **部署工具对齐金库退役现场**：CodexAccountVault 家族（`codex-account-vault-cloud.service`、`codex-vault-mihomo.service`、监听 4876）已于 2026-08-28 经项目所有者授权手术退役（unit 文件已删、端口无监听），`production-service-plan.mjs`/`production-preflight.mjs`/`production-cutover.sh` 的受保护清单同步收敛为共享 Caddy + 轻氧（8797），三套测试 fixture 与验收手册示例同步。首次 v0.8.3 preflight 因旧清单无法采集已退役服务而 fail-closed，属预期防护行为。
 - **总览进入即刷新（生产深测发现）**：行程/差旅写路径不经过 `refreshOverviewSummary`（该刷新只挂在客户/商机/动作/风险/快速记录写操作后），新建行程后站内切回总览时今日焦点/周趋势仍显示 bootstrap 时刻快照、需整页刷新才更新。修复为 `active` 切到 overview 时静默重拉 `GET /api/dashboard/summary`（失败保留旧值），顺带覆盖微信侧写入后的回站场景；新增 module-coverage 源码断言。
-- 零数据库迁移（读写全部命中现有表列）；零新依赖（趋势/漏斗全部纯 CSS）；模型路由不变。后端全量 1276 项（较 v0.8.2 基线 1275 净增 1 项：受控种子的 todayFocus/weeklyTrend/七阶段全序聚合断言，覆盖周一/周日 BETWEEN 双端点与两种历史 `updated_at` 格式）；前端 qa:local 433 项（净增 11 项：联动纯函数 8、区域归一 1、页面接线合同 1、词表同序 1）；Chrome 集成（rhythm 卡断言随卡移除改指今日焦点到点待办分区）、WebKit、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+- 零数据库迁移（读写全部命中现有表列）；零新依赖（趋势/漏斗全部纯 CSS）；模型路由不变。后端全量 1276 项（较 v0.8.2 基线 1275 净增 1 项：受控种子的 todayFocus/weeklyTrend/七阶段全序聚合断言，覆盖周一/周日 BETWEEN 双端点与两种历史 `updated_at` 格式）；前端 qa:local 434 项（净增 12 项：联动纯函数 8、区域归一 1、页面接线合同 1、词表同序 1、总览进入即刷新 1）；Chrome 集成（rhythm 卡断言随卡移除改指今日焦点到点待办分区）、WebKit、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
 
 ## [0.8.2] - 2026-08-28
 
