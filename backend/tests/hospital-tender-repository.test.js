@@ -162,6 +162,38 @@ describe("hospital tender repository", () => {
     assert.equal(summary.latestPublishedAt, "2026-08-16T08:00:00.000Z");
   });
 
+  it("filters notices by firstSeenFrom, alone and combined with relevance", () => {
+    now = "2026-08-27T00:30:00.000Z";
+    repository.upsertNotice(notice({ identityKey: "source-a:item-early", title: "窗口前公告" }));
+    now = "2026-08-27T01:30:00.000Z";
+    repository.upsertNotice(notice({
+      id: "notice-window-high",
+      identityKey: "source-a:item-window-high",
+      url: "https://example.com/notices/window-high",
+      title: "窗口内高相关公告",
+    }));
+    repository.upsertNotice(notice({
+      id: "notice-window-medium",
+      identityKey: "source-a:item-window-medium",
+      url: "https://example.com/notices/window-medium",
+      title: "窗口内中相关公告",
+      relevance: "medium",
+    }));
+
+    const anchor = "2026-08-27T01:00:00.000Z";
+    const window = repository.listNotices({ firstSeenFrom: anchor });
+    assert.deepEqual(window.map((item) => item.identityKey).sort(), [
+      "source-a:item-window-high",
+      "source-a:item-window-medium",
+    ]);
+    assert.equal(repository.countNotices({ firstSeenFrom: anchor }), 2);
+    assert.equal(repository.countNotices({ firstSeenFrom: anchor, relevance: "high" }), 1);
+    assert.equal(repository.countNotices({ firstSeenFrom: anchor, relevance: "medium" }), 1);
+    assert.equal(repository.countNotices({ firstSeenFrom: "2026-08-27T02:00:00.000Z" }), 0);
+    assert.equal(repository.countNotices({ firstSeenFrom: null }), 3);
+    assert.throws(() => repository.listNotices({ firstSeenFrom: "not-a-date" }), /firstSeenFrom/u);
+  });
+
   it("applies customer and keyword filters before pagination", () => {
     repository.upsertNotice(notice({
       identityKey: "source-a:item-1",

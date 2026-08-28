@@ -125,6 +125,15 @@ export function createWeixinConfirmationOutboxRepository(db, {
     });
   }
 
+  // Read-only point lookup on the enqueue idempotency key. The digest
+  // scheduler treats an existing row as the durable "already sent today"
+  // marker, so this must never mutate state or consider delivery status.
+  function hasKey({ owner, idempotencyKey } = {}) {
+    const normalizedOwner = text(owner, "owner", 200);
+    const keyHash = hash(text(idempotencyKey, "idempotencyKey", 300));
+    return Boolean(selectByKey.get({ $owner: normalizedOwner, $keyHash: keyHash }));
+  }
+
   function leaseNext({ workerId = "weixin-worker", renderMessage } = {}) {
     const normalizedWorker = text(workerId, "workerId", 200);
     if (typeof renderMessage !== "function") throw new TypeError("renderMessage is required");
@@ -326,6 +335,7 @@ export function createWeixinConfirmationOutboxRepository(db, {
 
   return Object.freeze({
     enqueue,
+    hasKey,
     leaseNext,
     ackSuccess,
     ackFailure,

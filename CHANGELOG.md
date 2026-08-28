@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-08-28
+
+### 每日晨报 + 周五收尾包（v0.7 系列收官）
+
+- 每日 09:00（Asia/Shanghai，`DAILY_DIGEST_TIME` 可调）小小微信晨报四件套（新模块 `backend/src/dailyDigest/`）：① 今日行程（`visit_itineraries` 当日 planned 单日 SQL，≤3 条，解析 plan_json 取站数与首站客户名，plan 形状异常 fail-open 仅显示标题）；② 待办（迁移 0028 的 `remind_at` 判窗——逾期 = 上海今日 00:00 之前且 pending/in_progress，今日 = 当日窗口内，各 ≤5 条按 remind_at 升序，**不看 reminded_at**（到点提醒发过 ≠ 办完，与 v0.7.5 单次提醒构成"提醒一次 + 晨报追账"组合）；另有未排期待办计数走三分支可见域）；③ 活跃风险（severity=高或 score≥80 取前 3，无高危降一行计数）；④ 昨日以来新招标（`listNotices` 扩 `firstSeenFrom` 过滤器按 `first_seen_at` 判"我们何时首见"，high 列表 ≤5 + 超出计数、medium 仅计数，与实时推送卡互补不重复、不带 URL）。首行"焦点"按 逾期高优待办 > 今日行程 > 高分风险 > 新招标 确定性排序，全空段省略、四段全空当日不发（audit `digest.daily.skipped`）。
+- 周五 16:30（`DAILY_DIGEST_FRIDAY_TIME` 可调）收尾包（kind=`friday_closeout`）：周报段只读引用 `salesReportSummary` 三分支（已有周报 N 份（最新状态）/已确认素材 N 条引导一键生成/暂无素材），**不自动落库不调模型**；凭证缺失 = 本周费用无任何 `payment_proof` 附件（NOT EXISTS SQL，对齐 Web 合计条 `paymentProofMissingCount` 口径）；发票缺失 = `unacknowledgedMissingCents > 0`（已走"确认无票"的不再催——与 Web 徽标 `invoice_pending` 口径的差异见 release notes）；两清单各 ≤8 行 + 超出计数 + 缺票合计；两清单皆空时改发一行"本周凭证与发票已齐 ✓"（收尾包全空也发，确认无欠账本身是核心信息）。
+- 调度与幂等（`digestScheduler.js`，独立 60s setTimeout 链、与 v0.7.5 待办提醒循环不共用 tick）：零迁移零状态表——outbox 行即持久 marker，幂等键 `daily-digest:{date}` / `friday-closeout:{date}`（`outboxRepository` 新增只读点查 `hasKey`，同键异内容 409 反向保证 marker 强一致）；重启不重发、当日错过补发（audit 记 lateMinutes）、跨日不补（过期晨报无行动价值）、周五收尾包错过不补到周末；worker 离线（`deliveryReady` 门同招标）不入队不标记、恢复即补。消息经 `digestMessage.js` fail-closed 渲染（3500 字上限、段/行数硬顶、payload 走预渲染 lines 规避 outbox 禁键），出箱走既有 `renderOutboxMessage` kind 分发（`daily_digest`/`friday_closeout` 两分支紧邻 `action_reminder` 追加）。
+- 管理面：`GET /api/digest/status`（user 鉴权：调度器状态含 daily/friday 两段 + 今日两枚幂等键是否已投）、`POST /api/digest/run?kind=daily|friday&dryRun=1`（user 鉴权：dryRun 只构建渲染返回文本不入队不审计，供发布当晚预览"明早会发什么"；真发绕时刻门不绕 marker，重复调用返回 `already_sent`）。审计三 action：`digest.daily.sent` / `digest.daily.skipped` / `digest.friday.sent`（entityType `assistant_digest`，actor `system:daily-digest`，metadata 含各段条数与 outboxId）。配置 `DAILY_DIGEST_AUTO_RUN`（生产默认开）/`DAILY_DIGEST_TIME`/`DAILY_DIGEST_FRIDAY_TIME`/`DAILY_DIGEST_POLL_MS`（默认 60s，钳 [5s, 600s]）。
+- 招标采集 2026-08-20 陈账（`last_error` 英文快照校验文案）已于 v0.7.6 部署核验确认自愈（scheduler success、last_error=null、连续正常轮巡），设计中的 lenient 单条容错加固按现场裁定降级为不做，登记观察项：如未来再现"单条坏公告拒绝整批快照"，按施工图第四章方案加固。
+- 零数据库迁移（schema_migrations 保持 27 项 last=0028）；模型路由不变；本版无新增小小意图/工具（纯推送）。后端全量 1275 项（较 v0.7.6 冻结基线 1239 净增 36 项：内容四件套与收尾包口径/渲染 fail-closed/调度幂等与补发语义/HTTP 端点与出箱链路/firstSeenFrom/hasKey）；前端 qa:local 416 项、Chrome/WebKit 集成、根发布测试 249 项与密钥扫描（603 文件零发现）全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.7.6] - 2026-08-28
 
 ### 小小·商机 agent：查/改阶段、金额、下一步，阶段升级联动销售决策

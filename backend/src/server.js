@@ -141,6 +141,9 @@ import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecor
 import { createQuickRecordStore } from "./quickRecords/quickRecordStore.js";
 import { createActionItemStore } from "./actionItems/actionItemStore.js";
 import { createActionReminderScheduler } from "./actionReminders/reminderScheduler.js";
+import { createDigestContentBuilder } from "./dailyDigest/digestContent.js";
+import { createDailyDigestScheduler } from "./dailyDigest/digestScheduler.js";
+import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "./dailyDigest/digestMessage.js";
 import { createActionItemPendingPreviewProviders } from "./assistant/actionItemPendingPreviewProviders.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
 import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
@@ -2803,6 +2806,33 @@ export function createServer(options = {}) {
   });
   const actionReminderAutoRun = options.actionReminderAutoRun ?? config.actionReminderAutoRun;
   if (actionReminderAutoRun && options.actionReminderSchedulerEnabled !== false) actionReminderScheduler.start();
+  const dailyDigestClock = options.dailyDigestSchedulerClock ?? (() => new Date());
+  const digestContentBuilder = createDigestContentBuilder({
+    db,
+    snapshotAdapter: assistantBusinessSnapshotAdapter,
+    actionItemStore: assistantActionItemStore,
+    tenderRepository: hospitalTenderRepository,
+    resolveBusinessOwner: assistantBusinessOwnerResolver,
+    clock: dailyDigestClock,
+    dailyTime: config.dailyDigestTime,
+  });
+  const dailyDigestScheduler = createDailyDigestScheduler({
+    db,
+    outboxRepository: weixinConfirmationOutboxRepository,
+    buildDailyDigest: digestContentBuilder.buildDailyDigest,
+    buildFridayCloseout: digestContentBuilder.buildFridayCloseout,
+    resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
+    resolveConversationId: () => shortcutBookkeepingAssistantRuntime.conversationFor(
+      shortcutBookkeepingAssistantRuntime.owner,
+    ),
+    deliveryReady: weixinTenderDeliveryReady,
+    clock: dailyDigestClock,
+    pollMs: config.dailyDigestPollMs,
+    dailyTime: config.dailyDigestTime,
+    fridayTime: config.dailyDigestFridayTime,
+  });
+  const dailyDigestAutoRun = options.dailyDigestAutoRun ?? config.dailyDigestAutoRun;
+  if (dailyDigestAutoRun && options.dailyDigestSchedulerEnabled !== false) dailyDigestScheduler.start();
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -6005,6 +6035,47 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/digest/status") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        sendJson(response, 200, {
+          item: dailyDigestScheduler.status(),
+          markers: dailyDigestScheduler.markers(),
+        });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/digest/run") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const kind = url.searchParams.get("kind") ?? "daily";
+        if (kind !== "daily" && kind !== "friday") {
+          badRequest(response, "kind must be daily or friday");
+          return;
+        }
+        const dryRunRaw = url.searchParams.get("dryRun");
+        const dryRun = dryRunRaw === "1" || dryRunRaw === "true";
+        await validateEmptyBody(request);
+        if (dryRun) {
+          // Preview only: build and render against live data without touching
+          // the outbox, the idempotency marker, or the audit log.
+          const digestOwner = shortcutBookkeepingAssistantRuntime.owner;
+          const built = kind === "daily"
+            ? await digestContentBuilder.buildDailyDigest({ owner: digestOwner })
+            : await digestContentBuilder.buildFridayCloseout({ owner: digestOwner });
+          if (built.empty) {
+            sendJson(response, 200, { kind, dryRun: true, status: "empty", reason: built.reason });
+            return;
+          }
+          const message = kind === "daily"
+            ? renderDailyDigestMessage(built.payload)
+            : renderFridayCloseoutMessage(built.payload);
+          sendJson(response, 200, { kind, dryRun: true, status: "rendered", message, stats: built.stats });
+          return;
+        }
+        const result = await dailyDigestScheduler.runManual({ kind });
+        sendJson(response, 200, { kind, dryRun: false, ...result });
+        return;
+      }
+
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.actionPatch);
@@ -7215,11 +7286,13 @@ export function createServer(options = {}) {
   server.on("close", () => {
     hospitalTenderScheduler.stop();
     actionReminderScheduler.stop();
+    dailyDigestScheduler.stop();
     db.close();
   });
   server.hospitalTenderScheduler = hospitalTenderScheduler;
   server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
   server.actionReminderScheduler = actionReminderScheduler;
+  server.dailyDigestScheduler = dailyDigestScheduler;
   return server;
 }
 

@@ -415,6 +415,7 @@ function normalizeListFilters(filters = {}) {
     "query",
     "publishedFrom",
     "publishedTo",
+    "firstSeenFrom",
     "limit",
     "offset",
   ]);
@@ -437,6 +438,9 @@ function normalizeListFilters(filters = {}) {
     publishedTo: filters.publishedTo === undefined || filters.publishedTo === null || filters.publishedTo === ""
       ? null
       : dateTime(filters.publishedTo, "publishedTo"),
+    firstSeenFrom: filters.firstSeenFrom === undefined || filters.firstSeenFrom === null || filters.firstSeenFrom === ""
+      ? null
+      : dateTime(filters.firstSeenFrom, "firstSeenFrom"),
     limit: filters.limit === undefined ? 50 : filters.limit,
     offset: filters.offset === undefined ? 0 : filters.offset,
   };
@@ -506,6 +510,12 @@ function noticeWhere(filters, { pagination = true } = {}) {
   if (filters.publishedTo !== null) {
     clauses.push("published_at <= $publishedTo");
     params.$publishedTo = filters.publishedTo;
+  }
+  if (filters.firstSeenFrom !== null) {
+    // first_seen_at is written by clock().toISOString(), so a lexicographic
+    // compare against a UTC ISO anchor is a correct time-window filter.
+    clauses.push("first_seen_at >= $firstSeenFrom");
+    params.$firstSeenFrom = filters.firstSeenFrom;
   }
   const paginationSql = pagination ? " LIMIT $limit OFFSET $offset" : "";
   if (pagination) {

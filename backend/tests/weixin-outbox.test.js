@@ -39,6 +39,25 @@ test("0019 creates a durable, credential-free confirmation outbox", () => {
   });
 });
 
+test("hasKey is a read-only owner-scoped point lookup on the idempotency key", () => {
+  withDatabase((db) => {
+    const clock = makeClock();
+    const repository = createWeixinConfirmationOutboxRepository(db, { clock: clock.now, idFactory: () => "outbox-haskey-1" });
+    assert.equal(repository.hasKey({ owner: "owner-a", idempotencyKey: "daily-digest:2026-08-28" }), false);
+    repository.enqueue({
+      owner: "owner-a",
+      conversationId: "conversation-1",
+      idempotencyKey: "daily-digest:2026-08-28",
+      payload: { kind: "daily_digest", digestDate: "2026-08-28" },
+    });
+    assert.equal(repository.hasKey({ owner: "owner-a", idempotencyKey: "daily-digest:2026-08-28" }), true);
+    assert.equal(repository.hasKey({ owner: "owner-b", idempotencyKey: "daily-digest:2026-08-28" }), false);
+    assert.equal(repository.hasKey({ owner: "owner-a", idempotencyKey: "daily-digest:2026-08-29" }), false);
+    assert.throws(() => repository.hasKey({ owner: "", idempotencyKey: "daily-digest:2026-08-28" }), TypeError);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 1);
+  });
+});
+
 test("enqueue is idempotent, hashes the key, and rejects confirmation secrets", () => {
   withDatabase((db) => {
     const clock = makeClock();

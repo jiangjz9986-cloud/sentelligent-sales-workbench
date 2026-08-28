@@ -93,6 +93,20 @@ function boundedPositiveInteger(value, name, max) {
   return parsed;
 }
 
+function timeOfDayValue(value, fallback, name) {
+  // Accept an already-parsed value so loadConfig stays idempotent when the
+  // server entry point feeds a loaded config back in as overrides.
+  if (value && typeof value === "object"
+    && Number.isSafeInteger(value.hour) && value.hour >= 0 && value.hour <= 23
+    && Number.isSafeInteger(value.minute) && value.minute >= 0 && value.minute <= 59) {
+    return { hour: value.hour, minute: value.minute };
+  }
+  const raw = value === undefined || value === null || value === "" ? fallback : value;
+  const match = String(raw).trim().match(/^([01]?\d|2[0-3]):([0-5]\d)$/u);
+  if (!match) throw new Error(`${name} must be HH:MM in the 24-hour clock`);
+  return { hour: Number(match[1]), minute: Number(match[2]) };
+}
+
 function invoiceOcrLanguagesValue(value) {
   const normalized = String(value ?? "chi_sim+eng").trim();
   if (!/^[A-Za-z0-9_.+-]{1,100}$/.test(normalized)) {
@@ -314,6 +328,28 @@ export function loadConfig(overrides = {}) {
       if (raw === undefined || raw === null || raw === "") return 60_000;
       const parsed = boundedPositiveInteger(raw, "ACTION_REMINDER_POLL_MS", 600_000);
       if (parsed < 5_000) throw new Error("ACTION_REMINDER_POLL_MS must be at least 5000");
+      return parsed;
+    })(),
+    dailyDigestAutoRun: booleanValue(
+      env.dailyDigestAutoRun ?? env.DAILY_DIGEST_AUTO_RUN,
+      nodeEnv === "production",
+      "DAILY_DIGEST_AUTO_RUN",
+    ),
+    dailyDigestTime: timeOfDayValue(
+      env.dailyDigestTime ?? env.DAILY_DIGEST_TIME,
+      "09:00",
+      "DAILY_DIGEST_TIME",
+    ),
+    dailyDigestFridayTime: timeOfDayValue(
+      env.dailyDigestFridayTime ?? env.DAILY_DIGEST_FRIDAY_TIME,
+      "16:30",
+      "DAILY_DIGEST_FRIDAY_TIME",
+    ),
+    dailyDigestPollMs: (() => {
+      const raw = env.dailyDigestPollMs ?? env.DAILY_DIGEST_POLL_MS;
+      if (raw === undefined || raw === null || raw === "") return 60_000;
+      const parsed = boundedPositiveInteger(raw, "DAILY_DIGEST_POLL_MS", 600_000);
+      if (parsed < 5_000) throw new Error("DAILY_DIGEST_POLL_MS must be at least 5000");
       return parsed;
     })(),
     // Synchronous time budget for the sales-decision stage review attached to
