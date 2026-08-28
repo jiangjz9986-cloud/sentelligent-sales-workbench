@@ -13,6 +13,15 @@ const TOOL_POLICIES = new Map([
   ["opportunity.detail", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["sales-decision.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
   ["action-risk.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  // Todo tools (v0.7.5). Create/complete/defer are append-or-reversible
+  // writes whose preview cards echo the parsed schedule, so they use the
+  // lightweight “确认” reply; deleting hides a business record and keeps the
+  // six-digit code.
+  ["action-risk.create", { risk: "R1", confirmation: "affirm_language", reason: "ordinary_write" }],
+  ["action-risk.list", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["action-risk.complete", { risk: "R1", confirmation: "affirm_language", reason: "ordinary_write" }],
+  ["action-risk.defer", { risk: "R1", confirmation: "affirm_language", reason: "ordinary_write" }],
+  ["action-risk.delete", { risk: "R2", confirmation: "explicit_code", reason: "record_write" }],
   ["itinerary.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["travel-expense.summary", { risk: "R1", confirmation: "none", reason: "read_only" }],
   // WeChat bookkeeping uses constrained natural-language confirmation at

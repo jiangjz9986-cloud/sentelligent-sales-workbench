@@ -297,7 +297,7 @@ export function createAssistantBusinessSnapshotAdapter({
     if (!params) return { items: [], truncated: false };
     const rows = db.prepare(`
       SELECT action.id, action.customer_id, action.opportunity_id, opportunity.customer_id AS opportunity_customer_id,
-             action.title, action.status, action.due, action.priority, action.updated_at
+             action.title, action.status, action.due, action.priority, action.remind_at, action.updated_at
       FROM action_items action
       LEFT JOIN opportunities opportunity ON opportunity.id = action.opportunity_id AND opportunity.deleted_at IS NULL
       LEFT JOIN customers action_customer ON action_customer.id = action.customer_id AND action_customer.deleted_at IS NULL
@@ -307,6 +307,8 @@ export function createAssistantBusinessSnapshotAdapter({
           OR (action.customer_id IS NULL AND opportunity.customer_id = $customerId))
         AND ($opportunityId IS NULL OR action.opportunity_id = $opportunityId)
         AND (
+          action.owner = $owner
+          OR
           (action.opportunity_id IS NOT NULL
             AND (action.customer_id IS NULL OR action.customer_id = opportunity.customer_id)
             AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND opportunity_customer.owner = $owner)))
@@ -327,6 +329,7 @@ export function createAssistantBusinessSnapshotAdapter({
         status: row.status,
         due: row.due ?? null,
         priority: optionalText(row.priority, 40),
+        remindAt: row.remind_at ?? null,
         updatedAt: trustedDatabaseTimestamp(row.updated_at),
       }));
     return { items: mapped, truncated: rows.length > MAX_ITEMS };

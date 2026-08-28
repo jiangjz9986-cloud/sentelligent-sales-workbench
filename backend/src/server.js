@@ -138,6 +138,9 @@ import {
 import { createVisitCaptureAssistantAdapter } from "./assistant/visitCaptureAssistantAdapter.js";
 import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecordPendingPreviewProviders.js";
 import { createQuickRecordStore } from "./quickRecords/quickRecordStore.js";
+import { createActionItemStore } from "./actionItems/actionItemStore.js";
+import { createActionReminderScheduler } from "./actionReminders/reminderScheduler.js";
+import { createActionItemPendingPreviewProviders } from "./assistant/actionItemPendingPreviewProviders.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
 import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
 import { reconcileWeixinInvoiceAttachments } from "./assistant/weixinInvoiceAttachment.js";
@@ -751,6 +754,9 @@ function actionFromRow(row) {
     status: row.status,
     sourceRecordId: row.source_record_id,
     tone: row.tone,
+    owner: row.owner ?? null,
+    remindAt: row.remind_at ?? null,
+    remindedAt: row.reminded_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1879,6 +1885,9 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
     $priority: priority,
     $sourceRecordId: quickRecord.id,
     $tone: priority === "高" ? "red" : "blue",
+    // Deep write-back inherits the record owner so assistant-visible scoping
+    // covers these rows without changing their display assignee (v0.7.5).
+    $owner: quickRecord.owner ?? null,
   };
   const currentRow = get(
     db,
@@ -1901,6 +1910,7 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
           reason = $reason,
           priority = $priority,
           tone = $tone,
+          owner = COALESCE(owner, $owner),
           deleted_at = NULL,
           deleted_by = NULL
           ${reactivating ? ", due = $due, assignee = $assignee, status = 'pending'" : ""}`,
@@ -1912,6 +1922,7 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
         $reason: params.$reason,
         $priority: params.$priority,
         $tone: params.$tone,
+        $owner: params.$owner,
         ...(reactivating ? { $due: params.$due, $assignee: params.$assignee } : {}),
       },
     });
@@ -1920,10 +1931,10 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
       db,
       `INSERT INTO action_items (
        id, customer_id, opportunity_id, title, customer, reason, due,
-       assignee, priority, status, source_record_id, tone
+       assignee, priority, status, source_record_id, tone, owner
      ) VALUES (
        $id, $customerId, $opportunityId, $title, $customer, $reason, $due,
-       $assignee, $priority, 'pending', $sourceRecordId, $tone
+       $assignee, $priority, 'pending', $sourceRecordId, $tone, $owner
      )`,
       { ...params, $id: randomUUID() },
     );
@@ -2885,6 +2896,21 @@ export function createServer(options = {}) {
       clock: assistantClock,
     });
   const assistantQuickRecordStore = createQuickRecordStore(db, { clock: assistantClock });
+  const assistantActionItemStore = createActionItemStore(db, { clock: assistantClock });
+  const actionReminderScheduler = createActionReminderScheduler({
+    db,
+    store: assistantActionItemStore,
+    outboxRepository: weixinConfirmationOutboxRepository,
+    resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
+    resolveConversationId: () => shortcutBookkeepingAssistantRuntime.conversationFor(
+      shortcutBookkeepingAssistantRuntime.owner,
+    ),
+    deliveryReady: weixinTenderDeliveryReady,
+    clock: options.actionReminderSchedulerClock ?? (() => new Date()),
+    pollMs: config.actionReminderPollMs,
+  });
+  const actionReminderAutoRun = options.actionReminderAutoRun ?? config.actionReminderAutoRun;
+  if (actionReminderAutoRun && options.actionReminderSchedulerEnabled !== false) actionReminderScheduler.start();
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -2895,6 +2921,7 @@ export function createServer(options = {}) {
       travelExpenseDocumentInboxRepository,
       bookkeepingRepository: shortcutBookkeepingRepository,
       bookkeepingRuntime: shortcutBookkeepingAssistantRuntime,
+      actionItemStore: assistantActionItemStore,
       travelExpenseRepository,
       travelExpenseRegionRepository,
       travelExpenseAnalyzer: travelExpenseAnalyzer,
@@ -2935,6 +2962,12 @@ export function createServer(options = {}) {
           customerAdapter: assistantCustomerAdapter,
           snapshotAdapter: assistantBusinessSnapshotAdapter,
           store: assistantQuickRecordStore,
+          resolveBusinessOwner: assistantBusinessOwnerResolver,
+          clock: assistantClock,
+        }),
+        ...createActionItemPendingPreviewProviders({
+          store: assistantActionItemStore,
+          customerAdapter: assistantCustomerAdapter,
           resolveBusinessOwner: assistantBusinessOwnerResolver,
           clock: assistantClock,
         }),
@@ -6058,6 +6091,21 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/actions/reminders/status") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const pending = get(
+          db,
+          `SELECT COUNT(*) AS count FROM action_items
+           WHERE remind_at IS NOT NULL AND reminded_at IS NULL AND deleted_at IS NULL
+             AND status IN ('pending', 'in_progress')`,
+        );
+        sendJson(response, 200, {
+          item: actionReminderScheduler.status(),
+          pendingCount: Number(pending?.count ?? 0),
+        });
+        return;
+      }
+
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.actionPatch);
@@ -7267,10 +7315,12 @@ export function createServer(options = {}) {
 
   server.on("close", () => {
     hospitalTenderScheduler.stop();
+    actionReminderScheduler.stop();
     db.close();
   });
   server.hospitalTenderScheduler = hospitalTenderScheduler;
   server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
+  server.actionReminderScheduler = actionReminderScheduler;
   return server;
 }
 

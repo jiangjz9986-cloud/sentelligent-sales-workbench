@@ -397,3 +397,70 @@ describe("quick-record intents (v0.7.3)", () => {
     assert.equal(router.route({ text: "日照中医医院什么情况" }).toolName, "customer.detail");
   });
 });
+
+describe("todo intents (v0.7.5)", () => {
+  // 2026-08-28 is a Friday 10:00 in Asia/Shanghai.
+  const router = createAssistantRouter({ clock: () => new Date("2026-08-28T02:00:00.000Z") });
+
+  it("parses schedule, priority, and customer hints out of a reminder prefix", () => {
+    const plan = router.route({ text: "提醒我明天上午十点给王工送方案 紧急" });
+    assert.equal(plan.status, "confirmation_required");
+    assert.equal(plan.toolName, "action-risk.create");
+    assert.equal(plan.risk, "R1");
+    assert.equal(plan.confirmation, "affirm_language");
+    assert.deepEqual(plan.arguments, {
+      title: "给王工送方案",
+      remindAt: "2026-08-29T02:00:00.000Z",
+      due: "明天上午十点",
+      priority: "高",
+      customerQuery: "王工送方案",
+    });
+  });
+
+  it("keeps deadline phrases and bare-colon prefixes as todos without a time", () => {
+    const deadline = router.route({ text: "待办：周五前交周报" });
+    assert.equal(deadline.toolName, "action-risk.create");
+    assert.equal(deadline.arguments.due, "周五前");
+    const noTime = router.route({ text: "记待办 整理拜访材料" });
+    assert.equal(noTime.toolName, "action-risk.create");
+    assert.equal(noTime.arguments.remindAt, undefined);
+  });
+
+  it("wins over the visit fallback and the bookkeeping regex for reminder bodies", () => {
+    assert.equal(router.route({ text: "提醒我明天拜访日照医院" }).toolName, "action-risk.create");
+    assert.equal(router.route({ text: "提醒我明天报销打车 50 元" }).toolName, "action-risk.create");
+    assert.equal(router.route({ text: "记账支出 50 元" }).toolName, "bookkeeping.ingest");
+    const lead = router.route({ text: "待办：记账 50 元打车" });
+    assert.equal(lead.status, "clarify");
+  });
+
+  it("keeps the capture prefixes away from 帮我记待办 through the lookahead", () => {
+    const plan = router.route({ text: "帮我记待办 明天交材料" });
+    assert.notEqual(plan.toolName, "visit-capture.capture");
+  });
+
+  it("routes scoped todo queries to the list and bare ones to the summary", () => {
+    const today = router.route({ text: "今天有什么待办" });
+    assert.equal(today.toolName, "action-risk.list");
+    assert.deepEqual(today.arguments, { dateStart: "2026-08-28", dateEnd: "2026-08-28", rangeLabel: "今天" });
+    const week = router.route({ text: "本周待办" });
+    assert.deepEqual(week.arguments, { dateStart: "2026-08-24", dateEnd: "2026-08-30", rangeLabel: "本周" });
+    const mine = router.route({ text: "我的待办" });
+    assert.deepEqual(mine.arguments, { rangeLabel: "全部" });
+    assert.equal(router.route({ text: "待办" }).toolName, "action-risk.summary");
+    assert.equal(router.route({ text: "有什么待办" }).toolName, "action-risk.summary");
+  });
+
+  it("requires the 待办 stem for status verbs and captures the target text", () => {
+    const complete = router.route({ text: "完成待办 abc123" });
+    assert.equal(complete.toolName, "action-risk.complete");
+    assert.deepEqual(complete.arguments, { query: "abc123" });
+    const defer = router.route({ text: "把待办 送方案 推迟到明天上午" });
+    assert.equal(defer.toolName, "action-risk.defer");
+    assert.deepEqual(defer.arguments, { query: "送方案", newTime: "明天上午" });
+    const remove = router.route({ text: "删除待办 abc123" });
+    assert.equal(remove.toolName, "action-risk.delete");
+    assert.equal(remove.confirmation, "explicit_code");
+    assert.notEqual(router.route({ text: "完成了拜访张主任" }).toolName, "action-risk.complete");
+  });
+});

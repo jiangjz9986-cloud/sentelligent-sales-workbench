@@ -28,6 +28,7 @@ import { apply as applyShortcutAdvanceAllocation } from "./migrations/0024_short
 import { apply as applyTravelExpenseRegionProfiles } from "./migrations/0025_travel_expense_region_profiles.mjs";
 import { apply as applyHospitalTenderActiveWindow } from "./migrations/0026_hospital_tender_active_window.mjs";
 import { apply as applyCustomerProfileAliases } from "./migrations/0027_customer_profile_aliases.mjs";
+import { apply as applyActionItemReminders } from "./migrations/0028_action_item_reminders.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -185,6 +186,12 @@ const migrations = [
     path: resolve(here, "migrations", "0027_customer_profile_aliases.mjs"),
     type: "module",
     apply: applyCustomerProfileAliases,
+  },
+  {
+    version: "0028",
+    path: resolve(here, "migrations", "0028_action_item_reminders.mjs"),
+    type: "module",
+    apply: applyActionItemReminders,
   },
 ];
 

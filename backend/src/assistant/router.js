@@ -2,6 +2,7 @@ import { validateToolInvocation } from "./contracts.js";
 import { createAgentRegistry } from "./agentRegistry.js";
 import { evaluatePolicy } from "./policy.js";
 import { extractSpokenOccurredAt, resolveSpokenRange } from "./spokenDate.js";
+import { extractSpokenInstant, resolveFutureRange } from "./spokenTime.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
@@ -244,7 +245,7 @@ function reportArguments(args) {
 
 // --- v0.7.3 quick-record intents (deterministic, no model) ---
 
-const QUICK_CAPTURE_PREFIX_RE = /^(记一下|记录一下|帮我记(?:一下|录)?|快速记录|记拜访)\s*[:：]?\s*([\s\S]*)$/u;
+const QUICK_CAPTURE_PREFIX_RE = /^(记一下|记录一下|帮我记(?:一下|录)?(?!待办)|快速记录|记拜访)\s*[:：]?\s*([\s\S]*)$/u;
 const QUICK_CAPTURE_ESCAPE_PREFIX = "记拜访";
 const QUICK_CAPTURE_EMPTY_QUESTION = "请把拜访、电话或会议内容跟在“记一下：”后面一起发我。";
 const QUICK_CAPTURE_BOOKKEEPING_HINT = /记账|支出|收入|借款|报销|发票|付款/u;
@@ -336,6 +337,76 @@ function quickRecordVoidPlan(match, registry, confidence) {
   return makePlan({
     tool,
     arguments: { ...(match[1] ? { quickRecordId: match[1] } : {}) },
+    confidence,
+    source: "natural",
+  });
+}
+
+// --- v0.7.5 todo intents (deterministic, no model) ---
+
+const TODO_CREATE_PREFIX_RE = /^(?:提醒我|记待办|新建待办)\s*[:：]?\s*([\s\S]+)$/u;
+const TODO_CREATE_COLON_RE = /^待办\s*[:：]\s*([\s\S]+)$/u;
+const TODO_DEFER_RE = /^(?:把)?待办\s*(.+?)\s*(?:推迟|延期|顺延|改)(?:到|至|成)\s*(.+)$/u;
+const TODO_DEFER_PREFIX_RE = /^(?:推迟|延期|顺延)待办\s*(.+?)\s*(?:到|至)\s*(.+)$/u;
+const TODO_COMPLETE_RE = /^(?:完成|办完|做完)(?:了)?待办\s*(.+)$/u;
+const TODO_COMPLETE_SUFFIX_RE = /^待办\s*(.+?)\s*(?:完成|办完|做完)(?:了)?$/u;
+const TODO_DELETE_RE = /^(?:删除|取消|删掉)待办\s*(.+)$/u;
+const TODO_LIST_RE = /^(?:查?(?:一下)?)?\s*(今天|今日|明天|本周|这周|下周|最近)?\s*(?:的)?\s*(我的)?\s*(?:有什么|有哪些|还有什么|还有哪些)?\s*待办(?:清单|列表|事项)?\s*[?？]?$/u;
+const TODO_PRIORITY_RE = /(紧急|重要|优先|高优)/u;
+const TODO_BOOKKEEPING_LEAD_RE = /^(?:记账|记支出|记收入)/u;
+const TODO_CONTACT_RE = /(?:给|帮|约|拜访|联系|回复)([\u4e00-\u9fffA-Za-z0-9]{2,20})/u;
+const TODO_EMPTY_QUESTION = "请补充待办内容，例如「提醒我周五前给王工送方案」。";
+
+function todoCreatePlan(body, registry, confidence, now) {
+  const tool = registry.getTool("action-risk.create");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const content = clean(body);
+  if (!content) return clarify(TODO_EMPTY_QUESTION, confidence);
+  // A body that opens with a bookkeeping verb is genuinely ambiguous between
+  // “remind me to book it later” and “book it now”; everything else stays a
+  // todo (提醒我… means a reminder even when money words appear).
+  if (TODO_BOOKKEEPING_LEAD_RE.test(content)) {
+    return clarify("你是要现在记账（直接发送「支出 …」），还是建一条待办提醒（以「待办：…」重发）？", confidence);
+  }
+  const { instant, remainder } = extractSpokenInstant(content, now);
+  let title = remainder;
+  const priorityMatch = title.match(TODO_PRIORITY_RE);
+  if (priorityMatch) title = title.replace(priorityMatch[1], "").trim();
+  title = clean(title).replace(/^[，,。:：\s]+|[，,。:：\s]+$/gu, "").slice(0, 80);
+  if (!title) return clarify(TODO_EMPTY_QUESTION, confidence);
+  const contact = title.match(TODO_CONTACT_RE);
+  return makePlan({
+    tool,
+    arguments: {
+      title,
+      ...(instant ? { remindAt: instant.iso, due: clean(instant.token).slice(0, 50) } : {}),
+      priority: priorityMatch ? "高" : "中",
+      ...(contact ? { customerQuery: contact[1] } : {}),
+    },
+    confidence,
+    source: "natural",
+  });
+}
+
+function todoTargetPlan(toolName, target, registry, confidence, extra = {}) {
+  const tool = registry.getTool(toolName);
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const query = clean(target);
+  if (!query) return clarify("请带上待办编号或标题，例如「完成待办 a1b2c3」。", confidence);
+  return makePlan({ tool, arguments: { query, ...extra }, confidence, source: "natural" });
+}
+
+function todoListPlan(match, registry, confidence, now) {
+  const tool = registry.getTool("action-risk.list");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const rangeWord = match[1] ?? null;
+  const range = rangeWord ? resolveFutureRange(rangeWord, now) : null;
+  return makePlan({
+    tool,
+    arguments: {
+      ...(range ? { dateStart: range.start, dateEnd: range.end } : {}),
+      rangeLabel: rangeWord ?? "全部",
+    },
     confidence,
     source: "natural",
   });
@@ -439,6 +510,17 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
   if (quickCapture) {
     return quickRecordCapturePlan(quickCapture[1], quickCapture[2], registry, confidence, now);
   }
+  // Todo prefixes are the second-strongest intent signals; the strong 待办
+  // stem keeps them disjoint from the capture prefixes above and every
+  // phrasing below (design v0.7.5 §1.3).
+  const todoCreate = value.match(TODO_CREATE_PREFIX_RE) ?? value.match(TODO_CREATE_COLON_RE);
+  if (todoCreate) return todoCreatePlan(todoCreate[1], registry, confidence, now);
+  const todoDefer = value.match(TODO_DEFER_RE) ?? value.match(TODO_DEFER_PREFIX_RE);
+  if (todoDefer) return todoTargetPlan("action-risk.defer", todoDefer[1], registry, confidence, { newTime: clean(todoDefer[2]) });
+  const todoComplete = value.match(TODO_COMPLETE_RE) ?? value.match(TODO_COMPLETE_SUFFIX_RE);
+  if (todoComplete) return todoTargetPlan("action-risk.complete", todoComplete[1], registry, confidence);
+  const todoDelete = value.match(TODO_DELETE_RE);
+  if (todoDelete) return todoTargetPlan("action-risk.delete", todoDelete[1], registry, confidence);
   if (/销售周报/.test(value)) {
     return makePlan({ tool: registry.getTool("sales-report.preview"), arguments: { week: "current" }, confidence, source: "natural" });
   }
@@ -507,6 +589,12 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
       confidence,
       source: "natural",
     });
+  }
+  // Time-scoped or 我的-scoped todo queries route to the owner-bounded list;
+  // bare 待办/有什么待办 keeps the existing action-risk summary above.
+  const todoList = followUpText.match(TODO_LIST_RE);
+  if (todoList && (todoList[1] || todoList[2])) {
+    return todoListPlan(todoList, registry, confidence, now);
   }
   if (/^(?:行程|行程摘要|拜访行程)$/u.test(value)) {
     return makePlan({ tool: registry.getTool("itinerary.summary"), arguments: {}, confidence, source: "natural" });

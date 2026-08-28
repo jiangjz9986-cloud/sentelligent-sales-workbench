@@ -229,13 +229,26 @@ export const CAPABILITY_CATALOG = deepFreeze([
   capability({
     id: "action-risk",
     name: "行动与风险",
-    description: "汇总未完成行动和活跃风险，保留来源标识供后续处理。",
+    description: "汇总未完成行动和活跃风险；微信端可建待办（自然语言时间/优先级解析，轻确认）、查待办清单（免确认）、完成/推迟（轻确认）、删除（六位码），到点经小小绑定私聊推送提醒。",
     status: "ready",
-    mappings: { tools: ["action-risk.summary"], apis: ["GET /api/actions", "GET /api/risks"] },
-    dependencies: ["authenticated action query", "authenticated risk query", "read-only assistant route"],
-    integrationPoints: ["assistant agentRegistry.action-risk", "action/risk APIs"],
+    mappings: {
+      tools: [
+        "action-risk.summary",
+        "action-risk.create",
+        "action-risk.list",
+        "action-risk.complete",
+        "action-risk.defer",
+        "action-risk.delete",
+      ],
+      apis: ["GET /api/actions", "GET /api/risks", "PATCH /api/actions/:id", "GET /api/actions/reminders/status"],
+    },
+    dependencies: [
+      "authenticated action query", "authenticated risk query", "read-only assistant route",
+      "action item store", "action reminder scheduler", "weixin confirmation outbox", "human confirmation gate",
+    ],
+    integrationPoints: ["assistant agentRegistry.action-risk", "action/risk APIs", "action reminder scheduler"],
     confirmationLevel: "preview",
-    sourceRefs: ["agentRegistry:action-risk", "toolRegistry:action-risk.summary"],
+    sourceRefs: ["agentRegistry:action-risk", "toolRegistry:action-risk.summary", "toolRegistry:action-risk.create"],
   }),
   capability({
     id: "itinerary.summary",

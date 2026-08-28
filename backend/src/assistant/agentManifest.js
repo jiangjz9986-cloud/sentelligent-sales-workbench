@@ -299,8 +299,18 @@ export const AGENT_MANIFESTS = deepFreeze([
   manifestDefinition("action-risk", {
     contractVersion: "action-risk-v1",
     modelPolicy: "none",
-    taskTypes: ["summary", "prioritize", "follow_up_preview", "status_change_preview"],
-    tools: ["action-risk.summary"],
+    taskTypes: [
+      "summary", "prioritize", "follow_up_preview", "status_change_preview",
+      "todo_create_preview", "todo_list", "todo_status_preview",
+    ],
+    tools: [
+      "action-risk.summary",
+      "action-risk.create",
+      "action-risk.list",
+      "action-risk.complete",
+      "action-risk.defer",
+      "action-risk.delete",
+    ],
     confirmation: { preview: "preview", write: "explicit" },
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
     inputSchema: {
@@ -331,6 +341,7 @@ export const AGENT_MANIFESTS = deepFreeze([
       "只使用 owner-scoped 服务端行动和风险摘要，保留服务端排序及来源引用。",
       "可以区分事实和未知，但不得把排序伪装成销售推进建议，也不得猜测责任人、截止日或风险处置结果。",
       "状态、截止日和优先级变更只能生成预览，不能执行写回，且必须经过本人确认。",
+      "待办的创建、完成与推迟先出预览卡再由本人回复确认写入，删除必须六位确认码确认；提醒时间以服务端解析结果为准，不得猜测。",
     ].join(""),
     fallback: { strategy: "return deterministic owner-scoped action and risk summary", status: "fallback" },
   }),

@@ -92,7 +92,7 @@ describe("小小 capability metadata catalog", () => {
       "reimbursement-report": ["GET /api/travel-expenses"],
       "sales-decision.preview": ["POST /api/ai/sales-decisions"],
       "sales-report": [],
-      "action-risk": ["GET /api/actions", "GET /api/risks"],
+      "action-risk": ["GET /api/actions", "GET /api/risks", "PATCH /api/actions/:id", "GET /api/actions/reminders/status"],
       "knowledge.search": ["POST /api/knowledge/search"],
       "advance-settlement": ["GET /api/travel-expense-advances", "GET /api/travel-expenses"],
     };

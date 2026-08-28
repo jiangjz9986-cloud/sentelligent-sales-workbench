@@ -125,6 +125,9 @@ CREATE TABLE IF NOT EXISTS action_items (
   status TEXT NOT NULL DEFAULT 'pending',
   source_record_id TEXT UNIQUE REFERENCES quick_records(id) ON DELETE SET NULL,
   tone TEXT,
+  owner TEXT,
+  remind_at TEXT,
+  reminded_at TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -181,6 +184,9 @@ CREATE INDEX IF NOT EXISTS idx_solution_drafts_opportunity_id ON solution_drafts
 CREATE INDEX IF NOT EXISTS idx_ai_suggestions_type ON ai_suggestions(type);
 CREATE INDEX IF NOT EXISTS idx_action_items_status ON action_items(status);
 CREATE INDEX IF NOT EXISTS idx_action_items_source_record_id ON action_items(source_record_id);
+CREATE INDEX IF NOT EXISTS idx_action_items_remind
+  ON action_items(remind_at)
+  WHERE remind_at IS NOT NULL AND reminded_at IS NULL AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_risk_items_status ON risk_items(status);
 CREATE INDEX IF NOT EXISTS idx_risk_items_opportunity_id ON risk_items(opportunity_id);
 CREATE INDEX IF NOT EXISTS idx_risk_items_source ON risk_items(source_type, source_id);

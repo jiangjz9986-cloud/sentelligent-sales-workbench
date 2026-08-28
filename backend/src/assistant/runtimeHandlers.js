@@ -9,6 +9,8 @@ import {
   updateCustomer,
 } from "../customers/customerStore.js";
 import { createQuickRecordStore } from "../quickRecords/quickRecordStore.js";
+import { createActionItemStore } from "../actionItems/actionItemStore.js";
+import { reminderDisplayOf } from "../actionReminders/reminderScheduler.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
@@ -487,12 +489,14 @@ export function createAssistantToolHandlers({
   agentRunRepository = null,
   salesLoopPreviewService = null,
   quickRecordStore = null,
+  actionItemStore = null,
   resolveBusinessOwner = (owner) => owner,
   clock = () => new Date(),
   fetchImpl = fetch,
 } = {}) {
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
   const recordStore = quickRecordStore ?? createQuickRecordStore(db, { clock });
+  const todoStore = actionItemStore ?? createActionItemStore(db, { clock });
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
   const settlementSnapshot = settlementSnapshotAdapter ?? createAssistantSettlementSnapshotAdapter({
     db,
@@ -1219,6 +1223,267 @@ export function createAssistantToolHandlers({
         summary,
         actionRiskResult: result,
         runId: result.runId,
+      };
+    },
+
+    async "action-risk.create"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未创建待办。", status: "denied" };
+      }
+      const actionItemId = safeText(context.actionId) || randomUUID();
+      const existing = todoStore.getVisible({ owner: businessOwner, id: actionItemId });
+      const receiptOf = (item) => weixinCard("待办已创建", [
+        ["编号", weixinShortId(item.id)],
+        ["内容", item.title],
+        ["提醒", item.remindAt ? reminderDisplayOf(item.remindAt) : "未设置"],
+        ["优先级", item.priority],
+        ...(item.customerName ? [["客户", item.customerName]] : []),
+      ], "发送“本周待办”可随时查看。");
+      if (existing) {
+        return { text: receiptOf(existing), status: "created", actionItem: existing, replayed: true };
+      }
+      let created;
+      try {
+        created = withImmediateTransaction(db, () => {
+          const item = todoStore.create({
+            owner: businessOwner,
+            title: safeText(args.title),
+            due: safeText(args.due) || null,
+            remindAt: safeText(args.remindAt) || null,
+            priority: safeText(args.priority) || "中",
+            customerId: safeText(args.customerId) || null,
+            customerName: safeText(args.customerName) || null,
+            id: actionItemId,
+          });
+          insertAudit(db, {
+            action: "action.create",
+            entityType: "action",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: null,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              source: "weixin-assistant",
+              remindAt: item.remindAt,
+              priority: item.priority,
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.message?.includes("UNIQUE")) {
+          const replayed = todoStore.getVisible({ owner: businessOwner, id: actionItemId });
+          if (replayed) return { text: receiptOf(replayed), status: "created", actionItem: replayed, replayed: true };
+        }
+        throw error;
+      }
+      return { text: receiptOf(created), status: "created", actionItem: created };
+    },
+
+    async "action-risk.list"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，无法查询待办。", status: "denied" };
+      }
+      const dateStart = safeText(args.dateStart) || null;
+      const dateEnd = safeText(args.dateEnd) || null;
+      const rangeLabel = safeText(args.rangeLabel) || (dateStart ? `${dateStart} ~ ${dateEnd}` : "全部");
+      const { items, truncated } = todoStore.list({
+        owner: businessOwner,
+        dateStart,
+        dateEnd,
+        limit: 8,
+      });
+      if (items.length === 0) {
+        return {
+          text: weixinCard("待办清单", [
+            ["范围", rangeLabel],
+            ["结果", "没有待办"],
+          ], "发送“提醒我…”可新建待办。"),
+          status: "ok",
+          items: [],
+          truncated: false,
+        };
+      }
+      const lines = items.flatMap((item, index) => [
+        [`${index + 1}`, `${weixinClip(item.title, 30)}`],
+        ["   提醒", item.remindAt ? reminderDisplayOf(item.remindAt) : (item.due ?? "未设置")],
+        ["   编号", weixinShortId(item.id)],
+      ]);
+      return {
+        text: weixinCard("待办清单", [
+          ["范围", `${rangeLabel} · ${items.length}${truncated ? "+" : ""} 条`],
+          ...lines,
+        ], "回复“完成待办 <编号>”或“待办 <编号> 推迟到…”。"),
+        status: "ok",
+        items,
+        truncated,
+      };
+    },
+
+    async "action-risk.complete"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改待办。", status: "denied" };
+      }
+      const actionItemId = safeText(args.actionItemId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!actionItemId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "完成请求不完整，请重新发起。", status: "error" };
+      }
+      let outcome;
+      try {
+        outcome = withImmediateTransaction(db, () => {
+          const result = todoStore.complete({ owner: businessOwner, id: actionItemId, expectedVersion });
+          insertAudit(db, {
+            action: "action.update",
+            entityType: "action",
+            entityId: result.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: { status: result.before.status },
+            after: { status: result.after.status },
+            entityVersion: result.after.version,
+            metadata: {
+              changedFields: ["status"],
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return result;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条待办刚在其他端被修改，本次未写入，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "待办不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("待办已完成", [
+          ["编号", weixinShortId(outcome.after.id)],
+          ["内容", weixinClip(outcome.after.title, 60)],
+        ]),
+        status: "updated",
+        actionItem: outcome.after,
+      };
+    },
+
+    async "action-risk.defer"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改待办。", status: "denied" };
+      }
+      const actionItemId = safeText(args.actionItemId);
+      const expectedVersion = Number(args.expectedVersion);
+      const remindAt = safeText(args.remindAt);
+      if (!actionItemId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !remindAt) {
+        return { text: "推迟请求不完整，请重新发起。", status: "error" };
+      }
+      let outcome;
+      try {
+        outcome = withImmediateTransaction(db, () => {
+          const result = todoStore.defer({
+            owner: businessOwner,
+            id: actionItemId,
+            expectedVersion,
+            remindAt,
+            due: safeText(args.due) || null,
+          });
+          insertAudit(db, {
+            action: "action.update",
+            entityType: "action",
+            entityId: result.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: { remindAt: result.before.remindAt, due: result.before.due },
+            after: { remindAt: result.after.remindAt, due: result.after.due },
+            entityVersion: result.after.version,
+            metadata: {
+              changedFields: ["remind_at", "due"],
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return result;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条待办刚在其他端被修改，本次未写入，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "待办不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("待办已顺延", [
+          ["编号", weixinShortId(outcome.after.id)],
+          ["内容", weixinClip(outcome.after.title, 60)],
+          ["提醒", outcome.after.remindAt ? reminderDisplayOf(outcome.after.remindAt) : "未设置"],
+        ]),
+        status: "updated",
+        actionItem: outcome.after,
+      };
+    },
+
+    async "action-risk.delete"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未删除待办。", status: "denied" };
+      }
+      const actionItemId = safeText(args.actionItemId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!actionItemId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "删除请求不完整，请重新发起。", status: "error" };
+      }
+      let outcome;
+      try {
+        outcome = withImmediateTransaction(db, () => {
+          const result = todoStore.softDelete({
+            owner: businessOwner,
+            id: actionItemId,
+            expectedVersion,
+            deletedBy: context.owner,
+          });
+          insertAudit(db, {
+            action: "action.delete",
+            entityType: "action",
+            entityId: result.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: { title: result.before.title, status: result.before.status },
+            after: { deletedAt: result.after.deletedAt, deletedBy: result.after.deletedBy },
+            entityVersion: result.after.version,
+            metadata: {
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return result;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条待办刚在其他端被修改，本次未删除，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "待办不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("待办已删除", [
+          ["编号", weixinShortId(outcome.after.id)],
+          ["内容", weixinClip(outcome.before.title, 60)],
+        ]),
+        status: "deleted",
+        actionItem: outcome.after,
       };
     },
 

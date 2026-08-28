@@ -304,6 +304,18 @@ export function loadConfig(overrides = {}) {
     ),
     hospitalTenderIntervalMinutes,
     hospitalTenderBatchSize,
+    actionReminderAutoRun: booleanValue(
+      env.actionReminderAutoRun ?? env.ACTION_REMINDER_AUTO_RUN,
+      nodeEnv === "production",
+      "ACTION_REMINDER_AUTO_RUN",
+    ),
+    actionReminderPollMs: (() => {
+      const raw = env.actionReminderPollMs ?? env.ACTION_REMINDER_POLL_MS;
+      if (raw === undefined || raw === null || raw === "") return 60_000;
+      const parsed = boundedPositiveInteger(raw, "ACTION_REMINDER_POLL_MS", 600_000);
+      if (parsed < 5_000) throw new Error("ACTION_REMINDER_POLL_MS must be at least 5000");
+      return parsed;
+    })(),
     hospitalTenderPushplusToken: String(
       env.hospitalTenderPushplusToken ?? env.HOSPITAL_TENDER_PUSHPLUS_TOKEN ?? "",
     ).trim(),
