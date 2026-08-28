@@ -58,7 +58,18 @@ function makeExpense(proofCount) {
 }
 
 function renderPages(proofCount) {
-  const expenseList = buildExpenseListExport({ expenses: [makeExpense(proofCount)] });
+  const expenseList = buildExpenseListExport({
+    expenses: [makeExpense(proofCount)],
+    week: { start: "2026-08-24", end: "2026-08-30" },
+    regionProfile: {
+      weekStart: "2026-08-24",
+      weekEnd: "2026-08-30",
+      version: 1,
+      cities: ["济宁", "东营"],
+      defaultCity: "济宁",
+      dateOverrides: [],
+    },
+  });
   const pages = paginateExpenseList({ rows: expenseList.rows, rowsPerPage: 9 });
   const thumbnailUrls = Object.fromEntries(Array.from({ length: proofCount }, (_, index) => [
     `proof-${index + 1}`,
@@ -73,6 +84,7 @@ function renderPages(proofCount) {
       generatedOn: "2026-08-26",
       totals: expenseList.totals,
       thumbnailUrls,
+      title: expenseList.title,
     }))),
   };
 }
@@ -90,6 +102,7 @@ describe("ExpenseListPrintPreview physical-row rendering", () => {
     assert.equal(occurrences(html, /rowSpan="2"/g), 6);
     assert.equal(occurrences(html, /<img /g), 2);
     assert.equal(occurrences(html, /打印分页测试/g), 1);
+    assert.match(html, /<h2>8\.24-8\.24济宁、东营出差费用清单<\/h2>/);
     assert.match(html, /第 1\/1 页/);
   });
 

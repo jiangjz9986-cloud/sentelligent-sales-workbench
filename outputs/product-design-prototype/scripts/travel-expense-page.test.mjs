@@ -156,12 +156,39 @@ describe("travel expense feature boundary", () => {
   it("uses the scheme-three ledger projection as the canonical ledger contract", async () => {
     const ledger = await source("src/features/travelExpense/ExpenseLedgerWorkbench.jsx");
 
-    const headings = ["时间", "类型", "分类 / 备注", "金额", "来源", "凭证", "发票", "操作"];
+    const headings = ["时间", "类型", "分类 / 备注", "金额", "凭证", "发票", "操作"];
     const positions = headings.map((heading) => ledger.indexOf(`<th scope="col">${heading}</th>`));
     assert.equal(positions.every((position) => position >= 0), true);
     assert.deepEqual([...positions].sort((left, right) => left - right), positions);
+    // v0.8.2: the 来源 column (微信小小 / 个人垫付 tags) is removed on desktop
+    // and mobile, and payment-proof thumbnails become the visual anchor.
+    assert.equal(ledger.includes('<th scope="col">来源</th>'), false);
+    assert.doesNotMatch(ledger, /SourceState/);
+    assert.doesNotMatch(ledger, /<dt>来源<\/dt>/);
+    assert.match(ledger, /maxDimension=\{360\}/);
     assert.match(ledger, /data-ledger-state=\{item\.formal \? "formal" : "pending"\}/);
     assert.match(ledger, /尚未计入本周合计/);
+  });
+
+  it("no longer renders the 小小待确认 review card; WeChat is the only confirmation surface", async () => {
+    const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
+    const css = await source("src/features/travelExpense/travelExpense.css");
+    const model = await source("src/features/travelExpense/expenseLedgerWorkbenchModel.js");
+
+    assert.doesNotMatch(page, /WeixinBookkeepingReviewCenter/);
+    assert.doesNotMatch(page, /小小待确认/);
+    assert.doesNotMatch(page, /expense-ledger-reviews/);
+    assert.doesNotMatch(css, /weixin-review-|weixin-bookkeeping/);
+    await assert.rejects(
+      source("src/features/travelExpense/WeixinBookkeepingReviewCenter.jsx"),
+      { code: "ENOENT" },
+    );
+    // Pending rows stay in the ledger and keep syncing through the background
+    // poll, but their action is a WeChat pointer instead of a web target.
+    assert.match(page, /setWeixinBookkeepingReviews/);
+    assert.match(page, /weixinBookkeepingReviews\.length === 0/);
+    assert.doesNotMatch(page, /onReviewItem=/);
+    assert.match(model, /action: "微信中确认"/);
   });
 
   it("gives the two primary workspaces keyboard tab semantics", async () => {
@@ -317,6 +344,18 @@ describe("travel expense feature boundary", () => {
     assert.match(css, /\.expense-list-print-table th:nth-child\(5\)\s*\{\s*width:\s*28%;\s*\}/);
     assert.match(css, /\.expense-list-payment-thumbnail img/);
     assert.match(css, /\.expense-list-print-totals/);
+    // v0.8.2 manual-sheet alignment: the week's responsible-region cities feed
+    // the “M.D-M.D城市出差费用清单” title in print and XLSX alike, printed
+    // proofs match the embedded XLSX picture size, and six proof rows fit an
+    // A4 portrait page.
+    assert.match(preview, /regionProfile = null/);
+    assert.match(preview, /week,\s*\n\s*regionProfile,/);
+    assert.match(preview, /rowsPerPage: 6/);
+    assert.match(preview, /<h2>\{title\}<\/h2>/);
+    assert.match(preview, /title=\{exportModel\.title\}/);
+    assert.match(page, /<ExpenseListPrintPreview[^/]*regionProfile=\{regionProfile\}/);
+    assert.match(page, /noInvoiceConfirmations,\s*\n\s*regionProfile,\s*\n\s*getAttachmentContentResponse: apiClient\.getTravelExpenseAttachmentContentResponse,/);
+    assert.match(css, /\.expense-list-payment-thumbnail img\s*\{[^}]*max-width:\s*190px/s);
   });
 
   it("shows authenticated payment thumbnails and editable weekly regions without web cross-week banners", async () => {
@@ -445,6 +484,7 @@ describe("travel expense feature boundary", () => {
       "src/features/travelExpense/expenseListXlsx.test.js",
       "src/features/travelExpense/ReimbursementOrganizer.test.js",
       "src/features/travelExpense/responsibleRegionModel.test.js",
+      "scripts/trip-region-settings-browser.test.mjs",
     ]) {
       assert.match(gate, new RegExp(testPath.replaceAll(".", "\\.")));
     }

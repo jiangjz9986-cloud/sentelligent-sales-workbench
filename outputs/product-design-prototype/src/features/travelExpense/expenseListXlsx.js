@@ -252,9 +252,10 @@ function buildStylesXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;¥&quot;#,##0.00"/></numFmts>
-  <fonts count="2">
+  <fonts count="3">
     <font><sz val="10.5"/><name val="等线"/><family val="2"/><charset val="134"/></font>
     <font><b/><sz val="10.5"/><name val="等线"/><family val="2"/><charset val="134"/></font>
+    <font><b/><sz val="14"/><name val="等线"/><family val="2"/><charset val="134"/></font>
   </fonts>
   <fills count="3">
     <fill><patternFill patternType="none"/></fill>
@@ -266,7 +267,7 @@ function buildStylesXml() {
     <border><left style="thin"><color rgb="FF9AA7B8"/></left><right style="thin"><color rgb="FF9AA7B8"/></right><top style="thin"><color rgb="FF9AA7B8"/></top><bottom style="thin"><color rgb="FF9AA7B8"/></bottom><diagonal/></border>
   </borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="8">
+  <cellXfs count="9">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
     <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
     <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
@@ -275,6 +276,7 @@ function buildStylesXml() {
     <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center" wrapText="1"/></xf>
     <xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>
     <xf numFmtId="164" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
   <dxfs count="0"/>
@@ -336,9 +338,17 @@ function buildWorksheet({ expenseList, thumbnailImages }) {
   const merges = [];
   const placements = [];
   const mediaByAttachmentId = new Map();
-  const headerCells = EXPENSE_LIST_COLUMNS.map(({ letter, label }) => inlineStringCell(`${letter}1`, label, 1)).join("");
-  sheetRows.push(`<row r="1" ht="28" customHeight="1">${headerCells}</row>`);
-  let sheetRow = 2;
+  // Row 1 mirrors the user's manual sheet: a merged bold title such as
+  // “8.17-8.21济宁、东营出差费用清单” above the seven fixed headers.
+  const title = String(expenseList.title ?? "").trim() || "出差费用清单";
+  merges.push("A1:G1");
+  sheetRows.push(`<row r="1" ht="30" customHeight="1">${[
+    inlineStringCell("A1", title, 8),
+    ...EXPENSE_LIST_COLUMNS.slice(1).map(({ letter }) => blankCell(`${letter}1`, 8)),
+  ].join("")}</row>`);
+  const headerCells = EXPENSE_LIST_COLUMNS.map(({ letter, label }) => inlineStringCell(`${letter}2`, label, 1)).join("");
+  sheetRows.push(`<row r="2" ht="28" customHeight="1">${headerCells}</row>`);
+  let sheetRow = 3;
 
   for (const [logicalIndex, logicalRow] of expenseList.rows.entries()) {
     if (!logicalRow || typeof logicalRow !== "object" || !logicalRow.cells || typeof logicalRow.cells !== "object") {
@@ -429,7 +439,7 @@ function buildWorksheet({ expenseList, thumbnailImages }) {
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>
   <dimension ref="A1:G${finalRow}"/>
-  <sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>
+  <sheetViews><sheetView showGridLines="0" workbookViewId="0"><pane ySplit="2" topLeftCell="A3" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A3" sqref="A3"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="18"/>
   <cols>${EXPENSE_LIST_COLUMNS.map(({ letter, width }, index) => `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"/>`).join("")}</cols>
   <sheetData>${sheetRows.join("")}</sheetData>

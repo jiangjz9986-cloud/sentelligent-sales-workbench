@@ -1,11 +1,9 @@
 import {
   ArrowDown,
   ArrowUp,
-  BadgeCheck,
   CalendarDays,
   CheckCircle2,
   CircleAlert,
-  CircleDollarSign,
   CreditCard,
   FileCheck2,
   FileClock,
@@ -14,7 +12,6 @@ import {
   Landmark,
   LoaderCircle,
   MapPin,
-  MessageCircleMore,
   Pencil,
   ReceiptText,
   RefreshCw,
@@ -82,11 +79,6 @@ function CategoryCopy({ item }) {
   );
 }
 
-function SourceState({ item }) {
-  const Icon = item.kind === "review" ? MessageCircleMore : item.kind === "advance" ? Landmark : CreditCard;
-  return <span className="ledger-workbench-source"><Icon size={16} aria-hidden="true" />{item.sourceLabel}</span>;
-}
-
 function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
   const first = item.paymentProofs?.[0];
   if (first && isTravelExpenseImage(first) && typeof getAttachmentContentResponse === "function") {
@@ -97,7 +89,7 @@ function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
           loadImage={({ signal }) => getAttachmentContentResponse(first.id, { signal })}
           title={first.fileName || "付款凭证"}
           variant="thumbnail"
-          maxDimension={180}
+          maxDimension={360}
           className="ledger-proof-preview-image"
         />
         <span><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span>
@@ -147,7 +139,6 @@ function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewIte
             <th scope="col">类型</th>
             <th scope="col">分类 / 备注</th>
             <th scope="col">金额</th>
-            <th scope="col">来源</th>
             <th scope="col">凭证</th>
             <th scope="col">发票</th>
             <th scope="col">操作</th>
@@ -165,7 +156,6 @@ function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewIte
                 <strong className={`ledger-workbench-amount is-${item.transactionType}`}>{amountLabel(item)}</strong>
                 {!item.formal ? <small className="ledger-workbench-not-counted">尚未计入本周合计</small> : null}
               </td>
-              <td><SourceState item={item} /></td>
               <td><ProofState item={item} getAttachmentContentResponse={getAttachmentContentResponse} onOpenProof={onOpenProof} /></td>
               <td><InvoiceState item={item} /></td>
               <td><ActionButton item={item} onOpenItem={onOpenItem} onReviewItem={onReviewItem} /></td>
@@ -192,7 +182,6 @@ function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem
             </header>
             <CategoryCopy item={item} />
             <dl>
-              <div><dt>来源</dt><dd><SourceState item={item} /></dd></div>
               <div><dt>付款凭证</dt><dd><ProofState item={item} getAttachmentContentResponse={getAttachmentContentResponse} onOpenProof={onOpenProof} /></dd></div>
               <div><dt>发票</dt><dd><InvoiceState item={item} /></dd></div>
             </dl>

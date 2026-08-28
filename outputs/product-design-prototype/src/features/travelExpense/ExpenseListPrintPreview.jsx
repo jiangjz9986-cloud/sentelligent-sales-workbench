@@ -25,12 +25,12 @@ function PaymentRecordCell({ paymentRecord, thumbnailUrls }) {
   ) : <span className="expense-list-payment-loading">缩略图准备中</span>;
 }
 
-export function ExpenseListPage({ page, week, owner, generatedOn, totals, thumbnailUrls }) {
+export function ExpenseListPage({ page, week, owner, generatedOn, totals, thumbnailUrls, title = "出差费用清单" }) {
   const isLastPage = page.pageNumber === page.totalPages;
   return (
     <article className="expense-list-print-sheet" data-page-number={page.pageNumber}>
       <header className="expense-list-print-title">
-        <h2>费用清单</h2>
+        <h2>{title}</h2>
         <dl>
           <div><dt>报销人</dt><dd>{owner || "—"}</dd></div>
           <div><dt>自然周</dt><dd>{week.start}—{week.end}</dd></div>
@@ -88,6 +88,7 @@ export function ExpenseListPrintPreview({
   owner,
   matches,
   noInvoiceConfirmations,
+  regionProfile = null,
   getAttachmentContentResponse,
   onClose,
 }) {
@@ -98,8 +99,12 @@ export function ExpenseListPrintPreview({
   const exportModel = useMemo(() => buildExpenseListExport({
     expenses,
     context: { matches, noInvoiceConfirmations },
-  }), [expenses, matches, noInvoiceConfirmations]);
-  const pages = useMemo(() => paginateExpenseList({ rows: exportModel.rows, rowsPerPage: 9 }), [exportModel]);
+    week,
+    regionProfile,
+  }), [expenses, matches, noInvoiceConfirmations, regionProfile, week]);
+  // Payment-record images print at the same physical size as the embedded
+  // XLSX pictures (~2in wide), so an A4 portrait page holds six proof rows.
+  const pages = useMemo(() => paginateExpenseList({ rows: exportModel.rows, rowsPerPage: 6 }), [exportModel]);
   const physicalRowCount = useMemo(() => pages.reduce((total, page) => (
     total + page.physicalRowCount
   ), 0), [pages]);
@@ -203,7 +208,7 @@ export function ExpenseListPrintPreview({
           <section><strong>数据汇总</strong><dl><div><dt>费用</dt><dd>{exportModel.rows.length} 条</dd></div><div><dt>付款记录行</dt><dd>{physicalRowCount} 行</dd></div><div><dt>预计页数</dt><dd>{pages.length} 页</dd></div></dl></section>
         </aside>
         <div className="expense-list-print-document">
-          {pages.map((page) => <ExpenseListPage key={page.pageNumber} page={page} week={week} owner={owner} generatedOn={generatedOn} totals={exportModel.totals} thumbnailUrls={thumbnailState.urls} />)}
+          {pages.map((page) => <ExpenseListPage key={page.pageNumber} page={page} week={week} owner={owner} generatedOn={generatedOn} totals={exportModel.totals} thumbnailUrls={thumbnailState.urls} title={exportModel.title} />)}
           {pages.length === 0 ? <div className="expense-empty-state"><strong>本周暂无已确认费用</strong><p>返回费用账本录入费用后再输出。</p></div> : null}
         </div>
       </div>

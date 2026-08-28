@@ -129,12 +129,39 @@ describe("seven-column expense list XLSX", () => {
     ]);
 
     const sheet = text(entries, "xl/worksheets/sheet1.xml");
-    assert.match(sheet, /<dimension ref="A1:G7"\/>/);
-    assert.match(sheet, /<c r="A1"[^>]*>.*序号.*<c r="B1"[^>]*>.*日期.*<c r="C1"[^>]*>.*用途.*<c r="D1"[^>]*>.*金额.*<c r="E1"[^>]*>.*付款记录.*<c r="F1"[^>]*>.*发票.*<c r="G1"[^>]*>.*备注/s);
+    assert.match(sheet, /<dimension ref="A1:G8"\/>/);
+    // Row 1 is the merged manual-sheet title; the seven fixed headers sit on
+    // row 2 with the pane frozen beneath them.
+    assert.match(sheet, /<c r="A1"[^>]*>.*8\.24-8\.25出差费用清单/s);
+    assert.match(sheet, /<mergeCell ref="A1:G1"\/>/);
+    assert.match(sheet, /<pane ySplit="2" topLeftCell="A3"/);
+    assert.match(sheet, /<c r="A2"[^>]*>.*序号.*<c r="B2"[^>]*>.*日期.*<c r="C2"[^>]*>.*用途.*<c r="D2"[^>]*>.*金额.*<c r="E2"[^>]*>.*付款记录.*<c r="F2"[^>]*>.*发票.*<c r="G2"[^>]*>.*备注/s);
     assert.doesNotMatch(sheet, /账单编号|区域|可报销|垫付方式|资金来源|状态/);
     assert.match(sheet, /<col min="7" max="7"/);
     assert.doesNotMatch(sheet, /<col min="8"|r="H\d+"/);
     assert.match(sheet, /<drawing r:id="rId1"\/>/);
+  });
+
+  it("writes the region cities and date range into the merged title row when provided", () => {
+    const entries = readStoredZip(buildExpenseListXlsx({
+      expenseList: buildExpenseListExport({
+        expenses,
+        context: {},
+        week: { start: "2026-08-24", end: "2026-08-30" },
+        regionProfile: {
+          weekStart: "2026-08-24",
+          weekEnd: "2026-08-30",
+          version: 1,
+          cities: ["济宁", "东营"],
+          defaultCity: "济宁",
+          dateOverrides: [],
+        },
+      }),
+      thumbnailImages: Object.fromEntries(["proof-1", "proof-2", "proof-3", "proof-4"].map((id) => [id, JPEG_BYTES])),
+      createdAt: "2026-08-26T00:00:00Z",
+    }));
+    const sheet = text(entries, "xl/worksheets/sheet1.xml");
+    assert.match(sheet, /<c r="A1"[^>]*>.*8\.24-8\.25济宁、东营出差费用清单/s);
   });
 
   it("embeds every payment proof and vertically merges non-proof cells for a multi-proof expense", () => {
@@ -149,17 +176,17 @@ describe("seven-column expense list XLSX", () => {
       createdAt: "2026-08-26T00:00:00Z",
     }));
     const sheet = text(entries, "xl/worksheets/sheet1.xml");
-    for (const reference of ["A2:A4", "B2:B4", "C2:C4", "D2:D4", "F2:F4", "G2:G4"]) {
+    for (const reference of ["A3:A5", "B3:B5", "C3:C5", "D3:D5", "F3:F5", "G3:G5"]) {
       assert.match(sheet, new RegExp(`<mergeCell ref="${reference}"\\/>`));
     }
-    assert.doesNotMatch(sheet, /<mergeCell ref="E2:E4"/);
+    assert.doesNotMatch(sheet, /<mergeCell ref="E3:E5"/);
 
     const drawing = text(entries, "xl/drawings/drawing1.xml");
     assert.equal((drawing.match(/<xdr:oneCellAnchor>/g) ?? []).length, 4);
-    assert.match(drawing, /<xdr:col>4<\/xdr:col>.*<xdr:row>1<\/xdr:row>/s);
-    assert.match(drawing, /<xdr:row>2<\/xdr:row>/);
+    assert.match(drawing, /<xdr:col>4<\/xdr:col>.*<xdr:row>2<\/xdr:row>/s);
     assert.match(drawing, /<xdr:row>3<\/xdr:row>/);
     assert.match(drawing, /<xdr:row>4<\/xdr:row>/);
+    assert.match(drawing, /<xdr:row>5<\/xdr:row>/);
 
     const relationships = text(entries, "xl/drawings/_rels/drawing1.xml.rels");
     assert.equal((relationships.match(/relationships\/image/g) ?? []).length, 4);
@@ -176,10 +203,10 @@ describe("seven-column expense list XLSX", () => {
       createdAt: "2026-08-26T00:00:00Z",
     }));
     const sheet = text(entries, "xl/worksheets/sheet1.xml");
-    assert.match(sheet, /<mergeCell ref="A6:C6"\/>/);
     assert.match(sheet, /<mergeCell ref="A7:C7"\/>/);
-    assert.match(sheet, /<c r="A6"[^>]*>.*费用合计.*<c r="D6"[^>]*><v>209\.9<\/v><\/c>/s);
-    assert.match(sheet, /<c r="A7"[^>]*>.*替票合计金额.*<c r="D7"[^>]*><v>179\.9<\/v><\/c>/s);
+    assert.match(sheet, /<mergeCell ref="A8:C8"\/>/);
+    assert.match(sheet, /<c r="A7"[^>]*>.*费用合计.*<c r="D7"[^>]*><v>209\.9<\/v><\/c>/s);
+    assert.match(sheet, /<c r="A8"[^>]*>.*替票合计金额.*<c r="D8"[^>]*><v>179\.9<\/v><\/c>/s);
   });
 
   it("returns a spreadsheet Blob and refuses silent proof loss", () => {

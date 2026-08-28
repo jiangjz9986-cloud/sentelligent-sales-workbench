@@ -17,7 +17,6 @@ import { InvoicePrintPreview } from "./InvoicePrintPreview.jsx";
 import { PaymentProofCenter } from "./PaymentProofCenter.jsx";
 import { downloadExpenseListXlsx } from "./ReimbursementOrganizer.jsx";
 import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
-import { WeixinBookkeepingReviewCenter } from "./WeixinBookkeepingReviewCenter.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import { canSaveRegionProfileForWeek } from "./travelExpensePageState.js";
 import {
@@ -507,6 +506,7 @@ export function TravelExpensePage({
         week,
         matches: invoiceMatches,
         noInvoiceConfirmations,
+        regionProfile,
         getAttachmentContentResponse: apiClient.getTravelExpenseAttachmentContentResponse,
       });
     } catch (exportError) {
@@ -591,7 +591,7 @@ export function TravelExpensePage({
 
   const getAttachmentUrl = (attachmentId) => apiClient.getTravelExpenseAttachmentContentUrl(attachmentId);
   const printPreview = expenseListPrintOpen
-    ? <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={closeExpenseListPrint} />
+    ? <ExpenseListPrintPreview expenses={expenses} week={week} owner={owner} matches={invoiceMatches} noInvoiceConfirmations={noInvoiceConfirmations} regionProfile={regionProfile} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} onClose={closeExpenseListPrint} />
     : invoicePrintItems
       ? <InvoicePrintPreview invoices={invoicePrintItems} week={week} owner={owner} getInvoiceContentUrl={apiClient.getInvoiceContentUrl} getInvoiceContentResponse={apiClient.getInvoiceContentResponse} onClose={closeInvoicePrint} />
       : null;
@@ -652,7 +652,6 @@ export function TravelExpensePage({
                 }
                 document.getElementById("expense-ledger-advances")?.scrollIntoView({ behavior: "smooth", block: "start" });
               }}
-              onReviewItem={() => document.getElementById("expense-ledger-reviews")?.scrollIntoView({ behavior: "smooth", block: "start" })}
               onOpenProof={(expense, projection) => {
                 const details = document.getElementById("expense-ledger-proofs");
                 if (details) details.open = true;
@@ -667,10 +666,6 @@ export function TravelExpensePage({
               exporting={expenseListExporting}
             />
             <div className="expense-ledger-child-functions">
-              <section id="expense-ledger-reviews" className="expense-ledger-child-card">
-                <header><div><strong>小小待确认</strong><span>确认后才会写入正式账本；确认回执会定位到真实 EXP 账单。</span></div><b>{weixinBookkeepingReviews.length}</b></header>
-                <WeixinBookkeepingReviewCenter reviews={weixinBookkeepingReviews} />
-              </section>
               <details id="expense-ledger-proofs" className="expense-ledger-child-card">
                 <summary><span><strong>付款凭证</strong><small>导入、人工关联和查看已附付款原件</small></span><b>{documentInbox.length} 待处理</b></summary>
                 <PaymentProofCenter expenses={expenses} inboxItems={documentInbox} getAttachmentUrl={getAttachmentUrl} getAttachmentContentResponse={apiClient.getTravelExpenseAttachmentContentResponse} getInboxContentUrl={apiClient.getTravelExpenseDocumentInboxContentUrl} getInboxContentResponse={apiClient.getTravelExpenseDocumentInboxContentResponse} onConfirmInbox={confirmInboxItem} onRejectInbox={rejectInboxItem} pendingInboxId={pendingInboxId} onUpload={uploadAttachment} onDelete={deleteAttachment} pendingAttachmentId={pendingAttachmentId} focusExpenseId={proofFocusExpenseId} onFocusExpenseHandled={handleProofFocusHandled} />

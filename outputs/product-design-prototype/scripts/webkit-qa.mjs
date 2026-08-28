@@ -102,8 +102,8 @@ async function assertExpensePageReady(page) {
   await expensePage.getByTestId("expense-ledger-workbench").waitFor();
   assert.equal(
     await expensePage.locator(".expense-ledger-child-card").count(),
-    3,
-    "scheme-three ledger should keep reviews, payment proofs, and received advances as child tools",
+    2,
+    "scheme-three ledger keeps payment proofs and received advances; the WeChat review card was removed in v0.8.2",
   );
 
   const naturalWeekInput = expensePage.locator('input[type="week"]');

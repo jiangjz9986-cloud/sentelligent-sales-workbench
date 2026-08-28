@@ -45,7 +45,7 @@ describe("expense ledger workbench shell", () => {
     assert.match(component, /时间/);
     assert.match(component, /类型/);
     assert.match(component, /分类 \/ 备注/);
-    assert.match(component, /来源/);
+    assert.doesNotMatch(component, /来源/);
     assert.match(component, /凭证/);
     assert.match(component, /发票/);
     assert.match(css, /@media \(max-width: 840px\)[\s\S]*?\.ledger-workbench-desktop-table\s*\{\s*display: none;/);
@@ -94,7 +94,11 @@ describe("expense ledger workbench shell", () => {
     assert.match(component, /ledger-proof-pdf-mark/);
     assert.match(component, /未上传/);
     assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: contain/s);
-    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width: 48px[^}]*height: 54px[^}]*flex: 0 0 48px/s);
+    // v0.8.2: at least double the former 48×54 thumbnail so receipt content is
+    // readable directly in the row, and the proof column is one of the widest.
+    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width: 104px[^}]*height: 117px[^}]*flex: 0 0 104px/s);
+    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*26%;\s*\}/);
+    assert.doesNotMatch(css, /\.ledger-workbench-desktop-table th:nth-child\(8\)/);
     assert.match(component, /共 \{item\.paymentProofCount\} 份/);
     assert.match(component, /aria-label=\{`查看\$\{item\.paymentProofCount\}份付款凭证`\}/);
   });

@@ -1836,7 +1836,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
             && /^\\d{4}-W\\d{2}$/.test(naturalWeekInput.value),
           weekValue: naturalWeekInput?.value ?? '',
           ledgerOpened,
-          ledgerChildFunctionsPresent: ledgerChildFunctionCount === 3,
+          ledgerChildFunctionsPresent: ledgerChildFunctionCount === 2,
           legacyExportAbsent,
           reimbursementActionsPresent,
           regionSettingsOpened: Boolean(regionDialog),
@@ -2934,7 +2934,7 @@ async function main() {
         assert.equal(result.expenseFlow.tabsPresent, true, "desktop travel expense page should expose exactly the expected reimbursement tabs");
         assert.equal(result.expenseFlow.naturalWeekInput, true, "desktop travel expense page should use a populated natural-week input");
         assert.equal(result.expenseFlow.ledgerOpened, true, "desktop travel expense page should open the scheme-three ledger workspace by default");
-        assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain reviews, payment proofs, and advances as three child functions");
+        assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain payment proofs and advances as its two child functions since the WeChat review card was removed in v0.8.2");
         assert.equal(result.expenseFlow.legacyExportAbsent, true, "desktop travel expense page must not expose a standalone reimbursement output tab");
         assert.equal(result.expenseFlow.reimbursementActionsPresent, true, "desktop ledger should expose only print and Excel expense-list actions");
         assert.equal(result.expenseFlow.regionSettingsOpened, true, "desktop ledger should open the weekly region settings card");

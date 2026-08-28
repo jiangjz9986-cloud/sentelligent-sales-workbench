@@ -338,7 +338,9 @@ function pendingItem(review, fallbackRegion) {
     paymentProofCount: 0,
     invoiceState: "unknown",
     invoiceLabel: "确认后判断",
-    action: "核对入账",
+    // WeChat is the only confirmation surface since v0.8.2; the ledger row
+    // reminds the user where to confirm instead of offering a web action.
+    action: "微信中确认",
     needsReview: true,
     warnings: safeArray(review?.warnings ?? [], "review.warnings"),
     original: review,

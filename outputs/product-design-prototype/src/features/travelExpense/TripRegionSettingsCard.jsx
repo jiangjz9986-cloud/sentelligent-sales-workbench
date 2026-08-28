@@ -72,6 +72,7 @@ export function TripRegionSettingsCard({
   const openerRef = useRef(null);
   const openCycleRef = useRef(0);
   const cancelFocusRestoreRef = useRef(null);
+  const draftInitializedRef = useRef(false);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -106,11 +107,24 @@ export function TripRegionSettingsCard({
   }, [open]);
 
   useEffect(() => {
-    if (!open || !profile) return;
+    // Initialize the editing draft exactly once per open cycle: the page keeps
+    // polling the workbench in the background, and every poll replaces the
+    // profile object identity without changing the persisted content. A live
+    // draft must never be reset by such a background refresh, otherwise cities
+    // the user just added disappear mid-edit. A version conflict is still
+    // surfaced on save through the existing 409 message.
+    if (!open) {
+      draftInitializedRef.current = false;
+      setDraft(null);
+      setCityInput("");
+      return;
+    }
+    if (draftInitializedRef.current || !profile) return;
     try {
       setDraft(createResponsibleRegionDraft(profile));
       setCityInput("");
       setError("");
+      draftInitializedRef.current = true;
     } catch (loadError) {
       setDraft(null);
       setError(userMessage(loadError, "区域设置读取失败。"));

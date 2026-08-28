@@ -6,6 +6,7 @@ import {
   EXPENSE_LIST_FORMAT_CAPABILITIES,
   buildExpenseListExport,
   buildExpenseListRows,
+  buildExpenseListTitle,
   buildExpenseListTotals,
   buildPaymentRecordCsv,
   buildPaymentRecordRows,
@@ -386,9 +387,41 @@ describe("confirmed seven-column expense list export", () => {
     assert.equal("contentUrl" in rows[0].paymentRecord.thumbnails[0], false);
     assert.equal("fileName" in rows[0].paymentRecord.thumbnails[0], false);
     assert.equal(rows[0].invoiceStatusLabel, "电子");
-    assert.equal(rows[1].notes, "");
+    // v0.8.2 manual-sheet alignment: 备注 assembles the free-text purpose and
+    // notes fields while 用途 stays a category word.
+    assert.equal(rows[0].notes, "出差早餐, 含饮品；第一行\n第二行");
+    assert.equal(rows[1].notes, "市内交通");
     assert.equal("merchant" in rows[0], false);
     assert.equal("paidAt" in rows[0], false);
+  });
+
+  it("builds the manual-sheet title from the expense date range and weekly region cities", () => {
+    const regionProfile = {
+      weekStart: "2026-08-03",
+      weekEnd: "2026-08-09",
+      version: 2,
+      cities: ["济宁", "东营"],
+      defaultCity: "济宁",
+      dateOverrides: [],
+    };
+
+    assert.equal(
+      buildExpenseListTitle({ expenses, regionProfile }),
+      "8.3-8.4济宁、东营出差费用清单",
+    );
+    assert.equal(
+      buildExpenseListTitle({ expenses: [], week: { start: "2026-08-17", end: "2026-08-23" }, regionProfile }),
+      "8.17-8.23济宁、东营出差费用清单",
+    );
+    assert.equal(buildExpenseListTitle({ expenses }), "8.3-8.4出差费用清单");
+    assert.equal(buildExpenseListTitle({}), "出差费用清单");
+
+    const output = buildExpenseListExport({
+      expenses,
+      week: { start: "2026-08-03", end: "2026-08-09" },
+      regionProfile,
+    });
+    assert.equal(output.title, "8.3-8.4济宁、东营出差费用清单");
   });
 
   it("keeps one logical lodging entry and stacks multiple proofs into physical rows", () => {

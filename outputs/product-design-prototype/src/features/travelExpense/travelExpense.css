@@ -2239,8 +2239,10 @@
 }
 
 .expense-list-payment-thumbnail img {
+  /* Matches the embedded XLSX picture box (~2in wide) so the printed sheet
+   * and the exported workbook show the payment proof at the same size. */
   width: 100%;
-  max-width: 96px;
+  max-width: 190px;
   aspect-ratio: 3 / 2;
   display: block;
   border: 1px solid #8b8b8b;
@@ -2824,164 +2826,6 @@
 .expense-inbox-empty small {
   color: #7e899d;
   font-size: 9.5px;
-}
-
-/* 小小待确认（微信记账人工复核卡） */
-.weixin-bookkeeping-review-item {
-  grid-template-columns: minmax(250px, 0.9fr) minmax(0, 1.6fr);
-}
-
-.weixin-review-source {
-  min-width: 0;
-  display: grid;
-  align-content: start;
-  justify-items: start;
-  gap: 8px;
-  padding: 14px;
-  border-right: 1px solid #e2e8f1;
-}
-
-.weixin-review-source > strong {
-  color: #33486d;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.weixin-review-raw {
-  width: 100%;
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  color: #43506a;
-  background: #f4f6fa;
-  font-family: ui-monospace, "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
-  line-height: 1.7;
-  overflow-wrap: anywhere;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-}
-
-.weixin-review-raw.is-expanded {
-  display: block;
-  -webkit-line-clamp: none;
-}
-
-.weixin-review-raw-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  margin-top: -2px;
-  padding: 2px 8px;
-  border: 0;
-  border-radius: 6px;
-  color: #2a5fd8;
-  background: transparent;
-  font-size: 11.5px;
-  font-weight: 650;
-}
-
-.weixin-review-raw-toggle:hover {
-  background: #eef3ff;
-}
-
-.weixin-review-raw-toggle:focus-visible {
-  outline: 0;
-  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.22);
-}
-
-.weixin-review-source > small {
-  color: #7d889f;
-  font-size: 11px;
-}
-
-.weixin-review-flags {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.weixin-review-flag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 9px;
-  border-radius: 999px;
-  color: #b45309;
-  background: #fdf1de;
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.weixin-review-decision {
-  min-width: 0;
-  display: grid;
-  align-content: start;
-  gap: 12px;
-  padding: 14px;
-}
-
-.weixin-review-summary {
-  margin: 0;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 12px;
-}
-
-.weixin-review-summary > div {
-  min-width: 0;
-  display: grid;
-  gap: 5px;
-}
-
-.weixin-review-summary dt {
-  color: #68758d;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.weixin-review-summary dd {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  min-height: 38px;
-  padding: 0 10px;
-  border: 1px dashed rgba(16, 35, 75, 0.16);
-  border-radius: 7px;
-  color: #243958;
-  background: #fbfcfe;
-  font-size: 12.5px;
-  font-weight: 640;
-  overflow-wrap: anywhere;
-}
-
-.weixin-review-wide {
-  grid-column: 1 / -1;
-}
-
-.weixin-review-wechat-hint {
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(38, 166, 91, 0.24);
-  border-radius: 9px;
-  color: #1f7a45;
-  background: rgba(38, 166, 91, 0.08);
-  font-size: 12.5px;
-  font-weight: 640;
-  line-height: 1.55;
-}
-
-.weixin-review-wechat-hint svg {
-  flex: none;
 }
 
 .expense-proof-list {
@@ -4651,10 +4495,7 @@
   .invoice-review-form > div,
   .invoice-match-form,
   .invoice-no-ticket-form { grid-template-columns: 1fr; }
-  .expense-inbox-item,
-  .weixin-bookkeeping-review-item { grid-template-columns: 1fr; }
-  .weixin-review-source { border-right: 0; border-bottom: 1px solid #e2e8f1; }
-  .weixin-review-summary { grid-template-columns: 1fr; }
+  .expense-inbox-item { grid-template-columns: 1fr; }
   .expense-inbox-original { min-height: 220px; border-right: 0; border-bottom: 1px solid #e2e8f1; }
   .expense-inbox-original > img,
   .expense-inbox-original > .authenticated-pdf-frame { height: 220px; }

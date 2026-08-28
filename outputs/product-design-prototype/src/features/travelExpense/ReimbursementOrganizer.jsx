@@ -85,6 +85,7 @@ export async function downloadExpenseListXlsx({
   week,
   matches = [],
   noInvoiceConfirmations = [],
+  regionProfile = null,
   getAttachmentContentResponse,
 }, {
   createThumbnail = createPaymentProofThumbnail,
@@ -95,6 +96,8 @@ export async function downloadExpenseListXlsx({
   const expenseList = buildExpenseListExport({
     expenses,
     context: { matches, noInvoiceConfirmations },
+    week,
+    regionProfile,
   });
   if (expenseList.rows.length === 0) {
     throw new Error("暂无已确认费用，暂不能导出费用清单。");
@@ -144,6 +147,7 @@ export function ReimbursementOrganizer({
   week,
   matches = [],
   noInvoiceConfirmations = [],
+  regionProfile = null,
   getAttachmentContentResponse,
   onOpenExpenseListPrint = () => {},
 }) {
@@ -159,6 +163,7 @@ export function ReimbursementOrganizer({
         week,
         matches,
         noInvoiceConfirmations,
+        regionProfile,
         getAttachmentContentResponse,
       });
     } catch (error) {

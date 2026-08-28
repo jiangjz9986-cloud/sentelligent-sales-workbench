@@ -177,6 +177,18 @@ function expenseListPurposeLabel(row) {
     ?? (String(row.visible.category ?? "").trim() || "其他");
 }
 
+function expenseListNotes(row) {
+  // The user-confirmed manual sheet keeps the specific what-for text (purpose,
+  // merchant, companions) in the 备注 column while 用途 stays a category word,
+  // so the remark assembles the existing purpose and notes fields.
+  const pieces = [];
+  for (const value of [row.source?.purpose, row.source?.notes]) {
+    const text = String(value ?? "").trim();
+    if (text && !pieces.includes(text)) pieces.push(text);
+  }
+  return pieces.join("；");
+}
+
 export function buildExpenseListRows(expenses = [], context = {}) {
   return buildExpenseLedgerRows(expenses, context).map((row, index) => {
     const stateLabels = row.visible.invoiceStates
@@ -200,11 +212,38 @@ export function buildExpenseListRows(expenses = [], context = {}) {
       invoiceLabel: stateLabels.join("、") || "待补",
       // Kept as a compatibility alias for the existing print renderer.
       invoiceStatusLabel: stateLabels.join("、") || "待补",
-      // Remarks are a distinct user field. Do not silently copy purpose or
-      // merchant text into the final reimbursement list.
-      notes: String(row.source?.notes ?? "").trim(),
+      notes: expenseListNotes(row),
     };
   });
+}
+
+function expenseListMonthDay(date) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(date ?? ""));
+  if (!match) return null;
+  return `${Number(match[2])}.${Number(match[3])}`;
+}
+
+/**
+ * Builds the user-confirmed sheet title `M.D-M.D<城市顿号列表>出差费用清单`,
+ * e.g. `8.17-8.21济宁、东营出差费用清单`. The date range covers the actual
+ * expense occurrence dates (falling back to the natural week when the list is
+ * empty) and the city list comes from the week's responsible-region profile.
+ */
+export function buildExpenseListTitle({ expenses = [], week = null, regionProfile = null } = {}) {
+  if (!Array.isArray(expenses)) throw new TypeError("expenses must be an array");
+  const dates = expenses
+    .flatMap((expense) => [expense?.occurredOn, expense?.endedOn ?? expense?.occurredEndOn])
+    .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? "")))
+    .sort();
+  const start = dates[0] ?? week?.start;
+  const end = dates.at(-1) ?? week?.end ?? start;
+  const startLabel = expenseListMonthDay(start);
+  const endLabel = expenseListMonthDay(end);
+  const rangeLabel = startLabel && endLabel ? `${startLabel}-${endLabel}` : "";
+  const cities = Array.isArray(regionProfile?.cities)
+    ? [...new Set(regionProfile.cities.map((city) => String(city ?? "").trim()).filter(Boolean))]
+    : [];
+  return `${rangeLabel}${cities.join("、")}出差费用清单`;
 }
 
 export function buildExpenseListTotals(rows = [], { matches = [] } = {}) {
@@ -236,10 +275,11 @@ export function buildExpenseListTotals(rows = [], { matches = [] } = {}) {
  * only attachment IDs plus compression policy, so file names, original URLs and
  * storage metadata never enter the export model.
  */
-export function buildExpenseListExport({ expenses = [], context = {} } = {}) {
+export function buildExpenseListExport({ expenses = [], context = {}, week = null, regionProfile = null } = {}) {
   const rows = buildExpenseListRows(expenses, context);
   return {
     schemaVersion: 1,
+    title: buildExpenseListTitle({ expenses, week, regionProfile }),
     columns: EXPENSE_LIST_COLUMNS,
     rows: rows.map((row) => {
       const physicalRowCount = Math.max(1, row.paymentRecord.thumbnails.length);
