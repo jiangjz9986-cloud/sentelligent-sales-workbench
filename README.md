@@ -1,65 +1,50 @@
 # 森特智行 AI 销售作战台
 
-森特智行 AI 销售作战台是一套面向个人复杂型 B2B 销售的业务系统。它把沟通记录、客户、商机、行动、风险、拜访行程、知识和周报放在同一套数据链路中，减少重复录入，也避免 AI 结果停留在一次性对话里。
+森特智行 AI 销售作战台是一套面向个人复杂型 B2B 销售的业务系统。它把沟通记录、客户、商机、行动、风险、拜访行程、差旅报销、待办、知识和周报放在同一套数据链路中，由小小（微信 AI 助手）承接移动端录入与提醒，减少重复录入，也避免 AI 结果停留在一次性对话里。
 
-系统已经部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。仓库为私有项目，常规发布只允许来自已验证的 `main` 和 GitHub Release；本次 `v0.6.24` 按项目所有者授权继续采用本地 exact-commit 路径，不同步 GitHub。生产数据库、录音、微信状态、密钥和备份不进入 Git。
+系统已部署到生产环境：[https://82.156.210.199/](https://82.156.210.199/)。生产数据库、录音、微信状态、密钥和备份不进入 Git。
 
-## 代码、发布与生产状态
+## 当前版本与生产状态
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前开发候选 | `v0.6.24`（差旅费用账本、发票与严格七列报销输出工作流候选） |
-| v0.6.24 发布方式 | 不同步 GitHub；本地完整门禁、注释标签、不可变归档、manifest、SHA-256 与生产 evidence |
-| v0.6.1 Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
-| v0.6.1 Release 状态 | 正式 Release 已发布；生产切换、`0017` 迁移、切换前后预检和 HTTPS smoke 均已完成 |
-| v0.6.0 Release | [森特智行 v0.6.0](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.0) |
-| v0.6.0 Release 归档 SHA-256 | `3b4f747384ecd594aa9db0a337aee3d3f239432e89a13c14cb63678e69c5f371` |
-| 本次发布前生产源码版本 | 以切换前服务器 `current` 与 manifest 的 fresh 快照为准 |
-| 本次发布前生产提交 | 以切换前服务器 manifest 的完整 commit 为准 |
-| 当前生产身份说明 | 本地 exact-commit 不可变 release；以服务器 manifest、服务路径和生产 evidence 为准 |
-| 最新公开 GitHub Release | [森特智行 v0.6.1](https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench/releases/tag/v0.6.1) |
-| 本次发布前生产 release | 以切换前服务器 `current` 真实路径为准 |
-| 本次回滚基线 | 切换前已验收的不可变 release；切换脚本还会生成 fresh 数据库和微信会话备份 |
-| v0.6.1 历史生产状态 | 当时切换前后预检均 `25/25`，HTTPS smoke `25/25`、`cleanup=clean`，数据库完整性通过 |
-| 发布前生产代码 | 以 fresh 服务器快照为准；任何旧预检都不能替代 v0.6.24 的 fresh 证据 |
-| `v0.5.3` 生产边界 | 首次切换因缺少 sender 白名单自动回滚；未移动 `v0.5.3` 标签 |
-| `v0.5.4` 生产边界 | 空 sender 白名单允许服务启动，但微信入站仍 fail-closed；已由后续版本取代 |
-| `v0.5.7` 生产验收 | 第二轮 HTTPS smoke `25/25`、`cleanup=clean`；生产库 `quick_check=ok`、外键违规 `0`、smoke 标记残留 `0`；真实微信 `/clear` 往返通过 |
-| `v0.4.4` 状态 | 已从合并后的 `main` 发布并完成受控生产切换；post-cutover 预检 `24/24`、HTTPS 冒烟 `25/25`（cleanup clean）和 Chrome 桌面/移动视口验收均有新鲜证据 |
+| 当前版本 | 以根目录 `VERSION` 与 [CHANGELOG](CHANGELOG.md) 顶部条目为准（本次回填时为 v0.8.4 工程健康收官） |
+| 生产身份 | 以服务器 `releases/` 当前 `current` 指向目录的 manifest（完整 commit）为准；`docs/releases/vX.Y.Z.md` 逐版保存部署证据表 |
+| 发布方式 | 自 v0.6.5 起按项目所有者授权采用本地 exact-commit 路径：本地注释 tag（不推 GitHub）+ git bundle + 服务器打包为不可变 release 目录；GitHub Release 停在 v0.6.1，是否恢复同步为待决策项 |
+| 制品与备份 | v0.8.0 起服务器每日 02:30 自动备份数据库与微信会话（14 天保留），发布 bundle+evidence 自动归档到 `backups/releases/<version>/`（root:root 0700） |
+| 回滚 | 每版部署证据表记录回滚点 release 目录；回滚只切换三个项目 systemd 服务 |
 
-上述历史现网字段不能替代本次 v0.6.24 的 fresh 生产证据；切换前必须重新采集数据库、服务、主机身份和受保护服务快照。生产部署细节见 [部署记录](docs/部署记录.md)，餐饮自动分类基线见 [v0.6.23 版本说明](docs/releases/v0.6.23.md)，本次候选边界见 [v0.6.24 版本说明](docs/releases/v0.6.24.md)。
+## 能力总览（按业务域）
 
-## 功能状态
-
-| 模块 | 当前能力 | 边界 |
+| 业务域 | 当前能力 | 边界 |
 | --- | --- | --- |
-| 战情总览 | 汇总真实客户、商机、行动、风险和周报数据 | 不使用演示业务数据回退 |
-| 快速记录 | 默认语音模式，支持文本、浏览器实时识别、AI 提炼（自动引用知识库并标注出处）、历史结果读取和人工修改；历史记录支持 URL 直达 | 录音文件长期保存/回放已按产品决策裁撤；浏览器不支持语音识别时引导改用文本录入 |
-| 客户画像 | 列表、模块内搜索、只读详情、显式新增/修改/删除 | 修改使用版本号和审计，删除为受保护软删除 |
-| 商机档案与看板 | 商机 CRUD、阶段、金额、概率、风险、动作和阶段统计 | 阶段调整仍应由真实客户行为证明 |
-| 销售决策 Agent V1 | 已接入 DeepSeek 运行时，支持机会诊断、场景 playbook、`sales-decision-v1` 严格合同、证据门槛、合规升级、只读历史和人工确认写回预览；上下文自动注入知识库条目（含 id）供 facts 引用 | 更多场景与行业评估集仍需持续扩充和校准；不允许模型自动写回客户、商机或行动，快速记录分析仍是独立链路 |
-| 下一步动作与风险 | 后端真实数据、状态更新、来源追踪和审计 | AI 建议必须经人工确认后写回 |
-| 智能拜访行程 | 高德地址解析、路线、时间、里程、过路费、顺序优化、地图和历史快照 | 历史读取不重复调用地图或模型 |
-| 差旅报销 | 按自然周管理费用、多笔实付、提前请款、多退少补、付款凭证、发票仓库、人工匹配和 A4 打印 | 单账号个人使用；自动识别结果进入 owner-scoped 复核队列，不包含审批流和财务付款 |
-| 小小微信记账 | 本人私聊发送付款凭证图片或收入/支出文字后，OCR/AI 生成固定格式草稿；交易列表图片可拆成多笔；低额付款按上海时间识别早餐/午餐/晚餐并以行程区域生成餐饮备注；引用草稿后可用自然语言确认、修改或取消 | 未确认不写账；发生日期或行程区域不明时保持待确认；大额仅结合餐饮商户/多人出差语义推断；可报销金额等于消费金额，借款到账作为收入并按自然周处理 |
-| 发票归档与匹配 | 后续在本人私聊发送发票图片或 PDF，按金额优先匹配当前自然周的唯一记账条目；唯一跨周候选只在 31 天窗口内自动关联 | 多个同额候选、日期超窗或识别不完整时进入人工复核；付款凭证和发票均按 owner 隔离、去重并保留审计 |
-| 周报与汇报 | 根据真实业务数据生成、编辑、保存和导出 | 生成内容仍需人工检查 |
-| 知识库 | 模块内搜索、条目维护和引用；快速记录与销售决策分析自动检索相关条目并标注出处（`knowledgeRefs`） | 自动引用基于标题/分类/标签的确定性匹配，引用集合由服务端挂载，模型不得虚构知识 id |
-| 微信机器人 | 系统内绑定、worker 自启动、持久化 AI 助手会话、付款凭证和发票图片/PDF 接入；已完成真实设备 `/clear` 往返验收 | 机器身份只获得声明的写入路由；更多业务场景仍按人工确认边界扩展 |
-| 系统配置 | 加密保存 DeepSeek API Key 与医院招标 PushPlus Token，并支持脱敏状态、清除和测试通知；运行时统一读取服务端密钥提供器 | iCost/快捷指令 Token 配置已退役；主加密密钥只允许进入后端受保护环境，页面不回显已保存明文 |
-| 医院招标监测 | `v0.6.0` 起内置公开来源采集，按每小时一批 10 个客户自动轮巡，持久化游标/快照/锁，展示公告、匹配证据、来源健康和轮巡进度，并支持 PushPlus 聚合通知 | 已随生产切换启用；首批真实轮巡和通知仍需持续观察；不依赖额外招标 API，不自动修改客户或商机 |
-| 方案辅助 | 只读兼容入口 | 按当前产品决定暂停写入和 AI 调用 |
+| 战情总览 | KPI、今日焦点（行程/到点待办/风险/新招标四分区）、周趋势、商机漏斗、客户温度、优先动作；进入页面即静默刷新 | 全部来自真实数据聚合，无演示数据回退 |
+| 快速记录 | 默认语音模式，浏览器实时识别、AI 提炼（自动引用知识库并标注出处）、历史结果读取与人工修改、URL 直达 | 录音长期保存/回放已裁撤；不支持语音识别时引导文本录入 |
+| 客户画像 | 列表、搜索、只读详情、显式新增/修改/删除、aliases 匹配 | 修改带版本号与审计；删除为受保护软删除；aliases/tags 暂无 Web 表单（API 已支持） |
+| 医院招标监测 | 公开来源采集、白天窗口轮巡、公告匹配证据、来源健康、调度设置、微信推送 | 只读监测，不自动修改客户或商机 |
+| 商机档案与看板 | 商机 CRUD、七阶段看板、时间线、销售决策 Agent 诊断（DeepSeek、证据门槛、人工确认写回） | 模型不得自动写回业务档案 |
+| 下一步动作与风险 | 真实数据、状态流转、来源追踪、审计、微信到点提醒 | AI 建议必须人工确认后写回 |
+| 智能拜访行程 | 高德地址解析、路线、里程、顺序优化、地图、历史快照；行程详情一键预填当日差旅费用 | 历史读取不重复调用地图或模型 |
+| 差旅报销 | 自然周账本工作台（日选择器、正式/待确认分离、行内编辑与删除）、多笔实付、提前请款、多退少补、付款凭证、发票仓库与匹配、区域档案、A4 打印与 Excel 导出 | 单账号个人使用，无审批流 |
+| 小小微信记账 | 私聊付款凭证图片/文字生成草稿，OCR/AI 拆分多笔，餐饮时段自动分类，自然语言确认/修改/取消 | 未确认不写账；大额仅结合语义推断 |
+| 小小业务 agent 套件 | 客户画像、拜访行程、快速记录、商机、智能待办五组微信自然语言 agent，统一回复卡片，写操作走确认流程 | owner-scoped；结构化数组字段仅 Web 可改 |
+| 智能待办与晨报 | 微信创建/完成待办、到点提醒（remind_at）、每日晨报（行程/待办/风险/新招标聚合推送） | remind_at 暂无 Web 编辑入口；晨报周末不补发 |
+| 周报与汇报 | 真实业务数据生成、编辑、保存、导出 | 生成内容仍需人工检查 |
+| 知识库 | 搜索、条目维护；快速记录与销售决策自动引用并标注出处 | 引用为确定性匹配，模型不得虚构知识 id |
+| 系统配置 | 加密保存 DeepSeek API Key 与 PushPlus Token、通知设置、招标调度、记账日志 | 主加密密钥只进后端受保护环境，页面不回显明文 |
+| 微信机器人 | 绑定、worker 自启动、持久化会话、图片/PDF 接入、outbox 单次投递 | 机器身份只获得声明的写入路由 |
+| 方案辅助 | 只读兼容入口 | 按产品决策暂停写入与 AI 调用 |
 
 ## 技术结构
 
 ```text
-React 19 + Vite
+React 19 + Vite (PWA)
         |
 Cookie Session + CSRF + JSON API
         |
 Node.js 24 + node:http
         |
-SQLite migrations + optimistic locking + soft delete + audit
+SQLite migrations (0001–0028) + optimistic locking + soft delete + audit
         |
 DeepSeek / AMap / WeChat Agent / browser voice
 ```
@@ -68,97 +53,59 @@ DeepSeek / AMap / WeChat Agent / browser voice
 
 | 路径 | 说明 |
 | --- | --- |
-| `outputs/product-design-prototype/` | 正式 React 前端、样式、页面、浏览器测试和静态服务 |
-| `backend/` | API、认证、数据库迁移、AI、地图、微信和服务脚本 |
+| `outputs/product-design-prototype/` | 正式 React 前端；`src/features/` 按域组织（salesWorkbench 页面已拆分至 `pages/` 子目录，`pages.jsx` 为桶文件） |
+| `backend/` | API、认证、迁移、AI、地图、微信、招标、差旅、待办、晨报等子域与服务脚本 |
 | `shared/` | 前后端共享业务契约 |
-| `scripts/` | 本地编排、密钥扫描、发布包、生产预检和发布测试 |
-| `docs/` | 需求、架构、开发、验收、部署和版本记录 |
-| `.github/` | CI、标签发布、Issue/PR 模板、CODEOWNERS 和依赖更新 |
+| `scripts/` | 本地编排、密钥扫描、发布打包、生产预检/切换/冒烟与发布测试 |
+| `docs/` | 需求、架构、开发、验收、部署与版本记录；`docs/superpowers/` 存放蓝图/研究/报告 |
 
 详细边界见 [项目架构与模块说明](docs/项目架构与模块说明.md)。
 
-## 新设备开始开发
+## 本地开发与启动
 
-要求：
+要求：Node.js 24 与配套 npm、Chrome（浏览器集成验收）、本地环境文件（真实密钥私下渠道配置）。
 
-- Git 与 GitHub CLI
-- Node.js 24 和配套 npm
-- Chrome，用于浏览器集成验收
-- 本地环境文件；真实密钥通过私下渠道配置，不从 GitHub 获取
+> GitHub 同步自 v0.6.5 起暂停，主线以本机仓库 `local/v0627-feature-closeout-20260827` 分支与本地注释 tag 链为准；换机恢复路径见 [交接说明](docs/森特智行-v0.8.x-交接说明.md)。
 
 ```bash
-git clone https://github.com/jiangjz9986-cloud/sentelligent-sales-workbench.git
-cd sentelligent-sales-workbench
 npm ci --prefix backend
 npm ci --prefix outputs/product-design-prototype
-```
-
-根据 `backend/.env.example` 和 `outputs/product-design-prototype/.env.example` 创建本机配置。然后运行：
-
-```bash
 npm run dev:start
 npm run dev:health
+npm run dev:stop   # 停止本地服务
 ```
-
-停止本地服务：
-
-```bash
-npm run dev:stop
-```
-
-完整的分支、worktree、同步和设备交接流程见 [多设备开发与版本管理](docs/多设备开发与版本管理.md)。
 
 ## 质量门
 
 ```bash
 npm run scan:secrets
-npm run test:deploy
-npm --prefix backend test
-npm --prefix outputs/product-design-prototype run qa:local
+npm run test:deploy                                   # 根发布工具测试
+npm --prefix backend test                             # 后端全量（v0.8.3 基线 1276）
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  npm --prefix outputs/product-design-prototype run qa:local    # 前端本地 QA（v0.8.3 基线 434）
 npm --prefix outputs/product-design-prototype run qa:integration
 npm --prefix outputs/product-design-prototype run qa:webkit
 ```
 
-涉及生产发布时还要完成：
-
-- 一致性数据库备份、`quick_check`、外键检查和 SHA-256
-- 生产预检须完整通过本版 `scripts/production-preflight.mjs` 导出的 `PRODUCTION_PREFLIGHT_CHECK_IDS` 动态合同，报告的 `summary.total`、`summary.passed` 与 `checks.length` 必须相等且 `summary.failed=0`；其中 `env.assistantSecrets` 强制微信机器边界和助手确认密钥独立且具有足够熵，`env.aiModel` 强制正式 DeepSeek 模式、端点、模型和独立密钥；`release.identity` 绑定 manifest、完整 commit 和三个项目服务；`database.environmentBinding` 绑定 `DATABASE_URL`、实际数据库以及 backend/WeChat 的同一 `EnvironmentFile` 路径和 SHA-256
-- 公开 HTTPS 冒烟 `25/25`
-- Chrome 桌面与移动视口验收
-- 三个项目服务、共享 Caddy 和受保护服务盘点
-- 新旧 release 路径与回滚点记录
+生产发布另需：一致性数据库备份与 `quick_check`/外键/SHA-256、`production-preflight.mjs` 动态合同 25/25、公开 HTTPS 冒烟 25/25（cleanup=clean）、三个项目服务与共享 Caddy 受保护边界盘点、回滚点记录。完整流程与全部踩坑见 [部署记录](docs/部署记录.md) 与最近版本的 `docs/releases/vX.Y.Z.md` 证据表。
 
 ## 版本与发布
 
-- 使用语义化版本，源文件版本写入 `VERSION` 和三个 `package.json`。常规正式发布以 tag、GitHub Release 和部署证据为准；项目所有者已明确授权的本地发布还必须具备 final exact commit、本地注释标签、不可变归档、manifest、独立 SHA-256 和服务器 evidence。
-- `v*` 标签触发 GitHub Release workflow，重新运行质量门并生成 `.tar.gz`、`release-result.json` 和 `SHA256SUMS`。
-- 生产默认只部署已合并到 `main` 且已打标签的提交；本次 `v0.6.24` 是不推 GitHub 的明确授权例外，仍必须从干净 final exact commit 和唯一注释标签生成制品。
-- GitHub Release 归档已包含质量门验证过的前端 `dist`；生产直接使用该目录，不在服务器重新构建前端。
-- 每个 release 使用独立目录。systemd 单元直接固定到真实 release 路径，`current` 只作人工识别，不作为服务启动依据。
-- 回滚只切换三个项目服务到上一已验收 release。共享 Caddy 和同机其他系统不随应用回滚重启。
-
-操作细节见 [发布与回滚操作手册](docs/发布与回滚操作手册.md) 和 [部署记录](docs/部署记录.md)。
+- 语义化版本写入 `VERSION` 与三个 `package.json`（root/backend/前端）。
+- 每版必须：全量门禁 → 冻结提交（精确 add）→ 本地注释 tag → `docs/releases/vX.Y.Z.md` 证据表。
+- 发布制品从干净 exact commit 生成 git bundle，SHA-256 双端复算；服务器 `LC_ALL=C` 打包为不可变 release 目录（root:root，755/644 归一）。
+- systemd 单元直接固定到真实 release 路径，`current` 只作人工识别。
+- 回滚只切换三个项目服务到上一已验收 release；共享 Caddy 不随应用重启（如需变更须用 restart 显式操作并另行授权）。
 
 ## 安全边界
 
-仓库不保存：
+仓库不保存：账号密码、API Key、Token、Cookie、会话密钥、`.env` 与生产配置、SSH/TLS 私钥、SQLite 主库与备份、录音与微信登录状态、`.runtime`、日志、依赖与构建产物。
 
-- 账号密码、API Key、Token、Cookie 和会话密钥
-- `.env` 和生产配置
-- SSH/TLS 私钥或证书包
-- SQLite 主库、WAL/SHM、备份和客户导出
-- 录音、转写原文和微信登录状态
-- `.runtime`、日志、依赖、构建目录和发布压缩包
-
-提交前必须运行密钥扫描。发现凭据进入 Git 后，先撤销和轮换，再清理历史；只删除工作区文件不算处理完成。详见 [SECURITY.md](SECURITY.md)。
-
-## v0.5.3 助手能力元数据
-
-候选版本新增只读的 capability catalog 和 bounded project-analysis helpers：目录描述每项能力的 readiness、工具/API 映射、依赖、集成点、确认级别和来源引用；项目分析按受限输入区分开放/关闭的行动与风险并保留来源引用。它们是描述性元数据和纯函数，不改变 agent registry、tool registry、router 或业务写入边界；`ready` 也只表示代码已接线，不表示生产已验收。
+提交前必须运行密钥扫描。发现凭据进入 Git 后，先撤销和轮换，再清理历史。详见 [SECURITY.md](SECURITY.md)。
 
 ## 微信 Clawbot 助手事件契约
 
-候选版本的 vendored `weixin-agent-sdk@0.5.0-sentelligent.10` worker 通过独立机器 Token 调用：
+vendored `weixin-agent-sdk` worker 通过独立机器 Token 调用：
 
 ```text
 POST /api/integrations/weixin-agent/events
@@ -166,29 +113,31 @@ Authorization: Bearer <森特智行专用 WEIXIN_AGENT_API_TOKEN>
 Idempotency-Key: <稳定重试键>
 ```
 
-请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和通用助手使用的六位 `confirmationCode`。快捷记账专属动作不读取六位码，而是在同一会话中只接受“确认”、以“修改”开头的明确字段修改或“取消”；修改后助手会发送最新草稿，只有该版本确认消息送达后才能入账。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB，原始字节无损保存。
+请求正文只接受标准化事件字段：`conversationId`、`text`、`sourceMessageId`、`senderId`、`chatType`（`direct`/`group`），可选 `groupId`、`media`、`pendingActionId` 和通用助手使用的六位 `confirmationCode`。记账草稿在同一会话中只接受"确认"、以"修改"开头的明确字段修改或"取消"。`media` 只接收原始 Base64、文件名、MIME 和 SHA-256；服务端重新校验魔数、MIME、长度和摘要，单文件上限 12 MiB。
 
-sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊；worker 会在读取配置或下载媒体前执行同一 allowlist。入站媒体通过流式 12 MiB 上限，处理完成后删除临时文件；永久拒绝会推进 polling cursor，网络或服务端临时失败仍保留重试。所有高风险确认回复都必须来自同一 sender、channel 和 private conversation。通用高风险助手仍使用其六码策略；快捷记账使用独立的三指令策略，接受带明确对象的“确认入账/同意/确定/取消/修改”，但拒绝单独“好的/好/行”、问题句和无法绑定当前编号或引用的模糊表达。通用确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定；执行租约、当前草稿投递门禁和稳定工具运行身份负责并发、重试和崩溃恢复。
+sender 必须出现在 `WEIXIN_ALLOWED_SENDER_IDS`，生产只接受私聊且拒绝群聊。高风险确认回复必须来自同一 sender、channel 和 private conversation；确认码只展示一次，SQLite 只保存 HMAC，连续五次错误后动作锁定。owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。
 
-owner、Token、路径和数据库身份一律由服务端配置决定，不能由消息正文覆盖。机器 Token 派生投递身份；轮换 Token 时必须先停止旧 worker、排空并封存旧 polling cursor，再启用新 Token，禁止并行消费。真实设备往返和生产切换仍需另行授权；本地候选检查不构成生产证据。
+## 文档地图
 
-## 文档索引
+**入口四类**：
+
+1. 交付蓝图与阶段状态：[v0.7–v0.8 连续交付蓝图](docs/superpowers/plans/2026-08-27-v07-v08-continuous-delivery.md)
+2. 逐版部署证据：`docs/releases/vX.Y.Z.md`（v0.6.5 起含完整生产证据表）
+3. 设计与调研：`docs/superpowers/research/`、交付报告 `docs/superpowers/reports/`
+4. 操作手册：[正式交付验收手册](docs/正式交付验收手册.md)、[发布与回滚操作手册](docs/发布与回滚操作手册.md)
+
+**基础文档**：
 
 - [原始项目需求书](项目需求书.txt)
 - [需求与验收矩阵](docs/需求与验收矩阵.md)
 - [项目架构与模块说明](docs/项目架构与模块说明.md)
 - [开发进度与路线图](docs/开发进度与路线图.md)
 - [开发日志](docs/开发日志.md)
-- [多设备开发与版本管理](docs/多设备开发与版本管理.md)
-- [v0.4.4 换机交接说明](docs/森特智行-v0.4.4-换机交接说明.md)
-- [发布与回滚操作手册](docs/发布与回滚操作手册.md)
 - [部署记录](docs/部署记录.md)
-- [正式交付验收手册](docs/正式交付验收手册.md)
-- [变更日志](CHANGELOG.md)
-- [安全策略](SECURITY.md)
-- [协作规范](CONTRIBUTING.md)
-- [微信 Clawbot 助手集成说明](docs/微信Clawbot助手集成.md)
-- [医院招标监测集成说明](docs/医院招标监测集成说明.md)
+- [v0.8.x 交接说明](docs/森特智行-v0.8.x-交接说明.md)（历史版本：[v0.4.4 换机交接说明](docs/森特智行-v0.4.4-换机交接说明.md)）
+- [多设备开发与版本管理](docs/多设备开发与版本管理.md)
+- [变更日志](CHANGELOG.md) · [安全策略](SECURITY.md) · [协作规范](CONTRIBUTING.md)
+- [微信 Clawbot 助手集成说明](docs/微信Clawbot助手集成.md) · [医院招标监测集成说明](docs/医院招标监测集成说明.md)
 
 ## 许可
 
