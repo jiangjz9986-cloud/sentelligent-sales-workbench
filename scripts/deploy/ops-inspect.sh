@@ -8,6 +8,8 @@
 #   4. daily backup freshness (< 26h)
 # Alerts go to the endpoint first (hour-keyed dedup there); PushPlus fallback.
 # Runs as root, installed 0700 at /opt/sentelligent-sales-workbench/tools/ops-inspect.sh.
+# python3 blocks do an explicit fsencode/UTF-8 round trip because systemd runs
+# this under the C locale (surrogate-escaped argv would emit mojibake JSON).
 set -uo pipefail
 ROOT="/opt/sentelligent-sales-workbench"
 STATE="$ROOT/tools/.ops-inspect-state"
@@ -24,14 +26,23 @@ state_set() {
   echo "$1=$2" >> "$STATE.tmp"
   mv "$STATE.tmp" "$STATE"
 }
+json_utf8() { # argv -> UTF-8-safe JSON object per the calling template
+  python3 -c '
+import json, os, sys
+argv = [os.fsencode(value).decode("utf-8", "replace") for value in sys.argv[2:]]
+if sys.argv[1] == "alert":
+    body = {"source": argv[0], "severity": "critical", "summary": argv[1], "detail": argv[2]}
+else:
+    body = {"token": argv[0], "title": argv[1], "content": argv[2], "template": "txt"}
+print(json.dumps(body))
+' "$@"
+}
 alert() { # $1 source  $2 summary  $3 detail
-  local payload
-  payload="$(python3 -c 'import json,sys;print(json.dumps({"source":sys.argv[1],"severity":"critical","summary":sys.argv[2],"detail":sys.argv[3]}))' "$1" "$2" "$3")"
   curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $OPS_BEARER" \
-    -H 'Content-Type: application/json' --data "$payload" \
+    -H 'Content-Type: application/json' --data "$(json_utf8 alert "$1" "$2" "$3")" \
     http://127.0.0.1:8897/api/integrations/ops-alerts | grep -qE '^2' && return 0
   [[ -n "$PUSH_BEARER" ]] && curl -sS --max-time 10 -o /dev/null -H 'Content-Type: application/json' \
-    --data "$(python3 -c 'import json,sys;print(json.dumps({"token":sys.argv[1],"title":"【巡检】"+sys.argv[2],"content":sys.argv[3],"template":"txt"}))' "$PUSH_BEARER" "$2" "$3")" \
+    --data "$(json_utf8 pushplus "$PUSH_BEARER" "【巡检】$2" "$3")" \
     https://www.pushplus.plus/send
 }
 # 1. new failed outbox rows (watermark = latest failed updated_at)
@@ -56,14 +67,16 @@ if [[ -z "$STATUS_JSON" ]]; then
   alert "ops-inspect:backend" "backend 状态端点不可达" "curl 127.0.0.1:8897 失败；若 systemd 显示 active 可能在崩溃循环"
 else
   echo "$STATUS_JSON" | python3 -c "
-import json,sys
-item=json.load(sys.stdin).get('item',{})
-out=[]
-for name,s in (item.get('schedulers') or {}).items():
-    if s and s.get('lastError'): out.append('scheduler-'+name+'|'+str(s.get('lastError')))
-w=item.get('weixinDelivery') or {}
-if w.get('status')!='ready': out.append('weixin-delivery|'+str(w.get('reason','not_ready')))
-print('\n'.join(out))
+import json, sys
+item = json.loads(sys.stdin.buffer.read().decode('utf-8', 'replace')).get('item', {})
+out = []
+for name, s in (item.get('schedulers') or {}).items():
+    if s and s.get('lastError'):
+        out.append('scheduler-' + name + '|' + str(s.get('lastError')))
+w = item.get('weixinDelivery') or {}
+if w.get('status') != 'ready':
+    out.append('weixin-delivery|' + str(w.get('reason', 'not_ready')))
+sys.stdout.buffer.write(('\n'.join(out)).encode('utf-8'))
 " | while IFS='|' read -r SRC ERR; do
     [[ -n "$SRC" ]] && alert "ops-inspect:$SRC" "巡检发现异常：$SRC" "$ERR"
   done

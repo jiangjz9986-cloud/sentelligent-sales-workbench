@@ -160,6 +160,17 @@ describe("ops alerts machine endpoint", () => {
       assert.equal(replay.body.item.id, first.body.item.id);
     }
 
+    // A changed detail within the same source-hour (fresh journal tail) is
+    // still storm-gated: 200 replayed:true, never an idempotency 409.
+    const changedDetail = await request("/api/integrations/ops-alerts", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${opsToken}` },
+      body: JSON.stringify(alertBody({ detail: "journal tail changed within the hour" })),
+    });
+    assert.equal(changedDetail.response.status, 200);
+    assert.equal(changedDetail.body.item.replayed, true);
+    assert.equal(changedDetail.body.item.pushplusFallback, false);
+
     const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
     const rows = db.prepare("SELECT owner, conversation_id, payload_json FROM weixin_confirmation_outbox").all();
     assert.equal(rows.length, 1);
@@ -171,7 +182,7 @@ describe("ops alerts machine endpoint", () => {
     assert.equal(payload.severity, "critical");
     assert.equal(Object.hasOwn(payload, "source"), false);
     const audits = db.prepare("SELECT actor, metadata_json FROM audit_logs WHERE action = 'ops_alert.receive'").all();
-    assert.equal(audits.length, 10);
+    assert.equal(audits.length, 11);
     assert.equal(audits[0].actor, owner);
     const metadata = JSON.parse(audits[0].metadata_json);
     assert.equal(metadata.severity, "critical");
