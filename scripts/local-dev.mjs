@@ -97,6 +97,9 @@ export function buildBackendCommand(config) {
       `CORS_ALLOWED_ORIGINS=${config.frontendUrl}`,
       "AUTH_COOKIE_SECURE=false",
       "NODE_ENV=development",
+      // Isolated stacks run the deterministic Amap stub so the itinerary
+      // chain is testable end to end; production config rejects mock.
+      "AMAP_MODE=mock",
       "node",
       "src/server.js",
     ],

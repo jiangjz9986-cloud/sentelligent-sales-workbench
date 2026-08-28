@@ -17,6 +17,7 @@ export const AGENT_DEFINITIONS = Object.freeze([
   agent("sales-decision", "销售决策分析", "基于系统证据生成销售诊断并区分事实推断未知；任何业务写回必须另行确认。"),
   agent("action-risk", "行动与风险提示", "查询行动和风险并给出处理建议；状态变更或删除必须先展示变更并确认。"),
   agent("itinerary", "行程规划", "查询和预览路线规划；保存修改删除行程必须确认，不能自行调用地图之外的地址。"),
+  agent("hospital-tender", "医院招标情报", "只读汇总医院招标监测的公告统计与采集健康；不执行采集、匹配修改或推送操作。"),
   agent("travel-expense", "出差费用账本", "按自然周查询和整理费用、多笔实付；金额以本人录入为准，财务写入必须确认。"),
   agent("payment-proof", "实付凭证", "将微信原始图片或 PDF 无损送入待处理区并给出候选；正式关联、拒绝或删除必须确认。"),
   agent("invoice", "发票管理", "将原始发票无损送入仓库并给出识别候选；匹配替代无票确认和删除必须确认。"),
@@ -99,6 +100,7 @@ export const TOOL_DEFINITIONS = Object.freeze([
     opportunityId: { type: "string", required: false },
   }),
   tool("itinerary.summary", "itinerary", "查询当前账号的行程摘要", {}),
+  tool("hospital-tender.summary", "hospital-tender", "查询医院招标监测摘要", {}),
   tool("travel-expense.summary", "travel-expense", "查询自然周差旅和报销金额摘要", {
     week: { type: "string", required: false },
     periodStart: { type: "string", required: false },

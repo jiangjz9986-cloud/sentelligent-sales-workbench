@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-29
+
+### 地基包：告警面 + L0 owner 清洗 + 审计C余修 + 运维收口（总蓝图 v0.9.0 行）
+
+- **告警面（块1）**：新集成 `ops-monitor` 机器端点 `POST /api/integrations/ops-alerts`（Bearer `OPS_ALERT_TOKEN`，`machineAuthorization` 白名单登记，未知字段 422、source 锚定正则、severity 双值）+ `GET …/ops-alerts/status`（一次探测四合一：outbox 各态计数与最老 queued/`weixinDeliveryReadiness` 快照/三调度器 lastError）。告警落 `weixin_confirmation_outbox`（kind=`ops_alert`，小时级幂等键 `ops-alert:{source}:{hourKey}` 即风暴闸，同源同小时重发返回 `replayed:true`），载荷键按 outbox 红线把 `source` 落库改名 `origin`；`renderOutboxMessage` 新增 ops_alert 分支（`ops/opsAlertMessage.js` 三段式卡，fail-closed）；微信投递未绑定时端点内叠加 PushPlus 直发（新 `ops/opsAlertPushplusNotifier.js`，逐字复用招标 notifier 的 HTTPS/超时/响应限长模式，token 走 `resolvePushplusToken()`），两通道皆不可用 503 `OPS_ALERT_DELIVERY_UNAVAILABLE`；审计 `ops_alert.receive`。`scripts/deploy/` 新增 `sentelligent-ops-alert@.service`（OnFailure 模板单元）、`sentelligent-ops-inspect.service/.timer`（5 分钟巡检：outbox failed 水位/worker 心跳/status 端点四合一/备份新鲜度<26h）与 `ops-alert.sh`/`ops-inspect.sh`（backend 自身失败跳端点直走 PushPlus 兜底）；四主单元部署时加 `OnFailure=sentelligent-ops-alert@%n` 与常驻三单元 `StartLimitInterval=300`/`StartLimitBurst=5`。生产校验：`OPS_ALERT_TOKEN` 若配置必须高熵并入秘密两两独立集合。
+- **L0 owner 词表清洗（块2）**：迁移 0029（业务六表 customers/opportunities/action_items/quick_records/weekly_reports/solution_drafts 的 `继振`/`legacy`/`??`/NULL owner 统一为账号 id `jiangjz`；值白名单+IS NULL 双幂等；不动 audit_logs 历史留痕、assistant_* 机器身份与展示列 assignee；不 bump version/updated_at）。`upsertActionFromQuickRecord` 深写回 `$assignee` 由硬编码 `"继振"` 过渡为 `quickRecord.owner ?? null`（与 owner 继承同源；users.display_name 回填归 v0.9.1）。migrations.test.js 基线 27→28 并新增 0029 白名单/幂等/行哈希不变用例；`api.test.js` 增深写回 assignee=owner 断言。
+- **审计C余修（块3）**：① 招标摘要微信意图（B12）——新 agent `hospital-tender` + 工具 `hospital-tender.summary`（R0 免确认，policy/registry/manifest/capability 四处登记，registry↔manifest 启动一致性校验通过），`naturalPlan` 差旅汇总之后、记账捕获之前插入锚定全匹配正则（宽式 `查.*招标` 会吞拜访记录查询，收窄为全匹配），`explicitPlan` 加别名 `招标摘要`，HELP 文案同步；handler 与 `GET /api/hospital-tenders/summary` 同源 `repository.summary()`（全局域，不做 owner 过滤）。② 「修改客户」让路（B4）——`explicitModification` 收窄为"修改 + 19 词记账字段表才命中"（词表单一来源 `BOOKKEEPING_CORRECTION_FIELD_WORDS` 自 `CORRECTION_LABELS` 导出，最长优先），`commandTargetsShortcut` 的修改分支改由词表版承担、裸`修改`保留归记账；活跃草稿期「修改客户 X，级别 …」直达 customer.update 六位码链（weixin-agent 全链集成用例），16 条记账修改语料回归全绿。③ `AMAP_MODE=mock`（A8）——config 新键（live|mock，生产硬闸拒 mock），server 装配三元加 mock 分支（`maps/amapMockClient.js` 确定性桩：地址哈希入青岛 bbox、距离=球面×1.4、时距≈40km/h、polyline/步骤桩），行程 API 在 mock 下全链 201 且几何可复现；`local-dev.mjs` 隔离栈配方补 `AMAP_MODE=mock`。④ D5（`test:tender` 挂 qa:local）已由 v0.8.4 的 752a793 完成，本版仅核销。
+- **运维收口（块4，仓内部分）**：新增 `scripts/deploy/server-config/`（服务器为事实来源的实况快照目录：README 约定 BOM 保留与 `@RELEASE_DIR@` 模板化）+ `server-config-drift.sh` 只读漂移检测（SSH_TARGET/SSH_KEY 参数化，退出码非 0=漂移）；快照于部署尾声（四主单元 patch 后）采集入仓。服务器清理七项、v0.8.1–0.8.3 归档核验、18899 核销随部署窗执行并记录于 release 文档。
+- 一处数据库迁移（0029，8 行 UPDATE 预期，生产执行前 /dev/shm 彩排+对账+VACUUM INTO 手动备份）；零新依赖。后端全量 1303 项（较 v0.8.4 基线 1276 净增 27：ops-alerts API/渲染/status、outbox statusCounts、0029 迁移、深写回 assignee、招标意图语料 10、修改让路语料 16+、amap mock 契约、行程 mock 全链、config amapMode/OPS token）；前端 qa:local 439 项与基线持平（本版零前端代码改动）；Chrome/WebKit 集成、根发布测试与发布内容秘密门全部通过（工作树 secret 扫描唯一 finding 为并行泳道未跟踪设计草稿 `2026-08-29-v091-auth-design.md`，不在本版冻结范围，冻结树扫描 0 findings，证据见 release 文档）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.8.4] - 2026-08-28
 
 ### 工程健康收官（总蓝图 L 阶段）

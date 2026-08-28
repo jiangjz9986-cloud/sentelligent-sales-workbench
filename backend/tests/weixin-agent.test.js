@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
+import { openDatabase } from "../src/db.js";
+import { createServer } from "../src/server.js";
 import { createSalesWorkbenchWeixinAgent } from "../src/weixin/agentBridge.js";
 import { minimalPdf, VALID_PNG } from "./helpers/image-fixtures.js";
 
@@ -605,6 +607,120 @@ describe("weixin sales workbench agent", () => {
     await agent.chat({ conversationId: "persistent-session", text: "拜访日照中医医院" });
     assert.ok(calls.some(([method, key]) => method === "set" && key === "persistent-session"));
     assert.ok(sessions.has("persistent-session"));
+  });
+
+  it("routes 修改客户 to the six-digit customer-update chain while a bookkeeping draft is active (audit C B4)", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "sentelligent-weixin-b4-"));
+    tempDirectories.push(tempDir);
+    const databaseUrl = join(tempDir, "b4.sqlite");
+    const owner = "assistant-owner";
+    const sender = "sender-1";
+    const machineToken = ["b4", "machine", "test", "token"].join("-");
+    const seedDb = openDatabase({ databaseUrl });
+    seedDb.exec(`
+      INSERT INTO customers (id, name, region, type, level, owner)
+      VALUES ('customer-b4-1', '黄岛人民医院', '青岛', '医院', 'B', 'assistant-owner');
+    `);
+    seedDb.close();
+    const server = createServer({
+      databaseUrl,
+      seed: false,
+      nodeEnv: "test",
+      authRequired: false,
+      weixinAgentApiToken: machineToken,
+      weixinAgentOwner: owner,
+      weixinBookkeepingConfirmationEnabled: true,
+      weixinBookkeepingOwner: owner,
+      weixinBookkeepingSenderId: sender,
+      weixinAllowedSenderIds: [sender],
+      assistantConfirmationSecret: Buffer.alloc(32, 0x42),
+      travelExpenseAnalyzer: async () => ({
+        status: "ready",
+        confidence: 0.98,
+        expense: {
+          occurredOn: "2026-08-18",
+          amountCents: 1280,
+          reimbursementCents: 1280,
+          purpose: "出差消费",
+          merchant: "合成商户",
+          paidAt: "2026-08-18T12:00:00+08:00",
+          fundingSource: "personal",
+          paymentMethod: "wechat",
+        },
+        warnings: [],
+        source: { provider: "test", model: null },
+      }),
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    const send = async (sourceMessageId, text) => {
+      const response = await fetch(`${baseUrl}/api/integrations/weixin-agent/events`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${machineToken}`,
+          "Content-Type": "application/json",
+          "Idempotency-Key": `weixin:${sourceMessageId}`,
+        },
+        body: JSON.stringify({
+          conversationId: "conversation-b4",
+          text,
+          sourceMessageId,
+          senderId: sender,
+          chatType: "direct",
+        }),
+      });
+      const bodyText = await response.text();
+      return { status: response.status, body: bodyText ? JSON.parse(bodyText) : null };
+    };
+
+    try {
+      // 1. An active bookkeeping draft (the exact audit C B4 precondition).
+      const draft = await send("b4-draft", "支出 2026-08-18 打车 12.80元 让路场景");
+      assert.equal(draft.status, 200, JSON.stringify(draft.body));
+      const draftDb = openDatabase({ databaseUrl });
+      assert.equal(
+        draftDb.prepare("SELECT status FROM shortcut_bookkeeping_entries").get().status,
+        "review_required",
+      );
+      draftDb.close();
+
+      // 2. 修改客户 must now yield to the deterministic router and open the
+      //    customer-update six-digit chain instead of the correction help.
+      const pending = await send("b4-customer-update", "修改客户 黄岛人民医院，级别 重点推进");
+      assert.equal(pending.status, 200, JSON.stringify(pending.body));
+      assert.equal(pending.body.status, "confirmation_required");
+      assert.equal(pending.body.toolName, "customer.update");
+      assert.match(pending.body.text, /级别/u);
+      const codes = String(pending.body.text).match(/(?<!\d)\d{6}(?!\d)/gu) ?? [];
+      assert.equal(codes.length, 1, pending.body.text);
+
+      const confirmed = await send("b4-customer-confirm", codes[0]);
+      assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+      assert.equal(confirmed.body.status, "ok");
+      assert.match(confirmed.body.text, /黄岛人民医院/u);
+
+      // 3. 修改商机… also leaves the bookkeeping runtime for the opportunity
+      //    group (imperfect subject parsing is acceptable per the design card).
+      const opportunity = await send("b4-opportunity", "修改商机的金额改成600万");
+      assert.equal(opportunity.status, 200, JSON.stringify(opportunity.body));
+      assert.doesNotMatch(String(opportunity.body.text), /请以“修改”开头并明确字段|已按你的修改更新草稿/u);
+
+      // 4. A bookkeeping-field correction still revises the untouched draft.
+      const revised = await send("b4-amount", "修改金额 100元");
+      assert.equal(revised.status, 200, JSON.stringify(revised.body));
+      assert.match(revised.body.text, /已按你的修改更新草稿/u);
+
+      const db = openDatabase({ databaseUrl });
+      assert.equal(
+        db.prepare("SELECT level FROM customers WHERE id = 'customer-b4-1'").get().level,
+        "重点推进",
+      );
+      const entry = db.prepare("SELECT status, amount_cents FROM shortcut_bookkeeping_entries").get();
+      assert.deepEqual({ ...entry }, { status: "review_required", amount_cents: 10000 });
+      db.close();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("bounds chunked workbench responses before buffering them in memory", async () => {

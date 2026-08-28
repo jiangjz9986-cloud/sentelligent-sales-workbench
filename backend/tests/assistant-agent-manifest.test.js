@@ -13,7 +13,7 @@ describe("versioned assistant agent manifests", () => {
     const registry = createAgentManifestRegistry();
     const manifests = registry.list();
 
-    assert.equal(manifests.length, 17);
+    assert.equal(manifests.length, 18);
     for (const manifest of manifests) {
       assert.match(manifest.id, /^[a-z][a-z0-9-]+$/);
       assert.match(manifest.version, /^\d+\.\d+\.\d+$/);

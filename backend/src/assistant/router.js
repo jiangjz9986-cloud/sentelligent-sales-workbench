@@ -7,7 +7,7 @@ import { KNOWN_STAGES, normalizeStageText } from "../opportunities/stageVocabula
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：战情总览、客户查询与详情、商机查询与维护（列表/详情/推进阶段/改金额/新建/删除）、记支出/收入、发送付款凭证或发票、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、知识检索、销售周报。财务写入会先发送待确认信息；请款结算仅供核对。";
+const HELP = "可用：战情总览、客户查询与详情、商机查询与维护（列表/详情/推进阶段/改金额/新建/删除）、记支出/收入、发送付款凭证或发票、拜访记录、动作风险、行程摘要、招标摘要、差旅与报销汇总、请款结算预览、知识检索、销售周报。财务写入会先发送待确认信息；请款结算仅供核对。";
 
 function clean(value) { return String(value ?? "").trim(); }
 
@@ -446,6 +446,11 @@ const OPPORTUNITY_CREATE_SEGMENT_KEYS = Object.freeze({
 });
 const OPPORTUNITY_TARGET_QUESTION = "请说明商机名称或编号，例如「把日照的商机推进到方案交流」。";
 
+// v0.9.0 hospital-tender summary intent (audit C B12). Anchored full-match on
+// purpose: a loose 查.*招标 would swallow record searches like
+// 查上周招标办的拜访记录, which must stay with QUICK_SEARCH downstream.
+const HOSPITAL_TENDER_SUMMARY_RE = /^(?:查一下|查查|查询|查)?\s*(?:最近|今天|本周)?\s*(?:有什么|有哪些)?\s*(?:医院)?招标(?:公告|信息|动态|情况|摘要|监测)?\s*(?:有什么|有哪些|怎么样)?\s*[?？]?$/u;
+
 function opportunityWriteTarget(subject, context) {
   const normalized = clean(subject);
   if (!normalized || OPPORTUNITY_PRONOUN_RE.test(normalized)) {
@@ -628,6 +633,7 @@ function explicitPlan(command, args, registry, { mediaRef, context: rawContext }
     "项目分析": ["sales-decision.preview", (value) => ({ opportunityId: value })],
     "动作风险": ["action-risk.summary", () => ({})],
     "行程摘要": ["itinerary.summary", () => ({})],
+    "招标摘要": ["hospital-tender.summary", () => ({})],
     "差旅汇总": ["travel-expense.summary", (value) => ({ week: clean(value) || "current" })],
     "知识检索": ["knowledge.search", (value) => ({ query: value })],
     拜访: ["visit-capture.collect", (value) => ({ text: value })],
@@ -771,6 +777,17 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
     return makePlan({
       tool: registry.getTool("travel-expense.summary"),
       arguments: { week: "current" },
+      confidence,
+      source: "natural",
+    });
+  }
+  // R0 tender summary sits with the query group: after the travel-expense
+  // summary phrasing, before the bookkeeping capture so 记一下/提醒我 prefixes
+  // upstream and the bookkeeping keywords below never see these queries.
+  if (HOSPITAL_TENDER_SUMMARY_RE.test(value)) {
+    return makePlan({
+      tool: registry.getTool("hospital-tender.summary"),
+      arguments: {},
       confidence,
       source: "natural",
     });

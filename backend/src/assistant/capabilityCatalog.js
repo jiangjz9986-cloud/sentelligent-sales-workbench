@@ -290,6 +290,17 @@ export const CAPABILITY_CATALOG = deepFreeze([
     sourceRefs: ["agentRegistry:itinerary", "toolRegistry:itinerary.summary"],
   }),
   capability({
+    id: "hospital-tender.summary",
+    name: "招标摘要",
+    description: "微信端免确认查询医院招标监测摘要：公告总数、今日新增、高相关、已匹配客户、截止临近与最近采集状态。",
+    status: "ready",
+    mappings: { tools: ["hospital-tender.summary"], apis: ["GET /api/hospital-tenders/summary"] },
+    dependencies: ["hospital tender repository", "global tender domain (no owner filter)", "read-only assistant route"],
+    integrationPoints: ["assistant router", "assistant runtime handlers", "hospital tender API"],
+    confirmationLevel: "none",
+    sourceRefs: ["agentRegistry:hospital-tender", "toolRegistry:hospital-tender.summary", "hospitalTender:repository.summary"],
+  }),
+  capability({
     id: "knowledge.search",
     name: "知识检索",
     description: "只读检索知识条目并保留来源，不执行知识写入。",

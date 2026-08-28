@@ -6,6 +6,7 @@ import { HttpError } from "../http/errors.js";
 import { resolveBookkeepingCategory } from "../bookkeeping/categoryCatalog.js";
 import {
   applyShortcutBookkeepingCorrection,
+  BOOKKEEPING_CORRECTION_FIELD_WORDS,
   parseShortcutBookkeepingCorrection,
   projectShortcutBookkeepingDraft,
 } from "../integrations/shortcutBookkeepingAssistant.js";
@@ -14,6 +15,7 @@ import { shortcutBookkeepingConversationId } from "../weixin/bookkeepingDelivery
 import { renderHospitalTenderNoticeMessage } from "../hospitalTender/weixinNotifier.js";
 import { renderActionReminderMessage } from "../actionReminders/reminderMessage.js";
 import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "../dailyDigest/digestMessage.js";
+import { renderOpsAlertMessage } from "../ops/opsAlertMessage.js";
 import { buildAutomaticMealNote, buildBookkeepingAnalysis } from "./bookkeepingCapture.js";
 import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
 
@@ -301,9 +303,22 @@ function resultMessage(entry) {
   return `已确认并录入森特智行：${entry.expenseReferenceCode ?? entry.expenseId ?? entry.id}，金额 ${formatMoney(entry.amountCents)}。`;
 }
 
+// 修改… only counts as bookkeeping language when the remainder opens with a
+// bookkeeping correction field (audit C B4): 修改客户/修改商机 must reach the
+// deterministic router even while a draft is active. Longest-first keeps the
+// alternation deterministic (费用类别 before 费用).
+const MODIFICATION_FIELD_RE = new RegExp(
+  `^(?:把|将)?\\s*(?:${[...BOOKKEEPING_CORRECTION_FIELD_WORDS]
+    .sort((a, b) => b.length - a.length)
+    .join("|")})`,
+  "u",
+);
+
 function explicitModification(value) {
   const match = /^修改(?:[：:\s]+)?(.+)$/su.exec(String(value ?? ""));
-  return match?.[1]?.trim() || null;
+  const body = match?.[1]?.trim() || null;
+  if (!body) return null;
+  return MODIFICATION_FIELD_RE.test(body) ? body : null;
 }
 
 function acceptedResult(entry) {
@@ -1231,6 +1246,9 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (payload.kind === "friday_closeout") {
       return renderFridayCloseoutMessage(payload);
     }
+    if (payload.kind === "ops_alert") {
+      return renderOpsAlertMessage(payload);
+    }
     if (payload.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) {
       const row = db.prepare(`
         SELECT entry.id AS entry_id, entry.captured_at, entry.created_at,
@@ -2043,8 +2061,11 @@ export function createShortcutBookkeepingAssistantRuntime({
       || quote
       || text === "确认"
       || textClassification.kind !== "ordinary"
+      // The 修改 branch is carried by explicitModification's field vocabulary;
+      // a bare 修改 (no body) still belongs here to keep the quote guidance.
       || explicitModification(text)
-      || /^(?:确认|修改|取消)/u.test(String(text ?? "")),
+      || /^(?:确认|取消)/u.test(String(text ?? ""))
+      || /^修改\s*[:：]?\s*$/u.test(String(text ?? "")),
     );
   }
 

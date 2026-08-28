@@ -32,6 +32,13 @@ const CORRECTION_LABELS = Object.freeze([
   ["分类", "category"], ["大类", "category"],
 ]);
 
+// Single source for the "修改 + bookkeeping field" vocabulary: the WeChat
+// runtime only claims a 修改… message when its body starts with one of these
+// labels, so 修改客户/修改商机 fall through to the deterministic router.
+export const BOOKKEEPING_CORRECTION_FIELD_WORDS = Object.freeze(
+  [...new Set(CORRECTION_LABELS.map(([label]) => label))],
+);
+
 const PROTECTED_LABELS = Object.freeze([
   "owner", "账号", "账户", "账本", "targetSystem", "目标系统", "idempotency", "幂等",
   "expense", "payment", "付款", "确认码", "confirmation", "source", "来源",

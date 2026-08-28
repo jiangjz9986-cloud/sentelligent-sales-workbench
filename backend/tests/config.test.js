@@ -201,6 +201,21 @@ describe("backend model configuration", () => {
     );
     assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOW_GROUPS: "true" }), /WEIXIN_ALLOW_GROUPS/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOWED_GROUP_IDS: "production-group" }), /WEIXIN_ALLOWED_GROUP_IDS/);
+
+    // v0.9.0 ops alert token: optional, but when configured in production it
+    // must be high-entropy and independent from every other secret.
+    const validOpsToken = Buffer.alloc(32, 11).toString("base64url");
+    const withOpsToken = loadConfig({ ...valid, OPS_ALERT_TOKEN: validOpsToken });
+    assert.equal(withOpsToken.opsAlertToken, validOpsToken);
+    assert.throws(
+      () => loadConfig({ ...valid, ...Object.fromEntries([["OPS_ALERT_TOKEN", "short"]]) }),
+      /OPS_ALERT_TOKEN/,
+    );
+    assert.throws(() => loadConfig({ ...valid, OPS_ALERT_TOKEN: validMachineToken }), /independent/);
+
+    // v0.9.0 AMAP_MODE: mock is a hard production gate.
+    assert.equal(loadConfig(valid).amapMode, "live");
+    assert.throws(() => loadConfig({ ...valid, AMAP_MODE: "mock" }), /AMAP_MODE/);
   });
 
   it("allows synthetic group policy only outside production when explicitly configured", () => {
@@ -238,6 +253,9 @@ describe("backend model configuration", () => {
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_AUTO_RUN: "yes" }), /HOSPITAL_TENDER_AUTO_RUN/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_INTERVAL_MINUTES: 1441 }), /HOSPITAL_TENDER_INTERVAL_MINUTES/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_BATCH_SIZE: 201 }), /HOSPITAL_TENDER_BATCH_SIZE/);
+    assert.equal(loadConfig(base).amapMode, "live");
+    assert.equal(loadConfig({ ...base, AMAP_MODE: " Mock " }).amapMode, "mock");
+    assert.throws(() => loadConfig({ ...base, AMAP_MODE: "sandbox" }), /AMAP_MODE/);
   });
 
   it("emits the plaintext development-password warning once without leaking its value", () => {

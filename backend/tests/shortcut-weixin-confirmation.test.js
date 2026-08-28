@@ -1678,6 +1678,98 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     db.close();
   });
 
+  it("keeps the bookkeeping-field 修改 corpus in the correction chain after the customer-write yield narrowing", async () => {
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-correction-corpus-capture"),
+      body: JSON.stringify({
+        conversationId: "conversation-correction-corpus",
+        text: "支出 2026-08-18 打车 12.80元 语料回归",
+        sourceMessageId: "weixin-correction-corpus-capture",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(captured.response.status, 200, JSON.stringify(captured.body));
+
+    const send = async (index, text, quotedMessageId = null) => {
+      const sourceMessageId = `weixin-correction-corpus-${index}`;
+      const result = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(sourceMessageId),
+        body: JSON.stringify({
+          conversationId: "conversation-correction-corpus",
+          text,
+          sourceMessageId,
+          senderId: sender,
+          chatType: "direct",
+          ...(quotedMessageId ? { quotedMessageId } : { suppressQuote: true }),
+        }),
+      });
+      assert.equal(result.response.status, 200, `${text}: ${JSON.stringify(result.body)}`);
+      return result.body;
+    };
+
+    const REVISED = /已按你的修改更新草稿/u;
+    const MENU_CLARIFY = /费用类别或小类不在当前三级记账菜单中/u;
+    // Every entry must stay inside the bookkeeping chain (no router toolName)
+    // even though 修改客户/修改商机 now yield to the deterministic router.
+    const corpus = [
+      ["修改金额 100元", REVISED],
+      ["修改：金额改为86.5元", REVISED],
+      ["修改时间 14:30", REVISED],
+      ["修改日期 8月27日", REVISED],
+      ["修改发生时间 2026-08-27T09:00:00+08:00", REVISED],
+      ["修改费用类别 交通", REVISED],
+      ["修改子分类 打车", REVISED],
+      ["修改分类 餐饮", REVISED],
+      ["修改大类 差旅", MENU_CLARIFY],
+      ["修改商户 滴滴出行", REVISED],
+      ["修改用途 客户拜访打车", REVISED],
+      ["修改备注：加急", REVISED],
+      ["修改说明 项目应酬", REVISED],
+      ["修改 把金额改成99元", REVISED],
+    ];
+    for (const [index, [text, expected]] of corpus.entries()) {
+      const body = await send(index, text);
+      assert.match(body.text, expected, text);
+      assert.equal(body.toolName, undefined, text);
+    }
+
+    // Bare 确认/取消 while the freshest draft is still undelivered keep the
+    // existing wait-for-draft guidance (unchanged behavior).
+    for (const [index, text] of [["confirm", "确认"], ["cancel", "取消"]]) {
+      const body = await send(`hold-${index}`, text);
+      assert.match(body.text, /最新记账草稿尚未确认送达/u, text);
+      assert.equal(body.toolName, undefined, text);
+    }
+
+    // A quoted bare 修改 still belongs to bookkeeping and re-issues the help.
+    const finalDraft = await leaseOutbox();
+    assert.match(finalDraft.item.message, /金额：99\.00 元/u);
+    await ackOutbox(finalDraft, true, "provider-correction-corpus-final");
+    const bareModify = await send("bare-modify", "修改", "provider-correction-corpus-final");
+    assert.match(bareModify.text, /请以“修改”开头并明确字段/u);
+    assert.equal(bareModify.toolName, undefined);
+
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const entry = db.prepare(
+      "SELECT status, amount_cents, merchant, note, category FROM shortcut_bookkeeping_entries",
+    ).get();
+    assert.deepEqual({ ...entry }, {
+      status: "review_required",
+      amount_cents: 9900,
+      merchant: "滴滴出行",
+      note: "项目应酬",
+      category: "餐饮",
+    });
+    const action = db.prepare("SELECT status, version FROM assistant_pending_actions").get();
+    assert.equal(action.status, "pending");
+    assert.equal(Number(action.version), 14);
+    db.close();
+  });
+
   it("denies no-quote financial commands from another allowlisted sender or an allowed group", async () => {
     const received = await request("/api/integrations/weixin-agent/events", {
       method: "POST",

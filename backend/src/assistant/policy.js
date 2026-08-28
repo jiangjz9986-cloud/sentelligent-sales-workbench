@@ -35,6 +35,7 @@ const TOOL_POLICIES = new Map([
   ["action-risk.defer", { risk: "R1", confirmation: "affirm_language", reason: "ordinary_write" }],
   ["action-risk.delete", { risk: "R2", confirmation: "explicit_code", reason: "record_write" }],
   ["itinerary.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["hospital-tender.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   ["travel-expense.summary", { risk: "R1", confirmation: "none", reason: "read_only" }],
   // WeChat bookkeeping uses constrained natural-language confirmation at
   // the dedicated runtime boundary; it never exposes or accepts a user-facing

@@ -106,7 +106,7 @@ async function withHarness(overrides, work) {
   const databaseUrl = join(tempDir, "test.sqlite");
   const amap = createAmapFixture();
   const options = overrides ?? {};
-  const server = createServer({
+  const serverOptions = {
     databaseUrl,
     seed: true,
     nodeEnv: "test",
@@ -121,7 +121,11 @@ async function withHarness(overrides, work) {
     modelApiKey: "",
     amapClient: amap.client,
     ...options,
-  });
+  };
+  // An explicit `amapClient: undefined` override exercises the server's own
+  // client assembly (AMAP_MODE / web-service key) instead of the fixture.
+  if (serverOptions.amapClient === undefined) delete serverOptions.amapClient;
+  const server = createServer(serverOptions);
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -384,6 +388,33 @@ describe("authenticated visit itinerary API", () => {
       assert.equal(result.body.error.code, "AMAP_LOCATION_MISMATCH");
       assert.equal(routeWork, 0);
       assert.doesNotMatch(JSON.stringify(result.body), /provider detail/);
+    });
+  });
+
+  it("plans the full itinerary chain with the deterministic stub under AMAP_MODE=mock", async () => {
+    await withHarness({ amapClient: undefined, amapMode: "mock", amapWebServiceKey: "" }, async ({ request }) => {
+      const created = await request("/api/itineraries", {
+        method: "POST",
+        body: JSON.stringify(payload()),
+      });
+      assert.equal(created.response.status, 201);
+      assert.equal(created.body.item.plan.stops.length, 2);
+      assert.equal(created.body.item.plan.route.tollsCny, 0);
+      assert.equal(created.body.item.plan.route.trafficLights, 2);
+      assert.ok(created.body.item.plan.route.distanceMeters > 0);
+      assert.match(created.body.item.plan.route.steps[0].instruction, /沿演示路线行驶/u);
+      for (const stop of created.body.item.plan.stops) {
+        assert.ok(stop.location.lng >= 120.1 && stop.location.lng <= 120.6, "mock lng bbox");
+        assert.ok(stop.location.lat >= 35.9 && stop.location.lat <= 36.4, "mock lat bbox");
+      }
+
+      // Determinism: replanning the same input yields the same geometry.
+      const replanned = await request("/api/itineraries", {
+        method: "POST",
+        body: JSON.stringify(payload({ title: "重复规划" })),
+      });
+      assert.equal(replanned.response.status, 201);
+      assert.deepEqual(replanned.body.item.plan.route, created.body.item.plan.route);
     });
   });
 

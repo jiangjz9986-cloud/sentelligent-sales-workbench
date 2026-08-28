@@ -65,6 +65,39 @@ describe("unified 小小 assistant routing", () => {
     assert.equal(router.route({ text: "差旅汇总" }).toolName, "travel-expense.summary");
   });
 
+  it("routes anchored tender-summary phrasings to hospital-tender.summary", () => {
+    const router = createAssistantRouter();
+    const hits = [
+      "招标摘要",
+      "医院招标",
+      "查一下医院招标",
+      "查询招标",
+      "最近有哪些招标公告",
+      "/招标摘要",
+    ];
+    for (const text of hits) {
+      const plan = router.route({ text });
+      assert.equal(plan.status, "planned", text);
+      assert.equal(plan.toolName, "hospital-tender.summary", text);
+      assert.deepEqual(plan.arguments, {}, text);
+      assert.equal(plan.requiresConfirmation, false, text);
+    }
+  });
+
+  it("keeps neighbouring tender-flavoured sentences with their existing intents", () => {
+    const router = createAssistantRouter();
+    const regressions = [
+      ["记一下：拜访了招标办沟通项目", "visit-capture.capture"],
+      ["提醒我周五跟进招标", "action-risk.create"],
+      ["查上周招标办的拜访记录", "visit-capture.search"],
+      ["知识检索 招标", "knowledge.search"],
+    ];
+    for (const [text, toolName] of regressions) {
+      const plan = router.route({ text });
+      assert.equal(plan.toolName, toolName, text);
+    }
+  });
+
   it("does not weaken the existing confirmation boundary for visit writes", () => {
     const router = createAssistantRouter();
     const write = router.route({ text: "/visit-capture.confirm draft-a" });

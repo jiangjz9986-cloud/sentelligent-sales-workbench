@@ -29,6 +29,7 @@ import { apply as applyTravelExpenseRegionProfiles } from "./migrations/0025_tra
 import { apply as applyHospitalTenderActiveWindow } from "./migrations/0026_hospital_tender_active_window.mjs";
 import { apply as applyCustomerProfileAliases } from "./migrations/0027_customer_profile_aliases.mjs";
 import { apply as applyActionItemReminders } from "./migrations/0028_action_item_reminders.mjs";
+import { apply as applyOwnerVocabularyCleanup } from "./migrations/0029_owner_vocabulary_cleanup.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -192,6 +193,12 @@ const migrations = [
     path: resolve(here, "migrations", "0028_action_item_reminders.mjs"),
     type: "module",
     apply: applyActionItemReminders,
+  },
+  {
+    version: "0029",
+    path: resolve(here, "migrations", "0029_owner_vocabulary_cleanup.mjs"),
+    type: "module",
+    apply: applyOwnerVocabularyCleanup,
   },
 ];
 

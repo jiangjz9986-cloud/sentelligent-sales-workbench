@@ -1,0 +1,15 @@
+# v0.9.0: every-5-minutes trigger for sentelligent-ops-inspect.service.
+# Persistent=false on purpose: a missed inspection window is worthless once
+# the next one runs; do not replay stale checks after boot.
+# Install target: /etc/systemd/system/sentelligent-ops-inspect.timer
+
+[Unit]
+Description=Every 5 minutes schedule for sentelligent-ops-inspect.service
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=false
+Unit=sentelligent-ops-inspect.service
+
+[Install]
+WantedBy=timers.target

@@ -378,6 +378,35 @@ export const AGENT_MANIFESTS = deepFreeze([
     ].join(""),
     fallback: { strategy: "return deterministic owner-scoped itinerary facts and an empty plan preview", status: "fallback" },
   }),
+  manifestDefinition("hospital-tender", {
+    contractVersion: "hospital-tender-v1",
+    modelPolicy: "none",
+    taskTypes: ["summary"],
+    tools: ["hospital-tender.summary"],
+    confirmation: { preview: "none", write: "none" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs"],
+      properties: {
+        schemaVersion: "hospital-tender-v1",
+        summary: "object",
+        asOf: "iso_datetime",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行医院招标情报 Agent。",
+      "只使用服务端招标监测仓库的聚合摘要，计数与时间必须原样保留。",
+      "不得根据计数猜测具体公告、客户匹配或截止日期，也不得触发采集或推送。",
+      "招标监测为全局域数据，摘要只读，不执行任何业务写入。",
+    ].join(""),
+    fallback: { strategy: "return deterministic tender summary counts and unknowns", status: "fallback" },
+  }),
   manifestDefinition("travel-expense", {
     lifecycle: "disabled",
     modelPolicy: "disabled_until_data_boundary_approved",

@@ -321,6 +321,21 @@ export function createWeixinConfirmationOutboxRepository(db, {
     }
   }
 
+  // Read-only aggregate for the ops-alerts status endpoint: per-status counts
+  // plus the oldest queued availability so an inspector can spot backlog.
+  function statusCounts() {
+    const counts = { queued: 0, processing: 0, sent: 0, failed: 0 };
+    for (const row of db.prepare(
+      "SELECT status, COUNT(*) AS count FROM weixin_confirmation_outbox GROUP BY status",
+    ).all()) {
+      if (Object.hasOwn(counts, row.status)) counts[row.status] = Number(row.count);
+    }
+    const oldest = db.prepare(
+      "SELECT MIN(available_at) AS oldest FROM weixin_confirmation_outbox WHERE status = 'queued'",
+    ).get();
+    return { ...counts, oldestQueuedAt: oldest?.oldest ?? null };
+  }
+
   function latestForEntry({ owner, entryId } = {}) {
     const normalizedOwner = text(owner, "owner", 200);
     const normalizedEntryId = text(entryId, "entryId", 200);
@@ -343,6 +358,7 @@ export function createWeixinConfirmationOutboxRepository(db, {
     requeueFailed,
     closePending,
     isLeaseCurrent,
+    statusCounts,
     latestForEntry,
     get: (id) => item(selectById.get({ $id: text(id, "id", 200) })),
   });

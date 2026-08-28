@@ -87,6 +87,9 @@ import {
 import { createShortcutAdvanceAllocationRepository } from "./integrations/shortcutAdvanceAllocationRepository.js";
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
+import { createMockAmapClient } from "./maps/amapMockClient.js";
+import { createOpsAlertService } from "./ops/opsAlertService.js";
+import { createOpsAlertPushplusNotifier } from "./ops/opsAlertPushplusNotifier.js";
 import {
   claimIdempotency,
   completeIdempotency,
@@ -1933,7 +1936,9 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
     $customer: customerName,
     $reason: riskText || `来自快速记录 ${quickRecord.id} 的人工确认结果`,
     $due: "待确认",
-    $assignee: "继振",
+    // v0.9.0 L0 transition: the deep write-back assignee follows the record
+    // owner (an account id) until users.display_name lands in v0.9.1.
+    $assignee: quickRecord.owner ?? null,
     $priority: priority,
     $sourceRecordId: quickRecord.id,
     $tone: priority === "高" ? "red" : "blue",
@@ -2817,13 +2822,15 @@ export function createServer(options = {}) {
   });
   const amapClient = Object.hasOwn(options, "amapClient")
     ? options.amapClient
-    : config.amapWebServiceKey
-      ? createAmapClient({
-          apiKey: config.amapWebServiceKey,
-          timeoutMs: config.amapTimeoutMs,
-          fetchImpl: options.fetchImpl ?? fetch,
-        })
-      : null;
+    : config.amapMode === "mock"
+      ? createMockAmapClient()
+      : config.amapWebServiceKey
+        ? createAmapClient({
+            apiKey: config.amapWebServiceKey,
+            timeoutMs: config.amapTimeoutMs,
+            fetchImpl: options.fetchImpl ?? fetch,
+          })
+        : null;
   const weixinLoginBinding = createWeixinLoginBinding({
     config,
     spawnLoginProcess: options.spawnWeixinLoginProcess,
@@ -2996,6 +3003,51 @@ export function createServer(options = {}) {
   });
   const dailyDigestAutoRun = options.dailyDigestAutoRun ?? config.dailyDigestAutoRun;
   if (dailyDigestAutoRun && options.dailyDigestSchedulerEnabled !== false) dailyDigestScheduler.start();
+  const opsAlertPushplusNotifier = createOpsAlertPushplusNotifier({
+    tokenProvider: resolvePushplusToken,
+    fetchImpl: options.fetchImpl ?? fetch,
+  });
+  const opsAlertService = options.opsAlertService ?? createOpsAlertService({
+    outboxRepository: weixinConfirmationOutboxRepository,
+    resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
+    resolveConversationId: (owner) => shortcutBookkeepingAssistantRuntime.conversationFor(owner),
+    weixinDeliveryReady: weixinTenderDeliveryReady,
+    pushplusNotify: opsAlertPushplusNotifier,
+    recordAudit: ({ actor, requestId, entityId, metadata }) => insertAudit(db, {
+      action: "ops_alert.receive",
+      entityType: "ops_alert",
+      entityId,
+      actor,
+      requestId,
+      before: null,
+      after: null,
+      metadata,
+    }),
+    clock: options.opsAlertClock ?? (() => new Date()),
+  });
+  // One probe covers backend liveness, the three scheduler lastError states,
+  // outbox backlog, and worker heartbeat for the 5-minute ops inspector.
+  const opsAlertStatusSnapshot = () => {
+    const tenderState = hospitalTenderScheduler.getState();
+    return {
+      generatedAt: new Date().toISOString(),
+      outbox: weixinConfirmationOutboxRepository.statusCounts(),
+      weixinDelivery: weixinDeliveryReadiness.snapshot(),
+      schedulers: {
+        hospitalTender: tenderState
+          ? {
+              enabled: Boolean(tenderState.enabled),
+              lastStatus: tenderState.lastStatus ?? null,
+              lastError: tenderState.lastError ?? null,
+              lastFinishedAt: tenderState.lastFinishedAt ?? null,
+              nextRunAt: tenderState.nextRunAt ?? null,
+            }
+          : null,
+        actionReminders: actionReminderScheduler.status(),
+        dailyDigest: dailyDigestScheduler.status(),
+      },
+    };
+  };
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -3006,6 +3058,7 @@ export function createServer(options = {}) {
       travelExpenseDocumentInboxRepository,
       bookkeepingRepository: shortcutBookkeepingRepository,
       bookkeepingRuntime: shortcutBookkeepingAssistantRuntime,
+      hospitalTenderRepository,
       actionItemStore: assistantActionItemStore,
       travelExpenseRepository,
       travelExpenseRegionRepository,
@@ -3552,6 +3605,42 @@ export function createServer(options = {}) {
             notices: result.notices.map((item) => serializeHospitalTenderNotice(item, customerNameById)),
           },
         });
+        return;
+      }
+
+      if (
+        url.pathname === "/api/integrations/ops-alerts"
+        || url.pathname === "/api/integrations/ops-alerts/status"
+      ) {
+        const machineIdentity = authenticateMachineRequest(request.headers.authorization, config);
+        if (!machineIdentity) return unauthorized(response);
+        assertMachineRouteAllowed(request.method, url.pathname, machineIdentity.integration);
+        if (url.pathname.endsWith("/status")) {
+          if (request.method !== "GET") {
+            sendHttpError(
+              response,
+              new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for the ops alert status endpoint"),
+              responseOptions(response, { Allow: "GET" }),
+            );
+            return;
+          }
+          sendJson(response, 200, { item: opsAlertStatusSnapshot() }, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (request.method !== "POST") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for the ops alert endpoint"),
+            responseOptions(response, { Allow: "POST" }),
+          );
+          return;
+        }
+        const body = await readJson(request, { maxBytes: Math.min(config.jsonBodyLimitBytes, 64 * 1024) });
+        const result = await opsAlertService.receive(body, {
+          actor: machineIdentity.account,
+          requestId,
+        });
+        sendJson(response, 200, result, { "Cache-Control": "no-store" });
         return;
       }
 

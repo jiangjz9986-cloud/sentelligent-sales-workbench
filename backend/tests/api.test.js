@@ -776,6 +776,11 @@ describe("sales workbench backend API", () => {
     assertApiEntity("customer", confirmed.body.customer);
     assertApiEntity("opportunity", confirmed.body.opportunity);
     assert.equal(confirmed.body.action.sourceRecordId, created.body.item.id);
+    // v0.9.0 L0 transition: the deep write-back assignee inherits the record
+    // owner (account id) instead of the historical hard-coded display name.
+    assert.equal(confirmed.body.action.assignee, confirmed.body.quickRecord.owner);
+    assert.ok(confirmed.body.action.assignee);
+    assert.notEqual(confirmed.body.action.assignee, "继振");
     assert.match(confirmed.body.customer.syncPreview.join("\n"), /快速记录已确认/);
     assert.match(confirmed.body.opportunity.sourceRecord, new RegExp(created.body.item.id));
 

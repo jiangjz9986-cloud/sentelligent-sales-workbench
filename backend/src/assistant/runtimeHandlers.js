@@ -525,6 +525,7 @@ export function createAssistantToolHandlers({
   travelExpenseDocumentInboxRepository,
   bookkeepingRepository = null,
   bookkeepingRuntime = null,
+  hospitalTenderRepository = null,
   travelExpenseRepository = null,
   travelExpenseRegionRepository = null,
   travelExpenseAnalyzer = null,
@@ -2064,6 +2065,38 @@ export function createAssistantToolHandlers({
       });
       return {
         text: expenseSummaryText(summary, "差旅汇总"),
+        status: "ok",
+        summary,
+      };
+    },
+
+    // Tender monitoring is a global domain (design ruling D1): the handler
+    // reads the same repository.summary() as GET /api/hospital-tenders/summary
+    // and applies no owner filter, matching the web endpoint.
+    async "hospital-tender.summary"() {
+      if (!hospitalTenderRepository || typeof hospitalTenderRepository.summary !== "function") {
+        return { text: "招标监测尚未完成配置，请稍后再试。", status: "error" };
+      }
+      const summary = hospitalTenderRepository.summary();
+      const shanghaiMinute = (value) => {
+        const parsed = Date.parse(String(value ?? ""));
+        if (!Number.isFinite(parsed)) return null;
+        return new Date(parsed + 8 * 60 * 60 * 1000).toISOString().slice(0, 16).replace("T", " ");
+      };
+      const latestRun = summary.latestRun
+        ? `${shanghaiMinute(summary.latestRun.finishedAt ?? summary.latestRun.startedAt) ?? "待确认"}（${weixinValue(summary.latestRun.status)}）`
+        : "待首轮采集";
+      return {
+        text: weixinCard("医院招标监测", [
+          ["截至", shanghaiMinute(summary.asOf) ?? "待确认"],
+          ["公告总数", String(summary.totalNotices)],
+          ["今日新增", String(summary.todayNewCount)],
+          ["高相关", String(summary.highRelevanceCount)],
+          ["已匹配客户", String(summary.matchedNotices)],
+          ["截止临近", String(summary.deadlineSoonCount)],
+          ["最新发布", summary.latestPublishedAt ?? "待确认"],
+          ["最近采集", latestRun],
+        ], "高相关新公告会自动推送；详情见工作台「招标监测」页。"),
         status: "ok",
         summary,
       };

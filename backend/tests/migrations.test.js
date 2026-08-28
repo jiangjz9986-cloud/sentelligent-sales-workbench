@@ -79,10 +79,10 @@ function seedLegacyBusinessRows(db) {
   const baselinePath = fileURLToPath(new URL("../src/db/migrations/0001_baseline.sql", import.meta.url));
   db.exec(readFileSync(baselinePath, "utf8"));
   db.exec(`
-    INSERT INTO customers (id, name, region, relation)
-    VALUES ('legacy-customer', 'Legacy customer', 'north', 71);
-    INSERT INTO opportunities (id, customer_id, name, stage, probability)
-    VALUES ('legacy-opportunity', 'legacy-customer', 'Legacy opportunity', 'discovery', 45);
+    INSERT INTO customers (id, name, region, relation, owner)
+    VALUES ('legacy-customer', 'Legacy customer', 'north', 71, 'legacy-owner');
+    INSERT INTO opportunities (id, customer_id, name, stage, probability, owner)
+    VALUES ('legacy-opportunity', 'legacy-customer', 'Legacy opportunity', 'discovery', 45, 'legacy-owner');
     INSERT INTO quick_records (id, raw_content, customer_id, opportunity_id, status)
     VALUES ('legacy-record', 'Legacy record', 'legacy-customer', 'legacy-opportunity', 'recorded');
     INSERT INTO ai_insights (id, quick_record_id, analysis_json)
@@ -163,7 +163,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 27);
+      assert.equal(firstMigrations.length, 28);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -190,6 +190,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[23].version, "0025");
       assert.equal(firstMigrations[24].version, "0026");
       assert.equal(firstMigrations[26].version, "0028");
+      assert.equal(firstMigrations[27].version, "0029");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -478,7 +479,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        27,
+        28,
       );
     } finally {
       db.close();
@@ -902,7 +903,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029"],
       );
     } finally {
       migrated.close();
@@ -1096,11 +1097,86 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 27);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 28);
     } finally {
       db.close();
     }
   });
+});
+
+test("migration 0029 normalizes legacy owner vocabulary", async () => {
+  const { apply } = await import("../src/db/migrations/0029_owner_vocabulary_cleanup.mjs");
+  const db = openDatabase({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      INSERT INTO customers (id, name, owner) VALUES
+        ('c-alias', '别名客户', '继振'),
+        ('c-keep', '白名单外客户', 'other-user'),
+        ('c-normal', '规范客户', 'jiangjz');
+      INSERT INTO opportunities (id, customer_id, name, owner) VALUES
+        ('o-alias', 'c-alias', '别名商机', '继振');
+      INSERT INTO action_items (id, title, owner) VALUES
+        ('a-alias', '别名待办', '继振'),
+        ('a-null', '无主待办', NULL);
+      INSERT INTO quick_records (id, raw_content, owner) VALUES
+        ('q-legacy', '历史记录', 'legacy');
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, content) VALUES
+        ('w-alias', '继振', '2026-07-06', '2026-07-12', '周报');
+      INSERT INTO solution_drafts (id, owner, title, content) VALUES
+        ('s-question', '??', '占位方案', '内容');
+    `);
+    const rowSnapshot = (table) => db.prepare(
+      `SELECT * FROM ${table} ORDER BY id`,
+    ).all().map((row) => {
+      const { owner: _owner, ...rest } = row;
+      return rest;
+    });
+    const beforeRows = Object.fromEntries(
+      ["customers", "opportunities", "action_items", "quick_records", "weekly_reports", "solution_drafts"]
+        .map((table) => [table, JSON.stringify(rowSnapshot(table))]),
+    );
+    const customerMetaBefore = db.prepare(
+      "SELECT id, version, updated_at FROM customers ORDER BY id",
+    ).all();
+
+    apply(db);
+
+    const owners = (table) => db.prepare(`SELECT id, owner FROM ${table} ORDER BY id`).all()
+      .map((row) => ({ id: row.id, owner: row.owner }));
+    assert.deepEqual(owners("customers"), [
+      { id: "c-alias", owner: "jiangjz" },
+      { id: "c-keep", owner: "other-user" },
+      { id: "c-normal", owner: "jiangjz" },
+    ]);
+    assert.deepEqual(owners("opportunities"), [{ id: "o-alias", owner: "jiangjz" }]);
+    assert.deepEqual(owners("action_items"), [
+      { id: "a-alias", owner: "jiangjz" },
+      { id: "a-null", owner: "jiangjz" },
+    ]);
+    assert.deepEqual(owners("quick_records"), [{ id: "q-legacy", owner: "jiangjz" }]);
+    assert.deepEqual(owners("weekly_reports"), [{ id: "w-alias", owner: "jiangjz" }]);
+    assert.deepEqual(owners("solution_drafts"), [{ id: "s-question", owner: "jiangjz" }]);
+
+    // Everything except owner (including version and updated_at) is untouched.
+    for (const [table, hash] of Object.entries(beforeRows)) {
+      assert.equal(JSON.stringify(rowSnapshot(table)), hash, table);
+    }
+    assert.deepEqual(
+      db.prepare("SELECT id, version, updated_at FROM customers ORDER BY id").all(),
+      customerMetaBefore,
+    );
+
+    // Whitelist idempotence: a second run changes nothing at all.
+    const fullSnapshot = () => JSON.stringify(
+      ["customers", "opportunities", "action_items", "quick_records", "weekly_reports", "solution_drafts"]
+        .map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()),
+    );
+    const afterFirstApply = fullSnapshot();
+    apply(db);
+    assert.equal(fullSnapshot(), afterFirstApply);
+  } finally {
+    db.close();
+  }
 });
 
 test("rolls back every 0002 schema change when the module migration fails partway", () => {
@@ -1160,7 +1236,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029"],
       );
     } finally {
       db.close();

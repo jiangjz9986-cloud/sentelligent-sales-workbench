@@ -284,6 +284,56 @@ test("closes queued or leased draft messages when a newer decision supersedes th
   });
 });
 
+test("statusCounts reports per-status totals and the oldest queued availability", () => {
+  withDatabase((db) => {
+    const clock = makeClock("2026-08-29T01:00:00.000Z");
+    let sequence = 0;
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      maxAttempts: 1,
+      idFactory: () => `outbox-status-${++sequence}`,
+    });
+    assert.deepEqual(repository.statusCounts(), {
+      queued: 0, processing: 0, sent: 0, failed: 0, oldestQueuedAt: null,
+    });
+
+    const oldest = repository.enqueue({
+      owner: "owner-1", conversationId: "conversation-1",
+      idempotencyKey: "status-oldest", payload: { amountCents: 1 },
+    });
+    clock.advance(60_000);
+    repository.enqueue({
+      owner: "owner-1", conversationId: "conversation-1",
+      idempotencyKey: "status-second", payload: { amountCents: 2 },
+    });
+    repository.enqueue({
+      owner: "owner-1", conversationId: "conversation-1",
+      idempotencyKey: "status-third", payload: { amountCents: 3 },
+    });
+    // Oldest row moves to sent; the second becomes terminal failed; the third
+    // stays leased (processing). Only the untouched fourth remains queued.
+    const firstLease = repository.leaseNext({ renderMessage: () => "send" });
+    repository.ackSuccess(firstLease.item.id, { leaseToken: firstLease.leaseToken });
+    const secondLease = repository.leaseNext({ renderMessage: () => "fail" });
+    repository.ackFailure(secondLease.item.id, { leaseToken: secondLease.leaseToken, errorCode: "SEND_FAILED" });
+    const thirdLease = repository.leaseNext({ renderMessage: () => "hold" });
+    assert.ok(thirdLease);
+    clock.advance(30_000);
+    repository.enqueue({
+      owner: "owner-1", conversationId: "conversation-1",
+      idempotencyKey: "status-fourth", payload: { amountCents: 4 },
+    });
+
+    const counts = repository.statusCounts();
+    assert.equal(counts.sent, 1);
+    assert.equal(counts.failed, 1);
+    assert.equal(counts.processing, 1);
+    assert.equal(counts.queued, 1);
+    assert.equal(counts.oldestQueuedAt, "2026-08-29T01:01:30.000Z");
+    assert.equal(oldest.status, "queued");
+  });
+});
+
 test("worker client sends a rendered lease and always records an ack", async () => {
   await withDatabase(async (db) => {
     const clock = makeClock();

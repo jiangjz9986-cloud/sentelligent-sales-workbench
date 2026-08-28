@@ -206,6 +206,12 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (config.hospitalTenderSyncToken && !isStrongIndependentSecret(config.hospitalTenderSyncToken)) {
     throw new Error("HOSPITAL_TENDER_SYNC_TOKEN must contain at least 32 bytes of high-entropy data in production");
   }
+  if (config.opsAlertToken && !isStrongIndependentSecret(config.opsAlertToken)) {
+    throw new Error("OPS_ALERT_TOKEN must contain at least 32 bytes of high-entropy data in production");
+  }
+  if (config.amapMode === "mock") {
+    throw new Error("AMAP_MODE must not be mock in production");
+  }
   // An empty sender allowlist is an intentional unbound state during the
   // initial production rollout. The event boundary still rejects every
   // sender until an operator configures a real WeChat sender ID.
@@ -215,13 +221,15 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (config.weixinAllowedGroupIds.length > 0) {
     throw new Error("WEIXIN_ALLOWED_GROUP_IDS must be empty in production");
   }
-  if (new Set([
+  const independentSecrets = [
     config.authSessionSecret,
     config.settingsEncryptionKey,
     config.weixinAgentApiToken,
     config.assistantConfirmationSecret,
     ...(config.hospitalTenderSyncToken ? [config.hospitalTenderSyncToken] : []),
-  ]).size !== (config.hospitalTenderSyncToken ? 5 : 4)) {
+    ...(config.opsAlertToken ? [config.opsAlertToken] : []),
+  ];
+  if (new Set(independentSecrets).size !== independentSecrets.length) {
     throw new Error("Production session, settings, machine, and confirmation secrets must be independent");
   }
   if (!config.authCookieSecure) throw new Error("AUTH_COOKIE_SECURE must be true in production");
@@ -288,6 +296,10 @@ export function loadConfig(overrides = {}) {
     "HOSPITAL_TENDER_BATCH_SIZE",
     200,
   );
+  const amapMode = String(env.amapMode ?? env.AMAP_MODE ?? "live").trim().toLowerCase();
+  if (!["live", "mock"].includes(amapMode)) {
+    throw new Error("AMAP_MODE must be live or mock");
+  }
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
     port: Number(env.port ?? env.PORT ?? 8787),
@@ -370,6 +382,7 @@ export function loadConfig(overrides = {}) {
     ).trim(),
     amapWebServiceKey: String(env.amapWebServiceKey ?? env.AMAP_WEB_SERVICE_KEY ?? "").trim(),
     amapTimeoutMs,
+    amapMode,
     solutionWritesEnabled: booleanValue(
       env.solutionWritesEnabled ?? env.SOLUTION_WRITES_ENABLED,
       false,
@@ -394,6 +407,7 @@ export function loadConfig(overrides = {}) {
     hospitalTenderSyncToken: String(
       env.hospitalTenderSyncToken ?? env.HOSPITAL_TENDER_SYNC_TOKEN ?? "",
     ).trim(),
+    opsAlertToken: String(env.opsAlertToken ?? env.OPS_ALERT_TOKEN ?? "").trim(),
     hospitalTenderSyncOwner: String(
       env.hospitalTenderSyncOwner
       ?? env.HOSPITAL_TENDER_SYNC_OWNER
