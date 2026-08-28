@@ -100,7 +100,7 @@ describe("weixin sales workbench agent", () => {
     assert.match(preview.text, /待确认/);
     assert.match(preview.text, /日照中医医院/);
     assert.match(corrected.text, /已更新/);
-    assert.match(entered.text, /已录入系统/);
+    assert.match(entered.text, /【拜访记录已录入】/);
     assert.equal(calls[0].url, "https://sales.example.test/api/quick-records/preview");
     assert.equal(calls[1].url, "https://sales.example.test/api/quick-records/preview");
     assert.equal(calls[2].url, "https://sales.example.test/api/quick-records");
@@ -224,9 +224,9 @@ describe("weixin sales workbench agent", () => {
       sourceChannel: "wechat_text",
     });
     assert.equal(calls[2].url, "https://sales.example.test/api/quick-records/qr-weixin-1/analyze");
-    assert.match(reply.text, /已录入系统/);
+    assert.match(reply.text, /【拜访记录已录入】/);
     assert.match(reply.text, /日照中医医院/);
-    assert.match(reply.text, /qr-weixin-1/);
+    assert.match(reply.text, /ixin-1/);
   });
 
   it("uses WeChat voice transcription text as a voice quick record", async () => {
@@ -268,7 +268,7 @@ describe("weixin sales workbench agent", () => {
     assert.match(drafted.text, /已暂存/);
     assert.match(preview.text, /待确认/);
     assert.equal(payloads[0].sourceChannel, "wechat_voice");
-    assert.match(reply.text, /已录入系统/);
+    assert.match(reply.text, /【拜访记录已录入】/);
   });
 
   it("searches customers with a slash command instead of creating a new record", async () => {

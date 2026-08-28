@@ -98,8 +98,8 @@ describe("visit-capture.capture handler", () => {
     }, { ...context, actionId: "action-capture-1" });
 
     assert.equal(result.status, "recorded");
-    assert.match(result.text, /已录入，记录 ID：…ture-1/);
-    assert.match(result.text, /已挂接客户：日照中医医院/);
+    assert.match(result.text, /【拜访记录已录入】[\s\S]*ture-1/);
+    assert.match(result.text, /客户：日照中医医院/);
     const row = db.prepare("SELECT * FROM quick_records WHERE id = 'action-capture-1'").get();
     assert.equal(row.owner, OWNER);
     assert.equal(row.source_channel, "微信助手");
@@ -173,7 +173,7 @@ describe("visit-capture.search handler", () => {
       dateEnd: "2026-08-30",
     }, context);
     assert.equal(result.status, "ok");
-    assert.match(result.text, /找到 1 条记录/);
+    assert.match(result.text, /【拜访记录】/);
     assert.match(result.text, /日照中医医院/);
     assert.match(result.text, /已分析/);
     assert.match(result.text, /…aaa111/);
@@ -183,7 +183,7 @@ describe("visit-capture.search handler", () => {
   it("returns the friendly empty text", async () => {
     const result = await handlers["visit-capture.search"]({ query: "不存在" }, context);
     assert.equal(result.items.length, 0);
-    assert.match(result.text, /没有找到与“不存在”相关的记录/);
+    assert.match(result.text, /没有与“不存在”相关的记录/);
   });
 });
 
@@ -197,8 +197,7 @@ describe("visit-capture.update handler", () => {
       changes: { summaryPatch: { action: "周三前发对比材料给张主任" } },
     }, { ...context, actionId: "action-update-1" });
     assert.equal(result.status, "updated");
-    assert.match(result.text, /已更新记录 …date-1（v2）：建议动作已修改/);
-    assert.match(result.text, /不会自动回改/);
+    assert.match(result.text, /【拜访记录已更新】[\s\S]*date-1[\s\S]*建议动作已修改/);
     const audits = auditRows("quick_record.analysis.update");
     assert.equal(audits.length, 1);
     assert.equal(audits[0].metadata.source, "weixin-assistant");
@@ -256,7 +255,7 @@ describe("visit-capture.void handler", () => {
       expectedVersion: 1,
     }, { ...context, actionId: "action-void-1" });
     assert.equal(result.status, "voided");
-    assert.match(result.text, /已作废记录 …void-1/);
+    assert.match(result.text, /【拜访记录已作废】[\s\S]*void-1/);
     const row = db.prepare("SELECT voided_at, voided_by, void_reason, version FROM quick_records WHERE id = 'record-void-1'").get();
     assert.equal(row.voided_at, "2026-08-28T04:00:00.000Z");
     assert.equal(row.voided_by, OWNER);

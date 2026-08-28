@@ -170,12 +170,11 @@ describe("小小一天销售闭环 HTTP 验收矩阵", () => {
     const dashboard = await machineEvent("战情总览", `loop-${++sequence}-dashboard`);
     assert.equal(dashboard.response.status, 200);
     assert.match(dashboard.body.text, /战情总览/);
-    assert.match(dashboard.body.text, /客户 2/);
-    assert.match(dashboard.body.text, /商机 2/);
+    assert.match(dashboard.body.text, /客户：2/);
+    assert.match(dashboard.body.text, /商机：2/);
 
     const customer = await machineEvent("/customer.search 日照中医医院", `loop-${++sequence}-customer`);
     assert.equal(customer.response.status, 200);
-    assert.match(customer.body.text, /rizhao/);
     assert.match(customer.body.text, /日照中医医院/);
 
     const project = await machineEvent("项目分析 op-rizhao-plan", `loop-${++sequence}-project`);
@@ -192,7 +191,7 @@ describe("小小一天销售闭环 HTTP 验收矩阵", () => {
 
     const preview = await machineEvent("记录", `loop-${++sequence}-visit-preview`);
     assert.equal(preview.response.status, 200);
-    assert.match(preview.body.text, /待确认记录/);
+    assert.match(preview.body.text, /【小小提醒！新增一条拜访记录】/);
     assert.match(preview.body.text, /日照中医医院/);
 
     const pending = await machineEvent("录入", `loop-${++sequence}-visit-pending`);
@@ -204,7 +203,7 @@ describe("小小一天销售闭环 HTTP 验收矩阵", () => {
     const confirmed = await machineEvent(code, `loop-${++sequence}-visit-confirmed`);
     assert.equal(confirmed.response.status, 200);
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已录入系统/);
+    assert.match(confirmed.body.text, /【拜访记录已录入】/);
 
     const db = openDatabase({ databaseUrl });
     try {

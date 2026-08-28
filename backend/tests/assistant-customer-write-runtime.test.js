@@ -54,8 +54,7 @@ describe("customer write runtime handlers", () => {
     }, { ...context, actionId: "action-create-1" });
 
     assert.equal(result.status, "created");
-    assert.match(result.text, /已建档：莒县人民医院/);
-    assert.match(result.text, /action-create-1/);
+    assert.match(result.text, /【客户已建档】[\s\S]*莒县人民医院/);
     const row = db.prepare("SELECT * FROM customers WHERE id = 'action-create-1'").get();
     assert.equal(row.owner, OWNER);
     assert.equal(row.name, "莒县人民医院");
@@ -107,9 +106,9 @@ describe("customer write runtime handlers", () => {
     }, { ...context, actionId: "action-update-1" });
 
     assert.equal(result.status, "updated");
-    assert.match(result.text, /已更新：示例医院（v2）/);
-    assert.match(result.text, /级别 B→A/);
-    assert.match(result.text, /别名 （空）→示例人民医院/);
+    assert.match(result.text, /【客户已更新】[\s\S]*示例医院/);
+    assert.match(result.text, /级别：B → A/);
+    assert.match(result.text, /别名：空 → 示例人民医院/);
     const row = db.prepare("SELECT * FROM customers WHERE id = 'customer-u1'").get();
     assert.equal(row.level, "A");
     assert.equal(row.version, 2);
@@ -164,7 +163,7 @@ describe("customer write runtime handlers", () => {
     }, { ...context, actionId: "action-delete-1" });
 
     assert.equal(result.status, "deleted");
-    assert.match(result.text, /已删除（归档）：删除医院/);
+    assert.match(result.text, /【客户已归档】[\s\S]*删除医院/);
     const row = db.prepare("SELECT deleted_at, deleted_by, version FROM customers WHERE id = 'customer-d1'").get();
     assert.ok(row.deleted_at);
     assert.equal(row.deleted_by, OWNER);
@@ -221,11 +220,11 @@ describe("customer write runtime handlers", () => {
       requestId: "request-alias-detail",
     });
     assert.equal(detail.status, "ok");
-    assert.match(detail.text, /客户画像：日照市中医医院 \[customer-a1\]/);
+    assert.match(detail.text, /【客户画像】[\s\S]*日照市中医医院/);
     assert.match(detail.text, /联系人：张主任/);
     assert.match(detail.text, /预算：约300万/);
     assert.match(detail.text, /别名：日照中医院/);
     assert.match(detail.text, /标签：十五五、信创/);
-    assert.match(detail.text, /在办商机 0 个/);
+    assert.match(detail.text, /在办商机：0/);
   });
 });

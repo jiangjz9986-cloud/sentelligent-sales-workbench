@@ -248,7 +248,7 @@ describe("customer pending preview providers", () => {
       });
       assert.equal(preview.block, undefined);
       assert.deepEqual(preview.arguments, { name: "莒县人民医院", region: "日照", tags: ["信创"] });
-      assert.match(preview.previewText, /【客户建档待确认】/);
+      assert.match(preview.previewText, /【小小提醒！新建客户】/);
       assert.match(preview.previewText, /名称：莒县人民医院/);
       assert.doesNotMatch(preview.previewText, /\d{6}/);
 
@@ -282,7 +282,8 @@ describe("customer pending preview providers", () => {
       assert.equal(preview.arguments.expectedVersion, 3);
       assert.deepEqual(Object.keys(preview.arguments.changes).sort(), ["aliases", "level"]);
       assert.deepEqual(preview.arguments.changes.aliases, ["示例院区", "示例人民医院"]);
-      assert.match(preview.previewText, /【客户改档待确认】示例医院 \[customer-1\]（当前 v3）/);
+      assert.match(preview.previewText, /【小小提醒！修改客户】/);
+      assert.match(preview.previewText, /名称：示例医院/);
       assert.match(preview.previewText, /级别：重点 → 普通/);
       assert.doesNotMatch(preview.previewText, /区域/);
 
@@ -308,8 +309,7 @@ describe("customer pending preview providers", () => {
         serverData: directServerData,
       });
       assert.equal(ambiguous.block, true);
-      assert.match(ambiguous.text, /找到 2 个客户/);
-      assert.match(ambiguous.text, /customer-a/);
+      assert.match(ambiguous.text, /【找到多个客户】/);
 
       const missing = await providers["customer.update"]({
         arguments: { query: "不存在医院", changes: { level: "A" } },
@@ -339,9 +339,8 @@ describe("customer pending preview providers", () => {
       });
       assert.equal(preview.block, undefined);
       assert.deepEqual(preview.arguments, { customerId: "customer-1", expectedVersion: 3 });
-      assert.match(preview.previewText, /【客户删档待确认】/);
-      assert.match(preview.previewText, /关联商机 2 个将随档案一起隐藏/);
-      assert.match(preview.previewText, /请确认这不是误操作/);
+      assert.match(preview.previewText, /【小小提醒！删除客户】/);
+      assert.match(preview.previewText, /关联商机：2/);
     } finally {
       db.close();
     }

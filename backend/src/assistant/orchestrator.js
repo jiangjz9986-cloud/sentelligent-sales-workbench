@@ -5,6 +5,7 @@ import { createAgentRegistry } from "./agentRegistry.js";
 import { validateToolInvocation } from "./contracts.js";
 import { getToolPolicy } from "./policy.js";
 import { classifyWeixinConfirmationText } from "./weixinEvent.js";
+import { weixinCard } from "./weixinCard.js";
 
 const SAFE_FAILURE = "处理失败，请稍后重试。";
 const SAFE_CONFIRMATION_FAILURE = "确认信息无效或已过期，请重新发起操作。";
@@ -276,15 +277,13 @@ function persistBusinessContext(repository, context, update) {
 
 export function safePendingResponse(tool, { code, preview }) {
   const previewText = typeof preview === "string" && preview.trim() ? preview.trim() : null;
+  const footer = `确认码：${code}\n请回复这六位数字，或回复“取消”。`;
+  if (previewText) return { text: `${previewText}\n\n${footer}` };
   return {
-    text: [
-      ...(previewText ? [previewText, ""] : []),
-      `待确认操作：${tool.description}`,
-      `确认码：${code}`,
-      "有效期：10 分钟",
-      "请在同一微信会话中直接回复这六位数字；不要转发给其他会话。",
-      "回复“取消”可放弃本次操作，回复“重发确认码”可轮换确认码。",
-    ].join("\n"),
+    text: weixinCard("待确认", [
+      ["操作", tool.description],
+      ["确认码", code],
+    ], "请回复这六位数字，或回复“取消”。"),
   };
 }
 
@@ -294,12 +293,10 @@ export function safePendingResponse(tool, { code, preview }) {
 // TTL, lease, and audit chain stay identical to code-confirmed actions.
 export function safeAffirmPendingResponse(tool, { preview }) {
   const previewText = typeof preview === "string" && preview.trim() ? preview.trim() : null;
+  const footer = "请回复“确认”或“取消”。";
+  if (previewText) return { text: `${previewText}\n\n${footer}` };
   return {
-    text: [
-      ...(previewText ? [previewText, ""] : []),
-      `待确认操作：${tool.description}`,
-      "回复“确认”写入，回复“取消”放弃；10 分钟内有效。",
-    ].join("\n"),
+    text: weixinCard("待确认", [["操作", tool.description]], footer),
   };
 }
 

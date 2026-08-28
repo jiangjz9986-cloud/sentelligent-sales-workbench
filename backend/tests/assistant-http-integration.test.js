@@ -303,7 +303,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     assert.equal(preview.response.status, 200);
     assert.equal(preview.body.status, "ok");
-    assert.match(preview.body.text, /待确认记录/);
+    assert.match(preview.body.text, /【小小提醒！新增一条拜访记录】/);
 
     const pending = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
@@ -352,7 +352,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     assert.equal(confirmed.response.status, 200);
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已录入系统/);
+    assert.match(confirmed.body.text, /【拜访记录已录入】/);
   });
 
   it("reuses the action id when a visit write committed before its tool result", async () => {
@@ -434,7 +434,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       body: JSON.stringify(eventBody({ sourceMessageId: "restart-preview", text: "记录" })),
     });
     assert.equal(preview.response.status, 200);
-    assert.match(preview.body.text, /待确认记录/);
+    assert.match(preview.body.text, /【小小提醒！新增一条拜访记录】/);
   });
 
   it("completes the real remote adapter to HTTP event boundary", async () => {
@@ -734,7 +734,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       body: JSON.stringify(eventBody({ senderId: "sender-1", sourceMessageId: "sender-one-preview", text: "记录" })),
     });
     assert.equal(senderOnePreview.response.status, 200);
-    assert.match(senderOnePreview.body.text, /待确认记录/);
+    assert.match(senderOnePreview.body.text, /【小小提醒！新增一条拜访记录】/);
   });
 
   it("derives exact owner, channel, sender, chat, group, and conversation scope without persisting raw WeChat identities or codes", async () => {
@@ -796,7 +796,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       headers: eventHeaders("weixin:scope-direct-preview"),
       body: JSON.stringify(eventBody({ conversationId, senderId, sourceMessageId: "scope-direct-preview", text: "记录" })),
     });
-    assert.match(directPreview.body.text, /待确认记录/);
+    assert.match(directPreview.body.text, /【小小提醒！新增一条拜访记录】/);
     const pending = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin:scope-direct-pending"),

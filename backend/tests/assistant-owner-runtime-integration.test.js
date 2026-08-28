@@ -56,7 +56,7 @@ describe("assistant runtime business-owner wiring", () => {
     const body = await response.json();
 
     assert.equal(response.status, 200);
-    assert.match(body.text, /business-customer/);
+    assert.match(body.text, /业务归属医院/);
     assert.doesNotMatch(body.text, /未找到客户/);
   });
 

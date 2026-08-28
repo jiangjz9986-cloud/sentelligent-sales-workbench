@@ -431,7 +431,8 @@ describe("assistant bounded business snapshot adapter", () => {
       {},
     );
     assert.equal(result.items[0].id, "customer-a");
-    assert.match(result.text, /customer-a/);
+    assert.match(result.text, /A医院/);
+    assert.doesNotMatch(result.text, /customer-a/, "internal ids stay out of the reply card");
     assert.equal(result.items.some((item) => item.owner), false);
   });
 

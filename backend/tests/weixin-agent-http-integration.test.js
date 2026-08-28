@@ -58,7 +58,7 @@ describe("WeChat agent HTTP integration", () => {
       text: "记录",
     });
 
-    assert.match(preview.text, /待确认记录/);
+    assert.match(preview.text, /【小小提醒！新增一条拜访记录】/);
     assert.match(preview.text, /日照中医医院/);
   });
 });

@@ -179,7 +179,7 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     const collected = await send({ text: "拜访闭包测试医院，已和采购负责人确认下周方案沟通。" });
     assert.match(collected.reply.text, /已暂存/);
     const preview = await send({ text: "记录" });
-    assert.match(preview.reply.text, /待确认记录/);
+    assert.match(preview.reply.text, /【小小提醒！新增一条拜访记录】/);
     const pending = await send({ text: "录入" });
     assert.equal(pending.reply.status, "confirmation_required");
     assert.equal(Object.hasOwn(pending.reply, "confirmationCode"), false);
@@ -210,7 +210,7 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     const sendAfterRestart = createSend(restartedAgent, expectedDeliveryKey, deliveryState);
     const confirmed = await sendAfterRestart({ text: firstCode });
     assert.equal(confirmed.reply.status, "ok");
-    assert.match(confirmed.reply.text, /已录入系统/);
+    assert.match(confirmed.reply.text, /【拜访记录已录入】/);
 
     let db = openDatabase({ databaseUrl });
     try {
@@ -280,7 +280,7 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     await expectSafeRemoteConflict(sendAfterRestart({ text: scopedCode }));
     const renewed = await sendAfterRestart({ text: renewedCode });
     assert.equal(renewed.reply.status, "ok");
-    assert.match(renewed.reply.text, /已录入系统/);
+    assert.match(renewed.reply.text, /【拜访记录已录入】/);
 
     db = openDatabase({ databaseUrl });
     try {

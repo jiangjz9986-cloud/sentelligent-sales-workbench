@@ -1,4 +1,5 @@
 import { AssistantContractError } from "./contracts.js";
+import { weixinCard, weixinClip, weixinValue } from "./weixinCard.js";
 import { getAgentManifest } from "./agentManifest.js";
 import {
   countActiveOpportunities,
@@ -371,16 +372,12 @@ function displayValue(value, empty = "（空）") {
 }
 
 function candidateLines(matches) {
-  return matches.slice(0, 5).map((item) => `- ${item.name ?? "名称待确认"} [${item.id}] / ${item.region ?? "-"}`);
+  return matches.slice(0, 5).map((item, index) => [`${index + 1}`, `${item.name ?? "名称待确认"}  ${item.region ?? ""}`.trim()]);
 }
 
 function resolutionBlock(result, target) {
   if (result.status === "clarify") {
-    return block([
-      `找到 ${result.matches.length} 个客户，请确认：`,
-      ...candidateLines(result.matches),
-      "请用更完整名称或客户 ID 重试。",
-    ].join("\n"));
+    return block(weixinCard("找到多个客户", candidateLines(result.matches)));
   }
   if (result.status === "not_found" || !result.customer) {
     return block(`未找到客户：${target ?? "（未提供）"}。可发送“新建客户 ${target ?? "…"}，区域…，类型…”建档。`);
@@ -470,15 +467,17 @@ export function createCustomerPendingPreviewProviders({
       if (duplicate) {
         return block(`已存在同名客户 [${duplicate.id}]，如确需新建请在名称中加区分（如院区），或发送“修改客户 ${duplicate.name}，…”直接更新现有档案。`);
       }
-      const previewText = [
-        "【客户建档待确认】",
-        `名称：${fields.name}`,
-        `区域：${displayValue(fields.region, "待补充")} ｜ 类型：${displayValue(fields.type, "待补充")} ｜ 级别：${displayValue(fields.level, "待补充")}`,
-        `联系人：${displayValue(fields.contact, "待补充")} ｜ 预算：${displayValue(fields.budget, "待补充")}`,
-        `别名：${displayValue(fields.aliases, "无")} ｜ 标签：${displayValue(fields.tags, "无")}`,
-        ...(fields.summary ? [`摘要：${fields.summary.slice(0, 200)}`] : []),
-        "未填字段确认后可发送“修改客户 …”补充。",
-      ].join("\n");
+      const previewText = weixinCard("小小提醒！新建客户", [
+        ["名称", fields.name],
+        ["区域", fields.region || "待补充"],
+        ["类型", fields.type || "待补充"],
+        ["级别", fields.level || "待补充"],
+        ["联系人", fields.contact || "待补充"],
+        ["预算", fields.budget || "待补充"],
+        ["别名", weixinValue(fields.aliases, "无")],
+        ["标签", weixinValue(fields.tags, "无")],
+        ...(fields.summary ? [["摘要", weixinClip(fields.summary, 80)]] : []),
+      ]);
       return {
         arguments: fields,
         previewText,
@@ -510,13 +509,13 @@ export function createCustomerPendingPreviewProviders({
         return block("内容与现有档案一致，无需修改。");
       }
       const changesToApply = Object.fromEntries(preview.changedFields.map((key) => [key, preview.after[key]]));
-      const previewText = [
-        `【客户改档待确认】${result.customer.name ?? "客户"} [${result.customer.id}]（当前 v${preview.expectedVersion}）`,
+      const previewText = weixinCard("小小提醒！修改客户", [
+        ["名称", result.customer.name],
         ...preview.changedFields.map((key) => (
-          `${FIELD_LABELS[key] ?? key}：${displayValue(preview.before[key])} → ${displayValue(preview.after[key])}`
+          [FIELD_LABELS[key] ?? key, `${displayValue(preview.before[key])} → ${displayValue(preview.after[key])}`]
         )),
-        `不支持的字段：${rejectedLabels.length > 0 ? `${rejectedLabels.join("、")}（请在系统网页中修改）` : "无"}`,
-      ].join("\n");
+        ...(rejectedLabels.length > 0 ? [["未改", `${rejectedLabels.join("、")}（请在网页改）`]] : []),
+      ]);
       return {
         arguments: {
           customerId: result.customer.id,
@@ -539,14 +538,13 @@ export function createCustomerPendingPreviewProviders({
       if (resolution.blocked) return resolution.blocked;
       const customer = resolution.result.customer;
       const opportunityCount = countActiveOpportunities(db, customer.id);
-      const previewText = [
-        `【客户删档待确认】${customer.name ?? "客户"} [${customer.id}]（当前 v${customer.version}）`,
-        `区域：${displayValue(customer.region, "-")} ｜ 类型：${displayValue(customer.type, "-")} ｜ 级别：${displayValue(customer.level, "-")}`,
-        opportunityCount > 0
-          ? `关联商机 ${opportunityCount} 个将随档案一起隐藏（软删除，可由管理员恢复）。`
-          : "当前没有关联商机（软删除，可由管理员恢复）。",
-        "请确认这不是误操作。",
-      ].join("\n");
+      const previewText = weixinCard("小小提醒！删除客户", [
+        ["名称", customer.name],
+        ["区域", customer.region || "-"],
+        ["类型", customer.type || "-"],
+        ["级别", customer.level || "-"],
+        ["关联商机", opportunityCount],
+      ]);
       return {
         arguments: {
           customerId: customer.id,

@@ -149,8 +149,8 @@ describe("quick-record agent HTTP boundary", () => {
     assert.equal(pending.body.toolName, "visit-capture.capture");
     assert.equal(pending.body.risk, "R1");
     assert.equal(Object.hasOwn(pending.body, "confirmationCode"), false, "no confirmationCode key for affirm actions");
-    assert.match(pending.body.text, /【拜访记录待确认】/);
-    assert.match(pending.body.text, /回复“确认”写入，回复“取消”放弃；10 分钟内有效。/);
+    assert.match(pending.body.text, /【小小提醒！新增一条拜访记录】/);
+    assert.match(pending.body.text, /请回复“确认”或“取消”。/);
     assert.equal(/(?<!\d)\d{6}(?!\d)/u.test(pending.body.text), false, "no six-digit code in the affirm card");
     assert.match(pending.body.text, /客户：日照中医医院/);
     assert.match(pending.body.text, /时间：2026-08-28/);
@@ -165,8 +165,8 @@ describe("quick-record agent HTTP boundary", () => {
     });
     assert.equal(confirmed.response.status, 200);
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已录入，记录 ID：…/);
-    assert.match(confirmed.body.text, /已挂接客户：日照中医医院/);
+    assert.match(confirmed.body.text, /【拜访记录已录入】/);
+    assert.match(confirmed.body.text, /客户：日照中医医院/);
 
     withDb((db) => {
       const row = db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: pending.body.actionId });
@@ -249,7 +249,7 @@ describe("quick-record agent HTTP boundary", () => {
       text: "重发确认码",
     });
     assert.equal(resent.body.status, "confirmation_required");
-    assert.match(resent.body.text, /【拜访记录待确认】/);
+    assert.match(resent.body.text, /【小小提醒！新增一条拜访记录】/);
     assert.equal(Object.hasOwn(resent.body, "confirmationCode"), false);
 
     const confirmed = await send("capture-guide-confirm", {
@@ -270,7 +270,7 @@ describe("quick-record agent HTTP boundary", () => {
     });
     assert.equal(result.response.status, 200);
     assert.equal(result.body.status, "ok");
-    assert.match(result.body.text, /找到 1 条记录/);
+    assert.match(result.body.text, /【拜访记录】/);
     assert.match(result.body.text, /日照中医医院/);
     assert.match(result.body.text, /…aaa111/);
     withDb((db) => {
@@ -287,7 +287,7 @@ describe("quick-record agent HTTP boundary", () => {
     assert.equal(pending.response.status, 200);
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.toolName, "visit-capture.update");
-    assert.match(pending.body.text, /【拜访记录修改待确认】/);
+    assert.match(pending.body.text, /【小小提醒！修改拜访记录】/);
     assert.match(pending.body.text, /原始建议/);
     assert.match(pending.body.text, /周三前发对比材料给张主任/);
     const code = confirmationCodeFrom(pending.body.text);
@@ -297,7 +297,7 @@ describe("quick-record agent HTTP boundary", () => {
       text: code,
     });
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已更新记录 …bbb222（v2）：建议动作已修改/);
+    assert.match(confirmed.body.text, /【拜访记录已更新】[\s\S]*bbb222/);
     withDb((db) => {
       const analysis = JSON.parse(db.prepare("SELECT analysis_json FROM ai_insights WHERE id = 'insight-record-update-bbb222'").get().analysis_json);
       assert.equal(analysis.summary.action.text, "周三前发对比材料给张主任");
@@ -344,7 +344,7 @@ describe("quick-record agent HTTP boundary", () => {
       text: "重发确认码",
     });
     assert.equal(renewed.body.status, "confirmation_required");
-    assert.match(renewed.body.text, /【拜访记录修改待确认】/, "resend repeats the stored preview");
+    assert.match(renewed.body.text, /【小小提醒！修改拜访记录】/, "resend repeats the stored preview");
     const secondCode = confirmationCodeFrom(renewed.body.text);
     assert.notEqual(secondCode, firstCode);
     const stale = await send("renew-stale", {
@@ -368,8 +368,8 @@ describe("quick-record agent HTTP boundary", () => {
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.toolName, "visit-capture.void");
     assert.equal(pending.body.risk, "R3");
-    assert.match(pending.body.text, /【拜访记录作废待确认】/);
-    assert.match(pending.body.text, /不再出现在记录列表、周报素材与项目分析中/);
+    assert.match(pending.body.text, /【小小提醒！作废拜访记录】/);
+    assert.match(pending.body.text, /状态：已分析/);
     const code = confirmationCodeFrom(pending.body.text);
 
     const confirmed = await send("void-confirm", {
@@ -377,7 +377,7 @@ describe("quick-record agent HTTP boundary", () => {
       text: code,
     });
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已作废记录 …ddd444/);
+    assert.match(confirmed.body.text, /【拜访记录已作废】[\s\S]*ddd444/);
     withDb((db) => {
       const row = db.prepare("SELECT voided_at, voided_by, void_reason, version FROM quick_records WHERE id = 'record-void-ddd444'").get();
       assert.ok(row.voided_at, "voided_at is finally written");
@@ -390,7 +390,7 @@ describe("quick-record agent HTTP boundary", () => {
       conversationId: "conversation-void-1",
       text: "最近的拜访记录",
     });
-    assert.match(search.body.text, /没有找到/, "the voided record is invisible to search");
+    assert.match(search.body.text, /没有记录/, "the voided record is invisible to search");
   });
 
   it("rejects quick-record writes from group chats", async () => {
@@ -443,7 +443,7 @@ describe("quick-record agent HTTP boundary", () => {
     assert.equal(pending.response.status, 200);
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.toolName, "visit-capture.capture");
-    assert.match(pending.body.text, /【拜访记录待确认】/, "capture text must reach the router, not the draft clarify");
+    assert.match(pending.body.text, /【小小提醒！新增一条拜访记录】/, "capture text must reach the router, not the draft clarify");
 
     // T-BK-1: an unquoted 确认 confirms the capture (the non-bookkeeping
     // pending action), not the bookkeeping draft.
@@ -452,7 +452,7 @@ describe("quick-record agent HTTP boundary", () => {
       text: "确认",
     });
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已录入，记录 ID：…/);
+    assert.match(confirmed.body.text, /【拜访记录已录入】/);
     withDb((db) => {
       assert.ok(db.prepare("SELECT id FROM quick_records WHERE id = $id").get({ $id: pending.body.actionId }));
       assert.equal(

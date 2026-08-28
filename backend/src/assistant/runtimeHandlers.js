@@ -31,6 +31,7 @@ import {
   extractBookkeepingRows,
 } from "./bookkeepingCapture.js";
 import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
+import { weixinCard, weixinClip, weixinShortId, weixinValue } from "./weixinCard.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
 const FINANCIAL_SCOPE_DENIED = "该财务预览仅限已绑定账号本人的微信私聊。";
@@ -78,15 +79,15 @@ function draftText(sessionRepository, context) {
 function previewText(analysis) {
   const customer = safeText(
     analysis?.customerCandidate?.id ? analysis.customerCandidate.name : analysis?.customer?.value,
-    "待匹配客户",
+    "待匹配",
   );
   const opportunity = safeText(
     analysis?.opportunityCandidate?.id ? analysis.opportunityCandidate.name : analysis?.opportunity?.value,
-    "待确认商机",
+    "待确认",
   );
-  const request = safeText(analysis?.summary?.request?.text, "待补充");
-  const risk = safeText(analysis?.summary?.risk?.text, "待确认");
-  const action = safeText(analysis?.summary?.action?.text, "待确认");
+  const request = weixinClip(analysis?.summary?.request?.text, 80, "待补充");
+  const risk = weixinClip(analysis?.summary?.risk?.text, 80, "无");
+  const action = weixinClip(analysis?.summary?.action?.text, 80, "待确认");
   const customerCandidate = analysis?.customerCandidate;
   const opportunityCandidate = analysis?.opportunityCandidate;
   const candidateLine = [
@@ -95,18 +96,26 @@ function previewText(analysis) {
     customerCandidate?.status === "unknown" ? "客户待匹配" : null,
     opportunityCandidate?.status === "unknown" ? "商机待匹配" : null,
   ].filter(Boolean).join("；");
-  return [
-    "待确认记录：",
-    `客户：${customer}`,
-    `商机：${opportunity}`,
-    `诉求：${request.slice(0, 160)}`,
-    `风险：${risk.slice(0, 160)}`,
-    `建议：${action.slice(0, 160)}`,
-    ...(candidateLine ? [`候选校验：${candidateLine}`] : []),
-    ...(analysis?.runId ? [`运行记录：${analysis.runId}`] : []),
-    "",
-    "确认无误后回复“录入”，再使用返回的确认码完成写入。",
-  ].join("\n");
+  return weixinCard("小小提醒！新增一条拜访记录", [
+    ["客户", customer],
+    ["商机", opportunity],
+    ["诉求", request],
+    ["风险", risk],
+    ["建议", action],
+    ...(candidateLine ? [["校验", candidateLine]] : []),
+  ], "确认无误请回复“录入”。");
+}
+
+function quickCaptureReceipt(record, insight, db) {
+  const customerName = record.customerId
+    ? db.prepare("SELECT name FROM customers WHERE id = $id").get({ $id: record.customerId })?.name ?? null
+    : null;
+  const actionText = weixinClip(insight?.summary?.action?.text, 60, "");
+  return weixinCard("拜访记录已录入", [
+    ["编号", weixinShortId(record.id)],
+    ["客户", customerName || "未匹配"],
+    ...(actionText ? [["建议", actionText]] : []),
+  ]);
 }
 
 function quickRecordFromRow(row) {
@@ -124,21 +133,6 @@ function quickRecordFromRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
-}
-
-function quickCaptureReceipt(record, insight, db) {
-  const customerName = record.customerId
-    ? db.prepare("SELECT name FROM customers WHERE id = $id").get({ $id: record.customerId })?.name ?? record.customerId
-    : null;
-  const actionText = safeText(insight?.summary?.action?.text);
-  return [
-    `已录入，记录 ID：…${record.id.slice(-6)}。`,
-    customerName
-      ? `已挂接客户：${customerName}；AI 分析已保存。`
-      : "未自动挂接客户（分析未唯一匹配）；AI 分析已保存。",
-    ...(actionText ? [`建议待办“${actionText.slice(0, 60)}”可在系统确认页写回客户/商机与待办。`] : []),
-    "后续可发“最近的记录”查看，或“把那条记录的下一步改成…”修改。",
-  ].join("\n");
 }
 
 function insightFromRow(row) {
@@ -430,8 +424,9 @@ function settlementPreviewText(result) {
 }
 
 function ambiguousEntityResult(label, items) {
+  const names = items.slice(0, 5).map((item) => item.name).filter(Boolean);
   return {
-    text: `找到多个${label}，请补充更具体的名称或内部标识：${items.slice(0, 5).map((item) => item.name).filter(Boolean).join("、")}`,
+    text: weixinCard(`找到多个${label}`, names.map((name, index) => [`${index + 1}`, name])),
     status: "clarify",
     question: `请确认要查看哪个${label}。`,
     items,
@@ -844,12 +839,15 @@ export function createAssistantToolHandlers({
       };
       const counts = summary.counts;
       return {
-        text: [
-          `战情总览（截至 ${summary.asOf}）：`,
-          `客户 ${counts.customers}，商机 ${counts.opportunities}`,
-          `未完成动作 ${counts.openActions}，活跃风险 ${counts.activeRisks}`,
-          `待执行行程 ${counts.upcomingItineraries}，本周差旅 ${counts.currentWeekExpenses} 笔`,
-        ].join("\n"),
+        text: weixinCard("战情总览", [
+          ["截至", summary.asOf],
+          ["客户", counts.customers],
+          ["商机", counts.opportunities],
+          ["待办", counts.openActions],
+          ["风险", counts.activeRisks],
+          ["行程", counts.upcomingItineraries],
+          ["本周差旅", `${counts.currentWeekExpenses} 笔`],
+        ]),
         status: "ok",
         summary,
         dashboardResult: result,
@@ -879,19 +877,20 @@ export function createAssistantToolHandlers({
         runId: result.runId,
       };
       const customer = result.customer;
-      const listText = (items) => (Array.isArray(items) && items.length > 0 ? items.join("、") : null);
       const opportunityCount = countActiveOpportunities(db, customer.id);
       return {
-        text: [
-          `客户画像：${customer.name ?? "名称待确认"} [${customer.id}]`,
-          `区域：${customer.region ?? "待补充"} ｜ 类型：${customer.type ?? "待补充"} ｜ 级别：${customer.level ?? "待补充"}`,
-          `联系人：${customer.contact ?? "待补充"}`,
-          `预算：${customer.budget ?? "待补充"}`,
-          `别名：${listText(customer.aliases) ?? "无"} ｜ 标签：${listText(customer.tags) ?? "无"}`,
-          ...(customer.summary ? [`摘要：${customer.summary.slice(0, 300)}`] : []),
-          `在办商机 ${opportunityCount} 个；更新时间：${customer.updatedAt ?? "待确认"}`,
-          "（未录入的字段不会猜测，可发送“修改客户 …”补充。）",
-        ].join("\n"),
+        text: weixinCard("客户画像", [
+          ["名称", customer.name],
+          ["区域", customer.region || "待补充"],
+          ["类型", customer.type || "待补充"],
+          ["级别", customer.level || "待补充"],
+          ["联系人", customer.contact || "待补充"],
+          ["预算", customer.budget || "待补充"],
+          ["别名", weixinValue(customer.aliases, "无")],
+          ["标签", weixinValue(customer.tags, "无")],
+          ...(customer.summary ? [["摘要", weixinClip(customer.summary, 80)]] : []),
+          ["在办商机", opportunityCount],
+        ]),
         status: "ok",
         customer,
         customerResult: result,
@@ -914,7 +913,10 @@ export function createAssistantToolHandlers({
       const existing = getActiveCustomer(db, customerId);
       if (existing) {
         return {
-          text: `已建档：${existing.name}（ID：${existing.id}，v${existing.version}）。发送“客户详情 ${existing.id}”可查看。`,
+          text: weixinCard("客户已建档", [
+            ["名称", existing.name],
+            ["编号", weixinShortId(existing.id)],
+          ]),
           status: "created",
           customer: existing,
           replayed: true,
@@ -959,10 +961,12 @@ export function createAssistantToolHandlers({
         return item;
       });
       return {
-        text: [
-          `已建档：${created.name}（ID：${created.id}，v${created.version}）。`,
-          `发送“客户详情 ${created.id}”可查看；后续可发送“修改客户 …”补充画像。`,
-        ].join("\n"),
+        text: weixinCard("客户已建档", [
+          ["名称", created.name],
+          ["区域", created.region || "待补充"],
+          ["类型", created.type || "待补充"],
+          ["级别", created.level || "待补充"],
+        ]),
         status: "created",
         customer: created,
         contextUpdate: {
@@ -1022,17 +1026,17 @@ export function createAssistantToolHandlers({
         }
         throw error;
       }
-      const describe = (value) => (Array.isArray(value)
-        ? (value.length > 0 ? value.join("、") : "（空）")
-        : (typeof value === "string" && value.trim() ? value.trim() : "（空）"));
       const fieldLabels = {
         name: "名称", region: "区域", type: "类型", level: "级别",
         contact: "联系人", budget: "预算", summary: "摘要", aliases: "别名", tags: "标签",
       };
       const changeLines = Object.keys(changes)
-        .map((key) => `${fieldLabels[key] ?? key} ${describe(before[key])}→${describe(updated[key])}`);
+        .map((key) => [fieldLabels[key] ?? key, `${weixinValue(before[key], "空")} → ${weixinValue(updated[key], "空")}`]);
       return {
-        text: `已更新：${updated.name}（v${updated.version}）。${changeLines.join("；")}。`,
+        text: weixinCard("客户已更新", [
+          ["名称", updated.name],
+          ...changeLines,
+        ]),
         status: "updated",
         customer: updated,
         contextUpdate: {
@@ -1080,7 +1084,7 @@ export function createAssistantToolHandlers({
         throw error;
       }
       return {
-        text: `已删除（归档）：${deleted.name}。原关联商机已随档案隐藏；如需恢复请联系管理员。`,
+        text: weixinCard("客户已归档", [["名称", deleted.name]]),
         status: "deleted",
         customer: deleted,
         contextUpdate: {
@@ -1121,13 +1125,13 @@ export function createAssistantToolHandlers({
       };
       const opportunity = result.opportunity;
       return {
-        text: [
-          `商机：${opportunity.name ?? "名称待确认"}`,
-          `阶段：${opportunity.stage ?? "待确认"}`,
-          `金额：${opportunity.amount ?? "待确认"}`,
-          `成交概率：${opportunity.probability === null ? "待确认" : `${opportunity.probability}%`}`,
-          `下一步：${opportunity.next ?? "待补充"}`,
-        ].join("\n"),
+        text: weixinCard("商机", [
+          ["名称", opportunity.name],
+          ["阶段", opportunity.stage || "待确认"],
+          ["金额", opportunity.amount || "待确认"],
+          ["成交概率", opportunity.probability === null ? "待确认" : `${opportunity.probability}%`],
+          ["下一步", opportunity.next || "待补充"],
+        ]),
         status: "ok",
         opportunity,
         opportunityResult: result,
@@ -1318,7 +1322,7 @@ export function createAssistantToolHandlers({
             // Recovery remains idempotent even if draft cleanup is retried later.
           }
           return {
-            text: `已录入系统，记录 ID：${existing.id}\nAI 分析已保存，可在系统内人工确认客户、商机和行动。`,
+            text: weixinCard("拜访记录已录入", [["编号", weixinShortId(existing.id)]]),
             status: "recorded",
             record: existing,
             insight,
@@ -1410,7 +1414,7 @@ export function createAssistantToolHandlers({
         // A completed business record remains valid even if draft cleanup is retried later.
       }
       return {
-        text: `已录入系统，记录 ID：${persisted.record.id}\nAI 分析已保存，可在系统内人工确认客户、商机和行动。`,
+        text: weixinCard("拜访记录已录入", [["编号", weixinShortId(persisted.record.id)]]),
         status: "recorded",
         record: persisted.record,
         insight: persisted.insight,
@@ -1566,27 +1570,33 @@ export function createAssistantToolHandlers({
       const rangeLabel = dateStart && dateEnd ? `${dateStart} ~ ${dateEnd}` : "近期";
       if (items.length === 0) {
         return {
-          text: `${rangeLabel}没有找到${query ? `与“${query}”相关的` : ""}记录。可发送“最近的记录”查看全部。`,
+          text: weixinCard("拜访记录", [
+            ["范围", rangeLabel],
+            ["结果", query ? `没有与“${query}”相关的记录` : "没有记录"],
+          ]),
           status: "ok",
           items: [],
           truncated: false,
         };
       }
       const statusLabels = { recorded: "待分析", analyzed: "已分析", confirmed: "已确认" };
-      const lines = [
-        `找到 ${items.length}${truncated ? "+" : ""} 条记录（${rangeLabel}${query ? `，关键词：${query}` : ""}）：`,
-        ...items.map((item, index) => {
-          const date = (item.occurredAt ?? item.createdAt ?? "").slice(5, 10) || "日期待确认";
-          const customer = item.customerName ?? "（未挂客户）";
-          const excerptText = String(item.rawContent ?? "").replace(/\s+/gu, " ").trim().slice(0, 60);
-          return `${index + 1}. ${date} ${customer} ｜ ${statusLabels[item.status] ?? item.status} ｜ …${item.id.slice(-6)}\n   ${excerptText}`;
-        }),
-        ...(truncated ? ["还有更多记录未展示，请补充客户名或缩小时间范围。"] : []),
-        "发送“把记录 <编号后6位> 的下一步改成…”可修改；“作废记录 <编号后6位>”可作废。",
-      ];
       const onlyCustomerId = items.length === 1 ? items[0].customerId : null;
+      const lines = items.flatMap((item, index) => {
+        const date = (item.occurredAt ?? item.createdAt ?? "").slice(5, 10) || "待确认";
+        const customer = item.customerName ?? "未挂客户";
+        return [
+          [`${index + 1}`, `${date}  ${customer}`],
+          ["   编号", weixinShortId(item.id)],
+          ["   状态", statusLabels[item.status] ?? item.status],
+          ["   摘要", weixinClip(item.rawContent, 40)],
+        ];
+      });
       return {
-        text: lines.join("\n"),
+        text: weixinCard("拜访记录", [
+          ["范围", `${rangeLabel}${query ? ` · ${query}` : ""}`],
+          ...lines,
+          ...(truncated ? [["提示", "还有更多，请补客户名或缩小时间"]] : []),
+        ]),
         status: "ok",
         items,
         truncated,
@@ -1701,10 +1711,10 @@ export function createAssistantToolHandlers({
         throw error;
       }
       return {
-        text: [
-          `已更新记录 …${result.record.id.slice(-6)}（v${result.record.version}）：${changedParts.join("；")}。`,
-          "注意：已进入周报草稿或已确认写回的内容不会自动回改。",
-        ].join("\n"),
+        text: weixinCard("拜访记录已更新", [
+          ["编号", weixinShortId(result.record.id)],
+          ["变更", changedParts.join("；")],
+        ]),
         status: "updated",
         record: result.record,
         ...(result.analysis ? { analysis: result.analysis } : {}),
@@ -1760,10 +1770,9 @@ export function createAssistantToolHandlers({
         throw error;
       }
       return {
-        text: [
-          `已作废记录 …${voided.after.id.slice(-6)}。该记录不再出现在记录列表、周报素材与项目分析中。`,
-          "已确认写回客户/商机的内容不会回退；如需恢复请联系管理员。",
-        ].join("\n"),
+        text: weixinCard("拜访记录已作废", [
+          ["编号", weixinShortId(voided.after.id)],
+        ]),
         status: "voided",
         record: voided.after,
       };
@@ -1782,11 +1791,13 @@ export function createAssistantToolHandlers({
       const items = result.matches ?? [];
       const truncated = result.truncated === true;
       const text = items.length === 0
-        ? `未找到客户：${query || "（未提供关键词）"}`
-        : [
-          `找到 ${items.length}${truncated ? "+" : ""} 个客户：`,
-          ...items.map((item) => `- ${item.name ?? "名称待确认"} [${item.id}] / ${item.region ?? "-"}`),
-        ].join("\n");
+        ? weixinCard("客户", [
+          ["结果", `未找到客户：${query || "未提供关键词"}`],
+        ])
+        : weixinCard("客户", items.map((item, index) => [
+          `${index + 1}`,
+          `${item.name ?? "名称待确认"}  ${item.region ?? ""}`.trim(),
+        ]));
       return {
         text,
         status: "ok",

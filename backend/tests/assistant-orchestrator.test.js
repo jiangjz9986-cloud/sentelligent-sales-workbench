@@ -287,11 +287,11 @@ describe("assistant orchestrator", () => {
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.confirmationCode, "482913");
     assert.equal(pending.body.text, [
-      "待确认操作：确认写入拜访记录",
+      "【待确认】",
+      "操作：确认写入拜访记录",
       "确认码：482913",
-      "有效期：10 分钟",
-      "请在同一微信会话中直接回复这六位数字；不要转发给其他会话。",
-      "回复“取消”可放弃本次操作，回复“重发确认码”可轮换确认码。",
+      "",
+      "请回复这六位数字，或回复“取消”。",
     ].join("\n"));
     assert.equal(calls, 0);
     assert.equal(JSON.stringify([...runtime.events.values()]).includes("482913"), false);
@@ -763,11 +763,11 @@ describe("assistant orchestrator", () => {
     });
     const pending = await orchestrator.handle({ context, input: { text: "save" } });
     assert.equal(pending.body.text, [
-      "待确认操作：确认写入拜访记录",
+      "【待确认】",
+      "操作：确认写入拜访记录",
       "确认码：482913",
-      "有效期：10 分钟",
-      "请在同一微信会话中直接回复这六位数字；不要转发给其他会话。",
-      "回复“取消”可放弃本次操作，回复“重发确认码”可轮换确认码。",
+      "",
+      "请回复这六位数字，或回复“取消”。",
     ].join("\n"));
     assert.equal(Object.hasOwn(runtime.pending.get(pending.body.actionId).payload, "preview"), false);
   });
@@ -981,7 +981,7 @@ describe("affirm-language confirmations (v0.7.3)", () => {
     assert.equal(response.body.status, "confirmation_required");
     assert.equal(Object.hasOwn(response.body, "confirmationCode"), false, "no code key in the live body");
     assert.match(response.body.text, /【拜访记录待确认】/);
-    assert.match(response.body.text, /回复“确认”写入，回复“取消”放弃；10 分钟内有效。/);
+    assert.match(response.body.text, /请回复“确认”或“取消”。/);
     assert.equal(/(?<!\d)\d{6}(?!\d)/u.test(response.body.text), false, "no six-digit code in the live text");
     const stored = [...runtime.events.values()][0];
     assert.deepEqual(stored.response, response.body, "stored body equals public body, nothing to scrub");
@@ -1047,7 +1047,7 @@ describe("affirm-language confirmations (v0.7.3)", () => {
     });
     assert.equal(resent.body.status, "confirmation_required");
     assert.match(resent.body.text, /【拜访记录待确认】/, "resend replays the preview card");
-    assert.match(resent.body.text, /回复“确认”写入/);
+    assert.match(resent.body.text, /请回复“确认”或“取消”。/);
     assert.equal(Object.hasOwn(resent.body, "confirmationCode"), false);
 
     const stillConfirmable = await orchestrator.handle({

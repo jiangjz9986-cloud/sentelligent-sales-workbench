@@ -148,7 +148,7 @@ describe("wired sales loop assistant runtime", () => {
     const searchMessageId = `runtime-${++sequence}-customer-search`;
     const search = await event("/customer.search 运行时医院", searchMessageId);
     assert.equal(search.response.status, 200);
-    assert.match(search.body.text, /customer-runtime/);
+    assert.match(search.body.text, /运行时医院/);
 
     db = openDatabase({ databaseUrl });
     runs = db.prepare(`
@@ -442,7 +442,8 @@ describe("wired sales loop assistant runtime", () => {
     const dashboardMessageId = `runtime-${++sequence}-dashboard`;
     const dashboard = await event("/dashboard.summary", dashboardMessageId);
     assert.equal(dashboard.response.status, 200);
-    assert.match(dashboard.body.text, /客户 1，商机 1/);
+    assert.match(dashboard.body.text, /客户：1/);
+    assert.match(dashboard.body.text, /商机：1/);
 
     let db = openDatabase({ databaseUrl });
     const runs = db.prepare(`
@@ -477,7 +478,7 @@ describe("wired sales loop assistant runtime", () => {
 
     const preview = await event("记录", `runtime-${++sequence}-visit-preview`);
     assert.equal(preview.response.status, 200);
-    assert.match(preview.body.text, /待确认记录/);
+    assert.match(preview.body.text, /【小小提醒！新增一条拜访记录】/);
 
     let db = openDatabase({ databaseUrl });
     let runs = db.prepare(`
@@ -509,7 +510,7 @@ describe("wired sales loop assistant runtime", () => {
 
     const confirmed = await event(code, `runtime-${++sequence}-visit-confirm-code`);
     assert.equal(confirmed.response.status, 200);
-    assert.match(confirmed.body.text, /已录入系统/);
+    assert.match(confirmed.body.text, /【拜访记录已录入】/);
 
     db = openDatabase({ databaseUrl });
     runs = db.prepare(`

@@ -122,7 +122,7 @@ describe("customer profile agent HTTP boundary", () => {
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.toolName, "customer.create");
     assert.equal(pending.body.risk, "R2");
-    assert.match(pending.body.text, /【客户建档待确认】/);
+    assert.match(pending.body.text, /【小小提醒！新建客户】/);
     assert.match(pending.body.text, /名称：莒县人民医院/);
     const code = confirmationCodeFrom(pending.body.text);
 
@@ -138,7 +138,7 @@ describe("customer profile agent HTTP boundary", () => {
     });
     assert.equal(confirmed.response.status, 200);
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已建档：莒县人民医院/);
+    assert.match(confirmed.body.text, /【客户已建档】[\s\S]*莒县人民医院/);
 
     withDb((db) => {
       const row = db.prepare("SELECT * FROM customers WHERE name = '莒县人民医院'").get();
@@ -161,7 +161,7 @@ describe("customer profile agent HTTP boundary", () => {
       conversationId: "conversation-create-1",
       text: `客户详情 ${pending.body.actionId}`,
     });
-    assert.match(detail.body.text, /客户画像：莒县人民医院/);
+    assert.match(detail.body.text, /【客户画像】[\s\S]*莒县人民医院/);
     assert.match(detail.body.text, /标签：信创/);
   });
 
@@ -172,7 +172,7 @@ describe("customer profile agent HTTP boundary", () => {
     });
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.toolName, "customer.update");
-    assert.match(pending.body.text, /【客户改档待确认】日照市中医医院 \[customer-seeded-1\]（当前 v1）/);
+    assert.match(pending.body.text, /【小小提醒！修改客户】[\s\S]*日照市中医医院/);
     assert.match(pending.body.text, /级别：A → B/);
     const code = confirmationCodeFrom(pending.body.text);
 
@@ -181,7 +181,7 @@ describe("customer profile agent HTTP boundary", () => {
       text: code,
     });
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已更新：日照市中医医院（v2）/);
+    assert.match(confirmed.body.text, /【客户已更新】[\s\S]*日照市中医医院/);
     withDb((db) => {
       const row = db.prepare("SELECT level, version FROM customers WHERE id = 'customer-seeded-1'").get();
       assert.equal(row.level, "B");
@@ -224,7 +224,7 @@ describe("customer profile agent HTTP boundary", () => {
     assert.equal(pending.body.status, "confirmation_required");
     assert.equal(pending.body.toolName, "customer.delete");
     assert.equal(pending.body.risk, "R3");
-    assert.match(pending.body.text, /【客户删档待确认】/);
+    assert.match(pending.body.text, /【小小提醒！删除客户】/);
     const code = confirmationCodeFrom(pending.body.text);
     const wrongCode = code === "111222" ? "222333" : "111222";
 
@@ -282,7 +282,7 @@ describe("customer profile agent HTTP boundary", () => {
       text: "重发确认码",
     });
     assert.equal(renewed.body.status, "confirmation_required");
-    assert.match(renewed.body.text, /【客户建档待确认】/, "renewed message repeats the preview card");
+    assert.match(renewed.body.text, /【小小提醒！新建客户】/, "renewed message repeats the preview card");
     const secondCode = confirmationCodeFrom(renewed.body.text);
     assert.notEqual(secondCode, firstCode);
 
@@ -374,7 +374,7 @@ describe("customer profile agent HTTP boundary", () => {
       text: "日照市中医医院什么情况",
     });
     assert.equal(profile.response.status, 200);
-    assert.match(profile.body.text, /客户画像：日照市中医医院/, "profile questions must not be hijacked by the draft");
+    assert.match(profile.body.text, /【客户画像】[\s\S]*日照市中医医院/, "profile questions must not be hijacked by the draft");
 
     const pending = await send("coexist-update-request", {
       conversationId: "conversation-coexist-1",
@@ -388,7 +388,7 @@ describe("customer profile agent HTTP boundary", () => {
       text: code,
     });
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已更新：日照市中医医院/, "the six-digit code must confirm the customer write, not the draft");
+    assert.match(confirmed.body.text, /【客户已更新】[\s\S]*日照市中医医院/, "the six-digit code must confirm the customer write, not the draft");
     withDb((db) => {
       assert.equal(db.prepare("SELECT level FROM customers WHERE id = 'customer-seeded-1'").get().level, "B");
       assert.equal(
