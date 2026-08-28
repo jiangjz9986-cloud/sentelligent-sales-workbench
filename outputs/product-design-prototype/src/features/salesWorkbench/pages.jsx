@@ -388,6 +388,8 @@ export function QuickRecord({
   const [voiceInterim, setVoiceInterim] = useState("");
   const recognitionRef = useRef(null);
   const voiceBaseTextRef = useRef("");
+  // 只有真正发生过语音转写时才标记"语音转写"，避免语音模式下手动输入被误标。
+  const voiceCapturedRef = useRef(false);
   const confirmationAttemptRef = useRef(null);
   if (!confirmationAttemptRef.current) {
     confirmationAttemptRef.current = createConfirmationAttemptTracker();
@@ -428,6 +430,7 @@ export function QuickRecord({
     if (recognitionRef.current) stopVoiceRecognition();
     confirmationAttemptRef.current.reset();
     setRecordMode("text");
+    voiceCapturedRef.current = false;
     setRecordText("");
     setAnalysis(null);
     setQuickRecord(null);
@@ -448,6 +451,7 @@ export function QuickRecord({
     const nextSyncLog = item.syncLog ?? item.confirmations ?? [];
     const nextConfirmedTargets = item.confirmedTargets ?? nextSyncLog.map((entry) => entry.target);
     setRecordMode("text");
+    voiceCapturedRef.current = false;
     setRecordText(nextText);
     setAnalysis(nextAnalysis);
     setQuickRecord(item);
@@ -483,6 +487,7 @@ export function QuickRecord({
     const base = voiceBaseTextRef.current.trim();
     const cleanTranscript = transcript.trim();
     const nextText = [base, cleanTranscript].filter(Boolean).join(base ? "\n" : "");
+    if (cleanTranscript) voiceCapturedRef.current = true;
     setRecordText(nextText);
     resetAnalysis(status);
   }
@@ -641,7 +646,7 @@ export function QuickRecord({
     setSyncStatus("正在分析记录内容");
     try {
       const result = await apiClient.analyzeQuickRecord(recordText, {
-        sourceChannel: recordMode === "voice" ? "语音转写" : "快速记录",
+        sourceChannel: voiceCapturedRef.current ? "语音转写" : "快速记录",
       });
       const historyItem = {
         ...result.quickRecord,
@@ -956,6 +961,7 @@ export function QuickRecord({
           aria-label="快速记录内容"
           value={recordText}
           onChange={(event) => {
+            if (!event.target.value.trim()) voiceCapturedRef.current = false;
             setRecordText(event.target.value);
             resetAnalysis("内容已变化，请重新确认分析");
           }}

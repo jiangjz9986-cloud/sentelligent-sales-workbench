@@ -57,6 +57,7 @@ describe("production static server", () => {
     assert.equal(contentTypeFor("app.js"), "text/javascript; charset=utf-8");
     assert.equal(contentTypeFor("style.css"), "text/css; charset=utf-8");
     assert.equal(contentTypeFor("logo.png"), "image/png");
+    assert.equal(contentTypeFor("manifest.webmanifest"), "application/manifest+json; charset=utf-8");
   });
 
   it("injects the browser runtime API base into the production index", () => {

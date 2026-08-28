@@ -495,7 +495,7 @@ export function HospitalTenderPage({
 }) {
   const [typeFilter, setTypeFilter] = useState("");
   const [relevanceFilter, setRelevanceFilter] = useState("");
-  const [customerFilter, setCustomerFilter] = useState(customerId);
+  const [customerFilter, setCustomerFilter] = useState(customerId ?? "");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [visibleNoticeCount, setVisibleNoticeCount] = useState(INITIAL_VISIBLE_NOTICE_COUNT);
@@ -504,7 +504,7 @@ export function HospitalTenderPage({
   const refreshGenerationRef = useRef(0);
 
   useEffect(() => {
-    setCustomerFilter(customerId);
+    setCustomerFilter(customerId ?? "");
   }, [customerId]);
 
   const [remoteState, setRemoteState] = useState({

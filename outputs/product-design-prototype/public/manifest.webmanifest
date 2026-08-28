@@ -1,0 +1,22 @@
+{
+  "name": "森特智行销售工作台",
+  "short_name": "森特智行",
+  "description": "森特智行 AI 销售作战台：快速记录、客户画像、商机档案、周报与差旅报销一体化工作台。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f5fa",
+  "theme_color": "#f3f5fa",
+  "icons": [
+    {
+      "src": "pwa-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "pwa-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

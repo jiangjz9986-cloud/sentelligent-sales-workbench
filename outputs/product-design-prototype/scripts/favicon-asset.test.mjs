@@ -133,3 +133,35 @@ describe("browser favicon asset", () => {
     assert.ok(alphaBounds.height >= 420, `expected tall icon crop, got ${alphaBounds.height}px`);
   });
 });
+
+describe("pwa install assets", () => {
+  it("links the web app manifest and calibrated theme color from index.html", () => {
+    const html = readFileSync(resolve("index.html"), "utf8");
+
+    assert.match(html, /rel="manifest"[^>]+href="\/manifest\.webmanifest"/);
+    assert.match(html, /name="theme-color"[^>]+content="#f3f5fa"/);
+  });
+
+  it("ships an installable manifest with a relative start_url and 192/512 icons", () => {
+    const manifestPath = resolve("public", "manifest.webmanifest");
+    assert.equal(existsSync(manifestPath), true);
+
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal(manifest.start_url, "./");
+    assert.equal(manifest.scope, "./");
+    assert.equal(manifest.display, "standalone");
+    assert.equal(manifest.background_color, "#f3f5fa");
+    assert.equal(manifest.theme_color, "#f3f5fa");
+    assert.deepEqual(
+      manifest.icons.map((icon) => icon.sizes),
+      ["192x192", "512x512"],
+    );
+
+    for (const icon of manifest.icons) {
+      const iconPath = resolve("public", icon.src);
+      assert.equal(existsSync(iconPath), true, `missing manifest icon ${icon.src}`);
+      const [width, height] = icon.sizes.split("x").map(Number);
+      assert.deepEqual(readPngSize(iconPath), { width, height });
+    }
+  });
+});

@@ -1,6 +1,7 @@
 .expense-page {
   --expense-ink: #10234b;
   --expense-subtle: #66738e;
+  --expense-muted: #7b879d;
   --expense-line: rgba(16, 35, 75, 0.1);
   --expense-soft-line: rgba(16, 35, 75, 0.06);
   width: 100%;
