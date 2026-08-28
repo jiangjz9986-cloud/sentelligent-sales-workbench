@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-28
+
+### 生产数据安全：每日自动数据库备份 + 发布制品服务器归档
+
+- 新增 `scripts/deploy/daily-db-backup.sh`：每日 02:30（Asia/Shanghai，systemd timer `Persistent=true` 补跑）对生产 SQLite 做在线快照（只读 `node:sqlite` 连接 + `busy_timeout` + `VACUUM INTO`，与 cutover 迁移彩排同款、对运行中后端零干扰）→ `quick_check`+外键校验 → fsync → SHA-256 sidecar → 原子重建 `manifest.json` → 按文件名日期清理 14 天前旧份。fail-closed：发布维护锁在位、磁盘余量不足、完整性不过均非零退出且清理半成品；已验证备份绝不误删。
+- 新增 `scripts/deploy/archive-release-artifacts.sh`：发布 bundle 与 evidence 归档到服务器 `backups/releases/<version>/`（staging 内 cmp/diff 校验复制 → 全量 SHA256SUMS + manifest → 原子 mv，已存在即失败不可覆盖 → root:root 0700/0600 冻结；证据内符号链接与 secret 疑似文件名直接拒绝），解除"发布制品仅存开发机"单点。
+- systemd 单元 `sentelligent-daily-backup.service/.timer` 落库并安装到生产（CentOS 7 / systemd 219：OnCalendar 用无时区写法，本地时区 Asia/Shanghai 已实测核对；单元引用 releases 之外的稳定路径 `tools/`，不进入 preflight 固定四项服务白名单，发布门禁零影响）。
+- 服务器实况核查报告（`docs/superpowers/research/2026-08-28-v080-server-facts.md`）12 项 TODO 全部核销或预记裁定：磁盘 22G 对约 50MB 备份总量、journald 已持久化、无单元/crontab 撞名；维护窗口撞 02:30 当晚 fail-closed 跳过（cutover 自带备份兜底）。
+- 无应用代码改动；后端/前端/发布门禁全绿基线不变。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.7.7] - 2026-08-28
 
 ### 每日晨报 + 周五收尾包（v0.7 系列收官）

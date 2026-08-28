@@ -13,8 +13,8 @@ Description=Daily 02:30 Asia/Shanghai schedule for sentelligent-daily-backup.ser
 # 02:30 local equals 02:30 Asia/Shanghai. Validate the final choice with
 # `systemd-analyze calendar` (>= 235) or a manual `systemctl list-timers`
 # check after enabling. See the design doc, section TODO.
-OnCalendar=*-*-* 02:30:00 Asia/Shanghai
-# OnCalendar=*-*-* 02:30:00
+# OnCalendar=*-*-* 02:30:00 Asia/Shanghai
+OnCalendar=*-*-* 02:30:00
 # Run once after boot if the 02:30 activation was missed (host powered off).
 Persistent=true
 Unit=sentelligent-daily-backup.service
