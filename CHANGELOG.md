@@ -13,7 +13,7 @@
 - 迁移 `0028_action_item_reminders`：action_items 加 `owner`/`remind_at`/`reminded_at` 三列 + 到期部分索引，存量行 owner 自挂接客户回填；快速记录确认深写回同步继承记录 owner。小小侧待办可见域扩展 `action.owner = $owner` 分支——不挂客户/商机的独立待办首次对小小可见；owner 为空的存量行微信端只读保护。
 - 新增 `backend/src/actionItems/actionItemStore.js`（owner 限定建/查/完成/顺延/软删，乐观锁版本守卫）与 `backend/src/actionReminders/reminderScheduler.js`（60 秒 setTimeout 轻循环：`remind_at<=now AND reminded_at IS NULL` 表即队列，outbox 幂等键 + reminded_at 双幂等防重复轰炸，worker 离线跳过不标记、恢复补发，迟到 >24h 标注"过期待办"）。到点提醒为闹钟语义、不受招标 9–20 窗口约束；夜间/清晨提醒时刻在预览卡提示。提醒卡走既有微信 outbox 绑定私聊投递（新 payload kind=`action_reminder`），回复"完成待办 <编号>/待办 <编号> 推迟到…"闭环。
 - 管理面：`GET /api/actions/reminders/status`（调度器状态 + 待发计数）；配置 `ACTION_REMINDER_AUTO_RUN`（生产默认开）与 `ACTION_REMINDER_POLL_MS`（默认 60s，下限 5s）。审计：`action.create`（微信建待办新 action）、`action.update`/`action.delete` 沿用 Web 同名 + `metadata.source` 区分、`action.reminder.sent`（actor=system:action-reminder）。
-- 后端全量 1189 项（较 v0.7.4 净增 31 项：store/时间解析/调度器/提醒渲染/HTTP 全链路/路由分流回归）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+- 后端全量 1189 项（较 v0.7.4 冻结基线 1148 净增 41 项，其中 10 项为迁移清单动态子用例：store/时间解析/调度器/提醒渲染/HTTP 全链路/路由分流回归）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
 
 ## [0.7.4] - 2026-08-28
 
