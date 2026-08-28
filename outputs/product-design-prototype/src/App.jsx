@@ -1036,6 +1036,26 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     }
   }
 
+  // Itinerary and travel-expense writes happen outside the workbench-entity
+  // handlers that call refreshOverviewSummary, so the today-focus and weekly
+  // trend cards would otherwise show the bootstrap-time snapshot until a full
+  // reload. Refresh silently every time the overview becomes the active page.
+  useEffect(() => {
+    if (active !== "overview" || !apiClient.isEnabled || backendStatus !== "connected") return undefined;
+    let cancelled = false;
+    apiClient
+      .getDashboardSummary()
+      .then((summary) => {
+        if (!cancelled) setOverviewSummary(summary);
+      })
+      .catch(() => {
+        // Keep the last known summary visible when the refresh fails.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [active, apiClient, backendStatus]);
+
   function mergeById(items, item) {
     return mergeEntityByVersion(items, item);
   }

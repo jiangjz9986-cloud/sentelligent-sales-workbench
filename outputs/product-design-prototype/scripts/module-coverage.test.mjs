@@ -58,6 +58,17 @@ describe("business module delivery coverage", () => {
     assert.match(subnavSource, /onClearContext/);
   });
 
+  it("re-fetches the dashboard summary whenever the overview becomes active", () => {
+    const appSource = read("src/App.jsx");
+
+    // v0.8.3 deep-test finding: itinerary/travel-expense writes do not pass
+    // through refreshOverviewSummary, so the overview must refresh on entry
+    // for the today-focus and weekly-trend cards to reflect them.
+    assert.match(appSource, /if \(active !== "overview" \|\| !apiClient\.isEnabled \|\| backendStatus !== "connected"\) return undefined;/);
+    assert.match(appSource, /\.getDashboardSummary\(\)\s*\n\s*\.then\(\(summary\) => \{\s*\n\s*if \(!cancelled\) setOverviewSummary\(summary\);/);
+    assert.match(appSource, /\}, \[active, apiClient, backendStatus\]\);/);
+  });
+
   it("renders a page branch for every sidebar module", () => {
     const navIds = extractNavIds(read("src/data/salesWorkbenchData.js"));
     const appSource = read("src/App.jsx");
