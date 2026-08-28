@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
+import { readSalesWorkbenchPagesSource } from "./pages-source.mjs";
+
 function read(filePath) {
   return readFileSync(resolve(filePath), "utf8");
 }
@@ -176,7 +178,7 @@ describe("business module delivery coverage", () => {
   });
 
   it("keeps the historical solution compatibility state read-only", () => {
-    const pageSource = read("src/features/salesWorkbench/pages.jsx");
+    const pageSource = readSalesWorkbenchPagesSource();
     const appSource = read("src/App.jsx");
     const solutionPageSource = pageSource.match(
       /export function SolutionPage\([\s\S]*?(?=\nexport function WeeklyPage)/,

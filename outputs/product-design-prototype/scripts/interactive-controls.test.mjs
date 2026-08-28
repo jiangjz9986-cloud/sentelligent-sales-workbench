@@ -3,9 +3,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
+import { readSalesWorkbenchPagesSource, salesWorkbenchPageFiles } from "./pages-source.mjs";
+
 const controlFiles = [
   "src/App.jsx",
-  "src/features/salesWorkbench/pages.jsx",
+  ...salesWorkbenchPageFiles(),
   "src/components/primitives.jsx",
   "src/features/visitItinerary/VisitItineraryPage.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",
@@ -82,7 +84,7 @@ describe("interactive control wiring", () => {
   });
 
   it("locks quick-record confirmation while synchronization, analysis save, or unsaved edits are active", () => {
-    const pageSource = readFileSync(resolve("src/features/salesWorkbench/pages.jsx"), "utf8");
+    const pageSource = readSalesWorkbenchPagesSource();
     const manualSync = pageSource.match(/<div className="manual-sync">[\s\S]*?<\/div>/)?.[0] ?? "";
 
     assert.match(pageSource, /createExclusiveAsyncGate/);

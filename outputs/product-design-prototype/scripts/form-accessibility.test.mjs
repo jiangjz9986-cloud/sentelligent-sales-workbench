@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
-const pageSource = readFileSync(resolve("src/features/salesWorkbench/pages.jsx"), "utf8");
+import { readSalesWorkbenchPagesSource } from "./pages-source.mjs";
+
+const pageSource = readSalesWorkbenchPagesSource();
 const travelExpenseFiles = [
   "src/features/travelExpense/TravelExpensePage.jsx",
   "src/features/travelExpense/ExpenseLedger.jsx",

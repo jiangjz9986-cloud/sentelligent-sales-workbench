@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
+import { readSalesWorkbenchPagesSource, salesWorkbenchPageFiles } from "./pages-source.mjs";
+
 const uiFiles = [
-  "src/features/salesWorkbench/pages.jsx",
+  ...salesWorkbenchPageFiles(),
   "src/components/primitives.jsx",
   "src/App.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",
@@ -63,7 +65,7 @@ describe("formal handoff UI copy", () => {
 
   it("opens quick record in voice mode with direct recording guidance", () => {
     const appSource = readFileSync(resolve("src/App.jsx"), "utf8");
-    const pageSource = readFileSync(resolve("src/features/salesWorkbench/pages.jsx"), "utf8");
+    const pageSource = readSalesWorkbenchPagesSource();
 
     assert.match(appSource, /const \[recordMode, setRecordMode\] = useState\("voice"\)/);
     assert.match(pageSource, /idle:\s*"待录入"/);

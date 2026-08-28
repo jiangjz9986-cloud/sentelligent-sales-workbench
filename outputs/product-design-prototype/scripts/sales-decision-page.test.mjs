@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
+import { readSalesWorkbenchPagesSource } from "./pages-source.mjs";
+
 const root = resolve(process.cwd());
-const pageSource = readFileSync(resolve(root, "src/features/salesWorkbench/pages.jsx"), "utf8");
+const pageSource = readSalesWorkbenchPagesSource(root);
 const panelSource = readFileSync(resolve(root, "src/features/salesWorkbench/SalesDecisionPanel.jsx"), "utf8");
 const apiSource = readFileSync(resolve(root, "src/api/salesWorkbenchApi.js"), "utf8");
 const combinedPageSource = `${pageSource}\n${panelSource}`;

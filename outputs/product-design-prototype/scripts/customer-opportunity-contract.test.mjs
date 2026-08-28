@@ -3,11 +3,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 
+import { salesWorkbenchPageFiles } from "./pages-source.mjs";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = [
   "../src/App.jsx",
   "../src/data/salesWorkbenchData.js",
-  "../src/features/salesWorkbench/pages.jsx",
+  ...salesWorkbenchPageFiles(join(here, "..")).map((file) => `../${file}`),
 ]
   .map((relativePath) => readFileSync(join(here, relativePath), "utf8"))
   .join("\n");

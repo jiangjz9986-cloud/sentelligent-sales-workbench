@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
-const pageSource = readFileSync(resolve("src/features/salesWorkbench/pages.jsx"), "utf8");
+import { readSalesWorkbenchPagesSource } from "./pages-source.mjs";
+
+const pageSource = readSalesWorkbenchPagesSource();
 
 describe("readonly detail action model", () => {
   it("keeps detail views read-only until the user explicitly clicks modify", () => {
