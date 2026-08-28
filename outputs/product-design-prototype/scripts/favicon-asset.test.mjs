@@ -138,16 +138,19 @@ describe("pwa install assets", () => {
   it("links the web app manifest and calibrated theme color from index.html", () => {
     const html = readFileSync(resolve("index.html"), "utf8");
 
-    assert.match(html, /rel="manifest"[^>]+href="\/manifest\.webmanifest"/);
+    assert.match(html, /rel="manifest"[^>]+href="\/sentelligent\.webmanifest"/);
     assert.match(html, /name="theme-color"[^>]+content="#f3f5fa"/);
   });
 
   it("ships an installable manifest with a relative start_url and 192/512 icons", () => {
-    const manifestPath = resolve("public", "manifest.webmanifest");
+    const manifestPath = resolve("public", "sentelligent.webmanifest");
     assert.equal(existsSync(manifestPath), true);
 
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    assert.equal(manifest.start_url, "./");
+    // The shared reverse proxy on the production host diverts mobile
+    // user-agents on the bare root path to another application, so the PWA
+    // must launch on an explicit route.
+    assert.equal(manifest.start_url, "./overview");
     assert.equal(manifest.scope, "./");
     assert.equal(manifest.display, "standalone");
     assert.equal(manifest.background_color, "#f3f5fa");
