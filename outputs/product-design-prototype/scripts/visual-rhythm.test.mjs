@@ -472,6 +472,20 @@ async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } 
                       opportunities: [],
                       rhythm: [],
                       stageCounts: [],
+                      todayFocus: {
+                        date: '2099-01-01',
+                        itineraries: { count: 0, items: [] },
+                        todos: { overdueCount: 0, todayCount: 0, items: [] },
+                        risks: { count: 0, items: [] },
+                        tenders: { highCount: 0, items: [] },
+                      },
+                      weeklyTrend: {
+                        weekStart: '2098-12-28',
+                        previousWeekStart: '2098-12-21',
+                        quickRecords: { current: 0, previous: 0 },
+                        expenseCents: { current: 0, previous: 0 },
+                        completedTodos: { current: 0, previous: 0 },
+                      },
                       generatedAt: '2099-01-01T00:00:00.000Z',
                     },
                   }

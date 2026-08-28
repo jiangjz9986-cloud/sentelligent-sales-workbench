@@ -187,6 +187,8 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     opportunities: "array",
     rhythm: "array",
     stageCounts: "array",
+    todayFocus: "object",
+    weeklyTrend: "object",
     generatedAt: "string",
   },
   visitItinerary: {

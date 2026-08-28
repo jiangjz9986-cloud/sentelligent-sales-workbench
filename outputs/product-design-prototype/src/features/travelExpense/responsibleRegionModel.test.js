@@ -5,6 +5,7 @@ import {
   addResponsibleCity,
   buildResponsibleRegionPayload,
   createResponsibleRegionDraft,
+  hasResponsibleCity,
   removeResponsibleCity,
   resolveResponsibleRegionDates,
   responsibleRegionWeekDates,
@@ -65,5 +66,16 @@ describe("responsible region profile model", () => {
   it("requires a real Monday-to-Sunday natural week", () => {
     assert.deepEqual(responsibleRegionWeekDates("2026-08-24").at(-1), "2026-08-30");
     assert.throws(() => responsibleRegionWeekDates("2026-08-25"), /Monday/u);
+  });
+
+  it("probes city membership through suffix normalization without throwing on junk", () => {
+    assert.equal(hasResponsibleCity(["济宁市", "东营"], "济宁"), true);
+    assert.equal(hasResponsibleCity(["济宁", "东营"], "济宁市"), true);
+    assert.equal(hasResponsibleCity(["济宁"], "日照"), false);
+    assert.equal(hasResponsibleCity([], "济宁"), false);
+    assert.equal(hasResponsibleCity(null, "济宁"), false);
+    assert.equal(hasResponsibleCity(["济宁"], ""), false);
+    assert.equal(hasResponsibleCity(["济宁"], null), false);
+    assert.equal(hasResponsibleCity(["济宁"], "x".repeat(500)), false);
   });
 });

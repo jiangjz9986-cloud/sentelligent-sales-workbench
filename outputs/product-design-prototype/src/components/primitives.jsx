@@ -107,6 +107,8 @@ export function StageStrip({ stageCounts = [], onStageClick }) {
     }
   }
 
+  const maxCount = Math.max(1, ...stageOrder.map((stage) => dataByStage.get(stage).count));
+
   return (
     <div className="stage-strip">
       {stageOrder.map((stage) => {
@@ -123,6 +125,11 @@ export function StageStrip({ stageCounts = [], onStageClick }) {
             <span>{stage}</span>
             <strong>{stageData.count}</strong>
             {amount ? <small>{amount}</small> : null}
+            <i
+              className="stage-strip__bar"
+              style={{ "--value": `${Math.round((stageData.count / maxCount) * 100)}%` }}
+              aria-hidden="true"
+            />
           </button>
         );
       })}

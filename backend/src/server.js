@@ -141,7 +141,13 @@ import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecor
 import { createQuickRecordStore } from "./quickRecords/quickRecordStore.js";
 import { createActionItemStore } from "./actionItems/actionItemStore.js";
 import { createActionReminderScheduler } from "./actionReminders/reminderScheduler.js";
-import { createDigestContentBuilder } from "./dailyDigest/digestContent.js";
+import {
+  addDays,
+  createDigestContentBuilder,
+  shanghaiDateParts,
+  weekStartOf,
+} from "./dailyDigest/digestContent.js";
+import { KNOWN_STAGES } from "./opportunities/stageVocabulary.js";
 import { createDailyDigestScheduler } from "./dailyDigest/digestScheduler.js";
 import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "./dailyDigest/digestMessage.js";
 import { createActionItemPendingPreviewProviders } from "./assistant/actionItemPendingPreviewProviders.js";
@@ -795,7 +801,133 @@ function dateChip(value) {
   return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-function dashboardSummaryFromDb(db) {
+function shanghaiInstantIso(dateOnly, time = "00:00:00") {
+  return new Date(`${dateOnly}T${time}+08:00`).toISOString();
+}
+
+// Today-focus aggregation for the web dashboard. Deliberately whole-database
+// scope (no owner filter) so the card matches the workbench list pages of the
+// current single-user deployment; a future multi-account rollout must narrow
+// this to request.authContext.account, mirroring the travel-expense scope.
+function dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository }) {
+  const itineraryRows = all(
+    db,
+    `SELECT id, title, plan_json
+     FROM visit_itineraries
+     WHERE deleted_at IS NULL AND status = 'planned' AND visit_date = $today
+     ORDER BY updated_at DESC, id
+     LIMIT 4`,
+    { $today: today },
+  );
+  const itineraries = itineraryRows.slice(0, 3).map((row) => {
+    let firstStop = "";
+    try {
+      const plan = JSON.parse(row.plan_json);
+      const stops = Array.isArray(plan?.stops) ? plan.stops : [];
+      const orderedIds = Array.isArray(plan?.orderedStopIds) ? plan.orderedStopIds : [];
+      const first = stops.find((stop) => stop?.id === orderedIds[0]) ?? stops[0];
+      firstStop = typeof first?.customerName === "string" ? first.customerName.trim() : "";
+    } catch {
+      // A corrupted plan snapshot still surfaces the itinerary by title.
+    }
+    return { id: row.id, title: row.title, firstStop };
+  });
+
+  const todayStartIso = shanghaiInstantIso(today);
+  const tomorrowStartIso = shanghaiInstantIso(addDays(today, 1));
+  const todoRows = all(
+    db,
+    `SELECT id, title, priority, remind_at
+     FROM action_items
+     WHERE deleted_at IS NULL AND status IN ('pending', 'in_progress')
+       AND remind_at IS NOT NULL AND remind_at < $tomorrowStartIso
+     ORDER BY remind_at ASC
+     LIMIT 8`,
+    { $tomorrowStartIso: tomorrowStartIso },
+  );
+  const overdueCount = todoRows.filter((row) => row.remind_at < todayStartIso).length;
+
+  const riskItems = highRisks.slice(0, 3).map((risk) => ({
+    id: risk.id,
+    customerName: customers.find((customer) => customer.id === risk.customerId)?.name ?? "",
+    title: risk.title,
+    score: risk.score,
+    severity: risk.severity,
+  }));
+
+  // Same "since yesterday 09:00 Asia/Shanghai" anchor as the daily digest, so
+  // the web card and the WeChat morning message agree on what counts as new.
+  let tenders = { highCount: 0, items: [] };
+  if (tenderRepository) {
+    const anchorIso = shanghaiInstantIso(addDays(today, -1), "09:00:00");
+    tenders = {
+      highCount: tenderRepository.countNotices({ firstSeenFrom: anchorIso, relevance: "high" }),
+      items: tenderRepository
+        .listNotices({ firstSeenFrom: anchorIso, relevance: "high", limit: 3 })
+        .map((notice) => ({ id: notice.id, title: notice.title, sourceName: notice.sourceName })),
+    };
+  }
+
+  return {
+    date: today,
+    itineraries: { count: itineraryRows.length, items: itineraries },
+    todos: {
+      overdueCount,
+      todayCount: todoRows.length - overdueCount,
+      items: todoRows.slice(0, 4).map((row) => ({
+        id: row.id,
+        title: row.title,
+        priority: row.priority,
+        remindAt: row.remind_at,
+        overdue: row.remind_at < todayStartIso,
+      })),
+    },
+    risks: { count: highRisks.length, items: riskItems },
+    tenders,
+  };
+}
+
+// Natural-week (Monday-start, Asia/Shanghai) this-week/last-week comparison.
+// Reuses the sales-report quick-record scope, the travel-expense weekly-total
+// scope, and approximates todo completion time by updated_at (complete/confirm
+// both rewrite it; the ±8h substr approximation is accepted for trend display).
+function dashboardWeeklyTrend(db, { weekStart, previousWeekStart }) {
+  const quickRecordCount = (start) => Number(get(
+    db,
+    `SELECT COUNT(*) AS count FROM quick_records
+     WHERE voided_at IS NULL
+       AND date(substr(COALESCE(occurred_at, created_at), 1, 10))
+           BETWEEN $weekStart AND date($weekStart, '+6 days')`,
+    { $weekStart: start },
+  )?.count ?? 0);
+  const expenseCents = (start) => Number(get(
+    db,
+    `SELECT COALESCE(SUM(payment.reimbursement_cents), 0) AS cents
+     FROM travel_expenses expense
+     JOIN travel_expense_payments payment ON payment.expense_id = expense.id
+     WHERE expense.deleted_at IS NULL
+       AND expense.occurred_on BETWEEN $weekStart AND date($weekStart, '+6 days')`,
+    { $weekStart: start },
+  )?.cents ?? 0);
+  const completedTodoCount = (start) => Number(get(
+    db,
+    `SELECT COUNT(*) AS count FROM action_items
+     WHERE deleted_at IS NULL AND status = 'done'
+       AND date(substr(updated_at, 1, 10))
+           BETWEEN $weekStart AND date($weekStart, '+6 days')`,
+    { $weekStart: start },
+  )?.count ?? 0);
+
+  return {
+    weekStart,
+    previousWeekStart,
+    quickRecords: { current: quickRecordCount(weekStart), previous: quickRecordCount(previousWeekStart) },
+    expenseCents: { current: expenseCents(weekStart), previous: expenseCents(previousWeekStart) },
+    completedTodos: { current: completedTodoCount(weekStart), previous: completedTodoCount(previousWeekStart) },
+  };
+}
+
+function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null } = {}) {
   const customers = all(db, "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY relation DESC, updated_at DESC").map(customerFromRow);
   const opportunities = all(
     db,
@@ -821,11 +953,40 @@ function dashboardSummaryFromDb(db) {
   const openRisks = risks.filter((item) => item.status !== "closed");
   const highRisks = openRisks.filter((item) => item.score >= 80 || item.severity === "高" || item.severity === "楂?");
   const forecast = opportunities.reduce((total, item) => total + numberFromText(item.amount), 0);
-  const stageCounts = [...new Set(opportunities.map((item) => item.stage).filter(Boolean))]
-    .map((stage) => ({
+
+  // Fixed seven-stage funnel in vocabulary order (zero-count stages included),
+  // unknown stages appended in encounter order; per-stage amount reuses the
+  // KPI "万" parsing so both surfaces under-count non-standard amount text the
+  // same way.
+  const stageAggregate = new Map();
+  for (const item of opportunities) {
+    const stage = String(item.stage ?? "").trim();
+    if (!stage) continue;
+    const entry = stageAggregate.get(stage) ?? { count: 0, amount: 0 };
+    entry.count += 1;
+    entry.amount += numberFromText(item.amount);
+    stageAggregate.set(stage, entry);
+  }
+  const stageOrder = [
+    ...KNOWN_STAGES,
+    ...[...stageAggregate.keys()].filter((stage) => !KNOWN_STAGES.includes(stage)),
+  ];
+  const stageCounts = stageOrder.map((stage) => {
+    const entry = stageAggregate.get(stage) ?? { count: 0, amount: 0 };
+    return {
       stage,
-      count: opportunities.filter((item) => item.stage === stage).length,
-    }));
+      count: entry.count,
+      amount: entry.amount > 0 ? `共 ${Math.round(entry.amount)} 万` : "",
+    };
+  });
+
+  const today = shanghaiDateParts(now).date;
+  const weekStart = weekStartOf(today);
+  const todayFocus = dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository });
+  const weeklyTrend = dashboardWeeklyTrend(db, {
+    weekStart,
+    previousWeekStart: addDays(weekStart, -7),
+  });
 
   return {
     metrics: {
@@ -877,6 +1038,8 @@ function dashboardSummaryFromDb(db) {
       { id: "rhythm-weekly", time: "18:00", title: "整理本周记录", type: "周报与汇报", target: "weekly" },
     ].slice(0, 3),
     stageCounts,
+    todayFocus,
+    weeklyTrend,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -3920,7 +4083,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/dashboard/summary") {
-        sendJson(response, 200, { item: dashboardSummaryFromDb(db) });
+        sendJson(response, 200, {
+          item: dashboardSummaryFromDb(db, { tenderRepository: hospitalTenderRepository }),
+        });
         return;
       }
 

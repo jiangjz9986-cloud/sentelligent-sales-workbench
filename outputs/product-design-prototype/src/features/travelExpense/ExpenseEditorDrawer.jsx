@@ -56,15 +56,17 @@ function emptyPayment() {
   };
 }
 
-function createDraft(expense, weekStart) {
+function createDraft(expense, weekStart, prefill = null) {
   if (!expense) {
     return {
-      occurredOn: weekStart,
-      category: "breakfast",
-      purpose: "",
+      occurredOn: prefill?.occurredOn ?? weekStart,
+      // A visit-linked draft defaults to transport (the most common on-the-road
+      // expense); plain manual entry keeps the existing breakfast default.
+      category: prefill ? "transport" : "breakfast",
+      purpose: prefill?.purpose ?? "",
       merchant: "",
-      itineraryId: "",
-      customerId: "",
+      itineraryId: prefill?.itineraryId ?? "",
+      customerId: prefill?.customerId ?? "",
       notes: "",
       payments: [emptyPayment()],
     };
@@ -99,18 +101,19 @@ export function ExpenseEditorDrawer({
   week,
   itineraries = [],
   customers = [],
+  prefill = null,
   pending = false,
   onClose,
   onSave,
 }) {
-  const [draft, setDraft] = useState(() => createDraft(expense, week.start));
+  const [draft, setDraft] = useState(() => createDraft(expense, week.start, prefill));
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!open) return;
-    setDraft(createDraft(expense, week.start));
+    setDraft(createDraft(expense, week.start, prefill));
     setError("");
-  }, [expense, open, week.start]);
+  }, [expense, open, prefill, week.start]);
 
   useEffect(() => {
     if (!open) return undefined;

@@ -490,6 +490,47 @@ describe("travel expense feature boundary", () => {
     }
   });
 
+  it("prefills the drawer from an itinerary draft exactly once and warns on unlisted regions", async () => {
+    const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
+    const editor = await source("src/features/travelExpense/ExpenseEditorDrawer.jsx");
+    const app = await source("src/App.jsx");
+    const itineraryPage = await source("src/features/visitItinerary/VisitItineraryPage.jsx");
+    const link = await source("src/features/visitItinerary/itineraryExpenseLink.js");
+
+    // One-shot draft consumption: captured at mount, week initialized to the
+    // itinerary's natural week, URL params cleared through the App callback.
+    assert.match(page, /const expenseDraftRef = useRef\(expenseDraft\)/);
+    assert.match(page, /naturalWeekFor\(new Date\(`\$\{expenseDraftRef\.current\.occurredOn\}T12:00:00`\)\)/);
+    assert.match(page, /const expenseDraftConsumedRef = useRef\(false\)/);
+    assert.match(page, /expenseDraftConsumedRef\.current = true/);
+    assert.match(page, /onExpenseDraftConsumed\?\.\(\)/);
+    // A deleted itinerary or customer falls back to 不关联 instead of a dangling id.
+    assert.match(page, /itineraries\.some\(\(item\) => item\.id === draft\.itineraryId\) \? draft\.itineraryId : ""/);
+    assert.match(page, /customers\.some\(\(item\) => item\.id === draft\.customerId\) \? draft\.customerId : ""/);
+    // Prefill reaches the drawer only for the linked opening; manual entry and
+    // closing always clear it.
+    assert.match(page, /prefill=\{draftPrefill\}/);
+    assert.match(page, /setEditingExpense\(null\); setDraftPrefill\(null\); setEditorOpen\(true\);/);
+    assert.match(page, /setEditorOpen\(false\); setEditingExpense\(null\); setDraftPrefill\(null\);/);
+    // Region mismatch is advisory only: a warning plus a settings shortcut,
+    // never an automatic region-profile write.
+    assert.match(page, /import \{ hasResponsibleCity \} from "\.\/responsibleRegionModel\.js"/);
+    assert.match(page, /data-testid="expense-draft-region-warning"/);
+    assert.match(page, /打开区域设置/);
+    assert.match(page, /week\.start === draftWeekStart/);
+    assert.match(editor, /function createDraft\(expense, weekStart, prefill = null\)/);
+    assert.match(editor, /occurredOn: prefill\?\.occurredOn \?\? weekStart/);
+    assert.match(editor, /category: prefill \? "transport" : "breakfast"/);
+    assert.match(app, /expenseDraft=\{expenseDraftFromFilters\(routeFilters\)\}/);
+    assert.match(app, /onExpenseDraftConsumed=\{consumeExpenseDraftRoute\}/);
+    assert.match(app, /function consumeExpenseDraftRoute\(\) \{[\s\S]*?writeBrowserRoute\(route, \{ replace: true \}\);[\s\S]*?\}/);
+    assert.match(app, /onRecordExpense=\{recordItineraryExpense\}/);
+    assert.match(itineraryPage, /data-testid="itinerary-record-expense"/);
+    assert.match(itineraryPage, /记当日费用/);
+    assert.match(link, /export function expenseDraftFiltersFromItinerary/);
+    assert.match(link, /export function expenseDraftFromFilters/);
+  });
+
   it("keeps the editor explicit, multi-payment, and keyboard dismissible", async () => {
     const editor = await source("src/features/travelExpense/ExpenseEditorDrawer.jsx");
 

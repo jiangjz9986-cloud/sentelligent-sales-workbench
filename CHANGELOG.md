@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-08-28
+
+### 战情总览升级 + 行程→差旅联动（总蓝图 K 阶段）
+
+- **今日焦点卡**（替换总览"本日推进节奏"静态卡）：一张 Panel 四分区——今天的行程（当日 planned 行程，标题+首站客户，点击进行程详情）、到点待办（逾期红胶囊/今日黄胶囊分计，复用 `remind_at` 上海时区判窗，与 v0.7.7 晨报同源口径）、高风险（沿用 `score>=80 OR severity=高` 源，客户名+分数）、新招标（"昨日 09:00 上海"锚点以来 high 相关，与晨报同锚）。每分区明细 ≤2 条 + "共 N 条"、空态短文案、44px 触控、分区头可点跳对应工作台。
+- **周趋势卡**：快速记录数 / 差旅报销额 / 待办完成数三行，本周 vs 上周（自然周周一起、Asia/Shanghai，复用 `weekStartOf/addDays`；**非**旧 KPI 的滚动 7 天窗）+ Δ%（上周为 0 显示"新增"、相等显示"持平"），纯 CSS 双横条（本周实色/上周浅色，宽度=值/两周最大值）。快速记录沿销售周报 `voided_at IS NULL` 口径；报销额沿差旅周合计 `reimbursement_cents` JOIN 口径；待办完成以 `updated_at` 前 10 位近似完成日（±8h 边界误差按设计接受并在测试固化）。
+- **商机漏斗**：`stageCounts` 改为按后端 `stageVocabulary.KNOWN_STAGES` 七阶段全序输出（含 0 计数），词表外阶段追加尾部；每阶段新增 `amount` 文本（`numberFromText` 求和 >0 时输出 `共 N 万`，与 KPI"万"口径一致）；前端 `StageStrip` 新增 `stage-strip__bar` 纯 CSS 底条（宽度=count/max），面板标题改"商机漏斗"。新增 stage-strip 词表同序源码断言（后端词表 ↔ 前端 fixedStages）。
+- **行程→差旅联动**：行程详情工具栏新增"记当日费用"（`ReceiptText`，44px）→ `navigateTo("expense", { filters })` 传 `draftDate/draftItinerary/draftCustomer/draftPurpose/draftRegion`（新纯函数模块 `itineraryExpenseLink.js` 双向映射：purpose=`拜访 前两站顿号连接[等]` 截断 100 字、region=首个非空站点 city、`draftDate` 非真实日历日期整组 fail-closed）→ 差旅页挂载即切至行程所在自然周并自动开新建抽屉预填（日期/事由/关联行程/关联客户，联动场景类目默认交通）→ 消费后 `replace` 清 URL 参数（刷新/回退不复弹）；指向已删行程/客户的参数回落"不关联"。抽屉 `createDraft` 增 `prefill` 参数（仅新建生效），"手工记一笔"与关闭/保存均清预填。
+- **区域档案联动（提示不自动写）**：目的地城市不在当周区域档案时显示警示条 + "打开区域设置"按钮（`regionProfile` 保存有 version 乐观锁，自动写风险大于收益）；城市比较走 `hasResponsibleCity` 后缀归一（济宁 ≡ 济宁市），非法输入不抛错按未命中处理；仅在差旅页仍停留在行程自然周时显示。
+- **接口与合同**：零新端点——扩展 `GET /api/dashboard/summary` 响应（`todayFocus`/`weeklyTrend` 新必需键 + `stageCounts[].amount`），`dashboardSummaryFromDb` 扩参接入已实例化的 `hospitalTenderRepository` 与上海时区周口径工具；`rhythm` 字段保留输出（合同兼容），web 端不再渲染。总览网格：今日焦点/周趋势各 span 6，最近记录/重点商机 span 4→6 补位，980/760 断点通栏名单同步；移除 `overview-rhythm`/`rhythm-*` 死样式。
+- 零数据库迁移（读写全部命中现有表列）；零新依赖（趋势/漏斗全部纯 CSS）；模型路由不变。后端全量 1276 项（较 v0.8.2 基线 1275 净增 1 项：受控种子的 todayFocus/weeklyTrend/七阶段全序聚合断言，覆盖周一/周日 BETWEEN 双端点与两种历史 `updated_at` 格式）；前端 qa:local 433 项（净增 11 项：联动纯函数 8、区域归一 1、页面接线合同 1、词表同序 1）；Chrome 集成（rhythm 卡断言随卡移除改指今日焦点到点待办分区）、WebKit、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.8.2] - 2026-08-28
 
 ### 差旅工作台整改（用户真机反馈驱动）

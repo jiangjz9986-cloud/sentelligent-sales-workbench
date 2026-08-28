@@ -117,6 +117,26 @@ export function createResponsibleRegionDraft(item) {
   };
 }
 
+// Loose membership probe for prefill warnings: suffix-normalized comparison
+// (济宁 ≡ 济宁市) that never throws, because the candidate city may come from
+// an arbitrary URL filter value.
+export function hasResponsibleCity(cities, value) {
+  if (!Array.isArray(cities)) return false;
+  let target;
+  try {
+    target = cityKey(value);
+  } catch {
+    return false;
+  }
+  return cities.some((city) => {
+    try {
+      return cityKey(city) === target;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export function addResponsibleCity(cities, value) {
   const normalizedCities = normalizeResponsibleCities(cities);
   const city = normalizeResponsibleCity(value);

@@ -53,6 +53,10 @@ import {
   WeeklyPage,
 } from "./features/salesWorkbench/pages.jsx";
 import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage.jsx";
+import {
+  expenseDraftFiltersFromItinerary,
+  expenseDraftFromFilters,
+} from "./features/visitItinerary/itineraryExpenseLink.js";
 import { TravelExpensePage } from "./features/travelExpense/TravelExpensePage.jsx";
 import { HospitalTenderPage } from "./features/hospitalTender/HospitalTenderPage.jsx";
 import { SystemSettingsPage } from "./features/settings/SystemSettingsPage.jsx";
@@ -973,6 +977,20 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     writeBrowserRoute(route);
   }
 
+  function recordItineraryExpense(item) {
+    const filters = expenseDraftFiltersFromItinerary(item);
+    if (!filters) return;
+    navigateTo("expense", { filters });
+  }
+
+  function consumeExpenseDraftRoute() {
+    // Replace (not push) so refresh and the back button cannot re-trigger the
+    // one-shot drawer prefill after it has been consumed.
+    const route = { ...ROUTE_BY_ACTIVE.expense, filters: {} };
+    applyWorkbenchRoute(route);
+    writeBrowserRoute(route, { replace: true });
+  }
+
   function openCustomerDetail(customerId) {
     if (!customerId) return;
     selectCustomer(customerId);
@@ -1551,6 +1569,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 onEdit={openItineraryEdit}
                 onSave={handleSaveItinerary}
                 onDelete={handleDeleteItinerary}
+                onRecordExpense={recordItineraryExpense}
               />
             )}
             {active === "expense" && (
@@ -1560,6 +1579,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 customers={workbenchCustomers}
                 itineraries={workbenchItineraries}
                 owner={authSession.displayName}
+                expenseDraft={expenseDraftFromFilters(routeFilters)}
+                onExpenseDraftConsumed={consumeExpenseDraftRoute}
               />
             )}
             {active === "solution" && (

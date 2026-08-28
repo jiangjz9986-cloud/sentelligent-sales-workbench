@@ -9,6 +9,14 @@ import {
   assertApiEntity,
 } from "../../shared/salesWorkbenchApiContract.mjs";
 import { hashPassword } from "../src/auth/password.js";
+import {
+  addDays,
+  shanghaiDateParts,
+  weekStartOf,
+} from "../src/dailyDigest/digestContent.js";
+import { openDatabase } from "../src/db.js";
+import { createHospitalTenderRepository } from "../src/hospitalTender/repository.js";
+import { KNOWN_STAGES } from "../src/opportunities/stageVocabulary.js";
 import { createServer } from "../src/server.js";
 
 let tempDir;
@@ -265,6 +273,177 @@ describe("sales workbench backend API", () => {
     assert.ok(summary.body.item.customerHeat.some((item) => item.customerId === "rizhao" && item.value === 82));
     assert.ok(summary.body.item.opportunities.some((item) => item.id === "op-rizhao-plan"));
     assert.ok(summary.body.item.stageCounts.some((item) => item.count > 0));
+    assert.deepEqual(
+      summary.body.item.stageCounts.slice(0, KNOWN_STAGES.length).map((item) => item.stage),
+      [...KNOWN_STAGES],
+    );
+    assert.ok(summary.body.item.stageCounts.every((item) => typeof item.amount === "string"));
+    assert.match(summary.body.item.todayFocus.date, /^\d{4}-\d{2}-\d{2}$/u);
+    assert.equal(summary.body.item.weeklyTrend.weekStart, weekStartOf(summary.body.item.todayFocus.date));
+    assert.equal(
+      summary.body.item.weeklyTrend.previousWeekStart,
+      addDays(summary.body.item.weeklyTrend.weekStart, -7),
+    );
+  });
+
+  it("aggregates today focus, natural-week trend, and the fixed-order stage funnel", async () => {
+    await new Promise((resolve) => server.close(resolve));
+    const dashboardDbUrl = join(tempDir, "dashboard.sqlite");
+    const db = openDatabase({ databaseUrl: dashboardDbUrl });
+    const now = new Date();
+    const today = shanghaiDateParts(now).date;
+    const weekStart = weekStartOf(today);
+    const previousWeekStart = addDays(weekStart, -7);
+    const shanghaiIso = (dateOnly, time) => new Date(`${dateOnly}T${time}+08:00`).toISOString();
+
+    db.prepare("INSERT INTO customers (id, name, owner, relation) VALUES ('cus-dash', '济宁市第一人民医院', '继振', 80)").run();
+    const insertOpportunity = db.prepare(
+      "INSERT INTO opportunities (id, customer_id, name, stage, amount, probability) VALUES ($id, 'cus-dash', $name, $stage, $amount, 60)",
+    );
+    insertOpportunity.run({ $id: "op-dash-1", $name: "济宁智慧医院一期", $stage: "线索", $amount: "120 万" });
+    insertOpportunity.run({ $id: "op-dash-2", $name: "济宁智慧医院二期", $stage: "线索", $amount: "预计 200 万" });
+    insertOpportunity.run({ $id: "op-dash-3", $name: "预算确认中项目", $stage: "预算确认", $amount: "80万" });
+    insertOpportunity.run({ $id: "op-dash-4", $name: "词表外阶段项目", $stage: "招投标", $amount: "待定" });
+
+    const planJson = JSON.stringify({
+      stops: [
+        { id: "stop-2", customerName: "济宁医学院附属医院" },
+        { id: "stop-1", customerName: "济宁市第一人民医院", city: "济宁" },
+      ],
+      orderedStopIds: ["stop-1", "stop-2"],
+    });
+    const insertItinerary = db.prepare(`
+      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
+      VALUES ($id, $title, $visitDate, $status, '{}', $planJson, '继振', '继振')
+    `);
+    insertItinerary.run({ $id: "itn-dash-today", $title: "济宁两院拜访", $visitDate: today, $status: "planned", $planJson: planJson });
+    insertItinerary.run({ $id: "itn-dash-cancelled", $title: "已取消行程", $visitDate: today, $status: "cancelled", $planJson: planJson });
+    insertItinerary.run({ $id: "itn-dash-past", $title: "昨日行程", $visitDate: addDays(today, -1), $status: "planned", $planJson: planJson });
+
+    const insertAction = db.prepare(`
+      INSERT INTO action_items (id, title, priority, status, remind_at, updated_at)
+      VALUES ($id, $title, $priority, $status, $remindAt, $updatedAt)
+    `);
+    insertAction.run({ $id: "act-dash-overdue", $title: "逾期回访", $priority: "高", $status: "pending", $remindAt: shanghaiIso(addDays(today, -1), "10:00:00"), $updatedAt: shanghaiIso(addDays(today, -1), "10:00:00") });
+    insertAction.run({ $id: "act-dash-today", $title: "今日送方案", $priority: "中", $status: "in_progress", $remindAt: shanghaiIso(today, "23:00:00"), $updatedAt: shanghaiIso(today, "08:00:00") });
+    insertAction.run({ $id: "act-dash-unscheduled", $title: "未排期待办", $priority: "低", $status: "pending", $remindAt: null, $updatedAt: shanghaiIso(today, "08:00:00") });
+    // Completed todos exercise both historic updated_at formats and both
+    // BETWEEN endpoints of each natural week.
+    insertAction.run({ $id: "act-dash-done-monday", $title: "本周一完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${weekStart} 10:00:00` });
+    insertAction.run({ $id: "act-dash-done-sunday", $title: "本周日完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${addDays(weekStart, 6)}T09:00:00.000Z` });
+    insertAction.run({ $id: "act-dash-done-prev-monday", $title: "上周一完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${previousWeekStart}T08:00:00.000Z` });
+    insertAction.run({ $id: "act-dash-done-prev-sunday", $title: "上周日完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${addDays(weekStart, -1)} 21:00:00` });
+
+    db.prepare(`
+      INSERT INTO risk_items (id, customer_id, title, target, severity, status, score, due, evidence, action)
+      VALUES ('risk-dash-high', 'cus-dash', '预算路径未确认', '商机', '高', 'open', 86, '本周五', '会议纪要', '尽快对齐')
+    `).run();
+
+    const insertQuickRecord = db.prepare(
+      "INSERT INTO quick_records (id, raw_content, occurred_at, status) VALUES ($id, $rawContent, $occurredAt, 'recorded')",
+    );
+    insertQuickRecord.run({ $id: "qr-dash-monday", $rawContent: "周一拜访记录", $occurredAt: `${weekStart}T09:00:00+08:00` });
+    insertQuickRecord.run({ $id: "qr-dash-sunday", $rawContent: "周日电话记录", $occurredAt: `${addDays(weekStart, 6)}T21:00:00+08:00` });
+    insertQuickRecord.run({ $id: "qr-dash-prev", $rawContent: "上周记录", $occurredAt: `${addDays(weekStart, -3)}T09:00:00+08:00` });
+    db.prepare(
+      "INSERT INTO quick_records (id, raw_content, occurred_at, status, voided_at) VALUES ('qr-dash-voided', '已作废记录', $occurredAt, 'recorded', $voidedAt)",
+    ).run({ $occurredAt: `${weekStart}T10:00:00+08:00`, $voidedAt: shanghaiIso(today, "12:00:00") });
+
+    const insertExpense = db.prepare(`
+      INSERT INTO travel_expenses (id, reference_code, owner, occurred_on, category, purpose, invoice_status, created_by, updated_by, deleted_at)
+      VALUES ($id, $ref, '继振', $occurredOn, 'transport', $purpose, 'pending', '继振', '继振', $deletedAt)
+    `);
+    const insertPayment = db.prepare(`
+      INSERT INTO travel_expense_payments (id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method)
+      VALUES ($id, $expenseId, 1, $paidAt, $cents, $cents, 'personal', 'wechat')
+    `);
+    insertExpense.run({ $id: "exp-dash-monday", $ref: "EXP-DASH-1", $occurredOn: weekStart, $purpose: "周一打车", $deletedAt: null });
+    insertPayment.run({ $id: "exp-dash-monday-pay", $expenseId: "exp-dash-monday", $paidAt: `${weekStart}T10:00:00+08:00`, $cents: 4500 });
+    insertExpense.run({ $id: "exp-dash-sunday", $ref: "EXP-DASH-2", $occurredOn: addDays(weekStart, 6), $purpose: "周日住宿", $deletedAt: null });
+    insertPayment.run({ $id: "exp-dash-sunday-pay", $expenseId: "exp-dash-sunday", $paidAt: `${addDays(weekStart, 6)}T10:00:00+08:00`, $cents: 5500 });
+    insertExpense.run({ $id: "exp-dash-prev", $ref: "EXP-DASH-3", $occurredOn: addDays(weekStart, -2), $purpose: "上周晚餐", $deletedAt: null });
+    insertPayment.run({ $id: "exp-dash-prev-pay", $expenseId: "exp-dash-prev", $paidAt: `${addDays(weekStart, -2)}T19:00:00+08:00`, $cents: 61200 });
+    insertExpense.run({ $id: "exp-dash-deleted", $ref: "EXP-DASH-4", $occurredOn: weekStart, $purpose: "已删除费用", $deletedAt: shanghaiIso(today, "12:00:00") });
+    insertPayment.run({ $id: "exp-dash-deleted-pay", $expenseId: "exp-dash-deleted", $paidAt: `${weekStart}T11:00:00+08:00`, $cents: 99900 });
+
+    const tenderRepository = createHospitalTenderRepository(db, { clock: () => now });
+    const seedNotice = (id, relevance) => tenderRepository.upsertNotice({
+      id,
+      identityKey: `source-dash:${id}`,
+      sourceId: "source-dash",
+      sourceName: "山东政采",
+      city: "济宁市",
+      title: `济宁市第一人民医院信息化采购（${id}）`,
+      url: `https://example.com/${id}`,
+      publishedAt: now.toISOString(),
+      noticeType: "tender",
+      hospitalNames: ["济宁市第一人民医院"],
+      sourceItemId: id,
+      contentSha256: "a".repeat(64),
+      relevance,
+      deadlineText: "2026-09-05",
+    });
+    seedNotice("notice-dash-high", "high");
+    seedNotice("notice-dash-medium", "medium");
+    db.close();
+
+    server = createServer({
+      databaseUrl: dashboardDbUrl,
+      seed: false,
+      aiAnalysisMode: "mock",
+      modelApiKey: "",
+      authRequired: false,
+      authAccount: "",
+      authPassword: "",
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const summary = await request("/api/dashboard/summary");
+    assert.equal(summary.response.status, 200);
+    assertApiEntity("dashboardSummary", summary.body.item);
+
+    const { todayFocus, weeklyTrend, stageCounts } = summary.body.item;
+    assert.equal(todayFocus.date, today);
+    assert.equal(todayFocus.itineraries.count, 1);
+    assert.deepEqual(todayFocus.itineraries.items, [
+      { id: "itn-dash-today", title: "济宁两院拜访", firstStop: "济宁市第一人民医院" },
+    ]);
+    assert.equal(todayFocus.todos.overdueCount, 1);
+    assert.equal(todayFocus.todos.todayCount, 1);
+    assert.deepEqual(todayFocus.todos.items.map((item) => [item.id, item.overdue]), [
+      ["act-dash-overdue", true],
+      ["act-dash-today", false],
+    ]);
+    assert.equal(todayFocus.risks.count, 1);
+    assert.deepEqual(todayFocus.risks.items, [{
+      id: "risk-dash-high",
+      customerName: "济宁市第一人民医院",
+      title: "预算路径未确认",
+      score: 86,
+      severity: "高",
+    }]);
+    assert.equal(todayFocus.tenders.highCount, 1);
+    assert.deepEqual(todayFocus.tenders.items, [
+      { id: "notice-dash-high", title: "济宁市第一人民医院信息化采购（notice-dash-high）", sourceName: "山东政采" },
+    ]);
+
+    assert.deepEqual(weeklyTrend, {
+      weekStart,
+      previousWeekStart,
+      quickRecords: { current: 2, previous: 1 },
+      expenseCents: { current: 10000, previous: 61200 },
+      completedTodos: { current: 2, previous: 2 },
+    });
+
+    assert.deepEqual(
+      stageCounts.slice(0, KNOWN_STAGES.length).map((item) => item.stage),
+      [...KNOWN_STAGES],
+    );
+    assert.deepEqual(stageCounts.find((item) => item.stage === "线索"), { stage: "线索", count: 2, amount: "共 320 万" });
+    assert.deepEqual(stageCounts.find((item) => item.stage === "预算确认"), { stage: "预算确认", count: 1, amount: "共 80 万" });
+    assert.deepEqual(stageCounts.find((item) => item.stage === "初步沟通"), { stage: "初步沟通", count: 0, amount: "" });
+    assert.deepEqual(stageCounts.at(-1), { stage: "招投标", count: 1, amount: "" });
   });
 
   it("creates a quick record and returns deterministic mock AI analysis", async () => {

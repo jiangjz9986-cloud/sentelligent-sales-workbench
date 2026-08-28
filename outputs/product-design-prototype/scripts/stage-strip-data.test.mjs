@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+
+import { KNOWN_STAGES } from "../../../backend/src/opportunities/stageVocabulary.js";
 
 import { createServer } from "vite";
 
@@ -196,6 +199,18 @@ describe("StageStrip business data", () => {
     });
     assert.equal(rows.find(({ stage }) => stage === "初步沟通")?.count, "0");
     assert.equal(renderedTotal, 12);
+  });
+});
+
+describe("stage vocabulary synchronization", () => {
+  it("keeps the frontend fixed stages aligned with the backend vocabulary and renders the funnel bar", async () => {
+    const primitivesSource = await readFile(new URL("../src/components/primitives.jsx", import.meta.url), "utf8");
+    const fixedStagesBlock = primitivesSource.match(/const fixedStages = \[([\s\S]*?)\];/)?.[1] ?? "";
+    const fixedStages = [...fixedStagesBlock.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+
+    assert.deepEqual(fixedStages, [...KNOWN_STAGES]);
+    assert.match(primitivesSource, /stage-strip__bar/);
+    assert.match(primitivesSource, /const maxCount = Math\.max\(1, \.\.\.stageOrder\.map/);
   });
 });
 

@@ -848,7 +848,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         await openOverview();
         cardInteractions.customerTemperature = await clickCardOpening('.progress-row', '日照中医医院', '[data-testid="customer-detail-view"]', null);
         await openOverview();
-        cardInteractions.rhythmCard = await clickCardOpening('.rhythm-row', '补齐', '[data-testid="page-actions"]', '动作列表');
+        cardInteractions.todayFocusTodos = await clickCardOpening('.today-focus-head', '到点待办', '[data-testid="page-actions"]', '动作列表');
         await openOverview();
         cardInteractions.stageCard = await clickCardOpening('.stage-card', '线索', '[data-testid="page-kanban"]', '线索');
 
@@ -2960,7 +2960,7 @@ async function main() {
         assert.equal(result.cardInteractions.customerTenderContext.firstRequestScoped, true, "desktop customer tender entry must scope its first notice request to the selected customer");
         assert.equal(result.cardInteractions.customerTenderContext.canonicalPath, true, "desktop customer tender entry should use the canonical customer tender deep link");
         assert.equal(result.cardInteractions.customerTenderContext.backRestored, true, "desktop customer tender history back should restore the exact customer detail");
-        assert.equal(result.cardInteractions.rhythmCard, true, "desktop rhythm card should open its related module");
+        assert.equal(result.cardInteractions.todayFocusTodos, true, "desktop today-focus todo section should open the actions list");
         assert.equal(result.cardInteractions.stageCard, true, "desktop stage card should open kanban");
         assert.equal(result.cardInteractions.weeklyStartsEmpty, true, "desktop weekly page should start from a real empty state");
         assert.equal(result.cardInteractions.weeklyDailyUsesRealSources, true, "desktop weekly daily view should render real draft sources");

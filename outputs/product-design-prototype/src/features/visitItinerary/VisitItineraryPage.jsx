@@ -11,6 +11,7 @@ import {
   Navigation,
   Pencil,
   Plus,
+  ReceiptText,
   Save,
   Search,
   Trash2,
@@ -150,7 +151,7 @@ function ListView({ items, onOpen, onCreate, query, setQuery, statusFilter, setS
   );
 }
 
-function DetailView({ item, onBack, onEdit, onDelete }) {
+function DetailView({ item, onBack, onEdit, onDelete, onRecordExpense }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   if (!item) {
     return (
@@ -168,6 +169,11 @@ function DetailView({ item, onBack, onEdit, onDelete }) {
       <div className="subview-actions sticky-subview-toolbar">
         <button className="ghost-button" type="button" onClick={onBack}><ArrowLeft size={16} />返回列表</button>
         <div className="detail-toolbar-actions">
+          {onRecordExpense ? (
+            <button className="ghost-button" type="button" data-testid="itinerary-record-expense" onClick={() => onRecordExpense(item)}>
+              <ReceiptText size={16} />记当日费用
+            </button>
+          ) : null}
           <button className="ghost-button" type="button" onClick={onEdit}><Pencil size={16} />修改</button>
           <button className="ghost-button danger" type="button" onClick={() => setConfirmingDelete(true)}><Trash2 size={16} />删除</button>
         </div>
@@ -351,6 +357,7 @@ export function VisitItineraryPage({
   onEdit,
   onSave,
   onDelete,
+  onRecordExpense,
 }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
@@ -367,7 +374,15 @@ export function VisitItineraryPage({
     );
   }
   if (viewMode === "detail") {
-    return <DetailView item={selected} onBack={onBack} onEdit={onEdit} onDelete={onDelete} />;
+    return (
+      <DetailView
+        item={selected}
+        onBack={onBack}
+        onEdit={onEdit}
+        onDelete={onDelete}
+        onRecordExpense={onRecordExpense}
+      />
+    );
   }
   return (
     <ListView

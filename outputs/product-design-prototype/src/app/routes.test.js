@@ -266,6 +266,22 @@ const routeCases = [
     expectedRoute({ page: "itineraries", active: "itinerary", mode: "edit", entityId: "itinerary-1" }),
     "/itineraries/itinerary-1/edit",
   ],
+  [
+    "/travel-expenses?draftCustomer=cus-1&draftDate=2026-08-28&draftItinerary=itn-1&draftPurpose=%E6%8B%9C%E8%AE%BF+%E6%B5%8E%E5%AE%81%E5%B8%82%E7%AC%AC%E4%B8%80%E4%BA%BA%E6%B0%91%E5%8C%BB%E9%99%A2%E3%80%81%E6%B5%8E%E5%AE%81%E5%8C%BB%E5%AD%A6%E9%99%A2%E9%99%84%E5%B1%9E%E5%8C%BB%E9%99%A2&draftRegion=%E6%B5%8E%E5%AE%81",
+    expectedRoute({
+      page: "travel-expenses",
+      active: "expense",
+      mode: "index",
+      filters: {
+        draftCustomer: ["cus-1"],
+        draftDate: ["2026-08-28"],
+        draftItinerary: ["itn-1"],
+        draftPurpose: ["拜访 济宁市第一人民医院、济宁医学院附属医院"],
+        draftRegion: ["济宁"],
+      },
+    }),
+    "/travel-expenses?draftCustomer=cus-1&draftDate=2026-08-28&draftItinerary=itn-1&draftPurpose=%E6%8B%9C%E8%AE%BF+%E6%B5%8E%E5%AE%81%E5%B8%82%E7%AC%AC%E4%B8%80%E4%BA%BA%E6%B0%91%E5%8C%BB%E9%99%A2%E3%80%81%E6%B5%8E%E5%AE%81%E5%8C%BB%E5%AD%A6%E9%99%A2%E9%99%84%E5%B1%9E%E5%8C%BB%E9%99%A2&draftRegion=%E6%B5%8E%E5%AE%81",
+  ],
 ];
 
 describe("workbench route parser and builder", () => {

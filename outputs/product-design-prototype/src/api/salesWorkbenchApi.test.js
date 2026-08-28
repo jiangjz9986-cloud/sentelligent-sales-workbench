@@ -195,7 +195,21 @@ function sampleDashboardSummary(overrides = {}) {
     recentRecords: [{ id: "qr-1", date: "06-03", customer: "Rizhao TCM Hospital", title: "site visit", status: "confirmed", tone: "blue" }],
     opportunities: [sampleOpportunity()],
     rhythm: [{ id: "rhythm-action", time: "18:00", title: "Prepare planning material", type: "下一步动作", target: "actions" }],
-    stageCounts: [{ stage: "planning", count: 1 }],
+    stageCounts: [{ stage: "planning", count: 1, amount: "共 120 万" }],
+    todayFocus: {
+      date: "2026-06-06",
+      itineraries: { count: 0, items: [] },
+      todos: { overdueCount: 0, todayCount: 0, items: [] },
+      risks: { count: 0, items: [] },
+      tenders: { highCount: 0, items: [] },
+    },
+    weeklyTrend: {
+      weekStart: "2026-06-01",
+      previousWeekStart: "2026-05-25",
+      quickRecords: { current: 1, previous: 0 },
+      expenseCents: { current: 0, previous: 0 },
+      completedTodos: { current: 0, previous: 0 },
+    },
     generatedAt: "2026-06-06T00:00:00.000Z",
     ...overrides,
   };

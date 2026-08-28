@@ -19,6 +19,7 @@ import { downloadExpenseListXlsx } from "./ReimbursementOrganizer.jsx";
 import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import { canSaveRegionProfileForWeek } from "./travelExpensePageState.js";
+import { hasResponsibleCity } from "./responsibleRegionModel.js";
 import {
   naturalWeekFor,
   summarizeTravelExpenses,
@@ -70,8 +71,18 @@ export function TravelExpensePage({
   customers = [],
   itineraries = [],
   owner = "",
+  expenseDraft = null,
+  onExpenseDraftConsumed,
 }) {
-  const [week, setWeek] = useState(() => naturalWeekFor(new Date()));
+  // The itinerary→expense draft is captured once at mount: the URL filters are
+  // replaced right after consumption, so the prop turning null later must not
+  // close the drawer or drop the region hint.
+  const expenseDraftRef = useRef(expenseDraft);
+  const [week, setWeek] = useState(() => (
+    expenseDraftRef.current
+      ? naturalWeekFor(new Date(`${expenseDraftRef.current.occurredOn}T12:00:00`))
+      : naturalWeekFor(new Date())
+  ));
   const [activeTab, setActiveTab] = useState("ledger");
   const [expenses, setExpenses] = useState([]);
   const [advances, setAdvances] = useState([]);
@@ -87,6 +98,7 @@ export function TravelExpensePage({
   const [reloadToken, setReloadToken] = useState(0);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingExpense, setEditingExpense] = useState(null);
+  const [draftPrefill, setDraftPrefill] = useState(null);
   const [saving, setSaving] = useState(false);
   const [pendingAttachmentId, setPendingAttachmentId] = useState(null);
   const [pendingInboxId, setPendingInboxId] = useState(null);
@@ -108,6 +120,24 @@ export function TravelExpensePage({
   const previewReturnRef = useRef(null);
   const previewCycleRef = useRef(0);
   const previewRestoreFrameRef = useRef(null);
+  const expenseDraftConsumedRef = useRef(false);
+
+  useEffect(() => {
+    const draft = expenseDraftRef.current;
+    if (!draft || expenseDraftConsumedRef.current) return;
+    expenseDraftConsumedRef.current = true;
+    setEditingExpense(null);
+    // A draft pointing at a deleted itinerary or customer falls back to
+    // "不关联" while the other prefilled fields stay usable.
+    setDraftPrefill({
+      occurredOn: draft.occurredOn,
+      purpose: draft.purpose ?? "",
+      itineraryId: itineraries.some((item) => item.id === draft.itineraryId) ? draft.itineraryId : "",
+      customerId: customers.some((item) => item.id === draft.customerId) ? draft.customerId : "",
+    });
+    setEditorOpen(true);
+    onExpenseDraftConsumed?.();
+  }, [customers, itineraries, onExpenseDraftConsumed]);
 
   const revealActiveTab = useCallback(() => {
     const tabsElement = tabsRef.current;
@@ -356,6 +386,7 @@ export function TravelExpensePage({
       }
       setEditorOpen(false);
       setEditingExpense(null);
+      setDraftPrefill(null);
       setActiveTab("ledger");
       setSelectedLedgerDate(saved.occurredOn);
       setHighlightExpenseId(saved.id);
@@ -598,6 +629,15 @@ export function TravelExpensePage({
   const selectedWeekLoaded = loadedWeekStartRef.current === week.start;
   const regionCalloutVisible = Boolean(selectedWeekLoaded && regionProfile
     && !regionProfile.defaultCity && regionProfile.dateOverrides.length === 0);
+  // Warn (never auto-write: region saves hold a version lock) when the linked
+  // itinerary's destination city is missing from this week's region profile.
+  const draftRegion = expenseDraftRef.current?.region ?? null;
+  const draftWeekStart = expenseDraftRef.current
+    ? naturalWeekFor(new Date(`${expenseDraftRef.current.occurredOn}T12:00:00`)).start
+    : null;
+  const draftRegionCalloutVisible = Boolean(draftRegion && selectedWeekLoaded && regionProfile
+    && week.start === draftWeekStart
+    && !hasResponsibleCity(regionProfile.cities, draftRegion));
 
   return (
     <>
@@ -608,7 +648,7 @@ export function TravelExpensePage({
         <nav ref={tabsRef} className="expense-tabs" aria-label="差旅报销功能" role="tablist">
           {TABS.map((tab, index) => <button key={tab.id} id={`expense-tab-${tab.id}`} className={activeTab === tab.id ? "active" : ""} data-testid={`expense-tab-${tab.id}`} data-trip-region-focus-fallback={tab.id === "ledger" || undefined} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`expense-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => navigate(tab.id)} onKeyDown={(event) => handleTabKeyDown(event, index)}>{tab.label}</button>)}
         </nav>
-        <button className="primary-button" type="button" onClick={() => { setEditingExpense(null); setEditorOpen(true); }}><Plus size={16} />手工记一笔</button>
+        <button className="primary-button" type="button" onClick={() => { setEditingExpense(null); setDraftPrefill(null); setEditorOpen(true); }}><Plus size={16} />手工记一笔</button>
       </header>
 
       <section className="expense-week-strip">
@@ -620,11 +660,12 @@ export function TravelExpensePage({
       </section>
 
       <p className="sr-only" role="status" aria-live="polite">{locationAnnouncement}</p>
-      {error || locationFailure || auxiliaryWarning || regionCalloutVisible ? (
+      {error || locationFailure || auxiliaryWarning || regionCalloutVisible || draftRegionCalloutVisible ? (
         <div className="expense-page-alerts">
           {error ? <div className="expense-page-alert is-error" role="alert"><CircleAlert size={16} /><span>{error}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重新加载</button></div> : null}
           {locationFailure ? <div className="expense-page-alert is-warning" role="status" data-testid="ledger-location-failure"><CircleAlert size={16} /><span>未找到 {locationFailure.referenceCode}，账目可能尚未同步或已经变更。</span><button ref={locationFailureActionRef} className="ghost-button" type="button" onClick={retryLedgerLocation}>重新加载并定位</button></div> : null}
           {auxiliaryWarning ? <div className="expense-page-alert is-warning" role="status"><CircleAlert size={16} /><span>{auxiliaryWarning}</span><button className="ghost-button" type="button" onClick={() => setReloadToken((value) => value + 1)}>重试辅助数据</button></div> : null}
+          {draftRegionCalloutVisible ? <div className="expense-page-alert is-warning" role="status" data-testid="expense-draft-region-warning"><MapPin size={16} /><span>本周区域档案未包含「{draftRegion}」，如当日在该市出差请先补充区域设置。</span><button className="ghost-button" type="button" onClick={() => setRegionSettingsOpen(true)}>打开区域设置</button></div> : null}
           {regionCalloutVisible ? <div className="expense-page-alert is-warning expense-region-callout" role="status"><MapPin size={16} /><span>本周还没有设置出差区域。小小收到付款凭证后会先询问区域，设置后可直接按发生日期匹配。</span><button className="ghost-button" type="button" onClick={() => setRegionSettingsOpen(true)}>设置本周区域</button></div> : null}
         </div>
       ) : null}
@@ -680,7 +721,7 @@ export function TravelExpensePage({
         </div>
       ) : null}
 
-      <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); }} onSave={saveExpense} />
+      <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} prefill={draftPrefill} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); setDraftPrefill(null); }} onSave={saveExpense} />
       <TripRegionSettingsCard open={selectedWeekLoaded && regionSettingsOpen} profile={regionProfile} pending={regionSaving} onClose={() => setRegionSettingsOpen(false)} onSave={saveRegionProfile} />
       </section>
     </>

@@ -1,8 +1,10 @@
 import {
+  AlarmClock,
   BarChart3,
   Bot,
   BriefcaseBusiness,
   CalendarClock,
+  CalendarDays,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -14,6 +16,7 @@ import {
   Lightbulb,
   LineChart,
   Link2,
+  Megaphone,
   MessageSquareText,
   Mic,
   Pencil,
@@ -113,6 +116,199 @@ async function generateBusinessSuggestion(apiClient, backendStatus, payload) {
   return apiClient.generateAiSuggestion(payload);
 }
 
+function formatTodayFocusTime(value) {
+  if (!value) return "时间待确认";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间待确认";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function TodayFocusSection({ icon: Icon, tone, title, badge, rows, moreLabel, emptyText, onOpen }) {
+  return (
+    <section className="today-focus-section">
+      <button className="today-focus-head interactive-card" type="button" onClick={onOpen}>
+        <span className={`mini-icon ${statusTone[tone]}`}>
+          <Icon size={15} />
+        </span>
+        <strong>{title}</strong>
+        {badge}
+        <ChevronRight className="today-focus-chevron" size={15} />
+      </button>
+      {rows.length === 0 ? (
+        <p className="today-focus-empty">{emptyText}</p>
+      ) : (
+        <div className="today-focus-rows">
+          {rows.map((row) => (
+            <button
+              className="today-focus-row interactive-card"
+              key={row.id}
+              type="button"
+              onClick={row.onClick ?? onOpen}
+            >
+              <strong>{row.primary}</strong>
+              {row.secondary ? <small>{row.secondary}</small> : null}
+            </button>
+          ))}
+          {moreLabel ? <small className="today-focus-more">{moreLabel}</small> : null}
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function TodayFocusCard({ focus, setActive, openActionList, openRiskList }) {
+  const itineraries = focus?.itineraries ?? { count: 0, items: [] };
+  const todos = focus?.todos ?? { overdueCount: 0, todayCount: 0, items: [] };
+  const risks = focus?.risks ?? { count: 0, items: [] };
+  const tenders = focus?.tenders ?? { highCount: 0, items: [] };
+  const todoTotal = todos.overdueCount + todos.todayCount;
+
+  return (
+    <Panel title="今日焦点" meta={focus?.date ?? ""} className="overview-today">
+      <div className="today-focus-list">
+        <TodayFocusSection
+          icon={CalendarDays}
+          tone="blue"
+          title="今天的行程"
+          badge={itineraries.count > 0 ? <b className="pill tone-blue">{itineraries.count} 条</b> : null}
+          rows={itineraries.items.slice(0, 2).map((item) => ({
+            id: item.id,
+            primary: item.title,
+            secondary: item.firstStop ? `首站 ${item.firstStop}` : "",
+            onClick: () => setActive("itinerary", { mode: "detail", entityId: item.id }),
+          }))}
+          moreLabel={itineraries.count > 2 ? `共 ${itineraries.count} 条行程` : ""}
+          emptyText="今日无行程，可到行程页安排拜访"
+          onOpen={() => setActive("itinerary")}
+        />
+        <TodayFocusSection
+          icon={AlarmClock}
+          tone="amber"
+          title="到点待办"
+          badge={todoTotal > 0 ? (
+            <span className="today-focus-badges">
+              {todos.overdueCount > 0 ? <b className="pill tone-red">逾期 {todos.overdueCount}</b> : null}
+              {todos.todayCount > 0 ? <b className="pill tone-amber">今日 {todos.todayCount}</b> : null}
+            </span>
+          ) : null}
+          rows={todos.items.slice(0, 2).map((item) => ({
+            id: item.id,
+            primary: item.title,
+            secondary: `${item.overdue ? "已逾期 · " : ""}${formatTodayFocusTime(item.remindAt)}`,
+          }))}
+          moreLabel={todoTotal > 2 ? `共 ${todoTotal} 条到点待办` : ""}
+          emptyText="今日没有到点待办"
+          onOpen={openActionList ? () => openActionList() : () => setActive("actions")}
+        />
+        <TodayFocusSection
+          icon={ShieldAlert}
+          tone="red"
+          title="高风险"
+          badge={risks.count > 0 ? <b className="pill tone-red">{risks.count} 项</b> : null}
+          rows={risks.items.slice(0, 2).map((item) => ({
+            id: item.id,
+            primary: item.customerName || item.title,
+            secondary: `${item.severity ?? "高"} · ${item.score ?? "--"} 分`,
+          }))}
+          moreLabel={risks.count > 2 ? `共 ${risks.count} 项高风险` : ""}
+          emptyText="暂无高风险项"
+          onOpen={openRiskList ? () => openRiskList() : () => setActive("risk")}
+        />
+        <TodayFocusSection
+          icon={Megaphone}
+          tone="teal"
+          title="新招标"
+          badge={tenders.highCount > 0 ? <b className="pill tone-teal">高相关 {tenders.highCount}</b> : null}
+          rows={tenders.items.slice(0, 2).map((item) => ({
+            id: item.id,
+            primary: item.title,
+            secondary: item.sourceName ?? "",
+          }))}
+          moreLabel={tenders.highCount > 2 ? `共 ${tenders.highCount} 条高相关` : ""}
+          emptyText="近 24 小时暂无新招标"
+          onOpen={() => setActive("hospital-tenders")}
+        />
+      </div>
+    </Panel>
+  );
+}
+
+function trendDeltaView(current, previous) {
+  if (current === previous) return { label: "持平", tone: "" };
+  if (previous === 0) return { label: "新增", tone: "is-up" };
+  const delta = Math.round(((current - previous) / previous) * 100);
+  return { label: `${delta > 0 ? "+" : ""}${delta}%`, tone: delta > 0 ? "is-up" : "is-down" };
+}
+
+function formatTrendCny(cents) {
+  return Number.isSafeInteger(cents) ? `¥${(cents / 100).toFixed(2)}` : "¥0.00";
+}
+
+export function WeeklyTrendCard({ trend }) {
+  const metrics = [
+    {
+      id: "quickRecords",
+      label: "快速记录",
+      current: trend?.quickRecords?.current ?? 0,
+      previous: trend?.quickRecords?.previous ?? 0,
+      format: (value) => `${value} 条`,
+    },
+    {
+      id: "expenseCents",
+      label: "差旅报销额",
+      current: trend?.expenseCents?.current ?? 0,
+      previous: trend?.expenseCents?.previous ?? 0,
+      format: formatTrendCny,
+    },
+    {
+      id: "completedTodos",
+      label: "待办完成",
+      current: trend?.completedTodos?.current ?? 0,
+      previous: trend?.completedTodos?.previous ?? 0,
+      format: (value) => `${value} 条`,
+    },
+  ];
+
+  return (
+    <Panel
+      title="周趋势"
+      meta={trend?.weekStart ? `本周 ${trend.weekStart} 起 vs 上周` : "本周 vs 上周"}
+      className="overview-trend"
+    >
+      <div className="trend-list">
+        {metrics.map((metric) => {
+          const max = Math.max(metric.current, metric.previous, 1);
+          const delta = trendDeltaView(metric.current, metric.previous);
+          return (
+            <div className="trend-row" key={metric.id}>
+              <div className="trend-row-head">
+                <strong>{metric.label}</strong>
+                <span className="trend-values">
+                  <b>{metric.format(metric.current)}</b>
+                  <small>vs {metric.format(metric.previous)}</small>
+                  <em className={`trend-delta ${delta.tone}`}>{delta.label}</em>
+                </span>
+              </div>
+              <span className="trend-bar is-current" aria-hidden="true">
+                <i style={{ "--value": `${Math.round((metric.current / max) * 100)}%` }} />
+              </span>
+              <span className="trend-bar is-previous" aria-hidden="true">
+                <i style={{ "--value": `${Math.round((metric.previous / max) * 100)}%` }} />
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}
+
 export function Overview({
   actions = [],
   customersList = [],
@@ -141,7 +337,6 @@ export function Overview({
   const healthItems = summary?.customerHeat ?? [];
   const recentRecords = summary?.recentRecords ?? [];
   const overviewOpportunities = summary?.opportunities ?? opportunitiesList.slice(0, 4);
-  const rhythmItems = summary?.rhythm ?? [];
 
   return (
     <div className="screen-grid overview-grid">
@@ -219,6 +414,15 @@ export function Overview({
         </div>
       </Panel>
 
+      <TodayFocusCard
+        focus={summary?.todayFocus}
+        setActive={setActive}
+        openActionList={openActionList}
+        openRiskList={openRiskList}
+      />
+
+      <WeeklyTrendCard trend={summary?.weeklyTrend} />
+
       <Panel title="最近快速记录" meta="来自拜访与电话" className="overview-records">
         {recentRecords.length === 0 ? (
           <button className="record-row" type="button" onClick={() => setActive("quick")}>
@@ -263,34 +467,7 @@ export function Overview({
         ))}
       </Panel>
 
-      <Panel title="本日推进节奏" meta="销售工作线" className="overview-rhythm">
-        <div className="rhythm-list">
-          {rhythmItems.map(({ time, title, type, target }) => (
-            <button
-              className="rhythm-row interactive-card"
-              key={title}
-              type="button"
-              onClick={() => {
-                if (target === "actions" && openActionList) openActionList();
-                else if (target === "risk" && openRiskList) openRiskList();
-                else if (target) setActive(target);
-                else if (type.includes("方案")) setActive("solution");
-                else if (type.includes("动作")) {
-                  if (openActionList) openActionList();
-                  else setActive("actions");
-                }
-                else setActive("weekly");
-              }}
-            >
-              <span>{time}</span>
-              <strong>{title}</strong>
-              <small>{type}</small>
-            </button>
-          ))}
-        </div>
-      </Panel>
-
-      <Panel title="商机阶段分布" meta="本周" className="overview-stage span-full">
+      <Panel title="商机漏斗" meta="七阶段计数与金额" className="overview-stage span-full">
         <StageStrip stageCounts={summary?.stageCounts} onStageClick={() => setActive("kanban")} />
       </Panel>
     </div>
