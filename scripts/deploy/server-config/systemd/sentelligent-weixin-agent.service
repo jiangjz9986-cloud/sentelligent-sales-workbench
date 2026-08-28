@@ -1,0 +1,25 @@
+[Unit]
+OnFailure=sentelligent-ops-alert@%n.service
+Description=Sentelligent Sales Workbench WeChat Agent Bridge
+After=network-online.target sentelligent-backend.service
+Wants=network-online.target
+
+[Service]
+StartLimitInterval=300
+StartLimitBurst=5
+Type=simple
+User=sentzx
+Group=sentzx
+WorkingDirectory=/opt/sentelligent-sales-workbench/releases/@RELEASE_DIR@/backend
+EnvironmentFile=/opt/sentelligent-sales-workbench/config/backend.env
+Environment=HOME=/opt/sentelligent-sales-workbench/weixin-session
+ExecStart=/opt/sentelligent-sales-workbench/runtime/node-v24/bin/node /opt/sentelligent-sales-workbench/releases/@RELEASE_DIR@/backend/src/weixin/worker.js start
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

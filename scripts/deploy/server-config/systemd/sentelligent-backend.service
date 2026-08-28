@@ -1,0 +1,24 @@
+[Unit]
+OnFailure=sentelligent-ops-alert@%n.service
+Description=Sentelligent Sales Workbench Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+StartLimitInterval=300
+StartLimitBurst=5
+Type=simple
+User=sentzx
+Group=sentzx
+WorkingDirectory=/opt/sentelligent-sales-workbench/releases/@RELEASE_DIR@/backend
+EnvironmentFile=/opt/sentelligent-sales-workbench/config/backend.env
+ExecStart=/opt/sentelligent-sales-workbench/runtime/node-v24/bin/node /opt/sentelligent-sales-workbench/releases/@RELEASE_DIR@/backend/src/server.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

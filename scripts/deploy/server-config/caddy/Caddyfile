@@ -1,0 +1,37 @@
+﻿{
+	admin off
+	default_sni 82.156.210.199
+}
+
+82.156.210.199 {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+
+	encode gzip
+	# qingyang-store begin
+	redir /qingyang /qingyang/
+
+	handle /qingyang/api/* {
+		uri strip_prefix /qingyang
+		reverse_proxy 127.0.0.1:8797
+	}
+
+	handle /qingyang/* {
+		uri strip_prefix /qingyang
+		root * /srv/qingyang-store/app/dist
+		try_files {path} /index.html
+		file_server
+	}
+	# qingyang-store end
+
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8897
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8088
+	}
+}
