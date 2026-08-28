@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-08-28
+
+### 工程健康收官（总蓝图 L 阶段）
+
+- **P0 孤儿测试挂门禁**：全仓唯一孤儿 `src/features/hospitalTender/HospitalTenderPage.test.mjs`（v0.6.26 招标 UI 合入后从未执行）修复后挂入门禁——组件自测试编写后演进为 `customerId ?? ""` 防御写法，两条断言同步该语义（守护意图不变）；新增 `test:tender` 脚本并插入 `qa:local` 链（`test:settings` 之后），4 项全绿。
+- **worktree/分支大清理（主仓库）**：先为 45 个待删分支逐一打本地 archive tag（`archive/<原名>-20260828`，不推远端，可随时 `git branch <名> archive/…` 复活）；A 类 28 个（已被主线包含，实证 `merge-base --is-ancestor` 复核）在主线工作树内 `git branch -d`（git 自身二次校验包含性；其中两个 expense-ledger 分支被脏 worktree 占用，先 `switch --detach` 摘 HEAD——同 commit、工作区文件一字未动——再删）；B 类 17 个（`git cherry` unique=0 内容等价）`-D`。移除 67 个干净 worktree（含 `/private/var` v0.6.25 发布临时 checkout 与 tmp/ 事务副本），保留主 checkout、活动工作树与 8 个脏 worktree（待人工过目）；`ls .worktrees` 与注册表清理后完全一致，无孤儿目录残留。`git worktree prune` + `git gc --prune=now` 收尾。**磁盘回收 ≈8.9 GB**（.worktrees 8.35 GB + 外部 worktree 450 MB + tmp 副本 61 MB + .git 44 MB），分支 78 → 33（主线 + main + 31 个"需确认"，后者仅列清单未删）。
+- **pages.jsx 按域拆分（3887 行 → 13 个域文件 + 桶文件）**：先行单独提交守护测试取源改造——`workbenchState.test.js` 的 `pagesSource` 改为聚合读取 `pages.jsx` + `pages/` 目录全部 `.jsx`（断言一字不动，`salesDataImports` 升级为全局匹配防聚合漏检），另外 8 个读源文本的 scripts 测试统一改走新 helper `scripts/pages-source.mjs`；再做纯剪切搬移：`pages/shared.jsx`（FormField/确认删除/DeleteConfirmationDialog/StakeholderGrid/FieldTags/DecisionChain/DraftPreview/joinedList/sourceRefText/generateBusinessSuggestion 等 14 个跨域符号）+ PageHeading/Overview/QuickRecord/Customer/Opportunity/Actions/Solution/Weekly/Risk/Knowledge/WeixinBinding/Kanban 十二个域文件，`pages.jsx` 原地改为纯桶文件（15 个导出符号面零变化，`App.jsx` 与 fixture 导入语句零改动）；每个域文件 import 集合按引用实证计算，顺带清掉 6 个死 import。类名与测试断言零变化，本地合成栈 14 页真浏览器走查零运行时错误。
+- **差旅账本行删除入口（两轮深测缺口 + `deleteExpense` 死代码清账）**：v0.8.2 账本重设计时旧 `ExpenseLedger` 的行删除按钮未迁入 `ExpenseLedgerWorkbench`，`TravelExpensePage.deleteExpense`（confirm + If-Match 版本头）成为死代码。本版在工作台账本行（桌面表格"操作"列 + 移动卡片 footer）为正式费用行补回删除按钮（`data-testid="expense-delete-ledger"`，红色描边样式、打印隐藏），接回既有 `deleteExpense`（`globalThis.confirm` 弹窗 + `deleteTravelExpense(id, version)` If-Match 乐观锁，语义对齐动作页删除）；待确认行与借款行不出删除入口。新增源级守护断言（组件/接线/CSS/If-Match 四点）。
+- **技术债清账**：v0.7.5 测试基线口径笔误核销（交付报告 §3-8 标记已解决：冻结基线 1148、净增 41）；`.production-cutover.lock` 残留说明写入 `docs/部署记录.md` 运维注意事项（flock 锚点属正常现象，判断切换状态以 `.maintenance-lock` 与进程为准）；生产 outbox 4 条 08-22/25 历史 failed 按部署窗口"只读确认 → SQL 清理 + audit_logs 留痕"处置（仓库无删除合同，`failed` 即终态语义）。阶段词表下沉、naturalPlan 前缀表驱动等其余登记项维持开放并在清册注明去向。
+- **docs 全面回填至 v0.8.x 现状**：README（能力总览 12 业务域、生产状态、质量门口径、文档地图四类入口）、开发进度与路线图（改薄壳：现行路线指蓝图 + v0.1–v0.8.4 历史里程碑表）、开发日志（7-29 之后版本级摘要表）、部署记录（v0.3.0–v0.8.4 部署索引表 + 运维注意事项含全部血泪坑）、需求与验收矩阵（按 12 业务域重列 + 交互/安全运行三表）、项目架构与模块说明（backend 22 子域 + 前端 features + 三调度器 + 迁移 0001–0028 索引 + 审计脱敏与 outbox 终态边界）、新增《森特智行-v0.8.x-交接说明》（本机仓库为唯一主线来源的恢复路径、服务器事实、部署 runbook 十条要点、备份系统、退役记录；v0.4.4 原件保留）。
+- 零数据库迁移、零新依赖、零后端代码改动（后端全量 1276 项基线复验全绿）；前端 qa:local 439 项（较 v0.8.3 基线 434 净增 5：招标页守护 4 + 账本删除接线守护 1）；Chrome/WebKit 集成、根发布测试 249 项与密钥扫描全部通过。本地合成栈深测 17/17（14 页走查 + 建费→行内删除全流程）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.8.3] - 2026-08-28
 
 ### 战情总览升级 + 行程→差旅联动（总蓝图 K 阶段）
