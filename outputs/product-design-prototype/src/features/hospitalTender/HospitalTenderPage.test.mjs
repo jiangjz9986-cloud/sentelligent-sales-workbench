@@ -74,8 +74,8 @@ test("hospital tender can open in one customer context and return to the all-cus
   const source = await readFile(pagePath, "utf8");
 
   assert.match(source, /customerId\s*=\s*""/);
-  assert.match(source, /setCustomerFilter\(customerId\)/);
-  assert.match(source, /useState\(customerId\)/);
+  assert.match(source, /setCustomerFilter\(customerId \?\? ""\)/);
+  assert.match(source, /useState\(customerId \?\? ""\)/);
   assert.match(source, /customerId:\s*customerFilter/);
   assert.match(source, /<option value="">全部客户<\/option>/);
   assert.match(source, /setCustomerFilter\(""\)/);
