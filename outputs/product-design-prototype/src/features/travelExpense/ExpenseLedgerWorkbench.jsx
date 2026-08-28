@@ -15,6 +15,7 @@ import {
   Pencil,
   ReceiptText,
   RefreshCw,
+  Trash2,
   Utensils,
   WalletCards,
 } from "lucide-react";
@@ -128,7 +129,24 @@ function ActionButton({ item, onOpenItem, onReviewItem }) {
   );
 }
 
-function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewItem, onOpenProof, getAttachmentContentResponse }) {
+function DeleteButton({ item, onDeleteItem }) {
+  if (item.kind !== "expense" || !item.formal || typeof onDeleteItem !== "function") return null;
+  return (
+    <button
+      className="ledger-workbench-delete"
+      type="button"
+      aria-label={`删除该笔费用：${itemAccessibleLabel(item)}`}
+      data-testid="expense-delete-ledger"
+      data-ledger-delete-action={item.sourceId}
+      onClick={() => onDeleteItem(item.original, item)}
+    >
+      <Trash2 size={14} aria-hidden="true" />
+      删除
+    </button>
+  );
+}
+
+function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewItem, onOpenProof, onDeleteItem, getAttachmentContentResponse }) {
   return (
     <div className="ledger-workbench-desktop-table">
       <table>
@@ -158,7 +176,7 @@ function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewIte
               </td>
               <td><ProofState item={item} getAttachmentContentResponse={getAttachmentContentResponse} onOpenProof={onOpenProof} /></td>
               <td><InvoiceState item={item} /></td>
-              <td><ActionButton item={item} onOpenItem={onOpenItem} onReviewItem={onReviewItem} /></td>
+              <td><div className="ledger-workbench-row-actions"><ActionButton item={item} onOpenItem={onOpenItem} onReviewItem={onReviewItem} /><DeleteButton item={item} onDeleteItem={onDeleteItem} /></div></td>
             </tr>
             );
           })}
@@ -168,7 +186,7 @@ function LedgerDesktopTable({ items, highlightExpenseId, onOpenItem, onReviewIte
   );
 }
 
-function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem, onOpenProof, getAttachmentContentResponse }) {
+function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem, onOpenProof, onDeleteItem, getAttachmentContentResponse }) {
   return (
     <ul className="ledger-workbench-mobile-list" aria-label="所选日期账目卡片">
       {items.map((item) => {
@@ -186,7 +204,7 @@ function LedgerMobileCards({ items, highlightExpenseId, onOpenItem, onReviewItem
               <div><dt>发票</dt><dd><InvoiceState item={item} /></dd></div>
             </dl>
             {!item.formal ? <p className="ledger-workbench-pending-note"><CircleAlert size={14} aria-hidden="true" />待确认内容不会计入本周合计</p> : null}
-            <footer><ActionButton item={item} onOpenItem={onOpenItem} onReviewItem={onReviewItem} /></footer>
+            <footer><ActionButton item={item} onOpenItem={onOpenItem} onReviewItem={onReviewItem} /><DeleteButton item={item} onDeleteItem={onDeleteItem} /></footer>
           </article>
         </li>
         );
@@ -246,6 +264,7 @@ export function ExpenseLedgerWorkbench({
   onOpenItem,
   onOpenProof,
   onReviewItem,
+  onDeleteItem,
   onOpenRegionSettings,
   getAttachmentContentResponse,
   onRetry,
@@ -362,8 +381,8 @@ export function ExpenseLedgerWorkbench({
 
         {model.selectedDay.items.length > 0 ? (
           <>
-            <LedgerDesktopTable items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} onOpenProof={onOpenProof} getAttachmentContentResponse={getAttachmentContentResponse} />
-            <LedgerMobileCards items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} onOpenProof={onOpenProof} getAttachmentContentResponse={getAttachmentContentResponse} />
+            <LedgerDesktopTable items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} onOpenProof={onOpenProof} onDeleteItem={onDeleteItem} getAttachmentContentResponse={getAttachmentContentResponse} />
+            <LedgerMobileCards items={model.selectedDay.items} highlightExpenseId={highlightExpenseId} onOpenItem={onOpenItem} onReviewItem={onReviewItem} onOpenProof={onOpenProof} onDeleteItem={onDeleteItem} getAttachmentContentResponse={getAttachmentContentResponse} />
           </>
         ) : <EmptyDay day={model.selectedDay} />}
       </section>

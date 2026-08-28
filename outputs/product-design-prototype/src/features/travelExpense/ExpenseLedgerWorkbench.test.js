@@ -23,6 +23,22 @@ describe("expense ledger workbench shell", () => {
     assert.match(component, /event\.key === "End"/);
   });
 
+  it("exposes a delete entry on formal expense rows wired to the versioned delete flow", async () => {
+    const component = await source("ExpenseLedgerWorkbench.jsx");
+    const page = await source("TravelExpensePage.jsx");
+    const css = await source("expenseLedgerWorkbench.css");
+
+    assert.match(component, /function DeleteButton\(\{ item, onDeleteItem \}\)/);
+    assert.match(component, /item\.kind !== "expense" \|\| !item\.formal \|\| typeof onDeleteItem !== "function"/);
+    assert.match(component, /data-testid="expense-delete-ledger"/);
+    assert.match(component, /data-ledger-delete-action=\{item\.sourceId\}/);
+    assert.match(component, /onDeleteItem\(item\.original, item\)/);
+    assert.match(page, /onDeleteItem=\{deleteExpense\}/);
+    assert.match(page, /globalThis\.confirm\?\.\(`确认删除“\$\{expense\.purpose\}”？`\)/);
+    assert.match(page, /deleteTravelExpense\(expense\.id, expense\.version\)/);
+    assert.match(css, /\.ledger-workbench-delete\s*\{/);
+  });
+
   it("visually and semantically separates pending reviews from formal entries", async () => {
     const component = await source("ExpenseLedgerWorkbench.jsx");
 

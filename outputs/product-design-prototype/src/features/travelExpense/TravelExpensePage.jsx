@@ -693,6 +693,7 @@ export function TravelExpensePage({
                 }
                 document.getElementById("expense-ledger-advances")?.scrollIntoView({ behavior: "smooth", block: "start" });
               }}
+              onDeleteItem={deleteExpense}
               onOpenProof={(expense, projection) => {
                 const details = document.getElementById("expense-ledger-proofs");
                 if (details) details.open = true;
