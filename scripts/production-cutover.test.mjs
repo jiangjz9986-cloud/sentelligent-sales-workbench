@@ -977,11 +977,9 @@ describe("controlled production cutover", () => {
   it("captures protected process, unit, Caddyfile, and listener identity", () => {
     assert.deepEqual(shellArray("PROTECTED_SERVICES"), [
       "sentelligent-caddy.service",
-      "codex-account-vault-cloud.service",
       "qingyang-store.service",
-      "codex-vault-mihomo.service",
     ]);
-    assert.deepEqual(shellArray("PROTECTED_PORTS"), ["80", "443", "4876", "8797"]);
+    assert.deepEqual(shellArray("PROTECTED_PORTS"), ["80", "443", "8797"]);
     assert.match(source, /MainPID/);
     assert.match(source, /ActiveEnterTimestamp/);
     assert.match(source, /FragmentPath/);

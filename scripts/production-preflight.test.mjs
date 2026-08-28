@@ -261,17 +261,6 @@ function validLegacyServiceSnapshot() {
     })),
     unrelatedServices: [
       {
-        name: "codex-account-vault-cloud.service",
-        protectionId: "account-vault",
-        protected: true,
-        active: true,
-        enabled: true,
-        mainPid: 4101,
-        activeEnterTimestamp: "2026-08-07T00:00:01.000Z",
-        FragmentPath: "/etc/systemd/system/codex-account-vault-cloud.service",
-        UnitFileSha256: "1".repeat(64),
-      },
-      {
         name: "qingyang-store.service",
         protectionId: "qingyang",
         protected: true,
@@ -282,27 +271,9 @@ function validLegacyServiceSnapshot() {
         FragmentPath: "/etc/systemd/system/qingyang-store.service",
         UnitFileSha256: "2".repeat(64),
       },
-      {
-        name: "codex-vault-mihomo.service",
-        protectionId: "proxy",
-        protected: true,
-        active: true,
-        enabled: true,
-        mainPid: 4103,
-        activeEnterTimestamp: "2026-08-07T00:00:03.000Z",
-        FragmentPath: "/etc/systemd/system/codex-vault-mihomo.service",
-        UnitFileSha256: "3".repeat(64),
-      },
     ],
-    protectedObjects: ["account-vault", "qingyang", "proxy"],
+    protectedObjects: ["qingyang"],
     listeners: [
-      {
-        port: 4876,
-        owner: "account-vault",
-        service: "codex-account-vault-cloud.service",
-        mainPid: 4101,
-        protected: true,
-      },
       {
         port: 8797,
         owner: "qingyang",
@@ -3456,7 +3427,7 @@ describe("production preflight", () => {
       copyFileSync(databasePath, backupPath);
       const plan = bindBackendEnvironment(validLegacyServiceSnapshot(), envFile);
       plan.unrelatedServices.find(
-        (service) => service.protectionId === "account-vault",
+        (service) => service.protectionId === "qingyang",
       ).active = false;
       const servicePlanPath = workspace.write(
         "inactive-protected-service-plan.json",
@@ -3612,13 +3583,13 @@ describe("production preflight", () => {
         candidate.unrelatedServices[0].name = "account-vault.service";
       },
       (candidate) => {
-        candidate.unrelatedServices[1].UnitFileSha256 = "";
+        candidate.unrelatedServices[0].UnitFileSha256 = "";
       },
       (candidate) => {
-        candidate.listeners[0].service = "qingyang-store.service";
+        candidate.listeners[0].service = "sentelligent-backend.service";
       },
       (candidate) => {
-        candidate.listeners[1].mainPid += 1;
+        candidate.listeners[0].mainPid += 1;
       },
     ]) {
       const candidate = structuredClone(plan);

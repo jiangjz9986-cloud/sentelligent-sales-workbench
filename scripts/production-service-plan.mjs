@@ -43,27 +43,17 @@ export const PROJECT_SERVICES = Object.freeze([
   "sentelligent-weixin-agent.service",
 ]);
 
+// CodexAccountVault (codex-account-vault-cloud + codex-vault-mihomo, listener
+// 4876) was retired by owner-approved surgery on 2026-08-28; the co-located
+// inventory keeps only the Qingyang store.
 export const PROTECTED_SERVICES = Object.freeze([
-  Object.freeze({
-    name: "codex-account-vault-cloud.service",
-    protectionId: "account-vault",
-  }),
   Object.freeze({
     name: "qingyang-store.service",
     protectionId: "qingyang",
   }),
-  Object.freeze({
-    name: "codex-vault-mihomo.service",
-    protectionId: "proxy",
-  }),
 ]);
 
 export const PROTECTED_LISTENERS = Object.freeze([
-  Object.freeze({
-    port: 4876,
-    owner: "account-vault",
-    service: "codex-account-vault-cloud.service",
-  }),
   Object.freeze({
     port: 8797,
     owner: "qingyang",

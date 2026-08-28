@@ -61,9 +61,7 @@ const servicePid = {
   "sentelligent-frontend.service": 3102,
   "sentelligent-caddy.service": 3103,
   "sentelligent-weixin-agent.service": 3104,
-  "codex-account-vault-cloud.service": 4101,
   "qingyang-store.service": 4102,
-  "codex-vault-mihomo.service": 4103,
 };
 
 const projectExecStart = {
@@ -159,7 +157,6 @@ function protectedServiceShow(serviceName) {
 
 function listenerSnapshot({ qingyangPid = 4102 } = {}) {
   return [
-    'LISTEN 0 128 127.0.0.1:4876 0.0.0.0:* users:(("node",pid=4101,fd=20))',
     `LISTEN 0 128 127.0.0.1:8797 0.0.0.0:* users:(("node",pid=${qingyangPid},fd=21))`,
   ].join("\n");
 }
@@ -236,8 +233,8 @@ describe("production service-plan generator", () => {
 
     assertCompatiblePlan(plan);
     assert.equal(plan.projectServices.length, 4);
-    assert.equal(plan.unrelatedServices.length, 3);
-    assert.equal(plan.listeners.length, 2);
+    assert.equal(plan.unrelatedServices.length, 1);
+    assert.equal(plan.listeners.length, 1);
     assert.deepEqual(plan.plannedCommands, [
       "systemctl restart sentelligent-backend.service",
       "systemctl restart sentelligent-frontend.service",
@@ -262,7 +259,7 @@ describe("production service-plan generator", () => {
     const showCalls = fixture.calls.filter(
       ([command, args]) => command === "systemctl" && args[0] === "show",
     );
-    assert.equal(showCalls.length, 14);
+    assert.equal(showCalls.length, 10);
     assert.ok(showCalls.every(([, args]) => args.length === 2));
     assert.equal(
       fixture.calls.filter(([command]) => command === "ss").length,
@@ -567,8 +564,8 @@ describe("production service-plan generator", () => {
         status: "created",
         outputPath: output,
         projectServices: 4,
-        protectedServices: 3,
-        protectedListeners: 2,
+        protectedServices: 1,
+        protectedListeners: 1,
       });
       assert.deepEqual(writerOptions, { allowedOutputRoot: root });
       assert.equal(JSON.stringify(result).includes(MACHINE_ID), false);

@@ -109,17 +109,12 @@ const ALLOWED_SERVICE_ACTIONS = Object.freeze([
   "status",
   "stop",
 ]);
+// CodexAccountVault (account-vault + proxy, listener 4876) was retired by
+// owner-approved surgery on 2026-08-28.
 const REQUIRED_PROTECTED_OBJECTS = Object.freeze([
-  "account-vault",
   "qingyang",
-  "proxy",
 ]);
 const REQUIRED_PROTECTED_LISTENERS = Object.freeze([
-  {
-    port: 4876,
-    owner: "account-vault",
-    service: "codex-account-vault-cloud.service",
-  },
   {
     port: 8797,
     owner: "qingyang",
@@ -133,12 +128,7 @@ const SHARED_CADDY_MUTATING_ACTIONS = Object.freeze([
   "stop",
 ]);
 const REQUIRED_PROTECTED_SERVICES = Object.freeze([
-  {
-    name: "codex-account-vault-cloud.service",
-    protectionId: "account-vault",
-  },
   { name: "qingyang-store.service", protectionId: "qingyang" },
-  { name: "codex-vault-mihomo.service", protectionId: "proxy" },
 ]);
 const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;

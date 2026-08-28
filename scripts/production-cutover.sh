@@ -22,16 +22,15 @@ readonly -a SYSTEMCTL_MUTATING_ACTIONS=(
   "stop"
   "restart"
 )
+# CodexAccountVault (codex-account-vault-cloud + codex-vault-mihomo, port
+# 4876) was retired by owner-approved surgery on 2026-08-28.
 readonly -a PROTECTED_SERVICES=(
   "sentelligent-caddy.service"
-  "codex-account-vault-cloud.service"
   "qingyang-store.service"
-  "codex-vault-mihomo.service"
 )
 readonly -a PROTECTED_PORTS=(
   "80"
   "443"
-  "4876"
   "8797"
 )
 
