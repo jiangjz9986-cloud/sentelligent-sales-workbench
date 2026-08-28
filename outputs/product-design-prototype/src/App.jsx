@@ -363,55 +363,12 @@ function EntityUnavailablePanel({ label, onBack }) {
   );
 }
 
-const ROUTE_BY_ACTIVE = Object.freeze({
-  overview: Object.freeze({ page: "overview", mode: "index" }),
-  quick: Object.freeze({ page: "quick-records", mode: "new" }),
-  customer: Object.freeze({ page: "customers", mode: "list" }),
-  "hospital-tenders": Object.freeze({ page: "hospital-tenders", mode: "index" }),
-  opportunity: Object.freeze({ page: "opportunities", mode: "list" }),
-  actions: Object.freeze({ page: "actions", mode: "list" }),
-  risk: Object.freeze({ page: "risks", mode: "list" }),
-  kanban: Object.freeze({ page: "kanban", mode: "index" }),
-  itinerary: Object.freeze({ page: "itineraries", mode: "list" }),
-  expense: Object.freeze({ page: "travel-expenses", mode: "index" }),
-  weekly: Object.freeze({ page: "weekly-reports", mode: "index" }),
-  knowledge: Object.freeze({ page: "knowledge", mode: "list" }),
-  settings: Object.freeze({ page: "settings/config", mode: "index" }),
-  weixin: Object.freeze({ page: "settings/weixin", mode: "index" }),
-  "settings-notifications": Object.freeze({ page: "settings/notifications", mode: "index" }),
-  "settings-tender-schedule": Object.freeze({ page: "settings/tender-schedule", mode: "index" }),
-  solution: Object.freeze({ page: "solutions", mode: "list" }),
-});
-
-const ACTIVE_BY_ROUTE_PAGE = Object.freeze({
-  overview: "overview",
-  "quick-records": "quick",
-  customers: "customer",
-  "hospital-tenders": "hospital-tenders",
-  opportunities: "opportunity",
-  actions: "actions",
-  risks: "risk",
-  kanban: "kanban",
-  itineraries: "itinerary",
-  "travel-expenses": "expense",
-  "weekly-reports": "weekly",
-  knowledge: "knowledge",
-  "settings/config": "settings",
-  "settings/weixin": "weixin",
-  "settings/notifications": "settings-notifications",
-  "settings/tender-schedule": "settings-tender-schedule",
-  solutions: "solution",
-});
-
-const PARENT_NAV_BY_ACTIVE = Object.freeze({
-  "hospital-tenders": "customer",
-  actions: "opportunity",
-  risk: "opportunity",
-  kanban: "opportunity",
-  weixin: "settings",
-  "settings-notifications": "settings",
-  "settings-tender-schedule": "settings",
-});
+import {
+  ACTIVE_BY_ROUTE_PAGE,
+  PARENT_NAV_BY_ACTIVE,
+  ROUTE_BY_ACTIVE,
+  SETTINGS_SECTION_BY_ACTIVE,
+} from "./app/navRoutes.js";
 
 function activeFromRoute(route) {
   return ACTIVE_BY_ROUTE_PAGE[route?.page] ?? "overview";
@@ -1360,11 +1317,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     && scopedOpportunityId
     && scopedOpportunities.length === 0,
   );
-  const settingsSection = {
-    settings: "security",
-    "settings-notifications": "notifications",
-    "settings-tender-schedule": "tender-schedule",
-  }[active] ?? "";
+  const settingsSection = SETTINGS_SECTION_BY_ACTIVE[active] ?? "";
 
   const blockedByBootstrap = activeParent !== "settings" && (
     bootstrapStatus === "loading" ||

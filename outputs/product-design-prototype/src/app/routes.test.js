@@ -942,3 +942,42 @@ describe("public base path", () => {
     assert.throws(() => resolvePublicBasePath("https://example.com/"), /base path/i);
   });
 });
+
+describe("sidebar navigation wiring (navRoutes.js)", () => {
+  it("keeps ROUTE_BY_ACTIVE and ACTIVE_BY_ROUTE_PAGE bidirectionally consistent", async () => {
+    const nav = await import("./navRoutes.js");
+    for (const [active, route] of Object.entries(nav.ROUTE_BY_ACTIVE)) {
+      assert.equal(
+        nav.ACTIVE_BY_ROUTE_PAGE[route.page],
+        active,
+        `route page ${route.page} must map back to nav id ${active}`,
+      );
+    }
+    for (const [page, active] of Object.entries(nav.ACTIVE_BY_ROUTE_PAGE)) {
+      assert.equal(
+        nav.ROUTE_BY_ACTIVE[active]?.page,
+        page,
+        `nav id ${active} must map back to route page ${page}`,
+      );
+    }
+  });
+
+  it("wires every settings sub-page to the settings parent and a rendered section", async () => {
+    const nav = await import("./navRoutes.js");
+    const settingsPages = Object.keys(nav.ACTIVE_BY_ROUTE_PAGE).filter((page) => page.startsWith("settings/"));
+    assert.equal(settingsPages.includes("settings/bookkeeping-log"), true, "the v0.7.1 bookkeeping log page must stay routable");
+    for (const page of settingsPages) {
+      const active = nav.ACTIVE_BY_ROUTE_PAGE[page];
+      if (active === "settings") continue;
+      assert.equal(
+        nav.PARENT_NAV_BY_ACTIVE[active],
+        "settings",
+        `${active} must highlight the settings parent nav`,
+      );
+    }
+    // Focused settings sections must resolve to a SystemSettingsPage section id.
+    assert.equal(nav.SETTINGS_SECTION_BY_ACTIVE["settings-bookkeeping-log"], "bookkeeping-log");
+    assert.equal(nav.SETTINGS_SECTION_BY_ACTIVE["settings-tender-schedule"], "tender-schedule");
+    assert.equal(nav.SETTINGS_SECTION_BY_ACTIVE["settings-notifications"], "notifications");
+  });
+});
