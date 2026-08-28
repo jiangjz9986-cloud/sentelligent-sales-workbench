@@ -11,6 +11,18 @@ const TOOL_POLICIES = new Map([
   ["customer.update", { risk: "R2", confirmation: "explicit_code", reason: "profile_write" }],
   ["customer.delete", { risk: "R3", confirmation: "explicit_code", reason: "destructive_write" }],
   ["opportunity.detail", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  // Opportunity tools (v0.7.6). Stage moves are the highest-frequency action
+  // and fully reversible (moving back restores the prior state, the kanban
+  // shows the change immediately), so they take the lightweight 确认 reply,
+  // as does the descriptive next-step field. Amount/name/risk edits feed
+  // decision analysis and reporting, and creating enters the funnel, so both
+  // keep the six-digit code; deleting hides a business record (R3).
+  ["opportunity.list", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["opportunity.update-stage", { risk: "R1", confirmation: "affirm_language", reason: "stage_write" }],
+  ["opportunity.update-next", { risk: "R1", confirmation: "affirm_language", reason: "ordinary_write" }],
+  ["opportunity.update", { risk: "R2", confirmation: "explicit_code", reason: "profile_write" }],
+  ["opportunity.create", { risk: "R2", confirmation: "explicit_code", reason: "profile_write" }],
+  ["opportunity.delete", { risk: "R3", confirmation: "explicit_code", reason: "destructive_write" }],
   ["sales-decision.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
   ["action-risk.summary", { risk: "R0", confirmation: "none", reason: "read_only" }],
   // Todo tools (v0.7.5). Create/complete/defer are append-or-reversible

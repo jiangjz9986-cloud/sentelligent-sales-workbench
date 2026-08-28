@@ -3,10 +3,11 @@ import { createAgentRegistry } from "./agentRegistry.js";
 import { evaluatePolicy } from "./policy.js";
 import { extractSpokenOccurredAt, resolveSpokenRange } from "./spokenDate.js";
 import { extractSpokenInstant, resolveFutureRange } from "./spokenTime.js";
+import { KNOWN_STAGES, normalizeStageText } from "../opportunities/stageVocabulary.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
-const HELP = "可用：战情总览、客户查询与详情、记支出/收入、发送付款凭证或发票、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、知识检索、销售周报。财务写入会先发送待确认信息；请款结算仅供核对。";
+const HELP = "可用：战情总览、客户查询与详情、商机查询与维护（列表/详情/推进阶段/改金额/新建/删除）、记支出/收入、发送付款凭证或发票、拜访记录、动作风险、行程摘要、差旅与报销汇总、请款结算预览、知识检索、销售周报。财务写入会先发送待确认信息；请款结算仅供核对。";
 
 function clean(value) { return String(value ?? "").trim(); }
 
@@ -412,6 +413,168 @@ function todoListPlan(match, registry, confidence, now) {
   });
 }
 
+// --- v0.7.6 opportunity intents (deterministic, no model) ---
+
+// Write group (design §3.2 G-W). 推进/推到 counts as an opportunity-domain
+// strong verb, so the 商机 stem may be omitted (covers subject-less
+// 推进到方案交流 and suffix references like 把 f3a9c1 推进到预算确认).
+const OPPORTUNITY_STAGE_ADVANCE_RE = /^(?:把|将)?(.{0,60}?)(?:的)?(?:商机)?(?:的)?(?:阶段)?(?:推进|推)(?:到|至)\s*(.+)$/u;
+const OPPORTUNITY_STAGE_SET_RE = /^(?:把|将)?(.{0,60}?)(?:的)?商机(?:的)?阶段(?:改成|改为|设为|设置为|更新为|换成|调整?到)\s*(.+)$/u;
+const OPPORTUNITY_STAGE_BACK_RE = /^(?:把|将)?(.{0,60}?)(?:的)?商机(?:回退|退回)(?:到|至)\s*(.+)$/u;
+const OPPORTUNITY_NEXT_SET_RE = /^(?:把|将)?(.{0,60}?)(?:的)?商机(?:的)?下一步(?:动作)?(?:改成|改为|设为|更新为|换成)\s*(.+)$/u;
+const OPPORTUNITY_NEXT_COLON_RE = /^(.{0,60}?)(?:的)?商机(?:的)?下一步\s*[:：]\s*(.+)$/u;
+const OPPORTUNITY_FIELD_SET_RE = /^(?:把|将)?(.{0,60}?)(?:的)?商机(?:的)?(金额|名称|风险)(?:改成|改为|设为|更新为|换成)\s*(.+)$/u;
+const OPPORTUNITY_CREATE_RE = /^(?:新建|新增|创建)商机\s*[:：]?\s*(.+)$/u;
+const OPPORTUNITY_DELETE_RE = /^(?:删除|删掉)商机\s*[:：]?\s*(.+)$/u;
+// Query group (design §3.2 G-Q, detail before list — the detail suffix is
+// more specific). A leading query verb keeps 查询日照的商机 away from the
+// bare customer search downstream.
+const OPPORTUNITY_DETAIL_QUERY_RE = /^(?:查一下|查查|查询|查)?\s*(.{2,60}?)(?:的)?商机(?:的)?(?:进展|什么进展|情况|什么情况|状态|怎么样)(?:如何|怎么样)?\s*[?？]?$/u;
+const OPPORTUNITY_LIST_RE = /^(?:查一下|查查|查询|查)?\s*(.{0,60}?)(?:的)?(有哪些|有什么)?商机(列表|们)?\s*[?？]?$/u;
+const OPPORTUNITY_PRONOUN_RE = /^(?:它|这个商机|该商机|当前商机|这个项目|该项目|当前项目)$/u;
+// Narrative visit phrasings that happen to end in 商机 stay with the
+// visit-capture fallback instead of becoming opportunity lookups.
+const OPPORTUNITY_SUBJECT_VISIT_HINT = /(?:拜访|拜会|电话|会议|沟通|走访)/u;
+const OPPORTUNITY_FIELD_KEYS = Object.freeze({ 金额: "amount", 名称: "name", 风险: "risk" });
+const OPPORTUNITY_CREATE_SEGMENT_RE = /^(名称|客户|阶段|金额|下一步)\s*[:：]?\s*(.+)$/u;
+const OPPORTUNITY_CREATE_SEGMENT_KEYS = Object.freeze({
+  名称: "name",
+  客户: "customerQuery",
+  阶段: "stage",
+  金额: "amount",
+  下一步: "next",
+});
+const OPPORTUNITY_TARGET_QUESTION = "请说明商机名称或编号，例如「把日照的商机推进到方案交流」。";
+
+function opportunityWriteTarget(subject, context) {
+  const normalized = clean(subject);
+  if (!normalized || OPPORTUNITY_PRONOUN_RE.test(normalized)) {
+    return context.opportunityId ? { opportunityId: context.opportunityId } : null;
+  }
+  if (normalized.length > 200) return null;
+  return { query: normalized };
+}
+
+function opportunityToolPlan(toolName, subject, extra, registry, confidence, context) {
+  const tool = registry.getTool(toolName);
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const target = opportunityWriteTarget(subject, context);
+  if (!target) return clarify(OPPORTUNITY_TARGET_QUESTION, confidence);
+  return makePlan({ tool, arguments: { ...target, ...extra }, confidence, source: "natural" });
+}
+
+function opportunityStagePlan(subject, stageRaw, registry, confidence, context) {
+  const stage = normalizeStageText(stageRaw);
+  if (!stage) {
+    return clarify(`请说明目标阶段，例如「把日照的商机推进到方案交流」。已知阶段：${KNOWN_STAGES.join("、")}。`, confidence);
+  }
+  // Relative phrasing is not auto-resolved in this version (design §7.2):
+  // the user states the explicit target after seeing the known sequence.
+  if (/^(?:下一?个?|上一?个?)(?:阶段|环节|步)$/u.test(stage)) {
+    return clarify(`请直接说明目标阶段。已知阶段顺序：${KNOWN_STAGES.join(" → ")}。`, confidence);
+  }
+  return opportunityToolPlan("opportunity.update-stage", subject, { stage }, registry, confidence, context);
+}
+
+function opportunityNextPlan(subject, nextRaw, registry, confidence, context) {
+  const next = clean(nextRaw);
+  if (!next) return clarify("请说明新的下一步动作，例如「把日照商机的下一步改成 下周带售前调研」。", confidence);
+  if (next.length > 500) return clarify("下一步动作太长了，请精简到 500 字以内。", confidence);
+  return opportunityToolPlan("opportunity.update-next", subject, { next }, registry, confidence, context);
+}
+
+function opportunityFieldPlan(subject, fieldLabel, valueRaw, registry, confidence, context) {
+  const value = clean(valueRaw);
+  if (!value) return clarify(`请说明新的${fieldLabel}。`, confidence);
+  return opportunityToolPlan(
+    "opportunity.update",
+    subject,
+    { changes: { [OPPORTUNITY_FIELD_KEYS[fieldLabel]]: value } },
+    registry,
+    confidence,
+    context,
+  );
+}
+
+function opportunityCreatePlan(payload, registry, confidence) {
+  const tool = registry.getTool("opportunity.create");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const segments = String(payload ?? "").split(/[，,；;]/u).map((part) => part.trim()).filter(Boolean);
+  if (segments.length === 0) {
+    return clarify("请说明商机名称，例如「新建商机 黄岛人民医院AI算力项目，客户 黄岛人民医院」。", confidence);
+  }
+  const fields = {};
+  let name = null;
+  for (const [index, segment] of segments.entries()) {
+    const keyed = segment.match(OPPORTUNITY_CREATE_SEGMENT_RE);
+    if (!keyed) {
+      if (index === 0) {
+        name = segment;
+        continue;
+      }
+      return clarify(`没听懂「${segment}」。可用段：客户（必填）、阶段、金额、下一步。`, confidence);
+    }
+    const key = OPPORTUNITY_CREATE_SEGMENT_KEYS[keyed[1]];
+    const value = keyed[2].trim();
+    if (key === "name") {
+      if (name) return clarify("商机名称出现了两次，请只写一次。", confidence);
+      name = value;
+      continue;
+    }
+    if (fields[key] !== undefined) return clarify(`「${keyed[1]}」出现了两次，请只写一次。`, confidence);
+    fields[key] = key === "stage" ? normalizeStageText(value) || value : value;
+  }
+  if (!name) return clarify("请说明商机名称，例如「新建商机 黄岛人民医院AI算力项目，客户 黄岛人民医院」。", confidence);
+  if (!fields.customerQuery) {
+    return clarify("请注明客户，例如「新建商机 黄岛人民医院AI算力项目，客户 黄岛人民医院」。", confidence);
+  }
+  return makePlan({ tool, arguments: { name, ...fields }, confidence, source: "natural" });
+}
+
+function opportunityWritePlan(value, registry, confidence, context) {
+  const create = value.match(OPPORTUNITY_CREATE_RE);
+  if (create) return opportunityCreatePlan(create[1], registry, confidence);
+  const remove = value.match(OPPORTUNITY_DELETE_RE);
+  if (remove) return opportunityToolPlan("opportunity.delete", remove[1], {}, registry, confidence, context);
+  const stageSet = value.match(OPPORTUNITY_STAGE_SET_RE) ?? value.match(OPPORTUNITY_STAGE_BACK_RE);
+  if (stageSet) return opportunityStagePlan(stageSet[1], stageSet[2], registry, confidence, context);
+  const fieldSet = value.match(OPPORTUNITY_FIELD_SET_RE);
+  if (fieldSet) return opportunityFieldPlan(fieldSet[1], fieldSet[2], fieldSet[3], registry, confidence, context);
+  const nextSet = value.match(OPPORTUNITY_NEXT_SET_RE) ?? value.match(OPPORTUNITY_NEXT_COLON_RE);
+  if (nextSet) return opportunityNextPlan(nextSet[1], nextSet[2], registry, confidence, context);
+  const advance = value.match(OPPORTUNITY_STAGE_ADVANCE_RE);
+  if (advance) return opportunityStagePlan(advance[1], advance[2], registry, confidence, context);
+  return null;
+}
+
+function opportunityDetailPlan(subject, registry, confidence, context) {
+  const tool = registry.getTool("opportunity.detail");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const normalized = clean(subject);
+  const target = !normalized || OPPORTUNITY_PRONOUN_RE.test(normalized)
+    ? context.opportunityId ?? ""
+    : normalized;
+  if (!target) return clarify(OPPORTUNITY_TARGET_QUESTION, confidence);
+  return makePlan({ tool, arguments: { opportunityId: target }, confidence, source: "natural" });
+}
+
+function opportunityListPlan(match, registry, confidence) {
+  const tool = registry.getTool("opportunity.list");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const subject = clean(match[1]);
+  const hasMarker = Boolean(match[2] || match[3]);
+  // Narrative sentences that merely end in 商机 (…拜访了X聊了聊商机) keep the
+  // visit-capture fallback instead of becoming a lookup.
+  if (subject && OPPORTUNITY_SUBJECT_VISIT_HINT.test(subject)) return null;
+  if (!subject && !hasMarker) {
+    return clarify("请带上客户或商机名称，如「日照医院有哪些商机」；发送「商机列表」可查看全部。", confidence);
+  }
+  if (!subject || OPPORTUNITY_PRONOUN_RE.test(subject)) {
+    return makePlan({ tool, arguments: {}, confidence, source: "natural" });
+  }
+  return makePlan({ tool, arguments: { query: subject }, confidence, source: "natural" });
+}
+
 function directArguments(toolName, args, mediaRef, context = {}) {
   if (toolName === "dashboard.summary" || toolName === "itinerary.summary") return {};
   if (toolName === "customer.search" || toolName === "knowledge.search") return { query: args };
@@ -561,6 +724,11 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
       source: "natural",
     });
   }
+  // v0.7.6 opportunity write group. Anchored after the 商机详情 alias and
+  // before 项目分析; it must stay ahead of the customer field-change regex
+  // below so 把X商机的名称改成Y is not swallowed by the customer tools.
+  const opportunityWrite = opportunityWritePlan(value, registry, confidence, context);
+  if (opportunityWrite) return opportunityWrite;
   const projectAnalysis = value.match(/^项目分析(?:\s+(.+))?$/u);
   if (projectAnalysis) {
     if (!projectAnalysis[1] && !context.opportunityId && context.customerId) {
@@ -686,6 +854,18 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
     const firstValue = clauses.shift() ?? "";
     return customerUpdatePlan(subject, [`${verb}${kind} ${firstValue}`, ...clauses], registry, confidence, context);
   }
+  // v0.7.6 opportunity query group. Anchored before the customer search and
+  // bare 查询 fallbacks so 查询日照的商机 stays an opportunity list instead of
+  // becoming a customer search. Detail runs before list (more specific suffix).
+  const opportunityProgress = value.match(OPPORTUNITY_DETAIL_QUERY_RE);
+  if (opportunityProgress) {
+    return opportunityDetailPlan(opportunityProgress[1], registry, confidence, context);
+  }
+  const opportunityList = value.match(OPPORTUNITY_LIST_RE);
+  if (opportunityList) {
+    const plan = opportunityListPlan(opportunityList, registry, confidence);
+    if (plan) return plan;
+  }
   const customer = value.match(/^(?:客户|查询客户)\s+(.+)$/);
   if (customer) {
     const tool = registry.getTool("customer.search");
@@ -701,7 +881,23 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
   );
   if (customerProfile) {
     const subject = clean(customerProfile[1]);
-    const excluded = /(?:项目|商机|报销|周报|记账|请款|发票|凭证|行程|差旅|风险|待办|知识)$/u.test(subject);
+    // v0.7.6 tech-debt repayment (v0.7.2 design risk 3): 商机/项目 subjects
+    // forward to the opportunity detail tool instead of being excluded to
+    // unknown. Normal traffic is captured upstream by the opportunity query
+    // group; this branch is the safety net for variants like X商机资料.
+    const opportunitySubject = subject.match(/^(.{0,58}?)(?:的)?(?:商机|项目)$/u);
+    if (opportunitySubject) {
+      const inner = clean(opportunitySubject[1]);
+      const target = !inner || /^(?:它|这个|该|当前)$/u.test(inner) ? context.opportunityId ?? "" : inner;
+      if (!target) return clarify(OPPORTUNITY_TARGET_QUESTION, confidence);
+      return makePlan({
+        tool: registry.getTool("opportunity.detail"),
+        arguments: { opportunityId: target },
+        confidence,
+        source: "natural",
+      });
+    }
+    const excluded = /(?:报销|周报|记账|请款|发票|凭证|行程|差旅|风险|待办|知识)$/u.test(subject);
     if (!excluded) {
       const target = CUSTOMER_PRONOUN_RE.test(subject) ? context.customerId ?? "" : subject;
       return makePlan({

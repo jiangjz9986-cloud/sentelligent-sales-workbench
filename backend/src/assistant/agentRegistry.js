@@ -59,6 +59,40 @@ export const TOOL_DEFINITIONS = Object.freeze([
     expectedVersion: { type: "number", required: false },
   }),
   tool("opportunity.detail", "opportunity", "查询一个商机的限界详情", { opportunityId: { type: "string", required: true } }),
+  tool("opportunity.list", "opportunity", "按客户或关键词查询商机列表", {
+    query: { type: "string", required: false },
+  }),
+  tool("opportunity.update-stage", "opportunity", "修改商机阶段", {
+    opportunityId: { type: "string", required: false },
+    query: { type: "string", required: false },
+    stage: { type: "string", required: true },
+    expectedVersion: { type: "number", required: false },
+  }),
+  tool("opportunity.update-next", "opportunity", "修改商机下一步动作", {
+    opportunityId: { type: "string", required: false },
+    query: { type: "string", required: false },
+    next: { type: "string", required: true },
+    expectedVersion: { type: "number", required: false },
+  }),
+  tool("opportunity.update", "opportunity", "修改商机档案（金额/名称/风险）", {
+    opportunityId: { type: "string", required: false },
+    query: { type: "string", required: false },
+    changes: { type: "object", required: true },
+    expectedVersion: { type: "number", required: false },
+  }),
+  tool("opportunity.create", "opportunity", "新建商机档案", {
+    name: { type: "string", required: true },
+    customerQuery: { type: "string", required: false },
+    customerId: { type: "string", required: false },
+    stage: { type: "string", required: false },
+    amount: { type: "string", required: false },
+    next: { type: "string", required: false },
+  }),
+  tool("opportunity.delete", "opportunity", "删除商机（软删除）", {
+    opportunityId: { type: "string", required: false },
+    query: { type: "string", required: false },
+    expectedVersion: { type: "number", required: false },
+  }),
   tool("sales-decision.preview", "sales-decision", "基于限界业务快照预览项目分析", { opportunityId: { type: "string", required: true } }),
   tool("action-risk.summary", "action-risk", "查询未完成动作和活跃风险摘要", {
     customerId: { type: "string", required: false },

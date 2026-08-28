@@ -12,6 +12,7 @@ const REQUIRED_CAPABILITY_IDS = [
   "customer.search",
   "customer.detail",
   "opportunity.detail",
+  "opportunity.write",
   "visit-capture",
   "travel-expense.summary",
   "reimbursement-report",
@@ -52,6 +53,23 @@ describe("小小 capability metadata catalog", () => {
       assert.ok(byId.get("visit-capture").mappings.tools.includes(tool), tool);
     }
     assert.ok(byId.get("reimbursement-report").mappings.tools.includes("reimbursement-report.preview"));
+    for (const tool of [
+      "opportunity.list",
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ]) {
+      assert.ok(byId.get("opportunity.write").mappings.tools.includes(tool), tool);
+    }
+    assert.equal(byId.get("opportunity.write").confirmationLevel, "explicit");
+    assert.deepEqual(byId.get("opportunity.write").mappings.apis, [
+      "POST /api/opportunities",
+      "PATCH /api/opportunities/:id",
+      "DELETE /api/opportunities/:id",
+    ]);
+    assert.match(byId.get("sales-decision.preview").description, /阶段升级检查/u);
     assert.equal(byId.get("sales-decision.preview").status, "ready");
     assert.equal(byId.get("sales-decision.preview").unavailableReason, null);
     assert.equal(byId.get("advance-settlement").status, "ready");

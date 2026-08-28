@@ -105,6 +105,34 @@ describe("versioned assistant agent manifests", () => {
     assert.match(customer.systemPrompt, /服务端执行/u);
   });
 
+  it("registers the opportunity write tools and preview task types on the opportunity manifest (v0.7.6)", () => {
+    const registry = createAgentManifestRegistry();
+    const opportunity = registry.get("opportunity");
+    assert.deepEqual(opportunity.tools, [
+      "opportunity.detail",
+      "opportunity.list",
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ]);
+    assert.deepEqual(opportunity.taskTypes, [
+      "search",
+      "detail",
+      "stage_review",
+      "change_preview",
+      "create_preview",
+      "delete_preview",
+    ]);
+    assert.equal(opportunity.confirmation.write, "explicit");
+    assert.equal(opportunity.modelPolicy, "none");
+    assert.match(opportunity.systemPrompt, /服务端执行/u);
+    assert.match(opportunity.systemPrompt, /概率与客户关系保持只读/u);
+    assert.match(opportunity.systemPrompt, /阶段升级检查由销售决策 Agent/u);
+    assert.equal(validateAgentManifest(opportunity).id, "opportunity");
+  });
+
   it("returns isolated manifest snapshots", () => {
     const first = getAgentManifest("sales-decision");
     first.taskTypes.push("forged");

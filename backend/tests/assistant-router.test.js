@@ -252,13 +252,162 @@ describe("assistant deterministic router", () => {
 
   it("keeps profile questions away from earlier intents and the visit fallback", () => {
     assert.equal(router.route({ text: "报销什么情况" }).toolName, null);
-    assert.equal(router.route({ text: "这个项目什么情况" }).toolName, null);
-    assert.equal(router.route({ text: "XX商机什么情况" }).toolName, null);
+    // v0.7.6 tech-debt repayment: 商机/项目 subjects now forward to the
+    // opportunity detail tool instead of falling to unknown.
+    const opportunityQuestion = router.route({ text: "XX商机什么情况" });
+    assert.equal(opportunityQuestion.toolName, "opportunity.detail");
+    assert.deepEqual(opportunityQuestion.arguments, { opportunityId: "XX" });
+    const pronounProject = router.route({ text: "这个项目什么情况" });
+    assert.equal(pronounProject.status, "clarify");
+    assert.equal(pronounProject.toolName, null);
+    const pinnedProject = router.route({ text: "这个项目什么情况", context: { opportunityId: "opportunity-9" } });
+    assert.equal(pinnedProject.toolName, "opportunity.detail");
+    assert.deepEqual(pinnedProject.arguments, { opportunityId: "opportunity-9" });
     assert.equal(router.route({ text: "报销周汇总什么情况" }).toolName, "reimbursement-report.preview");
     const visit = router.route({ text: "今天拜访日照中医医院，客户希望补齐材料。" });
     assert.equal(visit.toolName, "visit-capture.collect");
     const bookkeeping = router.route({ text: "支出 18.50 元 打车" });
     assert.equal(bookkeeping.toolName, "bookkeeping.ingest");
+  });
+});
+
+describe("opportunity intents (v0.7.6)", () => {
+  const router = createAssistantRouter({ clock: () => new Date("2026-08-28T02:00:00.000Z") });
+
+  it("routes stage moves to the affirm-confirmed update-stage tool with normalized targets", () => {
+    const advance = router.route({ text: "把日照的商机推进到投标" });
+    assert.equal(advance.status, "confirmation_required");
+    assert.equal(advance.toolName, "opportunity.update-stage");
+    assert.equal(advance.risk, "R1");
+    assert.equal(advance.confirmation, "affirm_language");
+    assert.deepEqual(advance.arguments, { query: "日照", stage: "投标" });
+
+    const set = router.route({ text: "黄岛商机阶段改成方案输出" });
+    assert.equal(set.toolName, "opportunity.update-stage");
+    assert.deepEqual(set.arguments, { query: "黄岛", stage: "方案输出" });
+
+    const back = router.route({ text: "把黄岛的商机回退到调研机会" });
+    assert.equal(back.toolName, "opportunity.update-stage");
+    assert.deepEqual(back.arguments, { query: "黄岛", stage: "调研机会" });
+
+    const suffix = router.route({ text: "把 f3a9c1 推进到预算确认" });
+    assert.deepEqual(suffix.arguments, { query: "f3a9c1", stage: "预算确认" });
+
+    const narrative = router.route({ text: "黄岛商机推进到投标了" });
+    assert.equal(narrative.toolName, "opportunity.update-stage");
+    assert.deepEqual(narrative.arguments, { query: "黄岛", stage: "投标" }, "the mood particle is stripped");
+
+    const contextual = router.route({ text: "推进到方案交流", context: { opportunityId: "opportunity-7" } });
+    assert.deepEqual(contextual.arguments, { opportunityId: "opportunity-7", stage: "方案交流" });
+    const noContext = router.route({ text: "推进到方案交流" });
+    assert.equal(noContext.status, "clarify");
+    const relative = router.route({ text: "把日照的商机推进到下一阶段" });
+    assert.equal(relative.status, "clarify");
+    assert.match(relative.question, /线索 → 初步沟通/u);
+  });
+
+  it("routes next-step edits to the affirm-confirmed update-next tool", () => {
+    const verb = router.route({ text: "把日照商机的下一步改成 下周带售前调研" });
+    assert.equal(verb.status, "confirmation_required");
+    assert.equal(verb.toolName, "opportunity.update-next");
+    assert.equal(verb.confirmation, "affirm_language");
+    assert.deepEqual(verb.arguments, { query: "日照", next: "下周带售前调研" });
+
+    const colon = router.route({ text: "日照商机的下一步：补齐规划材料" });
+    assert.equal(colon.toolName, "opportunity.update-next");
+    assert.deepEqual(colon.arguments, { query: "日照", next: "补齐规划材料" });
+  });
+
+  it("routes amount/name/risk edits, creation, and deletion on the code-confirmed ladder", () => {
+    const amount = router.route({ text: "把日照商机的金额改成 3000 万" });
+    assert.equal(amount.toolName, "opportunity.update");
+    assert.equal(amount.risk, "R2");
+    assert.equal(amount.confirmation, "explicit_code");
+    assert.deepEqual(amount.arguments, { query: "日照", changes: { amount: "3000 万" } });
+
+    const rename = router.route({ text: "把日照商机的名称改成 十五五算力规划" });
+    assert.deepEqual(rename.arguments, { query: "日照", changes: { name: "十五五算力规划" } });
+    const risk = router.route({ text: "把日照商机的风险改成 移动云竞争加剧" });
+    assert.deepEqual(risk.arguments, { query: "日照", changes: { risk: "移动云竞争加剧" } });
+
+    const create = router.route({ text: "新建商机 黄岛人民医院AI算力项目，客户 黄岛人民医院，阶段 线索，金额 500 万" });
+    assert.equal(create.toolName, "opportunity.create");
+    assert.equal(create.risk, "R2");
+    assert.deepEqual(create.arguments, {
+      name: "黄岛人民医院AI算力项目",
+      customerQuery: "黄岛人民医院",
+      stage: "线索",
+      amount: "500 万",
+    });
+    const createWithoutCustomer = router.route({ text: "新建商机 无主商机" });
+    assert.equal(createWithoutCustomer.status, "clarify");
+    assert.match(createWithoutCustomer.question, /请注明客户/u);
+
+    const remove = router.route({ text: "删除商机 a1b2c3" });
+    assert.equal(remove.toolName, "opportunity.delete");
+    assert.equal(remove.risk, "R3");
+    assert.deepEqual(remove.arguments, { query: "a1b2c3" });
+    const removeByName = router.route({ text: "删掉商机 日照中医医院十五五规划" });
+    assert.deepEqual(removeByName.arguments, { query: "日照中医医院十五五规划" });
+  });
+
+  it("routes progress questions and list phrasings to the confirmation-free reads", () => {
+    for (const text of ["日照医院的商机什么进展", "日照医院的商机情况", "日照医院商机状态"]) {
+      const plan = router.route({ text });
+      assert.equal(plan.status, "planned", text);
+      assert.equal(plan.toolName, "opportunity.detail", text);
+      assert.deepEqual(plan.arguments, { opportunityId: "日照医院" }, text);
+    }
+    const scoped = router.route({ text: "日照医院有哪些商机" });
+    assert.equal(scoped.toolName, "opportunity.list");
+    assert.deepEqual(scoped.arguments, { query: "日照医院" });
+    const bareSubject = router.route({ text: "日照的商机" });
+    assert.equal(bareSubject.toolName, "opportunity.list");
+    assert.deepEqual(bareSubject.arguments, { query: "日照" });
+    const listAll = router.route({ text: "商机列表" });
+    assert.equal(listAll.toolName, "opportunity.list");
+    assert.deepEqual(listAll.arguments, {});
+    const queried = router.route({ text: "查询日照的商机" });
+    assert.equal(queried.toolName, "opportunity.list", "查询X的商机 must not fall into the bare customer search");
+    assert.deepEqual(queried.arguments, { query: "日照" });
+    const bare = router.route({ text: "商机" });
+    assert.equal(bare.status, "clarify");
+    assert.match(bare.question, /日照医院有哪些商机/u);
+  });
+
+  it("stays disjoint from the bookkeeping, customer, quick-record, and todo intents", () => {
+    // Bookkeeping group.
+    assert.equal(router.route({ text: "支出 500 元 打车" }).toolName, "bookkeeping.ingest");
+    const amount = router.route({ text: "把商机金额改成 5000 万", context: { opportunityId: "opportunity-7" } });
+    assert.equal(amount.toolName, "opportunity.update", "amount edits never fall into bookkeeping");
+    assert.deepEqual(amount.arguments, { opportunityId: "opportunity-7", changes: { amount: "5000 万" } });
+
+    // Customer group.
+    assert.equal(router.route({ text: "把示例医院的名称改成新医院" }).toolName, "customer.update");
+    assert.equal(router.route({ text: "把示例医院商机的名称改成新名字" }).toolName, "opportunity.update");
+    assert.equal(router.route({ text: "示例医院什么情况" }).toolName, "customer.detail");
+    assert.equal(router.route({ text: "示例医院的商机什么情况" }).toolName, "opportunity.detail");
+    assert.equal(router.route({ text: "上周报销什么情况" }).toolName, null, "excluded subjects still fall through");
+
+    // Quick-record group.
+    assert.equal(router.route({ text: "记一下:黄岛商机推进到投标了" }).toolName, "visit-capture.capture");
+    assert.equal(router.route({ text: "日照的商机记录" }).toolName, "visit-capture.search");
+    assert.equal(router.route({ text: "把记录 abc123 的商机改成黄岛项目" }).toolName, "visit-capture.update");
+    const narrative = router.route({ text: "今天上午拜访了黄岛区中医院聊了聊商机" });
+    assert.equal(narrative.toolName, "visit-capture.collect", "visit narratives ending in 商机 keep the collector");
+
+    // Todo group (v0.7.5 prefixes win).
+    assert.equal(router.route({ text: "提醒我跟进黄岛商机" }).toolName, "action-risk.create");
+    assert.equal(router.route({ text: "待办：黄岛商机方案评审" }).toolName, "action-risk.create");
+
+    // Wide 推进到 boundary: non-opportunity subjects still parse but the
+    // provider blocks them with a self-clarifying not-found card
+    // (behavior change from the visit fallback, noted in release notes).
+    const meeting = router.route({ text: "会议推进到下周" });
+    assert.equal(meeting.toolName, "opportunity.update-stage");
+    assert.deepEqual(meeting.arguments, { query: "会议", stage: "下周" });
+    const itinerary = router.route({ text: "把行程推进到下周" });
+    assert.equal(itinerary.toolName, "opportunity.update-stage");
   });
 });
 

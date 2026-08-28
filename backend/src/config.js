@@ -316,6 +316,16 @@ export function loadConfig(overrides = {}) {
       if (parsed < 5_000) throw new Error("ACTION_REMINDER_POLL_MS must be at least 5000");
       return parsed;
     })(),
+    // Synchronous time budget for the sales-decision stage review attached to
+    // a confirmed forward stage move; on timeout the receipt tells the user to
+    // pull the full analysis via 项目分析 instead of waiting.
+    opportunityStageReviewBudgetMs: (() => {
+      const raw = env.opportunityStageReviewBudgetMs ?? env.OPPORTUNITY_STAGE_REVIEW_BUDGET_MS;
+      if (raw === undefined || raw === null || raw === "") return 8_000;
+      const parsed = boundedPositiveInteger(raw, "OPPORTUNITY_STAGE_REVIEW_BUDGET_MS", 30_000);
+      if (parsed < 1_000) throw new Error("OPPORTUNITY_STAGE_REVIEW_BUDGET_MS must be at least 1000");
+      return parsed;
+    })(),
     hospitalTenderPushplusToken: String(
       env.hospitalTenderPushplusToken ?? env.HOSPITAL_TENDER_PUSHPLUS_TOKEN ?? "",
     ).trim(),

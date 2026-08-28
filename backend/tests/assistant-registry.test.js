@@ -45,4 +45,55 @@ describe("assistant agent and tool registry", () => {
     assert.equal(tools.getTool("customer.search").agentId, "customer");
     assert.equal(tools.getTool("missing.tool"), null);
   });
+
+  it("registers the six opportunity tools with their argument contracts (v0.7.6)", () => {
+    const registry = createAgentRegistry();
+    for (const name of [
+      "opportunity.list",
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ]) {
+      const tool = registry.getTool(name);
+      assert.equal(tool.name, name, name);
+      assert.equal(tool.agentId, "opportunity", name);
+      assert.equal(typeof tool.execute, "undefined", name);
+    }
+    assert.deepEqual(registry.getTool("opportunity.update-stage").arguments, {
+      opportunityId: { type: "string", required: false },
+      query: { type: "string", required: false },
+      stage: { type: "string", required: true },
+      expectedVersion: { type: "number", required: false },
+    });
+    assert.deepEqual(registry.getTool("opportunity.update-next").arguments, {
+      opportunityId: { type: "string", required: false },
+      query: { type: "string", required: false },
+      next: { type: "string", required: true },
+      expectedVersion: { type: "number", required: false },
+    });
+    assert.deepEqual(registry.getTool("opportunity.update").arguments, {
+      opportunityId: { type: "string", required: false },
+      query: { type: "string", required: false },
+      changes: { type: "object", required: true },
+      expectedVersion: { type: "number", required: false },
+    });
+    assert.deepEqual(registry.getTool("opportunity.create").arguments, {
+      name: { type: "string", required: true },
+      customerQuery: { type: "string", required: false },
+      customerId: { type: "string", required: false },
+      stage: { type: "string", required: false },
+      amount: { type: "string", required: false },
+      next: { type: "string", required: false },
+    });
+    assert.deepEqual(registry.getTool("opportunity.delete").arguments, {
+      opportunityId: { type: "string", required: false },
+      query: { type: "string", required: false },
+      expectedVersion: { type: "number", required: false },
+    });
+    assert.deepEqual(registry.getTool("opportunity.list").arguments, {
+      query: { type: "string", required: false },
+    });
+  });
 });

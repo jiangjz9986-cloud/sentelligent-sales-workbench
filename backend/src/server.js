@@ -135,6 +135,7 @@ import {
   createCustomerAssistantAdapter,
   createCustomerPendingPreviewProviders,
 } from "./assistant/customerAssistantAdapter.js";
+import { createOpportunityAssistantAdapter } from "./assistant/opportunityAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./assistant/visitCaptureAssistantAdapter.js";
 import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecordPendingPreviewProviders.js";
 import { createQuickRecordStore } from "./quickRecords/quickRecordStore.js";
@@ -181,6 +182,13 @@ import {
   softDeleteCustomer,
   updateCustomer,
 } from "./customers/customerStore.js";
+import {
+  activeOpportunityEntityRow,
+  createOpportunity,
+  opportunityFromRow,
+  updateOpportunity,
+} from "./opportunities/opportunityStore.js";
+import { createOpportunityPendingPreviewProviders } from "./assistant/opportunityPendingPreviewProviders.js";
 
 const jsonColumns = {
   customer: [
@@ -624,31 +632,6 @@ function parseJson(value, fallback = []) {
 
 function json(value) {
   return JSON.stringify(value ?? []);
-}
-
-function opportunityFromRow(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    version: Number(row.version ?? 1),
-    customerId: row.customer_id,
-    name: row.name,
-    customer: row.customer,
-    stage: row.stage,
-    amount: row.amount,
-    owner: row.owner,
-    probability: row.probability,
-    days: row.days,
-    requirements: parseJson(row.requirements),
-    competitors: parseJson(row.competitors),
-    solutionDirection: parseJson(row.solution_direction),
-    sourceRecord: row.source_record,
-    risk: row.risk,
-    next: row.next,
-    tone: row.tone,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
 }
 
 function quickRecordFromRow(row) {
@@ -1299,23 +1282,6 @@ function activeOpportunityRow(db, id, owner) {
   return row ? { id: row.id, customerId: row.customer_id } : null;
 }
 
-function activeOpportunityEntityRow(db, id, owner) {
-  if (!id) return null;
-  const ownerClause = owner === undefined || owner === null
-    ? ""
-    : " AND opportunities.owner = $owner AND customers.owner = $owner";
-  return get(
-    db,
-    `SELECT opportunities.*
-     FROM opportunities
-     INNER JOIN customers ON customers.id = opportunities.customer_id
-     WHERE opportunities.id = $id
-       AND opportunities.deleted_at IS NULL
-       AND customers.deleted_at IS NULL${ownerClause}`,
-    owner === undefined || owner === null ? { $id: id } : { $id: id, $owner: owner },
-  );
-}
-
 function activeSolutionDraftRow(db, id) {
   if (!id) return null;
   return get(
@@ -1387,92 +1353,12 @@ function quickRecordOwnerScope(requestIdentity, alias = "") {
   };
 }
 
-function createOpportunity(db, body) {
-  const id = randomUUID();
-  run(
-    db,
-    `INSERT INTO opportunities (
-      id, customer_id, name, customer, stage, amount, owner, probability,
-      days, requirements, competitors, solution_direction, source_record,
-      risk, next, tone
-    ) VALUES (
-      $id, $customerId, $name, $customer, $stage, $amount, $owner, $probability,
-      $days, $requirements, $competitors, $solutionDirection, $sourceRecord,
-      $risk, $next, $tone
-    )`,
-    {
-      $id: id,
-      $customerId: body.customerId,
-      $name: body.name,
-      $customer: body.customer ?? null,
-      $stage: body.stage ?? null,
-      $amount: body.amount ?? null,
-      $owner: body.owner ?? null,
-      $probability: body.probability ?? 0,
-      $days: body.days ?? 0,
-      $requirements: json(body.requirements),
-      $competitors: json(body.competitors),
-      $solutionDirection: json(body.solutionDirection),
-      $sourceRecord: body.sourceRecord ?? null,
-      $risk: body.risk ?? null,
-      $next: body.next ?? null,
-      $tone: body.tone ?? null,
-    },
-  );
-  return opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: id }));
-}
-
 function patchValue(body, field, currentValue) {
   return Object.hasOwn(body, field) ? body[field] : currentValue;
 }
 
 function patchJsonValue(body, field, currentValue) {
   return Object.hasOwn(body, field) ? json(body[field]) : json(currentValue);
-}
-
-function updateOpportunity(db, id, body, expectedVersion) {
-  const current = opportunityFromRow(activeOpportunityEntityRow(db, id));
-  if (!current) return null;
-
-  runVersionedUpdate(db, {
-    table: "opportunities",
-    id,
-    expectedVersion,
-    setSql: `customer_id = $customerId,
-         name = $name,
-         customer = $customer,
-         stage = $stage,
-         amount = $amount,
-         owner = $owner,
-         probability = $probability,
-         days = $days,
-         requirements = $requirements,
-         competitors = $competitors,
-         solution_direction = $solutionDirection,
-         source_record = $sourceRecord,
-         risk = $risk,
-         next = $next,
-         tone = $tone`,
-    params: {
-      $customerId: patchValue(body, "customerId", current.customerId),
-      $name: patchValue(body, "name", current.name),
-      $customer: patchValue(body, "customer", current.customer),
-      $stage: patchValue(body, "stage", current.stage),
-      $amount: patchValue(body, "amount", current.amount),
-      $owner: patchValue(body, "owner", current.owner),
-      $probability: patchValue(body, "probability", current.probability),
-      $days: patchValue(body, "days", current.days),
-      $requirements: patchJsonValue(body, "requirements", current.requirements),
-      $competitors: patchJsonValue(body, "competitors", current.competitors),
-      $solutionDirection: patchJsonValue(body, "solutionDirection", current.solutionDirection),
-      $sourceRecord: patchValue(body, "sourceRecord", current.sourceRecord),
-      $risk: patchValue(body, "risk", current.risk),
-      $next: patchValue(body, "next", current.next),
-      $tone: patchValue(body, "tone", current.tone),
-    },
-  });
-
-  return opportunityFromRow(activeOpportunityEntityRow(db, id));
 }
 
 function normalizeTags(tags) {
@@ -2887,6 +2773,12 @@ export function createServer(options = {}) {
       runRepository: assistantAgentRunRepository,
       clock: assistantClock,
     });
+  const assistantOpportunityAdapter = options.assistantOpportunityAdapter
+    ?? createOpportunityAssistantAdapter({
+      snapshotAdapter: assistantBusinessSnapshotAdapter,
+      runRepository: assistantAgentRunRepository,
+      clock: assistantClock,
+    });
   const assistantVisitCaptureAdapter = options.assistantVisitCaptureAdapter
     ?? createVisitCaptureAssistantAdapter({
       config: runtimeConfig,
@@ -2931,6 +2823,7 @@ export function createServer(options = {}) {
       businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
       settlementSnapshotAdapter: assistantSettlementSnapshotAdapter,
       customerAssistantAdapter: assistantCustomerAdapter,
+      opportunityAssistantAdapter: assistantOpportunityAdapter,
       visitCaptureAssistantAdapter: assistantVisitCaptureAdapter,
       quickRecordStore: assistantQuickRecordStore,
       agentRunRepository: assistantAgentRunRepository,
@@ -2970,6 +2863,12 @@ export function createServer(options = {}) {
           customerAdapter: assistantCustomerAdapter,
           resolveBusinessOwner: assistantBusinessOwnerResolver,
           clock: assistantClock,
+        }),
+        ...createOpportunityPendingPreviewProviders({
+          opportunityAdapter: assistantOpportunityAdapter,
+          customerAdapter: assistantCustomerAdapter,
+          db,
+          resolveBusinessOwner: assistantBusinessOwnerResolver,
         }),
       },
     });

@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-08-28
+
+### 小小·商机 agent：查/改阶段、金额、下一步，阶段升级联动销售决策
+
+- 六个商机工具挂入既有 `opportunity` agent（全部确定性解析、不经模型；owner 服务端解析）：`opportunity.list`（R0 免确认，"日照医院有哪些商机/商机列表"，≤8 条候选带阶段/金额/编号后 6 位）、`opportunity.update-stage`（R1 轻确认，"把日照的商机推进到方案交流/回退到调研机会"，语气词与句读归一）、`opportunity.update-next`（R1 轻确认，"下一步改成…/下一步：…"）、`opportunity.update`（R2 六位码，白名单金额/名称/风险逐字段 before→after 预览）、`opportunity.create`（R2 六位码，客户唯一命中必填 + 同客户同名查重）、`opportunity.delete`（R3 六位码软删除，预览卡强提示行动/风险/快速记录/方案草稿关联计数）。既有 `opportunity.detail` 保持 R0，详情卡增补编号/客户/风险/更新时间。
+- 阶段升级联动销售决策 agent：确认执行成功且方向为前进（词表内、非"暂停观察"）时，同步调 `previewSalesDecision`（opportunity_diagnosis）并包 8 秒 race 预算（`OPPORTUNITY_STAGE_REVIEW_BUDGET_MS`，钳 1–30 秒），回执卡尾部追加 ≤4 行"阶段升级检查"（判断/阶段门槛/评分/下一步）；超时或失败提示"发送「项目分析 …」可查看完整分析"，不静默不推独立消息；回退/词表外/暂停目标回执附一行手动提示。分析在业务写事务提交后执行，失败不回滚业务写；`assistant_agent_runs` 以 `assistant-action:{actionId}:stage-review` 事件唯一索引挡重。
+- 阶段词表后端镜像：新增 `backend/src/opportunities/stageVocabulary.js`（线索→初步沟通→调研机会→方案输出→方案交流→预算确认→暂停观察，与 Web 看板 `kanbanStages` 注释互指），方向判定 forward/backward/same/unknown 全 fail-closed；词表外阶段预览卡提示"看板将新增该列，不触发升级检查"但不阻断（与看板 extraStages 兼容）；"推进到下一阶段"相对语式 clarify 列已知序列。
+- 两级消歧坍缩与钉版：`opportunitySearch` 一次 LIKE 商机名 OR 客户名覆盖"客户名→商机列表"；候选卡升级为带阶段/金额/编号后 6 位（detail/项目分析消歧同步升级）；编号后 6 位回指走 owner 可见域内 LIKE 唯一命中（含转义）；商机快照与适配器投影补 `version`，providers 把 `expectedVersion` 钉进持久化参数，服务端 `runVersionedUpdate` 等价版本守卫拒绝并发写。建商机复用 v0.7.2 客户消歧器（clarify/未命中一律 block，不默认取第一个）。
+- 商机写路径抽取为共享模块 `backend/src/opportunities/opportunityStore.js`（`opportunityFromRow`/`createOpportunity`/`updateOpportunity`/`activeOpportunityEntityRow` 自 server.js 迁出非复制，Web 与微信同一份 SQL/审计/版本冲突语义；新增软删/尾码检索/同名查重/关联计数/owner 列表）。审计零新词：`opportunity.create/update/delete` 沿用 Web 同名 + `metadata.source="weixin-assistant"` + `metadata.actionId`；改阶段审计增 `metadata.stageReview`（triggered/skipped_backward/skipped_unknown_stage/skipped_pause，与写同事务原子记录；attached/timeout/failed 结果记录在工具运行输出与回执文本）。建档以 actionId 作实体主键重放安全；群聊拒绝 HTTP 边界先行 403 + provider 写门纵深防御。
+- 技术债核销（v0.7.2 登记）：router 画像句式排除名单重排——商机意图组前置截获（G-W 写组锚定"商机详情"别名后、G-Q 查组锚定客户检索前），名单中"项目|商机"主语从"排除落 unknown"改为转发 `opportunity.detail`（"XX项目什么情况"可查）；与记账/客户/快速记录/待办四组词干的分流回归全部固化（"记一下：黄岛商机推进到投标了"仍是拜访记录、"提醒我跟进黄岛商机"仍是待办、"日照的商机记录"仍是记录检索、金额句式不落记账）。行为变更：宽"推进到"语式使"会议推进到下周"这类非商机主语从拜访兜底改为商机未找到的自澄清卡。
+- 零数据库迁移（opportunities 表 version/deleted_at/next 全现成）；模型路由不变；Web 商机 CRUD 合同零变化。后端全量 1239 项（较 v0.7.5 冻结基线 1189 净增 50 项：阶段词表/store 等价性/六 handler 直测含联动三态/HTTP 全链路 11 用例/路由分流回归/快照 version/eventId 幂等/记账让路合同）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试 249 项与密钥扫描（594 文件零发现）全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.7.5] - 2026-08-28
 
 ### 智能待办：自然语言建待办，到点小小提醒

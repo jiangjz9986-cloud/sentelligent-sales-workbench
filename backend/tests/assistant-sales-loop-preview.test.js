@@ -114,6 +114,47 @@ describe("sales loop preview service", () => {
     db.close();
   });
 
+  it("replays an action-scoped stage-review eventId through the run unique index (v0.7.6)", async () => {
+    const db = fixtureDb();
+    let sequence = 0;
+    const runs = createAssistantAgentRunRepository(db, { idFactory: () => `run-stage-review-${sequence += 1}` });
+    const service = createSalesLoopPreviewService({
+      db,
+      contextRepository: createSalesLoopContextRepository(db, {
+        clock: () => new Date("2026-08-20T10:00:00.000Z"),
+        resolveEntities: () => ({ customer: null, opportunity: null }),
+      }),
+      runRepository: runs,
+      config: { aiAnalysisMode: "mock" },
+      clock: () => new Date("2026-08-20T10:00:00.000Z"),
+    });
+    const eventId = "assistant-action:action-stage-1:stage-review";
+    const first = await service.previewSalesDecision({
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: "conversation-a",
+      eventId,
+      opportunityId: "opportunity-a",
+      analysisType: "opportunity_diagnosis",
+    });
+    assert.equal(first.status, "preview");
+    const second = await service.previewSalesDecision({
+      owner: "owner-a",
+      channel: "weixin",
+      conversationId: "conversation-a",
+      eventId,
+      opportunityId: "opportunity-a",
+      analysisType: "opportunity_diagnosis",
+    });
+    assert.equal(second.status, "preview");
+    assert.equal(second.runId, first.runId, "the event unique index replays instead of creating a second run");
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'sales-decision'").get().count,
+      1,
+    );
+    db.close();
+  });
+
   it("remembers only verified context and rejects missing or cross-owner targets", () => {
     const db = fixtureDb();
     const { service, context } = createService(db);

@@ -9,6 +9,7 @@ function opportunity(id, customerId, overrides = {}) {
   return {
     id,
     customerId,
+    version: 3,
     name: `${id} 升级项目`,
     stage: "方案",
     amount: "120 万",
@@ -128,7 +129,7 @@ describe("opportunity assistant adapter", () => {
     assert.ok(result.unknowns.some((item) => item.key === "relationship"));
   });
 
-  it("previews only non-protected text fields and never writes stage, amount, probability, or version", async () => {
+  it("previews stage/amount/name/risk/next changes while probability, customerId, and version stay protected (v0.7.6)", async () => {
     const adapter = createOpportunityAssistantAdapter({ snapshotAdapter: snapshotAdapter() });
     const result = await adapter.analyze({
       owner: "owner-1",
@@ -137,7 +138,7 @@ describe("opportunity assistant adapter", () => {
       changes: {
         risk: "预算路径已补充",
         next: "等待本人确认后安排交流",
-        stage: "成交",
+        stage: "方案交流",
         amount: "999 万",
         probability: 99,
         version: 999,
@@ -145,17 +146,23 @@ describe("opportunity assistant adapter", () => {
       },
     });
     assert.equal(result.status, "ok");
-    assert.deepEqual(result.changePreview.changedFields, ["risk", "next"]);
+    assert.deepEqual(result.changePreview.changedFields, ["risk", "next", "stage", "amount"]);
     assert.deepEqual(result.changePreview.before, {
       risk: "预算待确认",
       next: "安排技术交流",
+      stage: "方案",
+      amount: "120 万",
     });
     assert.deepEqual(result.changePreview.after, {
       risk: "预算路径已补充",
       next: "等待本人确认后安排交流",
+      stage: "方案交流",
+      amount: "999 万",
     });
-    assert.deepEqual(result.changePreview.rejectedFields, ["stage", "amount", "probability", "version", "customerId"]);
-    assert.equal(result.changePreview.expectedVersion, null);
+    assert.deepEqual(result.changePreview.rejectedFields, ["probability", "version", "customerId"]);
+    assert.deepEqual(result.changePreview.protectedFields, ["customerId", "probability", "version"]);
+    assert.equal(result.changePreview.expectedVersion, 3);
+    assert.equal(result.opportunity.version, 3);
     assert.equal(result.writebackPreview.allowed, false);
     assert.equal(result.writebackAllowed, false);
   });

@@ -441,4 +441,15 @@ describe("assistant bounded business snapshot adapter", () => {
     const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
     assert.equal(adapter.opportunityDetail({ owner: "owner-a", opportunityId: "opportunity-a" }).probability, null);
   });
+
+  it("projects the optimistic-lock version on opportunity detail and search rows (v0.7.6)", () => {
+    db.prepare("UPDATE opportunities SET version = 4 WHERE id = 'opportunity-a'").run();
+    const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
+    const detail = adapter.opportunityDetail({ owner: "owner-a", opportunityId: "opportunity-a" });
+    assert.equal(detail.version, 4);
+    assert.equal(detail.stage !== undefined, true, "existing fields keep flowing");
+    const search = adapter.opportunitySearch({ owner: "owner-a", query: "A项目" });
+    assert.equal(search.items.length, 1);
+    assert.equal(search.items[0].version, 4);
+  });
 });

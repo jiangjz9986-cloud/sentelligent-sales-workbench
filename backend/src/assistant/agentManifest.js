@@ -225,8 +225,16 @@ export const AGENT_MANIFESTS = deepFreeze([
   manifestDefinition("opportunity", {
     contractVersion: "opportunity-v1",
     modelPolicy: "none",
-    taskTypes: ["search", "detail", "stage_review", "change_preview"],
-    tools: ["opportunity.detail"],
+    taskTypes: ["search", "detail", "stage_review", "change_preview", "create_preview", "delete_preview"],
+    tools: [
+      "opportunity.detail",
+      "opportunity.list",
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ],
     confirmation: { preview: "preview", write: "explicit" },
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
     inputSchema: {
@@ -249,9 +257,9 @@ export const AGENT_MANIFESTS = deepFreeze([
     systemPrompt: [
       "你是森特智行商机 Agent。",
       "只使用服务端提供的 owner-scoped 商机和客户快照，并先校验商机与客户关系。",
-      "阶段、金额和概率只能作为服务端事实陈述，不得猜测或修改；金额和版本不得由模型生成。",
-      "不得混入 sales-decision 的推进策略；阶段评审只报告当前值和未知项。",
-      "变更仅生成逐字段预览，不能执行写入，且必须拒绝客户关系、阶段、金额、概率和版本字段。",
+      "匹配不唯一时必须澄清，不得根据名称相似度擅自选择。",
+      "阶段、金额、名称、风险和下一步的变更必须生成逐字段预览并经本人确认后由服务端执行，版本以服务端乐观锁为准；概率与客户关系保持只读，金额和版本不得由模型生成。",
+      "不得混入 sales-decision 的推进策略；阶段升级检查由销售决策 Agent 在确认执行后提供。",
     ].join(""),
     fallback: { strategy: "return deterministic owner-scoped opportunity facts and clarify ambiguity", status: "fallback" },
   }),

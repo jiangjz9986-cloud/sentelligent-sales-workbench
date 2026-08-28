@@ -359,6 +359,67 @@ test("yields capture intent text to the router while a bookkeeping draft is acti
   assert.equal(state.entry.status, "review_required");
 });
 
+// T-BK (v0.7.6 contract): while a delivered bookkeeping draft coexists with an
+// opportunity affirm pending action, an unquoted 确认 belongs to the generic
+// confirmation boundary (yield-path guard 1); six-digit codes aimed at an
+// opportunity pending action also yield; opportunity phrasings are never
+// implicitly bound to the draft (guard 2).
+test("yields an unquoted 确认 and codes to the generic boundary when an opportunity action is pending", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  for (const [actionType, text, classification] of [
+    ["opportunity.update-stage", "确认", { kind: "ordinary" }],
+    ["opportunity.update", "482913", { kind: "code", code: "482913" }],
+    ["opportunity.delete", "取消", { kind: "cancel" }],
+  ]) {
+    const opportunityAction = {
+      ...structuredClone(state.action),
+      id: `opportunity-action-${actionType}`,
+      actionType,
+    };
+    const result = await runtime.handlePending({
+      ...pendingInput(state, text),
+      action: opportunityAction,
+      textClassification: classification,
+    });
+    assert.equal(result, null, `${actionType} ${text}`);
+  }
+  assert.equal(state.completeLocalCalls, 0);
+  assert.equal(state.entry.status, "review_required", "the bookkeeping draft stays untouched");
+});
+
+test("yields opportunity phrasings to the router while a bookkeeping draft is active", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  for (const text of [
+    "把日照的商机推进到方案交流",
+    "把黄岛商机的金额改成 5000 万",
+    "日照医院有哪些商机",
+    "删除商机 a1b2c3",
+  ]) {
+    const input = { ...pendingInput(state, text), action: null };
+    assert.equal(await runtime.handlePending(input), null, text);
+  }
+  assert.equal(state.completeLocalCalls, 0);
+  assert.equal(state.entry.status, "review_required");
+});
+
+test("a quoted bookkeeping 确认 keeps priority over a pending opportunity affirm action", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  const opportunityAction = {
+    ...structuredClone(state.action),
+    id: "opportunity-action-quoted",
+    actionType: "opportunity.update-stage",
+  };
+  const result = await runtime.handlePending({
+    ...pendingInput(state, "确认"),
+    action: structuredClone(opportunityAction),
+    serverData: { quote: { text: "编号：202608180001 待确认记账 BK-AAAAAAAAAAAA" } },
+  });
+  assert.notEqual(result, null, "a quoted draft must stay inside the bookkeeping runtime");
+  assert.equal(result.status, 409);
+  assert.match(result.body.text, /引用的记账草稿不是当前可确认版本/);
+  assert.equal(state.completeLocalCalls, 0);
+});
+
 test("a quoted bookkeeping draft keeps priority over a pending customer action", async () => {
   const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
   const customerAction = {

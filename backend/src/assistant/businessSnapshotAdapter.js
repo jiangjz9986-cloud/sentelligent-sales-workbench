@@ -183,8 +183,10 @@ function customerFromRow(row) {
 
 function opportunityFromRow(row) {
   if (!row) return null;
+  const version = asSafeInteger(row.version);
   return {
     id: row.id,
+    version: version !== null && version >= 1 ? version : null,
     customerId: row.customer_id,
     name: optionalText(row.name, 200),
     customer: optionalText(row.customer, 200),

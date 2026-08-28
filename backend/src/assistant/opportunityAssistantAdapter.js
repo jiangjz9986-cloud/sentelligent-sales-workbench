@@ -3,10 +3,13 @@ import { getAgentManifest } from "./agentManifest.js";
 
 const AGENT_ID = "opportunity";
 const CONTRACT_VERSION = "opportunity-v1";
-const TASK_TYPES = new Set(["search", "detail", "stage_review", "change_preview"]);
+const TASK_TYPES = new Set(["search", "detail", "stage_review", "change_preview", "create_preview", "delete_preview"]);
 const MAX_ITEMS = 100;
 const MAX_TEXT = 2_000;
-const CHANGEABLE_FIELDS = new Set(["name", "risk", "next"]);
+// v0.7.6: stage and amount become server-confirmed changeable fields; the
+// customer relationship, probability, and version stay protected.
+const CHANGEABLE_FIELDS = new Set(["name", "risk", "next", "stage", "amount"]);
+const CHANGE_FIELD_LIMITS = Object.freeze({ name: 300, stage: 100, amount: 100, risk: 500, next: 500 });
 
 function isPlainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -93,6 +96,7 @@ function normalizeOpportunity(value) {
   if (!id) return null;
   return {
     id,
+    version: Number.isSafeInteger(value.version) && value.version >= 1 ? value.version : null,
     customerId: identifier(value.customerId, "opportunity.customerId"),
     name: boundedText(value.name, 300),
     customer: boundedText(value.customer, 300),
@@ -159,7 +163,7 @@ function changePreview(opportunity, changes) {
       rejectedFields.push(key);
       continue;
     }
-    const nextValue = boundedText(value, key === "name" ? 300 : 500);
+    const nextValue = boundedText(value, CHANGE_FIELD_LIMITS[key] ?? 500);
     if (!nextValue) {
       rejectedFields.push(key);
       continue;
@@ -171,12 +175,12 @@ function changePreview(opportunity, changes) {
   return {
     entity: "opportunity",
     opportunityId: opportunity.id,
-    expectedVersion: null,
+    expectedVersion: opportunity.version ?? null,
     before,
     after,
     changedFields,
     rejectedFields,
-    protectedFields: ["customerId", "stage", "amount", "probability", "version"],
+    protectedFields: ["customerId", "probability", "version"],
     requiresHumanConfirmation: true,
   };
 }
@@ -231,7 +235,7 @@ function outputBase({
       requiresHumanConfirmation: true,
       allowed: false,
       changedFields: change?.changedFields ?? [],
-      note: "商机写入工具尚未开放；阶段、金额、概率和版本保持只读，当前不会执行任何写入。",
+      note: "阶段、金额、名称、风险和下一步的变更经确认后由服务端执行；概率与客户关系保持只读。本预览不执行任何写入。",
     },
     writebackAllowed: false,
   };

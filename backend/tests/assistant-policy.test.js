@@ -60,6 +60,38 @@ describe("assistant execution policy", () => {
     }
   });
 
+  it("classifies the opportunity tools on the R0/R1-affirm/R2-code/R3-code ladder (v0.7.6)", () => {
+    assert.deepEqual(getToolPolicy("opportunity.list"), {
+      risk: "R0", confirmation: "none", reason: "read_only", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.update-stage"), {
+      risk: "R1", confirmation: "affirm_language", reason: "stage_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.update-next"), {
+      risk: "R1", confirmation: "affirm_language", reason: "ordinary_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.update"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.create"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.delete"), {
+      risk: "R3", confirmation: "explicit_code", reason: "destructive_write", denied: false,
+    });
+    assert.equal(evaluatePolicy({ toolName: "opportunity.list" }).requiresConfirmation, false);
+    for (const toolName of [
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ]) {
+      assert.equal(evaluatePolicy({ toolName }).requiresConfirmation, true, toolName);
+      assert.equal(evaluatePolicy({ toolName, confirmed: true }).requiresConfirmation, false, toolName);
+    }
+  });
+
   it("denies transport, shell, and database tools", () => {
     for (const name of ["http.request", "sql.query", "shell.exec"]) {
       assert.equal(DENY_LIST.has(name), true);
