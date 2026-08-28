@@ -406,6 +406,7 @@ function displaySession(session) {
   return {
     account: String(session.account).trim(),
     displayName: String(session.displayName ?? session.account).trim() || String(session.account).trim(),
+    role: session.role === "admin" ? "admin" : "member",
     expiresAt: new Date(session.expiresAt).toISOString(),
   };
 }
@@ -1390,6 +1391,35 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     async stopWeixinBinding() {
       const binding = await requestApi("/api/integrations/weixin-agent/login", { method: "DELETE" });
       return binding.item;
+    },
+
+    async listUsers() {
+      const response = await requestApi("/api/admin/users");
+      if (!Array.isArray(response?.items)) throw new TypeError("adminUsers.items: expected array");
+      return response.items;
+    },
+
+    async createUser(payload) {
+      const response = await requestApi("/api/admin/users", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      return response.item;
+    },
+
+    async updateUser(account, payload) {
+      const response = await requestApi(`/api/admin/users/${encodeURIComponent(account)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      return response.item;
+    },
+
+    async changePassword(payload) {
+      return requestApi("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
     },
 
     async getSecuritySettings() {

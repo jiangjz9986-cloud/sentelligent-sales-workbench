@@ -4,14 +4,16 @@ export function clearLegacyAuthSession(storage) {
   storage?.removeItem?.(AUTH_SESSION_STORAGE_KEY);
 }
 
-export function createDisplaySession({ account, displayName, expiresAt } = {}) {
+export function createDisplaySession({ account, displayName, role, expiresAt } = {}) {
   const normalizedAccount = String(account ?? "").trim();
   const normalizedDisplayName = String(displayName ?? "").trim() || normalizedAccount;
+  const normalizedRole = role === "admin" ? "admin" : "member";
   const normalizedExpiresAt = new Date(String(expiresAt ?? "")).toISOString();
 
   return {
     account: normalizedAccount,
     displayName: normalizedDisplayName,
+    role: normalizedRole,
     expiresAt: normalizedExpiresAt,
   };
 }

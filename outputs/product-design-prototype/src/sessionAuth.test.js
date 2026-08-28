@@ -47,9 +47,10 @@ describe("display-only login session", () => {
     assert.deepEqual(result, {
       account: "jiangjz",
       displayName: "姜继振",
+      role: "admin",
       expiresAt: "2026-07-22T00:00:00.000Z",
     });
-    assert.deepEqual(Object.keys(result).sort(), ["account", "displayName", "expiresAt"]);
+    assert.deepEqual(Object.keys(result).sort(), ["account", "displayName", "expiresAt", "role"]);
     assert.equal(Object.hasOwn(result, "token"), false);
     assert.equal(Object.hasOwn(result, "csrfToken"), false);
     assert.equal(Object.hasOwn(result, "createdAt"), false);
@@ -65,8 +66,16 @@ describe("display-only login session", () => {
       {
         account: "jiangjz",
         displayName: "jiangjz",
+        role: "member",
         expiresAt: "2026-07-22T00:00:00.000Z",
       },
     );
+  });
+
+  it("defaults unknown or missing roles to member and keeps admin verbatim", () => {
+    const base = { account: "jiangjz", expiresAt: "2026-07-22T00:00:00.000Z" };
+    assert.equal(sessionAuth.createDisplaySession({ ...base }).role, "member");
+    assert.equal(sessionAuth.createDisplaySession({ ...base, role: "owner" }).role, "member");
+    assert.equal(sessionAuth.createDisplaySession({ ...base, role: "admin" }).role, "admin");
   });
 });

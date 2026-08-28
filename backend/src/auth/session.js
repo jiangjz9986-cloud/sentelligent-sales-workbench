@@ -71,6 +71,29 @@ export function getActiveSession(db, config, cookieValue, now = Date.now()) {
   };
 }
 
+// 按 account 列直查吊销（无需 token 哈希故不收 config）。改密/停用场景使用；
+// exceptSessionId 保留操作者当前会话，防改密后被自己踢出。
+export function revokeSessionsForAccount(db, account, { exceptSessionId, now = Date.now() } = {}) {
+  const normalizedAccount = String(account ?? "").trim();
+  if (!normalizedAccount) return { changes: 0 };
+  const params = {
+    account: normalizedAccount,
+    revokedAt: new Date(now).toISOString(),
+  };
+  let exceptClause = "";
+  if (exceptSessionId) {
+    exceptClause = "AND id != :exceptSessionId";
+    params.exceptSessionId = exceptSessionId;
+  }
+  return db.prepare(`
+    UPDATE auth_sessions
+    SET revoked_at = :revokedAt
+    WHERE account = :account
+      AND revoked_at IS NULL
+      ${exceptClause}
+  `).run(params);
+}
+
 export function revokeSession(db, config, cookieValue, now = Date.now()) {
   if (!/^[A-Za-z0-9_-]{43}$/.test(String(cookieValue ?? ""))) return { changes: 0 };
   return db.prepare(`

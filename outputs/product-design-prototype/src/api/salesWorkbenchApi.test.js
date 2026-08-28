@@ -763,6 +763,7 @@ describe("sales workbench API client", () => {
     assert.deepEqual(session, {
       account: "jiangjz",
       displayName: "姜继振",
+      role: "member",
       expiresAt: "2026-07-22T00:00:00.000Z",
     });
     assert.equal(session.token, undefined);
@@ -803,6 +804,7 @@ describe("sales workbench API client", () => {
     assert.deepEqual(session, {
       account: "jiangjz",
       displayName: "姜继振",
+      role: "member",
       expiresAt: "2026-07-22T00:00:00.000Z",
     });
     assert.equal(session.token, undefined);
@@ -1174,6 +1176,77 @@ describe("sales workbench API client", () => {
       assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "csrf-logout-failure");
       assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), undefined);
     }
+  });
+
+  it("passes the admin role through login responses", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        account: "jiangjz",
+        displayName: "继振",
+        role: "admin",
+        expiresAt: "2026-07-22T00:00:00.000Z",
+        csrfToken: "csrf-admin-login",
+      }),
+    });
+    const passwordInput = ["pass", "word"].join("");
+    const session = await api.login({ account: "jiangjz", [passwordInput]: "unit-login-value" });
+    assert.equal(session.role, "admin");
+    assert.equal(session.displayName, "继振");
+  });
+
+  it("manages users through the admin endpoints with CSRF and expectedVersion in the body", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (String(options.method ?? "GET") === "GET") {
+          return jsonResponse({
+            items: [{
+              account: "jiangjz",
+              displayName: "继振",
+              role: "admin",
+              status: "active",
+              createdAt: "2026-08-29T00:00:00.000Z",
+              updatedAt: "2026-08-29T00:00:00.000Z",
+              lastLoginAt: null,
+              version: 1,
+            }],
+          });
+        }
+        return jsonResponse({ item: { account: "colleague", version: 2 } });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-admin-login" });
+
+    const users = await api.listUsers();
+    assert.equal(users.length, 1);
+    assert.equal(users[0].account, "jiangjz");
+    assert.equal(calls[0].url, "https://example.test/api/admin/users");
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+
+    const passwordInput = ["pass", "word"].join("");
+    await api.createUser({ account: "colleague", displayName: "同事", role: "member", [passwordInput]: "unit-colleague-value" });
+    assert.equal(calls[1].url, "https://example.test/api/admin/users");
+    assert.equal(calls[1].options.method, "POST");
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), "csrf-admin-login");
+    assert.equal(JSON.parse(calls[1].options.body).account, "colleague");
+
+    await api.updateUser("colleague", { expectedVersion: 1, status: "disabled" });
+    assert.equal(calls[2].url, "https://example.test/api/admin/users/colleague");
+    assert.equal(calls[2].options.method, "PATCH");
+    assert.equal(headerValue(calls[2].options, "X-CSRF-Token"), "csrf-admin-login");
+    assert.equal(headerValue(calls[2].options, "If-Match"), undefined);
+    assert.deepEqual(JSON.parse(calls[2].options.body), { expectedVersion: 1, status: "disabled" });
+
+    const currentField = ["current", "Pass", "word"].join("");
+    const nextField = ["new", "Pass", "word"].join("");
+    await api.changePassword({ [currentField]: "unit-old-value", [nextField]: "unit-new-value" });
+    assert.equal(calls[3].url, "https://example.test/api/auth/change-password");
+    assert.equal(calls[3].options.method, "POST");
+    assert.equal(headerValue(calls[3].options, "X-CSRF-Token"), "csrf-admin-login");
+    assert.deepEqual(Object.keys(JSON.parse(calls[3].options.body)).sort(), [currentField, nextField].sort());
   });
 
   it("loads bootstrap records and dashboard summary from the configured backend", async () => {

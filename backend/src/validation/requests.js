@@ -185,6 +185,17 @@ export const requestSchemas = freezeSchema({
     account: text(100, { required: true }),
     password: text(1000, { required: true }),
   },
+  adminUserCreate: {
+    account: text(32, { required: true }), displayName: text(50, { required: true }),
+    password: text(128, { required: true }),
+    role: { type: "enum", values: ["admin", "member"] },
+  },
+  adminUserPatch: {
+    displayName: text(50, { nonEmpty: true }), role: { type: "enum", values: ["admin", "member"] },
+    status: { type: "enum", values: ["active", "disabled"] }, password: text(128, { nonEmpty: true }),
+    expectedVersion: { type: "integer", min: 1, required: true },
+  },
+  changePassword: { currentPassword: text(1000, { required: true }), newPassword: text(128, { required: true }) },
   customerCreate: {
     name: text(200, { required: true }), region: text(100, { nullable: true }), type: text(100, { nullable: true }),
     level: text(50, { nullable: true }), owner: text(100, { nullable: true }), contact: text(500, { nullable: true }),

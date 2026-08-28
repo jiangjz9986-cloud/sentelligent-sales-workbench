@@ -3028,7 +3028,8 @@ async function main() {
     const logoutStart = cdp.networkResponses.length;
     const logoutState = await evaluate(cdp, `
       (async () => {
-        const logout = document.querySelector('button[title="退出登录"]');
+        // v0.9.1 起头像 title = "<显示名> · 退出登录"，用后缀匹配。
+        const logout = document.querySelector('button[title$="退出登录"]');
         if (!logout) throw new Error('Missing logout button');
         logout.click();
         const started = Date.now();

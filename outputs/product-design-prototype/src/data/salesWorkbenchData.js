@@ -13,6 +13,7 @@ import {
   ScrollText,
   Settings,
   ShieldAlert,
+  Users,
   UsersRound,
 } from "lucide-react";
 
@@ -50,6 +51,7 @@ export const moduleSubnavItems = {
   ],
   settings: [
     { id: "settings", label: "安全与 AI 配置", icon: Settings },
+    { id: "settings-users", label: "用户管理", icon: Users },
     { id: "weixin", label: "微信绑定", icon: Bot },
     { id: "settings-notifications", label: "通知服务", icon: BellRing },
     { id: "settings-tender-schedule", label: "招标调度", icon: CalendarClock },

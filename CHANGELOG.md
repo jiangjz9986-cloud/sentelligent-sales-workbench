@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-29
+
+### 认证层：users 表 + 登录双轨 + 用户管理面（总蓝图 v0.9.1 行，多账号设计 L1）
+
+- **迁移 0030（users 表 + env 种子 + assignee 显示名回填）**：`users`（account 主键 `^[a-z0-9]{2,32}$`、display_name、password_hash（scrypt$16384$8$1$ 前缀 CHECK）、role admin|member、status active|disabled、version 乐观锁、last_login_at）；种子读 `AUTH_ACCOUNT`/`AUTH_PASSWORD_HASH`（合法即插入首个 admin `继振`，env-less 彩排语境跳过种子）；`action_items.assignee` 以 `assignee∈users.account` 为闸回填为 display_name（二跑幂等、种子缺席空转）。启动期 `ensureBootstrapAdmin` 兜底补种（**只插不改**，绝不覆盖 UI 改密后的哈希；审计 `user.create` actor=`system:bootstrap`）。三重种子保障 + 双轨回退 + 迁移原子性 + 防呆四则 = 锁死风险为零。
+- **登录双轨（server.js `authenticateLogin`）**：先查 users——行存在则先算 scrypt 再判 status（三条失败路径恒时等价）；**该账号查无行**时回退 env 凭据比对（`configuredCredentialsMatch` 原封保留），命中回退=异常信号 → 警告日志 + 审计 `auth.login.env_fallback`（metadata reason=user_row_missing），计划 v0.9.3 评估移除。成功落 `last_login_at`（不 bump version）。登录与会话端点响应统一为 `{account, displayName, role, expiresAt, csrfToken}`（session 端点每请求查表，角色变更即时生效免重登；回退轨会话 displayName=account、role=member）。限流器/恒时比较/CSRF/7 天 TTL/机器令牌**零改动**，现有生产会话跨版继续有效；`AUTH_ACCOUNT`/`AUTH_PASSWORD_HASH` 本版保留生产强制（种子数据源 + 回退轨兜底）。
+- **admin API 四端点 + 防呆**：`GET|POST /api/admin/users`、`PATCH /api/admin/users/:account`（expectedVersion 乐观锁，冲突 409 VERSION_CONFLICT+currentVersion；重复建号 409 USER_EXISTS；目标缺席 404 USER_NOT_FOUND）与 `POST /api/auth/change-password`（复用登录限流键防会话内暴破；旧密码错回 **403 CURRENT_PASSWORD_INCORRECT** 而非 401——前端对一切 401 全局登出；回退轨会话 409 USER_NOT_PROVISIONED）。防呆二则：不能停用自己（409 SELF_DISABLE_FORBIDDEN）、不能停用/降级最后一个 active admin（409 LAST_ADMIN_PROTECTED）。停用或重置密码即吊销目标全部会话（新 `revokeSessionsForAccount`；本人改密/自重置保留当前会话）。密码策略 10–128 字符；scrypt 计算全部在事务外；机器令牌打 admin 路由由既有白名单闸自动 403 MACHINE_SCOPE_DENIED。新模块 `auth/usersStore.js`（CRUD/乐观锁/计数/兜底种子，SQL 单文件收敛）。
+- **系统配置域写端点 admin 门禁（读不动）**：`PUT|POST|DELETE settings/deepseek-key(+别名)`、`PUT|POST|DELETE settings/pushplus-token(+别名)`、`POST settings/pushplus/test`、`GET|POST|DELETE integrations/weixin-agent/login`（绑定生命周期整组）、`PATCH hospital-tenders/scheduler`、`POST scheduler/run(-next)`、`POST hospital-tenders/run` 统一加 `requireAdminRole`（403 ADMIN_ROLE_REQUIRED，角色每请求查表无缓存）。生产现状单账号=admin，行为零变化。
+- **审计动作词表全量**：`user.create`/`user.update`（before/after 限已变字段）/`user.disable`/`user.enable`/`password.reset`/`password.change`/`auth.login.env_fallback`（组合 PATCH 一次产生多行；吊销计数键用 `revokedCount` 避开审计敏感键正则；哈希绝不入响应/审计/日志）。
+- **前端用户管理面**：新 `features/settings/UserManagementPage.jsx`（admin 可见：列表/新建/编辑/重置密码/停用启用，自己行停用禁用+title 提示，409 词表映射中文 toast、冲突自动刷新列表；member 直击 URL 渲染"需要管理员权限"占位）挂六处注册点（subnav`settings-users`/navRoutes 三表/routes PAGE_META+matchRoute+pathForRoute/App 渲染分支/api 客户端）；系统配置安全子页新增"修改密码"卡（所有角色；旧密码错→"当前密码不正确"、429→限流文案）；侧栏 settings 子导航按 role 过滤（member 仅见"安全设置"）；顶栏头像悬停显示 `显示名 · 退出登录`，登录后头像自动变"继"；`sessionAuth`/`salesWorkbenchApi` role 透传 + `listUsers/createUser/updateUser/changePassword` 四方法。差旅打印单据"报销人"随 displayName 从 `jiangjz` 变"继振"（预期改进）。
+- **深写回 assignee 终态（v0.9.0 §2.4 遗留归本版）**：`upsertActionFromQuickRecord` 的 `$assignee` 改为 `getUser(owner)?.displayName ?? owner`（登录用户确认快速记录后展示列即人名"继振"）；存量由 0030 回填。
+- **明示**：member 登录后左侧导航与业务页面不变，**仍可见全量业务数据**——数据隔离随 v0.9.2；本版仅对系统配置域写端点做 admin 门禁。
+- 一处数据库迁移（0030，生产执行=cutover 后 backend 首启原子应用+env 种子；/dev/shm 双彩排 env-less+带 env）；零新依赖。后端全量 1327 项（较 v0.9.0 基线 1303 净增 24 用例 / 新增断言 ≥190：users-store 46、admin-users-http 81、auth-http 双轨/回退/停用不回退/改密全链、migrations 0030 四态、api 深写回显示名）；前端 qa:local 455 项（较基线 439 净增 16：用户管理页源级 8 + 浏览器走查全链 1 + 改密卡 2 + role 透传 3 + api 四方法 2，`test:user-management` 新挂链）；Chrome/WebKit 集成、根发布测试与两级秘密扫描全部通过（v0.9.0 遗留的 v091 设计文档 finding 已随本版改写清零）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.9.0] - 2026-08-29
 
 ### 地基包：告警面 + L0 owner 清洗 + 审计C余修 + 运维收口（总蓝图 v0.9.0 行）

@@ -58,6 +58,36 @@ test("tender schedule settings expose the existing scheduler controls without sh
   assert.doesNotMatch(source, /JSON\.stringify\s*\(/);
 });
 
+test("the security section carries a change-password card wired to the session-safe endpoint", async () => {
+  const source = await readFile(pagePath, "utf8");
+
+  assert.match(source, /data-testid="change-password-card"/);
+  assert.match(source, /data-testid="change-password-form"/);
+  assert.match(source, /aria-label="当前密码"/);
+  assert.match(source, /aria-label="新密码"/);
+  assert.match(source, /aria-label="确认新密码"/);
+  assert.match(source, /两次输入的新密码不一致/);
+  assert.match(source, /新密码至少 10 个字符/);
+  assert.match(source, /apiClient\.changePassword\(\{/);
+  assert.match(source, /密码已修改，其他已登录设备将需要重新登录/);
+  assert.match(source, /CURRENT_PASSWORD_INCORRECT/);
+  assert.match(source, /当前密码不正确/);
+  assert.match(source, /status === 429/);
+  assert.match(source, /尝试过于频繁，请 15 分钟后再试/);
+});
+
+test("members only see the change-password card in the security section", async () => {
+  const [source, appSource] = await Promise.all([
+    readFile(pagePath, "utf8"),
+    readFile(appPath, "utf8"),
+  ]);
+
+  assert.match(source, /role = "admin"/);
+  assert.match(source, /role !== "admin" && section === "security"/);
+  assert.match(source, /\{role === "admin" \? \(/);
+  assert.match(appSource, /<SystemSettingsPage[\s\S]*?role=\{authSession\?\.role \?\? "member"\}/);
+});
+
 test("grouped settings navigation and controls keep responsive accessible styling", async () => {
   const styles = await readFile(stylesPath, "utf8");
 

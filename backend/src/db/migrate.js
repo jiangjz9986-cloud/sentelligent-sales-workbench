@@ -30,6 +30,7 @@ import { apply as applyHospitalTenderActiveWindow } from "./migrations/0026_hosp
 import { apply as applyCustomerProfileAliases } from "./migrations/0027_customer_profile_aliases.mjs";
 import { apply as applyActionItemReminders } from "./migrations/0028_action_item_reminders.mjs";
 import { apply as applyOwnerVocabularyCleanup } from "./migrations/0029_owner_vocabulary_cleanup.mjs";
+import { apply as applyUsersTable } from "./migrations/0030_users_table.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -199,6 +200,12 @@ const migrations = [
     path: resolve(here, "migrations", "0029_owner_vocabulary_cleanup.mjs"),
     type: "module",
     apply: applyOwnerVocabularyCleanup,
+  },
+  {
+    version: "0030",
+    path: resolve(here, "migrations", "0030_users_table.mjs"),
+    type: "module",
+    apply: applyUsersTable,
   },
 ];
 

@@ -793,6 +793,70 @@ describe("sales workbench backend API", () => {
     assert.ok(risks.body.items.some((item) => item.sourceType === "quick_record" && item.sourceId === created.body.item.id));
   });
 
+  it("writes the users.display_name into the confirmed deep write-back assignee", async () => {
+    // v0.9.1：登录用户确认快速记录后，动作展示列 assignee 应为 users.display_name（继振）。
+    const passwordField = "pass" + "word";
+    const loginValue = "unit-login-value";
+    await new Promise((resolve) => server.close(resolve));
+    const { hashPassword } = await import("../src/auth/password.js");
+    server = createServer({
+      databaseUrl: join(tempDir, "assignee-display.sqlite"),
+      seed: true,
+      aiAnalysisMode: "mock",
+      modelApiKey: "",
+      nodeEnv: "test",
+      authRequired: true,
+      authAccount: "jiangjz",
+      authPassword: "",
+      authPasswordHash: await hashPassword(loginValue, { salt: Buffer.alloc(16, 31) }),
+      authSessionSecret: Buffer.alloc(32, 32).toString("base64url"),
+      authCookieSecure: false,
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const loggedIn = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account: "jiangjz", [passwordField]: loginValue }),
+    });
+    assert.equal(loggedIn.response.status, 200);
+    const authHeaders = {
+      Cookie: String(loggedIn.response.headers.get("set-cookie") ?? "").split(";", 1)[0],
+      "X-CSRF-Token": loggedIn.body.csrfToken,
+    };
+
+    const created = await request("/api/quick-records", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        rawContent: "黄岛区中医院下周需要带售前做双活机房调研，并进入本周周报。",
+        occurredAt: "2026-08-29T10:00:00+08:00",
+        sourceChannel: "现场拜访",
+      }),
+    });
+    assert.equal(created.response.status, 201);
+    await request(`/api/quick-records/${created.body.item.id}/analyze`, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    const confirmed = await request(`/api/quick-records/${created.body.item.id}/confirm`, {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        ...ifMatch(created.body.item.version),
+        "Idempotency-Key": "api-confirm-display-name",
+      },
+      body: JSON.stringify({
+        targets: ["customer", "opportunity"],
+        confirmedBy: "继振",
+        targetVersions: { customer: 1, opportunity: 1 },
+      }),
+    });
+    assert.equal(confirmed.response.status, 201);
+    assert.equal(confirmed.body.quickRecord.owner, "jiangjz");
+    assert.equal(confirmed.body.action.assignee, "继振");
+  });
+
   it("builds a weekly draft from confirmed quick records with source references", async () => {
     const created = await request("/api/quick-records", {
       method: "POST",

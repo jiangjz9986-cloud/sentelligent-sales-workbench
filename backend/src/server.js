@@ -14,13 +14,26 @@ import {
   pruneLoginRateLimits,
   recordLoginFailure,
 } from "./auth/loginRateLimit.js";
-import { validatePasswordHashEncoding, verifyPassword } from "./auth/password.js";
+import { hashPassword, validatePasswordHashEncoding, verifyPassword } from "./auth/password.js";
 import {
   createCsrfToken,
   createSession,
   getActiveSession,
   revokeSession,
+  revokeSessionsForAccount,
 } from "./auth/session.js";
+import {
+  UserNotFoundError,
+  UserVersionConflictError,
+  countActiveAdmins,
+  createUser,
+  ensureBootstrapAdmin,
+  getUser,
+  isValidUserAccount,
+  listUsers,
+  recordLastLogin,
+  updateUserVersioned,
+} from "./auth/usersStore.js";
 import { loadConfig } from "./config.js";
 import { all, get, openDatabase, run } from "./db.js";
 import { createDatabaseIdentity } from "./db/databaseIdentity.js";
@@ -1193,6 +1206,39 @@ function unauthorized(_response, message = "Please sign in", code = "UNAUTHORIZE
   throw new HttpError(401, code, message);
 }
 
+// v0.9.1 角色门禁：角色每请求从 users 表读取，无缓存。机器令牌不进入本闸——
+// admin 路由不在任何 INTEGRATION_ROUTES 白名单内，全局机器闸已回 403。
+function requireAdminRole(db, request) {
+  if (request.authContext?.kind !== "user") return unauthorized();
+  const user = getUser(db, request.authContext.account);
+  if (!user || user.role !== "admin" || user.status !== "active") {
+    throw new HttpError(403, "ADMIN_ROLE_REQUIRED", "Administrator role is required");
+  }
+  return user;
+}
+
+function userResponseItem(user) {
+  if (!user) return null;
+  return {
+    account: user.account,
+    displayName: user.displayName,
+    role: user.role,
+    status: user.status,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    lastLoginAt: user.lastLoginAt,
+    version: user.version,
+  };
+}
+
+const USER_PASSWORD_MIN_LENGTH = 10;
+
+function assertUserPasswordPolicy(password) {
+  if (typeof password !== "string" || password.length < USER_PASSWORD_MIN_LENGTH) {
+    validationFailure("password", "policy");
+  }
+}
+
 const riskStatuses = new Set(["open", "accepted", "in_progress", "deferred", "closed"]);
 const actionStatuses = new Set(["pending", "in_progress", "done", "deferred"]);
 const weeklyReportStatuses = new Set(["draft", "saved", "ready"]);
@@ -1936,9 +1982,8 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
     $customer: customerName,
     $reason: riskText || `来自快速记录 ${quickRecord.id} 的人工确认结果`,
     $due: "待确认",
-    // v0.9.0 L0 transition: the deep write-back assignee follows the record
-    // owner (an account id) until users.display_name lands in v0.9.1.
-    $assignee: quickRecord.owner ?? null,
+    // v0.9.1 终态：展示列用 users.display_name；无行（匿名/机器 owner）保持原值。
+    $assignee: getUser(db, quickRecord.owner)?.displayName ?? quickRecord.owner ?? null,
     $priority: priority,
     $sourceRecordId: quickRecord.id,
     $tone: priority === "高" ? "red" : "blue",
@@ -2281,14 +2326,46 @@ async function authenticateLogin(db, config, body, remoteAddress, now = Date.now
   pruneLoginRateLimits(db, now);
   for (const limiterKey of limiterKeys) assertLoginAllowed(db, limiterKey, now);
 
-  const credentialsValid = await configuredCredentialsMatch(config, body);
+  // v0.9.1 双轨：users 表优先；该账号查无行时回退 env 凭据比对（异常信号，
+  // 计划 v0.9.3 评估移除）。三条失败路径都恰好执行一次 scrypt，保持恒时。
+  const user = getUser(db, account);
+  let fallback = false;
+  let credentialsValid = false;
+  if (user) {
+    const passwordMatches = await verifyPassword(body?.password, user.passwordHash);
+    credentialsValid = passwordMatches && user.status === "active";
+  } else {
+    credentialsValid = await configuredCredentialsMatch(config, body);
+    fallback = credentialsValid;
+  }
   if (!credentialsValid) {
     for (const limiterKey of limiterKeys) recordLoginFailure(db, limiterKey, now);
     return null;
   }
 
   for (const limiterKey of limiterKeys) clearLoginFailures(db, limiterKey);
-  return createSession(db, config, { account: config.authAccount, now });
+  const sessionAccount = user?.account ?? config.authAccount;
+  if (user) recordLastLogin(db, user.account, new Date(now).toISOString());
+  if (fallback) {
+    console.warn(
+      `category=auth env fallback login account=${sessionAccount} (no users row; credentials matched the configured environment pair)`,
+    );
+    insertAudit(db, {
+      action: "auth.login.env_fallback",
+      entityType: "user",
+      entityId: sessionAccount,
+      actor: sessionAccount,
+      before: null,
+      after: null,
+      metadata: { reason: "user_row_missing" },
+    });
+  }
+  return {
+    session: createSession(db, config, { account: sessionAccount, now }),
+    displayName: user?.displayName ?? sessionAccount,
+    role: user?.role ?? "member",
+    fallback,
+  };
 }
 
 async function configuredCredentialsMatch(config, body) {
@@ -2339,6 +2416,18 @@ function itineraryAuditSnapshot(item) {
 function itineraryRepositoryFailure(error) {
   if (error instanceof ItineraryNotFoundError) notFound();
   if (error instanceof ItineraryVersionConflictError) {
+    throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
+      currentVersion: error.currentVersion,
+    });
+  }
+  throw error;
+}
+
+function userRepositoryFailure(error) {
+  if (error instanceof UserNotFoundError) {
+    throw new HttpError(404, "USER_NOT_FOUND", "用户不存在");
+  }
+  if (error instanceof UserVersionConflictError) {
     throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
       currentVersion: error.currentVersion,
     });
@@ -2543,6 +2632,9 @@ function buildSalesDecisionContext(db, body) {
 export function createServer(options = {}) {
   const config = loadConfig(options);
   const db = openDatabase({ databaseUrl: config.databaseUrl });
+  // 三重种子保障之二：迁移 0030 env 种子缺席（如 env-less 彩排）时，每次启动
+  // 兜底补种首个 admin。只插不改，绝不覆盖已有行。
+  ensureBootstrapAdmin(db, config);
   const secureSettingsRepository = isValidSettingsEncryptionKey(config.settingsEncryptionKey)
     ? createSecureSettingsRepository(db, {
         masterKey: config.settingsEncryptionKey,
@@ -3281,22 +3373,23 @@ export function createServer(options = {}) {
             "Authentication is required but not fully configured",
           );
         }
-        const session = await authenticateLogin(
+        const authenticated = await authenticateLogin(
           db,
           config,
           await readValidatedJson(request, requestSchemas.login),
           request.socket?.remoteAddress ?? "unknown",
         );
-        if (!session) {
+        if (!authenticated) {
           return unauthorized(response, "Account or password is incorrect", "INVALID_CREDENTIALS");
         }
         sendJson(response, 200, {
-          account: session.account,
-          displayName: session.account,
-          expiresAt: session.expiresAt,
-          csrfToken: session.csrfToken,
+          account: authenticated.session.account,
+          displayName: authenticated.displayName,
+          role: authenticated.role,
+          expiresAt: authenticated.session.expiresAt,
+          csrfToken: authenticated.session.csrfToken,
         }, {
-          "Set-Cookie": buildSessionCookie(config, session.cookieValue),
+          "Set-Cookie": buildSessionCookie(config, authenticated.session.cookieValue),
         });
         return;
       }
@@ -3947,7 +4040,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/hospital-tenders/run") {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         await validateEmptyBody(request);
         const result = await runInternalHospitalTender({
           actor: requestIdentity.account,
@@ -3959,9 +4052,13 @@ export function createServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/api/auth/session") {
         if (requestIdentity.kind !== "user") return unauthorized(response);
+        // 每请求查表（表极小）：角色/显示名变更即时生效免重登；回退轨会话无行
+        // 时降级为 account/member。
+        const sessionUser = getUser(db, requestIdentity.account);
         sendJson(response, 200, {
           account: requestIdentity.account,
-          displayName: requestIdentity.account,
+          displayName: sessionUser?.displayName ?? requestIdentity.account,
+          role: sessionUser?.role ?? "member",
           expiresAt: requestIdentity.expiresAt,
           csrfToken: requestIdentity.csrfToken,
         });
@@ -3975,6 +4072,231 @@ export function createServer(options = {}) {
         sendJson(response, 204, null, {
           "Set-Cookie": buildSessionCookie(config, "", { clear: true }),
         });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/auth/change-password") {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const body = await readValidatedJson(request, requestSchemas.changePassword);
+        assertUserPasswordPolicy(body.newPassword);
+        const account = requestIdentity.account;
+        const address = request.socket?.remoteAddress ?? "unknown";
+        // 复用登录限流键（account+address 与 IP 全域），防拿到会话后暴破旧密码。
+        const limiterKeys = [
+          loginRateLimitKey(config.authSessionSecret, account, address),
+          loginRateLimitKey(config.authSessionSecret, "<all-accounts>", address),
+        ];
+        const now = Date.now();
+        pruneLoginRateLimits(db, now);
+        for (const limiterKey of limiterKeys) assertLoginAllowed(db, limiterKey, now);
+        const user = getUser(db, account);
+        if (!user) {
+          throw new HttpError(
+            409,
+            "USER_NOT_PROVISIONED",
+            "当前会话来自环境凭据回退，用户表中没有该账号，暂不能在线修改密码",
+          );
+        }
+        const currentPasswordValid = await verifyPassword(body.currentPassword, user.passwordHash);
+        if (!currentPasswordValid) {
+          for (const limiterKey of limiterKeys) recordLoginFailure(db, limiterKey, now);
+          // 绝不可回 401：前端 requestApi 对一切 401 调 invalidateSession 全局登出。
+          throw new HttpError(403, "CURRENT_PASSWORD_INCORRECT", "当前密码不正确");
+        }
+        for (const limiterKey of limiterKeys) clearLoginFailures(db, limiterKey);
+        const newPasswordHash = await hashPassword(body.newPassword);
+        const result = withImmediateTransaction(db, () => {
+          let updated;
+          try {
+            updated = updateUserVersioned(db, {
+              account,
+              expectedVersion: user.version,
+              set: { passwordHash: newPasswordHash },
+              now,
+            });
+          } catch (error) {
+            userRepositoryFailure(error);
+          }
+          // 改密后吊销本人其他会话、当前会话保留：被盗会话改密自锁 + 改密者不被打断。
+          const revokedSessions = revokeSessionsForAccount(db, account, {
+            exceptSessionId: requestIdentity.id,
+            now,
+          }).changes;
+          insertAudit(db, {
+            action: "password.change",
+            entityType: "user",
+            entityId: account,
+            actor: account,
+            requestId,
+            before: null,
+            // 审计敏感键正则会剔除含 session 的键名，计数键用 revokedCount。
+            after: { revokedCount: revokedSessions },
+            entityVersion: updated.version,
+          });
+          return { revokedSessions };
+        });
+        sendJson(response, 200, { ok: true, revokedSessions: result.revokedSessions });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/admin/users") {
+        requireAdminRole(db, request);
+        sendJson(response, 200, {
+          items: listUsers(db).map(userResponseItem),
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/admin/users") {
+        requireAdminRole(db, request);
+        const body = await readValidatedJson(request, requestSchemas.adminUserCreate);
+        const account = body.account.trim();
+        if (!isValidUserAccount(account)) validationFailure("account", "format");
+        assertUserPasswordPolicy(body.password);
+        const displayName = body.displayName.trim();
+        // scrypt 异步且耗时，放事务外；PK 即幂等闸，不接 Idempotency-Key。
+        const passwordHash = await hashPassword(body.password);
+        let item;
+        try {
+          item = withImmediateTransaction(db, () => {
+            const created = createUser(db, {
+              account,
+              displayName,
+              passwordHash,
+              role: body.role ?? "member",
+            });
+            insertAudit(db, {
+              action: "user.create",
+              entityType: "user",
+              entityId: account,
+              actor: request.authContext.account,
+              requestId,
+              before: null,
+              after: {
+                account: created.account,
+                displayName: created.displayName,
+                role: created.role,
+                status: created.status,
+              },
+              entityVersion: created.version,
+            });
+            return created;
+          });
+        } catch (error) {
+          if (/UNIQUE constraint failed/i.test(String(error?.message ?? ""))) {
+            throw new HttpError(409, "USER_EXISTS", "账号已存在");
+          }
+          throw error;
+        }
+        sendJson(response, 201, { item: userResponseItem(item) }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "PATCH"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "admin"
+        && parts[2] === "users"
+        && parts[3]
+      ) {
+        requireAdminRole(db, request);
+        const targetAccount = parts[3];
+        const body = await readValidatedJson(request, requestSchemas.adminUserPatch);
+        if (
+          body.displayName === undefined
+          && body.role === undefined
+          && body.status === undefined
+          && body.password === undefined
+        ) {
+          validationFailure("body", "empty");
+        }
+        if (body.password !== undefined) assertUserPasswordPolicy(body.password);
+        const passwordHash = body.password !== undefined ? await hashPassword(body.password) : undefined;
+        const actorAccount = request.authContext.account;
+        const item = withImmediateTransaction(db, () => {
+          const target = getUser(db, targetAccount);
+          if (!target) throw new HttpError(404, "USER_NOT_FOUND", "用户不存在");
+          if (targetAccount === actorAccount && body.status === "disabled") {
+            throw new HttpError(409, "SELF_DISABLE_FORBIDDEN", "不能停用自己");
+          }
+          const strippingAdmin = target.role === "admin" && target.status === "active"
+            && (body.status === "disabled" || body.role === "member");
+          if (strippingAdmin && countActiveAdmins(db) === 1) {
+            throw new HttpError(409, "LAST_ADMIN_PROTECTED", "至少保留一位启用状态的管理员");
+          }
+          const set = {};
+          if (body.displayName !== undefined) set.displayName = body.displayName.trim();
+          if (body.role !== undefined) set.role = body.role;
+          if (body.status !== undefined) set.status = body.status;
+          if (passwordHash !== undefined) set.passwordHash = passwordHash;
+          let updated;
+          try {
+            updated = updateUserVersioned(db, {
+              account: targetAccount,
+              expectedVersion: body.expectedVersion,
+              set,
+            });
+          } catch (error) {
+            userRepositoryFailure(error);
+          }
+          let sessionsRevoked = 0;
+          if (body.status === "disabled" || passwordHash !== undefined) {
+            // 例外：admin 重置自己密码时保留当前会话，防被自己踢出中断操作。
+            const exceptSessionId = targetAccount === actorAccount && passwordHash !== undefined
+              ? request.authContext.id
+              : undefined;
+            sessionsRevoked = revokeSessionsForAccount(db, targetAccount, { exceptSessionId }).changes;
+          }
+          const profileBefore = {};
+          const profileAfter = {};
+          if (set.displayName !== undefined && set.displayName !== target.displayName) {
+            profileBefore.displayName = target.displayName;
+            profileAfter.displayName = updated.displayName;
+          }
+          if (set.role !== undefined && set.role !== target.role) {
+            profileBefore.role = target.role;
+            profileAfter.role = updated.role;
+          }
+          if (Object.keys(profileAfter).length > 0) {
+            insertAudit(db, {
+              action: "user.update",
+              entityType: "user",
+              entityId: targetAccount,
+              actor: actorAccount,
+              requestId,
+              before: profileBefore,
+              after: profileAfter,
+              entityVersion: updated.version,
+            });
+          }
+          if (set.status !== undefined && set.status !== target.status) {
+            insertAudit(db, {
+              action: set.status === "disabled" ? "user.disable" : "user.enable",
+              entityType: "user",
+              entityId: targetAccount,
+              actor: actorAccount,
+              requestId,
+              before: { status: target.status },
+              after: { status: updated.status, revokedCount: sessionsRevoked },
+              entityVersion: updated.version,
+            });
+          }
+          if (passwordHash !== undefined) {
+            insertAudit(db, {
+              action: "password.reset",
+              entityType: "user",
+              entityId: targetAccount,
+              actor: actorAccount,
+              requestId,
+              before: null,
+              after: { revokedCount: sessionsRevoked },
+              entityVersion: updated.version,
+            });
+          }
+          return updated;
+        });
+        sendJson(response, 200, { item: userResponseItem(item) }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -4001,7 +4323,7 @@ export function createServer(options = {}) {
         (request.method === "PUT" || request.method === "POST")
         && (url.pathname === "/api/settings/deepseek-key" || url.pathname === "/api/settings/deepseek-api-key")
       ) {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
         const repository = requireSecureSettings(secureSettingsRepository);
         const item = withImmediateTransaction(db, () => {
@@ -4030,7 +4352,7 @@ export function createServer(options = {}) {
         request.method === "DELETE"
         && (url.pathname === "/api/settings/deepseek-key" || url.pathname === "/api/settings/deepseek-api-key")
       ) {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         const confirmation = validateSecureSettingBody(
           await readJson(request),
           { field: "confirmation", max: 32 },
@@ -4061,7 +4383,7 @@ export function createServer(options = {}) {
         (request.method === "PUT" || request.method === "POST")
         && (url.pathname === "/api/settings/pushplus-token" || url.pathname === "/api/settings/pushplus")
       ) {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         const value = validateSecureSettingBody(await readJson(request), { field: "token", max: 512 });
         const repository = requireSecureSettings(secureSettingsRepository);
         const item = withImmediateTransaction(db, () => {
@@ -4090,7 +4412,7 @@ export function createServer(options = {}) {
         request.method === "DELETE"
         && (url.pathname === "/api/settings/pushplus-token" || url.pathname === "/api/settings/pushplus")
       ) {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         const confirmation = validateSecureSettingBody(
           await readJson(request),
           { field: "confirmation", max: 32 },
@@ -4118,7 +4440,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/settings/pushplus/test") {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         await validateEmptyBody(request);
         const repository = requireSecureSettings(secureSettingsRepository);
         if (!resolvePushplusToken()) {
@@ -4286,7 +4608,7 @@ export function createServer(options = {}) {
         request.method === "POST"
         && (url.pathname === "/api/hospital-tenders/scheduler/run-next" || url.pathname === "/api/hospital-tenders/scheduler/run")
       ) {
-        if (request.authContext.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         await validateEmptyBody(request);
         const result = await hospitalTenderScheduler.runNext({ force: true });
         sendJson(response, result.status === "skipped" && result.reason === "locked" ? 409 : 200, {
@@ -4307,7 +4629,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "PATCH" && url.pathname === "/api/hospital-tenders/scheduler") {
-        if (request.authContext.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         const body = await readJson(request);
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           throw new HttpError(422, "VALIDATION_ERROR", "轮巡配置必须是对象");
@@ -6072,17 +6394,20 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/integrations/weixin-agent/login") {
+        requireAdminRole(db, request);
         sendJson(response, 200, { item: weixinLoginBinding.current() });
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/integrations/weixin-agent/login") {
+        requireAdminRole(db, request);
         await validateEmptyBody(request);
         sendJson(response, 201, { item: weixinLoginBinding.start() });
         return;
       }
 
       if (request.method === "DELETE" && url.pathname === "/api/integrations/weixin-agent/login") {
+        requireAdminRole(db, request);
         await validateEmptyBody(request);
         sendJson(response, 200, { item: weixinLoginBinding.stop() });
         return;

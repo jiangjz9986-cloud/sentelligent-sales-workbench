@@ -444,6 +444,9 @@ async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } 
             ? {
                 account: 'visual-qa',
                 displayName: 'visual-qa',
+                // v0.9.1 起系统配置子导航按角色过滤：走查桩需要 admin 才能
+                // 打开微信绑定等 admin 子页。
+                role: 'admin',
                 expiresAt: '2099-01-01T00:00:00.000Z',
                 csrfToken: 'visual-csrf',
               }

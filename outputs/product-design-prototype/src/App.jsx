@@ -60,6 +60,7 @@ import {
 import { TravelExpensePage } from "./features/travelExpense/TravelExpensePage.jsx";
 import { HospitalTenderPage } from "./features/hospitalTender/HospitalTenderPage.jsx";
 import { SystemSettingsPage } from "./features/settings/SystemSettingsPage.jsx";
+import { UserManagementPage } from "./features/settings/UserManagementPage.jsx";
 import { ModuleSubnav } from "./components/ModuleSubnav.jsx";
 import { buildWorkbenchUrl, parseWorkbenchRoute } from "./app/routes.js";
 import { mergeEntityByVersion } from "./quickRecordModel.js";
@@ -1275,7 +1276,17 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
       (refreshed.opportunities ?? []).reduce((items, item) => mergeById(items, item), current));
   }
 
-  const subnavItems = moduleSubnavItems[activeParent] ?? [];
+  // member 在系统配置模块只见安全子页（改密入口）；用户管理等 admin 面板隐藏，
+  // 服务端各写端点另有 ADMIN_ROLE_REQUIRED 门禁兜底。
+  const subnavItems = (moduleSubnavItems[activeParent] ?? []).filter((item) => (
+    activeParent !== "settings"
+    || authSession?.role === "admin"
+    || item.id === "settings"
+  )).map((item) => (
+    activeParent === "settings" && item.id === "settings" && authSession?.role !== "admin"
+      ? { ...item, label: "安全设置" }
+      : item
+  ));
   const customerContextId = tenderCustomerId ?? (
     active === "customer" && ["detail", "edit"].includes(customerViewMode)
       ? routeEntityId ?? selectedCustomerId
@@ -1398,7 +1409,12 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               <Mic size={16} />
               快速记录
             </button>
-            <button className="avatar avatar-button" type="button" onClick={onLogout} title="退出登录">
+            <button
+              className="avatar avatar-button"
+              type="button"
+              onClick={onLogout}
+              title={`${authSession?.displayName ?? authSession?.account ?? ""} · 退出登录`}
+            >
               {avatarInitial}
             </button>
           </div>
@@ -1476,8 +1492,16 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                   apiClient={apiClient}
                   backendStatus={backendStatus}
                   section={settingsSection}
+                  role={authSession?.role ?? "member"}
                 />
               </div>
+            )}
+            {active === "settings-users" && (
+              <UserManagementPage
+                apiClient={apiClient}
+                backendStatus={backendStatus}
+                authSession={authSession}
+              />
             )}
             {active === "overview" && (
               <Overview

@@ -40,7 +40,8 @@ describe("business module delivery coverage", () => {
       {
         customer: ["customer", "hospital-tenders"],
         opportunity: ["opportunity", "risk", "actions", "kanban"],
-        settings: ["settings", "weixin", "settings-notifications", "settings-tender-schedule", "settings-bookkeeping-log"],
+        // v0.9.1 认证层：settings 组新增 admin 专属"用户管理"子页。
+        settings: ["settings", "settings-users", "weixin", "settings-notifications", "settings-tender-schedule", "settings-bookkeeping-log"],
       },
     );
   });

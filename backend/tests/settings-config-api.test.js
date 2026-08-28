@@ -7,7 +7,9 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 
-const account = "settings-owner";
+// v0.9.1 起系统配置写端点要求 active admin（users 行由启动兜底种子创建），
+// 账号必须符合 ^[a-z0-9]{2,32}$ 才会被种子接受。
+const account = "settingsowner";
 const password = "unit-password";
 const passwordHash = await hashPassword(password, { salt: Buffer.alloc(16, 91) });
 const encryptionKey = Buffer.alloc(32, 92).toString("base64url");

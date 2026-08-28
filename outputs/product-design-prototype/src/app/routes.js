@@ -21,6 +21,7 @@ const PAGE_META = Object.freeze({
   kanban: Object.freeze({ active: "opportunity", defaultMode: "index", readOnly: false }),
   "settings/weixin": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "settings/config": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
+  "settings/users": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "settings/notifications": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "settings/tender-schedule": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
   "settings/bookkeeping-log": Object.freeze({ active: "settings", defaultMode: "index", readOnly: false }),
@@ -188,6 +189,9 @@ function matchRoute(segments) {
   }
   if (page === "settings" && segments.length === 2 && segments[1] === "config") {
     return routeState("settings/config", "index");
+  }
+  if (page === "settings" && segments.length === 2 && segments[1] === "users") {
+    return routeState("settings/users", "index");
   }
   if (page === "settings" && segments.length === 2 && segments[1] === "notifications") {
     return routeState("settings/notifications", "index");
@@ -587,7 +591,7 @@ function pathForRoute(route) {
     throw new TypeError("Invalid route mode");
   }
   if (
-    (page === "travel-expenses" || page === "weekly-reports" || page === "settings/weixin" || page === "settings/config" || page === "settings/notifications" || page === "settings/tender-schedule" || page === "settings/bookkeeping-log") &&
+    (page === "travel-expenses" || page === "weekly-reports" || page === "settings/weixin" || page === "settings/config" || page === "settings/users" || page === "settings/notifications" || page === "settings/tender-schedule" || page === "settings/bookkeeping-log") &&
     mode === "index"
   ) {
     assertNoEntityId(route);

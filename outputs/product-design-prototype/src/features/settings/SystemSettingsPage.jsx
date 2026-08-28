@@ -6,6 +6,7 @@ import {
   Clock3,
   KeyRound,
   LoaderCircle,
+  LockKeyhole,
   Play,
   Power,
   RefreshCw,
@@ -165,10 +166,11 @@ function StatusMark({ status, children }) {
   );
 }
 
-export function SystemSettingsPage({ apiClient, backendStatus, section = "security" }) {
+export function SystemSettingsPage({ apiClient, backendStatus, section = "security", role = "admin" }) {
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState("");
   const [pushplusToken, setPushplusToken] = useState("");
+  const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
   const [integrationStatus, setIntegrationStatus] = useState({
     loading: true,
     error: "",
@@ -185,6 +187,11 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
 
   async function loadSettings() {
     if (section === "tender-schedule" || section === "bookkeeping-log") {
+      setLoading(false);
+      return;
+    }
+    // member 在安全子页只见改密卡，不拉取密钥元数据（写端点也已被后端 admin 门禁拦截）。
+    if (role !== "admin" && section === "security") {
       setLoading(false);
       return;
     }
@@ -418,6 +425,45 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     }
   }
 
+  async function submitPasswordChange(event) {
+    event.preventDefault();
+    if (!passwordForm.current || !passwordForm.next || !passwordForm.confirm) {
+      setError("请完整填写当前密码、新密码与确认新密码。");
+      return;
+    }
+    if (passwordForm.next.length < 10) {
+      setError("新密码至少 10 个字符。");
+      return;
+    }
+    if (passwordForm.next !== passwordForm.confirm) {
+      setError("两次输入的新密码不一致。");
+      return;
+    }
+    setBusy("change-password");
+    setNotice("");
+    try {
+      await apiClient.changePassword({
+        currentPassword: passwordForm.current,
+        newPassword: passwordForm.next,
+      });
+      setPasswordForm({ current: "", next: "", confirm: "" });
+      setNotice("密码已修改，其他已登录设备将需要重新登录。");
+      setError("");
+    } catch (changeError) {
+      if (changeError?.code === "CURRENT_PASSWORD_INCORRECT") {
+        setError("当前密码不正确");
+      } else if (changeError?.status === 429) {
+        setError("尝试过于频繁，请 15 分钟后再试");
+      } else if (changeError?.code === "USER_NOT_PROVISIONED") {
+        setError("当前会话来自环境凭据回退，暂不能在线修改密码，请联系管理员。");
+      } else {
+        setError("密码修改失败，请稍后重试。");
+      }
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function refreshScheduler() {
     if (typeof apiClient?.getHospitalTenderScheduler !== "function") return null;
     const result = await apiClient.getHospitalTenderScheduler();
@@ -534,6 +580,50 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       {!loading && section === "security" ? (
         <section className="settings-focused-section" data-testid="settings-security-section">
           <div className="settings-grid settings-grid-focused">
+            <Panel title="修改密码" meta="全部角色可用" className="settings-card" data-testid="change-password-card">
+              <div className="settings-card-icon deepseek"><LockKeyhole size={20} /></div>
+              <p className="settings-description">修改成功后，其他已登录设备会立即退出登录，本设备保持在线。</p>
+              <form className="settings-key-form" data-testid="change-password-form" onSubmit={submitPasswordChange}>
+                <label>
+                  <span>当前密码</span>
+                  <input
+                    type="password"
+                    value={passwordForm.current}
+                    onChange={(event) => setPasswordForm((current) => ({ ...current, current: event.target.value }))}
+                    autoComplete="current-password"
+                    aria-label="当前密码"
+                  />
+                </label>
+                <label>
+                  <span>新密码（至少 10 个字符）</span>
+                  <input
+                    type="password"
+                    value={passwordForm.next}
+                    onChange={(event) => setPasswordForm((current) => ({ ...current, next: event.target.value }))}
+                    autoComplete="new-password"
+                    aria-label="新密码"
+                  />
+                </label>
+                <label>
+                  <span>确认新密码</span>
+                  <input
+                    type="password"
+                    value={passwordForm.confirm}
+                    onChange={(event) => setPasswordForm((current) => ({ ...current, confirm: event.target.value }))}
+                    autoComplete="new-password"
+                    aria-label="确认新密码"
+                  />
+                </label>
+                <div className="settings-button-row">
+                  <button className="primary-button" type="submit" disabled={busy !== ""}>
+                    <LockKeyhole size={16} /> {busy === "change-password" ? "修改中…" : "修改密码"}
+                  </button>
+                </div>
+              </form>
+            </Panel>
+
+            {role === "admin" ? (
+            <>
             <Panel title="DeepSeek API Key" meta={statusLabel(deepseek?.status)} className="settings-card">
               <div className="settings-card-icon deepseek"><KeyRound size={20} /></div>
               <p className="settings-description">用于服务端 AI 分析。保存后只显示掩码和更新时间，不能从页面取回明文。</p>
@@ -589,6 +679,8 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
               </div>
               <p className="settings-inline-note">浏览器、普通业务接口和审计记录都不会返回密钥明文。</p>
             </Panel>
+            </>
+            ) : null}
           </div>
         </section>
       ) : null}

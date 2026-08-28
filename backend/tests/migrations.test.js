@@ -163,7 +163,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 28);
+      assert.equal(firstMigrations.length, 29);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -191,6 +191,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[24].version, "0026");
       assert.equal(firstMigrations[26].version, "0028");
       assert.equal(firstMigrations[27].version, "0029");
+      assert.equal(firstMigrations[28].version, "0030");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -479,7 +480,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        28,
+        29,
       );
     } finally {
       db.close();
@@ -903,7 +904,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030"],
       );
     } finally {
       migrated.close();
@@ -1097,7 +1098,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 28);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 29);
     } finally {
       db.close();
     }
@@ -1179,6 +1180,123 @@ test("migration 0029 normalizes legacy owner vocabulary", async () => {
   }
 });
 
+test("migration 0030 creates users and seeds the env admin", async () => {
+  const { apply } = await import("../src/db/migrations/0030_users_table.mjs");
+  const { hashPassword } = await import("../src/auth/password.js");
+  const seedHashValue = await hashPassword("unit-seed-password", { salt: Buffer.alloc(16, 41) });
+  const previousAccount = process.env.AUTH_ACCOUNT;
+  const previousHash = process.env.AUTH_PASSWORD_HASH;
+  const restoreEnv = () => {
+    if (previousAccount === undefined) delete process.env.AUTH_ACCOUNT;
+    else process.env.AUTH_ACCOUNT = previousAccount;
+    if (previousHash === undefined) delete process.env.AUTH_PASSWORD_HASH;
+    else process.env.AUTH_PASSWORD_HASH = previousHash;
+  };
+  const prepareActionItems = (db) => {
+    db.exec(`
+      CREATE TABLE action_items (id TEXT PRIMARY KEY, title TEXT, assignee TEXT);
+      INSERT INTO action_items (id, title, assignee) VALUES
+        ('a-owner', '账号 id 展示行', 'jiangjz'),
+        ('a-other', '外部人名行', '张三'),
+        ('a-null', '无主行', NULL);
+    `);
+  };
+
+  try {
+    // (a) 合法 env → 种子行 + assignee 回填（'张三' 与 NULL 不动）。
+    process.env.AUTH_ACCOUNT = "jiangjz";
+    process.env.AUTH_PASSWORD_HASH = seedHashValue;
+    const seeded = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareActionItems(seeded);
+      apply(seeded);
+      const user = seeded.prepare(
+        "SELECT account, display_name, password_hash, role, status, version FROM users",
+      ).get();
+      assert.deepEqual({ ...user }, {
+        account: "jiangjz",
+        display_name: "继振",
+        password_hash: seedHashValue,
+        role: "admin",
+        status: "active",
+        version: 1,
+      });
+      assert.deepEqual(
+        seeded.prepare("SELECT id, assignee FROM action_items ORDER BY id").all().map((row) => ({ ...row })),
+        [
+          { id: "a-null", assignee: null },
+          { id: "a-other", assignee: "张三" },
+          { id: "a-owner", assignee: "继振" },
+        ],
+      );
+
+      // (c) CHECK 拒绝矩阵（与 0030 DDL 一致）。
+      const insertUser = (overrides) => seeded.prepare(`
+        INSERT INTO users (account, display_name, password_hash, role, status, version, created_at, updated_at)
+        VALUES ($account, '校验', $hash, $role, $status, $version, '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')
+      `).run({
+        $account: "checkuser",
+        $hash: seedHashValue,
+        $role: "member",
+        $status: "active",
+        $version: 1,
+        ...overrides,
+      });
+      assert.throws(() => insertUser({ $account: "UPPER" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $hash: "plain-text" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $role: "owner" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $status: "archived" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $version: 0 }), /CHECK constraint failed/i);
+    } finally {
+      seeded.close();
+    }
+
+    // (b) env 缺席（env-less 彩排语境）→ 建表成功、种子跳过、回填空转。
+    delete process.env.AUTH_ACCOUNT;
+    delete process.env.AUTH_PASSWORD_HASH;
+    const envless = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareActionItems(envless);
+      apply(envless);
+      assert.equal(envless.prepare("SELECT COUNT(*) AS count FROM users").get().count, 0);
+      assert.deepEqual(
+        envless.prepare("SELECT id, assignee FROM action_items ORDER BY id").all().map((row) => ({ ...row })),
+        [
+          { id: "a-null", assignee: null },
+          { id: "a-other", assignee: "张三" },
+          { id: "a-owner", assignee: "jiangjz" },
+        ],
+      );
+    } finally {
+      envless.close();
+    }
+
+    // (d) 全链二跑幂等由版本账本保证：复跑 openDatabase 仍 1 行。
+    process.env.AUTH_ACCOUNT = "jiangjz";
+    process.env.AUTH_PASSWORD_HASH = seedHashValue;
+    withDatabase((databaseUrl) => {
+      const first = openDatabase({ databaseUrl });
+      try {
+        assert.equal(first.prepare("SELECT COUNT(*) AS count FROM users").get().count, 1);
+      } finally {
+        first.close();
+      }
+      const second = openDatabase({ databaseUrl });
+      try {
+        assert.equal(second.prepare("SELECT COUNT(*) AS count FROM users").get().count, 1);
+        assert.equal(
+          second.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0030'").get().count,
+          1,
+        );
+      } finally {
+        second.close();
+      }
+    });
+  } finally {
+    restoreEnv();
+  }
+});
+
 test("rolls back every 0002 schema change when the module migration fails partway", () => {
   withDatabase((databaseUrl) => {
     const db = createConnection({ databaseUrl });
@@ -1236,7 +1354,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030"],
       );
     } finally {
       db.close();
