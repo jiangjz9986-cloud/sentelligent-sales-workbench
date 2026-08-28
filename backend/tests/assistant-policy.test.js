@@ -39,6 +39,27 @@ describe("assistant execution policy", () => {
     }
   });
 
+  it("classifies the quick-record tools with the affirm-language capture level", () => {
+    assert.deepEqual(getToolPolicy("visit-capture.capture"), {
+      risk: "R1", confirmation: "affirm_language", reason: "ordinary_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("visit-capture.search"), {
+      risk: "R0", confirmation: "none", reason: "read_only", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("visit-capture.update"), {
+      risk: "R2", confirmation: "explicit_code", reason: "record_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("visit-capture.void"), {
+      risk: "R3", confirmation: "explicit_code", reason: "destructive_write", denied: false,
+    });
+    assert.equal(evaluatePolicy({ toolName: "visit-capture.capture" }).requiresConfirmation, true);
+    assert.equal(evaluatePolicy({ toolName: "visit-capture.capture", confirmed: true }).requiresConfirmation, false);
+    assert.equal(evaluatePolicy({ toolName: "visit-capture.search" }).requiresConfirmation, false);
+    for (const toolName of ["visit-capture.update", "visit-capture.void"]) {
+      assert.equal(evaluatePolicy({ toolName }).requiresConfirmation, true, toolName);
+    }
+  });
+
   it("denies transport, shell, and database tools", () => {
     for (const name of ["http.request", "sql.query", "shell.exec"]) {
       assert.equal(DENY_LIST.has(name), true);

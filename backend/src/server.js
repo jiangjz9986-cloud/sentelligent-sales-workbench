@@ -129,11 +129,15 @@ import { createAssistantAgentRunRepository } from "./assistant/agentRunRepositor
 import { createAssistantBusinessSnapshotAdapter } from "./assistant/businessSnapshotAdapter.js";
 import { createAssistantSettlementSnapshotAdapter } from "./assistant/settlementSnapshotAdapter.js";
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
+import { createAssistantRouter } from "./assistant/router.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import {
   createCustomerAssistantAdapter,
   createCustomerPendingPreviewProviders,
 } from "./assistant/customerAssistantAdapter.js";
+import { createVisitCaptureAssistantAdapter } from "./assistant/visitCaptureAssistantAdapter.js";
+import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecordPendingPreviewProviders.js";
+import { createQuickRecordStore } from "./quickRecords/quickRecordStore.js";
 import { createBusinessOwnerResolver } from "./assistant/businessOwnerResolver.js";
 import { createShortcutBookkeepingAssistantRuntime } from "./assistant/shortcutBookkeepingRuntime.js";
 import { reconcileWeixinInvoiceAttachments } from "./assistant/weixinInvoiceAttachment.js";
@@ -2872,6 +2876,15 @@ export function createServer(options = {}) {
       runRepository: assistantAgentRunRepository,
       clock: assistantClock,
     });
+  const assistantVisitCaptureAdapter = options.assistantVisitCaptureAdapter
+    ?? createVisitCaptureAssistantAdapter({
+      config: runtimeConfig,
+      fetchImpl: options.fetchImpl ?? fetch,
+      runRepository: assistantAgentRunRepository,
+      businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
+      clock: assistantClock,
+    });
+  const assistantQuickRecordStore = createQuickRecordStore(db, { clock: assistantClock });
   const assistantToolHandlers = options.assistantToolHandlers
     ?? createAssistantToolHandlers({
       db,
@@ -2891,6 +2904,8 @@ export function createServer(options = {}) {
       businessSnapshotAdapter: assistantBusinessSnapshotAdapter,
       settlementSnapshotAdapter: assistantSettlementSnapshotAdapter,
       customerAssistantAdapter: assistantCustomerAdapter,
+      visitCaptureAssistantAdapter: assistantVisitCaptureAdapter,
+      quickRecordStore: assistantQuickRecordStore,
       agentRunRepository: assistantAgentRunRepository,
       salesReportAssistantAdapter: assistantSalesReportAdapter,
       salesLoopPreviewService: assistantSalesLoopPreviewService,
@@ -2900,6 +2915,7 @@ export function createServer(options = {}) {
     });
   const assistantOrchestrator = options.assistantOrchestrator
     ?? createAssistantOrchestrator({
+      router: createAssistantRouter({ clock: assistantClock }),
       eventRepository: assistantEventRepository,
       sessionRepository: assistantSessionRepository,
       pendingActionRepository: assistantPendingActionRepository,
@@ -2908,11 +2924,21 @@ export function createServer(options = {}) {
       confirmationSecret: assistantConfirmationSecret,
       clock: assistantClock,
       pendingActionHandler: shortcutBookkeepingAssistantRuntime.handlePending,
-      pendingPreviewProviders: createCustomerPendingPreviewProviders({
-        adapter: assistantCustomerAdapter,
-        db,
-        resolveBusinessOwner: assistantBusinessOwnerResolver,
-      }),
+      pendingPreviewProviders: {
+        ...createCustomerPendingPreviewProviders({
+          adapter: assistantCustomerAdapter,
+          db,
+          resolveBusinessOwner: assistantBusinessOwnerResolver,
+        }),
+        ...createQuickRecordPendingPreviewProviders({
+          visitCaptureAdapter: assistantVisitCaptureAdapter,
+          customerAdapter: assistantCustomerAdapter,
+          snapshotAdapter: assistantBusinessSnapshotAdapter,
+          store: assistantQuickRecordStore,
+          resolveBusinessOwner: assistantBusinessOwnerResolver,
+          clock: assistantClock,
+        }),
+      },
     });
 
   async function buildItineraryPlan(body) {
@@ -6462,77 +6488,35 @@ export function createServer(options = {}) {
         if (Object.keys(body.summary).length === 0) validationFailure("summary", "minKeys");
         const ownerScope = quickRecordOwnerScope(request.authContext);
 
+        // The write itself lives in the shared quick-record store so the web
+        // PATCH route and the WeChat assistant edit the analysis through one
+        // SQL implementation (v0.7.3); route semantics and body shape are
+        // unchanged (the store's join/void projection keys are stripped).
+        const webProjection = ({ customerName, voidedAt, voidedBy, voidReason, ...record }) => record;
         const result = withImmediateTransaction(db, () => {
-          const beforeRecord = quickRecordFromRow(get(
-            db,
-            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
-            { $id: parts[2], ...ownerScope.params },
-          ));
-          if (!beforeRecord) notFound();
-          const insightRow = getLatestInsightRow(db, beforeRecord.id);
-          if (!insightRow) notFound();
-
-          const persistedAnalysis = parseJson(insightRow.analysis_json, null);
-          if (!persistedAnalysis?.summary || typeof persistedAnalysis.summary !== "object") {
-            throw new HttpError(500, "DATA_INTEGRITY_ERROR", "Saved quick-record analysis is invalid");
-          }
-          const nextSummary = { ...persistedAnalysis.summary };
-          for (const [key, text] of Object.entries(body.summary)) {
-            const current = nextSummary[key];
-            if (!current || typeof current !== "object" || Array.isArray(current)) {
-              throw new HttpError(500, "DATA_INTEGRITY_ERROR", "Saved quick-record analysis summary is invalid");
-            }
-            nextSummary[key] = { ...current, text };
-          }
-          const nextAnalysisJson = {
-            ...persistedAnalysis,
-            summary: nextSummary,
-          };
-
-          runVersionedUpdate(db, {
-            table: "quick_records",
-            id: beforeRecord.id,
+          const updated = assistantQuickRecordStore.updateInsightSummary({
+            owner: ownerScope.params.$owner ?? null,
+            id: parts[2],
             expectedVersion,
-            softDeletable: false,
-            extraWhereSql: ownerScope.clause,
-            setSql: "status = $status",
-            params: { $status: beforeRecord.status, ...ownerScope.params },
+            summaryPatch: body.summary,
           });
-          run(
-            db,
-            "UPDATE ai_insights SET analysis_json = $analysisJson WHERE id = $id",
-            {
-              $id: insightRow.id,
-              $analysisJson: JSON.stringify(nextAnalysisJson),
-            },
-          );
-
-          const quickRecord = quickRecordFromRow(get(
-            db,
-            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
-            { $id: beforeRecord.id, ...ownerScope.params },
-          ));
-          const beforeAnalysis = insightFromRow(insightRow);
-          const analysis = insightFromRow(get(
-            db,
-            "SELECT * FROM ai_insights WHERE id = $id",
-            { $id: insightRow.id },
-          ));
+          const beforeRecord = webProjection(updated.beforeRecord);
+          const quickRecord = webProjection(updated.record);
           insertAudit(db, {
             action: "quick_record.analysis.update",
             entityType: "quick_record",
             entityId: quickRecord.id,
             actor: request.authContext.account,
             requestId,
-            before: { quickRecord: beforeRecord, analysis: beforeAnalysis },
-            after: { quickRecord, analysis },
+            before: { quickRecord: beforeRecord, analysis: updated.beforeAnalysis },
+            after: { quickRecord, analysis: updated.analysis },
             entityVersion: quickRecord.version,
             metadata: {
-              insightId: analysis.id,
+              insightId: updated.analysis.id,
               summaryFields: Object.keys(body.summary),
             },
           });
-          return { quickRecord, analysis };
+          return { quickRecord, analysis: updated.analysis };
         });
         sendJson(response, 200, result);
         return;

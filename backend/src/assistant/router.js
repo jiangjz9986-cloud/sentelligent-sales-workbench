@@ -1,6 +1,7 @@
 import { validateToolInvocation } from "./contracts.js";
 import { createAgentRegistry } from "./agentRegistry.js";
 import { evaluatePolicy } from "./policy.js";
+import { extractSpokenOccurredAt, resolveSpokenRange } from "./spokenDate.js";
 
 export const ROUTER_CONFIDENCE_THRESHOLD = 0.8;
 
@@ -241,6 +242,105 @@ function reportArguments(args) {
   return dateRange(args);
 }
 
+// --- v0.7.3 quick-record intents (deterministic, no model) ---
+
+const QUICK_CAPTURE_PREFIX_RE = /^(记一下|记录一下|帮我记(?:一下|录)?|快速记录|记拜访)\s*[:：]?\s*([\s\S]*)$/u;
+const QUICK_CAPTURE_ESCAPE_PREFIX = "记拜访";
+const QUICK_CAPTURE_EMPTY_QUESTION = "请把拜访、电话或会议内容跟在“记一下：”后面一起发我。";
+const QUICK_CAPTURE_BOOKKEEPING_HINT = /记账|支出|收入|借款|报销|发票|付款/u;
+const QUICK_CAPTURE_AMOUNT_HINT = /\d+(?:\.\d+)?\s*(?:元|块钱?)/u;
+const QUICK_CAPTURE_VISIT_HINT = /(?:拜访|拜会|电话|会议|沟通|走访|客户|医院|项目)/u;
+const QUICK_SEARCH_RE = /^(?:查一下|查查|查询|查)?\s*(上上周|上周|本周|这周|上个月|上月|本月|今天|昨天|前天|最近)?\s*(?:去|拜访)?(.{0,60}?)的?(?:拜访记录|快速记录|记录)\s*[?？]?$/u;
+const QUICK_SEARCH_EXCLUDED_SUBJECT = /^(?:会议|电话|沟通|拜访|快速|历史)$/u;
+const QUICK_UPDATE_RE = /^(?:把|将)?(?:那条|这条|上一条|最近(?:一条|的)?)?记录\s*([A-Za-z0-9-]{6,64})?\s*的?(发生时间|时间|日期|客户|商机|诉求|反馈|风险|建议|下一步|待办)\s*(?:改成|改为|设为|设置为|更新为|换成)\s*([\s\S]+)$/u;
+const QUICK_UPDATE_FIELD_KEYS = Object.freeze({
+  发生时间: "occurredAt",
+  时间: "occurredAt",
+  日期: "occurredAt",
+  客户: "customerQuery",
+  商机: "opportunityQuery",
+  诉求: "summary.request",
+  反馈: "summary.feedback",
+  风险: "summary.risk",
+  建议: "summary.action",
+  下一步: "summary.action",
+  待办: "summary.action",
+});
+const QUICK_VOID_RE = /^(?:作废|删除|撤销)(?:那条|这条|最近的?)?记录\s*([A-Za-z0-9-]{6,64})?\s*$/u;
+const QUICK_CAPTURE_COMMANDS = new Set(["记一下", "记录一下", "快速记录", "记拜访"]);
+
+function quickRecordCapturePlan(prefix, body, registry, confidence, now) {
+  const tool = registry.getTool("visit-capture.capture");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const content = clean(body);
+  if (!content) return clarify(QUICK_CAPTURE_EMPTY_QUESTION, confidence);
+  // Ambiguity gate: bodies that read like bookkeeping (amount words or
+  // financial keywords without any visit vocabulary) are clarified instead of
+  // being captured; the 记拜访 prefix is the unconditional escape hatch.
+  if (prefix !== QUICK_CAPTURE_ESCAPE_PREFIX
+    && (QUICK_CAPTURE_BOOKKEEPING_HINT.test(content) || QUICK_CAPTURE_AMOUNT_HINT.test(content))
+    && !QUICK_CAPTURE_VISIT_HINT.test(content)) {
+    return clarify("这段更像记账内容：直接发送「支出 …」即可记账；如果是拜访记录请以「记拜访：…」开头重发。", confidence);
+  }
+  const occurredAt = extractSpokenOccurredAt(content, now);
+  return makePlan({
+    tool,
+    arguments: { rawContent: content, ...(occurredAt ? { occurredAt } : {}) },
+    confidence,
+    source: "natural",
+  });
+}
+
+function quickRecordSearchPlan(match, registry, confidence, now) {
+  const tool = registry.getTool("visit-capture.search");
+  if (!tool) return null;
+  const periodWord = match[1] ?? null;
+  const subject = clean(match[2]);
+  const usableSubject = subject && !QUICK_SEARCH_EXCLUDED_SUBJECT.test(subject) ? subject : null;
+  // Generic phrases like 会议记录 (no period word, excluded subject) keep the
+  // existing visit-capture collect fallback instead of becoming a search.
+  if (!periodWord && !usableSubject) return null;
+  const range = resolveSpokenRange(periodWord ?? "最近", now) ?? resolveSpokenRange("最近", now);
+  return makePlan({
+    tool,
+    arguments: {
+      ...(usableSubject ? { query: usableSubject } : {}),
+      dateStart: range.start,
+      dateEnd: range.end,
+    },
+    confidence,
+    source: "natural",
+  });
+}
+
+function quickRecordUpdatePlan(match, registry, confidence) {
+  const tool = registry.getTool("visit-capture.update");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  const value = clean(match[3]);
+  if (!value) return clarify("请说明要修改成的内容。", confidence);
+  return makePlan({
+    tool,
+    arguments: {
+      ...(match[1] ? { quickRecordId: match[1] } : {}),
+      field: QUICK_UPDATE_FIELD_KEYS[match[2]],
+      value,
+    },
+    confidence,
+    source: "natural",
+  });
+}
+
+function quickRecordVoidPlan(match, registry, confidence) {
+  const tool = registry.getTool("visit-capture.void");
+  if (!tool) return clarify("该功能尚未开放，请联系管理员。", confidence);
+  return makePlan({
+    tool,
+    arguments: { ...(match[1] ? { quickRecordId: match[1] } : {}) },
+    confidence,
+    source: "natural",
+  });
+}
+
 function directArguments(toolName, args, mediaRef, context = {}) {
   if (toolName === "dashboard.summary" || toolName === "itinerary.summary") return {};
   if (toolName === "customer.search" || toolName === "knowledge.search") return { query: args };
@@ -268,13 +368,16 @@ function directArguments(toolName, args, mediaRef, context = {}) {
   return {};
 }
 
-function explicitPlan(command, args, registry, { mediaRef, context: rawContext } = {}) {
+function explicitPlan(command, args, registry, { mediaRef, context: rawContext } = {}, now = new Date()) {
   const context = conversationContext({ context: rawContext });
   const normalized = command.replace(/^\//, "");
   if (normalized === "help" || normalized === "帮助" || normalized === "h") return { kind: "intent_plan", status: "help", toolName: null, agentId: "system-router", arguments: {}, message: HELP };
   if (normalized === "cancel" || normalized === "取消") return { kind: "intent_plan", status: "cancelled", toolName: null, agentId: "system-router", arguments: {} };
   if (Object.hasOwn(CUSTOMER_WRITE_COMMAND_MODES, normalized)) {
     return customerWriteCommandPlan(CUSTOMER_WRITE_COMMAND_MODES[normalized], args, registry, context);
+  }
+  if (QUICK_CAPTURE_COMMANDS.has(normalized)) {
+    return quickRecordCapturePlan(normalized, args, registry, 1, now);
   }
   const direct = registry.getTool(normalized);
   if (direct) {
@@ -326,9 +429,16 @@ function explicitPlan(command, args, registry, { mediaRef, context: rawContext }
   return makePlan({ tool, arguments: parsed, source: "explicit" });
 }
 
-function naturalPlan(text, confidence, registry, rawContext = {}) {
+function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date()) {
   const value = clean(text);
   const context = conversationContext({ context: rawContext });
+  // The capture prefix is the strongest user-intent signal and therefore sits
+  // in front of every other natural phrasing; its internal bookkeeping
+  // ambiguity gate keeps finance-looking bodies out (see quickRecordCapturePlan).
+  const quickCapture = value.match(QUICK_CAPTURE_PREFIX_RE);
+  if (quickCapture) {
+    return quickRecordCapturePlan(quickCapture[1], quickCapture[2], registry, confidence, now);
+  }
   if (/销售周报/.test(value)) {
     return makePlan({ tool: registry.getTool("sales-report.preview"), arguments: { week: "current" }, confidence, source: "natural" });
   }
@@ -440,6 +550,22 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
       source: "explicit",
     });
   }
+  // Quick-record history intents carry the explicit 记录 stem and sit before
+  // the v0.7.2 customer-write phrasings (longer stems match first; the two
+  // regex families are disjoint by field vocabulary).
+  const quickUpdate = value.match(QUICK_UPDATE_RE);
+  if (quickUpdate) {
+    return quickRecordUpdatePlan(quickUpdate, registry, confidence);
+  }
+  const quickVoid = value.match(QUICK_VOID_RE);
+  if (quickVoid) {
+    return quickRecordVoidPlan(quickVoid, registry, confidence);
+  }
+  const quickSearch = value.match(QUICK_SEARCH_RE);
+  if (quickSearch) {
+    const plan = quickRecordSearchPlan(quickSearch, registry, confidence, now);
+    if (plan) return plan;
+  }
   const customerCreate = value.match(/^(?:新建客户|新增客户|建档|客户建档)\s*[:：]?\s*(.+)$/u);
   if (customerCreate) {
     return customerCreatePlan(customerCreate[1], registry, confidence);
@@ -509,17 +635,22 @@ function naturalPlan(text, confidence, registry, rawContext = {}) {
   return unknown(confidence);
 }
 
-export function createAssistantRouter({ registry = createAgentRegistry(), confidenceThreshold = ROUTER_CONFIDENCE_THRESHOLD } = {}) {
+export function createAssistantRouter({
+  registry = createAgentRegistry(),
+  confidenceThreshold = ROUTER_CONFIDENCE_THRESHOLD,
+  clock = () => new Date(),
+} = {}) {
   return Object.freeze({
     route(input = {}) {
       const text = clean(input.text);
+      const now = clock();
       const explicit = parseExplicit(text);
       const plainCommand = text.toLowerCase();
       if (["帮助", "help"].includes(plainCommand)) {
-        return explicitPlan("帮助", "", registry, input);
+        return explicitPlan("帮助", "", registry, input, now);
       }
       if (["取消", "cancel"].includes(plainCommand)) {
-        return explicitPlan("取消", "", registry, input);
+        return explicitPlan("取消", "", registry, input, now);
       }
       if (["确认", "confirm"].includes(plainCommand)) {
         const pending = input.pendingPlan;
@@ -536,7 +667,7 @@ export function createAssistantRouter({ registry = createAgentRegistry(), confid
           if (!tool) return unknown(1, "tool_not_registered");
           return makePlan({ tool, arguments: pending.arguments ?? {}, confidence: pending.confidence ?? 1, confirmed: true, source: "confirmation" });
         }
-        return explicitPlan(explicit.command, explicit.args, registry, input) ?? unknown(1, "unknown_explicit_command");
+        return explicitPlan(explicit.command, explicit.args, registry, input, now) ?? unknown(1, "unknown_explicit_command");
       }
       const confidence = input.confidence === undefined ? 1 : Number(input.confidence);
       if (confidence < confidenceThreshold) return clarify("我不确定你的意图，请使用明确命令或补充说明。", confidence);
@@ -545,13 +676,13 @@ export function createAssistantRouter({ registry = createAgentRegistry(), confid
         if (tool) return makePlan({ tool, arguments: { mediaRef: input.mediaRef }, confidence: 1, source: "media" });
       }
       if (input.mediaRef && ["发票", "付款凭证"].includes(text)) {
-        return explicitPlan(text, "", registry, input);
+        return explicitPlan(text, "", registry, input, now);
       }
       if (input.mediaRef && /(?:记账|支出|收入|借款|到账)/u.test(text)) {
         const tool = registry.getTool("bookkeeping.ingest");
         if (tool) return makePlan({ tool, arguments: { text, mediaRef: input.mediaRef }, confidence: 1, source: "media" });
       }
-      return naturalPlan(text, confidence, registry, conversationContext(input));
+      return naturalPlan(text, confidence, registry, conversationContext(input), now);
     },
   });
 }

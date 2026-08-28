@@ -27,6 +27,14 @@ const TOOL_POLICIES = new Map([
   ["visit-capture.collect", { risk: "R1", confirmation: "none", reason: "draft_only" }],
   ["visit-capture.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],
   ["visit-capture.confirm", { risk: "R2", confirmation: "simple", reason: "ordinary_write" }],
+  // One-step quick-record capture is an append-only, non-financial write whose
+  // preview card shows exactly what will be written; it uses the lightweight
+  // “确认” reply (still a full pending action with an internal derived
+  // credential) instead of a user-facing six-digit code.
+  ["visit-capture.capture", { risk: "R1", confirmation: "affirm_language", reason: "ordinary_write" }],
+  ["visit-capture.search", { risk: "R0", confirmation: "none", reason: "read_only" }],
+  ["visit-capture.update", { risk: "R2", confirmation: "explicit_code", reason: "record_write" }],
+  ["visit-capture.void", { risk: "R3", confirmation: "explicit_code", reason: "destructive_write" }],
   ["payment-proof.ingest", { risk: "R1", confirmation: "none", reason: "inbox_capture" }],
   ["invoice.ingest", { risk: "R1", confirmation: "none", reason: "inbox_capture" }],
   ["reimbursement-report.preview", { risk: "R1", confirmation: "none", reason: "preview_only" }],

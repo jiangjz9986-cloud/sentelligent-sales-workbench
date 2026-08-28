@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-28
+
+### 小小·拜访与快速记录 agent：一句话记录，查、改、作废全链
+
+- 微信端新增四个快速记录工具并注册进确定性编排器：`visit-capture.capture`（R1 轻确认）、`visit-capture.search`（R0 免确认）、`visit-capture.update`（R2 六位码）、`visit-capture.void`（R3 六位码）。`记一下：/记录一下/快速记录/记拜访` 一步式捕获：同步 AI 分析（沿用 30s 超时静默降级的确定性 fallback）生成摘要卡（要点/客户匹配/待办建议），回复"确认"即写回——复用 quick_record 确认深写回链路（客户/商机/待办/风险），`source_channel='微信助手'` 直通周报素材路径不变。
+- R1 轻确认复用记账"确认"交互的内部派生凭据模式，`pendingActionRepository` 零改动；编排器新增 `affirm_language` 确认分支，与六位码链共享 TTL/取消/重发语义。与记账的歧义分流：金额与记账词（元/块/记账/报销/发票等）强信号让路记账链路，`记拜访：` 为绕开歧义的逃生门；记账草稿并存场景的让路合同用例（T-BK-1/2/3）在单元与 HTTP 两层固化。
+- `查/查一下 …（上周/本月/今天…）…的记录` 免确认检索：中文口语时间窗解析（新增 `spokenDate.js`，过去向）+ 客户主语模糊匹配（复用 v0.7.2 消歧器）；候选卡带记录短码。`把（那条/记录X）的字段改成…` 走 R2 预览卡（before/after + 乐观锁钉版）；`作废/删除记录` 走 R3——补齐 `voided_at` 自迁移 0002 建列以来从未有写路径的缺口，软作废可审计、读路径自动隐藏。
+- 快速记录写路径抽取为共享模块 `backend/src/quickRecords/quickRecordStore.js`（Web 与微信同一份 SQL/审计/版本冲突语义）；新增 `quickRecordPendingPreviewProviders.js` 预览提供者。既有微信三步式 visit-capture 暂存流原样保留。
+- 零数据库迁移；模型路由不变。后端全量 1145 项（较 v0.7.2 净增 73 项：store 写路径/口语日期/路由语式/预览提供者/HTTP 全链路 10 用例/记账并存合同用例）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.7.2] - 2026-08-28
 
 ### 小小·客户画像 agent：查免确认、增改删六位码确认

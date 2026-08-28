@@ -165,10 +165,25 @@ export const AGENT_MANIFESTS = deepFreeze([
   }),
   manifestDefinition("visit-capture", {
     modelPolicy: "required_with_deterministic_fallback",
-    taskTypes: ["capture", "normalize", "preview", "link_candidates"],
-    tools: ["visit-capture.collect", "visit-capture.preview", "visit-capture.confirm"],
+    taskTypes: ["capture", "normalize", "preview", "link_candidates", "history_search", "change_preview", "void_preview"],
+    tools: [
+      "visit-capture.collect",
+      "visit-capture.preview",
+      "visit-capture.confirm",
+      "visit-capture.capture",
+      "visit-capture.search",
+      "visit-capture.update",
+      "visit-capture.void",
+    ],
     confirmation: { preview: "preview", write: "explicit" },
     sourcePolicy: { mode: "required", requiredFields: ["sourceRefs", "rawContent"] },
+    systemPrompt: [
+      "你是小小助手的拜访记录采集与确认Agent。",
+      "只使用服务端提供的 owner-scoped 业务快照和已注册工具。",
+      "必须区分事实、推断、未知和建议，并保留来源引用。",
+      "不得猜测身份、权限、金额、日期或实体关系，不得执行任意 SQL、Shell、网络请求或文件操作。",
+      "任何写回只能生成预览，必须由本人明确确认后执行；快速记录写入使用回复确认的轻确认，历史记录的修改与作废必须六位确认码确认。",
+    ].join(""),
   }),
   manifestDefinition("customer", {
     contractVersion: "customer-v1",

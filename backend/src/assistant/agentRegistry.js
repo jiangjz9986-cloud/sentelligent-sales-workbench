@@ -80,6 +80,26 @@ export const TOOL_DEFINITIONS = Object.freeze([
   tool("visit-capture.collect", "visit-capture", "创建拜访记录草稿", { text: { type: "string", required: true } }),
   tool("visit-capture.preview", "visit-capture", "预览拜访记录草稿", { draftId: { type: "string", required: true } }),
   tool("visit-capture.confirm", "visit-capture", "确认写入拜访记录", { draftId: { type: "string", required: true } }),
+  tool("visit-capture.capture", "visit-capture", "快速记录拜访内容", {
+    rawContent: { type: "string", required: true },
+    occurredAt: { type: "string", required: false },
+  }),
+  tool("visit-capture.search", "visit-capture", "查询拜访记录", {
+    query: { type: "string", required: false },
+    dateStart: { type: "string", required: false },
+    dateEnd: { type: "string", required: false },
+  }),
+  tool("visit-capture.update", "visit-capture", "修改拜访记录", {
+    quickRecordId: { type: "string", required: false },
+    field: { type: "string", required: true },
+    value: { type: "string", required: true },
+    expectedVersion: { type: "number", required: false },
+    changes: { type: "object", required: false },
+  }),
+  tool("visit-capture.void", "visit-capture", "作废拜访记录（软作废）", {
+    quickRecordId: { type: "string", required: false },
+    expectedVersion: { type: "number", required: false },
+  }),
   tool("payment-proof.ingest", "payment-proof", "接收并识别实付凭证", { expenseId: { type: "string", required: false }, mediaRef: { type: "string", required: true } }),
   tool("invoice.ingest", "invoice", "接收并识别发票", { expenseId: { type: "string", required: false }, mediaRef: { type: "string", required: true } }),
   tool("reimbursement-report.preview", "reimbursement-report", "预览报销周汇总", { week: { type: "string", required: false }, periodStart: { type: "string", required: false }, periodEnd: { type: "string", required: false } }),

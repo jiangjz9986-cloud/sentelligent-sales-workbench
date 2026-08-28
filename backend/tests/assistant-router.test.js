@@ -261,3 +261,139 @@ describe("assistant deterministic router", () => {
     assert.equal(bookkeeping.toolName, "bookkeeping.ingest");
   });
 });
+
+describe("quick-record intents (v0.7.3)", () => {
+  // 2026-08-28 is a Friday in Asia/Shanghai.
+  const router = createAssistantRouter({ clock: () => new Date("2026-08-28T02:00:00.000Z") });
+
+  it("captures a one-step record with the spoken date pinned as occurredAt", () => {
+    const plan = router.route({ text: "记一下：今天拜访了日照中医医院，张主任说预算大概300万" });
+    assert.equal(plan.status, "confirmation_required");
+    assert.equal(plan.toolName, "visit-capture.capture");
+    assert.equal(plan.risk, "R1");
+    assert.equal(plan.confirmation, "affirm_language");
+    assert.deepEqual(plan.arguments, {
+      rawContent: "今天拜访了日照中医医院，张主任说预算大概300万",
+      occurredAt: "2026-08-28T04:00:00.000Z",
+    });
+  });
+
+  it("accepts every capture prefix and leaves occurredAt out when no date word exists", () => {
+    for (const text of ["记录一下和王主任的电话沟通", "帮我记一下 现场会议纪要", "帮我记录 现场会议纪要", "快速记录：客户现场走访", "记拜访：走访了莒县人民医院"]) {
+      const plan = router.route({ text });
+      assert.equal(plan.toolName, "visit-capture.capture", text);
+      assert.equal(plan.arguments.occurredAt, undefined, text);
+    }
+    const slash = router.route({ text: "/记一下 昨天拜访了日照中医医院" });
+    assert.equal(slash.toolName, "visit-capture.capture");
+    assert.equal(slash.arguments.occurredAt, "2026-08-27T04:00:00.000Z");
+  });
+
+  it("clarifies bookkeeping-like capture bodies and honors the 记拜访 escape prefix", () => {
+    const bookkeepingLike = router.route({ text: "记一下：打车50元" });
+    assert.equal(bookkeepingLike.status, "clarify");
+    assert.match(bookkeepingLike.question, /更像记账内容/);
+    assert.match(bookkeepingLike.question, /记拜访/);
+
+    const visitException = router.route({ text: "记一下：今天拜访了日照中医医院，谈了预算 300 元的耗材" });
+    assert.equal(visitException.toolName, "visit-capture.capture");
+
+    const escape = router.route({ text: "记拜访：打车50元去了客户那边" });
+    assert.equal(escape.toolName, "visit-capture.capture");
+    assert.equal(escape.arguments.rawContent, "打车50元去了客户那边");
+  });
+
+  it("clarifies an empty capture body with the friendly hint", () => {
+    for (const text of ["记一下：", "记一下", "快速记录"]) {
+      const plan = router.route({ text });
+      assert.equal(plan.status, "clarify", text);
+      assert.match(plan.question, /跟在“记一下：”后面/, text);
+    }
+  });
+
+  it("does not swallow bare weekly-report or legacy record phrases", () => {
+    assert.equal(router.route({ text: "销售周报" }).toolName, "sales-report.preview");
+    // With an explicit capture prefix the strongest user intent wins.
+    assert.equal(router.route({ text: "记一下：本周销售周报要点已同步" }).toolName, "visit-capture.capture");
+    assert.equal(router.route({ text: "记账 支出50元" }).toolName, "bookkeeping.ingest");
+    assert.equal(router.route({ text: "记录" }).toolName, "visit-capture.preview");
+    assert.equal(router.route({ text: "录入" }).toolName, "visit-capture.confirm");
+    assert.equal(router.route({ text: "会议记录" }).toolName, "visit-capture.collect");
+    assert.equal(router.route({ text: "拜访记录" }).toolName, "visit-capture.collect");
+  });
+
+  it("routes history searches with period and subject arguments", () => {
+    const withBoth = router.route({ text: "查一下上周去日照的记录" });
+    assert.equal(withBoth.status, "planned");
+    assert.equal(withBoth.toolName, "visit-capture.search");
+    assert.deepEqual(withBoth.arguments, { query: "日照", dateStart: "2026-08-17", dateEnd: "2026-08-23" });
+
+    const recent = router.route({ text: "最近的拜访记录" });
+    assert.equal(recent.toolName, "visit-capture.search");
+    assert.deepEqual(recent.arguments, { dateStart: "2026-08-15", dateEnd: "2026-08-28" });
+
+    const subjectOnly = router.route({ text: "日照中医医院的记录" });
+    assert.equal(subjectOnly.toolName, "visit-capture.search");
+    assert.deepEqual(subjectOnly.arguments, { query: "日照中医医院", dateStart: "2026-08-15", dateEnd: "2026-08-28" });
+
+    const monthRange = router.route({ text: "查询上个月的快速记录" });
+    assert.equal(monthRange.toolName, "visit-capture.search");
+    assert.deepEqual(monthRange.arguments, { dateStart: "2026-07-01", dateEnd: "2026-07-31" });
+
+    // Bare 查询 without the 记录 stem keeps the v0.7.2 customer search.
+    assert.equal(router.route({ text: "查询 人民医院" }).toolName, "customer.search");
+  });
+
+  it("maps every update field label onto the normalized field name", () => {
+    const cases = [
+      ["把那条记录的发生时间改成昨天", null, "occurredAt", "昨天"],
+      ["把记录 abc123 的时间改成昨天", "abc123", "occurredAt", "昨天"],
+      ["把最近一条记录的日期设为8月20日", null, "occurredAt", "8月20日"],
+      ["把那条记录的客户改成日照中医医院", null, "customerQuery", "日照中医医院"],
+      ["把记录 abc123 的商机改成十五五规划", "abc123", "opportunityQuery", "十五五规划"],
+      ["把这条记录的诉求改为补齐本地数据中心", null, "summary.request", "补齐本地数据中心"],
+      ["把那条记录的反馈更新为张主任已确认", null, "summary.feedback", "张主任已确认"],
+      ["把那条记录的风险改成预算路径未确认", null, "summary.risk", "预算路径未确认"],
+      ["把那条记录的建议改成输出对比材料", null, "summary.action", "输出对比材料"],
+      ["把那条记录的下一步改成周三前发对比材料给张主任", null, "summary.action", "周三前发对比材料给张主任"],
+      ["把上一条记录的待办换成催合同", null, "summary.action", "催合同"],
+    ];
+    for (const [text, quickRecordId, field, value] of cases) {
+      const plan = router.route({ text });
+      assert.equal(plan.status, "confirmation_required", text);
+      assert.equal(plan.toolName, "visit-capture.update", text);
+      assert.equal(plan.confirmation, "explicit_code", text);
+      assert.deepEqual(plan.arguments, {
+        ...(quickRecordId ? { quickRecordId } : {}),
+        field,
+        value,
+      }, text);
+    }
+  });
+
+  it("routes void phrasings as an R3 code-confirmed plan", () => {
+    const bare = router.route({ text: "作废那条记录" });
+    assert.equal(bare.status, "confirmation_required");
+    assert.equal(bare.toolName, "visit-capture.void");
+    assert.equal(bare.risk, "R3");
+    assert.deepEqual(bare.arguments, {});
+
+    const withId = router.route({ text: "删除记录 9d2c4a" });
+    assert.equal(withId.toolName, "visit-capture.void");
+    assert.deepEqual(withId.arguments, { quickRecordId: "9d2c4a" });
+
+    assert.equal(router.route({ text: "撤销这条记录" }).toolName, "visit-capture.void");
+  });
+
+  it("stays disjoint from the v0.7.2 customer-write regexes", () => {
+    // Customer field vocabulary does not collide with record field vocabulary.
+    assert.equal(router.route({ text: "把日照中医医院的名称改成日照市中医医院" }).toolName, "customer.update");
+    assert.equal(router.route({ text: "把那条记录的时间改成昨天" }).toolName, "visit-capture.update");
+    assert.equal(router.route({ text: "删除客户 测试医院" }).toolName, "customer.delete");
+    assert.equal(router.route({ text: "删除记录 abc123" }).toolName, "visit-capture.void");
+    assert.equal(router.route({ text: "修改客户 莒县人民医院，级别A" }).toolName, "customer.update");
+    // A profile question about a customer whose name ends with 记录 is
+    // impossible vocabulary; the customer read phrasings stay reachable.
+    assert.equal(router.route({ text: "日照中医医院什么情况" }).toolName, "customer.detail");
+  });
+});

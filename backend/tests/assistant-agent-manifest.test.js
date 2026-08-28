@@ -59,6 +59,27 @@ describe("versioned assistant agent manifests", () => {
     assert.equal(registry.get("personal-finance").enabled, false);
   });
 
+  it("registers the quick-record tools and history task types on the visit-capture manifest", () => {
+    const registry = createAgentManifestRegistry();
+    const visitCapture = registry.get("visit-capture");
+    assert.deepEqual(visitCapture.tools, [
+      "visit-capture.collect",
+      "visit-capture.preview",
+      "visit-capture.confirm",
+      "visit-capture.capture",
+      "visit-capture.search",
+      "visit-capture.update",
+      "visit-capture.void",
+    ]);
+    for (const taskType of ["capture", "normalize", "preview", "link_candidates", "history_search", "change_preview", "void_preview"]) {
+      assert.ok(visitCapture.taskTypes.includes(taskType), taskType);
+    }
+    assert.equal(visitCapture.modelPolicy, "required_with_deterministic_fallback");
+    assert.match(visitCapture.systemPrompt, /轻确认/u);
+    assert.match(visitCapture.systemPrompt, /六位确认码/u);
+    assert.equal(validateAgentManifest(visitCapture).id, "visit-capture");
+  });
+
   it("registers the customer write tools and preview task types on the customer manifest", () => {
     const registry = createAgentManifestRegistry();
     const customer = registry.get("customer");

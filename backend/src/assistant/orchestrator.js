@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomInt } from "node:crypto";
+import { createHash, createHmac, randomInt, randomUUID } from "node:crypto";
 
 import { createAssistantRouter } from "./router.js";
 import { createAgentRegistry } from "./agentRegistry.js";
@@ -288,6 +288,31 @@ export function safePendingResponse(tool, { code, preview }) {
   };
 }
 
+// Lightweight affirm-language confirmations never show a code; the pending
+// action still holds an internally derived credential (same pattern as the
+// bookkeeping runtime state credential) so the repository state machine,
+// TTL, lease, and audit chain stay identical to code-confirmed actions.
+export function safeAffirmPendingResponse(tool, { preview }) {
+  const previewText = typeof preview === "string" && preview.trim() ? preview.trim() : null;
+  return {
+    text: [
+      ...(previewText ? [previewText, ""] : []),
+      `待确认操作：${tool.description}`,
+      "回复“确认”写入，回复“取消”放弃；10 分钟内有效。",
+    ].join("\n"),
+  };
+}
+
+const AFFIRM_TEXT = "确认";
+const AFFIRM_CODE_GUIDANCE = "本操作无需确认码，回复“确认”写入，回复“取消”放弃。";
+
+function deriveAffirmCredential(confirmationSecretKey, actionId) {
+  const digest = createHmac("sha256", confirmationSecretKey)
+    .update(`sentelligent/assistant-affirm-confirmation/v1\u0000${actionId}`, "utf8")
+    .digest();
+  return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, "0");
+}
+
 /**
  * Deterministic assistant execution boundary. The HTTP layer supplies context;
  * model text can select only a registered tool and validated JSON arguments.
@@ -436,7 +461,28 @@ export function createAssistantOrchestrator({
         }
       }
       const scopedCommand = ["code", "cancel", "resend"].includes(textClassification.kind) || structuredCodePresent;
-      if (scopedCommand) {
+      // A bare 确认 confirms an affirm-language pending action (for example a
+      // quick-record capture). This branch runs strictly after the
+      // pendingActionHandler above, so a bookkeeping draft that owns 确认
+      // (quoted, or implicit when no generic pending action exists) has
+      // already been settled by the bookkeeping runtime and never reaches
+      // here. Code-confirmed pending actions ignore bare 确认 (router keeps
+      // the existing clarify).
+      let affirmConfirmation = false;
+      if (!scopedCommand && text.trim() === AFFIRM_TEXT) {
+        if (!pendingAction) {
+          try {
+            pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+          } catch {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
+        }
+        affirmConfirmation = Boolean(
+          pendingAction
+          && registry.getTool(pendingAction.actionType)?.policy?.confirmation === "affirm_language",
+        );
+      }
+      if (scopedCommand || affirmConfirmation) {
         if (structuredCodePresent && !structuredCode) {
           return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
         }
@@ -449,6 +495,34 @@ export function createAssistantOrchestrator({
           } catch {
             return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
           }
+        }
+        // Six-digit texts and resend requests aimed at an affirm-language
+        // pending action get guidance instead of a confirm() attempt, so the
+        // internal derived credential can never be guessed and wrong-code
+        // lockout is never triggered by an understandable user habit.
+        const affirmPendingTool = pendingAction
+          && registry.getTool(pendingAction.actionType)?.policy?.confirmation === "affirm_language"
+          ? registry.getTool(pendingAction.actionType)
+          : null;
+        if (affirmPendingTool && !affirmConfirmation && textClassification.kind !== "cancel") {
+          if (textClassification.kind === "resend") {
+            const storedPreview = typeof pendingAction.payload?.preview === "string" && pendingAction.payload.preview.trim()
+              ? pendingAction.payload.preview.trim()
+              : null;
+            const liveBody = {
+              status: "confirmation_required",
+              actionId: pendingAction.id,
+              toolName: affirmPendingTool.name,
+              risk: (pendingAction.payload?.plan || pendingAction.payload)?.risk,
+              ...safeAffirmPendingResponse(affirmPendingTool, { preview: storedPreview }),
+            };
+            return finish(200, liveBody, { draftText: "等待用户确认。" });
+          }
+          return finish(200, {
+            status: "clarify",
+            message: AFFIRM_CODE_GUIDANCE,
+            text: AFFIRM_CODE_GUIDANCE,
+          }, { draftText: "等待用户确认。" });
         }
         if (!pendingAction && pendingActionId) {
           const completed = pendingActionRepository?.get?.(pendingActionId, scope);
@@ -503,11 +577,16 @@ export function createAssistantOrchestrator({
             return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
           }
         } else {
-          if (!pendingAction || !code) {
+          // The affirm path re-derives the internal credential server-side;
+          // from here on the state machine is byte-identical to code confirms.
+          const suppliedCode = affirmConfirmation
+            ? deriveAffirmCredential(confirmationDigestKey, pendingAction.id)
+            : code;
+          if (!pendingAction || !suppliedCode) {
             return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
           }
           try {
-            const confirmed = pendingActionRepository.confirm(resolvedActionId, { ...scope, confirmationCode: code });
+            const confirmed = pendingActionRepository.confirm(resolvedActionId, { ...scope, confirmationCode: suppliedCode });
             if (confirmed?.expired || confirmed?.inProgress) {
               return finish(confirmed?.expired ? 410 : 409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
             }
@@ -606,12 +685,21 @@ export function createAssistantOrchestrator({
         const previewSummary = typeof enriched?.previewSummary === "string" && enriched.previewSummary.trim()
           ? enriched.previewSummary.trim().slice(0, 2000)
           : (previewText ? previewText.slice(0, 2000) : null);
-        const code = exactConfirmationCode(String(confirmationCodeFactory()));
+        // Affirm-language tools receive an internally derived credential bound
+        // to a pre-generated action id; the credential is never rendered, so
+        // the stored body needs no code scrubbing. Every other confirmation
+        // level keeps the six-digit code path unchanged.
+        const affirmTool = (tool.policy?.confirmation ?? getToolPolicy(tool.name).confirmation) === "affirm_language";
+        const affirmActionId = affirmTool ? randomUUID() : null;
+        const code = affirmTool
+          ? deriveAffirmCredential(confirmationDigestKey, affirmActionId)
+          : exactConfirmationCode(String(confirmationCodeFactory()));
         if (!code) return finish(500, { status: "error", message: SAFE_FAILURE });
         const expiresAt = new Date(clock().getTime() + pendingTtlMs).toISOString();
         let action;
         try {
           action = pendingActionRepository.create({
+            ...(affirmActionId ? { id: affirmActionId } : {}),
             owner: context.owner,
             channel: context.channel,
             conversationId: conversation?.id,
@@ -628,6 +716,16 @@ export function createAssistantOrchestrator({
             return finish(409, { status: "confirmation_required", message: "当前会话已有待确认操作，请先确认或取消。" });
           }
           throw error;
+        }
+        if (affirmTool) {
+          const publicBody = {
+            status: "confirmation_required",
+            actionId: action.id,
+            toolName: tool.name,
+            risk: plan.risk,
+            ...safeAffirmPendingResponse(tool, { preview: previewText ?? previewSummary }),
+          };
+          return finish(200, publicBody, { draftText: "等待用户确认。" });
         }
         const publicBody = {
           status: "confirmation_required",

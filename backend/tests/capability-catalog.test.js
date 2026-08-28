@@ -48,6 +48,9 @@ describe("小小 capability metadata catalog", () => {
 
     assert.ok(byId.get("customer.search").mappings.tools.includes("customer.search"));
     assert.ok(byId.get("visit-capture").mappings.tools.includes("visit-capture.collect"));
+    for (const tool of ["visit-capture.capture", "visit-capture.search", "visit-capture.update", "visit-capture.void"]) {
+      assert.ok(byId.get("visit-capture").mappings.tools.includes(tool), tool);
+    }
     assert.ok(byId.get("reimbursement-report").mappings.tools.includes("reimbursement-report.preview"));
     assert.equal(byId.get("sales-decision.preview").status, "ready");
     assert.equal(byId.get("sales-decision.preview").unavailableReason, null);
@@ -84,7 +87,7 @@ describe("小小 capability metadata catalog", () => {
       "customer.search": ["GET /api/customers"],
       "customer.detail": ["GET /api/customers/:id"],
       "opportunity.detail": ["GET /api/opportunities/:id"],
-      "visit-capture": ["POST /api/quick-records/preview"],
+      "visit-capture": ["POST /api/quick-records/preview", "GET /api/quick-records"],
       "travel-expense.summary": ["GET /api/travel-expenses"],
       "reimbursement-report": ["GET /api/travel-expenses"],
       "sales-decision.preview": ["POST /api/ai/sales-decisions"],

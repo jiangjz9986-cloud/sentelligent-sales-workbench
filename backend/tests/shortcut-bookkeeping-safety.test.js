@@ -299,6 +299,66 @@ test("keeps bookkeeping language bound to the draft when no other action is pend
   assert.equal(state.entry.status, "accepted");
 });
 
+// T-BK-1 (v0.7.3 contract): while a delivered bookkeeping draft coexists with
+// a quick-record capture pending action, an unquoted 确认 belongs to the
+// generic confirmation boundary (yield-path guard 1), not to the draft.
+test("yields an unquoted 确认 to the generic boundary when a capture affirm action is pending", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  const captureAction = {
+    ...structuredClone(state.action),
+    id: "capture-action-1",
+    actionType: "visit-capture.capture",
+  };
+  const result = await runtime.handlePending({
+    ...pendingInput(state, "确认"),
+    action: structuredClone(captureAction),
+  });
+  assert.equal(result, null, "the capture pending action owns the unquoted 确认");
+  assert.equal(state.completeLocalCalls, 0);
+  assert.equal(state.entry.status, "review_required", "the bookkeeping draft stays untouched");
+});
+
+// T-BK-2 (v0.7.3 contract): a 确认 quoting the delivered bookkeeping draft
+// stays inside the bookkeeping runtime even while a capture pending action
+// exists. The end-to-end settlement (real database, real outbox) is covered
+// by assistant-quick-record-http-integration.test.js; this harness only
+// proves the routing priority, mirroring the customer-action case above.
+test("a quoted bookkeeping 确认 keeps priority over a pending capture affirm action", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  const captureAction = {
+    ...structuredClone(state.action),
+    id: "capture-action-2",
+    actionType: "visit-capture.capture",
+  };
+  const result = await runtime.handlePending({
+    ...pendingInput(state, "确认"),
+    action: structuredClone(captureAction),
+    serverData: { quote: { text: "编号：202608180001 待确认记账 BK-AAAAAAAAAAAA" } },
+  });
+  assert.notEqual(result, null, "a quoted draft must stay inside the bookkeeping runtime");
+  assert.equal(result.status, 409);
+  assert.match(result.body.text, /引用的记账草稿不是当前可确认版本/);
+  assert.equal(state.completeLocalCalls, 0);
+});
+
+// T-BK-3 (v0.7.3 contract): capture intent text is never implicitly bound to
+// an active bookkeeping draft (yield-path guard 2).
+test("yields capture intent text to the router while a bookkeeping draft is active", async () => {
+  const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
+  for (const text of [
+    "记一下：今天拜访了日照中医医院，谈了十五五规划",
+    "记拜访：打车50元去了客户现场",
+    "查一下上周去日照的记录",
+    "把那条记录的下一步改成 周三前发对比材料",
+    "作废那条记录",
+  ]) {
+    const input = { ...pendingInput(state, text), action: null };
+    assert.equal(await runtime.handlePending(input), null, text);
+  }
+  assert.equal(state.completeLocalCalls, 0);
+  assert.equal(state.entry.status, "review_required");
+});
+
 test("a quoted bookkeeping draft keeps priority over a pending customer action", async () => {
   const { runtime, state } = makeRuntimeHarness({ failCompletionOnce: false });
   const customerAction = {

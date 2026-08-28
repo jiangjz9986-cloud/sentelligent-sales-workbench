@@ -944,3 +944,169 @@ describe("assistant orchestrator", () => {
     );
   });
 });
+
+describe("affirm-language confirmations (v0.7.3)", () => {
+  const capturePlan = Object.freeze({
+    status: "confirmation_required",
+    toolName: "visit-capture.capture",
+    agentId: "test-agent",
+    arguments: { value: "今天拜访了日照中医医院" },
+    risk: "R1",
+    confirmation: "affirm_language",
+  });
+
+  function affirmOrchestrator(runtime, { handler, previewProvider, plan = capturePlan } = {}) {
+    return createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, plan.risk, plan.confirmation ?? "affirm_language"),
+      router: routerFor(plan),
+      confirmationCodeFactory: () => {
+        throw new Error("affirm tools must not consume the user-facing code factory");
+      },
+      toolHandlers: { [plan.toolName]: handler ?? (() => ({ recorded: true })) },
+      ...(previewProvider ? { pendingPreviewProviders: { [plan.toolName]: previewProvider } } : {}),
+    });
+  }
+
+  it("creates an affirm pending action without any code and stores the same body", async () => {
+    const runtime = fakeRuntime();
+    const orchestrator = affirmOrchestrator(runtime, {
+      previewProvider: async () => ({
+        arguments: { value: "今天拜访了日照中医医院" },
+        previewText: "【拜访记录待确认】\n诉求：补齐材料",
+      }),
+    });
+    const response = await orchestrator.handle({ context, input: { text: "记一下：今天拜访了日照中医医院" } });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.status, "confirmation_required");
+    assert.equal(Object.hasOwn(response.body, "confirmationCode"), false, "no code key in the live body");
+    assert.match(response.body.text, /【拜访记录待确认】/);
+    assert.match(response.body.text, /回复“确认”写入，回复“取消”放弃；10 分钟内有效。/);
+    assert.equal(/(?<!\d)\d{6}(?!\d)/u.test(response.body.text), false, "no six-digit code in the live text");
+    const stored = [...runtime.events.values()][0];
+    assert.deepEqual(stored.response, response.body, "stored body equals public body, nothing to scrub");
+    const action = runtime.pending.get(response.body.actionId);
+    assert.equal(action.actionType, "visit-capture.capture");
+    assert.equal(action.status, "pending");
+  });
+
+  it("executes on a bare 确认 and replays the identical event response", async () => {
+    const runtime = fakeRuntime();
+    let calls = 0;
+    const orchestrator = affirmOrchestrator(runtime, {
+      handler: (args, handlerContext) => {
+        calls += 1;
+        return { recorded: true, actionId: handlerContext.actionId, value: args.value };
+      },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "记一下：今天拜访了日照中医医院" } });
+    const confirmed = await orchestrator.handle({
+      context: { ...context, event: "event-affirm-confirm", requestId: "request-affirm-confirm" },
+      input: { text: "确认" },
+    });
+    assert.equal(confirmed.status, 200);
+    assert.equal(confirmed.body.status, "ok");
+    assert.equal(confirmed.body.result.recorded, true);
+    assert.equal(confirmed.body.result.actionId, pending.body.actionId);
+    assert.equal(calls, 1);
+    assert.equal(runtime.pending.get(pending.body.actionId).status, "executed");
+
+    const replay = await orchestrator.handle({
+      context: { ...context, event: "event-affirm-confirm", requestId: "request-affirm-confirm" },
+      input: { text: "确认" },
+    });
+    assert.deepEqual(replay.body, confirmed.body);
+    assert.equal(calls, 1, "the event replay must not run the handler again");
+  });
+
+  it("guides six-digit texts and resend without counting confirmation failures", async () => {
+    const runtime = fakeRuntime();
+    const orchestrator = affirmOrchestrator(runtime, {
+      previewProvider: async () => ({
+        arguments: { value: "今天拜访了日照中医医院" },
+        previewText: "【拜访记录待确认】",
+      }),
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "记一下：今天拜访了日照中医医院" } });
+
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const guided = await orchestrator.handle({
+        context: { ...context, event: `event-affirm-code-${attempt}`, requestId: `request-affirm-code-${attempt}` },
+        input: { text: "123456" },
+      });
+      assert.equal(guided.status, 200);
+      assert.equal(guided.body.status, "clarify");
+      assert.match(guided.body.text, /本操作无需确认码/);
+    }
+    assert.equal(runtime.confirmationFailures.length, 0, "guidance must not count as wrong codes");
+    assert.equal(runtime.confirmationAttempts.get(pending.body.actionId), 0);
+
+    const resent = await orchestrator.handle({
+      context: { ...context, event: "event-affirm-resend", requestId: "request-affirm-resend" },
+      input: { text: "重发确认码" },
+    });
+    assert.equal(resent.body.status, "confirmation_required");
+    assert.match(resent.body.text, /【拜访记录待确认】/, "resend replays the preview card");
+    assert.match(resent.body.text, /回复“确认”写入/);
+    assert.equal(Object.hasOwn(resent.body, "confirmationCode"), false);
+
+    const stillConfirmable = await orchestrator.handle({
+      context: { ...context, event: "event-affirm-final-confirm", requestId: "request-affirm-final-confirm" },
+      input: { text: "确认" },
+    });
+    assert.equal(stillConfirmable.body.status, "ok", "the pending action stays confirmable after code texts");
+  });
+
+  it("cancels an affirm pending action with the generic 取消", async () => {
+    const runtime = fakeRuntime();
+    const orchestrator = affirmOrchestrator(runtime);
+    const pending = await orchestrator.handle({ context, input: { text: "记一下：今天拜访了日照中医医院" } });
+    const cancelled = await orchestrator.handle({
+      context: { ...context, event: "event-affirm-cancel", requestId: "request-affirm-cancel" },
+      input: { text: "取消" },
+    });
+    assert.equal(cancelled.body.status, "cancel");
+    assert.equal(runtime.pending.get(pending.body.actionId).status, "cancelled");
+  });
+
+  it("keeps a bare 确认 on the router path while a code-confirmed action is pending", async () => {
+    const runtime = fakeRuntime();
+    const plan = {
+      status: "confirmation_required",
+      toolName: "visit-capture.confirm",
+      agentId: "test-agent",
+      arguments: { value: "draft-1" },
+      risk: "R2",
+      confirmation: "simple",
+    };
+    let routedTexts = [];
+    const orchestrator = createAssistantOrchestrator({
+      ...runtime,
+      registry: registryFor(plan.toolName, "R2", "simple"),
+      router: { route(input) { routedTexts.push(input.text); return input.text === "确认" ? { status: "clarify", question: "当前没有待确认的操作。" } : { ...plan }; } },
+      confirmationCodeFactory: () => "482913",
+      toolHandlers: { [plan.toolName]: () => ({ saved: true }) },
+    });
+    const pending = await orchestrator.handle({ context, input: { text: "录入" } });
+    assert.equal(pending.body.status, "confirmation_required");
+    const bareAffirm = await orchestrator.handle({
+      context: { ...context, event: "event-code-bare-affirm", requestId: "request-code-bare-affirm" },
+      input: { text: "确认" },
+    });
+    assert.equal(bareAffirm.body.status, "clarify");
+    assert.equal(bareAffirm.body.message, "当前没有待确认的操作。");
+    assert.deepEqual(routedTexts, ["录入", "确认"], "bare 确认 falls through to the router for code tools");
+    assert.equal(runtime.pending.get(pending.body.actionId).status, "pending", "the code action is untouched");
+  });
+
+  it("fails safely when the affirm preview provider throws", async () => {
+    const runtime = fakeRuntime();
+    const orchestrator = affirmOrchestrator(runtime, {
+      previewProvider: async () => { throw new Error("provider exploded"); },
+    });
+    const response = await orchestrator.handle({ context, input: { text: "记一下：今天拜访了日照中医医院" } });
+    assert.equal(response.status, 500);
+    assert.equal(response.body.message, "处理失败，请稍后重试。");
+    assert.equal(runtime.pending.size, 0, "no pending action is created on provider failure");
+  });
+});

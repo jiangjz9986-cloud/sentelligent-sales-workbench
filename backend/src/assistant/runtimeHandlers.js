@@ -8,6 +8,7 @@ import {
   softDeleteCustomer,
   updateCustomer,
 } from "../customers/customerStore.js";
+import { createQuickRecordStore } from "../quickRecords/quickRecordStore.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
@@ -123,6 +124,21 @@ function quickRecordFromRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function quickCaptureReceipt(record, insight, db) {
+  const customerName = record.customerId
+    ? db.prepare("SELECT name FROM customers WHERE id = $id").get({ $id: record.customerId })?.name ?? record.customerId
+    : null;
+  const actionText = safeText(insight?.summary?.action?.text);
+  return [
+    `已录入，记录 ID：…${record.id.slice(-6)}。`,
+    customerName
+      ? `已挂接客户：${customerName}；AI 分析已保存。`
+      : "未自动挂接客户（分析未唯一匹配）；AI 分析已保存。",
+    ...(actionText ? [`建议待办“${actionText.slice(0, 60)}”可在系统确认页写回客户/商机与待办。`] : []),
+    "后续可发“最近的记录”查看，或“把那条记录的下一步改成…”修改。",
+  ].join("\n");
 }
 
 function insightFromRow(row) {
@@ -475,11 +491,13 @@ export function createAssistantToolHandlers({
   salesReportAssistantAdapter = null,
   agentRunRepository = null,
   salesLoopPreviewService = null,
+  quickRecordStore = null,
   resolveBusinessOwner = (owner) => owner,
   clock = () => new Date(),
   fetchImpl = fetch,
 } = {}) {
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
+  const recordStore = quickRecordStore ?? createQuickRecordStore(db, { clock });
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
   const settlementSnapshot = settlementSnapshotAdapter ?? createAssistantSettlementSnapshotAdapter({
     db,
@@ -1396,6 +1414,358 @@ export function createAssistantToolHandlers({
         status: "recorded",
         record: persisted.record,
         insight: persisted.insight,
+      };
+    },
+
+    async "visit-capture.capture"(args, context) {
+      const actionId = safeText(context.actionId);
+      const recordId = actionId || randomUUID();
+      const existingRow = db.prepare(
+        "SELECT * FROM quick_records WHERE id = $id AND owner = $owner",
+      ).get({ $id: recordId, $owner: context.owner });
+      if (existingRow) {
+        const existing = quickRecordFromRow(existingRow);
+        const insight = insightFromRow(db.prepare(`
+          SELECT * FROM ai_insights
+          WHERE quick_record_id = $quickRecordId
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+        `).get({ $quickRecordId: existing.id }));
+        return {
+          text: quickCaptureReceipt(existing, insight, db),
+          status: "recorded",
+          record: existing,
+          insight,
+          replayed: true,
+        };
+      }
+      const content = safeText(args.rawContent);
+      if (!content) return { text: "请把拜访、电话或会议内容跟在“记一下：”后面一起发我。", status: "empty" };
+      const now = clock();
+      const requestedOccurredAt = safeText(args.occurredAt);
+      const occurredAt = requestedOccurredAt && Number.isFinite(Date.parse(requestedOccurredAt))
+        ? new Date(requestedOccurredAt).toISOString()
+        : (now instanceof Date ? now.toISOString() : new Date(now).toISOString());
+      // The affirm preview provider already produced an agent run for this
+      // conversation and raw content; reuse it so confirmation does not pay a
+      // second model call. A miss falls back to a fresh (fallback-capable)
+      // analysis inside the adapter.
+      const reusableRun = reusableVisitRun(agentRunRepository, context, content);
+      const analysis = await visitCaptureAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.actionId ? `assistant-action:${context.actionId}` : context.event,
+        taskType: "capture",
+        rawContent: content,
+        occurredAt,
+        sourceChannel: "微信助手",
+        draftId: null,
+        businessContext: context.businessContext,
+        reusableRun,
+      });
+      const links = resolveQuickRecordLinks(snapshotAdapter, context.owner, analysis);
+      const persisted = withImmediateTransaction(db, () => {
+        db.prepare(`
+          INSERT INTO quick_records (id, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
+          VALUES ($id, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
+        `).run({
+          $id: recordId,
+          $rawContent: content,
+          $occurredAt: occurredAt,
+          $customerId: links.customerId,
+          $opportunityId: links.opportunityId,
+        });
+        db.prepare("UPDATE quick_records SET owner = $owner WHERE id = $id")
+          .run({ $id: recordId, $owner: context.owner });
+        const created = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: recordId }));
+        insertAudit(db, {
+          action: "quick_record.create",
+          entityType: "quick_record",
+          entityId: recordId,
+          actor: context.owner,
+          requestId: context.requestId,
+          before: null,
+          after: created,
+          entityVersion: created.version,
+          metadata: {
+            sourceChannel: created.sourceChannel,
+            customerId: created.customerId,
+            opportunityId: created.opportunityId,
+            source: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+        const insightId = randomUUID();
+        db.prepare(`
+          INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
+          VALUES ($id, $quickRecordId, $source, $confidence, $analysisJson)
+        `).run({
+          $id: insightId,
+          $quickRecordId: created.id,
+          $source: analysis?.source ?? "mock",
+          $confidence: analysis?.confidence ?? 70,
+          $analysisJson: JSON.stringify(analysis ?? {}),
+        });
+        db.prepare("UPDATE quick_records SET status = 'analyzed', updated_at = CURRENT_TIMESTAMP WHERE id = $id")
+          .run({ $id: created.id });
+        const updated = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: created.id }));
+        insertAudit(db, {
+          action: "quick_record.analyze",
+          entityType: "quick_record",
+          entityId: created.id,
+          actor: context.owner,
+          requestId: context.requestId,
+          before: { status: created.status },
+          after: { status: updated.status },
+          entityVersion: updated.version,
+          metadata: {
+            source: analysis?.source ?? "mock",
+            captureSource: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+        return {
+          record: updated,
+          insight: insightFromRow(db.prepare("SELECT * FROM ai_insights WHERE id = $id").get({ $id: insightId })),
+        };
+      });
+      return {
+        text: quickCaptureReceipt(persisted.record, persisted.insight, db),
+        status: "recorded",
+        record: persisted.record,
+        insight: persisted.insight,
+        ...(persisted.record.customerId
+          ? {
+            contextUpdate: {
+              customerId: persisted.record.customerId,
+              opportunityId: persisted.record.opportunityId ?? null,
+              source: "verified_entity",
+              sourceRefs: [{ type: "quick_record", id: persisted.record.id }],
+            },
+          }
+          : {}),
+      };
+    },
+
+    async "visit-capture.search"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，无法查询记录。", status: "denied" };
+      }
+      const query = safeText(args.query) || null;
+      const dateStart = safeText(args.dateStart) || null;
+      const dateEnd = safeText(args.dateEnd) || null;
+      const { items, truncated } = recordStore.search({
+        owner: businessOwner,
+        query,
+        dateStart,
+        dateEnd,
+        limit: 5,
+      });
+      const rangeLabel = dateStart && dateEnd ? `${dateStart} ~ ${dateEnd}` : "近期";
+      if (items.length === 0) {
+        return {
+          text: `${rangeLabel}没有找到${query ? `与“${query}”相关的` : ""}记录。可发送“最近的记录”查看全部。`,
+          status: "ok",
+          items: [],
+          truncated: false,
+        };
+      }
+      const statusLabels = { recorded: "待分析", analyzed: "已分析", confirmed: "已确认" };
+      const lines = [
+        `找到 ${items.length}${truncated ? "+" : ""} 条记录（${rangeLabel}${query ? `，关键词：${query}` : ""}）：`,
+        ...items.map((item, index) => {
+          const date = (item.occurredAt ?? item.createdAt ?? "").slice(5, 10) || "日期待确认";
+          const customer = item.customerName ?? "（未挂客户）";
+          const excerptText = String(item.rawContent ?? "").replace(/\s+/gu, " ").trim().slice(0, 60);
+          return `${index + 1}. ${date} ${customer} ｜ ${statusLabels[item.status] ?? item.status} ｜ …${item.id.slice(-6)}\n   ${excerptText}`;
+        }),
+        ...(truncated ? ["还有更多记录未展示，请补充客户名或缩小时间范围。"] : []),
+        "发送“把记录 <编号后6位> 的下一步改成…”可修改；“作废记录 <编号后6位>”可作废。",
+      ];
+      const onlyCustomerId = items.length === 1 ? items[0].customerId : null;
+      return {
+        text: lines.join("\n"),
+        status: "ok",
+        items,
+        truncated,
+        ...(onlyCustomerId
+          ? {
+            contextUpdate: {
+              customerId: onlyCustomerId,
+              opportunityId: items[0].opportunityId ?? null,
+              source: "verified_entity",
+              sourceRefs: [{ type: "quick_record", id: items[0].id }],
+            },
+          }
+          : {}),
+      };
+    },
+
+    async "visit-capture.update"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改记录。", status: "denied" };
+      }
+      const quickRecordId = safeText(args.quickRecordId);
+      const expectedVersion = Number(args.expectedVersion);
+      const changes = args.changes && typeof args.changes === "object" && !Array.isArray(args.changes)
+        ? args.changes
+        : null;
+      if (!quickRecordId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !changes) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const summaryPatch = changes.summaryPatch && typeof changes.summaryPatch === "object" && !Array.isArray(changes.summaryPatch)
+        ? changes.summaryPatch
+        : null;
+      const fields = changes.fields && typeof changes.fields === "object" && !Array.isArray(changes.fields)
+        ? changes.fields
+        : null;
+      if (!summaryPatch && !fields) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const changedParts = [];
+      let result = null;
+      try {
+        result = withImmediateTransaction(db, () => {
+          let current = null;
+          if (summaryPatch) {
+            const updated = recordStore.updateInsightSummary({
+              owner: businessOwner,
+              id: quickRecordId,
+              expectedVersion,
+              summaryPatch,
+            });
+            insertAudit(db, {
+              action: "quick_record.analysis.update",
+              entityType: "quick_record",
+              entityId: updated.record.id,
+              actor: context.owner,
+              requestId: context.requestId,
+              before: { quickRecord: updated.beforeRecord, analysis: updated.beforeAnalysis },
+              after: { quickRecord: updated.record, analysis: updated.analysis },
+              entityVersion: updated.record.version,
+              metadata: {
+                insightId: updated.analysis.id,
+                summaryFields: Object.keys(summaryPatch),
+                source: "weixin-assistant",
+                ...(context.actionId ? { actionId: context.actionId } : {}),
+              },
+            });
+            const summaryLabels = { request: "诉求", feedback: "反馈", risk: "风险", action: "建议动作" };
+            changedParts.push(...Object.keys(summaryPatch).map((key) => `${summaryLabels[key] ?? key}已修改`));
+            current = { record: updated.record, analysis: updated.analysis };
+          }
+          if (fields) {
+            const fieldVersion = current ? current.record.version : expectedVersion;
+            const updated = recordStore.updateFields({
+              owner: businessOwner,
+              id: quickRecordId,
+              expectedVersion: fieldVersion,
+              ...(Object.hasOwn(fields, "occurredAt") ? { occurredAt: fields.occurredAt } : {}),
+              ...(Object.hasOwn(fields, "customerId") ? { customerId: fields.customerId } : {}),
+              ...(Object.hasOwn(fields, "opportunityId") ? { opportunityId: fields.opportunityId } : {}),
+            });
+            insertAudit(db, {
+              action: "quick_record.update",
+              entityType: "quick_record",
+              entityId: updated.after.id,
+              actor: context.owner,
+              requestId: context.requestId,
+              before: updated.before,
+              after: updated.after,
+              entityVersion: updated.after.version,
+              metadata: {
+                changedFields: Object.keys(fields),
+                source: "weixin-assistant",
+                ...(context.actionId ? { actionId: context.actionId } : {}),
+              },
+            });
+            const fieldLabels = { occurredAt: "发生时间", customerId: "挂接客户", opportunityId: "挂接商机" };
+            changedParts.push(...Object.keys(fields).map((key) => `${fieldLabels[key] ?? key}已修改`));
+            current = { ...(current ?? {}), record: updated.after };
+          }
+          return current;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条记录刚在其他端被修改，本次未写入。请重新发起修改。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "记录不存在或已作废，未修改。", status: "not_found" };
+        }
+        if (error?.code === "QUICK_RECORD_RELATIONSHIP_INVALID") {
+          return { text: "客户与商机的关系已变化，本次未写入。请重新发起修改。", status: "conflict" };
+        }
+        throw error;
+      }
+      return {
+        text: [
+          `已更新记录 …${result.record.id.slice(-6)}（v${result.record.version}）：${changedParts.join("；")}。`,
+          "注意：已进入周报草稿或已确认写回的内容不会自动回改。",
+        ].join("\n"),
+        status: "updated",
+        record: result.record,
+        ...(result.analysis ? { analysis: result.analysis } : {}),
+      };
+    },
+
+    async "visit-capture.void"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未作废记录。", status: "denied" };
+      }
+      const quickRecordId = safeText(args.quickRecordId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!quickRecordId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "作废请求不完整，请重新发送作废指令。", status: "error" };
+      }
+      let voided;
+      try {
+        voided = withImmediateTransaction(db, () => {
+          const outcome = recordStore.void({
+            owner: businessOwner,
+            id: quickRecordId,
+            expectedVersion,
+            voidedBy: context.owner,
+            reason: "weixin-assistant-void",
+          });
+          insertAudit(db, {
+            action: "quick_record.void",
+            entityType: "quick_record",
+            entityId: outcome.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: outcome.before,
+            after: outcome.after,
+            entityVersion: outcome.after.version,
+            metadata: {
+              reason: "weixin-assistant-void",
+              previousStatus: outcome.before.status,
+              wasConfirmed: outcome.before.status === "confirmed",
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return outcome;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条记录刚在其他端被修改，本次未作废。请重新发起作废。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "记录不存在或已作废，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: [
+          `已作废记录 …${voided.after.id.slice(-6)}。该记录不再出现在记录列表、周报素材与项目分析中。`,
+          "已确认写回客户/商机的内容不会回退；如需恢复请联系管理员。",
+        ].join("\n"),
+        status: "voided",
+        record: voided.after,
       };
     },
 
