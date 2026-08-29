@@ -1,6 +1,6 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useState } from "react";
 import { kanbanStages, statusTone } from "../../../data/salesWorkbenchData.js";
+import { useToast } from "../../../components/toast.jsx";
 
 export function KanbanPage({
   opportunitiesList = [],
@@ -10,7 +10,7 @@ export function KanbanPage({
   onSaveOpportunity,
   backendStatus,
 }) {
-  const [statusMessage, setStatusMessage] = useState("看板阶段变更会同步到商机档案。");
+  const toast = useToast();
   const knownStages = kanbanStages.map(([stage]) => stage);
   const extraStages = [...new Set(opportunitiesList.map((item) => item.stage).filter(Boolean))]
     .filter((stage) => !knownStages.includes(stage));
@@ -21,21 +21,20 @@ export function KanbanPage({
     const currentIndex = stages.indexOf(item.stage);
     const nextStage = stages[currentIndex + direction];
     if (!nextStage) return;
-    setStatusMessage("正在更新看板阶段");
     try {
       await onSaveOpportunity({
         id: item.id,
         stage: nextStage,
       });
-            setStatusMessage("看板已更新，并同步到商机档案");
+      // 阶段写入落在商机档案（跨页效果），结果确认走全局提示条。
+      toast({ tone: "success", title: "看板已更新", description: `${item.name} → ${nextStage}，已同步到商机档案` });
     } catch (error) {
-      setStatusMessage(error.message || "看板阶段更新失败");
+      toast({ tone: "error", title: "看板阶段更新失败", description: error.message || "请稍后重试" });
     }
   }
 
   return (
     <div className="kanban-page">
-      <p className="kanban-status">{statusMessage}</p>
       <div className="kanban-board">
         {stages.map((stage) => {
           const cards = opportunitiesList.filter((item) => item.stage === stage);

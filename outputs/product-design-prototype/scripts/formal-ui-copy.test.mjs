@@ -8,6 +8,8 @@ import { readSalesWorkbenchPagesSource, salesWorkbenchPageFiles } from "./pages-
 const uiFiles = [
   ...salesWorkbenchPageFiles(),
   "src/components/primitives.jsx",
+  "src/components/toast.jsx",
+  "src/components/AvatarMenu.jsx",
   "src/App.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",
   "src/features/travelExpense/ExpenseEditorDrawer.jsx",

@@ -19,15 +19,15 @@ import {
 } from "../../../components/primitives.jsx";
 import { buildOpportunityTimeline } from "../opportunityTimeline.js";
 import { SalesDecisionPanel } from "../SalesDecisionPanel.jsx";
+import { useToast } from "../../../components/toast.jsx";
 import {
+  ConfirmDialog,
   FieldTags,
   FormField,
   arrayFromText,
-  confirmDelete,
   generateBusinessSuggestion,
   joinedList,
   numberFromInput,
-  showOperationError,
   textFromArray,
 } from "./shared.jsx";
 
@@ -197,6 +197,10 @@ export function OpportunityPage({
   backendStatus,
 }) {
   const [searchText, setSearchText] = useState("");
+  const toast = useToast();
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const cleanSearch = searchText.trim().toLowerCase();
   const visibleItems = cleanSearch
     ? items.filter((item) =>
@@ -215,14 +219,26 @@ export function OpportunityPage({
   const isEditView = viewMode === "edit";
   const timelineItems = buildOpportunityTimeline(selected);
 
-  async function deleteCurrentOpportunity() {
+  function requestDeleteCurrentOpportunity() {
     if (!selected?.id || !onDeleteOpportunity) return;
-    if (!confirmDelete(`确认删除商机「${selected.name}」？删除后将从商机列表移除。`)) return;
+    setDeleteError("");
+    setDeleteDialogOpen(true);
+  }
+
+  async function confirmDeleteCurrentOpportunity() {
+    if (!selected?.id || !onDeleteOpportunity || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError("");
     try {
+      const deletedName = selected.name;
       await onDeleteOpportunity(selected.id);
+      setDeleteDialogOpen(false);
       setViewMode?.("list");
+      toast({ tone: "success", title: "商机已删除", description: deletedName });
     } catch (error) {
-      showOperationError(error.message || "删除商机失败，请稍后重试。");
+      setDeleteError(error.message || "删除商机失败，请稍后重试。");
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -313,7 +329,7 @@ export function OpportunityPage({
               className="ghost-button danger"
               type="button"
               data-testid="opportunity-delete-detail"
-              onClick={deleteCurrentOpportunity}
+              onClick={requestDeleteCurrentOpportunity}
             >
               <Trash2 size={15} />
               删除
@@ -355,33 +371,17 @@ export function OpportunityPage({
             <InfoList items={selected.solutionDirection} tone="green" />
           </Panel>
           <Panel title="来源记录" meta="快速记录承接">
-            <ExpandableInsight
-              testId="opportunity-source-insight"
-              expandedTestId="opportunity-source-expanded"
-              ariaLabel="展开商机来源记录"
-              detail="已展开来源记录：可回到快速记录核对原始拜访、电话或会议内容，再决定是否写入周报。"
-            >
+            <ExpandableInsight testId="opportunity-source-insight">
               {selected.sourceRecord ?? "尚未绑定来源记录，可从快速记录确认后写入商机档案。"}
             </ExpandableInsight>
           </Panel>
           <Panel title="风险说明" meta="来自记录与字段">
-            <ExpandableInsight
-              tone="amber"
-              testId="opportunity-risk-insight"
-              expandedTestId="opportunity-risk-expanded"
-              ariaLabel="展开商机风险说明"
-              detail="已展开风险说明：可进入风险识别页分配负责人、设置处理时间并关闭风险。"
-            >
+            <ExpandableInsight tone="amber" testId="opportunity-risk-insight">
               {selected.risk ?? "尚未沉淀风险说明，可在风险识别页补充证据和处理建议。"}
             </ExpandableInsight>
           </Panel>
           <Panel title="下一步动作" meta="推进安排">
-            <ExpandableInsight
-              testId="opportunity-next-insight"
-              expandedTestId="opportunity-next-expanded"
-              ariaLabel="展开商机下一步动作"
-              detail="已展开下一步动作：可进入下一步动作页调整负责人、截止时间和完成状态。"
-            >
+            <ExpandableInsight testId="opportunity-next-insight">
               {selected.next ?? "尚未生成下一步动作，可从快速记录或商机推进建议中确认后生成。"}
             </ExpandableInsight>
           </Panel>
@@ -435,6 +435,20 @@ export function OpportunityPage({
           </>
         )}
       </section>
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        title="确认删除商机"
+        description={`“${selected?.name ?? "当前商机"}”将从商机列表中移除，此操作不能撤销。`}
+        busy={deleteBusy}
+        errorMessage={deleteError}
+        onCancel={() => {
+          if (deleteBusy) return;
+          setDeleteError("");
+          setDeleteDialogOpen(false);
+        }}
+        onConfirm={confirmDeleteCurrentOpportunity}
+        testIdPrefix="opportunity-delete"
+      />
     </section>
   );
 }

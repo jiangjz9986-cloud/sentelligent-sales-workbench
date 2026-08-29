@@ -240,32 +240,20 @@ export function Overview({
 
   return (
     <div className="screen-grid overview-grid">
+      {/* DOM 序=视觉序=读屏序：今日焦点与周趋势全端置顶（不用 CSS order）。 */}
+      <TodayFocusCard
+        focus={summary?.todayFocus}
+        setActive={setActive}
+        openActionList={openActionList}
+        openRiskList={openRiskList}
+      />
+
+      <WeeklyTrendCard trend={summary?.weeklyTrend} />
+
       <MetricCard label="本周快速记录" value={metrics.quickRecords.value} badge={metrics.quickRecords.badge} tone={metrics.quickRecords.tone} icon={Mic} className="overview-kpi" onClick={() => setActive("quick")} />
       <MetricCard label="重点商机" value={metrics.opportunities.value} badge={metrics.opportunities.badge} tone={metrics.opportunities.tone} icon={BriefcaseBusiness} className="overview-kpi" onClick={() => openOpportunityList ? openOpportunityList() : setActive("opportunity")} />
       <MetricCard label="预计回款" value={metrics.forecast.value} badge={metrics.forecast.badge} tone={metrics.forecast.tone} icon={TrendingUp} className="overview-kpi" onClick={() => setActive("kanban")} />
       <MetricCard label="高风险项" value={metrics.risks.value} badge={metrics.risks.badge} tone={metrics.risks.tone} icon={ShieldAlert} className="overview-kpi" onClick={() => openRiskList ? openRiskList() : setActive("risk")} />
-
-      <section className="hero-card overview-hero">
-        <span>销售作战总览</span>
-        <h2>从记录开始，让客户画像、商机档案和周报自动成形。</h2>
-        <p>
-          从快速记录沉淀客户画像、商机档案、风险动作和周报材料，销售可以先看今日优先级，再进入对应详情处理。
-        </p>
-        <div className="hero-stat-grid">
-          <span><strong>7</strong> 天记录视图</span>
-          <span><strong>3</strong> 路业务同步</span>
-          <span><strong>1</strong> 套销售数据</span>
-        </div>
-        <div className="hero-actions">
-          <button className="primary-button" type="button" onClick={() => setActive("quick")}>
-            <Mic size={16} />
-            新增快速记录
-          </button>
-          <button className="ghost-button dark" type="button" onClick={() => setActive("weekly")}>
-            查看本周七天记录
-          </button>
-        </div>
-      </section>
 
       <Panel title="今日优先动作" meta="按风险排序" className="overview-priority">
         <CompactList
@@ -313,15 +301,6 @@ export function Overview({
           ))}
         </div>
       </Panel>
-
-      <TodayFocusCard
-        focus={summary?.todayFocus}
-        setActive={setActive}
-        openActionList={openActionList}
-        openRiskList={openRiskList}
-      />
-
-      <WeeklyTrendCard trend={summary?.weeklyTrend} />
 
       <Panel title="最近快速记录" meta="来自拜访与电话" className="overview-records">
         {recentRecords.length === 0 ? (

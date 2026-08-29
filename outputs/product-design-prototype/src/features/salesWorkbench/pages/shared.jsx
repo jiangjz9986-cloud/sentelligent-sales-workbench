@@ -16,74 +16,43 @@ export async function generateBusinessSuggestion(apiClient, backendStatus, paylo
   return apiClient.generateAiSuggestion(payload);
 }
 
+// 干系人/标签/决策链均为纯展示基元：条目本身即全文，没有可补充的增量信息，
+// 因此不再提供点击展开（v0.10.0 去除无信息量的交互示能）。
 export function StakeholderGrid({ people }) {
-  const [expandedPerson, setExpandedPerson] = useState(null);
-
   return (
     <div className="stakeholder-grid">
-      {people.map((person) => {
-        const id = `${person.name}-${person.role}`;
-        return (
-        <button
-          className={`stakeholder-card interactive-card ${expandedPerson === id ? "expanded" : ""}`}
-          key={id}
-          type="button"
-          onClick={() => setExpandedPerson((current) => (current === id ? null : id))}
-        >
+      {people.map((person) => (
+        <article className="stakeholder-card" key={`${person.name}-${person.role}`}>
           <span className="avatar-dot" />
           <strong>{person.name}</strong>
           <small>{person.role}</small>
           <b className="pill tone-blue">{person.influence}</b>
-          {expandedPerson === id ? (
-            <small className="item-detail" data-testid="stakeholder-expanded">
-              已展开：适合补充最近沟通、影响力变化和下次拜访问题。
-            </small>
-          ) : null}
-        </button>
-        );
-      })}
+        </article>
+      ))}
     </div>
   );
 }
 
 export function FieldTags({ items, tone = "blue" }) {
-  const [expandedItem, setExpandedItem] = useState(null);
-
   return (
     <div className="field-tags">
       {items.map((item) => (
-        <button
-          className={`field-tag interactive-card ${statusTone[tone]} ${expandedItem === item ? "expanded" : ""}`}
-          key={item}
-          type="button"
-          onClick={() => setExpandedItem((current) => (current === item ? null : item))}
-        >
+        <span className={`field-tag ${statusTone[tone]}`} key={item}>
           {item}
-          {expandedItem === item ? <small data-testid="field-tag-expanded">可用于复盘、方案材料或客户背书。</small> : null}
-        </button>
+        </span>
       ))}
     </div>
   );
 }
 
 export function DecisionChain({ steps }) {
-  const [expandedStep, setExpandedStep] = useState(null);
-
   return (
     <div className="chain-list">
       {steps.map((step, index) => (
-        <button
-          className={`chain-step interactive-card ${expandedStep === step ? "expanded" : ""}`}
-          key={step}
-          type="button"
-          onClick={() => setExpandedStep((current) => (current === step ? null : step))}
-        >
+        <div className="chain-step" key={step}>
           <time>{index + 1}</time>
           <span>{step}</span>
-          {expandedStep === step ? (
-            <small data-testid="chain-expanded">已展开：需要记录责任人、确认材料和下一次推进动作。</small>
-          ) : null}
-        </button>
+        </div>
       ))}
     </div>
   );
@@ -139,20 +108,13 @@ export function FormField({ label, children }) {
   );
 }
 
-export function confirmDelete(message) {
-  if (typeof window === "undefined" || typeof window.confirm !== "function") return true;
-  return window.confirm(message);
-}
-
-export function showOperationError(message) {
-  if (typeof window !== "undefined" && typeof window.alert === "function") {
-    window.alert(message);
-  }
-}
-
-export function DeleteConfirmationDialog({
+// 统一样式确认弹窗（以客户删除弹窗为基准泛化）：焦点管理、Escape 取消、
+// role="alertdialog"、失败文案留在弹窗内。五域删除共用，testid 前缀区分。
+export function ConfirmDialog({
   open,
-  entityName,
+  title,
+  description,
+  confirmLabel = "确认删除",
   busy = false,
   errorMessage = "",
   onCancel,
@@ -189,8 +151,8 @@ export function DeleteConfirmationDialog({
           <Trash2 size={20} />
         </div>
         <div className="confirm-dialog-copy">
-          <h2 id={titleId}>确认删除客户</h2>
-          <p id={descriptionId}>“{entityName}”将从客户列表中移除，此操作不能撤销。</p>
+          <h2 id={titleId}>{title}</h2>
+          <p id={descriptionId}>{description}</p>
           {errorMessage ? <p className="confirm-dialog-error" role="alert">{errorMessage}</p> : null}
         </div>
         <div className="confirm-dialog-actions">
@@ -212,7 +174,7 @@ export function DeleteConfirmationDialog({
             onClick={onConfirm}
           >
             <Trash2 size={16} />
-            {busy ? "删除中" : "确认删除"}
+            {busy ? "删除中" : confirmLabel}
           </button>
         </div>
       </section>

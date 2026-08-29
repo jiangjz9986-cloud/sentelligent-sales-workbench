@@ -14,9 +14,10 @@ import {
   MetricInline,
   Panel,
 } from "../../../components/primitives.jsx";
+import { useToast } from "../../../components/toast.jsx";
 import {
+  ConfirmDialog,
   DecisionChain,
-  DeleteConfirmationDialog,
   FieldTags,
   FormField,
   StakeholderGrid,
@@ -184,6 +185,7 @@ export function CustomerPage({
   backendStatus,
 }) {
   const [searchText, setSearchText] = useState("");
+  const toast = useToast();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
@@ -215,9 +217,11 @@ export function CustomerPage({
     setDeleteBusy(true);
     setDeleteError("");
     try {
+      const deletedName = selected.name;
       await onDeleteCustomer(selected.id);
       setDeleteDialogOpen(false);
       setViewMode?.("list");
+      toast({ tone: "success", title: "客户已删除", description: deletedName });
     } catch (error) {
       setDeleteError(error.message || "删除客户失败，请稍后重试。");
     } finally {
@@ -379,9 +383,6 @@ export function CustomerPage({
             <StakeholderGrid people={selected.stakeholders} />
             <DecisionChain steps={selected.decisionChain} />
           </Panel>
-          <Panel title="关键联系人" meta="跟进角色">
-            <StakeholderGrid people={selected.stakeholders.slice(0, 4)} />
-          </Panel>
           <Panel title="历史项目" meta="已沉淀">
             <FieldTags items={selected.historyProjects} tone="green" />
           </Panel>
@@ -419,9 +420,10 @@ export function CustomerPage({
           </>
         )}
       </section>
-      <DeleteConfirmationDialog
+      <ConfirmDialog
         open={deleteDialogOpen}
-        entityName={selected?.name ?? "当前客户"}
+        title="确认删除客户"
+        description={`“${selected?.name ?? "当前客户"}”将从客户列表中移除，此操作不能撤销。`}
         busy={deleteBusy}
         errorMessage={deleteError}
         onCancel={() => {

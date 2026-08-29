@@ -10,13 +10,13 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { InfoList, ManualConfirmBox, Panel } from "../../../components/primitives.jsx";
+import { useToast } from "../../../components/toast.jsx";
 import {
+  ConfirmDialog,
   FormField,
   arrayFromText,
-  confirmDelete,
   generateBusinessSuggestion,
   joinedList,
-  showOperationError,
   textFromArray,
 } from "./shared.jsx";
 
@@ -149,14 +149,32 @@ export function KnowledgePage({
   const [searchStatus, setSearchStatus] = useState("按客户、场景或标签检索销售材料。");
   const [citationStatus, setCitationStatus] = useState("选择知识材料后，可生成带来源引用的方案或周报草稿。");
   const [citingTarget, setCitingTarget] = useState(null);
+  const toast = useToast();
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const current = selected ?? visibleItems[0] ?? null;
 
   useEffect(() => {
     setVisibleItems(items);
   }, [items]);
 
+  function changeSearchText(value) {
+    setSearchText(value);
+    // 清空关键词即时还原全量列表，无需再点检索。
+    if (!value.trim()) {
+      setVisibleItems(items);
+      setSearchStatus("按客户、场景或标签检索销售材料。");
+    }
+  }
+
   async function submitSearch(event) {
     event.preventDefault();
+    if (!searchText.trim()) {
+      setVisibleItems(items);
+      setSearchStatus("已还原全部材料");
+      return;
+    }
     setSearchStatus("检索中");
     try {
       const tags = arrayFromText(searchText).filter((item) => item.length <= 12);
@@ -180,6 +198,7 @@ export function KnowledgePage({
     try {
       await onCiteKnowledge(target, current);
       setCitationStatus(`已引用到${targetLabel}草稿，正在打开目标页面。`);
+      toast({ tone: "success", title: `已引用到${targetLabel}草稿`, description: current.title });
     } catch (error) {
       setCitationStatus(error.message || `引用到${targetLabel}失败，请稍后重试。`);
     } finally {
@@ -195,14 +214,26 @@ export function KnowledgePage({
   const isCreateView = viewMode === "create";
   const isEditView = viewMode === "edit";
 
-  async function deleteCurrentKnowledge() {
+  function requestDeleteCurrentKnowledge() {
     if (!current?.id || !onDeleteKnowledge) return;
-    if (!confirmDelete(`确认删除知识「${current.title}」？删除后将从知识列表移除。`)) return;
+    setDeleteError("");
+    setDeleteDialogOpen(true);
+  }
+
+  async function confirmDeleteCurrentKnowledge() {
+    if (!current?.id || !onDeleteKnowledge || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError("");
     try {
+      const deletedTitle = current.title;
       await onDeleteKnowledge(current.id);
+      setDeleteDialogOpen(false);
       setViewMode?.("list");
+      toast({ tone: "success", title: "知识材料已删除", description: deletedTitle });
     } catch (error) {
-      showOperationError(error.message || "删除知识失败，请稍后重试。");
+      setDeleteError(error.message || "删除知识失败，请稍后重试。");
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -231,7 +262,7 @@ export function KnowledgePage({
               <input
                 aria-label="搜索知识库材料"
                 value={searchText}
-                onChange={(event) => setSearchText(event.target.value)}
+                onChange={(event) => changeSearchText(event.target.value)}
                 placeholder="搜索移动云、双活、调研模板"
               />
             </label>
@@ -299,7 +330,7 @@ export function KnowledgePage({
               className="ghost-button danger"
               type="button"
               data-testid="knowledge-delete-detail"
-              onClick={deleteCurrentKnowledge}
+              onClick={requestDeleteCurrentKnowledge}
             >
               <Trash2 size={15} />
               删除
@@ -377,6 +408,20 @@ export function KnowledgePage({
           </>
         )}
       </section>
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        title="确认删除知识材料"
+        description={`“${current?.title ?? "当前知识材料"}”将从知识列表中移除，此操作不能撤销。`}
+        busy={deleteBusy}
+        errorMessage={deleteError}
+        onCancel={() => {
+          if (deleteBusy) return;
+          setDeleteError("");
+          setDeleteDialogOpen(false);
+        }}
+        onConfirm={confirmDeleteCurrentKnowledge}
+        testIdPrefix="knowledge-delete"
+      />
     </section>
   );
 }

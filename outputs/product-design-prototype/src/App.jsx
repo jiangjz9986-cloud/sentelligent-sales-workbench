@@ -52,6 +52,8 @@ import {
   WeixinBindingPage,
   WeeklyPage,
 } from "./features/salesWorkbench/pages.jsx";
+import { AvatarMenu } from "./components/AvatarMenu.jsx";
+import { ToastProvider } from "./components/toast.jsx";
 import { VisitItineraryPage } from "./features/visitItinerary/VisitItineraryPage.jsx";
 import {
   expenseDraftFiltersFromItinerary,
@@ -109,6 +111,9 @@ function resolveHeadingContext({
   }
 
   if (active === "actions") {
+    if (actionViewMode === "create") {
+      return { title: "新增待办" };
+    }
     if (actionViewMode === "edit") {
       return { title: selectedAction ? `修改${selectedAction.title}` : "下一步动作列表" };
     }
@@ -930,6 +935,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setActionViewMode(mode);
     const entityId = selectedActionIdRef.current;
     if (mode === "list") navigateTo("actions", { filters: routeFilters });
+    else if (mode === "create") navigateTo("actions", { mode: "new", filters: routeFilters });
     else if (entityId) navigateTo("actions", { mode, entityId, filters: routeFilters });
   }
 
@@ -1129,6 +1135,15 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     setSelectedActionId(updated.id);
     await refreshOverviewSummary();
     return updated;
+  }
+
+  async function handleCreateAction(draft) {
+    ensureBackend("新增待办");
+    const saved = await apiClient.createAction(draft);
+    setWorkbenchActions((current) => mergeById(current, saved));
+    selectAction(saved.id);
+    await refreshOverviewSummary();
+    return saved;
   }
 
   async function handleDeleteCustomer(id) {
@@ -1377,6 +1392,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
 
   return (
     <main className="app-shell">
+      <ToastProvider>
       <div className="product-window">
         <header className="topbar">
           <div className="brand-area">
@@ -1408,14 +1424,12 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
               <Mic size={16} />
               快速记录
             </button>
-            <button
-              className="avatar avatar-button"
-              type="button"
-              onClick={onLogout}
-              title={`${authSession?.displayName ?? authSession?.account ?? ""} · 退出登录`}
-            >
-              {avatarInitial}
-            </button>
+            <AvatarMenu
+              initial={avatarInitial}
+              displayName={authSession?.displayName ?? authSession?.account ?? ""}
+              account={authSession?.account ?? ""}
+              onLogout={onLogout}
+            />
           </div>
         </header>
 
@@ -1594,7 +1608,9 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 viewMode={actionViewMode}
                 setViewMode={changeActionViewMode}
                 onUpdateActionStatus={handleUpdateActionStatus}
+                onCreateAction={handleCreateAction}
                 onDeleteAction={handleDeleteAction}
+                customersList={workbenchCustomers}
                 backendStatus={backendStatus}
               />
             )}
@@ -1646,6 +1662,8 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
                 setWeeklyDraft={setWeeklyDraft}
                 weeklyDraftText={weeklyDraftText}
                 setWeeklyDraftText={setWeeklyDraftText}
+                quickRecords={workbenchQuickRecords}
+                onOpenQuickRecord={openQuickHistoryRoute}
               />
             )}
             {active === "risk" && (
@@ -1716,6 +1734,7 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
           </section>
         </div>
       </div>
+      </ToastProvider>
     </main>
   );
 }

@@ -11,8 +11,9 @@ import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "./digestM
 // a fully missed day is never back-filled.
 //
 // v0.9.3 多播：resolveDeliveries() 返回全部 active ∧ digest_enabled 绑定目标，
-// runOnce/runManual 逐 owner hasKey→build→enqueue；幂等键加 owner 维度，并对
-// 旧格式键做一版过渡（升级日防双发，v0.10.0 移除）。
+// runOnce/runManual 逐 owner hasKey→build→enqueue；幂等键含 owner 维度。
+// 旧单 owner 键格式的升级日过渡逻辑已按计划在 v0.10.0 移除（键含日期，过渡窗
+// 只存在于 v0.9.3 上线当天，退役后旧行天然失效）。
 
 const MAX_TIMER_DELAY = 2 ** 31 - 1;
 
@@ -35,15 +36,6 @@ export function dailyDigestKey(owner, dateOnly) {
 
 export function fridayCloseoutKey(owner, dateOnly) {
   return `friday-closeout:${owner}:${fridayOfWeek(dateOnly)}`;
-}
-
-// 单 owner 时代（≤v0.9.2）的键格式：仅用于升级日“已发过”判定，v0.10.0 移除。
-export function legacyDailyDigestKey(dateOnly) {
-  return `daily-digest:${dateOnly}`;
-}
-
-export function legacyFridayCloseoutKey(dateOnly) {
-  return `friday-closeout:${fridayOfWeek(dateOnly)}`;
 }
 
 export function createDailyDigestScheduler({
@@ -115,10 +107,8 @@ export function createDailyDigestScheduler({
     });
   }
 
-  function alreadyEnqueued(owner, idempotencyKey, legacyKey) {
-    if (outboxRepository.hasKey({ owner, idempotencyKey })) return true;
-    // 升级日过渡：旧格式键（无 owner 维度）只可能存在于历史单绑定 owner 名下。
-    return outboxRepository.hasKey({ owner, idempotencyKey: legacyKey });
+  function alreadyEnqueued(owner, idempotencyKey) {
+    return outboxRepository.hasKey({ owner, idempotencyKey });
   }
 
   async function deliverDaily({ delivery, parts, now, manual = false }) {
@@ -126,7 +116,7 @@ export function createDailyDigestScheduler({
     if (!manual && dailyEmptySkipDates.get(delivery.owner) === parts.date) {
       return { owner: delivery.owner, status: "skipped_empty" };
     }
-    if (alreadyEnqueued(delivery.owner, idempotencyKey, legacyDailyDigestKey(parts.date))) {
+    if (alreadyEnqueued(delivery.owner, idempotencyKey)) {
       return { owner: delivery.owner, status: "already_sent", digestDate: parts.date };
     }
     const built = await buildDailyDigest({ owner: delivery.owner, now });
@@ -172,7 +162,7 @@ export function createDailyDigestScheduler({
   async function deliverFriday({ delivery, parts, now, manual = false }) {
     const idempotencyKey = fridayCloseoutKey(delivery.owner, parts.date);
     const digestDate = fridayOfWeek(parts.date);
-    if (alreadyEnqueued(delivery.owner, idempotencyKey, legacyFridayCloseoutKey(parts.date))) {
+    if (alreadyEnqueued(delivery.owner, idempotencyKey)) {
       return { owner: delivery.owner, status: "already_sent", digestDate };
     }
     const built = await buildFridayCloseout({ owner: delivery.owner, now });
@@ -292,8 +282,8 @@ export function createDailyDigestScheduler({
     }
     const deliveries = targets.map((owner) => ({
       owner,
-      daily: alreadyEnqueued(owner, dailyDigestKey(owner, parts.date), legacyDailyDigestKey(parts.date)),
-      friday: alreadyEnqueued(owner, fridayCloseoutKey(owner, parts.date), legacyFridayCloseoutKey(parts.date)),
+      daily: alreadyEnqueued(owner, dailyDigestKey(owner, parts.date)),
+      friday: alreadyEnqueued(owner, fridayCloseoutKey(owner, parts.date)),
     }));
     return {
       daily: {

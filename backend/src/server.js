@@ -1728,6 +1728,11 @@ function updateActionItem(db, id, body, expectedVersion, owner = null) {
   if (!actionStatuses.has(nextStatus)) {
     return { error: "invalid_status" };
   }
+  const nextRemindAt = patchValue(body, "remindAt", current.remindAt);
+  // 提醒重新武装语义（对齐 actionItemStore.defer）：remindAt 发生变更（含置
+  // null）即清 reminded_at，让提醒调度器按新时间重新扫描；未携带或原值不变则
+  // 保留既有已提醒标记，避免重复投递。
+  const remindChanged = Object.hasOwn(body, "remindAt") && nextRemindAt !== current.remindAt;
 
   runVersionedUpdate(db, {
     table: "action_items",
@@ -1739,7 +1744,9 @@ function updateActionItem(db, id, body, expectedVersion, owner = null) {
          due = $due,
          assignee = $assignee,
          priority = $priority,
-         tone = $tone`,
+         tone = $tone,
+         remind_at = $remindAt,
+         reminded_at = $remindedAt`,
     params: {
       $title: patchValue(body, "title", current.title),
       $reason: patchValue(body, "reason", current.reason),
@@ -1748,10 +1755,26 @@ function updateActionItem(db, id, body, expectedVersion, owner = null) {
       $assignee: patchValue(body, "assignee", current.assignee),
       $priority: patchValue(body, "priority", current.priority),
       $tone: patchValue(body, "tone", current.tone),
+      $remindAt: nextRemindAt,
+      $remindedAt: remindChanged ? null : current.remindedAt,
     },
   });
 
   return actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+}
+
+// remindAt 请求值归一：空串/null 视为清除，合法时间归一为 ISO，非法即 422。
+function normalizeRemindAtField(body) {
+  if (!Object.hasOwn(body, "remindAt")) return;
+  if (body.remindAt === null || !String(body.remindAt).trim()) {
+    body.remindAt = null;
+    return;
+  }
+  const parsed = new Date(body.remindAt);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { remindAt: "dateTime" });
+  }
+  body.remindAt = parsed.toISOString();
 }
 
 function updateWeeklyReport(db, id, body, expectedVersion, owner = null) {
@@ -6979,6 +7002,54 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/actions") {
+        // v0.10.0：Web 首个创建待办入口。owner ≡ 会话账号（v0.9.2 隔离契约），
+        // 复用 actionItemStore.create（微信侧同一写路径），customerId 只允许挂
+        // 接本人名下客户（查无按校验失败处理，防跨账号挂接与存在性探测）。
+        const body = await readValidatedJson(request, requestSchemas.actionCreate);
+        normalizeRemindAtField(body);
+        const createOwner = requestOwner(request) ?? LEGACY_OWNER;
+        const item = withImmediateTransaction(db, () => {
+          let customerName = null;
+          if (body.customerId) {
+            const customerRow = get(
+              db,
+              `SELECT name FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(createOwner)}`,
+              ownerParams(createOwner, { $id: body.customerId }),
+            );
+            if (!customerRow) {
+              throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { customerId: "invalid" });
+            }
+            customerName = customerRow.name;
+          }
+          const created = createActionItemStore(db).create({
+            owner: createOwner,
+            id: randomUUID(),
+            title: body.title,
+            reason: body.reason ?? null,
+            due: body.due ?? null,
+            remindAt: body.remindAt ?? null,
+            priority: body.priority ?? "中",
+            customerId: body.customerId ?? null,
+            customerName,
+          });
+          insertAudit(db, {
+            action: "action.create",
+            entityType: "action",
+            entityId: created.id,
+            actor: request.authContext.account ?? createOwner,
+            requestId,
+            before: null,
+            after: created,
+            entityVersion: created.version,
+            metadata: { source: "web", remindAt: created.remindAt, priority: created.priority },
+          });
+          return actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: created.id }));
+        });
+        sendJson(response, 201, { item });
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/actions/reminders/status") {
         if (request.authContext.kind !== "user") return unauthorized(response);
         const reminderOwner = requestOwner(request);
@@ -7042,6 +7113,7 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.actionPatch);
+        normalizeRemindAtField(body);
         const patchOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
           const before = actionFromRow(get(

@@ -25,7 +25,6 @@ const requiredContract = [
   "solutionDirection",
   "sourceRecord",
   "组织架构与决策链",
-  "关键联系人",
   "历史项目",
   "现有基础架构",
   "快速记录承接",

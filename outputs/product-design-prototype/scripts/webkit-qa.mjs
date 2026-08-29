@@ -361,7 +361,8 @@ async function main() {
 
     const screenshotPath = resolve(evidenceDirectory, "webkit-iphone-360x800.png");
     await page.screenshot({ path: screenshotPath, fullPage: false });
-    await page.getByTitle("退出登录").click();
+    await page.getByTestId("avatar-menu-trigger").click();
+    await page.getByTestId("avatar-menu-logout").click();
     await page.getByTestId("login-submit").waitFor();
     assert.deepEqual(failedResponses, []);
 

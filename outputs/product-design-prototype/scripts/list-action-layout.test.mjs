@@ -25,6 +25,7 @@ describe("list page action layout", () => {
       "customer-create-detail",
       "opportunity-create-detail",
       "knowledge-create-detail",
+      "actions-create-detail",
     ]) {
       assert.match(pages, new RegExp(`<Panel[\\s\\S]{0,500}data-testid="${testId}"`));
     }

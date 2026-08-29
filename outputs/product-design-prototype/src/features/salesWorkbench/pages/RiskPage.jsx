@@ -15,7 +15,8 @@ import {
   MetricInline,
   Panel,
 } from "../../../components/primitives.jsx";
-import { confirmDelete, showOperationError } from "./shared.jsx";
+import { useToast } from "../../../components/toast.jsx";
+import { ConfirmDialog } from "./shared.jsx";
 
 const riskStatusMeta = {
   open: { label: "待确认", tone: "tone-amber", helper: "先确认风险是否真实影响商机推进。" },
@@ -59,9 +60,13 @@ export function RiskPage({
   backendStatus,
 }) {
   const current = selected ?? items[0] ?? null;
+  const toast = useToast();
   const [searchText, setSearchText] = useState("");
   const isEditView = viewMode === "edit";
   const [statusMessage, setStatusMessage] = useState("选择风险后，可人工确认、开始处理或关闭。");
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [assignee, setAssignee] = useState(current?.assignee ?? "继振");
   const [due, setDue] = useState(current?.due ?? "待确认");
   const currentStatus = riskStatusMeta[current?.status] ?? riskStatusMeta.open;
@@ -102,14 +107,26 @@ export function RiskPage({
     setViewMode?.("detail");
   }
 
-  async function deleteCurrentRisk() {
+  function requestDeleteCurrentRisk() {
     if (!current?.id || !onDeleteRisk) return;
-    if (!confirmDelete(`确认删除风险「${current.title}」？删除后将从风险列表移除。`)) return;
+    setDeleteError("");
+    setDeleteDialogOpen(true);
+  }
+
+  async function confirmDeleteCurrentRisk() {
+    if (!current?.id || !onDeleteRisk || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError("");
     try {
+      const deletedTitle = current.title;
       await onDeleteRisk(current.id);
+      setDeleteDialogOpen(false);
       setViewMode?.("list");
+      toast({ tone: "success", title: "风险已删除", description: deletedTitle });
     } catch (error) {
-      showOperationError(error.message || "删除风险失败，请稍后重试。");
+      setDeleteError(error.message || "删除风险失败，请稍后重试。");
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -184,7 +201,7 @@ export function RiskPage({
             className="ghost-button danger"
             type="button"
             data-testid="risk-delete-detail"
-            onClick={deleteCurrentRisk}
+            onClick={requestDeleteCurrentRisk}
           >
             <Trash2 size={15} />
             删除
@@ -249,27 +266,30 @@ export function RiskPage({
           </Panel>
         )}
         <Panel title="证据" meta={current.sourceType ? `来源：${sourceLabel}` : "来自快速记录与周报字段"}>
-          <ExpandableInsight
-            tone="amber"
-            testId="risk-evidence-insight"
-            expandedTestId="risk-evidence-expanded"
-            ariaLabel="展开风险证据"
-            detail="已展开证据：可用于复核来源记录、周报字段和商机风险判断。"
-          >
+          <ExpandableInsight tone="amber" testId="risk-evidence-insight">
             {current.evidence ?? "尚未补充证据，可从快速记录、客户反馈或周报字段中确认来源。"}
           </ExpandableInsight>
         </Panel>
         <Panel title="建议处理" meta="人工确认">
-          <ExpandableInsight
-            testId="risk-action-insight"
-            expandedTestId="risk-action-expanded"
-            ariaLabel="展开风险处理建议"
-            detail="已展开建议处理：确认后可在上方状态流转中分配负责人、延期处理或关闭风险。"
-          >
+          <ExpandableInsight testId="risk-action-insight">
             {current.action ?? "尚未生成处理建议，可先分配负责人并记录下一次处理时间。"}
           </ExpandableInsight>
         </Panel>
       </section>
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        title="确认删除风险"
+        description={`“${current?.title ?? "当前风险"}”将从风险列表中移除，此操作不能撤销。`}
+        busy={deleteBusy}
+        errorMessage={deleteError}
+        onCancel={() => {
+          if (deleteBusy) return;
+          setDeleteError("");
+          setDeleteDialogOpen(false);
+        }}
+        onConfirm={confirmDeleteCurrentRisk}
+        testIdPrefix="risk-delete"
+      />
     </section>
   );
 }

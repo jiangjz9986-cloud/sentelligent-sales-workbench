@@ -100,6 +100,7 @@ describe("business module delivery coverage", () => {
       "deleteCustomer",
       "saveOpportunity",
       "deleteOpportunity",
+      "createAction",
       "updateActionStatus",
       "deleteAction",
       "updateRiskStatus",

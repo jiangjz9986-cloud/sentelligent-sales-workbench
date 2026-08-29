@@ -22,6 +22,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AmapRouteMap } from "./AmapRouteMap.jsx";
 import { geocodeVisitItineraryPayload } from "./amapGeocoder.js";
 import { Panel } from "../../components/primitives.jsx";
+import { useToast } from "../../components/toast.jsx";
 import {
   addVisitStop,
   applyCustomerToVisitStop,
@@ -361,6 +362,17 @@ export function VisitItineraryPage({
 }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const toast = useToast();
+
+  async function deleteWithFeedback() {
+    const deletedTitle = selected?.title;
+    try {
+      await onDelete();
+      toast({ tone: "success", title: "拜访行程已删除", description: deletedTitle });
+    } catch (error) {
+      toast({ tone: "error", title: "行程删除失败", description: error.message || "请稍后重试" });
+    }
+  }
 
   if (viewMode === "new" || viewMode === "edit") {
     return (
@@ -379,7 +391,7 @@ export function VisitItineraryPage({
         item={selected}
         onBack={onBack}
         onEdit={onEdit}
-        onDelete={onDelete}
+        onDelete={deleteWithFeedback}
         onRecordExpense={onRecordExpense}
       />
     );

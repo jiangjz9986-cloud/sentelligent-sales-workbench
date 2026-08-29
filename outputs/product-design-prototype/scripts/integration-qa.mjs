@@ -986,15 +986,12 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         firstCustomerDetailButton.click();
         await waitUntil(() => document.querySelector('[data-testid="customer-detail-view"]'), 5000);
         cardInteractions.customerDetailViewOpened = Boolean(document.querySelector('[data-testid="customer-detail-view"]'));
-        document.querySelector('.stakeholder-card')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="stakeholder-expanded"]'), 5000);
-        cardInteractions.stakeholderExpanded = Boolean(document.querySelector('[data-testid="stakeholder-expanded"]'));
-        document.querySelector('.chain-step')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="chain-expanded"]'), 5000);
-        cardInteractions.chainExpanded = Boolean(document.querySelector('[data-testid="chain-expanded"]'));
-        document.querySelector('.field-tag')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="field-tag-expanded"]'), 5000);
-        cardInteractions.fieldTagExpanded = Boolean(document.querySelector('[data-testid="field-tag-expanded"]'));
+        await waitUntil(() => document.querySelector('.stakeholder-card')?.textContent?.includes('王院长'), 5000);
+        cardInteractions.stakeholderExpanded = Boolean(document.querySelector('.stakeholder-card')?.textContent?.includes('王院长'));
+        await waitUntil(() => document.querySelector('.chain-step')?.textContent?.includes('信息中心'), 5000);
+        cardInteractions.chainExpanded = Boolean(document.querySelector('.chain-step')?.textContent?.includes('信息中心'));
+        await waitUntil(() => document.querySelector('.field-tag')?.textContent?.trim(), 5000);
+        cardInteractions.fieldTagExpanded = Boolean(document.querySelector('.field-tag')?.textContent?.trim());
         const aiSuggestions = {};
         aiSuggestions.customer = await clickManualSuggestion('page-customer', '生成客户画像补全建议');
 
@@ -1042,18 +1039,14 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         opportunityDetailButton.click();
         await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"]'), 5000);
         cardInteractions.opportunityDetailViewOpened = Boolean(document.querySelector('[data-testid="opportunity-detail-view"]'));
-        document.querySelector('[data-testid="opportunity-source-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="opportunity-source-expanded"]'), 5000);
-        cardInteractions.opportunitySourceExpanded = Boolean(document.querySelector('[data-testid="opportunity-source-expanded"]'));
-        document.querySelector('[data-testid="opportunity-risk-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="opportunity-risk-expanded"]'), 5000);
-        cardInteractions.opportunityRiskExpanded = Boolean(document.querySelector('[data-testid="opportunity-risk-expanded"]'));
-        document.querySelector('[data-testid="opportunity-next-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="opportunity-next-expanded"]'), 5000);
-        cardInteractions.opportunityNextExpanded = Boolean(document.querySelector('[data-testid="opportunity-next-expanded"]'));
-        document.querySelector('.time-row')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="timeline-expanded"]'), 5000);
-        cardInteractions.timelineExpanded = Boolean(document.querySelector('[data-testid="timeline-expanded"]'));
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-source-insight"]')?.textContent?.trim(), 5000);
+        cardInteractions.opportunitySourceExpanded = Boolean(document.querySelector('[data-testid="opportunity-source-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-risk-insight"]')?.textContent?.trim(), 5000);
+        cardInteractions.opportunityRiskExpanded = Boolean(document.querySelector('[data-testid="opportunity-risk-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-next-insight"]')?.textContent?.trim(), 5000);
+        cardInteractions.opportunityNextExpanded = Boolean(document.querySelector('[data-testid="opportunity-next-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('.time-row')?.textContent?.trim(), 5000);
+        cardInteractions.timelineExpanded = Boolean(document.querySelector('.time-row')?.textContent?.trim());
         aiSuggestions.opportunity = await clickManualSuggestion('page-opportunity', '手动生成商机推进建议');
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('知识库'))?.click();
@@ -1190,12 +1183,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         riskDetailButton.click();
         await waitUntil(() => document.querySelector('[data-testid="risk-detail-view"]'), 5000);
         const riskDetailViewOpened = Boolean(document.querySelector('[data-testid="risk-detail-view"]'));
-        document.querySelector('[data-testid="risk-evidence-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="risk-evidence-expanded"]'), 5000);
-        const riskEvidenceExpanded = Boolean(document.querySelector('[data-testid="risk-evidence-expanded"]'));
-        document.querySelector('[data-testid="risk-action-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="risk-action-expanded"]'), 5000);
-        const riskActionExpanded = Boolean(document.querySelector('[data-testid="risk-action-expanded"]'));
+        await waitUntil(() => document.querySelector('[data-testid="risk-evidence-insight"]')?.textContent?.trim(), 5000);
+        const riskEvidenceExpanded = Boolean(document.querySelector('[data-testid="risk-evidence-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('[data-testid="risk-action-insight"]')?.textContent?.trim(), 5000);
+        const riskActionExpanded = Boolean(document.querySelector('[data-testid="risk-action-insight"]')?.textContent?.trim());
         document.querySelector('[data-testid="risk-edit-detail"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="risk-assignee-input"]'), 5000);
         clickRequired('开始处理');
@@ -1465,7 +1456,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const kanbanAdvanceButton = kanbanDynamicCard?.querySelector('[data-testid="kanban-stage-forward"]');
         const kanbanAdvanceAvailable = Boolean(kanbanAdvanceButton);
         kanbanAdvanceButton?.click();
-        await waitUntil(() => document.querySelector('[data-testid="page-kanban"]')?.textContent?.includes('看板已更新'), 8000);
+        await waitUntil(() => document.querySelector('.toast-region .toast')?.textContent?.includes('看板已更新'), 8000);
         const kanbanMovedCard = [...document.querySelectorAll('[data-testid="page-kanban"] .deal-card')]
           .find((button) => button.textContent.includes('测试集成客户规划调研'));
         const kanbanAdvanced = kanbanMovedCard?.textContent?.includes('调研机会') ?? false;
@@ -1565,11 +1556,17 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         cardInteractions.weeklyDailyUsesRealSources =
           document.querySelectorAll('[data-testid="weekly-daily-view"] .day-card').length > 0;
         const realWeeklyDayCard = await waitUntil(
-          () => document.querySelector('[data-testid="weekly-daily-view"] .day-card'),
+          () => [...document.querySelectorAll('[data-testid="weekly-daily-view"] [data-testid="weekly-day-toggle"]')]
+            .find((button) => (button.textContent ?? '').includes('周六') && (button.textContent ?? '').includes('条')),
           5000,
         );
-        realWeeklyDayCard.click();
-        await waitUntil(() => document.querySelector('[data-testid="weekly-expanded-day"]'), 5000);
+        realWeeklyDayCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        await wait(200);
+        await waitUntil(
+          () => document.querySelector('[data-testid="weekly-day-toggle"][aria-expanded="true"]')
+            && document.querySelector('[data-testid="weekly-expanded-day"]'),
+          5000,
+        );
         cardInteractions.weeklyDayExpanded = Boolean(document.querySelector('[data-testid="weekly-expanded-day"]'));
         document.querySelector('[data-testid="weekly-summary-tab"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="weekly-summary-view"]'), 5000);
@@ -2883,8 +2880,8 @@ async function main() {
         assert.equal(result.riskPageStatusClosed, true, "desktop flow should close a risk through the UI");
         assert.equal(result.riskPageAssigneeUpdated, true, "desktop flow should update risk owner through the UI");
         assert.equal(result.riskPageDueUpdated, true, "desktop flow should update risk due date through the UI");
-        assert.equal(result.riskPageEvidenceExpanded, true, "desktop risk evidence should expand details");
-        assert.equal(result.riskPageActionExpanded, true, "desktop risk action advice should expand details");
+        assert.equal(result.riskPageEvidenceExpanded, true, "desktop risk evidence should render without fake expand");
+        assert.equal(result.riskPageActionExpanded, true, "desktop risk action advice should render without fake expand");
         assert.equal(result.riskPageLocalSearch, true, "desktop risk page should search only risk records");
         assert.equal(result.riskPageDetailViewOpened, true, "desktop risk page should open detail as a sub view");
         assert.equal(result.actionFlow.statusDone, true, "desktop flow should complete an action through the UI");
@@ -2987,15 +2984,15 @@ async function main() {
           result.cardInteractions.quickAiRequestsBeforeHistory,
           "desktop history click should preserve the quick-record AI request count",
         );
-        assert.equal(result.cardInteractions.stakeholderExpanded, true, "desktop customer stakeholder card should expand details");
-        assert.equal(result.cardInteractions.chainExpanded, true, "desktop customer decision-chain card should expand details");
-        assert.equal(result.cardInteractions.fieldTagExpanded, true, "desktop customer tag card should expand details");
-        assert.equal(result.cardInteractions.opportunitySourceExpanded, true, "desktop opportunity source record should expand details");
-        assert.equal(result.cardInteractions.opportunityRiskExpanded, true, "desktop opportunity risk note should expand details");
-        assert.equal(result.cardInteractions.opportunityNextExpanded, true, "desktop opportunity next action should expand details");
+        assert.equal(result.cardInteractions.stakeholderExpanded, true, "desktop customer stakeholder card should render details without fake expand");
+        assert.equal(result.cardInteractions.chainExpanded, true, "desktop customer decision-chain should render details without fake expand");
+        assert.equal(result.cardInteractions.fieldTagExpanded, true, "desktop customer tags should render without fake expand");
+        assert.equal(result.cardInteractions.opportunitySourceExpanded, true, "desktop opportunity source record should render without fake expand");
+        assert.equal(result.cardInteractions.opportunityRiskExpanded, true, "desktop opportunity risk note should render without fake expand");
+        assert.equal(result.cardInteractions.opportunityNextExpanded, true, "desktop opportunity next action should render without fake expand");
         assert.equal(result.cardInteractions.opportunityLocalSearch, true, "desktop opportunity page should search only opportunity records");
         assert.equal(result.cardInteractions.opportunityDetailViewOpened, true, "desktop opportunity page should open detail as a sub view");
-        assert.equal(result.cardInteractions.timelineExpanded, true, "desktop opportunity timeline item should expand details");
+        assert.equal(result.cardInteractions.timelineExpanded, true, "desktop opportunity timeline item should render without fake expand");
         assert.equal(result.cardInteractions.opportunityContext.riskScoped, true, "desktop risk child page should keep the selected opportunity context");
         assert.equal(result.cardInteractions.opportunityContext.actionScoped, true, "desktop action child page should keep the selected opportunity context");
         assert.equal(result.cardInteractions.opportunityContext.kanbanScoped, true, "desktop kanban child page should keep the selected opportunity context");
@@ -3036,9 +3033,16 @@ async function main() {
     const logoutStart = cdp.networkResponses.length;
     const logoutState = await evaluate(cdp, `
       (async () => {
-        // v0.9.1 起头像 title = "<显示名> · 退出登录"，用后缀匹配。
-        const logout = document.querySelector('button[title$="退出登录"]');
-        if (!logout) throw new Error('Missing logout button');
+        const trigger = document.querySelector('[data-testid="avatar-menu-trigger"]');
+        if (!trigger) throw new Error('Missing avatar menu trigger');
+        trigger.click();
+        const menuStarted = Date.now();
+        while (Date.now() - menuStarted < 3000) {
+          if (document.querySelector('[data-testid="avatar-menu-logout"]')) break;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const logout = document.querySelector('[data-testid="avatar-menu-logout"]');
+        if (!logout) throw new Error('Missing avatar menu logout item');
         logout.click();
         const started = Date.now();
         while (Date.now() - started < 8000) {
@@ -3208,6 +3212,11 @@ async function main() {
 }
 
 main().catch((error) => {
+  if (error instanceof AggregateError) {
+    for (const [index, nested] of error.errors.entries()) {
+      console.error(`Integration QA nested error ${index + 1}: ${nested.stack ?? nested.message}`);
+    }
+  }
   console.error(error.stack ?? error.message);
   process.exit(1);
 });

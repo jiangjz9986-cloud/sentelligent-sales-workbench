@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-29
+
+### 快赢包：审计B Q1 六项 + 全局反馈系统（总蓝图 v0.10.0 行）
+
+- **总览重排**：今日焦点+周趋势 DOM 序置顶（全端同步，不用 CSS order）；hero 大卡及三条写死统计退役；KPI 卡增 chevron 示能；priority/health span 7+5。
+- **待办零深度**：列表行内完成/延期（乐观更新+toast）；新增待办入口+`ActionCreateForm`；`POST /api/actions` 新端点；`PATCH remindAt`+`reminded_at` 重置；`datetimeLocal` 双向转换工具。
+- **头像账号菜单**：`AvatarMenu` 替换一击登出（displayName/account 常驻，两击登出）。
+- **快速记录**：`analysisGateRef` pending 态+IME 组字守卫（composition 期间不清分析）。
+- **知识/周报**：检索清空即时还原全量；周报 daily tab 渲染 7 天真实快速记录分组（`groupRecordsByWeekday`）。
+- **假展开清除**：七基元改纯展示（删 interactive-card/占位句）；客户页删重复「关键联系人」Panel。
+- **全局反馈**：自研 `ToastProvider`+`ConfirmDialog` 替换五域 `window.confirm`；看板/行程删除接 toast；`kanban-status` 退役。
+- **调度器**：digest 旧格式幂等键过渡窗口关闭（v0.9.3 升级日防双发逻辑移除）。
+- 零数据库迁移；零新依赖。后端全量 1386 项（v0.9.3 基线 1375 净增 11：`actions-web-api`+digest 过渡）；前端 qa:local 480 项（基线 456 净增 24：overview-layout 6+quickwins 18+contract 调整）；Chrome/WebKit 集成、根发布测试与两级秘密扫描全部通过（findings=[]）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
 ## [0.9.3] - 2026-08-29
 
 ### 微信绑定层：weixin_bindings 表 + 绑定码流 + worker 多目标投递 + 调度器多播（总蓝图 v0.9.3 行，多账号设计 L3，D2 白名单入 DB、D3 晨报订阅制默认开）

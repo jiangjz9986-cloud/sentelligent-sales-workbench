@@ -4,6 +4,7 @@ import {
   FileText,
   Gauge,
   Link2,
+  LoaderCircle,
   MessageSquareText,
   Mic,
   Plus,
@@ -107,6 +108,7 @@ export function QuickRecord({
   const [quickRecord, setQuickRecord] = useState(null);
   const [analysisDirty, setAnalysisDirty] = useState(false);
   const [analysisSavePending, setAnalysisSavePending] = useState(false);
+  const [analysisPending, setAnalysisPending] = useState(false);
   const [selectedHistoryId, setSelectedHistoryId] = useState(null);
   const [confirmedTargets, setConfirmedTargets] = useState([]);
   const [confirmationPending, setConfirmationPending] = useState(false);
@@ -118,6 +120,8 @@ export function QuickRecord({
   const voiceBaseTextRef = useRef("");
   // 只有真正发生过语音转写时才标记"语音转写"，避免语音模式下手动输入被误标。
   const voiceCapturedRef = useRef(false);
+  // 中文输入法组字守卫：组字过程中的中间态不清空已生成的分析面板。
+  const composingRef = useRef(false);
   const confirmationAttemptRef = useRef(null);
   if (!confirmationAttemptRef.current) {
     confirmationAttemptRef.current = createConfirmationAttemptTracker();
@@ -125,6 +129,11 @@ export function QuickRecord({
   const confirmationGateRef = useRef(null);
   if (!confirmationGateRef.current) {
     confirmationGateRef.current = createExclusiveAsyncGate();
+  }
+  // 分析请求互斥门：慢网下连点只发一个分析请求。
+  const analysisGateRef = useRef(null);
+  if (!analysisGateRef.current) {
+    analysisGateRef.current = createExclusiveAsyncGate();
   }
   const quickRecordId = quickRecord?.id ?? null;
   const hasInput = recordText.trim().length > 0;
@@ -354,7 +363,7 @@ export function QuickRecord({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeHistoryId, quickRecords, selectedHistoryId]);
 
-  async function confirmAnalysis() {
+  async function confirmAnalysisUnlocked() {
     if (!recordText.trim()) {
       resetAnalysis("请先录入文本或语音转写内容");
       return;
@@ -395,6 +404,21 @@ export function QuickRecord({
       setSyncStatus("分析完成，等待人工同步");
     } catch (error) {
       setSyncStatus(error?.message || "分析失败，请稍后重试");
+    }
+  }
+
+  async function confirmAnalysis() {
+    const outcome = await analysisGateRef.current.run(async () => {
+      setAnalysisPending(true);
+      try {
+        await confirmAnalysisUnlocked();
+        return { status: "settled" };
+      } finally {
+        setAnalysisPending(false);
+      }
+    });
+    if (outcome.status === "busy") {
+      setSyncStatus("正在分析，请稍候");
     }
   }
 
@@ -688,9 +712,18 @@ export function QuickRecord({
         <textarea
           aria-label="快速记录内容"
           value={recordText}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={(event) => {
+            composingRef.current = false;
+            setRecordText(event.target.value);
+            resetAnalysis("内容已变化，请重新确认分析");
+          }}
           onChange={(event) => {
             if (!event.target.value.trim()) voiceCapturedRef.current = false;
             setRecordText(event.target.value);
+            if (composingRef.current) return;
             resetAnalysis("内容已变化，请重新确认分析");
           }}
           rows={4}
@@ -707,15 +740,17 @@ export function QuickRecord({
             className="primary-button"
             type="button"
             data-testid="confirm-ai-analysis"
+            disabled={analysisPending}
             onClick={confirmAnalysis}
           >
-            <Send size={16} />
-            确认调用 AI 分析
+            {analysisPending ? <LoaderCircle className="state-spinner" size={16} /> : <Send size={16} />}
+            {analysisPending ? "分析中" : "确认调用 AI 分析"}
           </button>
           <button
             className="ghost-button"
             type="button"
             data-testid="new-quick-record"
+            disabled={analysisPending}
             onClick={startNewRecordFromUi}
           >
             <Plus size={16} />
@@ -724,6 +759,7 @@ export function QuickRecord({
           <button
             className="ghost-button"
             type="button"
+            disabled={analysisPending}
             onClick={() => resetAnalysis("已准备重新分析")}
           >
             <RefreshCw size={16} />

@@ -1954,6 +1954,52 @@ describe("sales workbench API client", () => {
     ]);
   });
 
+  it("creates an action through the backend with only writable create fields", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body });
+        return jsonResponse({
+          item: sampleAction({
+            id: "act-created",
+            title: body.title,
+            remindAt: body.remindAt,
+            priority: body.priority,
+          }),
+        }, 201);
+      },
+    });
+
+    const created = await api.createAction({
+      title: "整理灾备对比表",
+      customerId: "rizhao",
+      priority: "高",
+      due: "周五 17:00",
+      remindAt: "2026-09-01T02:30:00.000Z",
+      owner: "someone-else",
+      id: "client-forged-id",
+      version: 99,
+    });
+
+    assertApiEntity("actionItem", created);
+    assert.equal(created.id, "act-created");
+    assert.deepEqual(calls, [
+      {
+        url: "http://127.0.0.1:8787/api/actions",
+        method: "POST",
+        body: {
+          title: "整理灾备对比表",
+          customerId: "rizhao",
+          priority: "高",
+          due: "周五 17:00",
+          remindAt: "2026-09-01T02:30:00.000Z",
+        },
+      },
+    ]);
+  });
+
   it("confirms quick record targets through the backend", async () => {
     const api = createSalesWorkbenchApi({
       baseUrl: "http://127.0.0.1:8787",

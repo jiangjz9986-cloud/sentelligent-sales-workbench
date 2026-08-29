@@ -11,8 +11,6 @@ import {
   createDailyDigestScheduler,
   dailyDigestKey,
   fridayCloseoutKey,
-  legacyDailyDigestKey,
-  legacyFridayCloseoutKey,
 } from "../src/dailyDigest/digestScheduler.js";
 
 const OWNER = "digestowner";
@@ -175,27 +173,32 @@ describe("daily digest scheduler", () => {
     assert.equal(outboxRows().length, 4);
   });
 
-  it("honors the legacy single-owner idempotency keys on upgrade day without double sending", async () => {
+  it("only consults owner-scoped idempotency keys after the v0.9.3 transition window closed (v0.10.0)", async () => {
     const outboxRepository = createWeixinConfirmationOutboxRepository(db, { clock: () => new Date(now) });
-    // 升级前（v0.9.2）当天已发过的旧格式键行（无 owner 维度）。
+    // 旧单 owner 键格式（≤v0.9.2，无 owner 维度）已退役：即便存在同日期的旧行，
+    // 调度器也不再据此判定"已发过"，只有 owner 维度键才是幂等标记。
     outboxRepository.enqueue({
       owner: OWNER,
       conversationId: "conversation-bound-1",
-      idempotencyKey: legacyDailyDigestKey("2026-08-28"),
+      idempotencyKey: "daily-digest:2026-08-28",
       payload: { kind: "daily_digest", digestDate: "2026-08-28", headline: null, sections: [{ heading: "旧", lines: ["· 旧行"] }], footer: "。" },
     });
-    outboxRepository.enqueue({
-      owner: OWNER,
-      conversationId: "conversation-bound-1",
-      idempotencyKey: legacyFridayCloseoutKey("2026-08-28"),
-      payload: { kind: "friday_closeout", digestDate: "2026-08-28", weekStart: "2026-08-24", sections: [{ heading: "旧", lines: ["· 旧行"] }], footer: "。" },
-    });
     const { scheduler } = makeScheduler({ outboxRepository });
-    now = "2026-08-28T09:00:00.000Z";
+    now = "2026-08-28T01:00:00.000Z";
     const result = await scheduler.runOnce();
-    assert.deepEqual(result.daily, [{ owner: OWNER, status: "already_sent", digestDate: "2026-08-28" }]);
-    assert.deepEqual(result.friday, [{ owner: OWNER, status: "already_sent", digestDate: "2026-08-28" }]);
-    assert.equal(outboxRows().length, 2, "the legacy rows stay the only rows for the day");
+    assert.deepEqual(result.daily, [
+      { owner: OWNER, status: "sent", digestDate: "2026-08-28", outboxId: result.daily[0].outboxId },
+    ]);
+    assert.equal(outboxRows().length, 2, "a fresh owner-scoped row is enqueued next to the retired-format row");
+    assert.equal(
+      outboxRepository.hasKey({ owner: OWNER, idempotencyKey: dailyDigestKey(OWNER, "2026-08-28") }),
+      true,
+    );
+
+    // 再跑一次：owner 维度键命中，保持单发。
+    const replay = await scheduler.runOnce();
+    assert.deepEqual(replay.daily, [{ owner: OWNER, status: "already_sent", digestDate: "2026-08-28" }]);
+    assert.equal(outboxRows().length, 2);
   });
 
   it("skips wholly when there are no digest targets and reports the reason", async () => {

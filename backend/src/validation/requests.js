@@ -251,6 +251,15 @@ export const requestSchemas = freezeSchema({
     title: text(500), reason: text(5000, { nullable: true }), due: text(50, { nullable: true }),
     assignee: text(100, { nullable: true }), priority: { type: "enum", values: ["高", "中", "低"] },
     status: { type: "enum", values: ["pending", "in_progress", "done", "deferred"] }, tone: text(50, { nullable: true }),
+    // v0.10.0：Web 端可写提醒时间；handler 归一 ISO 并按变更重置 reminded_at。
+    remindAt: text(50, { nullable: true }),
+  },
+  // v0.10.0 新增：Web 端创建待办（owner 不入 schema，服务端按会话注入；长度
+  // 上限对齐 actionItemStore.create 的校验）。
+  actionCreate: {
+    title: text(80, { required: true }), reason: text(500, { nullable: true }), due: text(50, { nullable: true }),
+    remindAt: text(50, { nullable: true }), priority: { type: "enum", values: ["高", "中", "低"] },
+    customerId: text(200, { nullable: true, nonEmpty: true }),
   },
   riskPatch: {
     action: text(5000), assignee: text(100, { nullable: true }), due: text(50, { nullable: true }),

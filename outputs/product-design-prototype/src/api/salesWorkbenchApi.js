@@ -19,6 +19,7 @@ const WRITABLE_FIELDS = Object.freeze({
     "requirements", "competitors", "solutionDirection", "sourceRecord", "risk", "next", "tone",
   ]),
   knowledge: Object.freeze(["title", "category", "tags", "summary", "content", "source"]),
+  actionCreate: Object.freeze(["title", "reason", "due", "remindAt", "priority", "customerId"]),
   itinerary: Object.freeze([
     "title", "visitDate", "status", "departureAddress", "departureCity", "departureLocation", "departureAt", "stops",
   ]),
@@ -1216,6 +1217,14 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         headers: versionHeaders(version),
       });
       return assertApiEntity("riskItem", deleted.deleted);
+    },
+
+    async createAction(draft) {
+      const created = await requestApi("/api/actions", {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(draft, WRITABLE_FIELDS.actionCreate)),
+      });
+      return assertApiEntity("actionItem", created.item);
     },
 
     async updateActionStatus(actionId, patch, version) {

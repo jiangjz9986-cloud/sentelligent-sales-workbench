@@ -1,5 +1,6 @@
 import {
   Check,
+  ChevronRight,
   Download,
   FileText,
   Save,
@@ -8,7 +9,13 @@ import {
 import { useEffect, useState } from "react";
 import { triggerBlobDownload } from "../../../downloadFile.js";
 import { MetricCard } from "../../../components/primitives.jsx";
+import { useToast } from "../../../components/toast.jsx";
 import { formatWeekRangeLabel, getCurrentWeekRange } from "../../../weekRange.js";
+import {
+  formatRecordTime,
+  groupRecordsByWeekday,
+  weeklyRecordStatusView,
+} from "../weeklyDaily.js";
 import { DraftPreview, sourceRefText } from "./shared.jsx";
 
 export function WeeklyPage({
@@ -20,12 +27,15 @@ export function WeeklyPage({
   setWeeklyDraft: setExternalWeeklyDraft,
   weeklyDraftText: externalWeeklyDraftText,
   setWeeklyDraftText: setExternalWeeklyDraftText,
+  quickRecords = [],
+  onOpenQuickRecord,
 }) {
   const [localWeeklyDraft, setLocalWeeklyDraft] = useState(null);
   const [localWeeklyDraftText, setLocalWeeklyDraftText] = useState("");
   const [draftStatus, setDraftStatus] = useState("周报草稿尚未生成。");
   const [isExporting, setIsExporting] = useState(false);
   const [expandedDayKey, setExpandedDayKey] = useState(null);
+  const toast = useToast();
   const daily = weeklyView === "daily";
   const weeklyDraft = externalWeeklyDraft ?? localWeeklyDraft;
   const weeklyDraftText = externalWeeklyDraft ? externalWeeklyDraftText ?? "" : localWeeklyDraftText;
@@ -101,6 +111,7 @@ export function WeeklyPage({
       const download = await apiClient.downloadWeeklyReport(weeklyDraft.id, "word");
       await triggerBlobDownload(download);
       setDraftStatus("周报 Word 已导出。");
+      toast({ tone: "success", title: "周报 Word 已导出", description: download.filename });
     } catch {
       setDraftStatus("周报导出失败，请稍后重试。");
     } finally {
@@ -161,39 +172,76 @@ export function WeeklyPage({
 
       {daily ? (
         <div className="daily-grid" data-testid="weekly-daily-view">
-          {sourceRefs.length > 0 ? sourceRefs.map((ref, index) => {
-            const dayKey = `${ref.type ?? "source"}-${ref.id ?? index}`;
-            const expanded = expandedDayKey === dayKey;
+          {groupRecordsByWeekday(quickRecords, getCurrentWeekRange()).map((day) => {
+            const expanded = expandedDayKey === day.key;
             return (
-              <button
-                className={`day-card interactive-card ${expanded ? "expanded" : ""}`}
-                key={dayKey}
-                type="button"
-                aria-expanded={expanded}
-                onClick={() => setExpandedDayKey((current) => current === dayKey ? null : dayKey)}
-              >
-                <div>
-                  <span className="date-chip tone-blue">{String(index + 1).padStart(2, "0")}</span>
-                  <h3>{sourceRefText(ref)}</h3>
-                </div>
-                <p>来源已纳入 {weekRangeLabel} 周报草稿。</p>
+              <article className={`day-card ${expanded ? "expanded" : ""}`} key={day.key}>
+                <button
+                  className="day-card-toggle interactive-card"
+                  type="button"
+                  aria-expanded={expanded}
+                  data-testid="weekly-day-toggle"
+                  onClick={() => setExpandedDayKey((current) => current === day.key ? null : day.key)}
+                >
+                  <div className="day-card-head">
+                    <span className="date-chip tone-blue">{day.weekday}</span>
+                    <h3>{day.dateLabel}</h3>
+                    {day.records.length > 0 ? <b className="pill tone-blue">{day.records.length} 条</b> : null}
+                  </div>
+                  {day.records.length === 0 ? (
+                    <p>当日无记录</p>
+                  ) : (
+                    <ul className="day-card-records">
+                      {day.records.slice(0, 3).map((record) => {
+                        const view = weeklyRecordStatusView(record);
+                        return (
+                          <li key={record.id}>
+                            <em>{formatRecordTime(record)}</em>
+                            <strong>{record.customer ?? record.customerId ?? "未关联客户"}</strong>
+                            <span>{record.title ?? record.rawContent ?? "未填写内容"}</span>
+                            <b className={`pill tone-${view.tone}`}>{view.status}</b>
+                          </li>
+                        );
+                      })}
+                      {day.records.length > 3 ? <li className="day-card-more">共 {day.records.length} 条记录</li> : null}
+                    </ul>
+                  )}
+                </button>
                 {expanded ? (
-                  <span className="day-card-detail" data-testid="weekly-expanded-day">
-                    <strong>{sourceRefText(ref)}</strong>
-                    <span>来源类型：{ref.type ?? "source"}</span>
-                    {ref.id ? <span>来源编号：{ref.id}</span> : null}
-                    <span>周报范围：{weekRangeLabel}</span>
-                  </span>
+                  <div className="day-card-detail" data-testid="weekly-expanded-day">
+                    {day.records.length === 0 ? (
+                      <span className="day-card-empty">{day.weekday}（{day.dateLabel}）当日无记录。</span>
+                    ) : (
+                      day.records.map((record) => {
+                        const view = weeklyRecordStatusView(record);
+                        return (
+                          <div className="day-card-record-row" key={record.id}>
+                            <div>
+                              <strong>{record.title ?? record.rawContent ?? "未填写内容"}</strong>
+                              <small>
+                                {formatRecordTime(record)} · {record.customer ?? record.customerId ?? "未关联客户"} · {view.status}
+                              </small>
+                            </div>
+                            {onOpenQuickRecord ? (
+                              <button
+                                className="ghost-button"
+                                type="button"
+                                data-testid="weekly-day-open-record"
+                                onClick={() => onOpenQuickRecord(record.id)}
+                              >
+                                在快速记录中打开
+                                <ChevronRight size={14} />
+                              </button>
+                            ) : null}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
                 ) : null}
-              </button>
+              </article>
             );
-          }) : (
-            <section className="workbench-state-panel" data-testid="weekly-source-empty" role="status">
-              <FileText size={28} />
-              <strong>草稿暂无来源引用</strong>
-              <p>当前周报草稿暂无可展示的来源记录。</p>
-            </section>
-          )}
+          })}
         </div>
       ) : (
         <div className="summary-grid" data-testid="weekly-summary-view">
