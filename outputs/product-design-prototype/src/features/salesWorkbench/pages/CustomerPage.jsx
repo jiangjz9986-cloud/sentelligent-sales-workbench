@@ -1,11 +1,8 @@
 import {
   ChevronLeft,
   ChevronRight,
-  Pencil,
   Plus,
   Save,
-  Search,
-  Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
@@ -14,9 +11,10 @@ import {
   MetricInline,
   Panel,
 } from "../../../components/primitives.jsx";
-import { useToast } from "../../../components/toast.jsx";
+import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
+import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import {
-  ConfirmDialog,
   DecisionChain,
   FieldTags,
   FormField,
@@ -27,6 +25,7 @@ import {
   numberFromInput,
   textFromArray,
 } from "./shared.jsx";
+import { EntityWorkspace } from "./EntityWorkspace.jsx";
 
 function customerToForm(customer) {
   return {
@@ -67,7 +66,7 @@ function customerFromForm(form, isNew) {
   };
 }
 
-function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSaved, onCancel, backendStatus }) {
+function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSaved, onCancel }) {
   const [mode, setMode] = useState(initialMode);
   const [form, setForm] = useState(() => (initialMode === "new" ? customerToForm(null) : customerToForm(selected)));
   const [saveStatus, setSaveStatus] = useState("就绪");
@@ -99,7 +98,7 @@ function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSave
       setMode("edit");
       setForm(customerToForm(saved));
       onSaved?.(saved);
-       setSaveStatus("已保存");
+      setSaveStatus("已保存");
     } catch (error) {
       setSaveStatus(error.message || "保存失败");
     }
@@ -169,271 +168,174 @@ function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSave
   );
 }
 
-export function CustomerPage({
-  items,
-  selected,
-  onSelect,
-  setActive,
-  setSelectedOpportunityId,
-  openOpportunityDetail,
-  onSaveCustomer,
-  onDeleteCustomer,
-  opportunitiesList = [],
-  viewMode = "list",
-  setViewMode,
-  apiClient,
-  backendStatus,
-}) {
-  const [searchText, setSearchText] = useState("");
-  const toast = useToast();
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
-  const cleanSearch = searchText.trim().toLowerCase();
-  const visibleItems = cleanSearch
-    ? items.filter((item) =>
-      [item.name, item.region, item.type, item.level, item.contact, item.summary, item.owner].some((value) =>
-        String(value ?? "").toLowerCase().includes(cleanSearch),
-      ),
-    )
-    : items;
+const customerConfig = {
+  listViewTestId: "customer-list-view",
+  detailViewTestId: "customer-detail-view",
+  listViewClassName: "customer-list-view",
+  detailViewClassName: "customer-detail-view detail-scroll-view",
+  listPanelClassName: "list-panel customer-list-panel",
+  panelTitle: "客户列表",
+  listMeta: (visible, total) => `${visible} / ${total} 家客户`,
+  searchAriaLabel: "搜索客户",
+  searchTestId: "customer-local-search",
+  searchPlaceholder: "搜索客户、区域、联系人、预算节奏",
+  searchFields: ["name", "region", "type", "level", "contact", "summary", "owner"],
+  openDetailTestId: "customer-open-detail",
+  editDetailTestId: "customer-edit-detail",
+  deleteDetailTestId: "customer-delete-detail",
+  createAction: {
+    testId: "customer-create-detail",
+    label: "新增客户",
+    icon: <Plus size={16} />,
+  },
+  emptyNoItems: "暂无客户，可点击“新增客户”开始录入。",
+  emptyNoMatch: "没有匹配客户，请调整关键词。",
+  rowPrimary: (item) => item.name,
+  rowSecondary: (item) => `${item.region} / ${item.type} / ${item.contact}`,
+  renderRowBadge: (item) => <b className="pill tone-blue">{item.level}</b>,
+  deleteDialog: {
+    title: "确认删除客户",
+    description: (selected) => `“${selected?.name ?? "当前客户"}”将从客户列表中移除，此操作不能撤销。`,
+    entityName: (selected) => selected.name,
+    testIdPrefix: "customer-delete",
+    successTitle: "客户已删除",
+    errorMessage: "删除客户失败，请稍后重试。",
+  },
+};
 
-  function openDetail(item) {
-    onSelect(item.id);
-    setViewMode?.("detail");
-  }
-
+function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
+  const { apiClient, backendStatus, workbenchOpportunities: opportunitiesList } = useWorkbenchData();
+  const { handleSaveCustomer } = useWorkbenchActions();
+  const { navigateTo: setActive, setSelectedOpportunityId, openOpportunityDetail } = useNavigation();
   const isCreateView = viewMode === "create";
   const isEditView = viewMode === "edit";
 
-  function requestDeleteCurrentCustomer() {
-    if (!selected?.id || !onDeleteCustomer) return;
-    setDeleteError("");
-    setDeleteDialogOpen(true);
-  }
-
-  async function confirmDeleteCurrentCustomer() {
-    if (!selected?.id || !onDeleteCustomer || deleteBusy) return;
-    setDeleteBusy(true);
-    setDeleteError("");
-    try {
-      const deletedName = selected.name;
-      await onDeleteCustomer(selected.id);
-      setDeleteDialogOpen(false);
-      setViewMode?.("list");
-      toast({ tone: "success", title: "客户已删除", description: deletedName });
-    } catch (error) {
-      setDeleteError(error.message || "删除客户失败，请稍后重试。");
-    } finally {
-      setDeleteBusy(false);
-    }
-  }
-
-  if (viewMode === "list") {
+  if (isCreateView || isEditView) {
     return (
-      <section className="customer-list-view" data-testid="customer-list-view">
-        <Panel
-          title="客户列表"
-          meta={`${visibleItems.length} / ${items.length} 家客户`}
-          className="list-panel customer-list-panel"
-          action={(
-            <button
-              className="primary-button"
-              type="button"
-              data-testid="customer-create-detail"
-              onClick={() => setViewMode?.("create")}
-            >
-              <Plus size={16} />
-              新增客户
-            </button>
-          )}
-        >
-          <label className="search-box page-search">
-            <Search size={16} />
-            <input
-              aria-label="搜索客户"
-              data-testid="customer-local-search"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="搜索客户、区域、联系人、预算节奏"
-            />
-          </label>
-          <div className="list-stack">
-            {visibleItems.map((item) => (
-              <article
-                className={`list-button customer-list-row ${selected?.id === item.id ? "selected" : ""}`}
-                key={item.id}
-              >
-                <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
-                  <span>
-                    <strong>{item.name}</strong>
-                    <small>{item.region} / {item.type} / {item.contact}</small>
-                  </span>
-                  <b className="pill tone-blue">{item.level}</b>
-                </button>
-                <button
-                  className="ghost-button"
-                  type="button"
-                  data-testid="customer-open-detail"
-                  onClick={() => openDetail(item)}
-                >
-                  查看详情
-                  <ChevronRight size={15} />
-                </button>
-              </article>
-            ))}
-            {visibleItems.length === 0 ? (
-              <p className="empty-list">
-                {items.length === 0 ? "暂无客户，可点击“新增客户”开始录入。" : "没有匹配客户，请调整关键词。"}
-              </p>
-            ) : null}
-          </div>
-        </Panel>
-      </section>
+      <CustomerEditor
+        selected={isCreateView ? null : selected}
+        initialMode={isCreateView ? "new" : "edit"}
+        onSaveCustomer={handleSaveCustomer}
+        onSaved={(saved) => {
+          onSelect(saved.id);
+          setViewMode?.("detail");
+        }}
+        onCancel={() => setViewMode?.(isCreateView ? "list" : "detail")}
+      />
     );
   }
 
   return (
-    <section className="customer-detail-view detail-scroll-view" data-testid="customer-detail-view">
-      <div className="subview-actions sticky-subview-toolbar">
-        <button className="ghost-button" type="button" onClick={() => setViewMode?.("list")}>
-          <ChevronLeft size={16} />
-          返回列表
-        </button>
-        {!isCreateView ? (
-          <div className="detail-toolbar-actions">
-            <button
-              className={isEditView ? "ghost-button disabled" : "ghost-button"}
-              disabled={isEditView}
-              type="button"
-              data-testid="customer-edit-detail"
-              onClick={() => setViewMode?.("edit")}
-            >
-              <Pencil size={15} />
-              修改
-            </button>
-            <button
-              className="ghost-button danger"
-              type="button"
-              data-testid="customer-delete-detail"
-              onClick={requestDeleteCurrentCustomer}
-            >
-              <Trash2 size={15} />
-              删除
-            </button>
-          </div>
-        ) : null}
+    <>
+      <div className="detail-metrics">
+        <MetricInline label="区域" value={selected.region} />
+        <MetricInline label="负责人" value={selected.owner} />
+        <MetricInline label="关系强度" value={`${selected.relation}`} />
+        <MetricInline label="预算节奏" value={selected.budget} />
       </div>
-      <section className="detail-surface">
-        {(isCreateView || isEditView) ? (
-          <CustomerEditor
-            selected={isCreateView ? null : selected}
-            initialMode={isCreateView ? "new" : "edit"}
-            onSaveCustomer={onSaveCustomer}
-            onSaved={(saved) => {
-              onSelect(saved.id);
-              setViewMode?.("detail");
-            }}
-            onCancel={() => setViewMode?.(isCreateView ? "list" : "detail")}
-            backendStatus={backendStatus}
-          />
-        ) : null}
-        {!isCreateView && !isEditView && (
-          <>
-        <div className="detail-metrics">
-          <MetricInline label="区域" value={selected.region} />
-          <MetricInline label="负责人" value={selected.owner} />
-          <MetricInline label="关系强度" value={`${selected.relation}`} />
-          <MetricInline label="预算节奏" value={selected.budget} />
-        </div>
-        <div className="three-col">
-          <Panel title="核心需求" meta="沉淀自记录">
-            <InfoList items={selected.needs} tone="blue" />
-          </Panel>
-          <Panel title="风险与顾虑" meta="需跟进">
-            <InfoList items={selected.risks} tone="amber" />
-          </Panel>
-          <Panel title="关联商机" meta="点击跳转">
-            <div className="list-stack tiny">
-              {selected.opportunities.map((name) => {
-                const opportunity = opportunitiesList.find((item) => item.name === name);
-                return (
-                  <button
-                    className="plain-link"
-                    key={name}
-                    type="button"
-                    onClick={() => {
-                      if (opportunity && openOpportunityDetail) openOpportunityDetail(opportunity.id);
-                      else {
-                        if (opportunity) setSelectedOpportunityId(opportunity.id);
-                        setActive("opportunity");
-                      }
-                    }}
-                  >
-                    {name}
-                    <ChevronRight size={15} />
-                  </button>
-                );
-              })}
-            </div>
-          </Panel>
-        </div>
-        <div className="two-col customer-profile-grid">
-          <Panel title="组织架构与决策链" meta="影响力视图">
-            <StakeholderGrid people={selected.stakeholders} />
-            <DecisionChain steps={selected.decisionChain} />
-          </Panel>
-          <Panel title="历史项目" meta="已沉淀">
-            <FieldTags items={selected.historyProjects} tone="green" />
-          </Panel>
-          <Panel title="现有基础架构" meta="调研字段">
-            <InfoList items={selected.infrastructure} tone="teal" />
-          </Panel>
-          <Panel title="快速记录承接" meta="记录来源">
-            <InfoList items={selected.syncPreview} tone="blue" />
-          </Panel>
-        </div>
-        <ManualConfirmBox
-          title="生成客户画像补全建议"
-          desc="结合快速记录整理组织关系、需求痛点和下一次拜访问题。"
-          onGenerate={() =>
-            generateBusinessSuggestion(apiClient, backendStatus, {
-              type: "customer_profile",
-              title: "生成客户画像补全建议",
-              context: {
-                customerId: selected.id,
-                customer: selected.name,
-                summary: selected.summary,
-                level: selected.level,
-                region: selected.region,
-                budget: selected.budget,
-                needs: joinedList(selected.needs),
-                risks: joinedList(selected.risks),
-                stakeholders: joinedList((selected.stakeholders ?? []).map((item) => `${item.name}-${item.role}`)),
-                decisionChain: joinedList(selected.decisionChain),
-                infrastructure: joinedList(selected.infrastructure),
-                syncPreview: joinedList(selected.syncPreview),
-              },
-            })
-          }
-        />
-          </>
-        )}
-      </section>
-      <ConfirmDialog
-        open={deleteDialogOpen}
-        title="确认删除客户"
-        description={`“${selected?.name ?? "当前客户"}”将从客户列表中移除，此操作不能撤销。`}
-        busy={deleteBusy}
-        errorMessage={deleteError}
-        onCancel={() => {
-          if (deleteBusy) return;
-          setDeleteError("");
-          setDeleteDialogOpen(false);
-        }}
-        onConfirm={confirmDeleteCurrentCustomer}
-        testIdPrefix="customer-delete"
+      <div className="three-col">
+        <Panel title="核心需求" meta="沉淀自记录">
+          <InfoList items={selected.needs} tone="blue" />
+        </Panel>
+        <Panel title="风险与顾虑" meta="需跟进">
+          <InfoList items={selected.risks} tone="amber" />
+        </Panel>
+        <Panel title="关联商机" meta="点击跳转">
+          <div className="list-stack tiny">
+            {selected.opportunities.map((name) => {
+              const opportunity = opportunitiesList.find((item) => item.name === name);
+              return (
+                <button
+                  className="plain-link"
+                  key={name}
+                  type="button"
+                  onClick={() => {
+                    if (opportunity && openOpportunityDetail) openOpportunityDetail(opportunity.id);
+                    else {
+                      if (opportunity) setSelectedOpportunityId(opportunity.id);
+                      setActive("opportunity");
+                    }
+                  }}
+                >
+                  {name}
+                  <ChevronRight size={15} />
+                </button>
+              );
+            })}
+          </div>
+        </Panel>
+      </div>
+      <div className="two-col customer-profile-grid">
+        <Panel title="组织架构与决策链" meta="影响力视图">
+          <StakeholderGrid people={selected.stakeholders} />
+          <DecisionChain steps={selected.decisionChain} />
+        </Panel>
+        <Panel title="历史项目" meta="已沉淀">
+          <FieldTags items={selected.historyProjects} tone="green" />
+        </Panel>
+        <Panel title="现有基础架构" meta="调研字段">
+          <InfoList items={selected.infrastructure} tone="teal" />
+        </Panel>
+        <Panel title="快速记录承接" meta="记录来源">
+          <InfoList items={selected.syncPreview} tone="blue" />
+        </Panel>
+      </div>
+      <ManualConfirmBox
+        title="生成客户画像补全建议"
+        desc="结合快速记录整理组织关系、需求痛点和下一次拜访问题。"
+        onGenerate={() =>
+          generateBusinessSuggestion(apiClient, backendStatus, {
+            type: "customer_profile",
+            title: "生成客户画像补全建议",
+            context: {
+              customerId: selected.id,
+              customer: selected.name,
+              summary: selected.summary,
+              level: selected.level,
+              region: selected.region,
+              budget: selected.budget,
+              needs: joinedList(selected.needs),
+              risks: joinedList(selected.risks),
+              stakeholders: joinedList((selected.stakeholders ?? []).map((item) => `${item.name}-${item.role}`)),
+              decisionChain: joinedList(selected.decisionChain),
+              infrastructure: joinedList(selected.infrastructure),
+              syncPreview: joinedList(selected.syncPreview),
+            },
+          })
+        }
       />
-    </section>
+    </>
+  );
+}
+
+export function CustomerPage({
+  items,
+  selected,
+  onSelect,
+  viewMode = "list",
+  setViewMode,
+}) {
+  const current = selected ?? items[0] ?? null;
+  const { handleDeleteCustomer } = useWorkbenchActions();
+
+  return (
+    <EntityWorkspace
+      items={items}
+      selected={current}
+      activeRowId={current?.id}
+      onSelect={onSelect}
+      viewMode={viewMode}
+      setViewMode={setViewMode}
+      config={customerConfig}
+      onDelete={handleDeleteCustomer}
+      renderDetail={({ viewMode: mode }) => (
+        <CustomerDetailBody
+          selected={current}
+          viewMode={mode}
+          setViewMode={setViewMode}
+          onSelect={onSelect}
+        />
+      )}
+    />
   );
 }

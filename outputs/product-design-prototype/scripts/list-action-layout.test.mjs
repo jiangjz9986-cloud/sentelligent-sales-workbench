@@ -18,19 +18,21 @@ describe("list page action layout", () => {
 
   it("places every list create action inside its content panel", () => {
     const pages = readSalesWorkbenchPagesSource();
+    const workspace = read("src/features/salesWorkbench/pages/EntityWorkspace.jsx");
     const itinerary = read("src/features/visitItinerary/VisitItineraryPage.jsx");
-    const app = read("src/App.jsx");
+    const shell = read("src/app/SalesWorkbenchShell.jsx");
 
+    assert.match(workspace, /action=\{config\.createAction \? \(/);
     for (const testId of [
       "customer-create-detail",
       "opportunity-create-detail",
       "knowledge-create-detail",
       "actions-create-detail",
     ]) {
-      assert.match(pages, new RegExp(`<Panel[\\s\\S]{0,500}data-testid="${testId}"`));
+      assert.match(pages, new RegExp(`testId:\\s*"${testId}"`));
     }
     assert.match(itinerary, /className="itinerary-list-panel"[\s\S]{0,500}data-testid="itinerary-create-detail"/);
-    assert.doesNotMatch(app, /const headingAction/);
+    assert.doesNotMatch(shell, /const headingAction/);
   });
 
   it("renders semantic month, day, and weekday date parts", () => {

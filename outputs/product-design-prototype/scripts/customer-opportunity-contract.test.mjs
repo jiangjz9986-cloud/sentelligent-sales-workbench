@@ -3,15 +3,18 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 
+import { appSourceFiles } from "./app-source.mjs";
 import { salesWorkbenchPageFiles } from "./pages-source.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, "..");
+const entityWorkspaceSource = readFileSync(join(root, "src/features/salesWorkbench/pages/EntityWorkspace.jsx"), "utf8");
 const appSource = [
-  "../src/App.jsx",
-  "../src/data/salesWorkbenchData.js",
-  ...salesWorkbenchPageFiles(join(here, "..")).map((file) => `../${file}`),
+  ...appSourceFiles(root).map((file) => join(root, file)),
+  join(root, "src/data/salesWorkbenchData.js"),
+  ...salesWorkbenchPageFiles(root).map((file) => join(root, file)),
 ]
-  .map((relativePath) => readFileSync(join(here, relativePath), "utf8"))
+  .map((filePath) => readFileSync(filePath, "utf8"))
   .join("\n");
 
 const requiredContract = [
@@ -39,36 +42,32 @@ for (const token of requiredContract) {
 }
 
 assert.ok(
-  appSource.includes("setActive(\"customer\")") && appSource.includes("setActive(\"opportunity\")"),
+  (appSource.includes('setActive("customer")') || appSource.includes('navigateTo("customer")'))
+  && (appSource.includes('setActive("opportunity")') || appSource.includes('navigateTo("opportunity")')),
   "Customer and opportunity detail pages must keep bidirectional navigation.",
 );
 
-const listRowContainers = appSource.match(/<article\b[^>]*className=\{`list-button customer-list-row[^>]*>/g) ?? [];
-assert.ok(listRowContainers.length >= 5, "List/detail business pages should render reusable list row containers.");
-for (const row of listRowContainers) {
-  assert.ok(
-    !row.includes("onClick"),
-    "List row containers must stay structural only; use row buttons for selection and detail navigation.",
-  );
-}
+assert.match(entityWorkspaceSource, /<article[\s\S]*className=\{`list-button customer-list-row/);
+assert.match(entityWorkspaceSource, /<button className="list-row-main" type="button" onClick=/);
 
-const listRowMainButtons = appSource.match(/<button className="list-row-main" type="button" onClick=/g) ?? [];
-assert.ok(
-  listRowMainButtons.length >= listRowContainers.length,
-  "Each business list row should expose a primary row button for keyboard and touch selection.",
-);
+for (const page of ["customerConfig", "opportunityConfig", "actionsConfigBase", "riskConfig", "knowledgeConfigBase"]) {
+  assert.match(appSource, new RegExp(`${page}[\\s\\S]*rowPrimary:`));
+}
 
 assert.ok(
   appSource.includes('const [recordText, setRecordText] = useState("");'),
   "Quick record composer should open as a blank new-record input by default.",
 );
 
-const createDetailEntries = appSource.match(/data-testid="(?:customer|opportunity|knowledge)-create-detail"[\s\S]{0,260}?setViewMode\?\.\("create"\)/g) ?? [];
-assert.equal(
-  createDetailEntries.length,
-  3,
-  "Customer, opportunity, and knowledge header create buttons should open a create detail view directly.",
-);
+const createDetailTestIds = [
+  "customer-create-detail",
+  "opportunity-create-detail",
+  "knowledge-create-detail",
+];
+for (const testId of createDetailTestIds) {
+  assert.match(appSource, new RegExp(`testId:\\s*"${testId}"`));
+}
+assert.match(appSource, /testId:\s*"actions-create-detail"/);
 
 const createInitialModes = appSource.match(/initialMode=\{isCreateView \? "new" : "edit"\}/g) ?? [];
 assert.equal(

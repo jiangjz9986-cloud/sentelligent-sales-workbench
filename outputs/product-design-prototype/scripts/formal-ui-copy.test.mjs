@@ -4,13 +4,15 @@ import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
 import { readSalesWorkbenchPagesSource, salesWorkbenchPageFiles } from "./pages-source.mjs";
+import { appSourceFiles } from "./app-source.mjs";
 
 const uiFiles = [
   ...salesWorkbenchPageFiles(),
+  ...appSourceFiles(),
   "src/components/primitives.jsx",
   "src/components/toast.jsx",
   "src/components/AvatarMenu.jsx",
-  "src/App.jsx",
+  "src/components/ModuleSubnav.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",
   "src/features/travelExpense/ExpenseEditorDrawer.jsx",
   "src/features/travelExpense/ExpenseLedger.jsx",
@@ -66,10 +68,10 @@ describe("formal handoff UI copy", () => {
   });
 
   it("opens quick record in voice mode with direct recording guidance", () => {
-    const appSource = readFileSync(resolve("src/App.jsx"), "utf8");
+    const sessionSource = readFileSync(resolve("src/app/useQuickRecordSession.jsx"), "utf8");
     const pageSource = readSalesWorkbenchPagesSource();
 
-    assert.match(appSource, /const \[recordMode, setRecordMode\] = useState\("voice"\)/);
+    assert.match(sessionSource, /const \[recordMode, setRecordMode\] = useState\("voice"\)/);
     assert.match(pageSource, /idle:\s*"待录入"/);
     assert.match(pageSource, /点击开始转写即可。/);
     assert.doesNotMatch(pageSource, /idle:\s*"可开始"/);

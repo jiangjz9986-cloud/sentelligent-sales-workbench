@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
+import { appSourceFiles } from "./app-source.mjs";
 import { readSalesWorkbenchPagesSource, salesWorkbenchPageFiles } from "./pages-source.mjs";
 
 const controlFiles = [
-  "src/App.jsx",
+  ...appSourceFiles(),
   ...salesWorkbenchPageFiles(),
+  "src/features/salesWorkbench/pages/EntityWorkspace.jsx",
   "src/components/primitives.jsx",
   "src/features/visitItinerary/VisitItineraryPage.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",

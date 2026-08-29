@@ -5,7 +5,12 @@ import { describe, it } from "node:test";
 
 import { readSalesWorkbenchPagesSource } from "./pages-source.mjs";
 
+function read(path) {
+  return readFileSync(resolve(path), "utf8");
+}
+
 const pageSource = readSalesWorkbenchPagesSource();
+const entityWorkspaceSource = read("src/features/salesWorkbench/pages/EntityWorkspace.jsx");
 const travelExpenseFiles = [
   "src/features/travelExpense/TravelExpensePage.jsx",
   "src/features/travelExpense/ExpenseLedger.jsx",
@@ -46,14 +51,22 @@ function controlContaining(fragment) {
 
 describe("form accessibility", () => {
   it("gives every page-local search field an explicit accessible name", () => {
-    const searchFields = [
-      "customer-local-search",
-      "opportunity-local-search",
-      "actions-local-search",
-      "risk-local-search",
-    ];
+    assert.match(entityWorkspaceSource, /aria-label=\{config\.searchAriaLabel\}/);
 
-    for (const testId of searchFields) {
+    const entityWorkspacePages = [
+      { testId: "customer-local-search", ariaLabel: "搜索客户" },
+      { testId: "opportunity-local-search", ariaLabel: "搜索商机" },
+      { testId: "actions-local-search", ariaLabel: "搜索动作" },
+      { testId: "risk-local-search", ariaLabel: "搜索风险" },
+    ];
+    for (const field of entityWorkspacePages) {
+      assert.match(pageSource, new RegExp(`searchTestId:\\s*"${field.testId}"`));
+      assert.match(pageSource, new RegExp(`searchAriaLabel:\\s*"${field.ariaLabel}"`));
+    }
+
+    const legacySearchFields = [];
+
+    for (const testId of legacySearchFields) {
       assert.match(tagByTestId(testId), /\baria-label=/, `${testId} needs aria-label`);
     }
     assert.match(controlContaining('placeholder="搜索移动云'), /\baria-label=/, "knowledge search needs aria-label");

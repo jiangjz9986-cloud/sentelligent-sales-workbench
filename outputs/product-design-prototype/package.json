@@ -11,7 +11,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "test:quick": "node --test src/quickRecordModel.test.js",
     "test:week": "node --test src/weekRange.test.js",
-    "test:state": "node --test src/app/workbenchState.test.js",
+    "test:state": "node --test src/app/workbenchState.test.js src/app/app-hooks.test.js",
     "test:routes": "node --test src/app/routes.test.js",
     "test:api": "node --test src/api/salesWorkbenchApi.test.js",
     "test:sales-decision": "node --test src/api/salesDecisionApi.test.js src/features/salesWorkbench/salesDecisionViewModel.test.js",
@@ -37,7 +37,8 @@
     "test:user-management": "node --test scripts/user-management-page.test.mjs",
     "test:tender": "node --test src/features/hospitalTender/HospitalTenderPage.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",
-    "qa:local": "npm run build && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:overview-layout && npm run test:quickwins && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run test:settings && npm run test:user-management && npm run test:tender && npm run scan:secrets",
+    "test:bundle": "node --test scripts/bundle-budget.test.mjs",
+    "qa:local": "npm run build && npm run test:bundle && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:overview-layout && npm run test:quickwins && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run test:settings && npm run test:user-management && npm run test:tender && npm run scan:secrets",
     "qa:integration": "node scripts/integration-qa.mjs",
     "qa:webkit": "node scripts/webkit-qa.mjs"
   },

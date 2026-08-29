@@ -3,13 +3,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const pagePath = new URL("./SystemSettingsPage.jsx", import.meta.url);
-const appPath = new URL("../../App.jsx", import.meta.url);
+const shellPath = new URL("../../app/SalesWorkbenchShell.jsx", import.meta.url);
 const stylesPath = new URL("../../styles/global.css", import.meta.url);
 
 test("system settings renders one focused child page for each grouped settings route", async () => {
-  const [source, appSource] = await Promise.all([
+  const [source, shellSource] = await Promise.all([
     readFile(pagePath, "utf8"),
-    readFile(appPath, "utf8"),
+    readFile(shellPath, "utf8"),
   ]);
 
   assert.match(source, /section\s*=\s*"security"/);
@@ -21,7 +21,7 @@ test("system settings renders one focused child page for each grouped settings r
   assert.match(source, /data-testid="settings-notifications-section"/);
   assert.match(source, /data-testid="settings-tender-schedule-section"/);
   assert.match(source, /data-testid="settings-bookkeeping-log-section"/);
-  assert.match(appSource, /<SystemSettingsPage[\s\S]*?section=\{settingsSection\}/);
+  assert.match(shellSource, /<SystemSettingsPage[\s\S]*?section=\{settingsSection\}/);
 });
 
 test("bookkeeping realtime log polls the scoped audit feed read-only", async () => {
@@ -77,15 +77,15 @@ test("the security section carries a change-password card wired to the session-s
 });
 
 test("members only see the change-password card in the security section", async () => {
-  const [source, appSource] = await Promise.all([
+  const [source, shellSource] = await Promise.all([
     readFile(pagePath, "utf8"),
-    readFile(appPath, "utf8"),
+    readFile(shellPath, "utf8"),
   ]);
 
   assert.match(source, /role = "admin"/);
   assert.match(source, /role !== "admin" && section === "security"/);
   assert.match(source, /\{role === "admin" \? \(/);
-  assert.match(appSource, /<SystemSettingsPage[\s\S]*?role=\{authSession\?\.role \?\? "member"\}/);
+  assert.match(shellSource, /<SystemSettingsPage[\s\S]*?role=\{authSession\?\.role \?\? "member"\}/);
 });
 
 test("grouped settings navigation and controls keep responsive accessible styling", async () => {

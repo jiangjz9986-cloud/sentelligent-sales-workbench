@@ -16,6 +16,11 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { statusTone } from "../../../data/salesWorkbenchData.js";
 import { assertBackendReady } from "../../../app/workbenchState.js";
+import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
+import { useQuickRecordSession } from "../../../app/useQuickRecordSession.jsx";
+import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
+import { mergeEntityByVersion } from "../../../quickRecordModel.js";
 import { createConfirmationAttemptTracker } from "../../../api/salesWorkbenchApi.js";
 import { MatchCard, Panel } from "../../../components/primitives.jsx";
 import {
@@ -80,30 +85,37 @@ function quickRecordHistoryView(item) {
   };
 }
 
-export function QuickRecord({
-  recordMode,
-  setRecordMode,
-  recordText,
-  setRecordText,
-  analysisVisible,
-  setAnalysisVisible,
-  syncStatus,
-  setSyncStatus,
-  setActive,
-  setSelectedCustomerId,
-  setSelectedOpportunityId,
-  openOpportunityDetail,
-  onBusinessSync,
-  onQuickRecordSaved,
-  onConfirmationRefresh,
-  apiClient,
-  backendStatus,
-  quickRecords = [],
-  customersList,
-  opportunitiesList,
-  routeHistoryId = null,
-  onHistoryRoute,
-}) {
+export function QuickRecord() {
+  const {
+    recordMode,
+    setRecordMode,
+    recordText,
+    setRecordText,
+    analysisVisible,
+    setAnalysisVisible,
+    syncStatus,
+    setSyncStatus,
+  } = useQuickRecordSession();
+  const {
+    apiClient,
+    backendStatus,
+    workbenchCustomers: customersList,
+    workbenchOpportunities: opportunitiesList,
+    workbenchQuickRecords: quickRecords,
+    setWorkbenchQuickRecords,
+  } = useWorkbenchData();
+  const {
+    navigateTo: setActive,
+    setSelectedCustomerId,
+    setSelectedOpportunityId,
+    openOpportunityDetail,
+    routeEntityId: routeHistoryId,
+    openQuickHistoryRoute: onHistoryRoute,
+  } = useNavigation();
+  const { handleBusinessSync: onBusinessSync, handleConfirmationRefresh: onConfirmationRefresh } = useWorkbenchActions();
+  const onQuickRecordSaved = (item) => {
+    setWorkbenchQuickRecords((current) => mergeEntityByVersion(current, item));
+  };
   const [analysis, setAnalysis] = useState(null);
   const [quickRecord, setQuickRecord] = useState(null);
   const [analysisDirty, setAnalysisDirty] = useState(false);

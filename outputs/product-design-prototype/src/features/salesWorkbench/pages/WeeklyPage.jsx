@@ -10,6 +10,9 @@ import { useEffect, useState } from "react";
 import { triggerBlobDownload } from "../../../downloadFile.js";
 import { MetricCard } from "../../../components/primitives.jsx";
 import { useToast } from "../../../components/toast.jsx";
+import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
+import { useWeeklySession } from "../../../app/useWeeklySession.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import { formatWeekRangeLabel, getCurrentWeekRange } from "../../../weekRange.js";
 import {
   formatRecordTime,
@@ -18,29 +21,22 @@ import {
 } from "../weeklyDaily.js";
 import { DraftPreview, sourceRefText } from "./shared.jsx";
 
-export function WeeklyPage({
-  weeklyView,
-  setWeeklyView,
-  apiClient,
-  backendStatus,
-  weeklyDraft: externalWeeklyDraft,
-  setWeeklyDraft: setExternalWeeklyDraft,
-  weeklyDraftText: externalWeeklyDraftText,
-  setWeeklyDraftText: setExternalWeeklyDraftText,
-  quickRecords = [],
-  onOpenQuickRecord,
-}) {
-  const [localWeeklyDraft, setLocalWeeklyDraft] = useState(null);
-  const [localWeeklyDraftText, setLocalWeeklyDraftText] = useState("");
+export function WeeklyPage() {
+  const {
+    weeklyView,
+    setWeeklyView,
+    weeklyDraft,
+    setWeeklyDraft,
+    weeklyDraftText,
+    setWeeklyDraftText,
+  } = useWeeklySession();
+  const { apiClient, backendStatus, workbenchQuickRecords: quickRecords } = useWorkbenchData();
+  const { openQuickHistoryRoute: onOpenQuickRecord } = useNavigation();
   const [draftStatus, setDraftStatus] = useState("周报草稿尚未生成。");
   const [isExporting, setIsExporting] = useState(false);
   const [expandedDayKey, setExpandedDayKey] = useState(null);
   const toast = useToast();
   const daily = weeklyView === "daily";
-  const weeklyDraft = externalWeeklyDraft ?? localWeeklyDraft;
-  const weeklyDraftText = externalWeeklyDraft ? externalWeeklyDraftText ?? "" : localWeeklyDraftText;
-  const setWeeklyDraft = setExternalWeeklyDraft ?? setLocalWeeklyDraft;
-  const setWeeklyDraftText = setExternalWeeklyDraftText ?? setLocalWeeklyDraftText;
 
   useEffect(() => {
     if (!weeklyDraft) return;

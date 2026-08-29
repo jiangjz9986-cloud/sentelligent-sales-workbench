@@ -3,13 +3,10 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
-  Pencil,
   Plus,
   Save,
-  Search,
-  Trash2,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { statusTone } from "../../../data/salesWorkbenchData.js";
 import {
   ExpandableInsight,
@@ -18,8 +15,12 @@ import {
   Panel,
 } from "../../../components/primitives.jsx";
 import { useToast } from "../../../components/toast.jsx";
+import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
+import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import { datetimeLocalFromIso, isoFromDatetimeLocal } from "../datetimeLocal.js";
-import { ConfirmDialog, FormField } from "./shared.jsx";
+import { EntityWorkspace } from "./EntityWorkspace.jsx";
+import { FormField } from "./shared.jsx";
 
 const actionStatusMeta = {
   pending: { label: "待处理", tone: "blue", message: "动作已保留在待处理队列。" },
@@ -69,7 +70,8 @@ function RemindAtField({ value, onChange }) {
   );
 }
 
-function ActionCreateForm({ customersList = [], onCreateAction, onSaved, onCancel }) {
+function ActionCreateForm({ onCreateAction, onSaved, onCancel }) {
+  const { workbenchCustomers: customersList } = useWorkbenchData();
   const [title, setTitle] = useState("");
   const [customerId, setCustomerId] = useState("");
   const [priority, setPriority] = useState("中");
@@ -169,43 +171,52 @@ function ActionCreateForm({ customersList = [], onCreateAction, onSaved, onCance
   );
 }
 
-export function ActionsPage({
-  items = [],
-  selected,
-  onSelect,
-  setActive,
-  viewMode = "list",
-  setViewMode,
-  onUpdateActionStatus,
-  onCreateAction,
-  onDeleteAction,
-  customersList = [],
-  backendStatus,
-}) {
-  const current = selected ?? items[0] ?? null;
-  const toast = useToast();
-  const [searchText, setSearchText] = useState("");
+const actionsConfigBase = {
+  listViewTestId: "action-list-view",
+  detailViewTestId: "action-detail-view",
+  detailCreateViewTestId: "action-create-view",
+  listViewClassName: "action-list-view",
+  detailViewClassName: "action-detail-view detail-scroll-view",
+  listPanelClassName: "list-panel action-list-panel",
+  listRowClassName: "action-list-row",
+  panelTitle: "动作列表",
+  listMeta: (visible, total) => `${visible} / ${total} 个动作`,
+  searchAriaLabel: "搜索动作",
+  searchTestId: "actions-local-search",
+  searchPlaceholder: "搜索动作、客户、负责人、截止时间",
+  searchFields: ["title", "customer", "reason", "due", "priority", "status", "assignee"],
+  openDetailTestId: "actions-open-detail",
+  editDetailTestId: "action-edit-detail",
+  deleteDetailTestId: "action-delete-detail",
+  hideToolbarOnCreate: true,
+  createAction: {
+    testId: "actions-create-detail",
+    label: "新增待办",
+    icon: <Plus size={16} />,
+  },
+  emptyNoItems: "暂无动作记录。",
+  emptyNoMatch: "没有匹配动作，请调整关键词。",
+  rowPrimary: (item) => item.title,
+  rowSecondary: (item) => `${item.customer} / ${item.due} / ${actionStatusMeta[item.status]?.label ?? item.status}`,
+  deleteDialog: {
+    title: "确认删除待办",
+    description: (selected) => `“${selected?.title ?? "当前待办"}”将从动作列表中移除，此操作不能撤销。`,
+    entityName: (selected) => selected.title,
+    testIdPrefix: "action-delete",
+    successTitle: "待办已删除",
+    errorMessage: "删除动作失败，请稍后重试。",
+  },
+};
+
+function ActionDetailBody({ selected, viewMode, setViewMode, onUpdateActionStatus }) {
+  const { navigateTo } = useNavigation();
+  const current = selected;
   const currentStatus = actionStatusMeta[current?.status] ?? actionStatusMeta.pending;
   const isEditView = viewMode === "edit";
-  const isCreateView = viewMode === "create";
   const [assignee, setAssignee] = useState(current?.assignee ?? "继振");
   const [due, setDue] = useState(current?.due ?? "");
   const [remindLocal, setRemindLocal] = useState(() => datetimeLocalFromIso(current?.remindAt));
   const [statusMessage, setStatusMessage] = useState("确认负责人和时间后，可更新动作处理状态。");
-  // 行内快捷操作的乐观覆盖层：成功由 mergeById 落真值，失败即回滚原状态。
-  const [optimisticStatus, setOptimisticStatus] = useState({});
-  const [pendingQuickIds, setPendingQuickIds] = useState(() => new Set());
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
-  const cleanSearch = searchText.trim().toLowerCase();
-  const visibleItems = cleanSearch
-    ? items.filter((item) =>
-      [item.title, item.customer, item.reason, item.due, item.priority, item.status, item.assignee].some((value) =>
-        String(value ?? "").toLowerCase().includes(cleanSearch),
-      ),
-    )
-    : items;
 
   useEffect(() => {
     setAssignee(current?.assignee ?? "继振");
@@ -213,37 +224,6 @@ export function ActionsPage({
     setRemindLocal(datetimeLocalFromIso(current?.remindAt));
     setStatusMessage("确认负责人和时间后，可更新动作处理状态。");
   }, [current?.id, current?.assignee, current?.due, current?.remindAt]);
-
-  function markQuickPending(id, pending) {
-    setPendingQuickIds((currentIds) => {
-      const next = new Set(currentIds);
-      if (pending) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }
-
-  async function quickPatch(item, status) {
-    if (!item?.id || !onUpdateActionStatus || pendingQuickIds.has(item.id)) return;
-    setOptimisticStatus((map) => ({ ...map, [item.id]: status }));
-    markQuickPending(item.id, true);
-    try {
-      await onUpdateActionStatus(item.id, {
-        status,
-        tone: status === "done" ? "green" : "amber",
-      });
-      toast({ tone: "success", title: status === "done" ? "待办已完成" : "待办已延期", description: item.title });
-    } catch (error) {
-      toast({ tone: "error", title: "待办更新失败", description: error.message || "请稍后重试" });
-    } finally {
-      setOptimisticStatus((map) => {
-        const next = { ...map };
-        delete next[item.id];
-        return next;
-      });
-      markQuickPending(item.id, false);
-    }
-  }
 
   async function updateAction(status) {
     if (!current?.id || !onUpdateActionStatus) return;
@@ -254,7 +234,6 @@ export function ActionsPage({
       assignee,
       tone: status === "done" ? "green" : status === "deferred" ? "amber" : "blue",
     };
-    // 只有提醒时间被真正改动时才随补丁提交，避免无关状态更新重置提醒标记。
     if (remindLocal !== datetimeLocalFromIso(current?.remindAt)) {
       patch.remindAt = isoFromDatetimeLocal(remindLocal);
     }
@@ -267,196 +246,19 @@ export function ActionsPage({
     }
   }
 
-  function openDetail(item) {
-    onSelect(item.id);
-    setViewMode?.("detail");
-  }
-
-  function requestDeleteCurrentAction() {
-    if (!current?.id || !onDeleteAction) return;
-    setDeleteError("");
-    setDeleteDialogOpen(true);
-  }
-
-  async function confirmDeleteCurrentAction() {
-    if (!current?.id || !onDeleteAction || deleteBusy) return;
-    setDeleteBusy(true);
-    setDeleteError("");
-    try {
-      const deletedTitle = current.title;
-      await onDeleteAction(current.id);
-      setDeleteDialogOpen(false);
-      setViewMode?.("list");
-      toast({ tone: "success", title: "待办已删除", description: deletedTitle });
-    } catch (error) {
-      setDeleteError(error.message || "删除动作失败，请稍后重试。");
-    } finally {
-      setDeleteBusy(false);
-    }
-  }
-
-  if (viewMode === "list") {
-    return (
-      <section className="action-list-view" data-testid="action-list-view">
-        <Panel
-          title="动作列表"
-          meta={`${visibleItems.length} / ${items.length} 个动作`}
-          className="list-panel action-list-panel"
-          action={(
-            <button
-              className="primary-button"
-              type="button"
-              data-testid="actions-create-detail"
-              onClick={() => setViewMode?.("create")}
-            >
-              <Plus size={16} />
-              新增待办
-            </button>
-          )}
-        >
-          <label className="search-box page-search">
-            <Search size={16} />
-            <input
-              aria-label="搜索动作"
-              data-testid="actions-local-search"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="搜索动作、客户、负责人、截止时间"
-            />
-          </label>
-          <div className="list-stack">
-            {visibleItems.map((item) => {
-              const rowStatus = optimisticStatus[item.id] ?? item.status;
-              const rowMeta = actionStatusMeta[rowStatus] ?? actionStatusMeta.pending;
-              const rowPending = pendingQuickIds.has(item.id);
-              const rowTone = optimisticStatus[item.id]
-                ? (rowStatus === "done" ? "green" : "amber")
-                : item.tone;
-              return (
-                <article
-                  className={`list-button customer-list-row action-list-row ${current?.id === item.id ? "selected" : ""}`}
-                  key={item.id}
-                >
-                  <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
-                    <span>
-                      <strong>{item.title}</strong>
-                      <small>{item.customer} / {item.due} / {rowMeta.label}</small>
-                    </span>
-                    <span className="list-row-pills">
-                      <b className={`pill ${statusTone[rowTone]}`}>{item.priority}</b>
-                      <b className={`pill tone-${rowMeta.tone}`}>{rowMeta.label}</b>
-                    </span>
-                  </button>
-                  <div className="list-row-quick-actions">
-                    {rowStatus !== "done" ? (
-                      <button
-                        className="ghost-button compact-icon"
-                        type="button"
-                        data-testid="action-quick-complete"
-                        disabled={rowPending}
-                        onClick={() => quickPatch(item, "done")}
-                      >
-                        <Check size={15} />
-                        完成
-                      </button>
-                    ) : null}
-                    {["pending", "in_progress"].includes(rowStatus) ? (
-                      <button
-                        className="ghost-button compact-icon"
-                        type="button"
-                        data-testid="action-quick-defer"
-                        disabled={rowPending}
-                        onClick={() => quickPatch(item, "deferred")}
-                      >
-                        <CalendarClock size={15} />
-                        延期
-                      </button>
-                    ) : null}
-                    <button
-                      className="ghost-button"
-                      type="button"
-                      data-testid="actions-open-detail"
-                      onClick={() => openDetail(item)}
-                    >
-                      查看详情
-                      <ChevronRight size={15} />
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-            {visibleItems.length === 0 ? (
-              <p className="empty-list">
-                {items.length === 0 ? "暂无动作记录。" : "没有匹配动作，请调整关键词。"}
-              </p>
-            ) : null}
-          </div>
-        </Panel>
-      </section>
-    );
-  }
-
-  if (isCreateView) {
-    return (
-      <section className="action-detail-view detail-scroll-view" data-testid="action-create-view">
-        <div className="subview-actions sticky-subview-toolbar">
-          <button className="ghost-button" type="button" onClick={() => setViewMode?.("list")}>
-            <ChevronLeft size={16} />
-            返回列表
-          </button>
-        </div>
-        <section className="detail-surface">
-          <ActionCreateForm
-            customersList={customersList}
-            onCreateAction={onCreateAction}
-            onSaved={(saved) => {
-              onSelect(saved.id);
-              setViewMode?.("detail");
-            }}
-            onCancel={() => setViewMode?.("list")}
-          />
-        </section>
-      </section>
-    );
+  if (viewMode === "create") {
+    return null;
   }
 
   return (
-    <section className="action-detail-view detail-scroll-view" data-testid="action-detail-view">
-      <div className="subview-actions sticky-subview-toolbar">
-        <button className="ghost-button" type="button" onClick={() => setViewMode?.("list")}>
-          <ChevronLeft size={16} />
-          返回列表
-        </button>
-        <div className="detail-toolbar-actions">
-          <button
-            className={isEditView ? "ghost-button disabled" : "ghost-button"}
-            disabled={isEditView}
-            type="button"
-            data-testid="action-edit-detail"
-            onClick={() => setViewMode?.("edit")}
-          >
-            <Pencil size={15} />
-            修改
-          </button>
-          <button
-            className="ghost-button danger"
-            type="button"
-            data-testid="action-delete-detail"
-            onClick={requestDeleteCurrentAction}
-          >
-            <Trash2 size={15} />
-            删除
-          </button>
-        </div>
+    <>
+      <div className="detail-metrics">
+        <MetricInline label="客户" value={current.customer} />
+        <MetricInline label="负责人" value={current.assignee ?? "待分配"} />
+        <MetricInline label="截止" value={current.due} />
+        <MetricInline label="状态" value={currentStatus.label} />
       </div>
-      <section className="detail-surface">
-        <div className="detail-metrics">
-          <MetricInline label="客户" value={current.customer} />
-          <MetricInline label="负责人" value={current.assignee ?? "待分配"} />
-          <MetricInline label="截止" value={current.due} />
-          <MetricInline label="状态" value={currentStatus.label} />
-        </div>
-        {isEditView ? (
+      {isEditView ? (
         <Panel title="动作落地处理" meta="销售人工更新">
           <div className="editor-grid two">
             <label className="form-field">
@@ -497,53 +299,182 @@ export function ActionsPage({
             </button>
           </div>
           <p className="risk-status-message">{statusMessage}</p>
-          <button className="primary-button" type="button" onClick={() => setActive("weekly")}>
+          <button className="primary-button" type="button" onClick={() => navigateTo("weekly")}>
             写入本周计划
           </button>
           <button className="ghost-button" type="button" onClick={() => setViewMode?.("detail")}>
             取消修改
           </button>
         </Panel>
-        ) : (
-          <>
-            <div className="two-col">
-              <Panel title="动作说明" meta={current.priority}>
-                <ExpandableInsight testId="action-reason-insight">
-                  {current.reason ?? "暂无动作说明。"}
-                </ExpandableInsight>
-              </Panel>
-              <Panel title="执行安排" meta="只读详情">
-                <InfoList
-                  items={[
-                    `负责人：${current.assignee ?? "待分配"}`,
-                    `截止时间：${current.due ?? "待确认"}`,
-                    `提醒时间：${formatRemindDisplay(current.remindAt) ?? "未设置"}`,
-                    `当前状态：${currentStatus.label}`,
-                  ]}
-                  tone="blue"
-                />
-              </Panel>
-            </div>
-            <button className="primary-button" type="button" onClick={() => setActive("weekly")}>
-              写入本周计划
+      ) : (
+        <>
+          <div className="two-col">
+            <Panel title="动作说明" meta={current.priority}>
+              <ExpandableInsight testId="action-reason-insight">
+                {current.reason ?? "暂无动作说明。"}
+              </ExpandableInsight>
+            </Panel>
+            <Panel title="执行安排" meta="只读详情">
+              <InfoList
+                items={[
+                  `负责人：${current.assignee ?? "待分配"}`,
+                  `截止时间：${current.due ?? "待确认"}`,
+                  `提醒时间：${formatRemindDisplay(current.remindAt) ?? "未设置"}`,
+                  `当前状态：${currentStatus.label}`,
+                ]}
+                tone="blue"
+              />
+            </Panel>
+          </div>
+          <button className="primary-button" type="button" onClick={() => navigateTo("weekly")}>
+            写入本周计划
+          </button>
+        </>
+      )}
+    </>
+  );
+}
+
+export function ActionsPage({
+  items = [],
+  selected,
+  onSelect,
+  viewMode = "list",
+  setViewMode,
+}) {
+  const { navigateTo } = useNavigation();
+  const current = selected ?? items[0] ?? null;
+  const toast = useToast();
+  const { handleUpdateActionStatus, handleCreateAction, handleDeleteAction } = useWorkbenchActions();
+  const [optimisticStatus, setOptimisticStatus] = useState({});
+  const [pendingQuickIds, setPendingQuickIds] = useState(() => new Set());
+
+  function markQuickPending(id, pending) {
+    setPendingQuickIds((currentIds) => {
+      const next = new Set(currentIds);
+      if (pending) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  async function quickPatch(item, status) {
+    if (!item?.id || pendingQuickIds.has(item.id)) return;
+    setOptimisticStatus((map) => ({ ...map, [item.id]: status }));
+    markQuickPending(item.id, true);
+    try {
+      await handleUpdateActionStatus(item.id, {
+        status,
+        tone: status === "done" ? "green" : "amber",
+      });
+      toast({ tone: "success", title: status === "done" ? "待办已完成" : "待办已延期", description: item.title });
+    } catch (error) {
+      toast({ tone: "error", title: "待办更新失败", description: error.message || "请稍后重试" });
+    } finally {
+      setOptimisticStatus((map) => {
+        const next = { ...map };
+        delete next[item.id];
+        return next;
+      });
+      markQuickPending(item.id, false);
+    }
+  }
+
+  const config = useMemo(() => ({
+    ...actionsConfigBase,
+    rowSecondary: (item) => {
+      const rowStatus = optimisticStatus[item.id] ?? item.status;
+      const rowMeta = actionStatusMeta[rowStatus] ?? actionStatusMeta.pending;
+      return `${item.customer} / ${item.due} / ${rowMeta.label}`;
+    },
+    renderRowBadge: (item) => {
+      const rowStatus = optimisticStatus[item.id] ?? item.status;
+      const rowMeta = actionStatusMeta[rowStatus] ?? actionStatusMeta.pending;
+      const rowTone = optimisticStatus[item.id]
+        ? (rowStatus === "done" ? "green" : "amber")
+        : item.tone;
+      return (
+        <span className="list-row-pills">
+          <b className={`pill ${statusTone[rowTone]}`}>{item.priority}</b>
+          <b className={`pill tone-${rowMeta.tone}`}>{rowMeta.label}</b>
+        </span>
+      );
+    },
+    renderRowActions: (item) => {
+      const rowStatus = optimisticStatus[item.id] ?? item.status;
+      const rowPending = pendingQuickIds.has(item.id);
+      return (
+        <div className="list-row-quick-actions">
+          {rowStatus !== "done" ? (
+            <button
+              className="ghost-button compact-icon"
+              type="button"
+              data-testid="action-quick-complete"
+              disabled={rowPending}
+              onClick={() => quickPatch(item, "done")}
+            >
+              <Check size={15} />
+              完成
             </button>
-          </>
-        )}
-      </section>
-      <ConfirmDialog
-        open={deleteDialogOpen}
-        title="确认删除待办"
-        description={`“${current?.title ?? "当前待办"}”将从动作列表中移除，此操作不能撤销。`}
-        busy={deleteBusy}
-        errorMessage={deleteError}
-        onCancel={() => {
-          if (deleteBusy) return;
-          setDeleteError("");
-          setDeleteDialogOpen(false);
-        }}
-        onConfirm={confirmDeleteCurrentAction}
-        testIdPrefix="action-delete"
-      />
-    </section>
+          ) : null}
+          {["pending", "in_progress"].includes(rowStatus) ? (
+            <button
+              className="ghost-button compact-icon"
+              type="button"
+              data-testid="action-quick-defer"
+              disabled={rowPending}
+              onClick={() => quickPatch(item, "deferred")}
+            >
+              <CalendarClock size={15} />
+              延期
+            </button>
+          ) : null}
+          <button
+            className="ghost-button"
+            type="button"
+            data-testid="actions-open-detail"
+            onClick={() => {
+              onSelect(item.id);
+              setViewMode?.("detail");
+            }}
+          >
+            查看详情
+            <ChevronRight size={15} />
+          </button>
+        </div>
+      );
+    },
+  }), [optimisticStatus, pendingQuickIds, onSelect, setViewMode]);
+
+  return (
+    <EntityWorkspace
+      items={items}
+      selected={current}
+      activeRowId={current?.id}
+      onSelect={onSelect}
+      viewMode={viewMode}
+      setViewMode={setViewMode}
+      config={config}
+      onDelete={handleDeleteAction}
+      renderDetail={({ viewMode: mode, isCreateView }) => (
+        isCreateView ? (
+          <ActionCreateForm
+            onCreateAction={handleCreateAction}
+            onSaved={(saved) => {
+              onSelect(saved.id);
+              setViewMode?.("detail");
+            }}
+            onCancel={() => setViewMode?.("list")}
+          />
+        ) : (
+          <ActionDetailBody
+            selected={current}
+            viewMode={mode}
+            setViewMode={setViewMode}
+            onUpdateActionStatus={handleUpdateActionStatus}
+          />
+        )
+      )}
+    />
   );
 }

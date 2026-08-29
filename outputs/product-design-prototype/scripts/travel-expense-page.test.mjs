@@ -2,10 +2,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
+import { readAppSource } from "./app-source.mjs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 const root = new URL("../", import.meta.url);
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 async function source(path) {
   return readFile(new URL(path, root), "utf8");
+}
+
+function appSource() {
+  return readAppSource(packageRoot);
 }
 
 describe("travel expense feature boundary", () => {
@@ -23,10 +32,10 @@ describe("travel expense feature boundary", () => {
   });
 
   it("assembles an isolated TravelExpensePage instead of business JSX in App", async () => {
-    const app = await source("src/App.jsx");
+    const app = appSource();
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
 
-    assert.match(app, /import \{ TravelExpensePage \} from "\.\/features\/travelExpense\/TravelExpensePage\.jsx"/);
+    assert.match(app, /const TravelExpensePage = lazy\(\(\) => import\("\.\.\/features\/travelExpense\/TravelExpensePage\.jsx"\)/);
     assert.match(app, /active === "expense"/);
     assert.match(app, /<TravelExpensePage/);
     assert.doesNotMatch(app, /实际付款记录表/);
@@ -493,7 +502,7 @@ describe("travel expense feature boundary", () => {
   it("prefills the drawer from an itinerary draft exactly once and warns on unlisted regions", async () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const editor = await source("src/features/travelExpense/ExpenseEditorDrawer.jsx");
-    const app = await source("src/App.jsx");
+    const app = appSource();
     const itineraryPage = await source("src/features/visitItinerary/VisitItineraryPage.jsx");
     const link = await source("src/features/visitItinerary/itineraryExpenseLink.js");
 
@@ -523,7 +532,7 @@ describe("travel expense feature boundary", () => {
     assert.match(editor, /category: prefill \? "transport" : "breakfast"/);
     assert.match(app, /expenseDraft=\{expenseDraftFromFilters\(routeFilters\)\}/);
     assert.match(app, /onExpenseDraftConsumed=\{consumeExpenseDraftRoute\}/);
-    assert.match(app, /function consumeExpenseDraftRoute\(\) \{[\s\S]*?writeBrowserRoute\(route, \{ replace: true \}\);[\s\S]*?\}/);
+    assert.match(app, /function consumeExpenseDraftRoute\(\) \{[\s\S]*?writeBrowserRoute\(route, workspaceRef, \{ replace: true \}\);[\s\S]*?\}/);
     assert.match(app, /onRecordExpense=\{recordItineraryExpense\}/);
     assert.match(itineraryPage, /data-testid="itinerary-record-expense"/);
     assert.match(itineraryPage, /记当日费用/);

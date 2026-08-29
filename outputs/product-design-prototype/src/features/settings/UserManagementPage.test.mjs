@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const pagePath = new URL("./UserManagementPage.jsx", import.meta.url);
-const appPath = new URL("../../App.jsx", import.meta.url);
+const shellPath = new URL("../../app/SalesWorkbenchShell.jsx", import.meta.url);
 const navRoutesPath = new URL("../../app/navRoutes.js", import.meta.url);
 const routesPath = new URL("../../app/routes.js", import.meta.url);
 const dataPath = new URL("../../data/salesWorkbenchData.js", import.meta.url);
@@ -108,15 +108,15 @@ test("members see the admin-required placeholder instead of the roster", async (
 });
 
 test("the page is registered at every navigation layer (v0.7.1 lesson)", async () => {
-  const [appSource, navRoutesSource, routesSource, dataSource] = await Promise.all([
-    readFile(appPath, "utf8"),
+  const [shellSource, navRoutesSource, routesSource, dataSource] = await Promise.all([
+    readFile(shellPath, "utf8"),
     readFile(navRoutesPath, "utf8"),
     readFile(routesPath, "utf8"),
     readFile(dataPath, "utf8"),
   ]);
 
-  assert.match(appSource, /<UserManagementPage[\s\S]*?authSession=\{authSession\}/);
-  assert.match(appSource, /active === "settings-users"/);
+  assert.match(shellSource, /<UserManagementPage[\s\S]*?authSession=\{authSession\}/);
+  assert.match(shellSource, /active === "settings-users"/);
   assert.match(navRoutesSource, /"settings-users": Object\.freeze\(\{ page: "settings\/users", mode: "index" \}\)/);
   assert.match(navRoutesSource, /"settings\/users": "settings-users"/);
   assert.match(navRoutesSource, /"settings-users": "settings"/);
@@ -126,9 +126,9 @@ test("the page is registered at every navigation layer (v0.7.1 lesson)", async (
 });
 
 test("the settings subnav is role-filtered so members only see the security entry", async () => {
-  const appSource = await readFile(appPath, "utf8");
+  const shellSource = await readFile(shellPath, "utf8");
 
-  assert.match(appSource, /authSession\?\.role === "admin"/);
-  assert.match(appSource, /item\.id === "settings"/);
-  assert.match(appSource, /安全设置/);
+  assert.match(shellSource, /authSession\?\.role === "admin"/);
+  assert.match(shellSource, /item\.id === "settings"/);
+  assert.match(shellSource, /安全设置/);
 });

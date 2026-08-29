@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-29
+
+### 工程铺路：路由拆包 + 状态下沉 + 五实体页 EntityWorkspace（总蓝图 v0.10.1 行）
+
+- **阶段 A**：15 路由 `React.lazy` + `Suspense`/`RouteChunkBoundary`；Overview 静态首屏；`test:bundle` 守护主 chunk <500KB（实测 ~351KB）。
+- **阶段 B**：`SalesWorkbenchShell` + 5 hook/context；`App.jsx` 仅认证（≤5 `useState`）；Overview/QuickRecord/Weekly 零 props；五实体页 ≤5 props。
+- **阶段 C**：客户/商机/待办/风险/知识 全量 `EntityWorkspace`；列表/详情/删除弹窗模板收敛。
+- **守护**：`app-source.mjs` 聚合取源；`dashboard-refresh` 断言迁至 `useWorkbenchData`（正则未改）；新增 `app-hooks.test.js` + bundle-budget；集成/视觉补 lazy 等待。
+- 零后端改动；零数据库迁移；零新依赖。用户可感知变化=首访各页瞬时「正在打开页面」+ 首屏主 JS 更小，其余零行为 diff。
+
 ## [0.10.0] - 2026-08-29
 
 ### 快赢包：审计B Q1 六项 + 全局反馈系统（总蓝图 v0.10.0 行）

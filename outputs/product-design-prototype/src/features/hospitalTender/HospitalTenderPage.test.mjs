@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const pagePath = new URL("./HospitalTenderPage.jsx", import.meta.url);
-const appPath = new URL("../../App.jsx", import.meta.url);
+const shellPath = new URL("../../app/SalesWorkbenchShell.jsx", import.meta.url);
 const stylesPath = new URL("../../styles/global.css", import.meta.url);
 
 test("hospital tender page exposes the read-only monitoring contract", async () => {
   const source = await readFile(pagePath, "utf8");
-  const appSource = await readFile(appPath, "utf8");
+  const shellSource = await readFile(shellPath, "utf8");
 
   assert.match(source, /export function HospitalTenderPage\s*\(/);
   for (const prop of ["apiClient", "notices", "summary", "sources", "health", "customers", "loading", "error", "onRefresh", "onSelectCustomer", "onOpenSchedule"]) {
@@ -23,7 +23,7 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   assert.match(source, /匹配依据/);
   assert.match(source, /调度设置/);
   assert.match(source, /onOpenSchedule/);
-  assert.match(appSource, /onOpenSchedule=\{\(\) => navigateTo\("settings-tender-schedule"\)\}/);
+  assert.match(shellSource, /onOpenSchedule=\{\(\) => navigateTo\("settings-tender-schedule"\)\}/);
   assert.doesNotMatch(source, /立即检测下一批/);
   assert.doesNotMatch(source, /启用自动轮巡|停用自动轮巡/);
   assert.doesNotMatch(source, /PushPlus/);
@@ -34,7 +34,7 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   assert.match(source, /搜索公告/);
   assert.match(source, /清除筛选/);
   assert.match(source, /lastSuccessAt/);
-  assert.match(appSource, /scrollIntoView/);
+  assert.match(shellSource, /scrollIntoView/);
   assert.match(source, /focusableSelector/);
   assert.match(source, /role="dialog"|aria-label="公告详情"/);
   assert.match(source, /hospital-tender-priority-strip/);

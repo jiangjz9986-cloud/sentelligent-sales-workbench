@@ -1,11 +1,7 @@
 import {
   ChevronLeft,
-  ChevronRight,
-  Pencil,
   Plus,
   Save,
-  Search,
-  Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { statusTone } from "../../../data/salesWorkbenchData.js";
@@ -19,9 +15,10 @@ import {
 } from "../../../components/primitives.jsx";
 import { buildOpportunityTimeline } from "../opportunityTimeline.js";
 import { SalesDecisionPanel } from "../SalesDecisionPanel.jsx";
-import { useToast } from "../../../components/toast.jsx";
+import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
+import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import {
-  ConfirmDialog,
   FieldTags,
   FormField,
   arrayFromText,
@@ -30,6 +27,7 @@ import {
   numberFromInput,
   textFromArray,
 } from "./shared.jsx";
+import { EntityWorkspace } from "./EntityWorkspace.jsx";
 
 function opportunityToForm(opportunity, selectedCustomer) {
   const hasOpportunity = Boolean(opportunity?.id);
@@ -70,7 +68,7 @@ function opportunityFromForm(form, customersList, isNew) {
   };
 }
 
-function OpportunityEditor({ selected, customersList, initialMode = "edit", onSaveOpportunity, onSaved, onCancel, backendStatus }) {
+function OpportunityEditor({ selected, customersList, initialMode = "edit", onSaveOpportunity, onSaved, onCancel }) {
   const selectedCustomer = customersList.find((item) => item.id === selected?.customerId) ?? customersList[0];
   const [mode, setMode] = useState(initialMode);
   const [form, setForm] = useState(() =>
@@ -182,273 +180,177 @@ function OpportunityEditor({ selected, customersList, initialMode = "edit", onSa
   );
 }
 
-export function OpportunityPage({
-  items,
-  selected,
-  onSelect,
-  setActive,
-  setSelectedCustomerId,
-  viewMode = "list",
-  setViewMode,
-  customersList,
-  onSaveOpportunity,
-  onDeleteOpportunity,
-  apiClient,
-  backendStatus,
-}) {
-  const [searchText, setSearchText] = useState("");
-  const toast = useToast();
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
-  const cleanSearch = searchText.trim().toLowerCase();
-  const visibleItems = cleanSearch
-    ? items.filter((item) =>
-      [item.name, item.customer, item.stage, item.risk, item.next, item.owner].some((value) =>
-        String(value ?? "").toLowerCase().includes(cleanSearch),
-      ),
-    )
-    : items;
+const opportunityConfig = {
+  listViewTestId: "opportunity-list-view",
+  detailViewTestId: "opportunity-detail-view",
+  listViewClassName: "opportunity-list-view",
+  detailViewClassName: "opportunity-detail-view detail-scroll-view",
+  listPanelClassName: "list-panel opportunity-list-panel",
+  panelTitle: "商机列表",
+  listMeta: (visible, total) => `${visible} / ${total} 个商机`,
+  searchAriaLabel: "搜索商机",
+  searchTestId: "opportunity-local-search",
+  searchPlaceholder: "搜索商机、客户、阶段、负责人",
+  searchFields: ["name", "customer", "stage", "risk", "next", "owner"],
+  openDetailTestId: "opportunity-open-detail",
+  editDetailTestId: "opportunity-edit-detail",
+  deleteDetailTestId: "opportunity-delete-detail",
+  createAction: {
+    testId: "opportunity-create-detail",
+    label: "新增商机",
+    icon: <Plus size={16} />,
+  },
+  emptyNoItems: "暂无商机，可点击“新增商机”开始录入。",
+  emptyNoMatch: "没有匹配商机，请调整关键词。",
+  rowPrimary: (item) => item.name,
+  rowSecondary: (item) => `${item.customer} / ${item.stage}`,
+  renderRowBadge: (item) => <b className={`pill ${statusTone[item.tone]}`}>{item.probability}%</b>,
+  deleteDialog: {
+    title: "确认删除商机",
+    description: (selected) => `“${selected?.name ?? "当前商机"}”将从商机列表中移除，此操作不能撤销。`,
+    entityName: (selected) => selected.name,
+    testIdPrefix: "opportunity-delete",
+    successTitle: "商机已删除",
+    errorMessage: "删除商机失败，请稍后重试。",
+  },
+};
 
-  function openDetail(item) {
-    onSelect(item.id);
-    setViewMode?.("detail");
-  }
-
+function OpportunityDetailBody({ selected, viewMode, setViewMode, onSelect }) {
+  const { apiClient, backendStatus, workbenchCustomers: customersList } = useWorkbenchData();
+  const { handleSaveOpportunity } = useWorkbenchActions();
+  const { navigateTo: setActive, setSelectedCustomerId } = useNavigation();
   const isCreateView = viewMode === "create";
   const isEditView = viewMode === "edit";
   const timelineItems = buildOpportunityTimeline(selected);
 
-  function requestDeleteCurrentOpportunity() {
-    if (!selected?.id || !onDeleteOpportunity) return;
-    setDeleteError("");
-    setDeleteDialogOpen(true);
-  }
-
-  async function confirmDeleteCurrentOpportunity() {
-    if (!selected?.id || !onDeleteOpportunity || deleteBusy) return;
-    setDeleteBusy(true);
-    setDeleteError("");
-    try {
-      const deletedName = selected.name;
-      await onDeleteOpportunity(selected.id);
-      setDeleteDialogOpen(false);
-      setViewMode?.("list");
-      toast({ tone: "success", title: "商机已删除", description: deletedName });
-    } catch (error) {
-      setDeleteError(error.message || "删除商机失败，请稍后重试。");
-    } finally {
-      setDeleteBusy(false);
-    }
-  }
-
-  if (viewMode === "list") {
+  if (isCreateView || isEditView) {
     return (
-      <section className="opportunity-list-view" data-testid="opportunity-list-view">
-        <Panel
-          title="商机列表"
-          meta={`${visibleItems.length} / ${items.length} 个商机`}
-          className="list-panel opportunity-list-panel"
-          action={(
-            <button
-              className="primary-button"
-              type="button"
-              data-testid="opportunity-create-detail"
-              onClick={() => setViewMode?.("create")}
-            >
-              <Plus size={16} />
-              新增商机
-            </button>
-          )}
-        >
-          <label className="search-box page-search">
-            <Search size={16} />
-            <input
-              aria-label="搜索商机"
-              data-testid="opportunity-local-search"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="搜索商机、客户、阶段、负责人"
-            />
-          </label>
-          <div className="list-stack">
-            {visibleItems.map((item) => (
-              <article
-                className={`list-button customer-list-row ${selected?.id === item.id ? "selected" : ""}`}
-                key={item.id}
-              >
-                <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
-                  <span>
-                    <strong>{item.name}</strong>
-                    <small>{item.customer} / {item.stage}</small>
-                  </span>
-                  <b className={`pill ${statusTone[item.tone]}`}>{item.probability}%</b>
-                </button>
-                <button
-                  className="ghost-button"
-                  type="button"
-                  data-testid="opportunity-open-detail"
-                  onClick={() => openDetail(item)}
-                >
-                  查看详情
-                  <ChevronRight size={15} />
-                </button>
-              </article>
-            ))}
-            {visibleItems.length === 0 ? (
-              <p className="empty-list">
-                {items.length === 0 ? "暂无商机，可点击“新增商机”开始录入。" : "没有匹配商机，请调整关键词。"}
-              </p>
-            ) : null}
-          </div>
-        </Panel>
-      </section>
+      <OpportunityEditor
+        selected={isCreateView ? null : selected}
+        customersList={customersList}
+        initialMode={isCreateView ? "new" : "edit"}
+        onSaveOpportunity={handleSaveOpportunity}
+        onSaved={(saved) => {
+          onSelect(saved.id);
+          setViewMode?.("detail");
+        }}
+        onCancel={() => setViewMode?.(isCreateView ? "list" : "detail")}
+      />
     );
   }
 
   return (
-    <section className="opportunity-detail-view detail-scroll-view" data-testid="opportunity-detail-view">
-      <div className="subview-actions sticky-subview-toolbar">
-        <button className="ghost-button" type="button" onClick={() => setViewMode?.("list")}>
-          <ChevronLeft size={16} />
-          返回列表
-        </button>
-        {!isCreateView ? (
-          <div className="detail-toolbar-actions">
-            <button
-              className={isEditView ? "ghost-button disabled" : "ghost-button"}
-              disabled={isEditView}
-              type="button"
-              data-testid="opportunity-edit-detail"
-              onClick={() => setViewMode?.("edit")}
-            >
-              <Pencil size={15} />
-              修改
-            </button>
-            <button
-              className="ghost-button danger"
-              type="button"
-              data-testid="opportunity-delete-detail"
-              onClick={requestDeleteCurrentOpportunity}
-            >
-              <Trash2 size={15} />
-              删除
-            </button>
-          </div>
-        ) : null}
+    <>
+      <div className="detail-metrics">
+        <MetricInline label="金额" value={selected.amount} />
+        <MetricInline label="赢率" value={`${selected.probability}%`} />
+        <MetricInline label="负责人" value={selected.owner} />
+        <MetricInline label="阶段" value={selected.stage} />
       </div>
-      <section className="detail-surface">
-        {(isCreateView || isEditView) ? (
-          <OpportunityEditor
-            selected={isCreateView ? null : selected}
-            customersList={customersList}
-            initialMode={isCreateView ? "new" : "edit"}
-            onSaveOpportunity={onSaveOpportunity}
-            onSaved={(saved) => {
-              onSelect(saved.id);
-              setViewMode?.("detail");
-            }}
-            onCancel={() => setViewMode?.(isCreateView ? "list" : "detail")}
-            backendStatus={backendStatus}
-          />
-        ) : null}
-        {!isCreateView && !isEditView && (
-          <>
-        <div className="detail-metrics">
-          <MetricInline label="金额" value={selected.amount} />
-          <MetricInline label="赢率" value={`${selected.probability}%`} />
-          <MetricInline label="负责人" value={selected.owner} />
-          <MetricInline label="阶段" value={selected.stage} />
-        </div>
-        <div className="two-col">
-          <Panel title="客户诉求 / 需求" meta="商机字段">
-            <InfoList items={selected.requirements} tone="blue" />
-          </Panel>
-          <Panel title="竞争对手" meta="关系与方案压力">
-            <FieldTags items={selected.competitors} tone="amber" />
-          </Panel>
-          <Panel title="方案方向" meta="售前协同">
-            <InfoList items={selected.solutionDirection} tone="green" />
-          </Panel>
-          <Panel title="来源记录" meta="快速记录承接">
-            <ExpandableInsight testId="opportunity-source-insight">
-              {selected.sourceRecord ?? "尚未绑定来源记录，可从快速记录确认后写入商机档案。"}
-            </ExpandableInsight>
-          </Panel>
-          <Panel title="风险说明" meta="来自记录与字段">
-            <ExpandableInsight tone="amber" testId="opportunity-risk-insight">
-              {selected.risk ?? "尚未沉淀风险说明，可在风险识别页补充证据和处理建议。"}
-            </ExpandableInsight>
-          </Panel>
-          <Panel title="下一步动作" meta="推进安排">
-            <ExpandableInsight testId="opportunity-next-insight">
-              {selected.next ?? "尚未生成下一步动作，可从快速记录或商机推进建议中确认后生成。"}
-            </ExpandableInsight>
-          </Panel>
-        </div>
-        <Timeline items={timelineItems} />
-        <SalesDecisionPanel
-          selected={selected}
-          customer={customersList.find((item) => item.id === selected.customerId) ?? null}
-          apiClient={apiClient}
-          backendStatus={backendStatus}
-        />
-        <div className="detail-actions">
-          <button
-            className="ghost-button"
-            type="button"
-            onClick={() => {
-              setSelectedCustomerId(selected.customerId);
-              setActive("customer");
-            }}
-          >
-            查看客户画像
-          </button>
-          <ManualConfirmBox
-            compact
-            title="手动生成商机推进建议"
-            desc="结合当前商机整理预算路径、竞品应对和售前支持建议。"
-            onGenerate={() =>
-              generateBusinessSuggestion(apiClient, backendStatus, {
-                type: "opportunity_push",
-                title: "手动生成商机推进建议",
-                context: {
-                  opportunityId: selected.id,
-                  opportunity: selected.name,
-                  customerId: selected.customerId,
-                  customer: selected.customer,
-                  stage: selected.stage,
-                  amount: selected.amount,
-                  probability: selected.probability,
-                  owner: selected.owner,
-                  requirements: joinedList(selected.requirements),
-                  competitors: joinedList(selected.competitors),
-                  solutionDirection: joinedList(selected.solutionDirection),
-                  risk: selected.risk,
-                  next: selected.next,
-                  sourceRecord: selected.sourceRecord,
-                },
-              })
-            }
-          />
-        </div>
-          </>
-        )}
-      </section>
-      <ConfirmDialog
-        open={deleteDialogOpen}
-        title="确认删除商机"
-        description={`“${selected?.name ?? "当前商机"}”将从商机列表中移除，此操作不能撤销。`}
-        busy={deleteBusy}
-        errorMessage={deleteError}
-        onCancel={() => {
-          if (deleteBusy) return;
-          setDeleteError("");
-          setDeleteDialogOpen(false);
-        }}
-        onConfirm={confirmDeleteCurrentOpportunity}
-        testIdPrefix="opportunity-delete"
+      <div className="two-col">
+        <Panel title="客户诉求 / 需求" meta="商机字段">
+          <InfoList items={selected.requirements} tone="blue" />
+        </Panel>
+        <Panel title="竞争对手" meta="关系与方案压力">
+          <FieldTags items={selected.competitors} tone="amber" />
+        </Panel>
+        <Panel title="方案方向" meta="售前协同">
+          <InfoList items={selected.solutionDirection} tone="green" />
+        </Panel>
+        <Panel title="来源记录" meta="快速记录承接">
+          <ExpandableInsight testId="opportunity-source-insight">
+            {selected.sourceRecord ?? "尚未绑定来源记录，可从快速记录确认后写入商机档案。"}
+          </ExpandableInsight>
+        </Panel>
+        <Panel title="风险说明" meta="来自记录与字段">
+          <ExpandableInsight tone="amber" testId="opportunity-risk-insight">
+            {selected.risk ?? "尚未沉淀风险说明，可在风险识别页补充证据和处理建议。"}
+          </ExpandableInsight>
+        </Panel>
+        <Panel title="下一步动作" meta="推进安排">
+          <ExpandableInsight testId="opportunity-next-insight">
+            {selected.next ?? "尚未生成下一步动作，可从快速记录或商机推进建议中确认后生成。"}
+          </ExpandableInsight>
+        </Panel>
+      </div>
+      <Timeline items={timelineItems} />
+      <SalesDecisionPanel
+        selected={selected}
+        customer={customersList.find((item) => item.id === selected.customerId) ?? null}
+        apiClient={apiClient}
+        backendStatus={backendStatus}
       />
-    </section>
+      <div className="detail-actions">
+        <button
+          className="ghost-button"
+          type="button"
+          onClick={() => {
+            setSelectedCustomerId(selected.customerId);
+            setActive("customer");
+          }}
+        >
+          查看客户画像
+        </button>
+        <ManualConfirmBox
+          compact
+          title="手动生成商机推进建议"
+          desc="结合当前商机整理预算路径、竞品应对和售前支持建议。"
+          onGenerate={() =>
+            generateBusinessSuggestion(apiClient, backendStatus, {
+              type: "opportunity_push",
+              title: "手动生成商机推进建议",
+              context: {
+                opportunityId: selected.id,
+                opportunity: selected.name,
+                customerId: selected.customerId,
+                customer: selected.customer,
+                stage: selected.stage,
+                amount: selected.amount,
+                probability: selected.probability,
+                owner: selected.owner,
+                requirements: joinedList(selected.requirements),
+                competitors: joinedList(selected.competitors),
+                solutionDirection: joinedList(selected.solutionDirection),
+                risk: selected.risk,
+                next: selected.next,
+                sourceRecord: selected.sourceRecord,
+              },
+            })
+          }
+        />
+      </div>
+    </>
+  );
+}
+
+export function OpportunityPage({
+  items,
+  selected,
+  onSelect,
+  viewMode = "list",
+  setViewMode,
+}) {
+  const current = selected ?? items[0] ?? null;
+  const { handleDeleteOpportunity } = useWorkbenchActions();
+
+  return (
+    <EntityWorkspace
+      items={items}
+      selected={current}
+      activeRowId={current?.id}
+      onSelect={onSelect}
+      viewMode={viewMode}
+      setViewMode={setViewMode}
+      config={opportunityConfig}
+      onDelete={handleDeleteOpportunity}
+      renderDetail={({ viewMode: mode }) => (
+        <OpportunityDetailBody
+          selected={current}
+          viewMode={mode}
+          setViewMode={setViewMode}
+          onSelect={onSelect}
+        />
+      )}
+    />
   );
 }

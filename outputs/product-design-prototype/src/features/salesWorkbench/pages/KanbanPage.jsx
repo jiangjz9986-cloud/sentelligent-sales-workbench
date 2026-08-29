@@ -1,32 +1,30 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { kanbanStages, statusTone } from "../../../data/salesWorkbenchData.js";
 import { useToast } from "../../../components/toast.jsx";
+import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
+import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 
-export function KanbanPage({
-  opportunitiesList = [],
-  setActive,
-  setSelectedOpportunityId,
-  openOpportunityDetail,
-  onSaveOpportunity,
-  backendStatus,
-}) {
+export function KanbanPage({ opportunitiesList = [] }) {
   const toast = useToast();
+  const { navigateTo: setActive, setSelectedOpportunityId, openOpportunityDetail } = useNavigation();
+  const { handleSaveOpportunity } = useWorkbenchActions();
+  const { backendStatus } = useWorkbenchData();
   const knownStages = kanbanStages.map(([stage]) => stage);
   const extraStages = [...new Set(opportunitiesList.map((item) => item.stage).filter(Boolean))]
     .filter((stage) => !knownStages.includes(stage));
   const stages = [...knownStages, ...extraStages];
 
   async function moveOpportunity(item, direction) {
-    if (!onSaveOpportunity) return;
+    if (!handleSaveOpportunity || backendStatus !== "connected") return;
     const currentIndex = stages.indexOf(item.stage);
     const nextStage = stages[currentIndex + direction];
     if (!nextStage) return;
     try {
-      await onSaveOpportunity({
+      await handleSaveOpportunity({
         id: item.id,
         stage: nextStage,
       });
-      // 阶段写入落在商机档案（跨页效果），结果确认走全局提示条。
       toast({ tone: "success", title: "看板已更新", description: `${item.name} → ${nextStage}，已同步到商机档案` });
     } catch (error) {
       toast({ tone: "error", title: "看板阶段更新失败", description: error.message || "请稍后重试" });

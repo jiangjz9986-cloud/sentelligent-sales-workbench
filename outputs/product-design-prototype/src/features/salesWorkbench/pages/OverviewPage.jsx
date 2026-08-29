@@ -9,6 +9,8 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { statusTone } from "../../../data/salesWorkbenchData.js";
+import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import {
   CompactList,
   MetricCard,
@@ -209,22 +211,25 @@ export function WeeklyTrendCard({ trend }) {
   );
 }
 
-export function Overview({
-  actions = [],
-  customersList = [],
-  opportunitiesList = [],
-  summary,
-  setActive,
-  setSelectedActionId,
-  setSelectedCustomerId,
-  setSelectedOpportunityId,
-  openCustomerDetail,
-  openOpportunityDetail,
-  openOpportunityList,
-  openActionDetail,
-  openActionList,
-  openRiskList,
-}) {
+export function Overview() {
+  const {
+    workbenchActions: actions,
+    workbenchCustomers: customersList,
+    workbenchOpportunities: opportunitiesList,
+    overviewSummary: summary,
+  } = useWorkbenchData();
+  const {
+    navigateTo: setActive,
+    setSelectedActionId,
+    setSelectedCustomerId,
+    setSelectedOpportunityId,
+    openCustomerDetail,
+    openOpportunityDetail,
+    openOpportunityList,
+    openActionDetail,
+    openActionList,
+    openRiskList,
+  } = useNavigation();
   const metrics = summary?.metrics ?? {
     quickRecords: { value: 0, badge: "0 条待确认", tone: "blue" },
     opportunities: { value: 0, badge: "0 个重点推进", tone: "amber" },

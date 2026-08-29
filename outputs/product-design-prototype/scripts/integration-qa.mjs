@@ -1772,8 +1772,11 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         if (!expenseNav) throw new Error('Missing travel expense navigation');
         expenseNav.click();
         const expensePage = await waitUntil(
-          () => document.querySelector('[data-testid="page-expense"]'),
-          5000,
+          () => {
+            const page = document.querySelector('[data-testid="page-expense"]');
+            return page && !page.querySelector('[data-testid="route-chunk-loading"]') ? page : null;
+          },
+          15000,
         );
         await waitUntil(() => !expensePage.querySelector('.expense-loading'), 10000);
         const expectedExpenseTabs = ['ledger', 'invoices'];

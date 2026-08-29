@@ -1,11 +1,6 @@
 import {
   CalendarClock,
   Check,
-  ChevronLeft,
-  ChevronRight,
-  Pencil,
-  Search,
-  Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { statusTone } from "../../../data/salesWorkbenchData.js";
@@ -15,8 +10,9 @@ import {
   MetricInline,
   Panel,
 } from "../../../components/primitives.jsx";
-import { useToast } from "../../../components/toast.jsx";
-import { ConfirmDialog } from "./shared.jsx";
+import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
+import { EntityWorkspace } from "./EntityWorkspace.jsx";
 
 const riskStatusMeta = {
   open: { label: "待确认", tone: "tone-amber", helper: "先确认风险是否真实影响商机推进。" },
@@ -49,36 +45,44 @@ function riskSourceLabel(sourceType) {
   return riskSourceLabels[sourceType] ?? "业务记录";
 }
 
-export function RiskPage({
-  items = [],
-  selected,
-  onSelect,
-  viewMode = "list",
-  setViewMode,
-  onUpdateRiskStatus,
-  onDeleteRisk,
-  backendStatus,
-}) {
-  const current = selected ?? items[0] ?? null;
-  const toast = useToast();
-  const [searchText, setSearchText] = useState("");
+const riskConfig = {
+  listViewTestId: "risk-list-view",
+  detailViewTestId: "risk-detail-view",
+  listViewClassName: "risk-list-view",
+  detailViewClassName: "risk-detail-view detail-scroll-view",
+  listPanelClassName: "list-panel risk-list-panel",
+  panelTitle: "风险列表",
+  listMeta: (visible, total) => `${visible} / ${total} 个风险`,
+  searchAriaLabel: "搜索风险",
+  searchTestId: "risk-local-search",
+  searchPlaceholder: "搜索风险、客户、证据、负责人",
+  searchFields: ["title", "target", "evidence", "action", "severity", "status", "assignee"],
+  openDetailTestId: "risk-open-detail",
+  editDetailTestId: "risk-edit-detail",
+  deleteDetailTestId: "risk-delete-detail",
+  emptyNoItems: "暂无风险记录。",
+  emptyNoMatch: "没有匹配风险，请调整关键词。",
+  rowPrimary: (item) => item.title,
+  rowSecondary: (item) => `${item.target} / ${riskStatusLabel(item.status)}`,
+  renderRowBadge: (item) => <b className={`score-chip ${statusTone[item.tone]}`}>{item.score}</b>,
+  deleteDialog: {
+    title: "确认删除风险",
+    description: (selected) => `“${selected?.title ?? "当前风险"}”将从风险列表中移除，此操作不能撤销。`,
+    entityName: (selected) => selected.title,
+    testIdPrefix: "risk-delete",
+    successTitle: "风险已删除",
+    errorMessage: "删除风险失败，请稍后重试。",
+  },
+};
+
+function RiskDetailBody({ selected, viewMode, setViewMode, onUpdateRiskStatus, backendStatus }) {
+  const current = selected;
   const isEditView = viewMode === "edit";
   const [statusMessage, setStatusMessage] = useState("选择风险后，可人工确认、开始处理或关闭。");
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [deleteBusy, setDeleteBusy] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
   const [assignee, setAssignee] = useState(current?.assignee ?? "继振");
   const [due, setDue] = useState(current?.due ?? "待确认");
   const currentStatus = riskStatusMeta[current?.status] ?? riskStatusMeta.open;
   const sourceLabel = riskSourceLabel(current?.sourceType);
-  const cleanSearch = searchText.trim().toLowerCase();
-  const visibleItems = cleanSearch
-    ? items.filter((item) =>
-      [item.title, item.target, item.evidence, item.action, item.severity, item.status, item.assignee].some((value) =>
-        String(value ?? "").toLowerCase().includes(cleanSearch),
-      ),
-    )
-    : items;
 
   useEffect(() => {
     setAssignee(current?.assignee ?? "继振");
@@ -102,125 +106,20 @@ export function RiskPage({
     }
   }
 
-  function openDetail(item) {
-    onSelect(item.id);
-    setViewMode?.("detail");
-  }
-
-  function requestDeleteCurrentRisk() {
-    if (!current?.id || !onDeleteRisk) return;
-    setDeleteError("");
-    setDeleteDialogOpen(true);
-  }
-
-  async function confirmDeleteCurrentRisk() {
-    if (!current?.id || !onDeleteRisk || deleteBusy) return;
-    setDeleteBusy(true);
-    setDeleteError("");
-    try {
-      const deletedTitle = current.title;
-      await onDeleteRisk(current.id);
-      setDeleteDialogOpen(false);
-      setViewMode?.("list");
-      toast({ tone: "success", title: "风险已删除", description: deletedTitle });
-    } catch (error) {
-      setDeleteError(error.message || "删除风险失败，请稍后重试。");
-    } finally {
-      setDeleteBusy(false);
-    }
-  }
-
-  if (viewMode === "list") {
-    return (
-      <section className="risk-list-view" data-testid="risk-list-view">
-        <Panel title="风险列表" meta={`${visibleItems.length} / ${items.length} 个风险`} className="list-panel risk-list-panel">
-          <label className="search-box page-search">
-            <Search size={16} />
-            <input
-              aria-label="搜索风险"
-              data-testid="risk-local-search"
-              value={searchText}
-              onChange={(event) => setSearchText(event.target.value)}
-              placeholder="搜索风险、客户、证据、负责人"
-            />
-          </label>
-          <div className="list-stack">
-            {visibleItems.map((item) => (
-              <article
-                className={`list-button customer-list-row ${current?.id === item.id ? "selected" : ""}`}
-                key={item.id}
-              >
-                <button className="list-row-main" type="button" onClick={() => onSelect(item.id)}>
-                  <span>
-                    <strong>{item.title}</strong>
-                    <small>{item.target} / {riskStatusLabel(item.status)}</small>
-                  </span>
-                  <b className={`score-chip ${statusTone[item.tone]}`}>{item.score}</b>
-                </button>
-                <button
-                  className="ghost-button"
-                  type="button"
-                  data-testid="risk-open-detail"
-                  onClick={() => openDetail(item)}
-                >
-                  查看详情
-                  <ChevronRight size={15} />
-                </button>
-              </article>
-            ))}
-            {visibleItems.length === 0 ? (
-              <p className="empty-list">
-                {items.length === 0 ? "暂无风险记录。" : "没有匹配风险，请调整关键词。"}
-              </p>
-            ) : null}
-          </div>
-        </Panel>
-      </section>
-    );
-  }
-
   return (
-    <section className="risk-detail-view detail-scroll-view" data-testid="risk-detail-view">
-      <div className="subview-actions sticky-subview-toolbar">
-        <button className="ghost-button" type="button" onClick={() => setViewMode?.("list")}>
-          <ChevronLeft size={16} />
-          返回列表
-        </button>
-        <div className="detail-toolbar-actions">
-          <button
-            className={isEditView ? "ghost-button disabled" : "ghost-button"}
-            disabled={isEditView}
-            type="button"
-            data-testid="risk-edit-detail"
-            onClick={() => setViewMode?.("edit")}
-          >
-            <Pencil size={15} />
-            修改
-          </button>
-          <button
-            className="ghost-button danger"
-            type="button"
-            data-testid="risk-delete-detail"
-            onClick={requestDeleteCurrentRisk}
-          >
-            <Trash2 size={15} />
-            删除
-          </button>
-        </div>
+    <>
+      <div className="detail-metrics">
+        <MetricInline label="状态" value={currentStatus.label} />
+        <MetricInline label="严重度" value={current.severity ?? "中"} />
+        <MetricInline label="分值" value={`${current.score}`} />
+        <MetricInline label="来源" value={sourceLabel} />
+        <MetricInline label="负责人" value={current.assignee ?? "待分配"} />
+        <MetricInline label="下次处理" value={current.due ?? "待确认"} />
       </div>
-      <section className="detail-surface">
-        <div className="detail-metrics">
-          <MetricInline label="状态" value={currentStatus.label} />
-          <MetricInline label="严重度" value={current.severity ?? "中"} />
-          <MetricInline label="分值" value={`${current.score}`} />
-          <MetricInline label="来源" value={sourceLabel} />
-          <MetricInline label="负责人" value={current.assignee ?? "待分配"} />
-          <MetricInline label="下次处理" value={current.due ?? "待确认"} />
-        </div>
-        <div className="risk-meter">
-          <span style={{ width: `${current.score}%` }} />
-        </div>
-        {isEditView ? (
+      <div className="risk-meter">
+        <span style={{ width: `${current.score}%` }} />
+      </div>
+      {isEditView ? (
         <Panel title="状态流转" meta={currentStatus.helper}>
           <div className="editor-grid two risk-owner-grid">
             <label className="form-field">
@@ -253,43 +152,62 @@ export function RiskPage({
             取消修改
           </button>
         </Panel>
-        ) : (
-          <Panel title="处理状态" meta={currentStatus.helper}>
-            <InfoList
-              items={[
-                `负责人：${current.assignee ?? "待分配"}`,
-                `下次处理：${current.due ?? "待确认"}`,
-                `当前状态：${currentStatus.label}`,
-              ]}
-              tone="blue"
-            />
-          </Panel>
-        )}
-        <Panel title="证据" meta={current.sourceType ? `来源：${sourceLabel}` : "来自快速记录与周报字段"}>
-          <ExpandableInsight tone="amber" testId="risk-evidence-insight">
-            {current.evidence ?? "尚未补充证据，可从快速记录、客户反馈或周报字段中确认来源。"}
-          </ExpandableInsight>
+      ) : (
+        <Panel title="处理状态" meta={currentStatus.helper}>
+          <InfoList
+            items={[
+              `负责人：${current.assignee ?? "待分配"}`,
+              `下次处理：${current.due ?? "待确认"}`,
+              `当前状态：${currentStatus.label}`,
+            ]}
+            tone="blue"
+          />
         </Panel>
-        <Panel title="建议处理" meta="人工确认">
-          <ExpandableInsight testId="risk-action-insight">
-            {current.action ?? "尚未生成处理建议，可先分配负责人并记录下一次处理时间。"}
-          </ExpandableInsight>
-        </Panel>
-      </section>
-      <ConfirmDialog
-        open={deleteDialogOpen}
-        title="确认删除风险"
-        description={`“${current?.title ?? "当前风险"}”将从风险列表中移除，此操作不能撤销。`}
-        busy={deleteBusy}
-        errorMessage={deleteError}
-        onCancel={() => {
-          if (deleteBusy) return;
-          setDeleteError("");
-          setDeleteDialogOpen(false);
-        }}
-        onConfirm={confirmDeleteCurrentRisk}
-        testIdPrefix="risk-delete"
-      />
-    </section>
+      )}
+      <Panel title="证据" meta={current.sourceType ? `来源：${sourceLabel}` : "来自快速记录与周报字段"}>
+        <ExpandableInsight tone="amber" testId="risk-evidence-insight">
+          {current.evidence ?? "尚未补充证据，可从快速记录、客户反馈或周报字段中确认来源。"}
+        </ExpandableInsight>
+      </Panel>
+      <Panel title="建议处理" meta="人工确认">
+        <ExpandableInsight testId="risk-action-insight">
+          {current.action ?? "尚未生成处理建议，可先分配负责人并记录下一次处理时间。"}
+        </ExpandableInsight>
+      </Panel>
+    </>
+  );
+}
+
+export function RiskPage({
+  items = [],
+  selected,
+  onSelect,
+  viewMode = "list",
+  setViewMode,
+}) {
+  const current = selected ?? items[0] ?? null;
+  const { backendStatus } = useWorkbenchData();
+  const { handleUpdateRiskStatus, handleDeleteRisk } = useWorkbenchActions();
+
+  return (
+    <EntityWorkspace
+      items={items}
+      selected={current}
+      activeRowId={current?.id}
+      onSelect={onSelect}
+      viewMode={viewMode}
+      setViewMode={setViewMode}
+      config={riskConfig}
+      onDelete={handleDeleteRisk}
+      renderDetail={({ viewMode: mode }) => (
+        <RiskDetailBody
+          selected={current}
+          viewMode={mode}
+          setViewMode={setViewMode}
+          onUpdateRiskStatus={handleUpdateRiskStatus}
+          backendStatus={backendStatus}
+        />
+      )}
+    />
   );
 }
