@@ -145,6 +145,8 @@ import { createAssistantAgentRunRepository } from "./assistant/agentRunRepositor
 import { createAssistantBusinessSnapshotAdapter } from "./assistant/businessSnapshotAdapter.js";
 import { createAssistantSettlementSnapshotAdapter } from "./assistant/settlementSnapshotAdapter.js";
 import { createAssistantOrchestrator } from "./assistant/orchestrator.js";
+import { createAgentRegistry } from "./assistant/agentRegistry.js";
+import { createAssistantWebHttpHandlers } from "./assistant/webHttpHandlers.js";
 import { createAssistantRouter } from "./assistant/router.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import {
@@ -3162,6 +3164,12 @@ export function createServer(options = {}) {
     : createBusinessOwnerResolver({
         hasActiveBinding: (account) => Boolean(weixinBindingsRepository.activeByAccount(account)),
       });
+  function resolveAssistantBusinessOwner(account) {
+    const bound = assistantBusinessOwnerResolver(account);
+    if (bound) return bound;
+    const normalized = typeof account === "string" ? account.trim() : "";
+    return normalized || null;
+  }
   // 入口安全闸（§2.1 序 5a/5b）。限流键密钥优先复用会话密钥（登录限流同源）；
   // 无会话密钥的测试/开发栈退化为确认密钥派生值，生产两者恒在。
   const weixinBindingGate = createWeixinBindingGate({
@@ -3181,13 +3189,13 @@ export function createServer(options = {}) {
     ?? createAssistantBusinessSnapshotAdapter({
       db,
       clock: assistantClock,
-      resolveBusinessOwner: assistantBusinessOwnerResolver,
+      resolveBusinessOwner: resolveAssistantBusinessOwner,
     });
   const assistantSettlementSnapshotAdapter = options.assistantSettlementSnapshotAdapter
     ?? createAssistantSettlementSnapshotAdapter({
       db,
       clock: assistantClock,
-      resolveBusinessOwner: assistantBusinessOwnerResolver,
+      resolveBusinessOwner: resolveAssistantBusinessOwner,
     });
   const assistantBusinessContextRepository = options.assistantBusinessContextRepository
     ?? createSalesLoopContextRepository(db, {
@@ -3219,7 +3227,7 @@ export function createServer(options = {}) {
       runRepository: assistantAgentRunRepository,
       config: runtimeConfig,
       fetchImpl: options.fetchImpl ?? fetch,
-      resolveBusinessOwner: assistantBusinessOwnerResolver,
+      resolveBusinessOwner: resolveAssistantBusinessOwner,
       clock: assistantClock,
     });
   const assistantSalesReportAdapter = options.assistantSalesReportAdapter
@@ -3275,7 +3283,7 @@ export function createServer(options = {}) {
     snapshotAdapter: assistantBusinessSnapshotAdapter,
     actionItemStore: assistantActionItemStore,
     tenderRepository: hospitalTenderRepository,
-    resolveBusinessOwner: assistantBusinessOwnerResolver,
+    resolveBusinessOwner: resolveAssistantBusinessOwner,
     clock: dailyDigestClock,
     dailyTime: config.dailyDigestTime,
   });
@@ -3366,7 +3374,7 @@ export function createServer(options = {}) {
       agentRunRepository: assistantAgentRunRepository,
       salesReportAssistantAdapter: assistantSalesReportAdapter,
       salesLoopPreviewService: assistantSalesLoopPreviewService,
-      resolveBusinessOwner: assistantBusinessOwnerResolver,
+      resolveBusinessOwner: resolveAssistantBusinessOwner,
       clock: assistantClock,
       fetchImpl: options.fetchImpl ?? fetch,
     });
@@ -3385,30 +3393,40 @@ export function createServer(options = {}) {
         ...createCustomerPendingPreviewProviders({
           adapter: assistantCustomerAdapter,
           db,
-          resolveBusinessOwner: assistantBusinessOwnerResolver,
+          resolveBusinessOwner: resolveAssistantBusinessOwner,
         }),
         ...createQuickRecordPendingPreviewProviders({
           visitCaptureAdapter: assistantVisitCaptureAdapter,
           customerAdapter: assistantCustomerAdapter,
           snapshotAdapter: assistantBusinessSnapshotAdapter,
           store: assistantQuickRecordStore,
-          resolveBusinessOwner: assistantBusinessOwnerResolver,
+          resolveBusinessOwner: resolveAssistantBusinessOwner,
           clock: assistantClock,
         }),
         ...createActionItemPendingPreviewProviders({
           store: assistantActionItemStore,
           customerAdapter: assistantCustomerAdapter,
-          resolveBusinessOwner: assistantBusinessOwnerResolver,
+          resolveBusinessOwner: resolveAssistantBusinessOwner,
           clock: assistantClock,
         }),
         ...createOpportunityPendingPreviewProviders({
           opportunityAdapter: assistantOpportunityAdapter,
           customerAdapter: assistantCustomerAdapter,
           db,
-          resolveBusinessOwner: assistantBusinessOwnerResolver,
+          resolveBusinessOwner: resolveAssistantBusinessOwner,
         }),
       },
     });
+  const assistantAgentRegistry = options.assistantAgentRegistry ?? createAgentRegistry();
+  const assistantWebHttp = options.assistantWebHttp ?? createAssistantWebHttpHandlers({
+    db,
+    config,
+    assistantOrchestrator,
+    assistantSessionRepository,
+    assistantPendingActionRepository: assistantPendingActionRepository,
+    assistantRegistry: assistantAgentRegistry,
+    confirmationSecret: assistantConfirmationSecret,
+  });
 
   async function buildItineraryPlan(body) {
     if (!amapClient) {
@@ -4298,6 +4316,54 @@ export function createServer(options = {}) {
           expiresAt: requestIdentity.expiresAt,
           csrfToken: requestIdentity.csrfToken,
         });
+        return;
+      }
+
+      const assistantWebChatRoute = "/api/assistant/chat";
+      const assistantWebConfirmRoute = "/api/assistant/confirm";
+      const assistantWebHistoryRoute = "/api/assistant/history";
+      if (
+        url.pathname === assistantWebChatRoute
+        || url.pathname === assistantWebConfirmRoute
+        || url.pathname === assistantWebHistoryRoute
+      ) {
+        if (requestIdentity.kind !== "user") return unauthorized(response);
+        const remoteAddress = request.socket?.remoteAddress ?? "unknown";
+        if (url.pathname === assistantWebHistoryRoute) {
+          if (request.method !== "GET") {
+            sendHttpError(response, new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for assistant history"), responseOptions(response, { Allow: "GET" }));
+            return;
+          }
+          const history = assistantWebHttp.handleHistory({
+            requestIdentity,
+            conversationId: url.searchParams.get("conversationId"),
+          });
+          sendJson(response, history.status, history.body, { "Cache-Control": "no-store" });
+          return;
+        }
+        if (request.method !== "POST") {
+          sendHttpError(response, new HttpError(405, "METHOD_NOT_ALLOWED", "Only POST is allowed for assistant web actions"), responseOptions(response, { Allow: "POST" }));
+          return;
+        }
+        const maxBytes = Math.min(config.jsonBodyLimitBytes, 32 * 1024);
+        const body = await readJson(request, { maxBytes });
+        if (url.pathname === assistantWebChatRoute) {
+          const result = await assistantWebHttp.handleChat({
+            requestIdentity,
+            remoteAddress,
+            requestId,
+            body,
+          });
+          sendJson(response, result.status, result.body, { "Cache-Control": "no-store" });
+          return;
+        }
+        const result = await assistantWebHttp.handleConfirm({
+          requestIdentity,
+          remoteAddress,
+          requestId,
+          body,
+        });
+        sendJson(response, result.status, result.body, { "Cache-Control": "no-store" });
         return;
       }
 

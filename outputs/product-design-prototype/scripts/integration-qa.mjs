@@ -1566,7 +1566,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           document.querySelectorAll('[data-testid="weekly-daily-view"] .day-card').length > 0;
         const realWeeklyDayCard = await waitUntil(
           () => [...document.querySelectorAll('[data-testid="weekly-daily-view"] [data-testid="weekly-day-toggle"]')]
-            .find((button) => (button.textContent ?? '').includes('周六') && (button.textContent ?? '').includes('条')),
+            .find((button) => /条/u.test(button.textContent ?? '')),
           5000,
         );
         realWeeklyDayCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));

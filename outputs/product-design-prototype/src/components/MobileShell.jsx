@@ -15,6 +15,7 @@ export function MobileShell({
   onNavigate,
   onMoreSubnav,
   onQuickRecord,
+  onOpenAssistant,
   authRole,
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -68,6 +69,10 @@ export function MobileShell({
           onNavigate(nextActive);
         }}
         onMoreSubnav={onMoreSubnav}
+        onOpenAssistant={() => {
+          setDrawerOpen(false);
+          onOpenAssistant?.();
+        }}
         authRole={authRole}
         badges={badges}
       />

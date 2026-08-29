@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-08-30
+
+### Web 小小对话面板（消灭双端割裂，总蓝图 v0.10.3 行）
+
+- **后端 web channel**：`POST /api/assistant/chat` + `POST /api/assistant/confirm` + `GET /api/assistant/history`（会话 Cookie+CSRF）；复用 `assistantOrchestrator.handle({ channel:"web" })`；R1 单钮确认；R2/R3 用 `deriveWebExplicitCredential` 点按确认（不展示六位码）；30/15min 限流；消息 ≤2000 字；owner 硬隔离。
+- **前端**：`AssistantChatPanel` + `AssistantConfirmCard`（weixinCard 解析）；桌面右下 Sparkles FAB；移动顶栏「小小」+ 更多抽屉备份；sessionStorage 展示 + localStorage conversationId；与 toast 集成。
+- **v1 开放**：战情/客户/待办/知识/招标；写操作走确认卡；**封闭**记账、visit-capture、凭证 ingest（仍仅微信）。
+- 零数据库迁移；后端 1409 项（+23）；前端新增守护 15 条（assistant-chat 套件）。
+
 ## [0.10.2] - 2026-08-29
 
 ### 移动形态 + 离线到达（合并版，总蓝图 v0.10.2 行）

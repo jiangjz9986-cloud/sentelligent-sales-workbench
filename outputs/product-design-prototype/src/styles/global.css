@@ -7179,3 +7179,137 @@ textarea:focus {
 .app-shell.mobile-shell-off .mobile-more-overlay {
   display: none !important;
 }
+
+.assistant-fab {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+}
+
+.assistant-chat-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.assistant-chat-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(420px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  box-shadow: -12px 0 40px rgba(15, 23, 42, 0.12);
+}
+
+.assistant-chat-header,
+.assistant-chat-composer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.assistant-chat-composer {
+  border-bottom: 0;
+  border-top: 1px solid var(--line);
+}
+
+.assistant-chat-composer textarea {
+  flex: 1;
+  min-height: 72px;
+  resize: vertical;
+}
+
+.assistant-chat-messages {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.assistant-message {
+  display: flex;
+}
+
+.assistant-message.is-user {
+  justify-content: flex-end;
+}
+
+.assistant-message-bubble {
+  max-width: 88%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--panel);
+  white-space: pre-wrap;
+}
+
+.assistant-message.is-user .assistant-message-bubble {
+  background: rgba(37, 99, 235, 0.12);
+}
+
+.assistant-message.is-error .assistant-message-bubble {
+  background: rgba(220, 38, 38, 0.1);
+}
+
+.assistant-confirm-card {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.assistant-confirm-title {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.assistant-confirm-fields {
+  margin: 0 0 12px;
+}
+
+.assistant-confirm-field {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.assistant-confirm-field dt {
+  color: var(--muted);
+}
+
+.assistant-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 760px) {
+  .assistant-fab {
+    display: none;
+  }
+
+  .assistant-chat-panel {
+    width: 100vw;
+    height: 100dvh;
+  }
+}

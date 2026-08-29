@@ -6,6 +6,11 @@ import { validateToolInvocation } from "./contracts.js";
 import { getToolPolicy } from "./policy.js";
 import { classifyWeixinConfirmationText } from "./weixinEvent.js";
 import { weixinCard } from "./weixinCard.js";
+import {
+  deriveWebExplicitCredential,
+  isWebClosedTool,
+  safeWebPendingResponse,
+} from "./webChannel.js";
 
 const SAFE_FAILURE = "处理失败，请稍后重试。";
 const SAFE_CONFIRMATION_FAILURE = "确认信息无效或已过期，请重新发起操作。";
@@ -310,6 +315,8 @@ function deriveAffirmCredential(confirmationSecretKey, actionId) {
   return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, "0");
 }
 
+export { deriveWebExplicitCredential };
+
 /**
  * Deterministic assistant execution boundary. The HTTP layer supplies context;
  * model text can select only a registered tool and validated JSON arguments.
@@ -576,9 +583,14 @@ export function createAssistantOrchestrator({
         } else {
           // The affirm path re-derives the internal credential server-side;
           // from here on the state machine is byte-identical to code confirms.
+          const webExplicitConfirmation = context.channel === "web"
+            && structuredCodePresent
+            && !affirmConfirmation;
           const suppliedCode = affirmConfirmation
             ? deriveAffirmCredential(confirmationDigestKey, pendingAction.id)
-            : code;
+            : webExplicitConfirmation
+              ? deriveWebExplicitCredential(confirmationDigestKey, pendingAction.id)
+              : code;
           if (!pendingAction || !suppliedCode) {
             return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
           }
@@ -617,6 +629,9 @@ export function createAssistantOrchestrator({
       if (plan.status === "denied") return finish(403, { status: "error", message: "该操作不在允许范围内。" });
       const tool = registry.getTool(plan.toolName);
       if (!tool) return finish(400, { status: "error", message: "该功能暂不可用。" });
+      if (context.channel === "web" && isWebClosedTool(tool.name)) {
+        return finish(403, { status: "error", message: "该操作请使用微信小小。" });
+      }
       if (tool.policy?.denied || getToolPolicy(tool.name).denied) return finish(403, { status: "error", message: "该操作不在允许范围内。" });
       if (resolvedActionId && pendingAction?.actionType !== tool.name) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
       const invocation = validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: plan.arguments || {} });
@@ -627,13 +642,15 @@ export function createAssistantOrchestrator({
       // handler can read any finance data or create an agent run.
       if (
         tool.name === "advance-settlement.preview"
-        && context.channel === "weixin"
-        && serverData.auditMetadata?.financialScope !== true
+        && (
+          (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true)
+          || context.channel === "web"
+        )
       ) {
         return finish(403, {
           status: "error",
-          message: SAFE_FINANCIAL_SCOPE_FAILURE,
-        }, { draftText: "财务预览访问被拒绝。" });
+          message: context.channel === "web" ? "该操作请使用微信小小。" : SAFE_FINANCIAL_SCOPE_FAILURE,
+        }, { draftText: context.channel === "web" ? "该操作请使用微信小小。" : "财务预览访问被拒绝。" });
       }
 
       // Bookkeeping confirmation actions are created only after the authenticated
@@ -686,17 +703,21 @@ export function createAssistantOrchestrator({
         // to a pre-generated action id; the credential is never rendered, so
         // the stored body needs no code scrubbing. Every other confirmation
         // level keeps the six-digit code path unchanged.
-        const affirmTool = (tool.policy?.confirmation ?? getToolPolicy(tool.name).confirmation) === "affirm_language";
-        const affirmActionId = affirmTool ? randomUUID() : null;
+        const confirmationPolicy = tool.policy?.confirmation ?? getToolPolicy(tool.name).confirmation;
+        const affirmTool = confirmationPolicy === "affirm_language";
+        const webExplicitTool = context.channel === "web" && confirmationPolicy === "explicit_code";
+        const derivedActionId = affirmTool || webExplicitTool ? randomUUID() : null;
         const code = affirmTool
-          ? deriveAffirmCredential(confirmationDigestKey, affirmActionId)
-          : exactConfirmationCode(String(confirmationCodeFactory()));
+          ? deriveAffirmCredential(confirmationDigestKey, derivedActionId)
+          : webExplicitTool
+            ? deriveWebExplicitCredential(confirmationDigestKey, derivedActionId)
+            : exactConfirmationCode(String(confirmationCodeFactory()));
         if (!code) return finish(500, { status: "error", message: SAFE_FAILURE });
         const expiresAt = new Date(clock().getTime() + pendingTtlMs).toISOString();
         let action;
         try {
           action = pendingActionRepository.create({
-            ...(affirmActionId ? { id: affirmActionId } : {}),
+            ...(derivedActionId ? { id: derivedActionId } : {}),
             owner: context.owner,
             channel: context.channel,
             conversationId: conversation?.id,
@@ -715,22 +736,27 @@ export function createAssistantOrchestrator({
           throw error;
         }
         if (affirmTool) {
+          const pendingResponse = context.channel === "web"
+            ? safeWebPendingResponse(tool, { preview: previewText ?? previewSummary })
+            : safeAffirmPendingResponse(tool, { preview: previewText ?? previewSummary });
           const publicBody = {
             status: "confirmation_required",
             actionId: action.id,
             toolName: tool.name,
             risk: plan.risk,
-            ...safeAffirmPendingResponse(tool, { preview: previewText ?? previewSummary }),
+            ...pendingResponse,
           };
           return finish(200, publicBody, { draftText: "等待用户确认。" });
         }
+        const pendingResponse = context.channel === "web"
+          ? safeWebPendingResponse(tool, { preview: previewText ?? previewSummary })
+          : safePendingResponse(tool, { code, preview: previewText ?? previewSummary });
         const publicBody = {
           status: "confirmation_required",
           actionId: action.id,
           toolName: tool.name,
           risk: plan.risk,
-          confirmationCode: code,
-          ...safePendingResponse(tool, { code, preview: previewText ?? previewSummary }),
+          ...(context.channel === "web" ? pendingResponse : { confirmationCode: code, ...pendingResponse }),
         };
         const storedBody = { ...publicBody, text: STORED_CONFIRMATION_TEXT };
         delete storedBody.confirmationCode;

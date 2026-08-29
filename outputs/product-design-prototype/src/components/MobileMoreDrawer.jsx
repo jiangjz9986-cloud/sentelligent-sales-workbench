@@ -8,6 +8,7 @@ import {
   PanelLeft,
   Settings,
   ShieldAlert,
+  Sparkles,
   UsersRound,
 } from "lucide-react";
 import { useEffect, useRef } from "react";
@@ -26,6 +27,11 @@ const GROUPS = [
     id: "opportunity",
     label: "商机",
     items: moduleSubnavItems.opportunity,
+  },
+  {
+    id: "assistant",
+    label: "AI 助手",
+    items: [{ id: "assistant-chat", label: "AI 对话", icon: Sparkles }],
   },
   {
     id: "weekly",
@@ -49,6 +55,7 @@ export function MobileMoreDrawer({
   onClose,
   onNavigate,
   onMoreSubnav,
+  onOpenAssistant,
   authRole = "member",
   badges = {},
 }) {
@@ -66,6 +73,11 @@ export function MobileMoreDrawer({
   if (!open) return null;
 
   function handleItemClick(item, parentId) {
+    if (parentId === "assistant") {
+      onOpenAssistant?.();
+      onClose();
+      return;
+    }
     if (parentId === "customer" || parentId === "opportunity") {
       onMoreSubnav(item.id);
       onClose();

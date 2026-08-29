@@ -68,10 +68,12 @@ export function createOpportunityPendingPreviewProviders({
   if (typeof resolveBusinessOwner !== "function") throw new TypeError("resolveBusinessOwner must be a function");
 
   function writeGate({ context, serverData }) {
-    if (serverData?.auditMetadata?.chatType !== "direct") {
+    if (context.channel !== "web" && serverData?.auditMetadata?.chatType !== "direct") {
       return { blocked: block("商机档案修改仅支持与小小的私聊。") };
     }
-    const owner = resolveBusinessOwner(context.owner);
+    const owner = context.channel === "web"
+      ? (typeof context.owner === "string" ? context.owner.trim() : "")
+      : resolveBusinessOwner(context.owner);
     if (typeof owner !== "string" || !owner.trim()) {
       return { blocked: block("当前账号未绑定业务负责人，暂不能修改商机档案。") };
     }

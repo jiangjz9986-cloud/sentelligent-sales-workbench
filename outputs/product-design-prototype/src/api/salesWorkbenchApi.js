@@ -1508,5 +1508,24 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       });
       return response.item;
     },
+
+    async postAssistantChat(payload) {
+      return requestApi("/api/assistant/chat", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async postAssistantConfirm(payload) {
+      return requestApi("/api/assistant/confirm", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getAssistantHistory(conversationId) {
+      const query = encodeURIComponent(conversationId);
+      return requestApi(`/api/assistant/history?conversationId=${query}`);
+    },
   };
 }

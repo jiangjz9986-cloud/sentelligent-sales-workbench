@@ -23,6 +23,8 @@ import { AvatarMenu } from "../components/AvatarMenu.jsx";
 import { MobileShell } from "../components/MobileShell.jsx";
 import { PullToRefresh } from "../components/PullToRefresh.jsx";
 import { ToastProvider, useToast } from "../components/toast.jsx";
+import { AssistantChatPanel } from "../components/assistant/AssistantChatPanel.jsx";
+import { useAssistantChat } from "./useAssistantChat.js";
 import { ModuleSubnav } from "../components/ModuleSubnav.jsx";
 import {
   NavigationProvider,
@@ -396,6 +398,13 @@ function WorkbenchShellBody({
     refreshOverviewSummary,
     reloadBootstrap,
   } = data;
+  const assistantChat = useAssistantChat({
+    api: apiClient,
+    account: authSession?.account ?? null,
+    onRefreshBootstrap: reloadBootstrap,
+    onRefreshOverview: refreshOverviewSummary,
+    toast,
+  });
   const badges = useNotificationBadges({
     apiClient,
     backendStatus,
@@ -660,7 +669,7 @@ function WorkbenchShellBody({
               周报
             </button>
             <button
-              className="primary-button topbar-mobile-hidden"
+              className="ghost-button topbar-mobile-hidden"
               type="button"
               data-testid="topbar-quick-record"
               onClick={() => navigateTo("quick")}
@@ -668,6 +677,19 @@ function WorkbenchShellBody({
               <Mic size={16} />
               快速记录
             </button>
+            {mobileShell ? (
+              <button
+                className="icon-button"
+                type="button"
+                data-testid="assistant-topbar-button"
+                aria-expanded={assistantChat.open}
+                aria-controls="assistant-chat-panel"
+                onClick={assistantChat.openChat}
+              >
+                <Sparkles size={16} />
+                小小
+              </button>
+            ) : null}
             <AvatarMenu
               initial={avatarInitial}
               displayName={authSession?.displayName ?? authSession?.account ?? ""}
@@ -903,12 +925,38 @@ function WorkbenchShellBody({
               authRole={authSession?.role ?? "member"}
               onNavigate={navigateTo}
               onMoreSubnav={handleModuleSubnavNavigate}
+              onOpenAssistant={assistantChat.openChat}
               onQuickRecord={() => {
                 quickSession.setRecordMode("voice");
                 navigateTo("quick");
               }}
             />
           ) : null}
+          {!mobileShell ? (
+            <button
+              className="assistant-fab"
+              type="button"
+              data-testid="assistant-fab"
+              aria-expanded={assistantChat.open}
+              aria-controls="assistant-chat-panel"
+              onClick={assistantChat.openChat}
+            >
+              <Sparkles size={22} />
+              <span>小小</span>
+            </button>
+          ) : null}
+          <AssistantChatPanel
+            open={assistantChat.open}
+            messages={assistantChat.messages}
+            pending={assistantChat.pending}
+            draft={assistantChat.draft}
+            busy={assistantChat.busy}
+            onDraftChange={assistantChat.setDraft}
+            onSend={assistantChat.sendMessage}
+            onClose={assistantChat.closeChat}
+            onConfirm={assistantChat.confirmPending}
+            onCancelPending={assistantChat.cancelPending}
+          />
         </div>
     </>
   );
