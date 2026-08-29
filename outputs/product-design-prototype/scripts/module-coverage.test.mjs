@@ -177,7 +177,7 @@ describe("business module delivery coverage", () => {
     const navBlock = extractNavBlock(dataSource);
 
     assert.doesNotMatch(navBlock, /\bid:\s*"solution"|方案辅助/);
-    assert.match(shellSource, /<aside className="sidebar">[\s\S]*\{navItems\.map/);
+    assert.match(shellSource, /<aside className=\{`sidebar \$\{mobileShell \? "hidden" : ""\}`\}>[\s\S]*\{navItems\.map/);
     assert.doesNotMatch(readAppSource(), /setActive\("solution"\)/);
   });
 

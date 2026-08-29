@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  cacheControlFor,
   contentTypeFor,
   createStaticServerConfig,
   injectRuntimeConfig,
@@ -83,5 +84,11 @@ describe("production static server", () => {
     assert.equal(headers["X-Content-Type-Options"], "nosniff");
     assert.equal(headers["X-Frame-Options"], "DENY");
     assert.match(headers["Permissions-Policy"], /microphone=\(self\)/);
+  });
+
+  it("serves service worker assets with no-cache headers", () => {
+    assert.equal(cacheControlFor("/var/www/dist/sw.js"), "no-cache");
+    assert.equal(cacheControlFor("/var/www/dist/index.html"), "no-cache");
+    assert.equal(cacheControlFor("/var/www/dist/assets/index-abc.js"), "public, max-age=31536000, immutable");
   });
 });

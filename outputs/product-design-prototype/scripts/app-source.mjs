@@ -9,6 +9,9 @@ const appHookFiles = [
   "src/app/useWorkbenchHandlers.jsx",
   "src/app/useQuickRecordSession.jsx",
   "src/app/useWeeklySession.jsx",
+  "src/app/useMobileShellEnabled.js",
+  "src/app/useNotificationBadges.js",
+  "src/app/registerServiceWorker.js",
 ];
 
 export function appSourceFiles(root = process.cwd()) {

@@ -215,6 +215,13 @@ async function main() {
       screen: { width: 390, height: 844 },
       locale: "zh-CN",
     });
+    await context.addInitScript(() => {
+      try {
+        localStorage.setItem("sentelligent_disable_sw", "1");
+        localStorage.setItem("sentelligent_mobile_shell", "0");
+        indexedDB.deleteDatabase("sentelligent-bootstrap");
+      } catch {}
+    });
     await context.addInitScript(installVoiceRecognitionUnavailable);
     const page = await context.newPage();
     const failedResponses = [];

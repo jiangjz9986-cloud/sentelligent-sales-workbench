@@ -21,3 +21,18 @@ export function isoFromDatetimeLocal(value) {
   if (Number.isNaN(date.getTime())) return null;
   return date.toISOString();
 }
+
+export function splitDatetimeLocal(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) return { date: "", time: "" };
+  const [date = "", time = ""] = trimmed.split("T");
+  return { date, time: time.slice(0, 5) };
+}
+
+export function joinDatetimeLocal(date, time) {
+  const normalizedDate = String(date ?? "").trim();
+  const normalizedTime = String(time ?? "").trim();
+  if (!normalizedDate && !normalizedTime) return "";
+  if (!normalizedDate) return "";
+  return `${normalizedDate}T${normalizedTime || "00:00"}`;
+}

@@ -38,7 +38,12 @@
     "test:tender": "node --test src/features/hospitalTender/HospitalTenderPage.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",
     "test:bundle": "node --test scripts/bundle-budget.test.mjs",
-    "qa:local": "npm run build && npm run test:bundle && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:overview-layout && npm run test:quickwins && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run test:settings && npm run test:user-management && npm run test:tender && npm run scan:secrets",
+    "test:mobile-shell": "node --test scripts/mobile-shell.test.mjs",
+    "test:pwa": "node --test scripts/pwa-manifest.test.mjs",
+    "test:input-capabilities": "node --test scripts/input-capabilities.test.mjs",
+    "test:bootstrap-cache": "node --test scripts/bootstrap-cache.test.mjs",
+    "test:service-worker": "node --test scripts/service-worker.test.mjs",
+    "qa:local": "npm run build && npm run test:bundle && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:overview-layout && npm run test:quickwins && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run test:settings && npm run test:user-management && npm run test:tender && npm run test:mobile-shell && npm run test:pwa && npm run test:input-capabilities && npm run test:bootstrap-cache && npm run test:service-worker && npm run scan:secrets",
     "qa:integration": "node scripts/integration-qa.mjs",
     "qa:webkit": "node scripts/webkit-qa.mjs"
   },
@@ -51,6 +56,7 @@
     "vite": "6.4.2"
   },
   "devDependencies": {
-    "playwright": "1.61.1"
+    "playwright": "1.61.1",
+    "vite-plugin-pwa": "^0.21.1"
   }
 }

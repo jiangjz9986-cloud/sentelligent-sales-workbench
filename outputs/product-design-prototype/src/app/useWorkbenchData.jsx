@@ -1,5 +1,10 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import {
+  clearSnapshot,
+  getSnapshot,
+  putSnapshot,
+} from "./bootstrapCache.js";
+import {
   createErrorWorkbenchState,
   createLoadingWorkbenchState,
   isCurrentBootstrapAttempt,
@@ -30,6 +35,8 @@ const noopData = {
   setWorkbenchItineraries: () => {},
   setOverviewSummary: () => {},
   refreshOverviewSummary: async () => {},
+  reloadBootstrap: async () => {},
+  offlineSnapshotSavedAt: null,
   setBootstrapAttempt: () => {},
   onBootstrapSelectionReset: () => {},
 };
@@ -42,9 +49,10 @@ export function WorkbenchDataProvider({ value, children }) {
   return <WorkbenchDataContext.Provider value={value}>{children}</WorkbenchDataContext.Provider>;
 }
 
-export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrapSelectionReset, active }) {
+export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrapSelectionReset, active, account }) {
   const [workbenchState, setWorkbenchState] = useState(createLoadingWorkbenchState);
   const [backendStatus, setBackendStatus] = useState(apiClient.isEnabled ? "connecting" : "offline");
+  const [offlineSnapshotSavedAt, setOfflineSnapshotSavedAt] = useState(null);
   const bootstrapGenerationRef = useRef(0);
   const {
     status: bootstrapStatus,
@@ -102,11 +110,32 @@ export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrap
     }));
   }
 
+  async function hydrateFromSnapshot(snapshot) {
+    if (!snapshot?.data) return false;
+    if (snapshot.expired) {
+      setWorkbenchState(createErrorWorkbenchState(new Error("快照已过期，请联网刷新。")));
+      onBootstrapSelectionReset?.(null);
+      setBackendStatus("offline-stale");
+      setOfflineSnapshotSavedAt(snapshot.savedAt ?? null);
+      return true;
+    }
+    const nextState = normalizeBootstrapData({
+      ...snapshot.data,
+      summary: snapshot.summary ?? snapshot.data?.summary ?? null,
+    });
+    setWorkbenchState(nextState);
+    onBootstrapSelectionReset?.(nextState);
+    setBackendStatus("offline-stale");
+    setOfflineSnapshotSavedAt(snapshot.savedAt ?? null);
+    return true;
+  }
+
   useEffect(() => {
     const controller = new AbortController();
     const requestGeneration = ++bootstrapGenerationRef.current;
     setWorkbenchState(createLoadingWorkbenchState());
     setBackendStatus("connecting");
+    setOfflineSnapshotSavedAt(null);
     if (!apiClient.isEnabled) {
       setWorkbenchState(createErrorWorkbenchState(new Error("业务服务未配置，请联系管理员。")));
       setBackendStatus("offline");
@@ -115,7 +144,7 @@ export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrap
 
     apiClient
       .loadBootstrap({ signal: controller.signal })
-      .then((data) => {
+      .then(async (data) => {
         if (!isCurrentBootstrapAttempt(
           bootstrapGenerationRef.current,
           requestGeneration,
@@ -125,20 +154,43 @@ export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrap
         setWorkbenchState(nextState);
         onBootstrapSelectionReset?.(nextState);
         setBackendStatus("connected");
+        setOfflineSnapshotSavedAt(null);
+        if (account) {
+          try {
+            const summary = nextState.summary ?? await apiClient.getDashboardSummary();
+            await putSnapshot(account, {
+              data,
+              summary,
+              savedAt: Date.now(),
+            });
+          } catch {
+            await putSnapshot(account, { data, summary: nextState.summary, savedAt: Date.now() });
+          }
+        }
       })
-      .catch((error) => {
+      .catch(async (error) => {
         if (!isCurrentBootstrapAttempt(
           bootstrapGenerationRef.current,
           requestGeneration,
           controller.signal,
         )) return;
+        const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+        const fetchFailed = String(error?.message ?? "").includes("Failed to fetch");
+        if (account && (offline || fetchFailed)) {
+          try {
+            const snapshot = await getSnapshot(account);
+            if (snapshot && await hydrateFromSnapshot(snapshot)) return;
+          } catch {
+            // Fall through to the regular error state.
+          }
+        }
         setWorkbenchState(createErrorWorkbenchState(error));
         onBootstrapSelectionReset?.(null);
         setBackendStatus("offline");
       });
 
     return () => controller.abort();
-  }, [apiClient, bootstrapAttempt]);
+  }, [apiClient, bootstrapAttempt, account]);
 
   async function refreshOverviewSummary() {
     if (!apiClient.isEnabled || backendStatus !== "connected") return;
@@ -169,6 +221,30 @@ export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrap
     };
   }, [active, apiClient, backendStatus]);
 
+  async function reloadBootstrap() {
+    if (!apiClient.isEnabled) return false;
+    if (backendStatus === "offline-stale" && typeof navigator !== "undefined" && !navigator.onLine) {
+      if (!account) return false;
+      const snapshot = await getSnapshot(account);
+      if (snapshot) {
+        await hydrateFromSnapshot(snapshot);
+        return { offline: true };
+      }
+      return false;
+    }
+    const data = await apiClient.loadBootstrap();
+    const nextState = normalizeBootstrapData(data);
+    setWorkbenchState(nextState);
+    onBootstrapSelectionReset?.(nextState);
+    setBackendStatus("connected");
+    setOfflineSnapshotSavedAt(null);
+    if (account) {
+      const summary = nextState.summary ?? await apiClient.getDashboardSummary().catch(() => null);
+      await putSnapshot(account, { data, summary, savedAt: Date.now() });
+    }
+    return { offline: false };
+  }
+
   return {
     workbenchState,
     backendStatus,
@@ -183,6 +259,7 @@ export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrap
     workbenchItineraries,
     overviewSummary,
     bootstrapErrorMessage,
+    offlineSnapshotSavedAt,
     setWorkbenchCustomers,
     setWorkbenchOpportunities,
     setWorkbenchActions,
@@ -192,6 +269,7 @@ export function useWorkbenchDataState({ apiClient, bootstrapAttempt, onBootstrap
     setWorkbenchItineraries,
     setOverviewSummary,
     refreshOverviewSummary,
+    reloadBootstrap,
     apiClient,
   };
 }

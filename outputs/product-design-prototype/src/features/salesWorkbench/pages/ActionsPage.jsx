@@ -19,6 +19,7 @@ import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
 import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import { datetimeLocalFromIso, isoFromDatetimeLocal } from "../datetimeLocal.js";
+import { DatetimeLocalInput } from "../../../components/DatetimeLocalInput.jsx";
 import { EntityWorkspace } from "./EntityWorkspace.jsx";
 import { FormField } from "./shared.jsx";
 
@@ -46,11 +47,10 @@ function RemindAtField({ value, onChange }) {
   return (
     <FormField label="提醒时间">
       <span className="remind-field">
-        <input
-          type="datetime-local"
-          data-testid="action-remind-input"
+        <DatetimeLocalInput
+          testId="action-remind-input"
           value={value}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={onChange}
         />
         {value ? (
           <button

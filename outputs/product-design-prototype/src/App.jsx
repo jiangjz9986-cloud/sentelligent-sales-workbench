@@ -7,7 +7,7 @@ import {
   ShieldCheck,
   UserRound,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   createSalesWorkbenchApi,
@@ -18,6 +18,8 @@ import {
   createDisplaySession,
 } from "./sessionAuth.js";
 import { SalesWorkbenchShell } from "./app/SalesWorkbenchShell.jsx";
+import { clearRuntimeCaches, clearSnapshot } from "./app/bootstrapCache.js";
+import { registerServiceWorker } from "./app/registerServiceWorker.js";
 
 function getBrowserStorage() {
   if (typeof window === "undefined") return null;
@@ -170,17 +172,34 @@ function AuthCheckingScreen() {
 export function App() {
   const [authPhase, setAuthPhase] = useState("checking");
   const [authSession, setAuthSession] = useState(null);
+  const accountRef = useRef(null);
   const apiBaseUrl = resolveApiBaseUrl(import.meta.env);
+  useEffect(() => {
+    accountRef.current = authSession?.account ?? null;
+  }, [authSession]);
   const apiClient = useMemo(
     () => createSalesWorkbenchApi({
       baseUrl: apiBaseUrl,
-      onUnauthorized: () => {
+      onUnauthorized: async () => {
+        const account = accountRef.current;
+        if (account) {
+          try {
+            await clearSnapshot(account);
+            await clearRuntimeCaches();
+          } catch {
+            // Session invalidation must proceed even if cache cleanup fails.
+          }
+        }
         setAuthSession(null);
         setAuthPhase("anonymous");
       },
     }),
     [apiBaseUrl],
   );
+
+  useEffect(() => {
+    registerServiceWorker().catch(() => {});
+  }, []);
 
   useEffect(() => {
     clearLegacyAuthSession(getBrowserStorage());
@@ -215,11 +234,20 @@ export function App() {
   }
 
   async function handleLogout() {
+    const account = authSession?.account;
     try {
       await apiClient.logout();
     } catch {
       // Local session state must still be cleared when the network is unavailable.
     } finally {
+      if (account) {
+        try {
+          await clearSnapshot(account);
+          await clearRuntimeCaches();
+        } catch {
+          // Logout must still complete when cache cleanup fails.
+        }
+      }
       apiClient.setSession(null);
       setAuthSession(null);
       setAuthPhase("anonymous");

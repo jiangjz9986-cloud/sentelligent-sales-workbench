@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-08-29
+
+### 移动形态 + 离线到达（合并版，总蓝图 v0.10.2 行）
+
+- **移动壳（≤760px）**：底栏 4+1 FAB + 更多面板、下拉刷新、safe-area、顶栏重复入口隐藏；`useMobileShellEnabled` kill-switch `sentelligent_mobile_shell=0`。
+- **iOS 降级**：`inputCapabilities` + `IsoWeekFallback` + `DatetimeLocalInput`（week/datetime-local 拆分）；`splitDatetimeLocal`/`joinDatetimeLocal` 单测。
+- **PWA**：maskable 192/512 图标 + iOS standalone meta（`apple-mobile-web-app-*`）。
+- **离线到达**：`vite-plugin-pwa` 只读壳（precache + SWR，**不拦截 /api/**）；`bootstrapCache` IndexedDB 快照（account key、TTL 7 天、401/登出清除）；`offline-stale` 顶栏文案；`RouteChunkBoundary` chunk 一次 reload 兜底。
+- **站内角标**：`useNotificationBadges` 60s 轮询 `getDashboardSummary`（移动底栏红点；桌面侧栏不加角标）；不做 Web Push。
+- **SW 运维**：`registerServiceWorker` kill-switch `sentelligent_disable_sw=1`；`static-server` 为 `sw.js`/`index.html` 发 `no-cache`；Caddy 注释 scope 红线。
+- 零后端改动；零数据库迁移；新增守护 ~38 条（mobile-shell/pwa/input/bootstrap-cache/service-worker/static-server/pull-to-refresh）。主 chunk build 实测 ~364KB（<500KB 预算）。
+
 ## [0.10.1] - 2026-08-29
 
 ### 工程铺路：路由拆包 + 状态下沉 + 五实体页 EntityWorkspace（总蓝图 v0.10.1 行）

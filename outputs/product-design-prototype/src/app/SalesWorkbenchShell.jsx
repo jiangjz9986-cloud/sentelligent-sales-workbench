@@ -20,7 +20,9 @@ import { expenseDraftFromFilters } from "../features/visitItinerary/itineraryExp
 import { Overview } from "../features/salesWorkbench/pages/OverviewPage.jsx";
 import { PageHeading } from "../features/salesWorkbench/pages/PageHeading.jsx";
 import { AvatarMenu } from "../components/AvatarMenu.jsx";
-import { ToastProvider } from "../components/toast.jsx";
+import { MobileShell } from "../components/MobileShell.jsx";
+import { PullToRefresh } from "../components/PullToRefresh.jsx";
+import { ToastProvider, useToast } from "../components/toast.jsx";
 import { ModuleSubnav } from "../components/ModuleSubnav.jsx";
 import {
   NavigationProvider,
@@ -33,6 +35,9 @@ import {
   useQuickRecordSessionState,
 } from "./useQuickRecordSession.jsx";
 import { WeeklySessionProvider, useWeeklySessionState } from "./useWeeklySession.jsx";
+import { useMobileShellEnabled } from "./useMobileShellEnabled.js";
+import { useNotificationBadges } from "./useNotificationBadges.js";
+import { useServiceWorkerUpdate } from "./useServiceWorkerUpdate.js";
 import { PARENT_NAV_BY_ACTIVE, SETTINGS_SECTION_BY_ACTIVE } from "./navRoutes.js";
 import { parseWorkbenchRoute } from "./routes.js";
 
@@ -118,6 +123,21 @@ class RouteChunkBoundary extends Component {
   }
   static getDerivedStateFromError() {
     return { hasError: true };
+  }
+  componentDidCatch(error) {
+    const message = String(error?.message ?? "");
+    if (!/ChunkLoadError|Failed to fetch dynamically imported module/i.test(message)) return;
+    if (typeof sessionStorage !== "undefined" && sessionStorage.getItem("chunk_reload_guard")) return;
+    const failedUrl = error?.request ?? error?.filename ?? "";
+    const attemptReload = async () => {
+      if (failedUrl && typeof caches !== "undefined") {
+        const cached = await caches.match(failedUrl);
+        if (cached) return;
+      }
+      sessionStorage.setItem("chunk_reload_guard", "1");
+      window.location.reload();
+    };
+    attemptReload().catch(() => {});
   }
   render() {
     if (this.state.hasError) {
@@ -241,8 +261,21 @@ function resolveHeadingContext({
   return null;
 }
 
+function formatRelativeSnapshotTime(savedAt) {
+  if (!savedAt) return "";
+  const minutes = Math.max(1, Math.round((Date.now() - savedAt) / 60_000));
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} 小时前`;
+  const days = Math.round(hours / 24);
+  return `${days} 天前`;
+}
 
-export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
+function WorkbenchShellBody({
+  apiClient,
+  authSession,
+  onLogout,
+}) {
   const initialRoute = useMemo(
     () => (typeof window === "undefined" ? null : parseWorkbenchRoute({
       pathname: window.location.pathname,
@@ -291,8 +324,12 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
     apiClient,
     bootstrapAttempt,
     active: nav.active,
+    account: authSession?.account ?? null,
     onBootstrapSelectionReset: handleBootstrapSelectionReset,
   });
+  const toast = useToast();
+  const mobileShell = useMobileShellEnabled();
+  useServiceWorkerUpdate(toast);
   const {
     active,
     routeFilters,
@@ -354,8 +391,17 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
     workbenchItineraries,
     overviewSummary,
     bootstrapErrorMessage,
+    offlineSnapshotSavedAt,
     setWorkbenchQuickRecords,
+    refreshOverviewSummary,
+    reloadBootstrap,
   } = data;
+  const badges = useNotificationBadges({
+    apiClient,
+    backendStatus,
+    overviewSummary,
+    active,
+  });
   function mergeById(items, item) {
     return mergeEntityByVersion(items, item);
   }
@@ -369,7 +415,8 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
     connecting: "连接中",
     connected: "在线",
     offline: "离线",
-  }[backendStatus];
+    "offline-stale": `离线快照 · ${formatRelativeSnapshotTime(offlineSnapshotSavedAt)}`,
+  }[backendStatus] ?? "离线";
 
   const scopedOpportunityId = routeFilters?.opportunityId?.[0] ?? null;
   const scopedActions = scopedOpportunityId
@@ -566,16 +613,31 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
   const visibleBootstrapStatus =
     bootstrapStatus === "loading" || bootstrapStatus === "error" ? bootstrapStatus : "empty";
 
+  async function handlePullRefresh() {
+    try {
+      if (active === "overview") {
+        await refreshOverviewSummary();
+        return;
+      }
+      if (["customer", "opportunity", "actions", "risk", "knowledge", "quick", "weekly", "kanban"].includes(active)) {
+        const result = await reloadBootstrap();
+        if (result?.offline) {
+          toast({ tone: "info", title: "当前为离线快照" });
+        }
+        return;
+      }
+      if (active === "itinerary" || active === "expense" || active === "hospital-tenders") {
+        setBootstrapAttempt(incrementBootstrapAttempt);
+        return;
+      }
+      await reloadBootstrap();
+    } catch (error) {
+      toast({ tone: "error", title: "刷新失败", description: error?.message ?? "请稍后重试" });
+    }
+  }
 
-  return (
-    <NavigationProvider value={nav}>
-    <WorkbenchDataProvider value={data}>
-    <WorkbenchActionsProvider value={handlers}>
-    <QuickRecordSessionProvider value={quickSession}>
-    <WeeklySessionProvider value={weeklySession}>
-    <main className="app-shell">
-      <ToastProvider>
-      <div className="product-window">
+  const contentBody = (
+    <>
         <header className="topbar">
           <div className="brand-area">
             <span className="brand-mark brand-logo-mark">
@@ -590,7 +652,7 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
               {apiStatusLabel}
             </span>
             <button
-              className="ghost-button"
+              className="ghost-button topbar-mobile-hidden"
               type="button"
               onClick={() => navigateTo("weekly")}
             >
@@ -598,7 +660,7 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
               周报
             </button>
             <button
-              className="primary-button"
+              className="primary-button topbar-mobile-hidden"
               type="button"
               data-testid="topbar-quick-record"
               onClick={() => navigateTo("quick")}
@@ -615,8 +677,8 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
           </div>
         </header>
 
-        <div ref={workspaceRef} className="workspace">
-          <aside className="sidebar">
+        <div ref={workspaceRef} className={`workspace ${mobileShell ? "mobile-shell-on" : ""}`}>
+          <aside className={`sidebar ${mobileShell ? "hidden" : ""}`}>
             <div className="nav-kicker">工作区</div>
             {navItems.map((item) => {
               const Icon = item.icon;
@@ -650,8 +712,9 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
             </div>
           </aside>
 
+          <PullToRefresh onRefresh={handlePullRefresh} disabled={!mobileShell}>
           <section
-            className={`content ${active === "quick" ? "quick-content" : ""}`}
+            className={`content ${active === "quick" ? "quick-content" : ""} ${mobileShell ? "mobile-shell-content" : ""}`}
             data-testid={`page-${active}`}
             data-workbench-state={bootstrapStatus}
             data-settings-section={settingsSection || undefined}
@@ -832,14 +895,47 @@ export function SalesWorkbenchShell({ apiClient, authSession, onLogout }) {
               </RouteChunkBoundary>
             )}
           </section>
+          </PullToRefresh>
+          {mobileShell ? (
+            <MobileShell
+              activeParent={activeParent}
+              badges={badges}
+              authRole={authSession?.role ?? "member"}
+              onNavigate={navigateTo}
+              onMoreSubnav={handleModuleSubnavNavigate}
+              onQuickRecord={() => {
+                quickSession.setRecordMode("voice");
+                navigateTo("quick");
+              }}
+            />
+          ) : null}
         </div>
+    </>
+  );
+
+  return (
+    <NavigationProvider value={nav}>
+    <WorkbenchDataProvider value={data}>
+    <WorkbenchActionsProvider value={handlers}>
+    <QuickRecordSessionProvider value={quickSession}>
+    <WeeklySessionProvider value={weeklySession}>
+    <main className={`app-shell ${mobileShell ? "mobile-shell-on" : ""}`}>
+      <div className="product-window">
+        {contentBody}
       </div>
-      </ToastProvider>
     </main>
     </WeeklySessionProvider>
     </QuickRecordSessionProvider>
     </WorkbenchActionsProvider>
     </WorkbenchDataProvider>
     </NavigationProvider>
+  );
+}
+
+export function SalesWorkbenchShell(props) {
+  return (
+    <ToastProvider>
+      <WorkbenchShellBody {...props} />
+    </ToastProvider>
   );
 }

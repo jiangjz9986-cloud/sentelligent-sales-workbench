@@ -17,6 +17,8 @@ import { InvoicePrintPreview } from "./InvoicePrintPreview.jsx";
 import { PaymentProofCenter } from "./PaymentProofCenter.jsx";
 import { downloadExpenseListXlsx } from "./ReimbursementOrganizer.jsx";
 import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
+import { IsoWeekFallback } from "./IsoWeekFallback.jsx";
+import { supportsInputType } from "../../app/inputCapabilities.js";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import { canSaveRegionProfileForWeek } from "./travelExpensePageState.js";
 import { hasResponsibleCity } from "./responsibleRegionModel.js";
@@ -652,7 +654,11 @@ export function TravelExpensePage({
       </header>
 
       <section className="expense-week-strip">
-        <label><CalendarDays size={18} /><span>自然周</span><input type="week" value={isoWeekInput(week.start)} onChange={(event) => selectWeek(event.target.value)} /></label>
+        <label><CalendarDays size={18} /><span>自然周</span>{supportsInputType("week") ? (
+          <input type="week" value={isoWeekInput(week.start)} onChange={(event) => selectWeek(event.target.value)} />
+        ) : (
+          <IsoWeekFallback value={week.start} onChange={setWeek} />
+        )}</label>
         <div className="expense-week-stat"><small>当前范围</small><strong>{week.start}—{week.end}</strong></div>
         <div className="expense-week-stat"><small>行程 / 说明</small><strong>{selectedWeekLoaded ? itineraryLabel : "正在同步"}</strong></div>
         <div className="expense-week-stat"><small>费用与付款</small><strong>{selectedWeekLoaded ? `${summary.expenseCount} 条 · ${summary.paymentCount} 笔` : "—"}</strong></div>

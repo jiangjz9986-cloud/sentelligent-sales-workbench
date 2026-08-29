@@ -12,6 +12,7 @@
 
 	encode gzip
 	# qingyang-store begin
+	# SW scope: workbench root only — never register under /qingyang
 	redir /qingyang /qingyang/
 
 	handle /qingyang/api/* {

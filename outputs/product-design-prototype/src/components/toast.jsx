@@ -72,6 +72,18 @@ export function ToastProvider({ children }) {
                 <strong>{item.title}</strong>
                 {item.description ? <small>{item.description}</small> : null}
               </div>
+              {item.actionLabel ? (
+                <button
+                  className="ghost-button toast-action"
+                  type="button"
+                  onClick={() => {
+                    item.onAction?.();
+                    dismiss(item.id);
+                  }}
+                >
+                  {item.actionLabel}
+                </button>
+              ) : null}
               <button
                 className="icon-button toast-close"
                 type="button"

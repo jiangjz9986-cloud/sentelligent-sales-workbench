@@ -818,6 +818,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           card.click();
           await waitUntil(() => document.querySelector(expectedSelector), 5000);
           if (!expectedText) return Boolean(document.querySelector(expectedSelector));
+          await waitUntil(
+            () => (document.querySelector(expectedSelector)?.textContent ?? '').includes(expectedText),
+            8000,
+          );
           return (document.querySelector(expectedSelector)?.textContent ?? '').includes(expectedText);
         };
         const clickManualSuggestion = async (pageTestId, titleText) => {
@@ -847,6 +851,15 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           return (suggestion?.textContent ?? '').trim().length > 20;
         };
 
+        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('周报'))?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'), 5000);
+        await waitUntil(
+          () => document.querySelector('[data-testid="weekly-empty"]') || document.querySelector('.weekly-layout'),
+          8000,
+        );
+        cardInteractions.weeklyStartsEmpty = Boolean(document.querySelector('[data-testid="weekly-empty"]'));
+        await openOverview();
+
         cardInteractions.quickKpi = await clickCardOpening('.metric-card', '本周快速记录', '[data-testid="page-quick"]', '先记录');
         cardInteractions.quickStartsEmpty = (document.querySelector('.record-composer textarea')?.value ?? '').trim() === '';
         await openOverview();
@@ -859,10 +872,6 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         cardInteractions.todayFocusTodos = await clickCardOpening('.today-focus-head', '到点待办', '[data-testid="page-actions"]', '动作列表');
         await openOverview();
         cardInteractions.stageCard = await clickCardOpening('.stage-card', '线索', '[data-testid="page-kanban"]', '线索');
-
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('周报'))?.click();
-        await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'), 5000);
-        cardInteractions.weeklyStartsEmpty = Boolean(document.querySelector('[data-testid="weekly-empty"]'));
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
@@ -2505,6 +2514,9 @@ async function main() {
     await waitForHttp(frontendUrl);
 
     cdp = await openChromeCdp();
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: "try{localStorage.setItem('sentelligent_disable_sw','1');indexedDB.deleteDatabase('sentelligent-bootstrap');}catch(e){}",
+    });
     const viewportResults = [];
     for (const viewport of viewportCases) {
       viewportResults.push(await runViewport(

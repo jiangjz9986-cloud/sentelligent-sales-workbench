@@ -157,7 +157,7 @@ describe("pwa install assets", () => {
     assert.equal(manifest.theme_color, "#f3f5fa");
     assert.deepEqual(
       manifest.icons.map((icon) => icon.sizes),
-      ["192x192", "512x512"],
+      ["192x192", "512x512", "192x192", "512x512"],
     );
 
     for (const icon of manifest.icons) {

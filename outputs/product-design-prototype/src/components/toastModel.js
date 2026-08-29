@@ -17,6 +17,8 @@ export function normalizeToastInput(input = {}) {
     title: String(input.title ?? "").trim(),
     description: String(input.description ?? "").trim(),
     duration: toastDurationFor(tone, input.duration),
+    actionLabel: String(input.actionLabel ?? "").trim(),
+    onAction: typeof input.onAction === "function" ? input.onAction : null,
   };
 }
 

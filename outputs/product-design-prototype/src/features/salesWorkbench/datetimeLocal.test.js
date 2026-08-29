@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { datetimeLocalFromIso, isoFromDatetimeLocal } from "./datetimeLocal.js";
+import { datetimeLocalFromIso, isoFromDatetimeLocal, joinDatetimeLocal, splitDatetimeLocal } from "./datetimeLocal.js";
 
 describe("remind-at datetime-local conversion", () => {
   it("round-trips an ISO instant through the local control value", () => {
@@ -33,5 +33,10 @@ describe("remind-at datetime-local conversion", () => {
   it("maps an invalid control value to null instead of throwing", () => {
     assert.equal(isoFromDatetimeLocal("9999-99-99T99:99"), null);
     assert.equal(isoFromDatetimeLocal("随手输入"), null);
+  });
+
+  it("splits and joins datetime-local values for fallback inputs", () => {
+    assert.deepEqual(splitDatetimeLocal("2026-09-01T09:05"), { date: "2026-09-01", time: "09:05" });
+    assert.equal(joinDatetimeLocal("2026-09-01", "09:05"), "2026-09-01T09:05");
   });
 });

@@ -112,6 +112,14 @@ function isProcessRunning(pid) {
   }
 }
 
+export function cacheControlFor(filePath) {
+  const isServiceWorker = filePath.endsWith("/sw.js") || filePath.endsWith("/service-worker.js");
+  if (filePath.endsWith("index.html") || isServiceWorker) {
+    return "no-cache";
+  }
+  return "public, max-age=31536000, immutable";
+}
+
 export function contentTypeFor(filePath) {
   return {
     ".html": "text/html; charset=utf-8",
@@ -233,7 +241,7 @@ export function createStaticServer(config) {
     response.writeHead(200, {
       ...securityHeaders,
       "Content-Type": contentTypeFor(filePath),
-      "Cache-Control": filePath.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable",
+      "Cache-Control": cacheControlFor(filePath),
     });
     if (filePath.endsWith("index.html")) {
       response.end(injectRuntimeConfig(readFileSync(filePath, "utf8"), config));
