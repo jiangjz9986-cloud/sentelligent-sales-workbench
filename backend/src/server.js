@@ -173,7 +173,15 @@ import { reconcileWeixinInvoiceAttachments } from "./assistant/weixinInvoiceAtta
 import { createSalesLoopContextRepository } from "./assistant/salesLoopContextRepository.js";
 import { createSalesLoopPreviewService } from "./assistant/salesLoopPreview.js";
 import { createSalesReportAssistantAdapter } from "./assistant/salesReportAssistantAdapter.js";
-import { assertWeixinSenderAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
+import { assertWeixinGroupAllowed, validateWeixinAssistantEvent } from "./assistant/weixinEvent.js";
+import { createWeixinBindingGate } from "./assistant/weixinBindingGate.js";
+import { issueBindingCode, pruneExpiredBindingCodes } from "./weixin/bindingCodes.js";
+import {
+  createWeixinBindingsRepository,
+  ensureBootstrapBinding,
+  weixinSenderHash,
+} from "./weixin/bindingsRepository.js";
+import { shortcutBookkeepingConversationId } from "./weixin/bookkeepingDeliveryScope.js";
 import { createWeixinConfirmationOutboxRepository } from "./weixin/outboxRepository.js";
 import { createWeixinDeliveryReadiness } from "./weixin/deliveryReadiness.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
@@ -238,6 +246,8 @@ const DOCUMENT_INBOX_EXTRACTED_TEXT_MAX_LENGTH = 200_000;
 const EXTRACTED_TEXT_TRUNCATED_WARNING = "EXTRACTED_TEXT_TRUNCATED";
 const WEIXIN_ASSISTANT_EVENT_ROUTE = "/api/integrations/weixin-agent/events";
 const WEIXIN_OUTBOX_ROUTE = "/api/integrations/weixin-agent/confirmation-outbox";
+// v0.9.3 多绑定就绪哨兵：worker 侧无唯一 expectedScope，可达性判定移到逐条投递期。
+const WEIXIN_MULTI_DELIVERY_SCOPE = "weixin:multi:v1";
 
 export function isRetiredBookkeepingPath(pathname) {
   const value = typeof pathname === "string" ? pathname : "";
@@ -1284,6 +1294,24 @@ function assertUserPasswordPolicy(password) {
   if (typeof password !== "string" || password.length < USER_PASSWORD_MIN_LENGTH) {
     validationFailure("password", "policy");
   }
+}
+
+function weixinBindingResponseItem(binding, userDisplayName = null) {
+  if (!binding) return null;
+  return {
+    senderId: binding.senderId,
+    account: binding.account,
+    userDisplayName,
+    displayName: binding.displayName,
+    financialEnabled: binding.financialEnabled,
+    digestEnabled: binding.digestEnabled,
+    status: binding.status,
+    boundAt: binding.boundAt,
+    boundBy: binding.boundBy,
+    version: binding.version,
+    createdAt: binding.createdAt,
+    updatedAt: binding.updatedAt,
+  };
 }
 
 const riskStatuses = new Set(["open", "accepted", "in_progress", "deferred", "closed"]);
@@ -2732,6 +2760,15 @@ export function createServer(options = {}) {
   // 三重种子保障之二：迁移 0030 env 种子缺席（如 env-less 彩排）时，每次启动
   // 兜底补种首个 admin。只插不改，绝不覆盖已有行。
   ensureBootstrapAdmin(db, config);
+  // v0.9.3：绑定表即 sender 白名单。0032 env 种子缺席时启动兜底补种（只插不改，
+  // 停用行绝不复活）；零绑定不 fail 启动——微信面自动静默，Web 面不受影响。
+  const weixinBindingsRepository = createWeixinBindingsRepository(db, {
+    clock: options.weixinBindingsClock ?? (() => new Date()),
+  });
+  ensureBootstrapBinding(db, config);
+  if (!weixinBindingsRepository.hasActive()) {
+    console.warn("category=weixin bindings_empty (no active weixin binding; proactive WeChat delivery is dormant)");
+  }
   const secureSettingsRepository = isValidSettingsEncryptionKey(config.settingsEncryptionKey)
     ? createSecureSettingsRepository(db, {
         masterKey: config.settingsEncryptionKey,
@@ -2826,27 +2863,57 @@ export function createServer(options = {}) {
   // WeChat "小小" push is the primary tender-notification channel. The
   // shortcut-bookkeeping runtime and outbox repository are declared later in
   // this scope, so readiness and the notifier itself resolve lazily at call
-  // time; PushPlus remains only as a fallback while the WeChat delivery scope
-  // is not bound.
-  const weixinTenderDeliveryReady = () => {
+  // time; PushPlus remains only as a fallback while no WeChat binding is
+  // active.
+  const weixinDeliveryEnabled = () => {
     try {
-      return Boolean(
-        shortcutBookkeepingAssistantRuntime?.ready
-        && shortcutBookkeepingAssistantRuntime.isReadyFor(shortcutBookkeepingAssistantRuntime.owner),
-      );
+      return Boolean(shortcutBookkeepingAssistantRuntime?.ready);
     } catch {
       return false;
     }
+  };
+  // 招标推送按客户 owner 分组投递（v0.9.3）：matchedCustomerIds → owner 映射。
+  const resolveCustomerOwnersByIds = (customerIds) => {
+    const map = new Map();
+    const ids = [...new Set((customerIds ?? []).filter((id) => typeof id === "string" && id))];
+    for (let index = 0; index < ids.length; index += 100) {
+      const chunk = ids.slice(index, index + 100);
+      const placeholders = chunk.map((_, position) => `$id${position}`).join(", ");
+      const params = Object.fromEntries(chunk.map((id, position) => [`$id${position}`, id]));
+      for (const row of db.prepare(
+        `SELECT id, owner FROM customers WHERE deleted_at IS NULL AND id IN (${placeholders})`,
+      ).all(params)) {
+        map.set(row.id, row.owner);
+      }
+    }
+    return map;
   };
   let hospitalTenderWeixinNotifierInstance = null;
   const hospitalTenderWeixinNotify = async (batch) => {
     if (!hospitalTenderWeixinNotifierInstance) {
       hospitalTenderWeixinNotifierInstance = createHospitalTenderWeixinNotifier({
         outboxRepository: weixinConfirmationOutboxRepository,
-        resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
-        resolveConversationId: () => shortcutBookkeepingAssistantRuntime.conversationFor(
-          shortcutBookkeepingAssistantRuntime.owner,
+        resolveDigestDeliveries: () => weixinBindingsRepository.listDigestTargets(),
+        // 无路由公告兜底目标：active ∧ digest_enabled 的 admin 绑定。
+        resolveAdminDeliveries: () => weixinBindingsRepository.listAdminTargets().filter(
+          (target) => weixinBindingsRepository.activeByAccount(target.account)?.digestEnabled === true,
         ),
+        resolveCustomerOwners: resolveCustomerOwnersByIds,
+        pushplusNotify: async (batch) => {
+          if (!hospitalTenderPushplusNotifier || !resolvePushplusToken()) {
+            throw new Error("notification unavailable");
+          }
+          return hospitalTenderPushplusNotifier(batch);
+        },
+        recordUnrouted: ({ count, cycleNumber }) => insertAudit(db, {
+          action: "hospital_tender.push.unrouted",
+          entityType: "hospital_tender_notice",
+          entityId: `cycle:${cycleNumber}`,
+          actor: "system:hospital-tender",
+          before: null,
+          after: null,
+          metadata: { count, cycleNumber },
+        }),
       });
     }
     return hospitalTenderWeixinNotifierInstance(batch);
@@ -2854,15 +2921,15 @@ export function createServer(options = {}) {
   const hospitalTenderNotifier = options.hospitalTenderNotifier !== undefined
     ? options.hospitalTenderNotifier
     : async (batch) => {
-      if (weixinTenderDeliveryReady()) return hospitalTenderWeixinNotify(batch);
+      if (weixinDeliveryEnabled()) return hospitalTenderWeixinNotify(batch);
       if (hospitalTenderPushplusNotifier && resolvePushplusToken()) return hospitalTenderPushplusNotifier(batch);
       throw new Error("notification unavailable");
     };
   const hospitalTenderNotificationState = () => ({
-    status: weixinTenderDeliveryReady() || (hospitalTenderPushplusNotifier && resolvePushplusToken())
+    status: weixinDeliveryEnabled() || (hospitalTenderPushplusNotifier && resolvePushplusToken())
       ? "enabled"
       : "disabled",
-    provider: weixinTenderDeliveryReady() ? "weixin" : "pushplus",
+    provider: weixinDeliveryEnabled() ? "weixin" : "pushplus",
   });
   const hospitalTenderScheduler = createHospitalTenderScheduler({
     db,
@@ -2878,7 +2945,7 @@ export function createServer(options = {}) {
     // cleared encrypted setting takes effect without restarting the scheduler.
     // A missing/cleared token disables delivery while allowing collection and
     // durable matching to continue normally.
-    notificationEnabled: () => weixinTenderDeliveryReady() || Boolean(resolvePushplusToken()),
+    notificationEnabled: () => weixinDeliveryEnabled() || Boolean(resolvePushplusToken()),
     clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
     ...(options.hospitalTenderSchedulerIdFactory
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
@@ -3061,15 +3128,32 @@ export function createServer(options = {}) {
       pendingActionRepository: assistantPendingActionRepository,
       sessionRepository: assistantSessionRepository,
       outboxRepository: weixinConfirmationOutboxRepository,
+      bindingsRepository: weixinBindingsRepository,
       confirmationSecret: assistantConfirmationSecret,
       ...(options.shortcutBookkeepingAssistantIdFactory ? { idFactory: options.shortcutBookkeepingAssistantIdFactory } : {}),
       clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
     });
+  // v0.9.3：resolver 改查绑定表，闭合语义不变——无 active 绑定 → null 拒答，绝不回退全量。
   const assistantBusinessOwnerResolver = typeof options.resolveBusinessOwner === "function"
     ? options.resolveBusinessOwner
     : createBusinessOwnerResolver({
-        businessOwner: config.weixinAgentOwner,
+        hasActiveBinding: (account) => Boolean(weixinBindingsRepository.activeByAccount(account)),
       });
+  // 入口安全闸（§2.1 序 5a/5b）。限流键密钥优先复用会话密钥（登录限流同源）；
+  // 无会话密钥的测试/开发栈退化为确认密钥派生值，生产两者恒在。
+  const weixinBindingGate = createWeixinBindingGate({
+    db,
+    bindingsRepository: weixinBindingsRepository,
+    codeSecret: assistantConfirmationSecret,
+    rateLimitSecret: typeof config.authSessionSecret === "string" && config.authSessionSecret.trim()
+      ? config.authSessionSecret
+      : createHash("sha256")
+        .update(Buffer.isBuffer(assistantConfirmationSecret)
+          ? assistantConfirmationSecret
+          : Buffer.from(String(assistantConfirmationSecret), "utf8"))
+        .digest("base64url"),
+    clock: assistantClock,
+  });
   const assistantBusinessSnapshotAdapter = options.assistantBusinessSnapshotAdapter
     ?? createAssistantBusinessSnapshotAdapter({
       db,
@@ -3155,11 +3239,8 @@ export function createServer(options = {}) {
     db,
     store: assistantActionItemStore,
     outboxRepository: weixinConfirmationOutboxRepository,
-    resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
-    resolveConversationId: () => shortcutBookkeepingAssistantRuntime.conversationFor(
-      shortcutBookkeepingAssistantRuntime.owner,
-    ),
-    deliveryReady: weixinTenderDeliveryReady,
+    resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
+    deliveryReady: weixinDeliveryEnabled,
     clock: options.actionReminderSchedulerClock ?? (() => new Date()),
     pollMs: config.actionReminderPollMs,
   });
@@ -3180,11 +3261,8 @@ export function createServer(options = {}) {
     outboxRepository: weixinConfirmationOutboxRepository,
     buildDailyDigest: digestContentBuilder.buildDailyDigest,
     buildFridayCloseout: digestContentBuilder.buildFridayCloseout,
-    resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
-    resolveConversationId: () => shortcutBookkeepingAssistantRuntime.conversationFor(
-      shortcutBookkeepingAssistantRuntime.owner,
-    ),
-    deliveryReady: weixinTenderDeliveryReady,
+    resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
+    deliveryReady: weixinDeliveryEnabled,
     clock: dailyDigestClock,
     pollMs: config.dailyDigestPollMs,
     dailyTime: config.dailyDigestTime,
@@ -3198,9 +3276,9 @@ export function createServer(options = {}) {
   });
   const opsAlertService = options.opsAlertService ?? createOpsAlertService({
     outboxRepository: weixinConfirmationOutboxRepository,
-    resolveOwner: () => shortcutBookkeepingAssistantRuntime.owner,
-    resolveConversationId: (owner) => shortcutBookkeepingAssistantRuntime.conversationFor(owner),
-    weixinDeliveryReady: weixinTenderDeliveryReady,
+    // 告警非订阅内容：目标=active admin 绑定（无视 digest_enabled），无则 PushPlus 兜底。
+    resolveDeliveries: () => weixinBindingsRepository.listAdminTargets(),
+    weixinDeliveryReady: weixinDeliveryEnabled,
     pushplusNotify: opsAlertPushplusNotifier,
     recordAudit: ({ actor, requestId, entityId, metadata }) => insertAudit(db, {
       action: "ops_alert.receive",
@@ -3222,6 +3300,7 @@ export function createServer(options = {}) {
       generatedAt: new Date().toISOString(),
       outbox: weixinConfirmationOutboxRepository.statusCounts(),
       weixinDelivery: weixinDeliveryReadiness.snapshot(),
+      weixinBindings: { active: weixinBindingsRepository.countActive() },
       schedulers: {
         hospitalTender: tenderState
           ? {
@@ -3496,8 +3575,10 @@ export function createServer(options = {}) {
         if (!machineIdentity) return unauthorized(response);
         assertMachineRouteAllowed(request.method, url.pathname, machineIdentity.integration);
         if (request.method === "GET") {
+          // 协议 v2：多绑定无唯一 scope，就绪回显收敛为 multi:v1 哨兵；旧 worker 报
+          // 旧 scope → delivery_scope_mismatch fail-closed 不放租约（升级窗口语义）。
           const expectedDeliveryScope = shortcutBookkeepingAssistantRuntime.ready
-            ? shortcutBookkeepingAssistantRuntime.conversationFor(shortcutBookkeepingAssistantRuntime.owner)
+            ? WEIXIN_MULTI_DELIVERY_SCOPE
             : null;
           const deliveryReport = weixinDeliveryReportFromHeaders(
             request.headers,
@@ -3512,19 +3593,22 @@ export function createServer(options = {}) {
           }
           shortcutBookkeepingAssistantRuntime.reconcileAcceptedReceipts();
           if (shortcutBookkeepingAssistantRuntime.ready) {
-            try {
-              reconcileWeixinInvoiceAttachments({
-                db,
-                invoiceRepository,
-                travelExpenseRepository,
-                owner: shortcutBookkeepingAssistantRuntime.owner,
-                actor: shortcutBookkeepingAssistantRuntime.owner,
-                requestIdPrefix: "weixin-worker-invoice-attachment",
-              });
-            } catch {
-              // Invoice and match rows remain the durable retry source. A
-              // transient attachment failure must not block confirmation
-              // message delivery; the next worker lease retries it.
+            for (const activeBinding of weixinBindingsRepository.listAll()) {
+              if (activeBinding.status !== "active") continue;
+              try {
+                reconcileWeixinInvoiceAttachments({
+                  db,
+                  invoiceRepository,
+                  travelExpenseRepository,
+                  owner: activeBinding.account,
+                  actor: activeBinding.account,
+                  requestIdPrefix: "weixin-worker-invoice-attachment",
+                });
+              } catch {
+                // Invoice and match rows remain the durable retry source. A
+                // transient attachment failure must not block confirmation
+                // message delivery; the next worker lease retries it.
+              }
             }
           }
           const workerId = typeof request.headers["x-weixin-worker-id"] === "string"
@@ -3540,7 +3624,13 @@ export function createServer(options = {}) {
             response.end();
             return;
           }
-          if (!shortcutBookkeepingAssistantRuntime.isReadyFor(lease.item.owner)) {
+          // lease 侧第一道保险：owner 现有 active 绑定且行会话 ≡ hash(owner, 绑定
+          // sender)，否则（解绑/换绑前旧行、幽灵 owner、伪造行）终态判废。
+          const leaseBinding = weixinBindingsRepository.activeByAccount(lease.item.owner);
+          if (
+            !leaseBinding
+            || lease.item.conversationId !== shortcutBookkeepingConversationId(lease.item.owner, leaseBinding.senderId)
+          ) {
             weixinConfirmationOutboxRepository.discardLeased(lease.item.id, {
               leaseToken: lease.leaseToken,
               errorCode: "WEIXIN_DELIVERY_SCOPE_MISMATCH",
@@ -3555,7 +3645,9 @@ export function createServer(options = {}) {
               id: lease.item.id,
               owner: lease.item.owner,
               conversationId: lease.item.conversationId,
-              deliveryScope: shortcutBookkeepingAssistantRuntime.conversationFor(lease.item.owner),
+              deliveryScope: lease.item.conversationId,
+              // additive 字段：worker 侧以此重算哈希做第二道保险后 sendMessageTo。
+              targetSenderId: leaseBinding.senderId,
               status: lease.item.status,
               message: lease.message,
             },
@@ -3624,10 +3716,37 @@ export function createServer(options = {}) {
         if (idempotencyKey !== body.sourceMessageId && idempotencyKey !== `weixin:${body.sourceMessageId}`) {
           throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { idempotencyKey: "mismatch" });
         }
-        assertWeixinSenderAllowed(config, body);
+        // v0.9.3 入口安全顺序（§2.1）：①机器令牌+路由白名单（上）→ ②幂等键+payload
+        // 校验（上）→ ③群闸 → ④绑定解析 → ⑤a 未绑定能力面={绑定意图} / ⑤b 绑定控制词
+        // → ⑥正常编排（owner := binding.account，机器令牌仅通道鉴权）。
+        assertWeixinGroupAllowed(config, body);
+        const binding = weixinBindingsRepository.activeBySender(body.senderId);
+        if (!binding) {
+          // 固定拒答：不入编排、不落 assistant_inbound_events、不写 blob。回 200
+          // 保证 worker 把引导文案带回用户（403 会被 worker 当错误吞掉）。
+          const denial = weixinBindingGate.handleUnbound({
+            senderId: body.senderId,
+            chatType: body.chatType,
+            text: body.text ?? "",
+          });
+          sendJson(response, denial.status, denial.body);
+          return;
+        }
+        const bindingControl = weixinBindingGate.handleBoundControl({
+          binding,
+          chatType: body.chatType,
+          text: body.text ?? "",
+        });
+        if (bindingControl) {
+          sendJson(response, bindingControl.status, bindingControl.body);
+          return;
+        }
+        const eventOwner = binding.account;
         const senderHash = createHash("sha256").update(body.senderId, "utf8").digest("hex");
+        // 种子绑定 account == machineIdentity.account == 'jiangjz'：升级前后
+        // conversation/event 哈希不变，幂等与会话零漂移。
         const conversationTuple = JSON.stringify([
-          machineIdentity.account,
+          eventOwner,
           "weixin",
           body.senderId,
           body.chatType,
@@ -3635,16 +3754,14 @@ export function createServer(options = {}) {
           body.conversationId,
         ]);
         const shortcutConversation = shortcutBookkeepingAssistantRuntime.enabled
-          && body.chatType === "direct"
-          && body.senderId === shortcutBookkeepingAssistantRuntime.senderId
-          && machineIdentity.account === shortcutBookkeepingAssistantRuntime.owner;
+          && body.chatType === "direct";
         const conversationScope = shortcutConversation
-          ? shortcutBookkeepingAssistantRuntime.conversationFor(machineIdentity.account, body.senderId)
+          ? shortcutBookkeepingAssistantRuntime.conversationFor(eventOwner, body.senderId)
           : `weixin:conversation:v1:${createHash("sha256")
             .update(conversationTuple, "utf8")
             .digest("hex")}`;
         const eventTuple = JSON.stringify([
-          machineIdentity.account,
+          eventOwner,
           "weixin",
           body.senderId,
           body.sourceMessageId,
@@ -3652,11 +3769,10 @@ export function createServer(options = {}) {
         const eventId = `weixin:event:v1:${createHash("sha256")
           .update(eventTuple, "utf8")
           .digest("hex")}`;
+        // financialScope := 私聊 ∧ binding.financial_enabled ∧ runtime.enabled。
         const financialScope = body.chatType === "direct"
-          && Boolean(config.weixinBookkeepingSenderId)
-          && body.senderId === config.weixinBookkeepingSenderId
-          && Boolean(config.weixinBookkeepingOwner)
-          && machineIdentity.account === config.weixinBookkeepingOwner;
+          && binding.financialEnabled === true
+          && shortcutBookkeepingAssistantRuntime.enabled === true;
         const auditMetadata = {
           senderHash,
           chatType: body.chatType,
@@ -3667,7 +3783,7 @@ export function createServer(options = {}) {
         };
         const result = await assistantOrchestrator.handle({
           context: {
-            owner: machineIdentity.account,
+            owner: eventOwner,
             channel: "weixin",
             conversation: conversationScope,
             event: eventId,
@@ -4394,6 +4510,132 @@ export function createServer(options = {}) {
           return updated;
         });
         sendJson(response, 200, { item: userResponseItem(item) }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      // v0.9.3 微信绑定管理（均 requireAdminRole；机器路由白名单不加，机器令牌 403）。
+      if (request.method === "GET" && url.pathname === "/api/admin/weixin-bindings") {
+        requireAdminRole(db, request);
+        const displayNames = new Map(listUsers(db).map((user) => [user.account, user.displayName]));
+        sendJson(response, 200, {
+          items: weixinBindingsRepository.listAll().map((binding) => (
+            weixinBindingResponseItem(binding, displayNames.get(binding.account) ?? null)
+          )),
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/admin/weixin-bindings/codes") {
+        requireAdminRole(db, request);
+        const body = await readValidatedJson(request, requestSchemas.adminWeixinBindingCode);
+        const account = body.account.trim();
+        const targetUser = getUser(db, account);
+        if (!targetUser) throw new HttpError(404, "USER_NOT_FOUND", "用户不存在");
+        if (targetUser.status !== "active") {
+          throw new HttpError(409, "USER_DISABLED", "已停用账号不能生成绑定码，请先启用该账号");
+        }
+        if (weixinBindingsRepository.activeByAccount(account)) {
+          throw new HttpError(409, "ACCOUNT_ALREADY_BOUND", "该账号已存在生效中的微信绑定，请先解绑");
+        }
+        const issued = withImmediateTransaction(db, () => {
+          pruneExpiredBindingCodes(db);
+          const created = issueBindingCode(db, {
+            account,
+            createdBy: request.authContext.account,
+            secret: assistantConfirmationSecret,
+          });
+          insertAudit(db, {
+            action: "weixin.binding.code_issued",
+            entityType: "weixin_binding",
+            entityId: account,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: null,
+            metadata: { account, expiresAt: created.expiresAt },
+          });
+          return created;
+        });
+        // 绑定码明文只出现在本次响应：不入库（哈希存储）、不入审计、不入日志。
+        sendJson(response, 201, {
+          item: { account, code: issued.code, expiresAt: issued.expiresAt },
+        }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "PATCH"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "admin"
+        && parts[2] === "weixin-bindings"
+        && parts[3]
+      ) {
+        requireAdminRole(db, request);
+        const targetSenderId = decodeURIComponent(parts[3]);
+        const body = await readValidatedJson(request, requestSchemas.adminWeixinBindingPatch);
+        if (
+          body.displayName === undefined
+          && body.financialEnabled === undefined
+          && body.digestEnabled === undefined
+          && body.status === undefined
+        ) {
+          validationFailure("body", "empty");
+        }
+        const actorAccount = request.authContext.account;
+        const item = withImmediateTransaction(db, () => {
+          const target = weixinBindingsRepository.bySender(targetSenderId);
+          if (!target) throw new HttpError(404, "WEIXIN_BINDING_NOT_FOUND", "微信绑定不存在");
+          const set = {};
+          if (body.displayName !== undefined) set.displayName = body.displayName;
+          if (body.financialEnabled !== undefined) set.financialEnabled = body.financialEnabled;
+          if (body.digestEnabled !== undefined) set.digestEnabled = body.digestEnabled;
+          if (body.status !== undefined) set.status = body.status;
+          const updated = weixinBindingsRepository.updateVersioned({
+            senderId: targetSenderId,
+            expectedVersion: body.expectedVersion,
+            set,
+          });
+          const before = {};
+          const after = {};
+          for (const field of ["displayName", "financialEnabled", "digestEnabled", "status"]) {
+            if (set[field] !== undefined && updated[field] !== target[field]) {
+              before[field] = target[field];
+              after[field] = updated[field];
+            }
+          }
+          const senderHash = weixinSenderHash(targetSenderId);
+          if (Object.keys(after).length > 0) {
+            // financial 开关变更必产生本行 = 财务授权可追溯。
+            insertAudit(db, {
+              action: "weixin.binding.updated",
+              entityType: "weixin_binding",
+              entityId: senderHash,
+              actor: actorAccount,
+              requestId,
+              before,
+              after,
+              metadata: { senderHash, account: updated.account },
+            });
+          }
+          if (set.status === "disabled" && target.status === "active") {
+            insertAudit(db, {
+              action: "weixin.binding.unbound",
+              entityType: "weixin_binding",
+              entityId: senderHash,
+              actor: actorAccount,
+              requestId,
+              before: null,
+              after: null,
+              metadata: { senderHash, account: updated.account, via: "web_admin" },
+            });
+          }
+          return updated;
+        });
+        const owningUser = getUser(db, item.account);
+        sendJson(response, 200, {
+          item: weixinBindingResponseItem(item, owningUser?.displayName ?? null),
+        }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -7453,14 +7695,29 @@ export function createServer(options = {}) {
             : getLatestInsight(db, quickRecord.id);
           if (body.analysisVersionId && !insight) notFound();
 
-          const nextCustomerId = targets.includes("customer")
-            ? insight?.customer?.id ?? quickRecord.customerId
-            : quickRecord.customerId;
-          const nextOpportunityId = targets.includes("opportunity")
-            ? insight?.opportunity?.id ?? quickRecord.opportunityId
-            : quickRecord.opportunityId;
           // v0.9.2：确认目标读取对 user 与 machine 一视同仁地带 owner 谓词。
           const confirmScopeOwner = requestOwner(request);
+          // v0.9.3 顺手修复（v0.9.2 观察项）：模型分析可能给出幻觉客户/商机 id（如
+          // cust-unknown）。模型来源的 id 仅在库内真实存在（含 owner 归属）时才作为
+          // 确认目标，否则按“未匹配”回退记录原值，而不是让整个 confirm 以 422 中断。
+          const insightCustomerId = insight?.customer?.id ?? null;
+          const insightCustomerExists = insightCustomerId
+            ? Boolean(get(
+              db,
+              `SELECT 1 AS present FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(confirmScopeOwner)}`,
+              ownerParams(confirmScopeOwner, { $id: insightCustomerId }),
+            ))
+            : false;
+          const insightOpportunityId = insight?.opportunity?.id ?? null;
+          const insightOpportunityExists = insightOpportunityId
+            ? Boolean(activeOpportunityEntityRow(db, insightOpportunityId, confirmScopeOwner ?? undefined))
+            : false;
+          const nextCustomerId = targets.includes("customer")
+            ? (insightCustomerExists ? insightCustomerId : quickRecord.customerId)
+            : quickRecord.customerId;
+          const nextOpportunityId = targets.includes("opportunity")
+            ? (insightOpportunityExists ? insightOpportunityId : quickRecord.opportunityId)
+            : quickRecord.opportunityId;
           const finalCustomer = nextCustomerId
             ? customerFromRow(get(
               db,

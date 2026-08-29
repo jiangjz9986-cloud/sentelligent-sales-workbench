@@ -1416,6 +1416,36 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return response.item;
     },
 
+    async listWeixinBindings() {
+      const response = await requestApi("/api/admin/weixin-bindings");
+      if (!Array.isArray(response?.items)) throw new TypeError("weixinBindings.items: expected array");
+      return response.items;
+    },
+
+    async createWeixinBindingCode(account) {
+      const response = await requestApi("/api/admin/weixin-bindings/codes", {
+        method: "POST",
+        body: JSON.stringify({ account }),
+      });
+      return response.item;
+    },
+
+    async updateWeixinBinding(senderId, payload) {
+      const response = await requestApi(`/api/admin/weixin-bindings/${encodeURIComponent(senderId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      return response.item;
+    },
+
+    async unbindWeixinBinding(senderId, expectedVersion) {
+      const response = await requestApi(`/api/admin/weixin-bindings/${encodeURIComponent(senderId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ expectedVersion, status: "disabled" }),
+      });
+      return response.item;
+    },
+
     async changePassword(payload) {
       return requestApi("/api/auth/change-password", {
         method: "POST",

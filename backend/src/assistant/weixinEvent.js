@@ -96,13 +96,9 @@ function validateAllowlistId(value, field) {
   return requiredText(value, field, MAX_IDENTIFIER_LENGTH);
 }
 
-export function assertWeixinSenderAllowed(config, event) {
-  const senderIds = Array.isArray(config?.weixinAllowedSenderIds)
-    ? config.weixinAllowedSenderIds
-    : [];
-  if (!senderIds.includes(event.senderId)) {
-    throw new HttpError(403, "WEIXIN_SENDER_NOT_ALLOWED", "This WeChat sender is not allowed");
-  }
+// v0.9.3：sender ∈ env 白名单分支退役——绑定表本身即白名单（入口序 4/5 由
+// weixinBindingGate 承担）。群规则原样保留（生产强制无群），语义零变化。
+export function assertWeixinGroupAllowed(config, event) {
   if (event.chatType === "group") {
     if (config?.weixinAllowGroups !== true) {
       throw new HttpError(403, "WEIXIN_GROUP_NOT_ALLOWED", "WeChat group messages are not allowed");

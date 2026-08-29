@@ -1,5 +1,8 @@
 import {
   KeyRound,
+  Link2,
+  Link2Off,
+  MessageCircle,
   Pencil,
   Power,
   RefreshCw,
@@ -36,13 +39,22 @@ function actionErrorMessage(error) {
   if (code === "USER_EXISTS") return "账号已存在";
   if (code === "USER_NOT_FOUND") return "用户不存在，已刷新列表";
   if (code === "ADMIN_ROLE_REQUIRED") return "需要管理员权限";
+  if (code === "ACCOUNT_ALREADY_BOUND") return "该账号已有生效中的微信绑定，请先解绑";
+  if (code === "USER_DISABLED") return "账号已停用，请先启用后再生成绑定码";
+  if (code === "WEIXIN_BINDING_NOT_FOUND") return "微信绑定不存在，已刷新列表";
   return "操作失败，请稍后重试";
+}
+
+function maskedSenderId(senderId) {
+  const value = String(senderId ?? "");
+  return value.length > 14 ? `${value.slice(0, 12)}…` : value;
 }
 
 const EMPTY_CREATE_FORM = { account: "", displayName: "", role: "member", initialValue: "" };
 
 export function UserManagementPage({ apiClient, backendStatus, authSession }) {
   const [users, setUsers] = useState([]);
+  const [bindings, setBindings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -54,6 +66,7 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
   const [resetValue, setResetValue] = useState("");
 
   const isAdmin = authSession?.role === "admin";
+  const bindingsSupported = typeof apiClient?.listWeixinBindings === "function";
 
   useEffect(() => {
     if (!isAdmin || !apiClient?.isEnabled) {
@@ -62,11 +75,14 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
     }
     let disposed = false;
     setLoading(true);
-    apiClient
-      .listUsers()
-      .then((items) => {
+    Promise.all([
+      apiClient.listUsers(),
+      bindingsSupported ? apiClient.listWeixinBindings() : Promise.resolve([]),
+    ])
+      .then(([userItems, bindingItems]) => {
         if (disposed) return;
-        setUsers(items);
+        setUsers(userItems);
+        setBindings(bindingItems);
         setError("");
         setLoading(false);
       })
@@ -78,7 +94,7 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
     return () => {
       disposed = true;
     };
-  }, [apiClient, backendStatus, isAdmin, reloadToken]);
+  }, [apiClient, backendStatus, isAdmin, reloadToken, bindingsSupported]);
 
   function reloadList() {
     setReloadToken((value) => value + 1);
@@ -95,7 +111,7 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
       return true;
     } catch (actionError) {
       setError(actionErrorMessage(actionError));
-      if (actionError?.code === "VERSION_CONFLICT" || actionError?.code === "USER_NOT_FOUND") {
+      if (["VERSION_CONFLICT", "USER_NOT_FOUND", "WEIXIN_BINDING_NOT_FOUND", "ACCOUNT_ALREADY_BOUND"].includes(actionError?.code)) {
         reloadList();
       }
       return false;
@@ -189,6 +205,55 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
       expectedVersion: user.version,
       status: disabling ? "disabled" : "active",
     }), disabling ? `已停用 ${user.displayName}` : `已启用 ${user.displayName}`);
+  }
+
+  function activeBindingOf(account) {
+    return bindings.find((binding) => binding.account === account && binding.status === "active") ?? null;
+  }
+
+  async function issueBindingCode(user) {
+    setBusy(`bindcode-${user.account}`);
+    setNotice("");
+    try {
+      const issued = await apiClient.createWeixinBindingCode(user.account);
+      setError("");
+      // 绑定码明文只展示这一次：不入列表、不入日志。
+      setDrawer({ type: "bindingCode", user, issued });
+    } catch (actionError) {
+      setError(actionErrorMessage(actionError));
+      if (actionError?.code === "ACCOUNT_ALREADY_BOUND" || actionError?.code === "USER_NOT_FOUND") {
+        reloadList();
+      }
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function toggleBindingSwitch(binding, field) {
+    const enabling = field === "financialEnabled" ? !binding.financialEnabled : !binding.digestEnabled;
+    if (field === "financialEnabled" && enabling) {
+      const confirmed = typeof window !== "undefined" && window.confirm(
+        `确定为 ${binding.userDisplayName ?? binding.account} 开通微信记账能力吗？开通后该微信可直接写入财务流水。`,
+      );
+      if (!confirmed) return;
+    }
+    await runAction(`binding-${field}-${binding.senderId}`, () => apiClient.updateWeixinBinding(binding.senderId, {
+      expectedVersion: binding.version,
+      [field]: enabling,
+    }), field === "financialEnabled"
+      ? (enabling ? "已开通记账能力" : "已关闭记账能力")
+      : (enabling ? "已开启晨报等主动推送" : "已关闭晨报等主动推送"));
+  }
+
+  async function unbindBinding(binding) {
+    const confirmed = typeof window !== "undefined" && window.confirm(
+      `确定解绑 ${binding.userDisplayName ?? binding.account} 的微信吗？解绑后该微信将无法继续使用工作台服务，未投递的消息会被静默作废。`,
+    );
+    if (!confirmed) return;
+    await runAction(`unbind-${binding.senderId}`, () => apiClient.unbindWeixinBinding(
+      binding.senderId,
+      binding.version,
+    ), `已解绑 ${binding.userDisplayName ?? binding.account} 的微信`);
   }
 
   if (!isAdmin) {
@@ -299,6 +364,18 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
                               >
                                 <KeyRound size={14} /> 重置密码
                               </button>
+                              {bindingsSupported ? (
+                                <button
+                                  className="ghost-button"
+                                  type="button"
+                                  data-testid={`user-bindcode-${user.account}`}
+                                  onClick={() => issueBindingCode(user)}
+                                  disabled={busy !== "" || user.status !== "active" || Boolean(activeBindingOf(user.account))}
+                                  title={activeBindingOf(user.account) ? "该账号已绑定微信，先解绑才能生成新码" : undefined}
+                                >
+                                  <MessageCircle size={14} /> 绑定码
+                                </button>
+                              ) : null}
                               <button
                                 className={user.status === "active" ? "danger-button" : "primary-button"}
                                 type="button"
@@ -319,6 +396,125 @@ export function UserManagementPage({ apiClient, backendStatus, authSession }) {
               </div>
             )}
           </Panel>
+
+          {bindingsSupported ? (
+            <Panel
+              title="微信绑定"
+              meta={`${bindings.filter((binding) => binding.status === "active").length} 个生效绑定`}
+              className="settings-card user-management-card"
+              data-testid="weixin-binding-panel"
+            >
+              {loading ? (
+                <p className="settings-empty-state">正在加载绑定列表…</p>
+              ) : bindings.length === 0 ? (
+                <p className="settings-empty-state">
+                  还没有微信绑定。在上方用户行点「绑定码」生成 6 位码，让同事在微信中发送「绑定 123456」即可完成绑定。
+                </p>
+              ) : (
+                <div className="user-table-wrap">
+                  <table className="user-table" data-testid="weixin-binding-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">账号</th>
+                        <th scope="col">微信标识</th>
+                        <th scope="col">记账能力</th>
+                        <th scope="col">主动推送</th>
+                        <th scope="col">状态</th>
+                        <th scope="col">绑定时间</th>
+                        <th scope="col">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {bindings.map((binding) => (
+                        <tr key={binding.senderId} data-testid={`binding-row-${binding.account}`} data-version={binding.version}>
+                          <td>{binding.userDisplayName ?? binding.account}（{binding.account}）</td>
+                          <td title={binding.senderId}>{maskedSenderId(binding.senderId)}</td>
+                          <td>
+                            <span className={`pill ${binding.financialEnabled ? "tone-green" : "tone-gray"}`}>
+                              {binding.financialEnabled ? "已开通" : "未开通"}
+                            </span>
+                          </td>
+                          <td>
+                            <span className={`pill ${binding.digestEnabled ? "tone-green" : "tone-gray"}`}>
+                              {binding.digestEnabled ? "开启" : "关闭"}
+                            </span>
+                          </td>
+                          <td>
+                            <span className={`pill ${binding.status === "active" ? "tone-green" : "tone-gray"}`}>
+                              {binding.status === "active" ? "生效中" : "已解绑"}
+                            </span>
+                          </td>
+                          <td>{formatDate(binding.boundAt)}</td>
+                          <td>
+                            <div className="settings-button-row user-row-actions">
+                              {binding.status === "active" ? (
+                                <>
+                                  <button
+                                    className="ghost-button"
+                                    type="button"
+                                    data-testid={`binding-financial-${binding.account}`}
+                                    onClick={() => toggleBindingSwitch(binding, "financialEnabled")}
+                                    disabled={busy !== ""}
+                                  >
+                                    <Link2 size={14} /> {binding.financialEnabled ? "关记账" : "开记账"}
+                                  </button>
+                                  <button
+                                    className="ghost-button"
+                                    type="button"
+                                    data-testid={`binding-digest-${binding.account}`}
+                                    onClick={() => toggleBindingSwitch(binding, "digestEnabled")}
+                                    disabled={busy !== ""}
+                                  >
+                                    <RefreshCw size={14} /> {binding.digestEnabled ? "关推送" : "开推送"}
+                                  </button>
+                                  <button
+                                    className="danger-button"
+                                    type="button"
+                                    data-testid={`binding-unbind-${binding.account}`}
+                                    onClick={() => unbindBinding(binding)}
+                                    disabled={busy !== ""}
+                                  >
+                                    <Link2Off size={14} /> 解绑
+                                  </button>
+                                </>
+                              ) : (
+                                <span className="settings-empty-state">可在用户行重新生成绑定码</span>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Panel>
+          ) : null}
+
+          {drawer?.type === "bindingCode" ? (
+            <Panel
+              title={`绑定码 · ${drawer.user.displayName}`}
+              meta="只显示一次"
+              className="settings-card"
+              data-testid="binding-code-drawer"
+            >
+              <div className="settings-key-form">
+                <p className="settings-feedback" role="status" data-testid="binding-code-value">
+                  绑定码：<strong>{drawer.issued.code}</strong>
+                </p>
+                <p>
+                  10 分钟内有效、只可使用一次。请当面或电话告知本人，让其在微信中对小小发送：
+                  <strong>绑定 {drawer.issued.code}</strong>
+                </p>
+                <p>过期时间：{formatDate(drawer.issued.expiresAt)}。绑定成功后默认开启晨报推送，记账能力需在本页显式开通。</p>
+                <div className="settings-button-row">
+                  <button className="primary-button" type="button" onClick={() => { setDrawer(null); reloadList(); }}>
+                    我已告知本人
+                  </button>
+                </div>
+              </div>
+            </Panel>
+          ) : null}
 
           {drawer?.type === "create" ? (
             <Panel title="新建用户" meta="初始密码只显示一次" className="settings-card" data-testid="user-create-drawer">

@@ -7,10 +7,11 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { createConnection } from "../src/db/connection.js";
 import { createServer } from "../src/server.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const opsToken = ["fixture", "ops", "monitor", "token"].join("-");
 const weixinToken = ["fixture", "weixin", "agent", "token"].join("-");
-const owner = "ops-owner";
+const owner = "opsowner";
 const sender = "ops-sender";
 
 let tempDir;
@@ -62,6 +63,13 @@ function startServer(overrides = {}) {
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => {
     baseUrl = `http://127.0.0.1:${server.address().port}`;
+    // v0.9.3：告警目标 = active admin 绑定（listAdminTargets）。
+    const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
+    try {
+      seedWeixinBinding(db, { account: owner, senderId: sender, role: "admin" });
+    } finally {
+      db.close();
+    }
     resolve();
   }));
 }
@@ -264,11 +272,13 @@ describe("ops alerts machine endpoint", () => {
       headers: {
         Authorization: `Bearer ${weixinToken}`,
         "X-Weixin-Delivery-Status": "ready",
-        "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(owner, sender),
+        "X-Weixin-Delivery-Scope": "weixin:multi:v1",
       },
     });
     assert.equal(lease.response.status, 200);
     assert.equal(lease.body.item.id, queued.body.item.id);
+    assert.equal(lease.body.item.targetSenderId, sender);
+    assert.equal(lease.body.item.deliveryScope, shortcutBookkeepingConversationId(owner, sender));
     assert.match(lease.body.item.message, /【小小运维告警】/u);
     assert.match(lease.body.item.message, /级别：严重/u);
     assert.match(lease.body.item.message, /来源：systemd:sentelligent-frontend.service/u);

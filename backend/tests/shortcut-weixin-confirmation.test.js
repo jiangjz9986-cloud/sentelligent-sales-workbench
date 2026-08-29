@@ -11,9 +11,11 @@ import { openDatabase } from "../src/db.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
 import { minimalPdf, VALID_JPEG, VALID_PNG } from "./helpers/image-fixtures.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const machineToken = "weixin-machine-test-token";
-const owner = "assistant-owner";
+// v0.9.3：owner 必须是合法 users 账号（bindings FK + CHECK 词表）。
+const owner = "assistantowner";
 const sender = "sender-1";
 const confirmationSecret = ["test", "shortcut", "confirmation", "secret"].join("-");
 
@@ -118,7 +120,8 @@ function workerHeaders() {
     Authorization: `Bearer ${machineToken}`,
     "X-Weixin-Worker-Id": "test-worker",
     "X-Weixin-Delivery-Status": "ready",
-    "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(owner, sender),
+    // v0.9.3 协议 v2：多绑定就绪哨兵（单绑定哈希 scope 由 lease 行内校验）。
+    "X-Weixin-Delivery-Scope": "weixin:multi:v1",
   };
 }
 
@@ -359,6 +362,15 @@ beforeEach(async () => {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
+  {
+    // v0.9.3：sender 白名单入 DB——为 harness owner 建 users 行与 active 绑定。
+    const seedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      seedWeixinBinding(seedDb, { account: owner, senderId: sender, financialEnabled: true });
+    } finally {
+      seedDb.close();
+    }
+  }
   await reportWorkerReady();
 });
 
@@ -836,24 +848,40 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     }
   });
 
-  it("rejects a week-region command from another allowlisted sender and a group chat", async () => {
-    for (const [id, scope] of [
-      ["other-sender", { senderId: "sender-2", chatType: "direct" }],
-      ["group", { senderId: sender, chatType: "group", groupId: "allowed-bookkeeping-test-group" }],
-    ]) {
-      const result = await request("/api/integrations/weixin-agent/events", {
-        method: "POST",
-        headers: eventHeaders(`weixin-region-denied-${id}`),
-        body: JSON.stringify({
-          conversationId: `conversation-region-denied-${id}`,
-          text: "本周区域是济南",
-          sourceMessageId: `weixin-region-denied-${id}`,
-          ...scope,
-          suppressQuote: true,
-        }),
-      });
-      assert.equal(result.response.status, 403);
-    }
+  it("rejects a week-region command from an unbound sender and a group chat", async () => {
+    // v0.9.3：未绑定 sender 在入口即被固定拒答（200 denied，不入编排）；
+    // 群聊来自已绑定 sender 仍进编排，由财务闸以 403 拒绝。
+    const unbound = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-denied-other-sender"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-denied-other-sender",
+        text: "本周区域是济南",
+        sourceMessageId: "weixin-region-denied-other-sender",
+        senderId: "sender-2",
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(unbound.response.status, 200);
+    assert.equal(unbound.body.status, "denied");
+    assert.match(unbound.body.text, /尚未绑定/u);
+
+    const group = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-region-denied-group"),
+      body: JSON.stringify({
+        conversationId: "conversation-region-denied-group",
+        text: "本周区域是济南",
+        sourceMessageId: "weixin-region-denied-group",
+        senderId: sender,
+        chatType: "group",
+        groupId: "allowed-bookkeeping-test-group",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(group.response.status, 403);
+
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     try {
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_region_profiles").get().count, 0);
@@ -1311,8 +1339,10 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
         },
       }),
     });
+    // v0.9.3：未绑定 sender 在入口即固定拒答（不入编排、不落库、不写 blob）。
     assert.equal(denied.response.status, 200);
-    assert.match(denied.body.text, /仅限已绑定账号本人/u);
+    assert.equal(denied.body.status, "denied");
+    assert.match(denied.body.text, /尚未绑定工作台账号/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_document_inbox").get().count, 0);
@@ -1438,8 +1468,10 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
         },
       }),
     });
+    // v0.9.3：未绑定 sender 在入口即固定拒答，发票 blob 不落库。
     assert.equal(denied.response.status, 200);
-    assert.match(denied.body.text, /仅限已绑定账号本人/u);
+    assert.equal(denied.body.status, "denied");
+    assert.match(denied.body.text, /尚未绑定工作台账号/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_matches").get().count, 0);
@@ -1794,9 +1826,11 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     await ackOutbox(draft, true, "provider-no-quote-scope-draft");
 
     const deniedCommands = ["修改备注为越权内容", "确认", "取消"];
-    for (const [scopeName, eventScope] of [
-      ["unbound", { senderId: "sender-2", chatType: "direct" }],
-      ["group", { senderId: sender, chatType: "group", groupId: "allowed-bookkeeping-test-group" }],
+    for (const [scopeName, eventScope, expect] of [
+      // v0.9.3：未绑定 sender 在入口即固定拒答（更早、更闭合）。
+      ["unbound", { senderId: "sender-2", chatType: "direct" }, "entry_denied"],
+      // 已绑定 sender 的群聊进编排，由财务闸 403 拒绝（语义不变）。
+      ["group", { senderId: sender, chatType: "group", groupId: "allowed-bookkeeping-test-group" }, "financial_denied"],
     ]) {
       for (const [index, text] of deniedCommands.entries()) {
         const sourceMessageId = `weixin-no-quote-${scopeName}-${index}`;
@@ -1811,9 +1845,15 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
             ...eventScope,
           }),
         });
-        assert.equal(denied.response.status, 403, JSON.stringify(denied.body));
-        assert.equal(denied.body.status, "error");
-        assert.match(denied.body.text, /本人私聊/u);
+        if (expect === "entry_denied") {
+          assert.equal(denied.response.status, 200, JSON.stringify(denied.body));
+          assert.equal(denied.body.status, "denied");
+          assert.match(denied.body.text, /尚未绑定工作台账号/u);
+        } else {
+          assert.equal(denied.response.status, 403, JSON.stringify(denied.body));
+          assert.equal(denied.body.status, "error");
+          assert.match(denied.body.text, /本人私聊/u);
+        }
       }
     }
 

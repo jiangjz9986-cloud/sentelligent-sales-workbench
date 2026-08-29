@@ -537,6 +537,7 @@ export function createShortcutBookkeepingAssistantRuntime({
   pendingActionRepository,
   sessionRepository,
   outboxRepository,
+  bindingsRepository,
   idFactory = randomUUID,
   clock = () => new Date(),
   confirmationSecret,
@@ -544,30 +545,46 @@ export function createShortcutBookkeepingAssistantRuntime({
   if (!db || !shortcutBookkeepingRepository || !pendingActionRepository || !sessionRepository || !outboxRepository) {
     throw new TypeError("Shortcut WeChat assistant runtime dependencies are required");
   }
+  if (!bindingsRepository || typeof bindingsRepository.activeByAccount !== "function") {
+    throw new TypeError("bindingsRepository is required for the shortcut WeChat assistant runtime");
+  }
   const secret = secretBuffer(confirmationSecret);
   const enabled = config?.weixinBookkeepingConfirmationEnabled === true;
-  const senderId = String(config?.weixinBookkeepingSenderId ?? "").trim()
-    || (Array.isArray(config?.weixinAllowedSenderIds) && config.weixinAllowedSenderIds.length === 1 ? config.weixinAllowedSenderIds[0] : "");
-  const owner = String(config?.weixinBookkeepingOwner ?? config?.weixinAgentOwner ?? "").trim();
-  const senderAllowed = Array.isArray(config?.weixinAllowedSenderIds)
-    && config.weixinAllowedSenderIds.includes(senderId);
-  const ready = enabled && Boolean(senderId) && Boolean(owner) && senderAllowed;
+
+  // v0.9.3：owner/senderId 闭包常量退役——绑定表是唯一事实源，每次调用现查。
+  function isReady() {
+    return enabled && bindingsRepository.hasActive();
+  }
 
   function isReadyFor(account) {
-    return ready && account === owner;
+    return enabled && Boolean(bindingsRepository.activeByAccount(account));
   }
 
   function assertReadyFor(account) {
     if (!enabled) throw new HttpError(503, "WEIXIN_BOOKKEEPING_CONFIRMATION_DISABLED", "小小微信记账复核尚未启用");
     if (!isReadyFor(account)) {
-      throw new HttpError(503, "WEIXIN_BOOKKEEPING_CONFIRMATION_NOT_READY", "小小微信记账复核尚未完成绑定");
+      throw new HttpError(503, "WEIXIN_BOOKKEEPING_CONFIRMATION_NOT_READY", "该账号未绑定微信，暂无法投递微信消息");
     }
   }
 
-  function conversationFor(account, requestedSender = senderId) {
+  function conversationFor(account, requestedSender = null) {
     assertReadyFor(account);
-    if (requestedSender !== senderId) throw new HttpError(403, "WEIXIN_SENDER_NOT_ALLOWED", "This WeChat sender is not allowed for WeChat bookkeeping confirmation");
-    return shortcutBookkeepingConversationId(account, senderId);
+    const binding = bindingsRepository.activeByAccount(account);
+    const expectedSender = binding.senderId;
+    if (requestedSender !== null && requestedSender !== undefined && requestedSender !== expectedSender) {
+      throw new HttpError(403, "WEIXIN_SENDER_NOT_ALLOWED", "This WeChat sender is not allowed for WeChat bookkeeping confirmation");
+    }
+    return shortcutBookkeepingConversationId(account, expectedSender);
+  }
+
+  // 无绑定 → null（供“财务落库照常、回执跳过”的可空路径使用）。
+  function conversationForOrNull(account) {
+    try {
+      return conversationFor(account);
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 503) return null;
+      throw error;
+    }
   }
 
   function findActionForEntry(account, entryId) {
@@ -818,20 +835,20 @@ export function createShortcutBookkeepingAssistantRuntime({
   }
 
   function reconcileAcceptedAttachments({ limit = 20 } = {}) {
-    if (!ready || !travelExpenseRepository || !travelExpenseDocumentInboxRepository) return [];
+    if (!isReady() || !travelExpenseRepository || !travelExpenseDocumentInboxRepository) return [];
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new TypeError("limit must be a positive safe integer no greater than 100");
     }
+    // 多绑定：跨全部 owner 扫描，逐行以行内 owner 归属处理。
     const rows = db.prepare(`
-      SELECT entry.id
+      SELECT entry.id, entry.owner
       FROM shortcut_bookkeeping_entries entry
       JOIN travel_expense_document_inbox inbox
         ON inbox.owner = entry.owner
        AND inbox.document_kind = 'payment_proof'
        AND inbox.source_message_id = entry.source_id
        AND inbox.status IN ('review_required', 'matched')
-      WHERE entry.owner = $owner
-        AND entry.status = 'accepted'
+      WHERE entry.status = 'accepted'
         AND entry.entry_type = 'expense'
         AND entry.expense_id IS NOT NULL
         AND entry.payment_id IS NOT NULL
@@ -850,12 +867,12 @@ export function createShortcutBookkeepingAssistantRuntime({
         )
       ORDER BY entry.updated_at ASC, entry.id ASC
       LIMIT $limit
-    `).all({ $owner: owner, $limit: limit });
+    `).all({ $limit: limit });
     return rows.map((row) => {
-      const entry = shortcutBookkeepingRepository.getReview(row.id, { owner });
+      const entry = shortcutBookkeepingRepository.getReview(row.id, { owner: row.owner });
       if (!entry || entry.status !== "accepted") return null;
       return attachSourceDocumentAfterAcceptance({
-        account: owner,
+        account: row.owner,
         entry,
         accepted: acceptedResult(entry),
         requestId: `reconcile:${entry.id}`,
@@ -1036,7 +1053,8 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
     const action = findLatestActionForEntry(normalizedAccount, entryId);
     if (!action) return { action: null, outbox: null, replayed: true };
-    const deliveryConversationId = conversationFor(normalizedAccount);
+    // v0.9.3：无 active 绑定不阻断 Web 复核——财务落库照常、微信回执跳过。
+    const deliveryConversationId = conversationForOrNull(normalizedAccount);
     const targetStatus = decision === "accepted" ? "executed" : "cancelled";
     const terminalKind = decision === "accepted" ? "accepted" : "cancelled";
     const result = decision === "accepted"
@@ -1101,29 +1119,32 @@ export function createShortcutBookkeepingAssistantRuntime({
             owner: normalizedAccount,
             channel: SHORTCUT_BOOKKEEPING_CHANNEL,
             source: "shortcut-web-review",
+            ...(deliveryConversationId ? {} : { receiptSkipped: true }),
           },
         });
       }
-      const closed = db.prepare(`
-        UPDATE weixin_confirmation_outbox
-        SET status = 'failed', lease_proof_hash = NULL, lease_until = NULL,
-            last_error_code = $errorCode, updated_at = $now
-        WHERE owner = $owner AND conversation_id = $conversationId
-          AND status IN ('queued', 'processing')
-          AND json_extract(payload_json, '$.actionId') = $actionId
-          AND json_extract(payload_json, '$.entryId') = $entryId
-          AND COALESCE(json_extract(payload_json, '$.kind'), 'confirmation')
-            NOT IN ('accepted', 'cancelled')
-      `).run({
-        $owner: normalizedAccount,
-        $conversationId: deliveryConversationId,
-        $actionId: action.id,
-        $entryId: entryId,
-        $errorCode: decision === "accepted"
-          ? "WEIXIN_OUTBOX_WEB_CONFIRMED"
-          : "WEIXIN_OUTBOX_WEB_REJECTED",
-        $now: now,
-      });
+      const closed = deliveryConversationId
+        ? db.prepare(`
+          UPDATE weixin_confirmation_outbox
+          SET status = 'failed', lease_proof_hash = NULL, lease_until = NULL,
+              last_error_code = $errorCode, updated_at = $now
+          WHERE owner = $owner AND conversation_id = $conversationId
+            AND status IN ('queued', 'processing')
+            AND json_extract(payload_json, '$.actionId') = $actionId
+            AND json_extract(payload_json, '$.entryId') = $entryId
+            AND COALESCE(json_extract(payload_json, '$.kind'), 'confirmation')
+              NOT IN ('accepted', 'cancelled')
+        `).run({
+          $owner: normalizedAccount,
+          $conversationId: deliveryConversationId,
+          $actionId: action.id,
+          $entryId: entryId,
+          $errorCode: decision === "accepted"
+            ? "WEIXIN_OUTBOX_WEB_CONFIRMED"
+            : "WEIXIN_OUTBOX_WEB_REJECTED",
+          $now: now,
+        })
+        : { changes: 0 };
       return { replayed, closedCount: Number(closed.changes ?? 0) };
     });
     const settledAction = pendingActionRepository.get(action.id, {
@@ -1132,17 +1153,19 @@ export function createShortcutBookkeepingAssistantRuntime({
       conversationId: action.conversationId,
     });
     let outbox = null;
-    try {
-      outbox = enqueue(
-        normalizedAccount,
-        deliveryConversationId,
-        settledAction ?? action,
-        entryId,
-        terminalKind,
-      );
-    } catch {
-      // Accepted receipts are reconciled before every worker lease. Rejected
-      // decisions are likewise retried by the terminal-review reconciliation.
+    if (deliveryConversationId) {
+      try {
+        outbox = enqueue(
+          normalizedAccount,
+          deliveryConversationId,
+          settledAction ?? action,
+          entryId,
+          terminalKind,
+        );
+      } catch {
+        // Accepted receipts are reconciled before every worker lease. Rejected
+        // decisions are likewise retried by the terminal-review reconciliation.
+      }
     }
     if (decision === "accepted" && entry.advanceId && advanceAllocationRepository) {
       try {
@@ -1360,7 +1383,7 @@ export function createShortcutBookkeepingAssistantRuntime({
   }
 
   function reconcileAcceptedReceipts({ limit = 20 } = {}) {
-    if (!ready) return [];
+    if (!isReady()) return [];
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
       throw new TypeError("limit must be a positive safe integer no greater than 100");
     }
@@ -1373,8 +1396,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       JOIN shortcut_bookkeeping_entries entry
         ON entry.id = json_extract(action.payload_json, '$.entryId')
        AND entry.owner = action.owner
-      WHERE action.owner = $owner
-        AND action.channel = $channel
+      WHERE action.channel = $channel
         AND action.action_type = $actionType
         AND entry.status IN ('accepted', 'rejected')
         AND NOT EXISTS (
@@ -1389,25 +1411,31 @@ export function createShortcutBookkeepingAssistantRuntime({
       ORDER BY action.updated_at ASC, action.id ASC
       LIMIT $limit
     `).all({
-      $owner: owner,
       $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
       $actionType: SHORTCUT_BOOKKEEPING_ACTION,
       $limit: limit,
     });
     const receipts = rows.map((row) => {
-      const entry = shortcutBookkeepingRepository.getReview(row.entry_id, { owner: row.owner });
-      if (!entry || entry.status !== row.entry_status) return null;
-      const targetActionStatus = entry.status === "accepted" ? "executed" : "cancelled";
-      if (row.action_status === targetActionStatus) {
+      // 多绑定：逐行容错——某 owner 无绑定（解绑窗口）时跳过该行，不中断整轮。
+      try {
+        const entry = shortcutBookkeepingRepository.getReview(row.entry_id, { owner: row.owner });
+        if (!entry || entry.status !== row.entry_status) return null;
+        const targetActionStatus = entry.status === "accepted" ? "executed" : "cancelled";
+        if (row.action_status === targetActionStatus) {
+          const conversationId = conversationForOrNull(row.owner);
+          if (!conversationId) return null;
           return enqueue(
             row.owner,
-            conversationFor(row.owner),
-          { id: row.action_id, version: Number(row.version) },
-          row.entry_id,
-          entry.status === "accepted" ? "accepted" : "cancelled",
-        );
+            conversationId,
+            { id: row.action_id, version: Number(row.version) },
+            row.entry_id,
+            entry.status === "accepted" ? "accepted" : "cancelled",
+          );
+        }
+        return settleFromWeb({ account: row.owner, entry, decision: row.entry_status }).outbox;
+      } catch {
+        return null;
       }
-      return settleFromWeb({ account: row.owner, entry, decision: row.entry_status }).outbox;
     }).filter(Boolean);
     if (advanceAllocationRepository) {
       const loanRows = db.prepare(`
@@ -1419,7 +1447,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         JOIN travel_expense_advance_sources source
           ON source.entry_id = entry.id AND source.owner = entry.owner AND source.status = 'active'
         JOIN travel_expense_advances advance ON advance.id = source.advance_id
-        WHERE entry.owner = $owner AND entry.status = 'accepted' AND entry.entry_type = 'income'
+        WHERE entry.status = 'accepted' AND entry.entry_type = 'income'
           AND source.advance_id IS NOT NULL
           AND NOT EXISTS (
             SELECT 1 FROM assistant_pending_actions action
@@ -1428,7 +1456,6 @@ export function createShortcutBookkeepingAssistantRuntime({
               AND json_extract(action.payload_json, '$.advanceId') = source.advance_id
           )
       `).all({
-        $owner: owner,
         $actionType: SHORTCUT_BOOKKEEPING_ACTION,
         $kind: SHORTCUT_ADVANCE_ALLOCATION_KIND,
       });
@@ -2072,11 +2099,13 @@ export function createShortcutBookkeepingAssistantRuntime({
   function financialEventScopeAllowed(context, serverData) {
     if (context?.channel !== SHORTCUT_BOOKKEEPING_CHANNEL) return true;
     const metadata = serverData?.auditMetadata;
-    const expectedSenderHash = createHash("sha256").update(senderId, "utf8").digest("hex");
-    return context.owner === owner
-      && metadata?.financialScope === true
-      && metadata?.chatType === "direct"
-      && metadata?.senderHash === expectedSenderHash;
+    if (metadata?.financialScope !== true || metadata?.chatType !== "direct") return false;
+    // v0.9.3：事件 sender 必须等于草稿 owner 当前绑定的 sender（哈希比对，防
+    // 其他会话经隐式选中操作他人财务草稿）。
+    const binding = bindingsRepository.activeByAccount(context?.owner);
+    if (!binding) return false;
+    const expectedSenderHash = createHash("sha256").update(binding.senderId, "utf8").digest("hex");
+    return metadata?.senderHash === expectedSenderHash;
   }
 
   function quoteLikelyTargetsShortcut(account, quote) {
@@ -2090,9 +2119,11 @@ export function createShortcutBookkeepingAssistantRuntime({
     const providerMessageId = typeof quote.providerMessageId === "string"
       ? quote.providerMessageId.trim()
       : "";
-    if (!providerMessageId || !account || !senderId) return false;
+    if (!providerMessageId || !account) return false;
     try {
-      const conversationId = shortcutBookkeepingConversationId(account, senderId);
+      const binding = bindingsRepository.activeByAccount(account);
+      if (!binding) return false;
+      const conversationId = shortcutBookkeepingConversationId(account, binding.senderId);
       const row = db.prepare(`
         SELECT 1
         FROM weixin_confirmation_outbox outbox
@@ -2457,9 +2488,10 @@ export function createShortcutBookkeepingAssistantRuntime({
 
   return Object.freeze({
     enabled,
-    ready,
-    senderId,
-    owner,
+    // 动态就绪：enabled ∧ 存在 active 绑定（绑定表是唯一事实源）。
+    get ready() {
+      return isReady();
+    },
     isReadyFor,
     assertReadyFor,
     conversationFor,

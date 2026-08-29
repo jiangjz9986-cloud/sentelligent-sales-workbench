@@ -172,7 +172,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 30);
+      assert.equal(firstMigrations.length, 31);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -202,6 +202,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[27].version, "0029");
       assert.equal(firstMigrations[28].version, "0030");
       assert.equal(firstMigrations[29].version, "0031");
+      assert.equal(firstMigrations[30].version, "0032");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -490,7 +491,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        30,
+        31,
       );
     } finally {
       db.close();
@@ -914,7 +915,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032"],
       );
     } finally {
       migrated.close();
@@ -1108,7 +1109,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 30);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 31);
     } finally {
       db.close();
     }
@@ -1459,6 +1460,152 @@ test("migration 0031 tightens owner isolation", async () => {
   }
 });
 
+test("migration 0032 creates weixin bindings and seeds the env binding", async () => {
+  const { apply } = await import("../src/db/migrations/0032_weixin_bindings.mjs");
+  const { hashPassword } = await import("../src/auth/password.js");
+  const seedHashValue = await hashPassword("unit-seed-password", { salt: Buffer.alloc(16, 42) });
+  const previousEnv = {
+    AUTH_ACCOUNT: process.env.AUTH_ACCOUNT,
+    WEIXIN_BOOKKEEPING_OWNER: process.env.WEIXIN_BOOKKEEPING_OWNER,
+    WEIXIN_BOOKKEEPING_SENDER_ID: process.env.WEIXIN_BOOKKEEPING_SENDER_ID,
+  };
+  const restoreEnv = () => {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  const prepareUsers = (db) => {
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec(`
+      CREATE TABLE users (
+        account TEXT PRIMARY KEY NOT NULL,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        status TEXT NOT NULL DEFAULT 'active',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    db.prepare(`
+      INSERT INTO users (account, display_name, password_hash, created_at, updated_at)
+      VALUES ('jiangjz', '继振', $hash, '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')
+    `).run({ $hash: seedHashValue });
+  };
+
+  try {
+    // (a) 带 env → 种子行 financial=1/digest=1/active，bound_by=system:bootstrap。
+    process.env.WEIXIN_BOOKKEEPING_OWNER = "jiangjz";
+    process.env.WEIXIN_BOOKKEEPING_SENDER_ID = "seed-sender-1";
+    const seeded = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareUsers(seeded);
+      apply(seeded);
+      const binding = seeded.prepare(
+        "SELECT sender_id, account, display_name, financial_enabled, digest_enabled, status, bound_by, version FROM weixin_bindings",
+      ).get();
+      assert.deepEqual({ ...binding }, {
+        sender_id: "seed-sender-1",
+        account: "jiangjz",
+        display_name: null,
+        financial_enabled: 1,
+        digest_enabled: 1,
+        status: "active",
+        bound_by: "system:bootstrap",
+        version: 1,
+      });
+
+      // (c) CHECK 矩阵：status 非法、financial=2、双 active 同 account 违反 partial index、FK 拒绝幽灵账号。
+      const insertBinding = (overrides = {}) => seeded.prepare(`
+        INSERT INTO weixin_bindings
+          (sender_id, account, financial_enabled, digest_enabled, status, bound_at, bound_by, created_at, updated_at)
+        VALUES ($senderId, $account, $financial, 1, $status, '2026-08-29T00:00:00.000Z', 'unit', '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')
+      `).run({
+        $senderId: "check-sender",
+        $account: "jiangjz",
+        $financial: 0,
+        $status: "active",
+        ...overrides,
+      });
+      assert.throws(() => insertBinding({ $status: "archived" }), /CHECK constraint failed/i);
+      assert.throws(() => insertBinding({ $financial: 2 }), /CHECK constraint failed/i);
+      assert.throws(() => insertBinding(), /UNIQUE constraint failed/i, "one active binding per account");
+      assert.throws(
+        () => insertBinding({ $account: "ghostacct", $senderId: "ghost-sender" }),
+        /FOREIGN KEY constraint failed/i,
+      );
+      // disabled 行不占 one-active 名额。
+      insertBinding({ $status: "disabled" });
+      assert.equal(seeded.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 2);
+
+      // codes 表可写、码明文列不存在（只有 code_hash）。
+      const codeColumns = seeded.prepare("PRAGMA table_info(weixin_binding_codes)").all().map((row) => row.name);
+      assert.deepEqual(codeColumns, ["code_hash", "account", "expires_at", "used_at", "created_by", "created_at"]);
+    } finally {
+      seeded.close();
+    }
+
+    // (b) env-less 彩排：建表成功、种子跳过。
+    delete process.env.WEIXIN_BOOKKEEPING_OWNER;
+    delete process.env.WEIXIN_BOOKKEEPING_SENDER_ID;
+    delete process.env.AUTH_ACCOUNT;
+    const envless = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareUsers(envless);
+      apply(envless);
+      assert.equal(envless.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 0);
+    } finally {
+      envless.close();
+    }
+
+    // (b2) 带 sender 但 users 无该账号（种子前置缺席）：跳过种子而不是违反 FK。
+    process.env.WEIXIN_BOOKKEEPING_OWNER = "ghostacct";
+    process.env.WEIXIN_BOOKKEEPING_SENDER_ID = "seed-sender-1";
+    const ghost = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareUsers(ghost);
+      apply(ghost);
+      assert.equal(ghost.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 0);
+    } finally {
+      ghost.close();
+    }
+
+    // (d) 全链二跑幂等：版本账本保证 0032 只应用一次。
+    process.env.AUTH_ACCOUNT = "jiangjz";
+    process.env.WEIXIN_BOOKKEEPING_OWNER = "jiangjz";
+    process.env.WEIXIN_BOOKKEEPING_SENDER_ID = "seed-sender-1";
+    const previousHash = process.env.AUTH_PASSWORD_HASH;
+    process.env.AUTH_PASSWORD_HASH = seedHashValue;
+    try {
+      withDatabase((databaseUrl) => {
+        const first = openDatabase({ databaseUrl });
+        try {
+          assert.equal(first.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 1);
+        } finally {
+          first.close();
+        }
+        const second = openDatabase({ databaseUrl });
+        try {
+          assert.equal(second.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 1);
+          assert.equal(
+            second.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0032'").get().count,
+            1,
+          );
+        } finally {
+          second.close();
+        }
+      });
+    } finally {
+      if (previousHash === undefined) delete process.env.AUTH_PASSWORD_HASH;
+      else process.env.AUTH_PASSWORD_HASH = previousHash;
+    }
+  } finally {
+    restoreEnv();
+  }
+});
+
 test("rolls back every 0002 schema change when the module migration fails partway", () => {
   withDatabase((databaseUrl) => {
     const db = createConnection({ databaseUrl });
@@ -1516,7 +1663,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032"],
       );
     } finally {
       db.close();

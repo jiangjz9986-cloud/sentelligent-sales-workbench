@@ -74,16 +74,16 @@ async function startServer(overrides = {}) {
     seed: false,
     nodeEnv: "test",
     authRequired: true,
-    authAccount: "assistant-owner",
+    authAccount: "assistantowner",
     authPassword: "",
     authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
     authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
     authCookieSecure: false,
     weixinAgentApiToken: machineToken,
-    weixinAgentOwner: "assistant-owner",
+    weixinAgentOwner: "assistantowner",
     weixinAllowedSenderIds: "sender-1,sender-2",
     weixinAllowGroups: false,
-    weixinBookkeepingOwner: "assistant-owner",
+    weixinBookkeepingOwner: "assistantowner",
     weixinBookkeepingSenderId: "sender-1",
     weixinBookkeepingConfirmationEnabled: true,
     assistantClock: () => new Date(nowMs),
@@ -99,7 +99,7 @@ beforeEach(async () => {
   withDb((db) => {
     db.exec(`
       INSERT INTO customers (id, name, region, type, level, owner, aliases, tags)
-      VALUES ('customer-seeded-1', '日照市中医医院', '日照', '医院', 'A', 'assistant-owner', '["日照中医院"]', '["十五五"]');
+      VALUES ('customer-seeded-1', '日照市中医医院', '日照', '医院', 'A', 'assistantowner', '["日照中医院"]', '["十五五"]');
     `);
   });
   await startServer();
@@ -143,7 +143,7 @@ describe("customer profile agent HTTP boundary", () => {
     withDb((db) => {
       const row = db.prepare("SELECT * FROM customers WHERE name = '莒县人民医院'").get();
       assert.ok(row);
-      assert.equal(row.owner, "assistant-owner");
+      assert.equal(row.owner, "assistantowner");
       assert.equal(row.id, pending.body.actionId);
       assert.deepEqual(JSON.parse(row.tags), ["信创"]);
       const businessAudit = db.prepare("SELECT metadata_json FROM audit_logs WHERE action = 'customer.create'").all();

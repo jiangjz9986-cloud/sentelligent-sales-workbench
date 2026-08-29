@@ -6,8 +6,9 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
-const owner = "sales-loop-owner";
+const owner = "salesloopowner";
 const machineToken = "sales-loop-machine-token";
 const senderId = "sales-loop-sender";
 const conversationId = "sales-loop-conversation";
@@ -21,6 +22,7 @@ let sequence;
 
 function insertFixture() {
   const db = openDatabase({ databaseUrl });
+  seedWeixinBinding(db, { account: owner, senderId });
   db.exec(`
     INSERT INTO customers (id, name, type, owner, budget, summary, needs, risks, stakeholders, decision_chain)
     VALUES ('customer-runtime', '运行时医院', '医院', '${owner}', '待立项', '评估平台稳定性升级', '["稳定性"]', '["预算待确认"]', '[]', '["信息科"]');

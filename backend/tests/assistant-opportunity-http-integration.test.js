@@ -70,16 +70,16 @@ async function startServer(overrides = {}) {
     seed: false,
     nodeEnv: "test",
     authRequired: true,
-    authAccount: "assistant-owner",
+    authAccount: "assistantowner",
     authPassword: "",
     authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
     authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
     authCookieSecure: false,
     weixinAgentApiToken: machineToken,
-    weixinAgentOwner: "assistant-owner",
+    weixinAgentOwner: "assistantowner",
     weixinAllowedSenderIds: "sender-1,sender-2",
     weixinAllowGroups: false,
-    weixinBookkeepingOwner: "assistant-owner",
+    weixinBookkeepingOwner: "assistantowner",
     weixinBookkeepingSenderId: "sender-1",
     weixinBookkeepingConfirmationEnabled: true,
     assistantClock: () => new Date(nowMs),
@@ -96,16 +96,16 @@ beforeEach(async () => {
   withDb((db) => {
     db.exec(`
       INSERT INTO customers (id, name, region, type, level, owner) VALUES
-        ('customer-seeded-1', '日照中医医院', '日照', '医院', 'A', 'assistant-owner'),
-        ('customer-seeded-2', '黄岛区中医院', '青岛', '医院', 'B', 'assistant-owner'),
-        ('customer-seeded-3', '胜利油田中心医院', '东营', '医院', 'A', 'assistant-owner'),
-        ('customer-seeded-4', '黄岛人民医院', '青岛', '医院', 'B', 'assistant-owner'),
-        ('customer-seeded-5', '黄岛中心医院', '青岛', '医院', 'B', 'assistant-owner');
+        ('customer-seeded-1', '日照中医医院', '日照', '医院', 'A', 'assistantowner'),
+        ('customer-seeded-2', '黄岛区中医院', '青岛', '医院', 'B', 'assistantowner'),
+        ('customer-seeded-3', '胜利油田中心医院', '东营', '医院', 'A', 'assistantowner'),
+        ('customer-seeded-4', '黄岛人民医院', '青岛', '医院', 'B', 'assistantowner'),
+        ('customer-seeded-5', '黄岛中心医院', '青岛', '医院', 'B', 'assistantowner');
       INSERT INTO opportunities (id, customer_id, name, customer, stage, amount, next, owner) VALUES
-        ('opp-rizhao-plan001', 'customer-seeded-1', '日照中医医院十五五规划', '日照中医医院', '方案输出', '规划类', '补齐规划材料', 'assistant-owner'),
-        ('opp-victory-pacs99', 'customer-seeded-3', '胜利油田 PACS 双活', '胜利油田中心医院', '方案交流', NULL, NULL, 'assistant-owner'),
-        ('opp-victory-srv888', 'customer-seeded-3', '服务器采购计划', '胜利油田中心医院', '预算确认', NULL, NULL, 'assistant-owner'),
-        ('opp-huangdao-tcm077', 'customer-seeded-2', '双活机房建设', '黄岛区中医院', '调研机会', '3000 万', NULL, 'assistant-owner');
+        ('opp-rizhao-plan001', 'customer-seeded-1', '日照中医医院十五五规划', '日照中医医院', '方案输出', '规划类', '补齐规划材料', 'assistantowner'),
+        ('opp-victory-pacs99', 'customer-seeded-3', '胜利油田 PACS 双活', '胜利油田中心医院', '方案交流', NULL, NULL, 'assistantowner'),
+        ('opp-victory-srv888', 'customer-seeded-3', '服务器采购计划', '胜利油田中心医院', '预算确认', NULL, NULL, 'assistantowner'),
+        ('opp-huangdao-tcm077', 'customer-seeded-2', '双活机房建设', '黄岛区中医院', '调研机会', '3000 万', NULL, 'assistantowner');
     `);
   });
   await startServer();
@@ -308,7 +308,7 @@ describe("opportunity agent HTTP boundary", () => {
     withDb((db) => {
       const row = db.prepare("SELECT * FROM opportunities WHERE id = $id").get({ $id: pending.body.actionId });
       assert.ok(row, "the pending action id is the durable opportunity key");
-      assert.equal(row.owner, "assistant-owner");
+      assert.equal(row.owner, "assistantowner");
       assert.equal(row.customer_id, "customer-seeded-4");
       assert.equal(row.customer, "黄岛人民医院");
       assert.equal(row.stage, "线索");

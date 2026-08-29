@@ -9,6 +9,10 @@ import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "./digestM
 // durable "already sent for this date" marker (hasKey point lookup), so a
 // restart never re-sends, a missed morning is re-sent later the same day, and
 // a fully missed day is never back-filled.
+//
+// v0.9.3 多播：resolveDeliveries() 返回全部 active ∧ digest_enabled 绑定目标，
+// runOnce/runManual 逐 owner hasKey→build→enqueue；幂等键加 owner 维度，并对
+// 旧格式键做一版过渡（升级日防双发，v0.10.0 移除）。
 
 const MAX_TIMER_DELAY = 2 ** 31 - 1;
 
@@ -25,11 +29,20 @@ function timeLabel({ hour, minute }) {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
-export function dailyDigestKey(dateOnly) {
+export function dailyDigestKey(owner, dateOnly) {
+  return `daily-digest:${owner}:${dateOnly}`;
+}
+
+export function fridayCloseoutKey(owner, dateOnly) {
+  return `friday-closeout:${owner}:${fridayOfWeek(dateOnly)}`;
+}
+
+// 单 owner 时代（≤v0.9.2）的键格式：仅用于升级日“已发过”判定，v0.10.0 移除。
+export function legacyDailyDigestKey(dateOnly) {
   return `daily-digest:${dateOnly}`;
 }
 
-export function fridayCloseoutKey(dateOnly) {
+export function legacyFridayCloseoutKey(dateOnly) {
   return `friday-closeout:${fridayOfWeek(dateOnly)}`;
 }
 
@@ -38,8 +51,7 @@ export function createDailyDigestScheduler({
   outboxRepository,
   buildDailyDigest,
   buildFridayCloseout,
-  resolveOwner,
-  resolveConversationId,
+  resolveDeliveries,
   deliveryReady,
   clock = () => new Date(),
   pollMs = 60_000,
@@ -52,8 +64,7 @@ export function createDailyDigestScheduler({
   }
   if (typeof buildDailyDigest !== "function") throw new TypeError("buildDailyDigest must be a function");
   if (typeof buildFridayCloseout !== "function") throw new TypeError("buildFridayCloseout must be a function");
-  if (typeof resolveOwner !== "function") throw new TypeError("resolveOwner must be a function");
-  if (typeof resolveConversationId !== "function") throw new TypeError("resolveConversationId must be a function");
+  if (typeof resolveDeliveries !== "function") throw new TypeError("resolveDeliveries must be a function");
   if (typeof deliveryReady !== "function") throw new TypeError("deliveryReady must be a function");
   if (typeof clock !== "function") throw new TypeError("clock must be a function");
   if (!Number.isSafeInteger(pollMs) || pollMs < 1_000 || pollMs > 3_600_000) throw new TypeError("pollMs is invalid");
@@ -72,23 +83,26 @@ export function createDailyDigestScheduler({
     daily: { lastSentDate: null, lastSkippedDate: null, lastOutboxId: null },
     friday: { lastSentDate: null, lastOutboxId: null },
   };
-  // In-memory only: suppresses re-computing a confirmed-empty daily digest for
-  // the rest of the day. Restart repetition of the skip audit is acceptable.
-  let dailyEmptySkipDate = null;
+  // In-memory only, per owner: suppresses re-computing a confirmed-empty daily
+  // digest for the rest of the day. Restart repetition of the skip audit is
+  // acceptable.
+  const dailyEmptySkipDates = new Map();
 
-  function resolveDelivery() {
+  function resolveDeliveryTargets() {
     if (!deliveryReady()) return null;
-    let owner = "";
-    let conversationId = "";
+    let targets;
     try {
-      owner = String(resolveOwner() ?? "").trim();
-      conversationId = String(resolveConversationId() ?? "").trim();
+      targets = resolveDeliveries() ?? [];
     } catch {
-      owner = "";
-      conversationId = "";
+      targets = [];
     }
-    if (!owner || !conversationId) return null;
-    return { owner, conversationId };
+    const normalized = [];
+    for (const target of targets) {
+      const owner = String(target?.account ?? target?.owner ?? "").trim();
+      const conversationId = String(target?.conversationId ?? "").trim();
+      if (owner && conversationId) normalized.push({ owner, conversationId });
+    }
+    return normalized;
   }
 
   function audit({ action, entityId, metadata }) {
@@ -101,21 +115,33 @@ export function createDailyDigestScheduler({
     });
   }
 
+  function alreadyEnqueued(owner, idempotencyKey, legacyKey) {
+    if (outboxRepository.hasKey({ owner, idempotencyKey })) return true;
+    // 升级日过渡：旧格式键（无 owner 维度）只可能存在于历史单绑定 owner 名下。
+    return outboxRepository.hasKey({ owner, idempotencyKey: legacyKey });
+  }
+
   async function deliverDaily({ delivery, parts, now, manual = false }) {
-    const idempotencyKey = dailyDigestKey(parts.date);
-    if (!manual && dailyEmptySkipDate === parts.date) return { status: "skipped_empty" };
-    if (outboxRepository.hasKey({ owner: delivery.owner, idempotencyKey })) {
-      return { status: "already_sent", digestDate: parts.date };
+    const idempotencyKey = dailyDigestKey(delivery.owner, parts.date);
+    if (!manual && dailyEmptySkipDates.get(delivery.owner) === parts.date) {
+      return { owner: delivery.owner, status: "skipped_empty" };
+    }
+    if (alreadyEnqueued(delivery.owner, idempotencyKey, legacyDailyDigestKey(parts.date))) {
+      return { owner: delivery.owner, status: "already_sent", digestDate: parts.date };
     }
     const built = await buildDailyDigest({ owner: delivery.owner, now });
     if (built.empty) {
-      if (built.reason === "no_business_owner") return { status: "skipped_no_owner" };
-      if (dailyEmptySkipDate !== parts.date) {
-        dailyEmptySkipDate = parts.date;
+      if (built.reason === "no_business_owner") return { owner: delivery.owner, status: "skipped_no_owner" };
+      if (dailyEmptySkipDates.get(delivery.owner) !== parts.date) {
+        dailyEmptySkipDates.set(delivery.owner, parts.date);
         state.daily.lastSkippedDate = parts.date;
-        audit({ action: "digest.daily.skipped", entityId: parts.date, metadata: { reason: "empty", manual } });
+        audit({
+          action: "digest.daily.skipped",
+          entityId: parts.date,
+          metadata: { reason: "empty", manual, owner: delivery.owner },
+        });
       }
-      return { status: "skipped_empty", digestDate: parts.date };
+      return { owner: delivery.owner, status: "skipped_empty", digestDate: parts.date };
     }
     renderDailyDigestMessage(built.payload);
     const enqueued = outboxRepository.enqueue({
@@ -132,6 +158,7 @@ export function createDailyDigestScheduler({
       entityId: parts.date,
       metadata: {
         digestDate: parts.date,
+        owner: delivery.owner,
         outboxId: enqueued.id ?? null,
         replayed: enqueued.replayed === true,
         lateMinutes,
@@ -139,17 +166,17 @@ export function createDailyDigestScheduler({
         ...built.stats,
       },
     });
-    return { status: "sent", digestDate: parts.date, outboxId: enqueued.id ?? null };
+    return { owner: delivery.owner, status: "sent", digestDate: parts.date, outboxId: enqueued.id ?? null };
   }
 
   async function deliverFriday({ delivery, parts, now, manual = false }) {
-    const idempotencyKey = fridayCloseoutKey(parts.date);
+    const idempotencyKey = fridayCloseoutKey(delivery.owner, parts.date);
     const digestDate = fridayOfWeek(parts.date);
-    if (outboxRepository.hasKey({ owner: delivery.owner, idempotencyKey })) {
-      return { status: "already_sent", digestDate };
+    if (alreadyEnqueued(delivery.owner, idempotencyKey, legacyFridayCloseoutKey(parts.date))) {
+      return { owner: delivery.owner, status: "already_sent", digestDate };
     }
     const built = await buildFridayCloseout({ owner: delivery.owner, now });
-    if (built.empty) return { status: "skipped_no_owner" };
+    if (built.empty) return { owner: delivery.owner, status: "skipped_no_owner" };
     renderFridayCloseoutMessage(built.payload);
     const enqueued = outboxRepository.enqueue({
       owner: delivery.owner,
@@ -166,6 +193,7 @@ export function createDailyDigestScheduler({
       metadata: {
         digestDate,
         weekStart: weekStartOf(parts.date),
+        owner: delivery.owner,
         outboxId: enqueued.id ?? null,
         replayed: enqueued.replayed === true,
         lateMinutes,
@@ -173,7 +201,7 @@ export function createDailyDigestScheduler({
         ...built.stats,
       },
     });
-    return { status: "sent", digestDate, outboxId: enqueued.id ?? null };
+    return { owner: delivery.owner, status: "sent", digestDate, outboxId: enqueued.id ?? null };
   }
 
   async function runOnce() {
@@ -189,14 +217,28 @@ export function createDailyDigestScheduler({
         state.lastStatus = "idle";
         return { status: "idle" };
       }
-      const delivery = resolveDelivery();
-      if (!delivery) {
+      const deliveries = resolveDeliveryTargets();
+      if (deliveries === null) {
         state.lastStatus = "skipped";
         return { status: "skipped", reason: "delivery_not_ready" };
       }
+      if (deliveries.length === 0) {
+        state.lastStatus = "skipped";
+        return { status: "skipped", reason: "no_digest_targets" };
+      }
       const results = {};
-      if (dailyDue) results.daily = await deliverDaily({ delivery, parts, now: nowDate });
-      if (fridayDue) results.friday = await deliverFriday({ delivery, parts, now: nowDate });
+      if (dailyDue) {
+        results.daily = [];
+        for (const delivery of deliveries) {
+          results.daily.push(await deliverDaily({ delivery, parts, now: nowDate }));
+        }
+      }
+      if (fridayDue) {
+        results.friday = [];
+        for (const delivery of deliveries) {
+          results.friday.push(await deliverFriday({ delivery, parts, now: nowDate }));
+        }
+      }
       state.lastStatus = "success";
       state.lastError = null;
       return { status: "success", ...results };
@@ -215,32 +257,55 @@ export function createDailyDigestScheduler({
     const now = clock();
     const nowDate = now instanceof Date ? now : new Date(now);
     const parts = shanghaiDateParts(nowDate);
-    const delivery = resolveDelivery();
-    if (!delivery) return { status: "delivery_not_ready" };
-    return kind === "daily"
-      ? deliverDaily({ delivery, parts, now: nowDate, manual: true })
-      : deliverFriday({ delivery, parts, now: nowDate, manual: true });
+    const deliveries = resolveDeliveryTargets();
+    if (deliveries === null) return { status: "delivery_not_ready" };
+    if (deliveries.length === 0) return { status: "no_digest_targets" };
+    const results = [];
+    for (const delivery of deliveries) {
+      results.push(kind === "daily"
+        ? await deliverDaily({ delivery, parts, now: nowDate, manual: true })
+        : await deliverFriday({ delivery, parts, now: nowDate, manual: true }));
+    }
+    const sent = results.filter((item) => item.status === "sent").length;
+    const status = sent > 0
+      ? "sent"
+      : results.every((item) => item.status === "already_sent")
+        ? "already_sent"
+        : results[0]?.status ?? "no_digest_targets";
+    return {
+      status,
+      digestDate: results[0]?.digestDate,
+      deliveries: results,
+    };
   }
 
   function markers() {
     const parts = shanghaiDateParts(clock());
     const fridayDate = fridayOfWeek(parts.date);
-    let owner = "";
+    let targets = [];
     try {
-      owner = String(resolveOwner() ?? "").trim();
+      targets = (resolveDeliveries() ?? [])
+        .map((target) => String(target?.account ?? target?.owner ?? "").trim())
+        .filter(Boolean);
     } catch {
-      owner = "";
+      targets = [];
     }
-    const lookup = (idempotencyKey) => (
-      owner ? outboxRepository.hasKey({ owner, idempotencyKey }) : false
-    );
+    const deliveries = targets.map((owner) => ({
+      owner,
+      daily: alreadyEnqueued(owner, dailyDigestKey(owner, parts.date), legacyDailyDigestKey(parts.date)),
+      friday: alreadyEnqueued(owner, fridayCloseoutKey(owner, parts.date), legacyFridayCloseoutKey(parts.date)),
+    }));
     return {
-      daily: { digestDate: parts.date, enqueued: lookup(dailyDigestKey(parts.date)) },
+      daily: {
+        digestDate: parts.date,
+        enqueued: deliveries.length > 0 && deliveries.every((item) => item.daily),
+      },
       friday: {
         digestDate: fridayDate,
         weekStart: weekStartOf(parts.date),
-        enqueued: lookup(fridayCloseoutKey(parts.date)),
+        enqueued: deliveries.length > 0 && deliveries.every((item) => item.friday),
       },
+      deliveries,
     };
   }
 

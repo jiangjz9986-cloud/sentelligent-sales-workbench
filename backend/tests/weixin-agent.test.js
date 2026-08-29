@@ -8,6 +8,7 @@ import { openDatabase } from "../src/db.js";
 import { createServer } from "../src/server.js";
 import { createSalesWorkbenchWeixinAgent } from "../src/weixin/agentBridge.js";
 import { minimalPdf, VALID_PNG } from "./helpers/image-fixtures.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const tempDirectories = [];
 
@@ -613,14 +614,15 @@ describe("weixin sales workbench agent", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "sentelligent-weixin-b4-"));
     tempDirectories.push(tempDir);
     const databaseUrl = join(tempDir, "b4.sqlite");
-    const owner = "assistant-owner";
+    const owner = "assistantowner";
     const sender = "sender-1";
     const machineToken = ["b4", "machine", "test", "token"].join("-");
     const seedDb = openDatabase({ databaseUrl });
     seedDb.exec(`
       INSERT INTO customers (id, name, region, type, level, owner)
-      VALUES ('customer-b4-1', '黄岛人民医院', '青岛', '医院', 'B', 'assistant-owner');
+      VALUES ('customer-b4-1', '黄岛人民医院', '青岛', '医院', 'B', 'assistantowner');
     `);
+    seedWeixinBinding(seedDb, { account: owner, senderId: sender, financialEnabled: true });
     seedDb.close();
     const server = createServer({
       databaseUrl,

@@ -57,8 +57,7 @@ function validateAlertInput(body) {
 
 export function createOpsAlertService({
   outboxRepository,
-  resolveOwner,
-  resolveConversationId,
+  resolveDeliveries,
   weixinDeliveryReady,
   pushplusNotify = null,
   recordAudit = null,
@@ -67,8 +66,8 @@ export function createOpsAlertService({
   if (!outboxRepository || typeof outboxRepository.enqueue !== "function") {
     throw new TypeError("outboxRepository is required");
   }
-  if (typeof resolveOwner !== "function" || typeof resolveConversationId !== "function") {
-    throw new TypeError("owner and conversation resolvers are required");
+  if (typeof resolveDeliveries !== "function") {
+    throw new TypeError("resolveDeliveries is required");
   }
   if (typeof weixinDeliveryReady !== "function") throw new TypeError("weixinDeliveryReady is required");
   if (pushplusNotify !== null && typeof pushplusNotify !== "function") {
@@ -102,25 +101,45 @@ export function createOpsAlertService({
     let item;
     let delivery;
     let pushplusFallback = false;
+    // v0.9.3 多播：目标=active admin 绑定（告警非订阅内容，无视 digest_enabled）；
+    // 幂等键加 owner 后缀。无 admin 绑定时落 PushPlus 兜底分支。
+    let targets = [];
     if (weixinDeliveryReady()) {
-      const owner = resolveOwner();
-      let queued;
       try {
-        queued = outboxRepository.enqueue({
-          owner,
-          conversationId: resolveConversationId(owner),
-          idempotencyKey,
-          payload,
-        });
-      } catch (error) {
-        // Same source within the same hour but with different content (for
-        // example a fresh journal tail): the hour gate must still hold, so
-        // report a replay instead of surfacing the outbox idempotency 409.
-        if (error?.code !== "WEIXIN_OUTBOX_IDEMPOTENCY_CONFLICT") throw error;
-        queued = null;
+        targets = (resolveDeliveries() ?? [])
+          .map((target) => ({
+            owner: String(target?.account ?? target?.owner ?? "").trim(),
+            conversationId: String(target?.conversationId ?? "").trim(),
+          }))
+          .filter((target) => target.owner && target.conversationId);
+      } catch {
+        targets = [];
       }
-      item = queued
-        ? { id: queued.id, status: queued.status, replayed: Boolean(queued.replayed) }
+    }
+    if (targets.length > 0) {
+      let firstQueued = null;
+      let anyNew = false;
+      for (const target of targets) {
+        let queued;
+        try {
+          queued = outboxRepository.enqueue({
+            owner: target.owner,
+            conversationId: target.conversationId,
+            idempotencyKey: `${idempotencyKey}:${target.owner}`,
+            payload,
+          });
+        } catch (error) {
+          // Same source within the same hour but with different content (for
+          // example a fresh journal tail): the hour gate must still hold, so
+          // report a replay instead of surfacing the outbox idempotency 409.
+          if (error?.code !== "WEIXIN_OUTBOX_IDEMPOTENCY_CONFLICT") throw error;
+          queued = null;
+        }
+        if (queued && !queued.replayed) anyNew = true;
+        if (queued && !firstQueued) firstQueued = queued;
+      }
+      item = firstQueued
+        ? { id: firstQueued.id, status: firstQueued.status, replayed: !anyNew }
         : { id: null, status: "deduplicated", replayed: true };
       delivery = "weixin_outbox";
     } else {

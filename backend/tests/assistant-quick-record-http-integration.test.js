@@ -71,16 +71,16 @@ async function startServer(overrides = {}) {
     seed: false,
     nodeEnv: "test",
     authRequired: true,
-    authAccount: "assistant-owner",
+    authAccount: "assistantowner",
     authPassword: "",
     authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
     authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
     authCookieSecure: false,
     weixinAgentApiToken: machineToken,
-    weixinAgentOwner: "assistant-owner",
+    weixinAgentOwner: "assistantowner",
     weixinAllowedSenderIds: "sender-1,sender-2",
     weixinAllowGroups: false,
-    weixinBookkeepingOwner: "assistant-owner",
+    weixinBookkeepingOwner: "assistantowner",
     weixinBookkeepingSenderId: "sender-1",
     weixinBookkeepingConfirmationEnabled: true,
     assistantClock: () => new Date(nowMs),
@@ -97,7 +97,7 @@ beforeEach(async () => {
   withDb((db) => {
     db.exec(`
       INSERT INTO customers (id, name, region, type, level, owner)
-      VALUES ('customer-seeded-1', '日照中医医院', '日照', '医院', 'A', 'assistant-owner');
+      VALUES ('customer-seeded-1', '日照中医医院', '日照', '医院', 'A', 'assistantowner');
     `);
   });
   await startServer();
@@ -118,7 +118,7 @@ function seedRecord(db, id, {
 } = {}) {
   db.prepare(`
     INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, status)
-    VALUES ($id, 'assistant-owner', $rawContent, $occurredAt, '微信助手', $customerId, $status)
+    VALUES ($id, 'assistantowner', $rawContent, $occurredAt, '微信助手', $customerId, $status)
   `).run({ $id: id, $rawContent: rawContent, $occurredAt: occurredAt, $customerId: customerId, $status: status });
   db.prepare(`
     INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
@@ -171,7 +171,7 @@ describe("quick-record agent HTTP boundary", () => {
     withDb((db) => {
       const row = db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: pending.body.actionId });
       assert.ok(row, "the pending action id is the durable record key");
-      assert.equal(row.owner, "assistant-owner");
+      assert.equal(row.owner, "assistantowner");
       assert.equal(row.source_channel, "微信助手");
       assert.equal(row.customer_id, "customer-seeded-1");
       assert.equal(row.status, "analyzed");
@@ -185,7 +185,7 @@ describe("quick-record agent HTTP boundary", () => {
       // source_channel='微信助手' analyzed records flow into the weekly report
       // preview pool without a manual weekly confirmation.
       const snapshot = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date(nowMs) });
-      const summary = snapshot.salesReportSummary({ owner: "assistant-owner", weekStart: "2026-08-24" });
+      const summary = snapshot.salesReportSummary({ owner: "assistantowner", weekStart: "2026-08-24" });
       assert.equal(summary.preview.sourceRecordCount, 1, "the captured record enters the weekly preview pool");
     });
   });
@@ -381,7 +381,7 @@ describe("quick-record agent HTTP boundary", () => {
     withDb((db) => {
       const row = db.prepare("SELECT voided_at, voided_by, void_reason, version FROM quick_records WHERE id = 'record-void-ddd444'").get();
       assert.ok(row.voided_at, "voided_at is finally written");
-      assert.equal(row.voided_by, "assistant-owner");
+      assert.equal(row.voided_by, "assistantowner");
       assert.equal(row.void_reason, "weixin-assistant-void");
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'quick_record.void'").get().count, 1);
     });

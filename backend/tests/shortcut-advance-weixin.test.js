@@ -6,10 +6,10 @@ import { afterEach, beforeEach, test } from "node:test";
 
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
-import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const machineHeaderValue = "advance-machine-credential";
-const owner = "advance-owner";
+const owner = "advanceowner";
 const sender = "advance-sender";
 const confirmationMaterial = "advance-weixin-confirmation-material-123456";
 
@@ -57,7 +57,7 @@ async function workerReady() {
     Authorization: `Bearer ${machineHeaderValue}`,
       "X-Weixin-Worker-Id": "advance-test-worker",
       "X-Weixin-Delivery-Status": "ready",
-      "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(owner, sender),
+      "X-Weixin-Delivery-Scope": "weixin:multi:v1",
     },
   });
 }
@@ -68,7 +68,7 @@ async function lease() {
     Authorization: `Bearer ${machineHeaderValue}`,
       "X-Weixin-Worker-Id": "advance-test-worker",
       "X-Weixin-Delivery-Status": "ready",
-      "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(owner, sender),
+      "X-Weixin-Delivery-Scope": "weixin:multi:v1",
     },
   });
   assert.equal(result.response.status, 200);
@@ -123,6 +123,14 @@ beforeEach(async () => {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
+  {
+    const seedDb = openDatabase({ databaseUrl: join(dir, "assistant.sqlite") });
+    try {
+      seedWeixinBinding(seedDb, { account: owner, senderId: sender, financialEnabled: true });
+    } finally {
+      seedDb.close();
+    }
+  }
   assert.equal((await workerReady()).response.status, 204);
 });
 

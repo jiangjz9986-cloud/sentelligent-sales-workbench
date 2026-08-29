@@ -192,17 +192,10 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!config.weixinAgentOwner) {
     throw new Error("WEIXIN_AGENT_OWNER is required in production");
   }
-  if (config.weixinBookkeepingConfirmationEnabled) {
-    if (!config.weixinBookkeepingSenderId) {
-      throw new Error("WEIXIN_BOOKKEEPING_SENDER_ID is required when WeChat bookkeeping confirmation is enabled");
-    }
-    if (!config.weixinAllowedSenderIds.includes(config.weixinBookkeepingSenderId)) {
-      throw new Error("WEIXIN_BOOKKEEPING_SENDER_ID must be present in WEIXIN_ALLOWED_SENDER_IDS");
-    }
-    if (config.weixinBookkeepingOwner !== config.weixinAgentOwner) {
-      throw new Error("WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER in production");
-    }
-  }
+  // v0.9.3：WEIXIN_BOOKKEEPING_SENDER_ID/OWNER 与 WEIXIN_ALLOWED_SENDER_IDS 的三条
+  // 硬校验退役——sender 白名单与业务归属由 weixin_bindings 表承载（运行时
+  // ensureBootstrapBinding + bindings 巡检字段替代），三枚 env 键保留一版仅供
+  // bootstrap 种子，v1.0.0-rc 连同键值一起退役。
   if (config.hospitalTenderSyncToken && !isStrongIndependentSecret(config.hospitalTenderSyncToken)) {
     throw new Error("HOSPITAL_TENDER_SYNC_TOKEN must contain at least 32 bytes of high-entropy data in production");
   }

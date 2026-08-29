@@ -70,16 +70,16 @@ async function startServer(overrides = {}) {
     seed: false,
     nodeEnv: "test",
     authRequired: true,
-    authAccount: "assistant-owner",
+    authAccount: "assistantowner",
     authPassword: "",
     authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
     authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
     authCookieSecure: false,
     weixinAgentApiToken: machineToken,
-    weixinAgentOwner: "assistant-owner",
+    weixinAgentOwner: "assistantowner",
     weixinAllowedSenderIds: "sender-1,sender-2",
     weixinAllowGroups: false,
-    weixinBookkeepingOwner: "assistant-owner",
+    weixinBookkeepingOwner: "assistantowner",
     weixinBookkeepingSenderId: "sender-1",
     weixinBookkeepingConfirmationEnabled: true,
     assistantClock: () => new Date(nowMs),
@@ -97,7 +97,7 @@ beforeEach(async () => {
   withDb((db) => {
     db.exec(`
       INSERT INTO customers (id, name, region, type, level, owner)
-      VALUES ('customer-seeded-1', '日照中医医院', '日照', '医院', 'A', 'assistant-owner');
+      VALUES ('customer-seeded-1', '日照中医医院', '日照', '医院', 'A', 'assistantowner');
     `);
   });
   await startServer();
@@ -138,7 +138,7 @@ describe("todo agent HTTP boundary", () => {
     withDb((db) => {
       const row = db.prepare("SELECT * FROM action_items WHERE id = $id").get({ $id: pending.body.actionId });
       assert.ok(row, "the pending action id is the durable todo key");
-      assert.equal(row.owner, "assistant-owner");
+      assert.equal(row.owner, "assistantowner");
       assert.equal(row.remind_at, "2026-08-29T02:00:00.000Z");
       assert.equal(row.status, "pending");
       assert.equal(row.source_record_id, null);
@@ -170,7 +170,7 @@ describe("todo agent HTTP boundary", () => {
     withDb((db) => {
       db.exec(`
         INSERT INTO action_items (id, title, owner, remind_at, priority)
-        VALUES ('todo-seeded-abc123', '给王工送方案', 'assistant-owner', '2026-08-28T06:00:00.000Z', '中');
+        VALUES ('todo-seeded-abc123', '给王工送方案', 'assistantowner', '2026-08-28T06:00:00.000Z', '中');
       `);
     });
 
@@ -200,7 +200,7 @@ describe("todo agent HTTP boundary", () => {
     withDb((db) => {
       db.exec(`
         INSERT INTO action_items (id, title, owner, remind_at, reminded_at)
-        VALUES ('todo-defer-def456', '回访张主任', 'assistant-owner', '2026-08-28T01:00:00.000Z', '2026-08-28T01:30:00.000Z');
+        VALUES ('todo-defer-def456', '回访张主任', 'assistantowner', '2026-08-28T01:00:00.000Z', '2026-08-28T01:30:00.000Z');
       `);
     });
     const deferPending = await send("todo-defer-1", { conversationId: "conversation-write-2", text: "待办 def456 推迟到明天上午" });
@@ -265,7 +265,7 @@ describe("todo agent HTTP boundary", () => {
     withDb((db) => {
       db.exec(`
         INSERT INTO action_items (id, title, owner, remind_at, priority, reason)
-        VALUES ('todo-remind-xyz789', '给王工送方案', 'assistant-owner', '2026-08-28T01:00:00.000Z', '高', '存在竞标风险');
+        VALUES ('todo-remind-xyz789', '给王工送方案', 'assistantowner', '2026-08-28T01:00:00.000Z', '高', '存在竞标风险');
       `);
     });
     const first = await server.actionReminderScheduler.runOnce();

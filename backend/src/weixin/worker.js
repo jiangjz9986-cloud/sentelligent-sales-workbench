@@ -1,14 +1,14 @@
 import { createHmac } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { assertWeixinSenderAllowed } from "../assistant/weixinEvent.js";
+import { assertWeixinGroupAllowed } from "../assistant/weixinEvent.js";
 import { loadConfig } from "../config.js";
-import {
-  isShortcutBookkeepingDeliveryScope,
-  shortcutBookkeepingConversationId,
-} from "./bookkeepingDeliveryScope.js";
+import { shortcutBookkeepingConversationId } from "./bookkeepingDeliveryScope.js";
 import { createRemoteClawbotAgent } from "./remoteAgent.js";
 import { createWeixinOutboxHttpClient, runWeixinOutboxPump } from "./outboxWorker.js";
+
+// v0.9.3 多绑定就绪哨兵：目标可达性判定移到逐条投递期，不再有全局唯一 scope。
+const WEIXIN_MULTI_DELIVERY_SCOPE = "weixin:multi:v1";
 
 function backendUrlFromConfig(config) {
   return config.weixinAgentBackendUrl || `http://${config.host}:${config.port}`;
@@ -51,13 +51,29 @@ export function deriveWeixinProviderClientId(deliveryKey, outboxId) {
     .digest("hex")}`;
 }
 
+// v0.9.3：sender 白名单入 DB（bindings 表），worker 不再本地判 sender——未绑定
+// sender 的消息交由后端入口闸回固定绑定引导；群规则本地保留（生产强制无群）。
 function isInboundAllowed(config, metadata) {
   try {
-    assertWeixinSenderAllowed(config, metadata);
+    assertWeixinGroupAllowed(config, metadata);
     return true;
   } catch (error) {
-    if (["WEIXIN_SENDER_NOT_ALLOWED", "WEIXIN_GROUP_NOT_ALLOWED"].includes(error?.code)) return false;
+    if (error?.code === "WEIXIN_GROUP_NOT_ALLOWED") return false;
     throw error;
+  }
+}
+
+// 第二道保险（§4.2）：worker 本地重算 hash(owner, targetSenderId)，要求与
+// deliveryScope、conversationId 三者一致；不满足（后端伪造/错配/缺目标）即
+// fail-closed 终态 WEIXIN_DELIVERY_SCOPE_MISMATCH。
+export function authorizeWeixinBoundDelivery(item) {
+  try {
+    const target = typeof item?.targetSenderId === "string" ? item.targetSenderId.trim() : "";
+    if (!target) return false;
+    const recomputed = shortcutBookkeepingConversationId(item.owner, target);
+    return recomputed === item.deliveryScope && item.deliveryScope === item.conversationId;
+  } catch {
+    return false;
   }
 }
 
@@ -105,60 +121,44 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
     deliveryKey,
     authorizeInbound: (metadata) => isInboundAllowed(config, metadata),
   });
-  const configuredBookkeepingDeliveryScope = config.weixinBookkeepingConfirmationEnabled
-    && config.weixinBookkeepingOwner
-    && config.weixinBookkeepingSenderId
-    && isInboundAllowed(config, {
-      senderId: config.weixinBookkeepingSenderId,
-      chatType: "direct",
-    })
-    ? {
-        owner: config.weixinBookkeepingOwner,
-        senderId: config.weixinBookkeepingSenderId,
-      }
-    : null;
+  // v0.9.3：env 绑定闭包退役。ready = 登录态 ∧ SDK 支持定向投递 ∧ runtime 确认面
+  // 启用；recipient_mismatch 三态原因退役为逐条投递期判定（一个不可达目标不再
+  // 全局熄火）。
   const sdkSupportsBoundDelivery = typeof bot.getDeliveryStatus === "function"
     && typeof bot.isDeliveryTarget === "function"
     && typeof bot.sendMessageTo === "function";
-  const deliveryTargetMatches = () => {
-    if (!configuredBookkeepingDeliveryScope || !sdkSupportsBoundDelivery) return false;
-    try {
-      return bot.isDeliveryTarget(configuredBookkeepingDeliveryScope.senderId) === true;
-    } catch {
-      return false;
-    }
-  };
-  const bookkeepingDeliveryScope = deliveryTargetMatches()
-    ? configuredBookkeepingDeliveryScope
-    : null;
-  const bookkeepingDeliveryScopeId = bookkeepingDeliveryScope
-    ? shortcutBookkeepingConversationId(
-        bookkeepingDeliveryScope.owner,
-        bookkeepingDeliveryScope.senderId,
-      )
-    : null;
   const outboxBot = {
-    async sendMessage(message, outboxId) {
-      if (!bookkeepingDeliveryScope || !deliveryTargetMatches()) {
+    async sendMessage(message, outboxId, { targetSenderId } = {}) {
+      const target = typeof targetSenderId === "string" ? targetSenderId.trim() : "";
+      if (!sdkSupportsBoundDelivery || !target) {
         const error = new Error("WeChat proactive delivery target is not bound");
         error.code = "WEIXIN_DELIVERY_SCOPE_MISMATCH";
         throw error;
       }
-      return bot.sendMessageTo(bookkeepingDeliveryScope.senderId, message, {
+      let reachable = false;
+      try {
+        reachable = bot.isDeliveryTarget(target) === true;
+      } catch {
+        reachable = false;
+      }
+      if (!reachable) {
+        // 联系人同步中/对方暂不可达不应终态：可重试，8 次耗尽自然 failed。
+        const error = new Error("WeChat delivery target is not reachable yet");
+        error.code = "WEIXIN_CONTEXT_NOT_READY";
+        throw error;
+      }
+      return bot.sendMessageTo(target, message, {
         clientId: deriveWeixinProviderClientId(deliveryKey, outboxId),
       });
     },
     getDeliveryStatus() {
-      if (!configuredBookkeepingDeliveryScope) {
+      if (!config.weixinBookkeepingConfirmationEnabled) {
         return { ready: false, status: "not_ready", reason: "bookkeeping_not_configured" };
       }
       if (!sdkSupportsBoundDelivery) {
         return { ready: false, status: "not_ready", reason: "sdk_status_unavailable" };
       }
-      if (!bookkeepingDeliveryScope || !deliveryTargetMatches()) {
-        return { ready: false, status: "not_ready", reason: "recipient_mismatch" };
-      }
-      return { ...bot.getDeliveryStatus(), deliveryScope: bookkeepingDeliveryScopeId };
+      return { ...bot.getDeliveryStatus(), deliveryScope: WEIXIN_MULTI_DELIVERY_SCOPE };
     },
   };
   process.stdout.write(`WeChat worker started. Backend: ${backendUrlFromConfig(config)}\n`);
@@ -172,10 +172,7 @@ export async function runWeixinWorker(argv = process.argv.slice(2), options = {}
   const pump = runWeixinOutboxPump({
     client: outboxClient,
     bot: outboxBot,
-    authorizeDelivery: (item) => isShortcutBookkeepingDeliveryScope(
-      item,
-      bookkeepingDeliveryScope ?? {},
-    ),
+    authorizeDelivery: authorizeWeixinBoundDelivery,
     pollMs: config.weixinOutboxPollMs,
     abortSignal: pumpAbort.signal,
     log: (message) => process.stdout.write(`${message}\n`),

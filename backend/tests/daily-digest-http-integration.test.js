@@ -52,7 +52,7 @@ function workerHeaders() {
     Authorization: `Bearer ${machineToken}`,
     "X-Weixin-Worker-Id": "digest-test-worker",
     "X-Weixin-Delivery-Status": "ready",
-    "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(OWNER, "sender-1"),
+    "X-Weixin-Delivery-Scope": "weixin:multi:v1",
   };
 }
 
@@ -158,10 +158,13 @@ describe("digest HTTP surface", () => {
       assert.equal(JSON.parse(audit[0].metadata_json).manual, true);
     });
 
-    // The delivery worker leases the row and receives the rendered card.
+    // The delivery worker leases the row and receives the rendered card plus
+    // the v0.9.3 multi-target fields.
     const leased = await request("/api/integrations/weixin-agent/confirmation-outbox", { headers: workerHeaders() });
     assert.equal(leased.response.status, 200);
     assert.ok(leased.body.leaseToken);
+    assert.equal(leased.body.item.targetSenderId, "sender-1");
+    assert.equal(leased.body.item.deliveryScope, shortcutBookkeepingConversationId(OWNER, "sender-1"));
     assert.ok(leased.body.item.message.startsWith("【小小晨报】08-28 周五"));
     assert.ok(leased.body.item.message.includes("■ 今日行程（1 站）"));
   });
@@ -170,9 +173,9 @@ describe("digest HTTP surface", () => {
     nowMs = Date.parse("2026-08-28T01:00:00.000Z"); // 09:00 Asia/Shanghai
     const first = await server.dailyDigestScheduler.runOnce();
     assert.equal(first.status, "success");
-    assert.equal(first.daily.status, "sent");
+    assert.deepEqual(first.daily.map((item) => [item.owner, item.status]), [[OWNER, "sent"]]);
     const second = await server.dailyDigestScheduler.runOnce();
-    assert.equal(second.daily.status, "already_sent");
+    assert.deepEqual(second.daily.map((item) => [item.owner, item.status]), [[OWNER, "already_sent"]]);
     withDb((db) => {
       const rows = db.prepare("SELECT payload_json FROM weixin_confirmation_outbox").all();
       assert.equal(rows.length, 1);

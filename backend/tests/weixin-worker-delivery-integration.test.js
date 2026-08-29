@@ -7,8 +7,9 @@ import test from "node:test";
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 import { start as startVendoredWeixin } from "../vendor/weixin-agent-sdk/dist/index.mjs";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
-const owner = "synthetic-owner";
+const owner = "syntheticowner";
 const sender = "synthetic-weixin-user";
 const machineCredential = ["synthetic", "machine", "credential"].join("-");
 const contextCredential = ["synthetic", "context", "credential", "never-log"].join("-");
@@ -77,6 +78,14 @@ test("worker restores the encrypted context token after restart and delivers a r
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const baseUrl = `http://127.0.0.1:${server.address().port}`;
+    {
+      const seedDb = openDatabase({ databaseUrl: join(tempDir, "backend.sqlite") });
+      try {
+        seedWeixinBinding(seedDb, { account: owner, senderId: sender, financialEnabled: true });
+      } finally {
+        seedDb.close();
+      }
+    }
     const workerConfig = {
       nodeEnv: "test",
       authRequired: false,

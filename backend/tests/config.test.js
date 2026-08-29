@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { loadConfig } from "../src/config.js";
-import { assertWeixinSenderAllowed } from "../src/assistant/weixinEvent.js";
+import { assertWeixinGroupAllowed } from "../src/assistant/weixinEvent.js";
 
 describe("backend model configuration", () => {
   it("loads model provider settings from backend env without changing the public default", () => {
@@ -193,12 +193,22 @@ describe("backend model configuration", () => {
     );
     assert.throws(() => loadConfig({ ...valid, ASSISTANT_CONFIRMATION_SECRET: validSessionSecret }), /independent|ASSISTANT_CONFIRMATION_SECRET/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_AGENT_API_TOKEN: validSessionSecret }), /independent|WEIXIN_AGENT_API_TOKEN/);
+    // v0.9.3：sender 白名单退役为 bootstrap 种子键（运行时 sender 过滤由 weixin_bindings
+    // 表承担，入口对未绑定 sender 固定拒答）；群闸语义原样保留。
     const unbound = loadConfig({ ...valid, WEIXIN_ALLOWED_SENDER_IDS: "" });
     assert.deepEqual(unbound.weixinAllowedSenderIds, []);
     assert.throws(
-      () => assertWeixinSenderAllowed(unbound, { senderId: "not-yet-bound", chatType: "direct" }),
-      (error) => error?.code === "WEIXIN_SENDER_NOT_ALLOWED",
+      () => assertWeixinGroupAllowed(unbound, { senderId: "any-sender", chatType: "group", groupId: "g-1" }),
+      (error) => error?.code === "WEIXIN_GROUP_NOT_ALLOWED",
     );
+    // 三条 BOOKKEEPING 生产硬校验退役：开启确认面但 env 键缺失/不一致不再拒启动。
+    const bindingTableEra = loadConfig({
+      ...valid,
+      WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED: "true",
+      WEIXIN_BOOKKEEPING_SENDER_ID: "",
+      WEIXIN_BOOKKEEPING_OWNER: "someoneelse",
+    });
+    assert.equal(bindingTableEra.weixinBookkeepingConfirmationEnabled, true);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOW_GROUPS: "true" }), /WEIXIN_ALLOW_GROUPS/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_ALLOWED_GROUP_IDS: "production-group" }), /WEIXIN_ALLOWED_GROUP_IDS/);
 

@@ -9,6 +9,7 @@ import { openDatabase } from "../src/db.js";
 import { createServer } from "../src/server.js";
 import { runWeixinWorker } from "../src/weixin/worker.js";
 import { normalizeInboundUpdate } from "../vendor/weixin-agent-sdk/dist/index.mjs";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 function syntheticLabel(...parts) {
   return parts.join("-");
@@ -37,7 +38,7 @@ function serverOptions(databaseUrl, seed) {
     authRequired: false,
     authSessionSecret: sessionSecret,
     weixinAgentApiToken: machineToken,
-    weixinAgentOwner: "closure-owner",
+    weixinAgentOwner: "closureowner",
     weixinAllowedSenderIds: `${senderA},${senderB}`,
     weixinAllowGroups: true,
     weixinAllowedGroupIds: groupId,
@@ -134,6 +135,16 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     const databaseUrl = join(tempDir, "closure.sqlite");
     server = createServer(serverOptions(databaseUrl, true));
     const baseUrl = await listen(server);
+    {
+      // v0.9.3：两 sender 各自绑定各自账号（一账号至多一条 active 绑定）。
+      const seedDb = openDatabase({ databaseUrl });
+      try {
+        seedWeixinBinding(seedDb, { account: "closureowner", senderId: senderA });
+        seedWeixinBinding(seedDb, { account: "closurepeer", senderId: senderB });
+      } finally {
+        seedDb.close();
+      }
+    }
 
     const starts = [];
     let processLogs = "";
@@ -214,8 +225,8 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
 
     let db = openDatabase({ databaseUrl });
     try {
-      assert.equal(count(db, "SELECT COUNT(*) AS count FROM quick_records WHERE owner = 'closure-owner'"), 1);
-      assert.equal(count(db, "SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE owner = 'closure-owner' AND tool_name = 'visit-capture.confirm' AND status = 'completed'"), 1);
+      assert.equal(count(db, "SELECT COUNT(*) AS count FROM quick_records WHERE owner = 'closureowner'"), 1);
+      assert.equal(count(db, "SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE owner = 'closureowner' AND tool_name = 'visit-capture.confirm' AND status = 'completed'"), 1);
     } finally {
       db.close();
     }
@@ -224,8 +235,8 @@ describe("vendored WeChat worker to HTTP SQLite confirmation closure", () => {
     assert.deepEqual(replay.reply, confirmed.reply);
     db = openDatabase({ databaseUrl });
     try {
-      assert.equal(count(db, "SELECT COUNT(*) AS count FROM quick_records WHERE owner = 'closure-owner'"), 1);
-      assert.equal(count(db, "SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE owner = 'closure-owner' AND tool_name = 'visit-capture.confirm'"), 1);
+      assert.equal(count(db, "SELECT COUNT(*) AS count FROM quick_records WHERE owner = 'closureowner'"), 1);
+      assert.equal(count(db, "SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE owner = 'closureowner' AND tool_name = 'visit-capture.confirm'"), 1);
     } finally {
       db.close();
     }

@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { createServer } from "../src/server.js";
-import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
+import { createConnection } from "../src/db/connection.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const opsToken = ["fixture", "ops", "monitor", "token"].join("-");
 const weixinToken = ["fixture", "weixin", "agent", "token"].join("-");
-const owner = "ops-owner";
+const owner = "opsowner";
 const sender = "ops-sender";
 
 let tempDir;
@@ -44,6 +45,14 @@ beforeEach(async () => {
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
+  {
+    const db = createConnection({ databaseUrl: join(tempDir, "ops-status.sqlite") });
+    try {
+      seedWeixinBinding(db, { account: owner, senderId: sender, role: "admin" });
+    } finally {
+      db.close();
+    }
+  }
 });
 
 afterEach(async () => {
@@ -88,6 +97,8 @@ describe("ops alerts status endpoint", () => {
     // No worker has reported yet: the 30s stale window reads as unavailable.
     assert.equal(item.weixinDelivery.status, "not_ready");
     assert.equal(item.weixinDelivery.reason, "worker_unavailable");
+    // v0.9.3 巡检字段：active 绑定计数供 bindings=0 告警。
+    assert.deepEqual(item.weixinBindings, { active: 1 });
     for (const name of ["hospitalTender", "actionReminders", "dailyDigest"]) {
       assert.ok(item.schedulers[name], name);
       assert.ok(Object.hasOwn(item.schedulers[name], "lastError"), name);
@@ -114,7 +125,7 @@ describe("ops alerts status endpoint", () => {
       headers: {
         Authorization: `Bearer ${weixinToken}`,
         "X-Weixin-Delivery-Status": "ready",
-        "X-Weixin-Delivery-Scope": shortcutBookkeepingConversationId(owner, sender),
+        "X-Weixin-Delivery-Scope": "weixin:multi:v1",
       },
     });
     assert.equal(workerReport.status, 200);

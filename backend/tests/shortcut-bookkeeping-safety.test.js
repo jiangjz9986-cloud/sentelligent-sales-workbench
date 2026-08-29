@@ -177,14 +177,24 @@ function makeRuntimeHarness({
     db,
     config: {
       weixinBookkeepingConfirmationEnabled: true,
-      weixinBookkeepingSenderId: "sender-1",
-      weixinBookkeepingOwner: "assistant-owner",
-      weixinAllowedSenderIds: ["sender-1"],
     },
     shortcutBookkeepingRepository,
     pendingActionRepository,
     sessionRepository: {},
     outboxRepository,
+    // v0.9.3：owner/senderId 闭包退役，绑定桩是唯一事实源。
+    bindingsRepository: {
+      hasActive: () => true,
+      activeByAccount: (account) => (account === "assistant-owner"
+        ? {
+            senderId: "sender-1",
+            account,
+            financialEnabled: true,
+            digestEnabled: true,
+            status: "active",
+          }
+        : null),
+    },
     confirmationSecret: fixtureMaterial,
   });
 

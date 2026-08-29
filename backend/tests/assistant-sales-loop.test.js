@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 function fixtureLabel(...parts) {
   return parts.join("-");
@@ -149,6 +150,15 @@ beforeEach(async () => {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
   sequence = 0;
+  {
+    // v0.9.3：微信事件 owner 由绑定表解析。
+    const seedDb = openDatabase({ databaseUrl });
+    try {
+      seedWeixinBinding(seedDb, { account: owner, senderId });
+    } finally {
+      seedDb.close();
+    }
+  }
 
   const login = await rawRequest("/api/auth/login", {
     method: "POST",
@@ -333,13 +343,16 @@ describe("小小一天销售闭环 HTTP 验收矩阵", () => {
     assert.match(hiddenProject.body.text, /未找到该商机/);
     assert.doesNotMatch(hiddenProject.body.text, /other-owner-opportunity/);
 
+    // v0.9.3：未绑定 sender 在入口即固定拒答（200 denied，不入编排、零能力）。
     const deniedSender = await machineEvent(
       "战情总览",
       `loop-${++sequence}-sender-denied`,
       { senderId: "not-allowlisted-sender" },
     );
-    assert.equal(deniedSender.response.status, 403);
-    assert.equal(deniedSender.body.error.code, "WEIXIN_SENDER_NOT_ALLOWED");
+    assert.equal(deniedSender.response.status, 200);
+    assert.equal(deniedSender.body.status, "denied");
+    assert.match(deniedSender.body.text, /尚未绑定工作台账号/u);
+    assert.doesNotMatch(deniedSender.body.text, /战情|总览/u);
 
     const machineWrite = await rawRequest("/api/travel-expenses", {
       method: "POST",

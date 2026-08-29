@@ -41,7 +41,10 @@ afterEach(async () => {
 
 function makeBuilder(overrides = {}) {
   const clock = () => new Date(NOW);
-  const resolveBusinessOwner = createBusinessOwnerResolver({ businessOwner: OWNER });
+  // v0.9.3：resolver 改查绑定表——桩以"仅 OWNER 有 active 绑定"复现闭合语义。
+  const resolveBusinessOwner = createBusinessOwnerResolver({
+    hasActiveBinding: (account) => account === OWNER,
+  });
   return createDigestContentBuilder({
     db,
     snapshotAdapter: createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner }),

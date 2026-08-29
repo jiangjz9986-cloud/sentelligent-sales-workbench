@@ -55,10 +55,12 @@ describe("WeChat worker wiring", () => {
       senderId: "sender-1",
       chatType: "direct",
     }), true);
+    // v0.9.3：sender 白名单入 DB——worker 放行全部私聊（未绑定者由后端入口闸
+    // 回固定绑定引导）；群规则本地保留。
     assert.equal(capturedStarts[0].options.authorizeInbound({
       senderId: "unlisted-sender",
       chatType: "direct",
-    }), false);
+    }), true);
     assert.equal(capturedStarts[0].options.authorizeInbound({
       senderId: "sender-1",
       chatType: "group",
@@ -118,7 +120,7 @@ describe("WeChat worker wiring", () => {
     }
   });
 
-  it("binds an outbox lease to the configured SDK recipient before sending", async () => {
+  it("delivers a leased item to the lease-designated target after re-verifying the hash", async () => {
     let releaseWait;
     const waitForAck = new Promise((resolve) => { releaseWait = resolve; });
     const sent = [];
@@ -147,6 +149,7 @@ describe("WeChat worker wiring", () => {
               owner: "assistant-owner",
               conversationId: shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
               deliveryScope: shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
+              targetSenderId: "sender-1",
               message: "synthetic bookkeeping draft",
             },
             leaseToken: syntheticLabel("lease", "bound"),
@@ -175,9 +178,6 @@ describe("WeChat worker wiring", () => {
         weixinAgentBackendUrl: "https://sales.example.test",
         weixinAgentOwner: "assistant-owner",
         weixinBookkeepingConfirmationEnabled: true,
-        weixinBookkeepingOwner: "assistant-owner",
-        weixinBookkeepingSenderId: "sender-1",
-        weixinAllowedSenderIds: ["sender-1"],
       },
     });
     assert.equal(sent.length, 1);
@@ -191,25 +191,94 @@ describe("WeChat worker wiring", () => {
       deriveWeixinProviderClientId(deliveryKey, "outbox-bound"),
     );
     assert.match(sent[0].options.clientId, /^sentelligent:[0-9a-f]{64}$/u);
+    // v0.9.3 协议 v2：多绑定就绪哨兵取代唯一 scope 回显。
     const leaseRequest = requests.find(({ options }) => options.method === "GET");
     assert.equal(leaseRequest.options.headers["X-Weixin-Delivery-Status"], "ready");
-    assert.equal(
-      leaseRequest.options.headers["X-Weixin-Delivery-Scope"],
-      shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
-    );
+    assert.equal(leaseRequest.options.headers["X-Weixin-Delivery-Scope"], "weixin:multi:v1");
   });
 
-  it("reports recipient mismatch and never sends or acknowledges a leased message", async () => {
+  it("terminally rejects a tampered lease target and acks unreachable targets as retryable", async () => {
+    const acks = [];
+    let phase = "tampered";
+    let releaseWait;
+    const waitForAcks = new Promise((resolve) => { releaseWait = resolve; });
+    let sendCalls = 0;
+    const sdk = {
+      start() {
+        return {
+          getDeliveryStatus() { return { ready: true, status: "ready" }; },
+          // 联系人列表尚未同步：目标暂不可达。
+          isDeliveryTarget() { return false; },
+          async sendMessageTo() { sendCalls += 1; },
+          async wait() { await waitForAcks; },
+        };
+      },
+    };
+    const leaseBody = (targetSenderId) => JSON.stringify({
+      item: {
+        id: `outbox-${phase}`,
+        owner: "assistant-owner",
+        conversationId: shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
+        deliveryScope: shortcutBookkeepingConversationId("assistant-owner", "sender-1"),
+        ...(targetSenderId ? { targetSenderId } : {}),
+        message: "synthetic bookkeeping draft",
+      },
+      leaseToken: syntheticLabel("lease", phase),
+    });
+    await runWeixinWorker(["start"], {
+      sdk,
+      fetchImpl: async (url, options) => {
+        if (options.method === "GET") {
+          if (phase === "tampered") return new Response(leaseBody("sender-forged"), { status: 200, headers: { "Content-Type": "application/json" } });
+          if (phase === "unreachable") return new Response(leaseBody("sender-1"), { status: 200, headers: { "Content-Type": "application/json" } });
+          return new Response(null, { status: 204 });
+        }
+        const body = JSON.parse(options.body);
+        if (body.check === true) {
+          return new Response(JSON.stringify({ current: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        acks.push(body);
+        phase = phase === "tampered" ? "unreachable" : "drained";
+        if (acks.length === 2) releaseWait();
+        return new Response(JSON.stringify({ item: { id: body.id, status: "queued" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      configOverrides: {
+        nodeEnv: "test",
+        authRequired: false,
+        authSessionSecret: Buffer.alloc(32, 17).toString("base64url"),
+        weixinAgentApiToken: syntheticLabel("worker", "mismatch", "token"),
+        weixinAgentBackendUrl: "https://sales.example.test",
+        weixinAgentOwner: "assistant-owner",
+        weixinBookkeepingConfirmationEnabled: true,
+      },
+    });
+    assert.equal(sendCalls, 0, "neither a forged nor an unreachable target may reach the SDK send");
+    assert.equal(acks.length, 2);
+    // 篡改目标（重算哈希不等）→ 终态 mismatch。
+    assert.equal(acks[0].id, "outbox-tampered");
+    assert.equal(acks[0].ok, false);
+    assert.equal(acks[0].terminal, true);
+    assert.equal(acks[0].errorCode, "WEIXIN_DELIVERY_SCOPE_MISMATCH");
+    // 目标暂不可达 → 可重试 context-not-ready（8 次耗尽自然 failed）。
+    assert.equal(acks[1].id, "outbox-unreachable");
+    assert.equal(acks[1].ok, false);
+    assert.notEqual(acks[1].terminal, true);
+    assert.equal(acks[1].errorCode, "WEIXIN_CONTEXT_NOT_READY");
+  });
+
+  it("reports bookkeeping_not_configured while the confirmation surface is disabled", async () => {
     let releaseWait;
     const waitForPoll = new Promise((resolve) => { releaseWait = resolve; });
-    let sendCalls = 0;
     const requests = [];
     const sdk = {
       start() {
         return {
           getDeliveryStatus() { return { ready: true, status: "ready" }; },
-          isDeliveryTarget() { return false; },
-          async sendMessageTo() { sendCalls += 1; },
+          isDeliveryTarget() { return true; },
+          async sendMessageTo() {},
           async wait() { await waitForPoll; },
         };
       },
@@ -224,21 +293,15 @@ describe("WeChat worker wiring", () => {
       configOverrides: {
         nodeEnv: "test",
         authRequired: false,
-        authSessionSecret: Buffer.alloc(32, 17).toString("base64url"),
-        weixinAgentApiToken: syntheticLabel("worker", "mismatch", "token"),
+        authSessionSecret: Buffer.alloc(32, 18).toString("base64url"),
+        weixinAgentApiToken: syntheticLabel("worker", "disabled", "token"),
         weixinAgentBackendUrl: "https://sales.example.test",
         weixinAgentOwner: "assistant-owner",
-        weixinBookkeepingConfirmationEnabled: true,
-        weixinBookkeepingOwner: "assistant-owner",
-        weixinBookkeepingSenderId: "sender-1",
-        weixinAllowedSenderIds: ["sender-1"],
+        weixinBookkeepingConfirmationEnabled: false,
       },
     });
-    assert.equal(sendCalls, 0);
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].options.method, "GET");
     assert.equal(requests[0].options.headers["X-Weixin-Delivery-Status"], "not_ready");
-    assert.equal(requests[0].options.headers["X-Weixin-Delivery-Reason"], "recipient_mismatch");
+    assert.equal(requests[0].options.headers["X-Weixin-Delivery-Reason"], "bookkeeping_not_configured");
   });
 
   it("keeps help and worker errors free of tokens, keys, and deprecated fallback names", async () => {

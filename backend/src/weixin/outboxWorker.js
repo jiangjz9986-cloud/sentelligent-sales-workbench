@@ -1,4 +1,6 @@
 const OUTBOX_PATH = "/api/integrations/weixin-agent/confirmation-outbox";
+// v0.9.3 协议 v2：多绑定就绪哨兵 multi:v1 与既有单绑定哈希 scope 并存（升级窗口）。
+const DELIVERY_SCOPE_RE = /^weixin:(?:shortcut:v1:[0-9a-f]{64}|multi:v1)$/u;
 
 function normalizeBackendUrl(value) {
   const normalized = String(value ?? "").trim().replace(/\/+$/u, "");
@@ -38,7 +40,7 @@ export function createWeixinOutboxHttpClient({ backendUrl, apiToken, fetchImpl =
       const deliveryScope = typeof delivery.deliveryScope === "string"
         ? delivery.deliveryScope.trim()
         : "";
-      if (/^weixin:shortcut:v1:[0-9a-f]{64}$/u.test(deliveryScope)) {
+      if (DELIVERY_SCOPE_RE.test(deliveryScope)) {
         values["X-Weixin-Delivery-Scope"] = deliveryScope;
       }
     }
@@ -60,6 +62,11 @@ export function createWeixinOutboxHttpClient({ backendUrl, apiToken, fetchImpl =
             owner: boundedText(item.owner, "outbox owner", 200),
             conversationId: boundedText(item.conversationId, "outbox conversation", 300),
             deliveryScope: boundedText(item.deliveryScope, "outbox delivery scope", 300),
+            // v0.9.3 additive：多目标投递的明文目标；缺失时由 authorizeDelivery
+            // fail-closed（旧后端不发该字段 → 二次校验不通过 → 终态判废）。
+            ...(typeof item.targetSenderId === "string" && item.targetSenderId.trim()
+              ? { targetSenderId: boundedText(item.targetSenderId, "outbox target sender", 200) }
+              : {}),
             message: boundedText(item.message, "outbox message", 20_000),
           },
           leaseToken: boundedText(body.leaseToken, "leaseToken", 200),
@@ -127,7 +134,7 @@ export async function runWeixinOutboxPump({
       if (typeof bot.getDeliveryStatus === "function") {
         try {
           const candidate = bot.getDeliveryStatus();
-          const deliveryScope = /^weixin:shortcut:v1:[0-9a-f]{64}$/u.test(String(candidate?.deliveryScope ?? ""))
+          const deliveryScope = DELIVERY_SCOPE_RE.test(String(candidate?.deliveryScope ?? ""))
             ? String(candidate.deliveryScope)
             : null;
           delivery = candidate?.ready === true && candidate?.status === "ready"
@@ -177,7 +184,10 @@ export async function runWeixinOutboxPump({
         continue;
       }
       try {
-        const sent = await bot.sendMessage(lease.item.message, lease.item.id);
+        // 协议 v2：目标 sender 随租约明文下发，authorizeDelivery 已重算哈希核验。
+        const sent = await bot.sendMessage(lease.item.message, lease.item.id, {
+          targetSenderId: lease.item.targetSenderId,
+        });
         const providerMessageId = typeof sent?.messageId === "string" && sent.messageId.trim()
           ? sent.messageId.trim().slice(0, 200)
           : null;

@@ -10,14 +10,17 @@ import { createActionReminderScheduler } from "../src/actionReminders/reminderSc
 import { createWeixinConfirmationOutboxRepository } from "../src/weixin/outboxRepository.js";
 
 const OWNER = "assistant-owner";
+const OWNER_B = "assistant-peer";
 const NOW = "2026-08-28T02:00:00.000Z";
 
 let dir;
 let db;
+let deliveries;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "sentelligent-action-reminder-"));
   db = openDatabase({ databaseUrl: join(dir, "reminders.sqlite") });
+  deliveries = [{ account: OWNER, conversationId: "conversation-bound-1" }];
 });
 
 afterEach(async () => {
@@ -32,8 +35,7 @@ function makeScheduler(overrides = {}) {
     db,
     store,
     outboxRepository,
-    resolveOwner: () => OWNER,
-    resolveConversationId: () => "conversation-bound-1",
+    resolveDeliveries: () => deliveries,
     deliveryReady: () => true,
     clock: () => new Date(NOW),
     pollMs: 60_000,
@@ -42,10 +44,10 @@ function makeScheduler(overrides = {}) {
   return { store, outboxRepository, scheduler };
 }
 
-function seedDue(id, remindAt, extra = "") {
+function seedDue(id, remindAt, extra = "", owner = OWNER) {
   db.exec(`
     INSERT INTO action_items (id, title, owner, remind_at${extra ? `, ${extra.split("=")[0]}` : ""})
-    VALUES ('${id}', '给王工送方案', '${OWNER}', '${remindAt}'${extra ? `, ${extra.split("=")[1]}` : ""})
+    VALUES ('${id}', '给王工送方案', '${owner}', '${remindAt}'${extra ? `, ${extra.split("=")[1]}` : ""})
   `);
 }
 
@@ -75,7 +77,7 @@ describe("action reminder scheduler", () => {
     assert.equal(outboxRows().length, 1);
   });
 
-  it("leaves future, done, deleted, and foreign-owner rows untouched", async () => {
+  it("leaves future, done, deleted, and unbound-owner rows untouched", async () => {
     const { scheduler } = makeScheduler();
     seedDue("todo-future", "2026-08-28T09:00:00.000Z");
     db.exec(`
@@ -89,6 +91,41 @@ describe("action reminder scheduler", () => {
     const result = await scheduler.runOnce();
     assert.deepEqual(result, { status: "success", enqueuedCount: 0, lateCount: 0 });
     assert.equal(outboxRows().length, 0);
+    // 无绑定 owner 的到期项不扫描、不置 reminded_at（后补绑定即补发的前提）。
+    assert.equal(db.prepare("SELECT reminded_at FROM action_items WHERE id = 'todo-foreign'").get().reminded_at, null);
+  });
+
+  it("multicasts per binding, keys per owner, and back-fills once a late binding appears", async () => {
+    deliveries = [
+      { account: OWNER, conversationId: "conversation-bound-1" },
+      { account: OWNER_B, conversationId: "conversation-bound-2" },
+    ];
+    const { scheduler, outboxRepository } = makeScheduler();
+    seedDue("todo-owner-a", "2026-08-28T01:00:00.000Z");
+    seedDue("todo-owner-b", "2026-08-28T01:00:00.000Z", "", OWNER_B);
+    const result = await scheduler.runOnce();
+    assert.deepEqual(result, { status: "success", enqueuedCount: 2, lateCount: 0 });
+    const rows = outboxRows();
+    assert.deepEqual(
+      rows.map((row) => [row.owner, row.conversation_id]).sort(),
+      [[OWNER, "conversation-bound-1"], [OWNER_B, "conversation-bound-2"]].sort(),
+    );
+    // 幂等键含 owner 维度。
+    const remindAtMs = Date.parse("2026-08-28T01:00:00.000Z");
+    assert.equal(outboxRepository.hasKey({ owner: OWNER, idempotencyKey: `action-reminder:${OWNER}:todo-owner-a:${remindAtMs}` }), true);
+    assert.equal(outboxRepository.hasKey({ owner: OWNER_B, idempotencyKey: `action-reminder:${OWNER_B}:todo-owner-b:${remindAtMs}` }), true);
+
+    // 后补绑定即补发：第三 owner 的到期项在其绑定出现后被扫描并带过期标记。
+    seedDue("todo-owner-late", "2026-08-26T01:00:00.000Z", "", "latebinder");
+    const before = await scheduler.runOnce();
+    assert.equal(before.enqueuedCount, 0);
+    deliveries = [...deliveries, { account: "latebinder", conversationId: "conversation-bound-3" }];
+    const after = await scheduler.runOnce();
+    assert.deepEqual(after, { status: "success", enqueuedCount: 1, lateCount: 1 });
+    const latePayload = outboxRows()
+      .map((row) => JSON.parse(row.payload_json))
+      .find((payload) => payload.actionItemId === "todo-owner-late");
+    assert.equal(latePayload.late, true);
   });
 
   it("skips without marking anything while delivery is not ready", async () => {

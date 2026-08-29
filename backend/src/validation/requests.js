@@ -196,6 +196,15 @@ export const requestSchemas = freezeSchema({
     expectedVersion: { type: "integer", min: 1, required: true },
   },
   changePassword: { currentPassword: text(1000, { required: true }), newPassword: text(128, { required: true }) },
+  // v0.9.3 微信绑定管理（admin）：生成绑定码 / 绑定行开关与解绑。
+  adminWeixinBindingCode: { account: text(32, { required: true }) },
+  adminWeixinBindingPatch: {
+    displayName: text(50, { nullable: true, nonEmpty: true }),
+    financialEnabled: { type: "enum", values: [true, false] },
+    digestEnabled: { type: "enum", values: [true, false] },
+    status: { type: "enum", values: ["active", "disabled"] },
+    expectedVersion: { type: "integer", min: 1, required: true },
+  },
   // v0.9.2：owner=服务端注入的归属/隔离键，客户/商机 schema 不再接收（传入即
   // 422 unknown；partialSchema 派生的 patch 词表随之收口）。
   customerCreate: {

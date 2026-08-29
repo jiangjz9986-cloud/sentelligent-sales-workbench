@@ -70,6 +70,35 @@ test("error codes map to operator-friendly toasts and conflicts refresh the list
   assert.match(source, /reloadList\(\)/);
 });
 
+test("the weixin binding panel lists bindings with switches, unbind, and a one-time code drawer (v0.9.3)", async () => {
+  const source = await readFile(pagePath, "utf8");
+
+  assert.match(source, /data-testid="weixin-binding-panel"/);
+  assert.match(source, /data-testid="weixin-binding-table"/);
+  for (const column of ["微信标识", "记账能力", "主动推送", "绑定时间"]) {
+    assert.match(source, new RegExp(column));
+  }
+  assert.match(source, /data-testid=\{`user-bindcode-\$\{user\.account\}`\}/);
+  assert.match(source, /data-testid=\{`binding-financial-\$\{binding\.account\}`\}/);
+  assert.match(source, /data-testid=\{`binding-digest-\$\{binding\.account\}`\}/);
+  assert.match(source, /data-testid=\{`binding-unbind-\$\{binding\.account\}`\}/);
+  assert.match(source, /listWeixinBindings/);
+  assert.match(source, /createWeixinBindingCode\(user\.account\)/);
+  assert.match(source, /updateWeixinBinding\(binding\.senderId/);
+  assert.match(source, /unbindWeixinBinding\(/);
+  // 绑定码一次性展示与开通记账的显式确认。
+  assert.match(source, /data-testid="binding-code-drawer"/);
+  assert.match(source, /只显示一次/);
+  assert.match(source, /10 分钟内有效、只可使用一次/);
+  assert.match(source, /开通后该微信可直接写入财务流水/);
+  assert.match(source, /未投递的消息会被静默作废/);
+  // 错误词表映射。
+  assert.match(source, /ACCOUNT_ALREADY_BOUND/);
+  assert.match(source, /USER_DISABLED/);
+  assert.match(source, /WEIXIN_BINDING_NOT_FOUND/);
+  assert.match(source, /该账号已有生效中的微信绑定，请先解绑/);
+});
+
 test("members see the admin-required placeholder instead of the roster", async () => {
   const source = await readFile(pagePath, "utf8");
 
