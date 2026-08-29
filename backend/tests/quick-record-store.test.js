@@ -19,8 +19,8 @@ function seedCustomer(id, name, { owner = OWNER } = {}) {
 
 function seedOpportunity(id, customerId, name) {
   db.prepare(
-    "INSERT INTO opportunities (id, customer_id, name) VALUES ($id, $customerId, $name)",
-  ).run({ $id: id, $customerId: customerId, $name: name });
+    "INSERT INTO opportunities (id, customer_id, name, owner) VALUES ($id, $customerId, $name, $owner)",
+  ).run({ $id: id, $customerId: customerId, $name: name, $owner: OWNER });
 }
 
 function seedRecord(id, {

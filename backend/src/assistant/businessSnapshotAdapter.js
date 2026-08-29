@@ -234,13 +234,15 @@ export function createAssistantBusinessSnapshotAdapter({
     FROM customers
     WHERE id = $customerId AND owner = $owner AND deleted_at IS NULL
   `);
+  // 0031 全量回填后 owner 恒非空：全部派生/回退（NULL-owner）可见性分支收敛为
+  // 单一 owner 谓词，对 jiangjz 结果集恒等（v0.9.2 收紧判据）。
   const opportunityById = db.prepare(`
     SELECT opportunity.*
     FROM opportunities opportunity
     INNER JOIN customers customer ON customer.id = opportunity.customer_id AND customer.deleted_at IS NULL
     WHERE opportunity.id = $opportunityId
       AND opportunity.deleted_at IS NULL
-      AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND customer.owner = $owner))
+      AND opportunity.owner = $owner
   `);
 
   function customerDetail({ owner, customerId }) {
@@ -283,7 +285,7 @@ export function createAssistantBusinessSnapshotAdapter({
       FROM opportunities opportunity
       INNER JOIN customers customer ON customer.id = opportunity.customer_id AND customer.deleted_at IS NULL
       WHERE opportunity.deleted_at IS NULL
-        AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND customer.owner = $owner))
+        AND opportunity.owner = $owner
         AND (opportunity.name LIKE $pattern ESCAPE '\\' OR customer.name LIKE $pattern ESCAPE '\\')
       ORDER BY opportunity.updated_at DESC, opportunity.id
       LIMIT ${MAX_ITEMS + 1}
@@ -308,15 +310,7 @@ export function createAssistantBusinessSnapshotAdapter({
         AND ($customerId IS NULL OR action.customer_id = $customerId
           OR (action.customer_id IS NULL AND opportunity.customer_id = $customerId))
         AND ($opportunityId IS NULL OR action.opportunity_id = $opportunityId)
-        AND (
-          action.owner = $owner
-          OR
-          (action.opportunity_id IS NOT NULL
-            AND (action.customer_id IS NULL OR action.customer_id = opportunity.customer_id)
-            AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND opportunity_customer.owner = $owner)))
-          OR
-          (action.opportunity_id IS NULL AND action.customer_id IS NOT NULL AND action_customer.owner = $owner)
-        )
+        AND action.owner = $owner
       ORDER BY action.updated_at DESC, action.id
       LIMIT ${MAX_ITEMS + 1}
     `).all(params);
@@ -351,13 +345,7 @@ export function createAssistantBusinessSnapshotAdapter({
         AND ($customerId IS NULL OR risk.customer_id = $customerId
           OR (risk.customer_id IS NULL AND opportunity.customer_id = $customerId))
         AND ($opportunityId IS NULL OR risk.opportunity_id = $opportunityId)
-        AND (
-          (risk.opportunity_id IS NOT NULL
-            AND (risk.customer_id IS NULL OR risk.customer_id = opportunity.customer_id)
-            AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND opportunity_customer.owner = $owner)))
-          OR
-          (risk.opportunity_id IS NULL AND risk.customer_id IS NOT NULL AND risk_customer.owner = $owner)
-        )
+        AND risk.owner = $owner
       ORDER BY risk.score DESC, risk.updated_at DESC, risk.id
       LIMIT ${MAX_ITEMS + 1}
     `).all(params);
@@ -397,31 +385,15 @@ export function createAssistantBusinessSnapshotAdapter({
         (SELECT COUNT(*) FROM opportunities opportunity
           INNER JOIN customers customer ON customer.id = opportunity.customer_id AND customer.deleted_at IS NULL
           WHERE opportunity.deleted_at IS NULL
-            AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND customer.owner = $owner))) AS opportunities,
+            AND opportunity.owner = $owner) AS opportunities,
         (SELECT COUNT(*) FROM action_items action
-          LEFT JOIN opportunities opportunity ON opportunity.id = action.opportunity_id AND opportunity.deleted_at IS NULL
-          LEFT JOIN customers action_customer ON action_customer.id = action.customer_id AND action_customer.deleted_at IS NULL
-          LEFT JOIN customers opportunity_customer ON opportunity_customer.id = opportunity.customer_id AND opportunity_customer.deleted_at IS NULL
           WHERE action.deleted_at IS NULL AND action.status IN ('pending', 'in_progress', 'deferred')
-            AND (
-              (action.opportunity_id IS NOT NULL
-                AND (action.customer_id IS NULL OR action.customer_id = opportunity.customer_id)
-                AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND opportunity_customer.owner = $owner)))
-              OR (action.opportunity_id IS NULL AND action.customer_id IS NOT NULL AND action_customer.owner = $owner)
-            )) AS open_actions,
+            AND action.owner = $owner) AS open_actions,
         (SELECT COUNT(*) FROM risk_items risk
-          LEFT JOIN opportunities opportunity ON opportunity.id = risk.opportunity_id AND opportunity.deleted_at IS NULL
-          LEFT JOIN customers risk_customer ON risk_customer.id = risk.customer_id AND risk_customer.deleted_at IS NULL
-          LEFT JOIN customers opportunity_customer ON opportunity_customer.id = opportunity.customer_id AND opportunity_customer.deleted_at IS NULL
           WHERE risk.deleted_at IS NULL AND risk.status IN ('open', 'accepted', 'in_progress', 'deferred')
-            AND (
-              (risk.opportunity_id IS NOT NULL
-                AND (risk.customer_id IS NULL OR risk.customer_id = opportunity.customer_id)
-                AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND opportunity_customer.owner = $owner)))
-              OR (risk.opportunity_id IS NULL AND risk.customer_id IS NOT NULL AND risk_customer.owner = $owner)
-            )) AS active_risks,
+            AND risk.owner = $owner) AS active_risks,
         (SELECT COUNT(*) FROM visit_itineraries
-          WHERE created_by = $owner AND deleted_at IS NULL AND status = 'planned' AND visit_date >= $today) AS upcoming_itineraries,
+          WHERE owner = $owner AND deleted_at IS NULL AND status = 'planned' AND visit_date >= $today) AS upcoming_itineraries,
         (SELECT COUNT(*) FROM travel_expenses
           WHERE owner = $owner AND deleted_at IS NULL
             AND occurred_on BETWEEN $weekStart AND date($weekStart, '+6 days')) AS current_week_expenses
@@ -559,7 +531,7 @@ export function createAssistantBusinessSnapshotAdapter({
     const rows = db.prepare(`
       SELECT id, title, visit_date, status, created_at, updated_at
       FROM visit_itineraries
-      WHERE created_by = $owner AND deleted_at IS NULL
+      WHERE owner = $owner AND deleted_at IS NULL
       ORDER BY visit_date, updated_at DESC, id
       LIMIT ${MAX_ITEMS + 1}
     `).all({ $owner: normalizedOwner });
@@ -846,16 +818,21 @@ export function createAssistantBusinessSnapshotAdapter({
     };
   }
 
-  function knowledgeSearch({ query }) {
+  function knowledgeSearch({ owner, query }) {
+    // v0.9.2（D1）：知识库从共享目录翻转为按 owner 隔离；owner 经服务端闭合映射
+    // 解析，绝不作为调用方可控的自由过滤器。
+    const resolvedOwner = resolveBusinessOwner(requiredText(owner, "owner"));
+    if (typeof resolvedOwner !== "string" || !resolvedOwner.trim()) return { items: [] };
     const pattern = likePattern(query);
     const items = db.prepare(`
       SELECT id, title, category, summary, source, updated_at
       FROM knowledge_items
       WHERE deleted_at IS NULL
+        AND owner = $owner
         AND (title LIKE $pattern ESCAPE '\\' OR category LIKE $pattern ESCAPE '\\' OR summary LIKE $pattern ESCAPE '\\')
       ORDER BY updated_at DESC, title, id
       LIMIT 10
-    `).all({ $pattern: pattern }).map((row) => ({
+    `).all({ $owner: resolvedOwner.trim(), $pattern: pattern }).map((row) => ({
       id: row.id,
       title: optionalText(row.title, 200),
       category: optionalText(row.category, 100),

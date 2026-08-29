@@ -26,6 +26,8 @@ describe("visit itinerary migration", () => {
         "updated_at",
         "deleted_at",
         "deleted_by",
+        // v0.9.2 迁移 0031 追加的归属/隔离键（NOT NULL DEFAULT 'jiangjz'）。
+        "owner",
       ]);
       for (const required of ["id", "version", "title", "visit_date", "status", "request_json", "plan_json", "created_by", "updated_by", "created_at", "updated_at"]) {
         assert.equal(byName.get(required).notnull, 1, required);

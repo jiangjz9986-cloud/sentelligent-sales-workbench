@@ -73,24 +73,15 @@ function mutationFailure(db, id) {
   });
 }
 
-// The visibility scope matches businessSnapshotAdapter.actionRows: a row is
-// visible when its own owner column matches, or its linked customer /
-// opportunity resolves to the owner. Writes additionally require the exact
-// owner column so legacy NULL-owner rows stay read-only over WeChat.
+// v0.9.2 收紧：0031 全量回填后 owner 恒非空，读写可见性统一收敛为单一 owner
+// 列谓词（与 businessSnapshotAdapter.actionRows 一致，对 jiangjz 结果集恒等）。
+// 客户名 join 仅为展示列保留。
 const VISIBILITY_CLAUSE = `
-  (
-    action.owner = $owner
-    OR (action.opportunity_id IS NOT NULL
-      AND (action.customer_id IS NULL OR action.customer_id = opportunity.customer_id)
-      AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND opportunity_customer.owner = $owner)))
-    OR (action.opportunity_id IS NULL AND action.customer_id IS NOT NULL AND action_customer.owner = $owner)
-  )
+  action.owner = $owner
 `;
 
 const VISIBILITY_JOINS = `
-  LEFT JOIN opportunities opportunity ON opportunity.id = action.opportunity_id AND opportunity.deleted_at IS NULL
   LEFT JOIN customers action_customer ON action_customer.id = action.customer_id AND action_customer.deleted_at IS NULL
-  LEFT JOIN customers opportunity_customer ON opportunity_customer.id = opportunity.customer_id AND opportunity_customer.deleted_at IS NULL
 `;
 
 export function createActionItemStore(db, { clock = () => new Date() } = {}) {

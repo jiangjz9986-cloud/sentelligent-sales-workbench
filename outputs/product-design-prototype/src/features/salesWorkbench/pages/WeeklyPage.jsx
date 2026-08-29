@@ -49,7 +49,6 @@ export function WeeklyPage({
     try {
       const { periodStart, periodEnd } = getCurrentWeekRange();
       const item = await apiClient.generateWeeklyDraft({
-        owner: "继振",
         periodStart,
         periodEnd,
       });

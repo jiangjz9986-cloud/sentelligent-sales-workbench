@@ -64,8 +64,8 @@ function seedItinerary(id, visitDate, { status = "planned", plan = null, title =
     orderedStopIds: ["stop-1", "stop-2"],
   });
   db.prepare(`
-    INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
-    VALUES ($id, $title, $visitDate, $status, '{}', $planJson, $owner, $owner)
+    INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by, owner)
+    VALUES ($id, $title, $visitDate, $status, '{}', $planJson, $owner, $owner, $owner)
   `).run({ $id: id, $title: title, $visitDate: visitDate, $status: status, $planJson: planJson, $owner: OWNER });
 }
 
@@ -78,9 +78,9 @@ function seedTodo(id, remindAt, { title = "给王工送方案", priority = "中"
 
 function seedRisk(id, { score = 82, severity = "高", title = "数据自主权分歧", due = "本周五" } = {}) {
   db.prepare(`
-    INSERT INTO risk_items (id, customer_id, title, target, severity, status, score, due, evidence, action)
-    VALUES ($id, 'customer-digest-1', $title, '商机', $severity, 'open', $score, $due, '会议纪要', '尽快对齐')
-  `).run({ $id: id, $title: title, $severity: severity, $score: score, $due: due });
+    INSERT INTO risk_items (id, customer_id, title, target, severity, status, score, due, evidence, action, owner)
+    VALUES ($id, 'customer-digest-1', $title, '商机', $severity, 'open', $score, $due, '会议纪要', '尽快对齐', $owner)
+  `).run({ $id: id, $title: title, $severity: severity, $score: score, $due: due, $owner: OWNER });
 }
 
 function seedNotice(repository, id, { relevance = "high", title = "日照市中医医院信息化设备采购", deadlineText = "2026-09-05" } = {}) {

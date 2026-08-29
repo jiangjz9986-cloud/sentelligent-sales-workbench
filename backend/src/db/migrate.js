@@ -31,6 +31,7 @@ import { apply as applyCustomerProfileAliases } from "./migrations/0027_customer
 import { apply as applyActionItemReminders } from "./migrations/0028_action_item_reminders.mjs";
 import { apply as applyOwnerVocabularyCleanup } from "./migrations/0029_owner_vocabulary_cleanup.mjs";
 import { apply as applyUsersTable } from "./migrations/0030_users_table.mjs";
+import { apply as applyOwnerIsolationTightening } from "./migrations/0031_owner_isolation_tightening.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -206,6 +207,12 @@ const migrations = [
     path: resolve(here, "migrations", "0030_users_table.mjs"),
     type: "module",
     apply: applyUsersTable,
+  },
+  {
+    version: "0031",
+    path: resolve(here, "migrations", "0031_owner_isolation_tightening.mjs"),
+    type: "module",
+    apply: applyOwnerIsolationTightening,
   },
 ];
 

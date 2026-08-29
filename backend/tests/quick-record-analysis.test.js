@@ -8,7 +8,8 @@ import { hashPassword } from "../src/auth/password.js";
 import { createConnection } from "../src/db/connection.js";
 import { createServer } from "../src/server.js";
 
-const account = "quick-record-editor";
+// v0.9.2：确认目标（种子客户 rizhao，owner=jiangjz）随会话硬过滤，harness 账号对齐种子 owner。
+const account = "jiangjz";
 const loginValue = "quick-record-test-login";
 const passwordField = "pass" + "word";
 const passwordHash = await hashPassword(loginValue, { salt: Buffer.alloc(16, 14) });
@@ -102,13 +103,13 @@ function seedPersistedHistory(databaseUrl) {
         id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status,
         version, created_at, updated_at
       ) VALUES
-        ('qr-history', 'quick-record-editor', '真实历史记录', '2026-07-18T09:00:00+08:00', 'test', 'rizhao', 'op-rizhao-plan', 'confirmed', 4, '2026-07-18 01:00:00', '2026-07-18 01:05:00'),
-        ('qr-no-analysis', 'quick-record-editor', '尚未分析记录', '2026-07-18T08:00:00+08:00', 'test', NULL, NULL, 'recorded', 1, '2026-07-18 00:00:00', '2026-07-18 00:00:00');
+        ('qr-history', 'jiangjz', '真实历史记录', '2026-07-18T09:00:00+08:00', 'test', 'rizhao', 'op-rizhao-plan', 'confirmed', 4, '2026-07-18 01:00:00', '2026-07-18 01:05:00'),
+        ('qr-no-analysis', 'jiangjz', '尚未分析记录', '2026-07-18T08:00:00+08:00', 'test', NULL, NULL, 'recorded', 1, '2026-07-18 00:00:00', '2026-07-18 00:00:00');
 
       INSERT INTO quick_records (
         id, owner, raw_content, status, version, voided_at, voided_by, void_reason, created_at, updated_at
       ) VALUES (
-        'qr-voided', 'quick-record-editor', 'voided record', 'recorded', 2, '2026-07-18 02:00:00', 'quick-record-editor',
+        'qr-voided', 'jiangjz', 'voided record', 'recorded', 2, '2026-07-18 02:00:00', 'jiangjz',
         'superseded', '2026-07-18 00:30:00', '2026-07-18 02:00:00'
       );
 

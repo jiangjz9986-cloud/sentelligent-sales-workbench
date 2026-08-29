@@ -1234,7 +1234,6 @@ function SalesWorkbenchApp({ apiClient, authSession, onLogout }) {
     if (target === "weekly") {
       const { periodStart, periodEnd } = getCurrentWeekRange();
       const draft = await apiClient.generateWeeklyDraft({
-        owner: "继振",
         periodStart,
         periodEnd,
         knowledgeIds: [knowledgeItem.id],

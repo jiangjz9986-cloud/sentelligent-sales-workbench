@@ -283,7 +283,8 @@ function createHappyFetch({
           id: "smoke-weekly",
           version: 1,
           status: "draft",
-          owner: body.owner,
+          // v0.9.2 服务端契约：Web 忽略 body.owner，owner 恒为会话账号。
+          owner: "jiangjz",
           periodStart: body.periodStart,
           periodEnd: body.periodEnd,
           content: `${MARKER} isolated weekly report content for smoke validation.`,
@@ -295,7 +296,7 @@ function createHappyFetch({
         item: {
           id: "smoke-weekly",
           version: 2,
-          owner: RUN_LABEL,
+          owner: "jiangjz",
           periodStart: "2099-01-01",
           periodEnd: "2099-01-07",
           ...body,

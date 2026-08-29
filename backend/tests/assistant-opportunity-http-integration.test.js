@@ -328,13 +328,13 @@ describe("opportunity agent HTTP boundary", () => {
   it("deletes behind the R3 code with the reference-count warning", async () => {
     withDb((db) => {
       db.exec(`
-        INSERT INTO action_items (id, opportunity_id, title) VALUES
-          ('act-del-1', 'opp-huangdao-tcm077', '行动一'),
-          ('act-del-2', 'opp-huangdao-tcm077', '行动二');
-        INSERT INTO risk_items (id, opportunity_id, title, target, evidence, action) VALUES
-          ('risk-del-1', 'opp-huangdao-tcm077', '风险一', '目标', '证据', '处理');
-        INSERT INTO quick_records (id, raw_content, opportunity_id) VALUES
-          ('qr-del-1', '记录一', 'opp-huangdao-tcm077');
+        INSERT INTO action_items (id, opportunity_id, title, owner) VALUES
+          ('act-del-1', 'opp-huangdao-tcm077', '行动一', 'jiangjz'),
+          ('act-del-2', 'opp-huangdao-tcm077', '行动二', 'jiangjz');
+        INSERT INTO risk_items (id, opportunity_id, title, target, evidence, action, owner) VALUES
+          ('risk-del-1', 'opp-huangdao-tcm077', '风险一', '目标', '证据', '处理', 'jiangjz');
+        INSERT INTO quick_records (id, raw_content, opportunity_id, owner) VALUES
+          ('qr-del-1', '记录一', 'opp-huangdao-tcm077', 'jiangjz');
       `);
     });
     const pending = await send("opp-delete-1", {

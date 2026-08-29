@@ -293,7 +293,9 @@ try {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      owner: "集成验收",
+      // v0.9.2：读取按会话账号硬过滤；历史行在 0031 回填后 owner=jiangjz，
+      // 夹具直接以回填后的形态落库。
+      owner: "jiangjz",
       customerId: "rizhao",
       opportunityId: "op-rizhao-plan",
       artifactType: "solution_framework",
@@ -404,6 +406,12 @@ try {
   if (response.status !== 201 || !body.item?.id) {
     throw new Error("Historical itinerary fixture creation failed: " + response.status);
   }
+  // v0.9.2：读取按会话账号硬过滤；匿名夹具进程落的是 owner=anonymous，
+  // 这里按 0031 回填语义把历史行归到 jiangjz（与生产存量一致）。
+  const { createConnection } = await import("./src/db/connection.js");
+  const fixtureDb = createConnection({ databaseUrl: process.env.DATABASE_URL });
+  fixtureDb.prepare("UPDATE visit_itineraries SET owner = 'jiangjz' WHERE id = $id").run({ $id: body.item.id });
+  fixtureDb.close();
   process.stdout.write(JSON.stringify(body.item));
 } finally {
   await new Promise((resolve) => server.close(resolve));

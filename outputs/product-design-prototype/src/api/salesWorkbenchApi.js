@@ -8,13 +8,14 @@ export function resolveApiBaseUrl(env = {}, runtime = globalThis) {
 }
 
 const WRITABLE_FIELDS = Object.freeze({
+  // v0.9.2：owner=服务端按会话注入的归属键，不再随请求体提交（传入即 422）。
   customer: Object.freeze([
-    "name", "region", "type", "level", "owner", "contact", "relation", "stakeholders",
+    "name", "region", "type", "level", "contact", "relation", "stakeholders",
     "decisionChain", "historyProjects", "infrastructure", "syncPreview", "budget", "summary",
     "needs", "risks", "opportunities",
   ]),
   opportunity: Object.freeze([
-    "customerId", "name", "customer", "stage", "amount", "owner", "probability", "days",
+    "customerId", "name", "customer", "stage", "amount", "probability", "days",
     "requirements", "competitors", "solutionDirection", "sourceRecord", "risk", "next", "tone",
   ]),
   knowledge: Object.freeze(["title", "category", "tags", "summary", "content", "source"]),
@@ -1267,8 +1268,8 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       };
     },
 
-    async generateWeeklyDraft({ owner, periodStart, periodEnd, knowledgeIds = [] }) {
-      const body = { owner, periodStart, periodEnd };
+    async generateWeeklyDraft({ periodStart, periodEnd, knowledgeIds = [] }) {
+      const body = { periodStart, periodEnd };
       if (knowledgeIds.length > 0) body.knowledgeIds = knowledgeIds;
       const draft = await requestApi("/api/reports/weekly/draft", {
         method: "POST",
@@ -1315,8 +1316,8 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       };
     },
 
-    async generateSolutionDraft({ owner, customerId, opportunityId, artifactType = "solution_framework", knowledgeIds = [] }) {
-      const body = { owner, customerId, opportunityId, artifactType };
+    async generateSolutionDraft({ customerId, opportunityId, artifactType = "solution_framework", knowledgeIds = [] }) {
+      const body = { customerId, opportunityId, artifactType };
       if (knowledgeIds.length > 0) body.knowledgeIds = knowledgeIds;
       const draft = await requestApi("/api/solutions/draft", {
         method: "POST",

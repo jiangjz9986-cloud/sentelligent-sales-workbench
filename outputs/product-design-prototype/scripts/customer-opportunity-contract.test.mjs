@@ -78,17 +78,25 @@ assert.equal(
   "Create and edit detail views should initialize editors from the explicit page mode.",
 );
 
+// v0.9.2：owner=服务端按会话注入的归属键，客户/商机表单不再有“负责人”输入项。
 const emptyCreateFormTokens = [
-  'owner: customer?.owner ?? ""',
   'relation: customer?.relation == null ? "" : String(customer.relation)',
   'customerId: hasOpportunity ? (opportunity?.customerId ?? selectedCustomer?.id ?? "") : ""',
   'customer: hasOpportunity ? (opportunity?.customer ?? selectedCustomer?.name ?? "") : ""',
   'stage: opportunity?.stage ?? ""',
   'amount: opportunity?.amount ?? ""',
-  'owner: opportunity?.owner ?? ""',
   'probability: opportunity?.probability == null ? "" : String(opportunity.probability)',
   '<option value="">请选择客户</option>',
 ];
+
+const removedOwnerFormTokens = [
+  'owner: customer?.owner ?? ""',
+  'owner: opportunity?.owner ?? ""',
+];
+
+for (const token of removedOwnerFormTokens) {
+  assert.ok(!appSource.includes(token), `Owner must stay out of the create/edit forms (v0.9.2): found ${token}`);
+}
 
 for (const token of emptyCreateFormTokens) {
   assert.ok(appSource.includes(token), `Create forms should start empty: missing ${token}`);

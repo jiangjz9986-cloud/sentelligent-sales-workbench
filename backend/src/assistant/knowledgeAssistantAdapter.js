@@ -210,10 +210,9 @@ export function createKnowledgeAssistantAdapter({
       if (replay) return replay;
     }
     try {
-      // Knowledge is currently a bounded shared catalog. The authenticated
-      // owner is retained in the run/audit scope, but is never sent as a
-      // caller-controlled filter to the shared read-only query.
-      const result = snapshotAdapter.knowledgeSearch({ query: normalizedQuery });
+      // v0.9.2（D1）：知识库按 owner 隔离。这里传的是服务端鉴权得到的 owner
+      //（快照适配器内部再走闭合业务归属映射），不是调用方可控的自由过滤器。
+      const result = snapshotAdapter.knowledgeSearch({ owner: normalizedOwner, query: normalizedQuery });
       let items = normalizeItems(result?.items);
       if (normalizedKnowledgeId) items = items.filter((item) => item.id === normalizedKnowledgeId);
       const target = normalizedKnowledgeId ? items.find((item) => item.id === normalizedKnowledgeId) ?? null : null;

@@ -114,29 +114,20 @@ export function createDigestContentBuilder({
   const itineraryTodayStatement = db.prepare(`
     SELECT id, title, plan_json
     FROM visit_itineraries
-    WHERE created_by = $owner AND deleted_at IS NULL AND status = 'planned' AND visit_date = $today
+    WHERE owner = $owner AND deleted_at IS NULL AND status = 'planned' AND visit_date = $today
     ORDER BY updated_at DESC, id
     LIMIT 4
   `);
 
-  // Same three-branch visibility as actionItemStore/actionRows: own owner
-  // column, or ownership derived through the linked opportunity or customer.
+  // v0.9.2 收紧：与 actionItemStore/actionRows 同款，0031 回填后可见性收敛为
+  // 单一 owner 列谓词（对 jiangjz 结果集恒等）。
   const unscheduledTodoCountStatement = db.prepare(`
     SELECT COUNT(*) AS count
     FROM action_items action
-    LEFT JOIN opportunities opportunity ON opportunity.id = action.opportunity_id AND opportunity.deleted_at IS NULL
-    LEFT JOIN customers action_customer ON action_customer.id = action.customer_id AND action_customer.deleted_at IS NULL
-    LEFT JOIN customers opportunity_customer ON opportunity_customer.id = opportunity.customer_id AND opportunity_customer.deleted_at IS NULL
     WHERE action.deleted_at IS NULL
       AND action.remind_at IS NULL
       AND action.status IN ('pending', 'in_progress')
-      AND (
-        action.owner = $owner
-        OR (action.opportunity_id IS NOT NULL
-          AND (action.customer_id IS NULL OR action.customer_id = opportunity.customer_id)
-          AND (opportunity.owner = $owner OR (opportunity.owner IS NULL AND opportunity_customer.owner = $owner)))
-        OR (action.opportunity_id IS NULL AND action.customer_id IS NOT NULL AND action_customer.owner = $owner)
-      )
+      AND action.owner = $owner
   `);
 
   // Mirrors the web ledger's paymentProofMissingCount rule: an expense is

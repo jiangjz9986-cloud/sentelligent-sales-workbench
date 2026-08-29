@@ -24,12 +24,12 @@ function fixtureDb() {
     VALUES ('record-a', 'owner-a', '客户确认平台稳定性需要提升。', '2026-08-19T10:00:00+08:00', '微信助手', 'customer-a', 'opportunity-a', 'analyzed');
     INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status)
     VALUES ('record-b', 'owner-b', '越权内容不应出现。', '2026-08-19T10:00:00+08:00', '微信助手', 'customer-b', 'opportunity-b', 'analyzed');
-    INSERT INTO action_items (id, customer_id, opportunity_id, title, status, due, assignee)
-    VALUES ('action-a', 'customer-a', 'opportunity-a', '补充技术资料', 'pending', '2026-08-21', '销售负责人');
-    INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action)
-    VALUES ('risk-a', 'customer-a', 'opportunity-a', '预算未确认', '商机', '高', 'open', '会议纪要', '确认预算');
-    INSERT INTO knowledge_items (id, title, category, summary, content, source)
-    VALUES ('knowledge-a', '医院采购流程', '销售', '需要核对采购路径。', '不应把完整正文直接暴露给预览。', '内部知识库');
+    INSERT INTO action_items (id, customer_id, opportunity_id, title, status, due, assignee, owner)
+    VALUES ('action-a', 'customer-a', 'opportunity-a', '补充技术资料', 'pending', '2026-08-21', '销售负责人', 'owner-a');
+    INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action, owner)
+    VALUES ('risk-a', 'customer-a', 'opportunity-a', '预算未确认', '商机', '高', 'open', '会议纪要', '确认预算', 'owner-a');
+    INSERT INTO knowledge_items (id, title, category, summary, content, source, owner)
+    VALUES ('knowledge-a', '医院采购流程', '销售', '需要核对采购路径。', '不应把完整正文直接暴露给预览。', '内部知识库', 'owner-a');
     INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
     VALUES ('insight-a', 'record-a', 'mock', 80, '{"customer":{"value":"A医院"},"opportunity":{"value":"A升级项目"},"summary":{"action":{"text":"安排技术交流"},"risk":{"text":"预算未确认"}}}');
     INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)

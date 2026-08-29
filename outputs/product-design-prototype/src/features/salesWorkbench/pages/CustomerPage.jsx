@@ -34,7 +34,6 @@ function customerToForm(customer) {
     region: customer?.region ?? "",
     type: customer?.type ?? "",
     level: customer?.level ?? "",
-    owner: customer?.owner ?? "",
     contact: customer?.contact ?? "",
     relation: customer?.relation == null ? "" : String(customer.relation),
     budget: customer?.budget ?? "",
@@ -52,7 +51,6 @@ function customerFromForm(form, isNew) {
     region: form.region.trim(),
     type: form.type.trim(),
     level: form.level.trim(),
-    owner: form.owner.trim(),
     contact: form.contact.trim(),
     relation: numberFromInput(form.relation),
     budget: form.budget.trim(),
@@ -140,9 +138,6 @@ function CustomerEditor({ selected, initialMode = "edit", onSaveCustomer, onSave
         </FormField>
         <FormField label="级别">
           <input value={form.level} onChange={(event) => update("level", event.target.value)} />
-        </FormField>
-        <FormField label="负责人">
-          <input value={form.owner} onChange={(event) => update("owner", event.target.value)} />
         </FormField>
         <FormField label="联系人">
           <input value={form.contact} onChange={(event) => update("contact", event.target.value)} />

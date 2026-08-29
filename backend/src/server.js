@@ -794,10 +794,40 @@ function riskFromRow(row) {
   };
 }
 
-function hospitalTenderCustomerNameMap(db) {
+// v0.9.2 Web 硬隔离基座：user 与 machine 身份一律以自身 account 作 owner 谓词
+//（读=WHERE 过滤，写=服务端注入并忽略 body）；anonymous 仅存在于
+// AUTH_REQUIRED=false 的单人开发/测试模式，保持历史全库视角，写路径回落
+// LEGACY_OWNER（与迁移 0031 的 DEFAULT 'jiangjz' 同语义）。
+const LEGACY_OWNER = "jiangjz";
+
+function requestOwner(request) {
+  const identity = request.authContext;
+  if (
+    !identity
+    || identity.kind === "anonymous"
+    || typeof identity.account !== "string"
+    || !identity.account.trim()
+  ) {
+    return null;
+  }
+  return identity.account;
+}
+
+function ownerClause(owner, column = "owner") {
+  return owner ? ` AND ${column} = $owner` : "";
+}
+
+function ownerParams(owner, params = {}) {
+  return owner ? { ...params, $owner: owner } : params;
+}
+
+function hospitalTenderCustomerNameMap(db, owner = null) {
   return new Map(
-    all(db, "SELECT id, name FROM customers WHERE deleted_at IS NULL ORDER BY id ASC")
-      .map((row) => [row.id, row.name]),
+    all(
+      db,
+      `SELECT id, name FROM customers WHERE deleted_at IS NULL${ownerClause(owner)} ORDER BY id ASC`,
+      ownerParams(owner),
+    ).map((row) => [row.id, row.name]),
   );
 }
 
@@ -821,19 +851,18 @@ function shanghaiInstantIso(dateOnly, time = "00:00:00") {
   return new Date(`${dateOnly}T${time}+08:00`).toISOString();
 }
 
-// Today-focus aggregation for the web dashboard. Deliberately whole-database
-// scope (no owner filter) so the card matches the workbench list pages of the
-// current single-user deployment; a future multi-account rollout must narrow
-// this to request.authContext.account, mirroring the travel-expense scope.
-function dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository }) {
+// Today-focus aggregation for the web dashboard. v0.9.2 起按会话账号硬过滤
+//（与差旅域同模板）；owner=null 仅出现在 AUTH_REQUIRED=false 的单人开发模式，
+// 维持历史全库视角。招标段保持全局（外部公开情报）。
+function dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository, owner = null }) {
   const itineraryRows = all(
     db,
     `SELECT id, title, plan_json
      FROM visit_itineraries
-     WHERE deleted_at IS NULL AND status = 'planned' AND visit_date = $today
+     WHERE deleted_at IS NULL AND status = 'planned' AND visit_date = $today${ownerClause(owner)}
      ORDER BY updated_at DESC, id
      LIMIT 4`,
-    { $today: today },
+    ownerParams(owner, { $today: today }),
   );
   const itineraries = itineraryRows.slice(0, 3).map((row) => {
     let firstStop = "";
@@ -856,10 +885,10 @@ function dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository
     `SELECT id, title, priority, remind_at
      FROM action_items
      WHERE deleted_at IS NULL AND status IN ('pending', 'in_progress')
-       AND remind_at IS NOT NULL AND remind_at < $tomorrowStartIso
+       AND remind_at IS NOT NULL AND remind_at < $tomorrowStartIso${ownerClause(owner)}
      ORDER BY remind_at ASC
      LIMIT 8`,
-    { $tomorrowStartIso: tomorrowStartIso },
+    ownerParams(owner, { $tomorrowStartIso: tomorrowStartIso }),
   );
   const overdueCount = todoRows.filter((row) => row.remind_at < todayStartIso).length;
 
@@ -907,14 +936,14 @@ function dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository
 // Reuses the sales-report quick-record scope, the travel-expense weekly-total
 // scope, and approximates todo completion time by updated_at (complete/confirm
 // both rewrite it; the ±8h substr approximation is accepted for trend display).
-function dashboardWeeklyTrend(db, { weekStart, previousWeekStart }) {
+function dashboardWeeklyTrend(db, { weekStart, previousWeekStart, owner = null }) {
   const quickRecordCount = (start) => Number(get(
     db,
     `SELECT COUNT(*) AS count FROM quick_records
      WHERE voided_at IS NULL
        AND date(substr(COALESCE(occurred_at, created_at), 1, 10))
-           BETWEEN $weekStart AND date($weekStart, '+6 days')`,
-    { $weekStart: start },
+           BETWEEN $weekStart AND date($weekStart, '+6 days')${ownerClause(owner)}`,
+    ownerParams(owner, { $weekStart: start }),
   )?.count ?? 0);
   const expenseCents = (start) => Number(get(
     db,
@@ -922,16 +951,16 @@ function dashboardWeeklyTrend(db, { weekStart, previousWeekStart }) {
      FROM travel_expenses expense
      JOIN travel_expense_payments payment ON payment.expense_id = expense.id
      WHERE expense.deleted_at IS NULL
-       AND expense.occurred_on BETWEEN $weekStart AND date($weekStart, '+6 days')`,
-    { $weekStart: start },
+       AND expense.occurred_on BETWEEN $weekStart AND date($weekStart, '+6 days')${ownerClause(owner, "expense.owner")}`,
+    ownerParams(owner, { $weekStart: start }),
   )?.cents ?? 0);
   const completedTodoCount = (start) => Number(get(
     db,
     `SELECT COUNT(*) AS count FROM action_items
      WHERE deleted_at IS NULL AND status = 'done'
        AND date(substr(updated_at, 1, 10))
-           BETWEEN $weekStart AND date($weekStart, '+6 days')`,
-    { $weekStart: start },
+           BETWEEN $weekStart AND date($weekStart, '+6 days')${ownerClause(owner)}`,
+    ownerParams(owner, { $weekStart: start }),
   )?.count ?? 0);
 
   return {
@@ -943,16 +972,21 @@ function dashboardWeeklyTrend(db, { weekStart, previousWeekStart }) {
   };
 }
 
-function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null } = {}) {
-  const customers = all(db, "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY relation DESC, updated_at DESC").map(customerFromRow);
+function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null, owner = null } = {}) {
+  const customers = all(
+    db,
+    `SELECT * FROM customers WHERE deleted_at IS NULL${ownerClause(owner)} ORDER BY relation DESC, updated_at DESC`,
+    ownerParams(owner),
+  ).map(customerFromRow);
   const opportunities = all(
     db,
     `SELECT opportunities.*
      FROM opportunities
      INNER JOIN customers ON customers.id = opportunities.customer_id
      WHERE opportunities.deleted_at IS NULL
-       AND customers.deleted_at IS NULL
+       AND customers.deleted_at IS NULL${ownerClause(owner, "opportunities.owner")}
      ORDER BY opportunities.probability DESC, opportunities.updated_at DESC`,
+    ownerParams(owner),
   ).map(opportunityFromRow);
   const priorityRank = (value) => {
     const text = String(value ?? "");
@@ -960,11 +994,23 @@ function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null 
     if (text.includes("中") || text.includes("涓")) return 1;
     return 2;
   };
-  const actions = all(db, "SELECT * FROM action_items WHERE deleted_at IS NULL ORDER BY updated_at DESC")
+  const actions = all(
+    db,
+    `SELECT * FROM action_items WHERE deleted_at IS NULL${ownerClause(owner)} ORDER BY updated_at DESC`,
+    ownerParams(owner),
+  )
     .map(actionFromRow)
     .sort((left, right) => priorityRank(left.priority) - priorityRank(right.priority));
-  const risks = all(db, "SELECT * FROM risk_items WHERE deleted_at IS NULL ORDER BY score DESC, updated_at DESC").map(riskFromRow);
-  const quickRecords = all(db, "SELECT * FROM quick_records ORDER BY occurred_at DESC, created_at DESC").map(quickRecordFromRow);
+  const risks = all(
+    db,
+    `SELECT * FROM risk_items WHERE deleted_at IS NULL${ownerClause(owner)} ORDER BY score DESC, updated_at DESC`,
+    ownerParams(owner),
+  ).map(riskFromRow);
+  const quickRecords = all(
+    db,
+    `SELECT * FROM quick_records WHERE 1 = 1${ownerClause(owner)} ORDER BY occurred_at DESC, created_at DESC`,
+    ownerParams(owner),
+  ).map(quickRecordFromRow);
   const openActions = actions.filter((item) => item.status !== "done");
   const openRisks = risks.filter((item) => item.status !== "closed");
   const highRisks = openRisks.filter((item) => item.score >= 80 || item.severity === "高" || item.severity === "楂?");
@@ -998,10 +1044,11 @@ function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null 
 
   const today = shanghaiDateParts(now).date;
   const weekStart = weekStartOf(today);
-  const todayFocus = dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository });
+  const todayFocus = dashboardTodayFocus(db, { today, customers, highRisks, tenderRepository, owner });
   const weeklyTrend = dashboardWeeklyTrend(db, {
     weekStart,
     previousWeekStart: addDays(weekStart, -7),
+    owner,
   });
 
   return {
@@ -1429,9 +1476,15 @@ function softDeleteRecord(db, {
   entityType,
   requestId,
   metadata,
+  owner = null,
 }) {
   return withImmediateTransaction(db, () => {
-    const beforeRow = get(db, `SELECT * FROM ${table} WHERE id = $id`, { $id: id });
+    // owner 谓词进 before 读取：跨账号查无行 → 404，先于版本比对（不泄露 currentVersion）。
+    const beforeRow = get(
+      db,
+      `SELECT * FROM ${table} WHERE id = $id${ownerClause(owner)}`,
+      ownerParams(owner, { $id: id }),
+    );
     if (!beforeRow || beforeRow.deleted_at) notFound();
 
     const result = run(
@@ -1497,7 +1550,7 @@ function activeOpportunityRow(db, id, owner) {
   return row ? { id: row.id, customerId: row.customer_id } : null;
 }
 
-function activeSolutionDraftRow(db, id) {
+function activeSolutionDraftRow(db, id, owner = null) {
   if (!id) return null;
   return get(
     db,
@@ -1510,12 +1563,12 @@ function activeSolutionDraftRow(db, id) {
        ON opportunities.id = solution_drafts.opportunity_id
       AND opportunities.customer_id = solution_drafts.customer_id
       AND opportunities.deleted_at IS NULL
-     WHERE solution_drafts.id = $id`,
-    { $id: id },
+     WHERE solution_drafts.id = $id${ownerClause(owner, "solution_drafts.owner")}`,
+    ownerParams(owner, { $id: id }),
   );
 }
 
-function activeSolutionDraftRows(db) {
+function activeSolutionDraftRows(db, owner = null) {
   return all(
     db,
     `SELECT solution_drafts.*
@@ -1527,7 +1580,9 @@ function activeSolutionDraftRows(db) {
        ON opportunities.id = solution_drafts.opportunity_id
       AND opportunities.customer_id = solution_drafts.customer_id
       AND opportunities.deleted_at IS NULL
+     WHERE 1 = 1${ownerClause(owner, "solution_drafts.owner")}
      ORDER BY solution_drafts.updated_at DESC, solution_drafts.created_at DESC`,
+    ownerParams(owner),
   );
 }
 
@@ -1580,14 +1635,14 @@ function normalizeTags(tags) {
   return Array.from(new Set((Array.isArray(tags) ? tags : []).map((tag) => String(tag ?? "").trim()).filter(Boolean)));
 }
 
-function createKnowledgeItem(db, body) {
+function createKnowledgeItem(db, body, owner) {
   const id = randomUUID();
   run(
     db,
     `INSERT INTO knowledge_items (
-      id, title, category, tags, summary, content, source
+      id, title, category, tags, summary, content, source, owner
     ) VALUES (
-      $id, $title, $category, $tags, $summary, $content, $source
+      $id, $title, $category, $tags, $summary, $content, $source, $owner
     )`,
     {
       $id: id,
@@ -1597,13 +1652,18 @@ function createKnowledgeItem(db, body) {
       $summary: body.summary ?? null,
       $content: body.content ?? null,
       $source: body.source ?? null,
+      $owner: owner,
     },
   );
   return knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id", { $id: id }));
 }
 
-function updateKnowledgeItem(db, id, body, expectedVersion) {
-  const current = knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+function updateKnowledgeItem(db, id, body, expectedVersion, owner = null) {
+  const current = knowledgeFromRow(get(
+    db,
+    `SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL${ownerClause(owner)}`,
+    ownerParams(owner, { $id: id }),
+  ));
   if (!current) return null;
 
   runVersionedUpdate(db, {
@@ -1629,8 +1689,12 @@ function updateKnowledgeItem(db, id, body, expectedVersion) {
   return knowledgeFromRow(get(db, "SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
-function updateActionItem(db, id, body, expectedVersion) {
-  const current = actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+function updateActionItem(db, id, body, expectedVersion, owner = null) {
+  const current = actionFromRow(get(
+    db,
+    `SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL${ownerClause(owner)}`,
+    ownerParams(owner, { $id: id }),
+  ));
   if (!current) return null;
   const nextStatus = patchValue(body, "status", current.status);
   if (!actionStatuses.has(nextStatus)) {
@@ -1662,8 +1726,12 @@ function updateActionItem(db, id, body, expectedVersion) {
   return actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
 }
 
-function updateWeeklyReport(db, id, body, expectedVersion) {
-  const current = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+function updateWeeklyReport(db, id, body, expectedVersion, owner = null) {
+  const current = weeklyReportFromRow(get(
+    db,
+    `SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL${ownerClause(owner)}`,
+    ownerParams(owner, { $id: id }),
+  ));
   if (!current) return null;
   const nextStatus = patchValue(body, "status", current.status);
   if (!weeklyReportStatuses.has(nextStatus)) {
@@ -1726,8 +1794,12 @@ function buildWeeklyWordDocument(report) {
 </html>`;
 }
 
-function updateRiskItem(db, id, body, expectedVersion) {
-  const current = riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+function updateRiskItem(db, id, body, expectedVersion, owner = null) {
+  const current = riskFromRow(get(
+    db,
+    `SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL${ownerClause(owner)}`,
+    ownerParams(owner, { $id: id }),
+  ));
   if (!current) return null;
   const nextStatus = patchValue(body, "status", current.status);
   if (!riskStatuses.has(nextStatus)) {
@@ -1785,8 +1857,12 @@ function scoreKnowledgeItem(item, terms, tags) {
   return termScore + tagScore;
 }
 
-function searchKnowledgeItems(db, { query = "", tags = [], limit = 8 } = {}) {
-  const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL ORDER BY updated_at DESC").map(knowledgeFromRow);
+function searchKnowledgeItems(db, { query = "", tags = [], limit = 8, owner = null } = {}) {
+  const rows = all(
+    db,
+    `SELECT * FROM knowledge_items WHERE deleted_at IS NULL${ownerClause(owner)} ORDER BY updated_at DESC`,
+    ownerParams(owner),
+  ).map(knowledgeFromRow);
   const cleanTags = normalizeTags(tags);
   const terms = splitSearchTerms(query, ...cleanTags);
   const maxItems = Math.max(1, Math.min(Number(limit) || 8, 20));
@@ -1803,11 +1879,14 @@ function searchKnowledgeItems(db, { query = "", tags = [], limit = 8 } = {}) {
     .map((entry) => entry.item);
 }
 
-function searchKnowledgeForAnalysis(db, rawText, limit = 4) {
+function searchKnowledgeForAnalysis(db, rawText, limit = 4, owner = null) {
   const text = String(rawText ?? "").toLowerCase();
   if (!text.trim()) return [];
-  const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL ORDER BY updated_at DESC")
-    .map(knowledgeFromRow);
+  const rows = all(
+    db,
+    `SELECT * FROM knowledge_items WHERE deleted_at IS NULL${ownerClause(owner)} ORDER BY updated_at DESC`,
+    ownerParams(owner),
+  ).map(knowledgeFromRow);
   const maxItems = Math.max(1, Math.min(Number(limit) || 4, 8));
   return rows
     .map((item) => {
@@ -1842,9 +1921,13 @@ function normalizeKnowledgeIds(value) {
   return Array.from(new Set(value.map((id) => String(id ?? "").trim()).filter(Boolean)));
 }
 
-function getKnowledgeItemsByIds(db, ids) {
+function getKnowledgeItemsByIds(db, ids, owner = null) {
   if (!ids.length) return [];
-  const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL").map(knowledgeFromRow);
+  const rows = all(
+    db,
+    `SELECT * FROM knowledge_items WHERE deleted_at IS NULL${ownerClause(owner)}`,
+    ownerParams(owner),
+  ).map(knowledgeFromRow);
   const byId = new Map(rows.map((item) => [item.id, item]));
   return ids.map((id) => byId.get(id)).filter(Boolean);
 }
@@ -2047,19 +2130,19 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
   }));
 }
 
-function getDraftActions(db, { customerId, opportunityId }) {
+function getDraftActions(db, { customerId, opportunityId, owner = null }) {
   return all(
     db,
     `SELECT * FROM action_items
      WHERE deleted_at IS NULL
-       AND (customer_id = $customerId OR opportunity_id = $opportunityId)
+       AND (customer_id = $customerId OR opportunity_id = $opportunityId)${ownerClause(owner)}
      ORDER BY
        CASE priority WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END,
        updated_at DESC`,
-    {
+    ownerParams(owner, {
       $customerId: customerId,
       $opportunityId: opportunityId,
-    },
+    }),
   ).map(actionFromRow);
 }
 
@@ -2070,7 +2153,7 @@ function hasUsefulCompetitors(opportunity) {
   });
 }
 
-function buildOpportunityRiskDrafts({ customer, opportunity, sourceType, sourceId }) {
+function buildOpportunityRiskDrafts({ customer, opportunity, sourceType, sourceId, owner }) {
   const text = [
     opportunity.amount,
     opportunity.risk,
@@ -2147,6 +2230,7 @@ function buildOpportunityRiskDrafts({ customer, opportunity, sourceType, sourceI
     status: "open",
     sourceType,
     sourceId,
+    owner,
   }));
 }
 
@@ -2220,7 +2304,8 @@ function upsertRiskItem(db, draft) {
            severity = $severity,
            evidence = $evidence,
            action = $action,
-           tone = $tone
+           tone = $tone,
+           owner = COALESCE($owner, owner)
            ${reactivating ? ", status = $status, deleted_at = NULL, deleted_by = NULL" : ""}`,
       params: {
         $id: current.id,
@@ -2233,6 +2318,7 @@ function upsertRiskItem(db, draft) {
         $evidence: draft.evidence,
         $action: draft.action,
         $tone: draft.tone,
+        $owner: draft.owner ?? null,
         ...(reactivating ? { $status: draft.status } : {}),
       },
     });
@@ -2244,10 +2330,11 @@ function upsertRiskItem(db, draft) {
     db,
     `INSERT INTO risk_items (
        id, customer_id, opportunity_id, title, target, score, severity,
-       status, evidence, action, source_type, source_id, tone
+       status, evidence, action, source_type, source_id, tone, owner
      ) VALUES (
        $id, $customerId, $opportunityId, $title, $target, $score, $severity,
-       $status, $evidence, $action, $sourceType, $sourceId, $tone
+       $status, $evidence, $action, $sourceType, $sourceId, $tone,
+       COALESCE($owner, '${LEGACY_OWNER}')
      )`,
     {
       $id: id,
@@ -2263,6 +2350,7 @@ function upsertRiskItem(db, draft) {
       $sourceType: draft.sourceType,
       $sourceId: draft.sourceId ?? null,
       $tone: draft.tone,
+      $owner: draft.owner ?? null,
     },
   );
 
@@ -2276,6 +2364,8 @@ function upsertRiskFromQuickRecord(db, quickRecord, insight, customer, opportuni
   const customerName = customer?.name ?? opportunity?.customer ?? insight?.customer?.value ?? "未关联客户";
   const opportunityName = opportunity?.name ?? insight?.opportunity?.value ?? "未关联商机";
   return upsertRiskItem(db, {
+    // 深写回链与 action 同款：风险继承快速记录的 owner（v0.9.2）。
+    owner: quickRecord.owner ?? null,
     customerId: customer?.id ?? opportunity?.customerId ?? quickRecord.customerId,
     opportunityId: opportunity?.id ?? quickRecord.opportunityId,
     title: insight?.summary?.risk?.title ?? "快速记录识别风险",
@@ -2538,36 +2628,40 @@ function itineraryMapFailure(error) {
   throw new HttpError(502, error.code, "Map service could not complete the request");
 }
 
-function buildSalesDecisionContext(db, body) {
+function buildSalesDecisionContext(db, body, owner = null) {
   let customer = null;
   let opportunity = null;
   let quickRecord = null;
 
   if (body.customerId) {
-    customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", {
-      $id: body.customerId,
-    }));
+    customer = customerFromRow(get(
+      db,
+      `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(owner)}`,
+      ownerParams(owner, { $id: body.customerId }),
+    ));
     if (!customer) notFound();
   }
 
   if (body.opportunityId) {
-    opportunity = opportunityFromRow(activeOpportunityEntityRow(db, body.opportunityId));
+    opportunity = opportunityFromRow(activeOpportunityEntityRow(db, body.opportunityId, owner ?? undefined));
     if (!opportunity) notFound();
     if (customer && opportunity.customerId !== customer.id) {
       validationFailure("opportunityId", "relationship");
     }
     if (!customer) {
-      customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", {
-        $id: opportunity.customerId,
-      }));
+      customer = customerFromRow(get(
+        db,
+        `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(owner)}`,
+        ownerParams(owner, { $id: opportunity.customerId }),
+      ));
     }
   }
 
   if (body.quickRecordId) {
     quickRecord = quickRecordFromRow(get(
       db,
-      "SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL",
-      { $id: body.quickRecordId },
+      `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerClause(owner)}`,
+      ownerParams(owner, { $id: body.quickRecordId }),
     ));
     if (!quickRecord) notFound();
     if (customer && quickRecord.customerId && quickRecord.customerId !== customer.id) {
@@ -2577,12 +2671,14 @@ function buildSalesDecisionContext(db, body) {
       validationFailure("quickRecordId", "relationship");
     }
     if (!customer && quickRecord.customerId) {
-      customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", {
-        $id: quickRecord.customerId,
-      }));
+      customer = customerFromRow(get(
+        db,
+        `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(owner)}`,
+        ownerParams(owner, { $id: quickRecord.customerId }),
+      ));
     }
     if (!opportunity && quickRecord.opportunityId) {
-      opportunity = opportunityFromRow(activeOpportunityEntityRow(db, quickRecord.opportunityId));
+      opportunity = opportunityFromRow(activeOpportunityEntityRow(db, quickRecord.opportunityId, owner ?? undefined));
     }
   }
 
@@ -2594,23 +2690,24 @@ function buildSalesDecisionContext(db, body) {
   const customerId = customer?.id ?? quickRecord?.customerId ?? opportunity?.customerId ?? null;
   const opportunityId = opportunity?.id ?? quickRecord?.opportunityId ?? null;
   const actions = customerId || opportunityId
-    ? getDraftActions(db, { customerId, opportunityId })
+    ? getDraftActions(db, { customerId, opportunityId, owner })
     : [];
   const risks = customerId || opportunityId
     ? all(
       db,
       `SELECT * FROM risk_items
        WHERE deleted_at IS NULL
-         AND (customer_id = $customerId OR opportunity_id = $opportunityId)
+         AND (customer_id = $customerId OR opportunity_id = $opportunityId)${ownerClause(owner)}
        ORDER BY updated_at DESC
        LIMIT 20`,
-      { $customerId: customerId, $opportunityId: opportunityId },
+      ownerParams(owner, { $customerId: customerId, $opportunityId: opportunityId }),
     ).map(riskFromRow)
     : [];
   const knowledge = searchKnowledgeForAnalysis(
     db,
     [customer?.name, opportunity?.name, rawContent].filter(Boolean).join(" "),
     6,
+    owner,
   );
 
   return {
@@ -4495,7 +4592,10 @@ export function createServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/api/dashboard/summary") {
         sendJson(response, 200, {
-          item: dashboardSummaryFromDb(db, { tenderRepository: hospitalTenderRepository }),
+          item: dashboardSummaryFromDb(db, {
+            tenderRepository: hospitalTenderRepository,
+            owner: requestOwner(request),
+          }),
         });
         return;
       }
@@ -4512,6 +4612,14 @@ export function createServer(options = {}) {
         }
         if (query.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(query)) {
           throw new HttpError(422, "VALIDATION_ERROR", "关键词筛选条件无效", { q: "max" });
+        }
+        // 公告=全局情报，双账号可见；匹配客户名映射按账号过滤（B 不见 A 的客户名/
+        // 匹配 id）。customerId 筛选先校归属：不属于当前账号 → 空集（200，防枚举
+        // 且不破 UI）。
+        const tenderOwner = requestOwner(request);
+        if (customerId && tenderOwner && !activeCustomerRow(db, customerId, tenderOwner)) {
+          sendJson(response, 200, { items: [], total: 0, limit, offset, hasMore: false });
+          return;
         }
         const filters = {
           sourceId: url.searchParams.get("sourceId") || undefined,
@@ -4537,9 +4645,10 @@ export function createServer(options = {}) {
         } catch (error) {
           throw new HttpError(422, "VALIDATION_ERROR", "招标公告筛选条件无效", { filters: error.message });
         }
-        const customerNames = hospitalTenderCustomerNameMap(db);
+        const customerNames = hospitalTenderCustomerNameMap(db, tenderOwner);
+        const serializeOptions = { restrictMatchesToKnownCustomers: tenderOwner !== null };
         sendJson(response, 200, {
-          items: items.map((item) => serializeHospitalTenderNotice(item, customerNames)),
+          items: items.map((item) => serializeHospitalTenderNotice(item, customerNames, serializeOptions)),
           total,
           limit,
           offset,
@@ -4558,8 +4667,11 @@ export function createServer(options = {}) {
       ) {
         const item = hospitalTenderRepository.getNotice(parts[2]);
         if (!item) return notFound(response);
+        const tenderOwner = requestOwner(request);
         sendJson(response, 200, {
-          item: serializeHospitalTenderNotice(item, hospitalTenderCustomerNameMap(db)),
+          item: serializeHospitalTenderNotice(item, hospitalTenderCustomerNameMap(db, tenderOwner), {
+            restrictMatchesToKnownCustomers: tenderOwner !== null,
+          }),
         });
         return;
       }
@@ -6235,7 +6347,7 @@ export function createServer(options = {}) {
         const status = url.searchParams.get("status") || undefined;
         let items;
         try {
-          items = itineraryRepository.list({ status });
+          items = itineraryRepository.list({ status, owner: requestOwner(request) });
         } catch (error) {
           if (error instanceof TypeError) validationFailure("status", "enum");
           throw error;
@@ -6286,7 +6398,7 @@ export function createServer(options = {}) {
         parts[1] === "itineraries" &&
         parts[2]
       ) {
-        const item = itineraryRepository.get(parts[2]);
+        const item = itineraryRepository.get(parts[2], { owner: requestOwner(request) });
         if (!item) notFound();
         sendJson(response, 200, { item });
         return;
@@ -6301,7 +6413,8 @@ export function createServer(options = {}) {
       ) {
         const expectedVersion = parseExpectedVersion(request);
         const body = validateVisitItineraryRequest(await readJson(request));
-        const current = itineraryRepository.get(parts[2]);
+        const itineraryOwner = requestOwner(request);
+        const current = itineraryRepository.get(parts[2], { owner: itineraryOwner });
         if (!current) notFound();
         if (current.version !== expectedVersion) {
           throw new HttpError(409, "VERSION_CONFLICT", "The record was updated by another request", {
@@ -6311,7 +6424,7 @@ export function createServer(options = {}) {
         const snapshotRequest = { ...body, status: body.status ?? current.status };
         const plan = await buildItineraryPlan(snapshotRequest);
         const item = withImmediateTransaction(db, () => {
-          const before = itineraryRepository.get(parts[2]);
+          const before = itineraryRepository.get(parts[2], { owner: itineraryOwner });
           if (!before) notFound();
           let updated;
           try {
@@ -6323,6 +6436,7 @@ export function createServer(options = {}) {
               request: snapshotRequest,
               plan,
               actor: request.authContext.account,
+              owner: itineraryOwner,
             });
           } catch (error) {
             itineraryRepositoryFailure(error);
@@ -6359,14 +6473,16 @@ export function createServer(options = {}) {
       ) {
         const expectedVersion = parseExpectedVersion(request);
         await validateEmptyBody(request);
+        const itineraryOwner = requestOwner(request);
         const deleted = withImmediateTransaction(db, () => {
-          const before = itineraryRepository.get(parts[2]);
+          const before = itineraryRepository.get(parts[2], { owner: itineraryOwner });
           if (!before) notFound();
           let result;
           try {
             result = itineraryRepository.softDelete(parts[2], {
               expectedVersion,
               actor: request.authContext.account,
+              owner: itineraryOwner,
             });
           } catch (error) {
             itineraryRepositoryFailure(error);
@@ -6414,13 +6530,13 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/customers") {
-        const rows = request.authContext.kind === "machine"
-          ? all(
-            db,
-            "SELECT * FROM customers WHERE deleted_at IS NULL AND owner = $owner ORDER BY created_at ASC",
-            { $owner: request.authContext.account },
-          )
-          : all(db, "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY created_at ASC");
+        // user 与 machine 分支合一为 owner 过滤（机器传自身 account，SQL 等价、行为不变）。
+        const listOwner = requestOwner(request);
+        const rows = all(
+          db,
+          `SELECT * FROM customers WHERE deleted_at IS NULL${ownerClause(listOwner)} ORDER BY created_at ASC`,
+          ownerParams(listOwner),
+        );
         sendJson(response, 200, { items: rows.map(customerFromRow) });
         return;
       }
@@ -6428,7 +6544,10 @@ export function createServer(options = {}) {
       if (request.method === "POST" && url.pathname === "/api/customers") {
         const body = await readValidatedJson(request, requestSchemas.customerCreate);
         const item = withImmediateTransaction(db, () => {
-          const created = createCustomer(db, body);
+          const created = createCustomer(db, {
+            ...body,
+            owner: requestOwner(request) ?? LEGACY_OWNER,
+          });
           insertAudit(db, {
             action: "customer.create",
             entityType: "customer",
@@ -6447,7 +6566,12 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
-        const item = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: parts[2] }));
+        const detailOwner = requestOwner(request);
+        const item = customerFromRow(get(
+          db,
+          `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(detailOwner)}`,
+          ownerParams(detailOwner, { $id: parts[2] }),
+        ));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;
@@ -6456,14 +6580,15 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "customers" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, customerPatchSchema);
+        const patchOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
           const before = customerFromRow(get(
             db,
-            "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL",
-            { $id: parts[2] },
+            `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(patchOwner)}`,
+            ownerParams(patchOwner, { $id: parts[2] }),
           ));
           if (!before) notFound();
-          const updated = updateCustomer(db, parts[2], body, expectedVersion);
+          const updated = updateCustomer(db, parts[2], body, expectedVersion, { owner: patchOwner });
           if (!updated) notFound();
           insertAudit(db, {
             action: "customer.update",
@@ -6490,20 +6615,23 @@ export function createServer(options = {}) {
           expectedVersion,
           deletedBy: request.authContext.account,
           requestId,
+          owner: requestOwner(request),
         });
         sendJson(response, 200, { deleted });
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/opportunities") {
+        const listOwner = requestOwner(request);
         const rows = all(
           db,
           `SELECT opportunities.*
            FROM opportunities
            INNER JOIN customers ON customers.id = opportunities.customer_id
            WHERE opportunities.deleted_at IS NULL
-             AND customers.deleted_at IS NULL
+             AND customers.deleted_at IS NULL${ownerClause(listOwner, "opportunities.owner")}
            ORDER BY opportunities.created_at ASC`,
+          ownerParams(listOwner),
         );
         sendJson(response, 200, { items: rows.map(opportunityFromRow) });
         return;
@@ -6511,9 +6639,15 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/opportunities") {
         const body = await readValidatedJson(request, requestSchemas.opportunityCreate);
+        const createOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
-          const customer = requireActiveCustomer(db, body.customerId);
-          const created = createOpportunity(db, { ...body, customer: customer.name });
+          // 跨账号客户 → 422 validationFailure（与"不存在"同响应，防枚举）。
+          const customer = requireActiveCustomer(db, body.customerId, createOwner ?? undefined);
+          const created = createOpportunity(db, {
+            ...body,
+            customer: customer.name,
+            owner: createOwner ?? LEGACY_OWNER,
+          });
           insertAudit(db, {
             action: "opportunity.create",
             entityType: "opportunity",
@@ -6532,7 +6666,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
-        const item = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
+        const item = opportunityFromRow(activeOpportunityEntityRow(db, parts[2], requestOwner(request) ?? undefined));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;
@@ -6541,11 +6675,12 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "opportunities" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, opportunityPatchSchema);
+        const patchOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
-          const before = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
+          const before = opportunityFromRow(activeOpportunityEntityRow(db, parts[2], patchOwner ?? undefined));
           if (!before) notFound();
-          const customer = requireActiveCustomer(db, body.customerId ?? before.customerId);
-          const updated = updateOpportunity(db, parts[2], { ...body, customer: customer.name }, expectedVersion);
+          const customer = requireActiveCustomer(db, body.customerId ?? before.customerId, patchOwner ?? undefined);
+          const updated = updateOpportunity(db, parts[2], { ...body, customer: customer.name }, expectedVersion, { owner: patchOwner });
           if (!updated) notFound();
           insertAudit(db, {
             action: "opportunity.update",
@@ -6580,6 +6715,7 @@ export function createServer(options = {}) {
           entityType: "opportunity",
           deletedBy: request.authContext.account,
           requestId,
+          owner: requestOwner(request),
           metadata: (before) => ({ name: before.name, customerId: before.customerId, stage: before.stage }),
         });
         sendJson(response, 200, { deleted });
@@ -6587,13 +6723,15 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/actions") {
+        const listOwner = requestOwner(request);
         const rows = all(
           db,
           `SELECT * FROM action_items
-           WHERE deleted_at IS NULL
+           WHERE deleted_at IS NULL${ownerClause(listOwner)}
            ORDER BY
              CASE priority WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END,
              updated_at DESC`,
+          ownerParams(listOwner),
         );
         sendJson(response, 200, { items: rows.map(actionFromRow) });
         return;
@@ -6601,11 +6739,13 @@ export function createServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/api/actions/reminders/status") {
         if (request.authContext.kind !== "user") return unauthorized(response);
+        const reminderOwner = requestOwner(request);
         const pending = get(
           db,
           `SELECT COUNT(*) AS count FROM action_items
            WHERE remind_at IS NOT NULL AND reminded_at IS NULL AND deleted_at IS NULL
-             AND status IN ('pending', 'in_progress')`,
+             AND status IN ('pending', 'in_progress')${ownerClause(reminderOwner)}`,
+          ownerParams(reminderOwner),
         );
         sendJson(response, 200, {
           item: actionReminderScheduler.status(),
@@ -6624,7 +6764,9 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/digest/run") {
-        if (request.authContext.kind !== "user") return unauthorized(response);
+        // v0.9.2：运维端点归位 admin 门禁（member 探测即 403）；dryRun 回显以调用者
+        // 账号为 digest owner，堵"回显他人晨报全文"的泄露面。
+        requireAdminRole(db, request);
         const kind = url.searchParams.get("kind") ?? "daily";
         if (kind !== "daily" && kind !== "friday") {
           badRequest(response, "kind must be daily or friday");
@@ -6636,7 +6778,7 @@ export function createServer(options = {}) {
         if (dryRun) {
           // Preview only: build and render against live data without touching
           // the outbox, the idempotency marker, or the audit log.
-          const digestOwner = shortcutBookkeepingAssistantRuntime.owner;
+          const digestOwner = request.authContext.account;
           const built = kind === "daily"
             ? await digestContentBuilder.buildDailyDigest({ owner: digestOwner })
             : await digestContentBuilder.buildFridayCloseout({ owner: digestOwner });
@@ -6658,14 +6800,15 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "actions" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.actionPatch);
+        const patchOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
           const before = actionFromRow(get(
             db,
-            "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL",
-            { $id: parts[2] },
+            `SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL${ownerClause(patchOwner)}`,
+            ownerParams(patchOwner, { $id: parts[2] }),
           ));
           if (!before) notFound();
-          const updated = updateActionItem(db, parts[2], body, expectedVersion);
+          const updated = updateActionItem(db, parts[2], body, expectedVersion, patchOwner);
           if (!updated) notFound();
           if (updated.error === "invalid_status") {
             badRequest(response, "status must be pending, in_progress, done, or deferred");
@@ -6699,6 +6842,7 @@ export function createServer(options = {}) {
           entityType: "action",
           deletedBy: request.authContext.account,
           requestId,
+          owner: requestOwner(request),
           metadata: (before) => ({ title: before.title, customerId: before.customerId, status: before.status }),
         });
         sendJson(response, 200, { deleted });
@@ -6706,14 +6850,16 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/risks") {
+        const listOwner = requestOwner(request);
         const rows = all(
           db,
           `SELECT * FROM risk_items
-           WHERE deleted_at IS NULL
+           WHERE deleted_at IS NULL${ownerClause(listOwner)}
            ORDER BY
              CASE severity WHEN '高' THEN 0 WHEN '中' THEN 1 ELSE 2 END,
              score DESC,
              updated_at DESC`,
+          ownerParams(listOwner),
         );
         sendJson(response, 200, { items: rows.map(riskFromRow) });
         return;
@@ -6722,14 +6868,15 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "risks" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.riskPatch);
+        const patchOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
           const before = riskFromRow(get(
             db,
-            "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL",
-            { $id: parts[2] },
+            `SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL${ownerClause(patchOwner)}`,
+            ownerParams(patchOwner, { $id: parts[2] }),
           ));
           if (!before) notFound();
-          const updated = updateRiskItem(db, parts[2], body, expectedVersion);
+          const updated = updateRiskItem(db, parts[2], body, expectedVersion, patchOwner);
           if (!updated) notFound();
           if (updated.error === "invalid_status") {
             badRequest(response, "status must be open, accepted, in_progress, deferred, or closed");
@@ -6763,6 +6910,7 @@ export function createServer(options = {}) {
           entityType: "risk",
           deletedBy: request.authContext.account,
           requestId,
+          owner: requestOwner(request),
           metadata: (before) => ({ title: before.title, status: before.status, sourceType: before.sourceType }),
         });
         sendJson(response, 200, { deleted });
@@ -6770,7 +6918,13 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/knowledge") {
-        const rows = all(db, "SELECT * FROM knowledge_items WHERE deleted_at IS NULL ORDER BY updated_at DESC, title ASC");
+        // D1 裁定：知识库本版从"全局"翻转为"个人"。
+        const listOwner = requestOwner(request);
+        const rows = all(
+          db,
+          `SELECT * FROM knowledge_items WHERE deleted_at IS NULL${ownerClause(listOwner)} ORDER BY updated_at DESC, title ASC`,
+          ownerParams(listOwner),
+        );
         sendJson(response, 200, { items: rows.map(knowledgeFromRow) });
         return;
       }
@@ -6781,7 +6935,7 @@ export function createServer(options = {}) {
           const created = createKnowledgeItem(db, {
             ...body,
             title: String(body.title).trim(),
-          });
+          }, requestOwner(request) ?? LEGACY_OWNER);
           insertAudit(db, {
             action: "knowledge.create",
             entityType: "knowledge",
@@ -6802,14 +6956,15 @@ export function createServer(options = {}) {
       if (request.method === "PATCH" && parts[0] === "api" && parts[1] === "knowledge" && parts[2]) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, knowledgePatchSchema);
+        const patchOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
           const before = knowledgeFromRow(get(
             db,
-            "SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL",
-            { $id: parts[2] },
+            `SELECT * FROM knowledge_items WHERE id = $id AND deleted_at IS NULL${ownerClause(patchOwner)}`,
+            ownerParams(patchOwner, { $id: parts[2] }),
           ));
           if (!before) notFound();
-          const updated = updateKnowledgeItem(db, parts[2], body, expectedVersion);
+          const updated = updateKnowledgeItem(db, parts[2], body, expectedVersion, patchOwner);
           if (!updated) notFound();
           insertAudit(db, {
             action: "knowledge.update",
@@ -6840,6 +6995,7 @@ export function createServer(options = {}) {
           entityType: "knowledge",
           deletedBy: request.authContext.account,
           requestId,
+          owner: requestOwner(request),
           metadata: (before) => ({ title: before.title, category: before.category }),
         });
         sendJson(response, 200, { deleted });
@@ -6856,6 +7012,7 @@ export function createServer(options = {}) {
           query: body.query,
           tags: body.tags,
           limit: body.limit,
+          owner: requestOwner(request),
         });
         sendJson(response, 200, { items });
         return;
@@ -6875,13 +7032,14 @@ export function createServer(options = {}) {
         );
         const sourceType = body.sourceType ?? "opportunity_diagnosis";
         const sourceId = body.sourceId ?? parts[2];
+        const diagnoseOwner = requestOwner(request);
         const items = withImmediateTransaction(db, () => {
-          const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, parts[2]));
+          const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, parts[2], diagnoseOwner ?? undefined));
           if (!opportunity) notFound();
           const customer = customerFromRow(get(
             db,
-            "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL",
-            { $id: opportunity.customerId },
+            `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(diagnoseOwner)}`,
+            ownerParams(diagnoseOwner, { $id: opportunity.customerId }),
           ));
           if (!customer) notFound();
 
@@ -6890,6 +7048,7 @@ export function createServer(options = {}) {
             opportunity,
             sourceType,
             sourceId,
+            owner: diagnoseOwner ?? LEGACY_OWNER,
           }).map((draft) => {
             const before = riskFromRow(findRiskItemRowForDraft(db, draft));
             const item = upsertRiskItem(db, draft);
@@ -6933,7 +7092,7 @@ export function createServer(options = {}) {
         const body = await readValidatedJson(request, requestSchemas.quickRecordPreview);
         const rawContent = String(body.rawContent ?? "").trim();
 
-        const analysisKnowledge = searchKnowledgeForAnalysis(db, rawContent, 4);
+        const analysisKnowledge = searchKnowledgeForAnalysis(db, rawContent, 4, requestOwner(request));
         const analysis = await analyzeQuickRecord(rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
           knowledgeItems: analysisKnowledge,
@@ -6954,8 +7113,10 @@ export function createServer(options = {}) {
         const body = await readValidatedJson(request, requestSchemas.quickRecordCreate);
         const rawContent = String(body.rawContent ?? "").trim();
         const item = withImmediateTransaction(db, () => {
+          // v0.9.2：目标归属校验对 user 与 machine 一视同仁（机器 account=WEIXIN_AGENT_OWNER，
+          // 值相同、行为不变）。
           validateCustomerOpportunityPair(db, body.customerId, body.opportunityId, {
-            owner: request.authContext.kind === "machine" ? request.authContext.account : undefined,
+            owner: requestOwner(request) ?? undefined,
           });
           const id = randomUUID();
           run(
@@ -7015,7 +7176,7 @@ export function createServer(options = {}) {
         );
         if (!quickRecord) return notFound(response);
 
-        const analysisKnowledge = searchKnowledgeForAnalysis(db, quickRecord.rawContent, 4);
+        const analysisKnowledge = searchKnowledgeForAnalysis(db, quickRecord.rawContent, 4, requestOwner(request));
         const analysis = await analyzeQuickRecord(quickRecord.rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
           knowledgeItems: analysisKnowledge,
@@ -7124,6 +7285,7 @@ export function createServer(options = {}) {
           customerId: url.searchParams.get("customerId") || undefined,
           opportunityId: url.searchParams.get("opportunityId") || undefined,
           quickRecordId: url.searchParams.get("quickRecordId") || undefined,
+          owner: requestOwner(request),
         });
         sendJson(response, 200, { items });
         return;
@@ -7137,7 +7299,7 @@ export function createServer(options = {}) {
         parts[2] === "sales-decisions" &&
         parts[3]
       ) {
-        const item = salesDecisionRepository.get(parts[3]);
+        const item = salesDecisionRepository.get(parts[3], { owner: requestOwner(request) });
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;
@@ -7145,7 +7307,8 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/ai/sales-decisions") {
         const body = await readValidatedJson(request, requestSchemas.salesDecisionAnalyze);
-        const context = buildSalesDecisionContext(db, body);
+        const decisionOwner = requestOwner(request);
+        const context = buildSalesDecisionContext(db, body, decisionOwner);
         const inputSnapshot = buildSalesDecisionInputSnapshot(context);
         const analysis = await analyzeSalesDecision(context, runtimeConfig, {
           fetchImpl: options.fetchImpl,
@@ -7161,6 +7324,7 @@ export function createServer(options = {}) {
             analysis,
             source: analysis.source,
             createdBy: request.authContext.account,
+            owner: decisionOwner ?? LEGACY_OWNER,
           });
           insertAudit(db, {
             action: "sales_decision_analysis.create",
@@ -7210,8 +7374,8 @@ export function createServer(options = {}) {
           const id = randomUUID();
           run(
             db,
-            `INSERT INTO ai_suggestions (id, type, title, status, content, source_refs)
-             VALUES ($id, $type, $title, $status, $content, $sourceRefs)`,
+            `INSERT INTO ai_suggestions (id, type, title, status, content, source_refs, owner)
+             VALUES ($id, $type, $title, $status, $content, $sourceRefs, $owner)`,
             {
               $id: id,
               $type: suggestion.type,
@@ -7219,6 +7383,7 @@ export function createServer(options = {}) {
               $status: suggestion.status,
               $content: suggestion.content,
               $sourceRefs: JSON.stringify(suggestion.sourceRefs),
+              $owner: requestOwner(request) ?? LEGACY_OWNER,
             },
           );
           const created = aiSuggestionFromRow(get(db, "SELECT * FROM ai_suggestions WHERE id = $id", { $id: id }));
@@ -7294,20 +7459,20 @@ export function createServer(options = {}) {
           const nextOpportunityId = targets.includes("opportunity")
             ? insight?.opportunity?.id ?? quickRecord.opportunityId
             : quickRecord.opportunityId;
+          // v0.9.2：确认目标读取对 user 与 machine 一视同仁地带 owner 谓词。
+          const confirmScopeOwner = requestOwner(request);
           const finalCustomer = nextCustomerId
             ? customerFromRow(get(
               db,
-              `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${request.authContext.kind === "machine" ? " AND owner = $owner" : ""}`,
-              request.authContext.kind === "machine"
-                ? { $id: nextCustomerId, $owner: request.authContext.account }
-                : { $id: nextCustomerId },
+              `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(confirmScopeOwner)}`,
+              ownerParams(confirmScopeOwner, { $id: nextCustomerId }),
             ))
             : null;
           const finalOpportunity = nextOpportunityId
             ? opportunityFromRow(activeOpportunityEntityRow(
               db,
               nextOpportunityId,
-              request.authContext.kind === "machine" ? request.authContext.account : undefined,
+              confirmScopeOwner ?? undefined,
             ))
             : null;
           if (nextCustomerId && !finalCustomer) validationFailure("customerId");
@@ -7486,14 +7651,15 @@ export function createServer(options = {}) {
         if (request.authContext.kind === "machine" && body.owner !== request.authContext.account) {
           throw new HttpError(403, "OWNER_SCOPE_DENIED", "Machine identity cannot select another business owner");
         }
-        const draftOwner = request.authContext.kind === "machine"
-          ? request.authContext.account
-          : body.owner;
+        // v0.9.2：user 与 machine 统一以会话账号为 draft owner（Web 忽略 body.owner）；
+        // anonymous 单人开发模式保留 body/legacy 回退。
+        const scopeOwner = requestOwner(request);
+        const draftOwner = scopeOwner ?? body.owner ?? LEGACY_OWNER;
         const knowledgeIds = normalizeKnowledgeIds(body.knowledgeIds);
         if (knowledgeIds === null) {
           validationFailure("knowledgeIds", "array");
         }
-        const knowledge = getKnowledgeItemsByIds(db, knowledgeIds);
+        const knowledge = getKnowledgeItemsByIds(db, knowledgeIds, scopeOwner);
         if (knowledge.length !== knowledgeIds.length) {
           validationFailure("knowledgeIds");
         }
@@ -7505,15 +7671,13 @@ export function createServer(options = {}) {
            JOIN manual_confirmations mc ON mc.quick_record_id = qr.id AND mc.target = 'weekly'
            LEFT JOIN ai_insights ai ON ai.quick_record_id = qr.id
            WHERE date(substr(COALESCE(qr.occurred_at, qr.created_at), 1, 10))
-             BETWEEN date($periodStart) AND date($periodEnd)
-             AND ($owner IS NULL OR qr.owner = $owner)
+             BETWEEN date($periodStart) AND date($periodEnd)${ownerClause(scopeOwner, "qr.owner")}
            GROUP BY qr.id
            ORDER BY COALESCE(qr.occurred_at, qr.created_at) ASC`,
-          {
+          ownerParams(scopeOwner, {
             $periodStart: body.periodStart,
             $periodEnd: body.periodEnd,
-            $owner: request.authContext.kind === "machine" ? draftOwner : null,
-          },
+          }),
         );
 
         const records = rows.map((row) => ({
@@ -7541,7 +7705,7 @@ export function createServer(options = {}) {
         );
 
         const item = withImmediateTransaction(db, () => {
-          if (getKnowledgeItemsByIds(db, knowledgeIds).length !== knowledgeIds.length) {
+          if (getKnowledgeItemsByIds(db, knowledgeIds, scopeOwner).length !== knowledgeIds.length) {
             validationFailure("knowledgeIds");
           }
           const id = randomUUID();
@@ -7589,7 +7753,12 @@ export function createServer(options = {}) {
         parts[3] &&
         parts[4] === "export"
       ) {
-        const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: parts[3] }));
+        const exportOwner = requestOwner(request);
+        const item = weeklyReportFromRow(get(
+          db,
+          `SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL${ownerClause(exportOwner)}`,
+          ownerParams(exportOwner, { $id: parts[3] }),
+        ));
         if (!item) return notFound(response);
         const format = url.searchParams.get("format") ?? "word";
         if (format !== "word") return badRequest(response, "format must be word");
@@ -7610,14 +7779,15 @@ export function createServer(options = {}) {
       ) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.weeklyPatch);
+        const patchOwner = requestOwner(request);
         const item = withImmediateTransaction(db, () => {
           const before = weeklyReportFromRow(get(
             db,
-            "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL",
-            { $id: parts[3] },
+            `SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL${ownerClause(patchOwner)}`,
+            ownerParams(patchOwner, { $id: parts[3] }),
           ));
           if (!before) notFound();
-          const updated = updateWeeklyReport(db, parts[3], body, expectedVersion);
+          const updated = updateWeeklyReport(db, parts[3], body, expectedVersion, patchOwner);
           if (!updated) notFound();
           if (updated.error === "invalid_status") {
             badRequest(response, "status must be draft, saved, or ready");
@@ -7657,6 +7827,7 @@ export function createServer(options = {}) {
           entityType: "weekly_report",
           deletedBy: request.authContext.account,
           requestId,
+          owner: requestOwner(request),
           metadata: (before) => ({
             owner: before.owner,
             periodStart: before.periodStart,
@@ -7675,14 +7846,19 @@ export function createServer(options = {}) {
         parts[2] === "weekly" &&
         parts[3]
       ) {
-        const item = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL", { $id: parts[3] }));
+        const detailOwner = requestOwner(request);
+        const item = weeklyReportFromRow(get(
+          db,
+          `SELECT * FROM weekly_reports WHERE id = $id AND deleted_at IS NULL${ownerClause(detailOwner)}`,
+          ownerParams(detailOwner, { $id: parts[3] }),
+        ));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/solutions") {
-        const items = activeSolutionDraftRows(db).map(solutionDraftFromRow);
+        const items = activeSolutionDraftRows(db, requestOwner(request)).map(solutionDraftFromRow);
         sendJson(response, 200, { items });
         return;
       }
@@ -7700,10 +7876,18 @@ export function createServer(options = {}) {
           validationFailure("knowledgeIds", "array");
         }
 
-        const customer = customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: body.customerId }));
-        const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, body.opportunityId));
-        validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
-        const selectedKnowledge = getKnowledgeItemsByIds(db, knowledgeIds);
+        // v0.9.2：owner=会话账号（Web 忽略 body.owner）；客户/商机/知识引用全部按
+        // 账号校验归属（跨账号 → 422，与"不存在"同响应）。
+        const scopeOwner = requestOwner(request);
+        const draftOwner = scopeOwner ?? body.owner ?? LEGACY_OWNER;
+        const customer = customerFromRow(get(
+          db,
+          `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(scopeOwner)}`,
+          ownerParams(scopeOwner, { $id: body.customerId }),
+        ));
+        const opportunity = opportunityFromRow(activeOpportunityEntityRow(db, body.opportunityId, scopeOwner ?? undefined));
+        validateCustomerOpportunityPair(db, body.customerId, body.opportunityId, { owner: scopeOwner ?? undefined });
+        const selectedKnowledge = getKnowledgeItemsByIds(db, knowledgeIds, scopeOwner);
         if (selectedKnowledge.length !== knowledgeIds.length) {
           validationFailure("knowledgeIds");
         }
@@ -7711,6 +7895,7 @@ export function createServer(options = {}) {
         const actions = getDraftActions(db, {
           customerId: customer.id,
           opportunityId: opportunity.id,
+          owner: scopeOwner,
         });
         const autoKnowledge = searchKnowledgeItems(db, {
           query: [
@@ -7724,10 +7909,11 @@ export function createServer(options = {}) {
             ...(opportunity.solutionDirection ?? []),
           ].join(" "),
           limit: 4,
+          owner: scopeOwner,
         });
         const knowledge = mergeKnowledgeItems(selectedKnowledge, autoKnowledge).slice(0, 8);
         const fallbackDraft = buildSolutionDraft({
-          owner: body.owner,
+          owner: draftOwner,
           customer,
           opportunity,
           actions,
@@ -7737,7 +7923,7 @@ export function createServer(options = {}) {
         const draft = await enhanceSolutionDraftWithModel(
           fallbackDraft,
           {
-            owner: body.owner,
+            owner: draftOwner,
             artifactType: fallbackDraft.artifactType,
             customer,
             opportunity,
@@ -7749,8 +7935,8 @@ export function createServer(options = {}) {
         );
 
         const item = withImmediateTransaction(db, () => {
-          validateCustomerOpportunityPair(db, body.customerId, body.opportunityId);
-          if (getKnowledgeItemsByIds(db, knowledgeIds).length !== knowledgeIds.length) {
+          validateCustomerOpportunityPair(db, body.customerId, body.opportunityId, { owner: scopeOwner ?? undefined });
+          if (getKnowledgeItemsByIds(db, knowledgeIds, scopeOwner).length !== knowledgeIds.length) {
             validationFailure("knowledgeIds");
           }
           const id = randomUUID();
@@ -7763,7 +7949,7 @@ export function createServer(options = {}) {
              )`,
             {
               $id: id,
-              $owner: body.owner,
+              $owner: draftOwner,
               $artifactType: draft.artifactType ?? fallbackDraft.artifactType,
               $title: draft.title,
               $customerId: customer.id,
@@ -7803,7 +7989,7 @@ export function createServer(options = {}) {
         const expectedVersion = parseExpectedVersion(request);
         const body = await readValidatedJson(request, requestSchemas.solutionPatch);
         const item = withImmediateTransaction(db, () => {
-          const before = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2]));
+          const before = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2], requestOwner(request)));
           if (!before) notFound();
           runVersionedUpdate(db, {
             table: "solution_drafts",
@@ -7846,7 +8032,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && parts[0] === "api" && parts[1] === "solutions" && parts[2]) {
-        const item = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2]));
+        const item = solutionDraftFromRow(activeSolutionDraftRow(db, parts[2], requestOwner(request)));
         if (!item) return notFound(response);
         sendJson(response, 200, { item });
         return;

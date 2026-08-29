@@ -192,13 +192,13 @@ test("request schemas strictly accept the current camelCase API payloads", () =>
   const examples = {
     login: { account: "sales", password: "secret" },
     customerCreate: {
-      name: "Customer", region: "East", type: "hospital", level: "A", owner: "Lee", contact: "Li", relation: 2,
+      name: "Customer", region: "East", type: "hospital", level: "A", contact: "Li", relation: 2,
       stakeholders: [{ role: "CIO" }], decisionChain: [{ step: "review" }], historyProjects: [{ year: 2026 }],
       infrastructure: [{ product: "storage" }], syncPreview: [{ source: "record" }], budget: "100", summary: "summary",
       needs: [{ text: "need" }], risks: [{ text: "risk" }], opportunities: [{ name: "deal" }],
     },
     opportunityCreate: {
-      customerId: "customer-1", name: "Deal", customer: "Customer", stage: "discover", amount: "100", owner: "Lee",
+      customerId: "customer-1", name: "Deal", customer: "Customer", stage: "discover", amount: "100",
       probability: 50, days: 30, requirements: [{ text: "need" }], competitors: [{ name: "other" }],
       solutionDirection: [{ text: "plan" }], sourceRecord: "record", risk: "risk", next: "next", tone: "calm",
     },

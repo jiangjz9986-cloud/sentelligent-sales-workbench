@@ -12,7 +12,8 @@ function fixtureLabel(...parts) {
   return parts.join("-");
 }
 
-const owner = "继振";
+// v0.9.2：种子 owner 词表统一为账号 id（0029/0031），业务归属对齐 jiangjz。
+const owner = "jiangjz";
 const accountValue = fixtureLabel("xiaoxiao", "sales", "loop", "password");
 const machineValue = fixtureLabel("xiaoxiao", "sales", "loop", "machine", "token");
 const senderId = "xiaoxiao-sales-loop-sender";

@@ -374,7 +374,10 @@ function dataOwner(value) {
       opportunityId: opportunity?.id ?? null,
     });
     const knowledge = input.knowledgeQuery
-      ? snapshotAdapter.knowledgeSearch({ query: requiredText(input.knowledgeQuery, "knowledgeQuery", 200) }).items
+      ? snapshotAdapter.knowledgeSearch({
+        owner: context.owner,
+        query: requiredText(input.knowledgeQuery, "knowledgeQuery", 200),
+      }).items
       : [];
     // Source references are reconstructed from rows that passed the owner scope;
     // caller-supplied references are never trusted as evidence.
@@ -556,7 +559,10 @@ function dataOwner(value) {
       updatedAt: row.updated_at,
     }));
     const knowledge = input.knowledgeQuery
-      ? snapshotAdapter.knowledgeSearch({ query: requiredText(input.knowledgeQuery, "knowledgeQuery", 200) }).items
+      ? snapshotAdapter.knowledgeSearch({
+        owner: normalizedOwner,
+        query: requiredText(input.knowledgeQuery, "knowledgeQuery", 200),
+      }).items
       : [];
     const draft = buildWeeklyDraft({
       // The business owner is an authorization boundary, not report prose or

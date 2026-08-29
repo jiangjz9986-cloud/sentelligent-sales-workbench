@@ -158,7 +158,7 @@ describe("cookie authentication protocol", () => {
   it("requires matching CSRF for cookie writes and allows cookie reads", async () => {
     await startServer();
     const loggedIn = await login();
-    const customer = JSON.stringify({ name: "CSRF customer", owner: "jiangjz" });
+    const customer = JSON.stringify({ name: "CSRF customer" });
 
     const missing = await request("/api/customers", {
       method: "POST",

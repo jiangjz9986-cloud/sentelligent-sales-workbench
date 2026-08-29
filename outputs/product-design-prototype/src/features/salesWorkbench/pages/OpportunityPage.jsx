@@ -40,7 +40,6 @@ function opportunityToForm(opportunity, selectedCustomer) {
     customer: hasOpportunity ? (opportunity?.customer ?? selectedCustomer?.name ?? "") : "",
     stage: opportunity?.stage ?? "",
     amount: opportunity?.amount ?? "",
-    owner: opportunity?.owner ?? "",
     probability: opportunity?.probability == null ? "" : String(opportunity.probability),
     days: opportunity?.days == null ? "" : String(opportunity.days),
     requirements: textFromArray(opportunity?.requirements),
@@ -60,7 +59,6 @@ function opportunityFromForm(form, customersList, isNew) {
     customer: customer?.name ?? form.customer.trim(),
     stage: form.stage.trim(),
     amount: form.amount.trim(),
-    owner: form.owner.trim(),
     probability: numberFromInput(form.probability, 30),
     days: numberFromInput(form.days),
     requirements: arrayFromText(form.requirements),
@@ -152,9 +150,6 @@ function OpportunityEditor({ selected, customersList, initialMode = "edit", onSa
         </FormField>
         <FormField label="金额">
           <input value={form.amount} onChange={(event) => update("amount", event.target.value)} />
-        </FormField>
-        <FormField label="负责人">
-          <input value={form.owner} onChange={(event) => update("owner", event.target.value)} />
         </FormField>
         <FormField label="赢率">
           <input min="0" max="100" type="number" value={form.probability} onChange={(event) => update("probability", event.target.value)} />

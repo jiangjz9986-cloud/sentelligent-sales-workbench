@@ -75,8 +75,15 @@ export function customerFromRow(row) {
   };
 }
 
-export function getActiveCustomer(db, id) {
-  return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+// v0.9.2 隔离：owner 传入即为硬谓词（跨账号读写查无行 → 404，先于乐观锁）；
+// 省略 owner 保持全库视角（AUTH_REQUIRED=false 的单人开发模式与既有单测）。
+export function getActiveCustomer(db, id, { owner = null } = {}) {
+  const ownerClause = owner ? " AND owner = $owner" : "";
+  return customerFromRow(get(
+    db,
+    `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause}`,
+    owner ? { $id: id, $owner: owner } : { $id: id },
+  ));
 }
 
 export function createCustomer(db, body, { id = randomUUID() } = {}) {
@@ -119,10 +126,11 @@ export function createCustomer(db, body, { id = randomUUID() } = {}) {
   return customerFromRow(get(db, "SELECT * FROM customers WHERE id = $id", { $id: id }));
 }
 
-export function updateCustomer(db, id, body, expectedVersion) {
-  const current = getActiveCustomer(db, id);
+export function updateCustomer(db, id, body, expectedVersion, { owner = null } = {}) {
+  const current = getActiveCustomer(db, id, { owner });
   if (!current) return null;
 
+  // owner 是归属/隔离键（v0.9.2 起服务端注入、无转移功能），不再进入补丁词表。
   const result = run(
     db,
     `UPDATE customers
@@ -130,7 +138,6 @@ export function updateCustomer(db, id, body, expectedVersion) {
          region = $region,
          type = $type,
          level = $level,
-         owner = $owner,
          contact = $contact,
          relation = $relation,
          stakeholders = $stakeholders,
@@ -149,15 +156,15 @@ export function updateCustomer(db, id, body, expectedVersion) {
          updated_at = CURRENT_TIMESTAMP
        WHERE id = $id
        AND version = $expectedVersion
-       AND deleted_at IS NULL`,
+       AND deleted_at IS NULL${owner ? " AND owner = $owner" : ""}`,
     {
       $id: id,
       $expectedVersion: expectedVersion,
+      ...(owner ? { $owner: owner } : {}),
       $name: patchValue(body, "name", current.name),
       $region: patchValue(body, "region", current.region),
       $type: patchValue(body, "type", current.type),
       $level: patchValue(body, "level", current.level),
-      $owner: patchValue(body, "owner", current.owner),
       $contact: patchValue(body, "contact", current.contact),
       $relation: patchValue(body, "relation", current.relation),
       $stakeholders: patchJsonValue(body, "stakeholders", current.stakeholders),
@@ -178,7 +185,7 @@ export function updateCustomer(db, id, body, expectedVersion) {
     throwVersionFailure(db, id);
   }
 
-  return getActiveCustomer(db, id);
+  return getActiveCustomer(db, id, { owner });
 }
 
 function customerSoftDeleteAuditSnapshot(entity, lifecycle = {}) {
@@ -192,9 +199,13 @@ function customerSoftDeleteAuditSnapshot(entity, lifecycle = {}) {
   };
 }
 
-export function softDeleteCustomer(db, { id, expectedVersion, deletedBy, requestId, metadata = {} }) {
+export function softDeleteCustomer(db, { id, expectedVersion, deletedBy, requestId, metadata = {}, owner = null }) {
   return withImmediateTransaction(db, () => {
-    const beforeRow = get(db, "SELECT * FROM customers WHERE id = $id", { $id: id });
+    const beforeRow = get(
+      db,
+      `SELECT * FROM customers WHERE id = $id${owner ? " AND owner = $owner" : ""}`,
+      owner ? { $id: id, $owner: owner } : { $id: id },
+    );
     if (!beforeRow || beforeRow.deleted_at) notFound();
 
     const result = run(
@@ -206,11 +217,12 @@ export function softDeleteCustomer(db, { id, expectedVersion, deletedBy, request
            updated_at = CURRENT_TIMESTAMP
        WHERE id = $id
          AND version = $expectedVersion
-         AND deleted_at IS NULL`,
+         AND deleted_at IS NULL${owner ? " AND owner = $owner" : ""}`,
       {
         $id: id,
         $expectedVersion: expectedVersion,
         $deletedBy: deletedBy,
+        ...(owner ? { $owner: owner } : {}),
       },
     );
     if (result.changes !== 1) {

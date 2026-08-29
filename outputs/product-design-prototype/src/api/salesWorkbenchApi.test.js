@@ -1685,7 +1685,6 @@ describe("sales workbench API client", () => {
         region: customer.region,
         type: customer.type,
         level: customer.level,
-        owner: customer.owner,
         contact: customer.contact,
         relation: customer.relation,
         stakeholders: customer.stakeholders,
@@ -1709,7 +1708,6 @@ describe("sales workbench API client", () => {
         customer: opportunity.customer,
         stage: opportunity.stage,
         amount: opportunity.amount,
-        owner: opportunity.owner,
         probability: opportunity.probability,
         days: opportunity.days,
         requirements: opportunity.requirements,
@@ -2054,18 +2052,18 @@ describe("sales workbench API client", () => {
       artifactType: "communication_outline",
       knowledgeIds: ["k-mobile-cloud"],
     });
+    // v0.9.2：即使调用方仍传 owner，客户端也不再发送——owner 由服务端按会话注入。
 
     assertApiEntity("weeklyReport", weekly);
     assertApiEntity("solutionDraft", solution);
     assert.deepEqual(calls, [
       {
         url: "http://127.0.0.1:8787/api/reports/weekly/draft",
-        body: { owner: "Jizhen", periodStart: "2026-06-01", periodEnd: "2026-06-07", knowledgeIds: ["k-mobile-cloud"] },
+        body: { periodStart: "2026-06-01", periodEnd: "2026-06-07", knowledgeIds: ["k-mobile-cloud"] },
       },
       {
         url: "http://127.0.0.1:8787/api/solutions/draft",
         body: {
-          owner: "Jizhen",
           customerId: "rizhao",
           opportunityId: "op-rizhao-plan",
           artifactType: "communication_outline",

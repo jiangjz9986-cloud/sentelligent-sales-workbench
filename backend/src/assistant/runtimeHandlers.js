@@ -1059,7 +1059,7 @@ export function createAssistantToolHandlers({
       let updated;
       try {
         updated = withImmediateTransaction(db, () => {
-          const item = updateCustomer(db, customerId, changes, expectedVersion);
+          const item = updateCustomer(db, customerId, changes, expectedVersion, { owner: businessOwner });
           if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
           insertAudit(db, {
             action: "customer.update",
@@ -1130,6 +1130,7 @@ export function createAssistantToolHandlers({
           expectedVersion,
           deletedBy: context.owner,
           requestId: context.requestId,
+          owner: businessOwner,
           metadata: {
             source: "weixin-assistant",
             ...(context.actionId ? { actionId: context.actionId } : {}),
@@ -1307,7 +1308,7 @@ export function createAssistantToolHandlers({
               : direction === "same"
                 ? "skipped_same"
                 : "skipped_unknown_stage";
-          const item = updateOpportunity(db, opportunityId, { stage }, expectedVersion);
+          const item = updateOpportunity(db, opportunityId, { stage }, expectedVersion, { owner: businessOwner });
           if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
           insertAudit(db, {
             action: "opportunity.update",
@@ -1424,7 +1425,7 @@ export function createAssistantToolHandlers({
           const before = getActiveOpportunity(db, opportunityId);
           if (!before) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
           beforeNext = before.next ?? null;
-          const item = updateOpportunity(db, opportunityId, { next }, expectedVersion);
+          const item = updateOpportunity(db, opportunityId, { next }, expectedVersion, { owner: businessOwner });
           if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
           insertAudit(db, {
             action: "opportunity.update",
@@ -1501,7 +1502,7 @@ export function createAssistantToolHandlers({
         updated = withImmediateTransaction(db, () => {
           before = getActiveOpportunity(db, opportunityId);
           if (!before) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
-          const item = updateOpportunity(db, opportunityId, changes, expectedVersion);
+          const item = updateOpportunity(db, opportunityId, changes, expectedVersion, { owner: businessOwner });
           if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
           insertAudit(db, {
             action: "opportunity.update",
@@ -2197,18 +2198,18 @@ export function createAssistantToolHandlers({
       const links = resolveQuickRecordLinks(snapshotAdapter, context.owner, analysis);
       const persisted = withImmediateTransaction(db, () => {
         const recordId = actionId || randomUUID();
+        // 0031 触发器要求 owner 随 INSERT 落定（NULL 即 ABORT），不再事后回填。
         db.prepare(`
-          INSERT INTO quick_records (id, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
-          VALUES ($id, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
+          INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
+          VALUES ($id, $owner, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
         `).run({
           $id: recordId,
+          $owner: context.owner,
           $rawContent: content,
           $occurredAt: occurredAt,
           $customerId: links.customerId,
           $opportunityId: links.opportunityId,
         });
-        db.prepare("UPDATE quick_records SET owner = $owner WHERE id = $id")
-          .run({ $id: recordId, $owner: context.owner });
         const created = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: recordId }));
         insertAudit(db, {
           action: "quick_record.create",
@@ -2318,18 +2319,18 @@ export function createAssistantToolHandlers({
       });
       const links = resolveQuickRecordLinks(snapshotAdapter, context.owner, analysis);
       const persisted = withImmediateTransaction(db, () => {
+        // 0031 触发器要求 owner 随 INSERT 落定（NULL 即 ABORT），不再事后回填。
         db.prepare(`
-          INSERT INTO quick_records (id, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
-          VALUES ($id, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
+          INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
+          VALUES ($id, $owner, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
         `).run({
           $id: recordId,
+          $owner: context.owner,
           $rawContent: content,
           $occurredAt: occurredAt,
           $customerId: links.customerId,
           $opportunityId: links.opportunityId,
         });
-        db.prepare("UPDATE quick_records SET owner = $owner WHERE id = $id")
-          .run({ $id: recordId, $owner: context.owner });
         const created = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: recordId }));
         insertAudit(db, {
           action: "quick_record.create",

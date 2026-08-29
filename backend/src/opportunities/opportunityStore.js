@@ -92,8 +92,8 @@ export function activeOpportunityEntityRow(db, id, owner) {
   );
 }
 
-export function getActiveOpportunity(db, id) {
-  return opportunityFromRow(activeOpportunityEntityRow(db, id));
+export function getActiveOpportunity(db, id, owner) {
+  return opportunityFromRow(activeOpportunityEntityRow(db, id, owner));
 }
 
 export function createOpportunity(db, body, { id = randomUUID() } = {}) {
@@ -130,10 +130,11 @@ export function createOpportunity(db, body, { id = randomUUID() } = {}) {
   return opportunityFromRow(get(db, "SELECT * FROM opportunities WHERE id = $id", { $id: id }));
 }
 
-export function updateOpportunity(db, id, body, expectedVersion) {
-  const current = getActiveOpportunity(db, id);
+export function updateOpportunity(db, id, body, expectedVersion, { owner = null } = {}) {
+  const current = getActiveOpportunity(db, id, owner ?? undefined);
   if (!current) return null;
 
+  // owner 是归属/隔离键（v0.9.2 起服务端注入、无转移功能），不再进入补丁词表。
   const result = run(
     db,
     `UPDATE opportunities
@@ -142,7 +143,6 @@ export function updateOpportunity(db, id, body, expectedVersion) {
          customer = $customer,
          stage = $stage,
          amount = $amount,
-         owner = $owner,
          probability = $probability,
          days = $days,
          requirements = $requirements,
@@ -156,16 +156,16 @@ export function updateOpportunity(db, id, body, expectedVersion) {
          updated_at = CURRENT_TIMESTAMP
        WHERE id = $id
        AND version = $expectedVersion
-       AND deleted_at IS NULL`,
+       AND deleted_at IS NULL${owner ? " AND owner = $owner" : ""}`,
     {
       $id: id,
       $expectedVersion: expectedVersion,
+      ...(owner ? { $owner: owner } : {}),
       $customerId: patchValue(body, "customerId", current.customerId),
       $name: patchValue(body, "name", current.name),
       $customer: patchValue(body, "customer", current.customer),
       $stage: patchValue(body, "stage", current.stage),
       $amount: patchValue(body, "amount", current.amount),
-      $owner: patchValue(body, "owner", current.owner),
       $probability: patchValue(body, "probability", current.probability),
       $days: patchValue(body, "days", current.days),
       $requirements: patchJsonValue(body, "requirements", current.requirements),
@@ -181,7 +181,7 @@ export function updateOpportunity(db, id, body, expectedVersion) {
     throwVersionFailure(db, id);
   }
 
-  return getActiveOpportunity(db, id);
+  return getActiveOpportunity(db, id, owner ?? undefined);
 }
 
 function opportunitySoftDeleteAuditSnapshot(entity, lifecycle = {}) {
@@ -250,14 +250,15 @@ export function softDeleteOpportunity(db, { id, expectedVersion, deletedBy, requ
   });
 }
 
+// 0031 全量回填后 owner 恒非空，可见性收敛为单一 owner 谓词（与快照适配器一致）。
 const OWNER_VISIBILITY_CLAUSE = `
-  (opportunities.owner = $owner OR (opportunities.owner IS NULL AND customers.owner = $owner))
+  opportunities.owner = $owner
 `;
 
 /**
  * Owner-visible opportunities whose id ends with the given suffix (candidate
- * cards show the last six characters). Same OR-visibility scope as the
- * assistant business snapshot; LIKE metacharacters in the suffix are escaped.
+ * cards show the last six characters). Same owner scope as the assistant
+ * business snapshot; LIKE metacharacters in the suffix are escaped.
  */
 export function findOpportunityByIdSuffix(db, { owner, suffix }) {
   const normalizedSuffix = String(suffix ?? "").trim();

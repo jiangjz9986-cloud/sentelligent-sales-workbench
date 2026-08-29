@@ -25,7 +25,7 @@ async function request(path, options = {}) {
 async function createCustomer(name = "optimistic-customer") {
   const created = await request("/api/customers", {
     method: "POST",
-    body: JSON.stringify({ name, owner: "tester", relation: 20 }),
+    body: JSON.stringify({ name, relation: 20 }),
   });
   assert.equal(created.response.status, 201);
   return created.body.item;

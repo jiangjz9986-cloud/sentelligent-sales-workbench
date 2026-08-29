@@ -155,7 +155,7 @@ describe("customer write runtime handlers", () => {
   it("soft-deletes a customer, hides it and its opportunities from the assistant reads", async () => {
     db.exec(`
       INSERT INTO customers (id, name, owner) VALUES ('customer-d1', '删除医院', 'assistant-owner');
-      INSERT INTO opportunities (id, customer_id, name) VALUES ('opp-d1', 'customer-d1', '信息化一期');
+      INSERT INTO opportunities (id, customer_id, name, owner) VALUES ('opp-d1', 'customer-d1', '信息化一期', 'assistant-owner');
     `);
     const result = await handlers["customer.delete"]({
       customerId: "customer-d1",

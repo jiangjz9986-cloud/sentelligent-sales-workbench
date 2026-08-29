@@ -60,7 +60,7 @@ describe("opportunity store", () => {
     assert.deepEqual(created.competitors, ["移动云"]);
     assert.equal(created.owner, OWNER);
 
-    const random = createOpportunity(db, { customerId: "customer-1", name: "随机编号商机" });
+    const random = createOpportunity(db, { customerId: "customer-1", name: "随机编号商机", owner: OWNER });
     assert.ok(random.id && random.id !== "opp-fixed-id-1");
     assert.equal(random.probability, 0);
     assert.deepEqual(random.requirements, []);
@@ -73,6 +73,7 @@ describe("opportunity store", () => {
       customer: "日照中医医院",
       stage: "方案输出",
       amount: "规划类",
+      owner: OWNER,
       risk: "原始风险",
       requirements: ["原始需求"],
     }, { id: "opp-update-1" });
@@ -85,7 +86,7 @@ describe("opportunity store", () => {
   });
 
   it("throws 409 VERSION_CONFLICT with the current version and 404 for missing rows", () => {
-    createOpportunity(db, { customerId: "customer-1", name: "版本冲突商机" }, { id: "opp-conflict-1" });
+    createOpportunity(db, { customerId: "customer-1", name: "版本冲突商机", owner: OWNER }, { id: "opp-conflict-1" });
     updateOpportunity(db, "opp-conflict-1", { stage: "线索" }, 1);
     assert.throws(
       () => updateOpportunity(db, "opp-conflict-1", { stage: "初步沟通" }, 1),
@@ -124,9 +125,11 @@ describe("opportunity store", () => {
     );
   });
 
-  it("finds by id suffix inside the owner-visible OR scope with LIKE escaping", () => {
+  // v0.9.2：0031 回填后 owner 恒非空（触发器拒绝 NULL），可见性收敛为单一 owner
+  // 列谓词；原 NULL-owner“继承商机”夹具改为回填后的 owner 列形态。
+  it("finds by id suffix inside the owner-column scope with LIKE escaping", () => {
     createOpportunity(db, { customerId: "customer-1", name: "自有商机", owner: OWNER }, { id: "opp-own-abc123" });
-    createOpportunity(db, { customerId: "customer-1", name: "继承商机", owner: null }, { id: "opp-null-abc123" });
+    createOpportunity(db, { customerId: "customer-1", name: "继承商机", owner: OWNER }, { id: "opp-null-abc123" });
     createOpportunity(db, { customerId: "customer-other", name: "他人商机", owner: "someone-else" }, { id: "opp-else-abc123" });
     createOpportunity(db, { customerId: "customer-2", name: "唯一商机", owner: OWNER }, { id: "opp-unique-def456" });
 
@@ -177,19 +180,19 @@ describe("opportunity store", () => {
   it("counts live references across actions, risks, quick records, and solution drafts", () => {
     createOpportunity(db, { customerId: "customer-1", name: "引用商机", owner: OWNER }, { id: "opp-ref-1" });
     db.exec(`
-      INSERT INTO action_items (id, opportunity_id, title) VALUES
-        ('act-1', 'opp-ref-1', '行动一'),
-        ('act-2', 'opp-ref-1', '行动二');
-      INSERT INTO action_items (id, opportunity_id, title, deleted_at) VALUES
-        ('act-deleted', 'opp-ref-1', '已删行动', CURRENT_TIMESTAMP);
-      INSERT INTO risk_items (id, opportunity_id, title, target, evidence, action) VALUES
-        ('risk-1', 'opp-ref-1', '风险一', '目标', '证据', '处理');
-      INSERT INTO quick_records (id, raw_content, opportunity_id) VALUES
-        ('qr-1', '记录一', 'opp-ref-1'),
-        ('qr-2', '记录二', 'opp-ref-1'),
-        ('qr-3', '记录三', 'opp-ref-1');
-      INSERT INTO quick_records (id, raw_content, opportunity_id, voided_at) VALUES
-        ('qr-voided', '已作废', 'opp-ref-1', CURRENT_TIMESTAMP);
+      INSERT INTO action_items (id, opportunity_id, title, owner) VALUES
+        ('act-1', 'opp-ref-1', '行动一', '${OWNER}'),
+        ('act-2', 'opp-ref-1', '行动二', '${OWNER}');
+      INSERT INTO action_items (id, opportunity_id, title, deleted_at, owner) VALUES
+        ('act-deleted', 'opp-ref-1', '已删行动', CURRENT_TIMESTAMP, '${OWNER}');
+      INSERT INTO risk_items (id, opportunity_id, title, target, evidence, action, owner) VALUES
+        ('risk-1', 'opp-ref-1', '风险一', '目标', '证据', '处理', '${OWNER}');
+      INSERT INTO quick_records (id, raw_content, opportunity_id, owner) VALUES
+        ('qr-1', '记录一', 'opp-ref-1', '${OWNER}'),
+        ('qr-2', '记录二', 'opp-ref-1', '${OWNER}'),
+        ('qr-3', '记录三', 'opp-ref-1', '${OWNER}');
+      INSERT INTO quick_records (id, raw_content, opportunity_id, voided_at, owner) VALUES
+        ('qr-voided', '已作废', 'opp-ref-1', CURRENT_TIMESTAMP, '${OWNER}');
       INSERT INTO solution_drafts (id, owner, title, customer_id, opportunity_id, content) VALUES
         ('sd-1', '${OWNER}', '方案草稿', 'customer-1', 'opp-ref-1', '正文');
     `);

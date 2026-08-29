@@ -590,7 +590,6 @@ export async function runSmoke({
           region: "Shandong",
           type: "medical",
           level: "A",
-          owner: PRODUCTION_ACCOUNT,
           contact: marker,
           summary: `${marker} isolated production smoke validation`,
         },
@@ -656,7 +655,6 @@ export async function runSmoke({
           name: `${marker} production smoke opportunity`,
           stage: "qualification",
           amount: "100000",
-          owner: PRODUCTION_ACCOUNT,
           probability: 35,
           sourceRecord: marker,
           risk: `${marker} budget and decision chain require validation`,
@@ -842,6 +840,8 @@ export async function runSmoke({
         csrfProtected: true,
         headers: writeHeaders("weekly-report.create"),
         body: {
+          // v0.9.2：Web 端 body.owner 被忽略，owner 恒为会话账号——故意发送
+          // 一个假 owner 来实测收口契约。
           owner: runLabel,
           periodStart: "2099-01-01",
           periodEnd: "2099-01-07",
@@ -853,7 +853,7 @@ export async function runSmoke({
         rememberCreatedId("weeklyReports", created.body.item.id);
       }
       expectedStatus(created, 201, "weekly draft create");
-      assertCheck(state.weekly?.owner === runLabel, "weekly draft owner is not isolated by runId");
+      assertCheck(state.weekly?.owner === PRODUCTION_ACCOUNT, "weekly draft owner must come from the session (body owner ignored)");
       assertCheck(state.weekly?.periodStart === "2099-01-01", "weekly draft period start is not isolated in 2099");
       assertCheck(state.weekly?.periodEnd === "2099-01-07", "weekly draft period end is not isolated in 2099");
       assertCheck(state.weekly?.status === "draft", "weekly report was not created as a draft");

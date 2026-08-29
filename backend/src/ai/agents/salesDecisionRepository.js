@@ -29,6 +29,7 @@ export function createSalesDecisionRepository(db, { idFactory, clock } = {}) {
   const now = clock ?? (() => new Date().toISOString());
 
   return {
+    // v0.9.2：owner=归属/隔离键（服务端注入），created_by=审计列；本版创建时恒等。
     create({
       analysisType,
       industry = "general",
@@ -39,15 +40,16 @@ export function createSalesDecisionRepository(db, { idFactory, clock } = {}) {
       analysis,
       source,
       createdBy,
+      owner,
     }) {
       const id = makeId();
       db.prepare(`
         INSERT INTO sales_decision_analyses (
           id, analysis_type, industry, customer_id, opportunity_id, quick_record_id,
-          input_json, analysis_json, source, created_by, created_at
+          input_json, analysis_json, source, created_by, owner, created_at
         ) VALUES (
           :id, :analysisType, :industry, :customerId, :opportunityId, :quickRecordId,
-          :inputJson, :analysisJson, :source, :createdBy, :createdAt
+          :inputJson, :analysisJson, :source, :createdBy, :owner, :createdAt
         )
       `).run({
         id,
@@ -60,26 +62,31 @@ export function createSalesDecisionRepository(db, { idFactory, clock } = {}) {
         analysisJson: JSON.stringify(analysis ?? {}),
         source,
         createdBy,
+        owner: owner ?? createdBy,
         createdAt: now(),
       });
       return fromRow(db.prepare("SELECT * FROM sales_decision_analyses WHERE id = :id").get({ id }));
     },
 
-    get(id) {
-      return fromRow(db.prepare("SELECT * FROM sales_decision_analyses WHERE id = :id").get({ id }));
+    get(id, { owner = null } = {}) {
+      return fromRow(db.prepare(
+        `SELECT * FROM sales_decision_analyses WHERE id = :id${owner ? " AND owner = :owner" : ""}`,
+      ).get(owner ? { id, owner } : { id }));
     },
 
-    list({ customerId, opportunityId, quickRecordId } = {}) {
+    list({ customerId, opportunityId, quickRecordId, owner = null } = {}) {
       return db.prepare(`
         SELECT * FROM sales_decision_analyses
         WHERE (:customerId IS NULL OR customer_id = :customerId)
           AND (:opportunityId IS NULL OR opportunity_id = :opportunityId)
           AND (:quickRecordId IS NULL OR quick_record_id = :quickRecordId)
+          ${owner ? "AND owner = :owner" : ""}
         ORDER BY created_at DESC, rowid DESC
       `).all({
         customerId: customerId ?? null,
         opportunityId: opportunityId ?? null,
         quickRecordId: quickRecordId ?? null,
+        ...(owner ? { owner } : {}),
       }).map(fromRow);
     },
   };

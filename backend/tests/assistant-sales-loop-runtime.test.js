@@ -28,10 +28,10 @@ function insertFixture() {
     VALUES ('opportunity-runtime', 'customer-runtime', '运行时升级项目', '初步发现', '1200000', '${owner}', '["总体规划"]', '安排技术交流');
     INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status)
     VALUES ('record-runtime', '${owner}', '客户确认现有平台稳定性需要提升，预算路径尚未确认。', '2026-08-19T10:00:00+08:00', '微信助手', 'customer-runtime', 'opportunity-runtime', 'analyzed');
-    INSERT INTO action_items (id, customer_id, opportunity_id, title, status, due, assignee)
-    VALUES ('action-runtime', 'customer-runtime', 'opportunity-runtime', '补充技术资料', 'pending', '2026-08-21', '销售负责人');
-    INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action)
-    VALUES ('risk-runtime', 'customer-runtime', 'opportunity-runtime', '预算未确认', '商机', '高', 'open', '会议纪要', '确认预算');
+    INSERT INTO action_items (id, customer_id, opportunity_id, title, status, due, assignee, owner)
+    VALUES ('action-runtime', 'customer-runtime', 'opportunity-runtime', '补充技术资料', 'pending', '2026-08-21', '销售负责人', '${owner}');
+    INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action, owner)
+    VALUES ('risk-runtime', 'customer-runtime', 'opportunity-runtime', '预算未确认', '商机', '高', 'open', '会议纪要', '确认预算', '${owner}');
     INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
     VALUES ('insight-runtime', 'record-runtime', 'mock', 80, '{"customer":{"value":"运行时医院"},"opportunity":{"value":"运行时升级项目"},"summary":{"action":{"text":"安排技术交流"},"risk":{"text":"预算路径尚未确认"}}}');
   `);
@@ -312,8 +312,8 @@ describe("wired sales loop assistant runtime", () => {
   it("routes action-risk and knowledge reads through fixed agents with replay-safe runs", async () => {
     let db = openDatabase({ databaseUrl });
     db.prepare(`
-      INSERT INTO knowledge_items (id, title, category, summary, content, source)
-      VALUES ('knowledge-runtime', '运行时采购知识', '销售', '采购摘要', '不应返回的完整正文', '内部知识库')
+      INSERT INTO knowledge_items (id, title, category, summary, content, source, owner)
+      VALUES ('knowledge-runtime', '运行时采购知识', '销售', '采购摘要', '不应返回的完整正文', '内部知识库', '${owner}')
     `).run();
     const before = businessCounts(db);
     db.close();
@@ -403,8 +403,8 @@ describe("wired sales loop assistant runtime", () => {
   it("routes itinerary summaries through a fixed read-only agent", async () => {
     let db = openDatabase({ databaseUrl });
     db.exec(`
-      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
-      VALUES ('itinerary-runtime', '运行时拜访行程', '2026-08-22', 'planned', '{}', '{}', '${owner}', '${owner}');
+      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by, owner)
+      VALUES ('itinerary-runtime', '运行时拜访行程', '2026-08-22', 'planned', '{}', '{}', '${owner}', '${owner}', '${owner}');
     `);
     db.close();
 

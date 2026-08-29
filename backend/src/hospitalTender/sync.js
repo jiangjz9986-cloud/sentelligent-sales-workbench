@@ -237,9 +237,28 @@ export function customerSnapshotFromRow(customer) {
   };
 }
 
-export function serializeHospitalTenderNotice(item, customerNameById = new Map()) {
+export function serializeHospitalTenderNotice(
+  item,
+  customerNameById = new Map(),
+  // v0.9.2 Web 显示面：公告全局可见，但匹配客户（id/理由/需求/名称）只渲染名
+  // 映射命中的行——他人客户的 match id 不出现。机器同步/调度路径传全量映射且
+  // 不开启该开关，序列化行为不变。
+  { restrictMatchesToKnownCustomers = false } = {},
+) {
   if (!item || typeof item !== "object") return null;
-  const match = normalizeNoticeMatch(item.match ?? {});
+  const fullMatch = normalizeNoticeMatch(item.match ?? {});
+  const visibleIds = restrictMatchesToKnownCustomers
+    ? fullMatch.matchedCustomerIds.filter((id) => customerNameById.has(id))
+    : fullMatch.matchedCustomerIds;
+  const visibleMap = (input) => (restrictMatchesToKnownCustomers
+    ? Object.fromEntries(Object.entries(input).filter(([id]) => customerNameById.has(id)))
+    : input);
+  const match = {
+    ...fullMatch,
+    matchedCustomerIds: visibleIds,
+    matchReasons: visibleMap(fullMatch.matchReasons),
+    matchedNeeds: visibleMap(fullMatch.matchedNeeds),
+  };
   return {
     id: item.id,
     identityKey: item.identityKey,

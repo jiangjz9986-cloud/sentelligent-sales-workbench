@@ -47,17 +47,19 @@ describe("actionItemStore.create", () => {
 });
 
 describe("actionItemStore visibility", () => {
-  it("sees own-column, customer-join, and opportunity-join rows but not others", () => {
+  // v0.9.2：0031 回填后 owner 恒非空，可见性收敛为单一 owner 列谓词；原
+  // “客户/商机挂接派生可见”夹具更新为回填后的 owner 列形态（他人/遗留池行不可见）。
+  it("sees only owner-column rows after the 0031 backfill", () => {
     withStore((store, db) => {
       db.exec(`
         INSERT INTO customers (id, name, owner) VALUES ('customer-1', '日照中医医院', '${OWNER}');
         INSERT INTO customers (id, name, owner) VALUES ('customer-2', '外部医院', '别人');
         INSERT INTO opportunities (id, customer_id, name, owner) VALUES ('opp-1', 'customer-1', '信息化', '${OWNER}');
         INSERT INTO action_items (id, title, owner) VALUES ('own-column', '自有列待办', '${OWNER}');
-        INSERT INTO action_items (id, title, customer_id) VALUES ('via-customer', '客户挂接待办', 'customer-1');
-        INSERT INTO action_items (id, title, opportunity_id) VALUES ('via-opportunity', '商机挂接待办', 'opp-1');
-        INSERT INTO action_items (id, title) VALUES ('orphan', '孤立待办');
-        INSERT INTO action_items (id, title, customer_id) VALUES ('foreign', '他人待办', 'customer-2');
+        INSERT INTO action_items (id, title, customer_id, owner) VALUES ('via-customer', '客户挂接待办', 'customer-1', '${OWNER}');
+        INSERT INTO action_items (id, title, opportunity_id, owner) VALUES ('via-opportunity', '商机挂接待办', 'opp-1', '${OWNER}');
+        INSERT INTO action_items (id, title, owner) VALUES ('orphan', '遗留池待办', 'jiangjz');
+        INSERT INTO action_items (id, title, customer_id, owner) VALUES ('foreign', '他人待办', 'customer-2', '别人');
       `);
       const { items } = store.list({ owner: OWNER, limit: 10 });
       const ids = items.map((item) => item.id).sort();
@@ -133,13 +135,15 @@ describe("actionItemStore targeting and writes", () => {
     });
   });
 
-  it("write-protects legacy rows without an owner column value", () => {
+  // v0.9.2：NULL-owner 遗留行已被 0031 回填至遗留池（jiangjz），对其他账号读写
+  // 双向关闭（原“可见但写保护”语义收紧为完全不可见，防越权只紧不松）。
+  it("keeps backfilled legacy-pool rows closed to other owners", () => {
     withStore((store, db) => {
       db.exec(`
         INSERT INTO customers (id, name, owner) VALUES ('customer-1', '日照中医医院', '${OWNER}');
-        INSERT INTO action_items (id, title, customer_id) VALUES ('legacy-1', '深写回待办', 'customer-1');
+        INSERT INTO action_items (id, title, customer_id, owner) VALUES ('legacy-1', '深写回待办', 'customer-1', 'jiangjz');
       `);
-      assert.equal(store.list({ owner: OWNER }).items.length, 1, "legacy row stays visible");
+      assert.equal(store.list({ owner: OWNER }).items.length, 0, "legacy-pool row is invisible to other owners");
       assert.throws(
         () => store.complete({ owner: OWNER, id: "legacy-1", expectedVersion: 1 }),
         (error) => error.code === "NOT_FOUND",

@@ -196,9 +196,11 @@ export const requestSchemas = freezeSchema({
     expectedVersion: { type: "integer", min: 1, required: true },
   },
   changePassword: { currentPassword: text(1000, { required: true }), newPassword: text(128, { required: true }) },
+  // v0.9.2：owner=服务端注入的归属/隔离键，客户/商机 schema 不再接收（传入即
+  // 422 unknown；partialSchema 派生的 patch 词表随之收口）。
   customerCreate: {
     name: text(200, { required: true }), region: text(100, { nullable: true }), type: text(100, { nullable: true }),
-    level: text(50, { nullable: true }), owner: text(100, { nullable: true }), contact: text(500, { nullable: true }),
+    level: text(50, { nullable: true }), contact: text(500, { nullable: true }),
     relation: { type: "integer", min: 0, max: 100 }, stakeholders: safeArray(),
     decisionChain: safeArray(), historyProjects: safeArray(), infrastructure: safeArray(),
     syncPreview: safeArray(), budget: text(500, { nullable: true }), summary: text(5000, { nullable: true }),
@@ -207,7 +209,7 @@ export const requestSchemas = freezeSchema({
   },
   opportunityCreate: {
     customerId: text(200, { required: true }), name: text(200, { required: true }), customer: text(200, { nullable: true }),
-    stage: text(100, { nullable: true }), amount: text(100, { nullable: true }), owner: text(100, { nullable: true }),
+    stage: text(100, { nullable: true }), amount: text(100, { nullable: true }),
     probability: { type: "integer", min: 0, max: 100 }, days: { type: "integer", min: 0, max: 10000 },
     requirements: safeArray(), competitors: safeArray(), solutionDirection: safeArray(),
     sourceRecord: text(200, { nullable: true }), risk: text(5000, { nullable: true }), next: text(5000, { nullable: true }), tone: text(50, { nullable: true }),
@@ -254,8 +256,9 @@ export const requestSchemas = freezeSchema({
     summary: text(5000, { nullable: true }), content: text(100000, { nullable: true }), source: text(1000, { nullable: true }),
   },
   knowledgeSearch: { query: text(5000, { nullable: true }), tags: stringArray(50, 100), limit: { type: "integer", min: 1, max: 20 } },
+  // owner 降级为可选：机器契约（OWNER_SCOPE_DENIED 自证）仍需要它，Web 忽略其值。
   weeklyDraft: {
-    owner: text(100, { required: true }), periodStart: text(50, { required: true }), periodEnd: text(50, { required: true }),
+    owner: text(100, { nullable: true }), periodStart: text(50, { required: true }), periodEnd: text(50, { required: true }),
     knowledgeIds: stringArray(100, 200),
   },
   aiSuggestion: { type: text(100, { required: true }), title: text(500, { required: true }), context: safeObject() },
@@ -274,7 +277,7 @@ export const requestSchemas = freezeSchema({
     rawContent: text(50000, { nullable: true, nonEmpty: true }),
   },
   solutionDraft: {
-    owner: text(100, { required: true }), customerId: text(200, { required: true }), opportunityId: text(200, { required: true }),
+    owner: text(100, { nullable: true }), customerId: text(200, { required: true }), opportunityId: text(200, { required: true }),
     artifactType: { type: "enum", values: ["solution_framework", "communication_outline", "presales_questions", "report_outline", "competitive_talk"] },
     knowledgeIds: stringArray(100, 200),
   },

@@ -44,6 +44,15 @@ const writeIntegrityColumns = {
   knowledge_items: ["version", "deleted_at", "deleted_by"],
 };
 
+// 0031 会清扫历史 owner 词表并给 ✗ 表补 owner 列，跨迁移行哈希对全部业务表
+// 统一忽略 owner（业务内容不变性仍由其余列保证）。
+const rowsHashOmittedColumns = Object.fromEntries(
+  Object.entries(writeIntegrityColumns).map(([table, columns]) => [
+    table,
+    columns.includes("owner") ? columns : [...columns, "owner"],
+  ]),
+);
+
 function columnNames(db, table) {
   return all(db, `PRAGMA table_info(${table})`).map((row) => row.name);
 }
@@ -163,7 +172,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 29);
+      assert.equal(firstMigrations.length, 30);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -192,6 +201,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[26].version, "0028");
       assert.equal(firstMigrations[27].version, "0029");
       assert.equal(firstMigrations[28].version, "0030");
+      assert.equal(firstMigrations[29].version, "0031");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -480,7 +490,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        29,
+        30,
       );
     } finally {
       db.close();
@@ -780,7 +790,7 @@ test("rejects a stored checksum that does not match migration 0002", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
-      run(db, "INSERT INTO customers (id, name) VALUES (:id, :name)", {
+      run(db, "INSERT INTO customers (id, name, owner) VALUES (:id, :name, 'jiangjz')", {
         id: "checksum-0002-customer",
         name: "Checksum 0002 customer",
       });
@@ -823,7 +833,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
     seedLegacyBusinessRows(legacy);
     const countsBefore = tableCounts(legacy);
     const hashesBefore = Object.fromEntries(
-      Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+      Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
         table,
         rowsHash(legacy, table, omittedColumns),
       ]),
@@ -896,7 +906,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
 
       assert.deepEqual(tableCounts(migrated), countsBefore);
       const hashesAfter = Object.fromEntries(
-        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+        Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
           table,
           rowsHash(migrated, table, omittedColumns),
         ]),
@@ -904,7 +914,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031"],
       );
     } finally {
       migrated.close();
@@ -918,7 +928,7 @@ test("rejects a stored checksum that does not match migration 0001", () => {
 
     try {
       db = openDatabase({ databaseUrl });
-      run(db, "INSERT INTO customers (id, name) VALUES (:id, :name)", {
+      run(db, "INSERT INTO customers (id, name, owner) VALUES (:id, :name, 'jiangjz')", {
         id: "checksum-customer",
         name: "Checksum customer"
       });
@@ -1004,7 +1014,7 @@ test("rejects a raw CRLF checksum for baseline migration 0001 without mutating r
       .digest("hex");
     const db = openDatabase({ databaseUrl });
     try {
-      run(db, "INSERT INTO customers (id, name) VALUES ('raw-checksum-customer', 'Raw checksum customer')");
+      run(db, "INSERT INTO customers (id, name, owner) VALUES ('raw-checksum-customer', 'Raw checksum customer', 'jiangjz')");
       run(db, "UPDATE schema_migrations SET checksum = :checksum WHERE version = '0001'", {
         checksum: rawCrlfChecksum
       });
@@ -1098,7 +1108,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 29);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 30);
     } finally {
       db.close();
     }
@@ -1107,8 +1117,22 @@ test("adopts legacy baseline tables by adding missing columns without losing row
 
 test("migration 0029 normalizes legacy owner vocabulary", async () => {
   const { apply } = await import("../src/db/migrations/0029_owner_vocabulary_cleanup.mjs");
-  const db = openDatabase({ databaseUrl: ":memory:" });
+  // 0029 运行时点在 0031 触发器之前：用 pre-0031 最小表形态承载 NULL/别名 owner 夹具
+  //（全链库的 owner 触发器会拒绝这类历史脏值的直插）。
+  const db = createConnection({ databaseUrl: ":memory:" });
   try {
+    db.exec(`
+      CREATE TABLE customers (
+        id TEXT PRIMARY KEY, name TEXT, owner TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE opportunities (id TEXT PRIMARY KEY, customer_id TEXT, name TEXT, owner TEXT);
+      CREATE TABLE action_items (id TEXT PRIMARY KEY, title TEXT, owner TEXT);
+      CREATE TABLE quick_records (id TEXT PRIMARY KEY, raw_content TEXT, owner TEXT);
+      CREATE TABLE weekly_reports (id TEXT PRIMARY KEY, owner TEXT, period_start TEXT, period_end TEXT, content TEXT);
+      CREATE TABLE solution_drafts (id TEXT PRIMARY KEY, owner TEXT, title TEXT, content TEXT);
+    `);
     db.exec(`
       INSERT INTO customers (id, name, owner) VALUES
         ('c-alias', '别名客户', '继振'),
@@ -1297,6 +1321,144 @@ test("migration 0030 creates users and seeds the env admin", async () => {
   }
 });
 
+test("migration 0031 tightens owner isolation", async () => {
+  const { apply } = await import("../src/db/migrations/0031_owner_isolation_tightening.mjs");
+  const addOwnerTables = [
+    "risk_items", "visit_itineraries", "sales_decision_analyses", "knowledge_items", "ai_suggestions",
+  ];
+  const sweepTables = [
+    "customers", "opportunities", "action_items", "quick_records", "weekly_reports", "solution_drafts",
+  ];
+  const guardTables = ["customers", "opportunities", "quick_records", "action_items"];
+  const indexTables = [
+    "customers", "opportunities", "action_items", "risk_items", "knowledge_items",
+    "visit_itineraries", "sales_decision_analyses", "solution_drafts", "weekly_reports",
+  ];
+  // 0030 时点的最小表形态：SWEEP 六表已有 owner 列（0001/0012/0029 轨迹），✗五表无 owner 列。
+  const prepareTables = (db) => {
+    db.exec(`
+      CREATE TABLE customers (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
+      CREATE TABLE opportunities (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
+      CREATE TABLE action_items (id TEXT PRIMARY KEY, title TEXT, owner TEXT);
+      CREATE TABLE quick_records (id TEXT PRIMARY KEY, raw_content TEXT, owner TEXT);
+      CREATE TABLE weekly_reports (id TEXT PRIMARY KEY, content TEXT, owner TEXT);
+      CREATE TABLE solution_drafts (id TEXT PRIMARY KEY, title TEXT, owner TEXT);
+      CREATE TABLE risk_items (id TEXT PRIMARY KEY, title TEXT);
+      CREATE TABLE visit_itineraries (id TEXT PRIMARY KEY, title TEXT);
+      CREATE TABLE sales_decision_analyses (id TEXT PRIMARY KEY, analysis_type TEXT);
+      CREATE TABLE knowledge_items (id TEXT PRIMARY KEY, title TEXT);
+      CREATE TABLE ai_suggestions (id TEXT PRIMARY KEY, title TEXT);
+    `);
+    for (const table of sweepTables) {
+      db.prepare(`INSERT INTO ${table} (id, owner) VALUES ($nullId, NULL), ($aliasId, '王五'), ($keepId, 'testb')`).run({
+        $nullId: `${table}-null`,
+        $aliasId: `${table}-alias`,
+        $keepId: `${table}-keep`,
+      });
+    }
+    for (const table of addOwnerTables) {
+      db.prepare(`INSERT INTO ${table} (id) VALUES ($id)`).run({ $id: `${table}-legacy` });
+    }
+  };
+  const owners = (db, table) => db.prepare(`SELECT id, owner FROM ${table} ORDER BY id`).all()
+    .map((row) => ({ id: row.id, owner: row.owner }));
+
+  // (a) 有 users 表：✗五表补列且存量回填 jiangjz；SWEEP 六表 NULL/词表外归一、词表内保留。
+  const withUsers = createConnection({ databaseUrl: ":memory:" });
+  try {
+    prepareTables(withUsers);
+    withUsers.exec(`
+      CREATE TABLE users (account TEXT PRIMARY KEY);
+      INSERT INTO users (account) VALUES ('jiangjz'), ('testb');
+    `);
+    apply(withUsers);
+    for (const table of addOwnerTables) {
+      const ownerColumn = withUsers.prepare(`PRAGMA table_info(${table})`).all()
+        .find((column) => column.name === "owner");
+      assert.equal(ownerColumn?.notnull, 1, `${table}.owner must be NOT NULL`);
+      assert.equal(ownerColumn?.dflt_value, "'jiangjz'", `${table}.owner default`);
+      assert.equal(
+        withUsers.prepare(`SELECT owner FROM ${table} WHERE id = $id`).get({ $id: `${table}-legacy` })?.owner,
+        "jiangjz",
+        `${table} legacy row backfilled`,
+      );
+    }
+    for (const table of sweepTables) {
+      assert.deepEqual(owners(withUsers, table), [
+        { id: `${table}-alias`, owner: "jiangjz" },
+        { id: `${table}-keep`, owner: "testb" },
+        { id: `${table}-null`, owner: "jiangjz" },
+      ], `${table} sweep`);
+    }
+
+    // (c) 触发器矩阵：四表 NULL owner 的 INSERT 与 UPDATE 均 ABORT，带 owner 写入成功。
+    for (const table of guardTables) {
+      assert.throws(
+        () => withUsers.prepare(`INSERT INTO ${table} (id, owner) VALUES ($id, NULL)`).run({ $id: `${table}-trigger-null` }),
+        /owner must not be NULL/u,
+        `${table} insert trigger`,
+      );
+      assert.throws(
+        () => withUsers.prepare(`UPDATE ${table} SET owner = NULL WHERE id = $id`).run({ $id: `${table}-keep` }),
+        /owner must not be NULL/u,
+        `${table} update trigger`,
+      );
+      withUsers.prepare(`INSERT INTO ${table} (id, owner) VALUES ($id, 'jiangjz')`).run({ $id: `${table}-trigger-ok` });
+      assert.equal(
+        withUsers.prepare(`SELECT owner FROM ${table} WHERE id = $id`).get({ $id: `${table}-trigger-ok` })?.owner,
+        "jiangjz",
+        `${table} owner insert allowed`,
+      );
+    }
+
+    // (d) 二次 apply 幂等：列/触发器/索引不重复、数据零变更。
+    const snapshot = () => JSON.stringify([...sweepTables, ...addOwnerTables].map((table) => (
+      withUsers.prepare(`SELECT * FROM ${table} ORDER BY id`).all()
+    )));
+    const beforeSecondApply = snapshot();
+    apply(withUsers);
+    assert.equal(snapshot(), beforeSecondApply, "second apply changes nothing");
+    for (const table of guardTables) {
+      assert.equal(
+        withUsers.prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND tbl_name = $table AND name LIKE 'trg_%owner_required%'",
+        ).get({ $table: table }).count,
+        2,
+        `${table} keeps exactly two owner triggers`,
+      );
+    }
+
+    // (e) 九枚 owner 过滤索引在位。
+    for (const table of indexTables) {
+      assert.equal(
+        withUsers.prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = $name",
+        ).get({ $name: `idx_${table}_owner` }).count,
+        1,
+        `idx_${table}_owner`,
+      );
+    }
+  } finally {
+    withUsers.close();
+  }
+
+  // (b) 无 users 表（直连旧库单测语境）：仅 NULL 归一，词表外值保留。
+  const withoutUsers = createConnection({ databaseUrl: ":memory:" });
+  try {
+    prepareTables(withoutUsers);
+    apply(withoutUsers);
+    for (const table of sweepTables) {
+      assert.deepEqual(owners(withoutUsers, table), [
+        { id: `${table}-alias`, owner: "王五" },
+        { id: `${table}-keep`, owner: "testb" },
+        { id: `${table}-null`, owner: "jiangjz" },
+      ], `${table} null-only sweep`);
+    }
+  } finally {
+    withoutUsers.close();
+  }
+});
+
 test("rolls back every 0002 schema change when the module migration fails partway", () => {
   withDatabase((databaseUrl) => {
     const db = createConnection({ databaseUrl });
@@ -1318,7 +1480,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       `, { checksum: baselineChecksum });
       const countsBefore = tableCounts(db);
       const hashesBefore = Object.fromEntries(
-        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+        Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
           table,
           rowsHash(db, table, omittedColumns),
         ]),
@@ -1338,7 +1500,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(databaseTableNames(db).includes("login_rate_limits"), false);
       assert.deepEqual(tableCounts(db), countsBefore);
       const hashesAfterFailure = Object.fromEntries(
-        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+        Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
           table,
           rowsHash(db, table, omittedColumns),
         ]),
@@ -1354,7 +1516,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031"],
       );
     } finally {
       db.close();

@@ -242,7 +242,8 @@ describe("sales workbench backend API", () => {
       authPasswordHash: await hashPassword("unit-secret", { salt: Buffer.alloc(16, 8) }),
       authSessionSecret: "unit-session-secret",
       weixinAgentApiToken: "wx-token",
-      weixinAgentOwner: "继振",
+      // v0.9.2：种子 owner 词表统一为账号 id，机器身份对齐 jiangjz。
+      weixinAgentOwner: "jiangjz",
     });
     await new Promise((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -298,7 +299,7 @@ describe("sales workbench backend API", () => {
 
     db.prepare("INSERT INTO customers (id, name, owner, relation) VALUES ('cus-dash', '济宁市第一人民医院', '继振', 80)").run();
     const insertOpportunity = db.prepare(
-      "INSERT INTO opportunities (id, customer_id, name, stage, amount, probability) VALUES ($id, 'cus-dash', $name, $stage, $amount, 60)",
+      "INSERT INTO opportunities (id, customer_id, name, stage, amount, probability, owner) VALUES ($id, 'cus-dash', $name, $stage, $amount, 60, 'jiangjz')",
     );
     insertOpportunity.run({ $id: "op-dash-1", $name: "济宁智慧医院一期", $stage: "线索", $amount: "120 万" });
     insertOpportunity.run({ $id: "op-dash-2", $name: "济宁智慧医院二期", $stage: "线索", $amount: "预计 200 万" });
@@ -321,8 +322,8 @@ describe("sales workbench backend API", () => {
     insertItinerary.run({ $id: "itn-dash-past", $title: "昨日行程", $visitDate: addDays(today, -1), $status: "planned", $planJson: planJson });
 
     const insertAction = db.prepare(`
-      INSERT INTO action_items (id, title, priority, status, remind_at, updated_at)
-      VALUES ($id, $title, $priority, $status, $remindAt, $updatedAt)
+      INSERT INTO action_items (id, title, priority, status, remind_at, updated_at, owner)
+      VALUES ($id, $title, $priority, $status, $remindAt, $updatedAt, 'jiangjz')
     `);
     insertAction.run({ $id: "act-dash-overdue", $title: "逾期回访", $priority: "高", $status: "pending", $remindAt: shanghaiIso(addDays(today, -1), "10:00:00"), $updatedAt: shanghaiIso(addDays(today, -1), "10:00:00") });
     insertAction.run({ $id: "act-dash-today", $title: "今日送方案", $priority: "中", $status: "in_progress", $remindAt: shanghaiIso(today, "23:00:00"), $updatedAt: shanghaiIso(today, "08:00:00") });
@@ -340,13 +341,13 @@ describe("sales workbench backend API", () => {
     `).run();
 
     const insertQuickRecord = db.prepare(
-      "INSERT INTO quick_records (id, raw_content, occurred_at, status) VALUES ($id, $rawContent, $occurredAt, 'recorded')",
+      "INSERT INTO quick_records (id, raw_content, occurred_at, status, owner) VALUES ($id, $rawContent, $occurredAt, 'recorded', 'jiangjz')",
     );
     insertQuickRecord.run({ $id: "qr-dash-monday", $rawContent: "周一拜访记录", $occurredAt: `${weekStart}T09:00:00+08:00` });
     insertQuickRecord.run({ $id: "qr-dash-sunday", $rawContent: "周日电话记录", $occurredAt: `${addDays(weekStart, 6)}T21:00:00+08:00` });
     insertQuickRecord.run({ $id: "qr-dash-prev", $rawContent: "上周记录", $occurredAt: `${addDays(weekStart, -3)}T09:00:00+08:00` });
     db.prepare(
-      "INSERT INTO quick_records (id, raw_content, occurred_at, status, voided_at) VALUES ('qr-dash-voided', '已作废记录', $occurredAt, 'recorded', $voidedAt)",
+      "INSERT INTO quick_records (id, raw_content, occurred_at, status, voided_at, owner) VALUES ('qr-dash-voided', '已作废记录', $occurredAt, 'recorded', $voidedAt, 'jiangjz')",
     ).run({ $occurredAt: `${weekStart}T10:00:00+08:00`, $voidedAt: shanghaiIso(today, "12:00:00") });
 
     const insertExpense = db.prepare(`
@@ -588,7 +589,6 @@ describe("sales workbench backend API", () => {
         region: "青岛胶州",
         type: "二级医院",
         level: "新建线索",
-        owner: "继振",
         contact: "信息科 / 待确认",
         relation: 35,
         needs: ["未来规划初访"],
@@ -626,7 +626,6 @@ describe("sales workbench backend API", () => {
         customer: "胶州中医医院",
         stage: "线索",
         amount: "待定",
-        owner: "继振",
         probability: 30,
         days: 0,
         requirements: ["现状调研"],
@@ -667,7 +666,6 @@ describe("sales workbench backend API", () => {
         region: "test",
         type: "test",
         level: "manual",
-        owner: "tester",
         contact: "tester",
         relation: 10,
       }),
@@ -1420,7 +1418,6 @@ describe("sales workbench backend API", () => {
         customer: "Rizhao",
         stage: "planning",
         amount: "pending",
-        owner: "Task 9 tester",
         probability: 30,
         days: 0,
         requirements: ["budget approval"],
@@ -1605,7 +1602,6 @@ describe("sales workbench backend API", () => {
         region: "青岛",
         type: "医疗 KA",
         level: "重点培育",
-        owner: "继振",
         contact: "信息科",
       }),
     });

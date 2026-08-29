@@ -328,8 +328,8 @@ describe("customer pending preview providers", () => {
     try {
       db.exec(`
         INSERT INTO customers (id, name, owner) VALUES ('customer-1', '示例医院', 'owner-1');
-        INSERT INTO opportunities (id, customer_id, name) VALUES ('opp-1', 'customer-1', '信息化一期');
-        INSERT INTO opportunities (id, customer_id, name) VALUES ('opp-2', 'customer-1', '信息化二期');
+        INSERT INTO opportunities (id, customer_id, name, owner) VALUES ('opp-1', 'customer-1', '信息化一期', 'owner-1');
+        INSERT INTO opportunities (id, customer_id, name, owner) VALUES ('opp-2', 'customer-1', '信息化二期', 'owner-1');
       `);
       const providers = makeProviders(db);
       const preview = await providers["customer.delete"]({

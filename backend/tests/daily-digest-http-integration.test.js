@@ -9,7 +9,9 @@ import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 
-const OWNER = "assistant-owner";
+// v0.9.2：digest/run 归位 admin 门禁——账号须能建 users 行（bootstrap admin 正则
+// 不含连字符），改用无连字符账号。
+const OWNER = "assistantowner";
 const machineToken = "test-machine-token";
 
 let tempDir;
@@ -84,9 +86,9 @@ beforeEach(async () => {
   withDb((db) => {
     db.exec(`
       INSERT INTO customers (id, name, owner) VALUES ('customer-digest-http', '日照中医医院', '${OWNER}');
-      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
+      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by, owner)
       VALUES ('itinerary-http-1', '日照两院拜访', '2026-08-28', 'planned', '{}',
-        '{"stops":[{"id":"stop-1","customerName":"日照中医医院"}],"orderedStopIds":["stop-1"]}', '${OWNER}', '${OWNER}');
+        '{"stops":[{"id":"stop-1","customerName":"日照中医医院"}],"orderedStopIds":["stop-1"]}', '${OWNER}', '${OWNER}', '${OWNER}');
     `);
   });
 });

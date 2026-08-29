@@ -216,7 +216,9 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
 
   useEffect(() => {
     let disposed = false;
-    if (!apiClient?.isEnabled || backendStatus !== "connected") {
+    // member 只见安全子页，不发运行状态探测——微信绑定状态是 admin 门禁端点，
+    // 成员探测只会产生 403 日志噪音（v0.9.1 遗留⑥，本版收口）。
+    if (!apiClient?.isEnabled || backendStatus !== "connected" || role !== "admin") {
       setIntegrationStatus({ loading: false, error: "", weixin: null, hospitalHealth: null, scheduler: null });
       return () => {
         disposed = true;
@@ -294,7 +296,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     return () => {
       disposed = true;
     };
-  }, [apiClient, backendStatus, section]);
+  }, [apiClient, backendStatus, section, role]);
 
   useEffect(() => {
     if (section !== "bookkeeping-log") return undefined;
