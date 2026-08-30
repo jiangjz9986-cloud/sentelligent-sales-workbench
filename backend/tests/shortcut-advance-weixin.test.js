@@ -6,12 +6,15 @@ import { afterEach, beforeEach, test } from "node:test";
 
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
+import { parseShortcutBookkeepingIntent } from "../src/integrations/shortcutBookkeepingIntent.js";
 import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const machineHeaderValue = "advance-machine-credential";
 const owner = "advanceowner";
 const sender = "advance-sender";
 const confirmationMaterial = "advance-weixin-confirmation-material-123456";
+const businessWeekSunday = "2026-08-30T23:59:59.999+08:00";
+const nextBusinessWeekMonday = "2026-08-31T00:00:00.000+08:00";
 
 let dir;
 let server;
@@ -102,6 +105,7 @@ beforeEach(async () => {
     weixinAllowedSenderIds: sender,
     weixinAllowGroups: false,
     assistantConfirmationSecret: confirmationMaterial,
+    assistantClock: () => new Date(businessWeekSunday),
     shortcutBookkeepingIdFactory: () => `entry-${++entryNo}`,
     shortcutBookkeepingAssistantIdFactory: () => `action-${++actionNo}`,
     weixinConfirmationOutboxIdFactory: () => `outbox-${++outboxNo}`,
@@ -142,6 +146,14 @@ afterEach(async () => {
 });
 
 test("loan income creates a pool and natural-language week assignment allocates it", async () => {
+  assert.deepEqual(
+    parseShortcutBookkeepingIntent("这笔借款用于本周", { now: new Date(businessWeekSunday) }).assignment,
+    { scope: "week", weekStart: "2026-08-24", owner: "self" },
+  );
+  assert.deepEqual(
+    parseShortcutBookkeepingIntent("这笔借款用于本周", { now: new Date(nextBusinessWeekMonday) }).assignment,
+    { scope: "week", weekStart: "2026-08-31", owner: "self" },
+  );
   const expense = await sendBookkeeping("advance-expense-1", "支出 2026-08-25 餐饮 500元");
   assert.equal(expense.response.status, 200);
   const expenseDraft = await lease();
@@ -201,7 +213,9 @@ test("loan income creates a pool and natural-language week assignment allocates 
 
   const db = openDatabase({ databaseUrl: join(dir, "assistant.sqlite") });
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_advance_allocations WHERE status = 'active'").get().count, 1);
-  assert.equal(db.prepare("SELECT allocated_cents FROM travel_expense_advance_allocations WHERE status = 'active'").get().allocated_cents, 50000);
+  const allocationFacts = db.prepare("SELECT week_start, allocated_cents FROM travel_expense_advance_allocations WHERE status = 'active'").get();
+  assert.equal(allocationFacts.week_start, "2026-08-24");
+  assert.equal(allocationFacts.allocated_cents, 50000);
   const advanceFacts = db.prepare("SELECT requested_cents, requested_on, received_cents FROM travel_expense_advances").get();
   assert.equal(advanceFacts.requested_cents, 0);
   assert.equal(advanceFacts.requested_on, null);
