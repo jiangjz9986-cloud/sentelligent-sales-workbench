@@ -1,0 +1,14 @@
+[COMPLETE_RELEASE_EVIDENCE_TRANSACTION]
+COMMAND=GIT_INDEX_FILE=<temporary-index> git -c core.whitespace=cr-at-eol diff --cached --check -- docs/releases/v0.10.3.md docs/releases/evidence/v0.10.3-20260830
+INPUT=temporary index seeded from HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6; formal release document plus all 28 files in the release evidence directory; real index untouched
+LITERAL_OUTPUT=<empty>
+EXIT_STATUS=0
+RESULT=complete 29-path transaction passed
+
+[HISTORICAL_PLAIN_DIFF_BOUNDARY]
+HISTORICAL_COMMAND=git diff --check
+HISTORICAL_INPUT=f38fd0d shared worktree with uncommitted Web hotfix candidate and five original-CRLF files
+HISTORICAL_FIRST_LITERAL_OUTPUT=backend/src/assistant/webChannel.js:49: trailing whitespace.
+HISTORICAL_EXIT_STATUS=2
+CURRENT_RESOLUTION=hotfix committed locally as 79f09d0 after its 11-path CRLF-aware staged gate returned 0
+PLAIN_DIFF_CURRENT_ASSERTION=none

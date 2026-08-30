@@ -1,0 +1,10 @@
+ROLLBACK_TARGET=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/rollback-test-copy.md
+ROLLBACK_INPUT_EXPECTED_MODIFIED_SHA256=fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9
+ROLLBACK_BEFORE_SHA256=fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9
+ROLLBACK_EXPECTED_ORIGINAL_SHA256=a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c
+ROLLBACK_AFTER_SHA256=a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c
+ROLLBACK_CMP_EXIT=0
+RESTORED_BEHAVIOR=release document returned to the frozen pre-evidence state with deployment and production-acceptance placeholders
+RESTORED_STATUS=original release document restored byte-for-byte
+FORMAL_FILE_STATUS=unchanged unless it was supplied as the rollback target
+EXIT_STATUS=0

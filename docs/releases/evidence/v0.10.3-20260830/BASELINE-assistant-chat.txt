@@ -1,0 +1,38 @@
+COMMAND=npm --prefix outputs/product-design-prototype run test:assistant-chat
+INPUT=repository HEAD 2dc9b1114107aee906d0ecfb006ac461cdb86cec; no stdin
+
+> product-design-prototype@0.10.0 test:assistant-chat
+> node --test scripts/weixinCardParse.test.mjs scripts/assistant-chat.test.mjs scripts/assistant-fab.test.mjs
+
+▶ assistantChatModel
+  ✔ merges remote history without duplicating local ids (1.588708ms)
+  ✔ appends messages immutably (0.105416ms)
+  ✔ flags write tools that should refresh bootstrap (0.084417ms)
+✔ assistantChatModel (3.383ms)
+▶ AssistantConfirmCard
+  ✔ renders confirm actions for R1/R2/R3 cards (0.15375ms)
+  ✔ falls back to preformatted text when card parsing fails (0.057125ms)
+  ✔ does not reference confirmationCode (0.065667ms)
+  ✔ exposes cancel and confirm handlers (0.055583ms)
+✔ AssistantConfirmCard (0.493917ms)
+▶ assistant entry points
+  ✔ renders desktop assistant fab when mobile shell is off (0.475375ms)
+  ✔ renders mobile topbar assistant button (0.09875ms)
+  ✔ wires the more drawer assistant backup entry (0.653417ms)
+  ✔ supports enter to send and escape to close in the chat panel (0.120125ms)
+✔ assistant entry points (2.912084ms)
+▶ weixinCardParse
+  ✔ parses title, fields, and footer (0.91625ms)
+  ✔ returns null for plain text (0.11175ms)
+  ✔ tolerates missing footer (0.710541ms)
+  ✔ keeps empty field values (0.153458ms)
+✔ weixinCardParse (3.002875ms)
+ℹ tests 15
+ℹ suites 4
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 93.049667
+EXIT_STATUS=0
