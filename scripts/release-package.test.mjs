@@ -2154,6 +2154,34 @@ describe("portable release package", () => {
     }
   });
 
+  it("allows only the exact ASR credential-reuse boolean flag through the release secret gate", async () => {
+    const { assertNoReleaseSecrets } = await loadReleaseModule();
+    const path = "backend/.env.example";
+
+    for (const content of [
+      "ASR_REUSE_MODEL_CREDENTIAL=false\n",
+      "ASR_REUSE_MODEL_CREDENTIAL=true\n",
+      'ASR_REUSE_MODEL_CREDENTIAL="false"\n',
+      "asr_reuse_model_credential=true\n",
+    ]) {
+      assert.doesNotThrow(() =>
+        assertNoReleaseSecrets([path], new Map([[path, Buffer.from(content)]])),
+      );
+    }
+
+    for (const content of [
+      "ASR_API_KEY=false\n",
+      "ASR_MODEL_CREDENTIAL=false\n",
+      "ASR_REUSE_MODEL_CREDENTIAL=anything-else\n",
+      "ASR_REUSE_MODEL_CREDENTIAL=TRUE\n",
+    ]) {
+      assert.throws(
+        () => assertNoReleaseSecrets([path], new Map([[path, Buffer.from(content)]])),
+        /credential-assignment/,
+      );
+    }
+  });
+
   it("allows explicit low-entropy credential labels only inside test source", async () => {
     const workspace = makeWorkspace("sentelligent-test-placeholder-");
     const output = makeWorkspace("sentelligent-test-placeholder-output-");

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
+import { ASR_CONFIG_DEFAULTS, ASR_LIMITS } from "./asr/contracts.js";
 import { validatePasswordHashEncoding } from "./auth/password.js";
 import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
 
@@ -158,6 +159,77 @@ function modelIdentifierValue(value, fallback, name) {
   return normalized;
 }
 
+function asrEnumValue(value, fallback, name, allowed) {
+  const candidate = value === undefined || value === null ? fallback : value;
+  if (typeof candidate !== "string" || !allowed.includes(candidate)) {
+    throw new Error(`${name} must be ${allowed.join(" or ")}`);
+  }
+  return candidate;
+}
+
+function optionalAsrModelValue(value) {
+  const normalized = String(value ?? "").trim();
+  if (normalized === "") return "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(normalized)) {
+    throw new Error("ASR_MODEL must be empty or a bounded model identifier");
+  }
+  return normalized;
+}
+
+function asrBaseUrlValue(value, { nodeEnv, allowAsrTestLoopbackHttp }) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string" || value !== value.trim() || value.length > 2_048) {
+    throw new Error("ASR_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("ASR_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol)
+    || !url.hostname
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) {
+    throw new Error("ASR_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  if (url.protocol !== "https:") {
+    const isExplicitTestLoopback = nodeEnv === "test"
+      && allowAsrTestLoopbackHttp === true
+      && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if (!isExplicitTestLoopback) {
+      throw new Error("ASR_BASE_URL must use https unless explicit test-only loopback injection is active");
+    }
+  }
+  return value;
+}
+
+function boundedAsrPathValue(value, fallback, name) {
+  const candidate = value === undefined || value === null ? fallback : value;
+  if (
+    typeof candidate !== "string"
+    || candidate.length === 0
+    || candidate.length > 300
+    || candidate !== candidate.trim()
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(candidate)
+  ) {
+    throw new Error(`${name} must be a bounded path`);
+  }
+  return candidate;
+}
+
+function boundedAsrInteger(value, fallback, name, { min = 1, max }) {
+  const parsed = positiveInteger(value === undefined || value === null ? fallback : value, name);
+  if (parsed < min || parsed > max) {
+    throw new Error(`${name} must be between ${min} and ${max}`);
+  }
+  return parsed;
+}
+
 function isStrongSessionSecret(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   const decoded = Buffer.from(value, "base64url");
@@ -205,6 +277,25 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (config.amapMode === "mock") {
     throw new Error("AMAP_MODE must not be mock in production");
   }
+  if (config.asrTempRoot !== ASR_CONFIG_DEFAULTS.tempRoot || !isAbsolute(config.asrTempRoot)) {
+    throw new Error(`ASR_TEMP_ROOT must be ${ASR_CONFIG_DEFAULTS.tempRoot} in production`);
+  }
+  if (!isAbsolute(config.asrFfprobeCommand)) {
+    throw new Error("ASR_FFPROBE_COMMAND must be an absolute path in production");
+  }
+  if (!isAbsolute(config.asrFfmpegCommand)) {
+    throw new Error("ASR_FFMPEG_COMMAND must be an absolute path in production");
+  }
+  if (config.asrBaseUrl && new URL(config.asrBaseUrl).protocol !== "https:") {
+    throw new Error("ASR_BASE_URL must use https in production");
+  }
+  if (config.asrReuseModelCredential) {
+    throw new Error("ASR_REUSE_MODEL_CREDENTIAL must remain false without production compatibility evidence");
+  }
+  if (config.asrMode === "live") {
+    if (!config.asrBaseUrl) throw new Error("ASR_BASE_URL is required when ASR_MODE=live in production");
+    if (!config.asrModel) throw new Error("ASR_MODEL is required when ASR_MODE=live in production");
+  }
   // An empty sender allowlist is an intentional unbound state during the
   // initial production rollout. The event boundary still rejects every
   // sender until an operator configures a real WeChat sender ID.
@@ -231,7 +322,7 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   }
 }
 
-export function loadConfig(overrides = {}) {
+export function loadConfig(overrides = {}, { allowAsrTestLoopbackHttp = false } = {}) {
   const envFile = loadEnvFile(overrides.envFile);
   const env = { ...envFile, ...process.env, ...overrides };
   const nodeEnv = String(env.nodeEnv ?? env.NODE_ENV ?? "development").trim().toLowerCase();
@@ -293,6 +384,45 @@ export function loadConfig(overrides = {}) {
   if (!["live", "mock"].includes(amapMode)) {
     throw new Error("AMAP_MODE must be live or mock");
   }
+  const asrMode = asrEnumValue(
+    env.asrMode ?? env.ASR_MODE,
+    ASR_CONFIG_DEFAULTS.mode,
+    "ASR_MODE",
+    ["disabled", "live"],
+  );
+  const asrProvider = asrEnumValue(
+    env.asrProvider ?? env.ASR_PROVIDER,
+    ASR_CONFIG_DEFAULTS.provider,
+    "ASR_PROVIDER",
+    [ASR_CONFIG_DEFAULTS.provider],
+  );
+  const asrTimeoutMs = boundedAsrInteger(
+    env.asrTimeoutMs ?? env.ASR_TIMEOUT_MS,
+    ASR_CONFIG_DEFAULTS.timeoutMs,
+    "ASR_TIMEOUT_MS",
+    { max: ASR_LIMITS.providerTimeoutMs },
+  );
+  const asrUploadMaxBytes = boundedAsrInteger(
+    env.asrUploadMaxBytes ?? env.ASR_UPLOAD_MAX_BYTES,
+    ASR_CONFIG_DEFAULTS.uploadMaxBytes,
+    "ASR_UPLOAD_MAX_BYTES",
+    { max: ASR_LIMITS.uploadMaxBytes },
+  );
+  const asrQuickMaxDurationMs = boundedAsrInteger(
+    env.asrQuickMaxDurationMs ?? env.ASR_QUICK_MAX_DURATION_MS,
+    ASR_CONFIG_DEFAULTS.quickMaxDurationMs,
+    "ASR_QUICK_MAX_DURATION_MS",
+    { min: ASR_LIMITS.minDurationMs, max: ASR_CONFIG_DEFAULTS.quickMaxDurationMs },
+  );
+  const asrAssistantMaxDurationMs = boundedAsrInteger(
+    env.asrAssistantMaxDurationMs ?? env.ASR_ASSISTANT_MAX_DURATION_MS,
+    ASR_CONFIG_DEFAULTS.assistantMaxDurationMs,
+    "ASR_ASSISTANT_MAX_DURATION_MS",
+    { min: ASR_LIMITS.minDurationMs, max: ASR_CONFIG_DEFAULTS.assistantMaxDurationMs },
+  );
+  if (asrAssistantMaxDurationMs > asrQuickMaxDurationMs) {
+    throw new Error("ASR_ASSISTANT_MAX_DURATION_MS must not exceed ASR_QUICK_MAX_DURATION_MS");
+  }
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
     port: Number(env.port ?? env.PORT ?? 8787),
@@ -312,6 +442,37 @@ export function loadConfig(overrides = {}) {
       "MODEL_VISION_NAME",
     ),
     modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
+    asrMode,
+    asrProvider,
+    asrBaseUrl: asrBaseUrlValue(env.asrBaseUrl ?? env.ASR_BASE_URL, {
+      nodeEnv,
+      allowAsrTestLoopbackHttp,
+    }),
+    asrModel: optionalAsrModelValue(env.asrModel ?? env.ASR_MODEL),
+    asrTimeoutMs,
+    asrUploadMaxBytes,
+    asrQuickMaxDurationMs,
+    asrAssistantMaxDurationMs,
+    asrFfprobeCommand: boundedAsrPathValue(
+      env.asrFfprobeCommand ?? env.ASR_FFPROBE_COMMAND,
+      ASR_CONFIG_DEFAULTS.ffprobeCommand,
+      "ASR_FFPROBE_COMMAND",
+    ),
+    asrFfmpegCommand: boundedAsrPathValue(
+      env.asrFfmpegCommand ?? env.ASR_FFMPEG_COMMAND,
+      ASR_CONFIG_DEFAULTS.ffmpegCommand,
+      "ASR_FFMPEG_COMMAND",
+    ),
+    asrTempRoot: boundedAsrPathValue(
+      env.asrTempRoot ?? env.ASR_TEMP_ROOT,
+      ASR_CONFIG_DEFAULTS.tempRoot,
+      "ASR_TEMP_ROOT",
+    ),
+    asrReuseModelCredential: booleanValue(
+      env.asrReuseModelCredential ?? env.ASR_REUSE_MODEL_CREDENTIAL,
+      ASR_CONFIG_DEFAULTS.reuseModelCredential,
+      "ASR_REUSE_MODEL_CREDENTIAL",
+    ),
     hospitalTenderPython: executableValue(
       env.hospitalTenderPython ?? env.HOSPITAL_TENDER_PYTHON ?? "python3",
       "HOSPITAL_TENDER_PYTHON",

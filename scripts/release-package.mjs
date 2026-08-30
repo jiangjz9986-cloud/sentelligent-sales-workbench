@@ -250,6 +250,11 @@ function isSensitiveAssignmentName(name) {
   );
 }
 
+function isAsrCredentialReuseBooleanFlag(name, value) {
+  return String(name).toUpperCase() === "ASR_REUSE_MODEL_CREDENTIAL"
+    && (value === "true" || value === "false");
+}
+
 const testFixtureMarkers = new Set([
   "admin",
   "analysis",
@@ -551,7 +556,8 @@ export function assertNoReleaseSecrets(files, contentByPath) {
       if (
         isSensitiveAssignmentName(name) &&
         (quoted || isConfigurationAssignmentPath(file)) &&
-        !isPlaceholderValue(value, file)
+        !isPlaceholderValue(value, file) &&
+        !isAsrCredentialReuseBooleanFlag(name, value)
       ) {
         const assignmentOffset = match[0].search(/[^\r\n]/);
         throw new Error(

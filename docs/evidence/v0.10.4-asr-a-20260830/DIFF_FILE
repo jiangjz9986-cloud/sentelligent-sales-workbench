@@ -1,0 +1,1503 @@
+diff --git a/backend/.env.example b/backend/.env.example
+index d8f9f568f4608daabe32dee0619a0686c8088da1..416889acbb458db9f71f4d8b1fb40d4a9533b6bd 100644
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -8,6 +8,19 @@ MODEL_NAME=deepseek-v4-flash
+ MODEL_VISION_NAME=deepseek-v4-flash-vision-exp
+ MODEL_API_KEY=
+ MODEL_TIMEOUT_MS=30000
++# Server ASR stays disabled until its independent provider readiness is green.
++ASR_MODE=disabled
++ASR_PROVIDER=openai-compatible
++ASR_BASE_URL=
++ASR_MODEL=
++ASR_TIMEOUT_MS=45000
++ASR_UPLOAD_MAX_BYTES=8388608
++ASR_QUICK_MAX_DURATION_MS=120000
++ASR_ASSISTANT_MAX_DURATION_MS=60000
++ASR_FFPROBE_COMMAND=/usr/bin/ffprobe
++ASR_FFMPEG_COMMAND=/usr/bin/ffmpeg
++ASR_TEMP_ROOT=/run/sentelligent-asr
++ASR_REUSE_MODEL_CREDENTIAL=false
+ # Python 3.11+ executable used by the built-in hospital tender collector.
+ HOSPITAL_TENDER_PYTHON=python3
+ # Production defaults to enabled; development defaults to disabled unless set.
+diff --git a/backend/src/asr/audioValidation.js b/backend/src/asr/audioValidation.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..3407f64329bd7633cde3bfd9a1969fa51beb1fe3
+--- /dev/null
++++ b/backend/src/asr/audioValidation.js
+@@ -0,0 +1,218 @@
++import {
++  ASR_LIMITS,
++  AsrContractError,
++  canonicalizeAsrMediaType,
++  durationLimitForPurpose,
++  parseAsrPurpose,
++} from "./contracts.js";
++
++const FORMAT_NAMES_BY_MEDIA_TYPE = Object.freeze({
++  "audio/webm": Object.freeze(["webm", "matroska"]),
++  "audio/ogg": Object.freeze(["ogg"]),
++  "audio/mp4": Object.freeze(["mov", "mp4", "m4a", "3gp", "3g2", "mj2"]),
++  "audio/wav": Object.freeze(["wav"]),
++});
++
++function contractError(code, status, message) {
++  throw new AsrContractError(code, status, message);
++}
++
++function asBytes(value) {
++  if (value instanceof Uint8Array) return value;
++  if (value instanceof ArrayBuffer) return new Uint8Array(value);
++  if (ArrayBuffer.isView(value)) {
++    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
++  }
++  throw new TypeError("magicBytes must be an ArrayBuffer or byte view");
++}
++
++function matches(bytes, offset, expected) {
++  if (bytes.length < offset + expected.length) return false;
++  for (let index = 0; index < expected.length; index += 1) {
++    if (bytes[offset + index] !== expected[index]) return false;
++  }
++  return true;
++}
++
++function asciiBytes(value) {
++  return Uint8Array.from([...value].map((character) => character.charCodeAt(0)));
++}
++
++const EBML = Uint8Array.of(0x1a, 0x45, 0xdf, 0xa3);
++const OGG = asciiBytes("OggS");
++const RIFF = asciiBytes("RIFF");
++const WAVE = asciiBytes("WAVE");
++const FTYP = asciiBytes("ftyp");
++
++function readUint32(bytes, offset) {
++  if (offset < 0 || bytes.length < offset + 4) return null;
++  return (
++    bytes[offset] * 0x1000000
++    + bytes[offset + 1] * 0x10000
++    + bytes[offset + 2] * 0x100
++    + bytes[offset + 3]
++  );
++}
++
++function hasValidFtypBox(bytes) {
++  let offset = 0;
++  while (offset + 8 <= bytes.length && offset + 4 < ASR_LIMITS.mp4FtypSearchBytes) {
++    const size32 = readUint32(bytes, offset);
++    if (size32 === null) return false;
++    let headerSize = 8;
++    let boxSize = size32;
++    if (size32 === 1) {
++      if (bytes.length < offset + 16) return false;
++      const high = readUint32(bytes, offset + 8);
++      const low = readUint32(bytes, offset + 12);
++      if (high === null || low === null || high > 0x1fffff) return false;
++      boxSize = high * 0x100000000 + low;
++      headerSize = 16;
++    } else if (size32 === 0) {
++      boxSize = bytes.length - offset;
++    }
++    if (!Number.isSafeInteger(boxSize) || boxSize < headerSize) return false;
++    if (matches(bytes, offset + 4, FTYP)) {
++      return boxSize >= headerSize + 8 && bytes.length >= offset + headerSize + 8;
++    }
++    if (boxSize === 0 || offset + boxSize <= offset) return false;
++    offset += boxSize;
++  }
++  return false;
++}
++
++export function detectAudioMediaType(magicBytes) {
++  const bytes = asBytes(magicBytes);
++  if (matches(bytes, 0, EBML)) return "audio/webm";
++  if (matches(bytes, 0, OGG)) return "audio/ogg";
++  if (matches(bytes, 0, RIFF) && matches(bytes, 8, WAVE)) return "audio/wav";
++  if (hasValidFtypBox(bytes)) return "audio/mp4";
++  return null;
++}
++
++export function assertAudioMagic(mediaType, magicBytes) {
++  const canonicalMediaType = canonicalizeAsrMediaType(mediaType);
++  if (detectAudioMediaType(magicBytes) !== canonicalMediaType) {
++    contractError(
++      "AUDIO_SIGNATURE_MISMATCH",
++      415,
++      "Audio signature does not match its media type",
++    );
++  }
++  return canonicalMediaType;
++}
++
++export function assertAudioByteLength(byteLength, maxBytes = ASR_LIMITS.uploadMaxBytes) {
++  if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
++    contractError("AUDIO_INVALID", 422, "Audio byte length is invalid");
++  }
++  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
++    throw new TypeError("maxBytes must be a positive safe integer");
++  }
++  if (byteLength === 0) {
++    contractError("AUDIO_BODY_REQUIRED", 400, "Audio body is required");
++  }
++  if (byteLength > maxBytes) {
++    contractError("AUDIO_TOO_LARGE", 413, "Audio exceeds the upload limit");
++  }
++  return byteLength;
++}
++
++export function assertAudioDuration(
++  durationMs,
++  purpose,
++  effectiveMaxDurationMs = durationLimitForPurpose(purpose),
++) {
++  const normalizedPurpose = parseAsrPurpose(purpose);
++  const hardPurposeMax = durationLimitForPurpose(normalizedPurpose);
++  if (
++    !Number.isSafeInteger(effectiveMaxDurationMs)
++    || effectiveMaxDurationMs < ASR_LIMITS.minDurationMs
++    || effectiveMaxDurationMs > hardPurposeMax
++  ) {
++    throw new TypeError("effectiveMaxDurationMs must be a safe integer within the purpose limits");
++  }
++  if (typeof durationMs !== "number" || !Number.isFinite(durationMs) || durationMs < 0) {
++    contractError("AUDIO_INVALID", 422, "Audio duration is invalid");
++  }
++  if (durationMs < ASR_LIMITS.minDurationMs) {
++    contractError("AUDIO_TOO_SHORT", 422, "Audio is too short");
++  }
++  if (durationMs > effectiveMaxDurationMs) {
++    contractError("AUDIO_TOO_LONG", 422, "Audio is too long");
++  }
++  return durationMs;
++}
++
++function invalidProbe() {
++  contractError("AUDIO_INVALID", 422, "Audio metadata is invalid");
++}
++
++function formatNames(value) {
++  if (typeof value !== "string") invalidProbe();
++  const result = value
++    .split(",")
++    .map((item) => item.trim().toLowerCase())
++    .filter(Boolean);
++  if (result.length === 0) invalidProbe();
++  return [...new Set(result)];
++}
++
++function positiveIntegerMetadata(value) {
++  const normalized = typeof value === "string" && /^[1-9]\d*$/u.test(value.trim())
++    ? Number(value.trim())
++    : value;
++  if (!Number.isSafeInteger(normalized) || normalized <= 0) invalidProbe();
++  return normalized;
++}
++
++export function validateAudioProbe(probe, { mediaType, purpose, effectiveMaxDurationMs } = {}) {
++  const canonicalMediaType = canonicalizeAsrMediaType(mediaType);
++  const normalizedPurpose = parseAsrPurpose(purpose);
++  if (!probe || typeof probe !== "object" || Array.isArray(probe)) invalidProbe();
++  if (!probe.format || typeof probe.format !== "object" || Array.isArray(probe.format)) invalidProbe();
++  if (!Array.isArray(probe.streams)) invalidProbe();
++
++  const names = formatNames(probe.format.format_name);
++  if (!names.some((name) => FORMAT_NAMES_BY_MEDIA_TYPE[canonicalMediaType].includes(name))) {
++    invalidProbe();
++  }
++
++  const durationSeconds = typeof probe.format.duration === "number"
++    ? probe.format.duration
++    : Number(probe.format.duration);
++  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) invalidProbe();
++  const exactDurationMs = durationSeconds * 1_000;
++  if (!Number.isFinite(exactDurationMs) || !Number.isSafeInteger(Math.ceil(exactDurationMs)) || exactDurationMs <= 0) {
++    invalidProbe();
++  }
++  assertAudioDuration(exactDurationMs, normalizedPurpose, effectiveMaxDurationMs);
++  const durationMs = Math.round(exactDurationMs);
++
++  const audioStreams = probe.streams.filter((stream) => stream?.codec_type === "audio");
++  const videoStreams = probe.streams.filter((stream) => stream?.codec_type === "video");
++  if (audioStreams.length !== 1 || videoStreams.length !== 0) invalidProbe();
++
++  const stream = audioStreams[0];
++  const channels = positiveIntegerMetadata(stream.channels);
++  const sampleRate = positiveIntegerMetadata(stream.sample_rate);
++  if (
++    channels < ASR_LIMITS.audioChannelsMin
++    || channels > ASR_LIMITS.audioChannelsMax
++    || sampleRate < ASR_LIMITS.sampleRateMinHz
++    || sampleRate > ASR_LIMITS.sampleRateMaxHz
++  ) {
++    invalidProbe();
++  }
++
++  return {
++    durationMs,
++    formatNames: names,
++    audioStream: {
++      index: Number.isSafeInteger(stream.index) ? stream.index : null,
++      codecName: typeof stream.codec_name === "string" ? stream.codec_name : "",
++      channels,
++      sampleRate,
++    },
++  };
++}
+diff --git a/backend/src/asr/contracts.js b/backend/src/asr/contracts.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..8802e0f6f5677bae29eed1006d63eb2ddd458880
+--- /dev/null
++++ b/backend/src/asr/contracts.js
+@@ -0,0 +1,239 @@
++const PURPOSE_DEFINITIONS = {
++  quick_record: Object.freeze({
++    maxDurationMs: 120_000,
++    maxTranscriptLength: 10_000,
++  }),
++  assistant_chat: Object.freeze({
++    maxDurationMs: 60_000,
++    maxTranscriptLength: 2_000,
++  }),
++};
++
++export const ASR_PURPOSES = Object.freeze(PURPOSE_DEFINITIONS);
++
++export const ASR_SUPPORTED_MEDIA_TYPES = Object.freeze([
++  "audio/webm",
++  "audio/ogg",
++  "audio/mp4",
++  "audio/wav",
++]);
++
++export const ASR_LIMITS = Object.freeze({
++  uploadMaxBytes: 8_388_608,
++  aggregateTempMaxBytes: 33_554_432,
++  magicMaxBytes: 64,
++  mp4FtypSearchBytes: 32,
++  minDurationMs: 300,
++  audioChannelsMin: 1,
++  audioChannelsMax: 2,
++  sampleRateMinHz: 8_000,
++  sampleRateMaxHz: 96_000,
++  uploadWallTimeoutMs: 60_000,
++  uploadIdleTimeoutMs: 15_000,
++  probeTimeoutMs: 3_000,
++  probeOutputMaxBytes: 65_536,
++  transcodeTimeoutMs: 15_000,
++  providerTimeoutMs: 45_000,
++  processingTimeoutMs: 60_000,
++  childKillGraceMs: 500,
++  normalizedPcmMaxBytes: 3_840_000,
++  providerResponseMaxBytes: 262_144,
++  idempotencyTtlMs: 300_000,
++  idempotencyCompletedCapacity: 256,
++  activeUploadsMax: 4,
++  ownerProcessingMax: 1,
++  globalProcessingMax: 2,
++  accountIpRequestLimit: 12,
++  accountIpWindowMs: 900_000,
++  metricsRingCapacity: 512,
++});
++
++export const ASR_CONFIG_DEFAULTS = Object.freeze({
++  mode: "disabled",
++  provider: "openai-compatible",
++  baseUrl: "",
++  model: "",
++  timeoutMs: ASR_LIMITS.providerTimeoutMs,
++  uploadMaxBytes: ASR_LIMITS.uploadMaxBytes,
++  quickMaxDurationMs: ASR_PURPOSES.quick_record.maxDurationMs,
++  assistantMaxDurationMs: ASR_PURPOSES.assistant_chat.maxDurationMs,
++  ffprobeCommand: "/usr/bin/ffprobe",
++  ffmpegCommand: "/usr/bin/ffmpeg",
++  tempRoot: "/run/sentelligent-asr",
++  reuseModelCredential: false,
++  language: "zh-CN",
++});
++
++const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u;
++const POSITIVE_DECIMAL_PATTERN = /^[1-9]\d*$/u;
++const DISALLOWED_TRANSCRIPT_CONTROLS = /[\u0000-\u0008\u000b-\u001f]/u;
++
++/**
++ * A bounded, sanitized validation result for error codes explicitly frozen by
++ * the v0.10.4 HTTP contract. Parser failures without a published HTTP code use
++ * TypeError instead, leaving their HTTP mapping to the route layer.
++ */
++export class AsrContractError extends Error {
++  constructor(code, status, message) {
++    super(message);
++    this.name = "AsrContractError";
++    this.code = code;
++    this.status = status;
++    this.statusCode = status;
++  }
++}
++
++function contractError(code, status, message) {
++  throw new AsrContractError(code, status, message);
++}
++
++function requestTypeError(field) {
++  throw new TypeError(`${field} does not satisfy the ASR request contract`);
++}
++
++function headerValue(headers, name) {
++  if (headers && typeof headers.get === "function") return headers.get(name);
++  if (!headers || typeof headers !== "object" || Array.isArray(headers)) {
++    requestTypeError("headers");
++  }
++  const expected = name.toLowerCase();
++  for (const [key, value] of Object.entries(headers)) {
++    if (key.toLowerCase() === expected) return value;
++  }
++  return undefined;
++}
++
++export function parseAsrPurpose(value) {
++  if (typeof value !== "string" || !Object.hasOwn(ASR_PURPOSES, value)) {
++    requestTypeError("purpose");
++  }
++  return value;
++}
++
++export function parseAsrQuery(searchParams) {
++  if (!searchParams || typeof searchParams.getAll !== "function") {
++    requestTypeError("query");
++  }
++  const purposes = searchParams.getAll("purpose");
++  if (purposes.length !== 1) requestTypeError("query");
++  return { purpose: parseAsrPurpose(purposes[0]) };
++}
++
++export function canonicalizeAsrMediaType(value) {
++  if (typeof value !== "string") {
++    contractError(
++      "AUDIO_MEDIA_TYPE_UNSUPPORTED",
++      415,
++      "Audio media type is unsupported",
++    );
++  }
++  const mediaType = value.split(";", 1)[0].trim().toLowerCase();
++  if (!ASR_SUPPORTED_MEDIA_TYPES.includes(mediaType)) {
++    contractError(
++      "AUDIO_MEDIA_TYPE_UNSUPPORTED",
++      415,
++      "Audio media type is unsupported",
++    );
++  }
++  return mediaType;
++}
++
++export function parseAsrContentEncoding(value) {
++  if (value === undefined || value === null) return "identity";
++  if (value !== "identity") {
++    requestTypeError("Content-Encoding");
++  }
++  return "identity";
++}
++
++function parsePositiveDecimal(value, field) {
++  if (typeof value !== "string") requestTypeError(field);
++  const normalized = value.trim();
++  if (!POSITIVE_DECIMAL_PATTERN.test(normalized)) requestTypeError(field);
++  const parsed = Number(normalized);
++  if (!Number.isSafeInteger(parsed) || parsed <= 0) requestTypeError(field);
++  return parsed;
++}
++
++export function parseAsrContentLength(value, maxBytes = ASR_LIMITS.uploadMaxBytes) {
++  if (value === undefined || value === null) return null;
++  const parsed = parsePositiveDecimal(value, "Content-Length");
++  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
++    throw new TypeError("maxBytes must be a positive safe integer");
++  }
++  if (parsed > maxBytes) {
++    contractError("AUDIO_TOO_LARGE", 413, "Audio exceeds the upload limit");
++  }
++  return parsed;
++}
++
++export function parseAsrIdempotencyKey(value) {
++  if (typeof value !== "string") {
++    contractError("INVALID_IDEMPOTENCY_KEY", 400, "Idempotency key is invalid");
++  }
++  const normalized = value.trim();
++  if (!IDEMPOTENCY_KEY_PATTERN.test(normalized)) {
++    contractError("INVALID_IDEMPOTENCY_KEY", 400, "Idempotency key is invalid");
++  }
++  return normalized;
++}
++
++export function parseAsrDurationHeader(value) {
++  if (value === undefined || value === null) return null;
++  return parsePositiveDecimal(value, "X-Audio-Duration-Ms");
++}
++
++export function parseAsrLanguage(value) {
++  if (value === undefined || value === null) {
++    return ASR_CONFIG_DEFAULTS.language;
++  }
++  if (value !== ASR_CONFIG_DEFAULTS.language) {
++    requestTypeError("X-ASR-Language");
++  }
++  return ASR_CONFIG_DEFAULTS.language;
++}
++
++export function parseAsrRequestHeaders(headers) {
++  return {
++    mediaType: canonicalizeAsrMediaType(headerValue(headers, "content-type")),
++    contentEncoding: parseAsrContentEncoding(headerValue(headers, "content-encoding")),
++    contentLength: parseAsrContentLength(headerValue(headers, "content-length")),
++    idempotencyKey: parseAsrIdempotencyKey(headerValue(headers, "idempotency-key")),
++    clientDurationMs: parseAsrDurationHeader(headerValue(headers, "x-audio-duration-ms")),
++    language: parseAsrLanguage(headerValue(headers, "x-asr-language")),
++  };
++}
++
++export function transcriptLimitForPurpose(purpose) {
++  return ASR_PURPOSES[parseAsrPurpose(purpose)].maxTranscriptLength;
++}
++
++export function durationLimitForPurpose(purpose) {
++  return ASR_PURPOSES[parseAsrPurpose(purpose)].maxDurationMs;
++}
++
++export function normalizeAsrTranscript(value, purpose) {
++  if (typeof value !== "string") {
++    contractError(
++      "ASR_PROVIDER_BAD_RESPONSE",
++      502,
++      "ASR provider returned an invalid transcript",
++    );
++  }
++  const canonical = value.replaceAll("\r\n", "\n").normalize("NFC");
++  if (DISALLOWED_TRANSCRIPT_CONTROLS.test(canonical)) {
++    contractError(
++      "ASR_PROVIDER_BAD_RESPONSE",
++      502,
++      "ASR provider returned an invalid transcript",
++    );
++  }
++  const normalized = canonical.trim();
++  if (!normalized) {
++    contractError("ASR_TRANSCRIPT_EMPTY", 422, "ASR transcript is empty");
++  }
++  if (normalized.length > transcriptLimitForPurpose(purpose)) {
++    contractError("ASR_TRANSCRIPT_TOO_LONG", 422, "ASR transcript is too long");
++  }
++  return normalized;
++}
+diff --git a/backend/src/config.js b/backend/src/config.js
+index b3c24e69116d02e5d43b5d24809ad668bbb456b0..8d5627aad27b99da92dec9bd708b1759df82681e 100644
+--- a/backend/src/config.js
++++ b/backend/src/config.js
+@@ -1,6 +1,7 @@
+ import { existsSync, readFileSync } from "node:fs";
+-import { resolve } from "node:path";
++import { isAbsolute, resolve } from "node:path";
+ 
++import { ASR_CONFIG_DEFAULTS, ASR_LIMITS } from "./asr/contracts.js";
+ import { validatePasswordHashEncoding } from "./auth/password.js";
+ import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
+ 
+@@ -158,6 +159,77 @@ function modelIdentifierValue(value, fallback, name) {
+   return normalized;
+ }
+ 
++function asrEnumValue(value, fallback, name, allowed) {
++  const candidate = value === undefined || value === null ? fallback : value;
++  if (typeof candidate !== "string" || !allowed.includes(candidate)) {
++    throw new Error(`${name} must be ${allowed.join(" or ")}`);
++  }
++  return candidate;
++}
++
++function optionalAsrModelValue(value) {
++  const normalized = String(value ?? "").trim();
++  if (normalized === "") return "";
++  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(normalized)) {
++    throw new Error("ASR_MODEL must be empty or a bounded model identifier");
++  }
++  return normalized;
++}
++
++function asrBaseUrlValue(value, { nodeEnv, allowAsrTestLoopbackHttp }) {
++  if (value === undefined || value === null || value === "") return "";
++  if (typeof value !== "string" || value !== value.trim() || value.length > 2_048) {
++    throw new Error("ASR_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
++  }
++  let url;
++  try {
++    url = new URL(value);
++  } catch {
++    throw new Error("ASR_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
++  }
++  if (
++    !["http:", "https:"].includes(url.protocol)
++    || !url.hostname
++    || url.username
++    || url.password
++    || url.search
++    || url.hash
++  ) {
++    throw new Error("ASR_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
++  }
++  if (url.protocol !== "https:") {
++    const isExplicitTestLoopback = nodeEnv === "test"
++      && allowAsrTestLoopbackHttp === true
++      && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
++    if (!isExplicitTestLoopback) {
++      throw new Error("ASR_BASE_URL must use https unless explicit test-only loopback injection is active");
++    }
++  }
++  return value;
++}
++
++function boundedAsrPathValue(value, fallback, name) {
++  const candidate = value === undefined || value === null ? fallback : value;
++  if (
++    typeof candidate !== "string"
++    || candidate.length === 0
++    || candidate.length > 300
++    || candidate !== candidate.trim()
++    || /[\u0000-\u001f\u007f-\u009f]/u.test(candidate)
++  ) {
++    throw new Error(`${name} must be a bounded path`);
++  }
++  return candidate;
++}
++
++function boundedAsrInteger(value, fallback, name, { min = 1, max }) {
++  const parsed = positiveInteger(value === undefined || value === null ? fallback : value, name);
++  if (parsed < min || parsed > max) {
++    throw new Error(`${name} must be between ${min} and ${max}`);
++  }
++  return parsed;
++}
++
+ function isStrongSessionSecret(value) {
+   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
+   const decoded = Buffer.from(value, "base64url");
+@@ -205,6 +277,25 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
+   if (config.amapMode === "mock") {
+     throw new Error("AMAP_MODE must not be mock in production");
+   }
++  if (config.asrTempRoot !== ASR_CONFIG_DEFAULTS.tempRoot || !isAbsolute(config.asrTempRoot)) {
++    throw new Error(`ASR_TEMP_ROOT must be ${ASR_CONFIG_DEFAULTS.tempRoot} in production`);
++  }
++  if (!isAbsolute(config.asrFfprobeCommand)) {
++    throw new Error("ASR_FFPROBE_COMMAND must be an absolute path in production");
++  }
++  if (!isAbsolute(config.asrFfmpegCommand)) {
++    throw new Error("ASR_FFMPEG_COMMAND must be an absolute path in production");
++  }
++  if (config.asrBaseUrl && new URL(config.asrBaseUrl).protocol !== "https:") {
++    throw new Error("ASR_BASE_URL must use https in production");
++  }
++  if (config.asrReuseModelCredential) {
++    throw new Error("ASR_REUSE_MODEL_CREDENTIAL must remain false without production compatibility evidence");
++  }
++  if (config.asrMode === "live") {
++    if (!config.asrBaseUrl) throw new Error("ASR_BASE_URL is required when ASR_MODE=live in production");
++    if (!config.asrModel) throw new Error("ASR_MODEL is required when ASR_MODE=live in production");
++  }
+   // An empty sender allowlist is an intentional unbound state during the
+   // initial production rollout. The event boundary still rejects every
+   // sender until an operator configures a real WeChat sender ID.
+@@ -231,7 +322,7 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
+   }
+ }
+ 
+-export function loadConfig(overrides = {}) {
++export function loadConfig(overrides = {}, { allowAsrTestLoopbackHttp = false } = {}) {
+   const envFile = loadEnvFile(overrides.envFile);
+   const env = { ...envFile, ...process.env, ...overrides };
+   const nodeEnv = String(env.nodeEnv ?? env.NODE_ENV ?? "development").trim().toLowerCase();
+@@ -293,6 +384,45 @@ export function loadConfig(overrides = {}) {
+   if (!["live", "mock"].includes(amapMode)) {
+     throw new Error("AMAP_MODE must be live or mock");
+   }
++  const asrMode = asrEnumValue(
++    env.asrMode ?? env.ASR_MODE,
++    ASR_CONFIG_DEFAULTS.mode,
++    "ASR_MODE",
++    ["disabled", "live"],
++  );
++  const asrProvider = asrEnumValue(
++    env.asrProvider ?? env.ASR_PROVIDER,
++    ASR_CONFIG_DEFAULTS.provider,
++    "ASR_PROVIDER",
++    [ASR_CONFIG_DEFAULTS.provider],
++  );
++  const asrTimeoutMs = boundedAsrInteger(
++    env.asrTimeoutMs ?? env.ASR_TIMEOUT_MS,
++    ASR_CONFIG_DEFAULTS.timeoutMs,
++    "ASR_TIMEOUT_MS",
++    { max: ASR_LIMITS.providerTimeoutMs },
++  );
++  const asrUploadMaxBytes = boundedAsrInteger(
++    env.asrUploadMaxBytes ?? env.ASR_UPLOAD_MAX_BYTES,
++    ASR_CONFIG_DEFAULTS.uploadMaxBytes,
++    "ASR_UPLOAD_MAX_BYTES",
++    { max: ASR_LIMITS.uploadMaxBytes },
++  );
++  const asrQuickMaxDurationMs = boundedAsrInteger(
++    env.asrQuickMaxDurationMs ?? env.ASR_QUICK_MAX_DURATION_MS,
++    ASR_CONFIG_DEFAULTS.quickMaxDurationMs,
++    "ASR_QUICK_MAX_DURATION_MS",
++    { min: ASR_LIMITS.minDurationMs, max: ASR_CONFIG_DEFAULTS.quickMaxDurationMs },
++  );
++  const asrAssistantMaxDurationMs = boundedAsrInteger(
++    env.asrAssistantMaxDurationMs ?? env.ASR_ASSISTANT_MAX_DURATION_MS,
++    ASR_CONFIG_DEFAULTS.assistantMaxDurationMs,
++    "ASR_ASSISTANT_MAX_DURATION_MS",
++    { min: ASR_LIMITS.minDurationMs, max: ASR_CONFIG_DEFAULTS.assistantMaxDurationMs },
++  );
++  if (asrAssistantMaxDurationMs > asrQuickMaxDurationMs) {
++    throw new Error("ASR_ASSISTANT_MAX_DURATION_MS must not exceed ASR_QUICK_MAX_DURATION_MS");
++  }
+   const config = {
+     host: env.host ?? env.HOST ?? "127.0.0.1",
+     port: Number(env.port ?? env.PORT ?? 8787),
+@@ -312,6 +442,37 @@ export function loadConfig(overrides = {}) {
+       "MODEL_VISION_NAME",
+     ),
+     modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
++    asrMode,
++    asrProvider,
++    asrBaseUrl: asrBaseUrlValue(env.asrBaseUrl ?? env.ASR_BASE_URL, {
++      nodeEnv,
++      allowAsrTestLoopbackHttp,
++    }),
++    asrModel: optionalAsrModelValue(env.asrModel ?? env.ASR_MODEL),
++    asrTimeoutMs,
++    asrUploadMaxBytes,
++    asrQuickMaxDurationMs,
++    asrAssistantMaxDurationMs,
++    asrFfprobeCommand: boundedAsrPathValue(
++      env.asrFfprobeCommand ?? env.ASR_FFPROBE_COMMAND,
++      ASR_CONFIG_DEFAULTS.ffprobeCommand,
++      "ASR_FFPROBE_COMMAND",
++    ),
++    asrFfmpegCommand: boundedAsrPathValue(
++      env.asrFfmpegCommand ?? env.ASR_FFMPEG_COMMAND,
++      ASR_CONFIG_DEFAULTS.ffmpegCommand,
++      "ASR_FFMPEG_COMMAND",
++    ),
++    asrTempRoot: boundedAsrPathValue(
++      env.asrTempRoot ?? env.ASR_TEMP_ROOT,
++      ASR_CONFIG_DEFAULTS.tempRoot,
++      "ASR_TEMP_ROOT",
++    ),
++    asrReuseModelCredential: booleanValue(
++      env.asrReuseModelCredential ?? env.ASR_REUSE_MODEL_CREDENTIAL,
++      ASR_CONFIG_DEFAULTS.reuseModelCredential,
++      "ASR_REUSE_MODEL_CREDENTIAL",
++    ),
+     hospitalTenderPython: executableValue(
+       env.hospitalTenderPython ?? env.HOSPITAL_TENDER_PYTHON ?? "python3",
+       "HOSPITAL_TENDER_PYTHON",
+diff --git a/backend/tests/asr-config.test.js b/backend/tests/asr-config.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..15679416deb8007dad8243ee403a40b723d1c71d
+--- /dev/null
++++ b/backend/tests/asr-config.test.js
+@@ -0,0 +1,248 @@
++import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { describe, it } from "node:test";
++
++import { loadConfig } from "../src/config.js";
++
++const missingEnvFile = join(tmpdir(), "sentelligent-v0104-asr-missing.env");
++
++function productionConfig(overrides = {}) {
++  const validPasswordHash = [
++    "scrypt",
++    "16384",
++    "8",
++    "1",
++    Buffer.alloc(16, 31).toString("base64url"),
++    Buffer.alloc(64, 32).toString("base64url"),
++  ].join("$");
++  return {
++    envFile: missingEnvFile,
++    NODE_ENV: "production",
++    AUTH_REQUIRED: "true",
++    AUTH_ACCOUNT: "asr-production-account",
++    AUTH_PASSWORD_HASH: validPasswordHash,
++    AUTH_SESSION_SECRET: Buffer.alloc(32, 33).toString("base64url"),
++    SETTINGS_ENCRYPTION_KEY: Buffer.alloc(32, 34).toString("base64url"),
++    WEIXIN_AGENT_API_TOKEN: Buffer.alloc(32, 35).toString("base64url"),
++    ASSISTANT_CONFIRMATION_SECRET: Buffer.alloc(32, 36).toString("base64url"),
++    WEIXIN_AGENT_OWNER: "asr-production-account",
++    AUTH_COOKIE_SECURE: "true",
++    CORS_ALLOWED_ORIGINS: "https://sales.example.test",
++    ASR_TEMP_ROOT: "/run/sentelligent-asr",
++    ASR_FFPROBE_COMMAND: "/usr/bin/ffprobe",
++    ASR_FFMPEG_COMMAND: "/usr/bin/ffmpeg",
++    ...overrides,
++  };
++}
++
++describe("ASR configuration", () => {
++  it("loads all twelve conservative defaults while keeping ASR disabled", () => {
++    const config = loadConfig({ envFile: missingEnvFile, NODE_ENV: "test" });
++    assert.deepEqual(
++      {
++        asrMode: config.asrMode,
++        asrProvider: config.asrProvider,
++        asrBaseUrl: config.asrBaseUrl,
++        asrModel: config.asrModel,
++        asrTimeoutMs: config.asrTimeoutMs,
++        asrUploadMaxBytes: config.asrUploadMaxBytes,
++        asrQuickMaxDurationMs: config.asrQuickMaxDurationMs,
++        asrAssistantMaxDurationMs: config.asrAssistantMaxDurationMs,
++        asrFfprobeCommand: config.asrFfprobeCommand,
++        asrFfmpegCommand: config.asrFfmpegCommand,
++        asrTempRoot: config.asrTempRoot,
++        asrReuseModelCredential: config.asrReuseModelCredential,
++      },
++      {
++        asrMode: "disabled",
++        asrProvider: "openai-compatible",
++        asrBaseUrl: "",
++        asrModel: "",
++        asrTimeoutMs: 45_000,
++        asrUploadMaxBytes: 8_388_608,
++        asrQuickMaxDurationMs: 120_000,
++        asrAssistantMaxDurationMs: 60_000,
++        asrFfprobeCommand: "/usr/bin/ffprobe",
++        asrFfmpegCommand: "/usr/bin/ffmpeg",
++        asrTempRoot: "/run/sentelligent-asr",
++        asrReuseModelCredential: false,
++      },
++    );
++    assert.equal(Object.hasOwn(config, "asrApiKey"), false);
++  });
++
++  it("parses explicit ASR values without confusing mode and provider", () => {
++    const config = loadConfig({
++      envFile: missingEnvFile,
++      NODE_ENV: "test",
++      ASR_MODE: "live",
++      ASR_PROVIDER: "openai-compatible",
++      ASR_BASE_URL: "https://asr.example.test/v1",
++      ASR_MODEL: "whisper-1",
++      ASR_TIMEOUT_MS: "44000",
++      ASR_UPLOAD_MAX_BYTES: "4194304",
++      ASR_QUICK_MAX_DURATION_MS: "110000",
++      ASR_ASSISTANT_MAX_DURATION_MS: "55000",
++      ASR_FFPROBE_COMMAND: "/opt/media/bin/ffprobe",
++      ASR_FFMPEG_COMMAND: "/opt/media/bin/ffmpeg",
++      ASR_TEMP_ROOT: "/tmp/asr-test-root",
++      ASR_REUSE_MODEL_CREDENTIAL: "true",
++    });
++    assert.equal(config.asrMode, "live");
++    assert.equal(config.asrProvider, "openai-compatible");
++    assert.equal(config.asrBaseUrl, "https://asr.example.test/v1");
++    assert.equal(config.asrModel, "whisper-1");
++    assert.equal(config.asrTimeoutMs, 44_000);
++    assert.equal(config.asrUploadMaxBytes, 4_194_304);
++    assert.equal(config.asrQuickMaxDurationMs, 110_000);
++    assert.equal(config.asrAssistantMaxDurationMs, 55_000);
++    assert.equal(config.asrFfprobeCommand, "/opt/media/bin/ffprobe");
++    assert.equal(config.asrFfmpegCommand, "/opt/media/bin/ffmpeg");
++    assert.equal(config.asrTempRoot, "/tmp/asr-test-root");
++    assert.equal(config.asrReuseModelCredential, true);
++    assert.equal(Object.hasOwn(config, "asrApiKey"), false);
++  });
++
++  it("fails closed for unknown ASR mode or every non-frozen provider", () => {
++    const base = { envFile: missingEnvFile, NODE_ENV: "test" };
++    for (const value of ["", "enabled", "mock", "off", "LIVE", " live ", true]) {
++      assert.throws(() => loadConfig({ ...base, ASR_MODE: value }), /ASR_MODE/);
++    }
++    for (const value of ["", "local-whisper", "whisper-cli", "openai", "OPENAI-COMPATIBLE", " openai-compatible ", true]) {
++      assert.throws(() => loadConfig({ ...base, ASR_PROVIDER: value }), /ASR_PROVIDER/);
++    }
++  });
++
++  it("rejects malformed or unsafe numeric, model, URL, command, and boolean settings", () => {
++    const base = { envFile: missingEnvFile, NODE_ENV: "test" };
++    for (const [field, values] of Object.entries({
++      ASR_TIMEOUT_MS: [0, -1, 1.5, "1e3", "45001", true],
++      ASR_UPLOAD_MAX_BYTES: [0, -1, 1.5, "1e3", "8388609", true],
++      ASR_QUICK_MAX_DURATION_MS: [299, "120001", "NaN", true],
++      ASR_ASSISTANT_MAX_DURATION_MS: [299, "60001", "NaN", true],
++    })) {
++      for (const value of values) {
++        assert.throws(() => loadConfig({ ...base, [field]: value }), new RegExp(field));
++      }
++    }
++    assert.throws(
++      () => loadConfig({ ...base, ASR_QUICK_MAX_DURATION_MS: "60000", ASR_ASSISTANT_MAX_DURATION_MS: "60001" }),
++      /ASR_ASSISTANT_MAX_DURATION_MS/,
++    );
++    for (const value of ["bad model", "model/with/slash", "\u0000model", "a".repeat(201)]) {
++      assert.throws(() => loadConfig({ ...base, ASR_MODEL: value }), /ASR_MODEL/);
++    }
++    for (const value of [
++      "not-a-url",
++      "ftp://asr.example.test",
++      "http://asr.example.test/v1",
++      "http://127.0.0.1:9999/v1",
++      "https://user:pass@asr.example.test",
++      "https://asr.example.test/v1?token=x",
++      "https://asr.example.test/v1#fragment",
++    ]) {
++      assert.throws(() => loadConfig({ ...base, ASR_BASE_URL: value }), /ASR_BASE_URL/);
++    }
++    for (const field of ["ASR_FFPROBE_COMMAND", "ASR_FFMPEG_COMMAND", "ASR_TEMP_ROOT"]) {
++      for (const value of ["", "path\u0000suffix", "a".repeat(301)]) {
++        assert.throws(() => loadConfig({ ...base, [field]: value }), new RegExp(field));
++      }
++    }
++    assert.throws(() => loadConfig({ ...base, ASR_REUSE_MODEL_CREDENTIAL: "invalid" }), /ASR_REUSE_MODEL_CREDENTIAL/);
++  });
++
++  it("allows HTTP loopback only through explicit test dependency injection", () => {
++    const loopback = {
++      envFile: missingEnvFile,
++      NODE_ENV: "test",
++      ASR_BASE_URL: "http://127.0.0.1:9999/v1",
++    };
++    assert.throws(() => loadConfig(loopback), /ASR_BASE_URL.*https|https.*ASR_BASE_URL/);
++    assert.equal(
++      loadConfig(loopback, { allowAsrTestLoopbackHttp: true }).asrBaseUrl,
++      "http://127.0.0.1:9999/v1",
++    );
++    assert.equal(
++      loadConfig({ ...loopback, ASR_BASE_URL: "http://localhost:9999/v1" }, { allowAsrTestLoopbackHttp: true }).asrBaseUrl,
++      "http://localhost:9999/v1",
++    );
++    assert.throws(
++      () => loadConfig({ ...loopback, ASR_BASE_URL: "http://asr.example.test/v1" }, { allowAsrTestLoopbackHttp: true }),
++      /ASR_BASE_URL.*https|https.*ASR_BASE_URL/,
++    );
++    assert.throws(
++      () => loadConfig({ ...loopback, NODE_ENV: "development" }, { allowAsrTestLoopbackHttp: true }),
++      /ASR_BASE_URL.*https|https.*ASR_BASE_URL/,
++    );
++    assert.throws(
++      () => loadConfig(productionConfig({ ASR_BASE_URL: loopback.ASR_BASE_URL }), { allowAsrTestLoopbackHttp: true }),
++      /ASR_BASE_URL.*https|https.*ASR_BASE_URL/,
++    );
++  });
++
++  it("allows the production kill switch to remain disabled without pretending readiness", () => {
++    const config = loadConfig(productionConfig());
++    assert.equal(config.asrMode, "disabled");
++    assert.equal(config.asrProvider, "openai-compatible");
++    assert.equal(config.asrBaseUrl, "");
++    assert.equal(config.asrModel, "");
++  });
++
++  it("requires complete independent live provider configuration in production", () => {
++    const live = productionConfig({
++      ASR_MODE: "live",
++      ASR_BASE_URL: "https://asr.example.test/v1",
++      ASR_MODEL: "whisper-1",
++      ASR_REUSE_MODEL_CREDENTIAL: "false",
++    });
++    const config = loadConfig(live);
++    assert.equal(config.asrMode, "live");
++    assert.equal(config.asrBaseUrl, "https://asr.example.test/v1");
++    assert.equal(config.asrModel, "whisper-1");
++
++    assert.throws(() => loadConfig({ ...live, ASR_BASE_URL: "" }), /ASR_BASE_URL/);
++    assert.throws(() => loadConfig({ ...live, ASR_MODEL: "" }), /ASR_MODEL/);
++    assert.throws(() => loadConfig({ ...live, ASR_BASE_URL: "http://127.0.0.1:9999/v1" }), /ASR_BASE_URL.*https|https.*ASR_BASE_URL/);
++    assert.throws(() => loadConfig({ ...live, ASR_REUSE_MODEL_CREDENTIAL: "true" }), /ASR_REUSE_MODEL_CREDENTIAL/);
++  });
++
++  it("pins production commands and temp root to absolute protected runtime locations", () => {
++    for (const [field, value] of [
++      ["ASR_FFPROBE_COMMAND", "ffprobe"],
++      ["ASR_FFMPEG_COMMAND", "ffmpeg"],
++      ["ASR_TEMP_ROOT", "relative/asr"],
++      ["ASR_TEMP_ROOT", "/tmp/asr"],
++    ]) {
++      assert.throws(() => loadConfig(productionConfig({ [field]: value })), new RegExp(field));
++    }
++  });
++
++  it("documents exactly the twelve ASR env keys with no secret placeholder", () => {
++    const envExample = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
++    const expected = [
++      "ASR_MODE=disabled",
++      "ASR_PROVIDER=openai-compatible",
++      "ASR_BASE_URL=",
++      "ASR_MODEL=",
++      "ASR_TIMEOUT_MS=45000",
++      "ASR_UPLOAD_MAX_BYTES=8388608",
++      "ASR_QUICK_MAX_DURATION_MS=120000",
++      "ASR_ASSISTANT_MAX_DURATION_MS=60000",
++      "ASR_FFPROBE_COMMAND=/usr/bin/ffprobe",
++      "ASR_FFMPEG_COMMAND=/usr/bin/ffmpeg",
++      "ASR_TEMP_ROOT=/run/sentelligent-asr",
++      "ASR_REUSE_MODEL_CREDENTIAL=false",
++    ];
++    for (const line of expected) assert.match(envExample, new RegExp(`^${line.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}$`, "m"));
++    assert.doesNotMatch(envExample, /^ASR_API_KEY=/m);
++  });
++
++  it("keeps the contract and validation modules pure", () => {
++    for (const relativePath of ["../src/asr/contracts.js", "../src/asr/audioValidation.js"]) {
++      const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
++      assert.doesNotMatch(source, /node:fs|node:child_process|\bfetch\s*\(|\bspawn\s*\(|\bexec(?:File)?\s*\(|\bDatabase\b|\bsqlite\b/i);
++    }
++  });
++});
+diff --git a/backend/tests/asr-validation.test.js b/backend/tests/asr-validation.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..655fdce930b1f1569f16fbdaaac4bdbadf0b7608
+--- /dev/null
++++ b/backend/tests/asr-validation.test.js
+@@ -0,0 +1,475 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++
++import {
++  ASR_CONFIG_DEFAULTS,
++  ASR_LIMITS,
++  ASR_PURPOSES,
++  ASR_SUPPORTED_MEDIA_TYPES,
++  AsrContractError,
++  canonicalizeAsrMediaType,
++  normalizeAsrTranscript,
++  parseAsrContentEncoding,
++  parseAsrContentLength,
++  parseAsrDurationHeader,
++  parseAsrIdempotencyKey,
++  parseAsrLanguage,
++  parseAsrPurpose,
++  parseAsrQuery,
++  parseAsrRequestHeaders,
++} from "../src/asr/contracts.js";
++import {
++  assertAudioByteLength,
++  assertAudioDuration,
++  assertAudioMagic,
++  detectAudioMediaType,
++  validateAudioProbe,
++} from "../src/asr/audioValidation.js";
++
++function expectContractError(action, code, status) {
++  assert.throws(
++    action,
++    (error) => {
++      assert.ok(error instanceof AsrContractError);
++      assert.equal(error.code, code);
++      if (status !== undefined) assert.equal(error.status, status);
++      return true;
++    },
++  );
++}
++
++function expectTypeError(action, name) {
++  assert.throws(action, (error) => {
++    assert.ok(error instanceof TypeError);
++    assert.match(error.message, new RegExp(name));
++    assert.equal(Object.hasOwn(error, "code"), false);
++    return true;
++  });
++}
++
++function bytes(...values) {
++  return Uint8Array.from(values);
++}
++
++function ascii(value) {
++  return Uint8Array.from(Buffer.from(value, "ascii"));
++}
++
++function mp4Ftyp({ size = 24, prefixBytes = 0 } = {}) {
++  const value = Buffer.alloc(prefixBytes + 24);
++  const offset = prefixBytes;
++  value.writeUInt32BE(size, offset);
++  value.write("ftyp", offset + 4, "ascii");
++  value.write("isom", offset + 8, "ascii");
++  value.writeUInt32BE(0, offset + 12);
++  value.write("isom", offset + 16, "ascii");
++  value.write("mp42", offset + 20, "ascii");
++  return value;
++}
++
++describe("ASR request and transcript contracts", () => {
++  it("freezes the v0.10.4 thresholds and the only provider defaults", () => {
++    assert.deepEqual(ASR_PURPOSES, {
++      quick_record: { maxDurationMs: 120_000, maxTranscriptLength: 10_000 },
++      assistant_chat: { maxDurationMs: 60_000, maxTranscriptLength: 2_000 },
++    });
++    assert.deepEqual(ASR_SUPPORTED_MEDIA_TYPES, [
++      "audio/webm",
++      "audio/ogg",
++      "audio/mp4",
++      "audio/wav",
++    ]);
++    assert.equal(ASR_LIMITS.uploadMaxBytes, 8_388_608);
++    assert.equal(ASR_LIMITS.minDurationMs, 300);
++    assert.equal(ASR_LIMITS.magicMaxBytes, 64);
++    assert.equal(ASR_LIMITS.mp4FtypSearchBytes, 32);
++    assert.equal(ASR_LIMITS.idempotencyTtlMs, 300_000);
++    assert.equal(ASR_LIMITS.idempotencyCompletedCapacity, 256);
++    assert.equal(ASR_CONFIG_DEFAULTS.mode, "disabled");
++    assert.equal(ASR_CONFIG_DEFAULTS.provider, "openai-compatible");
++    assert.equal(ASR_CONFIG_DEFAULTS.language, "zh-CN");
++    assert.ok(Object.isFrozen(ASR_PURPOSES));
++    assert.ok(Object.isFrozen(ASR_LIMITS));
++  });
++
++  it("accepts only the two exact purpose query values and rejects ambiguous query state", () => {
++    assert.equal(parseAsrPurpose("quick_record"), "quick_record");
++    assert.equal(parseAsrPurpose("assistant_chat"), "assistant_chat");
++    for (const value of [undefined, null, "", "quick-record", "QUICK_RECORD", " quick_record "]) {
++      expectTypeError(() => parseAsrPurpose(value), "purpose");
++    }
++
++    assert.deepEqual(parseAsrQuery(new URLSearchParams("purpose=quick_record")), {
++      purpose: "quick_record",
++    });
++    assert.deepEqual(
++      parseAsrQuery(new URLSearchParams("purpose=quick_record&ignored=not-metadata")),
++      { purpose: "quick_record" },
++    );
++    for (const query of [
++      new URLSearchParams(),
++      new URLSearchParams("purpose=quick_record&purpose=assistant_chat"),
++    ]) {
++      expectTypeError(() => parseAsrQuery(query), "query");
++    }
++  });
++
++  it("canonicalizes only the four MIME types while ignoring MIME parameters", () => {
++    assert.equal(canonicalizeAsrMediaType("audio/webm;codecs=opus"), "audio/webm");
++    assert.equal(canonicalizeAsrMediaType(" audio/ogg ; codecs=opus "), "audio/ogg");
++    assert.equal(canonicalizeAsrMediaType("audio/mp4"), "audio/mp4");
++    assert.equal(canonicalizeAsrMediaType("audio/wav; charset=binary"), "audio/wav");
++    for (const value of [undefined, "", "application/octet-stream", "multipart/form-data; boundary=x", ["audio/wav"]]) {
++      expectContractError(
++        () => canonicalizeAsrMediaType(value),
++        "AUDIO_MEDIA_TYPE_UNSUPPORTED",
++        415,
++      );
++    }
++  });
++
++  it("allows only absent or identity Content-Encoding", () => {
++    assert.equal(parseAsrContentEncoding(undefined), "identity");
++    assert.equal(parseAsrContentEncoding(null), "identity");
++    assert.equal(parseAsrContentEncoding("identity"), "identity");
++    for (const value of ["", "Identity", " identity ", "gzip", "br", "deflate", "identity,gzip", ["identity"]]) {
++      expectTypeError(() => parseAsrContentEncoding(value), "Content-Encoding");
++    }
++  });
++
++  it("parses an optional positive decimal Content-Length through exactly 8 MiB", () => {
++    assert.equal(parseAsrContentLength(undefined), null);
++    assert.equal(parseAsrContentLength(null), null);
++    assert.equal(parseAsrContentLength(" 1 "), 1);
++    assert.equal(parseAsrContentLength("8388608"), 8_388_608);
++    for (const value of ["", "0", "-1", "+1", "01", "1.0", "1e3", "NaN", true, ["1"]]) {
++      expectTypeError(() => parseAsrContentLength(value), "Content-Length");
++    }
++    expectContractError(() => parseAsrContentLength("8388609"), "AUDIO_TOO_LARGE", 413);
++  });
++
++  it("trims and validates Idempotency-Key at the inclusive 16/128 boundaries", () => {
++    const minimum = "a".repeat(16);
++    const maximum = `a${"._:-Z0".repeat(22).slice(0, 127)}`;
++    assert.equal(maximum.length, 128);
++    assert.equal(parseAsrIdempotencyKey(`  ${minimum}  `), minimum);
++    assert.equal(parseAsrIdempotencyKey(maximum), maximum);
++    assert.equal(parseAsrIdempotencyKey("asr:12345678-1234-1234-1234-123456789abc"), "asr:12345678-1234-1234-1234-123456789abc");
++    for (const value of [
++      undefined,
++      "a".repeat(15),
++      `-${"a".repeat(15)}`,
++      "a".repeat(129),
++      `a${"b".repeat(14)} `,
++      `a${"b".repeat(14)}\u0000`,
++      `中${"a".repeat(15)}`,
++      [minimum],
++    ]) {
++      expectContractError(() => parseAsrIdempotencyKey(value), "INVALID_IDEMPOTENCY_KEY", 400);
++    }
++  });
++
++  it("parses the client duration hint as a positive safe decimal integer without trusting it as a limit", () => {
++    assert.equal(parseAsrDurationHeader(undefined), null);
++    assert.equal(parseAsrDurationHeader(null), null);
++    assert.equal(parseAsrDurationHeader("1"), 1);
++    assert.equal(parseAsrDurationHeader(" 12340 "), 12_340);
++    assert.equal(parseAsrDurationHeader(String(Number.MAX_SAFE_INTEGER)), Number.MAX_SAFE_INTEGER);
++    for (const value of ["", "0", "-1", "+1", "01", "1.5", "1e3", "Infinity", true]) {
++      expectTypeError(() => parseAsrDurationHeader(value), "X-Audio-Duration-Ms");
++    }
++  });
++
++  it("defaults language to zh-CN and rejects every other value", () => {
++    assert.equal(parseAsrLanguage(undefined), "zh-CN");
++    assert.equal(parseAsrLanguage(null), "zh-CN");
++    assert.equal(parseAsrLanguage("zh-CN"), "zh-CN");
++    for (const value of ["", " zh-CN ", "zh", "zh-cn", "en-US", "zh-CN,en-US", ["zh-CN"]]) {
++      expectTypeError(() => parseAsrLanguage(value), "X-ASR-Language");
++    }
++  });
++
++  it("parses the complete controlled header contract without accepting caller metadata", () => {
++    assert.deepEqual(
++      parseAsrRequestHeaders({
++        "Content-Type": "audio/webm;codecs=opus",
++        "Content-Encoding": "identity",
++        "Content-Length": "4096",
++        "Idempotency-Key": "asr:12345678-1234-1234-1234-123456789abc",
++        "X-Audio-Duration-Ms": "12340",
++        "X-ASR-Language": "zh-CN",
++      }),
++      {
++        mediaType: "audio/webm",
++        contentEncoding: "identity",
++        contentLength: 4_096,
++        idempotencyKey: "asr:12345678-1234-1234-1234-123456789abc",
++        clientDurationMs: 12_340,
++        language: "zh-CN",
++      },
++    );
++  });
++
++  it("accepts Headers objects while leaving absent optional transport hints as null/default", () => {
++    const parsed = parseAsrRequestHeaders(new Headers({
++      "Content-Type": "audio/wav",
++      "Idempotency-Key": "asr:12345678-1234-1234-1234-123456789abc",
++    }));
++    assert.deepEqual(parsed, {
++      mediaType: "audio/wav",
++      contentEncoding: "identity",
++      contentLength: null,
++      idempotencyKey: "asr:12345678-1234-1234-1234-123456789abc",
++      clientDurationMs: null,
++      language: "zh-CN",
++    });
++  });
++
++  it("normalizes provider transcript using CRLF, NFC, trim, and exact purpose limits", () => {
++    assert.equal(normalizeAsrTranscript("  e\u0301\r\n第二行\t尾部  ", "quick_record"), "é\n第二行\t尾部");
++    assert.equal(normalizeAsrTranscript("\n\t可保留\t\n", "assistant_chat"), "可保留");
++    assert.equal(normalizeAsrTranscript("汉".repeat(10_000), "quick_record").length, 10_000);
++    assert.equal(normalizeAsrTranscript("汉".repeat(2_000), "assistant_chat").length, 2_000);
++
++    for (const value of ["", " \r\n\t "]) {
++      expectContractError(() => normalizeAsrTranscript(value, "quick_record"), "ASR_TRANSCRIPT_EMPTY", 422);
++    }
++    for (const value of ["text\u0000", "text\u0001", "text\u000b", "text\rtext"]) {
++      expectContractError(() => normalizeAsrTranscript(value, "quick_record"), "ASR_PROVIDER_BAD_RESPONSE", 502);
++    }
++    expectContractError(() => normalizeAsrTranscript(null, "quick_record"), "ASR_PROVIDER_BAD_RESPONSE", 502);
++    expectContractError(
++      () => normalizeAsrTranscript("汉".repeat(10_001), "quick_record"),
++      "ASR_TRANSCRIPT_TOO_LONG",
++      422,
++    );
++    expectContractError(
++      () => normalizeAsrTranscript("汉".repeat(2_001), "assistant_chat"),
++      "ASR_TRANSCRIPT_TOO_LONG",
++      422,
++    );
++  });
++
++  it("normalizes before counting and never truncates a boundary transcript", () => {
++    assert.equal(
++      normalizeAsrTranscript(`  ${"a".repeat(10_000)}  `, "quick_record"),
++      "a".repeat(10_000),
++    );
++    assert.equal(
++      normalizeAsrTranscript("e\u0301".repeat(2_000), "assistant_chat"),
++      "é".repeat(2_000),
++    );
++  });
++
++  it("rejects every C0 control except LF/TAB without extending the rule to DEL or C1", () => {
++    const rejected = [];
++    for (let codePoint = 0; codePoint <= 0x1f; codePoint += 1) {
++      if (codePoint === 0x09 || codePoint === 0x0a) continue;
++      rejected.push(String.fromCharCode(codePoint));
++    }
++    for (const control of rejected) {
++      expectContractError(
++        () => normalizeAsrTranscript(`a${control}b`, "quick_record"),
++        "ASR_PROVIDER_BAD_RESPONSE",
++        502,
++      );
++    }
++    assert.equal(normalizeAsrTranscript("a\u007fb\u0080c\u009fd", "quick_record"), "a\u007fb\u0080c\u009fd");
++  });
++});
++
++describe("ASR audio byte, magic, duration, and probe validation", () => {
++  const samples = {
++    "audio/webm": bytes(0x1a, 0x45, 0xdf, 0xa3, 0x01),
++    "audio/ogg": ascii("OggS\u0000extra"),
++    "audio/mp4": mp4Ftyp(),
++    "audio/wav": ascii("RIFF\u0010\u0000\u0000\u0000WAVEdata"),
++  };
++
++  it("accepts and detects all four exact MIME/magic combinations", () => {
++    for (const [mediaType, sample] of Object.entries(samples)) {
++      assert.equal(assertAudioMagic(mediaType, sample), mediaType);
++      assert.equal(detectAudioMediaType(sample), mediaType);
++    }
++  });
++
++  it("rejects every MIME/magic mismatch without guessing a fallback", () => {
++    for (const [mediaType, sample] of Object.entries(samples)) {
++      for (const otherMediaType of ASR_SUPPORTED_MEDIA_TYPES) {
++        if (otherMediaType === mediaType) continue;
++        expectContractError(
++          () => assertAudioMagic(otherMediaType, sample),
++          "AUDIO_SIGNATURE_MISMATCH",
++          415,
++        );
++      }
++    }
++  });
++
++  it("rejects short or malformed magic and an ftyp box outside the first 32 bytes", () => {
++    for (const sample of [new Uint8Array(), ascii("RIFF"), ascii("Ogg"), bytes(0x1a, 0x45, 0xdf)]) {
++      assert.equal(detectAudioMediaType(sample), null);
++    }
++    assert.equal(detectAudioMediaType(mp4Ftyp({ size: 8 })), null);
++    assert.equal(detectAudioMediaType(mp4Ftyp({ prefixBytes: 32 })), null);
++    expectContractError(
++      () => assertAudioMagic("audio/mp4", mp4Ftyp({ prefixBytes: 32 })),
++      "AUDIO_SIGNATURE_MISMATCH",
++      415,
++    );
++  });
++
++  it("accepts a valid ftyp box after a complete leading box while its type stays in the first 32 bytes", () => {
++    const sample = Buffer.alloc(16 + 24);
++    sample.writeUInt32BE(16, 0);
++    sample.write("free", 4, "ascii");
++    mp4Ftyp().copy(sample, 16);
++    assert.equal(detectAudioMediaType(sample), "audio/mp4");
++    assert.equal(assertAudioMagic("audio/mp4", sample), "audio/mp4");
++  });
++
++  it("enforces empty, one-byte, 8 MiB, and 8 MiB+1 body boundaries", () => {
++    expectContractError(() => assertAudioByteLength(0), "AUDIO_BODY_REQUIRED", 400);
++    assert.equal(assertAudioByteLength(1), 1);
++    assert.equal(assertAudioByteLength(8_388_608), 8_388_608);
++    expectContractError(() => assertAudioByteLength(8_388_609), "AUDIO_TOO_LARGE", 413);
++    for (const value of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "1"]) {
++      expectContractError(() => assertAudioByteLength(value), "AUDIO_INVALID", 422);
++    }
++  });
++
++  it("enforces the inclusive 300ms and purpose-specific authoritative duration boundaries", () => {
++    expectContractError(() => assertAudioDuration(299, "assistant_chat"), "AUDIO_TOO_SHORT", 422);
++    assert.equal(assertAudioDuration(300, "assistant_chat"), 300);
++    assert.equal(assertAudioDuration(60_000, "assistant_chat"), 60_000);
++    expectContractError(() => assertAudioDuration(60_001, "assistant_chat"), "AUDIO_TOO_LONG", 422);
++    assert.equal(assertAudioDuration(120_000, "quick_record"), 120_000);
++    expectContractError(() => assertAudioDuration(120_001, "quick_record"), "AUDIO_TOO_LONG", 422);
++    for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, "300"]) {
++      expectContractError(() => assertAudioDuration(value, "quick_record"), "AUDIO_INVALID", 422);
++    }
++  });
++
++  it("enforces a valid lowered effective duration without weakening the hard purpose ceiling", () => {
++    assert.equal(assertAudioDuration(30_000, "assistant_chat", 30_000), 30_000);
++    expectContractError(
++      () => assertAudioDuration(30_001, "assistant_chat", 30_000),
++      "AUDIO_TOO_LONG",
++      422,
++    );
++    assert.equal(assertAudioDuration(90_000, "quick_record", 90_000), 90_000);
++    expectContractError(
++      () => assertAudioDuration(90_001, "quick_record", 90_000),
++      "AUDIO_TOO_LONG",
++      422,
++    );
++    for (const value of [299, 60_001, 1.5, Number.NaN, "60000"]) {
++      expectTypeError(
++        () => assertAudioDuration(300, "assistant_chat", value),
++        "effectiveMaxDurationMs",
++      );
++    }
++  });
++
++  it("does not round a fractional probe duration across a hard boundary", () => {
++    const assistantProbe = {
++      format: { duration: "60.000001", format_name: "ogg" },
++      streams: [{ index: 0, codec_type: "audio", codec_name: "opus", channels: 1, sample_rate: "8000" }],
++    };
++    expectContractError(
++      () => validateAudioProbe(assistantProbe, { mediaType: "audio/ogg", purpose: "assistant_chat" }),
++      "AUDIO_TOO_LONG",
++      422,
++    );
++  });
++
++  it("passes the lowered effective duration through probe validation", () => {
++    const probe = {
++      format: { duration: "30.001", format_name: "ogg" },
++      streams: [{ index: 0, codec_type: "audio", codec_name: "opus", channels: 1, sample_rate: "8000" }],
++    };
++    expectContractError(
++      () => validateAudioProbe(probe, {
++        mediaType: "audio/ogg",
++        purpose: "assistant_chat",
++        effectiveMaxDurationMs: 30_000,
++      }),
++      "AUDIO_TOO_LONG",
++      422,
++    );
++    probe.format.duration = "30";
++    assert.equal(
++      validateAudioProbe(probe, {
++        mediaType: "audio/ogg",
++        purpose: "assistant_chat",
++        effectiveMaxDurationMs: 30_000,
++      }).durationMs,
++      30_000,
++    );
++  });
++
++  it("accepts exactly one bounded audio stream, no video, and compatible container metadata", () => {
++    const validated = validateAudioProbe(
++      {
++        format: { duration: "12.34", format_name: "matroska,webm" },
++        streams: [
++          { index: 0, codec_type: "audio", codec_name: "opus", channels: 2, sample_rate: "48000" },
++        ],
++      },
++      { mediaType: "audio/webm", purpose: "quick_record" },
++    );
++    assert.deepEqual(validated, {
++      durationMs: 12_340,
++      formatNames: ["matroska", "webm"],
++      audioStream: {
++        index: 0,
++        codecName: "opus",
++        channels: 2,
++        sampleRate: 48_000,
++      },
++    });
++  });
++
++  it("accepts inclusive channel and sample-rate probe boundaries", () => {
++    for (const [channels, sampleRate] of [[1, "8000"], [2, "96000"]]) {
++      const validated = validateAudioProbe(
++        {
++          format: { duration: "0.3", format_name: "wav" },
++          streams: [{ index: 0, codec_type: "audio", codec_name: "pcm_s16le", channels, sample_rate: sampleRate }],
++        },
++        { mediaType: "audio/wav", purpose: "assistant_chat" },
++      );
++      assert.equal(validated.audioStream.channels, channels);
++      assert.equal(validated.audioStream.sampleRate, Number(sampleRate));
++    }
++  });
++
++  it("rejects invalid stream counts, video, channel/sample-rate bounds, format, and duration", () => {
++    const valid = {
++      format: { duration: "1", format_name: "ogg" },
++      streams: [{ index: 0, codec_type: "audio", codec_name: "opus", channels: 1, sample_rate: "48000" }],
++    };
++    const invalid = [
++      { ...valid, streams: [] },
++      { ...valid, streams: [...valid.streams, { ...valid.streams[0], index: 1 }] },
++      { ...valid, streams: [...valid.streams, { index: 1, codec_type: "video", codec_name: "h264" }] },
++      { ...valid, streams: [{ ...valid.streams[0], channels: 0 }] },
++      { ...valid, streams: [{ ...valid.streams[0], channels: 3 }] },
++      { ...valid, streams: [{ ...valid.streams[0], sample_rate: "7999" }] },
++      { ...valid, streams: [{ ...valid.streams[0], sample_rate: "96001" }] },
++      { ...valid, format: { ...valid.format, duration: "NaN" } },
++    ];
++    for (const probe of invalid) {
++      expectContractError(
++        () => validateAudioProbe(probe, { mediaType: "audio/ogg", purpose: "quick_record" }),
++        "AUDIO_INVALID",
++        422,
++      );
++    }
++    expectContractError(
++      () => validateAudioProbe(valid, { mediaType: "audio/wav", purpose: "quick_record" }),
++      "AUDIO_INVALID",
++      422,
++    );
++  });
++});
+diff --git a/scripts/release-package.mjs b/scripts/release-package.mjs
+index d8fb8340badb5203d28b11fee05856f321a7351e..d0bb2e78e821d2c7262e90680c870ad251953c4d 100644
+--- a/scripts/release-package.mjs
++++ b/scripts/release-package.mjs
+@@ -250,6 +250,11 @@ function isSensitiveAssignmentName(name) {
+   );
+ }
+ 
++function isAsrCredentialReuseBooleanFlag(name, value) {
++  return String(name).toUpperCase() === "ASR_REUSE_MODEL_CREDENTIAL"
++    && (value === "true" || value === "false");
++}
++
+ const testFixtureMarkers = new Set([
+   "admin",
+   "analysis",
+@@ -551,7 +556,8 @@ export function assertNoReleaseSecrets(files, contentByPath) {
+       if (
+         isSensitiveAssignmentName(name) &&
+         (quoted || isConfigurationAssignmentPath(file)) &&
+-        !isPlaceholderValue(value, file)
++        !isPlaceholderValue(value, file) &&
++        !isAsrCredentialReuseBooleanFlag(name, value)
+       ) {
+         const assignmentOffset = match[0].search(/[^\r\n]/);
+         throw new Error(
+diff --git a/scripts/release-package.test.mjs b/scripts/release-package.test.mjs
+index f289e9f1e0d9ae676da610b274b09ed0f5d13772..20eb8d15d6882cbaa308d44033c8a8a7f969b194 100644
+--- a/scripts/release-package.test.mjs
++++ b/scripts/release-package.test.mjs
+@@ -2154,6 +2154,34 @@ describe("portable release package", () => {
+     }
+   });
+ 
++  it("allows only the exact ASR credential-reuse boolean flag through the release secret gate", async () => {
++    const { assertNoReleaseSecrets } = await loadReleaseModule();
++    const path = "backend/.env.example";
++
++    for (const content of [
++      "ASR_REUSE_MODEL_CREDENTIAL=false\n",
++      "ASR_REUSE_MODEL_CREDENTIAL=true\n",
++      'ASR_REUSE_MODEL_CREDENTIAL="false"\n',
++      "asr_reuse_model_credential=true\n",
++    ]) {
++      assert.doesNotThrow(() =>
++        assertNoReleaseSecrets([path], new Map([[path, Buffer.from(content)]])),
++      );
++    }
++
++    for (const content of [
++      "ASR_API_KEY=false\n",
++      "ASR_MODEL_CREDENTIAL=false\n",
++      "ASR_REUSE_MODEL_CREDENTIAL=anything-else\n",
++      "ASR_REUSE_MODEL_CREDENTIAL=TRUE\n",
++    ]) {
++      assert.throws(
++        () => assertNoReleaseSecrets([path], new Map([[path, Buffer.from(content)]])),
++        /credential-assignment/,
++      );
++    }
++  });
++
+   it("allows explicit low-entropy credential labels only inside test source", async () => {
+     const workspace = makeWorkspace("sentelligent-test-placeholder-");
+     const output = makeWorkspace("sentelligent-test-placeholder-output-");
