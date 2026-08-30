@@ -1,0 +1,4043 @@
+diff --git a/outputs/product-design-prototype/scripts/asr-capture.test.mjs b/outputs/product-design-prototype/scripts/asr-capture.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..87762270dcd55b066a5ad459c64b542b63d04a34
+--- /dev/null
++++ b/outputs/product-design-prototype/scripts/asr-capture.test.mjs
+@@ -0,0 +1,653 @@
++import assert from "node:assert/strict";
++import { readFile, rm, writeFile } from "node:fs/promises";
++import { after, before, describe, it } from "node:test";
++import os from "node:os";
++import path from "node:path";
++import { fileURLToPath } from "node:url";
++
++import { webkit } from "playwright";
++import React from "react";
++import { renderToStaticMarkup } from "react-dom/server";
++import { createServer } from "vite";
++
++const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const componentPath = path.join(projectRoot, "src/components/audio/VoiceCaptureControl.jsx");
++const hookPath = path.join(projectRoot, "src/audio/useServerTranscription.js");
++const browserHarnessPath = path.join(os.tmpdir(), `asr-hook-harness-${process.pid}.jsx`);
++
++let vite;
++let viteBaseUrl;
++let VoiceCaptureControlView;
++let beginTouchCapture;
++let cancelTouchGesture;
++let finishTouchCapture;
++let finishTouchGesture;
++let consumeSyntheticClickToken;
++let moveTouchGesture;
++let releaseTouchGesture;
++let runPrimaryKeyboardAction;
++let updateSyntheticClickToken;
++
++before(async () => {
++  await writeFile(browserHarnessPath, String.raw`
++import React, { StrictMode, useLayoutEffect } from "react";
++import { createRoot } from "react-dom/client";
++import { useServerTranscription } from "/src/audio/useServerTranscription.js";
++
++let nowValue = 10_000;
++let timerId = 0;
++const timers = new Map();
++const scheduledDelays = [];
++const requests = [];
++const callbacks = [];
++const commitResolvedRequests = new Set();
++const tracks = [];
++const recorders = [];
++let uuid = 0;
++
++function setTimeoutImpl(callback, delay = 0) {
++  const id = ++timerId;
++  const boundedDelay = Math.max(0, Number(delay) || 0);
++  timers.set(id, { callback, at: nowValue + boundedDelay });
++  scheduledDelays.push(boundedDelay);
++  return id;
++}
++
++function clearTimeoutImpl(id) {
++  timers.delete(id);
++}
++
++class FakeTrack {
++  constructor() { this.stopCalls = 0; tracks.push(this); }
++  stop() { this.stopCalls += 1; }
++}
++
++class FakeMediaRecorder {
++  static isTypeSupported(value) { return value === "audio/webm;codecs=opus"; }
++  constructor(stream, options = {}) {
++    this.stream = stream;
++    this.mimeType = options.mimeType || "audio/webm;codecs=opus";
++    this.state = "inactive";
++    recorders.push(this);
++  }
++  start() { this.state = "recording"; }
++  stop() {
++    if (this.state === "inactive") return;
++    this.state = "inactive";
++    const ondataavailable = this.ondataavailable;
++    const onstop = this.onstop;
++    queueMicrotask(() => {
++      ondataavailable?.({ data: new Blob(["synthetic-audio"], { type: this.mimeType }) });
++      onstop?.();
++    });
++  }
++}
++
++const mediaDevices = {
++  async getUserMedia() {
++    const trackA = new FakeTrack();
++    const trackB = new FakeTrack();
++    return { getTracks: () => [trackA, trackB] };
++  },
++};
++
++const apiClient = {
++  transcribeAudio(input) {
++    return new Promise((resolve, reject) => {
++      requests.push({ input, resolve, reject });
++    });
++  },
++};
++
++let props = {
++  purpose: "quick_record",
++  callbackLabel: "quick-initial",
++  disabled: false,
++  active: true,
++  sessionEpoch: 0,
++  resolveOnCommitIndex: null,
++};
++
++function publicSnapshot(transcription) {
++  return {
++    status: transcription.status,
++    purpose: transcription.purpose,
++    recordingGeneration: transcription.recordingGeneration,
++    errorCode: transcription.errorCode,
++  };
++}
++
++function Harness(currentProps) {
++  const transcription = useServerTranscription({
++    purpose: currentProps.purpose,
++    disabled: currentProps.disabled,
++    active: currentProps.active,
++    sessionEpoch: currentProps.sessionEpoch,
++    mediaDevices,
++    MediaRecorderImpl: FakeMediaRecorder,
++    SpeechRecognitionImpl: undefined,
++    BlobImpl: Blob,
++    AbortControllerImpl: AbortController,
++    cryptoImpl: {
++      randomUUID() {
++        uuid += 1;
++        return "00000000-0000-4000-8000-" + String(uuid).padStart(12, "0");
++      },
++    },
++    now: () => nowValue,
++    setTimeoutImpl,
++    clearTimeoutImpl,
++    apiClient,
++    onTranscript(text) { callbacks.push(currentProps.callbackLabel + ":" + text); },
++  });
++  useLayoutEffect(() => {
++    const index = currentProps.resolveOnCommitIndex;
++    if (!Number.isInteger(index) || commitResolvedRequests.has(index) || !requests[index]) return;
++    commitResolvedRequests.add(index);
++    const request = requests[index];
++    request.resolve({
++      requestId: "commit-request-" + index,
++      item: {
++        transcript: "COMMIT_SHOULD_NOT_APPLY",
++        language: "zh-CN",
++        durationMs: request.input.durationMs,
++        source: "server_asr",
++        replayed: false,
++      },
++    });
++  }, [currentProps.resolveOnCommitIndex]);
++  window.__asrCurrent = transcription;
++  window.__asrRenderedProps = { ...currentProps };
++  return React.createElement("output", {
++    id: "snapshot",
++    "data-status": transcription.status,
++    "data-purpose": transcription.purpose,
++  }, transcription.status);
++}
++
++const root = createRoot(document.getElementById("root"));
++function render(next = {}) {
++  props = { ...props, ...next };
++  root.render(React.createElement(StrictMode, null, React.createElement(Harness, props)));
++}
++
++window.__asrTest = {
++  render,
++  start: () => window.__asrCurrent.startCapture(),
++  stop: () => window.__asrCurrent.stopCapture(),
++  advance(milliseconds) { nowValue += milliseconds; },
++  snapshot: () => publicSnapshot(window.__asrCurrent),
++  renderedProps: () => ({ ...window.__asrRenderedProps }),
++  requestCount: () => requests.length,
++  request(index) {
++    const request = requests[index];
++    return request ? {
++      purpose: request.input.purpose,
++      durationMs: request.input.durationMs,
++      key: request.input.idempotencyKey,
++      aborted: request.input.signal.aborted,
++      abortReason: request.input.signal.reason ?? null,
++    } : null;
++  },
++  resolve(index, transcript) {
++    const request = requests[index];
++    request.resolve({
++      requestId: "request-" + index,
++      item: {
++        transcript,
++        language: "zh-CN",
++        durationMs: request.input.durationMs,
++        source: "server_asr",
++        replayed: false,
++      },
++    });
++  },
++  callbacks: () => [...callbacks],
++  pendingTimers: () => timers.size,
++  scheduledDelays: () => [...scheduledDelays],
++  allTracksStopped: () => tracks.length > 0 && tracks.every((track) => track.stopCalls === 1),
++  recorderCount: () => recorders.length,
++};
++render();
++`, "utf8");
++  vite = await createServer({
++    root: projectRoot,
++    configFile: path.join(projectRoot, "vite.config.mjs"),
++    logLevel: "silent",
++    plugins: [{
++      name: "asr-hook-browser-harness",
++      enforce: "pre",
++      configureServer(server) {
++        server.middlewares.use((request, response, next) => {
++          if (request.url !== "/__asr-hook-test") {
++            next();
++            return;
++          }
++          response.statusCode = 200;
++          response.setHeader("Content-Type", "text/html; charset=utf-8");
++          response.end(
++            `<div id="root"></div><script type="module" src="/@fs${browserHarnessPath}"></script>`,
++          );
++        });
++      },
++    }],
++    server: {
++      host: "127.0.0.1",
++      port: 0,
++      strictPort: false,
++      fs: { allow: [projectRoot, os.tmpdir()] },
++    },
++    appType: "custom",
++  });
++  await vite.listen();
++  const address = vite.httpServer.address();
++  viteBaseUrl = `http://127.0.0.1:${address.port}`;
++  ({
++    VoiceCaptureControlView,
++    beginTouchCapture,
++    cancelTouchGesture,
++    finishTouchCapture,
++    finishTouchGesture,
++    consumeSyntheticClickToken,
++    moveTouchGesture,
++    releaseTouchGesture,
++    runPrimaryKeyboardAction,
++    updateSyntheticClickToken,
++  } = await vite.ssrLoadModule("/src/components/audio/VoiceCaptureControl.jsx"));
++});
++
++after(async () => {
++  await vite?.close();
++  await rm(browserHarnessPath, { force: true });
++});
++
++function view(overrides = {}) {
++  return {
++    status: "idle",
++    statusText: "可以开始录音",
++    secondaryText: "录音完成后先回填文字草稿",
++    supported: true,
++    disabled: false,
++    recordingGeneration: 0,
++    sameBlobRetryCount: 0,
++    retryCountdownSeconds: 0,
++    rateLimitCountdownSeconds: 0,
++    startCapture() {},
++    stopCapture() {},
++    cancelCapture() {},
++    retry() {},
++    reset() {},
++    ...overrides,
++  };
++}
++
++describe("VoiceCaptureControl real JSX transform and rendered contract", () => {
++  it("loads through the existing Vite/React transform instead of source-only matching", () => {
++    assert.equal(typeof VoiceCaptureControlView, "function");
++    const html = renderToStaticMarkup(React.createElement(VoiceCaptureControlView, {
++      transcription: view(),
++    }));
++    assert.match(html, /aria-live="polite"/);
++    assert.match(html, /aria-label="开始录音"/);
++    assert.match(html, /可以开始录音/);
++  });
++
++  it("renders the one processing state and fixed privacy copy", () => {
++    const html = renderToStaticMarkup(React.createElement(VoiceCaptureControlView, {
++      transcription: view({
++        status: "processing",
++        statusText: "正在上传并转成文字",
++        secondaryText: "音频只用于本次转写；完成后先回填草稿",
++      }),
++    }));
++    assert.match(html, /正在上传并转成文字/);
++    assert.match(html, /音频只用于本次转写；完成后先回填草稿/);
++    assert.match(html, /aria-label="取消转写"/);
++    assert.doesNotMatch(html, /正在上传<\/|正在转写<\/|上传进度/);
++  });
++
++  it("offers one explicit manual retry only in retryable_error", () => {
++    const retryable = renderToStaticMarkup(React.createElement(VoiceCaptureControlView, {
++      transcription: view({
++        status: "retryable_error",
++        statusText: "转写未完成",
++        secondaryText: "可人工重试一次或改用文本",
++        sameBlobRetryCount: 0,
++      }),
++    }));
++    assert.match(retryable, />人工重试一次</);
++
++    const rateLimited = renderToStaticMarkup(React.createElement(VoiceCaptureControlView, {
++      transcription: view({
++        status: "rate_limited",
++        statusText: "请求过于频繁",
++        secondaryText: "等待后重新录音",
++        rateLimitCountdownSeconds: 300,
++      }),
++    }));
++    assert.match(rateLimited, /300 秒/);
++    assert.doesNotMatch(rateLimited, /人工重试当前录音|人工重试一次/);
++  });
++
++  it("renders Web Speech as an explicit temporary fallback without claiming server readiness", () => {
++    const html = renderToStaticMarkup(React.createElement(VoiceCaptureControlView, {
++      transcription: view({
++        supported: false,
++        status: "error",
++        browserInterimAvailable: true,
++        browserInterimActive: false,
++        startBrowserInterim() {},
++        stopBrowserInterim() {},
++      }),
++    }));
++    assert.match(html, />浏览器临时识别</);
++    assert.match(html, /disabled=""[^>]*>.*开始录音|<button[^>]*disabled=""/s);
++    assert.doesNotMatch(html, /已完成服务端转写/);
++  });
++
++  it("publishes dynamic recording and cancel labels without color-only status", () => {
++    const recording = renderToStaticMarkup(React.createElement(VoiceCaptureControlView, {
++      transcription: view({
++        status: "recording",
++        statusText: "正在录音",
++        secondaryText: "松开结束；最长 2 分钟",
++      }),
++    }));
++    assert.match(recording, /aria-label="停止录音"/);
++    assert.match(recording, />停止录音</);
++    assert.match(recording, /role="status"/);
++    assert.match(recording, /min-width:44px;min-height:44px/);
++  });
++
++  it("finishes touch capture by live controller state even when render-time permission state is stale", () => {
++    const calls = [];
++    assert.equal(finishTouchCapture({
++      stopCapture() { calls.push("stop"); return false; },
++      cancelCapture(reason) { calls.push(`cancel:${reason}`); return true; },
++    }), true);
++    assert.deepEqual(calls, ["stop", "cancel:pointer_up_before_permission"]);
++
++    calls.length = 0;
++    assert.equal(finishTouchCapture({
++      stopCapture() { calls.push("stop"); return true; },
++      cancelCapture(reason) { calls.push(`cancel:${reason}`); return true; },
++    }), true);
++    assert.deepEqual(calls, ["stop"]);
++  });
++
++  it("binds touch completion only to a pointer that started recording and cancels busy primary action", () => {
++    const busyCalls = [];
++    const busyGesture = { pointerId: null, startedCapture: false };
++    assert.equal(beginTouchCapture(view({
++      status: "processing",
++      startCapture() { busyCalls.push("start"); },
++      stopCapture() { busyCalls.push("stop"); return true; },
++      cancelCapture(reason) { busyCalls.push(`cancel:${reason}`); return true; },
++    }), busyGesture, 7), true);
++    assert.deepEqual(busyCalls, ["cancel:pointer_busy_cancel"]);
++    assert.deepEqual(busyGesture, { pointerId: 7, startedCapture: false });
++    assert.equal(finishTouchGesture({
++      stopCapture() { busyCalls.push("stop"); return true; },
++      cancelCapture(reason) { busyCalls.push(`cancel:${reason}`); return true; },
++    }, busyGesture, 7), false);
++    assert.deepEqual(busyCalls, ["cancel:pointer_busy_cancel"]);
++
++    const holdCalls = [];
++    const holdGesture = { pointerId: null, startedCapture: false };
++    assert.equal(beginTouchCapture(view({
++      startCapture() { holdCalls.push("start"); },
++    }), holdGesture, 8), true);
++    assert.deepEqual(holdCalls, ["start"]);
++    assert.equal(finishTouchGesture({
++      stopCapture() { holdCalls.push("stop"); return true; },
++      cancelCapture(reason) { holdCalls.push(`cancel:${reason}`); return true; },
++    }, holdGesture, 8), true);
++    assert.deepEqual(holdCalls, ["start", "stop"]);
++
++    const cancelledGesture = { pointerId: 9, startedCapture: true };
++    assert.equal(cancelTouchGesture({
++      cancelCapture(reason) { holdCalls.push(`cancel:${reason}`); return true; },
++    }, cancelledGesture, 9), true);
++    assert.deepEqual(holdCalls, ["start", "stop", "cancel:pointer_cancel"]);
++  });
++
++  it("ignores repeated keyboard activation and scopes synthetic-click suppression to the touch gesture", () => {
++    const actions = [];
++    const repeated = {
++      key: " ",
++      repeat: true,
++      preventDefault() { actions.push("prevent-repeat"); },
++    };
++    assert.equal(runPrimaryKeyboardAction(
++      repeated,
++      { cancelCapture(reason) { actions.push(`cancel:${reason}`); } },
++      { action() { actions.push("primary"); } },
++      false,
++    ), false);
++    assert.deepEqual(actions, ["prevent-repeat"]);
++
++    const firstPress = {
++      key: "Enter",
++      repeat: false,
++      preventDefault() { actions.push("prevent-enter"); },
++    };
++    assert.equal(runPrimaryKeyboardAction(
++      firstPress,
++      { cancelCapture(reason) { actions.push(`cancel:${reason}`); } },
++      { action() { actions.push("primary"); } },
++      false,
++    ), true);
++    assert.deepEqual(actions, ["prevent-repeat", "prevent-enter", "primary"]);
++
++    const token = { current: null };
++    assert.equal(updateSyntheticClickToken(token, { pointerType: "touch", pointerId: 31 }), true);
++    // pointercancel/leave intentionally leave the token until either the
++    // synthesized click or a new real mouse pointerdown resolves ownership.
++    assert.equal(consumeSyntheticClickToken(token), true);
++    assert.equal(consumeSyntheticClickToken(token), false);
++
++    assert.equal(updateSyntheticClickToken(token, { pointerType: "pen", pointerId: 32 }), true);
++    assert.deepEqual(token.current, { pointerType: "pen", pointerId: 32 });
++    assert.equal(updateSyntheticClickToken(token, { pointerType: "mouse", pointerId: 1 }), false);
++    assert.equal(token.current, null);
++    assert.equal(consumeSyntheticClickToken(token), false);
++  });
++
++  it("cancels a captured touch when it leaves bounds and never uploads on its later pointerup", () => {
++    const calls = [];
++    const transcription = {
++      stopCapture() { calls.push("stop"); return true; },
++      cancelCapture(reason) { calls.push(`cancel:${reason}`); return true; },
++    };
++    const target = {
++      getBoundingClientRect() {
++        return { left: 10, right: 54, top: 20, bottom: 64 };
++      },
++    };
++    const gesture = { pointerId: 41, startedCapture: true };
++    assert.equal(moveTouchGesture(transcription, gesture, {
++      pointerType: "touch",
++      pointerId: 41,
++      clientX: 80,
++      clientY: 40,
++      currentTarget: target,
++    }), true);
++    assert.deepEqual(calls, ["cancel:pointer_leave"]);
++    assert.deepEqual(gesture, { pointerId: null, startedCapture: false });
++    assert.equal(releaseTouchGesture(transcription, gesture, {
++      pointerType: "touch",
++      pointerId: 41,
++      clientX: 80,
++      clientY: 40,
++      currentTarget: target,
++    }), false);
++    assert.deepEqual(calls, ["cancel:pointer_leave"]);
++
++    const noMoveGesture = { pointerId: 42, startedCapture: true };
++    assert.equal(releaseTouchGesture(transcription, noMoveGesture, {
++      pointerType: "pen",
++      pointerId: 42,
++      clientX: 80,
++      clientY: 40,
++      currentTarget: target,
++    }), true);
++    assert.deepEqual(calls, ["cancel:pointer_leave", "cancel:pointer_leave"]);
++
++    const insideGesture = { pointerId: 43, startedCapture: true };
++    assert.equal(releaseTouchGesture(transcription, insideGesture, {
++      pointerType: "touch",
++      pointerId: 43,
++      clientX: 30,
++      clientY: 40,
++      currentTarget: target,
++    }), true);
++    assert.deepEqual(calls, ["cancel:pointer_leave", "cancel:pointer_leave", "stop"]);
++  });
++
++  it("fences purpose changes, delegates same-purpose success to the latest callback, and cancels disabled work under StrictMode", async () => {
++    const browser = await webkit.launch({ headless: true });
++    const page = await browser.newPage();
++    const browserDiagnostics = [];
++    page.on("console", (message) => browserDiagnostics.push(`console:${message.type()}:${message.text()}`));
++    page.on("pageerror", (error) => browserDiagnostics.push(`pageerror:${error.message}`));
++    page.on("requestfailed", (request) => browserDiagnostics.push(
++      `requestfailed:${request.url()}:${request.failure()?.errorText ?? "unknown"}`,
++    ));
++    try {
++      await page.goto(`${viteBaseUrl}/__asr-hook-test`, { waitUntil: "domcontentloaded" });
++      await page.waitForFunction(
++        () => window.__asrTest?.snapshot?.().status === "idle",
++        null,
++        { timeout: 10_000 },
++      ).catch((error) => {
++        throw new Error(`${error.message}\n${browserDiagnostics.join("\n")}`);
++      });
++
++      assert.equal(await page.evaluate(() => window.__asrTest.start()), true);
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "recording");
++      await page.evaluate(() => {
++        window.__asrTest.advance(500);
++        window.__asrTest.stop();
++      });
++      await page.waitForFunction(() => window.__asrTest.requestCount() === 1);
++      await page.evaluate(() => window.__asrTest.render({ callbackLabel: "quick-latest" }));
++      await page.waitForFunction(() => window.__asrTest.renderedProps().callbackLabel === "quick-latest");
++      await page.evaluate(() => window.__asrTest.resolve(0, "同用途最新回调"));
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "succeeded");
++      assert.deepEqual(
++        await page.evaluate(() => window.__asrTest.callbacks()),
++        ["quick-latest:同用途最新回调"],
++      );
++
++      assert.equal(await page.evaluate(() => window.__asrTest.start()), true);
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "recording");
++      await page.evaluate(() => {
++        window.__asrTest.advance(500);
++        window.__asrTest.stop();
++      });
++      await page.waitForFunction(() => window.__asrTest.requestCount() === 2);
++      await page.evaluate(() => window.__asrTest.render({
++        purpose: "assistant_chat",
++        callbackLabel: "assistant-latest",
++      }));
++      await page.waitForFunction(() => {
++        const snapshot = window.__asrTest.snapshot();
++        return snapshot.purpose === "assistant_chat" && snapshot.status === "idle";
++      });
++      assert.deepEqual(await page.evaluate(() => window.__asrTest.request(1)), {
++        purpose: "quick_record",
++        durationMs: 500,
++        key: "asr:00000000-0000-4000-8000-000000000002",
++        aborted: true,
++        abortReason: "unmount",
++      });
++      await page.evaluate(() => window.__asrTest.resolve(1, "旧用途迟到结果"));
++      await page.waitForTimeout(20);
++      assert.deepEqual(
++        await page.evaluate(() => window.__asrTest.callbacks()),
++        ["quick-latest:同用途最新回调"],
++      );
++      assert.deepEqual(await page.evaluate(() => window.__asrTest.snapshot()), {
++        status: "idle",
++        purpose: "assistant_chat",
++        recordingGeneration: 0,
++        errorCode: null,
++      });
++
++      assert.equal(await page.evaluate(() => window.__asrTest.start()), true);
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "recording");
++      const delays = await page.evaluate(() => window.__asrTest.scheduledDelays());
++      assert.equal(delays.at(-1), 60_000);
++      await page.evaluate(() => window.__asrTest.render({ disabled: true }));
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "cancelled");
++      assert.equal(await page.evaluate(() => window.__asrTest.pendingTimers()), 0);
++      assert.equal(await page.evaluate(() => window.__asrTest.allTracksStopped()), true);
++
++      await page.evaluate(() => window.__asrTest.render({ disabled: false }));
++      await page.waitForFunction(() => window.__asrTest.renderedProps().disabled === false);
++      assert.equal(await page.evaluate(() => window.__asrTest.start()), true);
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "recording");
++      await page.evaluate(() => {
++        window.__asrTest.advance(500);
++        window.__asrTest.stop();
++      });
++      await page.waitForFunction(() => window.__asrTest.requestCount() === 3);
++      const processingRequest = await page.evaluate(() => window.__asrTest.request(2));
++      assert.equal(processingRequest.purpose, "assistant_chat");
++      assert.equal(processingRequest.durationMs, 500);
++      assert.notEqual(processingRequest.key, "asr:00000000-0000-4000-8000-000000000002");
++      await page.evaluate(() => window.__asrTest.render({ disabled: true }));
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "cancelled");
++      assert.equal((await page.evaluate(() => window.__asrTest.request(2))).aborted, true);
++      assert.equal(await page.evaluate(() => window.__asrTest.pendingTimers()), 0);
++
++      await page.evaluate(() => window.__asrTest.render({ disabled: false }));
++      await page.waitForFunction(() => window.__asrTest.renderedProps().disabled === false);
++      assert.equal(await page.evaluate(() => window.__asrTest.start()), true);
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "recording");
++
++      await page.evaluate(() => window.__asrTest.render({ active: false }));
++      await page.waitForFunction(() => (
++        window.__asrTest.renderedProps().active === false
++        && window.__asrTest.snapshot().status === "cancelled"
++      ));
++      assert.equal(await page.evaluate(() => window.__asrTest.start()), false);
++      assert.equal(await page.evaluate(() => window.__asrTest.pendingTimers()), 0);
++      await page.evaluate(() => window.__asrTest.render({ active: true }));
++      await page.waitForFunction(() => window.__asrTest.renderedProps().active === true);
++      assert.equal(await page.evaluate(() => window.__asrTest.start()), true);
++      await page.waitForFunction(() => window.__asrTest.snapshot().status === "recording");
++
++      await page.evaluate(() => {
++        window.__asrTest.advance(500);
++        window.__asrTest.stop();
++      });
++      await page.waitForFunction(() => window.__asrTest.requestCount() === 4);
++      await page.evaluate(() => window.__asrTest.render({
++        sessionEpoch: 1,
++        resolveOnCommitIndex: 3,
++      }));
++      await page.waitForFunction(() => (
++        window.__asrTest.renderedProps().sessionEpoch === 1
++        && window.__asrTest.snapshot().status === "cancelled"
++      ));
++      assert.deepEqual(await page.evaluate(() => window.__asrTest.callbacks()), [
++        "quick-latest:同用途最新回调",
++      ]);
++      const logoutRequest = await page.evaluate(() => window.__asrTest.request(3));
++      assert.equal(logoutRequest.aborted, true);
++      assert.equal(logoutRequest.abortReason, "logout");
++      assert.equal(await page.evaluate(() => window.__asrTest.pendingTimers()), 0);
++    } finally {
++      await page.close();
++      await browser.close();
++    }
++  });
++
++  it("contains no playback, object URL, persistence, XHR, download, or audio-history path", async () => {
++    const sources = `${await readFile(componentPath, "utf8")}\n${await readFile(hookPath, "utf8")}`;
++    assert.doesNotMatch(sources, /<audio\b|createObjectURL|XMLHttpRequest|indexedDB|caches\.open|localStorage|sessionStorage/iu);
++    assert.doesNotMatch(sources, /录音已保存|查看录音|播放录音|下载录音|历史录音/u);
++    assert.doesNotMatch(sources, /uploading|transcribing/u);
++  });
++});
+diff --git a/outputs/product-design-prototype/src/api/salesWorkbenchApi.js b/outputs/product-design-prototype/src/api/salesWorkbenchApi.js
+index 139243941ee38fca75546fcb43ee179d8b02bcd3..a59ebf81647c6695f33f04c09be150926f305ab9 100644
+--- a/outputs/product-design-prototype/src/api/salesWorkbenchApi.js
++++ b/outputs/product-design-prototype/src/api/salesWorkbenchApi.js
+@@ -2,6 +2,13 @@ import {
+   assertApiCollection,
+   assertApiEntity,
+ } from "../../../../shared/salesWorkbenchApiContract.mjs";
++import {
++  MAX_AUDIO_BYTES,
++  MIN_RECORDING_DURATION_MS,
++  getTranscriptionPurposeLimits,
++  normalizeRecorderMimeType,
++} from "../audio/recordingCapabilities.js";
++import { adaptTranscriptionError } from "../audio/serverTranscription.js";
+ 
+ export function resolveApiBaseUrl(env = {}, runtime = globalThis) {
+   return String(env.VITE_API_BASE_URL ?? runtime?.__SENTELLIGENT_API_BASE_URL__ ?? "").trim().replace(/\/+$/, "");
+@@ -378,9 +385,93 @@ function toApiError(response, body) {
+   error.currentVersion = details?.fields?.currentVersion;
+   error.requestId = details?.requestId;
+   error.body = body;
++  error.retryAfterHeader = typeof response?.headers?.get === "function"
++    ? response.headers.get("retry-after")
++    : null;
+   return error;
+ }
+ 
++export function parseRetryAfterSeconds(value) {
++  if (typeof value !== "string" || !/^\d{1,3}$/u.test(value)) return null;
++  const seconds = Number(value);
++  return Number.isInteger(seconds) && seconds >= 1 && seconds <= 300 ? seconds : null;
++}
++
++export function assertTranscriptionResponse(response, purpose) {
++  const limits = getTranscriptionPurposeLimits(purpose);
++  if (!response || typeof response !== "object" || Array.isArray(response)) {
++    throw new TypeError("transcription response: expected object");
++  }
++  if (typeof response.requestId !== "string" || !response.requestId.trim()) {
++    throw new TypeError("transcription response.requestId: expected non-empty string");
++  }
++  const item = response.item;
++  if (!item || typeof item !== "object" || Array.isArray(item)) {
++    throw new TypeError("transcription response.item: expected object");
++  }
++  if (
++    typeof item.transcript !== "string"
++    || !item.transcript
++    || item.transcript.length > limits.maxTranscriptCharacters
++    || item.transcript !== item.transcript.normalize("NFC")
++    || item.transcript.trim() !== item.transcript
++    || /[\u0000-\u0008\u000B-\u001F]/u.test(item.transcript)
++  ) {
++    throw new TypeError("transcription response.item.transcript: invalid text length");
++  }
++  if (item.language !== "zh-CN") {
++    throw new TypeError("transcription response.item.language: expected zh-CN");
++  }
++  if (
++    !Number.isInteger(item.durationMs)
++    || item.durationMs < MIN_RECORDING_DURATION_MS
++    || item.durationMs > limits.maxDurationMs
++  ) {
++    throw new TypeError("transcription response.item.durationMs: outside purpose limit");
++  }
++  if (item.source !== "server_asr") {
++    throw new TypeError("transcription response.item.source: expected server_asr");
++  }
++  if (typeof item.replayed !== "boolean") {
++    throw new TypeError("transcription response.item.replayed: expected boolean");
++  }
++  // Return a newly constructed capability object. Provider/debug fields from
++  // a successful upstream payload never cross the API-client boundary.
++  return {
++    requestId: response.requestId,
++    item: {
++      transcript: item.transcript,
++      language: item.language,
++      durationMs: item.durationMs,
++      source: item.source,
++      replayed: item.replayed,
++    },
++  };
++}
++
++function assertTranscriptionRequest({ blob, purpose, durationMs, idempotencyKey }) {
++  const limits = getTranscriptionPurposeLimits(purpose);
++  if (!blob || typeof blob.size !== "number" || typeof blob.slice !== "function") {
++    throw new TypeError("transcription blob: expected raw Blob");
++  }
++  if (blob.size <= 0 || blob.size > MAX_AUDIO_BYTES) {
++    throw new TypeError("transcription blob: expected 1..8388608 bytes");
++  }
++  if (!normalizeRecorderMimeType(blob.type)) {
++    throw new TypeError("transcription blob.type: unsupported audio media type");
++  }
++  if (!Number.isInteger(durationMs) || durationMs < MIN_RECORDING_DURATION_MS || durationMs > limits.maxDurationMs) {
++    throw new TypeError("transcription durationMs: outside purpose limit");
++  }
++  if (
++    typeof idempotencyKey !== "string"
++    || idempotencyKey.trim() !== idempotencyKey
++    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u.test(idempotencyKey)
++  ) {
++    throw new TypeError("transcription Idempotency-Key: invalid");
++  }
++}
++
+ export async function requestJson(fetchImpl, url, options = {}, csrfToken = "") {
+   const response = await fetchImpl(url, {
+     ...options,
+@@ -522,6 +613,60 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
+     isEnabled: Boolean(root),
+     setSession,
+ 
++    async transcribeAudio({
++      blob,
++      purpose,
++      durationMs,
++      idempotencyKey,
++      signal,
++    }) {
++      assertTranscriptionRequest({ blob, purpose, durationMs, idempotencyKey });
++      let response;
++      try {
++        response = await requestApi(
++          `/api/asr/transcriptions?purpose=${encodeURIComponent(purpose)}`,
++          {
++            method: "POST",
++            headers: {
++              "Content-Type": normalizeRecorderMimeType(blob.type),
++              "Idempotency-Key": idempotencyKey,
++              "X-Audio-Duration-Ms": String(durationMs),
++              "X-ASR-Language": "zh-CN",
++            },
++            body: blob,
++            signal,
++          },
++        );
++      } catch (error) {
++        const code = signal?.aborted
++          ? "ASR_ABORTED"
++          : typeof error?.code === "string"
++            ? error.code
++            : Number.isInteger(error?.status)
++              ? "ASR_UNKNOWN_ERROR"
++              : "ASR_NETWORK_ERROR";
++        throw adaptTranscriptionError({
++          code,
++          name: signal?.aborted ? "AbortError" : error?.name,
++          status: error?.status,
++          requestId: error?.requestId,
++          retryAfterSeconds: parseRetryAfterSeconds(error?.retryAfterHeader),
++        });
++      }
++      try {
++        return assertTranscriptionResponse(response, purpose);
++      } catch {
++        // A 2xx response with a malformed provider-shaped payload is a
++        // transient provider contract failure. Keep the error sanitized and
++        // eligible for the one same-Blob retry; never expose response body.
++        throw adaptTranscriptionError({
++          code: "ASR_PROVIDER_BAD_RESPONSE",
++          status: 502,
++          requestId: response?.requestId,
++        });
++      }
++    },
++
+     async login({ account, password }) {
+       const requestId = ++loginRequestId;
+       restoreRequestId += 1;
+diff --git a/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js b/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
+index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a4ff52a5d 100644
+--- a/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
++++ b/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
+@@ -571,6 +571,298 @@ it("rejects invoice candidate responses without a concurrency version", async ()
+   );
+ });
+ 
++describe("ASR transcription API client", () => {
++  const sampleSuccess = (overrides = {}) => ({
++    requestId: "asr-request-1",
++    item: {
++      transcript: "服务端转写文字",
++      language: "zh-CN",
++      durationMs: 860,
++      source: "server_asr",
++      replayed: false,
++      ...overrides,
++    },
++  });
++
++  it("parses Retry-After only as a single decimal integer in the inclusive 1..300 range", () => {
++    for (const [input, expected] of [["1", 1], ["017", 17], ["300", 300]]) {
++      assert.equal(salesWorkbenchApiModule.parseRetryAfterSeconds(input), expected);
++    }
++    for (const input of [null, undefined, "", "0", "-1", "301", "1.5", "Wed, 30 Aug 2026 10:00:00 GMT", "1, 2", " 1 ", "+1"]) {
++      assert.equal(salesWorkbenchApiModule.parseRetryAfterSeconds(input), null, String(input));
++    }
++  });
++
++  it("posts the raw Blob with Cookie, CSRF, fixed language, duration, key, and AbortSignal", async () => {
++    const calls = [];
++    const blob = new Blob(["synthetic-audio"], { type: "audio/webm;codecs=opus" });
++    const controller = new AbortController();
++    const api = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      fetchImpl: async (url, options) => {
++        calls.push({ url, options });
++        return jsonResponse(sampleSuccess());
++      },
++    });
++    api.setSession({ csrfToken: "fixture-csrf-token" });
++
++    const result = await api.transcribeAudio({
++      blob,
++      purpose: "quick_record",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++      signal: controller.signal,
++    });
++
++    assert.deepEqual(result, sampleSuccess());
++    assert.equal(calls.length, 1);
++    assert.equal(calls[0].url, "https://example.test/api/asr/transcriptions?purpose=quick_record");
++    assert.equal(calls[0].options.method, "POST");
++    assert.equal(calls[0].options.credentials, "include");
++    assert.strictEqual(calls[0].options.body, blob);
++    assert.strictEqual(calls[0].options.signal, controller.signal);
++    assert.equal(headerValue(calls[0].options, "Content-Type"), "audio/webm;codecs=opus");
++    assert.equal(headerValue(calls[0].options, "Idempotency-Key"), "asr:12345678-1234-4234-9234-123456789abc");
++    assert.equal(headerValue(calls[0].options, "X-Audio-Duration-Ms"), "860");
++    assert.equal(headerValue(calls[0].options, "X-ASR-Language"), "zh-CN");
++    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "fixture-csrf-token");
++    assert.equal(headerValue(calls[0].options, "Authorization"), undefined);
++  });
++
++  it("accepts replayed success and enforces the response schema and purpose text limit", async () => {
++    const validApi = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      fetchImpl: async () => jsonResponse(sampleSuccess({ replayed: true })),
++    });
++    validApi.setSession({ csrfToken: "csrf" });
++    assert.equal((await validApi.transcribeAudio({
++      blob: new Blob(["a"], { type: "audio/mp4" }),
++      purpose: "assistant_chat",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++    })).item.replayed, true);
++
++    const allowedControlBoundary = "第一行\n\t第二行\u007F\u0085";
++    const boundaryApi = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      fetchImpl: async () => jsonResponse(sampleSuccess({ transcript: allowedControlBoundary })),
++    });
++    boundaryApi.setSession({ csrfToken: "csrf" });
++    assert.equal((await boundaryApi.transcribeAudio({
++      blob: new Blob(["a"], { type: "audio/mp4" }),
++      purpose: "assistant_chat",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++    })).item.transcript, allowedControlBoundary);
++
++    for (const invalidResponse of [
++      { item: sampleSuccess().item },
++      sampleSuccess({ source: "browser_speech" }),
++      sampleSuccess({ language: "en" }),
++      sampleSuccess({ replayed: "false" }),
++      sampleSuccess({ transcript: "x".repeat(2_001) }),
++      sampleSuccess({ transcript: "" }),
++      sampleSuccess({ transcript: "含\u0000控制字符" }),
++      sampleSuccess({ transcript: "含\r裸回车" }),
++    ]) {
++      const api = createSalesWorkbenchApi({
++        baseUrl: "https://example.test",
++        fetchImpl: async () => jsonResponse(invalidResponse),
++      });
++      api.setSession({ csrfToken: "csrf" });
++      await assert.rejects(() => api.transcribeAudio({
++        blob: new Blob(["a"], { type: "audio/mp4" }),
++        purpose: "assistant_chat",
++        durationMs: 860,
++        idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++      }), (error) => {
++        assert.equal(error.code, "ASR_PROVIDER_BAD_RESPONSE");
++        assert.equal(error.lifecycle, "same_blob_retryable");
++        assert.equal(Object.hasOwn(error, "body"), false);
++        assert.doesNotMatch(error.message, /provider|secret|nested/i);
++        return true;
++      });
++    }
++
++    const sensitiveFixture = "must-not-cross-client-contract";
++    const sanitizedApi = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      fetchImpl: async () => jsonResponse({
++        ...sampleSuccess({
++          replayed: true,
++          providerRaw: sensitiveFixture,
++          model: sensitiveFixture,
++          headers: { authorization: sensitiveFixture },
++        }),
++        providerResponse: sensitiveFixture,
++        internalPath: sensitiveFixture,
++      }),
++    });
++    sanitizedApi.setSession({ csrfToken: "csrf" });
++    const sanitized = await sanitizedApi.transcribeAudio({
++      blob: new Blob(["a"], { type: "audio/mp4" }),
++      purpose: "assistant_chat",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++    });
++    assert.deepEqual(sanitized, sampleSuccess({ replayed: true }));
++    assert.doesNotMatch(JSON.stringify(sanitized), /must-not-cross-client-contract/u);
++  });
++
++  it("publishes the exact lifecycle whitelist and bounded Retry-After without leaking error bodies", async () => {
++    const cases = [
++      [409, "ASR_IN_PROGRESS", "same_blob_retryable", 1],
++      [429, "ASR_CAPACITY_EXCEEDED", "same_blob_retryable", 2],
++      [502, "ASR_PROVIDER_BAD_RESPONSE", "same_blob_retryable", null],
++      [504, "ASR_TIMEOUT", "same_blob_retryable", 300],
++      [429, "ASR_RATE_LIMITED", "rate_limited", null],
++      [400, "INVALID_IDEMPOTENCY_KEY", "release_and_rerecord", null],
++      [422, "ASR_TRANSCRIPT_EMPTY", "release_and_rerecord", null],
++      [409, "IDEMPOTENCY_CONFLICT", "release_and_rerecord", null],
++      [503, "ASR_NOT_CONFIGURED", "release_and_rerecord", null],
++    ];
++    for (const [status, code, lifecycle, retryAfterSeconds] of cases) {
++      const api = createSalesWorkbenchApi({
++        baseUrl: "https://example.test",
++        fetchImpl: async () => jsonResponse({
++          error: { code, message: "sensitive provider detail", requestId: "request-error" },
++        }, status, { "Retry-After": retryAfterSeconds ?? "invalid" }),
++      });
++      api.setSession({ csrfToken: "csrf" });
++      await assert.rejects(
++        () => api.transcribeAudio({
++          blob: new Blob(["a"], { type: "audio/webm" }),
++          purpose: "quick_record",
++          durationMs: 860,
++          idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++        }),
++        (error) => {
++          assert.equal(error.code, code);
++          assert.equal(error.lifecycle, lifecycle);
++          assert.equal(error.retryAfterSeconds, retryAfterSeconds);
++          assert.equal(Object.hasOwn(error, "body"), false);
++          assert.doesNotMatch(error.message, /sensitive provider detail/i);
++          return true;
++        },
++      );
++    }
++  });
++
++  it("maps network failure to same-Blob retry and abort to release without global unauthorized", async () => {
++    const networkApi = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      fetchImpl: async () => { throw new TypeError("Failed to fetch sensitive URL"); },
++    });
++    networkApi.setSession({ csrfToken: "csrf" });
++    await assert.rejects(
++      () => networkApi.transcribeAudio({
++        blob: new Blob(["a"], { type: "audio/webm" }),
++        purpose: "quick_record",
++        durationMs: 860,
++        idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++      }),
++      (error) => error.code === "ASR_NETWORK_ERROR" && error.lifecycle === "same_blob_retryable",
++    );
++
++    let unauthorizedCalls = 0;
++    const abortController = new AbortController();
++    abortController.abort("user_cancel");
++    const abortApi = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      onUnauthorized() { unauthorizedCalls += 1; },
++      fetchImpl: async () => {
++        const error = new DOMException("Aborted", "AbortError");
++        throw error;
++      },
++    });
++    abortApi.setSession({ csrfToken: "csrf" });
++    await assert.rejects(() => abortApi.transcribeAudio({
++      blob: new Blob(["a"], { type: "audio/webm" }),
++      purpose: "quick_record",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++      signal: abortController.signal,
++    }), (error) => error.code === "ASR_ABORTED" && error.lifecycle === "release_and_rerecord");
++    assert.equal(unauthorizedCalls, 0);
++  });
++
++  it("invalidates once for a non-aborted ASR 401 while returning only the sanitized caller error", async () => {
++    let unauthorizedCalls = 0;
++    const api = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      onUnauthorized() { unauthorizedCalls += 1; },
++      fetchImpl: async () => jsonResponse({
++        error: {
++          code: "UNAUTHORIZED",
++          message: "sensitive session/provider detail",
++          requestId: "asr-request-401",
++        },
++      }, 401),
++    });
++    api.setSession({ csrfToken: "csrf" });
++    await assert.rejects(() => api.transcribeAudio({
++      blob: new Blob(["a"], { type: "audio/webm" }),
++      purpose: "quick_record",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++    }), (error) => {
++      assert.equal(error.code, "UNAUTHORIZED");
++      assert.equal(error.lifecycle, "release_and_rerecord");
++      assert.equal(error.status, 401);
++      assert.equal(error.requestId, "asr-request-401");
++      assert.equal(Object.hasOwn(error, "body"), false);
++      assert.doesNotMatch(error.message, /sensitive|provider detail/u);
++      return true;
++    });
++    assert.equal(unauthorizedCalls, 1);
++  });
++
++  it("defaults unknown HTTP errors to release instead of misclassifying them as a network interruption", async () => {
++    const api = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      fetchImpl: async () => jsonResponse({ error: { message: "untrusted gateway body" } }, 500),
++    });
++    api.setSession({ csrfToken: "csrf" });
++    await assert.rejects(() => api.transcribeAudio({
++      blob: new Blob(["a"], { type: "audio/webm" }),
++      purpose: "quick_record",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++    }), (error) => {
++      assert.equal(error.code, "ASR_UNKNOWN_ERROR");
++      assert.equal(error.lifecycle, "release_and_rerecord");
++      assert.doesNotMatch(error.message, /gateway|untrusted/i);
++      return true;
++    });
++  });
++
++  it("rejects invalid purpose, duration, key, Blob size, and media type before fetch", async () => {
++    let fetchCalls = 0;
++    const api = createSalesWorkbenchApi({
++      baseUrl: "https://example.test",
++      fetchImpl: async () => { fetchCalls += 1; return jsonResponse(sampleSuccess()); },
++    });
++    api.setSession({ csrfToken: "csrf" });
++    const valid = {
++      blob: new Blob(["a"], { type: "audio/webm" }),
++      purpose: "quick_record",
++      durationMs: 860,
++      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
++    };
++    for (const input of [
++      { ...valid, purpose: "other" },
++      { ...valid, durationMs: 0 },
++      { ...valid, durationMs: 120_001 },
++      { ...valid, idempotencyKey: "short" },
++      { ...valid, blob: new Blob([], { type: "audio/webm" }) },
++      { ...valid, blob: new Blob(["a"], { type: "video/webm" }) },
++    ]) {
++      await assert.rejects(() => api.transcribeAudio(input), TypeError);
++    }
++    assert.equal(fetchCalls, 0);
++  });
++});
++
+ function sampleAnalysis(overrides = {}) {
+   return {
+     id: "ai-1",
+diff --git a/outputs/product-design-prototype/src/audio/recordingCapabilities.js b/outputs/product-design-prototype/src/audio/recordingCapabilities.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..afa5f32fbd22c2e716b92af326ca3a6e69700602
+--- /dev/null
++++ b/outputs/product-design-prototype/src/audio/recordingCapabilities.js
+@@ -0,0 +1,86 @@
++export const RECORDING_MIME_CANDIDATES = Object.freeze([
++  "audio/webm;codecs=opus",
++  "audio/mp4;codecs=mp4a.40.2",
++  "audio/mp4",
++  "audio/ogg;codecs=opus",
++]);
++
++export const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
++export const MIN_RECORDING_DURATION_MS = 300;
++
++export const PURPOSE_LIMITS = Object.freeze({
++  quick_record: Object.freeze({
++    maxDurationMs: 120_000,
++    maxTranscriptCharacters: 10_000,
++  }),
++  assistant_chat: Object.freeze({
++    maxDurationMs: 60_000,
++    maxTranscriptCharacters: 2_000,
++  }),
++});
++
++const ALLOWED_MEDIA_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/wav"]);
++
++export function normalizeRecorderMimeType(value) {
++  if (typeof value !== "string" || !value.trim()) return null;
++  const normalized = value
++    .trim()
++    .toLowerCase()
++    .replace(/\s*;\s*/gu, ";")
++    .replace(/\s*=\s*/gu, "=");
++  const [baseType, ...parameters] = normalized.split(";");
++  if (!ALLOWED_MEDIA_TYPES.has(baseType)) return null;
++  if (parameters.some((parameter) => !/^[a-z0-9!#$&^_.+-]+=[a-z0-9!#$&^_.+-]+$/u.test(parameter))) {
++    return null;
++  }
++  return normalized;
++}
++
++export function selectRecordingMimeType(MediaRecorderImpl = globalThis.MediaRecorder) {
++  if (typeof MediaRecorderImpl !== "function") return null;
++  if (typeof MediaRecorderImpl.isTypeSupported !== "function") return "";
++  for (const candidate of RECORDING_MIME_CANDIDATES) {
++    try {
++      if (MediaRecorderImpl.isTypeSupported(candidate)) return candidate;
++    } catch {
++      // A capability probe is advisory. A throwing probe falls through to the
++      // browser default rather than inventing support for a candidate.
++      return "";
++    }
++  }
++  return "";
++}
++
++export function getRecordingCapability(
++  mediaDevices = globalThis.navigator?.mediaDevices,
++  MediaRecorderImpl = globalThis.MediaRecorder,
++) {
++  if (typeof mediaDevices?.getUserMedia !== "function") {
++    return {
++      supported: false,
++      mimeType: null,
++      usesBrowserDefault: false,
++      reason: "get_user_media_unavailable",
++    };
++  }
++  const mimeType = selectRecordingMimeType(MediaRecorderImpl);
++  if (mimeType === null) {
++    return {
++      supported: false,
++      mimeType: null,
++      usesBrowserDefault: false,
++      reason: "media_recorder_unavailable",
++    };
++  }
++  return {
++    supported: true,
++    mimeType,
++    usesBrowserDefault: mimeType === "",
++  };
++}
++
++export function getTranscriptionPurposeLimits(purpose) {
++  const limits = PURPOSE_LIMITS[purpose];
++  if (!limits) throw new TypeError("Transcription purpose must be quick_record or assistant_chat");
++  return limits;
++}
+diff --git a/outputs/product-design-prototype/src/audio/recordingCapabilities.test.js b/outputs/product-design-prototype/src/audio/recordingCapabilities.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae5121eab5c38fb198572ae20723b9bd0965d9e6
+--- /dev/null
++++ b/outputs/product-design-prototype/src/audio/recordingCapabilities.test.js
+@@ -0,0 +1,96 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++
++import {
++  MAX_AUDIO_BYTES,
++  PURPOSE_LIMITS,
++  getRecordingCapability,
++  getTranscriptionPurposeLimits,
++  normalizeRecorderMimeType,
++  selectRecordingMimeType,
++} from "./recordingCapabilities.js";
++
++function recorderWithSupport(supported) {
++  return class FakeMediaRecorder {
++    static isTypeSupported(value) {
++      return supported.includes(value);
++    }
++  };
++}
++
++describe("recording capabilities", () => {
++  it("prefers Chromium Opus WebM before every other supported type", () => {
++    const Recorder = recorderWithSupport([
++      "audio/mp4",
++      "audio/ogg;codecs=opus",
++      "audio/webm;codecs=opus",
++    ]);
++    assert.equal(selectRecordingMimeType(Recorder), "audio/webm;codecs=opus");
++  });
++
++  it("selects Safari AAC MP4 when WebM is unavailable", () => {
++    const Recorder = recorderWithSupport(["audio/mp4;codecs=mp4a.40.2", "audio/mp4"]);
++    assert.equal(selectRecordingMimeType(Recorder), "audio/mp4;codecs=mp4a.40.2");
++  });
++
++  it("falls back to generic MP4, then Opus Ogg", () => {
++    assert.equal(selectRecordingMimeType(recorderWithSupport(["audio/mp4"])), "audio/mp4");
++    assert.equal(
++      selectRecordingMimeType(recorderWithSupport(["audio/ogg;codecs=opus"])),
++      "audio/ogg;codecs=opus",
++    );
++  });
++
++  it("uses the browser default when MediaRecorder exists but no candidate is reported", () => {
++    assert.equal(selectRecordingMimeType(recorderWithSupport([])), "");
++  });
++
++  it("reports unsupported when MediaRecorder is absent or malformed", () => {
++    assert.equal(selectRecordingMimeType(undefined), null);
++    assert.equal(selectRecordingMimeType({}), null);
++  });
++
++  it("normalizes supported recorder media types without inventing a format", () => {
++    assert.equal(
++      normalizeRecorderMimeType(" AUDIO/WEBM ; CODECS=OPUS "),
++      "audio/webm;codecs=opus",
++    );
++    assert.equal(normalizeRecorderMimeType("audio/mp4; codecs=mp4a.40.2"), "audio/mp4;codecs=mp4a.40.2");
++    assert.equal(normalizeRecorderMimeType("audio/wav"), "audio/wav");
++    assert.equal(normalizeRecorderMimeType("video/webm"), null);
++    assert.equal(normalizeRecorderMimeType(""), null);
++  });
++
++  it("requires both getUserMedia and MediaRecorder for server capture readiness", () => {
++    const Recorder = recorderWithSupport(["audio/webm;codecs=opus"]);
++    assert.deepEqual(
++      getRecordingCapability({ getUserMedia() {} }, Recorder),
++      { supported: true, mimeType: "audio/webm;codecs=opus", usesBrowserDefault: false },
++    );
++    assert.deepEqual(
++      getRecordingCapability({}, Recorder),
++      { supported: false, mimeType: null, usesBrowserDefault: false, reason: "get_user_media_unavailable" },
++    );
++    assert.deepEqual(
++      getRecordingCapability({ getUserMedia() {} }, undefined),
++      { supported: false, mimeType: null, usesBrowserDefault: false, reason: "media_recorder_unavailable" },
++    );
++  });
++
++  it("publishes frozen purpose, duration, and byte limits", () => {
++    assert.equal(MAX_AUDIO_BYTES, 8 * 1024 * 1024);
++    assert.deepEqual(PURPOSE_LIMITS.quick_record, {
++      maxDurationMs: 120_000,
++      maxTranscriptCharacters: 10_000,
++    });
++    assert.deepEqual(PURPOSE_LIMITS.assistant_chat, {
++      maxDurationMs: 60_000,
++      maxTranscriptCharacters: 2_000,
++    });
++    assert.strictEqual(getTranscriptionPurposeLimits("quick_record"), PURPOSE_LIMITS.quick_record);
++    assert.throws(
++      () => getTranscriptionPurposeLimits("unknown"),
++      /quick_record or assistant_chat/,
++    );
++  });
++});
+diff --git a/outputs/product-design-prototype/src/audio/serverTranscription.js b/outputs/product-design-prototype/src/audio/serverTranscription.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..272bf72df2854afcf1121ee910144ba1692ec4c7
+--- /dev/null
++++ b/outputs/product-design-prototype/src/audio/serverTranscription.js
+@@ -0,0 +1,173 @@
++import {
++  MAX_AUDIO_BYTES,
++  MIN_RECORDING_DURATION_MS,
++  getTranscriptionPurposeLimits,
++  normalizeRecorderMimeType,
++} from "./recordingCapabilities.js";
++
++const SAME_BLOB_RETRYABLE_CODES = new Set([
++  "ASR_NETWORK_ERROR",
++  "ASR_IN_PROGRESS",
++  "ASR_CAPACITY_EXCEEDED",
++  "ASR_PROVIDER_BAD_RESPONSE",
++  "ASR_TIMEOUT",
++]);
++
++export const TRANSCRIPTION_COPY = Object.freeze({
++  NETWORK: "网络连接中断，可人工重试一次或改用文本。",
++  IN_PROGRESS: "当前录音仍在处理中，可稍后人工重试一次。",
++  CAPACITY: "转写服务繁忙，可稍后人工重试一次或改用文本。",
++  PROVIDER: "转写服务暂未完成，可人工重试一次或改用文本。",
++  TIMEOUT: "本次转写超时，可人工重试一次或改用文本。",
++  RATE_LIMITED: "请求过于频繁，请等待后重新录音。",
++  EMPTY: "没有识别到有效文字，请重新录音或改用文本。",
++  TOO_SHORT: "录音时间过短，请至少录制 0.3 秒。",
++  TOO_LONG: "录音时间过长，请缩短后重新录音。",
++  TOO_LARGE: "录音内容过大，请缩短后重新录音。",
++  UNSUPPORTED: "当前录音格式不受支持，请更换浏览器或改用文本。",
++  PERMISSION: "麦克风访问未获允许，请检查浏览器权限或改用文本。",
++  NOT_CONFIGURED: "服务端转写尚未就绪，请改用文本。",
++  EXPIRED: "录音已超过 5 分钟，请重新录音。",
++  ABORTED: "本次录音已取消。",
++  UNKNOWN_ERROR: "转写未完成，请重新录音或改用文本。",
++});
++
++const ERROR_COPY_BY_CODE = Object.freeze({
++  ASR_NETWORK_ERROR: TRANSCRIPTION_COPY.NETWORK,
++  ASR_IN_PROGRESS: TRANSCRIPTION_COPY.IN_PROGRESS,
++  ASR_CAPACITY_EXCEEDED: TRANSCRIPTION_COPY.CAPACITY,
++  ASR_PROVIDER_BAD_RESPONSE: TRANSCRIPTION_COPY.PROVIDER,
++  ASR_TIMEOUT: TRANSCRIPTION_COPY.TIMEOUT,
++  ASR_RATE_LIMITED: TRANSCRIPTION_COPY.RATE_LIMITED,
++  ASR_TRANSCRIPT_EMPTY: TRANSCRIPTION_COPY.EMPTY,
++  AUDIO_BODY_REQUIRED: "未生成有效录音，请重新录音或改用文本。",
++  INVALID_IDEMPOTENCY_KEY: "本次录音请求无效，请重新录音。",
++  UNAUTHORIZED: "登录状态已失效，请重新登录后录音。",
++  CSRF_INVALID: "当前会话校验失败，请刷新后重新录音。",
++  ORIGIN_NOT_ALLOWED: "当前页面不能提交录音，请改用受支持入口。",
++  MACHINE_SCOPE_DENIED: "当前身份不能提交录音，请使用用户会话。",
++  AUDIO_TOO_SHORT: TRANSCRIPTION_COPY.TOO_SHORT,
++  AUDIO_TOO_LONG: TRANSCRIPTION_COPY.TOO_LONG,
++  AUDIO_TOO_LARGE: TRANSCRIPTION_COPY.TOO_LARGE,
++  AUDIO_MEDIA_TYPE_UNSUPPORTED: TRANSCRIPTION_COPY.UNSUPPORTED,
++  AUDIO_SIGNATURE_MISMATCH: TRANSCRIPTION_COPY.UNSUPPORTED,
++  AUDIO_INVALID: "录音内容无效，请重新录音或改用文本。",
++  ASR_TRANSCRIPT_TOO_LONG: "录音内容过长，请缩短后重新录音。",
++  IDEMPOTENCY_CONFLICT: "录音请求已失效，请重新录音。",
++  ASR_TRANSCODE_FAILED: "录音处理未完成，请重新录音或改用文本。",
++  ASR_NOT_CONFIGURED: TRANSCRIPTION_COPY.NOT_CONFIGURED,
++  ASR_CLEANUP_FAILED: "录音临时数据清理未确认，请重新录音或改用文本。",
++  ASR_ABORTED: TRANSCRIPTION_COPY.ABORTED,
++  BLOB_TTL_EXPIRED: TRANSCRIPTION_COPY.EXPIRED,
++});
++
++function boundedRetryAfter(value) {
++  return Number.isInteger(value) && value >= 1 && value <= 300 ? value : null;
++}
++
++function safeErrorCode(error) {
++  if (error?.name === "AbortError") return "ASR_ABORTED";
++  if (typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/u.test(error.code)) {
++    return error.code;
++  }
++  if (error instanceof TypeError || error?.name === "TypeError") return "ASR_NETWORK_ERROR";
++  return "ASR_UNKNOWN_ERROR";
++}
++
++export class TranscriptionCapabilityError extends Error {
++  constructor({ code, status, lifecycle, retryAfterSeconds, requestId, userMessage }) {
++    super(userMessage);
++    this.name = code === "ASR_ABORTED" ? "AbortError" : "TranscriptionCapabilityError";
++    this.code = code;
++    this.status = Number.isInteger(status) ? status : undefined;
++    this.lifecycle = lifecycle;
++    this.retryAfterSeconds = retryAfterSeconds;
++    this.requestId = typeof requestId === "string" ? requestId : undefined;
++    this.userMessage = userMessage;
++  }
++}
++
++export function adaptTranscriptionError(error) {
++  const code = safeErrorCode(error);
++  const lifecycle = code === "ASR_RATE_LIMITED"
++    ? "rate_limited"
++    : SAME_BLOB_RETRYABLE_CODES.has(code)
++      ? "same_blob_retryable"
++      : "release_and_rerecord";
++  return new TranscriptionCapabilityError({
++    code,
++    status: error?.status,
++    lifecycle,
++    retryAfterSeconds: boundedRetryAfter(error?.retryAfterSeconds),
++    requestId: error?.requestId,
++    userMessage: ERROR_COPY_BY_CODE[code] ?? TRANSCRIPTION_COPY.UNKNOWN_ERROR,
++  });
++}
++
++export function createTranscriptionIdempotencyKey(cryptoImpl = globalThis.crypto) {
++  if (typeof cryptoImpl?.randomUUID !== "function") {
++    throw new Error("crypto.randomUUID() is required for ASR idempotency keys");
++  }
++  return `asr:${cryptoImpl.randomUUID()}`;
++}
++
++function assertTranscriptionInput({ blob, purpose, durationMs, key }) {
++  const limits = getTranscriptionPurposeLimits(purpose);
++  if (!blob || typeof blob.size !== "number" || typeof blob.slice !== "function") {
++    throw new TypeError("A raw audio Blob is required");
++  }
++  if (blob.size <= 0 || blob.size > MAX_AUDIO_BYTES) throw new TypeError("Audio Blob size is invalid");
++  if (!normalizeRecorderMimeType(blob.type)) throw new TypeError("Audio Blob media type is invalid");
++  if (!Number.isInteger(durationMs) || durationMs < MIN_RECORDING_DURATION_MS || durationMs > limits.maxDurationMs) {
++    throw new TypeError("durationMs is outside the transcription purpose limit");
++  }
++  if (typeof key !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u.test(key)) {
++    throw new TypeError("A valid transcription idempotency key is required");
++  }
++}
++
++export async function transcribeAudio(apiClient, input) {
++  if (typeof apiClient?.transcribeAudio !== "function") {
++    throw adaptTranscriptionError({ code: "ASR_NOT_CONFIGURED" });
++  }
++  assertTranscriptionInput(input);
++  let response;
++  try {
++    response = await apiClient.transcribeAudio({
++      blob: input.blob,
++      purpose: input.purpose,
++      durationMs: input.durationMs,
++      idempotencyKey: input.key,
++      language: "zh-CN",
++      signal: input.signal,
++    });
++  } catch (error) {
++    throw adaptTranscriptionError(error);
++  }
++  const item = response?.item;
++  const limits = getTranscriptionPurposeLimits(input.purpose);
++  if (
++    !item
++    || typeof item.transcript !== "string"
++    || !item.transcript
++    || item.transcript.length > limits.maxTranscriptCharacters
++    || item.transcript !== item.transcript.normalize("NFC")
++    || item.transcript.trim() !== item.transcript
++    || /[\u0000-\u0008\u000B-\u001F]/u.test(item.transcript)
++    || item.language !== "zh-CN"
++    || !Number.isInteger(item.durationMs)
++    || item.durationMs < MIN_RECORDING_DURATION_MS
++    || item.durationMs > limits.maxDurationMs
++    || item.source !== "server_asr"
++    || typeof item.replayed !== "boolean"
++  ) {
++    throw adaptTranscriptionError({ code: "ASR_PROVIDER_BAD_RESPONSE" });
++  }
++  return {
++    transcript: item.transcript,
++    language: item.language,
++    durationMs: item.durationMs,
++    source: item.source,
++    replayed: item.replayed,
++  };
++}
+diff --git a/outputs/product-design-prototype/src/audio/serverTranscription.test.js b/outputs/product-design-prototype/src/audio/serverTranscription.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..d37e3150a988358d357282bda99d9ef3c9c0ce5e
+--- /dev/null
++++ b/outputs/product-design-prototype/src/audio/serverTranscription.test.js
+@@ -0,0 +1,201 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++
++import {
++  TRANSCRIPTION_COPY,
++  adaptTranscriptionError,
++  createTranscriptionIdempotencyKey,
++  transcribeAudio,
++} from "./serverTranscription.js";
++
++describe("server transcription capability", () => {
++  it("creates an ASR idempotency key only through crypto.randomUUID", () => {
++    const calls = [];
++    assert.equal(
++      createTranscriptionIdempotencyKey({ randomUUID() { calls.push("randomUUID"); return "12345678-1234-4234-9234-123456789abc"; } }),
++      "asr:12345678-1234-4234-9234-123456789abc",
++    );
++    assert.deepEqual(calls, ["randomUUID"]);
++    assert.throws(() => createTranscriptionIdempotencyKey({}), /crypto\.randomUUID/);
++  });
++
++  it("forwards the same raw Blob, key, purpose, duration, language, and signal", async () => {
++    const calls = [];
++    const blob = new Blob(["synthetic-audio"], { type: "audio/webm;codecs=opus" });
++    const signal = new AbortController().signal;
++    const apiClient = {
++      async transcribeAudio(input) {
++        calls.push(input);
++        return {
++          requestId: "request-1",
++          item: {
++            transcript: "服务端文字",
++            language: "zh-CN",
++            durationMs: 800,
++            source: "server_asr",
++            replayed: false,
++            providerBody: "must-not-cross-capability",
++            model: "must-not-cross-capability",
++            headers: { authorization: "must-not-cross-capability" },
++          },
++          internalPath: "must-not-cross-capability",
++        };
++      },
++    };
++
++    const result = await transcribeAudio(apiClient, {
++      blob,
++      purpose: "quick_record",
++      durationMs: 800,
++      key: "asr:12345678-1234-4234-9234-123456789abc",
++      signal,
++    });
++
++    assert.equal(result.transcript, "服务端文字");
++    assert.deepEqual(result, {
++      transcript: "服务端文字",
++      language: "zh-CN",
++      durationMs: 800,
++      source: "server_asr",
++      replayed: false,
++    });
++    assert.doesNotMatch(JSON.stringify(result), /must-not-cross-capability/u);
++    assert.equal(calls.length, 1);
++    assert.strictEqual(calls[0].blob, blob);
++    assert.equal(calls[0].purpose, "quick_record");
++    assert.equal(calls[0].durationMs, 800);
++    assert.equal(calls[0].idempotencyKey, "asr:12345678-1234-4234-9234-123456789abc");
++    assert.equal(calls[0].language, "zh-CN");
++    assert.strictEqual(calls[0].signal, signal);
++  });
++
++  it("matches the server transcript control boundary without rejecting DEL or C1", async () => {
++    const blob = new Blob(["x"], { type: "audio/webm" });
++    const input = {
++      blob,
++      purpose: "quick_record",
++      durationMs: 500,
++      key: "asr:12345678-1234-4234-9234-123456789abc",
++    };
++    const allowed = "第一行\n\t第二行\u007F\u0085";
++    assert.equal((await transcribeAudio({
++      async transcribeAudio() {
++        return {
++          requestId: "boundary",
++          item: {
++            transcript: allowed,
++            language: "zh-CN",
++            durationMs: 500,
++            source: "server_asr",
++            replayed: false,
++          },
++        };
++      },
++    }, input)).transcript, allowed);
++
++    for (const transcript of ["含\u0000控制字符", "含\r裸回车"]) {
++      await assert.rejects(() => transcribeAudio({
++        async transcribeAudio() {
++          return {
++            requestId: "invalid-boundary",
++            item: {
++              transcript,
++              language: "zh-CN",
++              durationMs: 500,
++              source: "server_asr",
++              replayed: false,
++            },
++          };
++        },
++      }, input), (error) => error.code === "ASR_PROVIDER_BAD_RESPONSE");
++    }
++  });
++
++  it("keeps only the five designed transient failures eligible for the same Blob retry", () => {
++    for (const code of [
++      "ASR_NETWORK_ERROR",
++      "ASR_IN_PROGRESS",
++      "ASR_CAPACITY_EXCEEDED",
++      "ASR_PROVIDER_BAD_RESPONSE",
++      "ASR_TIMEOUT",
++    ]) {
++      const adapted = adaptTranscriptionError({ code, message: "provider body must stay hidden" });
++      assert.equal(adapted.lifecycle, "same_blob_retryable", code);
++      assert.notEqual(adapted.userMessage, "provider body must stay hidden");
++    }
++  });
++
++  it("classifies rate limiting separately and all validation/conflict failures as release", () => {
++    const rateLimited = adaptTranscriptionError({
++      code: "ASR_RATE_LIMITED",
++      lifecycle: "rate_limited",
++      retryAfterSeconds: 17,
++    });
++    assert.equal(rateLimited.lifecycle, "rate_limited");
++    assert.equal(rateLimited.retryAfterSeconds, 17);
++
++    for (const code of [
++      "INVALID_IDEMPOTENCY_KEY",
++      "ASR_TRANSCRIPT_EMPTY",
++      "IDEMPOTENCY_CONFLICT",
++      "AUDIO_TOO_LARGE",
++      "ASR_NOT_CONFIGURED",
++      "ASR_CLEANUP_FAILED",
++      "UNKNOWN_PROVIDER_FAILURE",
++    ]) {
++      assert.equal(adaptTranscriptionError({ code }).lifecycle, "release_and_rerecord", code);
++    }
++  });
++
++  it("uses fixed Chinese copy and never reflects unknown messages or raw bodies", () => {
++    const error = adaptTranscriptionError({
++      status: 502,
++      code: "SOMETHING_NEW",
++      message: "secret upstream response",
++      body: { error: { message: "secret nested response" } },
++      retryAfterSeconds: 999,
++    });
++    assert.equal(error.userMessage, TRANSCRIPTION_COPY.UNKNOWN_ERROR);
++    assert.equal(error.retryAfterSeconds, null);
++    assert.equal(Object.hasOwn(error, "body"), false);
++    assert.doesNotMatch(JSON.stringify(error), /secret/i);
++  });
++
++  it("rejects malformed wrapper inputs before calling the API", async () => {
++    let calls = 0;
++    const apiClient = { async transcribeAudio() { calls += 1; } };
++    const blob = new Blob(["x"], { type: "audio/webm" });
++    await assert.rejects(() => transcribeAudio(apiClient, {
++      blob,
++      purpose: "other",
++      durationMs: 500,
++      key: "asr:12345678-1234-4234-9234-123456789abc",
++    }), /purpose/);
++    await assert.rejects(() => transcribeAudio(apiClient, {
++      blob,
++      purpose: "quick_record",
++      durationMs: 0,
++      key: "asr:12345678-1234-4234-9234-123456789abc",
++    }), /durationMs/);
++    assert.equal(calls, 0);
++  });
++
++  it("sanitizes a malformed 2xx wrapper response as a transient provider contract failure", async () => {
++    const blob = new Blob(["x"], { type: "audio/webm" });
++    await assert.rejects(() => transcribeAudio({
++      async transcribeAudio() {
++        return { item: { transcript: null, providerBody: "untrusted" } };
++      },
++    }, {
++      blob,
++      purpose: "quick_record",
++      durationMs: 500,
++      key: "asr:12345678-1234-4234-9234-123456789abc",
++    }), (error) => {
++      assert.equal(error.code, "ASR_PROVIDER_BAD_RESPONSE");
++      assert.equal(error.lifecycle, "same_blob_retryable");
++      assert.doesNotMatch(error.message, /untrusted|providerBody/);
++      return true;
++    });
++  });
++});
+diff --git a/outputs/product-design-prototype/src/audio/useServerTranscription.js b/outputs/product-design-prototype/src/audio/useServerTranscription.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9d461c1f2e6609a8da0bcd14490b8c45ea4f90c
+--- /dev/null
++++ b/outputs/product-design-prototype/src/audio/useServerTranscription.js
+@@ -0,0 +1,1119 @@
++import { useEffect, useMemo, useRef, useState } from "react";
++
++import {
++  MAX_AUDIO_BYTES,
++  MIN_RECORDING_DURATION_MS,
++  getRecordingCapability,
++  getTranscriptionPurposeLimits,
++  normalizeRecorderMimeType,
++} from "./recordingCapabilities.js";
++import {
++  TRANSCRIPTION_COPY,
++  adaptTranscriptionError,
++  createTranscriptionIdempotencyKey,
++  transcribeAudio,
++} from "./serverTranscription.js";
++
++export const BLOB_TTL_MS = 300_000;
++export const RATE_LIMIT_FALLBACK_SECONDS = 300;
++export const FINALIZATION_FALLBACK_MS = 1_000;
++
++const STATUS_COPY = Object.freeze({
++  idle: Object.freeze({
++    statusText: "可以开始录音",
++    secondaryText: "录音完成后先回填文字草稿",
++  }),
++  requesting_permission: Object.freeze({
++    statusText: "正在请求麦克风",
++    secondaryText: "请在浏览器中允许访问",
++  }),
++  recording: Object.freeze({
++    statusText: "正在录音",
++    secondaryText: "松开结束",
++  }),
++  preparing: Object.freeze({
++    statusText: "正在准备录音",
++    secondaryText: "即将上传并转成文字",
++  }),
++  processing: Object.freeze({
++    statusText: "正在上传并转成文字",
++    secondaryText: "音频只用于本次转写；完成后先回填草稿",
++  }),
++  succeeded: Object.freeze({
++    statusText: "已转成文字",
++    secondaryText: "请确认或修改后继续",
++  }),
++  retryable_error: Object.freeze({
++    statusText: "转写未完成",
++    secondaryText: "可人工重试一次或改用文本",
++  }),
++  rate_limited: Object.freeze({
++    statusText: "请求过于频繁",
++    secondaryText: "等待倒计时结束后重新录音",
++  }),
++  error: Object.freeze({
++    statusText: "转写未完成",
++    secondaryText: "请重新录音或改用文本",
++  }),
++  cancelled: Object.freeze({
++    statusText: "已取消录音",
++    secondaryText: "可以重新录音或改用文本",
++  }),
++});
++
++function recordingSecondaryText(purpose) {
++  return purpose === "assistant_chat" ? "松开结束；最长 1 分钟" : "松开结束；最长 2 分钟";
++}
++
++function initialSnapshot(capability, purpose, browserInterimAvailable) {
++  return Object.freeze({
++    status: "idle",
++    ...STATUS_COPY.idle,
++    supported: capability.supported,
++    capabilityReason: capability.reason ?? null,
++    browserInterimAvailable,
++    browserInterimActive: false,
++    purpose,
++    recordingGeneration: 0,
++    sameBlobRetryCount: 0,
++    retryCountdownSeconds: 0,
++    rateLimitCountdownSeconds: 0,
++    expiresAt: null,
++    hasRetainedBlob: false,
++    errorCode: null,
++    errorMessage: null,
++    interimText: "",
++  });
++}
++
++function microphoneErrorCode(error) {
++  if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
++    return "MICROPHONE_PERMISSION_DENIED";
++  }
++  if (error?.name === "NotFoundError") return "MICROPHONE_UNAVAILABLE";
++  return "MICROPHONE_CAPTURE_FAILED";
++}
++
++function microphoneErrorMessage(code) {
++  if (code === "MICROPHONE_PERMISSION_DENIED") return TRANSCRIPTION_COPY.PERMISSION;
++  if (code === "MICROPHONE_UNAVAILABLE") return "未找到可用麦克风，请改用文本。";
++  return "麦克风启动失败，请重新录音或改用文本。";
++}
++
++function stopDetachedStream(stream) {
++  try {
++    for (const track of stream?.getTracks?.() ?? []) {
++      try { track.stop(); } catch { /* best-effort cleanup of a stale permission result */ }
++    }
++  } catch {
++    // A stale stream is never attached to state; cleanup failure must not revive it.
++  }
++}
++
++export function createServerTranscriptionController(configuration = {}) {
++  let options = {
++    purpose: "quick_record",
++    mediaDevices: globalThis.navigator?.mediaDevices,
++    MediaRecorderImpl: globalThis.MediaRecorder,
++    SpeechRecognitionImpl: globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition,
++    cryptoImpl: globalThis.crypto,
++    BlobImpl: globalThis.Blob,
++    AbortControllerImpl: globalThis.AbortController,
++    now: () => Date.now(),
++    setTimeoutImpl: globalThis.setTimeout?.bind(globalThis),
++    clearTimeoutImpl: globalThis.clearTimeout?.bind(globalThis),
++    onTranscript: undefined,
++    onInterimText: undefined,
++    ...configuration,
++    purpose: configuration.purpose ?? "quick_record",
++  };
++  // A controller owns exactly one purpose. Callers that change purpose must
++  // replace the controller so an in-flight quick-record request can never be
++  // delivered into an assistant-chat context (or vice versa).
++  const controllerPurpose = options.purpose;
++  const limits = getTranscriptionPurposeLimits(controllerPurpose);
++  options.purpose = controllerPurpose;
++  let capability = getRecordingCapability(options.mediaDevices, options.MediaRecorderImpl);
++  let snapshot = initialSnapshot(
++    capability,
++    controllerPurpose,
++    typeof options.SpeechRecognitionImpl === "function",
++  );
++  let generationCounter = 0;
++  let logoutEpoch = 0;
++  let currentGeneration = null;
++  let rateLimitTimer = null;
++  let rateLimitDeadline = 0;
++  let standaloneRecognition = null;
++  let standaloneRecognitionEpoch = 0;
++  let destroyed = false;
++  let lastReleasedResourceDiagnostics = null;
++  const listeners = new Set();
++
++  function publish(status, patch = {}) {
++    const copy = STATUS_COPY[status] ?? STATUS_COPY.error;
++    snapshot = Object.freeze({
++      ...snapshot,
++      ...copy,
++      ...(status === "recording" ? { secondaryText: recordingSecondaryText(controllerPurpose) } : {}),
++      ...patch,
++      status,
++    });
++    for (const listener of listeners) listener(snapshot);
++  }
++
++  function isCurrent(generation) {
++    return Boolean(
++      generation
++      && currentGeneration === generation
++      && !generation.invalidated
++      && !generation.expired,
++    );
++  }
++
++  function inactiveReason(generation) {
++    if (options.disabled === true) return "disabled";
++    if (options.active === false) return "panel_closed";
++    if (generation && generation.logoutEpoch !== logoutEpoch) return "logout";
++    return null;
++  }
++
++  function cancelIfInactive(generation) {
++    const reason = inactiveReason(generation);
++    if (!reason) return false;
++    if (isCurrent(generation)) cancelCapture(reason);
++    return true;
++  }
++
++  function clearGenerationTimer(generation, name) {
++    const timer = generation?.[name];
++    if (timer !== null && timer !== undefined) {
++      options.clearTimeoutImpl?.(timer);
++      generation[name] = null;
++    }
++  }
++
++  function stopSpeech(generation) {
++    if (!generation?.speechRecognition || generation.speechStopped) return;
++    generation.speechStopped = true;
++    generation.speechRecognition.onresult = null;
++    generation.speechRecognition.onerror = null;
++    try { generation.speechRecognition.abort?.(); } catch { /* idempotent release */ }
++  }
++
++  function stopTracks(generation) {
++    if (!generation?.stream || generation.tracksStopped) return;
++    generation.tracksStopped = true;
++    try {
++      for (const track of generation.stream.getTracks?.() ?? []) {
++        try { track.stop(); } catch { /* continue stopping all remaining tracks */ }
++      }
++    } catch {
++      // Stream cleanup is bounded and must not overwrite the state transition.
++    }
++  }
++
++  function abortRequest(generation, reason) {
++    const controller = generation?.requestController;
++    if (!controller || controller.signal.aborted) return;
++    try { controller.abort(reason); } catch { controller.abort(); }
++  }
++
++  function detachAndStopRecorder(generation) {
++    const recorder = generation?.recorder;
++    if (!recorder || generation.recorderDisposed) return;
++    generation.recorderDisposed = true;
++    recorder.ondataavailable = null;
++    recorder.onstop = null;
++    recorder.onerror = null;
++    if (recorder.state !== "inactive") {
++      try { recorder.stop(); } catch { /* recorder already stopped */ }
++    }
++  }
++
++  function clearGenerationTimers(generation) {
++    clearGenerationTimer(generation, "maxDurationTimer");
++    clearGenerationTimer(generation, "finalizationFallbackTimer");
++    clearGenerationTimer(generation, "blobTtlTimer");
++    clearGenerationTimer(generation, "retryCountdownTimer");
++  }
++
++  function releaseBlobAndKey(generation) {
++    clearGenerationTimer(generation, "blobTtlTimer");
++    clearGenerationTimer(generation, "retryCountdownTimer");
++    generation.blob = null;
++    generation.idempotencyKey = null;
++    if (Array.isArray(generation.chunks)) generation.chunks.length = 0;
++  }
++
++  function resourceDiagnostics(generation) {
++    if (!generation) return null;
++    return Object.freeze({
++      chunkCount: Array.isArray(generation.chunks) ? generation.chunks.length : 0,
++      hasBlob: Boolean(generation.blob),
++      hasKey: Boolean(generation.idempotencyKey),
++      hasRecorder: Boolean(generation.recorder),
++      hasStream: Boolean(generation.stream),
++      hasSpeechRecognition: Boolean(generation.speechRecognition),
++      hasRequestController: Boolean(generation.requestController),
++    });
++  }
++
++  function releaseOwnedResourceReferences(generation) {
++    generation.recorder = null;
++    generation.stream = null;
++    generation.speechRecognition = null;
++    generation.requestController = null;
++    generation.blobCreatedAt = null;
++    generation.expiresAt = null;
++    lastReleasedResourceDiagnostics = resourceDiagnostics(generation);
++  }
++
++  function releaseCaptureResourceReferences(generation) {
++    generation.recorder = null;
++    generation.stream = null;
++    generation.speechRecognition = null;
++  }
++
++  function invalidateGeneration(generation, reason) {
++    if (!generation || generation.invalidated) return false;
++    generation.invalidated = true;
++    clearGenerationTimers(generation);
++    stopSpeech(generation);
++    detachAndStopRecorder(generation);
++    stopTracks(generation);
++    abortRequest(generation, reason);
++    releaseBlobAndKey(generation);
++    releaseOwnedResourceReferences(generation);
++    if (currentGeneration === generation) currentGeneration = null;
++    return true;
++  }
++
++  function finishAndRelease(generation) {
++    clearGenerationTimers(generation);
++    stopSpeech(generation);
++    detachAndStopRecorder(generation);
++    stopTracks(generation);
++    releaseBlobAndKey(generation);
++    releaseOwnedResourceReferences(generation);
++    generation.completed = true;
++    if (currentGeneration === generation) currentGeneration = null;
++  }
++
++  function publishErrorAndRelease(generation, code, message) {
++    finishAndRelease(generation);
++    publish("error", {
++      recordingGeneration: generation?.id ?? snapshot.recordingGeneration,
++      sameBlobRetryCount: generation?.sameBlobRetryCount ?? 0,
++      retryCountdownSeconds: 0,
++      expiresAt: null,
++      hasRetainedBlob: false,
++      errorCode: code,
++      errorMessage: message,
++      secondaryText: message || STATUS_COPY.error.secondaryText,
++      interimText: "",
++    });
++  }
++
++  function clearRateLimitTimer() {
++    if (rateLimitTimer !== null) {
++      options.clearTimeoutImpl?.(rateLimitTimer);
++      rateLimitTimer = null;
++    }
++    rateLimitDeadline = 0;
++  }
++
++  function stopBrowserInterim({ publishState = true } = {}) {
++    const active = standaloneRecognition;
++    if (!active) return false;
++    standaloneRecognition = null;
++    standaloneRecognitionEpoch += 1;
++    active.onresult = null;
++    active.onerror = null;
++    active.onend = null;
++    try { active.abort?.(); } catch { /* idempotent optional enhancement cleanup */ }
++    if (publishState && !destroyed) {
++      publish(snapshot.status, {
++        browserInterimActive: false,
++        interimText: "",
++      });
++    }
++    return true;
++  }
++
++  function startBrowserInterim() {
++    if (destroyed || typeof options.SpeechRecognitionImpl !== "function") return false;
++    if (options.active === false || options.disabled === true) return false;
++    if (currentGeneration || capability.supported) return false;
++    stopBrowserInterim({ publishState: false });
++    let recognition;
++    try {
++      recognition = new options.SpeechRecognitionImpl();
++    } catch {
++      return false;
++    }
++    const epoch = ++standaloneRecognitionEpoch;
++    const recognitionLogoutEpoch = logoutEpoch;
++    standaloneRecognition = recognition;
++    recognition.lang = "zh-CN";
++    recognition.continuous = true;
++    recognition.interimResults = true;
++    recognition.onresult = (event) => {
++      if (standaloneRecognition !== recognition || epoch !== standaloneRecognitionEpoch) return;
++      const reason = options.disabled === true
++        ? "disabled"
++        : options.active === false
++          ? "panel_closed"
++          : recognitionLogoutEpoch !== logoutEpoch
++            ? "logout"
++            : null;
++      if (reason) {
++        cancelCapture(reason);
++        return;
++      }
++      let text = "";
++      const startIndex = Number.isInteger(event?.resultIndex) ? event.resultIndex : 0;
++      for (let index = startIndex; index < (event?.results?.length ?? 0); index += 1) {
++        text += String(event.results[index]?.[0]?.transcript ?? "");
++      }
++      const normalized = text.trim();
++      if (!normalized) return;
++      options.onInterimText?.(normalized);
++      publish(snapshot.status, {
++        statusText: "浏览器临时识别",
++        secondaryText: "仅供临时参考；服务端最终转写当前不可用",
++        browserInterimActive: true,
++        interimText: normalized,
++      });
++    };
++    const finish = () => {
++      if (standaloneRecognition !== recognition || epoch !== standaloneRecognitionEpoch) return;
++      standaloneRecognition = null;
++      publish(snapshot.status, { browserInterimActive: false });
++    };
++    recognition.onerror = finish;
++    recognition.onend = finish;
++    try {
++      recognition.start();
++    } catch {
++      standaloneRecognition = null;
++      return false;
++    }
++    publish(snapshot.status, {
++      statusText: "浏览器临时识别",
++      secondaryText: "仅供临时参考；服务端最终转写当前不可用",
++      browserInterimActive: true,
++      interimText: "",
++    });
++    return true;
++  }
++
++  function updateRateLimitCountdown() {
++    rateLimitTimer = null;
++    if (destroyed || snapshot.status !== "rate_limited") return;
++    const remaining = Math.max(0, Math.ceil((rateLimitDeadline - options.now()) / 1_000));
++    if (remaining === 0) {
++      rateLimitDeadline = 0;
++      publish("idle", {
++        sameBlobRetryCount: 0,
++        retryCountdownSeconds: 0,
++        rateLimitCountdownSeconds: 0,
++        expiresAt: null,
++        hasRetainedBlob: false,
++        errorCode: null,
++        errorMessage: null,
++      });
++      return;
++    }
++    publish("rate_limited", { rateLimitCountdownSeconds: remaining });
++    rateLimitTimer = options.setTimeoutImpl?.(updateRateLimitCountdown, Math.min(1_000, remaining * 1_000));
++  }
++
++  function enterRateLimit(generation, error) {
++    const seconds = Number.isInteger(error.retryAfterSeconds)
++      ? error.retryAfterSeconds
++      : RATE_LIMIT_FALLBACK_SECONDS;
++    finishAndRelease(generation);
++    clearRateLimitTimer();
++    rateLimitDeadline = options.now() + seconds * 1_000;
++    publish("rate_limited", {
++      recordingGeneration: generation.id,
++      sameBlobRetryCount: generation.sameBlobRetryCount,
++      retryCountdownSeconds: 0,
++      rateLimitCountdownSeconds: seconds,
++      expiresAt: null,
++      hasRetainedBlob: false,
++      errorCode: error.code,
++      errorMessage: error.userMessage,
++      secondaryText: `${error.userMessage} ${seconds} 秒后可重新录音。`,
++      interimText: "",
++    });
++    rateLimitTimer = options.setTimeoutImpl?.(updateRateLimitCountdown, 1_000);
++  }
++
++  function updateRetryCountdown(generation) {
++    generation.retryCountdownTimer = null;
++    if (!isCurrent(generation) || snapshot.status !== "retryable_error") return;
++    const remaining = Math.max(0, Math.ceil((generation.retryAvailableAt - options.now()) / 1_000));
++    publish("retryable_error", { retryCountdownSeconds: remaining });
++    if (remaining > 0) {
++      generation.retryCountdownTimer = options.setTimeoutImpl?.(
++        () => updateRetryCountdown(generation),
++        Math.min(1_000, remaining * 1_000),
++      );
++    }
++  }
++
++  function enterRetryableError(generation, error) {
++    generation.retryAvailableAt = options.now() + (error.retryAfterSeconds ?? 0) * 1_000;
++    const remaining = Math.max(0, Math.ceil((generation.retryAvailableAt - options.now()) / 1_000));
++    publish("retryable_error", {
++      recordingGeneration: generation.id,
++      sameBlobRetryCount: generation.sameBlobRetryCount,
++      retryCountdownSeconds: remaining,
++      rateLimitCountdownSeconds: 0,
++      expiresAt: generation.expiresAt,
++      hasRetainedBlob: true,
++      errorCode: error.code,
++      errorMessage: error.userMessage,
++      interimText: "",
++    });
++    if (remaining > 0) {
++      generation.retryCountdownTimer = options.setTimeoutImpl?.(
++        () => updateRetryCountdown(generation),
++        1_000,
++      );
++    }
++  }
++
++  function expireGeneration(generation) {
++    if (!isCurrent(generation)) return;
++    generation.expired = true;
++    abortRequest(generation, "blob_ttl_expired");
++    finishAndRelease(generation);
++    publish("error", {
++      recordingGeneration: generation.id,
++      sameBlobRetryCount: generation.sameBlobRetryCount,
++      retryCountdownSeconds: 0,
++      expiresAt: null,
++      hasRetainedBlob: false,
++      errorCode: "BLOB_TTL_EXPIRED",
++      errorMessage: TRANSCRIPTION_COPY.EXPIRED,
++      secondaryText: TRANSCRIPTION_COPY.EXPIRED,
++      interimText: "",
++    });
++  }
++
++  async function processGeneration(generation) {
++    if (!isCurrent(generation) || !generation.blob || !generation.idempotencyKey) return;
++    if (cancelIfInactive(generation)) return;
++    if (options.now() >= generation.expiresAt) {
++      expireGeneration(generation);
++      return;
++    }
++    const RequestAbortController = options.AbortControllerImpl;
++    const requestController = new RequestAbortController();
++    generation.requestController = requestController;
++    publish("processing", {
++      recordingGeneration: generation.id,
++      sameBlobRetryCount: generation.sameBlobRetryCount,
++      retryCountdownSeconds: 0,
++      rateLimitCountdownSeconds: 0,
++      expiresAt: generation.expiresAt,
++      hasRetainedBlob: true,
++      errorCode: null,
++      errorMessage: null,
++      interimText: "",
++    });
++
++    try {
++      const result = await transcribeAudio(generation.apiClient, {
++        blob: generation.blob,
++        purpose: generation.purpose,
++        durationMs: generation.durationMs,
++        key: generation.idempotencyKey,
++        signal: requestController.signal,
++      });
++      if (!isCurrent(generation) || requestController.signal.aborted) return;
++      if (cancelIfInactive(generation)) return;
++      if (options.now() >= generation.expiresAt) {
++        expireGeneration(generation);
++        return;
++      }
++      generation.requestController = null;
++      try {
++        generation.onTranscript?.(result.transcript, result);
++      } catch {
++        publishErrorAndRelease(
++          generation,
++          "TRANSCRIPT_APPLY_FAILED",
++          "文字回填未完成，请保留现有内容并重新录音。",
++        );
++        return;
++      }
++      // A consumer may synchronously close/cancel the control while applying
++      // the draft. Preserve that newer lifecycle instead of publishing stale
++      // success for a generation the callback already invalidated.
++      if (!isCurrent(generation)) return;
++      finishAndRelease(generation);
++      publish("succeeded", {
++        recordingGeneration: generation.id,
++        sameBlobRetryCount: generation.sameBlobRetryCount,
++        retryCountdownSeconds: 0,
++        rateLimitCountdownSeconds: 0,
++        expiresAt: null,
++        hasRetainedBlob: false,
++        errorCode: null,
++        errorMessage: null,
++        interimText: "",
++      });
++    } catch (caught) {
++      if (!isCurrent(generation) || generation.expired || requestController.signal.aborted) return;
++      if (cancelIfInactive(generation)) return;
++      if (options.now() >= generation.expiresAt) {
++        expireGeneration(generation);
++        return;
++      }
++      generation.requestController = null;
++      const error = adaptTranscriptionError(caught);
++      if (error.lifecycle === "rate_limited") {
++        enterRateLimit(generation, error);
++        return;
++      }
++      if (
++        error.lifecycle === "same_blob_retryable"
++        && generation.sameBlobRetryCount === 0
++        && options.now() < generation.expiresAt
++      ) {
++        enterRetryableError(generation, error);
++        return;
++      }
++      publishErrorAndRelease(generation, error.code, error.userMessage);
++    } finally {
++      if (generation.requestController === requestController) generation.requestController = null;
++    }
++  }
++
++  async function finalizeRecording(generation) {
++    if (!isCurrent(generation)) return;
++    if (cancelIfInactive(generation)) return;
++    if (generation.finalizationStarted) return;
++    generation.finalizationStarted = true;
++    clearGenerationTimer(generation, "maxDurationTimer");
++    clearGenerationTimer(generation, "finalizationFallbackTimer");
++    stopSpeech(generation);
++    stopTracks(generation);
++    // MediaRecorder queues final dataavailable/onstop events. Do not count
++    // that event-loop delay as speech duration after the user already stopped.
++    const recordingEndedAt = generation.stopRequestedAt ?? options.now();
++    const measuredDurationMs = Math.max(0, Math.round(recordingEndedAt - generation.startedAt));
++    generation.durationMs = measuredDurationMs;
++    if (generation.durationMs < MIN_RECORDING_DURATION_MS) {
++      publishErrorAndRelease(generation, "AUDIO_TOO_SHORT", TRANSCRIPTION_COPY.TOO_SHORT);
++      return;
++    }
++    if (generation.durationMs > limits.maxDurationMs) {
++      publishErrorAndRelease(generation, "AUDIO_TOO_LONG", TRANSCRIPTION_COPY.TOO_LONG);
++      return;
++    }
++    const chunks = generation.chunks.filter((chunk) => chunk && chunk.size > 0);
++    if (chunks.length === 0) {
++      publishErrorAndRelease(generation, "AUDIO_BODY_REQUIRED", TRANSCRIPTION_COPY.UNKNOWN_ERROR);
++      return;
++    }
++    const recordedBytes = chunks.reduce((total, chunk) => total + chunk.size, 0);
++    if (!Number.isSafeInteger(recordedBytes) || recordedBytes > MAX_AUDIO_BYTES) {
++      publishErrorAndRelease(generation, "AUDIO_TOO_LARGE", TRANSCRIPTION_COPY.TOO_LARGE);
++      return;
++    }
++    const mediaType = normalizeRecorderMimeType(
++      generation.recorder?.mimeType
++      || chunks.find((chunk) => chunk.type)?.type
++      || generation.selectedMimeType,
++    );
++    if (!mediaType) {
++      publishErrorAndRelease(generation, "AUDIO_MEDIA_TYPE_UNSUPPORTED", TRANSCRIPTION_COPY.UNSUPPORTED);
++      return;
++    }
++    let blob;
++    try {
++      blob = new options.BlobImpl(chunks, { type: mediaType });
++    } catch {
++      publishErrorAndRelease(generation, "AUDIO_INVALID", TRANSCRIPTION_COPY.UNKNOWN_ERROR);
++      return;
++    }
++    if (blob.size <= 0) {
++      publishErrorAndRelease(generation, "AUDIO_BODY_REQUIRED", TRANSCRIPTION_COPY.UNKNOWN_ERROR);
++      return;
++    }
++    if (blob.size > MAX_AUDIO_BYTES) {
++      publishErrorAndRelease(generation, "AUDIO_TOO_LARGE", TRANSCRIPTION_COPY.TOO_LARGE);
++      return;
++    }
++    // Blob owns the immutable upload bytes now; retaining MediaRecorder chunks
++    // would keep a second set of references alive for the five-minute retry TTL.
++    generation.chunks.length = 0;
++    let key;
++    try {
++      key = createTranscriptionIdempotencyKey(options.cryptoImpl);
++    } catch {
++      publishErrorAndRelease(generation, "INVALID_IDEMPOTENCY_KEY", TRANSCRIPTION_COPY.UNKNOWN_ERROR);
++      return;
++    }
++    generation.blob = blob;
++    generation.idempotencyKey = key;
++    generation.blobCreatedAt = options.now();
++    generation.expiresAt = generation.blobCreatedAt + BLOB_TTL_MS;
++    generation.sameBlobRetryCount = 0;
++    // Once a Blob exists, raw capture devices and recorder callbacks are no
++    // longer needed. Only the Blob/key remain for the one manual retry.
++    detachAndStopRecorder(generation);
++    releaseCaptureResourceReferences(generation);
++    generation.blobTtlTimer = options.setTimeoutImpl?.(
++      () => expireGeneration(generation),
++      BLOB_TTL_MS,
++    );
++    await processGeneration(generation);
++  }
++
++  function startSpeechEnhancement(generation) {
++    const SpeechRecognitionImpl = options.SpeechRecognitionImpl;
++    if (typeof SpeechRecognitionImpl !== "function") return;
++    try {
++      const recognition = new SpeechRecognitionImpl();
++      generation.speechRecognition = recognition;
++      recognition.lang = "zh-CN";
++      recognition.continuous = true;
++      recognition.interimResults = true;
++      recognition.onresult = (event) => {
++        if (!isCurrent(generation)) return;
++        if (cancelIfInactive(generation)) return;
++        let text = "";
++        const startIndex = Number.isInteger(event?.resultIndex) ? event.resultIndex : 0;
++        for (let index = startIndex; index < (event?.results?.length ?? 0); index += 1) {
++          text += String(event.results[index]?.[0]?.transcript ?? "");
++        }
++        const normalized = text.trim();
++        if (!normalized) return;
++        generation.onInterimText?.(normalized);
++        publish(snapshot.status, { interimText: normalized });
++      };
++      recognition.onerror = () => {
++        // Browser speech is explicitly an interim enhancement and never gates
++        // MediaRecorder or the server result.
++      };
++      recognition.start();
++    } catch {
++      generation.speechRecognition = null;
++    }
++  }
++
++  async function startCapture() {
++    if (destroyed) return false;
++    if (options.active === false || options.disabled === true) return false;
++    if (snapshot.status === "rate_limited" && snapshot.rateLimitCountdownSeconds > 0) return false;
++    stopBrowserInterim({ publishState: false });
++    clearRateLimitTimer();
++    if (currentGeneration) invalidateGeneration(currentGeneration, "rerecord");
++    capability = getRecordingCapability(options.mediaDevices, options.MediaRecorderImpl);
++    if (!capability.supported) {
++      publish("error", {
++        supported: false,
++        capabilityReason: capability.reason,
++        errorCode: "RECORDING_UNSUPPORTED",
++        errorMessage: TRANSCRIPTION_COPY.UNSUPPORTED,
++        secondaryText: TRANSCRIPTION_COPY.UNSUPPORTED,
++      });
++      return false;
++    }
++
++    const generation = {
++      id: ++generationCounter,
++      invalidated: false,
++      expired: false,
++      completed: false,
++      chunks: [],
++      stream: null,
++      tracksStopped: false,
++      recorder: null,
++      recorderDisposed: false,
++      selectedMimeType: capability.mimeType,
++      purpose: controllerPurpose,
++      logoutEpoch,
++      apiClient: options.apiClient,
++      onTranscript: options.onTranscript,
++      onInterimText: options.onInterimText,
++      startedAt: 0,
++      stopRequestedAt: null,
++      durationMs: 0,
++      blob: null,
++      idempotencyKey: null,
++      blobCreatedAt: null,
++      expiresAt: null,
++      sameBlobRetryCount: 0,
++      requestController: null,
++      maxDurationTimer: null,
++      finalizationFallbackTimer: null,
++      blobTtlTimer: null,
++      retryCountdownTimer: null,
++      retryAvailableAt: 0,
++      finalizationStarted: false,
++      speechRecognition: null,
++      speechStopped: false,
++    };
++    currentGeneration = generation;
++    publish("requesting_permission", {
++      supported: true,
++      capabilityReason: null,
++      recordingGeneration: generation.id,
++      sameBlobRetryCount: 0,
++      retryCountdownSeconds: 0,
++      rateLimitCountdownSeconds: 0,
++      expiresAt: null,
++      hasRetainedBlob: false,
++      errorCode: null,
++      errorMessage: null,
++      interimText: "",
++    });
++
++    let stream;
++    try {
++      stream = await options.mediaDevices.getUserMedia({ audio: true });
++    } catch (error) {
++      if (!isCurrent(generation)) return false;
++      if (cancelIfInactive(generation)) return false;
++      const code = microphoneErrorCode(error);
++      publishErrorAndRelease(generation, code, microphoneErrorMessage(code));
++      return false;
++    }
++    if (!isCurrent(generation)) {
++      stopDetachedStream(stream);
++      return false;
++    }
++    if (cancelIfInactive(generation)) {
++      stopDetachedStream(stream);
++      return false;
++    }
++    generation.stream = stream;
++
++    let recorder;
++    try {
++      recorder = generation.selectedMimeType
++        ? new options.MediaRecorderImpl(stream, { mimeType: generation.selectedMimeType })
++        : new options.MediaRecorderImpl(stream);
++    } catch {
++      publishErrorAndRelease(generation, "MEDIA_RECORDER_START_FAILED", TRANSCRIPTION_COPY.UNSUPPORTED);
++      return false;
++    }
++    generation.recorder = recorder;
++    recorder.ondataavailable = (event) => {
++      if (!isCurrent(generation)) return;
++      if (cancelIfInactive(generation)) return;
++      if (event?.data?.size > 0) generation.chunks.push(event.data);
++    };
++    recorder.onstop = () => {
++      if (!isCurrent(generation)) return;
++      if (cancelIfInactive(generation)) return;
++      void finalizeRecording(generation);
++    };
++    recorder.onerror = () => {
++      if (!isCurrent(generation)) return;
++      if (cancelIfInactive(generation)) return;
++      publishErrorAndRelease(generation, "MEDIA_RECORDER_FAILED", "录音采集失败，请重新录音或改用文本。");
++    };
++
++    try {
++      generation.startedAt = options.now();
++      recorder.start();
++      startSpeechEnhancement(generation);
++      generation.maxDurationTimer = options.setTimeoutImpl?.(
++        () => {
++          if (!isCurrent(generation)) return;
++          if (cancelIfInactive(generation)) return;
++          stopCapture("max_duration");
++        },
++        limits.maxDurationMs,
++      );
++      publish("recording", {
++        recordingGeneration: generation.id,
++        interimText: "",
++      });
++      return true;
++    } catch {
++      publishErrorAndRelease(generation, "MEDIA_RECORDER_START_FAILED", "录音采集失败，请重新录音或改用文本。");
++      return false;
++    }
++  }
++
++  function stopCapture(reason = "manual") {
++    const generation = currentGeneration;
++    if (!isCurrent(generation) || snapshot.status !== "recording") return false;
++    // Capture this once, before any recorder side effect. A delayed onstop must
++    // reuse the user's stop instant rather than the later callback time.
++    if (generation.stopRequestedAt === null) generation.stopRequestedAt = options.now();
++    clearGenerationTimer(generation, "maxDurationTimer");
++    stopSpeech(generation);
++    publish("preparing", {
++      recordingGeneration: generation.id,
++      interimText: "",
++    });
++    try {
++      // If the recorder is already inactive, final dataavailable/onstop may be
++      // queued but not delivered yet. Wait for authoritative onstop instead of
++      // finalizing an empty chunk list. This bounded fallback handles a browser
++      // that loses onstop, and the one-shot guard prevents duplicate requests.
++      generation.finalizationFallbackTimer = options.setTimeoutImpl?.(
++        () => void finalizeRecording(generation),
++        FINALIZATION_FALLBACK_MS,
++      );
++      // Install the fallback before stop(): test doubles (and unusual recorder
++      // implementations) may dispatch onstop synchronously, in which case
++      // finalizeRecording must be able to clear the already-owned timer.
++      if (generation.recorder.state !== "inactive") generation.recorder.stop();
++      return true;
++    } catch {
++      publishErrorAndRelease(generation, "MEDIA_RECORDER_FAILED", "录音采集失败，请重新录音或改用文本。");
++      return false;
++    } finally {
++      stopTracks(generation);
++    }
++  }
++
++  function retry() {
++    const generation = currentGeneration;
++    if (options.active === false || options.disabled === true) return false;
++    if (!isCurrent(generation) || snapshot.status !== "retryable_error") return false;
++    if (options.now() >= generation.expiresAt) {
++      expireGeneration(generation);
++      return false;
++    }
++    if (
++      !generation.blob
++      || !generation.idempotencyKey
++      || generation.sameBlobRetryCount >= 1
++    ) {
++      publishErrorAndRelease(generation, "SAME_BLOB_RETRY_EXHAUSTED", TRANSCRIPTION_COPY.UNKNOWN_ERROR);
++      return false;
++    }
++    if (options.now() < generation.retryAvailableAt) {
++      updateRetryCountdown(generation);
++      return false;
++    }
++    clearGenerationTimer(generation, "retryCountdownTimer");
++    generation.sameBlobRetryCount = 1;
++    void processGeneration(generation);
++    return true;
++  }
++
++  function cancelCapture(reason = "user_cancel") {
++    const wasRateLimited = snapshot.status === "rate_limited";
++    const stoppedBrowserInterim = stopBrowserInterim({ publishState: false });
++    clearRateLimitTimer();
++    const generation = currentGeneration;
++    if (!generation) {
++      if (!wasRateLimited && !stoppedBrowserInterim) return false;
++      publish("cancelled", {
++        sameBlobRetryCount: 0,
++        retryCountdownSeconds: 0,
++        rateLimitCountdownSeconds: 0,
++        expiresAt: null,
++        hasRetainedBlob: false,
++        errorCode: null,
++        errorMessage: null,
++        interimText: "",
++      });
++      return true;
++    }
++    const id = generation.id;
++    const changed = invalidateGeneration(generation, reason);
++    if (!changed) return false;
++    publish("cancelled", {
++      recordingGeneration: id,
++      sameBlobRetryCount: 0,
++      retryCountdownSeconds: 0,
++      rateLimitCountdownSeconds: 0,
++      expiresAt: null,
++      hasRetainedBlob: false,
++      errorCode: null,
++      errorMessage: null,
++      interimText: "",
++    });
++    return true;
++  }
++
++  function reset() {
++    stopBrowserInterim({ publishState: false });
++    clearRateLimitTimer();
++    if (currentGeneration) invalidateGeneration(currentGeneration, "discard");
++    publish("idle", {
++      sameBlobRetryCount: 0,
++      retryCountdownSeconds: 0,
++      rateLimitCountdownSeconds: 0,
++      expiresAt: null,
++      hasRetainedBlob: false,
++      errorCode: null,
++      errorMessage: null,
++      interimText: "",
++    });
++  }
++
++  function destroy(reason = "unmount") {
++    if (destroyed) return;
++    const shouldPublishCancelled = Boolean(
++      currentGeneration
++      || standaloneRecognition
++      || snapshot.status === "rate_limited"
++      || ["requesting_permission", "recording", "preparing", "processing", "retryable_error"].includes(snapshot.status),
++    );
++    stopBrowserInterim({ publishState: false });
++    clearRateLimitTimer();
++    if (currentGeneration) invalidateGeneration(currentGeneration, reason);
++    if (shouldPublishCancelled) {
++      publish("cancelled", {
++        sameBlobRetryCount: 0,
++        retryCountdownSeconds: 0,
++        rateLimitCountdownSeconds: 0,
++        expiresAt: null,
++        hasRetainedBlob: false,
++        errorCode: null,
++        errorMessage: null,
++        interimText: "",
++        browserInterimActive: false,
++      });
++    }
++    destroyed = true;
++    listeners.clear();
++  }
++
++  function activate() {
++    destroyed = false;
++  }
++
++  function updateOptions(nextOptions = {}) {
++    // Purpose is immutable for this controller. React creates a new controller
++    // for a new purpose, while mutable dependencies may update in place.
++    const { purpose: _ignoredPurpose, ...mutableOptions } = nextOptions;
++    if (
++      Object.hasOwn(mutableOptions, "sessionEpoch")
++      && !Object.is(mutableOptions.sessionEpoch, options.sessionEpoch)
++    ) {
++      logoutEpoch += 1;
++    }
++    options = { ...options, ...mutableOptions, purpose: controllerPurpose };
++  }
++
++  return Object.freeze({
++    getSnapshot: () => snapshot,
++    subscribe(listener) {
++      listeners.add(listener);
++      return () => listeners.delete(listener);
++    },
++    startCapture,
++    stopCapture,
++    retry,
++    startBrowserInterim,
++    stopBrowserInterim,
++    cancelCapture,
++    reset,
++    destroy,
++    activate,
++    updateOptions,
++    getResourceDiagnosticsForTests() {
++      return Object.freeze({
++        current: resourceDiagnostics(currentGeneration),
++        lastReleased: lastReleasedResourceDiagnostics,
++      });
++    },
++  });
++}
++
++export function useServerTranscription(configuration = {}) {
++  const latestConfiguration = useRef(configuration);
++  latestConfiguration.current = configuration;
++  const purpose = configuration.purpose ?? "quick_record";
++  const callbackPurpose = purpose;
++  const callbackSessionEpoch = configuration.sessionEpoch;
++  const purposeScopedTranscript = (...args) => {
++    if ((latestConfiguration.current.purpose ?? "quick_record") !== callbackPurpose) return;
++    if (latestConfiguration.current.active === false || latestConfiguration.current.disabled === true) return;
++    if (!Object.is(latestConfiguration.current.sessionEpoch, callbackSessionEpoch)) return;
++    latestConfiguration.current.onTranscript?.(...args);
++  };
++  const purposeScopedInterim = (...args) => {
++    if ((latestConfiguration.current.purpose ?? "quick_record") !== callbackPurpose) return;
++    if (latestConfiguration.current.active === false || latestConfiguration.current.disabled === true) return;
++    if (!Object.is(latestConfiguration.current.sessionEpoch, callbackSessionEpoch)) return;
++    latestConfiguration.current.onInterimText?.(...args);
++  };
++  const controller = useMemo(() => createServerTranscriptionController({
++    ...configuration,
++    purpose,
++    onTranscript: purposeScopedTranscript,
++    onInterimText: purposeScopedInterim,
++  }), [purpose]);
++  controller.updateOptions({
++    apiClient: configuration.apiClient,
++    active: configuration.active,
++    disabled: configuration.disabled,
++    sessionEpoch: configuration.sessionEpoch,
++    onTranscript: purposeScopedTranscript,
++    onInterimText: purposeScopedInterim,
++  });
++  const [snapshotState, setSnapshotState] = useState(() => ({
++    controller,
++    snapshot: controller.getSnapshot(),
++  }));
++  const snapshot = snapshotState.controller === controller
++    ? snapshotState.snapshot
++    : controller.getSnapshot();
++
++  useEffect(() => {
++    controller.activate();
++    setSnapshotState({ controller, snapshot: controller.getSnapshot() });
++    const unsubscribe = controller.subscribe((nextSnapshot) => {
++      setSnapshotState({ controller, snapshot: nextSnapshot });
++    });
++    const onPageHide = () => controller.cancelCapture("pagehide");
++    const onVisibilityChange = () => {
++      if (globalThis.document?.visibilityState === "hidden") {
++        controller.cancelCapture("visibility_hidden");
++      }
++    };
++    globalThis.addEventListener?.("pagehide", onPageHide);
++    globalThis.document?.addEventListener?.("visibilitychange", onVisibilityChange);
++    return () => {
++      globalThis.removeEventListener?.("pagehide", onPageHide);
++      globalThis.document?.removeEventListener?.("visibilitychange", onVisibilityChange);
++      unsubscribe();
++      controller.destroy("unmount");
++    };
++  }, [controller]);
++
++  const previousSessionEpoch = useRef(configuration.sessionEpoch);
++  useEffect(() => {
++    if (previousSessionEpoch.current !== configuration.sessionEpoch) {
++      previousSessionEpoch.current = configuration.sessionEpoch;
++      controller.cancelCapture("logout");
++    }
++  }, [configuration.sessionEpoch, controller]);
++
++  useEffect(() => {
++    if (configuration.disabled === true) {
++      controller.cancelCapture("disabled");
++    } else if (configuration.active === false) {
++      controller.cancelCapture("panel_closed");
++    }
++  }, [configuration.active, configuration.disabled, controller]);
++
++  const actions = useMemo(() => ({
++    startCapture: () => controller.startCapture(),
++    stopCapture: () => controller.stopCapture(),
++    cancelCapture: (reason) => controller.cancelCapture(reason),
++    retry: () => controller.retry(),
++    startBrowserInterim: () => controller.startBrowserInterim(),
++    stopBrowserInterim: () => controller.stopBrowserInterim(),
++    reset: () => controller.reset(),
++  }), [controller]);
++
++  return { ...snapshot, ...actions };
++}
+diff --git a/outputs/product-design-prototype/src/audio/useServerTranscription.test.js b/outputs/product-design-prototype/src/audio/useServerTranscription.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..96a4567fc1cae22ad4ac0937f8b80e373182531c
+--- /dev/null
++++ b/outputs/product-design-prototype/src/audio/useServerTranscription.test.js
+@@ -0,0 +1,903 @@
++import assert from "node:assert/strict";
++import { describe, it } from "node:test";
++
++import {
++  BLOB_TTL_MS,
++  createServerTranscriptionController,
++} from "./useServerTranscription.js";
++
++function deferred() {
++  let resolve;
++  let reject;
++  const promise = new Promise((resolvePromise, rejectPromise) => {
++    resolve = resolvePromise;
++    reject = rejectPromise;
++  });
++  return { promise, resolve, reject };
++}
++
++async function settle(turns = 8) {
++  for (let index = 0; index < turns; index += 1) await Promise.resolve();
++}
++
++function createClock(start = 10_000) {
++  let current = start;
++  let nextId = 0;
++  const tasks = new Map();
++  return {
++    now: () => current,
++    setTimeout(callback, delay = 0) {
++      const id = ++nextId;
++      tasks.set(id, { at: current + Math.max(0, Number(delay) || 0), callback });
++      return id;
++    },
++    clearTimeout(id) {
++      tasks.delete(id);
++    },
++    tick(milliseconds) {
++      const target = current + milliseconds;
++      while (true) {
++        const due = [...tasks.entries()]
++          .filter(([, task]) => task.at <= target)
++          .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
++        if (!due) break;
++        const [id, task] = due;
++        tasks.delete(id);
++        current = task.at;
++        task.callback();
++      }
++      current = target;
++    },
++    elapseWithoutTimers(milliseconds) {
++      current += milliseconds;
++    },
++    flushDueTimersAtCurrent() {
++      while (true) {
++        const due = [...tasks.entries()]
++          .filter(([, task]) => task.at <= current)
++          .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
++        if (!due) break;
++        const [id, task] = due;
++        tasks.delete(id);
++        task.callback();
++      }
++    },
++    pending: () => tasks.size,
++  };
++}
++
++function makeLifecycleError(code, lifecycle, retryAfterSeconds = null) {
++  return Object.assign(new Error("fixed"), {
++    code,
++    lifecycle,
++    retryAfterSeconds,
++    userMessage: "固定错误文案",
++  });
++}
++
++function createHarness({
++  transcribeImpl,
++  permission,
++  chunks,
++  SpeechRecognitionImpl,
++  purpose = "quick_record",
++  onTranscript,
++} = {}) {
++  const clock = createClock();
++  const tracks = [];
++  const streams = [];
++  const recorderInstances = [];
++  const requests = [];
++  const transcripts = [];
++  const transcriptResults = [];
++  const interim = [];
++  let uuid = 0;
++
++  class FakeTrack {
++    stopCalls = 0;
++    stop() { this.stopCalls += 1; }
++  }
++
++  class FakeMediaRecorder {
++    static isTypeSupported(value) { return value === "audio/webm;codecs=opus"; }
++    constructor(stream, options = {}) {
++      this.stream = stream;
++      this.mimeType = options.mimeType || "audio/webm;codecs=opus";
++      this.state = "inactive";
++      this.chunks = chunks ?? [new Blob(["synthetic-audio"], { type: this.mimeType })];
++      recorderInstances.push(this);
++    }
++    start() { this.state = "recording"; }
++    stop() {
++      if (this.state === "inactive") return;
++      this.state = "inactive";
++      const dataHandler = this.ondataavailable;
++      const stopHandler = this.onstop;
++      queueMicrotask(() => {
++        for (const chunk of this.chunks) dataHandler?.({ data: chunk });
++        stopHandler?.();
++      });
++    }
++  }
++
++  const mediaDevices = {
++    async getUserMedia() {
++      if (permission) return permission();
++      const trackA = new FakeTrack();
++      const trackB = new FakeTrack();
++      tracks.push(trackA, trackB);
++      const stream = { getTracks: () => [trackA, trackB] };
++      streams.push(stream);
++      return stream;
++    },
++  };
++
++  const apiClient = {
++    async transcribeAudio(input) {
++      requests.push(input);
++      if (transcribeImpl) return transcribeImpl(input, requests.length);
++      return {
++        requestId: `request-${requests.length}`,
++        item: {
++          transcript: `服务端文字-${requests.length}`,
++          language: "zh-CN",
++          durationMs: input.durationMs,
++          source: "server_asr",
++          replayed: false,
++        },
++      };
++    },
++  };
++
++  const controller = createServerTranscriptionController({
++    apiClient,
++    purpose,
++    mediaDevices,
++    MediaRecorderImpl: FakeMediaRecorder,
++    SpeechRecognitionImpl,
++    cryptoImpl: {
++      randomUUID() {
++        uuid += 1;
++        return `00000000-0000-4000-8000-${String(uuid).padStart(12, "0")}`;
++      },
++    },
++    now: clock.now,
++    setTimeoutImpl: clock.setTimeout,
++    clearTimeoutImpl: clock.clearTimeout,
++    onTranscript(text, result) {
++      transcripts.push(text);
++      transcriptResults.push(result);
++      onTranscript?.(text, result);
++    },
++    onInterimText(text) { interim.push(text); },
++  });
++
++  return {
++    controller,
++    clock,
++    tracks,
++    streams,
++    recorderInstances,
++    requests,
++    transcripts,
++    transcriptResults,
++    interim,
++  };
++}
++
++async function recordFor(harness, milliseconds = 500) {
++  assert.equal(await harness.controller.startCapture(), true);
++  assert.equal(harness.controller.getSnapshot().status, "recording");
++  harness.clock.tick(milliseconds);
++  assert.equal(harness.controller.stopCapture(), true);
++  await settle();
++}
++
++describe("server transcription controller", () => {
++  it("runs permission -> recording -> one processing -> succeeded and releases every track", async () => {
++    const pending = deferred();
++    const harness = createHarness({ transcribeImpl: () => pending.promise });
++    const statuses = [];
++    harness.controller.subscribe((snapshot) => statuses.push(snapshot.status));
++    await recordFor(harness);
++
++    assert.equal(harness.controller.getSnapshot().status, "processing");
++    assert.equal(harness.requests.length, 1);
++    assert.equal(harness.requests[0].blob instanceof Blob, true);
++    assert.equal(harness.requests[0].purpose, "quick_record");
++    assert.equal(harness.requests[0].durationMs, 500);
++    assert.equal(harness.requests[0].idempotencyKey, "asr:00000000-0000-4000-8000-000000000001");
++    assert.equal(harness.tracks.every((track) => track.stopCalls === 1), true);
++    assert.equal(statuses.includes("uploading"), false);
++    assert.equal(statuses.includes("transcribing"), false);
++
++    pending.resolve({
++      requestId: "request-1",
++      item: { transcript: "服务端文字", language: "zh-CN", durationMs: 500, source: "server_asr", replayed: false },
++    });
++    await settle();
++    assert.equal(harness.controller.getSnapshot().status, "succeeded");
++    assert.deepEqual(harness.transcripts, ["服务端文字"]);
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false);
++  });
++
++  it("preserves a synchronous cancel triggered while the consumer applies the transcript", async () => {
++    let controller;
++    const harness = createHarness({
++      onTranscript() { controller.cancelCapture("consumer_closed"); },
++    });
++    controller = harness.controller;
++    await recordFor(harness);
++    assert.deepEqual(harness.transcripts, ["服务端文字-1"]);
++    assert.equal(harness.controller.getSnapshot().status, "cancelled");
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false);
++    assert.equal(harness.clock.pending(), 0);
++  });
++
++  it("keeps the same Blob/key for exactly one manual retry and increments before sending", async () => {
++    const second = deferred();
++    const harness = createHarness({
++      transcribeImpl(input, callNumber) {
++        if (callNumber === 1) throw makeLifecycleError("ASR_TIMEOUT", "same_blob_retryable");
++        assert.equal(harness.controller.getSnapshot().sameBlobRetryCount, 1);
++        return second.promise;
++      },
++    });
++    await recordFor(harness);
++    const firstRequest = harness.requests[0];
++    const firstExpiry = harness.controller.getSnapshot().expiresAt;
++    assert.equal(harness.controller.getSnapshot().status, "retryable_error");
++    assert.equal(harness.controller.getSnapshot().sameBlobRetryCount, 0);
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, true);
++
++    assert.equal(harness.controller.retry(), true);
++    await settle();
++    assert.equal(harness.requests.length, 2);
++    assert.strictEqual(harness.requests[1].blob, firstRequest.blob);
++    assert.equal(harness.requests[1].idempotencyKey, firstRequest.idempotencyKey);
++    assert.equal(harness.controller.getSnapshot().sameBlobRetryCount, 1);
++    assert.equal(harness.controller.getSnapshot().expiresAt, firstExpiry);
++
++    second.resolve({
++      requestId: "request-2",
++      item: { transcript: "重试成功", language: "zh-CN", durationMs: 500, source: "server_asr", replayed: true },
++    });
++    await settle();
++    assert.deepEqual(harness.transcripts, ["重试成功"]);
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false);
++  });
++
++  it("releases the Blob/key after the one retry fails and never sends a third request", async () => {
++    const harness = createHarness({
++      transcribeImpl() { throw makeLifecycleError("ASR_PROVIDER_BAD_RESPONSE", "same_blob_retryable"); },
++    });
++    await recordFor(harness);
++    assert.equal(harness.controller.retry(), true);
++    await settle();
++    assert.equal(harness.requests.length, 2);
++    assert.equal(harness.controller.getSnapshot().status, "error");
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false);
++    assert.equal(harness.controller.retry(), false);
++    assert.equal(harness.requests.length, 2);
++  });
++
++  it("keeps fixed expiresAt across retry and aborts retry processing at the original TTL", async () => {
++    const second = deferred();
++    const harness = createHarness({
++      transcribeImpl(input, callNumber) {
++        if (callNumber === 1) throw makeLifecycleError("ASR_IN_PROGRESS", "same_blob_retryable");
++        return second.promise;
++      },
++    });
++    await recordFor(harness);
++    const expiresAt = harness.controller.getSnapshot().expiresAt;
++    harness.clock.tick(1_000);
++    assert.equal(harness.controller.retry(), true);
++    await settle();
++    assert.equal(harness.controller.getSnapshot().expiresAt, expiresAt);
++    const retrySignal = harness.requests[1].signal;
++
++    harness.clock.tick(BLOB_TTL_MS - 1_000);
++    await settle();
++    assert.equal(retrySignal.aborted, true);
++    assert.equal(retrySignal.reason, "blob_ttl_expired");
++    assert.equal(harness.controller.getSnapshot().status, "error");
++    assert.equal(harness.controller.getSnapshot().errorCode, "BLOB_TTL_EXPIRED");
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false);
++
++    second.resolve({
++      requestId: "late",
++      item: { transcript: "迟到文字", language: "zh-CN", durationMs: 500, source: "server_asr", replayed: false },
++    });
++    await settle();
++    assert.deepEqual(harness.transcripts, []);
++    assert.equal(harness.controller.getSnapshot().status, "error");
++  });
++
++  it("enforces Blob TTL from wall-clock time even when the scheduled timer is throttled", async () => {
++    for (const outcome of ["resolve", "reject"]) {
++      const pending = deferred();
++      const harness = createHarness({ transcribeImpl: () => pending.promise });
++      await recordFor(harness);
++      const signal = harness.requests[0].signal;
++      harness.clock.elapseWithoutTimers(BLOB_TTL_MS);
++      if (outcome === "resolve") {
++        pending.resolve({
++          requestId: "late-success",
++          item: {
++            transcript: "过期结果",
++            language: "zh-CN",
++            durationMs: 500,
++            source: "server_asr",
++            replayed: false,
++          },
++        });
++      } else {
++        pending.reject(makeLifecycleError("ASR_TIMEOUT", "same_blob_retryable"));
++      }
++      await settle();
++      assert.equal(signal.aborted, true, outcome);
++      assert.equal(signal.reason, "blob_ttl_expired", outcome);
++      assert.equal(harness.controller.getSnapshot().status, "error", outcome);
++      assert.equal(harness.controller.getSnapshot().errorCode, "BLOB_TTL_EXPIRED", outcome);
++      assert.deepEqual(harness.transcripts, [], outcome);
++      assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false, outcome);
++    }
++  });
++
++  it("prioritizes wall-clock TTL expiry over retry exhaustion when timers are throttled", async () => {
++    const harness = createHarness({
++      transcribeImpl() { throw makeLifecycleError("ASR_TIMEOUT", "same_blob_retryable"); },
++    });
++    await recordFor(harness);
++    assert.equal(harness.controller.getSnapshot().status, "retryable_error");
++    harness.clock.elapseWithoutTimers(BLOB_TTL_MS);
++    assert.equal(harness.controller.retry(), false);
++    assert.equal(harness.controller.getSnapshot().errorCode, "BLOB_TTL_EXPIRED");
++    assert.notEqual(harness.controller.getSnapshot().errorCode, "SAME_BLOB_RETRY_EXHAUSTED");
++    assert.equal(harness.requests.length, 1);
++  });
++
++  it("releases immediately for the explicit non-retryable matrix", async () => {
++    for (const code of ["INVALID_IDEMPOTENCY_KEY", "ASR_TRANSCRIPT_EMPTY", "IDEMPOTENCY_CONFLICT", "ASR_NOT_CONFIGURED"]) {
++      const harness = createHarness({ transcribeImpl() { throw makeLifecycleError(code, "release_and_rerecord"); } });
++      await recordFor(harness);
++      assert.equal(harness.controller.getSnapshot().status, "error", code);
++      assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false, code);
++      assert.equal(harness.controller.retry(), false, code);
++    }
++  });
++
++  it("rate limiting releases immediately, uses a 300-second UI fallback, and never auto-retries", async () => {
++    const harness = createHarness({
++      transcribeImpl() { throw makeLifecycleError("ASR_RATE_LIMITED", "rate_limited", null); },
++    });
++    await recordFor(harness);
++    assert.equal(harness.controller.getSnapshot().status, "rate_limited");
++    assert.equal(harness.controller.getSnapshot().rateLimitCountdownSeconds, 300);
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false);
++    assert.equal(harness.controller.retry(), false);
++    harness.clock.tick(299_000);
++    assert.equal(harness.controller.getSnapshot().rateLimitCountdownSeconds, 1);
++    assert.equal(harness.requests.length, 1);
++    harness.clock.tick(1_000);
++    assert.equal(harness.controller.getSnapshot().status, "idle");
++    assert.equal(harness.requests.length, 1);
++  });
++
++  it("cancels rate-limit lifecycle timers and starts a fresh generation with a fresh key", async () => {
++    const harness = createHarness({
++      transcribeImpl(input, callNumber) {
++        if (callNumber === 1) throw makeLifecycleError("ASR_RATE_LIMITED", "rate_limited", null);
++        return {
++          requestId: "fresh",
++          item: {
++            transcript: "新录音",
++            language: "zh-CN",
++            durationMs: input.durationMs,
++            source: "server_asr",
++            replayed: false,
++          },
++        };
++      },
++    });
++    await recordFor(harness);
++    const firstKey = harness.requests[0].idempotencyKey;
++    assert.equal(harness.controller.getSnapshot().status, "rate_limited");
++    assert.ok(harness.clock.pending() > 0);
++    assert.equal(harness.controller.cancelCapture("panel_closed"), true);
++    assert.equal(harness.controller.getSnapshot().status, "cancelled");
++    assert.equal(harness.controller.getSnapshot().rateLimitCountdownSeconds, 0);
++    assert.equal(harness.clock.pending(), 0);
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.clock.tick(500);
++    assert.equal(harness.controller.stopCapture(), true);
++    await settle();
++    assert.equal(harness.requests.length, 2);
++    assert.notEqual(harness.requests[1].idempotencyKey, firstKey);
++    assert.deepEqual(harness.transcripts, ["新录音"]);
++  });
++
++  it("honors valid retry countdown without triggering a request", async () => {
++    const second = deferred();
++    const harness = createHarness({
++      transcribeImpl(input, callNumber) {
++        if (callNumber === 1) throw makeLifecycleError("ASR_CAPACITY_EXCEEDED", "same_blob_retryable", 2);
++        return second.promise;
++      },
++    });
++    await recordFor(harness);
++    assert.equal(harness.controller.getSnapshot().retryCountdownSeconds, 2);
++    assert.equal(harness.controller.retry(), false);
++    harness.clock.tick(2_000);
++    assert.equal(harness.requests.length, 1);
++    assert.equal(harness.controller.getSnapshot().retryCountdownSeconds, 0);
++    assert.equal(harness.controller.retry(), true);
++    await settle();
++    assert.equal(harness.requests.length, 2);
++  });
++
++  it("invalidates an old processing generation before re-record and ignores its late success", async () => {
++    const first = deferred();
++    const harness = createHarness({
++      transcribeImpl(input, callNumber) {
++        if (callNumber === 1) return first.promise;
++        return {
++          requestId: "new",
++          item: { transcript: "新录音", language: "zh-CN", durationMs: input.durationMs, source: "server_asr", replayed: false },
++        };
++      },
++    });
++    await recordFor(harness);
++    const oldGeneration = harness.controller.getSnapshot().recordingGeneration;
++    const oldSignal = harness.requests[0].signal;
++    assert.equal(await harness.controller.startCapture(), true);
++    assert.equal(oldSignal.aborted, true);
++    assert.ok(harness.controller.getSnapshot().recordingGeneration > oldGeneration);
++    harness.clock.tick(500);
++    harness.controller.stopCapture();
++    await settle();
++    assert.deepEqual(harness.transcripts, ["新录音"]);
++
++    first.resolve({
++      requestId: "old",
++      item: { transcript: "旧录音迟到", language: "zh-CN", durationMs: 500, source: "server_asr", replayed: false },
++    });
++    await settle();
++    assert.deepEqual(harness.transcripts, ["新录音"]);
++    assert.equal(harness.controller.getSnapshot().status, "succeeded");
++  });
++
++  it("ignores a late rejection from an invalidated processing generation", async () => {
++    const first = deferred();
++    const harness = createHarness({
++      transcribeImpl(input, callNumber) {
++        if (callNumber === 1) return first.promise;
++        return {
++          requestId: "new",
++          item: { transcript: "新录音成功", language: "zh-CN", durationMs: input.durationMs, source: "server_asr", replayed: false },
++        };
++      },
++    });
++    await recordFor(harness);
++    await harness.controller.startCapture();
++    harness.clock.tick(500);
++    harness.controller.stopCapture();
++    await settle();
++    assert.deepEqual(harness.transcripts, ["新录音成功"]);
++
++    first.reject(makeLifecycleError("ASR_TIMEOUT", "same_blob_retryable", 1));
++    await settle();
++    assert.deepEqual(harness.transcripts, ["新录音成功"]);
++    assert.equal(harness.controller.getSnapshot().status, "succeeded");
++    assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false);
++  });
++
++  it("fences processing resolve/reject across active, disabled, and logout render transitions", async () => {
++    const transitions = [
++      { patch: { active: false }, reason: "panel_closed" },
++      { patch: { disabled: true }, reason: "disabled" },
++      { patch: { sessionEpoch: 1 }, reason: "logout" },
++    ];
++    for (const { patch, reason } of transitions) {
++      for (const outcome of ["resolve", "reject"]) {
++        const pending = deferred();
++        const harness = createHarness({ transcribeImpl: () => pending.promise });
++        await recordFor(harness);
++        const signal = harness.requests[0].signal;
++        harness.controller.updateOptions(patch);
++        assert.equal(harness.controller.getSnapshot().status, "processing");
++        if (outcome === "resolve") {
++          pending.resolve({
++            requestId: `${reason}-late-success`,
++            item: {
++              transcript: "SHOULD_NOT_APPLY",
++              language: "zh-CN",
++              durationMs: 500,
++              source: "server_asr",
++              replayed: false,
++            },
++          });
++        } else {
++          pending.reject(makeLifecycleError("ASR_TIMEOUT", "same_blob_retryable"));
++        }
++        await settle();
++        assert.deepEqual(harness.transcripts, [], `${reason}/${outcome}`);
++        assert.equal(harness.controller.getSnapshot().status, "cancelled", `${reason}/${outcome}`);
++        assert.equal(harness.controller.getSnapshot().errorCode, null, `${reason}/${outcome}`);
++        assert.equal(harness.controller.getSnapshot().hasRetainedBlob, false, `${reason}/${outcome}`);
++        assert.equal(signal.aborted, true, `${reason}/${outcome}`);
++        assert.equal(signal.reason, reason, `${reason}/${outcome}`);
++        assert.equal(harness.clock.pending(), 0, `${reason}/${outcome}`);
++        assert.equal(harness.controller.getResourceDiagnosticsForTests().current, null);
++        assert.deepEqual(harness.controller.getResourceDiagnosticsForTests().lastReleased, {
++          chunkCount: 0,
++          hasBlob: false,
++          hasKey: false,
++          hasRecorder: false,
++          hasStream: false,
++          hasSpeechRecognition: false,
++          hasRequestController: false,
++        });
++        assert.equal(harness.controller.cancelCapture(reason), false, `${reason}/${outcome}/idempotent`);
++      }
++    }
++  });
++
++  it("cancels pagehide/unmount idempotently, aborts fetch, and ignores late callbacks", async () => {
++    const pending = deferred();
++    const harness = createHarness({ transcribeImpl: () => pending.promise });
++    await recordFor(harness);
++    const signal = harness.requests[0].signal;
++    assert.equal(harness.controller.cancelCapture("pagehide"), true);
++    assert.equal(signal.aborted, true);
++    assert.equal(signal.reason, "pagehide");
++    assert.equal(harness.controller.getSnapshot().status, "cancelled");
++    assert.equal(harness.controller.cancelCapture("pagehide"), false);
++    harness.controller.destroy("unmount");
++    harness.controller.destroy("unmount");
++    assert.equal(harness.tracks.every((track) => track.stopCalls === 1), true);
++    pending.resolve({
++      requestId: "late",
++      item: { transcript: "迟到", language: "zh-CN", durationMs: 500, source: "server_asr", replayed: false },
++    });
++    await settle();
++    assert.deepEqual(harness.transcripts, []);
++    assert.equal(harness.clock.pending(), 0);
++  });
++
++  it("destroy then activate supports StrictMode-style recording and processing remounts", async () => {
++    const oldPending = deferred();
++    const harness = createHarness({
++      transcribeImpl(input, callNumber) {
++        if (callNumber === 1) return oldPending.promise;
++        return {
++          requestId: "after-remount",
++          item: {
++            transcript: "重新挂载成功",
++            language: "zh-CN",
++            durationMs: input.durationMs,
++            source: "server_asr",
++            replayed: false,
++          },
++        };
++      },
++    });
++
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.controller.destroy("strict_cleanup_recording");
++    assert.equal(harness.controller.getSnapshot().status, "cancelled");
++    harness.controller.activate();
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.clock.tick(500);
++    harness.controller.stopCapture();
++    await settle();
++    assert.equal(harness.controller.getSnapshot().status, "processing");
++    const oldSignal = harness.requests[0].signal;
++    harness.controller.destroy("strict_cleanup_processing");
++    assert.equal(oldSignal.aborted, true);
++    harness.controller.activate();
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.clock.tick(500);
++    harness.controller.stopCapture();
++    await settle();
++    assert.deepEqual(harness.transcripts, ["重新挂载成功"]);
++
++    oldPending.resolve({
++      requestId: "stale",
++      item: {
++        transcript: "旧结果",
++        language: "zh-CN",
++        durationMs: 500,
++        source: "server_asr",
++        replayed: false,
++      },
++    });
++    await settle();
++    assert.deepEqual(harness.transcripts, ["重新挂载成功"]);
++    assert.equal(harness.controller.getSnapshot().status, "succeeded");
++  });
++
++  it("cancels touch release while permission is pending and stops a late stream without starting a recorder", async () => {
++    const permission = deferred();
++    const harness = createHarness({
++      permission: () => permission.promise,
++    });
++    const startPromise = harness.controller.startCapture();
++    await settle();
++    assert.equal(harness.controller.getSnapshot().status, "requesting_permission");
++    assert.equal(harness.controller.cancelCapture("pointer_up_before_permission"), true);
++    assert.equal(harness.controller.getSnapshot().status, "cancelled");
++
++    const lateTrack = { stopCalls: 0, stop() { this.stopCalls += 1; } };
++    const lateStream = { getTracks: () => [lateTrack] };
++    permission.resolve(lateStream);
++    assert.equal(await startPromise, false);
++    await settle();
++    assert.equal(lateTrack.stopCalls, 1);
++    assert.equal(harness.recorderInstances.length, 0);
++    assert.equal(harness.requests.length, 0);
++    assert.equal(harness.controller.getSnapshot().status, "cancelled");
++  });
++
++  it("maps permission denial, empty data, and sub-300ms recordings without uploading", async () => {
++    const denied = createHarness({ permission: async () => { throw new DOMException("Denied", "NotAllowedError"); } });
++    assert.equal(await denied.controller.startCapture(), false);
++    assert.equal(denied.controller.getSnapshot().status, "error");
++    assert.equal(denied.controller.getSnapshot().errorCode, "MICROPHONE_PERMISSION_DENIED");
++    assert.equal(denied.requests.length, 0);
++
++    const empty = createHarness({ chunks: [] });
++    await recordFor(empty);
++    assert.equal(empty.controller.getSnapshot().errorCode, "AUDIO_BODY_REQUIRED");
++    assert.equal(empty.requests.length, 0);
++
++    const short = createHarness();
++    await recordFor(short, 299);
++    assert.equal(short.controller.getSnapshot().errorCode, "AUDIO_TOO_SHORT");
++    assert.equal(short.requests.length, 0);
++
++    const oversized = createHarness({
++      chunks: [{ size: 8 * 1024 * 1024 + 1, type: "audio/webm;codecs=opus" }],
++    });
++    await recordFor(oversized);
++    assert.equal(oversized.controller.getSnapshot().errorCode, "AUDIO_TOO_LARGE");
++    assert.equal(oversized.requests.length, 0);
++  });
++
++  it("automatically stops at the purpose maximum without inventing upload progress", async () => {
++    const pending = deferred();
++    const harness = createHarness({ transcribeImpl: () => pending.promise });
++    await harness.controller.startCapture();
++    harness.clock.tick(120_000);
++    await settle();
++    assert.equal(harness.recorderInstances[0].state, "inactive");
++    assert.equal(harness.controller.getSnapshot().status, "processing");
++    assert.equal(harness.controller.getSnapshot().statusText, "正在上传并转成文字");
++    assert.equal(harness.requests.length, 1);
++    assert.equal(harness.requests[0].durationMs, 120_000);
++    assert.equal(harness.controller.stopCapture(), false);
++    assert.equal(harness.requests.length, 1);
++  });
++
++  it("rejects a max timer that fires late instead of clamping and uploading an overlong recording", async () => {
++    const harness = createHarness();
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.clock.elapseWithoutTimers(123_000);
++    harness.clock.flushDueTimersAtCurrent();
++    await settle();
++    assert.equal(harness.controller.getSnapshot().status, "error");
++    assert.equal(harness.controller.getSnapshot().errorCode, "AUDIO_TOO_LONG");
++    assert.equal(harness.requests.length, 0);
++    assert.equal(harness.clock.pending(), 0);
++    assert.equal(harness.tracks.every((track) => track.stopCalls === 1), true);
++    assert.deepEqual(harness.controller.getResourceDiagnosticsForTests().lastReleased, {
++      chunkCount: 0,
++      hasBlob: false,
++      hasKey: false,
++      hasRecorder: false,
++      hasStream: false,
++      hasSpeechRecognition: false,
++      hasRequestController: false,
++    });
++  });
++
++  it("waits for queued final data/onstop when recorder is already inactive and fixes duration at stop", async () => {
++    const pending = deferred();
++    const harness = createHarness({ transcribeImpl: () => pending.promise });
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.clock.tick(500);
++    const recorder = harness.recorderInstances[0];
++    const queuedData = recorder.ondataavailable;
++    const queuedStop = recorder.onstop;
++    recorder.state = "inactive";
++
++    assert.equal(harness.controller.stopCapture(), true);
++    assert.equal(harness.controller.getSnapshot().status, "preparing");
++    assert.equal(harness.requests.length, 0);
++    harness.clock.elapseWithoutTimers(10_000);
++    queuedData({ data: recorder.chunks[0] });
++    queuedStop();
++    await settle();
++
++    assert.equal(harness.requests.length, 1);
++    assert.equal(harness.requests[0].durationMs, 500);
++    assert.equal(harness.controller.getSnapshot().status, "processing");
++    queuedStop();
++    await settle();
++    assert.equal(harness.requests.length, 1);
++  });
++
++  it("uses a bounded one-shot fallback if an inactive recorder loses onstop", async () => {
++    const harness = createHarness();
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.clock.tick(500);
++    harness.recorderInstances[0].state = "inactive";
++    assert.equal(harness.controller.stopCapture(), true);
++    assert.equal(harness.controller.getSnapshot().status, "preparing");
++    harness.clock.tick(999);
++    assert.equal(harness.controller.getSnapshot().status, "preparing");
++    harness.clock.tick(1);
++    await settle();
++    assert.equal(harness.controller.getSnapshot().status, "error");
++    assert.equal(harness.controller.getSnapshot().errorCode, "AUDIO_BODY_REQUIRED");
++    assert.equal(harness.requests.length, 0);
++    assert.equal(harness.clock.pending(), 0);
++  });
++
++  it("uses assistant purpose identity and its 60-second maximum even if mutable options request another purpose", async () => {
++    const pending = deferred();
++    const harness = createHarness({ purpose: "assistant_chat", transcribeImpl: () => pending.promise });
++    assert.equal(harness.controller.getSnapshot().purpose, "assistant_chat");
++    harness.controller.updateOptions({ purpose: "quick_record" });
++    assert.equal(await harness.controller.startCapture(), true);
++    harness.clock.tick(60_000);
++    await settle();
++    assert.equal(harness.requests.length, 1);
++    assert.equal(harness.requests[0].purpose, "assistant_chat");
++    assert.equal(harness.requests[0].durationMs, 60_000);
++    assert.equal(harness.controller.getSnapshot().purpose, "assistant_chat");
++  });
++
++  it("fails closed while inactive or disabled and recovers without replacing the controller", async () => {
++    const harness = createHarness();
++    harness.controller.updateOptions({ active: false });
++    assert.equal(await harness.controller.startCapture(), false);
++    assert.equal(harness.controller.getSnapshot().status, "idle");
++    assert.equal(harness.recorderInstances.length, 0);
++    harness.controller.updateOptions({ active: true, disabled: true });
++    assert.equal(await harness.controller.startCapture(), false);
++    assert.equal(harness.recorderInstances.length, 0);
++    harness.controller.updateOptions({ disabled: false });
++    assert.equal(await harness.controller.startCapture(), true);
++    assert.equal(harness.controller.getSnapshot().status, "recording");
++    assert.equal(harness.controller.cancelCapture("test_cleanup"), true);
++  });
++
++  it("retains only retry resources and clears every owned reference on terminal outcomes", async () => {
++    const retryHarness = createHarness({
++      transcribeImpl() { throw makeLifecycleError("ASR_TIMEOUT", "same_blob_retryable"); },
++    });
++    await recordFor(retryHarness);
++    assert.deepEqual(retryHarness.controller.getResourceDiagnosticsForTests().current, {
++      chunkCount: 0,
++      hasBlob: true,
++      hasKey: true,
++      hasRecorder: false,
++      hasStream: false,
++      hasSpeechRecognition: false,
++      hasRequestController: false,
++    });
++    assert.equal(retryHarness.controller.retry(), true);
++    await settle();
++    assert.equal(retryHarness.controller.getSnapshot().status, "error");
++    assert.equal(retryHarness.controller.getResourceDiagnosticsForTests().current, null);
++    assert.deepEqual(retryHarness.controller.getResourceDiagnosticsForTests().lastReleased, {
++      chunkCount: 0,
++      hasBlob: false,
++      hasKey: false,
++      hasRecorder: false,
++      hasStream: false,
++      hasSpeechRecognition: false,
++      hasRequestController: false,
++    });
++
++    const successHarness = createHarness();
++    await recordFor(successHarness);
++    assert.equal(successHarness.controller.getSnapshot().status, "succeeded");
++    assert.deepEqual(
++      successHarness.controller.getResourceDiagnosticsForTests().lastReleased,
++      retryHarness.controller.getResourceDiagnosticsForTests().lastReleased,
++    );
++  });
++
++  it("publishes Web Speech only as interim text and ignores its error", async () => {
++    const recognitions = [];
++    class FakeSpeechRecognition {
++      constructor() { recognitions.push(this); }
++      start() { this.started = true; }
++      abort() { this.aborted = true; }
++    }
++    const pending = deferred();
++    const harness = createHarness({ SpeechRecognitionImpl: FakeSpeechRecognition, transcribeImpl: () => pending.promise });
++    await harness.controller.startCapture();
++    recognitions[0].onresult({
++      resultIndex: 0,
++      results: [{ 0: { transcript: "浏览器临时文字" }, isFinal: false }],
++    });
++    recognitions[0].onerror(new Error("browser speech failed"));
++    assert.deepEqual(harness.interim, ["浏览器临时文字"]);
++    assert.equal(harness.controller.getSnapshot().status, "recording");
++    harness.clock.tick(500);
++    harness.controller.stopCapture();
++    await settle();
++    assert.equal(harness.controller.getSnapshot().status, "processing");
++  });
++
++  it("fences generation interim callbacks across disabled and logout render transitions", async () => {
++    for (const patch of [{ disabled: true }, { sessionEpoch: 1 }]) {
++      const recognitions = [];
++      class FakeSpeechRecognition {
++        constructor() { recognitions.push(this); }
++        start() { this.started = true; }
++        abort() { this.aborted = true; }
++      }
++      const harness = createHarness({ SpeechRecognitionImpl: FakeSpeechRecognition });
++      assert.equal(await harness.controller.startCapture(), true);
++      const lateInterim = recognitions[0].onresult;
++      harness.controller.updateOptions(patch);
++      lateInterim({
++        resultIndex: 0,
++        results: [{ 0: { transcript: "SHOULD_NOT_APPLY" }, isFinal: false }],
++      });
++      assert.deepEqual(harness.interim, []);
++      assert.equal(harness.controller.getSnapshot().status, "cancelled");
++      assert.equal(recognitions[0].aborted, true);
++      assert.equal(harness.tracks.every((track) => track.stopCalls === 1), true);
++      assert.equal(harness.clock.pending(), 0);
++    }
++  });
++
++  it("offers Web Speech only as an explicit interim fallback when server capture is unsupported", async () => {
++    const recognitions = [];
++    const interim = [];
++    let apiCalls = 0;
++    class FakeSpeechRecognition {
++      constructor() { recognitions.push(this); }
++      start() { this.started = true; }
++      abort() { this.aborted = true; }
++    }
++    const controller = createServerTranscriptionController({
++      purpose: "assistant_chat",
++      mediaDevices: {},
++      MediaRecorderImpl: undefined,
++      SpeechRecognitionImpl: FakeSpeechRecognition,
++      apiClient: { async transcribeAudio() { apiCalls += 1; } },
++      onInterimText(text) { interim.push(text); },
++    });
++
++    assert.equal(controller.getSnapshot().supported, false);
++    assert.equal(controller.getSnapshot().browserInterimAvailable, true);
++    assert.equal(await controller.startCapture(), false);
++    assert.equal(controller.startBrowserInterim(), true);
++    assert.equal(controller.getSnapshot().browserInterimActive, true);
++    recognitions[0].onresult({
++      resultIndex: 0,
++      results: [{ 0: { transcript: "仅临时显示" }, isFinal: true }],
++    });
++    assert.deepEqual(interim, ["仅临时显示"]);
++    assert.equal(controller.getSnapshot().interimText, "仅临时显示");
++    assert.equal(apiCalls, 0);
++    assert.equal(controller.stopBrowserInterim(), true);
++    assert.equal(controller.getSnapshot().browserInterimActive, false);
++    assert.equal(recognitions[0].aborted, true);
++
++    controller.updateOptions({ active: false });
++    assert.equal(controller.startBrowserInterim(), false);
++    controller.updateOptions({ active: true, disabled: true });
++    assert.equal(controller.startBrowserInterim(), false);
++    controller.updateOptions({ disabled: false });
++    assert.equal(controller.startBrowserInterim(), true);
++    assert.equal(controller.stopBrowserInterim(), true);
++  });
++});
+diff --git a/outputs/product-design-prototype/src/components/audio/VoiceCaptureControl.jsx b/outputs/product-design-prototype/src/components/audio/VoiceCaptureControl.jsx
+new file mode 100644
+index 0000000000000000000000000000000000000000..8065202b38792a37f4cc25d6f6b57569e75cfd41
+--- /dev/null
++++ b/outputs/product-design-prototype/src/components/audio/VoiceCaptureControl.jsx
+@@ -0,0 +1,288 @@
++import { useRef } from "react";
++
++import { useServerTranscription } from "../../audio/useServerTranscription.js";
++
++const BUSY_STATUSES = new Set(["requesting_permission", "preparing", "processing"]);
++
++export function updateSyntheticClickToken(tokenRef, event) {
++  if (event.pointerType === "mouse") {
++    // A real mouse click always has its own pointerdown. Clearing here means a
++    // cancelled touch gesture that emitted no click cannot swallow that click.
++    tokenRef.current = null;
++    return false;
++  }
++  tokenRef.current = { pointerId: event.pointerId, pointerType: event.pointerType };
++  return true;
++}
++
++export function consumeSyntheticClickToken(tokenRef) {
++  if (!tokenRef.current) return false;
++  tokenRef.current = null;
++  return true;
++}
++
++export function runPrimaryKeyboardAction(event, transcription, primary, primaryDisabled) {
++  if (event.repeat) {
++    event.preventDefault();
++    return false;
++  }
++  if (event.key === "Escape") {
++    event.preventDefault();
++    transcription.cancelCapture("keyboard_escape");
++    return true;
++  }
++  if (event.key !== " " && event.key !== "Enter") return false;
++  event.preventDefault();
++  if (primaryDisabled) return false;
++  primary.action();
++  return true;
++}
++
++export function beginTouchCapture(transcription, gesture, pointerId) {
++  gesture.pointerId = pointerId;
++  gesture.startedCapture = false;
++  if (BUSY_STATUSES.has(transcription.status)) {
++    return Boolean(transcription.cancelCapture?.("pointer_busy_cancel"));
++  }
++  if (
++    transcription.status === "recording"
++    || transcription.status === "rate_limited"
++    || transcription.disabled
++    || !transcription.supported
++  ) {
++    return false;
++  }
++  // Bind pointerup to what this pointerdown initiated. startCapture is async
++  // while permission is pending, so the gesture cannot depend on its Promise.
++  gesture.startedCapture = true;
++  transcription.startCapture?.();
++  return true;
++}
++
++export function finishTouchCapture(transcription) {
++  // Query the controller through its return value instead of trusting the
++  // render-time status captured before a fast pointerup event.
++  if (transcription.stopCapture?.()) return true;
++  return Boolean(transcription.cancelCapture?.("pointer_up_before_permission"));
++}
++
++export function finishTouchGesture(transcription, gesture, pointerId) {
++  if (gesture.pointerId !== pointerId) return false;
++  const shouldFinish = gesture.startedCapture;
++  gesture.pointerId = null;
++  gesture.startedCapture = false;
++  return shouldFinish ? finishTouchCapture(transcription) : false;
++}
++
++export function cancelTouchGesture(transcription, gesture, pointerId, reason = "pointer_cancel") {
++  if (gesture.pointerId !== pointerId) return false;
++  const shouldCancel = gesture.startedCapture;
++  gesture.pointerId = null;
++  gesture.startedCapture = false;
++  return shouldCancel ? Boolean(transcription.cancelCapture?.(reason)) : false;
++}
++
++export function isPointerInsideTarget(event) {
++  const rect = event.currentTarget?.getBoundingClientRect?.();
++  if (!rect) return true;
++  const { clientX, clientY } = event;
++  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
++  return (
++    clientX >= rect.left
++    && clientX <= rect.right
++    && clientY >= rect.top
++    && clientY <= rect.bottom
++  );
++}
++
++export function moveTouchGesture(transcription, gesture, event) {
++  if (
++    event.pointerType === "mouse"
++    || gesture.pointerId !== event.pointerId
++    || !gesture.startedCapture
++    || isPointerInsideTarget(event)
++  ) {
++    return false;
++  }
++  return cancelTouchGesture(transcription, gesture, event.pointerId, "pointer_leave");
++}
++
++export function releaseTouchGesture(transcription, gesture, event) {
++  if (event.pointerType === "mouse" || gesture.pointerId !== event.pointerId) return false;
++  if (!isPointerInsideTarget(event)) {
++    return cancelTouchGesture(transcription, gesture, event.pointerId, "pointer_leave");
++  }
++  return finishTouchGesture(transcription, gesture, event.pointerId);
++}
++
++function primaryAction(transcription) {
++  if (transcription.status === "recording") {
++    return { label: "停止录音", action: transcription.stopCapture, disabled: false };
++  }
++  if (BUSY_STATUSES.has(transcription.status)) {
++    return { label: "取消转写", action: () => transcription.cancelCapture("user_cancel"), disabled: false };
++  }
++  return {
++    label: "开始录音",
++    action: transcription.startCapture,
++    disabled: transcription.status === "rate_limited" || !transcription.supported,
++  };
++}
++
++export function VoiceCaptureControlView({
++  transcription,
++  disabled = false,
++  className = "",
++  compact = false,
++}) {
++  const syntheticClickToken = useRef(null);
++  const touchGesture = useRef({ pointerId: null, startedCapture: false });
++  const primary = primaryAction(transcription);
++  const primaryDisabled = disabled || transcription.disabled || primary.disabled;
++  const recording = transcription.status === "recording";
++
++  function toggleFromKeyboard(event) {
++    runPrimaryKeyboardAction(event, transcription, primary, primaryDisabled);
++  }
++
++  function handlePointerDown(event) {
++    if (event.pointerType === "mouse") {
++      updateSyntheticClickToken(syntheticClickToken, event);
++      return;
++    }
++    if (primaryDisabled || recording) return;
++    updateSyntheticClickToken(syntheticClickToken, event);
++    event.currentTarget.setPointerCapture?.(event.pointerId);
++    beginTouchCapture(transcription, touchGesture.current, event.pointerId);
++  }
++
++  function handlePointerUp(event) {
++    releaseTouchGesture(transcription, touchGesture.current, event);
++  }
++
++  function handlePointerMove(event) {
++    if (!moveTouchGesture(transcription, touchGesture.current, event)) return;
++    try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch { /* already released */ }
++  }
++
++  function handlePointerCancel(event) {
++    if (event.pointerType === "mouse") return;
++    cancelTouchGesture(transcription, touchGesture.current, event.pointerId);
++  }
++
++  function handleClick() {
++    if (consumeSyntheticClickToken(syntheticClickToken)) return;
++    if (!primaryDisabled) primary.action();
++  }
++
++  return (
++    <section
++      className={`voice-capture-control${compact ? " voice-capture-control--compact" : ""}${className ? ` ${className}` : ""}`}
++      data-state={transcription.status}
++      data-recording-generation={transcription.recordingGeneration}
++    >
++      <div className="voice-capture-control__actions">
++        <button
++          type="button"
++          className="voice-capture-control__primary"
++          aria-label={primary.label}
++          aria-pressed={recording}
++          disabled={primaryDisabled}
++          style={{ minWidth: 44, minHeight: 44 }}
++          onClick={handleClick}
++          onKeyDown={toggleFromKeyboard}
++          onPointerDown={handlePointerDown}
++          onPointerMove={handlePointerMove}
++          onPointerUp={handlePointerUp}
++          onPointerCancel={handlePointerCancel}
++          onPointerLeave={(event) => {
++            if (
++              event.pointerType !== "mouse"
++              && touchGesture.current.pointerId === event.pointerId
++              && touchGesture.current.startedCapture
++            ) {
++              cancelTouchGesture(
++                transcription,
++                touchGesture.current,
++                event.pointerId,
++                "pointer_leave",
++              );
++            }
++          }}
++        >
++          <span aria-hidden="true">{recording ? "●" : "◉"}</span>
++          <span>{primary.label}</span>
++        </button>
++
++        {transcription.status === "retryable_error" ? (
++          <button
++            type="button"
++            className="voice-capture-control__retry"
++            onClick={transcription.retry}
++            disabled={disabled || transcription.retryCountdownSeconds > 0 || transcription.sameBlobRetryCount >= 1}
++          >
++            {transcription.retryCountdownSeconds > 0
++              ? `${transcription.retryCountdownSeconds} 秒后可重试`
++              : "人工重试一次"}
++          </button>
++        ) : null}
++
++        {!transcription.supported && transcription.browserInterimAvailable ? (
++          <button
++            type="button"
++            className="voice-capture-control__browser-interim"
++            onClick={transcription.browserInterimActive
++              ? transcription.stopBrowserInterim
++              : transcription.startBrowserInterim}
++            disabled={disabled}
++          >
++            {transcription.browserInterimActive ? "停止浏览器临时识别" : "浏览器临时识别"}
++          </button>
++        ) : null}
++      </div>
++
++      <div className="voice-capture-control__status" role="status" aria-live="polite" aria-atomic="true">
++        <strong>{transcription.statusText}</strong>
++        <span>{transcription.secondaryText}</span>
++        {transcription.status === "rate_limited" && transcription.rateLimitCountdownSeconds > 0 ? (
++          <span>{transcription.rateLimitCountdownSeconds} 秒后可重新录音</span>
++        ) : null}
++        {transcription.interimText ? (
++          <span>
++            浏览器临时识别：{transcription.interimText}（以服务端最终结果为准）
++          </span>
++        ) : null}
++      </div>
++    </section>
++  );
++}
++
++export default function VoiceCaptureControl({
++  apiClient,
++  purpose = "quick_record",
++  onTranscript,
++  onInterimText,
++  disabled = false,
++  active = true,
++  sessionEpoch,
++  className,
++  compact,
++}) {
++  const transcription = useServerTranscription({
++    apiClient,
++    purpose,
++    onTranscript,
++    onInterimText,
++    active,
++    disabled,
++    sessionEpoch,
++  });
++  return (
++    <VoiceCaptureControlView
++      transcription={{ ...transcription, disabled: disabled || !active }}
++      disabled={disabled || !active}
++      className={className}
++      compact={compact}
++    />
++  );
++}

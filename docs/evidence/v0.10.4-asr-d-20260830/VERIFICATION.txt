@@ -1,0 +1,395 @@
+Sentelligent Sales Workbench v0.10.4 — Frontend ASR Capture Slice D Verification
+Date: 2026-08-30
+
+IDENTITY
+========
+WORKTREE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d
+BRANCH=codex/v0104-asr-capture-d
+BASE_SHA=7ff9e4cce204074ffdb584b1ea04630e5343f79c
+BASE_TREE=e1cde860912d6d1d2e98b1b2a8a64563825fed6b
+RESULT=ACCEPT_SLICE_D_FINAL
+
+CHANGED BRANCH / FIELDS / CONTRACTS
+===================================
+Changed branch: codex/v0104-asr-capture-d from the exact BASE_SHA and BASE_TREE above.
+Changed capture fields: purpose, active, disabled, sessionEpoch, status,
+recordingGeneration, durationMs, interimText, retry/countdown fields, fixed ASR
+request headers, raw audio Blob, AbortSignal, and an in-memory idempotency key.
+Changed media contract: WebM Opus, AAC MP4, generic MP4, Ogg Opus, then browser
+default; minimum 300 ms; maximum 8 MiB; quick_record 120 seconds/10000 JS code
+units; assistant_chat 60 seconds/2000 JS code units.
+Changed transport contract: authenticated raw-Blob POST, Cookie/CSRF boundary,
+fixed language/purpose/duration/media/idempotency inputs, pure decimal Retry-After
+1..300 only, sanitized response/error schema, no provider/debug/body leakage, and
+one explicit same-Blob retry within a fixed five-minute retention window.
+Changed controller contract: idle -> requesting_permission -> recording -> preparing
+-> processing -> terminal state; monotonic generation and logout fences; atomic stop
+time; bounded lost-onstop fallback; exact long-duration rejection; fail-closed
+active/disabled/sessionEpoch/purpose transitions; AbortController, timer, stream,
+chunk, Blob, key, and request reference release on every terminal path.
+Changed interaction contract: real transformed React JSX, StrictMode lifecycle,
+pointer capture with bounds checks, touch/pen synthetic-click scoping, pointer-leave
+cancellation, keyboard repeat suppression, Enter/Space/Escape behavior, 44 px primary
+control, dynamic aria-label, and aria-live status. No audio playback, object URL,
+XHR, download, history, or persistence path was introduced.
+Changed API client contract: ASR success is reconstructed from the exact allowlist;
+non-aborted ASR 401 invalidates once and returns only UNAUTHORIZED with
+release_and_rerecord while preserving requestId. The private logout fence is named
+sessionEpoch consistently; the superseded logoutToken name has zero source/test hits.
+No package.json change was made. No real microphone, ASR provider, model credential,
+production service, push, or deployment action was invoked.
+
+AUTHORIZED CODE / TEST PATHS (EXACTLY TEN)
+==========================================
+outputs/product-design-prototype/src/audio/recordingCapabilities.js
+outputs/product-design-prototype/src/audio/serverTranscription.js
+outputs/product-design-prototype/src/audio/useServerTranscription.js
+outputs/product-design-prototype/src/components/audio/VoiceCaptureControl.jsx
+outputs/product-design-prototype/src/audio/recordingCapabilities.test.js
+outputs/product-design-prototype/src/audio/serverTranscription.test.js
+outputs/product-design-prototype/src/audio/useServerTranscription.test.js
+outputs/product-design-prototype/scripts/asr-capture.test.mjs
+outputs/product-design-prototype/src/api/salesWorkbenchApi.js
+outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
+
+EVIDENCE ARTIFACT PATHS (EXACTLY FOUR)
+======================================
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/MODIFIED_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/VERIFICATION.txt
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/ROLLBACK.sh
+
+BASELINE
+========
+Input:
+  detached worktree /tmp/v0104-asr-d-apply-copy-20260830-final at
+  7ff9e4cce204074ffdb584b1ea04630e5343f79c.
+Exact commands:
+  git worktree add --detach /tmp/v0104-asr-d-apply-copy-20260830-final 7ff9e4cce204074ffdb584b1ea04630e5343f79c
+  git -C /tmp/v0104-asr-d-apply-copy-20260830-final rev-parse HEAD
+  npm --prefix /tmp/v0104-asr-d-apply-copy-20260830-final/outputs/product-design-prototype run test:api
+Literal result:
+  APPLY_COPY_HEAD=7ff9e4cce204074ffdb584b1ea04630e5343f79c
+  ℹ tests 65
+  ℹ suites 1
+  ℹ pass 65
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 90.35075
+  BASELINE_API_EXIT=0
+Exit status: worktree add=0; rev-parse=0; baseline API test=0.
+Baseline behavior/status: the existing API client suite passed 65/65; both baseline
+API paths existed; the eight new ASR source/test paths were absent.
+
+MODIFIED VERIFICATION
+=====================
+1. Syntax
+Exact command/input:
+  for each non-JSX code/test path among the exact ten: node --check PATH
+Literal result:
+  nine NODE_CHECK entries completed without parser output
+  NODE_CHECK_RESULT=PASS
+Exit status: 0.
+
+2. Frozen direct ASR/API/real-JSX suite
+Exact command/input:
+  node --test \
+    outputs/product-design-prototype/src/audio/recordingCapabilities.test.js \
+    outputs/product-design-prototype/src/audio/serverTranscription.test.js \
+    outputs/product-design-prototype/src/audio/useServerTranscription.test.js \
+    outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js \
+    outputs/product-design-prototype/scripts/asr-capture.test.mjs
+Literal result:
+  ℹ tests 128
+  ℹ suites 6
+  ℹ pass 128
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 1658.264542
+  DIRECT_SESSION_EPOCH_EXIT=0
+Exit status: 0.
+Log: /tmp/v0104-asr-d-direct-session-epoch.log
+Log SHA-256: 0d26ddabc064d11ab42fb8cd1e9cd14099d127f3a0e7577d227fdf47990ffa9a
+
+3. Production frontend build
+Exact command/input:
+  npm --prefix outputs/product-design-prototype run build
+Literal result:
+  ✓ 1850 modules transformed.
+  ✓ built in 1.70s
+  BUILD_SESSION_EPOCH_EXIT=0
+Exit status: 0.
+Log SHA-256: c82da657de41c3230709a40805e41a678ada4f4eb927ee61a2b68d577a560470
+
+4. Full frontend local QA
+Exact command/input:
+  CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npm --prefix outputs/product-design-prototype run qa:local
+Literal result:
+  every qa:local command completed; final frontend secret scan returned:
+  {
+    "status": "passed",
+    "scannedFiles": 770,
+    "findings": []
+  }
+  QA_LOCAL_SESSION_EPOCH_FINAL_EXIT=0
+Exit status: 0.
+Log SHA-256: 731368ec026a249949762bde5c9022a85bc98d1957068328d8af0bcaa095a2d6
+
+5. Native Chrome integration QA
+Exact command/input:
+  CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npm --prefix outputs/product-design-prototype run qa:integration
+Literal result:
+  "status": "passed"
+  "runtimeMode": "native"
+  all recorded viewport overflowX values: 0
+  QA_INTEGRATION_SESSION_EPOCH_EXIT=0
+Exit status: 0.
+Log SHA-256: 9b2552bd070b3ba7857c4d502493f4604fe723556438a11063755c447d0b588f
+
+6. Real WebKit QA
+Exact command/input:
+  npm --prefix outputs/product-design-prototype run qa:webkit
+Literal result:
+  "status": "passed"
+  "engine": "webkit"
+  "browserVersion": "26.5"
+  every published check: true
+  QA_WEBKIT_SESSION_EPOCH_EXIT=0
+Exit status: 0.
+Log SHA-256: 4a42bcf39843226daa6035f516b946eb078b465bc61c7c999896ea2f69de7d99
+
+7. Full backend regression
+Exact command/input:
+  npm --prefix backend test
+Literal result:
+  ℹ tests 1433
+  ℹ suites 166
+  ℹ pass 1433
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 19503.598375
+  BACKEND_SESSION_EPOCH_EXIT=0
+Exit status: 0.
+Log SHA-256: 0fa1ef9ad597a9135c9d5a993a2307b8a97d8e047b0b726f60ab630369bd4b93
+
+8. Full deploy/release regression and root history secret scan
+Exact command/input:
+  npm run test:deploy
+Literal result:
+  {
+    "status": "passed",
+    "scannedFiles": 770,
+    "scannedGitObjects": 3538,
+    "scannedGitMessages": 605,
+    "gitHistoryComplete": true,
+    "findings": []
+  }
+  ℹ tests 251
+  ℹ suites 18
+  ℹ pass 249
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 2
+  ℹ todo 0
+  ℹ duration_ms 105436.982958
+  DEPLOY_SESSION_EPOCH_EXIT=0
+Exit status: 0.
+Log SHA-256: 7436fb7c7d40d7a9130c1534f994819e610d3c0421b677acb97afc3a4efd99e3
+
+9. Private session-fence field cleanup
+Exact command/input:
+  rg -n --hidden --glob '!node_modules' 'logoutToken|callbackLogoutToken|previousLogoutToken' outputs/product-design-prototype/src/audio outputs/product-design-prototype/src/components/audio outputs/product-design-prototype/scripts/asr-capture.test.mjs
+Literal result:
+  no output; old-name match count=0
+Exit status: 1, the documented ripgrep no-match status.
+Focused replacement verification: 39 tests, 2 suites, 39 pass, 0 fail, exit 0.
+
+INDEPENDENT MODIFIED-COPY TEST
+==============================
+Input:
+  detached worktree /tmp/v0104-asr-d-apply-copy-20260830-final at BASE_SHA,
+  with only the formal frontend node_modules directory linked for the real JSX test.
+Exact commands:
+  git -C /tmp/v0104-asr-d-apply-copy-20260830-final apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  git -C /tmp/v0104-asr-d-apply-copy-20260830-final apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  Python read_bytes comparison of all ten modified-copy paths against the formal worktree
+  (cd /tmp/v0104-asr-d-apply-copy-20260830-final && node --test outputs/product-design-prototype/src/audio/recordingCapabilities.test.js outputs/product-design-prototype/src/audio/serverTranscription.test.js outputs/product-design-prototype/src/audio/useServerTranscription.test.js outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js outputs/product-design-prototype/scripts/asr-capture.test.mjs)
+Literal result:
+  APPLY_CHECK_EXIT=0
+  APPLY_EXIT=0
+  ten MODIFIED_COPY_PATH entries each RESULT=IDENTICAL
+  MODIFIED_COPY_BYTE_COMPARE_EXIT=0
+  ℹ tests 128
+  ℹ suites 6
+  ℹ pass 128
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 1853.937417
+  MODIFIED_DIRECT_EXIT=0
+  INDEPENDENT_APPLY_PIPELINE_EXIT=0
+Exit status: 0.
+Restored/formal status: the independent copy carried the exact modified bytes, while
+the formal worktree remained changed.
+
+ROLLBACK VERIFICATION
+=====================
+Input:
+  second detached worktree /tmp/v0104-asr-d-rollback-copy-20260830-final at
+  BASE_SHA, modified by applying the sibling DIFF_FILE.
+Exact commands:
+  git -C /tmp/v0104-asr-d-rollback-copy-20260830-final apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  git -C /tmp/v0104-asr-d-rollback-copy-20260830-final apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/ROLLBACK.sh /tmp/v0104-asr-d-rollback-copy-20260830-final
+  npm --prefix /tmp/v0104-asr-d-rollback-copy-20260830-final/outputs/product-design-prototype run test:api
+  unlink /tmp/v0104-asr-d-rollback-copy-20260830-final/outputs/product-design-prototype/node_modules
+  git -C /tmp/v0104-asr-d-rollback-copy-20260830-final status --short
+  Python base-blob/absence comparison for the exact ten paths
+Literal rollback output/result:
+  ROLLBACK_PATH=outputs/product-design-prototype/src/audio/recordingCapabilities.js RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/audio/serverTranscription.js RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/audio/useServerTranscription.js RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/components/audio/VoiceCaptureControl.jsx RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/audio/recordingCapabilities.test.js RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/audio/serverTranscription.test.js RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/audio/useServerTranscription.test.js RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/scripts/asr-capture.test.mjs RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/api/salesWorkbenchApi.js RESULT=RESTORED
+  ROLLBACK_PATH=outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js RESULT=RESTORED
+  ROLLBACK_RESULT=RESTORED BASE_SHA=7ff9e4cce204074ffdb584b1ea04630e5343f79c BASE_TREE=e1cde860912d6d1d2e98b1b2a8a64563825fed6b PATHS=10
+  ROLLBACK_SCRIPT_EXIT=0
+  ℹ tests 65
+  ℹ suites 1
+  ℹ pass 65
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 94.599
+  ROLLBACK_BASELINE_API_EXIT=0
+  ROLLBACK_GIT_STATUS=CLEAN
+  two original API paths: RESULT=BASE_BLOB_IDENTICAL
+  eight new ASR paths: RESULT=ABSENT
+  ROLLBACK_BASE_REOPEN_EXIT=0
+  RESTORED_BEHAVIOR=BASE_API_65_OF_65_PASS STATUS=CLEAN EIGHT_NEW_ASR_PATHS_ABSENT
+  INDEPENDENT_ROLLBACK_PIPELINE_EXIT=0
+Exit status: 0.
+Restored behavior/status: both original API files exactly matched their BASE_SHA blobs;
+all eight baseline-missing ASR files were absent; the target Git status was clean; the
+baseline API behavior was restored at 65/65.
+
+ORIGINAL AND MODIFIED FILE SHA-256
+=================================
+BASE_MISSING -> 38d56fcba89317b570732afcea97f6d06218185c168f64f1238b677af7f197e6  outputs/product-design-prototype/src/audio/recordingCapabilities.js
+BASE_MISSING -> faca0398c77f1044066961b791cefb65fba7e7f2c8d9b23fb294e78945070889  outputs/product-design-prototype/src/audio/serverTranscription.js
+BASE_MISSING -> d0d24fea687c7e0f32340394c4a2852e654e0a4c51a5644395586b9e20454d74  outputs/product-design-prototype/src/audio/useServerTranscription.js
+BASE_MISSING -> 4e3850348e5e8800742bbc6322cac760ed7393aa38288162c2a06361c029117f  outputs/product-design-prototype/src/components/audio/VoiceCaptureControl.jsx
+BASE_MISSING -> 3e25781a034bf4b7f8a9206c3e0d96cfbaad80e806594defbe1f008594242bd2  outputs/product-design-prototype/src/audio/recordingCapabilities.test.js
+BASE_MISSING -> a625cdcd32b03c3358237f8f9a9b4ea3092de6339d901f58eb352c55db031f3e  outputs/product-design-prototype/src/audio/serverTranscription.test.js
+BASE_MISSING -> 936c9854ac8f128e6e10f116bae96509727df72ff452c6910f6703ba14cc7846  outputs/product-design-prototype/src/audio/useServerTranscription.test.js
+BASE_MISSING -> 12a39bf62bdd100e2875a53fb6712ce37e34e783b59c66890822bb0412af9584  outputs/product-design-prototype/scripts/asr-capture.test.mjs
+4206c51a66b12f1247b8a4586eaa76ddf7215483c926dcb190e1b9b6743de41a -> 533e2eee023b57487524fbb096ba61a06578b8527aa986e385b1b5b6c144031a  outputs/product-design-prototype/src/api/salesWorkbenchApi.js
+b8c77d319dd904d8832c3d64c39663a82a729114a1fda7cd240bdd58b8c5abc7 -> 91b5a980f10f4cd57368b7b071cd4d4c8970d77b94e1dcada8d0cf6c4fd7b320  outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
+
+ARTIFACT SHA-256
+===============
+35866d707fccab0ce9ddb12ad471ee6ad4083bbfcde24b8bb139edd3963bf060  MODIFIED_FILE
+8d306ffe51fd1156ace9640b9074d777a46f8b733346efc65f9634b54dc1dff8  DIFF_FILE
+4471470114ba31d3550804b20a98adf2330cc68fcc012fe508244fb6c8658621  ROLLBACK.sh
+VERIFICATION.txt SHA-256 is computed only after this text is finalized and is reported
+with the final commit evidence so the file does not claim its own stale hash.
+
+ARTIFACT REOPEN / SAFEGUARD RESULT
+==================================
+MODIFIED_FILE is a deterministic USTAR archive with fixed uid/gid/mtime and exactly
+the ten allowlisted code/test paths. tar listing returned ten entries; safety checks
+rejected link/directory/absolute/traversal members; isolated extraction and Python
+read_bytes comparison returned ten RESULT=IDENTICAL lines and exit 0.
+DIFF_FILE is the exact --binary --full-index patch from BASE_SHA for the ten paths;
+a fresh disposable-index regeneration matched it byte-for-byte, git apply --check and
+independent apply exited 0, and its SHA-256 is recorded above.
+ROLLBACK.sh is executable; sh -n exited 0; it reverse-checks/applies the sibling patch,
+verifies BASE_SHA/BASE_TREE and every base blob/absence, and passed in the second
+independent modified copy.
+
+FINAL POST-ARTIFACT CHECKS
+==========================
+1. Root project secret/history scan with all four artifacts present
+Exact command/input:
+  npm run scan:secrets
+Literal result:
+  {
+    "status": "passed",
+    "scannedFiles": 772,
+    "scannedGitObjects": 3538,
+    "scannedGitMessages": 605,
+    "gitHistoryComplete": true,
+    "findings": []
+  }
+  POST_ARTIFACT_SECRET_PREAUDIT_EXIT=0
+Exit status: 0.
+
+2. Exact evidence directory and artifact reopen
+Exact commands/input:
+  find docs/evidence/v0.10.4-asr-d-20260830 -mindepth 1 -maxdepth 1 -type f -print
+  tar -tf docs/evidence/v0.10.4-asr-d-20260830/MODIFIED_FILE
+  inspect archive member safety; extract in an isolated TemporaryDirectory; Python read_bytes compare all ten members
+  regenerate --binary --full-index DIFF_FILE through a disposable index and byte-compare it
+  git apply --numstat docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  sh -n docs/evidence/v0.10.4-asr-d-20260830/ROLLBACK.sh
+  test -x docs/evidence/v0.10.4-asr-d-20260830/ROLLBACK.sh
+Literal result:
+  EVIDENCE_EXACT_FILES=4 EXIT=0
+  TAR_ENTRY_COUNT=10 EXIT=0
+  ten ARCHIVE_CMP entries each RESULT=IDENTICAL
+  ARCHIVE_EXTRACT_COMPARE_EXIT=0
+  DIFF_FILE_REOPEN_CMP_RESULT=IDENTICAL EXIT=0
+  DIFF_NUMSTAT_PATH_COUNT=10 EXIT=0
+  ROLLBACK_REOPEN_SYNTAX_EXECUTABLE=PASS EXIT=0
+Exit status: 0.
+
+3. Final diff/index/path boundary before the independent artifact audit
+Exact commands/input:
+  git diff --check
+  disposable BASE_SHA index: add and check the exact ten code/test paths
+  git diff --cached --name-only
+  validate the union of git diff --name-only and git ls-files --others --exclude-standard against the exact fourteen expected paths
+  whitespace-check VERIFICATION.txt and ROLLBACK.sh as new text files
+Literal result:
+  WORKTREE_DIFF_CHECK_EXIT=0
+  FINAL_CODE_CACHED_DIFF_CHECK_EXIT=0
+  FINAL_CODE_STAGED_PATHS=10
+  FORMAL_INDEX_PATHS=0
+  FINAL_CHANGED_PATH_COUNT=14 EXIT=0
+  VERIFICATION_WHITESPACE_CHECK=CLEAN OUTPUT_BYTES=0
+  ROLLBACK_WHITESPACE_CHECK=CLEAN OUTPUT_BYTES=0
+Exit status: 0.
+Resulting path boundary: exactly ten authorized code/test paths plus exactly four
+evidence artifacts; no formal-index entry and no additional Git-visible path.
+
+
+SEVERITY / ACCEPTANCE
+=====================
+Independent frozen-code audit before artifact finalization: P0=0; P1=0; behavior P2=0.
+Independent final artifact audit (fresh no-hardlink clone, 2026-08-30):
+Input: BASE_SHA 7ff9e4cce204074ffdb584b1ea04630e5343f79c and BASE_TREE e1cde860912d6d1d2e98b1b2a8a64563825fed6b; the four artifacts at the absolute paths above; the formal worktree remained modified.
+Exact commands/actions: reopen all four files; `test -x ROLLBACK.sh`; `sh -n ROLLBACK.sh`; SHA-256 all four current artifacts; clone without hardlinks and detach at BASE_SHA; run baseline `npm --prefix COPY/outputs/product-design-prototype run test:api`; `git -C COPY apply --check DIFF_FILE`; apply DIFF_FILE; safely inspect/extract MODIFIED_FILE and compare every member byte-for-byte with both COPY and the formal worktree; run the five-file direct `node --test` command; execute `ROLLBACK.sh COPY`; rerun baseline API test; remove the test-only node_modules link; compare the two original paths with BASE_SHA blobs, verify the eight new paths are absent, and require clean Git status.
+Literal result: all four files reopened; ROLLBACK executable=true and `sh -n` exit 0; BASE_HEAD=7ff9e4cce204074ffdb584b1ea04630e5343f79c; BASE_TREE=e1cde860912d6d1d2e98b1b2a8a64563825fed6b; BASELINE_API tests=65 suites=1 pass=65 fail=0 exit=0; APPLY_CHECK_EXIT=0; APPLY_EXIT=0; MODIFIED_FILE safe regular-member count=10 and all ten modified paths `RESULT=IDENTICAL`; modified direct suite tests=128 suites=6 pass=128 fail=0 exit=0; ROLLBACK printed ten `RESULT=RESTORED` lines and `ROLLBACK_RESULT=RESTORED ... PATHS=10`; rollback script exit=0; restored API tests=65 suites=1 pass=65 fail=0 exit=0; two original API paths `RESULT=BASE_BLOB_IDENTICAL`; eight new ASR paths `RESULT=ABSENT`; rollback reopen count=10; rollback Git status=CLEAN; final independent audit exit=0.
+Observed immutable artifact SHA-256: MODIFIED_FILE=35866d707fccab0ce9ddb12ad471ee6ad4083bbfcde24b8bb139edd3963bf060; DIFF_FILE=8d306ffe51fd1156ace9640b9074d777a46f8b733346efc65f9634b54dc1dff8; ROLLBACK.sh=4471470114ba31d3550804b20a98adf2330cc68fcc012fe508244fb6c8658621. The pre-insertion VERIFICATION.txt read during the successful audit had SHA-256 b903a7de7930c1c5655a689db4e1206436469ac10728e263772c5bfe8946dd34; its final post-insertion hash must be reported externally rather than self-embedded.
+Final severity: P0=0; P1=0; behavior P2=0. Final recommendation: ACCEPT Slice D for integration. No commit, push, deploy, real microphone, real provider, real credential, or production call was performed by the auditor.
+Recommendation: ACCEPT Slice D.
+
+SIDE-EFFECT STATUS
+==================
+PUSH=NOT_PERFORMED
+DEPLOY=NOT_PERFORMED
+REAL_MICROPHONE_OR_ASR_PROVIDER_CALL=NOT_PERFORMED
+REAL_MODEL_CREDENTIAL_OR_PRODUCTION_CALL=NOT_PERFORMED
+FORMAL_WORKTREE=MODIFIED_PENDING_COMMIT

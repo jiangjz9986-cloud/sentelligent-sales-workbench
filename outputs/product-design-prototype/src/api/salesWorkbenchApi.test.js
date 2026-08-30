@@ -571,6 +571,298 @@ it("rejects invoice candidate responses without a concurrency version", async ()
   );
 });
 
+describe("ASR transcription API client", () => {
+  const sampleSuccess = (overrides = {}) => ({
+    requestId: "asr-request-1",
+    item: {
+      transcript: "服务端转写文字",
+      language: "zh-CN",
+      durationMs: 860,
+      source: "server_asr",
+      replayed: false,
+      ...overrides,
+    },
+  });
+
+  it("parses Retry-After only as a single decimal integer in the inclusive 1..300 range", () => {
+    for (const [input, expected] of [["1", 1], ["017", 17], ["300", 300]]) {
+      assert.equal(salesWorkbenchApiModule.parseRetryAfterSeconds(input), expected);
+    }
+    for (const input of [null, undefined, "", "0", "-1", "301", "1.5", "Wed, 30 Aug 2026 10:00:00 GMT", "1, 2", " 1 ", "+1"]) {
+      assert.equal(salesWorkbenchApiModule.parseRetryAfterSeconds(input), null, String(input));
+    }
+  });
+
+  it("posts the raw Blob with Cookie, CSRF, fixed language, duration, key, and AbortSignal", async () => {
+    const calls = [];
+    const blob = new Blob(["synthetic-audio"], { type: "audio/webm;codecs=opus" });
+    const controller = new AbortController();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return jsonResponse(sampleSuccess());
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const result = await api.transcribeAudio({
+      blob,
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      signal: controller.signal,
+    });
+
+    assert.deepEqual(result, sampleSuccess());
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://example.test/api/asr/transcriptions?purpose=quick_record");
+    assert.equal(calls[0].options.method, "POST");
+    assert.equal(calls[0].options.credentials, "include");
+    assert.strictEqual(calls[0].options.body, blob);
+    assert.strictEqual(calls[0].options.signal, controller.signal);
+    assert.equal(headerValue(calls[0].options, "Content-Type"), "audio/webm;codecs=opus");
+    assert.equal(headerValue(calls[0].options, "Idempotency-Key"), "asr:12345678-1234-4234-9234-123456789abc");
+    assert.equal(headerValue(calls[0].options, "X-Audio-Duration-Ms"), "860");
+    assert.equal(headerValue(calls[0].options, "X-ASR-Language"), "zh-CN");
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "fixture-csrf-token");
+    assert.equal(headerValue(calls[0].options, "Authorization"), undefined);
+  });
+
+  it("accepts replayed success and enforces the response schema and purpose text limit", async () => {
+    const validApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse(sampleSuccess({ replayed: true })),
+    });
+    validApi.setSession({ csrfToken: "csrf" });
+    assert.equal((await validApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/mp4" }),
+      purpose: "assistant_chat",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    })).item.replayed, true);
+
+    const allowedControlBoundary = "第一行\n\t第二行\u007F\u0085";
+    const boundaryApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse(sampleSuccess({ transcript: allowedControlBoundary })),
+    });
+    boundaryApi.setSession({ csrfToken: "csrf" });
+    assert.equal((await boundaryApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/mp4" }),
+      purpose: "assistant_chat",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    })).item.transcript, allowedControlBoundary);
+
+    for (const invalidResponse of [
+      { item: sampleSuccess().item },
+      sampleSuccess({ source: "browser_speech" }),
+      sampleSuccess({ language: "en" }),
+      sampleSuccess({ replayed: "false" }),
+      sampleSuccess({ transcript: "x".repeat(2_001) }),
+      sampleSuccess({ transcript: "" }),
+      sampleSuccess({ transcript: "含\u0000控制字符" }),
+      sampleSuccess({ transcript: "含\r裸回车" }),
+    ]) {
+      const api = createSalesWorkbenchApi({
+        baseUrl: "https://example.test",
+        fetchImpl: async () => jsonResponse(invalidResponse),
+      });
+      api.setSession({ csrfToken: "csrf" });
+      await assert.rejects(() => api.transcribeAudio({
+        blob: new Blob(["a"], { type: "audio/mp4" }),
+        purpose: "assistant_chat",
+        durationMs: 860,
+        idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      }), (error) => {
+        assert.equal(error.code, "ASR_PROVIDER_BAD_RESPONSE");
+        assert.equal(error.lifecycle, "same_blob_retryable");
+        assert.equal(Object.hasOwn(error, "body"), false);
+        assert.doesNotMatch(error.message, /provider|secret|nested/i);
+        return true;
+      });
+    }
+
+    const sensitiveFixture = "must-not-cross-client-contract";
+    const sanitizedApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        ...sampleSuccess({
+          replayed: true,
+          providerRaw: sensitiveFixture,
+          model: sensitiveFixture,
+          headers: { authorization: sensitiveFixture },
+        }),
+        providerResponse: sensitiveFixture,
+        internalPath: sensitiveFixture,
+      }),
+    });
+    sanitizedApi.setSession({ csrfToken: "csrf" });
+    const sanitized = await sanitizedApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/mp4" }),
+      purpose: "assistant_chat",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    });
+    assert.deepEqual(sanitized, sampleSuccess({ replayed: true }));
+    assert.doesNotMatch(JSON.stringify(sanitized), /must-not-cross-client-contract/u);
+  });
+
+  it("publishes the exact lifecycle whitelist and bounded Retry-After without leaking error bodies", async () => {
+    const cases = [
+      [409, "ASR_IN_PROGRESS", "same_blob_retryable", 1],
+      [429, "ASR_CAPACITY_EXCEEDED", "same_blob_retryable", 2],
+      [502, "ASR_PROVIDER_BAD_RESPONSE", "same_blob_retryable", null],
+      [504, "ASR_TIMEOUT", "same_blob_retryable", 300],
+      [429, "ASR_RATE_LIMITED", "rate_limited", null],
+      [400, "INVALID_IDEMPOTENCY_KEY", "release_and_rerecord", null],
+      [422, "ASR_TRANSCRIPT_EMPTY", "release_and_rerecord", null],
+      [409, "IDEMPOTENCY_CONFLICT", "release_and_rerecord", null],
+      [503, "ASR_NOT_CONFIGURED", "release_and_rerecord", null],
+    ];
+    for (const [status, code, lifecycle, retryAfterSeconds] of cases) {
+      const api = createSalesWorkbenchApi({
+        baseUrl: "https://example.test",
+        fetchImpl: async () => jsonResponse({
+          error: { code, message: "sensitive provider detail", requestId: "request-error" },
+        }, status, { "Retry-After": retryAfterSeconds ?? "invalid" }),
+      });
+      api.setSession({ csrfToken: "csrf" });
+      await assert.rejects(
+        () => api.transcribeAudio({
+          blob: new Blob(["a"], { type: "audio/webm" }),
+          purpose: "quick_record",
+          durationMs: 860,
+          idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+        }),
+        (error) => {
+          assert.equal(error.code, code);
+          assert.equal(error.lifecycle, lifecycle);
+          assert.equal(error.retryAfterSeconds, retryAfterSeconds);
+          assert.equal(Object.hasOwn(error, "body"), false);
+          assert.doesNotMatch(error.message, /sensitive provider detail/i);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("maps network failure to same-Blob retry and abort to release without global unauthorized", async () => {
+    const networkApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => { throw new TypeError("Failed to fetch sensitive URL"); },
+    });
+    networkApi.setSession({ csrfToken: "csrf" });
+    await assert.rejects(
+      () => networkApi.transcribeAudio({
+        blob: new Blob(["a"], { type: "audio/webm" }),
+        purpose: "quick_record",
+        durationMs: 860,
+        idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      }),
+      (error) => error.code === "ASR_NETWORK_ERROR" && error.lifecycle === "same_blob_retryable",
+    );
+
+    let unauthorizedCalls = 0;
+    const abortController = new AbortController();
+    abortController.abort("user_cancel");
+    const abortApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized() { unauthorizedCalls += 1; },
+      fetchImpl: async () => {
+        const error = new DOMException("Aborted", "AbortError");
+        throw error;
+      },
+    });
+    abortApi.setSession({ csrfToken: "csrf" });
+    await assert.rejects(() => abortApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      signal: abortController.signal,
+    }), (error) => error.code === "ASR_ABORTED" && error.lifecycle === "release_and_rerecord");
+    assert.equal(unauthorizedCalls, 0);
+  });
+
+  it("invalidates once for a non-aborted ASR 401 while returning only the sanitized caller error", async () => {
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized() { unauthorizedCalls += 1; },
+      fetchImpl: async () => jsonResponse({
+        error: {
+          code: "UNAUTHORIZED",
+          message: "sensitive session/provider detail",
+          requestId: "asr-request-401",
+        },
+      }, 401),
+    });
+    api.setSession({ csrfToken: "csrf" });
+    await assert.rejects(() => api.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    }), (error) => {
+      assert.equal(error.code, "UNAUTHORIZED");
+      assert.equal(error.lifecycle, "release_and_rerecord");
+      assert.equal(error.status, 401);
+      assert.equal(error.requestId, "asr-request-401");
+      assert.equal(Object.hasOwn(error, "body"), false);
+      assert.doesNotMatch(error.message, /sensitive|provider detail/u);
+      return true;
+    });
+    assert.equal(unauthorizedCalls, 1);
+  });
+
+  it("defaults unknown HTTP errors to release instead of misclassifying them as a network interruption", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({ error: { message: "untrusted gateway body" } }, 500),
+    });
+    api.setSession({ csrfToken: "csrf" });
+    await assert.rejects(() => api.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    }), (error) => {
+      assert.equal(error.code, "ASR_UNKNOWN_ERROR");
+      assert.equal(error.lifecycle, "release_and_rerecord");
+      assert.doesNotMatch(error.message, /gateway|untrusted/i);
+      return true;
+    });
+  });
+
+  it("rejects invalid purpose, duration, key, Blob size, and media type before fetch", async () => {
+    let fetchCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => { fetchCalls += 1; return jsonResponse(sampleSuccess()); },
+    });
+    api.setSession({ csrfToken: "csrf" });
+    const valid = {
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    };
+    for (const input of [
+      { ...valid, purpose: "other" },
+      { ...valid, durationMs: 0 },
+      { ...valid, durationMs: 120_001 },
+      { ...valid, idempotencyKey: "short" },
+      { ...valid, blob: new Blob([], { type: "audio/webm" }) },
+      { ...valid, blob: new Blob(["a"], { type: "video/webm" }) },
+    ]) {
+      await assert.rejects(() => api.transcribeAudio(input), TypeError);
+    }
+    assert.equal(fetchCalls, 0);
+  });
+});
+
 function sampleAnalysis(overrides = {}) {
   return {
     id: "ai-1",

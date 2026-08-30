@@ -2,6 +2,13 @@ import {
   assertApiCollection,
   assertApiEntity,
 } from "../../../../shared/salesWorkbenchApiContract.mjs";
+import {
+  MAX_AUDIO_BYTES,
+  MIN_RECORDING_DURATION_MS,
+  getTranscriptionPurposeLimits,
+  normalizeRecorderMimeType,
+} from "../audio/recordingCapabilities.js";
+import { adaptTranscriptionError } from "../audio/serverTranscription.js";
 
 export function resolveApiBaseUrl(env = {}, runtime = globalThis) {
   return String(env.VITE_API_BASE_URL ?? runtime?.__SENTELLIGENT_API_BASE_URL__ ?? "").trim().replace(/\/+$/, "");
@@ -378,7 +385,91 @@ function toApiError(response, body) {
   error.currentVersion = details?.fields?.currentVersion;
   error.requestId = details?.requestId;
   error.body = body;
+  error.retryAfterHeader = typeof response?.headers?.get === "function"
+    ? response.headers.get("retry-after")
+    : null;
   return error;
+}
+
+export function parseRetryAfterSeconds(value) {
+  if (typeof value !== "string" || !/^\d{1,3}$/u.test(value)) return null;
+  const seconds = Number(value);
+  return Number.isInteger(seconds) && seconds >= 1 && seconds <= 300 ? seconds : null;
+}
+
+export function assertTranscriptionResponse(response, purpose) {
+  const limits = getTranscriptionPurposeLimits(purpose);
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    throw new TypeError("transcription response: expected object");
+  }
+  if (typeof response.requestId !== "string" || !response.requestId.trim()) {
+    throw new TypeError("transcription response.requestId: expected non-empty string");
+  }
+  const item = response.item;
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw new TypeError("transcription response.item: expected object");
+  }
+  if (
+    typeof item.transcript !== "string"
+    || !item.transcript
+    || item.transcript.length > limits.maxTranscriptCharacters
+    || item.transcript !== item.transcript.normalize("NFC")
+    || item.transcript.trim() !== item.transcript
+    || /[\u0000-\u0008\u000B-\u001F]/u.test(item.transcript)
+  ) {
+    throw new TypeError("transcription response.item.transcript: invalid text length");
+  }
+  if (item.language !== "zh-CN") {
+    throw new TypeError("transcription response.item.language: expected zh-CN");
+  }
+  if (
+    !Number.isInteger(item.durationMs)
+    || item.durationMs < MIN_RECORDING_DURATION_MS
+    || item.durationMs > limits.maxDurationMs
+  ) {
+    throw new TypeError("transcription response.item.durationMs: outside purpose limit");
+  }
+  if (item.source !== "server_asr") {
+    throw new TypeError("transcription response.item.source: expected server_asr");
+  }
+  if (typeof item.replayed !== "boolean") {
+    throw new TypeError("transcription response.item.replayed: expected boolean");
+  }
+  // Return a newly constructed capability object. Provider/debug fields from
+  // a successful upstream payload never cross the API-client boundary.
+  return {
+    requestId: response.requestId,
+    item: {
+      transcript: item.transcript,
+      language: item.language,
+      durationMs: item.durationMs,
+      source: item.source,
+      replayed: item.replayed,
+    },
+  };
+}
+
+function assertTranscriptionRequest({ blob, purpose, durationMs, idempotencyKey }) {
+  const limits = getTranscriptionPurposeLimits(purpose);
+  if (!blob || typeof blob.size !== "number" || typeof blob.slice !== "function") {
+    throw new TypeError("transcription blob: expected raw Blob");
+  }
+  if (blob.size <= 0 || blob.size > MAX_AUDIO_BYTES) {
+    throw new TypeError("transcription blob: expected 1..8388608 bytes");
+  }
+  if (!normalizeRecorderMimeType(blob.type)) {
+    throw new TypeError("transcription blob.type: unsupported audio media type");
+  }
+  if (!Number.isInteger(durationMs) || durationMs < MIN_RECORDING_DURATION_MS || durationMs > limits.maxDurationMs) {
+    throw new TypeError("transcription durationMs: outside purpose limit");
+  }
+  if (
+    typeof idempotencyKey !== "string"
+    || idempotencyKey.trim() !== idempotencyKey
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u.test(idempotencyKey)
+  ) {
+    throw new TypeError("transcription Idempotency-Key: invalid");
+  }
 }
 
 export async function requestJson(fetchImpl, url, options = {}, csrfToken = "") {
@@ -521,6 +612,60 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
   return {
     isEnabled: Boolean(root),
     setSession,
+
+    async transcribeAudio({
+      blob,
+      purpose,
+      durationMs,
+      idempotencyKey,
+      signal,
+    }) {
+      assertTranscriptionRequest({ blob, purpose, durationMs, idempotencyKey });
+      let response;
+      try {
+        response = await requestApi(
+          `/api/asr/transcriptions?purpose=${encodeURIComponent(purpose)}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": normalizeRecorderMimeType(blob.type),
+              "Idempotency-Key": idempotencyKey,
+              "X-Audio-Duration-Ms": String(durationMs),
+              "X-ASR-Language": "zh-CN",
+            },
+            body: blob,
+            signal,
+          },
+        );
+      } catch (error) {
+        const code = signal?.aborted
+          ? "ASR_ABORTED"
+          : typeof error?.code === "string"
+            ? error.code
+            : Number.isInteger(error?.status)
+              ? "ASR_UNKNOWN_ERROR"
+              : "ASR_NETWORK_ERROR";
+        throw adaptTranscriptionError({
+          code,
+          name: signal?.aborted ? "AbortError" : error?.name,
+          status: error?.status,
+          requestId: error?.requestId,
+          retryAfterSeconds: parseRetryAfterSeconds(error?.retryAfterHeader),
+        });
+      }
+      try {
+        return assertTranscriptionResponse(response, purpose);
+      } catch {
+        // A 2xx response with a malformed provider-shaped payload is a
+        // transient provider contract failure. Keep the error sanitized and
+        // eligible for the one same-Blob retry; never expose response body.
+        throw adaptTranscriptionError({
+          code: "ASR_PROVIDER_BAD_RESPONSE",
+          status: 502,
+          requestId: response?.requestId,
+        });
+      }
+    },
 
     async login({ account, password }) {
       const requestId = ++loginRequestId;
