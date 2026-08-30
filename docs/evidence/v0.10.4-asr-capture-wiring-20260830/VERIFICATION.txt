@@ -1,0 +1,121 @@
+SENTELLIGENT v0.10.4 ASR CAPTURE QA WIRING VERIFICATION
+=========================================================
+
+BRANCH / FIELD / RESULT
+=======================
+Branch: local/v0627-feature-closeout-20260827
+Baseline commit: 4073d079453a187ffadf2264f4f6139313610edb
+Baseline tree: d078859548a3272e09f9eae66b916658c50ab553
+Changed field: outputs/product-design-prototype/package.json scripts.test:asr-capture
+Changed branch: qa:local now invokes test:asr-capture immediately after test:api.
+Result: the ASR capture unit and real-JSX harness is a mandatory local QA gate.
+
+Original package SHA-256:
+  75f279db8f58066d6e72c9538d0f7edb41dd20f2ac4447e09a3d8a86e969609d
+Modified package SHA-256:
+  8995e5257ac7a648f4765d61cb8498c70ecaa6165db6f186ee2a0dbabdd64eb3
+
+FOUR ARTIFACT PATHS
+===================
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/MODIFIED_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/DIFF_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/VERIFICATION.txt
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/ROLLBACK.sh
+
+BASELINE
+========
+Input:
+  /tmp/v0104-wiring-final-apply.g4iPSG/repo
+  HEAD=4073d079453a187ffadf2264f4f6139313610edb
+
+Exact command:
+  cd /tmp/v0104-wiring-final-apply.g4iPSG/repo
+  node -e 'const p=require("./outputs/product-design-prototype/package.json"); if (p.scripts["test:asr-capture"] !== undefined) process.exit(1); if (/test:asr-capture/.test(p.scripts["qa:local"])) process.exit(1); console.log("BASELINE_SCRIPT_ABSENT=true QA_LOCAL_UNWIRED=true")'
+
+Literal output/result:
+  BASELINE_SCRIPT_ABSENT=true QA_LOCAL_UNWIRED=true
+  BASELINE_COMMAND_EXIT=0
+Exit status: 0.
+Baseline behavior/status: no dedicated ASR capture script existed and qa:local did not run it.
+
+MODIFIED
+========
+Input:
+  BASE_SHA=4073d079453a187ffadf2264f4f6139313610edb
+  TARGET=/tmp/v0104-wiring-final-apply.g4iPSG/repo
+  PATCH=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/DIFF_FILE
+
+Exact commands:
+  git -C /tmp/v0104-wiring-final-apply.g4iPSG/repo apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/DIFF_FILE
+  git -C /tmp/v0104-wiring-final-apply.g4iPSG/repo apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/DIFF_FILE
+  npm --prefix /tmp/v0104-wiring-final-apply.g4iPSG/repo/outputs/product-design-prototype run test:asr-capture
+
+Literal output/result:
+  APPLY_CHECK_EXIT=0
+  APPLY_EXIT=0
+  MODIFIED_COPY_PACKAGE_RESULT=IDENTICAL
+  MODIFIED_SCRIPT_PRESENT=true QA_LOCAL_WIRED_AFTER_TEST_API=true
+  tests 55
+  suites 4
+  pass 55
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  INDEPENDENT_MODIFIED_TEST_EXIT=0
+Exit status: 0.
+Modified behavior/status: the new script ran all audio controller and real-JSX capture checks and qa:local contained the script in the required position.
+
+ROLLBACK
+========
+Input:
+  TARGET=/tmp/v0104-wiring-final-rollback.H00BiR/repo
+  BASE_SHA=4073d079453a187ffadf2264f4f6139313610edb
+  BASE_TREE=d078859548a3272e09f9eae66b916658c50ab553
+
+Exact commands:
+  git -C /tmp/v0104-wiring-final-rollback.H00BiR/repo apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/DIFF_FILE
+  git -C /tmp/v0104-wiring-final-rollback.H00BiR/repo apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/DIFF_FILE
+  /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-capture-wiring-20260830/ROLLBACK.sh /tmp/v0104-wiring-final-rollback.H00BiR/repo
+
+Literal output/result:
+  ROLLBACK_PATH=outputs/product-design-prototype/package.json RESULT=RESTORED
+  ROLLBACK_RESULT=RESTORED BASE_SHA=4073d079453a187ffadf2264f4f6139313610edb BASE_TREE=d078859548a3272e09f9eae66b916658c50ab553 PATHS=1
+  ROLLBACK_SCRIPT_EXIT=0
+  RESTORED_SCRIPT_ABSENT=true QA_LOCAL_UNWIRED=true
+  ROLLBACK_BASE_BLOB_IDENTICAL=true
+  ROLLBACK_GIT_STATUS=CLEAN
+Exit status: 0.
+Restored behavior/status: the package blob exactly matched the baseline, the dedicated script was absent again, qa:local was unwired, and the independent copy was clean.
+
+FORMAL MODIFIED GATES OBSERVED BEFORE ARTIFACT COMMIT
+=====================================================
+Exact command:
+  npm --prefix outputs/product-design-prototype run test:asr-capture
+Literal result:
+  tests 55; suites 4; pass 55; fail 0; skipped 0; exit 0
+
+Exact command:
+  CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npm --prefix outputs/product-design-prototype run qa:local
+Literal result:
+  build 1850 modules; every chained test including test:asr-capture passed; frontend scan findings []; QA_LOCAL_CHROME_EXIT=0
+
+Exact command:
+  npm run scan:secrets
+Literal result:
+  status passed; scannedFiles 780; scannedGitObjects 3553; scannedGitMessages 611; gitHistoryComplete true; findings []; ROOT_SECRET_SCAN_PRECOMMIT_EXIT=0
+
+ARTIFACT SAFEGUARDS
+===================
+MODIFIED_FILE is a deterministic USTAR archive with one safe regular member at the exact package path.
+DIFF_FILE is the binary full-index patch for exactly the package path from BASE_SHA.
+ROLLBACK.sh is executable, passes sh -n, checks BASE_SHA and BASE_TREE, reverse-applies the sibling patch, and verifies the restored package blob.
+The first independent copy passed apply-check, apply, byte comparison, and modified tests.
+The second independent copy passed apply-check, apply, rollback, blob comparison, restored-behavior verification, and clean-status verification.
+
+SIDE-EFFECT STATUS
+==================
+PUSH=NOT_PERFORMED
+DEPLOY=NOT_PERFORMED
+REAL_MICROPHONE_OR_ASR_PROVIDER_CALL=NOT_PERFORMED
+REAL_MODEL_CREDENTIAL_OR_PRODUCTION_CALL=NOT_PERFORMED
