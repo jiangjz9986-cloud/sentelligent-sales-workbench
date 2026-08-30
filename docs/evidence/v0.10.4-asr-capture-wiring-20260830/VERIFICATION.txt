@@ -113,6 +113,33 @@ ROLLBACK.sh is executable, passes sh -n, checks BASE_SHA and BASE_TREE, reverse-
 The first independent copy passed apply-check, apply, byte comparison, and modified tests.
 The second independent copy passed apply-check, apply, rollback, blob comparison, restored-behavior verification, and clean-status verification.
 
+CLEAN COMMIT RELEASE GATE
+=========================
+Input:
+  HEAD=0e1fdf9bf766e9fd9c0280bae34a1b598be58580
+  TREE=fd0a76da2408a78bec28a7843071cd02d6debaa1
+  Git status clean before and after the command.
+
+Exact command:
+  npm run test:deploy
+
+Literal output/result:
+  status passed
+  scannedFiles 780
+  scannedGitObjects 3556
+  scannedGitMessages 612
+  gitHistoryComplete true
+  findings []
+  tests 252
+  suites 18
+  pass 250
+  fail 0
+  cancelled 0
+  skipped 2
+  todo 0
+  WIRING_CLEAN_COMMIT_TEST_DEPLOY_EXIT=0
+Exit status: 0.
+
 SIDE-EFFECT STATUS
 ==================
 PUSH=NOT_PERFORMED
