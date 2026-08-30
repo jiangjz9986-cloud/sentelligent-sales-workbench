@@ -831,7 +831,7 @@ index 139243941ee38fca75546fcb43ee179d8b02bcd3..a59ebf81647c6695f33f04c09be15092
        const requestId = ++loginRequestId;
        restoreRequestId += 1;
 diff --git a/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js b/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
-index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a4ff52a5d 100644
+index 7eb0d36b1f4aedddad023925ddcc41199076e96e..47a6eb1d63a20be0e9868586fc39863fd9ec9396 100644
 --- a/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
 +++ b/outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
 @@ -571,6 +571,298 @@ it("rejects invoice candidate responses without a concurrency version", async ()
@@ -901,7 +901,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +      baseUrl: "https://example.test",
 +      fetchImpl: async () => jsonResponse(sampleSuccess({ replayed: true })),
 +    });
-+    validApi.setSession({ csrfToken: "csrf" });
++    validApi.setSession({ csrfToken: "fixture-csrf-token" });
 +    assert.equal((await validApi.transcribeAudio({
 +      blob: new Blob(["a"], { type: "audio/mp4" }),
 +      purpose: "assistant_chat",
@@ -914,7 +914,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +      baseUrl: "https://example.test",
 +      fetchImpl: async () => jsonResponse(sampleSuccess({ transcript: allowedControlBoundary })),
 +    });
-+    boundaryApi.setSession({ csrfToken: "csrf" });
++    boundaryApi.setSession({ csrfToken: "fixture-csrf-token" });
 +    assert.equal((await boundaryApi.transcribeAudio({
 +      blob: new Blob(["a"], { type: "audio/mp4" }),
 +      purpose: "assistant_chat",
@@ -936,7 +936,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +        baseUrl: "https://example.test",
 +        fetchImpl: async () => jsonResponse(invalidResponse),
 +      });
-+      api.setSession({ csrfToken: "csrf" });
++      api.setSession({ csrfToken: "fixture-csrf-token" });
 +      await assert.rejects(() => api.transcribeAudio({
 +        blob: new Blob(["a"], { type: "audio/mp4" }),
 +        purpose: "assistant_chat",
@@ -965,7 +965,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +        internalPath: sensitiveFixture,
 +      }),
 +    });
-+    sanitizedApi.setSession({ csrfToken: "csrf" });
++    sanitizedApi.setSession({ csrfToken: "fixture-csrf-token" });
 +    const sanitized = await sanitizedApi.transcribeAudio({
 +      blob: new Blob(["a"], { type: "audio/mp4" }),
 +      purpose: "assistant_chat",
@@ -995,7 +995,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +          error: { code, message: "sensitive provider detail", requestId: "request-error" },
 +        }, status, { "Retry-After": retryAfterSeconds ?? "invalid" }),
 +      });
-+      api.setSession({ csrfToken: "csrf" });
++      api.setSession({ csrfToken: "fixture-csrf-token" });
 +      await assert.rejects(
 +        () => api.transcribeAudio({
 +          blob: new Blob(["a"], { type: "audio/webm" }),
@@ -1020,7 +1020,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +      baseUrl: "https://example.test",
 +      fetchImpl: async () => { throw new TypeError("Failed to fetch sensitive URL"); },
 +    });
-+    networkApi.setSession({ csrfToken: "csrf" });
++    networkApi.setSession({ csrfToken: "fixture-csrf-token" });
 +    await assert.rejects(
 +      () => networkApi.transcribeAudio({
 +        blob: new Blob(["a"], { type: "audio/webm" }),
@@ -1042,7 +1042,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +        throw error;
 +      },
 +    });
-+    abortApi.setSession({ csrfToken: "csrf" });
++    abortApi.setSession({ csrfToken: "fixture-csrf-token" });
 +    await assert.rejects(() => abortApi.transcribeAudio({
 +      blob: new Blob(["a"], { type: "audio/webm" }),
 +      purpose: "quick_record",
@@ -1066,7 +1066,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +        },
 +      }, 401),
 +    });
-+    api.setSession({ csrfToken: "csrf" });
++    api.setSession({ csrfToken: "fixture-csrf-token" });
 +    await assert.rejects(() => api.transcribeAudio({
 +      blob: new Blob(["a"], { type: "audio/webm" }),
 +      purpose: "quick_record",
@@ -1089,7 +1089,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +      baseUrl: "https://example.test",
 +      fetchImpl: async () => jsonResponse({ error: { message: "untrusted gateway body" } }, 500),
 +    });
-+    api.setSession({ csrfToken: "csrf" });
++    api.setSession({ csrfToken: "fixture-csrf-token" });
 +    await assert.rejects(() => api.transcribeAudio({
 +      blob: new Blob(["a"], { type: "audio/webm" }),
 +      purpose: "quick_record",
@@ -1109,7 +1109,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..05270f8294cb533855ecd45d2e6f986a
 +      baseUrl: "https://example.test",
 +      fetchImpl: async () => { fetchCalls += 1; return jsonResponse(sampleSuccess()); },
 +    });
-+    api.setSession({ csrfToken: "csrf" });
++    api.setSession({ csrfToken: "fixture-csrf-token" });
 +    const valid = {
 +      blob: new Blob(["a"], { type: "audio/webm" }),
 +      purpose: "quick_record",

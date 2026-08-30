@@ -634,7 +634,7 @@ describe("ASR transcription API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async () => jsonResponse(sampleSuccess({ replayed: true })),
     });
-    validApi.setSession({ csrfToken: "csrf" });
+    validApi.setSession({ csrfToken: "fixture-csrf-token" });
     assert.equal((await validApi.transcribeAudio({
       blob: new Blob(["a"], { type: "audio/mp4" }),
       purpose: "assistant_chat",
@@ -647,7 +647,7 @@ describe("ASR transcription API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async () => jsonResponse(sampleSuccess({ transcript: allowedControlBoundary })),
     });
-    boundaryApi.setSession({ csrfToken: "csrf" });
+    boundaryApi.setSession({ csrfToken: "fixture-csrf-token" });
     assert.equal((await boundaryApi.transcribeAudio({
       blob: new Blob(["a"], { type: "audio/mp4" }),
       purpose: "assistant_chat",
@@ -669,7 +669,7 @@ describe("ASR transcription API client", () => {
         baseUrl: "https://example.test",
         fetchImpl: async () => jsonResponse(invalidResponse),
       });
-      api.setSession({ csrfToken: "csrf" });
+      api.setSession({ csrfToken: "fixture-csrf-token" });
       await assert.rejects(() => api.transcribeAudio({
         blob: new Blob(["a"], { type: "audio/mp4" }),
         purpose: "assistant_chat",
@@ -698,7 +698,7 @@ describe("ASR transcription API client", () => {
         internalPath: sensitiveFixture,
       }),
     });
-    sanitizedApi.setSession({ csrfToken: "csrf" });
+    sanitizedApi.setSession({ csrfToken: "fixture-csrf-token" });
     const sanitized = await sanitizedApi.transcribeAudio({
       blob: new Blob(["a"], { type: "audio/mp4" }),
       purpose: "assistant_chat",
@@ -728,7 +728,7 @@ describe("ASR transcription API client", () => {
           error: { code, message: "sensitive provider detail", requestId: "request-error" },
         }, status, { "Retry-After": retryAfterSeconds ?? "invalid" }),
       });
-      api.setSession({ csrfToken: "csrf" });
+      api.setSession({ csrfToken: "fixture-csrf-token" });
       await assert.rejects(
         () => api.transcribeAudio({
           blob: new Blob(["a"], { type: "audio/webm" }),
@@ -753,7 +753,7 @@ describe("ASR transcription API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async () => { throw new TypeError("Failed to fetch sensitive URL"); },
     });
-    networkApi.setSession({ csrfToken: "csrf" });
+    networkApi.setSession({ csrfToken: "fixture-csrf-token" });
     await assert.rejects(
       () => networkApi.transcribeAudio({
         blob: new Blob(["a"], { type: "audio/webm" }),
@@ -775,7 +775,7 @@ describe("ASR transcription API client", () => {
         throw error;
       },
     });
-    abortApi.setSession({ csrfToken: "csrf" });
+    abortApi.setSession({ csrfToken: "fixture-csrf-token" });
     await assert.rejects(() => abortApi.transcribeAudio({
       blob: new Blob(["a"], { type: "audio/webm" }),
       purpose: "quick_record",
@@ -799,7 +799,7 @@ describe("ASR transcription API client", () => {
         },
       }, 401),
     });
-    api.setSession({ csrfToken: "csrf" });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
     await assert.rejects(() => api.transcribeAudio({
       blob: new Blob(["a"], { type: "audio/webm" }),
       purpose: "quick_record",
@@ -822,7 +822,7 @@ describe("ASR transcription API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async () => jsonResponse({ error: { message: "untrusted gateway body" } }, 500),
     });
-    api.setSession({ csrfToken: "csrf" });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
     await assert.rejects(() => api.transcribeAudio({
       blob: new Blob(["a"], { type: "audio/webm" }),
       purpose: "quick_record",
@@ -842,7 +842,7 @@ describe("ASR transcription API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async () => { fetchCalls += 1; return jsonResponse(sampleSuccess()); },
     });
-    api.setSession({ csrfToken: "csrf" });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
     const valid = {
       blob: new Blob(["a"], { type: "audio/webm" }),
       purpose: "quick_record",
