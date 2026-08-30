@@ -672,7 +672,7 @@ index 139243941ee38fca75546fcb43ee179d8b02bcd3..a59ebf81647c6695f33f04c09be15092
 +  normalizeRecorderMimeType,
 +} from "../audio/recordingCapabilities.js";
 +import { adaptTranscriptionError } from "../audio/serverTranscription.js";
- 
+
  export function resolveApiBaseUrl(env = {}, runtime = globalThis) {
    return String(env.VITE_API_BASE_URL ?? runtime?.__SENTELLIGENT_API_BASE_URL__ ?? "").trim().replace(/\/+$/, "");
 @@ -378,9 +385,93 @@ function toApiError(response, body) {
@@ -684,7 +684,7 @@ index 139243941ee38fca75546fcb43ee179d8b02bcd3..a59ebf81647c6695f33f04c09be15092
 +    : null;
    return error;
  }
- 
+
 +export function parseRetryAfterSeconds(value) {
 +  if (typeof value !== "string" || !/^\d{1,3}$/u.test(value)) return null;
 +  const seconds = Number(value);
@@ -772,7 +772,7 @@ index 139243941ee38fca75546fcb43ee179d8b02bcd3..a59ebf81647c6695f33f04c09be15092
 @@ -522,6 +613,60 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
      isEnabled: Boolean(root),
      setSession,
- 
+
 +    async transcribeAudio({
 +      blob,
 +      purpose,
@@ -837,7 +837,7 @@ index 7eb0d36b1f4aedddad023925ddcc41199076e96e..47a6eb1d63a20be0e9868586fc39863f
 @@ -571,6 +571,298 @@ it("rejects invoice candidate responses without a concurrency version", async ()
    );
  });
- 
+
 +describe("ASR transcription API client", () => {
 +  const sampleSuccess = (overrides = {}) => ({
 +    requestId: "asr-request-1",
