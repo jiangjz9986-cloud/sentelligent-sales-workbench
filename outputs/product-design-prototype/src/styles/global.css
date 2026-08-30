@@ -2602,6 +2602,105 @@ textarea:focus {
   line-height: 1.5;
 }
 
+/* Shared server-ASR control: quick record and 小小 use the same status
+   language and 44px touch target without exposing audio playback or storage. */
+.voice-control-status-shell {
+  width: min(100%, 520px);
+  display: grid;
+  justify-items: stretch;
+  gap: 8px;
+}
+
+.voice-capture-control {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.76);
+  text-align: left;
+}
+
+.voice-capture-control__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-capture-control__actions button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.voice-capture-control__primary,
+.voice-capture-control__retry,
+.voice-capture-control__browser-interim {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid rgba(47, 107, 255, 0.22);
+  border-radius: 8px;
+  color: #1e56e0;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.voice-capture-control__primary {
+  border-color: #2f6bff;
+  color: #fff;
+  background: #2f6bff;
+}
+
+.voice-capture-control__primary[aria-pressed="true"] {
+  border-color: #168b4b;
+  background: #168b4b;
+}
+
+.voice-capture-control__actions button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.voice-capture-control__status {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  color: #5f6f84;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.voice-capture-control__status strong {
+  color: #1e56e0;
+  font-size: 12px;
+}
+
+.voice-capture-control[data-state="recording"] .voice-capture-control__status strong,
+.voice-capture-control[data-state="processing"] .voice-capture-control__status strong,
+.voice-capture-control[data-state="preparing"] .voice-capture-control__status strong {
+  color: #168b4b;
+}
+
+.voice-capture-control[data-state="error"] .voice-capture-control__status strong,
+.voice-capture-control[data-state="rate_limited"] .voice-capture-control__status strong,
+.voice-capture-control[data-state="retryable_error"] .voice-capture-control__status strong {
+  color: #b45309;
+}
+
+.voice-capture-control--compact {
+  padding: 4px;
+  border: 0;
+  background: transparent;
+}
+
 .voice-status {
   width: min(100%, 440px);
   display: grid;

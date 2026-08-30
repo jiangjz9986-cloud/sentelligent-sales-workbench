@@ -13,6 +13,7 @@ import { createServer } from "vite";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const componentPath = path.join(projectRoot, "src/components/audio/VoiceCaptureControl.jsx");
 const hookPath = path.join(projectRoot, "src/audio/useServerTranscription.js");
+const quickRecordPagePath = path.join(projectRoot, "src/features/salesWorkbench/pages/QuickRecordPage.jsx");
 const browserHarnessPath = path.join(os.tmpdir(), `asr-hook-harness-${process.pid}.jsx`);
 
 let vite;
@@ -27,6 +28,9 @@ let moveTouchGesture;
 let releaseTouchGesture;
 let runPrimaryKeyboardAction;
 let updateSyntheticClickToken;
+let appendQuickRecordTranscript;
+let QUICK_RECORD_TRANSCRIPT_LIMIT;
+let QUICK_RECORD_CONTENT_LIMIT;
 
 before(async () => {
   await writeFile(browserHarnessPath, String.raw`
@@ -254,6 +258,11 @@ render();
     runPrimaryKeyboardAction,
     updateSyntheticClickToken,
   } = await vite.ssrLoadModule("/src/components/audio/VoiceCaptureControl.jsx"));
+  ({
+    appendQuickRecordTranscript,
+    QUICK_RECORD_TRANSCRIPT_LIMIT,
+    QUICK_RECORD_CONTENT_LIMIT,
+  } = await vite.ssrLoadModule("/src/features/salesWorkbench/pages/QuickRecordPage.jsx"));
 });
 
 after(async () => {
@@ -645,9 +654,67 @@ describe("VoiceCaptureControl real JSX transform and rendered contract", () => {
   });
 
   it("contains no playback, object URL, persistence, XHR, download, or audio-history path", async () => {
-    const sources = `${await readFile(componentPath, "utf8")}\n${await readFile(hookPath, "utf8")}`;
+    const sources = `${await readFile(componentPath, "utf8")}\n${await readFile(hookPath, "utf8")}\n${await readFile(quickRecordPagePath, "utf8")}`;
     assert.doesNotMatch(sources, /<audio\b|createObjectURL|XMLHttpRequest|indexedDB|caches\.open|localStorage|sessionStorage/iu);
     assert.doesNotMatch(sources, /录音已保存|查看录音|播放录音|下载录音|历史录音/u);
     assert.doesNotMatch(sources, /uploading|transcribing/u);
+  });
+
+  it("connects quick record to the shared server control and removes its legacy Web Speech mainline", async () => {
+    const source = await readFile(quickRecordPagePath, "utf8");
+    assert.match(source, /import VoiceCaptureControl from ["']\.\.\/\.\.\/\.\.\/components\/audio\/VoiceCaptureControl\.jsx["']/);
+    assert.match(source, /purpose="quick_record"/);
+    assert.match(source, /onTranscript=\{handleServerTranscript\}/);
+    assert.match(source, /key=\{`quick-record-voice-\$\{voiceSessionEpoch\}`\}/);
+    assert.match(source, /active=\{recordMode === "voice"\}/);
+    assert.doesNotMatch(source, /SpeechRecognition|webkitSpeechRecognition|getUserMedia|MediaRecorder/);
+  });
+
+  it("atomically appends a bounded server transcript and preserves original bytes on overflow", () => {
+    assert.equal(QUICK_RECORD_TRANSCRIPT_LIMIT, 10_000);
+    assert.equal(QUICK_RECORD_CONTENT_LIMIT, 50_000);
+    assert.deepEqual(
+      appendQuickRecordTranscript("", "服务端结果"),
+      { accepted: true, candidate: "服务端结果", reason: null },
+    );
+    assert.deepEqual(
+      appendQuickRecordTranscript("已有内容", "服务端结果"),
+      { accepted: true, candidate: "已有内容\n服务端结果", reason: null },
+    );
+    assert.equal(
+      appendQuickRecordTranscript("  原文  ", "结果").candidate,
+      "  原文  \n结果",
+    );
+
+    const transcriptAtLimit = "字".repeat(QUICK_RECORD_TRANSCRIPT_LIMIT);
+    const transcriptOverLimit = `${transcriptAtLimit}字`;
+    assert.equal(appendQuickRecordTranscript("", transcriptAtLimit).accepted, true);
+    assert.deepEqual(
+      appendQuickRecordTranscript("原文", transcriptOverLimit),
+      { accepted: false, candidate: "原文", reason: "transcript_too_long" },
+    );
+
+    const draftAtLimit = "字".repeat(QUICK_RECORD_CONTENT_LIMIT);
+    assert.equal(appendQuickRecordTranscript(draftAtLimit, "").accepted, true);
+    assert.deepEqual(
+      appendQuickRecordTranscript(draftAtLimit, "后续"),
+      { accepted: false, candidate: draftAtLimit, reason: "content_too_long" },
+    );
+  });
+
+  it("keeps quick-record analysis human-gated and fences every draft-replacement path", async () => {
+    const source = await readFile(quickRecordPagePath, "utf8");
+    assert.match(source, /voiceApplyEpochRef\.current !== voiceSessionEpoch/);
+    assert.match(source, /function startBlankRecord\(\) \{[\s\S]*?invalidateVoiceCapture\(\)/);
+    assert.match(source, /function loadHistoricalRecord\(item\) \{[\s\S]*?invalidateVoiceCapture\(\)/);
+    assert.match(source, /function switchToTextRecord\(\) \{[\s\S]*?invalidateVoiceCapture\(\)/);
+    assert.match(source, /sourceChannel: voiceCapturedRef\.current \? "语音转写" : "快速记录"/);
+    assert.match(source, /data-testid="confirm-ai-analysis"/);
+    assert.match(source, /onClick=\{confirmAnalysis\}/);
+    const transcriptHandler = source.slice(
+      source.indexOf("function handleServerTranscript"),
+      source.indexOf("useEffect(() => {", source.indexOf("function handleServerTranscript")),
+    );
+    assert.doesNotMatch(transcriptHandler, /analyzeQuickRecord|createQuickRecord|confirmAnalysis\(/);
   });
 });

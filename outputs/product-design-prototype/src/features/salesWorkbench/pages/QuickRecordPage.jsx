@@ -1,6 +1,5 @@
 import {
   Check,
-  CircleStop,
   FileText,
   Gauge,
   Link2,
@@ -23,6 +22,7 @@ import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import { mergeEntityByVersion } from "../../../quickRecordModel.js";
 import { createConfirmationAttemptTracker } from "../../../api/salesWorkbenchApi.js";
 import { MatchCard, Panel } from "../../../components/primitives.jsx";
+import VoiceCaptureControl from "../../../components/audio/VoiceCaptureControl.jsx";
 import {
   confirmQuickRecordTarget,
   createExclusiveAsyncGate,
@@ -52,23 +52,33 @@ function formatSyncTime(value) {
   });
 }
 
-function getSpeechRecognitionConstructor() {
-  if (typeof window === "undefined") return null;
-  return window.SpeechRecognition ?? window.webkitSpeechRecognition ?? null;
-}
+export const QUICK_RECORD_TRANSCRIPT_LIMIT = 10_000;
+export const QUICK_RECORD_CONTENT_LIMIT = 50_000;
 
-function canUseSpeechRecognition() {
-  if (!getSpeechRecognitionConstructor()) return false;
-  if (typeof window === "undefined") return false;
-  return window.isSecureContext !== false;
+/**
+ * Add one server transcript to the current quick-record draft without ever
+ * truncating either side.  Keeping this as a pure action makes the exact
+ * separator and both local limits independently testable from the page.
+ */
+export function appendQuickRecordTranscript(existing, transcript) {
+  const current = typeof existing === "string" ? existing : "";
+  if (typeof transcript !== "string" || transcript.length > QUICK_RECORD_TRANSCRIPT_LIMIT) {
+    return Object.freeze({
+      accepted: false,
+      candidate: current,
+      reason: "transcript_too_long",
+    });
+  }
+  const candidate = `${current}${current && transcript ? "\n" : ""}${transcript}`;
+  if (candidate.length > QUICK_RECORD_CONTENT_LIMIT) {
+    return Object.freeze({
+      accepted: false,
+      candidate: current,
+      reason: "content_too_long",
+    });
+  }
+  return Object.freeze({ accepted: true, candidate, reason: null });
 }
-
-const voiceStatusText = {
-  idle: "待录入",
-  listening: "转写中",
-  unsupported: "不可用",
-  error: "需处理",
-};
 
 function quickRecordHistoryView(item) {
   const date = new Date(item.occurredAt ?? item.createdAt ?? "");
@@ -125,11 +135,14 @@ export function QuickRecord() {
   const [confirmedTargets, setConfirmedTargets] = useState([]);
   const [confirmationPending, setConfirmationPending] = useState(false);
   const [syncLog, setSyncLog] = useState([]);
-  const [voiceStatus, setVoiceStatus] = useState("idle");
-  const [voiceMessage, setVoiceMessage] = useState("点击开始转写即可。");
-  const [voiceInterim, setVoiceInterim] = useState("");
-  const recognitionRef = useRef(null);
-  const voiceBaseTextRef = useRef("");
+  // This epoch belongs to the page, not to the shared recorder controller.
+  // Bumping it synchronously fences a late transcript before React commits the
+  // mode/history/new-record render; the keyed control then tears down the old
+  // controller and releases its Blob, stream, and request.
+  const [voiceSessionEpoch, setVoiceSessionEpoch] = useState(0);
+  const voiceApplyEpochRef = useRef(0);
+  const recordTextRef = useRef(recordText);
+  recordTextRef.current = recordText;
   // 只有真正发生过语音转写时才标记"语音转写"，避免语音模式下手动输入被误标。
   const voiceCapturedRef = useRef(false);
   // 中文输入法组字守卫：组字过程中的中间态不清空已生成的分析面板。
@@ -149,18 +162,17 @@ export function QuickRecord() {
   }
   const quickRecordId = quickRecord?.id ?? null;
   const hasInput = recordText.trim().length > 0;
-  const speechRecognitionAvailable = canUseSpeechRecognition();
-  const voiceUnavailable = !speechRecognitionAvailable;
-  const voiceNeedsSecureOrigin = typeof window !== "undefined" && window.isSecureContext === false;
   const flowState = getQuickRecordFlow({
     hasInput,
     hasAnalysis: Boolean(analysisVisible && analysis),
     confirmedTargets,
   });
-  const visibleVoiceStatus = voiceUnavailable && voiceStatus === "idle" ? "unsupported" : voiceStatus;
-  const visibleVoiceMessage = voiceUnavailable && voiceStatus === "idle"
-    ? (voiceNeedsSecureOrigin ? "当前不是 HTTPS，无法使用语音转写，请改用文本录入。" : "当前浏览器不支持语音转写，请改用文本录入。")
-    : voiceMessage;
+
+  function invalidateVoiceCapture() {
+    const nextEpoch = voiceApplyEpochRef.current + 1;
+    voiceApplyEpochRef.current = nextEpoch;
+    setVoiceSessionEpoch(nextEpoch);
+  }
 
   function resetAnalysis(status) {
     confirmationAttemptRef.current.reset();
@@ -176,10 +188,11 @@ export function QuickRecord() {
   }
 
   function startBlankRecord() {
-    if (recognitionRef.current) stopVoiceRecognition();
+    invalidateVoiceCapture();
     confirmationAttemptRef.current.reset();
     setRecordMode("text");
     voiceCapturedRef.current = false;
+    recordTextRef.current = "";
     setRecordText("");
     setAnalysis(null);
     setQuickRecord(null);
@@ -193,7 +206,7 @@ export function QuickRecord() {
   }
 
   function loadHistoricalRecord(item) {
-    if (recognitionRef.current) stopVoiceRecognition();
+    invalidateVoiceCapture();
     confirmationAttemptRef.current.reset();
     const nextText = item.rawContent ?? `${item.customer}：${item.title}。${item.feedback}`;
     const nextAnalysis = item.analysis ?? null;
@@ -201,6 +214,7 @@ export function QuickRecord() {
     const nextConfirmedTargets = item.confirmedTargets ?? nextSyncLog.map((entry) => entry.target);
     setRecordMode("text");
     voiceCapturedRef.current = false;
+    recordTextRef.current = nextText;
     setRecordText(nextText);
     setAnalysis(nextAnalysis);
     setQuickRecord(item);
@@ -232,141 +246,26 @@ export function QuickRecord() {
     setSyncStatus("分析内容已修改，请先保存再同步");
   }
 
-  function appendVoiceTranscript(transcript, status) {
-    const base = voiceBaseTextRef.current.trim();
-    const cleanTranscript = transcript.trim();
-    const nextText = [base, cleanTranscript].filter(Boolean).join(base ? "\n" : "");
-    if (cleanTranscript) voiceCapturedRef.current = true;
-    setRecordText(nextText);
-    resetAnalysis(status);
-  }
-
-  function stopVoiceRecognition() {
-    const recognition = recognitionRef.current;
-    if (!recognition) {
-      setVoiceStatus("idle");
-      setVoiceInterim("");
-      setVoiceMessage("点击开始转写即可。");
+  function handleServerTranscript(transcript) {
+    // A mode/history/new-record transition invalidates the callback before
+    // React's state update is committed.  The shared hook also has its own
+    // generation fence; this second fence protects the page's business draft.
+    if (voiceApplyEpochRef.current !== voiceSessionEpoch) return;
+    const result = appendQuickRecordTranscript(recordTextRef.current, transcript);
+    if (!result.accepted) {
+      setSyncStatus(
+        result.reason === "transcript_too_long"
+          ? "录音内容过长（单次最多 10000 字），请缩短重录"
+          : "录音内容过长（合并后最多 50000 字），请缩短重录",
+      );
       return;
     }
-
-    setVoiceMessage("正在停止语音转写");
-    try {
-      recognition.stop();
-    } catch {
-      recognitionRef.current = null;
-      setVoiceStatus("idle");
-      setVoiceInterim("");
-      setVoiceMessage("语音转写已停止。");
-    }
+    if (result.candidate === recordTextRef.current) return;
+    voiceCapturedRef.current = true;
+    recordTextRef.current = result.candidate;
+    setRecordText(result.candidate);
+    resetAnalysis("语音转写已写入，请确认调用 AI 分析");
   }
-
-  function startVoiceRecognition() {
-    const SpeechRecognition = getSpeechRecognitionConstructor();
-    setRecordMode("voice");
-
-    if (!SpeechRecognition) {
-      recognitionRef.current = null;
-      setVoiceStatus("unsupported");
-      setVoiceInterim("");
-      setVoiceMessage("当前浏览器不支持语音转写，请改用文本录入。");
-      setSyncStatus("语音转写不可用，请改用文本");
-      return;
-    }
-
-    if (recognitionRef.current) {
-      setVoiceMessage("正在转写，继续说。");
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    let finalTranscript = "";
-    voiceBaseTextRef.current = recordText.trim();
-    recognitionRef.current = recognition;
-    recognition.lang = "zh-CN";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      setVoiceStatus("listening");
-      setVoiceInterim("");
-      setVoiceMessage("正在转写，继续说。");
-      setSyncStatus("语音转写中，完成后请人工确认分析");
-    };
-
-    recognition.onresult = (event) => {
-      let interimTranscript = "";
-      let committedTranscript = "";
-      for (let index = event.resultIndex ?? 0; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const text = result?.[0]?.transcript?.trim();
-        if (!text) continue;
-        if (result.isFinal) committedTranscript += `${text} `;
-        else interimTranscript += `${text} `;
-      }
-
-      if (committedTranscript.trim()) {
-        finalTranscript = `${finalTranscript} ${committedTranscript}`.trim();
-        appendVoiceTranscript(finalTranscript, "语音转写已写入，请确认调用 AI 分析");
-        setVoiceMessage("已写入，继续说。");
-      } else if (interimTranscript.trim()) {
-        setVoiceMessage("正在识别，继续说。");
-      }
-      setVoiceInterim(interimTranscript.trim());
-    };
-
-    recognition.onerror = (event) => {
-      recognitionRef.current = null;
-      setVoiceStatus("error");
-      setVoiceInterim("");
-      if (event.error === "not-allowed") {
-        setVoiceMessage("请开启麦克风权限。");
-        setSyncStatus("麦克风权限未开启");
-        return;
-      }
-      if (event.error === "service-not-allowed") {
-        setVoiceStatus("unsupported");
-        setVoiceMessage("实时转写不可用，请改用文本。");
-        setSyncStatus("实时转写不可用");
-        return;
-      }
-      if (event.error === "no-speech") {
-        setVoiceMessage("未识别到语音。");
-        setSyncStatus("没有识别到语音");
-        return;
-      }
-      setVoiceMessage("实时转写不可用，请改用文本。");
-      setSyncStatus("语音转写暂时不可用");
-    };
-
-    recognition.onend = () => {
-      if (recognitionRef.current !== recognition) return;
-      recognitionRef.current = null;
-      setVoiceStatus("idle");
-      setVoiceInterim("");
-      setVoiceMessage(finalTranscript ? "转写已停止。" : "未识别到有效内容。");
-    };
-
-    try {
-      recognition.start();
-    } catch {
-      recognitionRef.current = null;
-      setVoiceStatus("error");
-      setVoiceInterim("");
-      setVoiceMessage("启动失败，请检查权限。");
-      setSyncStatus("语音转写启动失败");
-    }
-  }
-
-  useEffect(() => () => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.abort();
-      } catch {}
-    }
-    recognitionRef.current = null;
-  }, []);
 
   useEffect(() => {
     if (!routeHistoryId || routeHistoryId === selectedHistoryId) return;
@@ -623,11 +522,8 @@ export function QuickRecord() {
   }
 
   function switchToTextRecord() {
-    if (recognitionRef.current) stopVoiceRecognition();
+    invalidateVoiceCapture();
     setRecordMode("text");
-    setVoiceStatus("idle");
-    setVoiceInterim("");
-    setVoiceMessage("已切换文本录入。");
     resetAnalysis("请继续在记录框内录入内容");
   }
 
@@ -653,10 +549,7 @@ export function QuickRecord() {
               className={recordMode === "text" ? "active" : ""}
               data-testid="quick-record-mode-text"
               type="button"
-              onClick={() => {
-                if (recognitionRef.current) stopVoiceRecognition();
-                setRecordMode("text");
-              }}
+              onClick={switchToTextRecord}
             >
               <MessageSquareText size={14} />
               文本
@@ -680,39 +573,21 @@ export function QuickRecord() {
         </div>
 
         {recordMode === "voice" ? (
-          <div className={`voice-box ${voiceStatus === "listening" ? "is-listening" : ""}`}>
+          <div className="voice-box">
             <Mic size={26} />
             <div>
               <strong>语音记录</strong>
             </div>
-            <div className="voice-status" data-testid="voice-status">
-              <span className={`voice-dot ${visibleVoiceStatus}`} />
-              <b>{voiceStatusText[visibleVoiceStatus]}</b>
-              <small>{visibleVoiceMessage}</small>
-            </div>
-            {voiceInterim ? <p className="voice-interim">正在识别：{voiceInterim}</p> : null}
-            <div className="voice-controls">
-              {!voiceUnavailable ? (
-                <button
-                  className="primary-button"
-                  type="button"
-                  onClick={startVoiceRecognition}
-                  disabled={voiceStatus === "listening"}
-                >
-                  <Mic size={15} />
-                  开始转写
-                </button>
-              ) : null}
-              {voiceStatus === "listening" ? (
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={stopVoiceRecognition}
-                >
-                  <CircleStop size={15} />
-                  停止转写
-                </button>
-              ) : null}
+            <div className="voice-control-status-shell" data-testid="voice-status">
+              <VoiceCaptureControl
+                key={`quick-record-voice-${voiceSessionEpoch}`}
+                apiClient={apiClient}
+                purpose="quick_record"
+                onTranscript={handleServerTranscript}
+                active={recordMode === "voice"}
+                disabled={analysisPending}
+                className="quick-record-voice-control"
+              />
               <button className="ghost-button" type="button" onClick={switchToTextRecord}>
                 <MessageSquareText size={15} />
                 改用文本
@@ -729,11 +604,13 @@ export function QuickRecord() {
           }}
           onCompositionEnd={(event) => {
             composingRef.current = false;
+            recordTextRef.current = event.target.value;
             setRecordText(event.target.value);
             resetAnalysis("内容已变化，请重新确认分析");
           }}
           onChange={(event) => {
             if (!event.target.value.trim()) voiceCapturedRef.current = false;
+            recordTextRef.current = event.target.value;
             setRecordText(event.target.value);
             if (composingRef.current) return;
             resetAnalysis("内容已变化，请重新确认分析");

@@ -71,14 +71,15 @@ describe("formal handoff UI copy", () => {
     }
   });
 
-  it("opens quick record in voice mode with direct recording guidance", () => {
+  it("opens quick record in voice mode with the shared server transcription control", () => {
     const sessionSource = readFileSync(resolve("src/app/useQuickRecordSession.jsx"), "utf8");
     const pageSource = readSalesWorkbenchPagesSource();
+    const voiceControlSource = readFileSync(resolve("src/components/audio/VoiceCaptureControl.jsx"), "utf8");
 
     assert.match(sessionSource, /const \[recordMode, setRecordMode\] = useState\("voice"\)/);
-    assert.match(pageSource, /idle:\s*"待录入"/);
-    assert.match(pageSource, /点击开始转写即可。/);
-    assert.doesNotMatch(pageSource, /idle:\s*"可开始"/);
-    assert.doesNotMatch(pageSource, /准备录入。/);
+    assert.match(pageSource, /<VoiceCaptureControl/);
+    assert.match(pageSource, /purpose="quick_record"/);
+    assert.match(voiceControlSource, /label: "开始录音"/);
+    assert.doesNotMatch(pageSource, /SpeechRecognition|webkitSpeechRecognition/);
   });
 });
