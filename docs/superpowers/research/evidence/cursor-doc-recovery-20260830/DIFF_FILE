@@ -1,0 +1,16 @@
+diff --git a/docs/superpowers/plans/2026-08-28-audit-architecture-backend.md b/docs/superpowers/research/2026-08-28-audit-architecture-backend.md
+similarity index 100%
+rename from docs/superpowers/plans/2026-08-28-audit-architecture-backend.md
+rename to docs/superpowers/research/2026-08-28-audit-architecture-backend.md
+diff --git a/docs/superpowers/plans/2026-08-28-audit-feature-matrix.md b/docs/superpowers/research/2026-08-28-audit-feature-matrix.md
+similarity index 100%
+rename from docs/superpowers/plans/2026-08-28-audit-feature-matrix.md
+rename to docs/superpowers/research/2026-08-28-audit-feature-matrix.md
+diff --git a/docs/superpowers/plans/2026-08-28-audit-frontend-ux.md b/docs/superpowers/research/2026-08-28-audit-frontend-ux.md
+similarity index 100%
+rename from docs/superpowers/plans/2026-08-28-audit-frontend-ux.md
+rename to docs/superpowers/research/2026-08-28-audit-frontend-ux.md
+diff --git a/docs/superpowers/plans/2026-08-28-multi-account-design.md b/docs/superpowers/research/2026-08-28-multi-account-design.md
+similarity index 100%
+rename from docs/superpowers/plans/2026-08-28-multi-account-design.md
+rename to docs/superpowers/research/2026-08-28-multi-account-design.md
