@@ -1,0 +1,26 @@
+V0.10.4 ASR SLICE A0 MODIFIED FILE RECORD
+DATE=2026-08-30
+WORKTREE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+CHANGED_BRANCH=local/v0627-feature-closeout-20260827
+BASELINE_HEAD=f7683591802ad30073b720da96a4e7a49f2e2605
+PATH_COUNT=10
+DIFF_FORMAT=zero-context full-index binary unified diff; apply with git apply --unidiff-zero
+BASELINE_BLOB_PROVENANCE=Eight tracked A0 originals are read from f7683591802ad30073b720da96a4e7a49f2e2605; the 0033 migration and v0.10.3 forward-compat test are absent at that baseline.
+CHANGED_FIELD=secure_settings.setting_key adds asr_api_key while preserving all 11 fields; repository metadata adds asr without iCost or environment fallback; maskSecret globally masks lengths 1-4 completely, 5-8 as first+mask+last, and greater than 8 as first4+mask+last4; active-admin HTTP exposes GET /api/settings/security plus PUT and confirmed DELETE /api/settings/asr-api-key while POST remains 404 NOT_FOUND; credentialed exact-origin CORS advertises PUT without widening origins, headers, or credentials.
+MODIFIED_WORKTREE_STATE=The formal worktree remains modified at exactly ten A0 code/test paths plus this four-artifact directory; no commit, push, deployment, or real provider call was performed.
+
+FORMAT=original_sha256 modified_sha256 relative_path
+8c6c75ee76129a1026c1fb3fdef65041fbe8270468dbdcd15506b4a77fe52b85 4ea5a3bb2834e673bf97cfaab7293c47e273f2c18fa732d04317a54c7eca71e8 backend/src/db/migrate.js
+<absent> acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5 backend/src/db/migrations/0033_secure_settings_asr.mjs
+7e05489fbb8634af7b7a17afbaa641449ed6659da99f1f76c6635aca27e0689c 56f8f624b5effdcfab3e53aeac95de60aff4aaebb7ffe79519e1cd5890d1f769 backend/src/http/security.js
+697603d386ffba96509df61d60638abc76f8fbc3c11ea66ef36e94c11a8561d8 e8af93703027b834fb1849ca6e9ed531bc492024f151a9786f3213a8f399ce92 backend/src/server.js
+8374d306edc41e34b4e52bb3936b7f044f26bccc05d30d6c16ba88ed62b1d408 da6f77be81fb82cdf5748b8264fc0a92b8f740680d8ed20b24bededebbed835b backend/src/settings/repository.js
+de99e3c639c7f96d7ecc223d100be96a81e8f319eb927010aa41561fb0a60277 f8cc0ca5b061db04ee84f3f4466e295e284f13bc33f887978e8e4c22e8c2ba71 backend/src/settings/secretBox.js
+99a709c51e970aaa80328d63829e144cc3626da1df767dbfa45f4110d1ebb51f cc26b5a30d60c17d55ea39016fae64b0b9c802f644bdb6ac328b10ba541149f1 backend/tests/http-security.test.js
+a4296a15ab7a917ad5c87b601ed5be44c7c22b02ec67a2468a8d86721e8d3df7 b7b3bb0e4374e53364524414932c6442963ebedc1e9611db827967b5c0f2d595 backend/tests/migrations.test.js
+c6e3a5c8fd1d653b8328c74f2c570a096b033514c65d80e64f1f9f23e1a28297 97c9f05d15c6654becf08046a59ccee7de591fcad7107b58323a43fadde71d0f backend/tests/settings-config-api.test.js
+<absent> c2092aee9df6dfa5b20eda4f2c5411887bad75fa9ceec0fab8ea4026f542503e backend/tests/v0103-forward-compat.test.js
+
+DIFF_FILE_SHA256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095
+ROLLBACK_SH_SHA256=898b41e0f7dd803f84cf55c3295baaa9a8191de6a3f548f4075a2caec4698e04
+MIGRATION_0033_FROZEN_CHECKSUM=acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5

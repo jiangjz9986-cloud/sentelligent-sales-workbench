@@ -191,6 +191,7 @@ import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
 import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
 import { createHospitalTenderScheduler } from "./hospitalTender/scheduler.js";
 import {
+  ASR_SETTING_KEY,
   createSecureSettingsRepository,
   DEEPSEEK_SETTING_KEY,
   PUSHPLUS_SETTING_KEY,
@@ -4729,7 +4730,7 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "GET" && url.pathname === "/api/settings/security") {
-        if (requestIdentity.kind !== "user") return unauthorized(response);
+        requireAdminRole(db, request);
         const repository = requireSecureSettings(secureSettingsRepository);
         let item;
         try {
@@ -4739,10 +4740,68 @@ export function createServer(options = {}) {
               PUSHPLUS_SETTING_KEY,
               config.hospitalTenderPushplusToken,
             ),
+            asr: secureSettingMetadata(ASR_SETTING_KEY),
           };
         } catch {
           throw new HttpError(503, "SECURE_SETTINGS_UNAVAILABLE", "Secure settings storage is unavailable");
         }
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "PUT"
+        && url.pathname === "/api/settings/asr-api-key"
+      ) {
+        requireAdminRole(db, request);
+        const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const item = withImmediateTransaction(db, () => {
+          const saved = repository.setSecret(ASR_SETTING_KEY, value);
+          insertAudit(db, {
+            action: "settings.asr_api_key.save",
+            entityType: "secure_setting",
+            entityId: ASR_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: {
+              status: saved.status,
+              masked: saved.masked,
+              updatedAt: saved.updatedAt,
+            },
+            metadata: { setting: ASR_SETTING_KEY },
+          });
+          return saved;
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/api/settings/asr-api-key") {
+        requireAdminRole(db, request);
+        const confirmation = validateSecureSettingBody(
+          await readJson(request),
+          { field: "confirmation", max: 32 },
+        );
+        if (confirmation !== "CLEAR") {
+          throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear the ASR API key");
+        }
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const item = withImmediateTransaction(db, () => {
+          const cleared = repository.clearSecret(ASR_SETTING_KEY);
+          insertAudit(db, {
+            action: "settings.asr_api_key.clear",
+            entityType: "secure_setting",
+            entityId: ASR_SETTING_KEY,
+            actor: request.authContext.account,
+            requestId,
+            before: null,
+            after: { status: cleared.status, updatedAt: cleared.updatedAt },
+            metadata: { setting: ASR_SETTING_KEY, confirmation: "provided" },
+          });
+          return cleared;
+        });
         sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
         return;
       }

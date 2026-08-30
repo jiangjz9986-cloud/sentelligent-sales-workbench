@@ -1,0 +1,1581 @@
+diff --git a/backend/src/db/migrate.js b/backend/src/db/migrate.js
+index a0959de978932606b24dd85a4e309eb3e116150a..60bf42e41cbdf61a6c5016ea41f5480f3a418f00 100644
+--- a/backend/src/db/migrate.js
++++ b/backend/src/db/migrate.js
+@@ -35,0 +36 @@ import { apply as applyWeixinBindings } from "./migrations/0032_weixin_bindings.
++import { apply as applySecureSettingsAsr } from "./migrations/0033_secure_settings_asr.mjs";
+@@ -223,0 +225,6 @@ const migrations = [
++  {
++    version: "0033",
++    path: resolve(here, "migrations", "0033_secure_settings_asr.mjs"),
++    type: "module",
++    apply: applySecureSettingsAsr,
++  },
+diff --git a/backend/src/db/migrations/0033_secure_settings_asr.mjs b/backend/src/db/migrations/0033_secure_settings_asr.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..aeebd136be356ac20afea74d0e482577bd65d248
+--- /dev/null
++++ b/backend/src/db/migrations/0033_secure_settings_asr.mjs
+@@ -0,0 +1,122 @@
++/**
++ * Extend the encrypted settings store with the server-side ASR credential.
++ *
++ * SQLite cannot alter the existing setting_key CHECK constraint in place, so
++ * this migration rebuilds the table. The migration runner owns the enclosing
++ * transaction. Existing ciphertext and delivery metadata are copied as opaque
++ * values and verified before the original table is replaced.
++ */
++export function apply(db) {
++  db.exec(`
++    CREATE TABLE secure_settings_next (
++      setting_key TEXT PRIMARY KEY NOT NULL CHECK (
++        setting_key IN (
++          'icost_webhook_token',
++          'deepseek_api_key',
++          'hospital_tender_pushplus_token',
++          'asr_api_key'
++        )
++      ),
++      ciphertext TEXT CHECK (ciphertext IS NULL OR length(ciphertext) > 0),
++      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
++      created_at TEXT NOT NULL,
++      rotated_at TEXT,
++      updated_at TEXT NOT NULL,
++      last_success_at TEXT,
++      last_failure_at TEXT,
++      last_error_code TEXT CHECK (last_error_code IS NULL OR length(last_error_code) BETWEEN 1 AND 120),
++      last_delivery_count INTEGER CHECK (last_delivery_count IS NULL OR last_delivery_count >= 0),
++      last_chunk_count INTEGER CHECK (last_chunk_count IS NULL OR last_chunk_count >= 0),
++      CHECK ((status = 'active' AND ciphertext IS NOT NULL) OR (status = 'cleared' AND ciphertext IS NULL))
++    );
++
++    INSERT INTO secure_settings_next (
++      setting_key,
++      ciphertext,
++      status,
++      created_at,
++      rotated_at,
++      updated_at,
++      last_success_at,
++      last_failure_at,
++      last_error_code,
++      last_delivery_count,
++      last_chunk_count
++    )
++    SELECT
++      setting_key,
++      ciphertext,
++      status,
++      created_at,
++      rotated_at,
++      updated_at,
++      last_success_at,
++      last_failure_at,
++      last_error_code,
++      last_delivery_count,
++      last_chunk_count
++    FROM secure_settings;
++  `);
++
++  const sourceCount = db.prepare("SELECT COUNT(*) AS count FROM secure_settings").get().count;
++  const copiedCount = db.prepare("SELECT COUNT(*) AS count FROM secure_settings_next").get().count;
++  const missingSourceKeys = db.prepare(`
++    SELECT COUNT(*) AS count FROM (
++      SELECT setting_key FROM secure_settings
++      EXCEPT
++      SELECT setting_key FROM secure_settings_next
++    )
++  `).get().count;
++  const unexpectedCopiedKeys = db.prepare(`
++    SELECT COUNT(*) AS count FROM (
++      SELECT setting_key FROM secure_settings_next
++      EXCEPT
++      SELECT setting_key FROM secure_settings
++    )
++  `).get().count;
++  const missingSourceRows = db.prepare(`
++    SELECT COUNT(*) AS count FROM (
++      SELECT
++        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
++        last_success_at, last_failure_at, last_error_code,
++        last_delivery_count, last_chunk_count
++      FROM secure_settings
++      EXCEPT
++      SELECT
++        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
++        last_success_at, last_failure_at, last_error_code,
++        last_delivery_count, last_chunk_count
++      FROM secure_settings_next
++    )
++  `).get().count;
++  const unexpectedCopiedRows = db.prepare(`
++    SELECT COUNT(*) AS count FROM (
++      SELECT
++        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
++        last_success_at, last_failure_at, last_error_code,
++        last_delivery_count, last_chunk_count
++      FROM secure_settings_next
++      EXCEPT
++      SELECT
++        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
++        last_success_at, last_failure_at, last_error_code,
++        last_delivery_count, last_chunk_count
++      FROM secure_settings
++    )
++  `).get().count;
++
++  if (
++    sourceCount !== copiedCount
++    || missingSourceKeys !== 0
++    || unexpectedCopiedKeys !== 0
++    || missingSourceRows !== 0
++    || unexpectedCopiedRows !== 0
++  ) {
++    throw new Error("Secure settings ASR migration verification failed");
++  }
++
++  db.exec(`
++    DROP TABLE secure_settings;
++    ALTER TABLE secure_settings_next RENAME TO secure_settings;
++  `);
++}
+diff --git a/backend/src/http/security.js b/backend/src/http/security.js
+index e52e06146e97560ccd49302fd6a0ec4f68955b03..673d8367db3af1f12fe1b5a3ad5cf16e9dda4d65 100644
+--- a/backend/src/http/security.js
++++ b/backend/src/http/security.js
+@@ -71 +71 @@ export function corsHeaders(origin, config = {}) {
+-    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
++    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+diff --git a/backend/src/server.js b/backend/src/server.js
+index 2920e6d7e16ecea72711ecec971f46953b71425b..19ad541d30b18bf6bfc7c5cc706a21d5fba0a32b 100644
+--- a/backend/src/server.js
++++ b/backend/src/server.js
+@@ -193,0 +194 @@ import {
++  ASR_SETTING_KEY,
+@@ -4732 +4733 @@ export function createServer(options = {}) {
+-        if (requestIdentity.kind !== "user") return unauthorized(response);
++        requireAdminRole(db, request);
+@@ -4741,0 +4743 @@ export function createServer(options = {}) {
++            asr: secureSettingMetadata(ASR_SETTING_KEY),
+@@ -4749,0 +4752,57 @@ export function createServer(options = {}) {
++      if (
++        request.method === "PUT"
++        && url.pathname === "/api/settings/asr-api-key"
++      ) {
++        requireAdminRole(db, request);
++        const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
++        const repository = requireSecureSettings(secureSettingsRepository);
++        const item = withImmediateTransaction(db, () => {
++          const saved = repository.setSecret(ASR_SETTING_KEY, value);
++          insertAudit(db, {
++            action: "settings.asr_api_key.save",
++            entityType: "secure_setting",
++            entityId: ASR_SETTING_KEY,
++            actor: request.authContext.account,
++            requestId,
++            before: null,
++            after: {
++              status: saved.status,
++              masked: saved.masked,
++              updatedAt: saved.updatedAt,
++            },
++            metadata: { setting: ASR_SETTING_KEY },
++          });
++          return saved;
++        });
++        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
++        return;
++      }
++
++      if (request.method === "DELETE" && url.pathname === "/api/settings/asr-api-key") {
++        requireAdminRole(db, request);
++        const confirmation = validateSecureSettingBody(
++          await readJson(request),
++          { field: "confirmation", max: 32 },
++        );
++        if (confirmation !== "CLEAR") {
++          throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear the ASR API key");
++        }
++        const repository = requireSecureSettings(secureSettingsRepository);
++        const item = withImmediateTransaction(db, () => {
++          const cleared = repository.clearSecret(ASR_SETTING_KEY);
++          insertAudit(db, {
++            action: "settings.asr_api_key.clear",
++            entityType: "secure_setting",
++            entityId: ASR_SETTING_KEY,
++            actor: request.authContext.account,
++            requestId,
++            before: null,
++            after: { status: cleared.status, updatedAt: cleared.updatedAt },
++            metadata: { setting: ASR_SETTING_KEY, confirmation: "provided" },
++          });
++          return cleared;
++        });
++        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
++        return;
++      }
++
+diff --git a/backend/src/settings/repository.js b/backend/src/settings/repository.js
+index 3ce3c9cc95d1591110ada0254dec102da296c17b..b84cbfee14a4dc3e6da4a4483ff34d602b80f35d 100644
+--- a/backend/src/settings/repository.js
++++ b/backend/src/settings/repository.js
+@@ -4,0 +5 @@ export const PUSHPLUS_SETTING_KEY = "hospital_tender_pushplus_token";
++export const ASR_SETTING_KEY = "asr_api_key";
+@@ -8,0 +10 @@ const ALLOWED_KEYS = new Set([
++  ASR_SETTING_KEY,
+@@ -165,0 +168 @@ export function createSecureSettingsRepository(db, { masterKey, clock = () => ne
++        asr: metadata(ASR_SETTING_KEY),
+diff --git a/backend/src/settings/secretBox.js b/backend/src/settings/secretBox.js
+index 061c39e847d665f981bb76b394be4cc10b3f84c7..9cdf4ddce4c84e37a94fd096d1943dbedfc8e0a2 100644
+--- a/backend/src/settings/secretBox.js
++++ b/backend/src/settings/secretBox.js
+@@ -66 +66,2 @@ export function maskSecret(value) {
+-  if (value.length <= 8) return `${value.slice(0, 2)}••••${value.slice(-2)}`;
++  if (value.length <= 4) return "••••••";
++  if (value.length <= 8) return `${value.slice(0, 1)}••••••${value.slice(-1)}`;
+diff --git a/backend/tests/http-security.test.js b/backend/tests/http-security.test.js
+index f6d3a7fffcf81f35f9e2d5f43449a60310df0488..66253eb491182d95a4941a3141b28c1945d8ff47 100644
+--- a/backend/tests/http-security.test.js
++++ b/backend/tests/http-security.test.js
+@@ -195 +195 @@ test("allows credentialed CORS for exact configured origins only", () => {
+-    "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
++    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+diff --git a/backend/tests/migrations.test.js b/backend/tests/migrations.test.js
+index ea21ed08ae06010a04ff8376938fe9ec3e5990f7..8690d72b796007657063f1791b69be6ad55c6512 100644
+--- a/backend/tests/migrations.test.js
++++ b/backend/tests/migrations.test.js
+@@ -18,0 +19 @@ import { apply as applyPhase1WriteIntegrity } from "../src/db/migrations/0002_ph
++import { apply as applySecureSettings } from "../src/db/migrations/0015_secure_settings.mjs";
+@@ -19,0 +21,16 @@ import { apply as applySecureSettingsPushplus } from "../src/db/migrations/0021_
++import { apply as applySecureSettingsAsr } from "../src/db/migrations/0033_secure_settings_asr.mjs";
++
++const SECURE_SETTINGS_ASR_CHECKSUM = "acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5";
++const secureSettingsColumns = [
++  "setting_key",
++  "ciphertext",
++  "status",
++  "created_at",
++  "rotated_at",
++  "updated_at",
++  "last_success_at",
++  "last_failure_at",
++  "last_error_code",
++  "last_delivery_count",
++  "last_chunk_count",
++];
+@@ -128,0 +146,89 @@ function withDatabase(testBody) {
++function secureSettingsRows(db) {
++  return db.prepare("SELECT * FROM secure_settings ORDER BY setting_key").all()
++    .map((row) => ({ ...row }));
++}
++
++function seedSecureSettingsMatrix(db, status) {
++  const active = status === "active";
++  const insert = db.prepare(`
++    INSERT INTO secure_settings (
++      setting_key, ciphertext, status, created_at, rotated_at, updated_at,
++      last_success_at, last_failure_at, last_error_code,
++      last_delivery_count, last_chunk_count
++    ) VALUES (
++      $key, $ciphertext, $status, $createdAt, $rotatedAt, $updatedAt,
++      $lastSuccessAt, $lastFailureAt, $lastErrorCode,
++      $lastDeliveryCount, $lastChunkCount
++    )
++  `);
++  for (const [index, key] of [
++    "icost_webhook_token",
++    "deepseek_api_key",
++    "hospital_tender_pushplus_token",
++  ].entries()) {
++    insert.run({
++      $key: key,
++      $ciphertext: active ? `ciphertext-${index + 1}` : null,
++      $status: status,
++      $createdAt: `2026-08-2${index}T01:02:03.00${index}Z`,
++      $rotatedAt: index === 0 ? null : `2026-08-2${index}T02:03:04.00${index}Z`,
++      $updatedAt: `2026-08-2${index}T03:04:05.00${index}Z`,
++      $lastSuccessAt: index === 0 ? null : `2026-08-2${index}T04:05:06.00${index}Z`,
++      $lastFailureAt: index === 2 ? `2026-08-2${index}T05:06:07.00${index}Z` : null,
++      $lastErrorCode: index === 2 ? "synthetic_delivery_failure" : null,
++      $lastDeliveryCount: index,
++      $lastChunkCount: index + 1,
++    });
++  }
++}
++
++function rebuildSecureSettingsAs0032(db) {
++  db.exec("BEGIN IMMEDIATE");
++  try {
++    db.exec(`
++      CREATE TABLE secure_settings_0032_fixture (
++        setting_key TEXT PRIMARY KEY NOT NULL CHECK (
++          setting_key IN (
++            'icost_webhook_token',
++            'deepseek_api_key',
++            'hospital_tender_pushplus_token'
++          )
++        ),
++        ciphertext TEXT CHECK (ciphertext IS NULL OR length(ciphertext) > 0),
++        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
++        created_at TEXT NOT NULL,
++        rotated_at TEXT,
++        updated_at TEXT NOT NULL,
++        last_success_at TEXT,
++        last_failure_at TEXT,
++        last_error_code TEXT CHECK (last_error_code IS NULL OR length(last_error_code) BETWEEN 1 AND 120),
++        last_delivery_count INTEGER CHECK (last_delivery_count IS NULL OR last_delivery_count >= 0),
++        last_chunk_count INTEGER CHECK (last_chunk_count IS NULL OR last_chunk_count >= 0),
++        CHECK ((status = 'active' AND ciphertext IS NOT NULL) OR (status = 'cleared' AND ciphertext IS NULL))
++      );
++      INSERT INTO secure_settings_0032_fixture (
++        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
++        last_success_at, last_failure_at, last_error_code,
++        last_delivery_count, last_chunk_count
++      )
++      SELECT
++        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
++        last_success_at, last_failure_at, last_error_code,
++        last_delivery_count, last_chunk_count
++      FROM secure_settings
++      WHERE setting_key IN (
++        'icost_webhook_token',
++        'deepseek_api_key',
++        'hospital_tender_pushplus_token'
++      );
++      DROP TABLE secure_settings;
++      ALTER TABLE secure_settings_0032_fixture RENAME TO secure_settings;
++      DELETE FROM schema_migrations WHERE version = '0033';
++    `);
++    db.exec("COMMIT");
++  } catch (error) {
++    db.exec("ROLLBACK");
++    throw error;
++  }
++}
++
+@@ -175 +281 @@ test("records versioned migrations exactly once and remains idempotent on reopen
+-      assert.equal(firstMigrations.length, 31);
++      assert.equal(firstMigrations.length, 32);
+@@ -200,0 +307 @@ test("records versioned migrations exactly once and remains idempotent on reopen
++      assert.equal(firstMigrations[25].version, "0027");
+@@ -205,0 +313 @@ test("records versioned migrations exactly once and remains idempotent on reopen
++      assert.equal(firstMigrations[31].version, "0033");
+@@ -239,0 +348,8 @@ test("records versioned migrations exactly once and remains idempotent on reopen
++        "../src/db/migrations/0026_hospital_tender_active_window.mjs",
++        "../src/db/migrations/0027_customer_profile_aliases.mjs",
++        "../src/db/migrations/0028_action_item_reminders.mjs",
++        "../src/db/migrations/0029_owner_vocabulary_cleanup.mjs",
++        "../src/db/migrations/0030_users_table.mjs",
++        "../src/db/migrations/0031_owner_isolation_tightening.mjs",
++        "../src/db/migrations/0032_weixin_bindings.mjs",
++        "../src/db/migrations/0033_secure_settings_asr.mjs",
+@@ -264,0 +381,8 @@ test("records versioned migrations exactly once and remains idempotent on reopen
++      assert.equal(firstMigrations[24].checksum, migrationChecksum(migrationSources[24]));
++      assert.equal(firstMigrations[25].checksum, migrationChecksum(migrationSources[25]));
++      assert.equal(firstMigrations[26].checksum, migrationChecksum(migrationSources[26]));
++      assert.equal(firstMigrations[27].checksum, migrationChecksum(migrationSources[27]));
++      assert.equal(firstMigrations[28].checksum, migrationChecksum(migrationSources[28]));
++      assert.equal(firstMigrations[29].checksum, migrationChecksum(migrationSources[29]));
++      assert.equal(firstMigrations[30].checksum, migrationChecksum(migrationSources[30]));
++      assert.equal(firstMigrations[31].checksum, migrationChecksum(migrationSources[31]));
+@@ -461,0 +586,212 @@ test("migration 0021 preserves encrypted settings and adds bounded PushPlus deli
++test("migration 0033 upgrades the direct 0021 active matrix without changing any existing field", () => {
++  const db = createConnection({ databaseUrl: ":memory:" });
++  try {
++    applySecureSettings(db);
++    applySecureSettingsPushplus(db);
++    seedSecureSettingsMatrix(db, "active");
++    const before = secureSettingsRows(db);
++
++    db.exec("BEGIN IMMEDIATE");
++    try {
++      applySecureSettingsAsr(db);
++      db.exec("COMMIT");
++    } catch (error) {
++      db.exec("ROLLBACK");
++      throw error;
++    }
++
++    assert.deepEqual(columnNames(db, "secure_settings"), secureSettingsColumns);
++    assert.deepEqual(secureSettingsRows(db), before);
++    const tableSql = db.prepare(`
++      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
++    `).get().sql;
++    assert.match(tableSql, /asr_api_key/u);
++    db.prepare(`
++      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
++      VALUES ('asr_api_key', 'synthetic-asr-ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
++    `).run();
++    assert.throws(() => db.prepare(`
++      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
++      VALUES ('unknown_api_key', 'ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
++    `).run(), /CHECK constraint failed/i);
++  } finally {
++    db.close();
++  }
++});
++
++test("migration 0033 upgrades the direct 0021 cleared matrix without changing any existing field", () => {
++  const db = createConnection({ databaseUrl: ":memory:" });
++  try {
++    applySecureSettings(db);
++    applySecureSettingsPushplus(db);
++    seedSecureSettingsMatrix(db, "cleared");
++    const before = secureSettingsRows(db);
++    const beforeKeys = before.map((row) => row.setting_key);
++
++    db.exec("BEGIN IMMEDIATE");
++    try {
++      applySecureSettingsAsr(db);
++      db.exec("COMMIT");
++    } catch (error) {
++      db.exec("ROLLBACK");
++      throw error;
++    }
++
++    const after = secureSettingsRows(db);
++    assert.deepEqual(after, before);
++    assert.deepEqual(after.map((row) => row.setting_key), beforeKeys);
++    assert.equal(after.length, before.length);
++  } finally {
++    db.close();
++  }
++});
++
++test("migration 0033 upgrades a complete 0032 database and records only its frozen checksum", () => {
++  withDatabase((databaseUrl) => {
++    const db = openDatabase({ databaseUrl });
++    try {
++      rebuildSecureSettingsAs0032(db);
++      seedSecureSettingsMatrix(db, "active");
++      const rowsBefore = secureSettingsRows(db);
++      const ledgerBefore = db.prepare(
++        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
++      ).all().map((row) => ({ ...row }));
++      assert.equal(ledgerBefore.length, 31);
++      assert.equal(ledgerBefore.at(-1).version, "0032");
++
++      migrateDatabase(db);
++
++      const ledgerAfter = db.prepare(
++        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
++      ).all().map((row) => ({ ...row }));
++      const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
++      assert.equal(ledgerAfter.length, 32);
++      assert.deepEqual(added.map((row) => row.version), ["0033"]);
++      assert.deepEqual(ledgerAfter.filter((row) => row.version !== "0033"), ledgerBefore);
++      const source = readFileSync(
++        fileURLToPath(new URL("../src/db/migrations/0033_secure_settings_asr.mjs", import.meta.url)),
++        "utf8",
++      );
++      assert.equal(migrationChecksum(source), SECURE_SETTINGS_ASR_CHECKSUM);
++      assert.equal(added[0].checksum, SECURE_SETTINGS_ASR_CHECKSUM);
++      assert.deepEqual(secureSettingsRows(db), rowsBefore);
++    } finally {
++      db.close();
++    }
++  });
++});
++
++test("migration 0033 remains idempotent on reopen without changing its ledger timestamp", () => {
++  withDatabase((databaseUrl) => {
++    const first = openDatabase({ databaseUrl });
++    const firstLedger = { ...first.prepare(
++      "SELECT version, checksum, applied_at FROM schema_migrations WHERE version = '0033'",
++    ).get() };
++    first.close();
++
++    const second = openDatabase({ databaseUrl });
++    try {
++      const secondLedger = { ...second.prepare(
++        "SELECT version, checksum, applied_at FROM schema_migrations WHERE version = '0033'",
++      ).get() };
++      assert.deepEqual(secondLedger, firstLedger);
++      assert.equal(second.prepare(
++        "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0033'",
++      ).get().count, 1);
++    } finally {
++      second.close();
++    }
++  });
++});
++
++test("migration 0033 restores the original table rows and ledger after a post-DDL failure", () => {
++  withDatabase((databaseUrl) => {
++    const db = openDatabase({ databaseUrl });
++    try {
++      rebuildSecureSettingsAs0032(db);
++      seedSecureSettingsMatrix(db, "cleared");
++      const rowsBefore = secureSettingsRows(db);
++      const tableSqlBefore = db.prepare(`
++        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
++      `).get().sql;
++      const ledgerBefore = db.prepare(
++        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
++      ).all().map((row) => ({ ...row }));
++      let injected = false;
++      const guardedDb = new Proxy(db, {
++        get(target, property) {
++          if (property === "exec") {
++            return (sql) => {
++              const result = target.exec(sql);
++              if (
++                !injected
++                && typeof sql === "string"
++                && sql.includes("ALTER TABLE secure_settings_next RENAME TO secure_settings")
++              ) {
++                injected = true;
++                throw new Error("synthetic 0033 post-DDL failure");
++              }
++              return result;
++            };
++          }
++          const value = Reflect.get(target, property, target);
++          return typeof value === "function" ? value.bind(target) : value;
++        },
++      });
++
++      assert.throws(
++        () => migrateDatabase(guardedDb),
++        /synthetic 0033 post-DDL failure/u,
++      );
++      assert.equal(injected, true);
++      assert.equal(db.prepare(`
++        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
++      `).get().sql, tableSqlBefore);
++      assert.deepEqual(secureSettingsRows(db), rowsBefore);
++      assert.deepEqual(
++        db.prepare("SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version")
++          .all().map((row) => ({ ...row })),
++        ledgerBefore,
++      );
++      assert.equal(db.prepare(`
++        SELECT COUNT(*) AS count FROM sqlite_master
++        WHERE type = 'table' AND name = 'secure_settings_next'
++      `).get().count, 0);
++      assert.equal(db.prepare(
++        "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0033'",
++      ).get().count, 0);
++    } finally {
++      db.close();
++    }
++  });
++});
++
++test("migration 0033 checksum drift fails closed without changing settings or the stored ledger", () => {
++  withDatabase((databaseUrl) => {
++    const db = openDatabase({ databaseUrl });
++    db.prepare(`
++      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
++      VALUES ('asr_api_key', 'synthetic-asr-ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
++    `).run();
++    const rowsBefore = secureSettingsRows(db);
++    db.prepare("UPDATE schema_migrations SET checksum = 'invalid-0033-checksum' WHERE version = '0033'").run();
++    db.close();
++
++    assert.throws(() => {
++      const unexpected = openDatabase({ databaseUrl });
++      unexpected.close();
++    }, /Checksum mismatch for migration 0033/u);
++
++    const readable = createConnection({ databaseUrl });
++    try {
++      assert.deepEqual(secureSettingsRows(readable), rowsBefore);
++      assert.equal(
++        readable.prepare("SELECT checksum FROM schema_migrations WHERE version = '0033'").get().checksum,
++        "invalid-0033-checksum",
++      );
++    } finally {
++      readable.close();
++    }
++  });
++});
++
+@@ -494 +830 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
+-        31,
++        32,
+@@ -918 +1254 @@ test("upgrades all legacy business data into the phase one write-integrity schem
+-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032"],
++        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033"],
+@@ -1112 +1448 @@ test("adopts legacy baseline tables by adding missing columns without losing row
+-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 31);
++      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 32);
+@@ -1666 +2002 @@ test("rolls back every 0002 schema change when the module migration fails partwa
+-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032"],
++        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033"],
+diff --git a/backend/tests/settings-config-api.test.js b/backend/tests/settings-config-api.test.js
+index 229e9e408eb3eb6db33d754b965e7fb9ee5a8f0d..0a980fe8bdcb1282248630c69bf30258093c9100 100644
+--- a/backend/tests/settings-config-api.test.js
++++ b/backend/tests/settings-config-api.test.js
+@@ -7,0 +8,2 @@ import { hashPassword } from "../src/auth/password.js";
++import { createConnection } from "../src/db/connection.js";
++import { openDatabase } from "../src/db.js";
+@@ -8,0 +11,7 @@ import { createServer } from "../src/server.js";
++import {
++  ASR_SETTING_KEY,
++  createSecureSettingsRepository,
++  DEEPSEEK_SETTING_KEY,
++  PUSHPLUS_SETTING_KEY,
++} from "../src/settings/repository.js";
++import { maskSecret } from "../src/settings/secretBox.js";
+@@ -15,0 +25 @@ const encryptionKey = Buffer.alloc(32, 92).toString("base64url");
++const apiKeyField = ["api", "Key"].join("");
+@@ -63,0 +74,19 @@ async function login() {
++function readSettingsState() {
++  const db = createConnection({ databaseUrl });
++  try {
++    return {
++      asr: db.prepare(
++        "SELECT * FROM secure_settings WHERE setting_key = $key",
++      ).get({ $key: ASR_SETTING_KEY }) ?? null,
++      audit: db.prepare(`
++        SELECT action, entity_type, entity_id, actor, metadata_json, before_json, after_json
++        FROM audit_logs
++        WHERE entity_type = 'secure_setting' AND entity_id = $key
++        ORDER BY rowid
++      `).all({ $key: ASR_SETTING_KEY }).map((row) => ({ ...row })),
++    };
++  } finally {
++    db.close();
++  }
++}
++
+@@ -75,0 +105,143 @@ afterEach(async () => {
++describe("secure settings repository ASR allowlist", () => {
++  it("allows the frozen ASR key and exposes its metadata entry without widening to iCost", () => {
++    const db = openDatabase({ databaseUrl: ":memory:" });
++    try {
++      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
++      assert.equal(ASR_SETTING_KEY, "asr_api_key");
++      assert.deepEqual(Object.keys(repository.listMetadata()), ["deepseek", "pushplus", "asr"]);
++      assert.deepEqual(repository.listMetadata().asr, {
++        configured: false,
++        masked: null,
++        createdAt: null,
++        rotatedAt: null,
++        updatedAt: null,
++        lastSuccessAt: null,
++        lastFailureAt: null,
++        lastErrorCode: null,
++        lastDeliveryCount: null,
++        lastChunkCount: null,
++        status: "not_configured",
++      });
++      assert.equal(repository.has(ASR_SETTING_KEY), false);
++      assert.throws(() => repository.metadata("icost_webhook_token"), /Unknown secure setting/u);
++    } finally {
++      db.close();
++    }
++  });
++
++  it("sets and replaces ASR ciphertext while preserving creation and recording rotation", () => {
++    const db = openDatabase({ databaseUrl: ":memory:" });
++    const times = [
++      new Date("2026-08-30T01:02:03.000Z"),
++      new Date("2026-08-30T02:03:04.000Z"),
++    ];
++    let index = 0;
++    try {
++      const repository = createSecureSettingsRepository(db, {
++        masterKey: encryptionKey,
++        clock: () => times[index++],
++      });
++      const firstValue = "synthetic-asr-key-first";
++      const secondValue = "synthetic-asr-key-second";
++
++      const first = repository.setSecret(ASR_SETTING_KEY, firstValue);
++      const firstRow = { ...db.prepare(
++        "SELECT * FROM secure_settings WHERE setting_key = $key",
++      ).get({ $key: ASR_SETTING_KEY }) };
++      assert.equal(first.createdAt, times[0].toISOString());
++      assert.equal(first.rotatedAt, null);
++      assert.notEqual(firstRow.ciphertext, firstValue);
++      assert.doesNotMatch(firstRow.ciphertext, new RegExp(firstValue, "u"));
++      assert.equal(repository.readSecret(ASR_SETTING_KEY), firstValue);
++
++      const replaced = repository.setSecret(ASR_SETTING_KEY, secondValue);
++      const replacedRow = { ...db.prepare(
++        "SELECT * FROM secure_settings WHERE setting_key = $key",
++      ).get({ $key: ASR_SETTING_KEY }) };
++      assert.equal(replaced.createdAt, times[0].toISOString());
++      assert.equal(replaced.rotatedAt, times[1].toISOString());
++      assert.equal(replaced.updatedAt, times[1].toISOString());
++      assert.notEqual(replacedRow.ciphertext, firstRow.ciphertext);
++      assert.doesNotMatch(replacedRow.ciphertext, new RegExp(secondValue, "u"));
++      assert.equal(repository.readSecret(ASR_SETTING_KEY), secondValue);
++    } finally {
++      db.close();
++    }
++  });
++
++  it("clears ASR and suppresses every caller-provided fallback", () => {
++    const db = openDatabase({ databaseUrl: ":memory:" });
++    try {
++      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
++      repository.setSecret(ASR_SETTING_KEY, "synthetic-asr-key-to-clear");
++      const cleared = repository.clearSecret(ASR_SETTING_KEY);
++      assert.equal(cleared.configured, false);
++      assert.equal(cleared.status, "cleared");
++      assert.equal(cleared.masked, null);
++      assert.equal(repository.readSecret(ASR_SETTING_KEY), null);
++      assert.equal(repository.resolveSecret(ASR_SETTING_KEY, "synthetic-forbidden-fallback"), "");
++      const row = db.prepare(
++        "SELECT ciphertext, status FROM secure_settings WHERE setting_key = $key",
++      ).get({ $key: ASR_SETTING_KEY });
++      assert.deepEqual({ ...row }, { ciphertext: null, status: "cleared" });
++    } finally {
++      db.close();
++    }
++  });
++
++  it("fails closed for unknown keys on every repository read and mutation plane", () => {
++    const db = openDatabase({ databaseUrl: ":memory:" });
++    try {
++      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
++      const unknown = "unknown_provider_api_key";
++      for (const operation of [
++        () => repository.readSecret(unknown),
++        () => repository.resolveSecret(unknown, "fallback"),
++        () => repository.metadata(unknown),
++        () => repository.has(unknown),
++        () => repository.setSecret(unknown, "synthetic-value"),
++        () => repository.clearSecret(unknown),
++      ]) {
++        assert.throws(operation, /Unknown secure setting/u);
++      }
++      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM secure_settings").get().count, 0);
++    } finally {
++      db.close();
++    }
++  });
++
++  it("masks every short-secret boundary without reconstructing plaintext and preserves long provider masks", () => {
++    const db = openDatabase({ databaseUrl: ":memory:" });
++    try {
++      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
++      const boundaries = [
++        ["甲", "••••••"],
++        ["乙丙", "••••••"],
++        ["丁戊己", "••••••"],
++        ["庚辛壬癸", "••••••"],
++        ["子丑寅卯辰", "子••••••辰"],
++        ["巳午未申酉戌亥乾", "巳••••••乾"],
++        ["坤震巽坎离艮兑天地", "坤震巽坎••••••艮兑天地"],
++      ];
++      assert.deepEqual(boundaries.map(([value]) => value.length), [1, 2, 3, 4, 5, 8, 9]);
++      for (const [value, expectedMask] of boundaries) {
++        assert.equal(maskSecret(value), expectedMask);
++        const metadata = repository.setSecret(ASR_SETTING_KEY, value);
++        assert.equal(metadata.masked, expectedMask);
++        assert.notEqual(metadata.masked.replaceAll("•", ""), value);
++        assert.equal(repository.readSecret(ASR_SETTING_KEY), value);
++      }
++
++      for (const [key, value, expectedMask] of [
++        [DEEPSEEK_SETTING_KEY, "deepseek-provider-value", "deep••••••alue"],
++        [PUSHPLUS_SETTING_KEY, "pushplus-provider-value", "push••••••alue"],
++      ]) {
++        assert.equal(maskSecret(value), expectedMask);
++        assert.equal(repository.setSecret(key, value).masked, expectedMask);
++      }
++    } finally {
++      db.close();
++    }
++  });
++});
++
+@@ -119 +291 @@ describe("secure system settings API", () => {
+-      body: JSON.stringify({ apiKey: fixtureValue }),
++      body: JSON.stringify({ [apiKeyField]: fixtureValue }),
+@@ -230,0 +403,379 @@ describe("secure system settings API", () => {
++
++  it("lets only an active admin read ASR metadata and never invents an environment fallback", async () => {
++    const ignoredFallback = "synthetic-asr-environment-fallback";
++    await startServer({ asrApiKey: ignoredFallback });
++    const auth = await login();
++    const listed = await request("/api/settings/security", {
++      headers: { Cookie: auth.cookie },
++    });
++    assert.equal(listed.response.status, 200);
++    assert.equal(listed.response.headers.get("cache-control"), "no-store");
++    assert.deepEqual(listed.body.item.asr, {
++      configured: false,
++      masked: null,
++      createdAt: null,
++      rotatedAt: null,
++      updatedAt: null,
++      lastSuccessAt: null,
++      lastFailureAt: null,
++      lastErrorCode: null,
++      lastDeliveryCount: null,
++      lastChunkCount: null,
++      status: "not_configured",
++      source: "none",
++      fallbackSuppressed: false,
++    });
++    assert.doesNotMatch(JSON.stringify(listed.body), new RegExp(ignoredFallback, "u"));
++    assert.deepEqual(Object.keys(listed.body.item.asr).sort(), [
++      "configured",
++      "createdAt",
++      "fallbackSuppressed",
++      "lastChunkCount",
++      "lastDeliveryCount",
++      "lastErrorCode",
++      "lastFailureAt",
++      "lastSuccessAt",
++      "masked",
++      "rotatedAt",
++      "source",
++      "status",
++      "updatedAt",
++    ]);
++  });
++
++  it("sets and replaces ASR through repeated PUT while POST remains absent", async () => {
++    let currentTime = new Date("2026-08-30T03:04:05.000Z");
++    await startServer({ settingsClock: () => currentTime });
++    const auth = await login();
++    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
++    const firstValue = "synthetic-asr-http-first";
++    const secondValue = "synthetic-asr-http-second";
++    const consoleLines = [];
++    const originals = {
++      log: console.log,
++      warn: console.warn,
++      error: console.error,
++    };
++    console.log = (...values) => consoleLines.push(values.join(" "));
++    console.warn = (...values) => consoleLines.push(values.join(" "));
++    console.error = (...values) => consoleLines.push(values.join(" "));
++    try {
++      const saved = await request("/api/settings/asr-api-key", {
++        method: "PUT",
++        headers,
++        body: JSON.stringify({ [apiKeyField]: firstValue }),
++      });
++      assert.equal(saved.response.status, 200);
++      assert.equal(saved.response.headers.get("cache-control"), "no-store");
++      assert.equal(saved.body.item.configured, true);
++      assert.equal(saved.body.item.rotatedAt, null);
++      assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(firstValue, "u"));
++
++      currentTime = new Date("2026-08-30T04:05:06.000Z");
++      const replaced = await request("/api/settings/asr-api-key", {
++        method: "PUT",
++        headers,
++        body: JSON.stringify({ [apiKeyField]: secondValue }),
++      });
++      assert.equal(replaced.response.status, 200);
++      assert.equal(replaced.body.item.rotatedAt, currentTime.toISOString());
++      assert.doesNotMatch(JSON.stringify(replaced.body), new RegExp(secondValue, "u"));
++
++      const postProbe = await request("/api/settings/asr-api-key", {
++        method: "POST",
++        headers,
++        body: JSON.stringify({ [apiKeyField]: "synthetic-asr-post-probe" }),
++      });
++      assert.equal(postProbe.response.status, 404);
++      assert.equal(postProbe.body.error.code, "NOT_FOUND");
++    } finally {
++      console.log = originals.log;
++      console.warn = originals.warn;
++      console.error = originals.error;
++    }
++
++    const state = readSettingsState();
++    assert.equal(state.asr.status, "active");
++    assert.notEqual(state.asr.ciphertext, firstValue);
++    assert.notEqual(state.asr.ciphertext, secondValue);
++    assert.doesNotMatch(state.asr.ciphertext, new RegExp(`${firstValue}|${secondValue}`, "u"));
++    assert.deepEqual(state.audit.map((row) => row.action), [
++      "settings.asr_api_key.save",
++      "settings.asr_api_key.save",
++    ]);
++    const persistedDump = JSON.stringify(state);
++    const consoleDump = consoleLines.join("\n");
++    for (const value of [firstValue, secondValue]) {
++      assert.doesNotMatch(persistedDump, new RegExp(value, "u"));
++      assert.doesNotMatch(consoleDump, new RegExp(value, "u"));
++    }
++    for (const audit of state.audit) {
++      assert.equal(audit.actor, account);
++      assert.equal(audit.entity_type, "secure_setting");
++      assert.equal(audit.entity_id, ASR_SETTING_KEY);
++      assert.deepEqual(JSON.parse(audit.metadata_json), { setting: ASR_SETTING_KEY });
++      assert.deepEqual(Object.keys(JSON.parse(audit.after_json)).sort(), ["masked", "status", "updatedAt"]);
++    }
++  });
++
++  it("keeps length 1, 2, 3, 4, 5, 8, and 9 ASR values out of response, audit, storage, and console", async () => {
++    await startServer();
++    const auth = await login();
++    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
++    const values = [
++      "甲",
++      "乙丙",
++      "丁戊己",
++      "庚辛壬癸",
++      "子丑寅卯辰",
++      "巳午未申酉戌亥乾",
++      "坤震巽坎离艮兑天地",
++    ];
++    assert.deepEqual(values.map((value) => value.length), [1, 2, 3, 4, 5, 8, 9]);
++    const consoleLines = [];
++    const originals = {
++      log: console.log,
++      warn: console.warn,
++      error: console.error,
++    };
++    console.log = (...parts) => consoleLines.push(parts.join(" "));
++    console.warn = (...parts) => consoleLines.push(parts.join(" "));
++    console.error = (...parts) => consoleLines.push(parts.join(" "));
++    try {
++      for (const value of values) {
++        const saved = await request("/api/settings/asr-api-key", {
++          method: "PUT",
++          headers,
++          body: JSON.stringify({ [apiKeyField]: value }),
++        });
++        assert.equal(saved.response.status, 200, `length ${value.length}`);
++        assert.equal(saved.body.item.configured, true);
++        assert.notEqual(saved.body.item.masked.replaceAll("•", ""), value);
++        assert.equal(JSON.stringify(saved.body).includes(value), false);
++        const state = readSettingsState();
++        assert.equal(JSON.stringify(state).includes(value), false);
++      }
++    } finally {
++      console.log = originals.log;
++      console.warn = originals.warn;
++      console.error = originals.error;
++    }
++    const state = readSettingsState();
++    assert.equal(state.audit.length, values.length);
++    assert.equal(state.audit.every((row) => row.action === "settings.asr_api_key.save"), true);
++    for (const value of values) {
++      assert.equal(JSON.stringify(state.audit).includes(value), false);
++      assert.equal(consoleLines.join("\n").includes(value), false);
++    }
++  });
++
++  it("requires CLEAR before deleting ASR and persists an explicit cleared state", async () => {
++    await startServer();
++    const auth = await login();
++    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
++    const fixtureValue = "synthetic-asr-clear-value";
++    const saved = await request("/api/settings/asr-api-key", {
++      method: "PUT",
++      headers,
++      body: JSON.stringify({ [apiKeyField]: fixtureValue }),
++    });
++    assert.equal(saved.response.status, 200);
++
++    const missing = await request("/api/settings/asr-api-key", {
++      method: "DELETE",
++      headers,
++      body: JSON.stringify({ confirmation: "clear" }),
++    });
++    assert.equal(missing.response.status, 428);
++    assert.equal(missing.body.error.code, "CONFIRMATION_REQUIRED");
++    assert.equal(readSettingsState().asr.status, "active");
++
++    const cleared = await request("/api/settings/asr-api-key", {
++      method: "DELETE",
++      headers,
++      body: JSON.stringify({ confirmation: "CLEAR" }),
++    });
++    assert.equal(cleared.response.status, 200);
++    assert.equal(cleared.body.item.configured, false);
++    assert.equal(cleared.body.item.status, "cleared");
++    assert.doesNotMatch(JSON.stringify(cleared.body), new RegExp(fixtureValue, "u"));
++    const state = readSettingsState();
++    assert.equal(state.asr.ciphertext, null);
++    assert.equal(state.asr.status, "cleared");
++    assert.deepEqual(state.audit.map((row) => row.action), [
++      "settings.asr_api_key.save",
++      "settings.asr_api_key.clear",
++    ]);
++    assert.deepEqual(JSON.parse(state.audit.at(-1).metadata_json), {
++      setting: ASR_SETTING_KEY,
++      confirmation: "provided",
++    });
++  });
++
++  it("rejects unauthenticated GET, PUT, and DELETE before ASR storage or audit changes", async () => {
++    await startServer();
++    for (const [method, body] of [
++      ["GET", undefined],
++      ["PUT", JSON.stringify({ [apiKeyField]: "synthetic-unauthenticated-asr" })],
++      ["DELETE", JSON.stringify({ confirmation: "CLEAR" })],
++    ]) {
++      const path = method === "GET" ? "/api/settings/security" : "/api/settings/asr-api-key";
++      const denied = await request(path, { method, body });
++      assert.equal(denied.response.status, 401, method);
++      assert.equal(denied.body.error.code, "UNAUTHORIZED", method);
++    }
++    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
++  });
++
++  it("rejects active members on GET, PUT, and DELETE with the admin-role gate", async () => {
++    await startServer();
++    const auth = await login();
++    const db = createConnection({ databaseUrl });
++    try {
++      db.prepare("UPDATE users SET role = 'member' WHERE account = $account").run({ $account: account });
++    } finally {
++      db.close();
++    }
++    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
++    for (const [method, body] of [
++      ["GET", undefined],
++      ["PUT", JSON.stringify({ [apiKeyField]: "synthetic-member-asr" })],
++      ["DELETE", JSON.stringify({ confirmation: "CLEAR" })],
++    ]) {
++      const path = method === "GET" ? "/api/settings/security" : "/api/settings/asr-api-key";
++      const denied = await request(path, { method, headers, body });
++      assert.equal(denied.response.status, 403, method);
++      assert.equal(denied.body.error.code, "ADMIN_ROLE_REQUIRED", method);
++    }
++    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
++  });
++
++  it("keeps machine tokens outside GET, PUT, and DELETE on the ASR admin plane", async () => {
++    const machineToken = ["synthetic", "asr", "machine", "token"].join("-");
++    await startServer({ weixinAgentApiToken: machineToken, weixinAgentOwner: account });
++    const headers = { Authorization: `Bearer ${machineToken}` };
++    for (const [method, body] of [
++      ["GET", undefined],
++      ["PUT", JSON.stringify({ [apiKeyField]: "synthetic-machine-asr" })],
++      ["DELETE", JSON.stringify({ confirmation: "CLEAR" })],
++    ]) {
++      const path = method === "GET" ? "/api/settings/security" : "/api/settings/asr-api-key";
++      const denied = await request(path, { method, headers, body });
++      assert.equal(denied.response.status, 403, method);
++      assert.equal(denied.body.error.code, "MACHINE_SCOPE_DENIED", method);
++    }
++    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
++  });
++
++  it("allows the ASR PUT browser preflight only for an exact configured Origin without writing state", async () => {
++    const allowedOrigin = "https://settings.example.test";
++    await startServer({ corsAllowedOrigins: [allowedOrigin] });
++    const allowed = await request("/api/settings/asr-api-key", {
++      method: "OPTIONS",
++      headers: {
++        Origin: allowedOrigin,
++        "Access-Control-Request-Method": "PUT",
++        "Access-Control-Request-Headers": "Content-Type,X-CSRF-Token",
++      },
++    });
++    assert.equal(allowed.response.status, 204);
++    assert.equal(allowed.response.headers.get("access-control-allow-origin"), allowedOrigin);
++    assert.equal(allowed.response.headers.get("access-control-allow-credentials"), "true");
++    assert.equal(
++      allowed.response.headers.get("access-control-allow-methods"),
++      "GET,POST,PUT,PATCH,DELETE,OPTIONS",
++    );
++    assert.match(
++      allowed.response.headers.get("access-control-allow-headers"),
++      /(?:^|,)X-CSRF-Token(?:,|$)/u,
++    );
++    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
++
++    const forbidden = await request("/api/settings/asr-api-key", {
++      method: "OPTIONS",
++      headers: {
++        Origin: "https://forbidden.example.test",
++        "Access-Control-Request-Method": "PUT",
++        "Access-Control-Request-Headers": "Content-Type,X-CSRF-Token",
++      },
++    });
++    assert.equal(forbidden.response.status, 403);
++    assert.equal(forbidden.body.error.code, "ORIGIN_NOT_ALLOWED");
++    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
++  });
++
++  it("leaves the ASR row and audit unchanged after bad CSRF and bad Origin attempts", async () => {
++    const allowedOrigin = "https://settings.example.test";
++    await startServer({ corsAllowedOrigins: [allowedOrigin] });
++    const auth = await login();
++    const fixtureValue = "synthetic-asr-csrf-origin-value";
++    const goodHeaders = {
++      Cookie: auth.cookie,
++      "X-CSRF-Token": auth.csrf,
++      Origin: allowedOrigin,
++    };
++    const saved = await request("/api/settings/asr-api-key", {
++      method: "PUT",
++      headers: goodHeaders,
++      body: JSON.stringify({ [apiKeyField]: fixtureValue }),
++    });
++    assert.equal(saved.response.status, 200);
++    const before = readSettingsState();
++
++    const badCsrf = await request("/api/settings/asr-api-key", {
++      method: "PUT",
++      headers: { ...goodHeaders, "X-CSRF-Token": "invalid-csrf-token" },
++      body: JSON.stringify({ [apiKeyField]: "synthetic-asr-bad-csrf" }),
++    });
++    assert.equal(badCsrf.response.status, 403);
++    assert.equal(badCsrf.body.error.code, "CSRF_INVALID");
++
++    const badOrigin = await request("/api/settings/asr-api-key", {
++      method: "DELETE",
++      headers: { ...goodHeaders, Origin: "https://forbidden.example.test" },
++      body: JSON.stringify({ confirmation: "CLEAR" }),
++    });
++    assert.equal(badOrigin.response.status, 403);
++    assert.equal(badOrigin.body.error.code, "ORIGIN_NOT_ALLOWED");
++    assert.deepEqual(readSettingsState(), before);
++  });
++
++  it("returns fixed non-leaking errors for unavailable storage and invalid or oversized ASR payloads", async () => {
++    await startServer({ settingsEncryptionKey: "" });
++    const auth = await login();
++    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
++    const validSecret = ["synthetic", "asr", "storage", "unavailable"].join("-");
++    const unavailable = await request("/api/settings/asr-api-key", {
++      method: "PUT",
++      headers,
++      body: JSON.stringify({ [apiKeyField]: validSecret }),
++    });
++    assert.equal(unavailable.response.status, 503);
++    assert.equal(unavailable.body.error.code, "SECURE_SETTINGS_NOT_CONFIGURED");
++
++    const invalid = await request("/api/settings/asr-api-key", {
++      method: "PUT",
++      headers,
++      body: JSON.stringify({ [apiKeyField]: 42 }),
++    });
++    assert.equal(invalid.response.status, 422);
++    assert.equal(invalid.body.error.code, "VALIDATION_ERROR");
++    assert.deepEqual(invalid.body.error.fields, { [apiKeyField]: "format" });
++
++    const oversizedValue = `asr-${"x".repeat(497)}`;
++    assert.equal(oversizedValue.length, 501);
++    const oversized = await request("/api/settings/asr-api-key", {
++      method: "PUT",
++      headers,
++      body: JSON.stringify({ [apiKeyField]: oversizedValue }),
++    });
++    assert.equal(oversized.response.status, 422);
++    assert.equal(oversized.body.error.code, "VALIDATION_ERROR");
++    assert.deepEqual(oversized.body.error.fields, { [apiKeyField]: "format" });
++
++    const responseDump = JSON.stringify([unavailable.body, invalid.body, oversized.body]);
++    for (const value of [validSecret, oversizedValue]) {
++      assert.doesNotMatch(responseDump, new RegExp(value, "u"));
++    }
++    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
++  });
+diff --git a/backend/tests/v0103-forward-compat.test.js b/backend/tests/v0103-forward-compat.test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..bbaaaece9a48bd22e29ac190c4a2b1aa430af0a6
+--- /dev/null
++++ b/backend/tests/v0103-forward-compat.test.js
+@@ -0,0 +1,406 @@
++import assert from "node:assert/strict";
++import { createHash } from "node:crypto";
++import { spawnSync } from "node:child_process";
++import { existsSync } from "node:fs";
++import { mkdtemp, rm, symlink } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { dirname, join } from "node:path";
++import { fileURLToPath, pathToFileURL } from "node:url";
++import { test } from "node:test";
++
++import { hashPassword } from "../src/auth/password.js";
++import { createConnection } from "../src/db/connection.js";
++import { openDatabase } from "../src/db.js";
++import { createServer as createCurrentServer } from "../src/server.js";
++import {
++  ASR_SETTING_KEY,
++  createSecureSettingsRepository,
++} from "../src/settings/repository.js";
++
++const V0103_RELEASE_COMMIT = "2dc9b1114107aee906d0ecfb006ac461cdb86cec";
++const currentBackend = dirname(dirname(fileURLToPath(import.meta.url)));
++const repositoryRoot = dirname(currentBackend);
++const currentNodeModules = join(currentBackend, "node_modules");
++const apiKeyField = ["api", "Key"].join("");
++const secureSettingsColumns = [
++  "setting_key",
++  "ciphertext",
++  "status",
++  "created_at",
++  "rotated_at",
++  "updated_at",
++  "last_success_at",
++  "last_failure_at",
++  "last_error_code",
++  "last_delivery_count",
++  "last_chunk_count",
++];
++
++function rowHash(row) {
++  return createHash("sha256").update(JSON.stringify(row), "utf8").digest("hex");
++}
++
++function asrPersistenceSnapshot(databaseUrl) {
++  const db = createConnection({ databaseUrl });
++  try {
++    const asr = db.prepare(`
++      SELECT ${secureSettingsColumns.join(", ")}
++      FROM secure_settings
++      WHERE setting_key = $key
++    `).get({ $key: ASR_SETTING_KEY });
++    const ledger = db.prepare(`
++      SELECT version, checksum, applied_at
++      FROM schema_migrations
++      WHERE version = '0033'
++    `).get();
++    assert.ok(asr, "the current ASR row must exist");
++    assert.ok(ledger, "the 0033 ledger row must exist");
++    return {
++      asr: { ...asr },
++      ledger: { ...ledger },
++      asrHash: rowHash({ ...asr }),
++      ledgerHash: rowHash({ ...ledger }),
++    };
++  } finally {
++    db.close();
++  }
++}
++
++async function request(baseUrl, path, options = {}) {
++  const headers = { ...(options.headers ?? {}) };
++  if (options.body !== undefined && !headers["Content-Type"]) {
++    headers["Content-Type"] = "application/json";
++  }
++  const response = await fetch(`${baseUrl}${path}`, { ...options, headers });
++  const text = await response.text();
++  let body = null;
++  if (text) {
++    try {
++      body = JSON.parse(text);
++    } catch {
++      body = text;
++    }
++  }
++  return { response, body, text };
++}
++
++function cookiePair(response) {
++  return String(response.headers.get("set-cookie") ?? "").split(";", 1)[0];
++}
++
++async function login(baseUrl, account, password) {
++  const loggedIn = await request(baseUrl, "/api/auth/login", {
++    method: "POST",
++    body: JSON.stringify({ account, password }),
++  });
++  assert.equal(loggedIn.response.status, 200);
++  return {
++    cookie: cookiePair(loggedIn.response),
++    csrf: loggedIn.body.csrfToken,
++  };
++}
++
++async function listen(server) {
++  await new Promise((resolve, reject) => {
++    server.once("error", reject);
++    server.listen(0, "127.0.0.1", () => {
++      server.off("error", reject);
++      resolve();
++    });
++  });
++  return `http://127.0.0.1:${server.address().port}`;
++}
++
++async function close(server) {
++  if (!server?.listening) return;
++  await new Promise((resolve, reject) => {
++    server.close((error) => (error ? reject(error) : resolve()));
++  });
++}
++
++function materializeV0103Backend(tempRoot) {
++  const resolved = spawnSync(
++    "git",
++    ["rev-parse", `${V0103_RELEASE_COMMIT}^{commit}`],
++    { cwd: repositoryRoot, encoding: "utf8" },
++  );
++  assert.equal(resolved.status, 0, resolved.stderr);
++  assert.equal(resolved.stdout.trim(), V0103_RELEASE_COMMIT);
++
++  const archivePath = join(tempRoot, "v0103-backend.tar");
++  const archived = spawnSync(
++    "git",
++    ["archive", "--format=tar", `--output=${archivePath}`, V0103_RELEASE_COMMIT, "backend"],
++    { cwd: repositoryRoot, encoding: "utf8" },
++  );
++  assert.equal(archived.status, 0, archived.stderr);
++  const extracted = spawnSync(
++    "tar",
++    ["-xf", archivePath, "-C", tempRoot],
++    { cwd: repositoryRoot, encoding: "utf8" },
++  );
++  assert.equal(extracted.status, 0, extracted.stderr);
++  return join(tempRoot, "backend");
++}
++
++async function exactV0103Database(oldBackend, databaseUrl) {
++  const oldDbUrl = pathToFileURL(join(oldBackend, "src", "db.js"));
++  oldDbUrl.searchParams.set("release", V0103_RELEASE_COMMIT);
++  const oldDbModule = await import(oldDbUrl.href);
++  const environmentKeys = [
++    "AUTH_ACCOUNT",
++    "AUTH_PASSWORD_HASH",
++    "WEIXIN_BOOKKEEPING_SENDER_ID",
++    "WEIXIN_BOOKKEEPING_OWNER",
++  ];
++  const savedEnvironment = new Map(
++    environmentKeys.map((key) => [key, process.env[key]]),
++  );
++  for (const key of environmentKeys) delete process.env[key];
++  try {
++    const db = oldDbModule.openDatabase({ databaseUrl });
++    try {
++      const versions = db.prepare(
++        "SELECT version FROM schema_migrations ORDER BY version",
++      ).all().map((row) => row.version);
++      assert.equal(versions.length, 31);
++      assert.equal(versions.at(-1), "0032");
++      assert.deepEqual(
++        db.prepare("PRAGMA table_info(secure_settings)").all().map((column) => column.name),
++        secureSettingsColumns,
++      );
++    } finally {
++      db.close();
++    }
++  } finally {
++    for (const [key, value] of savedEnvironment) {
++      if (value === undefined) delete process.env[key];
++      else process.env[key] = value;
++    }
++  }
++}
++
++test("exact v0.10.3 remains forward-compatible with a current 0033 ASR database", async () => {
++  const tempRoot = await mkdtemp(join(tmpdir(), "sentelligent-v0103-forward-"));
++  const databaseUrl = join(tempRoot, "forward.sqlite");
++  const account = "forwardadmin";
++  const password = ["synthetic", "forward", "password"].join("-");
++  const passwordHash = await hashPassword(password, { salt: Buffer.alloc(16, 103) });
++  const authSessionSecret = Buffer.alloc(32, 104).toString("base64url");
++  const settingsEncryptionKey = Buffer.alloc(32, 105).toString("base64url");
++  const asrValue = "synthetic-forward-asr-value";
++  const currentOptions = {
++    databaseUrl,
++    seed: false,
++    nodeEnv: "test",
++    authRequired: true,
++    authAccount: account,
++    authPassword: "",
++    authPasswordHash: passwordHash,
++    authSessionSecret,
++    authCookieSecure: false,
++    corsAllowedOrigins: [],
++    settingsEncryptionKey,
++    aiAnalysisMode: "mock",
++    hospitalTenderAutoRun: false,
++    actionReminderAutoRun: false,
++    dailyDigestAutoRun: false,
++  };
++  let currentServer = null;
++  let oldServer = null;
++
++  try {
++    const oldBackend = materializeV0103Backend(tempRoot);
++    assert.equal(existsSync(join(oldBackend, "src", "server.js")), true);
++    assert.equal(existsSync(currentNodeModules), true);
++    await symlink(currentNodeModules, join(oldBackend, "node_modules"), "dir");
++
++    // Phase 1: exact release code creates a real, complete 0032 database.
++    await exactV0103Database(oldBackend, databaseUrl);
++
++    // Phase 2: current code performs only 0033, then its repository/API writes
++    // the new ASR key and an owner-scoped customer fixture.
++    const upgraded = openDatabase({ databaseUrl });
++    try {
++      const versions = upgraded.prepare(
++        "SELECT version FROM schema_migrations ORDER BY version",
++      ).all().map((row) => row.version);
++      assert.equal(versions.length, 32);
++      assert.equal(versions.at(-1), "0033");
++    } finally {
++      upgraded.close();
++    }
++
++    currentServer = createCurrentServer(currentOptions);
++    const currentBaseUrl = await listen(currentServer);
++    const currentAuth = await login(currentBaseUrl, account, password);
++    const currentWriteHeaders = {
++      Cookie: currentAuth.cookie,
++      "X-CSRF-Token": currentAuth.csrf,
++    };
++    const savedAsr = await request(currentBaseUrl, "/api/settings/asr-api-key", {
++      method: "PUT",
++      headers: currentWriteHeaders,
++      body: JSON.stringify({ [apiKeyField]: asrValue }),
++    });
++    assert.equal(savedAsr.response.status, 200);
++    assert.equal(savedAsr.body.item.configured, true);
++    assert.doesNotMatch(JSON.stringify(savedAsr.body), new RegExp(asrValue, "u"));
++
++    const customerName = "V0103前向兼容医院";
++    const createdCustomer = await request(currentBaseUrl, "/api/customers", {
++      method: "POST",
++      headers: currentWriteHeaders,
++      body: JSON.stringify({
++        name: customerName,
++        region: "兼容测试区",
++        summary: "exact v0.10.3 forward compatibility fixture",
++      }),
++    });
++    assert.equal(createdCustomer.response.status, 201);
++    await close(currentServer);
++    currentServer = null;
++
++    const beforeOldCode = asrPersistenceSnapshot(databaseUrl);
++
++    // Phase 3: boot exact release code against the 0033 database and exercise
++    // its established read/write planes. The release has no ASR route.
++    const oldServerUrl = pathToFileURL(join(oldBackend, "src", "server.js"));
++    oldServerUrl.searchParams.set("release", V0103_RELEASE_COMMIT);
++    const { createServer: createOldServer } = await import(oldServerUrl.href);
++    oldServer = createOldServer(currentOptions);
++    const oldBaseUrl = await listen(oldServer);
++
++    const health = await request(oldBaseUrl, "/api/health");
++    assert.equal(health.response.status, 200);
++    assert.equal(health.body.status, "ok");
++    assert.equal(health.body.database, "ready");
++
++    const oldAuth = await login(oldBaseUrl, account, password);
++    const oldWriteHeaders = {
++      Cookie: oldAuth.cookie,
++      "X-CSRF-Token": oldAuth.csrf,
++    };
++    const session = await request(oldBaseUrl, "/api/auth/session", {
++      headers: { Cookie: oldAuth.cookie },
++    });
++    assert.equal(session.response.status, 200);
++    assert.equal(session.body.account, account);
++    assert.equal(session.body.role, "admin");
++
++    const oldSettings = await request(oldBaseUrl, "/api/settings/security", {
++      headers: { Cookie: oldAuth.cookie },
++    });
++    assert.equal(oldSettings.response.status, 200);
++    assert.equal(Object.hasOwn(oldSettings.body.item, "deepseek"), true);
++    assert.equal(Object.hasOwn(oldSettings.body.item, "pushplus"), true);
++    assert.equal(Object.hasOwn(oldSettings.body.item, "asr"), false);
++
++    const oldDeepseekValue = "synthetic-v0103-deepseek-value";
++    const oldDeepseek = await request(oldBaseUrl, "/api/settings/deepseek-key", {
++      method: "PUT",
++      headers: oldWriteHeaders,
++      body: JSON.stringify({ [apiKeyField]: oldDeepseekValue }),
++    });
++    assert.equal(oldDeepseek.response.status, 200);
++    assert.equal(oldDeepseek.body.item.configured, true);
++    assert.doesNotMatch(JSON.stringify(oldDeepseek.body), new RegExp(oldDeepseekValue, "u"));
++
++    const oldPushplusValue = "synthetic-v0103-pushplus-value";
++    const oldPushplus = await request(oldBaseUrl, "/api/settings/pushplus-token", {
++      method: "PUT",
++      headers: oldWriteHeaders,
++      body: JSON.stringify({ token: oldPushplusValue }),
++    });
++    assert.equal(oldPushplus.response.status, 200);
++    assert.equal(oldPushplus.body.item.configured, true);
++    assert.doesNotMatch(JSON.stringify(oldPushplus.body), new RegExp(oldPushplusValue, "u"));
++
++    const quickRecord = await request(oldBaseUrl, "/api/quick-records", {
++      method: "POST",
++      headers: oldWriteHeaders,
++      body: JSON.stringify({
++        rawContent: "周三现场拜访日照中医医院，客户需要十五五规划材料。",
++        occurredAt: "2026-08-26T09:00:00+08:00",
++        sourceChannel: "forward-compat-test",
++      }),
++    });
++    assert.equal(quickRecord.response.status, 201);
++    const analyzed = await request(
++      oldBaseUrl,
++      `/api/quick-records/${quickRecord.body.item.id}/analyze`,
++      { method: "POST", headers: oldWriteHeaders, body: "{}" },
++    );
++    assert.equal(analyzed.response.status, 201);
++    assert.equal(analyzed.body.item.source, "mock");
++
++    const help = await request(oldBaseUrl, "/api/assistant/chat", {
++      method: "POST",
++      headers: oldWriteHeaders,
++      body: JSON.stringify({
++        message: "帮助",
++        conversationId: "v0103-forward-help",
++      }),
++    });
++    assert.equal(help.response.status, 200);
++    assert.equal(help.body.status, "help");
++
++    const customerQuery = await request(oldBaseUrl, "/api/assistant/chat", {
++      method: "POST",
++      headers: oldWriteHeaders,
++      body: JSON.stringify({
++        message: `客户 ${customerName}`,
++        conversationId: "v0103-forward-customer",
++      }),
++    });
++    assert.equal(customerQuery.response.status, 200);
++    assert.equal(customerQuery.body.status, "ok");
++    assert.match(JSON.stringify(customerQuery.body), new RegExp(customerName, "u"));
++
++    const absentAsrRoute = await request(oldBaseUrl, "/api/settings/asr-api-key", {
++      method: "PUT",
++      headers: oldWriteHeaders,
++      body: JSON.stringify({ [apiKeyField]: "synthetic-v0103-route-probe" }),
++    });
++    assert.equal(absentAsrRoute.response.status, 404);
++    assert.equal(absentAsrRoute.body.error.code, "NOT_FOUND");
++
++    await close(oldServer);
++    oldServer = null;
++
++    const afterOldCode = asrPersistenceSnapshot(databaseUrl);
++    assert.equal(afterOldCode.asrHash, beforeOldCode.asrHash);
++    assert.equal(afterOldCode.ledgerHash, beforeOldCode.ledgerHash);
++    assert.deepEqual(afterOldCode.asr, beforeOldCode.asr);
++    assert.deepEqual(afterOldCode.ledger, beforeOldCode.ledger);
++
++    // Phase 4: current code reopens the old-touched file, resolves ASR metadata,
++    // verifies the exact persisted secret, and passes SQLite integrity checks.
++    const reopened = openDatabase({ databaseUrl });
++    try {
++      const repository = createSecureSettingsRepository(reopened, {
++        masterKey: settingsEncryptionKey,
++      });
++      const metadata = repository.listMetadata().asr;
++      assert.equal(metadata.configured, true);
++      assert.equal(metadata.status, "active");
++      assert.equal(metadata.masked.includes(asrValue), false);
++      assert.equal(repository.readSecret(ASR_SETTING_KEY), asrValue);
++      assert.deepEqual(
++        reopened.prepare("PRAGMA quick_check").all().map((row) => row.quick_check),
++        ["ok"],
++      );
++      assert.equal(
++        reopened.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
++        32,
++      );
++    } finally {
++      reopened.close();
++    }
++  } finally {
++    await close(oldServer);
++    await close(currentServer);
++    await rm(tempRoot, { recursive: true, force: true });
++    assert.equal(existsSync(tempRoot), false);
++  }
++});

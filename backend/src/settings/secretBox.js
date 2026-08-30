@@ -63,6 +63,7 @@ export function decryptSecret(ciphertext, masterKey) {
 
 export function maskSecret(value) {
   if (typeof value !== "string" || !value) return null;
-  if (value.length <= 8) return `${value.slice(0, 2)}••••${value.slice(-2)}`;
+  if (value.length <= 4) return "••••••";
+  if (value.length <= 8) return `${value.slice(0, 1)}••••••${value.slice(-1)}`;
   return `${value.slice(0, 4)}••••••${value.slice(-4)}`;
 }

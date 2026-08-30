@@ -16,7 +16,24 @@ import {
   migrationChecksum,
 } from "../src/db/migrate.js";
 import { apply as applyPhase1WriteIntegrity } from "../src/db/migrations/0002_phase1_write_integrity.mjs";
+import { apply as applySecureSettings } from "../src/db/migrations/0015_secure_settings.mjs";
 import { apply as applySecureSettingsPushplus } from "../src/db/migrations/0021_secure_settings_pushplus.mjs";
+import { apply as applySecureSettingsAsr } from "../src/db/migrations/0033_secure_settings_asr.mjs";
+
+const SECURE_SETTINGS_ASR_CHECKSUM = "acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5";
+const secureSettingsColumns = [
+  "setting_key",
+  "ciphertext",
+  "status",
+  "created_at",
+  "rotated_at",
+  "updated_at",
+  "last_success_at",
+  "last_failure_at",
+  "last_error_code",
+  "last_delivery_count",
+  "last_chunk_count",
+];
 
 const businessTables = [
   "customers",
@@ -126,6 +143,95 @@ function withDatabase(testBody) {
   }
 }
 
+function secureSettingsRows(db) {
+  return db.prepare("SELECT * FROM secure_settings ORDER BY setting_key").all()
+    .map((row) => ({ ...row }));
+}
+
+function seedSecureSettingsMatrix(db, status) {
+  const active = status === "active";
+  const insert = db.prepare(`
+    INSERT INTO secure_settings (
+      setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+      last_success_at, last_failure_at, last_error_code,
+      last_delivery_count, last_chunk_count
+    ) VALUES (
+      $key, $ciphertext, $status, $createdAt, $rotatedAt, $updatedAt,
+      $lastSuccessAt, $lastFailureAt, $lastErrorCode,
+      $lastDeliveryCount, $lastChunkCount
+    )
+  `);
+  for (const [index, key] of [
+    "icost_webhook_token",
+    "deepseek_api_key",
+    "hospital_tender_pushplus_token",
+  ].entries()) {
+    insert.run({
+      $key: key,
+      $ciphertext: active ? `ciphertext-${index + 1}` : null,
+      $status: status,
+      $createdAt: `2026-08-2${index}T01:02:03.00${index}Z`,
+      $rotatedAt: index === 0 ? null : `2026-08-2${index}T02:03:04.00${index}Z`,
+      $updatedAt: `2026-08-2${index}T03:04:05.00${index}Z`,
+      $lastSuccessAt: index === 0 ? null : `2026-08-2${index}T04:05:06.00${index}Z`,
+      $lastFailureAt: index === 2 ? `2026-08-2${index}T05:06:07.00${index}Z` : null,
+      $lastErrorCode: index === 2 ? "synthetic_delivery_failure" : null,
+      $lastDeliveryCount: index,
+      $lastChunkCount: index + 1,
+    });
+  }
+}
+
+function rebuildSecureSettingsAs0032(db) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      CREATE TABLE secure_settings_0032_fixture (
+        setting_key TEXT PRIMARY KEY NOT NULL CHECK (
+          setting_key IN (
+            'icost_webhook_token',
+            'deepseek_api_key',
+            'hospital_tender_pushplus_token'
+          )
+        ),
+        ciphertext TEXT CHECK (ciphertext IS NULL OR length(ciphertext) > 0),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
+        created_at TEXT NOT NULL,
+        rotated_at TEXT,
+        updated_at TEXT NOT NULL,
+        last_success_at TEXT,
+        last_failure_at TEXT,
+        last_error_code TEXT CHECK (last_error_code IS NULL OR length(last_error_code) BETWEEN 1 AND 120),
+        last_delivery_count INTEGER CHECK (last_delivery_count IS NULL OR last_delivery_count >= 0),
+        last_chunk_count INTEGER CHECK (last_chunk_count IS NULL OR last_chunk_count >= 0),
+        CHECK ((status = 'active' AND ciphertext IS NOT NULL) OR (status = 'cleared' AND ciphertext IS NULL))
+      );
+      INSERT INTO secure_settings_0032_fixture (
+        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+        last_success_at, last_failure_at, last_error_code,
+        last_delivery_count, last_chunk_count
+      )
+      SELECT
+        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+        last_success_at, last_failure_at, last_error_code,
+        last_delivery_count, last_chunk_count
+      FROM secure_settings
+      WHERE setting_key IN (
+        'icost_webhook_token',
+        'deepseek_api_key',
+        'hospital_tender_pushplus_token'
+      );
+      DROP TABLE secure_settings;
+      ALTER TABLE secure_settings_0032_fixture RENAME TO secure_settings;
+      DELETE FROM schema_migrations WHERE version = '0033';
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function migrateThrough0002(db) {
   const migrationPaths = [
     fileURLToPath(new URL("../src/db/migrations/0001_baseline.sql", import.meta.url)),
@@ -172,7 +278,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 31);
+      assert.equal(firstMigrations.length, 32);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -198,11 +304,13 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[22].version, "0024");
       assert.equal(firstMigrations[23].version, "0025");
       assert.equal(firstMigrations[24].version, "0026");
+      assert.equal(firstMigrations[25].version, "0027");
       assert.equal(firstMigrations[26].version, "0028");
       assert.equal(firstMigrations[27].version, "0029");
       assert.equal(firstMigrations[28].version, "0030");
       assert.equal(firstMigrations[29].version, "0031");
       assert.equal(firstMigrations[30].version, "0032");
+      assert.equal(firstMigrations[31].version, "0033");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -237,6 +345,14 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0023_assistant_business_context.mjs",
         "../src/db/migrations/0024_shortcut_advance_allocation.mjs",
         "../src/db/migrations/0025_travel_expense_region_profiles.mjs",
+        "../src/db/migrations/0026_hospital_tender_active_window.mjs",
+        "../src/db/migrations/0027_customer_profile_aliases.mjs",
+        "../src/db/migrations/0028_action_item_reminders.mjs",
+        "../src/db/migrations/0029_owner_vocabulary_cleanup.mjs",
+        "../src/db/migrations/0030_users_table.mjs",
+        "../src/db/migrations/0031_owner_isolation_tightening.mjs",
+        "../src/db/migrations/0032_weixin_bindings.mjs",
+        "../src/db/migrations/0033_secure_settings_asr.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -262,6 +378,14 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[21].checksum, migrationChecksum(migrationSources[21]));
       assert.equal(firstMigrations[22].checksum, migrationChecksum(migrationSources[22]));
       assert.equal(firstMigrations[23].checksum, migrationChecksum(migrationSources[23]));
+      assert.equal(firstMigrations[24].checksum, migrationChecksum(migrationSources[24]));
+      assert.equal(firstMigrations[25].checksum, migrationChecksum(migrationSources[25]));
+      assert.equal(firstMigrations[26].checksum, migrationChecksum(migrationSources[26]));
+      assert.equal(firstMigrations[27].checksum, migrationChecksum(migrationSources[27]));
+      assert.equal(firstMigrations[28].checksum, migrationChecksum(migrationSources[28]));
+      assert.equal(firstMigrations[29].checksum, migrationChecksum(migrationSources[29]));
+      assert.equal(firstMigrations[30].checksum, migrationChecksum(migrationSources[30]));
+      assert.equal(firstMigrations[31].checksum, migrationChecksum(migrationSources[31]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -459,6 +583,218 @@ test("migration 0021 preserves encrypted settings and adds bounded PushPlus deli
   }
 });
 
+test("migration 0033 upgrades the direct 0021 active matrix without changing any existing field", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    applySecureSettings(db);
+    applySecureSettingsPushplus(db);
+    seedSecureSettingsMatrix(db, "active");
+    const before = secureSettingsRows(db);
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      applySecureSettingsAsr(db);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    assert.deepEqual(columnNames(db, "secure_settings"), secureSettingsColumns);
+    assert.deepEqual(secureSettingsRows(db), before);
+    const tableSql = db.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
+    `).get().sql;
+    assert.match(tableSql, /asr_api_key/u);
+    db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('asr_api_key', 'synthetic-asr-ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+    `).run();
+    assert.throws(() => db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('unknown_api_key', 'ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+    `).run(), /CHECK constraint failed/i);
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0033 upgrades the direct 0021 cleared matrix without changing any existing field", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    applySecureSettings(db);
+    applySecureSettingsPushplus(db);
+    seedSecureSettingsMatrix(db, "cleared");
+    const before = secureSettingsRows(db);
+    const beforeKeys = before.map((row) => row.setting_key);
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      applySecureSettingsAsr(db);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    const after = secureSettingsRows(db);
+    assert.deepEqual(after, before);
+    assert.deepEqual(after.map((row) => row.setting_key), beforeKeys);
+    assert.equal(after.length, before.length);
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0033 upgrades a complete 0032 database and records only its frozen checksum", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      rebuildSecureSettingsAs0032(db);
+      seedSecureSettingsMatrix(db, "active");
+      const rowsBefore = secureSettingsRows(db);
+      const ledgerBefore = db.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
+      ).all().map((row) => ({ ...row }));
+      assert.equal(ledgerBefore.length, 31);
+      assert.equal(ledgerBefore.at(-1).version, "0032");
+
+      migrateDatabase(db);
+
+      const ledgerAfter = db.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
+      ).all().map((row) => ({ ...row }));
+      const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
+      assert.equal(ledgerAfter.length, 32);
+      assert.deepEqual(added.map((row) => row.version), ["0033"]);
+      assert.deepEqual(ledgerAfter.filter((row) => row.version !== "0033"), ledgerBefore);
+      const source = readFileSync(
+        fileURLToPath(new URL("../src/db/migrations/0033_secure_settings_asr.mjs", import.meta.url)),
+        "utf8",
+      );
+      assert.equal(migrationChecksum(source), SECURE_SETTINGS_ASR_CHECKSUM);
+      assert.equal(added[0].checksum, SECURE_SETTINGS_ASR_CHECKSUM);
+      assert.deepEqual(secureSettingsRows(db), rowsBefore);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("migration 0033 remains idempotent on reopen without changing its ledger timestamp", () => {
+  withDatabase((databaseUrl) => {
+    const first = openDatabase({ databaseUrl });
+    const firstLedger = { ...first.prepare(
+      "SELECT version, checksum, applied_at FROM schema_migrations WHERE version = '0033'",
+    ).get() };
+    first.close();
+
+    const second = openDatabase({ databaseUrl });
+    try {
+      const secondLedger = { ...second.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations WHERE version = '0033'",
+      ).get() };
+      assert.deepEqual(secondLedger, firstLedger);
+      assert.equal(second.prepare(
+        "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0033'",
+      ).get().count, 1);
+    } finally {
+      second.close();
+    }
+  });
+});
+
+test("migration 0033 restores the original table rows and ledger after a post-DDL failure", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      rebuildSecureSettingsAs0032(db);
+      seedSecureSettingsMatrix(db, "cleared");
+      const rowsBefore = secureSettingsRows(db);
+      const tableSqlBefore = db.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
+      `).get().sql;
+      const ledgerBefore = db.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
+      ).all().map((row) => ({ ...row }));
+      let injected = false;
+      const guardedDb = new Proxy(db, {
+        get(target, property) {
+          if (property === "exec") {
+            return (sql) => {
+              const result = target.exec(sql);
+              if (
+                !injected
+                && typeof sql === "string"
+                && sql.includes("ALTER TABLE secure_settings_next RENAME TO secure_settings")
+              ) {
+                injected = true;
+                throw new Error("synthetic 0033 post-DDL failure");
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+
+      assert.throws(
+        () => migrateDatabase(guardedDb),
+        /synthetic 0033 post-DDL failure/u,
+      );
+      assert.equal(injected, true);
+      assert.equal(db.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
+      `).get().sql, tableSqlBefore);
+      assert.deepEqual(secureSettingsRows(db), rowsBefore);
+      assert.deepEqual(
+        db.prepare("SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version")
+          .all().map((row) => ({ ...row })),
+        ledgerBefore,
+      );
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM sqlite_master
+        WHERE type = 'table' AND name = 'secure_settings_next'
+      `).get().count, 0);
+      assert.equal(db.prepare(
+        "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0033'",
+      ).get().count, 0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("migration 0033 checksum drift fails closed without changing settings or the stored ledger", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('asr_api_key', 'synthetic-asr-ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+    `).run();
+    const rowsBefore = secureSettingsRows(db);
+    db.prepare("UPDATE schema_migrations SET checksum = 'invalid-0033-checksum' WHERE version = '0033'").run();
+    db.close();
+
+    assert.throws(() => {
+      const unexpected = openDatabase({ databaseUrl });
+      unexpected.close();
+    }, /Checksum mismatch for migration 0033/u);
+
+    const readable = createConnection({ databaseUrl });
+    try {
+      assert.deepEqual(secureSettingsRows(readable), rowsBefore);
+      assert.equal(
+        readable.prepare("SELECT checksum FROM schema_migrations WHERE version = '0033'").get().checksum,
+        "invalid-0033-checksum",
+      );
+    } finally {
+      readable.close();
+    }
+  });
+});
+
 test("reconciles the former settings migration 0019 before applying Shortcut migrations", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
@@ -491,7 +827,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        31,
+        32,
       );
     } finally {
       db.close();
@@ -915,7 +1251,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033"],
       );
     } finally {
       migrated.close();
@@ -1109,7 +1445,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 31);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 32);
     } finally {
       db.close();
     }
@@ -1663,7 +1999,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033"],
       );
     } finally {
       db.close();
