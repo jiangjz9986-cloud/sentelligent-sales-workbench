@@ -1,0 +1,1026 @@
+v0.10.3 Web 小小专项热修事务验证 v2
+GENERATED_AT=2026-08-30T14:28:05+0800
+REPOSITORY=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+CHANGED_GIT_BRANCH=local/v0627-feature-closeout-20260827
+HEAD=f38fd0d5d38b3cc80e7d2488e7a9e2b57e5efd25
+V0_10_3_TAG_OBJECT=1aa18d34eea8b8ba2138cd2c76422ca044b5d928
+V0_10_3_TAG_COMMIT=2dc9b1114107aee906d0ecfb006ac461cdb86cec
+LITERAL_BYTE_SEMANTICS=Captured UTF-8 log records preserve visible content. Each trailing byte 0x20 is rendered as \x20, each trailing byte 0x09 as \x09, and each carriage return byte 0x0d as \x0d. VERIFICATION.txt itself uses LF only and contains no trailing whitespace.
+
+CHANGED_BRANCH_OR_FIELD_1=router.naturalPlan customer-search branch: ^(?:查客户|查询客户|客户) routes query to customer.search
+CHANGED_BRANCH_OR_FIELD_2=router.naturalPlan bookkeeping branch: ^记一笔 routes full text to bookkeeping.ingest after quick-capture/todo precedence and before visit fallback
+CHANGED_BRANCH_OR_FIELD_3=webChannel.isWebClosedTool decision branch: only exact WEB_OPEN_TOOLS membership returns open; registered-unopened, unknown, blank, and null fail closed
+CHANGED_BRANCH_OR_FIELD_4=mapAssistantWebResponse fields: safe body.result.text -> body.text and body.result.card -> body.card flattening while body.result remains unchanged
+CHANGED_BRANCH_OR_FIELD_5=useAssistantChat send catch branch: HTTP 403 reads only error.body.message, appends assistant status=denied bubble, uses fixed fallback, and never renders nested error/provider body
+
+STRICT_ALLOWLIST:
+backend/src/assistant/router.js
+backend/src/assistant/webChannel.js
+outputs/product-design-prototype/src/app/useAssistantChat.js
+backend/tests/assistant-router.test.js
+backend/tests/assistant-web-http-integration.test.js
+backend/tests/assistant-web-orchestrator.test.js
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs
+docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/MODIFIED_FILE
+docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/DIFF_FILE
+docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/VERIFICATION.txt
+docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/ROLLBACK.sh
+
+FOUR_TRANSACTION_ARTIFACTS:
+MODIFIED_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/MODIFIED_FILE
+DIFF_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/DIFF_FILE
+VERIFICATION.txt=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/VERIFICATION.txt
+ROLLBACK.sh=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/ROLLBACK.sh
+
+ORIGINAL_AND_MODIFIED_SHA256:
+FILE=backend/src/assistant/router.js ORIGINAL_SHA256=7c10ff6a0544b7b9e9a89cd2e56cebba40c46aed76aafe6274fc5058e67b3277 MODIFIED_SHA256=dbebde83ec6d0249576f386ad99ccb4697ec071ab11407e24be30713fa9f7f63
+FILE=backend/src/assistant/webChannel.js ORIGINAL_SHA256=c38a631ae480be58420683457dd9c498a2a61e9f2265a3ad2c384ddd6f2ff5d3 MODIFIED_SHA256=378e60c706e861a3d53e0ba23f2373577e4b27b2256d7f2dcc3ec924980a156f
+FILE=outputs/product-design-prototype/src/app/useAssistantChat.js ORIGINAL_SHA256=c65a22b8d04c70fd304e533a4feaa31ffccc3a68a96510987fd6ae595b511ba9 MODIFIED_SHA256=fb71fd1d74ed4c17e15393201b9e1ca22b6f2874bd7e9dc1d3ee47095f1a9897
+FILE=backend/tests/assistant-router.test.js ORIGINAL_SHA256=29ab624381673c6b592e1d3d0366c0dbeffbcacdf6ce5aa97f734cc6769f2155 MODIFIED_SHA256=ac5f3ca33f7af73f4d9e03190829e539be52f3fd0c485f2e79add58be0a95f4a
+FILE=backend/tests/assistant-web-http-integration.test.js ORIGINAL_SHA256=2cd25cb0bc30fb12c3a71ffb36091ca4febedda4784243b493f2ab06d1a215dc MODIFIED_SHA256=9633f4494b20fa4ffa2c1d452374ca7d2718689da01795d770e20f46fc828982
+FILE=backend/tests/assistant-web-orchestrator.test.js ORIGINAL_SHA256=03317beb17dcf86c6736c7b41fc25ff43decda468badcfb22be0a04144a03d7c MODIFIED_SHA256=478725f3adc4aff4980717689dfee469827f11ffa965683cc08f320cb9559a38
+FILE=outputs/product-design-prototype/scripts/assistant-chat.test.mjs ORIGINAL_SHA256=b16fd756f05d185604e8ea0557b46fc1dda7d390d8dfad774ee71bcd47214624 MODIFIED_SHA256=a3dfa363f90c26ac451c0a53c71106c32acf9cba25dc74bd3272fd5b5fadf6d9
+
+ARTIFACT_FORMAT_AND_HASHES:
+MODIFIED_FILE_FORMAT=POSIX tar archive containing exact modified bytes of all 7 authorized source/test files
+MODIFIED_FILE_BYTES=132608
+MODIFIED_FILE_SHA256=8b2b37c9d6200723a846c046a79b3d1c413f37167a6d6f6daaadf8f93192c4ba
+DIFF_FILE_FORMAT=RFC1952 gzip stream made with gzip -n -9; decompressed payload is the exact binary-capable git patch for the 7 authorized files
+DIFF_FILE_BYTES=4671
+DIFF_FILE_SHA256=f2e64152b06845f40e8a6cb1a0acda43b36d5a94b4ace4d95cec3adaf0a59eb1
+DIFF_FILE_RAW_PATCH_BYTES=15359
+DIFF_FILE_RAW_PATCH_SHA256=bc39553b0f82a530d9eb3e0f5d95a178168188730bf950b1bab1a0b8ca21096c
+ROLLBACK.sh_MODE=755
+ROLLBACK.sh_BYTES=3606
+ROLLBACK.sh_SHA256=e84a197d6a02af36d324243697e71c5a95b30e32e42563af0f4048e5b5bd146e
+VERIFICATION.txt_SHA256=reported after final close because a self-hash embedded in the file would be recursively unstable
+
+TASK_INPUTS:
+- 查客户 V0103-UAT-20260830-客户
+- 查询客户 协和Web助手
+- 客户 协和Web助手
+- 记一笔午餐 50
+- 记一下：今天拜访了协和医院
+- 提醒我明天拜访协和医院
+- 今天拜访协和医院，客户希望补齐材料
+- customer result.text/card top-level display while retaining result
+- HTTP 403 top-level message -> assistant denied bubble; nested error/provider body hidden
+- WEB_OPEN_TOOLS exact allowlist; registered-unopened/unknown/null closed
+- financial tables before and after denied Web bookkeeping request remain zero
+
+================ BASELINE: RED TESTS, SOURCE STILL ORIGINAL ================
+BASELINE_CAPTURE_SHA256=d4fa1cfdbea9f81693c3378573e45864be38eb3e4a75a64b107637f93d1002d8
+BASELINE_CAPTURE_BYTES=12443
+BASELINE_INPUTS=查客户 V0103-UAT-20260830-客户 | 查询客户 协和Web助手 | 客户 协和Web助手 | 记一笔午餐 50 | 403 top-level message | registered/unknown/null web tools
+BASELINE_BACKEND_COMMAND=cd backend && node --test tests/assistant-router.test.js tests/assistant-web-http-integration.test.js tests/assistant-web-orchestrator.test.js
+▶ assistant deterministic router
+  ✔ gives explicit commands priority and returns a controlled read-only plan (1.551042ms)
+  ✔ asks for required arguments instead of creating an incomplete plan (0.192625ms)
+  ✔ handles help, cancel, and confirmation without executing a tool (0.333583ms)
+  ✔ clarifies ambiguous weekly report requests (0.58775ms)
+  ✔ routes explicitly named weekly reports and defaults to the current natural week (0.45075ms)
+  ✔ routes request-settlement and multi-refund/top-up phrases to a read-only preview (0.167833ms)
+  ✔ does not confuse reimbursement, bookkeeping, proof, or confirmation commands with settlement preview (4.180625ms)
+  ✔ keeps payment-proof and invoice inbox uploads compatible without confirmation (0.2205ms)
+  ✔ maps the existing Clawbot visit commands to persistent assistant tools (0.234416ms)
+  ✔ does not call tools for unknown or low-confidence natural language (0.163584ms)
+  ✖ routes the v0.10.3 task-book customer and bookkeeping sentences without stealing adjacent intents (0.699792ms)
+  ✔ continues a customer or project conversation from the server-owned context (0.205125ms)
+  ✔ does not guess a project when context only identifies a customer (0.066709ms)
+  ✔ parses customer create commands into a confirmation-required plan (0.52825ms)
+  ✔ parses keyed, sentence, and array-verb customer update phrasings (0.548833ms)
+  ✔ clarifies unsupported customer fields and missing targets instead of planning (0.158ms)
+  ✔ resolves customer-write pronouns from the server-owned context (0.112958ms)
+  ✔ parses customer delete commands as an R3 code-confirmed plan (0.064584ms)
+  ✔ routes bare 查询 and profile question phrasings to customer reads (0.234959ms)
+  ✔ keeps profile questions away from earlier intents and the visit fallback (0.173083ms)
+✖ assistant deterministic router (11.792584ms)
+▶ opportunity intents (v0.7.6)
+  ✔ routes stage moves to the affirm-confirmed update-stage tool with normalized targets (0.523ms)
+  ✔ routes next-step edits to the affirm-confirmed update-next tool (0.09275ms)
+  ✔ routes amount/name/risk edits, creation, and deletion on the code-confirmed ladder (0.315542ms)
+  ✔ routes progress questions and list phrasings to the confirmation-free reads (0.201625ms)
+  ✔ stays disjoint from the bookkeeping, customer, quick-record, and todo intents (2.681416ms)
+✔ opportunity intents (v0.7.6) (3.9225ms)
+▶ quick-record intents (v0.7.3)
+  ✔ captures a one-step record with the spoken date pinned as occurredAt (0.334333ms)
+  ✔ accepts every capture prefix and leaves occurredAt out when no date word exists (0.128583ms)
+  ✔ clarifies bookkeeping-like capture bodies and honors the 记拜访 escape prefix (0.128667ms)
+  ✔ clarifies an empty capture body with the friendly hint (0.051375ms)
+  ✔ does not swallow bare weekly-report or legacy record phrases (0.129584ms)
+  ✔ routes history searches with period and subject arguments (0.197708ms)
+  ✔ maps every update field label onto the normalized field name (0.225958ms)
+  ✔ routes void phrasings as an R3 code-confirmed plan (0.574167ms)
+  ✔ stays disjoint from the v0.7.2 customer-write regexes (0.123708ms)
+✔ quick-record intents (v0.7.3) (2.053ms)
+▶ todo intents (v0.7.5)
+  ✔ parses schedule, priority, and customer hints out of a reminder prefix (0.565667ms)
+  ✔ keeps deadline phrases and bare-colon prefixes as todos without a time (0.291333ms)
+  ✔ wins over the visit fallback and the bookkeeping regex for reminder bodies (0.119583ms)
+  ✔ keeps the capture prefixes away from 帮我记待办 through the lookahead (0.041417ms)
+  ✔ routes scoped todo queries to the list and bare ones to the summary (0.187542ms)
+  ✔ requires the 待办 stem for status verbs and captures the target text (0.096334ms)
+✔ todo intents (v0.7.5) (1.381541ms)
+category=auth bootstrap admin seeded account=jiangjz (users table had no row for the configured AUTH_ACCOUNT)
+category=weixin bindings_empty (no active weixin binding; proactive WeChat delivery is dormant)
+▶ assistant web HTTP integration
+  ✔ returns 401 for unauthenticated chat (3.836ms)
+  ✔ returns 403 for chat with invalid CSRF (2.819666ms)
+  ✔ returns 403 when a machine token hits the web chat route (3.180084ms)
+  ✔ returns HELP text for 帮助 (7.331708ms)
+  ✔ returns dashboard summary for 战情 (7.633ms)
+  ✔ rejects an oversized message with 422 (3.393916ms)
+  ✔ creates and confirms an R1 action-risk item through the web confirm endpoint (13.2625ms)
+  ✔ cancels a pending action through the web confirm endpoint (8.0015ms)
+  ✔ returns 404 for confirming another account pending action (6.889916ms)
+  ✔ requires confirmation without exposing a code for R2 customer updates (16.54225ms)
+  ✔ returns 404 for an unknown pendingActionId (3.714292ms)
+  ✔ replays the same clientMessageId response (6.382834ms)
+  ✔ returns filtered history for a conversation (5.803209ms)
+  ✖ denies the v0.10.3 task-book bookkeeping sentence before any financial write (5.880875ms)
+  ✔ denies visit-capture intents on web (4.934708ms)
+  ✖ returns the v0.10.3 task-book customer search at the top-level display contract (7.39425ms)
+  ✔ returns 429 after the assistant web rate limit is exceeded (93.01825ms)
+✖ assistant web HTTP integration (417.128458ms)
+✔ deriveWebExplicitCredential is deterministic for the same action id (1.600958ms)
+✔ deriveWebExplicitCredential differs from affirm credential domain (0.158167ms)
+✔ safeWebPendingResponse never includes confirmationCode (0.324541ms)
+✔ mapAssistantWebResponse strips confirmationCode and adds card (0.711459ms)
+✖ mapAssistantWebResponse safely flattens result text and card while preserving result (1.064541ms)
+✖ isWebClosedTool opens only the explicit WEB_OPEN_TOOLS allowlist (0.210959ms)
+✔ parseWeixinCardText round-trips card titles and fields (0.565875ms)
+ℹ tests 64
+ℹ suites 5
+ℹ pass 59
+ℹ fail 5
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 554.581917
+
+✖ failing tests:
+
+test at tests/assistant-router.test.js:108:3
+✖ routes the v0.10.3 task-book customer and bookkeeping sentences without stealing adjacent intents (0.699792ms)
+  AssertionError [ERR_ASSERTION]: 查客户 V0103-UAT-20260830-客户
+  + actual - expected
+\x20\x20
+  + 'unknown'
+  - 'planned'
+\x20\x20
+      at TestContext.<anonymous> (file:///Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/backend/tests/assistant-router.test.js:116:14)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1382:25)
+      at Suite.processPendingSubtests (node:internal/test_runner/test:960:18)
+      at Test.postRun (node:internal/test_runner/test:1522:19)
+      at Test.run (node:internal/test_runner/test:1447:12)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'unknown',
+    expected: 'planned',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/assistant-web-http-integration.test.js:304:3
+✖ denies the v0.10.3 task-book bookkeeping sentence before any financial write (5.880875ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+\x20\x20
+  200 !== 403
+\x20\x20
+      at TestContext.<anonymous> (file:///Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/backend/tests/assistant-web-http-integration.test.js:308:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 200,
+    expected: 403,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/assistant-web-http-integration.test.js:319:3
+✖ returns the v0.10.3 task-book customer search at the top-level display contract (7.39425ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+\x20\x20
+  'unknown' !== 'ok'
+\x20\x20
+      at TestContext.<anonymous> (file:///Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/backend/tests/assistant-web-http-integration.test.js:322:12)
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async Suite.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 'unknown',
+    expected: 'ok',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/assistant-web-orchestrator.test.js:53:1
+✖ mapAssistantWebResponse safely flattens result text and card while preserving result (1.064541ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  + actual - expected
+\x20\x20
+  + undefined
+  - '【客户】\n1：协和Web助手  北京'
+\x20\x20
+      at TestContext.<anonymous> (file:///Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/backend/tests/assistant-web-orchestrator.test.js:63:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1382:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+      at Test.postRun (node:internal/test_runner/test:1522:19)
+      at Test.run (node:internal/test_runner/test:1447:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: undefined,
+    expected: '【客户】\n1：协和Web助手  北京',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/assistant-web-orchestrator.test.js:74:1
+✖ isWebClosedTool opens only the explicit WEB_OPEN_TOOLS allowlist (0.210959ms)
+  AssertionError [ERR_ASSERTION]: registered but unopened tools fail closed
+\x20\x20
+  false !== true
+\x20\x20
+      at TestContext.<anonymous> (file:///Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/backend/tests/assistant-web-orchestrator.test.js:77:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1382:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:960:18)
+      at Test.postRun (node:internal/test_runner/test:1522:19)
+      at Test.run (node:internal/test_runner/test:1447:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:960:7) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+BASELINE_BACKEND_EXIT=1
+BASELINE_FRONTEND_COMMAND=cd outputs/product-design-prototype && node --test scripts/assistant-chat.test.mjs
+file:///Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/outputs/product-design-prototype/scripts/assistant-chat.test.mjs:11
+import { appendAssistantErrorBubble } from "../src/app/useAssistantChat.js";
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: The requested module '../src/app/useAssistantChat.js' does not provide an export named 'appendAssistantErrorBubble'
+    at #asyncInstantiate (node:internal/modules/esm/module_job:327:21)
+    at async ModuleJob.run (node:internal/modules/esm/module_job:431:5)
+    at async node:internal/modules/esm/loader:643:26
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)
+
+Node.js v24.19.0
+✖ scripts/assistant-chat.test.mjs (47.382917ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 52.033834
+
+✖ failing tests:
+
+test at scripts/assistant-chat.test.mjs:1:1
+✖ scripts/assistant-chat.test.mjs (47.382917ms)
+  'test failed'
+BASELINE_FRONTEND_EXIT=1
+BASELINE_COMBINED_EXIT=1
+
+================ MODIFIED: TARGETED TESTS GREEN ================
+MODIFIED_CAPTURE_SHA256=e50cf3608b5bf78c4bbd18d7cccc2405530e0c80bf64baec2b68c88ff4f813ba
+MODIFIED_CAPTURE_BYTES=8266
+MODIFIED_INPUTS=查客户 V0103-UAT-20260830-客户 | 查询客户 协和Web助手 | 客户 协和Web助手 | 记一笔午餐 50 | 403 top-level message | registered/unknown/null web tools
+MODIFIED_BACKEND_COMMAND=cd backend && node --test tests/assistant-router.test.js tests/assistant-web-orchestrator.test.js tests/assistant-web-http-integration.test.js
+▶ assistant deterministic router
+  ✔ gives explicit commands priority and returns a controlled read-only plan (1.878917ms)
+  ✔ asks for required arguments instead of creating an incomplete plan (0.235375ms)
+  ✔ handles help, cancel, and confirmation without executing a tool (0.367916ms)
+  ✔ clarifies ambiguous weekly report requests (0.877084ms)
+  ✔ routes explicitly named weekly reports and defaults to the current natural week (0.751083ms)
+  ✔ routes request-settlement and multi-refund/top-up phrases to a read-only preview (0.223958ms)
+  ✔ does not confuse reimbursement, bookkeeping, proof, or confirmation commands with settlement preview (3.863125ms)
+  ✔ keeps payment-proof and invoice inbox uploads compatible without confirmation (0.2115ms)
+  ✔ maps the existing Clawbot visit commands to persistent assistant tools (0.235292ms)
+  ✔ does not call tools for unknown or low-confidence natural language (0.165417ms)
+  ✔ routes the v0.10.3 task-book customer and bookkeeping sentences without stealing adjacent intents (1.308625ms)
+  ✔ continues a customer or project conversation from the server-owned context (0.137208ms)
+  ✔ does not guess a project when context only identifies a customer (0.05975ms)
+  ✔ parses customer create commands into a confirmation-required plan (0.509958ms)
+  ✔ parses keyed, sentence, and array-verb customer update phrasings (1.009167ms)
+  ✔ clarifies unsupported customer fields and missing targets instead of planning (0.150667ms)
+  ✔ resolves customer-write pronouns from the server-owned context (0.117792ms)
+  ✔ parses customer delete commands as an R3 code-confirmed plan (0.063875ms)
+  ✔ routes bare 查询 and profile question phrasings to customer reads (0.248917ms)
+  ✔ keeps profile questions away from earlier intents and the visit fallback (0.177916ms)
+✔ assistant deterministic router (13.608041ms)
+▶ opportunity intents (v0.7.6)
+  ✔ routes stage moves to the affirm-confirmed update-stage tool with normalized targets (0.425417ms)
+  ✔ routes next-step edits to the affirm-confirmed update-next tool (0.086542ms)
+  ✔ routes amount/name/risk edits, creation, and deletion on the code-confirmed ladder (0.315709ms)
+  ✔ routes progress questions and list phrasings to the confirmation-free reads (0.200709ms)
+  ✔ stays disjoint from the bookkeeping, customer, quick-record, and todo intents (0.715375ms)
+✔ opportunity intents (v0.7.6) (1.838834ms)
+▶ quick-record intents (v0.7.3)
+  ✔ captures a one-step record with the spoken date pinned as occurredAt (0.118875ms)
+  ✔ accepts every capture prefix and leaves occurredAt out when no date word exists (0.194333ms)
+  ✔ clarifies bookkeeping-like capture bodies and honors the 记拜访 escape prefix (0.385542ms)
+  ✔ clarifies an empty capture body with the friendly hint (0.088417ms)
+  ✔ does not swallow bare weekly-report or legacy record phrases (0.200625ms)
+  ✔ routes history searches with period and subject arguments (0.283875ms)
+  ✔ maps every update field label onto the normalized field name (0.228625ms)
+  ✔ routes void phrasings as an R3 code-confirmed plan (0.453333ms)
+  ✔ stays disjoint from the v0.7.2 customer-write regexes (0.119958ms)
+✔ quick-record intents (v0.7.3) (2.253875ms)
+▶ todo intents (v0.7.5)
+  ✔ parses schedule, priority, and customer hints out of a reminder prefix (0.480667ms)
+  ✔ keeps deadline phrases and bare-colon prefixes as todos without a time (0.149375ms)
+  ✔ wins over the visit fallback and the bookkeeping regex for reminder bodies (0.235125ms)
+  ✔ keeps the capture prefixes away from 帮我记待办 through the lookahead (0.075625ms)
+  ✔ routes scoped todo queries to the list and bare ones to the summary (0.199125ms)
+  ✔ requires the 待办 stem for status verbs and captures the target text (0.117959ms)
+✔ todo intents (v0.7.5) (1.355584ms)
+category=auth bootstrap admin seeded account=jiangjz (users table had no row for the configured AUTH_ACCOUNT)
+category=weixin bindings_empty (no active weixin binding; proactive WeChat delivery is dormant)
+▶ assistant web HTTP integration
+  ✔ returns 401 for unauthenticated chat (2.693125ms)
+  ✔ returns 403 for chat with invalid CSRF (2.972333ms)
+  ✔ returns 403 when a machine token hits the web chat route (3.578667ms)
+  ✔ returns HELP text for 帮助 (5.919167ms)
+  ✔ returns dashboard summary for 战情 (9.630417ms)
+  ✔ rejects an oversized message with 422 (3.538042ms)
+  ✔ creates and confirms an R1 action-risk item through the web confirm endpoint (15.64925ms)
+  ✔ cancels a pending action through the web confirm endpoint (9.532833ms)
+  ✔ returns 404 for confirming another account pending action (7.21ms)
+  ✔ requires confirmation without exposing a code for R2 customer updates (16.242ms)
+  ✔ returns 404 for an unknown pendingActionId (3.495709ms)
+  ✔ replays the same clientMessageId response (6.970583ms)
+  ✔ returns filtered history for a conversation (6.23875ms)
+  ✔ denies the v0.10.3 task-book bookkeeping sentence before any financial write (5.764ms)
+  ✔ denies visit-capture intents on web (4.013875ms)
+  ✔ returns the v0.10.3 task-book customer search at the top-level display contract (9.563084ms)
+  ✔ returns 429 after the assistant web rate limit is exceeded (101.120333ms)
+✔ assistant web HTTP integration (438.519208ms)
+✔ deriveWebExplicitCredential is deterministic for the same action id (1.133333ms)
+✔ deriveWebExplicitCredential differs from affirm credential domain (0.1515ms)
+✔ safeWebPendingResponse never includes confirmationCode (0.471ms)
+✔ mapAssistantWebResponse strips confirmationCode and adds card (0.373833ms)
+✔ mapAssistantWebResponse safely flattens result text and card while preserving result (0.507958ms)
+✔ isWebClosedTool opens only the explicit WEB_OPEN_TOOLS allowlist (0.081ms)
+✔ parseWeixinCardText round-trips card titles and fields (0.092875ms)
+ℹ tests 64
+ℹ suites 5
+ℹ pass 64
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 582.398208
+MODIFIED_BACKEND_EXIT=0
+MODIFIED_FRONTEND_COMMAND=npm --prefix outputs/product-design-prototype run test:assistant-chat
+
+> product-design-prototype@0.10.0 test:assistant-chat
+> node --test scripts/weixinCardParse.test.mjs scripts/assistant-chat.test.mjs scripts/assistant-fab.test.mjs
+
+▶ assistantChatModel
+  ✔ merges remote history without duplicating local ids (0.473834ms)
+  ✔ appends messages immutably (0.083417ms)
+  ✔ flags write tools that should refresh bootstrap (0.0695ms)
+✔ assistantChatModel (1.24625ms)
+▶ AssistantConfirmCard
+  ✔ renders confirm actions for R1/R2/R3 cards (0.165042ms)
+  ✔ falls back to preformatted text when card parsing fails (0.150791ms)
+  ✔ does not reference confirmationCode (0.133959ms)
+  ✔ exposes cancel and confirm handlers (0.126625ms)
+✔ AssistantConfirmCard (1.004584ms)
+▶ useAssistantChat error responses
+  ✔ appends a denied assistant bubble from only the 403 top-level message (0.920709ms)
+  ✔ uses a fixed 403 fallback instead of nested error or provider bodies (0.134375ms)
+✔ useAssistantChat error responses (1.186291ms)
+▶ assistant entry points
+  ✔ renders desktop assistant fab when mobile shell is off (0.55175ms)
+  ✔ renders mobile topbar assistant button (0.108084ms)
+  ✔ wires the more drawer assistant backup entry (0.236292ms)
+  ✔ supports enter to send and escape to close in the chat panel (0.068541ms)
+✔ assistant entry points (1.652917ms)
+▶ weixinCardParse
+  ✔ parses title, fields, and footer (1.039083ms)
+  ✔ returns null for plain text (0.175792ms)
+  ✔ tolerates missing footer (0.850667ms)
+  ✔ keeps empty field values (0.106292ms)
+✔ weixinCardParse (3.046833ms)
+ℹ tests 17
+ℹ suites 5
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 64.322916
+MODIFIED_FRONTEND_EXIT=0
+MODIFIED_COMBINED_EXIT=0
+
+================ BACKEND FULL GATE ================
+BACKEND_FULL_COMMAND=cd backend && npm test
+BACKEND_FULL_CAPTURE_SHA256=707e25a09d8df9d4b7d6d982af2d9394404ac702071ee0989fb06016439f21af
+BACKEND_FULL_CAPTURE_BYTES=202514
+BACKEND_FULL_LITERAL_RESULT:
+ℹ tests 1411
+ℹ suites 165
+ℹ pass 1411
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 22414.529333
+BACKEND_FULL_EXIT=0
+
+================ FRONTEND ASSISTANT-CHAT GATE ================
+FRONTEND_ASSISTANT_CHAT_COMMAND=cd outputs/product-design-prototype && npm run test:assistant-chat
+
+> product-design-prototype@0.10.0 test:assistant-chat
+> node --test scripts/weixinCardParse.test.mjs scripts/assistant-chat.test.mjs scripts/assistant-fab.test.mjs
+
+▶ assistantChatModel
+  ✔ merges remote history without duplicating local ids (0.464083ms)
+  ✔ appends messages immutably (0.087334ms)
+  ✔ flags write tools that should refresh bootstrap (0.071083ms)
+✔ assistantChatModel (1.290125ms)
+▶ AssistantConfirmCard
+  ✔ renders confirm actions for R1/R2/R3 cards (0.177333ms)
+  ✔ falls back to preformatted text when card parsing fails (0.0665ms)
+  ✔ does not reference confirmationCode (0.061084ms)
+  ✔ exposes cancel and confirm handlers (0.076084ms)
+✔ AssistantConfirmCard (0.525542ms)
+▶ useAssistantChat error responses
+  ✔ appends a denied assistant bubble from only the 403 top-level message (0.281709ms)
+  ✔ uses a fixed 403 fallback instead of nested error or provider bodies (0.181958ms)
+✔ useAssistantChat error responses (1.290125ms)
+▶ assistant entry points
+  ✔ renders desktop assistant fab when mobile shell is off (0.406625ms)
+  ✔ renders mobile topbar assistant button (0.095875ms)
+  ✔ wires the more drawer assistant backup entry (0.194083ms)
+  ✔ supports enter to send and escape to close in the chat panel (0.068083ms)
+✔ assistant entry points (1.361125ms)
+▶ weixinCardParse
+  ✔ parses title, fields, and footer (1.194667ms)
+  ✔ returns null for plain text (0.166708ms)
+  ✔ tolerates missing footer (0.906625ms)
+  ✔ keeps empty field values (0.178709ms)
+✔ weixinCardParse (3.2265ms)
+ℹ tests 17
+ℹ suites 5
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 64.978541
+FRONTEND_ASSISTANT_CHAT_EXIT=0
+
+================ DEPLOY TEST GATE (NO DEPLOYMENT PERFORMED) ================
+DEPLOY_TESTS_CAPTURE_SHA256=d9ebc775da9fb26d2dfe1233632a1c8358397415eb50895db57a5d1ff81489dd
+DEPLOY_TESTS_CAPTURE_BYTES=24545
+DEPLOY_TESTS_COMMAND=npm run test:deploy
+
+> sentelligent-sales-workbench@0.10.0 test:deploy
+> npm run scan:secrets && node --test scripts/*.test.mjs
+
+
+> sentelligent-sales-workbench@0.10.0 scan:secrets
+> node scripts/project-secret-scan.mjs --history
+
+{
+  "status": "passed",
+  "scannedFiles": 755,
+  "scannedGitObjects": 3488,
+  "scannedGitMessages": 599,
+  "gitHistoryComplete": true,
+  "findings": []
+}
+▶ formal delivery guide
+  ✔ documents the runtime, QA, security, and audit handoff commands (0.552292ms)
+  ✔ does not contain provider keys (0.108166ms)
+  ✔ documents the Phase 1 authentication, database recovery, and rollback procedure (0.1435ms)
+  ✔ documents the isolated Node 24 and shared Caddy production boundaries (0.103125ms)
+✔ formal delivery guide (1.517542ms)
+▶ production release staging guide
+  ✔ stages and preserves releases as root-owned immutable trees (0.101083ms)
+✔ production release staging guide (0.169125ms)
+▶ GitHub CI workflow
+  ✔ runs browser integration QA for pull requests and main pushes (0.577958ms)
+  ✔ runs every root Node test instead of the partial release test script (0.114333ms)
+✔ GitHub CI workflow (1.2655ms)
+▶ GitHub tagged release workflow
+  ✔ runs only for formal version tags (1.302541ms)
+  ✔ serializes release runs for the same immutable tag (0.141041ms)
+  ✔ isolates read-only verification from the write-enabled publish job (0.412625ms)
+  ✔ publishes only the artifact produced by verification without executing project code (0.268792ms)
+  ✔ checks out full history and requires the tagged commit to belong to origin/main (0.117167ms)
+  ✔ requires VERSION, package manifests, and package locks to share one version (0.141709ms)
+  ✔ rebuilds and verifies the complete project on Node 24 (0.107375ms)
+  ✔ revalidates the remote tag against github.sha immediately before publishing (0.172333ms)
+  ✔ scans the working tree and complete Git history before packaging (0.093375ms)
+  ✔ publishes an immutable archive and checksum as both an artifact and a GitHub Release (0.145042ms)
+✔ GitHub tagged release workflow (4.321959ms)
+▶ local WSL dev orchestration
+  ✔ preserves POSIX absolute workspace paths across host platforms (0.63225ms)
+  ✔ rejects workspace paths that cannot be mapped into WSL reliably (0.266333ms)
+  ✔ maps Windows paths into WSL mount paths without shell interpolation (0.151541ms)
+  ✔ builds a backend command that runs Node directly through wsl.exe (0.678458ms)
+  ✔ refuses to terminate a PID whose command line does not match the recorded project fingerprint (0.20675ms)
+  ✔ terminates a PID only after its executable and complete command fingerprint match (0.112666ms)
+  ﹣ preserves Unicode project markers while inspecting a real Windows child process (0.046167ms) # SKIP
+  ✔ builds a frontend command wired to the selected backend URL (0.20725ms)
+  ✔ removes the runtime file after stopping recorded local processes (4.854083ms)
+  ✔ ignores a tampered runtimePath and removes only the configured runtime state (1.212708ms)
+✔ local WSL dev orchestration (9.178458ms)
+▶ owned POSIX process cleanup
+  ✔ matches an exact executable, working directory, and complete command fingerprint (4.064541ms)
+  ✔ allows a declared executable wrapper only with multiple matching command tokens (0.149084ms)
+  ✔ returns fail-closed statuses without signaling an unverified process (0.982458ms)
+  ✔ reports inspection failures without signaling the process group (0.145ms)
+  ✔ terminates the verified process group and waits for it to disappear (0.132625ms)
+  ✔ fails when the verified process group remains alive (0.779459ms)
+  ✔ terminates a registered detached child and closes its output pipes (15.633375ms)
+✔ owned POSIX process cleanup (23.059917ms)
+▶ root package QA scripts
+  ✔ exposes one command for the full formal delivery verification (1.155458ms)
+  ✔ pins the GitHub Linux Chrome executable for browser-backed frontend QA (0.13325ms)
+  ✔ checks out complete history before the mandatory secret scan (0.073333ms)
+  ✔ makes complete Git history scanning explicit in the shared secret command (0.059917ms)
+  ✔ exposes the guarded production HTTPS smoke runner (0.069542ms)
+  ✔ exposes repeatable WebKit acceptance for iPhone Safari equivalence (0.066167ms)
+✔ root package QA scripts (2.281ms)
+▶ controlled production cutover
+  ✔ has valid Bash syntax (12.590333ms)
+  ✔ requires every deployment identity and state path as an explicit parameter (35.933ms)
+  ✔ rejects unknown arguments and missing option values (133.831834ms)
+  ✔ pins service mutations to exactly three project units and stop/restart (1.034834ms)
+  ✔ rejects shared Caddy and unsupported actions before systemctl is called (27.132291ms)
+  ✔ allows the wrapper to invoke one approved unit at a time (1284.217ms)
+  ✔ rejects lexical and canonical release path escapes (35.941917ms)
+  ✔ rejects overlapping backup, evidence, and WeChat state paths (23.341459ms)
+  ✔ fails when any protected service PID changes (14.780917ms)
+  ✔ normalizes protected listeners without transient socket queues (30.3165ms)
+  ✔ binds frontend health to the expected immutable release dist (100.090666ms)
+  ✔ rewrites exactly one old frontend DIST_PATH into the candidate release (35.647458ms)
+  ✔ rejects missing, duplicate, or unexpected frontend DIST_PATH values (68.456875ms)
+  ✔ verifies an extracted release manifest and rejects the wrong commit (122.732917ms)
+  ✔ rejects candidate files outside the manifest inventory (65.322959ms)
+  ✔ rejects a candidate manifest without the complete environment contract (63.19025ms)
+  ✔ accepts only a fresh exact canonical preflight report bound to this cutover (488.188667ms)
+  ✔ checks the preflight gate before frozen-release validation or service mutation (0.197583ms)
+  ✔ rehearses candidate migrations only on an isolated copy of a verified backup (656.422292ms)
+  ✔ blocks service mutation when the migrated rehearsal violates foreign keys (652.850791ms)
+  ✔ runs the candidate migration rehearsal before the first service mutation (0.172375ms)
+  ✔ does not remove a maintenance lock whose identity changed (491.189416ms)
+  ✔ removes only the maintenance lock owned by the current run (429.49ms)
+  ✔ dereferences the cutover lock descriptor before checking hard-link count (0.117958ms)
+  ✔ uses portable awk variable names for post-stop listener checks (0.177209ms)
+  ✔ captures protected process, unit, Caddyfile, and listener identity (0.224459ms)
+  ✔ requires an already-frozen candidate before hash verification and any service mutation (0.191333ms)
+  ✔ rejects hidden systemd execution surfaces before staging and after install (0.192625ms)
+  ✔ accepts the hardened CentOS 7 unit surface while rejecting enabled DynamicUser (1739.389459ms)
+  ✔ implements fail-closed maintenance, offline backups, atomic current, and rollback (0.4045ms)
+  ✔ contains no embedded release version, commit, host, or credential (0.455834ms)
+✔ controlled production cutover (6516.089167ms)
+▶ production HTTPS smoke target and credential boundary
+  ✔ accepts only the exact production HTTPS origin (0.617667ms)
+  ✔ requires origin and report CLI arguments and rejects password arguments (0.534875ms)
+  ✔ accepts the login password only from strict JSON stdin (0.205958ms)
+  ✔ never reads a login password from the process environment (0.452125ms)
+✔ production HTTPS smoke target and credential boundary (2.423291ms)
+▶ production HTTPS smoke report
+  ✔ locks the result checklist to exactly 25 stable IDs (0.105042ms)
+  ✔ writes a new JSON report atomically without leaving temporary files (12.332917ms)
+  ✔ never overwrites an existing report (1.561459ms)
+✔ production HTTPS smoke report (14.217625ms)
+▶ production HTTPS smoke execution
+  ✔ runs the isolated 25 checks and physically cleans the marked run in finally (42.542458ms)
+  ✔ still logs out and cleans in finally while preserving all 25 results after a check throws (13.291291ms)
+  ✔ accepts empty initial customer and opportunity collections (10.750334ms)
+  ✔ rejects redirect responses instead of following them (7.789125ms)
+  ✔ blocks authentication and business writes when the server-local database identity differs (9.335792ms)
+  ✔ fails when production frontend security headers are missing (6.923083ms)
+  ✔ fails overall when server cleanup is not clean (11.609542ms)
+  ✔ rejects cleanup evidence for a different smoke run (8.689666ms)
+  ✔ rejects cleanup evidence from a different database identity (9.934958ms)
+  ✔ rejects cleanup evidence with a missing residual counter (9.793ms)
+  ✔ still performs server cleanup when logout fails (8.625417ms)
+  ✔ fails cleanup when the exact audit id manifest cannot be collected (8.828084ms)
+  ✔ redacts authentication material from cleanup errors and the JSON report (9.21625ms)
+  ✔ requires a cleanup callback before making any network request (0.436459ms)
+✔ production HTTPS smoke execution (158.652375ms)
+▶ production preflight
+  ✔ accepts the hardened project unit execution surface without backend-env leakage (18.015125ms)
+  ✔ accepts an explicitly pinned service primary group when probing invoice tools (0.658959ms)
+  ✔ keeps all core checks compatible while failing a release without identity evidence (37.690875ms)
+  ✔ fails closed when DATABASE_URL or service EnvironmentFile evidence targets another production state (56.952458ms)
+  ✔ fails closed for retired bookkeeping variables or malformed invoice extraction settings (50.110208ms)
+  ✔ fails closed when WeChat bookkeeping confirmation is disabled or misbound (26.57875ms)
+  ✔ fails closed for missing or malformed v0.6.0 settings and hospital tender runtime values (27.051875ms)
+  ✔ accepts an explicitly disabled hospital tender scheduler without a notification token (6.741292ms)
+  ✔ accepts an active encrypted PushPlus setting when auto-run has no legacy env token (8.900333ms)
+  ✔ does not fall back to the env token after a stored PushPlus setting is cleared or invalid (32.796083ms)
+  ✔ verifies Python 3.11+ as the backend service user (0.57425ms)
+  ✔ rejects symlinked or writable-ancestor Python executable paths (0.2395ms)
+  ✔ rejects legacy boolean-only invoice tool evidence for the backend service user (6.42025ms)
+  ✔ accepts structured invoice capabilities bound to the backend service user (7.116583ms)
+  ✔ fails closed when the backend service identity snapshot omits group semantics (7.192625ms)
+  ✔ inspects exact invoice tool capabilities as the backend service user (0.400083ms)
+  ✔ runs bounded invoice probes with runuser and a secret-free environment (0.24075ms)
+  ✔ fails closed for root-only access, generic tools, and missing OCR languages (0.105959ms)
+  ✔ fails closed unless production expense automation uses the approved model configuration and an isolated key (25.001334ms)
+  ✔ accepts the exact current CentOS 7 service snapshot without targeting shared Caddy (10.8565ms)
+  ✔ allows a legacy schema-2 manifest only for the pre-cutover current release (10.959541ms)
+  ✔ allows the exact legacy schema-3 environment contract only for the current release (9.621ms)
+  ✔ allows the exact v0.6.18 environment contract only for the canonical current release (9.321666ms)
+  ✔ allows the exact v0.6.14 Shortcut/iCost manifest contract only for the canonical current release (10.709166ms)
+  ✔ allows only the existing Darwin arm64 dependency provenance for a legacy current release (13.722042ms)
+  ✔ rejects deployment-installed dependencies outside a legacy schema-2 archive inventory (9.451292ms)
+  ✔ rejects unhashed dependency files counted as part of a legacy schema-2 archive (9.869916ms)
+  ✔ never relaxes root ownership for a legacy current release (0.375708ms)
+  ✔ binds a parseable manifest and exact 40-character commit to one immutable release (9.389083ms)
+  ✔ rejects a fake manifest that contains only source.commit (5.543667ms)
+  ✔ rejects a release manifest without exact frontend build provenance (4.219875ms)
+  ✔ rejects a release manifest that omits a required production integration setting (6.751917ms)
+  ✔ rejects a release manifest with an invalid schemaVersion (6.031667ms)
+  ✔ rejects a release manifest with an invalid product (5.333583ms)
+  ✔ rejects a tampered dist file in the release directory (10.298458ms)
+  ✔ rejects a missing dist file in the release directory (7.2255ms)
+  ✔ rejects a tampered source file in the release directory (8.557875ms)
+  ✔ rejects a missing source file in the release directory (7.555083ms)
+  ✔ rejects a tampered migration file in the release directory (8.498875ms)
+  ✔ rejects a missing migration file in the release directory (6.755959ms)
+  ✔ rejects a tampered production dependency file in the release directory (7.975166ms)
+  ✔ rejects a missing production dependency file in the release directory (6.839959ms)
+  ✔ rejects an arbitrary addition to the backend production dependency tree (7.740083ms)
+  ✔ rejects a manifest-matching release file that is hard linked outside the release (8.097375ms)
+  ✔ requires every application service WorkingDirectory to exactly match the same immutable release (7.144542ms)
+  ✔ requires the project Node 24 executable for every immutable application service (7.459666ms)
+  ✔ rejects malformed identity evidence, current paths, old releases, and mixed releases (6.294916ms)
+  ✔ fails release.identity when the manifest cannot be parsed (7.99875ms)
+  ✔ requires release and explicit host identity CLI options (190.787042ms)
+  ✔ fails closed for Node 22, unsafe auth/CORS, bad data, a hash mismatch, and broad service actions (6.993666ms)
+  ✔ rejects a systemctl command that hides an unrelated service behind a project target (6.906208ms)
+  ✔ rejects the primary database itself and a hard link as backup evidence (8.341666ms)
+  ✔ requires backups to be free of SQLite sidecars while allowing the live primary WAL (6.702875ms)
+  ✔ uses an exact systemctl allowlist and rejects command bypasses (0.336167ms)
+  ✔ accepts exact legacy pre-deployment and current/release post-deployment ExecStart snapshots while rejecting path lures (0.165417ms)
+  ✔ rejects expanded service ownership, caller paths, Caddy paths, and users (14.05225ms)
+  ✔ fails closed when database file identity metadata is unavailable (0.227875ms)
+  ✔ reads security-sensitive files once and rejects hard links or identity changes (1.410542ms)
+  ✔ requires immutable release files to be root-owned, single-link, and runtime-read-only (0.112417ms)
+  ✔ rejects a valid SQLite primary that has another hard link (4.609792ms)
+  ✔ rejects a protected unrelated service that is not active (6.650709ms)
+  ✔ rejects incomplete service ownership and generic protection snapshots (7.230375ms)
+  ✔ rejects hidden systemd commands, drop-ins, environments, and path directives (0.455084ms)
+  ✔ binds snapshots to the explicit host and exact protected service identities (0.328625ms)
+✔ production preflight (801.665958ms)
+▶ production service-plan generator
+  ✔ collects a stable allowlisted snapshot that passes the preflight validators (6.461208ms)
+  ✔ fails closed and redacts an unexpected project Environment value (0.388291ms)
+  ✔ fails closed on duplicate allowlisted systemd properties (0.555959ms)
+  ✔ fails closed when a mandatory systemd property is missing (0.773541ms)
+  ✔ accepts the CentOS 7 Caddy snapshot when the empty EnvironmentFile property is omitted (2.364459ms)
+  ✔ still rejects non-empty or duplicate Caddy EnvironmentFile properties (0.40625ms)
+  ✔ accepts CentOS 7 snapshots that omit expected-empty project service properties (0.913292ms)
+  ✔ still rejects non-empty or duplicate expected-empty project service properties (0.610625ms)
+  ✔ does not propagate command-runner diagnostics into an error (0.195083ms)
+  ✔ rejects a protected listener whose PID is not the protected service PID (0.254042ms)
+  ✔ rejects service state that changes between the two collection passes (1.009625ms)
+  ✔ rejects file evidence that changes between hash passes (0.440333ms)
+  ✔ writes an exclusive atomic 0600 JSON file and refuses replacement (21.451459ms)
+  ✔ rejects an output parent that escapes through a symbolic link (2.246292ms)
+  ✔ supports injected CLI generation and exposes only a bounded summary (11.951042ms)
+  ✔ rejects missing, duplicate, and unknown CLI arguments without echoing them (0.702625ms)
+  ✔ registers the production service-plan package command (0.317541ms)
+✔ production service-plan generator (52.756792ms)
+▶ project secret scan
+  ✔ keeps the frontend entrypoint aligned with runtime and test-fixture exclusions (102.488458ms)
+  ✔ finds OpenAI-style provider keys in project text files (54.213958ms)
+  ✔ finds OpenAI-style provider keys in TypeScript module declaration files (48.254625ms)
+  ✔ ignores dependency and generated folders (48.523167ms)
+  ✔ skips Git-ignored local secrets while scanning untracked project files (193.150459ms)
+  ✔ handles Git-visible listings larger than the child-process default without scanning ignored secrets (292.289709ms)
+  ✔ passes when scanned project files contain only placeholders (50.736083ms)
+  ✔ ignores runtime references and explicit fixture values (47.298917ms)
+  ✔ allows only the exact historical Shortcut/WeChat fixture labels (27.081416ms)
+  ✔ ignores code expressions, documentation placeholders, and integration QA fixtures (44.794625ms)
+  ✔ does not treat quoted JSON or array literals as JavaScript expressions (46.868833ms)
+  ✔ finds credential-like literal assignments in configuration files (44.9645ms)
+  ✔ does not let action identifiers or local paths hide sensitive literals (48.919584ms)
+  ✔ finds sensitive assignments inside comments while preserving strings (47.392084ms)
+  ✔ does not treat bare configuration objects or arrays as JavaScript expressions (43.006041ms)
+  ✔ ignores package-path examples in comments but finds a real backtick secret (42.870542ms)
+  ✔ does not let regex literals hide a later sensitive assignment (39.941625ms)
+  ✔ finds real npm and test-source credentials while allowing explicit fixtures (37.023375ms)
+  ✔ allows bounded placeholder labels in the tree and history without hiding credentials (371.368ms)
+  ✔ reports bounded safe-lead assignments in production config while allowing test and docs fixtures (24.558958ms)
+  ✔ ignores synthetic cursor retry context only in historical test paths (448.168542ms)
+  ✔ allows bounded synthetic labels in test and documentation history while finding production values (434.6765ms)
+  ✔ allows public domain-separation labels without hiding credentials (436.08325ms)
+  ✔ reports bounded safe-lead assignments in history blobs and commit messages outside test/docs contexts (427.724833ms)
+  ✔ ignores package paths in source comments while finding real comment and string credentials (20.772167ms)
+  ✔ finds plain template literals and production values containing fixture words (45.057667ms)
+  ✔ finds credentials in the complete Git history, including non-current refs (467.577209ms)
+  ✔ ignores Codex turn-diff refs that are not publishable repository history (536.292291ms)
+  ✔ does not let a test-path alias hide the same credential blob from a config path (418.368875ms)
+  ✔ scans commit, annotated tag, and Git notes messages (446.892917ms)
+  ✔ allows quoted GitHub Actions context placeholders in the tree and Git history (372.076625ms)
+✔ project secret scan (5711.927292ms)
+▶ Phase 1 release boundary
+  ✔ rejects commands that can stop unrelated services (2.234958ms)
+  ✔ requires a verified project fingerprint before Windows, POSIX, or WSL PID termination (0.227125ms)
+  ✔ pins loopback authentication environment by runtime purpose (0.388333ms)
+  ✔ waits for the isolated browser profile to be released and never hides cleanup failure (0.149333ms)
+  ✔ runs every integration cleanup step and reports ownership or deletion failures (0.552042ms)
+  ✔ accepts an already-closed owned child as a valid cleanup terminal state (0.163541ms)
+  ✔ runs the WSL ownership check in a non-login shell (0.283875ms)
+  ✔ runs Chrome integration against the built production static server (1.068375ms)
+✔ Phase 1 release boundary (6.208959ms)
+▶ portable release package
+  ✔ excludes business media while preserving explicit runtime assets (5.976041ms)
+  ✔ keeps every tracked npm cache setting portable (37.4735ms)
+  ✔ rejects a dirty release source through the API (319.744916ms)
+  ✔ rejects API dirty and Git metadata bypass options (408.780708ms)
+  ✔ rejects dirty CLI sources and does not accept --allow-dirty (545.670459ms)
+  ✔ rebuilds ignored frontend dist from the exact commit instead of packaging stale worktree bytes (1059.033667ms)
+  ✔ rejects a generated dist root that links outside the exact commit checkout (752.657792ms)
+  ✔ never consumes ignored source node_modules while rebuilding an exact commit (670.491625ms)
+  ✔ uses an allowlisted frontend build environment that cannot leak caller secrets (978.880209ms)
+  ✔ bypasses caller npm wrappers and invokes a controlled build entry directly (1084.792833ms)
+  ✔ installs declared dependencies from the committed lockfile and records build provenance (1788.806167ms)
+  ✔ rejects ignored local-dependency bytes injected by a shared post-checkout hook (1114.967458ms)
+  ✔ isolates user and global npm configuration while including locked dev dependencies (1232.953666ms)
+  ✔ rejects committed local dependency specifications that escape the exact checkout (1.654958ms)
+  ✔ rejects ignored bytes inside a local dependency even when release filters exclude them (2.098458ms)
+  ﹣ resolves a Windows PATH npm wrapper to its verified npm-cli.js (0.05475ms) # SKIP
+  ✔ cleans a Git worktree registration when exact-commit byte verification fails (627.045084ms)
+  ✔ rejects active smudge filters before detached release materialization (286.434375ms)
+  ✔ publishes an archive atomically and removes a partial temporary file after failure (1.118458ms)
+  ✔ never overwrites an existing final archive during atomic publication (0.857ms)
+  ✔ uses SOURCE_DATE_EPOCH for reproducible default manifests and tar mtimes (1249.993333ms)
+  ✔ creates byte-identical packages from a named branch and detached HEAD (1277.191916ms)
+  ✔ falls back to the HEAD commit time when SOURCE_DATE_EPOCH is absent (1295.140709ms)
+  ✔ resolves the captured release commit time even when HEAD points at a newer commit (322.911375ms)
+  ✔ documents rollback by repinning exactly the three project systemd units (0.459209ms)
+  ✔ creates an extractable archive without secrets, runtime data, dependencies, or Codex metadata (2150.279042ms)
+  ✔ packages the exact installed backend production dependency tree (1063.245417ms)
+  ✔ rejects real keys, tokens, passwords, and private keys in included templates (3793.468709ms)
+  ✔ allows explicit low-entropy credential labels only inside test source (769.182459ms)
+  ✔ keeps domain-led Shortcut and WeChat fixture labels limited to test source (0.42175ms)
+  ✔ allows GitHub Actions context references without treating them as credential values (765.678625ms)
+  ✔ rejects sensitive assignments in ordinary YAML, JSON, and BOM text encodings (6778.722625ms)
+  ✔ fails closed when explicit text configuration cannot be decoded safely (1457.348ms)
+  ✔ builds and extracts the real project through Unicode source, output, and destination paths (125719.9295ms)
+  ✔ exposes dedicated package and production preflight commands (0.214ms)
+✔ portable release package (157565.779917ms)
+▶ WSL backend service wrapper
+  ✔ routes service commands into backend/scripts/service.mjs without shell interpolation (1.325875ms)
+  ✔ routes database commands into backend/scripts/db-maintenance.mjs (0.904417ms)
+✔ WSL backend service wrapper (2.906083ms)
+▶ WSL full-stack production wrapper
+  ✔ builds the frontend with the selected backend API base URL (1.772292ms)
+  ✔ routes static frontend service commands into WSL without bash interpolation (0.262083ms)
+✔ WSL full-stack production wrapper (2.6295ms)
+ℹ tests 251
+ℹ suites 18
+ℹ pass 249
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 2
+ℹ todo 0
+ℹ duration_ms 157740.498709
+DEPLOY_TESTS_EXIT=0
+
+================ FINAL SECRET SCAN BEFORE EVIDENCE REPACK ================
+FINAL_SECRET_SCAN_COMMAND=npm run scan:secrets
+
+> sentelligent-sales-workbench@0.10.0 scan:secrets
+> node scripts/project-secret-scan.mjs --history
+
+{
+  "status": "passed",
+  "scannedFiles": 758,
+  "scannedGitObjects": 3488,
+  "scannedGitMessages": 599,
+  "gitHistoryComplete": true,
+  "findings": []
+}
+FINAL_SECRET_SCAN_EXIT=0
+
+================ DIFF, EOL, TAG, AND SCOPE GATES ================
+DIFF_CHECK_COMMAND=git -c core.whitespace=cr-at-eol diff --check -- <7 authorized paths>
+DIFF_CHECK_EXIT=0
+EOL_CHECK_COMMAND=python3 byte-level LF/CRLF counter over <7 authorized paths>
+EOL_FILE=backend/src/assistant/router.js expected=LF actual=LF crlf=0 bare_lf=994 result=PASS
+EOL_FILE=backend/src/assistant/webChannel.js expected=CRLF actual=CRLF crlf=205 bare_lf=0 result=PASS
+EOL_FILE=outputs/product-design-prototype/src/app/useAssistantChat.js expected=CRLF actual=CRLF crlf=216 bare_lf=0 result=PASS
+EOL_FILE=backend/tests/assistant-router.test.js expected=LF actual=LF crlf=0 bare_lf=638 result=PASS
+EOL_FILE=backend/tests/assistant-web-http-integration.test.js expected=CRLF actual=CRLF crlf=348 bare_lf=0 result=PASS
+EOL_FILE=backend/tests/assistant-web-orchestrator.test.js expected=CRLF actual=CRLF crlf=90 bare_lf=0 result=PASS
+EOL_FILE=outputs/product-design-prototype/scripts/assistant-chat.test.mjs expected=CRLF actual=CRLF crlf=88 bare_lf=0 result=PASS
+EOL_CHECK_RESULT=PASS
+EOL_CHECK_EXIT=0
+TAG_CHECK_COMMAND=git rev-parse v0.10.3 v0.10.3^{commit} HEAD
+1aa18d34eea8b8ba2138cd2c76422ca044b5d928
+2dc9b1114107aee906d0ecfb006ac461cdb86cec
+f38fd0d5d38b3cc80e7d2488e7a9e2b57e5efd25
+TAG_CHECK_EXIT=0
+SCOPED_CHANGED_FILES_COMMAND=git diff --name-only -- <7 authorized paths>
+backend/src/assistant/router.js
+backend/src/assistant/webChannel.js
+backend/tests/assistant-router.test.js
+backend/tests/assistant-web-http-integration.test.js
+backend/tests/assistant-web-orchestrator.test.js
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs
+outputs/product-design-prototype/src/app/useAssistantChat.js
+SCOPED_CHANGED_FILES_EXIT=0
+
+PLAIN_WORKTREE_DIFF_CHECK_EXPLANATION:
+PLAIN_DIFF_CHECK_COMMAND=git diff --check -- <7 authorized paths>
+PLAIN_DIFF_CHECK_EXIT=2
+PLAIN_DIFF_CHECK_LINES=274
+PLAIN_DIFF_CHECK_TRAILING_WHITESPACE_REPORTS=137
+PLAIN_DIFF_CHECK_FIRST_LITERAL_REPORT=backend/src/assistant/webChannel.js:49: trailing whitespace.
+EXPLANATION=Five authorized source/test files are CRLF in the original HEAD blobs. Plain worktree git diff --check treats CR as trailing whitespace unless cr-at-eol is declared. Byte-level EOL verification above proves every source/test file is uniform and matches its original LF/CRLF style. The source/test gate is `git -c core.whitespace=cr-at-eol diff --check -- <7 authorized paths>` and returned exit 0. No Git config or attributes were changed.
+
+DIFF_ARCHIVE_REPACK:
+DIFF_FILE is binary at the outer Git transaction layer, so nested patch CRLF bytes and blank context lines are not reinterpreted as whitespace in the staged artifact diff.
+ROLLBACK.sh verifies DIFF_FILE compressed SHA-256, validates gzip integrity, expands into a mktemp file, verifies the raw patch SHA-256, performs reverse check/application, verifies all 7 restored hashes, and deletes the temporary patch via trap.
+
+================ INDEPENDENT-COPY ROLLBACK V2 ================
+ROLLBACK_V2_INPUT=independent_copy_with_7_modified_files root=/tmp/v0103-web-hotfix-rollback-v2.uhcWVU
+ROLLBACK_V2_COMMAND=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/ROLLBACK.sh /tmp/v0103-web-hotfix-rollback-v2.uhcWVU
+ROLLBACK_OK restored=7/7
+DIFF_ARCHIVE_SHA256=f2e64152b06845f40e8a6cb1a0acda43b36d5a94b4ace4d95cec3adaf0a59eb1
+RAW_PATCH_SHA256=bc39553b0f82a530d9eb3e0f5d95a178168188730bf950b1bab1a0b8ca21096c
+RESTORED_BEHAVIOR=original v0.10.3 routing, web allow decision, nested response shape, and toast-only 403 behavior
+TARGET_ROOT=/tmp/v0103-web-hotfix-rollback-v2.uhcWVU
+ROLLBACK_V2_SCRIPT_EXIT=0
+ROLLBACK_V2_BACKEND_COMMAND=cd <copy>/backend && node --test tests/assistant-router.test.js tests/assistant-web-orchestrator.test.js tests/assistant-web-http-integration.test.js
+▶ assistant deterministic router
+  ✔ gives explicit commands priority and returns a controlled read-only plan (1.517875ms)
+  ✔ asks for required arguments instead of creating an incomplete plan (0.193708ms)
+  ✔ handles help, cancel, and confirmation without executing a tool (0.351083ms)
+  ✔ clarifies ambiguous weekly report requests (0.611666ms)
+  ✔ routes explicitly named weekly reports and defaults to the current natural week (0.468292ms)
+  ✔ routes request-settlement and multi-refund/top-up phrases to a read-only preview (0.17725ms)
+  ✔ does not confuse reimbursement, bookkeeping, proof, or confirmation commands with settlement preview (3.812958ms)
+  ✔ keeps payment-proof and invoice inbox uploads compatible without confirmation (0.338209ms)
+  ✔ maps the existing Clawbot visit commands to persistent assistant tools (0.294166ms)
+  ✔ does not call tools for unknown or low-confidence natural language (0.183375ms)
+  ✔ continues a customer or project conversation from the server-owned context (0.176084ms)
+  ✔ does not guess a project when context only identifies a customer (0.136375ms)
+  ✔ parses customer create commands into a confirmation-required plan (0.596667ms)
+  ✔ parses keyed, sentence, and array-verb customer update phrasings (0.559458ms)
+  ✔ clarifies unsupported customer fields and missing targets instead of planning (0.177125ms)
+  ✔ resolves customer-write pronouns from the server-owned context (0.120209ms)
+  ✔ parses customer delete commands as an R3 code-confirmed plan (0.067833ms)
+  ✔ routes bare 查询 and profile question phrasings to customer reads (0.239916ms)
+  ✔ keeps profile questions away from earlier intents and the visit fallback (0.171125ms)
+✔ assistant deterministic router (11.180709ms)
+▶ opportunity intents (v0.7.6)
+  ✔ routes stage moves to the affirm-confirmed update-stage tool with normalized targets (0.504375ms)
+  ✔ routes next-step edits to the affirm-confirmed update-next tool (0.089125ms)
+  ✔ routes amount/name/risk edits, creation, and deletion on the code-confirmed ladder (0.502125ms)
+  ✔ routes progress questions and list phrasings to the confirmation-free reads (0.457959ms)
+  ✔ stays disjoint from the bookkeeping, customer, quick-record, and todo intents (1.558708ms)
+✔ opportunity intents (v0.7.6) (3.359375ms)
+▶ quick-record intents (v0.7.3)
+  ✔ captures a one-step record with the spoken date pinned as occurredAt (0.348ms)
+  ✔ accepts every capture prefix and leaves occurredAt out when no date word exists (0.1425ms)
+  ✔ clarifies bookkeeping-like capture bodies and honors the 记拜访 escape prefix (0.12325ms)
+  ✔ clarifies an empty capture body with the friendly hint (0.048333ms)
+  ✔ does not swallow bare weekly-report or legacy record phrases (0.119084ms)
+  ✔ routes history searches with period and subject arguments (0.180875ms)
+  ✔ maps every update field label onto the normalized field name (0.195875ms)
+  ✔ routes void phrasings as an R3 code-confirmed plan (0.089375ms)
+  ✔ stays disjoint from the v0.7.2 customer-write regexes (0.10325ms)
+✔ quick-record intents (v0.7.3) (1.470417ms)
+▶ todo intents (v0.7.5)
+  ✔ parses schedule, priority, and customer hints out of a reminder prefix (0.550959ms)
+  ✔ keeps deadline phrases and bare-colon prefixes as todos without a time (0.268959ms)
+  ✔ wins over the visit fallback and the bookkeeping regex for reminder bodies (0.116167ms)
+  ✔ keeps the capture prefixes away from 帮我记待办 through the lookahead (0.039667ms)
+  ✔ routes scoped todo queries to the list and bare ones to the summary (0.169459ms)
+  ✔ requires the 待办 stem for status verbs and captures the target text (0.105333ms)
+✔ todo intents (v0.7.5) (1.701125ms)
+category=auth bootstrap admin seeded account=jiangjz (users table had no row for the configured AUTH_ACCOUNT)
+category=weixin bindings_empty (no active weixin binding; proactive WeChat delivery is dormant)
+▶ assistant web HTTP integration
+  ✔ returns 401 for unauthenticated chat (2.120083ms)
+  ✔ returns 403 for chat with invalid CSRF (1.468917ms)
+  ✔ returns 403 when a machine token hits the web chat route (3.194417ms)
+  ✔ returns HELP text for 帮助 (7.706125ms)
+  ✔ returns dashboard summary for 战情 (8.942291ms)
+  ✔ rejects an oversized message with 422 (3.358334ms)
+  ✔ creates and confirms an R1 action-risk item through the web confirm endpoint (13.591541ms)
+  ✔ cancels a pending action through the web confirm endpoint (7.7215ms)
+  ✔ returns 404 for confirming another account pending action (7.292041ms)
+  ✔ requires confirmation without exposing a code for R2 customer updates (17.48225ms)
+  ✔ returns 404 for an unknown pendingActionId (2.884416ms)
+  ✔ replays the same clientMessageId response (6.711541ms)
+  ✔ returns filtered history for a conversation (6.07925ms)
+  ✔ denies bookkeeping intents on web (5.641083ms)
+  ✔ denies visit-capture intents on web (4.584042ms)
+  ✔ returns customer search results (10.42925ms)
+  ✔ returns 429 after the assistant web rate limit is exceeded (101.875958ms)
+✔ assistant web HTTP integration (429.823084ms)
+✔ deriveWebExplicitCredential is deterministic for the same action id (1.063167ms)
+✔ deriveWebExplicitCredential differs from affirm credential domain (0.113083ms)
+✔ safeWebPendingResponse never includes confirmationCode (0.288333ms)
+✔ mapAssistantWebResponse strips confirmationCode and adds card (0.149625ms)
+✔ isWebClosedTool blocks bookkeeping and visit-capture (0.084334ms)
+✔ parseWeixinCardText round-trips card titles and fields (0.54225ms)
+ℹ tests 62
+ℹ suites 5
+ℹ pass 62
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 566.962791
+ROLLBACK_V2_BACKEND_EXIT=0
+ROLLBACK_V2_FRONTEND_COMMAND=npm --prefix <copy>/outputs/product-design-prototype run test:assistant-chat
+
+> product-design-prototype@0.10.0 test:assistant-chat
+> node --test scripts/weixinCardParse.test.mjs scripts/assistant-chat.test.mjs scripts/assistant-fab.test.mjs
+
+▶ assistantChatModel
+  ✔ merges remote history without duplicating local ids (1.29525ms)
+  ✔ appends messages immutably (0.1065ms)
+  ✔ flags write tools that should refresh bootstrap (0.083292ms)
+✔ assistantChatModel (2.180459ms)
+▶ AssistantConfirmCard
+  ✔ renders confirm actions for R1/R2/R3 cards (0.149625ms)
+  ✔ falls back to preformatted text when card parsing fails (0.299042ms)
+  ✔ does not reference confirmationCode (0.07175ms)
+  ✔ exposes cancel and confirm handlers (0.059625ms)
+✔ AssistantConfirmCard (0.755791ms)
+▶ assistant entry points
+  ✔ renders desktop assistant fab when mobile shell is off (0.477292ms)
+  ✔ renders mobile topbar assistant button (0.368ms)
+  ✔ wires the more drawer assistant backup entry (0.386166ms)
+  ✔ supports enter to send and escape to close in the chat panel (0.098791ms)
+✔ assistant entry points (2.194167ms)
+▶ weixinCardParse
+  ✔ parses title, fields, and footer (1.049083ms)
+  ✔ returns null for plain text (0.114208ms)
+  ✔ tolerates missing footer (0.121ms)
+  ✔ keeps empty field values (0.6605ms)
+✔ weixinCardParse (2.599708ms)
+ℹ tests 15
+ℹ suites 4
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 60.005167
+ROLLBACK_V2_FRONTEND_EXIT=0
+ROLLBACK_V2_BEHAVIOR_COMMAND=node --input-type=module -e <original behavior probe>
+RESTORED_ROUTE_查客户=unknown
+RESTORED_ROUTE_记一笔=unknown
+RESTORED_WEB_itinerary_closed=false
+RESTORED_TOP_LEVEL_TEXT=undefined
+RESTORED_RESULT_TEXT=nested-original
+ROLLBACK_V2_BEHAVIOR_EXIT=0
+WORKTREE_MODIFIED_STATE=preserved_7/7
+ROLLBACK_V2_COMBINED_EXIT=0
+
+================ COMPLETE STAGED TRANSACTION GATE ================
+STAGED_TRANSACTION_COMMAND=GIT_INDEX_FILE=<temporary-index> git -c core.whitespace=cr-at-eol diff --cached --check -- <7 authorized source/test files + 4 transaction artifacts>
+STAGED_TRANSACTION_LITERAL_RESULT_BEGIN
+STAGED_TRANSACTION_INPUT=7_authorized_source_test_files+4_transaction_artifacts
+STAGED_TRANSACTION_INDEX=/tmp/v0103-hotfix-index-v2.oqlF9W
+STAGED_TRANSACTION_COMMAND=GIT_INDEX_FILE=<temporary-index> git -c core.whitespace=cr-at-eol diff --cached --check -- <11 transaction paths>
+STAGED_TRANSACTION_EXIT=0
+STAGED_TRANSACTION_NAME_STATUS_COMMAND=GIT_INDEX_FILE=<temporary-index> git diff --cached --name-status -- <11 transaction paths>
+M	backend/src/assistant/router.js
+M	backend/src/assistant/webChannel.js
+M	backend/tests/assistant-router.test.js
+M	backend/tests/assistant-web-http-integration.test.js
+M	backend/tests/assistant-web-orchestrator.test.js
+A	docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/DIFF_FILE
+A	docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/MODIFIED_FILE
+A	docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/ROLLBACK.sh
+A	docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/VERIFICATION.txt
+M	outputs/product-design-prototype/scripts/assistant-chat.test.mjs
+M	outputs/product-design-prototype/src/app/useAssistantChat.js
+STAGED_TRANSACTION_NAME_STATUS_EXIT=0
+STAGED_TRANSACTION_LITERAL_RESULT_END
+
+================ FINAL WORKTREE AND ARTIFACT STATE ================
+CURRENT_BEHAVIOR_STATUS=modified working tree remains on hotfix behavior; independent rollback copy restored original 7/7 hashes and original behavior
+ORIGINAL_BEHAVIOR_AFTER_ROLLBACK=查客户 unknown; 记一笔 unknown; itinerary.summary not closed; nested result.text not top-level; original frontend has toast-only 403 path
+OPERATIONS_NOT_PERFORMED=commit,push,deploy,production restart,tag move,release document edit,release acceptance evidence edit,ASR file edit
+RESIDUAL_1=Hotfix remains uncommitted and undeployed by request.
+RESIDUAL_2=Production Web acceptance/UAT must be rerun only after a separately authorized release/deploy lane.

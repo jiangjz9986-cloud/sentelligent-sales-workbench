@@ -12,6 +12,15 @@ const passwordField = "pass" + "word";
 const loginValueA = "assistant-web-secret-a";
 const loginValueB = "assistant-web-secret-b";
 const machineToken = "test-machine-token";
+const FINANCIAL_TABLES = [
+  "shortcut_bookkeeping_entries",
+  "shortcut_bookkeeping_revisions",
+  "travel_expenses",
+  "travel_expense_payments",
+  "travel_expense_ingestions",
+  "travel_expense_document_inbox",
+  "invoice_documents",
+];
 
 let tempDir;
 let server;
@@ -78,6 +87,13 @@ async function confirm(session, payload) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+function financialRowCounts() {
+  return Object.fromEntries(FINANCIAL_TABLES.map((table) => [
+    table,
+    db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count,
+  ]));
 }
 
 describe("assistant web HTTP integration", () => {
@@ -285,10 +301,13 @@ describe("assistant web HTTP integration", () => {
     assert.equal(history.body.items.some((item) => item.text === "<confirmation-code>"), false);
   });
 
-  it("denies bookkeeping intents on web", async () => {
-    const result = await chat(sessionA, { message: "支出 午餐 50" });
+  it("denies the v0.10.3 task-book bookkeeping sentence before any financial write", async () => {
+    const before = financialRowCounts();
+    assert.deepEqual(before, Object.fromEntries(FINANCIAL_TABLES.map((table) => [table, 0])));
+    const result = await chat(sessionA, { message: "记一笔午餐 50" });
     assert.equal(result.response.status, 403);
     assert.match(result.body.message ?? result.body.text ?? "", /微信小小/u);
+    assert.deepEqual(financialRowCounts(), before, "403 must leave every financial table unchanged at zero rows");
   });
 
   it("denies visit-capture intents on web", async () => {
@@ -297,10 +316,15 @@ describe("assistant web HTTP integration", () => {
     assert.match(result.body.message ?? result.body.text ?? "", /微信小小/u);
   });
 
-  it("returns customer search results", async () => {
-    const result = await chat(sessionA, { message: "客户 协和" });
+  it("returns the v0.10.3 task-book customer search at the top-level display contract", async () => {
+    const result = await chat(sessionA, { message: "查客户 协和Web助手" });
     assert.equal(result.response.status, 200);
     assert.equal(result.body.status, "ok");
+    assert.equal(result.body.toolName, "customer.search");
+    assert.match(result.body.text, /协和Web助手/u);
+    assert.equal(result.body.text, result.body.result.text);
+    assert.equal(result.body.card?.title, "客户");
+    assert.equal(result.body.result.items.some((item) => item.id === customerA.id), true);
   });
 
   it("returns 429 after the assistant web rate limit is exceeded", async () => {

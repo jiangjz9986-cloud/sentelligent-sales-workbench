@@ -105,6 +105,29 @@ describe("assistant deterministic router", () => {
     assert.equal(router.route({ text: "客户 医院", confidence: 0.9 }).toolName, "customer.search");
   });
 
+  it("routes the v0.10.3 task-book customer and bookkeeping sentences without stealing adjacent intents", () => {
+    const customerCases = [
+      ["查客户 V0103-UAT-20260830-客户", "V0103-UAT-20260830-客户"],
+      ["查询客户 协和Web助手", "协和Web助手"],
+      ["客户 协和Web助手", "协和Web助手"],
+    ];
+    for (const [text, query] of customerCases) {
+      const plan = router.route({ text });
+      assert.equal(plan.status, "planned", text);
+      assert.equal(plan.toolName, "customer.search", text);
+      assert.deepEqual(plan.arguments, { query }, text);
+    }
+
+    const bookkeeping = router.route({ text: "记一笔午餐 50" });
+    assert.equal(bookkeeping.status, "planned");
+    assert.equal(bookkeeping.toolName, "bookkeeping.ingest");
+    assert.deepEqual(bookkeeping.arguments, { text: "记一笔午餐 50" });
+
+    assert.equal(router.route({ text: "记一下：今天拜访了协和医院" }).toolName, "visit-capture.capture");
+    assert.equal(router.route({ text: "提醒我明天拜访协和医院" }).toolName, "action-risk.create");
+    assert.equal(router.route({ text: "今天拜访协和医院，客户希望补齐材料" }).toolName, "visit-capture.collect");
+  });
+
   it("continues a customer or project conversation from the server-owned context", () => {
     const customer = router.route({
       text: "客户详情",

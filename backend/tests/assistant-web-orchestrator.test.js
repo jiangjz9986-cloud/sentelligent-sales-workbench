@@ -50,9 +50,33 @@ test("mapAssistantWebResponse strips confirmationCode and adds card", () => {
   assert.equal(mapped.body.card?.title, "待确认");
 });
 
-test("isWebClosedTool blocks bookkeeping and visit-capture", () => {
+test("mapAssistantWebResponse safely flattens result text and card while preserving result", () => {
+  const result = {
+    text: "【客户】\n1：协和Web助手  北京",
+    card: { title: "客户", fields: [["1", "协和Web助手  北京"]], footer: null },
+    items: [{ id: "customer-1", name: "协和Web助手" }],
+  };
+  const mapped = mapAssistantWebResponse({
+    status: 200,
+    body: { status: "ok", toolName: "customer.search", result },
+  });
+  assert.equal(mapped.body.text, result.text);
+  assert.deepEqual(mapped.body.card, result.card);
+  assert.deepEqual(mapped.body.result, result);
+
+  const unsafeResult = { text: { providerBody: "raw-text" }, card: "raw-card" };
+  const unsafe = mapAssistantWebResponse({ status: 200, body: { status: "ok", result: unsafeResult } });
+  assert.equal(unsafe.body.text, undefined);
+  assert.equal(unsafe.body.card, undefined);
+  assert.deepEqual(unsafe.body.result, unsafeResult);
+});
+
+test("isWebClosedTool opens only the explicit WEB_OPEN_TOOLS allowlist", () => {
   assert.equal(isWebClosedTool("bookkeeping.confirm"), true);
   assert.equal(isWebClosedTool("visit-capture.capture"), true);
+  assert.equal(isWebClosedTool("itinerary.summary"), true, "registered but unopened tools fail closed");
+  assert.equal(isWebClosedTool("unregistered.future-tool"), true, "unknown tools fail closed");
+  assert.equal(isWebClosedTool(null), true, "null tools fail closed");
   assert.equal(isWebClosedTool("customer.search"), false);
 });
 

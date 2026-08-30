@@ -792,7 +792,8 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
       source: "natural",
     });
   }
-  if (/记账|支出|收入|借款到账/u.test(value)) {
+  const naturalBookkeeping = value.match(/^记一笔[：:\s]*(.+)$/u);
+  if (naturalBookkeeping || /记账|支出|收入|借款到账/u.test(value)) {
     const tool = registry.getTool("bookkeeping.ingest");
     return tool
       ? makePlan({ tool, arguments: { text: value }, confidence, source: "natural" })
@@ -883,7 +884,7 @@ function naturalPlan(text, confidence, registry, rawContext = {}, now = new Date
     const plan = opportunityListPlan(opportunityList, registry, confidence);
     if (plan) return plan;
   }
-  const customer = value.match(/^(?:客户|查询客户)\s+(.+)$/);
+  const customer = value.match(/^(?:查客户|查询客户|客户)\s+(.+)$/u);
   if (customer) {
     const tool = registry.getTool("customer.search");
     return makePlan({ tool, arguments: { query: customer[1] }, confidence, source: "natural" });

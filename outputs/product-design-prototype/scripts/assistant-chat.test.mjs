@@ -8,6 +8,7 @@ import {
   mergeHistoryMessages,
   shouldRefreshBootstrap,
 } from "../src/components/assistant/assistantChatModel.js";
+import { appendAssistantErrorBubble } from "../src/app/useAssistantChat.js";
 
 const confirmSource = readFileSync(resolve("src/components/assistant/AssistantConfirmCard.jsx"), "utf8");
 
@@ -50,5 +51,38 @@ describe("AssistantConfirmCard", () => {
   it("exposes cancel and confirm handlers", () => {
     assert.match(confirmSource, /onCancel/);
     assert.match(confirmSource, /onConfirm/);
+  });
+});
+
+describe("useAssistantChat error responses", () => {
+  it("appends a denied assistant bubble from only the 403 top-level message", () => {
+    const prior = [{ id: "user-1", role: "user", text: "记一笔午餐 50", status: "ok" }];
+    const error = Object.assign(new Error("Request failed with 403: provider-secret"), {
+      status: 403,
+      body: {
+        status: "error",
+        message: "该操作请使用微信小小。",
+        error: { message: "nested-provider-secret" },
+        providerBody: "raw-provider-body",
+      },
+    });
+    const next = appendAssistantErrorBubble(prior, error);
+    assert.equal(next.length, 2);
+    assert.equal(next[1].role, "assistant");
+    assert.equal(next[1].status, "denied");
+    assert.equal(next[1].text, "该操作请使用微信小小。");
+    assert.doesNotMatch(JSON.stringify(next[1]), /provider-secret|raw-provider-body/u);
+  });
+
+  it("uses a fixed 403 fallback instead of nested error or provider bodies", () => {
+    const error = {
+      status: 403,
+      message: "provider-secret",
+      body: { error: { message: "nested-provider-secret" }, providerBody: "raw-provider-body" },
+    };
+    const next = appendAssistantErrorBubble([], error);
+    assert.equal(next[0].status, "denied");
+    assert.equal(next[0].text, "该操作当前不可用。");
+    assert.doesNotMatch(JSON.stringify(next[0]), /provider-secret|raw-provider-body/u);
   });
 });

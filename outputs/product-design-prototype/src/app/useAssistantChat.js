@@ -20,6 +20,33 @@ function messageFromResponse(role, body) {
   };
 }
 
+function deniedResponseFromError(error) {
+  if (Number(error?.status) !== 403) return null;
+  const body = error?.body;
+  const message = body
+    && typeof body === "object"
+    && !Array.isArray(body)
+    && Object.hasOwn(body, "message")
+    && typeof body.message === "string"
+    ? body.message.trim()
+    : "";
+  const safeMessage = message
+    && message.length <= 500
+    && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(message)
+    ? message
+    : "该操作当前不可用。";
+  return { text: safeMessage, status: "denied" };
+}
+
+export function appendAssistantErrorBubble(priorMessages, error, messageFactory = null) {
+  const response = deniedResponseFromError(error);
+  if (!response) return priorMessages;
+  const assistantMessage = typeof messageFactory === "function"
+    ? messageFactory("assistant", response)
+    : { role: "assistant", ...response };
+  return appendMessage(priorMessages, assistantMessage);
+}
+
 export function useAssistantChat({
   api,
   account,
@@ -114,7 +141,12 @@ export function useAssistantChat({
       });
       applyResponse(body, priorMessages);
     } catch (error) {
-      toast?.({ tone: "error", title: "发送失败", description: error.message });
+      const withErrorBubble = appendAssistantErrorBubble(priorMessages, error, messageFromResponse);
+      if (withErrorBubble !== priorMessages) {
+        persistMessages(withErrorBubble);
+      } else {
+        toast?.({ tone: "error", title: "发送失败", description: "请稍后重试。" });
+      }
       setPending(null);
     } finally {
       setBusy(false);
@@ -133,7 +165,7 @@ export function useAssistantChat({
       setPending(null);
       applyResponse(body, messages);
     } catch (error) {
-      toast?.({ tone: "error", title: "确认失败", description: error.message });
+      toast?.({ tone: "error", title: "确认失败", description: "请稍后重试。" });
     } finally {
       setBusy(false);
     }
@@ -151,7 +183,7 @@ export function useAssistantChat({
       setPending(null);
       applyResponse(body, messages);
     } catch (error) {
-      toast?.({ tone: "error", title: "取消失败", description: error.message });
+      toast?.({ tone: "error", title: "取消失败", description: "请稍后重试。" });
     } finally {
       setBusy(false);
     }

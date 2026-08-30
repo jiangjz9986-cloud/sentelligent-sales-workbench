@@ -9,18 +9,6 @@ const MAX_MESSAGE_LENGTH = 2000;
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const RATE_LIMIT_MAX_REQUESTS = 30;
 
-const WEB_CLOSED_TOOL_PREFIXES = [
-  "bookkeeping.",
-  "shortcut-bookkeeping.",
-  "visit-capture.",
-  "payment-proof.",
-  "invoice.ingest",
-  "travel-expense.create",
-  "advance-settlement.",
-  "sales-report.",
-  "reimbursement-report.",
-];
-
 const WEB_OPEN_TOOLS = new Set([
   "dashboard.summary",
   "customer.search",
@@ -58,8 +46,7 @@ export function deriveWebExplicitCredential(confirmationSecretKey, actionId) {
 export function isWebClosedTool(toolName) {
   if (typeof toolName !== "string" || !toolName.trim()) return true;
   const normalized = toolName.trim();
-  if (WEB_OPEN_TOOLS.has(normalized)) return false;
-  return WEB_CLOSED_TOOL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+  return !WEB_OPEN_TOOLS.has(normalized);
 }
 
 export function assertWebToolAllowed(toolName) {
@@ -93,6 +80,20 @@ export function mapAssistantWebResponse(result) {
   const status = result?.status ?? 500;
   const body = result?.body && typeof result.body === "object" ? { ...result.body } : {};
   delete body.confirmationCode;
+  const nestedResult = body.result && typeof body.result === "object" && !Array.isArray(body.result)
+    ? body.result
+    : null;
+  if (typeof body.text !== "string" && typeof nestedResult?.text === "string") {
+    body.text = nestedResult.text;
+  }
+  if (
+    (!body.card || typeof body.card !== "object" || Array.isArray(body.card))
+    && nestedResult?.card
+    && typeof nestedResult.card === "object"
+    && !Array.isArray(nestedResult.card)
+  ) {
+    body.card = { ...nestedResult.card };
+  }
   if (!body.card && typeof body.text === "string") {
     const parsed = cardFromText(body.text);
     if (parsed) body.card = parsed;
