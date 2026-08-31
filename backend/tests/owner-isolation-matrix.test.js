@@ -168,7 +168,11 @@ describe("owner isolation matrix (v0.9.2)", () => {
 
     const quickRecord = await asA("/api/quick-records", {
       method: "POST",
-      body: JSON.stringify({ rawContent: "拜访A客户，确认预算窗口，下一步补齐方案材料。", customerId: fixtures.customer.id }),
+      body: JSON.stringify({
+        rawContent: "拜访A客户，确认预算窗口，下一步补齐方案材料。",
+        occurredAt: "2026-08-26T10:00:00+08:00",
+        customerId: fixtures.customer.id,
+      }),
     });
     assert.equal(quickRecord.response.status, 201, "A create quick record");
     fixtures.quickRecord = quickRecord.body.item;
