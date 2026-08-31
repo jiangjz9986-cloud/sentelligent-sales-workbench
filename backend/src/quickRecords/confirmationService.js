@@ -461,6 +461,7 @@ function previewIdentityPayload(preview) {
     updatedAt: preview.updatedAt,
     completedAt: preview.completedAt,
     cancelledAt: preview.cancelledAt,
+    cancelledBy: preview.cancelledBy,
     cancellationRequestIdentity: preview.cancellationRequestIdentity,
   };
 }
@@ -489,6 +490,44 @@ function previewDraftHash(preview) {
     evidenceHash: preview.evidenceHash,
     changes: preview.items.map(changeSeed),
   });
+}
+
+function normalizeStoredReceipt(raw, item, index) {
+  if (!isPlainObject(raw)) {
+    fail("PREVIEW_DATA_INVALID", "Stored confirmation receipt is invalid", { status: 500 });
+  }
+  const keys = Object.keys(raw).sort();
+  if (keys.length !== 3 || keys[0] !== "entityId" || keys[1] !== "field" || keys[2] !== "version") {
+    fail("PREVIEW_DATA_INVALID", "Stored confirmation receipt shape is invalid", { status: 500 });
+  }
+  const receipt = {
+    entityId: identifier(
+      raw.entityId,
+      `preview.items[${index}].receipt.entityId`,
+      "PREVIEW_DATA_INVALID",
+      500,
+    ),
+    field: fieldPath(
+      raw.field,
+      `preview.items[${index}].receipt.field`,
+      "PREVIEW_DATA_INVALID",
+      500,
+    ),
+    version: positiveInteger(
+      raw.version,
+      `preview.items[${index}].receipt.version`,
+      "PREVIEW_DATA_INVALID",
+      500,
+    ),
+  };
+  if (
+    receipt.entityId !== item.entityId
+    || receipt.field !== item.field
+    || receipt.version <= item.entityVersion
+  ) {
+    fail("PREVIEW_DATA_INVALID", "Stored confirmation receipt does not match its item", { status: 500 });
+  }
+  return receipt;
 }
 
 function normalizeStoredPreview(raw, { owner = null } = {}) {
@@ -536,6 +575,21 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
   preview.updatedAt = isoDate(preview.updatedAt, "preview.updatedAt", { required: true });
   preview.cancelledAt = isoDate(preview.cancelledAt, "preview.cancelledAt");
   preview.completedAt = isoDate(preview.completedAt, "preview.completedAt");
+  preview.cancelledBy = optionalText(
+    preview.cancelledBy,
+    "preview.cancelledBy",
+    MAX_ID,
+    "PREVIEW_DATA_INVALID",
+    500,
+  );
+  if (preview.cancelledBy !== null) {
+    preview.cancelledBy = identifier(
+      preview.cancelledBy,
+      "preview.cancelledBy",
+      "PREVIEW_DATA_INVALID",
+      500,
+    );
+  }
   preview.cancellationRequestIdentity = preview.cancellationRequestIdentity === null
     || preview.cancellationRequestIdentity === undefined
     ? null
@@ -661,10 +715,7 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     }
     item.receipt = item.receipt === null || item.receipt === undefined
       ? null
-      : safeJson(item.receipt, `preview.items[${index}].receipt`, {
-        code: "PREVIEW_DATA_INVALID",
-        status: 500,
-      });
+      : normalizeStoredReceipt(item.receipt, item, index);
     if (item.confirmationRequest === null || item.confirmationRequest === undefined) {
       item.confirmationRequest = null;
     } else {
@@ -696,6 +747,12 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
       if (!item.confirmedAt || !item.confirmedBy || item.receipt === null || !item.confirmationRequest) {
         fail("PREVIEW_DATA_INVALID", "Confirmed preview item lacks confirmation evidence", { status: 500 });
       }
+      if (item.confirmationMode !== "explicit") {
+        fail("PREVIEW_DATA_INVALID", "Only explicit preview items can be confirmed", { status: 500 });
+      }
+      if (item.confirmationRequest.mode === "all" && item.bulkEligible !== true) {
+        fail("PREVIEW_DATA_INVALID", "Stored bulk confirmation item is not eligible", { status: 500 });
+      }
     } else if (
       item.confirmedAt !== null
       || item.confirmedBy !== null
@@ -718,10 +775,28 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     }
     return item;
   });
+  const bulkConfirmationItems = preview.items.filter((item) => item.confirmationRequest?.mode === "all");
+  if (bulkConfirmationItems.length > 0) {
+    const [firstBulkItem] = bulkConfirmationItems;
+    if (
+      preview.status !== "completed"
+      || bulkConfirmationItems.some((item) => (
+        !sameDigest(
+          item.confirmationRequest.suggestionIdentity,
+          firstBulkItem.confirmationRequest.suggestionIdentity,
+        )
+        || item.confirmedBy !== firstBulkItem.confirmedBy
+        || item.confirmedAt !== firstBulkItem.confirmedAt
+      ))
+    ) {
+      fail("PREVIEW_DATA_INVALID", "Stored bulk confirmation cohort is invalid", { status: 500 });
+    }
+  }
   if (preview.status === "open") {
     if (
       preview.completedAt !== null
       || preview.cancelledAt !== null
+      || preview.cancelledBy !== null
       || preview.cancellationRequestIdentity !== null
     ) {
       fail("PREVIEW_DATA_INVALID", "Open confirmation preview has a terminal timestamp", { status: 500 });
@@ -731,7 +806,12 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     }
   }
   if (preview.status === "completed") {
-    if (!preview.completedAt || preview.cancelledAt !== null || preview.cancellationRequestIdentity !== null) {
+    if (
+      !preview.completedAt
+      || preview.cancelledAt !== null
+      || preview.cancelledBy !== null
+      || preview.cancellationRequestIdentity !== null
+    ) {
       fail("PREVIEW_DATA_INVALID", "Completed confirmation preview has invalid terminal state", { status: 500 });
     }
     if (preview.items.some((item) => item.status === "cancelled")) {
@@ -742,7 +822,12 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     }
   }
   if (preview.status === "cancelled") {
-    if (!preview.cancelledAt || preview.completedAt !== null || !preview.cancellationRequestIdentity) {
+    if (
+      !preview.cancelledAt
+      || preview.completedAt !== null
+      || !preview.cancelledBy
+      || !preview.cancellationRequestIdentity
+    ) {
       fail("PREVIEW_DATA_INVALID", "Cancelled confirmation preview has invalid terminal state", { status: 500 });
     }
     if (preview.items.some((item) => item.status === "pending")) {
@@ -844,6 +929,13 @@ function conflictResult(preview, reason, details = null) {
   };
 }
 
+function assertAuditAcknowledgement(raw, message) {
+  if (!isPlainObject(raw)) {
+    fail("AUDIT_WRITE_INVALID", message, { status: 500 });
+  }
+  identifier(raw.id, "audit.id", "AUDIT_WRITE_INVALID", 500);
+}
+
 export function createQuickRecordConfirmationService({
   draftRepository,
   previewRepository,
@@ -943,6 +1035,7 @@ export function createQuickRecordConfirmationService({
         updatedAt: now,
         completedAt: null,
         cancelledAt: null,
+        cancelledBy: null,
         cancellationRequestIdentity: null,
       };
       refreshIdentities(stored);
@@ -959,12 +1052,11 @@ export function createQuickRecordConfirmationService({
     return effectivePreview(loadPreview(owner, previewId).preview);
   }
 
-  function parsePins(input) {
-    const owner = identifier(input.owner, "owner");
-    if (input.confirmedBy !== undefined) {
+  function authenticatedActor(input, owner, code) {
+    if (["confirmedBy", "cancelledBy"].some((field) => Object.hasOwn(input, field))) {
       fail(
-        "UNTRUSTED_CONFIRMATION_ACTOR",
-        "confirmedBy must be derived from authenticated context",
+        code,
+        "Actor identity must be derived from authenticated context",
         { status: 403 },
       );
     }
@@ -977,12 +1069,17 @@ export function createQuickRecordConfirmationService({
       || resolvedActor.authenticated !== true
       || resolvedActor.owner !== owner
     ) {
-      fail("UNTRUSTED_CONFIRMATION_ACTOR", "Authenticated confirmation actor is required", { status: 403 });
+      fail(code, "Authenticated actor is required", { status: 403 });
     }
-    const actor = {
-      id: identifier(resolvedActor.id, "authenticatedActor.id", "UNTRUSTED_CONFIRMATION_ACTOR", 403),
+    return {
+      id: identifier(resolvedActor.id, "authenticatedActor.id", code, 403),
       owner,
     };
+  }
+
+  function parsePins(input) {
+    const owner = identifier(input.owner, "owner");
+    const actor = authenticatedActor(input, owner, "UNTRUSTED_CONFIRMATION_ACTOR");
     return {
       owner,
       previewId: identifier(input.previewId, "previewId"),
@@ -1026,6 +1123,21 @@ export function createQuickRecordConfirmationService({
       || !sameDigest(request.suggestionIdentity, pins.suggestionIdentity)
     ) return false;
     return mode !== "item" || sameDigest(request.itemIdentity, itemIdentity);
+  }
+
+  function matchesBulkConfirmationReplay(preview, pins) {
+    if (
+      preview.status !== "completed"
+      || preview.items.some((item) => (
+        item.confirmationMode === "explicit" && item.bulkEligible && item.status === "pending"
+      ))
+    ) return false;
+    const cohort = preview.items.filter((item) => item.confirmationRequest?.mode === "all");
+    return cohort.length > 0 && cohort.every((item) => (
+      item.status === "confirmed"
+      && item.confirmedBy === pins.actor.id
+      && sameDigest(item.confirmationRequest.suggestionIdentity, pins.suggestionIdentity)
+    ));
   }
 
   function revalidateDraft(preview, owner) {
@@ -1104,9 +1216,11 @@ export function createQuickRecordConfirmationService({
       ) {
         fail("WRITE_RESULT_INVALID", "The confirmed write result is invalid", { status: 500 });
       }
-      const receipt = rawResult?.receipt === undefined
-        ? { entityId: updated.entityId, field: updated.field, version: updated.version }
-        : safeJson(rawResult.receipt, "write receipt", { code: "WRITE_RESULT_INVALID", status: 500 });
+      const receipt = {
+        entityId: updated.entityId,
+        field: updated.field,
+        version: updated.version,
+      };
       const nextItem = next.items.find((candidate) => candidate.id === item.id);
       nextItem.status = "confirmed";
       nextItem.confirmedAt = now;
@@ -1171,9 +1285,7 @@ export function createQuickRecordConfirmationService({
       after: outcomes.map((item) => ({ id: item.id, value: clone(item.after), version: item.entityVersionAfter })),
       excludedTargets: excludedItems.map((item) => item.target),
     });
-    if (!isPlainObject(auditRaw) || !auditRaw.id) {
-      fail("AUDIT_WRITE_INVALID", "Confirmation audit persistence failed", { status: 500 });
-    }
+    assertAuditAcknowledgement(auditRaw, "Confirmation audit persistence failed");
     return {
       status: "confirmed",
       preview: effectivePreview(replaced),
@@ -1181,7 +1293,6 @@ export function createQuickRecordConfirmationService({
       excludedItems,
       writeback: true,
       replayed: false,
-      auditId: String(auditRaw.id),
     };
   }
 
@@ -1268,7 +1379,7 @@ export function createQuickRecordConfirmationService({
       return transaction(() => {
         const loaded = loadPreview(pins.owner, pins.previewId);
         const preview = loaded.preview;
-        if (preview.items.some((item) => matchesConfirmationReplay(item, pins, { mode: "all" }))) {
+        if (matchesBulkConfirmationReplay(preview, pins)) {
           assertPinnedInputs(preview, pins);
           return {
             status: "confirmed",
@@ -1294,6 +1405,9 @@ export function createQuickRecordConfirmationService({
           item.confirmationMode === "explicit" && item.bulkEligible && item.status === "pending"
         ));
         if (candidates.length === 0) {
+          if (preview.status !== "completed") {
+            fail("NO_BULK_CONFIRMABLE_ITEMS", "This open preview has no bulk-confirmable items", { status: 409 });
+          }
           return {
             status: "confirmed",
             preview: effectivePreview(preview, { replayed: true }),
@@ -1319,18 +1433,14 @@ export function createQuickRecordConfirmationService({
     }
   }
 
-  function cancel({
-    owner: ownerValue,
-    previewId: previewIdValue,
-    suggestionIdentity,
-    cancel: explicitCancel,
-  } = {}) {
-    if (explicitCancel !== true) {
+  function cancel(input = {}) {
+    if (input.cancel !== true) {
       fail("EXPLICIT_CANCELLATION_REQUIRED", "An explicit cancel=true is required", { status: 409 });
     }
-    const owner = identifier(ownerValue, "owner");
-    const previewId = identifier(previewIdValue, "previewId");
-    const identity = digestInput(suggestionIdentity, "suggestionIdentity");
+    const owner = identifier(input.owner, "owner");
+    const actor = authenticatedActor(input, owner, "UNTRUSTED_CANCELLATION_ACTOR");
+    const previewId = identifier(input.previewId, "previewId");
+    const identity = digestInput(input.suggestionIdentity, "suggestionIdentity");
     return transaction(() => {
       const loaded = loadPreview(owner, previewId);
       const preview = loaded.preview;
@@ -1338,12 +1448,20 @@ export function createQuickRecordConfirmationService({
         preview.status === "cancelled"
         && sameDigest(preview.cancellationRequestIdentity, identity)
       ) {
+        if (preview.cancelledBy !== actor.id) {
+          fail("CANCELLATION_ACTOR_MISMATCH", "The cancellation actor does not match", { status: 409 });
+        }
         return effectivePreview(preview, { replayed: true });
       }
       if (!sameDigest(preview.identity, identity)) {
         fail("SUGGESTION_IDENTITY_MISMATCH", "The preview suggestion identity does not match", { status: 409 });
       }
-      if (preview.status === "cancelled") return effectivePreview(preview, { replayed: true });
+      if (preview.status === "cancelled") {
+        if (preview.cancelledBy !== actor.id) {
+          fail("CANCELLATION_ACTOR_MISMATCH", "The cancellation actor does not match", { status: 409 });
+        }
+        return effectivePreview(preview, { replayed: true });
+      }
       if (preview.status === "completed") return effectivePreview(preview, { replayed: true });
       const now = clockDate(clock).toISOString();
       const next = clone(preview);
@@ -1352,6 +1470,7 @@ export function createQuickRecordConfirmationService({
       }
       next.status = "cancelled";
       next.cancelledAt = now;
+      next.cancelledBy = actor.id;
       next.updatedAt = now;
       next.cancellationRequestIdentity = preview.identity;
       next.revision = preview.revision + 1;
@@ -1375,6 +1494,20 @@ export function createQuickRecordConfirmationService({
       ) {
         fail("PREVIEW_DATA_INVALID", "Cancelled confirmation preview is invalid", { status: 500 });
       }
+      const auditRaw = auditRepository.append({
+        action: "quick_record.confirmation.cancelled",
+        owner,
+        quickRecordId: replaced.quickRecordId,
+        quickRecordVersion: replaced.quickRecordVersion,
+        analysisVersionId: replaced.analysisVersionId,
+        previewId: replaced.id,
+        previousSuggestionIdentity: preview.identity,
+        suggestionIdentity: replaced.identity,
+        cancelledBy: actor.id,
+        cancelledAt: now,
+        itemIds: preview.items.filter((item) => item.status === "pending").map((item) => item.id),
+      });
+      assertAuditAcknowledgement(auditRaw, "Cancellation audit persistence failed");
       return effectivePreview(replaced);
     });
   }
