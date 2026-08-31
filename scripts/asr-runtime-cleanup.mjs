@@ -180,6 +180,15 @@ export async function removeAsrWorkspaceAndVerify(path, fsImpl, {
     }
     if (delay > 0) await sleepImpl(delay);
     try {
+      // A previous attempt (or a concurrent owner shutdown) may have removed
+      // the workspace before this retry.  ENOENT is the verified terminal
+      // state, not a cleanup failure.
+      try {
+        await fsImpl.lstat(path);
+      } catch (error) {
+        if (isMissing(error)) return true;
+        throw error;
+      }
       await validate?.();
       await fsImpl.rm(path, { recursive: true, force: true });
       try {

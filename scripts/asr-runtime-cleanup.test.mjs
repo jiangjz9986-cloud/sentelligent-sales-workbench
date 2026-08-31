@@ -264,6 +264,35 @@ describe("ASR runtime cleanup sweep", () => {
     assert.equal(removeCalls, 2);
     assert.equal((await lstat(workspace).catch((error) => error.code)), "ENOENT");
   });
+
+  it("treats a workspace removed by a failed first attempt as already clean", async () => {
+    const root = await makeRoot();
+    const workspace = await makeRequest(root, "request-partial");
+    let removeCalls = 0;
+    const fsImpl = {
+      lstat,
+      readdir,
+      rm: async (...args) => {
+        removeCalls += 1;
+        if (removeCalls === 1) {
+          await rm(...args);
+          const error = new Error("post-delete transport error");
+          error.code = "EIO";
+          throw error;
+        }
+        return rm(...args);
+      },
+    };
+    const report = await cleanupAsrRuntime({
+      runtimeDirectory: root,
+      fsImpl,
+      cleanupAttempts: [0, 1],
+      sleepImpl: async () => {},
+    });
+    assert.equal(report.status, "clean");
+    assert.equal(report.removedCount, 1);
+    assert.equal(removeCalls, 1);
+  });
 });
 
 describe("ASR runtime cleanup CLI", () => {
