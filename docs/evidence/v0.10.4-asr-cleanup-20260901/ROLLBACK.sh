@@ -34,6 +34,10 @@ fi
 git -C "$TARGET" apply --reverse --check "$PATCH_FILE"
 git -C "$TARGET" apply --reverse "$PATCH_FILE"
 
+if [ ! -f "$TARGET/package.json" ] || [ -L "$TARGET/package.json" ]; then
+  printf 'ROLLBACK_RESULT=FAILED PATH=package.json REASON=BASE_FILE_TYPE_MISMATCH\n' >&2
+  exit 1
+fi
 if [ "$(git -C "$TARGET" hash-object -- package.json)" != "$(git -C "$TARGET" rev-parse "$BASE_SHA:package.json")" ]; then
   printf 'ROLLBACK_RESULT=FAILED PATH=package.json REASON=BASE_BLOB_MISMATCH\n' >&2
   exit 1

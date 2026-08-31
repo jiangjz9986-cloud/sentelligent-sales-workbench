@@ -7,8 +7,8 @@ WORKTREE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.
 BRANCH=codex/v0104-asr-cleanup
 BASE_SHA=0aadabc7cde716b090b0aa1532f5486a4f23defc
 BASE_TREE=35c84cd577120569a48f3cba436550cc56cb8e8f
-FINAL_CODE_COMMIT=cb0d8ae1293b7d92dd3859fed9f1dda1f0ffa38e
-FINAL_CODE_TREE=440602202ef59ae48fb23b076c3b9b1838dc984b
+FINAL_CODE_COMMIT=0e49aff5da7ced8b67df674ddcd6637c8ae7dd44
+FINAL_CODE_TREE=19c5d96ba8b124fc7137b532b5bf7bedb9fd8ce5
 CHANGED_FIELD=ASR runtime temporary-workspace cleanup: startup/periodic sweep, per-entry lstat, owner+0700 gate, non-following symlink handling, bounded retry+ENOENT verification, JSON CLI and npm command.
 FINAL_EXPECTED_STATUS=clean (code worktree before evidence commit)
 
@@ -35,9 +35,9 @@ MODIFIED_FILE AND PATCH INVENTORY
 those same three paths.  The archive and patch are retained so another copy can
 be independently applied and reversed.
 
-MODIFIED_FILE_SHA256=c9c4ac3f0a0808c8fb75237795b2d6fc6f5c72201115c439ffc3a1ed6488d950
-DIFF_FILE_SHA256=75096953950457de4b02e763f568ded2685f6e90de1d903a5d470f92757cfd12
-ROLLBACK_SHA256=44c8fab124bd224612f9c61e461c213dbe23f813f1fefb23e71628b88e899c6b
+MODIFIED_FILE_SHA256=0acf1efa6c4784965ffb8cf1207d9842f61b437f0d9a09dc768709c38814ecba
+DIFF_FILE_SHA256=4cbf7868c8403c37836ed2d67b0d6c9e6a5fa8dd8403d8bfb16ce8cdde9f890d
+ROLLBACK_SHA256=4cb3e24845d1ed40e311ffbd96889dbc7a60887178ec7a216f6be6567a7b0257
 
 BASELINE
 ========
@@ -81,9 +81,9 @@ Exact commands:
 Literal result:
   APPLY_CHECK_EXIT=0
   APPLY_EXIT=0
-  tests 19
+  tests 20
   suites 4
-  pass 19
+  pass 20
   fail 0
   cancelled 0
   skipped 0
@@ -155,9 +155,9 @@ Commands:
 Literal result:
   shell syntax exit=0
   archive entries: package.json, scripts/asr-runtime-cleanup.mjs, scripts/asr-runtime-cleanup.test.mjs
-  MODIFIED_FILE_SHA256=c9c4ac3f0a0808c8fb75237795b2d6fc6f5c72201115c439ffc3a1ed6488d950
-  DIFF_FILE_SHA256=75096953950457de4b02e763f568ded2685f6e90de1d903a5d470f92757cfd12
-  ROLLBACK_SHA256=44c8fab124bd224612f9c61e461c213dbe23f813f1fefb23e71628b88e899c6b
+  MODIFIED_FILE_SHA256=0acf1efa6c4784965ffb8cf1207d9842f61b437f0d9a09dc768709c38814ecba
+  DIFF_FILE_SHA256=4cbf7868c8403c37836ed2d67b0d6c9e6a5fa8dd8403d8bfb16ce8cdde9f890d
+  ROLLBACK_SHA256=4cb3e24845d1ed40e311ffbd96889dbc7a60887178ec7a216f6be6567a7b0257
 All four artifacts were reopened after creation; `ROLLBACK.sh` is executable
 (mode 0755), `MODIFIED_FILE` remains the changed final archive, and the code
 worktree remains unchanged by the independent rollback copy.

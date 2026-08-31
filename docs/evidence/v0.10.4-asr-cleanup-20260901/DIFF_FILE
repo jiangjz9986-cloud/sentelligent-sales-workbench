@@ -12,10 +12,10 @@ index 07556b7..a49ca94 100644
      "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
 diff --git a/scripts/asr-runtime-cleanup.mjs b/scripts/asr-runtime-cleanup.mjs
 new file mode 100644
-index 0000000..334bcec
+index 0000000..66e4927
 --- /dev/null
 +++ b/scripts/asr-runtime-cleanup.mjs
-@@ -0,0 +1,505 @@
+@@ -0,0 +1,514 @@
 +import {
 +  lstat,
 +  readdir,
@@ -198,6 +198,15 @@ index 0000000..334bcec
 +    }
 +    if (delay > 0) await sleepImpl(delay);
 +    try {
++      // A previous attempt (or a concurrent owner shutdown) may have removed
++      // the workspace before this retry.  ENOENT is the verified terminal
++      // state, not a cleanup failure.
++      try {
++        await fsImpl.lstat(path);
++      } catch (error) {
++        if (isMissing(error)) return true;
++        throw error;
++      }
 +      await validate?.();
 +      await fsImpl.rm(path, { recursive: true, force: true });
 +      try {
@@ -523,10 +532,10 @@ index 0000000..334bcec
 +}
 diff --git a/scripts/asr-runtime-cleanup.test.mjs b/scripts/asr-runtime-cleanup.test.mjs
 new file mode 100644
-index 0000000..b84ac4f
+index 0000000..f664a9d
 --- /dev/null
 +++ b/scripts/asr-runtime-cleanup.test.mjs
-@@ -0,0 +1,305 @@
+@@ -0,0 +1,334 @@
 +import assert from "node:assert/strict";
 +import { spawn } from "node:child_process";
 +import {
@@ -792,6 +801,35 @@ index 0000000..b84ac4f
 +    assert.equal(report.removedCount, 1);
 +    assert.equal(removeCalls, 2);
 +    assert.equal((await lstat(workspace).catch((error) => error.code)), "ENOENT");
++  });
++
++  it("treats a workspace removed by a failed first attempt as already clean", async () => {
++    const root = await makeRoot();
++    const workspace = await makeRequest(root, "request-partial");
++    let removeCalls = 0;
++    const fsImpl = {
++      lstat,
++      readdir,
++      rm: async (...args) => {
++        removeCalls += 1;
++        if (removeCalls === 1) {
++          await rm(...args);
++          const error = new Error("post-delete transport error");
++          error.code = "EIO";
++          throw error;
++        }
++        return rm(...args);
++      },
++    };
++    const report = await cleanupAsrRuntime({
++      runtimeDirectory: root,
++      fsImpl,
++      cleanupAttempts: [0, 1],
++      sleepImpl: async () => {},
++    });
++    assert.equal(report.status, "clean");
++    assert.equal(report.removedCount, 1);
++    assert.equal(removeCalls, 1);
 +  });
 +});
 +
