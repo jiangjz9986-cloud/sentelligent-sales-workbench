@@ -405,6 +405,7 @@ function WorkbenchShellBody({
     onRefreshOverview: refreshOverviewSummary,
     toast,
   });
+  const assistantOnline = Boolean(apiClient?.isEnabled && backendStatus === "connected");
   const badges = useNotificationBadges({
     apiClient,
     backendStatus,
@@ -951,6 +952,12 @@ function WorkbenchShellBody({
             pending={assistantChat.pending}
             draft={assistantChat.draft}
             busy={assistantChat.busy}
+            apiClient={apiClient}
+            online={assistantOnline}
+            sessionEpoch={authSession?.account ?? null}
+            appendTranscriptToDraft={assistantChat.appendTranscriptToDraft}
+            voiceFeedback={assistantChat.voiceFeedback}
+            draftFocusToken={assistantChat.draftFocusToken}
             onDraftChange={assistantChat.setDraft}
             onSend={assistantChat.sendMessage}
             onClose={assistantChat.closeChat}

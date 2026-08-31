@@ -1,5 +1,6 @@
 import { LoaderCircle, Send, X } from "lucide-react";
 import { useEffect, useRef } from "react";
+import VoiceCaptureControl from "../audio/VoiceCaptureControl.jsx";
 import { AssistantConfirmCard } from "./AssistantConfirmCard.jsx";
 
 function AssistantMessage({ message }) {
@@ -17,6 +18,12 @@ export function AssistantChatPanel({
   pending,
   draft,
   busy,
+  apiClient,
+  online = false,
+  sessionEpoch,
+  appendTranscriptToDraft,
+  voiceFeedback,
+  draftFocusToken,
   onDraftChange,
   onSend,
   onClose,
@@ -40,6 +47,11 @@ export function AssistantChatPanel({
     if (!open || !listRef.current) return;
     listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, open, pending]);
+
+  useEffect(() => {
+    if (!open || !draftFocusToken) return;
+    inputRef.current?.focus();
+  }, [draftFocusToken, open]);
 
   if (!open) return null;
 
@@ -84,6 +96,20 @@ export function AssistantChatPanel({
             onSend();
           }}
         >
+          <VoiceCaptureControl
+            apiClient={apiClient}
+            purpose="assistant_chat"
+            onTranscript={appendTranscriptToDraft}
+            active={open}
+            disabled={busy || Boolean(pending) || !online}
+            sessionEpoch={sessionEpoch}
+            compact
+          />
+          {voiceFeedback ? (
+            <p className="assistant-chat-voice-feedback" role="status" aria-live="polite">
+              {voiceFeedback}
+            </p>
+          ) : null}
           <textarea
             ref={inputRef}
             value={draft}

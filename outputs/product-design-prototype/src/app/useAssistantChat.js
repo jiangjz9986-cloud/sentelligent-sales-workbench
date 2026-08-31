@@ -9,6 +9,35 @@ import {
   writeStoredConversationId,
 } from "../components/assistant/assistantChatModel.js";
 
+export const ASSISTANT_DRAFT_MAX_LENGTH = 2000;
+
+export function appendTranscriptToDraftValue(existing, transcript) {
+  const current = typeof existing === "string" ? existing : "";
+  if (typeof transcript !== "string" || !transcript.trim()) {
+    return {
+      accepted: false,
+      draft: current,
+      message: "转写结果没有有效文字，请重新录音",
+    };
+  }
+  const text = transcript;
+  const candidate = current + (current && text ? "\n" : "") + text;
+
+  if (text.length > ASSISTANT_DRAFT_MAX_LENGTH || candidate.length > ASSISTANT_DRAFT_MAX_LENGTH) {
+    return {
+      accepted: false,
+      draft: current,
+      message: "录音内容过长，请缩短重录",
+    };
+  }
+
+  return {
+    accepted: true,
+    draft: candidate,
+    message: "已转成文字，请确认后发送",
+  };
+}
+
 function messageFromResponse(role, body) {
   const text = body?.text ?? body?.message ?? body?.question ?? "";
   return {
@@ -58,8 +87,43 @@ export function useAssistantChat({
   const [conversationId, setConversationId] = useState(() => readStoredConversationId(account));
   const [messages, setMessages] = useState([]);
   const [pending, setPending] = useState(null);
-  const [draft, setDraft] = useState("");
+  const [composer, setComposer] = useState({
+    draft: "",
+    voiceFeedback: "",
+    draftFocusToken: 0,
+  });
   const [busy, setBusy] = useState(false);
+  const { draft, voiceFeedback, draftFocusToken } = composer;
+
+  const setDraft = useCallback((nextDraft) => {
+    setComposer((current) => {
+      const value = typeof nextDraft === "function" ? nextDraft(current.draft) : nextDraft;
+      const normalizedDraft = typeof value === "string" ? value : "";
+      if (normalizedDraft === current.draft && !current.voiceFeedback) return current;
+      return {
+        ...current,
+        draft: normalizedDraft,
+        voiceFeedback: "",
+      };
+    });
+  }, []);
+
+  const appendTranscriptToDraft = useCallback((text) => {
+    setComposer((current) => {
+      const result = appendTranscriptToDraftValue(current.draft, text);
+      if (!result.accepted) {
+        return {
+          ...current,
+          voiceFeedback: result.message,
+        };
+      }
+      return {
+        draft: result.draft,
+        voiceFeedback: result.message,
+        draftFocusToken: current.draftFocusToken + 1,
+      };
+    });
+  }, []);
 
   const hydrate = useCallback(async () => {
     if (!api || !account) return;
@@ -97,6 +161,9 @@ export function useAssistantChat({
 
   const handleClose = useCallback(() => {
     setOpen(false);
+    setComposer((current) => (
+      current.voiceFeedback ? { ...current, voiceFeedback: "" } : current
+    ));
   }, []);
 
   const applyResponse = useCallback((body, priorMessages) => {
@@ -132,7 +199,11 @@ export function useAssistantChat({
     const userMessage = messageFromResponse("user", { text, status: "ok" });
     const priorMessages = appendMessage(messages, userMessage);
     persistMessages(priorMessages);
-    setDraft("");
+    setComposer((current) => ({
+      ...current,
+      draft: "",
+      voiceFeedback: "",
+    }));
     setBusy(true);
     try {
       const body = await api.postAssistantChat({
@@ -194,8 +265,11 @@ export function useAssistantChat({
     messages,
     pending,
     draft,
+    voiceFeedback,
+    draftFocusToken,
     busy,
     setDraft,
+    appendTranscriptToDraft,
     openChat: handleOpen,
     closeChat: handleClose,
     sendMessage,
@@ -206,11 +280,14 @@ export function useAssistantChat({
     cancelPending,
     confirmPending,
     draft,
+    draftFocusToken,
     handleClose,
     handleOpen,
     messages,
     open,
     pending,
     sendMessage,
+    voiceFeedback,
+    appendTranscriptToDraft,
   ]);
 }
