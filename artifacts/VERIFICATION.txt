@@ -1,0 +1,18 @@
+TARGET: visit temperature suggestion SQLite persistence
+BRANCH: codex/v011-temperature-persistence
+CHANGED_FIELD: schema_migrations registration and visit_temperature_suggestions persistence/relation repository
+MODIFIED_FILE: artifacts/MODIFIED_FILE
+DIFF_FILE: artifacts/DIFF_FILE
+VERIFICATION_FILE: artifacts/VERIFICATION.txt
+ROLLBACK_FILE: artifacts/ROLLBACK.sh
+
+BASELINE_COMMAND: git status --short --branch
+BASELINE_RESULT: ## codex/v011-temperature-persistence (clean after commit)
+BASELINE_EXIT_STATUS: 0
+MODIFIED_COMMAND: node --test backend/tests/migrations.test.js backend/tests/visit-temperature-persistence.test.js backend/tests/visit-temperature-suggestion.test.js backend/tests/visit-temperature-http.test.js
+MODIFIED_LITERAL_RESULT: 55 tests, 55 pass, 0 fail, 0 cancelled
+MODIFIED_EXIT_STATUS: 0
+ROLLBACK_COMMAND: artifacts/ROLLBACK.sh artifacts/MODIFIED_FILE artifacts/ROLLBACK_COPY
+ROLLBACK_LITERAL_RESULT: ROLLBACK_RESULT=restored-copy
+ROLLBACK_EXIT_STATUS: 0
+RESTORED_BEHAVIOR: rollback copy byte-identical to MODIFIED_FILE; working-tree MODIFIED_FILE remains changed

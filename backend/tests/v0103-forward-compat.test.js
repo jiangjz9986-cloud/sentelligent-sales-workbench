@@ -180,7 +180,7 @@ async function exactV0103Database(oldBackend, databaseUrl) {
   }
 }
 
-test("exact v0.10.3 remains forward-compatible with a current 0034 database", async () => {
+test("exact v0.10.3 remains forward-compatible with a current 0035 database", async () => {
   const tempRoot = await mkdtemp(join(tmpdir(), "sentelligent-v0103-forward-"));
   const databaseUrl = join(tempRoot, "forward.sqlite");
   const account = "forwardadmin";
@@ -218,16 +218,15 @@ test("exact v0.10.3 remains forward-compatible with a current 0034 database", as
     // Phase 1: exact release code creates a real, complete 0032 database.
     await exactV0103Database(oldBackend, databaseUrl);
 
-    // Phase 2: current code upgrades the exact 0032 database through 0033 and
-    // 0034, then its repository/API writes the new ASR key and an owner-scoped
+    // Phase 2: current code upgrades the exact 0032 database through 0033, 0034, and 0035, then its repository/API writes the new ASR key and an owner-scoped
     // customer fixture.
     const upgraded = openDatabase({ databaseUrl });
     try {
       const versions = upgraded.prepare(
         "SELECT version FROM schema_migrations ORDER BY version",
       ).all().map((row) => row.version);
-      assert.equal(versions.length, 33);
-      assert.deepEqual(versions.slice(-2), ["0033", "0034"]);
+      assert.equal(versions.length, 34);
+      assert.deepEqual(versions.slice(-3), ["0033", "0034", "0035"]);
     } finally {
       upgraded.close();
     }
@@ -393,7 +392,7 @@ test("exact v0.10.3 remains forward-compatible with a current 0034 database", as
       );
       assert.equal(
         reopened.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        33,
+        34,
       );
       assert.ok(reopened.prepare(`
         SELECT name FROM sqlite_master
