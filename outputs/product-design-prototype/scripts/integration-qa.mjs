@@ -937,36 +937,58 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           document.querySelector('[data-testid="quick-record-mode-voice"]')?.classList.contains('active') ?? false;
         voiceModeButton = document.querySelector('[data-testid="quick-record-mode-voice"]');
         voiceModeButton.click();
+        window.__qaAsrRequests.length = 0;
+        window.__qaMediaRecorderInstances.length = 0;
         const startVoiceButton = await waitUntil(
-          () => [...document.querySelectorAll('button')].find((button) => button.textContent.includes('开始转写')),
+          () => [...document.querySelectorAll('button')].find((button) => button.textContent.includes('开始录音')),
           5000,
         );
-        if (!startVoiceButton) throw new Error('Missing start voice transcription button');
+        if (!startVoiceButton) throw new Error('Missing start server recording button');
         startVoiceButton.click();
+        const mediaRecorder = await waitUntil(
+          () => (window.__qaMediaRecorderInstances[0]?.started ? window.__qaMediaRecorderInstances[0] : null),
+          5000,
+        );
+        if (!mediaRecorder) throw new Error('Server recording did not start');
         const voiceRecognition = await waitUntil(
           () => (window.__qaVoiceInstances[0]?.started ? window.__qaVoiceInstances[0] : null),
           5000,
         );
-        if (!voiceRecognition) throw new Error('Voice transcription did not start');
-        voiceRecognition.emitTranscript('周三现场拜访日照中医医院，客户反馈移动云计费和后台权限问题。');
-        await waitUntil(() => document.querySelector('textarea')?.value?.includes('移动云计费'), 5000);
-        const stopVoiceButton = [...document.querySelectorAll('button')].find((button) => button.textContent.includes('停止转写'));
-        if (!stopVoiceButton) throw new Error('Missing stop voice transcription button');
+        if (!voiceRecognition) throw new Error('Browser interim speech enhancement did not start');
+        voiceRecognition.emitTranscript('浏览器临时字幕不能写入草稿');
+        await waitUntil(
+          () => document.querySelector('[data-testid="voice-status"]')?.textContent?.includes('浏览器临时字幕不能写入草稿'),
+          5000,
+        );
+        const interimNotCommitted = !document.querySelector('textarea')?.value?.includes('浏览器临时字幕不能写入草稿');
+        await wait(350);
+        const stopVoiceButton = [...document.querySelectorAll('button')].find((button) => button.textContent.includes('停止录音'));
+        if (!stopVoiceButton) throw new Error('Missing stop server recording button');
         stopVoiceButton.click();
+        await waitUntil(() => mediaRecorder.stopped, 5000);
+        await waitUntil(() => document.querySelector('textarea')?.value?.includes('移动云计费'), 5000);
         await waitUntil(() => voiceRecognition.stopped, 5000);
+        const serverRequest = window.__qaAsrRequests[0] ?? null;
         window.__qaVoiceFlow = {
           defaultedToVoice,
           resetToVoiceAfterReturn,
           resetToVoiceFromTopbar,
           resetToVoiceFromOverview,
-          started: voiceRecognition.started,
-          stopped: voiceRecognition.stopped,
+          started: mediaRecorder.started,
+          stopped: mediaRecorder.stopped,
+          browserInterimStarted: voiceRecognition.started,
+          browserInterimStopped: voiceRecognition.stopped,
+          interimNotCommitted,
+          serverRequestCount: window.__qaAsrRequests.length,
+          serverRequest,
           transcriptInComposer: document.querySelector('textarea')?.value?.includes('移动云计费') ?? false,
           textareaValue: document.querySelector('textarea')?.value ?? '',
         };
 
         Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: undefined });
         Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: undefined });
+        Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: undefined });
+        Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined });
         [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '文本')?.click();
         await wait(100);
         [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音')?.click();
@@ -978,7 +1000,8 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
             ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('录音留存'))
             && !document.querySelector('[data-testid="voice-audio-card"]')
             && !document.querySelector('[data-testid="voice-upload-control"]'),
-          startTranscribeHidden: ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('开始转写')),
+          startRecordingDisabled: [...document.querySelectorAll('button')]
+            .find((button) => button.textContent.includes('开始录音'))?.disabled === true,
           textFallbackVisible: [...document.querySelectorAll('button')].some((button) => button.textContent.includes('改用文本')),
         };
 
@@ -2515,7 +2538,92 @@ async function main() {
 
     cdp = await openChromeCdp();
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-      source: "try{localStorage.setItem('sentelligent_disable_sw','1');indexedDB.deleteDatabase('sentelligent-bootstrap');}catch(e){}",
+      source: String.raw`
+        (() => {
+          try {
+            localStorage.setItem('sentelligent_disable_sw', '1');
+            indexedDB.deleteDatabase('sentelligent-bootstrap');
+          } catch {}
+
+          const nativeFetch = window.fetch.bind(window);
+          window.__qaAsrRequests = [];
+          window.fetch = async (input, init = {}) => {
+            const requestUrl = typeof input === 'string' ? input : input?.url;
+            const parsed = new URL(requestUrl, window.location.href);
+            if (parsed.pathname === '/api/asr/transcriptions') {
+              const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
+              const requestedDuration = Number(headers.get('X-Audio-Duration-Ms'));
+              const durationMs = Math.max(300, Math.min(60000, Math.round(requestedDuration || 300)));
+              const purpose = parsed.searchParams.get('purpose');
+              window.__qaAsrRequests.push({
+                purpose,
+                durationMs,
+                contentType: headers.get('Content-Type'),
+                idempotencyKeyPresent: Boolean(headers.get('Idempotency-Key')),
+                bodyIsBlob: init.body instanceof Blob,
+              });
+              return new Response(JSON.stringify({
+                requestId: 'qa-server-asr-request',
+                item: {
+                  transcript: '周三现场拜访日照中医医院，客户反馈移动云计费和后台权限问题。',
+                  language: 'zh-CN',
+                  durationMs,
+                  source: 'server_asr',
+                  replayed: false,
+                },
+              }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+              });
+            }
+            return nativeFetch(input, init);
+          };
+
+          window.__qaMediaRecorderInstances = [];
+          window.__qaMediaTracks = [];
+          Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: {
+              async getUserMedia() {
+                const track = { stopped: false, stop() { this.stopped = true; } };
+                window.__qaMediaTracks.push(track);
+                return { getTracks: () => [track] };
+              },
+            },
+          });
+          class QaMediaRecorder {
+            static isTypeSupported(type) {
+              return type === 'audio/webm;codecs=opus' || type === 'audio/webm';
+            }
+            constructor(stream, options = {}) {
+              this.stream = stream;
+              this.mimeType = options.mimeType || 'audio/webm';
+              this.state = 'inactive';
+              this.started = false;
+              this.stopped = false;
+              window.__qaMediaRecorderInstances.push(this);
+            }
+            start() {
+              this.state = 'recording';
+              this.started = true;
+            }
+            stop() {
+              if (this.state === 'inactive') return;
+              this.state = 'inactive';
+              this.stopped = true;
+              const data = new Blob([new Uint8Array([1, 2, 3, 4])], { type: this.mimeType });
+              queueMicrotask(() => {
+                this.ondataavailable?.({ data });
+                this.onstop?.();
+              });
+            }
+          }
+          Object.defineProperty(window, 'MediaRecorder', {
+            configurable: true,
+            value: QaMediaRecorder,
+          });
+        })();
+      `,
     });
     const viewportResults = [];
     for (const viewport of viewportCases) {
@@ -3021,16 +3129,23 @@ async function main() {
         assert.equal(result.aiSuggestions.customer, true, "desktop customer page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.opportunity, true, "desktop opportunity page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.knowledge, true, "desktop knowledge page should generate an AI suggestion through the UI");
-        assert.equal(result.voiceFlow.started, true, "desktop quick record voice mode should start browser speech recognition");
+        assert.equal(result.voiceFlow.started, true, "desktop quick record voice mode should start MediaRecorder capture");
         assert.equal(result.voiceFlow.defaultedToVoice, true, "desktop quick record should default to voice mode");
         assert.equal(result.voiceFlow.resetToVoiceAfterReturn, true, "desktop quick record should reset to voice mode whenever the page is reopened");
         assert.equal(result.voiceFlow.resetToVoiceFromTopbar, true, "desktop topbar quick record entry should reset to voice mode");
         assert.equal(result.voiceFlow.resetToVoiceFromOverview, true, "desktop overview quick record entry should reset to voice mode");
-        assert.equal(result.voiceFlow.transcriptInComposer, true, "desktop quick record voice mode should write transcript into composer");
-        assert.equal(result.voiceFlow.stopped, true, "desktop quick record voice mode should stop browser speech recognition");
-        assert.equal(result.voiceUnavailable.textGuidanceVisible, true, "desktop quick record should guide users to text entry when speech recognition is unavailable");
+        assert.equal(result.voiceFlow.browserInterimStarted, true, "desktop quick record should expose Web Speech only as an interim enhancement");
+        assert.equal(result.voiceFlow.browserInterimStopped, true, "desktop quick record should stop the interim browser recognizer with recording");
+        assert.equal(result.voiceFlow.interimNotCommitted, true, "browser interim speech must not write the business draft");
+        assert.equal(result.voiceFlow.serverRequestCount, 1, "desktop quick record should issue one synthetic server ASR request");
+        assert.equal(result.voiceFlow.serverRequest?.purpose, "quick_record", "desktop quick record should preserve the ASR purpose");
+        assert.equal(result.voiceFlow.serverRequest?.bodyIsBlob, true, "desktop quick record should upload the raw in-memory Blob");
+        assert.equal(result.voiceFlow.serverRequest?.idempotencyKeyPresent, true, "desktop quick record should send an idempotency key");
+        assert.equal(result.voiceFlow.transcriptInComposer, true, "desktop quick record should commit only the server transcript into the composer");
+        assert.equal(result.voiceFlow.stopped, true, "desktop quick record voice mode should stop MediaRecorder capture");
+        assert.equal(result.voiceUnavailable.textGuidanceVisible, true, "desktop quick record should guide users to text entry when recording is unavailable");
         assert.equal(result.voiceUnavailable.recordingControlsAbsent, true, "desktop quick record must not expose retired audio recording, playback, or upload controls");
-        assert.equal(result.voiceUnavailable.startTranscribeHidden, true, "desktop quick record should hide the transcribe trigger when speech recognition is unavailable");
+        assert.equal(result.voiceUnavailable.startRecordingDisabled, true, "desktop quick record should disable capture when MediaRecorder is unavailable");
         assert.equal(result.voiceUnavailable.textFallbackVisible, true, "desktop quick record should still allow switching to text entry");
         assert.deepEqual(
           result.productionCopy.forbiddenByPage,
