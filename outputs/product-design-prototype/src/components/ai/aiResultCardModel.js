@@ -3,6 +3,9 @@ export const AI_RESULT_CARD_STATUS = Object.freeze({
   CONFIRMED: "confirmed",
   CANCELLED: "cancelled",
   FAILED: "failed",
+  EXPIRED: "expired",
+  CONFLICT: "conflict",
+  UNSUPPORTED: "unsupported",
   HISTORY_READONLY: "history_readonly",
 });
 
@@ -26,6 +29,21 @@ const STATUS_META = Object.freeze({
     label: "处理失败",
     tone: "red",
     description: "处理没有完成，请检查失败原因后由人工决定下一步。",
+  }),
+  [AI_RESULT_CARD_STATUS.EXPIRED]: Object.freeze({
+    label: "已过期",
+    tone: "gray",
+    description: "这份建议已经超过确认有效期，当前卡片只读且不会写入业务数据。",
+  }),
+  [AI_RESULT_CARD_STATUS.CONFLICT]: Object.freeze({
+    label: "状态冲突",
+    tone: "red",
+    description: "确认时发现业务数据或证据已经变化，请先检查最新信息。",
+  }),
+  [AI_RESULT_CARD_STATUS.UNSUPPORTED]: Object.freeze({
+    label: "状态异常",
+    tone: "red",
+    description: "返回状态无法识别，卡片已锁定，刷新最新结果后再决定下一步。",
   }),
   [AI_RESULT_CARD_STATUS.HISTORY_READONLY]: Object.freeze({
     label: "历史记录",
@@ -92,17 +110,24 @@ function normalizeChanges(input) {
 }
 
 export function aiResultCardStatusMeta(status) {
-  return STATUS_META[status] ?? STATUS_META[AI_RESULT_CARD_STATUS.PENDING];
+  return Object.hasOwn(STATUS_META, status)
+    ? STATUS_META[status]
+    : STATUS_META[AI_RESULT_CARD_STATUS.UNSUPPORTED];
 }
 
-export function normalizeAiResultCard(input = {}, options = {}) {
+export function normalizeAiResultCard(input, options = {}) {
+  const hasResult = input !== undefined && input !== null;
   const source = input && typeof input === "object" ? input : {};
   const requestedStatus = options.historyReadOnly
     ? AI_RESULT_CARD_STATUS.HISTORY_READONLY
     : source.status;
-  const status = STATUS_META[requestedStatus]
-    ? requestedStatus
-    : AI_RESULT_CARD_STATUS.PENDING;
+  const status = requestedStatus === undefined || requestedStatus === null || requestedStatus === ""
+    ? hasResult
+      ? AI_RESULT_CARD_STATUS.UNSUPPORTED
+      : AI_RESULT_CARD_STATUS.PENDING
+    : Object.hasOwn(STATUS_META, requestedStatus)
+      ? requestedStatus
+      : AI_RESULT_CARD_STATUS.UNSUPPORTED;
   const suggestion = text(source.suggestion, text(source.body, text(source.content))).trim();
   const draft = text(source.draft, suggestion);
   const confidence = confidenceValue(source.confidence);

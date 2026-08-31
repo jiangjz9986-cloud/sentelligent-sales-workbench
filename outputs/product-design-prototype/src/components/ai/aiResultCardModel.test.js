@@ -60,6 +60,9 @@ describe("ai result card model", () => {
       [AI_RESULT_CARD_STATUS.CONFIRMED, "已确认"],
       [AI_RESULT_CARD_STATUS.CANCELLED, "已取消"],
       [AI_RESULT_CARD_STATUS.FAILED, "处理失败"],
+      [AI_RESULT_CARD_STATUS.EXPIRED, "已过期"],
+      [AI_RESULT_CARD_STATUS.CONFLICT, "状态冲突"],
+      [AI_RESULT_CARD_STATUS.UNSUPPORTED, "状态异常"],
       [AI_RESULT_CARD_STATUS.HISTORY_READONLY, "历史记录"],
     ]);
     for (const [status, label] of expected) {
@@ -112,11 +115,14 @@ describe("ai result card model", () => {
     assert.equal(createAiResultCancellationRequest(history), null);
   });
 
-  it("keeps confirmed, cancelled, and failed results non-actionable", () => {
+  it("keeps every terminal result non-actionable", () => {
     for (const status of [
       AI_RESULT_CARD_STATUS.CONFIRMED,
       AI_RESULT_CARD_STATUS.CANCELLED,
       AI_RESULT_CARD_STATUS.FAILED,
+      AI_RESULT_CARD_STATUS.EXPIRED,
+      AI_RESULT_CARD_STATUS.CONFLICT,
+      AI_RESULT_CARD_STATUS.UNSUPPORTED,
     ]) {
       const model = normalizeAiResultCard(result({ status }));
       assert.equal(model.readOnly, true);
@@ -124,6 +130,22 @@ describe("ai result card model", () => {
       assert.equal(createAiResultConfirmationRequest(model), null);
       assert.equal(createAiResultCancellationRequest(model), null);
     }
+  });
+
+  it("fails closed when a service returns a missing or unrecognized status", () => {
+    for (const model of [
+      normalizeAiResultCard(result({ status: undefined })),
+      normalizeAiResultCard(result({ status: "future_or_misspelled_status" })),
+    ]) {
+      assert.equal(model.status, AI_RESULT_CARD_STATUS.UNSUPPORTED);
+      assert.equal(model.statusMeta.label, "状态异常");
+      assert.equal(model.editable, false);
+      assert.equal(model.readOnly, true);
+      assert.equal(model.canConfirm, false);
+      assert.equal(createAiResultConfirmationRequest(model), null);
+      assert.equal(createAiResultCancellationRequest(model), null);
+    }
+    assert.equal(aiResultCardStatusMeta("future_or_misspelled_status").label, "状态异常");
   });
 
   it("renders an empty pending model when no result is available", () => {
