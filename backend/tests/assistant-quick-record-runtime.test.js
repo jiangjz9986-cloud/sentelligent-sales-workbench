@@ -83,6 +83,35 @@ function seedInsight(id, quickRecordId) {
   });
 }
 
+function seedTerminalPreview(quickRecordId, status) {
+  const previewId = `preview-${status}-${quickRecordId}`;
+  const hashCharacter = status === "completed" ? "a" : "b";
+  const identityCharacter = status === "completed" ? "c" : "d";
+  db.prepare(`
+    INSERT INTO quick_record_confirmation_previews (
+      id, owner, quick_record_id, draft_hash, identity, revision, status,
+      preview_json, created_at, updated_at
+    ) VALUES (
+      $id, $owner, $quickRecordId, $draftHash, $identity, 1, $status,
+      '{}', '2026-08-27T05:00:00.000Z', '2026-08-27T05:05:00.000Z'
+    )
+  `).run({
+    $id: previewId,
+    $owner: OWNER,
+    $quickRecordId: quickRecordId,
+    $draftHash: hashCharacter.repeat(64),
+    $identity: identityCharacter.repeat(64),
+    $status: status,
+  });
+  db.prepare(`
+    UPDATE quick_records
+    SET confirmation_preview_id = $previewId,
+        confirmation_preview_status = $status
+    WHERE id = $quickRecordId
+  `).run({ $previewId: previewId, $status: status, $quickRecordId: quickRecordId });
+  return previewId;
+}
+
 function auditRows(action) {
   return db.prepare("SELECT * FROM audit_logs WHERE action = $action ORDER BY created_at, id")
     .all({ $action: action })
@@ -244,6 +273,38 @@ describe("visit-capture.update handler", () => {
     }, context);
     assert.equal(relationship.status, "conflict");
     assert.match(relationship.text, /关系已变化/);
+  });
+
+  it("maps completed and cancelled confirmation previews to a friendly conflict without any write", async () => {
+    for (const [terminalStatus, changes] of [
+      ["completed", { summaryPatch: { action: "终态后不应写入" } }],
+      ["cancelled", { fields: { occurredAt: "2026-08-29T04:00:00.000Z" } }],
+    ]) {
+      const recordId = `record-terminal-${terminalStatus}`;
+      seedRecord(recordId);
+      seedInsight(`insight-${terminalStatus}`, recordId);
+      const previewId = seedTerminalPreview(recordId, terminalStatus);
+      const before = {
+        record: db.prepare("SELECT * FROM quick_records WHERE id = ?").get(recordId),
+        insight: db.prepare("SELECT * FROM ai_insights WHERE quick_record_id = ?").get(recordId),
+        preview: db.prepare("SELECT * FROM quick_record_confirmation_previews WHERE id = ?").get(previewId),
+        audits: db.prepare("SELECT * FROM audit_logs WHERE entity_id = ? ORDER BY id").all(recordId),
+      };
+
+      const result = await handlers["visit-capture.update"]({
+        quickRecordId: recordId,
+        expectedVersion: 1,
+        changes,
+      }, { ...context, requestId: `request-${terminalStatus}`, actionId: `action-${terminalStatus}` });
+
+      assert.equal(result.status, "conflict", terminalStatus);
+      assert.equal(result.code, "QUICK_RECORD_CONFIRMATION_TERMINAL", terminalStatus);
+      assert.match(result.text, terminalStatus === "completed" ? /已完成，不能再修改/ : /已取消，不能再修改/);
+      assert.deepEqual(db.prepare("SELECT * FROM quick_records WHERE id = ?").get(recordId), before.record);
+      assert.deepEqual(db.prepare("SELECT * FROM ai_insights WHERE quick_record_id = ?").get(recordId), before.insight);
+      assert.deepEqual(db.prepare("SELECT * FROM quick_record_confirmation_previews WHERE id = ?").get(previewId), before.preview);
+      assert.deepEqual(db.prepare("SELECT * FROM audit_logs WHERE entity_id = ? ORDER BY id").all(recordId), before.audits);
+    }
   });
 });
 

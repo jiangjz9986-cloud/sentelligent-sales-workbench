@@ -173,6 +173,28 @@ describe("sales loop preview service", () => {
     db.close();
   });
 
+  it("includes completed durable previews in weekly report source refs", () => {
+    const db = fixtureDb();
+    db.prepare("UPDATE quick_records SET confirmation_preview_status = 'completed' WHERE id = 'record-a'").run();
+    const { service } = createService(db);
+    const result = service.previewSalesReport({ owner: 'owner-a', weekStart: '2026-08-17' });
+    assert.equal(result.status, 'preview');
+    assert.equal(result.preview.sourceRecordCount, 1);
+    assert.ok(result.preview.sourceRefs.some((item) => item.type === 'quick_record' && item.id === 'record-a'));
+    db.close();
+  });
+
+  it("excludes recorded WeChat quick records from weekly report previews", () => {
+    const db = fixtureDb();
+    db.prepare("UPDATE quick_records SET source_channel = '微信助手', status = 'recorded' WHERE id = 'record-a'").run();
+    const { service } = createService(db);
+    const result = service.previewSalesReport({ owner: "owner-a", weekStart: "2026-08-17" });
+    assert.equal(result.status, "preview");
+    assert.equal(result.preview.sourceRecordCount, 0);
+    assert.deepEqual(result.preview.sourceRefs, []);
+    db.close();
+  });
+
   it("creates a source-backed weekly report preview from confirmed records without saving it", () => {
     const db = fixtureDb();
     const { service } = createService(db);

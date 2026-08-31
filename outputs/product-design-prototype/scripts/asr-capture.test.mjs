@@ -31,6 +31,8 @@ let updateSyntheticClickToken;
 let appendQuickRecordTranscript;
 let QUICK_RECORD_TRANSCRIPT_LIMIT;
 let QUICK_RECORD_CONTENT_LIMIT;
+let quickRecordHistoryView;
+let quickRecordNeedsConfirmation;
 
 before(async () => {
   await writeFile(browserHarnessPath, String.raw`
@@ -262,6 +264,8 @@ render();
     appendQuickRecordTranscript,
     QUICK_RECORD_TRANSCRIPT_LIMIT,
     QUICK_RECORD_CONTENT_LIMIT,
+    quickRecordHistoryView,
+    quickRecordNeedsConfirmation,
   } = await vite.ssrLoadModule("/src/features/salesWorkbench/pages/QuickRecordPage.jsx"));
 });
 
@@ -702,6 +706,25 @@ describe("VoiceCaptureControl real JSX transform and rendered contract", () => {
     );
   });
 
+  it("uses the durable preview status for history labels and pending counts", () => {
+    const base = {
+      status: "analyzed",
+      occurredAt: "2026-08-31T10:00:00+08:00",
+      rawContent: "快速记录",
+      confirmationPreviewId: null,
+      confirmationPreviewStatus: null,
+    };
+    assert.equal(quickRecordHistoryView(base).status, "待生成预览");
+    assert.equal(quickRecordNeedsConfirmation(base), true);
+    assert.equal(quickRecordHistoryView({ ...base, confirmationPreviewStatus: "open" }).status, "待确认");
+    assert.equal(quickRecordNeedsConfirmation({ ...base, confirmationPreviewStatus: "open" }), true);
+    assert.equal(quickRecordHistoryView({ ...base, confirmationPreviewStatus: "completed" }).status, "已确认");
+    assert.equal(quickRecordNeedsConfirmation({ ...base, confirmationPreviewStatus: "completed" }), false);
+    assert.equal(quickRecordHistoryView({ ...base, confirmationPreviewStatus: "cancelled" }).status, "已取消");
+    assert.equal(quickRecordNeedsConfirmation({ ...base, confirmationPreviewStatus: "cancelled" }), false);
+    assert.equal(quickRecordNeedsConfirmation({ ...base, status: "confirmed" }), false);
+  });
+
   it("keeps quick-record analysis human-gated and fences every draft-replacement path", async () => {
     const source = await readFile(quickRecordPagePath, "utf8");
     assert.match(source, /voiceApplyEpochRef\.current !== voiceSessionEpoch/);
@@ -716,5 +739,25 @@ describe("VoiceCaptureControl real JSX transform and rendered contract", () => {
       source.indexOf("useEffect(() => {", source.indexOf("function handleServerTranscript")),
     );
     assert.doesNotMatch(transcriptHandler, /analyzeQuickRecord|createQuickRecord|confirmAnalysis\(/);
+  });
+
+  it("keeps terminal history read-only and labels the manual confirmation log", async () => {
+    const source = await readFile(quickRecordPagePath, "utf8");
+    assert.match(
+      source,
+      /disabled=\{confirmationPending \|\| analysisSavePending \|\| pageReadOnly\}/,
+      "supplement-and-reanalyze must be disabled for historical and terminal records",
+    );
+    assert.match(
+      source,
+      /<span>人工确认同步日志<\/span>/,
+      "sync log title must identify human-confirmed writes",
+    );
+    assert.match(
+      source,
+      /<b>\{syncLog\.length\} 条<\/b>/,
+      "sync log count must show the durable row count without a fixed denominator",
+    );
+    assert.doesNotMatch(source, /\{syncLog\.length\}\/3/);
   });
 });

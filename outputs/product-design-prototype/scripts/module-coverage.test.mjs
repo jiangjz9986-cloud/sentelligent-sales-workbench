@@ -97,7 +97,11 @@ describe("business module delivery coverage", () => {
     const requiredApiMethods = [
       "createQuickRecord",
       "analyzeQuickRecord",
-      "confirmQuickRecord",
+      "createQuickRecordConfirmationPreview",
+      "getQuickRecordConfirmationPreview",
+      "confirmQuickRecordConfirmationItem",
+      "confirmAllQuickRecordConfirmationItems",
+      "cancelQuickRecordConfirmationPreview",
       "saveCustomer",
       "deleteCustomer",
       "saveOpportunity",

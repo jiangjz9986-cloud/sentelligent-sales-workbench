@@ -165,7 +165,18 @@ import {
 import { createOpportunityAssistantAdapter } from "./assistant/opportunityAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./assistant/visitCaptureAssistantAdapter.js";
 import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecordPendingPreviewProviders.js";
-import { createQuickRecordStore } from "./quickRecords/quickRecordStore.js";
+import {
+  assertQuickRecordConfirmationEditable,
+  createQuickRecordStore,
+} from "./quickRecords/quickRecordStore.js";
+import {
+  QuickRecordConfirmationError,
+  createQuickRecordConfirmationService,
+} from "./quickRecords/confirmationService.js";
+import {
+  QuickRecordConfirmationRepositoryError,
+  createQuickRecordConfirmationRepositories,
+} from "./quickRecords/confirmationRepository.js";
 import { createActionItemStore } from "./actionItems/actionItemStore.js";
 import { createActionReminderScheduler } from "./actionReminders/reminderScheduler.js";
 import {
@@ -668,6 +679,22 @@ function documentInboxRepositoryFailure(error) {
   throw error;
 }
 
+function quickRecordConfirmationFailure(error) {
+  if (error instanceof QuickRecordConfirmationError) {
+    const status = error.status === 400 ? 422 : error.status;
+    throw new HttpError(status, error.code, error.message, error.details ?? undefined);
+  }
+  if (error instanceof QuickRecordConfirmationRepositoryError) {
+    const status = error.code === "NOT_FOUND"
+      ? 404
+      : error.code === "NO_CONFIRMATION_CHANGES"
+        ? 409
+        : 500;
+    throw new HttpError(status, error.code, error.message);
+  }
+  throw error;
+}
+
 function parseJson(value, fallback = []) {
   if (!value) return fallback;
   try {
@@ -693,6 +720,8 @@ function quickRecordFromRow(row) {
     customerId: row.customer_id,
     opportunityId: row.opportunity_id,
     status: row.status,
+    confirmationPreviewId: row.confirmation_preview_id ?? null,
+    confirmationPreviewStatus: row.confirmation_preview_status ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -731,6 +760,7 @@ function weeklyReportFromRow(row) {
     periodEnd: row.period_end,
     status: row.status,
     content: row.content,
+    entries: parseJson(row.entries_json),
     sourceRefs: parseJson(row.source_refs),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -994,6 +1024,12 @@ function dashboardWeeklyTrend(db, { weekStart, previousWeekStart, owner = null }
   };
 }
 
+function dashboardQuickRecordNeedsConfirmation(record) {
+  if (["completed", "cancelled"].includes(record?.confirmationPreviewStatus)) return false;
+  if (record?.status === "confirmed") return false;
+  return record?.confirmationPreviewStatus === "open" || record?.status === "analyzed";
+}
+
 function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null, owner = null } = {}) {
   const customers = all(
     db,
@@ -1077,7 +1113,7 @@ function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null,
     metrics: {
       quickRecords: {
         value: quickRecords.length,
-        badge: `${quickRecords.filter((item) => item.status !== "confirmed").length} 条待确认`,
+        badge: `${quickRecords.filter(dashboardQuickRecordNeedsConfirmation).length} 条待确认`,
         tone: "blue",
       },
       opportunities: {
@@ -2792,6 +2828,24 @@ function buildSalesDecisionContext(db, body, owner = null) {
 export function createServer(options = {}) {
   const config = loadConfig(options);
   const db = openDatabase({ databaseUrl: config.databaseUrl });
+  const quickRecordConfirmationRepositories = createQuickRecordConfirmationRepositories(db);
+  const quickRecordConfirmationService = createQuickRecordConfirmationService({
+    ...quickRecordConfirmationRepositories,
+    runInTransaction: (work) => withImmediateTransaction(db, work),
+    resolveAuthenticatedActor: ({ owner, actor }) => {
+      if (
+        !actor
+        || typeof actor !== "object"
+        || !["user", "anonymous"].includes(actor.kind)
+        || actor.account !== owner
+      ) return null;
+      return { id: actor.account, owner, authenticated: true };
+    },
+    ...(options.quickRecordConfirmationIdFactory
+      ? { idFactory: options.quickRecordConfirmationIdFactory }
+      : {}),
+    clock: options.quickRecordConfirmationClock ?? (() => new Date()),
+  });
   // 三重种子保障之二：迁移 0030 env 种子缺席（如 env-less 彩排）时，每次启动
   // 兜底补种首个 admin。只插不改，绝不覆盖已有行。
   ensureBootstrapAdmin(db, config);
@@ -7682,6 +7736,11 @@ export function createServer(options = {}) {
       if (request.method === "POST" && url.pathname === "/api/quick-records") {
         const body = await readValidatedJson(request, requestSchemas.quickRecordCreate);
         const rawContent = String(body.rawContent ?? "").trim();
+        if (body.occurredAt !== undefined && body.occurredAt !== null) {
+          if (!Number.isFinite(Date.parse(body.occurredAt))) {
+            validationFailure("occurredAt", "dateTime");
+          }
+        }
         const item = withImmediateTransaction(db, () => {
           // v0.9.2：目标归属校验对 user 与 machine 一视同仁（机器 account=WEIXIN_AGENT_OWNER，
           // 值相同、行为不变）。
@@ -7745,6 +7804,7 @@ export function createServer(options = {}) {
           ),
         );
         if (!quickRecord) return notFound(response);
+        assertQuickRecordConfirmationEditable(quickRecord);
 
         const analysisKnowledge = searchKnowledgeForAnalysis(db, quickRecord.rawContent, 4, requestOwner(request));
         const analysis = await analyzeQuickRecord(quickRecord.rawContent, runtimeConfig, {
@@ -7847,6 +7907,142 @@ export function createServer(options = {}) {
           return { quickRecord, analysis: updated.analysis };
         });
         sendJson(response, 200, result);
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "quick-records" &&
+        parts[2] &&
+        parts[3] === "confirmation-previews"
+      ) {
+        await validateEmptyBody(request);
+        if (request.authContext.kind === "machine") {
+          throw new HttpError(403, "HUMAN_CONFIRMATION_REQUIRED", "A signed-in human session is required");
+        }
+        let item;
+        try {
+          item = quickRecordConfirmationService.preview({
+            owner: request.authContext.account,
+            quickRecordId: parts[2],
+          });
+        } catch (error) {
+          quickRecordConfirmationFailure(error);
+        }
+        sendJson(response, item.replayed ? 200 : 201, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "GET" &&
+        parts.length === 3 &&
+        parts[0] === "api" &&
+        parts[1] === "quick-record-confirmation-previews" &&
+        parts[2]
+      ) {
+        let item;
+        try {
+          item = quickRecordConfirmationService.get({
+            owner: request.authContext.account,
+            previewId: parts[2],
+          });
+        } catch (error) {
+          quickRecordConfirmationFailure(error);
+        }
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "quick-record-confirmation-previews" &&
+        parts[2] &&
+        parts[3] === "confirm-item"
+      ) {
+        if (request.authContext.kind === "machine") {
+          throw new HttpError(403, "HUMAN_CONFIRMATION_REQUIRED", "A signed-in human session is required");
+        }
+        const body = await readValidatedJson(request, requestSchemas.quickRecordConfirmationItem);
+        let result;
+        try {
+          result = quickRecordConfirmationService.confirmItem({
+            ...body,
+            owner: request.authContext.account,
+            previewId: parts[2],
+            actor: request.authContext,
+          });
+        } catch (error) {
+          quickRecordConfirmationFailure(error);
+        }
+        const item = {
+          ...result,
+          reason: result.reason ?? null,
+          details: result.details ?? null,
+        };
+        sendJson(response, result.status === "conflict" ? 409 : 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "quick-record-confirmation-previews" &&
+        parts[2] &&
+        parts[3] === "confirm-all"
+      ) {
+        if (request.authContext.kind === "machine") {
+          throw new HttpError(403, "HUMAN_CONFIRMATION_REQUIRED", "A signed-in human session is required");
+        }
+        const body = await readValidatedJson(request, requestSchemas.quickRecordConfirmationAll);
+        let result;
+        try {
+          result = quickRecordConfirmationService.confirmAll({
+            ...body,
+            owner: request.authContext.account,
+            previewId: parts[2],
+            actor: request.authContext,
+          });
+        } catch (error) {
+          quickRecordConfirmationFailure(error);
+        }
+        const item = {
+          ...result,
+          reason: result.reason ?? null,
+          details: result.details ?? null,
+        };
+        sendJson(response, result.status === "conflict" ? 409 : 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        parts.length === 4 &&
+        parts[0] === "api" &&
+        parts[1] === "quick-record-confirmation-previews" &&
+        parts[2] &&
+        parts[3] === "cancel"
+      ) {
+        if (request.authContext.kind === "machine") {
+          throw new HttpError(403, "HUMAN_CONFIRMATION_REQUIRED", "A signed-in human session is required");
+        }
+        const body = await readValidatedJson(request, requestSchemas.quickRecordConfirmationCancel);
+        let item;
+        try {
+          item = quickRecordConfirmationService.cancel({
+            ...body,
+            owner: request.authContext.account,
+            previewId: parts[2],
+            actor: request.authContext,
+          });
+        } catch (error) {
+          quickRecordConfirmationFailure(error);
+        }
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -8013,6 +8209,10 @@ export function createServer(options = {}) {
               currentVersion: quickRecord.version,
             });
           }
+          // A v2 durable preview owns the record's final state.  Keep the
+          // legacy all-in-one confirmation route from reopening or
+          // overwriting a completed/cancelled snapshot behind the new UI.
+          assertQuickRecordConfirmationEditable(quickRecord);
 
           const insight = body.analysisVersionId
             ? insightFromRow(get(
@@ -8253,10 +8453,17 @@ export function createServer(options = {}) {
           db,
           `SELECT qr.*, ai.analysis_json
            FROM quick_records qr
-           JOIN manual_confirmations mc ON mc.quick_record_id = qr.id AND mc.target = 'weekly'
+           LEFT JOIN manual_confirmations mc ON mc.quick_record_id = qr.id AND mc.target = 'weekly'
            LEFT JOIN ai_insights ai ON ai.quick_record_id = qr.id
            WHERE date(substr(COALESCE(qr.occurred_at, qr.created_at), 1, 10))
              BETWEEN date($periodStart) AND date($periodEnd)${ownerClause(scopeOwner, "qr.owner")}
+             AND (
+               (
+                 qr.status IN ('analyzed', 'confirmed')
+                 AND (qr.source_channel = '微信助手' OR mc.id IS NOT NULL)
+               )
+               OR qr.confirmation_preview_status = 'completed'
+             )
            GROUP BY qr.id
            ORDER BY COALESCE(qr.occurred_at, qr.created_at) ASC`,
           ownerParams(scopeOwner, {

@@ -2,7 +2,6 @@ import {
   Check,
   FileText,
   Gauge,
-  Link2,
   LoaderCircle,
   MessageSquareText,
   Mic,
@@ -19,17 +18,19 @@ import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useQuickRecordSession } from "../../../app/useQuickRecordSession.jsx";
 import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
 import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
-import { mergeEntityByVersion } from "../../../quickRecordModel.js";
-import { createConfirmationAttemptTracker } from "../../../api/salesWorkbenchApi.js";
 import { MatchCard, Panel } from "../../../components/primitives.jsx";
 import VoiceCaptureControl from "../../../components/audio/VoiceCaptureControl.jsx";
 import {
-  confirmQuickRecordTarget,
   createExclusiveAsyncGate,
   getQuickRecordFlow,
-  getSyncTargets,
-  resolveConfirmedSelectionId,
+  mergeEntityByVersion,
 } from "../../../quickRecordModel.js";
+import {
+  QUICK_RECORD_DIFF_STATUS,
+  createQuickRecordDiffCancellationPayload,
+  createQuickRecordDiffConfirmationPayload,
+  normalizeQuickRecordDiffPreview,
+} from "../quickRecordDiffModel.js";
 
 function syncTargetLabel(target) {
   return {
@@ -80,10 +81,19 @@ export function appendQuickRecordTranscript(existing, transcript) {
   return Object.freeze({ accepted: true, candidate, reason: null });
 }
 
-function quickRecordHistoryView(item) {
+export function quickRecordHistoryView(item) {
   const date = new Date(item.occurredAt ?? item.createdAt ?? "");
   const validDate = !Number.isNaN(date.getTime());
-  const status = item.status === "confirmed" ? "已确认" : item.status === "analyzed" ? "待同步" : "已记录";
+  const previewStatus = item.confirmationPreviewStatus;
+  const status = previewStatus === "completed" || item.status === "confirmed"
+    ? "已确认"
+    : previewStatus === "cancelled"
+      ? "已取消"
+      : previewStatus === "open"
+        ? "待确认"
+        : item.status === "analyzed"
+          ? "待生成预览"
+          : "已记录";
   return {
     day: validDate ? String(date.getDate()).padStart(2, "0") : "--",
     date: validDate ? `${date.getMonth() + 1}月` : "待记录",
@@ -91,8 +101,14 @@ function quickRecordHistoryView(item) {
     title: item.title ?? item.rawContent ?? "未填写内容",
     feedback: item.sourceChannel ?? "快速记录",
     status,
-    tone: status === "已确认" ? "green" : status === "待同步" ? "amber" : "blue",
+    tone: status === "已确认" ? "green" : status === "已取消" ? "gray" : status.startsWith("待") ? "amber" : "blue",
   };
+}
+
+export function quickRecordNeedsConfirmation(item) {
+  if (["completed", "cancelled"].includes(item.confirmationPreviewStatus)) return false;
+  if (item.status === "confirmed") return false;
+  return item.confirmationPreviewStatus === "open" || item.status === "analyzed";
 }
 
 export function QuickRecord() {
@@ -122,7 +138,7 @@ export function QuickRecord() {
     routeEntityId: routeHistoryId,
     openQuickHistoryRoute: onHistoryRoute,
   } = useNavigation();
-  const { handleBusinessSync: onBusinessSync, handleConfirmationRefresh: onConfirmationRefresh } = useWorkbenchActions();
+  const { handleConfirmationRefresh: onConfirmationRefresh } = useWorkbenchActions();
   const onQuickRecordSaved = (item) => {
     setWorkbenchQuickRecords((current) => mergeEntityByVersion(current, item));
   };
@@ -135,6 +151,8 @@ export function QuickRecord() {
   const [confirmedTargets, setConfirmedTargets] = useState([]);
   const [confirmationPending, setConfirmationPending] = useState(false);
   const [syncLog, setSyncLog] = useState([]);
+  const [confirmationPreview, setConfirmationPreview] = useState(null);
+  const [historyReadOnly, setHistoryReadOnly] = useState(false);
   // This epoch belongs to the page, not to the shared recorder controller.
   // Bumping it synchronously fences a late transcript before React commits the
   // mode/history/new-record render; the keyed control then tears down the old
@@ -147,10 +165,6 @@ export function QuickRecord() {
   const voiceCapturedRef = useRef(false);
   // 中文输入法组字守卫：组字过程中的中间态不清空已生成的分析面板。
   const composingRef = useRef(false);
-  const confirmationAttemptRef = useRef(null);
-  if (!confirmationAttemptRef.current) {
-    confirmationAttemptRef.current = createConfirmationAttemptTracker();
-  }
   const confirmationGateRef = useRef(null);
   if (!confirmationGateRef.current) {
     confirmationGateRef.current = createExclusiveAsyncGate();
@@ -161,6 +175,13 @@ export function QuickRecord() {
     analysisGateRef.current = createExclusiveAsyncGate();
   }
   const quickRecordId = quickRecord?.id ?? null;
+  const confirmationModel = confirmationPreview
+    ? normalizeQuickRecordDiffPreview(confirmationPreview, {
+      hasUnsavedDraftChanges: analysisDirty,
+      historyReadOnly,
+    })
+    : null;
+  const pageReadOnly = historyReadOnly || confirmationModel?.readOnly === true;
   const hasInput = recordText.trim().length > 0;
   const flowState = getQuickRecordFlow({
     hasInput,
@@ -175,7 +196,6 @@ export function QuickRecord() {
   }
 
   function resetAnalysis(status) {
-    confirmationAttemptRef.current.reset();
     setAnalysis(null);
     setQuickRecord(null);
     setAnalysisDirty(false);
@@ -183,13 +203,14 @@ export function QuickRecord() {
     setSelectedHistoryId(null);
     setConfirmedTargets([]);
     setSyncLog([]);
+    setConfirmationPreview(null);
+    setHistoryReadOnly(false);
     setAnalysisVisible(false);
     setSyncStatus(status);
   }
 
   function startBlankRecord() {
     invalidateVoiceCapture();
-    confirmationAttemptRef.current.reset();
     setRecordMode("text");
     voiceCapturedRef.current = false;
     recordTextRef.current = "";
@@ -201,13 +222,14 @@ export function QuickRecord() {
     setSelectedHistoryId(null);
     setConfirmedTargets([]);
     setSyncLog([]);
+    setConfirmationPreview(null);
+    setHistoryReadOnly(false);
     setAnalysisVisible(false);
     setSyncStatus("可录入新的拜访、电话、微信或会议内容");
   }
 
   function loadHistoricalRecord(item) {
     invalidateVoiceCapture();
-    confirmationAttemptRef.current.reset();
     const nextText = item.rawContent ?? `${item.customer}：${item.title}。${item.feedback}`;
     const nextAnalysis = item.analysis ?? null;
     const nextSyncLog = item.syncLog ?? item.confirmations ?? [];
@@ -223,13 +245,19 @@ export function QuickRecord() {
     setSelectedHistoryId(item.id);
     setConfirmedTargets(nextConfirmedTargets);
     setSyncLog(nextSyncLog);
+    setConfirmationPreview(null);
+    setHistoryReadOnly(true);
     setAnalysisVisible(Boolean(nextAnalysis));
-    setSyncStatus(nextAnalysis ? "已载入历史分析，可直接修改或确认同步" : "已载入历史记录，暂无已保存分析");
+    setSyncStatus(nextAnalysis ? "已载入历史分析与确认记录（历史只读）" : "已载入历史记录，暂无已保存分析");
   }
 
   function updateAnalysisSummary(section, text) {
-    confirmationAttemptRef.current.reset();
+    if (pageReadOnly) {
+      setSyncStatus("历史或已结束的确认记录只读，请新建记录后再修改");
+      return;
+    }
     setAnalysisDirty(true);
+    setConfirmationPreview(null);
     setAnalysis((current) => {
       if (!current?.summary?.[section]) return current;
       return {
@@ -250,7 +278,7 @@ export function QuickRecord() {
     // A mode/history/new-record transition invalidates the callback before
     // React's state update is committed.  The shared hook also has its own
     // generation fence; this second fence protects the page's business draft.
-    if (voiceApplyEpochRef.current !== voiceSessionEpoch) return;
+    if (voiceApplyEpochRef.current !== voiceSessionEpoch || pageReadOnly) return;
     const result = appendQuickRecordTranscript(recordTextRef.current, transcript);
     if (!result.accepted) {
       setSyncStatus(
@@ -274,13 +302,33 @@ export function QuickRecord() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeHistoryId, quickRecords, selectedHistoryId]);
 
+  useEffect(() => {
+    const previewId = quickRecord?.confirmationPreviewId;
+    if (!historyReadOnly || !previewId) return undefined;
+    let active = true;
+    setSyncStatus("正在读取历史确认预览");
+    apiClient.getQuickRecordConfirmationPreview(previewId)
+      .then((preview) => {
+        if (active) applyConfirmationPreview(preview, "已载入历史确认预览（只读）");
+      })
+      .catch((error) => {
+        if (active) setSyncStatus(error?.message || "历史确认预览读取失败，可重试");
+      });
+    return () => { active = false; };
+  // applyConfirmationPreview is intentionally recreated with page state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiClient, historyReadOnly, quickRecord?.confirmationPreviewId]);
+
   async function confirmAnalysisUnlocked() {
+    if (pageReadOnly) {
+      setSyncStatus("历史或已结束的确认记录只读，请先新建记录");
+      return;
+    }
     if (!recordText.trim()) {
       resetAnalysis("请先录入文本或语音转写内容");
       return;
     }
 
-    confirmationAttemptRef.current.reset();
     try {
       assertBackendReady(
         { isEnabled: apiClient?.isEnabled, status: backendStatus },
@@ -311,8 +359,10 @@ export function QuickRecord() {
       setSelectedHistoryId(result.quickRecord.id);
       setConfirmedTargets([]);
       setSyncLog([]);
+      setConfirmationPreview(null);
+      setHistoryReadOnly(false);
       setAnalysisVisible(true);
-      setSyncStatus("分析完成，等待人工同步");
+      setSyncStatus("分析完成，请先生成确认预览");
     } catch (error) {
       setSyncStatus(error?.message || "分析失败，请稍后重试");
     }
@@ -334,6 +384,10 @@ export function QuickRecord() {
   }
 
   async function saveAnalysisChanges() {
+    if (pageReadOnly) {
+      setSyncStatus("历史或已结束的确认记录只读，不能保存分析修改");
+      return;
+    }
     if (!quickRecordId || !analysis) {
       setSyncStatus("请先完成分析，再保存修改");
       return;
@@ -366,14 +420,15 @@ export function QuickRecord() {
         confirmedTargets: nextConfirmedTargets,
         syncLog: confirmations,
       };
-      confirmationAttemptRef.current.reset();
-      setQuickRecord(historyItem);
+        setQuickRecord(historyItem);
       setAnalysis(saved.analysis);
       setAnalysisDirty(false);
       setSyncLog(confirmations);
       setConfirmedTargets(nextConfirmedTargets);
+      setConfirmationPreview(null);
+      setHistoryReadOnly(false);
       onQuickRecordSaved?.(historyItem);
-      setSyncStatus("分析修改已保存，可继续确认同步");
+      setSyncStatus("分析修改已保存，请重新生成确认预览");
     } catch (error) {
       if (error?.code === "VERSION_CONFLICT") {
         try {
@@ -400,128 +455,135 @@ export function QuickRecord() {
     }
   }
 
-  async function confirmTargetUnlocked(target) {
-    let nextLogEntry = null;
-    let confirmationResult = null;
-    try {
-      assertBackendReady(
-        { isEnabled: apiClient?.isEnabled, status: backendStatus },
-        `同步${target.label}`,
-      );
-    } catch (error) {
-      setSyncStatus(error.message);
-      return;
-    }
-    if (!quickRecordId) {
-      setSyncStatus("请先完成 AI 分析，再同步业务档案");
-      return;
-    }
-    if (analysisDirty) {
-      setSyncStatus("请先保存分析修改，再同步业务档案");
-      return;
-    }
-
-    setSyncStatus(`正在同步${target.label}`);
-    try {
-      const outcome = await confirmQuickRecordTarget({
-        apiClient,
-        attemptTracker: confirmationAttemptRef.current,
-        quickRecord,
-        analysis,
-        target,
-        customers: customersList,
-        opportunities: opportunitiesList,
-        confirmedBy: "继振",
-      });
-      if (outcome.status === "missing_version") {
-        const entityLabel = outcome.entity === "customer" ? "客户" : "商机";
-        setSyncStatus(`同步失败，请刷新${entityLabel}版本后重试：${target.label}`);
-        return;
-      }
-      if (outcome.status === "conflict") {
-        const historyItem = outcome.refreshed.quickRecord;
-        setQuickRecord(historyItem);
-        setAnalysis(historyItem.analysis ?? null);
-        setAnalysisDirty(false);
-        setConfirmedTargets(historyItem.confirmedTargets ?? []);
-        setSyncLog(historyItem.syncLog ?? historyItem.confirmations ?? []);
-        setAnalysisVisible(Boolean(historyItem.analysis));
-        onQuickRecordSaved?.(historyItem);
-        onConfirmationRefresh?.(outcome.refreshed);
-        setSyncStatus(`数据已刷新，请重试：${target.label}`);
-        return;
-      }
-      const result = outcome.result;
-      confirmationResult = result;
-      const confirmations = result.confirmations ?? [];
-      const nextConfirmedTargets = confirmations.map((item) => item.target);
-      const nextAnalysis = result.analysis ?? analysis;
+  function applyConfirmationPreview(preview, message) {
+    setConfirmationPreview(preview);
+    if (quickRecord?.id === preview?.quickRecordId) {
       const historyItem = {
         ...quickRecord,
-        ...result.quickRecord,
-        analysis: nextAnalysis,
-        confirmations,
-        confirmedTargets: nextConfirmedTargets,
-        syncLog: confirmations,
+        confirmationPreviewId: preview.id,
+        confirmationPreviewStatus: preview.status,
       };
       setQuickRecord(historyItem);
-      setAnalysis(nextAnalysis);
-      setAnalysisDirty(false);
-      setConfirmedTargets(nextConfirmedTargets);
-      setSyncLog(confirmations);
       onQuickRecordSaved?.(historyItem);
-      onBusinessSync?.(result);
-      nextLogEntry = (result.confirmations ?? []).find((item) => item.target === target.id) ?? null;
-    } catch (error) {
-      setSyncStatus(error?.message || `同步失败，请稍后重试：${target.label}`);
-      return;
     }
-
-    setConfirmedTargets((current) => current.includes(target.id) ? current : [...current, target.id]);
-
-    if (target.id === "customer") {
-      setSelectedCustomerId(resolveConfirmedSelectionId("customer", {
-        result: confirmationResult,
-        analysis,
-        quickRecord,
-      }));
-    }
-    if (target.id === "opportunity") {
-      setSelectedOpportunityId(resolveConfirmedSelectionId("opportunity", {
-        result: confirmationResult,
-        analysis,
-        quickRecord,
-      }));
-    }
-    if (nextLogEntry) {
-      setSyncLog((current) => [
-        ...current.filter((item) => item.target !== nextLogEntry.target),
-        nextLogEntry,
-      ]);
-    }
-    setSyncStatus(`${target.status}（已同步）`);
+    const confirmedItems = Array.isArray(preview?.items)
+      ? preview.items.filter((item) => item.status === "confirmed")
+      : [];
+    setConfirmedTargets(confirmedItems.map((item) => item.target));
+    setSyncLog(confirmedItems.map((item) => ({
+      target: item.target,
+      note: item.receipt?.summary ?? "已由已登录用户确认写入",
+      createdAt: item.confirmedAt,
+      confirmedBy: item.confirmedBy,
+    })));
+    setSyncStatus(message);
   }
 
-  async function confirmTarget(target) {
-    try {
-      const outcome = await confirmationGateRef.current.run(async () => {
-        setConfirmationPending(true);
-        try {
-          await confirmTargetUnlocked(target);
-          return { status: "settled" };
-        } finally {
-          setConfirmationPending(false);
-        }
-      });
-      if (outcome.status === "busy") {
-        setSyncStatus("正在同步，请稍候");
-      }
-    } catch {
-      setSyncStatus(`同步失败，请稍后重试：${target.label}`);
+  async function refreshConfirmationPreview(previewId, message = "已刷新确认预览，请重试") {
+    const preview = await apiClient.getQuickRecordConfirmationPreview(previewId);
+    applyConfirmationPreview(preview, message);
+    return preview;
+  }
+
+  async function createConfirmationPreview() {
+    if (!quickRecordId || !analysis || analysisDirty) {
+      setSyncStatus(analysisDirty ? "请先保存分析修改，再生成确认预览" : "请先完成 AI 分析");
+      return;
     }
+    setConfirmationPending(true);
+    setSyncStatus("正在生成确认预览");
+    try {
+      const preview = await apiClient.createQuickRecordConfirmationPreview(quickRecordId);
+      setHistoryReadOnly(false);
+      applyConfirmationPreview(preview, preview.replayed ? "已载入现有确认预览" : "确认预览已生成，请逐项核对后写入");
+    } catch (error) {
+      setSyncStatus(error?.message || "生成确认预览失败，请重试");
+    } finally {
+      setConfirmationPending(false);
+    }
+  }
+
+  async function confirmPreviewItem(itemId) {
+    const payload = createQuickRecordDiffConfirmationPayload(confirmationModel, { itemId });
+    if (!payload) {
+      setSyncStatus("该项当前不可确认，请刷新预览后重试");
+      return;
+    }
+    await runConfirmationAction(async () => (
+      apiClient.confirmQuickRecordConfirmationItem(payload.previewId, payload)
+    ), "正在确认该项写入");
+  }
+
+  async function confirmAllPreviewItems() {
+    const payload = createQuickRecordDiffConfirmationPayload(confirmationModel, { confirmAll: true });
+    if (!payload) {
+      setSyncStatus("当前没有可全部确认的项目");
+      return;
+    }
+    await runConfirmationAction(async () => (
+      apiClient.confirmAllQuickRecordConfirmationItems(payload.previewId, payload)
+    ), "正在确认全部可写入项目");
+  }
+
+  async function cancelConfirmationPreview() {
+    const payload = createQuickRecordDiffCancellationPayload(confirmationModel);
+    if (!payload) {
+      setSyncStatus("该确认预览已经是只读状态");
+      return;
+    }
+    setConfirmationPending(true);
+    setSyncStatus("正在取消确认预览");
+    try {
+      const preview = await apiClient.cancelQuickRecordConfirmationPreview(payload.previewId, payload);
+      applyConfirmationPreview(preview, "确认预览已取消，历史保持只读");
+    } catch (error) {
+      if (error?.status === 409) {
+        try {
+          await refreshConfirmationPreview(payload.previewId);
+        } catch (refreshError) {
+          setSyncStatus(refreshError?.message || "确认预览冲突，请刷新后重试");
+        }
+      } else {
+        setSyncStatus(error?.message || "取消确认预览失败，请重试");
+      }
+    } finally {
+      setConfirmationPending(false);
+    }
+  }
+
+  async function runConfirmationAction(action, pendingMessage) {
+    const previewId = confirmationModel?.previewId;
+    const outcome = await confirmationGateRef.current.run(async () => {
+      setConfirmationPending(true);
+      setSyncStatus(pendingMessage);
+      try {
+        const result = await action();
+        applyConfirmationPreview(result.preview, result.status === "conflict"
+          ? "预览已变化，已载入最新状态，请重试"
+          : "确认结果已保存");
+      } catch (error) {
+        if (error?.status === 409 && previewId) {
+          try {
+            await refreshConfirmationPreview(previewId);
+          } catch (refreshError) {
+            setSyncStatus(refreshError?.message || "确认冲突，请刷新后重试");
+          }
+        } else {
+          setSyncStatus(error?.message || "确认失败，请重试");
+        }
+      } finally {
+        setConfirmationPending(false);
+      }
+      return { status: "settled" };
+    });
+    if (outcome.status === "busy") setSyncStatus("正在处理确认，请稍候");
   }
 
   function switchToTextRecord() {
+    if (pageReadOnly) {
+      setSyncStatus("历史或已结束的确认记录只读，请先新建记录");
+      return;
+    }
     invalidateVoiceCapture();
     setRecordMode("text");
     resetAnalysis("请继续在记录框内录入内容");
@@ -533,7 +595,7 @@ export function QuickRecord() {
   }
 
   const historyItems = quickRecords.map((item) => ({ item, view: quickRecordHistoryView(item) }));
-  const pendingHistoryCount = quickRecords.filter((item) => item.status !== "confirmed").length;
+  const pendingHistoryCount = quickRecords.filter(quickRecordNeedsConfirmation).length;
 
   return (
     <div className="record-layout">
@@ -549,6 +611,7 @@ export function QuickRecord() {
               className={recordMode === "text" ? "active" : ""}
               data-testid="quick-record-mode-text"
               type="button"
+              disabled={pageReadOnly}
               onClick={switchToTextRecord}
             >
               <MessageSquareText size={14} />
@@ -558,6 +621,7 @@ export function QuickRecord() {
               className={recordMode === "voice" ? "active" : ""}
               data-testid="quick-record-mode-voice"
               type="button"
+              disabled={pageReadOnly}
               onClick={() => setRecordMode("voice")}
             >
               <Mic size={14} />
@@ -598,6 +662,7 @@ export function QuickRecord() {
 
         <textarea
           aria-label="快速记录内容"
+          readOnly={pageReadOnly}
           value={recordText}
           onCompositionStart={() => {
             composingRef.current = true;
@@ -629,7 +694,7 @@ export function QuickRecord() {
             className="primary-button"
             type="button"
             data-testid="confirm-ai-analysis"
-            disabled={analysisPending}
+            disabled={analysisPending || pageReadOnly}
             onClick={confirmAnalysis}
           >
             {analysisPending ? <LoaderCircle className="state-spinner" size={16} /> : <Send size={16} />}
@@ -648,7 +713,7 @@ export function QuickRecord() {
           <button
             className="ghost-button"
             type="button"
-            disabled={analysisPending}
+            disabled={analysisPending || pageReadOnly}
             onClick={() => resetAnalysis("已准备重新分析")}
           >
             <RefreshCw size={16} />
@@ -697,7 +762,7 @@ export function QuickRecord() {
                 fieldKey={key}
                 title={item.title}
                 text={item.text}
-                onTextChange={(text) => updateAnalysisSummary(key, text)}
+                onTextChange={pageReadOnly ? undefined : (text) => updateAnalysisSummary(key, text)}
               />
             ))}
           </div>
@@ -725,7 +790,7 @@ export function QuickRecord() {
               className={analysisDirty ? "primary-button" : "ghost-button"}
               type="button"
               data-testid="save-analysis-modifications"
-              disabled={!analysisDirty || analysisSavePending}
+              disabled={pageReadOnly || !analysisDirty || analysisSavePending}
               onClick={saveAnalysisChanges}
             >
               <Save size={16} />
@@ -735,36 +800,102 @@ export function QuickRecord() {
               {analysisDirty ? "修改尚未保存" : "分析内容已保存"}
             </span>
           </div>
-          <div className="manual-sync">
-            {getSyncTargets().map((target) => {
-              const confirmed = confirmedTargets.includes(target.id);
-              const Icon = target.id === "customer" ? Save : target.id === "opportunity" ? Link2 : FileText;
-              return (
+          <section className="manual-sync confirmation-preview" data-testid="quick-record-confirmation-preview">
+            {!confirmationModel ? (
+              <>
+                <p>先生成一份可追溯的变更预览；预览不会写入客户、商机或周报。</p>
                 <button
-                  className={confirmed ? "ghost-button confirmed" : target.id === "customer" ? "primary-button" : "ghost-button"}
-                  key={target.id}
+                  className="primary-button"
                   type="button"
-                  disabled={confirmationPending || analysisSavePending || analysisDirty}
-                  onClick={() => confirmTarget(target)}
+                  data-testid="create-quick-record-confirmation-preview"
+                  disabled={confirmationPending || analysisSavePending || analysisDirty || historyReadOnly}
+                  onClick={createConfirmationPreview}
                 >
-                  {confirmed ? <Check size={16} /> : <Icon size={16} />}
-                  {confirmed ? target.doneLabel : target.label}
+                  <Sparkles size={16} />
+                  生成确认预览
                 </button>
-              );
-            })}
+              </>
+            ) : (
+              <>
+                <div className="confirmation-preview-head">
+                  <div>
+                    <strong>确认预览</strong>
+                    <small>{confirmationModel.readOnly ? "此预览已进入只读终态" : "逐项核对变更后，才会写入业务数据"}</small>
+                  </div>
+                  <b className={`pill ${confirmationModel.status === QUICK_RECORD_DIFF_STATUS.CONFIRMED ? "green" : confirmationModel.status === QUICK_RECORD_DIFF_STATUS.CANCELLED ? "gray" : "amber"}`}>
+                    {confirmationModel.status === QUICK_RECORD_DIFF_STATUS.CONFIRMED ? "已完成" : confirmationModel.status === QUICK_RECORD_DIFF_STATUS.CANCELLED ? "已取消" : "待确认"}
+                  </b>
+                </div>
+                {confirmationModel.blocker ? <p className="status-text">{confirmationModel.blocker.message}</p> : null}
+                <div className="confirmation-preview-items">
+                  {confirmationModel.items.map((item) => (
+                    <article className="confirmation-preview-item" key={item.id}>
+                      <div>
+                        <strong>{item.label}</strong>
+                        <small>{syncTargetLabel(item.target)} · {item.field}</small>
+                      </div>
+                      <div className="confirmation-preview-values">
+                        <span>原值：{JSON.stringify(item.before)}</span>
+                        <span>建议：{JSON.stringify(item.after)}</span>
+                      </div>
+                      <div className="confirmation-preview-item-action">
+                        {item.status === QUICK_RECORD_DIFF_STATUS.CONFIRMED ? <span className="confirmed"><Check size={15} /> 已确认</span> : null}
+                        {item.status === QUICK_RECORD_DIFF_STATUS.CANCELLED ? <span>已取消</span> : null}
+                        {item.confirmable ? (
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            disabled={confirmationPending}
+                            onClick={() => confirmPreviewItem(item.id)}
+                          >
+                            确认此项
+                          </button>
+                        ) : null}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+                <div className="confirmation-preview-actions">
+                  <button
+                    className="primary-button"
+                    type="button"
+                    disabled={confirmationPending || !confirmationModel.canConfirmAll}
+                    onClick={confirmAllPreviewItems}
+                  >
+                    <Check size={16} /> 全部确认可写入项
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    disabled={confirmationPending || confirmationModel.readOnly}
+                    onClick={cancelConfirmationPreview}
+                  >
+                    取消此预览
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    disabled={confirmationPending || !confirmationModel.previewId}
+                    onClick={() => refreshConfirmationPreview(confirmationModel.previewId, "确认预览已刷新")}
+                  >
+                    <RefreshCw size={16} /> 刷新预览
+                  </button>
+                </div>
+              </>
+            )}
             <button
               className="ghost-button"
               type="button"
-              disabled={confirmationPending || analysisSavePending}
+              disabled={confirmationPending || analysisSavePending || pageReadOnly}
               onClick={() => resetAnalysis("补充内容后可重新识别")}
             >
               补充内容后再识别
             </button>
-          </div>
+          </section>
           <div className="sync-log" data-testid="sync-log">
             <div className="sync-log-head">
-              <span>同步日志</span>
-              <b>{syncLog.length}/3</b>
+              <span>人工确认同步日志</span>
+              <b>{syncLog.length} 条</b>
             </div>
             {syncLog.length > 0 ? (
               <div className="sync-log-list">

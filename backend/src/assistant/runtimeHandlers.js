@@ -2548,6 +2548,19 @@ export function createAssistantToolHandlers({
           return current;
         });
       } catch (error) {
+        if (error?.code === "QUICK_RECORD_CONFIRMATION_TERMINAL") {
+          const currentStatus = error.fields?.currentStatus;
+          const terminalText = currentStatus === "completed"
+            ? "这条记录的确认预览已完成，不能再修改。"
+            : currentStatus === "cancelled"
+              ? "这条记录的确认预览已取消，不能再修改。"
+              : "这条记录的确认预览已结束，不能再修改。";
+          return {
+            text: terminalText,
+            status: "conflict",
+            code: "QUICK_RECORD_CONFIRMATION_TERMINAL",
+          };
+        }
         if (error?.code === "VERSION_CONFLICT") {
           return { text: "这条记录刚在其他端被修改，本次未写入。请重新发起修改。", status: "conflict" };
         }

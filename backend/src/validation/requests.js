@@ -247,6 +247,28 @@ export const requestSchemas = freezeSchema({
       value: { type: "integer", min: 1 },
     },
   },
+  quickRecordConfirmationItem: {
+    confirm: { type: "enum", values: [true], required: true },
+    suggestionIdentity: text(64, { required: true }),
+    expectedQuickRecordVersion: { type: "integer", min: 1, required: true },
+    analysisVersionId: text(200, { required: true }),
+    summaryHash: text(64, { required: true }),
+    evidenceHash: text(64, { required: true }),
+    itemId: text(200, { required: true }),
+    itemIdentity: text(64, { required: true }),
+  },
+  quickRecordConfirmationAll: {
+    confirm: { type: "enum", values: [true], required: true },
+    suggestionIdentity: text(64, { required: true }),
+    expectedQuickRecordVersion: { type: "integer", min: 1, required: true },
+    analysisVersionId: text(200, { required: true }),
+    summaryHash: text(64, { required: true }),
+    evidenceHash: text(64, { required: true }),
+  },
+  quickRecordConfirmationCancel: {
+    cancel: { type: "enum", values: [true], required: true },
+    suggestionIdentity: text(64, { required: true }),
+  },
   actionPatch: {
     title: text(500), reason: text(5000, { nullable: true }), due: text(50, { nullable: true }),
     assignee: text(100, { nullable: true }), priority: { type: "enum", values: ["高", "中", "低"] },

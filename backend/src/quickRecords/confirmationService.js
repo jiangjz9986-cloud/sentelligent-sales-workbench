@@ -353,11 +353,37 @@ function normalizeDraft(raw, { owner, quickRecordId } = {}) {
   if (!isPlainObject(raw.quickRecord) || raw.quickRecord.owner !== owner) return null;
   const recordId = identifier(raw.quickRecord.id, "quickRecord.id", "DRAFT_DATA_INVALID", 500);
   if (recordId !== quickRecordId || raw.quickRecord.voidedAt) return null;
+  const confirmationPreviewId = raw.quickRecord.confirmationPreviewId === undefined
+    || raw.quickRecord.confirmationPreviewId === null
+    ? null
+    : identifier(
+      raw.quickRecord.confirmationPreviewId,
+      "quickRecord.confirmationPreviewId",
+      "DRAFT_DATA_INVALID",
+      500,
+    );
+  const confirmationPreviewStatus = raw.quickRecord.confirmationPreviewStatus === undefined
+    || raw.quickRecord.confirmationPreviewStatus === null
+    ? null
+    : identifier(
+      raw.quickRecord.confirmationPreviewStatus,
+      "quickRecord.confirmationPreviewStatus",
+      "DRAFT_DATA_INVALID",
+      500,
+    );
+  if (
+    (confirmationPreviewId === null) !== (confirmationPreviewStatus === null)
+    || (confirmationPreviewStatus !== null && !PREVIEW_STATUSES.has(confirmationPreviewStatus))
+  ) {
+    fail("DRAFT_DATA_INVALID", "Quick-record confirmation preview linkage is invalid", { status: 500 });
+  }
   const quickRecord = {
     id: recordId,
     owner,
     version: positiveInteger(raw.quickRecord.version, "quickRecord.version", "DRAFT_DATA_INVALID", 500),
     status: identifier(raw.quickRecord.status, "quickRecord.status", "DRAFT_DATA_INVALID", 500),
+    confirmationPreviewId,
+    confirmationPreviewStatus,
   };
   if (!isPlainObject(raw.analysis)) {
     fail("DRAFT_DATA_INVALID", "A saved analysis is required", { status: 500 });
@@ -390,6 +416,19 @@ function normalizeDraft(raw, { owner, quickRecordId } = {}) {
 }
 
 function assertDraftConfirmable(draft) {
+  if (["completed", "cancelled"].includes(draft.quickRecord.confirmationPreviewStatus)) {
+    fail(
+      "QUICK_RECORD_CONFIRMATION_TERMINAL",
+      "The quick-record confirmation preview is terminal and cannot be recreated",
+      {
+        status: 409,
+        details: {
+          currentStatus: draft.quickRecord.confirmationPreviewStatus,
+          previewId: draft.quickRecord.confirmationPreviewId,
+        },
+      },
+    );
+  }
   if (draft.quickRecord.status !== CONFIRMABLE_QUICK_RECORD_STATUS) {
     fail("QUICK_RECORD_NOT_CONFIRMABLE", "The quick record is not in a confirmable state", {
       status: 409,
@@ -1159,8 +1198,18 @@ export function createQuickRecordConfirmationService({
     if (
       !sameDigest(draft.summaryHash, preview.summaryHash)
       || !sameDigest(draft.evidenceHash, preview.evidenceHash)
-      || !sameDigest(draft.draftHash, preview.draftHash)
     ) {
+      return { conflict: "draft_changed" };
+    }
+    // The first successful item confirmation intentionally changes that
+    // target's value/version, so rebuilding the whole draft afterwards no
+    // longer produces the immutable original draftHash.  Keep the full hash
+    // check before the first write; on later item-by-item confirmations the
+    // pinned record/analysis hashes above remain immutable and execute() checks
+    // each still-pending target's exact version and before value inside the
+    // same BEGIN IMMEDIATE transaction.
+    const hasConfirmedItem = preview.items.some((item) => item.status === "confirmed");
+    if (!hasConfirmedItem && !sameDigest(draft.draftHash, preview.draftHash)) {
       return { conflict: "draft_changed" };
     }
     return { draft };

@@ -326,6 +326,68 @@ async function main() {
     assert.equal(await page.getByRole("button", { name: "录音留存" }).count(), 0);
     await page.getByRole("button", { name: "改用文本" }).waitFor();
 
+    // Exercise the real durable-confirmation page at the target handset size.
+    // A long saved summary makes the actual before/after arrays wrap inside the
+    // production card rather than relying on a synthetic HTML layout fixture.
+    await page.getByTestId("quick-record-mode-text").click();
+    await page.getByLabel("快速记录内容").fill(
+      "现场拜访日照中医医院，讨论十五五规划和移动云灾备中心，客户要求补齐本地数据中心规划。",
+    );
+    await page.getByTestId("confirm-ai-analysis").click();
+    await page.getByTestId("quick-analysis-result").waitFor();
+    const longRequest = `客户要求：${"补齐本地数据中心、灾备中心与迁移边界的逐项规划说明；".repeat(24)}`;
+    await page.getByTestId("analysis-summary-request").fill(longRequest);
+    await page.getByTestId("save-analysis-modifications").click();
+    await page.getByTestId("create-quick-record-confirmation-preview").waitFor({ state: "visible" });
+    try {
+      await page.waitForFunction(() => (
+        document.querySelector('[data-testid="create-quick-record-confirmation-preview"]')?.disabled === false
+      ), null, { timeout: 10_000 });
+    } catch (error) {
+      const saveDiagnostics = await page.evaluate(() => ({
+        statuses: [...document.querySelectorAll(".status-text")].map((item) => item.textContent?.trim()),
+        saveDisabled: document.querySelector('[data-testid="save-analysis-modifications"]')?.disabled,
+        previewDisabled: document.querySelector('[data-testid="create-quick-record-confirmation-preview"]')?.disabled,
+      }));
+      throw new Error(`quick-record analysis save did not settle: ${JSON.stringify({ saveDiagnostics, failedResponses })}`, { cause: error });
+    }
+    await page.getByTestId("create-quick-record-confirmation-preview").click();
+    await page.locator(".confirmation-preview-item").first().waitFor();
+
+    const previewMetrics = await page.evaluate(() => {
+      const controls = [...document.querySelectorAll(".confirmation-preview-actions button")].map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { width: Math.round(rect.width), height: Math.round(rect.height) };
+      });
+      const overflowCandidates = [...document.querySelectorAll(
+        ".confirmation-preview, .confirmation-preview-item, .confirmation-preview-values, .confirmation-preview-values span",
+      )].map((element) => ({
+        className: element.className,
+        overflow: Math.ceil(element.scrollWidth - element.clientWidth),
+      })).filter((item) => item.overflow > 1);
+      return {
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        controls,
+        overflowCandidates,
+      };
+    });
+    assert.equal(previewMetrics.overflowX, 0);
+    assert.deepEqual(previewMetrics.overflowCandidates, []);
+    assert.equal(previewMetrics.controls.length, 3);
+    assert.ok(previewMetrics.controls.every((control) => control.width > 0 && control.height >= 44));
+    const mobileQuickPreviewScreenshotPath = resolve(evidenceDirectory, "webkit-quick-confirmation-390x844.png");
+    await page.getByTestId("quick-record-confirmation-preview").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: mobileQuickPreviewScreenshotPath, fullPage: false });
+
+    await page.getByRole("button", { name: "全部确认可写入项" }).click();
+    await page.getByText("此预览已进入只读终态").waitFor();
+    assert.equal(await page.getByTestId("quick-record-confirmation-preview").getByText("已完成", { exact: true }).count(), 1);
+    assert.equal(await page.locator('[data-testid^="analysis-summary-"]').count(), 0);
+    assert.equal(await page.getByLabel("快速记录内容").getAttribute("readonly"), "");
+    assert.equal(await page.getByTestId("confirm-ai-analysis").isDisabled(), true);
+    assert.equal(await page.getByTestId("save-analysis-modifications").isDisabled(), true);
+    await page.getByTestId("new-quick-record").click();
+
     await page.getByTestId("nav-customer").click();
     await page.getByTestId("customer-list-view").waitFor();
     await page.getByTestId("customer-open-detail").first().click();
@@ -382,6 +444,13 @@ async function main() {
         desktopExpenseMetrics,
         mobileExpenseMetrics,
         initialMetrics,
+        {
+          viewport: { width: 390, height: 844 },
+          visualScale: 1,
+          overflowX: previewMetrics.overflowX,
+          nestedOverflow: previewMetrics.overflowCandidates,
+          confirmationControls: previewMetrics.controls,
+        },
         smallMetrics,
       ],
       checks: {
@@ -397,6 +466,8 @@ async function main() {
         customerReadOnly: true,
         customerCancel: true,
         customerDeleteCancel: true,
+        quickRecordDurablePreview: true,
+        quickRecordTerminalReadOnly: true,
         quickRecordVoiceReset: true,
         logout: true,
       },
@@ -406,6 +477,7 @@ async function main() {
         desktopExpenseRegion: desktopRegionScreenshotPath,
         mobileExpense: mobileExpenseScreenshotPath,
         mobileExpenseRegion: mobileRegionScreenshotPath,
+        mobileQuickConfirmation: mobileQuickPreviewScreenshotPath,
         mobileItinerary: screenshotPath,
       },
     };

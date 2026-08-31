@@ -225,6 +225,8 @@ function sampleQuickRecord(overrides = {}) {
     customerId: null,
     opportunityId: null,
     status: "recorded",
+    confirmationPreviewId: null,
+    confirmationPreviewStatus: null,
     ...overrides,
   };
 }
@@ -894,6 +896,26 @@ function sampleConfirmation(overrides = {}) {
   };
 }
 
+function sampleQuickRecordConfirmationPreview(overrides = {}) {
+  return {
+    schemaVersion: "quick-record-confirmation-v2", id: "preview-1", identity: "a".repeat(64), owner: "Jizhen",
+    status: "open", revision: 1, quickRecordId: "qr-1", quickRecordVersion: 4,
+    quickRecordStatus: "analyzed", analysisVersionId: "ai-1", analysisStatus: "ready_for_confirmation",
+    summary: { title: "确认写入" }, evidence: [], summaryHash: "b".repeat(64), evidenceHash: "c".repeat(64),
+    draftHash: "d".repeat(64), items: [], requiresHumanConfirmation: true, automaticWriteAllowed: false,
+    createdWithUnsavedChanges: false, createdAt: "2026-06-05T10:30:00.000Z", updatedAt: "2026-06-05T10:30:00.000Z",
+    completedAt: null, cancelledAt: null, cancelledBy: null, replayed: false, confirmationBlocked: false,
+    bulkEligibleItemIds: [], ...overrides,
+  };
+}
+
+function sampleQuickRecordConfirmationOutcome(overrides = {}) {
+  return {
+    status: "confirmed", preview: sampleQuickRecordConfirmationPreview(), confirmedItems: [], excludedItems: [],
+    writeback: true, replayed: false, reason: null, details: null, ...overrides,
+  };
+}
+
 function sampleWeeklyReport(overrides = {}) {
   return {
     id: "wr-1",
@@ -903,6 +925,7 @@ function sampleWeeklyReport(overrides = {}) {
     periodEnd: "2026-06-07",
     status: "draft",
     content: "# weekly draft",
+    entries: [],
     sourceRefs: [{ type: "quick_record", id: "qr-1" }],
     ...overrides,
   };
@@ -2292,75 +2315,45 @@ describe("sales workbench API client", () => {
     ]);
   });
 
-  it("confirms quick record targets through the backend", async () => {
+  it("uses the five durable quick-record confirmation preview APIs without caller identity fields", async () => {
+    const calls = [];
+    const preview = sampleQuickRecordConfirmationPreview();
+    const outcome = sampleQuickRecordConfirmationOutcome({ preview });
     const api = createSalesWorkbenchApi({
       baseUrl: "http://127.0.0.1:8787",
       fetchImpl: async (url, options = {}) => {
-        assert.equal(url, "http://127.0.0.1:8787/api/quick-records/qr-1/confirm");
-        assert.deepEqual(JSON.parse(options.body), {
-          targets: ["customer", "opportunity", "weekly"],
-          confirmedBy: "Jizhen",
-          note: "manual confirmation",
-          targetVersions: { customer: 7, opportunity: 9 },
-          analysisVersionId: "ai-1",
-        });
-        assert.equal(headerValue(options, "Idempotency-Key"), "attempt-123");
-        assert.equal(headerValue(options, "If-Match"), '"4"');
-        return jsonResponse({
-          confirmations: [sampleConfirmation()],
-          quickRecord: sampleQuickRecord({
-            status: "confirmed",
-            customerId: "rizhao",
-            opportunityId: "op-rizhao-plan",
-          }),
-          customer: sampleCustomer({ syncPreview: ["快速记录已确认：Rizhao record"] }),
-          opportunity: sampleOpportunity({ sourceRecord: "quick-record qr-1" }),
-          action: sampleAction(),
-        }, 201);
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body });
+        if (url.endsWith("/api/quick-records/qr-1/confirmation-previews")) return jsonResponse({ item: preview }, 201);
+        if (url.endsWith("/api/quick-record-confirmation-previews/preview-1")) return jsonResponse({ item: preview });
+        if (url.endsWith("/confirm-item") || url.endsWith("/confirm-all")) return jsonResponse({ item: outcome });
+        if (url.endsWith("/cancel")) return jsonResponse({ item: preview });
+        return jsonResponse({ error: "not_found" }, 404);
       },
     });
-
-    const result = await api.confirmQuickRecord("qr-1", ["customer", "opportunity", "weekly"], {
-      confirmedBy: "Jizhen",
-      note: "manual confirmation",
-      idempotencyKey: "attempt-123",
-      quickRecordVersion: 4,
-      targetVersions: { customer: 7, opportunity: 9 },
-      analysisVersionId: "ai-1",
-    });
-
-    assert.equal(result.quickRecord.status, "confirmed");
-    assertApiCollection("manualConfirmation", result.confirmations);
-    assertApiEntity("quickRecord", result.quickRecord);
-    assertApiEntity("customer", result.customer);
-    assertApiEntity("opportunity", result.opportunity);
-    assert.equal(result.action.sourceRecordId, "qr-1");
-    assert.equal(result.confirmations[0].target, "weekly");
+    const pins = { confirm: true, suggestionIdentity: "a".repeat(64), expectedQuickRecordVersion: 4, analysisVersionId: "ai-1", summaryHash: "b".repeat(64), evidenceHash: "c".repeat(64) };
+    assert.equal((await api.createQuickRecordConfirmationPreview("qr-1")).id, "preview-1");
+    assert.equal((await api.getQuickRecordConfirmationPreview("preview-1")).id, "preview-1");
+    await api.confirmQuickRecordConfirmationItem("preview-1", { ...pins, itemId: "customer-needs", itemIdentity: "e".repeat(64), owner: "forged", actor: "forged", confirmedBy: "forged", cancelledBy: "forged" });
+    await api.confirmAllQuickRecordConfirmationItems("preview-1", { ...pins, owner: "forged", actor: "forged", confirmedBy: "forged", cancelledBy: "forged" });
+    await api.cancelQuickRecordConfirmationPreview("preview-1", { cancel: true, suggestionIdentity: "a".repeat(64), owner: "forged", actor: "forged", confirmedBy: "forged", cancelledBy: "forged" });
+    assert.deepEqual(calls, [
+      { url: "http://127.0.0.1:8787/api/quick-records/qr-1/confirmation-previews", method: "POST", body: {} },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1", method: "GET", body: null },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1/confirm-item", method: "POST", body: { ...pins, itemId: "customer-needs", itemIdentity: "e".repeat(64) } },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1/confirm-all", method: "POST", body: pins },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1/cancel", method: "POST", body: { cancel: true, suggestionIdentity: "a".repeat(64) } },
+    ]);
   });
 
-  it("rejects malformed quick-record risk writeback responses", async () => {
+  it("rejects malformed durable quick-record confirmation outcomes", async () => {
     const api = createSalesWorkbenchApi({
       baseUrl: "http://127.0.0.1:8787",
-      fetchImpl: async () =>
-        jsonResponse({
-          confirmations: [sampleConfirmation()],
-          quickRecord: sampleQuickRecord({
-            status: "confirmed",
-            customerId: "rizhao",
-            opportunityId: "op-rizhao-plan",
-          }),
-          risk: sampleRisk({ score: "high" }),
-        }, 201),
+      fetchImpl: async () => jsonResponse({ item: sampleQuickRecordConfirmationOutcome({ confirmedItems: "not-an-array" }) }),
     });
-
     await assert.rejects(
-      () => api.confirmQuickRecord("qr-1", ["customer"], {
-        confirmedBy: "Jizhen",
-        idempotencyKey: "malformed-response-attempt",
-        quickRecordVersion: 1,
-        targetVersions: { customer: 1 },
-      }),
-      /riskItem\.score: expected number/,
+      () => api.confirmAllQuickRecordConfirmationItems("preview-1", { confirm: true, suggestionIdentity: "a".repeat(64), expectedQuickRecordVersion: 4, analysisVersionId: "ai-1", summaryHash: "b".repeat(64), evidenceHash: "c".repeat(64) }),
+      /confirmedItems: expected array/,
     );
   });
 
@@ -2675,7 +2668,7 @@ describe("sales workbench API client", () => {
   });
 
   it("publishes strict travel-expense response contracts with integer-cent amounts", () => {
-    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-08-26");
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-08-31");
     assertApiEntity("travelExpensePayment", sampleTravelExpensePayment());
     assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment());
     assertApiEntity("travelExpense", sampleTravelExpense());

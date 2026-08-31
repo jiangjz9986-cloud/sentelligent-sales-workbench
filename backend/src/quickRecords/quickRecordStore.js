@@ -9,6 +9,26 @@ const ID_SUFFIX = /^[A-Za-z0-9-]{6,64}$/u;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/u;
 const SUMMARY_KEYS = new Set(["request", "feedback", "risk", "action"]);
 
+/**
+ * A durable confirmation preview is a snapshot. Once it is completed or
+ * cancelled, every edit/analyse path must stop rather than silently creating
+ * a new revision behind the user's confirmed (or explicitly declined) view.
+ * Keep this guard exported so HTTP and assistant callers share one rule.
+ */
+export function assertQuickRecordConfirmationEditable(record) {
+  const status = record?.confirmationPreviewStatus;
+  if (!["completed", "cancelled"].includes(status)) return;
+  throw new HttpError(
+    409,
+    "QUICK_RECORD_CONFIRMATION_TERMINAL",
+    "The quick-record confirmation preview is terminal and cannot be edited",
+    {
+      currentStatus: status,
+      previewId: record.confirmationPreviewId ?? null,
+    },
+  );
+}
+
 function requiredText(value, name, max = 500) {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max) {
     throw new TypeError(`${name} is required`);
@@ -51,6 +71,8 @@ function quickRecordFromRow(row) {
     opportunityId: row.opportunity_id,
     customerName: row.customer_name ?? null,
     status: row.status,
+    confirmationPreviewId: row.confirmation_preview_id ?? null,
+    confirmationPreviewStatus: row.confirmation_preview_status ?? null,
     voidedAt: row.voided_at ?? null,
     voidedBy: row.voided_by ?? null,
     voidReason: row.void_reason ?? null,
@@ -211,6 +233,7 @@ export function createQuickRecordStore(db, { clock = () => new Date() } = {}) {
     const version = requiredVersion(expectedVersion);
     const before = getWithLatestInsight({ owner: normalizedOwner, id: normalizedId });
     if (!before) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+    assertQuickRecordConfirmationEditable(before.record);
     const sets = [];
     const params = {};
     if (occurredAt !== undefined) {
@@ -269,6 +292,7 @@ export function createQuickRecordStore(db, { clock = () => new Date() } = {}) {
     ).get({ $id: normalizedId, ...ownerParams(normalizedOwner) });
     const beforeRecord = quickRecordFromRow(beforeRow);
     if (!beforeRecord) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+    assertQuickRecordConfirmationEditable(beforeRecord);
     const insightRow = db.prepare(`
       SELECT * FROM ai_insights
       WHERE quick_record_id = $quickRecordId

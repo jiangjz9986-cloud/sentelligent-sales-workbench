@@ -87,13 +87,10 @@ describe("interactive control wiring", () => {
 
   it("locks quick-record confirmation while synchronization, analysis save, or unsaved edits are active", () => {
     const pageSource = readSalesWorkbenchPagesSource();
-    const manualSync = pageSource.match(/<div className="manual-sync">[\s\S]*?<\/div>/)?.[0] ?? "";
 
     assert.match(pageSource, /createExclusiveAsyncGate/);
     assert.match(pageSource, /confirmationGateRef/);
-    assert.match(
-      manualSync,
-      /disabled=\{confirmationPending \|\| analysisSavePending \|\| analysisDirty\}/,
-    );
+    assert.match(pageSource, /data-testid="create-quick-record-confirmation-preview"/);
+    assert.match(pageSource, /disabled=\{confirmationPending \|\| analysisSavePending \|\| analysisDirty \|\| historyReadOnly\}/);
   });
 });

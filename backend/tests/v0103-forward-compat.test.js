@@ -180,7 +180,7 @@ async function exactV0103Database(oldBackend, databaseUrl) {
   }
 }
 
-test("exact v0.10.3 remains forward-compatible with a current 0033 ASR database", async () => {
+test("exact v0.10.3 remains forward-compatible with a current 0034 database", async () => {
   const tempRoot = await mkdtemp(join(tmpdir(), "sentelligent-v0103-forward-"));
   const databaseUrl = join(tempRoot, "forward.sqlite");
   const account = "forwardadmin";
@@ -218,15 +218,16 @@ test("exact v0.10.3 remains forward-compatible with a current 0033 ASR database"
     // Phase 1: exact release code creates a real, complete 0032 database.
     await exactV0103Database(oldBackend, databaseUrl);
 
-    // Phase 2: current code performs only 0033, then its repository/API writes
-    // the new ASR key and an owner-scoped customer fixture.
+    // Phase 2: current code upgrades the exact 0032 database through 0033 and
+    // 0034, then its repository/API writes the new ASR key and an owner-scoped
+    // customer fixture.
     const upgraded = openDatabase({ databaseUrl });
     try {
       const versions = upgraded.prepare(
         "SELECT version FROM schema_migrations ORDER BY version",
       ).all().map((row) => row.version);
-      assert.equal(versions.length, 32);
-      assert.equal(versions.at(-1), "0033");
+      assert.equal(versions.length, 33);
+      assert.deepEqual(versions.slice(-2), ["0033", "0034"]);
     } finally {
       upgraded.close();
     }
@@ -263,7 +264,7 @@ test("exact v0.10.3 remains forward-compatible with a current 0033 ASR database"
 
     const beforeOldCode = asrPersistenceSnapshot(databaseUrl);
 
-    // Phase 3: boot exact release code against the 0033 database and exercise
+    // Phase 3: boot exact release code against the 0034 database and exercise
     // its established read/write planes. The release has no ASR route.
     const oldServerUrl = pathToFileURL(join(oldBackend, "src", "server.js"));
     oldServerUrl.searchParams.set("release", V0103_RELEASE_COMMIT);
@@ -392,8 +393,12 @@ test("exact v0.10.3 remains forward-compatible with a current 0033 ASR database"
       );
       assert.equal(
         reopened.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        32,
+        33,
       );
+      assert.ok(reopened.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'quick_record_confirmation_previews'
+      `).get());
     } finally {
       reopened.close();
     }

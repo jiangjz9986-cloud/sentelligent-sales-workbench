@@ -53,8 +53,16 @@ const businessTables = [
 const writeIntegrityColumns = {
   customers: ["version", "deleted_at", "deleted_by", "aliases", "tags"],
   opportunities: ["version", "deleted_at", "deleted_by"],
-  quick_records: ["version", "voided_at", "voided_by", "void_reason", "owner"],
-  weekly_reports: ["version", "deleted_at", "deleted_by"],
+  quick_records: [
+    "version",
+    "voided_at",
+    "voided_by",
+    "void_reason",
+    "owner",
+    "confirmation_preview_id",
+    "confirmation_preview_status",
+  ],
+  weekly_reports: ["version", "deleted_at", "deleted_by", "entries_json"],
   solution_drafts: ["version"],
   action_items: ["version", "deleted_at", "deleted_by", "owner", "remind_at", "reminded_at"],
   risk_items: ["version", "deleted_at", "deleted_by"],
@@ -182,10 +190,15 @@ function seedSecureSettingsMatrix(db, status) {
   }
 }
 
-function rebuildSecureSettingsAs0032(db) {
+function rebuildDatabaseAs0032(db) {
   db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`
+      DROP INDEX idx_quick_records_confirmation_preview;
+      DROP TABLE quick_record_confirmation_previews;
+      ALTER TABLE quick_records DROP COLUMN confirmation_preview_id;
+      ALTER TABLE quick_records DROP COLUMN confirmation_preview_status;
+      ALTER TABLE weekly_reports DROP COLUMN entries_json;
       CREATE TABLE secure_settings_0032_fixture (
         setting_key TEXT PRIMARY KEY NOT NULL CHECK (
           setting_key IN (
@@ -223,7 +236,7 @@ function rebuildSecureSettingsAs0032(db) {
       );
       DROP TABLE secure_settings;
       ALTER TABLE secure_settings_0032_fixture RENAME TO secure_settings;
-      DELETE FROM schema_migrations WHERE version = '0033';
+      DELETE FROM schema_migrations WHERE version IN ('0033', '0034');
     `);
     db.exec("COMMIT");
   } catch (error) {
@@ -278,7 +291,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 32);
+      assert.equal(firstMigrations.length, 33);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -311,6 +324,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[29].version, "0031");
       assert.equal(firstMigrations[30].version, "0032");
       assert.equal(firstMigrations[31].version, "0033");
+      assert.equal(firstMigrations[32].version, "0034");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -353,6 +367,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0031_owner_isolation_tightening.mjs",
         "../src/db/migrations/0032_weixin_bindings.mjs",
         "../src/db/migrations/0033_secure_settings_asr.mjs",
+        "../src/db/migrations/0034_quick_record_confirmation_previews.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -386,6 +401,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[29].checksum, migrationChecksum(migrationSources[29]));
       assert.equal(firstMigrations[30].checksum, migrationChecksum(migrationSources[30]));
       assert.equal(firstMigrations[31].checksum, migrationChecksum(migrationSources[31]));
+      assert.equal(firstMigrations[32].checksum, migrationChecksum(migrationSources[32]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -646,11 +662,11 @@ test("migration 0033 upgrades the direct 0021 cleared matrix without changing an
   }
 });
 
-test("migration 0033 upgrades a complete 0032 database and records only its frozen checksum", () => {
+test("current migrations upgrade a complete 0032 database through 0033 and 0034 in order", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
-      rebuildSecureSettingsAs0032(db);
+      rebuildDatabaseAs0032(db);
       seedSecureSettingsMatrix(db, "active");
       const rowsBefore = secureSettingsRows(db);
       const ledgerBefore = db.prepare(
@@ -658,6 +674,10 @@ test("migration 0033 upgrades a complete 0032 database and records only its froz
       ).all().map((row) => ({ ...row }));
       assert.equal(ledgerBefore.length, 31);
       assert.equal(ledgerBefore.at(-1).version, "0032");
+      assert.equal(databaseTableNames(db).includes("quick_record_confirmation_previews"), false);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_id"), false);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_status"), false);
+      assert.equal(columnNames(db, "weekly_reports").includes("entries_json"), false);
 
       migrateDatabase(db);
 
@@ -665,16 +685,23 @@ test("migration 0033 upgrades a complete 0032 database and records only its froz
         "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
       ).all().map((row) => ({ ...row }));
       const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
-      assert.equal(ledgerAfter.length, 32);
-      assert.deepEqual(added.map((row) => row.version), ["0033"]);
-      assert.deepEqual(ledgerAfter.filter((row) => row.version !== "0033"), ledgerBefore);
+      assert.equal(ledgerAfter.length, 33);
+      assert.deepEqual(added.map((row) => row.version), ["0033", "0034"]);
+      assert.deepEqual(
+        ledgerAfter.filter((row) => !["0033", "0034"].includes(row.version)),
+        ledgerBefore,
+      );
       const source = readFileSync(
         fileURLToPath(new URL("../src/db/migrations/0033_secure_settings_asr.mjs", import.meta.url)),
         "utf8",
       );
       assert.equal(migrationChecksum(source), SECURE_SETTINGS_ASR_CHECKSUM);
-      assert.equal(added[0].checksum, SECURE_SETTINGS_ASR_CHECKSUM);
+      assert.equal(added.find((row) => row.version === "0033").checksum, SECURE_SETTINGS_ASR_CHECKSUM);
       assert.deepEqual(secureSettingsRows(db), rowsBefore);
+      assert.equal(databaseTableNames(db).includes("quick_record_confirmation_previews"), true);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_id"), true);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_status"), true);
+      assert.equal(columnNames(db, "weekly_reports").includes("entries_json"), true);
     } finally {
       db.close();
     }
@@ -708,7 +735,7 @@ test("migration 0033 restores the original table rows and ledger after a post-DD
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
-      rebuildSecureSettingsAs0032(db);
+      rebuildDatabaseAs0032(db);
       seedSecureSettingsMatrix(db, "cleared");
       const rowsBefore = secureSettingsRows(db);
       const tableSqlBefore = db.prepare(`
@@ -827,7 +854,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        32,
+        33,
       );
     } finally {
       db.close();
@@ -1251,7 +1278,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034"],
       );
     } finally {
       migrated.close();
@@ -1445,7 +1472,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 32);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 33);
     } finally {
       db.close();
     }
@@ -1999,7 +2026,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034"],
       );
     } finally {
       db.close();

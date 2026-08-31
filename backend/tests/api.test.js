@@ -895,6 +895,84 @@ describe("sales workbench backend API", () => {
     assert.ok(report.body.item.sourceRefs.some((ref) => ref.type === "quick_record"));
   });
 
+  it("includes completed durable quick-record previews in weekly drafts", async () => {
+    const created = await request("/api/quick-records", {
+      method: "POST",
+      body: JSON.stringify({
+        rawContent:
+          "日照中医医院需要十五五规划材料，确认预览完成后也要进入本周周报草稿。",
+        occurredAt: "2026-06-05T16:00:00+08:00",
+        sourceChannel: "快速记录",
+      }),
+    });
+
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, {
+      method: "POST",
+    });
+    const preview = await request(`/api/quick-records/${created.body.item.id}/confirmation-previews`, {
+      method: "POST",
+      body: "{}",
+    });
+    await request(`/api/quick-record-confirmation-previews/${preview.body.item.id}/confirm-all`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirm: true,
+        suggestionIdentity: preview.body.item.identity,
+        expectedQuickRecordVersion: analyzed.body.quickRecord.version,
+        analysisVersionId: preview.body.item.analysisVersionId,
+        summaryHash: preview.body.item.summaryHash,
+        evidenceHash: preview.body.item.evidenceHash,
+      }),
+    });
+
+    const report = await request("/api/reports/weekly/draft", {
+      method: "POST",
+      body: JSON.stringify({
+        owner: "继振",
+        periodStart: "2026-06-01",
+        periodEnd: "2026-06-07",
+      }),
+    });
+
+    assert.equal(report.response.status, 201);
+    assertApiEntity("weeklyReport", report.body.item);
+    assert.ok(report.body.item.sourceRefs.some((ref) => ref.type === "quick_record" && ref.id === created.body.item.id));
+  });
+
+  it("excludes recorded WeChat quick records from weekly drafts until analyzed", async () => {
+    const created = await request("/api/quick-records", {
+      method: "POST",
+      body: JSON.stringify({
+        rawContent: "尚未分析的微信记录不应进入周报。",
+        occurredAt: "2026-06-05T16:00:00+08:00",
+        sourceChannel: "微信助手",
+      }),
+    });
+    assert.equal(created.response.status, 201);
+    const maintenanceDb = openDatabase({ databaseUrl });
+    try {
+      maintenanceDb.prepare(
+        "UPDATE quick_records SET status = 'recorded' WHERE id = $id",
+      ).run({ $id: created.body.item.id });
+    } finally {
+      maintenanceDb.close();
+    }
+
+    const report = await request("/api/reports/weekly/draft", {
+      method: "POST",
+      body: JSON.stringify({
+        owner: "继振",
+        periodStart: "2026-06-01",
+        periodEnd: "2026-06-07",
+      }),
+    });
+    assert.equal(report.response.status, 201);
+    assert.equal(
+      report.body.item.sourceRefs.some((ref) => ref.type === "quick_record" && ref.id === created.body.item.id),
+      false,
+    );
+  });
+
   it("adds explicitly selected knowledge references to weekly drafts", async () => {
     const knowledge = await request("/api/knowledge", {
       method: "POST",

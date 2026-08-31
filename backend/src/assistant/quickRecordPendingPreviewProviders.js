@@ -264,6 +264,17 @@ export function createQuickRecordPendingPreviewProviders({
       const loaded = store.getWithLatestInsight({ owner: gate.owner, id: target.record.id });
       if (!loaded) return block("记录不存在或已作废，无法修改。");
       const { record, insight } = loaded;
+      // A durable confirmation preview is an immutable snapshot.  Once the
+      // preview has been completed or cancelled, do not create another
+      // six-digit pending-action preview for the same record.  The store-level
+      // guard remains the final race-safe check when a record reaches a
+      // terminal state after this provider has rendered its card.
+      if (["completed", "cancelled"].includes(record.confirmationPreviewStatus)) {
+        const terminalText = record.confirmationPreviewStatus === "completed"
+          ? "这条记录的确认预览已完成，不能再修改。"
+          : "这条记录的确认预览已取消，不能再修改。";
+        return block(terminalText, { bodyStatus: "error", status: 409 });
+      }
 
       const lines = [
         ["编号", weixinShortId(record.id)],

@@ -138,6 +138,34 @@ function seedRecord(db, id, {
   });
 }
 
+function seedTerminalPreview(db, quickRecordId, status) {
+  const previewId = `preview-${status}-${quickRecordId}`;
+  const hashCharacter = status === "completed" ? "a" : "b";
+  const identityCharacter = status === "completed" ? "c" : "d";
+  db.prepare(`
+    INSERT INTO quick_record_confirmation_previews (
+      id, owner, quick_record_id, draft_hash, identity, revision, status,
+      preview_json, created_at, updated_at
+    ) VALUES (
+      $id, 'assistantowner', $quickRecordId, $draftHash, $identity, 1, $status,
+      '{}', '2026-08-27T05:00:00.000Z', '2026-08-27T05:05:00.000Z'
+    )
+  `).run({
+    $id: previewId,
+    $quickRecordId: quickRecordId,
+    $draftHash: hashCharacter.repeat(64),
+    $identity: identityCharacter.repeat(64),
+    $status: status,
+  });
+  db.prepare(`
+    UPDATE quick_records
+    SET confirmation_preview_id = $previewId,
+        confirmation_preview_status = $status
+    WHERE id = $quickRecordId
+  `).run({ $previewId: previewId, $status: status, $quickRecordId: quickRecordId });
+  return previewId;
+}
+
 describe("quick-record agent HTTP boundary", () => {
   it("captures a record through the affirm card, writes it on 确认, and feeds the weekly report pool", async () => {
     const pending = await send("capture-request", {
@@ -330,6 +358,44 @@ describe("quick-record agent HTTP boundary", () => {
       assert.equal(action.status, "failed");
       assert.equal(action.error_code, "ASSISTANT_CONFIRMATION_LOCKED");
     });
+  });
+
+  it("returns 409 before creating an update action for completed or cancelled confirmation previews", async () => {
+    for (const [terminalStatus, suffix] of [["completed", "cc1111"], ["cancelled", "dd2222"]]) {
+      const recordId = `record-terminal-${terminalStatus}-${suffix}`;
+      const before = withDb((db) => {
+        seedRecord(db, recordId);
+        const previewId = seedTerminalPreview(db, recordId, terminalStatus);
+        return {
+          previewId,
+          record: db.prepare("SELECT * FROM quick_records WHERE id = ?").get(recordId),
+          insight: db.prepare("SELECT * FROM ai_insights WHERE quick_record_id = ?").get(recordId),
+          preview: db.prepare("SELECT * FROM quick_record_confirmation_previews WHERE id = ?").get(previewId),
+          pendingCount: db.prepare("SELECT COUNT(*) AS count FROM assistant_pending_actions").get().count,
+        };
+      });
+
+      const blocked = await send(`terminal-update-${terminalStatus}`, {
+        conversationId: `conversation-terminal-${terminalStatus}`,
+        text: `把记录 ${suffix} 的下一步改成 终态后不应写入`,
+      });
+
+      assert.equal(blocked.response.status, 409, terminalStatus);
+      assert.equal(blocked.body.status, "error", terminalStatus);
+      assert.match(blocked.body.text, terminalStatus === "completed" ? /已完成，不能再修改/ : /已取消，不能再修改/);
+      assert.equal(Object.hasOwn(blocked.body, "confirmationCode"), false);
+      assert.equal(Object.hasOwn(blocked.body, "actionId"), false);
+      withDb((db) => {
+        assert.deepEqual(db.prepare("SELECT * FROM quick_records WHERE id = ?").get(recordId), before.record);
+        assert.deepEqual(db.prepare("SELECT * FROM ai_insights WHERE quick_record_id = ?").get(recordId), before.insight);
+        assert.deepEqual(db.prepare("SELECT * FROM quick_record_confirmation_previews WHERE id = ?").get(before.previewId), before.preview);
+        assert.equal(db.prepare("SELECT COUNT(*) AS count FROM assistant_pending_actions").get().count, before.pendingCount);
+        assert.equal(
+          db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE entity_id = ? AND action IN ('quick_record.update', 'quick_record.analysis.update')").get(recordId).count,
+          0,
+        );
+      });
+    }
   });
 
   it("rotates the update confirmation code on request", async () => {

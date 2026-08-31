@@ -34,6 +34,7 @@ import { apply as applyUsersTable } from "./migrations/0030_users_table.mjs";
 import { apply as applyOwnerIsolationTightening } from "./migrations/0031_owner_isolation_tightening.mjs";
 import { apply as applyWeixinBindings } from "./migrations/0032_weixin_bindings.mjs";
 import { apply as applySecureSettingsAsr } from "./migrations/0033_secure_settings_asr.mjs";
+import { apply as applyQuickRecordConfirmationPreviews } from "./migrations/0034_quick_record_confirmation_previews.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -227,6 +228,12 @@ const migrations = [
     path: resolve(here, "migrations", "0033_secure_settings_asr.mjs"),
     type: "module",
     apply: applySecureSettingsAsr,
+  },
+  {
+    version: "0034",
+    path: resolve(here, "migrations", "0034_quick_record_confirmation_previews.mjs"),
+    type: "module",
+    apply: applyQuickRecordConfirmationPreviews,
   },
 ];
 

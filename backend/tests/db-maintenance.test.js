@@ -95,7 +95,8 @@ describe("sqlite maintenance", () => {
       assert.equal(before.pragmas.foreignKeys, 1);
       assert.equal(before.pragmas.journalMode, "wal");
       assert.equal(before.pragmas.busyTimeout, 5000);
-      assert.equal(Object.keys(before.tableCounts).length, 14);
+      assert.equal(Object.keys(before.tableCounts).length, 15);
+      assert.equal(before.tableCounts.quick_record_confirmation_previews, 0);
       assert.equal(before.tableCounts.sales_decision_analyses, 0);
       assert.deepEqual(before.tables, before.tableCounts);
       assert.equal(backup.status, "backed_up");
@@ -186,7 +187,7 @@ describe("sqlite maintenance", () => {
     }
   });
 
-  it("prints a healthy 14-table integrity report from the db-check command", () => {
+  it("prints a healthy 15-table integrity report from the db-check command", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-"));
     const databaseUrl = join(root, "sales-workbench.sqlite");
 
@@ -200,8 +201,31 @@ describe("sqlite maintenance", () => {
       assert.equal(report.quickCheck, "ok");
       assert.deepEqual(report.foreignKeyViolations, []);
       assert.equal(report.pragmas.busyTimeout, 5000);
-      assert.equal(Object.keys(report.tableCounts).length, 14);
+      assert.equal(Object.keys(report.tableCounts).length, 15);
+      assert.equal(report.tableCounts.quick_record_confirmation_previews, 0);
       assert.equal(report.tableCounts.sales_decision_analyses, 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing quick-record confirmation preview table as invalid", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-db-check-confirmation-preview-"));
+    const databaseUrl = join(root, "sales-workbench.sqlite");
+
+    try {
+      seedTestDatabase(databaseUrl);
+      const damaged = createConnection({ databaseUrl });
+      try {
+        damaged.exec("DROP TABLE quick_record_confirmation_previews");
+      } finally {
+        damaged.close();
+      }
+
+      const report = inspectDatabase({ databaseUrl });
+      assert.equal(report.status, "invalid");
+      assert.deepEqual(report.missingTables, ["quick_record_confirmation_previews"]);
+      assert.equal(report.tableCounts.quick_record_confirmation_previews, null);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -326,7 +350,8 @@ describe("sqlite maintenance", () => {
       assert.equal(report.error.code, "DATABASE_NOT_FOUND");
       assert.equal(report.quickCheck, "error");
       assert.equal(report.foreignKeyViolations, null);
-      assert.equal(Object.keys(report.tableCounts).length, 14);
+      assert.equal(Object.keys(report.tableCounts).length, 15);
+      assert.equal(report.tableCounts.quick_record_confirmation_previews, null);
       assert.equal(report.tableCounts.sales_decision_analyses, null);
       assert.equal(existsSync(databaseUrl), false);
     } finally {
@@ -350,7 +375,8 @@ describe("sqlite maintenance", () => {
       assert.equal(report.error.code, "INSPECTION_FAILED");
       assert.equal(report.quickCheck, "error");
       assert.equal(report.foreignKeyViolations, null);
-      assert.equal(Object.keys(report.tableCounts).length, 14);
+      assert.equal(Object.keys(report.tableCounts).length, 15);
+      assert.equal(report.tableCounts.quick_record_confirmation_previews, null);
       assert.equal(report.tableCounts.sales_decision_analyses, null);
       assert.deepEqual(readFileSync(databaseUrl), beforeBytes);
       assert.deepEqual(readdirSync(root).sort(), beforeEntries);

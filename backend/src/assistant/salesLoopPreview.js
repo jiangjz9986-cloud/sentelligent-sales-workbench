@@ -503,14 +503,20 @@ function dataOwner(value) {
         WHERE latest.quick_record_id = qr.id
         ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1
       )
-      WHERE qr.owner = $owner AND qr.voided_at IS NULL AND qr.status = 'analyzed'
+      WHERE qr.owner = $owner AND qr.voided_at IS NULL
         AND date(substr(COALESCE(qr.occurred_at, qr.created_at), 1, 10)) BETWEEN $start AND $end
         AND (
-          qr.source_channel = '微信助手'
-          OR EXISTS (
-            SELECT 1 FROM manual_confirmations confirmation
-            WHERE confirmation.quick_record_id = qr.id AND confirmation.target = 'weekly'
+          (
+            qr.status IN ('analyzed', 'confirmed')
+            AND (
+              qr.source_channel = '微信助手'
+              OR EXISTS (
+                SELECT 1 FROM manual_confirmations confirmation
+                WHERE confirmation.quick_record_id = qr.id AND confirmation.target = 'weekly'
+              )
+            )
           )
+          OR qr.confirmation_preview_status = 'completed'
         )
       ORDER BY COALESCE(qr.occurred_at, qr.created_at), qr.id
       LIMIT ${MAX_ITEMS + 1}

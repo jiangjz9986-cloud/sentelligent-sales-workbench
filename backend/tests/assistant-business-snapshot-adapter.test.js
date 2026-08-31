@@ -316,6 +316,15 @@ describe("assistant bounded business snapshot adapter", () => {
     assert.doesNotMatch(reimbursement.text, /可报销 70\.00 元，/);
   });
 
+  it("excludes recorded WeChat quick records from the sales-report preview", () => {
+    db.prepare("UPDATE quick_records SET source_channel = '微信助手', status = 'recorded' WHERE id = 'record-a'").run();
+    const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
+    const reports = adapter.salesReportSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+    assert.equal(reports.preview.sourceRecordCount, 0);
+    assert.deepEqual(reports.preview.sourceRefs, []);
+    assert.ok(reports.preview.preparation.blockers.includes("no_confirmed_records"));
+  });
+
   it("exposes the adapter through registered read-only runtime handlers", async () => {
     const sessions = createAssistantSessionRepository(db, { clock: () => new Date("2026-08-17T12:00:00Z") });
     const handlers = createAssistantToolHandlers({

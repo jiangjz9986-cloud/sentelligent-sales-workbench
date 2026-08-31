@@ -203,6 +203,34 @@ function apiItems(values, path, assertItem) {
   return values.map((value, index) => assertItem(value, `${path}[${index}]`));
 }
 
+/**
+ * Confirmation preview data is durable server state.  Keep the public API
+ * boundary strict so the page never performs a write against a partial or
+ * substituted preview.
+ */
+function assertQuickRecordConfirmationPreview(value, path = "quickRecordConfirmationPreview") {
+  const preview = assertApiEntity("quickRecordConfirmationPreview", value, path);
+  if (!Array.isArray(preview.items)) throw new TypeError(`${path}.items: expected array`);
+  if (!Array.isArray(preview.evidence)) throw new TypeError(`${path}.evidence: expected array`);
+  if (!Array.isArray(preview.bulkEligibleItemIds)) {
+    throw new TypeError(`${path}.bulkEligibleItemIds: expected array`);
+  }
+  return preview;
+}
+
+function assertQuickRecordConfirmationOutcome(value, path = "quickRecordConfirmationOutcome") {
+  const outcome = assertApiEntity("quickRecordConfirmationOutcome", value, path);
+  assertQuickRecordConfirmationPreview(outcome.preview, `${path}.preview`);
+  if (!Array.isArray(outcome.confirmedItems)) throw new TypeError(`${path}.confirmedItems: expected array`);
+  if (!Array.isArray(outcome.excludedItems)) throw new TypeError(`${path}.excludedItems: expected array`);
+  return outcome;
+}
+
+function confirmationPreviewUrl(previewId, suffix = "") {
+  const id = requiredApiString(previewId, "previewId");
+  return `/api/quick-record-confirmation-previews/${encodeURIComponent(id)}${suffix}`;
+}
+
 function assertInvoice(value, path = "invoice") {
   const invoice = apiObject(value, path);
   requiredApiString(invoice.id, `${path}.id`);
@@ -1389,37 +1417,47 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("actionItem", deleted.deleted);
     },
 
-    async confirmQuickRecord(quickRecordId, targets, options = {}) {
-      const idempotencyKey = String(options.idempotencyKey ?? "");
-      if (!idempotencyKey || idempotencyKey.trim() !== idempotencyKey) {
-        throw new TypeError("A valid confirmation Idempotency-Key is required");
-      }
-      const payload = {
-        targets,
-        confirmedBy: options.confirmedBy ?? "继振",
-        note: options.note ?? "",
-        targetVersions: options.targetVersions ?? {},
-      };
-      if (options.analysisVersionId) payload.analysisVersionId = options.analysisVersionId;
-      const confirmed = await requestApi(`/api/quick-records/${quickRecordId}/confirm`, {
+    async createQuickRecordConfirmationPreview(quickRecordId) {
+      const response = await requestApi(`/api/quick-records/${encodeURIComponent(requiredApiString(quickRecordId, "quickRecordId"))}/confirmation-previews`, {
         method: "POST",
-        headers: {
-          ...versionHeaders(options.quickRecordVersion),
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify(payload),
+        body: "{}",
       });
+      return assertQuickRecordConfirmationPreview(response?.item, "quickRecordConfirmationPreview.item");
+    },
 
-      return {
-        ...confirmed,
-        confirmations: assertApiCollection("manualConfirmation", confirmed.confirmations ?? []),
-        quickRecord: assertApiEntity("quickRecord", confirmed.quickRecord),
-        analysis: confirmed.analysis ? assertApiEntity("aiInsight", confirmed.analysis) : null,
-        customer: confirmed.customer ? assertApiEntity("customer", confirmed.customer) : null,
-        opportunity: confirmed.opportunity ? assertApiEntity("opportunity", confirmed.opportunity) : null,
-        action: confirmed.action ? assertApiEntity("actionItem", confirmed.action) : null,
-        risk: confirmed.risk ? assertApiEntity("riskItem", confirmed.risk) : null,
-      };
+    async getQuickRecordConfirmationPreview(previewId) {
+      const response = await requestApi(confirmationPreviewUrl(previewId));
+      return assertQuickRecordConfirmationPreview(response?.item, "quickRecordConfirmationPreview.item");
+    },
+
+    async confirmQuickRecordConfirmationItem(previewId, payload) {
+      const response = await requestApi(confirmationPreviewUrl(previewId, "/confirm-item"), {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(payload ?? {}, [
+          "confirm", "suggestionIdentity", "expectedQuickRecordVersion", "analysisVersionId",
+          "summaryHash", "evidenceHash", "itemId", "itemIdentity",
+        ])),
+      });
+      return assertQuickRecordConfirmationOutcome(response?.item, "quickRecordConfirmationOutcome.item");
+    },
+
+    async confirmAllQuickRecordConfirmationItems(previewId, payload) {
+      const response = await requestApi(confirmationPreviewUrl(previewId, "/confirm-all"), {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(payload ?? {}, [
+          "confirm", "suggestionIdentity", "expectedQuickRecordVersion", "analysisVersionId",
+          "summaryHash", "evidenceHash",
+        ])),
+      });
+      return assertQuickRecordConfirmationOutcome(response?.item, "quickRecordConfirmationOutcome.item");
+    },
+
+    async cancelQuickRecordConfirmationPreview(previewId, payload) {
+      const response = await requestApi(confirmationPreviewUrl(previewId, "/cancel"), {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(payload ?? {}, ["cancel", "suggestionIdentity"])),
+      });
+      return assertQuickRecordConfirmationPreview(response?.item, "quickRecordConfirmationPreview.item");
     },
 
     async generateWeeklyDraft({ periodStart, periodEnd, knowledgeIds = [] }) {
