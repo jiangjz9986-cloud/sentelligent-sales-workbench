@@ -208,6 +208,8 @@ import { createWeixinConfirmationOutboxRepository } from "./weixin/outboxReposit
 import { createWeixinDeliveryReadiness } from "./weixin/deliveryReadiness.js";
 import { buildWeeklyDraft } from "./weeklyDraft.js";
 import { createHospitalTenderRepository } from "./hospitalTender/repository.js";
+import { createHospitalTenderLeadConversionService } from "./hospitalTender/leadConversion.js";
+import { createHospitalTenderLeadConversionHttpHandlers } from "./hospitalTender/leadConversionHttp.js";
 import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
 import { createHospitalTenderScheduler } from "./hospitalTender/scheduler.js";
 import {
@@ -2908,6 +2910,19 @@ export function createServer(options = {}) {
     clock: options.hospitalTenderClock ?? (() => new Date()),
     ...(options.hospitalTenderIdFactory ? { idFactory: options.hospitalTenderIdFactory } : {}),
   });
+  const hospitalTenderLeadConversionService = options.hospitalTenderLeadConversionService
+    ?? createHospitalTenderLeadConversionService({
+      db,
+      tenderRepository: hospitalTenderRepository,
+      clock: options.hospitalTenderLeadConversionClock ?? (() => new Date()),
+      ...(options.hospitalTenderLeadConversionFailpoint
+        ? { failpoint: options.hospitalTenderLeadConversionFailpoint }
+        : {}),
+    });
+  const hospitalTenderLeadConversionHttp = options.hospitalTenderLeadConversionHttp
+    ?? createHospitalTenderLeadConversionHttpHandlers({
+      service: hospitalTenderLeadConversionService,
+    });
   const hospitalTenderInternalRunner = options.hospitalTenderInternalRunner
     ?? createInternalHospitalTenderRunner({
       ...(options.hospitalTenderInternalRunnerOptions ?? {}),
@@ -4199,6 +4214,27 @@ export function createServer(options = {}) {
           Pragma: "no-cache",
         });
         return;
+      }
+
+      // Hospital-tender lead conversion is mounted after authentication and
+      // CSRF gates so the adapter receives the server-derived user identity.
+      // Preview/confirm/cancel all share one service and the request body is
+      // read only for the POST actions; the adapter rejects every other method.
+      if (hospitalTenderLeadConversionHttp.matches(url.pathname)) {
+        const body = request.method === "POST"
+          ? await readJson(request, { maxBytes: Math.min(config.jsonBodyLimitBytes, 64 * 1024) })
+          : {};
+        const result = hospitalTenderLeadConversionHttp.handle({
+          method: request.method,
+          pathname: url.pathname,
+          requestIdentity,
+          requestId,
+          body,
+        });
+        if (result !== null) {
+          sendJson(response, result.status, result.body, result.headers);
+          return;
+        }
       }
 
       const weixinBookkeepingReviewRoute = "/api/integrations/weixin/bookkeeping/review";
@@ -8859,6 +8895,8 @@ export function createServer(options = {}) {
   });
   server.hospitalTenderScheduler = hospitalTenderScheduler;
   server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
+  server.hospitalTenderLeadConversionService = hospitalTenderLeadConversionService;
+  server.hospitalTenderLeadConversionHttp = hospitalTenderLeadConversionHttp;
   server.actionReminderScheduler = actionReminderScheduler;
   server.dailyDigestScheduler = dailyDigestScheduler;
   server.asrService = asrService;
