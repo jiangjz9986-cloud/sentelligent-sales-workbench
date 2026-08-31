@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
-const SCHEMA_VERSION = "quick-record-confirmation-v1";
+const SCHEMA_VERSION = "quick-record-confirmation-v2";
 const MAX_ID = 200;
 const MAX_TEXT = 2_000;
 const MAX_JSON_BYTES = 40_000;
@@ -13,14 +13,41 @@ const FIELD_PATH = /^[A-Za-z][A-Za-z0-9_.-]{0,199}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const PREVIEW_STATUSES = new Set(["open", "completed", "cancelled"]);
 const ITEM_STATUSES = new Set(["pending", "confirmed", "cancelled"]);
+const CONFIRMATION_REQUEST_MODES = new Set(["item", "all"]);
 const FORBIDDEN_OBJECT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const CONFIRMABLE_QUICK_RECORD_STATUS = "analyzed";
+const CONFIRMABLE_ANALYSIS_STATUS = "ready_for_confirmation";
 const TARGET_POLICIES = Object.freeze({
-  customer: Object.freeze({ confirmationMode: "explicit", bulkEligible: true }),
-  opportunity: Object.freeze({ confirmationMode: "explicit", bulkEligible: true }),
-  weekly: Object.freeze({ confirmationMode: "explicit", bulkEligible: true }),
-  customer_temperature: Object.freeze({ confirmationMode: "independent", bulkEligible: false }),
-  action: Object.freeze({ confirmationMode: "unsupported", bulkEligible: false }),
-  financial: Object.freeze({ confirmationMode: "unsupported", bulkEligible: false }),
+  customer: Object.freeze({
+    confirmationMode: "explicit",
+    bulkEligible: true,
+    fields: Object.freeze(["needs"]),
+  }),
+  opportunity: Object.freeze({
+    confirmationMode: "explicit",
+    bulkEligible: true,
+    fields: Object.freeze(["requirements"]),
+  }),
+  weekly: Object.freeze({
+    confirmationMode: "explicit",
+    bulkEligible: true,
+    fields: Object.freeze(["entries"]),
+  }),
+  customer_temperature: Object.freeze({
+    confirmationMode: "independent",
+    bulkEligible: false,
+    fields: Object.freeze(["relation"]),
+  }),
+  action: Object.freeze({
+    confirmationMode: "unsupported",
+    bulkEligible: false,
+    fields: Object.freeze(["title"]),
+  }),
+  financial: Object.freeze({
+    confirmationMode: "unsupported",
+    bulkEligible: false,
+    fields: Object.freeze(["amountCents"]),
+  }),
 });
 
 export class QuickRecordConfirmationError extends Error {
@@ -225,9 +252,12 @@ function normalizeEvidence(rawEvidence, code = "DRAFT_DATA_INVALID") {
   });
 }
 
-function policyFor(target, code = "DRAFT_DATA_INVALID") {
+function policyFor(target, field, code = "DRAFT_DATA_INVALID") {
   const policy = TARGET_POLICIES[target];
   if (!policy) fail(code, `Unsupported confirmation target: ${target}`, { status: 500 });
+  if (!policy.fields.includes(field)) {
+    fail(code, `Unsupported confirmation field: ${target}.${field}`, { status: 500 });
+  }
   return policy;
 }
 
@@ -258,9 +288,9 @@ function normalizeChanges(rawChanges, evidence, code = "DRAFT_DATA_INVALID") {
     if (ids.has(id)) fail(code, `analysis.changes[${index}].id is duplicated`, { status: 500 });
     ids.add(id);
     const target = identifier(raw.target, `analysis.changes[${index}].target`, code, 500);
-    const policy = policyFor(target, code);
     const entityId = identifier(raw.entityId, `analysis.changes[${index}].entityId`, code, 500);
     const field = fieldPath(raw.field, `analysis.changes[${index}].field`, code, 500);
+    const policy = policyFor(target, field, code);
     const location = `${target}\u0000${entityId}\u0000${field}`;
     if (locations.has(location)) fail(code, `analysis.changes[${index}] duplicates a target field`, { status: 500 });
     locations.add(location);
@@ -308,6 +338,7 @@ function draftPayload(draft) {
     quickRecordVersion: draft.quickRecord.version,
     quickRecordStatus: draft.quickRecord.status,
     analysisVersionId: draft.analysis.id,
+    analysisStatus: draft.analysis.status,
     summaryHash: draft.summaryHash,
     evidenceHash: draft.evidenceHash,
     changes: draft.changes.map(changeSeed),
@@ -332,6 +363,7 @@ function normalizeDraft(raw, { owner, quickRecordId } = {}) {
     fail("DRAFT_DATA_INVALID", "A saved analysis is required", { status: 500 });
   }
   const analysisId = identifier(raw.analysis.id, "analysis.id", "DRAFT_DATA_INVALID", 500);
+  const analysisStatus = identifier(raw.analysis.status, "analysis.status", "DRAFT_DATA_INVALID", 500);
   const summary = safeJson(raw.analysis.summary, "analysis.summary", {
     code: "DRAFT_DATA_INVALID",
     status: 500,
@@ -345,7 +377,7 @@ function normalizeDraft(raw, { owner, quickRecordId } = {}) {
     owner,
     hasUnsavedChanges: raw.hasUnsavedChanges,
     quickRecord,
-    analysis: { id: analysisId },
+    analysis: { id: analysisId, status: analysisStatus },
     summary,
     evidence,
     changes,
@@ -355,6 +387,37 @@ function normalizeDraft(raw, { owner, quickRecordId } = {}) {
   };
   draft.draftHash = digest(draftPayload(draft));
   return draft;
+}
+
+function assertDraftConfirmable(draft) {
+  if (draft.quickRecord.status !== CONFIRMABLE_QUICK_RECORD_STATUS) {
+    fail("QUICK_RECORD_NOT_CONFIRMABLE", "The quick record is not in a confirmable state", {
+      status: 409,
+      details: { currentStatus: draft.quickRecord.status },
+    });
+  }
+  if (draft.analysis.status !== CONFIRMABLE_ANALYSIS_STATUS) {
+    fail("ANALYSIS_NOT_CONFIRMABLE", "The analysis is not in a confirmable state", {
+      status: 409,
+      details: { currentStatus: draft.analysis.status },
+    });
+  }
+}
+
+function draftStateConflict(draft) {
+  if (draft.quickRecord.status !== CONFIRMABLE_QUICK_RECORD_STATUS) {
+    return {
+      conflict: "quick_record_not_confirmable",
+      details: { currentStatus: draft.quickRecord.status },
+    };
+  }
+  if (draft.analysis.status !== CONFIRMABLE_ANALYSIS_STATUS) {
+    return {
+      conflict: "analysis_not_confirmable",
+      details: { currentStatus: draft.analysis.status },
+    };
+  }
+  return null;
 }
 
 function itemIdentityPayload(item, context) {
@@ -367,6 +430,11 @@ function itemIdentityPayload(item, context) {
     ...changeSeed(item),
     confirmationMode: item.confirmationMode,
     bulkEligible: item.bulkEligible,
+    status: item.status,
+    confirmedAt: item.confirmedAt,
+    confirmedBy: item.confirmedBy,
+    receipt: item.receipt,
+    confirmationRequest: item.confirmationRequest,
   };
 }
 
@@ -379,12 +447,35 @@ function previewIdentityPayload(preview) {
     quickRecordVersion: preview.quickRecordVersion,
     quickRecordStatus: preview.quickRecordStatus,
     analysisVersionId: preview.analysisVersionId,
+    analysisStatus: preview.analysisStatus,
     summaryHash: preview.summaryHash,
     evidenceHash: preview.evidenceHash,
     draftHash: preview.draftHash,
+    status: preview.status,
+    revision: preview.revision,
     itemIdentities: preview.items.map((item) => item.identity),
+    requiresHumanConfirmation: preview.requiresHumanConfirmation,
+    automaticWriteAllowed: preview.automaticWriteAllowed,
+    createdWithUnsavedChanges: preview.createdWithUnsavedChanges,
     createdAt: preview.createdAt,
+    updatedAt: preview.updatedAt,
+    completedAt: preview.completedAt,
+    cancelledAt: preview.cancelledAt,
+    cancellationRequestIdentity: preview.cancellationRequestIdentity,
   };
+}
+
+function refreshIdentities(preview) {
+  for (const item of preview.items) {
+    item.identity = digest(itemIdentityPayload(item, {
+      previewId: preview.id,
+      owner: preview.owner,
+      quickRecordId: preview.quickRecordId,
+      analysisVersionId: preview.analysisVersionId,
+    }));
+  }
+  preview.identity = digest(previewIdentityPayload(preview));
+  return preview;
 }
 
 function previewDraftHash(preview) {
@@ -393,6 +484,7 @@ function previewDraftHash(preview) {
     quickRecordVersion: preview.quickRecordVersion,
     quickRecordStatus: preview.quickRecordStatus,
     analysisVersionId: preview.analysisVersionId,
+    analysisStatus: preview.analysisStatus,
     summaryHash: preview.summaryHash,
     evidenceHash: preview.evidenceHash,
     changes: preview.items.map(changeSeed),
@@ -421,17 +513,39 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     "PREVIEW_DATA_INVALID",
     500,
   );
+  if (preview.quickRecordStatus !== CONFIRMABLE_QUICK_RECORD_STATUS) {
+    fail("PREVIEW_DATA_INVALID", "Stored quick-record state is not confirmable", { status: 500 });
+  }
   preview.analysisVersionId = identifier(
     preview.analysisVersionId,
     "preview.analysisVersionId",
     "PREVIEW_DATA_INVALID",
     500,
   );
+  preview.analysisStatus = identifier(
+    preview.analysisStatus,
+    "preview.analysisStatus",
+    "PREVIEW_DATA_INVALID",
+    500,
+  );
+  if (preview.analysisStatus !== CONFIRMABLE_ANALYSIS_STATUS) {
+    fail("PREVIEW_DATA_INVALID", "Stored analysis state is not confirmable", { status: 500 });
+  }
   preview.revision = positiveInteger(preview.revision, "preview.revision", "PREVIEW_DATA_INVALID", 500);
   preview.createdAt = isoDate(preview.createdAt, "preview.createdAt", { required: true });
   preview.updatedAt = isoDate(preview.updatedAt, "preview.updatedAt", { required: true });
   preview.cancelledAt = isoDate(preview.cancelledAt, "preview.cancelledAt");
   preview.completedAt = isoDate(preview.completedAt, "preview.completedAt");
+  preview.cancellationRequestIdentity = preview.cancellationRequestIdentity === null
+    || preview.cancellationRequestIdentity === undefined
+    ? null
+    : String(preview.cancellationRequestIdentity);
+  if (
+    preview.cancellationRequestIdentity !== null
+    && !SHA256.test(preview.cancellationRequestIdentity)
+  ) {
+    fail("PREVIEW_DATA_INVALID", "Stored cancellation request identity is invalid", { status: 500 });
+  }
   if (!PREVIEW_STATUSES.has(preview.status)) {
     fail("PREVIEW_DATA_INVALID", "Stored confirmation preview status is invalid", { status: 500 });
   }
@@ -466,9 +580,9 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     if (itemIds.has(item.id)) fail("PREVIEW_DATA_INVALID", "Stored preview item id is duplicated", { status: 500 });
     itemIds.add(item.id);
     item.target = identifier(item.target, `preview.items[${index}].target`, "PREVIEW_DATA_INVALID", 500);
-    const policy = policyFor(item.target, "PREVIEW_DATA_INVALID");
     item.entityId = identifier(item.entityId, `preview.items[${index}].entityId`, "PREVIEW_DATA_INVALID", 500);
     item.field = fieldPath(item.field, `preview.items[${index}].field`, "PREVIEW_DATA_INVALID", 500);
+    const policy = policyFor(item.target, item.field, "PREVIEW_DATA_INVALID");
     item.label = requiredText(item.label, `preview.items[${index}].label`, 200, "PREVIEW_DATA_INVALID", 500);
     item.before = safeJson(item.before, `preview.items[${index}].before`, {
       code: "PREVIEW_DATA_INVALID",
@@ -530,17 +644,64 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
       fail("PREVIEW_DATA_INVALID", "Stored preview item status is invalid", { status: 500 });
     }
     item.confirmedAt = isoDate(item.confirmedAt, `preview.items[${index}].confirmedAt`);
+    item.confirmedBy = optionalText(
+      item.confirmedBy,
+      `preview.items[${index}].confirmedBy`,
+      MAX_ID,
+      "PREVIEW_DATA_INVALID",
+      500,
+    );
+    if (item.confirmedBy !== null) {
+      item.confirmedBy = identifier(
+        item.confirmedBy,
+        `preview.items[${index}].confirmedBy`,
+        "PREVIEW_DATA_INVALID",
+        500,
+      );
+    }
     item.receipt = item.receipt === null || item.receipt === undefined
       ? null
       : safeJson(item.receipt, `preview.items[${index}].receipt`, {
         code: "PREVIEW_DATA_INVALID",
         status: 500,
       });
+    if (item.confirmationRequest === null || item.confirmationRequest === undefined) {
+      item.confirmationRequest = null;
+    } else {
+      if (!isPlainObject(item.confirmationRequest)) {
+        fail("PREVIEW_DATA_INVALID", "Stored confirmation request is invalid", { status: 500 });
+      }
+      const requestMode = requiredText(
+        item.confirmationRequest.mode,
+        `preview.items[${index}].confirmationRequest.mode`,
+        20,
+        "PREVIEW_DATA_INVALID",
+        500,
+      );
+      if (!CONFIRMATION_REQUEST_MODES.has(requestMode)) {
+        fail("PREVIEW_DATA_INVALID", "Stored confirmation request mode is invalid", { status: 500 });
+      }
+      const requestSuggestionIdentity = String(item.confirmationRequest.suggestionIdentity ?? "");
+      const requestItemIdentity = String(item.confirmationRequest.itemIdentity ?? "");
+      if (!SHA256.test(requestSuggestionIdentity) || !SHA256.test(requestItemIdentity)) {
+        fail("PREVIEW_DATA_INVALID", "Stored confirmation request identity is invalid", { status: 500 });
+      }
+      item.confirmationRequest = {
+        mode: requestMode,
+        suggestionIdentity: requestSuggestionIdentity,
+        itemIdentity: requestItemIdentity,
+      };
+    }
     if (item.status === "confirmed") {
-      if (!item.confirmedAt || item.receipt === null) {
+      if (!item.confirmedAt || !item.confirmedBy || item.receipt === null || !item.confirmationRequest) {
         fail("PREVIEW_DATA_INVALID", "Confirmed preview item lacks confirmation evidence", { status: 500 });
       }
-    } else if (item.confirmedAt !== null || item.receipt !== null) {
+    } else if (
+      item.confirmedAt !== null
+      || item.confirmedBy !== null
+      || item.receipt !== null
+      || item.confirmationRequest !== null
+    ) {
       fail("PREVIEW_DATA_INVALID", "Unconfirmed preview item has confirmation evidence", { status: 500 });
     }
     if (!SHA256.test(String(item.identity ?? ""))) {
@@ -558,7 +719,11 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     return item;
   });
   if (preview.status === "open") {
-    if (preview.completedAt !== null || preview.cancelledAt !== null) {
+    if (
+      preview.completedAt !== null
+      || preview.cancelledAt !== null
+      || preview.cancellationRequestIdentity !== null
+    ) {
       fail("PREVIEW_DATA_INVALID", "Open confirmation preview has a terminal timestamp", { status: 500 });
     }
     if (preview.items.some((item) => item.status === "cancelled")) {
@@ -566,7 +731,7 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     }
   }
   if (preview.status === "completed") {
-    if (!preview.completedAt || preview.cancelledAt !== null) {
+    if (!preview.completedAt || preview.cancelledAt !== null || preview.cancellationRequestIdentity !== null) {
       fail("PREVIEW_DATA_INVALID", "Completed confirmation preview has invalid terminal state", { status: 500 });
     }
     if (preview.items.some((item) => item.status === "cancelled")) {
@@ -577,7 +742,7 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
     }
   }
   if (preview.status === "cancelled") {
-    if (!preview.cancelledAt || preview.completedAt !== null) {
+    if (!preview.cancelledAt || preview.completedAt !== null || !preview.cancellationRequestIdentity) {
       fail("PREVIEW_DATA_INVALID", "Cancelled confirmation preview has invalid terminal state", { status: 500 });
     }
     if (preview.items.some((item) => item.status === "pending")) {
@@ -595,6 +760,8 @@ function normalizeStoredPreview(raw, { owner = null } = {}) {
 
 function effectivePreview(preview, { replayed = false } = {}) {
   const result = clone(preview);
+  delete result.cancellationRequestIdentity;
+  for (const item of result.items) delete item.confirmationRequest;
   result.replayed = replayed;
   result.confirmationBlocked = result.createdWithUnsavedChanges;
   result.bulkEligibleItemIds = result.items
@@ -649,6 +816,21 @@ function normalizeCurrent(raw, { owner, item }) {
   };
 }
 
+function redactedConflictDetails(rawCurrent, { owner, item }) {
+  const details = { itemId: item.id };
+  if (
+    isPlainObject(rawCurrent)
+    && rawCurrent.owner === owner
+    && rawCurrent.entityId === item.entityId
+    && rawCurrent.field === item.field
+    && Number.isSafeInteger(rawCurrent.version)
+    && rawCurrent.version > 0
+  ) {
+    details.currentVersion = rawCurrent.version;
+  }
+  return details;
+}
+
 function conflictResult(preview, reason, details = null) {
   return {
     status: "conflict",
@@ -668,6 +850,7 @@ export function createQuickRecordConfirmationService({
   writeRepository,
   auditRepository,
   runInTransaction,
+  resolveAuthenticatedActor,
   idFactory = randomUUID,
   clock = () => new Date(),
 } = {}) {
@@ -676,6 +859,9 @@ export function createQuickRecordConfirmationService({
   assertRepository(writeRepository, "writeRepository", ["read", "apply"]);
   assertRepository(auditRepository, "auditRepository", ["append"]);
   if (typeof runInTransaction !== "function") throw new TypeError("runInTransaction must be a function");
+  if (typeof resolveAuthenticatedActor !== "function") {
+    throw new TypeError("resolveAuthenticatedActor must be a function");
+  }
   if (typeof idFactory !== "function") throw new TypeError("idFactory must be a function");
   if (typeof clock !== "function") throw new TypeError("clock must be a function");
 
@@ -699,6 +885,7 @@ export function createQuickRecordConfirmationService({
       if (!rawDraft) notFound();
       const draft = normalizeDraft(rawDraft, { owner, quickRecordId });
       if (!draft) notFound();
+      assertDraftConfirmable(draft);
       const existingRaw = previewRepository.findByDraft({
         owner,
         quickRecordId,
@@ -719,7 +906,9 @@ export function createQuickRecordConfirmationService({
           identity: null,
           status: "pending",
           confirmedAt: null,
+          confirmedBy: null,
           receipt: null,
+          confirmationRequest: null,
         };
         item.identity = digest(itemIdentityPayload(item, {
           previewId: id,
@@ -740,6 +929,7 @@ export function createQuickRecordConfirmationService({
         quickRecordVersion: draft.quickRecord.version,
         quickRecordStatus: draft.quickRecord.status,
         analysisVersionId: draft.analysis.id,
+        analysisStatus: draft.analysis.status,
         summary: clone(draft.summary),
         evidence: clone(draft.evidence),
         summaryHash: draft.summaryHash,
@@ -753,8 +943,9 @@ export function createQuickRecordConfirmationService({
         updatedAt: now,
         completedAt: null,
         cancelledAt: null,
+        cancellationRequestIdentity: null,
       };
-      stored.identity = digest(previewIdentityPayload(stored));
+      refreshIdentities(stored);
       const createdRaw = previewRepository.create(clone(stored));
       const created = normalizeStoredPreview(unwrapItem(createdRaw), { owner });
       if (!created || created.draftHash !== draft.draftHash) {
@@ -769,8 +960,31 @@ export function createQuickRecordConfirmationService({
   }
 
   function parsePins(input) {
+    const owner = identifier(input.owner, "owner");
+    if (input.confirmedBy !== undefined) {
+      fail(
+        "UNTRUSTED_CONFIRMATION_ACTOR",
+        "confirmedBy must be derived from authenticated context",
+        { status: 403 },
+      );
+    }
+    const resolvedActor = resolveAuthenticatedActor({ owner, actor: input.actor });
+    if (resolvedActor && typeof resolvedActor.then === "function") {
+      throw new TypeError("resolveAuthenticatedActor must execute synchronously");
+    }
+    if (
+      !isPlainObject(resolvedActor)
+      || resolvedActor.authenticated !== true
+      || resolvedActor.owner !== owner
+    ) {
+      fail("UNTRUSTED_CONFIRMATION_ACTOR", "Authenticated confirmation actor is required", { status: 403 });
+    }
+    const actor = {
+      id: identifier(resolvedActor.id, "authenticatedActor.id", "UNTRUSTED_CONFIRMATION_ACTOR", 403),
+      owner,
+    };
     return {
-      owner: identifier(input.owner, "owner"),
+      owner,
       previewId: identifier(input.previewId, "previewId"),
       suggestionIdentity: digestInput(input.suggestionIdentity, "suggestionIdentity"),
       expectedQuickRecordVersion: positiveInteger(
@@ -780,14 +994,11 @@ export function createQuickRecordConfirmationService({
       analysisVersionId: identifier(input.analysisVersionId, "analysisVersionId"),
       summaryHash: digestInput(input.summaryHash, "summaryHash"),
       evidenceHash: digestInput(input.evidenceHash, "evidenceHash"),
-      confirmedBy: optionalText(input.confirmedBy, "confirmedBy", 200),
+      actor,
     };
   }
 
-  function assertPins(preview, pins) {
-    if (!sameDigest(preview.identity, pins.suggestionIdentity)) {
-      fail("SUGGESTION_IDENTITY_MISMATCH", "The preview suggestion identity does not match", { status: 409 });
-    }
+  function assertPinnedInputs(preview, pins) {
     if (
       pins.expectedQuickRecordVersion !== preview.quickRecordVersion
       || pins.analysisVersionId !== preview.analysisVersionId
@@ -798,11 +1009,32 @@ export function createQuickRecordConfirmationService({
     }
   }
 
+  function assertPins(preview, pins) {
+    if (!sameDigest(preview.identity, pins.suggestionIdentity)) {
+      fail("SUGGESTION_IDENTITY_MISMATCH", "The preview suggestion identity does not match", { status: 409 });
+    }
+    assertPinnedInputs(preview, pins);
+  }
+
+  function matchesConfirmationReplay(item, pins, { mode, itemIdentity = null } = {}) {
+    const request = item.confirmationRequest;
+    if (
+      item.status !== "confirmed"
+      || !request
+      || request.mode !== mode
+      || item.confirmedBy !== pins.actor.id
+      || !sameDigest(request.suggestionIdentity, pins.suggestionIdentity)
+    ) return false;
+    return mode !== "item" || sameDigest(request.itemIdentity, itemIdentity);
+  }
+
   function revalidateDraft(preview, owner) {
     const raw = draftRepository.get({ owner, quickRecordId: preview.quickRecordId });
     if (!raw) return { conflict: "quick_record_unavailable" };
     const draft = normalizeDraft(raw, { owner, quickRecordId: preview.quickRecordId });
     if (!draft) return { conflict: "quick_record_unavailable" };
+    const stateConflict = draftStateConflict(draft);
+    if (stateConflict) return stateConflict;
     if (draft.hasUnsavedChanges) {
       fail("UNSAVED_DRAFT_CHANGES", "Save or discard analysis draft edits before confirmation", { status: 409 });
     }
@@ -822,7 +1054,7 @@ export function createQuickRecordConfirmationService({
     return { draft };
   }
 
-  function execute(preview, owner, items, { mode, confirmedBy }) {
+  function execute(preview, owner, items, { mode, actor }) {
     for (const item of items) {
       const current = normalizeCurrent(writeRepository.read({ owner, item: clone(item) }), { owner, item });
       if (!current) throw new ConfirmationConflict("target_unavailable", { itemId: item.id });
@@ -830,7 +1062,6 @@ export function createQuickRecordConfirmationService({
         throw new ConfirmationConflict("target_changed", {
           itemId: item.id,
           currentVersion: current.version,
-          currentValue: current.value,
         });
       }
     }
@@ -860,10 +1091,10 @@ export function createQuickRecordConfirmationService({
         throw error;
       }
       if (rawResult?.conflict || rawResult?.notFound) {
-        throw new ConfirmationConflict(rawResult.conflict ? "target_changed" : "target_unavailable", {
-          itemId: item.id,
-          current: rawResult.current ?? null,
-        });
+        throw new ConfirmationConflict(
+          rawResult.conflict ? "target_changed" : "target_unavailable",
+          redactedConflictDetails(rawResult.current, { owner, item }),
+        );
       }
       const updated = normalizeCurrent(unwrapItem(rawResult), { owner, item });
       if (
@@ -879,7 +1110,13 @@ export function createQuickRecordConfirmationService({
       const nextItem = next.items.find((candidate) => candidate.id === item.id);
       nextItem.status = "confirmed";
       nextItem.confirmedAt = now;
+      nextItem.confirmedBy = actor.id;
       nextItem.receipt = clone(receipt);
+      nextItem.confirmationRequest = {
+        mode,
+        suggestionIdentity: preview.identity,
+        itemIdentity: item.identity,
+      };
       outcomes.push({
         id: item.id,
         target: item.target,
@@ -895,6 +1132,8 @@ export function createQuickRecordConfirmationService({
       next.status = "completed";
       next.completedAt = now;
     }
+    next.revision = preview.revision + 1;
+    refreshIdentities(next);
     const replacedRaw = previewRepository.replace({
       owner,
       previewId: preview.id,
@@ -906,7 +1145,14 @@ export function createQuickRecordConfirmationService({
       fail("PREVIEW_STATE_CONFLICT", "The confirmation preview changed during confirmation", { status: 409 });
     }
     const replaced = normalizeStoredPreview(unwrapItem(replacedRaw), { owner });
-    if (!replaced) fail("PREVIEW_DATA_INVALID", "Updated confirmation preview is invalid", { status: 500 });
+    if (
+      !replaced
+      || replaced.id !== next.id
+      || replaced.revision !== next.revision
+      || !sameDigest(replaced.identity, next.identity)
+    ) {
+      fail("PREVIEW_DATA_INVALID", "Updated confirmation preview is invalid", { status: 500 });
+    }
     const excludedItems = replaced.items.map(exclusionFor).filter(Boolean);
     const auditRaw = auditRepository.append({
       action: "quick_record.confirmation",
@@ -915,9 +1161,10 @@ export function createQuickRecordConfirmationService({
       quickRecordVersion: replaced.quickRecordVersion,
       analysisVersionId: replaced.analysisVersionId,
       previewId: replaced.id,
+      previousSuggestionIdentity: preview.identity,
       suggestionIdentity: replaced.identity,
       mode,
-      confirmedBy,
+      confirmedBy: actor.id,
       confirmedAt: now,
       itemIds: outcomes.map((item) => item.id),
       before: outcomes.map((item) => ({ id: item.id, value: clone(item.before), version: item.entityVersionBefore })),
@@ -949,9 +1196,20 @@ export function createQuickRecordConfirmationService({
       return transaction(() => {
         const loaded = loadPreview(pins.owner, pins.previewId);
         const preview = loaded.preview;
-        assertPins(preview, pins);
         const item = preview.items.find((candidate) => candidate.id === itemId);
         if (!item) notFound();
+        if (matchesConfirmationReplay(item, pins, { mode: "item", itemIdentity })) {
+          assertPinnedInputs(preview, pins);
+          return {
+            status: "confirmed",
+            preview: effectivePreview(preview, { replayed: true }),
+            confirmedItems: [],
+            excludedItems: preview.items.map(exclusionFor).filter(Boolean),
+            writeback: false,
+            replayed: true,
+          };
+        }
+        assertPins(preview, pins);
         if (!sameDigest(item.identity, itemIdentity)) {
           fail("ITEM_IDENTITY_MISMATCH", "The preview item identity does not match", { status: 409 });
         }
@@ -991,7 +1249,7 @@ export function createQuickRecordConfirmationService({
         }
         return execute(preview, pins.owner, [item], {
           mode: "item",
-          confirmedBy: pins.confirmedBy,
+          actor: pins.actor,
         });
       });
     } catch (error) {
@@ -1010,6 +1268,17 @@ export function createQuickRecordConfirmationService({
       return transaction(() => {
         const loaded = loadPreview(pins.owner, pins.previewId);
         const preview = loaded.preview;
+        if (preview.items.some((item) => matchesConfirmationReplay(item, pins, { mode: "all" }))) {
+          assertPinnedInputs(preview, pins);
+          return {
+            status: "confirmed",
+            preview: effectivePreview(preview, { replayed: true }),
+            confirmedItems: [],
+            excludedItems: preview.items.map(exclusionFor).filter(Boolean),
+            writeback: false,
+            replayed: true,
+          };
+        }
         assertPins(preview, pins);
         if (preview.status === "cancelled") {
           return {
@@ -1040,7 +1309,7 @@ export function createQuickRecordConfirmationService({
         }
         return execute(preview, pins.owner, candidates, {
           mode: "all",
-          confirmedBy: pins.confirmedBy,
+          actor: pins.actor,
         });
       });
     } catch (error) {
@@ -1065,6 +1334,12 @@ export function createQuickRecordConfirmationService({
     return transaction(() => {
       const loaded = loadPreview(owner, previewId);
       const preview = loaded.preview;
+      if (
+        preview.status === "cancelled"
+        && sameDigest(preview.cancellationRequestIdentity, identity)
+      ) {
+        return effectivePreview(preview, { replayed: true });
+      }
       if (!sameDigest(preview.identity, identity)) {
         fail("SUGGESTION_IDENTITY_MISMATCH", "The preview suggestion identity does not match", { status: 409 });
       }
@@ -1078,18 +1353,28 @@ export function createQuickRecordConfirmationService({
       next.status = "cancelled";
       next.cancelledAt = now;
       next.updatedAt = now;
+      next.cancellationRequestIdentity = preview.identity;
+      next.revision = preview.revision + 1;
+      refreshIdentities(next);
       const replacedRaw = previewRepository.replace({
         owner,
         previewId,
         identity: preview.identity,
         expectedRevision: preview.revision,
-        item: next,
+        item: clone(next),
       });
       if (!replacedRaw) {
         fail("PREVIEW_STATE_CONFLICT", "The confirmation preview changed during cancellation", { status: 409 });
       }
       const replaced = normalizeStoredPreview(unwrapItem(replacedRaw), { owner });
-      if (!replaced) fail("PREVIEW_DATA_INVALID", "Cancelled confirmation preview is invalid", { status: 500 });
+      if (
+        !replaced
+        || replaced.id !== next.id
+        || replaced.revision !== next.revision
+        || !sameDigest(replaced.identity, next.identity)
+      ) {
+        fail("PREVIEW_DATA_INVALID", "Cancelled confirmation preview is invalid", { status: 500 });
+      }
       return effectivePreview(replaced);
     });
   }

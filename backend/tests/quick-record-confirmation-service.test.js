@@ -18,6 +18,7 @@ function createHarness() {
   let sequence = 0;
   let failAudit = false;
   let failApplyTarget = null;
+  let applyConflictCurrent = null;
   const counters = {
     previewCreates: 0,
     previewReplaces: 0,
@@ -45,6 +46,7 @@ function createHarness() {
       },
       analysis: {
         id: "analysis-a",
+        status: "ready_for_confirmation",
         summary: {
           request: { title: "客户诉求", text: "补齐本地灾备规划。" },
           feedback: { title: "客户反馈", text: "客户同意安排技术交流。" },
@@ -146,6 +148,7 @@ function createHarness() {
       },
       analysis: {
         id: "analysis-b",
+        status: "ready_for_confirmation",
         summary: { request: { title: "诉求", text: "另一个账号的数据" } },
         evidence: [{
           key: "request",
@@ -242,6 +245,9 @@ function createHarness() {
         error.code = "VERSION_CONFLICT";
         throw error;
       }
+      if (applyConflictCurrent) {
+        return { conflict: true, current: clone(applyConflictCurrent) };
+      }
       counters.businessWrites[item.target] += 1;
       const updated = {
         ...current,
@@ -283,12 +289,18 @@ function createHarness() {
     }
   };
 
+  const resolveAuthenticatedActor = ({ owner, actor }) => {
+    if (!actor || actor.sessionId !== `authenticated-session:${owner}`) return null;
+    return { id: owner, owner, authenticated: true };
+  };
+
   const service = createQuickRecordConfirmationService({
     draftRepository,
     previewRepository,
     writeRepository,
     auditRepository,
     runInTransaction,
+    resolveAuthenticatedActor,
     idFactory: () => `quick-confirmation-${++sequence}`,
     clock: () => new Date(now),
   });
@@ -303,6 +315,7 @@ function createHarness() {
     advance(ms) { now = new Date(now.getTime() + ms); },
     setFailAudit(value) { failAudit = value; },
     setFailApplyTarget(value) { failApplyTarget = value; },
+    setApplyConflictCurrent(value) { applyConflictCurrent = clone(value); },
   };
 }
 
@@ -315,6 +328,7 @@ function pins(preview, overrides = {}) {
     analysisVersionId: preview.analysisVersionId,
     summaryHash: preview.summaryHash,
     evidenceHash: preview.evidenceHash,
+    actor: { sessionId: `authenticated-session:${preview.owner}` },
     ...overrides,
   };
 }
@@ -339,6 +353,17 @@ describe("quick-record confirmation preview core", () => {
       name: "TypeError",
       message: "runInTransaction must be a function",
     });
+
+    assert.throws(() => createQuickRecordConfirmationService({
+      draftRepository: { get: noop },
+      previewRepository: { findByDraft: noop, create: noop, get: noop, replace: noop },
+      writeRepository: { read: noop, apply: noop },
+      auditRepository: { append: noop },
+      runInTransaction: (work) => work(),
+    }), {
+      name: "TypeError",
+      message: "resolveAuthenticatedActor must be a function",
+    });
   });
 
   it("builds a durable item-by-item before/after preview without business writes", () => {
@@ -348,10 +373,11 @@ describe("quick-record confirmation preview core", () => {
     const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
     const replay = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
 
-    assert.equal(preview.schemaVersion, "quick-record-confirmation-v1");
+    assert.equal(preview.schemaVersion, "quick-record-confirmation-v2");
     assert.equal(preview.status, "open");
     assert.equal(preview.quickRecordVersion, 4);
     assert.equal(preview.analysisVersionId, "analysis-a");
+    assert.equal(preview.analysisStatus, "ready_for_confirmation");
     assert.match(preview.identity, /^[0-9a-f]{64}$/u);
     assert.match(preview.summaryHash, /^[0-9a-f]{64}$/u);
     assert.match(preview.evidenceHash, /^[0-9a-f]{64}$/u);
@@ -359,6 +385,14 @@ describe("quick-record confirmation preview core", () => {
     assert.deepEqual(preview.items[0].before, ["原诉求"]);
     assert.deepEqual(preview.items[0].after, ["原诉求", "补齐本地灾备规划"]);
     assert.equal(preview.items.find((item) => item.target === "customer").confirmationMode, "explicit");
+    assert.deepEqual(preview.items.map((item) => [item.target, item.field]), [
+      ["customer", "needs"],
+      ["opportunity", "requirements"],
+      ["weekly", "entries"],
+      ["customer_temperature", "relation"],
+      ["action", "title"],
+      ["financial", "amountCents"],
+    ]);
     assert.equal(preview.items.find((item) => item.target === "customer_temperature").confirmationMode, "independent");
     assert.equal(preview.items.find((item) => item.target === "customer_temperature").bulkEligible, false);
     assert.equal(preview.items.find((item) => item.target === "action").confirmationMode, "unsupported");
@@ -391,10 +425,114 @@ describe("quick-record confirmation preview core", () => {
     assert.equal(harness.counters.audits, 0);
   });
 
+  it("allows preview and confirmation only from explicit confirmable record and analysis states", () => {
+    for (const [kind, terminalStatus, code] of [
+      ["quick-record", "recorded", "QUICK_RECORD_NOT_CONFIRMABLE"],
+      ["quick-record", "confirmed", "QUICK_RECORD_NOT_CONFIRMABLE"],
+      ["analysis", "draft", "ANALYSIS_NOT_CONFIRMABLE"],
+      ["analysis", "confirmed", "ANALYSIS_NOT_CONFIRMABLE"],
+    ]) {
+      const harness = createHarness();
+      const draft = harness.drafts.get("quick-record-a");
+      if (kind === "quick-record") draft.quickRecord.status = terminalStatus;
+      else draft.analysis.status = terminalStatus;
+
+      assert.throws(
+        () => harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" }),
+        errorCode(code),
+        `${kind}:${terminalStatus}`,
+      );
+      assert.equal(harness.counters.previewCreates, 0, `${kind}:${terminalStatus}`);
+      assert.equal(harness.counters.businessReads, 0, `${kind}:${terminalStatus}`);
+      assert.equal(totalWrites(harness), 0, `${kind}:${terminalStatus}`);
+      assert.equal(harness.counters.audits, 0, `${kind}:${terminalStatus}`);
+    }
+
+    {
+      const harness = createHarness();
+      delete harness.drafts.get("quick-record-a").analysis.status;
+      assert.throws(
+        () => harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" }),
+        errorCode("DRAFT_DATA_INVALID"),
+      );
+      assert.equal(harness.counters.previewCreates, 0);
+      assert.equal(totalWrites(harness), 0);
+    }
+
+    for (const [kind, terminalStatus, reason] of [
+      ["quick-record", "confirmed", "quick_record_not_confirmable"],
+      ["analysis", "confirmed", "analysis_not_confirmable"],
+    ]) {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      const item = preview.items[0];
+      const draft = harness.drafts.get("quick-record-a");
+      if (kind === "quick-record") draft.quickRecord.status = terminalStatus;
+      else draft.analysis.status = terminalStatus;
+
+      const result = harness.service.confirmItem({
+        ...pins(preview),
+        itemId: item.id,
+        itemIdentity: item.identity,
+        confirm: true,
+      });
+      assert.equal(result.status, "conflict", kind);
+      assert.equal(result.reason, reason, kind);
+      assert.deepEqual(result.details, { currentStatus: terminalStatus }, kind);
+      assert.equal(harness.counters.businessReads, 0, kind);
+      assert.equal(totalWrites(harness), 0, kind);
+      assert.equal(harness.counters.audits, 0, kind);
+    }
+  });
+
+  it("fails closed unless every target and field pair is explicitly allowlisted", () => {
+    const cases = [
+      ["customer", "temperature"],
+      ["opportunity", "status"],
+      ["weekly", "owner"],
+      ["customer_temperature", "needs"],
+      ["action", "amountCents"],
+      ["financial", "title"],
+      ["unknown_target", "entries"],
+    ];
+
+    for (const [target, field] of cases) {
+      const harness = createHarness();
+      const draft = harness.drafts.get("quick-record-a");
+      draft.analysis.changes = [{
+        ...clone(draft.analysis.changes[0]),
+        id: `forbidden-${target}-${field}`,
+        target,
+        field,
+        entityId: `${target}-entity`,
+        before: "before",
+        after: "after",
+        entityVersion: 1,
+      }];
+
+      assert.throws(
+        () => harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" }),
+        errorCode("DRAFT_DATA_INVALID"),
+        `${target}.${field}`,
+      );
+      assert.equal(harness.counters.previewCreates, 0, `${target}.${field}`);
+      assert.equal(harness.counters.businessReads, 0, `${target}.${field}`);
+      assert.equal(totalWrites(harness), 0, `${target}.${field}`);
+      assert.equal(harness.counters.audits, 0, `${target}.${field}`);
+    }
+  });
+
   it("cancels and replays a preview without touching any business target", () => {
     const harness = createHarness();
     const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+    const customerItem = preview.items.find((item) => item.target === "customer");
     const before = snapshotBusiness(harness);
+    const cancelInput = {
+      owner: "owner-a",
+      previewId: preview.id,
+      suggestionIdentity: preview.identity,
+      cancel: true,
+    };
 
     assert.throws(() => harness.service.cancel({
       owner: "owner-a",
@@ -402,45 +540,51 @@ describe("quick-record confirmation preview core", () => {
       suggestionIdentity: preview.identity,
     }), errorCode("EXPLICIT_CANCELLATION_REQUIRED"));
 
-    const cancelled = harness.service.cancel({
-      owner: "owner-a",
-      previewId: preview.id,
-      suggestionIdentity: preview.identity,
-      cancel: true,
-    });
-    const replay = harness.service.cancel({
-      owner: "owner-a",
-      previewId: preview.id,
-      suggestionIdentity: preview.identity,
-      cancel: true,
+    const cancelled = harness.service.cancel(cancelInput);
+    const replay = harness.service.cancel(cancelInput);
+    const refreshedReplay = harness.service.cancel({
+      ...cancelInput,
+      suggestionIdentity: cancelled.identity,
     });
 
     assert.equal(cancelled.status, "cancelled");
     assert.ok(cancelled.items.every((item) => item.status === "cancelled"));
+    assert.equal(Object.hasOwn(cancelled, "cancellationRequestIdentity"), false);
     assert.equal(replay.replayed, true);
+    assert.equal(refreshedReplay.replayed, true);
+    assert.equal(replay.identity, cancelled.identity);
+    assert.equal(harness.counters.previewReplaces, 1);
+    assert.equal(harness.counters.businessReads, 0);
     assert.equal(totalWrites(harness), 0);
     assert.equal(harness.counters.audits, 0);
     assert.deepEqual(snapshotBusiness(harness), before);
+    assert.throws(() => harness.service.confirmItem({
+      ...pins(preview),
+      itemId: customerItem.id,
+      itemIdentity: customerItem.identity,
+      confirm: true,
+    }), errorCode("SUGGESTION_IDENTITY_MISMATCH"));
   });
 
   it("returns cancelled for item and bulk confirmation after cancellation without a business read", () => {
     const harness = createHarness();
     const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
     const item = preview.items.find((candidate) => candidate.target === "customer");
-    harness.service.cancel({
+    const cancelled = harness.service.cancel({
       owner: preview.owner,
       previewId: preview.id,
       suggestionIdentity: preview.identity,
       cancel: true,
     });
+    const cancelledItem = cancelled.items.find((candidate) => candidate.id === item.id);
 
     const itemResult = harness.service.confirmItem({
-      ...pins(preview),
+      ...pins(cancelled),
       itemId: item.id,
-      itemIdentity: item.identity,
+      itemIdentity: cancelledItem.identity,
       confirm: true,
     });
-    const allResult = harness.service.confirmAll({ ...pins(preview), confirm: true });
+    const allResult = harness.service.confirmAll({ ...pins(cancelled), confirm: true });
 
     assert.equal(itemResult.status, "cancelled");
     assert.equal(itemResult.writeback, false);
@@ -460,13 +604,13 @@ describe("quick-record confirmation preview core", () => {
     const input = pins(preview, {
       itemId: customerItem.id,
       itemIdentity: customerItem.identity,
-      confirmedBy: "owner-a",
     });
 
     assert.throws(() => harness.service.confirmItem(input), errorCode("EXPLICIT_CONFIRMATION_REQUIRED"));
     assert.equal(totalWrites(harness), 0);
 
-    const confirmed = harness.service.confirmItem({ ...input, confirm: true });
+    const confirmationInput = { ...input, confirm: true };
+    const confirmed = harness.service.confirmItem(confirmationInput);
     assert.equal(confirmed.status, "confirmed");
     assert.equal(confirmed.writeback, true);
     assert.equal(confirmed.replayed, false);
@@ -474,12 +618,46 @@ describe("quick-record confirmation preview core", () => {
     assert.equal(harness.business.get(keyFor(customerItem)).version, customerItem.entityVersion + 1);
     assert.equal(harness.counters.businessWrites.customer, 1);
     assert.equal(harness.counters.audits, 1);
+    assert.equal(harness.audits[0].confirmedBy, "owner-a");
 
-    const replay = harness.service.confirmItem({ ...input, confirm: true });
+    const confirmedItem = confirmed.preview.items.find((item) => item.id === customerItem.id);
+    assert.notEqual(confirmed.preview.identity, preview.identity);
+    assert.notEqual(confirmedItem.identity, customerItem.identity);
+    assert.equal(confirmed.preview.revision, preview.revision + 1);
+    assert.equal(confirmedItem.confirmedBy, "owner-a");
+    assert.equal(Object.hasOwn(confirmedItem, "confirmationRequest"), false);
+    const replay = harness.service.confirmItem(confirmationInput);
+    const refreshedReplay = harness.service.confirmItem({
+      ...pins(confirmed.preview),
+      itemId: confirmedItem.id,
+      itemIdentity: confirmedItem.identity,
+      confirm: true,
+    });
     assert.equal(replay.status, "confirmed");
     assert.equal(replay.replayed, true);
     assert.equal(replay.writeback, false);
+    assert.equal(refreshedReplay.replayed, true);
+    assert.equal(refreshedReplay.writeback, false);
     assert.equal(harness.counters.businessWrites.customer, 1);
+    assert.equal(harness.counters.audits, 1);
+    assert.equal(harness.counters.businessReads, 1);
+    assert.equal(harness.counters.previewReplaces, 1);
+
+    const opportunityItem = preview.items.find((item) => item.target === "opportunity");
+    assert.throws(() => harness.service.confirmItem({
+      ...pins(preview),
+      itemId: opportunityItem.id,
+      itemIdentity: opportunityItem.identity,
+      confirm: true,
+    }), errorCode("SUGGESTION_IDENTITY_MISMATCH"));
+    assert.throws(() => harness.service.cancel({
+      owner: preview.owner,
+      previewId: preview.id,
+      suggestionIdentity: preview.identity,
+      cancel: true,
+    }), errorCode("SUGGESTION_IDENTITY_MISMATCH"));
+    assert.equal(harness.counters.businessWrites.customer, 1);
+    assert.equal(harness.counters.businessWrites.opportunity, 0);
     assert.equal(harness.counters.audits, 1);
   });
 
@@ -499,15 +677,39 @@ describe("quick-record confirmation preview core", () => {
     assert.equal(harness.counters.audits, 0);
   });
 
-  it("confirms all eligible items atomically while excluding temperature, action, and finance", () => {
+  it("requires a canonical actor resolved from authenticated context before confirmation", () => {
+    const attempts = [
+      { actor: null },
+      { actor: { sessionId: "authenticated-session:owner-b" } },
+      { confirmedBy: "forged-user" },
+    ];
+
+    for (const override of attempts) {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      const item = preview.items[0];
+
+      assert.throws(() => harness.service.confirmItem({
+        ...pins(preview, override),
+        itemId: item.id,
+        itemIdentity: item.identity,
+        confirm: true,
+      }), errorCode("UNTRUSTED_CONFIRMATION_ACTOR"));
+      assert.equal(harness.counters.businessReads, 0);
+      assert.equal(totalWrites(harness), 0);
+      assert.equal(harness.counters.audits, 0);
+    }
+  });
+
+  it("confirms explicit allowlisted items while excluding temperature, action, and finance", () => {
     const harness = createHarness();
     const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
-
-    const confirmed = harness.service.confirmAll({
+    const confirmationInput = {
       ...pins(preview),
-      confirmedBy: "owner-a",
       confirm: true,
-    });
+    };
+
+    const confirmed = harness.service.confirmAll(confirmationInput);
 
     assert.equal(confirmed.status, "confirmed");
     assert.deepEqual(confirmed.confirmedItems.map((item) => item.target), ["customer", "opportunity", "weekly"]);
@@ -527,32 +729,46 @@ describe("quick-record confirmation preview core", () => {
     assert.equal(harness.counters.businessWrites.financial, 0);
     assert.equal(harness.counters.audits, 1);
 
-    const replay = harness.service.confirmAll({
-      ...pins(preview),
-      confirmedBy: "owner-a",
-      confirm: true,
-    });
-    assert.equal(replay.replayed, true);
-    assert.equal(replay.writeback, false);
-    assert.equal(totalWrites(harness), 3);
-    assert.equal(harness.counters.audits, 1);
-
-    const temperature = preview.items.find((item) => item.target === "customer_temperature");
+    const temperature = confirmed.preview.items.find((item) => item.target === "customer_temperature");
     assert.throws(() => harness.service.confirmItem({
-      ...pins(preview),
+      ...pins(confirmed.preview),
       itemId: temperature.id,
       itemIdentity: temperature.identity,
       confirm: true,
     }), errorCode("INDEPENDENT_CONFIRMATION_REQUIRED"));
     for (const target of ["action", "financial"]) {
-      const item = preview.items.find((candidate) => candidate.target === target);
+      const item = confirmed.preview.items.find((candidate) => candidate.target === target);
       assert.throws(() => harness.service.confirmItem({
-        ...pins(preview),
+        ...pins(confirmed.preview),
         itemId: item.id,
         itemIdentity: item.identity,
         confirm: true,
       }), errorCode("TARGET_NOT_CONFIRMABLE"));
     }
+    assert.equal(totalWrites(harness), 3);
+
+    const replay = harness.service.confirmAll(confirmationInput);
+    const refreshedReplay = harness.service.confirmAll({
+      ...pins(confirmed.preview),
+      confirm: true,
+    });
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.writeback, false);
+    assert.equal(refreshedReplay.replayed, true);
+    assert.equal(refreshedReplay.writeback, false);
+    assert.equal(totalWrites(harness), 3);
+    assert.equal(harness.counters.audits, 1);
+    assert.equal(harness.counters.businessReads, 3);
+    assert.equal(harness.counters.previewReplaces, 1);
+
+    const customer = preview.items.find((item) => item.target === "customer");
+    assert.throws(() => harness.service.confirmItem({
+      ...pins(preview),
+      itemId: customer.id,
+      itemIdentity: customer.identity,
+      confirm: true,
+    }), errorCode("SUGGESTION_IDENTITY_MISMATCH"));
+
     assert.equal(totalWrites(harness), 3);
   });
 
@@ -567,7 +783,11 @@ describe("quick-record confirmation preview core", () => {
       itemIdentity: customer.identity,
       confirm: true,
     });
-    const remaining = harness.service.confirmAll({ ...pins(preview), confirm: true });
+    assert.throws(
+      () => harness.service.confirmAll({ ...pins(preview), confirm: true }),
+      errorCode("SUGGESTION_IDENTITY_MISMATCH"),
+    );
+    const remaining = harness.service.confirmAll({ ...pins(first.preview), confirm: true });
 
     assert.deepEqual(first.confirmedItems.map((item) => item.target), ["customer"]);
     assert.deepEqual(remaining.confirmedItems.map((item) => item.target), ["opportunity", "weekly"]);
@@ -595,7 +815,10 @@ describe("quick-record confirmation preview core", () => {
         errorCode("NOT_FOUND"),
       );
       assert.throws(() => harness.service.confirmItem({
-        ...pins(preview, { owner: "owner-b" }),
+        ...pins(preview, {
+          owner: "owner-b",
+          actor: { sessionId: "authenticated-session:owner-b" },
+        }),
         itemId: item.id,
         itemIdentity: item.identity,
         confirm: true,
@@ -682,6 +905,34 @@ describe("quick-record confirmation preview core", () => {
     assert.equal(harness.previews.get(preview.id).items[0].status, "pending");
   });
 
+  it("owner-validates and redacts apply-conflict details before returning them", () => {
+    const harness = createHarness();
+    const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+    const item = preview.items[0];
+    harness.setApplyConflictCurrent({
+      owner: "owner-b",
+      entityId: item.entityId,
+      field: item.field,
+      version: 99,
+      value: "owner-b-private-value",
+    });
+
+    const result = harness.service.confirmItem({
+      ...pins(preview),
+      itemId: item.id,
+      itemIdentity: item.identity,
+      confirm: true,
+    });
+
+    assert.equal(result.status, "conflict");
+    assert.equal(result.reason, "target_changed");
+    assert.deepEqual(result.details, { itemId: item.id });
+    assert.equal(JSON.stringify(result).includes("owner-b-private-value"), false);
+    assert.equal(JSON.stringify(result).includes("owner-b"), false);
+    assert.equal(totalWrites(harness), 0);
+    assert.equal(harness.counters.audits, 0);
+  });
+
   it("rolls back every business write and preview state on apply or audit failure", () => {
     {
       const harness = createHarness();
@@ -719,16 +970,19 @@ describe("quick-record confirmation preview core", () => {
   });
 
   it("fails closed on an unknown stored schema before any write", () => {
-    const harness = createHarness();
-    const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
-    harness.previews.get(preview.id).schemaVersion = "quick-record-confirmation-v999";
+    for (const schemaVersion of ["quick-record-confirmation-v1", "quick-record-confirmation-v999"]) {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      harness.previews.get(preview.id).schemaVersion = schemaVersion;
 
-    assert.throws(
-      () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
-      errorCode("PREVIEW_DATA_INVALID"),
-    );
-    assert.equal(totalWrites(harness), 0);
-    assert.equal(harness.counters.audits, 0);
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+        schemaVersion,
+      );
+      assert.equal(totalWrites(harness), 0);
+      assert.equal(harness.counters.audits, 0);
+    }
   });
 
   it("maps damaged stored source references to a bounded preview-data error", () => {
@@ -742,6 +996,149 @@ describe("quick-record confirmation preview core", () => {
     );
     assert.equal(totalWrites(harness), 0);
     assert.equal(harness.counters.audits, 0);
+  });
+
+  it("binds revision and every terminal item and preview field into rotating identities", () => {
+    {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      harness.previews.get(preview.id).revision += 1;
+
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+      );
+    }
+
+    {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      const stored = harness.previews.get(preview.id);
+      stored.revision += 1;
+      stored.updatedAt = "2026-08-31T08:01:00.000Z";
+      stored.items[0].status = "confirmed";
+      stored.items[0].confirmedAt = "2026-08-31T08:01:00.000Z";
+      stored.items[0].confirmedBy = "owner-a";
+      stored.items[0].receipt = { version: 6 };
+
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+      );
+    }
+
+    {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      const item = preview.items[0];
+      const confirmed = harness.service.confirmItem({
+        ...pins(preview),
+        itemId: item.id,
+        itemIdentity: item.identity,
+        confirm: true,
+      });
+      const stored = harness.previews.get(preview.id);
+      stored.items[0].receipt = { version: 999, forged: true };
+
+      assert.notEqual(confirmed.preview.identity, preview.identity);
+      assert.notEqual(confirmed.preview.items[0].identity, item.identity);
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+      );
+      assert.equal(harness.counters.businessWrites.customer, 1);
+      assert.equal(harness.counters.audits, 1);
+    }
+
+    for (const terminalField of ["confirmedAt", "confirmedBy"]) {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      const item = preview.items[0];
+      harness.service.confirmItem({
+        ...pins(preview),
+        itemId: item.id,
+        itemIdentity: item.identity,
+        confirm: true,
+      });
+      const storedItem = harness.previews.get(preview.id).items[0];
+      storedItem[terminalField] = terminalField === "confirmedAt"
+        ? "2026-08-31T08:02:00.000Z"
+        : "forged-actor";
+
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+        terminalField,
+      );
+    }
+
+    {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      const item = preview.items[0];
+      harness.service.confirmItem({
+        ...pins(preview),
+        itemId: item.id,
+        itemIdentity: item.identity,
+        confirm: true,
+      });
+      harness.previews.get(preview.id).items[0].confirmationRequest.mode = "all";
+
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+        "confirmationRequest.mode",
+      );
+    }
+
+    {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      harness.service.confirmAll({ ...pins(preview), confirm: true });
+      harness.previews.get(preview.id).completedAt = "2026-08-31T08:03:00.000Z";
+
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+        "completedAt",
+      );
+    }
+
+    {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      harness.service.cancel({
+        owner: preview.owner,
+        previewId: preview.id,
+        suggestionIdentity: preview.identity,
+        cancel: true,
+      });
+      harness.previews.get(preview.id).cancelledAt = "2026-08-31T08:03:00.000Z";
+
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+        "cancelledAt",
+      );
+    }
+
+    {
+      const harness = createHarness();
+      const preview = harness.service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      harness.service.cancel({
+        owner: preview.owner,
+        previewId: preview.id,
+        suggestionIdentity: preview.identity,
+        cancel: true,
+      });
+      harness.previews.get(preview.id).cancellationRequestIdentity = "0".repeat(64);
+
+      assert.throws(
+        () => harness.service.get({ owner: "owner-a", previewId: preview.id }),
+        errorCode("PREVIEW_DATA_INVALID"),
+        "cancellationRequestIdentity",
+      );
+    }
   });
 
   it("fails closed on impossible stored confirmation states before any write", () => {
