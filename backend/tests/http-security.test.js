@@ -19,6 +19,7 @@ import {
   sendJson,
 } from "../src/http/response.js";
 import {
+  assertCorsPreflightRequestHeaders,
   assertCsrfToken,
   buildSessionCookie,
   constantTimeEqual,
@@ -190,8 +191,8 @@ test("allows credentialed CORS for exact configured origins only", () => {
   assert.deepEqual(corsHeaders("https://sales.example.test", config), {
     "Access-Control-Allow-Origin": "https://sales.example.test",
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Expose-Headers": "Content-Disposition",
-    "Access-Control-Allow-Headers": "Content-Type,X-CSRF-Token,Idempotency-Key,If-Match",
+    "Access-Control-Expose-Headers": "Content-Disposition,Retry-After",
+    "Access-Control-Allow-Headers": "Content-Type,X-CSRF-Token,Idempotency-Key,If-Match,X-Audio-Duration-Ms,X-ASR-Language",
     "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     Vary: "Origin",
   });
@@ -204,6 +205,36 @@ test("allows credentialed CORS for exact configured origins only", () => {
       return true;
     },
   );
+});
+
+test("validates preflight request headers against the fixed browser allowlist", () => {
+  assert.deepEqual(assertCorsPreflightRequestHeaders(undefined), []);
+  assert.deepEqual(
+    assertCorsPreflightRequestHeaders(
+      "content-type, X-CSRF-Token, Idempotency-Key, X-Audio-Duration-Ms, X-ASR-Language",
+    ),
+    [
+      "content-type",
+      "x-csrf-token",
+      "idempotency-key",
+      "x-audio-duration-ms",
+      "x-asr-language",
+    ],
+  );
+  for (const value of [
+    "Content-Type,X-Private-ASR-Header",
+    "Content-Type,Content-Type",
+    "Content-Type,",
+    "Content-Type\r\nX-Evil: value",
+    ["Content-Type"],
+  ]) {
+    assert.throws(() => assertCorsPreflightRequestHeaders(value), (error) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.status, 403);
+      assert.equal(error.code, "CORS_HEADERS_NOT_ALLOWED");
+      return true;
+    });
+  }
 });
 
 test("applies browser security headers to JSON and document responses", () => {

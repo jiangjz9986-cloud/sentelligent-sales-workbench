@@ -221,9 +221,52 @@ describe("cookie authentication protocol", () => {
     assert.equal(preflight.response.headers.get("access-control-allow-credentials"), "true");
     assert.equal(
       preflight.response.headers.get("access-control-expose-headers"),
-      "Content-Disposition",
+      "Content-Disposition,Retry-After",
     );
     assert.match(preflight.response.headers.get("vary"), /Origin/i);
+
+    const asrPreflight = await request("/api/asr/transcriptions?purpose=quick_record", {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Content-Type,X-CSRF-Token,Idempotency-Key,X-Audio-Duration-Ms,X-ASR-Language",
+      },
+    });
+    assert.equal(asrPreflight.response.status, 204);
+    assert.equal(
+      asrPreflight.response.headers.get("access-control-allow-headers"),
+      "Content-Type,X-CSRF-Token,Idempotency-Key,If-Match,X-Audio-Duration-Ms,X-ASR-Language",
+    );
+    assert.equal(
+      asrPreflight.response.headers.get("access-control-expose-headers"),
+      "Content-Disposition,Retry-After",
+    );
+
+    const rejectedHeader = await request("/api/asr/transcriptions?purpose=quick_record", {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Content-Type,X-Private-ASR-Header",
+      },
+    });
+    assert.equal(rejectedHeader.response.status, 403);
+    assert.equal(rejectedHeader.body.error.code, "CORS_HEADERS_NOT_ALLOWED");
+    assert.equal(
+      rejectedHeader.response.headers.get("access-control-allow-headers"),
+      "Content-Type,X-CSRF-Token,Idempotency-Key,If-Match,X-Audio-Duration-Ms,X-ASR-Language",
+    );
+
+    const unchangedNonAsrPreflight = await request("/api/customers", {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "X-Legacy-Client-Header",
+      },
+    });
+    assert.equal(unchangedNonAsrPreflight.response.status, 204);
 
     const rejected = await request("/api/health", {
       headers: { Origin: "https://attacker.example" },

@@ -2,6 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
+import { createAsrService } from "./asr/asrService.js";
+import {
+  ASR_ROUTE,
+  ASR_STATUS_ROUTE,
+  createDeferredUnreadBodyFinalizer,
+  createAsrHttpHandlers,
+} from "./asr/http.js";
+
 import { insertAudit } from "./audit/auditRepository.js";
 import {
   authenticateMachineRequest,
@@ -119,6 +127,7 @@ import {
   sendJson as sendHttpJson,
 } from "./http/response.js";
 import {
+  assertCorsPreflightRequestHeaders,
   assertCsrfToken,
   buildSessionCookie,
   constantTimeEqual,
@@ -2810,6 +2819,37 @@ export function createServer(options = {}) {
       ? secureSettingsRepository.resolveSecret(DEEPSEEK_SETTING_KEY, config.modelApiKey)
       : config.modelApiKey,
   };
+  // A server owns exactly one ASR runtime.  Its independent key provider reads
+  // secure_settings on every provider request, so save/rotate/clear takes
+  // effect without restart and a missing or cleared row never falls back to
+  // the DeepSeek credential.
+  const resolveAsrApiKey = () => secureSettingsRepository
+    ? secureSettingsRepository.resolveSecret(ASR_SETTING_KEY, "")
+    : "";
+  const asrService = options.asrService ?? (config.authSessionSecret
+    ? createAsrService(config, {
+        ...(options.asrServiceDependencies ?? {}),
+        asrApiKeyProvider: resolveAsrApiKey,
+        providerDependencies: {
+          fetchImpl: options.asrFetchImpl ?? options.fetchImpl ?? fetch,
+          ...(options.asrServiceDependencies?.providerDependencies ?? {}),
+          ...(options.asrProviderDependencies ?? {}),
+        },
+      })
+    : null);
+  const asrCredentialMetadata = options.asrCredentialMetadataProvider ?? (() => secureSettingsRepository
+    ? secureSettingsRepository.metadata(ASR_SETTING_KEY)
+    : { configured: false, status: "not_configured" });
+  const asrHttp = asrService && config.authSessionSecret
+    ? createAsrHttpHandlers({
+        db,
+        config,
+        service: asrService,
+        credentialMetadataProvider: asrCredentialMetadata,
+        now: options.asrHttpClock ?? Date.now,
+        ...(options.asrHttpOptions ?? {}),
+      })
+    : null;
   const hospitalTenderRepository = createHospitalTenderRepository(db, {
     clock: options.hospitalTenderClock ?? (() => new Date()),
     ...(options.hospitalTenderIdFactory ? { idFactory: options.hospitalTenderIdFactory } : {}),
@@ -3538,6 +3578,10 @@ export function createServer(options = {}) {
     const requestId = randomUUID();
     request[requestConfigSymbol] = config;
     response[responseContextSymbol] = { config, requestId };
+    // Keep an ASR body unread until the fixed error JSON has been emitted even
+    // when an earlier global gate (Origin/auth/CSRF/machine scope) rejects the
+    // request before the ASR handler gets control.
+    let asrUnreadBodyFinalizer = null;
     try {
       const origin = request.headers.origin;
       if (Array.isArray(origin)) {
@@ -3548,6 +3592,9 @@ export function createServer(options = {}) {
 
       const url = new URL(request.url, `http://${request.headers.host ?? "127.0.0.1"}`);
       const parts = splitPath(url.pathname);
+      if (url.pathname === ASR_ROUTE) {
+        asrUnreadBodyFinalizer = createDeferredUnreadBodyFinalizer(response);
+      }
 
       if (isRetiredBookkeepingPath(url.pathname)) {
         sendHttpError(
@@ -3559,6 +3606,11 @@ export function createServer(options = {}) {
       }
 
       if (request.method === "OPTIONS") {
+        // Only ASR needs the stricter fixed-header preflight contract.  Keep
+        // existing non-ASR OPTIONS behavior unchanged.
+        if (url.pathname === ASR_ROUTE) {
+          assertCorsPreflightRequestHeaders(request.headers["access-control-request-headers"]);
+        }
         sendJson(response, 204, null);
         return;
       }
@@ -4003,7 +4055,14 @@ export function createServer(options = {}) {
       let requestIdentity = { account: "anonymous", kind: "anonymous" };
       if (config.authRequired && url.pathname.startsWith("/api/")) {
         requestIdentity = authenticateRequest(db, config, request);
-        if (!requestIdentity) return unauthorized(response);
+        if (!requestIdentity) {
+          asrUnreadBodyFinalizer?.defer(() => {
+            if (request.destroyed === true) return true;
+            request.destroy();
+            return true;
+          });
+          return unauthorized(response);
+        }
         if (requestIdentity.kind === "machine") {
           assertMachineRouteAllowed(request.method, url.pathname, requestIdentity.integration);
         } else if (isCookieWrite(request.method)) {
@@ -4015,6 +4074,78 @@ export function createServer(options = {}) {
         assertMachineRouteAllowed(request.method, url.pathname, requestIdentity.integration);
       }
       request.authContext = requestIdentity;
+
+      if (url.pathname === ASR_ROUTE) {
+        // Authentication and the global cookie-CSRF/machine-scope gates above
+        // always run before the ASR handler.  Owner is server-derived only.
+        if (requestIdentity.kind !== "user") {
+          asrUnreadBodyFinalizer?.defer(() => {
+            if (request.destroyed === true) return true;
+            request.destroy();
+            return true;
+          });
+          return unauthorized(response);
+        }
+        if (!asrHttp) {
+          throw new HttpError(503, "ASR_NOT_CONFIGURED", "ASR is not configured");
+        }
+        let result;
+        try {
+          result = await asrHttp.handleTranscription({
+            request,
+            response,
+            url,
+            owner: request.authContext.account,
+            requestId,
+            remoteAddress: request.socket?.remoteAddress ?? "unknown",
+            unreadBodyFinalizer: asrUnreadBodyFinalizer,
+          });
+        } catch (error) {
+          // ASR attaches Retry-After/no-store headers to mapped failures.  The
+          // shared outer catch intentionally knows nothing about ASR-specific
+          // headers, so consume this branch here and preserve the contract.
+          if (!response.headersSent && !response.destroyed) {
+            sendHttpError(response, error, responseOptions(response, error?.headers));
+          }
+          return;
+        }
+        if (result !== null && response.destroyed !== true && response.writableEnded !== true) {
+          sendJson(response, result.status, result.body, result.headers);
+        }
+        return;
+      }
+
+      if (url.pathname === ASR_STATUS_ROUTE) {
+        if (request.method !== "GET") {
+          sendHttpError(
+            response,
+            new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET is allowed for ASR status"),
+            responseOptions(response, { Allow: "GET", "Cache-Control": "no-store" }),
+          );
+          return;
+        }
+        requireAdminRole(db, request);
+        if (!asrHttp) {
+          throw new HttpError(503, "ASR_NOT_CONFIGURED", "ASR is not configured");
+        }
+        let statusSnapshot;
+        try {
+          statusSnapshot = await asrHttp.statusSnapshot({ request, response });
+        } catch (error) {
+          if (!response.headersSent && !response.destroyed) {
+            sendHttpError(response, error, responseOptions(response, error?.headers));
+          }
+          return;
+        }
+        if (statusSnapshot === null || response.destroyed === true || response.writableEnded === true) {
+          return;
+        }
+        sendJson(response, 200, { item: statusSnapshot }, {
+          "Cache-Control": "no-store, max-age=0",
+          Pragma: "no-cache",
+        });
+        return;
+      }
 
       const weixinBookkeepingReviewRoute = "/api/integrations/weixin/bookkeeping/review";
       const weixinBookkeepingReviewParts = url.pathname.split("/");
@@ -8498,6 +8629,17 @@ export function createServer(options = {}) {
         response.destroy();
         return;
       }
+      if (asrUnreadBodyFinalizer) {
+        asrUnreadBodyFinalizer.defer(() => {
+          if (request.destroyed === true) return true;
+          try {
+            request.destroy();
+            return true;
+          } catch {
+            return false;
+          }
+        });
+      }
       sendHttpError(response, error, responseOptions(response));
     }
   });
@@ -8512,6 +8654,33 @@ export function createServer(options = {}) {
   server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
   server.actionReminderScheduler = actionReminderScheduler;
   server.dailyDigestScheduler = dailyDigestScheduler;
+  server.asrService = asrService;
+
+  // Node's native close callback only waits for HTTP connections.  Wrap it so
+  // callers (tests, service scripts and production shutdown) also wait for ASR
+  // request abort, media-child termination, pending cleanup and final sweep.
+  const closeHttpServer = server.close.bind(server);
+  let shutdownPromise = null;
+  server.close = function closeWithAsr(callback) {
+    if (!shutdownPromise) {
+      const asrClose = asrService?.close?.() ?? Promise.resolve();
+      // Attach a rejection observer immediately; the native HTTP close may
+      // take longer than ASR teardown when keep-alive connections exist.
+      Promise.resolve(asrClose).catch(() => {});
+      shutdownPromise = new Promise((resolve, reject) => {
+        closeHttpServer((httpError) => {
+          Promise.resolve(asrClose).then(
+            () => httpError ? reject(httpError) : resolve(),
+            reject,
+          );
+        });
+      });
+    }
+    if (typeof callback === "function") {
+      shutdownPromise.then(() => callback(), (error) => callback(error));
+    }
+    return server;
+  };
   return server;
 }
 
