@@ -1,0 +1,163 @@
+Sentelligent Sales Workbench v0.10.4 ASR runtime cleanup slice
+Date: 2026-09-01 (Asia/Shanghai)
+
+IDENTITY AND CHANGED FIELD
+==========================
+WORKTREE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup
+BRANCH=codex/v0104-asr-cleanup
+BASE_SHA=0aadabc7cde716b090b0aa1532f5486a4f23defc
+BASE_TREE=35c84cd577120569a48f3cba436550cc56cb8e8f
+FINAL_CODE_COMMIT=cb0d8ae1293b7d92dd3859fed9f1dda1f0ffa38e
+FINAL_CODE_TREE=440602202ef59ae48fb23b076c3b9b1838dc984b
+CHANGED_FIELD=ASR runtime temporary-workspace cleanup: startup/periodic sweep, per-entry lstat, owner+0700 gate, non-following symlink handling, bounded retry+ENOENT verification, JSON CLI and npm command.
+FINAL_EXPECTED_STATUS=clean (code worktree before evidence commit)
+
+CODE FILES (EXACTLY THREE)
+==========================
+1. /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/scripts/asr-runtime-cleanup.mjs
+2. /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/scripts/asr-runtime-cleanup.test.mjs
+3. /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/package.json
+
+EVIDENCE ARTIFACTS (EXACTLY FOUR)
+=================================
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/MODIFIED_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/DIFF_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/VERIFICATION.txt
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/ROLLBACK.sh
+
+MODIFIED_FILE AND PATCH INVENTORY
+==================================
+`MODIFIED_FILE` is a tar archive created from FINAL_CODE_COMMIT and contains only:
+  package.json
+  scripts/asr-runtime-cleanup.mjs
+  scripts/asr-runtime-cleanup.test.mjs
+`DIFF_FILE` is the binary-safe exact patch from BASE_SHA to FINAL_CODE_COMMIT for
+those same three paths.  The archive and patch are retained so another copy can
+be independently applied and reversed.
+
+MODIFIED_FILE_SHA256=c9c4ac3f0a0808c8fb75237795b2d6fc6f5c72201115c439ffc3a1ed6488d950
+DIFF_FILE_SHA256=75096953950457de4b02e763f568ded2685f6e90de1d903a5d470f92757cfd12
+ROLLBACK_SHA256=44c8fab124bd224612f9c61e461c213dbe23f813f1fefb23e71628b88e899c6b
+
+BASELINE
+========
+Input copy: `/tmp/sent-zx-asr-cleanup-baseline-20260901`, detached at BASE_SHA.
+Exact command:
+  git worktree add --detach /tmp/sent-zx-asr-cleanup-baseline-20260901 0aadabc7cde716b090b0aa1532f5486a4f23defc
+  node --test scripts/package-scripts.test.mjs
+Literal result:
+  HEAD=0aadabc7cde716b090b0aa1532f5486a4f23defc
+  TREE=35c84cd577120569a48f3cba436550cc56cb8e8f
+  tests 6
+  suites 1
+  pass 6
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  BASELINE_PACKAGE_EXIT=0
+Exit status: 0.
+Baseline behavior: the six existing package-script checks passed; the ASR
+cleanup command and cleanup test file were absent at this commit.
+
+Baseline ASR regression command and literal result:
+  node --test backend/tests/asr-*.test.js
+  tests 283
+  suites 28
+  pass 283
+  fail 0
+  cancelled 0
+  skipped 0
+  BASELINE_ASR_EXIT=0
+Exit status: 0.
+
+MODIFIED
+========
+Input copy: `/tmp/sent-zx-asr-cleanup-modified-20260901`, detached at BASE_SHA.
+Exact commands:
+  git -C /tmp/sent-zx-asr-cleanup-modified-20260901 apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/DIFF_FILE
+  git -C /tmp/sent-zx-asr-cleanup-modified-20260901 apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/DIFF_FILE
+  node --test scripts/asr-runtime-cleanup.test.mjs scripts/package-scripts.test.mjs
+Literal result:
+  APPLY_CHECK_EXIT=0
+  APPLY_EXIT=0
+  tests 19
+  suites 4
+  pass 19
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  MODIFIED_SLICE_EXIT=0
+Exit status: 0.
+Modified ASR regression command and literal result:
+  node --test backend/tests/asr-*.test.js
+  tests 283
+  suites 28
+  pass 283
+  fail 0
+  cancelled 0
+  skipped 0
+  MODIFIED_ASR_EXIT=0
+Exit status: 0.
+
+Behavior verified by the modified slice: startup removes all protected
+request-* directories; periodic removes only age > 600000 ms; non-request,
+symlink, nested-symlink, owner, mode, missing-root and identity anomalies are
+left in place and report `status=degraded`; transient removal retries and a
+post-rm lstat requires ENOENT; CLI returns JSON and exit 0/1/64 for clean,
+degraded and usage-error paths.
+
+ROLLBACK
+========
+Input copy: `/tmp/sent-zx-asr-cleanup-rollback-20260901`, detached at BASE_SHA,
+then the exact DIFF_FILE was applied before rollback.
+Exact command:
+  /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/ROLLBACK.sh /tmp/sent-zx-asr-cleanup-rollback-20260901
+Literal result:
+  ROLLBACK_PATH=scripts/asr-runtime-cleanup.mjs RESULT=RESTORED
+  ROLLBACK_PATH=scripts/asr-runtime-cleanup.test.mjs RESULT=RESTORED
+  ROLLBACK_PATH=package.json RESULT=RESTORED
+  ROLLBACK_RESULT=RESTORED BASE_SHA=0aadabc7cde716b090b0aa1532f5486a4f23defc BASE_TREE=35c84cd577120569a48f3cba436550cc56cb8e8f PATHS=3
+  ROLLBACK_EXIT=0
+Post-rollback exact command:
+  node --test scripts/package-scripts.test.mjs
+Literal result:
+  tests 6
+  suites 1
+  pass 6
+  fail 0
+  cancelled 0
+  skipped 0
+  ROLLBACK_BASELINE_EXIT=0
+  git status --short --branch => ## HEAD (no branch)
+Exit status: 0.  Restored behavior equals BASE_SHA: package checks remain
+6/6 and both newly added script paths are absent.
+
+FULL DEPLOY GATE (CONTEXT)
+===========================
+Exact command:
+  npm run test:deploy
+Observed result:
+  tests 265; suites 21; pass 262; fail 1; skipped 2; exit 1
+  failing test: scripts/release-package.test.mjs:2435
+  literal failure: `sh: vite: command not found` and assertion `127 !== 0`
+This is an environment dependency failure in the existing Unicode release
+build test; it is not a failure of the cleanup slice.  The focused modified
+tests and the full 283-test ASR regression suite both passed as recorded above.
+
+FINAL ARTIFACT REOPEN CHECK
+===========================
+Commands:
+  sh -n /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/ROLLBACK.sh
+  tar -tf /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-cleanup/docs/evidence/v0.10.4-asr-cleanup-20260901/MODIFIED_FILE
+  sha256sum MODIFIED_FILE DIFF_FILE ROLLBACK.sh
+Literal result:
+  shell syntax exit=0
+  archive entries: package.json, scripts/asr-runtime-cleanup.mjs, scripts/asr-runtime-cleanup.test.mjs
+  MODIFIED_FILE_SHA256=c9c4ac3f0a0808c8fb75237795b2d6fc6f5c72201115c439ffc3a1ed6488d950
+  DIFF_FILE_SHA256=75096953950457de4b02e763f568ded2685f6e90de1d903a5d470f92757cfd12
+  ROLLBACK_SHA256=44c8fab124bd224612f9c61e461c213dbe23f813f1fefb23e71628b88e899c6b
+All four artifacts were reopened after creation; `ROLLBACK.sh` is executable
+(mode 0755), `MODIFIED_FILE` remains the changed final archive, and the code
+worktree remains unchanged by the independent rollback copy.
