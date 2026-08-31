@@ -73,6 +73,34 @@ function planDigest(plan) {
   return sha256(JSON.stringify(canonicalize(plan)));
 }
 
+function noticeSnapshotDigest(notice) {
+  // Bind the human preview to the complete normalized persisted notice, not
+  // only to fields that happen to be projected into the opportunity/todo.
+  // The upstream contentSha256 is deliberately ignored: the service hashes
+  // the actual persisted contentText so a stale or forged upstream digest
+  // cannot keep an old confirmation valid.
+  const snapshot = {
+    id: notice.id,
+    identityKey: notice.identityKey,
+    sourceId: notice.sourceId,
+    sourceName: notice.sourceName,
+    city: notice.city ?? null,
+    title: notice.title,
+    url: notice.url,
+    publishedAt: notice.publishedAt,
+    noticeType: notice.noticeType,
+    purchaser: notice.purchaser ?? null,
+    projectCode: notice.projectCode ?? null,
+    budgetText: notice.budgetText ?? null,
+    deadlineText: notice.deadlineText ?? null,
+    contentSha256: sha256(notice.contentText ?? ""),
+    hospitalNames: stringList(notice.hospitalNames),
+    sourceItemId: notice.sourceItemId ?? null,
+    relevance: notice.relevance,
+  };
+  return sha256(JSON.stringify(canonicalize(snapshot)));
+}
+
 function digestEquals(presented, expected) {
   if (typeof presented !== "string" || !DIGEST_PATTERN.test(presented)) return false;
   return timingSafeEqual(Buffer.from(presented, "hex"), Buffer.from(expected, "hex"));
@@ -207,6 +235,7 @@ function resultFromPlan(plan, digest) {
     notice: plan.notice,
     customer: plan.customer,
     conversionIdentity: plan.conversionIdentity,
+    noticeSnapshotDigest: plan.noticeSnapshotDigest,
     match: plan.match,
     drafts: plan.drafts,
     diff: {
@@ -248,6 +277,7 @@ function confirmationReceipt(plan, digest) {
   const common = {
     previewDigest: digest,
     conversionIdentity: plan.conversionIdentity,
+    noticeSnapshotDigest: plan.noticeSnapshotDigest,
     noticeIdentityKey: plan.notice.identityKey,
     owner: plan.owner,
     customerId: plan.customer.id,
@@ -370,6 +400,7 @@ export function createHospitalTenderLeadConversionService({
     return {
       schemaVersion: CONVERSION_SCHEMA_VERSION,
       conversionIdentity: identity,
+      noticeSnapshotDigest: noticeSnapshotDigest(notice),
       owner,
       notice: publicNotice(notice),
       customer: publicCustomer(customer),
@@ -392,6 +423,7 @@ export function createHospitalTenderLeadConversionService({
       noticeId: current.notice.id,
       customerId: current.customer.id,
       conversionIdentity: current.conversionIdentity,
+      noticeSnapshotDigest: current.noticeSnapshotDigest,
       previewDigest: current.previewDigest,
     };
   }
@@ -404,6 +436,7 @@ export function createHospitalTenderLeadConversionService({
       noticeId: plan.notice.id,
       customerId: plan.customer.id,
       conversionIdentity: plan.conversionIdentity,
+      noticeSnapshotDigest: plan.noticeSnapshotDigest,
       previewDigest: digest,
       opportunity,
       actionItem,
@@ -418,6 +451,7 @@ export function createHospitalTenderLeadConversionService({
       noticeId: plan.notice.id,
       customerId: plan.customer.id,
       conversionIdentity: plan.conversionIdentity,
+      noticeSnapshotDigest: plan.noticeSnapshotDigest,
       previewDigest: digest,
       opportunity,
       actionItem,

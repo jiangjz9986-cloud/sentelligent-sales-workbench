@@ -130,6 +130,7 @@ describe("hospital tender lead conversion", () => {
     assert.equal(preview.customer.id, "customer-a");
     assert.equal(preview.customer.version, 1);
     assert.match(preview.conversionIdentity, /^[0-9a-f]{64}$/u);
+    assert.match(preview.noticeSnapshotDigest, /^[0-9a-f]{64}$/u);
     assert.equal(preview.match.score, 100);
     assert.deepEqual(preview.match.reasons, ["hospital_name", "city", "need"]);
     assert.deepEqual(preview.match.needs, ["PACS 双活"]);
@@ -190,6 +191,7 @@ describe("hospital tender lead conversion", () => {
       schemaVersion: 1,
       previewDigest: preview.previewDigest,
       conversionIdentity: preview.conversionIdentity,
+      noticeSnapshotDigest: preview.noticeSnapshotDigest,
       noticeId: NOTICE_ID,
       noticeIdentityKey: "source-a:item-lead-1",
       owner: OWNER_A,
@@ -201,6 +203,7 @@ describe("hospital tender lead conversion", () => {
     assert.deepEqual(JSON.parse(audit.metadata_json), {
       previewDigest: preview.previewDigest,
       conversionIdentity: preview.conversionIdentity,
+      noticeSnapshotDigest: preview.noticeSnapshotDigest,
       noticeIdentityKey: "source-a:item-lead-1",
       owner: OWNER_A,
       customerId: "customer-a",
@@ -232,6 +235,62 @@ describe("hospital tender lead conversion", () => {
     assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
   });
 
+  it("binds previewDigest to every canonical persisted notice field that drafts can omit or truncate", () => {
+    const budgetPrefix = "预".repeat(100);
+    const deadlinePrefix = "期".repeat(50);
+    const matrixBase = {
+      budgetText: `${budgetPrefix}甲`,
+      deadlineText: `${deadlinePrefix}甲`,
+    };
+    upsertNotice(matrixBase);
+    const baseline = service.preview(input());
+    const variants = [
+      ["contentText", {
+        contentText: "采购 PACS 双活存储，正文发生变化但匹配和草稿保持不变。",
+        contentSha256: "a".repeat(64),
+      }],
+      ["purchaser", { purchaser: "青岛市中心医院采购办公室" }],
+      ["noticeType", { noticeType: "clarification" }],
+      ["relevance", { relevance: "medium" }],
+      ["city", { city: "青岛" }],
+      ["hospitalNames", { hospitalNames: ["青岛市中心医院", "青岛市第三医院"] }],
+      ["sourceItemId", { sourceItemId: "item-lead-1-revision" }],
+      ["budgetText tail after draft limit", { budgetText: `${budgetPrefix}乙` }],
+      ["deadlineText tail after draft limit", { deadlineText: `${deadlinePrefix}乙` }],
+    ];
+
+    for (const [label, changes] of variants) {
+      upsertNotice({ ...matrixBase, ...changes });
+      const changed = service.preview(input());
+      assert.notEqual(changed.noticeSnapshotDigest, baseline.noticeSnapshotDigest, label);
+      assert.notEqual(changed.previewDigest, baseline.previewDigest, label);
+      assert.equal(changed.conversionIdentity, baseline.conversionIdentity, label);
+      if (label !== "relevance") assert.deepEqual(changed.drafts, baseline.drafts, label);
+      upsertNotice(matrixBase);
+      assert.equal(service.preview(input()).previewDigest, baseline.previewDigest, `${label} restore`);
+    }
+    assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
+  });
+
+  it("rejects an old digest before the first write when only hidden notice content changed", () => {
+    const originalPreview = service.preview(input());
+    upsertNotice({
+      contentText: "采购 PACS 双活存储，正文在人工预览后发生变化。",
+      contentSha256: "a".repeat(64),
+    });
+    const changedPreview = service.preview(input());
+
+    assert.deepEqual(changedPreview.drafts, originalPreview.drafts);
+    assert.equal(changedPreview.conversionIdentity, originalPreview.conversionIdentity);
+    assert.notEqual(changedPreview.noticeSnapshotDigest, originalPreview.noticeSnapshotDigest);
+    assert.notEqual(changedPreview.previewDigest, originalPreview.previewDigest);
+    assert.throws(
+      () => confirmFromPreview(originalPreview, { requestId: "request-hidden-content-stale" }),
+      (error) => error.status === 409 && error.code === "PREVIEW_STALE",
+    );
+    assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
+  });
+
   it("replays a repeated confirmation with the same ids and no duplicate rows", () => {
     const preview = service.preview(input());
     const first = confirmFromPreview(preview);
@@ -248,11 +307,13 @@ describe("hospital tender lead conversion", () => {
     const first = confirmFromPreview(originalPreview);
 
     upsertNotice({
-      title: "青岛市中心医院 PACS 存储扩容项目（变更公告）",
       contentText: "采购 PACS 双活存储，交付范围已经变更。",
-      contentSha256: "b".repeat(64),
+      contentSha256: "a".repeat(64),
     });
     const changedPreview = service.preview(input());
+    assert.deepEqual(changedPreview.drafts, originalPreview.drafts);
+    assert.equal(changedPreview.conversionIdentity, originalPreview.conversionIdentity);
+    assert.notEqual(changedPreview.noticeSnapshotDigest, originalPreview.noticeSnapshotDigest);
     assert.notEqual(changedPreview.previewDigest, originalPreview.previewDigest);
     assert.equal(changedPreview.drafts.opportunity.id, first.opportunity.id);
 
