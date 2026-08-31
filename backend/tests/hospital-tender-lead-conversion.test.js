@@ -40,19 +40,8 @@ function confirmFromPreview(preview, overrides = {}) {
   }));
 }
 
-beforeEach(() => {
-  db = openDatabase({ databaseUrl: ":memory:" });
-  db.exec(`
-    INSERT INTO customers (id, name, region, owner, needs) VALUES
-      ('customer-a', '青岛市中心医院', '青岛', '${OWNER_A}', '["PACS 双活", "影像存储"]'),
-      ('customer-a2', '青岛市第二医院', '青岛', '${OWNER_A}', '["影像平台"]'),
-      ('customer-unmatched', '未命中医院', '济南', '${OWNER_A}', '[]'),
-      ('customer-b', '另一账号医院', '青岛', '${OWNER_B}', '["PACS"]');
-  `);
-  tenderRepository = createHospitalTenderRepository(db, {
-    clock: () => new Date("2026-08-31T02:00:00.000Z"),
-  });
-  tenderRepository.upsertNotice({
+function noticeSnapshot(overrides = {}) {
+  return {
     id: NOTICE_ID,
     identityKey: "source-a:item-lead-1",
     sourceId: "source-a",
@@ -71,20 +60,48 @@ beforeEach(() => {
     sourceItemId: "item-lead-1",
     contentSha256: "a".repeat(64),
     relevance: "high",
-  }, {
+    ...overrides,
+  };
+}
+
+function noticeMatch(overrides = {}) {
+  return {
     matchedCustomerIds: ["customer-a", "customer-a2", "customer-b"],
     matchReasons: {
-      "customer-a": ["医院名称精确命中", "PACS 需求命中"],
-      "customer-a2": ["同城医院匹配"],
-      "customer-b": ["PACS 需求命中"],
+      "customer-a": ["hospital_name", "city", "need"],
+      "customer-a2": ["city", "need"],
+      "customer-b": ["city", "need"],
     },
     matchedNeeds: {
-      "customer-a": ["PACS 双活", "影像存储"],
-      "customer-a2": ["影像平台"],
+      "customer-a": ["PACS 双活"],
+      "customer-a2": ["存储"],
       "customer-b": ["PACS"],
     },
-    matchScore: 88,
+    matchScore: 100,
+    ...overrides,
+  };
+}
+
+function upsertNotice(snapshotOverrides = {}, matchOverrides = {}) {
+  return tenderRepository.upsertNotice(
+    noticeSnapshot(snapshotOverrides),
+    noticeMatch(matchOverrides),
+  );
+}
+
+beforeEach(() => {
+  db = openDatabase({ databaseUrl: ":memory:" });
+  db.exec(`
+    INSERT INTO customers (id, name, region, owner, needs) VALUES
+      ('customer-a', '青岛市中心医院', '青岛', '${OWNER_A}', '["PACS 双活", "影像存储"]'),
+      ('customer-a2', '青岛市第二医院', '青岛', '${OWNER_A}', '["存储"]'),
+      ('customer-unmatched', '未命中医院', '济南', '${OWNER_A}', '[]'),
+      ('customer-b', '另一账号医院', '青岛', '${OWNER_B}', '["PACS"]');
+  `);
+  tenderRepository = createHospitalTenderRepository(db, {
+    clock: () => new Date("2026-08-31T02:00:00.000Z"),
   });
+  upsertNotice();
   service = createHospitalTenderLeadConversionService({
     db,
     tenderRepository,
@@ -112,9 +129,10 @@ describe("hospital tender lead conversion", () => {
     assert.equal(preview.notice.projectCode, "QDSZX-2026-01");
     assert.equal(preview.customer.id, "customer-a");
     assert.equal(preview.customer.version, 1);
-    assert.equal(preview.match.score, 88);
-    assert.deepEqual(preview.match.reasons, ["医院名称精确命中", "PACS 需求命中"]);
-    assert.deepEqual(preview.match.needs, ["PACS 双活", "影像存储"]);
+    assert.match(preview.conversionIdentity, /^[0-9a-f]{64}$/u);
+    assert.equal(preview.match.score, 100);
+    assert.deepEqual(preview.match.reasons, ["hospital_name", "city", "need"]);
+    assert.deepEqual(preview.match.needs, ["PACS 双活"]);
     assert.equal(preview.drafts.opportunity.customerId, "customer-a");
     assert.equal(preview.drafts.actionItem.customerId, "customer-a");
     assert.equal(preview.drafts.actionItem.opportunityId, preview.drafts.opportunity.id);
@@ -154,12 +172,12 @@ describe("hospital tender lead conversion", () => {
     const requirements = JSON.parse(opportunityRow.requirements);
     assert.ok(requirements.includes(`公告编号：${NOTICE_ID}`));
     assert.ok(requirements.includes(`公告原文：${NOTICE_URL}`));
-    assert.ok(requirements.some((item) => item.includes("医院名称精确命中")));
+    assert.ok(requirements.some((item) => item.includes("hospital_name")));
 
     const actionRow = db.prepare("SELECT * FROM action_items WHERE id = $id").get({ $id: result.actionItem.id });
     assert.equal(actionRow.customer_id, "customer-a");
     assert.equal(actionRow.opportunity_id, result.opportunity.id);
-    assert.match(actionRow.reason, /医院名称精确命中/u);
+    assert.match(actionRow.reason, /hospital_name/u);
     assert.match(actionRow.reason, /https:\/\/example\.com\/notices\/lead-1/u);
 
     const audit = db.prepare("SELECT * FROM audit_logs").get();
@@ -169,11 +187,31 @@ describe("hospital tender lead conversion", () => {
     assert.equal(audit.actor, OWNER_A);
     assert.equal(audit.request_id, "request-lead-1");
     assert.deepEqual(JSON.parse(audit.after_json), {
+      schemaVersion: 1,
+      previewDigest: preview.previewDigest,
+      conversionIdentity: preview.conversionIdentity,
       noticeId: NOTICE_ID,
+      noticeIdentityKey: "source-a:item-lead-1",
+      owner: OWNER_A,
       customerId: "customer-a",
       opportunityId: result.opportunity.id,
       actionItemId: result.actionItem.id,
+      matchScore: 100,
     });
+    assert.deepEqual(JSON.parse(audit.metadata_json), {
+      previewDigest: preview.previewDigest,
+      conversionIdentity: preview.conversionIdentity,
+      noticeIdentityKey: "source-a:item-lead-1",
+      owner: OWNER_A,
+      customerId: "customer-a",
+      opportunityId: result.opportunity.id,
+      actionItemId: result.actionItem.id,
+      matchScore: 100,
+    });
+    assert.doesNotMatch(
+      `${audit.after_json}${audit.metadata_json}`,
+      /青岛市中心医院 PACS 存储扩容项目|采购 PACS 双活存储/u,
+    );
   });
 
   it("requires the caller to say confirmed true before any write", () => {
@@ -205,6 +243,87 @@ describe("hospital tender lead conversion", () => {
     assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
   });
 
+  it("does not report an old conversion as a replay of a changed notice preview", () => {
+    const originalPreview = service.preview(input());
+    const first = confirmFromPreview(originalPreview);
+
+    upsertNotice({
+      title: "青岛市中心医院 PACS 存储扩容项目（变更公告）",
+      contentText: "采购 PACS 双活存储，交付范围已经变更。",
+      contentSha256: "b".repeat(64),
+    });
+    const changedPreview = service.preview(input());
+    assert.notEqual(changedPreview.previewDigest, originalPreview.previewDigest);
+    assert.equal(changedPreview.drafts.opportunity.id, first.opportunity.id);
+
+    assert.throws(
+      () => confirmFromPreview(changedPreview, { requestId: "request-changed-preview" }),
+      (error) => error.status === 409 && error.code === "CONVERSION_STATE_CONFLICT",
+    );
+    assert.throws(
+      () => confirmFromPreview(originalPreview, { requestId: "request-old-preview" }),
+      (error) => error.status === 409 && error.code === "PREVIEW_STALE",
+    );
+    assert.equal(
+      db.prepare("SELECT name FROM opportunities WHERE id = $id").get({ $id: first.opportunity.id }).name,
+      "招标线索：青岛市中心医院 PACS 存储扩容项目",
+    );
+    assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
+  });
+
+  it("preserves later human edits when replaying the exact confirmed preview", () => {
+    const preview = service.preview(input());
+    const first = confirmFromPreview(preview);
+    db.prepare(`
+      UPDATE opportunities
+      SET stage = '方案', next = '人工确认后的下一步', version = version + 1
+      WHERE id = $id
+    `).run({ $id: first.opportunity.id });
+    db.prepare(`
+      UPDATE action_items
+      SET status = 'in_progress', version = version + 1
+      WHERE id = $id
+    `).run({ $id: first.actionItem.id });
+
+    const replay = confirmFromPreview(preview, { requestId: "request-human-edits" });
+
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.opportunity.stage, "方案");
+    assert.equal(replay.opportunity.next, "人工确认后的下一步");
+    assert.equal(replay.actionItem.status, "in_progress");
+    assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
+  });
+
+  it("fails closed when the immutable confirmation audit receipt is damaged", () => {
+    const preview = service.preview(input());
+    confirmFromPreview(preview);
+    const audit = db.prepare("SELECT id, after_json FROM audit_logs").get();
+    const damagedAfter = JSON.parse(audit.after_json);
+    damagedAfter.previewDigest = "f".repeat(64);
+    db.prepare("UPDATE audit_logs SET after_json = $after WHERE id = $id").run({
+      $id: audit.id,
+      $after: JSON.stringify(damagedAfter),
+    });
+
+    assert.throws(
+      () => confirmFromPreview(preview, { requestId: "request-damaged-receipt" }),
+      (error) => error.status === 409 && error.code === "CONVERSION_STATE_CONFLICT",
+    );
+    assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
+  });
+
+  it("fails closed when the immutable confirmation audit receipt is missing", () => {
+    const preview = service.preview(input());
+    confirmFromPreview(preview);
+    db.prepare("DELETE FROM audit_logs").run();
+
+    assert.throws(
+      () => confirmFromPreview(preview, { requestId: "request-missing-receipt" }),
+      (error) => error.status === 409 && error.code === "CONVERSION_STATE_CONFLICT",
+    );
+    assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 0 });
+  });
+
   it("rolls the opportunity back when the todo step fails, then allows a clean retry", () => {
     const failing = createHospitalTenderLeadConversionService({
       db,
@@ -233,10 +352,58 @@ describe("hospital tender lead conversion", () => {
     assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
   });
 
+  it("rolls both business rows back when the real audit insert fails", () => {
+    const preview = service.preview(input());
+    db.exec(`
+      CREATE TEMP TRIGGER fail_hospital_tender_conversion_audit
+      BEFORE INSERT ON audit_logs
+      WHEN NEW.action = 'hospital_tender.lead_conversion.confirm'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected audit insert failure');
+      END;
+    `);
+
+    assert.throws(
+      () => confirmFromPreview(preview, { requestId: "request-audit-failure" }),
+      /injected audit insert failure/u,
+    );
+    assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
+  });
+
   it("hides an owner-visible customer that was not matched to the notice", () => {
     assert.throws(
       () => service.preview(input({ customerId: "customer-unmatched" })),
       (error) => error.status === 404 && error.code === "NOT_FOUND",
+    );
+    assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
+  });
+
+  it("fails closed when persisted customer match evidence disagrees with a current recomputation", () => {
+    upsertNotice({}, {
+      matchReasons: {
+        "customer-a": ["hospital_name", "city"],
+        "customer-a2": ["city", "need"],
+        "customer-b": ["city", "need"],
+      },
+    });
+
+    assert.throws(
+      () => service.preview(input()),
+      (error) => error.status === 409 && error.code === "MATCH_EVIDENCE_STALE",
+    );
+    assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
+  });
+
+  it("fails closed when the current customer no longer matches persisted notice evidence", () => {
+    db.prepare(`
+      UPDATE customers
+      SET name = '已迁移客户', region = '济南', needs = '[]', aliases = '[]', tags = '[]'
+      WHERE id = 'customer-a'
+    `).run();
+
+    assert.throws(
+      () => service.preview(input()),
+      (error) => error.status === 409 && error.code === "MATCH_EVIDENCE_STALE",
     );
     assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
   });
@@ -256,23 +423,27 @@ describe("hospital tender lead conversion", () => {
     assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
   });
 
-  it("rejects binding the same owner and notice to a second customer", () => {
+  it("converts two legal matched customers under the same owner independently", () => {
     const firstPreview = service.preview(input());
     const first = confirmFromPreview(firstPreview);
     const secondPreview = service.preview(input({ customerId: "customer-a2" }));
+    const second = service.confirm(input({
+      customerId: "customer-a2",
+      previewDigest: secondPreview.previewDigest,
+      confirmed: true,
+      requestId: "request-second-customer",
+    }));
 
-    assert.throws(
-      () => service.confirm(input({
-        customerId: "customer-a2",
-        previewDigest: secondPreview.previewDigest,
-        confirmed: true,
-        requestId: "request-second-customer",
-      })),
-      (error) => error.status === 409 && error.code === "CONVERSION_STATE_CONFLICT",
-    );
-    assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
-    assert.equal(db.prepare("SELECT customer_id FROM opportunities").get().customer_id, "customer-a");
-    assert.equal(db.prepare("SELECT opportunity_id FROM action_items").get().opportunity_id, first.opportunity.id);
+    assert.notEqual(secondPreview.conversionIdentity, firstPreview.conversionIdentity);
+    assert.notEqual(second.opportunity.id, first.opportunity.id);
+    assert.notEqual(second.actionItem.id, first.actionItem.id);
+    assert.equal(first.opportunity.customerId, "customer-a");
+    assert.equal(second.opportunity.customerId, "customer-a2");
+    assert.equal(first.opportunity.probability, 100);
+    assert.equal(second.opportunity.probability, 40);
+    assert.equal(first.actionItem.priority, "高");
+    assert.equal(second.actionItem.priority, "中");
+    assert.deepEqual(counts(), { opportunities: 2, actionItems: 2, audits: 2 });
   });
 
   it("refuses to repair a hidden half-completed conversion", () => {
@@ -297,6 +468,20 @@ describe("hospital tender lead conversion", () => {
       (error) => error.status === 409 && error.code === "CONVERSION_STATE_CONFLICT",
     );
     assert.deepEqual(counts(), { opportunities: 1, actionItems: 0, audits: 0 });
+  });
+
+  it("rejects a replay after its deterministic opportunity is rebound to another customer", () => {
+    const preview = service.preview(input());
+    const first = confirmFromPreview(preview);
+    db.prepare("UPDATE opportunities SET customer_id = 'customer-a2' WHERE id = $id").run({
+      $id: first.opportunity.id,
+    });
+
+    assert.throws(
+      () => confirmFromPreview(preview, { requestId: "request-rebound" }),
+      (error) => error.status === 409 && error.code === "CONVERSION_STATE_CONFLICT",
+    );
+    assert.deepEqual(counts(), { opportunities: 1, actionItems: 1, audits: 1 });
   });
 
   it("keeps deterministic conversions separate for different owners", () => {

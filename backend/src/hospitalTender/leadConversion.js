@@ -6,10 +6,14 @@ import { getActiveCustomer } from "../customers/customerStore.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
 import { createOpportunity, getActiveOpportunity } from "../opportunities/opportunityStore.js";
+import { matchNoticeToCustomers } from "./matching.js";
+import { customerSnapshotFromRow } from "./sync.js";
 
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/u;
 const CONVERSION_SCHEMA_VERSION = 1;
 const DEFAULT_NEXT_STEP = "核验公告范围、预算、截止时间和客户采购计划";
+const CONFIRM_AUDIT_ACTION = "hospital_tender.lead_conversion.confirm";
+const CONFIRM_AUDIT_ENTITY_TYPE = "hospital_tender_notice";
 
 function requiredText(value, name, max) {
   if (typeof value !== "string" || !value.trim()) {
@@ -94,13 +98,32 @@ function conversionConflict() {
   );
 }
 
-function deterministicIds(owner, identityKey) {
-  const identity = JSON.stringify([
+function matchEvidenceStale() {
+  throw new HttpError(
+    409,
+    "MATCH_EVIDENCE_STALE",
+    "The persisted tender match evidence no longer agrees with the current customer",
+  );
+}
+
+function sameStringSet(left, right) {
+  const leftValues = stringList(left);
+  const rightValues = stringList(right);
+  return leftValues.length === rightValues.length
+    && leftValues.every((item) => rightValues.includes(item));
+}
+
+function conversionIdentity(owner, identityKey, customerId) {
+  return sha256(JSON.stringify([
     "hospital_tender_lead_conversion",
     CONVERSION_SCHEMA_VERSION,
     owner,
     identityKey,
-  ]);
+    customerId,
+  ]));
+}
+
+function deterministicIds(identity) {
   return {
     opportunityId: `tender-opportunity-${sha256(`${identity}:opportunity`).slice(0, 32)}`,
     actionItemId: `tender-action-${sha256(`${identity}:action_item`).slice(0, 32)}`,
@@ -114,7 +137,7 @@ function tenderSourceRecord(notice) {
     : `hospital_tender_sha256:${sha256(notice.id)}`;
 }
 
-function draftOpportunity({ owner, notice, customer, reasons, needs, opportunityId }) {
+function draftOpportunity({ owner, notice, customer, reasons, needs, matchScore, opportunityId }) {
   const reasonEvidence = reasons.length > 0 ? reasons.join("；") : "公告与客户匹配";
   return {
     id: opportunityId,
@@ -124,7 +147,7 @@ function draftOpportunity({ owner, notice, customer, reasons, needs, opportunity
     stage: "线索",
     amount: truncate(notice.budgetText, 100),
     owner,
-    probability: Number(notice.match?.matchScore ?? 0),
+    probability: matchScore,
     days: 0,
     requirements: [
       ...needs,
@@ -141,7 +164,7 @@ function draftOpportunity({ owner, notice, customer, reasons, needs, opportunity
   };
 }
 
-function draftActionItem({ owner, notice, customer, reasons, actionItemId, opportunityId }) {
+function draftActionItem({ owner, notice, customer, reasons, matchScore, actionItemId, opportunityId }) {
   const reasonEvidence = reasons.length > 0 ? reasons.join("；") : "公告与客户匹配";
   return {
     id: actionItemId,
@@ -152,7 +175,7 @@ function draftActionItem({ owner, notice, customer, reasons, actionItemId, oppor
     title: truncate(`跟进招标：${notice.title}`, 80),
     reason: truncate(`来源公告 ${notice.id}；${reasonEvidence}；${notice.url}`, 500),
     due: truncate(notice.deadlineText, 50),
-    priority: notice.relevance === "high" || Number(notice.match?.matchScore ?? 0) >= 80 ? "高" : "中",
+    priority: matchScore >= 80 ? "高" : "中",
   };
 }
 
@@ -183,6 +206,7 @@ function resultFromPlan(plan, digest) {
     requiresHumanConfirmation: true,
     notice: plan.notice,
     customer: plan.customer,
+    conversionIdentity: plan.conversionIdentity,
     match: plan.match,
     drafts: plan.drafts,
     diff: {
@@ -190,6 +214,99 @@ function resultFromPlan(plan, digest) {
       actionItem: { before: null, after: plan.drafts.actionItem },
     },
     previewDigest: digest,
+  };
+}
+
+function currentCustomerMatch(notice, customer) {
+  const persistedReasons = stringList(notice.match?.matchReasons?.[customer.id]);
+  const persistedNeeds = stringList(notice.match?.matchedNeeds?.[customer.id]);
+  const recomputed = matchNoticeToCustomers(notice, [customerSnapshotFromRow(customer)]);
+  if (!stringList(recomputed.matchedCustomerIds).includes(customer.id)) matchEvidenceStale();
+
+  const reasons = stringList(recomputed.matchReasons?.[customer.id]);
+  const needs = stringList(recomputed.matchedNeeds?.[customer.id]);
+  if (!sameStringSet(persistedReasons, reasons) || !sameStringSet(persistedNeeds, needs)) {
+    matchEvidenceStale();
+  }
+  return {
+    score: Number(recomputed.matchScore),
+    reasons,
+    needs,
+  };
+}
+
+function parseAuditObject(value) {
+  try {
+    const parsed = JSON.parse(value ?? "null");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function confirmationReceipt(plan, digest) {
+  const common = {
+    previewDigest: digest,
+    conversionIdentity: plan.conversionIdentity,
+    noticeIdentityKey: plan.notice.identityKey,
+    owner: plan.owner,
+    customerId: plan.customer.id,
+    opportunityId: plan.drafts.opportunity.id,
+    actionItemId: plan.drafts.actionItem.id,
+    matchScore: plan.match.score,
+  };
+  return {
+    after: {
+      schemaVersion: plan.schemaVersion,
+      ...common,
+      noticeId: plan.notice.id,
+    },
+    metadata: common,
+  };
+}
+
+function receiptPayloadMatches(actual, expected) {
+  return actual !== null
+    && Object.entries(expected).every(([key, value]) => actual[key] === value);
+}
+
+function receiptReferencesConversion(receipt, expected) {
+  const payloads = [receipt.after, receipt.metadata].filter(Boolean);
+  return payloads.some((payload) => payload.conversionIdentity === expected.after.conversionIdentity
+    || (payload.opportunityId === expected.after.opportunityId
+      && payload.actionItemId === expected.after.actionItemId));
+}
+
+function readConfirmationReceipt(db, plan, digest) {
+  const expected = confirmationReceipt(plan, digest);
+  const rows = db.prepare(`
+    SELECT action, entity_type, entity_id, actor, after_json, metadata_json
+    FROM audit_logs
+    WHERE action = $action
+      AND entity_type = $entityType
+      AND entity_id = $entityId
+      AND actor = $actor
+    ORDER BY created_at ASC, id ASC
+  `).all({
+    $action: CONFIRM_AUDIT_ACTION,
+    $entityType: CONFIRM_AUDIT_ENTITY_TYPE,
+    $entityId: plan.notice.id,
+    $actor: plan.owner,
+  }).map((row) => ({
+    ...row,
+    after: parseAuditObject(row.after_json),
+    metadata: parseAuditObject(row.metadata_json),
+  }));
+  const candidates = rows.filter((row) => receiptReferencesConversion(row, expected));
+  const valid = candidates.filter((row) => row.action === CONFIRM_AUDIT_ACTION
+    && row.entity_type === CONFIRM_AUDIT_ENTITY_TYPE
+    && row.entity_id === plan.notice.id
+    && row.actor === plan.owner
+    && receiptPayloadMatches(row.after, expected.after)
+    && receiptPayloadMatches(row.metadata, expected.metadata));
+  return {
+    present: candidates.length > 0,
+    valid: candidates.length === 1 && valid.length === 1,
   };
 }
 
@@ -228,29 +345,35 @@ export function createHospitalTenderLeadConversionService({
     const matchedCustomerIds = stringList(notice.match?.matchedCustomerIds);
     if (!matchedCustomerIds.includes(customer.id)) notFound();
 
-    const reasons = stringList(notice.match?.matchReasons?.[customer.id]);
-    const needs = stringList(notice.match?.matchedNeeds?.[customer.id]);
-    const { opportunityId, actionItemId } = deterministicIds(owner, notice.identityKey);
-    const opportunity = draftOpportunity({ owner, notice, customer, reasons, needs, opportunityId });
+    const match = currentCustomerMatch(notice, customer);
+    const identity = conversionIdentity(owner, notice.identityKey, customer.id);
+    const { opportunityId, actionItemId } = deterministicIds(identity);
+    const opportunity = draftOpportunity({
+      owner,
+      notice,
+      customer,
+      reasons: match.reasons,
+      needs: match.needs,
+      matchScore: match.score,
+      opportunityId,
+    });
     const actionItem = draftActionItem({
       owner,
       notice,
       customer,
-      reasons,
+      reasons: match.reasons,
+      matchScore: match.score,
       actionItemId,
       opportunityId,
     });
 
     return {
       schemaVersion: CONVERSION_SCHEMA_VERSION,
+      conversionIdentity: identity,
       owner,
       notice: publicNotice(notice),
       customer: publicCustomer(customer),
-      match: {
-        score: Number(notice.match?.matchScore ?? 0),
-        reasons,
-        needs,
-      },
+      match,
       drafts: { opportunity, actionItem },
     };
   }
@@ -268,6 +391,7 @@ export function createHospitalTenderLeadConversionService({
       requiresHumanConfirmation: false,
       noticeId: current.notice.id,
       customerId: current.customer.id,
+      conversionIdentity: current.conversionIdentity,
       previewDigest: current.previewDigest,
     };
   }
@@ -279,6 +403,7 @@ export function createHospitalTenderLeadConversionService({
       replayed: true,
       noticeId: plan.notice.id,
       customerId: plan.customer.id,
+      conversionIdentity: plan.conversionIdentity,
       previewDigest: digest,
       opportunity,
       actionItem,
@@ -292,6 +417,7 @@ export function createHospitalTenderLeadConversionService({
       replayed: false,
       noticeId: plan.notice.id,
       customerId: plan.customer.id,
+      conversionIdentity: plan.conversionIdentity,
       previewDigest: digest,
       opportunity,
       actionItem,
@@ -326,6 +452,7 @@ export function createHospitalTenderLeadConversionService({
         SELECT id, customer_id, opportunity_id, owner, deleted_at
         FROM action_items WHERE id = $id
       `).get({ $id: actionItemId });
+      const receipt = readConfirmationReceipt(db, plan, digest);
 
       if (opportunityRow || actionItemRow) {
         if (!opportunityRow || !actionItemRow
@@ -337,11 +464,13 @@ export function createHospitalTenderLeadConversionService({
           || opportunityRow.source_record !== plan.drafts.opportunity.sourceRecord) {
           conversionConflict();
         }
+        if (!receipt.valid) conversionConflict();
         const opportunity = getActiveOpportunity(db, opportunityId, plan.owner);
         const actionItem = actionItemStore.getVisible({ owner: plan.owner, id: actionItemId });
         if (!opportunity || !actionItem) conversionConflict();
         return replayedResult(plan, digest, opportunity, actionItem);
       }
+      if (receipt.present) conversionConflict();
 
       const opportunity = createOpportunity(db, plan.drafts.opportunity, { id: opportunityId });
       const failpointResult = failpoint("afterOpportunity");
@@ -349,23 +478,16 @@ export function createHospitalTenderLeadConversionService({
         throw new TypeError("failpoint must be synchronous");
       }
       const actionItem = actionItemStore.create(plan.drafts.actionItem);
+      const auditReceipt = confirmationReceipt(plan, digest);
       insertAudit(db, {
-        action: "hospital_tender.lead_conversion.confirm",
-        entityType: "hospital_tender_notice",
+        action: CONFIRM_AUDIT_ACTION,
+        entityType: CONFIRM_AUDIT_ENTITY_TYPE,
         entityId: plan.notice.id,
         actor: plan.owner,
         requestId,
         before: null,
-        after: {
-          noticeId: plan.notice.id,
-          customerId: plan.customer.id,
-          opportunityId: opportunity.id,
-          actionItemId: actionItem.id,
-        },
-        metadata: {
-          matchScore: plan.match.score,
-          noticeUrl: plan.notice.url,
-        },
+        after: auditReceipt.after,
+        metadata: auditReceipt.metadata,
       });
       return newlyConfirmedResult(plan, digest, opportunity, actionItem);
     });
