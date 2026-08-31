@@ -203,7 +203,7 @@ let server;
 let baseUrl;
 let stub;
 
-async function seedHarness({ credential = "active" } = {}) {
+async function seedHarness({ asrSettingState = "active" } = {}) {
   const db = openDatabase({ databaseUrl });
   try {
     for (const user of [
@@ -220,15 +220,15 @@ async function seedHarness({ credential = "active" } = {}) {
       });
     }
     const repository = createSecureSettingsRepository(db, { masterKey: settingsKey });
-    if (credential === "active") repository.setSecret(ASR_SETTING_KEY, "synthetic-asr-http-key");
-    if (credential === "cleared") repository.clearSecret(ASR_SETTING_KEY);
+    if (asrSettingState === "active") repository.setSecret(ASR_SETTING_KEY, "synthetic-asr-http-key");
+    if (asrSettingState === "cleared") repository.clearSecret(ASR_SETTING_KEY);
   } finally {
     db.close();
   }
 }
 
-async function startHarness({ credential = "active", service, ...overrides } = {}) {
-  await seedHarness({ credential });
+async function startHarness({ asrSettingState = "active", service, ...overrides } = {}) {
+  await seedHarness({ asrSettingState });
   stub = service ? { service, state: service.state ?? null } : createStubAsrService();
   server = createServer({
     databaseUrl,
@@ -568,20 +568,20 @@ describe("ASR owner, limit and secure-setting isolation", () => {
   });
 
   it("fails closed for missing and cleared ASR credentials without initializing the runtime", async () => {
-    for (const credential of ["missing", "cleared"]) {
-      const isolatedDir = await mkdtemp(join(tmpdir(), `sentelligent-asr-${credential}-`));
+    for (const asrSettingState of ["missing", "cleared"]) {
+      const isolatedDir = await mkdtemp(join(tmpdir(), `sentelligent-asr-${asrSettingState}-`));
       const priorDatabaseUrl = databaseUrl;
       const priorServer = server;
       try {
         databaseUrl = join(isolatedDir, "asr.sqlite");
         server = null;
-        const { state } = await startHarness({ credential });
+        const { state } = await startHarness({ asrSettingState });
         const member = await login(memberAAccount, memberALoginValue);
         const result = await transcribe(member);
-        assert.equal(result.response.status, 503, credential);
-        assert.equal(result.body.error.code, "ASR_NOT_CONFIGURED", credential);
-        assert.equal(state.initializeCalls, 0, credential);
-        assert.equal(state.transcribeCalls, 0, credential);
+        assert.equal(result.response.status, 503, asrSettingState);
+        assert.equal(result.body.error.code, "ASR_NOT_CONFIGURED", asrSettingState);
+        assert.equal(state.initializeCalls, 0, asrSettingState);
+        assert.equal(state.transcribeCalls, 0, asrSettingState);
       } finally {
         if (server) await closeServer(server);
         server = priorServer;
@@ -738,7 +738,7 @@ describe("ASR slow unread request rejection", () => {
   });
 
   it("delivers complete JSON before terminating a slow body", async () => {
-    const { state } = await startHarness({ credential: "missing" });
+    const { state } = await startHarness({ asrSettingState: "missing" });
     const member = await login(memberAAccount, memberALoginValue);
     const received = await new Promise((resolve, reject) => {
       const client = createHttpRequest({
