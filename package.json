@@ -26,6 +26,7 @@
     "release:package": "node scripts/release-package.mjs",
     "service-plan:production": "node scripts/production-service-plan.mjs",
     "preflight:production": "node scripts/production-preflight.mjs",
+    "asr:cleanup": "node scripts/asr-runtime-cleanup.mjs",
     "smoke:production:https": "node scripts/production-https-smoke.mjs",
     "test:release": "node --test scripts/release-package.test.mjs scripts/production-preflight.test.mjs",
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
