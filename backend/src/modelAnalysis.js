@@ -157,6 +157,52 @@ async function callModel(rawContent, config, fetchImpl, systemPrompt = null, kno
   return parseModelAnalysisContent(content, config.modelProvider ?? "model");
 }
 
+function buildVisitTemperatureMessages(snapshot) {
+  const facts = (snapshot?.facts ?? []).slice(0, 50).map((fact) => ({
+    key: String(fact?.key ?? "").slice(0, 200),
+    label: String(fact?.label ?? fact?.key ?? "").slice(0, 200),
+    value: typeof fact?.value === "string"
+      ? fact.value.slice(0, 500)
+      : fact?.value,
+    confidence: fact?.confidence,
+    sourceRefs: Array.isArray(fact?.sourceRefs)
+      ? fact.sourceRefs.slice(0, 4).map((ref) => ({
+          type: String(ref?.type ?? "").slice(0, 100),
+          id: String(ref?.id ?? "").slice(0, 200),
+        }))
+      : [],
+  }));
+  return [
+    {
+      role: "system",
+      content: [
+        "你是客户温度建议器，只能根据已确认拜访的结构化事实生成建议。",
+        "不得创造事实，不得自动写回客户资料；只输出合法 JSON。",
+        "suggestedValue 和 confidence 必须是 0 到 100 的整数。",
+        "inferences 必须是有界数组，每项包含 claim、confidence、basisKeys；basisKeys 只能引用输入 facts.key。",
+        "证据不足时 suggestedValue 应保持当前 relation，不得凭空放大变化。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        currentRelation: snapshot?.customer?.relation,
+        facts,
+      }),
+    },
+  ];
+}
+
+export async function generateVisitTemperatureSuggestionWithModel(snapshot, config = {}, options = {}) {
+  const content = await callChatCompletion({
+    messages: buildVisitTemperatureMessages(snapshot),
+    config,
+    fetchImpl: options.fetchImpl ?? fetch,
+    maxTokens: 900,
+  });
+  return JSON.parse(stripJsonFence(content));
+}
+
 export function resolveModelApiKey(config = {}) {
   if (typeof config.modelApiKeyProvider === "function") {
     return String(config.modelApiKeyProvider() ?? "");

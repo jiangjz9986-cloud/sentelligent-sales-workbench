@@ -167,6 +167,7 @@ import { createVisitCaptureAssistantAdapter } from "./assistant/visitCaptureAssi
 import { createVisitTemperatureSuggestionHttpHandlers } from "./assistant/visitTemperatureHttp.js";
 import { createVisitTemperatureSuggestionService } from "./assistant/visitTemperatureSuggestion.js";
 import { createVisitTemperatureSuggestionRepositories } from "./assistant/visitTemperatureSuggestionRepository.js";
+import { createVisitTemperatureSuggestionGenerator } from "./assistant/visitTemperatureGenerator.js";
 import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecordPendingPreviewProviders.js";
 import {
   assertQuickRecordConfirmationEditable,
@@ -3239,20 +3240,14 @@ export function createServer(options = {}) {
         ? { idFactory: options.visitTemperatureSuggestionIdFactory }
         : {}),
     });
-  // The default generator is deliberately deterministic and bounded.  It
-  // receives only server-owned, confirmed visit/customer snapshots and
-  // produces a preview that preserves the current relation until a human
-  // explicitly confirms a different, injected/generated value.
+  // The default generator consumes only server-owned, confirmed snapshots.
+  // It uses the existing model boundary when configured and falls back to
+  // bounded evidence-keyword rules; neither path performs customer writes.
   const visitTemperatureSuggestionGenerator = options.visitTemperatureSuggestionGenerator
-    ?? ((snapshot) => ({
-      suggestedValue: snapshot.customer.relation,
-      confidence: 60,
-      inferences: [{
-        claim: "已确认拜访证据不足以支持自动改变客户温度，建议保持当前值",
-        confidence: 100,
-        basisKeys: ["current_relation"],
-      }],
-    }));
+    ?? createVisitTemperatureSuggestionGenerator({
+      config: runtimeConfig,
+      fetchImpl: options.fetchImpl ?? fetch,
+    });
   const visitTemperatureSuggestionService = options.visitTemperatureSuggestionService
     ?? createVisitTemperatureSuggestionService({
       ...visitTemperatureSuggestionRepositories,
