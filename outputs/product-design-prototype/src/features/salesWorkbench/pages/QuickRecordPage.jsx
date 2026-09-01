@@ -31,6 +31,7 @@ import {
   createQuickRecordDiffConfirmationPayload,
   normalizeQuickRecordDiffPreview,
 } from "../quickRecordDiffModel.js";
+import { VisitTemperatureSuggestionsPanel } from "../VisitTemperatureSuggestionsPanel.jsx";
 
 function syncTargetLabel(target) {
   return {
@@ -128,6 +129,7 @@ export function QuickRecord() {
     workbenchCustomers: customersList,
     workbenchOpportunities: opportunitiesList,
     workbenchQuickRecords: quickRecords,
+    setWorkbenchCustomers,
     setWorkbenchQuickRecords,
   } = useWorkbenchData();
   const {
@@ -914,6 +916,19 @@ export function QuickRecord() {
               <p>尚未产生同步记录。完成目标同步后，这里会保留可追溯的写入日志。</p>
             )}
           </div>
+          {quickRecord?.id ? (
+            <VisitTemperatureSuggestionsPanel
+              apiClient={apiClient}
+              backendStatus={backendStatus}
+              quickRecord={quickRecord}
+              customers={customersList}
+              onCustomerUpdated={(updated) => setWorkbenchCustomers((current) => current.map((customer) => (
+                customer.id === updated.id
+                  ? { ...customer, relation: updated.relation, version: updated.version }
+                  : customer
+              )))}
+            />
+          ) : null}
           <div className="analysis-routes">
             <button type="button" onClick={() => setActive("customer")}>查看客户画像</button>
             <button type="button" onClick={() => openOpportunityDetail ? openOpportunityDetail() : setActive("opportunity")}>查看商机档案</button>

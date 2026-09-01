@@ -3275,6 +3275,88 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.temperature-suggestions-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(248, 251, 255, 0.96), rgba(255, 255, 255, 0.94));
+}
+
+.temperature-panel-head,
+.temperature-card-head,
+.temperature-actions,
+.temperature-sources,
+.temperature-confirmation-note,
+.temperature-readonly {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.temperature-panel-head,
+.temperature-card-head { justify-content: space-between; }
+.temperature-panel-head > div,
+.temperature-card-head > div { min-width: 0; display: grid; gap: 3px; }
+.temperature-panel-head h3 { margin: 0; color: var(--text); font-size: 15px; }
+.temperature-panel-head p { margin: 0; color: #66738e; font-size: 11px; line-height: 1.45; }
+.temperature-card-head strong { color: var(--text); font-size: 13px; }
+.temperature-card-head small { color: #66738e; font-size: 11px; }
+.temperature-list { display: grid; gap: 9px; }
+.temperature-card {
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid rgba(16, 24, 40, 0.09);
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  background: #fff;
+}
+.temperature-card.tone-green { border-left-color: var(--green); }
+.temperature-card.tone-red { border-left-color: var(--red); }
+.temperature-card.tone-gray { border-left-color: #98a2b3; }
+.temperature-values {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(70px, .6fr) minmax(70px, .6fr);
+  align-items: center;
+  gap: 7px;
+  padding: 9px;
+  border-radius: 7px;
+  background: #f7f9fc;
+}
+.temperature-values > div { display: grid; gap: 2px; min-width: 0; }
+.temperature-values small { color: #66738e; font-size: 10px; font-weight: 700; }
+.temperature-values b { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+.temperature-arrow { color: var(--blue); transform: rotate(-90deg); }
+.temperature-evidence,
+.temperature-sources { display: grid; gap: 4px; }
+.temperature-evidence strong,
+.temperature-sources strong { color: var(--body); font-size: 11px; }
+.temperature-evidence p { margin: 0; color: #53617b; font-size: 11px; line-height: 1.45; }
+.temperature-evidence .temperature-inference { color: #315fb3; }
+.temperature-sources { grid-template-columns: auto repeat(auto-fit, minmax(110px, 1fr)); align-items: center; }
+.temperature-sources span { overflow-wrap: anywhere; color: #66738e; font-size: 10px; }
+.temperature-confirmation-note { margin: 0; color: #8a5a00; font-size: 11px; line-height: 1.45; }
+.temperature-confirmation-note.conflict { color: #b42318; }
+.temperature-readonly { margin: 0; color: #66738e; font-size: 11px; }
+.temperature-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; color: #66738e; font-size: 12px; line-height: 1.45; }
+.temperature-empty .primary-button { min-height: 30px; margin-left: auto; }
+.temperature-feedback { margin: 0; padding: 8px 9px; border-radius: 7px; color: #315fb3; background: rgba(229, 241, 255, 0.75); font-size: 11px; font-weight: 700; }
+.temperature-actions { flex-wrap: wrap; }
+.temperature-actions .primary-button,
+.temperature-actions .ghost-button { min-height: 32px; }
+.temperature-generate { justify-self: start; min-height: 30px; }
+.temperature-context { color: var(--muted); font-size: 10px; }
+
+@media (max-width: 620px) {
+  .temperature-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .temperature-arrow { display: none; }
+  .temperature-sources { grid-template-columns: 1fr; }
+  .temperature-empty .primary-button { margin-left: 0; }
+}
+
 .analysis-routes {
   display: flex;
   flex-wrap: wrap;

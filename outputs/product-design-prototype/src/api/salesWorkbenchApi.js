@@ -457,6 +457,191 @@ function toApiError(response, body) {
   return error;
 }
 
+const VISIT_TEMPERATURE_STATUSES = new Set(["pending", "confirmed", "cancelled", "expired", "conflict"]);
+const VISIT_TEMPERATURE_IDENTIFIER = /^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u;
+
+function visitTemperatureText(value, fallback = "", max = 2_000) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized && normalized.length <= max ? normalized : fallback;
+}
+
+function visitTemperatureRef(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = visitTemperatureText(value.type, "", 200);
+  const id = visitTemperatureText(value.id, "", 200);
+  return type && id && VISIT_TEMPERATURE_IDENTIFIER.test(type) && VISIT_TEMPERATURE_IDENTIFIER.test(id)
+    ? { type, id }
+    : null;
+}
+
+function visitTemperatureList(value, mapper) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 50) throw new TypeError("visit temperature list is invalid");
+  const mapped = value.map(mapper);
+  if (mapped.some((item) => !item)) throw new TypeError("visit temperature list contains invalid item");
+  return mapped;
+}
+
+/**
+ * Keep the temperature-suggestion boundary deliberately smaller than the
+ * generic API error boundary. The service can return internal details, but
+ * none of those details are needed by the confirmation UI.
+ */
+export function assertVisitTemperatureSuggestion(value, path = "visitTemperatureSuggestion") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path}: expected object`);
+  }
+  const status = visitTemperatureText(value.status).toLowerCase();
+  if (!VISIT_TEMPERATURE_STATUSES.has(status)) throw new TypeError(`${path}.status: invalid`);
+  const id = visitTemperatureText(value.id, "", 200);
+  const visitId = visitTemperatureText(value.visitId, "", 200);
+  const customerId = visitTemperatureText(value.customerId, "", 200);
+  if (!id || !visitId || !customerId
+    || !VISIT_TEMPERATURE_IDENTIFIER.test(id)
+    || !VISIT_TEMPERATURE_IDENTIFIER.test(visitId)
+    || !VISIT_TEMPERATURE_IDENTIFIER.test(customerId)) throw new TypeError(`${path}: missing identity`);
+  const integer = (field, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) => {
+    const next = value[field];
+    if (!Number.isSafeInteger(next) || next < min || next > max) throw new TypeError(`${path}.${field}: invalid`);
+    return next;
+  };
+  const identity = visitTemperatureText(value.identity);
+  if (!/^[0-9a-f]{64}$/u.test(identity)) throw new TypeError(`${path}.identity: invalid`);
+  const facts = visitTemperatureList(value.facts, (fact) => {
+    if (!fact || typeof fact !== "object" || Array.isArray(fact)) return null;
+    const key = visitTemperatureText(fact.key);
+    if (!key) return null;
+    if (!Number.isSafeInteger(fact.confidence) || fact.confidence < 0 || fact.confidence > 100
+      || !(typeof fact.value === "string" || typeof fact.value === "number" || typeof fact.value === "boolean")
+      || !Array.isArray(fact.sourceRefs) || fact.sourceRefs.length === 0) {
+      throw new TypeError(`${path}.facts: invalid evidence`);
+    }
+    return {
+      key,
+      label: visitTemperatureText(fact.label, key),
+      value: fact.value,
+      confidence: fact.confidence,
+      sourceRefs: visitTemperatureList(fact.sourceRefs, visitTemperatureRef),
+    };
+  });
+  const inferences = visitTemperatureList(value.inferences, (inference) => {
+    if (!inference || typeof inference !== "object" || Array.isArray(inference)) return null;
+    const claim = visitTemperatureText(inference.claim);
+    if (!claim || !Number.isSafeInteger(inference.confidence) || inference.confidence < 0 || inference.confidence > 100) {
+      throw new TypeError(`${path}.inferences: invalid evidence`);
+    }
+    return {
+      claim,
+      basis: visitTemperatureText(inference.basis),
+      confidence: inference.confidence,
+      sourceRefs: visitTemperatureList(inference.sourceRefs, visitTemperatureRef),
+    };
+  });
+  const sourceRefs = visitTemperatureList(value.sourceRefs, visitTemperatureRef);
+  if (facts.length === 0 || inferences.length === 0 || sourceRefs.length === 0
+    || typeof value.requiresHumanConfirmation !== "boolean"
+    || typeof value.writebackAllowed !== "boolean") {
+    throw new TypeError(`${path}: evidence is required`);
+  }
+  const previousValue = integer("previousValue", { max: 100 });
+  const suggestedValue = integer("suggestedValue", { max: 100 });
+  const delta = integer("delta", { min: -100, max: 100 });
+  if (delta !== suggestedValue - previousValue) throw new TypeError(`${path}.delta: invalid`);
+  return {
+    id,
+    identity,
+    status,
+    owner: visitTemperatureText(value.owner, "", 200),
+    visitId,
+    customerId,
+    previousValue,
+    suggestedValue,
+    delta,
+    confidence: integer("confidence", { max: 100 }),
+    customerVersion: integer("customerVersion", { min: 1 }),
+    facts,
+    inferences,
+    sourceRefs,
+    requiresHumanConfirmation: value.requiresHumanConfirmation === true,
+    writebackAllowed: value.writebackAllowed === true,
+    createdAt: visitTemperatureText(value.createdAt, ""),
+    expiresAt: visitTemperatureText(value.expiresAt, ""),
+    confirmedAt: value.confirmedAt == null ? null : visitTemperatureText(value.confirmedAt, ""),
+    cancelledAt: value.cancelledAt == null ? null : visitTemperatureText(value.cancelledAt, ""),
+    replayed: value.replayed === true,
+    writeback: value.writeback === true,
+    reason: visitTemperatureText(value.reason, ""),
+  };
+}
+
+export function normalizeVisitTemperatureError(error) {
+  if (error?.code === "VISIT_TEMPERATURE_TIMEOUT" || error?.name === "TimeoutError") {
+    const next = new Error("温度建议请求超时，请检查连接后重试");
+    next.code = "TIMEOUT";
+    next.status = error.status;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.status === 401) {
+    const next = new Error("登录状态已失效，请重新登录后重试");
+    next.code = "AUTH_REQUIRED";
+    next.status = 401;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.status === 409) {
+    const next = new Error("数据已变化，请重新获取最新建议后再操作");
+    next.code = "CONFLICT";
+    next.status = 409;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.status >= 500) {
+    const next = new Error("温度建议暂时不可用，请稍后重试");
+    next.code = "INTERNAL_ERROR";
+    next.status = error.status;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.name === "AbortError") {
+    const next = new Error("温度建议请求已中止，请重试");
+    next.code = "ABORTED";
+    next.name = "AbortError";
+    return next;
+  }
+  return error;
+}
+
+function visitTemperatureOutcome(value, path = "visitTemperatureOutcome") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path}: expected object`);
+  }
+  const status = visitTemperatureText(value.status).toLowerCase();
+  if (!VISIT_TEMPERATURE_STATUSES.has(status)) throw new TypeError(`${path}.status: invalid`);
+  const snapshot = (candidate, field) => {
+    if (candidate === null || candidate === undefined) return null;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)
+      || typeof candidate.id !== "string" || !candidate.id.trim()
+      || !Number.isSafeInteger(candidate.relation) || candidate.relation < 0 || candidate.relation > 100
+      || !Number.isSafeInteger(candidate.version) || candidate.version < 1) {
+      throw new TypeError(`${path}.${field}: invalid`);
+    }
+    return { id: candidate.id.trim(), relation: candidate.relation, version: candidate.version };
+  };
+  const suggestion = value.suggestion
+    ? assertVisitTemperatureSuggestion(value.suggestion, `${path}.suggestion`)
+    : null;
+  return {
+    status,
+    suggestion,
+    customer: snapshot(value.customer, "customer"),
+    currentCustomer: snapshot(value.currentCustomer, "currentCustomer"),
+    writeback: value.writeback === true,
+    replayed: value.replayed === true,
+    reason: visitTemperatureText(value.reason, ""),
+  };
+}
+
 export function parseRetryAfterSeconds(value) {
   if (typeof value !== "string" || !/^\d{1,3}$/u.test(value)) return null;
   const seconds = Number(value);
@@ -673,6 +858,122 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     });
 
     return assertApiEntity("quickRecord", created.item);
+  }
+
+  async function requestVisitTemperature(path, options = {}, { signal, timeoutMs = 10_000 } = {}) {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timer = null;
+    const abortFromParent = () => controller.abort(signal?.reason);
+    if (signal) {
+      if (signal.aborted) abortFromParent();
+      else signal.addEventListener("abort", abortFromParent, { once: true });
+    }
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+    }
+    try {
+      return await requestApi(path, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (timedOut) {
+        const timeoutError = new Error("温度建议请求超时");
+        timeoutError.name = "TimeoutError";
+        timeoutError.code = "VISIT_TEMPERATURE_TIMEOUT";
+        throw normalizeVisitTemperatureError(timeoutError);
+      }
+      throw normalizeVisitTemperatureError(error);
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abortFromParent);
+    }
+  }
+
+  async function createVisitTemperatureSuggestion(visitId, { signal, timeoutMs } = {}) {
+    let response;
+    try {
+      response = await requestVisitTemperature("/api/visit-temperature-suggestions", {
+        method: "POST",
+        body: JSON.stringify({ visitId: requiredApiString(visitId, "visitId") }),
+      }, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    return assertVisitTemperatureSuggestion(response?.item, "visitTemperatureSuggestion.item");
+  }
+
+  async function listVisitTemperatureSuggestions({ customerId, limit, signal, timeoutMs } = {}) {
+    let response;
+    try {
+      response = await requestVisitTemperature(queryPath("/api/visit-temperature-suggestions", { customerId, limit }), {}, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    const item = response?.item;
+    if (!item || typeof item !== "object" || !Array.isArray(item.items)) {
+      throw new TypeError("visitTemperatureSuggestions.items: expected array");
+    }
+    return {
+      items: item.items.map((suggestion, index) => assertVisitTemperatureSuggestion(
+        suggestion,
+        `visitTemperatureSuggestions.items[${index}]`,
+      )),
+      truncated: item.truncated === true,
+    };
+  }
+
+  async function getVisitTemperatureSuggestion(suggestionId, { signal, timeoutMs } = {}) {
+    let response;
+    try {
+      response = await requestVisitTemperature(`/api/visit-temperature-suggestions/${encodeURIComponent(requiredApiString(suggestionId, "suggestionId"))}`, {}, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    return assertVisitTemperatureSuggestion(response?.item, "visitTemperatureSuggestion.item");
+  }
+
+  async function confirmVisitTemperatureSuggestion(suggestion, { signal, timeoutMs } = {}) {
+    if (!suggestion || typeof suggestion !== "object") throw new TypeError("suggestion is required");
+    if (!Number.isSafeInteger(suggestion.previousValue) || suggestion.previousValue < 0 || suggestion.previousValue > 100) {
+      throw new TypeError("previousValue must be an integer from 0 to 100");
+    }
+    let response;
+    try {
+      response = await requestVisitTemperature(`/api/visit-temperature-suggestions/${encodeURIComponent(requiredApiString(suggestion.id, "suggestionId"))}/confirm`, {
+        method: "POST",
+        body: JSON.stringify({
+          suggestionIdentity: requiredApiString(suggestion.identity, "suggestionIdentity"),
+          expectedCustomerVersion: requiredApiVersion(suggestion.customerVersion, "expectedCustomerVersion"),
+          previousValue: Number(suggestion.previousValue),
+          confirm: true,
+        }),
+      }, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    return visitTemperatureOutcome(response?.item, "visitTemperatureConfirmation.item");
+  }
+
+  async function cancelVisitTemperatureSuggestion(suggestion, { signal, timeoutMs } = {}) {
+    if (!suggestion || typeof suggestion !== "object") throw new TypeError("suggestion is required");
+    let response;
+    try {
+      response = await requestVisitTemperature(`/api/visit-temperature-suggestions/${encodeURIComponent(requiredApiString(suggestion.id, "suggestionId"))}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({
+          suggestionIdentity: requiredApiString(suggestion.identity, "suggestionIdentity"),
+          cancel: true,
+        }),
+      }, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    const item = response?.item;
+    return item?.suggestion
+      ? visitTemperatureOutcome(item, "visitTemperatureCancellation.item")
+      : { status: item?.status, suggestion: assertVisitTemperatureSuggestion(item, "visitTemperatureCancellation.item"), replayed: item?.replayed === true };
   }
 
   return {
@@ -1353,6 +1654,11 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     },
 
     createQuickRecord,
+    createVisitTemperatureSuggestion,
+    listVisitTemperatureSuggestions,
+    getVisitTemperatureSuggestion,
+    confirmVisitTemperatureSuggestion,
+    cancelVisitTemperatureSuggestion,
 
     async analyzeQuickRecord(rawContent, metadata = {}) {
       const quickRecord = await createQuickRecord(rawContent, metadata);
