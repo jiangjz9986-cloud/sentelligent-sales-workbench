@@ -295,6 +295,44 @@ function assertHospitalTenderSource(value, path = "hospitalTenderSource") {
   return assertApiEntity("hospitalTenderSource", value, path);
 }
 
+function hospitalTenderLeadConversionUrl(noticeId, action) {
+  const id = requiredApiString(noticeId, "noticeId");
+  if (!new Set(["preview", "confirm", "cancel"]).has(action)) {
+    throw new TypeError("A valid hospital tender lead-conversion action is required");
+  }
+  return `/api/hospital-tenders/${encodeURIComponent(id)}/lead-conversion/${action}`;
+}
+
+function assertHospitalTenderLeadConversionPreview(value, path = "hospitalTenderLeadConversionPreview") {
+  const preview = assertApiEntity("hospitalTenderLeadConversionPreview", value, path);
+  if (preview.status !== "preview" || preview.requiresHumanConfirmation !== true) {
+    throw new TypeError(`${path}: expected a human-confirmation preview`);
+  }
+  requiredApiString(preview.previewDigest, `${path}.previewDigest`);
+  requiredApiString(preview.customer?.id, `${path}.customer.id`);
+  requiredApiString(preview.drafts?.opportunity?.name, `${path}.drafts.opportunity.name`);
+  requiredApiString(preview.drafts?.actionItem?.title, `${path}.drafts.actionItem.title`);
+  return preview;
+}
+
+function assertHospitalTenderLeadConversionConfirmation(value, path = "hospitalTenderLeadConversionConfirmation") {
+  const confirmation = assertApiEntity("hospitalTenderLeadConversionConfirmation", value, path);
+  if (confirmation.status !== "confirmed" || confirmation.requiresHumanConfirmation !== false) {
+    throw new TypeError(`${path}: expected a confirmed terminal result`);
+  }
+  requiredApiString(confirmation.opportunity?.id, `${path}.opportunity.id`);
+  requiredApiString(confirmation.actionItem?.id, `${path}.actionItem.id`);
+  return confirmation;
+}
+
+function assertHospitalTenderLeadConversionCancellation(value, path = "hospitalTenderLeadConversionCancellation") {
+  const cancellation = assertApiEntity("hospitalTenderLeadConversionCancellation", value, path);
+  if (cancellation.status !== "cancelled" || cancellation.requiresHumanConfirmation !== false) {
+    throw new TypeError(`${path}: expected a cancelled terminal result`);
+  }
+  return cancellation;
+}
+
 function idempotencyHeaders(options, label) {
   const key = String(options?.idempotencyKey ?? "");
   if (!key || key.trim() !== key) throw new TypeError(`A valid ${label} Idempotency-Key is required`);
@@ -846,6 +884,43 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     async getHospitalTenderHealth({ signal } = {}) {
       const response = await requestApi("/api/hospital-tenders/health", { signal });
       return assertApiEntity("hospitalTenderHealth", response.item);
+    },
+
+    async previewHospitalTenderLeadConversion(noticeId, input, { signal } = {}) {
+      const response = await requestApi(hospitalTenderLeadConversionUrl(noticeId, "preview"), {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          customerId: requiredApiString(input?.customerId, "customerId"),
+        }),
+      });
+      return assertHospitalTenderLeadConversionPreview(response?.item);
+    },
+
+    async confirmHospitalTenderLeadConversion(noticeId, input, { signal } = {}) {
+      const response = await requestApi(hospitalTenderLeadConversionUrl(noticeId, "confirm"), {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          customerId: requiredApiString(input?.customerId, "customerId"),
+          previewDigest: requiredApiString(input?.previewDigest, "previewDigest"),
+          confirmed: true,
+        }),
+      });
+      return assertHospitalTenderLeadConversionConfirmation(response?.item);
+    },
+
+    async cancelHospitalTenderLeadConversion(noticeId, input, { signal } = {}) {
+      const response = await requestApi(hospitalTenderLeadConversionUrl(noticeId, "cancel"), {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          customerId: requiredApiString(input?.customerId, "customerId"),
+          previewDigest: requiredApiString(input?.previewDigest, "previewDigest"),
+          cancel: true,
+        }),
+      });
+      return assertHospitalTenderLeadConversionCancellation(response?.item);
     },
 
     async runHospitalTenderMonitor() {

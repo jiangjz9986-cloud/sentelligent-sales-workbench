@@ -6,12 +6,12 @@ const pagePath = new URL("./HospitalTenderPage.jsx", import.meta.url);
 const shellPath = new URL("../../app/SalesWorkbenchShell.jsx", import.meta.url);
 const stylesPath = new URL("../../styles/global.css", import.meta.url);
 
-test("hospital tender page exposes the read-only monitoring contract", async () => {
+test("hospital tender page exposes monitoring plus explicit lead-conversion confirmation", async () => {
   const source = await readFile(pagePath, "utf8");
   const shellSource = await readFile(shellPath, "utf8");
 
   assert.match(source, /export function HospitalTenderPage\s*\(/);
-  for (const prop of ["apiClient", "notices", "summary", "sources", "health", "customers", "loading", "error", "onRefresh", "onSelectCustomer", "onOpenSchedule"]) {
+  for (const prop of ["apiClient", "backendStatus", "notices", "summary", "sources", "health", "customers", "loading", "error", "onRefresh", "onSelectCustomer", "onOpenSchedule"]) {
     assert.match(source, new RegExp(`\\b${prop}\\b`), `missing prop ${prop}`);
   }
   assert.match(source, /筛选公告类型/);
@@ -45,6 +45,20 @@ test("hospital tender page exposes the read-only monitoring contract", async () 
   assert.match(source, /userFacingTenderError/);
   assert.match(source, /publishedToday/);
   assert.match(source, /deadlineWithinNextSevenDays/);
+  assert.match(source, /生成转商机预览/);
+  assert.match(source, /确认创建商机和待办/);
+  assert.match(source, /取消本次预览/);
+  assert.match(source, /再次核对创建结果/);
+  assert.match(source, /REQUEST_TIMEOUT/);
+  assert.match(source, /AbortController/);
+  assert.match(source, /Promise\.race/);
+  assert.match(source, /previewHospitalTenderLeadConversion/);
+  assert.match(source, /confirmHospitalTenderLeadConversion/);
+  assert.match(source, /cancelHospitalTenderLeadConversion/);
+  assert.match(source, /明确确认后才会写入/);
+  assert.match(source, /activeRef\.current = true/);
+  assert.match(source, /pendingRef\.current/);
+  assert.match(source, /confirmationRequest/);
   assert.doesNotMatch(source, /2026-08-18/);
 });
 

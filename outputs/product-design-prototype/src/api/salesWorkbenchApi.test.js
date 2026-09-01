@@ -3521,6 +3521,78 @@ describe("sales workbench API client", () => {
     assert.equal(calls.at(-1).options.headers["X-CSRF-Token"], "fixture-csrf-token");
   });
 
+  it("previews, explicitly confirms, and explicitly cancels a hospital tender lead conversion", async () => {
+    const digest = "a".repeat(64);
+    const preview = {
+      status: "preview",
+      requiresHumanConfirmation: true,
+      notice: { id: "notice-1", title: "医院信息化采购" },
+      customer: { id: "customer-1", version: 2, name: "示例医院" },
+      conversionIdentity: "conversion-1",
+      noticeSnapshotDigest: "b".repeat(64),
+      match: { score: 85, reasons: ["hospital_name"], needs: ["PACS"] },
+      drafts: {
+        opportunity: { id: "opportunity-1", name: "招标线索：医院信息化采购", stage: "线索", next: "核验公告" },
+        actionItem: { id: "action-1", title: "跟进招标：医院信息化采购", priority: "高", due: "2026-09-10" },
+      },
+      diff: {
+        opportunity: { before: null, after: { id: "opportunity-1" } },
+        actionItem: { before: null, after: { id: "action-1" } },
+      },
+      previewDigest: digest,
+    };
+    const confirmation = {
+      status: "confirmed",
+      requiresHumanConfirmation: false,
+      replayed: false,
+      noticeId: "notice-1",
+      customerId: "customer-1",
+      conversionIdentity: "conversion-1",
+      noticeSnapshotDigest: "b".repeat(64),
+      previewDigest: digest,
+      opportunity: { id: "opportunity-1" },
+      actionItem: { id: "action-1" },
+    };
+    const cancellation = {
+      status: "cancelled",
+      requiresHumanConfirmation: false,
+      noticeId: "notice-1",
+      customerId: "customer-1",
+      conversionIdentity: "conversion-1",
+      noticeSnapshotDigest: "b".repeat(64),
+      previewDigest: digest,
+    };
+    const calls = [];
+    const controller = new AbortController();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/lead-conversion/preview")) return jsonResponse({ item: preview });
+        if (url.endsWith("/lead-conversion/confirm")) return jsonResponse({ item: confirmation });
+        if (url.endsWith("/lead-conversion/cancel")) return jsonResponse({ item: cancellation });
+        return jsonResponse({ error: { code: "NOT_FOUND", message: "missing" } }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const previewResult = await api.previewHospitalTenderLeadConversion("notice / 1", { customerId: "customer-1" }, { signal: controller.signal });
+    const confirmationResult = await api.confirmHospitalTenderLeadConversion("notice / 1", { customerId: "customer-1", previewDigest: digest }, { signal: controller.signal });
+    const cancellationResult = await api.cancelHospitalTenderLeadConversion("notice / 1", { customerId: "customer-1", previewDigest: digest }, { signal: controller.signal });
+
+    assert.equal(previewResult.status, "preview");
+    assert.equal(confirmationResult.status, "confirmed");
+    assert.equal(cancellationResult.status, "cancelled");
+    assert.equal(calls.length, 3);
+    assert.ok(calls.every((call) => call.options.method === "POST"));
+    assert.ok(calls.every((call) => call.options.signal === controller.signal));
+    assert.ok(calls.every((call) => call.options.headers["X-CSRF-Token"] === "fixture-csrf-token"));
+    assert.ok(calls.every((call) => call.url.includes("/api/hospital-tenders/notice%20%2F%201/lead-conversion/")));
+    assert.deepEqual(JSON.parse(calls[0].options.body), { customerId: "customer-1" });
+    assert.deepEqual(JSON.parse(calls[1].options.body), { customerId: "customer-1", previewDigest: digest, confirmed: true });
+    assert.deepEqual(JSON.parse(calls[2].options.body), { customerId: "customer-1", previewDigest: digest, cancel: true });
+  });
+
   it("keeps the Xiaoxiao WeChat review API read-only and reports client events", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({

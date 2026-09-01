@@ -1,5 +1,6 @@
 import {
   ChevronRight,
+  CheckCircle2,
   CircleAlert,
   Clock3,
   ExternalLink,
@@ -53,6 +54,7 @@ const HEALTH_LABELS = {
 
 const NOTICE_PAGE_SIZE = 200;
 const INITIAL_VISIBLE_NOTICE_COUNT = 8;
+const LEAD_CONVERSION_REQUEST_TIMEOUT_MS = 12_000;
 
 function firstText(...values) {
   return values.find((value) => value !== null && value !== undefined && String(value).trim())
@@ -115,6 +117,8 @@ function normalizeNotice(notice, index, customerNameById) {
     type: normalizeType(item.noticeType ?? item.type ?? item.category),
     relevance: normalizeRelevance(item.relevance ?? item.priority),
     customerId,
+    matchedCustomerIds,
+    matchedCustomerNames,
     customerName: firstText(
       item.customerName,
       item.customer,
@@ -133,6 +137,232 @@ function normalizeNotice(notice, index, customerNameById) {
     matchReasons: item.matchReasons ?? {},
     matchedNeeds: item.matchedNeeds ?? {},
   };
+}
+
+function leadConversionCustomerOptions(notice, customers) {
+  const labels = new Map((Array.isArray(customers) ? customers : []).map((customer) => [
+    customerValue(customer),
+    customerLabel(customer),
+  ]));
+  const ids = Array.isArray(notice?.matchedCustomerIds) ? notice.matchedCustomerIds : [];
+  const names = Array.isArray(notice?.matchedCustomerNames) ? notice.matchedCustomerNames : [];
+  return ids.map((id, index) => ({
+    id: firstText(id),
+    name: firstText(names[index], labels.get(firstText(id)), notice?.customerName, "已匹配客户"),
+  })).filter((item) => item.id);
+}
+
+function userFacingLeadConversionError(error) {
+  if (error?.code === "REQUEST_TIMEOUT") return "请求等待时间过长，已经停止等待，请重新操作。";
+  if (error?.code === "PREVIEW_STALE") return "公告或客户信息已经变化，请重新生成预览后再确认。";
+  if (error?.code === "MATCH_EVIDENCE_STALE") return "客户匹配依据已经变化，请刷新招标数据后重新核对。";
+  if (error?.code === "CONVERSION_STATE_CONFLICT") return "这条公告已有不一致的转换记录，请先核对现有商机和待办。";
+  if (error?.status === 404) return "当前账号下没有可用于转换的公告或客户。";
+  if (error?.status === 401 || error?.status === 403) return "登录状态已失效，请重新登录后再操作。";
+  if (error?.status === 422) return "当前预览信息不完整，请重新生成预览后再操作。";
+  return "转商机操作未完成，请稍后重试。";
+}
+
+function leadConversionTimeoutError() {
+  const error = new Error("Hospital tender lead conversion request timed out");
+  error.code = "REQUEST_TIMEOUT";
+  return error;
+}
+
+function LeadConversionSection({ apiClient, backendStatus, notice, customers }) {
+  const options = useMemo(
+    () => leadConversionCustomerOptions(notice, customers),
+    [customers, notice],
+  );
+  const [customerId, setCustomerId] = useState(() => firstText(notice?.customerId, options[0]?.id));
+  const [preview, setPreview] = useState(null);
+  const [result, setResult] = useState(null);
+  const [confirmationRequest, setConfirmationRequest] = useState(null);
+  const [pendingAction, setPendingAction] = useState("");
+  const [error, setError] = useState("");
+  const pendingRef = useRef(null);
+  const activeRef = useRef(true);
+
+  useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+      const pending = pendingRef.current;
+      pendingRef.current = null;
+      if (pending?.timer) globalThis.clearTimeout(pending.timer);
+      pending?.controller.abort();
+    };
+  }, []);
+
+  const runExclusive = useCallback(async (action, operation, onSuccess, onFailure) => {
+    if (pendingRef.current) return;
+    const controller = new AbortController();
+    const pending = { controller, timer: null };
+    pendingRef.current = pending;
+    setPendingAction(action);
+    setError("");
+    try {
+      const timeout = new Promise((resolve, reject) => {
+        pending.timer = globalThis.setTimeout(() => {
+          controller.abort();
+          reject(leadConversionTimeoutError());
+        }, LEAD_CONVERSION_REQUEST_TIMEOUT_MS);
+      });
+      const item = await Promise.race([operation(controller.signal), timeout]);
+      if (activeRef.current && pendingRef.current === pending) onSuccess(item);
+    } catch (operationError) {
+      if (activeRef.current && pendingRef.current === pending) {
+        onFailure?.(operationError);
+        setError(userFacingLeadConversionError(operationError));
+      }
+    } finally {
+      if (pending.timer) globalThis.clearTimeout(pending.timer);
+      if (pendingRef.current === pending) {
+        pendingRef.current = null;
+        if (activeRef.current) setPendingAction("");
+      }
+    }
+  }, []);
+
+  const resetStalePreview = (operationError) => {
+    if (["PREVIEW_STALE", "MATCH_EVIDENCE_STALE"].includes(operationError?.code)) {
+      setPreview(null);
+      setResult(null);
+      setConfirmationRequest(null);
+    }
+  };
+
+  const chooseCustomer = (nextCustomerId) => {
+    setCustomerId(nextCustomerId);
+    setPreview(null);
+    setResult(null);
+    setConfirmationRequest(null);
+    setError("");
+  };
+
+  const createPreview = () => runExclusive("preview", (signal) => (
+    apiClient.previewHospitalTenderLeadConversion(notice.id, { customerId }, { signal })
+  ), (item) => {
+    setPreview(item);
+    setResult(null);
+    setConfirmationRequest(null);
+  });
+
+  const confirmPreview = () => {
+    const request = { customerId, previewDigest: preview.previewDigest };
+    return runExclusive("confirm", (signal) => apiClient.confirmHospitalTenderLeadConversion(notice.id, {
+      ...request,
+    }, { signal }), (item) => {
+      setResult(item);
+      setPreview(null);
+      setConfirmationRequest(request);
+    }, resetStalePreview);
+  };
+
+  const replayConfirmation = () => runExclusive("replay", (signal) => (
+    apiClient.confirmHospitalTenderLeadConversion(notice.id, confirmationRequest, { signal })
+  ), (item) => {
+    setResult(item);
+  }, resetStalePreview);
+
+  const cancelPreview = () => runExclusive("cancel", (signal) => (
+    apiClient.cancelHospitalTenderLeadConversion(notice.id, {
+      customerId,
+      previewDigest: preview.previewDigest,
+    }, { signal })
+  ), (item) => {
+    setResult(item);
+    setPreview(null);
+    setConfirmationRequest(null);
+  }, resetStalePreview);
+
+  const connected = backendStatus === "connected";
+  const clientReady = apiClient
+    && typeof apiClient.previewHospitalTenderLeadConversion === "function"
+    && typeof apiClient.confirmHospitalTenderLeadConversion === "function"
+    && typeof apiClient.cancelHospitalTenderLeadConversion === "function";
+  const canStart = connected && clientReady && options.length > 0 && Boolean(customerId) && !pendingAction;
+
+  return (
+    <section className="detail-surface confirmation-preview" data-testid="hospital-tender-lead-conversion">
+      <div className="confirmation-preview-head">
+        <div>
+          <h3>转为商机</h3>
+          <small>先预览将创建的商机和跟进待办，明确确认后才会写入。</small>
+        </div>
+        <b className={`pill ${result?.status === "confirmed" ? "green" : result?.status === "cancelled" ? "gray" : preview ? "amber" : "blue"}`}>
+          {result?.status === "confirmed" ? "已创建" : result?.status === "cancelled" ? "已取消" : preview ? "待确认" : "未开始"}
+        </b>
+      </div>
+
+      {options.length > 0 ? (
+        <label className="form-field">
+          <span>关联客户</span>
+          <select
+            aria-label="选择转商机客户"
+            value={customerId}
+            onChange={(event) => chooseCustomer(event.target.value)}
+            disabled={Boolean(pendingAction || preview || result?.status === "confirmed")}
+          >
+            {options.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}
+          </select>
+        </label>
+      ) : <p className="status-text">这条公告尚未匹配到当前账号可用的客户，暂不能转为商机。</p>}
+
+      {!connected ? <p className="status-text">后端连接恢复后，才能生成转商机预览。</p> : null}
+      {error ? <p className="status-text" role="alert">{error}</p> : null}
+      {pendingAction ? <p className="status-text" role="status" aria-live="polite">当前操作正在处理，请稍候。</p> : null}
+
+      {preview ? (
+        <div className="confirmation-preview-items" aria-label="转商机变更预览">
+          <article className="confirmation-preview-item">
+            <strong>将创建商机</strong>
+            <div className="confirmation-preview-values">
+              <span>{preview.drafts.opportunity.name}</span>
+              <small>阶段：{preview.drafts.opportunity.stage || "线索"} · 下一步：{preview.drafts.opportunity.next || "待补充"}</small>
+            </div>
+          </article>
+          <article className="confirmation-preview-item">
+            <strong>将创建跟进待办</strong>
+            <div className="confirmation-preview-values">
+              <span>{preview.drafts.actionItem.title}</span>
+              <small>优先级：{preview.drafts.actionItem.priority || "中"} · 截止：{preview.drafts.actionItem.due || "待补充"}</small>
+            </div>
+          </article>
+        </div>
+      ) : null}
+
+      {result?.status === "confirmed" ? (
+        <p className="status-text" role="status">
+          <CheckCircle2 size={16} />{result.replayed ? "这条公告已转为商机，本次没有重复创建。" : "商机和跟进待办已创建。"}
+        </p>
+      ) : null}
+      {result?.status === "cancelled" ? <p className="status-text" role="status">本次预览已取消，没有写入业务数据。</p> : null}
+
+      <div className="confirmation-preview-actions">
+        {!preview && result?.status !== "confirmed" ? (
+          <button className="ghost-button" type="button" disabled={!canStart} onClick={() => { void createPreview(); }}>
+            {pendingAction === "preview" ? "正在生成预览" : result?.status === "cancelled" ? "重新生成预览" : "生成转商机预览"}
+          </button>
+        ) : null}
+        {preview ? (
+          <>
+            <button className="primary-button" type="button" disabled={Boolean(pendingAction)} onClick={() => { void confirmPreview(); }}>
+              {pendingAction === "confirm" ? "正在确认" : "确认创建商机和待办"}
+            </button>
+            <button className="ghost-button" type="button" disabled={Boolean(pendingAction)} onClick={() => { void cancelPreview(); }}>
+              {pendingAction === "cancel" ? "正在取消" : "取消本次预览"}
+            </button>
+          </>
+        ) : null}
+        {result?.status === "confirmed" && confirmationRequest ? (
+          <button className="ghost-button" type="button" disabled={Boolean(pendingAction || !connected)} onClick={() => { void replayConfirmation(); }}>
+            {pendingAction === "replay" ? "正在核对创建结果" : "再次核对创建结果"}
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
 }
 
 function customerLabel(customer) {
@@ -257,7 +487,7 @@ function deadlineLabel(value, now = Date.now()) {
   return "截止时间";
 }
 
-function NoticeDetail({ notice, onClose, onSelectCustomer }) {
+function NoticeDetail({ apiClient, backendStatus, notice, customers, onClose, onSelectCustomer }) {
   const matchReasons = [...new Set(Object.values(notice.matchReasons ?? {}).flat().filter(Boolean))];
   const matchedNeeds = [...new Set(Object.values(notice.matchedNeeds ?? {}).flat().filter(Boolean))];
   const dialogRef = useRef(null);
@@ -358,6 +588,12 @@ function NoticeDetail({ notice, onClose, onSelectCustomer }) {
               {matchedNeeds.length > 0 ? <small className="muted-copy">命中需求：{matchedNeeds.join("、")}</small> : null}
             </section>
           ) : null}
+          <LeadConversionSection
+            apiClient={apiClient}
+            backendStatus={backendStatus}
+            notice={notice}
+            customers={customers}
+          />
           <div className="detail-actions">
             {notice.sourceUrl ? (
               <a className="primary-button" href={notice.sourceUrl} target="_blank" rel="noreferrer">
@@ -756,7 +992,17 @@ export function HospitalTenderPage({
         </aside>
       </div>
 
-      {selectedNotice ? <NoticeDetail notice={selectedNotice} onClose={closeNotice} onSelectCustomer={onSelectCustomer} /> : null}
+      {selectedNotice ? (
+        <NoticeDetail
+          key={selectedNotice.id}
+          apiClient={apiClient}
+          backendStatus={backendStatus}
+          notice={selectedNotice}
+          customers={customers}
+          onClose={closeNotice}
+          onSelectCustomer={onSelectCustomer}
+        />
+      ) : null}
     </section>
   );
 }
