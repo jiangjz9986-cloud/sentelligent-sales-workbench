@@ -293,7 +293,7 @@ describe("central audit repository", () => {
       const confirmed = await request(`/api/quick-records/${quickRecord.id}/confirm`, {
         method: "POST",
         headers: {
-          "If-Match": `"${quickRecord.version}"`,
+          "If-Match": `"${analyzed.body.quickRecord.version}"`,
           "Idempotency-Key": "task10-authenticated-confirmer",
         },
         body: JSON.stringify({

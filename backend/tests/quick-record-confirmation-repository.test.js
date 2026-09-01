@@ -4,7 +4,10 @@ import { describe, it } from "node:test";
 
 import { openDatabase } from "../src/db.js";
 import { withImmediateTransaction } from "../src/db/transaction.js";
-import { createQuickRecordConfirmationRepositories } from "../src/quickRecords/confirmationRepository.js";
+import {
+  QuickRecordConfirmationRepositoryError,
+  createQuickRecordConfirmationRepositories,
+} from "../src/quickRecords/confirmationRepository.js";
 import {
   QuickRecordConfirmationError,
   createQuickRecordConfirmationService,
@@ -47,9 +50,18 @@ function seed(db, owner = "owner-a") {
   });
 }
 
-function createHarness({ failAudit = false } = {}) {
+function createHarness({
+  failAudit = false,
+  businessOwner = "owner-a",
+  quickRecordOwner = businessOwner,
+  repositoryOptions,
+} = {}) {
   const db = openDatabase({ databaseUrl: ":memory:" });
-  seed(db);
+  seed(db, businessOwner);
+  if (quickRecordOwner !== businessOwner) {
+    db.prepare("UPDATE quick_records SET owner = $owner WHERE id = 'quick-record-a'")
+      .run({ $owner: quickRecordOwner });
+  }
   if (failAudit) {
     db.exec(`
       CREATE TRIGGER fail_quick_confirmation_audit
@@ -58,7 +70,7 @@ function createHarness({ failAudit = false } = {}) {
       BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END;
     `);
   }
-  const repositories = createQuickRecordConfirmationRepositories(db);
+  const repositories = createQuickRecordConfirmationRepositories(db, repositoryOptions);
   const service = createQuickRecordConfirmationService({
     ...repositories,
     runInTransaction: (work) => withImmediateTransaction(db, work),
@@ -133,7 +145,334 @@ function insertActiveWeekly(db, {
   });
 }
 
+function insertCustomerOpportunity(db, {
+  customerId,
+  opportunityId,
+  owner = "owner-a",
+  customerDeletedAt = null,
+  opportunityDeletedAt = null,
+} = {}) {
+  db.prepare(`
+    INSERT INTO customers (id, name, owner, relation, needs, deleted_at)
+    VALUES ($id, $name, $owner, 30, '[]', $deletedAt)
+  `).run({
+    $id: customerId,
+    $name: `客户-${customerId}`,
+    $owner: owner,
+    $deletedAt: customerDeletedAt,
+  });
+  db.prepare(`
+    INSERT INTO opportunities (
+      id, customer_id, name, owner, requirements, deleted_at
+    ) VALUES (
+      $id, $customerId, $name, $owner, '[]', $deletedAt
+    )
+  `).run({
+    $id: opportunityId,
+    $customerId: customerId,
+    $name: `商机-${opportunityId}`,
+    $owner: owner,
+    $deletedAt: opportunityDeletedAt,
+  });
+}
+
+function updateQuickRecordLinks(db, { customerId = null, opportunityId = null } = {}) {
+  db.prepare(`
+    UPDATE quick_records
+    SET customer_id = $customerId, opportunity_id = $opportunityId
+    WHERE id = 'quick-record-a'
+  `).run({ $customerId: customerId, $opportunityId: opportunityId });
+}
+
+function updateAnalysisTargets(db, {
+  customerId = null,
+  opportunityId = null,
+  customerValue,
+  opportunityValue,
+} = {}) {
+  const row = db.prepare(
+    "SELECT analysis_json FROM ai_insights WHERE id = 'analysis-a'",
+  ).get();
+  const analysis = JSON.parse(row.analysis_json);
+  analysis.customer.id = customerId;
+  analysis.opportunity.id = opportunityId;
+  if (customerValue !== undefined) analysis.customer.value = customerValue;
+  if (opportunityValue !== undefined) analysis.opportunity.value = opportunityValue;
+  db.prepare(
+    "UPDATE ai_insights SET analysis_json = $analysis WHERE id = 'analysis-a'",
+  ).run({ $analysis: JSON.stringify(analysis) });
+}
+
+function targetEntityIds(preview) {
+  return Object.fromEntries(
+    preview.items
+      .filter((item) => ["customer", "opportunity"].includes(item.target))
+      .map((item) => [item.target, item.entityId]),
+  );
+}
+
+function assertRelationshipFailure(work) {
+  assert.throws(
+    work,
+    (error) => (
+      error instanceof QuickRecordConfirmationRepositoryError
+      && error.code === "QUICK_RECORD_RELATIONSHIP_INVALID"
+      && error.message === "Saved quick-record links are not confirmable"
+    ),
+  );
+}
+
 describe("SQLite quick-record confirmation repository", () => {
+  it("keeps auth-disabled anonymous confirmation compatible with globally visible business rows", () => {
+    const { db, service } = createHarness({
+      businessOwner: "business-owner",
+      quickRecordOwner: "anonymous",
+      repositoryOptions: { anonymousGlobalTargets: true },
+    });
+    try {
+      const preview = service.preview({ owner: "anonymous", quickRecordId: "quick-record-a" });
+      assert.deepEqual(targetEntityIds(preview), {
+        customer: "customer-a",
+        opportunity: "opportunity-a",
+      });
+
+      const outcome = service.confirmAll({
+        owner: "anonymous",
+        previewId: preview.id,
+        suggestionIdentity: preview.identity,
+        expectedQuickRecordVersion: preview.quickRecordVersion,
+        analysisVersionId: preview.analysisVersionId,
+        summaryHash: preview.summaryHash,
+        evidenceHash: preview.evidenceHash,
+        actor: { account: "anonymous" },
+        confirm: true,
+      });
+
+      assert.equal(outcome.status, "confirmed");
+      assert.ok(JSON.parse(db.prepare(
+        "SELECT needs FROM customers WHERE id = 'customer-a'",
+      ).get().needs).includes("补齐本地灾备规划"));
+      assert.ok(JSON.parse(db.prepare(
+        "SELECT requirements FROM opportunities WHERE id = 'opportunity-a'",
+      ).get().requirements).includes("补齐本地灾备规划"));
+    } finally {
+      db.close();
+    }
+  });
+
+  it("pins active explicit links even when the saved model candidates point at another valid pair", () => {
+    const { db, service } = createHarness();
+    try {
+      insertCustomerOpportunity(db, {
+        customerId: "customer-b",
+        opportunityId: "opportunity-b",
+      });
+      updateAnalysisTargets(db, {
+        customerId: "customer-b",
+        opportunityId: "opportunity-b",
+        customerValue: "不可信模型客户名称",
+        opportunityValue: "不可信模型商机名称",
+      });
+
+      const preview = service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+
+      assert.deepEqual(targetEntityIds(preview), {
+        customer: "customer-a",
+        opportunity: "opportunity-a",
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("fails closed instead of falling back when either explicit link is inactive or outside the owner", () => {
+    for (const [target, invalidation] of [
+      ["customer", "deleted"],
+      ["opportunity", "deleted"],
+      ["customer", "owner"],
+      ["opportunity", "owner"],
+    ]) {
+      const { db, service } = createHarness();
+      try {
+        insertCustomerOpportunity(db, {
+          customerId: "customer-b",
+          opportunityId: "opportunity-b",
+        });
+        updateAnalysisTargets(db, {
+          customerId: "customer-b",
+          opportunityId: "opportunity-b",
+        });
+        const table = target === "customer" ? "customers" : "opportunities";
+        const id = target === "customer" ? "customer-a" : "opportunity-a";
+        if (invalidation === "deleted") {
+          db.prepare(`
+            UPDATE ${table}
+            SET deleted_at = '2026-08-31T11:00:00.000Z'
+            WHERE id = $id
+          `).run({ $id: id });
+        } else {
+          db.prepare(`UPDATE ${table} SET owner = 'owner-b' WHERE id = $id`).run({ $id: id });
+        }
+
+        assertRelationshipFailure(() => (
+          service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" })
+        ));
+        assert.equal(
+          db.prepare("SELECT COUNT(*) AS count FROM quick_record_confirmation_previews").get().count,
+          0,
+        );
+      } finally {
+        db.close();
+      }
+    }
+  });
+
+  it("rejects a model opportunity from another customer when only the customer link is explicit", () => {
+    const { db, service } = createHarness();
+    try {
+      insertCustomerOpportunity(db, {
+        customerId: "customer-b",
+        opportunityId: "opportunity-b",
+      });
+      updateQuickRecordLinks(db, { customerId: "customer-a" });
+      updateAnalysisTargets(db, {
+        customerId: "customer-a",
+        opportunityId: "opportunity-b",
+        customerValue: "示例医院",
+        opportunityValue: "商机-opportunity-b",
+      });
+
+      assertRelationshipFailure(() => (
+        service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" })
+      ));
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM quick_record_confirmation_previews").get().count,
+        0,
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("keeps valid model candidates for unlinked records and rejects inconsistent candidate pairs", () => {
+    const { db, service } = createHarness();
+    try {
+      insertCustomerOpportunity(db, {
+        customerId: "customer-b",
+        opportunityId: "opportunity-b",
+      });
+      updateQuickRecordLinks(db);
+      updateAnalysisTargets(db, {
+        customerId: "customer-b",
+        opportunityId: "opportunity-b",
+        customerValue: "客户-customer-b",
+        opportunityValue: "商机-opportunity-b",
+      });
+
+      const preview = service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+      assert.deepEqual(targetEntityIds(preview), {
+        customer: "customer-b",
+        opportunity: "opportunity-b",
+      });
+
+      db.prepare("DELETE FROM quick_record_confirmation_previews").run();
+      db.prepare(`
+        UPDATE quick_records
+        SET confirmation_preview_id = NULL, confirmation_preview_status = NULL
+        WHERE id = 'quick-record-a'
+      `).run();
+      updateAnalysisTargets(db, {
+        customerId: "customer-a",
+        opportunityId: "opportunity-b",
+        customerValue: "示例医院",
+        opportunityValue: "商机-opportunity-b",
+      });
+
+      assertRelationshipFailure(() => (
+        service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" })
+      ));
+    } finally {
+      db.close();
+    }
+  });
+
+  it("excludes inactive or cross-owner model candidates from an unlinked record", () => {
+    const { db, service } = createHarness();
+    try {
+      insertCustomerOpportunity(db, {
+        customerId: "customer-other",
+        opportunityId: "opportunity-other",
+        owner: "owner-b",
+      });
+      updateQuickRecordLinks(db);
+      updateAnalysisTargets(db, {
+        customerId: "customer-other",
+        opportunityId: "opportunity-other",
+        customerValue: "客户-customer-other",
+        opportunityValue: "商机-opportunity-other",
+      });
+
+      const crossOwnerPreview = service.preview({
+        owner: "owner-a",
+        quickRecordId: "quick-record-a",
+      });
+      assert.deepEqual(targetEntityIds(crossOwnerPreview), {});
+
+      db.prepare("DELETE FROM quick_record_confirmation_previews").run();
+      db.prepare(`
+        UPDATE quick_records
+        SET confirmation_preview_id = NULL, confirmation_preview_status = NULL
+        WHERE id = 'quick-record-a'
+      `).run();
+      insertCustomerOpportunity(db, {
+        customerId: "customer-deleted",
+        opportunityId: "opportunity-deleted",
+        customerDeletedAt: "2026-08-31T10:00:00.000Z",
+      });
+      updateAnalysisTargets(db, {
+        customerId: "customer-deleted",
+        opportunityId: "opportunity-deleted",
+        customerValue: "客户-customer-deleted",
+        opportunityValue: "商机-opportunity-deleted",
+      });
+
+      const inactivePreview = service.preview({
+        owner: "owner-a",
+        quickRecordId: "quick-record-a",
+      });
+      assert.deepEqual(targetEntityIds(inactivePreview), {});
+    } finally {
+      db.close();
+    }
+  });
+
+  it("excludes same-owner active model ids whose displayed names do not exactly match", () => {
+    for (const forgedTarget of ["customer", "opportunity"]) {
+      const { db, service } = createHarness();
+      try {
+        insertCustomerOpportunity(db, {
+          customerId: "customer-b",
+          opportunityId: "opportunity-b",
+        });
+        updateQuickRecordLinks(db);
+        updateAnalysisTargets(db, {
+          customerId: "customer-b",
+          opportunityId: "opportunity-b",
+          customerValue: forgedTarget === "customer" ? "伪造客户名称" : "客户-customer-b",
+          opportunityValue: forgedTarget === "opportunity" ? "伪造商机名称" : "商机-opportunity-b",
+        });
+
+        const preview = service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+        const targets = targetEntityIds(preview);
+        assert.equal(Object.hasOwn(targets, forgedTarget), false);
+        const survivingTarget = forgedTarget === "customer" ? "opportunity" : "customer";
+        assert.equal(targets[survivingTarget], `${survivingTarget}-b`);
+      } finally {
+        db.close();
+      }
+    }
+  });
+
   it("persists a replayable preview and writes only the three explicitly allowed fields", () => {
     const { db, service } = createHarness();
     try {

@@ -60,7 +60,7 @@ async function createAnalyzedRecord(baseUrl, suffix, links = {}) {
     body: "{}",
   });
   assert.equal(analyzed.status, 201);
-  return { quickRecord: created.body.item, analysis: analyzed.body.item };
+  return { quickRecord: analyzed.body.quickRecord, analysis: analyzed.body.item };
 }
 
 async function targetVersions(baseUrl) {

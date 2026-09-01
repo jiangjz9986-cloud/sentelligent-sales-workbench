@@ -89,7 +89,7 @@ async function createAnalyzedRecord(request, suffix = "record") {
     body: "{}",
   });
   assert.equal(analyzed.response.status, 201);
-  return { quickRecord: created.body.item, analysis: analyzed.body.item };
+  return { quickRecord: analyzed.body.quickRecord, analysis: analyzed.body.item };
 }
 
 async function currentTargetVersions(request) {
@@ -251,6 +251,41 @@ describe("idempotency primitives", () => {
 });
 
 describe("transactional and idempotent quick-record confirmation", () => {
+  it("returns a conflict without creating a V2 preview when a saved relationship is no longer confirmable", async () => {
+    await withHarness({}, async ({ databaseUrl, request }) => {
+      const fixture = await createAnalyzedRecord(request, "invalid saved relationship");
+      inspectDatabase(databaseUrl, (db) => {
+        db.prepare(`
+          UPDATE customers
+          SET deleted_at = '2026-09-02T10:00:00.000Z'
+          WHERE id = 'rizhao'
+        `).run();
+      });
+      const snapshot = () => inspectDatabase(databaseUrl, (db) => ({
+        quickRecord: db.prepare(`
+          SELECT status, version, confirmation_preview_id, confirmation_preview_status
+          FROM quick_records WHERE id = ?
+        `).get(fixture.quickRecord.id),
+        previewCount: Number(db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM quick_record_confirmation_previews
+          WHERE quick_record_id = ?
+        `).get(fixture.quickRecord.id).count),
+      }));
+      const before = snapshot();
+
+      const result = await request(
+        `/api/quick-records/${fixture.quickRecord.id}/confirmation-previews`,
+        { method: "POST", body: "{}" },
+      );
+
+      assert.equal(result.response.status, 409);
+      assert.equal(result.body.error.code, "QUICK_RECORD_RELATIONSHIP_INVALID");
+      assert.deepEqual(snapshot(), before);
+      assert.equal(before.previewCount, 0);
+    });
+  });
+
   it("rolls back every write and the idempotency claim at confirm.afterAction", async () => {
     await withHarness({ failpoints: new Set(["confirm.afterAction"]) }, async ({ databaseUrl, request }) => {
       const fixture = await createAnalyzedRecord(request, "failpoint");
@@ -336,7 +371,10 @@ describe("transactional and idempotent quick-record confirmation", () => {
         method: "POST",
         body: "{}",
       });
-      const fixture = { quickRecord: created.body.item, analysis: analyzed.body.item };
+      assert.equal(analyzed.response.status, 201);
+      assert.equal(analyzed.body.quickRecord.customerId, "rizhao");
+      assert.equal(analyzed.body.item.customer.id, "rizhao");
+      const fixture = { quickRecord: analyzed.body.quickRecord, analysis: analyzed.body.item };
       const versions = await currentTargetVersions(request);
       const path = `/api/quick-records/${fixture.quickRecord.id}/confirm`;
 
@@ -344,7 +382,7 @@ describe("transactional and idempotent quick-record confirmation", () => {
         path,
         confirmOptions(fixture, versions, "sequential-customer", { targets: ["customer"] }),
       );
-      assert.equal(customerResult.response.status, 201);
+      assert.equal(customerResult.response.status, 201, JSON.stringify(customerResult.body));
       const customerOnlyState = inspectDatabase(databaseUrl, (db) => ({
         action: db.prepare(
           "SELECT customer_id, opportunity_id FROM action_items WHERE source_record_id = ? AND deleted_at IS NULL",
@@ -765,7 +803,7 @@ describe("transactional and idempotent quick-record confirmation", () => {
     });
   });
 
-  it("rejects single-target confirmations that would break the final customer-opportunity pair", async () => {
+  it("keeps an existing customer identity when confirming one target at a time", async () => {
     for (const target of ["customer", "opportunity"]) {
       await withHarness({}, async ({ databaseUrl, request }) => {
         const created = await request("/api/quick-records", {
@@ -783,10 +821,12 @@ describe("transactional and idempotent quick-record confirmation", () => {
           body: "{}",
         });
         assert.equal(analyzed.response.status, 201);
-        assert.equal(analyzed.body.item.customer.id, "rizhao");
+        assert.equal(analyzed.body.item.customer.id, "huangdao-tcm");
+        assert.equal(analyzed.body.item.customer.identityConflict, true);
+        assert.equal(analyzed.body.item.customer.candidateId, "rizhao");
         assert.equal(analyzed.body.item.opportunity.id, "op-rizhao-plan");
 
-        const fixture = { quickRecord: created.body.item, analysis: analyzed.body.item };
+        const fixture = { quickRecord: analyzed.body.quickRecord, analysis: analyzed.body.item };
         const versions = await currentTargetVersions(request);
         const key = `relationship-${target}`;
         const before = relationshipSnapshot(databaseUrl, fixture.quickRecord.id, key);
@@ -795,14 +835,11 @@ describe("transactional and idempotent quick-record confirmation", () => {
           confirmOptions(fixture, versions, key, { targets: [target] }),
         );
 
-        assert.equal(result.response.status, 422, target);
-        assert.equal(result.body.error.code, "VALIDATION_ERROR", target);
-        assert.equal(result.body.error.fields.opportunityId, "relationship", target);
-        assert.deepEqual(
-          relationshipSnapshot(databaseUrl, fixture.quickRecord.id, key),
-          before,
-          target,
-        );
+        assert.equal(result.response.status, 201, `${target}: ${JSON.stringify(result.body)}`);
+        assert.equal(result.body.quickRecord.customerId, "huangdao-tcm", target);
+        const after = relationshipSnapshot(databaseUrl, fixture.quickRecord.id, key);
+        assert.equal(after.quickRecord.customer_id, "huangdao-tcm", target);
+        assert.notDeepEqual(after, before, target);
       });
     }
   });
@@ -831,7 +868,11 @@ describe("transactional and idempotent quick-record confirmation", () => {
 
         assert.equal(result.response.status, 409, staleTarget);
         assert.equal(result.body.error.code, "VERSION_CONFLICT", staleTarget);
-        assert.equal(result.body.error.fields.currentVersion, 2, staleTarget);
+        assert.equal(
+          result.body.error.fields.currentVersion,
+          staleTarget === "quickRecord" ? fixture.quickRecord.version + 1 : 2,
+          staleTarget,
+        );
         assert.deepEqual(confirmationSnapshot(databaseUrl, fixture.quickRecord.id, key), before, staleTarget);
       });
     }

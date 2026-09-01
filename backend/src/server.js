@@ -696,7 +696,10 @@ function quickRecordConfirmationFailure(error) {
   if (error instanceof QuickRecordConfirmationRepositoryError) {
     const status = error.code === "NOT_FOUND"
       ? 404
-      : error.code === "NO_CONFIRMATION_CHANGES"
+      : (
+          error.code === "NO_CONFIRMATION_CHANGES"
+          || error.code === "QUICK_RECORD_RELATIONSHIP_INVALID"
+        )
         ? 409
         : 500;
     throw new HttpError(status, error.code, error.message);
@@ -1633,6 +1636,142 @@ function activeCustomerRow(db, id, owner) {
     db,
     `SELECT id, name FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause}`,
     owner === undefined || owner === null ? { $id: id } : { $id: id, $owner: owner },
+  );
+}
+
+function resolveAnalyzedQuickRecordCustomer(db, {
+  owner,
+  currentCustomerId,
+  analysis,
+}) {
+  const scopedOwner = typeof owner === "string" && owner.trim() ? owner.trim() : null;
+  const activeScopedCustomer = (id) => activeCustomerRow(db, id, scopedOwner);
+
+  // A customer selected before analysis is user-owned state. Never let model
+  // output silently replace or clear it, including after that customer was
+  // soft-deleted; lifecycle cleanup is a separate, explicit user operation.
+  const existingCustomerId = typeof currentCustomerId === "string"
+    ? currentCustomerId.trim()
+    : "";
+  if (existingCustomerId) {
+    const existingCustomer = get(
+      db,
+      `SELECT id, name FROM customers
+       WHERE id = $id${scopedOwner ? " AND owner = $owner" : ""}`,
+      scopedOwner ? { $id: existingCustomerId, $owner: scopedOwner } : { $id: existingCustomerId },
+    );
+    return {
+      customerId: existingCustomerId,
+      customerName: existingCustomer?.name ?? null,
+      matchSource: "existing",
+    };
+  }
+
+  const analyzedCustomer = analysis?.customer;
+  if (!analyzedCustomer || typeof analyzedCustomer !== "object" || Array.isArray(analyzedCustomer)) {
+    return { customerId: null, customerName: null, matchSource: "none" };
+  }
+
+  const analyzedCustomerId = typeof analyzedCustomer.id === "string" ? analyzedCustomer.id.trim() : "";
+  const analyzedCustomerName = typeof analyzedCustomer.value === "string"
+    ? analyzedCustomer.value.trim()
+    : "";
+  if (analyzedCustomerId) {
+    const matchedById = activeScopedCustomer(analyzedCustomerId);
+    // An explicitly supplied but untrusted ID fails closed. In particular, a
+    // forged or cross-owner ID must not use the name field as a bypass. The
+    // model must also agree with the server-owned customer's exact name.
+    return matchedById && matchedById.name === analyzedCustomerName
+      ? { customerId: matchedById.id, customerName: matchedById.name, matchSource: "analysis_id" }
+      : { customerId: null, customerName: null, matchSource: "none" };
+  }
+
+  if (!analyzedCustomerName) {
+    return { customerId: null, customerName: null, matchSource: "none" };
+  }
+
+  const exactNameMatches = all(
+    db,
+    `SELECT id, name
+     FROM customers
+     WHERE name = $name
+       ${scopedOwner ? "AND owner = $owner" : ""}
+       AND deleted_at IS NULL
+     ORDER BY id ASC
+     LIMIT 2`,
+    scopedOwner ? { $name: analyzedCustomerName, $owner: scopedOwner } : { $name: analyzedCustomerName },
+  );
+  return exactNameMatches.length === 1
+    ? {
+        customerId: exactNameMatches[0].id,
+        customerName: exactNameMatches[0].name,
+        matchSource: "exact_name",
+      }
+    : { customerId: null, customerName: null, matchSource: "none" };
+}
+
+function verifiedQuickRecordAnalysis(analysis, customerResolution) {
+  const analyzedCustomer = analysis?.customer;
+  if (!analyzedCustomer || typeof analyzedCustomer !== "object" || Array.isArray(analyzedCustomer)) {
+    return analysis;
+  }
+
+  const candidateId = typeof analyzedCustomer.id === "string"
+    ? analyzedCustomer.id.trim().slice(0, 200)
+    : "";
+  const candidateValue = typeof analyzedCustomer.value === "string"
+    ? analyzedCustomer.value.trim().slice(0, 200)
+    : "";
+  const verifiedId = customerResolution.customerId;
+  const verifiedName = customerResolution.customerName;
+
+  if (!verifiedId || !verifiedName) {
+    if (!candidateId) return analysis;
+    return {
+      ...analysis,
+      customer: {
+        ...analyzedCustomer,
+        id: null,
+        candidateId,
+      },
+    };
+  }
+
+  const identityConflict = Boolean(
+    (candidateId && candidateId !== verifiedId)
+    || (candidateValue && candidateValue !== verifiedName),
+  );
+  return {
+    ...analysis,
+    customer: {
+      ...analyzedCustomer,
+      id: verifiedId,
+      value: verifiedName,
+      ...(identityConflict
+        ? {
+            identityConflict: true,
+            ...(candidateId ? { candidateId } : {}),
+            ...(candidateValue ? { candidateValue } : {}),
+          }
+        : {}),
+    },
+  };
+}
+
+function assertQuickRecordAnalysisSnapshotCurrent(snapshot, current) {
+  const unchanged = current.version === snapshot.version
+    && current.rawContent === snapshot.rawContent
+    && current.customerId === snapshot.customerId
+    && current.opportunityId === snapshot.opportunityId;
+  if (unchanged) return;
+  throw new HttpError(
+    409,
+    "QUICK_RECORD_ANALYSIS_STALE",
+    "The quick record changed while analysis was running",
+    {
+      expectedVersion: snapshot.version,
+      currentVersion: current.version,
+    },
   );
 }
 
@@ -2844,7 +2983,12 @@ function buildSalesDecisionContext(db, body, owner = null) {
 export function createServer(options = {}) {
   const config = loadConfig(options);
   const db = openDatabase({ databaseUrl: config.databaseUrl });
-  const quickRecordConfirmationRepositories = createQuickRecordConfirmationRepositories(db);
+  const quickRecordConfirmationRepositories = createQuickRecordConfirmationRepositories(db, {
+    // The legacy auth-disabled development mode stores quick records under the
+    // synthetic anonymous owner while seed business rows keep their real owner.
+    // Authenticated deployments never enable this compatibility scope.
+    anonymousGlobalTargets: !config.authRequired,
+  });
   const quickRecordConfirmationService = createQuickRecordConfirmationService({
     ...quickRecordConfirmationRepositories,
     runInTransaction: (work) => withImmediateTransaction(db, work),
@@ -7967,7 +8111,15 @@ export function createServer(options = {}) {
             { $id: quickRecord.id, ...ownerScope.params },
           ));
           if (!current) notFound();
+          assertQuickRecordAnalysisSnapshotCurrent(quickRecord, current);
+          assertQuickRecordConfirmationEditable(current);
 
+          const customerResolution = resolveAnalyzedQuickRecordCustomer(db, {
+            owner: requestOwner(request) ? current.owner : null,
+            currentCustomerId: current.customerId,
+            analysis,
+          });
+          const verifiedAnalysis = verifiedQuickRecordAnalysis(analysis, customerResolution);
           const id = randomUUID();
           run(
             db,
@@ -7976,15 +8128,19 @@ export function createServer(options = {}) {
             {
               $id: id,
               $quickRecordId: current.id,
-              $source: analysis.source,
-              $confidence: analysis.confidence ?? 70,
-              $analysisJson: JSON.stringify(analysis),
+              $source: verifiedAnalysis.source,
+              $confidence: verifiedAnalysis.confidence ?? 70,
+              $analysisJson: JSON.stringify(verifiedAnalysis),
             },
           );
           run(db, `UPDATE quick_records
-            SET status = 'analyzed', updated_at = CURRENT_TIMESTAMP
+            SET status = 'analyzed',
+                customer_id = $customerId,
+                version = version + 1,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = $id${ownerScope.clause}`, {
             $id: current.id,
+            $customerId: customerResolution.customerId,
             ...ownerScope.params,
           });
           const updatedRecord = quickRecordFromRow(get(
@@ -8002,7 +8158,14 @@ export function createServer(options = {}) {
             before: { quickRecord: current, insight: null },
             after: { quickRecord: updatedRecord, insight },
             entityVersion: updatedRecord.version,
-            metadata: { insightId: insight.id, source: insight.source, confidence: insight.confidence },
+            metadata: {
+              insightId: insight.id,
+              source: insight.source,
+              confidence: insight.confidence,
+              customerId: updatedRecord.customerId,
+              customerMatchSource: customerResolution.matchSource,
+              customerIdentityConflict: insight.customer?.identityConflict === true,
+            },
           });
           return { insight, quickRecord: updatedRecord };
         });
@@ -8493,45 +8656,58 @@ export function createServer(options = {}) {
             : getLatestInsight(db, quickRecord.id);
           if (body.analysisVersionId && !insight) notFound();
 
-          // v0.9.2：确认目标读取对 user 与 machine 一视同仁地带 owner 谓词。
-          const confirmScopeOwner = requestOwner(request);
-          // v0.9.3 顺手修复（v0.9.2 观察项）：模型分析可能给出幻觉客户/商机 id（如
-          // cust-unknown）。模型来源的 id 仅在库内真实存在（含 owner 归属）时才作为
-          // 确认目标，否则按“未匹配”回退记录原值，而不是让整个 confirm 以 422 中断。
-          const insightCustomerId = insight?.customer?.id ?? null;
-          const insightCustomerExists = insightCustomerId
-            ? Boolean(get(
-              db,
-              `SELECT 1 AS present FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(confirmScopeOwner)}`,
-              ownerParams(confirmScopeOwner, { $id: insightCustomerId }),
-            ))
-            : false;
-          const insightOpportunityId = insight?.opportunity?.id ?? null;
-          const insightOpportunityExists = insightOpportunityId
-            ? Boolean(activeOpportunityEntityRow(db, insightOpportunityId, confirmScopeOwner ?? undefined))
-            : false;
-          const nextCustomerId = targets.includes("customer")
-            ? (insightCustomerExists ? insightCustomerId : quickRecord.customerId)
-            : quickRecord.customerId;
-          const nextOpportunityId = targets.includes("opportunity")
-            ? (insightOpportunityExists ? insightOpportunityId : quickRecord.opportunityId)
-            : quickRecord.opportunityId;
-          const finalCustomer = nextCustomerId
+          // Record links are user-owned state and always outrank model output.
+          // Authenticated user/machine requests stay owner-scoped; anonymous
+          // single-user development mode preserves its historical global view.
+          const requestScopeOwner = requestOwner(request);
+          const confirmScopeOwner = requestScopeOwner
+            ?? (quickRecord.owner && quickRecord.owner !== "anonymous" ? quickRecord.owner : null);
+          const linkedCustomerId = quickRecord.customerId;
+          const linkedOpportunityId = quickRecord.opportunityId;
+          const linkedCustomer = linkedCustomerId
             ? customerFromRow(get(
               db,
               `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(confirmScopeOwner)}`,
-              ownerParams(confirmScopeOwner, { $id: nextCustomerId }),
+              ownerParams(confirmScopeOwner, { $id: linkedCustomerId }),
             ))
             : null;
-          const finalOpportunity = nextOpportunityId
-            ? opportunityFromRow(activeOpportunityEntityRow(
-              db,
-              nextOpportunityId,
-              confirmScopeOwner ?? undefined,
-            ))
+          const linkedOpportunity = linkedOpportunityId
+            ? opportunityFromRow(activeOpportunityEntityRow(db, linkedOpportunityId, confirmScopeOwner))
             : null;
-          if (nextCustomerId && !finalCustomer) validationFailure("customerId");
-          if (nextOpportunityId && !finalOpportunity) validationFailure("opportunityId");
+          // A stale/deleted/cross-owner explicit link is not permission to use
+          // a model replacement. Abort the transaction so the idempotency claim
+          // and every prospective confirmation write roll back together.
+          if (linkedCustomerId && !linkedCustomer) validationFailure("customerId");
+          if (linkedOpportunityId && !linkedOpportunity) validationFailure("opportunityId");
+
+          let finalCustomer = linkedCustomer;
+          if (!linkedCustomerId && targets.includes("customer")) {
+            const candidateId = insight?.customer?.id;
+            const candidateName = insight?.customer?.value;
+            const candidate = typeof candidateId === "string" && typeof candidateName === "string"
+              ? customerFromRow(get(
+                db,
+                `SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL${ownerClause(confirmScopeOwner)}`,
+                ownerParams(confirmScopeOwner, { $id: candidateId }),
+              ))
+              : null;
+            finalCustomer = candidate?.name === candidateName ? candidate : null;
+            if (!finalCustomer) validationFailure("customerId");
+          }
+
+          let finalOpportunity = linkedOpportunity;
+          if (!linkedOpportunityId && targets.includes("opportunity")) {
+            const candidateId = insight?.opportunity?.id;
+            const candidateName = insight?.opportunity?.value;
+            const candidate = typeof candidateId === "string" && typeof candidateName === "string"
+              ? opportunityFromRow(activeOpportunityEntityRow(db, candidateId, confirmScopeOwner))
+              : null;
+            finalOpportunity = candidate?.name === candidateName ? candidate : null;
+            if (!finalOpportunity) validationFailure("opportunityId");
+          }
+
+          const nextCustomerId = finalCustomer?.id ?? null;
+          const nextOpportunityId = finalOpportunity?.id ?? null;
           if (finalCustomer && finalOpportunity && finalOpportunity.customerId !== finalCustomer.id) {
             validationFailure("opportunityId", "relationship");
           }

@@ -747,12 +747,13 @@ describe("sales workbench backend API", () => {
       }),
     });
 
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
 
     const confirmed = await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-confirm-all-targets",
       },
       body: JSON.stringify({
@@ -833,15 +834,16 @@ describe("sales workbench backend API", () => {
       }),
     });
     assert.equal(created.response.status, 201);
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, {
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, {
       method: "POST",
       headers: authHeaders,
     });
+    assert.equal(analyzed.response.status, 201);
     const confirmed = await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
         ...authHeaders,
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-confirm-display-name",
       },
       body: JSON.stringify({
@@ -866,11 +868,12 @@ describe("sales workbench backend API", () => {
       }),
     });
 
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-weekly-draft-source",
       },
       body: JSON.stringify({
@@ -909,11 +912,16 @@ describe("sales workbench backend API", () => {
     const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, {
       method: "POST",
     });
+    assert.equal(analyzed.response.status, 201, JSON.stringify(analyzed.body));
     const preview = await request(`/api/quick-records/${created.body.item.id}/confirmation-previews`, {
       method: "POST",
       body: "{}",
     });
-    await request(`/api/quick-record-confirmation-previews/${preview.body.item.id}/confirm-all`, {
+    assert.equal(preview.response.status, 201, JSON.stringify({
+      analyzed: analyzed.body,
+      preview: preview.body,
+    }));
+    const confirmed = await request(`/api/quick-record-confirmation-previews/${preview.body.item.id}/confirm-all`, {
       method: "POST",
       body: JSON.stringify({
         confirm: true,
@@ -924,6 +932,7 @@ describe("sales workbench backend API", () => {
         evidenceHash: preview.body.item.evidenceHash,
       }),
     });
+    assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
 
     const report = await request("/api/reports/weekly/draft", {
       method: "POST",
@@ -1012,11 +1021,12 @@ describe("sales workbench backend API", () => {
         sourceChannel: "快速记录",
       }),
     });
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-weekly-edit-source",
       },
       body: JSON.stringify({
@@ -1079,11 +1089,12 @@ describe("sales workbench backend API", () => {
         sourceChannel: "快速记录",
       }),
     });
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-weekly-model-source",
       },
       body: JSON.stringify({

@@ -141,24 +141,72 @@ function latestInsight(db, quickRecordId) {
   `).get({ $quickRecordId: quickRecordId });
 }
 
-function activeCustomer(db, owner, id) {
+function usesAnonymousGlobalTargets(owner, options) {
+  return options?.anonymousGlobalTargets === true && owner === "anonymous";
+}
+
+function activeCustomer(db, owner, id, options) {
   if (!id) return null;
+  const globalTargets = usesAnonymousGlobalTargets(owner, options);
   return db.prepare(`
     SELECT * FROM customers
-    WHERE id = $id AND owner = $owner AND deleted_at IS NULL
-  `).get({ $id: id, $owner: owner }) ?? null;
+    WHERE id = $id${globalTargets ? "" : " AND owner = $owner"} AND deleted_at IS NULL
+  `).get(globalTargets ? { $id: id } : { $id: id, $owner: owner }) ?? null;
 }
 
-function activeOpportunity(db, owner, id) {
+function activeOpportunity(db, owner, id, options) {
   if (!id) return null;
+  const globalTargets = usesAnonymousGlobalTargets(owner, options);
   return db.prepare(`
     SELECT * FROM opportunities
-    WHERE id = $id AND owner = $owner AND deleted_at IS NULL
-  `).get({ $id: id, $owner: owner }) ?? null;
+    WHERE id = $id${globalTargets ? "" : " AND owner = $owner"} AND deleted_at IS NULL
+  `).get(globalTargets ? { $id: id } : { $id: id, $owner: owner }) ?? null;
 }
 
-function firstActive(rows) {
-  return rows.find(Boolean) ?? null;
+function activeLinkedOpportunity(db, owner, id, options) {
+  const opportunity = activeOpportunity(db, owner, id, options);
+  if (!opportunity) return null;
+  return activeCustomer(db, owner, opportunity.customer_id, options) ? opportunity : null;
+}
+
+function failInvalidQuickRecordRelationship() {
+  fail(
+    "QUICK_RECORD_RELATIONSHIP_INVALID",
+    "Saved quick-record links are not confirmable",
+  );
+}
+
+function exactModelName(entity, value) {
+  return entity && typeof value === "string" && value === entity.name ? entity : null;
+}
+
+function confirmationTargets(db, owner, record, analysis, options) {
+  const explicitCustomerId = boundedText(record.customer_id);
+  const explicitOpportunityId = boundedText(record.opportunity_id);
+  const candidateCustomerId = boundedText(analysis.customer?.id);
+  const candidateOpportunityId = boundedText(analysis.opportunity?.id);
+
+  const customer = explicitCustomerId
+    ? activeCustomer(db, owner, explicitCustomerId, options)
+    : exactModelName(
+      activeCustomer(db, owner, candidateCustomerId, options),
+      analysis.customer?.value,
+    );
+  if (explicitCustomerId && !customer) failInvalidQuickRecordRelationship();
+
+  const opportunity = explicitOpportunityId
+    ? activeLinkedOpportunity(db, owner, explicitOpportunityId, options)
+    : exactModelName(
+      activeLinkedOpportunity(db, owner, candidateOpportunityId, options),
+      analysis.opportunity?.value,
+    );
+  if (explicitOpportunityId && !opportunity) failInvalidQuickRecordRelationship();
+
+  if (customer && opportunity && opportunity.customer_id !== customer.id) {
+    failInvalidQuickRecordRelationship();
+  }
+
+  return { customer, opportunity };
 }
 
 function evidenceFromAnalysis(analysis, insightId, quickRecordId) {
@@ -223,7 +271,7 @@ function weeklyTarget(db, owner, date) {
   return { id: availableVirtualWeeklyId(db, owner, weekStart), version: 1, entries: [] };
 }
 
-function buildDraft(db, owner, quickRecordId) {
+function buildDraft(db, owner, quickRecordId, options) {
   const record = db.prepare(`
     SELECT * FROM quick_records
     WHERE id = $id AND owner = $owner AND voided_at IS NULL
@@ -243,11 +291,8 @@ function buildDraft(db, owner, quickRecordId) {
   const requestText = boundedText(analysis.summary?.request?.text);
   const actionText = boundedText(analysis.summary?.action?.text);
   const changes = [];
+  const { customer, opportunity } = confirmationTargets(db, owner, record, analysis, options);
 
-  const customer = firstActive([
-    activeCustomer(db, owner, record.customer_id),
-    activeCustomer(db, owner, analysis.customer?.id),
-  ]);
   if (customer && requestText) {
     const before = parseArray(customer.needs, "customers.needs");
     addChange(changes, {
@@ -263,10 +308,6 @@ function buildDraft(db, owner, quickRecordId) {
     });
   }
 
-  const opportunity = firstActive([
-    activeOpportunity(db, owner, record.opportunity_id),
-    activeOpportunity(db, owner, analysis.opportunity?.id),
-  ]);
   if (opportunity && requestText) {
     const before = parseArray(opportunity.requirements, "opportunities.requirements");
     addChange(changes, {
@@ -406,9 +447,9 @@ function storedPreviewFromRow(row) {
   return item;
 }
 
-function currentWriteValue(db, owner, item) {
+function currentWriteValue(db, owner, item, options) {
   if (item.target === "customer" && item.field === "needs") {
-    const row = activeCustomer(db, owner, item.entityId);
+    const row = activeCustomer(db, owner, item.entityId, options);
     return row ? {
       owner,
       entityId: row.id,
@@ -418,7 +459,7 @@ function currentWriteValue(db, owner, item) {
     } : null;
   }
   if (item.target === "opportunity" && item.field === "requirements") {
-    const row = activeOpportunity(db, owner, item.entityId);
+    const row = activeOpportunity(db, owner, item.entityId, options);
     return row ? {
       owner,
       entityId: row.id,
@@ -453,24 +494,27 @@ function currentWriteValue(db, owner, item) {
   return null;
 }
 
-function updateExistingTarget(db, owner, item, expectedVersion, value) {
+function updateExistingTarget(db, owner, item, expectedVersion, value, options) {
   let result;
+  const globalTargets = usesAnonymousGlobalTargets(owner, options);
   if (item.target === "customer" && item.field === "needs") {
     result = db.prepare(`
       UPDATE customers
       SET needs = $value, version = version + 1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $id AND owner = $owner AND version = $expectedVersion AND deleted_at IS NULL
-    `).run({
-      $value: JSON.stringify(value), $id: item.entityId, $owner: owner, $expectedVersion: expectedVersion,
-    });
+      WHERE id = $id${globalTargets ? "" : " AND owner = $owner"}
+        AND version = $expectedVersion AND deleted_at IS NULL
+    `).run(globalTargets
+      ? { $value: JSON.stringify(value), $id: item.entityId, $expectedVersion: expectedVersion }
+      : { $value: JSON.stringify(value), $id: item.entityId, $owner: owner, $expectedVersion: expectedVersion });
   } else if (item.target === "opportunity" && item.field === "requirements") {
     result = db.prepare(`
       UPDATE opportunities
       SET requirements = $value, version = version + 1, updated_at = CURRENT_TIMESTAMP
-      WHERE id = $id AND owner = $owner AND version = $expectedVersion AND deleted_at IS NULL
-    `).run({
-      $value: JSON.stringify(value), $id: item.entityId, $owner: owner, $expectedVersion: expectedVersion,
-    });
+      WHERE id = $id${globalTargets ? "" : " AND owner = $owner"}
+        AND version = $expectedVersion AND deleted_at IS NULL
+    `).run(globalTargets
+      ? { $value: JSON.stringify(value), $id: item.entityId, $expectedVersion: expectedVersion }
+      : { $value: JSON.stringify(value), $id: item.entityId, $owner: owner, $expectedVersion: expectedVersion });
   } else if (item.target === "weekly" && item.field === "entries") {
     result = db.prepare(`
       UPDATE weekly_reports
@@ -485,12 +529,18 @@ function updateExistingTarget(db, owner, item, expectedVersion, value) {
   return Number(result.changes) === 1;
 }
 
-export function createQuickRecordConfirmationRepositories(db) {
+export function createQuickRecordConfirmationRepositories(db, {
+  anonymousGlobalTargets = false,
+} = {}) {
   assertDb(db);
+  if (typeof anonymousGlobalTargets !== "boolean") {
+    throw new TypeError("anonymousGlobalTargets must be a boolean");
+  }
+  const targetOptions = Object.freeze({ anonymousGlobalTargets });
 
   const draftRepository = {
     get({ owner, quickRecordId }) {
-      return buildDraft(db, owner, quickRecordId);
+      return buildDraft(db, owner, quickRecordId, targetOptions);
     },
   };
 
@@ -597,14 +647,14 @@ export function createQuickRecordConfirmationRepositories(db) {
 
   const writeRepository = {
     read({ owner, item }) {
-      return currentWriteValue(db, owner, item);
+      return currentWriteValue(db, owner, item, targetOptions);
     },
 
     apply({ owner, item, expectedVersion, expectedValue, value, quickRecordId }) {
       if (!Array.isArray(value) || value.length > MAX_ARRAY_ITEMS) {
         fail("INVALID_WRITE_VALUE", "confirmation write value must be a bounded array");
       }
-      const current = currentWriteValue(db, owner, item);
+      const current = currentWriteValue(db, owner, item, targetOptions);
       if (!current) return { notFound: true };
       if (current.version !== expectedVersion || !isDeepStrictEqual(current.value, expectedValue)) {
         return { conflict: true, current };
@@ -646,15 +696,15 @@ export function createQuickRecordConfirmationRepositories(db) {
             $version: expectedVersion + 1,
           });
         } catch (error) {
-          const latest = currentWriteValue(db, owner, item);
+          const latest = currentWriteValue(db, owner, item, targetOptions);
           if (latest && latest.version !== expectedVersion) return { conflict: true, current: latest };
           throw error;
         }
-      } else if (!updateExistingTarget(db, owner, item, expectedVersion, value)) {
-        const latest = currentWriteValue(db, owner, item);
+      } else if (!updateExistingTarget(db, owner, item, expectedVersion, value, targetOptions)) {
+        const latest = currentWriteValue(db, owner, item, targetOptions);
         return latest ? { conflict: true, current: latest } : { notFound: true };
       }
-      const updated = currentWriteValue(db, owner, item);
+      const updated = currentWriteValue(db, owner, item, targetOptions);
       return updated ? { item: updated } : { notFound: true };
     },
   };
