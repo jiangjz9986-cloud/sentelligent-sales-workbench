@@ -514,8 +514,8 @@ describe("invoice escalation real server wiring", () => {
   });
 
   it("keeps the scheduler status admin-only and rejects anonymous, machine, and member identities", async () => {
-    const adminPassword = "test-invoice-admin-password";
-    const memberPassword = "test-invoice-member-password";
+    const adminPassword = "test-admin-password";
+    const memberPassword = "test-account-password";
     const [adminHash, memberHash] = await Promise.all([
       hashPassword(adminPassword, { salt: Buffer.alloc(16, 51) }),
       hashPassword(memberPassword, { salt: Buffer.alloc(16, 52) }),
