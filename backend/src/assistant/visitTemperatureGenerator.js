@@ -74,6 +74,9 @@ function validModelResult(value, facts) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   if (!Number.isSafeInteger(value.suggestedValue) || value.suggestedValue < 0 || value.suggestedValue > 100) return false;
   if (!Number.isSafeInteger(value.confidence) || value.confidence < 0 || value.confidence > 100) return false;
+  const currentRelation = Number(facts.find((fact) => fact.key === "current_relation")?.value);
+  if (!Number.isSafeInteger(currentRelation)
+    || Math.abs(value.suggestedValue - currentRelation) > MAX_DELTA) return false;
   if (!Array.isArray(value.inferences) || value.inferences.length < 1 || value.inferences.length > MAX_INFERENCES) return false;
   const keys = new Set(facts.map((fact) => fact.key));
   return value.inferences.every((item) => (

@@ -79,7 +79,7 @@ describe("visit temperature suggestion generator", () => {
       fetchImpl: async (_url, options) => {
         requestBody = JSON.parse(options.body);
         return modelResponse({
-          suggestedValue: 63,
+          suggestedValue: 58,
           confidence: 82,
           inferences: [{
             claim: "客户明确愿意安排下一次交流",
@@ -90,7 +90,7 @@ describe("visit temperature suggestion generator", () => {
       },
     });
     const result = await generator(snapshot());
-    assert.equal(result.suggestedValue, 63);
+    assert.equal(result.suggestedValue, 58);
     assert.equal(result.confidence, 82);
     assert.equal(requestBody.model, "test-model");
     assert.match(requestBody.messages[1].content, /customer_feedback/u);
@@ -121,6 +121,16 @@ describe("visit temperature suggestion generator", () => {
       }),
     });
     assert.equal((await invalid(snapshot())).suggestedValue, 58);
+
+    const jump = createVisitTemperatureSuggestionGenerator({
+      config: { aiAnalysisMode: "model", modelApiKey: "test-key" },
+      fetchImpl: async () => modelResponse({
+        suggestedValue: 90,
+        confidence: 99,
+        inferences: [{ claim: "合法范围但跳变过大", confidence: 99, basisKeys: ["customer_feedback"] }],
+      }),
+    });
+    assert.equal((await jump(snapshot())).suggestedValue, 58);
   });
 
   it("clamps small rule changes at the relation boundaries", () => {
