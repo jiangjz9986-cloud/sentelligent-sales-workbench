@@ -30,10 +30,11 @@ describe("visit temperature suggestion panel wiring", () => {
   });
 
   it("uses completed V2 confirmation preview eligibility while excluding analyzed-only records", () => {
-    assert.match(source, /quickRecord\.status === "confirmed" \|\| quickRecord\.confirmationPreviewStatus === "completed"/u);
+    assert.match(source, /quickRecord\.status === "confirmed"\s*\|\|\s*\(quickRecord\.status === "analyzed"\s*&&\s*quickRecord\.confirmationPreviewStatus === "completed"\)/u);
     assert.match(source, /Boolean\(quickRecord\?\.id\)/u);
     assert.match(source, /Boolean\(quickRecord\?\.customerId\)/u);
-    assert.doesNotMatch(source, /quickRecord\.status === "analyzed"/u);
+    assert.doesNotMatch(source, /quickRecord\.status === "confirmed"\s*\|\|\s*quickRecord\.confirmationPreviewStatus/u);
+    assert.doesNotMatch(source, /quickRecord\.status === "draft"/u);
   });
 
   it("refreshes authoritative state after HTTP conflicts and uses currentCustomer on a conflict outcome", () => {

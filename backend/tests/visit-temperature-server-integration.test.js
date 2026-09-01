@@ -142,6 +142,7 @@ beforeEach(async () => {
   seedVisit({ id: "visit-a-cancel", owner: "ownera", customerId: "customer-a", content: "客户甲等待方案" });
   seedVisit({ id: "visit-a-v2", owner: "ownera", customerId: "customer-a", status: "analyzed", confirmationPreviewStatus: "completed", content: "客户甲完成确认预览" });
   seedVisit({ id: "visit-a-analyzed", owner: "ownera", customerId: "customer-a", status: "analyzed", content: "客户甲仅完成分析" });
+  seedVisit({ id: "visit-a-draft-completed", owner: "ownera", customerId: "customer-a", status: "draft", confirmationPreviewStatus: "completed", content: "客户甲草稿状态异常完成预览" });
   seedVisit({ id: "visit-b", owner: "ownerb", customerId: "customer-b", content: "客户乙确认交流" });
 });
 
@@ -285,6 +286,13 @@ describe("visit temperature server integration", () => {
       body: JSON.stringify({ visitId: "visit-a-analyzed" }),
     });
     assert.equal(analyzedOnly.response.status, 404);
+    assert.equal(generatorCalls, 1);
+
+    const draftCompleted = await userRequest(sessionA, "/api/visit-temperature-suggestions", {
+      method: "POST",
+      body: JSON.stringify({ visitId: "visit-a-draft-completed" }),
+    });
+    assert.equal(draftCompleted.response.status, 404);
     assert.equal(generatorCalls, 1);
 
     const crossOwner = await userRequest(sessionB, "/api/visit-temperature-suggestions", {

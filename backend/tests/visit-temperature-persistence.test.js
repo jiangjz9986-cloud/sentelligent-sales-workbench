@@ -62,6 +62,7 @@ beforeEach(() => {
   seedVisit({ id: "visit-b", owner: "owner-b", customerId: "customer-b" });
   seedVisit({ id: "visit-draft", owner: "owner-a", customerId: "customer-a", status: "analyzed", confirmationPreviewStatus: "open" });
   seedVisit({ id: "visit-v2", owner: "owner-a", customerId: "customer-a", status: "analyzed", confirmationPreviewStatus: "completed" });
+  seedVisit({ id: "visit-draft-completed", owner: "owner-a", customerId: "customer-a", status: "draft", confirmationPreviewStatus: "completed" });
   repositories = createVisitTemperatureSuggestionRepositories(db, {
     idFactory: () => "unused",
     clock: () => new Date(now),
@@ -219,6 +220,10 @@ describe("visit temperature SQLite persistence", () => {
     assert.equal(calls, 1);
     await assert.rejects(
       service.suggest({ owner: "owner-a", visitId: "visit-draft" }),
+      (error) => error.code === "NOT_FOUND",
+    );
+    await assert.rejects(
+      service.suggest({ owner: "owner-a", visitId: "visit-draft-completed" }),
       (error) => error.code === "NOT_FOUND",
     );
     await assert.rejects(

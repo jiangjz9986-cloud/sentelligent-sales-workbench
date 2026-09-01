@@ -235,7 +235,10 @@ export function createVisitTemperatureSuggestionRepositories(
         WHERE id = $id
           AND owner = $owner
           AND voided_at IS NULL
-          AND (status = 'confirmed' OR confirmation_preview_status = 'completed')
+          AND (
+            status = 'confirmed'
+            OR (status = 'analyzed' AND confirmation_preview_status = 'completed')
+          )
       `).get({ $id: id, $owner: normalizedOwner });
       if (!row) return null;
       const insight = latestInsight(db, id);

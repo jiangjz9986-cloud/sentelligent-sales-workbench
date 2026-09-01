@@ -66,7 +66,8 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
   const selectedSuggestion = items.find((item) => item.visitId === visitId);
   const canGenerate = Boolean(quickRecord?.id)
     && Boolean(quickRecord?.customerId)
-    && (quickRecord.status === "confirmed" || quickRecord.confirmationPreviewStatus === "completed")
+    && (quickRecord.status === "confirmed"
+      || (quickRecord.status === "analyzed" && quickRecord.confirmationPreviewStatus === "completed"))
     && !selectedSuggestion;
 
   async function generate() {
