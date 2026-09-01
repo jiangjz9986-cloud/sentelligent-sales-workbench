@@ -1,0 +1,33 @@
+Sentelligent Sales Workbench v0.10.4 — ASR production smoke integration
+Date: 2026-09-02
+
+TARGET / BRANCH / FIELD
+=======================
+TARGET=ASR production smoke runner and complete-history secret gate
+BRANCH=codex/asr-production-smoke-db69033-final
+CHANGED_FIELD=explicit production origin input; stdin-only credentials; sanitized exclusive report; fail-closed 0700 runtime check; manual acceptance pending; exact history-only tender fixture digest binding
+BASE_SHA=a8f79dd0a4f97a6a6782f7757f98591c3664983d
+BASE_TREE=ec832e83d7fc2c2b0467c2f7f41cad21688d8070
+ASR_COMMIT=f8d1492b25213683150a9929b347ee8a71cd808a
+SCANNER_COMMIT=7aaa6ffe4657b360c46dc0dc86c0f37c1b7dd96e
+
+MODIFIED CODE PATHS
+===================
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/package.json
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/scripts/package-scripts.test.mjs
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/scripts/asr-production-smoke.mjs
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/scripts/asr-production-smoke.test.mjs
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/backend/tests/hospital-tender-lead-conversion-api.integration.test.js
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/scripts/project-secret-scan.mjs
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/scripts/project-secret-scan.test.mjs
+
+DELIVERED CONTRACTS
+===================
+- The ASR package command carries no production target or credential.
+- The target origin is supplied explicitly by argument or environment and must be an exact bare HTTPS origin; the runner source embeds no production URL.
+- Password input is strict JSON from stdin. Credential arguments are rejected, and reports exclude authentication material, audio, transcript, references, and paths.
+- Report creation is exclusive, atomic, mode 0600, and refuses replacement.
+- Runtime inspection requires an inspected, empty, mode-0700 directory and zero runtime gauges; missing, unreadable, unsafe, non-empty, or unsafe-entry states fail closed.
+- Server-side mock coverage cannot set releaseReady: every browser, desktop, and iPhone acceptance item remains pending.
+- Historical secret exceptions apply only to git-history source and exact test path, assignment name, and SHA-256 digest; current-tree values still require scanner-safe fixture labels.
+- No production request, deployment, restart, push, tag, or release was performed.
