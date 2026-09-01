@@ -220,8 +220,14 @@ function staleError() {
   return error;
 }
 
-export function createInvoiceEscalationOutboxRenderer({ getInvoiceGap } = {}) {
+export function createInvoiceEscalationOutboxRenderer({
+  getInvoiceGap,
+  clock = () => new Date(),
+  levels = DEFAULT_INVOICE_ESCALATION_LEVELS,
+} = {}) {
   if (typeof getInvoiceGap !== "function") throw new TypeError("getInvoiceGap must be a function");
+  if (typeof clock !== "function") throw new TypeError("clock must be a function");
+  const normalizedLevels = normalizeInvoiceEscalationLevels(levels);
   return function renderOutboxItem(item = {}) {
     const owner = typeof item.owner === "string" ? item.owner.trim() : "";
     const payload = item.payload;
@@ -246,10 +252,24 @@ export function createInvoiceEscalationOutboxRenderer({ getInvoiceGap } = {}) {
         || currentGap.startedOn !== payload.startedOn
         || currentGap.expenseReference !== (payload.expenseReference ?? null);
       if (stale) throw staleError();
+      // A backed-up level-1 reminder must not be delivered after the gap has
+      // already crossed level 2 or 3. Re-evaluate against the current business
+      // date and render current days-open text while retaining the durable
+      // envelope only when its level is still the single highest due level.
+      const currentDecision = evaluateInvoiceEscalationGap({
+        gap: currentGap,
+        now: validDate(clock(), "clock"),
+        levels: normalizedLevels,
+      });
+      if (currentDecision.status !== "due"
+        || currentDecision.level.level !== payload.level
+        || currentDecision.level.days !== payload.thresholdDays) {
+        throw staleError();
+      }
+      return renderInvoiceEscalationMessage(currentDecision.payload);
     } catch (error) {
       if (error?.code === "WEIXIN_OUTBOX_STALE") throw error;
       throw staleError();
     }
-    return renderInvoiceEscalationMessage(payload);
   };
 }

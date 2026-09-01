@@ -176,6 +176,7 @@ describe("invoice escalation core", () => {
     let current = gap();
     const renderer = createInvoiceEscalationOutboxRenderer({
       getInvoiceGap: ({ owner, expenseId }) => current.owner === owner && current.expenseId === expenseId ? current : null,
+      clock: () => new Date(now),
     });
     const payload = evaluateInvoiceEscalationGap({ gap: current, now: new Date(now) }).payload;
     assert.match(renderer({ owner: OWNER_A, payload }), /发票缺口提醒/);
@@ -268,6 +269,7 @@ describe("invoice escalation scheduler", () => {
 
     const renderer = createInvoiceEscalationOutboxRenderer({
       getInvoiceGap: ({ owner, expenseId }) => (gapsByOwner.get(owner) ?? []).find((item) => item.expenseId === expenseId) ?? null,
+      clock: () => new Date(now),
     });
     assert.equal(outboxRepository.leaseNext({ renderMessage: renderer }), null, "revision 1 is discarded as stale");
     const next = outboxRepository.leaseNext({ renderMessage: renderer });
@@ -289,6 +291,7 @@ describe("invoice escalation scheduler", () => {
     assert.equal(resolved.enqueuedCount, 0);
     const renderer = createInvoiceEscalationOutboxRenderer({
       getInvoiceGap: ({ owner, expenseId }) => (gapsByOwner.get(owner) ?? []).find((item) => item.expenseId === expenseId) ?? null,
+      clock: () => new Date(now),
     });
     assert.equal(outboxRepository.leaseNext({ renderMessage: renderer }), null);
     assert.equal(outboxRows()[0].status, "failed");
@@ -303,7 +306,10 @@ describe("invoice escalation scheduler", () => {
     const outboxRepository = createOutbox({ maxAttempts: 1 });
     const { scheduler } = makeScheduler({ outboxRepository });
     await scheduler.runOnce();
-    const renderer = createInvoiceEscalationOutboxRenderer({ getInvoiceGap: () => gap() });
+    const renderer = createInvoiceEscalationOutboxRenderer({
+      getInvoiceGap: () => gap(),
+      clock: () => new Date(now),
+    });
     const lease = outboxRepository.leaseNext({ renderMessage: renderer });
     const failed = outboxRepository.ackFailure(lease.item.id, {
       leaseToken: lease.leaseToken,

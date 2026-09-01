@@ -89,6 +89,9 @@ import {
   InvoiceVersionConflictError,
   createInvoiceRepository,
 } from "./travelExpense/invoiceRepository.js";
+import { createInvoiceEscalationGapRepository } from "./travelExpense/invoiceEscalationGapRepository.js";
+import { createInvoiceEscalationOutboxRenderer } from "./travelExpense/invoiceEscalation.js";
+import { createInvoiceEscalationScheduler } from "./travelExpense/invoiceEscalationScheduler.js";
 import { withDocumentBlobWritePreflight } from "./travelExpense/documentBlobStore.js";
 import {
   validateTravelExpenseAdvancePayload,
@@ -3129,6 +3132,17 @@ export function createServer(options = {}) {
       ? { candidateIdFactory: options.invoiceCandidateIdFactory }
       : {}),
   });
+  const invoiceEscalationGapRepository = options.invoiceEscalationGapRepository
+    ?? createInvoiceEscalationGapRepository(db);
+  const invoiceEscalationClock = options.invoiceEscalationSchedulerClock ?? (() => new Date());
+  const invoiceEscalationOutboxRenderer = options.invoiceEscalationOutboxRenderer
+    ?? createInvoiceEscalationOutboxRenderer({
+      getInvoiceGap: invoiceEscalationGapRepository.getInvoiceGap,
+      clock: options.invoiceEscalationOutboxClock ?? invoiceEscalationClock,
+      ...(options.invoiceEscalationLevels !== undefined
+        ? { levels: options.invoiceEscalationLevels }
+        : {}),
+    });
   const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
   const invoiceTextTools = options.invoiceTextTools ?? probeLocalDocumentTextTools({
     ocrCommand: config.invoiceOcrCommand,
@@ -3302,6 +3316,11 @@ export function createServer(options = {}) {
       ...(options.shortcutBookkeepingAssistantIdFactory ? { idFactory: options.shortcutBookkeepingAssistantIdFactory } : {}),
       clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
     });
+  const renderWeixinOutboxMessage = (outboxItem) => (
+    outboxItem?.payload?.kind === "invoice_gap_escalation"
+      ? invoiceEscalationOutboxRenderer(outboxItem)
+      : shortcutBookkeepingAssistantRuntime.renderOutboxMessage(outboxItem)
+  );
   // v0.9.3：resolver 改查绑定表，闭合语义不变——无 active 绑定 → null 拒答，绝不回退全量。
   const assistantBusinessOwnerResolver = typeof options.resolveBusinessOwner === "function"
     ? options.resolveBusinessOwner
@@ -3421,6 +3440,26 @@ export function createServer(options = {}) {
   });
   const actionReminderAutoRun = options.actionReminderAutoRun ?? config.actionReminderAutoRun;
   if (actionReminderAutoRun && options.actionReminderSchedulerEnabled !== false) actionReminderScheduler.start();
+  const invoiceEscalationScheduler = options.invoiceEscalationScheduler
+    ?? createInvoiceEscalationScheduler({
+      outboxRepository: weixinConfirmationOutboxRepository,
+      listInvoiceGaps: invoiceEscalationGapRepository.listInvoiceGaps,
+      resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
+      deliveryReady: weixinDeliveryEnabled,
+      clock: invoiceEscalationClock,
+      pollMs: config.invoiceEscalationPollMs,
+      ...(options.invoiceEscalationLevels !== undefined
+        ? { levels: options.invoiceEscalationLevels }
+        : {}),
+      ...(options.invoiceEscalationBatchLimit !== undefined
+        ? { batchLimit: options.invoiceEscalationBatchLimit }
+        : {}),
+    });
+  const invoiceEscalationAutoRun = options.invoiceEscalationAutoRun
+    ?? config.invoiceEscalationAutoRun;
+  if (invoiceEscalationAutoRun && options.invoiceEscalationSchedulerEnabled !== false) {
+    invoiceEscalationScheduler.start();
+  }
   const dailyDigestClock = options.dailyDigestSchedulerClock ?? (() => new Date());
   const digestContentBuilder = createDigestContentBuilder({
     db,
@@ -3487,6 +3526,7 @@ export function createServer(options = {}) {
             }
           : null,
         actionReminders: actionReminderScheduler.status(),
+        invoiceEscalation: invoiceEscalationScheduler.status(),
         dailyDigest: dailyDigestScheduler.status(),
       },
     };
@@ -3813,7 +3853,7 @@ export function createServer(options = {}) {
             : "weixin-worker";
           const lease = weixinConfirmationOutboxRepository.leaseNext({
             workerId: workerId || "weixin-worker",
-            renderMessage: shortcutBookkeepingAssistantRuntime.renderOutboxMessage,
+            renderMessage: renderWeixinOutboxMessage,
           });
           if (!lease) {
             response.statusCode = 204;
@@ -5939,6 +5979,14 @@ export function createServer(options = {}) {
           releaseIdempotencyClaim(db, { ...idempotencyScope, claimToken: claim.claimToken });
           documentInboxRepositoryFailure(error);
         }
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/invoices/escalation/status") {
+        requireAdminRole(db, request);
+        sendJson(response, 200, {
+          item: invoiceEscalationScheduler.status(),
+        }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -8946,6 +8994,7 @@ export function createServer(options = {}) {
   server.on("close", () => {
     hospitalTenderScheduler.stop();
     actionReminderScheduler.stop();
+    invoiceEscalationScheduler.stop();
     dailyDigestScheduler.stop();
     db.close();
   });
@@ -8957,6 +9006,8 @@ export function createServer(options = {}) {
   server.visitTemperatureSuggestionHttp = visitTemperatureSuggestionHttp;
   server.visitTemperatureSuggestionRepositories = visitTemperatureSuggestionRepositories;
   server.actionReminderScheduler = actionReminderScheduler;
+  server.invoiceEscalationScheduler = invoiceEscalationScheduler;
+  server.invoiceEscalationGapRepository = invoiceEscalationGapRepository;
   server.dailyDigestScheduler = dailyDigestScheduler;
   server.asrService = asrService;
 

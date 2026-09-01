@@ -44,6 +44,8 @@ describe("backend model configuration", () => {
         "HOSPITAL_TENDER_INTERVAL_MINUTES=120",
         "HOSPITAL_TENDER_BATCH_SIZE=8",
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN=fixture-pushplus-token",
+        "INVOICE_ESCALATION_AUTO_RUN=true",
+        "INVOICE_ESCALATION_POLL_MS=45000",
       ].join("\n"),
       "utf8",
     );
@@ -81,6 +83,8 @@ describe("backend model configuration", () => {
       assert.equal(config.hospitalTenderIntervalMinutes, 120);
       assert.equal(config.hospitalTenderBatchSize, 8);
       assert.equal(config.hospitalTenderPushplusToken, "fixture-pushplus-token");
+      assert.equal(config.invoiceEscalationAutoRun, true);
+      assert.equal(config.invoiceEscalationPollMs, 45_000);
       assert.equal(config.port, 8788);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -123,6 +127,8 @@ describe("backend model configuration", () => {
     assert.equal(config.hospitalTenderIntervalMinutes, 60);
     assert.equal(config.hospitalTenderBatchSize, 10);
     assert.equal(config.hospitalTenderPushplusToken, "");
+    assert.equal(config.invoiceEscalationAutoRun, false);
+    assert.equal(config.invoiceEscalationPollMs, 60_000);
     assert.equal(config.nodeEnv, "development");
   });
 
@@ -168,6 +174,8 @@ describe("backend model configuration", () => {
     assert.equal(config.weixinAllowGroups, false);
     assert.deepEqual(config.weixinAllowedGroupIds, []);
     assert.deepEqual(config.corsAllowedOrigins, ["https://sales.example.test"]);
+    assert.equal(config.invoiceEscalationAutoRun, false);
+    assert.equal(config.invoiceEscalationPollMs, 60_000);
 
     for (const [field, message] of [
       ["AUTH_ACCOUNT", /AUTH_ACCOUNT/],
@@ -263,6 +271,15 @@ describe("backend model configuration", () => {
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_AUTO_RUN: "yes" }), /HOSPITAL_TENDER_AUTO_RUN/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_INTERVAL_MINUTES: 1441 }), /HOSPITAL_TENDER_INTERVAL_MINUTES/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_BATCH_SIZE: 201 }), /HOSPITAL_TENDER_BATCH_SIZE/);
+    assert.throws(() => loadConfig({ ...base, INVOICE_ESCALATION_AUTO_RUN: "yes" }), /INVOICE_ESCALATION_AUTO_RUN/);
+    for (const value of [0, 4_999, 600_001, 1.5, "1e5", true]) {
+      assert.throws(
+        () => loadConfig({ ...base, INVOICE_ESCALATION_POLL_MS: value }),
+        /INVOICE_ESCALATION_POLL_MS/,
+      );
+    }
+    assert.equal(loadConfig({ ...base, INVOICE_ESCALATION_POLL_MS: 5_000 }).invoiceEscalationPollMs, 5_000);
+    assert.equal(loadConfig({ ...base, INVOICE_ESCALATION_POLL_MS: 600_000 }).invoiceEscalationPollMs, 600_000);
     assert.equal(loadConfig(base).amapMode, "live");
     assert.equal(loadConfig({ ...base, AMAP_MODE: " Mock " }).amapMode, "mock");
     assert.throws(() => loadConfig({ ...base, AMAP_MODE: "sandbox" }), /AMAP_MODE/);

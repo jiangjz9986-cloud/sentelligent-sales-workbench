@@ -496,6 +496,18 @@ export function loadConfig(overrides = {}, { allowAsrTestLoopbackHttp = false } 
       if (parsed < 5_000) throw new Error("ACTION_REMINDER_POLL_MS must be at least 5000");
       return parsed;
     })(),
+    invoiceEscalationAutoRun: booleanValue(
+      env.invoiceEscalationAutoRun ?? env.INVOICE_ESCALATION_AUTO_RUN,
+      false,
+      "INVOICE_ESCALATION_AUTO_RUN",
+    ),
+    invoiceEscalationPollMs: (() => {
+      const raw = env.invoiceEscalationPollMs ?? env.INVOICE_ESCALATION_POLL_MS;
+      if (raw === undefined || raw === null || raw === "") return 60_000;
+      const parsed = boundedPositiveInteger(raw, "INVOICE_ESCALATION_POLL_MS", 600_000);
+      if (parsed < 5_000) throw new Error("INVOICE_ESCALATION_POLL_MS must be at least 5000");
+      return parsed;
+    })(),
     dailyDigestAutoRun: booleanValue(
       env.dailyDigestAutoRun ?? env.DAILY_DIGEST_AUTO_RUN,
       nodeEnv === "production",
