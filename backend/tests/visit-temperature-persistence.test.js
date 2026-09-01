@@ -17,15 +17,15 @@ function seedCustomer(id, owner, relation = 42) {
   `).run({ $id: id, $name: `${id}医院`, $owner: owner, $relation: relation });
 }
 
-function seedVisit({ id, owner, customerId, status = "confirmed", content = "客户认可试点范围并约定下次沟通。" }) {
+function seedVisit({ id, owner, customerId, status = "confirmed", confirmationPreviewStatus = null, content = "客户认可试点范围并约定下次沟通。" }) {
   db.prepare(`
     INSERT INTO quick_records (
-      id, owner, raw_content, occurred_at, customer_id, status, version, created_at, updated_at
+      id, owner, raw_content, occurred_at, customer_id, status, confirmation_preview_status, version, created_at, updated_at
     ) VALUES (
-      $id, $owner, $content, '2026-08-30T02:00:00.000Z', $customerId, $status, 3,
+      $id, $owner, $content, '2026-08-30T02:00:00.000Z', $customerId, $status, $confirmationPreviewStatus, 3,
       '2026-08-30T03:00:00.000Z', '2026-08-30T03:00:00.000Z'
     )
-  `).run({ $id: id, $owner: owner, $content: content, $customerId: customerId, $status: status });
+  `).run({ $id: id, $owner: owner, $content: content, $customerId: customerId, $status: status, $confirmationPreviewStatus: confirmationPreviewStatus });
   db.prepare(`
     INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json, created_at)
     VALUES ($id, $visitId, 'mock', 88, $analysis, '2026-08-30T03:00:00.000Z')
@@ -60,7 +60,8 @@ beforeEach(() => {
   seedCustomer("customer-b", "owner-b", 31);
   seedVisit({ id: "visit-a", owner: "owner-a", customerId: "customer-a" });
   seedVisit({ id: "visit-b", owner: "owner-b", customerId: "customer-b" });
-  seedVisit({ id: "visit-draft", owner: "owner-a", customerId: "customer-a", status: "analyzed" });
+  seedVisit({ id: "visit-draft", owner: "owner-a", customerId: "customer-a", status: "analyzed", confirmationPreviewStatus: "open" });
+  seedVisit({ id: "visit-v2", owner: "owner-a", customerId: "customer-a", status: "analyzed", confirmationPreviewStatus: "completed" });
   repositories = createVisitTemperatureSuggestionRepositories(db, {
     idFactory: () => "unused",
     clock: () => new Date(now),
@@ -101,6 +102,14 @@ describe("visit temperature SQLite persistence", () => {
     assert.ok(visit.evidence.some((item) => item.key === "customer_feedback"));
     assert.equal(repositories.visitRepository.getConfirmed({ owner: "owner-a", visitId: "visit-draft" }), null);
     assert.equal(repositories.visitRepository.getConfirmed({ owner: "owner-b", visitId: "visit-a" }), null);
+  });
+
+  it("accepts completed V2 confirmation previews without changing quick-record status", () => {
+    const visit = repositories.visitRepository.getConfirmed({ owner: "owner-a", visitId: "visit-v2" });
+    assert.equal(visit.id, "visit-v2");
+    assert.equal(visit.status, "analyzed");
+    assert.equal(visit.confirmationPreviewStatus, "completed");
+    assert.equal(db.prepare("SELECT status FROM quick_records WHERE id = 'visit-v2'").get().status, "analyzed");
   });
 
   it("keeps customer reads and relation writes owner-scoped, versioned, and audited", () => {
@@ -185,6 +194,39 @@ describe("visit temperature SQLite persistence", () => {
     assert.equal(db.prepare("SELECT relation, version FROM customers WHERE id = 'customer-a'").get().relation, 68);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'customer.relation.update'").get().count, 1);
     assert.deepEqual(repositories.suggestionRepository.list({ owner: "owner-b", limit: 20 }).items, []);
+  });
+
+  it("generates for a completed V2 preview, rejects analyzed-only, and preserves owner isolation", async () => {
+    let calls = 0;
+    const service = createVisitTemperatureSuggestionService({
+      ...repositories,
+      suggestionGenerator: async () => {
+        calls += 1;
+        return {
+          suggestedValue: 68,
+          confidence: 84,
+          inferences: [{ claim: "客户愿意继续推进", basisKeys: ["customer_feedback"], confidence: 84 }],
+        };
+      },
+      runInTransaction: (work) => withImmediateTransaction(db, work),
+      idFactory: () => `suggestion-v2-${calls + 1}`,
+      clock: () => new Date(now),
+      ttlMs: 60_000,
+    });
+
+    const completed = await service.suggest({ owner: "owner-a", visitId: "visit-v2" });
+    assert.equal(completed.status, "pending");
+    assert.equal(calls, 1);
+    await assert.rejects(
+      service.suggest({ owner: "owner-a", visitId: "visit-draft" }),
+      (error) => error.code === "NOT_FOUND",
+    );
+    await assert.rejects(
+      service.suggest({ owner: "owner-b", visitId: "visit-v2" }),
+      (error) => error.code === "NOT_FOUND",
+    );
+    assert.equal(calls, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM visit_temperature_suggestions").get().count, 1);
   });
 
   it("rolls back customer relation and audit when suggestion state persistence fails", async () => {

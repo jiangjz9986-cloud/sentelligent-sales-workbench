@@ -20,6 +20,7 @@ let server;
 let baseUrl;
 let db;
 let sequence = 0;
+let generatorCalls = 0;
 
 async function rawRequest(path, options = {}) {
   const headers = { ...(options.headers ?? {}) };
@@ -53,16 +54,16 @@ async function login(account, password) {
   };
 }
 
-function seedVisit({ id, owner, customerId, content }) {
+function seedVisit({ id, owner, customerId, status = "confirmed", confirmationPreviewStatus = null, content }) {
   db.prepare(`
     INSERT INTO quick_records (
-      id, owner, raw_content, occurred_at, customer_id, status, version,
+      id, owner, raw_content, occurred_at, customer_id, status, confirmation_preview_status, version,
       created_at, updated_at
     ) VALUES (
-      $id, $owner, $content, '2026-08-30T02:00:00.000Z', $customerId, 'confirmed', 3,
+      $id, $owner, $content, '2026-08-30T02:00:00.000Z', $customerId, $status, $confirmationPreviewStatus, 3,
       '2026-08-30T03:00:00.000Z', '2026-08-30T03:00:00.000Z'
     )
-  `).run({ $id: id, $owner: owner, $customerId: customerId, $content: content });
+  `).run({ $id: id, $owner: owner, $customerId: customerId, $content: content, $status: status, $confirmationPreviewStatus: confirmationPreviewStatus });
   db.prepare(`
     INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json, created_at)
     VALUES ($id, $visitId, 'test', 88, $analysis, '2026-08-30T03:00:00.000Z')
@@ -90,6 +91,7 @@ beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "sentelligent-temperature-server-"));
   databaseUrl = join(tempDir, "temperature.sqlite");
   sequence = 0;
+  generatorCalls = 0;
   server = createServer({
     databaseUrl,
     seed: false,
@@ -107,15 +109,18 @@ beforeEach(async () => {
     dailyDigestAutoRun: false,
     visitTemperatureSuggestionClock: () => new Date("2026-08-31T04:00:00.000Z"),
     visitTemperatureSuggestionIdFactory: () => `temperature-suggestion-${++sequence}`,
-    visitTemperatureSuggestionGenerator: (snapshot) => ({
-      suggestedValue: snapshot.customer.relation + 26,
-      confidence: 84,
-      inferences: [{
-        claim: "客户愿意安排下一次技术交流",
-        basisKeys: ["customer_feedback"],
+    visitTemperatureSuggestionGenerator: (snapshot) => {
+      generatorCalls += 1;
+      return {
+        suggestedValue: snapshot.customer.relation + 26,
         confidence: 84,
-      }],
-    }),
+        inferences: [{
+          claim: "客户愿意安排下一次技术交流",
+          basisKeys: ["customer_feedback"],
+          confidence: 84,
+        }],
+      };
+    },
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -135,6 +140,8 @@ beforeEach(async () => {
   seedVisit({ id: "visit-a", owner: "ownera", customerId: "customer-a", content: "客户甲认可下一次交流" });
   seedVisit({ id: "visit-a-stale", owner: "ownera", customerId: "customer-a", content: "客户甲确认排期" });
   seedVisit({ id: "visit-a-cancel", owner: "ownera", customerId: "customer-a", content: "客户甲等待方案" });
+  seedVisit({ id: "visit-a-v2", owner: "ownera", customerId: "customer-a", status: "analyzed", confirmationPreviewStatus: "completed", content: "客户甲完成确认预览" });
+  seedVisit({ id: "visit-a-analyzed", owner: "ownera", customerId: "customer-a", status: "analyzed", content: "客户甲仅完成分析" });
   seedVisit({ id: "visit-b", owner: "ownerb", customerId: "customer-b", content: "客户乙确认交流" });
 });
 
@@ -256,5 +263,36 @@ describe("visit temperature server integration", () => {
     assert.ok(server.visitTemperatureSuggestionService);
     assert.ok(server.visitTemperatureSuggestionHttp);
     assert.ok(server.visitTemperatureSuggestionRepositories);
+  });
+
+  it("accepts completed V2 previews while rejecting analyzed-only and cross-owner records", async () => {
+    const sessionA = await login("ownera", LOGIN_A_VALUE);
+    const sessionB = await login("ownerb", LOGIN_B_VALUE);
+
+    const v2 = await userRequest(sessionA, "/api/visit-temperature-suggestions", {
+      method: "POST",
+      body: JSON.stringify({ visitId: "visit-a-v2" }),
+    });
+    assert.equal(v2.response.status, 200);
+    assert.equal(v2.body.item.status, "pending");
+    assert.equal(generatorCalls, 1);
+    const v2Record = db.prepare("SELECT status, confirmation_preview_status FROM quick_records WHERE id = 'visit-a-v2'").get();
+    assert.equal(v2Record.status, "analyzed");
+    assert.equal(v2Record.confirmation_preview_status, "completed");
+
+    const analyzedOnly = await userRequest(sessionA, "/api/visit-temperature-suggestions", {
+      method: "POST",
+      body: JSON.stringify({ visitId: "visit-a-analyzed" }),
+    });
+    assert.equal(analyzedOnly.response.status, 404);
+    assert.equal(generatorCalls, 1);
+
+    const crossOwner = await userRequest(sessionB, "/api/visit-temperature-suggestions", {
+      method: "POST",
+      body: JSON.stringify({ visitId: "visit-a-v2" }),
+    });
+    assert.equal(crossOwner.response.status, 404);
+    assert.equal(generatorCalls, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM visit_temperature_suggestions").get().count, 1);
   });
 });

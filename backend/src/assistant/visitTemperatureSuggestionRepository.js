@@ -150,6 +150,7 @@ function confirmedVisitFromRows(row, insightRow, confirmationRow) {
     id: row.id,
     owner: row.owner,
     status: row.status,
+    confirmationPreviewStatus: row.confirmation_preview_status ?? null,
     version: Number(row.version ?? 1),
     customerId: row.customer_id,
     occurredAt: row.occurred_at,
@@ -231,7 +232,10 @@ export function createVisitTemperatureSuggestionRepositories(
       const id = requiredText(visitId, "visitId");
       const row = db.prepare(`
         SELECT * FROM quick_records
-        WHERE id = $id AND owner = $owner AND status = 'confirmed' AND voided_at IS NULL
+        WHERE id = $id
+          AND owner = $owner
+          AND voided_at IS NULL
+          AND (status = 'confirmed' OR confirmation_preview_status = 'completed')
       `).get({ $id: id, $owner: normalizedOwner });
       if (!row) return null;
       const insight = latestInsight(db, id);

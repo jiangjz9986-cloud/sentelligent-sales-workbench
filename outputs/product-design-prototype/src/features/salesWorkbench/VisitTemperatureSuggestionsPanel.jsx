@@ -64,7 +64,10 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
   }, [reload]);
 
   const selectedSuggestion = items.find((item) => item.visitId === visitId);
-  const canGenerate = quickRecord?.status === "confirmed" && !selectedSuggestion;
+  const canGenerate = Boolean(quickRecord?.id)
+    && Boolean(quickRecord?.customerId)
+    && (quickRecord.status === "confirmed" || quickRecord.confirmationPreviewStatus === "completed")
+    && !selectedSuggestion;
 
   async function generate() {
     if (!quickRecord?.id || !canGenerate) return;
@@ -90,10 +93,10 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
   async function act(item, action) {
     if (!temperatureCanAct(item) || pendingId) return;
     const generation = generationRef.current;
+    const controller = new AbortController();
     setPendingId(item.id);
     setMessage("");
     try {
-      const controller = new AbortController();
       requestRef.current?.abort();
       requestRef.current = controller;
       const outcome = action === "confirm"
@@ -102,16 +105,32 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
       if (!controller.signal.aborted && generation === generationRef.current) setItems((current) => current.map((candidate) => (
         candidate.id === item.id ? mergeTemperatureOutcome(candidate, outcome) : candidate
       )));
-      if (!controller.signal.aborted && generation === generationRef.current && outcome.customer) onCustomerUpdated?.(outcome.customer);
+      const authoritativeCustomer = outcome.status === "conflict"
+        ? outcome.currentCustomer
+        : outcome.customer;
+      if (!controller.signal.aborted && generation === generationRef.current && authoritativeCustomer) {
+        onCustomerUpdated?.(authoritativeCustomer);
+      }
       if (generation === generationRef.current) setMessage(outcome.status === "conflict"
         ? "此建议与当前数据不一致，已停止写回，请保留只读并重新核对拜访/客户数据"
         : action === "confirm" ? "已确认并写回客户温度" : "已取消该温度建议");
     } catch (error) {
       if (generation === generationRef.current && error?.status === 409) {
-        setItems((current) => current.map((candidate) => (
-          candidate.id === item.id ? { ...candidate, status: "conflict", writeback: false } : candidate
-        )));
-        setMessage("此建议与当前数据不一致，已停止写回，请保留只读并重新核对拜访/客户数据");
+        try {
+          const authoritative = await apiClient.getVisitTemperatureSuggestion(item.id, { signal: controller.signal });
+          if (!controller.signal.aborted && generation === generationRef.current) {
+            setItems((current) => current.map((candidate) => (
+              candidate.id === item.id
+                ? mergeTemperatureOutcome(candidate, { status: "conflict", suggestion: authoritative, writeback: false })
+                : candidate
+            )));
+            setMessage("此建议与当前数据不一致，已重新读取权威状态并停止写回，请重新核对拜访/客户数据");
+          }
+        } catch (refreshError) {
+          if (generation === generationRef.current && refreshError?.code !== "ABORTED" && refreshError?.name !== "AbortError") {
+            setMessage(temperatureErrorMessage(refreshError, "温度建议状态刷新"));
+          }
+        }
       } else if (generation === generationRef.current && error?.code !== "ABORTED" && error?.name !== "AbortError") {
         setMessage(temperatureErrorMessage(error, action === "confirm" ? "温度建议确认" : "温度建议取消"));
       }

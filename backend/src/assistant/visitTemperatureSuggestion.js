@@ -183,7 +183,7 @@ function normalizeVisit(raw, { owner, visitId, requireEvidence = true } = {}) {
   if (!isPlainObject(raw) || raw.owner !== owner) return null;
   const id = identifier(raw.id, "visit.id");
   if (id !== visitId) return null;
-  if (raw.status !== "confirmed") {
+  if (raw.status !== "confirmed" && raw.confirmationPreviewStatus !== "completed") {
     fail("VISIT_NOT_CONFIRMED", "The visit is not confirmed", { status: 409 });
   }
   const evidence = requireEvidence ? normalizeEvidence(raw.evidence) : [];

@@ -25,7 +25,21 @@ describe("visit temperature suggestion panel wiring", () => {
     assert.doesNotMatch(source, /全部确认/u);
     assert.match(source, /暂无可验证来源/u);
     assert.match(source, /sourceRefs\(item\)\.length > 0/u);
-    assert.match(source, /status: "conflict", writeback: false/u);
+    assert.match(source, /status: "conflict", suggestion: authoritative, writeback: false/u);
     assert.doesNotMatch(source, /outcome\.status === "conflict"\) await reload/u);
+  });
+
+  it("uses completed V2 confirmation preview eligibility while excluding analyzed-only records", () => {
+    assert.match(source, /quickRecord\.status === "confirmed" \|\| quickRecord\.confirmationPreviewStatus === "completed"/u);
+    assert.match(source, /Boolean\(quickRecord\?\.id\)/u);
+    assert.match(source, /Boolean\(quickRecord\?\.customerId\)/u);
+    assert.doesNotMatch(source, /quickRecord\.status === "analyzed"/u);
+  });
+
+  it("refreshes authoritative state after HTTP conflicts and uses currentCustomer on a conflict outcome", () => {
+    assert.match(source, /apiClient\.getVisitTemperatureSuggestion\(item\.id, \{ signal: controller\.signal \}\)/u);
+    assert.match(source, /mergeTemperatureOutcome\(candidate, \{ status: "conflict", suggestion: authoritative, writeback: false \}\)/u);
+    assert.match(source, /outcome\.status === "conflict"\s*\? outcome\.currentCustomer\s*:\s*outcome\.customer/u);
+    assert.doesNotMatch(source, /candidate\.id === item\.id \? \{ \.\.\.candidate, status: "conflict"/u);
   });
 });

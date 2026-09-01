@@ -91,6 +91,25 @@ describe("visit temperature API client", () => {
     assert.equal(Object.hasOwn(cancelPayload, "owner"), false);
   });
 
+  it("keeps the server-authoritative current customer on conflict outcomes", async () => {
+    const item = suggestion();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => response({
+        item: {
+          status: "conflict",
+          suggestion: item,
+          currentCustomer: { id: "customer-1", relation: 55, version: 4 },
+          writeback: false,
+        },
+      }),
+    });
+    const outcome = await api.confirmVisitTemperatureSuggestion(item);
+    assert.equal(outcome.status, "conflict");
+    assert.deepEqual(outcome.currentCustomer, { id: "customer-1", relation: 55, version: 4 });
+    assert.equal(outcome.writeback, false);
+  });
+
   it("distinguishes auth, conflict, timeout and internal errors without exposing body", () => {
     assert.equal(normalizeVisitTemperatureError({ status: 401, message: "private" }).code, "AUTH_REQUIRED");
     assert.equal(normalizeVisitTemperatureError({ status: 409, message: "private" }).code, "CONFLICT");
