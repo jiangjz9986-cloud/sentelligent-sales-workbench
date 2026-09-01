@@ -11,6 +11,8 @@ const controlFiles = [
   ...salesWorkbenchPageFiles(),
   "src/features/salesWorkbench/pages/EntityWorkspace.jsx",
   "src/components/primitives.jsx",
+  "src/components/ai/AiResultCard.jsx",
+  "src/components/ai/ManualAiSuggestionPanel.jsx",
   "src/features/visitItinerary/VisitItineraryPage.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",
   "src/features/travelExpense/ExpenseEditorDrawer.jsx",

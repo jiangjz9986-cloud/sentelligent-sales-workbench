@@ -225,6 +225,12 @@ async function main() {
     await context.addInitScript(installVoiceRecognitionUnavailable);
     const page = await context.newPage();
     const failedResponses = [];
+    const aiSuggestionRequests = [];
+    page.on("request", (request) => {
+      if (request.url().includes("/api/ai/suggestions")) {
+        aiSuggestionRequests.push({ method: request.method(), url: request.url() });
+      }
+    });
     page.on("response", (response) => {
       if (response.status() >= 400 && response.status() !== 401) {
         failedResponses.push({ status: response.status(), url: response.url() });
@@ -236,6 +242,88 @@ async function main() {
     await page.locator('input[aria-label="密码"]').fill(loginPassword);
     await page.getByTestId("login-submit").click();
     await page.getByTestId("page-overview").waitFor();
+
+    async function exerciseAiSuggestionCard({ module, type, action }) {
+      await page.getByTestId(`nav-${module}`).click();
+      await page.getByTestId(`${module}-list-view`).waitFor();
+      await page.getByTestId(`${module}-open-detail`).first().click();
+      await page.getByTestId(`${module}-detail-view`).waitFor();
+      const panel = page.getByTestId(`manual-ai-suggestion-${type}`);
+      await panel.waitFor();
+      const generate = page.getByTestId(`ai-suggestion-generate-${type}`);
+      await generate.waitFor();
+      await page.waitForFunction((testId) => (
+        document.querySelector(`[data-testid="${testId}"]`)?.disabled === false
+      ), `ai-suggestion-generate-${type}`);
+      await generate.click();
+      const card = panel.getByTestId("ai-result-card");
+      await card.waitFor();
+      assert.equal(await card.getAttribute("data-status"), "pending");
+      assert.match(await card.locator(".ai-result-card-confidence").innerText(), /%/);
+      assert.ok(await card.locator(".ai-result-card-evidence-list li").count() >= 1);
+      const draft = card.getByTestId("ai-result-card-draft");
+      await draft.fill(`${type} 人工调整后的验收草稿`);
+      const postCountBeforeReview = aiSuggestionRequests.filter((item) => item.method === "POST").length;
+
+      if (action === "refresh-confirm") {
+        await page.reload({ waitUntil: "networkidle" });
+        await panel.waitFor();
+        const restoredCard = panel.getByTestId("ai-result-card");
+        await restoredCard.waitFor();
+        assert.equal(await restoredCard.getAttribute("data-status"), "pending");
+        assert.equal(await restoredCard.getAttribute("data-readonly"), "false");
+        assert.equal(await restoredCard.getByTestId("ai-result-card-draft").count(), 1);
+        assert.equal(await restoredCard.getByTestId("ai-result-card-confirm").isEnabled(), true);
+        assert.equal(await restoredCard.getByRole("button", { name: "取消本次建议" }).isEnabled(), true);
+        assert.equal(
+          aiSuggestionRequests.filter((item) => item.method === "POST").length,
+          postCountBeforeReview,
+          "reload must restore pending history through GET without rerunning the model",
+        );
+        await restoredCard.getByTestId("ai-result-card-draft").fill(`${type} 刷新后人工确认草稿`);
+        await restoredCard.getByTestId("ai-result-card-confirm").click();
+        await page.waitForFunction((testId) => (
+          document.querySelector(`[data-testid="${testId}"] [data-testid="ai-result-card"]`)?.dataset.status === "confirmed"
+        ), `manual-ai-suggestion-${type}`);
+        assert.match(await panel.locator(".editor-status").innerText(), /均未自动修改/u);
+      } else if (action === "confirm") {
+        await card.getByTestId("ai-result-card-confirm").click();
+        await page.waitForFunction((testId) => (
+          document.querySelector(`[data-testid="${testId}"] [data-testid="ai-result-card"]`)?.dataset.status === "confirmed"
+        ), `manual-ai-suggestion-${type}`);
+        assert.match(await panel.locator(".editor-status").innerText(), /均未自动修改/u);
+      } else if (action === "cancel") {
+        await card.getByRole("button", { name: "取消本次建议" }).click();
+        await page.waitForFunction((testId) => (
+          document.querySelector(`[data-testid="${testId}"] [data-testid="ai-result-card"]`)?.dataset.status === "cancelled"
+        ), `manual-ai-suggestion-${type}`);
+        assert.match(await panel.locator(".editor-status").innerText(), /没有写入任何业务档案/u);
+      }
+
+      const history = panel.getByTestId(`ai-suggestion-history-${type}`).getByRole("button").first();
+      await history.click();
+      await page.waitForFunction((testId) => (
+        document.querySelector(`[data-testid="${testId}"] [data-testid="ai-result-card"]`)?.dataset.readonly === "true"
+      ), `manual-ai-suggestion-${type}`);
+      assert.equal(await panel.getByTestId("ai-result-card-draft").count(), 0);
+      assert.equal(
+        aiSuggestionRequests.filter((item) => item.method === "POST").length,
+        action ? postCountBeforeReview + 1 : postCountBeforeReview,
+        "opening a history snapshot must not generate or mutate a suggestion",
+      );
+      const layout = await panel.evaluate((element) => ({
+        pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        panelOverflow: element.scrollWidth - element.clientWidth,
+        controls: [...element.querySelectorAll("button, textarea")].map((control) => {
+          const rect = control.getBoundingClientRect();
+          return { width: Math.round(rect.width), height: Math.round(rect.height) };
+        }),
+      }));
+      assert.equal(layout.pageOverflow, 0);
+      assert.ok(layout.panelOverflow <= 1, `AI suggestion panel overflow ${layout.panelOverflow}px`);
+      assert.ok(layout.controls.every((control) => control.width > 0 && control.height >= 44));
+      return layout;
+    }
 
     for (const module of ["customer", "opportunity", "knowledge", "itinerary"]) {
       await page.getByTestId(`nav-${module}`).click();
@@ -413,6 +501,25 @@ async function main() {
     await page.getByTestId("customer-delete-dialog").waitFor({ state: "detached" });
     assert.equal(await page.getByTestId("customer-detail-view").count(), 1);
 
+    const customerAiCardMetrics = await exerciseAiSuggestionCard({
+      module: "customer",
+      type: "customer_profile",
+      action: "confirm",
+    });
+    const opportunityAiCardMetrics = await exerciseAiSuggestionCard({
+      module: "opportunity",
+      type: "opportunity_push",
+      action: "cancel",
+    });
+    const knowledgeAiCardMetrics = await exerciseAiSuggestionCard({
+      module: "knowledge",
+      type: "knowledge_talk",
+      action: "refresh-confirm",
+    });
+    const mobileAiCardScreenshotPath = resolve(evidenceDirectory, "webkit-ai-result-card-390x844.png");
+    await page.getByTestId("manual-ai-suggestion-knowledge_talk").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: mobileAiCardScreenshotPath, fullPage: false });
+
     await page.getByTestId("nav-quick").click();
     await page.getByTestId("quick-record-mode-text").click();
     await page.getByTestId("nav-customer").click();
@@ -451,6 +558,14 @@ async function main() {
           nestedOverflow: previewMetrics.overflowCandidates,
           confirmationControls: previewMetrics.controls,
         },
+        {
+          viewport: { width: 390, height: 844 },
+          aiSuggestionCards: {
+            customer: customerAiCardMetrics,
+            opportunity: opportunityAiCardMetrics,
+            knowledge: knowledgeAiCardMetrics,
+          },
+        },
         smallMetrics,
       ],
       checks: {
@@ -469,6 +584,10 @@ async function main() {
         quickRecordDurablePreview: true,
         quickRecordTerminalReadOnly: true,
         quickRecordVoiceReset: true,
+        aiSuggestionCustomerConfirm: true,
+        aiSuggestionOpportunityCancel: true,
+        aiSuggestionKnowledgePendingRestoredAfterReload: true,
+        aiSuggestionKnowledgeHistoryReadOnly: true,
         logout: true,
       },
       screenshots: {
@@ -478,6 +597,7 @@ async function main() {
         mobileExpense: mobileExpenseScreenshotPath,
         mobileExpenseRegion: mobileRegionScreenshotPath,
         mobileQuickConfirmation: mobileQuickPreviewScreenshotPath,
+        mobileAiResultCard: mobileAiCardScreenshotPath,
         mobileItinerary: screenshotPath,
       },
     };

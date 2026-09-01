@@ -224,14 +224,14 @@ describe("strict business request validation", () => {
       "tags",
     );
     assertValidation(
-      await post("/api/ai/suggestions", { type: "next", title: "Bad context", context: [] }),
+      await post("/api/ai/suggestions", { type: "customer_profile", title: "Bad context", context: [] }),
       "context",
     );
 
     let deepContext = { value: "leaf" };
     for (let depth = 0; depth < 7; depth += 1) deepContext = { nested: deepContext };
     assertValidation(
-      await post("/api/ai/suggestions", { type: "next", title: "Deep context", context: deepContext }),
+      await post("/api/ai/suggestions", { type: "customer_profile", title: "Deep context", context: deepContext }),
       "context",
     );
     assertValidation(
@@ -356,7 +356,7 @@ describe("strict business request validation", () => {
     );
     assertValidation(
       await post("/api/ai/suggestions", {
-        type: "next",
+        type: "customer_profile",
         title: "Suggestion",
         context: {},
         extra: true,

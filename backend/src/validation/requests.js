@@ -301,7 +301,18 @@ export const requestSchemas = freezeSchema({
     owner: text(100, { nullable: true }), periodStart: text(50, { required: true }), periodEnd: text(50, { required: true }),
     knowledgeIds: stringArray(100, 200),
   },
-  aiSuggestion: { type: text(100, { required: true }), title: text(500, { required: true }), context: safeObject() },
+  aiSuggestion: {
+    type: { type: "enum", values: ["customer_profile", "opportunity_push", "knowledge_talk"], required: true },
+    title: text(500, { required: true }),
+    context: safeObject(),
+  },
+  aiSuggestionConfirm: {
+    confirm: { type: "enum", values: [true], required: true },
+    draft: text(100000, { required: true }),
+  },
+  aiSuggestionCancel: {
+    cancel: { type: "enum", values: [true], required: true },
+  },
   salesDecisionAnalyze: {
     analysisType: {
       type: "enum",

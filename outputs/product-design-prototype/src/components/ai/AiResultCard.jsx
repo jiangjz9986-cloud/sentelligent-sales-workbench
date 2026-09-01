@@ -50,15 +50,18 @@ function ChangePreview({ changes, target }) {
 export function AiResultCard({
   result,
   historyReadOnly = false,
+  draftMode = "editable",
   draft: controlledDraft,
   busy = false,
+  confirmLabel = "人工确认并继续",
+  cancelLabel = "取消建议",
   onDraftChange,
   onConfirm,
   onCancel,
 }) {
   const model = useMemo(
-    () => normalizeAiResultCard(result, { historyReadOnly }),
-    [historyReadOnly, result],
+    () => normalizeAiResultCard(result, { historyReadOnly, draftMode }),
+    [draftMode, historyReadOnly, result],
   );
   const [localDraft, setLocalDraft] = useState(model.draft);
   const isControlled = typeof controlledDraft === "string";
@@ -152,7 +155,7 @@ export function AiResultCard({
       {showPendingActions ? (
         <footer className="ai-result-card-actions">
           <button type="button" className="ghost-button" disabled={busy} onClick={handleCancel}>
-            取消建议
+            {cancelLabel}
           </button>
           <button
             type="button"
@@ -161,7 +164,7 @@ export function AiResultCard({
             disabled={busy || !liveModel.canConfirm || typeof onConfirm !== "function"}
             onClick={handleConfirm}
           >
-            {busy ? "确认中" : "人工确认并继续"}
+            {busy ? "确认中" : confirmLabel}
           </button>
         </footer>
       ) : null}

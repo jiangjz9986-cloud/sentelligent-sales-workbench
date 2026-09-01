@@ -455,7 +455,7 @@ describe("business mutation and audit atomicity", () => {
         path: "/api/ai/suggestions",
         options: {
           method: "POST",
-          body: JSON.stringify({ type: "next_action", title: "Rollback suggestion", context: {} }),
+          body: JSON.stringify({ type: "customer_profile", title: "Rollback suggestion", context: {} }),
         },
       });
       await assertAuditRollback({

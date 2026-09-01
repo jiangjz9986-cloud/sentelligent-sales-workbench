@@ -182,6 +182,29 @@ function sampleKnowledgeItem(overrides = {}) {
   };
 }
 
+function sampleAiSuggestion(overrides = {}) {
+  return {
+    id: "suggestion-1",
+    version: 1,
+    type: "customer_profile",
+    title: "生成客户画像补全建议",
+    status: "pending",
+    content: "## 建议\n补齐关键人、预算窗口和下一步问题。",
+    draft: "## 建议\n补齐关键人、预算窗口和下一步问题。",
+    confidence: 78,
+    sourceRefs: [{ type: "customer_profile", id: "customer-1", title: "客户档案：日照中医医院" }],
+    confirmationPreview: {
+      target: "人工审核记录（不会自动修改客户画像）",
+      changes: [{ field: "建议状态", before: "待人工确认", after: "已人工确认" }],
+    },
+    createdAt: "2026-06-05T10:00:00.000Z",
+    updatedAt: "2026-06-05T10:00:00.000Z",
+    confirmedAt: null,
+    cancelledAt: null,
+    ...overrides,
+  };
+}
+
 function sampleDashboardSummary(overrides = {}) {
   return {
     metrics: {
@@ -2558,15 +2581,7 @@ describe("sales workbench API client", () => {
         calls.push({ url, body: JSON.parse(options.body) });
         if (url.endsWith("/api/ai/suggestions")) {
           return jsonResponse({
-            item: {
-              id: "suggestion-1",
-              type: "customer_profile",
-              title: "生成客户画像补全建议",
-              status: "generated",
-              content: "## 建议\n补齐关键人、预算窗口和下一步问题。",
-              sourceRefs: [{ type: "customer_profile", id: "manual" }],
-              createdAt: "2026-06-05T10:00:00.000Z",
-            },
+            item: sampleAiSuggestion(),
           }, 201);
         }
         return jsonResponse({ error: "not_found" }, 404);
@@ -2580,7 +2595,7 @@ describe("sales workbench API client", () => {
     });
 
     assertApiEntity("aiSuggestion", suggestion);
-    assert.equal(suggestion.status, "generated");
+    assert.equal(suggestion.status, "pending");
     assert.deepEqual(calls, [
       {
         url: "http://127.0.0.1:8787/api/ai/suggestions",
@@ -2589,6 +2604,89 @@ describe("sales workbench API client", () => {
           title: "生成客户画像补全建议",
           context: { customer: "日照中医医院" },
         },
+      },
+    ]);
+  });
+
+  it("lists history without a model POST and explicitly confirms or cancels one suggestion with CSRF and versions", async () => {
+    const calls = [];
+    const signals = [];
+    const controller = new AbortController();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        signals.push(options.signal);
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+        });
+        if (url.includes("/api/ai/suggestions?") && (options.method ?? "GET") === "GET") {
+          return jsonResponse({ items: [sampleAiSuggestion()] });
+        }
+        if (url.endsWith("/api/ai/suggestions/suggestion-1/confirm")) {
+          return jsonResponse({
+            item: sampleAiSuggestion({
+              version: 2,
+              status: "confirmed",
+              draft: "人工调整后的建议",
+              confirmedAt: "2026-06-05T10:05:00.000Z",
+            }),
+          });
+        }
+        if (url.endsWith("/api/ai/suggestions/suggestion-2/cancel")) {
+          return jsonResponse({
+            item: sampleAiSuggestion({
+              id: "suggestion-2",
+              version: 2,
+              status: "cancelled",
+              cancelledAt: "2026-06-05T10:06:00.000Z",
+            }),
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "csrf-ai-review" });
+
+    const history = await api.listAiSuggestions({
+      type: "customer_profile",
+      sourceId: "customer 1",
+      limit: 5,
+    }, { signal: controller.signal });
+    const confirmed = await api.confirmAiSuggestion("suggestion-1", {
+      draft: "人工调整后的建议",
+      version: 1,
+    }, { signal: controller.signal });
+    const cancelled = await api.cancelAiSuggestion("suggestion-2", { version: 1 }, { signal: controller.signal });
+
+    assert.equal(history.items.length, 1);
+    assert.equal(confirmed.status, "confirmed");
+    assert.equal(cancelled.status, "cancelled");
+    assert.deepEqual(signals, [controller.signal, controller.signal, controller.signal]);
+    assert.deepEqual(calls, [
+      {
+        url: "http://127.0.0.1:8787/api/ai/suggestions?type=customer_profile&sourceId=customer+1&limit=5",
+        method: "GET",
+        body: null,
+        csrf: undefined,
+        ifMatch: undefined,
+      },
+      {
+        url: "http://127.0.0.1:8787/api/ai/suggestions/suggestion-1/confirm",
+        method: "POST",
+        body: { confirm: true, draft: "人工调整后的建议" },
+        csrf: "csrf-ai-review",
+        ifMatch: '"1"',
+      },
+      {
+        url: "http://127.0.0.1:8787/api/ai/suggestions/suggestion-2/cancel",
+        method: "POST",
+        body: { cancel: true },
+        csrf: "csrf-ai-review",
+        ifMatch: '"1"',
       },
     ]);
   });
@@ -2668,7 +2766,7 @@ describe("sales workbench API client", () => {
   });
 
   it("publishes strict travel-expense response contracts with integer-cent amounts", () => {
-    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-08-31");
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-09-02");
     assertApiEntity("travelExpensePayment", sampleTravelExpensePayment());
     assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment());
     assertApiEntity("travelExpense", sampleTravelExpense());

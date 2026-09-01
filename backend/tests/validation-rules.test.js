@@ -211,7 +211,9 @@ test("request schemas strictly accept the current camelCase API payloads", () =>
     knowledgeCreate: { title: "Title", category: "manual", tags: ["tag"], summary: "summary", content: "content", source: "source" },
     knowledgeSearch: { query: "storage", tags: ["tag"], limit: 8 },
     weeklyDraft: { owner: "Lee", periodStart: "2026-07-01", periodEnd: "2026-07-07", knowledgeIds: ["knowledge-1"] },
-    aiSuggestion: { type: "follow_up", title: "Title", context: { customerId: "customer-1" } },
+    aiSuggestion: { type: "customer_profile", title: "Title", context: { customerId: "customer-1" } },
+    aiSuggestionConfirm: { confirm: true, draft: "人工确认草稿" },
+    aiSuggestionCancel: { cancel: true },
     solutionDraft: { owner: "Lee", customerId: "customer-1", opportunityId: "opportunity-1", artifactType: "solution_framework", knowledgeIds: ["knowledge-1"] },
     solutionPatch: { title: "Title", content: "content", status: "ready" },
     riskDiagnose: { sourceType: "opportunity_diagnosis", sourceId: "opportunity-1" },
@@ -233,6 +235,10 @@ test("request schemas reject ids, unknown keys, invalid list members, ranges, an
   validationError(() => validateObject(requestSchemas.knowledgeSearch, { limit: 21 }), "limit", "max");
   validationError(() => validateObject(requestSchemas.knowledgeCreate, { title: "Title", content: "x".repeat(100001) }), "content", "max");
   validationError(() => validateObject(requestSchemas.solutionDraft, { owner: "Lee", customerId: "c", opportunityId: "o", artifactType: "pdf" }), "artifactType", "enum");
+  validationError(() => validateObject(requestSchemas.aiSuggestionConfirm, { confirm: false, draft: "draft" }), "confirm", "enum");
+  validationError(() => validateObject(requestSchemas.aiSuggestionConfirm, { confirm: true, draft: " " }), "draft", "required");
+  validationError(() => validateObject(requestSchemas.aiSuggestionCancel, { cancel: false }), "cancel", "enum");
+  validationError(() => validateObject(requestSchemas.aiSuggestion, { type: "next", title: "Title", context: {} }), "type", "enum");
 });
 
 test("request schemas reject null structures while nullable text and foreign keys remain nullable", () => {
@@ -241,7 +247,7 @@ test("request schemas reject null structures while nullable text and foreign key
     [requestSchemas.opportunityCreate, { customerId: "c", name: "Deal", days: null }, "days"],
     [requestSchemas.customerCreate, { name: "Customer", stakeholders: null }, "stakeholders"],
     [requestSchemas.knowledgeCreate, { title: "Title", tags: null }, "tags"],
-    [requestSchemas.aiSuggestion, { type: "next", title: "Title", context: null }, "context"],
+    [requestSchemas.aiSuggestion, { type: "customer_profile", title: "Title", context: null }, "context"],
     [requestSchemas.solutionDraft, {
       owner: "Lee", customerId: "c", opportunityId: "o", artifactType: null,
     }, "artifactType"],

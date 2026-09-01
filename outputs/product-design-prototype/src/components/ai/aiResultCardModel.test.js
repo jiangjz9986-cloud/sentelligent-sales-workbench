@@ -115,6 +115,47 @@ describe("ai result card model", () => {
     assert.equal(createAiResultCancellationRequest(history), null);
   });
 
+  it("preserves an authoritative terminal status in a read-only history view", () => {
+    for (const status of [
+      AI_RESULT_CARD_STATUS.CONFIRMED,
+      AI_RESULT_CARD_STATUS.CANCELLED,
+      AI_RESULT_CARD_STATUS.FAILED,
+      AI_RESULT_CARD_STATUS.EXPIRED,
+      AI_RESULT_CARD_STATUS.CONFLICT,
+    ]) {
+      const history = normalizeAiResultCard(result({ status }), { historyReadOnly: true });
+      assert.equal(history.status, status);
+      assert.equal(history.readOnly, true);
+      assert.equal(history.canConfirm, false);
+      assert.equal(createAiResultConfirmationRequest(history), null);
+      assert.equal(createAiResultCancellationRequest(history), null);
+    }
+  });
+
+  it("keeps pending actions available when only the draft is read only", () => {
+    const pending = normalizeAiResultCard(result(), { draftMode: "readonly" });
+    assert.equal(pending.status, AI_RESULT_CARD_STATUS.PENDING);
+    assert.equal(pending.editable, false);
+    assert.equal(pending.readOnly, true);
+    assert.equal(pending.canConfirm, true);
+    assert.equal(updateAiResultDraft(pending, "不应改写数值快照"), pending);
+    assert.deepEqual(createAiResultConfirmationRequest(pending), {
+      action: "confirm",
+      id: "advice-1",
+      draft: "先确认预算，再安排方案评审。",
+      suggestion: "先确认预算，再安排方案评审。",
+      evidence: [
+        { id: "evidence-1", label: "8 月 29 日拜访纪要" },
+        { id: "e-2", label: "客户档案" },
+      ],
+      changes: [
+        { id: "change-1", field: "下一步动作", before: "—", after: "确认预算负责人" },
+      ],
+      requiresHumanConfirmation: true,
+    });
+    assert.equal(createAiResultCancellationRequest(pending)?.action, "cancel");
+  });
+
   it("keeps every terminal result non-actionable", () => {
     for (const status of [
       AI_RESULT_CARD_STATUS.CONFIRMED,
@@ -166,6 +207,7 @@ describe("AiResultCard interaction boundary", () => {
     assert.match(componentSource, /确认前可编辑草稿/u);
     assert.match(componentSource, /确认后改动预览/u);
     assert.match(componentSource, /historyReadOnly/u);
+    assert.match(componentSource, /draftMode/u);
     assert.match(componentSource, /data-readonly/u);
   });
 

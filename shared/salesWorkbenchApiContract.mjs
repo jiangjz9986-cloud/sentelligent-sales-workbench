@@ -1,4 +1,4 @@
-export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-08-31";
+export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-09-02";
 
 export const SALES_WORKBENCH_API_SCHEMAS = {
   customer: {
@@ -203,12 +203,19 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
   },
   aiSuggestion: {
     id: "string",
+    version: "positiveInteger",
     type: "string",
     title: "string",
     status: "string",
     content: "string",
+    draft: "string",
+    confidence: "number",
     sourceRefs: "array",
+    confirmationPreview: "object",
     createdAt: "string",
+    updatedAt: "string",
+    confirmedAt: "nullableString",
+    cancelledAt: "nullableString",
   },
   salesDecisionAnalysis: {
     id: "string",

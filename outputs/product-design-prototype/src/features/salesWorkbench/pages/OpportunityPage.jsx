@@ -8,11 +8,11 @@ import { statusTone } from "../../../data/salesWorkbenchData.js";
 import {
   ExpandableInsight,
   InfoList,
-  ManualConfirmBox,
   MetricInline,
   Panel,
   Timeline,
 } from "../../../components/primitives.jsx";
+import { ManualAiSuggestionPanel } from "../../../components/ai/ManualAiSuggestionPanel.jsx";
 import { buildOpportunityTimeline } from "../opportunityTimeline.js";
 import { SalesDecisionPanel } from "../SalesDecisionPanel.jsx";
 import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
@@ -22,7 +22,6 @@ import {
   FieldTags,
   FormField,
   arrayFromText,
-  generateBusinessSuggestion,
   joinedList,
   numberFromInput,
   textFromArray,
@@ -291,32 +290,30 @@ function OpportunityDetailBody({ selected, viewMode, setViewMode, onSelect }) {
         >
           查看客户画像
         </button>
-        <ManualConfirmBox
+        <ManualAiSuggestionPanel
           compact
           title="手动生成商机推进建议"
-          desc="结合当前商机整理预算路径、竞品应对和售前支持建议。"
-          onGenerate={() =>
-            generateBusinessSuggestion(apiClient, backendStatus, {
-              type: "opportunity_push",
-              title: "手动生成商机推进建议",
-              context: {
-                opportunityId: selected.id,
-                opportunity: selected.name,
-                customerId: selected.customerId,
-                customer: selected.customer,
-                stage: selected.stage,
-                amount: selected.amount,
-                probability: selected.probability,
-                owner: selected.owner,
-                requirements: joinedList(selected.requirements),
-                competitors: joinedList(selected.competitors),
-                solutionDirection: joinedList(selected.solutionDirection),
-                risk: selected.risk,
-                next: selected.next,
-                sourceRecord: selected.sourceRecord,
-              },
-            })
-          }
+          description="结合当前商机整理预算路径、竞品应对和售前支持建议。"
+          type="opportunity_push"
+          sourceId={selected.id}
+          apiClient={apiClient}
+          backendStatus={backendStatus}
+          context={{
+            opportunityId: selected.id,
+            opportunity: selected.name,
+            customerId: selected.customerId,
+            customer: selected.customer,
+            stage: selected.stage,
+            amount: selected.amount,
+            probability: selected.probability,
+            owner: selected.owner,
+            requirements: joinedList(selected.requirements),
+            competitors: joinedList(selected.competitors),
+            solutionDirection: joinedList(selected.solutionDirection),
+            risk: selected.risk,
+            next: selected.next,
+            sourceRecord: selected.sourceRecord,
+          }}
         />
       </div>
     </>

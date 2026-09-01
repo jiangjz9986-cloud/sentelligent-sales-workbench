@@ -19,6 +19,7 @@ import { apply as applyPhase1WriteIntegrity } from "../src/db/migrations/0002_ph
 import { apply as applySecureSettings } from "../src/db/migrations/0015_secure_settings.mjs";
 import { apply as applySecureSettingsPushplus } from "../src/db/migrations/0021_secure_settings_pushplus.mjs";
 import { apply as applySecureSettingsAsr } from "../src/db/migrations/0033_secure_settings_asr.mjs";
+import { apply as applyAiSuggestionReview } from "../src/db/migrations/0036_ai_suggestion_review.mjs";
 
 const SECURE_SETTINGS_ASR_CHECKSUM = "acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5";
 const secureSettingsColumns = [
@@ -71,12 +72,18 @@ const writeIntegrityColumns = {
 
 // 0031 会清扫历史 owner 词表并给 ✗ 表补 owner 列，跨迁移行哈希对全部业务表
 // 统一忽略 owner（业务内容不变性仍由其余列保证）。
-const rowsHashOmittedColumns = Object.fromEntries(
-  Object.entries(writeIntegrityColumns).map(([table, columns]) => [
-    table,
-    columns.includes("owner") ? columns : [...columns, "owner"],
-  ]),
-);
+const rowsHashOmittedColumns = {
+  ...Object.fromEntries(
+    Object.entries(writeIntegrityColumns).map(([table, columns]) => [
+      table,
+      columns.includes("owner") ? columns : [...columns, "owner"],
+    ]),
+  ),
+  ai_suggestions: [
+    "owner", "version", "status", "draft_content", "confidence", "source_id", "confirmation_preview",
+    "updated_at", "confirmed_at", "cancelled_at",
+  ],
+};
 
 function columnNames(db, table) {
   return all(db, `PRAGMA table_info(${table})`).map((row) => row.name);
@@ -236,7 +243,7 @@ function rebuildDatabaseAs0032(db) {
       );
       DROP TABLE secure_settings;
       ALTER TABLE secure_settings_0032_fixture RENAME TO secure_settings;
-      DELETE FROM schema_migrations WHERE version IN ('0033', '0034', '0035');
+      DELETE FROM schema_migrations WHERE version IN ('0033', '0034', '0035', '0036');
     `);
     db.exec("COMMIT");
   } catch (error) {
@@ -291,7 +298,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 34);
+      assert.equal(firstMigrations.length, 35);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -326,6 +333,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[31].version, "0033");
       assert.equal(firstMigrations[32].version, "0034");
       assert.equal(firstMigrations[33].version, "0035");
+      assert.equal(firstMigrations[34].version, "0036");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -370,6 +378,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0033_secure_settings_asr.mjs",
         "../src/db/migrations/0034_quick_record_confirmation_previews.mjs",
         "../src/db/migrations/0035_visit_temperature_suggestions.mjs",
+        "../src/db/migrations/0036_ai_suggestion_review.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -405,12 +414,68 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[31].checksum, migrationChecksum(migrationSources[31]));
       assert.equal(firstMigrations[32].checksum, migrationChecksum(migrationSources[32]));
       assert.equal(firstMigrations[33].checksum, migrationChecksum(migrationSources[33]));
+      assert.equal(firstMigrations[34].checksum, migrationChecksum(migrationSources[34]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
       first?.close();
     }
   });
+});
+
+test("migration 0036 turns legacy generated suggestions into reviewable snapshots without changing the generated content", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      CREATE TABLE ai_suggestions (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'generated',
+        content TEXT NOT NULL,
+        source_refs TEXT NOT NULL DEFAULT '[]',
+        owner TEXT NOT NULL DEFAULT 'jiangjz',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO ai_suggestions (id, type, title, content, source_refs)
+      VALUES ('legacy-ai', 'customer_profile', '补全建议', '原始生成正文', '[{"id":"customer-1"}]');
+    `);
+
+    applyAiSuggestionReview(db);
+    applyAiSuggestionReview(db);
+
+    const columns = columnNames(db, "ai_suggestions");
+    for (const column of [
+      "version", "draft_content", "confidence", "source_id", "confirmation_preview", "updated_at",
+      "confirmed_at", "cancelled_at",
+    ]) {
+      assert.equal(columns.includes(column), true, column);
+    }
+    const row = db.prepare("SELECT * FROM ai_suggestions WHERE id = 'legacy-ai'").get();
+    assert.equal(row.status, "pending");
+    assert.equal(row.content, "原始生成正文");
+    assert.equal(row.draft_content, "原始生成正文");
+    assert.equal(row.source_id, "customer-1");
+    assert.equal(row.version, 1);
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET status = 'future_status' WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion status/,
+    );
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET confidence = 101 WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion confidence/,
+    );
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET confidence = -1 WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion confidence/,
+    );
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET type = 'future_type' WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion type/,
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test("migration 0024 creates immutable revisions and advance allocation overlay tables", () => {
@@ -665,7 +730,7 @@ test("migration 0033 upgrades the direct 0021 cleared matrix without changing an
   }
 });
 
-test("current migrations upgrade a complete 0032 database through 0033, 0034, and 0035 in order", () => {
+test("current migrations upgrade a complete 0032 database through 0033, 0034, 0035, and 0036 in order", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
@@ -688,10 +753,10 @@ test("current migrations upgrade a complete 0032 database through 0033, 0034, an
         "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
       ).all().map((row) => ({ ...row }));
       const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
-      assert.equal(ledgerAfter.length, 34);
-      assert.deepEqual(added.map((row) => row.version), ["0033", "0034", "0035"]);
+      assert.equal(ledgerAfter.length, 35);
+      assert.deepEqual(added.map((row) => row.version), ["0033", "0034", "0035", "0036"]);
       assert.deepEqual(
-        ledgerAfter.filter((row) => !["0033", "0034", "0035"].includes(row.version)),
+        ledgerAfter.filter((row) => !["0033", "0034", "0035", "0036"].includes(row.version)),
         ledgerBefore,
       );
       const source = readFileSync(
@@ -857,7 +922,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        34,
+        35,
       );
     } finally {
       db.close();
@@ -1281,7 +1346,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036"],
       );
     } finally {
       migrated.close();
@@ -1475,7 +1540,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 34);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 35);
     } finally {
       db.close();
     }
@@ -2029,7 +2094,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036"],
       );
     } finally {
       db.close();

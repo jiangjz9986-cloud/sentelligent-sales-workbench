@@ -6,7 +6,8 @@ import {
   Search,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { InfoList, ManualConfirmBox, Panel } from "../../../components/primitives.jsx";
+import { InfoList, Panel } from "../../../components/primitives.jsx";
+import { ManualAiSuggestionPanel } from "../../../components/ai/ManualAiSuggestionPanel.jsx";
 import { useToast } from "../../../components/toast.jsx";
 import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
@@ -14,7 +15,6 @@ import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import {
   FormField,
   arrayFromText,
-  generateBusinessSuggestion,
   joinedList,
   textFromArray,
 } from "./shared.jsx";
@@ -247,24 +247,22 @@ function KnowledgeDetailBody({
           tone="teal"
         />
       </Panel>
-      <ManualConfirmBox
+      <ManualAiSuggestionPanel
         title="生成知识引用建议"
-        desc="引用知识库材料前需要人工确认客户场景，避免把不匹配的案例写进业务材料。"
-        onGenerate={() =>
-          generateBusinessSuggestion(apiClient, backendStatus, {
-            type: "knowledge_talk",
-            title: "生成知识引用建议",
-            context: {
-              knowledgeId: selected.id,
-              knowledge: selected.title,
-              category: selected.category,
-              tags: joinedList(selected.tags),
-              summary: selected.summary,
-              content: selected.content,
-              source: selected.source,
-            },
-          })
-        }
+        description="引用知识库材料前需要人工确认客户场景，避免把不匹配的案例写进业务材料。"
+        type="knowledge_talk"
+        sourceId={selected.id}
+        apiClient={apiClient}
+        backendStatus={backendStatus}
+        context={{
+          knowledgeId: selected.id,
+          knowledge: selected.title,
+          category: selected.category,
+          tags: joinedList(selected.tags),
+          summary: selected.summary,
+          content: selected.content,
+          source: selected.source,
+        }}
       />
     </>
   );

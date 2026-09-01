@@ -36,6 +36,7 @@ import { apply as applyWeixinBindings } from "./migrations/0032_weixin_bindings.
 import { apply as applySecureSettingsAsr } from "./migrations/0033_secure_settings_asr.mjs";
 import { apply as applyQuickRecordConfirmationPreviews } from "./migrations/0034_quick_record_confirmation_previews.mjs";
 import { apply as applyVisitTemperatureSuggestions } from "./migrations/0035_visit_temperature_suggestions.mjs";
+import { apply as applyAiSuggestionReview } from "./migrations/0036_ai_suggestion_review.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -241,6 +242,12 @@ const migrations = [
     path: resolve(here, "migrations", "0035_visit_temperature_suggestions.mjs"),
     type: "module",
     apply: applyVisitTemperatureSuggestions,
+  },
+  {
+    version: "0036",
+    path: resolve(here, "migrations", "0036_ai_suggestion_review.mjs"),
+    type: "module",
+    apply: applyAiSuggestionReview,
   },
 ];
 

@@ -826,9 +826,9 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         };
         const clickManualSuggestion = async (pageTestId, titleText) => {
           const page = document.querySelector('[data-testid="' + pageTestId + '"]');
-          const box = [...(page?.querySelectorAll('.manual-box') ?? [])].find((item) => item.textContent.includes(titleText));
+          const box = [...(page?.querySelectorAll('.manual-ai-suggestion-panel') ?? [])].find((item) => item.textContent.includes(titleText));
           if (!box) {
-            const available = [...(page?.querySelectorAll('.manual-box strong') ?? [])]
+            const available = [...(page?.querySelectorAll('.manual-ai-suggestion-panel strong') ?? [])]
               .map((item) => item.textContent.trim())
               .filter(Boolean)
               .join(' | ');
@@ -844,11 +844,18 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
             const htmlPreview = document.body.innerHTML.replace(/\s+/g, ' ').trim().slice(0, 360);
             throw new Error('Missing manual suggestion box ' + titleText + ' available=' + available + ' heading=' + heading + ' editorButtons=' + editorButtons + ' pageExists=' + pageExists + ' detailExists=' + detailExists + ' activeHeading=' + activeHeading + ' href=' + window.location.href + ' ready=' + document.readyState + ' body=' + bodyPreview + ' html=' + htmlPreview);
           }
-          const button = box.querySelector('button');
+          const button = box.querySelector('[data-testid^="ai-suggestion-generate-"]');
           if (!button) throw new Error('Missing manual suggestion button ' + titleText);
+          await waitUntil(() => !button.disabled, 8000);
           button.click();
-          const suggestion = await waitUntil(() => box.querySelector('[data-testid="generated-suggestion"]'), 8000);
-          return (suggestion?.textContent ?? '').trim().length > 20;
+          const suggestion = await waitUntil(() => box.querySelector('[data-testid="ai-result-card"]'), 8000);
+          const confidence = suggestion?.querySelector('.ai-result-card-confidence')?.textContent ?? '';
+          const evidence = suggestion?.querySelector('.ai-result-card-evidence-list')?.textContent ?? '';
+          const draft = suggestion?.querySelector('[data-testid="ai-result-card-draft"]')?.value ?? '';
+          return (suggestion?.textContent ?? '').trim().length > 20
+            && confidence.includes('%')
+            && evidence.trim().length > 0
+            && draft.trim().length > 0;
         };
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('周报'))?.click();

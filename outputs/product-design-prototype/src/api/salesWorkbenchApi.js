@@ -1602,12 +1602,46 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("solutionDraft", saved.item);
     },
 
-    async generateAiSuggestion({ type, title, context }) {
+    async generateAiSuggestion({ type, title, context }, { signal } = {}) {
       const suggestion = await requestApi("/api/ai/suggestions", {
         method: "POST",
         body: JSON.stringify({ type, title, context }),
+        signal,
       });
       return assertApiEntity("aiSuggestion", suggestion.item);
+    },
+
+    async listAiSuggestions(filters = {}, { signal } = {}) {
+      const params = new URLSearchParams();
+      for (const field of ["type", "sourceId", "limit"]) {
+        const value = filters[field];
+        if (value !== undefined && value !== null && String(value).trim()) {
+          params.set(field, String(value).trim());
+        }
+      }
+      const query = params.toString();
+      const response = await requestApi(`/api/ai/suggestions${query ? `?${query}` : ""}`, { signal });
+      return { items: assertApiCollection("aiSuggestion", response.items) };
+    },
+
+    async confirmAiSuggestion(id, { draft, version }, { signal } = {}) {
+      const response = await requestApi(`/api/ai/suggestions/${encodeURIComponent(id)}/confirm`, {
+        method: "POST",
+        headers: versionHeaders(version),
+        body: JSON.stringify({ confirm: true, draft }),
+        signal,
+      });
+      return assertApiEntity("aiSuggestion", response.item);
+    },
+
+    async cancelAiSuggestion(id, { version }, { signal } = {}) {
+      const response = await requestApi(`/api/ai/suggestions/${encodeURIComponent(id)}/cancel`, {
+        method: "POST",
+        headers: versionHeaders(version),
+        body: JSON.stringify({ cancel: true }),
+        signal,
+      });
+      return assertApiEntity("aiSuggestion", response.item);
     },
 
     async listSalesDecisionAnalyses(filters = {}) {

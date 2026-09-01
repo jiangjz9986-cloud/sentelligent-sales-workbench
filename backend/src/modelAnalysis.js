@@ -304,9 +304,52 @@ function labelForSuggestionType(type) {
 }
 
 function sourceRefForSuggestion(type, context = {}) {
+  const subject = {
+    customer_profile: context.customer,
+    opportunity_push: context.opportunity,
+    knowledge_talk: context.knowledge,
+  }[type] ?? context.customer ?? context.opportunity ?? context.knowledge ?? context.title;
+  const sourceId = {
+    customer_profile: context.customerId,
+    opportunity_push: context.opportunityId,
+    knowledge_talk: context.knowledgeId,
+  }[type] ?? context.id ?? context.customerId ?? context.opportunityId ?? context.knowledgeId;
+  const sourceLabel = {
+    customer_profile: "客户档案",
+    opportunity_push: "商机档案",
+    knowledge_talk: "知识材料",
+  }[type] ?? "业务上下文";
   return {
     type: type || "manual_suggestion",
-    id: context.id ?? context.customerId ?? context.opportunityId ?? context.knowledgeId ?? "manual",
+    id: sourceId ?? "manual",
+    title: `${sourceLabel}：${subject ?? "当前业务对象"}`,
+    detail: "生成时固定的业务上下文快照",
+  };
+}
+
+function suggestionConfidence(context = {}) {
+  const evidenceFields = Object.values(context).filter((value) => {
+    if (typeof value === "string") return value.trim().length > 0;
+    if (typeof value === "number") return Number.isFinite(value);
+    if (typeof value === "boolean") return true;
+    if (Array.isArray(value)) return value.length > 0;
+    return value && typeof value === "object" && Object.keys(value).length > 0;
+  }).length;
+  return Math.min(90, 54 + Math.min(evidenceFields, 9) * 4);
+}
+
+function suggestionConfirmationPreview(type) {
+  const target = {
+    customer_profile: "人工审核记录（不会自动修改客户画像）",
+    opportunity_push: "人工审核记录（不会自动修改商机档案）",
+    knowledge_talk: "人工审核记录（不会自动修改知识库）",
+  }[type] ?? "人工审核记录（不会自动修改业务档案）";
+  return {
+    target,
+    changes: [
+      { field: "建议状态", before: "待人工确认", after: "已人工确认" },
+      { field: "业务档案写回", before: "未写入", after: "仍不写入" },
+    ],
   };
 }
 
@@ -317,7 +360,7 @@ function buildFallbackSuggestion({ type, title, context = {} }) {
   return {
     type: type || "manual_suggestion",
     title: headline,
-    status: "generated",
+    status: "pending",
     content: [
       `## ${headline}`,
       "",
@@ -328,7 +371,9 @@ function buildFallbackSuggestion({ type, title, context = {} }) {
       "### 上下文摘要",
       contextText || "当前未提供额外上下文。",
     ].join("\n"),
+    confidence: suggestionConfidence(context),
     sourceRefs: [sourceRefForSuggestion(type, context)],
+    confirmationPreview: suggestionConfirmationPreview(type),
   };
 }
 

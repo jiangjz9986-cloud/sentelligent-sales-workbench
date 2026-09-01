@@ -798,12 +798,19 @@ function aiSuggestionFromRow(row) {
   if (!row) return null;
   return {
     id: row.id,
+    version: Number(row.version ?? 1),
     type: row.type,
     title: row.title,
     status: row.status,
     content: row.content,
+    draft: row.draft_content || row.content,
+    confidence: Number(row.confidence ?? 0),
     sourceRefs: parseJson(row.source_refs),
+    confirmationPreview: parseJson(row.confirmation_preview, {}),
     createdAt: row.created_at,
+    updatedAt: row.updated_at ?? row.created_at,
+    confirmedAt: row.confirmed_at ?? null,
+    cancelledAt: row.cancelled_at ?? null,
   };
 }
 
@@ -8262,6 +8269,120 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/ai/suggestions") {
+        const type = url.searchParams.get("type")?.trim() || null;
+        const sourceId = url.searchParams.get("sourceId")?.trim() || null;
+        const rawLimit = url.searchParams.get("limit");
+        const limit = rawLimit === null ? 5 : Number(rawLimit);
+        if (type && !["customer_profile", "opportunity_push", "knowledge_talk"].includes(type)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { type: "enum" });
+        }
+        if (sourceId && sourceId.length > 200) {
+          throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { sourceId: "max" });
+        }
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
+          throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { limit: "range" });
+        }
+        const listOwner = requestOwner(request);
+        const rows = all(
+          db,
+          `SELECT * FROM ai_suggestions
+            WHERE ($type IS NULL OR type = $type)
+              AND ($sourceId IS NULL OR source_id = $sourceId)${ownerClause(listOwner)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT $limit`,
+          ownerParams(listOwner, { $type: type, $sourceId: sourceId, $limit: limit }),
+        );
+        const items = rows.map(aiSuggestionFromRow);
+        sendJson(response, 200, { items }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts[0] === "api"
+        && parts[1] === "ai"
+        && parts[2] === "suggestions"
+        && parts[3]
+        && (parts[4] === "confirm" || parts[4] === "cancel")
+        && parts.length === 5
+      ) {
+        const action = parts[4];
+        const expectedVersion = parseExpectedVersion(request);
+        const body = await readValidatedJson(
+          request,
+          action === "confirm" ? requestSchemas.aiSuggestionConfirm : requestSchemas.aiSuggestionCancel,
+        );
+        const mutationOwner = requestOwner(request);
+        const item = withImmediateTransaction(db, () => {
+          const before = aiSuggestionFromRow(get(
+            db,
+            `SELECT * FROM ai_suggestions WHERE id = $id${ownerClause(mutationOwner)}`,
+            ownerParams(mutationOwner, { $id: parts[3] }),
+          ));
+          if (!before) notFound();
+
+          const nextStatus = action === "confirm" ? "confirmed" : "cancelled";
+          if (before.status === nextStatus) {
+            if (action === "confirm" && before.draft !== body.draft) {
+              throw new HttpError(409, "SUGGESTION_ALREADY_CONFIRMED", "The suggestion was already confirmed with a different draft");
+            }
+            return before;
+          }
+          if (before.status !== "pending") {
+            throw new HttpError(409, "SUGGESTION_NOT_PENDING", "The suggestion can no longer be reviewed", {
+              currentStatus: before.status,
+            });
+          }
+          if (before.version !== expectedVersion) {
+            throw new HttpError(409, "VERSION_CONFLICT", "The suggestion was updated by another request", {
+              currentVersion: before.version,
+            });
+          }
+
+          run(
+            db,
+            `UPDATE ai_suggestions
+                SET status = $status,
+                    draft_content = $draft,
+                    version = version + 1,
+                    updated_at = CURRENT_TIMESTAMP,
+                    confirmed_at = CASE WHEN $status = 'confirmed' THEN CURRENT_TIMESTAMP ELSE confirmed_at END,
+                    cancelled_at = CASE WHEN $status = 'cancelled' THEN CURRENT_TIMESTAMP ELSE cancelled_at END
+              WHERE id = $id AND version = $expectedVersion${ownerClause(mutationOwner)}`,
+            ownerParams(mutationOwner, {
+              $id: before.id,
+              $expectedVersion: expectedVersion,
+              $status: nextStatus,
+              $draft: action === "confirm" ? body.draft : before.draft,
+            }),
+          );
+          const updated = aiSuggestionFromRow(get(
+            db,
+            `SELECT * FROM ai_suggestions WHERE id = $id${ownerClause(mutationOwner)}`,
+            ownerParams(mutationOwner, { $id: before.id }),
+          ));
+          insertAudit(db, {
+            action: `ai.suggestion.${action}`,
+            entityType: "ai_suggestion",
+            entityId: updated.id,
+            actor: request.authContext.account,
+            requestId,
+            before,
+            after: updated,
+            entityVersion: updated.version,
+            metadata: {
+              type: updated.type,
+              businessWriteback: false,
+              requiresHumanConfirmation: true,
+            },
+          });
+          return updated;
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store", ETag: `"${item.version}"` });
+        return;
+      }
+
       if (request.method === "POST" && url.pathname === "/api/ai/suggestions") {
         const body = await readValidatedJson(request, requestSchemas.aiSuggestion);
         const type = String(body.type ?? "").trim();
@@ -8280,15 +8401,24 @@ export function createServer(options = {}) {
           const id = randomUUID();
           run(
             db,
-            `INSERT INTO ai_suggestions (id, type, title, status, content, source_refs, owner)
-             VALUES ($id, $type, $title, $status, $content, $sourceRefs, $owner)`,
+            `INSERT INTO ai_suggestions (
+               id, type, title, status, content, draft_content, confidence,
+               source_id, source_refs, confirmation_preview, owner
+             ) VALUES (
+               $id, $type, $title, $status, $content, $draft, $confidence,
+               $sourceId, $sourceRefs, $confirmationPreview, $owner
+             )`,
             {
               $id: id,
               $type: suggestion.type,
               $title: suggestion.title,
               $status: suggestion.status,
               $content: suggestion.content,
+              $draft: suggestion.content,
+              $confidence: suggestion.confidence,
+              $sourceId: suggestion.sourceRefs[0]?.id ?? null,
               $sourceRefs: JSON.stringify(suggestion.sourceRefs),
+              $confirmationPreview: JSON.stringify(suggestion.confirmationPreview),
               $owner: requestOwner(request) ?? LEGACY_OWNER,
             },
           );
@@ -8309,7 +8439,7 @@ export function createServer(options = {}) {
           });
           return created;
         });
-        sendJson(response, 201, { item });
+        sendJson(response, 201, { item }, { "Cache-Control": "no-store", ETag: `"${item.version}"` });
         return;
       }
 

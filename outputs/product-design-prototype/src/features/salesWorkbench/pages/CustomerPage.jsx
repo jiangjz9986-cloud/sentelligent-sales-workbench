@@ -7,10 +7,10 @@ import {
 import { useEffect, useState } from "react";
 import {
   InfoList,
-  ManualConfirmBox,
   MetricInline,
   Panel,
 } from "../../../components/primitives.jsx";
+import { ManualAiSuggestionPanel } from "../../../components/ai/ManualAiSuggestionPanel.jsx";
 import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
 import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
@@ -20,7 +20,6 @@ import {
   FormField,
   StakeholderGrid,
   arrayFromText,
-  generateBusinessSuggestion,
   joinedList,
   numberFromInput,
   textFromArray,
@@ -280,29 +279,27 @@ function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
           <InfoList items={selected.syncPreview} tone="blue" />
         </Panel>
       </div>
-      <ManualConfirmBox
+      <ManualAiSuggestionPanel
         title="生成客户画像补全建议"
-        desc="结合快速记录整理组织关系、需求痛点和下一次拜访问题。"
-        onGenerate={() =>
-          generateBusinessSuggestion(apiClient, backendStatus, {
-            type: "customer_profile",
-            title: "生成客户画像补全建议",
-            context: {
-              customerId: selected.id,
-              customer: selected.name,
-              summary: selected.summary,
-              level: selected.level,
-              region: selected.region,
-              budget: selected.budget,
-              needs: joinedList(selected.needs),
-              risks: joinedList(selected.risks),
-              stakeholders: joinedList((selected.stakeholders ?? []).map((item) => `${item.name}-${item.role}`)),
-              decisionChain: joinedList(selected.decisionChain),
-              infrastructure: joinedList(selected.infrastructure),
-              syncPreview: joinedList(selected.syncPreview),
-            },
-          })
-        }
+        description="结合快速记录整理组织关系、需求痛点和下一次拜访问题。"
+        type="customer_profile"
+        sourceId={selected.id}
+        apiClient={apiClient}
+        backendStatus={backendStatus}
+        context={{
+          customerId: selected.id,
+          customer: selected.name,
+          summary: selected.summary,
+          level: selected.level,
+          region: selected.region,
+          budget: selected.budget,
+          needs: joinedList(selected.needs),
+          risks: joinedList(selected.risks),
+          stakeholders: joinedList((selected.stakeholders ?? []).map((item) => `${item.name}-${item.role}`)),
+          decisionChain: joinedList(selected.decisionChain),
+          infrastructure: joinedList(selected.infrastructure),
+          syncPreview: joinedList(selected.syncPreview),
+        }}
       />
     </>
   );

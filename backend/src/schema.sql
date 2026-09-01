@@ -104,12 +104,23 @@ CREATE TABLE IF NOT EXISTS solution_drafts (
 
 CREATE TABLE IF NOT EXISTS ai_suggestions (
   id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  owner TEXT NOT NULL DEFAULT 'jiangjz',
+  type TEXT NOT NULL
+    CHECK (type IN ('customer_profile', 'opportunity_push', 'knowledge_talk')),
   title TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'generated',
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'confirmed', 'cancelled', 'failed', 'expired', 'conflict')),
   content TEXT NOT NULL,
+  draft_content TEXT NOT NULL DEFAULT '',
+  confidence REAL NOT NULL DEFAULT 0 CHECK (confidence >= 0 AND confidence <= 100),
+  source_id TEXT,
   source_refs TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  confirmation_preview TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  confirmed_at TEXT,
+  cancelled_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS action_items (
@@ -182,6 +193,9 @@ CREATE INDEX IF NOT EXISTS idx_weekly_reports_period ON weekly_reports(period_st
 CREATE INDEX IF NOT EXISTS idx_solution_drafts_customer_id ON solution_drafts(customer_id);
 CREATE INDEX IF NOT EXISTS idx_solution_drafts_opportunity_id ON solution_drafts(opportunity_id);
 CREATE INDEX IF NOT EXISTS idx_ai_suggestions_type ON ai_suggestions(type);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_owner_type_created ON ai_suggestions(owner, type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_suggestions_owner_type_source_created
+  ON ai_suggestions(owner, type, source_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_action_items_status ON action_items(status);
 CREATE INDEX IF NOT EXISTS idx_action_items_source_record_id ON action_items(source_record_id);
 CREATE INDEX IF NOT EXISTS idx_action_items_remind

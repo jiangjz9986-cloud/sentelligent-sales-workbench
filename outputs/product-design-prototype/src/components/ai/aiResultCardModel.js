@@ -118,7 +118,14 @@ export function aiResultCardStatusMeta(status) {
 export function normalizeAiResultCard(input, options = {}) {
   const hasResult = input !== undefined && input !== null;
   const source = input && typeof input === "object" ? input : {};
+  // A pending snapshot may be deliberately frozen by an outer history view,
+  // but a persisted terminal result must keep its authoritative lifecycle
+  // status (confirmed/cancelled/failed/expired/conflict) while remaining
+  // non-actionable. Replacing every terminal status with `history_readonly`
+  // hides the actual review outcome and makes browser/runtime checks drift
+  // from the stored record.
   const requestedStatus = options.historyReadOnly
+    && source.status === AI_RESULT_CARD_STATUS.PENDING
     ? AI_RESULT_CARD_STATUS.HISTORY_READONLY
     : source.status;
   const status = requestedStatus === undefined || requestedStatus === null || requestedStatus === ""
@@ -134,7 +141,8 @@ export function normalizeAiResultCard(input, options = {}) {
   const evidence = normalizeEvidence(source.evidence ?? source.sources);
   const previewSource = source.confirmationPreview ?? source.writebackPreview ?? source.preview;
   const changes = normalizeChanges(previewSource);
-  const editable = status === AI_RESULT_CARD_STATUS.PENDING;
+  const actionable = status === AI_RESULT_CARD_STATUS.PENDING;
+  const editable = actionable && options.draftMode !== "readonly";
 
   return {
     id: text(source.id) || null,
@@ -151,7 +159,7 @@ export function normalizeAiResultCard(input, options = {}) {
     errorMessage: text(source.errorMessage, text(source.error)),
     editable,
     readOnly: !editable,
-    canConfirm: editable && draft.trim().length > 0,
+    canConfirm: actionable && draft.trim().length > 0,
     requiresHumanConfirmation: true,
   };
 }
