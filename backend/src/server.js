@@ -164,6 +164,9 @@ import {
 } from "./assistant/customerAssistantAdapter.js";
 import { createOpportunityAssistantAdapter } from "./assistant/opportunityAssistantAdapter.js";
 import { createVisitCaptureAssistantAdapter } from "./assistant/visitCaptureAssistantAdapter.js";
+import { createVisitTemperatureSuggestionHttpHandlers } from "./assistant/visitTemperatureHttp.js";
+import { createVisitTemperatureSuggestionService } from "./assistant/visitTemperatureSuggestion.js";
+import { createVisitTemperatureSuggestionRepositories } from "./assistant/visitTemperatureSuggestionRepository.js";
 import { createQuickRecordPendingPreviewProviders } from "./assistant/quickRecordPendingPreviewProviders.js";
 import {
   assertQuickRecordConfirmationEditable,
@@ -3229,6 +3232,42 @@ export function createServer(options = {}) {
   });
 
   const assistantClock = options.assistantClock ?? options.now ?? (() => new Date());
+  const visitTemperatureSuggestionRepositories = options.visitTemperatureSuggestionRepositories
+    ?? createVisitTemperatureSuggestionRepositories(db, {
+      clock: options.visitTemperatureSuggestionClock ?? assistantClock,
+      ...(options.visitTemperatureSuggestionIdFactory
+        ? { idFactory: options.visitTemperatureSuggestionIdFactory }
+        : {}),
+    });
+  // The default generator is deliberately deterministic and bounded.  It
+  // receives only server-owned, confirmed visit/customer snapshots and
+  // produces a preview that preserves the current relation until a human
+  // explicitly confirms a different, injected/generated value.
+  const visitTemperatureSuggestionGenerator = options.visitTemperatureSuggestionGenerator
+    ?? ((snapshot) => ({
+      suggestedValue: snapshot.customer.relation,
+      confidence: 60,
+      inferences: [{
+        claim: "已确认拜访证据不足以支持自动改变客户温度，建议保持当前值",
+        confidence: 100,
+        basisKeys: ["current_relation"],
+      }],
+    }));
+  const visitTemperatureSuggestionService = options.visitTemperatureSuggestionService
+    ?? createVisitTemperatureSuggestionService({
+      ...visitTemperatureSuggestionRepositories,
+      suggestionGenerator: visitTemperatureSuggestionGenerator,
+      runInTransaction: (work) => withImmediateTransaction(db, work),
+      idFactory: options.visitTemperatureSuggestionIdFactory ?? randomUUID,
+      clock: options.visitTemperatureSuggestionClock ?? assistantClock,
+      ...(options.visitTemperatureSuggestionTtlMs !== undefined
+        ? { ttlMs: options.visitTemperatureSuggestionTtlMs }
+        : {}),
+    });
+  const visitTemperatureSuggestionHttp = options.visitTemperatureSuggestionHttp
+    ?? createVisitTemperatureSuggestionHttpHandlers({
+      service: visitTemperatureSuggestionService,
+    });
   const configuredAssistantConfirmationSecret = options.assistantConfirmationSecret ?? config.assistantConfirmationSecret;
   const assistantConfirmationSecret = typeof configuredAssistantConfirmationSecret === "string" && configuredAssistantConfirmationSecret.trim()
     ? configuredAssistantConfirmationSecret
@@ -4227,6 +4266,28 @@ export function createServer(options = {}) {
         const result = hospitalTenderLeadConversionHttp.handle({
           method: request.method,
           pathname: url.pathname,
+          requestIdentity,
+          requestId,
+          body,
+        });
+        if (result !== null) {
+          sendJson(response, result.status, result.body, result.headers);
+          return;
+        }
+      }
+
+      // Visit-temperature suggestions are mounted after authentication and
+      // CSRF gates.  The HTTP adapter derives owner from the authenticated
+      // user, reads request bodies only for POST actions, and delegates all
+      // optimistic-lock/writeback rules to the server-owned service.
+      if (visitTemperatureSuggestionHttp.matches(url.pathname)) {
+        const body = request.method === "POST"
+          ? await readJson(request, { maxBytes: Math.min(config.jsonBodyLimitBytes, 64 * 1024) })
+          : {};
+        const result = await visitTemperatureSuggestionHttp.handle({
+          method: request.method,
+          pathname: url.pathname,
+          query: url.searchParams,
           requestIdentity,
           requestId,
           body,
@@ -8897,6 +8958,9 @@ export function createServer(options = {}) {
   server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
   server.hospitalTenderLeadConversionService = hospitalTenderLeadConversionService;
   server.hospitalTenderLeadConversionHttp = hospitalTenderLeadConversionHttp;
+  server.visitTemperatureSuggestionService = visitTemperatureSuggestionService;
+  server.visitTemperatureSuggestionHttp = visitTemperatureSuggestionHttp;
+  server.visitTemperatureSuggestionRepositories = visitTemperatureSuggestionRepositories;
   server.actionReminderScheduler = actionReminderScheduler;
   server.dailyDigestScheduler = dailyDigestScheduler;
   server.asrService = asrService;
