@@ -547,7 +547,7 @@ export function assertVisitTemperatureSuggestion(value, path = "visitTemperature
   const suggestedValue = integer("suggestedValue", { max: 100 });
   const delta = integer("delta", { min: -100, max: 100 });
   if (delta !== suggestedValue - previousValue) throw new TypeError(`${path}.delta: invalid`);
-  return {
+  return assertApiEntity("visitTemperatureSuggestion", {
     id,
     identity,
     status,
@@ -571,7 +571,7 @@ export function assertVisitTemperatureSuggestion(value, path = "visitTemperature
     replayed: value.replayed === true,
     writeback: value.writeback === true,
     reason: visitTemperatureText(value.reason, ""),
-  };
+  }, path);
 }
 
 export function normalizeVisitTemperatureError(error) {
@@ -631,7 +631,7 @@ function visitTemperatureOutcome(value, path = "visitTemperatureOutcome") {
   const suggestion = value.suggestion
     ? assertVisitTemperatureSuggestion(value.suggestion, `${path}.suggestion`)
     : null;
-  return {
+  return assertApiEntity("visitTemperatureOutcome", {
     status,
     suggestion,
     customer: snapshot(value.customer, "customer"),
@@ -639,7 +639,7 @@ function visitTemperatureOutcome(value, path = "visitTemperatureOutcome") {
     writeback: value.writeback === true,
     replayed: value.replayed === true,
     reason: visitTemperatureText(value.reason, ""),
-  };
+  }, path);
 }
 
 export function parseRetryAfterSeconds(value) {

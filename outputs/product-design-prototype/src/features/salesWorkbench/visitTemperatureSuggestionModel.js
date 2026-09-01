@@ -47,6 +47,63 @@ export function temperatureSourceLabel(ref) {
   return `${ref.type ?? "来源"} · ${ref.id ?? "已记录"}`;
 }
 
+function temperatureEvidenceDetail(value) {
+  if (value === null || value === undefined || value === "") return "已记录";
+  if (["string", "number", "boolean"].includes(typeof value)) return String(value);
+  return "已记录";
+}
+
+export function temperatureSuggestionToAiCard(item, customerName = "") {
+  const facts = Array.isArray(item?.facts) ? item.facts.slice(0, 5) : [];
+  const inferences = Array.isArray(item?.inferences) ? item.inferences.slice(0, 3) : [];
+  const refs = Array.isArray(item?.sourceRefs) ? item.sourceRefs.slice(0, 5) : [];
+  const before = temperatureRelation(item?.previousValue);
+  const after = temperatureRelation(item?.suggestedValue);
+  const delta = temperatureDelta(item?.delta);
+  const inferenceLines = inferences
+    .map((inference) => String(inference?.claim ?? "").trim())
+    .filter(Boolean)
+    .map((claim) => `推断：${claim}`);
+
+  return {
+    id: item?.id ?? null,
+    title: `${String(customerName || item?.customerId || "当前客户").trim()} · 拜访温度建议`,
+    status: item?.status,
+    suggestion: [
+      `建议将客户温度从 ${before} 调整为 ${after}（变化 ${delta}）。`,
+      ...inferenceLines,
+    ].join("\n"),
+    // The temperature proposal is a pinned numeric snapshot. The shared card
+    // displays this text but receives draftMode="readonly" from the panel.
+    draft: `客户温度 ${before} → ${after}（${delta}）`,
+    confidence: item?.confidence,
+    evidence: [
+      ...facts.map((fact, index) => ({
+        id: `fact-${String(fact?.key ?? index)}`,
+        label: String(fact?.label ?? fact?.key ?? `事实 ${index + 1}`),
+        detail: temperatureEvidenceDetail(fact?.value),
+      })),
+      ...refs.map((ref, index) => ({
+        id: `source-${String(ref?.type ?? "source")}-${String(ref?.id ?? index)}`,
+        label: temperatureSourceLabel(ref),
+        detail: "拜访温度建议的持久化来源引用",
+      })),
+    ],
+    confirmationPreview: {
+      target: "客户档案中的温度值",
+      changes: [{
+        id: "customer-relation",
+        field: "客户温度",
+        before,
+        after,
+      }],
+    },
+    errorMessage: item?.status === VISIT_TEMPERATURE_STATUS.CONFLICT
+      ? "客户或拜访证据已经变化，当前建议已停止写回。"
+      : "",
+  };
+}
+
 export function temperatureCanAct(item) {
   return item?.status === VISIT_TEMPERATURE_STATUS.PENDING
     && item?.requiresHumanConfirmation === true

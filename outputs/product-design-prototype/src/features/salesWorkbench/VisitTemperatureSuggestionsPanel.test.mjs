@@ -23,10 +23,17 @@ describe("visit temperature suggestion panel wiring", () => {
     assert.match(source, /确认此条/u);
     assert.match(source, /取消此条/u);
     assert.doesNotMatch(source, /全部确认/u);
-    assert.match(source, /暂无可验证来源/u);
-    assert.match(source, /sourceRefs\(item\)\.length > 0/u);
+    assert.match(source, /temperatureCanAct\(item\)/u);
     assert.match(source, /status: "conflict", suggestion: authoritative, writeback: false/u);
     assert.doesNotMatch(source, /outcome\.status === "conflict"\) await reload/u);
+  });
+
+  it("renders every temperature proposal through the shared AI card with a pinned read-only draft", () => {
+    assert.match(source, /import \{ AiResultCard \}/u);
+    assert.match(source, /temperatureSuggestionToAiCard\(item, customerName\)/u);
+    assert.match(source, /draftMode="readonly"/u);
+    assert.match(source, /historyReadOnly=\{temperatureIsReadOnly\(item\)\}/u);
+    assert.doesNotMatch(source, /className=\{`temperature-card/u);
   });
 
   it("uses completed V2 confirmation preview eligibility while excluding analyzed-only records", () => {

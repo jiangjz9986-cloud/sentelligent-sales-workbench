@@ -5,7 +5,12 @@ import {
   temperatureCanAct,
   temperatureErrorMessage,
   temperatureIsReadOnly,
+  temperatureSuggestionToAiCard,
 } from "./visitTemperatureSuggestionModel.js";
+import {
+  AI_RESULT_CARD_STATUS,
+  normalizeAiResultCard,
+} from "../../components/ai/aiResultCardModel.js";
 
 const pending = {
   id: "s-1",
@@ -58,5 +63,23 @@ describe("visit temperature suggestion view model", () => {
     assert.match(temperatureErrorMessage({ status: 500 }), /暂时不可用/);
     assert.match(temperatureErrorMessage({ message: "stack trace from service" }), /失败/);
     assert.doesNotMatch(temperatureErrorMessage({ message: "stack trace from service" }), /stack trace/);
+  });
+
+  it("adapts the pinned numeric proposal to the shared AI card without making the draft editable", () => {
+    const mapped = temperatureSuggestionToAiCard({
+      ...pending,
+      confidence: 82,
+      delta: 6,
+      inferences: [{ claim: "建议小幅上调" }],
+    }, "测试客户");
+    const card = normalizeAiResultCard(mapped, { draftMode: "readonly" });
+    assert.equal(card.status, AI_RESULT_CARD_STATUS.PENDING);
+    assert.equal(card.editable, false);
+    assert.equal(card.readOnly, true);
+    assert.equal(card.canConfirm, true);
+    assert.match(card.title, /测试客户/u);
+    assert.match(card.draft, /40 \/ 100.*46 \/ 100/u);
+    assert.equal(card.changes[0].field, "客户温度");
+    assert.ok(card.evidence.some((item) => item.label.includes("quick_record")));
   });
 });

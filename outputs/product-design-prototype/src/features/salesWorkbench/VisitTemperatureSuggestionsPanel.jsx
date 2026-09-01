@@ -1,20 +1,13 @@
-import { Check, ChevronDown, CircleAlert, LoaderCircle, RefreshCw, Sparkles, X } from "lucide-react";
+import { LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AiResultCard } from "../../components/ai/AiResultCard.jsx";
 import {
   mergeTemperatureOutcome,
   temperatureCanAct,
-  temperatureDelta,
   temperatureErrorMessage,
   temperatureIsReadOnly,
-  temperatureRelation,
-  temperatureSourceLabel,
-  temperatureStatusLabel,
-  temperatureStatusTone,
+  temperatureSuggestionToAiCard,
 } from "./visitTemperatureSuggestionModel.js";
-
-function sourceRefs(item) {
-  return Array.isArray(item?.sourceRefs) ? item.sourceRefs : [];
-}
 
 export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, quickRecord, customers = [], onCustomerUpdated }) {
   const [items, setItems] = useState([]);
@@ -163,47 +156,24 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
       ) : null}
       {items.length > 0 ? (
         <div className="temperature-list">
-          {items.map((item) => (
-            <article className={`temperature-card tone-${temperatureStatusTone(item.status)}`} key={item.id} data-testid={`temperature-suggestion-${item.id}`}>
-              <div className="temperature-card-head">
-                <div>
-                  <strong>{customers.find((customer) => customer.id === item.customerId)?.name ?? item.customerId}</strong>
-                  <small>拜访记录 · {item.visitId}</small>
-                </div>
-                <span className={`pill ${temperatureStatusTone(item.status)}`}>{temperatureStatusLabel(item.status)}</span>
+          {items.map((item) => {
+            const customerName = customers.find((customer) => customer.id === item.customerId)?.name ?? item.customerId;
+            const actionable = temperatureCanAct(item);
+            return (
+              <div className="temperature-ai-card" key={item.id} data-testid={`temperature-suggestion-${item.id}`}>
+                <AiResultCard
+                  result={temperatureSuggestionToAiCard(item, customerName)}
+                  draftMode="readonly"
+                  historyReadOnly={temperatureIsReadOnly(item)}
+                  busy={pendingId !== null}
+                  confirmLabel="确认此条"
+                  cancelLabel="取消此条"
+                  onConfirm={actionable ? () => void act(item, "confirm") : undefined}
+                  onCancel={actionable ? () => void act(item, "cancel") : undefined}
+                />
               </div>
-              <div className="temperature-values">
-                <div><small>当前温度</small><b>{temperatureRelation(item.previousValue)}</b></div>
-                <ChevronDown size={16} className="temperature-arrow" />
-                <div><small>建议温度</small><b>{temperatureRelation(item.suggestedValue)}</b></div>
-                <div><small>变化</small><b>{temperatureDelta(item.delta)}</b></div>
-                <div><small>置信度</small><b>{item.confidence}%</b></div>
-              </div>
-              <div className="temperature-evidence">
-                <strong>已验证事实</strong>
-                {(item.facts ?? []).slice(0, 5).map((fact) => <p key={fact.key}>{fact.label}：{String(fact.value)}</p>)}
-                {(item.inferences ?? []).slice(0, 3).map((inference, index) => <p className="temperature-inference" key={`${item.id}-inference-${index}`}>推断：{inference.claim}</p>)}
-              </div>
-              <div className="temperature-sources">
-                <strong>来源引用</strong>
-                {sourceRefs(item).length > 0
-                  ? sourceRefs(item).map((ref) => <span key={`${ref.type}-${ref.id}`}>{temperatureSourceLabel(ref)}</span>)
-                  : <span>暂无可验证来源</span>}
-              </div>
-              {item.status === "pending" ? <p className="temperature-confirmation-note"><CircleAlert size={14} /> {sourceRefs(item).length > 0 ? "需要人工确认；系统不会自动写回客户温度。" : "证据不足已锁定；补充可验证来源后再核对。"}</p> : null}
-              {item.status === "conflict" ? <p className="temperature-confirmation-note conflict"><CircleAlert size={14} /> 此建议与当前数据不一致，已停止写回，请保留只读并重新核对拜访/客户数据。</p> : null}
-              {!temperatureIsReadOnly(item) && sourceRefs(item).length > 0 ? (
-                <div className="temperature-actions">
-                  <button className="primary-button" type="button" onClick={() => void act(item, "confirm")} disabled={pendingId !== null}>
-                    {pendingId === item.id ? <LoaderCircle className="state-spinner" size={15} /> : <Check size={15} />} 确认此条
-                  </button>
-                  <button className="ghost-button" type="button" onClick={() => void act(item, "cancel")} disabled={pendingId !== null}>
-                    <X size={15} /> 取消此条
-                  </button>
-                </div>
-              ) : <p className="temperature-readonly"><Check size={14} /> {item.status === "pending" ? "证据不足已锁定，不能写回" : "终态记录只读，不能再次写回"}</p>}
-            </article>
-          ))}
+            );
+          })}
         </div>
       ) : null}
       {items.length > 0 && canGenerate ? <button className="ghost-button temperature-generate" type="button" onClick={generate} disabled={pendingId !== null}>为当前已确认拜访生成建议</button> : null}

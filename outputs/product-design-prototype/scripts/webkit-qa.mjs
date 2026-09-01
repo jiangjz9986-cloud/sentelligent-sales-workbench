@@ -40,6 +40,38 @@ function closeServer(server) {
   });
 }
 
+function readTemperatureWritebackProof(databaseUrl) {
+  const db = openDatabase({ databaseUrl });
+  try {
+    const suggestion = db.prepare(`
+      SELECT id, customer_id, customer_version, previous_value, suggested_value,
+             status, confirmed_customer_version, confirmed_relation
+      FROM visit_temperature_suggestions
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get();
+    if (!suggestion) return null;
+    const customer = db.prepare(`
+      SELECT id, relation, version
+      FROM customers
+      WHERE id = $id
+    `).get({ $id: suggestion.customer_id });
+    const audit = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM audit_logs
+      WHERE action = 'customer.relation.update'
+        AND entity_id = $id
+    `).get({ $id: suggestion.customer_id });
+    return {
+      suggestion,
+      customer,
+      relationUpdateAuditCount: Number(audit?.count ?? 0),
+    };
+  } finally {
+    db.close();
+  }
+}
+
 async function freePort() {
   const probe = createProbeServer();
   await listen(probe, 0);
@@ -226,9 +258,16 @@ async function main() {
     const page = await context.newPage();
     const failedResponses = [];
     const aiSuggestionRequests = [];
+    const temperatureConfirmRequests = [];
     page.on("request", (request) => {
       if (request.url().includes("/api/ai/suggestions")) {
         aiSuggestionRequests.push({ method: request.method(), url: request.url() });
+      }
+      if (
+        request.method() === "POST"
+        && /\/api\/visit-temperature-suggestions\/[^/]+\/confirm$/u.test(request.url())
+      ) {
+        temperatureConfirmRequests.push({ method: request.method(), url: request.url() });
       }
     });
     page.on("response", (response) => {
@@ -474,6 +513,63 @@ async function main() {
     assert.equal(await page.getByLabel("快速记录内容").getAttribute("readonly"), "");
     assert.equal(await page.getByTestId("confirm-ai-analysis").isDisabled(), true);
     assert.equal(await page.getByTestId("save-analysis-modifications").isDisabled(), true);
+
+    // The completed V2 preview is the real eligibility signal for a visit
+    // temperature proposal. Exercise the same shared AiResultCard used by the
+    // other AI surfaces and prove that the pinned numeric draft is read-only
+    // while the explicit confirm/cancel actions remain available.
+    const temperaturePanel = page.getByTestId("visit-temperature-suggestions");
+    await temperaturePanel.scrollIntoViewIfNeeded();
+    const temperatureGenerate = temperaturePanel.getByRole("button", { name: "生成当前拜访建议" });
+    await temperatureGenerate.waitFor({ state: "visible" });
+    await temperatureGenerate.click();
+    const temperatureShell = temperaturePanel.locator('[data-testid^="temperature-suggestion-"]').first();
+    await temperatureShell.waitFor();
+    const temperatureCard = temperatureShell.getByTestId("ai-result-card");
+    await temperatureCard.waitFor();
+    assert.equal(await temperatureCard.getAttribute("data-status"), "pending");
+    assert.equal(await temperatureCard.getAttribute("data-readonly"), "true");
+    assert.equal(await temperatureCard.getByTestId("ai-result-card-draft").count(), 0);
+    assert.equal(await temperatureCard.getByTestId("ai-result-card-readonly-draft").count(), 1);
+    assert.equal(await temperatureCard.getByRole("button", { name: "确认此条" }).isEnabled(), true);
+    assert.equal(await temperatureCard.getByRole("button", { name: "取消此条" }).isEnabled(), true);
+    assert.equal(await temperaturePanel.getByRole("button", { name: /全部确认/u }).count(), 0);
+    const temperatureCardMetrics = await temperatureShell.evaluate((element) => ({
+      pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      cardOverflow: element.scrollWidth - element.clientWidth,
+      controls: [...element.querySelectorAll("button")].map((control) => {
+        const rect = control.getBoundingClientRect();
+        return { width: Math.round(rect.width), height: Math.round(rect.height) };
+      }),
+    }));
+    assert.equal(temperatureCardMetrics.pageOverflow, 0);
+    assert.ok(temperatureCardMetrics.cardOverflow <= 1);
+    assert.ok(temperatureCardMetrics.controls.every((control) => control.width > 0 && control.height >= 44));
+    const mobileTemperatureScreenshotPath = resolve(evidenceDirectory, "webkit-temperature-ai-card-390x844.png");
+    await page.screenshot({ path: mobileTemperatureScreenshotPath, fullPage: false });
+    const temperatureBefore = readTemperatureWritebackProof(databaseUrl);
+    assert.ok(temperatureBefore?.suggestion);
+    assert.ok(temperatureBefore?.customer);
+    assert.equal(temperatureBefore.suggestion.status, "pending");
+    assert.equal(temperatureBefore.customer.id, temperatureBefore.suggestion.customer_id);
+    assert.equal(temperatureBefore.customer.version, temperatureBefore.suggestion.customer_version);
+    assert.equal(temperatureBefore.customer.relation, temperatureBefore.suggestion.previous_value);
+    assert.equal(temperatureBefore.relationUpdateAuditCount, 0);
+    await temperatureCard.getByRole("button", { name: "确认此条" }).click();
+    await page.waitForFunction(() => (
+      document.querySelector('[data-testid="visit-temperature-suggestions"] [data-testid="ai-result-card"]')?.dataset.status === "confirmed"
+    ));
+    assert.equal(await temperatureCard.getAttribute("data-readonly"), "true");
+    assert.equal(await temperatureCard.getByRole("button", { name: "确认此条" }).count(), 0);
+    assert.equal(temperatureConfirmRequests.length, 1);
+    const temperatureAfter = readTemperatureWritebackProof(databaseUrl);
+    assert.equal(temperatureAfter.suggestion.id, temperatureBefore.suggestion.id);
+    assert.equal(temperatureAfter.suggestion.status, "confirmed");
+    assert.equal(temperatureAfter.customer.relation, temperatureBefore.suggestion.suggested_value);
+    assert.equal(temperatureAfter.customer.version, temperatureBefore.customer.version + 1);
+    assert.equal(temperatureAfter.suggestion.confirmed_relation, temperatureAfter.customer.relation);
+    assert.equal(temperatureAfter.suggestion.confirmed_customer_version, temperatureAfter.customer.version);
+    assert.equal(temperatureAfter.relationUpdateAuditCount, 1);
     await page.getByTestId("new-quick-record").click();
 
     await page.getByTestId("nav-customer").click();
@@ -566,6 +662,15 @@ async function main() {
             knowledge: knowledgeAiCardMetrics,
           },
         },
+        {
+          viewport: { width: 390, height: 844 },
+          temperatureAiCard: temperatureCardMetrics,
+          temperatureWriteback: {
+            confirmRequests: temperatureConfirmRequests.length,
+            customerVersionDelta: temperatureAfter.customer.version - temperatureBefore.customer.version,
+            relationUpdateAuditCount: temperatureAfter.relationUpdateAuditCount,
+          },
+        },
         smallMetrics,
       ],
       checks: {
@@ -583,6 +688,10 @@ async function main() {
         customerDeleteCancel: true,
         quickRecordDurablePreview: true,
         quickRecordTerminalReadOnly: true,
+        visitTemperatureCompletedPreviewEligible: true,
+        visitTemperatureSharedAiCardReadOnlyDraft: true,
+        visitTemperatureExplicitConfirm: true,
+        visitTemperatureSingleWriteback: true,
         quickRecordVoiceReset: true,
         aiSuggestionCustomerConfirm: true,
         aiSuggestionOpportunityCancel: true,
@@ -597,6 +706,7 @@ async function main() {
         mobileExpense: mobileExpenseScreenshotPath,
         mobileExpenseRegion: mobileRegionScreenshotPath,
         mobileQuickConfirmation: mobileQuickPreviewScreenshotPath,
+        mobileTemperatureAiCard: mobileTemperatureScreenshotPath,
         mobileAiResultCard: mobileAiCardScreenshotPath,
         mobileItinerary: screenshotPath,
       },
