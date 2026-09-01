@@ -57,6 +57,14 @@ describe("root package QA scripts", () => {
     );
   });
 
+  it("exposes the guarded ASR production smoke runner without embedding a target or credential", () => {
+    assert.equal(
+      packageJson.scripts?.["smoke:production:asr"],
+      "node scripts/asr-production-smoke.mjs",
+    );
+    assert.doesNotMatch(packageJson.scripts?.["smoke:production:asr"] ?? "", /password|cookie|csrf|82\.156/iu);
+  });
+
   it("exposes repeatable WebKit acceptance for iPhone Safari equivalence", () => {
     assert.equal(
       frontendPackageJson.scripts?.["qa:webkit"],
