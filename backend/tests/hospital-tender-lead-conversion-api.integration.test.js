@@ -8,9 +8,9 @@ import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 
 const ACCOUNT = "jiangjz";
-const PASSWORD = "unit-secret-123";
-const SYNC_TOKEN = "fixture-hospital-sync-token-1234567890";
-const SESSION_SECRET = "unit-session-secret-32-characters";
+const PASSWORD = "unit-test-password";
+const SYNC_TOKEN = "fixture-hospital-sync-token-placeholder";
+const SESSION_SECRET = "fixture-session-secret-placeholder-value";
 
 let tempDir;
 let server;
