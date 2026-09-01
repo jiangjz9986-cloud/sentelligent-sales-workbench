@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { scanProjectSecrets } from "./project-secret-scan.mjs";
+import {
+  isKnownHistoricalSyntheticFixtureDigest,
+  scanProjectSecrets,
+} from "./project-secret-scan.mjs";
 
 const sampleProviderKey = `sk-${"1234567890abcdef1234567890abcdef"}`;
 const frontendScannerPath = resolve(
@@ -220,6 +223,29 @@ describe("project secret scan", () => {
     } finally {
       workspace.cleanup();
     }
+  });
+
+  it("keeps historical fixture exceptions bound to source, path, assignment, and digest", () => {
+    const fixture = {
+      source: "git-history",
+      filePath: "backend/tests/hospital-tender-lead-conversion-api.integration.test.js",
+      assignmentKey: "PASSWORD",
+      digest: "682b2924255e1b09557faf10611eb1c11027a1fe7e318a58d50829d2b6576a6f",
+    };
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest(fixture), true);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({ ...fixture, source: "working-tree" }), false);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({
+      ...fixture,
+      filePath: "backend/src/config.js",
+    }), false);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({
+      ...fixture,
+      assignmentKey: "OTHER_PASSWORD",
+    }), false);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({
+      ...fixture,
+      digest: `${fixture.digest.slice(0, -1)}0`,
+    }), false);
   });
 
   it("ignores runtime references and explicit fixture values", () => {

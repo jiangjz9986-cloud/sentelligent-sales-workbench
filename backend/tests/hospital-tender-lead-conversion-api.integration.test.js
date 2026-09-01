@@ -9,7 +9,7 @@ import { createServer } from "../src/server.js";
 
 const ACCOUNT = "jiangjz";
 const PASSWORD = "unit-test-password";
-const SYNC_TOKEN = "fixture-hospital-sync-token-placeholder";
+const SYNC_TOKEN = "fixture-test-token";
 const SESSION_SECRET = "fixture-session-secret-placeholder-value";
 
 let tempDir;
