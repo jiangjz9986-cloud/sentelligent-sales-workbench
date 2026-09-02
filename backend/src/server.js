@@ -8090,7 +8090,7 @@ export function createServer(options = {}) {
         const quickRecord = quickRecordFromRow(
           get(
             db,
-            `SELECT * FROM quick_records WHERE id = $id${ownerScope.clause}`,
+            `SELECT * FROM quick_records WHERE id = $id AND voided_at IS NULL${ownerScope.clause}`,
             { $id: parts[2], ...ownerScope.params },
           ),
         );

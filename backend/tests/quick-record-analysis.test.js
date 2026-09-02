@@ -255,6 +255,36 @@ describe("persisted quick-record analysis", () => {
     });
   });
 
+  it("rejects a voided record before model work or persistence", async () => {
+    await withHarness({ aiAnalysisMode: "model", modelApiKey: "test-model-key" }, async ({
+      databaseUrl,
+      modelCalls,
+      request,
+    }) => {
+      seedPersistedHistory(databaseUrl);
+      const snapshot = () => inspectDatabase(databaseUrl, (db) => ({
+        record: db.prepare("SELECT * FROM quick_records WHERE id = 'qr-voided'").get(),
+        insights: db.prepare("SELECT * FROM ai_insights WHERE quick_record_id = 'qr-voided'").all(),
+        audits: db.prepare(`
+          SELECT * FROM audit_logs
+          WHERE action = 'quick_record.analyze' AND entity_id = 'qr-voided'
+          ORDER BY id
+        `).all(),
+      }));
+      const before = snapshot();
+
+      const analyzed = await request("/api/quick-records/qr-voided/analyze", {
+        method: "POST",
+        body: "{}",
+      });
+
+      assert.equal(analyzed.response.status, 404);
+      assert.equal(analyzed.body.error.code, "NOT_FOUND");
+      assert.equal(modelCalls.length, 0);
+      assert.deepEqual(snapshot(), before);
+    });
+  });
+
   it("requires authentication, CSRF, and If-Match before saving summary-only analysis changes", async () => {
     await withHarness({}, async ({ rawRequest, request, cookie, csrf }) => {
       const fixture = await createAnalyzedRecord(request);
