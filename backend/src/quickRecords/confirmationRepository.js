@@ -459,7 +459,7 @@ function currentWriteValue(db, owner, item, options) {
     } : null;
   }
   if (item.target === "opportunity" && item.field === "requirements") {
-    const row = activeOpportunity(db, owner, item.entityId, options);
+    const row = activeLinkedOpportunity(db, owner, item.entityId, options);
     return row ? {
       owner,
       entityId: row.id,
@@ -512,6 +512,11 @@ function updateExistingTarget(db, owner, item, expectedVersion, value, options) 
       SET requirements = $value, version = version + 1, updated_at = CURRENT_TIMESTAMP
       WHERE id = $id${globalTargets ? "" : " AND owner = $owner"}
         AND version = $expectedVersion AND deleted_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM customers
+          WHERE customers.id = opportunities.customer_id
+            AND customers.deleted_at IS NULL${globalTargets ? "" : " AND customers.owner = $owner"}
+        )
     `).run(globalTargets
       ? { $value: JSON.stringify(value), $id: item.entityId, $expectedVersion: expectedVersion }
       : { $value: JSON.stringify(value), $id: item.entityId, $owner: owner, $expectedVersion: expectedVersion });

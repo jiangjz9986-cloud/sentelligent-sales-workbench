@@ -473,6 +473,84 @@ describe("SQLite quick-record confirmation repository", () => {
     }
   });
 
+  it("rejects a pending opportunity write when its model-linked parent customer becomes unavailable", () => {
+    for (const invalidation of ["deleted", "owner"]) {
+      const { db, service } = createHarness();
+      try {
+        updateQuickRecordLinks(db);
+        const initialPreview = service.preview({ owner: "owner-a", quickRecordId: "quick-record-a" });
+        const customerItem = initialPreview.items.find((item) => item.id === "customer-needs");
+        assert.ok(customerItem);
+
+        const first = service.confirmItem({
+          ...pins(initialPreview),
+          itemId: customerItem.id,
+          itemIdentity: customerItem.identity,
+        });
+        assert.equal(first.status, "confirmed");
+        assert.equal(first.writeback, true);
+
+        if (invalidation === "deleted") {
+          db.prepare(`
+            UPDATE customers
+            SET deleted_at = '2026-08-31T13:00:00.000Z'
+            WHERE id = 'customer-a'
+          `).run();
+        } else {
+          db.prepare("UPDATE customers SET owner = 'owner-b' WHERE id = 'customer-a'").run();
+        }
+
+        const opportunityBefore = db.prepare(`
+          SELECT requirements, version
+          FROM opportunities
+          WHERE id = 'opportunity-a'
+        `).get();
+        const auditCountBefore = db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM audit_logs
+          WHERE action = 'quick_record.confirmation'
+        `).get().count;
+        const opportunityItem = first.preview.items.find((item) => item.id === "opportunity-requirements");
+        assert.ok(opportunityItem);
+
+        const second = service.confirmItem({
+          ...pins(first.preview),
+          itemId: opportunityItem.id,
+          itemIdentity: opportunityItem.identity,
+        });
+
+        assert.equal(second.status, "conflict", invalidation);
+        assert.equal(second.reason, "target_unavailable", invalidation);
+        assert.equal(second.writeback, false, invalidation);
+        assert.deepEqual(
+          db.prepare(`
+            SELECT requirements, version
+            FROM opportunities
+            WHERE id = 'opportunity-a'
+          `).get(),
+          opportunityBefore,
+          invalidation,
+        );
+        assert.equal(
+          db.prepare(`
+            SELECT COUNT(*) AS count
+            FROM audit_logs
+            WHERE action = 'quick_record.confirmation'
+          `).get().count,
+          auditCountBefore,
+          invalidation,
+        );
+        assert.equal(
+          second.preview.items.find((item) => item.id === opportunityItem.id)?.status,
+          "pending",
+          invalidation,
+        );
+      } finally {
+        db.close();
+      }
+    }
+  });
+
   it("persists a replayable preview and writes only the three explicitly allowed fields", () => {
     const { db, service } = createHarness();
     try {
