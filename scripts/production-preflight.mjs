@@ -19,6 +19,7 @@ import { hostname as readHostname } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
+import { MODEL_TIMEOUT_MS_MAX } from "../backend/src/config.js";
 import { decryptSecret } from "../backend/src/settings/secretBox.js";
 
 // A pre-cutover report may inspect the already-running release whose manifest
@@ -343,10 +344,10 @@ function hasHospitalTenderNotificationConfiguration(environment, database) {
   return isStrongHospitalTenderPushplusToken(token) && !otherSecrets.includes(token);
 }
 
-function isPositiveSafeIntegerText(value) {
+function isPositiveSafeIntegerText(value, max = Number.MAX_SAFE_INTEGER) {
   if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return false;
   const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0;
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= max;
 }
 
 function isProductionModelKey(value) {
@@ -379,7 +380,7 @@ function hasProductionModelConfiguration(environment) {
     environment.MODEL_NAME === APPROVED_MODEL_NAME &&
     environment.MODEL_VISION_NAME === APPROVED_VISION_MODEL_NAME &&
     baseUrl === APPROVED_MODEL_BASE_URL &&
-    isPositiveSafeIntegerText(environment.MODEL_TIMEOUT_MS) &&
+    isPositiveSafeIntegerText(environment.MODEL_TIMEOUT_MS, MODEL_TIMEOUT_MS_MAX) &&
     isProductionModelKey(modelKey) &&
     isolated
   );
@@ -2821,7 +2822,7 @@ export async function runProductionPreflight({
       "env.aiModel",
       hasProductionModelConfiguration(environment),
       "Expense automation uses the approved production model configuration and an isolated API key.",
-      "Production expense automation requires model mode, the approved DeepSeek provider, endpoint and model, a positive timeout, and an isolated non-empty MODEL_API_KEY.",
+      `Production expense automation requires model mode, the approved DeepSeek provider, endpoint and model, a positive timeout no greater than ${MODEL_TIMEOUT_MS_MAX} ms, and an isolated non-empty MODEL_API_KEY.`,
     ),
     makeCheck(
       "env.retiredBookkeepingIntegrations",

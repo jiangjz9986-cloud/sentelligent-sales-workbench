@@ -5,6 +5,8 @@ import { ASR_CONFIG_DEFAULTS, ASR_LIMITS } from "./asr/contracts.js";
 import { validatePasswordHashEncoding } from "./auth/password.js";
 import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
 
+export const MODEL_TIMEOUT_MS_MAX = 120_000;
+
 export function loadEnvFile(filePath = resolve(process.cwd(), ".env")) {
   if (!existsSync(filePath)) return {};
 
@@ -441,9 +443,10 @@ export function loadConfig(overrides = {}, { allowAsrTestLoopbackHttp = false } 
       "deepseek-v4-flash-vision-exp",
       "MODEL_VISION_NAME",
     ),
-    modelTimeoutMs: positiveInteger(
+    modelTimeoutMs: boundedPositiveInteger(
       env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30_000,
       "MODEL_TIMEOUT_MS",
+      MODEL_TIMEOUT_MS_MAX,
     ),
     asrMode,
     asrProvider,

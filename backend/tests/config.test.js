@@ -268,6 +268,10 @@ describe("backend model configuration", () => {
     }
     assert.equal(loadConfig(base).modelTimeoutMs, 30_000);
     assert.equal(loadConfig({ ...base, MODEL_TIMEOUT_MS: "45000" }).modelTimeoutMs, 45_000);
+    assert.equal(loadConfig({ ...base, MODEL_TIMEOUT_MS: "120000" }).modelTimeoutMs, 120_000);
+    for (const value of ["120001", "2147483648", "4294967296", Number.MAX_SAFE_INTEGER]) {
+      assert.throws(() => loadConfig({ ...base, MODEL_TIMEOUT_MS: value }), /MODEL_TIMEOUT_MS/);
+    }
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
     assert.throws(() => loadConfig({ ...base, MODEL_VISION_NAME: "vision model" }), /MODEL_VISION_NAME/);
     assert.throws(() => loadConfig({ ...base, INVOICE_PDF_IMAGE_COMMAND: "" }), /INVOICE_PDF_IMAGE_COMMAND/);

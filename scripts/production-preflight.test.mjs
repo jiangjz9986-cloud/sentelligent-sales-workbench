@@ -1825,6 +1825,8 @@ describe("production preflight", () => {
         ["unexpected model endpoint", "MODEL_BASE_URL", "https://example.test"],
         ["insecure model endpoint", "MODEL_BASE_URL", "http://api.deepseek.com"],
         ["zero model timeout", "MODEL_TIMEOUT_MS", "0"],
+        ["model timeout above maximum", "MODEL_TIMEOUT_MS", "120001"],
+        ["model timeout timer overflow", "MODEL_TIMEOUT_MS", "4294967296"],
         ["missing model key", "MODEL_API_KEY", ""],
         ["model key reused from session", "MODEL_API_KEY", environment.sessionValue],
         ["model key reused from WeChat", "MODEL_API_KEY", environment.weixinAgentApiToken],
