@@ -2898,8 +2898,8 @@ async function main() {
 
     assert.equal(latestRecord?.status, "analyzed", "durable confirmation should retain the analyzed quick-record status");
     assert.equal(latestRecord?.confirmationPreviewStatus, "completed", "latest quick record should point to a completed durable preview");
-    assert.equal(latestRecord?.customerId ?? null, null, "durable confirmation should not rewrite quick-record linkage fields");
-    assert.equal(latestRecord?.opportunityId ?? null, null, "durable confirmation should not rewrite quick-record linkage fields");
+    assert.equal(latestRecord?.customerId ?? null, "rizhao", "analysis should persist the server-verified customer identity");
+    assert.equal(latestRecord?.opportunityId ?? null, null, "durable confirmation should not add an unconfirmed opportunity link");
     assert.equal(
       latestRecord?.analysis?.summary?.request?.text,
       manualAnalysisRevision,

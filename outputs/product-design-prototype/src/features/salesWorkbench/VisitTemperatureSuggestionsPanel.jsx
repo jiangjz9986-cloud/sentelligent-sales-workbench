@@ -9,7 +9,14 @@ import {
   temperatureSuggestionToAiCard,
 } from "./visitTemperatureSuggestionModel.js";
 
-export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, quickRecord, customers = [], onCustomerUpdated }) {
+export function VisitTemperatureSuggestionsPanel({
+  apiClient,
+  backendStatus,
+  quickRecord,
+  customers = [],
+  historyReadOnly = false,
+  onCustomerUpdated,
+}) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [pendingId, setPendingId] = useState(null);
@@ -46,6 +53,10 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
   useEffect(() => {
     generationRef.current += 1;
     requestRef.current?.abort();
+    setItems([]);
+    setLoading(false);
+    setPendingId(null);
+    setMessage("");
     const controller = new AbortController();
     requestRef.current = controller;
     void reload(controller.signal);
@@ -57,14 +68,15 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
   }, [reload]);
 
   const selectedSuggestion = items.find((item) => item.visitId === visitId);
-  const canGenerate = Boolean(quickRecord?.id)
+  const canGenerate = !historyReadOnly
+    && Boolean(quickRecord?.id)
     && Boolean(quickRecord?.customerId)
     && (quickRecord.status === "confirmed"
       || (quickRecord.status === "analyzed" && quickRecord.confirmationPreviewStatus === "completed"))
     && !selectedSuggestion;
 
   async function generate() {
-    if (!quickRecord?.id || !canGenerate) return;
+    if (historyReadOnly || !quickRecord?.id || !canGenerate) return;
     const generation = generationRef.current;
     setPendingId("generate");
     setMessage("");
@@ -85,7 +97,8 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
   }
 
   async function act(item, action) {
-    if (!temperatureCanAct(item) || pendingId) return;
+    const isCurrentItem = item?.visitId === visitId && item?.customerId === customerId;
+    if (historyReadOnly || !isCurrentItem || !temperatureCanAct(item) || pendingId) return;
     const generation = generationRef.current;
     const controller = new AbortController();
     setPendingId(item.id);
@@ -113,12 +126,21 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
         try {
           const authoritative = await apiClient.getVisitTemperatureSuggestion(item.id, { signal: controller.signal });
           if (!controller.signal.aborted && generation === generationRef.current) {
+            const authoritativeStatus = ["confirmed", "cancelled", "expired"].includes(authoritative.status)
+              ? authoritative.status
+              : "conflict";
             setItems((current) => current.map((candidate) => (
               candidate.id === item.id
-                ? mergeTemperatureOutcome(candidate, { status: "conflict", suggestion: authoritative, writeback: false })
+                ? mergeTemperatureOutcome(candidate, { status: authoritativeStatus, suggestion: authoritative, writeback: false })
                 : candidate
             )));
-            setMessage("此建议与当前数据不一致，已重新读取权威状态并停止写回，请重新核对拜访/客户数据");
+            setMessage(authoritativeStatus === "conflict"
+              ? "此建议与当前数据不一致，已重新读取权威状态并停止写回，请重新核对拜访/客户数据"
+              : authoritativeStatus === "confirmed"
+                ? "此建议已在其他端确认，当前显示为只读结果"
+                : authoritativeStatus === "cancelled"
+                  ? "此建议已在其他端取消，当前显示为只读结果"
+                  : "此建议已过期，当前显示为只读结果");
           }
         } catch (refreshError) {
           if (generation === generationRef.current && refreshError?.code !== "ABORTED" && refreshError?.name !== "AbortError") {
@@ -158,13 +180,13 @@ export function VisitTemperatureSuggestionsPanel({ apiClient, backendStatus, qui
         <div className="temperature-list">
           {items.map((item) => {
             const customerName = customers.find((customer) => customer.id === item.customerId)?.name ?? item.customerId;
-            const actionable = temperatureCanAct(item);
+            const actionable = !historyReadOnly && temperatureCanAct(item);
             return (
               <div className="temperature-ai-card" key={item.id} data-testid={`temperature-suggestion-${item.id}`}>
                 <AiResultCard
                   result={temperatureSuggestionToAiCard(item, customerName)}
                   draftMode="readonly"
-                  historyReadOnly={temperatureIsReadOnly(item)}
+                  historyReadOnly={historyReadOnly || temperatureIsReadOnly(item)}
                   busy={pendingId !== null}
                   confirmLabel="确认此条"
                   cancelLabel="取消此条"

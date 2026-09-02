@@ -2649,7 +2649,7 @@ describe("sales workbench API client", () => {
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
-    api.setSession({ csrfToken: "csrf-ai-review" });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
 
     const history = await api.listAiSuggestions({
       type: "customer_profile",
@@ -2678,14 +2678,14 @@ describe("sales workbench API client", () => {
         url: "http://127.0.0.1:8787/api/ai/suggestions/suggestion-1/confirm",
         method: "POST",
         body: { confirm: true, draft: "人工调整后的建议" },
-        csrf: "csrf-ai-review",
+        csrf: "fixture-csrf-token",
         ifMatch: '"1"',
       },
       {
         url: "http://127.0.0.1:8787/api/ai/suggestions/suggestion-2/cancel",
         method: "POST",
         body: { cancel: true },
-        csrf: "csrf-ai-review",
+        csrf: "fixture-csrf-token",
         ifMatch: '"1"',
       },
     ]);

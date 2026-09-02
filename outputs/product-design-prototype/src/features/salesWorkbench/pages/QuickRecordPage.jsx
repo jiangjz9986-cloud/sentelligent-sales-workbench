@@ -922,6 +922,7 @@ export function QuickRecord() {
               backendStatus={backendStatus}
               quickRecord={quickRecord}
               customers={customersList}
+              historyReadOnly={historyReadOnly}
               onCustomerUpdated={(updated) => setWorkbenchCustomers((current) => current.map((customer) => (
                 customer.id === updated.id
                   ? { ...customer, relation: updated.relation, version: updated.version }
