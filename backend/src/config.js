@@ -169,6 +169,47 @@ function asrEnumValue(value, fallback, name, allowed) {
   return candidate;
 }
 
+function aiAnalysisModeValue(value, fallback = "mock") {
+  if (value === undefined) return fallback;
+  if (typeof value !== "string") throw new Error("AI_ANALYSIS_MODE must be mock or model");
+  const normalized = value.trim().toLowerCase();
+  if (!["mock", "model"].includes(normalized)) {
+    throw new Error("AI_ANALYSIS_MODE must be mock or model");
+  }
+  return normalized;
+}
+
+function modelBaseUrlValue(value, { nodeEnv, allowModelTestLoopbackHttp }) {
+  if (typeof value !== "string" || value.trim() === "" || value !== value.trim() || value.length > 2_048) {
+    throw new Error("MODEL_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("MODEL_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol)
+    || !url.hostname
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) {
+    throw new Error("MODEL_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  if (url.protocol !== "https:") {
+    const isExplicitTestLoopback = nodeEnv === "test"
+      && allowModelTestLoopbackHttp === true
+      && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if (!isExplicitTestLoopback) {
+      throw new Error("MODEL_BASE_URL must use https unless explicit test-only loopback injection is active");
+    }
+  }
+  return value;
+}
+
 function optionalAsrModelValue(value) {
   const normalized = String(value ?? "").trim();
   if (normalized === "") return "";
@@ -324,7 +365,10 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   }
 }
 
-export function loadConfig(overrides = {}, { allowAsrTestLoopbackHttp = false } = {}) {
+export function loadConfig(
+  overrides = {},
+  { allowAsrTestLoopbackHttp = false, allowModelTestLoopbackHttp = false } = {},
+) {
   const envFile = loadEnvFile(overrides.envFile);
   const env = { ...envFile, ...process.env, ...overrides };
   const nodeEnv = String(env.nodeEnv ?? env.NODE_ENV ?? "development").trim().toLowerCase();
@@ -425,14 +469,27 @@ export function loadConfig(overrides = {}, { allowAsrTestLoopbackHttp = false } 
   if (asrAssistantMaxDurationMs > asrQuickMaxDurationMs) {
     throw new Error("ASR_ASSISTANT_MAX_DURATION_MS must not exceed ASR_QUICK_MAX_DURATION_MS");
   }
+  const aiAnalysisMode = aiAnalysisModeValue(
+    env.aiAnalysisMode !== undefined ? env.aiAnalysisMode : env.AI_ANALYSIS_MODE,
+  );
+  const modelBaseUrl = modelBaseUrlValue(
+    env.modelBaseUrl !== undefined
+      ? env.modelBaseUrl
+      : env.MODEL_BASE_URL !== undefined
+        ? env.MODEL_BASE_URL
+        : env.DEEPSEEK_BASE_URL !== undefined
+          ? env.DEEPSEEK_BASE_URL
+          : "https://api.deepseek.com",
+    { nodeEnv, allowModelTestLoopbackHttp },
+  );
   const config = {
     host: env.host ?? env.HOST ?? "127.0.0.1",
     port: Number(env.port ?? env.PORT ?? 8787),
     databaseUrl: env.databaseUrl ?? env.DATABASE_URL ?? "./data/sales-workbench.sqlite",
-    aiAnalysisMode: env.aiAnalysisMode ?? env.AI_ANALYSIS_MODE ?? "mock",
+    aiAnalysisMode,
     modelProvider: env.modelProvider ?? env.MODEL_PROVIDER ?? "deepseek",
     modelApiKey: env.modelApiKey ?? env.MODEL_API_KEY ?? env.DEEPSEEK_API_KEY ?? "",
-    modelBaseUrl: env.modelBaseUrl ?? env.MODEL_BASE_URL ?? env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
+    modelBaseUrl,
     modelName: modelIdentifierValue(
       env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL,
       "deepseek-v4-flash",

@@ -292,6 +292,44 @@ describe("backend model configuration", () => {
     assert.throws(() => loadConfig({ ...base, AMAP_MODE: "sandbox" }), /AMAP_MODE/);
   });
 
+  it("normalizes AI analysis mode and validates the model endpoint", () => {
+    const base = { envFile: join(tmpdir(), "sent-zx-model-boundary-missing.env"), NODE_ENV: "test" };
+    assert.equal(loadConfig({ ...base, AI_ANALYSIS_MODE: "  MoDeL  " }).aiAnalysisMode, "model");
+    assert.equal(loadConfig({ ...base, AI_ANALYSIS_MODE: "model\n" }).aiAnalysisMode, "model");
+    assert.equal(loadConfig({ ...base, AI_ANALYSIS_MODE: " MOCK " }).aiAnalysisMode, "mock");
+    for (const value of ["", "   ", "typo", true, null]) {
+      assert.throws(() => loadConfig({ ...base, AI_ANALYSIS_MODE: value }), /AI_ANALYSIS_MODE/);
+    }
+
+    assert.equal(
+      loadConfig({ ...base, MODEL_BASE_URL: "https://api.deepseek.com/v1" }).modelBaseUrl,
+      "https://api.deepseek.com/v1",
+    );
+    for (const value of [
+      "",
+      "   ",
+      "not-a-url",
+      "http://api.deepseek.com",
+      "https://user:pass@example.com",
+      "https://example.com/path?query=1",
+      "https://example.com/path#fragment",
+      "ftp://example.com",
+    ]) {
+      assert.throws(() => loadConfig({ ...base, MODEL_BASE_URL: value }), /MODEL_BASE_URL/);
+    }
+    assert.equal(
+      loadConfig(
+        { ...base, MODEL_BASE_URL: "http://127.0.0.1:8787" },
+        { allowModelTestLoopbackHttp: true },
+      ).modelBaseUrl,
+      "http://127.0.0.1:8787",
+    );
+    assert.throws(
+      () => loadConfig({ ...base, MODEL_BASE_URL: "http://127.0.0.1:8787" }),
+      /MODEL_BASE_URL/,
+    );
+  });
+
   it("emits the plaintext development-password warning once without leaking its value", () => {
     const configUrl = new URL("../src/config.js", import.meta.url).href;
     const source = `
