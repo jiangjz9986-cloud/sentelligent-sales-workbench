@@ -441,7 +441,10 @@ export function loadConfig(overrides = {}, { allowAsrTestLoopbackHttp = false } 
       "deepseek-v4-flash-vision-exp",
       "MODEL_VISION_NAME",
     ),
-    modelTimeoutMs: Number(env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30000),
+    modelTimeoutMs: positiveInteger(
+      env.modelTimeoutMs ?? env.MODEL_TIMEOUT_MS ?? 30_000,
+      "MODEL_TIMEOUT_MS",
+    ),
     asrMode,
     asrProvider,
     asrBaseUrl: asrBaseUrlValue(env.asrBaseUrl ?? env.ASR_BASE_URL, {

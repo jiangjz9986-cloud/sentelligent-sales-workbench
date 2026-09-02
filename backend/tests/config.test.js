@@ -264,7 +264,10 @@ describe("backend model configuration", () => {
       assert.throws(() => loadConfig({ ...base, JSON_BODY_LIMIT_BYTES: value }), /JSON_BODY_LIMIT_BYTES/);
       assert.throws(() => loadConfig({ ...base, AMAP_TIMEOUT_MS: value }), /AMAP_TIMEOUT_MS/);
       assert.throws(() => loadConfig({ ...base, INVOICE_TEXT_EXTRACTION_TIMEOUT_MS: value }), /INVOICE_TEXT_EXTRACTION_TIMEOUT_MS/);
+      assert.throws(() => loadConfig({ ...base, MODEL_TIMEOUT_MS: value }), /MODEL_TIMEOUT_MS/);
     }
+    assert.equal(loadConfig(base).modelTimeoutMs, 30_000);
+    assert.equal(loadConfig({ ...base, MODEL_TIMEOUT_MS: "45000" }).modelTimeoutMs, 45_000);
     assert.throws(() => loadConfig({ ...base, INVOICE_OCR_LANGUAGES: "chi sim;rm" }), /INVOICE_OCR_LANGUAGES/);
     assert.throws(() => loadConfig({ ...base, MODEL_VISION_NAME: "vision model" }), /MODEL_VISION_NAME/);
     assert.throws(() => loadConfig({ ...base, INVOICE_PDF_IMAGE_COMMAND: "" }), /INVOICE_PDF_IMAGE_COMMAND/);
