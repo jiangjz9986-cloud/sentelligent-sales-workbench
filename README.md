@@ -8,7 +8,7 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前版本 | 以根目录 `VERSION` 与 [CHANGELOG](CHANGELOG.md) 顶部条目为准（本次回填时为 v0.8.4 工程健康收官） |
+| 当前版本 | 本地开发候选为 `v0.11.0`；生产版本仍以服务器 `current` 指向目录的 manifest 与逐版证据表为准 |
 | 生产身份 | 以服务器 `releases/` 当前 `current` 指向目录的 manifest（完整 commit）为准；`docs/releases/vX.Y.Z.md` 逐版保存部署证据表 |
 | 发布方式 | 自 v0.6.5 起按项目所有者授权采用本地 exact-commit 路径：本地注释 tag（不推 GitHub）+ git bundle + 服务器打包为不可变 release 目录；GitHub Release 停在 v0.6.1，是否恢复同步为待决策项 |
 | 制品与备份 | v0.8.0 起服务器每日 02:30 自动备份数据库与微信会话（14 天保留），发布 bundle+evidence 自动归档到 `backups/releases/<version>/`（root:root 0700） |
