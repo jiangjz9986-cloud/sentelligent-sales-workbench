@@ -26,6 +26,74 @@ import {
   textFromArray,
 } from "./shared.jsx";
 import { EntityWorkspace } from "./EntityWorkspace.jsx";
+import "./CustomerPage.css";
+
+function customerArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.trim()) : [];
+}
+
+function formatCustomerTimestamp(value) {
+  if (!value) return "未记录";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(parsed).replaceAll("/", "-");
+}
+
+function CustomerRecordMetadata({ selected }) {
+  const sourceItems = customerArray(selected.syncPreview);
+  const aliases = customerArray(selected.aliases);
+  const tags = customerArray(selected.tags);
+
+  return (
+    <Panel title="档案元数据" meta="版本与来源">
+      <div className="customer-record-meta" data-testid="customer-record-meta">
+        <div className="customer-record-meta-item">
+          <span>当前版本</span>
+          <strong data-testid="customer-version">v{selected.version}</strong>
+        </div>
+        <div className="customer-record-meta-item customer-record-meta-source">
+          <span>来源承接</span>
+          <strong data-testid="customer-source">
+            {sourceItems.length > 0 ? sourceItems.join("；") : "未记录来源"}
+          </strong>
+        </div>
+        <div className="customer-record-meta-item">
+          <span>创建时间</span>
+          <strong data-testid="customer-created-at">{formatCustomerTimestamp(selected.createdAt)}</strong>
+        </div>
+        <div className="customer-record-meta-item">
+          <span>最近更新</span>
+          <strong data-testid="customer-updated-at">{formatCustomerTimestamp(selected.updatedAt)}</strong>
+        </div>
+      </div>
+      <div className="customer-imported-fields" data-testid="customer-imported-fields">
+        <div className="customer-imported-field">
+          <span>别名</span>
+          <div className="customer-token-list">
+            {aliases.length > 0
+              ? aliases.map((item) => <span className="customer-token" key={item}>{item}</span>)
+              : <span className="customer-token empty">未记录</span>}
+          </div>
+        </div>
+        <div className="customer-imported-field">
+          <span>标签</span>
+          <div className="customer-token-list">
+            {tags.length > 0
+              ? tags.map((item) => <span className="customer-token" key={item}>{item}</span>)
+              : <span className="customer-token empty">未记录</span>}
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
 
 function customerToForm(customer) {
   return {
@@ -179,7 +247,10 @@ const customerConfig = {
   searchAriaLabel: "搜索客户",
   searchTestId: "customer-local-search",
   searchPlaceholder: "搜索客户、区域、联系人、预算节奏",
-  searchFields: ["name", "region", "type", "level", "contact", "summary", "owner"],
+  searchFields: [
+    "name", "region", "type", "level", "contact", "summary", "owner",
+    "aliases", "tags", "syncPreview",
+  ],
   openDetailTestId: "customer-open-detail",
   editDetailTestId: "customer-edit-detail",
   deleteDetailTestId: "customer-delete-detail",
@@ -241,6 +312,12 @@ function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
         <MetricInline label="关系强度" value={`${selected.relation}`} />
         <MetricInline label="预算节奏" value={selected.budget} />
       </div>
+      <CustomerRecordMetadata selected={selected} />
+      <Panel title="客户摘要" meta="档案正文">
+        <p className="customer-summary" data-testid="customer-summary">
+          {selected.summary || "尚未补充客户摘要。"}
+        </p>
+      </Panel>
       <ProactiveAssistantPanel
         assistant={overviewSummary?.proactiveAssistant}
         scope={{ customerId: selected.id }}
