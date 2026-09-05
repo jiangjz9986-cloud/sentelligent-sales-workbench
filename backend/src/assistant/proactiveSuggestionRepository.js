@@ -29,6 +29,13 @@ const TRIGGER_VALUES = new Set([
 ]);
 const SAFE_IDENTIFIER = /^[\u4e00-\u9fffA-Za-z0-9_.:-]{1,500}$/u;
 const SENSITIVE_KEY = /(?:password|secret|token|authorization|cookie|credential|private.?key|raw.?content|body|contact|phone|mobile|email)/iu;
+const VOLATILE_SUGGESTION_KEYS = new Set([
+  "generatedAt",
+  "modelAttempted",
+  "modelCacheHit",
+  "modelError",
+  "modelLatencyMs",
+]);
 
 function text(value, name, max = 500) {
   if (typeof value !== "string" || !value.trim()) throw new TypeError(`${name} is required`);
@@ -119,6 +126,25 @@ function json(value, name, maxBytes = MAX_CONTENT_BYTES) {
   const encoded = JSON.stringify(canonical(value, name));
   if (!encoded || Buffer.byteLength(encoded, "utf8") > maxBytes) throw new TypeError(`${name} is too large`);
   return encoded;
+}
+
+// Scan timestamps and model delivery telemetry describe how a scan ran, not
+// whether its business evidence changed. Keep them in the persisted content
+// for diagnostics, but exclude them from the revision/dedupe hash so a later
+// scan or a cache hit cannot create a new suggestion revision.
+function stableSuggestionPayload(suggestion) {
+  if (!suggestion || typeof suggestion !== "object" || Array.isArray(suggestion)) return {};
+  const stable = { ...suggestion };
+  for (const key of VOLATILE_SUGGESTION_KEYS) delete stable[key];
+  if (stable.trigger && typeof stable.trigger === "object" && !Array.isArray(stable.trigger)) {
+    stable.trigger = { ...stable.trigger };
+    delete stable.trigger.detectedAt;
+  }
+  return stable;
+}
+
+function stableSuggestionPayloadHash(suggestion) {
+  return hash(JSON.stringify(canonical(stableSuggestionPayload(suggestion), "suggestion")));
 }
 
 function parsed(value, fallback) {
@@ -365,7 +391,7 @@ export function createProactiveSuggestionRepository(db, {
       snoozedUntil,
       runId: input.runId === undefined || input.runId === null ? null : identifier(input.runId, "runId"),
       eventId: input.eventId === undefined || input.eventId === null ? null : identifier(input.eventId, "eventId"),
-      payloadHash: hash(contentJson),
+      payloadHash: stableSuggestionPayloadHash(suggestion),
     };
   }
 
@@ -380,26 +406,33 @@ export function createProactiveSuggestionRepository(db, {
         // between scans (for example, day 21 -> day 22), so update the single
         // deduped row rather than turning an unchanged source into an error or
         // a second suggestion. Lifecycle state is intentionally preserved.
-        const changed = existingByDedupe.proactive_payload_hash !== value.payloadHash;
+        let existingPayloadHash = existingByDedupe.proactive_payload_hash;
+        try {
+          existingPayloadHash = stableSuggestionPayloadHash(parsed(existingByDedupe.content, {}));
+        } catch {
+          // Preserve the legacy hash when an old row cannot be normalized;
+          // the normal write path still validates all newly generated rows.
+        }
+        const changed = existingPayloadHash !== value.payloadHash;
         db.prepare(`
           UPDATE ai_suggestions
-             SET title = CASE WHEN $changed = 1 THEN $title ELSE title END,
-                 content = CASE WHEN $changed = 1 THEN $content ELSE content END,
-                 draft_content = CASE WHEN $changed = 1 THEN $content ELSE draft_content END,
-                 confidence = CASE WHEN $changed = 1 THEN $confidence ELSE confidence END,
-                 source_id = CASE WHEN $changed = 1 THEN $sourceId ELSE source_id END,
-                 source_refs = CASE WHEN $changed = 1 THEN $sourceRefs ELSE source_refs END,
-                 confirmation_preview = CASE WHEN $changed = 1 THEN $confirmationPreview ELSE confirmation_preview END,
-                 source = CASE WHEN $changed = 1 THEN $source ELSE source END,
-                 fallback_reason = CASE WHEN $changed = 1 THEN $fallbackReason ELSE fallback_reason END,
-                 proactive_subject_type = CASE WHEN $changed = 1 THEN $subjectType ELSE proactive_subject_type END,
-                 proactive_subject_id = CASE WHEN $changed = 1 THEN $subjectId ELSE proactive_subject_id END,
-                 proactive_customer_id = CASE WHEN $changed = 1 THEN $customerId ELSE proactive_customer_id END,
-                 proactive_opportunity_id = CASE WHEN $changed = 1 THEN $opportunityId ELSE proactive_opportunity_id END,
-                 proactive_rule_version = CASE WHEN $changed = 1 THEN $ruleVersion ELSE proactive_rule_version END,
-                 proactive_priority = CASE WHEN $changed = 1 THEN $priority ELSE proactive_priority END,
-                 proactive_generated_at = CASE WHEN $changed = 1 THEN $generatedAt ELSE proactive_generated_at END,
-                 proactive_payload_hash = CASE WHEN $changed = 1 THEN $payloadHash ELSE proactive_payload_hash END,
+             SET title = $title,
+                 content = $content,
+                 draft_content = $content,
+                 confidence = $confidence,
+                 source_id = $sourceId,
+                 source_refs = $sourceRefs,
+                 confirmation_preview = $confirmationPreview,
+                 source = $source,
+                 fallback_reason = $fallbackReason,
+                 proactive_subject_type = $subjectType,
+                 proactive_subject_id = $subjectId,
+                 proactive_customer_id = $customerId,
+                 proactive_opportunity_id = $opportunityId,
+                 proactive_rule_version = $ruleVersion,
+                 proactive_priority = $priority,
+                 proactive_generated_at = $generatedAt,
+                 proactive_payload_hash = $payloadHash,
                  version = version + CASE WHEN $changed = 1 THEN 1 ELSE 0 END,
                  proactive_last_seen_at = $now,
                  proactive_run_id = COALESCE($runId, proactive_run_id),
@@ -703,8 +736,14 @@ export function createProactiveSuggestionRepository(db, {
       const contentJson = json(nextSuggestion, "suggestion");
       const preview = nextSuggestion.writebackPreview ?? {};
       const confirmationPreviewJson = json(preview, "confirmationPreview", 64 * 1024);
-      const payloadHash = hash(contentJson);
-      const changed = row.proactive_payload_hash !== payloadHash;
+      const payloadHash = stableSuggestionPayloadHash(nextSuggestion);
+      let existingPayloadHash = row.proactive_payload_hash;
+      try {
+        existingPayloadHash = stableSuggestionPayloadHash(parsed(row.content, {}));
+      } catch {
+        // Fall back to the stored hash for legacy malformed content.
+      }
+      const changed = existingPayloadHash !== payloadHash;
       if (!changed) return rowToItem(row);
       db.prepare(`
         UPDATE ai_suggestions SET
