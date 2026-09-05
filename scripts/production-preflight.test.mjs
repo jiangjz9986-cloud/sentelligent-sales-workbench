@@ -816,6 +816,43 @@ describe("production preflight", () => {
     }
   });
 
+  it("accepts the configured authentication owner when production business tables are intentionally empty", async () => {
+    const workspace = makeWorkspace();
+    try {
+      const origin = "https://sales.example.test";
+      const databasePath = join(workspace.root, "empty-sales-workbench.sqlite");
+      const environment = validEnvironment(origin, databasePath);
+      const envFile = workspace.write("empty-production.env", environment.source);
+      makeDatabase(databasePath);
+      const writer = new DatabaseSync(databasePath);
+      writer.exec("DELETE FROM customers; DELETE FROM opportunities;");
+      writer.close();
+      const backupPath = join(workspace.root, "backups", "empty-sales-workbench.sqlite");
+      mkdirSync(dirname(backupPath), { recursive: true });
+      copyFileSync(databasePath, backupPath);
+      const servicePlanPath = workspace.write(
+        "empty-service-plan.json",
+        JSON.stringify(bindBackendEnvironment(validLegacyServiceSnapshot(), envFile), null, 2),
+      );
+      const { runProductionPreflight } = await loadPreflightModule();
+      const report = await runProductionPreflight({
+        envFile,
+        databasePath,
+        backupPath,
+        expectedBackupSha256: fileSha256(backupPath),
+        expectedOrigins: [origin],
+        servicePlanPath,
+        nodeVersion: "24.14.1",
+      });
+      assert.equal(
+        report.checks.find((check) => check.id === "env.assistantSecrets")?.status,
+        "passed",
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
   it("fails closed when DATABASE_URL or service EnvironmentFile evidence targets another production state", async () => {
     const workspace = makeWorkspace();
     try {

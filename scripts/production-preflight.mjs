@@ -265,14 +265,24 @@ function hasAssistantSecretConfiguration(environment) {
 
 function hasWeixinOwnerConfiguration(environment, database) {
   const owner = environment.WEIXIN_AGENT_OWNER;
+  const businessOwners = Array.isArray(database?.businessOwners)
+    ? database.businessOwners
+    : [];
+  // An intentionally empty production database is valid after a data-cleanup
+  // or first-install window. In that state there is no historical business row
+  // to use as an owner anchor, so bind the machine identity to the configured
+  // authentication account. Once business rows exist, keep the stricter
+  // historical-owner match to prevent an accidental identity drift.
+  const ownerIsKnown = businessOwners.length > 0
+    ? businessOwners.includes(owner)
+    : owner === environment.AUTH_ACCOUNT;
   return (
     typeof owner === "string" &&
     owner.length > 0 &&
     owner.length <= 200 &&
     owner === owner.trim() &&
     !/[\u0000-\u001f\u007f-\u009f]/u.test(owner) &&
-    Array.isArray(database?.businessOwners) &&
-    database.businessOwners.includes(owner)
+    ownerIsKnown
   );
 }
 
