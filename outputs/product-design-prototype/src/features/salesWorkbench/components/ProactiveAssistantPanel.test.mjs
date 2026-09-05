@@ -171,4 +171,6 @@ test("panel exposes all lifecycle filters, editable fields, persistence callback
   assert.match(panelSource, /宿主尚未接入/);
   assert.match(stylesheetSource, /proactive-assistant-lifecycle-toolbar/);
   assert.match(stylesheetSource, /proactive-assistant-edit-grid/);
+  assert.match(stylesheetSource, /\.proactive-assistant-lifecycle-actions \.ghost-button[\s\S]*min-height: 34px/);
+  assert.match(stylesheetSource, /@media \(max-width: 620px\)[\s\S]*\.proactive-assistant-card\[data-suggestion-id\] \.proactive-assistant-card-actions \.ghost-button[\s\S]*min-height: 44px/);
 });

@@ -193,7 +193,7 @@
 }
 
 .proactive-assistant-lifecycle-actions .ghost-button {
-  min-height: 30px;
+  min-height: 34px;
   padding: 0 9px;
   font-size: 11px;
 }
@@ -299,7 +299,7 @@
 }
 
 .proactive-assistant-review-actions .ghost-button {
-  min-height: 30px;
+  min-height: 34px;
   gap: 5px;
   padding: 0 9px;
   font-size: 11px;
@@ -333,7 +333,7 @@
 
 .proactive-assistant-writeback-control .primary-button,
 .proactive-assistant-writeback-control .ghost-button {
-  min-height: 32px;
+  min-height: 34px;
   font-size: 11px;
 }
 
@@ -371,7 +371,7 @@
 }
 
 .proactive-notification-state .ghost-button {
-  min-height: 28px;
+  min-height: 34px;
   margin-left: auto;
   padding: 0 8px;
   font-size: 10.5px;
@@ -388,6 +388,17 @@
 }
 
 @media (max-width: 620px) {
+  .proactive-assistant-refresh,
+  .proactive-assistant-card[data-suggestion-id] .proactive-assistant-card-actions .ghost-button,
+  .proactive-assistant-card[data-suggestion-id] .proactive-assistant-card-actions .primary-button,
+  .proactive-assistant-lifecycle-actions .ghost-button,
+  .proactive-assistant-review-actions .ghost-button,
+  .proactive-assistant-writeback-control .primary-button,
+  .proactive-assistant-writeback-control .ghost-button,
+  .proactive-notification-state .ghost-button {
+    min-height: 44px;
+  }
+
   .proactive-assistant-persistence-note {
     align-items: flex-start;
   }
