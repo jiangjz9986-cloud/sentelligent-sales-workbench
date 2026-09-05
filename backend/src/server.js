@@ -162,6 +162,19 @@ import { createAssistantWebHttpHandlers } from "./assistant/webHttpHandlers.js";
 import { createAssistantRouter } from "./assistant/router.js";
 import { createAssistantToolHandlers } from "./assistant/runtimeHandlers.js";
 import {
+  createProactiveAssistantSnapshotFromDb,
+  findProactiveAssistantSuggestionFromDb,
+  proactiveConfirmationSnapshot,
+  proactivePreviewDigest,
+} from "./assistant/proactiveAssistant.js";
+import { createProactiveBackgroundWorker } from "./assistant/proactiveBackgroundWorker.js";
+import { createProactiveScanRepository } from "./assistant/proactiveScanRepository.js";
+import { createProactiveSuggestionRepository } from "./assistant/proactiveSuggestionRepository.js";
+import { createProactiveConfirmationPreviewRepository } from "./assistant/proactiveConfirmationRepository.js";
+import { createProactiveNotificationRepository } from "./assistant/proactiveNotificationRepository.js";
+import { createProactiveNotificationScheduler } from "./assistant/proactiveNotificationScheduler.js";
+import { renderProactiveNotificationMessage } from "./assistant/proactiveNotificationMessage.js";
+import {
   createCustomerAssistantAdapter,
   createCustomerPendingPreviewProviders,
 } from "./assistant/customerAssistantAdapter.js";
@@ -774,6 +787,8 @@ function weeklyReportFromRow(row) {
     content: row.content,
     entries: parseJson(row.entries_json),
     sourceRefs: parseJson(row.source_refs),
+    source: row.source ?? "legacy",
+    fallbackReason: row.fallback_reason ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -792,6 +807,8 @@ function solutionDraftFromRow(row) {
     status: row.status,
     content: row.content,
     sourceRefs: parseJson(row.source_refs),
+    source: row.source ?? "legacy",
+    fallbackReason: row.fallback_reason ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -810,6 +827,8 @@ function aiSuggestionFromRow(row) {
     confidence: Number(row.confidence ?? 0),
     sourceRefs: parseJson(row.source_refs),
     confirmationPreview: parseJson(row.confirmation_preview, {}),
+    source: row.source ?? "legacy",
+    fallbackReason: row.fallback_reason ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at ?? row.created_at,
     confirmedAt: row.confirmed_at ?? null,
@@ -1049,7 +1068,190 @@ function dashboardQuickRecordNeedsConfirmation(record) {
   return record?.confirmationPreviewStatus === "open" || record?.status === "analyzed";
 }
 
-function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null, owner = null } = {}) {
+function proactivePreviewMetadata(preview) {
+  return {
+    id: preview.id,
+    status: preview.status,
+    target: preview.target,
+    revision: preview.revision,
+    previewDigest: preview.previewDigest,
+    customerId: preview.customerId,
+    opportunityId: preview.opportunityId,
+    opportunityVersion: preview.opportunityVersion,
+    customerVersion: preview.customerVersion,
+    createdAt: preview.createdAt,
+    updatedAt: preview.updatedAt,
+    expiresAt: preview.expiresAt,
+    confirmedAt: preview.confirmedAt,
+    confirmedBy: preview.confirmedBy,
+    resultItemId: preview.resultItemId,
+  };
+}
+
+function hydrateProactiveAssistantSnapshot(snapshot, repository, owner, now) {
+  if (!repository || !owner || !snapshot?.items?.length) return snapshot;
+  const previews = repository.listOpenBySuggestionIds(
+    snapshot.items.map((item) => item.id),
+    owner,
+    { now },
+  );
+  const bySuggestion = new Map();
+  for (const preview of previews) {
+    const current = bySuggestion.get(preview.suggestionId) ?? {};
+    // listOpenBySuggestionIds returns newest-first; the first row per target
+    // is the current open preview for that target.
+    if (!current[preview.target]) current[preview.target] = proactivePreviewMetadata(preview);
+    bySuggestion.set(preview.suggestionId, current);
+  }
+  return {
+    ...snapshot,
+    items: snapshot.items.map((item) => ({
+      ...item,
+      confirmationPreviews: bySuggestion.get(item.id) ?? {},
+    })),
+  };
+}
+
+function proactiveLedgerItem(row) {
+  if (!row) return null;
+  const payload = row.suggestion && typeof row.suggestion === "object" && !Array.isArray(row.suggestion)
+    ? row.suggestion
+    : {};
+  const status = row.proactiveStatus ?? row.status ?? "pending";
+  return {
+    ...payload,
+    id: row.id,
+    version: Number(row.version ?? 1),
+    lifecycleVersion: Number(row.version ?? 1),
+    owner: row.owner,
+    status,
+    lifecycleStatus: status,
+    proactiveStatus: status,
+    title: row.title ?? payload.title ?? "主动助手建议",
+    source: row.source ?? payload.source ?? "deterministic",
+    fallbackReason: row.fallbackReason ?? payload.fallbackReason ?? null,
+    confidence: payload.confidence ?? row.confidence ?? null,
+    sourceRefs: Array.isArray(row.sourceRefs) ? row.sourceRefs : (payload.sourceRefs ?? []),
+    confirmationPreview: row.confirmationPreview ?? payload.confirmationPreview ?? {},
+    createdAt: row.createdAt ?? payload.createdAt ?? null,
+    updatedAt: row.updatedAt ?? payload.updatedAt ?? row.createdAt ?? null,
+    generatedAt: row.generatedAt ?? payload.generatedAt ?? null,
+    trigger: payload.trigger ?? (row.trigger ? { type: row.trigger } : null),
+    subjectType: row.subjectType ?? payload.subjectType ?? null,
+    subjectId: row.subjectId ?? payload.subjectId ?? null,
+    customerId: row.customerId ?? payload.customerId ?? null,
+    opportunityId: row.opportunityId ?? payload.opportunityId ?? null,
+    priority: payload.priority ?? (Number.isFinite(row.priority) ? row.priority : null),
+    snoozedUntil: row.snoozedUntil ?? null,
+    dismissReason: row.dismissReason ?? null,
+    resolvedAt: row.resolvedAt ?? null,
+    resultRefs: Array.isArray(row.resultRefs) ? row.resultRefs : [],
+    runId: row.runId ?? null,
+    eventId: row.eventId ?? null,
+  };
+}
+
+/**
+ * Read the durable proactive ledger without recomputing rules or invoking a
+ * model from a page request.  A null return means the worker has not yet
+ * produced a row for this owner; callers may then use the legacy read-only
+ * snapshot as a first-run bootstrap fallback.
+ */
+function proactiveSnapshotFromLedger({
+  db,
+  repository,
+  previewRepository = null,
+  owner,
+  limit = 50,
+  offset = 0,
+  status = null,
+  trigger = null,
+  subjectId = null,
+  customerId = null,
+  opportunityId = null,
+  now = new Date(),
+} = {}) {
+  if (!repository || !owner) return null;
+  const total = repository.count({ owner, status, trigger, subjectId, customerId, opportunityId });
+  if (total === 0 && !status && !trigger && !subjectId && !customerId && !opportunityId) return null;
+  const rows = repository.list({ owner, status, trigger, subjectId, customerId, opportunityId, limit, offset });
+  const items = rows.map(proactiveLedgerItem).filter(Boolean);
+  const filterParams = {
+    $owner: owner,
+    $status: status,
+    $trigger: trigger,
+    $subjectId: subjectId,
+    $customerId: customerId,
+    $opportunityId: opportunityId,
+  };
+  const filterClause = `
+       AND ($status IS NULL OR proactive_status = $status)
+       AND ($trigger IS NULL OR proactive_trigger = $trigger)
+       AND ($subjectId IS NULL OR proactive_subject_id = $subjectId)
+       AND ($customerId IS NULL OR proactive_customer_id = $customerId)
+       AND ($opportunityId IS NULL OR proactive_opportunity_id = $opportunityId)`;
+  const allCounts = db.prepare(`
+    SELECT proactive_trigger AS trigger, COUNT(*) AS count
+      FROM ai_suggestions
+     WHERE owner = $owner AND proactive_trigger IS NOT NULL${filterClause}
+     GROUP BY proactive_trigger
+  `).all(filterParams);
+  const lifecycleCounts = db.prepare(`
+    SELECT proactive_status AS status, COUNT(*) AS count
+      FROM ai_suggestions
+     WHERE owner = $owner AND proactive_trigger IS NOT NULL${filterClause}
+     GROUP BY proactive_status
+  `).all(filterParams);
+  const triggerCounts = Object.fromEntries(allCounts.map((row) => [row.trigger, Number(row.count)]));
+  const lifecycle = Object.fromEntries(lifecycleCounts.map((row) => [row.status, Number(row.count)]));
+  const canonicalLifecycle = {
+    pending: lifecycle.pending ?? 0,
+    deferred: (lifecycle.deferred ?? 0) + (lifecycle.snoozed ?? 0),
+    ignored: (lifecycle.ignored ?? 0) + (lifecycle.dismissed ?? 0),
+    resolved: lifecycle.resolved ?? 0,
+    confirmed: lifecycle.confirmed ?? 0,
+    executed: lifecycle.executed ?? 0,
+    conflict: lifecycle.conflict ?? 0,
+    failed: (lifecycle.failed ?? 0) + (lifecycle.expired ?? 0),
+  };
+  const latest = items.map((item) => item.updatedAt ?? item.generatedAt).filter(Boolean).sort().at(-1) ?? new Date().toISOString();
+  const snapshot = {
+    schemaVersion: "proactive-assistant-v1",
+    modelVersion: "rules/proactive-v1",
+    source: "persisted",
+    generatedAt: latest,
+    staleDays: 21,
+    limit,
+    offset,
+    items,
+    counts: {
+      total,
+      missingNextStep: triggerCounts.missing_next_step ?? 0,
+      staleOpportunity: triggerCounts.stale_opportunity ?? 0,
+      stageEvidenceMismatch: triggerCounts.stage_evidence_mismatch ?? 0,
+      budgetUnknown: triggerCounts.budget_unknown ?? 0,
+      decisionChainUnknown: triggerCounts.decision_chain_unknown ?? 0,
+      purchaseTimingUnknown: triggerCounts.purchase_timing_unknown ?? 0,
+      actionDue: triggerCounts.action_due ?? 0,
+      riskOpen: triggerCounts.risk_open ?? 0,
+      visitFollowUp: triggerCounts.visit_follow_up ?? 0,
+      tenderChange: triggerCounts.tender_change ?? 0,
+      lifecycle,
+    },
+    lifecycleCounts: { total, ...canonicalLifecycle },
+    truncated: offset + items.length < total,
+    writebackPolicy: { requiresHumanConfirmation: true, automaticWriteAllowed: false },
+  };
+  return hydrateProactiveAssistantSnapshot(snapshot, previewRepository, owner, now);
+}
+
+function dashboardSummaryFromDb(db, {
+  now = new Date(),
+  tenderRepository = null,
+  proactiveConfirmationPreviewRepository = null,
+  proactiveSuggestionRepository = null,
+  owner = null,
+} = {}) {
   const customers = all(
     db,
     `SELECT * FROM customers WHERE deleted_at IS NULL${ownerClause(owner)} ORDER BY relation DESC, updated_at DESC`,
@@ -1127,6 +1329,21 @@ function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null,
     previousWeekStart: addDays(weekStart, -7),
     owner,
   });
+  const proactiveOwner = owner ?? LEGACY_OWNER;
+  const proactiveAssistant = proactiveSnapshotFromLedger({
+    db,
+    repository: proactiveSuggestionRepository,
+    previewRepository: proactiveConfirmationPreviewRepository,
+    owner: proactiveOwner,
+    limit: 50,
+    now,
+  }) ?? hydrateProactiveAssistantSnapshot(createProactiveAssistantSnapshotFromDb({
+    db,
+    // The anonymous development/test track historically uses the seeded
+    // jiangjz owner. Authenticated requests always provide their own account.
+    owner: proactiveOwner,
+    now,
+  }), proactiveConfirmationPreviewRepository, proactiveOwner, now);
 
   return {
     metrics: {
@@ -1180,6 +1397,7 @@ function dashboardSummaryFromDb(db, { now = new Date(), tenderRepository = null,
     stageCounts,
     todayFocus,
     weeklyTrend,
+    proactiveAssistant,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -1980,6 +2198,16 @@ function normalizeRemindAtField(body) {
   body.remindAt = parsed.toISOString();
 }
 
+function proactiveWritebackId(type, suggestionId) {
+  return `proactive-${type}-${suggestionId}`;
+}
+
+function proactiveWritebackConflict(message, currentVersion) {
+  throw new HttpError(409, "PROACTIVE_PREVIEW_STALE", message, {
+    ...(currentVersion === undefined ? {} : { currentVersion }),
+  });
+}
+
 function updateWeeklyReport(db, id, body, expectedVersion, owner = null) {
   const current = weeklyReportFromRow(get(
     db,
@@ -2749,6 +2977,7 @@ function itineraryAuditSnapshot(item) {
     status: item.status,
     stopCount: Array.isArray(item.request?.stops) ? item.request.stops.length : 0,
     optimizationSource: item.plan?.optimization?.source ?? null,
+    optimizationFallbackReason: item.plan?.optimization?.fallbackReason ?? null,
     createdBy: item.createdBy,
     updatedBy: item.updatedBy,
     createdAt: item.createdAt,
@@ -3234,6 +3463,7 @@ export function createServer(options = {}) {
       "SELECT * FROM customers WHERE deleted_at IS NULL ORDER BY id ASC",
     ).map(customerFromRow),
     notifier: hospitalTenderNotifier,
+    onBatchCommitted: (payload) => enqueueProactiveTenderEvents(payload),
     // The notifier is intentionally constructed once so a newly saved or
     // cleared encrypted setting takes effect without restarting the scheduler.
     // A missing/cleared token disables delivery while allowing collection and
@@ -3398,6 +3628,190 @@ export function createServer(options = {}) {
   });
 
   const assistantClock = options.assistantClock ?? options.now ?? (() => new Date());
+  const proactiveAssistantWorker = options.proactiveAssistantWorker
+    ?? createProactiveBackgroundWorker({
+      db,
+      clock: options.proactiveAssistantClock ?? assistantClock,
+      workerId: options.proactiveAssistantWorkerId ?? `proactive-worker-${process.pid}`,
+      batchSize: config.proactiveAssistantBatchSize,
+      intervalMinutes: config.proactiveAssistantIntervalMinutes,
+      leaseMs: config.proactiveAssistantLeaseMs,
+      retryBaseMs: config.proactiveAssistantRetryBaseMs,
+      pollMs: config.proactiveAssistantPollMs,
+      modelProvider: config.modelProvider,
+      modelName: config.modelName,
+      modelTimeoutMs: Math.max(100, Math.min(10 * 60 * 1000, Number(config.modelTimeoutMs) || 30_000)),
+      modelConcurrency: config.proactiveAssistantModelConcurrency,
+      modelRetryLimit: config.proactiveAssistantModelRetryLimit,
+      modelCacheTtlMs: config.proactiveAssistantModelCacheTtlMs,
+      modelOwnerDailyLimit: config.proactiveAssistantModelOwnerDailyLimit,
+      modelGlobalDailyLimit: config.proactiveAssistantModelGlobalDailyLimit,
+      modelBudgetTimezone: config.proactiveAssistantModelBudgetTimezone,
+      includeExtendedSignals: true,
+      ...(config.aiAnalysisMode === "model"
+        ? {
+            modelAnalyzer: async (context, modelOptions = {}) => {
+              const result = await analyzeSalesDecision(context, runtimeConfig, {
+                fetchImpl: options.fetchImpl ?? fetch,
+                signal: modelOptions.signal,
+                throwOnFailure: true,
+              });
+              return result;
+            },
+          }
+        : {}),
+      ...(options.proactiveAssistantOwnersProvider
+        ? { ownersProvider: options.proactiveAssistantOwnersProvider }
+        : {}),
+      ...(options.proactiveAssistantSnapshotBuilder
+        ? { snapshotBuilder: options.proactiveAssistantSnapshotBuilder }
+        : {}),
+    });
+  if (config.proactiveAssistantAutoRun && options.proactiveAssistantWorkerEnabled !== false) {
+    proactiveAssistantWorker.start();
+  }
+  const proactiveScanRepository = proactiveAssistantWorker.scanRepository;
+  const proactiveSuggestionRepository = proactiveAssistantWorker.suggestionRepository;
+  const proactiveNotificationRepository = options.proactiveNotificationRepository
+    ?? createProactiveNotificationRepository(db, {
+      clock: options.proactiveNotificationClock ?? assistantClock,
+      ...(options.proactiveNotificationIdFactory ? { idFactory: options.proactiveNotificationIdFactory } : {}),
+    });
+
+  // Business writes enqueue only after their surrounding transaction has
+  // returned successfully.  The queue payload is deliberately limited to
+  // stable identifiers and versions; the worker re-reads the owner-scoped
+  // database snapshot and never receives raw customer or quick-record text.
+  function enqueueProactiveBusinessEvent({
+    owner,
+    entityType,
+    entityId,
+    version,
+    customerId,
+    opportunityId,
+    changedAt,
+  } = {}) {
+    const normalizedOwner = typeof owner === "string" ? owner.trim() : "";
+    const normalizedEntityType = typeof entityType === "string" ? entityType.trim() : "";
+    const normalizedEntityId = typeof entityId === "string" ? entityId.trim() : "";
+    if (!normalizedOwner || !normalizedEntityType || !normalizedEntityId) return null;
+    const versionTag = Number.isSafeInteger(version) && version >= 1
+      ? `v${version}`
+      : (typeof changedAt === "string" && changedAt.trim() ? changedAt.trim() : "changed");
+    const payload = {
+      entityType: normalizedEntityType,
+      entityId: normalizedEntityId,
+      ...(Number.isSafeInteger(version) && version >= 1 ? { version } : {}),
+      ...(typeof customerId === "string" && customerId.trim() ? { customerId: customerId.trim() } : {}),
+      ...(typeof opportunityId === "string" && opportunityId.trim() ? { opportunityId: opportunityId.trim() } : {}),
+      ...(typeof changedAt === "string" && changedAt.trim() ? { changedAt: changedAt.trim() } : {}),
+    };
+    try {
+      return proactiveAssistantWorker.enqueueEvent({
+        owner: normalizedOwner,
+        eventKey: `business:${normalizedEntityType}:${normalizedEntityId}:${versionTag}`,
+        eventType: `${normalizedEntityType}_changed`,
+        entityType: normalizedEntityType,
+        entityId: normalizedEntityId,
+        payload,
+      });
+    } catch (error) {
+      // Event persistence is an eventual-consistency aid; the periodic scan
+      // remains authoritative.  Never turn a successful business write into
+      // a 500 merely because the auxiliary event ledger is temporarily busy.
+      console.warn(`category=proactive_event enqueue_failed entityType=${normalizedEntityType} code=${String(error?.code ?? "EVENT_QUEUE_FAILED").replace(/[^A-Za-z0-9_.:-]/gu, "_")}`);
+      return null;
+    }
+  }
+
+  // A committed tender snapshot can affect more than one customer owner. Keep
+  // one durable event per owner and pass only stable notice/customer
+  // identities; the worker re-reads the owner-scoped opportunities after the
+  // event is claimed.
+  function enqueueProactiveTenderEvents({
+    changedAt,
+    snapshotId,
+    runId,
+    notices = [],
+  } = {}) {
+    if (!Array.isArray(notices) || notices.length === 0) return [];
+    const normalizedNotices = notices
+      .filter((notice) => notice && typeof notice === "object")
+      .map((notice) => ({
+        id: typeof notice.id === "string" && notice.id.trim() ? notice.id.trim() : null,
+        identityKey: typeof notice.identityKey === "string" && notice.identityKey.trim()
+          ? notice.identityKey.trim()
+          : null,
+        customerIds: Array.isArray(notice.match?.matchedCustomerIds ?? notice.matchedCustomerIds)
+          ? [...new Set((notice.match?.matchedCustomerIds ?? notice.matchedCustomerIds).filter(
+            (value) => typeof value === "string" && value.trim(),
+          ).map((value) => value.trim()))]
+          : [],
+      }))
+      .filter((notice) => (notice.id || notice.identityKey) && notice.customerIds.length > 0);
+    if (normalizedNotices.length === 0) return [];
+
+    const customerIds = [...new Set(normalizedNotices.flatMap((notice) => notice.customerIds))];
+    const customerOwners = resolveCustomerOwnersByIds(customerIds);
+    const byOwner = new Map();
+    for (const notice of normalizedNotices) {
+      const noticeIdentity = notice.identityKey ?? notice.id;
+      for (const customerId of notice.customerIds) {
+        const owner = customerOwners.get(customerId);
+        if (!owner) continue;
+        const group = byOwner.get(owner) ?? { customerIds: new Set(), noticeIds: new Set() };
+        group.customerIds.add(customerId);
+        group.noticeIds.add(noticeIdentity);
+        byOwner.set(owner, group);
+      }
+    }
+
+    const normalizedChangedAt = typeof changedAt === "string" && changedAt.trim()
+      ? changedAt.trim()
+      : new Date().toISOString();
+    const normalizedSnapshotId = typeof snapshotId === "string" && snapshotId.trim()
+      ? snapshotId.trim()
+      : normalizedChangedAt;
+    const normalizedRunId = typeof runId === "string" && runId.trim() ? runId.trim() : null;
+    const results = [];
+    for (const [owner, group] of byOwner.entries()) {
+      const ownerCustomerIds = [...group.customerIds].sort();
+      const ownerNoticeIds = [...group.noticeIds].sort();
+      const payload = {
+        changedAt: normalizedChangedAt,
+        snapshotId: normalizedSnapshotId,
+        ...(normalizedRunId ? { runId: normalizedRunId } : {}),
+        customerIds: ownerCustomerIds,
+        noticeIds: ownerNoticeIds,
+      };
+      const eventKeyDigest = createHash("sha256")
+        .update(JSON.stringify({ snapshotId: normalizedSnapshotId, customerIds: ownerCustomerIds, noticeIds: ownerNoticeIds }), "utf8")
+        .digest("hex");
+      try {
+        results.push(proactiveAssistantWorker.enqueueEvent({
+          owner,
+          eventKey: `hospital-tender:${normalizedSnapshotId}:${eventKeyDigest}`,
+          eventType: "hospital_tender_changed",
+          entityType: "hospital_tender",
+          entityId: normalizedSnapshotId,
+          payload,
+        }));
+      } catch (error) {
+        // The periodic proactive scan remains authoritative if the auxiliary
+        // event ledger is temporarily unavailable after tender commit.
+        console.warn(`category=proactive_event enqueue_failed entityType=hospital_tender code=${String(error?.code ?? "EVENT_QUEUE_FAILED").replace(/[^A-Za-z0-9_.:-]/gu, "_")}`);
+      }
+    }
+    return results;
+  }
+
+  const proactiveConfirmationPreviewRepository = options.proactiveConfirmationPreviewRepository
+    ?? createProactiveConfirmationPreviewRepository(db, {
+      clock: options.proactiveConfirmationPreviewClock ?? assistantClock,
+      ...(options.proactiveConfirmationPreviewIdFactory
+        ? { idFactory: options.proactiveConfirmationPreviewIdFactory }
+        : {}),
+    });
   const visitTemperatureSuggestionRepositories = options.visitTemperatureSuggestionRepositories
     ?? createVisitTemperatureSuggestionRepositories(db, {
       clock: options.visitTemperatureSuggestionClock ?? assistantClock,
@@ -3467,11 +3881,20 @@ export function createServer(options = {}) {
       ...(options.shortcutBookkeepingAssistantIdFactory ? { idFactory: options.shortcutBookkeepingAssistantIdFactory } : {}),
       clock: options.shortcutBookkeepingAssistantClock ?? assistantClock,
     });
-  const renderWeixinOutboxMessage = (outboxItem) => (
-    outboxItem?.payload?.kind === "invoice_gap_escalation"
-      ? invoiceEscalationOutboxRenderer(outboxItem)
-      : shortcutBookkeepingAssistantRuntime.renderOutboxMessage(outboxItem)
-  );
+  const renderWeixinOutboxMessage = (outboxItem) => {
+    if (outboxItem?.payload?.kind === "invoice_gap_escalation") return invoiceEscalationOutboxRenderer(outboxItem);
+    if (outboxItem?.payload?.kind === "proactive_suggestion") {
+      const notification = proactiveNotificationRepository.getByOutboxId(outboxItem.id);
+      const suggestion = notification
+        ? proactiveSuggestionRepository.get(notification.suggestionId, { owner: notification.owner })
+        : null;
+      if (!notification || !suggestion || suggestion.version !== notification.suggestionVersion || suggestion.status !== "pending") {
+        throw Object.assign(new Error("proactive notification is stale"), { code: "WEIXIN_OUTBOX_STALE" });
+      }
+      return renderProactiveNotificationMessage(outboxItem);
+    }
+    return shortcutBookkeepingAssistantRuntime.renderOutboxMessage(outboxItem);
+  };
   // v0.9.3：resolver 改查绑定表，闭合语义不变——无 active 绑定 → null 拒答，绝不回退全量。
   const assistantBusinessOwnerResolver = typeof options.resolveBusinessOwner === "function"
     ? options.resolveBusinessOwner
@@ -3657,6 +4080,29 @@ export function createServer(options = {}) {
     }),
     clock: options.opsAlertClock ?? (() => new Date()),
   });
+  const proactiveNotificationScheduler = options.proactiveNotificationScheduler
+    ?? createProactiveNotificationScheduler({
+      db,
+      suggestionRepository: proactiveSuggestionRepository,
+      notificationRepository: proactiveNotificationRepository,
+      outboxRepository: weixinConfirmationOutboxRepository,
+      resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
+      // Proactive suggestions stay in the owner-scoped in-app inbox when the
+      // owner has no WeChat binding.  The existing PushPlus token is a global
+      // hospital-tender/ops channel and cannot be used to prove this user's
+      // delivery target, so it is deliberately not wired as a fallback here.
+      clock: options.proactiveNotificationClock ?? assistantClock,
+      pollMs: options.proactiveNotificationPollMs ?? config.proactiveNotificationPollMs,
+      quietStartHour: options.proactiveNotificationQuietStartHour ?? config.proactiveNotificationQuietStart.hour,
+      quietStartMinute: options.proactiveNotificationQuietStartMinute ?? config.proactiveNotificationQuietStart.minute,
+      quietEndHour: options.proactiveNotificationQuietEndHour ?? config.proactiveNotificationQuietEnd.hour,
+      quietEndMinute: options.proactiveNotificationQuietEndMinute ?? config.proactiveNotificationQuietEnd.minute,
+      hourlyLimit: options.proactiveNotificationHourlyLimit ?? config.proactiveNotificationHourlyLimit,
+      dailyLimit: options.proactiveNotificationDailyLimit ?? config.proactiveNotificationDailyLimit,
+    });
+  if ((options.proactiveNotificationAutoRun ?? config.proactiveNotificationAutoRun) && options.proactiveNotificationSchedulerEnabled !== false) {
+    proactiveNotificationScheduler.start();
+  }
   // One probe covers backend liveness, the three scheduler lastError states,
   // outbox backlog, and worker heartbeat for the 5-minute ops inspector.
   const opsAlertStatusSnapshot = () => {
@@ -3664,6 +4110,7 @@ export function createServer(options = {}) {
     return {
       generatedAt: new Date().toISOString(),
       outbox: weixinConfirmationOutboxRepository.statusCounts(),
+      proactiveNotifications: proactiveNotificationRepository.statusCounts(),
       weixinDelivery: weixinDeliveryReadiness.snapshot(),
       weixinBindings: { active: weixinBindingsRepository.countActive() },
       schedulers: {
@@ -3679,6 +4126,7 @@ export function createServer(options = {}) {
         actionReminders: actionReminderScheduler.status(),
         invoiceEscalation: invoiceEscalationScheduler.status(),
         dailyDigest: dailyDigestScheduler.status(),
+        proactiveNotifications: proactiveNotificationScheduler.status(),
       },
     };
   };
@@ -3830,7 +4278,7 @@ export function createServer(options = {}) {
       });
       const collected = await hospitalTenderInternalRunner.run({ customerHospitals });
       const customerNameById = new Map(customers.map((customer) => [customer.id, customer.name]));
-      return withImmediateTransaction(db, () => {
+      const result = withImmediateTransaction(db, () => {
         const syncResult = ingestHospitalTenderSnapshot({
           repository: hospitalTenderRepository,
           payload: collected.payload,
@@ -3859,6 +4307,12 @@ export function createServer(options = {}) {
           notices: syncResult.notices.map((item) => serializeHospitalTenderNotice(item, customerNameById)),
         };
       });
+      enqueueProactiveTenderEvents({
+        changedAt: result.generatedAt,
+        snapshotId: result.generatedAt,
+        notices: result.notices,
+      });
+      return result;
     })();
     try {
       return await hospitalTenderInternalRunPromise;
@@ -4290,6 +4744,11 @@ export function createServer(options = {}) {
           });
           return syncResult;
         });
+        enqueueProactiveTenderEvents({
+          changedAt: result.generatedAt,
+          snapshotId: result.generatedAt,
+          notices: result.notices,
+        });
         sendJson(response, 200, {
           item: {
             generatedAt: result.generatedAt,
@@ -4711,8 +5170,9 @@ export function createServer(options = {}) {
             if (error instanceof TravelExpenseRegionProfileVersionConflictError) {
               throw new HttpError(409, "VERSION_CONFLICT", "The region profile was updated by another request", {
                 currentVersion: error.currentVersion,
-              });
-            }
+    });
+  }
+
             throw error;
           }
           if (saved.version !== before.version) {
@@ -5452,9 +5912,713 @@ export function createServer(options = {}) {
         sendJson(response, 200, {
           item: dashboardSummaryFromDb(db, {
             tenderRepository: hospitalTenderRepository,
+            proactiveConfirmationPreviewRepository,
+            proactiveSuggestionRepository,
             owner: requestOwner(request),
           }),
         });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/assistant/proactive/notifications") {
+        if (config.authRequired && request.authContext.kind !== "user") return unauthorized(response);
+        const owner = requestOwner(request) ?? LEGACY_OWNER;
+        const rawLimit = url.searchParams.get("limit") ?? "50";
+        const rawOffset = url.searchParams.get("offset") ?? "0";
+        if (!/^\d+$/u.test(rawLimit) || !/^\d+$/u.test(rawOffset)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "分页参数无效");
+        }
+        const limit = Number(rawLimit); const offset = Number(rawOffset);
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000) {
+          throw new HttpError(422, "VALIDATION_ERROR", "分页参数超出范围");
+        }
+        const items = proactiveNotificationRepository.list({ owner, limit, offset });
+        sendJson(response, 200, { items, total: proactiveNotificationRepository.count({ owner }) }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts[0] === "api" && parts[1] === "assistant" && parts[2] === "proactive"
+        && parts[3] === "notifications" && parts[4] && parts[5] === "read" && parts.length === 6
+      ) {
+        if (config.authRequired && request.authContext.kind !== "user") return unauthorized(response);
+        await validateEmptyBody(request);
+        const owner = requestOwner(request) ?? LEGACY_OWNER;
+        const item = proactiveNotificationRepository.markRead(parts[4], { owner });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/assistant/proactive") {
+        if (config.authRequired && request.authContext.kind !== "user") return unauthorized(response);
+        const rawLimit = url.searchParams.get("limit");
+        if (rawLimit !== null && !/^\d+$/u.test(rawLimit)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "limit 必须是正整数", { limit: "integer" });
+        }
+        const limit = rawLimit === null ? undefined : Number(rawLimit);
+        if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "limit 必须在 1-100 之间", { limit: "range" });
+        }
+        const rawOffset = url.searchParams.get("offset");
+        if (rawOffset !== null && !/^\d+$/u.test(rawOffset)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "offset 必须是非负整数", { offset: "integer" });
+        }
+        const offset = rawOffset === null ? 0 : Number(rawOffset);
+        if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000) {
+          throw new HttpError(422, "VALIDATION_ERROR", "offset 超出范围", { offset: "range" });
+        }
+        const status = url.searchParams.get("status")?.trim() || null;
+        const trigger = url.searchParams.get("trigger")?.trim() || null;
+        const subjectId = url.searchParams.get("subjectId")?.trim() || null;
+        const customerId = url.searchParams.get("customerId")?.trim() || null;
+        const opportunityId = url.searchParams.get("opportunityId")?.trim() || null;
+        const includeHistoryRaw = url.searchParams.get("includeHistory");
+        const includeHistory = includeHistoryRaw === "1" || includeHistoryRaw === "true";
+        if (status && !["pending", "deferred", "snoozed", "dismissed", "ignored", "resolved", "confirmed", "executed", "conflict", "expired", "failed"].includes(status)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "status 无效", { status: "enum" });
+        }
+        for (const [field, value] of [["subjectId", subjectId], ["customerId", customerId], ["opportunityId", opportunityId]]) {
+          if (value && (!/^[\u4e00-\u9fffA-Za-z0-9_.:-]{1,500}$/u.test(value))) {
+            throw new HttpError(422, "VALIDATION_ERROR", `${field} 无效`, { [field]: "identifier" });
+          }
+        }
+        const proactiveOwner = requestOwner(request) ?? LEGACY_OWNER;
+        const durable = proactiveSnapshotFromLedger({
+          db,
+          repository: proactiveSuggestionRepository,
+          previewRepository: proactiveConfirmationPreviewRepository,
+          owner: proactiveOwner,
+          limit: limit ?? 50,
+          offset,
+          status: includeHistory ? status : (status ?? null),
+          trigger,
+          subjectId,
+          customerId,
+          opportunityId,
+          now: new Date(),
+        });
+        const item = durable ?? hydrateProactiveAssistantSnapshot(createProactiveAssistantSnapshotFromDb({
+          db,
+          owner: proactiveOwner,
+          limit,
+        }), proactiveConfirmationPreviewRepository, proactiveOwner, new Date());
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/assistant/proactive/status") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const status = proactiveAssistantWorker.status();
+        const owner = requestOwner(request);
+        const counts = owner ? {
+          suggestions: proactiveSuggestionRepository.count({ owner }),
+          pending: proactiveSuggestionRepository.count({ owner, status: "pending" }),
+          deferred: proactiveSuggestionRepository.count({ owner, status: "deferred" }),
+          snoozed: proactiveSuggestionRepository.count({ owner, status: "snoozed" }),
+          dismissed: proactiveSuggestionRepository.count({ owner, status: "dismissed" }),
+          resolved: proactiveSuggestionRepository.count({ owner, status: "resolved" }),
+          ignored: proactiveSuggestionRepository.count({ owner, status: "ignored" }),
+          confirmed: proactiveSuggestionRepository.count({ owner, status: "confirmed" }),
+          executed: proactiveSuggestionRepository.count({ owner, status: "executed" }),
+          conflict: proactiveSuggestionRepository.count({ owner, status: "conflict" }),
+          failed: proactiveSuggestionRepository.count({ owner, status: "failed" }),
+          events: proactiveScanRepository.pendingEventCount({ owner }),
+        } : null;
+        const notifications = owner ? proactiveNotificationRepository.statusCounts({ owner }) : null;
+        sendJson(response, 200, { item: { ...status, counts, notifications, notificationScheduler: proactiveNotificationScheduler.status() } }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "PATCH"
+        && parts[0] === "api"
+        && parts[1] === "assistant"
+        && parts[2] === "proactive"
+        && parts[3]
+        && parts.length === 4
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const body = await readValidatedJson(request, requestSchemas.proactiveAssistantLifecyclePatch);
+        const owner = requestOwner(request);
+        if (!owner) return unauthorized(response);
+        const scope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: idempotencyKey,
+          hash: requestHash(body),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, scope);
+          if (claim.replay) {
+            return { status: claim.status, body: claim.body };
+          }
+          const before = proactiveSuggestionRepository.get(parts[3], { owner });
+          if (!before) notFound();
+          const item = proactiveSuggestionRepository.updateLifecycle(parts[3], {
+            owner,
+            status: body.status,
+            snoozedUntil: body.snoozedUntil,
+            dismissReason: body.dismissReason,
+            resultRefs: body.resultRefs,
+            expectedVersion: body.expectedVersion,
+          }, { withinTransaction: true });
+          insertAudit(db, {
+            action: "proactive_assistant.lifecycle.update",
+            entityType: "proactive_assistant_suggestion",
+            entityId: item.id,
+            actor: owner,
+            requestId,
+            before: { status: before.proactiveStatus, version: before.version },
+            after: { status: item.proactiveStatus, version: item.version },
+            entityVersion: item.version,
+            metadata: {
+              source: "proactive_assistant",
+              status: item.proactiveStatus,
+              resultRefCount: item.resultRefs?.length ?? 0,
+            },
+          });
+          const envelope = { item };
+          completeIdempotency(db, {
+            ...scope,
+            claimToken: claim.claimToken,
+            status: 200,
+            body: envelope,
+          });
+          return { status: 200, body: envelope, version: item.version };
+        });
+        sendJson(response, result.status, result.body, {
+          "Cache-Control": "no-store",
+          ...(result.version ? { ETag: `"${result.version}"` } : {}),
+        });
+        return;
+      }
+
+      if (
+        request.method === "PATCH"
+        && parts[0] === "api"
+        && parts[1] === "assistant"
+        && parts[2] === "proactive"
+        && parts[3]
+        && parts[4] === "fields"
+        && parts.length === 5
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const body = await readValidatedJson(request, requestSchemas.proactiveAssistantFieldsPatch);
+        const owner = requestOwner(request);
+        if (!owner) return unauthorized(response);
+        const scope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: idempotencyKey,
+          hash: requestHash(body),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, scope);
+          if (claim.replay) {
+            return { status: claim.status, body: claim.body };
+          }
+          const before = proactiveSuggestionRepository.get(parts[3], { owner });
+          if (!before) notFound();
+          const item = proactiveSuggestionRepository.updateFields(parts[3], {
+            owner,
+            expectedVersion: body.expectedVersion,
+            fields: {
+              owner: body.assignee,
+              dueDate: body.dueDate,
+              priority: body.priority,
+              expectedResult: body.expectedResult,
+            },
+          }, { withinTransaction: true });
+          proactiveConfirmationPreviewRepository.cancelOpenForSuggestion(parts[3], owner);
+          insertAudit(db, {
+            action: "proactive_assistant.fields.update",
+            entityType: "proactive_assistant_suggestion",
+            entityId: item.id,
+            actor: owner,
+            requestId,
+            before: { version: before.version },
+            after: { version: item.version },
+            entityVersion: item.version,
+            metadata: {
+              source: "proactive_assistant",
+              changedFields: ["assignee", "dueDate", "priority", "expectedResult"],
+            },
+          });
+          const envelope = { item };
+          completeIdempotency(db, {
+            ...scope,
+            claimToken: claim.claimToken,
+            status: 200,
+            body: envelope,
+          });
+          return { status: 200, body: envelope, version: item.version };
+        });
+        sendJson(response, result.status, result.body, {
+          "Cache-Control": "no-store",
+          ...(result.version ? { ETag: `"${result.version}"` } : {}),
+        });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts[0] === "api"
+        && parts[1] === "assistant"
+        && parts[2] === "proactive"
+        && parts[3]
+        && parts[4] === "previews"
+        && parts.length === 5
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const body = await readValidatedJson(request, requestSchemas.proactiveAssistantPreview);
+        const owner = requestOwner(request);
+        if (!owner) return unauthorized(response);
+        const suggestionId = parts[3];
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: idempotencyKey,
+          hash: requestHash(body),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+
+          const suggestion = proactiveSuggestionRepository.get(suggestionId, { owner })
+            ?? findProactiveAssistantSuggestionFromDb({
+              db,
+              owner,
+              suggestionId,
+            });
+          if (!suggestion) notFound();
+          const durableSnapshot = proactiveConfirmationSnapshot(suggestion, body.target);
+          if (!durableSnapshot) validationFailure("target", "unavailable");
+          const preview = durableSnapshot.preview;
+          const stored = proactiveConfirmationPreviewRepository.create({
+            owner,
+            suggestionId,
+            target: body.target,
+            customerId: suggestion.customerId,
+            opportunityId: suggestion.opportunityId,
+            opportunityVersion: suggestion.opportunityVersion,
+            customerVersion: suggestion.customerVersion,
+            previewDigest: durableSnapshot.previewDigest,
+            preview,
+            snapshot: durableSnapshot,
+          });
+          const responseEnvelope = { item: stored };
+          if (!stored.replayed) {
+            insertAudit(db, {
+              action: "proactive_assistant.preview.create",
+              entityType: "proactive_confirmation_preview",
+              entityId: stored.id,
+              actor: owner,
+              requestId,
+              before: null,
+              after: {
+                suggestionId,
+                target: body.target,
+                revision: stored.revision,
+                previewDigest: stored.previewDigest,
+                opportunityVersion: stored.opportunityVersion,
+                customerVersion: stored.customerVersion,
+                expiresAt: stored.expiresAt,
+              },
+              entityVersion: stored.revision,
+              metadata: { source: "proactive_assistant", suggestionId, target: body.target },
+            });
+          }
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: stored.replayed ? 200 : 201,
+            body: responseEnvelope,
+          });
+          return { status: stored.replayed ? 200 : 201, body: responseEnvelope };
+        });
+        sendJson(response, result.status, result.body, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts[0] === "api"
+        && parts[1] === "assistant"
+        && parts[2] === "proactive"
+        && parts[3]
+        && parts[4] === "previews"
+        && parts[5]
+        && parts.length === 6
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const owner = requestOwner(request);
+        if (!owner) return unauthorized(response);
+        const item = proactiveConfirmationPreviewRepository.get(parts[5], owner);
+        if (!item || item.suggestionId !== parts[3]) notFound();
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts[0] === "api"
+        && parts[1] === "assistant"
+        && parts[2] === "proactive"
+        && parts[3]
+        && parts[4] === "previews"
+        && parts[5]
+        && parts[6] === "cancel"
+        && parts.length === 7
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        await readValidatedJson(request, requestSchemas.proactiveAssistantPreviewCancel);
+        const owner = requestOwner(request);
+        if (!owner) return unauthorized(response);
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: idempotencyKey,
+          hash: requestHash({ cancel: true }),
+        };
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+          const item = proactiveConfirmationPreviewRepository.get(parts[5], owner);
+          if (!item || item.suggestionId !== parts[3]) notFound();
+          const cancelled = proactiveConfirmationPreviewRepository.cancel(item.id, owner);
+          if (item.status === "open" && cancelled?.status === "cancelled") {
+            insertAudit(db, {
+              action: "proactive_assistant.preview.cancel",
+              entityType: "proactive_confirmation_preview",
+              entityId: item.id,
+              actor: owner,
+              requestId,
+              before: { status: item.status },
+              after: { status: cancelled.status },
+              entityVersion: cancelled.revision,
+              metadata: { source: "proactive_assistant", suggestionId: item.suggestionId, target: item.target },
+            });
+          }
+          const responseEnvelope = { item: cancelled };
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 200,
+            body: responseEnvelope,
+          });
+          return { status: 200, body: responseEnvelope };
+        });
+        sendJson(response, result.status, result.body, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts[0] === "api"
+        && parts[1] === "assistant"
+        && parts[2] === "proactive"
+        && parts[3]
+        && parts[4] === "confirm"
+      ) {
+        // A proactive card is only a proposal.  This endpoint is the one
+        // explicit human-confirmation gate that can turn it into a business
+        // row; all identity, relationship, version and preview checks are
+        // repeated against the current database snapshot in one transaction.
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const body = await readValidatedJson(request, requestSchemas.proactiveAssistantConfirmation);
+        if (!/^[0-9a-f]{64}$/u.test(body.previewDigest)) {
+          throw new HttpError(422, "VALIDATION_ERROR", "previewDigest 必须是 SHA-256 摘要", { previewDigest: "digest" });
+        }
+        const owner = requestOwner(request);
+        if (!owner) return unauthorized(response);
+        const confirmationPreviewId = body.confirmationPreviewId;
+        const idempotencyScope = {
+          actor: request.authContext.account,
+          method: request.method,
+          path: url.pathname,
+          key: idempotencyKey,
+          hash: requestHash(body),
+        };
+        const suggestionId = parts[3];
+        const result = withImmediateTransaction(db, () => {
+          const claim = claimIdempotency(db, idempotencyScope);
+          if (claim.replay) return { status: claim.status, body: claim.body };
+
+          const durablePreview = proactiveConfirmationPreviewRepository.get(confirmationPreviewId, owner);
+          if (!durablePreview || durablePreview.suggestionId !== suggestionId) notFound();
+          if (durablePreview.target !== body.target) validationFailure("target", "mismatch");
+          if (
+            durablePreview.customerId !== body.customerId
+            || durablePreview.opportunityId !== body.opportunityId
+            || durablePreview.previewDigest !== body.previewDigest
+            || durablePreview.opportunityVersion !== body.expectedOpportunityVersion
+            || durablePreview.customerVersion !== body.expectedCustomerVersion
+          ) {
+            validationFailure("confirmationPreviewId", "mismatch");
+          }
+          if (requestHash(body.preview) !== requestHash(durablePreview.preview)) {
+            validationFailure("preview", "mismatch");
+          }
+          if (durablePreview.status === "expired" || durablePreview.status === "cancelled") {
+            throw new HttpError(409, "PROACTIVE_PREVIEW_CLOSED", "主动助手预览已关闭，请重新生成预览");
+          }
+
+          // A successful write changes the proactive rule inputs (for example,
+          // creating the missing-next-step action makes that card disappear
+          // on the next refresh).  Stable writeback IDs therefore get an
+          // idempotent replay path before rebuilding the now-current snapshot.
+          const target = body.target;
+          const stableId = proactiveWritebackId(target, suggestionId);
+          // Re-check the live relationship and versions before taking the
+          // stable-row replay path.  A completed writeback must not mask a
+          // newer customer/opportunity revision when the caller presents an
+          // older confirmation preview; that request is stale, not a replay.
+          const currentOpportunity = opportunityFromRow(activeOpportunityEntityRow(db, body.opportunityId, owner));
+          if (!currentOpportunity) notFound();
+          const currentCustomer = customerFromRow(get(
+            db,
+            "SELECT * FROM customers WHERE id = $id AND deleted_at IS NULL AND owner = $owner",
+            { $id: body.customerId, $owner: owner },
+          ));
+          if (!currentCustomer) notFound();
+          if (currentOpportunity.customerId !== currentCustomer.id) {
+            validationFailure("opportunityId", "relationship");
+          }
+          if (currentOpportunity.version !== body.expectedOpportunityVersion) {
+            proactiveWritebackConflict("主动助手预览已过期，请刷新后重新确认", currentOpportunity.version);
+          }
+          if (
+            body.expectedCustomerVersion !== undefined
+            && currentCustomer.version !== body.expectedCustomerVersion
+          ) {
+            proactiveWritebackConflict("关联客户已更新，请刷新后重新确认", currentCustomer.version);
+          }
+          const existingRow = get(
+            db,
+            `SELECT * FROM ${target === "action" ? "action_items" : "risk_items"} WHERE id = $id`,
+            { $id: stableId },
+          );
+          if (existingRow) {
+            if (existingRow.owner !== owner) notFound();
+            if (existingRow.deleted_at) {
+              throw new HttpError(409, "PROACTIVE_WRITEBACK_DELETED", "该主动助手写回已被删除，请重新生成建议");
+            }
+            if (existingRow.customer_id !== body.customerId || existingRow.opportunity_id !== body.opportunityId) {
+              validationFailure("opportunityId", "relationship");
+            }
+            // A stable writeback id is only replayable when it was created by
+            // this confirmation route.  Keep the original digest and target
+            // relationship in the confirmation audit so a fresh idempotency
+            // key cannot turn an arbitrary row with a predictable id into a
+            // successful replay.
+            const priorConfirmations = db.prepare(
+              `SELECT metadata_json
+               FROM audit_logs
+               WHERE action = 'proactive_assistant.confirm'
+                 AND entity_id = $suggestionId
+                 AND actor = $owner
+               ORDER BY created_at ASC, id ASC`,
+            ).all({ $suggestionId: suggestionId, $owner: owner });
+            const parsedConfirmations = priorConfirmations.map(({ metadata_json: metadataJson }) => {
+              try {
+                return metadataJson ? JSON.parse(metadataJson) : null;
+              } catch {
+                return null;
+              }
+            });
+            const sourceConfirmation = parsedConfirmations.find((metadata) => (
+              metadata?.source === "proactive_assistant"
+            ));
+            if (!sourceConfirmation) {
+              throw new HttpError(409, "PROACTIVE_WRITEBACK_UNVERIFIED", "该写回记录缺少可验证的确认来源，请重新生成建议");
+            }
+            // One suggestion can expose both an action and a risk preview.
+            // Select the confirmation audit for this target instead of the
+            // first audit row, otherwise confirming action first would make a
+            // later fresh-key replay of the risk look like a digest attack.
+            const priorMetadata = parsedConfirmations.find((metadata) => (
+              metadata?.source === "proactive_assistant"
+              && metadata.previewDigest === body.previewDigest
+              && metadata.customerId === body.customerId
+              && metadata.opportunityId === body.opportunityId
+              && (metadata.target === undefined || metadata.target === target)
+            ));
+            if (!priorMetadata) {
+              validationFailure("previewDigest", "mismatch");
+            }
+            const existing = target === "action" ? actionFromRow(existingRow) : riskFromRow(existingRow);
+            const responseBody = {
+              suggestionId,
+              status: "replayed",
+              target,
+              proactiveId: suggestionId,
+              confirmationPreviewId,
+              ...(target === "action" ? { action: existing, risk: null } : { action: null, risk: existing }),
+              replayed: true,
+            };
+            const responseEnvelope = { item: responseBody };
+            if (durablePreview.status === "open") {
+              proactiveConfirmationPreviewRepository.complete(confirmationPreviewId, owner, {
+                resultItemId: existing.id,
+                confirmedBy: owner,
+              });
+            }
+            completeIdempotency(db, {
+              ...idempotencyScope,
+              claimToken: claim.claimToken,
+              status: 200,
+              body: responseEnvelope,
+            });
+            return { status: 200, body: responseEnvelope };
+          }
+
+          const suggestion = proactiveSuggestionRepository.get(suggestionId, { owner })
+            ?? findProactiveAssistantSuggestionFromDb({
+              db,
+              owner,
+              suggestionId,
+            });
+          if (!suggestion) {
+            proactiveWritebackConflict("主动助手预览已变化，请刷新后重新确认");
+          }
+          if (
+            suggestion.customerId !== body.customerId
+            || suggestion.opportunityId !== body.opportunityId
+            || suggestion.opportunityVersion !== currentOpportunity.version
+            || (
+              body.expectedCustomerVersion !== undefined
+              && suggestion.customerVersion !== body.expectedCustomerVersion
+            )
+          ) {
+            validationFailure("previewDigest", "stale");
+          }
+          const preview = durablePreview.preview;
+          if (!preview) validationFailure("target", "unavailable");
+          const expectedDigest = proactivePreviewDigest(suggestion, target);
+          const publishedDigest = suggestion.previewDigests?.[target]
+            ?? (suggestion.previewDigest && (target === "action" || target === "risk")
+              ? suggestion.previewDigest
+              : null);
+          if (
+            expectedDigest !== body.previewDigest
+            || publishedDigest !== body.previewDigest
+            || durablePreview.snapshot?.previewDigest !== body.previewDigest
+          ) {
+            validationFailure("previewDigest", "mismatch");
+          }
+
+          let item;
+          if (target === "action") {
+            createActionItemStore(db).create({
+              owner,
+              id: stableId,
+              title: preview.title,
+              reason: preview.reason,
+              customerId: currentCustomer.id,
+              customerName: currentCustomer.name,
+              opportunityId: currentOpportunity.id,
+              priority: "中",
+            });
+            item = actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: stableId }));
+            insertAudit(db, {
+              action: "action.create",
+              entityType: "action",
+              entityId: item.id,
+              actor: owner,
+              requestId,
+              before: null,
+              after: item,
+              entityVersion: item.version,
+              metadata: { source: "proactive_assistant", suggestionId: suggestion.id },
+            });
+          } else {
+            const riskId = stableId;
+            run(db, `
+              INSERT INTO risk_items (
+                id, customer_id, opportunity_id, title, target, score, severity,
+                status, evidence, action, assignee, source_type, source_id, tone, owner
+              ) VALUES (
+                $id, $customerId, $opportunityId, $title, $target, 60, '中',
+                'open', $evidence, $action, $assignee, 'proactive_assistant', $sourceId, 'amber', $owner
+              )
+            `, {
+              $id: riskId,
+              $customerId: currentCustomer.id,
+              $opportunityId: currentOpportunity.id,
+              $title: preview.title,
+              $target: preview.target,
+              $evidence: preview.evidence,
+              $action: preview.action,
+              $assignee: owner,
+              $sourceId: suggestion.id,
+              $owner: owner,
+            });
+            item = riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: riskId }));
+            insertAudit(db, {
+              action: "risk.create",
+              entityType: "risk",
+              entityId: item.id,
+              actor: owner,
+              requestId,
+              before: null,
+              after: item,
+              entityVersion: item.version,
+              metadata: { source: "proactive_assistant", suggestionId: suggestion.id },
+            });
+          }
+          const responseBody = {
+            suggestionId: suggestion.id,
+            status: "created",
+            target,
+            proactiveId: suggestion.id,
+            confirmationPreviewId,
+            ...(target === "action" ? { action: item, risk: null } : { action: null, risk: item }),
+            replayed: false,
+          };
+          const responseEnvelope = { item: responseBody };
+          insertAudit(db, {
+            action: "proactive_assistant.confirm",
+            entityType: "proactive_assistant_writeback",
+            entityId: suggestion.id,
+            actor: owner,
+            requestId,
+            before: { confirmationStatus: "not_started", writebackAllowed: false },
+            after: { type: target, itemId: item.id, entityVersion: item.version },
+            entityVersion: item.version,
+            metadata: {
+              source: "proactive_assistant",
+              target,
+              trigger: suggestion.trigger.type,
+              customerId: currentCustomer.id,
+              opportunityId: currentOpportunity.id,
+              expectedOpportunityVersion: body.expectedOpportunityVersion,
+              expectedCustomerVersion: body.expectedCustomerVersion,
+              previewDigest: body.previewDigest,
+            },
+          });
+          proactiveConfirmationPreviewRepository.complete(confirmationPreviewId, owner, {
+            resultItemId: item.id,
+            confirmedBy: owner,
+          });
+          completeIdempotency(db, {
+            ...idempotencyScope,
+            claimToken: claim.claimToken,
+            status: 201,
+            body: responseEnvelope,
+          });
+          return { status: 201, body: responseEnvelope };
+        });
+        sendJson(response, result.status, result.body, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -7253,6 +8417,13 @@ export function createServer(options = {}) {
           });
           return created;
         });
+        enqueueProactiveBusinessEvent({
+          owner: requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "visit_itinerary",
+          entityId: item.id,
+          version: item.version,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 201, { item });
         return;
       }
@@ -7326,6 +8497,13 @@ export function createServer(options = {}) {
           });
           return updated;
         });
+        enqueueProactiveBusinessEvent({
+          owner: itineraryOwner ?? LEGACY_OWNER,
+          entityType: "visit_itinerary",
+          entityId: item.id,
+          version: item.version,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 200, { item });
         return;
       }
@@ -7371,6 +8549,13 @@ export function createServer(options = {}) {
           });
           return result;
         });
+        enqueueProactiveBusinessEvent({
+          owner: itineraryOwner ?? LEGACY_OWNER,
+          entityType: "visit_itinerary",
+          entityId: deleted.id,
+          version: deleted.version,
+          changedAt: deleted.updatedAt,
+        });
         sendJson(response, 200, { deleted });
         return;
       }
@@ -7409,10 +8594,11 @@ export function createServer(options = {}) {
 
       if (request.method === "POST" && url.pathname === "/api/customers") {
         const body = await readValidatedJson(request, requestSchemas.customerCreate);
+        const createOwner = requestOwner(request) ?? LEGACY_OWNER;
         const item = withImmediateTransaction(db, () => {
           const created = createCustomer(db, {
             ...body,
-            owner: requestOwner(request) ?? LEGACY_OWNER,
+            owner: createOwner,
           });
           insertAudit(db, {
             action: "customer.create",
@@ -7426,6 +8612,14 @@ export function createServer(options = {}) {
             metadata: { name: created.name, region: created.region, level: created.level },
           });
           return created;
+        });
+        enqueueProactiveBusinessEvent({
+          owner: createOwner,
+          entityType: "customer",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.id,
+          changedAt: item.updatedAt,
         });
         sendJson(response, 201, { item });
         return;
@@ -7469,6 +8663,14 @@ export function createServer(options = {}) {
           });
           return updated;
         });
+        enqueueProactiveBusinessEvent({
+          owner: patchOwner ?? LEGACY_OWNER,
+          entityType: "customer",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.id,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 200, { item });
         return;
       }
@@ -7482,6 +8684,14 @@ export function createServer(options = {}) {
           deletedBy: request.authContext.account,
           requestId,
           owner: requestOwner(request),
+        });
+        enqueueProactiveBusinessEvent({
+          owner: requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "customer",
+          entityId: deleted.id,
+          version: deleted.version,
+          customerId: deleted.id,
+          changedAt: deleted.updatedAt,
         });
         sendJson(response, 200, { deleted });
         return;
@@ -7527,6 +8737,15 @@ export function createServer(options = {}) {
           });
           return created;
         });
+        enqueueProactiveBusinessEvent({
+          owner: createOwner ?? LEGACY_OWNER,
+          entityType: "opportunity",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.customerId,
+          opportunityId: item.id,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 201, { item });
         return;
       }
@@ -7565,6 +8784,15 @@ export function createServer(options = {}) {
           });
           return updated;
         });
+        enqueueProactiveBusinessEvent({
+          owner: patchOwner ?? LEGACY_OWNER,
+          entityType: "opportunity",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.customerId,
+          opportunityId: item.id,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 200, { item });
         return;
       }
@@ -7583,6 +8811,15 @@ export function createServer(options = {}) {
           requestId,
           owner: requestOwner(request),
           metadata: (before) => ({ name: before.name, customerId: before.customerId, stage: before.stage }),
+        });
+        enqueueProactiveBusinessEvent({
+          owner: requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "opportunity",
+          entityId: deleted.id,
+          version: deleted.version,
+          customerId: deleted.customerId,
+          opportunityId: deleted.id,
+          changedAt: deleted.updatedAt,
         });
         sendJson(response, 200, { deleted });
         return;
@@ -7646,6 +8883,15 @@ export function createServer(options = {}) {
             metadata: { source: "web", remindAt: created.remindAt, priority: created.priority },
           });
           return actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: created.id }));
+        });
+        enqueueProactiveBusinessEvent({
+          owner: createOwner,
+          entityType: "action",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.customerId,
+          opportunityId: item.opportunityId,
+          changedAt: item.updatedAt,
         });
         sendJson(response, 201, { item });
         return;
@@ -7741,6 +8987,15 @@ export function createServer(options = {}) {
           });
           return updated;
         });
+        enqueueProactiveBusinessEvent({
+          owner: patchOwner ?? LEGACY_OWNER,
+          entityType: "action",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.customerId,
+          opportunityId: item.opportunityId,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 200, { item });
         return;
       }
@@ -7759,6 +9014,15 @@ export function createServer(options = {}) {
           requestId,
           owner: requestOwner(request),
           metadata: (before) => ({ title: before.title, customerId: before.customerId, status: before.status }),
+        });
+        enqueueProactiveBusinessEvent({
+          owner: requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "action",
+          entityId: deleted.id,
+          version: deleted.version,
+          customerId: deleted.customerId,
+          opportunityId: deleted.opportunityId,
+          changedAt: deleted.updatedAt,
         });
         sendJson(response, 200, { deleted });
         return;
@@ -7809,6 +9073,15 @@ export function createServer(options = {}) {
           });
           return updated;
         });
+        enqueueProactiveBusinessEvent({
+          owner: patchOwner ?? LEGACY_OWNER,
+          entityType: "risk",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.customerId,
+          opportunityId: item.opportunityId,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 200, { item });
         return;
       }
@@ -7827,6 +9100,15 @@ export function createServer(options = {}) {
           requestId,
           owner: requestOwner(request),
           metadata: (before) => ({ title: before.title, status: before.status, sourceType: before.sourceType }),
+        });
+        enqueueProactiveBusinessEvent({
+          owner: requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "risk",
+          entityId: deleted.id,
+          version: deleted.version,
+          customerId: deleted.customerId,
+          opportunityId: deleted.opportunityId,
+          changedAt: deleted.updatedAt,
         });
         sendJson(response, 200, { deleted });
         return;
@@ -8074,6 +9356,15 @@ export function createServer(options = {}) {
           });
           return created;
         });
+        enqueueProactiveBusinessEvent({
+          owner: item.owner ?? requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "quick_record",
+          entityId: item.id,
+          version: item.version,
+          customerId: item.customerId,
+          opportunityId: item.opportunityId,
+          changedAt: item.updatedAt,
+        });
         sendJson(response, 201, { item });
         return;
       }
@@ -8169,6 +9460,15 @@ export function createServer(options = {}) {
           });
           return { insight, quickRecord: updatedRecord };
         });
+        enqueueProactiveBusinessEvent({
+          owner: result.quickRecord.owner ?? requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "quick_record",
+          entityId: result.quickRecord.id,
+          version: result.quickRecord.version,
+          customerId: result.quickRecord.customerId,
+          opportunityId: result.quickRecord.opportunityId,
+          changedAt: result.quickRecord.updatedAt,
+        });
         sendJson(response, 201, { item: result.insight, quickRecord: result.quickRecord });
         return;
       }
@@ -8215,6 +9515,15 @@ export function createServer(options = {}) {
             },
           });
           return { quickRecord, analysis: updated.analysis };
+        });
+        enqueueProactiveBusinessEvent({
+          owner: result.quickRecord.owner ?? requestOwner(request) ?? LEGACY_OWNER,
+          entityType: "quick_record",
+          entityId: result.quickRecord.id,
+          version: result.quickRecord.version,
+          customerId: result.quickRecord.customerId,
+          opportunityId: result.quickRecord.opportunityId,
+          changedAt: result.quickRecord.updatedAt,
         });
         sendJson(response, 200, result);
         return;
@@ -8566,10 +9875,10 @@ export function createServer(options = {}) {
             db,
             `INSERT INTO ai_suggestions (
                id, type, title, status, content, draft_content, confidence,
-               source_id, source_refs, confirmation_preview, owner
+               source_id, source_refs, confirmation_preview, source, fallback_reason, owner
              ) VALUES (
                $id, $type, $title, $status, $content, $draft, $confidence,
-               $sourceId, $sourceRefs, $confirmationPreview, $owner
+               $sourceId, $sourceRefs, $confirmationPreview, $source, $fallbackReason, $owner
              )`,
             {
               $id: id,
@@ -8582,6 +9891,8 @@ export function createServer(options = {}) {
               $sourceId: suggestion.sourceRefs[0]?.id ?? null,
               $sourceRefs: JSON.stringify(suggestion.sourceRefs),
               $confirmationPreview: JSON.stringify(suggestion.confirmationPreview),
+              $source: suggestion.source ?? "deterministic",
+              $fallbackReason: suggestion.fallbackReason ?? null,
               $owner: requestOwner(request) ?? LEGACY_OWNER,
             },
           );
@@ -8598,6 +9909,8 @@ export function createServer(options = {}) {
               type: created.type,
               title: created.title,
               sourceRefs: created.sourceRefs.length,
+              source: created.source,
+              fallbackReason: created.fallbackReason,
             },
           });
           return created;
@@ -8873,6 +10186,27 @@ export function createServer(options = {}) {
           });
           return { status: 201, body: responseBody };
         });
+        const confirmedBody = result.body ?? {};
+        const confirmedQuickRecord = confirmedBody.quickRecord;
+        const confirmedOwner = requestOwner(request) ?? confirmedQuickRecord?.owner ?? LEGACY_OWNER;
+        for (const [entityType, entity] of [
+          ["quick_record", confirmedQuickRecord],
+          ["customer", confirmedBody.customer],
+          ["opportunity", confirmedBody.opportunity],
+          ["action", confirmedBody.action],
+          ["risk", confirmedBody.risk],
+        ]) {
+          if (!entity?.id) continue;
+          enqueueProactiveBusinessEvent({
+            owner: confirmedOwner,
+            entityType,
+            entityId: entity.id,
+            version: entity.version,
+            customerId: entity.customerId ?? confirmedQuickRecord?.customerId,
+            opportunityId: entity.opportunityId ?? confirmedQuickRecord?.opportunityId,
+            changedAt: entity.updatedAt ?? confirmedQuickRecord?.updatedAt,
+          });
+        }
         sendJson(response, result.status, result.body);
         return;
       }
@@ -8949,8 +10283,11 @@ export function createServer(options = {}) {
           const id = randomUUID();
           run(
             db,
-            `INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
-             VALUES ($id, $owner, $periodStart, $periodEnd, 'draft', $content, $sourceRefs)`,
+            `INSERT INTO weekly_reports (
+               id, owner, period_start, period_end, status, content, source_refs, source, fallback_reason
+             ) VALUES (
+               $id, $owner, $periodStart, $periodEnd, 'draft', $content, $sourceRefs, $source, $fallbackReason
+             )`,
             {
               $id: id,
               $owner: draftOwner,
@@ -8958,6 +10295,8 @@ export function createServer(options = {}) {
               $periodEnd: body.periodEnd,
               $content: draft.content,
               $sourceRefs: JSON.stringify(draft.sourceRefs),
+              $source: draft.source ?? "deterministic",
+              $fallbackReason: draft.fallbackReason ?? null,
             },
           );
           const created = weeklyReportFromRow(get(db, "SELECT * FROM weekly_reports WHERE id = $id", { $id: id }));
@@ -8974,6 +10313,8 @@ export function createServer(options = {}) {
               periodStart: created.periodStart,
               periodEnd: created.periodEnd,
               sourceRefs: created.sourceRefs.length,
+              source: created.source,
+              fallbackReason: created.fallbackReason,
               knowledgeIds,
             },
           });
@@ -9181,9 +10522,9 @@ export function createServer(options = {}) {
           run(
             db,
             `INSERT INTO solution_drafts (
-               id, owner, artifact_type, title, customer_id, opportunity_id, status, content, source_refs
+               id, owner, artifact_type, title, customer_id, opportunity_id, status, content, source_refs, source, fallback_reason
              ) VALUES (
-               $id, $owner, $artifactType, $title, $customerId, $opportunityId, 'draft', $content, $sourceRefs
+               $id, $owner, $artifactType, $title, $customerId, $opportunityId, 'draft', $content, $sourceRefs, $source, $fallbackReason
              )`,
             {
               $id: id,
@@ -9194,6 +10535,8 @@ export function createServer(options = {}) {
               $opportunityId: opportunity.id,
               $content: draft.content,
               $sourceRefs: JSON.stringify(draft.sourceRefs),
+              $source: draft.source ?? "deterministic",
+              $fallbackReason: draft.fallbackReason ?? null,
             },
           );
           const created = solutionDraftFromRow(get(db, "SELECT * FROM solution_drafts WHERE id = $id", { $id: id }));
@@ -9211,6 +10554,8 @@ export function createServer(options = {}) {
               opportunityId: created.opportunityId,
               artifactType: created.artifactType,
               sourceRefs: created.sourceRefs.length,
+              source: created.source,
+              fallbackReason: created.fallbackReason,
               knowledgeIds,
             },
           });
@@ -9302,6 +10647,8 @@ export function createServer(options = {}) {
     actionReminderScheduler.stop();
     invoiceEscalationScheduler.stop();
     dailyDigestScheduler.stop();
+    proactiveAssistantWorker.stop();
+    proactiveNotificationScheduler.stop();
     db.close();
   });
   server.hospitalTenderScheduler = hospitalTenderScheduler;
@@ -9316,6 +10663,11 @@ export function createServer(options = {}) {
   server.invoiceEscalationGapRepository = invoiceEscalationGapRepository;
   server.dailyDigestScheduler = dailyDigestScheduler;
   server.asrService = asrService;
+  server.proactiveAssistantWorker = proactiveAssistantWorker;
+  server.proactiveScanRepository = proactiveScanRepository;
+  server.proactiveSuggestionRepository = proactiveSuggestionRepository;
+  server.proactiveNotificationRepository = proactiveNotificationRepository;
+  server.proactiveNotificationScheduler = proactiveNotificationScheduler;
 
   // Node's native close callback only waits for HTTP connections.  Wrap it so
   // callers (tests, service scripts and production shutdown) also wait for ASR

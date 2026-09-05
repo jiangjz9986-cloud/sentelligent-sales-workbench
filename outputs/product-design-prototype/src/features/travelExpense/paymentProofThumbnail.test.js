@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
 import {
@@ -67,6 +69,11 @@ function bitmapFactoryForSource({ width, height, onClose = () => {} }) {
 }
 
 describe("payment proof output thumbnails", () => {
+  it("disables PDF function-string evaluation for untrusted payment proofs", () => {
+    const source = readFileSync(fileURLToPath(new URL("./paymentProofThumbnail.js", import.meta.url)), "utf8");
+    assert.match(source, /getDocument\(\{[\s\S]*isEvalSupported:\s*false/);
+  });
+
   it("calculates a centred contain placement without cropping or upscaling", () => {
     assert.deepEqual(calculatePaymentProofContain({ sourceWidth: 720, sourceHeight: 1280 }), {
       x: 112,

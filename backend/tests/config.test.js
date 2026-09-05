@@ -43,6 +43,20 @@ describe("backend model configuration", () => {
         "HOSPITAL_TENDER_AUTO_RUN=true",
         "HOSPITAL_TENDER_INTERVAL_MINUTES=120",
         "HOSPITAL_TENDER_BATCH_SIZE=8",
+        "PROACTIVE_ASSISTANT_AUTO_RUN=true",
+        "PROACTIVE_ASSISTANT_INTERVAL_MINUTES=15",
+        "PROACTIVE_ASSISTANT_BATCH_SIZE=25",
+        "PROACTIVE_ASSISTANT_LEASE_MS=60000",
+        "PROACTIVE_ASSISTANT_RETRY_BASE_MS=5000",
+        "PROACTIVE_ASSISTANT_POLL_MS=10000",
+        "PROACTIVE_ASSISTANT_MODEL_CONCURRENCY=4",
+        "PROACTIVE_ASSISTANT_MODEL_RETRY_LIMIT=2",
+        "PROACTIVE_NOTIFICATION_AUTO_RUN=true",
+        "PROACTIVE_NOTIFICATION_POLL_MS=20000",
+        "PROACTIVE_NOTIFICATION_QUIET_START=23:00",
+        "PROACTIVE_NOTIFICATION_QUIET_END=07:00",
+        "PROACTIVE_NOTIFICATION_HOURLY_LIMIT=4",
+        "PROACTIVE_NOTIFICATION_DAILY_LIMIT=20",
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN=fixture-pushplus-token",
         "INVOICE_ESCALATION_AUTO_RUN=true",
         "INVOICE_ESCALATION_POLL_MS=45000",
@@ -82,6 +96,21 @@ describe("backend model configuration", () => {
       assert.equal(config.hospitalTenderAutoRun, true);
       assert.equal(config.hospitalTenderIntervalMinutes, 120);
       assert.equal(config.hospitalTenderBatchSize, 8);
+      assert.equal(config.proactiveAssistantAutoRun, true);
+      assert.equal(config.proactiveAssistantIntervalMinutes, 15);
+      assert.equal(config.proactiveAssistantIntervalSeconds, 900);
+      assert.equal(config.proactiveAssistantBatchSize, 25);
+      assert.equal(config.proactiveAssistantLeaseMs, 60_000);
+      assert.equal(config.proactiveAssistantRetryBaseMs, 5_000);
+      assert.equal(config.proactiveAssistantPollMs, 10_000);
+      assert.equal(config.proactiveAssistantModelConcurrency, 4);
+      assert.equal(config.proactiveAssistantModelRetryLimit, 2);
+      assert.equal(config.proactiveNotificationAutoRun, true);
+      assert.equal(config.proactiveNotificationPollMs, 20_000);
+      assert.deepEqual(config.proactiveNotificationQuietStart, { hour: 23, minute: 0 });
+      assert.deepEqual(config.proactiveNotificationQuietEnd, { hour: 7, minute: 0 });
+      assert.equal(config.proactiveNotificationHourlyLimit, 4);
+      assert.equal(config.proactiveNotificationDailyLimit, 20);
       assert.equal(config.hospitalTenderPushplusToken, "fixture-pushplus-token");
       assert.equal(config.invoiceEscalationAutoRun, true);
       assert.equal(config.invoiceEscalationPollMs, 45_000);
@@ -126,6 +155,21 @@ describe("backend model configuration", () => {
     assert.equal(config.hospitalTenderAutoRun, false);
     assert.equal(config.hospitalTenderIntervalMinutes, 60);
     assert.equal(config.hospitalTenderBatchSize, 10);
+    assert.equal(config.proactiveAssistantAutoRun, false);
+    assert.equal(config.proactiveAssistantIntervalMinutes, 5);
+    assert.equal(config.proactiveAssistantIntervalSeconds, 300);
+    assert.equal(config.proactiveAssistantBatchSize, 50);
+    assert.equal(config.proactiveAssistantLeaseMs, 120_000);
+    assert.equal(config.proactiveAssistantRetryBaseMs, 30_000);
+    assert.equal(config.proactiveAssistantPollMs, 30_000);
+    assert.equal(config.proactiveAssistantModelConcurrency, 2);
+    assert.equal(config.proactiveAssistantModelRetryLimit, 1);
+    assert.equal(config.proactiveNotificationAutoRun, false);
+    assert.equal(config.proactiveNotificationPollMs, 60_000);
+    assert.deepEqual(config.proactiveNotificationQuietStart, { hour: 22, minute: 0 });
+    assert.deepEqual(config.proactiveNotificationQuietEnd, { hour: 8, minute: 0 });
+    assert.equal(config.proactiveNotificationHourlyLimit, 3);
+    assert.equal(config.proactiveNotificationDailyLimit, 12);
     assert.equal(config.hospitalTenderPushplusToken, "");
     assert.equal(config.invoiceEscalationAutoRun, false);
     assert.equal(config.invoiceEscalationPollMs, 60_000);
@@ -176,6 +220,15 @@ describe("backend model configuration", () => {
     assert.deepEqual(config.corsAllowedOrigins, ["https://sales.example.test"]);
     assert.equal(config.invoiceEscalationAutoRun, false);
     assert.equal(config.invoiceEscalationPollMs, 60_000);
+    assert.equal(config.proactiveAssistantAutoRun, true);
+    assert.equal(config.proactiveAssistantIntervalMinutes, 5);
+    assert.equal(config.proactiveAssistantIntervalSeconds, 300);
+    assert.equal(config.proactiveAssistantBatchSize, 50);
+    assert.equal(config.proactiveAssistantLeaseMs, 120_000);
+    assert.equal(config.proactiveAssistantRetryBaseMs, 30_000);
+    assert.equal(config.proactiveAssistantPollMs, 30_000);
+    assert.equal(config.proactiveAssistantModelConcurrency, 2);
+    assert.equal(config.proactiveAssistantModelRetryLimit, 1);
 
     for (const [field, message] of [
       ["AUTH_ACCOUNT", /AUTH_ACCOUNT/],
@@ -278,6 +331,45 @@ describe("backend model configuration", () => {
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_AUTO_RUN: "yes" }), /HOSPITAL_TENDER_AUTO_RUN/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_INTERVAL_MINUTES: 1441 }), /HOSPITAL_TENDER_INTERVAL_MINUTES/);
     assert.throws(() => loadConfig({ ...base, HOSPITAL_TENDER_BATCH_SIZE: 201 }), /HOSPITAL_TENDER_BATCH_SIZE/);
+    assert.throws(() => loadConfig({ ...base, PROACTIVE_ASSISTANT_AUTO_RUN: "yes" }), /PROACTIVE_ASSISTANT_AUTO_RUN/);
+    assert.throws(() => loadConfig({ ...base, PROACTIVE_NOTIFICATION_AUTO_RUN: "yes" }), /PROACTIVE_NOTIFICATION_AUTO_RUN/);
+    assert.throws(() => loadConfig({ ...base, PROACTIVE_NOTIFICATION_POLL_MS: 999 }), /PROACTIVE_NOTIFICATION_POLL_MS/);
+    assert.throws(() => loadConfig({ ...base, PROACTIVE_NOTIFICATION_QUIET_START: "25:00" }), /PROACTIVE_NOTIFICATION_QUIET_START/);
+    assert.throws(() => loadConfig({ ...base, PROACTIVE_NOTIFICATION_QUIET_END: "bad" }), /PROACTIVE_NOTIFICATION_QUIET_END/);
+    assert.throws(() => loadConfig({ ...base, PROACTIVE_NOTIFICATION_HOURLY_LIMIT: 101 }), /PROACTIVE_NOTIFICATION_HOURLY_LIMIT/);
+    assert.throws(() => loadConfig({ ...base, PROACTIVE_NOTIFICATION_DAILY_LIMIT: 1001 }), /PROACTIVE_NOTIFICATION_DAILY_LIMIT/);
+    for (const value of [0, 1_441, 1.5, "1e3", true]) {
+      assert.throws(
+        () => loadConfig({ ...base, PROACTIVE_ASSISTANT_INTERVAL_MINUTES: value }),
+        /PROACTIVE_ASSISTANT_INTERVAL_MINUTES/,
+      );
+    }
+    for (const value of [0, 501, 1.5, "1e3", true]) {
+      assert.throws(
+        () => loadConfig({ ...base, PROACTIVE_ASSISTANT_BATCH_SIZE: value }),
+        /PROACTIVE_ASSISTANT_BATCH_SIZE/,
+      );
+    }
+    for (const value of [0, 999, 86_400_001, 1.5, "1e3", true]) {
+      assert.throws(
+        () => loadConfig({ ...base, PROACTIVE_ASSISTANT_LEASE_MS: value }),
+        /PROACTIVE_ASSISTANT_LEASE_MS/,
+      );
+      assert.throws(
+        () => loadConfig({ ...base, PROACTIVE_ASSISTANT_RETRY_BASE_MS: value }),
+        /PROACTIVE_ASSISTANT_RETRY_BASE_MS/,
+      );
+      assert.throws(
+        () => loadConfig({ ...base, PROACTIVE_ASSISTANT_POLL_MS: value }),
+        /PROACTIVE_ASSISTANT_POLL_MS/,
+      );
+    }
+    assert.equal(loadConfig({ ...base, PROACTIVE_ASSISTANT_INTERVAL_MINUTES: 1 }).proactiveAssistantIntervalSeconds, 60);
+    assert.equal(loadConfig({ ...base, PROACTIVE_ASSISTANT_INTERVAL_MINUTES: 1_440 }).proactiveAssistantIntervalSeconds, 86_400);
+    assert.equal(loadConfig({ ...base, PROACTIVE_ASSISTANT_BATCH_SIZE: 500 }).proactiveAssistantBatchSize, 500);
+    assert.equal(loadConfig({ ...base, PROACTIVE_ASSISTANT_LEASE_MS: 1_000 }).proactiveAssistantLeaseMs, 1_000);
+    assert.equal(loadConfig({ ...base, PROACTIVE_ASSISTANT_RETRY_BASE_MS: 86_400_000 }).proactiveAssistantRetryBaseMs, 86_400_000);
+    assert.equal(loadConfig({ ...base, PROACTIVE_ASSISTANT_POLL_MS: 1_000 }).proactiveAssistantPollMs, 1_000);
     assert.throws(() => loadConfig({ ...base, INVOICE_ESCALATION_AUTO_RUN: "yes" }), /INVOICE_ESCALATION_AUTO_RUN/);
     for (const value of [0, 4_999, 600_001, 1.5, "1e5", true]) {
       assert.throws(

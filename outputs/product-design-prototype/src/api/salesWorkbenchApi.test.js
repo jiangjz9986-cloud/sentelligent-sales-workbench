@@ -197,6 +197,8 @@ function sampleAiSuggestion(overrides = {}) {
       target: "人工审核记录（不会自动修改客户画像）",
       changes: [{ field: "建议状态", before: "待人工确认", after: "已人工确认" }],
     },
+    source: "mock",
+    fallbackReason: null,
     createdAt: "2026-06-05T10:00:00.000Z",
     updatedAt: "2026-06-05T10:00:00.000Z",
     confirmedAt: null,
@@ -234,6 +236,95 @@ function sampleDashboardSummary(overrides = {}) {
       completedTodos: { current: 0, previous: 0 },
     },
     generatedAt: "2026-06-06T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleProactiveAssistant(overrides = {}) {
+  return {
+    schemaVersion: "proactive-assistant-v1",
+    modelVersion: "rules/proactive-v1",
+    source: "deterministic",
+    generatedAt: "2026-09-05T00:00:00.000Z",
+    staleDays: 21,
+    limit: 50,
+    items: [{
+      id: "proactive-missing-next-step-1",
+      schemaVersion: "proactive-assistant-v1",
+      subjectType: "opportunity",
+      subjectId: "op-rizhao-plan",
+      customerId: "rizhao",
+      opportunityId: "op-rizhao-plan",
+      opportunityVersion: 1,
+      customerVersion: 1,
+      title: "商机缺少下一步动作",
+      conclusion: "需要补充下一步",
+      facts: [],
+      inferences: [],
+      unknowns: [],
+      risks: [],
+      nextActions: [],
+      evidenceRefs: [],
+      sourceRefs: [],
+      confidence: null,
+      confidenceLevel: "unverified",
+      confidenceCalibrated: false,
+      priority: null,
+      priorityCalibrated: false,
+      trigger: { type: "missing_next_step", reason: "next 为空", detectedAt: "2026-09-05T00:00:00.000Z" },
+      modelVersion: "rules/proactive-v1",
+      source: "deterministic",
+      fallbackReason: null,
+      confirmationStatus: "not_started",
+      writebackPreview: { requiresHumanConfirmation: true, automaticWriteAllowed: false, action: null, risk: null, note: "preview" },
+      previewDigest: "a".repeat(64),
+      previewDigests: { action: "a".repeat(64) },
+      writebackAllowed: false,
+    }],
+    counts: { total: 1, missingNextStep: 1, staleOpportunity: 0, stageEvidenceMismatch: 0 },
+    truncated: false,
+    writebackPolicy: { requiresHumanConfirmation: true, automaticWriteAllowed: false },
+    ...overrides,
+  };
+}
+
+function sampleProactiveWritebackOutcome(overrides = {}) {
+  return {
+    status: "created",
+    target: "action",
+    replayed: false,
+    proactiveId: "proactive-missing-next-step-1",
+    suggestionId: "proactive-missing-next-step-1",
+    confirmationPreviewId: "preview-proactive-1",
+    action: sampleAction({ id: "act-proactive" }),
+    risk: null,
+    ...overrides,
+  };
+}
+
+function sampleProactiveConfirmationPreview(overrides = {}) {
+  return {
+    schemaVersion: "proactive-confirmation-preview-v1",
+    id: "preview-proactive-1",
+    owner: "jiangjz",
+    suggestionId: "proactive-missing-next-step-1",
+    target: "action",
+    revision: 1,
+    status: "open",
+    customerId: "rizhao",
+    opportunityId: "op-rizhao-plan",
+    opportunityVersion: 4,
+    customerVersion: 2,
+    previewDigest: "a".repeat(64),
+    preview: { title: "重新联系客户", reason: "长期没有互动" },
+    snapshot: { suggestionId: "proactive-missing-next-step-1", target: "action", previewDigest: "a".repeat(64) },
+    createdAt: "2026-09-05T00:00:00.000Z",
+    updatedAt: "2026-09-05T00:00:00.000Z",
+    expiresAt: "2026-09-05T00:30:00.000Z",
+    confirmedAt: null,
+    confirmedBy: null,
+    resultItemId: null,
+    replayed: false,
     ...overrides,
   };
 }
@@ -950,6 +1041,8 @@ function sampleWeeklyReport(overrides = {}) {
     content: "# weekly draft",
     entries: [],
     sourceRefs: [{ type: "quick_record", id: "qr-1" }],
+    source: "mock",
+    fallbackReason: null,
     ...overrides,
   };
 }
@@ -970,6 +1063,8 @@ function sampleSolutionDraft(overrides = {}) {
       { type: "opportunity", id: "op-rizhao-plan" },
       { type: "action", id: "act-1" },
     ],
+    source: "mock",
+    fallbackReason: null,
     createdAt: "2026-06-05 10:30:00",
     updatedAt: "2026-06-05 10:30:00",
     ...overrides,
@@ -999,6 +1094,7 @@ function bootstrapResponse(url) {
   if (url.endsWith("/api/solutions")) return jsonResponse({ items: [sampleSolutionDraft()] });
   if (url.endsWith("/api/itineraries")) return jsonResponse({ items: [sampleVisitItinerary()] });
   if (url.endsWith("/api/dashboard/summary")) return jsonResponse({ item: sampleDashboardSummary() });
+  if (url.includes("/api/assistant/proactive")) return jsonResponse({ item: sampleProactiveAssistant() });
   return jsonResponse({ error: "not_found" }, 404);
 }
 
@@ -1626,6 +1722,83 @@ describe("sales workbench API client", () => {
     ]);
     assert.equal(result.customers[0].id, "rizhao");
     assert.equal(result.opportunities[0].id, "op-rizhao-plan");
+  });
+
+  it("loads the owner-scoped proactive assistant snapshot without opening a write path", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, method: options.method ?? "GET" });
+        return bootstrapResponse(url);
+      },
+    });
+    const result = await api.getProactiveAssistant({ limit: 10 });
+    assert.equal(result.schemaVersion, "proactive-assistant-v1");
+    assert.equal(result.items[0].trigger.type, "missing_next_step");
+    assert.equal(result.items[0].opportunityVersion, 1);
+    assert.equal(result.items[0].customerVersion, 1);
+    assert.equal(result.items[0].writebackAllowed, false);
+    assert.equal(result.items[0].writebackPreview.requiresHumanConfirmation, true);
+    assert.deepEqual(result.items[0].previewDigests, { action: "a".repeat(64) });
+    assert.deepEqual(calls, [{ url: "https://example.test/api/assistant/proactive?limit=10", method: "GET" }]);
+  });
+
+  it("creates, reads, and cancels a durable proactive confirmation preview", async () => {
+    const calls = [];
+    const preview = sampleProactiveConfirmationPreview();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body, options });
+        if (url.endsWith("/cancel")) {
+          return jsonResponse({ item: { ...preview, status: "cancelled", replayed: false } });
+        }
+        if (options.method === "POST") return jsonResponse({ item: preview }, 201);
+        return jsonResponse({ item: preview });
+      },
+    });
+    const created = await api.createProactiveConfirmationPreview(
+      preview.suggestionId,
+      preview.target,
+      "proactive-preview-attempt-0001",
+    );
+    const fetched = await api.getProactiveConfirmationPreview(preview.suggestionId, preview.id);
+    const cancelled = await api.cancelProactiveConfirmationPreview(
+      preview.suggestionId,
+      preview.id,
+      "proactive-preview-cancel-0001",
+    );
+    assert.equal(created.id, preview.id);
+    assert.equal(fetched.status, "open");
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(created.suggestionId, preview.suggestionId);
+    assert.equal(created.target, "action");
+    assert.equal(created.opportunityVersion, 4);
+    assert.equal(created.customerVersion, 2);
+    assert.equal(created.previewDigest, "a".repeat(64));
+    assert.deepEqual(created.preview, preview.preview);
+    assert.deepEqual(created.snapshot, preview.snapshot);
+    assert.deepEqual(calls.map(({ url, method, body }) => ({ url, method, body })), [
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/previews",
+        method: "POST",
+        body: { target: "action" },
+      },
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/previews/preview-proactive-1",
+        method: "GET",
+        body: null,
+      },
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/previews/preview-proactive-1/cancel",
+        method: "POST",
+        body: { cancel: true },
+      },
+    ]);
+    assert.equal(headerValue(calls[0].options, "Idempotency-Key"), "proactive-preview-attempt-0001");
+    assert.equal(headerValue(calls[2].options, "Idempotency-Key"), "proactive-preview-cancel-0001");
   });
 
   it("rejects successful bootstrap collection responses that omit an explicit items array", async () => {
@@ -2336,6 +2509,116 @@ describe("sales workbench API client", () => {
         },
       },
     ]);
+  });
+
+  it("confirms proactive writeback with an idempotency key and sanitized preview", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body, options });
+        return jsonResponse({ item: sampleProactiveWritebackOutcome() }, 201);
+      },
+    });
+
+    const outcome = await api.confirmProactiveWriteback(
+      "proactive-missing-next-step-1",
+      {
+        target: "action",
+        customerId: "rizhao",
+        opportunityId: "op-rizhao-plan",
+        confirmationPreviewId: "preview-proactive-1",
+      expectedOpportunityVersion: 4,
+        expectedCustomerVersion: 2,
+        previewDigest: "a".repeat(64),
+        preview: {
+          title: "重新联系客户",
+          reason: "长期没有互动",
+          customerId: "rizhao",
+          opportunityId: "op-rizhao-plan",
+          owner: "forged-owner",
+          actor: "forged-actor",
+        },
+      },
+      "proactive-attempt-0001",
+    );
+
+    assert.equal(outcome.status, "created");
+    assert.equal(outcome.action.id, "act-proactive");
+    assert.deepEqual(calls.map(({ url, method, body }) => ({ url, method, body })), [
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/confirm",
+        method: "POST",
+        body: {
+          confirmationPreviewId: "preview-proactive-1",
+          target: "action",
+          customerId: "rizhao",
+          opportunityId: "op-rizhao-plan",
+          expectedOpportunityVersion: 4,
+          expectedCustomerVersion: 2,
+          previewDigest: "a".repeat(64),
+          preview: {
+            title: "重新联系客户",
+            reason: "长期没有互动",
+            customerId: "rizhao",
+            opportunityId: "op-rizhao-plan",
+          },
+        },
+      },
+    ]);
+    assert.equal(headerValue(calls[0].options, "Idempotency-Key"), "proactive-attempt-0001");
+  });
+
+  it("accepts replayed proactive writeback outcomes without treating them as errors", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async () => jsonResponse({
+        item: sampleProactiveWritebackOutcome({ status: "replayed", replayed: true }),
+      }),
+    });
+    const outcome = await api.confirmProactiveWriteback(
+      "proactive-missing-next-step-1",
+      {
+        target: "action",
+        customerId: "rizhao",
+        opportunityId: "op-rizhao-plan",
+        confirmationPreviewId: "preview-proactive-1",
+        expectedOpportunityVersion: 1,
+        expectedCustomerVersion: 1,
+        previewDigest: "a".repeat(64),
+        preview: { title: "重新联系客户" },
+      },
+      "proactive-attempt-0002",
+    );
+    assert.equal(outcome.status, "replayed");
+    assert.equal(outcome.replayed, true);
+  });
+
+  it("rejects a proactive writeback response missing the confirmed target entity", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async () => jsonResponse({
+        item: sampleProactiveWritebackOutcome({ action: null }),
+      }),
+    });
+    await assert.rejects(
+      () => api.confirmProactiveWriteback(
+        "proactive-missing-next-step-1",
+        {
+          target: "action",
+          customerId: "rizhao",
+          opportunityId: "op-rizhao-plan",
+          confirmationPreviewId: "preview-proactive-1",
+          expectedOpportunityVersion: 1,
+          expectedCustomerVersion: 1,
+          previewDigest: "a".repeat(64),
+          preview: { title: "重新联系客户" },
+        },
+        "proactive-attempt-0003",
+      ),
+      /expected action item/u,
+    );
   });
 
   it("uses the five durable quick-record confirmation preview APIs without caller identity fields", async () => {

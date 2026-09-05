@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { buildDeterministicSalesDecision } from "../src/ai/agents/salesDecisionAgent.js";
+import {
+  buildDeterministicSalesDecision,
+  buildSalesDecisionInputSnapshot,
+  buildSalesDecisionMessages,
+} from "../src/ai/agents/salesDecisionAgent.js";
 import { openDatabase } from "../src/db.js";
 import { createAssistantAgentRunRepository } from "../src/assistant/agentRunRepository.js";
 import { createSalesDecisionAssistantAdapter } from "../src/assistant/salesDecisionAssistantAdapter.js";
@@ -48,6 +52,38 @@ function modelResponse(body) {
 }
 
 describe("小小 sales-decision assistant adapter", () => {
+  it("carries bounded interaction metadata while excluding raw record content", () => {
+    const input = buildSalesDecisionInputSnapshot({
+      analysisType: "opportunity_diagnosis",
+      customer: { id: "customer-1", name: "示例医院" },
+      opportunity: { id: "opportunity-1", customerId: "customer-1", name: "升级项目", stage: "调研机会" },
+      interactions: [{
+        id: "record-1",
+        opportunityId: "opportunity-1",
+        customerId: "customer-1",
+        occurredAt: "2026-09-01T10:00:00.000Z",
+        sourceChannel: "phone",
+        status: "confirmed",
+        rawContent: "客户原始正文不应进入模型",
+      }],
+    });
+    assert.deepEqual(input.interactions, [{
+      id: "record-1",
+      opportunityId: "opportunity-1",
+      customerId: "customer-1",
+      occurredAt: "2026-09-01T10:00:00.000Z",
+      sourceChannel: "phone",
+      status: "confirmed",
+    }]);
+    assert.doesNotMatch(JSON.stringify(input), /客户原始正文/);
+    const messages = buildSalesDecisionMessages({
+      ...input,
+      interactions: input.interactions,
+    });
+    assert.doesNotMatch(JSON.stringify(messages), /客户原始正文/);
+    assert.match(JSON.stringify(messages), /record-1/);
+  });
+
   it("calls the existing sales-decision-v1 agent and persists a preview run", async () => {
     const db = openDatabase({ databaseUrl: ":memory:" });
     const runs = createAssistantAgentRunRepository(db, { idFactory: () => "sales-run-1" });
@@ -116,6 +152,26 @@ describe("小小 sales-decision assistant adapter", () => {
     const stored = runs.get(result.runId, { owner: "owner-1" }).item;
     assert.equal(stored.status, "fallback");
     assert.equal(stored.fallbackReason, "mock_model_fallback");
+    db.close();
+  });
+
+  it("records a missing model key as a fallback instead of masking it as deterministic", async () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const runs = createAssistantAgentRunRepository(db, { idFactory: () => "sales-run-missing-key" });
+    const adapter = createSalesDecisionAssistantAdapter({
+      config: { aiAnalysisMode: "model", modelBaseUrl: "https://example.invalid" },
+      runRepository: runs,
+    });
+    const result = await adapter.analyze({
+      owner: "owner-1",
+      eventId: "event-missing-key",
+      businessSnapshot: fixture(),
+    });
+    assert.equal(result.source, "mock_missing_model_key");
+    const stored = runs.get(result.runId, { owner: "owner-1" }).item;
+    assert.equal(stored.status, "fallback");
+    assert.equal(stored.source, "fallback");
+    assert.equal(stored.fallbackReason, "mock_missing_model_key");
     db.close();
   });
 

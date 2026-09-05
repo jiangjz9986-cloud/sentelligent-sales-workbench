@@ -96,7 +96,11 @@ export function AuthenticatedPdfFrame({
       ]);
       if (disposed) return;
 
-      loadingTask = pdfJs.getDocument({ data: new Uint8Array(buffer) });
+      loadingTask = pdfJs.getDocument({
+        data: new Uint8Array(buffer),
+        // Protected attachments are untrusted input; do not evaluate PDF function strings.
+        isEvalSupported: false,
+      });
       const documentProxy = await loadingTask.promise;
       if (disposed) return;
       if (!renderAllPages && (!Number.isSafeInteger(pageNumber) || pageNumber < 1 || pageNumber > documentProxy.numPages)) {

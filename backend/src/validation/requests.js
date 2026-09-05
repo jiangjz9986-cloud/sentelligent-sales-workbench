@@ -337,6 +337,39 @@ export const requestSchemas = freezeSchema({
     status: { type: "enum", values: ["draft", "saved", "ready"] },
   },
   riskDiagnose: { sourceType: text(100, { nullable: true }), sourceId: text(200, { nullable: true }) },
+  // 主动助手写回只接受服务端生成预览的确认，不接受客户端改写标题、证据或归属。
+  proactiveAssistantConfirmation: {
+    confirmationPreviewId: text(200, { required: true, nonEmpty: true }),
+    target: { type: "enum", values: ["action", "risk"], required: true },
+    customerId: text(200, { required: true, nonEmpty: true }),
+    opportunityId: text(200, { required: true, nonEmpty: true }),
+    expectedOpportunityVersion: { type: "integer", min: 1, required: true },
+    expectedCustomerVersion: { type: "integer", min: 1, required: true },
+    previewDigest: text(64, { required: true, nonEmpty: true }),
+    preview: safeObject({ maxKeys: 8, required: true }),
+  },
+  proactiveAssistantPreview: {
+    target: { type: "enum", values: ["action", "risk"], required: true },
+  },
+  proactiveAssistantPreviewCancel: {
+    cancel: { type: "enum", values: [true], required: true },
+  },
+  proactiveAssistantLifecyclePatch: {
+    // Canonical UI lifecycle states plus legacy aliases retained for old
+    // persisted rows and clients during the v1.1 rollout.
+    status: { type: "enum", values: ["pending", "deferred", "snoozed", "dismissed", "ignored", "resolved", "confirmed", "executed", "conflict", "expired", "failed"], required: true },
+    snoozedUntil: text(80, { nullable: true }),
+    dismissReason: text(500, { nullable: true }),
+    resultRefs: safeArray({ maxItems: 100 }),
+    expectedVersion: { type: "integer", min: 1 },
+  },
+  proactiveAssistantFieldsPatch: {
+    assignee: text(200, { nullable: true }),
+    dueDate: text(80, { nullable: true }),
+    priority: { type: "enum", values: ["高", "中", "低", "high", "medium", "low"] },
+    expectedResult: text(500, { nullable: true }),
+    expectedVersion: { type: "integer", min: 1, required: true },
+  },
   itineraryCreate: {
     title: text(200, { required: true }),
     visitDate: text(10, { required: true }),

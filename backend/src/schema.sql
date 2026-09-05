@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS weekly_reports (
   status TEXT NOT NULL DEFAULT 'draft',
   content TEXT NOT NULL,
   source_refs TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL DEFAULT 'legacy',
+  fallback_reason TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -98,6 +100,8 @@ CREATE TABLE IF NOT EXISTS solution_drafts (
   status TEXT NOT NULL DEFAULT 'draft',
   content TEXT NOT NULL,
   source_refs TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL DEFAULT 'legacy',
+  fallback_reason TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -117,6 +121,8 @@ CREATE TABLE IF NOT EXISTS ai_suggestions (
   source_id TEXT,
   source_refs TEXT NOT NULL DEFAULT '[]',
   confirmation_preview TEXT NOT NULL DEFAULT '{}',
+  source TEXT NOT NULL DEFAULT 'legacy',
+  fallback_reason TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   confirmed_at TEXT,

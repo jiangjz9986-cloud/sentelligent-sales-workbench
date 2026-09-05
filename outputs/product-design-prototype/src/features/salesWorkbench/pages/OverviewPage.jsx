@@ -11,12 +11,14 @@ import {
 import { statusTone } from "../../../data/salesWorkbenchData.js";
 import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
+import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
 import {
   CompactList,
   MetricCard,
   Panel,
   StageStrip,
 } from "../../../components/primitives.jsx";
+import { ProactiveAssistantPanel } from "../components/ProactiveAssistantPanel.jsx";
 
 function formatTodayFocusTime(value) {
   if (!value) return "时间待确认";
@@ -219,6 +221,13 @@ export function Overview() {
     overviewSummary: summary,
   } = useWorkbenchData();
   const {
+    handleCreateProactiveConfirmationPreview,
+    handleConfirmProactiveWriteback,
+    handleProactiveLifecycleChange,
+    handleUpdateProactiveSuggestion,
+    handleRefreshProactive,
+  } = useWorkbenchActions();
+  const {
     navigateTo: setActive,
     setSelectedActionId,
     setSelectedCustomerId,
@@ -254,6 +263,24 @@ export function Overview() {
       />
 
       <WeeklyTrendCard trend={summary?.weeklyTrend} />
+
+      <ProactiveAssistantPanel
+        assistant={summary?.proactiveAssistant}
+        onCreatePreview={handleCreateProactiveConfirmationPreview}
+        onConfirmWriteback={handleConfirmProactiveWriteback}
+        onLifecycleChange={handleProactiveLifecycleChange}
+        onUpdateSuggestion={handleUpdateProactiveSuggestion}
+        onRefresh={handleRefreshProactive}
+        onOpenOpportunity={(opportunityId) => {
+          if (opportunityId && openOpportunityDetail) openOpportunityDetail(opportunityId);
+          else if (opportunityId) {
+            setSelectedOpportunityId(opportunityId);
+            setActive("opportunity");
+          } else {
+            openOpportunityList ? openOpportunityList() : setActive("opportunity");
+          }
+        }}
+      />
 
       <MetricCard label="本周快速记录" value={metrics.quickRecords.value} badge={metrics.quickRecords.badge} tone={metrics.quickRecords.tone} icon={Mic} className="overview-kpi" onClick={() => setActive("quick")} />
       <MetricCard label="重点商机" value={metrics.opportunities.value} badge={metrics.opportunities.badge} tone={metrics.opportunities.tone} icon={BriefcaseBusiness} className="overview-kpi" onClick={() => openOpportunityList ? openOpportunityList() : setActive("opportunity")} />

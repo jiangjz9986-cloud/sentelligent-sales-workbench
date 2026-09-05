@@ -37,6 +37,11 @@ import { apply as applySecureSettingsAsr } from "./migrations/0033_secure_settin
 import { apply as applyQuickRecordConfirmationPreviews } from "./migrations/0034_quick_record_confirmation_previews.mjs";
 import { apply as applyVisitTemperatureSuggestions } from "./migrations/0035_visit_temperature_suggestions.mjs";
 import { apply as applyAiSuggestionReview } from "./migrations/0036_ai_suggestion_review.mjs";
+import { apply as applyAiModelProvenance } from "./migrations/0037_ai_model_provenance.mjs";
+import { apply as applyProactiveConfirmationPreviews } from "./migrations/0038_proactive_confirmation_previews.mjs";
+import { apply as applyProactiveBackgroundRuntime } from "./migrations/0039_proactive_background_runtime.mjs";
+import { apply as applyProactiveNotifications } from "./migrations/0040_proactive_notifications.mjs";
+import { apply as applyProactiveModelBudgetCache } from "./migrations/0041_proactive_model_budget_cache.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -248,6 +253,36 @@ const migrations = [
     path: resolve(here, "migrations", "0036_ai_suggestion_review.mjs"),
     type: "module",
     apply: applyAiSuggestionReview,
+  },
+  {
+    version: "0037",
+    path: resolve(here, "migrations", "0037_ai_model_provenance.mjs"),
+    type: "module",
+    apply: applyAiModelProvenance,
+  },
+  {
+    version: "0038",
+    path: resolve(here, "migrations", "0038_proactive_confirmation_previews.mjs"),
+    type: "module",
+    apply: applyProactiveConfirmationPreviews,
+  },
+  {
+    version: "0039",
+    path: resolve(here, "migrations", "0039_proactive_background_runtime.mjs"),
+    type: "module",
+    apply: applyProactiveBackgroundRuntime,
+  },
+  {
+    version: "0040",
+    path: resolve(here, "migrations", "0040_proactive_notifications.mjs"),
+    type: "module",
+    apply: applyProactiveNotifications,
+  },
+  {
+    version: "0041",
+    path: resolve(here, "migrations", "0041_proactive_model_budget_cache.mjs"),
+    type: "module",
+    apply: applyProactiveModelBudgetCache,
   },
 ];
 

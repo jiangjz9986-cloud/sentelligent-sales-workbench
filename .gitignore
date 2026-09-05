@@ -54,6 +54,9 @@ tmp/
 design-options/
 design-references/
 
+# Local release closeout evidence is kept outside the immutable release payload.
+artifacts/
+
 # This npm-based monorepo does not use a root pnpm lockfile.
 /pnpm-lock.yaml
 

@@ -54,7 +54,11 @@ async function readPdfPageCount(loadPdf, { signal } = {}) {
     throw error;
   }
 
-  const loadingTask = pdfJs.getDocument({ data: new Uint8Array(buffer) });
+  const loadingTask = pdfJs.getDocument({
+    data: new Uint8Array(buffer),
+    // Protected attachments are untrusted input; do not evaluate PDF function strings.
+    isEvalSupported: false,
+  });
   let documentProxy;
   try {
     documentProxy = await loadingTask.promise;

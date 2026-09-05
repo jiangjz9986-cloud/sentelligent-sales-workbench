@@ -894,6 +894,8 @@ describe("sales workbench backend API", () => {
     assert.equal(report.response.status, 201);
     assertApiEntity("weeklyReport", report.body.item);
     assert.equal(report.body.item.status, "draft");
+    assert.equal(report.body.item.source, "deterministic");
+    assert.equal(report.body.item.fallbackReason, null);
     assert.match(report.body.item.content, /本周重点进展/);
     assert.ok(report.body.item.sourceRefs.some((ref) => ref.type === "quick_record"));
   });
@@ -1143,6 +1145,8 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
     assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
     assert.match(report.body.item.content, /DeepSeek weekly draft/);
+    assert.equal(report.body.item.source, "deepseek");
+    assert.equal(report.body.item.fallbackReason, null);
     assert.doesNotMatch(JSON.stringify(report.body.item), /test-provider-key/);
   });
 
@@ -1356,6 +1360,8 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
     assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
     assert.match(draft.body.item.content, /DeepSeek solution draft/);
+    assert.equal(draft.body.item.source, "deepseek");
+    assert.equal(draft.body.item.fallbackReason, null);
     assert.ok(draft.body.item.sourceRefs.some((ref) => ref.type === "customer" && ref.id === "rizhao"));
     assert.doesNotMatch(JSON.stringify(draft.body.item), /test-provider-key/);
   });
@@ -1425,7 +1431,47 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
     assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
     assert.match(suggestion.body.item.content, /DeepSeek 建议/);
+    assert.equal(suggestion.body.item.source, "deepseek");
+    assert.equal(suggestion.body.item.fallbackReason, null);
     assert.doesNotMatch(JSON.stringify(suggestion.body.item), /test-provider-key/);
+  });
+
+  it("persists a bounded fallback reason when a direct suggestion has no model key", async () => {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    server = createServer({
+      databaseUrl,
+      aiAnalysisMode: "model",
+      modelProvider: "deepseek",
+      modelApiKey: "",
+      authRequired: false,
+      authAccount: "",
+      authPassword: "",
+    });
+    await new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const { port } = server.address();
+    baseUrl = `http://127.0.0.1:${port}`;
+
+    const suggestion = await request("/api/ai/suggestions", {
+      method: "POST",
+      body: JSON.stringify({
+        type: "customer_profile",
+        title: "缺少模型 Key 时的建议",
+        context: { customer: "日照中医医院" },
+      }),
+    });
+
+    assert.equal(suggestion.response.status, 201);
+    assert.equal(suggestion.body.item.source, "fallback");
+    assert.equal(suggestion.body.item.fallbackReason, "manual_suggestion_missing_model_key");
+
+    const history = await request("/api/ai/suggestions?sourceId=manual");
+    assert.equal(history.response.status, 200);
+    assert.equal(history.body.items[0].source, "fallback");
+    assert.equal(history.body.items[0].fallbackReason, "manual_suggestion_missing_model_key");
   });
 
   it("stores, searches, and cites knowledge items in solution drafts", async () => {

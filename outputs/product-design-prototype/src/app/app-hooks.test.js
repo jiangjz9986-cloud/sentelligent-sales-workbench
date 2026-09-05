@@ -89,6 +89,18 @@ describe("workbench handlers", () => {
     assert.match(weeklySource, /weeklyView: "daily"/);
     assert.match(weeklySource, /weeklyDraft: null/);
   });
+
+  it("routes proactive confirmations through the shared handler and merges both result types", () => {
+    const source = read("./useWorkbenchHandlers.jsx");
+    assert.match(source, /handleConfirmProactiveWriteback: async \(\) => \{\}/);
+    assert.match(source, /async function handleConfirmProactiveWriteback\(\{ item, target, preview, confirmationPreview \} = \{\}\)/);
+    assert.match(source, /confirmationPreview\.suggestionId !== item\.id/);
+    assert.match(source, /confirmationPreview\.previewDigest/);
+    assert.match(source, /apiClient\.confirmProactiveWriteback\(item\.id/);
+    assert.match(source, /setWorkbenchActions\(\(current\) => mergeById\(current, outcome\.action\)\)/);
+    assert.match(source, /setWorkbenchRisks\(\(current\) => mergeById\(current, outcome\.risk\)\)/);
+    assert.match(source, /reloadBootstrap\(\)\.catch\(\(\) => \{\}\)/);
+  });
 });
 
 describe("route chunk boundary", () => {

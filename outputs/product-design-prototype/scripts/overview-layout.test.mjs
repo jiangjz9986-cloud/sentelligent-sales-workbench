@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 // order），hero 大卡及其三条写死统计整体退役，KPI 卡带可点击示能。
 
 const overviewSource = readFileSync(resolve("src/features/salesWorkbench/pages/OverviewPage.jsx"), "utf8");
+const proactiveSource = readFileSync(resolve("src/features/salesWorkbench/components/ProactiveAssistantPanel.jsx"), "utf8");
 const primitivesSource = readFileSync(resolve("src/components/primitives.jsx"), "utf8");
 const css = readFileSync(resolve("src/styles/global.css"), "utf8");
 
@@ -43,5 +44,16 @@ describe("overview layout (v0.10.0 rearrangement)", () => {
   it("gives clickable KPI cards a chevron affordance", () => {
     assert.match(primitivesSource, /\{onClick \? <ChevronRight className="metric-chevron" size=\{15\} \/> : null\}/);
     assert.match(css, /\.metric-card \.metric-chevron \{/);
+  });
+
+  it("keeps proactive writeback behind explicit per-target confirmation buttons", () => {
+    assert.match(overviewSource, /onConfirmWriteback=\{handleConfirmProactiveWriteback\}/);
+    assert.match(proactiveSource, /data-testid=\{`proactive-confirm-\$\{target\}`\}/);
+    assert.match(proactiveSource, /确认创建\$\{targetLabel\}/);
+    assert.match(proactiveSource, /onConfirmWriteback\(\{ item, target, preview, confirmationPreview \}\)/);
+    assert.match(overviewSource, /onCreatePreview=\{handleCreateProactiveConfirmationPreview\}/);
+    assert.match(proactiveSource, /保存预览，不写回/);
+    assert.match(proactiveSource, /status === "pending"/);
+    assert.match(proactiveSource, /商机数据刚刚发生变化/);
   });
 });

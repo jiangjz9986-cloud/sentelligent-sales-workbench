@@ -81,6 +81,19 @@ function normalizeContext(context = {}) {
       occurredAt: context.quickRecord.occurredAt ?? null,
       sourceChannel: compact(context.quickRecord.sourceChannel, 100),
     } : null,
+    // Proactive background analysis receives interaction metadata without the
+    // original note body.  This lets the model reason about recency and the
+    // evidence boundary while keeping raw customer communications out of the
+    // model payload.  The field is optional so existing manual analysis input
+    // snapshots remain backwards-compatible when there are no interactions.
+    interactions: Array.isArray(context.interactions) ? context.interactions.slice(0, 50).map((item) => ({
+      id: item.id ? compact(String(item.id), 100) : null,
+      opportunityId: item.opportunityId ? compact(String(item.opportunityId), 100) : null,
+      customerId: item.customerId ? compact(String(item.customerId), 100) : null,
+      occurredAt: item.occurredAt ?? null,
+      sourceChannel: compact(item.sourceChannel, 100),
+      status: compact(item.status, 50),
+    })).filter((item) => item.id) : [],
     actions: Array.isArray(context.actions) ? context.actions.slice(0, 20).map((item) => ({
       title: compact(item.title, 400),
       due: compact(item.due, 100),
@@ -88,21 +101,49 @@ function normalizeContext(context = {}) {
       assignee: compact(item.assignee, 100),
     })) : [],
     risks: Array.isArray(context.risks) ? context.risks.slice(0, 20).map((item) => ({
+      id: item.id ? compact(String(item.id), 100) : null,
       title: compact(item.title, 400),
       severity: compact(item.severity, 50),
       status: compact(item.status, 50),
       evidence: compact(item.evidence, 800),
+    })) : [],
+    itineraries: Array.isArray(context.itineraries) ? context.itineraries.slice(0, 20).map((item) => ({
+      id: item.id ? compact(String(item.id), 100) : null,
+      title: compact(item.title, 300),
+      visitDate: compact(item.visitDate, 40),
+      status: compact(item.status, 50),
+    })) : [],
+    tenders: Array.isArray(context.tenders) ? context.tenders.slice(0, 20).map((item) => ({
+      id: item.id ? compact(String(item.id), 100) : null,
+      title: compact(item.title, 400),
+      noticeType: compact(item.noticeType, 80),
+      publishedAt: compact(item.publishedAt, 40),
+      sourceId: item.sourceId ? compact(String(item.sourceId), 100) : null,
     })) : [],
     knowledge: Array.isArray(context.knowledge) ? context.knowledge.slice(0, 8).map((item) => ({
       id: item.id ? compact(String(item.id), 64) : null,
       title: compact(item.title, 300),
       summary: compact(item.summary, 800),
     })) : [],
+    sourceRefs: Array.isArray(context.sourceRefs) ? context.sourceRefs.slice(0, 100).map((ref) => ({
+      type: compact(ref?.type, 100),
+      id: compact(String(ref?.id ?? ""), 300),
+    })).filter((ref) => ref.type && ref.id) : [],
   };
 }
 
 export function buildSalesDecisionInputSnapshot(context = {}) {
-  return normalizeContext(context);
+  const normalized = normalizeContext(context);
+  // Keep the persisted/API snapshot backwards-compatible when the optional
+  // structured context has no facts.  The model's private normalized context
+  // still retains these arrays, while the public snapshot only carries an
+  // extension field when it contains evidence.
+  for (const field of ["interactions", "itineraries", "tenders", "sourceRefs"]) {
+    if (Array.isArray(normalized[field]) && normalized[field].length === 0) {
+      delete normalized[field];
+    }
+  }
+  return normalized;
 }
 
 function combinedText(context) {
@@ -518,6 +559,8 @@ export function buildSalesDecisionMessages(inputContext = {}) {
         "stakeholders 只能使用上下文中已有姓名；没有联系人证据时输出空数组。nextActions 最多 5 条且必须包含全部模板字段。",
         `当前行业 playbook：${playbook.label}；重点：${playbook.focus.join("、")}。`,
         "context.knowledge 中的条目附有 id；引用知识库证据时，facts 条目使用 sourceType=\"knowledge\" 并把 sourceId 设为对应条目 id，不得虚构不存在的知识 id。",
+        "context.interactions、context.risks、context.itineraries、context.tenders 和 context.sourceRefs 都是服务端已保存的结构化事实；互动只包含时间、渠道和关联 id，不包含原始正文；只能引用其中出现的 id，不得生成新的 sourceId。",
+        "不要输出客户联系人电话、邮箱、原始记录正文、密钥或其他敏感字段；没有证据就输出未知。",
         "writebackPreview.customerFields, opportunityFields, actions, and risks must be arrays of non-empty strings only; never output objects or placeholders in these arrays.",
         `JSON 形状：${JSON.stringify(SALES_DECISION_OUTPUT_SHAPE)}`,
       ].join("\n"),
@@ -573,7 +616,7 @@ function sanitizeWritebackPreview(value) {
   };
 }
 
-async function callSalesDecisionModel(context, config, fetchImpl) {
+async function callSalesDecisionModel(context, config, fetchImpl, externalSignal = null) {
   const apiKey = resolveModelApiKey(config);
   const response = await fetchImpl(completionUrl(config.modelBaseUrl), {
     method: "POST",
@@ -589,7 +632,7 @@ async function callSalesDecisionModel(context, config, fetchImpl) {
       max_tokens: 12_000,
       stream: false,
     }),
-    signal: AbortSignal.timeout(resolveSalesDecisionModelTimeoutMs(config)),
+    signal: externalSignal ?? AbortSignal.timeout(resolveSalesDecisionModelTimeoutMs(config)),
   });
   const bodyText = await readBoundedResponseText(response, {
     maxBytes: MAX_MODEL_RESPONSE_BYTES,
@@ -608,13 +651,21 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
     { source },
   );
   if (config.aiAnalysisMode !== "model") return fallback("mock");
-  if (!resolveModelApiKey(config)) return fallback("mock_missing_model_key");
+  if (!resolveModelApiKey(config)) {
+    if (options.throwOnFailure) {
+      const error = new Error("model_not_configured");
+      error.code = "MODEL_NOT_CONFIGURED";
+      throw error;
+    }
+    return fallback("mock_missing_model_key");
+  }
 
   try {
     const parsed = await callSalesDecisionModel(
       inputContext,
       config,
       options.fetchImpl ?? fetch,
+      options.signal ?? null,
     );
     const deterministic = buildDeterministicSalesDecision(inputContext);
     const recommendedStage = SALES_DECISION_STAGES.includes(parsed?.stage?.recommended)
@@ -632,7 +683,8 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
       source: config.modelProvider ?? "deepseek",
     });
     return applySalesDecisionGuardrails(normalized, inputContext);
-  } catch {
+  } catch (error) {
+    if (options.throwOnFailure) throw error;
     return fallback("mock_model_fallback");
   }
 }

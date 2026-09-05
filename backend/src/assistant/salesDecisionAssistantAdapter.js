@@ -74,8 +74,11 @@ function collectSourceRefs(snapshot) {
   add("opportunity", snapshot.opportunity?.id);
   add("quick_record", snapshot.quickRecord?.id);
   for (const item of boundedArray(snapshot.quickRecords, "quickRecords")) add("quick_record", item?.id);
+  for (const item of boundedArray(snapshot.interactions, "interactions", 50)) add("quick_record", item?.id);
   for (const item of boundedArray(snapshot.actions, "actions")) add("action", item?.id);
   for (const item of boundedArray(snapshot.risks, "risks")) add("risk", item?.id);
+  for (const item of boundedArray(snapshot.itineraries, "itineraries", 20)) add("visit_itinerary", item?.id);
+  for (const item of boundedArray(snapshot.tenders, "tenders", 20)) add("hospital_tender_notice", item?.id);
   for (const item of boundedArray(snapshot.knowledge, "knowledge", 20)) add("knowledge", item?.id);
   return refs;
 }
@@ -167,6 +170,36 @@ function normalizeContext(snapshot, { analysisType, industry, analysisAt }) {
     status: optionalText(item.status, "risks[].status", 50) ?? "",
     evidence: optionalText(item.evidence ?? item.description, "risks[].evidence", 800) ?? "",
   } : { title: text(item, "risks[]", 400) });
+  const interactions = boundedArray(snapshot.interactions, "interactions", 50).map((item) => {
+    if (!isPlainObject(item)) throw new AssistantContractError("interactions[] must be objects", "invalid_sales_decision_input");
+    return {
+      id: identifier(item.id, "interactions[].id"),
+      opportunityId: identifier(item.opportunityId, "interactions[].opportunityId"),
+      customerId: identifier(item.customerId, "interactions[].customerId"),
+      occurredAt: optionalText(item.occurredAt, "interactions[].occurredAt", 100),
+      sourceChannel: optionalText(item.sourceChannel, "interactions[].sourceChannel", 100) ?? "",
+      status: optionalText(item.status, "interactions[].status", 50) ?? "",
+    };
+  });
+  const itineraries = boundedArray(snapshot.itineraries, "itineraries", 20).map((item) => {
+    if (!isPlainObject(item)) throw new AssistantContractError("itineraries[] must be objects", "invalid_sales_decision_input");
+    return {
+      id: identifier(item.id, "itineraries[].id"),
+      title: optionalText(item.title, "itineraries[].title", 300) ?? "",
+      visitDate: optionalText(item.visitDate, "itineraries[].visitDate", 40) ?? "",
+      status: optionalText(item.status, "itineraries[].status", 50) ?? "",
+    };
+  });
+  const tenders = boundedArray(snapshot.tenders, "tenders", 20).map((item) => {
+    if (!isPlainObject(item)) throw new AssistantContractError("tenders[] must be objects", "invalid_sales_decision_input");
+    return {
+      id: identifier(item.id, "tenders[].id"),
+      title: optionalText(item.title, "tenders[].title", 400) ?? "",
+      noticeType: optionalText(item.noticeType, "tenders[].noticeType", 80) ?? "",
+      publishedAt: optionalText(item.publishedAt, "tenders[].publishedAt", 40),
+      sourceId: identifier(item.sourceId, "tenders[].sourceId"),
+    };
+  });
   const knowledge = boundedArray(snapshot.knowledge, "knowledge", 8).map((item) => isPlainObject(item) ? {
     id: identifier(item.id, "knowledge[].id"),
     title: optionalText(item.title, "knowledge[].title", 300) ?? "",
@@ -179,8 +212,11 @@ function normalizeContext(snapshot, { analysisType, industry, analysisAt }) {
     customer,
     opportunity,
     quickRecord,
+    interactions,
     actions,
     risks,
+    itineraries,
+    tenders,
     knowledge,
   };
   const normalized = buildSalesDecisionInputSnapshot(context);
@@ -189,7 +225,7 @@ function normalizeContext(snapshot, { analysisType, industry, analysisAt }) {
     inputSnapshot: {
       ...normalized,
       analysisAt,
-      sourceRefs: collectSourceRefs({ ...snapshot, customer, opportunity, quickRecord, actions, risks, knowledge }),
+      sourceRefs: collectSourceRefs({ ...snapshot, customer, opportunity, quickRecord, interactions, actions, risks, itineraries, tenders, knowledge }),
     },
   };
 }
@@ -199,6 +235,11 @@ function sourceClass(source) {
   if (value.includes("fallback")) return "fallback";
   if (value === "deepseek" || value === "model") return "model";
   if (value === "mock") return "mock";
+  // The model analyzer uses explicit `mock_*` source values for deterministic
+  // fallbacks in model mode (for example when the key is missing).  Keep the
+  // source class honest so a missing credential cannot be persisted as a
+  // successful deterministic/model run with a blank fallback reason.
+  if (value.startsWith("mock_")) return "fallback";
   return "deterministic";
 }
 

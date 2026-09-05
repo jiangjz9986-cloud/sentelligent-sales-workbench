@@ -1,7 +1,8 @@
-import { createContext, useContext } from "react";
+import { createContext, useContext, useRef } from "react";
 import { assertBackendReady, removeEntityById } from "./workbenchState.js";
 import { mergeEntityByVersion } from "../quickRecordModel.js";
 import { getCurrentWeekRange } from "../weekRange.js";
+import { createStrongUuid } from "../api/salesWorkbenchApi.js";
 
 const WorkbenchActionsContext = createContext(null);
 
@@ -13,6 +14,11 @@ const noopActions = {
   handleUpdateRiskStatus: async () => {},
   handleUpdateActionStatus: async () => {},
   handleCreateAction: async () => {},
+  handleCreateProactiveConfirmationPreview: async () => {},
+  handleConfirmProactiveWriteback: async () => {},
+  handleProactiveLifecycleChange: async () => {},
+  handleUpdateProactiveSuggestion: async () => {},
+  handleRefreshProactive: async () => {},
   handleDeleteCustomer: async () => {},
   handleDeleteOpportunity: async () => {},
   handleDeleteKnowledge: async () => {},
@@ -49,6 +55,7 @@ export function useWorkbenchHandlers({ nav, data, apiClient, weeklySession, sele
     setWorkbenchKnowledge,
     setWorkbenchItineraries,
     refreshOverviewSummary,
+    reloadBootstrap,
     routeFilters,
   } = { ...data, routeFilters: nav.routeFilters };
 
@@ -69,6 +76,8 @@ export function useWorkbenchHandlers({ nav, data, apiClient, weeklySession, sele
   } = nav;
 
   const selectedItinerary = workbenchItineraries.find((item) => item.id === selectedItineraryId) ?? null;
+  const proactiveWritebackKeysRef = useRef(new Map());
+  const proactivePreviewKeysRef = useRef(new Map());
 
   function mergeById(items, item) {
     return mergeEntityByVersion(items, item);
@@ -151,6 +160,129 @@ export function useWorkbenchHandlers({ nav, data, apiClient, weeklySession, sele
     selectAction(saved.id);
     await refreshOverviewSummary();
     return saved;
+  }
+
+  async function handleCreateProactiveConfirmationPreview({ item, target } = {}) {
+    ensureBackend(target === "risk" ? "生成风险预览" : "生成行动预览");
+    if (!item?.id || (target !== "action" && target !== "risk")) {
+      throw new Error("主动助手预览信息不完整");
+    }
+    const keyId = `${item.id}:${target}`;
+    let idempotencyKey = proactivePreviewKeysRef.current.get(keyId);
+    if (!idempotencyKey) {
+      idempotencyKey = createStrongUuid();
+      proactivePreviewKeysRef.current.set(keyId, idempotencyKey);
+    }
+    return apiClient.createProactiveConfirmationPreview(item.id, target, idempotencyKey);
+  }
+
+  async function handleConfirmProactiveWriteback({ item, target, preview, confirmationPreview } = {}) {
+    ensureBackend(target === "risk" ? "确认创建风险" : "确认创建行动");
+    if (!item?.id || (target !== "action" && target !== "risk")) {
+      throw new Error("主动助手确认信息不完整");
+    }
+    if (!preview || typeof preview !== "object" || Array.isArray(preview)) {
+      throw new Error("主动助手预览不存在，请刷新后重试");
+    }
+    if (!confirmationPreview?.id || confirmationPreview.suggestionId !== item.id) {
+      throw new Error("请先生成并保存本次确认预览");
+    }
+
+    // Bind the write to the current, owner-scoped opportunity snapshot. The
+    // server repeats these checks in its transaction; this client check keeps
+    // an obviously stale card from issuing a write at all.
+    const opportunity = workbenchOpportunities.find((candidate) => candidate.id === item.opportunityId);
+    if (!opportunity) {
+      throw new Error("关联商机已不存在，请刷新后重新确认");
+    }
+    if (item.customerId && opportunity.customerId !== item.customerId) {
+      throw new Error("客户和商机关联已变化，请刷新后重新确认");
+    }
+    const customer = item.customerId
+      ? workbenchCustomers.find((candidate) => candidate.id === item.customerId)
+      : null;
+    if (item.customerId && !customer) {
+      throw new Error("关联客户已不存在，请刷新后重新确认");
+    }
+    const expectedCustomerVersion = customer?.version ?? item.customerVersion;
+    if (!Number.isSafeInteger(expectedCustomerVersion) || expectedCustomerVersion < 1) {
+      throw new Error("关联客户版本不可用，请刷新后重新确认");
+    }
+    const previewDigest = confirmationPreview.previewDigest;
+    if (typeof previewDigest !== "string" || !/^[0-9a-f]{64}$/u.test(previewDigest)) {
+      throw new Error("主动助手预览摘要不可用，请刷新后重新确认");
+    }
+
+    const keyId = `${item.id}:${target}`;
+    let idempotencyKey = proactiveWritebackKeysRef.current.get(keyId);
+    if (!idempotencyKey) {
+      idempotencyKey = createStrongUuid();
+      proactiveWritebackKeysRef.current.set(keyId, idempotencyKey);
+    }
+
+    try {
+      const outcome = await apiClient.confirmProactiveWriteback(item.id, {
+        target,
+        customerId: item.customerId ?? opportunity.customerId,
+        opportunityId: opportunity.id,
+        expectedOpportunityVersion: confirmationPreview.opportunityVersion,
+        expectedCustomerVersion: confirmationPreview.customerVersion,
+        previewDigest,
+        preview,
+        confirmationPreviewId: confirmationPreview.id,
+      }, idempotencyKey);
+
+      if (outcome.action) {
+        setWorkbenchActions((current) => mergeById(current, outcome.action));
+        nav.setSelectedActionId(outcome.action.id);
+      }
+      if (outcome.risk) {
+        setWorkbenchRisks((current) => mergeById(current, outcome.risk));
+        nav.setSelectedRiskId(outcome.risk.id);
+      }
+      await refreshOverviewSummary();
+      return outcome;
+    } catch (error) {
+      if (error?.status === 409 || error?.code === "VERSION_CONFLICT" || error?.code === "CONFLICT") {
+        // A conflict invalidates the card's target version. Reload the whole
+        // workbench so the next confirmation uses a newly-generated snapshot.
+        if (typeof reloadBootstrap === "function") await reloadBootstrap().catch(() => {});
+        const conflict = new Error("数据已变化，已刷新最新数据，请重新确认");
+        conflict.code = "CONFLICT";
+        conflict.status = 409;
+        throw conflict;
+      }
+      throw error;
+    }
+  }
+
+  async function handleProactiveLifecycleChange({ item, status, ...extra } = {}) {
+    ensureBackend("更新主动建议状态");
+    if (!item?.id || typeof status !== "string") throw new Error("主动建议状态信息不完整");
+    const key = createStrongUuid();
+    try {
+      const updated = await apiClient.updateProactiveLifecycle(item.id, { status, ...extra, expectedVersion: item.version }, key);
+      await refreshOverviewSummary();
+      return updated;
+    } catch (error) {
+      if (error?.status === 409 || error?.code === "VERSION_CONFLICT" || error?.code === "CONFLICT") {
+        await reloadBootstrap?.().catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  async function handleUpdateProactiveSuggestion({ item, fields } = {}) {
+    ensureBackend("编辑主动建议");
+    if (!item?.id || !fields || typeof fields !== "object") throw new Error("主动建议编辑信息不完整");
+    const updated = await apiClient.updateProactiveSuggestion(item.id, fields, item.version, createStrongUuid());
+    await refreshOverviewSummary();
+    return updated;
+  }
+
+  async function handleRefreshProactive() {
+    ensureBackend("刷新主动建议");
+    await refreshOverviewSummary();
   }
 
   async function handleDeleteCustomer(id) {
@@ -305,6 +437,11 @@ export function useWorkbenchHandlers({ nav, data, apiClient, weeklySession, sele
     handleUpdateRiskStatus,
     handleUpdateActionStatus,
     handleCreateAction,
+    handleCreateProactiveConfirmationPreview,
+    handleConfirmProactiveWriteback,
+    handleProactiveLifecycleChange,
+    handleUpdateProactiveSuggestion,
+    handleRefreshProactive,
     handleDeleteCustomer,
     handleDeleteOpportunity,
     handleDeleteKnowledge,

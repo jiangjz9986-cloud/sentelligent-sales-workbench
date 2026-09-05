@@ -3,6 +3,17 @@ import { analyzeSalesDecision as analyzeSalesDecisionAgent } from "./ai/agents/s
 import { readBoundedResponseText } from "./http/request.js";
 
 const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "ERR_INTERNET_DISCONNECTED",
+  "ERR_NETWORK",
+  "UND_ERR_SOCKET",
+]);
 
 function fallbackAnalysis(rawContent, source) {
   const analysis = buildQuickRecordAnalysis(rawContent);
@@ -137,10 +148,10 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
     maxBytes: MAX_MODEL_RESPONSE_BYTES,
     errorMessage: "Model provider response is too large",
   });
-  const body = text ? JSON.parse(text) : {};
   if (!response.ok) {
     throw new Error(`model provider returned ${response.status}`);
   }
+  const body = text ? JSON.parse(text) : {};
 
   const content = body.choices?.[0]?.message?.content;
   if (!content) throw new Error("model provider returned empty content");
@@ -217,6 +228,90 @@ function shouldUseModel(config) {
 function parseModelDraftContent(content) {
   const parsed = JSON.parse(stripJsonFence(content));
   return requireText(parsed.content, "content");
+}
+
+function modelProviderSource(config = {}) {
+  const provider = String(config.modelProvider ?? "").trim();
+  return provider || "model";
+}
+
+/**
+ * Keep fallback metadata stable and deliberately small.  The provider error
+ * itself is never returned to callers because it may contain implementation
+ * details or sensitive request information.  Only errors that can be
+ * identified reliably are given a more specific reason; all other provider
+ * failures retain the legacy feature-level `*_model_failure` reason.
+ */
+function modelFailureKind(error) {
+  const name = String(error?.name ?? "");
+  const code = String(error?.code ?? "").toUpperCase();
+  const message = String(error?.message ?? "");
+
+  if (
+    error instanceof SyntaxError
+    || code === "MODEL_INVALID_JSON"
+    || code === "INVALID_JSON"
+    || /invalid\s+json|unexpected\s+(?:end|token).*json|json\s+parse/i.test(message)
+  ) {
+    return "invalid_json";
+  }
+
+  if (
+    name === "TimeoutError"
+    || name === "AbortError"
+    || code === "ETIMEDOUT"
+    || code === "TIMEOUT"
+    || code === "UND_ERR_CONNECT_TIMEOUT"
+    || /(?:timed?\s*out|timeout|deadline\s+exceeded|request\s+aborted)/i.test(message)
+  ) {
+    return "timeout";
+  }
+
+  if (
+    NETWORK_ERROR_CODES.has(code)
+    || name === "FetchError"
+    || /fetch\s+failed|network\s+error|connection\s+(?:closed|refused|reset)|socket\s+(?:closed|hang\s*up)/i.test(message)
+  ) {
+    return "network_error";
+  }
+
+  return "model_failure";
+}
+
+function fallbackReason(feature, error = null) {
+  return `${feature}_${modelFailureKind(error)}`;
+}
+
+function withModelAvailability(fallback, config, feature) {
+  if (config.aiAnalysisMode === "model") {
+    return {
+      ...fallback,
+      source: "fallback",
+      fallbackReason: `${feature}_missing_model_key`,
+    };
+  }
+  return {
+    ...fallback,
+    source: "deterministic",
+    fallbackReason: null,
+  };
+}
+
+function withModelFailure(fallback, feature, error) {
+  return {
+    ...fallback,
+    source: "fallback",
+    fallbackReason: fallbackReason(feature, error),
+  };
+}
+
+function withModelContent(fallback, content, config) {
+  return {
+    ...fallback,
+    content,
+    source: modelProviderSource(config),
+    fallbackReason: null,
+  };
 }
 
 function compact(value, limit = 900) {
@@ -450,7 +545,8 @@ function buildItineraryOrderMessages(fallback, context) {
 }
 
 async function enhanceDraftWithModel(fallbackDraft, messages, config, options = {}) {
-  if (!shouldUseModel(config)) return fallbackDraft;
+  const feature = options.feature ?? "draft";
+  if (!shouldUseModel(config)) return withModelAvailability(fallbackDraft, config, feature);
 
   try {
     const content = await callChatCompletion({
@@ -459,12 +555,9 @@ async function enhanceDraftWithModel(fallbackDraft, messages, config, options = 
       fetchImpl: options.fetchImpl ?? fetch,
       maxTokens: 2600,
     });
-    return {
-      ...fallbackDraft,
-      content: parseModelDraftContent(content),
-    };
-  } catch {
-    return fallbackDraft;
+    return withModelContent(fallbackDraft, parseModelDraftContent(content), config);
+  } catch (error) {
+    return withModelFailure(fallbackDraft, feature, error);
   }
 }
 
@@ -473,42 +566,23 @@ export async function enhanceWeeklyDraftWithModel(fallbackDraft, context, config
     fallbackDraft,
     buildWeeklyDraftMessages({ ...context, fallbackDraft }),
     config,
-    options,
+    { ...options, feature: "weekly_draft" },
   );
 }
 
 /**
  * Compose a source-backed weekly draft while retaining whether the model was
- * actually used. The ordinary enhancer above intentionally keeps its legacy
- * return shape; the assistant adapter needs this explicit provenance to
- * persist a truthful Agent run.
+ * actually used. Both weekly entry points share the same provenance contract
+ * so the assistant adapter and the direct Web endpoint report the same source
+ * and fallback reason.
  */
 export async function composeWeeklyDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
-  if (!shouldUseModel(config)) {
-    return config.aiAnalysisMode === "model"
-      ? { ...fallbackDraft, source: "fallback", fallbackReason: "weekly_draft_missing_model_key" }
-      : { ...fallbackDraft, source: "deterministic", fallbackReason: null };
-  }
-  try {
-    const content = await callChatCompletion({
-      messages: buildWeeklyDraftMessages({ ...context, fallbackDraft, systemPrompt: options.systemPrompt }),
-      config,
-      fetchImpl: options.fetchImpl ?? fetch,
-      maxTokens: 2600,
-    });
-    return {
-      ...fallbackDraft,
-      content: parseModelDraftContent(content),
-      source: config.modelProvider ?? "model",
-      fallbackReason: null,
-    };
-  } catch {
-    return {
-      ...fallbackDraft,
-      source: "fallback",
-      fallbackReason: "weekly_draft_model_failure",
-    };
-  }
+  return enhanceDraftWithModel(
+    fallbackDraft,
+    buildWeeklyDraftMessages({ ...context, fallbackDraft, systemPrompt: options.systemPrompt }),
+    config,
+    { ...options, feature: "weekly_draft" },
+  );
 }
 
 export async function enhanceSolutionDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
@@ -516,13 +590,15 @@ export async function enhanceSolutionDraftWithModel(fallbackDraft, context, conf
     fallbackDraft,
     buildSolutionDraftMessages({ ...context, fallbackDraft }),
     config,
-    options,
+    { ...options, feature: "solution_draft" },
   );
 }
 
 export async function generateManualSuggestion(input, config = {}, options = {}) {
   const fallbackSuggestion = buildFallbackSuggestion(input ?? {});
-  if (!shouldUseModel(config)) return fallbackSuggestion;
+  if (!shouldUseModel(config)) {
+    return withModelAvailability(fallbackSuggestion, config, "manual_suggestion");
+  }
 
   try {
     const content = await callChatCompletion({
@@ -531,17 +607,14 @@ export async function generateManualSuggestion(input, config = {}, options = {})
       fetchImpl: options.fetchImpl ?? fetch,
       maxTokens: 1800,
     });
-    return {
-      ...fallbackSuggestion,
-      content: parseModelDraftContent(content),
-    };
-  } catch {
-    return fallbackSuggestion;
+    return withModelContent(fallbackSuggestion, parseModelDraftContent(content), config);
+  } catch (error) {
+    return withModelFailure(fallbackSuggestion, "manual_suggestion", error);
   }
 }
 
 export async function enhanceItineraryOrderWithModel(fallback, context, config = {}, options = {}) {
-  if (!shouldUseModel(config)) return fallback;
+  if (!shouldUseModel(config)) return withModelAvailability(fallback, config, "itinerary_order");
   try {
     const expectedStopIds = (context.stops ?? []).map((stop) => stop.id);
     const content = await callChatCompletion({
@@ -552,10 +625,11 @@ export async function enhanceItineraryOrderWithModel(fallback, context, config =
     });
     return {
       ...parseItineraryOrderContent(content, expectedStopIds),
-      source: config.modelProvider ?? "model",
+      source: modelProviderSource(config),
+      fallbackReason: null,
     };
-  } catch {
-    return fallback;
+  } catch (error) {
+    return withModelFailure(fallback, "itinerary_order", error);
   }
 }
 

@@ -13,6 +13,7 @@ import {
 import { ManualAiSuggestionPanel } from "../../../components/ai/ManualAiSuggestionPanel.jsx";
 import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { ProactiveAssistantPanel } from "../components/ProactiveAssistantPanel.jsx";
 import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import {
   DecisionChain,
@@ -204,7 +205,15 @@ const customerConfig = {
 
 function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
   const { apiClient, backendStatus, workbenchOpportunities: opportunitiesList } = useWorkbenchData();
-  const { handleSaveCustomer } = useWorkbenchActions();
+  const {
+    handleSaveCustomer,
+    handleCreateProactiveConfirmationPreview,
+    handleConfirmProactiveWriteback,
+    handleProactiveLifecycleChange,
+    handleUpdateProactiveSuggestion,
+    handleRefreshProactive,
+  } = useWorkbenchActions();
+  const { overviewSummary } = useWorkbenchData();
   const { navigateTo: setActive, setSelectedOpportunityId, openOpportunityDetail } = useNavigation();
   const isCreateView = viewMode === "create";
   const isEditView = viewMode === "edit";
@@ -232,6 +241,21 @@ function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
         <MetricInline label="关系强度" value={`${selected.relation}`} />
         <MetricInline label="预算节奏" value={selected.budget} />
       </div>
+      <ProactiveAssistantPanel
+        assistant={overviewSummary?.proactiveAssistant}
+        scope={{ customerId: selected.id }}
+        apiClient={apiClient}
+        backendStatus={backendStatus}
+        title="客户主动建议"
+        onCreatePreview={handleCreateProactiveConfirmationPreview}
+        onConfirmWriteback={handleConfirmProactiveWriteback}
+        onLifecycleChange={handleProactiveLifecycleChange}
+        onUpdateSuggestion={handleUpdateProactiveSuggestion}
+        onRefresh={handleRefreshProactive}
+        onOpenOpportunity={(opportunityId) => {
+          if (opportunityId && openOpportunityDetail) openOpportunityDetail(opportunityId);
+        }}
+      />
       <div className="three-col">
         <Panel title="核心需求" meta="沉淀自记录">
           <InfoList items={selected.needs} tone="blue" />

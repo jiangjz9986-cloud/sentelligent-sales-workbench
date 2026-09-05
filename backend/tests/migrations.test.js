@@ -20,6 +20,7 @@ import { apply as applySecureSettings } from "../src/db/migrations/0015_secure_s
 import { apply as applySecureSettingsPushplus } from "../src/db/migrations/0021_secure_settings_pushplus.mjs";
 import { apply as applySecureSettingsAsr } from "../src/db/migrations/0033_secure_settings_asr.mjs";
 import { apply as applyAiSuggestionReview } from "../src/db/migrations/0036_ai_suggestion_review.mjs";
+import { apply as applyAiModelProvenance } from "../src/db/migrations/0037_ai_model_provenance.mjs";
 
 const SECURE_SETTINGS_ASR_CHECKSUM = "acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5";
 const secureSettingsColumns = [
@@ -80,10 +81,27 @@ const rowsHashOmittedColumns = {
     ]),
   ),
   ai_suggestions: [
-    "owner", "version", "status", "draft_content", "confidence", "source_id", "confirmation_preview",
+    "owner", "version", "status", "draft_content", "confidence", "source_id", "confirmation_preview", "source", "fallback_reason",
     "updated_at", "confirmed_at", "cancelled_at",
+    // 0039 runtime columns are metadata and must not change the legacy
+    // generated suggestion content preservation hash.
+    "proactive_trigger", "proactive_subject_type", "proactive_subject_id",
+    "proactive_customer_id", "proactive_opportunity_id", "proactive_dedupe_key",
+    "proactive_rule_version", "proactive_priority", "proactive_status",
+    "proactive_stale_at", "proactive_snoozed_until", "proactive_dismiss_reason",
+    "proactive_resolved_at", "proactive_result_refs", "proactive_run_id",
+    "proactive_event_id", "proactive_generated_at", "proactive_last_seen_at",
+    "proactive_failure_count", "proactive_next_retry_at", "proactive_payload_hash",
   ],
 };
+rowsHashOmittedColumns.weekly_reports = [
+  ...(rowsHashOmittedColumns.weekly_reports ?? []),
+  "source", "fallback_reason",
+];
+rowsHashOmittedColumns.solution_drafts = [
+  ...(rowsHashOmittedColumns.solution_drafts ?? []),
+  "source", "fallback_reason",
+];
 
 function columnNames(db, table) {
   return all(db, `PRAGMA table_info(${table})`).map((row) => row.name);
@@ -243,7 +261,57 @@ function rebuildDatabaseAs0032(db) {
       );
       DROP TABLE secure_settings;
       ALTER TABLE secure_settings_0032_fixture RENAME TO secure_settings;
-      DELETE FROM schema_migrations WHERE version IN ('0033', '0034', '0035', '0036');
+      DROP INDEX IF EXISTS idx_weekly_reports_source_created;
+      DROP INDEX IF EXISTS idx_solution_drafts_source_created;
+      DROP INDEX IF EXISTS idx_ai_suggestions_source_created;
+      ALTER TABLE weekly_reports DROP COLUMN source;
+      ALTER TABLE weekly_reports DROP COLUMN fallback_reason;
+      ALTER TABLE solution_drafts DROP COLUMN source;
+      ALTER TABLE solution_drafts DROP COLUMN fallback_reason;
+      ALTER TABLE ai_suggestions DROP COLUMN source;
+      ALTER TABLE ai_suggestions DROP COLUMN fallback_reason;
+      DROP INDEX IF EXISTS idx_proactive_confirmation_previews_owner_status;
+      DROP INDEX IF EXISTS idx_proactive_confirmation_previews_suggestion;
+      DROP INDEX IF EXISTS idx_proactive_confirmation_previews_expiry;
+      DROP TABLE IF EXISTS proactive_confirmation_previews;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_dedupe;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_owner_status;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_subject;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_retry;
+      DROP TRIGGER IF EXISTS ai_suggestions_proactive_status_insert_guard;
+      DROP TRIGGER IF EXISTS ai_suggestions_proactive_status_update_guard;
+      DROP TABLE IF EXISTS proactive_scan_state;
+      DROP TABLE IF EXISTS proactive_scan_runs;
+      DROP TABLE IF EXISTS proactive_scan_lease;
+      DROP TABLE IF EXISTS proactive_scan_events;
+      DROP TABLE IF EXISTS proactive_notifications;
+      DROP INDEX IF EXISTS idx_proactive_model_cache_expiry;
+      DROP INDEX IF EXISTS idx_proactive_model_cache_owner;
+      DROP INDEX IF EXISTS idx_proactive_model_usage_date;
+      DROP TABLE IF EXISTS proactive_model_cache;
+      DROP TABLE IF EXISTS proactive_model_usage;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_trigger;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_subject_type;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_subject_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_customer_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_opportunity_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_dedupe_key;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_rule_version;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_priority;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_status;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_stale_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_snoozed_until;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_dismiss_reason;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_resolved_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_result_refs;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_run_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_event_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_generated_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_last_seen_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_failure_count;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_next_retry_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_payload_hash;
+      DELETE FROM schema_migrations WHERE version IN ('0033', '0034', '0035', '0036', '0037', '0038', '0039', '0040', '0041');
     `);
     db.exec("COMMIT");
   } catch (error) {
@@ -298,7 +366,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 35);
+      assert.equal(firstMigrations.length, 40);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -334,6 +402,11 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[32].version, "0034");
       assert.equal(firstMigrations[33].version, "0035");
       assert.equal(firstMigrations[34].version, "0036");
+      assert.equal(firstMigrations[35].version, "0037");
+      assert.equal(firstMigrations[36].version, "0038");
+      assert.equal(firstMigrations[37].version, "0039");
+      assert.equal(firstMigrations[38].version, "0040");
+      assert.equal(firstMigrations[39].version, "0041");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -379,6 +452,11 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0034_quick_record_confirmation_previews.mjs",
         "../src/db/migrations/0035_visit_temperature_suggestions.mjs",
         "../src/db/migrations/0036_ai_suggestion_review.mjs",
+        "../src/db/migrations/0037_ai_model_provenance.mjs",
+        "../src/db/migrations/0038_proactive_confirmation_previews.mjs",
+        "../src/db/migrations/0039_proactive_background_runtime.mjs",
+        "../src/db/migrations/0040_proactive_notifications.mjs",
+        "../src/db/migrations/0041_proactive_model_budget_cache.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -415,6 +493,11 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[32].checksum, migrationChecksum(migrationSources[32]));
       assert.equal(firstMigrations[33].checksum, migrationChecksum(migrationSources[33]));
       assert.equal(firstMigrations[34].checksum, migrationChecksum(migrationSources[34]));
+      assert.equal(firstMigrations[35].checksum, migrationChecksum(migrationSources[35]));
+      assert.equal(firstMigrations[36].checksum, migrationChecksum(migrationSources[36]));
+      assert.equal(firstMigrations[37].checksum, migrationChecksum(migrationSources[37]));
+      assert.equal(firstMigrations[38].checksum, migrationChecksum(migrationSources[38]));
+      assert.equal(firstMigrations[39].checksum, migrationChecksum(migrationSources[39]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -472,6 +555,54 @@ test("migration 0036 turns legacy generated suggestions into reviewable snapshot
     assert.throws(
       () => db.prepare("UPDATE ai_suggestions SET type = 'future_type' WHERE id = 'legacy-ai'").run(),
       /invalid ai suggestion type/,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0037 adds provenance columns and labels pre-existing rows as legacy", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      CREATE TABLE weekly_reports (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL, status TEXT NOT NULL, content TEXT NOT NULL,
+        source_refs TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE solution_drafts (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, artifact_type TEXT NOT NULL,
+        title TEXT NOT NULL, customer_id TEXT, opportunity_id TEXT, status TEXT NOT NULL,
+        content TEXT NOT NULL, source_refs TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE ai_suggestions (
+        id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL,
+        status TEXT NOT NULL, content TEXT NOT NULL, source_refs TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content)
+        VALUES ('weekly-1', 'owner', '2026-09-01', '2026-09-07', 'draft', 'legacy');
+      INSERT INTO solution_drafts (id, owner, artifact_type, title, status, content)
+        VALUES ('solution-1', 'owner', 'solution_framework', 'Legacy', 'draft', 'legacy');
+      INSERT INTO ai_suggestions (id, type, title, status, content)
+        VALUES ('suggestion-1', 'customer_profile', 'Legacy', 'pending', 'legacy');
+    `);
+
+    applyAiModelProvenance(db);
+    for (const table of ["weekly_reports", "solution_drafts", "ai_suggestions"]) {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+      assert.ok(columns.includes("source"));
+      assert.ok(columns.includes("fallback_reason"));
+      assert.equal(db.prepare(`SELECT source, fallback_reason FROM ${table}`).get().source, "legacy");
+    }
+
+    db.prepare("UPDATE weekly_reports SET source = 'deepseek', fallback_reason = NULL WHERE id = 'weekly-1'").run();
+    applyAiModelProvenance(db);
+    assert.deepEqual(
+      { ...db.prepare("SELECT source, fallback_reason FROM weekly_reports WHERE id = 'weekly-1'").get() },
+      { source: "deepseek", fallback_reason: null },
     );
   } finally {
     db.close();
@@ -730,7 +861,7 @@ test("migration 0033 upgrades the direct 0021 cleared matrix without changing an
   }
 });
 
-test("current migrations upgrade a complete 0032 database through 0033, 0034, 0035, and 0036 in order", () => {
+test("current migrations upgrade a complete 0032 database through 0033-0041 in order", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
@@ -753,10 +884,10 @@ test("current migrations upgrade a complete 0032 database through 0033, 0034, 00
         "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
       ).all().map((row) => ({ ...row }));
       const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
-      assert.equal(ledgerAfter.length, 35);
-      assert.deepEqual(added.map((row) => row.version), ["0033", "0034", "0035", "0036"]);
+      assert.equal(ledgerAfter.length, 40);
+      assert.deepEqual(added.map((row) => row.version), ["0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041"]);
       assert.deepEqual(
-        ledgerAfter.filter((row) => !["0033", "0034", "0035", "0036"].includes(row.version)),
+        ledgerAfter.filter((row) => !["0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041"].includes(row.version)),
         ledgerBefore,
       );
       const source = readFileSync(
@@ -767,6 +898,14 @@ test("current migrations upgrade a complete 0032 database through 0033, 0034, 00
       assert.equal(added.find((row) => row.version === "0033").checksum, SECURE_SETTINGS_ASR_CHECKSUM);
       assert.deepEqual(secureSettingsRows(db), rowsBefore);
       assert.equal(databaseTableNames(db).includes("quick_record_confirmation_previews"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_confirmation_previews"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_state"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_runs"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_lease"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_events"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_notifications"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_model_cache"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_model_usage"), true);
       assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_id"), true);
       assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_status"), true);
       assert.equal(columnNames(db, "weekly_reports").includes("entries_json"), true);
@@ -922,7 +1061,7 @@ test("reconciles the former settings migration 0019 before applying Shortcut mig
       );
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        35,
+        40,
       );
     } finally {
       db.close();
@@ -1346,7 +1485,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041"],
       );
     } finally {
       migrated.close();
@@ -1540,7 +1679,7 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 35);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 40);
     } finally {
       db.close();
     }
@@ -2094,7 +2233,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041"],
       );
     } finally {
       db.close();

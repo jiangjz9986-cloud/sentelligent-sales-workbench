@@ -1,6 +1,6 @@
 {
   "name": "product-design-prototype",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -24,6 +24,7 @@
     "test:travel-expense": "node --test src/api/salesWorkbenchApi.test.js src/features/travelExpense/travelExpensePageState.test.js src/features/travelExpense/AdvanceSettlement.test.js src/features/travelExpense/authenticatedPdf.test.js src/features/travelExpense/documentVariant.test.js src/features/travelExpense/expenseLedgerWorkbenchModel.test.js src/features/travelExpense/ExpenseLedgerWorkbench.test.js src/features/travelExpense/ExpenseListPrintPreview.test.js src/features/travelExpense/expenseListXlsx.test.js src/features/travelExpense/invoiceMatchingModel.test.js src/features/travelExpense/paymentProofModel.test.js src/features/travelExpense/paymentProofThumbnail.test.js src/features/travelExpense/ReimbursementOrganizer.test.js src/features/travelExpense/responsibleRegionModel.test.js src/features/travelExpense/travelExpenseDocument.test.js src/features/travelExpense/travelExpenseModel.test.js src/features/travelExpense/travelExpenseExport.test.js scripts/travel-expense-page.test.mjs scripts/authenticated-pdf-browser.test.mjs scripts/trip-region-settings-browser.test.mjs",
     "test:list-actions": "node --test scripts/list-action-layout.test.mjs",
     "test:overview-layout": "node --test scripts/overview-layout.test.mjs",
+    "test:proactive-assistant": "node --test src/api/salesWorkbenchApi.proactive.test.js src/features/salesWorkbench/components/proactiveAssistantModel.test.js src/features/salesWorkbench/components/proactiveNotificationModel.test.js scripts/proactive-cross-entry.test.mjs",
     "test:quickwins": "node --test src/components/toastModel.test.js src/features/salesWorkbench/datetimeLocal.test.js src/features/salesWorkbench/weeklyDaily.test.js",
     "test:contract": "node scripts/customer-opportunity-contract.test.mjs",
     "test:static": "node --test scripts/static-server.test.mjs",
@@ -47,20 +48,24 @@
     "test:bootstrap-cache": "node --test scripts/bootstrap-cache.test.mjs",
     "test:service-worker": "node --test scripts/service-worker.test.mjs",
     "test:assistant-chat": "node --test scripts/weixinCardParse.test.mjs scripts/assistant-chat.test.mjs scripts/assistant-fab.test.mjs",
-    "qa:local": "npm run build && npm run test:bundle && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:temperature && npm run test:asr-capture && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:ai-card && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:overview-layout && npm run test:quickwins && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run test:settings && npm run test:user-management && npm run test:tender && npm run test:mobile-shell && npm run test:pwa && npm run test:input-capabilities && npm run test:bootstrap-cache && npm run test:service-worker && npm run test:assistant-chat && npm run scan:secrets",
+    "qa:local": "npm run build && npm run test:bundle && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:temperature && npm run test:asr-capture && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:ai-card && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:overview-layout && npm run test:proactive-assistant && npm run test:quickwins && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run test:settings && npm run test:user-management && npm run test:tender && npm run test:mobile-shell && npm run test:pwa && npm run test:input-capabilities && npm run test:bootstrap-cache && npm run test:service-worker && npm run test:assistant-chat && npm run scan:secrets",
     "qa:integration": "node scripts/integration-qa.mjs",
     "qa:webkit": "node scripts/webkit-qa.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "5.0.4",
     "lucide-react": "^1.17.0",
-    "pdfjs-dist": "5.6.205",
+    "pdfjs-dist": "6.3.289",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "vite": "6.4.2"
+    "vite": "6.4.3"
   },
   "devDependencies": {
     "playwright": "1.61.1",
+    "postcss": "8.5.28",
     "vite-plugin-pwa": "^0.21.1"
+  },
+  "overrides": {
+    "nanoid": "3.3.18"
   }
 }

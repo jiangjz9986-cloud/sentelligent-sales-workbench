@@ -86,7 +86,7 @@ describe("ops alerts status endpoint", () => {
     assert.equal(wrongMethod.body.error.code, "MACHINE_SCOPE_DENIED");
   });
 
-  it("aggregates outbox counts, delivery readiness, and the three scheduler states", async () => {
+  it("aggregates outbox counts, delivery readiness, proactive notifications, and scheduler states", async () => {
     const initial = await request("/api/integrations/ops-alerts/status", {
       headers: { Authorization: `Bearer ${opsToken}` },
     });
@@ -94,12 +94,13 @@ describe("ops alerts status endpoint", () => {
     const item = initial.body.item;
     assert.ok(Date.parse(item.generatedAt) > 0);
     assert.deepEqual(item.outbox, { queued: 0, processing: 0, sent: 0, failed: 0, oldestQueuedAt: null });
+    assert.deepEqual(item.proactiveNotifications, { queued: 0, processing: 0, sent: 0, failed: 0, read: 0, unread: 0, total: 0 });
     // No worker has reported yet: the 30s stale window reads as unavailable.
     assert.equal(item.weixinDelivery.status, "not_ready");
     assert.equal(item.weixinDelivery.reason, "worker_unavailable");
     // v0.9.3 巡检字段：active 绑定计数供 bindings=0 告警。
     assert.deepEqual(item.weixinBindings, { active: 1 });
-    for (const name of ["hospitalTender", "actionReminders", "dailyDigest"]) {
+    for (const name of ["hospitalTender", "actionReminders", "dailyDigest", "proactiveNotifications"]) {
       assert.ok(item.schedulers[name], name);
       assert.ok(Object.hasOwn(item.schedulers[name], "lastError"), name);
     }
@@ -109,6 +110,9 @@ describe("ops alerts status endpoint", () => {
     assert.equal(item.schedulers.hospitalTender.lastError, null);
     assert.equal(item.schedulers.actionReminders.running, false);
     assert.equal(item.schedulers.dailyDigest.running, false);
+    assert.equal(item.schedulers.proactiveNotifications.running, false);
+    assert.equal(item.schedulers.proactiveNotifications.quietStart, "22:00");
+    assert.equal(item.schedulers.proactiveNotifications.hourlyLimit, 3);
 
     const queued = await request("/api/integrations/ops-alerts", {
       method: "POST",

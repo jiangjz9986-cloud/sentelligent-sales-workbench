@@ -963,6 +963,12 @@ function WorkbenchShellBody({
             onClose={assistantChat.closeChat}
             onConfirm={assistantChat.confirmPending}
             onCancelPending={assistantChat.cancelPending}
+            proactiveAssistant={overviewSummary?.proactiveAssistant}
+            onOpenProactiveOverview={() => navigateTo("overview")}
+            onOpenProactiveOpportunity={(opportunityId) => {
+              if (opportunityId) openOpportunityDetail(opportunityId);
+              else navigateTo("overview");
+            }}
           />
         </div>
     </>

@@ -1,0 +1,416 @@
+/* Global proactive-assistant queue styles live beside the queue component so
+   lifecycle review can evolve without widening the shared global.css surface. */
+
+.overview-proactive-assistant .panel-title-action {
+  display: flex;
+  align-items: center;
+}
+
+.proactive-assistant-refresh {
+  min-height: 34px;
+  gap: 5px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.proactive-assistant-refresh .is-spinning {
+  animation: proactive-assistant-spin 0.9s linear infinite;
+}
+
+.proactive-assistant-source {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.proactive-assistant-model small {
+  color: #b42318;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+@keyframes proactive-assistant-spin {
+  to { transform: rotate(360deg); }
+}
+
+.proactive-assistant-lifecycle-toolbar {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 5px;
+  overflow-x: auto;
+  border: 1px solid rgba(47, 107, 255, 0.12);
+  border-radius: 9px;
+  background: rgba(247, 250, 255, 0.82);
+}
+
+.proactive-assistant-filter {
+  min-width: max-content;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.proactive-assistant-filter:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.proactive-assistant-filter.is-selected {
+  color: var(--blue);
+  border-color: rgba(47, 107, 255, 0.18);
+  background: #fff;
+  box-shadow: 0 2px 7px rgba(36, 72, 130, 0.08);
+}
+
+.proactive-assistant-filter b {
+  min-width: 18px;
+  padding: 1px 4px;
+  border-radius: 999px;
+  color: currentColor;
+  background: rgba(47, 107, 255, 0.08);
+  text-align: center;
+  font-size: 10px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+
+.proactive-assistant-filter-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.proactive-assistant-filter-dot.tone-blue { color: var(--blue); }
+.proactive-assistant-filter-dot.tone-teal { color: var(--teal, #0f9f99); }
+.proactive-assistant-filter-dot.tone-green { color: var(--green); }
+.proactive-assistant-filter-dot.tone-amber { color: var(--amber); }
+.proactive-assistant-filter-dot.tone-red { color: var(--red); }
+.proactive-assistant-filter-dot.tone-gray { color: #98a2b3; }
+
+.proactive-assistant-persistence-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 12px;
+  padding: 7px 9px;
+  border: 1px solid rgba(152, 162, 179, 0.22);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(248, 249, 251, 0.84);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.proactive-assistant-persistence-note.is-connected {
+  border-color: rgba(47, 107, 255, 0.15);
+  background: rgba(229, 241, 255, 0.55);
+}
+
+.proactive-assistant-persistence-note .pill {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.proactive-assistant-status-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-height: 23px;
+}
+
+.proactive-assistant-status-row .pill {
+  font-size: 10.5px;
+}
+
+.proactive-assistant-readback-state,
+.proactive-assistant-version,
+.proactive-assistant-status-row time {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.proactive-assistant-readback-state {
+  padding: 2px 6px;
+  border: 1px solid rgba(47, 107, 255, 0.12);
+  border-radius: 999px;
+  color: #315fb3;
+  background: rgba(229, 241, 255, 0.62);
+}
+
+.proactive-assistant-card[data-suggestion-id] .proactive-assistant-card-head {
+  align-items: flex-start;
+}
+
+.proactive-assistant-lifecycle-control {
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(47, 107, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(247, 250, 255, 0.72);
+}
+
+.proactive-assistant-control-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.proactive-assistant-control-heading strong,
+.proactive-assistant-review-heading strong {
+  color: var(--body);
+  font-size: 11.5px;
+}
+
+.proactive-assistant-control-heading small,
+.proactive-assistant-review-heading small {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.proactive-assistant-lifecycle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.proactive-assistant-lifecycle-actions .ghost-button {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.proactive-assistant-inline-status {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.proactive-assistant-inline-status.tone-red {
+  color: var(--red);
+}
+
+.proactive-assistant-preview {
+  align-items: start;
+}
+
+.proactive-assistant-review-copy {
+  min-height: 54px;
+}
+
+.proactive-assistant-review-fields-wrap {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid rgba(217, 119, 6, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.proactive-assistant-review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.proactive-assistant-review-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.proactive-assistant-review-heading .pill {
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+
+.proactive-assistant-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.proactive-assistant-edit-field {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.proactive-assistant-edit-field-wide {
+  grid-column: span 3;
+}
+
+.proactive-assistant-edit-field span {
+  color: #66738e;
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.proactive-assistant-edit-field input,
+.proactive-assistant-edit-field select {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid rgba(16, 24, 40, 0.12);
+  border-radius: 7px;
+  outline: none;
+  color: var(--text);
+  background: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.proactive-assistant-edit-field input:focus,
+.proactive-assistant-edit-field select:focus {
+  border-color: rgba(47, 107, 255, 0.45);
+  box-shadow: var(--focus-ring);
+}
+
+.proactive-assistant-edit-field input:disabled,
+.proactive-assistant-edit-field select:disabled {
+  cursor: default;
+  opacity: 0.65;
+  background: #f3f5f8;
+}
+
+.proactive-assistant-review-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.proactive-assistant-review-actions .ghost-button {
+  min-height: 30px;
+  gap: 5px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.proactive-assistant-review-actions small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.proactive-assistant-review-actions small.tone-green {
+  color: var(--green);
+}
+
+.proactive-assistant-review-actions small.tone-red {
+  color: var(--red);
+}
+
+.proactive-assistant-writeback-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.proactive-assistant-writeback-control {
+  justify-content: flex-start;
+}
+
+.proactive-assistant-writeback-control .primary-button,
+.proactive-assistant-writeback-control .ghost-button {
+  min-height: 32px;
+  font-size: 11px;
+}
+
+.proactive-assistant-preview-status {
+  grid-column: 1 / -1;
+}
+
+.proactive-notification-summary,
+.proactive-notification-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.proactive-notification-summary {
+  padding: 9px 11px;
+  border: 1px solid rgba(47, 107, 255, 0.14);
+  border-radius: 9px;
+  background: rgba(229, 241, 255, 0.38);
+}
+
+.proactive-notification-summary strong,
+.proactive-notification-state strong {
+  color: var(--text);
+}
+
+.proactive-notification-state {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(247, 250, 255, 0.75);
+}
+
+.proactive-notification-state .ghost-button {
+  min-height: 28px;
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 10.5px;
+}
+
+@media (max-width: 900px) {
+  .proactive-assistant-edit-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .proactive-assistant-edit-field-wide {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 620px) {
+  .proactive-assistant-persistence-note {
+    align-items: flex-start;
+  }
+
+  .proactive-assistant-filter {
+    padding-inline: 7px;
+    min-height: 44px;
+  }
+
+  .proactive-assistant-edit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .proactive-assistant-edit-field-wide {
+    grid-column: auto;
+  }
+
+  .proactive-assistant-review-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .proactive-assistant-writeback-actions {
+    justify-content: flex-start;
+  }
+}

@@ -31,4 +31,14 @@ describe("pwa manifest and ios meta", () => {
     const html = readFileSync(resolve("index.html"), "utf8");
     assert.match(html, /rel="apple-touch-icon"[^>]+href="\/sent-zhixing-favicon\.png"/);
   });
+
+  it("keeps the generated install manifest aligned with the formal manifest", () => {
+    const generatedPath = resolve("dist/manifest.webmanifest");
+    if (!existsSync(generatedPath)) return;
+    const generated = JSON.parse(readFileSync(generatedPath, "utf8"));
+    assert.equal(generated.theme_color, "#f3f5fa");
+    assert.equal(generated.background_color, "#f3f5fa");
+    assert.equal(generated.start_url, "./overview");
+    assert.equal(generated.short_name, "森特智行");
+  });
 });

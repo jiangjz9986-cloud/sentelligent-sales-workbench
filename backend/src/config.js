@@ -6,6 +6,12 @@ import { validatePasswordHashEncoding } from "./auth/password.js";
 import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
 
 export const MODEL_TIMEOUT_MS_MAX = 120_000;
+export const PROACTIVE_ASSISTANT_INTERVAL_SECONDS_MAX = 24 * 60 * 60;
+export const PROACTIVE_ASSISTANT_BATCH_SIZE_MAX = 500;
+export const PROACTIVE_ASSISTANT_POLL_MS_MAX = 24 * 60 * 60 * 1000;
+export const PROACTIVE_ASSISTANT_MODEL_CACHE_TTL_MS_MAX = 30 * 24 * 60 * 60 * 1000;
+export const PROACTIVE_ASSISTANT_MODEL_OWNER_DAILY_LIMIT_MAX = 1_000_000;
+export const PROACTIVE_ASSISTANT_MODEL_GLOBAL_DAILY_LIMIT_MAX = 10_000_000;
 
 export function loadEnvFile(filePath = resolve(process.cwd(), ".env")) {
   if (!existsSync(filePath)) return {};
@@ -426,6 +432,125 @@ export function loadConfig(
     "HOSPITAL_TENDER_BATCH_SIZE",
     200,
   );
+  // The proactive assistant scanner owns its durable cursor and retry state
+  // in SQLite (migration 0039).  These process settings only control whether
+  // the timer is started and the safe upper bounds used when the state row is
+  // first initialized; persisted state remains authoritative afterwards.
+  const proactiveAssistantIntervalMinutes = boundedPositiveInteger(
+    env.proactiveAssistantIntervalMinutes
+      ?? env.PROACTIVE_ASSISTANT_INTERVAL_MINUTES
+      ?? 5,
+    "PROACTIVE_ASSISTANT_INTERVAL_MINUTES",
+    1440,
+  );
+  const proactiveAssistantBatchSize = boundedPositiveInteger(
+    env.proactiveAssistantBatchSize
+      ?? env.PROACTIVE_ASSISTANT_BATCH_SIZE
+      ?? 50,
+    "PROACTIVE_ASSISTANT_BATCH_SIZE",
+    500,
+  );
+  const proactiveAssistantLeaseMs = boundedPositiveInteger(
+    env.proactiveAssistantLeaseMs
+      ?? env.PROACTIVE_ASSISTANT_LEASE_MS
+      ?? 120_000,
+    "PROACTIVE_ASSISTANT_LEASE_MS",
+    24 * 60 * 60 * 1000,
+  );
+  if (proactiveAssistantLeaseMs < 1_000) {
+    throw new Error("PROACTIVE_ASSISTANT_LEASE_MS must be at least 1000 milliseconds");
+  }
+  const proactiveAssistantRetryBaseMs = boundedPositiveInteger(
+    env.proactiveAssistantRetryBaseMs
+      ?? env.PROACTIVE_ASSISTANT_RETRY_BASE_MS
+      ?? 30_000,
+    "PROACTIVE_ASSISTANT_RETRY_BASE_MS",
+    24 * 60 * 60 * 1000,
+  );
+  if (proactiveAssistantRetryBaseMs < 1_000) {
+    throw new Error("PROACTIVE_ASSISTANT_RETRY_BASE_MS must be at least 1000 milliseconds");
+  }
+  const proactiveAssistantPollMs = boundedPositiveInteger(
+    env.proactiveAssistantPollMs
+      ?? env.PROACTIVE_ASSISTANT_POLL_MS
+      ?? 30_000,
+    "PROACTIVE_ASSISTANT_POLL_MS",
+    24 * 60 * 60 * 1000,
+  );
+  if (proactiveAssistantPollMs < 1_000) {
+    throw new Error("PROACTIVE_ASSISTANT_POLL_MS must be at least 1000 milliseconds");
+  }
+  const proactiveAssistantModelConcurrency = boundedPositiveInteger(
+    env.proactiveAssistantModelConcurrency
+      ?? env.PROACTIVE_ASSISTANT_MODEL_CONCURRENCY
+      ?? 2,
+    "PROACTIVE_ASSISTANT_MODEL_CONCURRENCY",
+    20,
+  );
+  const proactiveAssistantModelRetryLimit = boundedPositiveInteger(
+    env.proactiveAssistantModelRetryLimit
+      ?? env.PROACTIVE_ASSISTANT_MODEL_RETRY_LIMIT
+      ?? 1,
+    "PROACTIVE_ASSISTANT_MODEL_RETRY_LIMIT",
+    3,
+  );
+  const proactiveAssistantModelCacheTtlMs = boundedPositiveInteger(
+    env.proactiveAssistantModelCacheTtlMs
+      ?? env.PROACTIVE_ASSISTANT_MODEL_CACHE_TTL_MS
+      ?? 24 * 60 * 60 * 1000,
+    "PROACTIVE_ASSISTANT_MODEL_CACHE_TTL_MS",
+    PROACTIVE_ASSISTANT_MODEL_CACHE_TTL_MS_MAX,
+  );
+  const proactiveAssistantModelOwnerDailyLimit = boundedPositiveInteger(
+    env.proactiveAssistantModelOwnerDailyLimit
+      ?? env.PROACTIVE_ASSISTANT_MODEL_OWNER_DAILY_LIMIT
+      ?? 100,
+    "PROACTIVE_ASSISTANT_MODEL_OWNER_DAILY_LIMIT",
+    PROACTIVE_ASSISTANT_MODEL_OWNER_DAILY_LIMIT_MAX,
+  );
+  const proactiveAssistantModelGlobalDailyLimit = boundedPositiveInteger(
+    env.proactiveAssistantModelGlobalDailyLimit
+      ?? env.PROACTIVE_ASSISTANT_MODEL_GLOBAL_DAILY_LIMIT
+      ?? 1000,
+    "PROACTIVE_ASSISTANT_MODEL_GLOBAL_DAILY_LIMIT",
+    PROACTIVE_ASSISTANT_MODEL_GLOBAL_DAILY_LIMIT_MAX,
+  );
+  const proactiveAssistantModelBudgetTimezone = String(
+    env.proactiveAssistantModelBudgetTimezone
+      ?? env.PROACTIVE_ASSISTANT_MODEL_BUDGET_TIMEZONE
+      ?? "Asia/Shanghai",
+  ).trim();
+  if (!proactiveAssistantModelBudgetTimezone) {
+    throw new Error("PROACTIVE_ASSISTANT_MODEL_BUDGET_TIMEZONE is required");
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: proactiveAssistantModelBudgetTimezone }).format(new Date());
+  } catch {
+    throw new Error("PROACTIVE_ASSISTANT_MODEL_BUDGET_TIMEZONE is invalid");
+  }
+  const proactiveAssistantIntervalSeconds = proactiveAssistantIntervalMinutes * 60;
+  const proactiveNotificationPollMs = boundedPositiveInteger(
+    env.proactiveNotificationPollMs ?? env.PROACTIVE_NOTIFICATION_POLL_MS ?? 60_000,
+    "PROACTIVE_NOTIFICATION_POLL_MS",
+    24 * 60 * 60 * 1000,
+  );
+  if (proactiveNotificationPollMs < 1_000) throw new Error("PROACTIVE_NOTIFICATION_POLL_MS must be at least 1000 milliseconds");
+  const proactiveNotificationQuietStart = timeOfDayValue(
+    env.proactiveNotificationQuietStart ?? env.PROACTIVE_NOTIFICATION_QUIET_START,
+    "22:00", "PROACTIVE_NOTIFICATION_QUIET_START",
+  );
+  const proactiveNotificationQuietEnd = timeOfDayValue(
+    env.proactiveNotificationQuietEnd ?? env.PROACTIVE_NOTIFICATION_QUIET_END,
+    "08:00", "PROACTIVE_NOTIFICATION_QUIET_END",
+  );
+  const proactiveNotificationHourlyLimit = boundedPositiveInteger(
+    env.proactiveNotificationHourlyLimit ?? env.PROACTIVE_NOTIFICATION_HOURLY_LIMIT ?? 3,
+    "PROACTIVE_NOTIFICATION_HOURLY_LIMIT", 100,
+  );
+  const proactiveNotificationDailyLimit = boundedPositiveInteger(
+    env.proactiveNotificationDailyLimit ?? env.PROACTIVE_NOTIFICATION_DAILY_LIMIT ?? 12,
+    "PROACTIVE_NOTIFICATION_DAILY_LIMIT", 1000,
+  );
   const amapMode = String(env.amapMode ?? env.AMAP_MODE ?? "live").trim().toLowerCase();
   if (!["live", "mock"].includes(amapMode)) {
     throw new Error("AMAP_MODE must be live or mock");
@@ -547,6 +672,33 @@ export function loadConfig(
     ),
     hospitalTenderIntervalMinutes,
     hospitalTenderBatchSize,
+    proactiveAssistantAutoRun: booleanValue(
+      env.proactiveAssistantAutoRun ?? env.PROACTIVE_ASSISTANT_AUTO_RUN,
+      nodeEnv === "production",
+      "PROACTIVE_ASSISTANT_AUTO_RUN",
+    ),
+    proactiveAssistantIntervalSeconds,
+    proactiveAssistantIntervalMinutes,
+    proactiveAssistantBatchSize,
+    proactiveAssistantLeaseMs,
+    proactiveAssistantRetryBaseMs,
+    proactiveAssistantPollMs,
+    proactiveAssistantModelConcurrency,
+    proactiveAssistantModelRetryLimit,
+    proactiveAssistantModelCacheTtlMs,
+    proactiveAssistantModelOwnerDailyLimit,
+    proactiveAssistantModelGlobalDailyLimit,
+    proactiveAssistantModelBudgetTimezone,
+    proactiveNotificationAutoRun: booleanValue(
+      env.proactiveNotificationAutoRun ?? env.PROACTIVE_NOTIFICATION_AUTO_RUN,
+      nodeEnv === "production",
+      "PROACTIVE_NOTIFICATION_AUTO_RUN",
+    ),
+    proactiveNotificationPollMs,
+    proactiveNotificationQuietStart,
+    proactiveNotificationQuietEnd,
+    proactiveNotificationHourlyLimit,
+    proactiveNotificationDailyLimit,
     actionReminderAutoRun: booleanValue(
       env.actionReminderAutoRun ?? env.ACTION_REMINDER_AUTO_RUN,
       nodeEnv === "production",

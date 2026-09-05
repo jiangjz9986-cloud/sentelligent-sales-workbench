@@ -17,6 +17,7 @@ import { buildOpportunityTimeline } from "../opportunityTimeline.js";
 import { SalesDecisionPanel } from "../SalesDecisionPanel.jsx";
 import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { ProactiveAssistantPanel } from "../components/ProactiveAssistantPanel.jsx";
 import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import {
   FieldTags,
@@ -215,9 +216,21 @@ const opportunityConfig = {
 };
 
 function OpportunityDetailBody({ selected, viewMode, setViewMode, onSelect }) {
-  const { apiClient, backendStatus, workbenchCustomers: customersList } = useWorkbenchData();
-  const { handleSaveOpportunity } = useWorkbenchActions();
-  const { navigateTo: setActive, setSelectedCustomerId } = useNavigation();
+  const {
+    apiClient,
+    backendStatus,
+    workbenchCustomers: customersList,
+    overviewSummary,
+  } = useWorkbenchData();
+  const {
+    handleSaveOpportunity,
+    handleCreateProactiveConfirmationPreview,
+    handleConfirmProactiveWriteback,
+    handleProactiveLifecycleChange,
+    handleUpdateProactiveSuggestion,
+    handleRefreshProactive,
+  } = useWorkbenchActions();
+  const { navigateTo: setActive, setSelectedCustomerId, openOpportunityDetail } = useNavigation();
   const isCreateView = viewMode === "create";
   const isEditView = viewMode === "edit";
   const timelineItems = buildOpportunityTimeline(selected);
@@ -246,6 +259,21 @@ function OpportunityDetailBody({ selected, viewMode, setViewMode, onSelect }) {
         <MetricInline label="负责人" value={selected.owner} />
         <MetricInline label="阶段" value={selected.stage} />
       </div>
+      <ProactiveAssistantPanel
+        assistant={overviewSummary?.proactiveAssistant}
+        scope={{ opportunityId: selected.id }}
+        apiClient={apiClient}
+        backendStatus={backendStatus}
+        title="商机主动建议"
+        onCreatePreview={handleCreateProactiveConfirmationPreview}
+        onConfirmWriteback={handleConfirmProactiveWriteback}
+        onLifecycleChange={handleProactiveLifecycleChange}
+        onUpdateSuggestion={handleUpdateProactiveSuggestion}
+        onRefresh={handleRefreshProactive}
+        onOpenOpportunity={(opportunityId) => {
+          if (opportunityId && openOpportunityDetail) openOpportunityDetail(opportunityId);
+        }}
+      />
       <div className="two-col">
         <Panel title="客户诉求 / 需求" meta="商机字段">
           <InfoList items={selected.requirements} tone="blue" />

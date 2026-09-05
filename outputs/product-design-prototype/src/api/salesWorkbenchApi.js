@@ -348,6 +348,226 @@ function queryPath(path, values) {
   return suffix ? `${path}?${suffix}` : path;
 }
 
+function assertProactiveAssistant(value, path = "proactiveAssistant") {
+  const item = assertApiEntity("proactiveAssistant", value, path);
+  if (!Array.isArray(item.items)) throw new TypeError(`${path}.items: expected array`);
+  item.items.forEach((suggestion, index) => {
+    if (!suggestion || typeof suggestion !== "object" || Array.isArray(suggestion)) {
+      throw new TypeError(`${path}.items[${index}]: expected object`);
+    }
+    for (const field of ["id", "schemaVersion", "subjectType", "subjectId", "title", "conclusion", "modelVersion", "source", "confirmationStatus"]) {
+      if (typeof suggestion[field] !== "string" || !suggestion[field].trim()) {
+        throw new TypeError(`${path}.items[${index}].${field}: expected non-empty string`);
+      }
+    }
+    if (!Number.isSafeInteger(suggestion.opportunityVersion) || suggestion.opportunityVersion < 1) {
+      throw new TypeError(`${path}.items[${index}].opportunityVersion: expected positive integer`);
+    }
+    if (!Number.isSafeInteger(suggestion.customerVersion) || suggestion.customerVersion < 1) {
+      throw new TypeError(`${path}.items[${index}].customerVersion: expected positive integer`);
+    }
+    if (suggestion.confidence !== null
+      && (typeof suggestion.confidence !== "number" || !Number.isFinite(suggestion.confidence))) {
+      throw new TypeError(`${path}.items[${index}].confidence: expected nullable number`);
+    }
+    if (suggestion.confidenceLevel !== undefined
+      && (typeof suggestion.confidenceLevel !== "string" || !suggestion.confidenceLevel.trim())) {
+      throw new TypeError(`${path}.items[${index}].confidenceLevel: expected non-empty string`);
+    }
+    if (suggestion.confidenceCalibrated !== undefined && typeof suggestion.confidenceCalibrated !== "boolean") {
+      throw new TypeError(`${path}.items[${index}].confidenceCalibrated: expected boolean`);
+    }
+    if (suggestion.priority !== undefined
+      && suggestion.priority !== null
+      && (typeof suggestion.priority !== "string" || !suggestion.priority.trim())) {
+      throw new TypeError(`${path}.items[${index}].priority: expected nullable string`);
+    }
+    if (suggestion.priorityCalibrated !== undefined && typeof suggestion.priorityCalibrated !== "boolean") {
+      throw new TypeError(`${path}.items[${index}].priorityCalibrated: expected boolean`);
+    }
+    for (const field of ["facts", "inferences", "unknowns", "risks", "nextActions", "evidenceRefs", "sourceRefs"]) {
+      if (!Array.isArray(suggestion[field])) throw new TypeError(`${path}.items[${index}].${field}: expected array`);
+    }
+    if (!suggestion.trigger || typeof suggestion.trigger !== "object" || typeof suggestion.trigger.type !== "string") {
+      throw new TypeError(`${path}.items[${index}].trigger: expected object`);
+    }
+    if (!suggestion.writebackPreview || suggestion.writebackPreview.requiresHumanConfirmation !== true
+      || suggestion.writebackPreview.automaticWriteAllowed !== false) {
+      throw new TypeError(`${path}.items[${index}].writebackPreview: expected human-confirmation boundary`);
+    }
+    if (suggestion.writebackAllowed !== false) {
+      throw new TypeError(`${path}.items[${index}].writebackAllowed: expected false`);
+    }
+    if (!suggestion.previewDigests || typeof suggestion.previewDigests !== "object" || Array.isArray(suggestion.previewDigests)) {
+      throw new TypeError(`${path}.items[${index}].previewDigests: expected object`);
+    }
+    for (const [target, digest] of Object.entries(suggestion.previewDigests)) {
+      if (!["action", "risk"].includes(target) || !/^[0-9a-f]{64}$/u.test(digest)) {
+        throw new TypeError(`${path}.items[${index}].previewDigests: expected SHA-256 target digests`);
+      }
+    }
+  });
+  return item;
+}
+
+const PROACTIVE_NOTIFICATION_CHANNELS = new Set(["in_app", "weixin", "pushplus"]);
+const PROACTIVE_NOTIFICATION_STATUSES = new Set(["queued", "processing", "sent", "failed", "read"]);
+
+function proactiveNotificationText(value, path, { max, nullable = false } = {}) {
+  if (nullable && (value === null || value === undefined || value === "")) return null;
+  const normalized = requiredApiString(value, path);
+  if (Number.isSafeInteger(max) && normalized.length > max) throw new TypeError(`${path}: exceeds ${max} characters`);
+  return normalized;
+}
+
+function assertProactiveNotification(value, path = "proactiveNotification") {
+  const item = apiObject(value, path);
+  const id = proactiveNotificationText(item.id, `${path}.id`, { max: 200 });
+  const suggestionId = proactiveNotificationText(item.suggestionId, `${path}.suggestionId`, { max: 500 });
+  const suggestionVersion = requiredApiVersion(item.suggestionVersion, `${path}.suggestionVersion`);
+  const channel = proactiveNotificationText(item.channel, `${path}.channel`, { max: 20 });
+  const status = proactiveNotificationText(item.status, `${path}.status`, { max: 20 });
+  if (!PROACTIVE_NOTIFICATION_CHANNELS.has(channel)) throw new TypeError(`${path}.channel: invalid channel`);
+  if (!PROACTIVE_NOTIFICATION_STATUSES.has(status)) throw new TypeError(`${path}.status: invalid status`);
+  const title = proactiveNotificationText(item.title, `${path}.title`, { max: 200 });
+  const trigger = proactiveNotificationText(item.trigger, `${path}.trigger`, { max: 100 });
+  const summary = proactiveNotificationText(item.summary, `${path}.summary`, { max: 500 });
+  const priority = item.priority;
+  const attemptCount = item.attemptCount;
+  if (!Number.isSafeInteger(priority) || priority < 0 || priority > 100) {
+    throw new TypeError(`${path}.priority: expected integer in 0..100`);
+  }
+  if (!Number.isSafeInteger(attemptCount) || attemptCount < 0) {
+    throw new TypeError(`${path}.attemptCount: expected non-negative integer`);
+  }
+  const availableAt = proactiveNotificationText(item.availableAt, `${path}.availableAt`, { max: 80 });
+  const lastErrorCode = proactiveNotificationText(item.lastErrorCode, `${path}.lastErrorCode`, { max: 100, nullable: true });
+  const sentAt = proactiveNotificationText(item.sentAt, `${path}.sentAt`, { max: 80, nullable: true });
+  const readAt = proactiveNotificationText(item.readAt, `${path}.readAt`, { max: 80, nullable: true });
+  const createdAt = proactiveNotificationText(item.createdAt, `${path}.createdAt`, { max: 80 });
+  const updatedAt = proactiveNotificationText(item.updatedAt, `${path}.updatedAt`, { max: 80 });
+  if (status === "read" && !readAt) throw new TypeError(`${path}.readAt: required for read status`);
+  if (status !== "read" && readAt) throw new TypeError(`${path}.readAt: unread status cannot have readAt`);
+  // Return an explicit allowlist. Owner identity, raw outbox identifiers, and
+  // any future backend fields never enter the browser notification state.
+  return {
+    id,
+    suggestionId,
+    suggestionVersion,
+    channel,
+    status,
+    title,
+    trigger,
+    priority,
+    summary,
+    attemptCount,
+    availableAt,
+    lastErrorCode,
+    sentAt,
+    readAt,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function assertProactiveNotificationPage(value, path = "proactiveNotifications") {
+  const page = apiObject(value, path);
+  if (!Array.isArray(page.items)) throw new TypeError(`${path}.items: expected array`);
+  if (!Number.isSafeInteger(page.total) || page.total < 0) throw new TypeError(`${path}.total: expected non-negative integer`);
+  return {
+    items: page.items.map((item, index) => assertProactiveNotification(item, `${path}.items[${index}]`)),
+    total: page.total,
+  };
+}
+
+function assertProactiveMutationItem(value, path = "proactiveAssistantSuggestion") {
+  const item = assertApiEntity("proactiveAssistantSuggestion", value, path);
+  if (typeof item.id !== "string" || !item.id.trim()) throw new TypeError(`${path}.id: expected non-empty string`);
+  if (!Number.isSafeInteger(item.version) || item.version < 1) throw new TypeError(`${path}.version: expected positive integer`);
+  const status = item.proactiveStatus ?? item.lifecycleStatus ?? item.status;
+  if (typeof status !== "string" || !status.trim()) throw new TypeError(`${path}.status: expected non-empty string`);
+  return item;
+}
+
+function assertProactiveConfirmationPreview(value, path = "proactiveConfirmationPreview") {
+  const preview = assertApiEntity("proactiveConfirmationPreview", value, path);
+  for (const field of ["id", "owner", "suggestionId", "target", "status", "customerId", "opportunityId", "previewDigest", "createdAt", "updatedAt", "expiresAt"]) {
+    if (typeof preview[field] !== "string" || !preview[field].trim()) {
+      throw new TypeError(`${path}.${field}: expected non-empty string`);
+    }
+  }
+  if (!new Set(["action", "risk"]).has(preview.target)) {
+    throw new TypeError(`${path}.target: expected action or risk`);
+  }
+  if (!new Set(["open", "completed", "cancelled", "expired"]).has(preview.status)) {
+    throw new TypeError(`${path}.status: expected a valid lifecycle status`);
+  }
+  if (!Number.isSafeInteger(preview.revision) || preview.revision < 1) {
+    throw new TypeError(`${path}.revision: expected positive integer`);
+  }
+  for (const field of ["opportunityVersion", "customerVersion"]) {
+    if (!Number.isSafeInteger(preview[field]) || preview[field] < 1) {
+      throw new TypeError(`${path}.${field}: expected positive integer`);
+    }
+  }
+  if (!/^[0-9a-f]{64}$/u.test(preview.previewDigest)) {
+    throw new TypeError(`${path}.previewDigest: expected SHA-256 digest`);
+  }
+  if (!preview.preview || typeof preview.preview !== "object" || Array.isArray(preview.preview)) {
+    throw new TypeError(`${path}.preview: expected object`);
+  }
+  if (!preview.snapshot || typeof preview.snapshot !== "object" || Array.isArray(preview.snapshot)) {
+    throw new TypeError(`${path}.snapshot: expected object`);
+  }
+  for (const field of ["confirmedAt", "confirmedBy", "resultItemId"]) {
+    if (preview[field] !== null && typeof preview[field] !== "string") {
+      throw new TypeError(`${path}.${field}: expected nullable string`);
+    }
+  }
+  if (typeof preview.replayed !== "boolean") throw new TypeError(`${path}.replayed: expected boolean`);
+  return preview;
+}
+
+/**
+ * A proactive writeback is a polymorphic result (one confirmed target per
+ * request). Keep this boundary explicit rather than letting the panel treat
+ * an arbitrary response as a newly-created action/risk.
+ */
+function assertProactiveWritebackOutcome(value, path = "proactiveWritebackOutcome") {
+  const outcome = apiObject(value, path);
+  if (!new Set(["created", "replayed"]).has(outcome.status)) {
+    throw new TypeError(`${path}.status: expected created or replayed`);
+  }
+  if (!new Set(["action", "risk"]).has(outcome.target)) {
+    throw new TypeError(`${path}.target: expected action or risk`);
+  }
+  if (typeof outcome.replayed !== "boolean") {
+    throw new TypeError(`${path}.replayed: expected boolean`);
+  }
+  if (typeof outcome.proactiveId !== "string" || !outcome.proactiveId.trim()) {
+    throw new TypeError(`${path}.proactiveId: expected non-empty string`);
+  }
+  if (typeof outcome.suggestionId !== "string" || !outcome.suggestionId.trim()) {
+    throw new TypeError(`${path}.suggestionId: expected non-empty string`);
+  }
+  if (outcome.suggestionId !== outcome.proactiveId) {
+    throw new TypeError(`${path}.suggestionId: expected to match proactiveId`);
+  }
+  const action = outcome.action == null
+    ? null
+    : assertApiEntity("actionItem", outcome.action, `${path}.action`);
+  const risk = outcome.risk == null
+    ? null
+    : assertApiEntity("riskItem", outcome.risk, `${path}.risk`);
+  if (outcome.target === "action" && !action) {
+    throw new TypeError(`${path}.action: expected action item for action target`);
+  }
+  if (outcome.target === "risk" && !risk) {
+    throw new TypeError(`${path}.risk: expected risk item for risk target`);
+  }
+  return { ...outcome, action, risk };
+}
+
 function versionHeaders(version) {
   if (!Number.isSafeInteger(version) || version <= 0) {
     throw new TypeError("A positive integer entity version is required");
@@ -1131,6 +1351,155 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     async getDashboardSummary() {
       const summary = await requestApi("/api/dashboard/summary");
       return assertApiEntity("dashboardSummary", summary.item);
+    },
+
+    async getProactiveAssistant({
+      limit,
+      offset,
+      status,
+      trigger,
+      subjectId,
+      customerId,
+      opportunityId,
+      includeHistory,
+      signal,
+    } = {}) {
+      const response = await requestApi(queryPath("/api/assistant/proactive", {
+        limit,
+        offset,
+        status,
+        trigger,
+        subjectId,
+        customerId,
+        opportunityId,
+        ...(includeHistory ? { includeHistory: true } : {}),
+      }), { signal });
+      return assertProactiveAssistant(response.item, "proactiveAssistant.item");
+    },
+
+    async getProactiveNotifications({ limit, offset, signal } = {}) {
+      const response = await requestApi(queryPath("/api/assistant/proactive/notifications", { limit, offset }), { signal });
+      return assertProactiveNotificationPage(response, "proactiveNotifications");
+    },
+
+    async markProactiveNotificationRead(notificationId) {
+      const id = requiredApiString(notificationId, "proactiveNotificationId");
+      const response = await requestApi(`/api/assistant/proactive/notifications/${encodeURIComponent(id)}/read`, {
+        method: "POST",
+        body: "{}",
+      });
+      return assertProactiveNotification(response?.item, "proactiveNotification.item");
+    },
+
+    async updateProactiveLifecycle(proactiveId, payload = {}, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const key = requiredApiString(idempotencyKey, "proactive lifecycle Idempotency-Key");
+      const status = requiredApiString(payload.status, "proactiveLifecycle.status");
+      const allowed = new Set(["pending", "deferred", "snoozed", "dismissed", "ignored", "resolved", "confirmed", "executed", "conflict", "expired", "failed"]);
+      if (!allowed.has(status)) throw new TypeError("proactiveLifecycle.status: invalid lifecycle status");
+      const body = pickOwnFields(payload, ["status", "snoozedUntil", "dismissReason", "resultRefs", "expectedVersion"]);
+      body.status = status;
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive lifecycle update"),
+        body: JSON.stringify(body),
+      });
+      return assertProactiveMutationItem(response?.item, "proactiveLifecycle.item");
+    },
+
+    async updateProactiveSuggestion(proactiveId, fields = {}, expectedVersion, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const key = requiredApiString(idempotencyKey, "proactive fields Idempotency-Key");
+      const version = requiredApiVersion(expectedVersion, "proactiveFields.expectedVersion");
+      const body = {
+        ...pickOwnFields(fields, ["assignee", "dueDate", "priority", "expectedResult"]),
+        expectedVersion: version,
+      };
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/fields`, {
+        method: "PATCH",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive fields update"),
+        body: JSON.stringify(body),
+      });
+      return assertProactiveMutationItem(response?.item, "proactiveFields.item");
+    },
+
+    async createProactiveConfirmationPreview(proactiveId, target, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      if (target !== "action" && target !== "risk") {
+        throw new TypeError("proactiveConfirmationPreview.target: expected action or risk");
+      }
+      const key = requiredApiString(idempotencyKey, "proactive confirmation preview Idempotency-Key");
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/previews`, {
+        method: "POST",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive confirmation preview"),
+        body: JSON.stringify({ target }),
+      });
+      return assertProactiveConfirmationPreview(response?.item, "proactiveConfirmationPreview.item");
+    },
+
+    async getProactiveConfirmationPreview(proactiveId, previewId) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const durableId = requiredApiString(previewId, "confirmationPreviewId");
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/previews/${encodeURIComponent(durableId)}`);
+      return assertProactiveConfirmationPreview(response?.item, "proactiveConfirmationPreview.item");
+    },
+
+    async cancelProactiveConfirmationPreview(proactiveId, previewId, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const durableId = requiredApiString(previewId, "confirmationPreviewId");
+      const key = requiredApiString(idempotencyKey, "proactive confirmation preview cancellation Idempotency-Key");
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/previews/${encodeURIComponent(durableId)}/cancel`, {
+        method: "POST",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive confirmation preview cancellation"),
+        body: JSON.stringify({ cancel: true }),
+      });
+      return assertProactiveConfirmationPreview(response?.item, "proactiveConfirmationPreview.item");
+    },
+
+    async confirmProactiveWriteback(proactiveId, payload = {}, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const target = payload?.target;
+      if (target !== "action" && target !== "risk") {
+        throw new TypeError("proactiveWriteback.target: expected action or risk");
+      }
+      const key = requiredApiString(idempotencyKey, "proactive writeback Idempotency-Key");
+      const customerId = requiredApiString(payload.customerId, "proactiveWriteback.customerId");
+      const opportunityId = requiredApiString(payload.opportunityId, "proactiveWriteback.opportunityId");
+      const confirmationPreviewId = requiredApiString(payload.confirmationPreviewId, "proactiveWriteback.confirmationPreviewId");
+      const expectedOpportunityVersion = requiredApiVersion(
+        payload.expectedOpportunityVersion,
+        "proactiveWriteback.expectedOpportunityVersion",
+      );
+      const expectedCustomerVersion = requiredApiVersion(
+        payload.expectedCustomerVersion,
+        "proactiveWriteback.expectedCustomerVersion",
+      );
+      const previewDigest = requiredApiString(payload.previewDigest, "proactiveWriteback.previewDigest");
+      if (!/^[0-9a-f]{64}$/u.test(previewDigest)) {
+        throw new TypeError("proactiveWriteback.previewDigest: expected SHA-256 digest");
+      }
+      const preview = payload?.preview;
+      if (!preview || typeof preview !== "object" || Array.isArray(preview)) {
+        throw new TypeError("proactiveWriteback.preview: expected object");
+      }
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/confirm`, {
+        method: "POST",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive writeback"),
+        body: JSON.stringify({
+          confirmationPreviewId,
+          target,
+          customerId,
+          opportunityId,
+          expectedOpportunityVersion,
+          expectedCustomerVersion,
+          previewDigest,
+          preview: pickOwnFields(preview, [
+            "title", "reason", "target", "evidence", "action",
+            "customerId", "opportunityId",
+          ]),
+        }),
+      });
+      return assertProactiveWritebackOutcome(response?.item, "proactiveWritebackOutcome.item");
     },
 
     async listHospitalTenders(filters = {}, { signal } = {}) {

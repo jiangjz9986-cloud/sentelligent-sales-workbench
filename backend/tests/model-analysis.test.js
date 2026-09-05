@@ -3,7 +3,11 @@ import { describe, it } from "node:test";
 
 import {
   analyzeQuickRecord,
+  composeWeeklyDraftWithModel,
+  enhanceSolutionDraftWithModel,
+  enhanceWeeklyDraftWithModel,
   enhanceItineraryOrderWithModel,
+  generateManualSuggestion,
   parseModelAnalysisContent,
 } from "../src/modelAnalysis.js";
 
@@ -41,6 +45,36 @@ function modelContent(overrides = {}) {
       action: { title: "建议动作", text: "同步商机并输出规划材料。" },
     },
     ...overrides,
+  });
+}
+
+function draftContent(content = "# 模型草稿\n\n基于已确认业务事实整理。") {
+  return JSON.stringify({ content });
+}
+
+function draftFixture(overrides = {}) {
+  return {
+    title: "销售草稿",
+    content: "# 确定性草稿\n\n请人工补充待确认事实。",
+    sourceRefs: [{ type: "customer", id: "customer-a" }],
+    ...overrides,
+  };
+}
+
+function modelConfig(overrides = {}) {
+  return {
+    aiAnalysisMode: "model",
+    modelProvider: "deepseek",
+    modelApiKey: "fixture",
+    modelBaseUrl: "https://api.deepseek.com/",
+    modelName: "deepseek-v4-flash",
+    ...overrides,
+  };
+}
+
+function modelDraftFetch(content = draftContent()) {
+  return async () => jsonResponse({
+    choices: [{ message: { content } }],
   });
 }
 
@@ -233,6 +267,7 @@ describe("model-backed itinerary ordering", () => {
       summary: "优先处理重点客户，再沿返程方向拜访客户甲。",
       advice: ["提前确认停车入口", "预留十分钟签到"],
       source: "deepseek",
+      fallbackReason: null,
     });
     assert.doesNotMatch(JSON.stringify(result), /fixture/);
   });
@@ -257,7 +292,11 @@ describe("model-backed itinerary ordering", () => {
           }) } }],
         }),
       });
-      assert.deepEqual(result, fallback);
+      assert.equal(result.source, "fallback");
+      assert.equal(result.fallbackReason, "itinerary_order_model_failure");
+      const { source: _source, fallbackReason: _fallbackReason, ...base } = result;
+      const { source: _fallbackSource, ...fallbackBase } = fallback;
+      assert.deepEqual(base, fallbackBase);
     }
   });
 
@@ -274,6 +313,162 @@ describe("model-backed itinerary ordering", () => {
     });
 
     assert.equal(called, false);
-    assert.deepEqual(result, fallback);
+    assert.equal(result.source, "deterministic");
+    assert.equal(result.fallbackReason, null);
+    const { source: _source, fallbackReason: _fallbackReason, ...base } = result;
+    const { source: _fallbackSource, ...fallbackBase } = fallback;
+    assert.deepEqual(base, fallbackBase);
+  });
+});
+
+describe("model provenance for drafts and suggestions", () => {
+  const weeklyContext = {
+    periodStart: "2026-08-17",
+    periodEnd: "2026-08-23",
+    records: [{
+      id: "record-1",
+      occurredAt: "2026-08-19T09:00:00+08:00",
+      sourceChannel: "manual",
+      rawContent: "客户确认下周安排技术交流。",
+      analysis: {},
+    }],
+    knowledge: [],
+    sourceRefs: [{ type: "quick_record", id: "record-1" }],
+  };
+  const solutionContext = {
+    owner: "owner-1",
+    artifactType: "solution_framework",
+    customer: { id: "customer-a", name: "客户甲" },
+    opportunity: { id: "opportunity-a", name: "升级项目" },
+    actions: [{ title: "确认技术交流时间" }],
+    knowledge: [],
+  };
+  const manualInput = {
+    type: "customer_profile",
+    title: "客户画像补全建议",
+    context: { customer: "客户甲", customerId: "customer-a" },
+  };
+
+  it("marks direct weekly enhancement as model-generated on valid output", async () => {
+    const result = await enhanceWeeklyDraftWithModel(
+      draftFixture(),
+      weeklyContext,
+      modelConfig(),
+      { fetchImpl: modelDraftFetch(draftContent("# 周报模型正文")) },
+    );
+
+    assert.equal(result.content, "# 周报模型正文");
+    assert.equal(result.source, "deepseek");
+    assert.equal(result.fallbackReason, null);
+  });
+
+  it("marks weekly and solution drafts as deterministic when model mode is disabled", async () => {
+    const weekly = await enhanceWeeklyDraftWithModel(
+      draftFixture(),
+      weeklyContext,
+      { aiAnalysisMode: "mock", modelApiKey: "" },
+      { fetchImpl: async () => { throw new Error("must not call model"); } },
+    );
+    const solution = await enhanceSolutionDraftWithModel(
+      draftFixture(),
+      solutionContext,
+      { aiAnalysisMode: "mock", modelApiKey: "" },
+      { fetchImpl: async () => { throw new Error("must not call model"); } },
+    );
+
+    for (const result of [weekly, solution]) {
+      assert.equal(result.source, "deterministic");
+      assert.equal(result.fallbackReason, null);
+      assert.equal(result.content, draftFixture().content);
+    }
+  });
+
+  it("distinguishes a missing model key for weekly, solution, and manual suggestions", async () => {
+    const config = { aiAnalysisMode: "model", modelProvider: "deepseek", modelApiKey: "" };
+    const fetchImpl = async () => { throw new Error("must not call model without a key"); };
+    const weekly = await enhanceWeeklyDraftWithModel(draftFixture(), weeklyContext, config, { fetchImpl });
+    const composed = await composeWeeklyDraftWithModel(draftFixture(), weeklyContext, config, { fetchImpl });
+    const solution = await enhanceSolutionDraftWithModel(draftFixture(), solutionContext, config, { fetchImpl });
+    const suggestion = await generateManualSuggestion(manualInput, config, { fetchImpl });
+
+    assert.deepEqual(
+      [weekly, composed, solution, suggestion].map(({ source, fallbackReason }) => ({ source, fallbackReason })),
+      [
+        { source: "fallback", fallbackReason: "weekly_draft_missing_model_key" },
+        { source: "fallback", fallbackReason: "weekly_draft_missing_model_key" },
+        { source: "fallback", fallbackReason: "solution_draft_missing_model_key" },
+        { source: "fallback", fallbackReason: "manual_suggestion_missing_model_key" },
+      ],
+    );
+  });
+
+  it("keeps the legacy weekly failure reason for an otherwise unclassified provider error", async () => {
+    const result = await enhanceWeeklyDraftWithModel(
+      draftFixture(),
+      weeklyContext,
+      modelConfig(),
+      { fetchImpl: async () => { throw new Error("provider unavailable"); } },
+    );
+
+    assert.equal(result.source, "fallback");
+    assert.equal(result.fallbackReason, "weekly_draft_model_failure");
+    assert.equal(result.content, draftFixture().content);
+  });
+
+  it("attributes invalid JSON, timeout, and network failures without exposing provider errors", async () => {
+    const invalidJson = await enhanceSolutionDraftWithModel(
+      draftFixture(),
+      solutionContext,
+      modelConfig(),
+      { fetchImpl: modelDraftFetch("{not-json") },
+    );
+    const timeoutError = Object.assign(new Error("upstream deadline exceeded"), { name: "TimeoutError" });
+    const timeout = await generateManualSuggestion(
+      manualInput,
+      modelConfig(),
+      { fetchImpl: async () => { throw timeoutError; } },
+    );
+    const network = await enhanceWeeklyDraftWithModel(
+      draftFixture(),
+      weeklyContext,
+      modelConfig(),
+      { fetchImpl: async () => { throw Object.assign(new Error("fetch failed"), { code: "ECONNRESET" }); } },
+    );
+
+    assert.equal(invalidJson.source, "fallback");
+    assert.equal(invalidJson.fallbackReason, "solution_draft_invalid_json");
+    assert.equal(timeout.source, "fallback");
+    assert.equal(timeout.fallbackReason, "manual_suggestion_timeout");
+    assert.equal(network.source, "fallback");
+    assert.equal(network.fallbackReason, "weekly_draft_network_error");
+    assert.doesNotMatch(JSON.stringify({ invalidJson, timeout, network }), /deadline|ECONNRESET|fetch failed/);
+  });
+
+  it("marks a valid-but-constrained-invalid itinerary response as a model fallback", async () => {
+    const fallback = {
+      orderedStopIds: ["customer-a", "customer-b"],
+      summary: "按预约时间和行车时长生成基础顺序。",
+      advice: ["出发前确认预约。"],
+      source: "deterministic",
+    };
+    const context = {
+      stops: [{ id: "customer-a" }, { id: "customer-b" }],
+    };
+    const result = await enhanceItineraryOrderWithModel(
+      fallback,
+      context,
+      modelConfig(),
+      {
+        fetchImpl: modelDraftFetch(JSON.stringify({
+          orderedStopIds: ["customer-a", "customer-a"],
+          summary: "重复停靠点",
+          advice: [],
+        })),
+      },
+    );
+
+    assert.equal(result.source, "fallback");
+    assert.equal(result.fallbackReason, "itinerary_order_model_failure");
+    assert.deepEqual(result.orderedStopIds, fallback.orderedStopIds);
   });
 });

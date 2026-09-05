@@ -148,6 +148,7 @@ export function createHospitalTenderScheduler({
   customersProvider,
   notifier = null,
   notificationEnabled = () => notifier !== null,
+  onBatchCommitted = null,
   clock = () => new Date(),
   idFactory = randomUUID,
   intervalMinutes = DEFAULT_INTERVAL_MINUTES,
@@ -160,6 +161,9 @@ export function createHospitalTenderScheduler({
   if (typeof customersProvider !== "function") throw new TypeError("customersProvider is required");
   if (typeof notifier !== "function" && notifier !== null) throw new TypeError("notifier must be a function");
   if (typeof notificationEnabled !== "function") throw new TypeError("notificationEnabled must be a function");
+  if (typeof onBatchCommitted !== "function" && onBatchCommitted !== null) {
+    throw new TypeError("onBatchCommitted must be a function");
+  }
   const configuredInterval = Number.isSafeInteger(intervalMinutes) && intervalMinutes > 0
     ? intervalMinutes
     : DEFAULT_INTERVAL_MINUTES;
@@ -439,6 +443,26 @@ export function createHospitalTenderScheduler({
           nextRunAt: addMinutes(finishedAt, current.intervalMinutes),
         });
         throw error;
+      }
+
+      // The database transaction above has committed before this callback is
+      // reached.  Pass only stable notice/customer identities to downstream
+      // consumers; the raw tender snapshot stays inside this scheduler.
+      if (onBatchCommitted) {
+        await onBatchCommitted({
+          changedAt: snapshot.generatedAt,
+          snapshotId: snapshot.id,
+          runId,
+          notices: result.notices.map((notice) => ({
+            id: notice.id,
+            identityKey: notice.identityKey,
+            match: {
+              matchedCustomerIds: Array.isArray(notice.match?.matchedCustomerIds)
+                ? [...notice.match.matchedCustomerIds]
+                : [],
+            },
+          })),
+        });
       }
 
       const sourceFailureCount = snapshot.payload.sources.filter((source) => (

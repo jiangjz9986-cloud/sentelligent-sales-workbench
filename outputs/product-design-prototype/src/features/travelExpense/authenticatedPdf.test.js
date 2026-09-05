@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 
 const moduleUrl = new URL("./authenticatedPdf.js", import.meta.url);
 const componentUrl = new URL("./AuthenticatedPdfFrame.jsx", import.meta.url);
+const invoicePreviewUrl = new URL("./InvoicePrintPreview.jsx", import.meta.url);
 
 async function loadAuthenticatedPdfModule() {
   if (!existsSync(fileURLToPath(moduleUrl))) return {};
@@ -124,6 +125,9 @@ describe("authenticated PDF loading", () => {
     assert.match(source, /new AbortController\(\)/);
     assert.match(source, /loadAuthenticatedPdfBlob/);
     assert.match(source, /getDocument/);
+    assert.match(source, /isEvalSupported:\s*false/);
+    const invoicePreviewSource = readFileSync(fileURLToPath(invoicePreviewUrl), "utf8");
+    assert.match(invoicePreviewSource, /isEvalSupported:\s*false/);
     assert.match(source, /renderTask\.promise/);
     assert.match(source, /renderTask\?\.cancel\(\)/);
     assert.match(source, /loadingTask\?\.destroy\(\)/);

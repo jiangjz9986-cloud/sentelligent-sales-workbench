@@ -272,7 +272,11 @@ async function renderFirstPdfPage(blob, { canvasFactory }) {
     loadPdfRuntime(),
     blob.arrayBuffer(),
   ]);
-  const loadingTask = pdfJs.getDocument({ data: new Uint8Array(buffer) });
+  const loadingTask = pdfJs.getDocument({
+    data: new Uint8Array(buffer),
+    // Protected attachments are untrusted input; do not evaluate PDF function strings.
+    isEvalSupported: false,
+  });
   let documentProxy;
   let page;
   let canvas;
