@@ -107,7 +107,7 @@ jobs:
 
       - name: Install WebKit browser
         working-directory: outputs/product-design-prototype
-        run: npx playwright install --with-deps webkit
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Verify release tooling and source boundaries
         run: node --test scripts/*.test.mjs
