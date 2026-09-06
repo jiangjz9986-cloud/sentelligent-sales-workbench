@@ -99,7 +99,7 @@ describe("root package QA scripts", () => {
       "node scripts/webkit-qa.mjs",
     );
     assert.equal(frontendPackageJson.devDependencies?.playwright, "1.61.1");
-    assert.match(ciWorkflow, /playwright install --with-deps webkit/);
+    assert.match(ciWorkflow, /playwright install --with-deps chromium webkit/);
     assert.match(
       ciWorkflow,
       /npm --prefix outputs\/product-design-prototype run qa:webkit/,
