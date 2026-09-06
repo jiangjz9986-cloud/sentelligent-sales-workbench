@@ -42,6 +42,10 @@ import { apply as applyProactiveConfirmationPreviews } from "./migrations/0038_p
 import { apply as applyProactiveBackgroundRuntime } from "./migrations/0039_proactive_background_runtime.mjs";
 import { apply as applyProactiveNotifications } from "./migrations/0040_proactive_notifications.mjs";
 import { apply as applyProactiveModelBudgetCache } from "./migrations/0041_proactive_model_budget_cache.mjs";
+import { apply as applyCustomerProactiveSubjects } from "./migrations/0042_customer_proactive_subjects.mjs";
+import { apply as applyHospitalTenderCanonicalBridge } from "./migrations/0043_hospital_tender_canonical_bridge.mjs";
+import { apply as applyActionRiskWritebackFields } from "./migrations/0044_action_risk_writeback_fields.mjs";
+import { apply as applyCustomerImportBatches } from "./migrations/0045_customer_import_batches.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrations = [
@@ -283,6 +287,30 @@ const migrations = [
     path: resolve(here, "migrations", "0041_proactive_model_budget_cache.mjs"),
     type: "module",
     apply: applyProactiveModelBudgetCache,
+  },
+  {
+    version: "0042",
+    path: resolve(here, "migrations", "0042_customer_proactive_subjects.mjs"),
+    type: "module",
+    apply: applyCustomerProactiveSubjects,
+  },
+  {
+    version: "0043",
+    path: resolve(here, "migrations", "0043_hospital_tender_canonical_bridge.mjs"),
+    type: "module",
+    apply: applyHospitalTenderCanonicalBridge,
+  },
+  {
+    version: "0044",
+    path: resolve(here, "migrations", "0044_action_risk_writeback_fields.mjs"),
+    type: "module",
+    apply: applyActionRiskWritebackFields,
+  },
+  {
+    version: "0045",
+    path: resolve(here, "migrations", "0045_customer_import_batches.mjs"),
+    type: "module",
+    apply: applyCustomerImportBatches,
   },
 ];
 

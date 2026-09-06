@@ -8,6 +8,7 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 
 - Shared contract: `../../shared/salesWorkbenchApiContract.mjs`
 - Contract version: `2026-09-06`
+- Contract release: `v0.12.0`
 - Owner: main control thread
 
 ## Covered Entities
@@ -22,6 +23,13 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 - `manualConfirmation`
 - `weeklyReport`
 - `solutionDraft`
+- `proactiveAssistant`
+- `proactiveAssistantSubject`
+- `proactiveConfirmationPreview`
+- `hospitalTenderNotice`
+- `hospitalTenderBridge`
+- `customerImportBatch`
+- `customerImportRow`
 
 `manualConfirmation.createdAt` is required because the quick-record UI renders a visible sync history after manual confirmation.
 `actionItem.sourceRecordId` links generated next actions back to the confirmed quick record that created them.
@@ -29,6 +37,14 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 `riskItem.status` is a backend-controlled workflow state; current allowed values are `open`, `accepted`, `in_progress`, and `closed`.
 `knowledgeItem.tags` and `knowledgeItem.content` are required by knowledge search and solution draft citation.
 `solutionDraft.sourceRefs` is required so generated materials remain traceable to customer, opportunity, action, and knowledge records.
+
+The v0.12.0 additive fields are frozen in `07-v0120-upgrade-freeze.md`.
+Customer proactive subjects use the server-owned identity
+`customer:<owner>:<customerId>` and a source digest/revision ledger. Hospital
+tender bridge previews bind to canonical notice revision and digest. Action and
+risk confirmations preserve the reviewed expected result, provenance, and
+writeback digest. Customer CSV/XLSX import is preview/confirm/cancel based and
+never persists original file bytes.
 
 ## Enforcement Points
 
