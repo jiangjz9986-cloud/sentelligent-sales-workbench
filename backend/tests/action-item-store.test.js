@@ -3,6 +3,10 @@ import { describe, it } from "node:test";
 
 import { openDatabase } from "../src/db.js";
 import { createActionItemStore } from "../src/actionItems/actionItemStore.js";
+import {
+  actionWritebackFromRow,
+  computeWritebackDigest,
+} from "../src/actionRisk/index.js";
 
 const OWNER = "继振";
 
@@ -132,6 +136,82 @@ describe("actionItemStore targeting and writes", () => {
         () => store.complete({ owner: OWNER, id: "todo-write-1", expectedVersion: 4 }),
         (error) => error.code === "NOT_FOUND",
       );
+    });
+  });
+
+  it("keeps a canonical writeback digest current across defer and complete", () => {
+    withStore((store, db) => {
+      db.prepare(`
+        INSERT INTO action_items (
+          id, title, owner, status, priority, source_type, source_id,
+          source_proactive_id, remind_at
+        ) VALUES (
+          'todo-digest-1', '确认下一步', $owner, 'pending', '中',
+          'proactive_assistant', 'suggestion-1', 'suggestion-1',
+          '2026-09-07T01:00:00.000Z'
+        )
+      `).run({ $owner: OWNER });
+      const initial = db.prepare("SELECT * FROM action_items WHERE id = 'todo-digest-1'").get();
+      const initialDigest = computeWritebackDigest("action", actionWritebackFromRow(initial));
+      db.prepare("UPDATE action_items SET writeback_digest = $digest WHERE id = 'todo-digest-1'")
+        .run({ $digest: initialDigest });
+
+      store.defer({
+        owner: OWNER,
+        id: "todo-digest-1",
+        expectedVersion: 1,
+        remindAt: "2026-09-08T01:00:00.000Z",
+        due: "2026-09-08",
+      });
+      const deferred = db.prepare("SELECT * FROM action_items WHERE id = 'todo-digest-1'").get();
+      assert.notEqual(deferred.writeback_digest, initialDigest);
+      assert.equal(
+        deferred.writeback_digest,
+        computeWritebackDigest("action", actionWritebackFromRow(deferred)),
+      );
+
+      store.complete({ owner: OWNER, id: "todo-digest-1", expectedVersion: 2 });
+      const completed = db.prepare("SELECT * FROM action_items WHERE id = 'todo-digest-1'").get();
+      assert.notEqual(completed.writeback_digest, deferred.writeback_digest);
+      assert.equal(
+        completed.writeback_digest,
+        computeWritebackDigest("action", actionWritebackFromRow(completed)),
+      );
+    });
+  });
+
+  it("initializes a missing digest for migrated quick-record provenance on defer and complete", () => {
+    withStore((store, db) => {
+      db.prepare(`
+        INSERT INTO action_items (
+          id, title, owner, status, priority, source_type, source_id, remind_at
+        ) VALUES (
+          'todo-migrated-digest-1', '迁移后的快捷记录待办', $owner, 'pending', '中',
+          'quick_record', 'legacy-record-1',
+          '2026-09-07T01:00:00.000Z'
+        )
+      `).run({ $owner: OWNER });
+      assert.equal(
+        db.prepare("SELECT writeback_digest FROM action_items WHERE id = 'todo-migrated-digest-1'").get().writeback_digest,
+        null,
+      );
+
+      store.defer({
+        owner: OWNER,
+        id: "todo-migrated-digest-1",
+        expectedVersion: 1,
+        remindAt: "2026-09-08T01:00:00.000Z",
+        due: "2026-09-08",
+      });
+      const deferred = db.prepare("SELECT * FROM action_items WHERE id = 'todo-migrated-digest-1'").get();
+      assert.equal(deferred.writeback_digest, computeWritebackDigest("action", actionWritebackFromRow(deferred)));
+
+      store.complete({ owner: OWNER, id: "todo-migrated-digest-1", expectedVersion: 2 });
+      const completed = db.prepare("SELECT * FROM action_items WHERE id = 'todo-migrated-digest-1'").get();
+      assert.notEqual(completed.writeback_digest, deferred.writeback_digest);
+      assert.equal(completed.writeback_digest, computeWritebackDigest("action", actionWritebackFromRow(completed)));
+      assert.equal(completed.source_type, "quick_record");
+      assert.equal(completed.source_id, "legacy-record-1");
     });
   });
 

@@ -10,6 +10,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 // Historical production reference only. Tested HEAD is always read from Git.
 export const PRODUCTION_BASELINE_COMMIT = "23695628a8bcaf6012c0548774a91fe5726bf3cc";
 const FRONTEND = "outputs/product-design-prototype";
+const EVIDENCE_RELEASE = "v0120";
 const SOURCE_PATHS = [
   "package.json", "backend/package.json", "backend/package-lock.json",
   "backend/src", "backend/vendor", "shared",
@@ -101,10 +102,10 @@ export function prepareBrowserEvidence({ workspaceRoot, suite, outputRoot }) {
   // Keep paths lexical here so macOS /var -> /private/var aliases cannot make
   // an in-worktree output look like an external directory.
   workspaceRoot = resolve(workspaceRoot);
-  const root = resolve(outputRoot || resolve(workspaceRoot, ".runtime", "browser-evidence", "v0112", suite));
+  const root = resolve(outputRoot || resolve(workspaceRoot, ".runtime", "browser-evidence", EVIDENCE_RELEASE, suite));
   const localPath = relative(workspaceRoot, root);
   if (localPath !== ".." && !localPath.startsWith(`..${sep}`) && !isAbsolute(localPath)) {
-    const standardPath = `.runtime/browser-evidence/v0112/${suite}`;
+    const standardPath = `.runtime/browser-evidence/${EVIDENCE_RELEASE}/${suite}`;
     assert.equal(localPath, standardPath, "Evidence output must be the standard ignored run directory or outside the worktree");
   }
   mkdirSync(root, { recursive: true, mode: 0o700 });

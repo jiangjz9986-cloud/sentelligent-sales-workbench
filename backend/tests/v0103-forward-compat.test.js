@@ -218,15 +218,18 @@ test("exact v0.10.3 remains forward-compatible with the current database", async
     // Phase 1: exact release code creates a real, complete 0032 database.
     await exactV0103Database(oldBackend, databaseUrl);
 
-    // Phase 2: current code upgrades the exact 0032 database through 0033-0041, then its repository/API writes the new ASR key and an owner-scoped
+    // Phase 2: current code upgrades the exact 0032 database through 0033-0045, then its repository/API writes the new ASR key and an owner-scoped
     // customer fixture.
     const upgraded = openDatabase({ databaseUrl });
     try {
       const versions = upgraded.prepare(
         "SELECT version FROM schema_migrations ORDER BY version",
       ).all().map((row) => row.version);
-      assert.equal(versions.length, 40);
-      assert.deepEqual(versions.slice(-9), ["0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041"]);
+      assert.equal(versions.length, 44);
+      assert.deepEqual(versions.slice(-13), [
+        "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041",
+        "0042", "0043", "0044", "0045",
+      ]);
     } finally {
       upgraded.close();
     }
@@ -392,7 +395,7 @@ test("exact v0.10.3 remains forward-compatible with the current database", async
       );
       assert.equal(
         reopened.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
-        40,
+        44,
       );
       assert.ok(reopened.prepare(`
         SELECT name FROM sqlite_master

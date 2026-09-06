@@ -38,6 +38,7 @@ const NOTICE_INPUT_KEYS = new Set([
   "id", "identityKey", "sourceId", "sourceName", "city", "title", "url", "publishedAt",
   "noticeType", "purchaser", "projectCode", "budgetText", "deadlineText", "contentText",
   "hospitalNames", "sourceItemId", "contentSha256", "relevance",
+  "canonicalNoticeId", "canonicalId", "canonicalIdentity",
 ]);
 
 function isPlainObject(value) {
@@ -286,6 +287,11 @@ export function serializeHospitalTenderNotice(
       .map((id) => customerNameById.get(id))
       .filter(Boolean),
     revision: Number(item.revision ?? 1),
+    canonicalNoticeId: item.canonicalNoticeId ?? item.identityKey,
+    canonicalRevision: Number(item.canonicalRevision ?? item.revision ?? 1),
+    canonicalDigest: item.canonicalDigest ?? digestContent(item.contentText),
+    bridgeStatus: item.bridgeStatus ?? "unbridged",
+    bridgeRefs: Array.isArray(item.bridgeRefs) ? item.bridgeRefs : [],
     firstSeenAt: item.firstSeenAt,
     lastSeenAt: item.lastSeenAt,
   };

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { apply as applyProactiveRuntime } from "../src/db/migrations/0039_proactive_background_runtime.mjs";
 import { openDatabase } from "../src/db.js";
+import { createCustomerProactiveSubjectService } from "../src/assistant/customerProactiveSubjectService.js";
 import { createProactiveBackgroundWorker } from "../src/assistant/proactiveBackgroundWorker.js";
 import { createProactiveScanRepository } from "../src/assistant/proactiveScanRepository.js";
 import { createProactiveSuggestionRepository } from "../src/assistant/proactiveSuggestionRepository.js";
@@ -92,6 +93,7 @@ describe("0039 proactive background runtime migration", () => {
       "proactive_scan_lease",
       "proactive_scan_runs",
       "proactive_scan_state",
+      "proactive_subjects",
     ]);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM proactive_scan_state").get().count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM proactive_scan_lease").get().count, 1);
@@ -202,6 +204,377 @@ describe("proactive scan repository leases and events", () => {
 });
 
 describe("proactive background worker", () => {
+  it("syncs one customer subject per owner/customer with the shared suggestion ledger", async () => {
+    const db = database();
+    const harness = clockHarness();
+    insertOpportunity(db, {
+      owner: "owner-a",
+      customerId: "customer-shared",
+      customerName: "共享客户",
+      id: "op-shared-a",
+      name: "共享项目 A",
+    });
+    insertOpportunity(db, {
+      owner: "owner-a",
+      customerId: "customer-shared",
+      customerName: "共享客户",
+      id: "op-shared-b",
+      name: "共享项目 B",
+    });
+    insertOpportunity(db, {
+      owner: "owner-a",
+      customerId: "customer-other",
+      customerName: "另一客户",
+      id: "op-other",
+      name: "另一项目",
+    });
+    insertOpportunity(db, {
+      owner: "owner-b",
+      customerId: "customer-b",
+      customerName: "B 客户",
+      id: "op-b",
+      name: "B 项目",
+    });
+
+    let suggestionId = 0;
+    let subjectId = 0;
+    const suggestionRepository = createProactiveSuggestionRepository(db, {
+      clock: harness.now,
+      idFactory: () => `suggestion-${++suggestionId}`,
+    });
+    const subjectService = createCustomerProactiveSubjectService({
+      db,
+      clock: harness.now,
+      idFactory: () => `subject-${++subjectId}`,
+      suggestionRepository,
+    });
+    const syncCalls = [];
+    const injectedSubjectService = {
+      suggestionRepository,
+      syncCustomer(input) {
+        syncCalls.push({ owner: input.owner, customerId: input.customerId });
+        return subjectService.syncCustomer(input);
+      },
+      assertCurrentRevision: subjectService.assertCurrentRevision,
+      validateRevision: subjectService.validateRevision,
+    };
+    const worker = createProactiveBackgroundWorker({
+      db,
+      clock: harness.now,
+      workerId: "worker-customer-subjects",
+      batchSize: 10,
+      leaseMs: 1_000,
+      retryBaseMs: 10,
+      includeExtendedSignals: false,
+      suggestionRepository,
+      customerProactiveSubjectService: injectedSubjectService,
+    });
+
+    const first = await worker.runOnce({ force: true });
+    assert.equal(first.status, "success");
+    assert.equal(first.objectCount, 4);
+    assert.equal(first.opportunityObjectCount, 4);
+    assert.equal(first.opportunitySuggestionCount, 4);
+    assert.equal(first.customerSubjectCount, 3);
+    assert.equal(first.customerScan.attemptedCount, 3);
+    assert.equal(first.customerScan.succeededCount, 3);
+    assert.equal(first.customerScan.failedCount, 0);
+    assert.equal(first.customerSuggestionCount, 3);
+    assert.equal(first.suggestionCount, 7);
+    assert.equal(first.insertedCount, 7);
+    assert.equal(first.run.customerSubjectCount, 3);
+    assert.deepEqual(syncCalls, [
+      { owner: "owner-a", customerId: "customer-other" },
+      { owner: "owner-a", customerId: "customer-shared" },
+      { owner: "owner-b", customerId: "customer-b" },
+    ]);
+
+    const ownerAItems = suggestionRepository.list({ owner: "owner-a", limit: 100 });
+    const ownerBItems = suggestionRepository.list({ owner: "owner-b", limit: 100 });
+    assert.equal(ownerAItems.filter((item) => item.subjectType === "opportunity").length, 3);
+    assert.equal(ownerAItems.filter((item) => item.subjectType === "customer").length, 2);
+    assert.equal(ownerBItems.filter((item) => item.subjectType === "opportunity").length, 1);
+    assert.equal(ownerBItems.filter((item) => item.subjectType === "customer").length, 1);
+    assert.equal(worker.status().customerProactiveSubjects.lastScan.status, "success");
+    assert.equal(worker.status().customerProactiveSubjects.lastScan.subjectCount, 3);
+
+    const before = subjectService.getSubject({ owner: "owner-a", customerId: "customer-shared" });
+    assert.equal(worker.assertCurrentCustomerSubjectRevision({
+      owner: "owner-a",
+      customerId: "customer-shared",
+      expectedVersion: before.version,
+      expectedSourceDigest: before.sourceDigest,
+    }).version, before.version);
+    assert.equal(worker.validateCustomerSubjectRevision({
+      owner: "owner-a",
+      customerId: "customer-shared",
+      expectedVersion: before.version,
+      expectedSourceDigest: before.sourceDigest,
+    }).valid, true);
+
+    db.prepare(`
+      UPDATE opportunities
+         SET version = 2, updated_at = '2026-09-05T12:01:00.000Z'
+       WHERE id = 'op-shared-b'
+    `).run();
+    harness.advance(60_000);
+    const second = await worker.runOnce({ force: true });
+    assert.equal(second.status, "success");
+    assert.equal(second.customerSubjectCount, 3);
+    assert.equal(second.customerInsertedCount, 0);
+    assert.equal(second.customerDedupedCount, 3);
+    assert.equal(syncCalls.length, 6);
+
+    const after = subjectService.getSubject({ owner: "owner-a", customerId: "customer-shared" });
+    assert.equal(after.version, before.version + 1);
+    assert.notEqual(after.sourceDigest, before.sourceDigest);
+    assert.throws(
+      () => worker.assertCurrentCustomerSubjectRevision({
+        owner: "owner-a",
+        customerId: "customer-shared",
+        expectedVersion: before.version,
+        expectedSourceDigest: before.sourceDigest,
+      }),
+      (error) => error?.code === "PROACTIVE_SUBJECT_STALE" && error?.fields?.currentVersion === after.version,
+    );
+    // The changed opportunity evidence receives a new opportunity suggestion
+    // revision; the customer subject keeps its stable id and is updated in
+    // place. The ledger therefore grows by one opportunity row, not one
+    // customer row.
+    assert.equal(suggestionRepository.count({ owner: "owner-a" }), 6);
+    assert.equal(suggestionRepository.count({ owner: "owner-b" }), 2);
+    db.close();
+  });
+
+  it("deduplicates customer sync across multiple events in one batch", async () => {
+    const db = database();
+    const harness = clockHarness();
+    insertOpportunity(db, {
+      owner: "owner-a",
+      customerId: "event-customer",
+      customerName: "事件客户",
+      id: "event-op-a",
+      name: "事件项目 A",
+    });
+    insertOpportunity(db, {
+      owner: "owner-a",
+      customerId: "event-customer",
+      customerName: "事件客户",
+      id: "event-op-b",
+      name: "事件项目 B",
+    });
+    const suggestionRepository = createProactiveSuggestionRepository(db, { clock: harness.now });
+    const subjectService = createCustomerProactiveSubjectService({
+      db,
+      clock: harness.now,
+      suggestionRepository,
+    });
+    const syncCalls = [];
+    const injectedSubjectService = {
+      suggestionRepository,
+      syncCustomer(input) {
+        syncCalls.push(`${input.owner}:${input.customerId}`);
+        return subjectService.syncCustomer(input);
+      },
+      assertCurrentRevision: subjectService.assertCurrentRevision,
+      validateRevision: subjectService.validateRevision,
+    };
+    const worker = createProactiveBackgroundWorker({
+      db,
+      clock: harness.now,
+      workerId: "worker-customer-events",
+      eventBatchSize: 2,
+      leaseMs: 1_000,
+      retryBaseMs: 10,
+      includeExtendedSignals: false,
+      suggestionRepository,
+      customerProactiveSubjectService: injectedSubjectService,
+    });
+    worker.enqueueEvent({
+      owner: "owner-a",
+      eventKey: "event-op-a:updated:1",
+      entityType: "opportunity",
+      entityId: "event-op-a",
+      payload: { opportunityId: "event-op-a" },
+    });
+    worker.enqueueEvent({
+      owner: "owner-a",
+      eventKey: "event-op-b:updated:1",
+      entityType: "opportunity",
+      entityId: "event-op-b",
+      payload: { opportunityId: "event-op-b" },
+    });
+
+    const result = await worker.runOnce({ force: true });
+    assert.equal(result.status, "success");
+    assert.equal(result.eventCount, 2);
+    assert.equal(result.customerSubjectCount, 1);
+    assert.equal(result.customerScan.succeededCount, 1);
+    assert.deepEqual(syncCalls, ["owner-a:event-customer"]);
+    assert.equal(worker.scanRepository.pendingEventCount({ owner: "owner-a" }), 0);
+    assert.equal(
+      suggestionRepository.list({ owner: "owner-a", limit: 100 }).filter((item) => item.subjectType === "customer").length,
+      1,
+    );
+    db.close();
+  });
+
+  it("keeps an event retryable when customer subject sync fails", async () => {
+    const db = database();
+    const harness = clockHarness();
+    insertOpportunity(db, {
+      owner: "owner-a",
+      customerId: "retry-customer",
+      id: "retry-opportunity",
+      name: "需要重试的项目",
+    });
+    const suggestionRepository = createProactiveSuggestionRepository(db, { clock: harness.now });
+    const subjectService = createCustomerProactiveSubjectService({ db, clock: harness.now, suggestionRepository });
+    let attempts = 0;
+    const injectedSubjectService = {
+      suggestionRepository,
+      syncCustomer(input) {
+        attempts += 1;
+        if (attempts === 1) throw new Error("temporary customer subject failure");
+        return subjectService.syncCustomer(input);
+      },
+      assertCurrentRevision: subjectService.assertCurrentRevision,
+      validateRevision: subjectService.validateRevision,
+    };
+    const worker = createProactiveBackgroundWorker({
+      db,
+      clock: harness.now,
+      workerId: "worker-customer-retry",
+      eventBatchSize: 1,
+      leaseMs: 1_000,
+      retryBaseMs: 10,
+      suggestionRepository,
+      customerProactiveSubjectService: injectedSubjectService,
+    });
+    const queued = worker.enqueueEvent({
+      owner: "owner-a",
+      eventKey: "retry-customer:changed:1",
+      entityType: "opportunity",
+      entityId: "retry-opportunity",
+      payload: { opportunityId: "retry-opportunity", customerId: "retry-customer" },
+    });
+
+    const first = await worker.runOnce({ force: true });
+    assert.equal(first.status, "failed");
+    assert.equal(worker.scanRepository.getEvent(queued.item.id).status, "failed");
+    assert.equal(worker.scanRepository.getEvent(queued.item.id).attemptCount, 1);
+    assert.equal(worker.scanRepository.getEvent(queued.item.id).lastErrorCode, "PROACTIVE_CUSTOMER_SUBJECT_SYNC_FAILED");
+
+    harness.advance(11);
+    const second = await worker.runOnce({ force: true });
+    assert.equal(second.status, "success");
+    assert.equal(worker.scanRepository.getEvent(queued.item.id).status, "completed");
+    assert.equal(worker.scanRepository.getEvent(queued.item.id).attemptCount, 2);
+    assert.equal(attempts, 2);
+    assert.ok(subjectService.getSubject({ owner: "owner-a", customerId: "retry-customer" }));
+    db.close();
+  });
+
+  it("syncs a customer event without an opportunity and keeps customer ownership isolated", async () => {
+    const db = database();
+    const harness = clockHarness();
+    db.prepare(`
+      INSERT INTO customers (id, name, owner, version, created_at, updated_at)
+      VALUES ('customer-without-opportunity', '无商机客户', 'owner-a', 1, $now, $now)
+    `).run({ $now: NOW_ISO });
+    db.prepare(`
+      INSERT INTO action_items (id, customer_id, title, owner, status, due, version, created_at, updated_at)
+      VALUES ('customer-only-action', 'customer-without-opportunity', '客户级信号', 'owner-a', 'pending', '2026-09-01', 1, $now, $now)
+    `).run({ $now: NOW_ISO });
+    db.prepare(`
+      INSERT INTO customers (id, name, owner, version, created_at, updated_at)
+      VALUES ('other-owner-customer', '另一账号客户', 'owner-b', 1, $now, $now)
+    `).run({ $now: NOW_ISO });
+
+    const suggestionRepository = createProactiveSuggestionRepository(db, { clock: harness.now });
+    const subjectService = createCustomerProactiveSubjectService({ db, clock: harness.now, suggestionRepository });
+    const syncCalls = [];
+    const injectedSubjectService = {
+      suggestionRepository,
+      syncCustomer(input) {
+        syncCalls.push({ owner: input.owner, customerId: input.customerId });
+        return subjectService.syncCustomer(input);
+      },
+      assertCurrentRevision: subjectService.assertCurrentRevision,
+      validateRevision: subjectService.validateRevision,
+    };
+    const worker = createProactiveBackgroundWorker({
+      db,
+      clock: harness.now,
+      workerId: "worker-customer-without-opportunity",
+      eventBatchSize: 1,
+      leaseMs: 1_000,
+      retryBaseMs: 10,
+      ownersProvider: () => ["owner-a"],
+      suggestionRepository,
+      customerProactiveSubjectService: injectedSubjectService,
+      includeExtendedSignals: true,
+    });
+    const queued = worker.enqueueEvent({
+      owner: "owner-a",
+      eventKey: "customer-without-opportunity:changed:1",
+      entityType: "customer",
+      entityId: "customer-without-opportunity",
+      payload: { customerId: "customer-without-opportunity" },
+    });
+    const result = await worker.runOnce({ force: true });
+    assert.equal(result.status, "success");
+    assert.deepEqual(syncCalls, [{ owner: "owner-a", customerId: "customer-without-opportunity" }]);
+    assert.equal(worker.scanRepository.getEvent(queued.item.id).status, "completed");
+    assert.ok(subjectService.getSubject({ owner: "owner-a", customerId: "customer-without-opportunity" }));
+    assert.equal(subjectService.getSubject({ owner: "owner-a", customerId: "other-owner-customer" }), null);
+    db.close();
+  });
+
+  it("periodically scans customer-level signals for customers without opportunities", async () => {
+    const db = database();
+    const harness = clockHarness();
+    db.prepare(`
+      INSERT INTO customers (id, name, owner, version, created_at, updated_at)
+      VALUES ('periodic-customer-only', '周期客户', 'owner-a', 1, $now, $now),
+             ('periodic-foreign-customer', '外部周期客户', 'owner-b', 1, $now, $now)
+    `).run({ $now: NOW_ISO });
+    db.prepare(`
+      INSERT INTO action_items (id, customer_id, title, owner, status, version, created_at, updated_at)
+      VALUES ('periodic-customer-action', 'periodic-customer-only', '周期客户信号', 'owner-a', 'pending', 1, $now, $now),
+             ('periodic-foreign-action', 'periodic-foreign-customer', '外部客户信号', 'owner-b', 'pending', 1, $now, $now)
+    `).run({ $now: NOW_ISO });
+    const suggestionRepository = createProactiveSuggestionRepository(db, { clock: harness.now });
+    const subjectService = createCustomerProactiveSubjectService({ db, clock: harness.now, suggestionRepository });
+    const syncCalls = [];
+    const injectedSubjectService = {
+      suggestionRepository,
+      syncCustomer(input) {
+        syncCalls.push(`${input.owner}:${input.customerId}`);
+        return subjectService.syncCustomer(input);
+      },
+      assertCurrentRevision: subjectService.assertCurrentRevision,
+      validateRevision: subjectService.validateRevision,
+    };
+    const worker = createProactiveBackgroundWorker({
+      db,
+      clock: harness.now,
+      workerId: "worker-periodic-customer-signals",
+      batchSize: 10,
+      leaseMs: 1_000,
+      retryBaseMs: 10,
+      ownersProvider: () => ["owner-a"],
+      suggestionRepository,
+      customerProactiveSubjectService: injectedSubjectService,
+    });
+    const result = await worker.runOnce({ force: true });
+    assert.equal(result.status, "success");
+    assert.deepEqual(syncCalls, ["owner-a:periodic-customer-only"]);
+    assert.ok(subjectService.getSubject({ owner: "owner-a", customerId: "periodic-customer-only" }));
+    assert.equal(subjectService.getSubject({ owner: "owner-b", customerId: "periodic-foreign-customer" }), null);
+    db.close();
+  });
+
   it("scans bounded batches, advances a durable cursor, and dedupes a second cycle", async () => {
     const db = database();
     const harness = clockHarness();

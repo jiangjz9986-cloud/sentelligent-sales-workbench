@@ -346,7 +346,11 @@ export const requestSchemas = freezeSchema({
     expectedOpportunityVersion: { type: "integer", min: 1, required: true },
     expectedCustomerVersion: { type: "integer", min: 1, required: true },
     previewDigest: text(64, { required: true, nonEmpty: true }),
-    preview: safeObject({ maxKeys: 8, required: true }),
+    // Customer-level proactive previews add frozen subject identity,
+    // revision/digest and contributing-opportunity fields to the legacy
+    // action/risk draft. Keep the generic nested JSON safety bounds while
+    // allowing the complete server-generated v0.12.0 preview to round-trip.
+    preview: safeObject({ maxKeys: 30, required: true }),
   },
   proactiveAssistantPreview: {
     target: { type: "enum", values: ["action", "risk"], required: true },
@@ -364,10 +368,10 @@ export const requestSchemas = freezeSchema({
     expectedVersion: { type: "integer", min: 1 },
   },
   proactiveAssistantFieldsPatch: {
-    assignee: text(200, { nullable: true }),
-    dueDate: text(80, { nullable: true }),
-    priority: { type: "enum", values: ["高", "中", "低", "high", "medium", "low"] },
-    expectedResult: text(500, { nullable: true }),
+    assignee: text(200, { nullable: true, nonEmpty: true }),
+    dueDate: text(80, { nullable: true, nonEmpty: true }),
+    priority: { type: "enum", values: ["高", "中", "低", "high", "medium", "low"], nullable: true },
+    expectedResult: text(500, { nullable: true, nonEmpty: true }),
     expectedVersion: { type: "integer", min: 1, required: true },
   },
   itineraryCreate: {

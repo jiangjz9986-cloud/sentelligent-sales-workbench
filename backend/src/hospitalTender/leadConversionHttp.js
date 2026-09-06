@@ -69,6 +69,54 @@ function assertAllowedKeys(body, allowed) {
   }
 }
 
+const REVIEW_ASSERTION_KEYS = Object.freeze([
+  "canonicalNoticeId",
+  "noticeRevision",
+  "noticeDigest",
+  "matchSnapshotDigest",
+  "customerSnapshotDigest",
+  "customerVersion",
+  "opportunitySnapshotDigest",
+]);
+
+function optionalDigest(value, field) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const normalized = requiredText(value, field, 64);
+  if (!DIGEST_PATTERN.test(normalized)) {
+    throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { [field]: "format" });
+  }
+  return normalized;
+}
+
+function optionalPositiveInteger(value, field) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new HttpError(422, "VALIDATION_ERROR", "Request validation failed", { [field]: "positiveInteger" });
+  }
+  return value;
+}
+
+function reviewAssertions(value) {
+  const result = {};
+  if (value.canonicalNoticeId !== undefined) {
+    result.canonicalNoticeId = requiredText(value.canonicalNoticeId, "canonicalNoticeId", 500);
+  }
+  const noticeRevision = optionalPositiveInteger(value.noticeRevision, "noticeRevision");
+  if (noticeRevision !== undefined) result.noticeRevision = noticeRevision;
+  for (const field of [
+    "noticeDigest",
+    "matchSnapshotDigest",
+    "customerSnapshotDigest",
+    "opportunitySnapshotDigest",
+  ]) {
+    const digest = optionalDigest(value[field], field);
+    if (digest !== undefined) result[field] = digest;
+  }
+  const customerVersion = optionalPositiveInteger(value.customerVersion, "customerVersion");
+  if (customerVersion !== undefined) result.customerVersion = customerVersion;
+  return result;
+}
+
 function validateInput(action, body) {
   const value = assertBody(body);
   if (action === "preview") {
@@ -79,7 +127,9 @@ function validateInput(action, body) {
   }
 
   if (action === "confirm") {
-    assertAllowedKeys(value, new Set(["customerId", "previewDigest", "confirmed"]));
+    assertAllowedKeys(value, new Set([
+      "customerId", "previewDigest", "confirmed", ...REVIEW_ASSERTION_KEYS,
+    ]));
     const customerId = requiredText(value.customerId, "customerId", CUSTOMER_ID_MAX);
     const previewDigest = requiredText(value.previewDigest, "previewDigest", 64);
     if (!DIGEST_PATTERN.test(previewDigest)) {
@@ -88,10 +138,12 @@ function validateInput(action, body) {
     if (value.confirmed !== true) {
       throw new HttpError(422, "CONFIRMATION_REQUIRED", "Explicit human confirmation is required before creating records");
     }
-    return { customerId, previewDigest, confirmed: true };
+    return { customerId, previewDigest, confirmed: true, ...reviewAssertions(value) };
   }
 
-  assertAllowedKeys(value, new Set(["customerId", "previewDigest", "cancel"]));
+  assertAllowedKeys(value, new Set([
+    "customerId", "previewDigest", "cancel", ...REVIEW_ASSERTION_KEYS,
+  ]));
   const customerId = requiredText(value.customerId, "customerId", CUSTOMER_ID_MAX);
   const previewDigest = requiredText(value.previewDigest, "previewDigest", 64);
   if (!DIGEST_PATTERN.test(previewDigest)) {
@@ -100,7 +152,7 @@ function validateInput(action, body) {
   if (value.cancel !== true) {
     throw new HttpError(422, "CANCELLATION_REQUIRED", "Explicit cancellation is required");
   }
-  return { customerId, previewDigest };
+  return { customerId, previewDigest, ...reviewAssertions(value) };
 }
 
 /**

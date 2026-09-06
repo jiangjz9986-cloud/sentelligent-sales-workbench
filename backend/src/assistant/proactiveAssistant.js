@@ -217,8 +217,19 @@ export function proactiveConfirmationSnapshot(suggestion, target = "action") {
     target,
     subjectType: suggestion.subjectType,
     subjectId: suggestion.subjectId,
+    subjectKey: suggestion.subjectKey ?? suggestion.customerSubjectKey ?? null,
+    subjectVersion: suggestion.subjectVersion ?? suggestion.customerSubjectVersion ?? null,
+    sourceDigest: suggestion.sourceDigest ?? suggestion.subjectSourceDigest ?? null,
+    subjectSourceRefs: Array.isArray(suggestion.subjectSourceRefs)
+      ? suggestion.subjectSourceRefs
+      : (Array.isArray(suggestion.sourceRefs) ? suggestion.sourceRefs : []),
+    customerSubject: suggestion.customerSubject ?? null,
     customerId: suggestion.customerId,
     opportunityId: suggestion.opportunityId,
+    opportunityIds: Array.isArray(suggestion.opportunityIds) ? suggestion.opportunityIds : [],
+    contributingOpportunityIds: Array.isArray(suggestion.contributingOpportunityIds)
+      ? suggestion.contributingOpportunityIds
+      : [],
     opportunityVersion: suggestion.opportunityVersion,
     customerVersion: suggestion.customerVersion,
     title: suggestion.title,

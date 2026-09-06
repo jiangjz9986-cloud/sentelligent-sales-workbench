@@ -136,6 +136,34 @@ test("arrays and nested JSON reject functions, non-finite numbers, excess depth,
   validationError(() => validateObject(schema, { items: [{ a: { b: { c: { d: { e: { f: true } } } } } }] }), "items", "item");
 });
 
+test("proactive confirmation accepts the bounded v0.12.0 customer preview shape", () => {
+  const preview = Object.fromEntries(
+    Array.from({ length: 20 }, (_, index) => [`field${index + 1}`, index + 1]),
+  );
+  const body = {
+    confirmationPreviewId: "preview-customer-1",
+    target: "action",
+    customerId: "customer-1",
+    opportunityId: "opportunity-1",
+    expectedOpportunityVersion: 1,
+    expectedCustomerVersion: 1,
+    previewDigest: "a".repeat(64),
+    preview,
+  };
+
+  assert.equal(validateObject(requestSchemas.proactiveAssistantConfirmation, body), body);
+  validationError(
+    () => validateObject(requestSchemas.proactiveAssistantConfirmation, {
+      ...body,
+      preview: Object.fromEntries(
+        Array.from({ length: 31 }, (_, index) => [`field${index + 1}`, index + 1]),
+      ),
+    }),
+    "preview",
+    "maxKeys",
+  );
+});
+
 test("partialSchema creates a separate optional schema without mutating the source", () => {
   const create = Object.freeze({ title: Object.freeze({ type: "string", required: true, max: 16 }) });
   const patch = partialSchema(create);

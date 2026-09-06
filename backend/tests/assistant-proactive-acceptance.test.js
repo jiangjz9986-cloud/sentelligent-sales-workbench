@@ -223,8 +223,13 @@ describe("主动助手真实对象验收", () => {
       assert.ok(ownerAItems.length >= 5);
       assert.ok(ownerBItems.length >= 3);
       assert.ok(ownerAItems.every((item) => item.source === "deterministic"));
-      assert.ok(ownerAItems.every((item) => item.fallbackReason === "model_not_configured"));
-      assert.ok(ownerAItems.every((item) => item.modelAttempted === true));
+      const ownerAOpportunityItems = ownerAItems.filter((item) => item.subjectType === "opportunity");
+      const ownerACustomerItems = ownerAItems.filter((item) => item.subjectType === "customer");
+      assert.ok(ownerAOpportunityItems.length > 0);
+      assert.ok(ownerACustomerItems.length > 0);
+      assert.ok(ownerAOpportunityItems.every((item) => item.fallbackReason === "model_not_configured"));
+      assert.ok(ownerAOpportunityItems.every((item) => item.modelAttempted === true));
+      assert.ok(ownerACustomerItems.every((item) => item.customerSubject?.customerId === "acceptance-customer-a"));
       assert.doesNotMatch(JSON.stringify(ownerAItems), /不可泄露的客户沟通正文/u);
       assert.ok(ownerBItems.every((item) => item.customerId === "acceptance-customer-b"));
       assert.ok(ownerBItems.every((item) => item.sourceRefs.every((ref) => !ref.id.endsWith("-a"))));
@@ -250,9 +255,13 @@ describe("主动助手真实对象验收", () => {
       assert.ok(snapshotB.body.item.items.some((item) => item.customerId === "acceptance-customer-b"));
       assert.ok(snapshotB.body.item.items.every((item) => item.customerId !== "acceptance-customer-a"));
 
-      const noticeTick = await server.proactiveNotificationScheduler.tick();
-      assert.equal(noticeTick.failed, 0);
-      assert.equal(noticeTick.inAppDelivered, ownerAItems.length + ownerBItems.length);
+      const firstNoticeTick = await server.proactiveNotificationScheduler.tick();
+      const secondNoticeTick = await server.proactiveNotificationScheduler.tick();
+      assert.equal(firstNoticeTick.failed + secondNoticeTick.failed, 0);
+      assert.equal(
+        firstNoticeTick.inAppDelivered + secondNoticeTick.inAppDelivered,
+        ownerAItems.length + ownerBItems.length,
+      );
       const notices = server.proactiveNotificationRepository.list({ owner: OWNER_A, limit: 100 });
       assert.equal(notices.length, ownerAItems.length);
       assert.ok(notices.every((item) => item.channel === "in_app" && item.status === "sent"));

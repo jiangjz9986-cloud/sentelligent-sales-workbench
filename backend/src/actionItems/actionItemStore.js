@@ -1,4 +1,8 @@
 import { HttpError } from "../http/errors.js";
+import {
+  actionWritebackFromRow,
+  computeWritebackDigest,
+} from "../actionRisk/writeback.js";
 
 // Owner-scoped action-item (todo) read/write module (v0.7.5). The WeChat
 // assistant handlers consume these helpers; the web PATCH/DELETE routes keep
@@ -71,6 +75,22 @@ function mutationFailure(db, id) {
   throw new HttpError(409, "VERSION_CONFLICT", "The action item was updated by another request", {
     currentVersion: Number(current.version),
   });
+}
+
+function refreshWritebackDigest(db, id) {
+  const row = db.prepare("SELECT * FROM action_items WHERE id = $id").get({ $id: id });
+  const hasWritebackProvenance = Boolean(
+    row?.writeback_digest
+    || row?.source_type
+    || row?.source_id
+    || row?.source_proactive_id
+    || row?.source_record_id,
+  );
+  if (!row || !hasWritebackProvenance) return;
+  const digest = computeWritebackDigest("action", actionWritebackFromRow(row));
+  if (digest === row.writeback_digest) return;
+  db.prepare("UPDATE action_items SET writeback_digest = $digest WHERE id = $id")
+    .run({ $id: id, $digest: digest });
 }
 
 // v0.9.2 收紧：0031 全量回填后 owner 恒非空，读写可见性统一收敛为单一 owner
@@ -221,6 +241,7 @@ export function createActionItemStore(db, { clock = () => new Date() } = {}) {
       WHERE id = $id AND owner = $owner AND deleted_at IS NULL AND version = $version
     `).run({ $id: before.id, $owner: before.owner, $version: version, $now: clock().toISOString() });
     if (result.changes !== 1) mutationFailure(db, before.id);
+    refreshWritebackDigest(db, before.id);
     return { before, after: writableBefore({ owner, id: before.id }) };
   }
 
@@ -243,6 +264,7 @@ export function createActionItemStore(db, { clock = () => new Date() } = {}) {
       $now: clock().toISOString(),
     });
     if (result.changes !== 1) mutationFailure(db, before.id);
+    refreshWritebackDigest(db, before.id);
     return { before, after: writableBefore({ owner, id: before.id }) };
   }
 

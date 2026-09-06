@@ -288,7 +288,27 @@ describe("hospital tender scheduler", () => {
   it("starts each new source snapshot with fresh customer matches", async () => {
     await withDb(async (db) => {
       const list = customers(1);
-      const { scheduler, tenderRepository } = setup(db, { customers: list });
+      let cycle = 0;
+      const { scheduler, tenderRepository } = setup(db, {
+        customers: list,
+        runner: {
+          run: async () => {
+            cycle += 1;
+            const payload = snapshot();
+            if (cycle === 2) {
+              payload.notices[0] = {
+                ...payload.notices[0],
+                identityKey: "source-b:item-99",
+                sourceId: "source-b",
+                sourceName: "另一个公开采购平台",
+                url: "https://example.com/b/99",
+                sourceItemId: "item-99",
+              };
+            }
+            return { payload, source: "test" };
+          },
+        },
+      });
       await scheduler.runNext({ force: true });
       assert.deepEqual(
         tenderRepository.listNotices({ limit: 10, offset: 0 })[0].match.matchedCustomerIds,
@@ -300,6 +320,11 @@ describe("hospital tender scheduler", () => {
       assert.deepEqual(
         tenderRepository.listNotices({ limit: 10, offset: 0 })[0].match.matchedCustomerIds,
         [],
+      );
+      assert.equal(tenderRepository.countNotices(), 1);
+      assert.equal(
+        tenderRepository.listNotices({ limit: 10, offset: 0 })[0].identityKey,
+        "source-a:item-1",
       );
     });
   });
@@ -332,6 +357,7 @@ describe("hospital tender scheduler", () => {
         identityKey: "source-a:item-2",
         title: "胜利油田中心医院 第二个信息化项目",
         url: "https://example.com/b",
+        projectCode: "A-2",
         sourceItemId: "item-2",
         contentSha256: "b".repeat(64),
       });
@@ -417,6 +443,7 @@ describe("hospital tender scheduler", () => {
         identityKey: `source-a:item-${index + 1}`,
         title: `胜利油田中心医院 信息化项目 ${index + 1}`,
         url: `https://example.com/notices/${index + 1}`,
+        projectCode: `A-${index + 1}`,
         sourceItemId: `item-${index + 1}`,
         contentSha256: (index + 1).toString(16).padStart(64, "0"),
       }));

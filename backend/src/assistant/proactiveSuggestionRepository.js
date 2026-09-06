@@ -151,6 +151,10 @@ function parsed(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
 }
 
+function tableColumns(db, table) {
+  return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+}
+
 function rowToItem(row) {
   if (!row) return null;
   const suggestion = parsed(row.content, null);
@@ -192,6 +196,16 @@ function rowToItem(row) {
     trigger: row.proactive_trigger ?? null,
     subjectType: row.proactive_subject_type ?? null,
     subjectId: row.proactive_subject_id ?? null,
+    subjectKey: row.proactive_subject_key ?? suggestionObject.subjectKey ?? suggestionObject.customerSubjectKey ?? null,
+    subjectVersion: row.proactive_subject_version === null || row.proactive_subject_version === undefined
+      ? (suggestionObject.subjectVersion ?? suggestionObject.customerSubjectVersion ?? null)
+      : Number(row.proactive_subject_version),
+    sourceDigest: row.proactive_source_digest ?? suggestionObject.sourceDigest ?? suggestionObject.subjectSourceDigest ?? null,
+    subjectSourceDigest: row.proactive_source_digest ?? suggestionObject.subjectSourceDigest ?? suggestionObject.sourceDigest ?? null,
+    subjectSourceRefs: parsed(
+      row.proactive_source_refs,
+      suggestionObject.subjectSourceRefs ?? suggestionObject.sourceRefs ?? [],
+    ),
     customerId: row.proactive_customer_id ?? null,
     opportunityId: row.proactive_opportunity_id ?? null,
     dedupeKey: row.proactive_dedupe_key ?? null,
@@ -243,27 +257,33 @@ function normalizeEditableFields(input = {}) {
   const source = input.fields && typeof input.fields === "object" && !Array.isArray(input.fields)
     ? input.fields
     : input;
-  const read = (...names) => names.map((name) => source[name]).find((value) => value !== undefined);
-  const ownerValue = read("owner", "assignee");
-  const dueValue = read("dueDate", "due");
-  const priorityValue = read("priority");
-  const expectedValue = read("expectedResult", "result");
-  const owner = ownerValue === undefined || ownerValue === null || ownerValue === ""
-    ? null
-    : text(ownerValue, "assignee", 200);
-  const dueDate = dueValue === undefined || dueValue === null || dueValue === ""
-    ? null
-    : text(dueValue, "dueDate", 80);
-  const priority = priorityValue === undefined || priorityValue === null || priorityValue === ""
-    ? null
-    : text(priorityValue, "priority", 20);
-  if (priority !== null && !new Set(["高", "中", "低", "high", "medium", "low"]).has(priority)) {
-    throw new TypeError("priority is invalid");
+  const read = (...names) => {
+    for (const name of names) {
+      if (Object.hasOwn(source, name) && source[name] !== undefined) {
+        return { provided: true, value: source[name] };
+      }
+    }
+    return { provided: false, value: undefined };
+  };
+  const normalized = {};
+  const owner = read("owner", "assignee");
+  if (owner.provided) normalized.owner = owner.value === null ? null : text(owner.value, "assignee", 200);
+  const dueDate = read("dueDate", "due");
+  if (dueDate.provided) normalized.dueDate = dueDate.value === null ? null : text(dueDate.value, "dueDate", 80);
+  const priority = read("priority");
+  if (priority.provided) {
+    normalized.priority = priority.value === null ? null : text(priority.value, "priority", 20);
+    if (normalized.priority !== null && !new Set(["高", "中", "低", "high", "medium", "low"]).has(normalized.priority)) {
+      throw new TypeError("priority is invalid");
+    }
   }
-  const expectedResult = expectedValue === undefined || expectedValue === null || expectedValue === ""
-    ? null
-    : text(expectedValue, "expectedResult", 500);
-  return { owner, dueDate, priority, expectedResult };
+  const expectedResult = read("expectedResult", "result");
+  if (expectedResult.provided) {
+    normalized.expectedResult = expectedResult.value === null
+      ? null
+      : text(expectedResult.value, "expectedResult", 500);
+  }
+  return normalized;
 }
 
 function mergeEditableFieldsIntoSuggestion(suggestion, fields) {
@@ -271,12 +291,26 @@ function mergeEditableFieldsIntoSuggestion(suggestion, fields) {
     ? suggestion
     : {};
   const normalizePriority = (value) => ({ high: "高", medium: "中", low: "低" }[value] ?? value);
-  const editable = {
-    assignee: fields.owner,
-    dueDate: fields.dueDate,
-    priority: normalizePriority(fields.priority),
-    expectedResult: fields.expectedResult,
-  };
+  const editable = base.reviewFields && typeof base.reviewFields === "object" && !Array.isArray(base.reviewFields)
+    ? { ...base.reviewFields }
+    : {};
+  const previewPatch = {};
+  if (Object.hasOwn(fields, "owner")) {
+    editable.assignee = fields.owner;
+    previewPatch.assignee = fields.owner;
+  }
+  if (Object.hasOwn(fields, "dueDate")) {
+    editable.dueDate = fields.dueDate;
+    previewPatch.dueDate = fields.dueDate;
+  }
+  if (Object.hasOwn(fields, "priority")) {
+    editable.priority = normalizePriority(fields.priority);
+    previewPatch.priority = editable.priority;
+  }
+  if (Object.hasOwn(fields, "expectedResult")) {
+    editable.expectedResult = fields.expectedResult;
+    previewPatch.expectedResult = fields.expectedResult;
+  }
   const updatePreview = (preview) => {
     if (!preview || typeof preview !== "object" || Array.isArray(preview)) return preview;
     const next = { ...preview };
@@ -289,10 +323,16 @@ function mergeEditableFieldsIntoSuggestion(suggestion, fields) {
         if (Object.hasOwn(preview, key)) next[key] = value;
       }
     };
-    setExisting(["assignee", "assigneeName", "owner", "ownerName"], editable.assignee);
-    setExisting(["due", "dueDate", "followUpDate", "followUpAt"], editable.dueDate);
-    setExisting(["priority"], editable.priority);
-    setExisting(["expectedResult", "expectedOutcome", "result"], editable.expectedResult);
+    if (Object.hasOwn(previewPatch, "assignee")) {
+      setExisting(["assignee", "assigneeName", "owner", "ownerName"], previewPatch.assignee);
+    }
+    if (Object.hasOwn(previewPatch, "dueDate")) {
+      setExisting(["due", "dueDate", "followUpDate", "followUpAt"], previewPatch.dueDate);
+    }
+    if (Object.hasOwn(previewPatch, "priority")) setExisting(["priority"], previewPatch.priority);
+    if (Object.hasOwn(previewPatch, "expectedResult")) {
+      setExisting(["expectedResult", "expectedOutcome", "result"], previewPatch.expectedResult);
+    }
     return next;
   };
   const currentWriteback = base.writebackPreview && typeof base.writebackPreview === "object"
@@ -324,6 +364,13 @@ export function createProactiveSuggestionRepository(db, {
   if (typeof idFactory !== "function") throw new TypeError("idFactory is required");
 
   const now = () => clockDate(clock).toISOString();
+  const columns = tableColumns(db, "ai_suggestions");
+  const hasCustomerSubjectColumns = [
+    "proactive_subject_key",
+    "proactive_subject_version",
+    "proactive_source_digest",
+    "proactive_source_refs",
+  ].every((column) => columns.has(column));
   const selectById = (id, owner = null) => owner === null
     ? db.prepare("SELECT * FROM ai_suggestions WHERE id = $id").get({ $id: id })
     : db.prepare("SELECT * FROM ai_suggestions WHERE id = $id AND owner = $owner").get({ $id: id, $owner: owner });
@@ -367,6 +414,33 @@ export function createProactiveSuggestionRepository(db, {
     const sourceRefs = Array.isArray(input.sourceRefs) ? input.sourceRefs : (Array.isArray(suggestion.sourceRefs) ? suggestion.sourceRefs : []);
     if (sourceRefs.length > MAX_SOURCE_REFS) throw new TypeError("sourceRefs contains too many items");
     const sourceRefsJson = json(sourceRefs, "sourceRefs", 64 * 1024);
+    const rawSubjectKey = input.subjectKey ?? suggestion.subjectKey ?? suggestion.customerSubjectKey ?? null;
+    const subjectKey = rawSubjectKey === null || rawSubjectKey === undefined || rawSubjectKey === ""
+      ? null
+      : identifier(rawSubjectKey, "subjectKey", 500);
+    const rawSubjectVersion = input.subjectVersion ?? suggestion.subjectVersion ?? suggestion.customerSubjectVersion ?? null;
+    const subjectVersion = rawSubjectVersion === null || rawSubjectVersion === undefined || rawSubjectVersion === ""
+      ? null
+      : integer(rawSubjectVersion, "subjectVersion", { min: 1 });
+    const rawSourceDigest = input.sourceDigest ?? suggestion.sourceDigest ?? suggestion.subjectSourceDigest ?? null;
+    const sourceDigest = rawSourceDigest === null || rawSourceDigest === undefined || rawSourceDigest === ""
+      ? null
+      : text(rawSourceDigest, "sourceDigest", 64).toLowerCase();
+    if (sourceDigest !== null && !/^[0-9a-f]{64}$/u.test(sourceDigest)) throw new TypeError("sourceDigest is invalid");
+    const subjectSourceRefs = Array.isArray(input.subjectSourceRefs)
+      ? input.subjectSourceRefs
+      : Array.isArray(suggestion.subjectSourceRefs)
+        ? suggestion.subjectSourceRefs
+        : sourceRefs;
+    if (subjectSourceRefs.length > MAX_SOURCE_REFS) throw new TypeError("subjectSourceRefs contains too many items");
+    const subjectSourceRefsJson = json(subjectSourceRefs, "subjectSourceRefs", 64 * 1024);
+    const hasSubjectMetadata = subjectKey !== null || subjectVersion !== null || sourceDigest !== null;
+    if (hasSubjectMetadata && !hasCustomerSubjectColumns) {
+      throw new TypeError("customer proactive subject columns are unavailable; apply migration 0042 first");
+    }
+    if (hasSubjectMetadata && (subjectKey === null || subjectVersion === null || sourceDigest === null)) {
+      throw new TypeError("subjectKey, subjectVersion, and sourceDigest must be supplied together");
+    }
     const resultRefsJson = json(input.resultRefs ?? [], "resultRefs", 64 * 1024);
     const contentJson = json(suggestion, "suggestion");
     const confirmationPreview = suggestion.writebackPreview ?? suggestion.confirmationPreview ?? {};
@@ -392,6 +466,10 @@ export function createProactiveSuggestionRepository(db, {
       source,
       fallbackReason,
       sourceRefsJson,
+      subjectKey,
+      subjectVersion,
+      sourceDigest,
+      subjectSourceRefsJson,
       resultRefsJson,
       contentJson,
       confirmationPreviewJson,
@@ -404,10 +482,10 @@ export function createProactiveSuggestionRepository(db, {
     };
   }
 
-  function save(input = {}) {
+  function save(input = {}, { withinTransaction = false } = {}) {
     const value = normalize(input);
     const nowIso = now();
-    return withImmediateTransaction(db, () => {
+    return runMutation(db, () => {
       const existingByDedupe = selectByDedupe(value.owner, value.dedupeKey);
       if (existingByDedupe) {
         // The deterministic assistant keeps a stable identity while a row is
@@ -430,12 +508,7 @@ export function createProactiveSuggestionRepository(db, {
           && !Array.isArray(persistedFields)
           && Object.keys(persistedFields).length > 0;
         let suggestion = hasPersistedFields
-          ? mergeEditableFieldsIntoSuggestion(value.suggestion, {
-            owner: persistedFields.assignee,
-            dueDate: persistedFields.dueDate,
-            priority: persistedFields.priority,
-            expectedResult: persistedFields.expectedResult,
-          })
+          ? mergeEditableFieldsIntoSuggestion(value.suggestion, normalizeEditableFields(persistedFields))
           : value.suggestion;
         if (hasPersistedFields) {
           const previewDigests = {};
@@ -470,6 +543,10 @@ export function createProactiveSuggestionRepository(db, {
                  fallback_reason = $fallbackReason,
                  proactive_subject_type = $subjectType,
                  proactive_subject_id = $subjectId,
+                 ${hasCustomerSubjectColumns ? `proactive_subject_key = $subjectKey,
+                 proactive_subject_version = $subjectVersion,
+                 proactive_source_digest = $sourceDigest,
+                 proactive_source_refs = $subjectSourceRefs,` : ""}
                  proactive_customer_id = $customerId,
                  proactive_opportunity_id = $opportunityId,
                  proactive_rule_version = $ruleVersion,
@@ -496,6 +573,12 @@ export function createProactiveSuggestionRepository(db, {
           $fallbackReason: value.fallbackReason,
           $subjectType: value.subjectType,
           $subjectId: value.subjectId,
+          ...(hasCustomerSubjectColumns ? {
+            $subjectKey: value.subjectKey,
+            $subjectVersion: value.subjectVersion,
+            $sourceDigest: value.sourceDigest,
+            $subjectSourceRefs: value.subjectSourceRefsJson,
+          } : {}),
           $customerId: value.customerId,
           $opportunityId: value.opportunityId,
           $ruleVersion: value.ruleVersion,
@@ -518,6 +601,8 @@ export function createProactiveSuggestionRepository(db, {
           source_id, source_refs, confirmation_preview, source, fallback_reason,
           created_at, updated_at,
           proactive_trigger, proactive_subject_type, proactive_subject_id,
+          ${hasCustomerSubjectColumns ? `proactive_subject_key, proactive_subject_version,
+          proactive_source_digest, proactive_source_refs,` : ""}
           proactive_customer_id, proactive_opportunity_id, proactive_dedupe_key,
           proactive_rule_version, proactive_priority, proactive_status,
           proactive_stale_at, proactive_snoozed_until, proactive_dismiss_reason,
@@ -529,6 +614,8 @@ export function createProactiveSuggestionRepository(db, {
           $sourceId, $sourceRefs, $confirmationPreview, $source, $fallbackReason,
           $now, $now,
           $trigger, $subjectType, $subjectId,
+          ${hasCustomerSubjectColumns ? `$subjectKey, $subjectVersion,
+          $sourceDigest, $subjectSourceRefs,` : ""}
           $customerId, $opportunityId, $dedupeKey,
           $ruleVersion, $priority, $proactiveStatus,
           $staleAt, $snoozedUntil, $dismissReason,
@@ -551,6 +638,12 @@ export function createProactiveSuggestionRepository(db, {
         $trigger: value.trigger,
         $subjectType: value.subjectType,
         $subjectId: value.subjectId,
+        ...(hasCustomerSubjectColumns ? {
+          $subjectKey: value.subjectKey,
+          $subjectVersion: value.subjectVersion,
+          $sourceDigest: value.sourceDigest,
+          $subjectSourceRefs: value.subjectSourceRefsJson,
+        } : {}),
         $customerId: value.customerId,
         $opportunityId: value.opportunityId,
         $dedupeKey: value.dedupeKey,
@@ -570,7 +663,11 @@ export function createProactiveSuggestionRepository(db, {
         $payloadHash: value.payloadHash,
       });
       return { item: rowToItem(selectById(value.id, value.owner)), replayed: false };
-    });
+    }, { withinTransaction });
+  }
+
+  function saveWithinTransaction(input = {}) {
+    return save(input, { withinTransaction: true });
   }
 
   function get(idValue, { owner = null } = {}) {
@@ -762,6 +859,10 @@ export function createProactiveSuggestionRepository(db, {
           });
         }
       }
+      // A version guard without editable fields is a read-only validation
+      // request. Do not materialize an empty reviewFields object or advance
+      // the suggestion revision when there is no semantic change.
+      if (Object.keys(fields).length === 0) return rowToItem(row);
       const currentSuggestion = parsed(row.content, {});
       const nextSuggestion = mergeEditableFieldsIntoSuggestion(currentSuggestion, fields);
       const previewDigests = {};
@@ -838,6 +939,7 @@ export function createProactiveSuggestionRepository(db, {
 
   return Object.freeze({
     save,
+    saveWithinTransaction,
     upsert: save,
     get,
     getByDedupe,

@@ -1,5 +1,35 @@
 import { randomUUID } from "node:crypto";
 
+import { HttpError } from "../http/errors.js";
+import {
+  BRIDGE_STATUSES,
+  CANONICAL_NOTICE_ID_MAX,
+  NOTICE_BRIDGE_STATUS_UNBRIDGED,
+  bridgeFromRow,
+  bridgeRefsJson,
+  bridgeStatusForRefs,
+  canonicalNoticeDigest,
+  canonicalNoticeIdentity,
+  canonicalNoticeIdentityCandidates,
+  contentDigest,
+  hospitalTenderBridgeId,
+  isSha256,
+  normalizeBridgeRef,
+  normalizeSha256,
+  parseBridgeRefs,
+  stableDigest,
+} from "./canonicalBridge.js";
+
+export {
+  BRIDGE_STATUSES,
+  CANONICAL_NOTICE_ID_MAX,
+  canonicalNoticeDigest,
+  canonicalNoticeIdentity,
+  canonicalNoticeIdentityCandidates,
+  contentDigest,
+  hospitalTenderBridgeId,
+};
+
 /**
  * Notice and source values are intentionally finite.  Source adapters should
  * map their upstream vocabulary to one of these values before persistence.
@@ -72,6 +102,9 @@ const NOTICE_KEYS = new Set([
   "sourceItemId",
   "contentSha256",
   "relevance",
+  "canonicalNoticeId",
+  "canonicalId",
+  "canonicalIdentity",
 ]);
 
 const MATCH_KEYS = new Set([
@@ -238,6 +271,11 @@ export function normalizeNoticeSnapshot(input = {}) {
     sourceItemId: optionalText(input.sourceItemId, "sourceItemId", NOTICE_FIELD_LIMITS.sourceItemId),
     contentSha256: sha256(input.contentSha256),
     relevance: enumValue(input.relevance, RELEVANCE_LEVELS, "relevance"),
+    canonicalNoticeId: optionalText(
+      input.canonicalNoticeId ?? input.canonicalId ?? input.canonicalIdentity,
+      "canonicalNoticeId",
+      CANONICAL_NOTICE_ID_MAX,
+    ),
   };
   return normalized;
 }
@@ -302,8 +340,14 @@ export function mergeNoticeMatches(previous = {}, next = {}) {
   });
 }
 
-function fromNoticeRow(row) {
+function fromNoticeRow(row, { bridgeRefs = null, bridgeStatus = null } = {}) {
   if (!row) return null;
+  const persistedBridgeRefs = bridgeRefs === null
+    ? parseBridgeRefs(row.bridge_refs_json)
+    : parseBridgeRefs(bridgeRefs);
+  const resolvedBridgeStatus = bridgeStatus
+    ?? (row.bridge_status || bridgeStatusForRefs(persistedBridgeRefs));
+  const rawRevision = Number(row.canonical_revision ?? row.revision ?? 1);
   return {
     id: row.id,
     identityKey: row.identity_key,
@@ -331,6 +375,14 @@ function fromNoticeRow(row) {
     }),
     firstSeenAt: row.first_seen_at,
     lastSeenAt: row.last_seen_at,
+    canonicalNoticeId: row.canonical_notice_id ?? null,
+    canonicalRevision: Number.isSafeInteger(rawRevision) && rawRevision >= 1 ? rawRevision : 1,
+    canonicalDigest: isSha256(row.canonical_digest) ? row.canonical_digest.toLowerCase() : null,
+    bridgeStatus: resolvedBridgeStatus || NOTICE_BRIDGE_STATUS_UNBRIDGED,
+    bridgeRefs: persistedBridgeRefs,
+    // Existing consumers use `revision` for tender source provenance.  Keep it
+    // as an alias while making canonicalRevision the source of truth.
+    revision: Number.isSafeInteger(rawRevision) && rawRevision >= 1 ? rawRevision : 1,
   };
 }
 
@@ -534,6 +586,65 @@ function runFilter(filters = {}) {
     : requiredText(filters.sourceId, "sourceId", NOTICE_FIELD_LIMITS.sourceId);
 }
 
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+  } catch {
+    return new Set();
+  }
+}
+
+function rawNoticeInput(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    identityKey: row.identity_key,
+    sourceId: row.source_id,
+    sourceName: row.source_name,
+    city: row.city,
+    title: row.title,
+    url: row.url,
+    publishedAt: row.published_at,
+    noticeType: row.notice_type,
+    purchaser: row.purchaser,
+    projectCode: row.project_code,
+    budgetText: row.budget_text,
+    deadlineText: row.deadline_text,
+    contentText: row.content_text,
+    hospitalNames: jsonValue(row.hospital_names_json, "hospitalNames", []),
+    sourceItemId: row.source_item_id,
+    contentSha256: row.content_sha256,
+    relevance: row.relevance,
+    canonicalNoticeId: row.canonical_notice_id,
+  };
+}
+
+function bridgeLookupError(message = "Hospital tender canonical bridge storage is unavailable") {
+  const error = new Error(message);
+  error.code = "HOSPITAL_TENDER_BRIDGE_SCHEMA_REQUIRED";
+  return error;
+}
+
+function bridgeConflictError(code, message, fields) {
+  return new HttpError(409, code, message, fields);
+}
+
+function requiredBridgeOwner(value) {
+  return requiredText(value, "owner", 200);
+}
+
+function requiredBridgeId(value, name = "canonicalNoticeId") {
+  return requiredText(value, name, name === "canonicalNoticeId" ? CANONICAL_NOTICE_ID_MAX : 200);
+}
+
+function positiveRevision(value, name = "noticeRevision") {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized < 1) {
+    throw new TypeError(`${name} must be a positive integer`);
+  }
+  return normalized;
+}
+
 /**
  * SQLite repository boundary for notices, source health, and ingestion runs.
  * Expected tables are documented by the SQL used in the focused repository
@@ -547,12 +658,202 @@ export function createHospitalTenderRepository(db, {
   if (typeof clock !== "function") throw new TypeError("clock must be a function");
   if (typeof idFactory !== "function") throw new TypeError("idFactory must be a function");
 
-  function getNotice(id) {
-    const noticeId = requiredText(id, "id", NOTICE_FIELD_LIMITS.id);
-    return fromNoticeRow(db.prepare("SELECT * FROM hospital_tender_notices WHERE id = $id").get({ $id: noticeId }));
+  const noticeColumns = tableColumns(db, "hospital_tender_notices");
+  const canonicalStorage = [
+    "canonical_notice_id",
+    "canonical_revision",
+    "canonical_digest",
+    "bridge_status",
+    "bridge_refs_json",
+  ].every((column) => noticeColumns.has(column));
+  const bridgeStorage = tableExists(db, "hospital_tender_bridges");
+
+  function requireBridgeStorage() {
+    if (!canonicalStorage || !bridgeStorage) throw bridgeLookupError();
   }
 
-  function upsertNotice(input, match = {}, options = {}) {
+  function rawNoticeById(id) {
+    return db.prepare("SELECT * FROM hospital_tender_notices WHERE id = $id").get({ $id: id }) ?? null;
+  }
+
+  function rawNoticeByIdentity(identityKey) {
+    return db.prepare(
+      "SELECT * FROM hospital_tender_notices WHERE identity_key = $identityKey",
+    ).get({ $identityKey: identityKey }) ?? null;
+  }
+
+  function rawNoticeRows() {
+    return db.prepare(
+      "SELECT * FROM hospital_tender_notices ORDER BY first_seen_at ASC, id ASC",
+    ).all();
+  }
+
+  function bridgeRows(canonicalNoticeId, owner = null) {
+    if (!bridgeStorage) return [];
+    const clauses = ["bridge.canonical_notice_id = $canonicalNoticeId"];
+    const params = { $canonicalNoticeId: canonicalNoticeId };
+    if (owner !== null && owner !== undefined) {
+      clauses.push("bridge.owner = $owner");
+      params.$owner = requiredBridgeOwner(owner);
+    }
+    return db.prepare(`
+      SELECT bridge.*
+        FROM hospital_tender_bridges AS bridge
+        JOIN customers AS customer
+          ON customer.id = bridge.customer_id
+         AND customer.owner = bridge.owner
+         AND customer.deleted_at IS NULL
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY bridge.owner ASC, bridge.customer_id ASC, bridge.id ASC
+    `).all(params).map(bridgeFromRow).filter(Boolean);
+  }
+
+  function noticeBridgeRefs(canonicalNoticeId, owner = null, fallback = []) {
+    const persisted = bridgeRows(canonicalNoticeId, owner);
+    if (persisted.length > 0 || bridgeStorage) return persisted;
+    return parseBridgeRefs(fallback).filter((ref) => owner === null || ref.owner === owner);
+  }
+
+  function updateNoticeBridgeProjection(canonicalNoticeId) {
+    if (!canonicalStorage) return;
+    const refs = bridgeRows(canonicalNoticeId);
+    db.prepare(`
+      UPDATE hospital_tender_notices
+         SET bridge_status = $bridgeStatus,
+             bridge_refs_json = $bridgeRefs
+       WHERE canonical_notice_id = $canonicalNoticeId
+    `).run({
+      $canonicalNoticeId: canonicalNoticeId,
+      $bridgeStatus: bridgeStatusForRefs(refs),
+      $bridgeRefs: bridgeRefsJson(refs),
+    });
+  }
+
+  function markBridgesStale(canonicalNoticeId, noticeRevision, noticeDigest, now) {
+    if (!bridgeStorage) return;
+    db.prepare(`
+      UPDATE hospital_tender_bridges
+         SET status = 'conflict', updated_at = $now
+       WHERE canonical_notice_id = $canonicalNoticeId
+         AND status IN ('previewed', 'confirmed')
+         AND (notice_revision <> $noticeRevision OR notice_digest <> $noticeDigest)
+    `).run({
+      $canonicalNoticeId: canonicalNoticeId,
+      $noticeRevision: noticeRevision,
+      $noticeDigest: noticeDigest,
+      $now: now,
+    });
+    updateNoticeBridgeProjection(canonicalNoticeId);
+  }
+
+  function hydrateNoticeRow(raw, { owner = null, repair = true } = {}) {
+    if (!raw) return null;
+    const input = rawNoticeInput(raw);
+    const storedCanonicalId = typeof raw.canonical_notice_id === "string" && raw.canonical_notice_id.trim()
+      ? raw.canonical_notice_id.trim()
+      : null;
+    const canonicalNoticeId = storedCanonicalId ?? canonicalNoticeIdentity(input);
+    const computedCanonicalDigest = canonicalNoticeDigest(input, { canonicalNoticeId });
+    const storedContentDigest = isSha256(raw.content_sha256)
+      ? raw.content_sha256.toLowerCase()
+      : null;
+    const storedCanonicalDigest = isSha256(raw.canonical_digest)
+      ? raw.canonical_digest.toLowerCase()
+      : null;
+    let canonicalRevision = Number(raw.canonical_revision ?? 1);
+    if (!Number.isSafeInteger(canonicalRevision) || canonicalRevision < 1) canonicalRevision = 1;
+
+    // 0043 initially copies content_sha256 into canonical_digest.  That row is
+    // still revision 1: canonical bridge code replaces the seed with the
+    // digest of the normalized persisted snapshot before any bridge is made.
+    const legacySeed = !storedCanonicalDigest
+      || storedCanonicalDigest === storedContentDigest
+      || !storedCanonicalId;
+    const changedOutsideRepository = storedCanonicalDigest !== null
+      && storedCanonicalDigest !== computedCanonicalDigest
+      && !legacySeed;
+    if (changedOutsideRepository) canonicalRevision += 1;
+
+    // `content_sha256` is the legacy content-only digest.  Do not seed it
+    // with the canonical notice digest: the latter intentionally includes
+    // normalized metadata and is therefore a different value.  Older rows
+    // may be null, so repair the missing value from the persisted body before
+    // any bridge row is created.
+    const repairedContentDigest = storedContentDigest ?? contentDigest(raw.content_text);
+    const persistedRefs = noticeBridgeRefs(canonicalNoticeId, null, raw.bridge_refs_json);
+    const persistedStatus = bridgeStatusForRefs(persistedRefs);
+    // Notice rows are global.  Bridge references are owner-scoped and are
+    // therefore returned only when a caller explicitly supplies an owner.
+    const refs = owner === null
+      ? []
+      : persistedRefs.filter((ref) => ref.owner === owner);
+    const projectedStatus = owner === null
+      ? NOTICE_BRIDGE_STATUS_UNBRIDGED
+      : bridgeStatusForRefs(refs);
+    if (repair && canonicalStorage) {
+      const shouldRepair = raw.canonical_notice_id !== canonicalNoticeId
+        || Number(raw.canonical_revision) !== canonicalRevision
+        || raw.canonical_digest !== computedCanonicalDigest
+        || raw.content_sha256 !== repairedContentDigest
+        || raw.bridge_status !== persistedStatus
+        || JSON.stringify(parseBridgeRefs(raw.bridge_refs_json)) !== JSON.stringify(persistedRefs);
+      if (shouldRepair) {
+        const now = nowIso(clock);
+        db.prepare(`
+          UPDATE hospital_tender_notices
+             SET content_sha256 = $contentSha256,
+                 canonical_notice_id = $canonicalNoticeId,
+                 canonical_revision = $canonicalRevision,
+                 canonical_digest = $canonicalDigest,
+                 bridge_status = $bridgeStatus,
+                 bridge_refs_json = $bridgeRefs
+           WHERE id = $id
+        `).run({
+          $id: raw.id,
+          $contentSha256: repairedContentDigest,
+          $canonicalNoticeId: canonicalNoticeId,
+          $canonicalRevision: canonicalRevision,
+          $canonicalDigest: computedCanonicalDigest,
+          $bridgeStatus: persistedStatus,
+          $bridgeRefs: bridgeRefsJson(persistedRefs),
+        });
+        if (changedOutsideRepository) {
+          markBridgesStale(canonicalNoticeId, canonicalRevision, computedCanonicalDigest, now);
+        }
+      }
+    }
+    return fromNoticeRow({
+      ...raw,
+      content_sha256: repairedContentDigest,
+      canonical_notice_id: canonicalNoticeId,
+      canonical_revision: canonicalRevision,
+      canonical_digest: computedCanonicalDigest,
+      bridge_status: projectedStatus,
+      bridge_refs_json: bridgeRefsJson(refs),
+    }, {
+      bridgeRefs: refs,
+      bridgeStatus: projectedStatus,
+    });
+  }
+
+  function getNotice(id, options = {}) {
+    const noticeId = requiredText(id, "id", NOTICE_FIELD_LIMITS.id);
+    if (!isPlainObject(options)) throw new TypeError("options must be an object");
+    assertKnownKeys(options, new Set(["owner"]), "options");
+    const owner = options.owner === undefined || options.owner === null
+      ? null
+      : requiredBridgeOwner(options.owner);
+    return hydrateNoticeRow(rawNoticeById(noticeId), { owner });
+  }
+
+  // Hospital tender notices are global intelligence, while bridge references
+  // are owner-scoped.  Keep the two concerns explicit so callers cannot
+  // accidentally serialize another owner's bridge rows from a global read.
+  function getNoticeForOwner(id, owner) {
+    return getNotice(id, { owner });
+  }
+
+  function upsertLegacyNotice(input, match = {}, options = {}) {
     const snapshot = normalizeNoticeSnapshot(input);
     if (!isPlainObject(options)) throw new TypeError("options must be an object");
     assertKnownKeys(options, new Set(["mergeExistingMatch"]), "options");
@@ -630,15 +931,577 @@ export function createHospitalTenderRepository(db, {
     return getNotice(id);
   }
 
-  function listNotices(inputFilters = {}) {
+  function matchingCanonicalNoticeRows(snapshot) {
+    const candidates = new Set(canonicalNoticeIdentityCandidates(snapshot));
+    const rows = rawNoticeRows().filter((row) => {
+      if (row.identity_key === snapshot.identityKey) return true;
+      if (row.canonical_notice_id && candidates.has(row.canonical_notice_id)) return true;
+      return canonicalNoticeIdentityCandidates(rawNoticeInput(row))
+        .some((candidate) => candidates.has(candidate));
+    });
+    return { candidates: [...candidates], rows };
+  }
+
+  function findCanonicalNotice(snapshot) {
+    const { candidates, rows } = matchingCanonicalNoticeRows(snapshot);
+    if (rows.length > 1) {
+      throw bridgeConflictError(
+        "NOTICE_CANONICAL_AMBIGUITY",
+        "Multiple persisted tender notices match the same canonical identity",
+        {
+          canonicalCandidates: candidates,
+          noticeIds: rows.map((row) => row.id),
+        },
+      );
+    }
+    return rows[0] ?? null;
+  }
+
+  function upsertNotice(input, match = {}, options = {}) {
+    if (!canonicalStorage) return upsertLegacyNotice(input, match, options);
+    const snapshot = normalizeNoticeSnapshot(input);
+    if (!isPlainObject(options)) throw new TypeError("options must be an object");
+    assertKnownKeys(options, new Set(["mergeExistingMatch"]), "options");
+
+    const existingRow = findCanonicalNotice(snapshot);
+    const existing = existingRow ? hydrateNoticeRow(existingRow) : null;
+    const canonicalNoticeId = existing?.canonicalNoticeId ?? canonicalNoticeIdentity(snapshot);
+    const canonicalDigest = canonicalNoticeDigest(snapshot, { canonicalNoticeId });
+    const canonicalRevision = existing === null
+      ? 1
+      : existing.canonicalDigest === canonicalDigest
+        ? existing.canonicalRevision
+        : existing.canonicalRevision + 1;
+    const preserveExistingSnapshot = existing !== null
+      && existing.identityKey !== snapshot.identityKey
+      && existing.canonicalDigest === canonicalDigest;
+    const persistedSnapshot = preserveExistingSnapshot ? existing : snapshot;
+    const normalizedMatch = options.mergeExistingMatch
+      ? mergeNoticeMatches(existing?.match ?? {}, match)
+      : normalizeNoticeMatch(match);
+    const id = existing?.id ?? snapshot.id ?? generatedId(idFactory, "generated notice id");
+    const conflictingId = rawNoticeById(id);
+    if (conflictingId && conflictingId.id !== existing?.id) {
+      throw bridgeConflictError("NOTICE_ID_CONFLICT", "A different notice already uses this id");
+    }
+    const conflictingIdentity = rawNoticeByIdentity(snapshot.identityKey);
+    if (conflictingIdentity && conflictingIdentity.id !== existing?.id) {
+      throw bridgeConflictError(
+        "NOTICE_IDENTITY_CONFLICT",
+        "A different notice already uses this identity key",
+      );
+    }
+
+    const now = nowIso(clock);
+    const values = {
+      $id: id,
+      $identityKey: persistedSnapshot.identityKey,
+      $sourceId: persistedSnapshot.sourceId,
+      $sourceName: persistedSnapshot.sourceName,
+      $city: persistedSnapshot.city,
+      $title: persistedSnapshot.title,
+      $url: persistedSnapshot.url,
+      $publishedAt: persistedSnapshot.publishedAt,
+      $noticeType: persistedSnapshot.noticeType,
+      $purchaser: persistedSnapshot.purchaser,
+      $projectCode: persistedSnapshot.projectCode,
+      $budgetText: persistedSnapshot.budgetText,
+      $deadlineText: persistedSnapshot.deadlineText,
+      $contentText: persistedSnapshot.contentText,
+      $hospitalNamesJson: JSON.stringify(persistedSnapshot.hospitalNames),
+      $sourceItemId: persistedSnapshot.sourceItemId,
+      // Keep the legacy content-only digest separate from the canonical
+      // notice digest.  A missing upstream content digest is repaired from
+      // content, never from the metadata-bound canonical snapshot.
+      $contentSha256: persistedSnapshot.contentSha256 ?? contentDigest(persistedSnapshot.contentText),
+      $relevance: persistedSnapshot.relevance,
+      $matchedCustomerIdsJson: JSON.stringify(normalizedMatch.matchedCustomerIds),
+      $matchReasonsJson: JSON.stringify(normalizedMatch.matchReasons),
+      $matchedNeedsJson: JSON.stringify(normalizedMatch.matchedNeeds),
+      $matchScore: normalizedMatch.matchScore,
+      $firstSeenAt: existingRow?.first_seen_at ?? now,
+      $lastSeenAt: now,
+      $canonicalNoticeId: canonicalNoticeId,
+      $canonicalRevision: canonicalRevision,
+      $canonicalDigest: canonicalDigest,
+      $bridgeStatus: existing?.bridgeStatus ?? NOTICE_BRIDGE_STATUS_UNBRIDGED,
+      $bridgeRefsJson: bridgeRefsJson(existing?.bridgeRefs ?? []),
+    };
+    if (existingRow) {
+      const {
+        $firstSeenAt: _firstSeenAt,
+        $bridgeStatus: _bridgeStatus,
+        $bridgeRefsJson: _bridgeRefsJson,
+        ...updateValues
+      } = values;
+      db.prepare(`
+        UPDATE hospital_tender_notices
+           SET identity_key = $identityKey,
+               source_id = $sourceId,
+               source_name = $sourceName,
+               city = $city,
+               title = $title,
+               url = $url,
+               published_at = $publishedAt,
+               notice_type = $noticeType,
+               purchaser = $purchaser,
+               project_code = $projectCode,
+               budget_text = $budgetText,
+               deadline_text = $deadlineText,
+               content_text = $contentText,
+               hospital_names_json = $hospitalNamesJson,
+               source_item_id = $sourceItemId,
+               content_sha256 = $contentSha256,
+               relevance = $relevance,
+               match_customer_ids_json = $matchedCustomerIdsJson,
+               match_reasons_json = $matchReasonsJson,
+               matched_needs_json = $matchedNeedsJson,
+               match_score = $matchScore,
+               canonical_notice_id = $canonicalNoticeId,
+               canonical_revision = $canonicalRevision,
+               canonical_digest = $canonicalDigest,
+               last_seen_at = $lastSeenAt
+         WHERE id = $id
+      `).run(updateValues);
+    } else {
+      db.prepare(`
+        INSERT INTO hospital_tender_notices (
+          id, identity_key, source_id, source_name, city, title, url, published_at,
+          notice_type, purchaser, project_code, budget_text, deadline_text, content_text,
+          hospital_names_json, source_item_id, content_sha256, relevance,
+          match_customer_ids_json, match_reasons_json, matched_needs_json, match_score,
+          first_seen_at, last_seen_at, canonical_notice_id, canonical_revision,
+          canonical_digest, bridge_status, bridge_refs_json
+        ) VALUES (
+          $id, $identityKey, $sourceId, $sourceName, $city, $title, $url, $publishedAt,
+          $noticeType, $purchaser, $projectCode, $budgetText, $deadlineText, $contentText,
+          $hospitalNamesJson, $sourceItemId, $contentSha256, $relevance,
+          $matchedCustomerIdsJson, $matchReasonsJson, $matchedNeedsJson, $matchScore,
+          $firstSeenAt, $lastSeenAt, $canonicalNoticeId, $canonicalRevision,
+          $canonicalDigest, $bridgeStatus, $bridgeRefsJson
+        )
+      `).run(values);
+    }
+    if (existing && existing.canonicalDigest !== canonicalDigest) {
+      markBridgesStale(canonicalNoticeId, canonicalRevision, canonicalDigest, now);
+    }
+    updateNoticeBridgeProjection(canonicalNoticeId);
+    return getNotice(id);
+  }
+
+  function ensureCanonicalNotice(noticeId, options = {}) {
+    if (!isPlainObject(options)) throw new TypeError("options must be an object");
+    assertKnownKeys(options, new Set(["owner"]), "options");
+    const owner = options.owner === undefined || options.owner === null
+      ? null
+      : requiredBridgeOwner(options.owner);
+    const raw = rawNoticeById(requiredText(noticeId, "id", NOTICE_FIELD_LIMITS.id));
+    if (!raw) return null;
+    findCanonicalNotice(rawNoticeInput(raw));
+    const item = hydrateNoticeRow(raw, { owner });
+    if (!item) return null;
+    if (!item.canonicalNoticeId || !isSha256(item.canonicalDigest)) {
+      throw bridgeLookupError("Hospital tender canonical notice repair failed");
+    }
+    return item;
+  }
+
+  function getNoticeByCanonicalId(canonicalNoticeId, options = {}) {
+    const normalizedCanonicalId = requiredBridgeId(canonicalNoticeId);
+    if (!isPlainObject(options)) throw new TypeError("options must be an object");
+    assertKnownKeys(options, new Set(["owner"]), "options");
+    const owner = options.owner === undefined || options.owner === null
+      ? null
+      : requiredBridgeOwner(options.owner);
+    if (canonicalStorage) {
+      const row = db.prepare(`
+        SELECT * FROM hospital_tender_notices
+         WHERE canonical_notice_id = $canonicalNoticeId
+         LIMIT 1
+      `).get({ $canonicalNoticeId: normalizedCanonicalId });
+      if (row) {
+        findCanonicalNotice(rawNoticeInput(row));
+        return hydrateNoticeRow(row, { owner });
+      }
+    }
+    const rows = rawNoticeRows().filter((candidate) => (
+      canonicalNoticeIdentityCandidates(rawNoticeInput(candidate)).includes(normalizedCanonicalId)
+    ));
+    if (rows.length > 1) {
+      throw bridgeConflictError(
+        "NOTICE_CANONICAL_AMBIGUITY",
+        "Multiple persisted tender notices match the requested canonical identity",
+        { canonicalNoticeId: normalizedCanonicalId, noticeIds: rows.map((row) => row.id) },
+      );
+    }
+    return hydrateNoticeRow(rows[0] ?? null, { owner });
+  }
+
+  function getCanonicalNoticeForOwner(canonicalNoticeId, owner) {
+    return getNoticeByCanonicalId(canonicalNoticeId, { owner });
+  }
+
+  function ownerCustomer(owner, customerId) {
+    const row = db.prepare(`
+      SELECT id, version
+        FROM customers
+       WHERE id = $customerId
+         AND owner = $owner
+         AND deleted_at IS NULL
+    `).get({ $owner: owner, $customerId: customerId });
+    if (!row) {
+      throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+    }
+    return { id: row.id, version: Number(row.version ?? 1) };
+  }
+
+  function bridgeInput(input = {}, { requireNotice = false } = {}) {
+    assertPlainObject(input, "bridge");
+    const owner = requiredBridgeOwner(input.owner);
+    const customerId = requiredBridgeId(input.customerId, "customerId");
+    ownerCustomer(owner, customerId);
+    let notice = null;
+    if (input.noticeId !== undefined && input.noticeId !== null && input.noticeId !== "") {
+      notice = ensureCanonicalNotice(input.noticeId, { owner });
+    } else if (input.canonicalNoticeId !== undefined
+      && input.canonicalNoticeId !== null
+      && input.canonicalNoticeId !== "") {
+      notice = getNoticeByCanonicalId(input.canonicalNoticeId, { owner });
+    }
+    if (requireNotice && !notice) {
+      throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+    }
+    const canonicalNoticeId = notice?.canonicalNoticeId
+      ?? requiredBridgeId(input.canonicalNoticeId);
+    return { owner, customerId, canonicalNoticeId, notice };
+  }
+
+  function getBridge(input = {}) {
+    requireBridgeStorage();
+    const { owner, customerId, canonicalNoticeId } = bridgeInput(input);
+    return bridgeFromRow(db.prepare(`
+      SELECT * FROM hospital_tender_bridges
+       WHERE owner = $owner
+         AND canonical_notice_id = $canonicalNoticeId
+         AND customer_id = $customerId
+    `).get({
+      $owner: owner,
+      $canonicalNoticeId: canonicalNoticeId,
+      $customerId: customerId,
+    }));
+  }
+
+  function listBridges(filters = {}) {
+    requireBridgeStorage();
+    assertPlainObject(filters, "filters");
+    assertKnownKeys(filters, new Set([
+      "owner", "canonicalNoticeId", "customerId", "status", "limit", "offset",
+    ]), "filters");
+    const owner = requiredBridgeOwner(filters.owner);
+    const canonicalNoticeId = optionalText(
+      filters.canonicalNoticeId,
+      "canonicalNoticeId",
+      CANONICAL_NOTICE_ID_MAX,
+    );
+    const customerId = optionalText(filters.customerId, "customerId", 200);
+    const status = filters.status === undefined || filters.status === null || filters.status === ""
+      ? null
+      : enumValue(filters.status, BRIDGE_STATUSES, "status");
+    const limit = filters.limit === undefined ? 50 : filters.limit;
+    const offset = filters.offset === undefined ? 0 : filters.offset;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new TypeError("limit must be an integer between 1 and 200");
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000) {
+      throw new TypeError("offset must be a non-negative safe integer");
+    }
+    return db.prepare(`
+      SELECT bridge.*
+        FROM hospital_tender_bridges AS bridge
+        JOIN customers AS customer
+          ON customer.id = bridge.customer_id
+         AND customer.owner = bridge.owner
+         AND customer.deleted_at IS NULL
+       WHERE bridge.owner = $owner
+         AND ($canonicalNoticeId IS NULL OR bridge.canonical_notice_id = $canonicalNoticeId)
+         AND ($customerId IS NULL OR bridge.customer_id = $customerId)
+         AND ($status IS NULL OR bridge.status = $status)
+       ORDER BY bridge.updated_at DESC, bridge.id ASC
+       LIMIT $limit OFFSET $offset
+    `).all({
+      $owner: owner,
+      $canonicalNoticeId: canonicalNoticeId,
+      $customerId: customerId,
+      $status: status,
+      $limit: limit,
+      $offset: offset,
+    }).map(bridgeFromRow).filter(Boolean);
+  }
+
+  function staleNoticeBridge({ owner, canonicalNoticeId, customerId, message }) {
+    markBridgeConflict({ owner, canonicalNoticeId, customerId });
+    throw bridgeConflictError(
+      "BRIDGE_NOTICE_STALE",
+      message ?? "The canonical tender notice changed after preview",
+    );
+  }
+
+  function assertCurrentNotice(input, notice) {
+    const expectedRevision = positiveRevision(input.noticeRevision);
+    const expectedDigest = normalizeSha256(input.noticeDigest, "noticeDigest");
+    if (expectedRevision !== notice.canonicalRevision || expectedDigest !== notice.canonicalDigest) {
+      staleNoticeBridge({
+        owner: input.owner,
+        canonicalNoticeId: notice.canonicalNoticeId,
+        customerId: input.customerId,
+      });
+    }
+    return { expectedRevision, expectedDigest };
+  }
+
+  function ensureBridge(input = {}) {
+    requireBridgeStorage();
+    const { owner, customerId, canonicalNoticeId, notice } = bridgeInput(input, { requireNotice: true });
+    const current = getBridge({ owner, canonicalNoticeId, customerId });
+    if (current) return current;
+    const now = nowIso(clock);
+    db.prepare(`
+      INSERT INTO hospital_tender_bridges (
+        id, owner, canonical_notice_id, customer_id, status,
+        notice_revision, notice_digest, opportunity_id, action_item_id,
+        preview_digest, created_at, updated_at
+      ) VALUES (
+        $id, $owner, $canonicalNoticeId, $customerId, 'unconverted',
+        $noticeRevision, $noticeDigest, NULL, NULL, NULL, $now, $now
+      )
+      ON CONFLICT(owner, canonical_notice_id, customer_id) DO NOTHING
+    `).run({
+      $id: hospitalTenderBridgeId({ owner, canonicalNoticeId, customerId }),
+      $owner: owner,
+      $canonicalNoticeId: canonicalNoticeId,
+      $customerId: customerId,
+      $noticeRevision: notice.canonicalRevision,
+      $noticeDigest: notice.canonicalDigest,
+      $now: now,
+    });
+    updateNoticeBridgeProjection(canonicalNoticeId);
+    return getBridge({ owner, canonicalNoticeId, customerId });
+  }
+
+  function recordBridgePreview(input = {}) {
+    requireBridgeStorage();
+    const { owner, customerId, canonicalNoticeId, notice } = bridgeInput(input, { requireNotice: true });
+    assertCurrentNotice({ ...input, owner, customerId }, notice);
+    const previewDigest = normalizeSha256(input.previewDigest, "previewDigest");
+    const allowConflictPreview = input.allowConflictPreview === true;
+    const current = ensureBridge({ owner, customerId, noticeId: notice.id });
+    if (current.status === "confirmed") {
+      if (current.noticeRevision === notice.canonicalRevision
+        && current.noticeDigest === notice.canonicalDigest
+        && current.previewDigest === previewDigest) {
+        return current;
+      }
+      markBridgeConflict({ owner, canonicalNoticeId, customerId });
+      // A confirmed bridge is immutable for replay purposes.  A caller may
+      // still render a fresh read-only proposal after the canonical notice
+      // advances, but that proposal cannot overwrite the confirmed receipt;
+      // confirmation will fail closed until a new bridge identity is chosen.
+      if (allowConflictPreview) return getBridge({ owner, canonicalNoticeId, customerId });
+      throw bridgeConflictError(
+        "BRIDGE_STATE_CONFLICT",
+        "The tender notice was already converted from a different preview",
+      );
+    }
+    if ((current.opportunityId || current.actionItemId) && current.status !== "cancelled") {
+      markBridgeConflict({ owner, canonicalNoticeId, customerId });
+      if (allowConflictPreview) return getBridge({ owner, canonicalNoticeId, customerId });
+      throw bridgeConflictError("BRIDGE_STATE_CONFLICT", "The tender bridge contains an incomplete result");
+    }
+    if (current.status === "conflict" && allowConflictPreview) {
+      // A stale preview conflict without durable conversion result ids is
+      // recoverable: the caller has supplied a fresh canonical notice
+      // snapshot and may create a new preview for the same owner/customer
+      // bridge. Once either result id exists, keep the bridge fail-closed.
+      if (current.opportunityId || current.actionItemId) return current;
+      // Otherwise continue into the normal preview update below.
+    }
+    const now = nowIso(clock);
+    const update = db.prepare(`
+      UPDATE hospital_tender_bridges
+         SET status = 'previewed',
+             notice_revision = $noticeRevision,
+             notice_digest = $noticeDigest,
+             opportunity_id = NULL,
+             action_item_id = NULL,
+             preview_digest = $previewDigest,
+             updated_at = $now
+       WHERE id = $id AND owner = $owner
+    `).run({
+      $id: current.id,
+      $owner: owner,
+      $noticeRevision: notice.canonicalRevision,
+      $noticeDigest: notice.canonicalDigest,
+      $previewDigest: previewDigest,
+      $now: now,
+    });
+    if (update.changes !== 1) {
+      markBridgeConflict({ owner, canonicalNoticeId, customerId });
+      throw bridgeConflictError("BRIDGE_STATE_CONFLICT", "The tender bridge changed during preview");
+    }
+    updateNoticeBridgeProjection(canonicalNoticeId);
+    return getBridge({ owner, canonicalNoticeId, customerId });
+  }
+
+  function confirmBridge(input = {}) {
+    requireBridgeStorage();
+    const { owner, customerId, canonicalNoticeId, notice } = bridgeInput(input, { requireNotice: true });
+    assertCurrentNotice({ ...input, owner, customerId }, notice);
+    const previewDigest = normalizeSha256(input.previewDigest, "previewDigest");
+    const opportunityId = requiredBridgeId(input.opportunityId, "opportunityId");
+    const actionItemId = requiredBridgeId(input.actionItemId, "actionItemId");
+    const current = getBridge({ owner, canonicalNoticeId, customerId });
+    if (current?.status === "confirmed") {
+      const replayed = current.noticeRevision === notice.canonicalRevision
+        && current.noticeDigest === notice.canonicalDigest
+        && current.previewDigest === previewDigest
+        && current.opportunityId === opportunityId
+        && current.actionItemId === actionItemId;
+      if (!replayed) {
+        markBridgeConflict({ owner, canonicalNoticeId, customerId });
+        throw bridgeConflictError("BRIDGE_STATE_CONFLICT", "The confirmed bridge receipt does not match");
+      }
+      return { ...current, replayed: true };
+    }
+    if (!current
+      || current.status !== "previewed"
+      || current.noticeRevision !== notice.canonicalRevision
+      || current.noticeDigest !== notice.canonicalDigest
+      || current.previewDigest !== previewDigest) {
+      markBridgeConflict({ owner, canonicalNoticeId, customerId });
+      throw bridgeConflictError("BRIDGE_PREVIEW_STALE", "The tender bridge preview no longer matches");
+    }
+    const now = nowIso(clock);
+    const update = db.prepare(`
+      UPDATE hospital_tender_bridges
+         SET status = 'confirmed',
+             opportunity_id = $opportunityId,
+             action_item_id = $actionItemId,
+             updated_at = $now
+       WHERE id = $id
+         AND owner = $owner
+         AND status = 'previewed'
+         AND notice_revision = $noticeRevision
+         AND notice_digest = $noticeDigest
+         AND preview_digest = $previewDigest
+    `).run({
+      $id: current.id,
+      $owner: owner,
+      $noticeRevision: notice.canonicalRevision,
+      $noticeDigest: notice.canonicalDigest,
+      $previewDigest: previewDigest,
+      $opportunityId: opportunityId,
+      $actionItemId: actionItemId,
+      $now: now,
+    });
+    if (update.changes !== 1) {
+      markBridgeConflict({ owner, canonicalNoticeId, customerId });
+      throw bridgeConflictError("BRIDGE_STATE_CONFLICT", "The tender bridge changed during confirmation");
+    }
+    updateNoticeBridgeProjection(canonicalNoticeId);
+    return {
+      ...getBridge({ owner, canonicalNoticeId, customerId }),
+      replayed: false,
+    };
+  }
+
+  function assertBridgePreview(input = {}) {
+    requireBridgeStorage();
+    const { owner, customerId, canonicalNoticeId, notice } = bridgeInput(input, { requireNotice: true });
+    assertCurrentNotice({ ...input, owner, customerId }, notice);
+    const previewDigest = normalizeSha256(input.previewDigest, "previewDigest");
+    const current = getBridge({ owner, canonicalNoticeId, customerId });
+    const valid = current !== null
+      && current.status === "previewed"
+      && current.noticeRevision === notice.canonicalRevision
+      && current.noticeDigest === notice.canonicalDigest
+      && current.previewDigest === previewDigest
+      && current.opportunityId === null
+      && current.actionItemId === null;
+    if (!valid) {
+      markBridgeConflict({ owner, canonicalNoticeId, customerId });
+      throw bridgeConflictError("BRIDGE_PREVIEW_STALE", "The tender bridge preview no longer matches");
+    }
+    return current;
+  }
+
+  function cancelBridge(input = {}) {
+    requireBridgeStorage();
+    const { owner, customerId, canonicalNoticeId, notice } = bridgeInput(input, { requireNotice: true });
+    assertCurrentNotice({ ...input, owner, customerId }, notice);
+    const previewDigest = normalizeSha256(input.previewDigest, "previewDigest");
+    const current = getBridge({ owner, canonicalNoticeId, customerId });
+    if (current?.status === "cancelled"
+      && current.noticeRevision === notice.canonicalRevision
+      && current.noticeDigest === notice.canonicalDigest
+      && current.previewDigest === previewDigest) {
+      return current;
+    }
+    if (!current
+      || current.status !== "previewed"
+      || current.noticeRevision !== notice.canonicalRevision
+      || current.noticeDigest !== notice.canonicalDigest
+      || current.previewDigest !== previewDigest) {
+      markBridgeConflict({ owner, canonicalNoticeId, customerId });
+      throw bridgeConflictError("BRIDGE_PREVIEW_STALE", "The tender bridge preview no longer matches");
+    }
+    db.prepare(`
+      UPDATE hospital_tender_bridges
+         SET status = 'cancelled', updated_at = $now
+       WHERE id = $id AND owner = $owner AND status = 'previewed'
+    `).run({ $id: current.id, $owner: owner, $now: nowIso(clock) });
+    updateNoticeBridgeProjection(canonicalNoticeId);
+    return getBridge({ owner, canonicalNoticeId, customerId });
+  }
+
+  function markBridgeConflict(input = {}) {
+    if (!bridgeStorage) return null;
+    const owner = requiredBridgeOwner(input.owner);
+    const canonicalNoticeId = requiredBridgeId(input.canonicalNoticeId);
+    const customerId = requiredBridgeId(input.customerId, "customerId");
+    db.prepare(`
+      UPDATE hospital_tender_bridges
+         SET status = 'conflict', updated_at = $now
+       WHERE owner = $owner
+         AND canonical_notice_id = $canonicalNoticeId
+         AND customer_id = $customerId
+    `).run({
+      $owner: owner,
+      $canonicalNoticeId: canonicalNoticeId,
+      $customerId: customerId,
+      $now: nowIso(clock),
+    });
+    updateNoticeBridgeProjection(canonicalNoticeId);
+    return getBridge({ owner, canonicalNoticeId, customerId });
+  }
+
+  function listNotices(inputFilters = {}, options = {}) {
     const filters = normalizeListFilters(inputFilters);
+    if (!isPlainObject(options)) throw new TypeError("options must be an object");
+    assertKnownKeys(options, new Set(["owner"]), "options");
+    const owner = options.owner === undefined || options.owner === null
+      ? null
+      : requiredBridgeOwner(options.owner);
     const { where, params, paginationSql } = noticeWhere(filters);
     return db.prepare(`
       SELECT * FROM hospital_tender_notices
       WHERE ${where}
       ORDER BY published_at DESC, id ASC
       ${paginationSql}
-    `).all(params).map(fromNoticeRow);
+    `).all(params).map((row) => hydrateNoticeRow(row, { owner }));
+  }
+
+  function listNoticesForOwner(inputFilters = {}, owner) {
+    return listNotices(inputFilters, { owner });
   }
 
   function countNotices(inputFilters = {}) {
@@ -826,13 +1689,26 @@ export function createHospitalTenderRepository(db, {
 
   return {
     getNotice,
+    getNoticeForOwner,
+    getNoticeByCanonicalId,
+    getCanonicalNoticeForOwner,
+    ensureCanonicalNotice,
     upsertNotice,
     listNotices,
+    listNoticesForOwner,
     countNotices,
     summary,
     listSources,
     health,
     recordRun,
     upsertSourceHealth,
+    getBridge,
+    listBridges,
+    ensureBridge,
+    recordBridgePreview,
+    assertBridgePreview,
+    confirmBridge,
+    cancelBridge,
+    markBridgeConflict,
   };
 }

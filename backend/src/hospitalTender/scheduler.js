@@ -456,6 +456,9 @@ export function createHospitalTenderScheduler({
           notices: result.notices.map((notice) => ({
             id: notice.id,
             identityKey: notice.identityKey,
+            canonicalNoticeId: notice.canonicalNoticeId,
+            canonicalRevision: notice.canonicalRevision,
+            canonicalDigest: notice.canonicalDigest,
             match: {
               matchedCustomerIds: Array.isArray(notice.match?.matchedCustomerIds)
                 ? [...notice.match.matchedCustomerIds]

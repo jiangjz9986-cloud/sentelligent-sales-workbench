@@ -188,14 +188,21 @@ describe("hospital tender lead conversion", () => {
     assert.equal(audit.actor, OWNER_A);
     assert.equal(audit.request_id, "request-lead-1");
     assert.deepEqual(JSON.parse(audit.after_json), {
-      schemaVersion: 1,
+      schemaVersion: 2,
       previewDigest: preview.previewDigest,
       conversionIdentity: preview.conversionIdentity,
       noticeSnapshotDigest: preview.noticeSnapshotDigest,
+      canonicalNoticeId: preview.canonicalNoticeId,
+      canonicalRevision: preview.canonicalRevision,
+      canonicalDigest: preview.canonicalDigest,
       noticeId: NOTICE_ID,
       noticeIdentityKey: "source-a:item-lead-1",
       owner: OWNER_A,
       customerId: "customer-a",
+      customerVersion: preview.customerVersion,
+      customerSnapshotDigest: preview.customerSnapshotDigest,
+      matchSnapshotDigest: preview.matchSnapshotDigest,
+      opportunitySnapshotDigest: preview.opportunitySnapshotDigest,
       opportunityId: result.opportunity.id,
       actionItemId: result.actionItem.id,
       matchScore: 100,
@@ -204,9 +211,16 @@ describe("hospital tender lead conversion", () => {
       previewDigest: preview.previewDigest,
       conversionIdentity: preview.conversionIdentity,
       noticeSnapshotDigest: preview.noticeSnapshotDigest,
+      canonicalNoticeId: preview.canonicalNoticeId,
+      canonicalRevision: preview.canonicalRevision,
+      canonicalDigest: preview.canonicalDigest,
       noticeIdentityKey: "source-a:item-lead-1",
       owner: OWNER_A,
       customerId: "customer-a",
+      customerVersion: preview.customerVersion,
+      customerSnapshotDigest: preview.customerSnapshotDigest,
+      matchSnapshotDigest: preview.matchSnapshotDigest,
+      opportunitySnapshotDigest: preview.opportunitySnapshotDigest,
       opportunityId: result.opportunity.id,
       actionItemId: result.actionItem.id,
       matchScore: 100,
@@ -267,7 +281,11 @@ describe("hospital tender lead conversion", () => {
       assert.equal(changed.conversionIdentity, baseline.conversionIdentity, label);
       if (label !== "relevance") assert.deepEqual(changed.drafts, baseline.drafts, label);
       upsertNotice(matrixBase);
-      assert.equal(service.preview(input()).previewDigest, baseline.previewDigest, `${label} restore`);
+      const restored = service.preview(input());
+      assert.equal(restored.canonicalDigest, baseline.canonicalDigest, `${label} restore canonical digest`);
+      assert.ok(restored.canonicalRevision >= baseline.canonicalRevision, `${label} restore canonical revision`);
+      assert.equal(restored.conversionIdentity, baseline.conversionIdentity, `${label} restore identity`);
+      assert.notEqual(restored.previewDigest, baseline.previewDigest, `${label} restore revision binding`);
     }
     assert.deepEqual(counts(), { opportunities: 0, actionItems: 0, audits: 0 });
   });

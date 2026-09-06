@@ -13,6 +13,7 @@ import {
 import { ManualAiSuggestionPanel } from "../../../components/ai/ManualAiSuggestionPanel.jsx";
 import { useNavigation } from "../../../app/useWorkbenchNavigation.jsx";
 import { useWorkbenchActions } from "../../../app/useWorkbenchHandlers.jsx";
+import { CustomerImportPanel } from "../../customerImport/CustomerImportPanel.jsx";
 import { ProactiveAssistantPanel } from "../components/ProactiveAssistantPanel.jsx";
 import { useWorkbenchData } from "../../../app/useWorkbenchData.jsx";
 import {
@@ -261,6 +262,9 @@ function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
   const { apiClient, backendStatus, workbenchOpportunities: opportunitiesList } = useWorkbenchData();
   const {
     handleSaveCustomer,
+    handlePreviewCustomerImport,
+    handleConfirmCustomerImport,
+    handleCancelCustomerImport,
     handleCreateProactiveConfirmationPreview,
     handleConfirmProactiveWriteback,
     handleProactiveLifecycleChange,
@@ -296,6 +300,12 @@ function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
         <MetricInline label="预算节奏" value={selected.budget} />
       </div>
       <CustomerRecordMetadata selected={selected} />
+      <CustomerImportPanel
+        disabled={!apiClient?.isEnabled || backendStatus !== "connected"}
+        onPreview={handlePreviewCustomerImport}
+        onConfirm={handleConfirmCustomerImport}
+        onCancel={handleCancelCustomerImport}
+      />
       <Panel title="客户摘要" meta="档案正文">
         <p className="customer-summary" data-testid="customer-summary">
           {selected.summary || "尚未补充客户摘要。"}

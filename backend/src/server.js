@@ -174,6 +174,7 @@ import { createProactiveConfirmationPreviewRepository } from "./assistant/proact
 import { createProactiveNotificationRepository } from "./assistant/proactiveNotificationRepository.js";
 import { createProactiveNotificationScheduler } from "./assistant/proactiveNotificationScheduler.js";
 import { renderProactiveNotificationMessage } from "./assistant/proactiveNotificationMessage.js";
+import { createCustomerProactiveSubjectService } from "./assistant/customerProactiveSubjectService.js";
 import {
   createCustomerAssistantAdapter,
   createCustomerPendingPreviewProviders,
@@ -198,6 +199,14 @@ import {
   createQuickRecordConfirmationRepositories,
 } from "./quickRecords/confirmationRepository.js";
 import { createActionItemStore } from "./actionItems/actionItemStore.js";
+import {
+  actionWritebackFromRow,
+  computeWritebackDigest,
+  createActionRiskWritebackService,
+  riskWritebackFromRow,
+} from "./actionRisk/index.js";
+import { createCustomerImportHttpApi } from "./customerImport/http.js";
+import { readCustomerImportMultipart } from "./customerImport/multipart.js";
 import { createActionReminderScheduler } from "./actionReminders/reminderScheduler.js";
 import {
   addDays,
@@ -855,6 +864,11 @@ function actionFromRow(row) {
     owner: row.owner ?? null,
     remindAt: row.remind_at ?? null,
     remindedAt: row.reminded_at ?? null,
+    expectedResult: row.expected_result ?? null,
+    sourceType: row.source_type ?? null,
+    sourceId: row.source_id ?? null,
+    sourceProactiveId: row.source_proactive_id ?? null,
+    writebackDigest: row.writeback_digest ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -878,10 +892,38 @@ function riskFromRow(row) {
     due: row.due,
     sourceType: row.source_type,
     sourceId: row.source_id,
+    expectedResult: row.expected_result ?? null,
+    sourceProactiveId: row.source_proactive_id ?? null,
+    writebackDigest: row.writeback_digest ?? null,
     tone: row.tone,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function refreshActionRiskWritebackDigest(db, kind, id, { force = false } = {}) {
+  const table = kind === "action" ? "action_items" : "risk_items";
+  const row = get(db, `SELECT * FROM ${table} WHERE id = $id`, { $id: id });
+  if (!row) return null;
+  const hasWritebackProvenance = Boolean(
+    row.writeback_digest
+    || row.source_type
+    || row.source_id
+    || row.source_proactive_id
+    || (kind === "action" && row.source_record_id),
+  );
+  if (!force && !hasWritebackProvenance) return row;
+  const payload = kind === "action" ? actionWritebackFromRow(row) : riskWritebackFromRow(row);
+  const digest = computeWritebackDigest(kind, payload);
+  if (row.writeback_digest !== digest) {
+    run(
+      db,
+      `UPDATE ${table} SET writeback_digest = $writebackDigest WHERE id = $id`,
+      { $id: id, $writebackDigest: digest },
+    );
+    row.writeback_digest = digest;
+  }
+  return row;
 }
 
 // v0.9.2 Web 硬隔离基座：user 与 machine 身份一律以自身 account 作 owner 谓词
@@ -1176,6 +1218,20 @@ function proactiveSnapshotFromLedger({
   if (total === 0 && !status && !trigger && !subjectId && !customerId && !opportunityId) return null;
   const rows = repository.list({ owner, status, trigger, subjectId, customerId, opportunityId, limit, offset });
   const items = rows.map(proactiveLedgerItem).filter(Boolean);
+  const subjectRows = db.prepare(`
+    SELECT DISTINCT proactive_subject_type AS subject_type
+      FROM ai_suggestions
+     WHERE owner = $owner
+       AND proactive_trigger IS NOT NULL
+       AND proactive_subject_type IS NOT NULL
+  `).all({ $owner: owner });
+  const subjectTypes = [...new Set(subjectRows.map((row) => row.subject_type).filter(Boolean))].sort();
+  const customerSubjectCount = db.prepare(`
+    SELECT COUNT(*) AS count
+      FROM proactive_subjects
+     WHERE owner = $owner
+       AND subject_type = 'customer'
+  `).get({ $owner: owner })?.count ?? 0;
   const filterParams = {
     $owner: owner,
     $status: status,
@@ -1224,6 +1280,8 @@ function proactiveSnapshotFromLedger({
     limit,
     offset,
     items,
+    subjectTypes,
+    customerSubjectCount: Number(customerSubjectCount),
     counts: {
       total,
       missingNextStep: triggerCounts.missing_next_step ?? 0,
@@ -1243,6 +1301,20 @@ function proactiveSnapshotFromLedger({
     writebackPolicy: { requiresHumanConfirmation: true, automaticWriteAllowed: false },
   };
   return hydrateProactiveAssistantSnapshot(snapshot, previewRepository, owner, now);
+}
+
+function assertCurrentCustomerProactiveSubject(service, owner, snapshot) {
+  if (!service || snapshot?.subjectType !== "customer") return;
+  const customerId = snapshot.customerId ?? snapshot.subjectId;
+  const expectedVersion = snapshot.subjectVersion ?? snapshot.customerSubjectVersion ?? null;
+  const expectedSourceDigest = snapshot.sourceDigest ?? snapshot.subjectSourceDigest ?? null;
+  if (!customerId || expectedVersion === null || !expectedSourceDigest) return;
+  service.assertCurrentRevision({
+    owner,
+    customerId,
+    expectedVersion,
+    expectedSourceDigest,
+  });
 }
 
 function dashboardSummaryFromDb(db, {
@@ -2181,7 +2253,7 @@ function updateActionItem(db, id, body, expectedVersion, owner = null) {
     },
   });
 
-  return actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+  return actionFromRow(refreshActionRiskWritebackDigest(db, "action", id));
 }
 
 // remindAt 请求值归一：空串/null 视为清除，合法时间归一为 ISO，非法即 422。
@@ -2310,7 +2382,7 @@ function updateRiskItem(db, id, body, expectedVersion, owner = null) {
     },
   });
 
-  return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+  return riskFromRow(refreshActionRiskWritebackDigest(db, "risk", id));
 }
 
 function splitSearchTerms(...values) {
@@ -2577,6 +2649,9 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
           reason = $reason,
           priority = $priority,
           tone = $tone,
+          source_type = 'quick_record',
+          source_id = $sourceRecordId,
+          source_proactive_id = NULL,
           owner = COALESCE(owner, $owner),
           deleted_at = NULL,
           deleted_by = NULL
@@ -2598,18 +2673,21 @@ function upsertActionFromQuickRecord(db, quickRecord, insight, customer, opportu
       db,
       `INSERT INTO action_items (
        id, customer_id, opportunity_id, title, customer, reason, due,
-       assignee, priority, status, source_record_id, tone, owner
+       assignee, priority, status, source_record_id, tone, owner,
+       source_type, source_id, source_proactive_id
      ) VALUES (
        $id, $customerId, $opportunityId, $title, $customer, $reason, $due,
-       $assignee, $priority, 'pending', $sourceRecordId, $tone, $owner
+       $assignee, $priority, 'pending', $sourceRecordId, $tone, $owner,
+       'quick_record', $sourceRecordId, NULL
      )`,
       { ...params, $id: randomUUID() },
     );
   }
 
-  return actionFromRow(get(db, "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId AND deleted_at IS NULL", {
+  const row = get(db, "SELECT * FROM action_items WHERE source_record_id = $sourceRecordId AND deleted_at IS NULL", {
     $sourceRecordId: quickRecord.id,
-  }));
+  });
+  return actionFromRow(refreshActionRiskWritebackDigest(db, "action", row.id, { force: true }));
 }
 
 function getDraftActions(db, { customerId, opportunityId, owner = null }) {
@@ -2786,6 +2864,9 @@ function upsertRiskItem(db, draft) {
            severity = $severity,
            evidence = $evidence,
            action = $action,
+           source_type = $sourceType,
+           source_id = $sourceId,
+           source_proactive_id = $sourceProactiveId,
            tone = $tone,
            owner = COALESCE($owner, owner)
            ${reactivating ? ", status = $status, deleted_at = NULL, deleted_by = NULL" : ""}`,
@@ -2799,12 +2880,15 @@ function upsertRiskItem(db, draft) {
         $severity: draft.severity,
         $evidence: draft.evidence,
         $action: draft.action,
+        $sourceType: draft.sourceType,
+        $sourceId: draft.sourceId ?? null,
+        $sourceProactiveId: draft.sourceProactiveId ?? null,
         $tone: draft.tone,
         $owner: draft.owner ?? null,
         ...(reactivating ? { $status: draft.status } : {}),
       },
     });
-    return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: current.id }));
+    return riskFromRow(refreshActionRiskWritebackDigest(db, "risk", current.id, { force: true }));
   }
 
   const id = randomUUID();
@@ -2812,10 +2896,12 @@ function upsertRiskItem(db, draft) {
     db,
     `INSERT INTO risk_items (
        id, customer_id, opportunity_id, title, target, score, severity,
-       status, evidence, action, source_type, source_id, tone, owner
+       status, evidence, action, source_type, source_id, source_proactive_id,
+       expected_result, tone, owner
      ) VALUES (
        $id, $customerId, $opportunityId, $title, $target, $score, $severity,
-       $status, $evidence, $action, $sourceType, $sourceId, $tone,
+       $status, $evidence, $action, $sourceType, $sourceId, $sourceProactiveId,
+       $expectedResult, $tone,
        COALESCE($owner, '${LEGACY_OWNER}')
      )`,
     {
@@ -2831,12 +2917,14 @@ function upsertRiskItem(db, draft) {
       $action: draft.action,
       $sourceType: draft.sourceType,
       $sourceId: draft.sourceId ?? null,
+      $sourceProactiveId: draft.sourceProactiveId ?? null,
+      $expectedResult: draft.expectedResult ?? null,
       $tone: draft.tone,
       $owner: draft.owner ?? null,
     },
   );
 
-  return riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: id }));
+  return riskFromRow(refreshActionRiskWritebackDigest(db, "risk", id, { force: true }));
 }
 
 function upsertRiskFromQuickRecord(db, quickRecord, insight, customer, opportunity) {
@@ -3628,10 +3716,45 @@ export function createServer(options = {}) {
   });
 
   const assistantClock = options.assistantClock ?? options.now ?? (() => new Date());
-  const proactiveAssistantWorker = options.proactiveAssistantWorker
+  const proactiveClock = options.proactiveAssistantClock ?? assistantClock;
+  const injectedProactiveAssistantWorker = options.proactiveAssistantWorker ?? null;
+  const proactiveScanRepository = injectedProactiveAssistantWorker?.scanRepository
+    ?? options.proactiveScanRepository
+    ?? createProactiveScanRepository(db, {
+      clock: proactiveClock,
+      ...(options.proactiveAssistantIdFactory ? { idFactory: options.proactiveAssistantIdFactory } : {}),
+      ...(options.proactiveAssistantLeaseTokenFactory
+        ? { leaseTokenFactory: options.proactiveAssistantLeaseTokenFactory }
+        : {}),
+    });
+  const proactiveSuggestionRepository = injectedProactiveAssistantWorker?.suggestionRepository
+    ?? options.proactiveSuggestionRepository
+    ?? createProactiveSuggestionRepository(db, {
+      clock: proactiveClock,
+      ...(options.proactiveAssistantIdFactory ? { idFactory: options.proactiveAssistantIdFactory } : {}),
+    });
+  const customerProactiveSubjectService = injectedProactiveAssistantWorker?.customerProactiveSubjectService
+    ?? injectedProactiveAssistantWorker?.customerSubjectService
+    ?? options.customerProactiveSubjectService
+    ?? createCustomerProactiveSubjectService({
+      db,
+      clock: proactiveClock,
+      suggestionRepository: proactiveSuggestionRepository,
+      ...(options.proactiveAssistantIdFactory ? { idFactory: options.proactiveAssistantIdFactory } : {}),
+    });
+  if (
+    customerProactiveSubjectService?.suggestionRepository
+    && customerProactiveSubjectService.suggestionRepository !== proactiveSuggestionRepository
+  ) {
+    throw new TypeError("customerProactiveSubjectService must use the shared proactiveSuggestionRepository");
+  }
+  const proactiveAssistantWorker = injectedProactiveAssistantWorker
     ?? createProactiveBackgroundWorker({
       db,
-      clock: options.proactiveAssistantClock ?? assistantClock,
+      scanRepository: proactiveScanRepository,
+      suggestionRepository: proactiveSuggestionRepository,
+      customerProactiveSubjectService,
+      clock: proactiveClock,
       workerId: options.proactiveAssistantWorkerId ?? `proactive-worker-${process.pid}`,
       batchSize: config.proactiveAssistantBatchSize,
       intervalMinutes: config.proactiveAssistantIntervalMinutes,
@@ -3670,8 +3793,18 @@ export function createServer(options = {}) {
   if (config.proactiveAssistantAutoRun && options.proactiveAssistantWorkerEnabled !== false) {
     proactiveAssistantWorker.start();
   }
-  const proactiveScanRepository = proactiveAssistantWorker.scanRepository;
-  const proactiveSuggestionRepository = proactiveAssistantWorker.suggestionRepository;
+  const actionRiskWritebackService = options.actionRiskWritebackService
+    ?? createActionRiskWritebackService({
+      db,
+      ...(options.actionRiskWritebackIdFactory ? { idFactory: options.actionRiskWritebackIdFactory } : {}),
+    });
+  const customerImportHttp = options.customerImportHttp
+    ?? createCustomerImportHttpApi({
+      db,
+      service: options.customerImportService,
+      now: options.customerImportClock ?? assistantClock,
+      ...(options.customerImportIdFactory ? { idFactory: options.customerImportIdFactory } : {}),
+    });
   const proactiveNotificationRepository = options.proactiveNotificationRepository
     ?? createProactiveNotificationRepository(db, {
       clock: options.proactiveNotificationClock ?? assistantClock,
@@ -4827,6 +4960,84 @@ export function createServer(options = {}) {
         assertMachineRouteAllowed(request.method, url.pathname, requestIdentity.integration);
       }
       request.authContext = requestIdentity;
+
+      if (request.method === "POST" && url.pathname === "/api/customer-imports/preview") {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const multipart = await readCustomerImportMultipart(request, {
+          maxFileBytes: customerImportHttp.limits.maxFileBytes,
+          maxRequestBytes: customerImportHttp.limits.maxFileBytes + 128 * 1024,
+        });
+        const result = await customerImportHttp.preview({
+          requestIdentity: request.authContext,
+          body: multipart.body,
+          file: multipart.file,
+          idempotencyKey,
+          requestId,
+        });
+        sendJson(response, result.replayed ? 200 : 201, { item: result }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && parts.length === 3
+        && parts[0] === "api"
+        && parts[1] === "customer-imports"
+        && parts[2]
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const item = customerImportHttp.get({
+          requestIdentity: request.authContext,
+          batchId: parts[2],
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "customer-imports"
+        && parts[2]
+        && parts[3] === "confirm"
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const body = await readJson(request, { maxBytes: Math.min(config.jsonBodyLimitBytes, 64 * 1024) });
+        const item = customerImportHttp.confirm({
+          requestIdentity: request.authContext,
+          batchId: parts[2],
+          body,
+          idempotencyKey,
+          requestId,
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && parts.length === 4
+        && parts[0] === "api"
+        && parts[1] === "customer-imports"
+        && parts[2]
+        && parts[3] === "cancel"
+      ) {
+        if (request.authContext.kind !== "user") return unauthorized(response);
+        const idempotencyKey = parseIdempotencyKey(request);
+        const body = await readJson(request, { maxBytes: Math.min(config.jsonBodyLimitBytes, 64 * 1024) });
+        const item = customerImportHttp.cancel({
+          requestIdentity: request.authContext,
+          batchId: parts[2],
+          body,
+          idempotencyKey,
+          requestId,
+        });
+        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        return;
+      }
 
       if (url.pathname === ASR_ROUTE) {
         // Authentication and the global cookie-CSRF/machine-scope gates above
@@ -6124,31 +6335,46 @@ export function createServer(options = {}) {
           }
           const before = proactiveSuggestionRepository.get(parts[3], { owner });
           if (!before) notFound();
+          const fields = {};
+          if (Object.hasOwn(body, "assignee")) fields.owner = body.assignee;
+          if (Object.hasOwn(body, "dueDate")) fields.dueDate = body.dueDate;
+          if (Object.hasOwn(body, "priority")) fields.priority = body.priority;
+          if (Object.hasOwn(body, "expectedResult")) fields.expectedResult = body.expectedResult;
           const item = proactiveSuggestionRepository.updateFields(parts[3], {
             owner,
             expectedVersion: body.expectedVersion,
-            fields: {
-              owner: body.assignee,
-              dueDate: body.dueDate,
-              priority: body.priority,
-              expectedResult: body.expectedResult,
-            },
+            fields,
           }, { withinTransaction: true });
-          proactiveConfirmationPreviewRepository.cancelOpenForSuggestion(parts[3], owner);
-          insertAudit(db, {
-            action: "proactive_assistant.fields.update",
-            entityType: "proactive_assistant_suggestion",
-            entityId: item.id,
-            actor: owner,
-            requestId,
-            before: { version: before.version },
-            after: { version: item.version },
-            entityVersion: item.version,
-            metadata: {
-              source: "proactive_assistant",
-              changedFields: ["assignee", "dueDate", "priority", "expectedResult"],
-            },
-          });
+          const beforeFields = before.reviewFields && typeof before.reviewFields === "object"
+            ? before.reviewFields
+            : {};
+          const afterFields = item.reviewFields && typeof item.reviewFields === "object"
+            ? item.reviewFields
+            : {};
+          const changedFields = ["assignee", "dueDate", "priority", "expectedResult"].filter((field) => (
+            Object.hasOwn(body, field)
+            && !Object.is(
+              Object.hasOwn(beforeFields, field) ? beforeFields[field] : undefined,
+              Object.hasOwn(afterFields, field) ? afterFields[field] : undefined,
+            )
+          ));
+          if (changedFields.length > 0) {
+            proactiveConfirmationPreviewRepository.cancelOpenForSuggestion(parts[3], owner);
+            insertAudit(db, {
+              action: "proactive_assistant.fields.update",
+              entityType: "proactive_assistant_suggestion",
+              entityId: item.id,
+              actor: owner,
+              requestId,
+              before: { version: before.version },
+              after: { version: item.version },
+              entityVersion: item.version,
+              metadata: {
+                source: "proactive_assistant",
+                changedFields,
+              },
+            });
+          }
           const envelope = { item };
           completeIdempotency(db, {
             ...scope,
@@ -6198,6 +6424,7 @@ export function createServer(options = {}) {
               suggestionId,
             });
           if (!suggestion) notFound();
+          assertCurrentCustomerProactiveSubject(customerProactiveSubjectService, owner, suggestion);
           const durableSnapshot = proactiveConfirmationSnapshot(suggestion, body.target);
           if (!durableSnapshot) validationFailure("target", "unavailable");
           const preview = durableSnapshot.preview;
@@ -6369,6 +6596,11 @@ export function createServer(options = {}) {
           if (requestHash(body.preview) !== requestHash(durablePreview.preview)) {
             validationFailure("preview", "mismatch");
           }
+          assertCurrentCustomerProactiveSubject(
+            customerProactiveSubjectService,
+            owner,
+            durablePreview.snapshot ?? durablePreview.preview,
+          );
           if (durablePreview.status === "expired" || durablePreview.status === "cancelled") {
             throw new HttpError(409, "PROACTIVE_PREVIEW_CLOSED", "主动助手预览已关闭，请重新生成预览");
           }
@@ -6456,6 +6688,20 @@ export function createServer(options = {}) {
             if (!priorMetadata) {
               validationFailure("previewDigest", "mismatch");
             }
+            const currentWritebackDigest = computeWritebackDigest(
+              target,
+              target === "action" ? actionWritebackFromRow(existingRow) : riskWritebackFromRow(existingRow),
+            );
+            if (
+              typeof priorMetadata.writebackDigest !== "string"
+              || priorMetadata.writebackDigest !== existingRow.writeback_digest
+              || existingRow.writeback_digest !== currentWritebackDigest
+            ) {
+              proactiveWritebackConflict(
+                "主动助手写回内容已变化，请刷新后重新确认",
+                Number(existingRow.version ?? 1),
+              );
+            }
             const existing = target === "action" ? actionFromRow(existingRow) : riskFromRow(existingRow);
             const responseBody = {
               suggestionId,
@@ -6517,19 +6763,53 @@ export function createServer(options = {}) {
             validationFailure("previewDigest", "mismatch");
           }
 
+          const reviewFields = suggestion.reviewFields && typeof suggestion.reviewFields === "object"
+            ? suggestion.reviewFields
+            : {};
+          const reviewedValue = (name, fallback = null) => {
+            if (Object.hasOwn(reviewFields, name)) return reviewFields[name];
+            if (Object.hasOwn(preview, name)) return preview[name];
+            return fallback;
+          };
+          const reviewedDue = Object.hasOwn(reviewFields, "dueDate")
+            ? reviewFields.dueDate
+            : reviewedValue("due", null);
+          const reviewedAssignee = Object.hasOwn(reviewFields, "assignee")
+            ? reviewFields.assignee
+            : reviewedValue("assignee", owner);
+          const reviewedExpectedResult = Object.hasOwn(reviewFields, "expectedResult")
+            ? reviewFields.expectedResult
+            : reviewedValue("expectedResult", null);
+          const reviewedSourceRecordId = reviewedValue("sourceRecordId", null);
+          const reviewedRiskSeverity = Object.hasOwn(reviewFields, "severity")
+            ? reviewFields.severity
+            : Object.hasOwn(reviewFields, "priority")
+              ? reviewFields.priority
+              : reviewedValue("severity", "中");
           let item;
           if (target === "action") {
-            createActionItemStore(db).create({
+            const writeback = actionRiskWritebackService.writeAction({
+              mode: "create",
               owner,
               id: stableId,
               title: preview.title,
-              reason: preview.reason,
+              customer: currentCustomer.name,
+              reason: preview.reason ?? suggestion.conclusion ?? "主动助手建议需要人工跟进。",
+              due: reviewedDue,
+              assignee: reviewedAssignee,
+              priority: reviewedValue("priority", "中") ?? "中",
+              status: reviewedValue("status", "pending") ?? "pending",
               customerId: currentCustomer.id,
-              customerName: currentCustomer.name,
               opportunityId: currentOpportunity.id,
-              priority: "中",
-            });
-            item = actionFromRow(get(db, "SELECT * FROM action_items WHERE id = $id AND deleted_at IS NULL", { $id: stableId }));
+              sourceRecordId: reviewedSourceRecordId,
+              sourceType: reviewedSourceRecordId ? "quick_record" : "proactive_assistant",
+              sourceId: reviewedSourceRecordId ?? suggestion.id,
+              sourceProactiveId: suggestion.id,
+              expectedResult: reviewedExpectedResult,
+              tone: reviewedValue("tone", null),
+              remindAt: reviewedValue("remindAt", null),
+            }, { withinTransaction: true });
+            item = writeback.item;
             insertAudit(db, {
               action: "action.create",
               entityType: "action",
@@ -6539,31 +6819,36 @@ export function createServer(options = {}) {
               before: null,
               after: item,
               entityVersion: item.version,
-              metadata: { source: "proactive_assistant", suggestionId: suggestion.id },
+              metadata: {
+                source: "proactive_assistant",
+                suggestionId: suggestion.id,
+                writebackDigest: writeback.writebackDigest,
+              },
             });
           } else {
             const riskId = stableId;
-            run(db, `
-              INSERT INTO risk_items (
-                id, customer_id, opportunity_id, title, target, score, severity,
-                status, evidence, action, assignee, source_type, source_id, tone, owner
-              ) VALUES (
-                $id, $customerId, $opportunityId, $title, $target, 60, '中',
-                'open', $evidence, $action, $assignee, 'proactive_assistant', $sourceId, 'amber', $owner
-              )
-            `, {
-              $id: riskId,
-              $customerId: currentCustomer.id,
-              $opportunityId: currentOpportunity.id,
-              $title: preview.title,
-              $target: preview.target,
-              $evidence: preview.evidence,
-              $action: preview.action,
-              $assignee: owner,
-              $sourceId: suggestion.id,
-              $owner: owner,
-            });
-            item = riskFromRow(get(db, "SELECT * FROM risk_items WHERE id = $id AND deleted_at IS NULL", { $id: riskId }));
+            const writeback = actionRiskWritebackService.writeRisk({
+              mode: "create",
+              owner,
+              id: riskId,
+              title: preview.title,
+              target: preview.target ?? `${currentCustomer.name} / ${currentOpportunity.name ?? currentOpportunity.id}`,
+              score: reviewedValue("score", 60) ?? 60,
+              severity: reviewedRiskSeverity ?? "中",
+              status: reviewedValue("status", "open") ?? "open",
+              evidence: preview.evidence ?? suggestion.conclusion ?? "主动助手建议需要人工核对证据。",
+              action: preview.action ?? "补充证据并确认下一步。",
+              assignee: reviewedAssignee,
+              due: reviewedDue,
+              customerId: currentCustomer.id,
+              opportunityId: currentOpportunity.id,
+              sourceType: "proactive_assistant",
+              sourceId: suggestion.id,
+              sourceProactiveId: suggestion.id,
+              expectedResult: reviewedExpectedResult,
+              tone: reviewedValue("tone", "amber") ?? "amber",
+            }, { withinTransaction: true });
+            item = writeback.item;
             insertAudit(db, {
               action: "risk.create",
               entityType: "risk",
@@ -6573,7 +6858,11 @@ export function createServer(options = {}) {
               before: null,
               after: item,
               entityVersion: item.version,
-              metadata: { source: "proactive_assistant", suggestionId: suggestion.id },
+              metadata: {
+                source: "proactive_assistant",
+                suggestionId: suggestion.id,
+                writebackDigest: writeback.writebackDigest,
+              },
             });
           }
           const responseBody = {
@@ -6604,6 +6893,7 @@ export function createServer(options = {}) {
               expectedOpportunityVersion: body.expectedOpportunityVersion,
               expectedCustomerVersion: body.expectedCustomerVersion,
               previewDigest: body.previewDigest,
+              writebackDigest: item.writebackDigest,
             },
           });
           proactiveConfirmationPreviewRepository.complete(confirmationPreviewId, owner, {
@@ -6657,7 +6947,7 @@ export function createServer(options = {}) {
         };
         let items;
         try {
-          items = hospitalTenderRepository.listNotices(filters);
+          items = hospitalTenderRepository.listNotices(filters, { owner: tenderOwner });
         } catch (error) {
           throw new HttpError(422, "VALIDATION_ERROR", "招标公告筛选条件无效", { filters: error.message });
         }
@@ -6687,9 +6977,9 @@ export function createServer(options = {}) {
         && parts[2]
         && !new Set(["summary", "sources", "health", "scheduler"]).has(parts[2])
       ) {
-        const item = hospitalTenderRepository.getNotice(parts[2]);
-        if (!item) return notFound(response);
         const tenderOwner = requestOwner(request);
+        const item = hospitalTenderRepository.getNotice(parts[2], { owner: tenderOwner });
+        if (!item) return notFound(response);
         sendJson(response, 200, {
           item: serializeHospitalTenderNotice(item, hospitalTenderCustomerNameMap(db, tenderOwner), {
             restrictMatchesToKnownCustomers: tenderOwner !== null,
@@ -10666,6 +10956,9 @@ export function createServer(options = {}) {
   server.proactiveAssistantWorker = proactiveAssistantWorker;
   server.proactiveScanRepository = proactiveScanRepository;
   server.proactiveSuggestionRepository = proactiveSuggestionRepository;
+  server.customerProactiveSubjectService = customerProactiveSubjectService;
+  server.actionRiskWritebackService = actionRiskWritebackService;
+  server.customerImportHttp = customerImportHttp;
   server.proactiveNotificationRepository = proactiveNotificationRepository;
   server.proactiveNotificationScheduler = proactiveNotificationScheduler;
 

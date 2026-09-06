@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-06
+
+### 客户级主动助手与客户数据闭环升级候选
+
+- **冻结与迁移**：以 `3370b9451f390cfcfa56bf8c4eb9b2df31c43a68` 为升级基线，冻结 shared API contract、文件所有权和 `0042–0045` 四个 forward-only 迁移；新增客户主动 subject、医院招标 canonical bridge、action/risk 写回字段及客户导入批次/行表，继续由迁移账本做 checksum 校验和幂等重开。
+- **客户级主动助手**：主动扫描从全局建议扩展到 owner/customer subject；持久化 subject revision、source digest、source refs 与建议关联，在后台 worker、服务装配、跨入口读取、人工预览/确认、幂等重放和 stale conflict 路径中保持同一客户身份。
+- **医院招标 bridge**：为招标通知补充唯一 canonical identity、revision、digest 与 owner/customer bridge 状态；匹配、同步、调度和转商机统一走 canonical bridge，确认前复核通知、客户与匹配证据，拒绝跨 owner、过期预览和损坏回执。
+- **action/risk 字段写回**：主动建议确认不再只写默认行动值；action 持久化负责人、截止日期、优先级、预期结果及来源 provenance，risk 将建议 priority 规范映射到 severity，并保留来源类型、来源 id、建议 id、subject key/version 和 source digest/refs。
+- **CSV/XLSX 客户批量导入**：新增认证后的 multipart preview/get/confirm/cancel API 与客户页导入面板；支持 UTF-8/BOM CSV（CRLF、引号、嵌入换行）和 XLSX，提供字段映射、服务端只读逐行动作、同 owner 名称/别名查重、create/merge/skip/reject、摘要校验、幂等、取消、即时事务提交与审计。owner 始终来自会话，原始文件字节不入库。
+- **浏览器验收**：新增真实 multipart CSV 的 WebKit 六视口流程，覆盖映射变化后强制重预览、确认回执、取消、客户 API/SQLite 回读、无原始文件列、零横向溢出、零非预期 HTTP 失败及 loopback-only 网络；XLSX 上传解析由后端自动化测试覆盖。
+- **候选边界**：该版本只在本地临时 SQLite、合成数据、mock AI 和 `127.0.0.1` 服务中验证；未读取 iCloud，未检查、连接、迁移或修改生产，也未发送真实通知。发布提交以最终干净提交和其 evidence 中的 40 位 exact commit 为准。
+
 ## [0.11.2] - 2026-09-06
 
 ### 维护交付候选：滚轮、主动助手稳定性与客户详情验收

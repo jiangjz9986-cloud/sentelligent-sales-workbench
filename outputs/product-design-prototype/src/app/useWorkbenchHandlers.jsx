@@ -14,6 +14,9 @@ const noopActions = {
   handleUpdateRiskStatus: async () => {},
   handleUpdateActionStatus: async () => {},
   handleCreateAction: async () => {},
+  handlePreviewCustomerImport: async () => {},
+  handleConfirmCustomerImport: async () => {},
+  handleCancelCustomerImport: async () => {},
   handleCreateProactiveConfirmationPreview: async () => {},
   handleConfirmProactiveWriteback: async () => {},
   handleProactiveLifecycleChange: async () => {},
@@ -160,6 +163,26 @@ export function useWorkbenchHandlers({ nav, data, apiClient, weeklySession, sele
     selectAction(saved.id);
     await refreshOverviewSummary();
     return saved;
+  }
+
+  async function handlePreviewCustomerImport(request = {}) {
+    ensureBackend("预览客户批量导入");
+    if (!request?.file) throw new Error("请选择客户 CSV 或 XLSX 文件");
+    return apiClient.previewCustomerImport(request.file, request);
+  }
+
+  async function handleConfirmCustomerImport(request = {}) {
+    ensureBackend("确认客户批量导入");
+    if (!request?.batchId) throw new Error("客户导入批次不存在");
+    const result = await apiClient.confirmCustomerImport(request.batchId, request, request);
+    if (typeof reloadBootstrap === "function") await reloadBootstrap();
+    return result;
+  }
+
+  async function handleCancelCustomerImport(request = {}) {
+    ensureBackend("取消客户批量导入");
+    if (!request?.batchId) throw new Error("客户导入批次不存在");
+    return apiClient.cancelCustomerImport(request.batchId, request, request);
   }
 
   async function handleCreateProactiveConfirmationPreview({ item, target } = {}) {
@@ -437,6 +460,9 @@ export function useWorkbenchHandlers({ nav, data, apiClient, weeklySession, sele
     handleUpdateRiskStatus,
     handleUpdateActionStatus,
     handleCreateAction,
+    handlePreviewCustomerImport,
+    handleConfirmCustomerImport,
+    handleCancelCustomerImport,
     handleCreateProactiveConfirmationPreview,
     handleConfirmProactiveWriteback,
     handleProactiveLifecycleChange,

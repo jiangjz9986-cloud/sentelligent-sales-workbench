@@ -7,6 +7,11 @@ import { describe, it } from "node:test";
 import { createConnection } from "../src/db/connection.js";
 import { withImmediateTransaction } from "../src/db/transaction.js";
 import {
+  actionWritebackFromRow,
+  computeWritebackDigest,
+  riskWritebackFromRow,
+} from "../src/actionRisk/index.js";
+import {
   parseIdempotencyKey,
   requestHash,
   stableJson,
@@ -352,6 +357,26 @@ describe("transactional and idempotent quick-record confirmation", () => {
       assert.equal(snapshot.confirmations.length, 3);
       assert.equal(snapshot.actions.length, 1);
       assert.equal(snapshot.risks.length, 1);
+      assert.equal(snapshot.actions[0].source_type, "quick_record");
+      assert.equal(snapshot.actions[0].source_id, fixture.quickRecord.id);
+      assert.equal(snapshot.actions[0].source_proactive_id, null);
+      assert.match(snapshot.actions[0].writeback_digest, /^[0-9a-f]{64}$/u);
+      assert.equal(
+        snapshot.actions[0].writeback_digest,
+        computeWritebackDigest("action", actionWritebackFromRow(snapshot.actions[0])),
+      );
+      assert.equal(first.body.action.sourceType, "quick_record");
+      assert.equal(first.body.action.sourceId, fixture.quickRecord.id);
+      assert.equal(first.body.action.writebackDigest, snapshot.actions[0].writeback_digest);
+      assert.equal(snapshot.risks[0].source_type, "quick_record");
+      assert.equal(snapshot.risks[0].source_id, fixture.quickRecord.id);
+      assert.equal(snapshot.risks[0].source_proactive_id, null);
+      assert.match(snapshot.risks[0].writeback_digest, /^[0-9a-f]{64}$/u);
+      assert.equal(
+        snapshot.risks[0].writeback_digest,
+        computeWritebackDigest("risk", riskWritebackFromRow(snapshot.risks[0])),
+      );
+      assert.equal(first.body.risk.writebackDigest, snapshot.risks[0].writeback_digest);
       assert.equal(snapshot.audits.length, 1);
       assert.equal(snapshot.idempotency.length, 1);
       assert.equal(snapshot.idempotency[0].state, "completed");

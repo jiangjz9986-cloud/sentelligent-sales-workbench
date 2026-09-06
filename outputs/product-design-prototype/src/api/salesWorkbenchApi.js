@@ -295,6 +295,26 @@ function assertHospitalTenderSource(value, path = "hospitalTenderSource") {
   return assertApiEntity("hospitalTenderSource", value, path);
 }
 
+export function assertCustomerImportResult(value, path = "customerImportResult") {
+  const result = apiObject(value, path);
+  const batch = result.customerImportBatch ?? result.batch;
+  const rows = result.customerImportRows ?? result.rows;
+  assertApiEntity("customerImportBatch", batch, `${path}.customerImportBatch`);
+  assertApiCollection("customerImportRow", rows, `${path}.customerImportRows`);
+  if (result.previewDigest !== undefined && result.previewDigest !== null
+    && typeof result.previewDigest !== "string") {
+    throw new TypeError(`${path}.previewDigest: expected nullable string`);
+  }
+  if (result.mapping !== undefined && result.mapping !== null
+    && (typeof result.mapping !== "object" || Array.isArray(result.mapping))) {
+    throw new TypeError(`${path}.mapping: expected nullable object`);
+  }
+  if (result.replayed !== undefined && typeof result.replayed !== "boolean") {
+    throw new TypeError(`${path}.replayed: expected boolean`);
+  }
+  return result;
+}
+
 function hospitalTenderLeadConversionUrl(noticeId, action) {
   const id = requiredApiString(noticeId, "noticeId");
   if (!new Set(["preview", "confirm", "cancel"]).has(action)) {
@@ -629,18 +649,25 @@ export function createConfirmationAttemptTracker({ createId = createStrongUuid }
   };
 }
 
+function isFormDataBody(body) {
+  return (typeof FormData !== "undefined" && body instanceof FormData)
+    || Object.prototype.toString.call(body) === "[object FormData]";
+}
+
 function requestHeaders(options, csrfToken) {
   const method = String(options.method ?? "GET").toUpperCase();
+  const formDataBody = isFormDataBody(options.body);
   const suppliedHeaders = { ...(options.headers ?? {}) };
   for (const name of Object.keys(suppliedHeaders)) {
     const normalizedName = name.toLowerCase();
-    if (normalizedName === "authorization" || normalizedName === "x-csrf-token") {
+    if (normalizedName === "authorization" || normalizedName === "x-csrf-token"
+      || (formDataBody && normalizedName === "content-type")) {
       delete suppliedHeaders[name];
     }
   }
 
   return {
-    "Content-Type": "application/json",
+    ...(formDataBody ? {} : { "Content-Type": "application/json" }),
     ...suppliedHeaders,
     ...(method !== "GET" && method !== "HEAD" && csrfToken
       ? { "X-CSRF-Token": csrfToken }
@@ -1375,6 +1402,96 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         ...(includeHistory ? { includeHistory: true } : {}),
       }), { signal });
       return assertProactiveAssistant(response.item, "proactiveAssistant.item");
+    },
+
+    async previewCustomerImport(file, options = {}) {
+      if (!file || typeof file !== "object" || !Number.isFinite(file.size) || file.size <= 0) {
+        throw new TypeError("customerImport.file: expected a non-empty File");
+      }
+      const idempotencyKey = requiredApiString(
+        options.idempotencyKey,
+        "customer import preview Idempotency-Key",
+      );
+      if (typeof FormData === "undefined") {
+        throw new Error("customer import preview requires FormData support");
+      }
+      const formData = new FormData();
+      const fileName = typeof file.name === "string" && file.name.trim() ? file.name : "customers.csv";
+      formData.append("file", file, fileName);
+      if (options.mapping !== undefined && options.mapping !== null) {
+        if (typeof options.mapping !== "object" || Array.isArray(options.mapping)) {
+          throw new TypeError("customerImport.mapping: expected object");
+        }
+        formData.append("mapping", JSON.stringify(options.mapping));
+      }
+      const response = await requestApi("/api/customer-imports/preview", {
+        method: "POST",
+        signal: options.signal,
+        headers: idempotencyHeaders({ idempotencyKey }, "customer import preview"),
+        body: formData,
+      });
+      return assertCustomerImportResult(
+        response?.item ?? response,
+        "customerImportPreview.item",
+      );
+    },
+
+    async getCustomerImport(batchId, { signal } = {}) {
+      const id = requiredApiString(batchId, "customerImport.batchId");
+      const response = await requestApi(`/api/customer-imports/${encodeURIComponent(id)}`, { signal });
+      return assertCustomerImportResult(response?.item ?? response, "customerImport.item");
+    },
+
+    async confirmCustomerImport(batchId, input = {}, options = {}) {
+      const id = requiredApiString(batchId, "customerImport.batchId");
+      const source = apiObject(input, "customerImportConfirm");
+      if (source.confirmed !== true) {
+        throw new TypeError("customerImportConfirm.confirmed: expected true");
+      }
+      const idempotencyKey = requiredApiString(
+        options.idempotencyKey ?? source.idempotencyKey,
+        "customer import confirm Idempotency-Key",
+      );
+      const previewDigest = requiredApiString(source.previewDigest, "customerImportConfirm.previewDigest");
+      const fileSha256 = requiredApiString(source.fileSha256, "customerImportConfirm.fileSha256");
+      if (!/^[0-9a-f]{64}$/u.test(previewDigest)) {
+        throw new TypeError("customerImportConfirm.previewDigest: expected SHA-256 digest");
+      }
+      if (!/^[0-9a-f]{64}$/u.test(fileSha256)) {
+        throw new TypeError("customerImportConfirm.fileSha256: expected SHA-256 digest");
+      }
+      const response = await requestApi(`/api/customer-imports/${encodeURIComponent(id)}/confirm`, {
+        method: "POST",
+        signal: options.signal ?? source.signal,
+        headers: idempotencyHeaders({ idempotencyKey }, "customer import confirm"),
+        body: JSON.stringify({ confirmed: true, previewDigest, fileSha256 }),
+      });
+      return assertCustomerImportResult(
+        response?.item ?? response,
+        "customerImportConfirmation.item",
+      );
+    },
+
+    async cancelCustomerImport(batchId, input = {}, options = {}) {
+      const id = requiredApiString(batchId, "customerImport.batchId");
+      const source = apiObject(input, "customerImportCancel");
+      const idempotencyKey = requiredApiString(
+        options.idempotencyKey ?? source.idempotencyKey,
+        "customer import cancel Idempotency-Key",
+      );
+      const reason = source.reason === undefined || source.reason === null || source.reason === ""
+        ? "operator_cancelled"
+        : requiredApiString(source.reason, "customerImportCancel.reason");
+      const response = await requestApi(`/api/customer-imports/${encodeURIComponent(id)}/cancel`, {
+        method: "POST",
+        signal: options.signal ?? source.signal,
+        headers: idempotencyHeaders({ idempotencyKey }, "customer import cancel"),
+        body: JSON.stringify({ reason }),
+      });
+      return assertCustomerImportResult(
+        response?.item ?? response,
+        "customerImportCancellation.item",
+      );
     },
 
     async getProactiveNotifications({ limit, offset, signal } = {}) {

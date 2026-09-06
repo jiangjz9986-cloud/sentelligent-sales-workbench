@@ -394,6 +394,66 @@ function normalizedOwners(value) {
   }).filter(Boolean))].sort();
 }
 
+function emptyCustomerSubjectScan({ enabled = false } = {}) {
+  return {
+    enabled,
+    status: enabled ? "idle" : "disabled",
+    attemptedCount: 0,
+    succeededCount: 0,
+    failedCount: 0,
+    subjectCount: 0,
+    suggestionCount: 0,
+    insertedCount: 0,
+    dedupedCount: 0,
+    results: [],
+    errors: [],
+  };
+}
+
+function addCustomerSubjectScan(left, right) {
+  const merged = {
+    enabled: Boolean(left?.enabled || right?.enabled),
+    status: "success",
+    attemptedCount: Number(left?.attemptedCount ?? 0) + Number(right?.attemptedCount ?? 0),
+    succeededCount: Number(left?.succeededCount ?? 0) + Number(right?.succeededCount ?? 0),
+    failedCount: Number(left?.failedCount ?? 0) + Number(right?.failedCount ?? 0),
+    subjectCount: Number(left?.subjectCount ?? 0) + Number(right?.subjectCount ?? 0),
+    suggestionCount: Number(left?.suggestionCount ?? 0) + Number(right?.suggestionCount ?? 0),
+    insertedCount: Number(left?.insertedCount ?? 0) + Number(right?.insertedCount ?? 0),
+    dedupedCount: Number(left?.dedupedCount ?? 0) + Number(right?.dedupedCount ?? 0),
+    results: [...(Array.isArray(left?.results) ? left.results : []), ...(Array.isArray(right?.results) ? right.results : [])],
+    errors: [...(Array.isArray(left?.errors) ? left.errors : []), ...(Array.isArray(right?.errors) ? right.errors : [])],
+  };
+  merged.status = merged.failedCount > 0
+    ? (merged.succeededCount > 0 ? "partial" : "failed")
+    : (merged.attemptedCount > 0 ? "success" : (merged.enabled ? "idle" : "disabled"));
+  return merged;
+}
+
+function customerSubjectResult({ owner, customerId, syncResult }) {
+  const subject = syncResult?.subject ?? syncResult?.customerSubject ?? null;
+  const suggestions = Array.isArray(syncResult?.suggestions)
+    ? syncResult.suggestions
+    : Array.isArray(syncResult?.items)
+      ? syncResult.items
+      : [];
+  return {
+    status: "success",
+    owner,
+    customerId,
+    identity: subject?.identity ?? `customer:${owner}:${customerId}`,
+    subjectType: subject?.subjectType ?? "customer",
+    subjectId: subject?.subjectId ?? customerId,
+    version: Number.isSafeInteger(subject?.version) ? subject.version : (syncResult?.revision ?? null),
+    sourceDigest: subject?.sourceDigest ?? syncResult?.sourceDigest ?? null,
+    suggestionCount: Number.isSafeInteger(subject?.suggestionCount)
+      ? subject.suggestionCount
+      : suggestions.length,
+    insertedCount: Number(syncResult?.insertedCount ?? 0),
+    dedupedCount: Number(syncResult?.dedupedCount ?? 0),
+  };
+}
+
 /**
  * A process-owned, timer-backed proactive scanner.  It never depends on a
  * browser request: `start()` is intended to be called while the backend is
@@ -404,6 +464,10 @@ export function createProactiveBackgroundWorker({
   db,
   scanRepository = null,
   suggestionRepository = null,
+  customerProactiveSubjectService = null,
+  // Keep the shorter alias for feature owners that already use the service
+  // under this name. The canonical injection point is the full option above.
+  customerSubjectService = null,
   snapshotBuilder = buildProactiveAssistantSnapshot,
   clock = () => new Date(),
   idFactory = randomUUID,
@@ -464,15 +528,27 @@ export function createProactiveBackgroundWorker({
     leaseTokenFactory,
   });
   const suggestions = suggestionRepository ?? createProactiveSuggestionRepository(db, { clock, idFactory });
+  if (customerProactiveSubjectService && customerSubjectService
+    && customerProactiveSubjectService !== customerSubjectService) {
+    throw new TypeError("customer proactive subject service options must refer to the same service");
+  }
+  const customerSubjects = customerProactiveSubjectService ?? customerSubjectService;
   if (!scan || typeof scan.getState !== "function" || typeof scan.tryAcquireLease !== "function") {
     throw new TypeError("scanRepository is invalid");
   }
   if (!suggestions || typeof suggestions.save !== "function") throw new TypeError("suggestionRepository is invalid");
+  if (customerSubjects !== null && (typeof customerSubjects !== "object" || typeof customerSubjects.syncCustomer !== "function")) {
+    throw new TypeError("customerProactiveSubjectService is invalid");
+  }
+  if (customerSubjects?.suggestionRepository && customerSubjects.suggestionRepository !== suggestions) {
+    throw new TypeError("customerProactiveSubjectService must use the shared suggestionRepository");
+  }
 
   const configuredWorkerId = identifier(workerId ?? `proactive-worker-${idFactory()}`, "workerId");
   let timer = null;
   let started = false;
   let ticking = false;
+  let lastCustomerSubjectScan = emptyCustomerSubjectScan({ enabled: Boolean(customerSubjects) });
   const modelQueue = createConcurrencyLimiter(modelConcurrency);
   const modelRuntime = modelAnalyzer && tableExists(db, "proactive_model_cache") && tableExists(db, "proactive_model_usage")
     ? createProactiveModelBudgetRepository(db, {
@@ -933,6 +1009,127 @@ export function createProactiveBackgroundWorker({
     return rows.map(rowToOpportunity);
   }
 
+  function customerSignalRows() {
+    if (!customerSubjects) return [];
+    const allowedOwners = ownersProvider ? new Set(normalizedOwners(ownersProvider())) : null;
+    const candidates = new Map();
+    const addCandidate = (ownerValue, customerIdValue) => {
+      const owner = String(ownerValue ?? "").trim();
+      const customerId = String(customerIdValue ?? "").trim();
+      if (!owner || !customerId || (allowedOwners && !allowedOwners.has(owner))) return;
+      candidates.set(`${owner}\u0000${customerId}`, { owner, customerId });
+    };
+    const directRows = db.prepare(`
+      SELECT customer.owner, customer.id AS customer_id
+        FROM customers customer
+       WHERE customer.deleted_at IS NULL
+         AND customer.owner IS NOT NULL
+         AND trim(customer.owner) <> ''
+         AND NOT EXISTS (
+           SELECT 1 FROM opportunities opportunity
+            WHERE opportunity.owner = customer.owner
+              AND opportunity.customer_id = customer.id
+              AND opportunity.deleted_at IS NULL
+         )
+         AND (
+           EXISTS (
+             SELECT 1 FROM action_items action
+              WHERE action.owner = customer.owner
+                AND action.customer_id = customer.id
+                AND action.deleted_at IS NULL
+           )
+           OR EXISTS (
+             SELECT 1 FROM risk_items risk
+              WHERE risk.owner = customer.owner
+                AND risk.customer_id = customer.id
+                AND risk.deleted_at IS NULL
+           )
+           OR EXISTS (
+             SELECT 1 FROM quick_records interaction
+              WHERE interaction.owner = customer.owner
+                AND interaction.customer_id = customer.id
+                AND interaction.voided_at IS NULL
+           )
+           OR EXISTS (
+             SELECT 1 FROM proactive_subjects subject
+              WHERE subject.owner = customer.owner
+                AND subject.customer_id = customer.id
+           )
+         )
+       ORDER BY customer.owner ASC, customer.id ASC
+    `).all();
+    for (const row of directRows) addCandidate(row.owner, row.customer_id);
+
+    const selectCustomer = db.prepare(`
+      SELECT customer.owner, customer.id
+        FROM customers customer
+       WHERE customer.id = $customerId
+         AND ($owner IS NULL OR customer.owner = $owner)
+         AND customer.deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM opportunities opportunity
+            WHERE opportunity.owner = customer.owner
+              AND opportunity.customer_id = customer.id
+              AND opportunity.deleted_at IS NULL
+         )
+       LIMIT 1
+    `);
+    const addOwnedCustomer = (ownerValue, customerIdValue) => {
+      const owner = String(ownerValue ?? "").trim();
+      const customerId = String(customerIdValue ?? "").trim();
+      if (!customerId || (owner && allowedOwners && !allowedOwners.has(owner))) return;
+      const row = selectCustomer.get({ $owner: owner || null, $customerId: customerId });
+      if (row) addCandidate(row.owner, row.id);
+    };
+
+    if (tableExists(db, "visit_itineraries")) {
+      const itineraries = db.prepare(`
+        SELECT owner, request_json, plan_json
+          FROM visit_itineraries
+         WHERE deleted_at IS NULL AND status <> 'cancelled'
+      `).all();
+      for (const row of itineraries) {
+        let request = {};
+        let plan = {};
+        try { request = JSON.parse(row.request_json ?? "{}"); } catch {}
+        try { plan = JSON.parse(row.plan_json ?? "{}"); } catch {}
+        addOwnedCustomer(
+          row.owner,
+          request.customerId ?? request.customer_id ?? plan.customerId ?? plan.customer_id ?? null,
+        );
+      }
+    }
+
+    if (tableExists(db, "hospital_tender_notices")) {
+      const notices = db.prepare(`
+        SELECT match_customer_ids_json
+          FROM hospital_tender_notices
+         ORDER BY published_at DESC, id DESC
+         LIMIT 200
+      `).all();
+      for (const row of notices) {
+        let customerIds = [];
+        try { customerIds = JSON.parse(row.match_customer_ids_json ?? "[]"); } catch {}
+        for (const customerId of Array.isArray(customerIds) ? customerIds : []) {
+          addOwnedCustomer(null, customerId);
+        }
+      }
+    }
+
+    return [...candidates.values()].sort((left, right) => (
+      left.owner.localeCompare(right.owner) || left.customerId.localeCompare(right.customerId)
+    ));
+  }
+
+  function periodicCustomerSignalRows(cycleNumber, limit) {
+    const rows = customerSignalRows();
+    const bounded = Math.max(1, Math.min(Number(limit) || batchSize, 500));
+    if (rows.length <= bounded) return rows;
+    const cycle = Number.isSafeInteger(cycleNumber) && cycleNumber >= 0 ? cycleNumber : 0;
+    const start = (cycle * bounded) % rows.length;
+    return Array.from({ length: bounded }, (_, index) => rows[(start + index) % rows.length]);
+  }
+
 function relatedRows(owner, opportunities) {
   const rows = opportunities.filter(Boolean);
     if (rows.length === 0) return { actions: [], interactions: [], risks: [], itineraries: [], tenders: [], knowledge: [] };
@@ -1060,11 +1257,68 @@ function relatedRows(owner, opportunities) {
       : [];
   }
 
-  async function processRows(rows, { runId, eventId = null } = {}) {
+  function uniqueCustomerRows(rows) {
+    const byKey = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const owner = String(row?.owner ?? "").trim();
+      const customerId = String(row?.customerId ?? "").trim();
+      if (!owner || !customerId) continue;
+      const key = `${owner}\u0000${customerId}`;
+      if (!byKey.has(key)) byKey.set(key, { owner, customerId });
+    }
+    return [...byKey.values()].sort((left, right) => (
+      left.owner.localeCompare(right.owner) || left.customerId.localeCompare(right.customerId)
+    ));
+  }
+
+  async function processCustomerSubjects(rows) {
+    if (!customerSubjects) return emptyCustomerSubjectScan();
+    const groups = uniqueCustomerRows(rows);
+    const scanResult = emptyCustomerSubjectScan({ enabled: true });
+    scanResult.attemptedCount = groups.length;
+    scanResult.subjectCount = groups.length;
+    for (const group of groups) {
+      try {
+        const synced = await customerSubjects.syncCustomer({
+          owner: group.owner,
+          customerId: group.customerId,
+          ...(staleDays === undefined ? {} : { staleDays }),
+          includeExtendedSignals,
+        });
+        const result = customerSubjectResult({
+          owner: group.owner,
+          customerId: group.customerId,
+          syncResult: synced,
+        });
+        scanResult.succeededCount += 1;
+        scanResult.suggestionCount += result.suggestionCount;
+        scanResult.insertedCount += result.insertedCount;
+        scanResult.dedupedCount += result.dedupedCount;
+        scanResult.results.push(result);
+      } catch (error) {
+        const failure = {
+          status: "failed",
+          owner: group.owner,
+          customerId: group.customerId,
+          error: safeError(error, "customer proactive subject sync failed"),
+          errorCode: String(error?.code ?? "PROACTIVE_CUSTOMER_SUBJECT_SYNC_FAILED").slice(0, 200),
+        };
+        scanResult.failedCount += 1;
+        scanResult.errors.push(failure);
+        scanResult.results.push(failure);
+      }
+    }
+    scanResult.status = scanResult.failedCount > 0
+      ? (scanResult.succeededCount > 0 ? "partial" : "failed")
+      : (scanResult.attemptedCount > 0 ? "success" : "idle");
+    return scanResult;
+  }
+
+  async function processRows(rows, { runId, eventId = null, syncCustomers = true } = {}) {
     let objectCount = 0;
-    let suggestionCount = 0;
-    let insertedCount = 0;
-    let dedupedCount = 0;
+    let opportunitySuggestionCount = 0;
+    let opportunityInsertedCount = 0;
+    let opportunityDedupedCount = 0;
     const grouped = new Map();
     for (const row of rows) {
       const list = grouped.get(row.owner) ?? [];
@@ -1129,7 +1383,7 @@ function relatedRows(owner, opportunities) {
             knowledge: ownerRelated.knowledge,
           }));
         }
-        suggestionCount += items.length;
+        opportunitySuggestionCount += items.length;
         for (const item of items) {
           const saved = await suggestions.save({
             owner,
@@ -1152,15 +1406,104 @@ function relatedRows(owner, opportunities) {
             runId,
             eventId,
           });
-          if (saved.replayed) dedupedCount += 1;
-          else insertedCount += 1;
+          if (saved.replayed) opportunityDedupedCount += 1;
+          else opportunityInsertedCount += 1;
         }
       }
     }
-    return { objectCount, suggestionCount, insertedCount, dedupedCount };
+    const customerScan = syncCustomers
+      ? await processCustomerSubjects(rows)
+      : emptyCustomerSubjectScan({ enabled: Boolean(customerSubjects) });
+    return {
+      objectCount,
+      opportunityObjectCount: objectCount,
+      opportunitySuggestionCount,
+      opportunityInsertedCount,
+      opportunityDedupedCount,
+      customerScan,
+      customerSubjectCount: customerScan.subjectCount,
+      customerSuggestionCount: customerScan.suggestionCount,
+      customerInsertedCount: customerScan.insertedCount,
+      customerDedupedCount: customerScan.dedupedCount,
+      suggestionCount: opportunitySuggestionCount + customerScan.suggestionCount,
+      insertedCount: opportunityInsertedCount + customerScan.insertedCount,
+      dedupedCount: opportunityDedupedCount + customerScan.dedupedCount,
+    };
+  }
+
+  function emptyProcessResult() {
+    const customerScan = emptyCustomerSubjectScan({ enabled: Boolean(customerSubjects) });
+    return {
+      objectCount: 0,
+      opportunityObjectCount: 0,
+      opportunitySuggestionCount: 0,
+      opportunityInsertedCount: 0,
+      opportunityDedupedCount: 0,
+      customerScan,
+      customerSubjectCount: 0,
+      customerSuggestionCount: 0,
+      customerInsertedCount: 0,
+      customerDedupedCount: 0,
+      suggestionCount: 0,
+      insertedCount: 0,
+      dedupedCount: 0,
+    };
+  }
+
+  function customerOnlyProcessResult(customerScan) {
+    return {
+      ...emptyProcessResult(),
+      customerScan,
+      customerSubjectCount: customerScan.subjectCount,
+      customerSuggestionCount: customerScan.suggestionCount,
+      customerInsertedCount: customerScan.insertedCount,
+      customerDedupedCount: customerScan.dedupedCount,
+      suggestionCount: customerScan.suggestionCount,
+      insertedCount: customerScan.insertedCount,
+      dedupedCount: customerScan.dedupedCount,
+    };
+  }
+
+  function mergeProcessResults(left, right) {
+    const mergedCustomerScan = addCustomerSubjectScan(left?.customerScan, right?.customerScan);
+    return {
+      objectCount: Number(left?.objectCount ?? 0) + Number(right?.objectCount ?? 0),
+      opportunityObjectCount: Number(left?.opportunityObjectCount ?? 0) + Number(right?.opportunityObjectCount ?? 0),
+      opportunitySuggestionCount: Number(left?.opportunitySuggestionCount ?? 0) + Number(right?.opportunitySuggestionCount ?? 0),
+      opportunityInsertedCount: Number(left?.opportunityInsertedCount ?? 0) + Number(right?.opportunityInsertedCount ?? 0),
+      opportunityDedupedCount: Number(left?.opportunityDedupedCount ?? 0) + Number(right?.opportunityDedupedCount ?? 0),
+      customerScan: mergedCustomerScan,
+      customerSubjectCount: Number(left?.customerSubjectCount ?? 0) + Number(right?.customerSubjectCount ?? 0),
+      customerSuggestionCount: Number(left?.customerSuggestionCount ?? 0) + Number(right?.customerSuggestionCount ?? 0),
+      customerInsertedCount: Number(left?.customerInsertedCount ?? 0) + Number(right?.customerInsertedCount ?? 0),
+      customerDedupedCount: Number(left?.customerDedupedCount ?? 0) + Number(right?.customerDedupedCount ?? 0),
+      suggestionCount: Number(left?.suggestionCount ?? 0) + Number(right?.suggestionCount ?? 0),
+      insertedCount: Number(left?.insertedCount ?? 0) + Number(right?.insertedCount ?? 0),
+      dedupedCount: Number(left?.dedupedCount ?? 0) + Number(right?.dedupedCount ?? 0),
+    };
+  }
+
+  function runView(runValue, processResult) {
+    if (!runValue) return runValue;
+    return {
+      ...runValue,
+      opportunityObjectCount: processResult?.opportunityObjectCount ?? 0,
+      opportunitySuggestionCount: processResult?.opportunitySuggestionCount ?? 0,
+      opportunityInsertedCount: processResult?.opportunityInsertedCount ?? 0,
+      opportunityDedupedCount: processResult?.opportunityDedupedCount ?? 0,
+      customerSubjectCount: processResult?.customerSubjectCount ?? 0,
+      customerSuggestionCount: processResult?.customerSuggestionCount ?? 0,
+      customerInsertedCount: processResult?.customerInsertedCount ?? 0,
+      customerDedupedCount: processResult?.customerDedupedCount ?? 0,
+      customerScan: processResult?.customerScan ?? emptyCustomerSubjectScan({ enabled: Boolean(customerSubjects) }),
+    };
   }
 
   function eventTargetRows(event) {
+    if (event.entityType === "customer") {
+      const customerId = event.payload?.customerId ?? event.entityId ?? null;
+      return customerId ? queryOpportunitiesByCustomerId(event.owner, customerId) : [];
+    }
     const targetId = event.entityType === "opportunity"
       ? event.entityId
       : event.payload?.opportunityId ?? event.payload?.subjectId ?? null;
@@ -1172,11 +1515,23 @@ function relatedRows(owner, opportunities) {
     if (!targetId && customerIds.length > 0) {
       return queryOpportunitiesByCustomerIds(event.owner, customerIds);
     }
-    if (!targetId && event.entityType === "customer" && event.payload?.customerId) {
-      return queryOpportunitiesByCustomerId(event.owner, event.payload.customerId);
-    }
     if (!targetId) return queryOpportunities({ owner: event.owner, limit: getState().batchSize }).rows;
     return queryOpportunityById(event.owner, targetId);
+  }
+
+  function eventCustomerRows(event, rows) {
+    const customerIds = [];
+    if (Array.isArray(event.payload?.customerIds)) customerIds.push(...event.payload.customerIds);
+    if (event.payload?.customerId) customerIds.push(event.payload.customerId);
+    if (event.entityType === "customer" && event.entityId) customerIds.push(event.entityId);
+    return uniqueCustomerRows([
+      ...(Array.isArray(rows) ? rows : []),
+      ...customerIds.map((customerId) => ({ owner: event.owner, customerId })),
+    ]);
+  }
+
+  function customerRowKey(row) {
+    return `${row.owner}\u0000${row.customerId}`;
   }
 
   function retryAt(now, failureCount) {
@@ -1229,40 +1584,77 @@ function relatedRows(owner, opportunities) {
       });
       scan.updateState({ lastStartedAt: nowIso, lastStatus: "running", lastError: null, lastRunId: run.id });
 
-      let aggregate = { objectCount: 0, suggestionCount: 0, insertedCount: 0, dedupedCount: 0 };
+      let aggregate = emptyProcessResult();
       let failedEvents = 0;
       if (events.length > 0) {
+        const customerRows = [];
+        const readyEvents = [];
+        const failClaimedEvent = (claimed, errorCode, errorText) => {
+          failedEvents += 1;
+          try {
+            scan.failEvent(claimed.item.id, {
+              leaseToken: claimed.leaseToken,
+              errorCode,
+              errorText,
+              retryBaseMs,
+            });
+          } catch {
+            // A lost event lease remains recoverable through its durable row.
+          }
+        };
         for (const claimed of events) {
           try {
             const rows = eventTargetRows(claimed.item);
+            const eventCustomers = eventCustomerRows(claimed.item, rows);
+            customerRows.push(...eventCustomers);
             if (rows.length > 0) {
-              const result = await processRows(rows, { runId: run.id, eventId: claimed.item.id });
-              aggregate = {
-                objectCount: aggregate.objectCount + result.objectCount,
-                suggestionCount: aggregate.suggestionCount + result.suggestionCount,
-                insertedCount: aggregate.insertedCount + result.insertedCount,
-                dedupedCount: aggregate.dedupedCount + result.dedupedCount,
-              };
+              const result = await processRows(rows, {
+                runId: run.id,
+                eventId: claimed.item.id,
+                syncCustomers: false,
+              });
+              aggregate = mergeProcessResults(aggregate, result);
             }
-            scan.completeEvent(claimed.item.id, {
-              workerId: configuredWorkerId,
-              leaseToken: claimed.leaseToken,
+            readyEvents.push({
+              claimed,
+              customerKeys: eventCustomers.map(customerRowKey),
             });
           } catch (error) {
-            failedEvents += 1;
-            try {
-              scan.failEvent(claimed.item.id, {
-                leaseToken: claimed.leaseToken,
-                errorCode: "PROACTIVE_EVENT_PROCESS_FAILED",
-                errorText: safeError(error, "proactive event processing failed"),
-              });
-            } catch {
-              // A lost event lease remains recoverable through its durable row.
-            }
+            failClaimedEvent(
+              claimed,
+              "PROACTIVE_EVENT_PROCESS_FAILED",
+              safeError(error, "proactive event processing failed"),
+            );
           }
         }
+        let customerScan = emptyCustomerSubjectScan({ enabled: Boolean(customerSubjects) });
+        if (customerRows.length > 0) {
+          customerScan = await processCustomerSubjects(customerRows);
+          aggregate = mergeProcessResults(aggregate, customerOnlyProcessResult(customerScan));
+        }
+        const customerFailures = new Map(customerScan.results
+          .filter((result) => result?.status === "failed")
+          .map((result) => [customerRowKey(result), result]));
+        for (const ready of readyEvents) {
+          const failure = ready.customerKeys.map((key) => customerFailures.get(key)).find(Boolean);
+          if (failure) {
+            failClaimedEvent(
+              ready.claimed,
+              failure.errorCode ?? "PROACTIVE_CUSTOMER_SUBJECT_SYNC_FAILED",
+              failure.error ?? "customer proactive subject sync failed",
+            );
+            continue;
+          }
+          scan.completeEvent(ready.claimed.item.id, {
+            workerId: configuredWorkerId,
+            leaseToken: ready.claimed.leaseToken,
+          });
+        }
         const finishedAt = clockDate(clock);
-        const status = failedEvents === events.length ? "failed" : failedEvents > 0 ? "partial" : "success";
+        const customerFailure = aggregate.customerScan.failedCount > 0;
+        const status = failedEvents === events.length
+          ? "failed"
+          : (failedEvents > 0 || customerFailure ? "partial" : "success");
         const nextRetryAt = status === "success" ? null : retryAt(finishedAt, currentState.failureCount + 1);
         run = scan.updateRun(run.id, {
           status,
@@ -1288,7 +1680,14 @@ function relatedRows(owner, opportunities) {
           nextRetryAt,
           nextRunAt: status === "success" ? addSeconds(finishedAt, currentState.intervalSeconds) : nextRetryAt,
         });
-        return { status, run, state, eventCount: events.length };
+        lastCustomerSubjectScan = aggregate.customerScan;
+        return {
+          status,
+          run: runView(run, aggregate),
+          state,
+          eventCount: events.length,
+          ...aggregate,
+        };
       }
 
       const cursor = currentState.cursorOwner && currentState.cursorOpportunityId
@@ -1303,15 +1702,18 @@ function relatedRows(owner, opportunities) {
         if (!owner) throw new Error("opportunity owner is missing");
         rows[index].owner = owner;
       }
-      const result = rows.length > 0 ? await processRows(rows, { runId: run.id }) : {
-        objectCount: 0,
-        suggestionCount: 0,
-        insertedCount: 0,
-        dedupedCount: 0,
-      };
-      aggregate = result;
       const last = rows.at(-1) ?? null;
       const hasMore = selected.hasMore;
+      const completedCycle = !hasMore;
+      let result = rows.length > 0 ? await processRows(rows, { runId: run.id }) : emptyProcessResult();
+      if (completedCycle && customerSubjects) {
+        const signalRows = periodicCustomerSignalRows(currentState.cycleNumber, currentState.batchSize);
+        if (signalRows.length > 0) {
+          const customerScan = await processCustomerSubjects(signalRows);
+          result = mergeProcessResults(result, customerOnlyProcessResult(customerScan));
+        }
+      }
+      aggregate = result;
       const nextCursorOwner = hasMore && last ? last.owner : null;
       const nextCursorOpportunityId = hasMore && last ? last.id : null;
       const cycleObjectCount = currentState.cursorOwner ? currentState.cycleObjectCount : opportunityCount();
@@ -1319,9 +1721,11 @@ function relatedRows(owner, opportunities) {
         ? currentState.cycleProcessedCount + result.objectCount
         : result.objectCount;
       const finishedAt = clockDate(clock);
-      const completedCycle = !hasMore;
-      const nextCycleNumber = completedCycle ? currentState.cycleNumber + 1 : currentState.cycleNumber;
-      const runStatus = "success";
+      const runStatus = result.customerScan.failedCount > 0 ? "partial" : "success";
+      const nextCycleNumber = completedCycle && runStatus === "success"
+        ? currentState.cycleNumber + 1
+        : currentState.cycleNumber;
+      const nextRetryAt = runStatus === "success" ? null : retryAt(finishedAt, currentState.failureCount + 1);
       run = scan.updateRun(run.id, {
         status: runStatus,
         objectCount: result.objectCount,
@@ -1332,6 +1736,7 @@ function relatedRows(owner, opportunities) {
         nextCursorOwner,
         nextCursorOpportunityId,
         finishedAt,
+        nextRetryAt,
       });
       state = scan.updateState({
         cursorOwner: nextCursorOwner,
@@ -1346,18 +1751,16 @@ function relatedRows(owner, opportunities) {
         lastSuggestionCount: result.suggestionCount,
         lastInsertedCount: result.insertedCount,
         lastDedupedCount: result.dedupedCount,
-        failureCount: 0,
-        nextRetryAt: null,
-        nextRunAt: addSeconds(finishedAt, currentState.intervalSeconds),
+        failureCount: runStatus === "success" ? 0 : currentState.failureCount + 1,
+        nextRetryAt,
+        nextRunAt: runStatus === "success" ? addSeconds(finishedAt, currentState.intervalSeconds) : nextRetryAt,
       });
+      lastCustomerSubjectScan = result.customerScan;
       return {
         status: runStatus,
-        run,
+        run: runView(run, result),
         state,
-        objectCount: result.objectCount,
-        suggestionCount: result.suggestionCount,
-        insertedCount: result.insertedCount,
-        dedupedCount: result.dedupedCount,
+        ...result,
         hasMore,
       };
     } catch (error) {
@@ -1433,6 +1836,15 @@ function relatedRows(owner, opportunities) {
   }
 
   function status() {
+    const customerScan = {
+      ...lastCustomerSubjectScan,
+      results: Array.isArray(lastCustomerSubjectScan.results)
+        ? lastCustomerSubjectScan.results.slice()
+        : [],
+      errors: Array.isArray(lastCustomerSubjectScan.errors)
+        ? lastCustomerSubjectScan.errors.slice()
+        : [],
+    };
     return {
       running: started,
       ticking,
@@ -1440,6 +1852,12 @@ function relatedRows(owner, opportunities) {
       state: getState(),
       lease: typeof scan.leaseState === "function" ? scan.leaseState() : null,
       pendingEventCount: typeof scan.pendingEventCount === "function" ? scan.pendingEventCount() : null,
+      customerProactiveSubjects: {
+        enabled: Boolean(customerSubjects),
+        available: Boolean(customerSubjects),
+        lastScan: customerScan,
+      },
+      customerSubjectScan: customerScan,
       modelBudget: modelRuntime
         ? {
           global: modelRuntime.usage({ at: clockDate(clock) }),
@@ -1457,6 +1875,20 @@ function relatedRows(owner, opportunities) {
     return scan.enqueueEvent(input);
   }
 
+  function assertCurrentCustomerSubjectRevision(input = {}) {
+    if (!customerSubjects || typeof customerSubjects.assertCurrentRevision !== "function") {
+      throw new TypeError("customerProactiveSubjectService does not support revision checks");
+    }
+    return customerSubjects.assertCurrentRevision(input);
+  }
+
+  function validateCustomerSubjectRevision(input = {}) {
+    if (!customerSubjects || typeof customerSubjects.validateRevision !== "function") {
+      throw new TypeError("customerProactiveSubjectService does not support revision checks");
+    }
+    return customerSubjects.validateRevision(input);
+  }
+
   return Object.freeze({
     start,
     stop,
@@ -1468,6 +1900,10 @@ function relatedRows(owner, opportunities) {
     enqueueEvent,
     scanRepository: scan,
     suggestionRepository: suggestions,
+    customerProactiveSubjectService: customerSubjects,
+    customerSubjectService: customerSubjects,
+    assertCurrentCustomerSubjectRevision,
+    validateCustomerSubjectRevision,
     workerId: configuredWorkerId,
   });
 }
