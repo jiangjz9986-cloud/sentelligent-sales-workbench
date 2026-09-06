@@ -7,7 +7,7 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 ## Contract File
 
 - Shared contract: `../../shared/salesWorkbenchApiContract.mjs`
-- Contract version: `2026-06-05`
+- Contract version: `2026-09-06`
 - Owner: main control thread
 
 ## Covered Entities
@@ -31,6 +31,15 @@ The frontend prototype and WSL backend now share a runtime-verifiable API field 
 `solutionDraft.sourceRefs` is required so generated materials remain traceable to customer, opportunity, action, and knowledge records.
 
 ## Enforcement Points
+
+Customer metadata is additive: `aliases` and `tags` are string arrays when
+present; `createdAt` and `updatedAt` are strings or null when present. Legacy
+projections may omit these four fields. Validation preserves omissions and
+rejects malformed supplied types; it does not fabricate timestamps or expand
+the frontend write allowlist. The current backend emits all four fields.
+SQLite `CURRENT_TIMESTAMP` values are UTC. Customer presentation interprets
+those values explicitly and displays instants in `Asia/Shanghai`.
+`syncPreview` remains a synchronization summary, not import provenance.
 
 - Frontend API runtime client validates backend responses in `src/api/salesWorkbenchApi.js`.
 - Frontend API tests validate mocked responses in `src/api/salesWorkbenchApi.test.js`.

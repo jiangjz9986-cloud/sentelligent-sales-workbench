@@ -1,4 +1,4 @@
-export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-09-02";
+export const SALES_WORKBENCH_API_CONTRACT_VERSION = "2026-09-06";
 
 export const SALES_WORKBENCH_API_SCHEMAS = {
   customer: {
@@ -21,6 +21,10 @@ export const SALES_WORKBENCH_API_SCHEMAS = {
     needs: "array",
     risks: "array",
     opportunities: "array",
+    aliases: "optional:stringArray",
+    tags: "optional:stringArray",
+    createdAt: "optional:nullableString",
+    updatedAt: "optional:nullableString",
   },
   opportunity: {
     id: "string",
@@ -705,6 +709,7 @@ function describeValue(value) {
 
 function isExpectedType(value, descriptor) {
   if (descriptor === "array") return Array.isArray(value);
+  if (descriptor === "stringArray") return Array.isArray(value) && value.every((item) => typeof item === "string");
   if (descriptor === "object") return value !== null && typeof value === "object" && !Array.isArray(value);
   if (descriptor === "nullableObject") return value === null || (typeof value === "object" && !Array.isArray(value));
   if (descriptor === "string") return typeof value === "string";
@@ -726,12 +731,16 @@ export function collectApiEntityErrors(entityName, value, path = entityName) {
 
   const errors = [];
   for (const [field, descriptor] of Object.entries(schema)) {
+    // Older cached customer projections omit additive metadata fields.
+    const optional = descriptor.startsWith("optional:");
+    const expectedType = optional ? descriptor.slice("optional:".length) : descriptor;
+    if (optional && value[field] === undefined) continue;
     if (!(field in value)) {
       errors.push(`${path}.${field}: missing required field`);
       continue;
     }
-    if (!isExpectedType(value[field], descriptor)) {
-      errors.push(`${path}.${field}: expected ${descriptor}, received ${describeValue(value[field])}`);
+    if (!isExpectedType(value[field], expectedType)) {
+      errors.push(`${path}.${field}: expected ${expectedType}, received ${describeValue(value[field])}`);
     }
   }
   return errors;

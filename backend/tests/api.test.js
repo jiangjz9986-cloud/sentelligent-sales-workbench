@@ -594,12 +594,18 @@ describe("sales workbench backend API", () => {
         needs: ["未来规划初访"],
         risks: ["决策链待补齐"],
         opportunities: [],
+        aliases: ["胶州医院别名"],
+        tags: ["客户验收"],
       }),
     });
 
     assert.equal(createdCustomer.response.status, 201);
     assertApiEntity("customer", createdCustomer.body.item);
     assert.equal(createdCustomer.body.item.name, "胶州中医医院");
+    assert.deepEqual(createdCustomer.body.item.aliases, ["胶州医院别名"]);
+    assert.deepEqual(createdCustomer.body.item.tags, ["客户验收"]);
+    assert.equal(typeof createdCustomer.body.item.createdAt, "string");
+    assert.equal(typeof createdCustomer.body.item.updatedAt, "string");
 
     const updatedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`, {
       method: "PATCH",
@@ -617,6 +623,13 @@ describe("sales workbench backend API", () => {
     assert.equal(updatedCustomer.body.item.level, "重点培育");
     assert.equal(updatedCustomer.body.item.relation, 52);
     assert.deepEqual(updatedCustomer.body.item.needs, ["未来规划初访", "补齐现有基础架构"]);
+    assert.deepEqual(updatedCustomer.body.item.aliases, createdCustomer.body.item.aliases);
+    assert.deepEqual(updatedCustomer.body.item.tags, createdCustomer.body.item.tags);
+    assert.equal(updatedCustomer.body.item.createdAt, createdCustomer.body.item.createdAt);
+    const loadedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`);
+    assert.equal(loadedCustomer.response.status, 200);
+    assertApiEntity("customer", loadedCustomer.body.item);
+    assert.deepEqual(loadedCustomer.body.item, updatedCustomer.body.item);
 
     const createdOpportunity = await request("/api/opportunities", {
       method: "POST",

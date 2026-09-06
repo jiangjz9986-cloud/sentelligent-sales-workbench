@@ -98,6 +98,39 @@ function sampleCustomer(overrides = {}) {
   };
 }
 
+describe("additive customer metadata contract", () => {
+  it("preserves aliases, tags and raw timestamps without changing the response", () => {
+    const customer = sampleCustomer({
+      aliases: ["Hospital alias"], tags: ["Important"],
+      createdAt: "2026-09-06 01:00:00", updatedAt: "2026-09-06T09:00:00+08:00",
+    });
+    const before = structuredClone(customer);
+    assert.equal(assertApiEntity("customer", customer), customer);
+    assert.deepEqual(customer, before);
+  });
+
+  it("accepts absent legacy metadata and explicit unknown timestamps without inventing values", () => {
+    const legacy = sampleCustomer();
+    assertApiEntity("customer", legacy);
+    assert.equal(Object.hasOwn(legacy, "createdAt"), false);
+    assertApiEntity("customer", sampleCustomer({ aliases: [], tags: [], createdAt: null, updatedAt: null }));
+    assert.throws(() => assertApiEntity("customer", sampleCustomer({ version: undefined })), /customer.version/);
+  });
+
+  it("rejects malformed present metadata instead of silently discarding fields", () => {
+    for (const field of ["aliases", "tags"]) {
+      for (const value of [null, "tag", {}, [1], ["valid", null]]) {
+        assert.throws(() => assertApiEntity("customer", sampleCustomer({ [field]: value })), new RegExp(`customer.${field}`));
+      }
+    }
+    for (const field of ["createdAt", "updatedAt"]) {
+      for (const value of [123, {}, [], false]) {
+        assert.throws(() => assertApiEntity("customer", sampleCustomer({ [field]: value })), new RegExp(`customer.${field}`));
+      }
+    }
+  });
+});
+
 function sampleOpportunity(overrides = {}) {
   return {
     id: "op-rizhao-plan",
@@ -3049,7 +3082,7 @@ describe("sales workbench API client", () => {
   });
 
   it("publishes strict travel-expense response contracts with integer-cent amounts", () => {
-    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-09-02");
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-09-06");
     assertApiEntity("travelExpensePayment", sampleTravelExpensePayment());
     assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment());
     assertApiEntity("travelExpense", sampleTravelExpense());
