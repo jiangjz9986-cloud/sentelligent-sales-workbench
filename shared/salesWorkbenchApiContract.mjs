@@ -734,7 +734,7 @@ export function collectApiEntityErrors(entityName, value, path = entityName) {
     // Older cached customer projections omit additive metadata fields.
     const optional = descriptor.startsWith("optional:");
     const expectedType = optional ? descriptor.slice("optional:".length) : descriptor;
-    if (optional && value[field] === undefined) continue;
+    if (optional && !Object.hasOwn(value, field)) continue;
     if (!(field in value)) {
       errors.push(`${path}.${field}: missing required field`);
       continue;
