@@ -26,50 +26,33 @@ import {
   textFromArray,
 } from "./shared.jsx";
 import { EntityWorkspace } from "./EntityWorkspace.jsx";
+import { customerMetadataItems, formatCustomerTimestamp } from "./customerRecordMetadata.js";
 import "./CustomerPage.css";
 
-function customerArray(value) {
-  return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.trim()) : [];
-}
-
-function formatCustomerTimestamp(value) {
-  if (!value) return "未记录";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return String(value);
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(parsed).replaceAll("/", "-");
-}
-
 function CustomerRecordMetadata({ selected }) {
-  const sourceItems = customerArray(selected.syncPreview);
-  const aliases = customerArray(selected.aliases);
-  const tags = customerArray(selected.tags);
+  const syncItems = customerMetadataItems(selected.syncPreview);
+  const aliases = customerMetadataItems(selected.aliases);
+  const tags = customerMetadataItems(selected.tags);
 
   return (
-    <Panel title="档案元数据" meta="版本与来源">
+    <Panel title="档案元数据" meta="版本与同步摘要">
       <div className="customer-record-meta" data-testid="customer-record-meta">
         <div className="customer-record-meta-item">
           <span>当前版本</span>
-          <strong data-testid="customer-version">v{selected.version}</strong>
+          <strong data-testid="customer-version">{selected.version == null || selected.version === "" ? "未记录" : `v${selected.version}`}</strong>
         </div>
-        <div className="customer-record-meta-item customer-record-meta-source">
-          <span>来源承接</span>
+        <div className="customer-record-meta-item customer-record-meta-sync">
+          <span>同步摘要</span>
           <strong data-testid="customer-source">
-            {sourceItems.length > 0 ? sourceItems.join("；") : "未记录来源"}
+            {syncItems.length > 0 ? syncItems.join("；") : "暂无同步摘要"}
           </strong>
         </div>
         <div className="customer-record-meta-item">
-          <span>创建时间</span>
+          <span>创建时间（北京时间）</span>
           <strong data-testid="customer-created-at">{formatCustomerTimestamp(selected.createdAt)}</strong>
         </div>
         <div className="customer-record-meta-item">
-          <span>最近更新</span>
+          <span>最近更新（北京时间）</span>
           <strong data-testid="customer-updated-at">{formatCustomerTimestamp(selected.updatedAt)}</strong>
         </div>
       </div>
@@ -376,8 +359,10 @@ function CustomerDetailBody({ selected, viewMode, setViewMode, onSelect }) {
         <Panel title="现有基础架构" meta="调研字段">
           <InfoList items={selected.infrastructure} tone="teal" />
         </Panel>
-        <Panel title="快速记录承接" meta="记录来源">
-          <InfoList items={selected.syncPreview} tone="blue" />
+        <Panel title="快速记录承接" meta="同步摘要">
+          <div className="customer-sync-summary">
+            <InfoList items={customerMetadataItems(selected.syncPreview)} tone="blue" />
+          </div>
         </Panel>
       </div>
       <ManualAiSuggestionPanel
