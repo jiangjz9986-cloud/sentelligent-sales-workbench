@@ -244,7 +244,7 @@ async function assertMobileTouchLayout(page, label, { canWheel }) {
   return metrics;
 }
 
-async function exerciseBrowser(browserType, browserLabel, frontendOrigin, evidenceDirectory, report) {
+async function exerciseBrowser(browserType, browserLabel, frontendOrigin, backendOrigin, evidenceDirectory, report) {
   const browser = await browserType.launch({ headless: true });
   report.browserVersion = browser.version();
   try {
@@ -253,7 +253,7 @@ async function exerciseBrowser(browserType, browserLabel, frontendOrigin, eviden
       locale: "zh-CN",
       serviceWorkers: "block",
     });
-    const desktopBlockedOrigins = await restrictEvidenceNetwork(desktopContext, frontendOrigin);
+    const desktopBlockedOrigins = await restrictEvidenceNetwork(desktopContext, frontendOrigin, backendOrigin);
     await desktopContext.addInitScript(() => localStorage.setItem("sentelligent_disable_sw", "1"));
     const desktopPage = await desktopContext.newPage();
     await desktopPage.goto(frontendOrigin, { waitUntil: "networkidle" });
@@ -279,7 +279,7 @@ async function exerciseBrowser(browserType, browserLabel, frontendOrigin, eviden
       locale: "zh-CN",
       serviceWorkers: "block",
     });
-    const mobileBlockedOrigins = await restrictEvidenceNetwork(mobileContext, frontendOrigin);
+    const mobileBlockedOrigins = await restrictEvidenceNetwork(mobileContext, frontendOrigin, backendOrigin);
     await mobileContext.addInitScript(() => localStorage.setItem("sentelligent_disable_sw", "1"));
     const mobilePage = await mobileContext.newPage();
     await mobilePage.goto(frontendOrigin, { waitUntil: "networkidle" });
@@ -349,7 +349,7 @@ async function main() {
     for (const [label, browserType] of [["chromium", chromium], ["webkit", webkit]]) {
       const browserReport = { engine: label };
       report.browsers.push(browserReport);
-      await exerciseBrowser(browserType, label, frontendOrigin, evidence.directory, browserReport);
+      await exerciseBrowser(browserType, label, frontendOrigin, backendOrigin, evidence.directory, browserReport);
     }
     report.status = "passed";
   } catch (error) {

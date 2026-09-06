@@ -206,12 +206,17 @@ export async function browserContextIdentity(page, browser, engine) {
   };
 }
 
-export async function restrictEvidenceNetwork(context, frontendOrigin) {
-  assert.equal(new URL(frontendOrigin).hostname, "127.0.0.1", "Evidence must use its loopback fixture server");
+export async function restrictEvidenceNetwork(context, ...allowedOriginValues) {
+  assert.ok(allowedOriginValues.length > 0, "Evidence must specify at least one allowed origin");
+  const allowedOrigins = new Set(allowedOriginValues.map((originValue) => {
+    const origin = new URL(originValue);
+    assert.equal(origin.hostname, "127.0.0.1", "Evidence must use loopback fixture servers");
+    return origin.origin;
+  }));
   const blocked = [];
   await context.route("**/*", (route) => {
     const url = new URL(route.request().url());
-    if (url.origin === frontendOrigin || ["data:", "blob:"].includes(url.protocol)) return route.continue();
+    if (allowedOrigins.has(url.origin) || ["data:", "blob:"].includes(url.protocol)) return route.continue();
     blocked.push(url.origin);
     return route.abort("blockedbyclient");
   });

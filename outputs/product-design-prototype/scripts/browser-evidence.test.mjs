@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 
-import { prepareBrowserEvidence } from "./browser-evidence.mjs";
+import { prepareBrowserEvidence, restrictEvidenceNetwork } from "./browser-evidence.mjs";
 
 function git(root, ...args) {
   execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: "pipe" });
@@ -148,4 +148,42 @@ test("does not allow evidence output to overwrite an unignored worktree path", (
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("allows every explicitly listed loopback origin and blocks all other network traffic", async () => {
+  let routeHandler;
+  const continued = [];
+  const aborted = [];
+  const context = {
+    async route(pattern, handler) {
+      assert.equal(pattern, "**/*");
+      routeHandler = handler;
+    },
+  };
+  const blocked = await restrictEvidenceNetwork(
+    context,
+    "http://127.0.0.1:3100/",
+    "http://127.0.0.1:3200",
+  );
+  const routeFor = (url) => ({
+    request: () => ({ url: () => url }),
+    continue: () => continued.push(url),
+    abort: (reason) => aborted.push({ url, reason }),
+  });
+
+  await routeHandler(routeFor("http://127.0.0.1:3100/assets/app.js"));
+  await routeHandler(routeFor("http://127.0.0.1:3200/api/session"));
+  await routeHandler(routeFor("data:text/plain,fixture"));
+  await routeHandler(routeFor("https://example.com/should-be-blocked"));
+
+  assert.deepEqual(continued, [
+    "http://127.0.0.1:3100/assets/app.js",
+    "http://127.0.0.1:3200/api/session",
+    "data:text/plain,fixture",
+  ]);
+  assert.deepEqual(aborted, [{
+    url: "https://example.com/should-be-blocked",
+    reason: "blockedbyclient",
+  }]);
+  assert.deepEqual(blocked, ["https://example.com"]);
 });

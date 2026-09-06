@@ -180,6 +180,7 @@ async function captureResponsiveContext(browser, {
   name,
   contextOptions,
   frontendOrigin,
+  backendOrigin,
   customerName,
   evidenceDirectory,
 }) {
@@ -188,7 +189,7 @@ async function captureResponsiveContext(browser, {
     serviceWorkers: "block",
     ...contextOptions,
   });
-  const blockedOrigins = await restrictEvidenceNetwork(context, frontendOrigin);
+  const blockedOrigins = await restrictEvidenceNetwork(context, frontendOrigin, backendOrigin);
   await addInitScript(context);
   const page = await context.newPage();
   const failedResponses = [];
@@ -357,7 +358,7 @@ async function main() {
       locale: "zh-CN",
       serviceWorkers: "block",
     });
-    const blockedOrigins = await restrictEvidenceNetwork(desktopContext, frontendOrigin);
+    const blockedOrigins = await restrictEvidenceNetwork(desktopContext, frontendOrigin, backendOrigin);
     await addInitScript(desktopContext);
     const desktopPage = await desktopContext.newPage();
     const desktopFailedResponses = [];
@@ -458,6 +459,7 @@ async function main() {
       name: "tablet",
       contextOptions: { viewport: { width: 820, height: 1180 } },
       frontendOrigin,
+      backendOrigin,
       customerName: fixture.name,
       evidenceDirectory,
     });
@@ -470,6 +472,7 @@ async function main() {
       name: "iphone",
       contextOptions: { ...devices["iPhone 13"], viewport: { width: 390, height: 844 } },
       frontendOrigin,
+      backendOrigin,
       customerName: fixture.name,
       evidenceDirectory,
     });
