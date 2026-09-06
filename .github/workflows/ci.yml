@@ -44,7 +44,7 @@ jobs:
 
       - name: Install WebKit browser
         working-directory: outputs/product-design-prototype
-        run: npx playwright install --with-deps webkit
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Scan current source for secrets
         run: npm run scan:secrets
