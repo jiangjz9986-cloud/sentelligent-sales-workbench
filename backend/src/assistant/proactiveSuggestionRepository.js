@@ -279,13 +279,21 @@ function mergeEditableFieldsIntoSuggestion(suggestion, fields) {
   };
   const updatePreview = (preview) => {
     if (!preview || typeof preview !== "object" || Array.isArray(preview)) return preview;
-    return {
-      ...preview,
-      ...(editable.assignee ? { assignee: editable.assignee } : {}),
-      ...(editable.dueDate ? { due: editable.dueDate, dueDate: editable.dueDate } : {}),
-      ...(editable.priority ? { priority: editable.priority } : {}),
-      ...(editable.expectedResult ? { expectedResult: editable.expectedResult } : {}),
+    const next = { ...preview };
+    const setExisting = (keys, value) => {
+      for (const key of keys) {
+        // Confirmation previews are server-owned and bounded by the HTTP
+        // contract. Preserve their shape and only refresh an editable field
+        // when that field was already part of the generated preview; the
+        // complete human draft remains in reviewFields below.
+        if (Object.hasOwn(preview, key)) next[key] = value;
+      }
     };
+    setExisting(["assignee", "assigneeName", "owner", "ownerName"], editable.assignee);
+    setExisting(["due", "dueDate", "followUpDate", "followUpAt"], editable.dueDate);
+    setExisting(["priority"], editable.priority);
+    setExisting(["expectedResult", "expectedOutcome", "result"], editable.expectedResult);
+    return next;
   };
   const currentWriteback = base.writebackPreview && typeof base.writebackPreview === "object"
     ? base.writebackPreview
@@ -367,6 +375,7 @@ export function createProactiveSuggestionRepository(db, {
     const staleAt = iso(input.staleAt, "staleAt", { nullable: true });
     const snoozedUntil = iso(input.snoozedUntil, "snoozedUntil", { nullable: true });
     return {
+      suggestion,
       owner,
       id,
       title: text(input.title ?? suggestion.title, "title", 500),
@@ -407,13 +416,47 @@ export function createProactiveSuggestionRepository(db, {
         // deduped row rather than turning an unchanged source into an error or
         // a second suggestion. Lifecycle state is intentionally preserved.
         let existingPayloadHash = existingByDedupe.proactive_payload_hash;
+        let persistedSuggestion = null;
         try {
-          existingPayloadHash = stableSuggestionPayloadHash(parsed(existingByDedupe.content, {}));
+          persistedSuggestion = parsed(existingByDedupe.content, {});
+          existingPayloadHash = stableSuggestionPayloadHash(persistedSuggestion);
         } catch {
           // Preserve the legacy hash when an old row cannot be normalized;
           // the normal write path still validates all newly generated rows.
         }
-        const changed = existingPayloadHash !== value.payloadHash;
+        const persistedFields = persistedSuggestion?.reviewFields;
+        const hasPersistedFields = persistedFields
+          && typeof persistedFields === "object"
+          && !Array.isArray(persistedFields)
+          && Object.keys(persistedFields).length > 0;
+        let suggestion = hasPersistedFields
+          ? mergeEditableFieldsIntoSuggestion(value.suggestion, {
+            owner: persistedFields.assignee,
+            dueDate: persistedFields.dueDate,
+            priority: persistedFields.priority,
+            expectedResult: persistedFields.expectedResult,
+          })
+          : value.suggestion;
+        if (hasPersistedFields) {
+          const previewDigests = {};
+          for (const target of ["action", "risk"]) {
+            if (suggestion.writebackPreview?.[target]) previewDigests[target] = previewDigestFor(suggestion, target);
+          }
+          suggestion = {
+            ...suggestion,
+            previewDigests,
+            previewDigest: previewDigests.risk ?? previewDigests.action ?? null,
+            writebackPreview: suggestion.writebackPreview && suggestion.previewDigest
+              ? { ...suggestion.writebackPreview, previewDigest: previewDigests.risk ?? previewDigests.action ?? null }
+              : suggestion.writebackPreview,
+          };
+        }
+        const nextContentJson = hasPersistedFields ? json(suggestion, "suggestion") : value.contentJson;
+        const nextConfirmationPreviewJson = hasPersistedFields
+          ? json(suggestion.writebackPreview ?? {}, "confirmationPreview", 64 * 1024)
+          : value.confirmationPreviewJson;
+        const nextPayloadHash = hasPersistedFields ? stableSuggestionPayloadHash(suggestion) : value.payloadHash;
+        const changed = existingPayloadHash !== nextPayloadHash;
         db.prepare(`
           UPDATE ai_suggestions
              SET title = $title,
@@ -444,11 +487,11 @@ export function createProactiveSuggestionRepository(db, {
           $id: existingByDedupe.id,
           $owner: value.owner,
           $title: value.title,
-          $content: value.contentJson,
+          $content: nextContentJson,
           $confidence: value.confidence ?? 0,
           $sourceId: value.subjectId,
           $sourceRefs: value.sourceRefsJson,
-          $confirmationPreview: value.confirmationPreviewJson,
+          $confirmationPreview: nextConfirmationPreviewJson,
           $source: value.source,
           $fallbackReason: value.fallbackReason,
           $subjectType: value.subjectType,
@@ -458,7 +501,7 @@ export function createProactiveSuggestionRepository(db, {
           $ruleVersion: value.ruleVersion,
           $priority: value.priority,
           $generatedAt: value.generatedAt,
-          $payloadHash: value.payloadHash,
+          $payloadHash: nextPayloadHash,
           $now: nowIso,
           $runId: value.runId,
           $eventId: value.eventId,

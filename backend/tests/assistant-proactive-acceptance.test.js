@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
@@ -116,6 +117,55 @@ function confirmationBody(preview) {
     previewDigest: preview.previewDigest,
     preview: preview.preview,
   };
+}
+
+const ACCEPTANCE_DURABLE_TABLES = [
+  "customers",
+  "opportunities",
+  "action_items",
+  "risk_items",
+  "quick_records",
+  "ai_suggestions",
+  "proactive_confirmation_previews",
+  "proactive_scan_state",
+  "proactive_scan_lease",
+  "proactive_scan_runs",
+  "proactive_notifications",
+  "weixin_confirmation_outbox",
+  "audit_logs",
+  "idempotency_keys",
+];
+
+function durableAcceptanceSnapshot(databaseUrl) {
+  const db = createConnection({ databaseUrl });
+  try {
+    return Object.fromEntries(ACCEPTANCE_DURABLE_TABLES.map((table) => [
+      table,
+      db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+    ]));
+  } finally {
+    db.close();
+  }
+}
+
+async function settleAutomaticSchedulers(server) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    await waitForImmediate();
+    if (!server.proactiveAssistantWorker.status().ticking
+      && !server.proactiveNotificationScheduler.status().ticking) return;
+  }
+  throw new Error("automatic proactive schedulers did not settle");
+}
+
+async function advanceAutomaticClock(testContext, clock, server, milliseconds) {
+  clock.advance(milliseconds);
+  testContext.mock.timers.tick(milliseconds);
+  await settleAutomaticSchedulers(server);
+}
+
+async function listenOnLoopback(server) {
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return `http://127.0.0.1:${server.address().port}`;
 }
 
 describe("主动助手真实对象验收", () => {
@@ -346,5 +396,238 @@ describe("主动助手真实对象验收", () => {
     assert.equal(notificationRepository.count({ owner: "cache-owner" }), 1);
     assert.equal(notificationRepository.list({ owner: "cache-owner" })[0].status, "sent");
     db.close();
+  });
+
+  it("自动启动并在真实 server 重启后续扫两个周期，保留人工编辑且不重复确认写回", async (testContext) => {
+    const tempDir = await mkdtemp(join(tmpdir(), "sentelligent-proactive-background-acceptance-"));
+    const databaseUrl = join(tempDir, "background.sqlite");
+    const passwordHashA = await hashPassword(LOGIN_INPUT_A, { salt: Buffer.alloc(16, 91) });
+    const passwordHashB = await hashPassword(LOGIN_INPUT_B, { salt: Buffer.alloc(16, 92) });
+    let current = new Date(NOW);
+    const clock = () => new Date(current);
+    const advanceClock = (milliseconds) => { current = new Date(current.getTime() + milliseconds); };
+    const serverOptions = {
+      databaseUrl,
+      seed: false,
+      nodeEnv: "test",
+      authRequired: true,
+      authAccount: OWNER_A,
+      authPassword: "",
+      authPasswordHash: passwordHashA,
+      authSessionSecret: Buffer.alloc(32, 93).toString("base64url"),
+      authCookieSecure: false,
+      aiAnalysisMode: "model",
+      modelApiKey: "",
+      proactiveAssistantAutoRun: true,
+      proactiveNotificationAutoRun: true,
+      proactiveAssistantBatchSize: 1,
+      proactiveAssistantIntervalMinutes: 1,
+      proactiveAssistantPollMs: 1_000,
+      proactiveAssistantLeaseMs: 1_000,
+      proactiveNotificationPollMs: 1_000,
+      hospitalTenderAutoRun: false,
+      actionReminderAutoRun: false,
+      invoiceEscalationAutoRun: false,
+      dailyDigestAutoRun: false,
+      weixinAgentApiToken: "",
+      weixinAgentOwner: "",
+      assistantClock: clock,
+      proactiveAssistantClock: clock,
+      proactiveNotificationClock: clock,
+    };
+    let server;
+    let baseUrl;
+    try {
+      testContext.mock.timers.enable({ apis: ["setTimeout", "setInterval"], now: Date.parse(NOW) });
+      server = createServer(serverOptions);
+      const seedDb = createConnection({ databaseUrl });
+      try {
+        insertAcceptanceData(seedDb, passwordHashB);
+      } finally {
+        seedDb.close();
+      }
+      baseUrl = await listenOnLoopback(server);
+      server.proactiveScanRepository.updateState({ batchSize: 1 });
+
+      // The first callback is the worker's automatic initial schedule. No
+      // direct runOnce call is used anywhere in this lifecycle test.
+      testContext.mock.timers.tick(0);
+      await settleAutomaticSchedulers(server);
+
+      const firstState = server.proactiveScanRepository.getState();
+      assert.equal(firstState.lastStatus, "success");
+      assert.equal(firstState.lastBatchCount, 1);
+      assert.equal(firstState.cursorOwner, OWNER_A);
+      assert.equal(firstState.cursorOpportunityId, "acceptance-opportunity-a");
+      assert.equal(server.proactiveScanRepository.listRuns({ limit: 10 }).length, 1);
+
+      const sessionA = await login(baseUrl, OWNER_A, LOGIN_INPUT_A);
+      const asA = asUser(baseUrl, sessionA);
+      const firstItems = server.proactiveSuggestionRepository.list({ owner: OWNER_A, limit: 100 });
+      const stageItem = firstItems.find((item) => item.trigger === "stage_evidence_mismatch");
+      const riskItem = firstItems.find((item) => item.trigger === "risk_open");
+      const actionDueItem = firstItems.find((item) => item.trigger === "action_due");
+      assert.ok(stageItem?.writebackPreview?.action);
+      assert.ok(riskItem?.writebackPreview?.risk);
+      assert.ok(actionDueItem);
+      assert.doesNotMatch(JSON.stringify(firstItems), /不可泄露的客户沟通正文/u);
+
+      const oldPreviewResult = await asA(`/api/assistant/proactive/${stageItem.id}/previews`, {
+        method: "POST",
+        headers: { "Idempotency-Key": "background-old-preview" },
+        body: JSON.stringify({ target: "action" }),
+      });
+      assert.equal(oldPreviewResult.response.status, 201);
+      const oldPreview = oldPreviewResult.body.item;
+      const edited = await asA(`/api/assistant/proactive/${stageItem.id}/fields`, {
+        method: "PATCH",
+        headers: { "Idempotency-Key": "background-fields-edit" },
+        body: JSON.stringify({
+          assignee: OWNER_A,
+          dueDate: "2099-09-01",
+          priority: "高",
+          expectedResult: "人工编辑后的确认结果",
+          expectedVersion: stageItem.version,
+        }),
+      });
+      assert.equal(edited.response.status, 200);
+      assert.equal(edited.body.item.version, stageItem.version + 1);
+      assert.equal(edited.body.item.reviewFields.expectedResult, "人工编辑后的确认结果");
+      const cancelledOldPreview = await asA(`/api/assistant/proactive/${stageItem.id}/previews/${oldPreview.id}`);
+      assert.equal(cancelledOldPreview.body.item.status, "cancelled");
+      const editedPreviewResult = await asA(`/api/assistant/proactive/${stageItem.id}/previews`, {
+        method: "POST",
+        headers: { "Idempotency-Key": "background-edited-preview" },
+        body: JSON.stringify({ target: "action" }),
+      });
+      assert.equal(editedPreviewResult.response.status, 201);
+      const editedPreview = editedPreviewResult.body.item;
+
+      // Shorten only the persisted interval after the initial server-configured
+      // minute. The worker still runs from its durable nextRunAt timestamps.
+      server.proactiveScanRepository.updateState({
+        intervalSeconds: 30,
+        nextRunAt: new Date(current.getTime() + 30_000),
+      });
+      const beforeRestart = durableAcceptanceSnapshot(databaseUrl);
+      await new Promise((resolve) => server.close(resolve));
+      assert.deepEqual(durableAcceptanceSnapshot(databaseUrl), beforeRestart);
+
+      server = createServer(serverOptions);
+      baseUrl = await listenOnLoopback(server);
+      assert.deepEqual(durableAcceptanceSnapshot(databaseUrl), beforeRestart);
+      const restartedSessionA = await login(baseUrl, OWNER_A, LOGIN_INPUT_A);
+      const restartedAsA = asUser(baseUrl, restartedSessionA);
+      const persisted = server.proactiveSuggestionRepository.get(stageItem.id, { owner: OWNER_A });
+      assert.equal(persisted.reviewFields.expectedResult, "人工编辑后的确认结果");
+      const persistedPreview = await restartedAsA(`/api/assistant/proactive/${stageItem.id}/previews/${editedPreview.id}`);
+      assert.equal(persistedPreview.response.status, 200);
+      assert.equal(persistedPreview.body.item.status, "open");
+
+      // Complete the remainder of cycle 1, then cycle 2, through timer ticks.
+      await advanceAutomaticClock(testContext, { advance: advanceClock }, server, 60_000);
+      await advanceAutomaticClock(testContext, { advance: advanceClock }, server, 30_000);
+      await advanceAutomaticClock(testContext, { advance: advanceClock }, server, 30_000);
+      const completedState = server.proactiveScanRepository.getState();
+      assert.equal(completedState.lastStatus, "success");
+      assert.equal(completedState.cursorOwner, null);
+      assert.equal(completedState.cursorOpportunityId, null);
+      assert.equal(completedState.cycleNumber, 2);
+      const runs = server.proactiveScanRepository.listRuns({ limit: 10 }).reverse();
+      assert.equal(runs.length, 4);
+      assert.ok(runs.every((run) => run.status === "success" && run.trigger === "scheduled"));
+      assert.deepEqual(runs.map((run) => run.objectCount), [1, 1, 1, 1]);
+      assert.deepEqual(runs.map((run) => run.nextCursorOpportunityId), [
+        "acceptance-opportunity-a", null, "acceptance-opportunity-a", null,
+      ]);
+      const afterCycleItems = server.proactiveSuggestionRepository.list({ owner: OWNER_A, limit: 100 });
+      assert.equal(afterCycleItems.length, firstItems.length);
+      const afterTwoCycles = server.proactiveSuggestionRepository.get(stageItem.id, { owner: OWNER_A });
+      assert.equal(afterTwoCycles.reviewFields.expectedResult, "人工编辑后的确认结果");
+      assert.equal(afterTwoCycles.reviewFields.priority, "高");
+      // The edited revision is the only pending notification identity because
+      // delivery had not run before the shutdown.
+      assert.equal(server.proactiveNotificationRepository.count({ owner: OWNER_A }), firstItems.length);
+      const notificationRows = server.proactiveNotificationRepository.list({ owner: OWNER_A, limit: 100 });
+      assert.equal(
+        notificationRows.filter((item) => item.status === "sent").length,
+        firstItems.length,
+      );
+      assert.equal(server.proactiveNotificationRepository.list({ owner: OWNER_A, limit: 100 }).some((item) => item.channel !== "in_app"), false);
+
+      // action_due was verified in the first cycle. Use the edited stage
+      // suggestion for the cross-restart confirmation because it remains a
+      // stable evidence-backed item across later due-date state changes.
+      const confirmationSuggestion = stageItem;
+      const confirmationPreviewResult = await restartedAsA(`/api/assistant/proactive/${confirmationSuggestion.id}/previews`, {
+        method: "POST",
+        headers: { "Idempotency-Key": "background-action-preview" },
+        body: JSON.stringify({ target: "action" }),
+      });
+      assert.ok([200, 201].includes(confirmationPreviewResult.response.status));
+      const confirmationPreview = confirmationPreviewResult.body.item;
+
+      const riskPreviewResult = await restartedAsA(`/api/assistant/proactive/${riskItem.id}/previews`, {
+        method: "POST",
+        headers: { "Idempotency-Key": "background-risk-failure-preview" },
+        body: JSON.stringify({ target: "risk" }),
+      });
+      assert.equal(riskPreviewResult.response.status, 201);
+      const riskPreview = riskPreviewResult.body.item;
+      const triggerDb = createConnection({ databaseUrl });
+      try {
+        triggerDb.exec(`
+          CREATE TRIGGER background_risk_audit_failure
+          BEFORE INSERT ON audit_logs
+          WHEN NEW.action = 'risk.create'
+          BEGIN
+            SELECT RAISE(ABORT, 'background risk audit failure');
+          END;
+        `);
+      } finally {
+        triggerDb.close();
+      }
+      const riskFailed = await restartedAsA(`/api/assistant/proactive/${riskItem.id}/confirm`, {
+        method: "POST",
+        headers: { "Idempotency-Key": "background-risk-audit-failure" },
+        body: JSON.stringify(confirmationBody(riskPreview)),
+      });
+      assert.equal(riskFailed.response.status, 500);
+      const verifyRisk = createConnection({ databaseUrl });
+      try {
+        assert.equal(verifyRisk.prepare("SELECT COUNT(*) AS count FROM risk_items WHERE id = $id").get({ $id: `proactive-risk-${riskItem.id}` }).count, 0);
+        assert.equal(verifyRisk.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'risk.create' AND entity_id = $id").get({ $id: `proactive-risk-${riskItem.id}` }).count, 0);
+        assert.equal(verifyRisk.prepare("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key = $key").get({ $key: "background-risk-audit-failure" }).count, 0);
+        verifyRisk.exec("DROP TRIGGER background_risk_audit_failure");
+      } finally {
+        verifyRisk.close();
+      }
+
+      const confirmed = await restartedAsA(`/api/assistant/proactive/${confirmationSuggestion.id}/confirm`, {
+        method: "POST",
+        headers: { "Idempotency-Key": "background-action-confirm" },
+        body: JSON.stringify(confirmationBody(confirmationPreview)),
+      });
+      assert.equal(confirmed.response.status, 201);
+      const beforeReplayRestart = durableAcceptanceSnapshot(databaseUrl);
+      await new Promise((resolve) => server.close(resolve));
+      server = createServer(serverOptions);
+      baseUrl = await listenOnLoopback(server);
+      assert.deepEqual(durableAcceptanceSnapshot(databaseUrl), beforeReplayRestart);
+      const finalSessionA = await login(baseUrl, OWNER_A, LOGIN_INPUT_A);
+      const finalAsA = asUser(baseUrl, finalSessionA);
+      const replay = await finalAsA(`/api/assistant/proactive/${confirmationSuggestion.id}/confirm`, {
+        method: "POST",
+        headers: { "Idempotency-Key": "background-action-confirm" },
+        body: JSON.stringify(confirmationBody(confirmationPreview)),
+      });
+      assert.equal(replay.response.status, 201);
+      assert.equal(replay.body.item.replayed, false);
+      assert.deepEqual(durableAcceptanceSnapshot(databaseUrl), beforeReplayRestart);
+    } finally {
+      if (server?.listening) await new Promise((resolve) => server.close(resolve));
+      testContext.mock.timers.reset();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });
