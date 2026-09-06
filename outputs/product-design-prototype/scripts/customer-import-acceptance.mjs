@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer as createProbeServer } from "node:net";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,14 +15,13 @@ import {
   createStaticServerConfig,
 } from "./static-server.mjs";
 import { createCustomerImportFixture } from "./fixtures/customer-import-fixture.mjs";
+import { browserContextIdentity, prepareBrowserEvidence, restrictEvidenceNetwork } from "./browser-evidence.mjs";
 
-const BASELINE_COMMIT = "23695628a8bcaf6012c0548774a91fe5726bf3cc";
 const loginAccount = "jiangjz";
 const loginInput = "customer-acceptance-password";
 const here = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(here, "..");
 const workspaceRoot = resolve(appRoot, "..", "..");
-const distPath = resolve(appRoot, "dist");
 
 function listen(server, port = 0) {
   return new Promise((resolveListen, reject) => {
@@ -192,8 +185,10 @@ async function captureResponsiveContext(browser, {
 }) {
   const context = await browser.newContext({
     locale: "zh-CN",
+    serviceWorkers: "block",
     ...contextOptions,
   });
+  const blockedOrigins = await restrictEvidenceNetwork(context, frontendOrigin);
   await addInitScript(context);
   const page = await context.newPage();
   const failedResponses = [];
@@ -202,6 +197,7 @@ async function captureResponsiveContext(browser, {
   });
   try {
     await page.goto(frontendOrigin, { waitUntil: "networkidle" });
+    const browserIdentity = await browserContextIdentity(page, browser, "webkit");
     await loginBrowser(page);
     failedResponses.length = 0;
     await openCustomerList(page);
@@ -227,42 +223,38 @@ async function captureResponsiveContext(browser, {
     );
     const screenshot = resolve(evidenceDirectory, `customer-${name}-${metrics.viewport.width}x${metrics.viewport.height}.png`);
     await page.screenshot({ path: screenshot, fullPage: false });
-    return { metrics, screenshot, failedResponses };
+    assert.deepEqual(blockedOrigins, [], `${name}: only local synthetic fixture traffic is allowed`);
+    return { metrics, screenshot, failedResponses, browser: browserIdentity };
   } finally {
     await context.close();
   }
 }
 
 async function main() {
-  assert.equal(existsSync(resolve(distPath, "index.html")), true, "run npm run build before acceptance");
+  const evidence = prepareBrowserEvidence({
+    workspaceRoot,
+    suite: "customer-api-acceptance",
+    outputRoot: process.env.CUSTOMER_ACCEPTANCE_EVIDENCE_DIR,
+  });
   const runtimeDirectory = mkdtempSync(resolve(tmpdir(), "sentelligent-customer-acceptance-"));
-  const evidenceDirectory = resolve(
-    process.env.CUSTOMER_ACCEPTANCE_EVIDENCE_DIR
-      || resolve(workspaceRoot, ".runtime", "customer-import-acceptance"),
-  );
-  mkdirSync(evidenceDirectory, { recursive: true });
-
-  const backendPort = await freePort();
-  const frontendPort = await freePort();
-  const backendOrigin = `http://127.0.0.1:${backendPort}`;
-  const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
+  const { directory: evidenceDirectory, distPath } = evidence;
   const databaseUrl = resolve(runtimeDirectory, "customer-acceptance.sqlite");
-  const runId = `${Date.now()}-${process.pid}`;
+  const runId = evidence.identity.runId;
   const fixture = createCustomerImportFixture(runId);
   const report = {
     status: "failed",
-    baselineCommit: BASELINE_COMMIT,
-    generatedAt: new Date().toISOString(),
-    importContract: {
+    acceptanceScope: {
       fileUploadUi: false,
       batchImportApi: false,
+      production64CustomerAcceptance: false,
       availableAlternative: "POST /api/customers with an authenticated session",
       interpretation: "The customer was created through the real API alternative; this is not evidence of file import support.",
     },
-    importedCustomer: { name: fixture.name },
+    apiCreatedCustomer: { name: fixture.name },
     checks: {},
     viewports: {},
     screenshots: {},
+    browsers: {},
     failedResponses: [],
   };
 
@@ -270,6 +262,10 @@ async function main() {
   let frontend;
   let browser;
   try {
+    const backendPort = await freePort();
+    const frontendPort = await freePort();
+    const backendOrigin = `http://127.0.0.1:${backendPort}`;
+    const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
     backend = createBackendServer({
       databaseUrl,
       seed: true,
@@ -303,7 +299,7 @@ async function main() {
     });
     assert.equal(before.response.status, 200);
     assert.ok(!before.body.items.some((item) => item.name === fixture.name), "fixture customer must not pre-exist");
-    report.checks.preImportNameAbsent = true;
+    report.checks.preCreateNameAbsent = true;
 
     const created = await apiRequest(backendOrigin, "/api/customers", {
       ...session,
@@ -320,11 +316,11 @@ async function main() {
     assert.deepEqual(createdCustomer.tags, fixture.tags);
     assert.ok(createdCustomer.createdAt);
     assert.ok(createdCustomer.updatedAt);
-    report.importedCustomer = {
+    report.apiCreatedCustomer = {
       id: createdCustomer.id,
       name: createdCustomer.name,
       version: createdCustomer.version,
-      source: createdCustomer.syncPreview[0],
+      syncSummary: createdCustomer.syncPreview[0],
       aliases: createdCustomer.aliases,
       tags: createdCustomer.tags,
       createdAt: createdCustomer.createdAt,
@@ -359,7 +355,9 @@ async function main() {
     const desktopContext = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       locale: "zh-CN",
+      serviceWorkers: "block",
     });
+    const blockedOrigins = await restrictEvidenceNetwork(desktopContext, frontendOrigin);
     await addInitScript(desktopContext);
     const desktopPage = await desktopContext.newPage();
     const desktopFailedResponses = [];
@@ -368,6 +366,7 @@ async function main() {
     });
     try {
       await desktopPage.goto(frontendOrigin, { waitUntil: "networkidle" });
+      report.browsers.desktop = await browserContextIdentity(desktopPage, browser, "webkit");
       await loginBrowser(desktopPage);
       desktopFailedResponses.length = 0;
       await openCustomerList(desktopPage);
@@ -382,7 +381,7 @@ async function main() {
       await customerRow.waitFor();
       assert.equal(await desktopPage.locator(".customer-list-row").count(), 1, "customer search should filter to the fixture");
       assert.match(await desktopPage.getByTestId("customer-list-view").innerText(), new RegExp(fixture.name));
-      report.checks.searchFindsImportedCustomer = true;
+      report.checks.searchFindsApiCreatedCustomer = true;
       await search.fill("");
 
       await customerRow.getByTestId("customer-open-detail").click();
@@ -395,7 +394,7 @@ async function main() {
       assert.match(await desktopPage.getByTestId("customer-imported-fields").innerText(), new RegExp(fixture.tags[0]));
       assert.notEqual(await desktopPage.getByTestId("customer-created-at").innerText(), "未记录");
       assert.notEqual(await desktopPage.getByTestId("customer-updated-at").innerText(), "未记录");
-      report.checks.detailShowsVersionSourceAndImportedFields = true;
+      report.checks.detailShowsVersionSyncSummaryAndFixtureFields = true;
 
       const initialMetrics = await customerLayoutMetrics(desktopPage);
       assertNoHorizontalOverflow(initialMetrics, "desktop detail");
@@ -432,9 +431,10 @@ async function main() {
       assert.equal(afterSave.response.status, 200);
       assert.equal(afterSave.body.item.version, 2);
       assert.equal(afterSave.body.item.summary, editedSummary);
-      assert.deepEqual(afterSave.body.item.tags, fixture.tags, "UI edit should preserve imported tags");
-      assert.deepEqual(afterSave.body.item.aliases, fixture.aliases, "UI edit should preserve imported aliases");
-      report.checks.editSavePersistsAndPreservesImportedFields = true;
+      assert.deepEqual(afterSave.body.item.tags, fixture.tags, "UI edit should preserve fixture tags");
+      assert.deepEqual(afterSave.body.item.aliases, fixture.aliases, "UI edit should preserve fixture aliases");
+      assert.deepEqual(afterSave.body.item.syncPreview, fixture.syncPreview, "UI edit should preserve the sync summary");
+      report.checks.editSavePersistsAndPreservesFixtureFields = true;
 
       await desktopPage.getByTestId("customer-delete-detail").click();
       await desktopPage.getByTestId("customer-delete-dialog").waitFor();
@@ -448,6 +448,7 @@ async function main() {
       report.viewports.desktop = desktopFinalMetrics;
       assert.ok(desktopFinalMetrics.controls.some((control) => control.testId === "customer-edit-detail"));
       report.checks.keyCustomerButtonsUsable = true;
+      assert.deepEqual(blockedOrigins, [], "desktop: only local synthetic fixture traffic is allowed");
     } finally {
       report.failedResponses.push(...desktopFailedResponses);
       await desktopContext.close();
@@ -461,6 +462,7 @@ async function main() {
       evidenceDirectory,
     });
     report.viewports.tablet = tablet.metrics;
+    report.browsers.tablet = tablet.browser;
     report.screenshots.tabletDetail = tablet.screenshot;
     report.failedResponses.push(...tablet.failedResponses);
 
@@ -472,6 +474,7 @@ async function main() {
       evidenceDirectory,
     });
     report.viewports.iphone = iphone.metrics;
+    report.browsers.iphone = iphone.browser;
     report.screenshots.iphoneDetail = iphone.screenshot;
     report.failedResponses.push(...iphone.failedResponses);
     assert.deepEqual(report.failedResponses, [], "customer acceptance should not produce HTTP error responses");
@@ -481,19 +484,14 @@ async function main() {
     report.error = { name: error.name, message: error.message };
     throw error;
   } finally {
-    report.generatedAt = new Date().toISOString();
-    writeFileSync(
-      resolve(evidenceDirectory, "customer-import-acceptance-report.json"),
-      `${JSON.stringify(report, null, 2)}\n`,
-      { mode: 0o600 },
-    );
     await browser?.close().catch(() => {});
     await closeServer(frontend).catch(() => {});
     await closeServer(backend).catch(() => {});
     rmSync(runtimeDirectory, { recursive: true, force: true });
+    evidence.finish(report);
   }
 
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ status: report.status, reportPath: evidence.reportPath, git: evidence.identity.git }, null, 2)}\n`);
 }
 
 await main();

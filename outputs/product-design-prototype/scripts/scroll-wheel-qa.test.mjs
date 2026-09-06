@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer as createNetServer } from "node:net";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,10 +13,11 @@ import {
   createStaticServer,
   createStaticServerConfig,
 } from "./static-server.mjs";
+import { browserContextIdentity, prepareBrowserEvidence, restrictEvidenceNetwork } from "./browser-evidence.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(here, "..");
-const distPath = resolve(appRoot, "dist");
+const workspaceRoot = resolve(appRoot, "..", "..");
 const loginInput = "scroll-wheel-qa-password";
 
 function listen(server, port) {
@@ -243,17 +244,20 @@ async function assertMobileTouchLayout(page, label, { canWheel }) {
   return metrics;
 }
 
-async function exerciseBrowser(browserType, browserLabel, frontendOrigin) {
+async function exerciseBrowser(browserType, browserLabel, frontendOrigin, evidenceDirectory, report) {
   const browser = await browserType.launch({ headless: true });
-  const report = { engine: browserLabel, browserVersion: browser.version(), desktop: null, mobile: null };
+  report.browserVersion = browser.version();
   try {
     const desktopContext = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       locale: "zh-CN",
+      serviceWorkers: "block",
     });
+    const desktopBlockedOrigins = await restrictEvidenceNetwork(desktopContext, frontendOrigin);
     await desktopContext.addInitScript(() => localStorage.setItem("sentelligent_disable_sw", "1"));
     const desktopPage = await desktopContext.newPage();
     await desktopPage.goto(frontendOrigin, { waitUntil: "networkidle" });
+    report.desktopBrowser = await browserContextIdentity(desktopPage, browser, browserLabel);
     await desktopPage.getByLabel("账号").fill("jiangjz");
     await desktopPage.locator('input[aria-label="密码"]').fill(loginInput);
     await desktopPage.getByTestId("login-submit").click();
@@ -261,8 +265,11 @@ async function exerciseBrowser(browserType, browserLabel, frontendOrigin) {
     await desktopPage.waitForTimeout(120);
     const desktopRoot = await assertPageScrollRoot(desktopPage, `${browserLabel}/desktop`);
     const wheel = await assertDesktopWheel(desktopPage, `${browserLabel}/desktop`);
+    const desktopScreenshot = resolve(evidenceDirectory, `scroll-${browserLabel}-desktop-1440x900.png`);
+    await desktopPage.screenshot({ path: desktopScreenshot, fullPage: false });
     const nested = await assertNestedBoundaries(desktopPage, `${browserLabel}/desktop`);
-    report.desktop = { root: desktopRoot, wheel, nested };
+    report.desktop = { root: desktopRoot, wheel, nested, screenshot: desktopScreenshot };
+    assert.deepEqual(desktopBlockedOrigins, [], "desktop: only local synthetic fixture traffic is allowed");
     await desktopContext.close();
 
     const mobileContext = await browser.newContext({
@@ -270,10 +277,13 @@ async function exerciseBrowser(browserType, browserLabel, frontendOrigin) {
       viewport: { width: 390, height: 844 },
       screen: { width: 390, height: 844 },
       locale: "zh-CN",
+      serviceWorkers: "block",
     });
+    const mobileBlockedOrigins = await restrictEvidenceNetwork(mobileContext, frontendOrigin);
     await mobileContext.addInitScript(() => localStorage.setItem("sentelligent_disable_sw", "1"));
     const mobilePage = await mobileContext.newPage();
     await mobilePage.goto(frontendOrigin, { waitUntil: "networkidle" });
+    report.mobileBrowser = await browserContextIdentity(mobilePage, browser, browserLabel);
     await mobilePage.getByLabel("账号").fill("jiangjz");
     await mobilePage.locator('input[aria-label="密码"]').fill(loginInput);
     await mobilePage.getByTestId("login-submit").click();
@@ -284,6 +294,10 @@ async function exerciseBrowser(browserType, browserLabel, frontendOrigin) {
       `${browserLabel}/mobile`,
       { canWheel: browserLabel === "chromium" },
     );
+    report.mobileVerification = browserLabel === "chromium" ? "emulated-mobile-wheel" : "programmatic-scrollability-not-touch-gesture";
+    report.mobileScreenshot = resolve(evidenceDirectory, `scroll-${browserLabel}-mobile-390x844.png`);
+    await mobilePage.screenshot({ path: report.mobileScreenshot, fullPage: false });
+    assert.deepEqual(mobileBlockedOrigins, [], "mobile: only local synthetic fixture traffic is allowed");
     await mobileContext.close();
   } finally {
     await browser.close();
@@ -292,13 +306,21 @@ async function exerciseBrowser(browserType, browserLabel, frontendOrigin) {
 }
 
 async function main() {
-  assert.equal(existsSync(resolve(distPath, "index.html")), true, "run the frontend build before scroll-wheel QA");
+  const evidence = prepareBrowserEvidence({
+    workspaceRoot,
+    suite: "scroll-wheel",
+    outputRoot: process.env.SCROLL_WHEEL_EVIDENCE_DIR,
+  });
   const runtimeDirectory = mkdtempSync(resolve(tmpdir(), "sentelligent-scroll-wheel-qa-"));
+  const report = { status: "failed", acceptanceScope: "synthetic-local-scroll-regression", browsers: [] };
+  let backend;
+  let frontend;
+  try {
   const frontendPort = await freePort();
   const backendPort = await freePort();
   const frontendOrigin = `http://127.0.0.1:${frontendPort}`;
   const backendOrigin = `http://127.0.0.1:${backendPort}`;
-  const backend = createBackendServer({
+  backend = createBackendServer({
     databaseUrl: resolve(runtimeDirectory, "scroll-wheel.sqlite"),
     seed: true,
     nodeEnv: "test",
@@ -314,27 +336,32 @@ async function main() {
     authCookieSecure: false,
     corsAllowedOrigins: [frontendOrigin],
   });
-  const frontend = createStaticServer(createStaticServerConfig({
+  frontend = createStaticServer(createStaticServerConfig({
     host: "127.0.0.1",
     port: frontendPort,
     apiBaseUrl: backendOrigin,
-    distPath,
+    distPath: evidence.distPath,
     runtimeRoot: resolve(runtimeDirectory, "frontend-runtime"),
   }));
 
-  try {
     await listen(backend, backendPort);
     await listen(frontend, frontendPort);
-    const reports = [];
     for (const [label, browserType] of [["chromium", chromium], ["webkit", webkit]]) {
-      reports.push(await exerciseBrowser(browserType, label, frontendOrigin));
+      const browserReport = { engine: label };
+      report.browsers.push(browserReport);
+      await exerciseBrowser(browserType, label, frontendOrigin, evidence.directory, browserReport);
     }
-    process.stdout.write(`${JSON.stringify({ status: "passed", browsers: reports }, null, 2)}\n`);
+    report.status = "passed";
+  } catch (error) {
+    report.error = { name: error.name, message: error.message };
+    throw error;
   } finally {
     await closeServer(frontend).catch(() => {});
     await closeServer(backend).catch(() => {});
     rmSync(runtimeDirectory, { recursive: true, force: true });
+    evidence.finish(report);
   }
+  process.stdout.write(`${JSON.stringify({ status: report.status, reportPath: evidence.reportPath, git: evidence.identity.git }, null, 2)}\n`);
 }
 
 await main();
