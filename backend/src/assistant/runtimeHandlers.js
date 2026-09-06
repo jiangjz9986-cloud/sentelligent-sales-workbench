@@ -1,13 +1,50 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { insertAudit } from "../audit/auditRepository.js";
+import {
+  countActiveOpportunities,
+  createCustomer,
+  getActiveCustomer,
+  softDeleteCustomer,
+  updateCustomer,
+} from "../customers/customerStore.js";
+import {
+  createOpportunity,
+  getActiveOpportunity,
+  listOwnerOpportunities,
+  softDeleteOpportunity,
+  updateOpportunity,
+} from "../opportunities/opportunityStore.js";
+import { stageDirection } from "../opportunities/stageVocabulary.js";
+import { createQuickRecordStore } from "../quickRecords/quickRecordStore.js";
+import { createActionItemStore } from "../actionItems/actionItemStore.js";
+import { reminderDisplayOf } from "../actionReminders/reminderScheduler.js";
 import { withImmediateTransaction } from "../db/transaction.js";
+import { HttpError } from "../http/errors.js";
 import { decodeCanonicalBase64 } from "../http/strictBase64.js";
-import { analyzeQuickRecord } from "../modelAnalysis.js";
 import { withDocumentBlobWritePreflight } from "../travelExpense/documentBlobStore.js";
+import { createActionRiskAssistantAdapter } from "./actionRiskAssistantAdapter.js";
+import { createAdvanceSettlementAssistantAdapter } from "./advanceSettlementAssistantAdapter.js";
 import { createAssistantBusinessSnapshotAdapter } from "./businessSnapshotAdapter.js";
+import { createAssistantSettlementSnapshotAdapter } from "./settlementSnapshotAdapter.js";
+import { createCustomerAssistantAdapter } from "./customerAssistantAdapter.js";
+import { createDashboardAssistantAdapter } from "./dashboardAssistantAdapter.js";
+import { createItineraryAssistantAdapter } from "./itineraryAssistantAdapter.js";
+import { createKnowledgeAssistantAdapter } from "./knowledgeAssistantAdapter.js";
+import { createOpportunityAssistantAdapter } from "./opportunityAssistantAdapter.js";
+import { createSalesReportAssistantAdapter } from "./salesReportAssistantAdapter.js";
+import { createVisitCaptureAssistantAdapter } from "./visitCaptureAssistantAdapter.js";
+import { reconcileWeixinInvoiceAttachments } from "./weixinInvoiceAttachment.js";
+import {
+  buildBookkeepingAnalysis,
+  classifyBookkeepingEntry,
+  extractBookkeepingRows,
+} from "./bookkeepingCapture.js";
+import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
+import { weixinCard, weixinClip, weixinShortId, weixinValue } from "./weixinCard.js";
 
 const MAX_DOCUMENT_BYTES = 12 * 1024 * 1024;
+const FINANCIAL_SCOPE_DENIED = "该财务预览仅限已绑定账号本人的微信私聊。";
 
 function safeText(value, fallback = "") {
   const text = typeof value === "string" ? value.trim() : "";
@@ -28,8 +65,15 @@ function draftParts(sessionRepository, context) {
   return { conversation, parts };
 }
 
+const CONTROL_MESSAGES = new Set([
+  "记录", "录入", "确认", "取消", "帮助", "help", "/帮助", "/help",
+  // The orchestrator persists confirmation deliveries as this placeholder so
+  // the original code never enters the business draft.
+  "<confirmation-code>",
+]);
+
 function isControlMessage(text) {
-  return new Set(["记录", "录入", "确认", "取消", "帮助", "help", "/帮助", "/help"]).has(text);
+  return CONTROL_MESSAGES.has(text);
 }
 
 function draftText(sessionRepository, context) {
@@ -43,21 +87,45 @@ function draftText(sessionRepository, context) {
 }
 
 function previewText(analysis) {
-  const customer = safeText(analysis?.customer?.value, "待匹配客户");
-  const opportunity = safeText(analysis?.opportunity?.value, "待确认商机");
-  const request = safeText(analysis?.summary?.request?.text, "待补充");
-  const risk = safeText(analysis?.summary?.risk?.text, "待确认");
-  const action = safeText(analysis?.summary?.action?.text, "待确认");
-  return [
-    "待确认记录：",
-    `客户：${customer}`,
-    `商机：${opportunity}`,
-    `诉求：${request.slice(0, 160)}`,
-    `风险：${risk.slice(0, 160)}`,
-    `建议：${action.slice(0, 160)}`,
-    "",
-    "确认无误后回复“录入”，再使用返回的确认码完成写入。",
-  ].join("\n");
+  const customer = safeText(
+    analysis?.customerCandidate?.id ? analysis.customerCandidate.name : analysis?.customer?.value,
+    "待匹配",
+  );
+  const opportunity = safeText(
+    analysis?.opportunityCandidate?.id ? analysis.opportunityCandidate.name : analysis?.opportunity?.value,
+    "待确认",
+  );
+  const request = weixinClip(analysis?.summary?.request?.text, 80, "待补充");
+  const risk = weixinClip(analysis?.summary?.risk?.text, 80, "无");
+  const action = weixinClip(analysis?.summary?.action?.text, 80, "待确认");
+  const customerCandidate = analysis?.customerCandidate;
+  const opportunityCandidate = analysis?.opportunityCandidate;
+  const candidateLine = [
+    customerCandidate?.status === "ambiguous" ? "客户候选不唯一" : null,
+    opportunityCandidate?.status === "ambiguous" ? "商机候选不唯一" : null,
+    customerCandidate?.status === "unknown" ? "客户待匹配" : null,
+    opportunityCandidate?.status === "unknown" ? "商机待匹配" : null,
+  ].filter(Boolean).join("；");
+  return weixinCard("小小提醒！新增一条拜访记录", [
+    ["客户", customer],
+    ["商机", opportunity],
+    ["诉求", request],
+    ["风险", risk],
+    ["建议", action],
+    ...(candidateLine ? [["校验", candidateLine]] : []),
+  ], "确认无误请回复“录入”。");
+}
+
+function quickCaptureReceipt(record, insight, db) {
+  const customerName = record.customerId
+    ? db.prepare("SELECT name FROM customers WHERE id = $id").get({ $id: record.customerId })?.name ?? null
+    : null;
+  const actionText = weixinClip(insight?.summary?.action?.text, 60, "");
+  return weixinCard("拜访记录已录入", [
+    ["编号", weixinShortId(record.id)],
+    ["客户", customerName || "未匹配"],
+    ...(actionText ? [["建议", actionText]] : []),
+  ]);
 }
 
 function quickRecordFromRow(row) {
@@ -103,8 +171,92 @@ function boundedRecognition(recognition) {
   return { ...recognition, extractedText };
 }
 
+function visionTransactionRows(recognition) {
+  const transactions = recognition?.transactions;
+  if (!Array.isArray(transactions) || transactions.length < 1 || transactions.length > 20) return [];
+  return transactions.flatMap((transaction, index) => {
+    if (!transaction || typeof transaction !== "object" || Array.isArray(transaction)) return [];
+    const amountCents = Number.isSafeInteger(transaction.amountCents) && transaction.amountCents > 0
+      ? transaction.amountCents
+      : null;
+    if (amountCents === null) return [];
+    const occurredOn = /^\d{4}-\d{2}-\d{2}$/u.test(safeText(transaction.occurredOn))
+      ? safeText(transaction.occurredOn)
+      : null;
+    const paidTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(safeText(transaction.paidTime))
+      ? safeText(transaction.paidTime)
+      : null;
+    const merchant = safeText(transaction.merchant) || null;
+    const paymentMethod = safeText(transaction.paymentMethod) || null;
+    return [{
+      index,
+      amountCents,
+      entryType: null,
+      merchant,
+      occurredOn,
+      paidTime,
+      paymentMethod,
+      text: [
+        merchant ? `商户：${merchant}` : null,
+        occurredOn ? `交易日期：${occurredOn}` : null,
+        paidTime ? `支付时间：${paidTime}` : null,
+        `金额：${(amountCents / 100).toFixed(2)} 元`,
+        paymentMethod ? `支付方式：${paymentMethod}` : null,
+      ].filter(Boolean).join("\n").slice(0, 12_000),
+      warnings: [],
+      visionTransaction: true,
+    }];
+  });
+}
+
 function moneyFromCents(value) {
   return Number.isSafeInteger(value) && value >= 0 ? `${(value / 100).toFixed(2)} 元` : "金额待确认";
+}
+
+function shanghaiWeekStart(value) {
+  const date = value instanceof Date ? value : new Date(value ?? Date.now());
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  const day = new Date(`${valueOf("year")}-${valueOf("month")}-${valueOf("day")}T00:00:00.000Z`);
+  if (Number.isNaN(day.getTime())) return null;
+  day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7));
+  return day.toISOString().slice(0, 10);
+}
+
+function shanghaiDate(value) {
+  const date = value instanceof Date ? value : new Date(value ?? Date.now());
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  const normalized = `${valueOf("year")}-${valueOf("month")}-${valueOf("day")}`;
+  return /^\d{4}-\d{2}-\d{2}$/u.test(normalized) ? normalized : null;
+}
+
+function looksLikeInvoiceDocument({ fileName, mediaType, text } = {}) {
+  const name = safeText(fileName);
+  const value = safeText(text);
+  if (/(?:发票|invoice)/iu.test(name)) return true;
+  if (mediaType === "application/pdf" && !/(?:付款|支付|交易|账单)/u.test(name)) return true;
+  const markers = [
+    /(?:电子)?发票/u,
+    /发票(?:代码|号码)/u,
+    /购买方/u,
+    /销售方/u,
+    /价税合计/u,
+    /税额/u,
+  ].filter((pattern) => pattern.test(value)).length;
+  return markers >= 2;
 }
 
 function safeEntityHint(value, max = 200) {
@@ -179,20 +331,6 @@ function expenseSummaryText(summary, label) {
   return lines.join("\n");
 }
 
-function salesReportSummaryText(summary) {
-  const counts = summary.statusCounts ?? { draft: 0, saved: 0, ready: 0 };
-  const preview = summary.preview ?? {};
-  const text = `销售周报预览（${summary.weekStart}）：已保存周报 ${summary.reportCount} 条（草稿 ${counts.draft}、已保存 ${counts.saved}、就绪 ${counts.ready}）。`;
-  if (summary.truncated) return `${text}\n当前只展示前 100 条，属于部分摘要。`;
-  const previewText = preview.sourceRecordCount > 0
-    ? `已基于 ${preview.sourceRecordCount}${preview.truncated ? "+" : ""} 条已确认拜访记录生成未保存预览。`
-    : "当前没有可用于生成周报预览的已确认拜访记录。";
-  const content = typeof preview.content === "string" && preview.content.trim()
-    ? `\n\n${preview.content.slice(0, 4_000)}${preview.content.length > 4_000 ? "\n（正文已限界，完整内容请在系统内查看。）" : ""}`
-    : "";
-  return `${text}\n${previewText}\n${preview.persisted === false ? "本次仅预览，尚未写入周报。" : "已保留来源引用，可用于确认前准备。"}${content}`;
-}
-
 function projectAnalysisText(analysis) {
   const metrics = analysis.metrics ?? {};
   const opportunity = metrics.opportunity ?? {};
@@ -213,13 +351,171 @@ function projectAnalysisText(analysis) {
   return lines.join("\n");
 }
 
+function salesDecisionPreviewText(result) {
+  const analysis = result?.analysis ?? {};
+  const decision = analysis.decision ?? {};
+  const stage = analysis.stage ?? {};
+  const score = analysis.score ?? {};
+  const lines = [
+    "项目分析预览（销售决策预览，sales-decision-v1，未写回）：",
+    `判断：${decision.code ?? "待确认"}（置信度 ${Number.isSafeInteger(decision.confidence) ? decision.confidence : "待确认"}）`,
+    `阶段：当前 ${result?.currentStageLabel ?? stage.current ?? "待确认"}，建议 ${stage.recommended ?? "待确认"}${stage.gatePassed === true ? "（阶段门槛已满足）" : "（阶段门槛未满足）"}`,
+    `评分：${Number.isSafeInteger(score.total) ? score.total : "待确认"}`,
+    `结论：${String(analysis.headline ?? decision.reason ?? "待补充证据").slice(0, 500)}`,
+  ];
+  if (analysis.compliance?.status === "review_required") {
+    lines.push(`合规：需要人工审查${analysis.compliance.flags?.length ? `（${analysis.compliance.flags.slice(0, 3).join("、")}）` : ""}`);
+  }
+  if (Array.isArray(analysis.unknowns) && analysis.unknowns.length > 0) {
+    lines.push(`待确认：${analysis.unknowns.slice(0, 3).map((item) => item.question).join("；")}`);
+  }
+  if (Array.isArray(analysis.nextActions) && analysis.nextActions.length > 0) {
+    lines.push(`下一步：${analysis.nextActions.slice(0, 3).map((item) => item.action).join("；")}`);
+  }
+  if (result?.runId) lines.push(`运行记录：${result.runId}（来源 ${result.source ?? "待确认"}）`);
+  return lines.join("\n");
+}
+
+function salesLoopStatusText(result, fallback) {
+  if (result?.status === "clarify") return result.question ?? fallback;
+  if (result?.status === "not_found") return "未找到该项目，或当前账号无权查看。";
+  if (result?.status === "review_required") {
+    const reason = result.message ?? ((result.blockers ?? []).join("、") || "证据不足");
+    return `销售决策暂需人工复核：${reason}`;
+  }
+  return fallback;
+}
+
+function salesReportSummaryText(summary) {
+  const counts = summary?.statusCounts ?? { draft: 0, saved: 0, ready: 0 };
+  const preview = summary?.preview ?? {};
+  const lines = [
+    `销售周报预览（${summary?.weekStart ?? "待确认"}）：已保存周报 ${summary?.reportCount ?? 0} 条（草稿 ${counts.draft}、已保存 ${counts.saved}、就绪 ${counts.ready}）。`,
+  ];
+  if (Number.isSafeInteger(summary?.candidateRecordCount) && summary.candidateRecordCount !== summary?.preview?.sourceRecordCount) {
+    lines.push(`本周可见快速记录 ${summary.candidateRecordCount} 条，其中 ${preview.sourceRecordCount ?? 0} 条已确认进入预览。`);
+  } else if (preview.sourceRecordCount > 0) {
+    lines.push(`已基于 ${preview.sourceRecordCount}${preview.truncated ? "+" : ""} 条已确认拜访记录生成未保存预览。`);
+  } else {
+    lines.push("当前没有可用于生成周报预览的已确认拜访记录。");
+  }
+  if (preview.preparation?.ready === false) {
+    lines.push(`确认前待处理：${(preview.preparation.blockers ?? []).join("、") || "资料不完整"}。`);
+  }
+  const content = typeof preview.content === "string" && preview.content.trim()
+    ? preview.content.slice(0, 4_000)
+    : "";
+  if (content) lines.push("", content, ...(preview.content.length > 4_000 ? ["（正文已限界，完整内容请在系统内查看。）"] : []));
+  lines.push("本次仅预览，尚未写入周报。");
+  return lines.join("\n");
+}
+
+function settlementDirectionText(direction) {
+  return direction === "company_reimburses"
+    ? "公司应补"
+    : direction === "individual_returns"
+      ? "个人应退"
+      : direction === "balanced"
+        ? "已平衡"
+        : "方向待确认";
+}
+
+function settlementPreviewText(result) {
+  const preview = result?.settlementPreview ?? {};
+  const formula = preview.formula ?? {};
+  const lines = [
+    `请款结算预览（${result?.weekStart ?? "待确认"}）：${settlementDirectionText(preview.direction)}，金额 ${moneyFromCents(preview.amountCents)}。`,
+    `公式：非公司直付的可报销金额 ${moneyFromCents(formula.settlementEligibleCents)} - 已收到请款金额 ${moneyFromCents(formula.advanceReceivedCents)} = ${Number.isSafeInteger(formula.personalSettlementCents) ? `${formula.personalSettlementCents < 0 ? "-" : ""}${moneyFromCents(Math.abs(formula.personalSettlementCents))}` : "待确认"}。`,
+    "本次结果仅供人工核对，不接受确认写入，也不会生成退款或补款交易。",
+  ];
+  const blockers = Array.isArray(preview.blockers) ? preview.blockers : [];
+  if (blockers.length) lines.push(`待人工复核：${blockers.slice(0, 4).map((item) => item.question).join("；")}`);
+  return lines.join("\n");
+}
+
 function ambiguousEntityResult(label, items) {
+  const names = items.slice(0, 5).map((item) => item.name).filter(Boolean);
   return {
-    text: `找到多个${label}，请补充更具体的名称或内部标识：${items.slice(0, 5).map((item) => item.name).filter(Boolean).join("、")}`,
+    text: weixinCard(`找到多个${label}`, names.map((name, index) => [`${index + 1}`, name])),
     status: "clarify",
     question: `请确认要查看哪个${label}。`,
     items,
   };
+}
+
+// Opportunity candidates carry stage/amount/id-suffix so same-customer
+// opportunities stay tellable apart (v0.7.6); customer candidates keep the
+// name-only card above.
+function opportunityCandidateLines(items) {
+  return items.slice(0, 5).map((item, index) => [
+    `${index + 1}`,
+    `${item.name ?? "名称待确认"} ${weixinShortId(item.id)} ｜ ${item.stage ?? "阶段待确认"} ｜ ${item.amount ?? "金额待确认"}`,
+  ]);
+}
+
+function ambiguousOpportunityResult(items) {
+  return {
+    text: weixinCard("找到多个商机", opportunityCandidateLines(items), "回复更完整名称或编号后 6 位重试。"),
+    status: "clarify",
+    question: "请确认要查看哪个商机。",
+    items,
+  };
+}
+
+function stageReviewSummaryText(result, opportunityName) {
+  const analysis = result?.analysis ?? {};
+  const decision = analysis.decision ?? {};
+  const stage = analysis.stage ?? {};
+  const score = analysis.score ?? {};
+  const missing = Array.isArray(stage.missingGateEvidence)
+    ? stage.missingGateEvidence.slice(0, 2).map((item) => String(item).slice(0, 60))
+    : [];
+  const nextAction = Array.isArray(analysis.nextActions) && analysis.nextActions[0]?.action
+    ? String(analysis.nextActions[0].action).slice(0, 80)
+    : null;
+  return [
+    "——阶段升级检查（销售决策 agent）——",
+    `判断：${decision.code ?? "待确认"}（置信度 ${Number.isSafeInteger(decision.confidence) ? decision.confidence : "待确认"}）`,
+    `阶段门槛：${stage.gatePassed === true ? "已满足" : `未满足${missing.length > 0 ? `（缺：${missing.join("、")}）` : ""}`}`,
+    `评分：${Number.isSafeInteger(score.total) ? score.total : "待确认"}${nextAction ? ` ｜ 下一步：${nextAction}` : ""}`,
+    `完整分析发送「项目分析 ${opportunityName ?? ""}」查看。`,
+  ].join("\n");
+}
+
+const STAGE_REVIEW_TIMEOUT = Symbol("stage-review-timeout");
+
+function stageReviewBudgetSleep(budgetMs) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(STAGE_REVIEW_TIMEOUT), budgetMs);
+    if (typeof timer?.unref === "function") timer.unref();
+  });
+}
+
+function reusableVisitRun(repository, context, content) {
+  if (!repository) return null;
+  try {
+    const byEvent = context.event && typeof repository.getByEvent === "function"
+      ? repository.getByEvent({ owner: context.owner, channel: context.channel, eventId: context.event })
+      : null;
+    const byConversation = typeof repository.getLatest === "function"
+      ? repository.getLatest({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        agentId: "visit-capture",
+      })
+      : null;
+    for (const scoped of [byEvent, byConversation]) {
+      const input = scoped?.item?.input;
+      if (!scoped?.item?.output || input?.rawContent !== content) continue;
+      if ((input?.context?.customerId ?? null) !== (context.businessContext?.customerId ?? null)) continue;
+      if ((input?.context?.opportunityId ?? null) !== (context.businessContext?.opportunityId ?? null)) continue;
+      return scoped;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export function createAssistantToolHandlers({
@@ -227,82 +523,1223 @@ export function createAssistantToolHandlers({
   config,
   sessionRepository,
   travelExpenseDocumentInboxRepository,
+  bookkeepingRepository = null,
+  bookkeepingRuntime = null,
+  hospitalTenderRepository = null,
+  travelExpenseRepository = null,
+  travelExpenseRegionRepository = null,
+  travelExpenseAnalyzer = null,
   invoiceRepository,
   paymentProofRecognizer,
   invoiceRecognizer,
   businessSnapshotAdapter = null,
+  settlementSnapshotAdapter = null,
+  customerAssistantAdapter = null,
+  dashboardAssistantAdapter = null,
+  actionRiskAssistantAdapter = null,
+  knowledgeAssistantAdapter = null,
+  opportunityAssistantAdapter = null,
+  itineraryAssistantAdapter = null,
+  advanceSettlementAssistantAdapter = null,
+  visitCaptureAssistantAdapter = null,
+  salesReportAssistantAdapter = null,
+  agentRunRepository = null,
+  salesLoopPreviewService = null,
+  quickRecordStore = null,
+  actionItemStore = null,
   resolveBusinessOwner = (owner) => owner,
   clock = () => new Date(),
   fetchImpl = fetch,
 } = {}) {
   if (!db || !sessionRepository) throw new TypeError("assistant runtime dependencies are required");
+  const recordStore = quickRecordStore ?? createQuickRecordStore(db, { clock });
+  const todoStore = actionItemStore ?? createActionItemStore(db, { clock });
   const snapshotAdapter = businessSnapshotAdapter ?? createAssistantBusinessSnapshotAdapter({ db, clock, resolveBusinessOwner });
+  const settlementSnapshot = settlementSnapshotAdapter ?? createAssistantSettlementSnapshotAdapter({
+    db,
+    clock,
+    resolveBusinessOwner,
+  });
+  const customerAdapter = customerAssistantAdapter ?? createCustomerAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const dashboardAdapter = dashboardAssistantAdapter ?? createDashboardAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const opportunityAdapter = opportunityAssistantAdapter ?? createOpportunityAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const actionRiskAdapter = actionRiskAssistantAdapter ?? createActionRiskAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const knowledgeAdapter = knowledgeAssistantAdapter ?? createKnowledgeAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const itineraryAdapter = itineraryAssistantAdapter ?? createItineraryAssistantAdapter({
+    snapshotAdapter,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const advanceSettlementAdapter = advanceSettlementAssistantAdapter ?? createAdvanceSettlementAssistantAdapter({
+    settlementSnapshotAdapter: settlementSnapshot,
+    runRepository: agentRunRepository,
+    clock,
+  });
+  const visitCaptureAdapter = visitCaptureAssistantAdapter ?? createVisitCaptureAssistantAdapter({
+    config,
+    fetchImpl,
+    runRepository: agentRunRepository,
+    businessSnapshotAdapter: snapshotAdapter,
+    clock,
+  });
+  const salesReportAdapter = salesReportAssistantAdapter ?? (
+    salesLoopPreviewService && typeof salesLoopPreviewService.buildSalesReportSnapshot === "function"
+      ? createSalesReportAssistantAdapter({
+          config,
+          fetchImpl,
+          runRepository: agentRunRepository,
+          clock,
+          snapshotProvider: ({ owner, weekStart, periodStart, periodEnd, knowledgeQuery }) => (
+            salesLoopPreviewService.buildSalesReportSnapshot({ owner, weekStart, periodStart, periodEnd, knowledgeQuery })
+          ),
+        })
+      : null
+  );
 
   const handlers = {
+    async "bookkeeping.ingest"(args, context, serverData) {
+      const media = serverData.media;
+      const rawText = safeText(args?.text);
+      const receivedAt = clock();
+      if (!media && !rawText) {
+        return { text: "请发送付款截图，或直接说明金额、日期和用途。", status: "clarify" };
+      }
+      if (!bookkeepingRepository || !bookkeepingRuntime) {
+        return { text: "记账助手尚未完成配置，当前没有写入任何费用。", status: "error" };
+      }
+      if (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true) {
+        return { text: FINANCIAL_SCOPE_DENIED, status: "denied" };
+      }
+      if (media && media.sourceRef !== args?.mediaRef) {
+        return { text: "这张图片的来源标识已变化，请重新发送。", status: "error" };
+      }
+      if (media && !rawText && looksLikeInvoiceDocument({
+        fileName: media.fileName,
+        mediaType: media.mediaType,
+        text: "",
+      })) {
+        return handlers["invoice.ingest"]({ mediaRef: media.sourceRef }, context, serverData);
+      }
+
+      const content = media ? mediaBuffer(media) : null;
+      const sourceRef = media?.sourceRef
+        ?? `weixin:text:${safeText(context.event) || safeText(context.requestId) || createHash("sha256").update(rawText, "utf8").digest("hex")}`;
+      if (media && typeof bookkeepingRepository.listBySource === "function") {
+        const existingItems = bookkeepingRepository.listBySource({
+          owner: context.owner,
+          sourceId: sourceRef,
+        });
+        if (existingItems.length > 0) {
+          const existingResults = existingItems.map((item) => ({
+            item,
+            pending: item.status === "review_required"
+              ? bookkeepingRuntime.startReview({ account: context.owner, entry: item })
+              : null,
+          }));
+          const countText = existingItems.length > 1 ? `，共识别 ${existingItems.length} 笔` : "";
+          return {
+            text: `这张付款凭证已经收到${countText}，已保留原来的记账状态。`,
+            status: "duplicate",
+            item: existingItems[0] ?? null,
+            items: existingItems,
+            pending: existingResults[0]?.pending ?? null,
+            pendingItems: existingResults.map((result) => result.pending).filter(Boolean),
+          };
+        }
+      }
+      let recognition = {};
+      if (media) {
+        try {
+          recognition = boundedRecognition(await paymentProofRecognizer({
+            fileName: media.fileName,
+            mediaType: media.mediaType,
+            buffer: content,
+          }, { referenceDate: shanghaiDate(receivedAt) }));
+        } catch {
+          recognition = { extractedText: null, evidence: null, warnings: ["RECOGNITION_FAILED"], source: { provider: "rules", model: null } };
+        }
+      }
+      const extractedText = safeText(recognition?.extractedText) || rawText;
+      if (media && !rawText && (
+        recognition?.documentKind === "invoice"
+        || looksLikeInvoiceDocument({
+          fileName: media.fileName,
+          mediaType: media.mediaType,
+          text: extractedText,
+        })
+      )) {
+        return handlers["invoice.ingest"]({ mediaRef: media.sourceRef }, context, serverData);
+      }
+      const splitRows = media
+        ? extractBookkeepingRows(extractedText, { layout: recognition?.layout })
+        : [];
+      const transactionRows = media ? visionTransactionRows(recognition) : [];
+      const rowInputs = splitRows.length > 1
+        ? splitRows
+        : transactionRows.length > 1
+          ? transactionRows
+          : [{
+            index: 0,
+            text: extractedText || rawText,
+            amountCents: recognition?.evidence?.amountCents ?? null,
+            entryType: null,
+            merchant: recognition?.evidence?.merchant ?? null,
+            warnings: [],
+          }];
+      const explicitEntryType = /收入|借款|借支|预借|到账|工资|奖金/u.test(rawText)
+        ? "income"
+        : /支出|消费|付款/u.test(rawText) ? "expense" : null;
+      const analyzedRows = [];
+      for (const row of rowInputs) {
+        const rowText = safeText(row.text) || extractedText || rawText;
+        let expenseAnalysis = null;
+        if (rowText && typeof travelExpenseAnalyzer === "function") {
+          try {
+            expenseAnalysis = await travelExpenseAnalyzer(rowText);
+          } catch {
+            expenseAnalysis = { warnings: ["ANALYSIS_FAILED"], expense: null, source: { provider: "rules", model: null } };
+          }
+        }
+        const combinedText = row.visionTransaction
+          ? `${rowText}\n${rawText}`.trim()
+          : `${rawText}\n${rowText}`.trim();
+        const entryType = classifyBookkeepingEntry({
+          text: combinedText,
+          entryType: explicitEntryType ?? row.entryType ?? args?.entryType,
+        });
+        const rowRecognition = rowInputs.length > 1
+          ? {
+              extractedText: rowText,
+              evidence: {
+                amountCents: row.amountCents,
+                occurredOn: row.visionTransaction ? row.occurredOn : null,
+                paidTime: row.visionTransaction ? row.paidTime : null,
+                merchant: row.merchant,
+                paymentMethod: row.visionTransaction
+                  ? row.paymentMethod
+                  : recognition?.evidence?.paymentMethod ?? null,
+              },
+              confidence: recognition?.confidence ?? null,
+              warnings: [...new Set([
+                ...(Array.isArray(recognition?.warnings) ? recognition.warnings : []),
+                ...(Array.isArray(row.warnings) ? row.warnings : []),
+              ])],
+              source: recognition?.source ?? { provider: "rules", model: null },
+            }
+          : recognition;
+        const analysis = buildBookkeepingAnalysis({
+          recognition: rowRecognition,
+          expenseAnalysis,
+          text: combinedText,
+          entryType,
+          now: receivedAt,
+          tripRegionResolver: ({ occurredOn }) => (
+            travelExpenseRegionRepository?.resolveRegion({
+              owner: context.owner,
+              occurredOn,
+            })?.city
+            ?? resolveItineraryTripRegion(db, {
+              owner: context.owner,
+              occurredOn,
+            })
+          ),
+        });
+        const profileRegion = travelExpenseRegionRepository?.resolveRegion({
+          owner: context.owner,
+          occurredOn: analysis.expense?.occurredOn,
+        }) ?? null;
+        if (profileRegion?.city && analysis.noteAutomation?.kind === "meal") {
+          analysis.noteAutomation = {
+            ...analysis.noteAutomation,
+            tripRegion: profileRegion.city,
+            tripRegionSource: profileRegion.source,
+          };
+        }
+        analyzedRows.push({ row, rowText, entryType, analysis });
+      }
+      let inbox = null;
+      if (media && travelExpenseDocumentInboxRepository) {
+        try {
+          inbox = await withDocumentBlobWritePreflight(db, {
+            owner: context.owner,
+            content,
+          }, (encodedDocumentBlob) => withImmediateTransaction(db, () => travelExpenseDocumentInboxRepository.createDocument({
+            owner: context.owner,
+            actor: context.owner,
+            source: "weixin",
+            sourceRef,
+            documentKind: "payment_proof",
+            fileName: media.fileName,
+            mediaType: media.mediaType,
+            content,
+            encodedDocumentBlob,
+            status: "review_required",
+            extractedText: recognition?.extractedText ?? null,
+            recognition: { ...recognition, bookkeepingCapture: true },
+            errorCode: recognition?.warnings?.[0] ?? null,
+          })));
+        } catch (error) {
+          if (error?.code !== "DUPLICATE_DOCUMENT") throw error;
+          inbox = error.existingId
+            ? travelExpenseDocumentInboxRepository.getDocument(error.existingId, { owner: context.owner })
+            : null;
+        }
+      }
+      // Persist the complete source batch atomically. Repository write methods
+      // join this outer transaction, so a crash cannot leave row 1 durable
+      // while row 2 is absent. The in-transaction source recheck also closes
+      // the concurrent-first-request window after asynchronous recognition.
+      const capturedResults = withImmediateTransaction(db, () => {
+        if (media && typeof bookkeepingRepository.listBySource === "function") {
+          const concurrentExisting = bookkeepingRepository.listBySource({
+            owner: context.owner,
+            sourceId: sourceRef,
+          });
+          if (concurrentExisting.length > 0) {
+            return concurrentExisting.map((item) => ({ item, replayed: true }));
+          }
+        }
+        const batch = [];
+        for (const { row, rowText, entryType, analysis } of analyzedRows) {
+          const rowOrdinal = row.index + 1;
+          const idempotencySource = media
+            ? `${sourceRef}:row:${rowOrdinal}`
+            : analyzedRows.length > 1
+              ? `${sourceRef}:row:${rowOrdinal}`
+              : sourceRef;
+          const requestHash = createHash("sha256").update(JSON.stringify(media
+            ? { sourceRef, rowOrdinal, media: true }
+            : {
+                sourceRef,
+                rowIndex: row.index,
+                rowText,
+                rawText,
+                entryType,
+              }), "utf8").digest("hex");
+          const received = bookkeepingRepository.receive({
+            owner: context.owner,
+            actor: context.owner,
+            ledgerName: "出差报销",
+            entryType,
+            category: analysis.category,
+            subcategory: analysis.subcategory,
+            note: analysis.note ?? null,
+            idempotencyKey: `weixin-bookkeeping:${idempotencySource}`,
+            requestHash,
+            sourceId: sourceRef,
+            rawText: rowText || rawText || media?.fileName || "微信图片记账",
+            capturedAt: analysis.expense?.paidAt ?? receivedAt.toISOString(),
+          });
+          if (received.replayed) {
+            batch.push({ item: received.item, replayed: true });
+            continue;
+          }
+          const claimed = bookkeepingRepository.claim(received.item.id);
+          const completed = bookkeepingRepository.completeLocal(received.item.id, {
+            analysis,
+            leaseToken: claimed.leaseToken,
+          });
+          batch.push({ item: completed.item, replayed: false });
+        }
+        return batch;
+      });
+      const results = capturedResults.map((result) => ({
+        ...result,
+        pending: result.item.status === "review_required"
+          ? bookkeepingRuntime.startReview({ account: context.owner, entry: result.item })
+          : null,
+      }));
+      const pendingCount = results.filter((result) => result.pending).length;
+      const replayed = results.every((result) => result.replayed);
+      const countText = results.length > 1 ? `，共识别 ${results.length} 笔` : "";
+      return {
+        text: replayed
+          ? `这张付款凭证已经收到${countText}，已保留原来的记账状态。`
+          : `已收到付款凭证${countText}，正在逐笔发送待确认记账信息。请分别引用小小的消息回复。`,
+        status: pendingCount > 0 ? "review_required" : "duplicate",
+        item: results[0]?.item ?? null,
+        items: results.map((result) => result.item),
+        pending: results[0]?.pending ?? null,
+        pendingItems: results.map((result) => result.pending).filter(Boolean),
+        ...(inbox ? { documentInboxId: inbox.id } : {}),
+      };
+    },
+
     async "dashboard.summary"(_args, context) {
-      const summary = snapshotAdapter.dashboardSummary({ owner: context.owner });
+      const result = await dashboardAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "daily_overview",
+      });
+      const summary = {
+        asOf: result.asOf,
+        weekStart: result.weekStart,
+        counts: result.counts,
+      };
       const counts = summary.counts;
       return {
-        text: [
-          `战情总览（截至 ${summary.asOf}）：`,
-          `客户 ${counts.customers}，商机 ${counts.opportunities}`,
-          `未完成动作 ${counts.openActions}，活跃风险 ${counts.activeRisks}`,
-          `待执行行程 ${counts.upcomingItineraries}，本周差旅 ${counts.currentWeekExpenses} 笔`,
-        ].join("\n"),
+        text: weixinCard("战情总览", [
+          ["截至", summary.asOf],
+          ["客户", counts.customers],
+          ["商机", counts.opportunities],
+          ["待办", counts.openActions],
+          ["风险", counts.activeRisks],
+          ["行程", counts.upcomingItineraries],
+          ["本周差旅", `${counts.currentWeekExpenses} 笔`],
+        ]),
         status: "ok",
         summary,
+        dashboardResult: result,
+        runId: result.runId,
       };
     },
 
     async "customer.detail"(args, context) {
-      let customer = snapshotAdapter.customerDetail({ owner: context.owner, customerId: args.customerId });
-      if (!customer) {
-        const matches = snapshotAdapter.customerSearch({ owner: context.owner, query: args.customerId }).items;
-        if (matches.length > 1) return ambiguousEntityResult("客户", matches);
-        customer = matches[0] ?? null;
-      }
-      if (!customer) return { text: "未找到该客户，或当前账号无权查看。", status: "not_found" };
+      const result = await customerAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "detail",
+        customerId: args.customerId,
+        query: args.customerId,
+      });
+      if (result.status === "clarify") return {
+        ...ambiguousEntityResult("客户", result.matches),
+        customerResult: result,
+        runId: result.runId,
+      };
+      if (result.status === "not_found" || !result.customer) return {
+        text: "未找到该客户，或当前账号无权查看。",
+        status: "not_found",
+        customerResult: result,
+        runId: result.runId,
+      };
+      const customer = result.customer;
+      const opportunityCount = countActiveOpportunities(db, customer.id);
       return {
-        text: [
-          `客户：${customer.name ?? "名称待确认"}`,
-          `区域：${customer.region ?? "待确认"}`,
-          `类型：${customer.type ?? "待确认"}`,
-          `级别：${customer.level ?? "待确认"}`,
-        ].join("\n"),
+        text: weixinCard("客户画像", [
+          ["名称", customer.name],
+          ["区域", customer.region || "待补充"],
+          ["类型", customer.type || "待补充"],
+          ["级别", customer.level || "待补充"],
+          ["联系人", customer.contact || "待补充"],
+          ["预算", customer.budget || "待补充"],
+          ["别名", weixinValue(customer.aliases, "无")],
+          ["标签", weixinValue(customer.tags, "无")],
+          ...(customer.summary ? [["摘要", weixinClip(customer.summary, 80)]] : []),
+          ["在办商机", opportunityCount],
+        ]),
         status: "ok",
         customer,
+        customerResult: result,
+        runId: result.runId,
+        contextUpdate: {
+          customerId: customer.id,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: customer.id }],
+        },
+      };
+    },
+
+    async "customer.create"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未创建客户档案。", status: "denied" };
+      }
+      const customerId = safeText(context.actionId) || randomUUID();
+      const existing = getActiveCustomer(db, customerId);
+      if (existing) {
+        return {
+          text: weixinCard("客户已建档", [
+            ["名称", existing.name],
+            ["编号", weixinShortId(existing.id)],
+          ]),
+          status: "created",
+          customer: existing,
+          replayed: true,
+          contextUpdate: {
+            customerId: existing.id,
+            opportunityId: null,
+            source: "verified_entity",
+            sourceRefs: [{ type: "customer", id: existing.id }],
+          },
+        };
+      }
+      const created = withImmediateTransaction(db, () => {
+        const item = createCustomer(db, {
+          name: safeText(args.name),
+          region: safeText(args.region) || null,
+          type: safeText(args.type) || null,
+          level: safeText(args.level) || null,
+          contact: safeText(args.contact) || null,
+          budget: safeText(args.budget) || null,
+          summary: safeText(args.summary) || null,
+          aliases: Array.isArray(args.aliases) ? args.aliases : [],
+          tags: Array.isArray(args.tags) ? args.tags : [],
+          owner: businessOwner,
+        }, { id: customerId });
+        insertAudit(db, {
+          action: "customer.create",
+          entityType: "customer",
+          entityId: item.id,
+          actor: context.owner,
+          requestId: context.requestId,
+          before: null,
+          after: item,
+          entityVersion: item.version,
+          metadata: {
+            name: item.name,
+            region: item.region,
+            level: item.level,
+            source: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+        return item;
+      });
+      return {
+        text: weixinCard("客户已建档", [
+          ["名称", created.name],
+          ["区域", created.region || "待补充"],
+          ["类型", created.type || "待补充"],
+          ["级别", created.level || "待补充"],
+        ]),
+        status: "created",
+        customer: created,
+        contextUpdate: {
+          customerId: created.id,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: created.id }],
+        },
+      };
+    },
+
+    async "customer.update"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改客户档案。", status: "denied" };
+      }
+      const customerId = safeText(args.customerId);
+      const expectedVersion = Number(args.expectedVersion);
+      const changes = args.changes && typeof args.changes === "object" && !Array.isArray(args.changes)
+        ? args.changes
+        : null;
+      if (!customerId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !changes || Object.keys(changes).length === 0) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const before = getActiveCustomer(db, customerId);
+      if (!before || before.owner !== businessOwner) {
+        return { text: "客户不存在或已删除，未修改任何资料。", status: "not_found" };
+      }
+      let updated;
+      try {
+        updated = withImmediateTransaction(db, () => {
+          const item = updateCustomer(db, customerId, changes, expectedVersion, { owner: businessOwner });
+          if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          insertAudit(db, {
+            action: "customer.update",
+            entityType: "customer",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              changedFields: Object.keys(changes),
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "客户资料刚在其他端被修改，本次未写入。请重新发送修改指令查看最新资料。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "客户不存在或已删除，未修改任何资料。", status: "not_found" };
+        }
+        throw error;
+      }
+      const fieldLabels = {
+        name: "名称", region: "区域", type: "类型", level: "级别",
+        contact: "联系人", budget: "预算", summary: "摘要", aliases: "别名", tags: "标签",
+      };
+      const changeLines = Object.keys(changes)
+        .map((key) => [fieldLabels[key] ?? key, `${weixinValue(before[key], "空")} → ${weixinValue(updated[key], "空")}`]);
+      return {
+        text: weixinCard("客户已更新", [
+          ["名称", updated.name],
+          ...changeLines,
+        ]),
+        status: "updated",
+        customer: updated,
+        contextUpdate: {
+          customerId: updated.id,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: updated.id }],
+        },
+      };
+    },
+
+    async "customer.delete"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未删除客户档案。", status: "denied" };
+      }
+      const customerId = safeText(args.customerId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!customerId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "删除请求不完整，请重新发送删除指令。", status: "error" };
+      }
+      const before = getActiveCustomer(db, customerId);
+      if (!before || before.owner !== businessOwner) {
+        return { text: "客户不存在或已删除，未执行任何操作。", status: "not_found" };
+      }
+      let deleted;
+      try {
+        deleted = softDeleteCustomer(db, {
+          id: customerId,
+          expectedVersion,
+          deletedBy: context.owner,
+          requestId: context.requestId,
+          owner: businessOwner,
+          metadata: {
+            source: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "客户资料刚在其他端被修改，本次未删除。请重新发送删除指令查看最新资料。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "客户不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("客户已归档", [["名称", deleted.name]]),
+        status: "deleted",
+        customer: deleted,
+        contextUpdate: {
+          customerId: null,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "customer", id: deleted.id }],
+        },
       };
     },
 
     async "opportunity.detail"(args, context) {
-      let opportunity = snapshotAdapter.opportunityDetail({
+      const result = await opportunityAdapter.analyze({
         owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "detail",
         opportunityId: args.opportunityId,
+        query: args.opportunityId,
       });
-      if (!opportunity) {
-        const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: args.opportunityId }).items;
-        if (matches.length > 1) return ambiguousEntityResult("商机", matches);
-        opportunity = matches[0] ?? null;
-      }
-      if (!opportunity) return { text: "未找到该商机，或当前账号无权查看。", status: "not_found" };
+      if (result.status === "clarify") return {
+        ...ambiguousOpportunityResult(result.matches),
+        opportunityResult: result,
+        runId: result.runId,
+      };
+      if (result.status === "review_required" && !result.opportunity) return {
+        text: "商机与关联客户无法核验，请先在系统中确认关系。",
+        status: "review_required",
+        opportunityResult: result,
+        runId: result.runId,
+      };
+      if (result.status === "not_found" || !result.opportunity) return {
+        text: "未找到该商机，或当前账号无权查看。",
+        status: "not_found",
+        opportunityResult: result,
+        runId: result.runId,
+      };
+      const opportunity = result.opportunity;
       return {
-        text: [
-          `商机：${opportunity.name ?? "名称待确认"}`,
-          `阶段：${opportunity.stage ?? "待确认"}`,
-          `金额：${opportunity.amount ?? "待确认"}`,
-          `成交概率：${opportunity.probability === null ? "待确认" : `${opportunity.probability}%`}`,
-          `下一步：${opportunity.next ?? "待补充"}`,
-        ].join("\n"),
+        text: weixinCard("商机", [
+          ["名称", opportunity.name],
+          ["编号", weixinShortId(opportunity.id)],
+          ["客户", opportunity.customer || "待确认"],
+          ["阶段", opportunity.stage || "待确认"],
+          ["金额", opportunity.amount || "待确认"],
+          ["成交概率", opportunity.probability === null ? "待确认" : `${opportunity.probability}%`],
+          ["下一步", opportunity.next || "待补充"],
+          ...(opportunity.risk ? [["风险", weixinClip(opportunity.risk, 80)]] : []),
+          ...(opportunity.updatedAt ? [["更新", opportunity.updatedAt]] : []),
+        ]),
         status: "ok",
         opportunity,
+        opportunityResult: result,
+        runId: result.runId,
+        contextUpdate: {
+          customerId: opportunity.customerId ?? null,
+          opportunityId: opportunity.id,
+          source: "verified_entity",
+          sourceRefs: [
+            ...(opportunity.customerId ? [{ type: "customer", id: opportunity.customerId }] : []),
+            { type: "opportunity", id: opportunity.id },
+          ],
+        },
+      };
+    },
+
+    async "opportunity.list"(args, context, serverData) {
+      if (serverData?.auditMetadata?.chatType !== "direct") {
+        return { text: "商机列表仅支持与小小的私聊。", status: "denied" };
+      }
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，无法查询商机。", status: "denied" };
+      }
+      const query = safeText(args.query).slice(0, 200);
+      let items;
+      let truncated = false;
+      if (query) {
+        const result = opportunityAdapter.search(context.owner, query);
+        items = result.matches.slice(0, 8);
+        truncated = result.truncated || result.matches.length > 8;
+      } else {
+        const result = listOwnerOpportunities(db, { owner: businessOwner, limit: 8 });
+        items = result.items;
+        truncated = result.truncated;
+      }
+      if (items.length === 0) {
+        return {
+          text: query
+            ? `没有找到与「${query}」相关的商机。可发送「商机列表」查看全部，或发送「新建商机 ${query}，客户 …」建档。`
+            : "当前没有可见的商机。可发送「新建商机 名称，客户 …」建档。",
+          status: "not_found",
+        };
+      }
+      const single = items.length === 1 ? items[0] : null;
+      return {
+        text: weixinCard(query ? `${query} 的商机` : "商机列表", [
+          ["数量", `${items.length}${truncated ? "+" : ""} 个`],
+          ...items.map((item, index) => [
+            `${index + 1}`,
+            `${item.name ?? "名称待确认"} ${weixinShortId(item.id)} ｜ ${item.stage ?? "阶段待确认"} ｜ ${item.amount ?? "金额待确认"}`,
+          ]),
+          ...(truncated ? [["提示", "仅显示前 8 个，请用更具体名称缩小范围"]] : []),
+        ], "发送「商机详情 加名称」可查看完整信息。"),
+        status: "ok",
+        items,
+        truncated,
+        ...(single
+          ? {
+            contextUpdate: {
+              customerId: single.customerId ?? null,
+              opportunityId: single.id,
+              source: "verified_entity",
+              sourceRefs: [
+                ...(single.customerId ? [{ type: "customer", id: single.customerId }] : []),
+                { type: "opportunity", id: single.id },
+              ],
+            },
+          }
+          : {}),
+      };
+    },
+
+    async "opportunity.update-stage"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改商机。", status: "denied" };
+      }
+      const opportunityId = safeText(args.opportunityId);
+      const expectedVersion = Number(args.expectedVersion);
+      const stage = safeText(args.stage);
+      if (!opportunityId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !stage) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      // Visibility recheck through the owner-scoped snapshot closes the
+      // preview→confirm window (the provider pinned the id and version).
+      const visible = snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId });
+      if (!visible) {
+        return { text: "商机不存在或已删除，未修改任何资料。", status: "not_found" };
+      }
+      let updated;
+      let beforeStage = null;
+      let stageReview = "skipped_unknown_stage";
+      try {
+        updated = withImmediateTransaction(db, () => {
+          const before = getActiveOpportunity(db, opportunityId);
+          if (!before) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          beforeStage = before.stage ?? null;
+          const direction = stageDirection(before.stage, stage);
+          // The audit row commits atomically with the write, so it records the
+          // review decision (triggered/skipped_*); the attached/timeout/failed
+          // outcome of the post-commit race lands in the tool-run output and
+          // the receipt text instead.
+          stageReview = direction === "forward"
+            ? (stage === "暂停观察" ? "skipped_pause" : "triggered")
+            : direction === "backward"
+              ? "skipped_backward"
+              : direction === "same"
+                ? "skipped_same"
+                : "skipped_unknown_stage";
+          const item = updateOpportunity(db, opportunityId, { stage }, expectedVersion, { owner: businessOwner });
+          if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          insertAudit(db, {
+            action: "opportunity.update",
+            entityType: "opportunity",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              changedFields: ["stage"],
+              stage: item.stage,
+              probability: item.probability,
+              source: "weixin-assistant",
+              stageReview,
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "商机资料刚在其他端被修改，本次未写入，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "商机不存在或已删除，未修改任何资料。", status: "not_found" };
+        }
+        throw error;
+      }
+      // Stage-review linkage runs strictly after the committed write; an
+      // analysis failure or timeout never rolls back the business change.
+      let stageReviewOutcome = stageReview;
+      let reviewBlock = null;
+      if (stageReview === "triggered") {
+        if (salesLoopPreviewService && typeof salesLoopPreviewService.previewSalesDecision === "function") {
+          const budgetMs = Number.isSafeInteger(config?.opportunityStageReviewBudgetMs)
+            ? config.opportunityStageReviewBudgetMs
+            : 8_000;
+          try {
+            const review = await Promise.race([
+              salesLoopPreviewService.previewSalesDecision({
+                owner: context.owner,
+                channel: context.channel,
+                conversationId: context.conversation,
+                eventId: `assistant-action:${context.actionId ?? context.event}:stage-review`,
+                opportunityId,
+                analysisType: "opportunity_diagnosis",
+              }),
+              stageReviewBudgetSleep(budgetMs),
+            ]);
+            if (review === STAGE_REVIEW_TIMEOUT) {
+              stageReviewOutcome = "timeout";
+            } else if (review?.status === "preview") {
+              stageReviewOutcome = "attached";
+              reviewBlock = stageReviewSummaryText(review, updated.name);
+            } else {
+              stageReviewOutcome = "failed";
+            }
+          } catch {
+            stageReviewOutcome = "failed";
+          }
+        } else {
+          stageReviewOutcome = "failed";
+        }
+      }
+      const manualHint = `如需分析可发送「项目分析 ${updated.name}」。`;
+      const footer = stageReviewOutcome === "attached"
+        ? null
+        : stageReviewOutcome === "timeout" || stageReviewOutcome === "failed"
+          ? `决策分析未在时限内完成，发送「项目分析 ${updated.name}」可查看完整分析。`
+          : manualHint;
+      const card = weixinCard("商机阶段已更新", [
+        ["名称", updated.name],
+        ["客户", updated.customer || "待确认"],
+        ["阶段", `${beforeStage ?? "（空）"} → ${updated.stage}`],
+      ], footer);
+      return {
+        text: reviewBlock ? `${card}\n\n${reviewBlock}` : card,
+        status: "updated",
+        opportunity: updated,
+        stageReview: stageReviewOutcome,
+        contextUpdate: {
+          customerId: updated.customerId ?? null,
+          opportunityId: updated.id,
+          source: "verified_entity",
+          sourceRefs: [
+            ...(updated.customerId ? [{ type: "customer", id: updated.customerId }] : []),
+            { type: "opportunity", id: updated.id },
+          ],
+        },
+      };
+    },
+
+    async "opportunity.update-next"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改商机。", status: "denied" };
+      }
+      const opportunityId = safeText(args.opportunityId);
+      const expectedVersion = Number(args.expectedVersion);
+      const next = safeText(args.next);
+      if (!opportunityId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !next) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const visible = snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId });
+      if (!visible) {
+        return { text: "商机不存在或已删除，未修改任何资料。", status: "not_found" };
+      }
+      let updated;
+      let beforeNext = null;
+      try {
+        updated = withImmediateTransaction(db, () => {
+          const before = getActiveOpportunity(db, opportunityId);
+          if (!before) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          beforeNext = before.next ?? null;
+          const item = updateOpportunity(db, opportunityId, { next }, expectedVersion, { owner: businessOwner });
+          if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          insertAudit(db, {
+            action: "opportunity.update",
+            entityType: "opportunity",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              changedFields: ["next"],
+              stage: item.stage,
+              probability: item.probability,
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "商机资料刚在其他端被修改，本次未写入，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "商机不存在或已删除，未修改任何资料。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("商机下一步已更新", [
+          ["名称", updated.name],
+          ["下一步", `${weixinClip(beforeNext, 60, "（空）")} → ${weixinClip(updated.next, 60)}`],
+        ]),
+        status: "updated",
+        opportunity: updated,
+        contextUpdate: {
+          customerId: updated.customerId ?? null,
+          opportunityId: updated.id,
+          source: "verified_entity",
+          sourceRefs: [
+            ...(updated.customerId ? [{ type: "customer", id: updated.customerId }] : []),
+            { type: "opportunity", id: updated.id },
+          ],
+        },
+      };
+    },
+
+    async "opportunity.update"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改商机。", status: "denied" };
+      }
+      const opportunityId = safeText(args.opportunityId);
+      const expectedVersion = Number(args.expectedVersion);
+      const rawChanges = args.changes && typeof args.changes === "object" && !Array.isArray(args.changes)
+        ? args.changes
+        : null;
+      const changes = {};
+      for (const key of ["amount", "name", "risk"]) {
+        const value = rawChanges ? safeText(rawChanges[key]) : "";
+        if (value) changes[key] = value;
+      }
+      if (!opportunityId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || Object.keys(changes).length === 0) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const visible = snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId });
+      if (!visible) {
+        return { text: "商机不存在或已删除，未修改任何资料。", status: "not_found" };
+      }
+      let updated;
+      let before;
+      try {
+        updated = withImmediateTransaction(db, () => {
+          before = getActiveOpportunity(db, opportunityId);
+          if (!before) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          const item = updateOpportunity(db, opportunityId, changes, expectedVersion, { owner: businessOwner });
+          if (!item) throw new HttpError(404, "NOT_FOUND", "Requested resource was not found");
+          insertAudit(db, {
+            action: "opportunity.update",
+            entityType: "opportunity",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              changedFields: Object.keys(changes),
+              stage: item.stage,
+              probability: item.probability,
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "商机资料刚在其他端被修改，本次未写入，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "商机不存在或已删除，未修改任何资料。", status: "not_found" };
+        }
+        throw error;
+      }
+      const fieldLabels = { amount: "金额", name: "名称", risk: "风险" };
+      return {
+        text: weixinCard("商机已更新", [
+          ["名称", updated.name],
+          ...Object.keys(changes).map((key) => [
+            fieldLabels[key] ?? key,
+            `${weixinClip(before[key], 60, "（空）")} → ${weixinClip(updated[key], 60)}`,
+          ]),
+        ]),
+        status: "updated",
+        opportunity: updated,
+        contextUpdate: {
+          customerId: updated.customerId ?? null,
+          opportunityId: updated.id,
+          source: "verified_entity",
+          sourceRefs: [
+            ...(updated.customerId ? [{ type: "customer", id: updated.customerId }] : []),
+            { type: "opportunity", id: updated.id },
+          ],
+        },
+      };
+    },
+
+    async "opportunity.create"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未创建商机。", status: "denied" };
+      }
+      const name = safeText(args.name);
+      const customerId = safeText(args.customerId);
+      if (!name || !customerId) {
+        return { text: "创建请求不完整，请重新发送新建指令。", status: "error" };
+      }
+      const opportunityId = safeText(context.actionId) || randomUUID();
+      const receiptOf = (item) => weixinCard("商机已建档", [
+        ["名称", item.name],
+        ["编号", weixinShortId(item.id)],
+        ["客户", item.customer || "待确认"],
+        ["阶段", item.stage || "待补充"],
+        ["金额", item.amount || "待补充"],
+      ], `发送「商机详情 ${item.name}」可查看。`);
+      const contextOf = (item) => ({
+        customerId: item.customerId ?? null,
+        opportunityId: item.id,
+        source: "verified_entity",
+        sourceRefs: [
+          ...(item.customerId ? [{ type: "customer", id: item.customerId }] : []),
+          { type: "opportunity", id: item.id },
+        ],
+      });
+      const existing = getActiveOpportunity(db, opportunityId);
+      if (existing) {
+        return {
+          text: receiptOf(existing),
+          status: "created",
+          opportunity: existing,
+          replayed: true,
+          contextUpdate: contextOf(existing),
+        };
+      }
+      // Customer visibility recheck through the owner-scoped snapshot (the
+      // provider verified it at preview time; this closes the confirm window).
+      const customer = snapshotAdapter.customerDetail({ owner: context.owner, customerId });
+      if (!customer) {
+        return { text: "客户不存在或已删除，未创建商机。", status: "not_found" };
+      }
+      let created;
+      try {
+        created = withImmediateTransaction(db, () => {
+          const item = createOpportunity(db, {
+            customerId,
+            name,
+            customer: customer.name,
+            stage: safeText(args.stage) || null,
+            amount: safeText(args.amount) || null,
+            next: safeText(args.next) || null,
+            owner: businessOwner,
+          }, { id: opportunityId });
+          insertAudit(db, {
+            action: "opportunity.create",
+            entityType: "opportunity",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: null,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              name: item.name,
+              customerId: item.customerId,
+              stage: item.stage,
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.message?.includes("UNIQUE")) {
+          const replayed = getActiveOpportunity(db, opportunityId);
+          if (replayed) {
+            return {
+              text: receiptOf(replayed),
+              status: "created",
+              opportunity: replayed,
+              replayed: true,
+              contextUpdate: contextOf(replayed),
+            };
+          }
+        }
+        throw error;
+      }
+      return {
+        text: receiptOf(created),
+        status: "created",
+        opportunity: created,
+        contextUpdate: contextOf(created),
+      };
+    },
+
+    async "opportunity.delete"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未删除商机。", status: "denied" };
+      }
+      const opportunityId = safeText(args.opportunityId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!opportunityId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "删除请求不完整，请重新发送删除指令。", status: "error" };
+      }
+      const visible = snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId });
+      if (!visible) {
+        return { text: "商机不存在或已删除，未执行任何操作。", status: "not_found" };
+      }
+      let deleted;
+      try {
+        deleted = softDeleteOpportunity(db, {
+          id: opportunityId,
+          expectedVersion,
+          deletedBy: context.owner,
+          requestId: context.requestId,
+          metadata: {
+            source: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "商机资料刚在其他端被修改，本次未删除，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "商机不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("商机已删除（归档）", [
+          ["名称", deleted.name],
+          ["客户", deleted.customer || "待确认"],
+          ["说明", "关联行动/风险/记录的商机挂接已隐藏；如需恢复请联系管理员"],
+        ]),
+        status: "deleted",
+        opportunity: deleted,
+        contextUpdate: {
+          customerId: visible.customerId ?? null,
+          opportunityId: null,
+          source: "verified_entity",
+          sourceRefs: [{ type: "opportunity", id: deleted.id }],
+        },
       };
     },
 
     async "sales-decision.preview"(args, context) {
+      if (salesLoopPreviewService) {
+        let opportunityId = safeText(args.opportunityId);
+        if (opportunityId && !snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId })) {
+          const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: opportunityId }).items;
+          if (matches.length > 1) return ambiguousOpportunityResult(matches);
+          opportunityId = matches[0]?.id ?? opportunityId;
+        }
+        const result = await salesLoopPreviewService.previewSalesDecision({
+          owner: context.owner,
+          channel: context.channel,
+          conversationId: context.conversation,
+          eventId: context.event,
+          ...(opportunityId ? { opportunityId } : {}),
+        });
+        if (result.status !== "preview") {
+          return { ...result, text: salesLoopStatusText(result, "请先指定一个客户或商机。") };
+        }
+        return {
+          text: salesDecisionPreviewText(result),
+          status: "preview",
+          analysis: result.analysis,
+          salesDecision: result,
+          sourceRefs: result.sourceRefs,
+          contextUpdate: {
+            customerId: result.context?.customerId ?? null,
+            opportunityId: result.context?.opportunityId ?? null,
+            source: "analysis",
+            sourceRefs: result.sourceRefs,
+          },
+        };
+      }
       let opportunityId = args.opportunityId;
       if (!snapshotAdapter.opportunityDetail({ owner: context.owner, opportunityId })) {
         const matches = snapshotAdapter.opportunitySearch({ owner: context.owner, query: opportunityId }).items;
-        if (matches.length > 1) return ambiguousEntityResult("商机", matches);
+        if (matches.length > 1) return ambiguousOpportunityResult(matches);
         opportunityId = matches[0]?.id ?? opportunityId;
       }
       const analysis = snapshotAdapter.projectAnalysis({
@@ -314,11 +1751,20 @@ export function createAssistantToolHandlers({
     },
 
     async "action-risk.summary"(args, context) {
-      const summary = snapshotAdapter.actionRiskSummary({
+      const result = await actionRiskAdapter.analyze({
         owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "summary",
         customerId: args.customerId,
         opportunityId: args.opportunityId,
       });
+      const summary = {
+        actions: result.actions,
+        risks: result.risks,
+        truncated: result.truncated,
+      };
       return {
         text: [
           `动作风险摘要：未完成动作 ${summary.actions.length} 项，活跃风险 ${summary.risks.length} 项。`,
@@ -327,17 +1773,289 @@ export function createAssistantToolHandlers({
         ].join("\n"),
         status: "ok",
         summary,
+        actionRiskResult: result,
+        runId: result.runId,
+      };
+    },
+
+    async "action-risk.create"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未创建待办。", status: "denied" };
+      }
+      const actionItemId = safeText(context.actionId) || randomUUID();
+      const existing = todoStore.getVisible({ owner: businessOwner, id: actionItemId });
+      const receiptOf = (item) => weixinCard("待办已创建", [
+        ["编号", weixinShortId(item.id)],
+        ["内容", item.title],
+        ["提醒", item.remindAt ? reminderDisplayOf(item.remindAt) : "未设置"],
+        ["优先级", item.priority],
+        ...(item.customerName ? [["客户", item.customerName]] : []),
+      ], "发送“本周待办”可随时查看。");
+      if (existing) {
+        return { text: receiptOf(existing), status: "created", actionItem: existing, replayed: true };
+      }
+      let created;
+      try {
+        created = withImmediateTransaction(db, () => {
+          const item = todoStore.create({
+            owner: businessOwner,
+            title: safeText(args.title),
+            due: safeText(args.due) || null,
+            remindAt: safeText(args.remindAt) || null,
+            priority: safeText(args.priority) || "中",
+            customerId: safeText(args.customerId) || null,
+            customerName: safeText(args.customerName) || null,
+            id: actionItemId,
+          });
+          insertAudit(db, {
+            action: "action.create",
+            entityType: "action",
+            entityId: item.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: null,
+            after: item,
+            entityVersion: item.version,
+            metadata: {
+              source: "weixin-assistant",
+              remindAt: item.remindAt,
+              priority: item.priority,
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return item;
+        });
+      } catch (error) {
+        if (error?.message?.includes("UNIQUE")) {
+          const replayed = todoStore.getVisible({ owner: businessOwner, id: actionItemId });
+          if (replayed) return { text: receiptOf(replayed), status: "created", actionItem: replayed, replayed: true };
+        }
+        throw error;
+      }
+      return { text: receiptOf(created), status: "created", actionItem: created };
+    },
+
+    async "action-risk.list"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，无法查询待办。", status: "denied" };
+      }
+      const dateStart = safeText(args.dateStart) || null;
+      const dateEnd = safeText(args.dateEnd) || null;
+      const rangeLabel = safeText(args.rangeLabel) || (dateStart ? `${dateStart} ~ ${dateEnd}` : "全部");
+      const { items, truncated } = todoStore.list({
+        owner: businessOwner,
+        dateStart,
+        dateEnd,
+        limit: 8,
+      });
+      if (items.length === 0) {
+        return {
+          text: weixinCard("待办清单", [
+            ["范围", rangeLabel],
+            ["结果", "没有待办"],
+          ], "发送“提醒我…”可新建待办。"),
+          status: "ok",
+          items: [],
+          truncated: false,
+        };
+      }
+      const lines = items.flatMap((item, index) => [
+        [`${index + 1}`, `${weixinClip(item.title, 30)}`],
+        ["   提醒", item.remindAt ? reminderDisplayOf(item.remindAt) : (item.due ?? "未设置")],
+        ["   编号", weixinShortId(item.id)],
+      ]);
+      return {
+        text: weixinCard("待办清单", [
+          ["范围", `${rangeLabel} · ${items.length}${truncated ? "+" : ""} 条`],
+          ...lines,
+        ], "回复“完成待办 <编号>”或“待办 <编号> 推迟到…”。"),
+        status: "ok",
+        items,
+        truncated,
+      };
+    },
+
+    async "action-risk.complete"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改待办。", status: "denied" };
+      }
+      const actionItemId = safeText(args.actionItemId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!actionItemId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "完成请求不完整，请重新发起。", status: "error" };
+      }
+      let outcome;
+      try {
+        outcome = withImmediateTransaction(db, () => {
+          const result = todoStore.complete({ owner: businessOwner, id: actionItemId, expectedVersion });
+          insertAudit(db, {
+            action: "action.update",
+            entityType: "action",
+            entityId: result.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: { status: result.before.status },
+            after: { status: result.after.status },
+            entityVersion: result.after.version,
+            metadata: {
+              changedFields: ["status"],
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return result;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条待办刚在其他端被修改，本次未写入，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "待办不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("待办已完成", [
+          ["编号", weixinShortId(outcome.after.id)],
+          ["内容", weixinClip(outcome.after.title, 60)],
+        ]),
+        status: "updated",
+        actionItem: outcome.after,
+      };
+    },
+
+    async "action-risk.defer"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改待办。", status: "denied" };
+      }
+      const actionItemId = safeText(args.actionItemId);
+      const expectedVersion = Number(args.expectedVersion);
+      const remindAt = safeText(args.remindAt);
+      if (!actionItemId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !remindAt) {
+        return { text: "推迟请求不完整，请重新发起。", status: "error" };
+      }
+      let outcome;
+      try {
+        outcome = withImmediateTransaction(db, () => {
+          const result = todoStore.defer({
+            owner: businessOwner,
+            id: actionItemId,
+            expectedVersion,
+            remindAt,
+            due: safeText(args.due) || null,
+          });
+          insertAudit(db, {
+            action: "action.update",
+            entityType: "action",
+            entityId: result.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: { remindAt: result.before.remindAt, due: result.before.due },
+            after: { remindAt: result.after.remindAt, due: result.after.due },
+            entityVersion: result.after.version,
+            metadata: {
+              changedFields: ["remind_at", "due"],
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return result;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条待办刚在其他端被修改，本次未写入，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "待办不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("待办已顺延", [
+          ["编号", weixinShortId(outcome.after.id)],
+          ["内容", weixinClip(outcome.after.title, 60)],
+          ["提醒", outcome.after.remindAt ? reminderDisplayOf(outcome.after.remindAt) : "未设置"],
+        ]),
+        status: "updated",
+        actionItem: outcome.after,
+      };
+    },
+
+    async "action-risk.delete"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未删除待办。", status: "denied" };
+      }
+      const actionItemId = safeText(args.actionItemId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!actionItemId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "删除请求不完整，请重新发起。", status: "error" };
+      }
+      let outcome;
+      try {
+        outcome = withImmediateTransaction(db, () => {
+          const result = todoStore.softDelete({
+            owner: businessOwner,
+            id: actionItemId,
+            expectedVersion,
+            deletedBy: context.owner,
+          });
+          insertAudit(db, {
+            action: "action.delete",
+            entityType: "action",
+            entityId: result.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: { title: result.before.title, status: result.before.status },
+            after: { deletedAt: result.after.deletedAt, deletedBy: result.after.deletedBy },
+            entityVersion: result.after.version,
+            metadata: {
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return result;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条待办刚在其他端被修改，本次未删除，请重新发起。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "待办不存在或已删除，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("待办已删除", [
+          ["编号", weixinShortId(outcome.after.id)],
+          ["内容", weixinClip(outcome.before.title, 60)],
+        ]),
+        status: "deleted",
+        actionItem: outcome.after,
       };
     },
 
     async "itinerary.summary"(_args, context) {
-      const summary = snapshotAdapter.itinerarySummary({ owner: context.owner });
+      const result = await itineraryAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "summary",
+      });
+      const summary = { items: result.items, truncated: result.truncated };
       return {
         text: summary.items.length
           ? [`行程摘要：共 ${summary.items.length} 条。`, ...summary.items.slice(0, 5).map((item) => `- ${item.visitDate} ${item.title ?? "未命名行程"}（${item.status}）`)].join("\n")
           : "当前没有可见行程。",
         status: "ok",
         summary,
+        itineraryResult: result,
+        runId: result.runId,
       };
     },
 
@@ -353,14 +2071,55 @@ export function createAssistantToolHandlers({
       };
     },
 
-    async "knowledge.search"(args) {
-      const result = snapshotAdapter.knowledgeSearch({ query: args.query });
+    // Tender monitoring is a global domain (design ruling D1): the handler
+    // reads the same repository.summary() as GET /api/hospital-tenders/summary
+    // and applies no owner filter, matching the web endpoint.
+    async "hospital-tender.summary"() {
+      if (!hospitalTenderRepository || typeof hospitalTenderRepository.summary !== "function") {
+        return { text: "招标监测尚未完成配置，请稍后再试。", status: "error" };
+      }
+      const summary = hospitalTenderRepository.summary();
+      const shanghaiMinute = (value) => {
+        const parsed = Date.parse(String(value ?? ""));
+        if (!Number.isFinite(parsed)) return null;
+        return new Date(parsed + 8 * 60 * 60 * 1000).toISOString().slice(0, 16).replace("T", " ");
+      };
+      const latestRun = summary.latestRun
+        ? `${shanghaiMinute(summary.latestRun.finishedAt ?? summary.latestRun.startedAt) ?? "待确认"}（${weixinValue(summary.latestRun.status)}）`
+        : "待首轮采集";
+      return {
+        text: weixinCard("医院招标监测", [
+          ["截至", shanghaiMinute(summary.asOf) ?? "待确认"],
+          ["公告总数", String(summary.totalNotices)],
+          ["今日新增", String(summary.todayNewCount)],
+          ["高相关", String(summary.highRelevanceCount)],
+          ["已匹配客户", String(summary.matchedNotices)],
+          ["截止临近", String(summary.deadlineSoonCount)],
+          ["最新发布", summary.latestPublishedAt ?? "待确认"],
+          ["最近采集", latestRun],
+        ], "高相关新公告会自动推送；详情见工作台「招标监测」页。"),
+        status: "ok",
+        summary,
+      };
+    },
+
+    async "knowledge.search"(args, context) {
+      const result = await knowledgeAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "search",
+        query: args.query,
+      });
       return {
         text: result.items.length
           ? [`知识检索结果：${result.items.length} 条。`, ...result.items.map((item) => `- ${item.title}：${item.summary ?? "暂无摘要"}（来源：${item.source ?? "待确认"}）`)].join("\n")
           : `未找到相关知识：${safeText(args.query)}`,
         status: "ok",
         items: result.items,
+        knowledgeResult: result,
+        runId: result.runId,
       };
     },
 
@@ -375,8 +2134,20 @@ export function createAssistantToolHandlers({
     async "visit-capture.preview"(_args, context) {
       const content = draftText(sessionRepository, context);
       if (!content) return { text: "当前没有暂存内容，请先发送拜访、电话或会议内容。", status: "empty" };
-      const analysis = await analyzeQuickRecord(content, config, { fetchImpl });
-      return { text: previewText(analysis), status: "preview", analysis };
+      const analysis = await visitCaptureAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "preview",
+        rawContent: content,
+        sourceChannel: "微信助手",
+        // The session primary key is an internal implementation detail; it is
+        // deliberately not exposed as an evidence/source reference.
+        draftId: null,
+        businessContext: context.businessContext,
+      });
+      return { text: previewText(analysis), status: analysis.status, analysis, runId: analysis.runId };
     },
 
     async "visit-capture.confirm"(_args, context) {
@@ -400,7 +2171,7 @@ export function createAssistantToolHandlers({
             // Recovery remains idempotent even if draft cleanup is retried later.
           }
           return {
-            text: `已录入系统，记录 ID：${existing.id}\nAI 分析已保存，可在系统内人工确认客户、商机和行动。`,
+            text: weixinCard("拜访记录已录入", [["编号", weixinShortId(existing.id)]]),
             status: "recorded",
             record: existing,
             insight,
@@ -411,22 +2182,34 @@ export function createAssistantToolHandlers({
       if (!content) return { text: "当前没有待录入内容，请先发送记录内容。", status: "empty" };
       const now = clock();
       const occurredAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
-      const analysis = await analyzeQuickRecord(content, config, { fetchImpl });
+      const reusableRun = reusableVisitRun(agentRunRepository, context, content);
+      const analysis = await visitCaptureAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.actionId ? `assistant-action:${context.actionId}` : context.event,
+        taskType: "capture",
+        rawContent: content,
+        sourceChannel: "微信助手",
+        draftId: null,
+        businessContext: context.businessContext,
+        reusableRun,
+      });
       const links = resolveQuickRecordLinks(snapshotAdapter, context.owner, analysis);
       const persisted = withImmediateTransaction(db, () => {
         const recordId = actionId || randomUUID();
+        // 0031 触发器要求 owner 随 INSERT 落定（NULL 即 ABORT），不再事后回填。
         db.prepare(`
-          INSERT INTO quick_records (id, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
-          VALUES ($id, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
+          INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
+          VALUES ($id, $owner, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
         `).run({
           $id: recordId,
+          $owner: context.owner,
           $rawContent: content,
           $occurredAt: occurredAt,
           $customerId: links.customerId,
           $opportunityId: links.opportunityId,
         });
-        db.prepare("UPDATE quick_records SET owner = $owner WHERE id = $id")
-          .run({ $id: recordId, $owner: context.owner });
         const created = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: recordId }));
         insertAudit(db, {
           action: "quick_record.create",
@@ -480,28 +2263,419 @@ export function createAssistantToolHandlers({
         // A completed business record remains valid even if draft cleanup is retried later.
       }
       return {
-        text: `已录入系统，记录 ID：${persisted.record.id}\nAI 分析已保存，可在系统内人工确认客户、商机和行动。`,
+        text: weixinCard("拜访记录已录入", [["编号", weixinShortId(persisted.record.id)]]),
         status: "recorded",
         record: persisted.record,
         insight: persisted.insight,
       };
     },
 
+    async "visit-capture.capture"(args, context) {
+      const actionId = safeText(context.actionId);
+      const recordId = actionId || randomUUID();
+      const existingRow = db.prepare(
+        "SELECT * FROM quick_records WHERE id = $id AND owner = $owner",
+      ).get({ $id: recordId, $owner: context.owner });
+      if (existingRow) {
+        const existing = quickRecordFromRow(existingRow);
+        const insight = insightFromRow(db.prepare(`
+          SELECT * FROM ai_insights
+          WHERE quick_record_id = $quickRecordId
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1
+        `).get({ $quickRecordId: existing.id }));
+        return {
+          text: quickCaptureReceipt(existing, insight, db),
+          status: "recorded",
+          record: existing,
+          insight,
+          replayed: true,
+        };
+      }
+      const content = safeText(args.rawContent);
+      if (!content) return { text: "请把拜访、电话或会议内容跟在“记一下：”后面一起发我。", status: "empty" };
+      const now = clock();
+      const requestedOccurredAt = safeText(args.occurredAt);
+      const occurredAt = requestedOccurredAt && Number.isFinite(Date.parse(requestedOccurredAt))
+        ? new Date(requestedOccurredAt).toISOString()
+        : (now instanceof Date ? now.toISOString() : new Date(now).toISOString());
+      // The affirm preview provider already produced an agent run for this
+      // conversation and raw content; reuse it so confirmation does not pay a
+      // second model call. A miss falls back to a fresh (fallback-capable)
+      // analysis inside the adapter.
+      const reusableRun = reusableVisitRun(agentRunRepository, context, content);
+      const analysis = await visitCaptureAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.actionId ? `assistant-action:${context.actionId}` : context.event,
+        taskType: "capture",
+        rawContent: content,
+        occurredAt,
+        sourceChannel: "微信助手",
+        draftId: null,
+        businessContext: context.businessContext,
+        reusableRun,
+      });
+      const links = resolveQuickRecordLinks(snapshotAdapter, context.owner, analysis);
+      const persisted = withImmediateTransaction(db, () => {
+        // 0031 触发器要求 owner 随 INSERT 落定（NULL 即 ABORT），不再事后回填。
+        db.prepare(`
+          INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id)
+          VALUES ($id, $owner, $rawContent, $occurredAt, '微信助手', $customerId, $opportunityId)
+        `).run({
+          $id: recordId,
+          $owner: context.owner,
+          $rawContent: content,
+          $occurredAt: occurredAt,
+          $customerId: links.customerId,
+          $opportunityId: links.opportunityId,
+        });
+        const created = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: recordId }));
+        insertAudit(db, {
+          action: "quick_record.create",
+          entityType: "quick_record",
+          entityId: recordId,
+          actor: context.owner,
+          requestId: context.requestId,
+          before: null,
+          after: created,
+          entityVersion: created.version,
+          metadata: {
+            sourceChannel: created.sourceChannel,
+            customerId: created.customerId,
+            opportunityId: created.opportunityId,
+            source: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+        const insightId = randomUUID();
+        db.prepare(`
+          INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
+          VALUES ($id, $quickRecordId, $source, $confidence, $analysisJson)
+        `).run({
+          $id: insightId,
+          $quickRecordId: created.id,
+          $source: analysis?.source ?? "mock",
+          $confidence: analysis?.confidence ?? 70,
+          $analysisJson: JSON.stringify(analysis ?? {}),
+        });
+        db.prepare("UPDATE quick_records SET status = 'analyzed', updated_at = CURRENT_TIMESTAMP WHERE id = $id")
+          .run({ $id: created.id });
+        const updated = quickRecordFromRow(db.prepare("SELECT * FROM quick_records WHERE id = $id").get({ $id: created.id }));
+        insertAudit(db, {
+          action: "quick_record.analyze",
+          entityType: "quick_record",
+          entityId: created.id,
+          actor: context.owner,
+          requestId: context.requestId,
+          before: { status: created.status },
+          after: { status: updated.status },
+          entityVersion: updated.version,
+          metadata: {
+            source: analysis?.source ?? "mock",
+            captureSource: "weixin-assistant",
+            ...(context.actionId ? { actionId: context.actionId } : {}),
+          },
+        });
+        return {
+          record: updated,
+          insight: insightFromRow(db.prepare("SELECT * FROM ai_insights WHERE id = $id").get({ $id: insightId })),
+        };
+      });
+      return {
+        text: quickCaptureReceipt(persisted.record, persisted.insight, db),
+        status: "recorded",
+        record: persisted.record,
+        insight: persisted.insight,
+        ...(persisted.record.customerId
+          ? {
+            contextUpdate: {
+              customerId: persisted.record.customerId,
+              opportunityId: persisted.record.opportunityId ?? null,
+              source: "verified_entity",
+              sourceRefs: [{ type: "quick_record", id: persisted.record.id }],
+            },
+          }
+          : {}),
+      };
+    },
+
+    async "visit-capture.search"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，无法查询记录。", status: "denied" };
+      }
+      const query = safeText(args.query) || null;
+      const dateStart = safeText(args.dateStart) || null;
+      const dateEnd = safeText(args.dateEnd) || null;
+      const { items, truncated } = recordStore.search({
+        owner: businessOwner,
+        query,
+        dateStart,
+        dateEnd,
+        limit: 5,
+      });
+      const rangeLabel = dateStart && dateEnd ? `${dateStart} ~ ${dateEnd}` : "近期";
+      if (items.length === 0) {
+        return {
+          text: weixinCard("拜访记录", [
+            ["范围", rangeLabel],
+            ["结果", query ? `没有与“${query}”相关的记录` : "没有记录"],
+          ]),
+          status: "ok",
+          items: [],
+          truncated: false,
+        };
+      }
+      const statusLabels = { recorded: "待分析", analyzed: "已分析", confirmed: "已确认" };
+      const onlyCustomerId = items.length === 1 ? items[0].customerId : null;
+      const lines = items.flatMap((item, index) => {
+        const date = (item.occurredAt ?? item.createdAt ?? "").slice(5, 10) || "待确认";
+        const customer = item.customerName ?? "未挂客户";
+        return [
+          [`${index + 1}`, `${date}  ${customer}`],
+          ["   编号", weixinShortId(item.id)],
+          ["   状态", statusLabels[item.status] ?? item.status],
+          ["   摘要", weixinClip(item.rawContent, 40)],
+        ];
+      });
+      return {
+        text: weixinCard("拜访记录", [
+          ["范围", `${rangeLabel}${query ? ` · ${query}` : ""}`],
+          ...lines,
+          ...(truncated ? [["提示", "还有更多，请补客户名或缩小时间"]] : []),
+        ]),
+        status: "ok",
+        items,
+        truncated,
+        ...(onlyCustomerId
+          ? {
+            contextUpdate: {
+              customerId: onlyCustomerId,
+              opportunityId: items[0].opportunityId ?? null,
+              source: "verified_entity",
+              sourceRefs: [{ type: "quick_record", id: items[0].id }],
+            },
+          }
+          : {}),
+      };
+    },
+
+    async "visit-capture.update"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未修改记录。", status: "denied" };
+      }
+      const quickRecordId = safeText(args.quickRecordId);
+      const expectedVersion = Number(args.expectedVersion);
+      const changes = args.changes && typeof args.changes === "object" && !Array.isArray(args.changes)
+        ? args.changes
+        : null;
+      if (!quickRecordId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || !changes) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const summaryPatch = changes.summaryPatch && typeof changes.summaryPatch === "object" && !Array.isArray(changes.summaryPatch)
+        ? changes.summaryPatch
+        : null;
+      const fields = changes.fields && typeof changes.fields === "object" && !Array.isArray(changes.fields)
+        ? changes.fields
+        : null;
+      if (!summaryPatch && !fields) {
+        return { text: "修改请求不完整，请重新发送修改指令。", status: "error" };
+      }
+      const changedParts = [];
+      let result = null;
+      try {
+        result = withImmediateTransaction(db, () => {
+          let current = null;
+          if (summaryPatch) {
+            const updated = recordStore.updateInsightSummary({
+              owner: businessOwner,
+              id: quickRecordId,
+              expectedVersion,
+              summaryPatch,
+            });
+            insertAudit(db, {
+              action: "quick_record.analysis.update",
+              entityType: "quick_record",
+              entityId: updated.record.id,
+              actor: context.owner,
+              requestId: context.requestId,
+              before: { quickRecord: updated.beforeRecord, analysis: updated.beforeAnalysis },
+              after: { quickRecord: updated.record, analysis: updated.analysis },
+              entityVersion: updated.record.version,
+              metadata: {
+                insightId: updated.analysis.id,
+                summaryFields: Object.keys(summaryPatch),
+                source: "weixin-assistant",
+                ...(context.actionId ? { actionId: context.actionId } : {}),
+              },
+            });
+            const summaryLabels = { request: "诉求", feedback: "反馈", risk: "风险", action: "建议动作" };
+            changedParts.push(...Object.keys(summaryPatch).map((key) => `${summaryLabels[key] ?? key}已修改`));
+            current = { record: updated.record, analysis: updated.analysis };
+          }
+          if (fields) {
+            const fieldVersion = current ? current.record.version : expectedVersion;
+            const updated = recordStore.updateFields({
+              owner: businessOwner,
+              id: quickRecordId,
+              expectedVersion: fieldVersion,
+              ...(Object.hasOwn(fields, "occurredAt") ? { occurredAt: fields.occurredAt } : {}),
+              ...(Object.hasOwn(fields, "customerId") ? { customerId: fields.customerId } : {}),
+              ...(Object.hasOwn(fields, "opportunityId") ? { opportunityId: fields.opportunityId } : {}),
+            });
+            insertAudit(db, {
+              action: "quick_record.update",
+              entityType: "quick_record",
+              entityId: updated.after.id,
+              actor: context.owner,
+              requestId: context.requestId,
+              before: updated.before,
+              after: updated.after,
+              entityVersion: updated.after.version,
+              metadata: {
+                changedFields: Object.keys(fields),
+                source: "weixin-assistant",
+                ...(context.actionId ? { actionId: context.actionId } : {}),
+              },
+            });
+            const fieldLabels = { occurredAt: "发生时间", customerId: "挂接客户", opportunityId: "挂接商机" };
+            changedParts.push(...Object.keys(fields).map((key) => `${fieldLabels[key] ?? key}已修改`));
+            current = { ...(current ?? {}), record: updated.after };
+          }
+          return current;
+        });
+      } catch (error) {
+        if (error?.code === "QUICK_RECORD_CONFIRMATION_TERMINAL") {
+          const currentStatus = error.fields?.currentStatus;
+          const terminalText = currentStatus === "completed"
+            ? "这条记录的确认预览已完成，不能再修改。"
+            : currentStatus === "cancelled"
+              ? "这条记录的确认预览已取消，不能再修改。"
+              : "这条记录的确认预览已结束，不能再修改。";
+          return {
+            text: terminalText,
+            status: "conflict",
+            code: "QUICK_RECORD_CONFIRMATION_TERMINAL",
+          };
+        }
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条记录刚在其他端被修改，本次未写入。请重新发起修改。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "记录不存在或已作废，未修改。", status: "not_found" };
+        }
+        if (error?.code === "QUICK_RECORD_RELATIONSHIP_INVALID") {
+          return { text: "客户与商机的关系已变化，本次未写入。请重新发起修改。", status: "conflict" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("拜访记录已更新", [
+          ["编号", weixinShortId(result.record.id)],
+          ["变更", changedParts.join("；")],
+        ]),
+        status: "updated",
+        record: result.record,
+        ...(result.analysis ? { analysis: result.analysis } : {}),
+      };
+    },
+
+    async "visit-capture.void"(args, context) {
+      const businessOwner = resolveBusinessOwner(context.owner);
+      if (typeof businessOwner !== "string" || !businessOwner.trim()) {
+        return { text: "当前账号未绑定业务负责人，未作废记录。", status: "denied" };
+      }
+      const quickRecordId = safeText(args.quickRecordId);
+      const expectedVersion = Number(args.expectedVersion);
+      if (!quickRecordId || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+        return { text: "作废请求不完整，请重新发送作废指令。", status: "error" };
+      }
+      let voided;
+      try {
+        voided = withImmediateTransaction(db, () => {
+          const outcome = recordStore.void({
+            owner: businessOwner,
+            id: quickRecordId,
+            expectedVersion,
+            voidedBy: context.owner,
+            reason: "weixin-assistant-void",
+          });
+          insertAudit(db, {
+            action: "quick_record.void",
+            entityType: "quick_record",
+            entityId: outcome.after.id,
+            actor: context.owner,
+            requestId: context.requestId,
+            before: outcome.before,
+            after: outcome.after,
+            entityVersion: outcome.after.version,
+            metadata: {
+              reason: "weixin-assistant-void",
+              previousStatus: outcome.before.status,
+              wasConfirmed: outcome.before.status === "confirmed",
+              source: "weixin-assistant",
+              ...(context.actionId ? { actionId: context.actionId } : {}),
+            },
+          });
+          return outcome;
+        });
+      } catch (error) {
+        if (error?.code === "VERSION_CONFLICT") {
+          return { text: "这条记录刚在其他端被修改，本次未作废。请重新发起作废。", status: "conflict" };
+        }
+        if (error?.code === "NOT_FOUND") {
+          return { text: "记录不存在或已作废，未执行任何操作。", status: "not_found" };
+        }
+        throw error;
+      }
+      return {
+        text: weixinCard("拜访记录已作废", [
+          ["编号", weixinShortId(voided.after.id)],
+        ]),
+        status: "voided",
+        record: voided.after,
+      };
+    },
+
     async "customer.search"(args, context) {
       const query = safeText(args.query);
-      const result = snapshotAdapter.customerSearch({ owner: context.owner, query: query || "客户" });
-      const text = result.items.length === 0
-        ? `未找到客户：${query || "（未提供关键词）"}`
-        : [
-          `找到 ${result.items.length}${result.truncated ? "+" : ""} 个客户：`,
-          ...result.items.map((item) => `- ${item.name ?? "名称待确认"} [${item.id}] / ${item.region ?? "-"}`),
-        ].join("\n");
-      return { text, status: "ok", items: result.items, truncated: result.truncated };
+      const result = await customerAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "search",
+        query: query || "客户",
+      });
+      const items = result.matches ?? [];
+      const truncated = result.truncated === true;
+      const text = items.length === 0
+        ? weixinCard("客户", [
+          ["结果", `未找到客户：${query || "未提供关键词"}`],
+        ])
+        : weixinCard("客户", items.map((item, index) => [
+          `${index + 1}`,
+          `${item.name ?? "名称待确认"}  ${item.region ?? ""}`.trim(),
+        ]));
+      return {
+        text,
+        status: "ok",
+        items,
+        truncated,
+        customerResult: result,
+        runId: result.runId,
+      };
     },
 
     async "invoice.ingest"(args, context, serverData) {
       const media = serverData.media;
       if (!media || media.sourceRef !== args.mediaRef) return { text: "请把发票图片或 PDF 与命令一起发送。", status: "empty" };
+      if (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true) {
+        return { text: FINANCIAL_SCOPE_DENIED, status: "denied" };
+      }
       const content = mediaBuffer(media);
       let recognition;
       try {
@@ -514,6 +2688,7 @@ export function createAssistantToolHandlers({
         recognition = { status: "review_required", extractedText: null, warnings: ["RECOGNITION_FAILED"], conflicts: [], fields: {} };
       }
       let item;
+      let duplicate = false;
       try {
         item = await withDocumentBlobWritePreflight(db, {
           owner: context.owner,
@@ -545,11 +2720,69 @@ export function createAssistantToolHandlers({
         }));
       } catch (error) {
         if (error?.code === "DUPLICATE_INVOICE") {
-          return { text: "这张发票已经在发票仓库中，无需重复上传。", status: "duplicate" };
+          item = invoiceRepository.getInvoice(error.existingInvoiceId, { owner: context.owner });
+          if (!item) throw error;
+          duplicate = true;
+        } else {
+          throw error;
         }
-        throw error;
       }
-      return { text: `发票已存入发票仓库，编号：${item.id}。无需先匹配费用，可在系统内人工复核。`, status: "received", item };
+      let match = null;
+      if (typeof invoiceRepository.autoMatchInvoice === "function") {
+        try {
+          match = invoiceRepository.autoMatchInvoice({
+            owner: context.owner,
+            actor: context.owner,
+            invoiceId: item.id,
+            priorityWeekStart: shanghaiWeekStart(clock()),
+          });
+          if (match?.status === "matched" && match.invoice) item = match.invoice;
+        } catch {
+          match = { status: "review_required", reason: "automatic_match_failed", candidates: [] };
+        }
+      }
+      if (match?.status === "matched") {
+        const confirmedMatches = invoiceRepository.listMatches({
+          owner: context.owner,
+          invoiceId: item.id,
+          state: "confirmed",
+        });
+        const activeMatch = match.match ?? confirmedMatches[0] ?? null;
+        const reconciliation = reconcileWeixinInvoiceAttachments({
+          db,
+          invoiceRepository,
+          travelExpenseRepository,
+          owner: context.owner,
+          actor: context.owner,
+          invoiceId: item.id,
+          requestIdPrefix: context.requestId ?? "weixin-invoice",
+        });
+        const attachmentResult = activeMatch
+          ? reconciliation.find((result) => result.matchId === activeMatch.id) ?? null
+          : null;
+        const expenseAttachment = attachmentResult?.attachment ?? null;
+        const attachmentPending = reconciliation.some((result) => result.status === "pending");
+        return {
+          text: attachmentPending
+            ? `发票金额已自动匹配费用：${match.selected?.expenseReferenceCode ?? activeMatch?.expenseId ?? "待确认"}，但报销附件正在后台补传。`
+            : `发票${duplicate ? "已存在并" : "已存入并"}自动绑定费用：${match.selected?.expenseReferenceCode ?? activeMatch?.expenseId ?? "待确认"}，金额 ${moneyFromCents(activeMatch?.allocatedCents)}。`,
+          status: attachmentPending ? "review_required" : "matched",
+          item,
+          match: { ...match, match: activeMatch },
+          attachmentStatus: attachmentPending ? "pending" : expenseAttachment ? "attached" : "already_attached",
+          attachmentReconciliation: reconciliation,
+          ...(expenseAttachment ? { expenseAttachment } : {}),
+        };
+      }
+      const candidateText = Array.isArray(match?.candidates) && match.candidates.length
+        ? `候选：${match.candidates.slice(0, 3).map((candidate) => `${candidate.expenseReferenceCode}（${candidate.occurredOn}，${moneyFromCents(candidate.paymentRemainingCents)}）`).join("；")}`
+        : "当前没有唯一金额候选";
+      return {
+        text: `发票${duplicate ? "已在" : "已存入"}发票仓库，编号：${item.id}。${candidateText}。当前未形成唯一自动匹配，请在系统内人工复核。`,
+        status: duplicate ? "duplicate" : "review_required",
+        item,
+        match,
+      };
     },
 
     async "payment-proof.ingest"(args, context, serverData) {
@@ -625,12 +2858,72 @@ export function createAssistantToolHandlers({
       };
     },
 
-    async "sales-report.preview"(args, context) {
-      const summary = snapshotAdapter.salesReportSummary({
+    async "advance-settlement.preview"(args, context, serverData = {}) {
+      if (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true) {
+        throw new HttpError(403, "ASSISTANT_FINANCIAL_SCOPE_DENIED", FINANCIAL_SCOPE_DENIED);
+      }
+      const result = await advanceSettlementAdapter.analyze({
         owner: context.owner,
-        weekStart: args.periodStart ?? args.week,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "settlement_preview",
+        weekStart: args.week ?? args.periodStart ?? null,
       });
-      return { text: salesReportSummaryText(summary), status: "preview", summary };
+      return {
+        text: settlementPreviewText(result),
+        status: result.status,
+        settlementPreview: result.settlementPreview,
+        summary: {
+          weekStart: result.weekStart,
+          summary: result.summary,
+          settlementEvidence: result.settlementEvidence,
+          truncated: result.truncated,
+        },
+        settlementResult: result,
+        runId: result.runId,
+      };
+    },
+
+    async "sales-report.preview"(args, context) {
+      if (!salesReportAdapter) {
+        const summary = snapshotAdapter.salesReportSummary({
+          owner: context.owner,
+          weekStart: args.periodStart ?? args.week,
+        });
+        return { text: salesReportSummaryText(summary), status: "preview", summary };
+      }
+      const result = await salesReportAdapter.analyze({
+        owner: context.owner,
+        channel: context.channel,
+        conversationId: context.conversation,
+        eventId: context.event,
+        taskType: "weekly_preview",
+        weekStart: args.periodStart ?? args.week,
+        periodStart: args.periodStart ?? null,
+        periodEnd: args.periodEnd ?? null,
+      });
+      if (result.status !== "preview") {
+        return {
+          text: result.status === "not_found" ? "未找到当前账号可见的销售周报数据。" : "销售周报暂需人工补充资料。",
+          status: result.status,
+          report: result,
+        };
+      }
+      return {
+        text: salesReportSummaryText({
+          weekStart: result.period.start,
+          periodEnd: result.period.end,
+          reportCount: result.persistedReportRefs?.length ?? 0,
+          candidateRecordCount: result.candidateRecordCount ?? result.sourceRecordCount ?? 0,
+          preview: result.summary,
+          statusCounts: result.statusCounts ?? { draft: 0, saved: 0, ready: 0 },
+        }),
+        status: "preview",
+        summary: result.summary,
+        report: result,
+        runId: result.runId,
+      };
     },
   };
 

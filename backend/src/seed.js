@@ -10,7 +10,7 @@ const customers = [
     region: "日照",
     type: "医疗 KA",
     level: "重点推进",
-    owner: "继振",
+    owner: "jiangjz",
     contact: "梁斌 / 信息主管",
     relation: 82,
     stakeholders: [
@@ -34,7 +34,7 @@ const customers = [
     region: "青岛黄岛",
     type: "三级甲等",
     level: "高潜商机",
-    owner: "继振",
+    owner: "jiangjz",
     contact: "吕宜明 / 王滨",
     relation: 79,
     stakeholders: [
@@ -62,7 +62,7 @@ const opportunities = [
     customer: "日照中医医院",
     stage: "方案输出",
     amount: "规划类",
-    owner: "继振",
+    owner: "jiangjz",
     probability: 66,
     days: 3,
     requirements: ["十五五年度规划材料", "本地数据中心健壮度评估", "移动云灾备模式重新论证"],
@@ -80,7 +80,7 @@ const opportunities = [
     customer: "黄岛区中医院",
     stage: "调研机会",
     amount: "3000 万",
-    owner: "继振",
+    owner: "jiangjz",
     probability: 72,
     days: 5,
     requirements: ["新院区双活机房调研", "架构图参考材料", "信创与 AI 算力规划"],
@@ -293,10 +293,10 @@ export function seedDatabase(db) {
       db,
       `INSERT OR IGNORE INTO action_items (
         id, customer_id, opportunity_id, title, customer, reason, due,
-        priority, status, source_record_id, tone
+        priority, status, source_record_id, tone, owner
       ) VALUES (
         $id, $customerId, $opportunityId, $title, $customer, $reason, $due,
-        $priority, $status, $sourceRecordId, $tone
+        $priority, $status, $sourceRecordId, $tone, 'jiangjz'
       )`,
       {
         $id: action.id,
@@ -319,10 +319,10 @@ export function seedDatabase(db) {
       db,
       `INSERT OR IGNORE INTO risk_items (
         id, customer_id, opportunity_id, title, target, score, severity,
-        status, evidence, action, assignee, due, source_type, source_id, tone
+        status, evidence, action, assignee, due, source_type, source_id, tone, owner
       ) VALUES (
         $id, $customerId, $opportunityId, $title, $target, $score, $severity,
-        $status, $evidence, $action, $assignee, $due, $sourceType, $sourceId, $tone
+        $status, $evidence, $action, $assignee, $due, $sourceType, $sourceId, $tone, 'jiangjz'
       )`,
       {
         $id: item.id,
@@ -348,9 +348,9 @@ export function seedDatabase(db) {
     run(
       db,
       `INSERT OR IGNORE INTO knowledge_items (
-        id, title, category, tags, summary, content, source
+        id, title, category, tags, summary, content, source, owner
       ) VALUES (
-        $id, $title, $category, $tags, $summary, $content, $source
+        $id, $title, $category, $tags, $summary, $content, $source, 'jiangjz'
       )`,
       {
         $id: item.id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -38,6 +39,11 @@ class _Repository:
         self.saved.append(item)
         return SimpleNamespace(inserted=True, revised=False)
 
+    def save_notices(self, items, *, seen_at=None):
+        items = tuple(items)
+        self.saved.extend(items)
+        return tuple(SimpleNamespace(inserted=True, revised=False) for _ in items)
+
     def pending_notifications(self, *, levels=()):
         return ()
 
@@ -57,6 +63,21 @@ class _Adapter:
         return self.result
 
 
+class _FailingAdapter:
+    def fetch(self) -> SourceResult:
+        raise TimeoutError("fixture source budget exhausted")
+
+
+class _BudgetHttpClient:
+    def __init__(self) -> None:
+        self.budgets = []
+
+    @contextmanager
+    def request_budget(self, seconds):
+        self.budgets.append(seconds)
+        yield
+
+
 def _notice(source_id: str) -> TenderNotice:
     return TenderNotice(
         source_id=source_id,
@@ -71,6 +92,64 @@ def _notice(source_id: str) -> TenderNotice:
 
 
 class RunnerIsolationTests(TestCase):
+    def test_exhausted_source_budget_does_not_block_later_source_persistence(self) -> None:
+        config = _Config()
+        config.sources = (
+            {"id": "timed-out", "adapter": "fixture", "enabled": True},
+            {"id": "healthy", "adapter": "fixture", "enabled": True},
+        )
+        repository = _Repository()
+        client = _BudgetHttpClient()
+        adapters = {
+            "timed-out": _FailingAdapter(),
+            "healthy": _Adapter(SourceResult(notices=(_notice("healthy"),))),
+        }
+        with patch(
+            "hospital_tender_monitor.runner.source_factory",
+            side_effect=lambda source, _http: adapters[source["id"]],
+        ):
+            summary = MonitorRunner(
+                config,
+                repository=repository,
+                http_client=client,
+                lock_path=Path("/tmp/hospital-tender-runner-source-budget.lock"),
+            ).run()
+
+        self.assertTrue(summary.success)
+        self.assertEqual(summary.successful_source_count, 1)
+        self.assertEqual(summary.failed_source_count, 1)
+        self.assertEqual(client.budgets, [45.0, 45.0])
+        self.assertEqual([item.notice.source_id for item in repository.saved], ["healthy"])
+        self.assertEqual([health.success for health in repository.health], [False, True])
+
+    def test_persists_each_source_with_one_bounded_bulk_write(self) -> None:
+        config = _Config()
+        config.sources = ({"id": "healthy", "adapter": "fixture", "enabled": True},)
+        repository = _Repository()
+        calls = []
+        repository.save_notices = lambda items, *, seen_at=None: (
+            calls.append((tuple(items), seen_at))
+            or tuple(SimpleNamespace(inserted=True, revised=False) for _ in items)
+        )
+        repository.save_notice = lambda *_args, **_kwargs: self.fail(
+            "runner must not open one SQLite transaction per notice"
+        )
+        adapter = _Adapter(SourceResult(notices=(_notice("healthy-1"), _notice("healthy-2"))))
+
+        with patch("hospital_tender_monitor.runner.source_factory", return_value=adapter):
+            summary = MonitorRunner(
+                config,
+                repository=repository,
+                http_client=object(),
+                lock_path=Path("/tmp/hospital-tender-runner-bulk-write.lock"),
+            ).run()
+
+        self.assertTrue(summary.success)
+        self.assertEqual(summary.inserted_count, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0][0]), 2)
+        self.assertIsNotNone(calls[0][1])
+
     def test_partial_source_failure_keeps_a_usable_snapshot_run(self) -> None:
         config = _Config()
         config.sources = (

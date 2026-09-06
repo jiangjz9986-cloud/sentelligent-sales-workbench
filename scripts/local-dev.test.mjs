@@ -69,6 +69,7 @@ describe("local WSL dev orchestration", () => {
     assert.ok(command.args.includes("CORS_ALLOWED_ORIGINS=http://127.0.0.1:5184"));
     assert.ok(command.args.includes("AUTH_COOKIE_SECURE=false"));
     assert.ok(command.args.includes("NODE_ENV=development"));
+    assert.ok(command.args.includes("AMAP_MODE=mock"));
     assert.ok(command.args.includes("node"));
     assert.ok(command.args.includes("src/server.js"));
     assert.equal(command.args.includes("bash"), false);

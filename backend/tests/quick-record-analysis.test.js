@@ -8,7 +8,8 @@ import { hashPassword } from "../src/auth/password.js";
 import { createConnection } from "../src/db/connection.js";
 import { createServer } from "../src/server.js";
 
-const account = "quick-record-editor";
+// v0.9.2：确认目标（种子客户 rizhao，owner=jiangjz）随会话硬过滤，harness 账号对齐种子 owner。
+const account = "jiangjz";
 const loginValue = "quick-record-test-login";
 const passwordField = "pass" + "word";
 const passwordHash = await hashPassword(loginValue, { salt: Buffer.alloc(16, 14) });
@@ -99,16 +100,16 @@ function seedPersistedHistory(databaseUrl) {
   inspectDatabase(databaseUrl, (db) => {
     db.exec(`
       INSERT INTO quick_records (
-        id, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status,
+        id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status,
         version, created_at, updated_at
       ) VALUES
-        ('qr-history', '真实历史记录', '2026-07-18T09:00:00+08:00', 'test', 'rizhao', 'op-rizhao-plan', 'confirmed', 4, '2026-07-18 01:00:00', '2026-07-18 01:05:00'),
-        ('qr-no-analysis', '尚未分析记录', '2026-07-18T08:00:00+08:00', 'test', NULL, NULL, 'recorded', 1, '2026-07-18 00:00:00', '2026-07-18 00:00:00');
+        ('qr-history', 'jiangjz', '真实历史记录', '2026-07-18T09:00:00+08:00', 'test', 'rizhao', 'op-rizhao-plan', 'confirmed', 4, '2026-07-18 01:00:00', '2026-07-18 01:05:00'),
+        ('qr-no-analysis', 'jiangjz', '尚未分析记录', '2026-07-18T08:00:00+08:00', 'test', NULL, NULL, 'recorded', 1, '2026-07-18 00:00:00', '2026-07-18 00:00:00');
 
       INSERT INTO quick_records (
-        id, raw_content, status, version, voided_at, voided_by, void_reason, created_at, updated_at
+        id, owner, raw_content, status, version, voided_at, voided_by, void_reason, created_at, updated_at
       ) VALUES (
-        'qr-voided', 'voided record', 'recorded', 2, '2026-07-18 02:00:00', 'quick-record-editor',
+        'qr-voided', 'jiangjz', 'voided record', 'recorded', 2, '2026-07-18 02:00:00', 'jiangjz',
         'superseded', '2026-07-18 00:30:00', '2026-07-18 02:00:00'
       );
 
@@ -164,6 +165,69 @@ function summaryPatch(requestText) {
 }
 
 describe("persisted quick-record analysis", () => {
+  it("keeps WeChat machine quick-record reads and writes inside the machine owner scope", async () => {
+    const machineOwnerCredential = ["machine", "owner", "token"].join("-");
+    await withHarness({
+      weixinAgentApiToken: machineOwnerCredential,
+      weixinAgentOwner: "wechat-owner",
+    }, async ({ databaseUrl, rawRequest, request }) => {
+      inspectDatabase(databaseUrl, (db) => {
+        db.prepare(`
+          INSERT INTO quick_records (id, owner, raw_content, status)
+          VALUES ($id, $owner, $rawContent, 'recorded')
+        `).run({
+          $id: "qr-other-owner",
+          $owner: "different-owner",
+          $rawContent: "不应被微信机器身份读取的内容",
+        });
+        db.prepare(`
+          INSERT INTO quick_records (id, owner, raw_content, status)
+          VALUES ($id, $owner, $rawContent, 'recorded')
+        `).run({
+          $id: "qr-wechat-owner",
+          $owner: "wechat-owner",
+          $rawContent: "微信机器身份自己的记录",
+        });
+        db.prepare(`
+          INSERT INTO customers (id, name, owner)
+          VALUES ($id, $name, $owner)
+        `).run({
+          $id: "customer-other-owner",
+          $name: "其他 owner 客户",
+          $owner: "different-owner",
+        });
+      });
+
+      const machineHeaders = {
+        Authorization: `Bearer ${machineOwnerCredential}`,
+        "Content-Type": "application/json",
+      };
+      const browserDenied = await request("/api/quick-records/qr-other-owner/analyze", {
+        method: "POST",
+        body: "{}",
+      });
+      assert.equal(browserDenied.response.status, 404);
+
+      const denied = await rawRequest("/api/quick-records/qr-other-owner/analyze", {
+        method: "POST",
+        headers: machineHeaders,
+        body: "{}",
+      });
+      assert.equal(denied.response.status, 404);
+
+      const crossOwnerCreate = await rawRequest("/api/quick-records", {
+        method: "POST",
+        headers: machineHeaders,
+        body: JSON.stringify({
+          rawContent: "不应绑定其他 owner 客户",
+          customerId: "customer-other-owner",
+          sourceChannel: "wechat_text",
+        }),
+      });
+      assert.equal(crossOwnerCreate.response.status, 422);
+    });
+  });
+
   it("lists the latest saved analysis and confirmation state without calling the model", async () => {
     await withHarness({ aiAnalysisMode: "model", modelApiKey: "test-model-key" }, async ({
       databaseUrl,
@@ -188,6 +252,36 @@ describe("persisted quick-record analysis", () => {
       assert.deepEqual(noAnalysis.confirmations, []);
       assert.deepEqual(noAnalysis.syncLog, []);
       assert.equal(modelCalls.length, 0);
+    });
+  });
+
+  it("rejects a voided record before model work or persistence", async () => {
+    await withHarness({ aiAnalysisMode: "model", modelApiKey: "test-model-key" }, async ({
+      databaseUrl,
+      modelCalls,
+      request,
+    }) => {
+      seedPersistedHistory(databaseUrl);
+      const snapshot = () => inspectDatabase(databaseUrl, (db) => ({
+        record: db.prepare("SELECT * FROM quick_records WHERE id = 'qr-voided'").get(),
+        insights: db.prepare("SELECT * FROM ai_insights WHERE quick_record_id = 'qr-voided'").all(),
+        audits: db.prepare(`
+          SELECT * FROM audit_logs
+          WHERE action = 'quick_record.analyze' AND entity_id = 'qr-voided'
+          ORDER BY id
+        `).all(),
+      }));
+      const before = snapshot();
+
+      const analyzed = await request("/api/quick-records/qr-voided/analyze", {
+        method: "POST",
+        body: "{}",
+      });
+
+      assert.equal(analyzed.response.status, 404);
+      assert.equal(analyzed.body.error.code, "NOT_FOUND");
+      assert.equal(modelCalls.length, 0);
+      assert.deepEqual(snapshot(), before);
     });
   });
 
@@ -326,6 +420,48 @@ describe("persisted quick-record analysis", () => {
       assert.deepEqual(after.record, before.record);
       assert.deepEqual(after.insight, before.insight);
       assert.deepEqual(after.audits, []);
+    });
+  });
+
+  it("retrieves matching knowledge, persists knowledge refs, and keeps them after summary edits", async () => {
+    await withHarness({}, async ({ request }) => {
+      const knowledge = await request("/api/knowledge", {
+        method: "POST",
+        body: JSON.stringify({
+          title: "量子加密隧道专项方案",
+          category: "方案",
+          tags: ["量子加密隧道"],
+          summary: "面向医院专网的量子加密隧道设计要点。",
+          content: "量子加密隧道的部署步骤与计费模式说明。",
+          source: "售前沉淀",
+        }),
+      });
+      assert.equal(knowledge.response.status, 201);
+      const knowledgeId = knowledge.body.item.id;
+      const expectedRefs = [{ type: "knowledge", id: knowledgeId, title: "量子加密隧道专项方案" }];
+
+      const created = await request("/api/quick-records", {
+        method: "POST",
+        body: JSON.stringify({ rawContent: "客户询问量子加密隧道方案的落地路径和预算。" }),
+      });
+      assert.equal(created.response.status, 201);
+
+      const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+      assert.equal(analyzed.response.status, 201);
+      assert.deepEqual(analyzed.body.item.knowledgeRefs, expectedRefs);
+
+      const listed = await request("/api/quick-records");
+      assert.equal(listed.response.status, 200);
+      const persisted = listed.body.items.find((item) => item.id === created.body.item.id);
+      assert.deepEqual(persisted.analysis.knowledgeRefs, expectedRefs);
+
+      const patched = await request(`/api/quick-records/${created.body.item.id}/analysis`, {
+        method: "PATCH",
+        headers: { "If-Match": `"${analyzed.body.quickRecord.version}"` },
+        body: JSON.stringify(summaryPatch("人工修订后的诉求")),
+      });
+      assert.equal(patched.response.status, 200);
+      assert.deepEqual(patched.body.analysis.knowledgeRefs, expectedRefs);
     });
   });
 });

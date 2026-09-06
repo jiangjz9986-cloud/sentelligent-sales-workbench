@@ -32,7 +32,7 @@ describe("local invoice document text extractor", () => {
       assert.equal(await extractor.extract("application/pdf", Buffer.from("pdf-original")), "PDF 发票文本");
       assert.equal(calls.length, 2);
       assert.equal(calls[0].command, "safe-tesseract");
-      assert.deepEqual(calls[0].args.slice(1), ["stdout", "-l", "chi_sim+eng", "--psm", "6"]);
+      assert.deepEqual(calls[0].args.slice(1), ["stdout", "-l", "chi_sim+eng", "--psm", "4"]);
       assert.equal(calls[0].timeoutMs, 4321);
       assert.equal(calls[1].command, "safe-pdftotext");
       assert.deepEqual(calls[1].args.slice(0, 1), ["-layout"]);
@@ -40,6 +40,36 @@ describe("local invoice document text extractor", () => {
       for (const call of calls) {
         await assert.rejects(access(call.inputPath));
       }
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("returns bounded PSM 4 word coordinates for transaction-row splitting", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "sentelligent-document-layout-test-"));
+    const tsv = [
+      "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+      "1\t1\t0\t0\t0\t0\t0\t0\t1280\t520\t-1\t",
+      "5\t1\t1\t1\t1\t1\t240\t45\t220\t34\t95\t合成商户",
+      "5\t1\t1\t1\t1\t2\t1120\t45\t120\t34\t94\t-12.34",
+    ].join("\n");
+    const calls = [];
+    const extractor = createLocalDocumentTextExtractor({
+      ocrCommand: "safe-tesseract",
+      tempRoot,
+      runner: async ({ args, inputPath }) => {
+        await access(inputPath);
+        calls.push(args);
+        return tsv;
+      },
+    });
+    try {
+      const result = await extractor.extractLayout("image/jpeg", Buffer.from("image-original"));
+      assert.equal(result.text, "合成商户 -12.34");
+      assert.equal(result.pageWidth, 1280);
+      assert.equal(result.pageHeight, 520);
+      assert.equal(result.tokens.length, 2);
+      assert.deepEqual(calls[0].slice(1), ["stdout", "-l", "chi_sim+eng", "--psm", "4", "tsv"]);
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }

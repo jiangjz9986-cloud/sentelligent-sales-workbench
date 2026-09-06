@@ -28,17 +28,16 @@ const pages = [
   { name: "quick", testId: "page-quick" },
   { name: "customer", testId: "page-customer" },
   { name: "opportunity", testId: "page-opportunity" },
-  { name: "actions", testId: "page-actions" },
+  { name: "actions", parentNav: "opportunity", subnav: "actions", testId: "page-actions" },
   { name: "itinerary", testId: "page-itinerary" },
   { name: "expense", testId: "page-expense" },
   { name: "weekly", testId: "page-weekly" },
-  { name: "risk", testId: "page-risk" },
+  { name: "risk", parentNav: "opportunity", subnav: "risk", testId: "page-risk" },
   { name: "knowledge", testId: "page-knowledge" },
-  { name: "kanban", testId: "page-kanban" },
-  { name: "weixin", testId: "page-weixin" },
-  { name: "shortcut", testId: "page-shortcut" },
+  { name: "kanban", parentNav: "opportunity", subnav: "kanban", testId: "page-kanban" },
+  { name: "weixin", parentNav: "settings", subnav: "weixin", testId: "page-weixin" },
   { name: "settings", testId: "page-settings" },
-  { name: "hospital-tenders", testId: "hospital-tender-page" },
+  { name: "hospital-tenders", parentNav: "customer", subnav: "hospital-tenders", testId: "page-hospital-tenders" },
 ];
 
 function findChrome() {
@@ -445,6 +444,9 @@ async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } 
             ? {
                 account: 'visual-qa',
                 displayName: 'visual-qa',
+                // v0.9.1 起系统配置子导航按角色过滤：走查桩需要 admin 才能
+                // 打开微信绑定等 admin 子页。
+                role: 'admin',
                 expiresAt: '2099-01-01T00:00:00.000Z',
                 csrfToken: 'visual-csrf',
               }
@@ -473,6 +475,20 @@ async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } 
                       opportunities: [],
                       rhythm: [],
                       stageCounts: [],
+                      todayFocus: {
+                        date: '2099-01-01',
+                        itineraries: { count: 0, items: [] },
+                        todos: { overdueCount: 0, todayCount: 0, items: [] },
+                        risks: { count: 0, items: [] },
+                        tenders: { highCount: 0, items: [] },
+                      },
+                      weeklyTrend: {
+                        weekStart: '2098-12-28',
+                        previousWeekStart: '2098-12-21',
+                        quickRecords: { current: 0, previous: 0 },
+                        expenseCents: { current: 0, previous: 0 },
+                        completedTodos: { current: 0, previous: 0 },
+                      },
                       generatedAt: '2099-01-01T00:00:00.000Z',
                     },
                   }
@@ -551,7 +567,7 @@ async function measureVisualRhythm(cdp, url, viewport) {
       const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const pages = ${JSON.stringify(pages)};
       const round = (value) => Math.round(value);
-      const waitUntil = async (predicate, timeoutMs = 5000) => {
+      const waitUntil = async (predicate, timeoutMs = 15000) => {
         const started = Date.now();
         while (Date.now() - started < timeoutMs) {
           const value = predicate();
@@ -573,11 +589,30 @@ async function measureVisualRhythm(cdp, url, viewport) {
           return Boolean(visibleRect(child));
         });
       };
+      const waitForLazyPage = async (page, timeoutMs = 15000) => {
+        const pageRootId = 'page-' + page.name;
+        await waitUntil(() => document.querySelector('[data-testid="' + pageRootId + '"]'), timeoutMs);
+        await waitUntil(() => {
+          const root = document.querySelector('[data-testid="' + pageRootId + '"]');
+          return root && !root.querySelector('[data-testid="route-chunk-loading"]');
+        }, timeoutMs);
+        if (page.testId !== pageRootId) {
+          await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'), timeoutMs);
+        }
+      };
+      const openPage = async (page) => {
+        const parent = page.parentNav ?? page.name;
+        document.querySelector('[data-testid="nav-' + parent + '"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-' + parent + '"]') || document.querySelector('[data-testid="' + page.testId + '"]'));
+        if (page.subnav) {
+          document.querySelector('[data-testid="subnav-' + page.subnav + '"]')?.click();
+        }
+        await waitForLazyPage(page);
+      };
       const results = [];
-      await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
+      await waitUntil(() => document.querySelector('[data-testid="page-overview"]') && !document.querySelector('[data-testid="auth-checking"]'));
       for (const page of pages) {
-        document.querySelector('[data-testid="nav-' + page.name + '"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
+        await openPage(page);
         await wait(180);
         const content = document.querySelector('[data-testid="' + page.testId + '"]');
         const heading = content?.querySelector('.page-heading');
@@ -635,11 +670,28 @@ async function measureDesktopListDensity(cdp, url) {
         }
         throw new Error('Timed out waiting for list density page condition');
       };
-      await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
+      const waitForLazyPage = async (page, timeoutMs = 15000) => {
+        const pageRootId = 'page-' + page.name;
+        await waitUntil(() => document.querySelector('[data-testid="' + pageRootId + '"]'), timeoutMs);
+        await waitUntil(() => {
+          const root = document.querySelector('[data-testid="' + pageRootId + '"]');
+          return root && !root.querySelector('[data-testid="route-chunk-loading"]');
+        }, timeoutMs);
+        if (page.testId !== pageRootId) {
+          await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'), timeoutMs);
+        }
+      };
+      const openPage = async (page) => {
+        const parent = page.parentNav ?? page.name;
+        document.querySelector('[data-testid="nav-' + parent + '"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-' + parent + '"]') || document.querySelector('[data-testid="' + page.testId + '"]'));
+        if (page.subnav) document.querySelector('[data-testid="subnav-' + page.subnav + '"]')?.click();
+        await waitForLazyPage(page);
+      };
+      await waitUntil(() => document.querySelector('[data-testid="page-overview"]') && !document.querySelector('[data-testid="auth-checking"]'));
       const results = [];
       for (const page of listPages) {
-        document.querySelector('[data-testid="nav-' + page.name + '"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="' + page.testId + '"]'));
+        await openPage(page);
         await wait(180);
         const content = document.querySelector('[data-testid="' + page.testId + '"]');
         const panel = content?.querySelector('.customer-list-panel, .opportunity-list-panel, .action-list-panel, .risk-list-panel, .knowledge-list-panel');
@@ -948,6 +1000,10 @@ describe("visual rhythm", () => {
           [...document.querySelectorAll('.nav-item')]
             .find((item) => item.textContent.includes('周报'))?.click();
           await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'));
+          await waitUntil(() => {
+            const root = document.querySelector('[data-testid="page-weekly"]');
+            return root && !root.querySelector('[data-testid="route-chunk-loading"]');
+          });
           await wait(100);
           return {
             customerBootstrapCalls: window.__visualApiCalls['/api/customers'] ?? 0,
@@ -1043,6 +1099,10 @@ describe("visual rhythm", () => {
           await waitUntil(() => document.querySelector('[data-testid="page-overview"]'), 'workbench bootstrap');
           document.querySelectorAll('.nav-item')[3]?.click();
           await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 'opportunity list');
+          await waitUntil(() => {
+            const root = document.querySelector('[data-testid="page-opportunity"]');
+            return root && !root.querySelector('[data-testid="route-chunk-loading"]');
+          }, 'opportunity chunk');
 
           const openButtons = () => [...document.querySelectorAll('[data-testid="opportunity-open-detail"]')];
           openButtons()[0]?.click();

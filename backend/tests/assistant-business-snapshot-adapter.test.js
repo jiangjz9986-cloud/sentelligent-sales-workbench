@@ -28,18 +28,20 @@ function insertFixtures() {
     INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, customer_id, opportunity_id, status)
     VALUES ('record-a', 'owner-a', '不得出现在助手快照中的原始拜访正文', '2026-08-15T09:00:00+08:00', 'visit', 'customer-a', 'opportunity-a', 'analyzed')
   `).run();
+  // v0.9.2 夹具形态：0031 回填后 owner 恒非空（触发器/NOT NULL 也不再允许 NULL），
+  // 行动/风险/行程/知识全部带显式 owner 列。
   db.prepare(`
-    INSERT INTO action_items (id, customer_id, opportunity_id, title, status, due)
-    VALUES ('action-a', 'customer-a', 'opportunity-a', '补齐方案', 'pending', '2026-08-20')
+    INSERT INTO action_items (id, customer_id, opportunity_id, title, status, due, owner)
+    VALUES ('action-a', 'customer-a', 'opportunity-a', '补齐方案', 'pending', '2026-08-20', 'owner-a')
   `).run();
   db.prepare(`
-    INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action)
-    VALUES ('risk-a', 'customer-a', 'opportunity-a', '预算未确认', '商机', '高', 'open', '会议纪要', '确认预算')
+    INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action, owner)
+    VALUES ('risk-a', 'customer-a', 'opportunity-a', '预算未确认', '商机', '高', 'open', '会议纪要', '确认预算', 'owner-a')
   `).run();
 
   const insertItinerary = db.prepare(`
-    INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
-    VALUES ($id, $title, $visitDate, 'planned', '{}', '{}', $owner, $owner)
+    INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by, owner)
+    VALUES ($id, $title, $visitDate, 'planned', '{}', '{}', $owner, $owner, $owner)
   `);
   insertItinerary.run({ $id: "itinerary-a", $title: "拜访 A 医院", $visitDate: "2026-08-18", $owner: "owner-a" });
   insertItinerary.run({ $id: "itinerary-b", $title: "拜访 B 医院", $visitDate: "2026-08-18", $owner: "owner-b" });
@@ -58,14 +60,20 @@ function insertFixtures() {
   `);
   insertPayment.run({ $id: "payment-a", $expenseId: "expense-a", $amount: 8800, $reimbursement: 7000 });
   insertPayment.run({ $id: "payment-b", $expenseId: "expense-b", $amount: 9900, $reimbursement: 9000 });
+  db.prepare(`
+    INSERT INTO travel_expense_advances (
+      id, owner, week_start, status, requested_cents, received_cents, requested_on,
+      received_on, purpose, created_by, updated_by
+    ) VALUES ('advance-a', 'owner-a', '2026-08-17', 'received', 5000, 5000, '2026-08-17', '2026-08-17', 'A 项目备用金', 'owner-a', 'owner-a')
+  `).run();
 
   db.prepare(`
     INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content)
     VALUES ('report-a', 'owner-a', '2026-08-17', '2026-08-23', 'ready', 'A 周报')
   `).run();
   db.prepare(`
-    INSERT INTO knowledge_items (id, title, category, summary, content, source)
-    VALUES ('knowledge-a', '医院采购流程', '销售', '采购阶段摘要', '不应直接返回的完整知识正文', '内部知识库')
+    INSERT INTO knowledge_items (id, title, category, summary, content, source, owner)
+    VALUES ('knowledge-a', '医院采购流程', '销售', '采购阶段摘要', '不应直接返回的完整知识正文', '内部知识库', 'owner-a')
   `).run();
 }
 
@@ -108,22 +116,25 @@ describe("assistant bounded business snapshot adapter", () => {
     assert.equal(adapter.customerDetail({ owner: "account-b", customerId: "customer-a" }), null);
   });
 
-  it("fails closed for mismatched ownership while preserving opportunity customer fallback", () => {
+  // v0.9.2 语义更新：0031 回填后可见性收敛为单一 owner 列谓词——NULL-owner 派生
+  // 回退成为死分支被删除；历史脏交叉挂接行统一落在遗留池 owner（对任何其他账号
+  // 均不可见，防越权语义不放宽）。
+  it("fails closed on the owner column after the 0031 backfill (no derived fallback)", () => {
     db.prepare(`
       INSERT INTO opportunities (id, customer_id, name, stage, amount, owner, probability)
-      VALUES ('opportunity-fallback', 'customer-a', '回退归属项目', 'lead', '20 万', NULL, 30)
+      VALUES ('opportunity-fallback', 'customer-a', '回退归属项目', 'lead', '20 万', 'owner-a', 30)
     `).run();
     db.prepare(`
-      INSERT INTO action_items (id, customer_id, opportunity_id, title, status)
-      VALUES ('action-fallback', NULL, 'opportunity-fallback', '按商机关联跟进', 'pending')
+      INSERT INTO action_items (id, customer_id, opportunity_id, title, status, owner)
+      VALUES ('action-fallback', NULL, 'opportunity-fallback', '按商机关联跟进', 'pending', 'owner-a')
     `).run();
     db.prepare(`
-      INSERT INTO action_items (id, customer_id, opportunity_id, title, status)
-      VALUES ('action-owner-mismatch', 'customer-a', 'opportunity-b', '错误双归属动作', 'pending')
+      INSERT INTO action_items (id, customer_id, opportunity_id, title, status, owner)
+      VALUES ('action-owner-mismatch', 'customer-a', 'opportunity-b', '错误双归属动作', 'pending', 'owner-legacy')
     `).run();
     db.prepare(`
-      INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action)
-      VALUES ('risk-owner-mismatch', 'customer-a', 'opportunity-b', '错误双归属风险', '商机', '高', 'open', '测试', '忽略')
+      INSERT INTO risk_items (id, customer_id, opportunity_id, title, target, severity, status, evidence, action, owner)
+      VALUES ('risk-owner-mismatch', 'customer-a', 'opportunity-b', '错误双归属风险', '商机', '高', 'open', '测试', '忽略', 'owner-legacy')
     `).run();
 
     const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
@@ -136,10 +147,10 @@ describe("assistant bounded business snapshot adapter", () => {
     assert.equal(ownerA.risks.some((item) => item.id === "risk-owner-mismatch"), false);
     assert.equal(ownerB.risks.some((item) => item.id === "risk-owner-mismatch"), false);
 
-    db.prepare("INSERT INTO action_items (id, customer_id, title, status) VALUES ('action-done', 'customer-a', '已完成动作', 'done')").run();
-    db.prepare("INSERT INTO action_items (id, customer_id, title, status) VALUES ('action-cancelled', 'customer-a', '已取消动作', 'cancelled')").run();
-    db.prepare("INSERT INTO risk_items (id, customer_id, title, target, severity, status, evidence, action) VALUES ('risk-closed', 'customer-a', '已关闭风险', '客户', '中', 'closed', '测试', '忽略')").run();
-    db.prepare("INSERT INTO risk_items (id, customer_id, title, target, severity, status, evidence, action) VALUES ('risk-resolved', 'customer-a', '已解决风险', '客户', '中', 'resolved', '测试', '忽略')").run();
+    db.prepare("INSERT INTO action_items (id, customer_id, title, status, owner) VALUES ('action-done', 'customer-a', '已完成动作', 'done', 'owner-a')").run();
+    db.prepare("INSERT INTO action_items (id, customer_id, title, status, owner) VALUES ('action-cancelled', 'customer-a', '已取消动作', 'cancelled', 'owner-a')").run();
+    db.prepare("INSERT INTO risk_items (id, customer_id, title, target, severity, status, evidence, action, owner) VALUES ('risk-closed', 'customer-a', '已关闭风险', '客户', '中', 'closed', '测试', '忽略', 'owner-a')").run();
+    db.prepare("INSERT INTO risk_items (id, customer_id, title, target, severity, status, evidence, action, owner) VALUES ('risk-resolved', 'customer-a', '已解决风险', '客户', '中', 'resolved', '测试', '忽略', 'owner-a')").run();
     const filtered = adapter.actionRiskSummary({ owner: "owner-a" });
     assert.equal(filtered.actions.some((item) => item.id === "action-done" || item.id === "action-cancelled"), false);
     assert.equal(filtered.risks.some((item) => item.id === "risk-closed" || item.id === "risk-resolved"), false);
@@ -196,7 +207,7 @@ describe("assistant bounded business snapshot adapter", () => {
     const actionRisk = adapter.actionRiskSummary({ owner: "owner-a" });
     const itineraries = adapter.itinerarySummary({ owner: "owner-a" });
     const expenses = adapter.travelExpenseSummary({ owner: "owner-a", weekStart: "2026-08-17" });
-    const knowledge = adapter.knowledgeSearch({ query: "采购" });
+    const knowledge = adapter.knowledgeSearch({ owner: "owner-a", query: "采购" });
     const after = db.prepare("SELECT total_changes() AS count").get().count;
 
     assert.deepEqual(actionRisk.actions.map((item) => item.id), ["action-a"]);
@@ -305,6 +316,15 @@ describe("assistant bounded business snapshot adapter", () => {
     assert.doesNotMatch(reimbursement.text, /可报销 70\.00 元，/);
   });
 
+  it("excludes recorded WeChat quick records from the sales-report preview", () => {
+    db.prepare("UPDATE quick_records SET source_channel = '微信助手', status = 'recorded' WHERE id = 'record-a'").run();
+    const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
+    const reports = adapter.salesReportSummary({ owner: "owner-a", weekStart: "2026-08-17" });
+    assert.equal(reports.preview.sourceRecordCount, 0);
+    assert.deepEqual(reports.preview.sourceRefs, []);
+    assert.ok(reports.preview.preparation.blockers.includes("no_confirmed_records"));
+  });
+
   it("exposes the adapter through registered read-only runtime handlers", async () => {
     const sessions = createAssistantSessionRepository(db, { clock: () => new Date("2026-08-17T12:00:00Z") });
     const handlers = createAssistantToolHandlers({
@@ -323,19 +343,77 @@ describe("assistant bounded business snapshot adapter", () => {
       ["action-risk.summary", {}],
       ["itinerary.summary", {}],
       ["travel-expense.summary", { week: "current" }],
+      ["advance-settlement.preview", { week: "2026-08-17" }],
       ["knowledge.search", { query: "采购" }],
     ]) {
       assert.equal(typeof handlers[toolName], "function", toolName);
-      const output = await handlers[toolName](args, context, {});
+      const serverData = toolName === "advance-settlement.preview"
+        ? { auditMetadata: { financialScope: true } }
+        : {};
+      const output = await handlers[toolName](args, context, serverData);
       assert.equal(typeof output.text, "string", toolName);
       assert.ok(output.text.length > 0, toolName);
     }
+    const settlement = await handlers["advance-settlement.preview"](
+      { week: "2026-08-17" },
+      context,
+      { auditMetadata: { financialScope: true } },
+    );
+    assert.equal(settlement.status, "review_required");
+    assert.equal(settlement.settlementPreview.direction, "company_reimburses");
+    assert.equal(settlement.settlementPreview.transaction.recorded, false);
+    assert.equal(settlement.settlementResult.advances[0].id, "advance-a");
+    assert.equal(settlement.settlementResult.advances[0].owner, undefined);
+    const otherOwnerSettlement = await handlers["advance-settlement.preview"](
+      { week: "2026-08-17" },
+      { ...context, owner: "owner-b", conversation: "conversation-b" },
+      { auditMetadata: { financialScope: true } },
+    );
+    assert.deepEqual(otherOwnerSettlement.settlementResult.advances, []);
+    assert.equal(db.prepare("SELECT total_changes() AS count").get().count, before);
     const denied = await handlers["customer.detail"]({ customerId: "customer-b" }, context, {});
     assert.equal(denied.status, "not_found");
     assert.equal((await handlers["customer.detail"]({ customerId: "A医院" }, context, {})).customer.name, "A医院");
     assert.equal((await handlers["opportunity.detail"]({ opportunityId: "A项目" }, context, {})).opportunity.name, "A项目");
     assert.equal((await handlers["sales-decision.preview"]({ opportunityId: "A项目" }, context, {})).status, "preview");
     assert.equal(db.prepare("SELECT total_changes() AS count").get().count, before);
+  });
+
+  it("denies a direct WeChat settlement handler before reading its snapshot", async () => {
+    const sessions = createAssistantSessionRepository(db, { clock: () => new Date("2026-08-17T12:00:00Z") });
+    let settlementReads = 0;
+    const handlers = createAssistantToolHandlers({
+      db,
+      config: { aiAnalysisMode: "mock" },
+      sessionRepository: sessions,
+      settlementSnapshotAdapter: {
+        advanceSettlementSummary() {
+          settlementReads += 1;
+          throw new Error("denied handlers must not read settlement data");
+        },
+      },
+      clock: () => new Date("2026-08-17T12:00:00Z"),
+    });
+
+    await assert.rejects(
+      handlers["advance-settlement.preview"](
+        { week: "2026-08-17" },
+        { owner: "owner-a", channel: "weixin", conversation: "conversation-denied", requestId: "request-denied" },
+        { auditMetadata: { financialScope: false } },
+      ),
+      (error) => {
+        assert.equal(error.name, "HttpError");
+        assert.equal(error.status, 403);
+        assert.equal(error.code, "ASSISTANT_FINANCIAL_SCOPE_DENIED");
+        assert.equal(error.message, "该财务预览仅限已绑定账号本人的微信私聊。");
+        return true;
+      },
+    );
+    assert.equal(settlementReads, 0);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'").get().count,
+      0,
+    );
   });
 
   it("clarifies ambiguous names instead of guessing an entity", async () => {
@@ -367,7 +445,8 @@ describe("assistant bounded business snapshot adapter", () => {
       {},
     );
     assert.equal(result.items[0].id, "customer-a");
-    assert.match(result.text, /customer-a/);
+    assert.match(result.text, /A医院/);
+    assert.doesNotMatch(result.text, /customer-a/, "internal ids stay out of the reply card");
     assert.equal(result.items.some((item) => item.owner), false);
   });
 
@@ -375,5 +454,16 @@ describe("assistant bounded business snapshot adapter", () => {
     db.prepare("UPDATE opportunities SET probability = 101 WHERE id = 'opportunity-a'").run();
     const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
     assert.equal(adapter.opportunityDetail({ owner: "owner-a", opportunityId: "opportunity-a" }).probability, null);
+  });
+
+  it("projects the optimistic-lock version on opportunity detail and search rows (v0.7.6)", () => {
+    db.prepare("UPDATE opportunities SET version = 4 WHERE id = 'opportunity-a'").run();
+    const adapter = createAssistantBusinessSnapshotAdapter({ db, clock: () => new Date("2026-08-17T12:00:00Z") });
+    const detail = adapter.opportunityDetail({ owner: "owner-a", opportunityId: "opportunity-a" });
+    assert.equal(detail.version, 4);
+    assert.equal(detail.stage !== undefined, true, "existing fields keep flowing");
+    const search = adapter.opportunitySearch({ owner: "owner-a", query: "A项目" });
+    assert.equal(search.items.length, 1);
+    assert.equal(search.items[0].version, 4);
   });
 });

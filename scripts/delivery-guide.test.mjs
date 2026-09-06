@@ -85,7 +85,8 @@ describe("production release staging guide", () => {
       "chown -R root:root",
       "trusted_manifest_sha=",
       "旧生产 release",
-      "重新执行 25/25",
+      "PRODUCTION_PREFLIGHT_CHECK_IDS",
+      "重新执行当版全部预检",
     ]) {
       assert.match(content, literalPattern(required));
     }

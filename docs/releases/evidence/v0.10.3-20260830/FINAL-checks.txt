@@ -1,0 +1,121 @@
+[CURRENT_IDENTITY]
+COMMAND=git rev-parse HEAD; git rev-parse 'v0.10.3^{}'
+INPUT=current local worktree; no stdin
+LITERAL_OUTPUT=
+79f09d0738b4aff6aecd1cbc47effc337afdcba6
+2dc9b1114107aee906d0ecfb006ac461cdb86cec
+EXIT_STATUS=0
+RESULT=acceptance baseline f38fd0d followed by local Web hotfix 79f09d0; production tag remains frozen at 2dc9b111
+
+[RELEASE_DOCUMENT_CONTRACT]
+COMMAND=python3 /tmp/v0103-release-doc-validator.py docs/releases/v0.10.3.md
+INPUT=current release document; validator SHA-256 30865f79d682f4fe01a27df50108cc64db4f41e8ce76b067c725c1f2ca37ec45
+LITERAL_OUTPUT=
+VALIDATED_FILE=docs/releases/v0.10.3.md
+REQUIRED_CHECKS=19
+MISSING_CHECKS=0
+MISSING_NAMES=<none>
+RESULT=PASS
+EXIT_STATUS=0
+
+[EVIDENCE_INTEGRITY]
+COMMAND=python3 inline integrity checker over formal doc and docs/releases/evidence/v0.10.3-20260830
+INPUT=14 deterministic file, hash, classification, and status assertions; no production input
+LITERAL_OUTPUT=
+required_artifacts_4_of_4=PASS
+rollback_executable=PASS
+formal_equals_modified=PASS
+original_hash_preserved=PASS
+rollback_copy_equals_original=PASS
+diff_nonempty=PASS
+screenshots_count_7=PASS
+production_report_keys_clean=PASS
+frozen_commit_present=PASS
+baseline_commit_present=PASS
+hotfix_commit_present=PASS
+acceptance_failed_present=PASS
+zero_write_present=PASS
+local_not_production_present=PASS
+CHECKS_TOTAL=14
+CHECKS_PASSED=14
+CHECKS_FAILED=0
+ORIGINAL_SHA256=a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c
+MODIFIED_SHA256=fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9
+DIFF_SHA256=0d0410fc760a50969531748053e7a509cfa51f9f36294429158272535f63d96a
+ROLLBACK_SHA256=d2acaddb25d20109887ec3c7468b6fbf1a5ebefc0690534a8fae4ca922429279
+CHECKS_EXIT_STATUS=0
+
+[SCREENSHOT_INTEGRITY_AND_VISUAL_REVIEW]
+COMMAND=cd docs/releases/evidence/v0.10.3-20260830/screenshots && shasum -a 256 -c ../screenshots.sha256
+INPUT=seven original production PNG files
+LITERAL_OUTPUT=
+./01-web-xiaoxiao-panel-open.png: OK
+./02-help-passed.png: OK
+./03-synthetic-action-precondition-none.png: OK
+./04-synthetic-customer-precondition-none.png: OK
+./05-synthetic-customer-query-blocked.png: OK
+./06-finance-web-result-generic-unrecognized.png: OK
+./07-weixin-binding-not-started.png: OK
+EXIT_STATUS=0
+VISUAL_CLASSIFICATION=2 passed; 2 failed; 3 blocked
+PRODUCTION_SPECIALIZED_ACCEPTANCE=failed with user-action blockers
+PRODUCTION_BUSINESS_WRITES=0
+
+[CURRENT_HEAD_LOCAL_HOTFIX_TESTS]
+BACKEND_COMMAND=cd backend && node --test tests/assistant-router.test.js tests/assistant-web-orchestrator.test.js tests/assistant-web-http-integration.test.js
+BACKEND_INPUT=HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6; synthetic SQLite test fixture; no production input
+BACKEND_LITERAL_RESULT=tests 64; suites 5; pass 64; fail 0; cancelled 0; skipped 0; todo 0
+BACKEND_EXIT_STATUS=0
+FRONTEND_COMMAND=npm --prefix outputs/product-design-prototype run test:assistant-chat
+FRONTEND_INPUT=HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6; no production input
+FRONTEND_LITERAL_RESULT=tests 17; suites 5; pass 17; fail 0; cancelled 0; skipped 0; todo 0
+FRONTEND_EXIT_STATUS=0
+INTERPRETATION=local tests only; production acceptance not rerun
+
+[HISTORICAL_RECORD_BOUNDARY]
+MODIFIED-assistant-chat.txt=historical f38fd0d acceptance-inventory run; its literal HEAD f38 text is intentionally preserved and is not current
+GIT-diff-check.txt=historical plain git diff --check exit 2 while hotfix was uncommitted; literal output preserved
+HOTFIX_CURRENT_STATE=committed locally as 79f09d0; not deployed; tag unchanged
+HOTFIX_CRLF_AWARE_STAGED_GATE=exit 0
+PLAIN_DIFF_CURRENT_ASSERTION=none
+
+[SECRET_SCAN]
+COMMAND=npm run scan:secrets
+INPUT=current worktree including release evidence; no stdin
+LITERAL_OUTPUT=
+> sentelligent-sales-workbench@0.10.0 scan:secrets
+> node scripts/project-secret-scan.mjs --history
+
+{
+  "status": "passed",
+  "scannedFiles": 758,
+  "scannedGitObjects": 3497,
+  "scannedGitMessages": 600,
+  "gitHistoryComplete": true,
+  "findings": []
+}
+EXIT_STATUS=0
+
+[ROLLBACK_RECHECK]
+COMMAND=cmp -s docs/releases/evidence/v0.10.3-20260830/rollback-test-copy.md docs/releases/evidence/v0.10.3-20260830/ORIGINAL_v0.10.3.md; cmp -s docs/releases/v0.10.3.md docs/releases/evidence/v0.10.3-20260830/MODIFIED_FILE
+INPUT=independently rolled-back copy and retained formal modified file
+LITERAL_OUTPUT=<empty>
+ROLLBACK_COPY_CMP_EXIT=0
+FORMAL_MODIFIED_CMP_EXIT=0
+RESTORED_BEHAVIOR=independent copy has the original placeholder-only release-document behavior
+RESTORED_STATUS=original SHA-256 a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c restored
+
+[COMPLETE_STAGED_TRANSACTION]
+COMMAND=GIT_INDEX_FILE=<temporary-index> git -c core.whitespace=cr-at-eol diff --cached --check -- docs/releases/v0.10.3.md docs/releases/evidence/v0.10.3-20260830
+INPUT=temporary index seeded from HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6; 1 modified release document + complete 28-file evidence directory; real index untouched
+LITERAL_OUTPUT=<empty>
+EXIT_STATUS=0
+RESULT=complete 29-path transaction passed
+
+[OPERATIONS_NOT_PERFORMED]
+commit_this_transaction
+push
+deploy
+production_restart
+production_business_write
+tag_move

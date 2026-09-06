@@ -108,7 +108,7 @@ describe("GitHub tagged release workflow", () => {
     assert.match(workflow, /npm --prefix backend test/);
     assert.match(workflow, /npm --prefix outputs\/product-design-prototype run qa:local/);
     assert.match(workflow, /npm --prefix outputs\/product-design-prototype run qa:integration/);
-    assert.match(workflow, /playwright install --with-deps webkit/);
+    assert.match(workflow, /playwright install --with-deps chromium webkit/);
     assert.match(workflow, /npm --prefix outputs\/product-design-prototype run qa:webkit/);
   });
 

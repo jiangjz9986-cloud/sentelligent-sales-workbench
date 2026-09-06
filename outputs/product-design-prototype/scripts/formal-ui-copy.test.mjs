@@ -3,10 +3,20 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
+import { readSalesWorkbenchPagesSource, salesWorkbenchPageFiles } from "./pages-source.mjs";
+import { appSourceFiles } from "./app-source.mjs";
+
 const uiFiles = [
-  "src/features/salesWorkbench/pages.jsx",
+  ...salesWorkbenchPageFiles(),
+  ...appSourceFiles(),
   "src/components/primitives.jsx",
-  "src/App.jsx",
+  "src/components/toast.jsx",
+  "src/components/AvatarMenu.jsx",
+  "src/components/ModuleSubnav.jsx",
+  "src/components/MobileShell.jsx",
+  "src/components/MobileMoreDrawer.jsx",
+  "src/components/PullToRefresh.jsx",
+  "src/components/DatetimeLocalInput.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",
   "src/features/travelExpense/ExpenseEditorDrawer.jsx",
   "src/features/travelExpense/ExpenseLedger.jsx",
@@ -61,14 +71,15 @@ describe("formal handoff UI copy", () => {
     }
   });
 
-  it("opens quick record in voice mode with direct recording guidance", () => {
-    const appSource = readFileSync(resolve("src/App.jsx"), "utf8");
-    const pageSource = readFileSync(resolve("src/features/salesWorkbench/pages.jsx"), "utf8");
+  it("opens quick record in voice mode with the shared server transcription control", () => {
+    const sessionSource = readFileSync(resolve("src/app/useQuickRecordSession.jsx"), "utf8");
+    const pageSource = readSalesWorkbenchPagesSource();
+    const voiceControlSource = readFileSync(resolve("src/components/audio/VoiceCaptureControl.jsx"), "utf8");
 
-    assert.match(appSource, /const \[recordMode, setRecordMode\] = useState\("voice"\)/);
-    assert.match(pageSource, /idle:\s*"待录入"/);
-    assert.match(pageSource, /点击开始转写即可。/);
-    assert.doesNotMatch(pageSource, /idle:\s*"可开始"/);
-    assert.doesNotMatch(pageSource, /准备录入。/);
+    assert.match(sessionSource, /const \[recordMode, setRecordMode\] = useState\("voice"\)/);
+    assert.match(pageSource, /<VoiceCaptureControl/);
+    assert.match(pageSource, /purpose="quick_record"/);
+    assert.match(voiceControlSource, /label: "开始录音"/);
+    assert.doesNotMatch(pageSource, /SpeechRecognition|webkitSpeechRecognition/);
   });
 });

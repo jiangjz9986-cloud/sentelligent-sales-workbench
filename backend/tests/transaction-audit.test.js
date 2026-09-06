@@ -8,7 +8,8 @@ import { hashPassword } from "../src/auth/password.js";
 import { createConnection } from "../src/db/connection.js";
 import { createServer } from "../src/server.js";
 
-const account = "task10-auditor";
+// v0.9.2：列表/详情按会话账号硬过滤，harness 账号对齐种子 owner（jiangjz）。
+const account = "jiangjz";
 const passwordField = "pass" + "word";
 const loginValue = "task10-login-value";
 const passwordHash = await hashPassword(loginValue, { salt: Buffer.alloc(16, 10) });
@@ -234,7 +235,6 @@ describe("central audit repository", () => {
         method: "POST",
         body: JSON.stringify({
           name: "Task 10 audited customer",
-          owner: "request-controlled-owner",
           contact: "13800138000 person@example.test",
           stakeholders: [{ name: "Decision maker", phone: "13800138000", email: "person@example.test" }],
           summary: "before summary",
@@ -258,7 +258,7 @@ describe("central audit repository", () => {
       const updated = await request(`/api/customers/${created.body.item.id}`, {
         method: "PATCH",
         headers: { "If-Match": `"${created.body.item.version}"` },
-        body: JSON.stringify({ owner: "another-request-owner", summary: "after summary" }),
+        body: JSON.stringify({ summary: "after summary" }),
       });
       assert.equal(updated.response.status, 200);
 
@@ -293,7 +293,7 @@ describe("central audit repository", () => {
       const confirmed = await request(`/api/quick-records/${quickRecord.id}/confirm`, {
         method: "POST",
         headers: {
-          "If-Match": `"${quickRecord.version}"`,
+          "If-Match": `"${analyzed.body.quickRecord.version}"`,
           "Idempotency-Key": "task10-authenticated-confirmer",
         },
         body: JSON.stringify({
@@ -337,7 +337,7 @@ describe("business mutation and audit atomicity", () => {
         action: "customer.create",
         table: "customers",
         path: "/api/customers",
-        options: { method: "POST", body: JSON.stringify({ name: "Rollback customer", owner: "body-owner" }) },
+        options: { method: "POST", body: JSON.stringify({ name: "Rollback customer" }) },
       });
       await assertAuditRollback({
         databaseUrl,
@@ -347,7 +347,7 @@ describe("business mutation and audit atomicity", () => {
         path: "/api/opportunities",
         options: {
           method: "POST",
-          body: JSON.stringify({ customerId: "rizhao", name: "Rollback opportunity", owner: "body-owner" }),
+          body: JSON.stringify({ customerId: "rizhao", name: "Rollback opportunity" }),
         },
       });
       await assertAuditRollback({
@@ -391,7 +391,7 @@ describe("business mutation and audit atomicity", () => {
         options: {
           method: "PATCH",
           headers: { "If-Match": `"${customer.version}"` },
-          body: JSON.stringify({ owner: "rollback-owner" }),
+          body: JSON.stringify({ summary: "rollback summary" }),
         },
       });
       await assertAuditRollback({
@@ -403,7 +403,7 @@ describe("business mutation and audit atomicity", () => {
         options: {
           method: "PATCH",
           headers: { "If-Match": `"${opportunity.version}"` },
-          body: JSON.stringify({ owner: "rollback-owner" }),
+          body: JSON.stringify({ risk: "rollback risk" }),
         },
       });
       await assertAuditRollback({
@@ -455,7 +455,7 @@ describe("business mutation and audit atomicity", () => {
         path: "/api/ai/suggestions",
         options: {
           method: "POST",
-          body: JSON.stringify({ type: "next_action", title: "Rollback suggestion", context: {} }),
+          body: JSON.stringify({ type: "customer_profile", title: "Rollback suggestion", context: {} }),
         },
       });
       await assertAuditRollback({

@@ -85,10 +85,11 @@ function insertFixture(db, {
   });
   db.prepare(`
     INSERT INTO quick_records (
-      id, raw_content, source_channel, customer_id, opportunity_id, status
-    ) VALUES ($id, $rawContent, $sourceChannel, $customerId, $opportunityId, 'analyzed')
+      id, owner, raw_content, source_channel, customer_id, opportunity_id, status
+    ) VALUES ($id, $owner, $rawContent, $sourceChannel, $customerId, $opportunityId, 'analyzed')
   `).run({
     $id: ids.quickRecord,
+    $owner: account,
     $rawContent: `${marker} 快速记录`,
     $sourceChannel: marker,
     $customerId: ids.customer,

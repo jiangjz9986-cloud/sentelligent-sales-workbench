@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 const stateModule = await import("./workbenchState.js").catch(() => ({}));
@@ -29,13 +29,28 @@ function emptyCollections() {
 }
 
 function salesDataImports(source) {
-  const importedNames = source.match(
-    /import\s*\{([^}]*)\}\s*from\s*"[^"]*salesWorkbenchData\.js";/,
-  )?.[1] ?? "";
-  return importedNames
-    .split(",")
+  return [...source.matchAll(
+    /import\s*\{([^}]*)\}\s*from\s*"[^"]*salesWorkbenchData\.js";/g,
+  )]
+    .flatMap((match) => match[1].split(","))
     .map((name) => name.trim())
     .filter(Boolean);
+}
+
+// The sales workbench pages live in pages.jsx plus per-domain files under
+// pages/; guard assertions must cover the aggregated source text of all of them.
+function readSalesWorkbenchPagesSource() {
+  const barrelUrl = new URL("../features/salesWorkbench/pages.jsx", import.meta.url);
+  const pagesDirUrl = new URL("../features/salesWorkbench/pages/", import.meta.url);
+  const sources = [readFileSync(barrelUrl, "utf8")];
+  if (existsSync(pagesDirUrl)) {
+    for (const entry of readdirSync(pagesDirUrl).sort()) {
+      if (entry.endsWith(".jsx")) {
+        sources.push(readFileSync(new URL(entry, pagesDirUrl), "utf8"));
+      }
+    }
+  }
+  return sources.join("\n");
 }
 
 describe("workbench bootstrap state", () => {
@@ -159,11 +174,12 @@ describe("workbench bootstrap state", () => {
   });
 
   it("does not import static demo collections into production workbench state", () => {
-    const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
-    const pagesSource = readFileSync(
-      new URL("../features/salesWorkbench/pages.jsx", import.meta.url),
-      "utf8",
-    );
+    const appSource = [
+      readFileSync(new URL("../App.jsx", import.meta.url), "utf8"),
+      readFileSync(new URL("./SalesWorkbenchShell.jsx", import.meta.url), "utf8"),
+      readFileSync(new URL("./useWorkbenchData.jsx", import.meta.url), "utf8"),
+    ].join("\n");
+    const pagesSource = readSalesWorkbenchPagesSource();
     const forbiddenImports = [
       "actionSeeds",
       "customers",
@@ -210,7 +226,7 @@ describe("workbench bootstrap state", () => {
   });
 
   it("wires loading, empty, error, and retry states into the workbench shell", () => {
-    const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
+    const shellSource = readFileSync(new URL("./SalesWorkbenchShell.jsx", import.meta.url), "utf8");
 
     for (const testId of [
       "workbench-loading",
@@ -218,17 +234,17 @@ describe("workbench bootstrap state", () => {
       "workbench-error",
       "bootstrap-retry",
     ]) {
-      assert.match(appSource, new RegExp(`data-testid="${testId}"`));
+      assert.match(shellSource, new RegExp(`data-testid="${testId}"`));
     }
-    assert.match(appSource, /setBootstrapAttempt\(incrementBootstrapAttempt\)/);
+    assert.match(shellSource, /setBootstrapAttempt\(incrementBootstrapAttempt\)/);
     assert.doesNotMatch(
-      appSource,
+      shellSource,
       /data\.(customers|opportunities|actions|risks|knowledge)\.length\s*>\s*0/,
     );
   });
 
   it("applies every asynchronous deletion to the latest React collection state", () => {
-    const appSource = readFileSync(new URL("../App.jsx", import.meta.url), "utf8");
+    const handlersSource = readFileSync(new URL("./useWorkbenchHandlers.jsx", import.meta.url), "utf8");
     for (const setter of [
       "setWorkbenchCustomers",
       "setWorkbenchOpportunities",
@@ -237,12 +253,12 @@ describe("workbench bootstrap state", () => {
       "setWorkbenchRisks",
     ]) {
       assert.match(
-        appSource,
+        handlersSource,
         new RegExp(`${setter}\\(\\(current\\) => removeEntityById\\(current, id\\)\\)`),
       );
     }
     assert.doesNotMatch(
-      appSource,
+      handlersSource,
       /const remaining(?:Customers|Opportunities|Knowledge|Actions|Risks)\s*=/,
     );
   });

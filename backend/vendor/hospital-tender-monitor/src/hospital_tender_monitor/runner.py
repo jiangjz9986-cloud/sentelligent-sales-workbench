@@ -28,6 +28,7 @@ from .storage import Repository, RepositoryError, RunRecord
 
 logger = logging.getLogger(__name__)
 DEFAULT_REQUEST_INTERVAL_SECONDS = 0.2
+DEFAULT_SOURCE_REQUEST_BUDGET_SECONDS = 45.0
 
 
 class LockBusyError(RuntimeError):
@@ -189,12 +190,15 @@ class MonitorRunner:
             rules = self._rules()
             sources = self._sources()
             successful = failed = notice_count = inserted = revised = 0
-            classified_items: list[ClassifiedNotice] = []
             health_rows: list[SourceHealth] = []
             for source, adapter in sources:
                 source_id = str(source.get("id", ""))
                 try:
-                    result = adapter.fetch()
+                    request_budget = getattr(self.http_client, "request_budget", None)
+                    budget_context = request_budget(DEFAULT_SOURCE_REQUEST_BUDGET_SECONDS) \
+                        if callable(request_budget) else nullcontext()
+                    with budget_context:
+                        result = adapter.fetch()
                     raw_success = getattr(result, "success", None)
                     if type(raw_success) is not bool:
                         raise RuntimeError("source failure")
@@ -207,18 +211,22 @@ class MonitorRunner:
                         )
                     if not result.success:
                         raise RuntimeError("source failure")
-                    successful += 1
                     notices = tuple(result.notices)
                     notice_count += len(notices)
+                    source_items: list[ClassifiedNotice] = []
                     for notice in notices:
                         item = classify(notice, rules)
                         if item.level is RelevanceLevel.IRRELEVANT:
                             continue
-                        classified_items.append(item)
-                        if not dry_run:
-                            outcome = self.repository.save_notice(item, seen_at=self._now())
-                            inserted += int(outcome.inserted)
-                            revised += int(outcome.revised)
+                        source_items.append(item)
+                    if not dry_run and source_items:
+                        outcomes = self.repository.save_notices(
+                            source_items,
+                            seen_at=self._now(),
+                        )
+                        inserted += sum(int(outcome.inserted) for outcome in outcomes)
+                        revised += sum(int(outcome.revised) for outcome in outcomes)
+                    successful += 1
                     health = SourceHealth(
                         source_id,
                         self._now(),

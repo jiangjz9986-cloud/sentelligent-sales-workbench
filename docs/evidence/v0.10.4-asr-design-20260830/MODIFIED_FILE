@@ -1,0 +1,980 @@
+# v0.10.4 语音服务端化（ASR）· 实施级设计
+
+日期：2026-08-30 · 状态：**定稿，可直接拆分实施**
+实现基线：worktree `integrate-v0626-candidate`，分支 `local/v0627-feature-closeout-20260827`，当前 HEAD `0eb4ec485ff6ba7663045dab6cf7638486ea021e`。
+架构盘点快照：`2dc9b1114107aee906d0ecfb006ac461cdb86cec`；该提交仅用于说明最初源码盘点，不是本设计事务的当前 Git baseline。
+范围依据：总蓝图 `2026-08-28-grand-plan-v09-v10.md` 的 v0.10.4 行、前端审计 §2/§4.2/§6.2，以及 v0.10.2/v0.10.3 明确后移到本版的语音任务。
+
+> 本文以文件名、导出函数和路由为稳定锚点，不依赖易漂移行号。实现前必须以当前工作树重新核对锚点。
+
+## 0. 结论先行
+
+1. **服务端 ASR 成为最终转写主链**：浏览器用 `MediaRecorder` 采集一次性音频，上传到 `POST /api/asr/transcriptions`；服务端流式限额写入受保护临时目录，校验 MIME/魔数/音轨/时长，转为 16 kHz 单声道 PCM WAV，再交给唯一激活的 ASR provider。
+2. **Web Speech 退为增强，不再是唯一语音能力**：可用时只显示实时临时字幕；服务端成功结果才覆盖为“已完成服务端转写”。Web Speech 失败不得阻断录音上传，亦不得在服务端失败时伪装成服务端成功。
+3. **快速记录与 Web 小小共用同一采集与转写组件**：快速记录把转写回填到 `recordText`，仍需用户点“确认调用 AI 分析”；小小把转写回填到 `draft`，仍需用户点“发送”。**两处都不自动分析、不自动发送、不自动写业务数据。**
+4. **音频只存在于短时内存/请求生命周期**：浏览器 Blob 通常在成功、取消、丢弃、重录、卸载、logout 或 `pagehide` 时立即释放；只有网络中断、`ASR_IN_PROGRESS`、`ASR_CAPACITY_EXCEEDED`、`ASR_PROVIDER_BAD_RESPONSE`、`ASR_TIMEOUT` 可在同一挂载周期保留同一 Blob 与幂等 key，且每段新录音从 `sameBlobRetryCount=0` 开始、最多人工重试一次、硬 TTL 为 5 分钟。`INVALID_IDEMPOTENCY_KEY`、`ASR_TRANSCRIPT_EMPTY`、`IDEMPOTENCY_CONFLICT` 与 `ASR_RATE_LIMITED` 都立即释放当前 Blob/key 并要求重新录音。服务端文件权限 `0600`，工作目录 `0700`，所有成功、错误、超时和取消分支都在 `finally` 删除；不建音频表、不写对象存储、不进备份、不生成下载 URL。
+5. **明确不恢复长期录音与回放**：不恢复 v0.6.27 已裁撤的 MediaRecorder 长期保存、音频历史卡、上传录音库、下载或播放控件。`quick_records` 和助手历史只在用户后续确认动作后保存文本，永不保存原始音频。
+6. **v0.10.4 只实现一个冻结 provider**：配置字段仍显式保留，但本版只允许 `ASR_PROVIDER=openai-compatible`；缺配置、能力探测失败或 provider 异常均 fail closed，不在一次请求内静默切换。`local-whisper`/`whisper-cli` 进入后续版本非目标，不在本版创建适配器、配置、测试或发布承诺。
+7. **现有模型配置只复用安全基础设施，不假定 DeepSeek 支持语音**：复用 `secure_settings`、运行时 secret provider、超时/有界响应和服务账号预检模式；ASR model/base URL 与 `asr_api_key` 必须独立显式配置。现有 `secure_settings` 同时受数据库 CHECK 与 repository allowlist 限制，所以本版必须新增迁移 `0033_secure_settings_asr.mjs`，不能只在运行时代码中发明 key。只有适配器声明音频能力且同源校验通过时，才允许运维显式选择复用现有模型凭据；不得在独立 ASR key 缺失时静默回退到 DeepSeek key。
+
+---
+
+## 1. 目标、非目标与验收不变量
+
+### 1.1 本版目标
+
+- iPhone PWA、Safari、Chrome 和桌面浏览器都能录一段短语音并得到服务端中文转写。
+- 快速记录和 Web 小小共享捕获、上传、取消、重试、错误映射与无障碍交互，不复制两套底层状态机。
+- 音频格式、大小、时长、音轨、provider 响应和文本长度全部在服务端重新校验。
+- 会话 Cookie、Origin、CSRF、owner、角色、限流、幂等和并发闸与现有用户 API 一致。
+- provider 调用、外部命令、临时文件和响应读取都有硬超时、硬上限、取消传播和可证明清理。
+- 生产预检、受保护测试音频 smoke、回滚演练与无音频残留检查形成发布证据。
+
+### 1.2 明确非目标
+
+- 不保存、归档、同步、下载或回放录音；不增加 `audio_recordings`、附件或对象存储。
+- 不把录音加入 Service Worker、Cache Storage、IndexedDB、`localStorage`、`sessionStorage`、助手 history 或 SQLite。
+- 不给微信语音消息改协议；本版只覆盖 Web 快速记录与 v0.10.3 Web 对话面板。
+- 不做实时流式 ASR、WebSocket/SSE、说话人分离、时间戳字幕、自动摘要或自动写回。
+- 不自动把服务端 transcript 送入 AI：用户必须先看到、可编辑，再显式分析或发送。
+- 不把 DeepSeek chat model 当作语音模型；未经能力验证不得拼接 `/audio/transcriptions` 猜测可用性。
+- 不实现本地 Whisper provider；`local-whisper`、`whisper-cli`、本地模型下载/哈希/运维门禁全部后移，不得以预留文案宣称本版支持。
+- 不引入队列、Redis、独立媒体服务或长期任务表。
+
+### 1.3 硬不变量
+
+| 编号 | 不变量 | 证明方式 |
+| --- | --- | --- |
+| I-01 | 每个请求最多一个 provider 调用 | 幂等/并发单测 + provider spy 计数 |
+| I-02 | owner 只来自 `authContext.account` | HTTP 双账号测试；请求无 owner 字段 |
+| I-03 | 未登录、错误 Origin、错误 CSRF、机器令牌均不能调用 | HTTP 集成 401/403 矩阵 |
+| I-04 | 音频不进 DB、审计、日志、缓存与响应 | DB 前后表快照、日志扫描、响应 schema 断言 |
+| I-05 | 所有完成路径临时目录为零 | success/error/timeout/abort/cleanup-failure 测试 |
+| I-06 | 服务端结果只回填草稿，不自动分析/发送 | 前端单元 + 浏览器网络请求计数 |
+| I-07 | Web Speech 结果明确标“浏览器临时识别” | UI 状态机与文案断言 |
+| I-08 | 不出现播放、下载、历史音频入口 | 源码扫描 + DOM 测试 |
+| I-09 | provider key、Authorization、原文和音频字节不进入日志 | 注入 canary + 日志扫描 |
+| I-10 | 回滚至 v0.10.3 后业务文本链仍可用 | 回滚部署验收；Web Speech/文本入口回归 |
+
+---
+
+## 2. 当前源码事实与接入锚点
+
+### 2.1 快速记录现状
+
+`outputs/product-design-prototype/src/features/salesWorkbench/pages/QuickRecordPage.jsx`：
+
+- `getSpeechRecognitionConstructor()` 只读取 `window.SpeechRecognition` / `window.webkitSpeechRecognition`。
+- `startVoiceRecognition()` 配置 `lang="zh-CN"`、`continuous=true`、`interimResults=true`，通过 `onresult` 直接写 `recordText`。
+- `stopVoiceRecognition()`、组件卸载 `abort()` 和 `recognition.onerror` 已有基本状态处理，但没有 `MediaRecorder`、`getUserMedia`、音频上传或服务端 ASR。
+- `voiceCapturedRef` 只有收到最终浏览器转写时才为 true，随后 `analyzeQuickRecord()` 把 `sourceChannel` 标为“语音转写”。
+- `confirmAnalysisUnlocked()` 当前调用 `apiClient.analyzeQuickRecord(recordText, metadata)`，后者先建 quick record，再调 `/analyze`。本版只替换语音文本来源，不改变“用户确认后才创建/分析”的业务边界。
+- 语音 UI 已有 idle/listening/unsupported/error 和“开始/停止/改用文本”；实施时扩展为 capture/processing/succeeded/error/cancelled。浏览器 `fetch` 没有可靠上传进度事件，所以不伪造 uploading→transcribing 分界，保留已有分析互斥闸。
+
+`outputs/product-design-prototype/src/app/useQuickRecordSession.jsx`：
+
+- `recordMode` 默认 `voice`，`recordText` 是内存状态；正好承接服务端 transcript，不应把 Blob 加入 session 持久层。
+
+`outputs/product-design-prototype/src/components/MobileShell.jsx` 与 `SalesWorkbenchShell.jsx`：
+
+- 移动 FAB 只把 `recordMode` 置 `voice` 并导航到快速记录。入口保持不变，录音能力在页面内接入。
+
+### 2.2 现有快速记录 API
+
+`outputs/product-design-prototype/src/api/salesWorkbenchApi.js`：
+
+- `requestHeaders()` 为所有非 GET/HEAD 用户请求自动带 `X-CSRF-Token` 和 Cookie；调用方提供的 `Content-Type` 可覆盖 JSON 默认值，因此可安全增加 raw-audio 请求而不另造鉴权客户端。
+- `createQuickRecord()` → `POST /api/quick-records`；`analyzeQuickRecord()` → 创建后再 `POST /api/quick-records/:id/analyze`。
+
+`backend/src/validation/requests.js` 与 `backend/src/server.js`：
+
+- quick record 文本上限 50,000 字符；owner 由会话注入，关联客户/商机做 owner 校验。
+- `quickRecordOwnerScope()`、`requestOwner()` 已把列表、分析与确认收口到账号。
+- `/api/quick-records/preview` 与 `/analyze` 都走 `analyzeQuickRecord()`；ASR 不应绕过这些后续文本合同。
+
+### 2.3 Web 小小现状
+
+`outputs/product-design-prototype/src/app/useAssistantChat.js`：
+
+- `sendMessage()` 只发送 `draft.trim()` 到 `postAssistantChat()`；`applyResponse()` 管理确认卡和 bootstrap 刷新。
+- 本版新增“转写到 draft”的动作，不改变 `sendMessage()`、confirm/cancel 或 conversation 状态机。
+
+`outputs/product-design-prototype/src/components/assistant/AssistantChatPanel.jsx`：
+
+- 当前只有 2,000 字文本框与发送按钮；语音按钮应放在同一 composer 内。
+- 转写成功通过 `appendTranscriptToDraft(transcript)` 原子追加，精确计算 `candidate = existing + (existing && transcript ? "\n" : "") + transcript`；单次 transcript 与合并后 draft 均不得超过 2,000 字，超限时不截断、不写部分文本并保持原 draft 逐字不变。用户仍须点发送；pending confirmation 存在时禁用录音，与现有 textarea 一致。
+
+`backend/src/assistant/webChannel.js`、`webHttpHandlers.js` 与 `server.js`：
+
+- `/api/assistant/chat` 已有用户 Cookie、CSRF、owner、conversation 与 30/15min 限流。
+- ASR 是独立、无业务写入的用户端点；转写文本随后仍走既有 `/api/assistant/chat`，不得把音频塞进 `serverData.media` 或放开财务/微信媒体工具。
+
+### 2.4 模型与 secret 基线
+
+`backend/src/config.js`、`backend/.env.example`、`backend/src/modelAnalysis.js` 与 `server.js`：
+
+- 当前模型配置为 `MODEL_PROVIDER`、`MODEL_BASE_URL`、`MODEL_NAME`、`MODEL_API_KEY`、`MODEL_TIMEOUT_MS`；文本链固定调用 `/chat/completions`。
+- 生产运行时通过 `runtimeConfig.modelApiKeyProvider` 从加密 `secure_settings` 解析 DeepSeek key。
+- 当前迁移注册表最高为 `0032_weixin_bindings.mjs`；`0024` 已用于 `shortcut_advance_allocation`，因此 ASR 不能占用 `0024`，必须使用下一号 `0033_secure_settings_asr.mjs`。
+- `0015_secure_settings.mjs` 创建的表以 CHECK 只允许 `icost_webhook_token`、`deepseek_api_key`；`0021_secure_settings_pushplus.mjs` 重建表后才增加 `hospital_tender_pushplus_token`。`backend/src/settings/repository.js` 还有第二层 `ALLOWED_KEYS`。新增 `asr_api_key` 必须同时更新数据库 CHECK、repository metadata 与 admin write-only API，并以迁移测试证明既有 ciphertext/metadata 逐字节保留。
+- `readBoundedResponseText()`、`AbortSignal.timeout()` 和固定 JSON 解析已有可复用模式。
+- 当前配置没有已证实的 ASR endpoint/model；设计盘点机器上 `ffmpeg`、`ffprobe` 均未安装。实现与发布门禁必须显式补齐，不能用“本机测试未跑”替代；本版不探测或承诺 `whisper`/`whisper-cli`。
+
+### 2.5 临时文件与发布工具锚点
+
+- `backend/src/travelExpense/localDocumentTextExtractor.js`、`localPdfImageRenderer.js` 已采用 `mkdtemp`、文件 `0600`、固定参数 `spawn`、`finally rm`；ASR 在此模式上增加取消传播、清理复核与启动扫尾。
+- `scripts/production-preflight.mjs` 已能以 backend systemd 服务账号验证 Python/Tesseract/Poppler 的真实路径、可执行性、版本和身份；ffmpeg/ffprobe 必须复用同一 fail-closed 证据形态。
+- 根 `SECURITY.md` 明确录音、转写原文、凭据和生产配置不进入 Git、日志或发布目录。
+
+---
+
+## 3. 用户流程与统一前端状态机
+
+### 3.1 状态机
+
+统一 hook `useServerTranscription()` 暴露：
+
+```text
+idle
+  └─ startCapture → requesting_permission
+requesting_permission
+  ├─ stream ready → recording
+  ├─ denied/unavailable → error
+  └─ cancel/unmount → cancelled → idle
+recording
+  ├─ stop/min duration met → preparing
+  ├─ cancel/pagehide/max error → cancelled|error
+  └─ max duration reached → preparing (automatic stop)
+preparing
+  ├─ Blob validated client-side；sameBlobRetryCount=0 → processing
+  └─ invalid/empty → release Blob/key → error
+processing
+  ├─ 200 && current recordingGeneration → succeeded
+  ├─ explicit AbortController cancel → cancelled
+  ├─ Blob TTL reaches 5min → mark generation expired + abort active fetch + release Blob/key → error
+  ├─ stale/expired generation resolves or rejects → ignore late result；never mutate current draft/state
+  ├─ eligible transient && sameBlobRetryCount=0 && Blob<5min → retryable_error
+  ├─ eligible transient && sameBlobRetryCount=1 → release Blob/key → error
+  ├─ ASR_RATE_LIMITED → release Blob/key → rate_limited
+  └─ invalid/empty/conflict/other non-retryable → release Blob/key → error
+succeeded
+  └─ guarded apply transcript + release Blob/key → idle
+retryable_error
+  ├─ manual retry same Blob + same Idempotency-Key → sameBlobRetryCount=1 → processing
+  ├─ discard/re-record → release Blob/key → idle
+  └─ 5 min TTL/unmount → release Blob/key → idle
+rate_limited
+  ├─ enter → Blob/key already released；show retryAfterSeconds countdown
+  └─ countdown complete → idle；only a new recording may create a new key
+```
+
+每段新录音都创建单调递增的 `recordingGeneration`，并把 Blob、key、`sameBlobRetryCount=0`、AbortController、`blobCreatedAt`、固定 `expiresAt = blobCreatedAt + 300000` 与 TTL/countdown timer 绑定到该 generation；retry 不得重置或延长 expiresAt。每个 recorder/fetch/timer callback 都捕获 generation，并在改 transcript/draft/UI 前检查 `currentGeneration === capturedGeneration` 且未 expired；重录、cancel、关闭面板、logout、`pagehide`、unmount 会先使旧 generation 失效并 abort。旧 callback 只能清理自己拥有的资源，不得清空或覆盖新 generation 的 Blob/key/state；late success/error 一律丢弃。
+
+只有网络中断、`ASR_IN_PROGRESS`、`ASR_CAPACITY_EXCEEDED`、`ASR_PROVIDER_BAD_RESPONSE`、`ASR_TIMEOUT` 可进入 `retryable_error`；retry 必须由用户人工触发，且第二次请求发出前原子置为 `sameBlobRetryCount=1`，不得自动重试。Blob 创建后 5 分钟的 TTL timer 必须贯穿初次/重试 `processing`：到点先标记 generation expired，再以固定 abort reason `blob_ttl_expired` abort active fetch、释放 Blob/key/timer/按钮并要求重新录音；`blob_ttl_expired`、user cancel、unmount、logout、`pagehide` 的 AbortError 都不得分类为网络中断或 `same_blob_retryable`，随后到达的 resolve/reject 必须被 generation fence 忽略。5 分钟只是 Blob 保留上限，不增加重试次数。
+
+禁止从 `recording` 或 `processing` 直接触发 quick-record analyze 或 assistant send。状态只能表达客户端确知的事实；单次 `fetch` 生命周期统一显示“正在上传并转成文字”。
+
+### 3.2 快速记录流程
+
+1. 用户进入语音模式，移动端按住说话；桌面鼠标/键盘使用“开始/停止”切换。
+2. `MediaRecorder` 收集 Blob；若 Web Speech 可用，可并行显示灰色“浏览器临时识别”，但不改服务端状态。
+3. 停止后进入 `processing`；成功响应先验证单次 transcript ≤10,000 字，再按 `existing + (existing && transcript ? "\n" : "") + transcript` 计算候选文本。候选总长必须 ≤50,000 字；超限时不截断、不修改原 `recordText`，提示缩短重录或先删减已有文本。
+4. 页面标记 `sourceChannel="服务端语音转写"`，但只在用户点击“确认调用 AI 分析”后随 quick record 保存。
+5. 用户可编辑、清空、补录或改用文本。再次补录会生成新 key，不覆盖已确认文本。
+
+### 3.3 Web 小小流程
+
+1. composer 在无 pending confirmation 且在线时显示麦克风按钮。
+2. 录音/上传/转写状态取代发送按钮旁的空闲提示；已有 draft 不清空。
+3. 成功后调用 `appendTranscriptToDraft(transcript)`，以 `candidate = existing + (existing && transcript ? "\n" : "") + transcript` 计算候选 draft；只有单次 transcript 与 candidate 都 ≤2,000 字才一次性写入。任一超限都不截断、不写部分文本，原 draft 保持逐字不变；成功写入后聚焦 textarea，显示“已转成文字，请确认后发送”。
+4. **不调用 `postAssistantChat()`**。用户编辑后点发送，才进入既有 owner/conversation/确认模型。
+5. `assistant_chat` 单段服务端时长上限 60 秒、单次/合并后 draft 文本上限 2,000 字；`quick_record` 为 120 秒、单次 transcript 上限 10,000 字，已有文本与 transcript 合并后仍受既有 50,000 字业务上限约束。
+
+### 3.4 录音控件交互
+
+- touch/pen：`pointerdown` 开始、`pointerup` 停止；滑出按钮或 `pointercancel` 视为取消。
+- mouse：一次点击开始、再次点击停止，避免鼠标抬起即产生不足 300ms 的空录音。
+- keyboard：Space/Enter 切换开始/停止；Escape 取消。
+- 状态需有 `aria-live="polite"`；录音按钮有动态 `aria-label`，不用只有颜色的红点表达状态。
+- `visibilitychange(hidden)`、`pagehide`、路由离开、对话关闭、logout 与组件卸载统一：先 invalidate 当前 `recordingGeneration`，再停止 tracks、abort fetch、清 Blob/key、清 timer；success/cancel/discard 也立即释放。旧 generation 的任何 recorder/fetch/timer callback 都不得修改新 generation。只有状态机固定的五类 transient error、`sameBlobRetryCount=0` 且 Blob 创建后 `<5min` 才可保留；满 5 分钟即使 retry fetch 正在 processing 也必须标记 expired、abort、销毁并忽略 late result。`INVALID_IDEMPOTENCY_KEY`、`ASR_TRANSCRIPT_EMPTY`、`IDEMPOTENCY_CONFLICT`、`ASR_RATE_LIMITED` 立即释放。5 分钟是保留上限，不是无限 retry 窗口。
+- `MediaStreamTrack.stop()` 对全部 tracks 调用且可重复；不把 stream/Blob 放进 React 全局 context。
+
+### 3.5 格式能力选择
+
+`selectRecordingMimeType(MediaRecorder)` 按顺序探测：
+
+1. `audio/webm;codecs=opus`（Chromium）
+2. `audio/mp4;codecs=mp4a.40.2`（支持时的 Safari）
+3. `audio/mp4`
+4. `audio/ogg;codecs=opus`
+5. 浏览器默认 `MediaRecorder` MIME（仍须服务端从 Blob.type + 魔数重验）
+
+浏览器无 `getUserMedia`/`MediaRecorder` 时：Web Speech 可作为显式“浏览器临时转写”增强入口；否则引导文本输入。不能把“Web Speech 可用”当作服务端 ASR readiness。
+
+---
+
+## 4. HTTP API 合同
+
+### 4.1 路由选择
+
+只新增一个原始二进制端点：
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `POST` | `/api/asr/transcriptions?purpose=quick_record` | 快速记录转写，最长 120 秒 |
+| `POST` | `/api/asr/transcriptions?purpose=assistant_chat` | 小小 draft 转写，最长 60 秒 |
+
+选择 raw body 而非 JSON Base64/multipart：避免 Base64 33% 膨胀、避免整文件进 JS/Node 大 Buffer，也不为单文件请求引入 multipart 依赖。元数据全部由受控 query/header 表达，文件名不进入合同。
+
+### 4.2 请求
+
+```http
+POST /api/asr/transcriptions?purpose=quick_record HTTP/1.1
+Content-Type: audio/webm;codecs=opus
+Content-Length: <browser generated>
+Idempotency-Key: asr:<uuid>
+X-Audio-Duration-Ms: 12340
+X-ASR-Language: zh-CN
+X-CSRF-Token: <session csrf>
+
+<raw audio bytes>
+```
+
+规则：
+
+- `purpose` 必填且只接受 `quick_record|assistant_chat`。
+- `Content-Type` 忽略参数后只接受 `audio/webm|audio/ogg|audio/mp4|audio/wav`。
+- `Content-Encoding` 只允许缺省或 `identity`；拒绝 gzip/br 等压缩音频请求。
+- `Content-Length` 存在时必须为正十进制且 ≤8 MiB；缺失/分块传输仍由流式计数在第 8 MiB+1 字节立即终止。
+- `Idempotency-Key` 必填，trim 后匹配 `^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$`。
+- `X-Audio-Duration-Ms` 是客户端 UX 提示，只接受正整数但**不作为安全判断**；最终时长以 ffprobe 为准。
+- `X-ASR-Language` v1 只接受 `zh-CN` 或缺省（缺省=`zh-CN`）。
+- body 不能为空，不能混入 JSON/multipart boundary，不能接受客户端路径或文件名。
+
+### 4.3 成功响应
+
+HTTP 200：
+
+```json
+{
+  "requestId": "server-request-uuid",
+  "item": {
+    "transcript": "服务端转写后的可编辑文字",
+    "language": "zh-CN",
+    "durationMs": 12340,
+    "source": "server_asr",
+    "replayed": false
+  }
+}
+```
+
+- 同 key/同音频的 5 分钟内重放返回 200 且 `replayed:true`。
+- 不返回 provider 原始 body、模型名、音频 SHA、临时路径、音频 URL、字节或 credential 状态。
+- 响应头：`Cache-Control: no-store, max-age=0`、`Pragma: no-cache`、`X-Content-Type-Options: nosniff`。
+
+### 4.4 transcript 归一化
+
+- provider 文本必须为 string；NFC 归一、`\r\n`→`\n`、去首尾空白。
+- 拒绝 NUL、C0 控制字符（允许 `\n`/`\t`）和空文本。
+- 单次 `quick_record` transcript 上限 10,000 字；`assistant_chat` transcript 上限 2,000 字；超限不截断、不返回部分文本。快速记录与已有 `recordText` 合并后的业务总上限仍为 50,000 字，由前端候选合并与既有 quick-record 服务端合同双重校验。
+- 不在 ASR 层做客户匹配、摘要、敏感词替换或业务修正。
+
+### 4.5 错误码
+
+| HTTP | code | 条件 | 前端行为 |
+| --- | --- | --- | --- |
+| 400 | `AUDIO_BODY_REQUIRED` | 空 body | 回到可重录 |
+| 400 | `INVALID_IDEMPOTENCY_KEY` | key 缺失/格式错 | 立即释放当前 Blob/key；不得以新 key 重放同一音频，要求重新录音，新录音自然生成新 key |
+| 401 | `UNAUTHORIZED` | 无用户会话 | 走现有失效会话处理 |
+| 403 | `CSRF_INVALID` / `ORIGIN_NOT_ALLOWED` | 会话写保护失败 | 不重试，保持文本草稿 |
+| 403 | `MACHINE_SCOPE_DENIED` | 机器令牌命中现有全局 machine route 闸 | 不向机器开放，不进入 ASR handler |
+| 405 | `METHOD_NOT_ALLOWED` | 非 POST | `Allow: POST` |
+| 413 | `AUDIO_TOO_LARGE` | >8 MiB | 提示缩短录音 |
+| 415 | `AUDIO_MEDIA_TYPE_UNSUPPORTED` | MIME 不在 allowlist | 提示换浏览器/文本 |
+| 415 | `AUDIO_SIGNATURE_MISMATCH` | MIME 与魔数不符 | 丢弃 Blob，重新录 |
+| 422 | `AUDIO_INVALID` | 容器损坏、无音轨、多音轨/视频轨 | 丢弃并重录 |
+| 422 | `AUDIO_TOO_SHORT` | <300ms | 提示录音过短 |
+| 422 | `AUDIO_TOO_LONG` | quick >120s / assistant >60s | 提示缩短 |
+| 422 | `ASR_TRANSCRIPT_EMPTY` | provider 无有效文字 | 立即释放当前 Blob/key；不重放同一音频，提示未听清并要求重新录音 |
+| 422 | `ASR_TRANSCRIPT_TOO_LONG` | 超 purpose 文本上限 | 提示缩短录音，不截断 |
+| 409 | `IDEMPOTENCY_CONFLICT` | 同 owner+key 不同指纹 | 立即释放当前 Blob/key；不得换 key 重放同一音频，要求重新录音并由新录音生成新 key |
+| 409 | `ASR_IN_PROGRESS` | 同 key 正在处理 | `sameBlobRetryCount<1`、Blob `<5min` 时可在 `Retry-After: 1` 后人工用同 Blob/key 重试一次；不并发重发 |
+| 429 | `ASR_RATE_LIMITED` | 12 次/15min account+IP | 返回 `Retry-After=clamp(ceil(remainingWindowMs/1000),1,300)`；立即释放 Blob/key，倒计时后只能重新录音 |
+| 429 | `ASR_CAPACITY_EXCEEDED` | active uploads 4、temp bytes 32MiB、owner processing 1 或全局 processing 2 任一已满 | `sameBlobRetryCount<1`、Blob `<5min` 时可在 `Retry-After: 2` 后人工用同 Blob/key 重试一次 |
+| 500 | `ASR_TRANSCODE_FAILED` | ffmpeg 非 0、PCM 溢出/奇数、write/fsync、inode/mode/size/header/时长复核失败 | 丢弃 Blob，改用文本或重录 |
+| 502 | `ASR_PROVIDER_BAD_RESPONSE` | 上游拒绝/响应不合法 | 仅 `sameBlobRetryCount<1`、Blob `<5min` 时可人工用同 Blob/key 重试一次；再次失败立即释放并要求重新录音 |
+| 503 | `ASR_NOT_CONFIGURED` | provider/工具/readiness 不满足 | 提供文本或浏览器临时转写 |
+| 503 | `ASR_CLEANUP_FAILED` | 临时文件未能确认删除 | fail closed，不回 transcript |
+| 504 | `ASR_TIMEOUT` | 转码/provider/总处理超时 | 仅 `sameBlobRetryCount<1`、Blob `<5min` 时可人工用同 Blob/key 重试一次；再次失败立即释放并要求重新录音 |
+
+客户端主动 abort 或连接断开不尝试写 JSON；内部结果记为 `cancelled`，执行同一清理闸。
+
+### 4.6 CORS、退避与前端错误合同
+
+- `backend/src/http/security.js` 的用户 API CORS allowlist 必须显式加入 `X-Audio-Duration-Ms`、`X-ASR-Language`；沿用既有 `Content-Type`、`Idempotency-Key`、`X-CSRF-Token`，不得反射请求端任意 header。
+- `Access-Control-Expose-Headers` 必须加入 `Retry-After`。真实 `OPTIONS /api/asr/transcriptions?...` 要在允许 Origin 下返回上述 allow/expose 合同；错误 Origin 或请求未允许 header 必须 fail closed。
+- API client 仅把纯十进制、`1..300` 的 `Retry-After` 解析为 `retryAfterSeconds`；缺失、负数、零、小数、日期、超界或多值全部视为不可用，显示固定文案。
+- `ASR_RATE_LIMITED` 必须由服务端返回 `Retry-After = clamp(ceil(remainingWindowMs / 1000), 1, 300)`。`300` 秒只是下一次允许重新检查的上界提示，不承诺 15 分钟窗口届时已经结束；前端进入 `rate_limited` 时立即释放 Blob/key，只显示倒计时，倒计时完成后只允许重新录音，不显示“重试当前录音”。若该 code 的 header 被中间层剥离或不是合法 `1..300`，parser 仍返回 unavailable，hook 使用纯 UI 固定 `rateLimitCountdownSeconds = retryAfterSeconds ?? 300`；该 300 秒 fallback 不把非法 header 视为有效、不自动请求，也不改变服务端 15 分钟窗口。
+- 网络中断、`ASR_IN_PROGRESS`、`ASR_CAPACITY_EXCEEDED`、`ASR_PROVIDER_BAD_RESPONSE`、`ASR_TIMEOUT` 共享唯一同 Blob retry 合同：用户人工触发、同 Blob、同 `Idempotency-Key`、Blob `<5min`、`sameBlobRetryCount<1`；发出 retry 前计数置 1，后续失败立即释放 Blob/key 并要求重新录音。`retryAfterSeconds` 只控制人工操作的倒计时，绝不触发自动重试。
+- `INVALID_IDEMPOTENCY_KEY`、`ASR_TRANSCRIPT_EMPTY`、`IDEMPOTENCY_CONFLICT` 均立即释放当前 Blob/key，不允许换 key 重放同一音频；新录音自然生成新 key。未知错误不得展示 provider body、原始 header 或异常 message。
+
+---
+
+## 5. 服务端临时音频生命周期
+
+### 5.1 目录与权限
+
+- 生产根目录：`/run/sentelligent-asr`，由 systemd `RuntimeDirectory=sentelligent-asr` 创建，`RuntimeDirectoryMode=0700`。backend 全局 `UMask` 保持现有 `0027`，不得为 ASR 改成 `0077`；ASR 自己对每个目录显式 `0700`、每个文件用 `open(...,"wx",0o600)` 并复核实际 mode `0600`。
+- 每请求：`mkdtemp(join(tempRoot, "request-"))`，复核 `lstat` 为真实目录、owner=服务账号、mode 不宽于 `0700`，拒绝 symlink。
+- 输入与规范化输出用 `open(..., "wx", 0o600)`；路径完全由服务端生成。每次打开后立即 `fstat`，只接受 regular file、当前服务 uid、mode `0600`、link count=1。
+- 开发/测试允许注入 `tempRoot`，默认 `tmpdir()`；生产配置必须为绝对路径 `/run/sentelligent-asr`，不能落入 release、repo、数据库、备份或静态目录。
+
+### 5.2 阶段 A：流式上传
+
+新增 `backend/src/asr/audioBody.js`：
+
+1. 先按 Content-Length/MIME/Content-Encoding 快速拒绝。
+2. 使用 `stream/promises.pipeline(request, boundedHashTransform, writeStream, { signal })`；不 `Buffer.concat` 整段音频。
+3. transform 同时计算 byte count、SHA-256 和前 64 字节 magic；第 8 MiB+1 字节抛 `AUDIO_TOO_LARGE` 并销毁写流。
+4. 上传 wall timeout 60s；连续 15s 无数据视为超时。客户端 disconnect 触发统一 `AbortController`。
+5. 上传结束 `fsync`/close 后再进入校验，未 close 的 fd 不交给 ffprobe/provider。
+
+### 5.3 阶段 B：格式、魔数与媒体探测
+
+允许表：
+
+| MIME | 魔数/容器 | 典型编码 |
+| --- | --- | --- |
+| `audio/webm` | EBML `1A 45 DF A3` | Opus |
+| `audio/ogg` | ASCII `OggS` | Opus |
+| `audio/mp4` | 前 32 bytes 内合法 `ftyp` box | AAC |
+| `audio/wav` | `RIFF....WAVE` | PCM |
+
+ffprobe 固定调用（`shell:false`）：
+
+```text
+/usr/bin/ffprobe -v error -show_entries format=duration,format_name -show_entries stream=index,codec_type,codec_name,channels,sample_rate -of json <server-generated-input>
+```
+
+- 超时 3s，stdout+stderr 各 ≤64 KiB；非 0、JSON 不合法、NaN/Infinity 均映射 `AUDIO_INVALID`。
+- 必须恰好 1 条 audio stream、0 条 video stream；channel `1..2`，sample rate `8000..96000`。
+- 服务端权威时长：`300ms..purposeMax`，边界含 300ms/60s/120s。
+- MIME、magic、ffprobe format 三者必须相容；客户端 duration 与权威值偏差 >20% 只记 redacted metric，不用它放宽限制。
+
+### 5.4 阶段 C：规范化转码
+
+ffmpeg 固定调用（`shell:false`）：
+
+```text
+/usr/bin/ffmpeg -nostdin -hide_banner -loglevel error -i <input> -map 0:a:0 -vn -ac 1 -ar 16000 -c:a pcm_s16le -f s16le pipe:1
+```
+
+- Node 先以 `open(normalizedPath,"wx",0o600)` 预建目标文件，记录 `fstat` 的 `dev+ino+uid+mode+nlink`，写入 44-byte canonical WAV header placeholder：`RIFF`/size=0/`WAVE`/16-byte `fmt ` PCM、mono、16000 Hz、byteRate 32000、blockAlign 2、bitsPerSample 16、`data`/size=0。
+- ffmpeg 不接收目标路径，不使用 `-y`/`-n`，只把 raw `s16le` 写到 stdout。stdout 不能整段缓存；必须经过 bounded Transform，从文件 offset 44 流式写入同一预开 fd。
+- PCM 硬上限为 `3,840,000` bytes；第 `3,840,001` byte 到达时 Transform 立即 abort pipeline、向 child 发 `SIGTERM`，500ms 后仍存活再 `SIGKILL`。stderr 独立上限 64 KiB，stdout PCM 不进入日志或内存聚合。
+- 转码 timeout 15s；client abort、上限、write/fsync、child 非 0 等所有失败都走同一 TERM→500ms KILL 和 finally 清理，不留下打开 fd。
+- 成功后要求 PCM bytes >0 且为偶数；由 `pcmBytes/32000*1000` 计算规范化时长，必须仍在 purpose 上限内并与原始 ffprobe 时长差 ≤500ms。随后用定位写回 RIFF size=`36+pcmBytes`、data size=`pcmBytes`，`fsync`、close。
+- close 后重新 `lstat`，必须仍是同一 `dev+ino`、regular file、当前 uid、mode `0600`、nlink=1、size=`44+pcmBytes`；再解析完整 header，确认 mono/16k/16-bit PCM、两个 size 与实际长度一致。任何不一致 fail closed 并清理。
+- 不把 provider 自带转码当作服务端验证替代；唯一远端 provider 只接收上述可 seek、长度已回填且复核通过的规范化 WAV。
+
+### 5.5 阶段 D：识别
+
+`asrService.transcribe()` 只向 provider 传：
+
+```js
+{
+  audioPath: normalizedWavPath,
+  mediaType: "audio/wav",
+  language: "zh-CN",
+  durationMs,
+  purpose,
+  signal,
+  requestId,
+}
+```
+
+- provider timeout 45s；全阶段（上传结束后）硬上限 60s。
+- provider 返回后先做 §4.4 文本归一，再构造成功响应。
+- provider 不接收 owner、Cookie、CSRF、客户/商机上下文或助手 conversation；音频转文字是无业务上下文纯能力。
+
+### 5.6 阶段 E：finally 擦除
+
+伪代码：
+
+```js
+let result;
+let primaryError;
+try {
+  result = await runPipeline();
+} catch (error) {
+  primaryError = error;
+} finally {
+  abortChildren();
+  await closeAllHandles();
+  await removeAndVerify(workspace, { attempts: [0, 50, 200, 1000] });
+}
+if (cleanupFailed) throw new HttpError(503, "ASR_CLEANUP_FAILED", "Temporary audio cleanup failed");
+if (primaryError) throw primaryError;
+return result;
+```
+
+`removeAndVerify`：每次 `rm(workspace,{recursive:true,force:true})` 后 `lstat`；只把 `ENOENT` 视为成功。清理失败时不得返回 transcript；日志只记 requestId/errorCode，不记 path/原文。
+
+启动期 sweeper 必须在 server readiness 变为 ready 之前运行：重启后不存在合法活跃 ASR 请求，因此对名称匹配、真实目录、当前 uid、mode 不宽于 `0700` 的全部 `request-*` 无条件清除，不看 mtime；目录名不匹配、symlink 或 owner/mode 异常时不跟随/不删除，readiness 变 degraded 并拒绝新 ASR 请求。
+
+周期 sweeper 每 5 分钟只清理年龄 `>10min` 的合法 owned `request-*`，timer 必须 `unref()`。`server.close()` 必须停止 timer、阻止新请求、abort 全部 active upload/pipeline/provider、对 child 执行有界 TERM→500ms KILL、等待有界 `finally` cleanup；测试必须证明 close 后 `asr_inflight=0`、runtime dir 空且没有 ASR timer/fd/child/open handle。
+
+---
+
+## 6. Provider 抽象与配置复用
+
+### 6.1 接口
+
+```js
+export function createAsrProvider(config) {
+  return {
+    id,                 // 仅内部枚举，不进用户响应
+    readiness(),        // { ready, code }，不得含 secret/baseUrl 原文
+    transcribe(input),  // Promise<{ text, detectedLanguage?: string }>
+  };
+}
+```
+
+provider 只能读取规范化 WAV，不管理临时目录、不写 DB、不记录日志；`asrService` 独占生命周期与错误归一化。
+
+### 6.2 远端 OpenAI-compatible 适配器
+
+`backend/src/asr/providers/openAiCompatible.js`：
+
+- `ASR_BASE_URL` 先由 `new URL()` 严格解析：禁止 username/password、query、fragment；生产只允许 `https:`，测试只能通过显式 test dependency 注入允许 loopback HTTP，不得由生产 env 打开。
+- 保留 base pathname，不把 `/v1` 丢成根路径：将 pathname 规范化为恰好带一个尾 `/`，再执行 `new URL("audio/transcriptions", normalizedBaseUrl)`。固定矩阵：`https://host`/`https://host/`→`https://host/audio/transcriptions`，`https://host/v1`/`https://host/v1/`→`https://host/v1/audio/transcriptions`；禁止用前导 `/audio/transcriptions`、禁止重定向到其他 origin。
+- 用 Node 内建 `FormData` 与 `node:fs.openAsBlob(normalizedWavPath,{type:"audio/wav"})` 生成 file-backed Blob，发送 `file`、`model`、`language=zh`、`response_format=json`；必须在 WAV fsync/close/lstat/header 复核后才打开 Blob，并在 fetch 结束/abort 后释放引用。禁止 `readFile`、`Buffer.concat` 或 arrayBuffer 整体读取 ≤3,840,044-byte WAV，不引入 multipart npm 依赖；production preflight 必须验证运行时存在 `openAsBlob`，缺失即 fail closed。
+- `redirect:"error"`，Authorization 只来自 `asrApiKeyProvider()`；key 为空在发网前 `ASR_NOT_CONFIGURED`。
+- provider JSON 响应 byte 上限为 `256 KiB`（262,144 bytes）；第 262,145 byte 立即 abort。只接受 `{text:string}`，错误 body 不进入日志/对外响应。
+- 网络、4xx/5xx、超时和非法 JSON 映射为固定错误码；不得把 provider body、URL query 或 key 拼进 Error.message。
+
+### 6.3 Provider 冻结边界
+
+- v0.10.4 的 provider registry 只有 `openai-compatible`；config、factory、tests、preflight、smoke 和 release manifest 遇到其他值一律 fail closed。
+- 不创建 `localWhisper.js`，不增加 Whisper command/model env，不下载本地模型，也不写“二选一”发布门禁。未来版本若引入 local provider，必须重新设计模型供应链、资源预算、准确率与运维合同。
+
+### 6.4 配置合同
+
+`backend/.env.example` 新增（均为空/保守默认，不含真实值）：
+
+```dotenv
+ASR_MODE=disabled
+ASR_PROVIDER=openai-compatible
+ASR_BASE_URL=
+ASR_MODEL=
+ASR_TIMEOUT_MS=45000
+ASR_UPLOAD_MAX_BYTES=8388608
+ASR_QUICK_MAX_DURATION_MS=120000
+ASR_ASSISTANT_MAX_DURATION_MS=60000
+ASR_FFPROBE_COMMAND=/usr/bin/ffprobe
+ASR_FFMPEG_COMMAND=/usr/bin/ffmpeg
+ASR_TEMP_ROOT=/run/sentelligent-asr
+ASR_REUSE_MODEL_CREDENTIAL=false
+```
+
+两个字段职责必须分离，任何实现、测试、preflight 和操作手册都不得把它们合并：
+
+- `ASR_MODE` 是生命周期/kill-switch 枚举，只允许 `disabled|live`。`disabled` 时路由在创建临时目录、读取 body 或调用工具/provider 前返回 `503 ASR_NOT_CONFIGURED`；`live` 时才执行完整 readiness。
+- `ASR_PROVIDER` 是实现选择字段，v0.10.4 唯一允许值为 `openai-compatible`。它不是开关；即使 kill switch 把 mode 改成 `disabled`，provider 值仍保留，以便故障排除后按同一冻结配置恢复。
+- 未知 mode 或任何非 `openai-compatible` provider 在配置解析时 fail closed。`ASR_MODE=live` 时，provider 必须在 release manifest 和 evidence 中冻结，并要求独立 base URL/model/credential readiness。
+- 生产发布完成态必须为 `ASR_MODE=live` 且 provider readiness 全绿；`disabled` 只表示未启用或执行 kill switch，不能计为 v0.10.4 ASR 验收通过。
+
+生产 secret：
+
+- 数据库当前最高迁移为 `0032`，本版新增 `backend/src/db/migrations/0033_secure_settings_asr.mjs`。迁移沿用 `0021` 的完整列合同重建 `secure_settings_next`，仅把 `asr_api_key` 加入 `setting_key` CHECK；在同一 `BEGIN IMMEDIATE` 迁移事务内复制全部既有行和 delivery metadata，校验 row count、key 集合及 ciphertext/metadata 逐字节一致后替换旧表。不得解密、打印或复制为明文字段。
+- `backend/src/db/migrate.js` 必须注册 `0033`；`backend/src/settings/repository.js` 新增 `ASR_SETTING_KEY="asr_api_key"`、更新 `ALLOWED_KEYS` 与 `listMetadata().asr`。未知 key 仍 fail closed。
+- `GET /api/settings/security` 只增加 `asr` 的 configured/masked/status/timestamps metadata；admin-only `PUT /api/settings/asr-api-key` 只接收一次明文并立即加密，`DELETE /api/settings/asr-api-key` 要求显式 `confirmation:"CLEAR"`。响应、审计、日志、错误和前端状态都不得回显 key；member、machine token、错误 CSRF/Origin 必须被拒绝。
+- `runtimeConfig.asrApiKeyProvider` 在 `ASR_REUSE_MODEL_CREDENTIAL=false` 时只解析 `asr_api_key`，缺失或 cleared 就 fail closed，不读取 `deepseek_api_key`，也不提供同名环境回退。
+- `ASR_REUSE_MODEL_CREDENTIAL=true` 是显式选择而不是 fallback：只有 ASR adapter 声明 `credentialCompatibility="model"`、ASR/模型 base URL 同 origin、provider capability probe 明确支持配置的 ASR model 时才允许启动；启用后固定使用 model secret provider，不先试 ASR key、失败后再切换。当前 DeepSeek chat 基线不满足，默认 false，生产未形成专项证据时必须保持 false。
+
+### 6.5 复用原则
+
+| 可复用 | 禁止复用/混用 |
+| --- | --- |
+| `secure_settings` 加密保存、metadata-only 展示与 `0033` 表重建模式 | 不绕过数据库 CHECK/repository allowlist 动态写新 key |
+| `modelApiKeyProvider` 的动态 secret-provider 形态 | 不在代码里把 `/chat/completions` 改成猜测的音频路径 |
+| `readBoundedResponseText` 与 timeout/error sanitization | 不把模型 fallback/mocked analysis 当 ASR 成功 |
+| production-preflight 服务账号探测框架 | 不因 Web Speech 可用跳过服务端 readiness |
+| backend Node built-ins 与现有无依赖风格 | 不加入音频/凭据到前端环境变量 |
+| 显式 credential source 与 capability probe | 不因 `asr_api_key` 缺失静默复用 DeepSeek key |
+
+---
+
+## 7. 鉴权、Owner、CSRF、RBAC、幂等与资源闸
+
+### 7.1 鉴权与 RBAC
+
+- 路由放在 `request.authContext` 与全局 CSRF 解析之后；只允许 `requestIdentity.kind === "user"`。
+- member/admin 都可转写自己的录音；无需 admin 角色。停用账号按现有 session/user 规则失效。
+- 不把 ASR 路由加入任何 `INTEGRATION_ROUTES` 或 machine allowlist；Bearer machine token 先命中现有全局 route scope 闸，固定返回 `403 MACHINE_SCOPE_DENIED`，不进入 ASR handler，也不新增/伪造 `ASR_USER_REQUIRED`。
+- `owner := authContext.account` 只用于限流和幂等作用域；请求无 owner、account、targetAccount 字段。
+- ASR 不读写客户/商机/quick record/assistant 表，不存在 admin 代转或跨账号查询。
+
+### 7.2 Origin 与 CSRF
+
+- 复用 `corsHeaders(origin, config)`；不放宽 allowed origins。为该端点精确更新 `backend/src/http/security.js`：Allow-Headers 加 `X-Audio-Duration-Ms`、`X-ASR-Language`，Expose-Headers 加 `Retry-After`，并覆盖真实 OPTIONS。
+- Cookie 写请求必须 `assertCsrfToken`；前端复用 `requestApi` 自动注入 token。
+- 不接受 `Authorization`、`X-CSRF-Token` 的调用方覆盖，沿用 `requestHeaders()` 清洗规则。
+
+### 7.3 幂等
+
+进程内有界 TTL cache（不进 SQLite）：
+
+- key = `HMAC(authSessionSecret, owner + "\0" + Idempotency-Key)`；日志只允许前 12 位摘要。
+- fingerprint = SHA-256(`purpose + canonicalMime + audioSha256 + authoritativeDurationMs`)。
+- TTL 5 分钟、最多 256 completed entries；LRU 超限先删过期，再删最旧 completed，不驱逐 pending。
+- 同 key+同 fingerprint completed → replay；pending → `ASR_IN_PROGRESS`；不同 fingerprint → `IDEMPOTENCY_CONFLICT`。conflict 只拒绝当前请求，不得删除或改写原 key 对应的 pending/completed entry。
+- 成功才写 completed transcript；网络中断、provider bad response/timeout、取消、转码、empty、cleanup 等未成功终态都删除本请求的 pending reservation，`ASR_IN_PROGRESS` 保留原 pending entry。服务端释放 reservation 不等于客户端可重放：客户端只有固定 transient 集合可在 `sameBlobRetryCount<1` 时用同 Blob/key 人工重试一次。
+- `INVALID_IDEMPOTENCY_KEY` 未创建 reservation；`ASR_TRANSCRIPT_EMPTY` 删除当前 reservation；`IDEMPOTENCY_CONFLICT` 保留原 entry。三者的客户端都必须立即释放当前 Blob/key、要求重新录音，禁止用“换 key 重放同一音频”规避幂等语义。
+- 重启后幂等窗口自然消失；这是有意的短时隐私边界，不新增持久 transcript 副本。
+
+### 7.4 限流与并发
+
+- account+remoteAddress：12 次/15 分钟，复用 `login_rate_limits` 的 HMAC key 形态，前缀 `asr-web:`，与 assistant 限流独立。命中 `ASR_RATE_LIMITED` 时，服务端固定返回正整数 `Retry-After = clamp(ceil(remainingWindowMs / 1000), 1, 300)`；300 秒仅是再次检查提示，不缩短或重置 15 分钟限流窗口。
+- 固定资源顺序：鉴权/Origin/CSRF/config → request-count 限流 → active-upload/temporary-byte gate → bounded upload 与 magic 验证 → 获取单 owner/全局 processing slot → ffprobe → ffmpeg → provider → cleanup → 最后释放 processing slot。不得在完整上传和 magic 通过前占用稀缺 processing slot。
+- 全进程 active uploads 上限 4；所有 ASR workspace 中已接收临时音频 bytes 总和上限 32 MiB。已知 Content-Length 先原子 reservation，未知长度随 chunk 原子累加；任一上限达到立即 429/abort，并在失败/cleanup 中精确归还，不排队、不读满后再拒绝。
+- 单 owner 同时 1 个 processing；全进程同时 2 个 ffprobe/ffmpeg/provider pipeline。processing slot 覆盖最终 cleanup，只有清理验证完成后才在 `finally` 释放；重复 key 不占第二 provider slot。
+- 上传前消耗 request-count 限流；上传失败仍计请求次数，但不得调用 ffprobe/ffmpeg/provider。provider spy/metrics 必须证明 8MiB+1、magic mismatch、upload capacity 拒绝的 provider calls delta=0。
+- 达到容量立即 429，不把请求排队到内存；`ASR_CAPACITY_EXCEEDED` 客户端仅在 Blob `<5min` 且 `sameBlobRetryCount<1` 时可在 `Retry-After` 后人工用同 Blob/key 重试一次。`ASR_RATE_LIMITED` 不属于容量重试分支，客户端已释放音频，只能在倒计时后重新录音。
+
+---
+
+## 8. 前端模块设计
+
+### 8.1 纯能力层
+
+新增 `outputs/product-design-prototype/src/audio/recordingCapabilities.js`：
+
+- `selectRecordingMimeType()`、`normalizeRecorderMimeType()`、purpose 时长上限。
+- 只做纯函数，覆盖 Safari/Chromium/unsupported matrix。
+
+新增 `src/audio/serverTranscription.js`：
+
+- `createTranscriptionIdempotencyKey()` 使用 `crypto.randomUUID()`。
+- `transcribeAudio(apiClient,{blob,purpose,durationMs,key,signal})`；不直接触碰页面状态。
+- 错误 code → 中文可操作文案的纯映射；未知错误用固定文案，不展示 provider message。
+
+### 8.2 统一 hook 与组件
+
+新增 `src/audio/useServerTranscription.js` 与 `src/components/audio/VoiceCaptureControl.jsx`：
+
+- hook 独占 MediaStream/MediaRecorder/Blob/AbortController/timer/optional SpeechRecognition refs；另以单调 `recordingGeneration` 绑定每次录音的 Blob/key/retry count/controller/timers 和固定 `expiresAt = blobCreatedAt + 300000`，retry 不得续期。
+- 所有异步 callback 在写 transcript/draft/state 或释放共享 ref 前执行 generation/expired fence；重录、cancel、关闭面板、logout、`pagehide`、unmount 先 invalidate+abort，旧 callback 只能释放其 own resources，late result 不得污染新录音。
+- component 只渲染状态、时长、开始/停止/取消/重试；无播放元素、无 object URL。
+- 每段新录音初始化 `sameBlobRetryCount=0`。同 Blob retryable 集合固定为网络中断、`ASR_IN_PROGRESS`、`ASR_CAPACITY_EXCEEDED`、`ASR_PROVIDER_BAD_RESPONSE`、`ASR_TIMEOUT`；人工 retry 必须同时满足同一挂载周期、同 Blob、同 key、Blob 创建后 `<5min`、`sameBlobRetryCount<1`，发请求前原子把计数置为 1，绝不自动 retry。
+- retry 后再次收到上述任一失败，或用户试图第二次 retry，hook 必须立即释放 Blob/key、清 timer/按钮并进入不可重试 `error`，要求重新录音。5 分钟只限制保留时长，不增加 retry 次数；TTL timer 在 retry `processing` 期间继续运行，到点以 `blob_ttl_expired` 标记 generation expired、abort active fetch、释放资源并忽略 late result；TTL/user/unmount/logout/pagehide AbortError 不得映射为网络 retryable。
+- `ASR_RATE_LIMITED` 不在同 Blob retryable 集合；hook 进入独立 `rate_limited` 状态前立即释放 Blob/key，再以 `rateLimitCountdownSeconds = retryAfterSeconds ?? 300` 显示倒计时。倒计时结束回到 `idle`，只允许重新录音并自然生成新 key，不显示“重试当前录音”、不自动重试；missing/invalid header 的 300 秒只是客户端再次检查 fallback。
+- `INVALID_IDEMPOTENCY_KEY`、`ASR_TRANSCRIPT_EMPTY`、`IDEMPOTENCY_CONFLICT` 明确立即释放当前 Blob/key且要求重新录音；其他 HTTP validation/security/not-configured/cleanup/too-large/too-long 错误同样立即释放。success/cancel/discard/unmount/logout/pagehide 立即释放；TTL 到点 timer 主动清除 Blob、同一 key 与 retry 按钮。
+- 录音 max 到点自动 stop；client 先拒绝明显 >8MiB，但服务端仍权威。
+- optional Web Speech 文本通过 `onInterimText` 显示，不直接持久化。
+- 原生 `fetch` 不提供可靠上传进度；hook 从请求发出到 200/错误只暴露一个 `processing`，不根据 Promise/计时器伪造 uploading/transcribing 状态。
+
+### 8.3 API client
+
+`salesWorkbenchApi.js` 增：
+
+```js
+async transcribeAudio({ blob, purpose, durationMs, idempotencyKey, signal })
+```
+
+调用 `requestApi("/api/asr/transcriptions?...", {method:"POST", headers:{Content-Type, Idempotency-Key, X-Audio-Duration-Ms, X-ASR-Language:"zh-CN"}, body:blob, signal})`。
+
+- 沿用 Cookie/CSRF；不得手写 Authorization。
+- `assertTranscriptionResponse()` 验证成功 schema 与 purpose 文本上限。
+- 错误适配器返回固定 `lifecycle` 分类：网络中断/`ASR_IN_PROGRESS`/`ASR_CAPACITY_EXCEEDED`/`ASR_PROVIDER_BAD_RESPONSE`/`ASR_TIMEOUT` 为 `same_blob_retryable`；`ASR_RATE_LIMITED` 为 `rate_limited`；`INVALID_IDEMPOTENCY_KEY`/`ASR_TRANSCRIPT_EMPTY`/`IDEMPOTENCY_CONFLICT` 及其他 validation/security/config/cleanup 错误为 `release_and_rerecord`。hook 只依据该白名单状态转换，未知 code 默认释放。
+- 错误适配器只把 `Retry-After` 的 `1..300` 纯十进制秒解析为 `retryAfterSeconds`；其他形式返回 `null` 并使用固定文案，绝不自动 retry。只有 `ASR_RATE_LIMITED` 的 hook 对 `null` 应用固定 300 秒 UI fallback；`rate_limited` 倒计时只开放新录音，`same_blob_retryable` 仍须检查 `sameBlobRetryCount<1`、Blob `<5min` 与当前 `recordingGeneration`。
+- abort 不触发全局 unauthorized；现有 `requestApi` 已检查 `!options.signal?.aborted` 后才处理 401。
+
+### 8.4 快速记录接入
+
+`QuickRecordPage.jsx`：
+
+- 用 `VoiceCaptureControl` 替换当前“开始/停止”底层；保留语音/文本 segmented、分析闸和历史链。
+- `onTranscript` 先断言单次 transcript ≤10,000，再精确计算 `candidate = existing + (existing && transcript ? "\n" : "") + transcript`；只有 candidate ≤50,000 才一次性写入并设置 `voiceCapturedRef.current=true`，否则保持 existing 原文逐字不变。sourceChannel 改为“服务端语音转写”。
+- 任何 transcript 变化调用现有 `resetAnalysis("内容已变化，请重新确认分析")`，不绕过 IME 守卫。
+- 历史记录载入、新建记录、切文本、路由卸载都会 cancel/discard。
+- Web Speech interim 不触发 `resetAnalysis`，避免临时字幕清空已生成分析。
+
+### 8.5 Web 小小接入
+
+`useAssistantChat.js` 增 `appendTranscriptToDraft(text)` 纯状态动作；`AssistantChatPanel.jsx` composer 放共享控件：
+
+- pending/busy/offline 时禁用。
+- 当前 `recordingGeneration` 的 `onTranscript` 只调用 `appendTranscriptToDraft(transcript)`；该动作必须用 React functional state update 或等价原子动作读取响应到达时的最新 `existing`，精确计算 `candidate = existing + (existing && transcript ? "\n" : "") + transcript`。只有单次 transcript 与 candidate 都 ≤2,000 字时才一次性写 candidate；任一超限都不截断、不写部分文本，显示“录音内容过长，请缩短重录”，原 draft 保持逐字不变。无论候选写入或因本地上限拒绝，成功 ASR generation 的 Blob/key 都立即释放；stale generation 不调用该动作。
+- 关闭面板触发 cancel；重开没有 Blob/录音恢复。
+- assistant history 仍只在发送后出现文本；sessionStorage 不存未发送 transcript。
+
+### 8.6 文案与视觉
+
+状态文案固定：
+
+| 状态 | 主文案 | 次文案 |
+| --- | --- | --- |
+| permission | 正在请求麦克风 | 请在浏览器中允许访问 |
+| recording | 正在录音 | 松开结束；最长 2 分钟/1 分钟 |
+| processing | 正在上传并转成文字 | 音频只用于本次转写；完成后先回填草稿 |
+| succeeded | 已转成文字 | 请确认或修改后继续 |
+| retryable_error | 转写未完成 | 可人工重试一次或改用文本 |
+| rate_limited | 请求过于频繁 | 等待 1..300 秒或固定 300 秒 fallback 倒计时后重新录音 |
+| error | 转写未完成 | 请重新录音或改用文本 |
+| interim | 浏览器临时识别 | 以服务端最终结果为准 |
+
+不出现“录音已保存”“查看录音”“播放”“下载”“历史录音”等文案。
+
+---
+
+## 9. 可观测性与数据最小化
+
+### 9.1 允许记录
+
+结构化字段白名单：
+
+```text
+requestId
+ownerScopeHash (HMAC 截断，不是账号)
+purpose
+canonicalMediaType
+bytesBucket (<1MiB|1-4MiB|4-8MiB)
+durationBucket (<15s|15-60s|60-120s)
+providerId (内部枚举)
+stage (upload|probe|transcode|provider|cleanup)
+outcome/errorCode
+elapsedMs
+replayed
+cleanupVerified
+```
+
+指标：
+
+- `asr_requests_total{purpose,provider,outcome,error_code}`
+- `asr_provider_calls_total{provider,outcome}`
+- `asr_stage_duration_ms{stage,purpose}` histogram
+- `asr_audio_duration_ms{purpose}` histogram
+- `asr_inflight` gauge
+- `asr_active_uploads` / `asr_temp_bytes` gauges
+- `asr_cleanup_failures_total`
+- `asr_stale_temp_directories` gauge
+
+新增 `backend/src/asr/metrics.js`，不得依赖外部 metrics 服务：
+
+- 维护进程启动以来的有界 counters/gauges，以及最多 512 条完成事件的 ring；ring 满只覆盖最旧完成事件，不保存 pending body，不按 owner 建 map。
+- ring 事件只含 `completedAt/purpose/provider/outcome/errorCode/totalMs/providerMs/cleanupVerified`；不含 requestId、owner/account/hash、transcript、音频、路径、URL、key 或 header。p95 只从当前 ring 的有效数值样本计算，样本不足时返回 `null`。
+- counters、ring、p95 窗口在进程重启后清零；metadata 明确返回 `startedAt`、`capacity=512`、`sampleCount`、`oldestCompletedAt`、`newestCompletedAt`，不得伪装成跨重启累计。
+- Slice C 新增 admin-only `GET /api/admin/asr/status`：沿用用户会话、全局 machine scope 与 `requireAdminRole`，返回上述 metadata、requests/providerCalls/outcome counts、inflight/activeUploads/tempBytes、p95、cleanupFailures/staleTempDirectories；`Cache-Control:no-store`，不返回 ring 明细或任何正文。
+- smoke 先取 before snapshot，再执行受保护 fixture，最后取 after snapshot，以 delta 证明 provider calls、inflight 归零、p95、cleanup/stale；并发测试和 server.close 测试证明 gauges 不泄漏。
+
+### 9.2 禁止记录
+
+- 音频 bytes/Base64、音频 SHA 全值、文件名、临时绝对路径。
+- transcript、Web Speech interim、provider request/response body。
+- owner/account、Cookie、CSRF、Authorization、API key、base URL query。
+- ffmpeg raw PCM stdout、ffmpeg/ffprobe stderr 原文；只保留有界 byte count、退出码、signal 和映射 errorCode。
+
+### 9.3 审计与数据库
+
+- ASR 本身不是业务写入，不插 `audit_log`，避免 transcript 再复制一份。
+- 用户后续创建 quick record 或发送 assistant message 时，沿用现有文本业务审计/历史，不额外引用音频 requestId。
+- 自动化测试对所有表做 ASR 前后 row-count/checksum 比较；除复用限流计数外无变化。限流表只含 HMAC key/count/time。
+
+---
+
+## 10. 文件边界与可并行实施切片
+
+### Slice A0：Secure Settings 迁移与管理入口（共享集成，必须最先完成）
+
+**只改/新增**：
+
+- `backend/src/db/migrations/0033_secure_settings_asr.mjs`
+- `backend/src/db/migrate.js`
+- `backend/src/settings/repository.js`
+- `backend/src/server.js` 中 `/api/settings/security`、`/api/settings/asr-api-key` 的精确区块
+- `backend/tests/migrations.test.js`
+- `backend/tests/settings-config-api.test.js`
+
+交付：把 `asr_api_key` 加入数据库 CHECK 与 repository allowlist；既有 ciphertext/metadata 逐字节保留；GET 只返回 mask/metadata；admin 可一次性写入、替换、显式清除，任何响应/审计/日志均无明文。迁移必须覆盖“从 0021 结构直接升级”和“完整 0032 数据库升级”两条路径，验证 migration ledger/checksum、重复启动幂等、未知 key 拒绝和事务失败原表不变。
+
+这是共享集成切片，不与 C 同时写 `server.js`；由主控先完成、验证、形成独立 commit，A–G 再基于它继续。不得在本切片实现 ASR route/provider，也不得复用或迁移 DeepSeek secret 值。管理员前端卡片与 API client 方法归 Slice G，避免让迁移切片同时改业务 UI。
+
+### Slice A：合同、配置与纯校验（依赖 A0，可独立）
+
+**只改/新增**：
+
+- `backend/src/asr/contracts.js`
+- `backend/src/asr/audioValidation.js`
+- `backend/src/config.js`
+- `backend/.env.example`
+- `backend/tests/asr-config.test.js`
+- `backend/tests/asr-validation.test.js`
+
+交付：阈值、MIME/magic、query/header、transcript 归一、`ASR_MODE=disabled|live`、唯一 `ASR_PROVIDER=openai-compatible` 与 config production guards。任何其他 provider 值 fail closed；不得碰 `server.js`、前端或 provider 网络。
+
+### Slice B：临时生命周期、ffprobe/ffmpeg 与 provider（依赖 A，可并行前端）
+
+**只改/新增**：
+
+- `backend/src/asr/audioBody.js`
+- `backend/src/asr/mediaTools.js`
+- `backend/src/asr/asrService.js`
+- `backend/src/asr/idempotencyCache.js`
+- `backend/src/asr/metrics.js`
+- `backend/src/asr/providers/openAiCompatible.js`
+- `backend/tests/asr-service.test.js`
+- `backend/tests/asr-provider.test.js`
+- `backend/tests/asr-metrics.test.js`
+
+交付：raw PCM stdout→预开 WAV fd 的硬上限/回填合同、全路径 cleanup/cancel/timeout/idempotency/concurrency、512 ring/counters/gauges。所有外部进程和 fetch 都通过注入 fake 测试；不得改 route/UI，不得新增 local provider。
+
+### Slice C：HTTP 与安全边界（依赖 A0+A+B）
+
+**只改/新增**：
+
+- `backend/src/asr/http.js`
+- `backend/src/http/security.js`（CORS Allow/Expose 精确增量）
+- `backend/src/server.js`（主控共享文件，精确接线）
+- `backend/tests/asr-http-integration.test.js`
+- `backend/tests/asr-owner-isolation.test.js`
+- 现有 CORS/security 专项测试文件的 OPTIONS、Allow-Headers、Expose-Headers 回归
+
+交付：单路由、现有 `MACHINE_SCOPE_DENIED`、Cookie/CSRF/Origin/user-only、owner、资源顺序、限流、Retry-After/CORS、错误/响应头，以及 admin-only `/api/admin/asr/status` metadata snapshot；把 `runtimeConfig.asrApiKeyProvider` 精确接到 A0 已落地的 `ASR_SETTING_KEY`，默认只读 `asr_api_key`，不得在 key 缺失时回退 DeepSeek。不得修改 quick record/assistant 业务 endpoint。
+
+### Slice D：前端录音能力层（依赖 A0 的共享 API 文件落定，可与 A/B 并行）
+
+**只改/新增**：
+
+- `outputs/product-design-prototype/src/audio/recordingCapabilities.js`
+- `.../src/audio/serverTranscription.js`
+- `.../src/audio/useServerTranscription.js`
+- `.../src/components/audio/VoiceCaptureControl.jsx`
+- 对应 `*.test.js` / `scripts/asr-capture.test.mjs`
+- `.../src/api/salesWorkbenchApi.js` + 专项 API 测试
+
+交付：统一 `processing` 状态机、`recordingGeneration` async fence、MediaRecorder/Web Speech 增强、Blob ≤5min retry/立即释放矩阵、固定 expiresAt 不因 retry 延长、retry processing 到点以 `blob_ttl_expired` abort+late-result discard、bounded `retryAfterSeconds` 与 rate-limit 300 秒 fallback、cleanup、API client。不得接页面，不引入 XHR 或伪上传进度。
+
+### Slice E：快速记录接线（依赖 C+D）
+
+**只改**：
+
+- `QuickRecordPage.jsx`
+- 快速记录专项页面/模型测试
+- 必要的 `global.css` 精确区块（共享文件，主控复核）
+
+交付：服务端 transcript 回填、人确认后分析、历史/重录/切页取消；无音频播放/持久化。
+
+### Slice F：Web 小小接线（依赖 C+D，可与 E 并行）
+
+**只改**：
+
+- `useAssistantChat.js`
+- `AssistantChatPanel.jsx`
+- `assistant-chat.test.mjs` / `assistant-fab.test.mjs` 必要扩展
+- 与 E 协调同一 `global.css` 区块，避免并发覆盖
+
+交付：当前 generation 的 transcript 以响应到达时最新 draft 做原子 candidate 追加，2,000 上限拒绝时原文不变、Blob/key 仍释放；stale generation 不写 draft，不自动 send，pending/offline/close 状态正确。
+
+### Slice G：生产工具、证据与发布（依赖 A–F）
+
+**只改/新增**：
+
+- `scripts/production-preflight.mjs` + tests
+- `scripts/asr-production-smoke.mjs` + tests
+- `scripts/asr-runtime-cleanup.mjs` + tests（版本化、逐项 lstat、non-following，不使用 shell glob）
+- `scripts/production-https-smoke.mjs`（只加 readiness/合同，不嵌音频）
+- systemd 部署模板/操作手册中 ASR runtime directory 与工具门禁
+- `outputs/product-design-prototype/src/api/salesWorkbenchApi.js` 的 ASR Key metadata/save/clear 方法与 API 测试
+- `outputs/product-design-prototype/src/features/settings/SystemSettingsPage.jsx` 的管理员 ASR Key 卡与设置页测试
+- `README.md`、`CHANGELOG.md`、`VERSION`、三个 package version、`docs/releases/v0.10.4.md`
+
+交付：服务账号工具探测、临时目录/cleanup drill、受保护 out-of-repo 语音 fixture smoke、`/api/admin/asr/status` before/after delta、metadata-only/write-only 管理员 ASR Key 卡与回滚证据。password input 提交后清空，页面/API 响应绝不回显明文。
+
+**共享文件互斥**：`migrate.js`、`settings/repository.js`、`server.js`、`config.js`、`salesWorkbenchApi.js`、`SystemSettingsPage.jsx`、`global.css`、package/version/release 文档只能由主控在各 slice 完成后顺序集成。A0 必须先于 A–G；每个 slice 独立 commit，不得让并行线程同时写同一共享文件。
+
+---
+
+## 11. 完整测试矩阵与量化阈值
+
+### 11.0 Secure Settings 迁移与管理入口（≥16）
+
+- 从 `0021` 结构直接执行 `0033`：DeepSeek/iCost/PushPlus 既有 active/cleared 行、ciphertext、timestamps 与 delivery metadata 逐字段相等；新 `asr_api_key` 可写，任意未知 key 仍触发 CHECK。
+- 从已跑到 `0032` 的完整数据库执行总迁移：migration ledger 新增且只新增 `0033`，checksum 固定；第二次启动不重跑，事务失败时原表、原行和 ledger 均不变。
+- `createSecureSettingsRepository`：`ASR_SETTING_KEY` 在 allowlist/listMetadata 中；set/replace/clear、cleared 抑制、unknown key fail closed；解密值不进入 metadata。
+- settings HTTP：未登录、member、machine token、错误 Origin/CSRF 拒绝；admin PUT/DELETE 通过；DELETE 缺 `confirmation:"CLEAR"` 拒绝；GET 只有 configured/masked/status/timestamps，不含 ciphertext/plaintext。
+- 审计、错误、响应、前端状态与测试快照扫描不得出现合成 ASR key 明文；设置页提交后必须清空 password input，不进 `localStorage`/`sessionStorage`。
+- `ASR_REUSE_MODEL_CREDENTIAL=false` 且 `asr_api_key` missing/cleared 时，provider spy 证明未读取或调用 `modelApiKeyProvider`；显式 reuse 缺任一同源/capability 条件均启动失败。
+
+### 11.1 Backend 单元：合同与媒体（≥30）
+
+| 组 | 边界 |
+| --- | --- |
+| MIME/magic | 4 类正确组合；每类 MIME 错配；未知 MIME；magic 太短；MP4 `ftyp` 越界 |
+| body | 0 bytes；1 byte；8MiB 恰好通过；8MiB+1 立即 413；chunked 超限；Content-Length 非法/超限；Content-Encoding 拒绝 |
+| duration | 299ms reject；300ms pass；assistant 60,000 pass/60,001 reject；quick 120,000 pass/120,001 reject；NaN/负值 reject |
+| stream | 0/2 audio、含 video、channels 0/3、sample rate 7999/96001、ffprobe 超时/超大/非法 JSON |
+| transcode | exact raw-s16le `pipe:1` argv、`shell:false`、44-byte placeholder、fd offset 44、PCM 3,840,000 pass/3,840,001 immediate abort、偶数字节、RIFF/data size 回填、fsync/close、dev+ino/uid/mode/nlink/size 复核、时长偏差 501ms、TERM→500ms KILL |
+| provider URL/upload/response | root、root slash、`/v1`、`/v1/` 保留路径；userinfo/query/hash/http/non-loopback/redirect 拒绝；`openAsBlob` file-backed upload 且 `readFile`/`Buffer.concat` spy=0；JSON 262,144 bytes pass/262,145 abort |
+| transcript | empty、NUL/control、NFC、CRLF、quick 10,000/10,001、assistant 2,000/2,001，不截断 |
+
+### 11.2 Backend 服务生命周期（≥22）
+
+每一项同时断言 workspace `ENOENT`、upload/temp-byte/processing slot 释放、metrics gauge 归零、provider 调用次数：
+
+1. success；2. upload error；3. client abort；4. probe error；5. PCM overflow/write/fsync/header error；6. provider 4xx；7. provider 5xx；8. provider timeout；9. bad/oversize JSON；10. empty transcript；11. transcript too long；12. cleanup 首次失败重试成功；13. cleanup 持续失败→503 且不回文本；14. startup 清全部合法 request-*；15. startup symlink/owner 异常 degraded；16. periodic 只清 >10min；17. timer unref；18. server.close abort/kill/cleanup/no handles；19. idempotent replay；20. same-key pending/conflict；21. owner 隔离；22. TTL/LRU；23. active uploads 4/5；24. temp bytes 32MiB/+1；25. processing global 2/3 与 owner 1/2；26. 512 ring 覆盖、重启清零、p95 样本不足 null。
+
+### 11.3 Backend HTTP/安全（≥20）
+
+- 未登录 401、错误 CSRF 403、错误 Origin 403、machine token 精确 `403 MACHINE_SCOPE_DENIED` 且 handler/provider delta=0、GET 405。
+- member/admin 200；disabled/expired session 按现有合同失败。
+- purpose/MIME/key/header/body 全错误矩阵。
+- 真实 OPTIONS 覆盖允许 Origin、`X-Audio-Duration-Ms`/`X-ASR-Language` Allow-Headers、`Retry-After` Expose-Headers，以及非法 Origin/未允许 header 拒绝。
+- A/B 两账号相同 key/相同音频各自调用，不共享 transcript；A 的 rate limit 不耗尽 B。第 12 次/第 13 次边界与窗口剩余秒数分别覆盖 `Retry-After` 1/300/大于 300 时 clamp=300，header 始终为 `1..300` 正整数且不改变 15 分钟窗口。
+- 200 schema + no-store；所有 error 含固定 code/requestId，不含 provider body/path/key/transcript。
+- ASR 前后业务表 row count/hash一致；`audit_log` 无 ASR 原文；限流表仅 HMAC key。
+- provider spy 证明 raw owner/headers 未传入。
+- `/api/admin/asr/status`：未登录/member/machine 拒绝，admin 200+no-store；字段固定、有界、重启清零，不含 owner/requestId/transcript/path/key/ring 明细。
+
+### 11.4 Frontend 单元/源码门禁（≥28）
+
+- MIME 选择：Chrome/Safari/default/unsupported。
+- MediaRecorder：permission deny、empty chunks、自动 max stop、手动 stop、cancel、pagehide、unmount、重复 stop 幂等、tracks 全停；重录/关闭面板使旧 `recordingGeneration` 失效，旧 recorder/fetch/timer success/error 均不改新 Blob/key/state。
+- Web Speech：可用时 interim；error 不阻塞 recorder；interim 不触发 analyze/send。
+- API：raw Blob、Content-Type、CSRF、key、duration、abort、错误映射、replay；固定 `same_blob_retryable`/`rate_limited`/`release_and_rerecord` 分类；Retry-After 1/300 解析，0/负数/301/小数/日期/多值返回 null，`ASR_RATE_LIMITED` null 使用 300 秒 UI fallback，仍不自动 retry。
+- 快速记录：existing 空/非空的精确 separator；单次 10,000/10,001、合并 50,000/50,001；超限时原文 byte-equivalent；sourceChannel、无自动 `/quick-records`/`/analyze`，用户点击后恰好一次。
+- 小小：`appendTranscriptToDraft` 以 functional update 读取响应到达时最新 existing，空/非空使用精确换行 candidate；单次 2,000/2,001、合并 2,000/2,001，超限原 draft byte-equivalent 且成功 Blob/key 已释放；processing 期间编辑 draft 与 stale generation 不覆盖新文本；无自动 `/assistant/chat`，pending/offline/close 禁用或取消。
+- 单一 `processing` 状态与固定“正在上传并转成文字”文案；源码/DOM 不存在 uploading→transcribing 伪进度或 XHR。
+- retry 状态：每段新录音 `sameBlobRetryCount=0`；五类 eligible transient initial failure 保留同 Blob+key `<5min`，人工 retry 1 次后计数为 1；第二次失败/第二次点击拒绝并释放。固定 expiresAt 不因 retry 延长；TTL 在 retry processing 中到点必须以 `blob_ttl_expired` abort+release，且不分类为网络 retryable，late resolve/reject 被 generation fence 丢弃；TTL 是保留上限而非无限次数。
+- 释放矩阵：`INVALID_IDEMPOTENCY_KEY`、`ASR_TRANSCRIPT_EMPTY`、`IDEMPOTENCY_CONFLICT` 立即释放 Blob/key、禁止换 key 重放同音频；`ASR_RATE_LIMITED` 立即释放并进入 1..300 或 invalid/missing→300 fallback 倒计时，完成后只可重新录音；success/cancel/discard/unmount/logout/pagehide 与其他 non-retryable 也立即释放。
+- DOM/source 扫描：无 `<audio>`、`URL.createObjectURL`、IndexedDB/CacheStorage 音频、音频下载/历史文案。
+
+### 11.5 浏览器与真机
+
+| 环境 | 场景 | 通过阈值 |
+| --- | --- | --- |
+| Chrome desktop | tap start/stop + quick record | transcript 回填；分析请求在点击前 0 次、点击后 1 次 |
+| Chrome Android/PWA 仿真 | touch hold/cancel/retry | 44px 热区；cancel 后网络中止；无残留 |
+| iPhone Safari | `audio/mp4` 录音 | 200；中文文本可编辑；无播放控件 |
+| iPhone standalone PWA | 快速 FAB→录音 | 单手完成；页面切后台立即 stop/abort |
+| WebKit QA | unsupported/permission-denied | 不白屏；文本和临时 Web Speech 路径可用 |
+| 小小面板 | 录音→draft→手工 send | send 前 0 请求；send 后 1 请求；历史只含文本 |
+| 弱网 | Slow 3G processing/cancel | 60s upload hard timeout；只显示 processing；UI 可取消，不重复 provider |
+| 离线 | 点语音 | 不启动上传；保留已有 draft；给文本入口 |
+
+### 11.6 ASR 质量与性能门槛
+
+受保护 fixture 存放在 Git/release/backup 外，权限 `0600`，只用合成或明确同意的非业务语音；证据只记录 fixture SHA-256、时长、字符数、CER 和 pass/fail，不记录音频或 transcript。
+
+- 12 条普通话销售词汇短句，2 名说话人或等价合成音色；每条 5–20 秒。
+- 有效响应率 12/12；空文本 0；普通话字符错误率 CER：median ≤15%，p95 ≤30%。
+- 10 秒音频在生产连续 20 次：provider 成功率 100%，admin metrics 当前 ring 的 total latency p95 ≤20s、max ≤45s。
+- smoke 前后 admin snapshot delta：requests=20、providerCalls=20、cleanupVerified=20、cleanupFailures=0、stale=0；结束 inflight=0、activeUploads=0、tempBytes=0、临时目录残留=0。
+- 取消专项 10 次（upload 5/provider 5）：10/10 在 2s 内 inflight 归零，临时目录残留=0。
+- 8MiB+1 与 120001/60001ms fixtures 必须在 provider 调用前拒绝，provider spy count=0。
+
+### 11.7 全量门禁
+
+```bash
+npm --prefix backend test
+CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  npm --prefix outputs/product-design-prototype run qa:local
+npm --prefix outputs/product-design-prototype run qa:integration
+npm --prefix outputs/product-design-prototype run qa:webkit
+npm run test:deploy
+npm run scan:secrets
+git diff --check
+```
+
+新增专项结果不得替代上述全量门禁。任何输出截断、测试跳过、真实 provider 未执行或 cleanup 未复核都不算发布通过。
+
+---
+
+## 12. 部署、生产验收与回滚
+
+### 12.1 部署前只读盘点
+
+1. 确认 exact commit/tag/release manifest、数据库备份与上一 release 回滚点；只读核对生产 migration ledger 当前最高版本与 checksum。候选基线最高为 `0032`，本版计划新增 `0033_secure_settings_asr`，若生产或合入分支已经占用 `0033`，必须停发、重新编号并更新全部设计/测试/evidence，禁止复用版本号或改写已应用 migration。
+2. 以 backend systemd `User=` 身份验证 ffprobe/ffmpeg；唯一 OpenAI-compatible provider 验证规范化 base URL、加密 key metadata、model 与 capability probe。
+3. 验证 `/run/sentelligent-asr` owner/mode/非 symlink/可创建+删除 0600 测试文件；盘点必须以空目录结束。
+4. 验证 systemd：`RuntimeDirectory=sentelligent-asr`、`RuntimeDirectoryMode=0700`、backend 既有 `UMask=0027`、`PrivateTmp=true`；ASR 通过显式 mkdir/open mode 实现 0700/0600，不改全局 umask，不扩大静态目录或 release 的写权限。
+5. `ASR_MODE` 必须精确为 `live`；`ASR_PROVIDER` 必须精确为本版唯一值 `openai-compatible`。`ASR_MODE=disabled`、任何其他 provider、provider 未冻结或 readiness degraded 均不得发布为 v0.10.4 完成。
+6. 在脱敏数据库副本先跑 `0033` 并校验 row count、所有既有 ciphertext/metadata hash、CHECK SQL、ledger checksum；再证明 v0.10.3 backend 对升级后 schema 的健康/登录/设置 metadata 只读兼容，作为代码回滚不降库的前置门禁。
+
+### 12.2 preflight 新门禁
+
+新增至少 6 个 fail-closed check：
+
+- `asr.config`：`ASR_MODE=disabled|live` 与唯一 `ASR_PROVIDER=openai-compatible` 分离；live 的 normalized base URL/model/timeout/limit/credential readiness 合同。
+- `asr.secureSettings`：migration `0033` 已应用且 checksum 正确；remote 独立 `asr_api_key` metadata 为 configured，或者显式 model credential reuse 的同源/capability 专项证据完整；不得输出 secret。
+- `asr.mediaTools`：ffprobe/ffmpeg 为绝对常规可执行文件，服务账号可执行，版本身份正确。
+- `asr.provider`：Node runtime `openAsBlob` 存在，OpenAI-compatible capability、尾斜杠 path 保留、file-backed upload、redirect error、256KiB response cap 通过；不输出 secret。
+- `asr.runtimeDirectory`：路径、owner、0700、非 symlink、create/delete drill。
+- `asr.cleanup`：模拟 success/error 两次，结束目录均空。
+- `asr.noPersistence`：release/静态/backup/data 路径无音频扩展名与 request temp 目录。
+- `asr.metrics`：admin status before/after delta 可读，窗口 metadata 明确，inflight/activeUploads/tempBytes=0，cleanup/stale=0；重启后 counters/ring 清零。
+- `asr.settingsUi`：管理员页面只显示 configured/masked/status，save/replace/clear 可用且 password input 清空，member 无管理入口，浏览器网络/DOM/storage 无 key 明文。
+
+不为 ASR 重启共享 Caddy；只切换/重启三个项目服务中实际受影响的 backend/frontend，遵循现有 cutover 保护清单。
+
+### 12.3 生产验收脚本
+
+1. 登录账号 A，快速记录→按住说受保护验收短句→松开；只看到 `processing`“正在上传并转成文字”→服务端文字回填，不出现伪上传百分比或 uploading/transcribing 分段。
+2. 回填后先确认网络：`/api/quick-records` 与 `/analyze` 请求均为 0；人工修改一个字后点“确认调用 AI 分析”，两请求各恰好 1，分析正常。
+3. 小小面板录第二句；文字只进 draft，`/api/assistant/chat` 为 0；点发送后为 1，回复正常。
+4. 在 processing 中点取消；inflight/activeUploads/tempBytes ≤2s 归零，服务端 runtime dir 空。
+5. 用受保护边界 fixture 验 8MiB+1、too-long、MIME mismatch；都在 provider 前失败。
+6. 账号 B 同 key 测隔离；A 限流不影响 B；ASR 不出现跨账号可查询资源。
+7. 快速记录历史、助手 history、数据库、备份、release/static 目录均无音频；页面无播放/下载控件。
+8. 浏览器禁用 MediaRecorder/拒绝麦克风，文本录入与 Web Speech 临时增强仍可用。
+9. 以 admin-only `/api/admin/asr/status` 取 smoke 前后 snapshot，运行 §11.6 质量/性能门槛与公开 HTTPS smoke；证据只写 window/delta/hash/length/metric/result。
+10. 管理员设置页写入合成 ASR key 后 input 清空、只显示 mask；member 看不到管理入口；显式 CLEAR 后 provider readiness fail closed，恢复 key 后再验 live。
+
+建议证据：快速记录 recording/processing/transcript/人工分析、小小 draft/发送、取消、降级、管理员 ASR key metadata 各 1 张，desktop+iPhone ≥10 张；不截取真实客户正文或 provider credential。
+
+### 12.4 发布后观察
+
+- 30 分钟通过 admin status 定期读取当前进程窗口 metadata 与 delta，观察 requests/provider calls、p95、inflight、active uploads/temp bytes、429/5xx、cleanup failures、stale temp；进程重启后窗口清零必须单独标注，不能把前后窗口相加伪装连续指标。
+- `cleanup_failures_total > 0`、stale temp >0、provider error rate >5% 或 p95 >20s 连续 10 分钟即停止验收并执行 kill-switch/回滚。
+- 观察期结束再次以服务账号检查 runtime dir 空、release/data/backup 无音频扩展名。
+
+### 12.5 Kill switch
+
+备份 backend env 后只把 `ASR_MODE=live` 改为 `ASR_MODE=disabled`，保留已冻结的 `ASR_PROVIDER` 与其他 provider 配置，只重启 backend；端点必须在落盘/body/provider 前返回 `ASR_NOT_CONFIGURED`，前端保留文本/Web Speech 临时增强。恢复时只把 mode 改回 `live`，且必须重新跑 provider/readiness/cleanup smoke。该开关用于快速止损，不替代版本回滚与证据。
+
+### 12.6 完整回滚
+
+1. 保存当前 service/env/evidence 与 `schema_migrations`/`secure_settings` metadata 快照（不含 secret 值/音频/原文），确认部署前数据库备份可读且恢复演练已通过。
+2. 首选前向兼容代码回滚：先设 `ASR_MODE=disabled`，切回已经在脱敏升级副本上证明兼容 `0033` schema 的 v0.10.3 exact release，恢复对应 backend env/unit，重启受影响项目服务；不得删除 migration ledger 或改写 `0033` checksum。
+3. 验证 `/api/asr/transcriptions` 不再可用；快速记录文本/Web Speech 与 Web 小小文本对话恢复 v0.10.3 行为。
+4. 只运行随 release 固定并校验 hash 的 `scripts/asr-runtime-cleanup.mjs`：以服务账号逐项枚举目录，名称必须匹配精确 `request-<server-generated-id>`，`lstat` 必须为 non-symlink 真实目录、当前 uid、mode 不宽于 0700；逐项 non-following 删除并再次 `lstat=ENOENT`。任一名称/owner/mode/type 异常立即 fail closed，不使用 shell glob 或裸 `rm -rf`。完成后复核 runtime dir 空；systemd RuntimeDirectory 可留空或随 unit 回滚移除。
+5. `secure_settings` 中独立 `asr_api_key` 可保持加密、不可用状态；v0.10.3 repository 不读取该 key。若产品要求清除，必须在新版本管理端仍可用时先走 admin DELETE 显式确认并另存审计，不在自动回滚脚本中输出值或直接改 ciphertext。
+6. 跑健康、登录、quick-record 文本分析、assistant help/查询/确认和 v0.10.3 smoke；记录 restored behavior/status。
+7. 只有在 v0.10.3 对迁移后 schema 的兼容门禁失败或业务明确要求降库时，才走维护窗内的整库备份恢复；恢复会回退部署后的全部数据库写入，必须独立审批、停写、核对时间点并执行恢复后数据验收，禁止用逆向 DROP/重建脚本局部降 `secure_settings`。
+
+本版新增 `0033_secure_settings_asr`，但不建音频表、不迁移音频资产。正常代码回滚保留前向兼容的 `0033` schema 与加密 key；严格降库只允许恢复已验证整库备份，不需要也不得恢复任何录音。
+
+---
+
+## 13. Definition of Done
+
+- [ ] Slice A0–G 各自测试通过并由主控顺序集成；A0 的 `0033`、repository allowlist、metadata-only/write-only API 先落地，共享文件无并发覆盖。
+- [ ] `ASR_MODE=disabled|live` 与 `ASR_PROVIDER=openai-compatible` 职责分离；本版任何其他 provider fail closed，生产完成态为 live+冻结 provider，kill switch 只切 mode。
+- [ ] `0033` 同时通过 0021 结构升级、完整 0032 数据库升级、重复启动、事务失败、ciphertext/metadata 保真与 v0.10.3 前向兼容回滚测试。
+- [ ] server ASR 是 quick record 与 Web 小小的共同最终转写链；Web Speech 只标临时增强。
+- [ ] raw binary API 的格式/大小/时长/转码/provider/文本全校验与错误码实现一致。
+- [ ] Cookie、Origin、CSRF、user-only、member/admin、owner、限流、幂等、并发矩阵全绿。
+- [ ] success/error/timeout/cancel/cleanup-failure/进程启动扫尾均有真实测试，目录最终为零。
+- [ ] raw PCM stdout 3,840,000-byte hard gate、44-byte WAV header 回填、同 inode/owner/mode/size 复核、TERM→500ms KILL 与 server.close 无 open handles 全绿。
+- [ ] CORS 两个 ASR header、Retry-After expose/bounded parse、单一 processing 状态全绿；每段新录音 `recordingGeneration` fence + `sameBlobRetryCount=0`，五类 transient 同 Blob/key 最多人工 retry 一次，5min 仅为保留上限，expiresAt 不因 retry 延长，在途到点以 `blob_ttl_expired` abort/release且不归类网络 retryable，stale/late result 不污染新状态。
+- [ ] `INVALID_IDEMPOTENCY_KEY`、`ASR_TRANSCRIPT_EMPTY`、`IDEMPOTENCY_CONFLICT` 立即释放且禁止换 key 重放；`ASR_RATE_LIMITED` 使用 clamp 1..300 header、invalid/missing→300 秒 UI fallback、立即释放、倒计时后只重新录音，Blob/key 生命周期矩阵全绿。
+- [ ] admin ASR status 的 512 ring/counters/gauges、重启清零、smoke delta 和管理员 ASR Key metadata/write/clear 卡全绿且无敏感字段。
+- [ ] provider key/音频/transcript/path/provider body 未出现在日志、响应、Git、release、DB、backup。
+- [ ] 快速记录没有自动 analyze；小小通过 `appendTranscriptToDraft` 的精确换行 candidate 原子追加，单次/合并后 ≤2,000，超限原 draft 逐字不变且没有自动 send；用户可先编辑文本。
+- [ ] 无 `<audio>`、回放、下载、历史音频、长期表、对象存储、SW/IndexedDB 音频缓存。
+- [ ] backend、前端 local/integration/WebKit、deploy、secret scan、diff check 全量门禁通过。
+- [ ] 受保护 12 句质量集、20 次性能、10 次取消和双账号生产验收达到 §11 阈值。
+- [ ] kill-switch 与切回 v0.10.3 回滚都真实演练，恢复后的文本/助手业务通过。
+- [ ] `docs/releases/v0.10.4.md` 回填 exact commit、tag、制品、preflight/cutover/postflight/smoke、截图、cleanup 与回滚证据。
+
+完成以上全部项目后，v0.10.4 才可标记“语音服务端化已交付”；仅有浏览器 Web Speech、mock provider、单元测试或 health 200 均不足以完成本版。

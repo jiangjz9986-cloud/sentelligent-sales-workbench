@@ -98,6 +98,11 @@ function saveWeixinAccount(accountId, update) {
 	const dir = resolveAccountsDir$1();
 	fs.mkdirSync(dir, { recursive: true });
 	const existing = loadWeixinAccount(accountId) ?? {};
+	const loginIdentityChanged = Boolean(
+		update.token && update.token.trim() !== existing.token?.trim()
+		|| update.userId !== void 0 && update.userId.trim() !== existing.userId?.trim()
+	);
+	if (loginIdentityChanged) clearPersistedContextToken(accountId);
 	const token = update.token?.trim() || existing.token;
 	const baseUrl = update.baseUrl?.trim() || existing.baseUrl;
 	const userId = update.userId !== void 0 ? update.userId.trim() || void 0 : existing.userId?.trim() || void 0;
@@ -117,6 +122,7 @@ function saveWeixinAccount(accountId, update) {
 }
 /** Remove account data file. */
 function clearWeixinAccount(accountId) {
+	clearPersistedContextToken(accountId);
 	try {
 		fs.unlinkSync(resolveAccountPath(accountId));
 	} catch {}
@@ -499,9 +505,81 @@ async function getUploadUrl(params) {
 	});
 	return JSON.parse(rawText);
 }
+function sendMessageProviderError(code, message) {
+	const error = new Error(message);
+	error.code = code;
+	return error;
+}
+function hasProviderMessageIdAcknowledgement(rawText) {
+	const matched = /^\s*\{\s*"message_id"\s*:\s*([1-9]\d{0,19})\s*\}\s*$/u.exec(rawText);
+	if (!matched) return false;
+	try {
+		return BigInt(matched[1]) <= 18446744073709551615n;
+	} catch {
+		return false;
+	}
+}
+/**
+* Validate the provider's JSON-level acknowledgement without surfacing its
+* response body. iLink deployments may return an empty/whitespace-only HTTP
+* body, an empty JSON object, or a sole positive 64-bit-style `message_id`
+* after an accepted text send, or expose business status through top-level/
+* nested `ret` and `errcode` fields. Every status that is present must be
+* numeric zero.
+*/
+function assertSendMessageAccepted(rawText) {
+	if (typeof rawText === "string" && rawText.trim() === "") return;
+	if (hasProviderMessageIdAcknowledgement(rawText)) return;
+	let response;
+	try {
+		response = JSON.parse(rawText);
+	} catch {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (response === null || typeof response !== "object" || Array.isArray(response)) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	const topKeys = Object.keys(response);
+	if (topKeys.length === 0) return;
+	const topAllowed = new Set(["ret", "errcode", "errmsg", "base_resp"]);
+	if (topKeys.some((key) => !topAllowed.has(key))) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (Object.hasOwn(response, "errmsg") && typeof response.errmsg !== "string") {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	const baseResponse = response.base_resp;
+	if (baseResponse !== void 0 && (baseResponse === null || typeof baseResponse !== "object" || Array.isArray(baseResponse))) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (baseResponse !== void 0) {
+		const baseKeys = Object.keys(baseResponse);
+		const baseAllowed = new Set(["ret", "errcode", "errmsg"]);
+		if (baseKeys.some((key) => !baseAllowed.has(key))
+			|| !baseKeys.some((key) => key === "ret" || key === "errcode")
+			|| Object.hasOwn(baseResponse, "errmsg") && typeof baseResponse.errmsg !== "string") {
+			throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+		}
+	}
+	const statuses = [
+		Object.hasOwn(response, "ret") ? response.ret : void 0,
+		Object.hasOwn(response, "errcode") ? response.errcode : void 0,
+		baseResponse && Object.hasOwn(baseResponse, "ret") ? baseResponse.ret : void 0,
+		baseResponse && Object.hasOwn(baseResponse, "errcode") ? baseResponse.errcode : void 0
+	].filter((value) => value !== void 0);
+	if (statuses.some((value) => typeof value !== "number" || !Number.isSafeInteger(value))) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+	if (statuses.some((value) => value !== 0)) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_REJECTED", "sendMessage: provider rejected request");
+	}
+	if (statuses.length === 0) {
+		throw sendMessageProviderError("WEIXIN_PROVIDER_RESPONSE_INVALID", "sendMessage: invalid provider response");
+	}
+}
 /** Send a single message downstream. */
 async function sendMessage(params) {
-	await apiFetch({
+	const rawText = await apiFetch({
 		baseUrl: params.baseUrl,
 		endpoint: "ilink/bot/sendmessage",
 		body: JSON.stringify({
@@ -512,6 +590,7 @@ async function sendMessage(params) {
 		timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
 		label: "sendMessage"
 	});
+	assertSendMessageAccepted(rawText);
 }
 /** Fetch bot config (includes typing_ticket) for a given user. */
 async function getConfig(params) {
@@ -1046,27 +1125,126 @@ async function uploadFileAttachmentToWeixin(params) {
 }
 //#endregion
 //#region src/messaging/inbound.ts
-/**
-* contextToken is issued per-message by the Weixin getupdates API and must
-* be echoed verbatim in every outbound send. It is not persisted: the monitor
-* loop populates this map on each inbound message, and the outbound adapter
-* reads it back when the agent sends a reply.
-*/
+const CONTEXT_TOKEN_TTL_MS = 23 * 60 * 60 * 1e3;
+const MAX_CONTEXT_TOKEN_BYTES = 2e4;
+const CONTEXT_TOKEN_DOMAIN = "sentelligent/weixin-context-token/v1";
 const contextTokenStore = /* @__PURE__ */ new Map();
 function contextTokenKey(accountId, userId) {
 	return `${accountId}:${userId}`;
 }
-/** Store a context token for a given account+user pair. */
-function setContextToken(accountId, userId, token) {
-	const k = contextTokenKey(accountId, userId);
-	contextTokenStore.set(k, token);
+function contextTokenFilePath(accountId) {
+	return path.join(resolveAccountsDir$1(), `${accountId}.context.json`);
 }
-/** Retrieve the cached context token for a given account+user pair. */
-function getContextToken(accountId, userId) {
+function contextTokenEncryptionKey(deliveryKey, accountId) {
+	return crypto.createHmac("sha256", Buffer.from(deliveryKey)).update(CONTEXT_TOKEN_DOMAIN, "utf8").update("\0", "utf8").update(accountId, "utf8").digest();
+}
+function contextTokenAad(accountId, userId, expiresAt) {
+	return Buffer.from(`${CONTEXT_TOKEN_DOMAIN}\0${accountId}\0${userId}\0${expiresAt}`, "utf8");
+}
+function validContextToken(token) {
+	return typeof token === "string" && token.length > 0 && Buffer.byteLength(token, "utf8") <= MAX_CONTEXT_TOKEN_BYTES;
+}
+function clearPersistedContextToken(accountId) {
+	for (const key of contextTokenStore.keys()) if (key.startsWith(`${accountId}:`)) contextTokenStore.delete(key);
+	try {
+		fs.unlinkSync(contextTokenFilePath(accountId));
+	} catch {}
+}
+function persistContextToken(accountId, userId, token, deliveryKey, expiresAt) {
+	const iv = crypto.randomBytes(12);
+	const cipher = crypto.createCipheriv("aes-256-gcm", contextTokenEncryptionKey(deliveryKey, accountId), iv);
+	cipher.setAAD(contextTokenAad(accountId, userId, expiresAt));
+	const ciphertext = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
+	const record = {
+		version: 1,
+		expiresAt,
+		iv: iv.toString("base64url"),
+		authTag: cipher.getAuthTag().toString("base64url"),
+		ciphertext: ciphertext.toString("base64url")
+	};
+	const filePath = contextTokenFilePath(accountId);
+	const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+	fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 448 });
+	try {
+		fs.writeFileSync(tempPath, JSON.stringify(record), { encoding: "utf8", mode: 384 });
+		fs.renameSync(tempPath, filePath);
+		try {
+			fs.chmodSync(filePath, 384);
+		} catch {}
+	} finally {
+		try {
+			fs.unlinkSync(tempPath);
+		} catch {}
+	}
+}
+function restoreContextToken(accountId, userId, deliveryKey) {
+	const filePath = contextTokenFilePath(accountId);
+	contextTokenStore.delete(contextTokenKey(accountId, userId));
+	try {
+		const record = JSON.parse(fs.readFileSync(filePath, "utf8"));
+		const expiresAtMs = Date.parse(record?.expiresAt);
+		if (record?.version !== 1
+			|| !Number.isFinite(expiresAtMs)
+			|| new Date(expiresAtMs).toISOString() !== record.expiresAt
+			|| expiresAtMs <= Date.now()
+			|| expiresAtMs > Date.now() + CONTEXT_TOKEN_TTL_MS) throw new Error("context token expired");
+		for (const field of ["iv", "authTag", "ciphertext"]) {
+			if (typeof record[field] !== "string" || record[field].length < 1 || record[field].length > 4 * MAX_CONTEXT_TOKEN_BYTES) throw new Error("context token record invalid");
+		}
+		const iv = Buffer.from(record.iv, "base64url");
+		const authTag = Buffer.from(record.authTag, "base64url");
+		const encrypted = Buffer.from(record.ciphertext, "base64url");
+		if (iv.byteLength !== 12 || authTag.byteLength !== 16 || encrypted.byteLength > MAX_CONTEXT_TOKEN_BYTES + 32) throw new Error("context token record invalid");
+		const decipher = crypto.createDecipheriv("aes-256-gcm", contextTokenEncryptionKey(deliveryKey, accountId), iv);
+		decipher.setAAD(contextTokenAad(accountId, userId, record.expiresAt));
+		decipher.setAuthTag(authTag);
+		const token = Buffer.concat([
+			decipher.update(encrypted),
+			decipher.final()
+		]).toString("utf8");
+		if (!validContextToken(token)) throw new Error("context token invalid");
+		contextTokenStore.set(contextTokenKey(accountId, userId), { token, expiresAtMs });
+		return true;
+	} catch {
+		try {
+			fs.unlinkSync(filePath);
+		} catch {}
+		return false;
+	}
+}
+/**
+* Context tokens are issued per-message and are required for proactive sends.
+* The in-memory copy is backed by an AES-256-GCM record bound to the account,
+* recipient, and caller-supplied delivery key. Plaintext is never written.
+*/
+function setContextToken(accountId, userId, token, deliveryKey) {
+	if (!validContextToken(token)) return;
 	const k = contextTokenKey(accountId, userId);
-	const val = contextTokenStore.get(k);
-	logger.debug(`getContextToken category=context status=${val !== void 0 ? "found" : "missing"} durationMs=0`);
-	return val;
+	const expiresAtMs = Date.now() + CONTEXT_TOKEN_TTL_MS;
+	contextTokenStore.set(k, { token, expiresAtMs });
+	try {
+		persistContextToken(accountId, userId, token, deliveryKey, new Date(expiresAtMs).toISOString());
+	} catch {
+		logger.warn("setContextToken category=context status=persist-failed durationMs=0");
+	}
+}
+function getContextTokenState(accountId, userId) {
+	const k = contextTokenKey(accountId, userId);
+	const entry = contextTokenStore.get(k);
+	if (!entry) return { ready: false, status: "not_ready", reason: "context_token_missing" };
+	if (!Number.isFinite(entry.expiresAtMs) || entry.expiresAtMs <= Date.now()) {
+		contextTokenStore.delete(k);
+		try {
+			fs.unlinkSync(contextTokenFilePath(accountId));
+		} catch {}
+		return { ready: false, status: "not_ready", reason: "context_token_expired" };
+	}
+	return { ready: true, status: "ready", token: entry.token, expiresAt: new Date(entry.expiresAtMs).toISOString() };
+}
+function getContextToken(accountId, userId) {
+	const state = getContextTokenState(accountId, userId);
+	logger.debug(`getContextToken category=context status=${state.ready ? "found" : "missing"} durationMs=0`);
+	return state.ready ? state.token : void 0;
 }
 /** Returns true if the message item is a media type (image, video, file, or voice). */
 function isMediaItem(item) {
@@ -1090,6 +1268,14 @@ function bodyFromItemList(itemList) {
 			return `[引用: ${parts.join(" | ")}]\n${text}`;
 		}
 		if (item.type === MessageItemType.VOICE && item.voice_item?.text) return item.voice_item.text;
+	}
+	return "";
+}
+function directBodyFromItemList(itemList) {
+	if (!itemList?.length) return "";
+	for (const item of itemList) {
+		if (item.type === MessageItemType.TEXT && item.text_item?.text != null) return String(item.text_item.text);
+		if (item.type === MessageItemType.VOICE && item.voice_item?.text) return String(item.voice_item.text);
 	}
 	return "";
 }
@@ -1132,6 +1318,41 @@ function oneCanonicalUpstreamId(full) {
 	if (msgId !== null && clientId !== null && msgId !== clientId) throw new TypeError("ambiguous upstream message id");
 	return msgId ?? clientId;
 }
+function quotedReferenceFromItemList(itemList) {
+	if (!itemList?.length) return null;
+	const ref = itemList.find((item) => item?.type === MessageItemType.TEXT && item.ref_msg)?.ref_msg;
+	if (!ref || typeof ref !== "object" || Array.isArray(ref)) return null;
+	let quotedMessageId = null;
+	try {
+		// Proactive Sentelligent drafts are persisted by their caller-supplied
+		// client_id. A quoted Weixin reference may also carry a numeric
+		// message_id, but that provider id is not the durable outbox identity.
+		// Validate every candidate, then prefer only the exact namespaced client
+		// id shape; ordinary inbound identity keeps oneCanonicalUpstreamId's
+		// message_id-first behavior.
+		optionalUpstreamIdentifier(ref.message_id, "quoted message id");
+		optionalUpstreamIdentifier(ref.msg_id, "quoted message id");
+		const clientId = optionalUpstreamIdentifier(ref.client_id, "quoted message id");
+		quotedMessageId = /^sentelligent:[0-9a-f]{64}$/u.test(clientId ?? "")
+			? clientId
+			: oneCanonicalUpstreamId(ref);
+	} catch {
+		throw new TypeError("ambiguous quoted message id");
+	}
+	const parts = [];
+	if (typeof ref.title === "string" && ref.title.trim()) parts.push(ref.title.trim());
+	if (ref.message_item) {
+		const body = bodyFromItemList([ref.message_item]).trim();
+		if (body) parts.push(body);
+	}
+	const quotedText = parts.join("\n").slice(0, 2e4);
+	if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(quotedText)) throw new TypeError("invalid quoted text");
+	if (!quotedMessageId && !quotedText) return null;
+	return {
+		...quotedMessageId ? { quotedMessageId } : {},
+		...quotedText ? { quotedText } : {}
+	};
+}
 function hasUnrecognizedGroupSignal(full) {
 	return ["group_id", "room_id", "chat_type", "is_group"].some((name) => {
 		if (!Object.hasOwn(full, name)) return false;
@@ -1163,13 +1384,19 @@ function normalizedFileName(fileName) {
 function canonicalMessageMaterial(itemList, media) {
 	const itemTypes = itemList.map((item) => item?.type);
 	if (itemTypes.some((type) => !Number.isSafeInteger(type))) throw new TypeError("invalid message item type");
-	const material = { itemTypes, text: bodyFromItemList(itemList) };
+	const quote = quotedReferenceFromItemList(itemList);
+	const material = {
+		itemTypes,
+		text: directBodyFromItemList(itemList),
+		...quote?.quotedMessageId ? { quotedMessageId: quote.quotedMessageId } : {},
+		...quote?.quotedText ? { quotedText: quote.quotedText } : {}
+	};
 	if (media !== null && media !== void 0) {
 		if (typeof media !== "object" || !/^[0-9a-f]{64}$/u.test(media.sha256 ?? "")) throw new TypeError("invalid media sha256");
 		material.mediaSha256 = media.sha256;
 		material.fileName = normalizedFileName(media.fileName);
 	}
-	return { text: material.text, canonicalJson: JSON.stringify(material) };
+	return { text: material.text, quote, canonicalJson: JSON.stringify(material) };
 }
 function encodeDeliveryIdParts(parts) {
 	return Buffer.concat(parts.map((part) => {
@@ -1191,6 +1418,8 @@ function normalizeInboundUpdate(full, { deliveryKey, media = null, chatMetadata 
 	return Object.freeze({
 		conversationId: identity.conversationId,
 		text: material.text,
+		...material.quote?.quotedMessageId ? { quotedMessageId: material.quote.quotedMessageId } : {},
+		...material.quote?.quotedText ? { quotedText: material.quote.quotedText } : {},
 		...media?.requestMedia ? { media: media.requestMedia } : {},
 		senderId: identity.senderId,
 		messageId: deliveryIdFromUpdate({ senderId: identity.senderId, upstreamId: oneCanonicalUpstreamId(full), deliveryTimestampMs: full.create_time_ms, material: material.canonicalJson }, deliveryKey),
@@ -1255,7 +1484,10 @@ async function sendMessageWeixin(params) {
 		logger.error("sendMessageWeixin category=send status=missing-context durationMs=0");
 		throw new Error("sendMessageWeixin: contextToken is required");
 	}
-	const clientId = generateClientId();
+	const clientId = opts.clientId ?? generateClientId();
+	if (typeof clientId !== "string" || !clientId || clientId.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(clientId)) {
+		throw new TypeError("sendMessageWeixin: clientId is invalid");
+	}
 	const req = buildSendMessageReq({
 		to,
 		contextToken: opts.contextToken,
@@ -1555,13 +1787,59 @@ function getRemainingPauseMs(accountId) {
 }
 //#endregion
 //#region src/cdn/pic-decrypt.ts
+const CDN_DOWNLOAD_TIMEOUT_MS = 60 * 1e3;
+class InboundMediaError extends Error {
+	constructor(message, { permanent = false } = {}) {
+		super(message);
+		this.name = "InboundMediaError";
+		this.permanent = permanent;
+	}
+}
+function mediaTooLarge(label) {
+	return new InboundMediaError(`${label}: media exceeds the allowed size`, { permanent: true });
+}
+async function readBoundedCdnResponse(res, maxBytes, label) {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("maxBytes must be a positive safe integer");
+	const contentLength = res.headers?.get?.("content-length");
+	if (typeof contentLength === "string" && /^\d+$/u.test(contentLength.trim())) {
+		const declaredBytes = Number(contentLength.trim());
+		if (!Number.isSafeInteger(declaredBytes) || declaredBytes > maxBytes) {
+			try {
+				await res.body?.cancel();
+			} catch {}
+			throw mediaTooLarge(label);
+		}
+	}
+	if (!res.body || typeof res.body.getReader !== "function") throw new Error(`${label}: CDN response body is unavailable`);
+	const reader = res.body.getReader();
+	const chunks = [];
+	let totalBytes = 0;
+	try {
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done) break;
+			if (!(value instanceof Uint8Array)) throw new Error(`${label}: CDN response chunk is invalid`);
+			if (value.byteLength > maxBytes - totalBytes) {
+				try {
+					await reader.cancel();
+				} catch {}
+				throw mediaTooLarge(label);
+			}
+			chunks.push(Buffer.from(value));
+			totalBytes += value.byteLength;
+		}
+	} finally {
+		reader.releaseLock?.();
+	}
+	return Buffer.concat(chunks, totalBytes);
+}
 /**
 * Download raw bytes from the CDN (no decryption).
 */
-async function fetchCdnBytes(url, label) {
+async function fetchCdnBytes(url, label, maxBytes) {
 	let res;
 	try {
-		res = await fetch(url);
+		res = await fetch(url, { signal: AbortSignal.timeout(CDN_DOWNLOAD_TIMEOUT_MS) });
 	} catch (err) {
 		logger.error(`${label} category=cdn-download status=network-error durationMs=0`);
 		throw err;
@@ -1571,7 +1849,7 @@ async function fetchCdnBytes(url, label) {
 		logger.error(`${label} category=cdn-download status=${res.status} durationMs=0`);
 		throw new Error(`${label}: CDN download HTTP ${res.status}`);
 	}
-	return Buffer.from(await res.arrayBuffer());
+	return readBoundedCdnResponse(res, maxBytes, label);
 }
 /**
 * Parse CDNMedia.aes_key into a raw 16-byte AES key.
@@ -1588,27 +1866,33 @@ function parseAesKey(aesKeyBase64, label) {
 	if (decoded.length === 16) return decoded;
 	if (decoded.length === 32 && /^[0-9a-fA-F]{32}$/.test(decoded.toString("ascii"))) return Buffer.from(decoded.toString("ascii"), "hex");
 	logger.error(`${label} category=media-key bytes=${decoded.length} status=invalid durationMs=0`);
-	throw new Error(`${label}: invalid media key`);
+	throw new InboundMediaError(`${label}: invalid media key`, { permanent: true });
 }
 /**
 * Download and AES-128-ECB decrypt a CDN media file. Returns plaintext Buffer.
 * aesKeyBase64: CDNMedia.aes_key JSON field (see parseAesKey for supported formats).
 */
-async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl) {
+async function downloadAndDecryptBuffer(encryptedQueryParam, aesKeyBase64, cdnBaseUrl, label, fullUrl, maxBytes) {
 	const key = parseAesKey(aesKeyBase64, label);
 	const url = fullUrl || buildCdnDownloadUrl(encryptedQueryParam, cdnBaseUrl);
-	const encrypted = await fetchCdnBytes(url, label);
+	const encrypted = await fetchCdnBytes(url, label, aesEcbPaddedSize(maxBytes));
 	logger.debug(`${label}: downloaded ${encrypted.byteLength} bytes, decrypting`);
-	const decrypted = decryptAesEcb(encrypted, key);
+	let decrypted;
+	try {
+		decrypted = decryptAesEcb(encrypted, key);
+	} catch {
+		throw new InboundMediaError(`${label}: media decryption failed`, { permanent: true });
+	}
+	if (decrypted.length > maxBytes) throw mediaTooLarge(label);
 	logger.debug(`${label}: decrypted ${decrypted.length} bytes`);
 	return decrypted;
 }
 /**
 * Download plain (unencrypted) bytes from the CDN. Returns the raw Buffer.
 */
-async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl) {
+async function downloadPlainCdnBuffer(encryptedQueryParam, cdnBaseUrl, label, fullUrl, maxBytes) {
 	const url = fullUrl || buildCdnDownloadUrl(encryptedQueryParam, cdnBaseUrl);
-	return fetchCdnBytes(url, label);
+	return fetchCdnBytes(url, label, maxBytes);
 }
 //#endregion
 //#region src/media/silk-transcode.ts
@@ -1675,7 +1959,22 @@ async function silkToWav(silkBuf) {
 }
 //#endregion
 //#region src/media/media-download.ts
-const WEIXIN_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
+const WEIXIN_MEDIA_MAX_BYTES = 12 * 1024 * 1024;
+const WEIXIN_JPEG_PROVIDER_TRAILER_BYTES = 24;
+function stripVerifiedJpegProviderTrailer(bytes) {
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const trailerOffset = buffer.length - WEIXIN_JPEG_PROVIDER_TRAILER_BYTES;
+	if (trailerOffset < 4 || buffer[0] !== 255 || buffer[1] !== 216 || buffer[trailerOffset - 2] !== 255 || buffer[trailerOffset - 1] !== 217) return buffer;
+	const trailer = buffer.subarray(trailerOffset);
+	if (!trailer.subarray(4, 8).every((byte) => byte === 0)) return buffer;
+	// The provider prefix varies; the zero field and core digest define the observed trailer contract.
+	const expectedDigest = crypto.createHash("md5").update(buffer.subarray(0, trailerOffset)).digest();
+	if (!crypto.timingSafeEqual(trailer.subarray(8, 24), expectedDigest)) return buffer;
+	return buffer.subarray(0, trailerOffset);
+}
+function recordMediaFailure(result, error) {
+	result.failureKind = error instanceof InboundMediaError && error.permanent === true ? "permanent" : "transient";
+}
 /**
 * Download and decrypt media from a single MessageItem.
 * Returns the populated WeixinInboundMediaOpts fields; empty object on unsupported type or failure.
@@ -1689,12 +1988,16 @@ async function downloadMediaFromItem(item, deps) {
 		const aesKeyBase64 = img.aeskey ? Buffer.from(img.aeskey, "hex").toString("base64") : img.media.aes_key;
 		logger.debug(`${label} category=media type=image status=downloading durationMs=0`);
 		try {
-			const saved = await saveMedia(aesKeyBase64 ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url) : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url), void 0, "inbound", WEIXIN_MEDIA_MAX_BYTES);
+			const downloaded = aesKeyBase64 ? await downloadAndDecryptBuffer(img.media.encrypt_query_param ?? "", aesKeyBase64, cdnBaseUrl, `${label} image`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES) : await downloadPlainCdnBuffer(img.media.encrypt_query_param ?? "", cdnBaseUrl, `${label} image-plain`, img.media.full_url, WEIXIN_MEDIA_MAX_BYTES);
+			const normalized = stripVerifiedJpegProviderTrailer(downloaded);
+			if (normalized.byteLength !== downloaded.byteLength) logger.debug(`${label} category=media-normalization status=provider-trailer-stripped bytes=24 durationMs=0`);
+			const saved = await saveMedia(normalized, void 0, "inbound", WEIXIN_MEDIA_MAX_BYTES);
 			result.decryptedPicPath = saved.path;
 			result.sha256 = saved.sha256;
 			result.fileName = saved.fileName;
 			logger.debug(`${label} category=media type=image status=saved durationMs=0`);
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=image status=failed durationMs=0`);
 			errLog(`weixin category=media type=image status=failed durationMs=0`);
 		}
@@ -1702,7 +2005,7 @@ async function downloadMediaFromItem(item, deps) {
 		const voice = item.voice_item;
 		if (!voice?.media?.encrypt_query_param && !voice?.media?.full_url || !voice?.media?.aes_key) return result;
 		try {
-			const silkBuf = await downloadAndDecryptBuffer(voice.media.encrypt_query_param ?? "", voice.media.aes_key, cdnBaseUrl, `${label} voice`, voice.media.full_url);
+			const silkBuf = await downloadAndDecryptBuffer(voice.media.encrypt_query_param ?? "", voice.media.aes_key, cdnBaseUrl, `${label} voice`, voice.media.full_url, WEIXIN_MEDIA_MAX_BYTES);
 			const decryptedSha256 = crypto.createHash("sha256").update(silkBuf).digest("hex");
 			logger.debug(`${label} category=media type=audio bytes=${silkBuf.length} status=decrypted durationMs=0`);
 			const wavBuf = await silkToWav(silkBuf);
@@ -1722,6 +2025,7 @@ async function downloadMediaFromItem(item, deps) {
 				logger.debug(`${label} category=media type=audio status=saved-fallback durationMs=0`);
 			}
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=audio status=failed durationMs=0`);
 			errLog("weixin category=media type=audio status=failed durationMs=0");
 		}
@@ -1729,7 +2033,7 @@ async function downloadMediaFromItem(item, deps) {
 		const fileItem = item.file_item;
 		if (!fileItem?.media?.encrypt_query_param && !fileItem?.media?.full_url || !fileItem?.media?.aes_key) return result;
 		try {
-			const buf = await downloadAndDecryptBuffer(fileItem.media.encrypt_query_param ?? "", fileItem.media.aes_key, cdnBaseUrl, `${label} file`, fileItem.media.full_url);
+			const buf = await downloadAndDecryptBuffer(fileItem.media.encrypt_query_param ?? "", fileItem.media.aes_key, cdnBaseUrl, `${label} file`, fileItem.media.full_url, WEIXIN_MEDIA_MAX_BYTES);
 			const mime = getMimeFromFilename(fileItem.file_name ?? "file.bin");
 			const saved = await saveMedia(buf, mime, "inbound", WEIXIN_MEDIA_MAX_BYTES, fileItem.file_name ?? void 0);
 			result.decryptedFilePath = saved.path;
@@ -1738,6 +2042,7 @@ async function downloadMediaFromItem(item, deps) {
 			result.fileName = saved.fileName;
 			logger.debug(`${label} category=media type=file status=saved durationMs=0`);
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=file status=failed durationMs=0`);
 			errLog("weixin category=media type=file status=failed durationMs=0");
 		}
@@ -1745,12 +2050,13 @@ async function downloadMediaFromItem(item, deps) {
 		const videoItem = item.video_item;
 		if (!videoItem?.media?.encrypt_query_param && !videoItem?.media?.full_url || !videoItem?.media?.aes_key) return result;
 		try {
-			const saved = await saveMedia(await downloadAndDecryptBuffer(videoItem.media.encrypt_query_param ?? "", videoItem.media.aes_key, cdnBaseUrl, `${label} video`, videoItem.media.full_url), "video/mp4", "inbound", WEIXIN_MEDIA_MAX_BYTES);
+			const saved = await saveMedia(await downloadAndDecryptBuffer(videoItem.media.encrypt_query_param ?? "", videoItem.media.aes_key, cdnBaseUrl, `${label} video`, videoItem.media.full_url, WEIXIN_MEDIA_MAX_BYTES), "video/mp4", "inbound", WEIXIN_MEDIA_MAX_BYTES);
 			result.decryptedVideoPath = saved.path;
 			result.sha256 = saved.sha256;
 			result.fileName = saved.fileName;
 			logger.debug(`${label} category=media type=video status=saved durationMs=0`);
 		} catch (err) {
+			recordMediaFailure(result, err);
 			logger.error(`${label} category=media type=video status=failed durationMs=0`);
 			errLog("weixin category=media type=video status=failed durationMs=0");
 		}
@@ -1830,7 +2136,11 @@ async function handleSlashCommand(content, ctx) {
 //#region src/messaging/process-message.ts
 const MEDIA_TEMP_DIR$1 = path.join(os.tmpdir(), "weixin-agent/media");
 /** Save a buffer to a temporary file, returning the file path. */
-async function saveMediaBuffer(buffer, contentType, subdir, _maxBytes, originalFilename) {
+async function saveMediaBuffer(buffer, contentType, subdir, maxBytes, originalFilename) {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new TypeError("maxBytes must be a positive safe integer");
+	if (!(buffer instanceof Uint8Array)) throw new TypeError("media buffer must be bytes");
+	if (buffer.byteLength > maxBytes) throw mediaTooLarge("inbound media");
+	const bytes = Buffer.from(buffer);
 	const dir = path.join(MEDIA_TEMP_DIR$1, subdir ?? "");
 	await fs$1.mkdir(dir, { recursive: true });
 	let ext = ".bin";
@@ -1838,10 +2148,15 @@ async function saveMediaBuffer(buffer, contentType, subdir, _maxBytes, originalF
 	else if (contentType) ext = getExtensionFromMime(contentType);
 	const name = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
 	const filePath = path.join(dir, name);
-	await fs$1.writeFile(filePath, buffer);
+	try {
+		await fs$1.writeFile(filePath, bytes);
+	} catch (error) {
+		await fs$1.rm(filePath, { force: true }).catch(() => {});
+		throw error;
+	}
 	return {
 		path: filePath,
-		sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+		sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
 		fileName: originalFilename
 	};
 }
@@ -1861,133 +2176,178 @@ function findMediaItem(itemList) {
 }
 /**
 * Process a single inbound message:
-*   slash command check → download media → call agent → send reply.
+*   authorization → slash command check → bounded media download → call agent → send reply.
 */
 async function processOneMessage(full, deps) {
-	const textBody = extractTextBody(full.item_list);
-	const contextToken = full.context_token;
-	let inboundMedia = null;
-	const mediaItem = findMediaItem(full.item_list);
-	if (mediaItem) try {
-		const downloaded = await downloadMediaFromItem(mediaItem, {
-			cdnBaseUrl: deps.cdnBaseUrl,
-			saveMedia: saveMediaBuffer,
-			log: deps.log,
-			errLog: deps.errLog,
-			label: "inbound"
-		});
-		let requestMedia;
-		if (downloaded.decryptedPicPath) requestMedia = { type: "image", filePath: downloaded.decryptedPicPath, mimeType: "image/*" };
-		else if (downloaded.decryptedVideoPath) requestMedia = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };
-		else if (downloaded.decryptedFilePath) requestMedia = {
-			type: "file",
-			filePath: downloaded.decryptedFilePath,
-			mimeType: downloaded.fileMediaType ?? "application/octet-stream",
-			...normalizedFileName(downloaded.fileName) ? { fileName: normalizedFileName(downloaded.fileName) } : {}
-		};
-		else if (downloaded.decryptedVoicePath) requestMedia = { type: "audio", filePath: downloaded.decryptedVoicePath, mimeType: downloaded.voiceMediaType ?? "audio/wav" };
-		if (requestMedia && downloaded.sha256) inboundMedia = {
-			sha256: downloaded.sha256,
-			fileName: downloaded.fileName,
-			requestMedia
-		};
-	} catch (err) {
-		deps.errLog("[weixin] category=media status=failed durationMs=0");
-	}
-	if (mediaItem && !inboundMedia) {
-		deps.errLog("[weixin] category=media status=failed durationMs=0");
-		return false;
-	}
-	const classifierInput = Object.freeze({});
-	const chatMetadata = deps.classifyChat?.(classifierInput) ?? null;
-	const request = normalizeInboundUpdate(full, {
-		deliveryKey: deps.deliveryKey,
-		media: inboundMedia,
-		chatMetadata
-	});
-	if (contextToken) setContextToken(deps.accountId, request.senderId, contextToken);
-	if (textBody.startsWith("/")) {
-		const slashResult = await handleSlashCommand(textBody, {
-			to: request.conversationId,
-			contextToken,
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			accountId: deps.accountId,
-			log: deps.log,
-			errLog: deps.errLog,
-			onClear: () => deps.agent.clearSession?.(request.conversationId)
-		});
-		if (slashResult.handled) return slashResult.succeeded === true;
-	}
-	const to = request.conversationId;
-	let typingTimer;
-	const startTyping = () => {
-		if (!deps.typingTicket) return;
-		sendTyping({
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			body: {
-				ilink_user_id: to,
-				typing_ticket: deps.typingTicket,
-				status: TypingStatus.TYPING
-			}
-		}).catch(() => {});
-	};
-	if (deps.typingTicket) {
-		startTyping();
-		typingTimer = setInterval(startTyping, 1e4);
-	}
+	let inboundMediaPath = null;
 	try {
-		const response = await deps.agent.chat(request);
-		if (response.media) {
-			let filePath;
-			const mediaUrl = response.media.url;
-			if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR$1, "outbound"));
-			else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
-			await sendWeixinMediaFile({
-				filePath,
-				to,
-				text: response.text ? markdownToPlainText(response.text) : "",
-				opts: {
-					baseUrl: deps.baseUrl,
-					token: deps.token,
-					contextToken
-				},
-				cdnBaseUrl: deps.cdnBaseUrl
+		let chatMetadata;
+		let identity;
+		try {
+			validateRawUpdate(full);
+			const classifierInput = Object.freeze({});
+			chatMetadata = deps.classifyChat?.(classifierInput) ?? null;
+			identity = chatIdentityFromUpdate(full, chatMetadata);
+		} catch {
+			deps.errLog("[weixin] category=authorization status=invalid durationMs=0");
+			return true;
+		}
+		const authorizationMetadata = Object.freeze({
+			senderId: identity.senderId,
+			chatType: identity.chatType,
+			...identity.groupId ? { groupId: identity.groupId } : {}
+		});
+		if (deps.authorizeInbound && await deps.authorizeInbound(authorizationMetadata) !== true) {
+			deps.errLog("[weixin] category=authorization status=denied durationMs=0");
+			return true;
+		}
+
+		const textBody = extractTextBody(full.item_list);
+		const contextToken = full.context_token;
+		let inboundMedia = null;
+		let mediaFailureKind = null;
+		const mediaItem = findMediaItem(full.item_list);
+		if (mediaItem) try {
+			const downloaded = await downloadMediaFromItem(mediaItem, {
+				cdnBaseUrl: deps.cdnBaseUrl,
+				saveMedia: saveMediaBuffer,
+				log: deps.log,
+				errLog: deps.errLog,
+				label: "inbound"
 			});
-		} else if (response.text) await sendMessageWeixin({
-			to,
-			text: markdownToPlainText(response.text),
-			opts: {
+			mediaFailureKind = downloaded.failureKind ?? null;
+			let requestMedia;
+			if (downloaded.decryptedPicPath) requestMedia = { type: "image", filePath: downloaded.decryptedPicPath, mimeType: "image/*" };
+			else if (downloaded.decryptedVideoPath) requestMedia = { type: "video", filePath: downloaded.decryptedVideoPath, mimeType: "video/mp4" };
+			else if (downloaded.decryptedFilePath) requestMedia = {
+				type: "file",
+				filePath: downloaded.decryptedFilePath,
+				mimeType: downloaded.fileMediaType ?? "application/octet-stream",
+				...normalizedFileName(downloaded.fileName) ? { fileName: normalizedFileName(downloaded.fileName) } : {}
+			};
+			else if (downloaded.decryptedVoicePath) requestMedia = { type: "audio", filePath: downloaded.decryptedVoicePath, mimeType: downloaded.voiceMediaType ?? "audio/wav" };
+			inboundMediaPath = requestMedia?.filePath ?? null;
+			if (requestMedia && downloaded.sha256) inboundMedia = {
+				sha256: downloaded.sha256,
+				fileName: downloaded.fileName,
+				requestMedia
+			};
+		} catch {
+			mediaFailureKind = "transient";
+			deps.errLog("[weixin] category=media status=failed durationMs=0");
+		}
+		if (mediaItem && !inboundMedia) {
+			deps.errLog(`[weixin] category=media status=${mediaFailureKind === "permanent" ? "rejected" : "failed"} durationMs=0`);
+			return mediaFailureKind === "permanent";
+		}
+		const request = normalizeInboundUpdate(full, {
+			deliveryKey: deps.deliveryKey,
+			media: inboundMedia,
+			chatMetadata
+		});
+		if (contextToken) setContextToken(deps.accountId, request.senderId, contextToken, deps.deliveryKey);
+		if (textBody.startsWith("/")) {
+			const slashResult = await handleSlashCommand(textBody, {
+				to: request.conversationId,
+				contextToken,
 				baseUrl: deps.baseUrl,
 				token: deps.token,
-				contextToken
+				accountId: deps.accountId,
+				log: deps.log,
+				errLog: deps.errLog,
+				onClear: () => deps.agent.clearSession?.(request.conversationId)
+			});
+			if (slashResult.handled) return slashResult.succeeded === true;
+		}
+		const to = request.conversationId;
+		const resolvedTypingTicket = deps.getTypingTicket ? await deps.getTypingTicket() : deps.typingTicket;
+		const typingTicket = typeof resolvedTypingTicket === "string" ? resolvedTypingTicket : "";
+		let typingTimer;
+		const startTyping = () => {
+			if (!typingTicket) return;
+			sendTyping({
+				baseUrl: deps.baseUrl,
+				token: deps.token,
+				body: {
+					ilink_user_id: to,
+					typing_ticket: typingTicket,
+					status: TypingStatus.TYPING
+				}
+			}).catch(() => {});
+		};
+		if (typingTicket) {
+			startTyping();
+			typingTimer = setInterval(startTyping, 1e4);
+		}
+		try {
+			let response;
+			try {
+				response = await deps.agent.chat(request);
+			} catch (err) {
+				deps.errLog("[weixin] category=message status=failed durationMs=0");
+				sendWeixinErrorNotice({
+					to,
+					contextToken,
+					message: "⚠️ 处理消息失败",
+					baseUrl: deps.baseUrl,
+					token: deps.token,
+					errLog: deps.errLog
+				});
+				return err?.permanent === true;
 			}
-		});
-	} catch (err) {
-		deps.errLog("[weixin] category=message status=failed durationMs=0");
-		sendWeixinErrorNotice({
-			to,
-			contextToken,
-			message: "⚠️ 处理消息失败",
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			errLog: deps.errLog
-		});
-		return false;
+			try {
+				if (response.media) {
+					let filePath;
+					const mediaUrl = response.media.url;
+					if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR$1, "outbound"));
+					else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
+					await sendWeixinMediaFile({
+						filePath,
+						to,
+						text: response.text ? markdownToPlainText(response.text) : "",
+						opts: {
+							baseUrl: deps.baseUrl,
+							token: deps.token,
+							contextToken
+						},
+						cdnBaseUrl: deps.cdnBaseUrl
+					});
+				} else if (response.text) await sendMessageWeixin({
+					to,
+					text: markdownToPlainText(response.text),
+					opts: {
+						baseUrl: deps.baseUrl,
+						token: deps.token,
+						contextToken
+					}
+				});
+			} catch {
+				// The agent result may already contain durable business effects. A reply
+				// transport failure must not replay that event or block later messages in
+				// the same provider batch; record the delivery failure and advance.
+				deps.errLog("[weixin] category=delivery status=failed durationMs=0");
+				return true;
+			}
+		} finally {
+			if (typingTimer) clearInterval(typingTimer);
+			if (typingTicket) sendTyping({
+				baseUrl: deps.baseUrl,
+				token: deps.token,
+				body: {
+					ilink_user_id: to,
+					typing_ticket: typingTicket,
+					status: TypingStatus.CANCEL
+				}
+			}).catch(() => {});
+		}
+		return true;
 	} finally {
-		if (typingTimer) clearInterval(typingTimer);
-		if (deps.typingTicket) sendTyping({
-			baseUrl: deps.baseUrl,
-			token: deps.token,
-			body: {
-				ilink_user_id: to,
-				typing_ticket: deps.typingTicket,
-				status: TypingStatus.CANCEL
-			}
-		}).catch(() => {});
+		if (inboundMediaPath) try {
+			await fs$1.rm(inboundMediaPath, { force: true });
+		} catch {
+			deps.errLog("[weixin] category=media-cleanup status=failed durationMs=0");
+		}
 	}
-	return true;
 }
 //#endregion
 //#region src/storage/sync-buf.ts
@@ -2048,7 +2408,7 @@ const RETRY_DELAY_MS = 2e3;
 * Runs until aborted.
 */
 async function monitorWeixinProvider(opts) {
-	const { baseUrl, cdnBaseUrl, token, accountId, agent, abortSignal, longPollTimeoutMs, deliveryKey, classifyChat } = opts;
+	const { baseUrl, cdnBaseUrl, token, accountId, agent, abortSignal, longPollTimeoutMs, deliveryKey, classifyChat, authorizeInbound } = opts;
 	const log = opts.log ?? ((msg) => console.log(msg));
 	const errLog = (msg) => {
 		log(msg);
@@ -2112,7 +2472,8 @@ async function monitorWeixinProvider(opts) {
 				token,
 				deliveryKey,
 				classifyChat,
-				typingTicket: (await configManager.getForUser(fromUserId, full.context_token)).typingTicket,
+				authorizeInbound,
+				getTypingTicket: async () => (await configManager.getForUser(fromUserId, full.context_token)).typingTicket,
 				log,
 				errLog
 			});
@@ -2245,6 +2606,34 @@ var Bot = class {
 	async wait() {
 		await this._monitorPromise;
 	}
+	/** Return a credential-free proactive-delivery readiness snapshot. */
+	getDeliveryStatus() {
+		const state = getContextTokenState(this._accountId, this._userId);
+		return Object.freeze({
+			ready: state.ready,
+			status: state.status,
+			...state.reason ? { reason: state.reason } : {},
+			...state.expiresAt ? { expiresAt: state.expiresAt } : {}
+		});
+	}
+	/** Return whether proactive delivery is bound to this exact recipient. */
+	isDeliveryTarget(recipientId) {
+		return typeof recipientId === "string" && recipientId === this._userId;
+	}
+	/**
+	* Proactively send to an explicitly bound recipient.
+	*
+	* The recipient must match the immutable user attached to this login. This
+	* keeps the delivery target and its context token in the same SDK boundary.
+	*/
+	async sendMessageTo(recipientId, message, options = {}) {
+		if (!this.isDeliveryTarget(recipientId)) {
+			const error = new Error("微信主动发送目标与当前登录用户不匹配");
+			error.code = "WEIXIN_DELIVERY_TARGET_MISMATCH";
+			throw error;
+		}
+		return this.sendMessage(message, options);
+	}
 	/**
 	* Proactively send a message to the logged-in WeChat user.
 	*
@@ -2254,36 +2643,41 @@ var Bot = class {
 	* Requires at least one inbound message to have been received so that a
 	* valid `context_token` is cached (tokens are valid for ~24 hours).
 	*/
-	async sendMessage(message) {
+	async sendMessage(message, options = {}) {
+		if (options === null || typeof options !== "object" || Array.isArray(options)) throw new TypeError("sendMessage options are invalid");
 		const response = typeof message === "string" ? { text: message } : message;
 		const contextToken = getContextToken(this._accountId, this._userId);
-		if (!contextToken) throw new Error("没有找到 context_token，需要在 start() 运行期间至少收到过一条消息");
+		if (!contextToken) {
+			const error = new Error("微信主动发送尚未就绪，请先向助手发送一条消息");
+			error.code = "WEIXIN_CONTEXT_NOT_READY";
+			throw error;
+		}
 		const apiOpts = {
 			baseUrl: this._baseUrl,
 			token: this._token,
-			contextToken
+			contextToken,
+			...options.clientId ? { clientId: options.clientId } : {}
 		};
 		if (response.media) {
 			let filePath;
 			const mediaUrl = response.media.url;
 			if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) filePath = await downloadRemoteImageToTemp(mediaUrl, path.join(MEDIA_TEMP_DIR, "outbound"));
 			else filePath = path.isAbsolute(mediaUrl) ? mediaUrl : path.resolve(mediaUrl);
-			await sendWeixinMediaFile({
+			const sent = await sendWeixinMediaFile({
 				filePath,
 				to: this._userId,
 				text: response.text ? markdownToPlainText(response.text) : "",
 				opts: apiOpts,
 				cdnBaseUrl: this._cdnBaseUrl
 			});
-			return;
+			return sent;
 		}
 		if (response.text) {
-			await sendMessageWeixin({
+			return sendMessageWeixin({
 				to: this._userId,
 				text: markdownToPlainText(response.text),
 				opts: apiOpts
 			});
-			return;
 		}
 		throw new Error("消息必须包含 text 或 media");
 	}
@@ -2297,6 +2691,7 @@ var Bot = class {
 function start(agent, opts) {
 	const log = opts?.log ?? console.log;
 	if (!(opts?.deliveryKey instanceof Uint8Array) || opts.deliveryKey.byteLength !== 32) throw new TypeError("deliveryKey must be 32 bytes");
+	if (opts.authorizeInbound !== void 0 && typeof opts.authorizeInbound !== "function") throw new TypeError("authorizeInbound must be a function");
 	const deliveryKey = new Uint8Array(opts.deliveryKey);
 	let accountId = opts?.accountId;
 	if (!accountId) {
@@ -2309,6 +2704,7 @@ function start(agent, opts) {
 	if (!account.configured) throw new Error(`账号 ${accountId} 未配置 (缺少 token)，请先运行 login`);
 	const userId = loadWeixinAccount(account.accountId)?.userId;
 	if (!userId) throw new Error(`账号 ${accountId} 没有关联的用户 ID，请重新运行 login`);
+	restoreContextToken(account.accountId, userId, deliveryKey);
 	log("[weixin] category=bot status=started durationMs=0");
 	const monitorPromise = monitorWeixinProvider({
 		baseUrl: account.baseUrl,
@@ -2318,6 +2714,7 @@ function start(agent, opts) {
 		agent,
 		deliveryKey,
 		classifyChat: opts.classifyChat,
+		authorizeInbound: opts.authorizeInbound,
 		abortSignal: opts?.abortSignal,
 		log
 	});

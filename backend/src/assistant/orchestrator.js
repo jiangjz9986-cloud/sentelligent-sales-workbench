@@ -1,13 +1,20 @@
-import { createHash, createHmac, randomInt } from "node:crypto";
+import { createHash, createHmac, randomInt, randomUUID } from "node:crypto";
 
 import { createAssistantRouter } from "./router.js";
 import { createAgentRegistry } from "./agentRegistry.js";
 import { validateToolInvocation } from "./contracts.js";
 import { getToolPolicy } from "./policy.js";
 import { classifyWeixinConfirmationText } from "./weixinEvent.js";
+import { weixinCard } from "./weixinCard.js";
+import {
+  deriveWebExplicitCredential,
+  isWebClosedTool,
+  safeWebPendingResponse,
+} from "./webChannel.js";
 
 const SAFE_FAILURE = "处理失败，请稍后重试。";
 const SAFE_CONFIRMATION_FAILURE = "确认信息无效或已过期，请重新发起操作。";
+const SAFE_FINANCIAL_SCOPE_FAILURE = "该财务预览仅限已绑定账号本人的微信私聊。";
 const VALID_CONTEXT = ["owner", "channel", "conversation", "event", "requestId"];
 const STORED_CONFIRMATION_TEXT = "确认码不会重复展示，请在同一会话回复“重发确认码”或“取消”。";
 
@@ -23,6 +30,12 @@ function requestDigest(input) {
     pendingActionId: input.pendingActionId === undefined ? null : input.pendingActionId,
     confirmationCode: input.confirmationCode === undefined ? null : String(input.confirmationCode),
     mediaSha256: input.mediaSha256 ?? null,
+    quoteProviderMessageId: input.quoteProviderMessageId ?? null,
+    quoteTextHash: input.quoteTextHash ?? null,
+    senderHash: input.senderHash ?? null,
+    groupHash: input.groupHash ?? null,
+    chatType: input.chatType ?? null,
+    financialScope: input.financialScope ?? null,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
@@ -87,20 +100,43 @@ function makeContext(value) {
 function makeServerData(value) {
   if (value === undefined || value === null) return Object.freeze({});
   if (typeof value !== "object" || Array.isArray(value)) throw new TypeError("serverData must be an object");
-  if (Object.keys(value).some((key) => !["media", "auditMetadata"].includes(key))) throw new TypeError("serverData contains an unsupported field");
+  if (Object.keys(value).some((key) => !["media", "auditMetadata", "quote"].includes(key))) throw new TypeError("serverData contains an unsupported field");
   const result = {};
   if (value.auditMetadata !== undefined && value.auditMetadata !== null) {
     const metadata = value.auditMetadata;
     if (typeof metadata !== "object" || Array.isArray(metadata)) throw new TypeError("serverData.auditMetadata must be an object");
-    const allowedMetadata = new Set(["senderHash", "groupHash", "chatType"]);
+    const allowedMetadata = new Set(["senderHash", "groupHash", "chatType", "financialScope"]);
     if (Object.keys(metadata).some((key) => !allowedMetadata.has(key))) throw new TypeError("serverData.auditMetadata contains an unsupported field");
     const normalizedMetadata = {};
-    for (const key of allowedMetadata) {
+    for (const key of ["senderHash", "groupHash", "chatType"]) {
       if (metadata[key] === undefined || metadata[key] === null) continue;
       if (typeof metadata[key] !== "string" || !metadata[key].trim()) throw new TypeError(`serverData.auditMetadata.${key} is invalid`);
       normalizedMetadata[key] = metadata[key];
     }
+    if (metadata.financialScope !== undefined && metadata.financialScope !== null) {
+      if (typeof metadata.financialScope !== "boolean") throw new TypeError("serverData.auditMetadata.financialScope is invalid");
+      normalizedMetadata.financialScope = metadata.financialScope;
+    }
     result.auditMetadata = Object.freeze(normalizedMetadata);
+  }
+  if (value.quote !== undefined && value.quote !== null) {
+    const quote = value.quote;
+    if (typeof quote !== "object" || Array.isArray(quote)) throw new TypeError("serverData.quote must be an object");
+    const allowedQuote = new Set(["providerMessageId", "text"]);
+    if (Object.keys(quote).some((key) => !allowedQuote.has(key))) throw new TypeError("serverData.quote contains an unsupported field");
+    const providerMessageId = typeof quote.providerMessageId === "string" ? quote.providerMessageId.trim() : "";
+    const quotedText = typeof quote.text === "string" ? quote.text : "";
+    if (providerMessageId && (providerMessageId.length > 500 || /[\u0000-\u001f\u007f-\u009f]/u.test(providerMessageId))) {
+      throw new TypeError("serverData.quote.providerMessageId is invalid");
+    }
+    if (quotedText && (quotedText.length > 20_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(quotedText))) {
+      throw new TypeError("serverData.quote.text is invalid");
+    }
+    if (!providerMessageId && !quotedText) throw new TypeError("serverData.quote is incomplete");
+    result.quote = Object.freeze({
+      ...(providerMessageId ? { providerMessageId } : {}),
+      ...(quotedText ? { text: quotedText } : {}),
+    });
   }
   if (value.media === undefined || value.media === null) return Object.freeze(result);
   const media = value.media;
@@ -155,6 +191,7 @@ function contextIdentifier(value) {
     || normalized.length > 200
     || normalized.startsWith("synthetic:")
     || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)
+    || !/^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u.test(normalized)
   ) return null;
   return normalized;
 }
@@ -193,17 +230,92 @@ function nextConversationContext(previous, toolName, argumentsValue, result) {
   return current;
 }
 
-export function safePendingResponse(tool, { code }) {
+function normalizedBusinessContext(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return {
-    text: [
-      `待确认操作：${tool.description}`,
-      `确认码：${code}`,
-      "有效期：10 分钟",
-      "请在同一微信会话中直接回复这六位数字；不要转发给其他会话。",
-      "回复“取消”可放弃本次操作，回复“重发确认码”可轮换确认码。",
-    ].join("\n"),
+    ...(contextIdentifier(value.customerId) ? { customerId: contextIdentifier(value.customerId) } : {}),
+    ...(contextIdentifier(value.opportunityId) ? { opportunityId: contextIdentifier(value.opportunityId) } : {}),
   };
 }
+
+function contextUpdateFromResult(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !value.contextUpdate) return null;
+  const update = value.contextUpdate;
+  if (!update || typeof update !== "object" || Array.isArray(update)) return null;
+  const hasCustomer = Object.hasOwn(update, "customerId");
+  const hasOpportunity = Object.hasOwn(update, "opportunityId");
+  if (!hasCustomer && !hasOpportunity) return null;
+  return {
+    ...(hasCustomer ? { customerId: contextIdentifier(update.customerId) } : {}),
+    ...(hasOpportunity ? { opportunityId: contextIdentifier(update.opportunityId) } : {}),
+    source: typeof update.source === "string" ? update.source : "verified_entity",
+    sourceRefs: Array.isArray(update.sourceRefs) ? update.sourceRefs : [],
+  };
+}
+
+function readBusinessContext(repository, context) {
+  if (!repository || typeof repository.get !== "function") return {};
+  try {
+    return normalizedBusinessContext(repository.get({
+      owner: context.owner,
+      channel: context.channel,
+      conversationId: context.conversation,
+    }));
+  } catch {
+    return {};
+  }
+}
+
+function persistBusinessContext(repository, context, update) {
+  if (!repository || typeof repository.set !== "function" || !update) return null;
+  return repository.set({
+    owner: context.owner,
+    channel: context.channel,
+    conversationId: context.conversation,
+    customerId: update.customerId ?? null,
+    opportunityId: update.opportunityId ?? null,
+    source: update.source,
+    sourceRefs: update.sourceRefs,
+    requestId: context.requestId,
+  });
+}
+
+export function safePendingResponse(tool, { code, preview }) {
+  const previewText = typeof preview === "string" && preview.trim() ? preview.trim() : null;
+  const footer = `确认码：${code}\n请回复这六位数字，或回复“取消”。`;
+  if (previewText) return { text: `${previewText}\n\n${footer}` };
+  return {
+    text: weixinCard("待确认", [
+      ["操作", tool.description],
+      ["确认码", code],
+    ], "请回复这六位数字，或回复“取消”。"),
+  };
+}
+
+// Lightweight affirm-language confirmations never show a code; the pending
+// action still holds an internally derived credential (same pattern as the
+// bookkeeping runtime state credential) so the repository state machine,
+// TTL, lease, and audit chain stay identical to code-confirmed actions.
+export function safeAffirmPendingResponse(tool, { preview }) {
+  const previewText = typeof preview === "string" && preview.trim() ? preview.trim() : null;
+  const footer = "请回复“确认”或“取消”。";
+  if (previewText) return { text: `${previewText}\n\n${footer}` };
+  return {
+    text: weixinCard("待确认", [["操作", tool.description]], footer),
+  };
+}
+
+const AFFIRM_TEXT = "确认";
+const AFFIRM_CODE_GUIDANCE = "本操作无需确认码，回复“确认”写入，回复“取消”放弃。";
+
+function deriveAffirmCredential(confirmationSecretKey, actionId) {
+  const digest = createHmac("sha256", confirmationSecretKey)
+    .update(`sentelligent/assistant-affirm-confirmation/v1\u0000${actionId}`, "utf8")
+    .digest();
+  return String(digest.readUInt32BE(0) % 1_000_000).padStart(6, "0");
+}
+
+export { deriveWebExplicitCredential };
 
 /**
  * Deterministic assistant execution boundary. The HTTP layer supplies context;
@@ -215,11 +327,14 @@ export function createAssistantOrchestrator({
   eventRepository,
   sessionRepository,
   pendingActionRepository,
+  businessContextRepository = null,
   toolHandlers = {},
   confirmationCodeFactory = defaultCode,
   confirmationSecret,
   clock = () => new Date(),
   pendingTtlMs = 10 * 60 * 1000,
+  pendingActionHandler = null,
+  pendingPreviewProviders = {},
 } = {}) {
   if (!eventRepository || typeof eventRepository.receive !== "function" || typeof eventRepository.claim !== "function") {
     throw new TypeError("eventRepository must support receive and claim");
@@ -254,6 +369,14 @@ export function createAssistantOrchestrator({
         pendingActionId,
         confirmationCode: structuredCodePresent ? "<confirmation-code>" : undefined,
         mediaSha256: serverData.media?.sha256,
+        quoteProviderMessageId: serverData.quote?.providerMessageId,
+        quoteTextHash: serverData.quote?.text
+          ? createHash("sha256").update(serverData.quote.text, "utf8").digest("hex")
+          : null,
+        senderHash: serverData.auditMetadata?.senderHash,
+        groupHash: serverData.auditMetadata?.groupHash,
+        chatType: serverData.auditMetadata?.chatType,
+        financialScope: serverData.auditMetadata?.financialScope,
       });
     const received = eventRepository.receive({
       owner: context.owner,
@@ -278,6 +401,8 @@ export function createAssistantOrchestrator({
     const conversationContext = conversation?.id
       ? normalizedConversationContext(sessionRepository?.getContext?.(conversation.id) ?? sessionRepository?.getConversationContext?.(conversation.id))
       : {};
+    const businessContext = readBusinessContext(businessContextRepository, context);
+    const routingContext = { ...conversationContext, ...businessContext };
     const append = (role, value, metadata = {}) => sessionRepository?.appendDraftPart?.(conversation?.id, {
       role,
       text: String(value),
@@ -312,18 +437,96 @@ export function createAssistantOrchestrator({
       let pendingPlan;
       let pendingAction;
       const scope = { owner: context.owner, channel: context.channel, conversationId: conversation?.id };
+      if (typeof pendingActionHandler === "function") {
+        try {
+          pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+        } catch {
+          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        }
+        const specialized = await pendingActionHandler({
+          action: pendingAction,
+          scope,
+          context,
+          text,
+          textClassification,
+          confirmationCode: code,
+          pendingActionId,
+          serverData,
+        });
+        if (specialized) {
+          return finish(
+            specialized.status ?? 200,
+            specialized.body ?? { status: "ok", text: "已处理。" },
+            {
+              ...(specialized.storedBody ? { storedBody: specialized.storedBody } : {}),
+              ...(specialized.draftText ? { draftText: specialized.draftText } : {}),
+            },
+          );
+        }
+      }
       const scopedCommand = ["code", "cancel", "resend"].includes(textClassification.kind) || structuredCodePresent;
-      if (scopedCommand) {
+      // A bare 确认 confirms an affirm-language pending action (for example a
+      // quick-record capture). This branch runs strictly after the
+      // pendingActionHandler above, so a bookkeeping draft that owns 确认
+      // (quoted, or implicit when no generic pending action exists) has
+      // already been settled by the bookkeeping runtime and never reaches
+      // here. Code-confirmed pending actions ignore bare 确认 (router keeps
+      // the existing clarify).
+      let affirmConfirmation = false;
+      if (!scopedCommand && text.trim() === AFFIRM_TEXT) {
+        if (!pendingAction) {
+          try {
+            pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+          } catch {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
+        }
+        affirmConfirmation = Boolean(
+          pendingAction
+          && registry.getTool(pendingAction.actionType)?.policy?.confirmation === "affirm_language",
+        );
+      }
+      if (scopedCommand || affirmConfirmation) {
         if (structuredCodePresent && !structuredCode) {
           return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
         }
         if (textClassification.kind === "code" && structuredCodePresent && structuredCode !== textClassification.code) {
           return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
         }
-        try {
-          pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
-        } catch {
-          return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+        if (!pendingAction) {
+          try {
+            pendingAction = pendingActionRepository?.findActiveByConversation?.(scope) ?? null;
+          } catch {
+            return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
+          }
+        }
+        // Six-digit texts and resend requests aimed at an affirm-language
+        // pending action get guidance instead of a confirm() attempt, so the
+        // internal derived credential can never be guessed and wrong-code
+        // lockout is never triggered by an understandable user habit.
+        const affirmPendingTool = pendingAction
+          && registry.getTool(pendingAction.actionType)?.policy?.confirmation === "affirm_language"
+          ? registry.getTool(pendingAction.actionType)
+          : null;
+        if (affirmPendingTool && !affirmConfirmation && textClassification.kind !== "cancel") {
+          if (textClassification.kind === "resend") {
+            const storedPreview = typeof pendingAction.payload?.preview === "string" && pendingAction.payload.preview.trim()
+              ? pendingAction.payload.preview.trim()
+              : null;
+            const liveBody = {
+              status: "confirmation_required",
+              actionId: pendingAction.id,
+              toolName: affirmPendingTool.name,
+              risk: (pendingAction.payload?.plan || pendingAction.payload)?.risk,
+              ...safeAffirmPendingResponse(affirmPendingTool, { preview: storedPreview }),
+            };
+            return finish(200, liveBody, { draftText: "等待用户确认。" });
+          }
+          return finish(200, {
+            status: "clarify",
+            message: AFFIRM_CODE_GUIDANCE,
+            text: AFFIRM_CODE_GUIDANCE,
+          }, { draftText: "等待用户确认。" });
         }
         if (!pendingAction && pendingActionId) {
           const completed = pendingActionRepository?.get?.(pendingActionId, scope);
@@ -360,13 +563,16 @@ export function createAssistantOrchestrator({
             const renewed = pendingActionRepository.renewConfirmation(resolvedActionId, { ...scope, confirmationCode: replacementCode });
             const tool = registry.getTool(pendingAction.actionType);
             if (!tool) throw new TypeError("pending action tool is unavailable");
+            const storedPreview = typeof pendingAction.payload?.preview === "string" && pendingAction.payload.preview.trim()
+              ? pendingAction.payload.preview.trim()
+              : null;
             const liveBody = {
               status: "confirmation_required",
               actionId: resolvedActionId,
               toolName: tool.name,
               risk: (pendingAction.payload?.plan || pendingAction.payload)?.risk,
               confirmationCode: renewed.confirmationCode,
-              ...safePendingResponse(tool, { code: renewed.confirmationCode }),
+              ...safePendingResponse(tool, { code: renewed.confirmationCode, preview: storedPreview }),
             };
             const storedBody = { ...liveBody, text: STORED_CONFIRMATION_TEXT };
             delete storedBody.confirmationCode;
@@ -375,11 +581,21 @@ export function createAssistantOrchestrator({
             return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
           }
         } else {
-          if (!pendingAction || !code) {
+          // The affirm path re-derives the internal credential server-side;
+          // from here on the state machine is byte-identical to code confirms.
+          const webExplicitConfirmation = context.channel === "web"
+            && structuredCodePresent
+            && !affirmConfirmation;
+          const suppliedCode = affirmConfirmation
+            ? deriveAffirmCredential(confirmationDigestKey, pendingAction.id)
+            : webExplicitConfirmation
+              ? deriveWebExplicitCredential(confirmationDigestKey, pendingAction.id)
+              : code;
+          if (!pendingAction || !suppliedCode) {
             return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
           }
           try {
-            const confirmed = pendingActionRepository.confirm(resolvedActionId, { ...scope, confirmationCode: code });
+            const confirmed = pendingActionRepository.confirm(resolvedActionId, { ...scope, confirmationCode: suppliedCode });
             if (confirmed?.expired || confirmed?.inProgress) {
               return finish(confirmed?.expired ? 410 : 409, { status: "error", message: SAFE_CONFIRMATION_FAILURE }, { draftText: "确认信息已处理。" });
             }
@@ -405,7 +621,7 @@ export function createAssistantOrchestrator({
           text,
           confidence,
           mediaRef: serverData.media?.sourceRef,
-          context: conversationContext,
+          context: routingContext,
         });
       if (["help", "clarify", "unknown", "cancelled", "cancel"].includes(plan.status)) {
         return finish(200, { status: plan.status === "cancelled" || plan.status === "cancel" ? "cancel" : plan.status, message: safeText(plan), question: plan.question });
@@ -413,23 +629,103 @@ export function createAssistantOrchestrator({
       if (plan.status === "denied") return finish(403, { status: "error", message: "该操作不在允许范围内。" });
       const tool = registry.getTool(plan.toolName);
       if (!tool) return finish(400, { status: "error", message: "该功能暂不可用。" });
+      if (context.channel === "web" && isWebClosedTool(tool.name)) {
+        return finish(403, { status: "error", message: "该操作请使用微信小小。" });
+      }
       if (tool.policy?.denied || getToolPolicy(tool.name).denied) return finish(403, { status: "error", message: "该操作不在允许范围内。" });
       if (resolvedActionId && pendingAction?.actionType !== tool.name) return finish(409, { status: "error", message: SAFE_CONFIRMATION_FAILURE });
       const invocation = validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: plan.arguments || {} });
 
+      // The HTTP boundary derives this bit from the authenticated machine
+      // owner, exact configured bookkeeping sender, and direct-chat state.
+      // Reject before pending actions, durable tool runs, or the settlement
+      // handler can read any finance data or create an agent run.
+      if (
+        tool.name === "advance-settlement.preview"
+        && (
+          (context.channel === "weixin" && serverData.auditMetadata?.financialScope !== true)
+          || context.channel === "web"
+        )
+      ) {
+        return finish(403, {
+          status: "error",
+          message: context.channel === "web" ? "该操作请使用微信小小。" : SAFE_FINANCIAL_SCOPE_FAILURE,
+        }, { draftText: context.channel === "web" ? "该操作请使用微信小小。" : "财务预览访问被拒绝。" });
+      }
+
+      // Bookkeeping confirmation actions are created only after the authenticated
+      // WeChat image/text event has persisted an owner-scoped draft. A generic
+      // assistant plan has no entry id and must not create a second pending
+      // financial action or confirmation code.
+      if ((tool.name === "bookkeeping.confirm" || tool.name === "shortcut-bookkeeping.confirm") && !resolvedActionId) {
+        return finish(409, {
+          status: "clarify",
+          message: "请先在绑定的微信会话中发送付款截图或记账文字；收到待确认信息后回复“确认”、以“修改”开头说明修改内容，或回复“取消”。",
+        }, { draftText: "等待微信图片或文字记账草稿。" });
+      }
+
       if (isRisky(plan) && !plan.confirmed && !resolvedActionId) {
         if (!pendingActionRepository?.create) return finish(500, { status: "error", message: SAFE_FAILURE });
-        const code = exactConfirmationCode(String(confirmationCodeFactory()));
+        // A registered preview provider can disambiguate the target entity,
+        // pin server-owned facts (ids, expected versions, normalized changes)
+        // into the stored plan, and render a human preview before any pending
+        // action or confirmation code exists. A block result never creates an
+        // action; a provider failure falls through to the safe error response.
+        const previewProvider = pendingPreviewProviders[tool.name];
+        let enriched = null;
+        if (typeof previewProvider === "function") {
+          enriched = await previewProvider({
+            arguments: invocation.arguments,
+            context,
+            businessContext: routingContext,
+            serverData,
+          });
+          if (enriched?.block) {
+            const blockText = typeof enriched.text === "string" && enriched.text.trim()
+              ? enriched.text.trim()
+              : SAFE_FAILURE;
+            return finish(enriched.status ?? 200, {
+              status: enriched.bodyStatus ?? "clarify",
+              message: blockText,
+            }, { draftText: blockText });
+          }
+        }
+        const plannedArguments = enriched && enriched.arguments !== undefined
+          ? validateToolInvocation({ agentId: tool.agentId, toolName: tool.name, arguments: enriched.arguments }).arguments
+          : invocation.arguments;
+        const previewText = typeof enriched?.previewText === "string" && enriched.previewText.trim()
+          ? enriched.previewText.trim()
+          : null;
+        const previewSummary = typeof enriched?.previewSummary === "string" && enriched.previewSummary.trim()
+          ? enriched.previewSummary.trim().slice(0, 2000)
+          : (previewText ? previewText.slice(0, 2000) : null);
+        // Affirm-language tools receive an internally derived credential bound
+        // to a pre-generated action id; the credential is never rendered, so
+        // the stored body needs no code scrubbing. Every other confirmation
+        // level keeps the six-digit code path unchanged.
+        const confirmationPolicy = tool.policy?.confirmation ?? getToolPolicy(tool.name).confirmation;
+        const affirmTool = confirmationPolicy === "affirm_language";
+        const webExplicitTool = context.channel === "web" && confirmationPolicy === "explicit_code";
+        const derivedActionId = affirmTool || webExplicitTool ? randomUUID() : null;
+        const code = affirmTool
+          ? deriveAffirmCredential(confirmationDigestKey, derivedActionId)
+          : webExplicitTool
+            ? deriveWebExplicitCredential(confirmationDigestKey, derivedActionId)
+            : exactConfirmationCode(String(confirmationCodeFactory()));
         if (!code) return finish(500, { status: "error", message: SAFE_FAILURE });
         const expiresAt = new Date(clock().getTime() + pendingTtlMs).toISOString();
         let action;
         try {
           action = pendingActionRepository.create({
+            ...(derivedActionId ? { id: derivedActionId } : {}),
             owner: context.owner,
             channel: context.channel,
             conversationId: conversation?.id,
             actionType: tool.name,
-            payload: { plan: { ...plan, arguments: invocation.arguments } },
+            payload: {
+              plan: { ...plan, arguments: plannedArguments },
+              ...(previewSummary ? { preview: previewSummary } : {}),
+            },
             confirmationCode: code,
             expiresAt,
           });
@@ -439,13 +735,28 @@ export function createAssistantOrchestrator({
           }
           throw error;
         }
+        if (affirmTool) {
+          const pendingResponse = context.channel === "web"
+            ? safeWebPendingResponse(tool, { preview: previewText ?? previewSummary })
+            : safeAffirmPendingResponse(tool, { preview: previewText ?? previewSummary });
+          const publicBody = {
+            status: "confirmation_required",
+            actionId: action.id,
+            toolName: tool.name,
+            risk: plan.risk,
+            ...pendingResponse,
+          };
+          return finish(200, publicBody, { draftText: "等待用户确认。" });
+        }
+        const pendingResponse = context.channel === "web"
+          ? safeWebPendingResponse(tool, { preview: previewText ?? previewSummary })
+          : safePendingResponse(tool, { code, preview: previewText ?? previewSummary });
         const publicBody = {
           status: "confirmation_required",
           actionId: action.id,
           toolName: tool.name,
           risk: plan.risk,
-          confirmationCode: code,
-          ...safePendingResponse(tool, { code }),
+          ...(context.channel === "web" ? pendingResponse : { confirmationCode: code, ...pendingResponse }),
         };
         const storedBody = { ...publicBody, text: STORED_CONFIRMATION_TEXT };
         delete storedBody.confirmationCode;
@@ -481,7 +792,12 @@ export function createAssistantOrchestrator({
               result: output,
             });
           }
-          const outputContext = nextConversationContext(conversationContext, tool.name, invocation.arguments, output);
+          const contextUpdate = contextUpdateFromResult(output);
+          persistBusinessContext(businessContextRepository, context, contextUpdate);
+          const outputContext = {
+            ...nextConversationContext(routingContext, tool.name, invocation.arguments, output),
+            ...normalizedBusinessContext(contextUpdate),
+          };
           return finish(200, { status: "ok", toolName: tool.name, result: output }, {
             draftText: confirmationContext ? "确认信息已处理。" : "ok",
             assistantContext: outputContext,
@@ -506,10 +822,13 @@ export function createAssistantOrchestrator({
         }
         toolRun = { id: createdRun.item.id, leaseToken: claimedRun.leaseToken };
       }
-      const handlerContext = resolvedActionId
-        ? Object.freeze({ ...context, actionId: resolvedActionId })
-        : context;
+      const handlerContext = Object.freeze({
+        ...context,
+        businessContext: routingContext,
+        ...(resolvedActionId ? { actionId: resolvedActionId } : {}),
+      });
       const result = await handler(Object.freeze({ ...invocation.arguments }), handlerContext, serverData);
+      persistBusinessContext(businessContextRepository, context, contextUpdateFromResult(result));
       if (toolRun) {
         eventRepository.completeToolRun(toolRun.id, { leaseToken: toolRun.leaseToken, output: result });
       }
@@ -522,7 +841,10 @@ export function createAssistantOrchestrator({
           result,
         });
       }
-      const outputContext = nextConversationContext(conversationContext, tool.name, invocation.arguments, result);
+      const outputContext = {
+        ...nextConversationContext(routingContext, tool.name, invocation.arguments, result),
+        ...normalizedBusinessContext(contextUpdateFromResult(result)),
+      };
       return finish(200, { status: "ok", toolName: tool.name, result }, {
         draftText: confirmationContext ? "确认信息已处理。" : "ok",
         assistantContext: outputContext,

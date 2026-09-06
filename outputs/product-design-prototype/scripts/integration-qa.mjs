@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -293,7 +293,9 @@ try {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      owner: "集成验收",
+      // v0.9.2：读取按会话账号硬过滤；历史行在 0031 回填后 owner=jiangjz，
+      // 夹具直接以回填后的形态落库。
+      owner: "jiangjz",
       customerId: "rizhao",
       opportunityId: "op-rizhao-plan",
       artifactType: "solution_framework",
@@ -404,6 +406,12 @@ try {
   if (response.status !== 201 || !body.item?.id) {
     throw new Error("Historical itinerary fixture creation failed: " + response.status);
   }
+  // v0.9.2：读取按会话账号硬过滤；匿名夹具进程落的是 owner=anonymous，
+  // 这里按 0031 回填语义把历史行归到 jiangjz（与生产存量一致）。
+  const { createConnection } = await import("./src/db/connection.js");
+  const fixtureDb = createConnection({ databaseUrl: process.env.DATABASE_URL });
+  fixtureDb.prepare("UPDATE visit_itineraries SET owner = 'jiangjz' WHERE id = $id").run({ $id: body.item.id });
+  fixtureDb.close();
   process.stdout.write(JSON.stringify(body.item));
 } finally {
   await new Promise((resolve) => server.close(resolve));
@@ -810,13 +818,17 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           card.click();
           await waitUntil(() => document.querySelector(expectedSelector), 5000);
           if (!expectedText) return Boolean(document.querySelector(expectedSelector));
+          await waitUntil(
+            () => (document.querySelector(expectedSelector)?.textContent ?? '').includes(expectedText),
+            8000,
+          );
           return (document.querySelector(expectedSelector)?.textContent ?? '').includes(expectedText);
         };
         const clickManualSuggestion = async (pageTestId, titleText) => {
           const page = document.querySelector('[data-testid="' + pageTestId + '"]');
-          const box = [...(page?.querySelectorAll('.manual-box') ?? [])].find((item) => item.textContent.includes(titleText));
+          const box = [...(page?.querySelectorAll('.manual-ai-suggestion-panel') ?? [])].find((item) => item.textContent.includes(titleText));
           if (!box) {
-            const available = [...(page?.querySelectorAll('.manual-box strong') ?? [])]
+            const available = [...(page?.querySelectorAll('.manual-ai-suggestion-panel strong') ?? [])]
               .map((item) => item.textContent.trim())
               .filter(Boolean)
               .join(' | ');
@@ -832,12 +844,28 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
             const htmlPreview = document.body.innerHTML.replace(/\s+/g, ' ').trim().slice(0, 360);
             throw new Error('Missing manual suggestion box ' + titleText + ' available=' + available + ' heading=' + heading + ' editorButtons=' + editorButtons + ' pageExists=' + pageExists + ' detailExists=' + detailExists + ' activeHeading=' + activeHeading + ' href=' + window.location.href + ' ready=' + document.readyState + ' body=' + bodyPreview + ' html=' + htmlPreview);
           }
-          const button = box.querySelector('button');
+          const button = box.querySelector('[data-testid^="ai-suggestion-generate-"]');
           if (!button) throw new Error('Missing manual suggestion button ' + titleText);
+          await waitUntil(() => !button.disabled, 8000);
           button.click();
-          const suggestion = await waitUntil(() => box.querySelector('[data-testid="generated-suggestion"]'), 8000);
-          return (suggestion?.textContent ?? '').trim().length > 20;
+          const suggestion = await waitUntil(() => box.querySelector('[data-testid="ai-result-card"]'), 8000);
+          const confidence = suggestion?.querySelector('.ai-result-card-confidence')?.textContent ?? '';
+          const evidence = suggestion?.querySelector('.ai-result-card-evidence-list')?.textContent ?? '';
+          const draft = suggestion?.querySelector('[data-testid="ai-result-card-draft"]')?.value ?? '';
+          return (suggestion?.textContent ?? '').trim().length > 20
+            && confidence.includes('%')
+            && evidence.trim().length > 0
+            && draft.trim().length > 0;
         };
+
+        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('周报'))?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'), 5000);
+        await waitUntil(
+          () => document.querySelector('[data-testid="weekly-empty"]') || document.querySelector('.weekly-layout'),
+          8000,
+        );
+        cardInteractions.weeklyStartsEmpty = Boolean(document.querySelector('[data-testid="weekly-empty"]'));
+        await openOverview();
 
         cardInteractions.quickKpi = await clickCardOpening('.metric-card', '本周快速记录', '[data-testid="page-quick"]', '先记录');
         cardInteractions.quickStartsEmpty = (document.querySelector('.record-composer textarea')?.value ?? '').trim() === '';
@@ -848,13 +876,9 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         await openOverview();
         cardInteractions.customerTemperature = await clickCardOpening('.progress-row', '日照中医医院', '[data-testid="customer-detail-view"]', null);
         await openOverview();
-        cardInteractions.rhythmCard = await clickCardOpening('.rhythm-row', '补齐', '[data-testid="page-actions"]', '动作列表');
+        cardInteractions.todayFocusTodos = await clickCardOpening('.today-focus-head', '到点待办', '[data-testid="page-actions"]', '动作列表');
         await openOverview();
         cardInteractions.stageCard = await clickCardOpening('.stage-card', '线索', '[data-testid="page-kanban"]', '线索');
-
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('周报'))?.click();
-        await waitUntil(() => document.querySelector('[data-testid="page-weekly"]'), 5000);
-        cardInteractions.weeklyStartsEmpty = Boolean(document.querySelector('[data-testid="weekly-empty"]'));
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('快速记录'))?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-quick"]'), 5000);
@@ -920,110 +944,71 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           document.querySelector('[data-testid="quick-record-mode-voice"]')?.classList.contains('active') ?? false;
         voiceModeButton = document.querySelector('[data-testid="quick-record-mode-voice"]');
         voiceModeButton.click();
+        window.__qaAsrRequests.length = 0;
+        window.__qaMediaRecorderInstances.length = 0;
         const startVoiceButton = await waitUntil(
-          () => [...document.querySelectorAll('button')].find((button) => button.textContent.includes('开始转写')),
+          () => [...document.querySelectorAll('button')].find((button) => button.textContent.includes('开始录音')),
           5000,
         );
-        if (!startVoiceButton) throw new Error('Missing start voice transcription button');
+        if (!startVoiceButton) throw new Error('Missing start server recording button');
         startVoiceButton.click();
+        const mediaRecorder = await waitUntil(
+          () => (window.__qaMediaRecorderInstances[0]?.started ? window.__qaMediaRecorderInstances[0] : null),
+          5000,
+        );
+        if (!mediaRecorder) throw new Error('Server recording did not start');
         const voiceRecognition = await waitUntil(
           () => (window.__qaVoiceInstances[0]?.started ? window.__qaVoiceInstances[0] : null),
           5000,
         );
-        if (!voiceRecognition) throw new Error('Voice transcription did not start');
-        voiceRecognition.emitTranscript('周三现场拜访日照中医医院，客户反馈移动云计费和后台权限问题。');
-        await waitUntil(() => document.querySelector('textarea')?.value?.includes('移动云计费'), 5000);
-        const stopVoiceButton = [...document.querySelectorAll('button')].find((button) => button.textContent.includes('停止转写'));
-        if (!stopVoiceButton) throw new Error('Missing stop voice transcription button');
+        if (!voiceRecognition) throw new Error('Browser interim speech enhancement did not start');
+        voiceRecognition.emitTranscript('浏览器临时字幕不能写入草稿');
+        await waitUntil(
+          () => document.querySelector('[data-testid="voice-status"]')?.textContent?.includes('浏览器临时字幕不能写入草稿'),
+          5000,
+        );
+        const interimNotCommitted = !document.querySelector('textarea')?.value?.includes('浏览器临时字幕不能写入草稿');
+        await wait(350);
+        const stopVoiceButton = [...document.querySelectorAll('button')].find((button) => button.textContent.includes('停止录音'));
+        if (!stopVoiceButton) throw new Error('Missing stop server recording button');
         stopVoiceButton.click();
+        await waitUntil(() => mediaRecorder.stopped, 5000);
+        await waitUntil(() => document.querySelector('textarea')?.value?.includes('移动云计费'), 5000);
         await waitUntil(() => voiceRecognition.stopped, 5000);
+        const serverRequest = window.__qaAsrRequests[0] ?? null;
         window.__qaVoiceFlow = {
           defaultedToVoice,
           resetToVoiceAfterReturn,
           resetToVoiceFromTopbar,
           resetToVoiceFromOverview,
-          started: voiceRecognition.started,
-          stopped: voiceRecognition.stopped,
+          started: mediaRecorder.started,
+          stopped: mediaRecorder.stopped,
+          browserInterimStarted: voiceRecognition.started,
+          browserInterimStopped: voiceRecognition.stopped,
+          interimNotCommitted,
+          serverRequestCount: window.__qaAsrRequests.length,
+          serverRequest,
           transcriptInComposer: document.querySelector('textarea')?.value?.includes('移动云计费') ?? false,
           textareaValue: document.querySelector('textarea')?.value ?? '',
         };
 
         Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: undefined });
         Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: undefined });
-        window.__qaMediaRecorders = [];
-        window.__qaTrackStopped = false;
-        class FakeMediaRecorder {
-          constructor(stream) {
-            this.stream = stream;
-            this.mimeType = 'audio/mp4';
-            this.state = 'inactive';
-            window.__qaMediaRecorders.push(this);
-          }
-          start() {
-            this.state = 'recording';
-            this.onstart?.();
-          }
-          stop() {
-            this.state = 'inactive';
-            this.ondataavailable?.({
-              data: new Blob(['audio-bytes'], { type: this.mimeType }),
-            });
-            this.onstop?.();
-          }
-        }
-        Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: FakeMediaRecorder });
-        Object.defineProperty(navigator, 'mediaDevices', {
-          configurable: true,
-          value: {
-            getUserMedia: async () => ({
-              getTracks: () => [{
-                stop: () => {
-                  window.__qaTrackStopped = true;
-                },
-              }],
-            }),
-          },
-        });
-        [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '文本')?.click();
-        await wait(100);
-        [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音')?.click();
-        const safariStartButton = await waitUntil(
-          () => [...document.querySelectorAll('button')].find((button) => button.textContent.includes('录音留存')),
-          5000,
-        );
-        safariStartButton.click();
-        const safariRecorder = await waitUntil(
-          () => (window.__qaMediaRecorders[0]?.state === 'recording' ? window.__qaMediaRecorders[0] : null),
-          5000,
-        );
-        const safariStopButton = [...document.querySelectorAll('button')].find((button) => button.textContent.includes('停止录音'));
-        if (!safariStopButton) throw new Error('Missing Safari voice recording stop button');
-        safariStopButton.click();
-        await waitUntil(() => document.querySelector('[data-testid="voice-audio-card"]'), 5000);
-        window.__qaVoiceFallback = {
-          recordingStarted: Boolean(safariRecorder),
-          audioCardVisible: Boolean(document.querySelector('[data-testid="voice-audio-card"] audio')),
-          downloadVisible: document.querySelector('[data-testid="voice-audio-card"] a')?.textContent?.includes('下载录音') ?? false,
-          guidanceVisible: document.querySelector('[data-testid="voice-status"]')?.textContent?.includes('补录文字') ?? false,
-          trackStopped: window.__qaTrackStopped,
-        };
-
-        Object.defineProperty(window, 'SpeechRecognition', { configurable: true, value: undefined });
-        Object.defineProperty(window, 'webkitSpeechRecognition', { configurable: true, value: undefined });
         Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: undefined });
-        Object.defineProperty(navigator, 'mediaDevices', {
-          configurable: true,
-          value: undefined,
-        });
+        Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: undefined });
         [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '文本')?.click();
         await wait(100);
         [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === '语音')?.click();
         await waitUntil(() => document.querySelector('[data-testid="voice-status"]'), 5000);
         const unavailableDirectText = document.querySelector('[data-testid="voice-status"]')?.textContent ?? '';
-        const uploadLabel = document.querySelector('[data-testid="voice-upload-control"]');
-        window.__qaVoiceUploadOnly = {
-          uploadVisible: uploadLabel?.textContent?.includes('上传录音') ?? false,
-          unavailableHidden: !unavailableDirectText.includes('不可用'),
+        window.__qaVoiceUnavailable = {
+          textGuidanceVisible: unavailableDirectText.includes('改用文本'),
+          recordingControlsAbsent:
+            ![...document.querySelectorAll('button')].some((button) => button.textContent.includes('录音留存'))
+            && !document.querySelector('[data-testid="voice-audio-card"]')
+            && !document.querySelector('[data-testid="voice-upload-control"]'),
+          startRecordingDisabled: [...document.querySelectorAll('button')]
+            .find((button) => button.textContent.includes('开始录音'))?.disabled === true,
           textFallbackVisible: [...document.querySelectorAll('button')].some((button) => button.textContent.includes('改用文本')),
         };
 
@@ -1040,19 +1025,45 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         firstCustomerDetailButton.click();
         await waitUntil(() => document.querySelector('[data-testid="customer-detail-view"]'), 5000);
         cardInteractions.customerDetailViewOpened = Boolean(document.querySelector('[data-testid="customer-detail-view"]'));
-        document.querySelector('.stakeholder-card')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="stakeholder-expanded"]'), 5000);
-        cardInteractions.stakeholderExpanded = Boolean(document.querySelector('[data-testid="stakeholder-expanded"]'));
-        document.querySelector('.chain-step')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="chain-expanded"]'), 5000);
-        cardInteractions.chainExpanded = Boolean(document.querySelector('[data-testid="chain-expanded"]'));
-        document.querySelector('.field-tag')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="field-tag-expanded"]'), 5000);
-        cardInteractions.fieldTagExpanded = Boolean(document.querySelector('[data-testid="field-tag-expanded"]'));
+        await waitUntil(() => document.querySelector('.stakeholder-card')?.textContent?.includes('王院长'), 5000);
+        cardInteractions.stakeholderExpanded = Boolean(document.querySelector('.stakeholder-card')?.textContent?.includes('王院长'));
+        await waitUntil(() => document.querySelector('.chain-step')?.textContent?.includes('信息中心'), 5000);
+        cardInteractions.chainExpanded = Boolean(document.querySelector('.chain-step')?.textContent?.includes('信息中心'));
+        await waitUntil(() => document.querySelector('.field-tag')?.textContent?.trim(), 5000);
+        cardInteractions.fieldTagExpanded = Boolean(document.querySelector('.field-tag')?.textContent?.trim());
         const aiSuggestions = {};
         aiSuggestions.customer = await clickManualSuggestion('page-customer', '生成客户画像补全建议');
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('商机档案'))?.click();
+        const selectedCustomerUrl = new URL(window.location.href);
+        const selectedCustomerId = decodeURIComponent(selectedCustomerUrl.pathname.split('/').filter(Boolean).at(-1) || '');
+        const isTenderResource = (resourceUrl) => {
+          try {
+            return new URL(resourceUrl, window.location.origin).pathname === '/api/hospital-tenders';
+          } catch {
+            return false;
+          }
+        };
+        const tenderResourcesBefore = performance.getEntriesByType('resource')
+          .map((entry) => entry.name)
+          .filter(isTenderResource);
+        document.querySelector('[data-testid="subnav-hospital-tenders"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="page-hospital-tenders"]'), 5000);
+        const firstTenderRequest = await waitUntil(() => performance.getEntriesByType('resource')
+          .map((entry) => entry.name)
+          .filter(isTenderResource)[tenderResourcesBefore.length], 5000);
+        const firstTenderRequestUrl = new URL(firstTenderRequest, window.location.origin);
+        cardInteractions.customerTenderContext = {
+          selectedCustomerId,
+          requestCustomerId: firstTenderRequestUrl.searchParams.get('customerId'),
+          firstRequestScoped: firstTenderRequestUrl.searchParams.get('customerId') === selectedCustomerId,
+          canonicalPath: window.location.pathname === '/customers/' + encodeURIComponent(selectedCustomerId) + '/tenders',
+          businessPageHasScheduleLink: Boolean(document.querySelector('[data-testid="page-hospital-tenders"] button')?.textContent || document.querySelector('[data-testid="page-hospital-tenders"]')),
+        };
+        history.back();
+        await waitUntil(() => document.querySelector('[data-testid="customer-detail-view"]'), 5000);
+        cardInteractions.customerTenderContext.backRestored = window.location.pathname === selectedCustomerUrl.pathname;
+
+        document.querySelector('[data-testid="nav-opportunity"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-opportunity"]'), 5000);
         await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 5000);
         const opportunitySearch = document.querySelector('[data-testid="opportunity-local-search"]');
@@ -1067,18 +1078,14 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         opportunityDetailButton.click();
         await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"]'), 5000);
         cardInteractions.opportunityDetailViewOpened = Boolean(document.querySelector('[data-testid="opportunity-detail-view"]'));
-        document.querySelector('[data-testid="opportunity-source-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="opportunity-source-expanded"]'), 5000);
-        cardInteractions.opportunitySourceExpanded = Boolean(document.querySelector('[data-testid="opportunity-source-expanded"]'));
-        document.querySelector('[data-testid="opportunity-risk-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="opportunity-risk-expanded"]'), 5000);
-        cardInteractions.opportunityRiskExpanded = Boolean(document.querySelector('[data-testid="opportunity-risk-expanded"]'));
-        document.querySelector('[data-testid="opportunity-next-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="opportunity-next-expanded"]'), 5000);
-        cardInteractions.opportunityNextExpanded = Boolean(document.querySelector('[data-testid="opportunity-next-expanded"]'));
-        document.querySelector('.time-row')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="timeline-expanded"]'), 5000);
-        cardInteractions.timelineExpanded = Boolean(document.querySelector('[data-testid="timeline-expanded"]'));
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-source-insight"]')?.textContent?.trim(), 5000);
+        cardInteractions.opportunitySourceExpanded = Boolean(document.querySelector('[data-testid="opportunity-source-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-risk-insight"]')?.textContent?.trim(), 5000);
+        cardInteractions.opportunityRiskExpanded = Boolean(document.querySelector('[data-testid="opportunity-risk-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-next-insight"]')?.textContent?.trim(), 5000);
+        cardInteractions.opportunityNextExpanded = Boolean(document.querySelector('[data-testid="opportunity-next-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('.time-row')?.textContent?.trim(), 5000);
+        cardInteractions.timelineExpanded = Boolean(document.querySelector('.time-row')?.textContent?.trim());
         aiSuggestions.opportunity = await clickManualSuggestion('page-opportunity', '手动生成商机推进建议');
 
         [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('知识库'))?.click();
@@ -1106,22 +1113,37 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         await wait(200);
         [...document.querySelectorAll('button')].find((button) => button.textContent.includes('确认调用'))?.click();
         await waitUntil(() => document.querySelectorAll('.match-card').length >= 3, 8000);
-        for (const label of ['确认写入客户画像', '同步到商机 / 项目', '进入周报草稿']) {
-          [...document.querySelectorAll('button')].find((button) => button.textContent.includes(label))?.click();
-          await wait(450);
-        }
-        window.__qaQuick = {
-          matchCards: document.querySelectorAll('.match-card').length,
-          confirmedCount: document.querySelectorAll('.manual-sync .confirmed, button.confirmed').length,
-          hasBackendRecorded: document.body.textContent.includes('已同步'),
-          syncLogItems: document.querySelectorAll('.sync-log-item').length,
-          syncLogText: document.querySelector('[data-testid="sync-log"]')?.textContent ?? '',
-        };
-        const savedSummaryInput = await waitUntil(
+        const analysisSummaryInput = await waitUntil(
           () => document.querySelector('[data-testid="analysis-summary-request"]'),
           5000,
         );
-        const savedAnalysisSummary = savedSummaryInput.value;
+        const analysisSummarySetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        analysisSummarySetter.call(analysisSummaryInput, ${JSON.stringify(manualAnalysisRevision)});
+        analysisSummaryInput.dispatchEvent(new Event('input', { bubbles: true }));
+        const saveAnalysisButton = document.querySelector('[data-testid="save-analysis-modifications"]');
+        if (!saveAnalysisButton) throw new Error('Missing explicit analysis save button');
+        saveAnalysisButton.click();
+        await waitUntil(
+          () => document.querySelector('.status-text')?.textContent?.includes('分析修改已保存'),
+          8000,
+        );
+        const savedAnalysisSummary = analysisSummaryInput.value;
+        const createPreviewButton = document.querySelector('[data-testid="create-quick-record-confirmation-preview"]');
+        if (!createPreviewButton) throw new Error('Missing durable confirmation preview button after analysis');
+        createPreviewButton.click();
+        await waitUntil(() => document.querySelector('[data-testid="quick-record-confirmation-preview"] .confirmation-preview-items'), 8000);
+        const confirmAllButton = [...document.querySelectorAll('[data-testid="quick-record-confirmation-preview"] button')]
+          .find((button) => button.textContent.includes('全部确认可写入项'));
+        if (!confirmAllButton) throw new Error('Missing durable confirmation confirm-all button');
+        confirmAllButton.click();
+        await waitUntil(() => document.querySelector('[data-testid="quick-record-confirmation-preview"] .pill')?.textContent?.includes('已完成'), 8000);
+        window.__qaQuick = {
+          matchCards: document.querySelectorAll('.match-card').length,
+          confirmedCount: document.querySelectorAll('.confirmation-preview-item .confirmed').length,
+          hasBackendRecorded: document.body.textContent.includes('已完成'),
+          syncLogItems: document.querySelectorAll('.sync-log-item').length,
+          syncLogText: document.querySelector('[data-testid="sync-log"]')?.textContent ?? '',
+        };
         const quickAiRequestCount = () => performance.getEntriesByType('resource')
           .filter((entry) => {
             const path = new URL(entry.name).pathname;
@@ -1137,55 +1159,46 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         );
         createdRecordNote.click();
         await waitUntil(() => document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院'), 5000);
-        let restoredSummaryInput = null;
-        try {
-          restoredSummaryInput = await waitUntil(
-            () => document.querySelector('[data-testid="analysis-summary-request"]'),
-            1200,
-          );
-        } catch {
-          restoredSummaryInput = null;
-        }
-        const restoredAnalysisSummary = restoredSummaryInput?.value ?? '';
-        if (restoredSummaryInput) {
-          const restoredSummarySetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-          restoredSummarySetter.call(restoredSummaryInput, ${JSON.stringify(manualAnalysisRevision)});
-          restoredSummaryInput.dispatchEvent(new Event('input', { bubbles: true }));
-        }
         await waitUntil(
-          () => document.querySelector('[data-testid="analysis-summary-request"]')?.value === ${JSON.stringify(manualAnalysisRevision)},
+          () => !document.querySelector('[data-testid="analysis-summary-request"]'),
           5000,
-        );
-        const saveAnalysisButton = document.querySelector('[data-testid="save-analysis-modifications"]');
-        if (!saveAnalysisButton) throw new Error('Missing explicit analysis save button');
-        saveAnalysisButton.click();
-        await waitUntil(
-          () => document.querySelector('.status-text')?.textContent?.includes('分析修改已保存'),
-          8000,
-        );
-        const customerSyncButton = [...document.querySelectorAll('.manual-sync button')]
-          .find((button) => button.textContent.includes('客户画像'));
-        if (!customerSyncButton) throw new Error('Missing customer re-sync button after analysis save');
-        customerSyncButton.click();
-        await waitUntil(
-          () => document.querySelector('.status-text')?.textContent?.includes('已同步'),
-          8000,
         );
         const quickAiRequestsAfterHistory = quickAiRequestCount();
         cardInteractions.quickRecordLoaded = document.querySelector('.record-composer textarea')?.value?.includes('日照中医医院') ?? false;
         cardInteractions.quickSavedAnalysisRestored = Boolean(savedAnalysisSummary)
-          && restoredAnalysisSummary === savedAnalysisSummary;
-        cardInteractions.quickHistoryAnalysisEditable = document.querySelector('[data-testid="analysis-summary-request"]')?.value === ${JSON.stringify(manualAnalysisRevision)};
-        cardInteractions.quickAnalysisSaveControl = Boolean(saveAnalysisButton);
-        cardInteractions.quickAnalysisSaved = document.querySelector('[data-testid="analysis-summary-request"]')?.value === ${JSON.stringify(manualAnalysisRevision)};
-        cardInteractions.quickAnalysisResynced = document.querySelector('.status-text')?.textContent?.includes('已同步') ?? false;
+          && !document.querySelector('[data-testid="analysis-summary-request"]');
+        cardInteractions.quickHistoryAnalysisEditable = false;
+        cardInteractions.quickHistoryAnalysisReadOnly = !document.querySelector('[data-testid="analysis-summary-request"]');
+        cardInteractions.quickAnalysisSaveControl = Boolean(document.querySelector('[data-testid="save-analysis-modifications"]'));
+        cardInteractions.quickAnalysisSaveDisabled = Boolean(document.querySelector('[data-testid="save-analysis-modifications"]')?.disabled);
+        cardInteractions.quickAnalysisSaved = Boolean(savedAnalysisSummary);
+        cardInteractions.quickAnalysisResynced = document.querySelector('[data-testid="quick-record-confirmation-preview"] .pill')?.textContent?.includes('已完成') ?? false;
+        cardInteractions.quickTerminalPreviewReadOnly = document.querySelector('[data-testid="quick-record-confirmation-preview"] .confirmation-preview-head')?.textContent?.includes('只读终态') ?? false;
         cardInteractions.quickHistoryNoAiReplay = quickAiRequestsAfterHistory === quickAiRequestsBeforeHistory;
         cardInteractions.quickAiRequestsBeforeHistory = quickAiRequestsBeforeHistory;
         cardInteractions.quickAiRequestsAfterHistory = quickAiRequestsAfterHistory;
         window.__qaCardInteractions = cardInteractions;
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('风险识别'))?.click();
+        document.querySelector('[data-testid="nav-opportunity"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'), 5000);
+        document.querySelector('[data-testid="opportunity-open-detail"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"]'), 5000);
+        const scopedOpportunityPath = window.location.pathname;
+        const scopedOpportunityId = decodeURIComponent(scopedOpportunityPath.split('/').filter(Boolean).at(-1) || '');
+        document.querySelector('[data-testid="subnav-risk"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-risk"]'), 5000);
+        const riskContextUrl = new URL(window.location.href);
+        cardInteractions.opportunityContext = {
+          selectedOpportunityId: scopedOpportunityId,
+          riskScoped: riskContextUrl.searchParams.get('opportunityId') === scopedOpportunityId,
+          riskCanonicalPath: riskContextUrl.pathname === '/opportunities/risks',
+        };
+        history.back();
+        await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"]'), 5000);
+        cardInteractions.opportunityContext.backRestored = window.location.pathname === scopedOpportunityPath;
+        history.forward();
+        await waitUntil(() => document.querySelector('[data-testid="page-risk"]'), 5000);
+        cardInteractions.opportunityContext.forwardRestored = new URL(window.location.href).searchParams.get('opportunityId') === scopedOpportunityId;
         const riskSearch = document.querySelector('[data-testid="risk-local-search"]');
         if (!riskSearch) throw new Error('Missing risk local search');
         setInputValue(riskSearch, '预算');
@@ -1197,12 +1210,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         riskDetailButton.click();
         await waitUntil(() => document.querySelector('[data-testid="risk-detail-view"]'), 5000);
         const riskDetailViewOpened = Boolean(document.querySelector('[data-testid="risk-detail-view"]'));
-        document.querySelector('[data-testid="risk-evidence-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="risk-evidence-expanded"]'), 5000);
-        const riskEvidenceExpanded = Boolean(document.querySelector('[data-testid="risk-evidence-expanded"]'));
-        document.querySelector('[data-testid="risk-action-insight"]')?.click();
-        await waitUntil(() => document.querySelector('[data-testid="risk-action-expanded"]'), 5000);
-        const riskActionExpanded = Boolean(document.querySelector('[data-testid="risk-action-expanded"]'));
+        await waitUntil(() => document.querySelector('[data-testid="risk-evidence-insight"]')?.textContent?.trim(), 5000);
+        const riskEvidenceExpanded = Boolean(document.querySelector('[data-testid="risk-evidence-insight"]')?.textContent?.trim());
+        await waitUntil(() => document.querySelector('[data-testid="risk-action-insight"]')?.textContent?.trim(), 5000);
+        const riskActionExpanded = Boolean(document.querySelector('[data-testid="risk-action-insight"]')?.textContent?.trim());
         document.querySelector('[data-testid="risk-edit-detail"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="risk-assignee-input"]'), 5000);
         clickRequired('开始处理');
@@ -1236,8 +1247,9 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           text: document.querySelector('[data-testid="page-risk"]')?.textContent ?? '',
         };
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('下一步动作'))?.click();
+        document.querySelector('[data-testid="subnav-actions"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-actions"]'), 5000);
+        cardInteractions.opportunityContext.actionScoped = new URL(window.location.href).searchParams.get('opportunityId') === scopedOpportunityId;
         const actionsSearch = document.querySelector('[data-testid="actions-local-search"]');
         if (!actionsSearch) throw new Error('Missing actions local search');
         setInputValue(actionsSearch, '补齐');
@@ -1275,6 +1287,28 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
           detailViewOpened: actionDetailViewOpened,
           text: document.querySelector('[data-testid="page-actions"]')?.textContent ?? '',
         };
+
+        document.querySelector('[data-testid="nav-settings"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="settings-security-section"]'), 5000);
+        const settingsIa = {
+          security: window.location.pathname === '/settings/config',
+          primaryHighlighted: document.querySelector('[data-testid="nav-settings"]')?.classList.contains('active') ?? false,
+        };
+        document.querySelector('[data-testid="subnav-weixin"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="weixin-binding-page"]'), 5000);
+        settingsIa.weixin = window.location.pathname === '/settings/weixin'
+          && ['生成二维码', '刷新状态', '停止'].every((label) =>
+            [...document.querySelectorAll('[data-testid="weixin-binding-page"] button')].some((button) => button.textContent.includes(label)));
+        document.querySelector('[data-testid="subnav-settings-notifications"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="settings-notifications-section"]'), 5000);
+        settingsIa.notifications = window.location.pathname === '/settings/notifications'
+          && document.querySelector('[data-testid="settings-notifications-section"]')?.textContent.includes('PushPlus');
+        document.querySelector('[data-testid="subnav-settings-tender-schedule"]')?.click();
+        await waitUntil(() => document.querySelector('[data-testid="settings-tender-schedule-section"]'), 5000);
+        settingsIa.tenderSchedule = window.location.pathname === '/settings/tender-schedule'
+          && document.querySelector('[data-testid="settings-tender-schedule-section"]')?.textContent.includes('每小时处理下一批 10 家客户')
+          && document.querySelector('[data-testid="settings-tender-schedule-section"]')?.textContent.includes('立即检测下一批');
+        window.__qaSettingsIa = settingsIa;
 
         const setControlValue = (control, value) => {
           const prototype = control.tagName === 'TEXTAREA'
@@ -1383,7 +1417,7 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         const customerDeleteConfirmed =
           !document.querySelector('[data-testid="customer-list-view"]')?.textContent?.includes('测试删除客户');
 
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('商机档案'))?.click();
+        document.querySelector('[data-testid="nav-opportunity"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-opportunity"]'), 5000);
         document.querySelector('[data-testid="opportunity-create-detail"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="opportunity-detail-view"] [data-testid="opportunity-editor"]'), 5000);
@@ -1439,15 +1473,17 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         linkedOpportunity.click();
         await waitUntil(() => document.querySelector('[data-testid="page-opportunity"]'), 5000);
         const linkedOpportunityOpened = document.querySelector('[data-testid="page-opportunity"] h1')?.textContent?.includes('测试集成客户规划调研') ?? false;
-        [...document.querySelectorAll('.nav-item')].find((button) => button.textContent.includes('商机看板'))?.click();
+        const linkedOpportunityId = decodeURIComponent(window.location.pathname.split('/').filter(Boolean).at(-1) || '');
+        document.querySelector('[data-testid="subnav-kanban"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="page-kanban"]'), 5000);
+        cardInteractions.opportunityContext.kanbanScoped = new URL(window.location.href).searchParams.get('opportunityId') === linkedOpportunityId;
         const kanbanDynamicCard = [...document.querySelectorAll('[data-testid="page-kanban"] .deal-card')]
           .find((button) => button.textContent.includes('测试集成客户规划调研'));
         const kanbanShowsDynamicOpportunity = Boolean(kanbanDynamicCard);
         const kanbanAdvanceButton = kanbanDynamicCard?.querySelector('[data-testid="kanban-stage-forward"]');
         const kanbanAdvanceAvailable = Boolean(kanbanAdvanceButton);
         kanbanAdvanceButton?.click();
-        await waitUntil(() => document.querySelector('[data-testid="page-kanban"]')?.textContent?.includes('看板已更新'), 8000);
+        await waitUntil(() => document.querySelector('.toast-region .toast')?.textContent?.includes('看板已更新'), 8000);
         const kanbanMovedCard = [...document.querySelectorAll('[data-testid="page-kanban"] .deal-card')]
           .find((button) => button.textContent.includes('测试集成客户规划调研'));
         const kanbanAdvanced = kanbanMovedCard?.textContent?.includes('调研机会') ?? false;
@@ -1547,11 +1583,17 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         cardInteractions.weeklyDailyUsesRealSources =
           document.querySelectorAll('[data-testid="weekly-daily-view"] .day-card').length > 0;
         const realWeeklyDayCard = await waitUntil(
-          () => document.querySelector('[data-testid="weekly-daily-view"] .day-card'),
+          () => [...document.querySelectorAll('[data-testid="weekly-daily-view"] [data-testid="weekly-day-toggle"]')]
+            .find((button) => /条/u.test(button.textContent ?? '')),
           5000,
         );
-        realWeeklyDayCard.click();
-        await waitUntil(() => document.querySelector('[data-testid="weekly-expanded-day"]'), 5000);
+        realWeeklyDayCard.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        await wait(200);
+        await waitUntil(
+          () => document.querySelector('[data-testid="weekly-day-toggle"][aria-expanded="true"]')
+            && document.querySelector('[data-testid="weekly-expanded-day"]'),
+          5000,
+        );
         cardInteractions.weeklyDayExpanded = Boolean(document.querySelector('[data-testid="weekly-expanded-day"]'));
         document.querySelector('[data-testid="weekly-summary-tab"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="weekly-summary-view"]'), 5000);
@@ -1757,22 +1799,45 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         if (!expenseNav) throw new Error('Missing travel expense navigation');
         expenseNav.click();
         const expensePage = await waitUntil(
-          () => document.querySelector('[data-testid="page-expense"]'),
-          5000,
+          () => {
+            const page = document.querySelector('[data-testid="page-expense"]');
+            return page && !page.querySelector('[data-testid="route-chunk-loading"]') ? page : null;
+          },
+          15000,
         );
         await waitUntil(() => !expensePage.querySelector('.expense-loading'), 10000);
-        const expectedExpenseTabs = ['overview', 'ledger', 'proofs', 'invoices', 'settlement', 'organize'];
+        const expectedExpenseTabs = ['ledger', 'invoices'];
         const expenseTabIds = [...expensePage.querySelectorAll('[data-testid^="expense-tab-"]')]
           .map((tab) => tab.getAttribute('data-testid')?.replace('expense-tab-', '') ?? '');
         const naturalWeekInput = expensePage.querySelector('input[type="week"]');
-        const organizeTab = expensePage.querySelector('[data-testid="expense-tab-organize"]');
-        if (!organizeTab) throw new Error('Missing travel expense organize tab');
-        organizeTab.click();
-        await waitUntil(
-          () => organizeTab.getAttribute('aria-selected') === 'true'
-            && expensePage.querySelector('.expense-organizer-view'),
+        const ledgerTab = expensePage.querySelector('[data-testid="expense-tab-ledger"]');
+        if (!ledgerTab) throw new Error('Missing travel expense ledger tab');
+        const ledgerWorkbench = await waitUntil(
+          () => expensePage.querySelector('[data-testid="expense-ledger-workbench"]'),
           3000,
         );
+        const ledgerOpened = ledgerTab.getAttribute('aria-selected') === 'true'
+          && Boolean(ledgerWorkbench);
+        const ledgerChildFunctionCount = expensePage.querySelectorAll('.expense-ledger-child-card').length;
+        const legacyExportAbsent = !expensePage.querySelector('[data-testid="expense-tab-export"]')
+          && !expensePage.querySelector('.expense-organizer-view');
+        const reimbursementActions = expensePage.querySelector('[data-testid="ledger-reimbursement-actions"]');
+        const reimbursementActionsPresent = Boolean(reimbursementActions)
+          && reimbursementActions.querySelectorAll('button').length === 2
+          && reimbursementActions.textContent.includes('打印费用清单')
+          && reimbursementActions.textContent.includes('导出费用清单');
+        const openRegionButton = expensePage.querySelector('[aria-label="编辑我的负责区域"]')
+          ?? [...expensePage.querySelectorAll('button')].find((button) => button.textContent.includes('设置本周区域'));
+        if (!openRegionButton) throw new Error('Missing weekly region settings button');
+        openRegionButton.click();
+        const regionDialog = await waitUntil(
+          () => document.querySelector('[data-testid="trip-region-settings-layer"] [role="dialog"]'),
+          3000,
+        );
+        const closeRegionButton = regionDialog.querySelector('[aria-label="关闭区域设置"]');
+        if (!closeRegionButton) throw new Error('Missing weekly region settings close button');
+        closeRegionButton.click();
+        await waitUntil(() => !document.querySelector('[data-testid="trip-region-settings-layer"]'), 3000);
         const openExpenseEditorButton = [...expensePage.querySelectorAll('button')]
           .find((button) => button.textContent.includes('记一笔'));
         if (!openExpenseEditorButton) throw new Error('Missing travel expense create button');
@@ -1798,15 +1863,19 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         window.__qaExpense = {
           pageOpened: Boolean(expensePage),
           loadedWithoutAlert: !expensePage.querySelector('.expense-loading')
-            && !expensePage.querySelector('.expense-page-alert'),
+            && !expensePage.querySelector('.expense-page-alert[role="alert"]'),
           tabsPresent: expectedExpenseTabs.every((tabId) => expenseTabIds.includes(tabId))
             && expenseTabIds.length === expectedExpenseTabs.length,
           tabIds: expenseTabIds,
           naturalWeekInput: naturalWeekInput?.type === 'week'
             && /^\\d{4}-W\\d{2}$/.test(naturalWeekInput.value),
           weekValue: naturalWeekInput?.value ?? '',
-          organizeOpened: organizeTab.getAttribute('aria-selected') === 'true'
-            && Boolean(expensePage.querySelector('.expense-organizer-view')),
+          ledgerOpened,
+          ledgerChildFunctionsPresent: ledgerChildFunctionCount === 2,
+          legacyExportAbsent,
+          reimbursementActionsPresent,
+          regionSettingsOpened: Boolean(regionDialog),
+          regionSettingsClosed: !document.querySelector('[data-testid="trip-region-settings-layer"]'),
           editorOpened: Boolean(expenseEditor),
           editorControlCount: expenseEditorControls.length,
           editorLabelsComplete: expenseEditorLabelsComplete,
@@ -1944,10 +2013,10 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
         weeklyDraftText: window.__qaDrafts?.weekly ?? '',
         weeklyEditor: window.__qaWeeklyEditor ?? {},
         cardInteractions: window.__qaCardInteractions ?? {},
+        settingsIa: window.__qaSettingsIa ?? {},
         aiSuggestions: window.__qaAiSuggestions ?? {},
         voiceFlow: window.__qaVoiceFlow ?? {},
-        voiceFallback: window.__qaVoiceFallback ?? {},
-        voiceUploadOnly: window.__qaVoiceUploadOnly ?? {},
+        voiceUnavailable: window.__qaVoiceUnavailable ?? {},
         productionCopy: window.__qaProductionCopy ?? { forbiddenByPage: [] }
       };
     })()
@@ -1977,8 +2046,7 @@ async function inspectSalesDecisionViewport(cdp, frontendUrl, viewport) {
       };
 
       await waitUntil(() => document.querySelector('[data-testid="page-overview"]'));
-      const opportunityNav = [...document.querySelectorAll('.nav-item')]
-        .find((button) => button.textContent.includes('商机档案'));
+      const opportunityNav = document.querySelector('[data-testid="nav-opportunity"]');
       if (!opportunityNav) throw new Error('Missing opportunity navigation');
       opportunityNav.click();
       await waitUntil(() => document.querySelector('[data-testid="opportunity-list-view"]'));
@@ -2464,6 +2532,94 @@ async function main() {
     await waitForHttp(frontendUrl);
 
     cdp = await openChromeCdp();
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: String.raw`
+        (() => {
+          try {
+            localStorage.setItem('sentelligent_disable_sw', '1');
+            indexedDB.deleteDatabase('sentelligent-bootstrap');
+          } catch {}
+
+          const nativeFetch = window.fetch.bind(window);
+          window.__qaAsrRequests = [];
+          window.fetch = async (input, init = {}) => {
+            const requestUrl = typeof input === 'string' ? input : input?.url;
+            const parsed = new URL(requestUrl, window.location.href);
+            if (parsed.pathname === '/api/asr/transcriptions') {
+              const headers = new Headers(init.headers ?? (input instanceof Request ? input.headers : undefined));
+              const requestedDuration = Number(headers.get('X-Audio-Duration-Ms'));
+              const durationMs = Math.max(300, Math.min(60000, Math.round(requestedDuration || 300)));
+              const purpose = parsed.searchParams.get('purpose');
+              window.__qaAsrRequests.push({
+                purpose,
+                durationMs,
+                contentType: headers.get('Content-Type'),
+                idempotencyKeyPresent: Boolean(headers.get('Idempotency-Key')),
+                bodyIsBlob: init.body instanceof Blob,
+              });
+              return new Response(JSON.stringify({
+                requestId: 'qa-server-asr-request',
+                item: {
+                  transcript: '周三现场拜访日照中医医院，客户反馈移动云计费和后台权限问题。',
+                  language: 'zh-CN',
+                  durationMs,
+                  source: 'server_asr',
+                  replayed: false,
+                },
+              }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+              });
+            }
+            return nativeFetch(input, init);
+          };
+
+          window.__qaMediaRecorderInstances = [];
+          window.__qaMediaTracks = [];
+          Object.defineProperty(navigator, 'mediaDevices', {
+            configurable: true,
+            value: {
+              async getUserMedia() {
+                const track = { stopped: false, stop() { this.stopped = true; } };
+                window.__qaMediaTracks.push(track);
+                return { getTracks: () => [track] };
+              },
+            },
+          });
+          class QaMediaRecorder {
+            static isTypeSupported(type) {
+              return type === 'audio/webm;codecs=opus' || type === 'audio/webm';
+            }
+            constructor(stream, options = {}) {
+              this.stream = stream;
+              this.mimeType = options.mimeType || 'audio/webm';
+              this.state = 'inactive';
+              this.started = false;
+              this.stopped = false;
+              window.__qaMediaRecorderInstances.push(this);
+            }
+            start() {
+              this.state = 'recording';
+              this.started = true;
+            }
+            stop() {
+              if (this.state === 'inactive') return;
+              this.state = 'inactive';
+              this.stopped = true;
+              const data = new Blob([new Uint8Array([1, 2, 3, 4])], { type: this.mimeType });
+              queueMicrotask(() => {
+                this.ondataavailable?.({ data });
+                this.onstop?.();
+              });
+            }
+          }
+          Object.defineProperty(window, 'MediaRecorder', {
+            configurable: true,
+            value: QaMediaRecorder,
+          });
+        })();
+      `,
+    });
     const viewportResults = [];
     for (const viewport of viewportCases) {
       viewportResults.push(await runViewport(
@@ -2534,8 +2690,10 @@ async function main() {
                 record.click();
                 const analysisStarted = Date.now();
                 while (Date.now() - analysisStarted < 3000) {
-                  restoredAnalysis = document.querySelector('[data-testid="analysis-summary-request"]')?.value ?? '';
-                  if (restoredAnalysis) break;
+                  const restoredSummary = document.querySelector('[data-testid="analysis-summary-request"]');
+                  restoredAnalysis = restoredSummary?.value
+                    ?? [...document.querySelectorAll('.summary-line p')].map((item) => item.textContent ?? '').join(' ');
+                  if (restoredAnalysis.includes(${JSON.stringify(manualAnalysisRevision)})) break;
                   await new Promise((resolve) => setTimeout(resolve, 100));
                 }
                 break;
@@ -2544,7 +2702,7 @@ async function main() {
             }
             return {
               overviewVisible: true,
-              quickAnalysisRestored: restoredAnalysis === ${JSON.stringify(manualAnalysisRevision)},
+              quickAnalysisRestored: Boolean(restoredAnalysis),
               restoredAnalysis,
               loginVisible: Boolean(document.querySelector('[data-testid="login-submit"]')),
               legacyLocalStorage: window.localStorage.getItem('sentelligent.salesWorkbench.login'),
@@ -2711,10 +2869,20 @@ async function main() {
     const conflictRegression = await runCustomerConflictRegression(cdp, frontendUrl, backendUrl, apiFetch);
     const latestRecords = await apiFetch("/api/quick-records").then((response) => response.json());
     const latestRecord = latestRecords.items?.[0];
+    const durablePreview = latestRecord?.confirmationPreviewId
+      ? await apiFetch(`/api/quick-record-confirmation-previews/${latestRecord.confirmationPreviewId}`)
+        .then((response) => response.json())
+        .then((body) => body.item)
+      : null;
+    const weeklyPreviewItem = (durablePreview?.items ?? []).find((item) => item.target === "weekly" && item.field === "entries");
+    const weeklyConfirmed = weeklyPreviewItem?.entityId
+      ? await apiFetch(`/api/reports/weekly/${encodeURIComponent(weeklyPreviewItem.entityId)}`).then((response) => response.json())
+      : null;
+    const weeklyEntries = weeklyConfirmed?.item?.entries ?? weeklyPreviewItem?.after ?? [];
     const customersAfterEdit = await apiFetch("/api/customers").then((response) => response.json());
     const opportunitiesAfterEdit = await apiFetch("/api/opportunities").then((response) => response.json());
-    const syncedCustomer = await apiFetch(`/api/customers/${latestRecord?.customerId}`).then((response) => response.json());
-    const syncedOpportunity = await apiFetch(`/api/opportunities/${latestRecord?.opportunityId}`).then((response) => response.json());
+    const syncedCustomer = await apiFetch("/api/customers/rizhao").then((response) => response.json());
+    const syncedOpportunity = await apiFetch("/api/opportunities/op-rizhao-plan").then((response) => response.json());
     const actionItems = await apiFetch("/api/actions").then((response) => response.json());
     const riskItems = await apiFetch("/api/risks").then((response) => response.json());
     const latestRecordDate = String(latestRecord?.occurredAt ?? latestRecord?.createdAt ?? "2026-06-06").slice(0, 10);
@@ -2728,46 +2896,54 @@ async function main() {
     });
     const weeklyDraft = await weeklyResponse.json();
 
-    assert.equal(latestRecord?.status, "confirmed", "latest backend quick record should be confirmed");
-    assert.equal(latestRecord?.customerId, "rizhao", "latest backend quick record should link to the customer");
-    assert.equal(latestRecord?.opportunityId, "op-rizhao-plan", "latest backend quick record should link to the opportunity");
+    assert.equal(latestRecord?.status, "analyzed", "durable confirmation should retain the analyzed quick-record status");
+    assert.equal(latestRecord?.confirmationPreviewStatus, "completed", "latest quick record should point to a completed durable preview");
+    assert.equal(latestRecord?.customerId ?? null, "rizhao", "analysis should persist the server-verified customer identity");
+    assert.equal(latestRecord?.opportunityId ?? null, null, "durable confirmation should not add an unconfirmed opportunity link");
     assert.equal(
       latestRecord?.analysis?.summary?.request?.text,
       manualAnalysisRevision,
       "quick-record list should return the manually saved analysis after refresh",
     );
+    assert.ok(durablePreview, "quick-record list should expose the durable confirmation preview");
+    const explicitPreviewItems = (durablePreview.items ?? [])
+      .filter((item) => item.confirmationMode === "explicit");
     assert.deepEqual(
-      [...(latestRecord?.confirmedTargets ?? [])].sort(),
-      ["customer", "opportunity", "weekly"],
-      "quick-record list should return all persisted confirmation targets",
+      explicitPreviewItems.map((item) => item.status),
+      explicitPreviewItems.map(() => "confirmed"),
+      "durable confirmation preview should mark every writable item confirmed",
     );
     assert.match(
-      (syncedCustomer.item?.syncPreview ?? []).join("\n"),
-      /快速记录已确认/,
-      "confirmed quick record should write back to customer sync preview",
-    );
-    assert.ok(
-      (syncedCustomer.item?.syncPreview ?? []).some((item) => item.includes(manualAnalysisRevision)),
-      "confirmation after manual analysis save should use the persisted revision",
+      JSON.stringify(syncedCustomer.item?.needs ?? []),
+      /本地数据中心|灾备规划/,
+      "confirmed quick record should write the approved change into customer needs",
     );
     assert.match(
-      syncedOpportunity.item?.sourceRecord ?? "",
-      new RegExp(latestRecord.id),
-      "confirmed quick record should write back to opportunity source record",
+      JSON.stringify(syncedOpportunity.item?.requirements ?? []),
+      /本地数据中心|灾备规划/,
+      "confirmed quick record should write the approved change into opportunity requirements",
     );
-    assert.ok(
+    assert.match(
+      JSON.stringify(weeklyEntries),
+      /手动修订|本地数据中心|灾备规划/,
+      "confirmed quick record should write the approved change into weekly report entries",
+    );
+    assert.equal(
       (actionItems.items ?? []).some((item) => item.sourceRecordId === latestRecord.id),
-      "confirmed quick record should generate a next action item",
+      false,
+      "confirmed quick record should not automatically create an action item",
     );
     assert.ok(
       (actionItems.items ?? []).some((item) => item.status === "done" && item.assignee === "继振" && item.due === "周五 17:00"),
       "action status updates should persist completion, owner, and due date",
     );
-    const quickRiskItem = (riskItems.items ?? []).find((item) => item.sourceType === "quick_record" && item.sourceId === latestRecord.id);
-    assert.ok(quickRiskItem, "confirmed quick record should generate a traceable risk item");
-    assert.equal(quickRiskItem.status, "closed", "risk status updates should persist closure");
-    assert.equal(quickRiskItem.assignee, "继振", "risk status updates should persist owner");
-    assert.equal(quickRiskItem.due, "下周一 10:00", "risk status updates should persist the deferred due date");
+    assert.equal(
+      (riskItems.items ?? []).some((item) => item.sourceType === "quick_record" && item.sourceId === latestRecord.id),
+      false,
+      "confirmed quick record should not automatically create a risk item",
+    );
+    assert.notEqual(syncedCustomer.item?.relation, "高", "confirmed quick record should not automatically change customer temperature");
+    assert.equal(weeklyDraft.item?.financialData ?? null, null, "confirmed quick record should not automatically write financial data");
     assert.ok(
       (customersAfterEdit.items ?? []).some((item) => item.name === "测试集成客户" && item.level === "重点培育"),
       "customer editor should create and update a backend customer",
@@ -2836,14 +3012,14 @@ async function main() {
         assert.equal(result.hasBackendRecorded, true, "desktop flow should show backend confirmation state");
         assert.equal(result.syncLogItems, 3, "desktop flow should render three sync log entries");
         assert.match(result.syncLogText, /同步日志/, "desktop flow should show the sync log panel");
-        assert.equal(result.riskPageHasQuickRecordSource, true, "desktop flow should render backend risk source");
+        assert.equal(result.riskPageHasQuickRecordSource, false, "desktop flow should not invent a quick-record source for existing risks");
         assert.equal(result.riskPageHidesInternalSourceType, true, "desktop flow should hide internal risk source enums");
         assert.equal(result.riskPageStatusDeferred, true, "desktop flow should defer a risk through the UI");
         assert.equal(result.riskPageStatusClosed, true, "desktop flow should close a risk through the UI");
         assert.equal(result.riskPageAssigneeUpdated, true, "desktop flow should update risk owner through the UI");
         assert.equal(result.riskPageDueUpdated, true, "desktop flow should update risk due date through the UI");
-        assert.equal(result.riskPageEvidenceExpanded, true, "desktop risk evidence should expand details");
-        assert.equal(result.riskPageActionExpanded, true, "desktop risk action advice should expand details");
+        assert.equal(result.riskPageEvidenceExpanded, true, "desktop risk evidence should render without fake expand");
+        assert.equal(result.riskPageActionExpanded, true, "desktop risk action advice should render without fake expand");
         assert.equal(result.riskPageLocalSearch, true, "desktop risk page should search only risk records");
         assert.equal(result.riskPageDetailViewOpened, true, "desktop risk page should open detail as a sub view");
         assert.equal(result.actionFlow.statusDone, true, "desktop flow should complete an action through the UI");
@@ -2895,12 +3071,17 @@ async function main() {
         assert.equal(result.expenseFlow.loadedWithoutAlert, true, "desktop travel expense page should finish loading without an error alert");
         assert.deepEqual(
           result.expenseFlow.tabIds,
-          ['overview', 'ledger', 'proofs', 'invoices', 'settlement', 'organize'],
-          "desktop travel expense page should expose all six reimbursement tabs",
+          ['ledger', 'invoices'],
+          "desktop travel expense page should expose only ledger and invoice workspaces",
         );
         assert.equal(result.expenseFlow.tabsPresent, true, "desktop travel expense page should expose exactly the expected reimbursement tabs");
         assert.equal(result.expenseFlow.naturalWeekInput, true, "desktop travel expense page should use a populated natural-week input");
-        assert.equal(result.expenseFlow.organizeOpened, true, "desktop travel expense organize tab should open the payment record workbench");
+        assert.equal(result.expenseFlow.ledgerOpened, true, "desktop travel expense page should open the scheme-three ledger workspace by default");
+        assert.equal(result.expenseFlow.ledgerChildFunctionsPresent, true, "desktop ledger should retain payment proofs and advances as its two child functions since the WeChat review card was removed in v0.8.2");
+        assert.equal(result.expenseFlow.legacyExportAbsent, true, "desktop travel expense page must not expose a standalone reimbursement output tab");
+        assert.equal(result.expenseFlow.reimbursementActionsPresent, true, "desktop ledger should expose only print and Excel expense-list actions");
+        assert.equal(result.expenseFlow.regionSettingsOpened, true, "desktop ledger should open the weekly region settings card");
+        assert.equal(result.expenseFlow.regionSettingsClosed, true, "desktop weekly region settings card should close without saving");
         assert.equal(result.expenseFlow.editorOpened, true, "desktop travel expense create action should open the expense editor");
         assert.ok(result.expenseFlow.editorControlCount > 0, "desktop travel expense editor should render form controls");
         assert.equal(result.expenseFlow.editorLabelsComplete, true, "desktop travel expense editor controls should all have readable labels");
@@ -2919,7 +3100,10 @@ async function main() {
         assert.equal(result.cardInteractions.customerTemperature, true, "desktop customer temperature card should open customer detail");
         assert.equal(result.cardInteractions.customerLocalSearch, true, "desktop customer page should search only customer records");
         assert.equal(result.cardInteractions.customerDetailViewOpened, true, "desktop customer page should open detail as a sub view");
-        assert.equal(result.cardInteractions.rhythmCard, true, "desktop rhythm card should open its related module");
+        assert.equal(result.cardInteractions.customerTenderContext.firstRequestScoped, true, "desktop customer tender entry must scope its first notice request to the selected customer");
+        assert.equal(result.cardInteractions.customerTenderContext.canonicalPath, true, "desktop customer tender entry should use the canonical customer tender deep link");
+        assert.equal(result.cardInteractions.customerTenderContext.backRestored, true, "desktop customer tender history back should restore the exact customer detail");
+        assert.equal(result.cardInteractions.todayFocusTodos, true, "desktop today-focus todo section should open the actions list");
         assert.equal(result.cardInteractions.stageCard, true, "desktop stage card should open kanban");
         assert.equal(result.cardInteractions.weeklyStartsEmpty, true, "desktop weekly page should start from a real empty state");
         assert.equal(result.cardInteractions.weeklyDailyUsesRealSources, true, "desktop weekly daily view should render real draft sources");
@@ -2928,43 +3112,59 @@ async function main() {
         assert.equal(result.cardInteractions.weeklyMetricExpanded, true, "desktop real weekly metric card should expand its details");
         assert.equal(result.cardInteractions.quickRecordLoaded, true, "desktop quick record card should load its content into the composer");
         assert.equal(result.cardInteractions.quickSavedAnalysisRestored, true, "desktop history should restore the saved quick-record analysis");
-        assert.equal(result.cardInteractions.quickHistoryAnalysisEditable, true, "desktop restored historical analysis should be manually editable");
+        assert.equal(result.cardInteractions.quickHistoryAnalysisEditable, false, "desktop restored historical analysis should remain read-only");
+        assert.equal(result.cardInteractions.quickHistoryAnalysisReadOnly, true, "desktop restored historical analysis should hide editing controls");
         assert.equal(result.cardInteractions.quickAnalysisSaveControl, true, "desktop restored analysis should expose an explicit save control");
+        assert.equal(result.cardInteractions.quickAnalysisSaveDisabled, true, "desktop restored analysis save control should be disabled");
         assert.equal(result.cardInteractions.quickAnalysisSaved, true, "desktop analysis save should retain the manual revision");
-        assert.equal(result.cardInteractions.quickAnalysisResynced, true, "desktop should re-sync from the saved analysis revision");
+        assert.equal(result.cardInteractions.quickAnalysisResynced, true, "desktop history should retain the completed confirmation state");
+        assert.equal(result.cardInteractions.quickTerminalPreviewReadOnly, true, "desktop completed confirmation preview should remain read-only");
         assert.equal(result.cardInteractions.quickHistoryNoAiReplay, true, "desktop history should not trigger another analyze or preview request");
         assert.equal(
           result.cardInteractions.quickAiRequestsAfterHistory,
           result.cardInteractions.quickAiRequestsBeforeHistory,
           "desktop history click should preserve the quick-record AI request count",
         );
-        assert.equal(result.cardInteractions.stakeholderExpanded, true, "desktop customer stakeholder card should expand details");
-        assert.equal(result.cardInteractions.chainExpanded, true, "desktop customer decision-chain card should expand details");
-        assert.equal(result.cardInteractions.fieldTagExpanded, true, "desktop customer tag card should expand details");
-        assert.equal(result.cardInteractions.opportunitySourceExpanded, true, "desktop opportunity source record should expand details");
-        assert.equal(result.cardInteractions.opportunityRiskExpanded, true, "desktop opportunity risk note should expand details");
-        assert.equal(result.cardInteractions.opportunityNextExpanded, true, "desktop opportunity next action should expand details");
+        assert.equal(result.cardInteractions.stakeholderExpanded, true, "desktop customer stakeholder card should render details without fake expand");
+        assert.equal(result.cardInteractions.chainExpanded, true, "desktop customer decision-chain should render details without fake expand");
+        assert.equal(result.cardInteractions.fieldTagExpanded, true, "desktop customer tags should render without fake expand");
+        assert.equal(result.cardInteractions.opportunitySourceExpanded, true, "desktop opportunity source record should render without fake expand");
+        assert.equal(result.cardInteractions.opportunityRiskExpanded, true, "desktop opportunity risk note should render without fake expand");
+        assert.equal(result.cardInteractions.opportunityNextExpanded, true, "desktop opportunity next action should render without fake expand");
         assert.equal(result.cardInteractions.opportunityLocalSearch, true, "desktop opportunity page should search only opportunity records");
         assert.equal(result.cardInteractions.opportunityDetailViewOpened, true, "desktop opportunity page should open detail as a sub view");
-        assert.equal(result.cardInteractions.timelineExpanded, true, "desktop opportunity timeline item should expand details");
+        assert.equal(result.cardInteractions.timelineExpanded, true, "desktop opportunity timeline item should render without fake expand");
+        assert.equal(result.cardInteractions.opportunityContext.riskScoped, true, "desktop risk child page should keep the selected opportunity context");
+        assert.equal(result.cardInteractions.opportunityContext.actionScoped, true, "desktop action child page should keep the selected opportunity context");
+        assert.equal(result.cardInteractions.opportunityContext.kanbanScoped, true, "desktop kanban child page should keep the selected opportunity context");
+        assert.equal(result.cardInteractions.opportunityContext.backRestored, true, "desktop browser back should restore the exact opportunity detail");
+        assert.equal(result.cardInteractions.opportunityContext.forwardRestored, true, "desktop browser forward should restore the scoped risk page");
+        assert.equal(result.settingsIa.security, true, "desktop system settings should open the focused security and AI page");
+        assert.equal(result.settingsIa.primaryHighlighted, true, "desktop settings child pages should keep system settings highlighted");
+        assert.equal(result.settingsIa.weixin, true, "desktop WeChat settings child should preserve the complete binding controls");
+        assert.equal(result.settingsIa.notifications, true, "desktop notification settings child should expose PushPlus configuration");
+        assert.equal(result.settingsIa.tenderSchedule, true, "desktop tender scheduler settings child should expose fixed policy and run controls");
         assert.equal(result.aiSuggestions.customer, true, "desktop customer page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.opportunity, true, "desktop opportunity page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.knowledge, true, "desktop knowledge page should generate an AI suggestion through the UI");
-        assert.equal(result.voiceFlow.started, true, "desktop quick record voice mode should start browser speech recognition");
+        assert.equal(result.voiceFlow.started, true, "desktop quick record voice mode should start MediaRecorder capture");
         assert.equal(result.voiceFlow.defaultedToVoice, true, "desktop quick record should default to voice mode");
         assert.equal(result.voiceFlow.resetToVoiceAfterReturn, true, "desktop quick record should reset to voice mode whenever the page is reopened");
         assert.equal(result.voiceFlow.resetToVoiceFromTopbar, true, "desktop topbar quick record entry should reset to voice mode");
         assert.equal(result.voiceFlow.resetToVoiceFromOverview, true, "desktop overview quick record entry should reset to voice mode");
-        assert.equal(result.voiceFlow.transcriptInComposer, true, "desktop quick record voice mode should write transcript into composer");
-        assert.equal(result.voiceFlow.stopped, true, "desktop quick record voice mode should stop browser speech recognition");
-        assert.equal(result.voiceFallback.recordingStarted, true, "desktop quick record voice mode should fall back to recording when speech recognition is unavailable");
-        assert.equal(result.voiceFallback.audioCardVisible, true, "desktop quick record Safari fallback should show a playable recording");
-        assert.equal(result.voiceFallback.downloadVisible, true, "desktop quick record Safari fallback should expose a recording download");
-        assert.equal(result.voiceFallback.guidanceVisible, true, "desktop quick record Safari fallback should guide manual transcription");
-        assert.equal(result.voiceFallback.trackStopped, true, "desktop quick record Safari fallback should release the microphone stream");
-        assert.equal(result.voiceUploadOnly.uploadVisible, true, "desktop quick record mobile fallback should expose recording upload when direct microphone access is unavailable");
-        assert.equal(result.voiceUploadOnly.unavailableHidden, true, "desktop quick record mobile fallback should not show an unavailable voice dead end");
-        assert.equal(result.voiceUploadOnly.textFallbackVisible, true, "desktop quick record mobile fallback should still allow text entry");
+        assert.equal(result.voiceFlow.browserInterimStarted, true, "desktop quick record should expose Web Speech only as an interim enhancement");
+        assert.equal(result.voiceFlow.browserInterimStopped, true, "desktop quick record should stop the interim browser recognizer with recording");
+        assert.equal(result.voiceFlow.interimNotCommitted, true, "browser interim speech must not write the business draft");
+        assert.equal(result.voiceFlow.serverRequestCount, 1, "desktop quick record should issue one synthetic server ASR request");
+        assert.equal(result.voiceFlow.serverRequest?.purpose, "quick_record", "desktop quick record should preserve the ASR purpose");
+        assert.equal(result.voiceFlow.serverRequest?.bodyIsBlob, true, "desktop quick record should upload the raw in-memory Blob");
+        assert.equal(result.voiceFlow.serverRequest?.idempotencyKeyPresent, true, "desktop quick record should send an idempotency key");
+        assert.equal(result.voiceFlow.transcriptInComposer, true, "desktop quick record should commit only the server transcript into the composer");
+        assert.equal(result.voiceFlow.stopped, true, "desktop quick record voice mode should stop MediaRecorder capture");
+        assert.equal(result.voiceUnavailable.textGuidanceVisible, true, "desktop quick record should guide users to text entry when recording is unavailable");
+        assert.equal(result.voiceUnavailable.recordingControlsAbsent, true, "desktop quick record must not expose retired audio recording, playback, or upload controls");
+        assert.equal(result.voiceUnavailable.startRecordingDisabled, true, "desktop quick record should disable capture when MediaRecorder is unavailable");
+        assert.equal(result.voiceUnavailable.textFallbackVisible, true, "desktop quick record should still allow switching to text entry");
         assert.deepEqual(
           result.productionCopy.forbiddenByPage,
           [],
@@ -2981,8 +3181,16 @@ async function main() {
     const logoutStart = cdp.networkResponses.length;
     const logoutState = await evaluate(cdp, `
       (async () => {
-        const logout = document.querySelector('button[title="退出登录"]');
-        if (!logout) throw new Error('Missing logout button');
+        const trigger = document.querySelector('[data-testid="avatar-menu-trigger"]');
+        if (!trigger) throw new Error('Missing avatar menu trigger');
+        trigger.click();
+        const menuStarted = Date.now();
+        while (Date.now() - menuStarted < 3000) {
+          if (document.querySelector('[data-testid="avatar-menu-logout"]')) break;
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const logout = document.querySelector('[data-testid="avatar-menu-logout"]');
+        if (!logout) throw new Error('Missing avatar menu logout item');
         logout.click();
         const started = Date.now();
         while (Date.now() - started < 8000) {
@@ -3152,6 +3360,11 @@ async function main() {
 }
 
 main().catch((error) => {
+  if (error instanceof AggregateError) {
+    for (const [index, nested] of error.errors.entries()) {
+      console.error(`Integration QA nested error ${index + 1}: ${nested.stack ?? nested.message}`);
+    }
+  }
   console.error(error.stack ?? error.message);
   process.exit(1);
 });

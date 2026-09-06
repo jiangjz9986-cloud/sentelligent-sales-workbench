@@ -98,6 +98,39 @@ function sampleCustomer(overrides = {}) {
   };
 }
 
+describe("additive customer metadata contract", () => {
+  it("preserves aliases, tags and raw timestamps without changing the response", () => {
+    const customer = sampleCustomer({
+      aliases: ["Hospital alias"], tags: ["Important"],
+      createdAt: "2026-09-06 01:00:00", updatedAt: "2026-09-06T09:00:00+08:00",
+    });
+    const before = structuredClone(customer);
+    assert.equal(assertApiEntity("customer", customer), customer);
+    assert.deepEqual(customer, before);
+  });
+
+  it("accepts absent legacy metadata and explicit unknown timestamps without inventing values", () => {
+    const legacy = sampleCustomer();
+    assertApiEntity("customer", legacy);
+    assert.equal(Object.hasOwn(legacy, "createdAt"), false);
+    assertApiEntity("customer", sampleCustomer({ aliases: [], tags: [], createdAt: null, updatedAt: null }));
+    assert.throws(() => assertApiEntity("customer", sampleCustomer({ version: undefined })), /customer.version/);
+  });
+
+  it("rejects malformed present metadata instead of silently discarding fields", () => {
+    for (const field of ["aliases", "tags"]) {
+      for (const value of [null, "tag", {}, [1], ["valid", null]]) {
+        assert.throws(() => assertApiEntity("customer", sampleCustomer({ [field]: value })), new RegExp(`customer.${field}`));
+      }
+    }
+    for (const field of ["createdAt", "updatedAt"]) {
+      for (const value of [123, {}, [], false]) {
+        assert.throws(() => assertApiEntity("customer", sampleCustomer({ [field]: value })), new RegExp(`customer.${field}`));
+      }
+    }
+  });
+});
+
 function sampleOpportunity(overrides = {}) {
   return {
     id: "op-rizhao-plan",
@@ -182,6 +215,31 @@ function sampleKnowledgeItem(overrides = {}) {
   };
 }
 
+function sampleAiSuggestion(overrides = {}) {
+  return {
+    id: "suggestion-1",
+    version: 1,
+    type: "customer_profile",
+    title: "生成客户画像补全建议",
+    status: "pending",
+    content: "## 建议\n补齐关键人、预算窗口和下一步问题。",
+    draft: "## 建议\n补齐关键人、预算窗口和下一步问题。",
+    confidence: 78,
+    sourceRefs: [{ type: "customer_profile", id: "customer-1", title: "客户档案：日照中医医院" }],
+    confirmationPreview: {
+      target: "人工审核记录（不会自动修改客户画像）",
+      changes: [{ field: "建议状态", before: "待人工确认", after: "已人工确认" }],
+    },
+    source: "mock",
+    fallbackReason: null,
+    createdAt: "2026-06-05T10:00:00.000Z",
+    updatedAt: "2026-06-05T10:00:00.000Z",
+    confirmedAt: null,
+    cancelledAt: null,
+    ...overrides,
+  };
+}
+
 function sampleDashboardSummary(overrides = {}) {
   return {
     metrics: {
@@ -195,8 +253,111 @@ function sampleDashboardSummary(overrides = {}) {
     recentRecords: [{ id: "qr-1", date: "06-03", customer: "Rizhao TCM Hospital", title: "site visit", status: "confirmed", tone: "blue" }],
     opportunities: [sampleOpportunity()],
     rhythm: [{ id: "rhythm-action", time: "18:00", title: "Prepare planning material", type: "下一步动作", target: "actions" }],
-    stageCounts: [{ stage: "planning", count: 1 }],
+    stageCounts: [{ stage: "planning", count: 1, amount: "共 120 万" }],
+    todayFocus: {
+      date: "2026-06-06",
+      itineraries: { count: 0, items: [] },
+      todos: { overdueCount: 0, todayCount: 0, items: [] },
+      risks: { count: 0, items: [] },
+      tenders: { highCount: 0, items: [] },
+    },
+    weeklyTrend: {
+      weekStart: "2026-06-01",
+      previousWeekStart: "2026-05-25",
+      quickRecords: { current: 1, previous: 0 },
+      expenseCents: { current: 0, previous: 0 },
+      completedTodos: { current: 0, previous: 0 },
+    },
     generatedAt: "2026-06-06T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleProactiveAssistant(overrides = {}) {
+  return {
+    schemaVersion: "proactive-assistant-v1",
+    modelVersion: "rules/proactive-v1",
+    source: "deterministic",
+    generatedAt: "2026-09-05T00:00:00.000Z",
+    staleDays: 21,
+    limit: 50,
+    items: [{
+      id: "proactive-missing-next-step-1",
+      schemaVersion: "proactive-assistant-v1",
+      subjectType: "opportunity",
+      subjectId: "op-rizhao-plan",
+      customerId: "rizhao",
+      opportunityId: "op-rizhao-plan",
+      opportunityVersion: 1,
+      customerVersion: 1,
+      title: "商机缺少下一步动作",
+      conclusion: "需要补充下一步",
+      facts: [],
+      inferences: [],
+      unknowns: [],
+      risks: [],
+      nextActions: [],
+      evidenceRefs: [],
+      sourceRefs: [],
+      confidence: null,
+      confidenceLevel: "unverified",
+      confidenceCalibrated: false,
+      priority: null,
+      priorityCalibrated: false,
+      trigger: { type: "missing_next_step", reason: "next 为空", detectedAt: "2026-09-05T00:00:00.000Z" },
+      modelVersion: "rules/proactive-v1",
+      source: "deterministic",
+      fallbackReason: null,
+      confirmationStatus: "not_started",
+      writebackPreview: { requiresHumanConfirmation: true, automaticWriteAllowed: false, action: null, risk: null, note: "preview" },
+      previewDigest: "a".repeat(64),
+      previewDigests: { action: "a".repeat(64) },
+      writebackAllowed: false,
+    }],
+    counts: { total: 1, missingNextStep: 1, staleOpportunity: 0, stageEvidenceMismatch: 0 },
+    truncated: false,
+    writebackPolicy: { requiresHumanConfirmation: true, automaticWriteAllowed: false },
+    ...overrides,
+  };
+}
+
+function sampleProactiveWritebackOutcome(overrides = {}) {
+  return {
+    status: "created",
+    target: "action",
+    replayed: false,
+    proactiveId: "proactive-missing-next-step-1",
+    suggestionId: "proactive-missing-next-step-1",
+    confirmationPreviewId: "preview-proactive-1",
+    action: sampleAction({ id: "act-proactive" }),
+    risk: null,
+    ...overrides,
+  };
+}
+
+function sampleProactiveConfirmationPreview(overrides = {}) {
+  return {
+    schemaVersion: "proactive-confirmation-preview-v1",
+    id: "preview-proactive-1",
+    owner: "jiangjz",
+    suggestionId: "proactive-missing-next-step-1",
+    target: "action",
+    revision: 1,
+    status: "open",
+    customerId: "rizhao",
+    opportunityId: "op-rizhao-plan",
+    opportunityVersion: 4,
+    customerVersion: 2,
+    previewDigest: "a".repeat(64),
+    preview: { title: "重新联系客户", reason: "长期没有互动" },
+    snapshot: { suggestionId: "proactive-missing-next-step-1", target: "action", previewDigest: "a".repeat(64) },
+    createdAt: "2026-09-05T00:00:00.000Z",
+    updatedAt: "2026-09-05T00:00:00.000Z",
+    expiresAt: "2026-09-05T00:30:00.000Z",
+    confirmedAt: null,
+    confirmedBy: null,
+    resultItemId: null,
+    replayed: false,
     ...overrides,
   };
 }
@@ -211,6 +372,8 @@ function sampleQuickRecord(overrides = {}) {
     customerId: null,
     opportunityId: null,
     status: "recorded",
+    confirmationPreviewId: null,
+    confirmationPreviewStatus: null,
     ...overrides,
   };
 }
@@ -310,6 +473,8 @@ function sampleTravelExpense(overrides = {}) {
     customerId: "customer-1",
     invoiceStatus: "covered",
     notes: null,
+    tripRegion: null,
+    tripRegionSource: null,
     payments: [sampleTravelExpensePayment()],
     attachments: [sampleTravelExpenseAttachment()],
     createdBy: "jiangjz",
@@ -337,6 +502,77 @@ function sampleTravelExpenseAdvance(overrides = {}) {
     updatedBy: "jiangjz",
     createdAt: "2026-08-01T08:00:00.000Z",
     updatedAt: "2026-08-03T08:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleShortcutBookkeepingLedgerReceipt(overrides = {}) {
+  return {
+    entryId: "entry-1",
+    expenseId: "expense-1",
+    paymentId: "payment-1",
+    referenceCode: "EXP-20260804-ABC12345",
+    occurredOn: "2026-08-04",
+    weekStart: "2026-08-03",
+    amountCents: 6800,
+    reimbursementCents: 6800,
+    attachmentStatus: "matched",
+    ...overrides,
+  };
+}
+
+function sampleShortcutBookkeepingReview(overrides = {}) {
+  const status = overrides.status ?? "review_required";
+  return {
+    id: "entry-1",
+    status,
+    targetSystem: "sentelligent",
+    ledgerName: "出差报销",
+    entryType: "expense",
+    category: "餐饮",
+    subcategory: "午餐",
+    note: null,
+    warnings: [],
+    expenseId: status === "accepted" ? "expense-1" : null,
+    paymentId: status === "accepted" ? "payment-1" : null,
+    expenseReferenceCode: status === "accepted" ? "EXP-20260804-ABC12345" : null,
+    remoteId: null,
+    remoteReference: null,
+    remoteStatus: null,
+    replayed: false,
+    ledgerReceipt: status === "accepted" ? sampleShortcutBookkeepingLedgerReceipt() : null,
+    rawText: "支付 68 元",
+    analysis: { status: "review_required", expense: null },
+    analysisProvider: "rules",
+    analysisModel: null,
+    errorCode: null,
+    attemptCount: 1,
+    createdAt: "2026-08-04T12:31:00.000Z",
+    updatedAt: "2026-08-04T12:31:00.000Z",
+    ...overrides,
+  };
+}
+
+function sampleTravelExpenseWorkbench(overrides = {}) {
+  return {
+    weekStart: "2026-08-03",
+    expenses: [sampleTravelExpense()],
+    advances: [sampleTravelExpenseAdvance()],
+    bookkeepingReviews: [sampleShortcutBookkeepingReview()],
+    regionProfile: {
+      weekStart: "2026-08-03",
+      weekEnd: "2026-08-09",
+      version: 0,
+      cities: [],
+      defaultCity: null,
+      dateOverrides: [],
+      createdAt: null,
+      updatedAt: null,
+    },
+    recentLedgerReceipts: [sampleShortcutBookkeepingLedgerReceipt({
+      acceptedAt: "2026-08-04T12:32:30.000Z",
+    })],
+    generatedAt: "2026-08-04T12:33:00.000Z",
     ...overrides,
   };
 }
@@ -484,6 +720,298 @@ it("rejects invoice candidate responses without a concurrency version", async ()
   );
 });
 
+describe("ASR transcription API client", () => {
+  const sampleSuccess = (overrides = {}) => ({
+    requestId: "asr-request-1",
+    item: {
+      transcript: "服务端转写文字",
+      language: "zh-CN",
+      durationMs: 860,
+      source: "server_asr",
+      replayed: false,
+      ...overrides,
+    },
+  });
+
+  it("parses Retry-After only as a single decimal integer in the inclusive 1..300 range", () => {
+    for (const [input, expected] of [["1", 1], ["017", 17], ["300", 300]]) {
+      assert.equal(salesWorkbenchApiModule.parseRetryAfterSeconds(input), expected);
+    }
+    for (const input of [null, undefined, "", "0", "-1", "301", "1.5", "Wed, 30 Aug 2026 10:00:00 GMT", "1, 2", " 1 ", "+1"]) {
+      assert.equal(salesWorkbenchApiModule.parseRetryAfterSeconds(input), null, String(input));
+    }
+  });
+
+  it("posts the raw Blob with Cookie, CSRF, fixed language, duration, key, and AbortSignal", async () => {
+    const calls = [];
+    const blob = new Blob(["synthetic-audio"], { type: "audio/webm;codecs=opus" });
+    const controller = new AbortController();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return jsonResponse(sampleSuccess());
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const result = await api.transcribeAudio({
+      blob,
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      signal: controller.signal,
+    });
+
+    assert.deepEqual(result, sampleSuccess());
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://example.test/api/asr/transcriptions?purpose=quick_record");
+    assert.equal(calls[0].options.method, "POST");
+    assert.equal(calls[0].options.credentials, "include");
+    assert.strictEqual(calls[0].options.body, blob);
+    assert.strictEqual(calls[0].options.signal, controller.signal);
+    assert.equal(headerValue(calls[0].options, "Content-Type"), "audio/webm;codecs=opus");
+    assert.equal(headerValue(calls[0].options, "Idempotency-Key"), "asr:12345678-1234-4234-9234-123456789abc");
+    assert.equal(headerValue(calls[0].options, "X-Audio-Duration-Ms"), "860");
+    assert.equal(headerValue(calls[0].options, "X-ASR-Language"), "zh-CN");
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), "fixture-csrf-token");
+    assert.equal(headerValue(calls[0].options, "Authorization"), undefined);
+  });
+
+  it("accepts replayed success and enforces the response schema and purpose text limit", async () => {
+    const validApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse(sampleSuccess({ replayed: true })),
+    });
+    validApi.setSession({ csrfToken: "fixture-csrf-token" });
+    assert.equal((await validApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/mp4" }),
+      purpose: "assistant_chat",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    })).item.replayed, true);
+
+    const allowedControlBoundary = "第一行\n\t第二行\u007F\u0085";
+    const boundaryApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse(sampleSuccess({ transcript: allowedControlBoundary })),
+    });
+    boundaryApi.setSession({ csrfToken: "fixture-csrf-token" });
+    assert.equal((await boundaryApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/mp4" }),
+      purpose: "assistant_chat",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    })).item.transcript, allowedControlBoundary);
+
+    for (const invalidResponse of [
+      { item: sampleSuccess().item },
+      sampleSuccess({ source: "browser_speech" }),
+      sampleSuccess({ language: "en" }),
+      sampleSuccess({ replayed: "false" }),
+      sampleSuccess({ transcript: "x".repeat(2_001) }),
+      sampleSuccess({ transcript: "" }),
+      sampleSuccess({ transcript: "含\u0000控制字符" }),
+      sampleSuccess({ transcript: "含\r裸回车" }),
+    ]) {
+      const api = createSalesWorkbenchApi({
+        baseUrl: "https://example.test",
+        fetchImpl: async () => jsonResponse(invalidResponse),
+      });
+      api.setSession({ csrfToken: "fixture-csrf-token" });
+      await assert.rejects(() => api.transcribeAudio({
+        blob: new Blob(["a"], { type: "audio/mp4" }),
+        purpose: "assistant_chat",
+        durationMs: 860,
+        idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      }), (error) => {
+        assert.equal(error.code, "ASR_PROVIDER_BAD_RESPONSE");
+        assert.equal(error.lifecycle, "same_blob_retryable");
+        assert.equal(Object.hasOwn(error, "body"), false);
+        assert.doesNotMatch(error.message, /provider|secret|nested/i);
+        return true;
+      });
+    }
+
+    const sensitiveFixture = "must-not-cross-client-contract";
+    const sanitizedApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        ...sampleSuccess({
+          replayed: true,
+          providerRaw: sensitiveFixture,
+          model: sensitiveFixture,
+          headers: { authorization: sensitiveFixture },
+        }),
+        providerResponse: sensitiveFixture,
+        internalPath: sensitiveFixture,
+      }),
+    });
+    sanitizedApi.setSession({ csrfToken: "fixture-csrf-token" });
+    const sanitized = await sanitizedApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/mp4" }),
+      purpose: "assistant_chat",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    });
+    assert.deepEqual(sanitized, sampleSuccess({ replayed: true }));
+    assert.doesNotMatch(JSON.stringify(sanitized), /must-not-cross-client-contract/u);
+  });
+
+  it("publishes the exact lifecycle whitelist and bounded Retry-After without leaking error bodies", async () => {
+    const cases = [
+      [409, "ASR_IN_PROGRESS", "same_blob_retryable", 1],
+      [429, "ASR_CAPACITY_EXCEEDED", "same_blob_retryable", 2],
+      [502, "ASR_PROVIDER_BAD_RESPONSE", "same_blob_retryable", null],
+      [504, "ASR_TIMEOUT", "same_blob_retryable", 300],
+      [429, "ASR_RATE_LIMITED", "rate_limited", null],
+      [400, "INVALID_IDEMPOTENCY_KEY", "release_and_rerecord", null],
+      [422, "ASR_TRANSCRIPT_EMPTY", "release_and_rerecord", null],
+      [409, "IDEMPOTENCY_CONFLICT", "release_and_rerecord", null],
+      [503, "ASR_NOT_CONFIGURED", "release_and_rerecord", null],
+    ];
+    for (const [status, code, lifecycle, retryAfterSeconds] of cases) {
+      const api = createSalesWorkbenchApi({
+        baseUrl: "https://example.test",
+        fetchImpl: async () => jsonResponse({
+          error: { code, message: "sensitive provider detail", requestId: "request-error" },
+        }, status, { "Retry-After": retryAfterSeconds ?? "invalid" }),
+      });
+      api.setSession({ csrfToken: "fixture-csrf-token" });
+      await assert.rejects(
+        () => api.transcribeAudio({
+          blob: new Blob(["a"], { type: "audio/webm" }),
+          purpose: "quick_record",
+          durationMs: 860,
+          idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+        }),
+        (error) => {
+          assert.equal(error.code, code);
+          assert.equal(error.lifecycle, lifecycle);
+          assert.equal(error.retryAfterSeconds, retryAfterSeconds);
+          assert.equal(Object.hasOwn(error, "body"), false);
+          assert.doesNotMatch(error.message, /sensitive provider detail/i);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("maps network failure to same-Blob retry and abort to release without global unauthorized", async () => {
+    const networkApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => { throw new TypeError("Failed to fetch sensitive URL"); },
+    });
+    networkApi.setSession({ csrfToken: "fixture-csrf-token" });
+    await assert.rejects(
+      () => networkApi.transcribeAudio({
+        blob: new Blob(["a"], { type: "audio/webm" }),
+        purpose: "quick_record",
+        durationMs: 860,
+        idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      }),
+      (error) => error.code === "ASR_NETWORK_ERROR" && error.lifecycle === "same_blob_retryable",
+    );
+
+    let unauthorizedCalls = 0;
+    const abortController = new AbortController();
+    abortController.abort("user_cancel");
+    const abortApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized() { unauthorizedCalls += 1; },
+      fetchImpl: async () => {
+        const error = new DOMException("Aborted", "AbortError");
+        throw error;
+      },
+    });
+    abortApi.setSession({ csrfToken: "fixture-csrf-token" });
+    await assert.rejects(() => abortApi.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+      signal: abortController.signal,
+    }), (error) => error.code === "ASR_ABORTED" && error.lifecycle === "release_and_rerecord");
+    assert.equal(unauthorizedCalls, 0);
+  });
+
+  it("invalidates once for a non-aborted ASR 401 while returning only the sanitized caller error", async () => {
+    let unauthorizedCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      onUnauthorized() { unauthorizedCalls += 1; },
+      fetchImpl: async () => jsonResponse({
+        error: {
+          code: "UNAUTHORIZED",
+          message: "sensitive session/provider detail",
+          requestId: "asr-request-401",
+        },
+      }, 401),
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+    await assert.rejects(() => api.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    }), (error) => {
+      assert.equal(error.code, "UNAUTHORIZED");
+      assert.equal(error.lifecycle, "release_and_rerecord");
+      assert.equal(error.status, 401);
+      assert.equal(error.requestId, "asr-request-401");
+      assert.equal(Object.hasOwn(error, "body"), false);
+      assert.doesNotMatch(error.message, /sensitive|provider detail/u);
+      return true;
+    });
+    assert.equal(unauthorizedCalls, 1);
+  });
+
+  it("defaults unknown HTTP errors to release instead of misclassifying them as a network interruption", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({ error: { message: "untrusted gateway body" } }, 500),
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+    await assert.rejects(() => api.transcribeAudio({
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    }), (error) => {
+      assert.equal(error.code, "ASR_UNKNOWN_ERROR");
+      assert.equal(error.lifecycle, "release_and_rerecord");
+      assert.doesNotMatch(error.message, /gateway|untrusted/i);
+      return true;
+    });
+  });
+
+  it("rejects invalid purpose, duration, key, Blob size, and media type before fetch", async () => {
+    let fetchCalls = 0;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => { fetchCalls += 1; return jsonResponse(sampleSuccess()); },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+    const valid = {
+      blob: new Blob(["a"], { type: "audio/webm" }),
+      purpose: "quick_record",
+      durationMs: 860,
+      idempotencyKey: "asr:12345678-1234-4234-9234-123456789abc",
+    };
+    for (const input of [
+      { ...valid, purpose: "other" },
+      { ...valid, durationMs: 0 },
+      { ...valid, durationMs: 120_001 },
+      { ...valid, idempotencyKey: "short" },
+      { ...valid, blob: new Blob([], { type: "audio/webm" }) },
+      { ...valid, blob: new Blob(["a"], { type: "video/webm" }) },
+    ]) {
+      await assert.rejects(() => api.transcribeAudio(input), TypeError);
+    }
+    assert.equal(fetchCalls, 0);
+  });
+});
+
 function sampleAnalysis(overrides = {}) {
   return {
     id: "ai-1",
@@ -515,6 +1043,26 @@ function sampleConfirmation(overrides = {}) {
   };
 }
 
+function sampleQuickRecordConfirmationPreview(overrides = {}) {
+  return {
+    schemaVersion: "quick-record-confirmation-v2", id: "preview-1", identity: "a".repeat(64), owner: "Jizhen",
+    status: "open", revision: 1, quickRecordId: "qr-1", quickRecordVersion: 4,
+    quickRecordStatus: "analyzed", analysisVersionId: "ai-1", analysisStatus: "ready_for_confirmation",
+    summary: { title: "确认写入" }, evidence: [], summaryHash: "b".repeat(64), evidenceHash: "c".repeat(64),
+    draftHash: "d".repeat(64), items: [], requiresHumanConfirmation: true, automaticWriteAllowed: false,
+    createdWithUnsavedChanges: false, createdAt: "2026-06-05T10:30:00.000Z", updatedAt: "2026-06-05T10:30:00.000Z",
+    completedAt: null, cancelledAt: null, cancelledBy: null, replayed: false, confirmationBlocked: false,
+    bulkEligibleItemIds: [], ...overrides,
+  };
+}
+
+function sampleQuickRecordConfirmationOutcome(overrides = {}) {
+  return {
+    status: "confirmed", preview: sampleQuickRecordConfirmationPreview(), confirmedItems: [], excludedItems: [],
+    writeback: true, replayed: false, reason: null, details: null, ...overrides,
+  };
+}
+
 function sampleWeeklyReport(overrides = {}) {
   return {
     id: "wr-1",
@@ -524,7 +1072,10 @@ function sampleWeeklyReport(overrides = {}) {
     periodEnd: "2026-06-07",
     status: "draft",
     content: "# weekly draft",
+    entries: [],
     sourceRefs: [{ type: "quick_record", id: "qr-1" }],
+    source: "mock",
+    fallbackReason: null,
     ...overrides,
   };
 }
@@ -545,6 +1096,8 @@ function sampleSolutionDraft(overrides = {}) {
       { type: "opportunity", id: "op-rizhao-plan" },
       { type: "action", id: "act-1" },
     ],
+    source: "mock",
+    fallbackReason: null,
     createdAt: "2026-06-05 10:30:00",
     updatedAt: "2026-06-05 10:30:00",
     ...overrides,
@@ -574,6 +1127,7 @@ function bootstrapResponse(url) {
   if (url.endsWith("/api/solutions")) return jsonResponse({ items: [sampleSolutionDraft()] });
   if (url.endsWith("/api/itineraries")) return jsonResponse({ items: [sampleVisitItinerary()] });
   if (url.endsWith("/api/dashboard/summary")) return jsonResponse({ item: sampleDashboardSummary() });
+  if (url.includes("/api/assistant/proactive")) return jsonResponse({ item: sampleProactiveAssistant() });
   return jsonResponse({ error: "not_found" }, 404);
 }
 
@@ -676,6 +1230,7 @@ describe("sales workbench API client", () => {
     assert.deepEqual(session, {
       account: "jiangjz",
       displayName: "姜继振",
+      role: "member",
       expiresAt: "2026-07-22T00:00:00.000Z",
     });
     assert.equal(session.token, undefined);
@@ -716,6 +1271,7 @@ describe("sales workbench API client", () => {
     assert.deepEqual(session, {
       account: "jiangjz",
       displayName: "姜继振",
+      role: "member",
       expiresAt: "2026-07-22T00:00:00.000Z",
     });
     assert.equal(session.token, undefined);
@@ -1089,6 +1645,77 @@ describe("sales workbench API client", () => {
     }
   });
 
+  it("passes the admin role through login responses", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        account: "jiangjz",
+        displayName: "继振",
+        role: "admin",
+        expiresAt: "2026-07-22T00:00:00.000Z",
+        csrfToken: "csrf-admin-login",
+      }),
+    });
+    const passwordInput = ["pass", "word"].join("");
+    const session = await api.login({ account: "jiangjz", [passwordInput]: "unit-login-value" });
+    assert.equal(session.role, "admin");
+    assert.equal(session.displayName, "继振");
+  });
+
+  it("manages users through the admin endpoints with CSRF and expectedVersion in the body", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (String(options.method ?? "GET") === "GET") {
+          return jsonResponse({
+            items: [{
+              account: "jiangjz",
+              displayName: "继振",
+              role: "admin",
+              status: "active",
+              createdAt: "2026-08-29T00:00:00.000Z",
+              updatedAt: "2026-08-29T00:00:00.000Z",
+              lastLoginAt: null,
+              version: 1,
+            }],
+          });
+        }
+        return jsonResponse({ item: { account: "colleague", version: 2 } });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-admin-login" });
+
+    const users = await api.listUsers();
+    assert.equal(users.length, 1);
+    assert.equal(users[0].account, "jiangjz");
+    assert.equal(calls[0].url, "https://example.test/api/admin/users");
+    assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+
+    const passwordInput = ["pass", "word"].join("");
+    await api.createUser({ account: "colleague", displayName: "同事", role: "member", [passwordInput]: "unit-colleague-value" });
+    assert.equal(calls[1].url, "https://example.test/api/admin/users");
+    assert.equal(calls[1].options.method, "POST");
+    assert.equal(headerValue(calls[1].options, "X-CSRF-Token"), "csrf-admin-login");
+    assert.equal(JSON.parse(calls[1].options.body).account, "colleague");
+
+    await api.updateUser("colleague", { expectedVersion: 1, status: "disabled" });
+    assert.equal(calls[2].url, "https://example.test/api/admin/users/colleague");
+    assert.equal(calls[2].options.method, "PATCH");
+    assert.equal(headerValue(calls[2].options, "X-CSRF-Token"), "csrf-admin-login");
+    assert.equal(headerValue(calls[2].options, "If-Match"), undefined);
+    assert.deepEqual(JSON.parse(calls[2].options.body), { expectedVersion: 1, status: "disabled" });
+
+    const currentField = ["current", "Pass", "word"].join("");
+    const nextField = ["new", "Pass", "word"].join("");
+    await api.changePassword({ [currentField]: "unit-old-value", [nextField]: "unit-new-value" });
+    assert.equal(calls[3].url, "https://example.test/api/auth/change-password");
+    assert.equal(calls[3].options.method, "POST");
+    assert.equal(headerValue(calls[3].options, "X-CSRF-Token"), "csrf-admin-login");
+    assert.deepEqual(Object.keys(JSON.parse(calls[3].options.body)).sort(), [currentField, nextField].sort());
+  });
+
   it("loads bootstrap records and dashboard summary from the configured backend", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
@@ -1128,6 +1755,83 @@ describe("sales workbench API client", () => {
     ]);
     assert.equal(result.customers[0].id, "rizhao");
     assert.equal(result.opportunities[0].id, "op-rizhao-plan");
+  });
+
+  it("loads the owner-scoped proactive assistant snapshot without opening a write path", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, method: options.method ?? "GET" });
+        return bootstrapResponse(url);
+      },
+    });
+    const result = await api.getProactiveAssistant({ limit: 10 });
+    assert.equal(result.schemaVersion, "proactive-assistant-v1");
+    assert.equal(result.items[0].trigger.type, "missing_next_step");
+    assert.equal(result.items[0].opportunityVersion, 1);
+    assert.equal(result.items[0].customerVersion, 1);
+    assert.equal(result.items[0].writebackAllowed, false);
+    assert.equal(result.items[0].writebackPreview.requiresHumanConfirmation, true);
+    assert.deepEqual(result.items[0].previewDigests, { action: "a".repeat(64) });
+    assert.deepEqual(calls, [{ url: "https://example.test/api/assistant/proactive?limit=10", method: "GET" }]);
+  });
+
+  it("creates, reads, and cancels a durable proactive confirmation preview", async () => {
+    const calls = [];
+    const preview = sampleProactiveConfirmationPreview();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body, options });
+        if (url.endsWith("/cancel")) {
+          return jsonResponse({ item: { ...preview, status: "cancelled", replayed: false } });
+        }
+        if (options.method === "POST") return jsonResponse({ item: preview }, 201);
+        return jsonResponse({ item: preview });
+      },
+    });
+    const created = await api.createProactiveConfirmationPreview(
+      preview.suggestionId,
+      preview.target,
+      "proactive-preview-attempt-0001",
+    );
+    const fetched = await api.getProactiveConfirmationPreview(preview.suggestionId, preview.id);
+    const cancelled = await api.cancelProactiveConfirmationPreview(
+      preview.suggestionId,
+      preview.id,
+      "proactive-preview-cancel-0001",
+    );
+    assert.equal(created.id, preview.id);
+    assert.equal(fetched.status, "open");
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(created.suggestionId, preview.suggestionId);
+    assert.equal(created.target, "action");
+    assert.equal(created.opportunityVersion, 4);
+    assert.equal(created.customerVersion, 2);
+    assert.equal(created.previewDigest, "a".repeat(64));
+    assert.deepEqual(created.preview, preview.preview);
+    assert.deepEqual(created.snapshot, preview.snapshot);
+    assert.deepEqual(calls.map(({ url, method, body }) => ({ url, method, body })), [
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/previews",
+        method: "POST",
+        body: { target: "action" },
+      },
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/previews/preview-proactive-1",
+        method: "GET",
+        body: null,
+      },
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/previews/preview-proactive-1/cancel",
+        method: "POST",
+        body: { cancel: true },
+      },
+    ]);
+    assert.equal(headerValue(calls[0].options, "Idempotency-Key"), "proactive-preview-attempt-0001");
+    assert.equal(headerValue(calls[2].options, "Idempotency-Key"), "proactive-preview-cancel-0001");
   });
 
   it("rejects successful bootstrap collection responses that omit an explicit items array", async () => {
@@ -1525,7 +2229,6 @@ describe("sales workbench API client", () => {
         region: customer.region,
         type: customer.type,
         level: customer.level,
-        owner: customer.owner,
         contact: customer.contact,
         relation: customer.relation,
         stakeholders: customer.stakeholders,
@@ -1549,7 +2252,6 @@ describe("sales workbench API client", () => {
         customer: opportunity.customer,
         stage: opportunity.stage,
         amount: opportunity.amount,
-        owner: opportunity.owner,
         probability: opportunity.probability,
         days: opportunity.days,
         requirements: opportunity.requirements,
@@ -1796,75 +2498,201 @@ describe("sales workbench API client", () => {
     ]);
   });
 
-  it("confirms quick record targets through the backend", async () => {
+  it("creates an action through the backend with only writable create fields", async () => {
+    const calls = [];
     const api = createSalesWorkbenchApi({
       baseUrl: "http://127.0.0.1:8787",
       fetchImpl: async (url, options = {}) => {
-        assert.equal(url, "http://127.0.0.1:8787/api/quick-records/qr-1/confirm");
-        assert.deepEqual(JSON.parse(options.body), {
-          targets: ["customer", "opportunity", "weekly"],
-          confirmedBy: "Jizhen",
-          note: "manual confirmation",
-          targetVersions: { customer: 7, opportunity: 9 },
-          analysisVersionId: "ai-1",
-        });
-        assert.equal(headerValue(options, "Idempotency-Key"), "attempt-123");
-        assert.equal(headerValue(options, "If-Match"), '"4"');
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body });
         return jsonResponse({
-          confirmations: [sampleConfirmation()],
-          quickRecord: sampleQuickRecord({
-            status: "confirmed",
-            customerId: "rizhao",
-            opportunityId: "op-rizhao-plan",
+          item: sampleAction({
+            id: "act-created",
+            title: body.title,
+            remindAt: body.remindAt,
+            priority: body.priority,
           }),
-          customer: sampleCustomer({ syncPreview: ["快速记录已确认：Rizhao record"] }),
-          opportunity: sampleOpportunity({ sourceRecord: "quick-record qr-1" }),
-          action: sampleAction(),
         }, 201);
       },
     });
 
-    const result = await api.confirmQuickRecord("qr-1", ["customer", "opportunity", "weekly"], {
-      confirmedBy: "Jizhen",
-      note: "manual confirmation",
-      idempotencyKey: "attempt-123",
-      quickRecordVersion: 4,
-      targetVersions: { customer: 7, opportunity: 9 },
-      analysisVersionId: "ai-1",
+    const created = await api.createAction({
+      title: "整理灾备对比表",
+      customerId: "rizhao",
+      priority: "高",
+      due: "周五 17:00",
+      remindAt: "2026-09-01T02:30:00.000Z",
+      owner: "someone-else",
+      id: "client-forged-id",
+      version: 99,
     });
 
-    assert.equal(result.quickRecord.status, "confirmed");
-    assertApiCollection("manualConfirmation", result.confirmations);
-    assertApiEntity("quickRecord", result.quickRecord);
-    assertApiEntity("customer", result.customer);
-    assertApiEntity("opportunity", result.opportunity);
-    assert.equal(result.action.sourceRecordId, "qr-1");
-    assert.equal(result.confirmations[0].target, "weekly");
+    assertApiEntity("actionItem", created);
+    assert.equal(created.id, "act-created");
+    assert.deepEqual(calls, [
+      {
+        url: "http://127.0.0.1:8787/api/actions",
+        method: "POST",
+        body: {
+          title: "整理灾备对比表",
+          customerId: "rizhao",
+          priority: "高",
+          due: "周五 17:00",
+          remindAt: "2026-09-01T02:30:00.000Z",
+        },
+      },
+    ]);
   });
 
-  it("rejects malformed quick-record risk writeback responses", async () => {
+  it("confirms proactive writeback with an idempotency key and sanitized preview", async () => {
+    const calls = [];
     const api = createSalesWorkbenchApi({
       baseUrl: "http://127.0.0.1:8787",
-      fetchImpl: async () =>
-        jsonResponse({
-          confirmations: [sampleConfirmation()],
-          quickRecord: sampleQuickRecord({
-            status: "confirmed",
-            customerId: "rizhao",
-            opportunityId: "op-rizhao-plan",
-          }),
-          risk: sampleRisk({ score: "high" }),
-        }, 201),
+      fetchImpl: async (url, options = {}) => {
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body, options });
+        return jsonResponse({ item: sampleProactiveWritebackOutcome() }, 201);
+      },
     });
 
-    await assert.rejects(
-      () => api.confirmQuickRecord("qr-1", ["customer"], {
-        confirmedBy: "Jizhen",
-        idempotencyKey: "malformed-response-attempt",
-        quickRecordVersion: 1,
-        targetVersions: { customer: 1 },
+    const outcome = await api.confirmProactiveWriteback(
+      "proactive-missing-next-step-1",
+      {
+        target: "action",
+        customerId: "rizhao",
+        opportunityId: "op-rizhao-plan",
+        confirmationPreviewId: "preview-proactive-1",
+      expectedOpportunityVersion: 4,
+        expectedCustomerVersion: 2,
+        previewDigest: "a".repeat(64),
+        preview: {
+          title: "重新联系客户",
+          reason: "长期没有互动",
+          customerId: "rizhao",
+          opportunityId: "op-rizhao-plan",
+          owner: "forged-owner",
+          actor: "forged-actor",
+        },
+      },
+      "proactive-attempt-0001",
+    );
+
+    assert.equal(outcome.status, "created");
+    assert.equal(outcome.action.id, "act-proactive");
+    assert.deepEqual(calls.map(({ url, method, body }) => ({ url, method, body })), [
+      {
+        url: "http://127.0.0.1:8787/api/assistant/proactive/proactive-missing-next-step-1/confirm",
+        method: "POST",
+        body: {
+          confirmationPreviewId: "preview-proactive-1",
+          target: "action",
+          customerId: "rizhao",
+          opportunityId: "op-rizhao-plan",
+          expectedOpportunityVersion: 4,
+          expectedCustomerVersion: 2,
+          previewDigest: "a".repeat(64),
+          preview: {
+            title: "重新联系客户",
+            reason: "长期没有互动",
+            customerId: "rizhao",
+            opportunityId: "op-rizhao-plan",
+          },
+        },
+      },
+    ]);
+    assert.equal(headerValue(calls[0].options, "Idempotency-Key"), "proactive-attempt-0001");
+  });
+
+  it("accepts replayed proactive writeback outcomes without treating them as errors", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async () => jsonResponse({
+        item: sampleProactiveWritebackOutcome({ status: "replayed", replayed: true }),
       }),
-      /riskItem\.score: expected number/,
+    });
+    const outcome = await api.confirmProactiveWriteback(
+      "proactive-missing-next-step-1",
+      {
+        target: "action",
+        customerId: "rizhao",
+        opportunityId: "op-rizhao-plan",
+        confirmationPreviewId: "preview-proactive-1",
+        expectedOpportunityVersion: 1,
+        expectedCustomerVersion: 1,
+        previewDigest: "a".repeat(64),
+        preview: { title: "重新联系客户" },
+      },
+      "proactive-attempt-0002",
+    );
+    assert.equal(outcome.status, "replayed");
+    assert.equal(outcome.replayed, true);
+  });
+
+  it("rejects a proactive writeback response missing the confirmed target entity", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async () => jsonResponse({
+        item: sampleProactiveWritebackOutcome({ action: null }),
+      }),
+    });
+    await assert.rejects(
+      () => api.confirmProactiveWriteback(
+        "proactive-missing-next-step-1",
+        {
+          target: "action",
+          customerId: "rizhao",
+          opportunityId: "op-rizhao-plan",
+          confirmationPreviewId: "preview-proactive-1",
+          expectedOpportunityVersion: 1,
+          expectedCustomerVersion: 1,
+          previewDigest: "a".repeat(64),
+          preview: { title: "重新联系客户" },
+        },
+        "proactive-attempt-0003",
+      ),
+      /expected action item/u,
+    );
+  });
+
+  it("uses the five durable quick-record confirmation preview APIs without caller identity fields", async () => {
+    const calls = [];
+    const preview = sampleQuickRecordConfirmationPreview();
+    const outcome = sampleQuickRecordConfirmationOutcome({ preview });
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        const body = options.body ? JSON.parse(options.body) : null;
+        calls.push({ url, method: options.method ?? "GET", body });
+        if (url.endsWith("/api/quick-records/qr-1/confirmation-previews")) return jsonResponse({ item: preview }, 201);
+        if (url.endsWith("/api/quick-record-confirmation-previews/preview-1")) return jsonResponse({ item: preview });
+        if (url.endsWith("/confirm-item") || url.endsWith("/confirm-all")) return jsonResponse({ item: outcome });
+        if (url.endsWith("/cancel")) return jsonResponse({ item: preview });
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    const pins = { confirm: true, suggestionIdentity: "a".repeat(64), expectedQuickRecordVersion: 4, analysisVersionId: "ai-1", summaryHash: "b".repeat(64), evidenceHash: "c".repeat(64) };
+    assert.equal((await api.createQuickRecordConfirmationPreview("qr-1")).id, "preview-1");
+    assert.equal((await api.getQuickRecordConfirmationPreview("preview-1")).id, "preview-1");
+    await api.confirmQuickRecordConfirmationItem("preview-1", { ...pins, itemId: "customer-needs", itemIdentity: "e".repeat(64), owner: "forged", actor: "forged", confirmedBy: "forged", cancelledBy: "forged" });
+    await api.confirmAllQuickRecordConfirmationItems("preview-1", { ...pins, owner: "forged", actor: "forged", confirmedBy: "forged", cancelledBy: "forged" });
+    await api.cancelQuickRecordConfirmationPreview("preview-1", { cancel: true, suggestionIdentity: "a".repeat(64), owner: "forged", actor: "forged", confirmedBy: "forged", cancelledBy: "forged" });
+    assert.deepEqual(calls, [
+      { url: "http://127.0.0.1:8787/api/quick-records/qr-1/confirmation-previews", method: "POST", body: {} },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1", method: "GET", body: null },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1/confirm-item", method: "POST", body: { ...pins, itemId: "customer-needs", itemIdentity: "e".repeat(64) } },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1/confirm-all", method: "POST", body: pins },
+      { url: "http://127.0.0.1:8787/api/quick-record-confirmation-previews/preview-1/cancel", method: "POST", body: { cancel: true, suggestionIdentity: "a".repeat(64) } },
+    ]);
+  });
+
+  it("rejects malformed durable quick-record confirmation outcomes", async () => {
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async () => jsonResponse({ item: sampleQuickRecordConfirmationOutcome({ confirmedItems: "not-an-array" }) }),
+    });
+    await assert.rejects(
+      () => api.confirmAllQuickRecordConfirmationItems("preview-1", { confirm: true, suggestionIdentity: "a".repeat(64), expectedQuickRecordVersion: 4, analysisVersionId: "ai-1", summaryHash: "b".repeat(64), evidenceHash: "c".repeat(64) }),
+      /confirmedItems: expected array/,
     );
   });
 
@@ -1894,18 +2722,18 @@ describe("sales workbench API client", () => {
       artifactType: "communication_outline",
       knowledgeIds: ["k-mobile-cloud"],
     });
+    // v0.9.2：即使调用方仍传 owner，客户端也不再发送——owner 由服务端按会话注入。
 
     assertApiEntity("weeklyReport", weekly);
     assertApiEntity("solutionDraft", solution);
     assert.deepEqual(calls, [
       {
         url: "http://127.0.0.1:8787/api/reports/weekly/draft",
-        body: { owner: "Jizhen", periodStart: "2026-06-01", periodEnd: "2026-06-07", knowledgeIds: ["k-mobile-cloud"] },
+        body: { periodStart: "2026-06-01", periodEnd: "2026-06-07", knowledgeIds: ["k-mobile-cloud"] },
       },
       {
         url: "http://127.0.0.1:8787/api/solutions/draft",
         body: {
-          owner: "Jizhen",
           customerId: "rizhao",
           opportunityId: "op-rizhao-plan",
           artifactType: "communication_outline",
@@ -2069,15 +2897,7 @@ describe("sales workbench API client", () => {
         calls.push({ url, body: JSON.parse(options.body) });
         if (url.endsWith("/api/ai/suggestions")) {
           return jsonResponse({
-            item: {
-              id: "suggestion-1",
-              type: "customer_profile",
-              title: "生成客户画像补全建议",
-              status: "generated",
-              content: "## 建议\n补齐关键人、预算窗口和下一步问题。",
-              sourceRefs: [{ type: "customer_profile", id: "manual" }],
-              createdAt: "2026-06-05T10:00:00.000Z",
-            },
+            item: sampleAiSuggestion(),
           }, 201);
         }
         return jsonResponse({ error: "not_found" }, 404);
@@ -2091,7 +2911,7 @@ describe("sales workbench API client", () => {
     });
 
     assertApiEntity("aiSuggestion", suggestion);
-    assert.equal(suggestion.status, "generated");
+    assert.equal(suggestion.status, "pending");
     assert.deepEqual(calls, [
       {
         url: "http://127.0.0.1:8787/api/ai/suggestions",
@@ -2100,6 +2920,89 @@ describe("sales workbench API client", () => {
           title: "生成客户画像补全建议",
           context: { customer: "日照中医医院" },
         },
+      },
+    ]);
+  });
+
+  it("lists history without a model POST and explicitly confirms or cancels one suggestion with CSRF and versions", async () => {
+    const calls = [];
+    const signals = [];
+    const controller = new AbortController();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "http://127.0.0.1:8787",
+      fetchImpl: async (url, options = {}) => {
+        signals.push(options.signal);
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          body: options.body ? JSON.parse(options.body) : null,
+          csrf: headerValue(options, "X-CSRF-Token"),
+          ifMatch: headerValue(options, "If-Match"),
+        });
+        if (url.includes("/api/ai/suggestions?") && (options.method ?? "GET") === "GET") {
+          return jsonResponse({ items: [sampleAiSuggestion()] });
+        }
+        if (url.endsWith("/api/ai/suggestions/suggestion-1/confirm")) {
+          return jsonResponse({
+            item: sampleAiSuggestion({
+              version: 2,
+              status: "confirmed",
+              draft: "人工调整后的建议",
+              confirmedAt: "2026-06-05T10:05:00.000Z",
+            }),
+          });
+        }
+        if (url.endsWith("/api/ai/suggestions/suggestion-2/cancel")) {
+          return jsonResponse({
+            item: sampleAiSuggestion({
+              id: "suggestion-2",
+              version: 2,
+              status: "cancelled",
+              cancelledAt: "2026-06-05T10:06:00.000Z",
+            }),
+          });
+        }
+        return jsonResponse({ error: "not_found" }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const history = await api.listAiSuggestions({
+      type: "customer_profile",
+      sourceId: "customer 1",
+      limit: 5,
+    }, { signal: controller.signal });
+    const confirmed = await api.confirmAiSuggestion("suggestion-1", {
+      draft: "人工调整后的建议",
+      version: 1,
+    }, { signal: controller.signal });
+    const cancelled = await api.cancelAiSuggestion("suggestion-2", { version: 1 }, { signal: controller.signal });
+
+    assert.equal(history.items.length, 1);
+    assert.equal(confirmed.status, "confirmed");
+    assert.equal(cancelled.status, "cancelled");
+    assert.deepEqual(signals, [controller.signal, controller.signal, controller.signal]);
+    assert.deepEqual(calls, [
+      {
+        url: "http://127.0.0.1:8787/api/ai/suggestions?type=customer_profile&sourceId=customer+1&limit=5",
+        method: "GET",
+        body: null,
+        csrf: undefined,
+        ifMatch: undefined,
+      },
+      {
+        url: "http://127.0.0.1:8787/api/ai/suggestions/suggestion-1/confirm",
+        method: "POST",
+        body: { confirm: true, draft: "人工调整后的建议" },
+        csrf: "fixture-csrf-token",
+        ifMatch: '"1"',
+      },
+      {
+        url: "http://127.0.0.1:8787/api/ai/suggestions/suggestion-2/cancel",
+        method: "POST",
+        body: { cancel: true },
+        csrf: "fixture-csrf-token",
+        ifMatch: '"1"',
       },
     ]);
   });
@@ -2179,11 +3082,14 @@ describe("sales workbench API client", () => {
   });
 
   it("publishes strict travel-expense response contracts with integer-cent amounts", () => {
-    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-08-07");
+    assert.equal(SALES_WORKBENCH_API_CONTRACT_VERSION, "2026-09-06");
     assertApiEntity("travelExpensePayment", sampleTravelExpensePayment());
     assertApiEntity("travelExpenseAttachment", sampleTravelExpenseAttachment());
     assertApiEntity("travelExpense", sampleTravelExpense());
     assertApiEntity("travelExpenseAdvance", sampleTravelExpenseAdvance());
+    assertApiEntity("shortcutBookkeepingLedgerReceipt", sampleShortcutBookkeepingLedgerReceipt());
+    assertApiEntity("shortcutBookkeepingReview", sampleShortcutBookkeepingReview());
+    assertApiEntity("travelExpenseWorkbench", sampleTravelExpenseWorkbench());
 
     assert.throws(
       () => assertApiEntity("travelExpensePayment", sampleTravelExpensePayment({ amountCents: 68.5 })),
@@ -2196,6 +3102,13 @@ describe("sales workbench API client", () => {
     assert.throws(
       () => assertApiEntity("travelExpense", sampleTravelExpense({ referenceCode: undefined })),
       /referenceCode: expected string/,
+    );
+    assert.throws(
+      () => assertApiEntity(
+        "shortcutBookkeepingLedgerReceipt",
+        sampleShortcutBookkeepingLedgerReceipt({ amountCents: 68.5 }),
+      ),
+      /amountCents: expected nonNegativeInteger/,
     );
   });
 
@@ -2328,6 +3241,91 @@ describe("sales workbench API client", () => {
     assert.deepEqual(calls[4].body, {});
   });
 
+  it("loads one strict owner-scoped ledger workbench projection for the selected natural week", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        return jsonResponse({ item: sampleTravelExpenseWorkbench() });
+      },
+    });
+    const controller = new AbortController();
+    const workbench = await api.getTravelExpenseWorkbench({
+      weekStart: "2026-08-03",
+      signal: controller.signal,
+    });
+
+    assert.equal(workbench.weekStart, "2026-08-03");
+    assert.equal(workbench.expenses[0].referenceCode, "EXP-20260804-ABC12345");
+    assert.equal(workbench.advances[0].receivedCents, 180000);
+    assert.equal(workbench.bookkeepingReviews[0].ledgerReceipt, null);
+    assert.equal(calls[0].url, "https://example.test/api/travel-expense-workbench?weekStart=2026-08-03");
+    assert.equal(calls[0].options.signal, controller.signal);
+
+    const invalidApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        item: sampleTravelExpenseWorkbench({
+          bookkeepingReviews: [sampleShortcutBookkeepingReview({
+            status: "accepted",
+            ledgerReceipt: sampleShortcutBookkeepingLedgerReceipt({ attachmentStatus: "unknown" }),
+          })],
+        }),
+      }),
+    });
+    await assert.rejects(
+      () => invalidApi.getTravelExpenseWorkbench({ weekStart: "2026-08-03" }),
+      /attachmentStatus: expected matched, pending, or not_available/,
+    );
+  });
+
+  it("loads and saves the owner-scoped weekly region profile with first-write optimistic locking", async () => {
+    const calls = [];
+    const empty = sampleTravelExpenseWorkbench().regionProfile;
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({
+          url,
+          method: options.method ?? "GET",
+          ifMatch: headerValue(options, "If-Match"),
+          csrf: headerValue(options, "X-CSRF-Token"),
+          body: options.body ? JSON.parse(options.body) : null,
+        });
+        return jsonResponse({
+          item: options.method === "PUT"
+            ? { ...empty, version: 1, cities: ["济宁"], defaultCity: "济宁", updatedAt: "2026-08-04T12:34:00.000Z" }
+            : empty,
+        });
+      },
+    });
+    api.setSession({ csrfToken: "csrf-test" });
+
+    const loaded = await api.getTravelExpenseRegionProfile({ weekStart: "2026-08-03" });
+    const saved = await api.saveTravelExpenseRegionProfile({
+      version: loaded.version,
+      weekStart: loaded.weekStart,
+      cities: ["济宁"],
+      defaultCity: "济宁",
+      dateOverrides: [],
+      owner: "must-not-be-sent",
+    });
+
+    assert.equal(loaded.version, 0);
+    assert.equal(saved.version, 1);
+    assert.equal(calls[0].url, "https://example.test/api/travel-expense-region-profile?weekStart=2026-08-03");
+    assert.equal(calls[1].method, "PUT");
+    assert.equal(calls[1].ifMatch, '"0"');
+    assert.equal(calls[1].csrf, "csrf-test");
+    assert.deepEqual(calls[1].body, {
+      weekStart: "2026-08-03",
+      cities: ["济宁"],
+      defaultCity: "济宁",
+      dateOverrides: [],
+    });
+  });
+
   it("adds and deletes expense attachments and builds an authenticated encoded content URL", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
@@ -2393,7 +3391,7 @@ describe("sales workbench API client", () => {
     ]);
   });
 
-  it("loads protected travel-expense attachment PDF content with Cookie credentials", async () => {
+  it("loads protected travel-expense attachment PDF or image content with Cookie credentials", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
       baseUrl: "https://example.test",
@@ -2414,9 +3412,12 @@ describe("sales workbench API client", () => {
     assert.equal(calls[0].options.method, "GET");
     assert.equal(calls[0].options.credentials, "include");
     assert.equal(calls[0].options.redirect, "error");
-    assert.equal(headerValue(calls[0].options, "Accept"), "application/pdf");
+    assert.equal(headerValue(calls[0].options, "Accept"), "application/pdf,image/*");
     assert.equal(headerValue(calls[0].options, "Content-Type"), undefined);
     assert.equal(headerValue(calls[0].options, "X-CSRF-Token"), undefined);
+
+    await api.getInvoiceContentResponse("invoice-image-1", { accept: "application/pdf,image/*" });
+    assert.equal(headerValue(calls[1].options, "Accept"), "application/pdf,image/*");
   });
 
   it("lists, reads, confirms, and rejects the protected payment-proof review inbox", async () => {
@@ -2691,7 +3692,7 @@ describe("sales workbench API client", () => {
         if (url.includes("/api/travel-expense-no-invoice-confirmations?")) return jsonResponse({ items: [sampleNoInvoiceConfirmation()] });
         if (url.endsWith("/api/travel-expenses/expense-1/no-invoice") && options.method === "POST") return jsonResponse({ item: sampleNoInvoiceConfirmation() }, 201);
         if (url.endsWith("/api/travel-expenses/expense-1/no-invoice") && options.method === "DELETE") return jsonResponse({ item: sampleNoInvoiceConfirmation({ version: 2, revokedAt: "2026-08-05T02:00:00.000Z" }) });
-        if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-coverage")) return jsonResponse({ item: { weekStart: "2026-08-03", reimbursementCents: 10000, confirmedCoverageCents: 0, noInvoiceConfirmedCents: 6800, missingInvoiceCents: 10000 } });
+        if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-coverage")) return jsonResponse({ item: { weekStart: "2026-08-03", reimbursementCents: 10000, confirmedCoverageCents: 0, electronicInvoiceCoverageCents: 0, substituteInvoiceCoverageCents: 0, noInvoiceConfirmedCents: 6800, missingInvoiceCents: 10000, invoiceWarehouseAvailableCents: 24000 } });
         if (url.includes("/api/travel-expense-weeks/2026-08-03/invoice-suggestions?")) return jsonResponse({ items: [sampleInvoiceCandidate()] });
         if (url.endsWith("/api/travel-expense-weeks/2026-08-03/invoice-suggestions")) return jsonResponse({ items: [sampleInvoiceCandidate()] }, 201);
         if (url.endsWith("/api/invoice-match-candidates/candidate-1/accept")) return jsonResponse({ item: sampleInvoiceCandidate({ status: "accepted" }) });
@@ -2728,6 +3729,7 @@ describe("sales workbench API client", () => {
     assert.equal(confirmedNoInvoice.expenseId, "expense-1");
     assert.ok(revokedNoInvoice.revokedAt);
     assert.equal(coverage.missingInvoiceCents, 10000);
+    assert.equal(coverage.invoiceWarehouseAvailableCents, 24000);
     assert.equal(candidates[0].status, "suggested");
     assert.equal(generated.length, 1);
     assert.equal(accepted.status, "accepted");
@@ -2891,10 +3893,11 @@ describe("sales workbench API client", () => {
       baseUrl: "https://example.test",
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
-        if (url.includes("/api/hospital-tenders?") || url.endsWith("/api/hospital-tenders")) return jsonResponse({ items: [notice] });
-        if (url.endsWith("/api/hospital-tenders/summary")) return jsonResponse({ item: { totalNotices: 1, matchedNotices: 1, byNoticeType: { tender: 1 }, byRelevance: { high: 1 }, latestRun: null } });
+        if (url.includes("/api/hospital-tenders?") || url.endsWith("/api/hospital-tenders")) return jsonResponse({ items: [notice], total: 1, limit: 100, offset: 0, hasMore: false });
+        if (url.endsWith("/api/hospital-tenders/summary")) return jsonResponse({ item: { totalNotices: 1, matchedNotices: 1, highRelevanceCount: 1, deadlineSoonCount: 0, todayNewCount: 0, byNoticeType: { tender: 1 }, byRelevance: { high: 1 }, latestRun: null } });
         if (url.endsWith("/api/hospital-tenders/sources")) return jsonResponse({ items: [source] });
         if (url.endsWith("/api/hospital-tenders/health")) return jsonResponse({ item: { status: "healthy", sourceCount: 1, staleCount: 0, latestRun: null } });
+        if (url.endsWith("/api/hospital-tenders/scheduler") && options.method === "PATCH") return jsonResponse({ item: { enabled: false, intervalMinutes: 60, batchSize: 10, lastStatus: "waiting" }, runs: [] });
         if (url.endsWith("/api/hospital-tenders/scheduler")) return jsonResponse({ item: { enabled: true, intervalMinutes: 60, batchSize: 10, lastStatus: "waiting" }, runs: [] });
         if (url.endsWith("/api/hospital-tenders/scheduler/run-next")) return jsonResponse({ item: { status: "success", state: { lastStatus: "success" } } });
         if (url.endsWith("/api/hospital-tenders/run")) return jsonResponse({ item: { acceptedCount: 1, rejectedCount: 0 } });
@@ -2904,22 +3907,194 @@ describe("sales workbench API client", () => {
     api.setSession({ csrfToken: "fixture-csrf-token" });
 
     const notices = await api.listHospitalTenders({ customerId: "rizhao" });
+    const noticePage = await api.listHospitalTenderPage({ customerId: "rizhao", limit: 100 });
     const summary = await api.getHospitalTenderSummary();
     const sources = await api.listHospitalTenderSources();
     const health = await api.getHospitalTenderHealth();
     const run = await api.runHospitalTenderMonitor();
     const scheduler = await api.getHospitalTenderScheduler();
+    const schedulerUpdate = await api.updateHospitalTenderScheduler({ enabled: false });
     const schedulerRun = await api.runHospitalTenderScheduler();
     assert.equal(notices[0].matchedCustomerIds[0], "rizhao");
+    assert.equal(noticePage.total, 1);
+    assert.equal(noticePage.hasMore, false);
+    assert.equal(noticePage.items[0].id, notice.id);
+    assert.match(calls.find((call) => call.url.includes("limit=100"))?.url ?? "", /customerId=rizhao/);
     assert.equal(summary.totalNotices, 1);
     assert.equal(sources[0].status, "healthy");
     assert.equal(health.staleCount, 0);
     assert.equal(run.acceptedCount, 1);
     assert.equal(scheduler.item.batchSize, 10);
+    assert.equal(schedulerUpdate.item.enabled, false);
+    const schedulerUpdateCall = calls.find((call) => call.url.endsWith("/api/hospital-tenders/scheduler") && call.options.method === "PATCH");
+    assert.deepEqual(JSON.parse(schedulerUpdateCall.options.body), { enabled: false });
+    assert.equal(schedulerUpdateCall.options.headers["X-CSRF-Token"], "fixture-csrf-token");
     assert.equal(schedulerRun.status, "success");
     assert.match(calls[0].url, /customerId=rizhao/);
     assert.equal(calls.at(-1).options.method, "POST");
     assert.equal(calls.at(-1).options.headers["X-CSRF-Token"], "fixture-csrf-token");
+  });
+
+  it("previews, explicitly confirms, and explicitly cancels a hospital tender lead conversion", async () => {
+    const digest = "a".repeat(64);
+    const preview = {
+      status: "preview",
+      requiresHumanConfirmation: true,
+      notice: { id: "notice-1", title: "医院信息化采购" },
+      customer: { id: "customer-1", version: 2, name: "示例医院" },
+      conversionIdentity: "conversion-1",
+      noticeSnapshotDigest: "b".repeat(64),
+      match: { score: 85, reasons: ["hospital_name"], needs: ["PACS"] },
+      drafts: {
+        opportunity: { id: "opportunity-1", name: "招标线索：医院信息化采购", stage: "线索", next: "核验公告" },
+        actionItem: { id: "action-1", title: "跟进招标：医院信息化采购", priority: "高", due: "2026-09-10" },
+      },
+      diff: {
+        opportunity: { before: null, after: { id: "opportunity-1" } },
+        actionItem: { before: null, after: { id: "action-1" } },
+      },
+      previewDigest: digest,
+    };
+    const confirmation = {
+      status: "confirmed",
+      requiresHumanConfirmation: false,
+      replayed: false,
+      noticeId: "notice-1",
+      customerId: "customer-1",
+      conversionIdentity: "conversion-1",
+      noticeSnapshotDigest: "b".repeat(64),
+      previewDigest: digest,
+      opportunity: { id: "opportunity-1" },
+      actionItem: { id: "action-1" },
+    };
+    const cancellation = {
+      status: "cancelled",
+      requiresHumanConfirmation: false,
+      noticeId: "notice-1",
+      customerId: "customer-1",
+      conversionIdentity: "conversion-1",
+      noticeSnapshotDigest: "b".repeat(64),
+      previewDigest: digest,
+    };
+    const calls = [];
+    const controller = new AbortController();
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.endsWith("/lead-conversion/preview")) return jsonResponse({ item: preview });
+        if (url.endsWith("/lead-conversion/confirm")) return jsonResponse({ item: confirmation });
+        if (url.endsWith("/lead-conversion/cancel")) return jsonResponse({ item: cancellation });
+        return jsonResponse({ error: { code: "NOT_FOUND", message: "missing" } }, 404);
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+
+    const previewResult = await api.previewHospitalTenderLeadConversion("notice / 1", { customerId: "customer-1" }, { signal: controller.signal });
+    const confirmationResult = await api.confirmHospitalTenderLeadConversion("notice / 1", { customerId: "customer-1", previewDigest: digest }, { signal: controller.signal });
+    const cancellationResult = await api.cancelHospitalTenderLeadConversion("notice / 1", { customerId: "customer-1", previewDigest: digest }, { signal: controller.signal });
+
+    assert.equal(previewResult.status, "preview");
+    assert.equal(confirmationResult.status, "confirmed");
+    assert.equal(cancellationResult.status, "cancelled");
+    assert.equal(calls.length, 3);
+    assert.ok(calls.every((call) => call.options.method === "POST"));
+    assert.ok(calls.every((call) => call.options.signal === controller.signal));
+    assert.ok(calls.every((call) => call.options.headers["X-CSRF-Token"] === "fixture-csrf-token"));
+    assert.ok(calls.every((call) => call.url.includes("/api/hospital-tenders/notice%20%2F%201/lead-conversion/")));
+    assert.deepEqual(JSON.parse(calls[0].options.body), { customerId: "customer-1" });
+    assert.deepEqual(JSON.parse(calls[1].options.body), { customerId: "customer-1", previewDigest: digest, confirmed: true });
+    assert.deepEqual(JSON.parse(calls[2].options.body), { customerId: "customer-1", previewDigest: digest, cancel: true });
+  });
+
+  it("keeps the Xiaoxiao WeChat review API read-only and reports client events", async () => {
+    const calls = [];
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async (url, options = {}) => {
+        calls.push({ url, options });
+        if (url.includes("/api/audit-logs")) {
+          return jsonResponse({ items: [{ id: "audit-1", action: "travel_expense.create" }] });
+        }
+        if (url.includes("/api/bookkeeping/client-events")) {
+          return jsonResponse({ recorded: true }, 201);
+        }
+        if (url.includes("/api/integrations/weixin/bookkeeping/review?")) {
+          return jsonResponse({ items: [sampleShortcutBookkeepingReview()] });
+        }
+        return jsonResponse({ item: sampleShortcutBookkeepingReview() });
+      },
+    });
+    api.setSession({ csrfToken: "fixture-csrf-token" });
+    const items = await api.listWeixinBookkeepingReviews({ status: "review_required" });
+    const item = await api.getWeixinBookkeepingReview("entry-1");
+    assert.equal(items[0].id, "entry-1");
+    assert.equal(item.id, "entry-1");
+    assert.equal(api.confirmWeixinBookkeepingReview, undefined);
+    assert.equal(api.rejectWeixinBookkeepingReview, undefined);
+    assert.equal(api.retryWeixinBookkeepingReview, undefined);
+
+    const logs = await api.listBookkeepingAuditLogs({ limit: 50 });
+    assert.equal(logs[0].id, "audit-1");
+    assert.match(calls.at(-1).url, /\/api\/audit-logs\?scope=bookkeeping&limit=50/u);
+
+    await api.recordBookkeepingClientEvent("print_expense_list", { weekStart: "2026-08-24", itemCount: 6 });
+    const eventCall = calls.at(-1);
+    assert.match(eventCall.url, /\/api\/bookkeeping\/client-events/u);
+    assert.equal(eventCall.options.method, "POST");
+    assert.equal(eventCall.options.headers["X-CSRF-Token"], "fixture-csrf-token");
+    assert.deepEqual(JSON.parse(eventCall.options.body), {
+      event: "print_expense_list",
+      weekStart: "2026-08-24",
+      itemCount: 6,
+    });
+  });
+
+  it("enforces formal ledger receipts only for accepted Xiaoxiao expense reviews", async () => {
+    const acceptedIncome = sampleShortcutBookkeepingReview({
+      id: "income-entry-1",
+      status: "accepted",
+      entryType: "income",
+      category: "借款到账",
+      subcategory: null,
+      expenseId: null,
+      paymentId: null,
+      expenseReferenceCode: null,
+      ledgerReceipt: null,
+    });
+    const acceptedIncomeApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({ item: acceptedIncome }),
+    });
+    const loadedIncome = await acceptedIncomeApi.getWeixinBookkeepingReview("income-entry-1");
+    assert.equal(loadedIncome.status, "accepted");
+    assert.equal(loadedIncome.entryType, "income");
+    assert.equal(loadedIncome.ledgerReceipt, null);
+
+    const acceptedExpenseWithoutReceiptApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        item: sampleShortcutBookkeepingReview({ status: "accepted", ledgerReceipt: null }),
+      }),
+    });
+    await assert.rejects(
+      () => acceptedExpenseWithoutReceiptApi.getWeixinBookkeepingReview("entry-1"),
+      /ledgerReceipt: expected object/u,
+    );
+
+    const unacceptedWithReceiptApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        item: sampleShortcutBookkeepingReview({
+          status: "review_required",
+          ledgerReceipt: sampleShortcutBookkeepingLedgerReceipt(),
+        }),
+      }),
+    });
+    await assert.rejects(
+      () => unacceptedWithReceiptApi.getWeixinBookkeepingReview("entry-1"),
+      /only accepted expense records may expose a formal ledger receipt/u,
+    );
   });
 
   it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {
@@ -2929,10 +4104,7 @@ describe("sales workbench API client", () => {
       fetchImpl: async (url, options = {}) => {
         calls.push({ url, options });
         if (url.endsWith("/api/settings/security")) {
-          return jsonResponse({ item: { icost: { configured: false }, deepseek: { configured: false } } });
-        }
-        if (url.endsWith("/api/settings/icost-token/rotate")) {
-          return jsonResponse({ item: { token: syntheticToken, masked: "icos••••once", status: "active" } });
+          return jsonResponse({ item: { deepseek: { configured: false } } });
         }
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "PUT") {
           return jsonResponse({ item: { configured: true, masked: "synt••••test", status: "active" } });
@@ -2940,95 +4112,33 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "DELETE") {
           return jsonResponse({ item: { configured: false, masked: null, status: "cleared" } });
         }
+        if (url.endsWith("/api/settings/pushplus-token") && options.method === "PUT") {
+          return jsonResponse({ item: { configured: true, masked: "push••••test", status: "active", source: "settings" } });
+        }
+        if (url.endsWith("/api/settings/pushplus-token") && options.method === "DELETE") {
+          return jsonResponse({ item: { configured: false, masked: null, status: "cleared", source: "settings" } });
+        }
+        if (url.endsWith("/api/settings/pushplus/test")) {
+          return jsonResponse({ item: { status: "sent", notificationCount: 1, testedAt: "2026-08-20T00:00:00.000Z" } });
+        }
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
     api.setSession({ csrfToken: "fixture-csrf-token" });
 
-    assert.equal((await api.getSecuritySettings()).icost.configured, false);
-    assert.equal((await api.rotateIcostToken()).token, syntheticToken);
+    assert.equal((await api.getSecuritySettings()).deepseek.configured, false);
     await api.saveDeepSeekApiKey(syntheticKey);
     await api.clearDeepSeekApiKey();
-
-    assert.equal(calls[1].options.method, "POST");
+    await api.savePushplusToken(syntheticToken);
+    await api.testPushplusToken();
+    await api.clearPushplusToken();
+    assert.equal(calls.length, 6);
+    assert.equal(calls[1].options.body, JSON.stringify({ apiKey: syntheticKey }));
     assert.equal(calls[1].options.headers["X-CSRF-Token"], "fixture-csrf-token");
-    assert.equal(calls[2].options.body, JSON.stringify({ apiKey: syntheticKey }));
-    assert.equal(calls[3].options.body, JSON.stringify({ confirmation: "CLEAR" }));
-  });
-
-  it("manages Shortcut tokens with cookie credentials and never treats the list as a secret source", async () => {
-    const calls = [];
-    const api = createSalesWorkbenchApi({
-      baseUrl: "http://127.0.0.1:8787",
-      fetchImpl: async (url, options = {}) => {
-        calls.push({ url, options });
-        if (options.method === "POST") {
-          return jsonResponse({
-            item: {
-              id: "token-1",
-              label: "iPhone 截图记账",
-              account: "jiangjz",
-              token: "test-token",
-              tokenPrefix: "AAAAAAAA",
-              createdAt: "2026-08-16T12:00:00.000Z",
-              lastUsedAt: null,
-              revokedAt: null,
-            },
-          }, 201);
-        }
-        if (options.method === "DELETE") {
-          return jsonResponse({ item: { id: "token-1", revokedAt: "2026-08-16T12:01:00.000Z" } });
-        }
-        return jsonResponse({
-          items: [{
-            id: "token-1",
-            label: "iPhone 截图记账",
-            account: "jiangjz",
-            tokenPrefix: "AAAAAAAA",
-            createdAt: "2026-08-16T12:00:00.000Z",
-            lastUsedAt: null,
-            revokedAt: null,
-          }],
-        });
-      },
-    });
-    api.setSession({ csrfToken: "fixture-csrf-token" });
-
-    const created = await api.createShortcutToken({ label: "iPhone 截图记账" });
-    const listed = await api.listShortcutTokens();
-    const revoked = await api.revokeShortcutToken("token-1");
-
-    assert.equal(created.token, "test-token");
-    assert.equal(listed[0].token, undefined);
-    assert.equal(revoked.revokedAt, "2026-08-16T12:01:00.000Z");
-    assert.deepEqual(calls.map(({ url, options }) => ({
-      url,
-      method: options.method ?? "GET",
-      csrf: headerValue(options, "X-CSRF-Token"),
-      credentials: options.credentials,
-      body: options.body ? JSON.parse(options.body) : undefined,
-    })), [
-      {
-        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens",
-        method: "POST",
-        csrf: "fixture-csrf-token",
-        credentials: "include",
-        body: { label: "iPhone 截图记账" },
-      },
-      {
-        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens",
-        method: "GET",
-        csrf: undefined,
-        credentials: "include",
-        body: undefined,
-      },
-      {
-        url: "http://127.0.0.1:8787/api/integrations/shortcut/tokens/token-1",
-        method: "DELETE",
-        csrf: "fixture-csrf-token",
-        credentials: "include",
-        body: undefined,
-      },
-    ]);
+    assert.equal(calls[2].options.body, JSON.stringify({ confirmation: "CLEAR" }));
+    assert.equal(calls[3].options.body, JSON.stringify({ token: syntheticToken }));
+    assert.equal(calls[4].options.method, "POST");
+    assert.equal(calls[4].options.headers["X-CSRF-Token"], "fixture-csrf-token");
+    assert.equal(calls[5].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
 });

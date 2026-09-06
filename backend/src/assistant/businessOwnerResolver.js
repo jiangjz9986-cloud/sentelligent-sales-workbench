@@ -12,17 +12,20 @@ function normalizeOwner(value) {
 }
 
 /**
- * Resolve the authenticated WeChat machine identity to the business owner
- * stored on sales records. The mapping is deliberately exact and closed:
- * missing configuration or an unexpected account never falls back to a
+ * Resolve an account to the business owner stored on sales records. The
+ * mapping is deliberately exact and closed (v0.9.3: backed by the live
+ * weixin_bindings table instead of a configured single owner): an account
+ * without an active binding resolves to null and never falls back to a
  * global/all-owner query.
  */
-export function createBusinessOwnerResolver({ businessOwner = "" } = {}) {
-  const configuredOwner = normalizeOwner(businessOwner);
+export function createBusinessOwnerResolver({ hasActiveBinding } = {}) {
+  if (typeof hasActiveBinding !== "function") {
+    throw new TypeError("hasActiveBinding must be a function");
+  }
   return (account) => {
     const normalizedAccount = normalizeOwner(account);
-    if (!configuredOwner || !normalizedAccount || normalizedAccount !== configuredOwner) return null;
-    return configuredOwner;
+    if (!normalizedAccount || hasActiveBinding(normalizedAccount) !== true) return null;
+    return normalizedAccount;
   };
 }
 

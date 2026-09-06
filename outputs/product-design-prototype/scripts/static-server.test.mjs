@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  cacheControlFor,
   contentTypeFor,
   createStaticServerConfig,
   injectRuntimeConfig,
@@ -57,6 +58,7 @@ describe("production static server", () => {
     assert.equal(contentTypeFor("app.js"), "text/javascript; charset=utf-8");
     assert.equal(contentTypeFor("style.css"), "text/css; charset=utf-8");
     assert.equal(contentTypeFor("logo.png"), "image/png");
+    assert.equal(contentTypeFor("manifest.webmanifest"), "application/manifest+json; charset=utf-8");
   });
 
   it("injects the browser runtime API base into the production index", () => {
@@ -82,5 +84,11 @@ describe("production static server", () => {
     assert.equal(headers["X-Content-Type-Options"], "nosniff");
     assert.equal(headers["X-Frame-Options"], "DENY");
     assert.match(headers["Permissions-Policy"], /microphone=\(self\)/);
+  });
+
+  it("serves service worker assets with no-cache headers", () => {
+    assert.equal(cacheControlFor("/var/www/dist/sw.js"), "no-cache");
+    assert.equal(cacheControlFor("/var/www/dist/index.html"), "no-cache");
+    assert.equal(cacheControlFor("/var/www/dist/assets/index-abc.js"), "public, max-age=31536000, immutable");
   });
 });

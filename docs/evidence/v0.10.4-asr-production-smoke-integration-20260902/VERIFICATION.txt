@@ -1,0 +1,143 @@
+Sentelligent Sales Workbench v0.10.4 - ASR production smoke integration verification
+Date: 2026-09-02
+
+TARGET / BRANCH / CHANGED FIELD
+===============================
+TARGET=ASR production smoke runner and complete-history secret gate
+BRANCH=codex/asr-production-smoke-db69033-final
+CHANGED_FIELD=explicit production origin input; stdin-only credentials; sanitized exclusive report; fail-closed 0700 runtime check; manual acceptance pending; exact git-history-only tender fixture digest binding
+BASE_SHA=a8f79dd0a4f97a6a6782f7757f98591c3664983d
+BASE_TREE=ec832e83d7fc2c2b0467c2f7f41cad21688d8070
+ASR_COMMIT=f8d1492b25213683150a9929b347ee8a71cd808a
+SCANNER_COMMIT=7aaa6ffe4657b360c46dc0dc86c0f37c1b7dd96e
+
+FINAL ARTIFACT PATHS (FOUR)
+===========================
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/MODIFIED_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/DIFF_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/VERIFICATION.txt
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/ROLLBACK.sh
+
+MODIFIED CONTRACT RESULT
+========================
+- package.json exposes smoke:production:asr without embedding a target or credential.
+- The origin is supplied explicitly by --origin or SENT_ZX_ASR_SMOKE_ORIGIN/ASR_SMOKE_ORIGIN, then accepted only as an exact bare HTTPS origin. No production URL is embedded in the ASR runner source.
+- Password input is strict JSON on stdin. Credential command-line arguments are rejected. Report fields exclude credentials, audio, transcript, fixture reference, and paths.
+- Report creation is exclusive, atomic, mode 0600, and refuses replacement.
+- Runtime inspection requires an inspected, empty mode-0700 directory and zero runtime gauges; missing, unreadable, unsafe, non-empty, and unsafe-entry states fail closed.
+- Every browser, desktop, and iPhone acceptance item stays pending; automated mock success cannot set releaseReady true.
+- Historical fixture suppression is restricted to source=git-history plus exact test path, assignment name, and SHA-256 digest. Negative tests prove source, path, assignment, or digest changes are rejected. The working tree still requires scanner-safe fixture labels.
+
+BASELINE
+========
+Input: independent no-hardlink clone /tmp/asr-prod-smoke-baseline-20260902.MskZZm checked out at BASE_SHA.
+Exact command:
+  git clone --no-hardlinks --quiet /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final /tmp/asr-prod-smoke-baseline-20260902.MskZZm
+  git -C /tmp/asr-prod-smoke-baseline-20260902.MskZZm checkout --quiet a8f79dd0a4f97a6a6782f7757f98591c3664983d
+  (cd /tmp/asr-prod-smoke-baseline-20260902.MskZZm && node --test scripts/package-scripts.test.mjs scripts/project-secret-scan.test.mjs)
+Literal output/result:
+  tests 37
+  suites 2
+  pass 37
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  duration_ms 5184.102583
+  BASELINE_DIRECT_EXIT=0
+Exit status: 0.
+Baseline behavior/status: package and scanner suites passed 37/37; the ASR production smoke command and runner/test paths were absent at BASE_SHA, and the exact historical digest binding was absent.
+
+MODIFIED
+========
+Input: independent no-hardlink clone /tmp/asr-prod-smoke-modified-20260902.Ylx3wC checked out at BASE_SHA, with DIFF_FILE applied.
+Exact command:
+  git -C /tmp/asr-prod-smoke-modified-20260902.Ylx3wC apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/DIFF_FILE
+  git -C /tmp/asr-prod-smoke-modified-20260902.Ylx3wC apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/DIFF_FILE
+  (cd /tmp/asr-prod-smoke-modified-20260902.Ylx3wC && node --check scripts/asr-production-smoke.mjs && node --test scripts/asr-production-smoke.test.mjs scripts/package-scripts.test.mjs scripts/project-secret-scan.test.mjs)
+  (cd /tmp/asr-prod-smoke-modified-20260902.Ylx3wC && node --input-type=module -e 'const {scanProjectSecrets}=await import("./scripts/project-secret-scan.mjs"); const r=scanProjectSecrets({root:process.cwd(),includeGitHistory:true}); console.log(JSON.stringify({status:r.status,scannedFiles:r.scannedFiles,scannedGitObjects:r.scannedGitObjects,scannedGitMessages:r.scannedGitMessages,gitHistoryComplete:r.gitHistoryComplete,findingCount:r.findings.length})); if(r.status!=="passed")process.exitCode=1;')
+Literal output/result:
+  APPLY_CHECK_EXIT=0
+  APPLY_EXIT=0
+  NODE_CHECK_EXIT=0
+  tests 55
+  suites 5
+  pass 55
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  duration_ms 5188.96225
+  {"status":"passed","scannedFiles":821,"scannedGitObjects":3677,"scannedGitMessages":673,"gitHistoryComplete":true,"findingCount":0}
+  MODIFIED_FULL_HISTORY_SCAN_EXIT=0
+Exit status: 0.
+Modified behavior/status: the exact patch reconstructed the guarded runner and history-only digest binding. Mock quality covered 12 fixtures; performance covered 20/20 attempts; cancellation covered 10/10; boundary rejection made zero provider calls; reports remained sanitized; manual acceptance remained pending; releaseReady remained false; complete Git history returned zero findings.
+
+ROLLBACK
+========
+Input: independent no-hardlink clone /tmp/asr-prod-smoke-rollback-20260902.Ru4iGT checked out at BASE_SHA, with DIFF_FILE applied; ROLLBACK.sh was then executed against that modified copy.
+Exact command:
+  git -C /tmp/asr-prod-smoke-rollback-20260902.Ru4iGT apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/DIFF_FILE
+  /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/asr-production-smoke-db69033-final/docs/evidence/v0.10.4-asr-production-smoke-integration-20260902/ROLLBACK.sh /tmp/asr-prod-smoke-rollback-20260902.Ru4iGT
+  (cd /tmp/asr-prod-smoke-rollback-20260902.Ru4iGT && node --test scripts/package-scripts.test.mjs scripts/project-secret-scan.test.mjs)
+  git -C /tmp/asr-prod-smoke-rollback-20260902.Ru4iGT status --short
+  git -C /tmp/asr-prod-smoke-rollback-20260902.Ru4iGT diff --no-ext-diff --exit-code a8f79dd0a4f97a6a6782f7757f98591c3664983d -- package.json scripts/package-scripts.test.mjs scripts/asr-production-smoke.mjs scripts/asr-production-smoke.test.mjs backend/tests/hospital-tender-lead-conversion-api.integration.test.js scripts/project-secret-scan.mjs scripts/project-secret-scan.test.mjs
+Literal output/result:
+  ROLLBACK_PATH=package.json RESULT=RESTORED
+  ROLLBACK_PATH=scripts/package-scripts.test.mjs RESULT=RESTORED
+  ROLLBACK_PATH=scripts/asr-production-smoke.mjs RESULT=RESTORED
+  ROLLBACK_PATH=scripts/asr-production-smoke.test.mjs RESULT=RESTORED
+  ROLLBACK_PATH=backend/tests/hospital-tender-lead-conversion-api.integration.test.js RESULT=RESTORED
+  ROLLBACK_PATH=scripts/project-secret-scan.mjs RESULT=RESTORED
+  ROLLBACK_PATH=scripts/project-secret-scan.test.mjs RESULT=RESTORED
+  ROLLBACK_RESULT=RESTORED BASE_SHA=a8f79dd0a4f97a6a6782f7757f98591c3664983d BASE_TREE=ec832e83d7fc2c2b0467c2f7f41cad21688d8070 PATHS=7
+  tests 37
+  suites 2
+  pass 37
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  duration_ms 5257.633625
+  ROLLBACK_GIT_STATUS= (empty)
+  ROLLBACK_DIFF_EXIT=0
+Exit status: 0.
+Restored behavior/status: all seven changed paths matched BASE_SHA exactly, the new ASR files were absent as at baseline, the worktree was clean, and baseline package/scanner behavior passed 37/37.
+
+ADDITIONAL GATES ON INTEGRATION BRANCH
+======================================
+Exact command:
+  node --check scripts/asr-production-smoke.mjs && node --test scripts/asr-production-smoke.test.mjs scripts/package-scripts.test.mjs
+Literal result: tests 23; suites 4; pass 23; fail 0; cancelled 0; skipped 0; todo 0; exit 0.
+
+Exact command:
+  (cd backend && node --test tests/asr-config.test.js tests/asr-http-integration.test.js tests/asr-http-unit.test.js tests/asr-metrics.test.js tests/asr-provider.test.js tests/asr-service.test.js tests/asr-validation.test.js tests/production-smoke-cleanup.test.js)
+Literal result: tests 299; suites 28; pass 299; fail 0; cancelled 0; skipped 0; todo 0; duration_ms 7922.913625; exit 0.
+
+Exact command:
+  node --test outputs/product-design-prototype/scripts/asr-capture.test.mjs
+Literal result: tests 16; suites 1; pass 16; fail 0; cancelled 0; skipped 0; todo 0; duration_ms 5035.574417; exit 0.
+
+Exact command:
+  npm --prefix outputs/product-design-prototype run build
+Literal result: Vite transformed 1853 modules and built successfully; exit 0. The pre-existing PWA theme_color warning remained non-fatal.
+
+Exact command:
+  (cd backend && npm test)
+Literal result: tests 1838; suites 204; pass 1838; fail 0; cancelled 0; skipped 0; todo 0; duration_ms 29227.987792; exit 0.
+
+Exact command:
+  node --test scripts/*.test.mjs
+Literal result: tests 284; suites 24; pass 282; fail 0; cancelled 0; skipped 2; todo 0; duration_ms 86318.025708; exit 0.
+
+Exact command:
+  npm run test:deploy
+Literal result: full history status passed; scannedFiles 821; scannedGitObjects 3696; scannedGitMessages 689; gitHistoryComplete true; findings empty; tests 284; suites 24; pass 282; fail 0; cancelled 0; skipped 2; todo 0; duration_ms 92793.291334; exit 0.
+
+Exact command after creating and reopening all four artifacts:
+  node --input-type=module -e 'const {scanProjectSecrets}=await import("./scripts/project-secret-scan.mjs"); const r=scanProjectSecrets({root:process.cwd(),includeGitHistory:true}); console.log(JSON.stringify({status:r.status,scannedFiles:r.scannedFiles,scannedGitObjects:r.scannedGitObjects,scannedGitMessages:r.scannedGitMessages,gitHistoryComplete:r.gitHistoryComplete,findingCount:r.findings.length})); if(r.status!=="passed")process.exitCode=1;'
+Literal result: {"status":"passed","scannedFiles":823,"scannedGitObjects":3696,"scannedGitMessages":693,"gitHistoryComplete":true,"findingCount":0}; exit 0.
+
+PRODUCTION SCOPE
+================
+No production URL request, provider run, deployment, service restart, database write, push, tag, or release was performed. Automated runner checks use controlled local mocks. Real provider quality/performance and desktop/iPhone acceptance remain pending by design, and releaseReady remains false.

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
+import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 
 let baseUrl;
@@ -36,8 +37,10 @@ beforeEach(async () => {
     seed: true,
     nodeEnv: "development",
     authRequired: true,
+    // v0.9.1 起调度器写端点要求 active admin：改用 scrypt 哈希让启动兜底种子
+    // 建出 users 行（明文兼容轨不建行，会落在 member 回退语义上）。
     authAccount: "owner",
-    authPassword: "password",
+    authPasswordHash: await hashPassword("password", { salt: Buffer.alloc(16, 11) }),
     ["authSession" + "Secret"]: "test-session-secret-0123456789012345",
     hospitalTenderAutoRun: false,
     ["hospitalTender" + "SyncToken"]: machineCredential,

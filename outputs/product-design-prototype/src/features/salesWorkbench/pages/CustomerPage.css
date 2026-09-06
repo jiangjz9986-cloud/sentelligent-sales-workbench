@@ -1,0 +1,113 @@
+.customer-record-meta {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.customer-record-meta-item {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 11px 12px;
+  border: 1px solid rgba(16, 24, 40, 0.08);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.customer-record-meta-item > span,
+.customer-imported-field > span {
+  min-width: 0;
+  color: #66738e;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.customer-record-meta-item strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.customer-record-meta-sync strong {
+  color: var(--blue-deep);
+}
+
+.customer-sync-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.customer-sync-summary .info-item > span:last-child {
+  min-width: 0;
+}
+
+.customer-sync-summary .info-item strong {
+  overflow-wrap: anywhere;
+}
+
+.customer-summary {
+  margin: 0;
+  color: var(--body);
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.customer-imported-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(16, 24, 40, 0.08);
+}
+
+.customer-imported-field {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.customer-token-list {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.customer-token {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid rgba(47, 107, 255, 0.16);
+  border-radius: 7px;
+  color: #1e56e0;
+  background: #f4f7ff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.customer-token.empty {
+  color: #66738e;
+  border-color: rgba(16, 24, 40, 0.08);
+  background: #f5f7fb;
+}
+
+@media (max-width: 900px) {
+  .customer-record-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .customer-record-meta,
+  .customer-imported-fields {
+    grid-template-columns: 1fr;
+  }
+}

@@ -13,6 +13,8 @@ const EVENT_KEYS = new Set([
   "media",
   "pendingActionId",
   "confirmationCode",
+  "quotedMessageId",
+  "quotedText",
 ]);
 const MEDIA_KEYS = new Set([
   "type",
@@ -37,8 +39,12 @@ function requiredText(value, field, max = MAX_IDENTIFIER_LENGTH) {
   return normalized;
 }
 
-function requiredEventText(value) {
-  if (typeof value !== "string" || !value.trim()) validation({ text: "required" });
+function eventText(value, { mediaPresent = false } = {}) {
+  if (value === undefined || value === null || value === "") {
+    if (mediaPresent) return "";
+    validation({ text: "required" });
+  }
+  if (typeof value !== "string" || (!value.trim() && !mediaPresent)) validation({ text: "required" });
   if (value.length > MAX_TEXT_LENGTH || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) {
     validation({ text: "format" });
   }
@@ -53,6 +59,15 @@ function optionalText(value, field, max = MAX_IDENTIFIER_LENGTH) {
 function optionalExactText(value, field, max = MAX_IDENTIFIER_LENGTH) {
   if (value === undefined || value === null || value === "") return null;
   if (typeof value !== "string" || value.length > max) validation({ [field]: "format" });
+  return value;
+}
+
+function optionalEventText(value, field, max = MAX_TEXT_LENGTH) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > max
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) {
+    validation({ [field]: "format" });
+  }
   return value;
 }
 
@@ -81,13 +96,9 @@ function validateAllowlistId(value, field) {
   return requiredText(value, field, MAX_IDENTIFIER_LENGTH);
 }
 
-export function assertWeixinSenderAllowed(config, event) {
-  const senderIds = Array.isArray(config?.weixinAllowedSenderIds)
-    ? config.weixinAllowedSenderIds
-    : [];
-  if (!senderIds.includes(event.senderId)) {
-    throw new HttpError(403, "WEIXIN_SENDER_NOT_ALLOWED", "This WeChat sender is not allowed");
-  }
+// v0.9.3：sender ∈ env 白名单分支退役——绑定表本身即白名单（入口序 4/5 由
+// weixinBindingGate 承担）。群规则原样保留（生产强制无群），语义零变化。
+export function assertWeixinGroupAllowed(config, event) {
   if (event.chatType === "group") {
     if (config?.weixinAllowGroups !== true) {
       throw new HttpError(403, "WEIXIN_GROUP_NOT_ALLOWED", "WeChat group messages are not allowed");
@@ -110,7 +121,9 @@ export async function validateWeixinAssistantEvent(value) {
   const body = plainObject(value, "body");
   checkKeys(body, EVENT_KEYS, "body");
   const conversationId = requiredText(body.conversationId, "conversationId");
-  const text = requiredEventText(body.text);
+  const text = eventText(body.text, {
+    mediaPresent: body.media !== undefined && body.media !== null,
+  });
   const sourceMessageId = requiredText(body.sourceMessageId, "sourceMessageId");
   const senderId = validateAllowlistId(body.senderId, "senderId");
   const chatType = normalizeChatType(body.chatType);
@@ -120,6 +133,8 @@ export async function validateWeixinAssistantEvent(value) {
   const pendingActionId = optionalText(body.pendingActionId, "pendingActionId", 300);
   const confirmationCode = optionalExactText(body.confirmationCode, "confirmationCode", 100);
   if (confirmationCode && !/^[0-9]{6}$/u.test(confirmationCode)) validation({ confirmationCode: "format" });
+  const quotedMessageId = optionalText(body.quotedMessageId, "quotedMessageId", MAX_IDENTIFIER_LENGTH);
+  const quotedText = optionalEventText(body.quotedText, "quotedText");
 
   let media = null;
   if (body.media !== undefined && body.media !== null) {
@@ -152,6 +167,8 @@ export async function validateWeixinAssistantEvent(value) {
     ...(groupId ? { groupId } : {}),
     ...(pendingActionId ? { pendingActionId } : {}),
     ...(confirmationCode ? { confirmationCode } : {}),
+    ...(quotedMessageId ? { quotedMessageId } : {}),
+    ...(quotedText ? { quotedText } : {}),
     ...(media ? { media } : {}),
   };
 }

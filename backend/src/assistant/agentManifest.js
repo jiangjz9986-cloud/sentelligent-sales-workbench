@@ -1,0 +1,697 @@
+import {
+  AGENT_DEFINITIONS,
+  createAgentRegistry,
+} from "./agentRegistry.js";
+import {
+  AssistantContractError,
+  validateAgentId,
+  validateToolName,
+} from "./contracts.js";
+
+export const AGENT_MANIFEST_SCHEMA_VERSION = "assistant-agent-manifest-v1";
+export const AGENT_CONTRACT_VERSION = "assistant-agent-contract-v1";
+
+const LIFECYCLE_STATUSES = new Set(["active", "draft", "disabled"]);
+const MODEL_POLICIES = new Set([
+  "none",
+  "optional",
+  "required",
+  "required_with_deterministic_fallback",
+  "disabled_until_approved",
+  "disabled_until_data_boundary_approved",
+]);
+const CONFIRMATION_LEVELS = new Set(["none", "preview", "explicit"]);
+const SOURCE_POLICIES = new Set(["none", "optional", "required"]);
+const TASK_TYPE = /^[a-z][a-z0-9_]{1,63}$/;
+const TOOL_NAME = /^[a-z][a-z0-9-]{0,63}\.[a-z][a-z0-9-]{0,63}$/;
+const VERSION = /^\d+\.\d+\.\d+$/;
+const UNSAFE_PROMPT = /(?:execute|run|send|reveal|accept)\s+(?:arbitrary\s+)?(?:sql|shell|http|url|token|owner)|ignore\s+(?:all\s+)?safety/i;
+
+function isPlainObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function clone(value) {
+  if (Array.isArray(value)) return value.map(clone);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, clone(child)]));
+  }
+  return value;
+}
+
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function requiredText(value, name, max = 4000) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new AssistantContractError(name + " is required", "invalid_manifest");
+  }
+  const normalized = value.trim();
+  if (normalized.length > max) {
+    throw new AssistantContractError(name + " is too long", "invalid_manifest");
+  }
+  return normalized;
+}
+
+function stringArray(value, name, { maxItems = 100, pattern = null } = {}) {
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw new AssistantContractError(name + " must be a bounded array", "invalid_manifest");
+  }
+  const result = value.map((item, index) => {
+    const label = name + "[" + index + "]";
+    const normalized = requiredText(item, label, 500);
+    if (pattern && !pattern.test(normalized)) {
+      throw new AssistantContractError(label + " is invalid", "invalid_manifest");
+    }
+    return normalized;
+  });
+  if (new Set(result).size !== result.length) {
+    throw new AssistantContractError(name + " contains duplicates", "invalid_manifest");
+  }
+  return result;
+}
+
+function schema(value, name) {
+  if (!isPlainObject(value) || value.type !== "object") {
+    throw new AssistantContractError(name + " must be an object schema", "invalid_manifest");
+  }
+  const required = stringArray(value.required ?? [], name + ".required", { maxItems: 100 });
+  const properties = isPlainObject(value.properties ?? {}) ? clone(value.properties) : null;
+  if (!properties) {
+    throw new AssistantContractError(name + ".properties must be an object", "invalid_manifest");
+  }
+  return { type: "object", required, properties };
+}
+
+function promptFor(description) {
+  return [
+    "你是小小助手的", description, "Agent。",
+    "只使用服务端提供的 owner-scoped 业务快照和已注册工具。",
+    "必须区分事实、推断、未知和建议，并保留来源引用。",
+    "不得猜测身份、权限、金额、日期或实体关系，不得执行任意 SQL、Shell、网络请求或文件操作。",
+    "任何写回只能生成预览，必须由本人明确确认后执行。",
+  ].join("");
+}
+
+function manifestDefinition(id, options = {}) {
+  const agent = AGENT_DEFINITIONS.find((item) => item.id === id);
+  if (!agent) throw new Error("missing registered agent: " + id);
+  return {
+    schemaVersion: AGENT_MANIFEST_SCHEMA_VERSION,
+    contractVersion: AGENT_CONTRACT_VERSION,
+    id,
+    version: "1.0.0",
+    description: agent.description,
+    instructions: agent.instructions,
+    enabled: agent.enabled,
+    lifecycle: agent.enabled ? "active" : "disabled",
+    modelPolicy: "optional",
+    taskTypes: ["default"],
+    tools: [],
+    confirmation: { preview: "none", write: "explicit" },
+    sourcePolicy: { mode: "optional", requiredFields: ["sourceRefs"] },
+    inputSchema: { type: "object", required: [], properties: {} },
+    outputSchema: {
+      type: "object",
+      required: ["status", "facts", "inferences", "unknowns", "sourceRefs"],
+      properties: {},
+    },
+    systemPrompt: promptFor(agent.description),
+    fallback: { strategy: "return a bounded deterministic result", status: "fallback" },
+    ...options,
+  };
+}
+
+export const AGENT_MANIFESTS = deepFreeze([
+  manifestDefinition("system-router", {
+    modelPolicy: "none",
+    taskTypes: ["route_intent", "clarify", "help", "cancel", "confirm"],
+    confirmation: { preview: "none", write: "none" },
+    sourcePolicy: { mode: "none", requiredFields: [] },
+    outputSchema: { type: "object", required: ["status", "agentId", "taskType"], properties: {} },
+    fallback: { strategy: "return unknown or clarify without executing a tool", status: "clarify" },
+  }),
+  manifestDefinition("dashboard", {
+    contractVersion: "dashboard-v1",
+    modelPolicy: "none",
+    taskTypes: ["daily_overview", "weekly_overview", "focus_summary"],
+    tools: ["dashboard.summary"],
+    confirmation: { preview: "none", write: "none" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "dashboard-v1", asOf: "iso_datetime", weekStart: "date", counts: "object" },
+    },
+    systemPrompt: [
+      "你是森特智行工作台总览 Agent。",
+      "只使用 owner-scoped 服务端总览快照，计数和截至时间必须原样保留。",
+      "不得根据计数猜测客户、商机、行动、风险、行程或费用明细。",
+      "总览只读，不执行任何业务写入。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped counts and unknowns", status: "fallback" },
+  }),
+  manifestDefinition("visit-capture", {
+    modelPolicy: "required_with_deterministic_fallback",
+    taskTypes: ["capture", "normalize", "preview", "link_candidates", "history_search", "change_preview", "void_preview"],
+    tools: [
+      "visit-capture.collect",
+      "visit-capture.preview",
+      "visit-capture.confirm",
+      "visit-capture.capture",
+      "visit-capture.search",
+      "visit-capture.update",
+      "visit-capture.void",
+    ],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs", "rawContent"] },
+    systemPrompt: [
+      "你是小小助手的拜访记录采集与确认Agent。",
+      "只使用服务端提供的 owner-scoped 业务快照和已注册工具。",
+      "必须区分事实、推断、未知和建议，并保留来源引用。",
+      "不得猜测身份、权限、金额、日期或实体关系，不得执行任意 SQL、Shell、网络请求或文件操作。",
+      "任何写回只能生成预览，必须由本人明确确认后执行；快速记录写入使用回复确认的轻确认，历史记录的修改与作废必须六位确认码确认。",
+    ].join(""),
+  }),
+  manifestDefinition("customer", {
+    contractVersion: "customer-v1",
+    taskTypes: ["search", "detail", "summarize", "change_preview", "create_preview", "delete_preview"],
+    tools: ["customer.search", "customer.detail", "customer.create", "customer.update", "customer.delete"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: {
+        taskType: "enum",
+        query: "string",
+        customerId: "string",
+        changes: "object",
+        expectedVersion: "integer|null",
+      },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "customer-v1",
+        customer: "object|null",
+        matches: "array",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行客户 Agent。",
+      "只使用服务端提供的 owner-scoped 客户快照；查询结果以服务端字段为准。",
+      "匹配不唯一时必须澄清，不得根据名称相似度擅自选择。",
+      "严格区分事实、推断和未知；变更只生成逐字段 before/after 预览，不能直接写入。",
+      "新增、修改、删除档案必须经六位确认码确认后由服务端执行，版本以服务端乐观锁为准。",
+      "不得猜测联系人、级别、行业、客户关系、权限或来源。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped customer fields and clarify ambiguity", status: "fallback" },
+  }),
+  manifestDefinition("opportunity", {
+    contractVersion: "opportunity-v1",
+    modelPolicy: "none",
+    taskTypes: ["search", "detail", "stage_review", "change_preview", "create_preview", "delete_preview"],
+    tools: [
+      "opportunity.detail",
+      "opportunity.list",
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", query: "string", opportunityId: "string", changes: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "relationship", "writebackPreview"],
+      properties: {
+        schemaVersion: "opportunity-v1",
+        opportunity: "object|null",
+        matches: "array",
+        relationship: "object",
+        stageReview: "object|null",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行商机 Agent。",
+      "只使用服务端提供的 owner-scoped 商机和客户快照，并先校验商机与客户关系。",
+      "匹配不唯一时必须澄清，不得根据名称相似度擅自选择。",
+      "阶段、金额、名称、风险和下一步的变更必须生成逐字段预览并经本人确认后由服务端执行，版本以服务端乐观锁为准；概率与客户关系保持只读，金额和版本不得由模型生成。",
+      "不得混入 sales-decision 的推进策略；阶段升级检查由销售决策 Agent 在确认执行后提供。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped opportunity facts and clarify ambiguity", status: "fallback" },
+  }),
+  manifestDefinition("sales-decision", {
+    contractVersion: "sales-decision-v1",
+    modelPolicy: "required_with_deterministic_fallback",
+    taskTypes: ["opportunity_diagnosis", "customer_analysis", "meeting_preparation", "next_step_decision"],
+    tools: ["sales-decision.preview"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["customer", "opportunity", "sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["analysisType", "analysisAt"],
+      properties: {
+        analysisType: "enum",
+        analysisAt: "iso_datetime",
+        customer: "object",
+        opportunity: "object",
+        quickRecord: "object|null",
+        actions: "array",
+        risks: "array",
+        knowledge: "array",
+      },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "inferences", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "sales-decision-v1",
+        decision: "object",
+        stage: "object",
+        score: "object",
+        compliance: "object",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行 sales-decision-v1 Agent。",
+      "只基于服务端提供的不可变业务快照分析，不得编造预算、决策人、承诺、竞争信息、金额、阶段或客户意图。",
+      "严格区分事实、推断、未知、风险和建议；每个关键结论保留来源引用。",
+      "证据不足时保守评分并列出验证问题；发现合规红线时停止推进建议并要求人工审查。",
+      "只输出严格合同；writebackPreview 永远只是待确认草案，不能执行任何业务写回。",
+    ].join(""),
+    fallback: { strategy: "run deterministic sales-decision guardrails on the same snapshot", status: "fallback" },
+  }),
+  manifestDefinition("action-risk", {
+    contractVersion: "action-risk-v1",
+    modelPolicy: "none",
+    taskTypes: [
+      "summary", "prioritize", "follow_up_preview", "status_change_preview",
+      "todo_create_preview", "todo_list", "todo_status_preview",
+    ],
+    tools: [
+      "action-risk.summary",
+      "action-risk.create",
+      "action-risk.list",
+      "action-risk.complete",
+      "action-risk.defer",
+      "action-risk.delete",
+    ],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: {
+        taskType: "enum",
+        customerId: "string",
+        opportunityId: "string",
+        actionId: "string",
+        riskId: "string",
+        changes: "object",
+      },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "action-risk-v1",
+        actions: "array",
+        risks: "array",
+        prioritization: "object",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行行动与风险 Agent。",
+      "只使用 owner-scoped 服务端行动和风险摘要，保留服务端排序及来源引用。",
+      "可以区分事实和未知，但不得把排序伪装成销售推进建议，也不得猜测责任人、截止日或风险处置结果。",
+      "状态、截止日和优先级变更只能生成预览，不能执行写回，且必须经过本人确认。",
+      "待办的创建、完成与推迟先出预览卡再由本人回复确认写入，删除必须六位确认码确认；提醒时间以服务端解析结果为准，不得猜测。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped action and risk summary", status: "fallback" },
+  }),
+  manifestDefinition("itinerary", {
+    contractVersion: "itinerary-v1",
+    modelPolicy: "none",
+    taskTypes: ["summary", "plan_preview", "optimize_order", "change_preview"],
+    tools: ["itinerary.summary"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", itineraryId: "string", changes: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: { schemaVersion: "itinerary-v1", items: "array", planPreview: "object|null", changePreview: "object|null" },
+    },
+    systemPrompt: [
+      "你是森特智行行程 Agent。",
+      "只使用 owner-scoped 行程快照，日期和状态以服务端记录为准。",
+      "没有路线输入时不得猜地址、顺序、里程或到达时间；规划和排序只能返回待确认预览。",
+      "保存、修改、删除和路线变更都不能直接执行，必须由本人确认。",
+    ].join(""),
+    fallback: { strategy: "return deterministic owner-scoped itinerary facts and an empty plan preview", status: "fallback" },
+  }),
+  manifestDefinition("hospital-tender", {
+    contractVersion: "hospital-tender-v1",
+    modelPolicy: "none",
+    taskTypes: ["summary"],
+    tools: ["hospital-tender.summary"],
+    confirmation: { preview: "none", write: "none" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs"],
+      properties: {
+        schemaVersion: "hospital-tender-v1",
+        summary: "object",
+        asOf: "iso_datetime",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行医院招标情报 Agent。",
+      "只使用服务端招标监测仓库的聚合摘要，计数与时间必须原样保留。",
+      "不得根据计数猜测具体公告、客户匹配或截止日期，也不得触发采集或推送。",
+      "招标监测为全局域数据，摘要只读，不执行任何业务写入。",
+    ].join(""),
+    fallback: { strategy: "return deterministic tender summary counts and unknowns", status: "fallback" },
+  }),
+  manifestDefinition("travel-expense", {
+    lifecycle: "disabled",
+    modelPolicy: "disabled_until_data_boundary_approved",
+    taskTypes: ["weekly_summary", "expense_review", "entry_preview"],
+    tools: ["travel-expense.summary"],
+    confirmation: { preview: "preview", write: "explicit" },
+    fallback: { strategy: "keep the existing deterministic expense tool outside versioned agent runs", status: "disabled" },
+  }),
+  manifestDefinition("payment-proof", {
+    lifecycle: "disabled",
+    modelPolicy: "disabled_until_data_boundary_approved",
+    taskTypes: ["ingest", "recognize", "candidate_match", "review"],
+    tools: ["payment-proof.ingest"],
+    confirmation: { preview: "preview", write: "explicit" },
+    fallback: { strategy: "keep the existing confirmed proof workflow outside versioned agent runs", status: "disabled" },
+  }),
+  manifestDefinition("invoice", {
+    lifecycle: "disabled",
+    modelPolicy: "disabled_until_data_boundary_approved",
+    taskTypes: ["ingest", "recognize", "match_preview", "no_invoice_review"],
+    tools: ["invoice.ingest"],
+    confirmation: { preview: "preview", write: "explicit" },
+    fallback: { strategy: "keep the existing confirmed invoice workflow outside versioned agent runs", status: "disabled" },
+  }),
+  manifestDefinition("advance-settlement", {
+    contractVersion: "advance-settlement-v1",
+    lifecycle: "active",
+    modelPolicy: "none",
+    taskTypes: ["advance_summary", "settlement_preview", "direction_explanation"],
+    tools: ["advance-settlement.preview"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType"],
+      properties: { taskType: "enum", weekStart: "date" },
+    },
+    outputSchema: {
+      type: "object",
+      required: [
+        "schemaVersion",
+        "status",
+        "facts",
+        "unknowns",
+        "sourceRefs",
+        "settlementSnapshotHash",
+        "requiresHumanReview",
+        "acceptsConfirmation",
+        "writebackPreview",
+        "writebackAllowed",
+      ],
+      properties: {
+        schemaVersion: "advance-settlement-v1",
+        weekStart: "date",
+        advances: "array",
+        expenses: "array",
+        settlementEvidence: "object",
+        settlementPreview: "object",
+        settlementSnapshotHash: "sha256",
+        requiresHumanReview: "boolean",
+        acceptsConfirmation: "boolean",
+        writebackAllowed: "boolean",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行请款与多退少补 Agent。",
+      "只使用服务端重建的 owner-scoped 请款、到账、费用、付款资金来源和票据证据快照。",
+      "结算预览按“非公司直付的可报销金额 - 已收到请款金额”计算；正数表示公司应补，负数表示个人应退，零表示平衡。",
+      "任何异常、截断、票据未覆盖或 owner 范围不完整都必须列为人工复核阻塞项，不得猜测或静默补全。",
+      "输出始终是待人工复核预览；当前合同不接受确认或写回，不得创建退款/补款流水，不得修改费用、请款金额或状态，也不得声称交易已经发生。",
+    ].join(""),
+    fallback: { strategy: "return a bounded source-backed settlement direction preview with manual confirmation blockers", status: "review_required" },
+  }),
+  manifestDefinition("reimbursement-report", {
+    lifecycle: "disabled",
+    modelPolicy: "disabled_until_data_boundary_approved",
+    taskTypes: ["weekly_summary", "invoice_coverage", "print_readiness"],
+    tools: ["reimbursement-report.preview"],
+    confirmation: { preview: "preview", write: "none" },
+    fallback: { strategy: "keep the existing deterministic reimbursement preview outside versioned agent runs", status: "disabled" },
+  }),
+  manifestDefinition("sales-report", {
+    contractVersion: "sales-report-v1",
+    modelPolicy: "required_with_deterministic_fallback",
+    taskTypes: ["weekly_preview", "meeting_digest", "source_review", "save_preview"],
+    tools: ["sales-report.preview"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs", "period"] },
+    inputSchema: {
+      type: "object",
+      required: ["period", "sourceRecords"],
+      properties: {
+        period: "object",
+        sourceRecords: "array",
+        knowledge: "array",
+        taskType: "enum",
+      },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "period", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "sales-report-v1",
+        executiveSummary: "string",
+        customerUpdates: "array",
+        opportunityUpdates: "array",
+        actions: "array",
+        risks: "array",
+        preparation: "object",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行销售周报 Agent。",
+      "只使用服务端提供的已确认拜访记录、客户、商机、行动、风险和知识引用组织周报。",
+      "不得编造客户进展、金额、承诺、完成状态或来源；没有证据的内容必须标记为未知或省略。",
+      "严格区分事实、推断、未知和建议；输出只是预览，不代表周报已保存、发布或写回任何业务数据。",
+    ].join(""),
+    fallback: { strategy: "use the deterministic source-backed weekly draft and mark composition as fallback", status: "fallback" },
+  }),
+  manifestDefinition("knowledge", {
+    contractVersion: "knowledge-v1",
+    modelPolicy: "none",
+    taskTypes: ["search", "answer_with_sources", "compare", "maintenance_preview"],
+    tools: ["knowledge.search"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    inputSchema: {
+      type: "object",
+      required: ["taskType", "query"],
+      properties: { taskType: "enum", query: "string", knowledgeId: "string", changes: "object" },
+    },
+    outputSchema: {
+      type: "object",
+      required: ["schemaVersion", "status", "facts", "unknowns", "sourceRefs", "writebackPreview"],
+      properties: {
+        schemaVersion: "knowledge-v1",
+        items: "array",
+        answer: "object|null",
+        comparison: "object|null",
+        changePreview: "object|null",
+      },
+    },
+    systemPrompt: [
+      "你是森特智行知识 Agent。",
+      "只读检索有界知识元数据和摘要，所有结论必须保留来源引用。",
+      "没有来源时必须返回未知，不得把完整正文、外部链接或猜测当作事实。",
+      "回答、比较和维护都只能基于当前返回条目；知识写入仅生成预览并等待本人确认。",
+    ].join(""),
+    fallback: { strategy: "return bounded source-backed knowledge metadata and unknowns", status: "fallback" },
+  }),
+  manifestDefinition("solution", {
+    lifecycle: "disabled",
+    modelPolicy: "disabled_until_approved",
+    taskTypes: ["solution_outline", "meeting_agenda", "proposal_draft"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    fallback: { strategy: "explain that the feature is disabled", status: "disabled" },
+  }),
+  manifestDefinition("personal-finance", {
+    lifecycle: "disabled",
+    modelPolicy: "disabled_until_data_boundary_approved",
+    taskTypes: ["ledger_summary", "cashflow_review", "personal_budget"],
+    confirmation: { preview: "preview", write: "explicit" },
+    sourcePolicy: { mode: "required", requiredFields: ["sourceRefs"] },
+    fallback: { strategy: "explain that the feature is disabled", status: "disabled" },
+  }),
+]);
+
+export function validateAgentManifest(value, { registry = createAgentRegistry() } = {}) {
+  if (!isPlainObject(value)) {
+    throw new AssistantContractError("agent manifest must be an object", "invalid_manifest");
+  }
+  const id = validateAgentId(value.id);
+  const registered = registry.getAgent(id);
+  if (!registered) throw new AssistantContractError("agent is not registered: " + id, "invalid_manifest");
+  const version = requiredText(value.version, "version", 40);
+  if (!VERSION.test(version)) throw new AssistantContractError("version is invalid", "invalid_manifest");
+  const lifecycle = requiredText(value.lifecycle, "lifecycle", 40);
+  if (!LIFECYCLE_STATUSES.has(lifecycle)) throw new AssistantContractError("lifecycle is invalid", "invalid_manifest");
+  const modelPolicy = requiredText(value.modelPolicy, "modelPolicy", 100);
+  if (!MODEL_POLICIES.has(modelPolicy)) throw new AssistantContractError("modelPolicy is invalid", "invalid_manifest");
+  if (Boolean(value.enabled) !== Boolean(registered.enabled)) {
+    throw new AssistantContractError("manifest enabled state does not match registry", "invalid_manifest");
+  }
+  const taskTypes = stringArray(value.taskTypes, "taskTypes", { pattern: TASK_TYPE });
+  const tools = stringArray(value.tools ?? [], "tools", { pattern: TOOL_NAME });
+  for (const toolName of tools) {
+    validateToolName(toolName);
+    const tool = registry.getTool(toolName);
+    if (!tool) throw new AssistantContractError("tool is not registered: " + toolName, "invalid_manifest");
+    if (tool.agentId !== id) {
+      throw new AssistantContractError("tool belongs to another agent: " + toolName, "invalid_manifest");
+    }
+  }
+  if (!isPlainObject(value.confirmation)) {
+    throw new AssistantContractError("confirmation is invalid", "invalid_manifest");
+  }
+  const confirmation = {
+    preview: requiredText(value.confirmation.preview, "confirmation.preview", 40),
+    write: requiredText(value.confirmation.write, "confirmation.write", 40),
+  };
+  if (!CONFIRMATION_LEVELS.has(confirmation.preview) || !CONFIRMATION_LEVELS.has(confirmation.write)) {
+    throw new AssistantContractError("confirmation level is invalid", "invalid_manifest");
+  }
+  if (!isPlainObject(value.sourcePolicy)) {
+    throw new AssistantContractError("sourcePolicy is invalid", "invalid_manifest");
+  }
+  const sourcePolicy = {
+    mode: requiredText(value.sourcePolicy.mode, "sourcePolicy.mode", 40),
+    requiredFields: stringArray(value.sourcePolicy.requiredFields ?? [], "sourcePolicy.requiredFields"),
+  };
+  if (!SOURCE_POLICIES.has(sourcePolicy.mode)) {
+    throw new AssistantContractError("sourcePolicy.mode is invalid", "invalid_manifest");
+  }
+  const systemPrompt = requiredText(value.systemPrompt, "systemPrompt", 20_000);
+  if (UNSAFE_PROMPT.test(systemPrompt)) {
+    throw new AssistantContractError("systemPrompt contains unsafe execution instructions", "unsafe_prompt");
+  }
+  if (!isPlainObject(value.fallback)) {
+    throw new AssistantContractError("fallback is invalid", "invalid_manifest");
+  }
+  const fallback = {
+    strategy: requiredText(value.fallback.strategy, "fallback.strategy", 2000),
+    status: requiredText(value.fallback.status, "fallback.status", 100),
+  };
+  const inputSchema = schema(value.inputSchema, "inputSchema");
+  const outputSchema = schema(value.outputSchema, "outputSchema");
+  return deepFreeze({
+    schemaVersion: requiredText(value.schemaVersion, "schemaVersion", 100),
+    contractVersion: requiredText(value.contractVersion, "contractVersion", 100),
+    id,
+    version,
+    description: requiredText(value.description, "description", 1000),
+    instructions: requiredText(value.instructions, "instructions", 4000),
+    enabled: Boolean(value.enabled),
+    lifecycle,
+    modelPolicy,
+    taskTypes,
+    tools,
+    confirmation,
+    sourcePolicy,
+    inputSchema,
+    outputSchema,
+    systemPrompt,
+    fallback,
+  });
+}
+
+export function createAgentManifestRegistry({
+  manifests = AGENT_MANIFESTS,
+  registry = createAgentRegistry(),
+} = {}) {
+  if (!Array.isArray(manifests)) {
+    throw new AssistantContractError("manifests must be an array", "invalid_manifest");
+  }
+  const map = new Map();
+  for (const candidate of manifests) {
+    const normalized = validateAgentManifest(candidate, { registry });
+    if (map.has(normalized.id)) {
+      throw new AssistantContractError("duplicate agent manifest: " + normalized.id, "invalid_manifest");
+    }
+    map.set(normalized.id, normalized);
+  }
+  for (const agent of registry.listAgents()) {
+    if (!map.has(agent.id)) {
+      throw new AssistantContractError("missing agent manifest: " + agent.id, "invalid_manifest");
+    }
+  }
+  return Object.freeze({
+    list: () => [...map.values()].map(clone),
+    get: (id) => {
+      if (typeof id !== "string") return null;
+      const item = map.get(id.trim());
+      return item ? clone(item) : null;
+    },
+    has: (id) => typeof id === "string" && map.has(id.trim()),
+  });
+}
+
+const DEFAULT_REGISTRY = createAgentManifestRegistry();
+
+export function listAgentManifests() {
+  return DEFAULT_REGISTRY.list();
+}
+
+export function getAgentManifest(id) {
+  return DEFAULT_REGISTRY.get(id);
+}

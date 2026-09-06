@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
+import { openDatabase } from "../src/db.js";
+import { createShortcutBookkeepingRepository } from "../src/integrations/shortcutBookkeepingRepository.js";
 import { createServer } from "../src/server.js";
 import {
   SHORT_JPEG_ENVELOPE,
@@ -258,6 +260,433 @@ describe("authenticated travel expense API", () => {
     });
   });
 
+  it("returns one no-store formal-ledger projection without letting auxiliary resources hide the week", async () => {
+    await withHarness(async ({ raw, request }) => {
+      assert.equal((await raw("/api/travel-expense-workbench?weekStart=2026-08-03")).response.status, 401);
+
+      const createdExpense = await createExpense(request);
+      const createdAdvance = await request("/api/travel-expense-advances", {
+        method: "POST",
+        body: JSON.stringify(advance()),
+      });
+      assert.equal(createdAdvance.response.status, 201);
+
+      const received = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+      assert.equal(received.response.status, 200);
+      assert.equal(received.response.headers.get("cache-control"), "no-store");
+      assert.equal(received.body.item.weekStart, "2026-08-03");
+      assert.deepEqual(received.body.item.expenses, [createdExpense]);
+      assert.deepEqual(received.body.item.advances, [createdAdvance.body.item]);
+      assert.deepEqual(received.body.item.bookkeepingReviews, []);
+      assert.deepEqual(received.body.item.regionProfile, {
+        weekStart: "2026-08-03",
+        weekEnd: "2026-08-09",
+        version: 0,
+        cities: [],
+        defaultCity: null,
+        dateOverrides: [],
+        createdAt: null,
+        updatedAt: null,
+      });
+      assert.deepEqual(received.body.item.recentLedgerReceipts, []);
+      assert.match(received.body.item.generatedAt, /^\d{4}-\d{2}-\d{2}T/u);
+
+      const invalidWeek = await request("/api/travel-expense-workbench?weekStart=2026-08-02");
+      assert.equal(invalidWeek.response.status, 422);
+      assert.equal(invalidWeek.body.error.code, "VALIDATION_ERROR");
+    });
+  });
+
+  it("reads and version-saves one owner-scoped natural-week region profile", async () => {
+    await withHarness(async ({ csrf, request }) => {
+      const empty = await request("/api/travel-expense-region-profile?weekStart=2026-08-24");
+      assert.equal(empty.response.status, 200);
+      assert.equal(empty.response.headers.get("cache-control"), "no-store");
+      assert.equal(empty.body.item.version, 0);
+
+      const payload = {
+        weekStart: "2026-08-24",
+        cities: ["济南", "青岛"],
+        defaultCity: "济南",
+        dateOverrides: [{ date: "2026-08-27", city: "青岛" }],
+      };
+      const missingVersion = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(missingVersion.response.status, 428);
+
+      const saved = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(saved.response.status, 200);
+      assert.equal(saved.response.headers.get("etag"), '"1"');
+      assert.deepEqual(saved.body.item.cities, ["济南", "青岛"]);
+      assert.equal(saved.body.item.defaultCity, "济南");
+      assert.deepEqual(saved.body.item.dateOverrides, [{ date: "2026-08-27", city: "青岛" }]);
+
+      const stale = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify({ ...payload, defaultCity: "青岛" }),
+      });
+      assert.equal(stale.response.status, 409);
+      assert.equal(stale.body.error.fields.currentVersion, 1);
+
+      const invalid = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"1"' },
+        body: JSON.stringify({ ...payload, owner: "other-owner" }),
+      });
+      assertValidation(invalid, "owner");
+
+      const projected = await request("/api/travel-expense-workbench?weekStart=2026-08-24");
+      assert.deepEqual(projected.body.item.regionProfile, saved.body.item);
+      const inherited = await request("/api/travel-expense-region-profile?weekStart=2026-08-31");
+      assert.deepEqual(inherited.body.item, {
+        weekStart: "2026-08-31",
+        weekEnd: "2026-09-06",
+        version: 0,
+        cities: ["济南", "青岛"],
+        defaultCity: null,
+        dateOverrides: [],
+        createdAt: null,
+        updatedAt: null,
+      });
+    });
+  });
+
+  it("reports a committed region save as successful when pending-draft refresh is deferred", async () => {
+    const refreshCalls = [];
+    await withHarness(async ({ csrf, request }) => {
+      const payload = {
+        weekStart: "2026-08-24",
+        cities: ["济南"],
+        defaultCity: "济南",
+        dateOverrides: [],
+      };
+      const saved = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(saved.response.status, 200, JSON.stringify(saved.body));
+      assert.equal(saved.body.item.version, 1);
+      assert.deepEqual(saved.body.draftRefresh, {
+        status: "deferred",
+        refreshedCount: 0,
+        errorCode: "REGION_DRAFT_REFRESH_DEFERRED",
+      });
+      assert.deepEqual(refreshCalls, [{ account: "travel-owner", weekStart: "2026-08-24" }]);
+
+      const persisted = await request("/api/travel-expense-region-profile?weekStart=2026-08-24");
+      assert.equal(persisted.response.status, 200);
+      assert.equal(persisted.body.item.version, 1);
+      assert.equal(persisted.body.item.defaultCity, "济南");
+
+      const staleRetry = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify(payload),
+      });
+      assert.equal(staleRetry.response.status, 409);
+      assert.equal(staleRetry.body.error.fields.currentVersion, 1);
+    }, {
+      shortcutBookkeepingAssistantRuntime: {
+        refreshRegionDependentDrafts(input) {
+          refreshCalls.push(input);
+          throw new Error("synthetic draft refresh failure");
+        },
+      },
+    });
+  });
+
+  it("refreshes a profile-derived pending meal when Web clears the weekly region", async () => {
+    await withHarness(async ({ csrf, databaseUrl, request }) => {
+      const fixtureDb = openDatabase({ databaseUrl });
+      let reviewId;
+      try {
+        const repository = createShortcutBookkeepingRepository(fixtureDb, {
+          idFactory: () => "web-region-clear-review",
+          clock: () => new Date("2026-08-25T04:00:00.000Z"),
+        });
+        const received = repository.receive({
+          owner: "travel-owner",
+          actor: "travel-owner",
+          ledgerName: "出差报销",
+          entryType: "expense",
+          category: "餐饮",
+          subcategory: "午餐",
+          idempotencyKey: "web-region-clear-review",
+          requestHash: "b".repeat(64),
+          rawText: "合成午餐",
+        });
+        reviewId = received.item.id;
+        const claimed = repository.claim(reviewId);
+        repository.completeLocal(reviewId, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "review_required",
+            confidence: 1,
+            category: "餐饮",
+            subcategory: "午餐",
+            note: "8.25济南午餐",
+            noteAutomation: {
+              kind: "meal",
+              mealKey: "lunch",
+              paidTime: "12:00",
+              tripRegion: "济南",
+              tripRegionSource: "week_default",
+            },
+            expense: {
+              occurredOn: "2026-08-25",
+              amountCents: 3000,
+              reimbursementCents: 3000,
+              purpose: "合成午餐",
+              merchant: null,
+              fundingSource: "personal",
+              paymentMethod: "wechat",
+            },
+            warnings: ["WEIXIN_CONFIRMATION_REQUIRED"],
+            source: { provider: "test", model: null },
+          },
+        });
+      } finally {
+        fixtureDb.close();
+      }
+
+      const saved = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"0"' },
+        body: JSON.stringify({
+          weekStart: "2026-08-24", cities: ["济南"], defaultCity: "济南", dateOverrides: [],
+        }),
+      });
+      assert.equal(saved.response.status, 200);
+      const cleared = await request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": csrf, "If-Match": '"1"' },
+        body: JSON.stringify({
+          weekStart: "2026-08-24", cities: [], defaultCity: null, dateOverrides: [],
+        }),
+      });
+      assert.equal(cleared.response.status, 200);
+
+      const verifiedDb = openDatabase({ databaseUrl });
+      try {
+        const row = verifiedDb.prepare(`
+          SELECT note, analysis_json FROM shortcut_bookkeeping_entries WHERE id = $id
+        `).get({ $id: reviewId });
+        const analysis = JSON.parse(row.analysis_json);
+        assert.equal(row.note, null);
+        assert.equal(analysis.noteAutomation.tripRegion, null);
+        assert.equal(analysis.noteAutomation.tripRegionSource, null);
+        assert.ok(analysis.warnings.includes("missing_trip_region"));
+        assert.equal(verifiedDb.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+      } finally {
+        verifiedDb.close();
+      }
+    });
+  });
+
+  it("reads the workbench snapshot while another connection owns the SQLite write reservation", async () => {
+    await withHarness(async ({ databaseUrl, request }) => {
+      const createdExpense = await createExpense(request);
+      const writer = openDatabase({ databaseUrl });
+      writer.exec("BEGIN IMMEDIATE");
+      try {
+        const received = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+        assert.equal(received.response.status, 200);
+        assert.deepEqual(received.body.item.expenses, [createdExpense]);
+        assert.deepEqual(received.body.item.advances, []);
+        assert.deepEqual(received.body.item.bookkeepingReviews, []);
+        assert.equal(writer.isTransaction, true);
+      } finally {
+        writer.exec("ROLLBACK");
+        writer.close();
+      }
+    });
+  });
+
+  it("returns the same canonical formal-ledger receipt after Web confirmation and replay", async () => {
+    await withHarness(async ({ databaseUrl, request }) => {
+      const fixtureDb = openDatabase({ databaseUrl });
+      let reviewId;
+      try {
+        const repository = createShortcutBookkeepingRepository(fixtureDb, {
+          idFactory: () => "web-review-entry-1",
+          clock: () => new Date("2026-08-04T04:30:00.000Z"),
+        });
+        const received = repository.receive({
+          owner: "travel-owner",
+          actor: "travel-owner",
+          ledgerName: "出差报销",
+          entryType: "expense",
+          category: "餐饮",
+          subcategory: "午餐",
+          idempotencyKey: "web-review-canonical-receipt",
+          requestHash: "a".repeat(64),
+          rawText: "2026-08-04 午餐 68 元",
+        });
+        reviewId = received.item.id;
+        const claimed = repository.claim(reviewId);
+        repository.completeLocal(reviewId, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "review_required",
+            confidence: 0.7,
+            expense: null,
+            warnings: ["manual_confirmation_required"],
+            source: { provider: "test" },
+          },
+        });
+      } finally {
+        fixtureDb.close();
+      }
+
+      const analysis = {
+        status: "ready",
+        confidence: 1,
+        expense: {
+          occurredOn: "2026-08-04",
+          amountCents: 6800,
+          reimbursementCents: 6800,
+          purpose: "出差午餐",
+          merchant: null,
+          fundingSource: "personal",
+          paymentMethod: "wechat",
+        },
+        warnings: [],
+        source: { provider: "manual", model: null },
+      };
+      const path = `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`;
+      const confirmed = await request(path, {
+        method: "POST",
+        body: JSON.stringify({ analysis }),
+      });
+      assert.equal(confirmed.response.status, 201);
+      assert.equal(confirmed.body.item.status, "accepted");
+      assert.deepEqual(confirmed.body.item.ledgerReceipt, {
+        entryId: reviewId,
+        expenseId: confirmed.body.item.expenseId,
+        paymentId: confirmed.body.item.paymentId,
+        referenceCode: confirmed.body.item.expenseReferenceCode,
+        occurredOn: "2026-08-04",
+        weekStart: "2026-08-03",
+        amountCents: 6800,
+        reimbursementCents: 6800,
+        attachmentStatus: "not_available",
+      });
+
+      const replayed = await request(path, {
+        method: "POST",
+        body: JSON.stringify({ analysis }),
+      });
+      assert.equal(replayed.response.status, 200);
+      assert.equal(replayed.body.item.replayed, true);
+      assert.deepEqual(replayed.body.item.ledgerReceipt, confirmed.body.item.ledgerReceipt);
+
+      const projection = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+      assert.equal(projection.body.item.expenses.length, 1);
+      assert.equal(projection.body.item.expenses[0].id, confirmed.body.item.ledgerReceipt.expenseId);
+      assert.deepEqual(projection.body.item.bookkeepingReviews, []);
+      assert.deepEqual(projection.body.item.recentLedgerReceipts, [{
+        ...confirmed.body.item.ledgerReceipt,
+        acceptedAt: confirmed.body.item.updatedAt,
+      }]);
+
+      const probeDb = openDatabase({ databaseUrl });
+      try {
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 1);
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 1);
+      } finally {
+        probeDb.close();
+      }
+    });
+  });
+
+  it("keeps a ready retry in human review without creating formal ledger rows", async () => {
+    await withHarness(async ({ databaseUrl, request }) => {
+      const fixtureDb = openDatabase({ databaseUrl });
+      let reviewId;
+      try {
+        const repository = createShortcutBookkeepingRepository(fixtureDb, {
+          idFactory: () => "web-review-retry-ready-1",
+          clock: () => new Date("2026-08-04T04:30:00.000Z"),
+        });
+        const received = repository.receive({
+          owner: "travel-owner",
+          actor: "travel-owner",
+          ledgerName: "出差报销",
+          entryType: "expense",
+          category: "餐饮",
+          subcategory: "午餐",
+          idempotencyKey: "web-review-retry-ready",
+          requestHash: "b".repeat(64),
+          rawText: "2026-08-04 午餐 68 元",
+        });
+        reviewId = received.item.id;
+        const claimed = repository.claim(reviewId);
+        repository.completeLocal(reviewId, {
+          leaseToken: claimed.leaseToken,
+          analysis: {
+            status: "review_required",
+            confidence: 0,
+            expense: null,
+            warnings: ["model_error"],
+            source: { provider: "test" },
+          },
+        });
+      } finally {
+        fixtureDb.close();
+      }
+
+      const retried = await request(
+        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
+        { method: "POST", body: "{}" },
+      );
+      assert.equal(retried.response.status, 202);
+      assert.equal(retried.body.item.status, "review_required");
+      assert.equal(retried.body.item.ledgerReceipt, null);
+      assert.equal(retried.body.item.analysis.expense.occurredOn, "2026-08-04");
+      assert.equal(retried.body.item.analysis.expense.amountCents, 6800);
+
+      const projection = await request("/api/travel-expense-workbench?weekStart=2026-08-03");
+      assert.deepEqual(projection.body.item.expenses, []);
+      assert.deepEqual(
+        projection.body.item.bookkeepingReviews.map((item) => item.id),
+        [reviewId],
+      );
+
+      const probeDb = openDatabase({ databaseUrl });
+      try {
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 0);
+        assert.equal(probeDb.prepare("SELECT COUNT(*) AS count FROM travel_expense_payments").get().count, 0);
+      } finally {
+        probeDb.close();
+      }
+    }, {
+      travelExpenseAnalyzer: async () => ({
+        status: "ready",
+        confidence: 1,
+        expense: {
+          occurredOn: "2026-08-04",
+          amountCents: 6800,
+          reimbursementCents: 6800,
+          purpose: "出差午餐",
+          merchant: null,
+          fundingSource: "personal",
+          paymentMethod: "wechat",
+        },
+        warnings: [],
+        source: { provider: "test", model: "ready-retry" },
+      }),
+    });
+  });
+
   it("strictly rejects unknown fields, invalid dates, and invalid integer-cent values without writes", async () => {
     await withHarness(async ({ request }) => {
       for (const [body, field] of [
@@ -491,6 +920,17 @@ describe("authenticated travel expense API", () => {
         body: JSON.stringify(advance()),
       });
       assert.equal(createdAdvance.response.status, 201);
+      const region = await first.request("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: { "If-Match": '"0"', "X-CSRF-Token": first.csrf },
+        body: JSON.stringify({
+          weekStart: "2026-08-03",
+          cities: ["济南"],
+          defaultCity: "济南",
+          dateOverrides: [],
+        }),
+      });
+      assert.equal(region.response.status, 200);
       await closeServer(first.server);
       first = null;
 
@@ -504,6 +944,10 @@ describe("authenticated travel expense API", () => {
       assert.equal((await second.request(`/api/travel-expenses/${encodeURIComponent(createdExpense.id)}`)).response.status, 404);
       assert.equal((await second.authenticatedFetch(contentUrl)).status, 404);
       assert.deepEqual((await second.request("/api/travel-expense-advances?weekStart=2026-08-03")).body.items, []);
+      assert.deepEqual(
+        (await second.request("/api/travel-expense-region-profile?weekStart=2026-08-03")).body.item.cities,
+        [],
+      );
       const foreignPatch = await second.request(`/api/travel-expenses/${encodeURIComponent(createdExpense.id)}`, {
         method: "PATCH",
         headers: { "If-Match": '"2"' },
@@ -528,5 +972,62 @@ describe("authenticated travel expense API", () => {
       assert.deepEqual((await request("/api/travel-expenses?weekStart=2026-08-03")).body.items, []);
       assert.deepEqual((await request("/api/audit-logs?entityType=travel_expense")).body.items, []);
     }, { failpoints: new Set(["travelExpense.create.afterWrite"]) });
+  });
+
+  it("records allowlisted bookkeeping client events and scopes the realtime audit feed", async () => {
+    await withHarness(async ({ raw, request }) => {
+      assert.equal((await raw("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event: "print_expense_list" }),
+      })).response.status, 401);
+
+      await createExpense(request);
+
+      const unknownEvent = await request("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event: "drop_table" }),
+      });
+      assert.equal(unknownEvent.response.status, 422);
+      assert.equal(unknownEvent.body.error.code, "VALIDATION_ERROR");
+
+      const recorded = await request("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({
+          event: "print_expense_list",
+          weekStart: "2026-08-03",
+          itemCount: 4,
+          ignored: "field",
+        }),
+      });
+      assert.equal(recorded.response.status, 201);
+      assert.deepEqual(recorded.body, { recorded: true });
+
+      const exported = await request("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event: "export_expense_xlsx", weekStart: "bad-date", itemCount: -5 }),
+      });
+      assert.equal(exported.response.status, 201);
+
+      const unknownScope = await request("/api/audit-logs?scope=everything");
+      assert.equal(unknownScope.response.status, 422);
+
+      const scoped = await request("/api/audit-logs?scope=bookkeeping");
+      assert.equal(scoped.response.status, 200);
+      const actions = scoped.body.items.map((item) => item.action);
+      assert.equal(actions.includes("travel_expense.create"), true);
+      assert.equal(actions.includes("bookkeeping_client.print_expense_list"), true);
+      assert.equal(actions.includes("bookkeeping_client.export_expense_xlsx"), true);
+      assert.equal(actions.every((action) => /^(travel_expense|travel_expense_advance|travel_expense_document_inbox|invoice|shortcut_bookkeeping|bookkeeping_client)\./.test(action)), true);
+
+      const printEntry = scoped.body.items.find((item) => item.action === "bookkeeping_client.print_expense_list");
+      assert.equal(printEntry.entityType, "bookkeeping_client_event");
+      assert.equal(printEntry.metadata.weekStart, "2026-08-03");
+      assert.equal(printEntry.metadata.itemCount, 4);
+      assert.equal(printEntry.metadata.ignored, undefined);
+
+      const exportEntry = scoped.body.items.find((item) => item.action === "bookkeeping_client.export_expense_xlsx");
+      assert.equal(exportEntry.metadata.weekStart, undefined);
+      assert.equal(exportEntry.metadata.itemCount, undefined);
+    });
   });
 });

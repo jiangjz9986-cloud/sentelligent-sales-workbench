@@ -1,14 +1,506 @@
 # 变更日志
 
-本项目按语义化版本记录代码变更。版本条目表示对应代码已经冻结，不自动表示 tag、GitHub Release 或生产部署已经完成。条目时间使用 ISO 8601 和 `Asia/Shanghai` 时区；正式发布以 GitHub Release 的 `publishedAt`、标签提交和资产 SHA-256 为准，生产状态以部署记录和服务器 evidence 为准。
+本项目按语义化版本记录代码变更。版本条目表示对应代码已经冻结，不自动表示标签、制品封存或生产部署已经完成。条目时间使用 ISO 8601 和 `Asia/Shanghai` 时区；常规发布以 GitHub Release 为准。经项目所有者明确授权的直接生产发布，必须以本地注释标签、exact-commit 不可变归档、manifest、SHA-256 和服务器 evidence 共同确认身份。
 
 ## [Unreleased]
 
-### iOS 快捷指令真实记账
+## [0.12.0] - 2026-09-06
 
-- 新增 `0018` 快捷记账台账和 `POST /api/integrations/shortcut/bookkeeping`，支持账号全局幂等、处理租约、失败恢复和审计。
-- 出差报销支出写入森特差旅费用和支付记录；biubiu 通过固定 loopback 地址与独立 bridge credential 写轻氧，远端未确认时 fail closed。
-- Token 验证只有在写入链路配置完整时返回 `bookkeepingReady=true`；生产 preflight 扩展为 `27/27` 并校验桥接凭据隔离。
+### 客户级主动助手与客户数据闭环升级候选
+
+- **冻结与迁移**：以 `3370b9451f390cfcfa56bf8c4eb9b2df31c43a68` 为升级基线，冻结 shared API contract、文件所有权和 `0042–0045` 四个 forward-only 迁移；新增客户主动 subject、医院招标 canonical bridge、action/risk 写回字段及客户导入批次/行表，继续由迁移账本做 checksum 校验和幂等重开。
+- **客户级主动助手**：主动扫描从全局建议扩展到 owner/customer subject；持久化 subject revision、source digest、source refs 与建议关联，在后台 worker、服务装配、跨入口读取、人工预览/确认、幂等重放和 stale conflict 路径中保持同一客户身份。
+- **医院招标 bridge**：为招标通知补充唯一 canonical identity、revision、digest 与 owner/customer bridge 状态；匹配、同步、调度和转商机统一走 canonical bridge，确认前复核通知、客户与匹配证据，拒绝跨 owner、过期预览和损坏回执。
+- **action/risk 字段写回**：主动建议确认不再只写默认行动值；action 持久化负责人、截止日期、优先级、预期结果及来源 provenance，risk 将建议 priority 规范映射到 severity，并保留来源类型、来源 id、建议 id、subject key/version 和 source digest/refs。
+- **CSV/XLSX 客户批量导入**：新增认证后的 multipart preview/get/confirm/cancel API 与客户页导入面板；支持 UTF-8/BOM CSV（CRLF、引号、嵌入换行）和 XLSX，提供字段映射、服务端只读逐行动作、同 owner 名称/别名查重、create/merge/skip/reject、摘要校验、幂等、取消、即时事务提交与审计。owner 始终来自会话，原始文件字节不入库。
+- **浏览器验收**：新增真实 multipart CSV 的 WebKit 六视口流程，覆盖映射变化后强制重预览、确认回执、取消、客户 API/SQLite 回读、无原始文件列、零横向溢出、零非预期 HTTP 失败及 loopback-only 网络；XLSX 上传解析由后端自动化测试覆盖。
+- **候选边界**：该版本只在本地临时 SQLite、合成数据、mock AI 和 `127.0.0.1` 服务中验证；未读取 iCloud，未检查、连接、迁移或修改生产，也未发送真实通知。发布提交以最终干净提交和其 evidence 中的 40 位 exact commit 为准。
+
+## [0.11.2] - 2026-09-06
+
+### 维护交付候选：滚轮、主动助手稳定性与客户详情验收
+
+- **页面滚轮**：修复受限 workspace 中页面内容没有可滚动范围的问题；保持 `.content` 为页面级滚动根，并覆盖桌面 wheel、移动布局和嵌套面板边界。
+- **主动助手**：稳定建议修订、刷新回读、后台扫描生命周期、重启恢复、租约、通知去重、缓存/额度、owner 隔离以及 action/risk 的预览、确认、幂等和版本冲突路径；主动助手控件满足桌面与窄屏触达尺寸要求。
+- **客户详情**：补充客户版本、同步摘要、别名、标签、创建/更新时间展示；统一按 Asia/Shanghai 格式化可识别时间，并对长字段和空值做安全处理。
+- **客户验收**：新增认证 API 创建后的持久化、列表搜索、详情、编辑取消/保存、删除取消和桌面/平板/iPhone 等价视口验收；报告绑定实际源码身份，明确这不是 CSV/XLSX 文件导入证明。
+- **证据与 QA**：浏览器证据网络限制支持多个显式 loopback origin；滚轮与客户验收同时允许隔离前端和后端 origin；主动助手面板、客户元数据和证据身份测试已接入常规 QA。
+- **版本治理**：统一根项目、backend、frontend 及 lockfile 的版本字段为 `0.11.2`。本候选不新增数据库迁移，不表示生产已切换。
+
+### 边界与未完成项
+
+- 生产仍以 v0.11.1 的 immutable release 为准；本条目只描述本地候选，不构成 SSH 写入、迁移、服务重启或真实通知授权。
+- 当前产品仍没有 CSV/XLSX 批量导入 UI/API；客户验收使用隔离 SQLite 和认证后的 `POST /api/customers`。
+- 主动助手 action 写回沿用现有 `action_items` 契约，当前创建路径的优先级为默认“中”、负责人为当前 owner；`expectedResult` 保留在建议预览/人工字段语义中，未扩展为业务表列。该限制列入后续契约升级，不在本维护候选中伪装成已完成。
+- 客户级主动扫描、医院招标 bridge、真实模型质量和外送通知闭环、批量导入分别列入后续版本或独立功能线。
+
+
+## [0.11.1] - 2026-09-05
+
+### 全局主动助手发布候选（本地冻结前）
+
+- **跨入口统一建议**：总览、客户、商机和小小入口读取同一条持久化主动建议；建议带有来源版本、修订、更新时间、发生时间和公告摘要哈希等受控溯源字段。
+- **通知账本与去重**：站内通知、微信 outbox、PushPlus owner 隔离、静默时段、限频、失败重试、已读状态和旧行动提醒去重统一收口；重复提醒只保留站内记录，不重复外送。
+- **模型调用治理**：模型结果按证据、模型身份、规则/契约版本做稳定缓存；缓存 TTL、owner 每日额度和全局每日额度持久化到 SQLite，额度耗尽时明确标记确定性 fallback。
+- **人工确认与并发**：主动建议写回继续要求显式确认、预览摘要、owner 隔离、版本校验、幂等键和历史只读；模型只能引用服务端提供的真实来源。
+- **PWA 清单**：补齐 `theme_color`、`background_color`、`start_url`、`lang`、正式应用名称和图标，Vite 构建不再输出 manifest 警告。
+- **可复现证据**：候选分支为 `codex/v0111-pdf-provenance`，基于生产 v0.11.0 提交 `10a45887386fd39ad9b0376e48d6a326d502e2c8`；后端迁移新增 `0037–0041`。
+- **空库启动修复**：生产在保留 `jiangjz` 管理员、业务表为空的清理后状态下，主动助手机器 owner 使用 `AUTH_ACCOUNT` 作为锚点，预检不再要求凭空创建业务记录。
+
+### 本地门禁状态
+
+- 后端定向与全量测试、前端 `qa:local`、Chrome integration、WebKit、根 `test:deploy`、依赖审计和 `git diff --check` 均已通过。
+- 桌面录音和 iPhone 真机验收按用户决定明确标记为 `skipped / 未执行`，不计为通过。
+- Team 账号与模型质量之间没有可复现归因证据；本版本只修复可复现的配置、调用、缓存、额度、通知和来源溯源问题。
+- 本条目在候选提交阶段不单独证明生产切换；生产状态以服务器 immutable release、fresh preflight、cutover、postflight 和 HTTPS smoke 证据为准。
+
+## [0.11.0] - 2026-09-03
+
+### 联动补链与模型调用纠偏（本地候选）
+
+- **联动补链**：整合招标转商机、拜访温度建议、发票逾期升级、统一 AI 结果卡、快速记录确认预览等 v0.11 功能；写回继续走人工确认和版本校验。
+- **模型调用纠偏**：作废快速记录在模型调用前直接拒绝；`MODEL_TIMEOUT_MS` 统一限制为 `1–120000` 毫秒，避免 Node 定时器溢出；`AI_ANALYSIS_MODE` 和 `MODEL_BASE_URL` 在配置入口严格校验，非法值不再静默落到 mock。
+- **判断边界**：Cursor 日志能证明期间发生过模型选择变化，但没有证据证明变化由 Team 账号造成；本候选只修复了可复现的配置与调用缺陷。
+- **候选状态**：本条目只表示本地代码候选，不表示已打 tag、已生成发布制品、已部署生产或真实模型质量验收完成。
+
+## [0.10.3] - 2026-08-30
+
+### Web 小小对话面板（消灭双端割裂，总蓝图 v0.10.3 行）
+
+- **后端 web channel**：`POST /api/assistant/chat` + `POST /api/assistant/confirm` + `GET /api/assistant/history`（会话 Cookie+CSRF）；复用 `assistantOrchestrator.handle({ channel:"web" })`；R1 单钮确认；R2/R3 用 `deriveWebExplicitCredential` 点按确认（不展示六位码）；30/15min 限流；消息 ≤2000 字；owner 硬隔离。
+- **前端**：`AssistantChatPanel` + `AssistantConfirmCard`（weixinCard 解析）；桌面右下 Sparkles FAB；移动顶栏「小小」+ 更多抽屉备份；sessionStorage 展示 + localStorage conversationId；与 toast 集成。
+- **v1 开放**：战情/客户/待办/知识/招标；写操作走确认卡；**封闭**记账、visit-capture、凭证 ingest（仍仅微信）。
+- 零数据库迁移；后端 1409 项（+23）；前端新增守护 15 条（assistant-chat 套件）。
+
+## [0.10.2] - 2026-08-29
+
+### 移动形态 + 离线到达（合并版，总蓝图 v0.10.2 行）
+
+- **移动壳（≤760px）**：底栏 4+1 FAB + 更多面板、下拉刷新、safe-area、顶栏重复入口隐藏；`useMobileShellEnabled` kill-switch `sentelligent_mobile_shell=0`。
+- **iOS 降级**：`inputCapabilities` + `IsoWeekFallback` + `DatetimeLocalInput`（week/datetime-local 拆分）；`splitDatetimeLocal`/`joinDatetimeLocal` 单测。
+- **PWA**：maskable 192/512 图标 + iOS standalone meta（`apple-mobile-web-app-*`）。
+- **离线到达**：`vite-plugin-pwa` 只读壳（precache + SWR，**不拦截 /api/**）；`bootstrapCache` IndexedDB 快照（account key、TTL 7 天、401/登出清除）；`offline-stale` 顶栏文案；`RouteChunkBoundary` chunk 一次 reload 兜底。
+- **站内角标**：`useNotificationBadges` 60s 轮询 `getDashboardSummary`（移动底栏红点；桌面侧栏不加角标）；不做 Web Push。
+- **SW 运维**：`registerServiceWorker` kill-switch `sentelligent_disable_sw=1`；`static-server` 为 `sw.js`/`index.html` 发 `no-cache`；Caddy 注释 scope 红线。
+- 零后端改动；零数据库迁移；新增守护 ~38 条（mobile-shell/pwa/input/bootstrap-cache/service-worker/static-server/pull-to-refresh）。主 chunk build 实测 ~364KB（<500KB 预算）。
+
+## [0.10.1] - 2026-08-29
+
+### 工程铺路：路由拆包 + 状态下沉 + 五实体页 EntityWorkspace（总蓝图 v0.10.1 行）
+
+- **阶段 A**：15 路由 `React.lazy` + `Suspense`/`RouteChunkBoundary`；Overview 静态首屏；`test:bundle` 守护主 chunk <500KB（实测 ~351KB）。
+- **阶段 B**：`SalesWorkbenchShell` + 5 hook/context；`App.jsx` 仅认证（≤5 `useState`）；Overview/QuickRecord/Weekly 零 props；五实体页 ≤5 props。
+- **阶段 C**：客户/商机/待办/风险/知识 全量 `EntityWorkspace`；列表/详情/删除弹窗模板收敛。
+- **守护**：`app-source.mjs` 聚合取源；`dashboard-refresh` 断言迁至 `useWorkbenchData`（正则未改）；新增 `app-hooks.test.js` + bundle-budget；集成/视觉补 lazy 等待。
+- 零后端改动；零数据库迁移；零新依赖。用户可感知变化=首访各页瞬时「正在打开页面」+ 首屏主 JS 更小，其余零行为 diff。
+
+## [0.10.0] - 2026-08-29
+
+### 快赢包：审计B Q1 六项 + 全局反馈系统（总蓝图 v0.10.0 行）
+
+- **总览重排**：今日焦点+周趋势 DOM 序置顶（全端同步，不用 CSS order）；hero 大卡及三条写死统计退役；KPI 卡增 chevron 示能；priority/health span 7+5。
+- **待办零深度**：列表行内完成/延期（乐观更新+toast）；新增待办入口+`ActionCreateForm`；`POST /api/actions` 新端点；`PATCH remindAt`+`reminded_at` 重置；`datetimeLocal` 双向转换工具。
+- **头像账号菜单**：`AvatarMenu` 替换一击登出（displayName/account 常驻，两击登出）。
+- **快速记录**：`analysisGateRef` pending 态+IME 组字守卫（composition 期间不清分析）。
+- **知识/周报**：检索清空即时还原全量；周报 daily tab 渲染 7 天真实快速记录分组（`groupRecordsByWeekday`）。
+- **假展开清除**：七基元改纯展示（删 interactive-card/占位句）；客户页删重复「关键联系人」Panel。
+- **全局反馈**：自研 `ToastProvider`+`ConfirmDialog` 替换五域 `window.confirm`；看板/行程删除接 toast；`kanban-status` 退役。
+- **调度器**：digest 旧格式幂等键过渡窗口关闭（v0.9.3 升级日防双发逻辑移除）。
+- 零数据库迁移；零新依赖。后端全量 1386 项（v0.9.3 基线 1375 净增 11：`actions-web-api`+digest 过渡）；前端 qa:local 480 项（基线 456 净增 24：overview-layout 6+quickwins 18+contract 调整）；Chrome/WebKit 集成、根发布测试与两级秘密扫描全部通过（findings=[]）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.9.3] - 2026-08-29
+
+### 微信绑定层：weixin_bindings 表 + 绑定码流 + worker 多目标投递 + 调度器多播（总蓝图 v0.9.3 行，多账号设计 L3，D2 白名单入 DB、D3 晨报订阅制默认开）
+
+- **迁移 0032（weixin_bindings + weixin_binding_codes）**：绑定表（sender_id 主键、account REFERENCES users、display_name、financial_enabled 默认 0、digest_enabled 默认 1、status、bound_at/bound_by、version 乐观锁）+ **一账号至多一条 active 绑定**（partial UNIQUE 索引 `idx_weixin_bindings_one_active_per_account`）；绑定码表只存 HMAC 哈希（code_hash 主键、expires_at、used_at 一次性标记）。种子读 env（现 sender→jiangjz，financial=1/digest=1，对应现 BOOKKEEPING 绑定语义）；env-less 彩排跳过种子，由启动期 `ensureBootstrapBinding` 兜底（只插不改、admin 停用过的行绝不复活，0030 同构）。migrations.test.js 基线 30→31 + 0032 专项用例（带 env 种子/无 env 跳过/幽灵账号跳过/CHECK 矩阵/one-active 索引/FK/二跑幂等）。
+- **入口安全顺序（核心）**：`POST /api/integrations/weixin-agent/events` 六步闸——①机器令牌+路由白名单（一字不动）→②幂等键+payload 校验（不动）→③群闸（`assertWeixinSenderAllowed` 拆分为 `assertWeixinGroupAllowed`，sender ∈ env 白名单分支退役——**绑定表本身即白名单**）→④`activeBySender` 绑定解析→⑤a **未绑定 sender 能力面={绑定 ######}**，其余任何文本/媒体固定拒答（不入编排、不落 assistant_inbound_events、不写 blob，回 200 denied 引导文案）；⑤b 已绑定者绑定控制词优先：「绑定 ######」回已绑定提示（不消耗码防误换绑）、「解绑」→「确认解绑」两段自助（无状态窗口）→⑥正常编排，`owner := binding.account`（机器令牌仅通道鉴权；种子绑定与 machineIdentity 同值，升级前后 conversation/event 哈希零漂移）。防爆破复用 `loginRateLimit` 全套（5 次/15 分钟，key=senderId 维度，错码 record、成功 clear、码空间 10^6×TTL 10 分钟×一次性）。
+- **绑定码流**：admin 于用户管理页生成 6 位码（`POST /api/admin/weixin-bindings/codes`，TTL 10 分钟、一次性、HMAC-SHA256 哈希存储 + 域分隔前缀，复用 assistantConfirmationSecret 不加 env 键；**明文只出现在 issue 响应一次**，不入库/审计/日志）；一账号一活跃码（新码作废旧未用码）；redeem+users active 校验+bind 同事务（绑定失败回滚码消耗）；新绑定 `financial_enabled=0` 默认关（财务写入显式授权）、`digest_enabled=1` 默认开（D3）。欢迎卡含能力清单与解绑指引。新模块 `weixin/bindingsRepository.js`（CRUD/乐观锁/one-active 409/换绑 upsert/listDigestTargets/listAdminTargets）、`weixin/bindingCodes.js`（issue/redeem/prune）、`assistant/weixinBindingGate.js`（入口闸，从 server.js 拆出便于单测）。
+- **运行时九装配点改查绑定表**：runtime 工厂 owner/senderId 闭包常量退役（`ready`=enabled ∧ hasActive() 动态 getter、`isReadyFor`/`conversationFor` 每次现查、导出面删 owner/senderId）；`settleFromWeb` 无绑定改跳回执（财务落库照常、outbox:null、审计 receiptSkipped——Web 端解绑用户仍可正常记账复核）；`reconcileAcceptedReceipts`/`reconcileAcceptedAttachments` 跨 owner 扫描+逐行容错（无绑定行跳过不中断）；`financialEventScopeAllowed`/`quoteLikelyTargetsShortcut` 改按 owner 当前绑定 sender 哈希比对；**financialScope := 私聊 ∧ binding.financial_enabled ∧ runtime.enabled**（下游 orchestrator 白名单/runtimeHandlers 三处拒闸零改动）；`businessOwnerResolver` 改注入 `hasActiveBinding` 查表（**闭合语义不变**：无绑定→null 拒答不回退全量，digest 空报/快照空集自动继承）；digest dryRun 保持调用者账号；outbox GET 内发票回执 reconcile 遍历全部 active 绑定逐 owner 执行。
+- **worker 多目标投递（协议 v2，双保险）**：outbox 行 `conversation_id ≡ deliveryScope ≡ hash(owner, senderId)` 不变式钉死（全部生产者经 `conversationFor` 入队）。lease 侧第一道：owner 现有 active 绑定 ∧ 行会话 ≡ hash(owner, 绑定 sender)，否则（解绑/换绑旧行、幽灵 owner、伪造行）终态 `WEIXIN_DELIVERY_SCOPE_MISMATCH` 判废——**解绑后消息静默、旧消息永不追投新 sender**；通过则响应 additive 增 `targetSenderId`。worker 侧第二道（`authorizeWeixinBoundDelivery` 导出可测）：本地重算 `hash(owner, targetSenderId)` 要求与 deliveryScope、conversationId 三者一致，不满足终态 fail-closed；`isDeliveryTarget` 假→`WEIXIN_CONTEXT_NOT_READY` 可重试（联系人同步中不终态，8 次耗尽自然 failed）→`sendMessageTo(target)`（clientId 派生不变）。就绪协议升级：worker 报 `weixin:multi:v1` 哨兵（`recipient_mismatch` 三态退役为逐条投递期判定，一个不可达目标不再全局熄火）；backend expectedScope 同哨兵（无 active 绑定→configuration_incomplete 不放租约）；scope 正则放宽为 `^weixin:(shortcut:v1:[0-9a-f]{64}|multi:v1)$`；升级窗口 fail-closed（旧 worker 报旧 scope→mismatch 不放租约，cutover 同窗重启对齐）。ack 协议与机器路由白名单零 diff。
+- **调度器多播**：三调度器+opsAlertService 统一 `listDigestTargets()`（active ∧ digest_enabled=1 总闸）。晨报/周五：逐 owner hasKey→build→enqueue（buildDailyDigest({owner}) 复用 v0.9.2 隔离即得各自内容），幂等键加 owner 维度（`daily-digest:{owner}:{date}`），**旧格式键过渡一版防升级日双发**（v0.10.0 移除），空跳过标记 per-owner，markers 逐 owner（`GET /api/digest/status` 形状 additive）；待办提醒：逐 owner 扫描（键 `action-reminder:{owner}:{id}:{ms}`，reminded_at 双保险；owner 无绑定不扫描不置位，**后补绑定即补发**）；招标推送：公告按匹配客户 owner 分组（一公告可入多组、组内去重，键 `hospital-tender:{owner}:cycle:{n}:chunk:{i}:{digest}`），**无路由公告投 digest-enabled 的 admin 绑定→PushPlus→审计 `hospital_tender.push.unrouted` 计数后视为已处理**（保持调度器重试契约）；告警：目标=active admin 绑定（无视 digest_enabled，告警非订阅内容），键加 `:{owner}` 后缀，无 admin 绑定落 PushPlus 兜底。
+- **Web 绑定管理（admin）**：`GET /api/admin/weixin-bindings`（listAll+users 联查显示名）、`POST /api/admin/weixin-bindings/codes`（users active 校验、已绑定 409 ACCOUNT_ALREADY_BOUND、停用账号 409 USER_DISABLED）、`PATCH /api/admin/weixin-bindings/:senderId`（displayName/financialEnabled/digestEnabled/status + expectedVersion 乐观锁；status→active 经 one-active 索引否则 409）——均 `requireAdminRole`，机器路由白名单不加（机器令牌 403）。前端 `UserManagementPage` 增「微信绑定」Panel（列表/开关/解绑确认）+ 用户行「绑定码」按钮 + 一次性展示抽屉（10 分钟有效、只用一次、当面告知提示）；api 层四方法。审计词表全量：`weixin.binding.code_issued/bound/code_rejected(reason∈invalid|expired|used|rate_limited)/denied/unbound(via∈weixin_self|web_admin|bootstrap)/updated`（entity_id=senderHash 前 16 位，**senderId 明文与码明文绝不入审计**；financial 开关变更必产生 updated 行=财务授权可追溯）。
+- **config 生产校验改造**：删除三条硬校验（`WEIXIN_BOOKKEEPING_SENDER_ID` 必填、∈ `WEIXIN_ALLOWED_SENDER_IDS`、`WEIXIN_BOOKKEEPING_OWNER === WEIXIN_AGENT_OWNER`）；保留 `WEIXIN_AGENT_OWNER` 必填（机器身份/workerId）与群聊两条硬校验、令牌熵校验。替代=运行时检查：启动期 `ensureBootstrapBinding` + 零绑定 `bindings_empty` 警告（不 fail 启动，微信面自动静默）+ `opsAlertStatusSnapshot` 增 `weixinBindings:{active:N}` 巡检字段。三枚 WEIXIN_* 绑定 env 键保留一版仅供 bootstrap 种子，v1.0.0-rc 连同键值退役（收官检查表登记）。
+- **顺手修复（v0.9.2 遗留观察项）**：快速记录 confirm 前对模型给出的 customerId/opportunityId 做存在性白名单校验（owner 归属内查库），幻觉 id（如 `cust-unknown`）按"未匹配"回退记录原值，不再 422 中断确认。
+- **评估项（不实施）**：v0.9.1 登录 env 回退轨退役——绑定层改动已够大，保留至 v1.0.0-rc（生产 journalctl env_fallback 命中数见 release 文档验收节）。
+- 一处数据库迁移（0032）；零新依赖；机器令牌与路由白名单零 diff（#18）；不上多 worker（#7）。**测试先写**：scope 矩阵（≥23 断言目标，实际 68）与绑定流（70 断言）两文件先行红提交后转绿。后端全量 1375 项（v0.9.2 基线 1345 净增 30 用例；四个新测试文件 243 断言 ≥ 任务书下限 70/估算 127）；前端 qa:local 456 项（基线 455 +绑定 Panel 契约 1）；Chrome/WebKit 集成、根发布测试与两级秘密扫描全部通过（findings=[]）。本版新改文件行尾归一 LF。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.9.2] - 2026-08-29
+
+### 数据层 + Web 硬隔离：owner NOT NULL 化 + 17 域端点矩阵 + 隔离矩阵测试（总蓝图 v0.9.2 行，多账号设计 L2，D1 裁定完全隔离无共享开关）
+
+- **迁移 0031（owner 隔离收紧）**：✗五表（risk_items/visit_itineraries/sales_decision_analyses/knowledge_items/ai_suggestions）`ADD COLUMN owner TEXT NOT NULL DEFAULT 'jiangjz'`（SQLite 自动回填存量）；◇四表（customers/opportunities/quick_records/action_items）以 RAISE(ABORT) 触发器实现 NOT NULL 语义（`migrateDatabase` 单事务 + `foreign_keys=ON` 下列重建不可行——FK 关闭窗口不存在、DROP 会级联清空商机、RENAME 会改写子表 FK，任务书 §1.1 论证；0009 防篡改触发器先例）；v0.9.1 窗口期 body 残值按 users.account 词表归一（无 users 表的直连旧库仅清 NULL）；九枚 `idx_*_owner` 过滤索引。全部幂等；migrations.test.js 基线 29→30 + 0031 五态专项用例（补列/清扫/触发器矩阵/二跑幂等/索引）。
+- **统一隔离机制**：owner ≡ `request.authContext.account`（读=WHERE 硬过滤，写=服务端注入并忽略 body）；跨账号一律 **404 防枚举**——owner 谓词进 before 读取，天然先于乐观锁，绝不泄露 409/currentVersion；admin 与 member 业务数据**同权同隔离**（admin 不可见他人业务数据）；机器路径（weixin-agent 白名单/outbox 租约协议）与全局域一字不动。anonymous 身份仅存在于 `AUTH_REQUIRED=false` 的单人开发/测试模式，保持历史全库视角、写路径回落遗留池 owner（与 0031 DEFAULT 同语义）。
+- **17 域端点矩阵逐行实施**：销售核心五域（客户/商机/行动/风险/知识）列表加 owner 过滤、GET/PATCH/DELETE :id 加 before-读取 owner 谓词（`updateCustomer`/`updateOpportunity`/`softDeleteCustomer`/`softDeleteRecord`/`update{Action,Risk,Knowledge,WeeklyReport}Item` 全部增 owner 参数）；行程域 `itineraryRepository` 五函数增 owner 维度（create 落 owner=actor）；AI 决策域 `salesDecisionRepository` list/get/create 增 owner（`buildSalesDecisionContext` 三实体读取全部 owner 化，跨账号 404）；`ai_suggestions` INSERT 落 owner；周报域 draftOwner 统一为会话账号（机器 OWNER_SCOPE_DENIED 契约保留）、源记录聚合恒带 owner、:id 四端点 404；方案域列表/详情/PATCH 加 `solution_drafts.owner` 谓词，draft 引用客户/商机/知识按账号校验；dashboard/summary 五查询+todayFocus+weeklyTrend 全部 owner 化（招标段保持全局情报）；`actions/reminders/status` pendingCount owner 化；快速记录域固化既有隔离并把 `validateCustomerOpportunityPair` 与 confirm 目标读取从"仅机器"改为 user/machine 一视同仁。知识域按 D1 从"全局"翻转为"个人"（列表/POST/PATCH/DELETE/search + 五个知识注入面：分析检索/引用校验/autoKnowledge/快照 `knowledgeSearch` 增 owner）。
+- **两处隐性泄露堵住**：`POST /api/digest/run` 归位 admin 门禁（member 探测 403），dryRun 回显以调用者账号为 digest owner（不再回显运行时 owner 的晨报全文）；招标列表/详情的 `hospitalTenderCustomerNameMap` 按账号过滤，`serializeHospitalTenderNotice` 新增 Web 显示面开关——匹配客户的 id/理由/需求/名称只渲染名映射命中者（他人客户 match id 不出现），`customerId` 筛选先校归属、不属于当前账号返回空集（200 防枚举）；机器同步/调度器序列化路径不动。
+- **写路径收口**：`customerCreate`/`opportunityCreate` schema 删 `owner` 键（传入即 422 unknown，patch 词表随 partialSchema 收口；store UPDATE SET 同步剔除 owner——本版无转移功能）；`weeklyDraft.owner`/`solutionDraft.owner` 由 required 降为可选（机器契约需要、Web 忽略其值）；runtimeHandlers 微信侧 `customer.update`/`customer.delete`/`opportunity.update*` 五调用点传 businessOwner（顺手封死微信侧理论跨 owner 写洞）；`upsertRiskItem`/`buildOpportunityRiskDrafts`/`upsertRiskFromQuickRecord` 风险落库补 owner（深写回链与 action 同款继承记录 owner）；seed.js owner 语义更新（客户/商机 `继振`→`jiangjz`，行动/风险/知识 INSERT 补 owner 列）；**修复两处微信写路径 0031 前置缺陷**：`visit-capture.confirm`/`visit-capture.capture` 原先"先插 NULL owner 再回填"，触发器时代改为 INSERT 即带 owner。前端配套：`WRITABLE_FIELDS.customer/opportunity` 删 owner、两个 draft 方法停发 owner、客户/商机表单摘除"负责人"输入框（详情页只读展示保留）。
+- **快照适配器 NULL 回退收紧**：`businessSnapshotAdapter`（opportunityById/opportunitySearch/actionRows/riskRows/dashboard counts/itinerarySummary 的 created_by→owner/knowledgeSearch 新增 owner）、`actionItemStore`（VISIBILITY_CLAUSE/JOINS 收敛为单 owner 谓词）、`opportunityStore`（可见性 OR 支）、`digestContent`（unscheduledTodoCount 三分支/itineraryToday created_by）全部收敛为单一 owner 列谓词——0031 回填后对 jiangjz 结果集恒等；硬判据 `rg "owner IS NULL"` 四文件归零。
+- **隔离矩阵测试（先红后绿）**：新 `owner-isolation-matrix.test.js` 双账号夹具（jiangjz=admin 启动种子 + testb=member 经 admin API 建号）17 用例、静态 100 处断言/运行期 ≈125 次执行（矩阵 ≈110 ≥ 任务书目标 80）：逐域 A 可见 B 不可见、B 携正确/错误 expectedVersion PATCH 均 404 且响应无 currentVersion、POST body.owner 422/忽略、B 引用 A 实体 422/404、dashboard B 全零、招标公告双账号可见但匹配名各归各、digest member 403、审计 actor 各自成轨、weixin 机器令牌 GET customers/POST quick-records/analyze 行为照旧（owner=jiangjz）。
+- **member 403 探测噪音收口（v0.9.1 遗留⑥）**：SystemSettingsPage 运行状态探测（含 admin 门禁的微信绑定状态端点）仅 admin 会话发起，member 不再产生 403 日志行。
+- 一处数据库迁移（0031，生产执行=cutover 后 backend 首启原子应用；/dev/shm 彩排 + owner 分布对账单 + VACUUM INTO 手动备份）；零新依赖；本版微信仍单 owner=jiangjz（绑定表化随 v0.9.3），weixin 既有测试语义零放宽（NULL-owner 夹具按 0031 回填后形态更新，逐条见 release 文档）。后端全量 1345 项（v0.9.1 基线 1327 净增 18 用例：隔离矩阵 17 + 迁移 0031 专项 1）；前端 qa:local 455 项持平（owner 表单契约守护改向：断言"负责人不在表单"）；Chrome/WebKit 集成、根发布测试与两级秘密扫描全部通过（findings=[]）。本版新改文件行尾归一 LF，历史遗留 CR 文件登记 v1.0.0-rc 统一清理。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.9.1] - 2026-08-29
+
+### 认证层：users 表 + 登录双轨 + 用户管理面（总蓝图 v0.9.1 行，多账号设计 L1）
+
+- **迁移 0030（users 表 + env 种子 + assignee 显示名回填）**：`users`（account 主键 `^[a-z0-9]{2,32}$`、display_name、password_hash（scrypt$16384$8$1$ 前缀 CHECK）、role admin|member、status active|disabled、version 乐观锁、last_login_at）；种子读 `AUTH_ACCOUNT`/`AUTH_PASSWORD_HASH`（合法即插入首个 admin `继振`，env-less 彩排语境跳过种子）；`action_items.assignee` 以 `assignee∈users.account` 为闸回填为 display_name（二跑幂等、种子缺席空转）。启动期 `ensureBootstrapAdmin` 兜底补种（**只插不改**，绝不覆盖 UI 改密后的哈希；审计 `user.create` actor=`system:bootstrap`）。三重种子保障 + 双轨回退 + 迁移原子性 + 防呆四则 = 锁死风险为零。
+- **登录双轨（server.js `authenticateLogin`）**：先查 users——行存在则先算 scrypt 再判 status（三条失败路径恒时等价）；**该账号查无行**时回退 env 凭据比对（`configuredCredentialsMatch` 原封保留），命中回退=异常信号 → 警告日志 + 审计 `auth.login.env_fallback`（metadata reason=user_row_missing），计划 v0.9.3 评估移除。成功落 `last_login_at`（不 bump version）。登录与会话端点响应统一为 `{account, displayName, role, expiresAt, csrfToken}`（session 端点每请求查表，角色变更即时生效免重登；回退轨会话 displayName=account、role=member）。限流器/恒时比较/CSRF/7 天 TTL/机器令牌**零改动**，现有生产会话跨版继续有效；`AUTH_ACCOUNT`/`AUTH_PASSWORD_HASH` 本版保留生产强制（种子数据源 + 回退轨兜底）。
+- **admin API 四端点 + 防呆**：`GET|POST /api/admin/users`、`PATCH /api/admin/users/:account`（expectedVersion 乐观锁，冲突 409 VERSION_CONFLICT+currentVersion；重复建号 409 USER_EXISTS；目标缺席 404 USER_NOT_FOUND）与 `POST /api/auth/change-password`（复用登录限流键防会话内暴破；旧密码错回 **403 CURRENT_PASSWORD_INCORRECT** 而非 401——前端对一切 401 全局登出；回退轨会话 409 USER_NOT_PROVISIONED）。防呆二则：不能停用自己（409 SELF_DISABLE_FORBIDDEN）、不能停用/降级最后一个 active admin（409 LAST_ADMIN_PROTECTED）。停用或重置密码即吊销目标全部会话（新 `revokeSessionsForAccount`；本人改密/自重置保留当前会话）。密码策略 10–128 字符；scrypt 计算全部在事务外；机器令牌打 admin 路由由既有白名单闸自动 403 MACHINE_SCOPE_DENIED。新模块 `auth/usersStore.js`（CRUD/乐观锁/计数/兜底种子，SQL 单文件收敛）。
+- **系统配置域写端点 admin 门禁（读不动）**：`PUT|POST|DELETE settings/deepseek-key(+别名)`、`PUT|POST|DELETE settings/pushplus-token(+别名)`、`POST settings/pushplus/test`、`GET|POST|DELETE integrations/weixin-agent/login`（绑定生命周期整组）、`PATCH hospital-tenders/scheduler`、`POST scheduler/run(-next)`、`POST hospital-tenders/run` 统一加 `requireAdminRole`（403 ADMIN_ROLE_REQUIRED，角色每请求查表无缓存）。生产现状单账号=admin，行为零变化。
+- **审计动作词表全量**：`user.create`/`user.update`（before/after 限已变字段）/`user.disable`/`user.enable`/`password.reset`/`password.change`/`auth.login.env_fallback`（组合 PATCH 一次产生多行；吊销计数键用 `revokedCount` 避开审计敏感键正则；哈希绝不入响应/审计/日志）。
+- **前端用户管理面**：新 `features/settings/UserManagementPage.jsx`（admin 可见：列表/新建/编辑/重置密码/停用启用，自己行停用禁用+title 提示，409 词表映射中文 toast、冲突自动刷新列表；member 直击 URL 渲染"需要管理员权限"占位）挂六处注册点（subnav`settings-users`/navRoutes 三表/routes PAGE_META+matchRoute+pathForRoute/App 渲染分支/api 客户端）；系统配置安全子页新增"修改密码"卡（所有角色；旧密码错→"当前密码不正确"、429→限流文案）；侧栏 settings 子导航按 role 过滤（member 仅见"安全设置"）；顶栏头像悬停显示 `显示名 · 退出登录`，登录后头像自动变"继"；`sessionAuth`/`salesWorkbenchApi` role 透传 + `listUsers/createUser/updateUser/changePassword` 四方法。差旅打印单据"报销人"随 displayName 从 `jiangjz` 变"继振"（预期改进）。
+- **深写回 assignee 终态（v0.9.0 §2.4 遗留归本版）**：`upsertActionFromQuickRecord` 的 `$assignee` 改为 `getUser(owner)?.displayName ?? owner`（登录用户确认快速记录后展示列即人名"继振"）；存量由 0030 回填。
+- **明示**：member 登录后左侧导航与业务页面不变，**仍可见全量业务数据**——数据隔离随 v0.9.2；本版仅对系统配置域写端点做 admin 门禁。
+- 一处数据库迁移（0030，生产执行=cutover 后 backend 首启原子应用+env 种子；/dev/shm 双彩排 env-less+带 env）；零新依赖。后端全量 1327 项（较 v0.9.0 基线 1303 净增 24 用例 / 新增断言 ≥190：users-store 46、admin-users-http 81、auth-http 双轨/回退/停用不回退/改密全链、migrations 0030 四态、api 深写回显示名）；前端 qa:local 455 项（较基线 439 净增 16：用户管理页源级 8 + 浏览器走查全链 1 + 改密卡 2 + role 透传 3 + api 四方法 2，`test:user-management` 新挂链）；Chrome/WebKit 集成、根发布测试与两级秘密扫描全部通过（v0.9.0 遗留的 v091 设计文档 finding 已随本版改写清零）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.9.0] - 2026-08-29
+
+### 地基包：告警面 + L0 owner 清洗 + 审计C余修 + 运维收口（总蓝图 v0.9.0 行）
+
+- **告警面（块1）**：新集成 `ops-monitor` 机器端点 `POST /api/integrations/ops-alerts`（Bearer `OPS_ALERT_TOKEN`，`machineAuthorization` 白名单登记，未知字段 422、source 锚定正则、severity 双值）+ `GET …/ops-alerts/status`（一次探测四合一：outbox 各态计数与最老 queued/`weixinDeliveryReadiness` 快照/三调度器 lastError）。告警落 `weixin_confirmation_outbox`（kind=`ops_alert`，小时级幂等键 `ops-alert:{source}:{hourKey}` 即风暴闸，同源同小时重发返回 `replayed:true`），载荷键按 outbox 红线把 `source` 落库改名 `origin`；`renderOutboxMessage` 新增 ops_alert 分支（`ops/opsAlertMessage.js` 三段式卡，fail-closed）；微信投递未绑定时端点内叠加 PushPlus 直发（新 `ops/opsAlertPushplusNotifier.js`，逐字复用招标 notifier 的 HTTPS/超时/响应限长模式，token 走 `resolvePushplusToken()`），两通道皆不可用 503 `OPS_ALERT_DELIVERY_UNAVAILABLE`；审计 `ops_alert.receive`。`scripts/deploy/` 新增 `sentelligent-ops-alert@.service`（OnFailure 模板单元）、`sentelligent-ops-inspect.service/.timer`（5 分钟巡检：outbox failed 水位/worker 心跳/status 端点四合一/备份新鲜度<26h）与 `ops-alert.sh`/`ops-inspect.sh`（backend 自身失败跳端点直走 PushPlus 兜底）；四主单元部署时加 `OnFailure=sentelligent-ops-alert@%n` 与常驻三单元 `StartLimitInterval=300`/`StartLimitBurst=5`。生产校验：`OPS_ALERT_TOKEN` 若配置必须高熵并入秘密两两独立集合。
+- **L0 owner 词表清洗（块2）**：迁移 0029（业务六表 customers/opportunities/action_items/quick_records/weekly_reports/solution_drafts 的 `继振`/`legacy`/`??`/NULL owner 统一为账号 id `jiangjz`；值白名单+IS NULL 双幂等；不动 audit_logs 历史留痕、assistant_* 机器身份与展示列 assignee；不 bump version/updated_at）。`upsertActionFromQuickRecord` 深写回 `$assignee` 由硬编码 `"继振"` 过渡为 `quickRecord.owner ?? null`（与 owner 继承同源；users.display_name 回填归 v0.9.1）。migrations.test.js 基线 27→28 并新增 0029 白名单/幂等/行哈希不变用例；`api.test.js` 增深写回 assignee=owner 断言。
+- **审计C余修（块3）**：① 招标摘要微信意图（B12）——新 agent `hospital-tender` + 工具 `hospital-tender.summary`（R0 免确认，policy/registry/manifest/capability 四处登记，registry↔manifest 启动一致性校验通过），`naturalPlan` 差旅汇总之后、记账捕获之前插入锚定全匹配正则（宽式 `查.*招标` 会吞拜访记录查询，收窄为全匹配），`explicitPlan` 加别名 `招标摘要`，HELP 文案同步；handler 与 `GET /api/hospital-tenders/summary` 同源 `repository.summary()`（全局域，不做 owner 过滤）。② 「修改客户」让路（B4）——`explicitModification` 收窄为"修改 + 19 词记账字段表才命中"（词表单一来源 `BOOKKEEPING_CORRECTION_FIELD_WORDS` 自 `CORRECTION_LABELS` 导出，最长优先），`commandTargetsShortcut` 的修改分支改由词表版承担、裸`修改`保留归记账；活跃草稿期「修改客户 X，级别 …」直达 customer.update 六位码链（weixin-agent 全链集成用例），16 条记账修改语料回归全绿。③ `AMAP_MODE=mock`（A8）——config 新键（live|mock，生产硬闸拒 mock），server 装配三元加 mock 分支（`maps/amapMockClient.js` 确定性桩：地址哈希入青岛 bbox、距离=球面×1.4、时距≈40km/h、polyline/步骤桩），行程 API 在 mock 下全链 201 且几何可复现；`local-dev.mjs` 隔离栈配方补 `AMAP_MODE=mock`。④ D5（`test:tender` 挂 qa:local）已由 v0.8.4 的 752a793 完成，本版仅核销。
+- **运维收口（块4，仓内部分）**：新增 `scripts/deploy/server-config/`（服务器为事实来源的实况快照目录：README 约定 BOM 保留与 `@RELEASE_DIR@` 模板化）+ `server-config-drift.sh` 只读漂移检测（SSH_TARGET/SSH_KEY 参数化，退出码非 0=漂移）；快照于部署尾声（四主单元 patch 后）采集入仓。服务器清理七项、v0.8.1–0.8.3 归档核验、18899 核销随部署窗执行并记录于 release 文档。
+- 一处数据库迁移（0029，8 行 UPDATE 预期，生产执行前 /dev/shm 彩排+对账+VACUUM INTO 手动备份）；零新依赖。后端全量 1303 项（较 v0.8.4 基线 1276 净增 27：ops-alerts API/渲染/status、outbox statusCounts、0029 迁移、深写回 assignee、招标意图语料 10、修改让路语料 16+、amap mock 契约、行程 mock 全链、config amapMode/OPS token）；前端 qa:local 439 项与基线持平（本版零前端代码改动）；Chrome/WebKit 集成、根发布测试与发布内容秘密门全部通过（工作树 secret 扫描唯一 finding 为并行泳道未跟踪设计草稿 `2026-08-29-v091-auth-design.md`，不在本版冻结范围，冻结树扫描 0 findings，证据见 release 文档）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.8.4] - 2026-08-28
+
+### 工程健康收官（总蓝图 L 阶段）
+
+- **P0 孤儿测试挂门禁**：全仓唯一孤儿 `src/features/hospitalTender/HospitalTenderPage.test.mjs`（v0.6.26 招标 UI 合入后从未执行）修复后挂入门禁——组件自测试编写后演进为 `customerId ?? ""` 防御写法，两条断言同步该语义（守护意图不变）；新增 `test:tender` 脚本并插入 `qa:local` 链（`test:settings` 之后），4 项全绿。
+- **worktree/分支大清理（主仓库）**：先为 45 个待删分支逐一打本地 archive tag（`archive/<原名>-20260828`，不推远端，可随时 `git branch <名> archive/…` 复活）；A 类 28 个（已被主线包含，实证 `merge-base --is-ancestor` 复核）在主线工作树内 `git branch -d`（git 自身二次校验包含性；其中两个 expense-ledger 分支被脏 worktree 占用，先 `switch --detach` 摘 HEAD——同 commit、工作区文件一字未动——再删）；B 类 17 个（`git cherry` unique=0 内容等价）`-D`。移除 67 个干净 worktree（含 `/private/var` v0.6.25 发布临时 checkout 与 tmp/ 事务副本），保留主 checkout、活动工作树与 8 个脏 worktree（待人工过目）；`ls .worktrees` 与注册表清理后完全一致，无孤儿目录残留。`git worktree prune` + `git gc --prune=now` 收尾。**磁盘回收 ≈8.9 GB**（.worktrees 8.35 GB + 外部 worktree 450 MB + tmp 副本 61 MB + .git 44 MB），分支 78 → 33（主线 + main + 31 个"需确认"，后者仅列清单未删）。
+- **pages.jsx 按域拆分（3887 行 → 13 个域文件 + 桶文件）**：先行单独提交守护测试取源改造——`workbenchState.test.js` 的 `pagesSource` 改为聚合读取 `pages.jsx` + `pages/` 目录全部 `.jsx`（断言一字不动，`salesDataImports` 升级为全局匹配防聚合漏检），另外 8 个读源文本的 scripts 测试统一改走新 helper `scripts/pages-source.mjs`；再做纯剪切搬移：`pages/shared.jsx`（FormField/确认删除/DeleteConfirmationDialog/StakeholderGrid/FieldTags/DecisionChain/DraftPreview/joinedList/sourceRefText/generateBusinessSuggestion 等 14 个跨域符号）+ PageHeading/Overview/QuickRecord/Customer/Opportunity/Actions/Solution/Weekly/Risk/Knowledge/WeixinBinding/Kanban 十二个域文件，`pages.jsx` 原地改为纯桶文件（15 个导出符号面零变化，`App.jsx` 与 fixture 导入语句零改动）；每个域文件 import 集合按引用实证计算，顺带清掉 6 个死 import。类名与测试断言零变化，本地合成栈 14 页真浏览器走查零运行时错误。
+- **差旅账本行删除入口（两轮深测缺口 + `deleteExpense` 死代码清账）**：v0.8.2 账本重设计时旧 `ExpenseLedger` 的行删除按钮未迁入 `ExpenseLedgerWorkbench`，`TravelExpensePage.deleteExpense`（confirm + If-Match 版本头）成为死代码。本版在工作台账本行（桌面表格"操作"列 + 移动卡片 footer）为正式费用行补回删除按钮（`data-testid="expense-delete-ledger"`，红色描边样式、打印隐藏），接回既有 `deleteExpense`（`globalThis.confirm` 弹窗 + `deleteTravelExpense(id, version)` If-Match 乐观锁，语义对齐动作页删除）；待确认行与借款行不出删除入口。新增源级守护断言（组件/接线/CSS/If-Match 四点）。
+- **技术债清账**：v0.7.5 测试基线口径笔误核销（交付报告 §3-8 标记已解决：冻结基线 1148、净增 41）；`.production-cutover.lock` 残留说明写入 `docs/部署记录.md` 运维注意事项（flock 锚点属正常现象，判断切换状态以 `.maintenance-lock` 与进程为准）；生产 outbox 4 条 08-22/25 历史 failed 按部署窗口"只读确认 → SQL 清理 + audit_logs 留痕"处置（仓库无删除合同，`failed` 即终态语义）。阶段词表下沉、naturalPlan 前缀表驱动等其余登记项维持开放并在清册注明去向。
+- **docs 全面回填至 v0.8.x 现状**：README（能力总览 12 业务域、生产状态、质量门口径、文档地图四类入口）、开发进度与路线图（改薄壳：现行路线指蓝图 + v0.1–v0.8.4 历史里程碑表）、开发日志（7-29 之后版本级摘要表）、部署记录（v0.3.0–v0.8.4 部署索引表 + 运维注意事项含全部血泪坑）、需求与验收矩阵（按 12 业务域重列 + 交互/安全运行三表）、项目架构与模块说明（backend 22 子域 + 前端 features + 三调度器 + 迁移 0001–0028 索引 + 审计脱敏与 outbox 终态边界）、新增《森特智行-v0.8.x-交接说明》（本机仓库为唯一主线来源的恢复路径、服务器事实、部署 runbook 十条要点、备份系统、退役记录；v0.4.4 原件保留）。
+- 零数据库迁移、零新依赖、零后端代码改动（后端全量 1276 项基线复验全绿）；前端 qa:local 439 项（较 v0.8.3 基线 434 净增 5：招标页守护 4 + 账本删除接线守护 1）；Chrome/WebKit 集成、根发布测试 249 项与密钥扫描全部通过。本地合成栈深测 17/17（14 页走查 + 建费→行内删除全流程）。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.8.3] - 2026-08-28
+
+### 战情总览升级 + 行程→差旅联动（总蓝图 K 阶段）
+
+- **今日焦点卡**（替换总览"本日推进节奏"静态卡）：一张 Panel 四分区——今天的行程（当日 planned 行程，标题+首站客户，点击进行程详情）、到点待办（逾期红胶囊/今日黄胶囊分计，复用 `remind_at` 上海时区判窗，与 v0.7.7 晨报同源口径）、高风险（沿用 `score>=80 OR severity=高` 源，客户名+分数）、新招标（"昨日 09:00 上海"锚点以来 high 相关，与晨报同锚）。每分区明细 ≤2 条 + "共 N 条"、空态短文案、44px 触控、分区头可点跳对应工作台。
+- **周趋势卡**：快速记录数 / 差旅报销额 / 待办完成数三行，本周 vs 上周（自然周周一起、Asia/Shanghai，复用 `weekStartOf/addDays`；**非**旧 KPI 的滚动 7 天窗）+ Δ%（上周为 0 显示"新增"、相等显示"持平"），纯 CSS 双横条（本周实色/上周浅色，宽度=值/两周最大值）。快速记录沿销售周报 `voided_at IS NULL` 口径；报销额沿差旅周合计 `reimbursement_cents` JOIN 口径；待办完成以 `updated_at` 前 10 位近似完成日（±8h 边界误差按设计接受并在测试固化）。
+- **商机漏斗**：`stageCounts` 改为按后端 `stageVocabulary.KNOWN_STAGES` 七阶段全序输出（含 0 计数），词表外阶段追加尾部；每阶段新增 `amount` 文本（`numberFromText` 求和 >0 时输出 `共 N 万`，与 KPI"万"口径一致）；前端 `StageStrip` 新增 `stage-strip__bar` 纯 CSS 底条（宽度=count/max），面板标题改"商机漏斗"。新增 stage-strip 词表同序源码断言（后端词表 ↔ 前端 fixedStages）。
+- **行程→差旅联动**：行程详情工具栏新增"记当日费用"（`ReceiptText`，44px）→ `navigateTo("expense", { filters })` 传 `draftDate/draftItinerary/draftCustomer/draftPurpose/draftRegion`（新纯函数模块 `itineraryExpenseLink.js` 双向映射：purpose=`拜访 前两站顿号连接[等]` 截断 100 字、region=首个非空站点 city、`draftDate` 非真实日历日期整组 fail-closed）→ 差旅页挂载即切至行程所在自然周并自动开新建抽屉预填（日期/事由/关联行程/关联客户，联动场景类目默认交通）→ 消费后 `replace` 清 URL 参数（刷新/回退不复弹）；指向已删行程/客户的参数回落"不关联"。抽屉 `createDraft` 增 `prefill` 参数（仅新建生效），"手工记一笔"与关闭/保存均清预填。
+- **区域档案联动（提示不自动写）**：目的地城市不在当周区域档案时显示警示条 + "打开区域设置"按钮（`regionProfile` 保存有 version 乐观锁，自动写风险大于收益）；城市比较走 `hasResponsibleCity` 后缀归一（济宁 ≡ 济宁市），非法输入不抛错按未命中处理；仅在差旅页仍停留在行程自然周时显示。
+- **接口与合同**：零新端点——扩展 `GET /api/dashboard/summary` 响应（`todayFocus`/`weeklyTrend` 新必需键 + `stageCounts[].amount`），`dashboardSummaryFromDb` 扩参接入已实例化的 `hospitalTenderRepository` 与上海时区周口径工具；`rhythm` 字段保留输出（合同兼容），web 端不再渲染。总览网格：今日焦点/周趋势各 span 6，最近记录/重点商机 span 4→6 补位，980/760 断点通栏名单同步；移除 `overview-rhythm`/`rhythm-*` 死样式。
+- **部署工具对齐金库退役现场**：CodexAccountVault 家族（`codex-account-vault-cloud.service`、`codex-vault-mihomo.service`、监听 4876）已于 2026-08-28 经项目所有者授权手术退役（unit 文件已删、端口无监听），`production-service-plan.mjs`/`production-preflight.mjs`/`production-cutover.sh` 的受保护清单同步收敛为共享 Caddy + 轻氧（8797），三套测试 fixture 与验收手册示例同步。首次 v0.8.3 preflight 因旧清单无法采集已退役服务而 fail-closed，属预期防护行为。
+- **总览进入即刷新（生产深测发现）**：行程/差旅写路径不经过 `refreshOverviewSummary`（该刷新只挂在客户/商机/动作/风险/快速记录写操作后），新建行程后站内切回总览时今日焦点/周趋势仍显示 bootstrap 时刻快照、需整页刷新才更新。修复为 `active` 切到 overview 时静默重拉 `GET /api/dashboard/summary`（失败保留旧值），顺带覆盖微信侧写入后的回站场景；新增 module-coverage 源码断言。
+- 零数据库迁移（读写全部命中现有表列）；零新依赖（趋势/漏斗全部纯 CSS）；模型路由不变。后端全量 1276 项（较 v0.8.2 基线 1275 净增 1 项：受控种子的 todayFocus/weeklyTrend/七阶段全序聚合断言，覆盖周一/周日 BETWEEN 双端点与两种历史 `updated_at` 格式）；前端 qa:local 434 项（净增 12 项：联动纯函数 8、区域归一 1、页面接线合同 1、词表同序 1、总览进入即刷新 1）；Chrome 集成（rhythm 卡断言随卡移除改指今日焦点到点待办分区）、WebKit、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.8.2] - 2026-08-28
+
+### 差旅工作台整改（用户真机反馈驱动）
+
+- **区域弹窗"无法添加城市"高优 bug 修复**：差旅页在存在小小待确认记录时每 12 秒轮询工作台，每次轮询都会以新对象身份重置 `regionProfile`，而区域设置卡的 `useEffect([open, profile])` 随之重建草稿——用户刚添加的城市几秒内被清空。改为"每次打开只初始化一次草稿"（open 转真且 profile 首次可用时初始化，ref 防重入、关闭时复位并清空草稿），后台轮询与服务端版本变化都不再打扰编辑中的草稿；保存冲突仍走既有 409 文案。新增 WebKit 真浏览器组件回归测试 `scripts/trip-region-settings-browser.test.mjs`（模拟 profile 身份变化/版本变化不重置草稿、关闭重开按最新 profile 重建）。
+- **移除"小小待确认"只读卡**：微信是唯一确认端，网页不再渲染 `WeixinBookkeepingReviewCenter`（组件文件与 `weixin-review-*` 样式族一并删除，Chrome/WebKit 集成合同改为账本仅保留付款凭证与借款到账两张子卡）；账本内待确认行保留并继续 12 秒轮询同步，其行内动作由"核对入账"改为"微信中确认"指引；后端微信确认合同不动。
+- **账本表格改版**：删除"来源"列（微信小小/个人垫付标签整列去掉，桌面表格与移动卡片同步）；"凭证"列缩略图从 48×54 放大到 104×117（超过翻倍，解码尺寸 180→360），列宽重排后凭证列 26% 成为最宽列之一，点击"查看"看大图能力保留。
+- **账本/打印/XLSX 对齐用户手工费用清单版式（7 列）**：`序号|日期|用途|金额|付款记录|发票|备注`。① 标题统一为 `M.D-M.D<城市顿号列表>出差费用清单`（日期范围取清单内费用实际发生日，空清单回落自然周；城市取本周负责区域 profile，如 `8.24-8.26济宁、东营出差费用清单`），打印页眉与 XLSX 首行（A1:G1 合并、加粗 14pt、冻结窗格顺移）同源渲染；② 备注列改为 purpose+notes 现有字段拼装（顿号语义"；"连接、去重），用途列保持类别词；③ 发票列沿用系统既有状态词表（已匹配电子发票→"电子"、规则候选匹配→"替票"、无票确认→"无票确认"、待补→"待补"——"替票"为系统既有概念 `substitute_invoice`，无新造词）；④ 底部合计保留"费用合计"+"替票合计金额"两行（替票合计=确认的 rule_candidate 匹配分摊额），账本合计条的可报销/垫付合计不变；⑤ 一笔多凭证时序号/日期/用途/金额/发票/备注跨行合并、每行一图的既有行为保持并纳入断言；⑥ 打印页凭证图放大至与 XLSX 内嵌图同物理尺寸（约 2 英寸宽，A4 纵向每页 6 个凭证行），XLSX 内嵌图片继续使用无依赖手工 OOXML zip 组装方案（非降级文字）。
+- 随车上线 `7c83da5` PWA 撞路由避让修复（v0.8.1 部署核验发现共享 Caddy 占用 `/manifest.webmanifest` 与移动 UA 裸根路径：manifest 改名 `/sentelligent.webmanifest`、`start_url=./overview`），部署后需复验 manifest/图标经 HTTPS 可达。
+- 零后端与数据库改动（后端全量 1275 项基线复验全绿）；前端 qa:local 422 项（净增 4 项：区域草稿浏览器回归、清单标题两处、页面合同扩充）；Chrome/WebKit 集成、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.8.1] - 2026-08-28
+
+### 全站视觉统一与 PWA（视觉审查报告 P0–P2 落地）
+
+- **P0 真缺陷修复**：全站首屏加载/错误/空数据面板的 `.workbench-state-panel`/`.state-spinner`/`.kanban-page` 三组类此前在任何样式表都没有定义（裸 HTML 渲染），按差旅基准模板补齐；6 处 `var(--ink)` 与 2 处 `var(--expense-muted)` 未定义变量修复。
+- **token 归一**：圆角三套体系收敛为卡片 10 / 控件 8 / 胶囊 999；文本色双色系（Untitled UI 灰系 111 处）统一到海军蓝灰基准；散落 iOS 色票收敛；焦点环统一 3px/0.22；触控目标对齐 44px；全局滚动条一段规则统一。客户/商机/知识/周报/行程/总览的列表、pill、合计条、提示条、空态对齐差旅基准（空态收敛为居中式+虚线两种）。改造遵循"改值不改名、只增不删"，全部既有类名断言测试保持绿。
+- **PWA 最小集**：新增 `manifest.webmanifest`（相对 start_url，适配动态 base）+ 192/512 图标（由森特透明底 LOGO 生成）+ theme-color 校准为全局背景 `#f3f5fa`；静态服务器补 manifest/图标伺服与测试。手机浏览器可"添加到主屏幕"以近原生方式使用。
+- 顺带修复两项走查发现：医院招标页 React `select value null` 警告（受控值兜底空串）；快速记录语音模式下手动输入被误标"语音转写"（改为仅真实发生转写才标记，来源通道语义修正）。
+- 后端全量 1275 项不变全绿；前端 qa:local 418 项（净增 2 项 PWA 资产测试）；Chrome/WebKit 集成、根发布测试与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.8.0] - 2026-08-28
+
+### 生产数据安全：每日自动数据库备份 + 发布制品服务器归档
+
+- 新增 `scripts/deploy/daily-db-backup.sh`：每日 02:30（Asia/Shanghai，systemd timer `Persistent=true` 补跑）对生产 SQLite 做在线快照（只读 `node:sqlite` 连接 + `busy_timeout` + `VACUUM INTO`，与 cutover 迁移彩排同款、对运行中后端零干扰）→ `quick_check`+外键校验 → fsync → SHA-256 sidecar → 原子重建 `manifest.json` → 按文件名日期清理 14 天前旧份。fail-closed：发布维护锁在位、磁盘余量不足、完整性不过均非零退出且清理半成品；已验证备份绝不误删。
+- 新增 `scripts/deploy/archive-release-artifacts.sh`：发布 bundle 与 evidence 归档到服务器 `backups/releases/<version>/`（staging 内 cmp/diff 校验复制 → 全量 SHA256SUMS + manifest → 原子 mv，已存在即失败不可覆盖 → root:root 0700/0600 冻结；证据内符号链接与 secret 疑似文件名直接拒绝），解除"发布制品仅存开发机"单点。
+- systemd 单元 `sentelligent-daily-backup.service/.timer` 落库并安装到生产（CentOS 7 / systemd 219：OnCalendar 用无时区写法，本地时区 Asia/Shanghai 已实测核对；单元引用 releases 之外的稳定路径 `tools/`，不进入 preflight 固定四项服务白名单，发布门禁零影响）。
+- 服务器实况核查报告（`docs/superpowers/research/2026-08-28-v080-server-facts.md`）12 项 TODO 全部核销或预记裁定：磁盘 22G 对约 50MB 备份总量、journald 已持久化、无单元/crontab 撞名；维护窗口撞 02:30 当晚 fail-closed 跳过（cutover 自带备份兜底）。
+- 无应用代码改动；后端/前端/发布门禁全绿基线不变。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.7] - 2026-08-28
+
+### 每日晨报 + 周五收尾包（v0.7 系列收官）
+
+- 每日 09:00（Asia/Shanghai，`DAILY_DIGEST_TIME` 可调）小小微信晨报四件套（新模块 `backend/src/dailyDigest/`）：① 今日行程（`visit_itineraries` 当日 planned 单日 SQL，≤3 条，解析 plan_json 取站数与首站客户名，plan 形状异常 fail-open 仅显示标题）；② 待办（迁移 0028 的 `remind_at` 判窗——逾期 = 上海今日 00:00 之前且 pending/in_progress，今日 = 当日窗口内，各 ≤5 条按 remind_at 升序，**不看 reminded_at**（到点提醒发过 ≠ 办完，与 v0.7.5 单次提醒构成"提醒一次 + 晨报追账"组合）；另有未排期待办计数走三分支可见域）；③ 活跃风险（severity=高或 score≥80 取前 3，无高危降一行计数）；④ 昨日以来新招标（`listNotices` 扩 `firstSeenFrom` 过滤器按 `first_seen_at` 判"我们何时首见"，high 列表 ≤5 + 超出计数、medium 仅计数，与实时推送卡互补不重复、不带 URL）。首行"焦点"按 逾期高优待办 > 今日行程 > 高分风险 > 新招标 确定性排序，全空段省略、四段全空当日不发（audit `digest.daily.skipped`）。
+- 周五 16:30（`DAILY_DIGEST_FRIDAY_TIME` 可调）收尾包（kind=`friday_closeout`）：周报段只读引用 `salesReportSummary` 三分支（已有周报 N 份（最新状态）/已确认素材 N 条引导一键生成/暂无素材），**不自动落库不调模型**；凭证缺失 = 本周费用无任何 `payment_proof` 附件（NOT EXISTS SQL，对齐 Web 合计条 `paymentProofMissingCount` 口径）；发票缺失 = `unacknowledgedMissingCents > 0`（已走"确认无票"的不再催——与 Web 徽标 `invoice_pending` 口径的差异见 release notes）；两清单各 ≤8 行 + 超出计数 + 缺票合计；两清单皆空时改发一行"本周凭证与发票已齐 ✓"（收尾包全空也发，确认无欠账本身是核心信息）。
+- 调度与幂等（`digestScheduler.js`，独立 60s setTimeout 链、与 v0.7.5 待办提醒循环不共用 tick）：零迁移零状态表——outbox 行即持久 marker，幂等键 `daily-digest:{date}` / `friday-closeout:{date}`（`outboxRepository` 新增只读点查 `hasKey`，同键异内容 409 反向保证 marker 强一致）；重启不重发、当日错过补发（audit 记 lateMinutes）、跨日不补（过期晨报无行动价值）、周五收尾包错过不补到周末；worker 离线（`deliveryReady` 门同招标）不入队不标记、恢复即补。消息经 `digestMessage.js` fail-closed 渲染（3500 字上限、段/行数硬顶、payload 走预渲染 lines 规避 outbox 禁键），出箱走既有 `renderOutboxMessage` kind 分发（`daily_digest`/`friday_closeout` 两分支紧邻 `action_reminder` 追加）。
+- 管理面：`GET /api/digest/status`（user 鉴权：调度器状态含 daily/friday 两段 + 今日两枚幂等键是否已投）、`POST /api/digest/run?kind=daily|friday&dryRun=1`（user 鉴权：dryRun 只构建渲染返回文本不入队不审计，供发布当晚预览"明早会发什么"；真发绕时刻门不绕 marker，重复调用返回 `already_sent`）。审计三 action：`digest.daily.sent` / `digest.daily.skipped` / `digest.friday.sent`（entityType `assistant_digest`，actor `system:daily-digest`，metadata 含各段条数与 outboxId）。配置 `DAILY_DIGEST_AUTO_RUN`（生产默认开）/`DAILY_DIGEST_TIME`/`DAILY_DIGEST_FRIDAY_TIME`/`DAILY_DIGEST_POLL_MS`（默认 60s，钳 [5s, 600s]）。
+- 招标采集 2026-08-20 陈账（`last_error` 英文快照校验文案）已于 v0.7.6 部署核验确认自愈（scheduler success、last_error=null、连续正常轮巡），设计中的 lenient 单条容错加固按现场裁定降级为不做，登记观察项：如未来再现"单条坏公告拒绝整批快照"，按施工图第四章方案加固。
+- 零数据库迁移（schema_migrations 保持 27 项 last=0028）；模型路由不变；本版无新增小小意图/工具（纯推送）。后端全量 1275 项（较 v0.7.6 冻结基线 1239 净增 36 项：内容四件套与收尾包口径/渲染 fail-closed/调度幂等与补发语义/HTTP 端点与出箱链路/firstSeenFrom/hasKey）；前端 qa:local 416 项、Chrome/WebKit 集成、根发布测试 249 项与密钥扫描（603 文件零发现）全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.6] - 2026-08-28
+
+### 小小·商机 agent：查/改阶段、金额、下一步，阶段升级联动销售决策
+
+- 六个商机工具挂入既有 `opportunity` agent（全部确定性解析、不经模型；owner 服务端解析）：`opportunity.list`（R0 免确认，"日照医院有哪些商机/商机列表"，≤8 条候选带阶段/金额/编号后 6 位）、`opportunity.update-stage`（R1 轻确认，"把日照的商机推进到方案交流/回退到调研机会"，语气词与句读归一）、`opportunity.update-next`（R1 轻确认，"下一步改成…/下一步：…"）、`opportunity.update`（R2 六位码，白名单金额/名称/风险逐字段 before→after 预览）、`opportunity.create`（R2 六位码，客户唯一命中必填 + 同客户同名查重）、`opportunity.delete`（R3 六位码软删除，预览卡强提示行动/风险/快速记录/方案草稿关联计数）。既有 `opportunity.detail` 保持 R0，详情卡增补编号/客户/风险/更新时间。
+- 阶段升级联动销售决策 agent：确认执行成功且方向为前进（词表内、非"暂停观察"）时，同步调 `previewSalesDecision`（opportunity_diagnosis）并包 8 秒 race 预算（`OPPORTUNITY_STAGE_REVIEW_BUDGET_MS`，钳 1–30 秒），回执卡尾部追加 ≤4 行"阶段升级检查"（判断/阶段门槛/评分/下一步）；超时或失败提示"发送「项目分析 …」可查看完整分析"，不静默不推独立消息；回退/词表外/暂停目标回执附一行手动提示。分析在业务写事务提交后执行，失败不回滚业务写；`assistant_agent_runs` 以 `assistant-action:{actionId}:stage-review` 事件唯一索引挡重。
+- 阶段词表后端镜像：新增 `backend/src/opportunities/stageVocabulary.js`（线索→初步沟通→调研机会→方案输出→方案交流→预算确认→暂停观察，与 Web 看板 `kanbanStages` 注释互指），方向判定 forward/backward/same/unknown 全 fail-closed；词表外阶段预览卡提示"看板将新增该列，不触发升级检查"但不阻断（与看板 extraStages 兼容）；"推进到下一阶段"相对语式 clarify 列已知序列。
+- 两级消歧坍缩与钉版：`opportunitySearch` 一次 LIKE 商机名 OR 客户名覆盖"客户名→商机列表"；候选卡升级为带阶段/金额/编号后 6 位（detail/项目分析消歧同步升级）；编号后 6 位回指走 owner 可见域内 LIKE 唯一命中（含转义）；商机快照与适配器投影补 `version`，providers 把 `expectedVersion` 钉进持久化参数，服务端 `runVersionedUpdate` 等价版本守卫拒绝并发写。建商机复用 v0.7.2 客户消歧器（clarify/未命中一律 block，不默认取第一个）。
+- 商机写路径抽取为共享模块 `backend/src/opportunities/opportunityStore.js`（`opportunityFromRow`/`createOpportunity`/`updateOpportunity`/`activeOpportunityEntityRow` 自 server.js 迁出非复制，Web 与微信同一份 SQL/审计/版本冲突语义；新增软删/尾码检索/同名查重/关联计数/owner 列表）。审计零新词：`opportunity.create/update/delete` 沿用 Web 同名 + `metadata.source="weixin-assistant"` + `metadata.actionId`；改阶段审计增 `metadata.stageReview`（triggered/skipped_backward/skipped_unknown_stage/skipped_pause，与写同事务原子记录；attached/timeout/failed 结果记录在工具运行输出与回执文本）。建档以 actionId 作实体主键重放安全；群聊拒绝 HTTP 边界先行 403 + provider 写门纵深防御。
+- 技术债核销（v0.7.2 登记）：router 画像句式排除名单重排——商机意图组前置截获（G-W 写组锚定"商机详情"别名后、G-Q 查组锚定客户检索前），名单中"项目|商机"主语从"排除落 unknown"改为转发 `opportunity.detail`（"XX项目什么情况"可查）；与记账/客户/快速记录/待办四组词干的分流回归全部固化（"记一下：黄岛商机推进到投标了"仍是拜访记录、"提醒我跟进黄岛商机"仍是待办、"日照的商机记录"仍是记录检索、金额句式不落记账）。行为变更：宽"推进到"语式使"会议推进到下周"这类非商机主语从拜访兜底改为商机未找到的自澄清卡。
+- 零数据库迁移（opportunities 表 version/deleted_at/next 全现成）；模型路由不变；Web 商机 CRUD 合同零变化。后端全量 1239 项（较 v0.7.5 冻结基线 1189 净增 50 项：阶段词表/store 等价性/六 handler 直测含联动三态/HTTP 全链路 11 用例/路由分流回归/快照 version/eventId 幂等/记账让路合同）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试 249 项与密钥扫描（594 文件零发现）全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.5] - 2026-08-28
+
+### 智能待办：自然语言建待办，到点小小提醒
+
+- 五个待办工具挂入既有 `action-risk` agent：`action-risk.create`（R1 轻确认，"提醒我…/待办：…/记待办/新建待办"）、`action-risk.list`（R0 免确认，"今天/本周/我的待办"）、`action-risk.complete`/`action-risk.defer`（R1 轻确认）、`action-risk.delete`（R2 六位码，软删除）。裸"待办/有什么待办"维持既有动作风险摘要不变；"完成了拜访…"等无"待办"词干句式不受影响。
+- 自然语言解析全部确定性、不经模型：新增 `backend/src/assistant/spokenTime.js` 未来向时间解析（明天/后天/下周X/周X 最近未来语义/X月X日/N天后/月底/X号 + 上午十点/下午3点半/14:30/中午/今晚/明早 + "周五前/3天内"截止语义；有日期无时刻默认 09:00，有时刻无日期按今明判定）；优先级词（紧急/重要/优先/高优 → 高）；"给/约/联系 X"人名候选仅在唯一命中时挂接客户，不唯一时静默不挂。预览卡回显解析结果，解析失败降级"无提醒纯待办"，不瞎猜。
+- 迁移 `0028_action_item_reminders`：action_items 加 `owner`/`remind_at`/`reminded_at` 三列 + 到期部分索引，存量行 owner 自挂接客户回填；快速记录确认深写回同步继承记录 owner。小小侧待办可见域扩展 `action.owner = $owner` 分支——不挂客户/商机的独立待办首次对小小可见；owner 为空的存量行微信端只读保护。
+- 新增 `backend/src/actionItems/actionItemStore.js`（owner 限定建/查/完成/顺延/软删，乐观锁版本守卫）与 `backend/src/actionReminders/reminderScheduler.js`（60 秒 setTimeout 轻循环：`remind_at<=now AND reminded_at IS NULL` 表即队列，outbox 幂等键 + reminded_at 双幂等防重复轰炸，worker 离线跳过不标记、恢复补发，迟到 >24h 标注"过期待办"）。到点提醒为闹钟语义、不受招标 9–20 窗口约束；夜间/清晨提醒时刻在预览卡提示。提醒卡走既有微信 outbox 绑定私聊投递（新 payload kind=`action_reminder`），回复"完成待办 <编号>/待办 <编号> 推迟到…"闭环。
+- 管理面：`GET /api/actions/reminders/status`（调度器状态 + 待发计数）；配置 `ACTION_REMINDER_AUTO_RUN`（生产默认开）与 `ACTION_REMINDER_POLL_MS`（默认 60s，下限 5s）。审计：`action.create`（微信建待办新 action）、`action.update`/`action.delete` 沿用 Web 同名 + `metadata.source` 区分、`action.reminder.sent`（actor=system:action-reminder）。
+- 后端全量 1189 项（较 v0.7.4 冻结基线 1148 净增 41 项，其中 10 项为迁移清单动态子用例：store/时间解析/调度器/提醒渲染/HTTP 全链路/路由分流回归）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.4] - 2026-08-28
+
+### 小小微信回复卡片统一（用户真机反馈驱动）
+
+- 新增共享渲染器 `backend/src/assistant/weixinCard.js`：所有小小回复对齐记账消息的既有版式——`【标题】` + 每行一个 `标签：值` 字段 + 空行 + 一句操作提示；空值统一显示"待确认"，列表用顿号连接，长文本按上限截断加省略号。
+- 覆盖改造的回复面：拜访记录（新增/修改/作废三张预览卡、录入/更新/作废三张回执卡、记录列表与空态）、客户（画像卡、建档/改档/删档预览卡、建档/更新/归档回执卡、候选消歧卡）、商机详情卡、战情总览卡、客户检索列表；旧三步拜访流的预览卡同步换版式并保留"回复录入"指引。
+- 确认提示语简化：六位码卡收敛为"确认码：XXXXXX ＋ 请回复这六位数字，或回复“取消”"两行；轻确认收敛为"请回复“确认”或“取消”"一句。TTL/取消/重发确认码语义与安全不变量（明文码不落库、存档占位）完全不变。
+- 去技术细节：回复中不再出现 UUID、乐观锁版本号、运行记录 ID；单据引用统一为尾 6 位短码；摘要截断从 160 收紧到 80 字符。
+- 零数据库迁移、零 API 合同变化（仅 text 文案）；模型路由不变。后端全量 1148 项（净增 3 项卡片渲染测试），前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.3] - 2026-08-28
+
+### 小小·拜访与快速记录 agent：一句话记录，查、改、作废全链
+
+- 微信端新增四个快速记录工具并注册进确定性编排器：`visit-capture.capture`（R1 轻确认）、`visit-capture.search`（R0 免确认）、`visit-capture.update`（R2 六位码）、`visit-capture.void`（R3 六位码）。`记一下：/记录一下/快速记录/记拜访` 一步式捕获：同步 AI 分析（沿用 30s 超时静默降级的确定性 fallback）生成摘要卡（要点/客户匹配/待办建议），回复"确认"即写回——复用 quick_record 确认深写回链路（客户/商机/待办/风险），`source_channel='微信助手'` 直通周报素材路径不变。
+- R1 轻确认复用记账"确认"交互的内部派生凭据模式，`pendingActionRepository` 零改动；编排器新增 `affirm_language` 确认分支，与六位码链共享 TTL/取消/重发语义。与记账的歧义分流：金额与记账词（元/块/记账/报销/发票等）强信号让路记账链路，`记拜访：` 为绕开歧义的逃生门；记账草稿并存场景的让路合同用例（T-BK-1/2/3）在单元与 HTTP 两层固化。
+- `查/查一下 …（上周/本月/今天…）…的记录` 免确认检索：中文口语时间窗解析（新增 `spokenDate.js`，过去向）+ 客户主语模糊匹配（复用 v0.7.2 消歧器）；候选卡带记录短码。`把（那条/记录X）的字段改成…` 走 R2 预览卡（before/after + 乐观锁钉版）；`作废/删除记录` 走 R3——补齐 `voided_at` 自迁移 0002 建列以来从未有写路径的缺口，软作废可审计、读路径自动隐藏。
+- 快速记录写路径抽取为共享模块 `backend/src/quickRecords/quickRecordStore.js`（Web 与微信同一份 SQL/审计/版本冲突语义）；新增 `quickRecordPendingPreviewProviders.js` 预览提供者。既有微信三步式 visit-capture 暂存流原样保留。
+- 零数据库迁移；模型路由不变。后端全量 1145 项（较 v0.7.2 净增 73 项：store 写路径/口语日期/路由语式/预览提供者/HTTP 全链路 10 用例/记账并存合同用例）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试 249 项与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.2] - 2026-08-28
+
+### 小小·客户画像 agent：查免确认、增改删六位码确认
+
+- 微信端新增三个客户写工具并注册进确定性编排器：`customer.create`（R2）、`customer.update`（R2）、`customer.delete`（R3，软删除），全部走既有六位码确认链（10 分钟 TTL、错码 5 次锁定、明文码不落库）；查询类（`customer.search`/`customer.detail`）保持 R0 免确认。写操作仅限与小小绑定的私聊（群聊 fail-closed 拒绝），owner 一律由服务端机器身份解析，模型与用户均不能指定归属。
+- 编排器新增可选 `pendingPreviewProviders` 钩子：建 pending action 之前先做客户消歧（唯一命中出预览卡、多命中列候选澄清、零命中引导建档）、建档重名保护、逐字段 before/after 变更预览，并把规范化参数与乐观锁版本钉进持久化计划；预览摘要随"重发确认码"一并重发；事件存档仍整体替换为占位文本，确认码与预览卡都不进 `assistant_inbound_events`。provider 抛错走既有安全失败响应，未注册 provider 的确认流字节级不变。
+- 修复记账运行时 `handlePending` 的两处让路缺陷：主会话存在非记账 pending action（如客户写操作）且未引用记账草稿时，六位码/取消/重发确认码/普通文本一律交回通用确认边界（此前六位码会被"小小记账不使用六位确认码"吞掉）；无引用、无 pendingActionId 时，非记账语言不再被隐式草稿绑定劫持（客户画像问答、建/改/删档指令在草稿活跃期正常工作）。引用草稿的确认/修改/取消、隐式"确认"、借款/区域意图与财务范围门全部保持不变。
+- 新增前向迁移 `0027_customer_profile_aliases`：customers 表加 `aliases`/`tags`（JSON 文本数组，默认 `[]`）；小小快照投影扩展 `version/contact/budget/summary/aliases/tags`，客户检索的 LIKE 条件加 `aliases`（"日照中医院"等俗称可查）；画像卡展示联系人/预算/别名/标签/摘要/在办商机数。Web `POST/PATCH /api/customers` 同步接受 `aliases`/`tags`（≤20 项、每项 ≤120 字），响应与审计快照新增这两个字段。
+- `server.js` 客户写路径抽取为共享模块 `backend/src/customers/customerStore.js`（create/update/softDelete/重名检查/在办商机计数），微信与 Web 走同一份 SQL 与审计快照；Web 端客户 CRUD 行为、审计 action（`customer.create/update/delete`）与乐观锁语义不变。微信来源审计以 `metadata.source="weixin-assistant"` + `metadata.actionId` 区分；`customer.create` 以 actionId 作实体主键实现重放安全，update/delete 以 `expectedVersion` 兜底防止二次写；`contact` 字段仍被审计脱敏器按键名剔除（预期行为，changedFields 可证明改动）。
+- 路由器新增确定性语式：建档（`新建客户/新增客户/建档：…` 键值段解析）、改档（`修改客户 X，级别A`、`把X的区域改成日照`、`给X加别名Y`、上下文代词`它/这个客户`回退）、删档（`删除客户/删档`）、`查询 X` 与画像句式（`X什么情况/近况/画像/资料/档案`，显式排除以项目/商机/报销等结尾的主语）；未知字段澄清提示可改字段清单。
+- 测试：后端全量 1072 项（较 v0.7.1 净增 42 项：路由语式、策略/manifest、变更预览与预览提供者、写 handler 幂等与版本冲突、HTTP 全链路建/改/删/锁定/换码/过期/群聊拒绝、记账草稿共存回归）；前端 qa:local 414 项、Chrome/WebKit 集成、根发布测试与密钥扫描全部通过。按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.1] - 2026-08-27
+
+### 记账确认唯一化与系统配置记账实时日志
+
+- 记账确认收敛为微信单一入口：差旅工作台"小小待确认记账"改为只读复核卡（识别摘要 dl 展示 + 微信引用回复引导），删除确认入账/重新识别/拒绝按钮与可编辑表单；同步移除跨周账目提示横幅及其数据链（`selectCrossWeekLedgerReceipts`/`locateRecentReceipt`/`refreshWeixinBookkeepingReviews`），周切换与保存费用的定位机制不变。
+- 前端 API 客户端裁撤 `confirmWeixinBookkeepingReview`/`rejectWeixinBookkeepingReview`/`retryWeixinBookkeepingReview`；微信 worker 使用的后端确认合同保持不变。
+- 后端 `GET /api/audit-logs` 新增 `scope=bookkeeping`：服务端常量前缀白名单（travel_expense/travel_expense_advance/travel_expense_document_inbox/invoice/shortcut_bookkeeping/bookkeeping_client），SQLite `GLOB` 前缀匹配避免 LIKE 下划线通配，未知 scope 422 fail-closed。
+- 新增 `POST /api/bookkeeping/client-events`（仅登录用户）：事件白名单 `print_expense_list`/`print_invoices`/`export_expense_xlsx`，`weekStart` 须 `YYYY-MM-DD`、`itemCount` 须 0–10000 安全整数、`context` ≤200 字符，非法值与未知字段丢弃 fail-closed，写入 `audit_logs`（`bookkeeping_client.*`）。
+- 差旅工作台三处埋点 fire-and-forget：打印费用清单、打印发票、导出费用 Excel；埋点失败静默，不阻塞主交互。
+- 系统配置新增"记账日志"子页（`/settings/bookkeeping-log`，子导航第 5 项）：每 10 秒轮询 scope 过滤的审计流水并支持手动刷新，动作中文标签映射、HH:mm:ss 时间、单据短标识与金额/摘要提取，空态/加载态/错误态齐全。
+- 修复上一候选遗留的 `setRecentLedgerReceipts` 残留调用导致差旅页运行时崩溃的问题；无数据库迁移；模型路由不变；后端全量 1030 项、前端 qa:local、Chrome/WebKit 集成、根发布测试与密钥扫描全部通过；按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.7.0] - 2026-08-27
+
+### 小小助手：医院招标微信推送与白天轮巡窗口
+
+- 医院招标监测通知改为经微信助手"小小"主动推送：复用既有微信确认 outbox（幂等键 `hospital-tender:cycle:{n}:chunk:{i}:{内容哈希}`、租约重试、单实例投递、绑定本人私聊），有新的高相关公告才推送、无新公告不打扰；PushPlus 仅在微信投递未绑定时作为兜底通道保留。
+- 新增前向迁移 `0026_hospital_tender_active_window`：轮巡调度器增加 Asia/Shanghai 活动窗口（默认 9–20 点），窗口外不采集不推送，`next_run_at` 自动跳到下一窗口起点；`--force` 手动运行不受窗口限制。调度器 PATCH API 支持 `activeStartHour`/`activeEndHour`（0–23/1–24，start<end fail-closed），窗口或间隔变更即时生效。
+- 推送文案为有界纯文本分片（每条最多 20 条公告），payload 不含 token/密钥/正文以外内容；渲染 fail-closed，未知 outbox kind 行为不变，快捷记账链路不受影响。
+- 后端全量 1029 项、迁移与调度窗口回归、根发布测试全部通过；生产切换后需用 PATCH 将 `intervalMinutes` 设为 `120` 以启用"每 2 小时"节奏；按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.6.28] - 2026-08-27
+
+### 差旅报销界面重设计
+
+- 基于浏览器全覆盖走查（桌面 1440×900 与移动 390×844 双视口、真实前后端联动数据）重做差旅费用账本工作台视觉：宽屏内容居中自适应、顶部统计条与自然周条重排（城市 chip、待办徽标）、提示条收敛为细条样式、账目表状态统一浅底 pill、底部合计条按"金额组/待办组/操作组"分区。
+- 小小待确认卡重排：微信原始文字默认三行折叠可展开、表单字段两列网格对齐、`missing_date`/`invalid_model_response` 等英文错误码映射为中文状态标签、确认/重新识别/拒绝按钮组统一。
+- 付款凭证区紧凑化：去除重复标题、费用块头一行化、上传控件收窄；收款方缺失时回落显示费用商户。发票页仓库列宽、状态标签与原件预览容器统一。
+- 纯前端展示层变更：无 API、数据库、业务逻辑或 data-testid 契约变化；后端全量、qa:local、Chrome 集成、WebKit 与根发布测试全部通过；按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.6.27] - 2026-08-27
+
+### 功能收尾：录音裁撤、知识引用与全站路由
+
+- 按产品决策彻底移除快速记录的录音长期保存/回放遗留链路：MediaRecorder 录音兜底、本地音频回放卡、"上传录音"控件及相关样式与 QA 注入全部删除；浏览器不支持语音识别时引导改用文本录入，实时语音转写保持不变。
+- 知识库接入两条 AI 分析链路：快速记录 preview/analyze 使用确定性中文友好检索（标题/分类/标签整词 + 中文 4 字滑窗、得分阈值）注入 prompt，并由服务端把 `knowledgeRefs` 出处挂载到分析结果与 `ai_insights` 持久化 JSON，人工修改摘要不丢引用；销售决策上下文知识条目带 id，提示词要求 facts 以 `sourceType="knowledge"` 引用真实 id。前端分析面板新增"参考知识"区并可跳转知识详情。
+- 补全浏览器历史（UX-08）：知识库、拜访行程、快速记录历史与方案辅助详情写入真实 URL，深链/刷新/前进后退恢复视图与选中记录，bootstrap 不再覆盖深链选中，深链失效显示"记录不可用"；新增内容区滚动位置随浏览器历史保存与恢复。
+- 本版无数据库迁移；模型路由不变（文本 `deepseek-v4-flash`，图片/PDF `deepseek-v4-flash-vision-exp`）；后端全量 1022 项、前端 qa:local/qa:integration/qa:webkit、根发布测试与密钥扫描全部通过；按项目所有者授权走本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.6.26] - 2026-08-27
+
+### 差旅账本与客户画像/招标监测整合
+
+- 差旅费用账本继续保留账本、发票两个工作区，付款凭证、整理报销、借款/请款作为账本内子功能；补齐跨周账目精确定位、付款凭证定位、打印预览状态保留、区域设置焦点恢复与发票候选覆盖校验。
+- 客户画像、商机和系统配置按新的信息架构接入真实路由与上下文；医院招标监测接入客户上下文、调度控制与 PushPlus 配置，保留人工确认和只读边界。
+- 强化医院招标官方来源采集、批次租约、部分快照、通知重试与生产预检；本版无数据库迁移。
+- 本地候选已完成前端、后端、Chrome/WebKit、secret scan、发布前置和回滚门禁；生产切换需以本候选的不可变制品、预检报告和服务器证据为准。
+
+
+## [0.6.23] - 2026-08-25
+
+### 小小餐饮时段自动分类
+
+- 本人微信付款凭证在上海时间 `04:00–10:59`、`11:00–15:59`、`17:00–23:59` 且单笔不超过 40 元时，自动归入餐饮的早餐、午餐或晚餐子类；同一截图的多笔付款仍逐笔生成独立草稿。
+- 固定确认消息只显示父类“餐饮”，内部继续保留早餐/午餐/晚餐子类，并自动生成“月.日 + owner/date 行程区域 + 餐次”备注；区域不唯一或缺失时不猜测并保留复核提示。
+- 大额付款仅在餐饮商户或多人出差语义成立时按付款时段推断餐次；明确的招待、住宿、交通或汽车维保语义优先于餐饮时钟，避免低额非餐饮误分类。
+- 支付时间只使用付款/交易语义时刻并忽略手机状态栏；视觉模型可返回最多 20 个严格多笔交易，重复附件复用首次内容寻址结果；自动备注带来源元数据，金额、时间、商户、用途、日期、餐次或父类修改后按人工优先级重算或清空。
+- 零金额修改保持澄清且不改变草稿；行程区域只接受明确字段或有边界的移动短语，普通叙述失败关闭到同 owner/date 唯一行程城市。
+- 修复“修改费用类别为……”被短标签“费用”误解析为金额修改的问题；确认、取消、owner 隔离、引用版本门禁和消费金额等于可报销金额的合同保持不变。
+- 本版没有数据库迁移；图片/PDF 继续使用 `deepseek-v4-flash-vision-exp`，其他模型任务继续使用 `deepseek-v4-flash`；按项目所有者授权直接发布生产，不同步 GitHub。
+
+## [0.6.22] - 2026-08-25
+
+### 微信单次回执兼容热修
+
+- 生产安全遥测确认发送接口会以 HTTP 200 和仅含正整数 `message_id` 的 JSON 对象表示成功；vendored SDK 现在只接受这一精确形状、空/空白正文、空对象或全零状态字段。
+- 缺失、空值、非正整数、混合未知字段、畸形 JSON 和任一显式非零状态继续失败关闭；响应正文和值不写入应用日志。
+- 继续保留 v0.6.21 的空备注、自然语言修改、引用身份和受限 409 修复；无数据库迁移，不改变视觉/文字模型路由，不同步 GitHub。
+
+## [0.6.21] - 2026-08-25
+
+### 小小备注与微信引用回执热修
+
+- 新付款凭证的备注默认留空并显示“无”；商户和用途继续保存在各自字段，不再把商户名称回填为备注。
+- 自然语言备注修改同步数据库行、分析快照和后续确认消息；兼容“修改备注8.18晚餐：……”这类紧凑表达。
+- 微信发送接口的 HTTP 2xx 空正文按成功回执处理，结束“消息实际可见但 outbox 误判失败并反复发送”的循环；引用消息优先匹配稳定的 Sentelligent 客户端标识。
+- 后端的受限 409 业务说明不再被包装成“处理消息失败”；当 provider 没有传递引用元数据时，只对唯一草稿或与其他草稿有明确时间间隔的最新草稿提供状态兜底，最终确认仍要求该最新草稿已有成功送达证据。
+- 隐式选择草稿后再次执行绑定 owner、精确发送者与本人私聊门禁，其他 allowlist 发送者和群聊不能修改、确认或取消财务草稿；旧版引用不能确认已修订的新版本。
+- 本版不修改既有待确认记录的历史备注，无数据库迁移，不改变图片/PDF 使用 `deepseek-v4-flash-vision-exp`、其他任务使用 `deepseek-v4-flash` 的模型路由；按项目所有者授权直接发布生产，不同步 GitHub。
+
+## [0.6.20] - 2026-08-25
+
+### 生产 PDF 视觉渲染兼容热修
+
+- 保留图片与 PDF 使用 `deepseek-v4-flash-vision-exp`、纯文字继续使用 `deepseek-v4-flash` 的模型路由合同。
+- 移除生产 Poppler 0.26.5 不支持的 `pdftoppm -jpegopt` 参数；PDF 仍先有界渲染最多四页 JPEG，再交给视觉模型。
+- 新增精确参数回归，禁止重新引入旧版生产命令不支持的 JPEG 质量参数；本版无数据库迁移，不同步 GitHub。
+
+## [0.6.19] - 2026-08-25
+
+### 小小视觉记账与单次投递热修
+
+- 图片付款凭证、图片发票和 PDF 发票改用 `deepseek-v4-flash-vision-exp`；其他模型任务继续使用 `deepseek-v4-flash`。
+- 微信 provider 的空成功回执和零状态回执按成功处理，同一 outbox 重试复用稳定客户端幂等标识，终止重复确认消息。
+- 本版无数据库迁移；按项目所有者授权使用本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.6.18] - 2026-08-25
+
+### 微信远程媒体类型热修
+
+- 修复微信远程 Agent 将已规范化图片提交到事件 API 时遗漏必需 `media.type` 的问题；严格从 SDK 请求映射且仅转发精确的 `image` 或 `file`，服务端媒体白名单和魔数校验保持不变。
+- 新增真实 JPEG 文件路径到远程 HTTP 请求体、再到 `validateWeixinAssistantEvent` 与无损 `contentBase64` 的闭环回归，并用真实本地 HTTP server 验证图片能生成记账草稿；同时覆盖 `image`/`file` 精确映射及近似、大小写和不支持类型拒绝。
+- 本版没有数据库迁移，不清理微信 session、游标、历史消息、待确认草稿或 outbox；按项目所有者授权直接发布生产，不同步 GitHub。
+
+## [0.6.17] - 2026-08-25
+
+### 微信付款图片尾部规范化热修
+
+- 微信图片解密或下载后、落盘和计算 SHA-256 前，只在 JPEG 起始标记、固定位置结束标记、provider trailer 零字段和 MD5 摘要四项同时匹配时剥离已验证的 24 字节 provider trailer。
+- trailer 任一条件不匹配时保持原字节，继续交由现有严格图片检查 fail-closed；不扩展格式白名单，也不放宽发票或付款凭证校验。
+- 新增真实结构 JPEG 的正例、任意前四字节兼容及摘要、零字段、SOI/EOI 位置负例，并验证剥离后能通过生产 `readWeixinDocument` 规范化。
+- 本版没有数据库迁移，不删除微信 session、游标或历史消息；按项目所有者授权直接发布生产，不同步 GitHub。
+
+## [0.6.16] - 2026-08-25
+
+### 微信入站游标阻塞热修
+
+- 将微信助手的后端处理阶段与微信回复投递阶段拆开：只有后端/Agent 瞬态失败才保留旧游标重试；后端已经成功时，单次回复投递失败不再重放业务事件或阻塞同批后续图片。
+- 新增同批两条消息回归门禁，证明第一条回复失败后第二条仍只处理一次、游标推进且不会产生 `updates error` 毒消息循环；原有“真正处理失败必须重试”门禁保持不变。
+- 不删除微信登录会话、持久游标、记账草稿、outbox 或报销数据；本版没有数据库迁移，也不改变“小小”记账的人工确认合同。
+- 按项目所有者授权直接发布生产，不同步 GitHub；“整理报销”会话及其数据结构不在本热修范围内。
+
+## [0.6.15] - 2026-08-25
+
+### 小小微信图片记账与发票自动匹配
+
+- 将记账入口统一为本人向“小小”微信助手发送付款凭证图片或收入、支出、借款到账文字；OCR/AI 只生成固定格式待确认草稿，必须引用消息并用自然语言确认、修改或取消后才写入账务。
+- 支持单图多笔交易拆分、内容寻址去重、压缩付款凭证附件，以及按金额优先当前自然周、最多跨 31 天的发票自动匹配；同额歧义、超窗或识别不完整时转人工复核。
+- 支出的可报销金额等于消费金额；无借款时按个人垫付，借款仅在确认到账后作为收入入账，并沿用自然周追溯分配和余额展示。
+- 退役 iOS 快捷指令与 iCost 写入链路，删除 handler、Token、配对、签名工具和前端入口；旧 URL 只保留无副作用的 HTTP 410 墓碑，生产环境拒绝旧变量。
+- 本版没有数据库迁移，不重构普通手工报销数据结构；按项目所有者授权使用本地 exact-commit 生产发布，不同步 GitHub。
+
+## [0.6.14] - 2026-08-24
+
+### 快捷指令记账、自然语言确认与借款归属
+
+- 将 V8 全屏 OCR 快捷指令接入统一的快捷记账待确认链路；快捷指令只提交纯文本和结构化字段，不保存账号密码，也不绕过人工确认。
+- 固定微信草稿格式，要求绑定本人直聊、发送者、引用消息和最新版本全部通过后，才接受明确的“确认/取消/修改”自然语言；单独的“好的/好/行”和疑问句保持拒绝执行。
+- 支出可报销金额固定等于消费金额并自动按个人垫付；“出差-借款”只在到账确认后作为收入入账，支持本周、指定费用和到账后追溯分配。
+- 新增不可变记账修订、借款来源、分配计划和分配流水；分配结果显示已用、剩余、个人垫付和未覆盖金额，并通过幂等和快照门禁防止重复或错账。
+- 提供独立的官方 iCost URL 可选桥接：森特成功生成待复核草稿后，用户可选择打开 `iCost://expense`/`iCost://income` 预填页面；公开协议没有查询或保存回执，系统不会把打开页面误报为 iCost 已记账。
+- 新增前向迁移 `0024_shortcut_advance_allocation`；不修改“整理报销”会话的标准报销费用、付款凭证、发票或周汇总边界。
+- 本候选按项目所有者授权走本地 exact-commit 生产路径，不同步 GitHub；真实设备绑定 V8 签名副本需在可信 macOS 注入设备凭据后生成。
+
+## [0.6.13] - 2026-08-24
+
+### 小小结算预览与全屏 OCR 快捷指令
+
+- 延续 `v0.6.12` 的小小请款结算只读预览、owner/财务发送者私聊边界、快照哈希、fail-closed 和禁止确认写回合同。
+- 修复旧 iCost V7 转换器只提交裁剪 OCR 的缺口：新增对原始截屏的第二次 OCR，并将裁剪 OCR 与全屏 OCR 通过显式文本动作合并后再发送金额预览。
+- 新签名安装副本命名为“智能截图记账（三级菜单待确认版V8·全屏OCR）”，避免继续导入旧 V7；快捷指令仍只创建小小待确认草稿，不绕过人工确认。
+- 无数据库迁移、无前端业务改动；不改“整理报销”或快捷记账确认/回执/outbox 运行时逻辑，GitHub 不同步。
+
+## [0.6.12] - 2026-08-23
+
+### 小小请款结算预览
+
+- 单独启用“请款结算与多退少补”确定性预览，仅在已绑定 owner 与财务微信发送者完全匹配的本人私聊中读取同一自然周的请款、到账、费用、付款资金来源和票据覆盖事实。
+- 结算公式固定为“非公司直付的可报销金额 - 已收到请款金额”，仅展示公司应补、个人应退或平衡方向；异常字段、记录截断、资金来源不明、票据未覆盖或缺少显式请款事实都会 fail-closed，不推断方向和金额。
+- 输出携带服务端证据快照哈希，只供人工核对；本版不接受“确认”写入，不创建退款或补款流水，不修改费用、请款金额或状态，也不调用模型猜测财务事实。成功事件原样重放，失败或运行中的事件不会重新读取财务数据。
+- 群聊、第二个普通 allowlist 发送者和未完成财务身份绑定的请求会在结算读取与 tool/agent run 创建之前拒绝，不泄露金额或记录是否存在；运行记录不保存原始 owner 身份。
+
+### 隔离与发布边界
+
+- 本版以生产 `v0.6.11` 精确提交为基线，不接入差旅、付款凭证、发票或报销周汇总的版本化 Agent，不改快捷记账确认链路，也不包含“整理报销”会话的未提交文件。
+- 无数据库迁移、无前端业务改动；版本统一为 `0.6.12`，只允许通过新的不可变制品切换 backend、frontend 和 weixin-agent 三个项目服务。
+- 按项目所有者要求不写入 GitHub；本地 exact-commit、注释标签、归档、manifest、SHA-256、生产预检、备份和切换后 smoke 共同组成发布身份。
+
+## [0.6.11] - 2026-08-23
+
+### 安全系统配置与通知
+
+- 将 DeepSeek、地图及 PushPlus 等运行凭据收口到服务端安全配置，普通查询、审计和前端状态不返回密钥明文。
+- 系统设置页新增 PushPlus 配置与投递健康状态；医院招标通知从加密配置解析凭据，并保持有界响应、失败重试和现有 SSRF 防护。
+
+### 小小非财务 Agent
+
+- 新增固定版本的 Agent 合同、可重放运行记录和销售业务上下文，接入销售决策、客户、商机、拜访采集、销售周报、动作风险、知识、行程和战情看板能力。
+- 读取严格按业务 owner 隔离；销售、行程和看板输出保持只读预览，拜访写入仍需既有人工确认流程，模型不得自主写业务或财务记录。
+- 本版不启用差旅、报销周报、发票、付款凭证和请款结算 Agent；这些财务能力继续沿用现网路径，不因本次统一运行时而改变。
+
+### 智能截图记账
+
+- 强制 OCR 以纯文本传输，增强人民币符号、全角字符和跨行金额识别，并降低时间、还款等非消费数字的误判。
+- 自动识别失败时允许进入人工填写金额的安全兜底；提交仍只形成待确认草稿，最终记账继续受绑定会话与人工确认约束。
+
+### 数据库与发布边界
+
+- 保留生产已使用的 `0019`、`0020` 校验和，新增 `0021_secure_settings_pushplus`、`0022_assistant_agent_runs` 和 `0023_assistant_business_context` 三个只前向迁移。
+- 根目录、后端和前端版本统一为 `0.6.11`。本版由项目所有者明确授权不写入 GitHub，以本地 exact-commit、不可变归档、manifest、SHA-256 和生产 evidence 组成发布身份。
+- 只有生产备份副本迁移演练、切换前后预检、HTTPS smoke 和清理检查全部通过后，才视为已部署；仅允许切换 backend、frontend 和 weixin-agent，共享 Caddy 不得重启。
+
+## [0.6.5] - 2026-08-22
+
+### 小小与快捷记账可靠闭环
+
+- 正式路径使用可撤销的 V7 设备配对凭据；保留既有 V9 真机的限界迁移兼容，不保存账号密码。
+- 收入和支出均先形成 owner-scoped 草稿；只有绑定微信私聊中的最新六位 ASCII 确认码可以入账，“确认”等自然语言只返回安全提示。
+- 微信 context token、确认 outbox、delivery scope 和 accepted/rejected 回执均持久化；重启、租约丢失和“财务成功但回执中断”可对账恢复，固定幂等键避免重复回执。
+- Web 人工确认/拒绝与微信处理使用终态守卫和 lease fencing，旧草稿会 terminal 化，不阻塞下一笔快捷记账。
+
+### 差旅报销与医院招标
+
+- 恢复六字段费用账本、替票组合、认证图片/PDF 预览、分辨率门禁、费用清单打印和多页发票固定槽位打印。
+- 恢复医院公告分页、搜索、客户/类型/相关性筛选、重点机会、新鲜度、运行反馈、来源健康和 PushPlus 状态；移动端筛选与搜索控件保持至少 44px 触控目标。
+
+### 小小销售上下文与安全边界
+
+- 恢复持久化客户/商机上下文、拜访实体关联、限界项目卡、票据覆盖、报销阻塞、真实来源周报状态和已确认拜访预览。
+- 保持 owner/sender/conversation 隔离、人工确认和只读预览边界；不允许模型自主写业务或财务记录。
+
+### 发布边界
+
+- 项目所有者因 GitHub Actions 用量上限明确授权本版本不再同步 GitHub，改由本地完整门禁、注释标签、exact-commit 归档、manifest 和 SHA-256 直接交付生产。
+- 本条目只冻结候选范围；只有 fresh 生产备份、迁移演练、切换前后预检、受保护服务不变性检查和 HTTPS smoke 全部通过后，才可标记为已部署。
+- 仅允许切换 backend、frontend 和 weixin-agent；Caddy、轻氧、账户保险库和 Mihomo 不得重启或改写。
 
 ### 医院招标真实来源采集
 

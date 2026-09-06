@@ -1,0 +1,195 @@
+VERIFICATION_FORMAT=v3
+VERIFIED_AT_LOCAL=2026-08-30 Asia/Shanghai
+CHANGED_BRANCH=local/v0627-feature-closeout-20260827
+CHANGED_FIELD=docs/releases/v0.10.3.md sections 冻结身份与接管时间线, 部署证据, 生产专项验收记录, 七张截图的证据分类, 生产数据与影响面, 后续本地 Web 热修状态, 需用户完成或即时确认的动作, 证据目录
+CURRENT_HEAD=79f09d0738b4aff6aecd1cbc47effc337afdcba6
+ACCEPTANCE_INVENTORY_BASELINE=f38fd0d5d38b3cc80e7d2488e7a9e2b57e5efd25
+V0103_TAG_COMMIT=2dc9b1114107aee906d0ecfb006ac461cdb86cec
+HOTFIX_STATUS=79f09d0738b4aff6aecd1cbc47effc337afdcba6 committed locally; not deployed; v0.10.3 tag unchanged
+PRODUCTION_STATUS=frozen v0.10.3 deployment four gates passed; production specialized acceptance failed and has user-action blockers
+PRODUCTION_BUSINESS_WRITES=0
+PRODUCTION_RESIDUAL_SYNTHETIC_CUSTOMERS=0
+PRODUCTION_RESIDUAL_SYNTHETIC_ACTIONS=0
+
+FORMAL_MODIFIED_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/v0.10.3.md
+ARTIFACT_MODIFIED_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/MODIFIED_FILE
+ARTIFACT_DIFF_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/DIFF_FILE
+ARTIFACT_VERIFICATION=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/VERIFICATION.txt
+ARTIFACT_ROLLBACK=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/ROLLBACK.sh
+ORIGINAL_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/ORIGINAL_v0.10.3.md
+
+ORIGINAL_SHA256=a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c
+MODIFIED_SHA256=fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9
+DIFF_SHA256=0d0410fc760a50969531748053e7a509cfa51f9f36294429158272535f63d96a
+ROLLBACK_SCRIPT_SHA256=d2acaddb25d20109887ec3c7468b6fbf1a5ebefc0690534a8fae4ca922429279
+ROLLBACK_SCRIPT_MODE=755
+
+[HISTORICAL_RECORD_BOUNDARY]
+HISTORICAL_FILE_1=BASELINE-assistant-chat.txt records the frozen 2dc9b111 assistant-chat run: 15 pass, exit 0
+HISTORICAL_FILE_2=MODIFIED-assistant-chat.txt line 2 records the f38fd0d acceptance-inventory moment: 15 pass, exit 0
+HISTORICAL_FILE_2_INTERPRETATION=the literal HEAD f38fd0d text is preserved as historical output and is not the current HEAD
+HISTORICAL_FILE_3=GIT-diff-check.txt preserves the early shared-worktree plain git diff --check output while the Web hotfix was uncommitted
+HISTORICAL_FILE_3_INTERPRETATION=the literal uncommitted state and exit 2 remain historical facts; hotfix is now local commit 79f09d0
+CURRENT_HEAD_TEST_FILE_1=MODIFIED-hotfix-targeted-backend.txt
+CURRENT_HEAD_TEST_FILE_2=MODIFIED-assistant-chat-current.txt
+CURRENT_HEAD_ASSERTION=79f09d0738b4aff6aecd1cbc47effc337afdcba6
+
+[BASELINE]
+COMMAND=python3 /tmp/v0103-release-doc-validator.py docs/releases/evidence/v0.10.3-20260830/ORIGINAL_v0.10.3.md
+VALIDATOR_SHA256=30865f79d682f4fe01a27df50108cc64db4f41e8ce76b067c725c1f2ca37ec45
+INPUT=ORIGINAL_v0.10.3.md byte-identical to docs/releases/v0.10.3.md at tag commit 2dc9b1114107aee906d0ecfb006ac461cdb86cec; argv file path; validator program from /tmp; no business input
+LITERAL_OUTPUT=
+VALIDATED_FILE=docs/releases/evidence/v0.10.3-20260830/ORIGINAL_v0.10.3.md
+REQUIRED_CHECKS=19
+MISSING_CHECKS=19
+MISSING_NAMES=frozen_commit,acceptance_baseline,local_hotfix,hotfix_state,acceptance_verdict,local_not_production,zero_business_write,screenshot_pass_count,screenshot_failure_count,screenshot_blocked_count,crlf_aware_gate,plain_diff_history,screenshot_01,screenshot_02,screenshot_03,screenshot_04,screenshot_05,screenshot_06,screenshot_07
+RESULT=FAIL
+EXIT_STATUS=1
+BASELINE_RESULT=expected red baseline; frozen release document still contained deployment and production-acceptance placeholders
+BASELINE_BEHAVIOR=the original document did not distinguish deployment success from specialized production acceptance or local hotfix status
+BASELINE_EXIT_STATUS=1
+
+[MODIFIED]
+COMMAND=python3 /tmp/v0103-release-doc-validator.py docs/releases/v0.10.3.md
+VALIDATOR_SHA256=30865f79d682f4fe01a27df50108cc64db4f41e8ce76b067c725c1f2ca37ec45
+INPUT=current HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6 plus modified release document; argv file path; validator program from /tmp; no business input
+LITERAL_OUTPUT=
+VALIDATED_FILE=docs/releases/v0.10.3.md
+REQUIRED_CHECKS=19
+MISSING_CHECKS=0
+MISSING_NAMES=<none>
+RESULT=PASS
+EXIT_STATUS=0
+MODIFIED_RESULT=all 19 release-evidence contract checks passed
+MODIFIED_BEHAVIOR=the document now preserves the f38 acceptance baseline, identifies local commit 79f09d0 as undeployed, keeps v0.10.3 tag immutable, separates four-gate deployment success from failed/blocked production acceptance, classifies all seven screenshots, and records zero business writes
+MODIFIED_EXIT_STATUS=0
+
+[CURRENT_HEAD_TARGETED_BACKEND]
+COMMAND=cd backend && node --test tests/assistant-router.test.js tests/assistant-web-orchestrator.test.js tests/assistant-web-http-integration.test.js
+INPUT=HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6; temporary synthetic SQLite test fixture; no production input; no stdin
+LITERAL_RESULT=tests 64; suites 5; pass 64; fail 0; cancelled 0; skipped 0; todo 0
+CAPTURE=docs/releases/evidence/v0.10.3-20260830/MODIFIED-hotfix-targeted-backend.txt
+EXIT_STATUS=0
+INTERPRETATION=local hotfix evidence only; not production acceptance
+
+[CURRENT_HEAD_FRONTEND]
+COMMAND=npm --prefix outputs/product-design-prototype run test:assistant-chat
+INPUT=HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6; no production input; no stdin
+LITERAL_RESULT=tests 17; suites 5; pass 17; fail 0; cancelled 0; skipped 0; todo 0
+CAPTURE=docs/releases/evidence/v0.10.3-20260830/MODIFIED-assistant-chat-current.txt
+EXIT_STATUS=0
+INTERPRETATION=local hotfix evidence only; not production acceptance
+
+[COMMITTED_HOTFIX_FULL_GATES]
+SOURCE=docs/evidence/v0.10.3-web-acceptance-hotfix-20260830/VERIFICATION.txt committed in 79f09d0738b4aff6aecd1cbc47effc337afdcba6
+BACKEND_FULL_COMMAND=cd backend && npm test
+BACKEND_FULL_LITERAL_RESULT=tests 1411; suites 165; pass 1411; fail 0; cancelled 0; skipped 0; todo 0
+BACKEND_FULL_EXIT_STATUS=0
+DEPLOY_TEST_COMMAND=npm run test:deploy
+DEPLOY_TEST_LITERAL_RESULT=tests 251; suites 18; pass 249; fail 0; cancelled 0; skipped 2; todo 0
+DEPLOY_TEST_EXIT_STATUS=0
+HOTFIX_SECRET_SCAN_LITERAL_RESULT=status passed; scannedGitObjects 3488; scannedGitMessages 599; gitHistoryComplete true; findings []
+HOTFIX_SECRET_SCAN_EXIT_STATUS=0
+HOTFIX_CRLF_AWARE_STAGED_COMMAND=GIT_INDEX_FILE=<temporary-index> git -c core.whitespace=cr-at-eol diff --cached --check -- <7 authorized source/test files + 4 hotfix transaction artifacts>
+HOTFIX_CRLF_AWARE_STAGED_LITERAL_OUTPUT=<empty>
+HOTFIX_CRLF_AWARE_STAGED_EXIT_STATUS=0
+INTERPRETATION=these are committed local hotfix gates; no production deployment or UAT resulted
+
+[PLAIN_DIFF_HISTORICAL_FACT]
+HISTORICAL_COMMAND=git diff --check
+HISTORICAL_INPUT=shared worktree at f38fd0d with uncommitted hotfix candidate containing five pre-existing CRLF-style source/test files
+HISTORICAL_FIRST_LITERAL_OUTPUT=backend/src/assistant/webChannel.js:49: trailing whitespace.
+HISTORICAL_LITERAL_OUTPUT_FILE=docs/releases/evidence/v0.10.3-20260830/GIT-diff-check.txt
+HISTORICAL_EXIT_STATUS=2
+RESOLUTION=hotfix was committed as 79f09d0 after its complete CRLF-aware staged transaction returned exit 0 and byte-level EOL checks proved original LF/CRLF styles were retained
+CURRENT_PLAIN_DIFF_ASSERTION=none; ordinary git diff --check is not claimed to pass for the CRLF hotfix files
+
+[DIFF_GENERATION]
+COMMAND=diff -u --label ORIGINAL_v0.10.3.md --label MODIFIED_FILE docs/releases/evidence/v0.10.3-20260830/ORIGINAL_v0.10.3.md docs/releases/evidence/v0.10.3-20260830/MODIFIED_FILE > docs/releases/evidence/v0.10.3-20260830/DIFF_FILE
+INPUT=ORIGINAL_v0.10.3.md SHA-256 a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c; MODIFIED_FILE SHA-256 fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9
+LITERAL_OUTPUT=<redirected to DIFF_FILE; 136 lines; SHA-256 0d0410fc760a50969531748053e7a509cfa51f9f36294429158272535f63d96a>
+RESULT=files differ as intended; DIFF_FILE is non-empty
+EXIT_STATUS=1
+EXIT_STATUS_MEANING=expected diff(1) because the modified release document differs from the original
+
+[ROLLBACK]
+COMMAND=docs/releases/evidence/v0.10.3-20260830/ROLLBACK.sh /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/rollback-test-copy.md
+INPUT=rollback-test-copy.md initially byte-identical to MODIFIED_FILE SHA-256 fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9; formal docs/releases/v0.10.3.md is not the rollback target
+LITERAL_OUTPUT=
+ROLLBACK_TARGET=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/releases/evidence/v0.10.3-20260830/rollback-test-copy.md
+ROLLBACK_INPUT_EXPECTED_MODIFIED_SHA256=fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9
+ROLLBACK_BEFORE_SHA256=fa3222ed8ebe369bef7b227d30586ace29849b47afa13d1bbcc6cbd7b23e7de9
+ROLLBACK_EXPECTED_ORIGINAL_SHA256=a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c
+ROLLBACK_AFTER_SHA256=a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c
+ROLLBACK_CMP_EXIT=0
+RESTORED_BEHAVIOR=release document returned to the frozen pre-evidence state with deployment and production-acceptance placeholders
+RESTORED_STATUS=original release document restored byte-for-byte
+FORMAL_FILE_STATUS=unchanged unless it was supplied as the rollback target
+EXIT_STATUS=0
+RESULT=independent rollback-test-copy.md restored byte-for-byte to ORIGINAL_v0.10.3.md
+ROLLBACK_EXIT_STATUS=0
+RESTORED_BEHAVIOR=independent copy again has the original placeholder-only release-document behavior
+RESTORED_STATUS=original SHA-256 a61eaeb099cdf50aef18f01f2a879065acc989c870da312a2b6a52cc0439d04c restored; cmp exit 0
+FORMAL_FILE_STATUS=docs/releases/v0.10.3.md remains changed and byte-identical to MODIFIED_FILE
+
+[SCREENSHOT_INTEGRITY]
+COMMAND=cd docs/releases/evidence/v0.10.3-20260830/screenshots && shasum -a 256 -c ../screenshots.sha256
+INPUT=seven production PNG originals and existing checksum manifest
+LITERAL_OUTPUT=
+./01-web-xiaoxiao-panel-open.png: OK
+./02-help-passed.png: OK
+./03-synthetic-action-precondition-none.png: OK
+./04-synthetic-customer-precondition-none.png: OK
+./05-synthetic-customer-query-blocked.png: OK
+./06-finance-web-result-generic-unrecognized.png: OK
+./07-weixin-binding-not-started.png: OK
+RESULT=seven screenshots intact; visual review classification 2 passed, 2 failed, 3 blocked
+EXIT_STATUS=0
+
+[SECRET_SCAN]
+COMMAND=npm run scan:secrets
+INPUT=current worktree including final v0.10.3 release document and release evidence transaction; no stdin
+LITERAL_OUTPUT=
+> sentelligent-sales-workbench@0.10.0 scan:secrets
+> node scripts/project-secret-scan.mjs --history
+
+{
+  "status": "passed",
+  "scannedFiles": 758,
+  "scannedGitObjects": 3497,
+  "scannedGitMessages": 600,
+  "gitHistoryComplete": true,
+  "findings": []
+}
+EXIT_STATUS=0
+RESULT=passed; findings empty
+
+[FINAL_STAGED_TRANSACTION]
+COMMAND=GIT_INDEX_FILE=<temporary-index> git -c core.whitespace=cr-at-eol diff --cached --check -- docs/releases/v0.10.3.md docs/releases/evidence/v0.10.3-20260830
+INPUT=temporary index seeded from current HEAD 79f09d0738b4aff6aecd1cbc47effc337afdcba6; formal release document plus the complete release evidence directory; real index untouched
+LITERAL_OUTPUT=<empty>
+EXIT_STATUS=0
+NAME_STATUS_RESULT=docs/releases/v0.10.3.md modified; complete docs/releases/evidence/v0.10.3-20260830 directory added
+CURRENT_HEAD_AT_GATE=79f09d0738b4aff6aecd1cbc47effc337afdcba6
+RESULT=complete scoped transaction passed CRLF-aware staged whitespace gate
+
+[ARTIFACT_REOPEN]
+COMMAND=cat MODIFIED_FILE; cat DIFF_FILE; cat VERIFICATION.txt; cat ROLLBACK.sh; test -x ROLLBACK.sh; cmp formal MODIFIED_FILE
+INPUT=the four required artifacts after final checks
+LITERAL_RESULT=all four files readable; ROLLBACK.sh executable mode 755; formal file equals MODIFIED_FILE; DIFF_FILE non-empty
+EXIT_STATUS=0
+
+[OPERATIONS_NOT_PERFORMED]
+production_business_write
+production_deploy
+production_restart
+push
+tag_move
+commit_this_release_evidence_transaction
+
+[FINAL_STATUS]
+DEPLOYMENT_FOUR_GATES=passed
+PRODUCTION_SPECIALIZED_ACCEPTANCE=failed_with_user_action_blockers
+LOCAL_HOTFIX=committed_as_79f09d0_but_not_deployed
+PRODUCTION_RESTORED_BEHAVIOR_STATUS=unchanged_frozen_2dc9b111
+FORMAL_MODIFIED_FILE_STATUS=changed_and_retained

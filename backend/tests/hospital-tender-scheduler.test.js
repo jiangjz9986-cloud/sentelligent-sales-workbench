@@ -86,9 +86,12 @@ function setup(db, options = {}) {
     customersProvider: () => list,
     runner: options.runner ?? { run: async () => ({ payload: snapshot(), source: "test" }) },
     notifier: options.notifier ?? null,
+    ...(options.notificationEnabled
+      ? { notificationEnabled: options.notificationEnabled }
+      : {}),
     intervalMinutes: 60,
     batchSize: 10,
-    clock: () => new Date("2026-08-17T00:00:00.000Z"),
+    clock: options.clock ?? (() => new Date("2026-08-17T00:00:00.000Z")),
     idFactory: (() => {
       let id = 100;
       return () => `scheduler-${++id}`;
@@ -129,6 +132,25 @@ describe("hospital tender scheduler", () => {
       assert.equal(schedulerRepository.getState().cycleProcessedCount, 12);
       assert.equal(schedulerRepository.listRuns().length, 2);
       assert.equal(tenderRepository.getNotice("nonexistent"), null);
+    });
+  });
+
+  it("continues collection without marking a batch failed when notification is disabled", async () => {
+    await withDb(async (db) => {
+      let delivered = false;
+      const { scheduler, schedulerRepository } = setup(db, {
+        notifier: async () => {
+          delivered = true;
+          return 1;
+        },
+        notificationEnabled: () => false,
+      });
+      const result = await scheduler.runNext({ force: true });
+      assert.equal(result.status, "success");
+      assert.equal(delivered, false);
+      assert.equal(result.notificationCount, 0);
+      assert.equal(schedulerRepository.getState().cursorCustomerId, "customer-10");
+      assert.equal(schedulerRepository.getState().lastError, null);
     });
   });
 
@@ -266,7 +288,27 @@ describe("hospital tender scheduler", () => {
   it("starts each new source snapshot with fresh customer matches", async () => {
     await withDb(async (db) => {
       const list = customers(1);
-      const { scheduler, tenderRepository } = setup(db, { customers: list });
+      let cycle = 0;
+      const { scheduler, tenderRepository } = setup(db, {
+        customers: list,
+        runner: {
+          run: async () => {
+            cycle += 1;
+            const payload = snapshot();
+            if (cycle === 2) {
+              payload.notices[0] = {
+                ...payload.notices[0],
+                identityKey: "source-b:item-99",
+                sourceId: "source-b",
+                sourceName: "另一个公开采购平台",
+                url: "https://example.com/b/99",
+                sourceItemId: "item-99",
+              };
+            }
+            return { payload, source: "test" };
+          },
+        },
+      });
       await scheduler.runNext({ force: true });
       assert.deepEqual(
         tenderRepository.listNotices({ limit: 10, offset: 0 })[0].match.matchedCustomerIds,
@@ -278,6 +320,11 @@ describe("hospital tender scheduler", () => {
       assert.deepEqual(
         tenderRepository.listNotices({ limit: 10, offset: 0 })[0].match.matchedCustomerIds,
         [],
+      );
+      assert.equal(tenderRepository.countNotices(), 1);
+      assert.equal(
+        tenderRepository.listNotices({ limit: 10, offset: 0 })[0].identityKey,
+        "source-a:item-1",
       );
     });
   });
@@ -310,6 +357,7 @@ describe("hospital tender scheduler", () => {
         identityKey: "source-a:item-2",
         title: "胜利油田中心医院 第二个信息化项目",
         url: "https://example.com/b",
+        projectCode: "A-2",
         sourceItemId: "item-2",
         contentSha256: "b".repeat(64),
       });
@@ -395,6 +443,7 @@ describe("hospital tender scheduler", () => {
         identityKey: `source-a:item-${index + 1}`,
         title: `胜利油田中心医院 信息化项目 ${index + 1}`,
         url: `https://example.com/notices/${index + 1}`,
+        projectCode: `A-${index + 1}`,
         sourceItemId: `item-${index + 1}`,
         contentSha256: (index + 1).toString(16).padStart(64, "0"),
       }));
@@ -438,6 +487,24 @@ describe("hospital tender scheduler", () => {
       assert.equal(state.cursorCustomerId, null);
       assert.equal(state.snapshotId, null);
       assert.ok(state.nextRunAt);
+    });
+  });
+
+  it("persists a bounded collector stage instead of a raw internal error", async () => {
+    await withDb(async (db) => {
+      const internalError = Object.assign(new Error("private collector detail"), {
+        code: "HOSPITAL_TENDER_INTERNAL_RUN_FAILED",
+        stage: "snapshot_normalize",
+      });
+      const { scheduler, schedulerRepository } = setup(db, {
+        customers: customers(1),
+        runner: { run: async () => { throw internalError; } },
+      });
+      await assert.rejects(() => scheduler.runNext({ force: true }), internalError);
+      const state = schedulerRepository.getState();
+      assert.equal(state.lastStatus, "failed");
+      assert.equal(state.lastError, "医院招标快照校验失败");
+      assert.doesNotMatch(state.lastError, /private/u);
     });
   });
 
@@ -501,6 +568,61 @@ describe("hospital tender scheduler", () => {
       assert.equal(second.status, "skipped");
       resolveRunner();
       assert.equal((await first).status, "success");
+    });
+  });
+
+  it("waits outside the Asia/Shanghai active window and resumes at the next window start", async () => {
+    await withDb(async (db) => {
+      // 2026-08-17T13:30:00Z is 21:30 in Asia/Shanghai, after the 9-20 window.
+      const { scheduler, schedulerRepository } = setup(db, {
+        clock: () => new Date("2026-08-17T13:30:00.000Z"),
+      });
+      const result = await scheduler.runNext();
+      assert.equal(result.status, "waiting");
+      assert.equal(result.reason, "window");
+      assert.equal(result.state.lastStatus, "waiting");
+      // Next window start is 09:00 Asia/Shanghai on 2026-08-18 = 01:00:00Z.
+      assert.equal(result.state.nextRunAt, "2026-08-18T01:00:00.000Z");
+      assert.equal(schedulerRepository.getState().nextRunAt, "2026-08-18T01:00:00.000Z");
+    });
+  });
+
+  it("runs inside the active window and honours force outside it", async () => {
+    await withDb(async (db) => {
+      // 2026-08-17T03:00:00Z is 11:00 in Asia/Shanghai, inside the window.
+      const inside = setup(db, { clock: () => new Date("2026-08-17T03:00:00.000Z") });
+      const insideResult = await inside.scheduler.runNext();
+      assert.equal(insideResult.status, "success");
+    });
+    await withDb(async (db) => {
+      // 22:00 Asia/Shanghai: a forced manual run must still collect.
+      const forced = setup(db, { clock: () => new Date("2026-08-17T14:00:00.000Z") });
+      const forcedResult = await forced.scheduler.runNext({ force: true });
+      assert.equal(forcedResult.status, "success");
+    });
+  });
+
+  it("persists and validates the configurable active window bounds", async () => {
+    await withDb(async (db) => {
+      const { schedulerRepository } = setup(db);
+      const defaults = schedulerRepository.getState();
+      assert.equal(defaults.activeStartHour, 9);
+      assert.equal(defaults.activeEndHour, 20);
+      const updated = schedulerRepository.updateState({ activeStartHour: 8, activeEndHour: 22 });
+      assert.equal(updated.activeStartHour, 8);
+      assert.equal(updated.activeEndHour, 22);
+      assert.throws(
+        () => schedulerRepository.updateState({ activeStartHour: 21, activeEndHour: 20 }),
+        /active window is invalid/,
+      );
+      assert.throws(
+        () => schedulerRepository.updateState({ activeStartHour: -1 }),
+        /activeStartHour/,
+      );
+      assert.throws(
+        () => schedulerRepository.updateState({ activeEndHour: 25 }),
+        /active window is invalid|activeEndHour/,
+      );
     });
   });
 });

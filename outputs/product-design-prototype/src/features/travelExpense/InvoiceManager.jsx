@@ -18,6 +18,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
+import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import {
   calculateInvoiceMatchAllocation,
@@ -235,8 +236,105 @@ export function InvoiceManager({
 
   const matchExpense = expenses.find((expense) => expense.id === matchExpenseId);
   const noInvoiceExpense = expenses.find((expense) => expense.id === noInvoiceExpenseId);
+  const noInvoicePayment = noInvoiceExpense?.payments.find((payment) => payment.id === noInvoicePaymentId);
   const selectedMatches = matches.filter((match) => match.invoiceId === selectedInvoiceId && match.state !== "revoked");
   const conflictFields = useMemo(() => invoiceConflictFields(selectedInvoice), [selectedInvoice]);
+  const noInvoiceConfirmationPending = pendingAction === "no-invoice";
+  const noInvoiceConfirmationTitle = noInvoiceConfirmationPending
+    ? "正在确认无票"
+    : !noInvoiceExpense
+      ? "请先选择费用"
+      : !noInvoicePaymentId
+        ? "请先选择付款记录"
+        : !noInvoicePayment
+          ? "付款记录已变更，请重新选择"
+        : !noInvoiceReason.trim()
+          ? "请填写无票原因"
+          : "确认当前付款无发票";
+  const noInvoiceConfirmationDisabled = noInvoiceConfirmationPending
+    || !noInvoiceExpense
+    || !noInvoicePayment
+    || !noInvoiceReason.trim();
+  const candidateResourceStates = [resource.invoices, resource.matches, resource.noInvoice, resource.candidates];
+  const candidateResourceFailed = candidateResourceStates.some((state) => state.status === "error");
+  const candidateResourcesReady = resource.invoices.status === "ready"
+    && resource.matches.status === "ready"
+    && resource.noInvoice.status === "ready"
+    && resource.candidates.status === "ready";
+  const confirmedCentsByExpense = new Map();
+  const confirmedCentsByPayment = new Map();
+  for (const match of matches) {
+    if (match.state !== "confirmed" || !Number.isSafeInteger(match.allocatedCents) || match.allocatedCents < 0) continue;
+    const expenseTotal = (confirmedCentsByExpense.get(match.expenseId) ?? 0) + match.allocatedCents;
+    confirmedCentsByExpense.set(match.expenseId, Number.isSafeInteger(expenseTotal) ? expenseTotal : Number.POSITIVE_INFINITY);
+    if (match.paymentId) {
+      const paymentTotal = (confirmedCentsByPayment.get(match.paymentId) ?? 0) + match.allocatedCents;
+      confirmedCentsByPayment.set(match.paymentId, Number.isSafeInteger(paymentTotal) ? paymentTotal : Number.POSITIVE_INFINITY);
+    }
+  }
+  const hasActiveCandidateConfirmation = confirmations.some((confirmation) => (
+    !confirmation.revokedAt
+      && Number.isSafeInteger(confirmation.amountSnapshotCents)
+      && confirmation.amountSnapshotCents > 0
+  ));
+  const hasCandidateTarget = confirmations.some((confirmation) => (
+    !confirmation.revokedAt
+      && Number.isSafeInteger(confirmation.amountSnapshotCents)
+      && confirmation.amountSnapshotCents > 0
+      && expenses.some((expense) => {
+        if (expense.id !== confirmation.expenseId || !Array.isArray(expense.payments)) return false;
+        const reimbursementCents = expense.payments.reduce((total, payment) => {
+          if (!Number.isSafeInteger(payment?.reimbursementCents) || payment.reimbursementCents < 0) return Number.POSITIVE_INFINITY;
+          const next = total + payment.reimbursementCents;
+          return Number.isSafeInteger(next) ? next : Number.POSITIVE_INFINITY;
+        }, 0);
+        if (!Number.isFinite(reimbursementCents)
+          || reimbursementCents <= (confirmedCentsByExpense.get(expense.id) ?? 0)) return false;
+        if (!confirmation.paymentId) return true;
+        const payment = expense.payments.find((item) => item.id === confirmation.paymentId);
+        return Boolean(payment
+          && Number.isSafeInteger(payment.reimbursementCents)
+          && payment.reimbursementCents > (confirmedCentsByPayment.get(payment.id) ?? 0));
+      })
+  ));
+  const confirmedCentsByInvoice = matches.reduce((totals, match) => {
+    if (match.state !== "confirmed" || !Number.isSafeInteger(match.allocatedCents)) return totals;
+    totals.set(match.invoiceId, (totals.get(match.invoiceId) ?? 0) + match.allocatedCents);
+    return totals;
+  }, new Map());
+  const hasUnmatchedInvoiceBalance = invoices.some((invoice) => (
+    invoice.status === "unmatched"
+    && Number.isSafeInteger(invoice.totalCents)
+    && invoice.totalCents > (confirmedCentsByInvoice.get(invoice.id) ?? 0)
+  ));
+  const hasAvailableInvoice = hasUnmatchedInvoiceBalance
+    && Number.isSafeInteger(coverage?.invoiceWarehouseAvailableCents)
+    && coverage.invoiceWarehouseAvailableCents > 0;
+  const hasSuggestedCandidate = candidates.some((candidate) => candidate.status === "suggested");
+  const candidateGenerationPending = pendingAction === "generate-candidates";
+  const candidateGenerationTitle = candidateGenerationPending
+    ? "正在自动生成候选发票"
+    : candidateResourceFailed
+      ? "候选资格数据加载失败，请先重试"
+    : !candidateResourcesReady
+      ? "请等待发票、无票记录和候选数据加载完成"
+      : expenses.length === 0
+        ? "当前自然周暂无费用，无法生成候选发票"
+        : !hasCandidateTarget
+          ? hasActiveCandidateConfirmation
+            ? "本周无票记录对应的付款已变更或已被发票覆盖，请刷新后重新确认"
+            : "请先为本周付款确认无票"
+          : hasSuggestedCandidate
+            ? "本周已有待处理候选，请先确认或拒绝"
+        : !hasAvailableInvoice
+          ? "发票仓库暂无可匹配的可用发票"
+          : "为当前自然周费用自动生成候选发票";
+  const candidateGenerationDisabled = candidateGenerationPending
+    || !candidateResourcesReady
+    || expenses.length === 0
+    || !hasCandidateTarget
+    || hasSuggestedCandidate
+    || !hasAvailableInvoice;
   const printableInvoices = useMemo(() => {
     const weekExpenseIds = new Set(expenses.map((expense) => expense.id));
     const matchedInvoiceIds = new Set(matches
@@ -357,7 +455,7 @@ export function InvoiceManager({
 
   async function confirmNoInvoice() {
     const expense = noInvoiceExpense;
-    const payment = expense?.payments.find((item) => item.id === noInvoicePaymentId);
+    const payment = noInvoicePayment;
     if (!expense || !payment || !noInvoiceReason.trim()) {
       setActionError("请选择费用和付款，并填写无票原因。");
       return;
@@ -397,6 +495,9 @@ export function InvoiceManager({
     if (generated) {
       setCandidates(generated);
       setResourceState("candidates", { status: "ready", error: "" });
+      if (generated.length === 0) {
+        setActionError("当前没有同时满足未覆盖余额、开票日期和费用类别条件的候选发票。");
+      }
     }
   }
 
@@ -411,6 +512,10 @@ export function InvoiceManager({
     if (decision === "accept") {
       setReload((current) => ({ ...current, invoices: current.invoices + 1, matches: current.matches + 1, noInvoice: current.noInvoice + 1 }));
       onExpenseChanged();
+    } else {
+      // Rejected suggestions no longer reserve invoice warehouse coverage.
+      // Refresh the server-derived coverage before re-enabling generation.
+      setReload((current) => ({ ...current, noInvoice: current.noInvoice + 1 }));
     }
   }
 
@@ -422,7 +527,7 @@ export function InvoiceManager({
           <p>原件独立保存；OCR 与模型结果并排核对，冲突项必须人工复核后再匹配费用。</p>
         </div>
         <div className="invoice-manager-actions">
-          <button className="invoice-print-button" type="button" disabled={resource.matches.status !== "ready" || printableInvoices.length === 0} title={printableInvoices.length ? `本周可打印 ${printableInvoices.length} 份已匹配发票` : "本周暂无已匹配发票"} onClick={() => onOpenPrint(printableInvoices)}><Printer size={17} />打印本周已匹配发票<span>{printableInvoices.length}</span></button>
+          <button className="invoice-print-button" type="button" data-testid="invoice-print-trigger" disabled={resource.matches.status !== "ready" || printableInvoices.length === 0} title={printableInvoices.length ? `本周可打印 ${printableInvoices.length} 份已匹配发票` : "本周暂无已匹配发票"} onClick={() => onOpenPrint(printableInvoices)}><Printer size={17} />打印本周已匹配发票<span>{printableInvoices.length}</span></button>
           <label className="invoice-upload-button" aria-disabled={pendingAction === "upload"}>
             {pendingAction === "upload" ? <LoaderCircle className="state-spinner" size={17} /> : <Upload size={17} />}
             <span>{pendingAction === "upload" ? "正在上传" : "上传发票"}</span>
@@ -465,7 +570,7 @@ export function InvoiceManager({
               <div className="invoice-detail-scroll">
                 <section className="invoice-original-preview">
                   {selectedInvoice.mediaType.startsWith("image/")
-                    ? <img src={apiClient.getInvoiceContentUrl(selectedInvoice.id)} alt={selectedInvoice.fileName} />
+                    ? <AuthenticatedImageFrame resourceKey={selectedInvoice.id} loadImage={({ signal }) => apiClient.getInvoiceContentResponse(selectedInvoice.id, { signal, accept: "application/pdf,image/*" })} title={`${selectedInvoice.fileName}原件预览`} variant="preview" />
                     : <AuthenticatedPdfFrame resourceKey={selectedInvoice.id} loadPdf={({ signal }) => apiClient.getInvoiceContentResponse(selectedInvoice.id, { signal })} title={`${selectedInvoice.fileName}原件预览`} renderWidth={1200} />}
                 </section>
 
@@ -527,15 +632,17 @@ export function InvoiceManager({
           {resource.noInvoice.status === "ready" ? <>
             <div className="invoice-coverage-strip">
               <span><small>本周应报销</small><strong>{formatCny(coverage?.reimbursementCents ?? 0)}</strong></span>
-              <span><small>已覆盖</small><strong>{formatCny(coverage?.confirmedCoverageCents ?? 0)}</strong></span>
+              <span><small>电子发票</small><strong>{formatCny(coverage?.electronicInvoiceCoverageCents ?? coverage?.confirmedCoverageCents ?? 0)}</strong></span>
+              <span><small>替票覆盖</small><strong>{formatCny(coverage?.substituteInvoiceCoverageCents ?? 0)}</strong></span>
               <span><small>确认无票</small><strong>{formatCny(coverage?.noInvoiceConfirmedCents ?? 0)}</strong></span>
               <span className="warning"><small>仍缺发票</small><strong>{formatCny(coverage?.missingInvoiceCents ?? 0)}</strong></span>
+              <span><small>仓库可用</small><strong>{formatCny(coverage?.invoiceWarehouseAvailableCents ?? 0)}</strong></span>
             </div>
             <div className="invoice-no-ticket-form">
               <label><span>费用</span><select value={noInvoiceExpenseId} onChange={(event) => { setNoInvoiceExpenseId(event.target.value); setNoInvoicePaymentId(""); }}><option value="">请选择费用</option>{expenses.map((expense) => <option value={expense.id} key={expense.id}>{expense.occurredOn} · {expense.purpose}</option>)}</select></label>
               <label><span>付款</span><select value={noInvoicePaymentId} disabled={!noInvoiceExpense} onChange={(event) => setNoInvoicePaymentId(event.target.value)}><option value="">请选择付款</option>{noInvoiceExpense?.payments.map((payment, index) => <option value={payment.id} key={payment.id}>付款 {index + 1} · {formatCny(payment.reimbursementCents)}</option>)}</select></label>
               <label className="wide"><span>无票原因</span><input value={noInvoiceReason} placeholder="例如：商户无法开票" onChange={(event) => setNoInvoiceReason(event.target.value)} /></label>
-              <button type="button" onClick={confirmNoInvoice} disabled={pendingAction === "no-invoice"}>确认无票</button>
+              <button type="button" onClick={confirmNoInvoice} disabled={noInvoiceConfirmationDisabled} title={noInvoiceConfirmationTitle}>确认无票</button>
             </div>
             <div className="invoice-confirmation-list">
               {confirmations.filter((item) => !item.revokedAt).map((confirmation) => {
@@ -547,7 +654,8 @@ export function InvoiceManager({
         </section>
 
         <section className="invoice-operation-card invoice-candidate-card">
-          <header><div><Sparkles size={17} /><strong>候选发票</strong></div><button type="button" onClick={generateCandidates} disabled={pendingAction === "generate-candidates"}>{pendingAction === "generate-candidates" ? <LoaderCircle className="state-spinner" size={15} /> : <Sparkles size={15} />}自动生成候选</button></header>
+          <header><div><Sparkles size={17} /><strong>候选发票</strong></div><button type="button" onClick={generateCandidates} disabled={candidateGenerationDisabled} title={candidateGenerationTitle} aria-describedby={candidateGenerationDisabled ? "invoice-candidate-generation-status" : undefined}>{candidateGenerationPending ? <LoaderCircle className="state-spinner" size={15} /> : <Sparkles size={15} />}自动生成候选</button></header>
+          {candidateGenerationDisabled ? <p id="invoice-candidate-generation-status" className="invoice-inline-state" role="status">{candidateGenerationTitle}</p> : null}
           <ResourceState state={resource.candidates} loadingText="正在读取候选发票" empty="暂无可用候选发票" isEmpty={candidates.filter((item) => item.status === "suggested").length === 0} retryLabel="重新加载候选发票" onRetry={() => setReload((current) => ({ ...current, candidates: current.candidates + 1 }))} />
           {resource.candidates.status === "ready" ? <div className="invoice-candidate-list">
             {candidates.filter((candidate) => candidate.status === "suggested").map((candidate) => {

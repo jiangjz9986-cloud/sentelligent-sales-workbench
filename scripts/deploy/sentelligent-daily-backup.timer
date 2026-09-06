@@ -1,0 +1,23 @@
+# v0.8.0 draft: daily 02:30 Asia/Shanghai trigger for the SQLite backup.
+# Install target: /etc/systemd/system/sentelligent-daily-backup.timer
+# Full procedure: docs/superpowers/research/2026-08-27-v080-backup-design.md
+
+[Unit]
+Description=Daily 02:30 Asia/Shanghai schedule for sentelligent-daily-backup.service
+
+[Timer]
+# The trailing time zone in OnCalendar requires systemd >= 235. The current
+# production host is believed to run CentOS 7 (systemd 219): there the line
+# below fails to parse. In that case use the commented plain form instead and
+# confirm `timedatectl` reports the local time zone Asia/Shanghai, so that
+# 02:30 local equals 02:30 Asia/Shanghai. Validate the final choice with
+# `systemd-analyze calendar` (>= 235) or a manual `systemctl list-timers`
+# check after enabling. See the design doc, section TODO.
+# OnCalendar=*-*-* 02:30:00 Asia/Shanghai
+OnCalendar=*-*-* 02:30:00
+# Run once after boot if the 02:30 activation was missed (host powered off).
+Persistent=true
+Unit=sentelligent-daily-backup.service
+
+[Install]
+WantedBy=timers.target

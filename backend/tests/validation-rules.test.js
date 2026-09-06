@@ -136,6 +136,34 @@ test("arrays and nested JSON reject functions, non-finite numbers, excess depth,
   validationError(() => validateObject(schema, { items: [{ a: { b: { c: { d: { e: { f: true } } } } } }] }), "items", "item");
 });
 
+test("proactive confirmation accepts the bounded v0.12.0 customer preview shape", () => {
+  const preview = Object.fromEntries(
+    Array.from({ length: 20 }, (_, index) => [`field${index + 1}`, index + 1]),
+  );
+  const body = {
+    confirmationPreviewId: "preview-customer-1",
+    target: "action",
+    customerId: "customer-1",
+    opportunityId: "opportunity-1",
+    expectedOpportunityVersion: 1,
+    expectedCustomerVersion: 1,
+    previewDigest: "a".repeat(64),
+    preview,
+  };
+
+  assert.equal(validateObject(requestSchemas.proactiveAssistantConfirmation, body), body);
+  validationError(
+    () => validateObject(requestSchemas.proactiveAssistantConfirmation, {
+      ...body,
+      preview: Object.fromEntries(
+        Array.from({ length: 31 }, (_, index) => [`field${index + 1}`, index + 1]),
+      ),
+    }),
+    "preview",
+    "maxKeys",
+  );
+});
+
 test("partialSchema creates a separate optional schema without mutating the source", () => {
   const create = Object.freeze({ title: Object.freeze({ type: "string", required: true, max: 16 }) });
   const patch = partialSchema(create);
@@ -192,13 +220,13 @@ test("request schemas strictly accept the current camelCase API payloads", () =>
   const examples = {
     login: { account: "sales", password: "secret" },
     customerCreate: {
-      name: "Customer", region: "East", type: "hospital", level: "A", owner: "Lee", contact: "Li", relation: 2,
+      name: "Customer", region: "East", type: "hospital", level: "A", contact: "Li", relation: 2,
       stakeholders: [{ role: "CIO" }], decisionChain: [{ step: "review" }], historyProjects: [{ year: 2026 }],
       infrastructure: [{ product: "storage" }], syncPreview: [{ source: "record" }], budget: "100", summary: "summary",
       needs: [{ text: "need" }], risks: [{ text: "risk" }], opportunities: [{ name: "deal" }],
     },
     opportunityCreate: {
-      customerId: "customer-1", name: "Deal", customer: "Customer", stage: "discover", amount: "100", owner: "Lee",
+      customerId: "customer-1", name: "Deal", customer: "Customer", stage: "discover", amount: "100",
       probability: 50, days: 30, requirements: [{ text: "need" }], competitors: [{ name: "other" }],
       solutionDirection: [{ text: "plan" }], sourceRecord: "record", risk: "risk", next: "next", tone: "calm",
     },
@@ -211,7 +239,9 @@ test("request schemas strictly accept the current camelCase API payloads", () =>
     knowledgeCreate: { title: "Title", category: "manual", tags: ["tag"], summary: "summary", content: "content", source: "source" },
     knowledgeSearch: { query: "storage", tags: ["tag"], limit: 8 },
     weeklyDraft: { owner: "Lee", periodStart: "2026-07-01", periodEnd: "2026-07-07", knowledgeIds: ["knowledge-1"] },
-    aiSuggestion: { type: "follow_up", title: "Title", context: { customerId: "customer-1" } },
+    aiSuggestion: { type: "customer_profile", title: "Title", context: { customerId: "customer-1" } },
+    aiSuggestionConfirm: { confirm: true, draft: "人工确认草稿" },
+    aiSuggestionCancel: { cancel: true },
     solutionDraft: { owner: "Lee", customerId: "customer-1", opportunityId: "opportunity-1", artifactType: "solution_framework", knowledgeIds: ["knowledge-1"] },
     solutionPatch: { title: "Title", content: "content", status: "ready" },
     riskDiagnose: { sourceType: "opportunity_diagnosis", sourceId: "opportunity-1" },
@@ -233,6 +263,10 @@ test("request schemas reject ids, unknown keys, invalid list members, ranges, an
   validationError(() => validateObject(requestSchemas.knowledgeSearch, { limit: 21 }), "limit", "max");
   validationError(() => validateObject(requestSchemas.knowledgeCreate, { title: "Title", content: "x".repeat(100001) }), "content", "max");
   validationError(() => validateObject(requestSchemas.solutionDraft, { owner: "Lee", customerId: "c", opportunityId: "o", artifactType: "pdf" }), "artifactType", "enum");
+  validationError(() => validateObject(requestSchemas.aiSuggestionConfirm, { confirm: false, draft: "draft" }), "confirm", "enum");
+  validationError(() => validateObject(requestSchemas.aiSuggestionConfirm, { confirm: true, draft: " " }), "draft", "required");
+  validationError(() => validateObject(requestSchemas.aiSuggestionCancel, { cancel: false }), "cancel", "enum");
+  validationError(() => validateObject(requestSchemas.aiSuggestion, { type: "next", title: "Title", context: {} }), "type", "enum");
 });
 
 test("request schemas reject null structures while nullable text and foreign keys remain nullable", () => {
@@ -241,7 +275,7 @@ test("request schemas reject null structures while nullable text and foreign key
     [requestSchemas.opportunityCreate, { customerId: "c", name: "Deal", days: null }, "days"],
     [requestSchemas.customerCreate, { name: "Customer", stakeholders: null }, "stakeholders"],
     [requestSchemas.knowledgeCreate, { title: "Title", tags: null }, "tags"],
-    [requestSchemas.aiSuggestion, { type: "next", title: "Title", context: null }, "context"],
+    [requestSchemas.aiSuggestion, { type: "customer_profile", title: "Title", context: null }, "context"],
     [requestSchemas.solutionDraft, {
       owner: "Lee", customerId: "c", opportunityId: "o", artifactType: null,
     }, "artifactType"],

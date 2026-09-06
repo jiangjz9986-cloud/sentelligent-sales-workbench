@@ -46,12 +46,14 @@ export function AuthenticatedPdfFrame({
   renderWidth = 1200,
   className = "",
   onStatusChange,
+  onPageCountChange,
 }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState(initialState);
   const canvasRef = useRef(null);
   const loadPdfRef = useRef(loadPdf);
   const statusCallbackRef = useRef(onStatusChange);
+  const pageCountCallbackRef = useRef(onPageCountChange);
 
   useEffect(() => {
     loadPdfRef.current = loadPdf;
@@ -60,6 +62,10 @@ export function AuthenticatedPdfFrame({
   useEffect(() => {
     statusCallbackRef.current = onStatusChange;
   }, [onStatusChange]);
+
+  useEffect(() => {
+    pageCountCallbackRef.current = onPageCountChange;
+  }, [onPageCountChange]);
 
   function publishStatus(status) {
     statusCallbackRef.current?.(status);
@@ -90,7 +96,11 @@ export function AuthenticatedPdfFrame({
       ]);
       if (disposed) return;
 
-      loadingTask = pdfJs.getDocument({ data: new Uint8Array(buffer) });
+      loadingTask = pdfJs.getDocument({
+        data: new Uint8Array(buffer),
+        // Protected attachments are untrusted input; do not evaluate PDF function strings.
+        isEvalSupported: false,
+      });
       const documentProxy = await loadingTask.promise;
       if (disposed) return;
       if (!renderAllPages && (!Number.isSafeInteger(pageNumber) || pageNumber < 1 || pageNumber > documentProxy.numPages)) {
@@ -141,6 +151,7 @@ export function AuthenticatedPdfFrame({
         pageCount: documentProxy.numPages,
         requiresPageReload: false,
       });
+      pageCountCallbackRef.current?.(documentProxy.numPages);
       publishStatus("ready");
     })().catch((error) => {
       if (

@@ -1,0 +1,18 @@
+bash: warning: setlocale: LC_ALL: cannot change locale (C.UTF-8)
+/bin/sh: warning: setlocale: LC_ALL: cannot change locale (C.UTF-8)
+PROJECT_ROOT=/opt/sentelligent-sales-workbench
+CURRENT=/opt/sentelligent-sales-workbench/releases/v0.10.3-20260829T164400Z_2dc9b11
+VERSION=0.10.3
+HEALTH_HTTP=200
+sentelligent-backend.service=active
+sentelligent-frontend.service=active
+sentelligent-weixin-agent.service=active
+REPORT=/opt/sentelligent-sales-workbench/evidence/v0.10.3-20260829T164400Z_2dc9b11-preflight/preflight-report.json
+SHA256=381ecd52a7807ef552fcbca07844b31325b9c259fe9f8b5883f41ed4e807530a
+REPORT=/opt/sentelligent-sales-workbench/evidence/2026-08-29T16-45-27Z-16451/cutover-report.json
+SHA256=39c1e1acf2a5aca0f45975d974203f5228f86c25d5989c74eab49094df080e41
+REPORT=/opt/sentelligent-sales-workbench/evidence/v0.10.3-20260829T164400Z_2dc9b11-postflight/preflight-report.json
+SHA256=225e409429eea22d9f50416b0c62b189c6fa98dbc87c7db9ba1b1569e8ec5f83
+REPORT=/opt/sentelligent-sales-workbench/evidence/v0.10.3-20260829T164400Z_2dc9b11-smoke/production-https-smoke-20260829T164636Z.json
+SHA256=b53a5a4751a669cdbb9738d06e034d2079b5b5569e8dd2dc16ffe12b44cfd6af
+WEIXIN_STATUS_HTTP=200

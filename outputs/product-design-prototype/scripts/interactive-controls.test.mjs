@@ -3,10 +3,16 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
+import { appSourceFiles } from "./app-source.mjs";
+import { readSalesWorkbenchPagesSource, salesWorkbenchPageFiles } from "./pages-source.mjs";
+
 const controlFiles = [
-  "src/App.jsx",
-  "src/features/salesWorkbench/pages.jsx",
+  ...appSourceFiles(),
+  ...salesWorkbenchPageFiles(),
+  "src/features/salesWorkbench/pages/EntityWorkspace.jsx",
   "src/components/primitives.jsx",
+  "src/components/ai/AiResultCard.jsx",
+  "src/components/ai/ManualAiSuggestionPanel.jsx",
   "src/features/visitItinerary/VisitItineraryPage.jsx",
   "src/features/travelExpense/AdvanceSettlement.jsx",
   "src/features/travelExpense/ExpenseEditorDrawer.jsx",
@@ -82,14 +88,11 @@ describe("interactive control wiring", () => {
   });
 
   it("locks quick-record confirmation while synchronization, analysis save, or unsaved edits are active", () => {
-    const pageSource = readFileSync(resolve("src/features/salesWorkbench/pages.jsx"), "utf8");
-    const manualSync = pageSource.match(/<div className="manual-sync">[\s\S]*?<\/div>/)?.[0] ?? "";
+    const pageSource = readSalesWorkbenchPagesSource();
 
     assert.match(pageSource, /createExclusiveAsyncGate/);
     assert.match(pageSource, /confirmationGateRef/);
-    assert.match(
-      manualSync,
-      /disabled=\{confirmationPending \|\| analysisSavePending \|\| analysisDirty\}/,
-    );
+    assert.match(pageSource, /data-testid="create-quick-record-confirmation-preview"/);
+    assert.match(pageSource, /disabled=\{confirmationPending \|\| analysisSavePending \|\| analysisDirty \|\| historyReadOnly\}/);
   });
 });

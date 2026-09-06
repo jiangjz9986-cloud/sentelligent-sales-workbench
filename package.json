@@ -1,6 +1,6 @@
 {
   "name": "sentelligent-sales-workbench",
-  "version": "0.6.2",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -24,7 +24,10 @@
     "wsl:stack:smoke": "node scripts/fixed-stack-smoke.mjs",
     "scan:secrets": "node scripts/project-secret-scan.mjs --history",
     "release:package": "node scripts/release-package.mjs",
+    "service-plan:production": "node scripts/production-service-plan.mjs",
     "preflight:production": "node scripts/production-preflight.mjs",
+    "asr:cleanup": "node scripts/asr-runtime-cleanup.mjs",
+    "smoke:production:asr": "node scripts/asr-production-smoke.mjs",
     "smoke:production:https": "node scripts/production-https-smoke.mjs",
     "test:release": "node --test scripts/release-package.test.mjs scripts/production-preflight.test.mjs",
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",

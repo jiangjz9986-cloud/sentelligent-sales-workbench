@@ -1,12 +1,12 @@
 # 微信 Clawbot 助手集成说明
 
-## v0.5.4 候选边界
+## 当前候选边界
 
-本说明描述当前 v0.5.4 热修复候选，不构成生产切换或真实设备验收证据。v0.5.3 的生产切换曾因未配置 sender 白名单自动回滚；现有生产事实仍以部署记录和服务器 evidence 为准。
+本说明描述小小微信助手当前候选，不构成生产切换或真实设备验收证据。现有生产事实仍以部署记录和服务器 evidence 为准。
 
 ## 入站事件与身份
 
-候选使用 vendored `weixin-agent-sdk@0.5.0-sentelligent.1` 的受限入站元数据调用：
+候选使用 vendored `weixin-agent-sdk@0.5.0-sentelligent.10` 的受限入站元数据调用：
 
 ```text
 POST /api/integrations/weixin-agent/events
@@ -28,6 +28,10 @@ Idempotency-Key: <opaque sourceMessageId>
 
 命令不做 trim 或 Unicode 数字归一化；前后空格、换行、全角数字、`确认 012345` 或附加文字均不匹配。连续五次错误确认后动作锁定。确认码只在生成的微信回复中展示一次，SQLite 仅保存 HMAC；事件、响应投影、会话、草稿、待确认动作、工具结果和日志不得包含明文确认码。执行租约和稳定工具运行身份负责并发、重试和崩溃恢复。
 
+微信记账使用独立确认策略，不适用上述通用六码。本人必须引用小小已经成功送达的当前版本草稿，再用自然语言确认、修改字段或取消；疑问句、没有引用的回复、其他 sender、群聊或旧版本草稿都不会写账。
+
+付款凭证图片和收入/支出文字先进入 OCR/AI 草稿；多笔交易截图可拆成多个独立草稿。确认后才写入报销记录并关联压缩付款凭证。后续发票图片/PDF按金额优先匹配当前自然周的唯一条目；歧义或超出日期窗口时进入人工复核。
+
 ## 运行配置与轮换
 
 真实值只配置在私有环境文件中，不进入 Git、日志或聊天：
@@ -35,13 +39,18 @@ Idempotency-Key: <opaque sourceMessageId>
 ```text
 WEIXIN_AGENT_API_TOKEN=<独立机器 Token>
 WEIXIN_AGENT_BACKEND_URL=https://<公网基址>
+WEIXIN_AGENT_OWNER=<正式账号>
+WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED=true
+WEIXIN_BOOKKEEPING_OWNER=<与 WEIXIN_AGENT_OWNER 一致>
+WEIXIN_BOOKKEEPING_SENDER_ID=<本人 sender ID>
+WEIXIN_OUTBOX_POLL_MS=5000
 WEIXIN_ALLOWED_SENDER_IDS=<逗号分隔的 sender ID；未绑定时留空，所有入站都会被拒绝>
 WEIXIN_ALLOW_GROUPS=false
 WEIXIN_ALLOWED_GROUP_IDS=
 ASSISTANT_CONFIRMATION_SECRET=<独立的至少 32 字节 canonical base64url 密钥>
 ```
 
-`ASSISTANT_CONFIRMATION_SECRET` 必须独立于 session、机器 Token、模型密钥和 iCost Token；非 loopback 后端必须使用 HTTPS。森特智行和轻氧继续使用独立 URL、Token、owner、数据库和审计。
+`ASSISTANT_CONFIRMATION_SECRET` 必须独立于 session、机器 Token 和模型密钥；非 loopback 后端必须使用 HTTPS。旧 iCost/快捷指令写入变量不得出现在生产环境中。
 
 机器 Token 轮换时：
 

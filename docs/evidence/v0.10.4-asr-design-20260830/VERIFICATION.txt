@@ -1,0 +1,359 @@
+v0.10.4 服务端 ASR 实施级设计：最终事务验证记录
+====================================================
+
+日期：2026-08-30（Asia/Shanghai）
+仓库：/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+分支：local/v0627-feature-closeout-20260827
+当前 Git baseline HEAD：0eb4ec485ff6ba7663045dab6cf7638486ea021e
+架构盘点快照：2dc9b1114107aee906d0ecfb006ac461cdb86cec
+变更字段：`docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md` 的 v0.10.4 服务端 ASR 实施合同，闭环原 4 个 P2 与派生 3 个异步生命周期 P2；保留已冻结的 provider/secure settings/media/security/capacity/metrics/deploy/rollback 决策。
+返工输入正文 SHA-256：67ef60adb36a61c826fc3ce091f96c07b99d92e303dc731447f43fa68913bdfc。
+最终独立只读复审：P0=0，P1=0，P2=0，23/23 合同断言通过，APPROVED。
+
+一、正式设计与精确四工件
+------------------------
+
+正式设计：
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md
+
+MODIFIED_FILE：
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/MODIFIED_FILE
+
+DIFF_FILE：
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/DIFF_FILE
+
+VERIFICATION.txt：
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/VERIFICATION.txt
+
+ROLLBACK.sh：
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/ROLLBACK.sh
+
+关闭前固定状态（VERIFICATION.txt 自身在关闭后从外部计算 SHA-256，不自嵌套哈希）：
+- 正式设计：mode 0644，bytes 82090，SHA-256 b826b98fb3b4344ef5dfbd392234bfa7ed230ddb86394b2795f0ab7abf1ad204。
+- MODIFIED_FILE：mode 0644，bytes 82090，SHA-256 b826b98fb3b4344ef5dfbd392234bfa7ed230ddb86394b2795f0ab7abf1ad204。
+- DIFF_FILE：mode 0644，bytes 83350，SHA-256 2a131772d33becb4c1740014aed263bc07d75afafa3d6304239271c266e83afa。
+- ROLLBACK.sh：mode 0755，bytes 948，SHA-256 96f5f521e534fe5702dec9322747b4bd4d2a1993c9167f36f95ee319e101f42f。
+- 正式设计与 MODIFIED_FILE 逐字节一致。
+- evidence 目录最终只存在上述四个文件。
+
+二、BASELINE：当前 HEAD 原始状态
+-------------------------------
+
+精确命令：
+
+python3 - <<'PY_BASELINE'
+from pathlib import Path
+import hashlib
+import subprocess
+expected_head='0eb4ec485ff6ba7663045dab6cf7638486ea021e'
+architecture_snapshot='2dc9b1114107aee906d0ecfb006ac461cdb86cec'
+target='docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md'
+head=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+tracked=subprocess.check_output(['git','ls-tree','-r','--name-only','HEAD','--',target],text=True).strip()
+if head != expected_head or tracked:
+    raise SystemExit(f'BASELINE_ERROR head={head} tracked={tracked!r}')
+empty_sha=hashlib.sha256(b'').hexdigest()
+print(f'BASELINE_OK current_head={head} target_status=absent original_sha256={empty_sha} architecture_snapshot={architecture_snapshot}')
+PY_BASELINE
+
+输入：HEAD 0eb4ec485ff6ba7663045dab6cf7638486ea021e 的 tree 与目标路径。
+
+字面 stdout：
+BASELINE_OK current_head=0eb4ec485ff6ba7663045dab6cf7638486ea021e target_status=absent original_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 architecture_snapshot=2dc9b1114107aee906d0ecfb006ac461cdb86cec
+
+字面 stderr：空
+退出状态：0
+
+恢复前行为/状态：目标在 baseline tree 中为 absent；架构快照只用于最初盘点，不是当前 Git baseline。
+
+三、MODIFIED：正文、复制件、hygiene 与实施合同
+--------------------------------------------
+
+精确命令（以下 Python body 已以正式设计和 MODIFIED_FILE 为输入执行）：
+
+python3 - \
+  docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md \
+  docs/evidence/v0.10.4-asr-design-20260830/MODIFIED_FILE <<'PY_MODIFIED'
+from pathlib import Path
+import hashlib,re,sys
+if len(sys.argv) not in (2,3):
+    raise SystemExit('usage: validator DESIGN [MODIFIED_FILE]')
+design=Path(sys.argv[1]); raw=design.read_bytes(); text=raw.decode('utf-8'); lines=text.splitlines()
+if len(sys.argv)==3:
+    copy=Path(sys.argv[2]).read_bytes()
+    if copy != raw: raise SystemExit('MODIFIED_ERROR design_copy=not_identical')
+required=[
+'当前 HEAD `0eb4ec485ff6ba7663045dab6cf7638486ea021e`',
+'架构盘点快照：`2dc9b1114107aee906d0ecfb006ac461cdb86cec`',
+'`ASR_MODE` 是生命周期/kill-switch 枚举，只允许 `disabled|live`',
+'v0.10.4 唯一允许值为 `openai-compatible`',
+'`0033_secure_settings_asr.mjs`',
+'`ASR_SETTING_KEY="asr_api_key"`',
+'`node:fs.openAsBlob(normalizedWavPath,{type:"audio/wav"})`',
+'-f s16le pipe:1',
+'第 `3,840,001` byte',
+'44-byte canonical WAV header placeholder',
+'`MACHINE_SCOPE_DENIED`',
+'`Access-Control-Expose-Headers` 必须加入 `Retry-After`',
+'全进程 active uploads 上限 4',
+'临时音频 bytes 总和上限 32 MiB',
+'启动期 sweeper 必须在 server readiness 变为 ready 之前运行',
+'timer 必须 `unref()`',
+'`server.close()` 必须停止 timer',
+'`backend/src/asr/metrics.js`',
+'最多 512 条完成事件的 ring',
+'`GET /api/admin/asr/status`',
+'只暴露一个 `processing`',
+'正在上传并转成文字',
+'单次 `quick_record` transcript 上限 10,000 字',
+'候选总长必须 ≤50,000 字',
+'provider JSON 响应 byte 上限为 `256 KiB`',
+'第 262,145 byte',
+'`UMask` 保持现有 `0027`',
+'`scripts/asr-runtime-cleanup.mjs`',
+'SystemSettingsPage.jsx',
+'`\\r\\n`→`\\n`',
+'appendTranscriptToDraft(transcript)',
+'candidate = existing + (existing && transcript ? "\\n" : "") + transcript',
+'sameBlobRetryCount=0',
+'sameBlobRetryCount<1',
+'`rate_limited`',
+'`same_blob_retryable`',
+'`release_and_rerecord`',
+'`Retry-After = clamp(ceil(remainingWindowMs / 1000), 1, 300)`',
+'不显示“重试当前录音”',
+'第二次失败/第二次点击拒绝并释放',
+'`recordingGeneration`',
+'`currentGeneration === capturedGeneration`',
+'mark generation expired',
+'abort active fetch',
+'ignore late result',
+'functional state update',
+'rateLimitCountdownSeconds = retryAfterSeconds ?? 300',
+'invalid/missing→300 秒 UI fallback',
+'`expiresAt = blobCreatedAt + 300000`',
+'`blob_ttl_expired`',
+'不得分类为网络中断或 `same_blob_retryable`',
+]
+missing=[x for x in required if x not in text]
+forbidden=[
+'79f09d0738b4aff6aecd1cbc47effc337afdcba6',
+'onDraftChange(transcript)',
+'生成新 key 后重试',
+'openai-compatible|local-whisper',
+'ASR_WHISPER_COMMAND',
+'ASR_WHISPER_MODEL_PATH',
+'UMask=0077',
+'rm -rf /run/sentelligent-asr',
+'`quick_record` 上限 50,000 字',
+'上游响应上限 64 KiB',
+'providers/localWhisper.js',
+]
+present=[x for x in forbidden if x in text]
+# Legacy terms may only occur in explicit non-goal / anti-pattern contexts.
+legacy={}
+for term,markers in {
+    'local-whisper':('非目标','不实现','不创建'),
+    'whisper-cli':('非目标','不实现','不探测','不创建'),
+    'uploading':('不伪造','不存在','不出现','不根据'),
+    'transcribing':('不伪造','不存在','不出现','不根据'),
+    'ASR_USER_REQUIRED':('不新增/伪造',),
+}.items():
+    hits=[(n,line) for n,line in enumerate(lines,1) if term in line]
+    bad=[(n,line) for n,line in hits if not any(marker in line for marker in markers)]
+    legacy[term]=(len(hits),len(bad))
+    if bad: present.append(f'{term}:bad_context={bad!r}')
+# Error-table lifecycle assertions, not merely scattered keyword presence.
+def row(code):
+    matches=[line for line in lines if line.startswith('|') and f'`{code}`' in line]
+    if len(matches)!=1: raise SystemExit(f'MODIFIED_ERROR row={code} matches={matches!r}')
+    return matches[0]
+fatal=('INVALID_IDEMPOTENCY_KEY','ASR_TRANSCRIPT_EMPTY','IDEMPOTENCY_CONFLICT')
+for code in fatal:
+    value=row(code)
+    if not ('Blob/key' in value and ('重新录音' in value or '重新录' in value)):
+        raise SystemExit(f'MODIFIED_ERROR fatal_row={value!r}')
+    if '可重试' in value: raise SystemExit(f'MODIFIED_ERROR fatal_retry={value!r}')
+rate=row('ASR_RATE_LIMITED')
+if not all(x in rate for x in ('Retry-After','clamp','释放 Blob/key','重新录音')):
+    raise SystemExit(f'MODIFIED_ERROR rate_row={rate!r}')
+for code in ('ASR_IN_PROGRESS','ASR_CAPACITY_EXCEEDED'):
+    value=row(code)
+    if not all(x in value for x in ('sameBlobRetryCount<1','Blob `<5min`','同 Blob/key','一次')):
+        raise SystemExit(f'MODIFIED_ERROR bounded_row={value!r}')
+for code in ('ASR_PROVIDER_BAD_RESPONSE','ASR_TIMEOUT'):
+    value=row(code)
+    if not all(x in value for x in ('sameBlobRetryCount<1','Blob `<5min`','一次','再次失败立即释放')):
+        raise SystemExit(f'MODIFIED_ERROR provider_row={value!r}')
+retryable_lines=[line for line in lines if '同 Blob retryable 集合固定' in line]
+if len(retryable_lines)!=1 or 'ASR_RATE_LIMITED' in retryable_lines[0]:
+    raise SystemExit(f'MODIFIED_ERROR retryable_allowlist={retryable_lines!r}')
+if re.search(r'ASR_TRANSCRIPT_EMPTY[^\n|]*可重试',text):
+    raise SystemExit('MODIFIED_ERROR empty_retry_residue')
+# Cross-section P2/test/DoD requirements.
+p2_required=[
+'旧 callback 只能清理自己拥有的资源',
+'late success/error 一律丢弃',
+'TTL 在 retry processing 中到点必须以 `blob_ttl_expired` abort+release',
+'`ASR_RATE_LIMITED` null 使用 300 秒 UI fallback',
+'processing 期间编辑 draft 与 stale generation 不覆盖新文本',
+'stale/late result 不污染新状态',
+]
+p2_missing=[x for x in p2_required if x not in text]
+trailing=[n for n,line in enumerate(lines,1) if line.endswith((' ','\t'))]
+headings=len(re.findall(r'^#{1,6} ',text,flags=re.M))
+if missing or p2_missing or present or trailing or b'\r' in raw or text.count('## 11. 完整测试矩阵与量化阈值')!=1 or text.count('```')%2:
+    raise SystemExit(f'MODIFIED_ERROR missing={missing!r} p2_missing={p2_missing!r} forbidden={present!r} trailing={trailing!r} raw_cr={raw.count(bytes([13]))}')
+copy_status='identical' if len(sys.argv)==3 else 'not_checked'
+print(f'MODIFIED_OK sha256={hashlib.sha256(raw).hexdigest()} bytes={len(raw)} newlines={raw.count(bytes([10]))} headings={headings} requirements={len(required)}/{len(required)} p2_rows=8/8 p2_cross_sections={len(p2_required)}/{len(p2_required)} trailing_whitespace=0 raw_cr=0 section11=1 fences=balanced design_copy={copy_status} legacy_contexts={legacy}')
+PY_MODIFIED
+
+输入：最终正式设计与 MODIFIED_FILE。
+
+字面 stdout：
+MODIFIED_OK sha256=b826b98fb3b4344ef5dfbd392234bfa7ed230ddb86394b2795f0ab7abf1ad204 bytes=82090 newlines=980 headings=80 requirements=51/51 p2_rows=8/8 p2_cross_sections=6/6 trailing_whitespace=0 raw_cr=0 section11=1 fences=balanced design_copy=identical legacy_contexts={'local-whisper': (2, 0), 'whisper-cli': (3, 0), 'uploading': (4, 0), 'transcribing': (4, 0), 'ASR_USER_REQUIRED': (1, 0)}
+
+字面 stderr：空
+退出状态：0
+
+结构化门禁同时验证：
+- 原 31 个 P1/P2 冻结锚点未回退；最终 required anchors 为 51/51。
+- `onDraftChange(transcript)`、旧 HEAD、换 key 重放同音频、rate-limit 同 Blob retry、local provider 实施等 forbidden residues 为 0。
+- assistant 使用最新 draft functional update、精确 newline candidate、单次/合并后 2,000 上限与本地拒绝仍 release。
+- INVALID/EMPTY/CONFLICT 立即释放并重新录音；五类 transient 同 Blob/key 最多人工一次。
+- rate-limit clamp 1..300、invalid/missing→300 秒纯 UI fallback、倒计时后只新录音。
+- recordingGeneration fence、固定 expiresAt、blob_ttl_expired abort、late-result discard 已同步状态机/hook/Slice/tests/DoD。
+
+四、冻结后的关键实施合同
+----------------------
+
+1. `ASR_MODE=disabled|live`；v0.10.4 唯一 provider 为 `ASR_PROVIDER=openai-compatible`；local Whisper 明确后续非目标。
+2. 新增 `0033_secure_settings_asr.mjs` 与 `asr_api_key`，同步 SQLite CHECK、repository allowlist/metadata、admin write/clear 与管理员卡片。
+3. ffmpeg 固定 raw `-f s16le pipe:1`；Node 预开 0600 WAV 并写 44-byte header；PCM 3,840,000 通过、第 3,840,001 byte 立即 abort/TERM，500ms 后 KILL；成功回填并复核 inode/owner/mode/size/header/duration。
+4. provider 使用 `node:fs.openAsBlob(...)` file-backed Blob，禁止 readFile/Buffer.concat 整文件；BASE_URL 保留 pathname；JSON 262,144 通过、第 262,145 byte abort。
+5. CORS 增两个 ASR header并 expose Retry-After；machine token 固定 `403 MACHINE_SCOPE_DENIED`；前端只暴露 `processing` 和“正在上传并转成文字”。
+6. quick 单次 transcript ≤10,000、合并 ≤50,000；assistant 通过 appendTranscriptToDraft 对最新 draft 原子追加，单次/合并 ≤2,000，超限原文逐字不变；都不自动 analyze/send。
+7. INVALID/EMPTY/CONFLICT 立即释放 Blob/key、要求重新录音；ASR_RATE_LIMITED 立即释放，header clamp 1..300，非法/缺失用 300 秒 UI fallback，倒计时后只新录音。
+8. 五类 transient 共享 `sameBlobRetryCount<1`、同 Blob/key、人工 retry、Blob<5min；第二次失败释放。每段录音由 recordingGeneration 隔离，expiresAt 不因 retry 延长，TTL 在途以 blob_ttl_expired abort 并丢弃 late result。
+9. 资源顺序：限流→upload/temp gate→bounded upload/magic→processing slot→probe/transcode/provider/cleanup；active uploads≤4、temp bytes≤32MiB、owner processing≤1、global≤2。
+10. startup ready 前清合法 request-*；periodic 只清 >10min 且 timer unref；server.close 停 timer、abort、TERM/KILL、bounded cleanup，无 open handles。
+11. backend UMask 保持 0027，ASR 显式 0700/0600；512 ring/counters/gauges；admin-only GET /api/admin/asr/status；回滚 cleanup 使用版本化 non-following helper，不用裸 glob。
+
+五、DIFF_FILE 正反向验证
+----------------------
+
+空白检查精确命令：
+git diff --no-index --check -- /dev/null docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md
+
+输入：/dev/null 与最终正式设计。
+字面 stdout：空
+字面 stderr：空
+退出状态：1（Git 对存在 clean no-index difference 的预期状态）。
+
+正向精确命令：
+cd /tmp/v0104-asr-final-patch-copy.jaEz8h
+git apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/DIFF_FILE
+git apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/DIFF_FILE
+cmp -s /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md /tmp/v0104-asr-final-patch-copy.jaEz8h/docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md
+
+输入：全新空临时根与 DIFF_FILE。
+结果：git apply --check stdout/stderr 空、exit 0；git apply stdout/stderr 空、exit 0；cmp exit 0，生成设计与正式设计逐字节一致。
+
+反向适用性精确命令：
+git apply --check --reverse /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/DIFF_FILE
+
+输入：正式工作树。
+字面 stdout：空
+字面 stderr：空
+退出状态：0
+
+重新生成比较：`git diff --no-index --binary -- /dev/null <design>` exit 1；生成 bytes 与 DIFF_FILE 逐字节一致。
+
+字面 wrapper stdout：
+DIFF_VERIFY_OK no_index_stdout_bytes=0 no_index_stderr_bytes=0 no_index_exit=1 forward_check_exit=0 forward_apply_exit=0 forward_copy=identical reverse_stdout_bytes=0 reverse_stderr_bytes=0 reverse_check_exit=0 regenerated_diff=identical patch=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/DIFF_FILE forward_root=/tmp/v0104-asr-final-patch-copy.jaEz8h
+
+wrapper stderr：空
+wrapper 退出状态：0
+
+六、ROLLBACK 独立副本
+--------------------
+
+精确命令：
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/ROLLBACK.sh /tmp/v0104-asr-final-rollback-copy.Y2BBO4
+
+输入：独立副本 /tmp/v0104-asr-final-rollback-copy.Y2BBO4；目标设计在执行前与正式设计逐字节一致。
+
+字面 stdout：
+ROLLBACK_OK restored_status=absent original_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 target=/tmp/v0104-asr-final-rollback-copy.Y2BBO4/docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md
+ROLLBACK_VERIFY_OK stdout_bytes=226 stderr_bytes=0 exit=0 restored_status=absent modified_file_status=present formal_design_status=present design_copy=identical bash_n_exit=0 rollback_root=/tmp/v0104-asr-final-rollback-copy.Y2BBO4
+
+字面 stderr：空
+退出状态：0
+
+ROLLBACK.sh 语法精确命令：
+bash -n docs/evidence/v0.10.4-asr-design-20260830/ROLLBACK.sh
+字面 stdout：空
+字面 stderr：空
+退出状态：0
+
+恢复行为/状态：独立副本恢复为 current HEAD 的 absent 状态；正式设计与 MODIFIED_FILE 保持 present 且逐字节一致。脚本在删除前拒绝 symlink、非 regular target 与 SHA-256 不匹配目标。
+
+七、最终 Secret Scan
+--------------------
+
+精确命令：
+npm run scan:secrets
+
+输入：正式设计与最终精确四工件存在、临时 helper 已移除的完整工作树和 Git 历史。
+
+字面 stdout：
+
+> sentelligent-sales-workbench@0.10.0 scan:secrets
+> node scripts/project-secret-scan.mjs --history
+
+{
+  "status": "passed",
+  "scannedFiles": 760,
+  "scannedGitObjects": 3513,
+  "scannedGitMessages": 601,
+  "gitHistoryComplete": true,
+  "findings": []
+}
+
+字面 stderr：空
+退出状态：0
+
+两遍关闭验证结果：在 VERIFICATION placeholder 与填入字面输出后各运行一次；两次 stdout 逐字节一致，identical=yes。
+
+八、临时 index whole-transaction whitespace gate
+-------------------------------------------------
+
+临时 index 从 HEAD 0eb4ec485ff6ba7663045dab6cf7638486ea021e 初始化，只加入以下 5 路径：
+- docs/superpowers/plans/2026-08-30-v0104-server-asr-design.md
+- docs/evidence/v0.10.4-asr-design-20260830/MODIFIED_FILE
+- docs/evidence/v0.10.4-asr-design-20260830/DIFF_FILE
+- docs/evidence/v0.10.4-asr-design-20260830/VERIFICATION.txt
+- docs/evidence/v0.10.4-asr-design-20260830/ROLLBACK.sh
+
+精确验收命令：
+GIT_INDEX_FILE="$TEMP_INDEX" git diff --cached --check
+
+输入：从当前 HEAD read-tree 后只 add 上述五路径的临时 index。
+字面 stdout：空
+字面 stderr：空
+退出状态：0
+
+字面 wrapper stdout：
+TEMP_INDEX_OK baseline_head=0eb4ec485ff6ba7663045dab6cf7638486ea021e changed_paths=5 diff_check_stdout_bytes=0 diff_check_stderr_bytes=0 diff_check_exit=0 real_index_before_sha256=91eba21e1ba9e218c55a2a3faa0d61660c629b2bf1e7d01c4bfa31c6008c57de real_index_after_sha256=91eba21e1ba9e218c55a2a3faa0d61660c629b2bf1e7d01c4bfa31c6008c57de real_index_bytes=107750 temp_index_deleted=yes
+
+wrapper stderr：空
+wrapper 退出状态：0
+
+关闭结果：placeholder 与填入字面输出后的两遍临时 index wrapper 输出一致；最终 VERIFICATION 内容再次执行同一门禁仍为 changed_paths=5、diff check exit=0、真实 index hash/bytes 不变。
+
+真实 index 门禁前固定为 mode 0644、bytes 107750、SHA-256 91eba21e1ba9e218c55a2a3faa0d61660c629b2bf1e7d01c4bfa31c6008c57de；临时 index 删除后再次读取必须完全相同。
+
+九、范围与未执行操作
+------------------
+
+本事务只修改正式 ASR 设计及 /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-design-20260830/ 精确四工件。未修改 v0.10.3 热修源码、release 文档/evidence、backend/frontend 实现、真实 Git index 或生产配置；未实施 ASR 源码，未 commit、未 push、未 deploy、未重启服务、未调用真实 provider/key。

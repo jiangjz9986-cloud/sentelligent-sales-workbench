@@ -12,12 +12,84 @@ describe("assistant execution policy", () => {
   it("classifies read, preview, ordinary write, and financial tools", () => {
     assert.equal(getToolPolicy("customer.search").risk, RISK_LEVELS.R0);
     assert.equal(getToolPolicy("reimbursement-report.preview").risk, RISK_LEVELS.R1);
+    assert.equal(getToolPolicy("advance-settlement.preview").risk, RISK_LEVELS.R1);
+    assert.equal(getToolPolicy("advance-settlement.preview").confirmation, "none");
     assert.equal(getToolPolicy("visit-capture.confirm").risk, RISK_LEVELS.R2);
     assert.equal(getToolPolicy("invoice.ingest").risk, RISK_LEVELS.R1);
     assert.equal(getToolPolicy("invoice.ingest").confirmation, "none");
     assert.equal(getToolPolicy("visit-capture.confirm").confirmation, "simple");
     assert.equal(getToolPolicy("travel-expense.create").risk, RISK_LEVELS.R3);
     assert.equal(getToolPolicy("travel-expense.create").confirmation, "explicit_code");
+    assert.equal(getToolPolicy("shortcut-bookkeeping.confirm").confirmation, "explicit_language");
+  });
+
+  it("classifies the customer profile write tools as code-confirmed writes", () => {
+    assert.deepEqual(getToolPolicy("customer.create"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("customer.update"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("customer.delete"), {
+      risk: "R3", confirmation: "explicit_code", reason: "destructive_write", denied: false,
+    });
+    for (const toolName of ["customer.create", "customer.update", "customer.delete"]) {
+      assert.equal(evaluatePolicy({ toolName }).requiresConfirmation, true, toolName);
+      assert.equal(evaluatePolicy({ toolName, confirmed: true }).requiresConfirmation, false, toolName);
+    }
+  });
+
+  it("classifies the quick-record tools with the affirm-language capture level", () => {
+    assert.deepEqual(getToolPolicy("visit-capture.capture"), {
+      risk: "R1", confirmation: "affirm_language", reason: "ordinary_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("visit-capture.search"), {
+      risk: "R0", confirmation: "none", reason: "read_only", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("visit-capture.update"), {
+      risk: "R2", confirmation: "explicit_code", reason: "record_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("visit-capture.void"), {
+      risk: "R3", confirmation: "explicit_code", reason: "destructive_write", denied: false,
+    });
+    assert.equal(evaluatePolicy({ toolName: "visit-capture.capture" }).requiresConfirmation, true);
+    assert.equal(evaluatePolicy({ toolName: "visit-capture.capture", confirmed: true }).requiresConfirmation, false);
+    assert.equal(evaluatePolicy({ toolName: "visit-capture.search" }).requiresConfirmation, false);
+    for (const toolName of ["visit-capture.update", "visit-capture.void"]) {
+      assert.equal(evaluatePolicy({ toolName }).requiresConfirmation, true, toolName);
+    }
+  });
+
+  it("classifies the opportunity tools on the R0/R1-affirm/R2-code/R3-code ladder (v0.7.6)", () => {
+    assert.deepEqual(getToolPolicy("opportunity.list"), {
+      risk: "R0", confirmation: "none", reason: "read_only", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.update-stage"), {
+      risk: "R1", confirmation: "affirm_language", reason: "stage_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.update-next"), {
+      risk: "R1", confirmation: "affirm_language", reason: "ordinary_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.update"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.create"), {
+      risk: "R2", confirmation: "explicit_code", reason: "profile_write", denied: false,
+    });
+    assert.deepEqual(getToolPolicy("opportunity.delete"), {
+      risk: "R3", confirmation: "explicit_code", reason: "destructive_write", denied: false,
+    });
+    assert.equal(evaluatePolicy({ toolName: "opportunity.list" }).requiresConfirmation, false);
+    for (const toolName of [
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ]) {
+      assert.equal(evaluatePolicy({ toolName }).requiresConfirmation, true, toolName);
+      assert.equal(evaluatePolicy({ toolName, confirmed: true }).requiresConfirmation, false, toolName);
+    }
   });
 
   it("denies transport, shell, and database tools", () => {

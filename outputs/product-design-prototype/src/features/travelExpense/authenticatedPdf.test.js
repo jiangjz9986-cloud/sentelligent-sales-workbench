@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 
 const moduleUrl = new URL("./authenticatedPdf.js", import.meta.url);
 const componentUrl = new URL("./AuthenticatedPdfFrame.jsx", import.meta.url);
+const invoicePreviewUrl = new URL("./InvoicePrintPreview.jsx", import.meta.url);
 
 async function loadAuthenticatedPdfModule() {
   if (!existsSync(fileURLToPath(moduleUrl))) return {};
@@ -92,6 +93,31 @@ describe("authenticated PDF loading", () => {
     assert.equal(blobRead, false);
   });
 
+  it("loads authenticated image bytes only when the response declares an image", async () => {
+    const pdf = await loadAuthenticatedPdfModule();
+    assert.equal(typeof pdf.loadAuthenticatedImageBlob, "function");
+    const responseBlob = new Blob(["image-bytes"], { type: "image/png" });
+    const blob = await pdf.loadAuthenticatedImageBlob(async () => ({
+      ok: true,
+      status: 200,
+      redirected: false,
+      headers: new Headers({ "Content-Type": "image/png" }),
+      blob: async () => responseBlob,
+    }));
+    assert.equal(blob, responseBlob);
+
+    await assert.rejects(
+      pdf.loadAuthenticatedImageBlob(async () => ({
+        ok: true,
+        status: 200,
+        redirected: false,
+        headers: new Headers({ "Content-Type": "application/pdf" }),
+        blob: async () => new Blob(["pdf"], { type: "application/pdf" }),
+      })),
+      /Content-Type|图片/i,
+    );
+  });
+
   it("aborts stale work and exposes PDF.js canvas readiness", () => {
     const componentPath = fileURLToPath(componentUrl);
     const source = existsSync(componentPath) ? readFileSync(componentPath, "utf8") : "";
@@ -99,6 +125,9 @@ describe("authenticated PDF loading", () => {
     assert.match(source, /new AbortController\(\)/);
     assert.match(source, /loadAuthenticatedPdfBlob/);
     assert.match(source, /getDocument/);
+    assert.match(source, /isEvalSupported:\s*false/);
+    const invoicePreviewSource = readFileSync(fileURLToPath(invoicePreviewUrl), "utf8");
+    assert.match(invoicePreviewSource, /isEvalSupported:\s*false/);
     assert.match(source, /renderTask\.promise/);
     assert.match(source, /renderTask\?\.cancel\(\)/);
     assert.match(source, /loadingTask\?\.destroy\(\)/);

@@ -135,6 +135,73 @@ beforeEach(() => {
 afterEach(() => db.close());
 
 describe("invoice matching and weekly coverage", () => {
+  it("prefers the unique exact amount in the priority natural week", () => {
+    const expense = createExpense({ occurredOn: "2026-08-05", purpose: "本周消费" });
+    createExpense({ occurredOn: "2026-08-24", purpose: "跨周但日期更近的消费" });
+    const invoice = createInvoice("auto-match-priority-week", { issuedOn: "2026-08-25" });
+    const result = invoiceRepository.autoMatchInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: invoice.id,
+      priorityWeekStart: "2026-08-03",
+    });
+    assert.equal(result.status, "matched");
+    assert.equal(result.match.expenseId, expense.id);
+    assert.equal(result.match.paymentId, expense.payments[0].id);
+    assert.equal(result.match.allocatedCents, 10000);
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "matched");
+  });
+
+  it("automatically binds a unique cross-week exact amount at the 31-day boundary", () => {
+    const expense = createExpense({ occurredOn: "2026-07-04", purpose: "跨周窗内消费" });
+    const invoice = createInvoice("auto-match-cross-week-in-window", { issuedOn: "2026-08-04" });
+    const result = invoiceRepository.autoMatchInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: invoice.id,
+      priorityWeekStart: "2026-08-03",
+    });
+    assert.equal(result.status, "matched");
+    assert.equal(result.match.expenseId, expense.id);
+    assert.equal(result.selected.weekPriority, false);
+    assert.equal(result.selected.dayDistance, 31);
+    assert.equal(result.selected.dateWindowEligible, true);
+  });
+
+  it("keeps a unique cross-week exact amount at 32 days in review", () => {
+    const expense = createExpense({ occurredOn: "2026-07-03", purpose: "跨周超窗消费" });
+    const invoice = createInvoice("auto-match-cross-week-out-of-window", { issuedOn: "2026-08-04" });
+    const result = invoiceRepository.autoMatchInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: invoice.id,
+      priorityWeekStart: "2026-08-03",
+    });
+    assert.equal(result.status, "review_required");
+    assert.equal(result.reason, "exact_amount_outside_date_window");
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.candidates[0].expenseId, expense.id);
+    assert.equal(result.candidates[0].dateWindowEligible, false);
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "unmatched");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_matches WHERE invoice_id = $invoiceId").get({ $invoiceId: invoice.id }).count, 0);
+  });
+
+  it("keeps equal-amount invoice candidates in review instead of guessing", () => {
+    createExpense({ occurredOn: "2026-08-04", purpose: "第一笔" });
+    createExpense({ occurredOn: "2026-08-06", purpose: "第二笔" });
+    const invoice = createInvoice("auto-match-ambiguous");
+    const result = invoiceRepository.autoMatchInvoice({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: invoice.id,
+      priorityWeekStart: "2026-08-03",
+    });
+    assert.equal(result.status, "review_required");
+    assert.equal(result.reason, "multiple_exact_amounts");
+    assert.equal(result.candidates.length, 2);
+    assert.equal(invoiceRepository.getInvoice(invoice.id, { owner: "owner-a" }).status, "unmatched");
+  });
+
   it("rejects removing a payment referenced by invoice workflow evidence", () => {
     const expense = createExpense({
       payments: [
@@ -314,9 +381,12 @@ describe("invoice matching and weekly coverage", () => {
       weekStart: "2026-08-03",
       reimbursementCents: 20000,
       confirmedCoverageCents: 10000,
+      electronicInvoiceCoverageCents: 10000,
+      substituteInvoiceCoverageCents: 0,
       missingInvoiceCents: 10000,
       noInvoiceConfirmedCents: 0,
       unacknowledgedMissingCents: 10000,
+      invoiceWarehouseAvailableCents: 0,
       expenseCount: 1,
     });
   });
@@ -344,6 +414,51 @@ describe("invoice matching and weekly coverage", () => {
       (error) => error?.code === "EXPENSE_HAS_ACTIVE_INVOICE_STATE",
     );
     assert.ok(expenseRepository.getExpense(expense.id, { owner: "owner-a" }));
+  });
+
+  it("separates electronic and substitute coverage and reports unused warehouse value", () => {
+    const expense = createExpense({
+      purpose: "电子票与替票混合住宿",
+      payments: [payment({ amountCents: 10000, reimbursementCents: 10000 })],
+    });
+    const electronic = createInvoice("coverage-electronic", { totalCents: 3000 });
+    const substitute = createInvoice("coverage-substitute", { totalCents: 2000 });
+    createInvoice("coverage-warehouse", { totalCents: 8000 });
+
+    confirmMatch({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: electronic.id,
+      expenseReferenceCode: expense.referenceCode,
+      paymentId: expense.payments[0].id,
+      allocatedCents: 3000,
+      matchMethod: "manual_selection",
+    });
+    confirmMatch({
+      owner: "owner-a",
+      actor: "owner-a",
+      invoiceId: substitute.id,
+      expenseReferenceCode: expense.referenceCode,
+      paymentId: expense.payments[0].id,
+      allocatedCents: 2000,
+      matchMethod: "rule_candidate",
+    });
+
+    assert.deepEqual(invoiceRepository.getWeekInvoiceCoverage({
+      owner: "owner-a",
+      weekStart: "2026-08-03",
+    }), {
+      weekStart: "2026-08-03",
+      reimbursementCents: 10000,
+      confirmedCoverageCents: 5000,
+      electronicInvoiceCoverageCents: 3000,
+      substituteInvoiceCoverageCents: 2000,
+      missingInvoiceCents: 5000,
+      noInvoiceConfirmedCents: 0,
+      unacknowledgedMissingCents: 5000,
+      invoiceWarehouseAvailableCents: 8000,
+      expenseCount: 1,
+    });
   });
 
   it("rejects review and deletion of an invoice with confirmed matches", () => {
@@ -537,9 +652,12 @@ describe("invoice matching and weekly coverage", () => {
       weekStart: "2026-08-03",
       reimbursementCents: 15000,
       confirmedCoverageCents: 3000,
+      electronicInvoiceCoverageCents: 3000,
+      substituteInvoiceCoverageCents: 0,
       missingInvoiceCents: 12000,
       noInvoiceConfirmedCents: 5000,
       unacknowledgedMissingCents: 7000,
+      invoiceWarehouseAvailableCents: 0,
       expenseCount: 2,
     });
 

@@ -8,6 +8,7 @@ import { webkit } from "playwright";
 import { createServer as createViteServer } from "vite";
 
 import { multiPagePdf, VALID_PDF } from "../../../backend/tests/helpers/image-fixtures.js";
+import viteConfig from "../vite.config.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appRoot = resolve(here, "..");
@@ -36,6 +37,11 @@ async function freePort() {
   await closeServer(probe);
   return port;
 }
+
+test("preserves linked dependencies so PDF.js worker imports retain Vite asset URL semantics", () => {
+  const config = viteConfig({ command: "serve", mode: "test" });
+  assert.equal(config.resolve?.preserveSymlinks, true);
+});
 
 test("keeps four-up printing disabled until PDF.js renders the authenticated PDF Canvas", async (context) => {
   const port = await freePort();

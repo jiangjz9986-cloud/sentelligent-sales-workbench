@@ -208,6 +208,7 @@ export async function planVisitItinerary(input, {
     advice: Array.isArray(selectedEnhancement.advice) ? selectedEnhancement.advice : [],
     optimization: {
       source: selectedEnhancement.source ?? "deterministic",
+      fallbackReason: selectedEnhancement.fallbackReason ?? null,
       baselineOrderedStopIds: baseline.orderedStopIds,
     },
     totals: {

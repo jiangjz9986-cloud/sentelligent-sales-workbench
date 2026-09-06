@@ -40,6 +40,7 @@ export function MetricCard({ label, value, badge, tone, className = "", onClick,
         <b className={`pill ${statusTone[tone]}`}>{badge}</b>
         {expanded && detail ? <small data-testid="metric-expanded">{detail}</small> : null}
       </span>
+      {onClick ? <ChevronRight className="metric-chevron" size={15} /> : null}
     </Component>
   );
 }
@@ -107,6 +108,8 @@ export function StageStrip({ stageCounts = [], onStageClick }) {
     }
   }
 
+  const maxCount = Math.max(1, ...stageOrder.map((stage) => dataByStage.get(stage).count));
+
   return (
     <div className="stage-strip">
       {stageOrder.map((stage) => {
@@ -123,6 +126,11 @@ export function StageStrip({ stageCounts = [], onStageClick }) {
             <span>{stage}</span>
             <strong>{stageData.count}</strong>
             {amount ? <small>{amount}</small> : null}
+            <i
+              className="stage-strip__bar"
+              style={{ "--value": `${Math.round((stageData.count / maxCount) * 100)}%` }}
+              aria-hidden="true"
+            />
           </button>
         );
       })}
@@ -130,14 +138,11 @@ export function StageStrip({ stageCounts = [], onStageClick }) {
   );
 }
 
+// 匹配卡为纯展示：value/meta/置信度已全部呈现，没有可展开的增量信息（v0.10.0
+// 去除无信息量交互；结构化升级归 v0.11.1 AI 卡片契约）。
 export function MatchCard({ title, value, meta, tone }) {
-  const [expanded, setExpanded] = useState(false);
   return (
-    <button
-      className={`match-card interactive-card ${expanded ? "expanded" : ""}`}
-      type="button"
-      onClick={() => setExpanded((current) => !current)}
-    >
+    <section className="match-card">
       <span className={`mini-icon ${statusTone[tone]}`}>
         <Target size={15} />
       </span>
@@ -145,9 +150,8 @@ export function MatchCard({ title, value, meta, tone }) {
         <small>{title}</small>
         <strong>{value}</strong>
         <em>{meta}</em>
-        {expanded ? <small className="item-detail">匹配依据已展开，可结合当前记录调整同步目标。</small> : null}
       </div>
-    </button>
+    </section>
   );
 }
 
@@ -164,55 +168,28 @@ export function ExtractCard({ title, items }) {
   );
 }
 
-export function ExpandableInsight({
-  children,
-  tone = "blue",
-  detail = "已展开：可结合客户、商机、动作和周报继续处理。",
-  testId,
-  expandedTestId,
-  ariaLabel,
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const fallbackLabel = typeof children === "string" && children.trim() ? children : detail;
-
+// 洞察块与信息清单为纯展示：正文即全文，点击不会带来新信息（v0.10.0 去除
+// 无信息量交互，正文与空值兜底文案保留）。
+export function ExpandableInsight({ children, tone = "blue", testId }) {
   return (
-    <button
-      className={`insight insight-card interactive-card ${tone} ${expanded ? "expanded" : ""}`}
-      type="button"
-      data-testid={testId}
-      aria-label={ariaLabel ?? fallbackLabel}
-      onClick={() => setExpanded((current) => !current)}
-    >
+    <div className={`insight insight-card ${tone}`} data-testid={testId}>
       <span className="insight-main">{children}</span>
-      <ChevronRight className="insight-chevron" size={16} />
-      {expanded ? (
-        <small className="item-detail" data-testid={expandedTestId}>
-          {detail}
-        </small>
-      ) : null}
-    </button>
+    </div>
   );
 }
 
 export function InfoList({ items, tone = "blue" }) {
-  const [expandedItem, setExpandedItem] = useState(null);
   return (
     <div className="info-list">
       {items.map((item) => (
-        <button
-          className={`info-item interactive-card ${expandedItem === item ? "expanded" : ""}`}
-          key={item}
-          type="button"
-          onClick={() => setExpandedItem((current) => (current === item ? null : item))}
-        >
+        <span className="info-item" key={item}>
           <span className={`mini-icon ${statusTone[tone]}`}>
             <ClipboardList size={15} />
           </span>
           <span>
             <strong>{item}</strong>
-            {expandedItem === item ? <small className="item-detail">可关联客户、商机、周报或方案继续处理。</small> : null}
           </span>
-        </button>
+        </span>
       ))}
     </div>
   );
@@ -284,35 +261,22 @@ export function ManualConfirmBox({ title, desc, compact = false, onGenerate }) {
   );
 }
 
+// 时间线行为纯展示：date/title/description 已全部呈现（来源跳转联动归 v0.11.0）。
 export function Timeline({ items = [] }) {
-  const [expandedRow, setExpandedRow] = useState(null);
   const timelineItems = Array.isArray(items) ? items : [];
 
   return (
     <Panel title="阶段时间线" meta="记录来源">
       <div className="timeline">
-        {timelineItems.length > 0 ? timelineItems.map((item, index) => {
-          const id = item.id ?? `${item.date}-${item.title}-${index}`;
-          return (
-          <button
-            className={`time-row interactive-card ${expandedRow === id ? "expanded" : ""}`}
-            key={id}
-            type="button"
-            onClick={() => setExpandedRow((current) => (current === id ? null : id))}
-          >
+        {timelineItems.length > 0 ? timelineItems.map((item, index) => (
+          <div className="time-row" key={item.id ?? `${item.date}-${item.title}-${index}`}>
             <time>{item.date}</time>
             <span>
               <strong>{item.title}</strong>
               <small>{item.description}</small>
-              {expandedRow === id ? (
-                <small className="item-detail" data-testid="timeline-expanded">
-                  已展开：可回看来源记录、确认责任人，并同步下一步动作。
-                </small>
-              ) : null}
             </span>
-          </button>
-          );
-        }) : (
+          </div>
+        )) : (
           <p className="empty-list" data-testid="opportunity-timeline-empty">
             暂无时间线记录
           </p>

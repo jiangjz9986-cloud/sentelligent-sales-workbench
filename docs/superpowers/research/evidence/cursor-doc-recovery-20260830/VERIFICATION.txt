@@ -1,0 +1,235 @@
+CURSOR_DOCUMENT_RECOVERY_TRANSACTION
+DATE=2026-08-30
+STATUS=PASSED
+REPOSITORY=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+BRANCH=local/v0627-feature-closeout-20260827
+HEAD=2dc9b1114107aee906d0ecfb006ac461cdb86cec
+CHANGED_FIELD=document_location
+CONTENT_CHANGE=none
+PATH_CHANGE=intentional plans-to-research classification
+
+AUTHORITATIVE SOURCE
+source_stash_ref=stash@{0}
+source_stash_commit=c5d1f32e5440df2c6c4814139412c1aa0a50f557
+source_untracked_tree=2dfd34713eaac584a14479a3b813c33a416460b8
+stash_count_before=2
+stash_count_after=2
+stash_action=none
+
+RECOVERED PATHS AND HASHES
+1. docs/superpowers/research/2026-08-28-audit-architecture-backend.md
+   source=docs/superpowers/plans/2026-08-28-audit-architecture-backend.md
+   original_sha256=28a874555a9b428f5703ad75e6eea3d220de6d24572f15154a167e545085d11f
+   recovered_sha256=28a874555a9b428f5703ad75e6eea3d220de6d24572f15154a167e545085d11f
+   result=byte-for-byte-identical
+2. docs/superpowers/research/2026-08-28-audit-feature-matrix.md
+   source=docs/superpowers/plans/2026-08-28-audit-feature-matrix.md
+   original_sha256=9fea6d8512fb1acbbd8656586c36bc55d47a5ec010b9fdf10ef2db8004089505
+   recovered_sha256=9fea6d8512fb1acbbd8656586c36bc55d47a5ec010b9fdf10ef2db8004089505
+   result=byte-for-byte-identical
+3. docs/superpowers/research/2026-08-28-audit-frontend-ux.md
+   source=docs/superpowers/plans/2026-08-28-audit-frontend-ux.md
+   original_sha256=3d969d646867eae78838be42c71dca716ac71c7cf7c68c42afbf779009604f8d
+   recovered_sha256=3d969d646867eae78838be42c71dca716ac71c7cf7c68c42afbf779009604f8d
+   result=byte-for-byte-identical
+4. docs/superpowers/research/2026-08-28-multi-account-design.md
+   source=docs/superpowers/plans/2026-08-28-multi-account-design.md
+   original_sha256=dead6d38db4c091f08aee970e2fe305cf14dcdf1aec8676cbb951b628c4e5183
+   recovered_sha256=dead6d38db4c091f08aee970e2fe305cf14dcdf1aec8676cbb951b628c4e5183
+   result=byte-for-byte-identical
+
+GRAND PLAN INDEX
+path=docs/superpowers/plans/2026-08-28-grand-plan-v09-v10.md
+change=none-required
+result=lines 123-126 already list all four research destinations exactly once; all four files exist
+legacy_source_path_references=0
+markdown_links=0
+markdown_missing_links=0
+
+REPEATED V0.10.3 DESIGN SAFEGUARD
+stash_path=docs/superpowers/plans/2026-08-29-v0103-web-chat-design.md
+stash_result=still present in stash@{0}^3
+worktree_path=docs/superpowers/plans/2026-08-29-v0103-web-chat-design.md
+worktree_status=clean and unchanged from HEAD
+action=none
+
+TRANSACTION ARTIFACTS
+MODIFIED_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/superpowers/research/evidence/cursor-doc-recovery-20260830/MODIFIED_FILE
+DIFF_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/superpowers/research/evidence/cursor-doc-recovery-20260830/DIFF_FILE
+VERIFICATION=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/superpowers/research/evidence/cursor-doc-recovery-20260830/VERIFICATION.txt
+ROLLBACK=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/superpowers/research/evidence/cursor-doc-recovery-20260830/ROLLBACK.sh
+ROLLBACK_MODE=-rwxr-xr-x
+
+BASELINE
+command:
+set -euo pipefail
+REPO=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+SOURCE=$(git -C "$REPO" rev-parse 'stash@{0}^3')
+FILES=(2026-08-28-audit-architecture-backend.md 2026-08-28-audit-feature-matrix.md 2026-08-28-audit-frontend-ux.md 2026-08-28-multi-account-design.md)
+count=0
+for name in "${FILES[@]}"; do
+  source_path="docs/superpowers/plans/$name"
+  git -C "$REPO" cat-file -e "$SOURCE:$source_path"
+  sha=$(git -C "$REPO" show "$SOURCE:$source_path" | shasum -a 256 | awk '{print $1}')
+  printf 'BASELINE_BLOB_OK=%s:%s\n' "$source_path" "$sha"
+  count=$((count + 1))
+done
+printf 'BASELINE_SOURCE=%s\n' "$SOURCE"
+printf 'BASELINE_TOTAL=%d/4\n' "$count"
+input=stash@{0}^3 and the four plans-path blobs listed above
+literal_output:
+BASELINE_BLOB_OK=docs/superpowers/plans/2026-08-28-audit-architecture-backend.md:28a874555a9b428f5703ad75e6eea3d220de6d24572f15154a167e545085d11f
+BASELINE_BLOB_OK=docs/superpowers/plans/2026-08-28-audit-feature-matrix.md:9fea6d8512fb1acbbd8656586c36bc55d47a5ec010b9fdf10ef2db8004089505
+BASELINE_BLOB_OK=docs/superpowers/plans/2026-08-28-audit-frontend-ux.md:3d969d646867eae78838be42c71dca716ac71c7cf7c68c42afbf779009604f8d
+BASELINE_BLOB_OK=docs/superpowers/plans/2026-08-28-multi-account-design.md:dead6d38db4c091f08aee970e2fe305cf14dcdf1aec8676cbb951b628c4e5183
+BASELINE_SOURCE=2dfd34713eaac584a14479a3b813c33a416460b8
+BASELINE_TOTAL=4/4
+exit_status=0
+result=all four authoritative stash blobs exist and their original hashes are preserved
+
+MODIFIED
+command:
+set -euo pipefail
+REPO=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+SOURCE=$(git -C "$REPO" rev-parse 'stash@{0}^3')
+FILES=(2026-08-28-audit-architecture-backend.md 2026-08-28-audit-feature-matrix.md 2026-08-28-audit-frontend-ux.md 2026-08-28-multi-account-design.md)
+count=0
+for name in "${FILES[@]}"; do
+  source_path="docs/superpowers/plans/$name"
+  destination_path="docs/superpowers/research/$name"
+  cmp -s <(git -C "$REPO" show "$SOURCE:$source_path") "$REPO/$destination_path"
+  sha=$(shasum -a 256 "$REPO/$destination_path" | awk '{print $1}')
+  printf 'MODIFIED_BYTE_MATCH=%s:%s\n' "$destination_path" "$sha"
+  count=$((count + 1))
+done
+printf 'MODIFIED_TOTAL=%d/4\n' "$count"
+printf 'MODIFIED_BEHAVIOR=research-paths-present-and-source-bytes-preserved\n'
+input=the four restored research-path files compared directly to stash@{0}^3 blobs
+literal_output:
+MODIFIED_BYTE_MATCH=docs/superpowers/research/2026-08-28-audit-architecture-backend.md:28a874555a9b428f5703ad75e6eea3d220de6d24572f15154a167e545085d11f
+MODIFIED_BYTE_MATCH=docs/superpowers/research/2026-08-28-audit-feature-matrix.md:9fea6d8512fb1acbbd8656586c36bc55d47a5ec010b9fdf10ef2db8004089505
+MODIFIED_BYTE_MATCH=docs/superpowers/research/2026-08-28-audit-frontend-ux.md:3d969d646867eae78838be42c71dca716ac71c7cf7c68c42afbf779009604f8d
+MODIFIED_BYTE_MATCH=docs/superpowers/research/2026-08-28-multi-account-design.md:dead6d38db4c091f08aee970e2fe305cf14dcdf1aec8676cbb951b628c4e5183
+MODIFIED_TOTAL=4/4
+MODIFIED_BEHAVIOR=research-paths-present-and-source-bytes-preserved
+exit_status=0
+result=path classification changed from plans to research while all bytes remain identical
+
+MARKDOWN AND INDEX CHECK
+command=python3 inline checker over the four restored files plus docs/superpowers/plans/2026-08-28-grand-plan-v09-v10.md; it decodes UTF-8, requires final LF, rejects CR and trailing whitespace, resolves Markdown local links, verifies each research destination occurs exactly once, and rejects the four legacy plans paths
+input=five Markdown files named above
+literal_output:
+GRAND_PLAN_REFERENCE=docs/superpowers/research/2026-08-28-audit-architecture-backend.md:count=1:present=true
+LEGACY_PATH_REFERENCE=docs/superpowers/plans/2026-08-28-audit-architecture-backend.md:count=0
+GRAND_PLAN_REFERENCE=docs/superpowers/research/2026-08-28-audit-feature-matrix.md:count=1:present=true
+LEGACY_PATH_REFERENCE=docs/superpowers/plans/2026-08-28-audit-feature-matrix.md:count=0
+GRAND_PLAN_REFERENCE=docs/superpowers/research/2026-08-28-audit-frontend-ux.md:count=1:present=true
+LEGACY_PATH_REFERENCE=docs/superpowers/plans/2026-08-28-audit-frontend-ux.md:count=0
+GRAND_PLAN_REFERENCE=docs/superpowers/research/2026-08-28-multi-account-design.md:count=1:present=true
+LEGACY_PATH_REFERENCE=docs/superpowers/plans/2026-08-28-multi-account-design.md:count=0
+MARKDOWN_FILES=5
+MARKDOWN_LINKS=0
+MARKDOWN_ERRORS=0
+MARKDOWN_RESULT=pass
+exit_status=0
+result=grand-plan index is already correct; no edit was necessary
+
+SECRET SCAN
+command=npm run scan:secrets
+working_directory=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+input=tracked files, untracked files including the recovery and evidence artifacts, Git objects, and Git messages
+literal_output:
+> sentelligent-sales-workbench@0.10.0 scan:secrets
+> node scripts/project-secret-scan.mjs --history
+
+{
+  "status": "passed",
+  "scannedFiles": 741,
+  "scannedGitObjects": 3486,
+  "scannedGitMessages": 598,
+  "gitHistoryComplete": true,
+  "findings": []
+}
+exit_status=0
+result=no findings
+
+EXTENSIONLESS ARTIFACT SECRET SCAN
+command=copy MODIFIED_FILE and DIFF_FILE to an independent temporary directory as MODIFIED_FILE.txt and DIFF_FILE.txt, then run node scripts/project-secret-scan.mjs --root=/tmp/cursor-doc-recovery-artifact-scan-20260830.24vKCI --no-history
+input=/tmp/cursor-doc-recovery-artifact-scan-20260830.24vKCI/MODIFIED_FILE.txt and /tmp/cursor-doc-recovery-artifact-scan-20260830.24vKCI/DIFF_FILE.txt
+literal_output:
+EXTENSIONLESS_SCAN_COPY=/tmp/cursor-doc-recovery-artifact-scan-20260830.24vKCI
+{
+  "status": "passed",
+  "scannedFiles": 2,
+  "scannedGitObjects": 0,
+  "scannedGitMessages": 0,
+  "gitHistoryComplete": null,
+  "findings": []
+}
+exit_status=0
+result=both extensionless artifacts passed the same scanner on independent .txt copies
+
+ROLLBACK
+command:
+set -euo pipefail
+REPO=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+ROLLBACK="$REPO/docs/superpowers/research/evidence/cursor-doc-recovery-20260830/ROLLBACK.sh"
+TEST_ROOT=$(mktemp -d /tmp/cursor-doc-recovery-rollback-test-20260830.XXXXXX)
+mkdir -p "$TEST_ROOT/docs/superpowers/research"
+FILES=(2026-08-28-audit-architecture-backend.md 2026-08-28-audit-feature-matrix.md 2026-08-28-audit-frontend-ux.md 2026-08-28-multi-account-design.md)
+for name in "${FILES[@]}"; do
+  cp "$REPO/docs/superpowers/research/$name" "$TEST_ROOT/docs/superpowers/research/$name"
+done
+printf 'ROLLBACK_TEST_COPY=%s\n' "$TEST_ROOT"
+"$ROLLBACK" "$TEST_ROOT"
+remaining=0
+for name in "${FILES[@]}"; do
+  if [[ -e "$TEST_ROOT/docs/superpowers/research/$name" ]]; then remaining=$((remaining + 1)); fi
+done
+worktree_present=0
+for name in "${FILES[@]}"; do
+  if [[ -f "$REPO/docs/superpowers/research/$name" ]]; then worktree_present=$((worktree_present + 1)); fi
+done
+printf 'ROLLBACK_TEST_REMAINING=%d/4\n' "$remaining"
+printf 'WORKTREE_RECOVERED_PRESENT=%d/4\n' "$worktree_present"
+printf 'ROLLBACK_TEST_RESULT=pass\n'
+[[ "$remaining" -eq 0 && "$worktree_present" -eq 4 ]]
+input=independent copy /tmp/cursor-doc-recovery-rollback-test-20260830.vbbFmP containing the four exact-hash recovered files
+literal_output:
+ROLLBACK_TEST_COPY=/tmp/cursor-doc-recovery-rollback-test-20260830.vbbFmP
+ROLLBACK_ROOT=/tmp/cursor-doc-recovery-rollback-test-20260830.vbbFmP
+ROLLBACK_INPUT_OK=docs/superpowers/research/2026-08-28-audit-architecture-backend.md:28a874555a9b428f5703ad75e6eea3d220de6d24572f15154a167e545085d11f
+ROLLBACK_INPUT_OK=docs/superpowers/research/2026-08-28-audit-feature-matrix.md:9fea6d8512fb1acbbd8656586c36bc55d47a5ec010b9fdf10ef2db8004089505
+ROLLBACK_INPUT_OK=docs/superpowers/research/2026-08-28-audit-frontend-ux.md:3d969d646867eae78838be42c71dca716ac71c7cf7c68c42afbf779009604f8d
+ROLLBACK_INPUT_OK=docs/superpowers/research/2026-08-28-multi-account-design.md:dead6d38db4c091f08aee970e2fe305cf14dcdf1aec8676cbb951b628c4e5183
+ROLLBACK_REMOVED=4/4
+ROLLBACK_RESTORED_BEHAVIOR=pre-recovery-paths-absent
+ROLLBACK_STASH_ACTION=none
+ROLLBACK_TEST_REMAINING=0/4
+WORKTREE_RECOVERED_PRESENT=4/4
+ROLLBACK_TEST_RESULT=pass
+exit_status=0
+restored_behavior=the independent copy returned to the pre-recovery state with all four research paths absent
+retained_behavior=the real worktree still contains all four recovered research documents
+stash_status=unchanged; stash@{0} was not applied, popped, dropped, or edited
+
+FINAL SCOPED GIT STATUS
+literal_output:
+?? docs/superpowers/research/2026-08-28-audit-architecture-backend.md
+?? docs/superpowers/research/2026-08-28-audit-feature-matrix.md
+?? docs/superpowers/research/2026-08-28-audit-frontend-ux.md
+?? docs/superpowers/research/2026-08-28-multi-account-design.md
+?? docs/superpowers/research/evidence/cursor-doc-recovery-20260830/DIFF_FILE
+?? docs/superpowers/research/evidence/cursor-doc-recovery-20260830/MODIFIED_FILE
+?? docs/superpowers/research/evidence/cursor-doc-recovery-20260830/ROLLBACK.sh
+?? docs/superpowers/research/evidence/cursor-doc-recovery-20260830/VERIFICATION.txt
+grand_plan_status=clean
+v0103_design_status=clean
+commit=not-performed
+push=not-performed
+business_source_change=none
+
+SUGGESTED COMMIT BOUNDARY
+include=the four docs/superpowers/research/2026-08-28-*.md recovery files and docs/superpowers/research/evidence/cursor-doc-recovery-20260830 only
+exclude=all docs/releases/evidence work, the unchanged grand plan, the tracked v0.10.3 design, all business source, and all other worktree changes
+suggested_message=docs(superpowers): recover Cursor audit and account design research

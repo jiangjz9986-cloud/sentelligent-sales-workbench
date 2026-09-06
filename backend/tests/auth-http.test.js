@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
 import { isMachineRouteAllowed } from "../src/auth/machineAuthorization.js";
+import { createConnection } from "../src/db/connection.js";
 import { createServer } from "../src/server.js";
 
 const passwordField = "pass" + "word";
@@ -157,7 +158,7 @@ describe("cookie authentication protocol", () => {
   it("requires matching CSRF for cookie writes and allows cookie reads", async () => {
     await startServer();
     const loggedIn = await login();
-    const customer = JSON.stringify({ name: "CSRF customer", owner: "jiangjz" });
+    const customer = JSON.stringify({ name: "CSRF customer" });
 
     const missing = await request("/api/customers", {
       method: "POST",
@@ -220,9 +221,52 @@ describe("cookie authentication protocol", () => {
     assert.equal(preflight.response.headers.get("access-control-allow-credentials"), "true");
     assert.equal(
       preflight.response.headers.get("access-control-expose-headers"),
-      "Content-Disposition",
+      "Content-Disposition,Retry-After",
     );
     assert.match(preflight.response.headers.get("vary"), /Origin/i);
+
+    const asrPreflight = await request("/api/asr/transcriptions?purpose=quick_record", {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Content-Type,X-CSRF-Token,Idempotency-Key,X-Audio-Duration-Ms,X-ASR-Language",
+      },
+    });
+    assert.equal(asrPreflight.response.status, 204);
+    assert.equal(
+      asrPreflight.response.headers.get("access-control-allow-headers"),
+      "Content-Type,X-CSRF-Token,Idempotency-Key,If-Match,X-Audio-Duration-Ms,X-ASR-Language",
+    );
+    assert.equal(
+      asrPreflight.response.headers.get("access-control-expose-headers"),
+      "Content-Disposition,Retry-After",
+    );
+
+    const rejectedHeader = await request("/api/asr/transcriptions?purpose=quick_record", {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Content-Type,X-Private-ASR-Header",
+      },
+    });
+    assert.equal(rejectedHeader.response.status, 403);
+    assert.equal(rejectedHeader.body.error.code, "CORS_HEADERS_NOT_ALLOWED");
+    assert.equal(
+      rejectedHeader.response.headers.get("access-control-allow-headers"),
+      "Content-Type,X-CSRF-Token,Idempotency-Key,If-Match,X-Audio-Duration-Ms,X-ASR-Language",
+    );
+
+    const unchangedNonAsrPreflight = await request("/api/customers", {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "X-Legacy-Client-Header",
+      },
+    });
+    assert.equal(unchangedNonAsrPreflight.response.status, 204);
 
     const rejected = await request("/api/health", {
       headers: { Origin: "https://attacker.example" },
@@ -357,6 +401,188 @@ describe("cookie authentication protocol", () => {
     });
     assert.equal(limited.response.status, 429);
     assert.equal(limited.body.error.code, "LOGIN_RATE_LIMITED");
+  });
+
+  it("serves the users-table login track with display name, role, and last login stamp", async () => {
+    await startServer();
+
+    const loggedIn = await login();
+    assert.equal(loggedIn.body.account, "jiangjz");
+    assert.equal(loggedIn.body.displayName, "继振");
+    assert.equal(loggedIn.body.role, "admin");
+
+    const session = await request("/api/auth/session", {
+      headers: { Cookie: loggedIn.cookie },
+    });
+    assert.equal(session.response.status, 200);
+    assert.equal(session.body.displayName, "继振");
+    assert.equal(session.body.role, "admin");
+
+    const db = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      const row = db.prepare(
+        "SELECT last_login_at AS lastLoginAt FROM users WHERE account = 'jiangjz'",
+      ).get();
+      assert.ok(row.lastLoginAt);
+      assert.ok(Date.parse(row.lastLoginAt) <= Date.now());
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'auth.login.env_fallback'").get().count,
+        0,
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("falls back to environment credentials only when the users row is missing, with an audit trail", async () => {
+    await startServer();
+    const db = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      db.prepare("DELETE FROM users WHERE account = 'jiangjz'").run();
+    } finally {
+      db.close();
+    }
+
+    const loggedIn = await login();
+    assert.equal(loggedIn.body.account, "jiangjz");
+    assert.equal(loggedIn.body.displayName, "jiangjz");
+    assert.equal(loggedIn.body.role, "member");
+
+    const audit = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      const rows = audit.prepare(
+        "SELECT actor, entity_id AS entityId, metadata_json AS metadataJson FROM audit_logs WHERE action = 'auth.login.env_fallback'",
+      ).all().map((row) => ({ ...row }));
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].actor, "jiangjz");
+      assert.equal(rows[0].entityId, "jiangjz");
+      assert.match(rows[0].metadataJson, /user_row_missing/);
+    } finally {
+      audit.close();
+    }
+  });
+
+  it("rejects disabled accounts without falling back to environment credentials", async () => {
+    await startServer();
+    const db = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      db.prepare("UPDATE users SET status = 'disabled' WHERE account = 'jiangjz'").run();
+    } finally {
+      db.close();
+    }
+
+    // 行存在但停用：即使 env 凭据本可匹配，也绝不回退，响应与密码错不可区分。
+    const denied = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account: "jiangjz", [passwordField]: loginValue }),
+    });
+    assert.equal(denied.response.status, 401);
+    assert.equal(denied.body.error.code, "INVALID_CREDENTIALS");
+
+    const audit = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      assert.equal(
+        audit.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'auth.login.env_fallback'").get().count,
+        0,
+      );
+    } finally {
+      audit.close();
+    }
+  });
+
+  it("changes the password end to end: wrong current 403, throttling, and session revocation", async () => {
+    await startServer();
+    const first = await login();
+    const second = await login();
+
+    // 旧密码错 → 403（绝非 401，防前端全局登出）+ 计入登录限流。
+    const wrongCurrent = await request("/api/auth/change-password", {
+      method: "POST",
+      headers: { Cookie: first.cookie, "X-CSRF-Token": first.csrf },
+      body: JSON.stringify({ currentPassword: "wrong-value", newPassword: "unit-rotated-password" }),
+    });
+    assert.equal(wrongCurrent.response.status, 403);
+    assert.equal(wrongCurrent.body.error.code, "CURRENT_PASSWORD_INCORRECT");
+    const throttle = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      assert.equal(throttle.prepare("SELECT COUNT(*) AS count FROM login_rate_limits").get().count, 2);
+    } finally {
+      throttle.close();
+    }
+
+    const tooShort = await request("/api/auth/change-password", {
+      method: "POST",
+      headers: { Cookie: first.cookie, "X-CSRF-Token": first.csrf },
+      body: JSON.stringify({ currentPassword: loginValue, newPassword: "test" }),
+    });
+    assert.equal(tooShort.response.status, 422);
+
+    const changed = await request("/api/auth/change-password", {
+      method: "POST",
+      headers: { Cookie: first.cookie, "X-CSRF-Token": first.csrf },
+      body: JSON.stringify({ currentPassword: loginValue, newPassword: "unit-rotated-password" }),
+    });
+    assert.equal(changed.response.status, 200);
+    assert.equal(changed.body.ok, true);
+    assert.equal(changed.body.revokedSessions, 1);
+
+    // 本会话保留，其他会话即死。
+    assert.equal(
+      (await request("/api/auth/session", { headers: { Cookie: first.cookie } })).response.status,
+      200,
+    );
+    assert.equal(
+      (await request("/api/auth/session", { headers: { Cookie: second.cookie } })).response.status,
+      401,
+    );
+
+    // 旧密码失效，新密码可登录（DB 轨，不回退 env）。
+    const oldValue = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account: "jiangjz", [passwordField]: loginValue }),
+    });
+    assert.equal(oldValue.response.status, 401);
+    const rotated = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account: "jiangjz", [passwordField]: "unit-rotated-password" }),
+    });
+    assert.equal(rotated.response.status, 200);
+    assert.equal(rotated.body.displayName, "继振");
+
+    const audit = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      const rows = audit.prepare(
+        "SELECT actor, after_json AS afterJson FROM audit_logs WHERE action = 'password.change'",
+      ).all().map((row) => ({ ...row }));
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].actor, "jiangjz");
+      assert.match(rows[0].afterJson, /"revokedCount":1/);
+      assert.doesNotMatch(rows[0].afterJson, /scrypt\$/);
+      assert.equal(
+        audit.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'auth.login.env_fallback'").get().count,
+        0,
+      );
+    } finally {
+      audit.close();
+    }
+  });
+
+  it("returns USER_NOT_PROVISIONED when an env-fallback session tries to change the password", async () => {
+    await startServer();
+    const db = createConnection({ databaseUrl: join(tempDir, "auth-http.sqlite") });
+    try {
+      db.prepare("DELETE FROM users WHERE account = 'jiangjz'").run();
+    } finally {
+      db.close();
+    }
+    const fallbackSession = await login();
+    const denied = await request("/api/auth/change-password", {
+      method: "POST",
+      headers: { Cookie: fallbackSession.cookie, "X-CSRF-Token": fallbackSession.csrf },
+      body: JSON.stringify({ currentPassword: loginValue, newPassword: "unit-rotated-password" }),
+    });
+    assert.equal(denied.response.status, 409);
+    assert.equal(denied.body.error.code, "USER_NOT_PROVISIONED");
   });
 
   it("sets browser security headers and production HSTS", async () => {

@@ -10,8 +10,12 @@ const ALLOWED_MACHINE_ROUTES = new Set([
   "POST /api/travel-expense-document-inbox",
   "POST /api/invoices",
   "POST /api/integrations/weixin-agent/events",
+  "GET /api/integrations/weixin-agent/confirmation-outbox",
+  "POST /api/integrations/weixin-agent/confirmation-outbox",
   "POST /api/integrations/hospital-tenders/sync",
   "GET /api/integrations/hospital-tenders/health",
+  "POST /api/integrations/ops-alerts",
+  "GET /api/integrations/ops-alerts/status",
 ]);
 const QUICK_RECORD_ANALYZE_ROUTE = /^POST \/api\/quick-records\/[^/]+\/analyze$/;
 
@@ -24,10 +28,16 @@ const INTEGRATION_ROUTES = Object.freeze({
     "POST /api/travel-expense-document-inbox",
     "POST /api/invoices",
     "POST /api/integrations/weixin-agent/events",
+    "GET /api/integrations/weixin-agent/confirmation-outbox",
+    "POST /api/integrations/weixin-agent/confirmation-outbox",
   ]),
   "hospital-tender-monitor": new Set([
     "POST /api/integrations/hospital-tenders/sync",
     "GET /api/integrations/hospital-tenders/health",
+  ]),
+  "ops-monitor": new Set([
+    "POST /api/integrations/ops-alerts",
+    "GET /api/integrations/ops-alerts/status",
   ]),
 });
 
@@ -64,6 +74,13 @@ function configuredMachineCredentials(config) {
       owner: config.hospitalTenderSyncOwner,
     });
   }
+  if (typeof config?.opsAlertToken === "string" && config.opsAlertToken.length > 0) {
+    credentials.push({
+      token: config.opsAlertToken,
+      integration: "ops-monitor",
+      owner: config.authAccount,
+    });
+  }
   return credentials;
 }
 
@@ -71,7 +88,9 @@ function configuredMachineOwner(config, integration, owner) {
   for (const value of [owner, config?.authAccount]) {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
-  return integration === "hospital-tender-monitor" ? "hospital-tender-monitor" : "weixin-agent";
+  if (integration === "hospital-tender-monitor") return "hospital-tender-monitor";
+  if (integration === "ops-monitor") return "ops-monitor";
+  return "weixin-agent";
 }
 
 function machineIdentity(config, integration, owner) {

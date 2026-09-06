@@ -1,0 +1,259 @@
+V0.10.4 ASR SLICE A0 VERIFICATION
+DATE=2026-08-30
+WORKTREE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate
+CHANGED_BRANCH=local/v0627-feature-closeout-20260827
+BASELINE_HEAD=f7683591802ad30073b720da96a4e7a49f2e2605
+PATH_COUNT=10
+DIFF_FORMAT=zero-context full-index binary unified diff; apply with git apply --unidiff-zero
+CHANGED_FIELD=secure_settings.setting_key adds asr_api_key while preserving all 11 fields; repository metadata adds asr without iCost or environment fallback; maskSecret globally masks lengths 1-4 completely, 5-8 as first+mask+last, and greater than 8 as first4+mask+last4; active-admin HTTP exposes GET /api/settings/security plus PUT and confirmed DELETE /api/settings/asr-api-key while POST remains 404 NOT_FOUND; credentialed exact-origin CORS advertises PUT without widening origins, headers, or credentials.
+FINAL_STATE=The formal worktree remains modified at exactly ten A0 code/test paths plus the four evidence artifacts; the real index, exact 14-path status, formal object path set, full formal object metadata manifest, actual Node scanner temp root, and fixed /tmp gate root remain unchanged and residue-free across the corrected final chain; no commit, push, deployment, or real provider call was performed.
+
+FOUR_ARTIFACTS
+MODIFIED_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-a0-20260830/MODIFIED_FILE
+DIFF_FILE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-a0-20260830/DIFF_FILE
+VERIFICATION.txt=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-a0-20260830/VERIFICATION.txt
+ROLLBACK.sh=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-a0-20260830/ROLLBACK.sh
+
+A0_CODE_TEST_PATHS
+1=backend/src/db/migrate.js
+2=backend/src/db/migrations/0033_secure_settings_asr.mjs
+3=backend/src/http/security.js
+4=backend/src/server.js
+5=backend/src/settings/repository.js
+6=backend/src/settings/secretBox.js
+7=backend/tests/http-security.test.js
+8=backend/tests/migrations.test.js
+9=backend/tests/settings-config-api.test.js
+10=backend/tests/v0103-forward-compat.test.js
+
+BASELINE
+COMMAND=cd /tmp/v0104-asr-a0-zero-rollback-copy-20260830/backend && node --test tests/migrations.test.js tests/settings-config-api.test.js tests/http-security.test.js
+INPUT=Independent detached f7683591802ad30073b720da96a4e7a49f2e2605 copy before DIFF_FILE: eight tracked paths at original hashes; 0033 migration and v0.10.3 forward-compat test absent.
+LITERAL_OUTPUT=tests=45; suites=1; pass=45; fail=0; cancelled=0; skipped=0; todo=0; duration_ms=1106.338958; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=The pre-ASR 0032 migration registry, pre-ASR repository/API behavior, and original CORS method contract passed before modification.
+LOG=/tmp/v0104-asr-a0-zero-baseline-before-20260830.log
+
+TDD_RED_MIGRATION
+COMMAND=cd backend && node --test tests/migrations.test.js
+INPUT=0033 migration tests imported the not-yet-created module.
+LITERAL_OUTPUT=Error [ERR_MODULE_NOT_FOUND]: Cannot find module backend/src/db/migrations/0033_secure_settings_asr.mjs; tests=1; pass=0; fail=1
+EXIT_STATUS=1
+LOG=/tmp/v0104-asr-a0-red-migrations-20260830.log
+
+TDD_RED_SETTINGS
+COMMAND=cd backend && node --test tests/settings-config-api.test.js
+INPUT=ASR repository and HTTP tests imported the not-yet-exported constant.
+LITERAL_OUTPUT=SyntaxError: module ../src/settings/repository.js does not provide an export named ASR_SETTING_KEY; tests=1; pass=0; fail=1
+EXIT_STATUS=1
+LOG=/tmp/v0104-asr-a0-red-settings-20260830.log
+
+TDD_RED_SHORT_MASK_AND_POST
+COMMAND=cd backend && node --test tests/settings-config-api.test.js
+INPUT=Length 1,2,3,4,5,8,9 non-leakage tests and the PUT-only ASR route contract before the mask and route corrections.
+LITERAL_OUTPUT=tests=19; pass=16; fail=3; exit=1; length-1 mask exposed its input; ASR POST returned 200 instead of 404; short input appeared in HTTP/audit state dump.
+EXIT_STATUS=1
+LOG=/tmp/v0104-asr-a0-red-short-mask-post-contract-20260830.log
+
+MODIFIED_SYNTAX
+COMMAND=From repository root, run node --check separately for each of the ten paths listed in A0_CODE_TEST_PATHS.
+INPUT=Formal worktree at the exact modified hashes in MODIFIED_FILE and stable HEAD f7683591802ad30073b720da96a4e7a49f2e2605.
+LITERAL_OUTPUT=Each path printed EXIT 0; RESULT=10/10 syntax checks passed.
+EXIT_STATUS=0
+LOG=/tmp/v0104-asr-a0-node-check-10paths-20260830.log
+
+MODIFIED_TARGETED_FORMAL
+COMMAND=cd /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/backend && node --test tests/migrations.test.js tests/settings-config-api.test.js tests/v0103-forward-compat.test.js tests/http-security.test.js
+INPUT=Formal ten-path A0 modification at stable HEAD f7683591802ad30073b720da96a4e7a49f2e2605.
+LITERAL_OUTPUT=tests=67; suites=2; pass=67; fail=0; cancelled=0; skipped=0; todo=0; duration_ms=1651.70825; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=0033 preservation/rollback/checksum, repository encryption and allowlist, global mask boundaries, admin/machine/CSRF/origin/POST/PUT/DELETE HTTP matrix, allowed and forbidden PUT preflight with no storage/audit write, non-leakage, and exact v0.10.3 forward compatibility all passed.
+LOG=/tmp/v0104-asr-a0-targeted-10paths-20260830.log
+
+MODIFIED_FULL_BACKEND
+COMMAND=cd /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate && npm --prefix backend test
+INPUT=Formal ten-path A0 modified worktree at stable HEAD f7683591802ad30073b720da96a4e7a49f2e2605.
+LITERAL_OUTPUT=tests=1433; suites=166; pass=1433; fail=0; cancelled=0; skipped=0; todo=0; duration_ms=21405.777208; COMMAND_EXIT=0
+EXIT_STATUS=0
+LOG=/tmp/v0104-asr-a0-backend-full-20260830.log
+
+MODIFIED_DEPLOY_GATE
+COMMAND=cd /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate && npm run test:deploy
+INPUT=Formal ten-path A0 modified worktree at stable HEAD f7683591802ad30073b720da96a4e7a49f2e2605.
+LITERAL_OUTPUT_1=embedded scan status=passed; scannedFiles=762; scannedGitObjects=3516; scannedGitMessages=602; gitHistoryComplete=true; findings=[]
+LITERAL_OUTPUT_2=tests=251; suites=18; pass=249; fail=0; cancelled=0; skipped=2; todo=0; duration_ms=117318.145666; COMMAND_EXIT=0
+EXIT_STATUS=0
+LOG=/tmp/v0104-asr-a0-test-deploy-20260830.log
+
+ZERO_CONTEXT_DIFF_GENERATION
+COMMAND=With a disposable GIT_INDEX_FILE: git read-tree HEAD; git add the ten A0 paths; git diff --cached --binary --full-index --unified=0 HEAD -- ten paths > DIFF_FILE.
+INPUT=Formal code/test bytes unchanged from the passing full-backend and deployment gates.
+LITERAL_OUTPUT=ZERO_DIFF_SHA256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095; ZERO_DIFF_BYTES=66213; ZERO_DIFF_LINES=1581; ZERO_DIFF_PATH_COUNT=10; SPACE_ONLY_LINE_COUNT=0; FORMAL_ZERO_REVERSE_CHECK_EXIT=0
+EXIT_STATUS=0
+RESULT=The zero-context patch preserves the exact ten code/test bytes and contains no unified-diff context-space-only records.
+
+INDEPENDENT_ZERO_APPLY
+COMMAND=git -C /tmp/v0104-asr-a0-zero-rollback-copy-20260830 apply --unidiff-zero --check DIFF_FILE && git -C /tmp/v0104-asr-a0-zero-rollback-copy-20260830 apply --unidiff-zero DIFF_FILE; then shasum -a 256 -c for all ten modified paths.
+INPUT=Clean detached f7683591802ad30073b720da96a4e7a49f2e2605 copy and zero-context DIFF_FILE SHA-256 ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095.
+LITERAL_OUTPUT=DIFF_SPACE_ONLY_LINES=0; ZERO_APPLY_CHECK_EXIT=0; ZERO_APPLY_EXIT=0; ten path lines each OK; MODIFIED_HASHES=10/10 matched.
+EXIT_STATUS=0
+RESULT=The zero-context patch reproduced exactly the formal modified bytes in an independent copy.
+LOG=/tmp/v0104-asr-a0-zero-apply-hashes-20260830.log
+
+INDEPENDENT_COPY_MODIFIED
+COMMAND=cd /tmp/v0104-asr-a0-zero-rollback-copy-20260830/backend && node --test tests/migrations.test.js tests/settings-config-api.test.js tests/v0103-forward-compat.test.js tests/http-security.test.js
+INPUT=Detached baseline after applying zero-context DIFF_FILE with all ten modified hashes matched.
+LITERAL_OUTPUT=tests=67; suites=2; pass=67; fail=0; cancelled=0; skipped=0; todo=0; duration_ms=1653.837333; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=The independent zero-context patch copy reproduced the modified behavior.
+LOG=/tmp/v0104-asr-a0-zero-modified-20260830.log
+
+ZERO_CONTEXT_STAGED_TRANSACTION
+COMMAND=With a disposable GIT_INDEX_FILE: git read-tree HEAD; git apply --cached --unidiff-zero --check DIFF_FILE; git apply --cached --unidiff-zero DIFF_FILE; git -c core.whitespace=cr-at-eol diff --cached --check HEAD; regenerate zero-context staged diff and cmp with DIFF_FILE; reverse the cached patch; verify disposable and real indexes clean.
+INPUT=Detached f7683591802ad30073b720da96a4e7a49f2e2605 copy, exact zero-context DIFF_FILE, and untouched real index.
+LITERAL_OUTPUT=REAL_INDEX_BEFORE_EXIT=0; ZERO_STAGED_APPLY_CHECK_EXIT=0; ZERO_STAGED_APPLY_EXIT=0; ZERO_STAGED_DIFF_CHECK_EXIT=0; ZERO_STAGED_PATH_COUNT=10; ZERO_STAGED_DIFF_SHA256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095; ZERO_STAGED_DIFF_CMP_EXIT=0; ZERO_STAGED_REVERSE_CHECK_EXIT=0; ZERO_STAGED_REVERSE_EXIT=0; DISPOSABLE_INDEX_RESTORED_EXIT=0; REAL_INDEX_AFTER_EXIT=0; WORKTREE_ZERO_REVERSE_CHECK_EXIT=0
+EXIT_STATUS=0
+LOG=/tmp/v0104-asr-a0-zero-staged-transaction-20260830.log
+
+ROLLBACK
+COMMAND=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate/docs/evidence/v0.10.4-asr-a0-20260830/ROLLBACK.sh /tmp/v0104-asr-a0-zero-rollback-copy-20260830
+INPUT=Independent detached copy at f7683591802ad30073b720da96a4e7a49f2e2605 with exactly ten A0 path changes, all modified hashes matched, clean index, and exact zero-context DIFF_FILE hash.
+LITERAL_OUTPUT_1=ROLLBACK_TARGET=/private/tmp/v0104-asr-a0-zero-rollback-copy-20260830
+LITERAL_OUTPUT_2=ROLLBACK_RESULT=restored; ROLLBACK_EXIT=0; COMMAND_EXIT=0
+LITERAL_OUTPUT_3=RESTORED_HEAD=f7683591802ad30073b720da96a4e7a49f2e2605
+LITERAL_OUTPUT_4=RESTORED_PATHS=8 original hashes matched; 2 new paths absent; git status clean
+LITERAL_OUTPUT_5=RESTORED_BEHAVIOR=0032 secure-settings schema, pre-ASR repository/API behavior, and pre-PUT CORS allow-methods restored.
+EXIT_STATUS=0
+RESULT=Rollback used git apply --unidiff-zero --reverse only on the independent copy; the formal worktree remained modified.
+LOG=/tmp/v0104-asr-a0-zero-rollback-execution-20260830.log
+
+ROLLBACK_BASELINE
+COMMAND=cd /tmp/v0104-asr-a0-zero-rollback-copy-20260830/backend && node --test tests/migrations.test.js tests/settings-config-api.test.js tests/http-security.test.js
+INPUT=Independent copy after ROLLBACK.sh restored eight tracked originals and removed both new paths.
+LITERAL_OUTPUT=tests=45; suites=1; pass=45; fail=0; cancelled=0; skipped=0; todo=0; duration_ms=955.419458; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=The restored pre-ASR behavior passed again after zero-context rollback.
+LOG=/tmp/v0104-asr-a0-zero-baseline-after-rollback-20260830.log
+
+ROLLBACK_FINAL_CLEAN
+COMMAND=Verify eight original SHA-256 values with shasum -c; assert both new paths absent; assert git status clean; remove the detached copy with git worktree remove.
+INPUT=Independent copy after restored baseline tests and removal of the temporary node_modules symlink.
+LITERAL_OUTPUT=RESTORED_HASHES=8/8 matched; NEW_PATHS_ABSENT=2/2; COPY_STATUS=clean; COPY_REMOVED=yes
+EXIT_STATUS=0
+LOG=/tmp/v0104-asr-a0-zero-final-clean-20260830.log
+
+FORMAL_ODB_FRESHEN_P1_REWORK
+PRIOR_CLOSURE_STATUS=Rejected after discovery that git hash-object -w ran with a temporary primary object directory and the formal object directory attached as an alternate; Git freshened ten already-existing formal loose blobs, changing their mtime_ns and ctime_ns while the prior path-list/count-only gate stayed green.
+CORRECTED_WRITE_PHASE=All blob-writing commands run first with GIT_OBJECT_DIRECTORY set to a disposable directory and GIT_ALTERNATE_OBJECT_DIRECTORIES completely unset; every returned OID must exist as a loose object in the disposable ODB.
+CORRECTED_READ_PHASE=Only after every blob write completes may the formal object directory be attached as a read-only alternate for read-tree, update-index, and diff; no hash-object -w or other object-writing command occurs after the alternate becomes visible.
+FORMAL_OBJECT_METADATA_FIELDS=relative_path,dev,ino,nlink,size,mtime_ns,ctime_ns,content_sha256
+FORMAL_OBJECT_METADATA_SCOPE=Every regular file recursively present in the resolved formal common Git object directory, with symlink and unknown-type rejection, single-descriptor no-follow reads, pre/open/post identity checks, stable ordering, content SHA-256, and exact serialized before/after comparison.
+FORMAL_OBJECT_METADATA_BASELINE=The current post-discovery formal ODB state is the preserved comparison baseline; no attempt was made to synthesize or restore superseded filesystem timestamps.
+DRAFT_SCANNER_SELF_TEST=tests=69; pass=69; fail=0; same-OID 60bf42e41cbdf61a6c5016ea41f5480f3a418f00 was written to temp-only ODB; formal metadata entries=919/919; cmp=0; external full-manifest cmp=0.
+DRAFT_SCANNER_NORMAL=regen diff cmp=0; temp blob writes=10; alternate unset during writes=true; read phase alternate read-only=true; writes after alternate=0; formal metadata entries=919/919; internal cmp=0; external full-manifest cmp=0.
+DRAFT_GATE=14 paths; temp blob writes=14; alternate unset during writes=true; writes after alternate=0; formal metadata entries=919/919; internal cmp=0; external full-manifest cmp=0; index/status/object-list unchanged; temp residue=0.
+PRE_FINAL_INDEPENDENT_REVIEW=Frozen gate SHA-256 121fb97881db0b22d7df665ad8fb6a810c90dd2afda0036910b889918bc36dfa and temp-root-corrected reopen-helper SHA-256 87a52e7510284127a1a010d9a09880e4fbcbf03e29e6e8f9f2cef9260996ab8b received read-only P0=0; P1=0; DECISION=PASS.
+
+TEMP_ROOT_RESIDUE_P1_REWORK
+INTERMEDIATE_CLOSURE_STATUS=Rejected after independent final review found that scanner residue fields globbed only /tmp even though Node os.tmpdir() resolved elsewhere; its P0=0/P1=0/final PASS was superseded by P0=0/P1=1/DECISION=FAIL and none of its official logs or state is reused.
+ROOT_CAUSE=The Node scanner creates raw, self-test, and same-OID directories under node:os.tmpdir(), which on this host canonically resolves to /private/var/folders/0z/tfc44qh50p771y4khg5crc640000gn/T; the gate alone creates its directory under /tmp, canonically /private/tmp.
+CORRECTION=The helper executes the resolved Node binary to obtain os.tmpdir(), cross-checks Python tempfile.gettempdir(), resolves and type-checks both scanner and gate roots, stores nodeBinary/scannerRoot/pythonRoot/gateRoot in capture state, requires zero residue at capture, requires roots unchanged at reopen, and checks all four prefixes across both bound roots.
+SCANNER_TEMP_ROOT=/private/var/folders/0z/tfc44qh50p771y4khg5crc640000gn/T
+GATE_TEMP_ROOT=/private/tmp
+SCANNER_TEMP_PREFIXES=v0104-asr-a0-raw-scan-*; v0104-asr-a0-scanner-selftest-*; v0104-asr-a0-same-oid-isolation-*
+GATE_TEMP_PREFIX=v0104-asr-a0-14path-gate.*
+DRAFT_TEMP_ROOT_HELPER=Capture bound both canonical roots and reported TEMP_RESIDUE_AT_CAPTURE=0; reopen required TEMP_ROOTS_UNCHANGED=true and reported all four designated counts plus TEMP_RESIDUE_ALL_BOUND_ROOTS=0; command exits=0.
+TEMP_ROOT_INDEPENDENT_REVIEW=Helper SHA-256 87a52e7510284127a1a010d9a09880e4fbcbf03e29e6e8f9f2cef9260996ab8b received focused read-only P0=0; P1=0; DECISION=PASS.
+
+
+FINAL_14_PATH_STAGED_GATE
+COMMAND=/bin/bash /tmp/v0104-asr-a0-dual-final-14path-staged-gate-20260830.sh
+SCRIPT_SHA256=121fb97881db0b22d7df665ad8fb6a810c90dd2afda0036910b889918bc36dfa
+INPUT=Final frozen ten code/test paths plus the four evidence artifacts; disposable GIT_INDEX_FILE and temp-only GIT_OBJECT_DIRECTORY; f7683591802ad30073b720da96a4e7a49f2e2605 as the immutable baseline; formal index, status, object path-list, and full object metadata manifest snapshots before execution.
+LITERAL_OUTPUT_1=FINAL_STAGED_PATH_COUNT=14; FULL_14_PATH_DIFF_CHECK_EXIT=0; REGENERATED_ZERO_DIFF_SHA256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095; REGENERATED_ZERO_DIFF_CMP_EXIT=0
+LITERAL_OUTPUT_2=DISPOSABLE_14_PATH_INDEX_RESTORED_EXIT=0; REAL_INDEX_SHA256_BEFORE=ffe952f2dfbefaecf0e040e38e89995845a160b1db89834e7816b4645f909874; REAL_INDEX_SHA256_AFTER=ffe952f2dfbefaecf0e040e38e89995845a160b1db89834e7816b4645f909874; REAL_INDEX_CLEAN_EXIT=0
+LITERAL_OUTPUT_3=FORMAL_STATUS_SHA256_BEFORE=c7fd366c0db4c7e2fc343770e84ce6227a1722e4da10e145f42eb749f76a7c82; FORMAL_STATUS_SHA256_AFTER=c7fd366c0db4c7e2fc343770e84ce6227a1722e4da10e145f42eb749f76a7c82; FORMAL_OBJECT_COUNT_BEFORE=919; FORMAL_OBJECT_COUNT_AFTER=919; FORMAL_OBJECT_LIST_SHA256_BEFORE=6df8865b75d58cd3c115be83fa3e230bda7fff523d5e7a3904c8352a073f3f22; FORMAL_OBJECT_LIST_SHA256_AFTER=6df8865b75d58cd3c115be83fa3e230bda7fff523d5e7a3904c8352a073f3f22
+LITERAL_OUTPUT_4=FORMAL_OBJECT_METADATA_FIELDS=relative_path,dev,ino,nlink,size,mtime_ns,ctime_ns,content_sha256; FORMAL_OBJECT_METADATA_ENTRY_COUNT_BEFORE=919; FORMAL_OBJECT_METADATA_ENTRY_COUNT_AFTER=919; FORMAL_OBJECT_METADATA_TOTAL_BYTES_BEFORE=33665934; FORMAL_OBJECT_METADATA_TOTAL_BYTES_AFTER=33665934; FORMAL_OBJECT_METADATA_SHA256_BEFORE=e4b52f254eaddb302420797e658f1734221d8ec1a59596d8943d186d789dfd6e; FORMAL_OBJECT_METADATA_SHA256_AFTER=e4b52f254eaddb302420797e658f1734221d8ec1a59596d8943d186d789dfd6e; FORMAL_OBJECT_METADATA_CMP_EXIT=0
+LITERAL_OUTPUT_5=TEMP_BLOB_WRITE_COUNT=14; TEMP_BLOB_WRITE_PHASE_ALTERNATE_UNSET=true; READ_PHASE_FORMAL_ALTERNATE_READ_ONLY=true; WRITE_COMMANDS_AFTER_FORMAL_ALTERNATE=0; TEMP_OBJECT_DIRECTORY=true; TEMP_RESIDUE_AFTER_CLEANUP=0; status=passed; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=All 14 current paths were staged only in the disposable index; all 14 blobs were created in the isolated temp ODB before the formal ODB became visible; the regenerated ten-path diff matched DIFF_FILE; the disposable index was restored; and the real index, exact status, formal object path set, and full formal object metadata manifest remained exactly unchanged.
+LOG=/tmp/v0104-asr-a0-dual-final-14path-staged-gate-20260830.log
+
+DUAL_SECRET_SCAN_SCOPE
+PROJECT_WORKTREE_DIRECT_SCOPE=The project-secret-scan working-tree phase directly reads the ten A0 code/test paths, VERIFICATION.txt, ROLLBACK.sh, and other regular text selected by its text-path rules.
+PROJECT_HISTORY_DIRECT_SCOPE=The project-secret-scan history phase scans committed Git objects and commit messages.
+PROJECT_SCOPE_EXCLUSION=The project-secret-scan does not directly read the current extensionless MODIFIED_FILE or DIFF_FILE.
+RAW_SCANNER_DIRECT_SCOPE=The fixed raw scanner directly and fail-closed reads exactly MODIFIED_FILE and DIFF_FILE, then binds their grammar, hashes, formal ten-path bytes, exact 14-path worktree status, clean formal index, regenerated zero-context patch, reverse applicability, and a byte-exact before/after manifest of every formal Git object file including path, identity, size, nanosecond timestamps, and compressed-content SHA-256.
+DUAL_CHAIN_RESULT=Project scan plus the fixed raw scanner directly cover the two extensionless artifacts, the regular-text implementation/evidence paths, and committed Git history without claiming that either scanner alone covers all four artifacts.
+
+PROJECT_SECRET_SCAN_FINAL
+COMMAND=cd /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/integrate-v0626-candidate && npm run scan:secrets
+INPUT=Final frozen ten-path implementation, final VERIFICATION.txt and ROLLBACK.sh regular text, all other Git-visible recognized text, and complete committed Git history at f7683591802ad30073b720da96a4e7a49f2e2605; MODIFIED_FILE and DIFF_FILE are intentionally covered by the separate fixed raw scanner.
+LITERAL_OUTPUT={"status":"passed","scannedFiles":762,"scannedGitObjects":3516,"scannedGitMessages":602,"gitHistoryComplete":true,"findings":[]}; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=The recognized working-tree text and complete committed Git history passed with zero findings; this result is combined with, not substituted for, the extensionless-artifact raw scan.
+LOG=/tmp/v0104-asr-a0-project-scan-final-dual-20260830.log
+
+RAW_ARTIFACT_SCANNER
+SCANNER_PATH=/private/tmp/v0104-asr-a0-artifact-scan-20260830.mjs
+SCRIPT_SHA256=3b11759a6723379ade4ea407c9ddca625a5252bcbf30e879660ff41dd2a62230
+RULESET_SHA256=8d8cdb8b1f6ae4e2b1a45a0d0578b45dbdec365cd19677d403ef1703b418269b
+SCANNER_VERSION=1.2.0
+SCANNER_REPOSITORY_ARTIFACT=false
+SCANNER_FIXED_INPUTS=MODIFIED_FILE and DIFF_FILE only for raw credential scanning; all formal-state bindings use fixed absolute paths and f7683591802ad30073b720da96a4e7a49f2e2605.
+
+RAW_ARTIFACT_SCANNER_SELF_TEST
+COMMAND=node /tmp/v0104-asr-a0-artifact-scan-20260830.mjs --self-test
+INPUT=Frozen scanner bytes plus 69 acceptance/adversarial cases: the prior 66 credential, parser, filesystem, status, grammar, provenance, and redaction cases; a fail-closed write-with-alternate guard; a live same-OID temp-only write/read-only-alternate isolation case; and an exact full-formal-ODB metadata manifest comparison.
+LITERAL_OUTPUT_1=scanner_id=v0104-asr-a0-fixed-raw-artifact-scanner; scanner_version=1.2.0; mode=self-test; script_sha256=3b11759a6723379ade4ea407c9ddca625a5252bcbf30e879660ff41dd2a62230; ruleset_sha256=8d8cdb8b1f6ae4e2b1a45a0d0578b45dbdec365cd19677d403ef1703b418269b
+LITERAL_OUTPUT_2=case_git_write_with_alternate_rejected=passed:GIT_WRITE_WITH_ALTERNATE_REJECTED; case_formal_same_oid_temp_write_isolation=passed:metadata-unchanged; case_formal_object_metadata_manifest=passed:exact; same_oid=60bf42e41cbdf61a6c5016ea41f5480f3a418f00
+LITERAL_OUTPUT_3=formal_object_metadata_manifest_fields=relative_path,dev,ino,nlink,size,mtime_ns,ctime_ns,content_sha256; formal_object_metadata_entry_count_before=919; formal_object_metadata_entry_count_after=919; formal_object_metadata_total_bytes_before=33665934; formal_object_metadata_total_bytes_after=33665934; formal_object_metadata_sha256_before=b6948710965eafbdb2128d076ae88608cde5a9f77b7f4606e24bff5155745c4e; formal_object_metadata_sha256_after=b6948710965eafbdb2128d076ae88608cde5a9f77b7f4606e24bff5155745c4e; formal_object_metadata_cmp_exit=0
+LITERAL_OUTPUT_4=temp_blob_write_count=1; temp_blob_write_phase_alternate_unset=true; read_phase_formal_alternate_read_only=true; write_commands_after_formal_alternate=0; tests=69; pass=69; fail=0; sensitive_values_echoed=false; status=passed; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=The complete fail-closed suite passed, and the live same-OID write proved that a temp-only hash-object -w plus later read-only formal alternate leaves every formal object path, identity, size, nanosecond timestamp, and compressed-content digest unchanged.
+LOG=/tmp/v0104-asr-a0-artifact-scan-selftest-final-20260830.log
+
+RAW_ARTIFACT_SCAN_FINAL
+COMMAND=node /tmp/v0104-asr-a0-artifact-scan-20260830.mjs
+INPUT=MODIFIED_FILE expected SHA-256 931a460c8c26f7f237bf313640652f077380b342e035d14eb063f4c2a4a4533f, 3147 bytes, 26 LF lines, mode 0644; DIFF_FILE expected SHA-256 ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095, 66213 bytes, 1581 LF lines, mode 0600; exact formal HEAD/branch/ten modified hashes/four-artifact status; clean real index; full formal object metadata manifest before and after regeneration.
+LITERAL_OUTPUT_1=scanner_id=v0104-asr-a0-fixed-raw-artifact-scanner; scanner_version=1.2.0; script_sha256=3b11759a6723379ade4ea407c9ddca625a5252bcbf30e879660ff41dd2a62230; ruleset_sha256=8d8cdb8b1f6ae4e2b1a45a0d0578b45dbdec365cd19677d403ef1703b418269b
+LITERAL_OUTPUT_2=file_0_name=MODIFIED_FILE; file_0_expected_sha256=931a460c8c26f7f237bf313640652f077380b342e035d14eb063f4c2a4a4533f; file_0_actual_sha256=931a460c8c26f7f237bf313640652f077380b342e035d14eb063f4c2a4a4533f; file_0_expected_bytes=3147; file_0_actual_bytes=3147; file_0_expected_lines=26; file_0_actual_lines=26; file_0_encoding=utf-8-fatal; file_0_symlink=false; file_0_regular=true; file_0_single_fd=true; file_0_pre_post_identity_equal=true; file_0_post_path_identity_equal=true
+LITERAL_OUTPUT_3=file_1_name=DIFF_FILE; file_1_expected_sha256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095; file_1_actual_sha256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095; file_1_expected_bytes=66213; file_1_actual_bytes=66213; file_1_expected_lines=1581; file_1_actual_lines=1581; file_1_encoding=utf-8-fatal; file_1_symlink=false; file_1_regular=true; file_1_single_fd=true; file_1_pre_post_identity_equal=true; file_1_post_path_identity_equal=true
+LITERAL_OUTPUT_4=modified_grammar_status=passed; modified_line_count=26; modified_path_count=10; formal_worktree_status_path_count=14; formal_staged_clean=true; diff_grammar_status=passed; diff_path_count=10; diff_hunk_count=34; diff_hunks_per_path=2,1,1,4,3,1,1,13,7,1; diff_context_line_count=0; diff_old_payload_lines=10; diff_new_payload_lines=1495
+LITERAL_OUTPUT_5=diff_payload_provenance=regenerated_cmp; diff_metadata_scan=generic_raw; diff_regenerated_sha256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095; diff_cmp_exit=0; diff_reverse_check_exit=0; regen_input_provenance=single-fd-captured-code-buffers; formal_current_snapshot_hash_equal=true
+LITERAL_OUTPUT_6=real_index_sha256_before=ffe952f2dfbefaecf0e040e38e89995845a160b1db89834e7816b4645f909874; real_index_sha256_after=ffe952f2dfbefaecf0e040e38e89995845a160b1db89834e7816b4645f909874; real_index_hash_equal=true; temp_object_directory=true
+LITERAL_OUTPUT_7=formal_object_metadata_manifest_fields=relative_path,dev,ino,nlink,size,mtime_ns,ctime_ns,content_sha256; formal_object_metadata_entry_count_before=919; formal_object_metadata_entry_count_after=919; formal_object_metadata_total_bytes_before=33665934; formal_object_metadata_total_bytes_after=33665934; formal_object_metadata_sha256_before=b6948710965eafbdb2128d076ae88608cde5a9f77b7f4606e24bff5155745c4e; formal_object_metadata_sha256_after=b6948710965eafbdb2128d076ae88608cde5a9f77b7f4606e24bff5155745c4e; formal_object_metadata_cmp_exit=0
+LITERAL_OUTPUT_8=temp_blob_write_count=10; temp_blob_write_phase_alternate_unset=true; read_phase_formal_alternate_read_only=true; write_commands_after_formal_alternate=0; scannedFiles=2; skippedFiles=[]; decodeErrors=[]; findings=[]; status=passed; COMMAND_EXIT=0
+EXIT_STATUS=0
+RESULT=Both extensionless artifacts passed exact file, text, grammar, credential, provenance, regenerated-diff, reverse-check, formal-index, isolated-object-write, and full formal-object-metadata bindings with no finding and no formal-index or formal-object mutation.
+LOG=/tmp/v0104-asr-a0-artifact-scan-final-20260830.log
+
+FINAL_ARTIFACT_CAPTURE_AND_REOPEN
+HELPER_PATH=/private/tmp/v0104-asr-a0-final-reopen-20260830.py
+HELPER_SHA256=87a52e7510284127a1a010d9a09880e4fbcbf03e29e6e8f9f2cef9260996ab8b
+BOUND_SCANNER_SHA256=3b11759a6723379ade4ea407c9ddca625a5252bcbf30e879660ff41dd2a62230
+BOUND_GATE_SHA256=121fb97881db0b22d7df665ad8fb6a810c90dd2afda0036910b889918bc36dfa
+CAPTURE_COMMAND=python3 /tmp/v0104-asr-a0-final-reopen-20260830.py capture /tmp/v0104-asr-a0-final-artifact-state-20260830.json
+CAPTURE_INPUT=The final four artifact bytes and three frozen tool bytes after this last P1 correction and before the fresh 14-path gate or either final scanner; the complete formal object metadata manifest, resolved Node binary, actual scanner temp root, Python temp root, fixed gate temp root, and zero starting residue are stored in the state file.
+CAPTURE_LITERAL_OUTPUT=ARTIFACT_CAPTURE_COUNT=4; each artifact SHA256/MTIME_NS/CTIME_NS recorded; TOOL_CAPTURE_COUNT=3; scanner, gate, and helper SHA256 recorded; SCANNER_TEMP_ROOT=/private/var/folders/0z/tfc44qh50p771y4khg5crc640000gn/T; GATE_TEMP_ROOT=/private/tmp; TEMP_RESIDUE_AT_CAPTURE=0; FORMAL_STATUS_PATH_COUNT=14; FORMAL_OBJECT_METADATA_FIELDS=relative_path,dev,ino,nlink,size,mtime_ns,ctime_ns,content_sha256; FORMAL_OBJECT_METADATA_ENTRY_COUNT=919; FORMAL_OBJECT_METADATA_SHA256=03fa65b94ebe386f58c84ccaa8bb906ef5e2e56daf3447462572de82c7c7ae7d; REAL_INDEX_CLEAN_EXIT=0; status=passed; COMMAND_EXIT=0
+CAPTURE_EXIT_STATUS=0
+CAPTURE_LOG=/tmp/v0104-asr-a0-final-artifact-capture-20260830.log
+VERIFY_COMMAND=python3 /tmp/v0104-asr-a0-final-reopen-20260830.py verify /tmp/v0104-asr-a0-final-artifact-state-20260830.json
+VERIFY_INPUT=The four frozen artifacts, three frozen tools, bound scanner/gate temp roots, zero starting residue, and full formal object metadata state after the fresh gate, project scan, raw self-test, and raw normal scan; all four final logs must be newer than the maximum artifact mtime.
+VERIFY_LITERAL_OUTPUT=ARTIFACT_REOPEN_COUNT=4; ARTIFACT_SHA_MTIME_CTIME_UNCHANGED=4/4; TOOL_SHA_MTIME_CTIME_UNCHANGED=3/3; FINAL_LOGS_AFTER_MAX_ARTIFACT_MTIME=4/4; FORMAL_STATUS_PATH_COUNT=14; CODE_HASHES_UNCHANGED=10/10; SCANNER_SHA256_UNCHANGED=true; GATE_SHA256_UNCHANGED=true; REOPEN_HELPER_SHA256_UNCHANGED=true; SCANNER_TEMP_ROOT=/private/var/folders/0z/tfc44qh50p771y4khg5crc640000gn/T; GATE_TEMP_ROOT=/private/tmp; TEMP_ROOTS_UNCHANGED=true; FORMAL_OBJECT_METADATA_STATE_UNCHANGED=true; FORMAL_OBJECT_METADATA_ENTRY_COUNT=919; FORMAL_OBJECT_METADATA_SHA256_UNCHANGED=true; FORMAL_OBJECT_METADATA_CMP_EXIT=0; REAL_INDEX_CLEAN_EXIT=0; SCANNER_RAW_TEMP_RESIDUE=0; SCANNER_SELFTEST_TEMP_RESIDUE=0; SCANNER_SAME_OID_TEMP_RESIDUE=0; GATE_TEMP_RESIDUE=0; TEMP_RESIDUE_ALL_BOUND_ROOTS=0; status=passed; COMMAND_EXIT=0
+VERIFY_EXIT_STATUS=0
+VERIFY_RESULT=All four artifacts and all three tools were reopened after both final scanners; their full captured state remained exact; the ten code/test hashes, real index, and exact 14-path status remained frozen; every final log was chronologically newer than the artifacts; the complete formal object metadata manifest matched the pre-chain capture exactly; the actual Node scanner temp root and fixed /tmp gate root remained bound; and every scanner/gate prefix was absent across both roots.
+VERIFY_LOG=/tmp/v0104-asr-a0-dual-final-reopen-20260830.log
+
+ARTIFACT_HASHES
+MODIFIED_FILE_SHA256=931a460c8c26f7f237bf313640652f077380b342e035d14eb063f4c2a4a4533f
+DIFF_FILE_SHA256=ccb97483b23cacbb4de5992603bc95b2eb9a68e0d2b425250257bba08a4dd095
+ROLLBACK_SH_SHA256=898b41e0f7dd803f84cf55c3295baaa9a8191de6a3f548f4075a2caec4698e04
+MIGRATION_0033_FROZEN_CHECKSUM=acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5
+SCANNER_SHA256=3b11759a6723379ade4ea407c9ddca625a5252bcbf30e879660ff41dd2a62230
+SCANNER_RULESET_SHA256=8d8cdb8b1f6ae4e2b1a45a0d0578b45dbdec365cd19677d403ef1703b418269b
+FINAL_14_PATH_GATE_SHA256=121fb97881db0b22d7df665ad8fb6a810c90dd2afda0036910b889918bc36dfa
+FINAL_REOPEN_HELPER_SHA256=87a52e7510284127a1a010d9a09880e4fbcbf03e29e6e8f9f2cef9260996ab8b
+
+RESTORED_BEHAVIOR_STATUS=Verified on the independent copy: baseline passed before modification; zero-context DIFF_FILE reproduced all ten modified hashes and tests; cached staged apply/reverse matched the patch byte-for-byte; ROLLBACK.sh restored all eight tracked originals and removed both new paths; the restored baseline passed; and the copy finished clean. The formal worktree still contains the ten-path A0 change.
+FINAL_NON_ACTIONS=no commit; no push; no deployment; no real provider call.

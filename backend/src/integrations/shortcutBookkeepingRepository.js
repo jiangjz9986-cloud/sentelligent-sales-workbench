@@ -3,17 +3,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { insertAudit } from "../audit/auditRepository.js";
 import { withImmediateTransaction } from "../db/transaction.js";
 import { HttpError } from "../http/errors.js";
-import { resolveShortcutCategory } from "./shortcutBookkeeping.js";
+import { resolveBookkeepingCategory } from "../bookkeeping/categoryCatalog.js";
+import { resolveTravelExpenseRegionFromDatabase } from "../travelExpense/regionRepository.js";
 
 const COMPLETED_STATUSES = new Set(["accepted", "review_required", "rejected"]);
 const FUNDING_SOURCES = new Set(["personal", "company", "advance"]);
 const PAYMENT_METHODS = new Set(["wechat", "alipay", "card", "cash", "other"]);
-const REMOTE_COMPLETION_STATUSES = new Set([
-  "pending",
-  "processing",
-  "review",
-  "confirmed",
-]);
+
+function runTransaction(db, work) {
+  return db.isTransaction ? work() : withImmediateTransaction(db, work);
+}
 
 function isPlainObject(value) {
   return value !== null
@@ -74,7 +73,14 @@ function dateTime(value, name, { nullable = false } = {}) {
   if (typeof value !== "string" || !value.trim() || Number.isNaN(Date.parse(value))) {
     throw new TypeError(`${name} must be an ISO date-time`);
   }
-  return value.trim();
+  const normalized = value.trim();
+  const datePart = normalized.match(/^(\d{4})-(\d{2})-(\d{2})(?:T|\s|$)/u);
+  if (!datePart) throw new TypeError(`${name} must contain a real calendar date`);
+  const date = new Date(Date.UTC(Number(datePart[1]), Number(datePart[2]) - 1, Number(datePart[3])));
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== datePart.slice(1).join("-")) {
+    throw new TypeError(`${name} must contain a real calendar date`);
+  }
+  return normalized;
 }
 
 function nonNegativeCents(value, name, { nullable = false } = {}) {
@@ -100,7 +106,10 @@ function referenceCode(occurredOn, id) {
   return `EXP-${occurredOn.replaceAll("-", "")}-${hashValue(id).slice(0, 8).toUpperCase()}`;
 }
 
-function legacyCategory({ ledgerName, entryType, category, subcategory }) {
+function legacyCategory(input = {}) {
+  const ledgerName = input.ledgerName ?? input.ledger_name;
+  const entryType = input.entryType ?? input.entry_type;
+  const { category, subcategory } = input;
   if (entryType === "income") return "other";
   if (ledgerName === "出差报销") {
     if (category === "餐饮") {
@@ -109,9 +118,9 @@ function legacyCategory({ ledgerName, entryType, category, subcategory }) {
           : subcategory === "晚餐" ? "dinner"
             : "other";
     }
-    if (category === "住宿费") return "lodging";
-    if (category === "交通" || category === "汽车维修") return "transport";
-    if (category === "招待/礼品") return "hospitality";
+    if (category === "住宿" || category === "住宿费") return "lodging";
+    if (category === "交通" || category === "交通费") return "transport";
+    if (category === "招待" || category === "礼品" || category === "招待/礼品") return "hospitality";
   }
   return "other";
 }
@@ -155,6 +164,12 @@ function itemFromRow(row) {
     expenseId: row.expense_id,
     paymentId: row.payment_id,
     expenseReferenceCode: row.expense_reference_code ?? null,
+    advanceId: row.advance_id ?? null,
+    advanceSourceId: row.advance_source_id ?? null,
+    advanceWeekStart: row.advance_week_start ?? null,
+    advanceReceivedCents: row.advance_received_cents === null || row.advance_received_cents === undefined
+      ? null
+      : Number(row.advance_received_cents),
     remoteId: row.remote_id,
     remoteReference: row.remote_reference,
     remoteStatus: row.remote_status,
@@ -169,6 +184,53 @@ function normalizeSource(value) {
   return {
     provider: requiredText(value.provider ?? "rules", "analysis.source.provider", 200),
     model: optionalText(value.model, "analysis.source.model", 200),
+  };
+}
+
+function normalizeNoteAutomation(value) {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value) || value.kind !== "meal") {
+    throw new TypeError("analysis.noteAutomation is invalid");
+  }
+  const tripRegionSource = value.tripRegionSource === null || value.tripRegionSource === undefined
+    ? null
+    : value.tripRegionSource;
+  if (tripRegionSource !== null && ![
+    "text", "itinerary", "week_default", "date_override", "user_correction",
+  ].includes(tripRegionSource)) {
+    throw new TypeError("analysis.noteAutomation.tripRegionSource is invalid");
+  }
+  const paidTime = value.paidTime === null || value.paidTime === undefined
+    ? null
+    : value.paidTime;
+  if (paidTime !== null && (typeof paidTime !== "string" || !/^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(paidTime))) {
+    throw new TypeError("analysis.noteAutomation.paidTime is invalid");
+  }
+  return {
+    kind: "meal",
+    tripRegion: optionalText(value.tripRegion, "analysis.noteAutomation.tripRegion", 100),
+    tripRegionSource,
+    paidTime,
+  };
+}
+
+function normalizeCategoryAutomation(value) {
+  if (value === undefined || value === null) return null;
+  if (!isPlainObject(value) || value.kind !== "contextual") {
+    throw new TypeError("analysis.categoryAutomation is invalid");
+  }
+  return {
+    kind: "contextual",
+    sourceCategory: optionalText(
+      value.sourceCategory,
+      "analysis.categoryAutomation.sourceCategory",
+      100,
+    ),
+    sourceSubcategory: optionalText(
+      value.sourceSubcategory,
+      "analysis.categoryAutomation.sourceSubcategory",
+      100,
+    ),
   };
 }
 
@@ -223,16 +285,86 @@ function normalizeAnalysis(value, row) {
     : "review_required";
   const confidence = Number(value.confidence);
   const expense = normalizeExpense(value.expense, { required: status === "ready" });
+  const category = requiredText(value.category ?? row.category, "analysis.category", 100);
+  const subcategory = optionalText(value.subcategory ?? row.subcategory, "analysis.subcategory", 100);
+  const resolvedSelection = resolveBookkeepingCategory({
+    ledgerName: row.ledger_name,
+    entryType: row.entry_type,
+    category,
+    subcategory,
+  });
+  const note = optionalText(value.note ?? row.note, "analysis.note", 1_000);
   if (status === "ready" && !expense.purpose) {
-    expense.purpose = `${row.category}${row.subcategory ? `-${row.subcategory}` : ""}`;
+    expense.purpose = `${resolvedSelection.category}${resolvedSelection.subcategory ? `-${resolvedSelection.subcategory}` : ""}`;
   }
   return {
     status,
     confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : 0,
+    category: resolvedSelection.category,
+    subcategory: resolvedSelection.subcategory,
+    note,
+    noteAutomation: normalizeNoteAutomation(value.noteAutomation),
+    categoryAutomation: normalizeCategoryAutomation(value.categoryAutomation),
     expense,
     warnings: normalizeWarnings(value.warnings),
     source: normalizeSource(value.source),
   };
+}
+
+function normalizeReviewPatch(value, row) {
+  if (value === undefined) return null;
+  if (!isPlainObject(value)) throw new TypeError("reviewPatch must be an object");
+  const allowed = new Set(["category", "subcategory", "note"]);
+  const unknown = Object.keys(value).find((key) => !allowed.has(key));
+  if (unknown) throw new TypeError(`reviewPatch.${unknown} is not allowed`);
+  const category = Object.hasOwn(value, "category")
+    ? requiredText(value.category, "reviewPatch.category", 100)
+    : requiredText(row.category, "stored category", 100);
+  const subcategory = Object.hasOwn(value, "subcategory")
+    ? optionalText(value.subcategory, "reviewPatch.subcategory", 100)
+    : optionalText(row.subcategory, "stored subcategory", 100);
+  const note = Object.hasOwn(value, "note")
+    ? optionalText(value.note, "reviewPatch.note", 1_000)
+    : optionalText(row.note, "stored note", 1_000);
+  const resolved = resolveBookkeepingCategory({
+    ledgerName: row.ledger_name,
+    entryType: row.entry_type,
+    category,
+    subcategory,
+  });
+  return {
+    category: resolved.category,
+    subcategory: resolved.subcategory,
+    note,
+  };
+}
+
+function dateOnlyInShanghai(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  const datePart = normalized.match(/^(\d{4})-(\d{2})-(\d{2})(?:T|\s|$)/u);
+  if (!datePart) return null;
+  const calendarDate = new Date(Date.UTC(Number(datePart[1]), Number(datePart[2]) - 1, Number(datePart[3])));
+  if (Number.isNaN(calendarDate.getTime()) || calendarDate.toISOString().slice(0, 10) !== datePart.slice(1).join("-")) return null;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const valueOf = (type) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${valueOf("year")}-${valueOf("month")}-${valueOf("day")}`;
+}
+
+function mondayInShanghai(value) {
+  const day = dateOnlyInShanghai(value);
+  if (!day) return null;
+  const date = new Date(`${day}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  const offset = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - offset);
+  return date.toISOString().slice(0, 10);
 }
 
 export function applyShortcutSelectionAnalysis(value, selection) {
@@ -240,6 +372,22 @@ export function applyShortcutSelectionAnalysis(value, selection) {
   const warnings = Array.isArray(analysis.warnings) ? [...analysis.warnings] : [];
   const expense = isPlainObject(analysis.expense) ? { ...analysis.expense } : {};
   expense.category = legacyCategory(selection);
+  if (Number.isSafeInteger(selection?.amountCents) && selection.amountCents > 0) {
+    expense.amountCents = selection.amountCents;
+    expense.reimbursementCents = selection.amountCents;
+    for (const warning of ["missing_amount", "invalid_amount", "missing_amountCents", "invalid_amountCents"]) {
+      const index = warnings.indexOf(warning);
+      if (index >= 0) warnings.splice(index, 1);
+    }
+  }
+  if (typeof selection?.capturedAt === "string" && Number.isFinite(Date.parse(selection.capturedAt))) {
+    expense.occurredOn = dateOnlyInShanghai(selection.capturedAt);
+    expense.paidAt = selection.capturedAt;
+    for (const warning of ["missing_date", "invalid_date"]) {
+      const index = warnings.indexOf(warning);
+      if (index >= 0) warnings.splice(index, 1);
+    }
+  }
   if (!expense.purpose || !String(expense.purpose).trim()) {
     expense.purpose = `${selection.category}${selection.subcategory ? `-${selection.subcategory}` : ""}`;
     const index = warnings.indexOf("missing_purpose");
@@ -247,7 +395,7 @@ export function applyShortcutSelectionAnalysis(value, selection) {
   }
   const categoryWarning = warnings.indexOf("missing_category");
   if (categoryWarning >= 0) warnings.splice(categoryWarning, 1);
-  const hasCoreFields = isPlainObject(analysis.expense)
+  const hasCoreFields = (isPlainObject(analysis.expense) || selection?.explicitCapture === true)
     && (expense.occurredOn ?? expense.occurred_on)
     && (expense.amountCents ?? expense.amount_cents) !== null
     && (expense.amountCents ?? expense.amount_cents) !== undefined;
@@ -271,16 +419,174 @@ export function createShortcutBookkeepingRepository(db, {
 
   const selectById = db.prepare(`
     SELECT entry.*, expense.reference_code AS expense_reference_code
+           , advance_source.id AS advance_source_id
+           , advance.id AS advance_id
+           , advance.week_start AS advance_week_start
+           , advance.received_cents AS advance_received_cents
     FROM shortcut_bookkeeping_entries entry
     LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+    LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+      AND advance_source.status = 'active'
+    LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
     WHERE entry.id = $id
   `);
   const selectByKey = db.prepare(`
     SELECT entry.*, expense.reference_code AS expense_reference_code
+           , advance_source.id AS advance_source_id
+           , advance.id AS advance_id
+           , advance.week_start AS advance_week_start
+           , advance.received_cents AS advance_received_cents
     FROM shortcut_bookkeeping_entries entry
     LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+    LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+      AND advance_source.status = 'active'
+    LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
     WHERE entry.owner = $owner AND entry.idempotency_key_hash = $idempotencyKeyHash
   `);
+  const selectBySource = db.prepare(`
+    SELECT entry.*, expense.reference_code AS expense_reference_code
+           , advance_source.id AS advance_source_id
+           , advance.id AS advance_id
+           , advance.week_start AS advance_week_start
+           , advance.received_cents AS advance_received_cents
+    FROM shortcut_bookkeeping_entries entry
+    LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+    LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+      AND advance_source.status = 'active'
+    LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
+    WHERE entry.owner = $owner AND entry.target_system = 'sentelligent'
+      AND entry.source_id = $sourceId
+    ORDER BY entry.created_at ASC, entry.id ASC
+    LIMIT 20
+  `);
+  const selectLedgerReceiptByEntryId = db.prepare(`
+    SELECT entry.id AS entry_id,
+           expense.id AS expense_id,
+           payment.id AS payment_id,
+           expense.reference_code,
+           expense.occurred_on,
+           payment.amount_cents,
+           payment.reimbursement_cents,
+           CASE
+             WHEN EXISTS (
+               SELECT 1
+               FROM travel_expense_attachments attachment
+               JOIN travel_expense_attachment_payments attachment_payment
+                 ON attachment_payment.attachment_id = attachment.id
+               WHERE attachment.expense_id = expense.id
+                 AND attachment.kind = 'payment_proof'
+                 AND attachment_payment.payment_id = payment.id
+             ) THEN 'matched'
+             WHEN entry.source_id IS NOT NULL AND EXISTS (
+               SELECT 1
+               FROM travel_expense_document_inbox inbox
+               WHERE inbox.owner = entry.owner
+                 AND inbox.document_kind = 'payment_proof'
+                 AND inbox.source_message_id = entry.source_id
+                 AND inbox.status IN ('received', 'processing', 'review_required', 'matched')
+             ) THEN 'pending'
+             ELSE 'not_available'
+           END AS attachment_status
+    FROM shortcut_bookkeeping_entries entry
+    JOIN travel_expenses expense
+      ON expense.id = entry.expense_id
+     AND expense.owner = entry.owner
+     AND expense.deleted_at IS NULL
+    JOIN travel_expense_payments payment
+      ON payment.id = entry.payment_id
+     AND payment.expense_id = expense.id
+    WHERE entry.id = $id
+      AND entry.target_system = 'sentelligent'
+      AND entry.entry_type = 'expense'
+      AND entry.status = 'accepted'
+  `);
+
+  function ledgerReceiptFromAcceptedRow(row) {
+    if (!row || row.status !== "accepted" || row.entry_type !== "expense") return null;
+    const receipt = selectLedgerReceiptByEntryId.get({ $id: row.id });
+    if (!receipt) {
+      throw new HttpError(
+        409,
+        "SHORTCUT_LEDGER_RECEIPT_INCOMPLETE",
+        "Accepted bookkeeping entry is missing its canonical expense or payment",
+      );
+    }
+    const weekStart = mondayInShanghai(receipt.occurred_on);
+    if (!weekStart) {
+      throw new HttpError(
+        409,
+        "SHORTCUT_LEDGER_RECEIPT_INCOMPLETE",
+        "Accepted bookkeeping entry has an invalid canonical occurrence date",
+      );
+    }
+    return {
+      entryId: requiredText(receipt.entry_id, "ledger receipt entry id", 200),
+      expenseId: requiredText(receipt.expense_id, "ledger receipt expense id", 200),
+      paymentId: requiredText(receipt.payment_id, "ledger receipt payment id", 200),
+      referenceCode: requiredText(receipt.reference_code, "ledger receipt reference code", 200),
+      occurredOn: dateOnly(receipt.occurred_on, "ledger receipt occurredOn"),
+      weekStart,
+      amountCents: nonNegativeCents(Number(receipt.amount_cents), "ledger receipt amountCents"),
+      reimbursementCents: nonNegativeCents(
+        Number(receipt.reimbursement_cents),
+        "ledger receipt reimbursementCents",
+      ),
+      attachmentStatus: receipt.attachment_status,
+    };
+  }
+
+  function completedResult(row, { replayed, ...extra } = {}) {
+    const ledgerReceipt = ledgerReceiptFromAcceptedRow(row);
+    return {
+      item: itemFromRow(row),
+      ...(ledgerReceipt ? { ledgerReceipt } : {}),
+      ...extra,
+      replayed: replayed === true,
+    };
+  }
+
+  function getLedgerReceipt(idValue, { owner } = {}) {
+    const id = requiredText(idValue, "id", 200);
+    const normalizedOwner = requiredText(owner, "owner", 200);
+    const row = selectById.get({ $id: id });
+    if (!row || row.owner !== normalizedOwner || row.target_system !== "sentelligent") {
+      throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
+    }
+    if (row.status !== "accepted" || row.entry_type !== "expense") return null;
+    return ledgerReceiptFromAcceptedRow(row);
+  }
+
+  function listRecentLedgerReceipts({ owner, limit = 50 } = {}) {
+    const normalizedOwner = requiredText(owner, "owner", 200);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+      throw new TypeError("limit must be between 1 and 50");
+    }
+    return db.prepare(`
+      SELECT id, status, entry_type, updated_at
+      FROM shortcut_bookkeeping_entries
+      WHERE owner = $owner
+        AND target_system = 'sentelligent'
+        AND entry_type = 'expense'
+        AND status = 'accepted'
+      ORDER BY updated_at DESC, id DESC
+      LIMIT $limit
+    `).all({ $owner: normalizedOwner, $limit: limit }).flatMap((row) => {
+      const receipt = ledgerReceiptFromAcceptedRow(row);
+      return receipt ? [{
+        ...receipt,
+        acceptedAt: dateTime(row.updated_at, "acceptedAt"),
+      }] : [];
+    });
+  }
+
+  function listBySource({ owner, sourceId } = {}) {
+    const normalizedOwner = requiredText(owner, "owner", 200);
+    const normalizedSourceId = requiredText(sourceId, "sourceId", 200);
+    return selectBySource.all({
+      $owner: normalizedOwner,
+      $sourceId: normalizedSourceId,
+    }).map(itemFromRow);
+  }
 
   function receive(input = {}) {
     const owner = requiredText(input.owner, "owner", 200);
@@ -289,7 +595,7 @@ export function createShortcutBookkeepingRepository(db, {
     const entryType = requiredText(input.entryType, "entryType", 20);
     const category = requiredText(input.category, "category", 100);
     const subcategory = optionalText(input.subcategory, "subcategory", 100);
-    const resolved = resolveShortcutCategory({ ledgerName, entryType, category, subcategory });
+    const resolved = resolveBookkeepingCategory({ ledgerName, entryType, category, subcategory });
     const idempotencyKeyHash = hashValue(requiredText(input.idempotencyKey, "idempotencyKey", 200));
     const normalizedRequestHash = sha256Value(input.requestHash, "requestHash");
     const rawText = requiredText(input.rawText, "rawText", 12_000);
@@ -298,7 +604,7 @@ export function createShortcutBookkeepingRepository(db, {
     const capturedAt = dateTime(input.capturedAt, "capturedAt", { nullable: true });
     const now = nowIso(clock);
 
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const existing = selectByKey.get({ $owner: owner, $idempotencyKeyHash: idempotencyKeyHash });
       if (existing) {
         if (existing.request_hash !== normalizedRequestHash) {
@@ -364,13 +670,13 @@ export function createShortcutBookkeepingRepository(db, {
       throw new TypeError("leaseMs must be positive");
     }
     const now = nowIso(clock);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current) {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_NOT_FOUND", "Shortcut bookkeeping entry was not found");
       }
       if (COMPLETED_STATUSES.has(current.status)) {
-        return { item: itemFromRow(current), replayed: true };
+        return completedResult(current, { replayed: true });
       }
       if (current.status === "processing") {
         const started = Date.parse(current.lease_started_at);
@@ -406,8 +712,15 @@ export function createShortcutBookkeepingRepository(db, {
     if (!allowedStatuses.has(status)) throw new TypeError("status is invalid");
     const rows = db.prepare(`
       SELECT entry.*, expense.reference_code AS expense_reference_code
+             , advance_source.id AS advance_source_id
+             , advance.id AS advance_id
+             , advance.week_start AS advance_week_start
+             , advance.received_cents AS advance_received_cents
       FROM shortcut_bookkeeping_entries entry
       LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+      LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+        AND advance_source.status = 'active'
+      LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
       WHERE entry.owner = $owner AND entry.target_system = 'sentelligent' AND entry.status = $status
       ORDER BY entry.updated_at DESC, entry.id DESC
       LIMIT $limit
@@ -420,8 +733,15 @@ export function createShortcutBookkeepingRepository(db, {
     const normalizedOwner = requiredText(owner, "owner", 200);
     const row = db.prepare(`
       SELECT entry.*, expense.reference_code AS expense_reference_code
+             , advance_source.id AS advance_source_id
+             , advance.id AS advance_id
+             , advance.week_start AS advance_week_start
+             , advance.received_cents AS advance_received_cents
       FROM shortcut_bookkeeping_entries entry
       LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
+      LEFT JOIN travel_expense_advance_sources advance_source ON advance_source.entry_id = entry.id
+        AND advance_source.status = 'active'
+      LEFT JOIN travel_expense_advances advance ON advance.id = advance_source.advance_id
       WHERE entry.id = $id AND entry.owner = $owner AND entry.target_system = 'sentelligent'
     `).get({ $id: id, $owner: normalizedOwner });
     return itemFromRow(row);
@@ -432,13 +752,13 @@ export function createShortcutBookkeepingRepository(db, {
     const normalizedOwner = requiredText(owner, "owner", 200);
     if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new TypeError("leaseMs must be positive");
     const now = nowIso(clock);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current || current.owner !== normalizedOwner || current.target_system !== "sentelligent") {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
       }
       if (current.status === "accepted" || current.status === "rejected") {
-        return { item: itemFromRow(current), replayed: true };
+        return completedResult(current, { replayed: true });
       }
       if (current.status !== "review_required") {
         throw new HttpError(409, "SHORTCUT_BOOKKEEPING_REVIEW_STATE_CONFLICT", "Shortcut review item is not awaiting review");
@@ -456,12 +776,12 @@ export function createShortcutBookkeepingRepository(db, {
     });
   }
 
-  function rejectReview(idValue, { owner, actor, reason } = {}) {
+  function rejectReview(idValue, { owner, actor, reason, purge = false } = {}) {
     const id = requiredText(idValue, "id", 200);
     const normalizedOwner = requiredText(owner, "owner", 200);
     const normalizedActor = requiredText(actor ?? owner, "actor", 200);
     const normalizedReason = requiredText(reason, "reason", 1_000);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current || current.owner !== normalizedOwner || current.target_system !== "sentelligent") {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
@@ -471,12 +791,23 @@ export function createShortcutBookkeepingRepository(db, {
         throw new HttpError(409, "SHORTCUT_BOOKKEEPING_REVIEW_STATE_CONFLICT", "Shortcut review item is not awaiting review");
       }
       const now = nowIso(clock);
-      db.prepare(`
-        UPDATE shortcut_bookkeeping_entries
-        SET status = 'rejected', lease_started_at = NULL, error_code = 'MANUAL_REJECTED',
-            updated_at = $now, warnings_json = json_insert(warnings_json, '$[#]', $reason)
-        WHERE id = $id AND owner = $owner AND status = 'review_required'
-      `).run({ $id: id, $owner: normalizedOwner, $now: now, $reason: normalizedReason });
+      const statement = purge
+        ? `
+          UPDATE shortcut_bookkeeping_entries
+          SET status = 'rejected', lease_started_at = NULL, error_code = 'MANUAL_REJECTED',
+              raw_text = '[已取消]', analysis_json = NULL, analysis_provider = NULL,
+              analysis_model = NULL, occurred_on = NULL, amount_cents = NULL,
+              merchant = NULL, purpose = NULL, note = NULL,
+              updated_at = $now, warnings_json = json_insert(warnings_json, '$[#]', $reason)
+          WHERE id = $id AND owner = $owner AND status = 'review_required'
+        `
+        : `
+          UPDATE shortcut_bookkeeping_entries
+          SET status = 'rejected', lease_started_at = NULL, error_code = 'MANUAL_REJECTED',
+              updated_at = $now, warnings_json = json_insert(warnings_json, '$[#]', $reason)
+          WHERE id = $id AND owner = $owner AND status = 'review_required'
+        `;
+      db.prepare(statement).run({ $id: id, $owner: normalizedOwner, $now: now, $reason: normalizedReason });
       insertAudit(db, {
         action: "shortcut_bookkeeping.manual_reject",
         entityType: "shortcut_bookkeeping_entry",
@@ -495,12 +826,12 @@ export function createShortcutBookkeepingRepository(db, {
     const id = requiredText(idValue, "id", 200);
     const normalizedOwner = requiredText(owner, "owner", 200);
     const normalizedActor = requiredText(actor ?? owner, "actor", 200);
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const current = selectById.get({ $id: id });
       if (!current || current.owner !== normalizedOwner || current.target_system !== "sentelligent") {
         throw new HttpError(404, "SHORTCUT_BOOKKEEPING_REVIEW_NOT_FOUND", "Shortcut review item was not found");
       }
-      if (current.status === "accepted") return { item: itemFromRow(current), replayed: true };
+      if (current.status === "accepted") return completedResult(current, { replayed: true });
       if (current.status === "rejected") {
         throw new HttpError(409, "SHORTCUT_BOOKKEEPING_REVIEW_TERMINAL", "Rejected shortcut review item cannot be retried");
       }
@@ -551,16 +882,164 @@ export function createShortcutBookkeepingRepository(db, {
     return { id, current, replayed: false };
   }
 
-  function completeLocal(idValue, { analysis: analysisValue, leaseToken } = {}) {
-    return withImmediateTransaction(db, () => {
-      const state = currentProcessing(idValue, leaseToken, "sentelligent");
-      if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
-      const { id, current } = state;
-      if (current.ledger_name !== "出差报销" || current.entry_type !== "expense") {
-        throw new TypeError("Sentelligent Shortcut bookkeeping only supports 出差报销 expense entries");
+  function ensureAdvanceForLoanIncome(current, analysis, now) {
+    if (current.entry_type !== "income" || current.category !== "出差" || current.subcategory !== "借款") {
+      return null;
+    }
+    const amountCents = analysis.expense?.amountCents;
+    if (!Number.isSafeInteger(amountCents) || amountCents <= 0) {
+      throw new TypeError("loan income amount must be positive");
+    }
+    const receivedOn = dateOnlyInShanghai(analysis.expense?.paidAt ?? analysis.expense?.occurredOn);
+    const weekStart = mondayInShanghai(receivedOn);
+    if (!receivedOn || !weekStart) throw new TypeError("loan income date is invalid");
+    const existing = db.prepare(`
+      SELECT source.*, advance.received_cents AS advance_received_cents,
+             advance.week_start AS advance_week_start
+      FROM travel_expense_advance_sources source
+      JOIN travel_expense_advances advance ON advance.id = source.advance_id
+      WHERE source.entry_id = $entryId
+    `).get({ $entryId: current.id });
+    if (existing) {
+      if (Number(existing.amount_cents) !== amountCents || existing.status !== "active") {
+        throw new HttpError(409, "SHORTCUT_ADVANCE_SOURCE_CONFLICT", "Loan income already has a conflicting advance source");
       }
-      const analysis = normalizeAnalysis(analysisValue, current);
+      return {
+        sourceId: existing.id,
+        advanceId: existing.advance_id,
+        weekStart: existing.advance_week_start,
+        receivedCents: Number(existing.advance_received_cents),
+        replayed: true,
+      };
+    }
+    const digest = hashValue(current.id).slice(0, 24);
+    const advanceId = `shortcut-advance-${digest}`;
+    const sourceId = `shortcut-advance-source-${digest}`;
+    const purpose = current.note || analysis.expense?.purpose || "出差借款";
+    db.prepare(`
+      INSERT INTO travel_expense_advances (
+        id, version, owner, week_start, status, requested_cents, received_cents,
+        requested_on, received_on, purpose, notes, created_by, updated_by, created_at, updated_at
+      ) VALUES (
+        $advanceId, 1, $owner, $weekStart, 'received', 0, $amountCents,
+        NULL, $receivedOn, $purpose, $notes, $actor, $actor, $now, $now
+      )
+    `).run({
+      $advanceId: advanceId,
+      $owner: current.owner,
+      $weekStart: weekStart,
+      $amountCents: amountCents,
+      $receivedOn: receivedOn,
+      $purpose: purpose,
+      $notes: current.raw_text === "[已取消]" ? null : current.note,
+      $actor: current.actor,
+      $now: now,
+    });
+    db.prepare(`
+      INSERT INTO travel_expense_advance_sources (
+        id, owner, entry_id, advance_id, amount_cents, received_on, week_start,
+        status, created_by, created_at
+      ) VALUES (
+        $sourceId, $owner, $entryId, $advanceId, $amountCents, $receivedOn, $weekStart,
+        'active', $actor, $now
+      )
+    `).run({
+      $sourceId: sourceId,
+      $owner: current.owner,
+      $entryId: current.id,
+      $advanceId: advanceId,
+      $amountCents: amountCents,
+      $receivedOn: receivedOn,
+      $weekStart: weekStart,
+      $actor: current.actor,
+      $now: now,
+    });
+    insertAudit(db, {
+      action: "shortcut_bookkeeping.advance_received",
+      entityType: "travel_expense_advance",
+      entityId: advanceId,
+      actor: current.actor,
+      requestId: current.source_id,
+      before: null,
+      after: { status: "received", amountCents, weekStart, sourceEntryId: current.id },
+      metadata: { owner: current.owner, source: "shortcut_bookkeeping_income" },
+    });
+    return { sourceId, advanceId, weekStart, receivedCents: amountCents, replayed: false };
+  }
+
+  function completeLocal(idValue, {
+    analysis: analysisValue,
+    leaseToken,
+    reviewPatch,
+    revisionSource = "capture",
+  } = {}) {
+    return runTransaction(db, () => {
+      const state = currentProcessing(idValue, leaseToken, "sentelligent");
+      if (state.replayed) return completedResult(state.current, { replayed: true });
+      const { id, current } = state;
+      if (current.ledger_name !== "出差报销"
+        || !["income", "expense"].includes(current.entry_type)) {
+        throw new TypeError("Sentelligent Shortcut bookkeeping entry type is invalid");
+      }
+      const normalizedReviewPatch = normalizeReviewPatch(reviewPatch, current);
+      const effectiveCurrent = normalizedReviewPatch
+        ? { ...current, ...normalizedReviewPatch }
+        : current;
+      if (normalizedReviewPatch) {
+        db.prepare(`
+          UPDATE shortcut_bookkeeping_entries
+          SET category = $category, subcategory = $subcategory, note = $note
+          WHERE id = $id AND status = 'processing'
+        `).run({
+          $id: id,
+          $category: normalizedReviewPatch.category,
+          $subcategory: normalizedReviewPatch.subcategory,
+          $note: normalizedReviewPatch.note,
+        });
+      }
+      let analysis = normalizeAnalysis(analysisValue, effectiveCurrent);
+      // Shortcut expense captures use the consumption amount as the
+      // reimbursable amount by product rule. Keep the invariant at the
+      // repository boundary too, so a legacy analyzer or a Web correction
+      // cannot silently create a lower reimbursement value.
+      if (current.entry_type === "expense" && analysis.expense
+        && Number.isSafeInteger(analysis.expense.amountCents)) {
+        analysis = {
+          ...analysis,
+          expense: {
+            ...analysis.expense,
+            reimbursementCents: analysis.expense.amountCents,
+            fundingSource: "personal",
+          },
+        };
+      }
       const now = nowIso(clock);
+      if (!["capture", "weixin_correction", "system"].includes(revisionSource)) {
+        throw new TypeError("revisionSource is invalid");
+      }
+      const revisionVersion = Number(db.prepare(
+        "SELECT COALESCE(MAX(version), 0) + 1 AS next_version FROM shortcut_bookkeeping_revisions WHERE entry_id = $entryId",
+      ).get({ $entryId: id }).next_version);
+      const revisionId = `shortcut-revision-${hashValue(`${id}:${revisionVersion}`).slice(0, 24)}`;
+      db.prepare(`
+        INSERT INTO shortcut_bookkeeping_revisions (
+          id, owner, entry_id, version, changes_json, source, created_by, created_at
+        ) VALUES ($revisionId, $owner, $entryId, $version, $changesJson, $source, $actor, $now)
+      `).run({
+        $revisionId: revisionId,
+        $owner: current.owner,
+        $entryId: id,
+        $version: revisionVersion,
+        $changesJson: JSON.stringify({
+          category: effectiveCurrent.category,
+          subcategory: effectiveCurrent.subcategory,
+          note: effectiveCurrent.note,
+          analysis,
+        }),
+        $source: revisionSource,
+        $actor: current.actor,
+        $now: now,
+      });
       const stored = {
         $id: id,
         $provider: analysis.source.provider,
@@ -571,6 +1050,9 @@ export function createShortcutBookkeepingRepository(db, {
         $amountCents: analysis.expense?.amountCents ?? null,
         $merchant: analysis.expense?.merchant ?? null,
         $purpose: analysis.expense?.purpose ?? null,
+        $category: effectiveCurrent.category,
+        $subcategory: effectiveCurrent.subcategory,
+        $note: effectiveCurrent.note,
         $now: now,
       };
       if (analysis.status === "review_required") {
@@ -580,7 +1062,9 @@ export function createShortcutBookkeepingRepository(db, {
               lease_started_at = NULL, analysis_provider = $provider, analysis_model = $model,
               analysis_json = $analysisJson, warnings_json = $warningsJson,
               occurred_on = $occurredOn, amount_cents = $amountCents,
-              merchant = $merchant, purpose = $purpose, error_code = NULL, updated_at = $now
+              merchant = $merchant, purpose = $purpose,
+              category = $category, subcategory = $subcategory, note = $note,
+              error_code = NULL, updated_at = $now
           WHERE id = $id
         `).run(stored);
         insertAudit(db, {
@@ -596,27 +1080,91 @@ export function createShortcutBookkeepingRepository(db, {
         return { item: itemFromRow(selectById.get({ $id: id })), replayed: false };
       }
 
+      if (current.entry_type === "income") {
+        db.prepare(`
+          UPDATE shortcut_bookkeeping_entries
+          SET status = 'accepted', attempt_count = attempt_count + 1, lease_started_at = NULL,
+              analysis_provider = $provider, analysis_model = $model,
+              analysis_json = $analysisJson, warnings_json = $warningsJson,
+              occurred_on = $occurredOn, amount_cents = $amountCents,
+              merchant = $merchant, purpose = $purpose,
+              category = $category, subcategory = $subcategory, note = $note,
+              expense_id = NULL, payment_id = NULL,
+              error_code = NULL, updated_at = $now
+          WHERE id = $id
+        `).run(stored);
+        const advance = ensureAdvanceForLoanIncome(
+          { ...current, ...effectiveCurrent },
+          analysis,
+          now,
+        );
+        insertAudit(db, {
+          action: "shortcut_bookkeeping.accept",
+          entityType: "shortcut_bookkeeping_entry",
+          entityId: id,
+          actor: current.actor,
+          requestId: current.source_id,
+          before: { status: current.status },
+          after: {
+            status: "accepted",
+            entryType: "income",
+            amountCents: analysis.expense.amountCents,
+          },
+          metadata: {
+            owner: effectiveCurrent.owner,
+            targetSystem: current.target_system,
+            ledgerName: current.ledger_name,
+            entryType: current.entry_type,
+            category: effectiveCurrent.category,
+            subcategory: effectiveCurrent.subcategory,
+          },
+        });
+        return {
+          item: itemFromRow(selectById.get({ $id: id })),
+          ...(advance ? { advance } : {}),
+          replayed: false,
+        };
+      }
+
       const expense = analysis.expense;
       const expenseId = generatedId(idFactory, "generated expense id");
       const paymentId = generatedId(idFactory, "generated payment id");
       const paidAt = expense.paidAt ?? current.captured_at ?? `${expense.occurredOn}T12:00:00+08:00`;
+      const automatedRegion = analysis.noteAutomation?.tripRegion
+        && ["text", "user_correction", "itinerary"].includes(analysis.noteAutomation.tripRegionSource)
+        ? {
+            city: analysis.noteAutomation.tripRegion,
+            source: analysis.noteAutomation.tripRegionSource === "text"
+              ? "payment_text"
+              : analysis.noteAutomation.tripRegionSource,
+          }
+        : null;
+      const profileRegion = resolveTravelExpenseRegionFromDatabase(db, {
+        owner: current.owner,
+        occurredOn: expense.occurredOn,
+      });
+      const resolvedRegion = automatedRegion ?? profileRegion;
       db.prepare(`
           INSERT INTO travel_expenses (
             id, reference_code, owner, occurred_on, category, purpose, merchant,
-            invoice_status, notes, created_by, updated_by, created_at, updated_at
+            invoice_status, notes, trip_region, trip_region_source,
+            created_by, updated_by, created_at, updated_at
           ) VALUES (
             $id, $referenceCode, $owner, $occurredOn, $category, $purpose, $merchant,
-            'pending', $notes, $actor, $actor, $now, $now
+            'pending', $notes, $tripRegion, $tripRegionSource,
+            $actor, $actor, $now, $now
           )
       `).run({
           $id: expenseId,
           $referenceCode: referenceCode(expense.occurredOn, expenseId),
           $owner: current.owner,
           $occurredOn: expense.occurredOn,
-          $category: legacyCategory(current),
+          $category: legacyCategory(effectiveCurrent),
           $purpose: expense.purpose,
           $merchant: expense.merchant,
-          $notes: current.note,
+          $notes: effectiveCurrent.note,
+          $tripRegion: resolvedRegion?.city ?? null,
+          $tripRegionSource: resolvedRegion?.source ?? null,
           $actor: current.actor,
           $now: now,
       });
@@ -646,6 +1194,7 @@ export function createShortcutBookkeepingRepository(db, {
             analysis_json = $analysisJson, warnings_json = $warningsJson,
             occurred_on = $occurredOn, amount_cents = $amountCents,
             merchant = $merchant, purpose = $purpose,
+            category = $category, subcategory = $subcategory, note = $note,
             expense_id = $expenseId, payment_id = $paymentId,
             error_code = NULL, updated_at = $now
         WHERE id = $id
@@ -658,117 +1207,21 @@ export function createShortcutBookkeepingRepository(db, {
         requestId: current.source_id,
         before: { status: current.status },
         after: { status: "accepted", expenseId, paymentId, amountCents: expense.amountCents },
-        metadata: {
-          owner: current.owner,
+          metadata: {
+          owner: effectiveCurrent.owner,
           targetSystem: current.target_system,
           ledgerName: current.ledger_name,
           entryType: current.entry_type,
-          category: current.category,
-          subcategory: current.subcategory,
+          category: effectiveCurrent.category,
+          subcategory: effectiveCurrent.subcategory,
         },
       });
-      return { item: itemFromRow(selectById.get({ $id: id })), replayed: false };
-    });
-  }
-
-  function completeRemote(idValue, { remote, leaseToken } = {}) {
-    return withImmediateTransaction(db, () => {
-      const state = currentProcessing(idValue, leaseToken, "qingyang");
-      if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
-      if (!isPlainObject(remote)) throw new TypeError("remote result must be an object");
-      const remoteId = requiredText(remote.id, "remote.id", 200);
-      const remoteReference = requiredText(remote.reference, "remote.reference", 200);
-      const remoteStatus = requiredText(remote.status, "remote.status", 50);
-      if (!REMOTE_COMPLETION_STATUSES.has(remoteStatus)) {
-        throw new TypeError(
-          "remote.status must be pending, processing, review, or confirmed; "
-          + "failed must be released and rejected/voided must use completeRemoteTerminal",
-        );
-      }
-      const now = nowIso(clock);
-      const localStatus = remoteStatus === "confirmed" ? "accepted" : "review_required";
-      db.prepare(`
-        UPDATE shortcut_bookkeeping_entries
-        SET status = $localStatus, attempt_count = attempt_count + 1,
-            lease_started_at = NULL, remote_id = $remoteId,
-            remote_reference = $remoteReference, remote_status = $remoteStatus,
-            error_code = NULL, updated_at = $now
-        WHERE id = $id
-      `).run({
-        $id: state.id,
-        $localStatus: localStatus,
-        $remoteId: remoteId,
-        $remoteReference: remoteReference,
-        $remoteStatus: remoteStatus,
-        $now: now,
-      });
-      insertAudit(db, {
-        action: "shortcut_bookkeeping.bridge_accept",
-        entityType: "shortcut_bookkeeping_entry",
-        entityId: state.id,
-        actor: state.current.actor,
-        requestId: state.current.source_id,
-        before: { status: state.current.status },
-        after: { status: localStatus, remoteId, remoteReference, remoteStatus },
-        metadata: {
-          owner: state.current.owner,
-          targetSystem: state.current.target_system,
-          ledgerName: state.current.ledger_name,
-          entryType: state.current.entry_type,
-          category: state.current.category,
-          subcategory: state.current.subcategory,
-        },
-      });
-      return { item: itemFromRow(selectById.get({ $id: state.id })), replayed: false };
-    });
-  }
-
-  function completeRemoteTerminal(idValue, { remote, leaseToken } = {}) {
-    return withImmediateTransaction(db, () => {
-      const state = currentProcessing(idValue, leaseToken, "qingyang");
-      if (state.replayed) return { item: itemFromRow(state.current), replayed: true };
-      if (!isPlainObject(remote)) throw new TypeError("remote result must be an object");
-      const remoteId = requiredText(remote.id, "remote.id", 200);
-      const remoteReference = requiredText(remote.reference, "remote.reference", 200);
-      const remoteStatus = requiredText(remote.status, "remote.status", 50);
-      if (!new Set(["rejected", "voided"]).has(remoteStatus)) {
-        throw new TypeError("remote.status must be rejected or voided");
-      }
-      const now = nowIso(clock);
-      db.prepare(`
-        UPDATE shortcut_bookkeeping_entries
-        SET status = 'rejected', attempt_count = attempt_count + 1,
-            lease_started_at = NULL, remote_id = $remoteId,
-            remote_reference = $remoteReference, remote_status = $remoteStatus,
-            error_code = 'QINGYANG_REMOTE_TERMINAL', updated_at = $now
-        WHERE id = $id
-      `).run({
-        $id: state.id,
-        $remoteId: remoteId,
-        $remoteReference: remoteReference,
-        $remoteStatus: remoteStatus,
-        $now: now,
-      });
-      insertAudit(db, {
-        action: "shortcut_bookkeeping.bridge_reject",
-        entityType: "shortcut_bookkeeping_entry",
-        entityId: state.id,
-        actor: state.current.actor,
-        requestId: state.current.source_id,
-        before: { status: state.current.status },
-        after: { status: "rejected", remoteId, remoteReference, remoteStatus },
-        metadata: {
-          owner: state.current.owner,
-          targetSystem: state.current.target_system,
-          ledgerName: state.current.ledger_name,
-        },
-      });
-      return { item: itemFromRow(selectById.get({ $id: state.id })), replayed: false };
+      return completedResult(selectById.get({ $id: id }), { replayed: false });
     });
   }
 
   function release(idValue, { leaseToken, errorCode = "PROCESSING_FAILED" } = {}) {
-    return withImmediateTransaction(db, () => {
+    return runTransaction(db, () => {
       const id = requiredText(idValue, "id", 200);
       const normalizedLease = dateTime(leaseToken, "leaseToken", { nullable: true });
       const normalizedError = requiredText(errorCode, "errorCode", 200);
@@ -799,15 +1252,16 @@ export function createShortcutBookkeepingRepository(db, {
 
   return {
     receive,
+    listBySource,
     claim,
     listReview,
     getReview,
     claimReview,
     rejectReview,
     retryReview,
+    getLedgerReceipt,
+    listRecentLedgerReceipts,
     completeLocal,
-    completeRemote,
-    completeRemoteTerminal,
     release,
   };
 }

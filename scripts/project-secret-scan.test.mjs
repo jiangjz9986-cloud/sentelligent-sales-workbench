@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 import { mkdtempSync, rmSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { scanProjectSecrets } from "./project-secret-scan.mjs";
+import {
+  isKnownHistoricalSyntheticFixtureDigest,
+  scanProjectSecrets,
+} from "./project-secret-scan.mjs";
 
 const sampleProviderKey = `sk-${"1234567890abcdef1234567890abcdef"}`;
 const frontendScannerPath = resolve(
@@ -222,6 +225,29 @@ describe("project secret scan", () => {
     }
   });
 
+  it("keeps historical fixture exceptions bound to source, path, assignment, and digest", () => {
+    const fixture = {
+      source: "git-history",
+      filePath: "backend/tests/hospital-tender-lead-conversion-api.integration.test.js",
+      assignmentKey: "PASSWORD",
+      digest: "682b2924255e1b09557faf10611eb1c11027a1fe7e318a58d50829d2b6576a6f",
+    };
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest(fixture), true);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({ ...fixture, source: "working-tree" }), false);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({
+      ...fixture,
+      filePath: "backend/src/config.js",
+    }), false);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({
+      ...fixture,
+      assignmentKey: "OTHER_PASSWORD",
+    }), false);
+    assert.equal(isKnownHistoricalSyntheticFixtureDigest({
+      ...fixture,
+      digest: `${fixture.digest.slice(0, -1)}0`,
+    }), false);
+  });
+
   it("ignores runtime references and explicit fixture values", () => {
     const workspace = makeWorkspace();
     try {
@@ -237,6 +263,10 @@ describe("project secret scan", () => {
         ].join("\n"),
       );
       workspace.write(
+        "scripts/integration-qa.mjs",
+        'const config = { AUTH_SESSION_SECRET: "qa-session-secret" };\n',
+      );
+      workspace.write(
         "integrations/icost-shortcut/verify-shortcut.mjs",
         [
           "const TOKEN_ACTION = ",
@@ -244,13 +274,31 @@ describe("project secret scan", () => {
           ";\n",
         ].join(""),
       );
-      workspace.write(
-        "scripts/integration-qa.mjs",
-        'const config = { AUTH_SESSION_SECRET: "qa-session-secret" };\n',
-      );
 
       const result = scanProjectSecrets({ root: workspace.root });
 
+      assert.equal(result.status, "passed");
+      assert.deepEqual(result.findings, []);
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("allows only the exact historical Shortcut/WeChat fixture labels", () => {
+    const workspace = makeWorkspace();
+    try {
+      workspace.write(
+        "backend/tests/historical-shortcut-fixtures.test.js",
+        [
+          'const shortcutToken = "shortcut-test-token";',
+          'const machineToken = "weixin-machine-test-token";',
+          'const shortcutMachineToken = "shortcut-machine-test-token";',
+          'const confirmationSecret = "shortcut-weixin-confirmation-test-secret-012345678901234567890123456789";',
+          'const safetySecret = "shortcut-bookkeeping-safety-test-secret-012345678901234567890123456789";',
+          "",
+        ].join("\\n"),
+      );
+      const result = scanProjectSecrets({ root: workspace.root, includeGitHistory: false });
       assert.equal(result.status, "passed");
       assert.deepEqual(result.findings, []);
     } finally {
@@ -835,6 +883,35 @@ describe("project secret scan", () => {
       assert.deepEqual(
         result.findings.map((item) => [item.source, item.file, item.pattern]),
         [["working-tree", "config/production.env", "API key assignment"]],
+      );
+    } finally {
+      workspace.cleanup();
+    }
+  });
+
+  it("allows public domain-separation labels without hiding credentials", () => {
+    const workspace = makeWorkspace();
+    const productionCredential = ["Prod", "D7q4", "V9m", "!"].join("");
+    try {
+      initializeRepository(workspace);
+      workspace.write(
+        "backend/vendor/example-sdk/index.mjs",
+        [
+          'const CONTEXT_TOKEN_DOMAIN = "sentelligent/weixin-context-token/v1";',
+          ["const AUTH_TOKEN_DOMAIN", JSON.stringify(productionCredential)].join(" = ") + ";",
+          "",
+        ].join("\n"),
+      );
+      commitAll(workspace, "domain separation fixture");
+      git(workspace.root, "rm", "backend/vendor/example-sdk/index.mjs");
+      git(workspace.root, "commit", "-m", "remove domain separation fixture");
+
+      const result = scanProjectSecrets({ root: workspace.root });
+
+      assert.equal(result.status, "failed");
+      assert.deepEqual(
+        result.findings.map((item) => [item.source, item.file, item.line, item.pattern]),
+        [["git-history", "backend/vendor/example-sdk/index.mjs", 2, "API key assignment"]],
       );
     } finally {
       workspace.cleanup();

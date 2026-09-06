@@ -6,7 +6,7 @@ from io import BytesIO
 from unittest import TestCase
 from urllib.error import HTTPError
 
-from hospital_tender_monitor.http import HttpClient
+from hospital_tender_monitor.http import HttpClient, HttpError
 
 
 class _Response:
@@ -47,6 +47,86 @@ class _Clock:
 
 
 class HttpBudgetTests(TestCase):
+    def test_source_budget_rejects_response_body_that_finishes_after_deadline(self) -> None:
+        clock = _Clock()
+
+        class _SlowResponse(_Response):
+            def read(self, size: int = -1) -> bytes:
+                clock.value += 21.0
+                return super().read(size)
+
+        client = HttpClient(
+            timeout_seconds=15,
+            opener=lambda request, timeout: _SlowResponse(request.full_url),
+            resolver=_resolver,
+            sleeper=clock.sleep,
+            monotonic=clock.now,
+            max_attempts=1,
+            min_interval_seconds=0,
+        )
+
+        with self.assertRaises(HttpError):
+            with client.request_budget(20):
+                client.request("GET", "https://public.example.test/slow-body")
+
+    def test_consecutive_requests_share_one_budget_and_context_exit_restores_deadline(self) -> None:
+        clock = _Clock()
+        timeouts = []
+        durations = iter((12.0, 8.0, 1.0))
+
+        def opener(request, timeout):
+            timeouts.append(timeout)
+            clock.value += min(next(durations), timeout)
+            return _Response(request.full_url)
+
+        client = HttpClient(
+            timeout_seconds=15,
+            opener=opener,
+            resolver=_resolver,
+            sleeper=clock.sleep,
+            monotonic=clock.now,
+            max_attempts=1,
+            min_interval_seconds=0,
+        )
+
+        with client.request_budget(20):
+            client.request("GET", "https://public.example.test/one")
+            client.request("GET", "https://public.example.test/two")
+        client.request("GET", "https://public.example.test/after-budget")
+
+        self.assertEqual(len(timeouts), 3)
+        self.assertAlmostEqual(timeouts[0], 15.0)
+        self.assertAlmostEqual(timeouts[1], 8.0)
+        self.assertAlmostEqual(timeouts[2], 15.0)
+
+    def test_source_budget_caps_multi_request_retry_time(self) -> None:
+        clock = _Clock()
+        timeouts = []
+
+        def opener(_request, timeout):
+            timeouts.append(timeout)
+            clock.value += timeout
+            raise TimeoutError("fixture timeout")
+
+        client = HttpClient(
+            timeout_seconds=15,
+            opener=opener,
+            resolver=_resolver,
+            sleeper=clock.sleep,
+            monotonic=clock.now,
+            max_attempts=3,
+            min_interval_seconds=0,
+        )
+
+        with client.request_budget(20):
+            with self.assertRaises(HttpError):
+                client.request("GET", "https://public.example.test/notices")
+
+        self.assertEqual(len(timeouts), 2)
+        self.assertAlmostEqual(timeouts[0], 15.0)
+        self.assertAlmostEqual(timeouts[1], 4.75)
+        self.assertAlmostEqual(clock.value, 20.0)
+
     def test_retries_429_with_bounded_retry_after(self) -> None:
         attempts = 0
         clock = _Clock()

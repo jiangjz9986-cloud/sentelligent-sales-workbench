@@ -13,7 +13,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   createPaymentProofSelection,
@@ -21,6 +21,7 @@ import {
   validatePaymentProofSelection,
 } from "./paymentProofModel.js";
 import { AuthenticatedPdfFrame } from "./AuthenticatedPdfFrame.jsx";
+import { AuthenticatedImageFrame } from "./AuthenticatedImageFrame.jsx";
 import {
   isTravelExpenseImage,
   isTravelExpensePdf,
@@ -36,9 +37,9 @@ const FUNDING_LABELS = {
   advance: "请款资金",
 };
 
-function paymentLabel(payment, index) {
+function paymentLabel(payment, index, expense) {
   const time = payment.paidAt ? formatTravelExpenseDateTime(payment.paidAt) : "时间待补";
-  const merchant = payment.merchant || "收款方待补";
+  const merchant = payment.merchant || expense?.merchant || "收款方待补";
   return `付款 ${index + 1} · ${merchant} · ${formatCny(payment.amountCents)} · ${time}`;
 }
 
@@ -81,6 +82,7 @@ export function PaymentProofCenter({
   expenses,
   inboxItems = [],
   getAttachmentUrl,
+  getAttachmentContentResponse,
   getInboxContentUrl,
   getInboxContentResponse,
   onConfirmInbox,
@@ -89,16 +91,36 @@ export function PaymentProofCenter({
   onUpload,
   onDelete,
   pendingAttachmentId,
+  focusExpenseId = null,
+  onFocusExpenseHandled,
 }) {
   const [selections, setSelections] = useState({});
   const [selectionErrors, setSelectionErrors] = useState({});
   const [inboxSelections, setInboxSelections] = useState({});
   const [inboxErrors, setInboxErrors] = useState({});
-  const [brokenImages, setBrokenImages] = useState(() => new Set());
 
   const proofCount = useMemo(() => expenses.reduce((total, expense) => (
     total + expense.attachments.filter((attachment) => attachment.kind === "payment_proof").length
   ), 0), [expenses]);
+
+  useEffect(() => {
+    if (!focusExpenseId) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const expense = expenses.find((item) => item.id === focusExpenseId);
+      const target = [...document.querySelectorAll("[data-proof-expense-id]")]
+        .find((element) => element.dataset.proofExpenseId === focusExpenseId);
+      if (!target) {
+        onFocusExpenseHandled?.({ expenseId: focusExpenseId, referenceCode: expense?.referenceCode, found: false });
+        return;
+      }
+
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      const focusTarget = target.querySelector("[data-proof-open]") ?? target;
+      if (focusTarget instanceof HTMLElement) focusTarget.focus({ preventScroll: true });
+      onFocusExpenseHandled?.({ expenseId: focusExpenseId, referenceCode: expense?.referenceCode, found: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [expenses, focusExpenseId, onFocusExpenseHandled]);
 
   function selectedFor(expense) {
     return selections[expense.id] ?? createPaymentProofSelection(expense);
@@ -189,11 +211,8 @@ export function PaymentProofCenter({
 
   return (
     <section className="expense-proof-center">
-      <header className="expense-section-intro">
-        <div>
-          <strong>付款凭证</strong>
-          <p>上传前先勾选凭证对应的付款记录；支持一张凭证关联一笔或多笔付款。</p>
-        </div>
+      <header className="expense-proof-center-note">
+        <p>上传前先勾选凭证对应的付款记录；支持一张凭证关联一笔或多笔付款。</p>
         <span>{proofCount} 份凭证</span>
       </header>
 
@@ -213,13 +232,12 @@ export function PaymentProofCenter({
             const pending = pendingInboxId === item.id;
             const isImage = isTravelExpenseImage(item);
             const isPdf = isTravelExpensePdf(item);
-            const broken = brokenImages.has(item.id);
             return (
               <article className="expense-inbox-item" key={item.id}>
                 <div className="expense-inbox-original">
-                  {isImage && !broken ? <img src={getInboxContentUrl(item.id)} alt={item.fileName} onError={() => setBrokenImages((current) => new Set(current).add(item.id))} /> : null}
+                  {isImage ? <AuthenticatedImageFrame resourceKey={item.id} loadImage={({ signal }) => getInboxContentResponse(item.id, { signal })} title={item.fileName} maxDimension={900} /> : null}
                   {isPdf ? <AuthenticatedPdfFrame resourceKey={item.id} loadPdf={({ signal }) => getInboxContentResponse(item.id, { signal })} title={`${item.fileName} PDF 付款凭证原件`} renderWidth={900} /> : null}
-                  {(!isImage && !isPdf) || broken ? <span><ImageOff size={24} /><strong>{broken ? "预览失败" : "原件文件"}</strong></span> : null}
+                  {!isImage && !isPdf ? <span><ImageOff size={24} /><strong>原件文件</strong></span> : null}
                   <a href={getInboxContentUrl(item.id)} target="_blank" rel="noreferrer"><ExternalLink size={14} />打开原件</a>
                 </div>
 
@@ -240,7 +258,7 @@ export function PaymentProofCenter({
 
                 <div className="expense-inbox-decision">
                   <label><span>账单编号</span><select value={selection.expenseId} onChange={(event) => chooseInboxExpense(item, event.target.value)}><option value="">请选择账单</option>{expenses.map((expense) => <option value={expense.id} key={expense.id}>{expense.referenceCode} · {expense.purpose}</option>)}</select></label>
-                  <label><span>付款记录</span><select value={selection.paymentId} disabled={!selectedExpense} onChange={(event) => { setInboxSelections((current) => ({ ...current, [item.id]: { ...selection, paymentId: event.target.value } })); setInboxErrors((current) => ({ ...current, [item.id]: "" })); }}><option value="">请选择付款</option>{selectedExpense?.payments.map((payment, index) => <option value={payment.id} key={payment.id}>{paymentLabel(payment, index)}</option>)}</select></label>
+                  <label><span>付款记录</span><select value={selection.paymentId} disabled={!selectedExpense} onChange={(event) => { setInboxSelections((current) => ({ ...current, [item.id]: { ...selection, paymentId: event.target.value } })); setInboxErrors((current) => ({ ...current, [item.id]: "" })); }}><option value="">请选择付款</option>{selectedExpense?.payments.map((payment, index) => <option value={payment.id} key={payment.id}>{paymentLabel(payment, index, selectedExpense)}</option>)}</select></label>
                   {inboxErrors[item.id] ? <p className="expense-inbox-error" role="alert"><CircleAlert size={15} />{inboxErrors[item.id]}</p> : null}
                   <div className="expense-inbox-actions">
                     <button type="button" className="primary" disabled={pending} onClick={() => void confirmInbox(item)}>{pending ? <LoaderCircle className="state-spinner" size={15} /> : <Check size={15} />}确认关联</button>
@@ -260,12 +278,14 @@ export function PaymentProofCenter({
           const proofs = expense.attachments.filter((attachment) => attachment.kind === "payment_proof");
           const pending = pendingAttachmentId === expense.id;
           return (
-            <article className="expense-proof-card" key={expense.id}>
+            <article className="expense-proof-card" key={expense.id} data-proof-expense-id={expense.id} tabIndex={-1} aria-label={`${expense.referenceCode} 的付款凭证`}>
               <header className="expense-proof-card-head">
                 <div>
+                  <code>{expense.referenceCode}</code>
                   <span>{expense.occurredOn}</span>
                   <strong>{expense.purpose}</strong>
-                  <small>{formatCny(expense.reimbursementCents)} · {expense.payments.length} 笔付款 · {proofs.length} 份凭证</small>
+                  <b>{formatCny(expense.reimbursementCents)}</b>
+                  <small>{proofs.length} 份凭证</small>
                 </div>
                 <span className={proofs.length ? "is-ready" : "is-missing"}>{proofs.length ? "已有凭证" : "待上传"}</span>
               </header>
@@ -281,7 +301,7 @@ export function PaymentProofCenter({
                         onChange={() => togglePayment(expense, payment.id)}
                       />
                       <span>
-                        <strong>{paymentLabel(payment, index)}</strong>
+                        <strong>{paymentLabel(payment, index, expense)}</strong>
                         <small>{FUNDING_LABELS[payment.fundingSource] ?? payment.fundingSource} · 报销 {formatCny(payment.reimbursementCents)}</small>
                       </span>
                     </label>
@@ -291,10 +311,9 @@ export function PaymentProofCenter({
 
                 <div className="expense-proof-upload">
                   <label className="expense-upload-tile" data-enabled={selectedPaymentIds.length ? "true" : "false"} aria-disabled={!selectedPaymentIds.length || pending}>
-                    <Upload size={19} />
+                    <Upload size={17} />
                     <span>{pending ? "正在上传" : "上传付款凭证"}</span>
-                    <small>{selectedPaymentIds.length ? `已选 ${selectedPaymentIds.length} 笔付款` : "至少选择一笔付款"}</small>
-                    <small>图片 / PDF · 原文件最大 12 MiB</small>
+                    <small>{selectedPaymentIds.length ? `已选 ${selectedPaymentIds.length} 笔付款` : "至少选择一笔付款"} · 图片 / PDF · 原文件最大 12 MiB</small>
                     <input type="file"
                       accept="image/jpeg,image/png,image/webp,application/pdf"
                       disabled={!selectedPaymentIds.length || pending}
@@ -313,21 +332,20 @@ export function PaymentProofCenter({
                 {proofs.map((attachment) => {
                   const isImage = isTravelExpenseImage(attachment);
                   const isPdf = isTravelExpensePdf(attachment);
-                  const broken = brokenImages.has(attachment.id);
                   return (
                     <article className="expense-proof-file" key={attachment.id}>
-                      <a className="expense-proof-file-preview" href={getAttachmentUrl(attachment.id)} target="_blank" rel="noreferrer" aria-label={`打开${attachment.fileName}`}>
-                        {isImage && !broken ? (
-                          <img src={getAttachmentUrl(attachment.id)} alt={attachment.fileName} onError={() => setBrokenImages((current) => new Set(current).add(attachment.id))} />
+                      <div className="expense-proof-file-preview" aria-label={`${attachment.fileName}预览`}>
+                        {isImage ? (
+                          <AuthenticatedImageFrame resourceKey={attachment.id} loadImage={({ signal }) => getAttachmentContentResponse(attachment.id, { signal })} title={attachment.fileName} maxDimension={360} />
                         ) : (
-                          <span>{broken ? <ImageOff size={22} /> : <FileText size={24} />}<strong>{isPdf ? "PDF" : broken ? "预览失败" : "文件"}</strong></span>
+                          <span><FileText size={24} /><strong>{isPdf ? "PDF" : "文件"}</strong></span>
                         )}
-                      </a>
+                      </div>
                       <div>
                         <strong title={attachment.fileName}>{attachment.fileName}</strong>
                         <small>{proofPaymentSummary(attachment, expense)}</small>
                         <nav aria-label={`${attachment.fileName}文件操作`}>
-                          <a href={getAttachmentUrl(attachment.id)} target="_blank" rel="noreferrer"><ExternalLink size={14} />打开</a>
+                          <a href={getAttachmentUrl(attachment.id)} target="_blank" rel="noreferrer" data-proof-open><ExternalLink size={14} />打开</a>
                           <a href={getAttachmentUrl(attachment.id)} download={attachment.fileName}><Download size={14} />下载</a>
                           <button type="button" disabled={pendingAttachmentId === attachment.id} onClick={() => onDelete(expense, attachment)}><Trash2 size={14} />删除</button>
                         </nav>

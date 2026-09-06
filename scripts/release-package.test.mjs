@@ -290,10 +290,14 @@ describe("portable release package", () => {
       "outputs/product-design-prototype/dist/assets/sente-logo.png",
       "outputs/logo/sent-zhixing-transparent-logo.png",
       "森特透明底LOGO 800 800.png",
+    ]) {
+      assert.equal(shouldExcludeReleasePath(file), false, `${file} must be preserved`);
+    }
+    for (const file of [
       "integrations/icost-shortcut/icost-dual-write.unsigned.shortcut",
       "integrations/shortcut/shortcut-bookkeeping.unsigned.shortcut",
     ]) {
-      assert.equal(shouldExcludeReleasePath(file), false, `${file} must be preserved`);
+      assert.equal(shouldExcludeReleasePath(file), true, `${file} is a retired integration asset`);
     }
   });
 
@@ -1922,10 +1926,10 @@ describe("portable release package", () => {
         "HOSPITAL_TENDER_BATCH_SIZE",
         "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
         "WEIXIN_AGENT_API_TOKEN",
-        "ICOST_WEBHOOK_TOKEN",
-        "ICOST_WEBHOOK_OWNER",
-        "ICOST_WEBHOOK_RATE_LIMIT",
-        "ICOST_WEBHOOK_WINDOW_MS",
+        "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
+        "WEIXIN_BOOKKEEPING_OWNER",
+        "WEIXIN_BOOKKEEPING_SENDER_ID",
+        "WEIXIN_OUTBOX_POLL_MS",
         "INVOICE_OCR_COMMAND",
         "INVOICE_PDF_TEXT_COMMAND",
         "INVOICE_OCR_LANGUAGES",
@@ -2150,6 +2154,34 @@ describe("portable release package", () => {
     }
   });
 
+  it("allows only the exact ASR credential-reuse boolean flag through the release secret gate", async () => {
+    const { assertNoReleaseSecrets } = await loadReleaseModule();
+    const path = "backend/.env.example";
+
+    for (const content of [
+      "ASR_REUSE_MODEL_CREDENTIAL=false\n",
+      "ASR_REUSE_MODEL_CREDENTIAL=true\n",
+      'ASR_REUSE_MODEL_CREDENTIAL="false"\n',
+      "asr_reuse_model_credential=true\n",
+    ]) {
+      assert.doesNotThrow(() =>
+        assertNoReleaseSecrets([path], new Map([[path, Buffer.from(content)]])),
+      );
+    }
+
+    for (const content of [
+      "ASR_API_KEY=false\n",
+      "ASR_MODEL_CREDENTIAL=false\n",
+      "ASR_REUSE_MODEL_CREDENTIAL=anything-else\n",
+      "ASR_REUSE_MODEL_CREDENTIAL=TRUE\n",
+    ]) {
+      assert.throws(
+        () => assertNoReleaseSecrets([path], new Map([[path, Buffer.from(content)]])),
+        /credential-assignment/,
+      );
+    }
+  });
+
   it("allows explicit low-entropy credential labels only inside test source", async () => {
     const workspace = makeWorkspace("sentelligent-test-placeholder-");
     const output = makeWorkspace("sentelligent-test-placeholder-output-");
@@ -2181,6 +2213,41 @@ describe("portable release package", () => {
       workspace.cleanup();
       output.cleanup();
     }
+  });
+
+  it("keeps domain-led Shortcut and WeChat fixture labels limited to test source", async () => {
+    const { assertNoReleaseSecrets } = await loadReleaseModule();
+    const testContent = [
+      'const shortcutToken = "test-shortcut-token";',
+      'const machineToken = "weixin-machine-test-token";',
+      "",
+    ].join("\n");
+
+    assert.doesNotThrow(() =>
+      assertNoReleaseSecrets(
+        ["backend/tests/shortcut-confirmation.test.js"],
+        new Map([["backend/tests/shortcut-confirmation.test.js", Buffer.from(testContent)]]),
+      ),
+    );
+    const sourceContent = [
+      [
+        "const shortcutToken",
+        JSON.stringify(["shortcut", "machine", "test", "token"].join("-")),
+      ].join(" = ") + ";",
+      [
+        "const machineToken",
+        JSON.stringify(["weixin", "machine", "test", "token"].join("-")),
+      ].join(" = ") + ";",
+      "",
+    ].join("\n");
+    assert.throws(
+      () =>
+        assertNoReleaseSecrets(
+          ["backend/src/shortcut-confirmation.js"],
+          new Map([["backend/src/shortcut-confirmation.js", Buffer.from(sourceContent)]]),
+        ),
+      /credential-assignment/,
+    );
   });
 
   it("allows GitHub Actions context references without treating them as credential values", async () => {

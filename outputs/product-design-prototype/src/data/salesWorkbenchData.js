@@ -6,13 +6,14 @@ import {
   CalendarClock,
   Command,
   FileText,
-  KeyRound,
   Mic,
   MapPinned,
   PanelLeft,
   ReceiptText,
+  ScrollText,
   Settings,
   ShieldAlert,
+  Users,
   UsersRound,
 } from "lucide-react";
 
@@ -29,19 +30,34 @@ export const navItems = [
   { id: "overview", label: "战情总览", icon: Command },
   { id: "quick", label: "快速记录", icon: Mic },
   { id: "customer", label: "客户画像", icon: UsersRound },
-  { id: "opportunity", label: "商机档案", icon: BriefcaseBusiness },
-  { id: "actions", label: "下一步动作", icon: CalendarClock },
+  { id: "opportunity", label: "商机", icon: BriefcaseBusiness },
   { id: "itinerary", label: "智能拜访行程", icon: MapPinned },
   { id: "expense", label: "差旅报销", icon: ReceiptText },
   { id: "weekly", label: "周报与汇报", icon: FileText },
-  { id: "risk", label: "风险识别", icon: ShieldAlert },
   { id: "knowledge", label: "知识库", icon: BookOpen },
-  { id: "kanban", label: "商机看板", icon: PanelLeft },
-  { id: "weixin", label: "微信绑定", icon: Bot },
-  { id: "shortcut", label: "快捷指令", icon: KeyRound },
   { id: "settings", label: "系统配置", icon: Settings },
-  { id: "hospital-tenders", label: "医院招标监测", icon: BellRing },
 ];
+
+export const moduleSubnavItems = {
+  customer: [
+    { id: "customer", label: "客户档案", icon: UsersRound },
+    { id: "hospital-tenders", label: "招标监测", icon: BellRing },
+  ],
+  opportunity: [
+    { id: "opportunity", label: "商机档案", icon: BriefcaseBusiness },
+    { id: "risk", label: "风险识别", icon: ShieldAlert },
+    { id: "actions", label: "下一步动作", icon: CalendarClock },
+    { id: "kanban", label: "看板", icon: PanelLeft },
+  ],
+  settings: [
+    { id: "settings", label: "安全与 AI 配置", icon: Settings },
+    { id: "settings-users", label: "用户管理", icon: Users },
+    { id: "weixin", label: "微信绑定", icon: Bot },
+    { id: "settings-notifications", label: "通知服务", icon: BellRing },
+    { id: "settings-tender-schedule", label: "招标调度", icon: CalendarClock },
+    { id: "settings-bookkeeping-log", label: "记账日志", icon: ScrollText },
+  ],
+};
 
 export const compatibilityRouteMeta = {
   solution: { id: "solution", label: "历史方案" },

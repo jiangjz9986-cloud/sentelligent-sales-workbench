@@ -90,6 +90,11 @@ export function matchNoticeToCustomers(inputNotice, customers = []) {
   delete noticeInput.match;
   delete noticeInput.firstSeenAt;
   delete noticeInput.lastSeenAt;
+  delete noticeInput.canonicalRevision;
+  delete noticeInput.canonicalDigest;
+  delete noticeInput.bridgeStatus;
+  delete noticeInput.bridgeRefs;
+  delete noticeInput.revision;
   const notice = normalizeNoticeSnapshot(noticeInput);
   if (!Array.isArray(customers)) throw new TypeError("customers must be an array");
   if (customers.length > 200) throw new TypeError("customers contains too many items");

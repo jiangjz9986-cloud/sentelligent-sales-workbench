@@ -9,6 +9,8 @@ import {
   normalizeInboundUpdate,
   start,
 } from "../vendor/weixin-agent-sdk/dist/index.mjs";
+import { readWeixinDocument } from "../src/travelExpense/documentInboxMedia.js";
+import { VALID_JPEG } from "./helpers/image-fixtures.js";
 
 const DELIVERY_KEY = Buffer.alloc(32, 7);
 const DELIVERY_PREFIX = "weixin:delivery:v1:";
@@ -35,6 +37,14 @@ function expectedDeliveryId(parts, deliveryKey = DELIVERY_KEY) {
     return Buffer.concat([length, value]);
   }));
   return DELIVERY_PREFIX + createHmac("sha256", deliveryKey).update(encoded).digest("hex");
+}
+
+function jpegProviderTrailer(core, prefix = Buffer.from("347b7ad3", "hex")) {
+  return Buffer.concat([
+    prefix,
+    Buffer.alloc(4),
+    createHash("md5").update(core).digest(),
+  ]);
 }
 
 async function withSyntheticAccount(label, run) {
@@ -155,6 +165,71 @@ describe("vendored Weixin inbound adapter", () => {
       "synthetic-sender-a",
       "123456789",
     ]));
+  });
+
+  it("keeps the reply command separate from the quoted outbound draft identity", () => {
+    const request = normalizeInboundUpdate(textUpdate({
+      message_id: "synthetic-reply-message",
+      item_list: [{
+        type: 1,
+        text_item: { text: "确认" },
+        ref_msg: {
+          client_id: "synthetic-outbound-draft",
+          title: "小小记账草稿",
+          message_item: {
+            type: 1,
+            text_item: { text: "检测到一笔新记账\n待确认编号：BK-0123456789AB" },
+          },
+        },
+      }],
+    }), { deliveryKey: DELIVERY_KEY });
+
+    assert.equal(request.text, "确认");
+    assert.equal(request.quotedMessageId, "synthetic-outbound-draft");
+    assert.equal(request.quotedText, "小小记账草稿\n检测到一笔新记账\n待确认编号：BK-0123456789AB");
+    assert.doesNotMatch(request.text, /BK-|引用/u);
+  });
+
+  it("prefers a strict Sentelligent outbound client id only for quoted draft identity", () => {
+    const outboundClientId = `sentelligent:${"a".repeat(64)}`;
+    const request = normalizeInboundUpdate(textUpdate({
+      message_id: "synthetic-reply-message-with-provider-id",
+      client_id: "synthetic-reply-client-id",
+      item_list: [{
+        type: 1,
+        text_item: { text: "修改备注为合成晚餐" },
+        ref_msg: {
+          message_id: 123456789,
+          client_id: outboundClientId,
+          title: "小小记账草稿",
+          message_item: {
+            type: 1,
+            text_item: { text: "【小小提醒！新增一条待记账信息】\n编号：202608182251" },
+          },
+        },
+      }],
+    }), { deliveryKey: DELIVERY_KEY });
+
+    assert.equal(request.quotedMessageId, outboundClientId);
+    assert.equal(request.text, "修改备注为合成晚餐");
+    assert.equal(request.messageId, expectedDeliveryId([
+      DELIVERY_DOMAIN,
+      "synthetic-sender-a",
+      "synthetic-reply-message-with-provider-id",
+    ]));
+
+    const ordinaryQuote = normalizeInboundUpdate(textUpdate({
+      message_id: "synthetic-ordinary-reply-message",
+      item_list: [{
+        type: 1,
+        text_item: { text: "确认" },
+        ref_msg: {
+          message_id: 987654321,
+          client_id: "synthetic-namespaced-lookalike",
+        },
+      }],
+    }), { deliveryKey: DELIVERY_KEY });
+    assert.equal(ordinaryQuote.quotedMessageId, "987654321");
   });
 
   it("preserves an unsafe 64-bit provider message_id before normalization", async () => {
@@ -389,6 +464,212 @@ describe("vendored Weixin inbound adapter", () => {
     }
   });
 
+  it("restores proactive delivery from an encrypted expiring context record", async () => {
+    await withSyntheticAccount("context-persistence", async ({ accountId, stateDir }) => {
+      const contextToken = syntheticLabel("synthetic", "proactive", "context", "secret");
+      const firstAbort = new AbortController();
+      let firstPolls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          firstPolls += 1;
+          if (firstPolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: "synthetic-context-persistence-cursor",
+            msgs: [textUpdate({
+              from_user_id: "synthetic-bot-user",
+              message_id: "synthetic-context-persistence-message",
+              context_token: contextToken,
+            })],
+          }), { status: 200 });
+          firstAbort.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) {
+          return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        }
+        if (endpoint.endsWith("/sendmessage")) {
+          return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        }
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+      const first = start({
+        async chat() { return { text: "synthetic activation reply" }; },
+      }, {
+        accountId,
+        abortSignal: firstAbort.signal,
+        deliveryKey: DELIVERY_KEY,
+        log() {},
+      });
+      await first.wait();
+      assert.equal(first.getDeliveryStatus().ready, true);
+      assert.equal(first.isDeliveryTarget("synthetic-bot-user"), true);
+      assert.equal(first.isDeliveryTarget("synthetic-other-user"), false);
+
+      const contextPath = join(
+        stateDir,
+        "openclaw-weixin",
+        "accounts",
+        `${accountId}.context.json`,
+      );
+      const encryptedRecord = await readFile(contextPath, "utf8");
+      assert.doesNotMatch(encryptedRecord, /synthetic-proactive-context-secret|synthetic-bot-user/u);
+      assert.equal((await stat(contextPath)).mode & 0o777, 0o600);
+
+      const secondAbort = new AbortController();
+      const proactiveBodies = [];
+      const proactiveResponses = [
+        { ret: 0 },
+        { errcode: 0, errmsg: "ok" },
+        {},
+        { base_resp: { ret: 0 } },
+        "",
+        " \n\t",
+        '{"message_id":1234567890123456789}',
+        { ret: -14, errmsg: "synthetic-private-ret-detail" },
+        { errcode: 40013, errmsg: "synthetic-private-errcode-detail" },
+        { ret: 0, errcode: -1, errmsg: "synthetic-private-conflicting-detail" },
+        { message: "synthetic-private-unrecognized-response" },
+        { message_id: "" },
+        { message_id: "1234567890123456789" },
+        { message_id: null },
+        { message_id: 0 },
+        { message_id: -1 },
+        '{"message_id":1.5}',
+        '{"message_id":1e3}',
+        { message_id: true },
+        { message_id: [] },
+        { message_id: {} },
+        '{"message_id":1,"message_id":2}',
+        { message_id: "123", unexpected: true },
+        { ret: 0, unexpected: true },
+        { base_resp: { ret: 0, unexpected: true } },
+        '{"message_id":18446744073709551616}',
+        "synthetic-private-malformed-response",
+      ];
+      const proactiveResponseCount = proactiveResponses.length;
+      const internalLogOffsets = await snapshotInternalLogs();
+      globalThis.fetch = async (url, init) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          secondAbort.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/sendmessage")) {
+          proactiveBodies.push(JSON.parse(init.body));
+          const response = proactiveResponses.shift();
+          return new Response(
+            typeof response === "string" ? response : JSON.stringify(response),
+            { status: 200 },
+          );
+        }
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+      const restored = start({ async chat() { return {}; } }, {
+        accountId,
+        abortSignal: secondAbort.signal,
+        deliveryKey: DELIVERY_KEY,
+        log() {},
+      });
+      assert.equal(restored.getDeliveryStatus().status, "ready");
+      await assert.rejects(
+        restored.sendMessageTo("synthetic-other-user", "must not cross recipient scope"),
+        (error) => error?.code === "WEIXIN_DELIVERY_TARGET_MISMATCH",
+      );
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic proactive delivery");
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic errcode success");
+      const stableClientId = `sentelligent:${"a".repeat(64)}`;
+      const emptyAcknowledgement = await restored.sendMessageTo(
+        "synthetic-bot-user",
+        "synthetic empty-object success",
+        { clientId: stableClientId },
+      );
+      assert.equal(emptyAcknowledgement.messageId, stableClientId);
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic nested-status success");
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic empty-body success");
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic whitespace-body success");
+      await restored.sendMessageTo("synthetic-bot-user", "synthetic numeric message-id success");
+      const expectedFailures = [
+        ...Array.from({ length: 3 }, () => [
+          "WEIXIN_PROVIDER_REJECTED",
+          "sendMessage: provider rejected request",
+        ]),
+        ...Array.from({ length: proactiveResponseCount - 7 - 3 }, () => [
+          "WEIXIN_PROVIDER_RESPONSE_INVALID",
+          "sendMessage: invalid provider response",
+        ]),
+      ];
+      for (const expected of expectedFailures) {
+        await assert.rejects(
+          restored.sendMessageTo("synthetic-bot-user", "synthetic rejected delivery"),
+          (error) => {
+            assert.equal(error?.code, expected[0]);
+            assert.equal(error?.message, expected[1]);
+            return true;
+          },
+        );
+      }
+      await restored.wait();
+      assert.equal(proactiveBodies.length, proactiveResponseCount);
+      assert.equal(proactiveBodies[0].msg.context_token, contextToken);
+      assert.equal(proactiveBodies[2].msg.client_id, stableClientId);
+      const providerErrorLogs = await readInternalLogDelta(internalLogOffsets);
+      for (const secret of [
+        "synthetic-private-ret-detail",
+        "synthetic-private-errcode-detail",
+        "synthetic-private-conflicting-detail",
+        "synthetic-private-unrecognized-response",
+        "synthetic-private-malformed-response",
+      ]) assert.equal(providerErrorLogs.includes(secret), false);
+
+      const tamperedRecord = JSON.parse(encryptedRecord);
+      tamperedRecord.expiresAt = "2099-01-01T00:00:00.000Z";
+      await writeFile(contextPath, JSON.stringify(tamperedRecord), { mode: 0o600 });
+      const tamperedAbort = new AbortController();
+      globalThis.fetch = async (url) => {
+        if (new URL(url).pathname.endsWith("/getupdates")) {
+          tamperedAbort.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        throw new Error("tampered-expiry bot must not send");
+      };
+      const tampered = start({ async chat() { return {}; } }, {
+        accountId,
+        abortSignal: tamperedAbort.signal,
+        deliveryKey: DELIVERY_KEY,
+        log() {},
+      });
+      assert.equal(tampered.getDeliveryStatus().reason, "context_token_missing");
+      await tampered.wait();
+
+      await writeFile(contextPath, encryptedRecord, { mode: 0o600 });
+      const thirdAbort = new AbortController();
+      globalThis.fetch = async (url) => {
+        if (new URL(url).pathname.endsWith("/getupdates")) {
+          thirdAbort.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        throw new Error("wrong-key bot must not send");
+      };
+      const wrongKey = start({ async chat() { return {}; } }, {
+        accountId,
+        abortSignal: thirdAbort.signal,
+        deliveryKey: Buffer.alloc(32, 8),
+        log() {},
+      });
+      assert.deepEqual(wrongKey.getDeliveryStatus(), {
+        ready: false,
+        status: "not_ready",
+        reason: "context_token_missing",
+      });
+      await assert.rejects(
+        wrongKey.sendMessage("must not send"),
+        (error) => error?.code === "WEIXIN_CONTEXT_NOT_READY",
+      );
+      await wrongKey.wait();
+    });
+  });
+
   it("copies the delivery key before asynchronous monitor handoff", async () => {
     await withSyntheticAccount("delivery-key-copy", async ({ accountId }) => {
       const deliveryKey = Buffer.alloc(32, 9);
@@ -501,6 +782,176 @@ describe("vendored Weixin inbound adapter", () => {
     });
   });
 
+  it("authorizes before config or CDN access and advances past denied media", async () => {
+    await withSyntheticAccount("media-preauthorization", async ({ accountId, stateDir }) => {
+      const abortController = new AbortController();
+      const allowedSender = "synthetic-allowed-sender";
+      const deniedSender = "synthetic-denied-sender";
+      const nextCursor = "synthetic-preauthorization-cursor";
+      const syncFilePath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.sync.json`);
+      const authorized = [];
+      const requests = [];
+      let updatePolls = 0;
+      let configCalls = 0;
+      let cdnCalls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: nextCursor,
+            msgs: [
+              textUpdate({
+                from_user_id: deniedSender,
+                message_id: "synthetic-denied-media-message",
+                item_list: [{
+                  type: 2,
+                  image_item: { media: { full_url: "https://cdn.invalid/denied-media" } },
+                }],
+              }),
+              textUpdate({
+                from_user_id: allowedSender,
+                context_token: syntheticLabel("synthetic", "allowed", "context"),
+                message_id: "synthetic-allowed-text-message",
+                item_list: [{ type: 1, text_item: { text: "synthetic allowed text" } }],
+              }),
+            ],
+          }), { status: 200 });
+          assert.deepEqual(JSON.parse(await readFile(syncFilePath, "utf8")), { get_updates_buf: nextCursor });
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) {
+          configCalls += 1;
+          return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        }
+        if (endpoint.endsWith("/sendmessage")) return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        if (url === "https://cdn.invalid/denied-media") {
+          cdnCalls += 1;
+          return new Response(Buffer.from("must not be downloaded"), { status: 200 });
+        }
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      const bot = start({
+        async chat(request) {
+          requests.push(request);
+          return { text: "synthetic allowed reply" };
+        },
+      }, {
+        accountId,
+        abortSignal: abortController.signal,
+        deliveryKey: DELIVERY_KEY,
+        authorizeInbound(metadata) {
+          authorized.push(metadata);
+          return metadata.senderId === allowedSender;
+        },
+        log() {},
+      });
+      await bot.wait();
+
+      assert.deepEqual(authorized.map((item) => item.senderId), [deniedSender, allowedSender]);
+      assert.equal(authorized.every((item) => Object.isFrozen(item)), true);
+      assert.equal(cdnCalls, 0);
+      assert.equal(configCalls, 1);
+      assert.deepEqual(requests.map((item) => item.senderId), [allowedSender]);
+    });
+  });
+
+  it("cancels chunked media above 12 MiB and continues with later messages", async () => {
+    await withSyntheticAccount("media-stream-limit", async ({ accountId, stateDir }) => {
+      const abortController = new AbortController();
+      const mediaUrl = "https://cdn.invalid/synthetic-oversized-media";
+      const nextCursor = "synthetic-stream-limit-cursor";
+      const syncFilePath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.sync.json`);
+      const chunk = new Uint8Array(7 * 1024 * 1024);
+      const requestMediaPaths = [];
+      const requests = [];
+      let cancelled = false;
+      let updatePolls = 0;
+      let configCalls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: nextCursor,
+            msgs: [
+              textUpdate({
+                message_id: "synthetic-oversized-media-message",
+                item_list: [{
+                  type: 2,
+                  image_item: { media: { full_url: mediaUrl } },
+                }],
+              }),
+              textUpdate({
+                context_token: syntheticLabel("synthetic", "after", "oversized", "context"),
+                message_id: "synthetic-after-oversized-message",
+                item_list: [{ type: 1, text_item: { text: "synthetic after oversized" } }],
+              }),
+            ],
+          }), { status: 200 });
+          assert.deepEqual(JSON.parse(await readFile(syncFilePath, "utf8")), { get_updates_buf: nextCursor });
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) {
+          configCalls += 1;
+          return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        }
+        if (endpoint.endsWith("/sendmessage")) return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        if (url === mediaUrl) {
+          let reads = 0;
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            body: {
+              getReader() {
+                return {
+                  async read() {
+                    reads += 1;
+                    return reads <= 2
+                      ? { value: chunk, done: false }
+                      : { value: undefined, done: true };
+                  },
+                  async cancel() { cancelled = true; },
+                  releaseLock() {},
+                };
+              },
+            },
+          };
+        }
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      try {
+        const bot = start({
+          async chat(request) {
+            requests.push(request);
+            if (request.media?.filePath) requestMediaPaths.push(request.media.filePath);
+            return request.media ? {} : { text: "synthetic continued reply" };
+          },
+        }, {
+          accountId,
+          abortSignal: abortController.signal,
+          deliveryKey: DELIVERY_KEY,
+          log() {},
+        });
+        await bot.wait();
+      } finally {
+        await Promise.all(requestMediaPaths.map((filePath) => rm(filePath, { force: true })));
+      }
+
+      assert.equal(cancelled, true);
+      assert.equal(configCalls, 1);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].text, "synthetic after oversized");
+    });
+  });
+
   it("keeps the previous polling cursor until a failed batch is retried successfully", async () => {
     await withSyntheticAccount("cursor-retry", async ({ accountId, stateDir }) => {
       const abortController = new AbortController();
@@ -579,6 +1030,92 @@ describe("vendored Weixin inbound adapter", () => {
     });
   });
 
+  it("advances past a durable inbound result when only its Weixin reply delivery fails", async () => {
+    await withSyntheticAccount("reply-delivery-failure", async ({ accountId, stateDir }) => {
+      const abortController = new AbortController();
+      const oldCursor = "synthetic-reply-failure-old-cursor";
+      const newCursor = "synthetic-reply-failure-new-cursor";
+      const syncFilePath = join(stateDir, "openclaw-weixin", "accounts", `${accountId}.sync.json`);
+      await writeFile(syncFilePath, JSON.stringify({ get_updates_buf: oldCursor }));
+      const requestedCursors = [];
+      const chatTexts = [];
+      const logLines = [];
+      const aesKey = Buffer.alloc(16, 8);
+      const mediaUrl = "https://cdn.invalid/synthetic-following-image";
+      const imageWithTrailer = Buffer.concat([VALID_JPEG, jpegProviderTrailer(VALID_JPEG)]);
+      const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+      const encryptedImage = Buffer.concat([cipher.update(imageWithTrailer), cipher.final()]);
+      let followingImageAccepted = false;
+      let updatePolls = 0;
+      let sendCalls = 0;
+      let persistedCursorOnNextPoll = null;
+      globalThis.fetch = async (url, init) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          requestedCursors.push(JSON.parse(init.body).get_updates_buf);
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: newCursor,
+            msgs: [
+              textUpdate({
+                message_id: "synthetic-reply-failure-message-a",
+                context_token: syntheticLabel("synthetic", "old", "reply", "context"),
+                item_list: [{ type: 1, text_item: { text: "synthetic durable first" } }],
+              }),
+              textUpdate({
+                message_id: "synthetic-reply-failure-message-b",
+                context_token: syntheticLabel("synthetic", "fresh", "reply", "context"),
+                item_list: [{
+                  type: 2,
+                  image_item: { media: { full_url: mediaUrl, aes_key: aesKey.toString("base64") } },
+                }],
+              }),
+            ],
+          }), { status: 200 });
+          persistedCursorOnNextPoll = JSON.parse(await readFile(syncFilePath, "utf8")).get_updates_buf;
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (endpoint.endsWith("/getconfig")) {
+          return new Response(JSON.stringify({ ret: 0, typing_ticket: "" }), { status: 200 });
+        }
+        if (endpoint.endsWith("/sendmessage")) {
+          sendCalls += 1;
+          if (sendCalls === 1) return new Response("synthetic delivery unavailable", { status: 503 });
+          return new Response(JSON.stringify({ ret: 0 }), { status: 200 });
+        }
+        if (url === mediaUrl) return new Response(encryptedImage, { status: 200 });
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      const bot = start({
+        async chat(request) {
+          chatTexts.push(request.text);
+          if (request.media) {
+            const normalized = await readWeixinDocument(request.media);
+            followingImageAccepted = normalized.sha256 === createHash("sha256").update(VALID_JPEG).digest("hex");
+          }
+          return { text: `synthetic reply for ${request.text}` };
+        },
+      }, {
+        accountId,
+        abortSignal: abortController.signal,
+        deliveryKey: DELIVERY_KEY,
+        log(message) { logLines.push(message); },
+      });
+      await bot.wait();
+
+      assert.deepEqual(chatTexts, ["synthetic durable first", ""]);
+      assert.equal(followingImageAccepted, true);
+      assert.deepEqual(requestedCursors, [oldCursor, newCursor], logLines.join("\n"));
+      assert.equal(sendCalls, 2);
+      assert.equal(persistedCursorOnNextPoll, newCursor);
+      assert.match(logLines.join("\n"), /category=delivery status=failed/u);
+      assert.doesNotMatch(logLines.join("\n"), /category=updates status=error/u);
+    });
+  });
+
   it("normalizes downloadable media only after decrypting, saving, and hashing it", async () => {
     await withSyntheticAccount("media-success", async ({ accountId }) => {
       const abortController = new AbortController();
@@ -640,6 +1177,111 @@ describe("vendored Weixin inbound adapter", () => {
         }),
       ]));
       assert.equal(requests[0].media.filePath.includes("synthetic decrypted"), false);
+      await assert.rejects(
+        stat(requests[0].media.filePath),
+        (error) => error?.code === "ENOENT",
+      );
+    });
+  });
+
+  it("strips only a digest-and-zero-field verified 24-byte JPEG provider trailer before saving and hashing", async () => {
+    await withSyntheticAccount("jpeg-provider-trailer", async ({ accountId }) => {
+      const abortController = new AbortController();
+      const aesKey = Buffer.alloc(16, 9);
+      const jpegCore = VALID_JPEG;
+      const validTrailer = jpegProviderTrailer(jpegCore);
+      const valid = Buffer.concat([jpegCore, validTrailer]);
+      const validAlternatePrefix = Buffer.concat([
+        jpegCore,
+        jpegProviderTrailer(jpegCore, Buffer.from([0x53, 0x57, 0x42, 0x01])),
+      ]);
+      const badDigest = Buffer.from(valid);
+      badDigest[badDigest.length - 1] ^= 0x01;
+      const badZeroField = Buffer.from(valid);
+      badZeroField[jpegCore.length + 4] = 0x01;
+      const badSoiPosition = Buffer.from(valid);
+      badSoiPosition[0] = 0x00;
+      const badEoiPosition = Buffer.concat([jpegCore, Buffer.from([0x01]), validTrailer]);
+      const cases = [
+        { label: "valid", plaintext: valid, expected: jpegCore, accepted: true },
+        { label: "valid-alternate-prefix", plaintext: validAlternatePrefix, expected: jpegCore, accepted: true },
+        { label: "bad-digest", plaintext: badDigest, expected: badDigest, accepted: false },
+        { label: "bad-zero", plaintext: badZeroField, expected: badZeroField, accepted: false },
+        { label: "bad-soi-position", plaintext: badSoiPosition, expected: badSoiPosition, accepted: false },
+        { label: "bad-eoi-position", plaintext: badEoiPosition, expected: badEoiPosition, accepted: false },
+      ];
+      const encryptedByUrl = new Map(cases.map(({ label, plaintext }) => {
+        const cipher = createCipheriv("aes-128-ecb", aesKey, null);
+        return [
+          `https://cdn.invalid/synthetic-${label}-image`,
+          Buffer.concat([cipher.update(plaintext), cipher.final()]),
+        ];
+      }));
+      const received = [];
+      let updatePolls = 0;
+      globalThis.fetch = async (url) => {
+        const endpoint = new URL(url).pathname;
+        if (endpoint.endsWith("/getupdates")) {
+          updatePolls += 1;
+          if (updatePolls === 1) return new Response(JSON.stringify({
+            ret: 0,
+            get_updates_buf: "synthetic-jpeg-provider-trailer-cursor",
+            msgs: cases.map(({ label }, index) => textUpdate({
+              create_time_ms: 1786500000123 + index,
+              item_list: [{
+                type: 2,
+                image_item: {
+                  media: {
+                    full_url: `https://cdn.invalid/synthetic-${label}-image`,
+                    aes_key: aesKey.toString("base64"),
+                  },
+                },
+              }],
+            })),
+          }), { status: 200 });
+          abortController.abort();
+          throw new DOMException("aborted", "AbortError");
+        }
+        if (encryptedByUrl.has(String(url))) return new Response(encryptedByUrl.get(String(url)), { status: 200 });
+        throw new Error(`unexpected synthetic endpoint: ${endpoint}`);
+      };
+
+      const bot = start({
+        async chat(request) {
+          const bytes = await readFile(request.media.filePath);
+          let normalizationCode = "accepted";
+          try {
+            await readWeixinDocument(request.media);
+          } catch (error) {
+            normalizationCode = error?.code ?? "unknown";
+          }
+          received.push({ bytes, messageId: request.messageId, normalizationCode });
+          return {};
+        },
+      }, {
+        accountId,
+        abortSignal: abortController.signal,
+        deliveryKey: DELIVERY_KEY,
+        log() {},
+      });
+      await bot.wait();
+
+      assert.equal(received.length, cases.length);
+      for (const [index, { expected, accepted }] of cases.entries()) {
+        assert.deepEqual(received[index].bytes, expected);
+        assert.equal(received[index].normalizationCode, accepted ? "accepted" : "invalid_magic");
+        assert.equal(received[index].messageId, expectedDeliveryId([
+          DELIVERY_DOMAIN,
+          "synthetic-sender-a",
+          String(1786500000123 + index),
+          JSON.stringify({
+            itemTypes: [2],
+            text: "",
+            mediaSha256: createHash("sha256").update(expected).digest("hex"),
+            fileName: null,
+          }),
+        ]));
+      }
     });
   });
 

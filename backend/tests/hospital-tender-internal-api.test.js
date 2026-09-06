@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
+import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 
 let tempDir;
@@ -32,8 +33,9 @@ beforeEach(async () => {
     seed: true,
     nodeEnv: "development",
     authRequired: true,
+    // v0.9.1 起内部检测端点要求 active admin：改用 scrypt 哈希让启动兜底种子建出 users 行。
     authAccount: "owner",
-    authPassword: "password",
+    authPasswordHash: await hashPassword("password", { salt: Buffer.alloc(16, 12) }),
     ["authSession" + "Secret"]: "test-session-secret-0123456789012345",
     hospitalTenderInternalRunner: {
       async run(options) {

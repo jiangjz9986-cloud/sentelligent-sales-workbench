@@ -1,0 +1,250 @@
+Sentelligent Sales Workbench v0.10.4 — Frontend ASR Capture Slice D Final Verification
+Date: 2026-08-30
+
+IDENTITY AND FINAL-STATE BINDING
+================================
+WORKTREE=/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d
+BRANCH=codex/v0104-asr-capture-d
+BASE_SHA=7ff9e4cce204074ffdb584b1ea04630e5343f79c
+BASE_TREE=e1cde860912d6d1d2e98b1b2a8a64563825fed6b
+FINAL_CODE_COMMIT=078f1522cf9521071ec8a967c5937a5749654873
+FIXTURE_AND_EVIDENCE_PARENT_COMMIT=752e240eb805ae2dfc45ed468743e84edbbebc9d
+FINAL_ARTIFACT_COMMIT=HEAD
+FINAL_ARTIFACT_TREE=HEAD^{tree}
+RESULT=ACCEPT_SLICE_D_FIXTURE_AND_ARTIFACT_REMEDIATION
+FINAL_EXPECTED_STATUS=CLEAN
+
+FINAL-STATE BINDING RULE
+========================
+This file cannot embed the SHA or tree of the commit containing its own final bytes
+without creating a self-reference. It therefore binds the immutable business-code
+commit and the exact parent on which the final artifact-only commit is based. The final
+artifact commit SHA/tree, the four final SHA-256 values, fresh detached verification,
+final clean status, cumulative full-tree diff-check, and final clean-commit deploy result
+are reported externally after this file is committed and reopened.
+
+REMEDIATED FIELDS / CONTRACTS
+=============================
+1. ASR-specific API tests use the approved explicit fixture-csrf-token label. Ten short
+   csrfToken fixture assignments were replaced; DIFF_FILE contains eleven approved
+   fixture assignments (twelve fixture-csrf-token occurrences including one assertion)
+   and zero short csrfToken assignment occurrences.
+2. The release secret gate, scan code, exclusion rules, release-package code/tests,
+   package.json, and production source behavior were not changed or relaxed.
+3. DIFF_FILE contains the exact ten-path BASE_SHA patch. Four blank context lines that
+   Git encoded as one space were normalized to empty lines. Fresh detached apply-check,
+   apply, and ten-path byte comparison all pass; no patch behavior changed.
+4. The previously accepted media, duration, size, raw-Blob transport, Cookie/CSRF,
+   idempotency, Retry-After, single-retry, retention, lifecycle, generation, sessionEpoch,
+   StrictMode, interaction, error-sanitization, and resource-release contracts remain
+   unchanged.
+5. No package.json change was made.
+
+AUTHORIZED CODE / TEST PATHS (EXACTLY TEN)
+==========================================
+outputs/product-design-prototype/src/audio/recordingCapabilities.js
+outputs/product-design-prototype/src/audio/serverTranscription.js
+outputs/product-design-prototype/src/audio/useServerTranscription.js
+outputs/product-design-prototype/src/components/audio/VoiceCaptureControl.jsx
+outputs/product-design-prototype/src/audio/recordingCapabilities.test.js
+outputs/product-design-prototype/src/audio/serverTranscription.test.js
+outputs/product-design-prototype/src/audio/useServerTranscription.test.js
+outputs/product-design-prototype/scripts/asr-capture.test.mjs
+outputs/product-design-prototype/src/api/salesWorkbenchApi.js
+outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js
+
+EVIDENCE ARTIFACT PATHS (EXACTLY FOUR)
+======================================
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/MODIFIED_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/VERIFICATION.txt
+/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/ROLLBACK.sh
+
+BASELINE
+========
+Input:
+  detached copy /tmp/v0104-asr-d-fixture-apply-20260830 at BASE_SHA.
+Exact commands:
+  git worktree add --detach /tmp/v0104-asr-d-fixture-apply-20260830 7ff9e4cce204074ffdb584b1ea04630e5343f79c
+  npm --prefix /tmp/v0104-asr-d-fixture-apply-20260830/outputs/product-design-prototype run test:api
+Literal result:
+  HEAD=7ff9e4cce204074ffdb584b1ea04630e5343f79c
+  tests 65
+  suites 1
+  pass 65
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  duration_ms 101.374958
+  BASELINE_API_EXIT=0
+Exit status: 0.
+Baseline behavior/status: two API paths existed; eight new ASR paths were absent; the
+baseline API behavior passed 65/65.
+
+MODIFIED
+========
+Input:
+  the same detached baseline copy and the regenerated sibling DIFF_FILE.
+Exact commands:
+  git -C /tmp/v0104-asr-d-fixture-apply-20260830 apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  git -C /tmp/v0104-asr-d-fixture-apply-20260830 apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  compare all ten copy paths byte-for-byte with the formal worktree
+  node --test outputs/product-design-prototype/src/audio/recordingCapabilities.test.js outputs/product-design-prototype/src/audio/serverTranscription.test.js outputs/product-design-prototype/src/audio/useServerTranscription.test.js outputs/product-design-prototype/src/api/salesWorkbenchApi.test.js outputs/product-design-prototype/scripts/asr-capture.test.mjs
+Literal result:
+  APPLY_CHECK_EXIT=0
+  APPLY_EXIT=0
+  ten paths RESULT=IDENTICAL
+  MODIFIED_BYTE_COMPARE_EXIT=0
+  tests 128
+  suites 6
+  pass 128
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  duration_ms 1713.181042
+  MODIFIED_DIRECT_EXIT=0
+Exit status: 0.
+Modified behavior/status: exact ten formal bytes reconstructed; ASR/API/real-JSX suite
+passed 128/128.
+
+ROLLBACK
+========
+Input:
+  second detached copy /tmp/v0104-asr-d-fixture-rollback-20260830 at BASE_SHA,
+  modified by applying sibling DIFF_FILE.
+Exact commands:
+  git -C /tmp/v0104-asr-d-fixture-rollback-20260830 apply --check /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  git -C /tmp/v0104-asr-d-fixture-rollback-20260830 apply /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/DIFF_FILE
+  /Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0104-asr-slice-d/docs/evidence/v0.10.4-asr-d-20260830/ROLLBACK.sh /tmp/v0104-asr-d-fixture-rollback-20260830
+  npm --prefix /tmp/v0104-asr-d-fixture-rollback-20260830/outputs/product-design-prototype run test:api
+  remove the test-only node_modules link
+  git -C /tmp/v0104-asr-d-fixture-rollback-20260830 status --short
+  compare two original API paths with BASE_SHA blobs and verify eight new paths absent
+Literal result:
+  ten ROLLBACK_PATH entries: RESULT=RESTORED
+  ROLLBACK_RESULT=RESTORED BASE_SHA=7ff9e4cce204074ffdb584b1ea04630e5343f79c BASE_TREE=e1cde860912d6d1d2e98b1b2a8a64563825fed6b PATHS=10
+  ROLLBACK_SCRIPT_EXIT=0
+  tests 65
+  suites 1
+  pass 65
+  fail 0
+  cancelled 0
+  skipped 0
+  todo 0
+  duration_ms 98.539792
+  ROLLBACK_BASELINE_API_EXIT=0
+  ROLLBACK_GIT_STATUS=CLEAN
+  two original API paths: RESULT=BASE_BLOB_IDENTICAL
+  eight new ASR paths: RESULT=ABSENT
+  ROLLBACK_REOPEN_COUNT=10 EXIT=0
+Exit status: 0.
+Restored behavior/status: exact BASE_SHA bytes; eight new paths absent; clean Git status;
+baseline API behavior restored at 65/65.
+
+NORMALIZED DIFF REOPEN
+======================
+Input:
+  normalized current DIFF_FILE and fresh detached copy
+  /tmp/v0104-asr-d-normalized-apply-final at BASE_SHA.
+Exact commands/actions:
+  replace the four DIFF_FILE blank context records containing one trailing space with
+  empty context records; require zero trailing-space lines
+  git -C /tmp/v0104-asr-d-normalized-apply-final apply --check DIFF_FILE
+  git -C /tmp/v0104-asr-d-normalized-apply-final apply DIFF_FILE
+  compare all ten paths byte-for-byte with the formal worktree
+  in a second fresh copy, apply DIFF_FILE, execute ROLLBACK.sh, require clean status,
+  and rerun the baseline API suite
+Literal result:
+  NORMALIZED_DIFF_CONTEXT_BLANK_LINES=4
+  DIFF_TRAILING_SPACE_LINE_COUNT=0
+  NORMALIZED_FRESH_APPLY_CHECK_EXIT=0
+  NORMALIZED_FRESH_APPLY_EXIT=0
+  NORMALIZED_FRESH_APPLY_IDENTICAL=10
+  ROLLBACK_RESULT=RESTORED BASE_SHA=7ff9e4cce204074ffdb584b1ea04630e5343f79c BASE_TREE=e1cde860912d6d1d2e98b1b2a8a64563825fed6b PATHS=10
+  NORMALIZED_ROLLBACK_SCRIPT_EXIT=0
+  NORMALIZED_ROLLBACK_STATUS=CLEAN
+  tests 65
+  suites 1
+  pass 65
+  fail 0
+  NORMALIZED_ROLLBACK_API_EXIT=0
+Exit status: 0.
+
+CLEAN-COMMIT RELEASE GATES
+==========================
+First committed release-gate state:
+  commit 51c985dc48920e645c0d5fca4b0ebe781fa09755
+  tree 8c118cedb565a96da02afe5c0d0a34e62aa124b6
+Exact command:
+  npm run test:deploy
+Literal result:
+  pre-status lines=0
+  secret scan status=passed; scannedFiles=772; scannedGitObjects=3552;
+  scannedGitMessages=608; gitHistoryComplete=true; findings=[]
+  tests 251
+  suites 18
+  pass 249
+  fail 0
+  cancelled 0
+  skipped 2
+  todo 0
+  duration_ms 126174.224958
+  exit 0
+  post-status lines=0
+
+Second committed release-gate state:
+  commit 752e240eb805ae2dfc45ed468743e84edbbebc9d
+  tree 1911c04b1f2dd27248701c21e37d746bb2bbe4bf
+Exact command:
+  npm run test:deploy
+Literal result:
+  pre-status lines=0
+  secret scan status=passed; scannedFiles=772; scannedGitObjects=3552;
+  scannedGitMessages=608; gitHistoryComplete=true; findings=[]
+  tests 251
+  suites 18
+  pass 249
+  fail 0
+  cancelled 0
+  skipped 2
+  todo 0
+  duration_ms 133786.434208
+  exit 0
+  post-status=CLEAN
+
+The HEAD artifact commit and a fresh detached HEAD test:deploy rerun are
+reported externally after this file is committed, reopened, and audited.
+
+ARTIFACT CONTRACT
+=================
+MODIFIED_FILE: deterministic USTAR with ten safe regular members; isolated extraction
+matches all formal modified code/test paths.
+DIFF_FILE: exact ten-path BASE_SHA patch; short CSRF assignments=0; approved fixture
+assignments=11; fixture-csrf-token occurrences=12; trailing-space lines=0; fresh detached apply-check,
+apply, and byte comparison=10/10.
+ROLLBACK.sh: executable mode 100755; sh -n exit 0; reverse apply and exact base
+blob/absence checks passed on the second independent modified copy.
+VERIFICATION.txt: no self-hash claim; final hash reported externally.
+All four final SHA-256 values are reported externally after the final artifact commit.
+
+ACCEPTANCE
+==========
+Fixture repair: PASS.
+Independent modified copy: PASS, 128/128.
+Independent rollback copy: PASS, restored 65/65 and clean.
+Committed release gates: PASS twice, each pass 249/fail 0/skip 2/exit 0.
+Release secret gate implementation: UNCHANGED.
+Full-tree cumulative diff-check after normalized DIFF_FILE: must pass from the final
+artifact commit and is reported externally.
+Recommendation: ACCEPT Slice D after fresh detached HEAD artifact audit confirms
+the externally reported commit/tree/hash/diff/deploy values.
+
+SIDE-EFFECT STATUS
+==================
+PUSH=NOT_PERFORMED
+DEPLOY=NOT_PERFORMED
+REAL_MICROPHONE_OR_ASR_PROVIDER_CALL=NOT_PERFORMED
+REAL_MODEL_CREDENTIAL_OR_PRODUCTION_CALL=NOT_PERFORMED
+FINAL_EXPECTED_FORMAL_STATUS=CLEAN

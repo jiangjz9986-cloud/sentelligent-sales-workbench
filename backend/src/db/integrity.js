@@ -8,6 +8,7 @@ export const BUSINESS_TABLES = [
   "customers",
   "opportunities",
   "quick_records",
+  "quick_record_confirmation_previews",
   "ai_insights",
   "manual_confirmations",
   "weekly_reports",

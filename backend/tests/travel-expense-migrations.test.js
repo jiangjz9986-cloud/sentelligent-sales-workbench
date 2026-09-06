@@ -19,6 +19,9 @@ describe("travel expense migration", () => {
       `).map((row) => row.name);
 
       assert.deepEqual(tableNames, [
+        "travel_expense_advance_allocation_plans",
+        "travel_expense_advance_allocations",
+        "travel_expense_advance_sources",
         "travel_expense_advances",
         "travel_expense_attachment_payments",
         "travel_expense_attachments",
@@ -26,6 +29,7 @@ describe("travel expense migration", () => {
         "travel_expense_ingestions",
         "travel_expense_no_invoice_confirmations",
         "travel_expense_payments",
+        "travel_expense_region_profiles",
         "travel_expenses",
       ]);
 
@@ -33,6 +37,7 @@ describe("travel expense migration", () => {
         "id", "version", "owner", "occurred_on", "category", "purpose", "merchant",
         "itinerary_id", "customer_id", "invoice_status", "notes", "created_by", "updated_by",
         "created_at", "updated_at", "deleted_at", "deleted_by", "reference_code",
+        "trip_region", "trip_region_source",
       ]);
       assert.deepEqual(columns(db, "travel_expense_payments").map((column) => column.name), [
         "id", "expense_id", "sequence", "paid_at", "merchant", "amount_cents",
@@ -50,6 +55,20 @@ describe("travel expense migration", () => {
         "id", "version", "owner", "week_start", "status", "requested_cents", "received_cents",
         "requested_on", "received_on", "purpose", "notes", "created_by", "updated_by",
         "created_at", "updated_at", "deleted_at", "deleted_by",
+      ]);
+      assert.deepEqual(columns(db, "travel_expense_advance_sources").map((column) => column.name), [
+        "id", "owner", "entry_id", "advance_id", "amount_cents", "received_on", "week_start",
+        "status", "created_by", "created_at", "reversed_by", "reversed_at",
+      ]);
+      assert.deepEqual(columns(db, "travel_expense_advance_allocation_plans").map((column) => column.name), [
+        "id", "owner", "advance_id", "week_start", "scope", "status", "plan_hash",
+        "requested_cents", "allocated_cents", "remaining_cents", "uncovered_cents", "overage_cents",
+        "created_by", "created_at", "superseded_by", "superseded_at",
+      ]);
+      assert.deepEqual(columns(db, "travel_expense_advance_allocations").map((column) => column.name), [
+        "id", "owner", "plan_id", "advance_id", "expense_id", "payment_id", "week_start",
+        "allocated_cents", "allocation_kind", "status", "created_by", "created_at", "reversed_by",
+        "reversed_at", "reason",
       ]);
 
       const migration = all(db, "SELECT version, checksum FROM schema_migrations WHERE version = '0007'");

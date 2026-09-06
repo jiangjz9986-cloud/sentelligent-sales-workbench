@@ -7,7 +7,9 @@ from hospital_tender_monitor.http import HttpResponse
 from hospital_tender_monitor.sources.dongying import DongyingAdapter
 from hospital_tender_monitor.sources.hospital_html import HospitalHtmlAdapter
 from hospital_tender_monitor.sources.jining import JiningAdapter
+from hospital_tender_monitor.sources.qingdao import QingdaoAdapter
 from hospital_tender_monitor.sources.base import parse_published_at
+from hospital_tender_monitor.models import NoticeType
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -44,6 +46,7 @@ class SourceFixtureTests(TestCase):
         result = DongyingAdapter(source, _Http((FIXTURES / "dongying_search.json").read_text(encoding="utf-8"))).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
+        self.assertEqual(result.notices[0].content_text, result.notices[0].title)
 
     def test_dongying_accepts_direct_record_envelope(self) -> None:
         source = {
@@ -58,6 +61,7 @@ class SourceFixtureTests(TestCase):
         result = DongyingAdapter(source, _Http(body)).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
+        self.assertEqual(result.notices[0].content_text, result.notices[0].title)
 
     def test_jining_categories_deduplicate_the_same_public_notice(self) -> None:
         source = {
@@ -71,6 +75,27 @@ class SourceFixtureTests(TestCase):
         result = JiningAdapter(source, _Http((FIXTURES / "jining_newest.json").read_text(encoding="utf-8"))).fetch()
         self.assertTrue(result.success)
         self.assertEqual(len(result.notices), 1)
+        self.assertEqual(result.notices[0].content_text, result.notices[0].title)
+
+    def test_qingdao_notice_exports_nonempty_normalized_content(self) -> None:
+        source = {
+            "id": "qingdao-ggzy",
+            "name": "Qingdao public fixture",
+            "city": "Qingdao",
+            "url": "https://example.com/",
+        }
+        adapter = QingdaoAdapter(source, _Http(""))
+        notice = adapter._notice(
+            (
+                "Synthetic hospital IT procurement",
+                "/TradeDetals-ZtbShow/item-project-1-0-area/detail.html",
+                "2026-08-17",
+            ),
+            NoticeType.PROCUREMENT,
+            "0",
+        )
+        self.assertIsNotNone(notice)
+        self.assertEqual(notice.content_text, notice.title)
 
     def test_hospital_list_fixtures_extract_only_dated_procurement_rows(self) -> None:
         cases = (

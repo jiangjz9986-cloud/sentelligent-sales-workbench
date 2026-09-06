@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { readBoundedResponseText } from "../http/request.js";
 import {
   readWeixinDocument,
   WeixinDocumentError,
@@ -9,12 +10,16 @@ import {
 const EVENT_PATH = "/api/integrations/weixin-agent/events";
 const SAFE_FAILURE_MESSAGE = "远程助手暂时不可用，请稍后重试";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MAX_BUSINESS_REPLY_TEXT_LENGTH = 20_000;
+const BUSINESS_REPLY_STATUSES = new Set(["clarify", "review_required", "error"]);
+const CONTROL_CHARACTER_RE = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export class RemoteAgentError extends Error {
-  constructor(code, message = SAFE_FAILURE_MESSAGE) {
+  constructor(code, message = SAFE_FAILURE_MESSAGE, { permanent = false } = {}) {
     super(message);
     this.name = "RemoteAgentError";
     this.code = code;
+    this.permanent = permanent || ["REMOTE_AGENT_INVALID_REQUEST", "REMOTE_AGENT_MEDIA_INVALID"].includes(code);
   }
 }
 
@@ -25,12 +30,42 @@ function requiredText(value, name, max = 5000) {
   return value;
 }
 
+function messageText(value, { mediaPresent = false } = {}) {
+  if (value === undefined || value === null || value === "") {
+    if (mediaPresent) return "";
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "text is required");
+  }
+  if (typeof value !== "string" || value.length > 20000) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "text is invalid");
+  }
+  if (!value.trim() && mediaPresent) return "";
+  if (!value.trim()) throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "text is required");
+  return value;
+}
+
 function requiredIdentifier(value, name, max = 500) {
   const identifier = requiredText(value, name, max);
   if (/[\u0000-\u001f\u007f-\u009f]/u.test(identifier)) {
     throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", `${name} is invalid`);
   }
   return identifier;
+}
+
+function optionalQuote(request) {
+  const providerMessageId = request?.quotedMessageId === undefined || request?.quotedMessageId === null
+    ? ""
+    : requiredIdentifier(request.quotedMessageId, "quotedMessageId", 500);
+  const quotedText = request?.quotedText === undefined || request?.quotedText === null
+    ? ""
+    : requiredText(request.quotedText, "quotedText", 20000);
+  if (!providerMessageId && !quotedText) return null;
+  if (quotedText && /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(quotedText)) {
+    throw new RemoteAgentError("REMOTE_AGENT_INVALID_REQUEST", "quotedText is invalid");
+  }
+  return {
+    ...(providerMessageId ? { quotedMessageId: providerMessageId } : {}),
+    ...(quotedText ? { quotedText } : {}),
+  };
 }
 
 function requiredDeliveryMetadata(request) {
@@ -113,14 +148,38 @@ function parseResponseBody(value) {
   return body;
 }
 
+function parseSafeConflictReply(value) {
+  let body;
+  try {
+    body = parseResponseBody(value);
+  } catch {
+    return null;
+  }
+  const keys = Object.keys(body).sort();
+  if (keys.length !== 2 || keys[0] !== "status" || keys[1] !== "text") return null;
+  if (!BUSINESS_REPLY_STATUSES.has(body.status)) return null;
+  if (
+    typeof body.text !== "string"
+    || !body.text.trim()
+    || body.text.length > MAX_BUSINESS_REPLY_TEXT_LENGTH
+    || CONTROL_CHARACTER_RE.test(body.text)
+  ) return null;
+  return { status: body.status, text: body.text };
+}
+
 async function normalizeMedia(request) {
   if (!request.media) return null;
   try {
+    const type = request.media.type;
+    if (type !== "image" && type !== "file") {
+      throw new WeixinDocumentError("unsupported_media");
+    }
     const document = await readWeixinDocument(request.media);
     // Keep the existing source-reference semantics available to the receiving
     // service while deriving the event identity independently below.
     const sourceRef = weixinDocumentSourceRef({}, document.sha256);
     return {
+      type,
       fileName: document.fileName,
       mediaType: document.mediaType,
       contentBase64: document.contentBase64,
@@ -152,8 +211,12 @@ export function createRemoteClawbotAgent(options = {}) {
         ? optionalSyntheticMetadata(request)
         : requiredDeliveryMetadata(request);
       const conversationId = metadata?.conversationId ?? requiredIdentifier(request.conversationId, "conversationId");
-      const text = requiredText(request.text, "text", 20000);
+      const quote = optionalQuote(request);
       const media = await normalizeMedia(request);
+      // A native WeChat image message has no text body. Allow that one shape
+      // through so the server can classify it as a bookkeeping capture; keep
+      // text mandatory for text-only messages.
+      const text = messageText(request.text, { mediaPresent: Boolean(media) });
       const digest = digestFor({ conversationId, text, mediaSha256: media?.sha256 });
       const sourceMessageId = metadata?.messageId ?? `weixin:${digest}`;
       const body = {
@@ -167,6 +230,7 @@ export function createRemoteClawbotAgent(options = {}) {
         if (metadata.groupId) body.groupId = metadata.groupId;
       }
       if (media) body.media = media;
+      if (quote) Object.assign(body, quote);
 
       let response;
       try {
@@ -188,11 +252,25 @@ export function createRemoteClawbotAgent(options = {}) {
       }
       let responseText;
       try {
-        responseText = await response.text();
+        responseText = await readBoundedResponseText(response, {
+          maxBytes: MAX_RESPONSE_BYTES,
+          errorMessage: "Remote agent response body is too large",
+        });
       } catch {
         throw new RemoteAgentError("REMOTE_AGENT_INVALID_RESPONSE");
       }
-      if (!response.ok) throw new RemoteAgentError("REMOTE_AGENT_REQUEST_FAILED");
+      if (!response.ok) {
+        const status = Number(response.status);
+        if (status === 409) {
+          const conflictReply = parseSafeConflictReply(responseText);
+          if (conflictReply) return conflictReply;
+        }
+        const permanent = Number.isInteger(status)
+          && status >= 400
+          && status < 500
+          && ![408, 429].includes(status);
+        throw new RemoteAgentError("REMOTE_AGENT_REQUEST_FAILED", SAFE_FAILURE_MESSAGE, { permanent });
+      }
       try {
         return parseResponseBody(responseText);
       } catch (error) {

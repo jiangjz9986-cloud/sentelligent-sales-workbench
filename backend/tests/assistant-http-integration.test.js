@@ -9,7 +9,18 @@ import { hashPassword } from "../src/auth/password.js";
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
+import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
 import { VALID_PNG } from "./helpers/image-fixtures.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
+
+function seedHarnessBinding(tempDirValue) {
+  const db = openDatabase({ databaseUrl: join(tempDirValue, "assistant.sqlite") });
+  try {
+    seedWeixinBinding(db, { account: "assistantowner", senderId: "sender-1", financialEnabled: true });
+  } finally {
+    db.close();
+  }
+}
 
 const machineToken = "test-machine-token";
 let tempDir;
@@ -56,6 +67,59 @@ function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+const SETTLEMENT_PREVIEW_RUNTIME_TABLES = new Set([
+  "assistant_agent_runs",
+  "assistant_conversations",
+  "assistant_draft_parts",
+  "assistant_inbound_events",
+  "assistant_tool_runs",
+  "audit_logs",
+  // v0.9.3：绑定配置表由 harness 夹具自身增改（seed/disable），非业务数据面。
+  "weixin_bindings",
+  "weixin_binding_codes",
+]);
+
+function businessTableSnapshot(db) {
+  const tables = db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+    ORDER BY name
+  `).all();
+  return Object.fromEntries(tables
+    .filter(({ name }) => !SETTLEMENT_PREVIEW_RUNTIME_TABLES.has(name))
+    .map(({ name }) => {
+      const quotedName = `"${name.replaceAll('"', '""')}"`;
+      return [name, db.prepare(`SELECT * FROM ${quotedName} ORDER BY rowid`).all()];
+    }));
+}
+
+async function restartAssistantServer(overrides = {}) {
+  if (server) await new Promise((resolve) => server.close(resolve));
+  server = createServer({
+    databaseUrl: join(tempDir, "assistant.sqlite"),
+    seed: false,
+    nodeEnv: "test",
+    authRequired: true,
+    authAccount: "assistantowner",
+    authPassword: "",
+    authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
+    authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
+    authCookieSecure: false,
+    weixinAgentApiToken: machineToken,
+    weixinAgentOwner: "assistantowner",
+    weixinAllowedSenderIds: "sender-1,sender-2",
+    weixinAllowGroups: false,
+    weixinBookkeepingOwner: "assistantowner",
+    weixinBookkeepingConfirmationEnabled: true,
+    weixinBookkeepingSenderId: "sender-1",
+    ...overrides,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+  seedHarnessBinding(tempDir);
+}
+
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "sentelligent-assistant-http-"));
   server = createServer({
@@ -63,18 +127,22 @@ beforeEach(async () => {
     seed: true,
     nodeEnv: "test",
     authRequired: true,
-    authAccount: "assistant-owner",
+    authAccount: "assistantowner",
     authPassword: "",
     authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
     authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
     authCookieSecure: false,
     weixinAgentApiToken: machineToken,
-    weixinAgentOwner: "assistant-owner",
+    weixinAgentOwner: "assistantowner",
     weixinAllowedSenderIds: "sender-1,sender-2",
     weixinAllowGroups: false,
+    weixinBookkeepingOwner: "assistantowner",
+    weixinBookkeepingConfirmationEnabled: true,
+    weixinBookkeepingSenderId: "sender-1",
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
+  seedHarnessBinding(tempDir);
 });
 
 afterEach(async () => {
@@ -140,7 +208,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.equal(result.response.status, 200);
     assert.equal(result.body.status, "ok");
     assert.match(result.body.text, /发票/);
-    assert.doesNotMatch(JSON.stringify(result.body), /filePath|assistant-owner/);
+    assert.doesNotMatch(JSON.stringify(result.body), /filePath|assistantowner/);
 
     for (const [index, forbiddenField] of [
       ["owner", "caller-owner"],
@@ -150,6 +218,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       ["url", "https://caller.invalid/private"],
       ["token", "caller-token"],
       ["filePath", "/caller/private/file"],
+      ["financialScope", true],
     ].entries()) {
       const sourceMessageId = `message-invoice-forbidden-${index}`;
       const forbidden = await request("/api/integrations/weixin-agent/events", {
@@ -178,14 +247,24 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.doesNotMatch(JSON.stringify(result.body), /stack|filePath|not-base64/i);
   });
 
-  it("rejects unallowlisted senders and group messages before creating an event", async () => {
+  it("denies unbound senders with binding guidance and rejects group messages before creating an event", async () => {
+    // v0.9.3：未绑定 sender 回 200 固定拒答（绑定引导），不入编排不落库。
     const sender = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin:sender-denied"),
       body: JSON.stringify(eventBody({ senderId: "sender-denied", sourceMessageId: "sender-denied" })),
     });
-    assert.equal(sender.response.status, 403);
-    assert.equal(sender.body.error.code, "WEIXIN_SENDER_NOT_ALLOWED");
+    assert.equal(sender.response.status, 200);
+    assert.equal(sender.body.status, "denied");
+    assert.match(sender.body.text, /尚未绑定工作台账号/u);
+    const eventsDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(eventsDb.prepare(
+        "SELECT COUNT(*) AS count FROM assistant_inbound_events WHERE payload_json LIKE '%sender-denied%'",
+      ).get().count, 0);
+    } finally {
+      eventsDb.close();
+    }
 
     const group = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
@@ -252,7 +331,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     assert.equal(preview.response.status, 200);
     assert.equal(preview.body.status, "ok");
-    assert.match(preview.body.text, /待确认记录/);
+    assert.match(preview.body.text, /【小小提醒！新增一条拜访记录】/);
 
     const pending = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
@@ -301,7 +380,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     assert.equal(confirmed.response.status, 200);
     assert.equal(confirmed.body.status, "ok");
-    assert.match(confirmed.body.text, /已录入系统/);
+    assert.match(confirmed.body.text, /【拜访记录已录入】/);
   });
 
   it("reuses the action id when a visit write committed before its tool result", async () => {
@@ -325,7 +404,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     const recoveryDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     recoveryDb.prepare(`
       INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel, status)
-      VALUES ($id, 'assistant-owner', '拜访 crash-window-marker', '2026-08-05T09:00:00.000Z', 'recovery-test', 'analyzed')
+      VALUES ($id, 'assistantowner', '拜访 crash-window-marker', '2026-08-05T09:00:00.000Z', 'recovery-test', 'analyzed')
     `).run({ $id: pending.body.actionId });
     recoveryDb.prepare(`
       INSERT INTO ai_insights (id, quick_record_id, source, confidence, analysis_json)
@@ -344,7 +423,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.equal(confirmed.response.status, 200);
     const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(
-      verifyDb.prepare("SELECT COUNT(*) AS count FROM quick_records WHERE owner = 'assistant-owner' AND raw_content LIKE '%crash-window-marker%'").get().count,
+      verifyDb.prepare("SELECT COUNT(*) AS count FROM quick_records WHERE owner = 'assistantowner' AND raw_content LIKE '%crash-window-marker%'").get().count,
       1,
     );
     verifyDb.close();
@@ -364,15 +443,18 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       seed: false,
       nodeEnv: "test",
       authRequired: true,
-      authAccount: "assistant-owner",
+      authAccount: "assistantowner",
       authPassword: "",
       authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
       authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
       authCookieSecure: false,
       weixinAgentApiToken: machineToken,
-      weixinAgentOwner: "assistant-owner",
+      weixinAgentOwner: "assistantowner",
       weixinAllowedSenderIds: "sender-1,sender-2",
       weixinAllowGroups: false,
+      weixinBookkeepingOwner: "assistantowner",
+      weixinBookkeepingConfirmationEnabled: true,
+      weixinBookkeepingSenderId: "sender-1",
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -383,7 +465,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       body: JSON.stringify(eventBody({ sourceMessageId: "restart-preview", text: "记录" })),
     });
     assert.equal(preview.response.status, 200);
-    assert.match(preview.body.text, /待确认记录/);
+    assert.match(preview.body.text, /【小小提醒！新增一条拜访记录】/);
   });
 
   it("completes the real remote adapter to HTTP event boundary", async () => {
@@ -420,19 +502,224 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     assert.match(reimbursement.body.text, /报销周汇总预览/);
   });
 
+  it("routes a request-settlement preview through the HTTP runtime without recording a transaction or crossing owners", async () => {
+    const scopedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    scopedDb.exec(`
+      INSERT INTO travel_expenses (
+        id, reference_code, owner, occurred_on, category, purpose, invoice_status, created_by, updated_by
+      ) VALUES ('settlement-http-expense', 'EXP-SETTLEMENT-HTTP-1', 'assistantowner', '2026-08-18', 'transport', 'HTTP 结算测试', 'pending', 'assistantowner', 'assistantowner');
+      INSERT INTO travel_expense_payments (
+        id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method
+      ) VALUES ('settlement-http-payment', 'settlement-http-expense', 1, '2026-08-18T10:00:00+08:00', 12000, 10000, 'personal', 'wechat');
+      INSERT INTO travel_expense_advances (
+        id, owner, week_start, status, requested_cents, received_cents, requested_on, received_on, purpose, created_by, updated_by
+      ) VALUES ('settlement-http-advance', 'assistantowner', '2026-08-17', 'received', 5000, 5000, '2026-08-17', '2026-08-17', 'HTTP 结算备用金', 'assistantowner', 'assistantowner');
+      INSERT INTO travel_expenses (
+        id, reference_code, owner, occurred_on, category, purpose, invoice_status, created_by, updated_by
+      ) VALUES ('settlement-http-other-expense', 'EXP-SETTLEMENT-HTTP-2', 'other-owner', '2026-08-18', 'transport', '另一 owner 费用', 'pending', 'other-owner', 'other-owner');
+      INSERT INTO travel_expense_payments (
+        id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method
+      ) VALUES ('settlement-http-other-payment', 'settlement-http-other-expense', 1, '2026-08-18T10:00:00+08:00', 9900, 9000, 'personal', 'wechat');
+      INSERT INTO travel_expense_advances (
+        id, owner, week_start, status, requested_cents, received_cents, requested_on, received_on, purpose, created_by, updated_by
+      ) VALUES ('settlement-http-other-advance', 'other-owner', '2026-08-17', 'received', 9000, 9000, '2026-08-17', '2026-08-17', '另一 owner 备用金', 'other-owner', 'other-owner');
+    `);
+    const beforeBusiness = businessTableSnapshot(scopedDb);
+    scopedDb.close();
+
+    const preview = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-preview"),
+      body: JSON.stringify(eventBody({ sourceMessageId: "settlement-preview", text: "多退少补 2026-08-17" })),
+    });
+    assert.equal(preview.response.status, 200);
+    assert.equal(preview.body.toolName, "advance-settlement.preview");
+    assert.match(preview.body.text, /请款结算预览/);
+    assert.match(preview.body.text, /公司应补/);
+    assert.match(preview.body.text, /仅供人工核对/);
+    assert.match(preview.body.text, /不接受确认写入/);
+    assert.match(preview.body.text, /不会生成退款或补款交易/);
+
+    const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    const run = verifyDb.prepare(`
+      SELECT output_json, input_json
+      FROM assistant_agent_runs
+      WHERE owner = 'assistantowner' AND agent_id = 'advance-settlement'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get();
+    assert.ok(run);
+    const output = JSON.parse(run.output_json);
+    assert.equal(output.settlementPreview.direction, "company_reimburses");
+    assert.equal(output.settlementPreview.transaction.recorded, false);
+    assert.equal(output.settlementPreview.writebackAllowed, false);
+    assert.match(output.settlementSnapshotHash, /^[0-9a-f]{64}$/u);
+    assert.equal(output.requiresHumanReview, true);
+    assert.equal(output.acceptsConfirmation, false);
+    assert.equal(output.writebackAllowed, false);
+    assert.equal(output.advances.some((item) => item.id === "settlement-http-other-advance"), false);
+    assert.equal(run.input_json.includes("assistantowner"), false);
+    assert.equal(verifyDb.prepare("SELECT COUNT(*) AS count FROM travel_expense_advances").get().count, 2);
+    assert.deepEqual(businessTableSnapshot(verifyDb), beforeBusiness);
+    const toolRunCount = verifyDb.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE tool_name = 'advance-settlement.preview'",
+    ).get().count;
+    const agentRunCount = verifyDb.prepare(
+      "SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'",
+    ).get().count;
+    verifyDb.close();
+
+    // The durable event id intentionally excludes raw chat identifiers. Its
+    // request hash must therefore bind the server-owned chat/financial scope,
+    // or a group delivery reusing the same provider message id could replay a
+    // previously authorized direct-message result.
+    await restartAssistantServer({
+      weixinAllowGroups: true,
+      weixinAllowedGroupIds: "group-settlement-replay",
+    });
+    const groupReplay = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-preview"),
+      body: JSON.stringify(eventBody({
+        chatType: "group",
+        groupId: "group-settlement-replay",
+        sourceMessageId: "settlement-preview",
+        text: "多退少补 2026-08-17",
+      })),
+    });
+    assert.equal(groupReplay.response.status, 409);
+    assert.equal(groupReplay.body.error.code, "ASSISTANT_EVENT_CONFLICT");
+    assert.doesNotMatch(JSON.stringify(groupReplay.body), /公司应补|HTTP 结算备用金|5000|10000/u);
+
+    const replayDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(
+        replayDb.prepare("SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE tool_name = 'advance-settlement.preview'").get().count,
+        toolRunCount,
+      );
+      assert.equal(
+        replayDb.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'").get().count,
+        agentRunCount,
+      );
+      assert.deepEqual(businessTableSnapshot(replayDb), beforeBusiness);
+    } finally {
+      replayDb.close();
+    }
+  });
+
+  it("denies unbound sender, group, and missing owner before finance reads or tool and agent runs", async () => {
+    let settlementReads = 0;
+    const settlementAdapter = {
+      advanceSettlementSummary() {
+        settlementReads += 1;
+        throw new Error("settlement snapshot must not be read for a denied caller");
+      },
+    };
+    await restartAssistantServer({
+      weixinAllowGroups: true,
+      weixinAllowedGroupIds: "group-settlement-denied",
+      assistantSettlementSnapshotAdapter: settlementAdapter,
+    });
+
+    const scopedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    scopedDb.exec(`
+      INSERT INTO travel_expense_advances (
+        id, owner, week_start, status, requested_cents, received_cents, requested_on, received_on, purpose, created_by, updated_by
+      ) VALUES (
+        'settlement-denied-sentinel', 'assistantowner', '2026-08-17', 'received', 987654, 987654,
+        '2026-08-17', '2026-08-17', 'DENIED-SETTLEMENT-SENTINEL', 'assistantowner', 'assistantowner'
+      );
+    `);
+    const beforeBusiness = businessTableSnapshot(scopedDb);
+    scopedDb.close();
+
+    // v0.9.3：未绑定 sender 在入口即固定拒答（200 denied）；已绑定 sender 的群聊
+    // 进编排，由财务闸 403 拒绝（语义不变）。
+    const unboundDenied = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-denied-sender"),
+      body: JSON.stringify(eventBody({
+        senderId: "sender-2",
+        sourceMessageId: "settlement-denied-sender",
+        text: "多退少补 2026-08-17",
+      })),
+    });
+    assert.equal(unboundDenied.response.status, 200);
+    assert.equal(unboundDenied.body.status, "denied");
+    assert.match(unboundDenied.body.text, /尚未绑定工作台账号/u);
+
+    const groupDenied = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-denied-group"),
+      body: JSON.stringify(eventBody({
+        chatType: "group",
+        groupId: "group-settlement-denied",
+        sourceMessageId: "settlement-denied-group",
+        text: "多退少补 2026-08-17",
+      })),
+    });
+    assert.equal(groupDenied.response.status, 403);
+    assert.deepEqual(groupDenied.body, {
+      status: "error",
+      text: "该财务预览仅限已绑定账号本人的微信私聊。",
+    });
+
+    // “owner 缺失”在绑定表时代 = 该 sender 无 active 绑定：解绑后同 sender 回到
+    // 入口固定拒答。
+    const unbindDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      unbindDb.prepare("UPDATE weixin_bindings SET status = 'disabled' WHERE sender_id = 'sender-1'").run();
+    } finally {
+      unbindDb.close();
+    }
+    const missingOwner = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin:settlement-denied-owner"),
+      body: JSON.stringify(eventBody({
+        sourceMessageId: "settlement-denied-owner",
+        text: "多退少补 2026-08-17",
+      })),
+    });
+    assert.equal(missingOwner.response.status, 200);
+    assert.equal(missingOwner.body.status, "denied");
+    assert.match(missingOwner.body.text, /尚未绑定工作台账号/u);
+
+    const verifyDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      assert.equal(settlementReads, 0);
+      assert.equal(
+        verifyDb.prepare("SELECT COUNT(*) AS count FROM assistant_tool_runs WHERE tool_name = 'advance-settlement.preview'").get().count,
+        0,
+      );
+      assert.equal(
+        verifyDb.prepare("SELECT COUNT(*) AS count FROM assistant_agent_runs WHERE agent_id = 'advance-settlement'").get().count,
+        0,
+      );
+      assert.deepEqual(businessTableSnapshot(verifyDb), beforeBusiness);
+      const serializedEvents = JSON.stringify(
+        verifyDb.prepare("SELECT response_json FROM assistant_inbound_events ORDER BY created_at, id").all(),
+      );
+      for (const secret of ["987654", "DENIED-SETTLEMENT-SENTINEL", "settlement-denied-sentinel"]) {
+        assert.equal(serializedEvents.includes(secret), false);
+      }
+    } finally {
+      verifyDb.close();
+    }
+  });
+
   it("scopes assistant customer search and sales reports to the machine owner", async () => {
     const scopedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     scopedDb.exec(`
       INSERT INTO customers (id, name, owner, updated_at)
-      VALUES ('assistant-owner-customer', 'Owner A Hospital', 'assistant-owner', CURRENT_TIMESTAMP);
+      VALUES ('assistantowner-customer', 'Owner A Hospital', 'assistantowner', CURRENT_TIMESTAMP);
       INSERT INTO customers (id, name, owner, updated_at)
       VALUES ('other-owner-customer', 'Owner B Hospital', 'other-owner', CURRENT_TIMESTAMP);
       INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel)
-      VALUES ('assistant-owner-record', 'assistant-owner', 'owner a record', '2026-08-05T09:00:00.000Z', 'test');
+      VALUES ('assistantowner-record', 'assistantowner', 'owner a record', '2026-08-05T09:00:00.000Z', 'test');
       INSERT INTO quick_records (id, owner, raw_content, occurred_at, source_channel)
       VALUES ('other-owner-record', 'other-owner', 'owner b record', '2026-08-05T09:00:00.000Z', 'test');
       INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
-      VALUES ('assistant-owner-report', 'assistant-owner', '2026-08-03', '2026-08-09', 'ready', 'owner a report', '[]');
+      VALUES ('assistantowner-report', 'assistantowner', '2026-08-03', '2026-08-09', 'ready', 'owner a report', '[]');
       INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content, source_refs)
       VALUES ('other-owner-report', 'other-owner', '2026-08-03', '2026-08-09', 'ready', 'owner b report', '[]');
     `);
@@ -464,6 +751,13 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
   });
 
   it("isolates assistant drafts when two senders reuse the same conversation id", async () => {
+    // v0.9.3：第二个 sender 需要自己的绑定账号（sender→account 由绑定表解析）。
+    const peerDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      seedWeixinBinding(peerDb, { account: "assistantpeer", senderId: "sender-2", financialEnabled: false });
+    } finally {
+      peerDb.close();
+    }
     const senderOne = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin:sender-one-collect"),
@@ -485,7 +779,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       body: JSON.stringify(eventBody({ senderId: "sender-1", sourceMessageId: "sender-one-preview", text: "记录" })),
     });
     assert.equal(senderOnePreview.response.status, 200);
-    assert.match(senderOnePreview.body.text, /待确认记录/);
+    assert.match(senderOnePreview.body.text, /【小小提醒！新增一条拜访记录】/);
   });
 
   it("derives exact owner, channel, sender, chat, group, and conversation scope without persisting raw WeChat identities or codes", async () => {
@@ -496,16 +790,19 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       seed: false,
       nodeEnv: "test",
       authRequired: true,
-      authAccount: "assistant-owner",
+      authAccount: "assistantowner",
       authPassword: "",
       authPasswordHash: await hashPassword("unit-password", { salt: Buffer.alloc(16, 13) }),
       authSessionSecret: Buffer.alloc(32, 12).toString("base64url"),
       authCookieSecure: false,
       weixinAgentApiToken: machineToken,
-      weixinAgentOwner: "assistant-owner",
+      weixinAgentOwner: "assistantowner",
       weixinAllowedSenderIds: "sender-1,sender-2",
       weixinAllowGroups: true,
       weixinAllowedGroupIds: "group-privacy-1",
+      weixinBookkeepingOwner: "assistantowner",
+      weixinBookkeepingConfirmationEnabled: true,
+      weixinBookkeepingSenderId: "sender-1",
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -545,7 +842,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       headers: eventHeaders("weixin:scope-direct-preview"),
       body: JSON.stringify(eventBody({ conversationId, senderId, sourceMessageId: "scope-direct-preview", text: "记录" })),
     });
-    assert.match(directPreview.body.text, /待确认记录/);
+    assert.match(directPreview.body.text, /【小小提醒！新增一条拜访记录】/);
     const pending = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin:scope-direct-pending"),
@@ -580,11 +877,11 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
 
     const db = openDatabase({ databaseUrl });
     try {
-      const directScope = `weixin:conversation:v1:${sha256(JSON.stringify([
-        "assistant-owner", "weixin", senderId, "direct", null, conversationId,
-      ]))}`;
+      // v0.9.3：绑定 sender 的私聊会话恒为 shortcut 记账会话（hash(owner, sender)），
+      // 泛型 weixin:conversation:v1 分支仅余群聊。
+      const directScope = shortcutBookkeepingConversationId("assistantowner", senderId);
       const groupScope = `weixin:conversation:v1:${sha256(JSON.stringify([
-        "assistant-owner", "weixin", senderId, "group", groupId, conversationId,
+        "assistantowner", "weixin", senderId, "group", groupId, conversationId,
       ]))}`;
       const conversationHashes = db.prepare(
         "SELECT conversation_id_hash FROM assistant_conversations ORDER BY conversation_id_hash",
@@ -592,7 +889,7 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
       assert.deepEqual(conversationHashes, [sha256(directScope), sha256(groupScope)].sort());
 
       const directEvent = `weixin:event:v1:${sha256(JSON.stringify([
-        "assistant-owner", "weixin", senderId, "scope-direct-collect",
+        "assistantowner", "weixin", senderId, "scope-direct-collect",
       ]))}`;
       assert.equal(
         db.prepare("SELECT COUNT(*) AS count FROM assistant_inbound_events WHERE event_id_hash = ?")
@@ -636,9 +933,19 @@ describe("persistent WeChat assistant events HTTP boundary", () => {
     });
     const code = confirmationCodeFrom(pending.body.text);
 
+    // v0.9.3：绑定 sender 的私聊会话恒等于 hash(owner, sender)（provider 会话号不再
+    // 切分会话），隔离矩阵改为：他人绑定 sender（任意会话号）与未绑定 sender 都
+    // 无法确认/取消/重发。
+    const peerDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    try {
+      seedWeixinBinding(peerDb, { account: "assistantpeer", senderId: "sender-2", financialEnabled: false });
+    } finally {
+      peerDb.close();
+    }
     for (const [index, scope] of [
-      { senderId: "sender-1", conversationId: "other-conversation" },
       { senderId: "sender-2", conversationId },
+      { senderId: "sender-2", conversationId: "other-conversation" },
+      { senderId: "sender-unbound", conversationId },
     ].entries()) {
       for (const [commandIndex, text] of [code, "取消", "重发确认码"].entries()) {
         const sourceMessageId = `isolation-${index}-${commandIndex}`;

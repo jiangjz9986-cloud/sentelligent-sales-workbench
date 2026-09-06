@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { TextDecoder } from "node:util";
@@ -202,7 +203,60 @@ function isExplicitTestFixtureValue(value, filePath) {
     // treated as placeholders.
     /^sales[-_]loop[-_]machine[-_]token$/i,
     /^must[-_]not[-_]enter$/i,
+    // Older Shortcut/WeChat tests predate the bounded vocabulary above. These
+    // exact labels are synthetic fixtures; the required `test` marker and
+    // fixed numeric suffix keep real credentials out of this exception.
+    /^shortcut(?:[-_]machine)?[-_]test[-_]token$/i,
+    /^weixin[-_]machine[-_]test[-_]token$/i,
+    /^shortcut[-_]weixin[-_]confirmation[-_]test[-_]secret[-_]\d{30,}$/i,
+    /^shortcut[-_]bookkeeping[-_]safety[-_]test[-_]secret[-_]\d{30,}$/i,
+    /^action[-_]lease$/i,
+    /^entry[-_]lease$/i,
   ].some((pattern) => pattern.test(value));
+}
+
+// Historical blobs can retain credential-shaped test fixtures after the
+// working tree has moved to scanner-safe labels.  Bind each exception to the
+// exact historical source, test path, assignment name and value digest.  No
+// plaintext fixture value is copied into this scanner or its output.
+const knownHistoricalSyntheticFixtureDigests = new Map([
+  [
+    "backend/tests/hospital-tender-lead-conversion-api.integration.test.js|PASSWORD",
+    "682b2924255e1b09557faf10611eb1c11027a1fe7e318a58d50829d2b6576a6f",
+  ],
+  [
+    "backend/tests/hospital-tender-lead-conversion-api.integration.test.js|SYNC_TOKEN",
+    "bccf944d42a6f59159efb03ac9e9747fcc725fb5ebb678252920db5b0bc2f679",
+  ],
+  [
+    "backend/tests/hospital-tender-lead-conversion-api.integration.test.js|SESSION_SECRET",
+    "87fe89878d0dc75a4d4cb3a98c2a26dc6cc6620db1680712a9a8a8333eb078d2",
+  ],
+]);
+
+export function isKnownHistoricalSyntheticFixtureDigest({
+  source,
+  filePath,
+  assignmentKey,
+  digest,
+} = {}) {
+  if (source !== "git-history") return false;
+  const normalizedPath = String(filePath ?? "").replaceAll("\\", "/");
+  if (!isTestSourcePath(normalizedPath) || !/^[0-9a-f]{64}$/u.test(String(digest ?? ""))) {
+    return false;
+  }
+  return knownHistoricalSyntheticFixtureDigests.get(
+    `${normalizedPath}|${String(assignmentKey ?? "")}`,
+  ) === digest;
+}
+
+function isKnownHistoricalSyntheticFixtureValue(value, filePath, assignmentKey, source) {
+  return isKnownHistoricalSyntheticFixtureDigest({
+    source,
+    filePath,
+    assignmentKey,
+    digest: createHash("sha256").update(String(value ?? "")).digest("hex"),
+  });
 }
 
 const boundedPlaceholderStrongMarkers = new Set([
@@ -384,11 +438,24 @@ function isJavaScriptExpressionValue(value, { allowObjectOrArray = false } = {})
   );
 }
 
-function isJavaScriptConstantReference(value, filePath, assignmentKey) {
+// Git-history scans still encounter the retired iCost verifier blob. Its
+// *_ACTION constants contain public Apple/App-Intent identifiers, not keys.
+// Keep this path- and shape-bounded exception even though the source file is
+// no longer shipped in the working tree or release archive.
+function isRetiredShortcutActionIdentifier(value, filePath, assignmentKey) {
   return (
     /(?:^|\/)integrations\/icost-shortcut\/verify-shortcut\.mjs$/u.test(filePath) &&
     /^[A-Z][A-Z0-9_]*_ACTION$/u.test(assignmentKey) &&
     /^(?:is\.[A-Za-z0-9.]+|com\.[A-Za-z0-9.]+)$/u.test(value)
+  );
+}
+
+function isPublicDomainSeparationValue(value, filePath, assignmentKey) {
+  if (!commentAwareSourceExts.has(extname(filePath).toLowerCase())) return false;
+  if (!/(?:^|_)DOMAIN(?:_SEPARATOR)?$/u.test(String(assignmentKey))) return false;
+  if (value.length > 128) return false;
+  return /^[a-z][a-z0-9.-]{0,31}(?:\/[a-z][a-z0-9.-]{0,31}){1,7}\/v[1-9][0-9]{0,3}$/u.test(
+    value,
   );
 }
 
@@ -399,9 +466,11 @@ function isPlaceholderValue(
   {
     allowJavaScriptExpression = true,
     allowBoundedPlaceholder = false,
+    source = "working-tree",
   } = {},
 ) {
   const value = String(rawValue ?? "").trim();
+  if (isKnownHistoricalSyntheticFixtureValue(value, filePath, assignmentKey, source)) return true;
   if (isExplicitTestFixtureValue(value, filePath)) return true;
   if (!value) return true;
   if (githubActionsContextPattern.test(value)) return true;
@@ -411,7 +480,8 @@ function isPlaceholderValue(
       allowObjectOrArray: commentAwareSourceExts.has(extname(filePath).toLowerCase()),
     })
   ) return true;
-  if (isJavaScriptConstantReference(value, filePath, assignmentKey)) return true;
+  if (isRetiredShortcutActionIdentifier(value, filePath, assignmentKey)) return true;
+  if (isPublicDomainSeparationValue(value, filePath, assignmentKey)) return true;
   if (/^(?:[:@$][A-Za-z_][A-Za-z0-9_.-]*|%[A-Za-z_][A-Za-z0-9_]*%)$/.test(value)) {
     return true;
   }
@@ -637,6 +707,7 @@ function shouldReportAssignment(
     !isPlaceholderValue(value, filePath, match[1], {
       allowJavaScriptExpression: quotedValue === undefined,
       allowBoundedPlaceholder,
+      source,
     }) &&
     (isCredentialLikeLiteral(value) ||
       (!isTestSourcePath(filePath) && boundedPlaceholderParts(value) !== null))

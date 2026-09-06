@@ -82,6 +82,20 @@ describe("hospital tender PushPlus notifier", () => {
     assert.equal(createHospitalTenderNotifier({ token: "" }), null);
   });
 
+  it("does not resolve configured secret metadata until a nonempty delivery", async () => {
+    let resolutions = 0;
+    const notifier = createHospitalTenderNotifier({
+      tokenProvider: () => {
+        resolutions += 1;
+        return fixtureValue;
+      },
+      fetchImpl: async () => providerResponse(),
+    });
+    assert.equal(resolutions, 0);
+    assert.equal(await notifier({ notices: [] }), 0);
+    assert.equal(resolutions, 0);
+  });
+
   it("splits an oversized aggregate into bounded requests without dropping notices", async () => {
     const requests = [];
     const notifier = createHospitalTenderNotifier({
@@ -144,5 +158,32 @@ describe("hospital tender PushPlus notifier", () => {
     });
     await assert.rejects(() => oversized({ notices: notices(1) }), /notification response invalid/);
     assert.equal(cancelled, true);
+  });
+
+  it("resolves a token at send time and records bounded delivery callbacks", async () => {
+    const tokenValues = {
+      before: ["synthetic", "pushplus", "fixture", "one"].join("-"),
+      after: ["synthetic", "pushplus", "fixture", "two"].join("-"),
+    };
+    let token = tokenValues.before;
+    const successes = [];
+    const failures = [];
+    const requests = [];
+    const notifier = createHospitalTenderNotifier({
+      tokenProvider: () => token,
+      fetchImpl: async (_url, options) => {
+        requests.push(JSON.parse(options.body));
+        return providerResponse();
+      },
+      onSuccess: (result) => successes.push(result),
+      onFailure: (result) => failures.push(result),
+    });
+    await notifier({ notices: notices(1) });
+    token = tokenValues.after;
+    await notifier({ notices: notices(1) });
+    assert.equal(requests[0].token, tokenValues.before);
+    assert.equal(requests[1].token, tokenValues.after);
+    assert.deepEqual(successes.map((item) => [item.count, item.chunkCount]), [[1, 1], [1, 1]]);
+    assert.deepEqual(failures, []);
   });
 });

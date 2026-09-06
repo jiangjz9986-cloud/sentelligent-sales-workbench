@@ -2,11 +2,21 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  EXPENSE_LIST_COLUMNS,
+  EXPENSE_LIST_FORMAT_CAPABILITIES,
+  buildExpenseListExport,
+  buildExpenseListRows,
+  buildExpenseListTitle,
+  buildExpenseListTotals,
   buildPaymentRecordCsv,
   buildPaymentRecordRows,
+  assessPrintImageResolution,
+  expandInvoicePrintItems,
   paginateInvoicePrint,
   paginatePaymentRecord,
   paymentRecordFilename,
+  expenseListFilename,
+  paginateExpenseList,
   printWhenImagesReady,
 } from "./travelExpenseExport.js";
 
@@ -69,6 +79,33 @@ const expenses = [
     ],
   },
 ];
+
+function expenseWithProofCount({ id, proofCount, amountCents = 1000, occurredOn = "2026-08-05" }) {
+  const paymentId = `${id}-payment`;
+  return {
+    ...expenses[1],
+    id,
+    referenceCode: `EXP-${id}`,
+    occurredOn,
+    attachments: Array.from({ length: proofCount }, (_, index) => ({
+      id: `${id}-proof-${index + 1}`,
+      kind: "payment_proof",
+      paymentIds: [paymentId],
+    })),
+    payments: [{
+      ...expenses[1].payments[0],
+      id: paymentId,
+      amountCents,
+      reimbursementCents: amountCents,
+    }],
+  };
+}
+
+function buildPrintableRows(specifications) {
+  return buildExpenseListExport({
+    expenses: specifications.map((specification) => expenseWithProofCount(specification)),
+  }).rows;
+}
 
 describe("actual payment record export", () => {
   it("exports one row per actual payment with a UTF-8 BOM", () => {
@@ -199,6 +236,24 @@ describe("actual payment print pagination", () => {
 });
 
 describe("invoice print pagination", () => {
+  it("expands every PDF page into an ordered fixed-slot print item", () => {
+    const invoices = [
+      { id: "pdf-1", fileName: "multi-page.pdf", mediaType: "application/pdf" },
+      { id: "image-1", fileName: "receipt.png", mediaType: "image/png" },
+      { id: "pdf-2", fileName: "unknown-pages.pdf", mediaType: "application/pdf" },
+    ];
+
+    const items = expandInvoicePrintItems(invoices, { "pdf-1": 3 });
+
+    assert.deepEqual(items.map((item) => [item.invoice.id, item.pageNumber, item.pageCount]), [
+      ["pdf-1", 1, 3],
+      ["pdf-1", 2, 3],
+      ["pdf-1", 3, 3],
+      ["image-1", null, 1],
+    ]);
+    assert.equal(items.some((item) => item.invoice.id === "pdf-2"), false);
+  });
+
   it("keeps four fixed invoice slots on every landscape A4 page", () => {
     const invoices = Array.from({ length: 5 }, (_, index) => ({
       id: `invoice-${index + 1}`,
@@ -244,5 +299,293 @@ describe("invoice print pagination", () => {
       /发票原件加载失败/,
     );
     assert.equal(selector, ".invoice-print-document img");
+  });
+
+  it("flags low-resolution originals instead of silently replacing them", async () => {
+    assert.equal(assessPrintImageResolution({
+      naturalWidth: 479,
+      naturalHeight: 800,
+      minNaturalWidth: 480,
+      minNaturalHeight: 300,
+    }), "low_resolution");
+    assert.equal(assessPrintImageResolution({
+      naturalWidth: 1200,
+      naturalHeight: 800,
+      minNaturalWidth: 480,
+      minNaturalHeight: 300,
+    }), "ready");
+
+    const documentRef = {
+      querySelectorAll: () => [{ complete: true, naturalWidth: 479, naturalHeight: 800 }],
+    };
+    await assert.rejects(
+      printWhenImagesReady({
+        documentRef,
+        print: () => assert.fail("low-resolution original must not print automatically"),
+        selector: ".invoice-print-document img",
+        minNaturalWidth: 480,
+        minNaturalHeight: 300,
+        errorMessage: "发票原件加载失败，请重新检查后打印。",
+      }),
+      /分辨率不足/,
+    );
+  });
+});
+
+describe("confirmed seven-column expense list export", () => {
+  it("freezes the exact seven visible columns and does not append internal ledger fields", () => {
+    assert.deepEqual(EXPENSE_LIST_COLUMNS.map(({ id, label }) => [id, label]), [
+      ["sequence", "序号"],
+      ["date", "日期"],
+      ["purpose", "用途"],
+      ["amount", "金额"],
+      ["paymentRecord", "付款记录"],
+      ["invoice", "发票"],
+      ["notes", "备注"],
+    ]);
+
+    const output = buildExpenseListExport({ expenses });
+    assert.deepEqual(Object.keys(output.rows[0].cells), EXPENSE_LIST_COLUMNS.map((column) => column.id));
+    assert.equal("referenceCode" in output.rows[0].cells, false);
+    assert.equal("merchant" in output.rows[0].cells, false);
+    assert.equal("fundingSource" in output.rows[0].cells, false);
+    assert.equal("accountLast4" in output.rows[0].cells, false);
+  });
+
+  it("keeps compatibility fields while supplying sanitized proof thumbnail data", () => {
+    const rows = buildExpenseListRows(expenses);
+    assert.deepEqual(Object.keys(rows[0]), [
+      "sequence",
+      "expenseId",
+      "referenceCode",
+      "dateLabel",
+      "purposeLabel",
+      "categoryLabel",
+      "amountCents",
+      "amountLabel",
+      "paymentRecord",
+      "paymentProofLabel",
+      "invoiceLabel",
+      "invoiceStatusLabel",
+      "notes",
+    ]);
+    assert.equal(rows[0].dateLabel, "2026-08-03");
+    assert.equal(rows[0].purposeLabel, "餐费");
+    assert.equal(rows[0].categoryLabel, "餐费");
+    assert.equal(rows[0].amountCents, 4000);
+    assert.equal(rows[0].paymentProofLabel, "3 张");
+    assert.equal(rows[0].paymentRecord.type, "thumbnail_stack");
+    assert.equal(rows[0].paymentRecord.thumbnails.length, 3);
+    assert.deepEqual(Object.keys(rows[0].paymentRecord.thumbnails[0]), [
+      "attachmentId",
+      "lineNumber",
+      "altText",
+      "thumbnailPolicy",
+    ]);
+    assert.equal(rows[0].paymentRecord.thumbnails[0].attachmentId, "attachment-1");
+    assert.equal(rows[0].paymentRecord.thumbnails[0].thumbnailPolicy.stripMetadata, true);
+    assert.equal("contentUrl" in rows[0].paymentRecord.thumbnails[0], false);
+    assert.equal("fileName" in rows[0].paymentRecord.thumbnails[0], false);
+    assert.equal(rows[0].invoiceStatusLabel, "电子");
+    // v0.8.2 manual-sheet alignment: 备注 assembles the free-text purpose and
+    // notes fields while 用途 stays a category word.
+    assert.equal(rows[0].notes, "出差早餐, 含饮品；第一行\n第二行");
+    assert.equal(rows[1].notes, "市内交通");
+    assert.equal("merchant" in rows[0], false);
+    assert.equal("paidAt" in rows[0], false);
+  });
+
+  it("builds the manual-sheet title from the expense date range and weekly region cities", () => {
+    const regionProfile = {
+      weekStart: "2026-08-03",
+      weekEnd: "2026-08-09",
+      version: 2,
+      cities: ["济宁", "东营"],
+      defaultCity: "济宁",
+      dateOverrides: [],
+    };
+
+    assert.equal(
+      buildExpenseListTitle({ expenses, regionProfile }),
+      "8.3-8.4济宁、东营出差费用清单",
+    );
+    assert.equal(
+      buildExpenseListTitle({ expenses: [], week: { start: "2026-08-17", end: "2026-08-23" }, regionProfile }),
+      "8.17-8.23济宁、东营出差费用清单",
+    );
+    assert.equal(buildExpenseListTitle({ expenses }), "8.3-8.4出差费用清单");
+    assert.equal(buildExpenseListTitle({}), "出差费用清单");
+
+    const output = buildExpenseListExport({
+      expenses,
+      week: { start: "2026-08-03", end: "2026-08-09" },
+      regionProfile,
+    });
+    assert.equal(output.title, "8.3-8.4济宁、东营出差费用清单");
+  });
+
+  it("keeps one logical lodging entry and stacks multiple proofs into physical rows", () => {
+    const output = buildExpenseListExport({
+      expenses: [{
+        ...expenses[0],
+        id: "lodging-1",
+        referenceCode: "EXP-20260803-LODGING",
+        category: "lodging",
+        notes: "8.3 济南住宿",
+      }],
+    });
+
+    assert.equal(output.rows.length, 1);
+    assert.equal(output.rows[0].cells.purpose.value, "住宿");
+    assert.equal(output.rows[0].physicalRowCount, 3);
+    assert.deepEqual(output.rows[0].mergeCellIds, [
+      "sequence",
+      "date",
+      "purpose",
+      "amount",
+      "invoice",
+      "notes",
+    ]);
+    assert.deepEqual(
+      output.rows[0].cells.paymentRecord.thumbnails.map((thumbnail) => thumbnail.lineNumber),
+      [1, 2, 3],
+    );
+  });
+
+  it("calculates expense and confirmed substitute-invoice totals for selected rows", () => {
+    const matches = [
+      {
+        id: "substitute-1",
+        expenseId: "expense-1",
+        state: "confirmed",
+        matchMethod: "rule_candidate",
+        allocatedCents: 17990,
+      },
+      {
+        id: "electronic-1",
+        expenseId: "expense-2",
+        state: "confirmed",
+        matchMethod: "manual",
+        allocatedCents: 2400,
+      },
+      {
+        id: "outside-selection",
+        expenseId: "expense-outside",
+        state: "confirmed",
+        matchMethod: "rule_candidate",
+        allocatedCents: 99900,
+      },
+      {
+        id: "revoked-substitute",
+        expenseId: "expense-2",
+        state: "revoked",
+        matchMethod: "rule_candidate",
+        allocatedCents: 500,
+      },
+    ];
+    const rows = buildExpenseListRows(expenses, { matches });
+
+    assert.deepEqual(buildExpenseListTotals(rows, { matches }), {
+      expenseTotalTitle: "费用合计",
+      expenseTotalCents: 6400,
+      expenseTotalLabel: "¥64.00",
+      substituteInvoiceTotalTitle: "替票合计金额",
+      substituteInvoiceTotalCents: 17990,
+      substituteInvoiceTotalLabel: "¥179.90",
+    });
+    assert.deepEqual(buildExpenseListExport({ expenses, context: { matches } }).totals, {
+      expenseTotalTitle: "费用合计",
+      expenseTotalCents: 6400,
+      expenseTotalLabel: "¥64.00",
+      substituteInvoiceTotalTitle: "替票合计金额",
+      substituteInvoiceTotalCents: 17990,
+      substituteInvoiceTotalLabel: "¥179.90",
+    });
+  });
+
+  it("marks CSV as data-only while Excel, PDF and print retain proof thumbnails", () => {
+    assert.deepEqual(EXPENSE_LIST_FORMAT_CAPABILITIES.xlsx, {
+      standardOutput: true,
+      embedsPaymentRecordThumbnails: true,
+    });
+    assert.equal(EXPENSE_LIST_FORMAT_CAPABILITIES.csv.standardOutput, false);
+    assert.equal(EXPENSE_LIST_FORMAT_CAPABILITIES.csv.embedsPaymentRecordThumbnails, false);
+    assert.match(EXPENSE_LIST_FORMAT_CAPABILITIES.csv.notice, /仅供数据交换/);
+    assert.match(EXPENSE_LIST_FORMAT_CAPABILITIES.csv.notice, /不作为最终标准费用清单/);
+  });
+
+  it("expands two proofs into two E-column rows and row-spans the other six cells", () => {
+    const rows = buildPrintableRows([{ id: "two-proofs", proofCount: 2, amountCents: 3200 }]);
+    const pages = paginateExpenseList({ rows, rowsPerPage: 9 });
+
+    assert.equal(pages.length, 1);
+    assert.equal(pages[0].physicalRowCount, 2);
+    assert.deepEqual(pages[0].rows.map((row) => row.paymentRecord.thumbnail?.attachmentId), [
+      "two-proofs-proof-1",
+      "two-proofs-proof-2",
+    ]);
+    assert.deepEqual(pages[0].rows.map((row) => row.sharedCells.render), [true, false]);
+    assert.equal(pages[0].rows[0].sharedCells.rowSpan, 2);
+    assert.equal(pages[0].rows[1].sharedCells.rowSpan, 0);
+    assert.equal(pages[0].totalCents, 3200);
+  });
+
+  it("uses exactly one physical page for nine proof rows", () => {
+    const rows = buildPrintableRows([{ id: "nine-proofs", proofCount: 9, amountCents: 9000 }]);
+    const pages = paginateExpenseList({ rows, rowsPerPage: 9 });
+
+    assert.deepEqual(pages.map((page) => page.physicalRowCount), [9]);
+    assert.equal(pages[0].rows[0].sharedCells.rowSpan, 9);
+    assert.equal(pages[0].rows.at(-1).physicalRowNumber, 9);
+    assert.equal(pages[0].pageNumber, 1);
+    assert.equal(pages[0].totalPages, 1);
+  });
+
+  it("splits an over-capacity expense and repeats its six shared cells on the next page", () => {
+    const rows = buildPrintableRows([{ id: "eleven-proofs", proofCount: 11, amountCents: 11800 }]);
+    const pages = paginateExpenseList({ rows, rowsPerPage: 9 });
+
+    assert.deepEqual(pages.map((page) => page.physicalRowCount), [9, 2]);
+    assert.deepEqual(pages.map((page) => [page.pageNumber, page.totalPages]), [[1, 2], [2, 2]]);
+    assert.equal(pages[0].rows[0].sharedCells.rowSpan, 9);
+    assert.equal(pages[0].rows[0].sharedCells.continuesOnNextPage, true);
+    assert.equal(pages[1].rows[0].sharedCells.render, true);
+    assert.equal(pages[1].rows[0].sharedCells.rowSpan, 2);
+    assert.equal(pages[1].rows[0].sharedCells.continuedFromPreviousPage, true);
+    assert.equal(pages[1].rows[0].physicalRowNumber, 10);
+    assert.equal(pages[1].rows[0].cells.amount.label, "¥118.00");
+  });
+
+  it("keeps normal proof groups together and counts every logical amount exactly once", () => {
+    const rows = buildPrintableRows([
+      { id: "two-proofs-first", proofCount: 2, amountCents: 3200, occurredOn: "2026-08-05" },
+      { id: "nine-proofs-second", proofCount: 9, amountCents: 9000, occurredOn: "2026-08-06" },
+      { id: "eleven-proofs-third", proofCount: 11, amountCents: 11800, occurredOn: "2026-08-07" },
+    ]);
+    const pages = paginateExpenseList({ rows, rowsPerPage: 9 });
+
+    assert.deepEqual(pages.map((page) => page.physicalRowCount), [2, 9, 9, 2]);
+    assert.equal(pages[1].rows[0].expenseId, "nine-proofs-second");
+    assert.equal(pages[1].rows[0].sharedCells.rowSpan, 9);
+    assert.equal(pages.flatMap((page) => page.rows).filter((row) => row.countsTowardTotal).length, 3);
+    assert.equal(pages.reduce((total, page) => total + page.totalCents, 0), 24000);
+    assert.equal(pages.flatMap((page) => page.rows).reduce((total, row) => (
+      total + row.amountContributionCents
+    ), 0), 24000);
+    assert.deepEqual(pages.map((page) => page.totalPages), [4, 4, 4, 4]);
+  });
+
+  it("rejects a renderer row whose declared physical count disagrees with its proofs", () => {
+    const rows = buildPrintableRows([{ id: "invalid-count", proofCount: 2 }]);
+    rows[0].physicalRowCount = 1;
+    assert.throws(
+      () => paginateExpenseList({ rows, rowsPerPage: 9 }),
+      /physicalRowCount is invalid/,
+    );
+  });
+
+  it("uses the stable PDF and XLSX file names", () => {
+    assert.equal(expenseListFilename("2026-08-03"), "费用清单-2026-08-03.pdf");
+    assert.equal(expenseListFilename("2026-08-03", "xlsx"), "费用清单-2026-08-03.xlsx");
   });
 });

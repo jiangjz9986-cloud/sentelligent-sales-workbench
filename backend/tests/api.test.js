@@ -9,6 +9,14 @@ import {
   assertApiEntity,
 } from "../../shared/salesWorkbenchApiContract.mjs";
 import { hashPassword } from "../src/auth/password.js";
+import {
+  addDays,
+  shanghaiDateParts,
+  weekStartOf,
+} from "../src/dailyDigest/digestContent.js";
+import { openDatabase } from "../src/db.js";
+import { createHospitalTenderRepository } from "../src/hospitalTender/repository.js";
+import { KNOWN_STAGES } from "../src/opportunities/stageVocabulary.js";
 import { createServer } from "../src/server.js";
 
 let tempDir;
@@ -234,7 +242,8 @@ describe("sales workbench backend API", () => {
       authPasswordHash: await hashPassword("unit-secret", { salt: Buffer.alloc(16, 8) }),
       authSessionSecret: "unit-session-secret",
       weixinAgentApiToken: "wx-token",
-      weixinAgentOwner: "继振",
+      // v0.9.2：种子 owner 词表统一为账号 id，机器身份对齐 jiangjz。
+      weixinAgentOwner: "jiangjz",
     });
     await new Promise((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -265,6 +274,177 @@ describe("sales workbench backend API", () => {
     assert.ok(summary.body.item.customerHeat.some((item) => item.customerId === "rizhao" && item.value === 82));
     assert.ok(summary.body.item.opportunities.some((item) => item.id === "op-rizhao-plan"));
     assert.ok(summary.body.item.stageCounts.some((item) => item.count > 0));
+    assert.deepEqual(
+      summary.body.item.stageCounts.slice(0, KNOWN_STAGES.length).map((item) => item.stage),
+      [...KNOWN_STAGES],
+    );
+    assert.ok(summary.body.item.stageCounts.every((item) => typeof item.amount === "string"));
+    assert.match(summary.body.item.todayFocus.date, /^\d{4}-\d{2}-\d{2}$/u);
+    assert.equal(summary.body.item.weeklyTrend.weekStart, weekStartOf(summary.body.item.todayFocus.date));
+    assert.equal(
+      summary.body.item.weeklyTrend.previousWeekStart,
+      addDays(summary.body.item.weeklyTrend.weekStart, -7),
+    );
+  });
+
+  it("aggregates today focus, natural-week trend, and the fixed-order stage funnel", async () => {
+    await new Promise((resolve) => server.close(resolve));
+    const dashboardDbUrl = join(tempDir, "dashboard.sqlite");
+    const db = openDatabase({ databaseUrl: dashboardDbUrl });
+    const now = new Date();
+    const today = shanghaiDateParts(now).date;
+    const weekStart = weekStartOf(today);
+    const previousWeekStart = addDays(weekStart, -7);
+    const shanghaiIso = (dateOnly, time) => new Date(`${dateOnly}T${time}+08:00`).toISOString();
+
+    db.prepare("INSERT INTO customers (id, name, owner, relation) VALUES ('cus-dash', '济宁市第一人民医院', '继振', 80)").run();
+    const insertOpportunity = db.prepare(
+      "INSERT INTO opportunities (id, customer_id, name, stage, amount, probability, owner) VALUES ($id, 'cus-dash', $name, $stage, $amount, 60, 'jiangjz')",
+    );
+    insertOpportunity.run({ $id: "op-dash-1", $name: "济宁智慧医院一期", $stage: "线索", $amount: "120 万" });
+    insertOpportunity.run({ $id: "op-dash-2", $name: "济宁智慧医院二期", $stage: "线索", $amount: "预计 200 万" });
+    insertOpportunity.run({ $id: "op-dash-3", $name: "预算确认中项目", $stage: "预算确认", $amount: "80万" });
+    insertOpportunity.run({ $id: "op-dash-4", $name: "词表外阶段项目", $stage: "招投标", $amount: "待定" });
+
+    const planJson = JSON.stringify({
+      stops: [
+        { id: "stop-2", customerName: "济宁医学院附属医院" },
+        { id: "stop-1", customerName: "济宁市第一人民医院", city: "济宁" },
+      ],
+      orderedStopIds: ["stop-1", "stop-2"],
+    });
+    const insertItinerary = db.prepare(`
+      INSERT INTO visit_itineraries (id, title, visit_date, status, request_json, plan_json, created_by, updated_by)
+      VALUES ($id, $title, $visitDate, $status, '{}', $planJson, '继振', '继振')
+    `);
+    insertItinerary.run({ $id: "itn-dash-today", $title: "济宁两院拜访", $visitDate: today, $status: "planned", $planJson: planJson });
+    insertItinerary.run({ $id: "itn-dash-cancelled", $title: "已取消行程", $visitDate: today, $status: "cancelled", $planJson: planJson });
+    insertItinerary.run({ $id: "itn-dash-past", $title: "昨日行程", $visitDate: addDays(today, -1), $status: "planned", $planJson: planJson });
+
+    const insertAction = db.prepare(`
+      INSERT INTO action_items (id, title, priority, status, remind_at, updated_at, owner)
+      VALUES ($id, $title, $priority, $status, $remindAt, $updatedAt, 'jiangjz')
+    `);
+    insertAction.run({ $id: "act-dash-overdue", $title: "逾期回访", $priority: "高", $status: "pending", $remindAt: shanghaiIso(addDays(today, -1), "10:00:00"), $updatedAt: shanghaiIso(addDays(today, -1), "10:00:00") });
+    insertAction.run({ $id: "act-dash-today", $title: "今日送方案", $priority: "中", $status: "in_progress", $remindAt: shanghaiIso(today, "23:00:00"), $updatedAt: shanghaiIso(today, "08:00:00") });
+    insertAction.run({ $id: "act-dash-unscheduled", $title: "未排期待办", $priority: "低", $status: "pending", $remindAt: null, $updatedAt: shanghaiIso(today, "08:00:00") });
+    // Completed todos exercise both historic updated_at formats and both
+    // BETWEEN endpoints of each natural week.
+    insertAction.run({ $id: "act-dash-done-monday", $title: "本周一完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${weekStart} 10:00:00` });
+    insertAction.run({ $id: "act-dash-done-sunday", $title: "本周日完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${addDays(weekStart, 6)}T09:00:00.000Z` });
+    insertAction.run({ $id: "act-dash-done-prev-monday", $title: "上周一完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${previousWeekStart}T08:00:00.000Z` });
+    insertAction.run({ $id: "act-dash-done-prev-sunday", $title: "上周日完成", $priority: "中", $status: "done", $remindAt: null, $updatedAt: `${addDays(weekStart, -1)} 21:00:00` });
+
+    db.prepare(`
+      INSERT INTO risk_items (id, customer_id, title, target, severity, status, score, due, evidence, action)
+      VALUES ('risk-dash-high', 'cus-dash', '预算路径未确认', '商机', '高', 'open', 86, '本周五', '会议纪要', '尽快对齐')
+    `).run();
+
+    const insertQuickRecord = db.prepare(
+      "INSERT INTO quick_records (id, raw_content, occurred_at, status, owner) VALUES ($id, $rawContent, $occurredAt, 'recorded', 'jiangjz')",
+    );
+    insertQuickRecord.run({ $id: "qr-dash-monday", $rawContent: "周一拜访记录", $occurredAt: `${weekStart}T09:00:00+08:00` });
+    insertQuickRecord.run({ $id: "qr-dash-sunday", $rawContent: "周日电话记录", $occurredAt: `${addDays(weekStart, 6)}T21:00:00+08:00` });
+    insertQuickRecord.run({ $id: "qr-dash-prev", $rawContent: "上周记录", $occurredAt: `${addDays(weekStart, -3)}T09:00:00+08:00` });
+    db.prepare(
+      "INSERT INTO quick_records (id, raw_content, occurred_at, status, voided_at, owner) VALUES ('qr-dash-voided', '已作废记录', $occurredAt, 'recorded', $voidedAt, 'jiangjz')",
+    ).run({ $occurredAt: `${weekStart}T10:00:00+08:00`, $voidedAt: shanghaiIso(today, "12:00:00") });
+
+    const insertExpense = db.prepare(`
+      INSERT INTO travel_expenses (id, reference_code, owner, occurred_on, category, purpose, invoice_status, created_by, updated_by, deleted_at)
+      VALUES ($id, $ref, '继振', $occurredOn, 'transport', $purpose, 'pending', '继振', '继振', $deletedAt)
+    `);
+    const insertPayment = db.prepare(`
+      INSERT INTO travel_expense_payments (id, expense_id, sequence, paid_at, amount_cents, reimbursement_cents, funding_source, payment_method)
+      VALUES ($id, $expenseId, 1, $paidAt, $cents, $cents, 'personal', 'wechat')
+    `);
+    insertExpense.run({ $id: "exp-dash-monday", $ref: "EXP-DASH-1", $occurredOn: weekStart, $purpose: "周一打车", $deletedAt: null });
+    insertPayment.run({ $id: "exp-dash-monday-pay", $expenseId: "exp-dash-monday", $paidAt: `${weekStart}T10:00:00+08:00`, $cents: 4500 });
+    insertExpense.run({ $id: "exp-dash-sunday", $ref: "EXP-DASH-2", $occurredOn: addDays(weekStart, 6), $purpose: "周日住宿", $deletedAt: null });
+    insertPayment.run({ $id: "exp-dash-sunday-pay", $expenseId: "exp-dash-sunday", $paidAt: `${addDays(weekStart, 6)}T10:00:00+08:00`, $cents: 5500 });
+    insertExpense.run({ $id: "exp-dash-prev", $ref: "EXP-DASH-3", $occurredOn: addDays(weekStart, -2), $purpose: "上周晚餐", $deletedAt: null });
+    insertPayment.run({ $id: "exp-dash-prev-pay", $expenseId: "exp-dash-prev", $paidAt: `${addDays(weekStart, -2)}T19:00:00+08:00`, $cents: 61200 });
+    insertExpense.run({ $id: "exp-dash-deleted", $ref: "EXP-DASH-4", $occurredOn: weekStart, $purpose: "已删除费用", $deletedAt: shanghaiIso(today, "12:00:00") });
+    insertPayment.run({ $id: "exp-dash-deleted-pay", $expenseId: "exp-dash-deleted", $paidAt: `${weekStart}T11:00:00+08:00`, $cents: 99900 });
+
+    const tenderRepository = createHospitalTenderRepository(db, { clock: () => now });
+    const seedNotice = (id, relevance) => tenderRepository.upsertNotice({
+      id,
+      identityKey: `source-dash:${id}`,
+      sourceId: "source-dash",
+      sourceName: "山东政采",
+      city: "济宁市",
+      title: `济宁市第一人民医院信息化采购（${id}）`,
+      url: `https://example.com/${id}`,
+      publishedAt: now.toISOString(),
+      noticeType: "tender",
+      hospitalNames: ["济宁市第一人民医院"],
+      sourceItemId: id,
+      contentSha256: "a".repeat(64),
+      relevance,
+      deadlineText: "2026-09-05",
+    });
+    seedNotice("notice-dash-high", "high");
+    seedNotice("notice-dash-medium", "medium");
+    db.close();
+
+    server = createServer({
+      databaseUrl: dashboardDbUrl,
+      seed: false,
+      aiAnalysisMode: "mock",
+      modelApiKey: "",
+      authRequired: false,
+      authAccount: "",
+      authPassword: "",
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const summary = await request("/api/dashboard/summary");
+    assert.equal(summary.response.status, 200);
+    assertApiEntity("dashboardSummary", summary.body.item);
+
+    const { todayFocus, weeklyTrend, stageCounts } = summary.body.item;
+    assert.equal(todayFocus.date, today);
+    assert.equal(todayFocus.itineraries.count, 1);
+    assert.deepEqual(todayFocus.itineraries.items, [
+      { id: "itn-dash-today", title: "济宁两院拜访", firstStop: "济宁市第一人民医院" },
+    ]);
+    assert.equal(todayFocus.todos.overdueCount, 1);
+    assert.equal(todayFocus.todos.todayCount, 1);
+    assert.deepEqual(todayFocus.todos.items.map((item) => [item.id, item.overdue]), [
+      ["act-dash-overdue", true],
+      ["act-dash-today", false],
+    ]);
+    assert.equal(todayFocus.risks.count, 1);
+    assert.deepEqual(todayFocus.risks.items, [{
+      id: "risk-dash-high",
+      customerName: "济宁市第一人民医院",
+      title: "预算路径未确认",
+      score: 86,
+      severity: "高",
+    }]);
+    assert.equal(todayFocus.tenders.highCount, 1);
+    assert.deepEqual(todayFocus.tenders.items, [
+      { id: "notice-dash-high", title: "济宁市第一人民医院信息化采购（notice-dash-high）", sourceName: "山东政采" },
+    ]);
+
+    assert.deepEqual(weeklyTrend, {
+      weekStart,
+      previousWeekStart,
+      quickRecords: { current: 2, previous: 1 },
+      expenseCents: { current: 10000, previous: 61200 },
+      completedTodos: { current: 2, previous: 2 },
+    });
+
+    assert.deepEqual(
+      stageCounts.slice(0, KNOWN_STAGES.length).map((item) => item.stage),
+      [...KNOWN_STAGES],
+    );
+    assert.deepEqual(stageCounts.find((item) => item.stage === "线索"), { stage: "线索", count: 2, amount: "共 320 万" });
+    assert.deepEqual(stageCounts.find((item) => item.stage === "预算确认"), { stage: "预算确认", count: 1, amount: "共 80 万" });
+    assert.deepEqual(stageCounts.find((item) => item.stage === "初步沟通"), { stage: "初步沟通", count: 0, amount: "" });
+    assert.deepEqual(stageCounts.at(-1), { stage: "招投标", count: 1, amount: "" });
   });
 
   it("creates a quick record and returns deterministic mock AI analysis", async () => {
@@ -409,18 +589,23 @@ describe("sales workbench backend API", () => {
         region: "青岛胶州",
         type: "二级医院",
         level: "新建线索",
-        owner: "继振",
         contact: "信息科 / 待确认",
         relation: 35,
         needs: ["未来规划初访"],
         risks: ["决策链待补齐"],
         opportunities: [],
+        aliases: ["胶州医院别名"],
+        tags: ["客户验收"],
       }),
     });
 
     assert.equal(createdCustomer.response.status, 201);
     assertApiEntity("customer", createdCustomer.body.item);
     assert.equal(createdCustomer.body.item.name, "胶州中医医院");
+    assert.deepEqual(createdCustomer.body.item.aliases, ["胶州医院别名"]);
+    assert.deepEqual(createdCustomer.body.item.tags, ["客户验收"]);
+    assert.equal(typeof createdCustomer.body.item.createdAt, "string");
+    assert.equal(typeof createdCustomer.body.item.updatedAt, "string");
 
     const updatedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`, {
       method: "PATCH",
@@ -438,6 +623,13 @@ describe("sales workbench backend API", () => {
     assert.equal(updatedCustomer.body.item.level, "重点培育");
     assert.equal(updatedCustomer.body.item.relation, 52);
     assert.deepEqual(updatedCustomer.body.item.needs, ["未来规划初访", "补齐现有基础架构"]);
+    assert.deepEqual(updatedCustomer.body.item.aliases, createdCustomer.body.item.aliases);
+    assert.deepEqual(updatedCustomer.body.item.tags, createdCustomer.body.item.tags);
+    assert.equal(updatedCustomer.body.item.createdAt, createdCustomer.body.item.createdAt);
+    const loadedCustomer = await request(`/api/customers/${createdCustomer.body.item.id}`);
+    assert.equal(loadedCustomer.response.status, 200);
+    assertApiEntity("customer", loadedCustomer.body.item);
+    assert.deepEqual(loadedCustomer.body.item, updatedCustomer.body.item);
 
     const createdOpportunity = await request("/api/opportunities", {
       method: "POST",
@@ -447,7 +639,6 @@ describe("sales workbench backend API", () => {
         customer: "胶州中医医院",
         stage: "线索",
         amount: "待定",
-        owner: "继振",
         probability: 30,
         days: 0,
         requirements: ["现状调研"],
@@ -488,7 +679,6 @@ describe("sales workbench backend API", () => {
         region: "test",
         type: "test",
         level: "manual",
-        owner: "tester",
         contact: "tester",
         relation: 10,
       }),
@@ -570,12 +760,13 @@ describe("sales workbench backend API", () => {
       }),
     });
 
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
 
     const confirmed = await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-confirm-all-targets",
       },
       body: JSON.stringify({
@@ -597,6 +788,11 @@ describe("sales workbench backend API", () => {
     assertApiEntity("customer", confirmed.body.customer);
     assertApiEntity("opportunity", confirmed.body.opportunity);
     assert.equal(confirmed.body.action.sourceRecordId, created.body.item.id);
+    // v0.9.0 L0 transition: the deep write-back assignee inherits the record
+    // owner (account id) instead of the historical hard-coded display name.
+    assert.equal(confirmed.body.action.assignee, confirmed.body.quickRecord.owner);
+    assert.ok(confirmed.body.action.assignee);
+    assert.notEqual(confirmed.body.action.assignee, "继振");
     assert.match(confirmed.body.customer.syncPreview.join("\n"), /快速记录已确认/);
     assert.match(confirmed.body.opportunity.sourceRecord, new RegExp(created.body.item.id));
 
@@ -607,6 +803,71 @@ describe("sales workbench backend API", () => {
     assert.equal(risks.response.status, 200);
     assertApiCollection("riskItem", risks.body.items);
     assert.ok(risks.body.items.some((item) => item.sourceType === "quick_record" && item.sourceId === created.body.item.id));
+  });
+
+  it("writes the users.display_name into the confirmed deep write-back assignee", async () => {
+    // v0.9.1：登录用户确认快速记录后，动作展示列 assignee 应为 users.display_name（继振）。
+    const passwordField = "pass" + "word";
+    const loginValue = "unit-login-value";
+    await new Promise((resolve) => server.close(resolve));
+    const { hashPassword } = await import("../src/auth/password.js");
+    server = createServer({
+      databaseUrl: join(tempDir, "assignee-display.sqlite"),
+      seed: true,
+      aiAnalysisMode: "mock",
+      modelApiKey: "",
+      nodeEnv: "test",
+      authRequired: true,
+      authAccount: "jiangjz",
+      authPassword: "",
+      authPasswordHash: await hashPassword(loginValue, { salt: Buffer.alloc(16, 31) }),
+      authSessionSecret: Buffer.alloc(32, 32).toString("base64url"),
+      authCookieSecure: false,
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+    const loggedIn = await request("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ account: "jiangjz", [passwordField]: loginValue }),
+    });
+    assert.equal(loggedIn.response.status, 200);
+    const authHeaders = {
+      Cookie: String(loggedIn.response.headers.get("set-cookie") ?? "").split(";", 1)[0],
+      "X-CSRF-Token": loggedIn.body.csrfToken,
+    };
+
+    const created = await request("/api/quick-records", {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        rawContent: "黄岛区中医院下周需要带售前做双活机房调研，并进入本周周报。",
+        occurredAt: "2026-08-29T10:00:00+08:00",
+        sourceChannel: "现场拜访",
+      }),
+    });
+    assert.equal(created.response.status, 201);
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    assert.equal(analyzed.response.status, 201);
+    const confirmed = await request(`/api/quick-records/${created.body.item.id}/confirm`, {
+      method: "POST",
+      headers: {
+        ...authHeaders,
+        ...ifMatch(analyzed.body.quickRecord.version),
+        "Idempotency-Key": "api-confirm-display-name",
+      },
+      body: JSON.stringify({
+        targets: ["customer", "opportunity"],
+        confirmedBy: "继振",
+        targetVersions: { customer: 1, opportunity: 1 },
+      }),
+    });
+    assert.equal(confirmed.response.status, 201);
+    assert.equal(confirmed.body.quickRecord.owner, "jiangjz");
+    assert.equal(confirmed.body.action.assignee, "继振");
   });
 
   it("builds a weekly draft from confirmed quick records with source references", async () => {
@@ -620,11 +881,12 @@ describe("sales workbench backend API", () => {
       }),
     });
 
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-weekly-draft-source",
       },
       body: JSON.stringify({
@@ -645,8 +907,94 @@ describe("sales workbench backend API", () => {
     assert.equal(report.response.status, 201);
     assertApiEntity("weeklyReport", report.body.item);
     assert.equal(report.body.item.status, "draft");
+    assert.equal(report.body.item.source, "deterministic");
+    assert.equal(report.body.item.fallbackReason, null);
     assert.match(report.body.item.content, /本周重点进展/);
     assert.ok(report.body.item.sourceRefs.some((ref) => ref.type === "quick_record"));
+  });
+
+  it("includes completed durable quick-record previews in weekly drafts", async () => {
+    const created = await request("/api/quick-records", {
+      method: "POST",
+      body: JSON.stringify({
+        rawContent:
+          "日照中医医院需要十五五规划材料，确认预览完成后也要进入本周周报草稿。",
+        occurredAt: "2026-06-05T16:00:00+08:00",
+        sourceChannel: "快速记录",
+      }),
+    });
+
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, {
+      method: "POST",
+    });
+    assert.equal(analyzed.response.status, 201, JSON.stringify(analyzed.body));
+    const preview = await request(`/api/quick-records/${created.body.item.id}/confirmation-previews`, {
+      method: "POST",
+      body: "{}",
+    });
+    assert.equal(preview.response.status, 201, JSON.stringify({
+      analyzed: analyzed.body,
+      preview: preview.body,
+    }));
+    const confirmed = await request(`/api/quick-record-confirmation-previews/${preview.body.item.id}/confirm-all`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirm: true,
+        suggestionIdentity: preview.body.item.identity,
+        expectedQuickRecordVersion: analyzed.body.quickRecord.version,
+        analysisVersionId: preview.body.item.analysisVersionId,
+        summaryHash: preview.body.item.summaryHash,
+        evidenceHash: preview.body.item.evidenceHash,
+      }),
+    });
+    assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+
+    const report = await request("/api/reports/weekly/draft", {
+      method: "POST",
+      body: JSON.stringify({
+        owner: "继振",
+        periodStart: "2026-06-01",
+        periodEnd: "2026-06-07",
+      }),
+    });
+
+    assert.equal(report.response.status, 201);
+    assertApiEntity("weeklyReport", report.body.item);
+    assert.ok(report.body.item.sourceRefs.some((ref) => ref.type === "quick_record" && ref.id === created.body.item.id));
+  });
+
+  it("excludes recorded WeChat quick records from weekly drafts until analyzed", async () => {
+    const created = await request("/api/quick-records", {
+      method: "POST",
+      body: JSON.stringify({
+        rawContent: "尚未分析的微信记录不应进入周报。",
+        occurredAt: "2026-06-05T16:00:00+08:00",
+        sourceChannel: "微信助手",
+      }),
+    });
+    assert.equal(created.response.status, 201);
+    const maintenanceDb = openDatabase({ databaseUrl });
+    try {
+      maintenanceDb.prepare(
+        "UPDATE quick_records SET status = 'recorded' WHERE id = $id",
+      ).run({ $id: created.body.item.id });
+    } finally {
+      maintenanceDb.close();
+    }
+
+    const report = await request("/api/reports/weekly/draft", {
+      method: "POST",
+      body: JSON.stringify({
+        owner: "继振",
+        periodStart: "2026-06-01",
+        periodEnd: "2026-06-07",
+      }),
+    });
+    assert.equal(report.response.status, 201);
+    assert.equal(
+      report.body.item.sourceRefs.some((ref) => ref.type === "quick_record" && ref.id === created.body.item.id),
+      false,
+    );
   });
 
   it("adds explicitly selected knowledge references to weekly drafts", async () => {
@@ -688,11 +1036,12 @@ describe("sales workbench backend API", () => {
         sourceChannel: "快速记录",
       }),
     });
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-weekly-edit-source",
       },
       body: JSON.stringify({
@@ -732,7 +1081,9 @@ describe("sales workbench backend API", () => {
     const exportedText = await exported.text();
     assert.equal(exported.status, 200);
     assert.match(exported.headers.get("content-type") ?? "", /application\/msword/);
-    assert.match(exported.headers.get("content-disposition") ?? "", /weekly-report-.*\.doc/);
+    const contentDisposition = exported.headers.get("content-disposition") ?? "";
+    assert.match(contentDisposition, /^attachment; filename\*=UTF-8''weekly-report-.*\.doc$/);
+    assert.doesNotMatch(contentDisposition, /[\r\n"]/);
     assert.match(exportedText, /已确认周报/);
     assert.match(exportedText, /日照中医医院十五五规划材料已补齐/);
 
@@ -753,11 +1104,12 @@ describe("sales workbench backend API", () => {
         sourceChannel: "快速记录",
       }),
     });
-    await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    const analyzed = await request(`/api/quick-records/${created.body.item.id}/analyze`, { method: "POST" });
+    assert.equal(analyzed.response.status, 201);
     await request(`/api/quick-records/${created.body.item.id}/confirm`, {
       method: "POST",
       headers: {
-        ...ifMatch(created.body.item.version),
+        ...ifMatch(analyzed.body.quickRecord.version),
         "Idempotency-Key": "api-weekly-model-source",
       },
       body: JSON.stringify({
@@ -806,6 +1158,8 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
     assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
     assert.match(report.body.item.content, /DeepSeek weekly draft/);
+    assert.equal(report.body.item.source, "deepseek");
+    assert.equal(report.body.item.fallbackReason, null);
     assert.doesNotMatch(JSON.stringify(report.body.item), /test-provider-key/);
   });
 
@@ -1019,6 +1373,8 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
     assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
     assert.match(draft.body.item.content, /DeepSeek solution draft/);
+    assert.equal(draft.body.item.source, "deepseek");
+    assert.equal(draft.body.item.fallbackReason, null);
     assert.ok(draft.body.item.sourceRefs.some((ref) => ref.type === "customer" && ref.id === "rizhao"));
     assert.doesNotMatch(JSON.stringify(draft.body.item), /test-provider-key/);
   });
@@ -1088,7 +1444,47 @@ describe("sales workbench backend API", () => {
     assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
     assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
     assert.match(suggestion.body.item.content, /DeepSeek 建议/);
+    assert.equal(suggestion.body.item.source, "deepseek");
+    assert.equal(suggestion.body.item.fallbackReason, null);
     assert.doesNotMatch(JSON.stringify(suggestion.body.item), /test-provider-key/);
+  });
+
+  it("persists a bounded fallback reason when a direct suggestion has no model key", async () => {
+    if (server) {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    server = createServer({
+      databaseUrl,
+      aiAnalysisMode: "model",
+      modelProvider: "deepseek",
+      modelApiKey: "",
+      authRequired: false,
+      authAccount: "",
+      authPassword: "",
+    });
+    await new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const { port } = server.address();
+    baseUrl = `http://127.0.0.1:${port}`;
+
+    const suggestion = await request("/api/ai/suggestions", {
+      method: "POST",
+      body: JSON.stringify({
+        type: "customer_profile",
+        title: "缺少模型 Key 时的建议",
+        context: { customer: "日照中医医院" },
+      }),
+    });
+
+    assert.equal(suggestion.response.status, 201);
+    assert.equal(suggestion.body.item.source, "fallback");
+    assert.equal(suggestion.body.item.fallbackReason, "manual_suggestion_missing_model_key");
+
+    const history = await request("/api/ai/suggestions?sourceId=manual");
+    assert.equal(history.response.status, 200);
+    assert.equal(history.body.items[0].source, "fallback");
+    assert.equal(history.body.items[0].fallbackReason, "manual_suggestion_missing_model_key");
   });
 
   it("stores, searches, and cites knowledge items in solution drafts", async () => {
@@ -1170,7 +1566,6 @@ describe("sales workbench backend API", () => {
         customer: "Rizhao",
         stage: "planning",
         amount: "pending",
-        owner: "Task 9 tester",
         probability: 30,
         days: 0,
         requirements: ["budget approval"],
@@ -1355,7 +1750,6 @@ describe("sales workbench backend API", () => {
         region: "青岛",
         type: "医疗 KA",
         level: "重点培育",
-        owner: "继振",
         contact: "信息科",
       }),
     });

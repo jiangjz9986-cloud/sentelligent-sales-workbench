@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
 
+import { readBoundedResponseText } from "../http/request.js";
+import { weixinCard, weixinClip, weixinShortId } from "../assistant/weixinCard.js";
 import {
   parsePaymentProofCommandArgs,
   readWeixinDocument,
   WeixinDocumentError,
   weixinDocumentSourceRef,
 } from "../travelExpense/documentInboxMedia.js";
+
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 const helpText = [
   "森特智行微信助手",
@@ -146,24 +150,15 @@ async function buildDraftPreview(session, client) {
   return analysis;
 }
 
-function formatDraftPreview(session, label = "待确认记录") {
+function formatDraftPreview(session, label = "小小提醒！新增一条拜访记录") {
   const analysis = session.preview;
-  const customer = analysis?.customer?.value || "待匹配客户";
-  const opportunity = analysis?.opportunity?.value || "待确认商机";
-  const request = analysis?.summary?.request?.text || "待补充客户诉求";
-  const risk = analysis?.summary?.risk?.text || "待补充风险信息";
-  const action = analysis?.summary?.action?.text || "待补充下一步动作";
-
-  return [
-    `${label}：`,
-    `客户：${customer}`,
-    `商机：${opportunity}`,
-    `诉求：${compact(request, 120)}`,
-    `风险：${compact(risk, 120)}`,
-    `建议：${compact(action, 120)}`,
-    "",
-    "需要调整就继续发送补充内容；确认后发送“录入”。",
-  ].join("\n");
+  return weixinCard(label, [
+    ["客户", analysis?.customer?.value || "待匹配"],
+    ["商机", analysis?.opportunity?.value || "待确认"],
+    ["诉求", weixinClip(analysis?.summary?.request?.text, 80, "待补充")],
+    ["风险", weixinClip(analysis?.summary?.risk?.text, 80, "无")],
+    ["建议", weixinClip(analysis?.summary?.action?.text, 80, "待确认")],
+  ], "补充内容可继续发送；确认后回复“录入”。");
 }
 
 class SalesWorkbenchClient {
@@ -186,7 +181,10 @@ class SalesWorkbenchClient {
       },
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
-    const text = await response.text();
+    const text = await readBoundedResponseText(response, {
+      maxBytes: MAX_RESPONSE_BYTES,
+      errorMessage: "Backend response body is too large",
+    });
     const body = parseJsonResponse(text);
     if (!response.ok) {
       const message = body?.message || body?.error || `backend returned ${response.status}`;
@@ -240,20 +238,12 @@ class SalesWorkbenchClient {
 }
 
 function formatQuickRecordReply(record, insight) {
-  const customer = insight?.customer?.value || "待匹配客户";
-  const opportunity = insight?.opportunity?.value || "待确认商机";
-  const request = insight?.summary?.request?.text || "已生成结构化识别建议";
-  const action = insight?.summary?.action?.text || "请在系统里人工确认后再写入业务档案";
-  return [
-    "已录入系统，并完成分析。",
-    `记录ID：${record.id}`,
-    `客户：${customer}`,
-    `商机：${opportunity}`,
-    `诉求：${compact(request, 140)}`,
-    `建议：${compact(action, 140)}`,
-    "",
-    "客户、商机和周报仍需在系统内人工确认后同步。",
-  ].join("\n");
+  return weixinCard("拜访记录已录入", [
+    ["编号", weixinShortId(record.id)],
+    ["客户", insight?.customer?.value || "待匹配"],
+    ["商机", insight?.opportunity?.value || "待确认"],
+    ["建议", weixinClip(insight?.summary?.action?.text, 80, "待确认")],
+  ]);
 }
 
 function formatCustomerReply(items, keyword) {
@@ -467,7 +457,7 @@ export function createSalesWorkbenchWeixinAgent(options = {}) {
         }
 
         await buildDraftPreview(session, client);
-        return { text: formatDraftPreview(session, "待确认记录") };
+        return { text: formatDraftPreview(session) };
       }
 
       if (isEnterCommand(text)) {
@@ -496,7 +486,7 @@ export function createSalesWorkbenchWeixinAgent(options = {}) {
 
       if (session.phase === "review") {
         await buildDraftPreview(session, client);
-        return { text: formatDraftPreview(session, "已更新待录入记录") };
+        return { text: formatDraftPreview(session, "小小提醒！已更新拜访记录草稿") };
       }
 
       return {

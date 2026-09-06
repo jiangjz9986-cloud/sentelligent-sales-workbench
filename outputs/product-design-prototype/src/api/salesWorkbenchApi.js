@@ -2,22 +2,31 @@ import {
   assertApiCollection,
   assertApiEntity,
 } from "../../../../shared/salesWorkbenchApiContract.mjs";
+import {
+  MAX_AUDIO_BYTES,
+  MIN_RECORDING_DURATION_MS,
+  getTranscriptionPurposeLimits,
+  normalizeRecorderMimeType,
+} from "../audio/recordingCapabilities.js";
+import { adaptTranscriptionError } from "../audio/serverTranscription.js";
 
 export function resolveApiBaseUrl(env = {}, runtime = globalThis) {
   return String(env.VITE_API_BASE_URL ?? runtime?.__SENTELLIGENT_API_BASE_URL__ ?? "").trim().replace(/\/+$/, "");
 }
 
 const WRITABLE_FIELDS = Object.freeze({
+  // v0.9.2：owner=服务端按会话注入的归属键，不再随请求体提交（传入即 422）。
   customer: Object.freeze([
-    "name", "region", "type", "level", "owner", "contact", "relation", "stakeholders",
+    "name", "region", "type", "level", "contact", "relation", "stakeholders",
     "decisionChain", "historyProjects", "infrastructure", "syncPreview", "budget", "summary",
     "needs", "risks", "opportunities",
   ]),
   opportunity: Object.freeze([
-    "customerId", "name", "customer", "stage", "amount", "owner", "probability", "days",
+    "customerId", "name", "customer", "stage", "amount", "probability", "days",
     "requirements", "competitors", "solutionDirection", "sourceRecord", "risk", "next", "tone",
   ]),
   knowledge: Object.freeze(["title", "category", "tags", "summary", "content", "source"]),
+  actionCreate: Object.freeze(["title", "reason", "due", "remindAt", "priority", "customerId"]),
   itinerary: Object.freeze([
     "title", "visitDate", "status", "departureAddress", "departureCity", "departureLocation", "departureAt", "stops",
   ]),
@@ -34,6 +43,7 @@ const WRITABLE_FIELDS = Object.freeze({
   travelExpenseAdvance: Object.freeze([
     "weekStart", "status", "requestedCents", "receivedCents", "requestedOn", "receivedOn", "purpose", "notes",
   ]),
+  travelExpenseRegionProfile: Object.freeze(["weekStart", "cities", "defaultCity", "dateOverrides"]),
   invoiceUpload: Object.freeze(["fileName", "mediaType", "contentBase64", "sourceRef"]),
   invoiceReview: Object.freeze([
     "invoiceCode", "invoiceNumber", "issuedOn", "sellerName", "buyerName",
@@ -86,6 +96,42 @@ function assertTravelExpenseDocumentInbox(value, path = "travelExpenseDocumentIn
   return item;
 }
 
+function assertShortcutBookkeepingLedgerReceipt(value, path = "shortcutBookkeepingLedgerReceipt") {
+  const receipt = assertApiEntity("shortcutBookkeepingLedgerReceipt", value, path);
+  if (!new Set(["matched", "pending", "not_available"]).has(receipt.attachmentStatus)) {
+    throw new TypeError(`${path}.attachmentStatus: expected matched, pending, or not_available`);
+  }
+  return receipt;
+}
+
+function assertWeixinBookkeepingReview(value, path = "shortcutBookkeepingReview") {
+  const item = assertApiEntity("shortcutBookkeepingReview", value, path);
+  if (item.status === "accepted" && item.entryType === "expense") {
+    assertShortcutBookkeepingLedgerReceipt(item.ledgerReceipt, `${path}.ledgerReceipt`);
+  } else if (item.ledgerReceipt !== null) {
+    throw new TypeError(`${path}.ledgerReceipt: only accepted expense records may expose a formal ledger receipt`);
+  }
+  return item;
+}
+
+function assertTravelExpenseWorkbench(value, path = "travelExpenseWorkbench") {
+  const workbench = assertApiEntity("travelExpenseWorkbench", value, path);
+  assertTravelExpenseCollection(workbench.expenses, `${path}.expenses`);
+  assertApiCollection("travelExpenseAdvance", workbench.advances, `${path}.advances`);
+  assertApiCollection("shortcutBookkeepingReview", workbench.bookkeepingReviews, `${path}.bookkeepingReviews`);
+  workbench.bookkeepingReviews.forEach((item, index) => (
+    assertWeixinBookkeepingReview(item, `${path}.bookkeepingReviews[${index}]`)
+  ));
+  assertTravelExpenseRegionProfile(workbench.regionProfile, `${path}.regionProfile`);
+  if (!Array.isArray(workbench.recentLedgerReceipts)) {
+    throw new TypeError(`${path}.recentLedgerReceipts: expected array`);
+  }
+  workbench.recentLedgerReceipts.forEach((item, index) => (
+    assertRecentLedgerReceipt(item, `${path}.recentLedgerReceipts[${index}]`)
+  ));
+  return workbench;
+}
+
 function apiObject(value, path) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError(`${path}: expected object`);
@@ -109,9 +155,80 @@ function nullableApiCents(value, path) {
   return value;
 }
 
+function requiredDateOnly(value, path) {
+  requiredApiString(value, path);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (!match) throw new TypeError(`${path}: expected YYYY-MM-DD`);
+  const parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  if (parsed.toISOString().slice(0, 10) !== value) throw new TypeError(`${path}: expected real calendar date`);
+  return value;
+}
+
+function assertTravelExpenseRegionProfile(value, path = "travelExpenseRegionProfile") {
+  const profile = apiObject(value, path);
+  requiredDateOnly(profile.weekStart, `${path}.weekStart`);
+  requiredDateOnly(profile.weekEnd, `${path}.weekEnd`);
+  if (!Number.isSafeInteger(profile.version) || profile.version < 0) {
+    throw new TypeError(`${path}.version: expected non-negative integer`);
+  }
+  if (!Array.isArray(profile.cities)) throw new TypeError(`${path}.cities: expected array`);
+  profile.cities.forEach((city, index) => requiredApiString(city, `${path}.cities[${index}]`));
+  if (profile.defaultCity !== null) requiredApiString(profile.defaultCity, `${path}.defaultCity`);
+  if (!Array.isArray(profile.dateOverrides)) throw new TypeError(`${path}.dateOverrides: expected array`);
+  profile.dateOverrides.forEach((override, index) => {
+    const item = apiObject(override, `${path}.dateOverrides[${index}]`);
+    requiredDateOnly(item.date, `${path}.dateOverrides[${index}].date`);
+    requiredApiString(item.city, `${path}.dateOverrides[${index}].city`);
+  });
+  return profile;
+}
+
+function assertRecentLedgerReceipt(value, path = "recentLedgerReceipt") {
+  const receipt = apiObject(value, path);
+  for (const field of ["entryId", "expenseId", "paymentId", "referenceCode", "acceptedAt"]) {
+    requiredApiString(receipt[field], `${path}.${field}`);
+  }
+  requiredDateOnly(receipt.occurredOn, `${path}.occurredOn`);
+  requiredDateOnly(receipt.weekStart, `${path}.weekStart`);
+  nullableApiCents(receipt.amountCents, `${path}.amountCents`);
+  nullableApiCents(receipt.reimbursementCents, `${path}.reimbursementCents`);
+  if (!new Set(["matched", "pending", "not_available"]).has(receipt.attachmentStatus)) {
+    throw new TypeError(`${path}.attachmentStatus: expected matched, pending, or not_available`);
+  }
+  return receipt;
+}
+
 function apiItems(values, path, assertItem) {
   if (!Array.isArray(values)) throw new TypeError(`${path}: expected array`);
   return values.map((value, index) => assertItem(value, `${path}[${index}]`));
+}
+
+/**
+ * Confirmation preview data is durable server state.  Keep the public API
+ * boundary strict so the page never performs a write against a partial or
+ * substituted preview.
+ */
+function assertQuickRecordConfirmationPreview(value, path = "quickRecordConfirmationPreview") {
+  const preview = assertApiEntity("quickRecordConfirmationPreview", value, path);
+  if (!Array.isArray(preview.items)) throw new TypeError(`${path}.items: expected array`);
+  if (!Array.isArray(preview.evidence)) throw new TypeError(`${path}.evidence: expected array`);
+  if (!Array.isArray(preview.bulkEligibleItemIds)) {
+    throw new TypeError(`${path}.bulkEligibleItemIds: expected array`);
+  }
+  return preview;
+}
+
+function assertQuickRecordConfirmationOutcome(value, path = "quickRecordConfirmationOutcome") {
+  const outcome = assertApiEntity("quickRecordConfirmationOutcome", value, path);
+  assertQuickRecordConfirmationPreview(outcome.preview, `${path}.preview`);
+  if (!Array.isArray(outcome.confirmedItems)) throw new TypeError(`${path}.confirmedItems: expected array`);
+  if (!Array.isArray(outcome.excludedItems)) throw new TypeError(`${path}.excludedItems: expected array`);
+  return outcome;
+}
+
+function confirmationPreviewUrl(previewId, suffix = "") {
+  const id = requiredApiString(previewId, "previewId");
+  return `/api/quick-record-confirmation-previews/${encodeURIComponent(id)}${suffix}`;
 }
 
 function assertInvoice(value, path = "invoice") {
@@ -152,7 +269,7 @@ function assertNoInvoiceConfirmation(value, path = "noInvoiceConfirmation") {
 function assertInvoiceCoverage(value, path = "invoiceCoverage") {
   const coverage = apiObject(value, path);
   requiredApiString(coverage.weekStart, `${path}.weekStart`);
-  for (const field of ["reimbursementCents", "confirmedCoverageCents", "noInvoiceConfirmedCents", "missingInvoiceCents"]) {
+  for (const field of ["reimbursementCents", "confirmedCoverageCents", "electronicInvoiceCoverageCents", "substituteInvoiceCoverageCents", "noInvoiceConfirmedCents", "missingInvoiceCents", "invoiceWarehouseAvailableCents"]) {
     nullableApiCents(coverage[field], `${path}.${field}`);
   }
   return coverage;
@@ -178,6 +295,64 @@ function assertHospitalTenderSource(value, path = "hospitalTenderSource") {
   return assertApiEntity("hospitalTenderSource", value, path);
 }
 
+export function assertCustomerImportResult(value, path = "customerImportResult") {
+  const result = apiObject(value, path);
+  const batch = result.customerImportBatch ?? result.batch;
+  const rows = result.customerImportRows ?? result.rows;
+  assertApiEntity("customerImportBatch", batch, `${path}.customerImportBatch`);
+  assertApiCollection("customerImportRow", rows, `${path}.customerImportRows`);
+  if (result.previewDigest !== undefined && result.previewDigest !== null
+    && typeof result.previewDigest !== "string") {
+    throw new TypeError(`${path}.previewDigest: expected nullable string`);
+  }
+  if (result.mapping !== undefined && result.mapping !== null
+    && (typeof result.mapping !== "object" || Array.isArray(result.mapping))) {
+    throw new TypeError(`${path}.mapping: expected nullable object`);
+  }
+  if (result.replayed !== undefined && typeof result.replayed !== "boolean") {
+    throw new TypeError(`${path}.replayed: expected boolean`);
+  }
+  return result;
+}
+
+function hospitalTenderLeadConversionUrl(noticeId, action) {
+  const id = requiredApiString(noticeId, "noticeId");
+  if (!new Set(["preview", "confirm", "cancel"]).has(action)) {
+    throw new TypeError("A valid hospital tender lead-conversion action is required");
+  }
+  return `/api/hospital-tenders/${encodeURIComponent(id)}/lead-conversion/${action}`;
+}
+
+function assertHospitalTenderLeadConversionPreview(value, path = "hospitalTenderLeadConversionPreview") {
+  const preview = assertApiEntity("hospitalTenderLeadConversionPreview", value, path);
+  if (preview.status !== "preview" || preview.requiresHumanConfirmation !== true) {
+    throw new TypeError(`${path}: expected a human-confirmation preview`);
+  }
+  requiredApiString(preview.previewDigest, `${path}.previewDigest`);
+  requiredApiString(preview.customer?.id, `${path}.customer.id`);
+  requiredApiString(preview.drafts?.opportunity?.name, `${path}.drafts.opportunity.name`);
+  requiredApiString(preview.drafts?.actionItem?.title, `${path}.drafts.actionItem.title`);
+  return preview;
+}
+
+function assertHospitalTenderLeadConversionConfirmation(value, path = "hospitalTenderLeadConversionConfirmation") {
+  const confirmation = assertApiEntity("hospitalTenderLeadConversionConfirmation", value, path);
+  if (confirmation.status !== "confirmed" || confirmation.requiresHumanConfirmation !== false) {
+    throw new TypeError(`${path}: expected a confirmed terminal result`);
+  }
+  requiredApiString(confirmation.opportunity?.id, `${path}.opportunity.id`);
+  requiredApiString(confirmation.actionItem?.id, `${path}.actionItem.id`);
+  return confirmation;
+}
+
+function assertHospitalTenderLeadConversionCancellation(value, path = "hospitalTenderLeadConversionCancellation") {
+  const cancellation = assertApiEntity("hospitalTenderLeadConversionCancellation", value, path);
+  if (cancellation.status !== "cancelled" || cancellation.requiresHumanConfirmation !== false) {
+    throw new TypeError(`${path}: expected a cancelled terminal result`);
+  }
+  return cancellation;
+}
+
 function idempotencyHeaders(options, label) {
   const key = String(options?.idempotencyKey ?? "");
   if (!key || key.trim() !== key) throw new TypeError(`A valid ${label} Idempotency-Key is required`);
@@ -193,9 +368,236 @@ function queryPath(path, values) {
   return suffix ? `${path}?${suffix}` : path;
 }
 
+function assertProactiveAssistant(value, path = "proactiveAssistant") {
+  const item = assertApiEntity("proactiveAssistant", value, path);
+  if (!Array.isArray(item.items)) throw new TypeError(`${path}.items: expected array`);
+  item.items.forEach((suggestion, index) => {
+    if (!suggestion || typeof suggestion !== "object" || Array.isArray(suggestion)) {
+      throw new TypeError(`${path}.items[${index}]: expected object`);
+    }
+    for (const field of ["id", "schemaVersion", "subjectType", "subjectId", "title", "conclusion", "modelVersion", "source", "confirmationStatus"]) {
+      if (typeof suggestion[field] !== "string" || !suggestion[field].trim()) {
+        throw new TypeError(`${path}.items[${index}].${field}: expected non-empty string`);
+      }
+    }
+    if (!Number.isSafeInteger(suggestion.opportunityVersion) || suggestion.opportunityVersion < 1) {
+      throw new TypeError(`${path}.items[${index}].opportunityVersion: expected positive integer`);
+    }
+    if (!Number.isSafeInteger(suggestion.customerVersion) || suggestion.customerVersion < 1) {
+      throw new TypeError(`${path}.items[${index}].customerVersion: expected positive integer`);
+    }
+    if (suggestion.confidence !== null
+      && (typeof suggestion.confidence !== "number" || !Number.isFinite(suggestion.confidence))) {
+      throw new TypeError(`${path}.items[${index}].confidence: expected nullable number`);
+    }
+    if (suggestion.confidenceLevel !== undefined
+      && (typeof suggestion.confidenceLevel !== "string" || !suggestion.confidenceLevel.trim())) {
+      throw new TypeError(`${path}.items[${index}].confidenceLevel: expected non-empty string`);
+    }
+    if (suggestion.confidenceCalibrated !== undefined && typeof suggestion.confidenceCalibrated !== "boolean") {
+      throw new TypeError(`${path}.items[${index}].confidenceCalibrated: expected boolean`);
+    }
+    if (suggestion.priority !== undefined
+      && suggestion.priority !== null
+      && (typeof suggestion.priority !== "string" || !suggestion.priority.trim())) {
+      throw new TypeError(`${path}.items[${index}].priority: expected nullable string`);
+    }
+    if (suggestion.priorityCalibrated !== undefined && typeof suggestion.priorityCalibrated !== "boolean") {
+      throw new TypeError(`${path}.items[${index}].priorityCalibrated: expected boolean`);
+    }
+    for (const field of ["facts", "inferences", "unknowns", "risks", "nextActions", "evidenceRefs", "sourceRefs"]) {
+      if (!Array.isArray(suggestion[field])) throw new TypeError(`${path}.items[${index}].${field}: expected array`);
+    }
+    if (!suggestion.trigger || typeof suggestion.trigger !== "object" || typeof suggestion.trigger.type !== "string") {
+      throw new TypeError(`${path}.items[${index}].trigger: expected object`);
+    }
+    if (!suggestion.writebackPreview || suggestion.writebackPreview.requiresHumanConfirmation !== true
+      || suggestion.writebackPreview.automaticWriteAllowed !== false) {
+      throw new TypeError(`${path}.items[${index}].writebackPreview: expected human-confirmation boundary`);
+    }
+    if (suggestion.writebackAllowed !== false) {
+      throw new TypeError(`${path}.items[${index}].writebackAllowed: expected false`);
+    }
+    if (!suggestion.previewDigests || typeof suggestion.previewDigests !== "object" || Array.isArray(suggestion.previewDigests)) {
+      throw new TypeError(`${path}.items[${index}].previewDigests: expected object`);
+    }
+    for (const [target, digest] of Object.entries(suggestion.previewDigests)) {
+      if (!["action", "risk"].includes(target) || !/^[0-9a-f]{64}$/u.test(digest)) {
+        throw new TypeError(`${path}.items[${index}].previewDigests: expected SHA-256 target digests`);
+      }
+    }
+  });
+  return item;
+}
+
+const PROACTIVE_NOTIFICATION_CHANNELS = new Set(["in_app", "weixin", "pushplus"]);
+const PROACTIVE_NOTIFICATION_STATUSES = new Set(["queued", "processing", "sent", "failed", "read"]);
+
+function proactiveNotificationText(value, path, { max, nullable = false } = {}) {
+  if (nullable && (value === null || value === undefined || value === "")) return null;
+  const normalized = requiredApiString(value, path);
+  if (Number.isSafeInteger(max) && normalized.length > max) throw new TypeError(`${path}: exceeds ${max} characters`);
+  return normalized;
+}
+
+function assertProactiveNotification(value, path = "proactiveNotification") {
+  const item = apiObject(value, path);
+  const id = proactiveNotificationText(item.id, `${path}.id`, { max: 200 });
+  const suggestionId = proactiveNotificationText(item.suggestionId, `${path}.suggestionId`, { max: 500 });
+  const suggestionVersion = requiredApiVersion(item.suggestionVersion, `${path}.suggestionVersion`);
+  const channel = proactiveNotificationText(item.channel, `${path}.channel`, { max: 20 });
+  const status = proactiveNotificationText(item.status, `${path}.status`, { max: 20 });
+  if (!PROACTIVE_NOTIFICATION_CHANNELS.has(channel)) throw new TypeError(`${path}.channel: invalid channel`);
+  if (!PROACTIVE_NOTIFICATION_STATUSES.has(status)) throw new TypeError(`${path}.status: invalid status`);
+  const title = proactiveNotificationText(item.title, `${path}.title`, { max: 200 });
+  const trigger = proactiveNotificationText(item.trigger, `${path}.trigger`, { max: 100 });
+  const summary = proactiveNotificationText(item.summary, `${path}.summary`, { max: 500 });
+  const priority = item.priority;
+  const attemptCount = item.attemptCount;
+  if (!Number.isSafeInteger(priority) || priority < 0 || priority > 100) {
+    throw new TypeError(`${path}.priority: expected integer in 0..100`);
+  }
+  if (!Number.isSafeInteger(attemptCount) || attemptCount < 0) {
+    throw new TypeError(`${path}.attemptCount: expected non-negative integer`);
+  }
+  const availableAt = proactiveNotificationText(item.availableAt, `${path}.availableAt`, { max: 80 });
+  const lastErrorCode = proactiveNotificationText(item.lastErrorCode, `${path}.lastErrorCode`, { max: 100, nullable: true });
+  const sentAt = proactiveNotificationText(item.sentAt, `${path}.sentAt`, { max: 80, nullable: true });
+  const readAt = proactiveNotificationText(item.readAt, `${path}.readAt`, { max: 80, nullable: true });
+  const createdAt = proactiveNotificationText(item.createdAt, `${path}.createdAt`, { max: 80 });
+  const updatedAt = proactiveNotificationText(item.updatedAt, `${path}.updatedAt`, { max: 80 });
+  if (status === "read" && !readAt) throw new TypeError(`${path}.readAt: required for read status`);
+  if (status !== "read" && readAt) throw new TypeError(`${path}.readAt: unread status cannot have readAt`);
+  // Return an explicit allowlist. Owner identity, raw outbox identifiers, and
+  // any future backend fields never enter the browser notification state.
+  return {
+    id,
+    suggestionId,
+    suggestionVersion,
+    channel,
+    status,
+    title,
+    trigger,
+    priority,
+    summary,
+    attemptCount,
+    availableAt,
+    lastErrorCode,
+    sentAt,
+    readAt,
+    createdAt,
+    updatedAt,
+  };
+}
+
+function assertProactiveNotificationPage(value, path = "proactiveNotifications") {
+  const page = apiObject(value, path);
+  if (!Array.isArray(page.items)) throw new TypeError(`${path}.items: expected array`);
+  if (!Number.isSafeInteger(page.total) || page.total < 0) throw new TypeError(`${path}.total: expected non-negative integer`);
+  return {
+    items: page.items.map((item, index) => assertProactiveNotification(item, `${path}.items[${index}]`)),
+    total: page.total,
+  };
+}
+
+function assertProactiveMutationItem(value, path = "proactiveAssistantSuggestion") {
+  const item = assertApiEntity("proactiveAssistantSuggestion", value, path);
+  if (typeof item.id !== "string" || !item.id.trim()) throw new TypeError(`${path}.id: expected non-empty string`);
+  if (!Number.isSafeInteger(item.version) || item.version < 1) throw new TypeError(`${path}.version: expected positive integer`);
+  const status = item.proactiveStatus ?? item.lifecycleStatus ?? item.status;
+  if (typeof status !== "string" || !status.trim()) throw new TypeError(`${path}.status: expected non-empty string`);
+  return item;
+}
+
+function assertProactiveConfirmationPreview(value, path = "proactiveConfirmationPreview") {
+  const preview = assertApiEntity("proactiveConfirmationPreview", value, path);
+  for (const field of ["id", "owner", "suggestionId", "target", "status", "customerId", "opportunityId", "previewDigest", "createdAt", "updatedAt", "expiresAt"]) {
+    if (typeof preview[field] !== "string" || !preview[field].trim()) {
+      throw new TypeError(`${path}.${field}: expected non-empty string`);
+    }
+  }
+  if (!new Set(["action", "risk"]).has(preview.target)) {
+    throw new TypeError(`${path}.target: expected action or risk`);
+  }
+  if (!new Set(["open", "completed", "cancelled", "expired"]).has(preview.status)) {
+    throw new TypeError(`${path}.status: expected a valid lifecycle status`);
+  }
+  if (!Number.isSafeInteger(preview.revision) || preview.revision < 1) {
+    throw new TypeError(`${path}.revision: expected positive integer`);
+  }
+  for (const field of ["opportunityVersion", "customerVersion"]) {
+    if (!Number.isSafeInteger(preview[field]) || preview[field] < 1) {
+      throw new TypeError(`${path}.${field}: expected positive integer`);
+    }
+  }
+  if (!/^[0-9a-f]{64}$/u.test(preview.previewDigest)) {
+    throw new TypeError(`${path}.previewDigest: expected SHA-256 digest`);
+  }
+  if (!preview.preview || typeof preview.preview !== "object" || Array.isArray(preview.preview)) {
+    throw new TypeError(`${path}.preview: expected object`);
+  }
+  if (!preview.snapshot || typeof preview.snapshot !== "object" || Array.isArray(preview.snapshot)) {
+    throw new TypeError(`${path}.snapshot: expected object`);
+  }
+  for (const field of ["confirmedAt", "confirmedBy", "resultItemId"]) {
+    if (preview[field] !== null && typeof preview[field] !== "string") {
+      throw new TypeError(`${path}.${field}: expected nullable string`);
+    }
+  }
+  if (typeof preview.replayed !== "boolean") throw new TypeError(`${path}.replayed: expected boolean`);
+  return preview;
+}
+
+/**
+ * A proactive writeback is a polymorphic result (one confirmed target per
+ * request). Keep this boundary explicit rather than letting the panel treat
+ * an arbitrary response as a newly-created action/risk.
+ */
+function assertProactiveWritebackOutcome(value, path = "proactiveWritebackOutcome") {
+  const outcome = apiObject(value, path);
+  if (!new Set(["created", "replayed"]).has(outcome.status)) {
+    throw new TypeError(`${path}.status: expected created or replayed`);
+  }
+  if (!new Set(["action", "risk"]).has(outcome.target)) {
+    throw new TypeError(`${path}.target: expected action or risk`);
+  }
+  if (typeof outcome.replayed !== "boolean") {
+    throw new TypeError(`${path}.replayed: expected boolean`);
+  }
+  if (typeof outcome.proactiveId !== "string" || !outcome.proactiveId.trim()) {
+    throw new TypeError(`${path}.proactiveId: expected non-empty string`);
+  }
+  if (typeof outcome.suggestionId !== "string" || !outcome.suggestionId.trim()) {
+    throw new TypeError(`${path}.suggestionId: expected non-empty string`);
+  }
+  if (outcome.suggestionId !== outcome.proactiveId) {
+    throw new TypeError(`${path}.suggestionId: expected to match proactiveId`);
+  }
+  const action = outcome.action == null
+    ? null
+    : assertApiEntity("actionItem", outcome.action, `${path}.action`);
+  const risk = outcome.risk == null
+    ? null
+    : assertApiEntity("riskItem", outcome.risk, `${path}.risk`);
+  if (outcome.target === "action" && !action) {
+    throw new TypeError(`${path}.action: expected action item for action target`);
+  }
+  if (outcome.target === "risk" && !risk) {
+    throw new TypeError(`${path}.risk: expected risk item for risk target`);
+  }
+  return { ...outcome, action, risk };
+}
+
 function versionHeaders(version) {
   if (!Number.isSafeInteger(version) || version <= 0) {
     throw new TypeError("A positive integer entity version is required");
+  }
+  return { "If-Match": `"${version}"` };
+}
+
+function nonNegativeVersionHeaders(version) {
+  if (!Number.isSafeInteger(version) || version < 0) {
+    throw new TypeError("A non-negative integer entity version is required");
   }
   return { "If-Match": `"${version}"` };
 }
@@ -247,18 +649,25 @@ export function createConfirmationAttemptTracker({ createId = createStrongUuid }
   };
 }
 
+function isFormDataBody(body) {
+  return (typeof FormData !== "undefined" && body instanceof FormData)
+    || Object.prototype.toString.call(body) === "[object FormData]";
+}
+
 function requestHeaders(options, csrfToken) {
   const method = String(options.method ?? "GET").toUpperCase();
+  const formDataBody = isFormDataBody(options.body);
   const suppliedHeaders = { ...(options.headers ?? {}) };
   for (const name of Object.keys(suppliedHeaders)) {
     const normalizedName = name.toLowerCase();
-    if (normalizedName === "authorization" || normalizedName === "x-csrf-token") {
+    if (normalizedName === "authorization" || normalizedName === "x-csrf-token"
+      || (formDataBody && normalizedName === "content-type")) {
       delete suppliedHeaders[name];
     }
   }
 
   return {
-    "Content-Type": "application/json",
+    ...(formDataBody ? {} : { "Content-Type": "application/json" }),
     ...suppliedHeaders,
     ...(method !== "GET" && method !== "HEAD" && csrfToken
       ? { "X-CSRF-Token": csrfToken }
@@ -289,7 +698,276 @@ function toApiError(response, body) {
   error.currentVersion = details?.fields?.currentVersion;
   error.requestId = details?.requestId;
   error.body = body;
+  error.retryAfterHeader = typeof response?.headers?.get === "function"
+    ? response.headers.get("retry-after")
+    : null;
   return error;
+}
+
+const VISIT_TEMPERATURE_STATUSES = new Set(["pending", "confirmed", "cancelled", "expired", "conflict"]);
+const VISIT_TEMPERATURE_IDENTIFIER = /^[\u4e00-\u9fffA-Za-z0-9_.:-]+$/u;
+
+function visitTemperatureText(value, fallback = "", max = 2_000) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized && normalized.length <= max ? normalized : fallback;
+}
+
+function visitTemperatureRef(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const type = visitTemperatureText(value.type, "", 200);
+  const id = visitTemperatureText(value.id, "", 200);
+  return type && id && VISIT_TEMPERATURE_IDENTIFIER.test(type) && VISIT_TEMPERATURE_IDENTIFIER.test(id)
+    ? { type, id }
+    : null;
+}
+
+function visitTemperatureList(value, mapper) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > 50) throw new TypeError("visit temperature list is invalid");
+  const mapped = value.map(mapper);
+  if (mapped.some((item) => !item)) throw new TypeError("visit temperature list contains invalid item");
+  return mapped;
+}
+
+/**
+ * Keep the temperature-suggestion boundary deliberately smaller than the
+ * generic API error boundary. The service can return internal details, but
+ * none of those details are needed by the confirmation UI.
+ */
+export function assertVisitTemperatureSuggestion(value, path = "visitTemperatureSuggestion") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path}: expected object`);
+  }
+  const status = visitTemperatureText(value.status).toLowerCase();
+  if (!VISIT_TEMPERATURE_STATUSES.has(status)) throw new TypeError(`${path}.status: invalid`);
+  const id = visitTemperatureText(value.id, "", 200);
+  const visitId = visitTemperatureText(value.visitId, "", 200);
+  const customerId = visitTemperatureText(value.customerId, "", 200);
+  if (!id || !visitId || !customerId
+    || !VISIT_TEMPERATURE_IDENTIFIER.test(id)
+    || !VISIT_TEMPERATURE_IDENTIFIER.test(visitId)
+    || !VISIT_TEMPERATURE_IDENTIFIER.test(customerId)) throw new TypeError(`${path}: missing identity`);
+  const integer = (field, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) => {
+    const next = value[field];
+    if (!Number.isSafeInteger(next) || next < min || next > max) throw new TypeError(`${path}.${field}: invalid`);
+    return next;
+  };
+  const identity = visitTemperatureText(value.identity);
+  if (!/^[0-9a-f]{64}$/u.test(identity)) throw new TypeError(`${path}.identity: invalid`);
+  const facts = visitTemperatureList(value.facts, (fact) => {
+    if (!fact || typeof fact !== "object" || Array.isArray(fact)) return null;
+    const key = visitTemperatureText(fact.key);
+    if (!key) return null;
+    if (!Number.isSafeInteger(fact.confidence) || fact.confidence < 0 || fact.confidence > 100
+      || !(typeof fact.value === "string" || typeof fact.value === "number" || typeof fact.value === "boolean")
+      || !Array.isArray(fact.sourceRefs) || fact.sourceRefs.length === 0) {
+      throw new TypeError(`${path}.facts: invalid evidence`);
+    }
+    return {
+      key,
+      label: visitTemperatureText(fact.label, key),
+      value: fact.value,
+      confidence: fact.confidence,
+      sourceRefs: visitTemperatureList(fact.sourceRefs, visitTemperatureRef),
+    };
+  });
+  const inferences = visitTemperatureList(value.inferences, (inference) => {
+    if (!inference || typeof inference !== "object" || Array.isArray(inference)) return null;
+    const claim = visitTemperatureText(inference.claim);
+    if (!claim || !Number.isSafeInteger(inference.confidence) || inference.confidence < 0 || inference.confidence > 100) {
+      throw new TypeError(`${path}.inferences: invalid evidence`);
+    }
+    return {
+      claim,
+      basis: visitTemperatureText(inference.basis),
+      confidence: inference.confidence,
+      sourceRefs: visitTemperatureList(inference.sourceRefs, visitTemperatureRef),
+    };
+  });
+  const sourceRefs = visitTemperatureList(value.sourceRefs, visitTemperatureRef);
+  if (facts.length === 0 || inferences.length === 0 || sourceRefs.length === 0
+    || typeof value.requiresHumanConfirmation !== "boolean"
+    || typeof value.writebackAllowed !== "boolean") {
+    throw new TypeError(`${path}: evidence is required`);
+  }
+  const previousValue = integer("previousValue", { max: 100 });
+  const suggestedValue = integer("suggestedValue", { max: 100 });
+  const delta = integer("delta", { min: -100, max: 100 });
+  if (delta !== suggestedValue - previousValue) throw new TypeError(`${path}.delta: invalid`);
+  return assertApiEntity("visitTemperatureSuggestion", {
+    id,
+    identity,
+    status,
+    owner: visitTemperatureText(value.owner, "", 200),
+    visitId,
+    customerId,
+    previousValue,
+    suggestedValue,
+    delta,
+    confidence: integer("confidence", { max: 100 }),
+    customerVersion: integer("customerVersion", { min: 1 }),
+    facts,
+    inferences,
+    sourceRefs,
+    requiresHumanConfirmation: value.requiresHumanConfirmation === true,
+    writebackAllowed: value.writebackAllowed === true,
+    createdAt: visitTemperatureText(value.createdAt, ""),
+    expiresAt: visitTemperatureText(value.expiresAt, ""),
+    confirmedAt: value.confirmedAt == null ? null : visitTemperatureText(value.confirmedAt, ""),
+    cancelledAt: value.cancelledAt == null ? null : visitTemperatureText(value.cancelledAt, ""),
+    replayed: value.replayed === true,
+    writeback: value.writeback === true,
+    reason: visitTemperatureText(value.reason, ""),
+  }, path);
+}
+
+export function normalizeVisitTemperatureError(error) {
+  if (error?.code === "VISIT_TEMPERATURE_TIMEOUT" || error?.name === "TimeoutError") {
+    const next = new Error("温度建议请求超时，请检查连接后重试");
+    next.code = "TIMEOUT";
+    next.status = error.status;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.status === 401) {
+    const next = new Error("登录状态已失效，请重新登录后重试");
+    next.code = "AUTH_REQUIRED";
+    next.status = 401;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.status === 409) {
+    const next = new Error("数据已变化，请重新获取最新建议后再操作");
+    next.code = "CONFLICT";
+    next.status = 409;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.status >= 500) {
+    const next = new Error("温度建议暂时不可用，请稍后重试");
+    next.code = "INTERNAL_ERROR";
+    next.status = error.status;
+    next.requestId = error.requestId;
+    return next;
+  }
+  if (error?.name === "AbortError") {
+    const next = new Error("温度建议请求已中止，请重试");
+    next.code = "ABORTED";
+    next.name = "AbortError";
+    return next;
+  }
+  return error;
+}
+
+function visitTemperatureOutcome(value, path = "visitTemperatureOutcome") {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${path}: expected object`);
+  }
+  const status = visitTemperatureText(value.status).toLowerCase();
+  if (!VISIT_TEMPERATURE_STATUSES.has(status)) throw new TypeError(`${path}.status: invalid`);
+  const snapshot = (candidate, field) => {
+    if (candidate === null || candidate === undefined) return null;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)
+      || typeof candidate.id !== "string" || !candidate.id.trim()
+      || !Number.isSafeInteger(candidate.relation) || candidate.relation < 0 || candidate.relation > 100
+      || !Number.isSafeInteger(candidate.version) || candidate.version < 1) {
+      throw new TypeError(`${path}.${field}: invalid`);
+    }
+    return { id: candidate.id.trim(), relation: candidate.relation, version: candidate.version };
+  };
+  const suggestion = value.suggestion
+    ? assertVisitTemperatureSuggestion(value.suggestion, `${path}.suggestion`)
+    : null;
+  return assertApiEntity("visitTemperatureOutcome", {
+    status,
+    suggestion,
+    customer: snapshot(value.customer, "customer"),
+    currentCustomer: snapshot(value.currentCustomer, "currentCustomer"),
+    writeback: value.writeback === true,
+    replayed: value.replayed === true,
+    reason: visitTemperatureText(value.reason, ""),
+  }, path);
+}
+
+export function parseRetryAfterSeconds(value) {
+  if (typeof value !== "string" || !/^\d{1,3}$/u.test(value)) return null;
+  const seconds = Number(value);
+  return Number.isInteger(seconds) && seconds >= 1 && seconds <= 300 ? seconds : null;
+}
+
+export function assertTranscriptionResponse(response, purpose) {
+  const limits = getTranscriptionPurposeLimits(purpose);
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    throw new TypeError("transcription response: expected object");
+  }
+  if (typeof response.requestId !== "string" || !response.requestId.trim()) {
+    throw new TypeError("transcription response.requestId: expected non-empty string");
+  }
+  const item = response.item;
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw new TypeError("transcription response.item: expected object");
+  }
+  if (
+    typeof item.transcript !== "string"
+    || !item.transcript
+    || item.transcript.length > limits.maxTranscriptCharacters
+    || item.transcript !== item.transcript.normalize("NFC")
+    || item.transcript.trim() !== item.transcript
+    || /[\u0000-\u0008\u000B-\u001F]/u.test(item.transcript)
+  ) {
+    throw new TypeError("transcription response.item.transcript: invalid text length");
+  }
+  if (item.language !== "zh-CN") {
+    throw new TypeError("transcription response.item.language: expected zh-CN");
+  }
+  if (
+    !Number.isInteger(item.durationMs)
+    || item.durationMs < MIN_RECORDING_DURATION_MS
+    || item.durationMs > limits.maxDurationMs
+  ) {
+    throw new TypeError("transcription response.item.durationMs: outside purpose limit");
+  }
+  if (item.source !== "server_asr") {
+    throw new TypeError("transcription response.item.source: expected server_asr");
+  }
+  if (typeof item.replayed !== "boolean") {
+    throw new TypeError("transcription response.item.replayed: expected boolean");
+  }
+  // Return a newly constructed capability object. Provider/debug fields from
+  // a successful upstream payload never cross the API-client boundary.
+  return {
+    requestId: response.requestId,
+    item: {
+      transcript: item.transcript,
+      language: item.language,
+      durationMs: item.durationMs,
+      source: item.source,
+      replayed: item.replayed,
+    },
+  };
+}
+
+function assertTranscriptionRequest({ blob, purpose, durationMs, idempotencyKey }) {
+  const limits = getTranscriptionPurposeLimits(purpose);
+  if (!blob || typeof blob.size !== "number" || typeof blob.slice !== "function") {
+    throw new TypeError("transcription blob: expected raw Blob");
+  }
+  if (blob.size <= 0 || blob.size > MAX_AUDIO_BYTES) {
+    throw new TypeError("transcription blob: expected 1..8388608 bytes");
+  }
+  if (!normalizeRecorderMimeType(blob.type)) {
+    throw new TypeError("transcription blob.type: unsupported audio media type");
+  }
+  if (!Number.isInteger(durationMs) || durationMs < MIN_RECORDING_DURATION_MS || durationMs > limits.maxDurationMs) {
+    throw new TypeError("transcription durationMs: outside purpose limit");
+  }
+  if (
+    typeof idempotencyKey !== "string"
+    || idempotencyKey.trim() !== idempotencyKey
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/u.test(idempotencyKey)
+  ) {
+    throw new TypeError("transcription Idempotency-Key: invalid");
+  }
 }
 
 export async function requestJson(fetchImpl, url, options = {}, csrfToken = "") {
@@ -319,6 +997,7 @@ function displaySession(session) {
   return {
     account: String(session.account).trim(),
     displayName: String(session.displayName ?? session.account).trim() || String(session.account).trim(),
+    role: session.role === "admin" ? "admin" : "member",
     expiresAt: new Date(session.expiresAt).toISOString(),
   };
 }
@@ -428,9 +1107,179 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     return assertApiEntity("quickRecord", created.item);
   }
 
+  async function requestVisitTemperature(path, options = {}, { signal, timeoutMs = 10_000 } = {}) {
+    const controller = new AbortController();
+    let timedOut = false;
+    let timer = null;
+    const abortFromParent = () => controller.abort(signal?.reason);
+    if (signal) {
+      if (signal.aborted) abortFromParent();
+      else signal.addEventListener("abort", abortFromParent, { once: true });
+    }
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+    }
+    try {
+      return await requestApi(path, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (timedOut) {
+        const timeoutError = new Error("温度建议请求超时");
+        timeoutError.name = "TimeoutError";
+        timeoutError.code = "VISIT_TEMPERATURE_TIMEOUT";
+        throw normalizeVisitTemperatureError(timeoutError);
+      }
+      throw normalizeVisitTemperatureError(error);
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abortFromParent);
+    }
+  }
+
+  async function createVisitTemperatureSuggestion(visitId, { signal, timeoutMs } = {}) {
+    let response;
+    try {
+      response = await requestVisitTemperature("/api/visit-temperature-suggestions", {
+        method: "POST",
+        body: JSON.stringify({ visitId: requiredApiString(visitId, "visitId") }),
+      }, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    return assertVisitTemperatureSuggestion(response?.item, "visitTemperatureSuggestion.item");
+  }
+
+  async function listVisitTemperatureSuggestions({ customerId, limit, signal, timeoutMs } = {}) {
+    let response;
+    try {
+      response = await requestVisitTemperature(queryPath("/api/visit-temperature-suggestions", { customerId, limit }), {}, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    const item = response?.item;
+    if (!item || typeof item !== "object" || !Array.isArray(item.items)) {
+      throw new TypeError("visitTemperatureSuggestions.items: expected array");
+    }
+    return {
+      items: item.items.map((suggestion, index) => assertVisitTemperatureSuggestion(
+        suggestion,
+        `visitTemperatureSuggestions.items[${index}]`,
+      )),
+      truncated: item.truncated === true,
+    };
+  }
+
+  async function getVisitTemperatureSuggestion(suggestionId, { signal, timeoutMs } = {}) {
+    let response;
+    try {
+      response = await requestVisitTemperature(`/api/visit-temperature-suggestions/${encodeURIComponent(requiredApiString(suggestionId, "suggestionId"))}`, {}, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    return assertVisitTemperatureSuggestion(response?.item, "visitTemperatureSuggestion.item");
+  }
+
+  async function confirmVisitTemperatureSuggestion(suggestion, { signal, timeoutMs } = {}) {
+    if (!suggestion || typeof suggestion !== "object") throw new TypeError("suggestion is required");
+    if (!Number.isSafeInteger(suggestion.previousValue) || suggestion.previousValue < 0 || suggestion.previousValue > 100) {
+      throw new TypeError("previousValue must be an integer from 0 to 100");
+    }
+    let response;
+    try {
+      response = await requestVisitTemperature(`/api/visit-temperature-suggestions/${encodeURIComponent(requiredApiString(suggestion.id, "suggestionId"))}/confirm`, {
+        method: "POST",
+        body: JSON.stringify({
+          suggestionIdentity: requiredApiString(suggestion.identity, "suggestionIdentity"),
+          expectedCustomerVersion: requiredApiVersion(suggestion.customerVersion, "expectedCustomerVersion"),
+          previousValue: Number(suggestion.previousValue),
+          confirm: true,
+        }),
+      }, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    return visitTemperatureOutcome(response?.item, "visitTemperatureConfirmation.item");
+  }
+
+  async function cancelVisitTemperatureSuggestion(suggestion, { signal, timeoutMs } = {}) {
+    if (!suggestion || typeof suggestion !== "object") throw new TypeError("suggestion is required");
+    let response;
+    try {
+      response = await requestVisitTemperature(`/api/visit-temperature-suggestions/${encodeURIComponent(requiredApiString(suggestion.id, "suggestionId"))}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({
+          suggestionIdentity: requiredApiString(suggestion.identity, "suggestionIdentity"),
+          cancel: true,
+        }),
+      }, { signal, timeoutMs });
+    } catch (error) {
+      throw normalizeVisitTemperatureError(error);
+    }
+    const item = response?.item;
+    return item?.suggestion
+      ? visitTemperatureOutcome(item, "visitTemperatureCancellation.item")
+      : { status: item?.status, suggestion: assertVisitTemperatureSuggestion(item, "visitTemperatureCancellation.item"), replayed: item?.replayed === true };
+  }
+
   return {
     isEnabled: Boolean(root),
     setSession,
+
+    async transcribeAudio({
+      blob,
+      purpose,
+      durationMs,
+      idempotencyKey,
+      signal,
+    }) {
+      assertTranscriptionRequest({ blob, purpose, durationMs, idempotencyKey });
+      let response;
+      try {
+        response = await requestApi(
+          `/api/asr/transcriptions?purpose=${encodeURIComponent(purpose)}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": normalizeRecorderMimeType(blob.type),
+              "Idempotency-Key": idempotencyKey,
+              "X-Audio-Duration-Ms": String(durationMs),
+              "X-ASR-Language": "zh-CN",
+            },
+            body: blob,
+            signal,
+          },
+        );
+      } catch (error) {
+        const code = signal?.aborted
+          ? "ASR_ABORTED"
+          : typeof error?.code === "string"
+            ? error.code
+            : Number.isInteger(error?.status)
+              ? "ASR_UNKNOWN_ERROR"
+              : "ASR_NETWORK_ERROR";
+        throw adaptTranscriptionError({
+          code,
+          name: signal?.aborted ? "AbortError" : error?.name,
+          status: error?.status,
+          requestId: error?.requestId,
+          retryAfterSeconds: parseRetryAfterSeconds(error?.retryAfterHeader),
+        });
+      }
+      try {
+        return assertTranscriptionResponse(response, purpose);
+      } catch {
+        // A 2xx response with a malformed provider-shaped payload is a
+        // transient provider contract failure. Keep the error sanitized and
+        // eligible for the one same-Blob retry; never expose response body.
+        throw adaptTranscriptionError({
+          code: "ASR_PROVIDER_BAD_RESPONSE",
+          status: 502,
+          requestId: response?.requestId,
+        });
+      }
+    },
 
     async login({ account, password }) {
       const requestId = ++loginRequestId;
@@ -531,6 +1380,245 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("dashboardSummary", summary.item);
     },
 
+    async getProactiveAssistant({
+      limit,
+      offset,
+      status,
+      trigger,
+      subjectId,
+      customerId,
+      opportunityId,
+      includeHistory,
+      signal,
+    } = {}) {
+      const response = await requestApi(queryPath("/api/assistant/proactive", {
+        limit,
+        offset,
+        status,
+        trigger,
+        subjectId,
+        customerId,
+        opportunityId,
+        ...(includeHistory ? { includeHistory: true } : {}),
+      }), { signal });
+      return assertProactiveAssistant(response.item, "proactiveAssistant.item");
+    },
+
+    async previewCustomerImport(file, options = {}) {
+      if (!file || typeof file !== "object" || !Number.isFinite(file.size) || file.size <= 0) {
+        throw new TypeError("customerImport.file: expected a non-empty File");
+      }
+      const idempotencyKey = requiredApiString(
+        options.idempotencyKey,
+        "customer import preview Idempotency-Key",
+      );
+      if (typeof FormData === "undefined") {
+        throw new Error("customer import preview requires FormData support");
+      }
+      const formData = new FormData();
+      const fileName = typeof file.name === "string" && file.name.trim() ? file.name : "customers.csv";
+      formData.append("file", file, fileName);
+      if (options.mapping !== undefined && options.mapping !== null) {
+        if (typeof options.mapping !== "object" || Array.isArray(options.mapping)) {
+          throw new TypeError("customerImport.mapping: expected object");
+        }
+        formData.append("mapping", JSON.stringify(options.mapping));
+      }
+      const response = await requestApi("/api/customer-imports/preview", {
+        method: "POST",
+        signal: options.signal,
+        headers: idempotencyHeaders({ idempotencyKey }, "customer import preview"),
+        body: formData,
+      });
+      return assertCustomerImportResult(
+        response?.item ?? response,
+        "customerImportPreview.item",
+      );
+    },
+
+    async getCustomerImport(batchId, { signal } = {}) {
+      const id = requiredApiString(batchId, "customerImport.batchId");
+      const response = await requestApi(`/api/customer-imports/${encodeURIComponent(id)}`, { signal });
+      return assertCustomerImportResult(response?.item ?? response, "customerImport.item");
+    },
+
+    async confirmCustomerImport(batchId, input = {}, options = {}) {
+      const id = requiredApiString(batchId, "customerImport.batchId");
+      const source = apiObject(input, "customerImportConfirm");
+      if (source.confirmed !== true) {
+        throw new TypeError("customerImportConfirm.confirmed: expected true");
+      }
+      const idempotencyKey = requiredApiString(
+        options.idempotencyKey ?? source.idempotencyKey,
+        "customer import confirm Idempotency-Key",
+      );
+      const previewDigest = requiredApiString(source.previewDigest, "customerImportConfirm.previewDigest");
+      const fileSha256 = requiredApiString(source.fileSha256, "customerImportConfirm.fileSha256");
+      if (!/^[0-9a-f]{64}$/u.test(previewDigest)) {
+        throw new TypeError("customerImportConfirm.previewDigest: expected SHA-256 digest");
+      }
+      if (!/^[0-9a-f]{64}$/u.test(fileSha256)) {
+        throw new TypeError("customerImportConfirm.fileSha256: expected SHA-256 digest");
+      }
+      const response = await requestApi(`/api/customer-imports/${encodeURIComponent(id)}/confirm`, {
+        method: "POST",
+        signal: options.signal ?? source.signal,
+        headers: idempotencyHeaders({ idempotencyKey }, "customer import confirm"),
+        body: JSON.stringify({ confirmed: true, previewDigest, fileSha256 }),
+      });
+      return assertCustomerImportResult(
+        response?.item ?? response,
+        "customerImportConfirmation.item",
+      );
+    },
+
+    async cancelCustomerImport(batchId, input = {}, options = {}) {
+      const id = requiredApiString(batchId, "customerImport.batchId");
+      const source = apiObject(input, "customerImportCancel");
+      const idempotencyKey = requiredApiString(
+        options.idempotencyKey ?? source.idempotencyKey,
+        "customer import cancel Idempotency-Key",
+      );
+      const reason = source.reason === undefined || source.reason === null || source.reason === ""
+        ? "operator_cancelled"
+        : requiredApiString(source.reason, "customerImportCancel.reason");
+      const response = await requestApi(`/api/customer-imports/${encodeURIComponent(id)}/cancel`, {
+        method: "POST",
+        signal: options.signal ?? source.signal,
+        headers: idempotencyHeaders({ idempotencyKey }, "customer import cancel"),
+        body: JSON.stringify({ reason }),
+      });
+      return assertCustomerImportResult(
+        response?.item ?? response,
+        "customerImportCancellation.item",
+      );
+    },
+
+    async getProactiveNotifications({ limit, offset, signal } = {}) {
+      const response = await requestApi(queryPath("/api/assistant/proactive/notifications", { limit, offset }), { signal });
+      return assertProactiveNotificationPage(response, "proactiveNotifications");
+    },
+
+    async markProactiveNotificationRead(notificationId) {
+      const id = requiredApiString(notificationId, "proactiveNotificationId");
+      const response = await requestApi(`/api/assistant/proactive/notifications/${encodeURIComponent(id)}/read`, {
+        method: "POST",
+        body: "{}",
+      });
+      return assertProactiveNotification(response?.item, "proactiveNotification.item");
+    },
+
+    async updateProactiveLifecycle(proactiveId, payload = {}, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const key = requiredApiString(idempotencyKey, "proactive lifecycle Idempotency-Key");
+      const status = requiredApiString(payload.status, "proactiveLifecycle.status");
+      const allowed = new Set(["pending", "deferred", "snoozed", "dismissed", "ignored", "resolved", "confirmed", "executed", "conflict", "expired", "failed"]);
+      if (!allowed.has(status)) throw new TypeError("proactiveLifecycle.status: invalid lifecycle status");
+      const body = pickOwnFields(payload, ["status", "snoozedUntil", "dismissReason", "resultRefs", "expectedVersion"]);
+      body.status = status;
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive lifecycle update"),
+        body: JSON.stringify(body),
+      });
+      return assertProactiveMutationItem(response?.item, "proactiveLifecycle.item");
+    },
+
+    async updateProactiveSuggestion(proactiveId, fields = {}, expectedVersion, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const key = requiredApiString(idempotencyKey, "proactive fields Idempotency-Key");
+      const version = requiredApiVersion(expectedVersion, "proactiveFields.expectedVersion");
+      const body = {
+        ...pickOwnFields(fields, ["assignee", "dueDate", "priority", "expectedResult"]),
+        expectedVersion: version,
+      };
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/fields`, {
+        method: "PATCH",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive fields update"),
+        body: JSON.stringify(body),
+      });
+      return assertProactiveMutationItem(response?.item, "proactiveFields.item");
+    },
+
+    async createProactiveConfirmationPreview(proactiveId, target, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      if (target !== "action" && target !== "risk") {
+        throw new TypeError("proactiveConfirmationPreview.target: expected action or risk");
+      }
+      const key = requiredApiString(idempotencyKey, "proactive confirmation preview Idempotency-Key");
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/previews`, {
+        method: "POST",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive confirmation preview"),
+        body: JSON.stringify({ target }),
+      });
+      return assertProactiveConfirmationPreview(response?.item, "proactiveConfirmationPreview.item");
+    },
+
+    async getProactiveConfirmationPreview(proactiveId, previewId) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const durableId = requiredApiString(previewId, "confirmationPreviewId");
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/previews/${encodeURIComponent(durableId)}`);
+      return assertProactiveConfirmationPreview(response?.item, "proactiveConfirmationPreview.item");
+    },
+
+    async cancelProactiveConfirmationPreview(proactiveId, previewId, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const durableId = requiredApiString(previewId, "confirmationPreviewId");
+      const key = requiredApiString(idempotencyKey, "proactive confirmation preview cancellation Idempotency-Key");
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/previews/${encodeURIComponent(durableId)}/cancel`, {
+        method: "POST",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive confirmation preview cancellation"),
+        body: JSON.stringify({ cancel: true }),
+      });
+      return assertProactiveConfirmationPreview(response?.item, "proactiveConfirmationPreview.item");
+    },
+
+    async confirmProactiveWriteback(proactiveId, payload = {}, idempotencyKey) {
+      const id = requiredApiString(proactiveId, "proactiveId");
+      const target = payload?.target;
+      if (target !== "action" && target !== "risk") {
+        throw new TypeError("proactiveWriteback.target: expected action or risk");
+      }
+      const key = requiredApiString(idempotencyKey, "proactive writeback Idempotency-Key");
+      const customerId = requiredApiString(payload.customerId, "proactiveWriteback.customerId");
+      const opportunityId = requiredApiString(payload.opportunityId, "proactiveWriteback.opportunityId");
+      const confirmationPreviewId = requiredApiString(payload.confirmationPreviewId, "proactiveWriteback.confirmationPreviewId");
+      const expectedOpportunityVersion = requiredApiVersion(
+        payload.expectedOpportunityVersion,
+        "proactiveWriteback.expectedOpportunityVersion",
+      );
+      const expectedCustomerVersion = requiredApiVersion(
+        payload.expectedCustomerVersion,
+        "proactiveWriteback.expectedCustomerVersion",
+      );
+      const previewDigest = requiredApiString(payload.previewDigest, "proactiveWriteback.previewDigest");
+      if (!/^[0-9a-f]{64}$/u.test(previewDigest)) {
+        throw new TypeError("proactiveWriteback.previewDigest: expected SHA-256 digest");
+      }
+      const preview = payload?.preview;
+      if (!preview || typeof preview !== "object" || Array.isArray(preview)) {
+        throw new TypeError("proactiveWriteback.preview: expected object");
+      }
+      const response = await requestApi(`/api/assistant/proactive/${encodeURIComponent(id)}/confirm`, {
+        method: "POST",
+        headers: idempotencyHeaders({ idempotencyKey: key }, "proactive writeback"),
+        body: JSON.stringify({
+          confirmationPreviewId,
+          target,
+          customerId,
+          opportunityId,
+          expectedOpportunityVersion,
+          expectedCustomerVersion,
+          previewDigest,
+          preview: pickOwnFields(preview, [
+            "title", "reason", "target", "evidence", "action",
+            "customerId", "opportunityId",
+          ]),
+        }),
+      });
+      return assertProactiveWritebackOutcome(response?.item, "proactiveWritebackOutcome.item");
+    },
+
     async listHospitalTenders(filters = {}, { signal } = {}) {
       const query = new URLSearchParams();
       for (const [key, value] of Object.entries(filters ?? {})) {
@@ -538,6 +1626,31 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       }
       const response = await requestApi(`/api/hospital-tenders${query.size ? `?${query}` : ""}`, { signal });
       return assertApiCollection("hospitalTenderNotice", response.items ?? [], "hospitalTenders.items");
+    },
+
+    async listHospitalTenderPage(filters = {}, { signal } = {}) {
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(filters ?? {})) {
+        if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+      }
+      const response = await requestApi(`/api/hospital-tenders${query.size ? `?${query}` : ""}`, { signal });
+      const items = assertApiCollection("hospitalTenderNotice", response.items ?? [], "hospitalTenders.items");
+      const total = Number.isSafeInteger(response.total) && response.total >= 0
+        ? response.total
+        : items.length;
+      const limit = Number.isSafeInteger(response.limit) && response.limit > 0
+        ? response.limit
+        : (Number.isSafeInteger(filters.limit) && filters.limit > 0 ? filters.limit : items.length || 1);
+      const offset = Number.isSafeInteger(response.offset) && response.offset >= 0
+        ? response.offset
+        : (Number.isSafeInteger(filters.offset) && filters.offset >= 0 ? filters.offset : 0);
+      return {
+        items,
+        total,
+        limit,
+        offset,
+        hasMore: response.hasMore === undefined ? offset + items.length < total : Boolean(response.hasMore),
+      };
     },
 
     async getHospitalTender(id, { signal } = {}) {
@@ -560,6 +1673,43 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("hospitalTenderHealth", response.item);
     },
 
+    async previewHospitalTenderLeadConversion(noticeId, input, { signal } = {}) {
+      const response = await requestApi(hospitalTenderLeadConversionUrl(noticeId, "preview"), {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          customerId: requiredApiString(input?.customerId, "customerId"),
+        }),
+      });
+      return assertHospitalTenderLeadConversionPreview(response?.item);
+    },
+
+    async confirmHospitalTenderLeadConversion(noticeId, input, { signal } = {}) {
+      const response = await requestApi(hospitalTenderLeadConversionUrl(noticeId, "confirm"), {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          customerId: requiredApiString(input?.customerId, "customerId"),
+          previewDigest: requiredApiString(input?.previewDigest, "previewDigest"),
+          confirmed: true,
+        }),
+      });
+      return assertHospitalTenderLeadConversionConfirmation(response?.item);
+    },
+
+    async cancelHospitalTenderLeadConversion(noticeId, input, { signal } = {}) {
+      const response = await requestApi(hospitalTenderLeadConversionUrl(noticeId, "cancel"), {
+        method: "POST",
+        signal,
+        body: JSON.stringify({
+          customerId: requiredApiString(input?.customerId, "customerId"),
+          previewDigest: requiredApiString(input?.previewDigest, "previewDigest"),
+          cancel: true,
+        }),
+      });
+      return assertHospitalTenderLeadConversionCancellation(response?.item);
+    },
+
     async runHospitalTenderMonitor() {
       const response = await requestApi("/api/hospital-tenders/run", {
         method: "POST",
@@ -570,6 +1720,14 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
 
     async getHospitalTenderScheduler({ signal } = {}) {
       const response = await requestApi("/api/hospital-tenders/scheduler", { signal });
+      return response;
+    },
+
+    async updateHospitalTenderScheduler(patch) {
+      const response = await requestApi("/api/hospital-tenders/scheduler", {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
       return response;
     },
 
@@ -620,6 +1778,31 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertTravelExpenseCollection(response?.items, "travelExpenses.items");
     },
 
+    async getTravelExpenseWorkbench({ weekStart, signal } = {}) {
+      const response = await requestApi(
+        queryPath("/api/travel-expense-workbench", { weekStart }),
+        { signal },
+      );
+      return assertTravelExpenseWorkbench(response?.item, "travelExpenseWorkbench.item");
+    },
+
+    async getTravelExpenseRegionProfile({ weekStart, signal } = {}) {
+      const response = await requestApi(
+        queryPath("/api/travel-expense-region-profile", { weekStart }),
+        { signal },
+      );
+      return assertTravelExpenseRegionProfile(response?.item, "travelExpenseRegionProfile.item");
+    },
+
+    async saveTravelExpenseRegionProfile(profile) {
+      const response = await requestApi("/api/travel-expense-region-profile", {
+        method: "PUT",
+        headers: nonNegativeVersionHeaders(profile?.version),
+        body: JSON.stringify(pickOwnFields(profile, WRITABLE_FIELDS.travelExpenseRegionProfile)),
+      });
+      return assertTravelExpenseRegionProfile(response?.item, "travelExpenseRegionProfile.item");
+    },
+
     async getTravelExpense(expenseId, { signal } = {}) {
       const response = await requestApi(`/api/travel-expenses/${encodeURIComponent(expenseId)}`, { signal });
       return assertTravelExpense(response?.item, "travelExpense.item");
@@ -668,7 +1851,7 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         method: "GET",
         credentials: "include",
         redirect: "error",
-        headers: { Accept: "application/pdf" },
+        headers: { Accept: "application/pdf,image/*" },
         signal,
       });
     },
@@ -742,45 +1925,42 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertTravelExpenseDocumentInbox(response?.item, "travelExpenseDocumentInbox.item");
     },
 
-    async listShortcutBookkeepingReviews({ status = "review_required", signal } = {}) {
+    async listWeixinBookkeepingReviews({ status = "review_required", signal } = {}) {
       const response = await requestApi(
-        queryPath("/api/integrations/shortcut/bookkeeping/review", { status }),
+        queryPath("/api/integrations/weixin/bookkeeping/review", { status }),
         { signal },
       );
-      if (!Array.isArray(response?.items)) throw new TypeError("shortcutBookkeepingReviews.items must be an array");
+      return apiItems(
+        response?.items,
+        "weixinBookkeepingReviews.items",
+        assertWeixinBookkeepingReview,
+      );
+    },
+
+    async getWeixinBookkeepingReview(reviewId, { signal } = {}) {
+      const response = await requestApi(
+        `/api/integrations/weixin/bookkeeping/review/${encodeURIComponent(reviewId)}`,
+        { signal },
+      );
+      return assertWeixinBookkeepingReview(response?.item, "weixinBookkeepingReview.item");
+    },
+
+    async listBookkeepingAuditLogs({ limit = 100, signal } = {}) {
+      const response = await requestApi(
+        `/api/audit-logs?scope=bookkeeping&limit=${encodeURIComponent(limit)}`,
+        { signal },
+      );
+      if (!Array.isArray(response?.items)) {
+        throw new TypeError("auditLogs.items: expected array");
+      }
       return response.items;
     },
 
-    async getShortcutBookkeepingReview(reviewId, { signal } = {}) {
-      const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}`,
-        { signal },
-      );
-      return response?.item ?? null;
-    },
-
-    async confirmShortcutBookkeepingReview(reviewId, analysis) {
-      const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/confirm`,
-        { method: "POST", body: JSON.stringify({ analysis }) },
-      );
-      return response?.item ?? null;
-    },
-
-    async rejectShortcutBookkeepingReview(reviewId, reason) {
-      const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/reject`,
-        { method: "POST", body: JSON.stringify({ reason }) },
-      );
-      return response?.item ?? null;
-    },
-
-    async retryShortcutBookkeepingReview(reviewId) {
-      const response = await requestApi(
-        `/api/integrations/shortcut/bookkeeping/review/${encodeURIComponent(reviewId)}/retry`,
-        { method: "POST", body: "{}" },
-      );
-      return response?.item ?? null;
+    async recordBookkeepingClientEvent(event, detail = {}) {
+      await requestApi("/api/bookkeeping/client-events", {
+        method: "POST",
+        body: JSON.stringify({ event, ...detail }),
+      });
     },
 
     async listTravelExpenseAdvances({ weekStart, signal } = {}) {
@@ -834,12 +2014,13 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return url(`/api/invoices/${encodeURIComponent(invoiceId)}/content`);
     },
 
-    async getInvoiceContentResponse(invoiceId, { signal } = {}) {
+    async getInvoiceContentResponse(invoiceId, { signal, accept = "application/pdf" } = {}) {
+      if (typeof accept !== "string" || !accept.trim()) throw new TypeError("invoice content Accept header must be a non-empty string");
       return requestApiResponse(`/api/invoices/${encodeURIComponent(invoiceId)}/content`, {
         method: "GET",
         credentials: "include",
         redirect: "error",
-        headers: { Accept: "application/pdf" },
+        headers: { Accept: accept },
         signal,
       });
     },
@@ -959,6 +2140,11 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
     },
 
     createQuickRecord,
+    createVisitTemperatureSuggestion,
+    listVisitTemperatureSuggestions,
+    getVisitTemperatureSuggestion,
+    confirmVisitTemperatureSuggestion,
+    cancelVisitTemperatureSuggestion,
 
     async analyzeQuickRecord(rawContent, metadata = {}) {
       const quickRecord = await createQuickRecord(rawContent, metadata);
@@ -1073,6 +2259,14 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("riskItem", deleted.deleted);
     },
 
+    async createAction(draft) {
+      const created = await requestApi("/api/actions", {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(draft, WRITABLE_FIELDS.actionCreate)),
+      });
+      return assertApiEntity("actionItem", created.item);
+    },
+
     async updateActionStatus(actionId, patch, version) {
       const updated = await requestApi(`/api/actions/${actionId}`, {
         method: "PATCH",
@@ -1090,41 +2284,51 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("actionItem", deleted.deleted);
     },
 
-    async confirmQuickRecord(quickRecordId, targets, options = {}) {
-      const idempotencyKey = String(options.idempotencyKey ?? "");
-      if (!idempotencyKey || idempotencyKey.trim() !== idempotencyKey) {
-        throw new TypeError("A valid confirmation Idempotency-Key is required");
-      }
-      const payload = {
-        targets,
-        confirmedBy: options.confirmedBy ?? "继振",
-        note: options.note ?? "",
-        targetVersions: options.targetVersions ?? {},
-      };
-      if (options.analysisVersionId) payload.analysisVersionId = options.analysisVersionId;
-      const confirmed = await requestApi(`/api/quick-records/${quickRecordId}/confirm`, {
+    async createQuickRecordConfirmationPreview(quickRecordId) {
+      const response = await requestApi(`/api/quick-records/${encodeURIComponent(requiredApiString(quickRecordId, "quickRecordId"))}/confirmation-previews`, {
         method: "POST",
-        headers: {
-          ...versionHeaders(options.quickRecordVersion),
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: JSON.stringify(payload),
+        body: "{}",
       });
-
-      return {
-        ...confirmed,
-        confirmations: assertApiCollection("manualConfirmation", confirmed.confirmations ?? []),
-        quickRecord: assertApiEntity("quickRecord", confirmed.quickRecord),
-        analysis: confirmed.analysis ? assertApiEntity("aiInsight", confirmed.analysis) : null,
-        customer: confirmed.customer ? assertApiEntity("customer", confirmed.customer) : null,
-        opportunity: confirmed.opportunity ? assertApiEntity("opportunity", confirmed.opportunity) : null,
-        action: confirmed.action ? assertApiEntity("actionItem", confirmed.action) : null,
-        risk: confirmed.risk ? assertApiEntity("riskItem", confirmed.risk) : null,
-      };
+      return assertQuickRecordConfirmationPreview(response?.item, "quickRecordConfirmationPreview.item");
     },
 
-    async generateWeeklyDraft({ owner, periodStart, periodEnd, knowledgeIds = [] }) {
-      const body = { owner, periodStart, periodEnd };
+    async getQuickRecordConfirmationPreview(previewId) {
+      const response = await requestApi(confirmationPreviewUrl(previewId));
+      return assertQuickRecordConfirmationPreview(response?.item, "quickRecordConfirmationPreview.item");
+    },
+
+    async confirmQuickRecordConfirmationItem(previewId, payload) {
+      const response = await requestApi(confirmationPreviewUrl(previewId, "/confirm-item"), {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(payload ?? {}, [
+          "confirm", "suggestionIdentity", "expectedQuickRecordVersion", "analysisVersionId",
+          "summaryHash", "evidenceHash", "itemId", "itemIdentity",
+        ])),
+      });
+      return assertQuickRecordConfirmationOutcome(response?.item, "quickRecordConfirmationOutcome.item");
+    },
+
+    async confirmAllQuickRecordConfirmationItems(previewId, payload) {
+      const response = await requestApi(confirmationPreviewUrl(previewId, "/confirm-all"), {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(payload ?? {}, [
+          "confirm", "suggestionIdentity", "expectedQuickRecordVersion", "analysisVersionId",
+          "summaryHash", "evidenceHash",
+        ])),
+      });
+      return assertQuickRecordConfirmationOutcome(response?.item, "quickRecordConfirmationOutcome.item");
+    },
+
+    async cancelQuickRecordConfirmationPreview(previewId, payload) {
+      const response = await requestApi(confirmationPreviewUrl(previewId, "/cancel"), {
+        method: "POST",
+        body: JSON.stringify(pickOwnFields(payload ?? {}, ["cancel", "suggestionIdentity"])),
+      });
+      return assertQuickRecordConfirmationPreview(response?.item, "quickRecordConfirmationPreview.item");
+    },
+
+    async generateWeeklyDraft({ periodStart, periodEnd, knowledgeIds = [] }) {
+      const body = { periodStart, periodEnd };
       if (knowledgeIds.length > 0) body.knowledgeIds = knowledgeIds;
       const draft = await requestApi("/api/reports/weekly/draft", {
         method: "POST",
@@ -1171,8 +2375,8 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       };
     },
 
-    async generateSolutionDraft({ owner, customerId, opportunityId, artifactType = "solution_framework", knowledgeIds = [] }) {
-      const body = { owner, customerId, opportunityId, artifactType };
+    async generateSolutionDraft({ customerId, opportunityId, artifactType = "solution_framework", knowledgeIds = [] }) {
+      const body = { customerId, opportunityId, artifactType };
       if (knowledgeIds.length > 0) body.knowledgeIds = knowledgeIds;
       const draft = await requestApi("/api/solutions/draft", {
         method: "POST",
@@ -1190,12 +2394,46 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return assertApiEntity("solutionDraft", saved.item);
     },
 
-    async generateAiSuggestion({ type, title, context }) {
+    async generateAiSuggestion({ type, title, context }, { signal } = {}) {
       const suggestion = await requestApi("/api/ai/suggestions", {
         method: "POST",
         body: JSON.stringify({ type, title, context }),
+        signal,
       });
       return assertApiEntity("aiSuggestion", suggestion.item);
+    },
+
+    async listAiSuggestions(filters = {}, { signal } = {}) {
+      const params = new URLSearchParams();
+      for (const field of ["type", "sourceId", "limit"]) {
+        const value = filters[field];
+        if (value !== undefined && value !== null && String(value).trim()) {
+          params.set(field, String(value).trim());
+        }
+      }
+      const query = params.toString();
+      const response = await requestApi(`/api/ai/suggestions${query ? `?${query}` : ""}`, { signal });
+      return { items: assertApiCollection("aiSuggestion", response.items) };
+    },
+
+    async confirmAiSuggestion(id, { draft, version }, { signal } = {}) {
+      const response = await requestApi(`/api/ai/suggestions/${encodeURIComponent(id)}/confirm`, {
+        method: "POST",
+        headers: versionHeaders(version),
+        body: JSON.stringify({ confirm: true, draft }),
+        signal,
+      });
+      return assertApiEntity("aiSuggestion", response.item);
+    },
+
+    async cancelAiSuggestion(id, { version }, { signal } = {}) {
+      const response = await requestApi(`/api/ai/suggestions/${encodeURIComponent(id)}/cancel`, {
+        method: "POST",
+        headers: versionHeaders(version),
+        body: JSON.stringify({ cancel: true }),
+        signal,
+      });
+      return assertApiEntity("aiSuggestion", response.item);
     },
 
     async listSalesDecisionAnalyses(filters = {}) {
@@ -1249,48 +2487,67 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       return binding.item;
     },
 
-    async listShortcutTokens() {
-      const response = await requestApi("/api/integrations/shortcut/tokens");
-      if (!Array.isArray(response?.items)) {
-        throw new TypeError("快捷指令 Token 响应缺少 items");
-      }
+    async listUsers() {
+      const response = await requestApi("/api/admin/users");
+      if (!Array.isArray(response?.items)) throw new TypeError("adminUsers.items: expected array");
       return response.items;
     },
 
-    async createShortcutToken({ label } = {}) {
-      const body = {};
-      if (label !== undefined) body.label = label;
-      const response = await requestApi("/api/integrations/shortcut/tokens", {
+    async createUser(payload) {
+      const response = await requestApi("/api/admin/users", {
         method: "POST",
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       });
-      if (!response?.item || typeof response.item.token !== "string") {
-        throw new TypeError("快捷指令 Token 创建响应缺少一次性 Token");
-      }
       return response.item;
     },
 
-    async revokeShortcutToken(id) {
-      const normalizedId = String(id ?? "").trim();
-      if (!normalizedId) throw new TypeError("快捷指令 Token id 不能为空");
-      const response = await requestApi(
-        `/api/integrations/shortcut/tokens/${encodeURIComponent(normalizedId)}`,
-        { method: "DELETE" },
-      );
-      if (!response?.item) throw new TypeError("快捷指令 Token 撤销响应缺少 item");
+    async updateUser(account, payload) {
+      const response = await requestApi(`/api/admin/users/${encodeURIComponent(account)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
       return response.item;
+    },
+
+    async listWeixinBindings() {
+      const response = await requestApi("/api/admin/weixin-bindings");
+      if (!Array.isArray(response?.items)) throw new TypeError("weixinBindings.items: expected array");
+      return response.items;
+    },
+
+    async createWeixinBindingCode(account) {
+      const response = await requestApi("/api/admin/weixin-bindings/codes", {
+        method: "POST",
+        body: JSON.stringify({ account }),
+      });
+      return response.item;
+    },
+
+    async updateWeixinBinding(senderId, payload) {
+      const response = await requestApi(`/api/admin/weixin-bindings/${encodeURIComponent(senderId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      return response.item;
+    },
+
+    async unbindWeixinBinding(senderId, expectedVersion) {
+      const response = await requestApi(`/api/admin/weixin-bindings/${encodeURIComponent(senderId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ expectedVersion, status: "disabled" }),
+      });
+      return response.item;
+    },
+
+    async changePassword(payload) {
+      return requestApi("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
     },
 
     async getSecuritySettings() {
       const response = await requestApi("/api/settings/security");
-      return response.item;
-    },
-
-    async rotateIcostToken() {
-      const response = await requestApi("/api/settings/icost-token/rotate", {
-        method: "POST",
-        body: "{}",
-      });
       return response.item;
     },
 
@@ -1309,6 +2566,50 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
         body: JSON.stringify({ confirmation: "CLEAR" }),
       });
       return response.item;
+    },
+
+    async savePushplusToken(token) {
+      if (typeof token !== "string" || !token.trim()) throw new TypeError("PushPlus Token is required");
+      const response = await requestApi("/api/settings/pushplus-token", {
+        method: "PUT",
+        body: JSON.stringify({ token: token.trim() }),
+      });
+      return response.item;
+    },
+
+    async clearPushplusToken() {
+      const response = await requestApi("/api/settings/pushplus-token", {
+        method: "DELETE",
+        body: JSON.stringify({ confirmation: "CLEAR" }),
+      });
+      return response.item;
+    },
+
+    async testPushplusToken() {
+      const response = await requestApi("/api/settings/pushplus/test", {
+        method: "POST",
+        body: "{}",
+      });
+      return response.item;
+    },
+
+    async postAssistantChat(payload) {
+      return requestApi("/api/assistant/chat", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async postAssistantConfirm(payload) {
+      return requestApi("/api/assistant/confirm", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+
+    async getAssistantHistory(conversationId) {
+      const query = encodeURIComponent(conversationId);
+      return requestApi(`/api/assistant/history?conversationId=${query}`);
     },
   };
 }

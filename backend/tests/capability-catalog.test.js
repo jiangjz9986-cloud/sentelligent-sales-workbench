@@ -12,9 +12,11 @@ const REQUIRED_CAPABILITY_IDS = [
   "customer.search",
   "customer.detail",
   "opportunity.detail",
+  "opportunity.write",
   "visit-capture",
   "travel-expense.summary",
   "reimbursement-report",
+  "advance-settlement",
   "sales-decision.preview",
   "sales-report",
   "action-risk",
@@ -47,9 +49,32 @@ describe("小小 capability metadata catalog", () => {
 
     assert.ok(byId.get("customer.search").mappings.tools.includes("customer.search"));
     assert.ok(byId.get("visit-capture").mappings.tools.includes("visit-capture.collect"));
+    for (const tool of ["visit-capture.capture", "visit-capture.search", "visit-capture.update", "visit-capture.void"]) {
+      assert.ok(byId.get("visit-capture").mappings.tools.includes(tool), tool);
+    }
     assert.ok(byId.get("reimbursement-report").mappings.tools.includes("reimbursement-report.preview"));
-    assert.equal(byId.get("sales-decision.preview").status, "partial");
-    assert.match(byId.get("sales-decision.preview").unavailableReason, /尚未接入/);
+    for (const tool of [
+      "opportunity.list",
+      "opportunity.update-stage",
+      "opportunity.update-next",
+      "opportunity.update",
+      "opportunity.create",
+      "opportunity.delete",
+    ]) {
+      assert.ok(byId.get("opportunity.write").mappings.tools.includes(tool), tool);
+    }
+    assert.equal(byId.get("opportunity.write").confirmationLevel, "explicit");
+    assert.deepEqual(byId.get("opportunity.write").mappings.apis, [
+      "POST /api/opportunities",
+      "PATCH /api/opportunities/:id",
+      "DELETE /api/opportunities/:id",
+    ]);
+    assert.match(byId.get("sales-decision.preview").description, /阶段升级检查/u);
+    assert.equal(byId.get("sales-decision.preview").status, "ready");
+    assert.equal(byId.get("sales-decision.preview").unavailableReason, null);
+    assert.equal(byId.get("advance-settlement").status, "ready");
+    assert.equal(byId.get("advance-settlement").unavailableReason, null);
+    assert.ok(byId.get("advance-settlement").mappings.tools.includes("advance-settlement.preview"));
   });
 
   it("returns isolated snapshots so callers cannot mutate the internal catalog", () => {
@@ -80,13 +105,14 @@ describe("小小 capability metadata catalog", () => {
       "customer.search": ["GET /api/customers"],
       "customer.detail": ["GET /api/customers/:id"],
       "opportunity.detail": ["GET /api/opportunities/:id"],
-      "visit-capture": ["POST /api/quick-records/preview"],
+      "visit-capture": ["POST /api/quick-records/preview", "GET /api/quick-records"],
       "travel-expense.summary": ["GET /api/travel-expenses"],
       "reimbursement-report": ["GET /api/travel-expenses"],
       "sales-decision.preview": ["POST /api/ai/sales-decisions"],
       "sales-report": [],
-      "action-risk": ["GET /api/actions", "GET /api/risks"],
+      "action-risk": ["GET /api/actions", "GET /api/risks", "PATCH /api/actions/:id", "GET /api/actions/reminders/status"],
       "knowledge.search": ["POST /api/knowledge/search"],
+      "advance-settlement": ["GET /api/travel-expense-advances", "GET /api/travel-expenses"],
     };
 
     for (const [id, apis] of Object.entries(expectedApis)) {

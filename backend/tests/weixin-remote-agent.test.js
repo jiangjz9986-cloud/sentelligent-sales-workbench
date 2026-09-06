@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 
+import { validateWeixinAssistantEvent } from "../src/assistant/weixinEvent.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
-import { VALID_PNG } from "./helpers/image-fixtures.js";
+import { VALID_JPEG, VALID_PNG } from "./helpers/image-fixtures.js";
 
 const temporaryDirectories = [];
 
@@ -14,6 +15,14 @@ async function mediaPath() {
   temporaryDirectories.push(directory);
   const filePath = join(directory, "receipt.png");
   await writeFile(filePath, VALID_PNG);
+  return filePath;
+}
+
+async function jpegMediaPath() {
+  const directory = await mkdtemp(join(tmpdir(), "sentelligent-remote-agent-jpeg-"));
+  temporaryDirectories.push(directory);
+  const filePath = join(directory, "payment-proof.jpg");
+  await writeFile(filePath, VALID_JPEG);
   return filePath;
 }
 
@@ -77,6 +86,7 @@ describe("remote Clawbot agent adapter", () => {
       senderId: "sender-1",
       chatType: "direct",
       media: {
+        type: "image",
         fileName: "receipt.png",
         mediaType: "image/png",
         contentBase64: VALID_PNG.toString("base64"),
@@ -85,6 +95,76 @@ describe("remote Clawbot agent adapter", () => {
       },
     });
     assert.doesNotMatch(calls[0].options.body, /must-not-be-forwarded|rawUpdate|filePath|test-machine-token|[A-Z]:\\/i);
+  });
+
+  it("carries a real file-path JPEG through the remote HTTP body and strict event validator", async () => {
+    const filePath = await jpegMediaPath();
+    let postedBody;
+    let validatedEvent;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-machine-token",
+      fetchImpl: async (_url, options) => {
+        postedBody = JSON.parse(options.body);
+        validatedEvent = await validateWeixinAssistantEvent(postedBody);
+        return jsonResponse({ status: "ok", reply: "received" });
+      },
+    });
+
+    const result = await agent.chat({
+      conversationId: "conversation-jpeg",
+      text: "",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"b".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1_786_500_000_123,
+      media: { type: "image", filePath, mimeType: "image/*", fileName: "payment-proof.jpg" },
+    });
+
+    assert.deepEqual(result, { status: "ok", reply: "received" });
+    assert.equal(postedBody.media.type, "image");
+    assert.equal(postedBody.media.mediaType, "image/jpeg");
+    assert.equal(postedBody.media.contentBase64, VALID_JPEG.toString("base64"));
+    assert.equal(validatedEvent.media.mediaType, "image/jpeg");
+    assert.equal(validatedEvent.media.contentBase64, VALID_JPEG.toString("base64"));
+    assert.equal(Object.hasOwn(postedBody.media, "filePath"), false);
+  });
+
+  it("preserves only the exact image and file media kinds at the remote boundary", async () => {
+    const filePath = await mediaPath();
+    const postedTypes = [];
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-machine-token",
+      fetchImpl: async (_url, options) => {
+        postedTypes.push(JSON.parse(options.body).media.type);
+        return jsonResponse({ status: "ok" });
+      },
+    });
+    const delivery = {
+      conversationId: "conversation-media-kind",
+      text: "",
+      senderId: "sender-1",
+      chatType: "direct",
+      deliveryTimestampMs: 1_786_500_000_123,
+    };
+
+    for (const [index, type] of ["image", "file"].entries()) {
+      await agent.chat({
+        ...delivery,
+        messageId: `weixin:delivery:v1:${String(index + 1).repeat(64)}`,
+        media: { type, filePath, mimeType: "image/png", fileName: "receipt.png" },
+      });
+    }
+    for (const [index, type] of [" image ", "IMAGE", "audio"].entries()) {
+      await assert.rejects(agent.chat({
+        ...delivery,
+        messageId: `weixin:delivery:v1:${String(index + 3).repeat(64)}`,
+        media: { type, filePath, mimeType: "image/png", fileName: "receipt.png" },
+      }), { code: "REMOTE_AGENT_MEDIA_INVALID" });
+    }
+
+    assert.deepEqual(postedTypes, ["image", "file"]);
   });
 
   it("keeps the legacy digest fallback available only when explicitly injected for tests", async () => {
@@ -191,6 +271,159 @@ describe("remote Clawbot agent adapter", () => {
     );
   });
 
+  it("returns only strict bounded 409 business replies to WeChat", async () => {
+    let reply = { status: "clarify", text: "请引用对应的最新记账草稿。" };
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse(reply, 409),
+    });
+    const request = {
+      conversationId: "c-1",
+      text: "修改备注为客户拜访",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+
+    for (const status of ["clarify", "review_required", "error"]) {
+      reply = { status, text: `bounded-${status}` };
+      assert.deepEqual(await agent.chat(request), reply);
+    }
+  });
+
+  it("rejects malformed or expanded 409 response shapes as permanent safe errors", async () => {
+    let responseBody = { status: "clarify", text: "valid", debug: { path: "/private/db" } };
+    let rawResponse = null;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => rawResponse ?? jsonResponse(responseBody, 409),
+    });
+    const request = {
+      conversationId: "c-1",
+      text: "修改备注为客户拜访",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"b".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+    const invalidBodies = [
+      responseBody,
+      { status: "ok", text: "not-allowlisted" },
+      { status: "clarify", text: "" },
+      { status: "clarify", text: "   " },
+      { status: "clarify", text: "contains\ncontrol" },
+      { status: "clarify", text: "x".repeat(20_001) },
+      { status: "clarify" },
+      ["clarify", "text"],
+    ];
+
+    for (const invalidBody of invalidBodies) {
+      responseBody = invalidBody;
+      await assert.rejects(agent.chat(request), (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
+        assert.equal(error.message, "远程助手暂时不可用，请稍后重试");
+        assert.equal(error.permanent, true);
+        return true;
+      });
+    }
+
+    rawResponse = { ok: false, status: 409, text: async () => "{not-json" };
+    await assert.rejects(agent.chat(request), { code: "REMOTE_AGENT_REQUEST_FAILED", permanent: true });
+  });
+
+  it("keeps authorization and server failures exceptional", async () => {
+    let backendStatus = 401;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse({ status: "clarify", text: "must not be returned" }, backendStatus),
+    });
+    const request = {
+      conversationId: "c-1",
+      text: "hello",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"c".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+
+    for (const status of [401, 403, 500]) {
+      backendStatus = status;
+      await assert.rejects(agent.chat(request), (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
+        assert.equal(error.permanent, status < 500);
+        return true;
+      });
+    }
+  });
+
+  it("marks permanent backend authorization responses so one message cannot poison retries", async () => {
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse({ error: { code: "WEIXIN_SENDER_NOT_ALLOWED" } }, 403),
+    });
+
+    await assert.rejects(
+      agent.chat({
+        conversationId: "c-1",
+        text: "hello",
+        senderId: "sender-1",
+        messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+        chatType: "direct",
+        deliveryTimestampMs: 1786500000123,
+      }),
+      (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_REQUEST_FAILED");
+        assert.equal(error.permanent, true);
+        return true;
+      },
+    );
+  });
+
+  it("bounds chunked backend responses before buffering them in memory", async () => {
+    const chunk = new Uint8Array(600 * 1024);
+    let reads = 0;
+    let cancelled = false;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        body: {
+          getReader: () => ({
+            read: async () => (reads++ < 2 ? { value: chunk, done: false } : { value: undefined, done: true }),
+            cancel: async () => { cancelled = true; },
+            releaseLock: () => {},
+          }),
+        },
+        text: async () => assert.fail("streaming responses must not fall back to text()"),
+      }),
+    });
+
+    await assert.rejects(
+      agent.chat({
+        conversationId: "c-1",
+        text: "hello",
+        senderId: "sender-1",
+        messageId: `weixin:delivery:v1:${"a".repeat(64)}`,
+        chatType: "direct",
+        deliveryTimestampMs: 1786500000123,
+      }),
+      (error) => {
+        assert.equal(error.code, "REMOTE_AGENT_INVALID_RESPONSE");
+        assert.equal(error.message, "远程助手暂时不可用，请稍后重试");
+        return true;
+      },
+    );
+    assert.equal(cancelled, true);
+  });
+
   it("forwards sender and chat metadata while keeping the owner server-owned", async () => {
     let requestBody;
     const agent = createRemoteClawbotAgent({
@@ -223,5 +456,33 @@ describe("remote Clawbot agent adapter", () => {
     assert.equal(Object.hasOwn(requestBody, "pendingActionId"), false);
     assert.equal(Object.hasOwn(requestBody, "confirmationCode"), false);
     assert.equal(Object.hasOwn(requestBody, "owner"), false);
+  });
+
+  it("forwards only bounded structured quote fields for precise pending-draft selection", async () => {
+    let requestBody;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "token",
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return jsonResponse({ status: "ok", text: "received" });
+      },
+    });
+
+    await agent.chat({
+      conversationId: "c-quote",
+      text: "确认",
+      quotedMessageId: "provider-outbound-1",
+      quotedText: "检测到一笔新记账\n待确认编号：BK-0123456789AB",
+      senderId: "sender-from-message",
+      chatType: "direct",
+      messageId: `weixin:delivery:v1:${"b".repeat(64)}`,
+      deliveryTimestampMs: 1786500000123,
+      rawUpdate: { private: "must-not-be-forwarded" },
+    });
+
+    assert.equal(requestBody.quotedMessageId, "provider-outbound-1");
+    assert.equal(requestBody.quotedText, "检测到一笔新记账\n待确认编号：BK-0123456789AB");
+    assert.equal(Object.hasOwn(requestBody, "rawUpdate"), false);
   });
 });

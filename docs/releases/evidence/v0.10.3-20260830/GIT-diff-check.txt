@@ -1,0 +1,289 @@
+backend/src/assistant/webChannel.js:49: trailing whitespace.
++  return !WEB_OPEN_TOOLS.has(normalized);
+backend/src/assistant/webChannel.js:83: trailing whitespace.
++  const nestedResult = body.result && typeof body.result === "object" && !Array.isArray(body.result)
+backend/src/assistant/webChannel.js:84: trailing whitespace.
++    ? body.result
+backend/src/assistant/webChannel.js:85: trailing whitespace.
++    : null;
+backend/src/assistant/webChannel.js:86: trailing whitespace.
++  if (typeof body.text !== "string" && typeof nestedResult?.text === "string") {
+backend/src/assistant/webChannel.js:87: trailing whitespace.
++    body.text = nestedResult.text;
+backend/src/assistant/webChannel.js:88: trailing whitespace.
++  }
+backend/src/assistant/webChannel.js:89: trailing whitespace.
++  if (
+backend/src/assistant/webChannel.js:90: trailing whitespace.
++    (!body.card || typeof body.card !== "object" || Array.isArray(body.card))
+backend/src/assistant/webChannel.js:91: trailing whitespace.
++    && nestedResult?.card
+backend/src/assistant/webChannel.js:92: trailing whitespace.
++    && typeof nestedResult.card === "object"
+backend/src/assistant/webChannel.js:93: trailing whitespace.
++    && !Array.isArray(nestedResult.card)
+backend/src/assistant/webChannel.js:94: trailing whitespace.
++  ) {
+backend/src/assistant/webChannel.js:95: trailing whitespace.
++    body.card = { ...nestedResult.card };
+backend/src/assistant/webChannel.js:96: trailing whitespace.
++  }
+backend/tests/assistant-web-http-integration.test.js:15: trailing whitespace.
++const FINANCIAL_TABLES = [
+backend/tests/assistant-web-http-integration.test.js:16: trailing whitespace.
++  "shortcut_bookkeeping_entries",
+backend/tests/assistant-web-http-integration.test.js:17: trailing whitespace.
++  "shortcut_bookkeeping_revisions",
+backend/tests/assistant-web-http-integration.test.js:18: trailing whitespace.
++  "travel_expenses",
+backend/tests/assistant-web-http-integration.test.js:19: trailing whitespace.
++  "travel_expense_payments",
+backend/tests/assistant-web-http-integration.test.js:20: trailing whitespace.
++  "travel_expense_ingestions",
+backend/tests/assistant-web-http-integration.test.js:21: trailing whitespace.
++  "travel_expense_document_inbox",
+backend/tests/assistant-web-http-integration.test.js:22: trailing whitespace.
++  "invoice_documents",
+backend/tests/assistant-web-http-integration.test.js:23: trailing whitespace.
++];
+backend/tests/assistant-web-http-integration.test.js:92: trailing whitespace.
++function financialRowCounts() {
+backend/tests/assistant-web-http-integration.test.js:93: trailing whitespace.
++  return Object.fromEntries(FINANCIAL_TABLES.map((table) => [
+backend/tests/assistant-web-http-integration.test.js:94: trailing whitespace.
++    table,
+backend/tests/assistant-web-http-integration.test.js:95: trailing whitespace.
++    db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count,
+backend/tests/assistant-web-http-integration.test.js:96: trailing whitespace.
++  ]));
+backend/tests/assistant-web-http-integration.test.js:97: trailing whitespace.
++}
+backend/tests/assistant-web-http-integration.test.js:98: trailing whitespace.
++
+backend/tests/assistant-web-http-integration.test.js:304: trailing whitespace.
++  it("denies the v0.10.3 task-book bookkeeping sentence before any financial write", async () => {
+backend/tests/assistant-web-http-integration.test.js:305: trailing whitespace.
++    const before = financialRowCounts();
+backend/tests/assistant-web-http-integration.test.js:306: trailing whitespace.
++    assert.deepEqual(before, Object.fromEntries(FINANCIAL_TABLES.map((table) => [table, 0])));
+backend/tests/assistant-web-http-integration.test.js:307: trailing whitespace.
++    const result = await chat(sessionA, { message: "记一笔午餐 50" });
+backend/tests/assistant-web-http-integration.test.js:310: trailing whitespace.
++    assert.deepEqual(financialRowCounts(), before, "403 must leave every financial table unchanged at zero rows");
+backend/tests/assistant-web-http-integration.test.js:319: trailing whitespace.
++  it("returns the v0.10.3 task-book customer search at the top-level display contract", async () => {
+backend/tests/assistant-web-http-integration.test.js:320: trailing whitespace.
++    const result = await chat(sessionA, { message: "查客户 协和Web助手" });
+backend/tests/assistant-web-http-integration.test.js:323: trailing whitespace.
++    assert.equal(result.body.toolName, "customer.search");
+backend/tests/assistant-web-http-integration.test.js:324: trailing whitespace.
++    assert.match(result.body.text, /协和Web助手/u);
+backend/tests/assistant-web-http-integration.test.js:325: trailing whitespace.
++    assert.equal(result.body.text, result.body.result.text);
+backend/tests/assistant-web-http-integration.test.js:326: trailing whitespace.
++    assert.equal(result.body.card?.title, "客户");
+backend/tests/assistant-web-http-integration.test.js:327: trailing whitespace.
++    assert.equal(result.body.result.items.some((item) => item.id === customerA.id), true);
+backend/tests/assistant-web-orchestrator.test.js:53: trailing whitespace.
++test("mapAssistantWebResponse safely flattens result text and card while preserving result", () => {
+backend/tests/assistant-web-orchestrator.test.js:54: trailing whitespace.
++  const result = {
+backend/tests/assistant-web-orchestrator.test.js:55: trailing whitespace.
++    text: "【客户】\n1：协和Web助手  北京",
+backend/tests/assistant-web-orchestrator.test.js:56: trailing whitespace.
++    card: { title: "客户", fields: [["1", "协和Web助手  北京"]], footer: null },
+backend/tests/assistant-web-orchestrator.test.js:57: trailing whitespace.
++    items: [{ id: "customer-1", name: "协和Web助手" }],
+backend/tests/assistant-web-orchestrator.test.js:58: trailing whitespace.
++  };
+backend/tests/assistant-web-orchestrator.test.js:59: trailing whitespace.
++  const mapped = mapAssistantWebResponse({
+backend/tests/assistant-web-orchestrator.test.js:60: trailing whitespace.
++    status: 200,
+backend/tests/assistant-web-orchestrator.test.js:61: trailing whitespace.
++    body: { status: "ok", toolName: "customer.search", result },
+backend/tests/assistant-web-orchestrator.test.js:62: trailing whitespace.
++  });
+backend/tests/assistant-web-orchestrator.test.js:63: trailing whitespace.
++  assert.equal(mapped.body.text, result.text);
+backend/tests/assistant-web-orchestrator.test.js:64: trailing whitespace.
++  assert.deepEqual(mapped.body.card, result.card);
+backend/tests/assistant-web-orchestrator.test.js:65: trailing whitespace.
++  assert.deepEqual(mapped.body.result, result);
+backend/tests/assistant-web-orchestrator.test.js:66: trailing whitespace.
++
+backend/tests/assistant-web-orchestrator.test.js:67: trailing whitespace.
++  const unsafeResult = { text: { providerBody: "raw-text" }, card: "raw-card" };
+backend/tests/assistant-web-orchestrator.test.js:68: trailing whitespace.
++  const unsafe = mapAssistantWebResponse({ status: 200, body: { status: "ok", result: unsafeResult } });
+backend/tests/assistant-web-orchestrator.test.js:69: trailing whitespace.
++  assert.equal(unsafe.body.text, undefined);
+backend/tests/assistant-web-orchestrator.test.js:70: trailing whitespace.
++  assert.equal(unsafe.body.card, undefined);
+backend/tests/assistant-web-orchestrator.test.js:71: trailing whitespace.
++  assert.deepEqual(unsafe.body.result, unsafeResult);
+backend/tests/assistant-web-orchestrator.test.js:72: trailing whitespace.
++});
+backend/tests/assistant-web-orchestrator.test.js:73: trailing whitespace.
++
+backend/tests/assistant-web-orchestrator.test.js:74: trailing whitespace.
++test("isWebClosedTool opens only the explicit WEB_OPEN_TOOLS allowlist", () => {
+backend/tests/assistant-web-orchestrator.test.js:77: trailing whitespace.
++  assert.equal(isWebClosedTool("itinerary.summary"), true, "registered but unopened tools fail closed");
+backend/tests/assistant-web-orchestrator.test.js:78: trailing whitespace.
++  assert.equal(isWebClosedTool("unregistered.future-tool"), true, "unknown tools fail closed");
+backend/tests/assistant-web-orchestrator.test.js:79: trailing whitespace.
++  assert.equal(isWebClosedTool(null), true, "null tools fail closed");
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:11: trailing whitespace.
++import { appendAssistantErrorBubble } from "../src/app/useAssistantChat.js";
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:56: trailing whitespace.
++
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:57: trailing whitespace.
++describe("useAssistantChat error responses", () => {
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:58: trailing whitespace.
++  it("appends a denied assistant bubble from only the 403 top-level message", () => {
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:59: trailing whitespace.
++    const prior = [{ id: "user-1", role: "user", text: "记一笔午餐 50", status: "ok" }];
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:60: trailing whitespace.
++    const error = Object.assign(new Error("Request failed with 403: provider-secret"), {
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:61: trailing whitespace.
++      status: 403,
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:62: trailing whitespace.
++      body: {
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:63: trailing whitespace.
++        status: "error",
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:64: trailing whitespace.
++        message: "该操作请使用微信小小。",
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:65: trailing whitespace.
++        error: { message: "nested-provider-secret" },
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:66: trailing whitespace.
++        providerBody: "raw-provider-body",
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:67: trailing whitespace.
++      },
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:68: trailing whitespace.
++    });
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:69: trailing whitespace.
++    const next = appendAssistantErrorBubble(prior, error);
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:70: trailing whitespace.
++    assert.equal(next.length, 2);
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:71: trailing whitespace.
++    assert.equal(next[1].role, "assistant");
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:72: trailing whitespace.
++    assert.equal(next[1].status, "denied");
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:73: trailing whitespace.
++    assert.equal(next[1].text, "该操作请使用微信小小。");
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:74: trailing whitespace.
++    assert.doesNotMatch(JSON.stringify(next[1]), /provider-secret|raw-provider-body/u);
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:75: trailing whitespace.
++  });
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:76: trailing whitespace.
++
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:77: trailing whitespace.
++  it("uses a fixed 403 fallback instead of nested error or provider bodies", () => {
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:78: trailing whitespace.
++    const error = {
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:79: trailing whitespace.
++      status: 403,
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:80: trailing whitespace.
++      message: "provider-secret",
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:81: trailing whitespace.
++      body: { error: { message: "nested-provider-secret" }, providerBody: "raw-provider-body" },
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:82: trailing whitespace.
++    };
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:83: trailing whitespace.
++    const next = appendAssistantErrorBubble([], error);
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:84: trailing whitespace.
++    assert.equal(next[0].status, "denied");
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:85: trailing whitespace.
++    assert.equal(next[0].text, "该操作当前不可用。");
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:86: trailing whitespace.
++    assert.doesNotMatch(JSON.stringify(next[0]), /provider-secret|raw-provider-body/u);
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:87: trailing whitespace.
++  });
+outputs/product-design-prototype/scripts/assistant-chat.test.mjs:88: trailing whitespace.
++});
+outputs/product-design-prototype/src/app/useAssistantChat.js:23: trailing whitespace.
++function deniedResponseFromError(error) {
+outputs/product-design-prototype/src/app/useAssistantChat.js:24: trailing whitespace.
++  if (Number(error?.status) !== 403) return null;
+outputs/product-design-prototype/src/app/useAssistantChat.js:25: trailing whitespace.
++  const body = error?.body;
+outputs/product-design-prototype/src/app/useAssistantChat.js:26: trailing whitespace.
++  const message = body
+outputs/product-design-prototype/src/app/useAssistantChat.js:27: trailing whitespace.
++    && typeof body === "object"
+outputs/product-design-prototype/src/app/useAssistantChat.js:28: trailing whitespace.
++    && !Array.isArray(body)
+outputs/product-design-prototype/src/app/useAssistantChat.js:29: trailing whitespace.
++    && Object.hasOwn(body, "message")
+outputs/product-design-prototype/src/app/useAssistantChat.js:30: trailing whitespace.
++    && typeof body.message === "string"
+outputs/product-design-prototype/src/app/useAssistantChat.js:31: trailing whitespace.
++    ? body.message.trim()
+outputs/product-design-prototype/src/app/useAssistantChat.js:32: trailing whitespace.
++    : "";
+outputs/product-design-prototype/src/app/useAssistantChat.js:33: trailing whitespace.
++  const safeMessage = message
+outputs/product-design-prototype/src/app/useAssistantChat.js:34: trailing whitespace.
++    && message.length <= 500
+outputs/product-design-prototype/src/app/useAssistantChat.js:35: trailing whitespace.
++    && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(message)
+outputs/product-design-prototype/src/app/useAssistantChat.js:36: trailing whitespace.
++    ? message
+outputs/product-design-prototype/src/app/useAssistantChat.js:37: trailing whitespace.
++    : "该操作当前不可用。";
+outputs/product-design-prototype/src/app/useAssistantChat.js:38: trailing whitespace.
++  return { text: safeMessage, status: "denied" };
+outputs/product-design-prototype/src/app/useAssistantChat.js:39: trailing whitespace.
++}
+outputs/product-design-prototype/src/app/useAssistantChat.js:40: trailing whitespace.
++
+outputs/product-design-prototype/src/app/useAssistantChat.js:41: trailing whitespace.
++export function appendAssistantErrorBubble(priorMessages, error, messageFactory = null) {
+outputs/product-design-prototype/src/app/useAssistantChat.js:42: trailing whitespace.
++  const response = deniedResponseFromError(error);
+outputs/product-design-prototype/src/app/useAssistantChat.js:43: trailing whitespace.
++  if (!response) return priorMessages;
+outputs/product-design-prototype/src/app/useAssistantChat.js:44: trailing whitespace.
++  const assistantMessage = typeof messageFactory === "function"
+outputs/product-design-prototype/src/app/useAssistantChat.js:45: trailing whitespace.
++    ? messageFactory("assistant", response)
+outputs/product-design-prototype/src/app/useAssistantChat.js:46: trailing whitespace.
++    : { role: "assistant", ...response };
+outputs/product-design-prototype/src/app/useAssistantChat.js:47: trailing whitespace.
++  return appendMessage(priorMessages, assistantMessage);
+outputs/product-design-prototype/src/app/useAssistantChat.js:48: trailing whitespace.
++}
+outputs/product-design-prototype/src/app/useAssistantChat.js:49: trailing whitespace.
++
+outputs/product-design-prototype/src/app/useAssistantChat.js:144: trailing whitespace.
++      const withErrorBubble = appendAssistantErrorBubble(priorMessages, error, messageFromResponse);
+outputs/product-design-prototype/src/app/useAssistantChat.js:145: trailing whitespace.
++      if (withErrorBubble !== priorMessages) {
+outputs/product-design-prototype/src/app/useAssistantChat.js:146: trailing whitespace.
++        persistMessages(withErrorBubble);
+outputs/product-design-prototype/src/app/useAssistantChat.js:147: trailing whitespace.
++      } else {
+outputs/product-design-prototype/src/app/useAssistantChat.js:148: trailing whitespace.
++        toast?.({ tone: "error", title: "发送失败", description: "请稍后重试。" });
+outputs/product-design-prototype/src/app/useAssistantChat.js:149: trailing whitespace.
++      }
+outputs/product-design-prototype/src/app/useAssistantChat.js:168: trailing whitespace.
++      toast?.({ tone: "error", title: "确认失败", description: "请稍后重试。" });
+outputs/product-design-prototype/src/app/useAssistantChat.js:186: trailing whitespace.
++      toast?.({ tone: "error", title: "取消失败", description: "请稍后重试。" });
+EXIT_STATUS=2
+
+[HISTORICAL_RESULT_RESOLUTION_2026-08-30]
+HISTORICAL_CONTEXT=the literal output above was captured while the Web hotfix source/tests were uncommitted in the shared worktree
+HISTORICAL_COMMAND=git diff --check
+HISTORICAL_EXIT_STATUS=2
+HISTORICAL_FIRST_LITERAL_RESULT=backend/src/assistant/webChannel.js:49: trailing whitespace.
+HISTORICAL_EXPLANATION=five authorized source/test files already used CRLF in their original blobs; plain git diff --check interpreted CR as trailing whitespace
+HOTFIX_COMMIT=79f09d0738b4aff6aecd1cbc47effc337afdcba6
+HOTFIX_COMMIT_STATUS=committed locally; not deployed; v0.10.3 tag unchanged
+HOTFIX_CRLF_AWARE_STAGED_COMMAND=GIT_INDEX_FILE=<temporary-index> git -c core.whitespace=cr-at-eol diff --cached --check -- <7 source/test paths + 4 hotfix transaction artifacts>
+HOTFIX_CRLF_AWARE_STAGED_EXIT_STATUS=0
+HOTFIX_EOL_RESULT=all 7 source/test files retained their original uniform LF or CRLF style
+PLAIN_DIFF_CURRENT_ASSERTION=none; this record does not claim plain git diff --check passes for the CRLF hotfix files
+PRODUCTION_ACCEPTANCE_STATUS=not rerun; local hotfix gates are not production evidence

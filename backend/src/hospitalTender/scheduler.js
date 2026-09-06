@@ -47,6 +47,30 @@ function addMinutes(isoDate, minutes) {
   return new Date(Date.parse(isoDate) + minutes * 60_000).toISOString();
 }
 
+const SHANGHAI_UTC_OFFSET_MS = 8 * 3_600_000;
+
+/**
+ * Milliseconds to wait until the Asia/Shanghai active window `[start, end)`
+ * opens. Returns 0 when the window is currently open or the persisted bounds
+ * are unusable (fail-open keeps collection alive instead of silently halting).
+ */
+function activeWindowWaitMs(state, nowDate) {
+  const startHour = Number.isSafeInteger(state?.activeStartHour) ? state.activeStartHour : 9;
+  const endHour = Number.isSafeInteger(state?.activeEndHour) ? state.activeEndHour : 20;
+  if (startHour < 0 || startHour > 23 || endHour < 1 || endHour > 24 || startHour >= endHour) return 0;
+  const shanghai = new Date(nowDate.getTime() + SHANGHAI_UTC_OFFSET_MS);
+  const hour = shanghai.getUTCHours();
+  if (hour >= startHour && hour < endHour) return 0;
+  const shanghaiDayStartUtcMs = Date.UTC(
+    shanghai.getUTCFullYear(),
+    shanghai.getUTCMonth(),
+    shanghai.getUTCDate(),
+  ) - SHANGHAI_UTC_OFFSET_MS;
+  let windowStartMs = shanghaiDayStartUtcMs + startHour * 3_600_000;
+  if (windowStartMs <= nowDate.getTime()) windowStartMs += 24 * 3_600_000;
+  return windowStartMs - nowDate.getTime();
+}
+
 function collectorCustomers(customers) {
   const seenNames = new Set();
   return customers.flatMap((customer) => {
@@ -80,6 +104,20 @@ function collectorCustomers(customers) {
 }
 
 function safeError(error, fallback = "医院招标轮巡失败") {
+  if (error?.code === "HOSPITAL_TENDER_INTERNAL_RUN_FAILED") {
+    const stages = {
+      collector_spawn: "医院招标采集进程启动失败",
+      collector_process: "医院招标采集进程运行失败",
+      collector_exit: "医院招标采集进程退出失败",
+      collector_timeout: "医院招标采集进程超时",
+      customer_registry: "医院招标客户清单校验失败",
+      snapshot_read: "医院招标快照读取失败",
+      snapshot_parse: "医院招标快照解析失败",
+      snapshot_normalize: "医院招标快照校验失败",
+      runner: fallback,
+    };
+    return stages[error.stage] ?? fallback;
+  }
   const message = String(error?.message ?? "").trim();
   if (!message || message.length > 500 || /token|secret|bearer|password|key/i.test(message)) return fallback;
   return message;
@@ -109,6 +147,8 @@ export function createHospitalTenderScheduler({
   runner,
   customersProvider,
   notifier = null,
+  notificationEnabled = () => notifier !== null,
+  onBatchCommitted = null,
   clock = () => new Date(),
   idFactory = randomUUID,
   intervalMinutes = DEFAULT_INTERVAL_MINUTES,
@@ -120,6 +160,10 @@ export function createHospitalTenderScheduler({
   }
   if (typeof customersProvider !== "function") throw new TypeError("customersProvider is required");
   if (typeof notifier !== "function" && notifier !== null) throw new TypeError("notifier must be a function");
+  if (typeof notificationEnabled !== "function") throw new TypeError("notificationEnabled must be a function");
+  if (typeof onBatchCommitted !== "function" && onBatchCommitted !== null) {
+    throw new TypeError("onBatchCommitted must be a function");
+  }
   const configuredInterval = Number.isSafeInteger(intervalMinutes) && intervalMinutes > 0
     ? intervalMinutes
     : DEFAULT_INTERVAL_MINUTES;
@@ -203,6 +247,14 @@ export function createHospitalTenderScheduler({
         return { status: "disabled", state: disabled };
       }
       const nowIso = startedAt;
+      const windowWaitMs = activeWindowWaitMs(current, now());
+      if (!force && windowWaitMs > 0) {
+        const waiting = repository.updateState({
+          lastStatus: "waiting",
+          nextRunAt: new Date(Date.parse(nowIso) + windowWaitMs).toISOString(),
+        });
+        return { status: "waiting", reason: "window", state: waiting };
+      }
       if (!force && current.nextRunAt && Date.parse(current.nextRunAt) > Date.parse(nowIso)) {
         return { status: "waiting", state: current };
       }
@@ -393,6 +445,29 @@ export function createHospitalTenderScheduler({
         throw error;
       }
 
+      // The database transaction above has committed before this callback is
+      // reached.  Pass only stable notice/customer identities to downstream
+      // consumers; the raw tender snapshot stays inside this scheduler.
+      if (onBatchCommitted) {
+        await onBatchCommitted({
+          changedAt: snapshot.generatedAt,
+          snapshotId: snapshot.id,
+          runId,
+          notices: result.notices.map((notice) => ({
+            id: notice.id,
+            identityKey: notice.identityKey,
+            canonicalNoticeId: notice.canonicalNoticeId,
+            canonicalRevision: notice.canonicalRevision,
+            canonicalDigest: notice.canonicalDigest,
+            match: {
+              matchedCustomerIds: Array.isArray(notice.match?.matchedCustomerIds)
+                ? [...notice.match.matchedCustomerIds]
+                : [],
+            },
+          })),
+        });
+      }
+
       const sourceFailureCount = snapshot.payload.sources.filter((source) => (
         source.status === "error" || source.status === "degraded"
       )).length;
@@ -409,7 +484,13 @@ export function createHospitalTenderScheduler({
         && notice.match?.matchedCustomerIds?.some((id) => batchCustomerIds.has(id))
       ));
       let notificationCount = 0;
-      if (notifier && newHighNotices.length > 0) {
+      let notificationsEnabled = false;
+      try {
+        notificationsEnabled = Boolean(notificationEnabled());
+      } catch {
+        notificationsEnabled = false;
+      }
+      if (notifier && notificationsEnabled && newHighNotices.length > 0) {
         try {
           const notified = await notifier({
             cycleNumber: current.cycleNumber,

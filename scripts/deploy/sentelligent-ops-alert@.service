@@ -1,0 +1,19 @@
+# v0.9.0: template oneshot unit fired by OnFailure=sentelligent-ops-alert@%n
+# on the four main units (backend/frontend/weixin-agent/daily-backup).
+# %i (verbatim instance) carries the failed unit name into the alert script;
+# %I would unescape "-" into "/" and corrupt sentelligent-* unit names.
+# No [Install] section on purpose: this unit is only ever pulled in by
+# OnFailure and must never be enabled at boot. The template itself has no
+# OnFailure, so it cannot cascade.
+# Install target: /etc/systemd/system/sentelligent-ops-alert@.service
+
+[Unit]
+Description=Sentelligent ops failure alert for %i
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+TimeoutStartSec=60
+SyslogIdentifier=sentelligent-ops-alert
+ExecStart=/usr/bin/env bash /opt/sentelligent-sales-workbench/tools/ops-alert.sh %i

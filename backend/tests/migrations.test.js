@@ -16,6 +16,26 @@ import {
   migrationChecksum,
 } from "../src/db/migrate.js";
 import { apply as applyPhase1WriteIntegrity } from "../src/db/migrations/0002_phase1_write_integrity.mjs";
+import { apply as applySecureSettings } from "../src/db/migrations/0015_secure_settings.mjs";
+import { apply as applySecureSettingsPushplus } from "../src/db/migrations/0021_secure_settings_pushplus.mjs";
+import { apply as applySecureSettingsAsr } from "../src/db/migrations/0033_secure_settings_asr.mjs";
+import { apply as applyAiSuggestionReview } from "../src/db/migrations/0036_ai_suggestion_review.mjs";
+import { apply as applyAiModelProvenance } from "../src/db/migrations/0037_ai_model_provenance.mjs";
+
+const SECURE_SETTINGS_ASR_CHECKSUM = "acada172a32c458427845fe973730bcbf4e8c6903547614fb19495131b663ed5";
+const secureSettingsColumns = [
+  "setting_key",
+  "ciphertext",
+  "status",
+  "created_at",
+  "rotated_at",
+  "updated_at",
+  "last_success_at",
+  "last_failure_at",
+  "last_error_code",
+  "last_delivery_count",
+  "last_chunk_count",
+];
 
 const businessTables = [
   "customers",
@@ -33,15 +53,67 @@ const businessTables = [
 ];
 
 const writeIntegrityColumns = {
-  customers: ["version", "deleted_at", "deleted_by"],
+  customers: ["version", "deleted_at", "deleted_by", "aliases", "tags"],
   opportunities: ["version", "deleted_at", "deleted_by"],
-  quick_records: ["version", "voided_at", "voided_by", "void_reason", "owner"],
-  weekly_reports: ["version", "deleted_at", "deleted_by"],
+  quick_records: [
+    "version",
+    "voided_at",
+    "voided_by",
+    "void_reason",
+    "owner",
+    "confirmation_preview_id",
+    "confirmation_preview_status",
+  ],
+  weekly_reports: ["version", "deleted_at", "deleted_by", "entries_json"],
   solution_drafts: ["version"],
-  action_items: ["version", "deleted_at", "deleted_by"],
+  action_items: ["version", "deleted_at", "deleted_by", "owner", "remind_at", "reminded_at"],
   risk_items: ["version", "deleted_at", "deleted_by"],
   knowledge_items: ["version", "deleted_at", "deleted_by"],
 };
+
+// 0031 会清扫历史 owner 词表并给 ✗ 表补 owner 列，跨迁移行哈希对全部业务表
+// 统一忽略 owner（业务内容不变性仍由其余列保证）。
+const rowsHashOmittedColumns = {
+  ...Object.fromEntries(
+    Object.entries(writeIntegrityColumns).map(([table, columns]) => [
+      table,
+      columns.includes("owner") ? columns : [...columns, "owner"],
+    ]),
+  ),
+  ai_suggestions: [
+    "owner", "version", "status", "draft_content", "confidence", "source_id", "confirmation_preview", "source", "fallback_reason",
+    "updated_at", "confirmed_at", "cancelled_at",
+    // 0039 runtime columns are metadata and must not change the legacy
+    // generated suggestion content preservation hash.
+    "proactive_trigger", "proactive_subject_type", "proactive_subject_id",
+    "proactive_customer_id", "proactive_opportunity_id", "proactive_dedupe_key",
+    "proactive_rule_version", "proactive_priority", "proactive_status",
+    "proactive_stale_at", "proactive_snoozed_until", "proactive_dismiss_reason",
+    "proactive_resolved_at", "proactive_result_refs", "proactive_run_id",
+    "proactive_event_id", "proactive_generated_at", "proactive_last_seen_at",
+    "proactive_failure_count", "proactive_next_retry_at", "proactive_payload_hash",
+  ],
+};
+rowsHashOmittedColumns.action_items = [
+  ...(rowsHashOmittedColumns.action_items ?? []),
+  "expected_result", "source_type", "source_id", "source_proactive_id", "writeback_digest",
+];
+rowsHashOmittedColumns.risk_items = [
+  ...(rowsHashOmittedColumns.risk_items ?? []),
+  "expected_result", "source_proactive_id", "writeback_digest",
+];
+rowsHashOmittedColumns.ai_suggestions = [
+  ...(rowsHashOmittedColumns.ai_suggestions ?? []),
+  "proactive_subject_key", "proactive_subject_version", "proactive_source_digest", "proactive_source_refs",
+];
+rowsHashOmittedColumns.weekly_reports = [
+  ...(rowsHashOmittedColumns.weekly_reports ?? []),
+  "source", "fallback_reason",
+];
+rowsHashOmittedColumns.solution_drafts = [
+  ...(rowsHashOmittedColumns.solution_drafts ?? []),
+  "source", "fallback_reason",
+];
 
 function columnNames(db, table) {
   return all(db, `PRAGMA table_info(${table})`).map((row) => row.name);
@@ -78,10 +150,10 @@ function seedLegacyBusinessRows(db) {
   const baselinePath = fileURLToPath(new URL("../src/db/migrations/0001_baseline.sql", import.meta.url));
   db.exec(readFileSync(baselinePath, "utf8"));
   db.exec(`
-    INSERT INTO customers (id, name, region, relation)
-    VALUES ('legacy-customer', 'Legacy customer', 'north', 71);
-    INSERT INTO opportunities (id, customer_id, name, stage, probability)
-    VALUES ('legacy-opportunity', 'legacy-customer', 'Legacy opportunity', 'discovery', 45);
+    INSERT INTO customers (id, name, region, relation, owner)
+    VALUES ('legacy-customer', 'Legacy customer', 'north', 71, 'legacy-owner');
+    INSERT INTO opportunities (id, customer_id, name, stage, probability, owner)
+    VALUES ('legacy-opportunity', 'legacy-customer', 'Legacy opportunity', 'discovery', 45, 'legacy-owner');
     INSERT INTO quick_records (id, raw_content, customer_id, opportunity_id, status)
     VALUES ('legacy-record', 'Legacy record', 'legacy-customer', 'legacy-opportunity', 'recorded');
     INSERT INTO ai_insights (id, quick_record_id, analysis_json)
@@ -113,6 +185,187 @@ function withDatabase(testBody) {
     testBody(databaseUrl);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function secureSettingsRows(db) {
+  return db.prepare("SELECT * FROM secure_settings ORDER BY setting_key").all()
+    .map((row) => ({ ...row }));
+}
+
+function seedSecureSettingsMatrix(db, status) {
+  const active = status === "active";
+  const insert = db.prepare(`
+    INSERT INTO secure_settings (
+      setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+      last_success_at, last_failure_at, last_error_code,
+      last_delivery_count, last_chunk_count
+    ) VALUES (
+      $key, $ciphertext, $status, $createdAt, $rotatedAt, $updatedAt,
+      $lastSuccessAt, $lastFailureAt, $lastErrorCode,
+      $lastDeliveryCount, $lastChunkCount
+    )
+  `);
+  for (const [index, key] of [
+    "icost_webhook_token",
+    "deepseek_api_key",
+    "hospital_tender_pushplus_token",
+  ].entries()) {
+    insert.run({
+      $key: key,
+      $ciphertext: active ? `ciphertext-${index + 1}` : null,
+      $status: status,
+      $createdAt: `2026-08-2${index}T01:02:03.00${index}Z`,
+      $rotatedAt: index === 0 ? null : `2026-08-2${index}T02:03:04.00${index}Z`,
+      $updatedAt: `2026-08-2${index}T03:04:05.00${index}Z`,
+      $lastSuccessAt: index === 0 ? null : `2026-08-2${index}T04:05:06.00${index}Z`,
+      $lastFailureAt: index === 2 ? `2026-08-2${index}T05:06:07.00${index}Z` : null,
+      $lastErrorCode: index === 2 ? "synthetic_delivery_failure" : null,
+      $lastDeliveryCount: index,
+      $lastChunkCount: index + 1,
+    });
+  }
+}
+
+function rebuildDatabaseAs0032(db) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`
+      DROP INDEX idx_quick_records_confirmation_preview;
+      DROP TABLE quick_record_confirmation_previews;
+      ALTER TABLE quick_records DROP COLUMN confirmation_preview_id;
+      ALTER TABLE quick_records DROP COLUMN confirmation_preview_status;
+      ALTER TABLE weekly_reports DROP COLUMN entries_json;
+      CREATE TABLE secure_settings_0032_fixture (
+        setting_key TEXT PRIMARY KEY NOT NULL CHECK (
+          setting_key IN (
+            'icost_webhook_token',
+            'deepseek_api_key',
+            'hospital_tender_pushplus_token'
+          )
+        ),
+        ciphertext TEXT CHECK (ciphertext IS NULL OR length(ciphertext) > 0),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
+        created_at TEXT NOT NULL,
+        rotated_at TEXT,
+        updated_at TEXT NOT NULL,
+        last_success_at TEXT,
+        last_failure_at TEXT,
+        last_error_code TEXT CHECK (last_error_code IS NULL OR length(last_error_code) BETWEEN 1 AND 120),
+        last_delivery_count INTEGER CHECK (last_delivery_count IS NULL OR last_delivery_count >= 0),
+        last_chunk_count INTEGER CHECK (last_chunk_count IS NULL OR last_chunk_count >= 0),
+        CHECK ((status = 'active' AND ciphertext IS NOT NULL) OR (status = 'cleared' AND ciphertext IS NULL))
+      );
+      INSERT INTO secure_settings_0032_fixture (
+        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+        last_success_at, last_failure_at, last_error_code,
+        last_delivery_count, last_chunk_count
+      )
+      SELECT
+        setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+        last_success_at, last_failure_at, last_error_code,
+        last_delivery_count, last_chunk_count
+      FROM secure_settings
+      WHERE setting_key IN (
+        'icost_webhook_token',
+        'deepseek_api_key',
+        'hospital_tender_pushplus_token'
+      );
+      DROP TABLE secure_settings;
+      ALTER TABLE secure_settings_0032_fixture RENAME TO secure_settings;
+      DROP INDEX IF EXISTS idx_weekly_reports_source_created;
+      DROP INDEX IF EXISTS idx_solution_drafts_source_created;
+      DROP INDEX IF EXISTS idx_ai_suggestions_source_created;
+      ALTER TABLE weekly_reports DROP COLUMN source;
+      ALTER TABLE weekly_reports DROP COLUMN fallback_reason;
+      ALTER TABLE solution_drafts DROP COLUMN source;
+      ALTER TABLE solution_drafts DROP COLUMN fallback_reason;
+      ALTER TABLE ai_suggestions DROP COLUMN source;
+      ALTER TABLE ai_suggestions DROP COLUMN fallback_reason;
+      DROP INDEX IF EXISTS idx_proactive_confirmation_previews_owner_status;
+      DROP INDEX IF EXISTS idx_proactive_confirmation_previews_suggestion;
+      DROP INDEX IF EXISTS idx_proactive_confirmation_previews_expiry;
+      DROP TABLE IF EXISTS proactive_confirmation_previews;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_dedupe;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_owner_status;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_subject;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_retry;
+      DROP TRIGGER IF EXISTS ai_suggestions_proactive_status_insert_guard;
+      DROP TRIGGER IF EXISTS ai_suggestions_proactive_status_update_guard;
+      DROP TABLE IF EXISTS proactive_scan_state;
+      DROP TABLE IF EXISTS proactive_scan_runs;
+      DROP TABLE IF EXISTS proactive_scan_lease;
+      DROP TABLE IF EXISTS proactive_scan_events;
+      DROP TABLE IF EXISTS proactive_notifications;
+      DROP INDEX IF EXISTS idx_proactive_model_cache_expiry;
+      DROP INDEX IF EXISTS idx_proactive_model_cache_owner;
+      DROP INDEX IF EXISTS idx_proactive_model_usage_date;
+      DROP TABLE IF EXISTS proactive_model_cache;
+      DROP TABLE IF EXISTS proactive_model_usage;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_trigger;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_subject_type;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_subject_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_customer_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_opportunity_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_dedupe_key;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_rule_version;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_priority;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_status;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_stale_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_snoozed_until;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_dismiss_reason;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_resolved_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_result_refs;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_run_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_event_id;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_generated_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_last_seen_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_failure_count;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_next_retry_at;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_payload_hash;
+      DROP INDEX IF EXISTS idx_ai_suggestions_proactive_subject_key;
+      DROP INDEX IF EXISTS idx_proactive_subjects_owner_updated;
+      DROP INDEX IF EXISTS idx_proactive_subjects_customer;
+      DROP TABLE IF EXISTS proactive_subjects;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_subject_key;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_subject_version;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_source_digest;
+      ALTER TABLE ai_suggestions DROP COLUMN proactive_source_refs;
+      DROP INDEX IF EXISTS idx_hospital_tender_bridges_owner_status;
+      DROP INDEX IF EXISTS idx_hospital_tender_bridges_notice;
+      DROP TABLE IF EXISTS hospital_tender_bridges;
+      DROP INDEX IF EXISTS idx_hospital_tender_canonical_notice;
+      DROP INDEX IF EXISTS idx_hospital_tender_notice_bridge_status;
+      ALTER TABLE hospital_tender_notices DROP COLUMN canonical_notice_id;
+      ALTER TABLE hospital_tender_notices DROP COLUMN canonical_revision;
+      ALTER TABLE hospital_tender_notices DROP COLUMN canonical_digest;
+      ALTER TABLE hospital_tender_notices DROP COLUMN bridge_status;
+      ALTER TABLE hospital_tender_notices DROP COLUMN bridge_refs_json;
+      DROP INDEX IF EXISTS idx_action_items_source_identity;
+      DROP INDEX IF EXISTS idx_action_items_proactive_source;
+      DROP INDEX IF EXISTS idx_risk_items_proactive_source;
+      ALTER TABLE action_items DROP COLUMN expected_result;
+      ALTER TABLE action_items DROP COLUMN source_type;
+      ALTER TABLE action_items DROP COLUMN source_id;
+      ALTER TABLE action_items DROP COLUMN source_proactive_id;
+      ALTER TABLE action_items DROP COLUMN writeback_digest;
+      ALTER TABLE risk_items DROP COLUMN expected_result;
+      ALTER TABLE risk_items DROP COLUMN source_proactive_id;
+      ALTER TABLE risk_items DROP COLUMN writeback_digest;
+      DROP INDEX IF EXISTS idx_customer_import_rows_owner_name;
+      DROP INDEX IF EXISTS idx_customer_import_rows_batch;
+      DROP INDEX IF EXISTS idx_customer_import_batches_owner_status;
+      DROP TABLE IF EXISTS customer_import_rows;
+      DROP TABLE IF EXISTS customer_import_batches;
+      DELETE FROM schema_migrations WHERE version IN (
+        '0033', '0034', '0035', '0036', '0037', '0038', '0039', '0040', '0041',
+        '0042', '0043', '0044', '0045'
+      );
+    `);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
   }
 }
 
@@ -162,7 +415,7 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       second = openDatabase({ databaseUrl });
       const secondMigrations = all(second, "SELECT version, checksum FROM schema_migrations ORDER BY version");
 
-      assert.equal(firstMigrations.length, 17);
+      assert.equal(firstMigrations.length, 44);
       assert.equal(firstMigrations[0].version, "0001");
       assert.equal(firstMigrations[1].version, "0002");
       assert.equal(firstMigrations[2].version, "0003");
@@ -180,6 +433,33 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[14].version, "0016");
       assert.equal(firstMigrations[15].version, "0017");
       assert.equal(firstMigrations[16].version, "0018");
+      assert.equal(firstMigrations[17].version, "0019");
+      assert.equal(firstMigrations[18].version, "0020");
+      assert.equal(firstMigrations[19].version, "0021");
+      assert.equal(firstMigrations[20].version, "0022");
+      assert.equal(firstMigrations[21].version, "0023");
+      assert.equal(firstMigrations[22].version, "0024");
+      assert.equal(firstMigrations[23].version, "0025");
+      assert.equal(firstMigrations[24].version, "0026");
+      assert.equal(firstMigrations[25].version, "0027");
+      assert.equal(firstMigrations[26].version, "0028");
+      assert.equal(firstMigrations[27].version, "0029");
+      assert.equal(firstMigrations[28].version, "0030");
+      assert.equal(firstMigrations[29].version, "0031");
+      assert.equal(firstMigrations[30].version, "0032");
+      assert.equal(firstMigrations[31].version, "0033");
+      assert.equal(firstMigrations[32].version, "0034");
+      assert.equal(firstMigrations[33].version, "0035");
+      assert.equal(firstMigrations[34].version, "0036");
+      assert.equal(firstMigrations[35].version, "0037");
+      assert.equal(firstMigrations[36].version, "0038");
+      assert.equal(firstMigrations[37].version, "0039");
+      assert.equal(firstMigrations[38].version, "0040");
+      assert.equal(firstMigrations[39].version, "0041");
+      assert.equal(firstMigrations[40].version, "0042");
+      assert.equal(firstMigrations[41].version, "0043");
+      assert.equal(firstMigrations[42].version, "0044");
+      assert.equal(firstMigrations[43].version, "0045");
       assert.match(firstMigrations[0].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[1].checksum, /^[a-f0-9]{64}$/);
       assert.match(firstMigrations[2].checksum, /^[a-f0-9]{64}$/);
@@ -207,6 +487,33 @@ test("records versioned migrations exactly once and remains idempotent on reopen
         "../src/db/migrations/0016_hospital_tender_scheduler.mjs",
         "../src/db/migrations/0017_shortcut_webhook_tokens.mjs",
         "../src/db/migrations/0018_shortcut_bookkeeping_entries.mjs",
+        "../src/db/migrations/0019_shortcut_weixin_confirmation.mjs",
+        "../src/db/migrations/0020_shortcut_income_entries.mjs",
+        "../src/db/migrations/0021_secure_settings_pushplus.mjs",
+        "../src/db/migrations/0022_assistant_agent_runs.mjs",
+        "../src/db/migrations/0023_assistant_business_context.mjs",
+        "../src/db/migrations/0024_shortcut_advance_allocation.mjs",
+        "../src/db/migrations/0025_travel_expense_region_profiles.mjs",
+        "../src/db/migrations/0026_hospital_tender_active_window.mjs",
+        "../src/db/migrations/0027_customer_profile_aliases.mjs",
+        "../src/db/migrations/0028_action_item_reminders.mjs",
+        "../src/db/migrations/0029_owner_vocabulary_cleanup.mjs",
+        "../src/db/migrations/0030_users_table.mjs",
+        "../src/db/migrations/0031_owner_isolation_tightening.mjs",
+        "../src/db/migrations/0032_weixin_bindings.mjs",
+        "../src/db/migrations/0033_secure_settings_asr.mjs",
+        "../src/db/migrations/0034_quick_record_confirmation_previews.mjs",
+        "../src/db/migrations/0035_visit_temperature_suggestions.mjs",
+        "../src/db/migrations/0036_ai_suggestion_review.mjs",
+        "../src/db/migrations/0037_ai_model_provenance.mjs",
+        "../src/db/migrations/0038_proactive_confirmation_previews.mjs",
+        "../src/db/migrations/0039_proactive_background_runtime.mjs",
+        "../src/db/migrations/0040_proactive_notifications.mjs",
+        "../src/db/migrations/0041_proactive_model_budget_cache.mjs",
+        "../src/db/migrations/0042_customer_proactive_subjects.mjs",
+        "../src/db/migrations/0043_hospital_tender_canonical_bridge.mjs",
+        "../src/db/migrations/0044_action_risk_writeback_fields.mjs",
+        "../src/db/migrations/0045_customer_import_batches.mjs",
       ].map((relativePath) => readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8"));
       assert.equal(firstMigrations[0].checksum, migrationChecksum(migrationSources[0]));
       assert.equal(firstMigrations[1].checksum, migrationChecksum(migrationSources[1]));
@@ -225,6 +532,33 @@ test("records versioned migrations exactly once and remains idempotent on reopen
       assert.equal(firstMigrations[14].checksum, migrationChecksum(migrationSources[14]));
       assert.equal(firstMigrations[15].checksum, migrationChecksum(migrationSources[15]));
       assert.equal(firstMigrations[16].checksum, migrationChecksum(migrationSources[16]));
+      assert.equal(firstMigrations[17].checksum, migrationChecksum(migrationSources[17]));
+      assert.equal(firstMigrations[18].checksum, migrationChecksum(migrationSources[18]));
+      assert.equal(firstMigrations[19].checksum, migrationChecksum(migrationSources[19]));
+      assert.equal(firstMigrations[20].checksum, migrationChecksum(migrationSources[20]));
+      assert.equal(firstMigrations[21].checksum, migrationChecksum(migrationSources[21]));
+      assert.equal(firstMigrations[22].checksum, migrationChecksum(migrationSources[22]));
+      assert.equal(firstMigrations[23].checksum, migrationChecksum(migrationSources[23]));
+      assert.equal(firstMigrations[24].checksum, migrationChecksum(migrationSources[24]));
+      assert.equal(firstMigrations[25].checksum, migrationChecksum(migrationSources[25]));
+      assert.equal(firstMigrations[26].checksum, migrationChecksum(migrationSources[26]));
+      assert.equal(firstMigrations[27].checksum, migrationChecksum(migrationSources[27]));
+      assert.equal(firstMigrations[28].checksum, migrationChecksum(migrationSources[28]));
+      assert.equal(firstMigrations[29].checksum, migrationChecksum(migrationSources[29]));
+      assert.equal(firstMigrations[30].checksum, migrationChecksum(migrationSources[30]));
+      assert.equal(firstMigrations[31].checksum, migrationChecksum(migrationSources[31]));
+      assert.equal(firstMigrations[32].checksum, migrationChecksum(migrationSources[32]));
+      assert.equal(firstMigrations[33].checksum, migrationChecksum(migrationSources[33]));
+      assert.equal(firstMigrations[34].checksum, migrationChecksum(migrationSources[34]));
+      assert.equal(firstMigrations[35].checksum, migrationChecksum(migrationSources[35]));
+      assert.equal(firstMigrations[36].checksum, migrationChecksum(migrationSources[36]));
+      assert.equal(firstMigrations[37].checksum, migrationChecksum(migrationSources[37]));
+      assert.equal(firstMigrations[38].checksum, migrationChecksum(migrationSources[38]));
+      assert.equal(firstMigrations[39].checksum, migrationChecksum(migrationSources[39]));
+      assert.equal(firstMigrations[40].checksum, migrationChecksum(migrationSources[40]));
+      assert.equal(firstMigrations[41].checksum, migrationChecksum(migrationSources[41]));
+      assert.equal(firstMigrations[42].checksum, migrationChecksum(migrationSources[42]));
+      assert.equal(firstMigrations[43].checksum, migrationChecksum(migrationSources[43]));
       assert.deepEqual(secondMigrations, firstMigrations);
     } finally {
       second?.close();
@@ -233,7 +567,158 @@ test("records versioned migrations exactly once and remains idempotent on reopen
   });
 });
 
-test("migration 0018 creates the isolated Shortcut bookkeeping ledger with remote identity fields", () => {
+test("migration 0036 turns legacy generated suggestions into reviewable snapshots without changing the generated content", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      CREATE TABLE ai_suggestions (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'generated',
+        content TEXT NOT NULL,
+        source_refs TEXT NOT NULL DEFAULT '[]',
+        owner TEXT NOT NULL DEFAULT 'jiangjz',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO ai_suggestions (id, type, title, content, source_refs)
+      VALUES ('legacy-ai', 'customer_profile', '补全建议', '原始生成正文', '[{"id":"customer-1"}]');
+    `);
+
+    applyAiSuggestionReview(db);
+    applyAiSuggestionReview(db);
+
+    const columns = columnNames(db, "ai_suggestions");
+    for (const column of [
+      "version", "draft_content", "confidence", "source_id", "confirmation_preview", "updated_at",
+      "confirmed_at", "cancelled_at",
+    ]) {
+      assert.equal(columns.includes(column), true, column);
+    }
+    const row = db.prepare("SELECT * FROM ai_suggestions WHERE id = 'legacy-ai'").get();
+    assert.equal(row.status, "pending");
+    assert.equal(row.content, "原始生成正文");
+    assert.equal(row.draft_content, "原始生成正文");
+    assert.equal(row.source_id, "customer-1");
+    assert.equal(row.version, 1);
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET status = 'future_status' WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion status/,
+    );
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET confidence = 101 WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion confidence/,
+    );
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET confidence = -1 WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion confidence/,
+    );
+    assert.throws(
+      () => db.prepare("UPDATE ai_suggestions SET type = 'future_type' WHERE id = 'legacy-ai'").run(),
+      /invalid ai suggestion type/,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0037 adds provenance columns and labels pre-existing rows as legacy", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      CREATE TABLE weekly_reports (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL, status TEXT NOT NULL, content TEXT NOT NULL,
+        source_refs TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE solution_drafts (
+        id TEXT PRIMARY KEY, owner TEXT NOT NULL, artifact_type TEXT NOT NULL,
+        title TEXT NOT NULL, customer_id TEXT, opportunity_id TEXT, status TEXT NOT NULL,
+        content TEXT NOT NULL, source_refs TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE ai_suggestions (
+        id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL,
+        status TEXT NOT NULL, content TEXT NOT NULL, source_refs TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, status, content)
+        VALUES ('weekly-1', 'owner', '2026-09-01', '2026-09-07', 'draft', 'legacy');
+      INSERT INTO solution_drafts (id, owner, artifact_type, title, status, content)
+        VALUES ('solution-1', 'owner', 'solution_framework', 'Legacy', 'draft', 'legacy');
+      INSERT INTO ai_suggestions (id, type, title, status, content)
+        VALUES ('suggestion-1', 'customer_profile', 'Legacy', 'pending', 'legacy');
+    `);
+
+    applyAiModelProvenance(db);
+    for (const table of ["weekly_reports", "solution_drafts", "ai_suggestions"]) {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+      assert.ok(columns.includes("source"));
+      assert.ok(columns.includes("fallback_reason"));
+      assert.equal(db.prepare(`SELECT source, fallback_reason FROM ${table}`).get().source, "legacy");
+    }
+
+    db.prepare("UPDATE weekly_reports SET source = 'deepseek', fallback_reason = NULL WHERE id = 'weekly-1'").run();
+    applyAiModelProvenance(db);
+    assert.deepEqual(
+      { ...db.prepare("SELECT source, fallback_reason FROM weekly_reports WHERE id = 'weekly-1'").get() },
+      { source: "deepseek", fallback_reason: null },
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0024 creates immutable revisions and advance allocation overlay tables", () => {
+  const db = openDatabase({ databaseUrl: ":memory:" });
+  try {
+    assert.deepEqual(columnNames(db, "shortcut_bookkeeping_revisions"), [
+      "id", "owner", "entry_id", "version", "changes_json", "source", "created_by", "created_at",
+    ]);
+    assert.deepEqual(columnNames(db, "travel_expense_advance_sources"), [
+      "id", "owner", "entry_id", "advance_id", "amount_cents", "received_on", "week_start",
+      "status", "created_by", "created_at", "reversed_by", "reversed_at",
+    ]);
+    assert.deepEqual(columnNames(db, "travel_expense_advance_allocation_plans"), [
+      "id", "owner", "advance_id", "week_start", "scope", "status", "plan_hash",
+      "requested_cents", "allocated_cents", "remaining_cents", "uncovered_cents", "overage_cents",
+      "created_by", "created_at", "superseded_by", "superseded_at",
+    ]);
+    assert.deepEqual(columnNames(db, "travel_expense_advance_allocations"), [
+      "id", "owner", "plan_id", "advance_id", "expense_id", "payment_id", "week_start",
+      "allocated_cents", "allocation_kind", "status", "created_by", "created_at", "reversed_by",
+      "reversed_at", "reason",
+    ]);
+    assert.equal(
+      all(db, "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0024'")[0].count,
+      1,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0025 creates owner-week region profiles and expense region snapshots", () => {
+  const db = openDatabase({ databaseUrl: ":memory:" });
+  try {
+    assert.deepEqual(columnNames(db, "travel_expense_region_profiles"), [
+      "owner", "week_start", "version", "cities_json", "default_city",
+      "date_overrides_json", "created_by", "updated_by", "created_at", "updated_at",
+    ]);
+    const expenseColumns = columnNames(db, "travel_expenses");
+    assert.equal(expenseColumns.includes("trip_region"), true);
+    assert.equal(expenseColumns.includes("trip_region_source"), true);
+    assert.equal(
+      all(db, "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0025'")[0].count,
+      1,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0020 preserves the Shortcut ledger and permits accepted income without travel-expense rows", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
@@ -268,6 +753,10 @@ test("migration 0018 creates the isolated Shortcut bookkeeping ledger with remot
         all(db, "SELECT checksum FROM schema_migrations WHERE version = '0018'")[0].checksum,
         /^[a-f0-9]{64}$/u,
       );
+      assert.equal(
+        all(db, "SELECT version FROM schema_migrations WHERE version = '0020'").length,
+        1,
+      );
       const insertEntry = db.prepare(`
         INSERT INTO shortcut_bookkeeping_entries (
           id, owner, actor, target_system, ledger_name, entry_type, category,
@@ -277,15 +766,23 @@ test("migration 0018 creates the isolated Shortcut bookkeeping ledger with remot
           $idempotencyKeyHash, $requestHash, 'synthetic text', $status
         )
       `);
-      assert.throws(
-        () => insertEntry.run({
-          $id: "invalid-income",
-          $entryType: "income",
-          $idempotencyKeyHash: "a".repeat(64),
-          $requestHash: "b".repeat(64),
-          $status: "received",
-        }),
-        /CHECK constraint failed/i,
+      insertEntry.run({
+        $id: "valid-income-received",
+        $entryType: "income",
+        $idempotencyKeyHash: "a".repeat(64),
+        $requestHash: "b".repeat(64),
+        $status: "received",
+      });
+      insertEntry.run({
+        $id: "valid-income-accepted",
+        $entryType: "income",
+        $idempotencyKeyHash: "e".repeat(64),
+        $requestHash: "f".repeat(64),
+        $status: "accepted",
+      });
+      assert.equal(
+        all(db, "SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries WHERE entry_type = 'income'")[0].count,
+        2,
       );
       assert.throws(
         () => insertEntry.run({
@@ -296,6 +793,389 @@ test("migration 0018 creates the isolated Shortcut bookkeeping ledger with remot
           $status: "accepted",
         }),
         /CHECK constraint failed/i,
+      );
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("migration 0021 preserves encrypted settings and adds bounded PushPlus delivery metadata", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      CREATE TABLE secure_settings (
+        setting_key TEXT PRIMARY KEY NOT NULL CHECK (setting_key IN ('icost_webhook_token', 'deepseek_api_key')),
+        ciphertext TEXT CHECK (ciphertext IS NULL OR length(ciphertext) > 0),
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'cleared')),
+        created_at TEXT NOT NULL,
+        rotated_at TEXT,
+        updated_at TEXT NOT NULL,
+        CHECK ((status = 'active' AND ciphertext IS NOT NULL) OR (status = 'cleared' AND ciphertext IS NULL))
+      );
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('deepseek_api_key', 'ciphertext-fixture', 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z');
+    `);
+
+    applySecureSettingsPushplus(db);
+
+    assert.deepEqual(columnNames(db, "secure_settings"), [
+      "setting_key", "ciphertext", "status", "created_at", "rotated_at", "updated_at",
+      "last_success_at", "last_failure_at", "last_error_code", "last_delivery_count", "last_chunk_count",
+    ]);
+    assert.deepEqual(
+      {
+        ...db.prepare("SELECT setting_key, ciphertext, status FROM secure_settings WHERE setting_key = 'deepseek_api_key'").get(),
+      },
+      { setting_key: "deepseek_api_key", ciphertext: "ciphertext-fixture", status: "active" },
+    );
+
+    db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('hospital_tender_pushplus_token', 'pushplus-ciphertext', 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')
+    `).run();
+    db.prepare(`
+      UPDATE secure_settings
+      SET last_delivery_count = 1, last_chunk_count = 1, last_error_code = 'notification_failed'
+      WHERE setting_key = 'hospital_tender_pushplus_token'
+    `).run();
+
+    assert.throws(
+      () => db.prepare(`
+        INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+        VALUES ('hospital_tender_pushplus_token', NULL, 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')
+      `).run(),
+      /UNIQUE constraint failed|CHECK constraint failed/i,
+    );
+    assert.throws(
+      () => db.prepare(`
+        INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+        VALUES ('invalid-setting', 'ciphertext', 'active', '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z')
+      `).run(),
+      /CHECK constraint failed/i,
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0033 upgrades the direct 0021 active matrix without changing any existing field", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    applySecureSettings(db);
+    applySecureSettingsPushplus(db);
+    seedSecureSettingsMatrix(db, "active");
+    const before = secureSettingsRows(db);
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      applySecureSettingsAsr(db);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    assert.deepEqual(columnNames(db, "secure_settings"), secureSettingsColumns);
+    assert.deepEqual(secureSettingsRows(db), before);
+    const tableSql = db.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
+    `).get().sql;
+    assert.match(tableSql, /asr_api_key/u);
+    db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('asr_api_key', 'synthetic-asr-ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+    `).run();
+    assert.throws(() => db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('unknown_api_key', 'ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+    `).run(), /CHECK constraint failed/i);
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0033 upgrades the direct 0021 cleared matrix without changing any existing field", () => {
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    applySecureSettings(db);
+    applySecureSettingsPushplus(db);
+    seedSecureSettingsMatrix(db, "cleared");
+    const before = secureSettingsRows(db);
+    const beforeKeys = before.map((row) => row.setting_key);
+
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      applySecureSettingsAsr(db);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    const after = secureSettingsRows(db);
+    assert.deepEqual(after, before);
+    assert.deepEqual(after.map((row) => row.setting_key), beforeKeys);
+    assert.equal(after.length, before.length);
+  } finally {
+    db.close();
+  }
+});
+
+test("current migrations upgrade a complete 0032 database through 0033-0045 in order", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      rebuildDatabaseAs0032(db);
+      seedSecureSettingsMatrix(db, "active");
+      const rowsBefore = secureSettingsRows(db);
+      const ledgerBefore = db.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
+      ).all().map((row) => ({ ...row }));
+      assert.equal(ledgerBefore.length, 31);
+      assert.equal(ledgerBefore.at(-1).version, "0032");
+      assert.equal(databaseTableNames(db).includes("quick_record_confirmation_previews"), false);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_id"), false);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_status"), false);
+      assert.equal(columnNames(db, "weekly_reports").includes("entries_json"), false);
+
+      migrateDatabase(db);
+
+      const ledgerAfter = db.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
+      ).all().map((row) => ({ ...row }));
+      const added = ledgerAfter.filter((row) => !ledgerBefore.some((before) => before.version === row.version));
+      assert.equal(ledgerAfter.length, 44);
+      assert.deepEqual(added.map((row) => row.version), [
+        "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041",
+        "0042", "0043", "0044", "0045",
+      ]);
+      assert.deepEqual(
+        ledgerAfter.filter((row) => ![
+          "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041",
+          "0042", "0043", "0044", "0045",
+        ].includes(row.version)),
+        ledgerBefore,
+      );
+      const source = readFileSync(
+        fileURLToPath(new URL("../src/db/migrations/0033_secure_settings_asr.mjs", import.meta.url)),
+        "utf8",
+      );
+      assert.equal(migrationChecksum(source), SECURE_SETTINGS_ASR_CHECKSUM);
+      assert.equal(added.find((row) => row.version === "0033").checksum, SECURE_SETTINGS_ASR_CHECKSUM);
+      assert.deepEqual(secureSettingsRows(db), rowsBefore);
+      assert.equal(databaseTableNames(db).includes("quick_record_confirmation_previews"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_confirmation_previews"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_state"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_runs"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_lease"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_scan_events"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_notifications"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_model_cache"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_model_usage"), true);
+      assert.equal(databaseTableNames(db).includes("proactive_subjects"), true);
+      assert.equal(databaseTableNames(db).includes("hospital_tender_bridges"), true);
+      assert.equal(databaseTableNames(db).includes("customer_import_batches"), true);
+      assert.equal(databaseTableNames(db).includes("customer_import_rows"), true);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_id"), true);
+      assert.equal(columnNames(db, "quick_records").includes("confirmation_preview_status"), true);
+      assert.equal(columnNames(db, "weekly_reports").includes("entries_json"), true);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("migration 0033 remains idempotent on reopen without changing its ledger timestamp", () => {
+  withDatabase((databaseUrl) => {
+    const first = openDatabase({ databaseUrl });
+    const firstLedger = { ...first.prepare(
+      "SELECT version, checksum, applied_at FROM schema_migrations WHERE version = '0033'",
+    ).get() };
+    first.close();
+
+    const second = openDatabase({ databaseUrl });
+    try {
+      const secondLedger = { ...second.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations WHERE version = '0033'",
+      ).get() };
+      assert.deepEqual(secondLedger, firstLedger);
+      assert.equal(second.prepare(
+        "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0033'",
+      ).get().count, 1);
+    } finally {
+      second.close();
+    }
+  });
+});
+
+test("migration 0033 restores the original table rows and ledger after a post-DDL failure", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      rebuildDatabaseAs0032(db);
+      seedSecureSettingsMatrix(db, "cleared");
+      const rowsBefore = secureSettingsRows(db);
+      const tableSqlBefore = db.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
+      `).get().sql;
+      const ledgerBefore = db.prepare(
+        "SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version",
+      ).all().map((row) => ({ ...row }));
+      let injected = false;
+      const guardedDb = new Proxy(db, {
+        get(target, property) {
+          if (property === "exec") {
+            return (sql) => {
+              const result = target.exec(sql);
+              if (
+                !injected
+                && typeof sql === "string"
+                && sql.includes("ALTER TABLE secure_settings_next RENAME TO secure_settings")
+              ) {
+                injected = true;
+                throw new Error("synthetic 0033 post-DDL failure");
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+
+      assert.throws(
+        () => migrateDatabase(guardedDb),
+        /synthetic 0033 post-DDL failure/u,
+      );
+      assert.equal(injected, true);
+      assert.equal(db.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'secure_settings'
+      `).get().sql, tableSqlBefore);
+      assert.deepEqual(secureSettingsRows(db), rowsBefore);
+      assert.deepEqual(
+        db.prepare("SELECT version, checksum, applied_at FROM schema_migrations ORDER BY version")
+          .all().map((row) => ({ ...row })),
+        ledgerBefore,
+      );
+      assert.equal(db.prepare(`
+        SELECT COUNT(*) AS count FROM sqlite_master
+        WHERE type = 'table' AND name = 'secure_settings_next'
+      `).get().count, 0);
+      assert.equal(db.prepare(
+        "SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0033'",
+      ).get().count, 0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("migration 0033 checksum drift fails closed without changing settings or the stored ledger", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    db.prepare(`
+      INSERT INTO secure_settings (setting_key, ciphertext, status, created_at, updated_at)
+      VALUES ('asr_api_key', 'synthetic-asr-ciphertext', 'active', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+    `).run();
+    const rowsBefore = secureSettingsRows(db);
+    db.prepare("UPDATE schema_migrations SET checksum = 'invalid-0033-checksum' WHERE version = '0033'").run();
+    db.close();
+
+    assert.throws(() => {
+      const unexpected = openDatabase({ databaseUrl });
+      unexpected.close();
+    }, /Checksum mismatch for migration 0033/u);
+
+    const readable = createConnection({ databaseUrl });
+    try {
+      assert.deepEqual(secureSettingsRows(readable), rowsBefore);
+      assert.equal(
+        readable.prepare("SELECT checksum FROM schema_migrations WHERE version = '0033'").get().checksum,
+        "invalid-0033-checksum",
+      );
+    } finally {
+      readable.close();
+    }
+  });
+});
+
+test("reconciles the former settings migration 0019 before applying Shortcut migrations", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      const settingsPath = fileURLToPath(
+        new URL("../src/db/migrations/0021_secure_settings_pushplus.mjs", import.meta.url),
+      );
+      const legacySettingsChecksum = migrationChecksum(readFileSync(settingsPath, "utf8"));
+      db.exec(`
+        DROP TABLE weixin_confirmation_outbox;
+        DELETE FROM schema_migrations WHERE version IN ('0019', '0020', '0021', '0022', '0023', '0024', '0025');
+      `);
+      db.prepare(`
+        INSERT INTO schema_migrations (version, checksum, applied_at)
+        VALUES ('0019', $checksum, '2026-08-20T00:00:00.000Z')
+      `).run({ $checksum: legacySettingsChecksum });
+
+      migrateDatabase(db);
+
+      const reconciled = db.prepare(`
+        SELECT version, checksum FROM schema_migrations
+        WHERE version IN ('0019', '0020', '0021')
+        ORDER BY version
+      `).all();
+      assert.deepEqual(reconciled.map((row) => row.version), ["0019", "0020", "0021"]);
+      assert.equal(reconciled[2].checksum, legacySettingsChecksum);
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count,
+        0,
+      );
+      assert.equal(
+        db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count,
+        44,
+      );
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test("refuses to relabel settings-as-0019 when the expected PushPlus schema is absent", () => {
+  withDatabase((databaseUrl) => {
+    const db = openDatabase({ databaseUrl });
+    try {
+      const settingsPath = fileURLToPath(
+        new URL("../src/db/migrations/0021_secure_settings_pushplus.mjs", import.meta.url),
+      );
+      const legacySettingsChecksum = migrationChecksum(readFileSync(settingsPath, "utf8"));
+      db.exec(`
+        DELETE FROM schema_migrations WHERE version IN ('0019', '0021');
+        DROP TABLE secure_settings;
+        CREATE TABLE secure_settings (
+          setting_key TEXT PRIMARY KEY NOT NULL,
+          ciphertext TEXT,
+          status TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          rotated_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      db.prepare(`
+        INSERT INTO schema_migrations (version, checksum, applied_at)
+        VALUES ('0019', $checksum, '2026-08-20T00:00:00.000Z')
+      `).run({ $checksum: legacySettingsChecksum });
+
+      assert.throws(
+        () => migrateDatabase(db),
+        /Cannot reconcile legacy migration 0019/u,
+      );
+      assert.equal(
+        db.prepare("SELECT version FROM schema_migrations WHERE version = '0019'").get().version,
+        "0019",
+      );
+      assert.equal(
+        db.prepare("SELECT version FROM schema_migrations WHERE version = '0021'").get(),
+        undefined,
       );
     } finally {
       db.close();
@@ -552,7 +1432,7 @@ test("rejects a stored checksum that does not match migration 0002", () => {
   withDatabase((databaseUrl) => {
     const db = openDatabase({ databaseUrl });
     try {
-      run(db, "INSERT INTO customers (id, name) VALUES (:id, :name)", {
+      run(db, "INSERT INTO customers (id, name, owner) VALUES (:id, :name, 'jiangjz')", {
         id: "checksum-0002-customer",
         name: "Checksum 0002 customer",
       });
@@ -595,7 +1475,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
     seedLegacyBusinessRows(legacy);
     const countsBefore = tableCounts(legacy);
     const hashesBefore = Object.fromEntries(
-      Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+      Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
         table,
         rowsHash(legacy, table, omittedColumns),
       ]),
@@ -668,7 +1548,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
 
       assert.deepEqual(tableCounts(migrated), countsBefore);
       const hashesAfter = Object.fromEntries(
-        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+        Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
           table,
           rowsHash(migrated, table, omittedColumns),
         ]),
@@ -676,7 +1556,7 @@ test("upgrades all legacy business data into the phase one write-integrity schem
       assert.deepEqual(hashesAfter, hashesBefore);
       assert.deepEqual(
         all(migrated, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045"],
       );
     } finally {
       migrated.close();
@@ -690,7 +1570,7 @@ test("rejects a stored checksum that does not match migration 0001", () => {
 
     try {
       db = openDatabase({ databaseUrl });
-      run(db, "INSERT INTO customers (id, name) VALUES (:id, :name)", {
+      run(db, "INSERT INTO customers (id, name, owner) VALUES (:id, :name, 'jiangjz')", {
         id: "checksum-customer",
         name: "Checksum customer"
       });
@@ -776,7 +1656,7 @@ test("rejects a raw CRLF checksum for baseline migration 0001 without mutating r
       .digest("hex");
     const db = openDatabase({ databaseUrl });
     try {
-      run(db, "INSERT INTO customers (id, name) VALUES ('raw-checksum-customer', 'Raw checksum customer')");
+      run(db, "INSERT INTO customers (id, name, owner) VALUES ('raw-checksum-customer', 'Raw checksum customer', 'jiangjz')");
       run(db, "UPDATE schema_migrations SET checksum = :checksum WHERE version = '0001'", {
         checksum: rawCrlfChecksum
       });
@@ -870,11 +1750,501 @@ test("adopts legacy baseline tables by adding missing columns without losing row
       assert.equal(all(db, "SELECT title, assignee FROM action_items WHERE id = 'legacy-action'")[0].title, "Legacy action");
       assert.equal(all(db, "SELECT assignee, due FROM risk_items WHERE id = 'legacy-risk'")[0].due, null);
       assert.equal(all(db, "SELECT artifact_type FROM solution_drafts WHERE id = 'legacy-solution'")[0].artifact_type, "solution_framework");
-      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 17);
+      assert.equal(all(db, "SELECT version FROM schema_migrations").length, 44);
     } finally {
       db.close();
     }
   });
+});
+
+test("migration 0029 normalizes legacy owner vocabulary", async () => {
+  const { apply } = await import("../src/db/migrations/0029_owner_vocabulary_cleanup.mjs");
+  // 0029 运行时点在 0031 触发器之前：用 pre-0031 最小表形态承载 NULL/别名 owner 夹具
+  //（全链库的 owner 触发器会拒绝这类历史脏值的直插）。
+  const db = createConnection({ databaseUrl: ":memory:" });
+  try {
+    db.exec(`
+      CREATE TABLE customers (
+        id TEXT PRIMARY KEY, name TEXT, owner TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE opportunities (id TEXT PRIMARY KEY, customer_id TEXT, name TEXT, owner TEXT);
+      CREATE TABLE action_items (id TEXT PRIMARY KEY, title TEXT, owner TEXT);
+      CREATE TABLE quick_records (id TEXT PRIMARY KEY, raw_content TEXT, owner TEXT);
+      CREATE TABLE weekly_reports (id TEXT PRIMARY KEY, owner TEXT, period_start TEXT, period_end TEXT, content TEXT);
+      CREATE TABLE solution_drafts (id TEXT PRIMARY KEY, owner TEXT, title TEXT, content TEXT);
+    `);
+    db.exec(`
+      INSERT INTO customers (id, name, owner) VALUES
+        ('c-alias', '别名客户', '继振'),
+        ('c-keep', '白名单外客户', 'other-user'),
+        ('c-normal', '规范客户', 'jiangjz');
+      INSERT INTO opportunities (id, customer_id, name, owner) VALUES
+        ('o-alias', 'c-alias', '别名商机', '继振');
+      INSERT INTO action_items (id, title, owner) VALUES
+        ('a-alias', '别名待办', '继振'),
+        ('a-null', '无主待办', NULL);
+      INSERT INTO quick_records (id, raw_content, owner) VALUES
+        ('q-legacy', '历史记录', 'legacy');
+      INSERT INTO weekly_reports (id, owner, period_start, period_end, content) VALUES
+        ('w-alias', '继振', '2026-07-06', '2026-07-12', '周报');
+      INSERT INTO solution_drafts (id, owner, title, content) VALUES
+        ('s-question', '??', '占位方案', '内容');
+    `);
+    const rowSnapshot = (table) => db.prepare(
+      `SELECT * FROM ${table} ORDER BY id`,
+    ).all().map((row) => {
+      const { owner: _owner, ...rest } = row;
+      return rest;
+    });
+    const beforeRows = Object.fromEntries(
+      ["customers", "opportunities", "action_items", "quick_records", "weekly_reports", "solution_drafts"]
+        .map((table) => [table, JSON.stringify(rowSnapshot(table))]),
+    );
+    const customerMetaBefore = db.prepare(
+      "SELECT id, version, updated_at FROM customers ORDER BY id",
+    ).all();
+
+    apply(db);
+
+    const owners = (table) => db.prepare(`SELECT id, owner FROM ${table} ORDER BY id`).all()
+      .map((row) => ({ id: row.id, owner: row.owner }));
+    assert.deepEqual(owners("customers"), [
+      { id: "c-alias", owner: "jiangjz" },
+      { id: "c-keep", owner: "other-user" },
+      { id: "c-normal", owner: "jiangjz" },
+    ]);
+    assert.deepEqual(owners("opportunities"), [{ id: "o-alias", owner: "jiangjz" }]);
+    assert.deepEqual(owners("action_items"), [
+      { id: "a-alias", owner: "jiangjz" },
+      { id: "a-null", owner: "jiangjz" },
+    ]);
+    assert.deepEqual(owners("quick_records"), [{ id: "q-legacy", owner: "jiangjz" }]);
+    assert.deepEqual(owners("weekly_reports"), [{ id: "w-alias", owner: "jiangjz" }]);
+    assert.deepEqual(owners("solution_drafts"), [{ id: "s-question", owner: "jiangjz" }]);
+
+    // Everything except owner (including version and updated_at) is untouched.
+    for (const [table, hash] of Object.entries(beforeRows)) {
+      assert.equal(JSON.stringify(rowSnapshot(table)), hash, table);
+    }
+    assert.deepEqual(
+      db.prepare("SELECT id, version, updated_at FROM customers ORDER BY id").all(),
+      customerMetaBefore,
+    );
+
+    // Whitelist idempotence: a second run changes nothing at all.
+    const fullSnapshot = () => JSON.stringify(
+      ["customers", "opportunities", "action_items", "quick_records", "weekly_reports", "solution_drafts"]
+        .map((table) => db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()),
+    );
+    const afterFirstApply = fullSnapshot();
+    apply(db);
+    assert.equal(fullSnapshot(), afterFirstApply);
+  } finally {
+    db.close();
+  }
+});
+
+test("migration 0030 creates users and seeds the env admin", async () => {
+  const { apply } = await import("../src/db/migrations/0030_users_table.mjs");
+  const { hashPassword } = await import("../src/auth/password.js");
+  const seedHashValue = await hashPassword("unit-seed-password", { salt: Buffer.alloc(16, 41) });
+  const previousAccount = process.env.AUTH_ACCOUNT;
+  const previousHash = process.env.AUTH_PASSWORD_HASH;
+  const restoreEnv = () => {
+    if (previousAccount === undefined) delete process.env.AUTH_ACCOUNT;
+    else process.env.AUTH_ACCOUNT = previousAccount;
+    if (previousHash === undefined) delete process.env.AUTH_PASSWORD_HASH;
+    else process.env.AUTH_PASSWORD_HASH = previousHash;
+  };
+  const prepareActionItems = (db) => {
+    db.exec(`
+      CREATE TABLE action_items (id TEXT PRIMARY KEY, title TEXT, assignee TEXT);
+      INSERT INTO action_items (id, title, assignee) VALUES
+        ('a-owner', '账号 id 展示行', 'jiangjz'),
+        ('a-other', '外部人名行', '张三'),
+        ('a-null', '无主行', NULL);
+    `);
+  };
+
+  try {
+    // (a) 合法 env → 种子行 + assignee 回填（'张三' 与 NULL 不动）。
+    process.env.AUTH_ACCOUNT = "jiangjz";
+    process.env.AUTH_PASSWORD_HASH = seedHashValue;
+    const seeded = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareActionItems(seeded);
+      apply(seeded);
+      const user = seeded.prepare(
+        "SELECT account, display_name, password_hash, role, status, version FROM users",
+      ).get();
+      assert.deepEqual({ ...user }, {
+        account: "jiangjz",
+        display_name: "继振",
+        password_hash: seedHashValue,
+        role: "admin",
+        status: "active",
+        version: 1,
+      });
+      assert.deepEqual(
+        seeded.prepare("SELECT id, assignee FROM action_items ORDER BY id").all().map((row) => ({ ...row })),
+        [
+          { id: "a-null", assignee: null },
+          { id: "a-other", assignee: "张三" },
+          { id: "a-owner", assignee: "继振" },
+        ],
+      );
+
+      // (c) CHECK 拒绝矩阵（与 0030 DDL 一致）。
+      const insertUser = (overrides) => seeded.prepare(`
+        INSERT INTO users (account, display_name, password_hash, role, status, version, created_at, updated_at)
+        VALUES ($account, '校验', $hash, $role, $status, $version, '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')
+      `).run({
+        $account: "checkuser",
+        $hash: seedHashValue,
+        $role: "member",
+        $status: "active",
+        $version: 1,
+        ...overrides,
+      });
+      assert.throws(() => insertUser({ $account: "UPPER" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $hash: "plain-text" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $role: "owner" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $status: "archived" }), /CHECK constraint failed/i);
+      assert.throws(() => insertUser({ $version: 0 }), /CHECK constraint failed/i);
+    } finally {
+      seeded.close();
+    }
+
+    // (b) env 缺席（env-less 彩排语境）→ 建表成功、种子跳过、回填空转。
+    delete process.env.AUTH_ACCOUNT;
+    delete process.env.AUTH_PASSWORD_HASH;
+    const envless = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareActionItems(envless);
+      apply(envless);
+      assert.equal(envless.prepare("SELECT COUNT(*) AS count FROM users").get().count, 0);
+      assert.deepEqual(
+        envless.prepare("SELECT id, assignee FROM action_items ORDER BY id").all().map((row) => ({ ...row })),
+        [
+          { id: "a-null", assignee: null },
+          { id: "a-other", assignee: "张三" },
+          { id: "a-owner", assignee: "jiangjz" },
+        ],
+      );
+    } finally {
+      envless.close();
+    }
+
+    // (d) 全链二跑幂等由版本账本保证：复跑 openDatabase 仍 1 行。
+    process.env.AUTH_ACCOUNT = "jiangjz";
+    process.env.AUTH_PASSWORD_HASH = seedHashValue;
+    withDatabase((databaseUrl) => {
+      const first = openDatabase({ databaseUrl });
+      try {
+        assert.equal(first.prepare("SELECT COUNT(*) AS count FROM users").get().count, 1);
+      } finally {
+        first.close();
+      }
+      const second = openDatabase({ databaseUrl });
+      try {
+        assert.equal(second.prepare("SELECT COUNT(*) AS count FROM users").get().count, 1);
+        assert.equal(
+          second.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0030'").get().count,
+          1,
+        );
+      } finally {
+        second.close();
+      }
+    });
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("migration 0031 tightens owner isolation", async () => {
+  const { apply } = await import("../src/db/migrations/0031_owner_isolation_tightening.mjs");
+  const addOwnerTables = [
+    "risk_items", "visit_itineraries", "sales_decision_analyses", "knowledge_items", "ai_suggestions",
+  ];
+  const sweepTables = [
+    "customers", "opportunities", "action_items", "quick_records", "weekly_reports", "solution_drafts",
+  ];
+  const guardTables = ["customers", "opportunities", "quick_records", "action_items"];
+  const indexTables = [
+    "customers", "opportunities", "action_items", "risk_items", "knowledge_items",
+    "visit_itineraries", "sales_decision_analyses", "solution_drafts", "weekly_reports",
+  ];
+  // 0030 时点的最小表形态：SWEEP 六表已有 owner 列（0001/0012/0029 轨迹），✗五表无 owner 列。
+  const prepareTables = (db) => {
+    db.exec(`
+      CREATE TABLE customers (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
+      CREATE TABLE opportunities (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
+      CREATE TABLE action_items (id TEXT PRIMARY KEY, title TEXT, owner TEXT);
+      CREATE TABLE quick_records (id TEXT PRIMARY KEY, raw_content TEXT, owner TEXT);
+      CREATE TABLE weekly_reports (id TEXT PRIMARY KEY, content TEXT, owner TEXT);
+      CREATE TABLE solution_drafts (id TEXT PRIMARY KEY, title TEXT, owner TEXT);
+      CREATE TABLE risk_items (id TEXT PRIMARY KEY, title TEXT);
+      CREATE TABLE visit_itineraries (id TEXT PRIMARY KEY, title TEXT);
+      CREATE TABLE sales_decision_analyses (id TEXT PRIMARY KEY, analysis_type TEXT);
+      CREATE TABLE knowledge_items (id TEXT PRIMARY KEY, title TEXT);
+      CREATE TABLE ai_suggestions (id TEXT PRIMARY KEY, title TEXT);
+    `);
+    for (const table of sweepTables) {
+      db.prepare(`INSERT INTO ${table} (id, owner) VALUES ($nullId, NULL), ($aliasId, '王五'), ($keepId, 'testb')`).run({
+        $nullId: `${table}-null`,
+        $aliasId: `${table}-alias`,
+        $keepId: `${table}-keep`,
+      });
+    }
+    for (const table of addOwnerTables) {
+      db.prepare(`INSERT INTO ${table} (id) VALUES ($id)`).run({ $id: `${table}-legacy` });
+    }
+  };
+  const owners = (db, table) => db.prepare(`SELECT id, owner FROM ${table} ORDER BY id`).all()
+    .map((row) => ({ id: row.id, owner: row.owner }));
+
+  // (a) 有 users 表：✗五表补列且存量回填 jiangjz；SWEEP 六表 NULL/词表外归一、词表内保留。
+  const withUsers = createConnection({ databaseUrl: ":memory:" });
+  try {
+    prepareTables(withUsers);
+    withUsers.exec(`
+      CREATE TABLE users (account TEXT PRIMARY KEY);
+      INSERT INTO users (account) VALUES ('jiangjz'), ('testb');
+    `);
+    apply(withUsers);
+    for (const table of addOwnerTables) {
+      const ownerColumn = withUsers.prepare(`PRAGMA table_info(${table})`).all()
+        .find((column) => column.name === "owner");
+      assert.equal(ownerColumn?.notnull, 1, `${table}.owner must be NOT NULL`);
+      assert.equal(ownerColumn?.dflt_value, "'jiangjz'", `${table}.owner default`);
+      assert.equal(
+        withUsers.prepare(`SELECT owner FROM ${table} WHERE id = $id`).get({ $id: `${table}-legacy` })?.owner,
+        "jiangjz",
+        `${table} legacy row backfilled`,
+      );
+    }
+    for (const table of sweepTables) {
+      assert.deepEqual(owners(withUsers, table), [
+        { id: `${table}-alias`, owner: "jiangjz" },
+        { id: `${table}-keep`, owner: "testb" },
+        { id: `${table}-null`, owner: "jiangjz" },
+      ], `${table} sweep`);
+    }
+
+    // (c) 触发器矩阵：四表 NULL owner 的 INSERT 与 UPDATE 均 ABORT，带 owner 写入成功。
+    for (const table of guardTables) {
+      assert.throws(
+        () => withUsers.prepare(`INSERT INTO ${table} (id, owner) VALUES ($id, NULL)`).run({ $id: `${table}-trigger-null` }),
+        /owner must not be NULL/u,
+        `${table} insert trigger`,
+      );
+      assert.throws(
+        () => withUsers.prepare(`UPDATE ${table} SET owner = NULL WHERE id = $id`).run({ $id: `${table}-keep` }),
+        /owner must not be NULL/u,
+        `${table} update trigger`,
+      );
+      withUsers.prepare(`INSERT INTO ${table} (id, owner) VALUES ($id, 'jiangjz')`).run({ $id: `${table}-trigger-ok` });
+      assert.equal(
+        withUsers.prepare(`SELECT owner FROM ${table} WHERE id = $id`).get({ $id: `${table}-trigger-ok` })?.owner,
+        "jiangjz",
+        `${table} owner insert allowed`,
+      );
+    }
+
+    // (d) 二次 apply 幂等：列/触发器/索引不重复、数据零变更。
+    const snapshot = () => JSON.stringify([...sweepTables, ...addOwnerTables].map((table) => (
+      withUsers.prepare(`SELECT * FROM ${table} ORDER BY id`).all()
+    )));
+    const beforeSecondApply = snapshot();
+    apply(withUsers);
+    assert.equal(snapshot(), beforeSecondApply, "second apply changes nothing");
+    for (const table of guardTables) {
+      assert.equal(
+        withUsers.prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND tbl_name = $table AND name LIKE 'trg_%owner_required%'",
+        ).get({ $table: table }).count,
+        2,
+        `${table} keeps exactly two owner triggers`,
+      );
+    }
+
+    // (e) 九枚 owner 过滤索引在位。
+    for (const table of indexTables) {
+      assert.equal(
+        withUsers.prepare(
+          "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name = $name",
+        ).get({ $name: `idx_${table}_owner` }).count,
+        1,
+        `idx_${table}_owner`,
+      );
+    }
+  } finally {
+    withUsers.close();
+  }
+
+  // (b) 无 users 表（直连旧库单测语境）：仅 NULL 归一，词表外值保留。
+  const withoutUsers = createConnection({ databaseUrl: ":memory:" });
+  try {
+    prepareTables(withoutUsers);
+    apply(withoutUsers);
+    for (const table of sweepTables) {
+      assert.deepEqual(owners(withoutUsers, table), [
+        { id: `${table}-alias`, owner: "王五" },
+        { id: `${table}-keep`, owner: "testb" },
+        { id: `${table}-null`, owner: "jiangjz" },
+      ], `${table} null-only sweep`);
+    }
+  } finally {
+    withoutUsers.close();
+  }
+});
+
+test("migration 0032 creates weixin bindings and seeds the env binding", async () => {
+  const { apply } = await import("../src/db/migrations/0032_weixin_bindings.mjs");
+  const { hashPassword } = await import("../src/auth/password.js");
+  const seedHashValue = await hashPassword("unit-seed-password", { salt: Buffer.alloc(16, 42) });
+  const previousEnv = {
+    AUTH_ACCOUNT: process.env.AUTH_ACCOUNT,
+    WEIXIN_BOOKKEEPING_OWNER: process.env.WEIXIN_BOOKKEEPING_OWNER,
+    WEIXIN_BOOKKEEPING_SENDER_ID: process.env.WEIXIN_BOOKKEEPING_SENDER_ID,
+  };
+  const restoreEnv = () => {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  const prepareUsers = (db) => {
+    db.exec("PRAGMA foreign_keys = ON");
+    db.exec(`
+      CREATE TABLE users (
+        account TEXT PRIMARY KEY NOT NULL,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'member',
+        status TEXT NOT NULL DEFAULT 'active',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    db.prepare(`
+      INSERT INTO users (account, display_name, password_hash, created_at, updated_at)
+      VALUES ('jiangjz', '继振', $hash, '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')
+    `).run({ $hash: seedHashValue });
+  };
+
+  try {
+    // (a) 带 env → 种子行 financial=1/digest=1/active，bound_by=system:bootstrap。
+    process.env.WEIXIN_BOOKKEEPING_OWNER = "jiangjz";
+    process.env.WEIXIN_BOOKKEEPING_SENDER_ID = "seed-sender-1";
+    const seeded = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareUsers(seeded);
+      apply(seeded);
+      const binding = seeded.prepare(
+        "SELECT sender_id, account, display_name, financial_enabled, digest_enabled, status, bound_by, version FROM weixin_bindings",
+      ).get();
+      assert.deepEqual({ ...binding }, {
+        sender_id: "seed-sender-1",
+        account: "jiangjz",
+        display_name: null,
+        financial_enabled: 1,
+        digest_enabled: 1,
+        status: "active",
+        bound_by: "system:bootstrap",
+        version: 1,
+      });
+
+      // (c) CHECK 矩阵：status 非法、financial=2、双 active 同 account 违反 partial index、FK 拒绝幽灵账号。
+      const insertBinding = (overrides = {}) => seeded.prepare(`
+        INSERT INTO weixin_bindings
+          (sender_id, account, financial_enabled, digest_enabled, status, bound_at, bound_by, created_at, updated_at)
+        VALUES ($senderId, $account, $financial, 1, $status, '2026-08-29T00:00:00.000Z', 'unit', '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')
+      `).run({
+        $senderId: "check-sender",
+        $account: "jiangjz",
+        $financial: 0,
+        $status: "active",
+        ...overrides,
+      });
+      assert.throws(() => insertBinding({ $status: "archived" }), /CHECK constraint failed/i);
+      assert.throws(() => insertBinding({ $financial: 2 }), /CHECK constraint failed/i);
+      assert.throws(() => insertBinding(), /UNIQUE constraint failed/i, "one active binding per account");
+      assert.throws(
+        () => insertBinding({ $account: "ghostacct", $senderId: "ghost-sender" }),
+        /FOREIGN KEY constraint failed/i,
+      );
+      // disabled 行不占 one-active 名额。
+      insertBinding({ $status: "disabled" });
+      assert.equal(seeded.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 2);
+
+      // codes 表可写、码明文列不存在（只有 code_hash）。
+      const codeColumns = seeded.prepare("PRAGMA table_info(weixin_binding_codes)").all().map((row) => row.name);
+      assert.deepEqual(codeColumns, ["code_hash", "account", "expires_at", "used_at", "created_by", "created_at"]);
+    } finally {
+      seeded.close();
+    }
+
+    // (b) env-less 彩排：建表成功、种子跳过。
+    delete process.env.WEIXIN_BOOKKEEPING_OWNER;
+    delete process.env.WEIXIN_BOOKKEEPING_SENDER_ID;
+    delete process.env.AUTH_ACCOUNT;
+    const envless = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareUsers(envless);
+      apply(envless);
+      assert.equal(envless.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 0);
+    } finally {
+      envless.close();
+    }
+
+    // (b2) 带 sender 但 users 无该账号（种子前置缺席）：跳过种子而不是违反 FK。
+    process.env.WEIXIN_BOOKKEEPING_OWNER = "ghostacct";
+    process.env.WEIXIN_BOOKKEEPING_SENDER_ID = "seed-sender-1";
+    const ghost = createConnection({ databaseUrl: ":memory:" });
+    try {
+      prepareUsers(ghost);
+      apply(ghost);
+      assert.equal(ghost.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 0);
+    } finally {
+      ghost.close();
+    }
+
+    // (d) 全链二跑幂等：版本账本保证 0032 只应用一次。
+    process.env.AUTH_ACCOUNT = "jiangjz";
+    process.env.WEIXIN_BOOKKEEPING_OWNER = "jiangjz";
+    process.env.WEIXIN_BOOKKEEPING_SENDER_ID = "seed-sender-1";
+    const previousHash = process.env.AUTH_PASSWORD_HASH;
+    process.env.AUTH_PASSWORD_HASH = seedHashValue;
+    try {
+      withDatabase((databaseUrl) => {
+        const first = openDatabase({ databaseUrl });
+        try {
+          assert.equal(first.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 1);
+        } finally {
+          first.close();
+        }
+        const second = openDatabase({ databaseUrl });
+        try {
+          assert.equal(second.prepare("SELECT COUNT(*) AS count FROM weixin_bindings").get().count, 1);
+          assert.equal(
+            second.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version = '0032'").get().count,
+            1,
+          );
+        } finally {
+          second.close();
+        }
+      });
+    } finally {
+      if (previousHash === undefined) delete process.env.AUTH_PASSWORD_HASH;
+      else process.env.AUTH_PASSWORD_HASH = previousHash;
+    }
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("rolls back every 0002 schema change when the module migration fails partway", () => {
@@ -898,7 +2268,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       `, { checksum: baselineChecksum });
       const countsBefore = tableCounts(db);
       const hashesBefore = Object.fromEntries(
-        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+        Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
           table,
           rowsHash(db, table, omittedColumns),
         ]),
@@ -918,7 +2288,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(databaseTableNames(db).includes("login_rate_limits"), false);
       assert.deepEqual(tableCounts(db), countsBefore);
       const hashesAfterFailure = Object.fromEntries(
-        Object.entries(writeIntegrityColumns).map(([table, omittedColumns]) => [
+        Object.entries(rowsHashOmittedColumns).map(([table, omittedColumns]) => [
           table,
           rowsHash(db, table, omittedColumns),
         ]),
@@ -934,7 +2304,7 @@ test("rolls back every 0002 schema change when the module migration fails partwa
       assert.equal(columnNames(db, "customers").includes("version"), true);
       assert.deepEqual(
         all(db, "SELECT version FROM schema_migrations ORDER BY version").map((row) => row.version),
-        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018"],
+        ["0001", "0002", "0003", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028", "0029", "0030", "0031", "0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0041", "0042", "0043", "0044", "0045"],
       );
     } finally {
       db.close();

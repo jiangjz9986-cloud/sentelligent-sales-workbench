@@ -1,0 +1,16 @@
+# v0.9.0: oneshot service for the 5-minute ops inspection (outbox failed
+# watermark / worker heartbeat / scheduler lastError via the ops-alerts status
+# endpoint / daily backup freshness). Triggered only by
+# sentelligent-ops-inspect.timer; no [Install] section on purpose.
+# Install target: /etc/systemd/system/sentelligent-ops-inspect.service
+
+[Unit]
+Description=Sentelligent sales workbench 5-minute ops inspection
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+TimeoutStartSec=120
+SyslogIdentifier=sentelligent-ops-inspect
+ExecStart=/usr/bin/env bash /opt/sentelligent-sales-workbench/tools/ops-inspect.sh

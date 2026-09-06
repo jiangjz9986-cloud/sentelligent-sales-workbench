@@ -14,6 +14,34 @@ const ciWorkflow = readFileSync(
 );
 
 describe("root package QA scripts", () => {
+  it("explicitly runs the proactive panel regression in regular frontend QA", () => {
+    const command = frontendPackageJson.scripts?.["test:proactive-assistant"] ?? "";
+    assert.match(command, /^node --test /);
+    assert.ok(command.split(/\s+/u).includes("src/features/salesWorkbench/components/ProactiveAssistantPanel.test.mjs"));
+    assert.ok(frontendPackageJson.scripts["qa:local"].split(" && ").includes("npm run test:proactive-assistant"));
+  });
+
+  it("runs customer metadata and browser evidence identity tests in regular frontend QA", () => {
+    for (const [name, file] of [
+      ["test:customer-metadata", "src/features/salesWorkbench/pages/customerRecordMetadata.test.js"],
+      ["test:browser-evidence", "scripts/browser-evidence.test.mjs"],
+    ]) {
+      assert.equal(frontendPackageJson.scripts?.[name], `node --test ${file}`);
+      assert.ok(frontendPackageJson.scripts["qa:local"].split(" && ").includes(`npm run ${name}`));
+    }
+  });
+
+  it("keeps both identity-bound browser acceptance runners in integration QA", () => {
+    for (const [name, file] of [
+      ["test:scroll-wheel", "scripts/scroll-wheel-qa.test.mjs"],
+      ["test:customer-import-acceptance", "scripts/customer-import-acceptance.mjs"],
+    ]) {
+      assert.equal(frontendPackageJson.scripts?.[name], `node ${file}`);
+      assert.ok(frontendPackageJson.scripts["qa:integration"].split(" && ").includes(`npm run ${name}`));
+    }
+    assert.equal(frontendPackageJson.scripts.build, "vite build");
+  });
+
   it("exposes one command for the full formal delivery verification", () => {
     const script = packageJson.scripts?.["qa:full"];
 
@@ -57,13 +85,21 @@ describe("root package QA scripts", () => {
     );
   });
 
+  it("exposes the guarded ASR production smoke runner without embedding a target or credential", () => {
+    assert.equal(
+      packageJson.scripts?.["smoke:production:asr"],
+      "node scripts/asr-production-smoke.mjs",
+    );
+    assert.doesNotMatch(packageJson.scripts?.["smoke:production:asr"] ?? "", /password|cookie|csrf|82\.156/iu);
+  });
+
   it("exposes repeatable WebKit acceptance for iPhone Safari equivalence", () => {
     assert.equal(
       frontendPackageJson.scripts?.["qa:webkit"],
       "node scripts/webkit-qa.mjs",
     );
     assert.equal(frontendPackageJson.devDependencies?.playwright, "1.61.1");
-    assert.match(ciWorkflow, /playwright install --with-deps webkit/);
+    assert.match(ciWorkflow, /playwright install --with-deps chromium webkit/);
     assert.match(
       ciWorkflow,
       /npm --prefix outputs\/product-design-prototype run qa:webkit/,

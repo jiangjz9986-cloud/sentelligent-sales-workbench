@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 
 import { createServer } from "../src/server.js";
 import { openDatabase } from "../src/db.js";
+import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const machineHeader = "fixture-machine-header";
 let tempDir;
@@ -19,11 +20,13 @@ describe("assistant runtime business-owner wiring", () => {
     tempDir = null;
   });
 
-  it("uses an explicit machine-account to business-owner resolver for HTTP assistant reads", async () => {
+  it("uses an explicit event-account to business-owner resolver for HTTP assistant reads", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "sentelligent-owner-runtime-"));
     const databaseUrl = join(tempDir, "assistant.sqlite");
     const db = openDatabase({ databaseUrl });
     db.prepare("INSERT INTO customers (id, name, region, owner) VALUES ('business-customer', '业务归属医院', '山东', 'business-owner')").run();
+    // v0.9.3：事件 owner = 绑定账号（机器令牌仅通道鉴权）。
+    seedWeixinBinding(db, { account: "machineaccount", senderId: "owner-runtime-sender" });
     db.close();
 
     server = createServer({
@@ -33,7 +36,7 @@ describe("assistant runtime business-owner wiring", () => {
       authSessionSecret: Buffer.alloc(32, 21).toString("base64url"),
       weixinAgentApiToken: machineHeader,
       weixinAgentOwner: "machine-account",
-      resolveBusinessOwner: (account) => account === "machine-account" ? "business-owner" : null,
+      resolveBusinessOwner: (account) => account === "machineaccount" ? "business-owner" : null,
       weixinAllowedSenderIds: "owner-runtime-sender",
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -56,7 +59,7 @@ describe("assistant runtime business-owner wiring", () => {
     const body = await response.json();
 
     assert.equal(response.status, 200);
-    assert.match(body.text, /business-customer/);
+    assert.match(body.text, /业务归属医院/);
     assert.doesNotMatch(body.text, /未找到客户/);
   });
 
@@ -106,7 +109,7 @@ describe("assistant runtime business-owner wiring", () => {
     assert.equal(forgedBody.error.code, "OWNER_SCOPE_DENIED");
   });
 
-  it("fails closed when the configured business owner has no active business rows", async () => {
+  it("fails closed when the bound account has no active business rows", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "sentelligent-owner-runtime-missing-"));
     const databaseUrl = join(tempDir, "assistant.sqlite");
     server = createServer({
@@ -119,6 +122,15 @@ describe("assistant runtime business-owner wiring", () => {
       weixinAllowedSenderIds: "owner-runtime-sender",
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    {
+      // 绑定存在但该账号名下没有任何业务行：闭合语义应回“未找到客户”而非回退全量。
+      const seedDb = openDatabase({ databaseUrl });
+      try {
+        seedWeixinBinding(seedDb, { account: "emptyaccount", senderId: "owner-runtime-sender" });
+      } finally {
+        seedDb.close();
+      }
+    }
 
     const response = await fetch(`http://127.0.0.1:${server.address().port}/api/integrations/weixin-agent/events`, {
       method: "POST",

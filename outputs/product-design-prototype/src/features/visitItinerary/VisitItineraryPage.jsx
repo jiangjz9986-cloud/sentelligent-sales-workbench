@@ -11,6 +11,7 @@ import {
   Navigation,
   Pencil,
   Plus,
+  ReceiptText,
   Save,
   Search,
   Trash2,
@@ -21,6 +22,8 @@ import { useEffect, useMemo, useState } from "react";
 import { AmapRouteMap } from "./AmapRouteMap.jsx";
 import { geocodeVisitItineraryPayload } from "./amapGeocoder.js";
 import { Panel } from "../../components/primitives.jsx";
+import { DatetimeLocalInput } from "../../components/DatetimeLocalInput.jsx";
+import { useToast } from "../../components/toast.jsx";
 import {
   addVisitStop,
   applyCustomerToVisitStop,
@@ -150,7 +153,7 @@ function ListView({ items, onOpen, onCreate, query, setQuery, statusFilter, setS
   );
 }
 
-function DetailView({ item, onBack, onEdit, onDelete }) {
+function DetailView({ item, onBack, onEdit, onDelete, onRecordExpense }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   if (!item) {
     return (
@@ -168,6 +171,11 @@ function DetailView({ item, onBack, onEdit, onDelete }) {
       <div className="subview-actions sticky-subview-toolbar">
         <button className="ghost-button" type="button" onClick={onBack}><ArrowLeft size={16} />返回列表</button>
         <div className="detail-toolbar-actions">
+          {onRecordExpense ? (
+            <button className="ghost-button" type="button" data-testid="itinerary-record-expense" onClick={() => onRecordExpense(item)}>
+              <ReceiptText size={16} />记当日费用
+            </button>
+          ) : null}
           <button className="ghost-button" type="button" onClick={onEdit}><Pencil size={16} />修改</button>
           <button className="ghost-button danger" type="button" onClick={() => setConfirmingDelete(true)}><Trash2 size={16} />删除</button>
         </div>
@@ -303,7 +311,7 @@ function ItineraryForm({ mode, selected, customers, onCancel, onSave }) {
           <label className="form-field"><span>行程名称</span><input value={draft.title} onChange={(event) => updateField("title", event.target.value)} required /></label>
           <label className="form-field"><span>拜访日期</span><input type="date" value={draft.visitDate} onChange={(event) => updateField("visitDate", event.target.value)} required /></label>
           <label className="form-field"><span>状态</span><select value={draft.status} onChange={(event) => updateField("status", event.target.value)}><option value="planned">待执行</option><option value="completed">已完成</option><option value="cancelled">已取消</option></select></label>
-          <label className="form-field"><span>出发时间</span><input type="datetime-local" value={draft.departureAt} onChange={(event) => updateField("departureAt", event.target.value)} required /></label>
+          <label className="form-field"><span>出发时间</span><DatetimeLocalInput value={draft.departureAt} onChange={(value) => updateField("departureAt", value)} required testId="itinerary-departure-at" /></label>
           <label className="form-field form-field-wide"><span>出发地址</span><input value={draft.departureAddress} onChange={(event) => updateField("departureAddress", event.target.value)} required /></label>
           <label className="form-field"><span>出发城市</span><input value={draft.departureCity} onChange={(event) => updateField("departureCity", event.target.value)} /></label>
         </div>
@@ -329,7 +337,7 @@ function ItineraryForm({ mode, selected, customers, onCancel, onSave }) {
                 <label className="form-field form-field-wide"><span>客户地址</span><input value={stop.address} onChange={(event) => updateStop(stop.id, "address", event.target.value)} required /></label>
                 <label className="form-field"><span>城市</span><input value={stop.city} onChange={(event) => updateStop(stop.id, "city", event.target.value)} /></label>
                 <label className="form-field"><span>停留时长</span><input type="number" min="1" max="480" value={stop.visitMinutes} onChange={(event) => updateStop(stop.id, "visitMinutes", Number(event.target.value))} required /></label>
-                <label className="form-field"><span>预约时间</span><input type="datetime-local" value={stop.appointmentAt} onChange={(event) => updateStop(stop.id, "appointmentAt", event.target.value)} /></label>
+                <label className="form-field"><span>预约时间</span><DatetimeLocalInput value={stop.appointmentAt} onChange={(value) => updateStop(stop.id, "appointmentAt", value)} testId={`itinerary-stop-${stop.id}-appointment`} /></label>
                 <label className="form-field form-field-wide"><span>备注</span><textarea value={stop.notes} onChange={(event) => updateStop(stop.id, "notes", event.target.value)} /></label>
               </div>
             </article>
@@ -351,9 +359,21 @@ export function VisitItineraryPage({
   onEdit,
   onSave,
   onDelete,
+  onRecordExpense,
 }) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const toast = useToast();
+
+  async function deleteWithFeedback() {
+    const deletedTitle = selected?.title;
+    try {
+      await onDelete();
+      toast({ tone: "success", title: "拜访行程已删除", description: deletedTitle });
+    } catch (error) {
+      toast({ tone: "error", title: "行程删除失败", description: error.message || "请稍后重试" });
+    }
+  }
 
   if (viewMode === "new" || viewMode === "edit") {
     return (
@@ -367,7 +387,15 @@ export function VisitItineraryPage({
     );
   }
   if (viewMode === "detail") {
-    return <DetailView item={selected} onBack={onBack} onEdit={onEdit} onDelete={onDelete} />;
+    return (
+      <DetailView
+        item={selected}
+        onBack={onBack}
+        onEdit={onEdit}
+        onDelete={deleteWithFeedback}
+        onRecordExpense={onRecordExpense}
+      />
+    );
   }
   return (
     <ListView

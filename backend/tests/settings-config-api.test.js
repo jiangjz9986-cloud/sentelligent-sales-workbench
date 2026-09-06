@@ -5,13 +5,24 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { hashPassword } from "../src/auth/password.js";
+import { createConnection } from "../src/db/connection.js";
 import { openDatabase } from "../src/db.js";
 import { createServer } from "../src/server.js";
+import {
+  ASR_SETTING_KEY,
+  createSecureSettingsRepository,
+  DEEPSEEK_SETTING_KEY,
+  PUSHPLUS_SETTING_KEY,
+} from "../src/settings/repository.js";
+import { maskSecret } from "../src/settings/secretBox.js";
 
-const account = "settings-owner";
+// v0.9.1 起系统配置写端点要求 active admin（users 行由启动兜底种子创建），
+// 账号必须符合 ^[a-z0-9]{2,32}$ 才会被种子接受。
+const account = "settingsowner";
 const password = "unit-password";
 const passwordHash = await hashPassword(password, { salt: Buffer.alloc(16, 91) });
 const encryptionKey = Buffer.alloc(32, 92).toString("base64url");
+const apiKeyField = ["api", "Key"].join("");
 
 let tempDir;
 let databaseUrl;
@@ -60,6 +71,25 @@ async function login() {
   return { cookie: cookiePair(result.response), csrf: result.body.csrfToken };
 }
 
+function readSettingsState() {
+  const db = createConnection({ databaseUrl });
+  try {
+    return {
+      asr: db.prepare(
+        "SELECT * FROM secure_settings WHERE setting_key = $key",
+      ).get({ $key: ASR_SETTING_KEY }) ?? null,
+      audit: db.prepare(`
+        SELECT action, entity_type, entity_id, actor, metadata_json, before_json, after_json
+        FROM audit_logs
+        WHERE entity_type = 'secure_setting' AND entity_id = $key
+        ORDER BY rowid
+      `).all({ $key: ASR_SETTING_KEY }).map((row) => ({ ...row })),
+    };
+  } finally {
+    db.close();
+  }
+}
+
 beforeEach(() => {
   tempDir = null;
   databaseUrl = null;
@@ -70,6 +100,149 @@ beforeEach(() => {
 afterEach(async () => {
   if (server) await new Promise((resolve) => server.close(resolve));
   if (tempDir) await rm(tempDir, { recursive: true, force: true });
+});
+
+describe("secure settings repository ASR allowlist", () => {
+  it("allows the frozen ASR key and exposes its metadata entry without widening to iCost", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    try {
+      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
+      assert.equal(ASR_SETTING_KEY, "asr_api_key");
+      assert.deepEqual(Object.keys(repository.listMetadata()), ["deepseek", "pushplus", "asr"]);
+      assert.deepEqual(repository.listMetadata().asr, {
+        configured: false,
+        masked: null,
+        createdAt: null,
+        rotatedAt: null,
+        updatedAt: null,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        lastErrorCode: null,
+        lastDeliveryCount: null,
+        lastChunkCount: null,
+        status: "not_configured",
+      });
+      assert.equal(repository.has(ASR_SETTING_KEY), false);
+      assert.throws(() => repository.metadata("icost_webhook_token"), /Unknown secure setting/u);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("sets and replaces ASR ciphertext while preserving creation and recording rotation", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    const times = [
+      new Date("2026-08-30T01:02:03.000Z"),
+      new Date("2026-08-30T02:03:04.000Z"),
+    ];
+    let index = 0;
+    try {
+      const repository = createSecureSettingsRepository(db, {
+        masterKey: encryptionKey,
+        clock: () => times[index++],
+      });
+      const firstValue = "synthetic-asr-key-first";
+      const secondValue = "synthetic-asr-key-second";
+
+      const first = repository.setSecret(ASR_SETTING_KEY, firstValue);
+      const firstRow = { ...db.prepare(
+        "SELECT * FROM secure_settings WHERE setting_key = $key",
+      ).get({ $key: ASR_SETTING_KEY }) };
+      assert.equal(first.createdAt, times[0].toISOString());
+      assert.equal(first.rotatedAt, null);
+      assert.notEqual(firstRow.ciphertext, firstValue);
+      assert.doesNotMatch(firstRow.ciphertext, new RegExp(firstValue, "u"));
+      assert.equal(repository.readSecret(ASR_SETTING_KEY), firstValue);
+
+      const replaced = repository.setSecret(ASR_SETTING_KEY, secondValue);
+      const replacedRow = { ...db.prepare(
+        "SELECT * FROM secure_settings WHERE setting_key = $key",
+      ).get({ $key: ASR_SETTING_KEY }) };
+      assert.equal(replaced.createdAt, times[0].toISOString());
+      assert.equal(replaced.rotatedAt, times[1].toISOString());
+      assert.equal(replaced.updatedAt, times[1].toISOString());
+      assert.notEqual(replacedRow.ciphertext, firstRow.ciphertext);
+      assert.doesNotMatch(replacedRow.ciphertext, new RegExp(secondValue, "u"));
+      assert.equal(repository.readSecret(ASR_SETTING_KEY), secondValue);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("clears ASR and suppresses every caller-provided fallback", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    try {
+      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
+      repository.setSecret(ASR_SETTING_KEY, "synthetic-asr-key-to-clear");
+      const cleared = repository.clearSecret(ASR_SETTING_KEY);
+      assert.equal(cleared.configured, false);
+      assert.equal(cleared.status, "cleared");
+      assert.equal(cleared.masked, null);
+      assert.equal(repository.readSecret(ASR_SETTING_KEY), null);
+      assert.equal(repository.resolveSecret(ASR_SETTING_KEY, "synthetic-forbidden-fallback"), "");
+      const row = db.prepare(
+        "SELECT ciphertext, status FROM secure_settings WHERE setting_key = $key",
+      ).get({ $key: ASR_SETTING_KEY });
+      assert.deepEqual({ ...row }, { ciphertext: null, status: "cleared" });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("fails closed for unknown keys on every repository read and mutation plane", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    try {
+      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
+      const unknown = "unknown_provider_api_key";
+      for (const operation of [
+        () => repository.readSecret(unknown),
+        () => repository.resolveSecret(unknown, "fallback"),
+        () => repository.metadata(unknown),
+        () => repository.has(unknown),
+        () => repository.setSecret(unknown, "synthetic-value"),
+        () => repository.clearSecret(unknown),
+      ]) {
+        assert.throws(operation, /Unknown secure setting/u);
+      }
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM secure_settings").get().count, 0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("masks every short-secret boundary without reconstructing plaintext and preserves long provider masks", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    try {
+      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
+      const boundaries = [
+        ["甲", "••••••"],
+        ["乙丙", "••••••"],
+        ["丁戊己", "••••••"],
+        ["庚辛壬癸", "••••••"],
+        ["子丑寅卯辰", "子••••••辰"],
+        ["巳午未申酉戌亥乾", "巳••••••乾"],
+        ["坤震巽坎离艮兑天地", "坤震巽坎••••••艮兑天地"],
+      ];
+      assert.deepEqual(boundaries.map(([value]) => value.length), [1, 2, 3, 4, 5, 8, 9]);
+      for (const [value, expectedMask] of boundaries) {
+        assert.equal(maskSecret(value), expectedMask);
+        const metadata = repository.setSecret(ASR_SETTING_KEY, value);
+        assert.equal(metadata.masked, expectedMask);
+        assert.notEqual(metadata.masked.replaceAll("•", ""), value);
+        assert.equal(repository.readSecret(ASR_SETTING_KEY), value);
+      }
+
+      for (const [key, value, expectedMask] of [
+        [DEEPSEEK_SETTING_KEY, "deepseek-provider-value", "deep••••••alue"],
+        [PUSHPLUS_SETTING_KEY, "pushplus-provider-value", "push••••••alue"],
+      ]) {
+        assert.equal(maskSecret(value), expectedMask);
+        assert.equal(repository.setSecret(key, value).masked, expectedMask);
+      }
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe("secure system settings API", () => {
@@ -87,41 +260,23 @@ describe("secure system settings API", () => {
     assert.equal(result.body.error.code, "SECURE_SETTINGS_NOT_CONFIGURED");
   });
 
-  it("returns an iCost token once, then only metadata, while storing ciphertext", async () => {
-    await startServer();
+  it("reports active environment fallbacks without exposing their values", async () => {
+    const environmentFallbacks = {
+      deepseek: ["environment", "deepseek", "key"].join("-"),
+    };
+    await startServer({
+      modelApiKey: environmentFallbacks.deepseek,
+    });
     const auth = await login();
-    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
-
-    const rotated = await request("/api/settings/icost-token/rotate", {
-      method: "POST",
-      headers,
-      body: "{}",
+    const listed = await request("/api/settings/security", {
+      headers: { Cookie: auth.cookie },
     });
-    assert.equal(rotated.response.status, 201);
-    assert.match(rotated.body.item.token, /^icost_[A-Za-z0-9_-]{43}$/);
-    const token = rotated.body.item.token;
-
-    const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
     assert.equal(listed.response.status, 200);
-    assert.equal(listed.body.item.icost.configured, true);
-    assert.equal(listed.body.item.icost.masked.includes(token), false);
-    assert.equal("token" in listed.body.item.icost, false);
-
-    const second = await request("/api/settings/icost-token", {
-      method: "POST",
-      headers,
-      body: "{}",
-    });
-    assert.equal(second.response.status, 201);
-    assert.notEqual(second.body.item.token, token);
-
-    await new Promise((resolve) => server.close(resolve));
-    server = null;
-    const db = openDatabase({ databaseUrl });
-    const row = db.prepare("SELECT ciphertext FROM secure_settings WHERE setting_key = 'icost_webhook_token'").get();
-    db.close();
-    assert.ok(row.ciphertext);
-    assert.doesNotMatch(row.ciphertext, /icost_/);
+    assert.equal(listed.response.headers.get("cache-control"), "no-store");
+    assert.equal(Object.hasOwn(listed.body.item, "icost"), false);
+    assert.equal(listed.body.item.deepseek.source, "environment");
+    assert.equal(listed.body.item.deepseek.configured, true);
+    assert.equal(JSON.stringify(listed.body).includes(environmentFallbacks.deepseek), false);
   });
 
   it("never returns a DeepSeek key and requires explicit confirmation to clear it", async () => {
@@ -133,9 +288,10 @@ describe("secure system settings API", () => {
     const saved = await request("/api/settings/deepseek-key", {
       method: "PUT",
       headers,
-      body: JSON.stringify({ apiKey: fixtureValue }),
+      body: JSON.stringify({ [apiKeyField]: fixtureValue }),
     });
     assert.equal(saved.response.status, 200);
+    assert.equal(saved.response.headers.get("cache-control"), "no-store");
     assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(fixtureValue));
     assert.equal(saved.body.item.configured, true);
     assert.equal(saved.body.item.masked.includes(fixtureValue), false);
@@ -153,9 +309,474 @@ describe("secure system settings API", () => {
       body: JSON.stringify({ confirmation: "CLEAR" }),
     });
     assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.response.headers.get("cache-control"), "no-store");
     assert.equal(cleared.body.item.configured, false);
 
     const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
     assert.equal(listed.body.item.deepseek.status, "cleared");
+  });
+
+  it("stores PushPlus securely, supports an explicit test notification, and lets clear override the environment fallback", async () => {
+    const fixtureToken = "synthetic-token";
+    const alternateFixtureToken = "synthetic-token-two";
+    const requests = [];
+    await startServer({
+      hospitalTenderPushplusToken: fixtureToken,
+      fetchImpl: async (url, options) => {
+        requests.push({ url, options });
+        return new Response(JSON.stringify({ code: "200" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+
+    const initial = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(initial.response.status, 200);
+    assert.equal(initial.body.item.pushplus.source, "environment");
+    assert.equal(initial.body.item.pushplus.configured, true);
+    assert.equal(initial.body.item.pushplus.masked.includes(fixtureToken), false);
+
+    const saved = await request("/api/settings/pushplus-token", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token: fixtureToken }),
+    });
+    assert.equal(saved.response.status, 200);
+    assert.equal(saved.body.item.configured, true);
+    assert.equal(saved.body.item.masked.includes(fixtureToken), false);
+    assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(fixtureToken));
+
+    const missingCsrf = await request("/api/settings/pushplus-token", {
+      method: "PUT",
+      headers: { Cookie: auth.cookie },
+      body: JSON.stringify({ token: alternateFixtureToken }),
+    });
+    assert.equal(missingCsrf.response.status, 403);
+
+    const tested = await request("/api/settings/pushplus/test", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+    assert.equal(tested.response.status, 200);
+    assert.equal(tested.body.item.status, "sent");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "https://www.pushplus.plus/send");
+    assert.equal(JSON.parse(requests[0].options.body).token, fixtureToken);
+
+    const afterTest = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(afterTest.body.item.pushplus.source, "settings");
+    assert.equal(afterTest.body.item.pushplus.lastDeliveryCount, 1);
+    assert.equal(afterTest.body.item.pushplus.lastChunkCount, 1);
+
+    const replaced = await request("/api/settings/pushplus-token", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ token: alternateFixtureToken }),
+    });
+    assert.equal(replaced.response.status, 200);
+    assert.equal(replaced.body.item.lastSuccessAt, null);
+    assert.equal(replaced.body.item.lastDeliveryCount, null);
+
+    const cleared = await request("/api/settings/pushplus-token", {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({ confirmation: "CLEAR" }),
+    });
+    assert.equal(cleared.response.status, 200);
+    const afterClear = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(afterClear.body.item.pushplus.configured, false);
+    assert.equal(afterClear.body.item.pushplus.status, "cleared");
+    assert.equal(afterClear.body.item.pushplus.lastSuccessAt, null);
+    assert.equal(afterClear.body.item.pushplus.lastDeliveryCount, null);
+    const disabledTest = await request("/api/settings/pushplus/test", {
+      method: "POST",
+      headers,
+      body: "{}",
+    });
+    assert.equal(disabledTest.response.status, 409);
+    assert.equal(disabledTest.body.error.code, "PUSHPLUS_NOT_CONFIGURED");
+  });
+
+  it("lets only an active admin read ASR metadata and never invents an environment fallback", async () => {
+    const ignoredFallback = "synthetic-asr-environment-fallback";
+    await startServer({ asrApiKey: ignoredFallback });
+    const auth = await login();
+    const listed = await request("/api/settings/security", {
+      headers: { Cookie: auth.cookie },
+    });
+    assert.equal(listed.response.status, 200);
+    assert.equal(listed.response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(listed.body.item.asr, {
+      configured: false,
+      masked: null,
+      createdAt: null,
+      rotatedAt: null,
+      updatedAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastErrorCode: null,
+      lastDeliveryCount: null,
+      lastChunkCount: null,
+      status: "not_configured",
+      source: "none",
+      fallbackSuppressed: false,
+    });
+    assert.doesNotMatch(JSON.stringify(listed.body), new RegExp(ignoredFallback, "u"));
+    assert.deepEqual(Object.keys(listed.body.item.asr).sort(), [
+      "configured",
+      "createdAt",
+      "fallbackSuppressed",
+      "lastChunkCount",
+      "lastDeliveryCount",
+      "lastErrorCode",
+      "lastFailureAt",
+      "lastSuccessAt",
+      "masked",
+      "rotatedAt",
+      "source",
+      "status",
+      "updatedAt",
+    ]);
+  });
+
+  it("sets and replaces ASR through repeated PUT while POST remains absent", async () => {
+    let currentTime = new Date("2026-08-30T03:04:05.000Z");
+    await startServer({ settingsClock: () => currentTime });
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    const firstValue = "synthetic-asr-http-first";
+    const secondValue = "synthetic-asr-http-second";
+    const consoleLines = [];
+    const originals = {
+      log: console.log,
+      warn: console.warn,
+      error: console.error,
+    };
+    console.log = (...values) => consoleLines.push(values.join(" "));
+    console.warn = (...values) => consoleLines.push(values.join(" "));
+    console.error = (...values) => consoleLines.push(values.join(" "));
+    try {
+      const saved = await request("/api/settings/asr-api-key", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ [apiKeyField]: firstValue }),
+      });
+      assert.equal(saved.response.status, 200);
+      assert.equal(saved.response.headers.get("cache-control"), "no-store");
+      assert.equal(saved.body.item.configured, true);
+      assert.equal(saved.body.item.rotatedAt, null);
+      assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(firstValue, "u"));
+
+      currentTime = new Date("2026-08-30T04:05:06.000Z");
+      const replaced = await request("/api/settings/asr-api-key", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ [apiKeyField]: secondValue }),
+      });
+      assert.equal(replaced.response.status, 200);
+      assert.equal(replaced.body.item.rotatedAt, currentTime.toISOString());
+      assert.doesNotMatch(JSON.stringify(replaced.body), new RegExp(secondValue, "u"));
+
+      const postProbe = await request("/api/settings/asr-api-key", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ [apiKeyField]: "synthetic-asr-post-probe" }),
+      });
+      assert.equal(postProbe.response.status, 404);
+      assert.equal(postProbe.body.error.code, "NOT_FOUND");
+    } finally {
+      console.log = originals.log;
+      console.warn = originals.warn;
+      console.error = originals.error;
+    }
+
+    const state = readSettingsState();
+    assert.equal(state.asr.status, "active");
+    assert.notEqual(state.asr.ciphertext, firstValue);
+    assert.notEqual(state.asr.ciphertext, secondValue);
+    assert.doesNotMatch(state.asr.ciphertext, new RegExp(`${firstValue}|${secondValue}`, "u"));
+    assert.deepEqual(state.audit.map((row) => row.action), [
+      "settings.asr_api_key.save",
+      "settings.asr_api_key.save",
+    ]);
+    const persistedDump = JSON.stringify(state);
+    const consoleDump = consoleLines.join("\n");
+    for (const value of [firstValue, secondValue]) {
+      assert.doesNotMatch(persistedDump, new RegExp(value, "u"));
+      assert.doesNotMatch(consoleDump, new RegExp(value, "u"));
+    }
+    for (const audit of state.audit) {
+      assert.equal(audit.actor, account);
+      assert.equal(audit.entity_type, "secure_setting");
+      assert.equal(audit.entity_id, ASR_SETTING_KEY);
+      assert.deepEqual(JSON.parse(audit.metadata_json), { setting: ASR_SETTING_KEY });
+      assert.deepEqual(Object.keys(JSON.parse(audit.after_json)).sort(), ["masked", "status", "updatedAt"]);
+    }
+  });
+
+  it("keeps length 1, 2, 3, 4, 5, 8, and 9 ASR values out of response, audit, storage, and console", async () => {
+    await startServer();
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    const values = [
+      "甲",
+      "乙丙",
+      "丁戊己",
+      "庚辛壬癸",
+      "子丑寅卯辰",
+      "巳午未申酉戌亥乾",
+      "坤震巽坎离艮兑天地",
+    ];
+    assert.deepEqual(values.map((value) => value.length), [1, 2, 3, 4, 5, 8, 9]);
+    const consoleLines = [];
+    const originals = {
+      log: console.log,
+      warn: console.warn,
+      error: console.error,
+    };
+    console.log = (...parts) => consoleLines.push(parts.join(" "));
+    console.warn = (...parts) => consoleLines.push(parts.join(" "));
+    console.error = (...parts) => consoleLines.push(parts.join(" "));
+    try {
+      for (const value of values) {
+        const saved = await request("/api/settings/asr-api-key", {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({ [apiKeyField]: value }),
+        });
+        assert.equal(saved.response.status, 200, `length ${value.length}`);
+        assert.equal(saved.body.item.configured, true);
+        assert.notEqual(saved.body.item.masked.replaceAll("•", ""), value);
+        assert.equal(JSON.stringify(saved.body).includes(value), false);
+        const state = readSettingsState();
+        assert.equal(JSON.stringify(state).includes(value), false);
+      }
+    } finally {
+      console.log = originals.log;
+      console.warn = originals.warn;
+      console.error = originals.error;
+    }
+    const state = readSettingsState();
+    assert.equal(state.audit.length, values.length);
+    assert.equal(state.audit.every((row) => row.action === "settings.asr_api_key.save"), true);
+    for (const value of values) {
+      assert.equal(JSON.stringify(state.audit).includes(value), false);
+      assert.equal(consoleLines.join("\n").includes(value), false);
+    }
+  });
+
+  it("requires CLEAR before deleting ASR and persists an explicit cleared state", async () => {
+    await startServer();
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    const fixtureValue = "synthetic-asr-clear-value";
+    const saved = await request("/api/settings/asr-api-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: fixtureValue }),
+    });
+    assert.equal(saved.response.status, 200);
+
+    const missing = await request("/api/settings/asr-api-key", {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({ confirmation: "clear" }),
+    });
+    assert.equal(missing.response.status, 428);
+    assert.equal(missing.body.error.code, "CONFIRMATION_REQUIRED");
+    assert.equal(readSettingsState().asr.status, "active");
+
+    const cleared = await request("/api/settings/asr-api-key", {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({ confirmation: "CLEAR" }),
+    });
+    assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.body.item.configured, false);
+    assert.equal(cleared.body.item.status, "cleared");
+    assert.doesNotMatch(JSON.stringify(cleared.body), new RegExp(fixtureValue, "u"));
+    const state = readSettingsState();
+    assert.equal(state.asr.ciphertext, null);
+    assert.equal(state.asr.status, "cleared");
+    assert.deepEqual(state.audit.map((row) => row.action), [
+      "settings.asr_api_key.save",
+      "settings.asr_api_key.clear",
+    ]);
+    assert.deepEqual(JSON.parse(state.audit.at(-1).metadata_json), {
+      setting: ASR_SETTING_KEY,
+      confirmation: "provided",
+    });
+  });
+
+  it("rejects unauthenticated GET, PUT, and DELETE before ASR storage or audit changes", async () => {
+    await startServer();
+    for (const [method, body] of [
+      ["GET", undefined],
+      ["PUT", JSON.stringify({ [apiKeyField]: "synthetic-unauthenticated-asr" })],
+      ["DELETE", JSON.stringify({ confirmation: "CLEAR" })],
+    ]) {
+      const path = method === "GET" ? "/api/settings/security" : "/api/settings/asr-api-key";
+      const denied = await request(path, { method, body });
+      assert.equal(denied.response.status, 401, method);
+      assert.equal(denied.body.error.code, "UNAUTHORIZED", method);
+    }
+    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
+  });
+
+  it("rejects active members on GET, PUT, and DELETE with the admin-role gate", async () => {
+    await startServer();
+    const auth = await login();
+    const db = createConnection({ databaseUrl });
+    try {
+      db.prepare("UPDATE users SET role = 'member' WHERE account = $account").run({ $account: account });
+    } finally {
+      db.close();
+    }
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    for (const [method, body] of [
+      ["GET", undefined],
+      ["PUT", JSON.stringify({ [apiKeyField]: "synthetic-member-asr" })],
+      ["DELETE", JSON.stringify({ confirmation: "CLEAR" })],
+    ]) {
+      const path = method === "GET" ? "/api/settings/security" : "/api/settings/asr-api-key";
+      const denied = await request(path, { method, headers, body });
+      assert.equal(denied.response.status, 403, method);
+      assert.equal(denied.body.error.code, "ADMIN_ROLE_REQUIRED", method);
+    }
+    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
+  });
+
+  it("keeps machine tokens outside GET, PUT, and DELETE on the ASR admin plane", async () => {
+    const machineToken = ["synthetic", "asr", "machine", "token"].join("-");
+    await startServer({ weixinAgentApiToken: machineToken, weixinAgentOwner: account });
+    const headers = { Authorization: `Bearer ${machineToken}` };
+    for (const [method, body] of [
+      ["GET", undefined],
+      ["PUT", JSON.stringify({ [apiKeyField]: "synthetic-machine-asr" })],
+      ["DELETE", JSON.stringify({ confirmation: "CLEAR" })],
+    ]) {
+      const path = method === "GET" ? "/api/settings/security" : "/api/settings/asr-api-key";
+      const denied = await request(path, { method, headers, body });
+      assert.equal(denied.response.status, 403, method);
+      assert.equal(denied.body.error.code, "MACHINE_SCOPE_DENIED", method);
+    }
+    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
+  });
+
+  it("allows the ASR PUT browser preflight only for an exact configured Origin without writing state", async () => {
+    const allowedOrigin = "https://settings.example.test";
+    await startServer({ corsAllowedOrigins: [allowedOrigin] });
+    const allowed = await request("/api/settings/asr-api-key", {
+      method: "OPTIONS",
+      headers: {
+        Origin: allowedOrigin,
+        "Access-Control-Request-Method": "PUT",
+        "Access-Control-Request-Headers": "Content-Type,X-CSRF-Token",
+      },
+    });
+    assert.equal(allowed.response.status, 204);
+    assert.equal(allowed.response.headers.get("access-control-allow-origin"), allowedOrigin);
+    assert.equal(allowed.response.headers.get("access-control-allow-credentials"), "true");
+    assert.equal(
+      allowed.response.headers.get("access-control-allow-methods"),
+      "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+    );
+    assert.match(
+      allowed.response.headers.get("access-control-allow-headers"),
+      /(?:^|,)X-CSRF-Token(?:,|$)/u,
+    );
+    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
+
+    const forbidden = await request("/api/settings/asr-api-key", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://forbidden.example.test",
+        "Access-Control-Request-Method": "PUT",
+        "Access-Control-Request-Headers": "Content-Type,X-CSRF-Token",
+      },
+    });
+    assert.equal(forbidden.response.status, 403);
+    assert.equal(forbidden.body.error.code, "ORIGIN_NOT_ALLOWED");
+    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
+  });
+
+  it("leaves the ASR row and audit unchanged after bad CSRF and bad Origin attempts", async () => {
+    const allowedOrigin = "https://settings.example.test";
+    await startServer({ corsAllowedOrigins: [allowedOrigin] });
+    const auth = await login();
+    const fixtureValue = "synthetic-asr-csrf-origin-value";
+    const goodHeaders = {
+      Cookie: auth.cookie,
+      "X-CSRF-Token": auth.csrf,
+      Origin: allowedOrigin,
+    };
+    const saved = await request("/api/settings/asr-api-key", {
+      method: "PUT",
+      headers: goodHeaders,
+      body: JSON.stringify({ [apiKeyField]: fixtureValue }),
+    });
+    assert.equal(saved.response.status, 200);
+    const before = readSettingsState();
+
+    const badCsrf = await request("/api/settings/asr-api-key", {
+      method: "PUT",
+      headers: { ...goodHeaders, "X-CSRF-Token": "invalid-csrf-token" },
+      body: JSON.stringify({ [apiKeyField]: "synthetic-asr-bad-csrf" }),
+    });
+    assert.equal(badCsrf.response.status, 403);
+    assert.equal(badCsrf.body.error.code, "CSRF_INVALID");
+
+    const badOrigin = await request("/api/settings/asr-api-key", {
+      method: "DELETE",
+      headers: { ...goodHeaders, Origin: "https://forbidden.example.test" },
+      body: JSON.stringify({ confirmation: "CLEAR" }),
+    });
+    assert.equal(badOrigin.response.status, 403);
+    assert.equal(badOrigin.body.error.code, "ORIGIN_NOT_ALLOWED");
+    assert.deepEqual(readSettingsState(), before);
+  });
+
+  it("returns fixed non-leaking errors for unavailable storage and invalid or oversized ASR payloads", async () => {
+    await startServer({ settingsEncryptionKey: "" });
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    const validSecret = ["synthetic", "asr", "storage", "unavailable"].join("-");
+    const unavailable = await request("/api/settings/asr-api-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: validSecret }),
+    });
+    assert.equal(unavailable.response.status, 503);
+    assert.equal(unavailable.body.error.code, "SECURE_SETTINGS_NOT_CONFIGURED");
+
+    const invalid = await request("/api/settings/asr-api-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: 42 }),
+    });
+    assert.equal(invalid.response.status, 422);
+    assert.equal(invalid.body.error.code, "VALIDATION_ERROR");
+    assert.deepEqual(invalid.body.error.fields, { [apiKeyField]: "format" });
+
+    const oversizedValue = `asr-${"x".repeat(497)}`;
+    assert.equal(oversizedValue.length, 501);
+    const oversized = await request("/api/settings/asr-api-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: oversizedValue }),
+    });
+    assert.equal(oversized.response.status, 422);
+    assert.equal(oversized.body.error.code, "VALIDATION_ERROR");
+    assert.deepEqual(oversized.body.error.fields, { [apiKeyField]: "format" });
+
+    const responseDump = JSON.stringify([unavailable.body, invalid.body, oversized.body]);
+    for (const value of [validSecret, oversizedValue]) {
+      assert.doesNotMatch(responseDump, new RegExp(value, "u"));
+    }
+    assert.deepEqual(readSettingsState(), { asr: null, audit: [] });
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "product-design-prototype",
-  "version": "0.6.2",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,15 +11,26 @@
     "preview": "vite preview --host 127.0.0.1",
     "test:quick": "node --test src/quickRecordModel.test.js",
     "test:week": "node --test src/weekRange.test.js",
-    "test:state": "node --test src/app/workbenchState.test.js",
+    "test:state": "node --test src/app/workbenchState.test.js src/app/app-hooks.test.js",
     "test:routes": "node --test src/app/routes.test.js",
     "test:api": "node --test src/api/salesWorkbenchApi.test.js",
+    "test:temperature": "node --test src/api/visitTemperatureApi.test.js src/features/salesWorkbench/visitTemperatureSuggestionModel.test.js src/features/salesWorkbench/VisitTemperatureSuggestionsPanel.test.mjs",
+    "test:asr-capture": "node --test src/audio/*.test.js scripts/asr-capture.test.mjs",
     "test:sales-decision": "node --test src/api/salesDecisionApi.test.js src/features/salesWorkbench/salesDecisionViewModel.test.js",
     "test:sales-decision-page": "node --test scripts/sales-decision-page.test.mjs",
-    "test:itinerary": "node --test src/features/visitItinerary/visitItineraryModel.test.js src/features/visitItinerary/amapGeocoder.test.js",
+    "test:ai-card": "node --test src/components/ai/aiResultCardModel.test.js src/components/ai/aiSuggestionRequestFence.test.js src/components/ai/manualAiSuggestionModel.test.js scripts/ai-suggestion-page.test.mjs",
+    "test:itinerary": "node --test src/features/visitItinerary/visitItineraryModel.test.js src/features/visitItinerary/amapGeocoder.test.js src/features/visitItinerary/itineraryExpenseLink.test.js",
     "test:itinerary-page": "node --test scripts/itinerary-page.test.mjs",
-    "test:travel-expense": "node --test src/api/salesWorkbenchApi.test.js src/features/travelExpense/authenticatedPdf.test.js src/features/travelExpense/invoiceMatchingModel.test.js src/features/travelExpense/paymentProofModel.test.js src/features/travelExpense/travelExpenseDocument.test.js src/features/travelExpense/travelExpenseModel.test.js src/features/travelExpense/travelExpenseExport.test.js scripts/travel-expense-page.test.mjs scripts/authenticated-pdf-browser.test.mjs",
+    "test:travel-expense": "node --test src/api/salesWorkbenchApi.test.js src/features/travelExpense/travelExpensePageState.test.js src/features/travelExpense/AdvanceSettlement.test.js src/features/travelExpense/authenticatedPdf.test.js src/features/travelExpense/documentVariant.test.js src/features/travelExpense/expenseLedgerWorkbenchModel.test.js src/features/travelExpense/ExpenseLedgerWorkbench.test.js src/features/travelExpense/ExpenseListPrintPreview.test.js src/features/travelExpense/expenseListXlsx.test.js src/features/travelExpense/invoiceMatchingModel.test.js src/features/travelExpense/paymentProofModel.test.js src/features/travelExpense/paymentProofThumbnail.test.js src/features/travelExpense/ReimbursementOrganizer.test.js src/features/travelExpense/responsibleRegionModel.test.js src/features/travelExpense/travelExpenseDocument.test.js src/features/travelExpense/travelExpenseModel.test.js src/features/travelExpense/travelExpenseExport.test.js scripts/travel-expense-page.test.mjs scripts/authenticated-pdf-browser.test.mjs scripts/trip-region-settings-browser.test.mjs",
     "test:list-actions": "node --test scripts/list-action-layout.test.mjs",
+    "test:overview-layout": "node --test scripts/overview-layout.test.mjs",
+    "test:proactive-assistant": "node --test src/api/salesWorkbenchApi.proactive.test.js src/features/salesWorkbench/components/proactiveAssistantModel.test.js src/features/salesWorkbench/components/ProactiveAssistantPanel.test.mjs src/features/salesWorkbench/components/proactiveNotificationModel.test.js scripts/proactive-cross-entry.test.mjs",
+    "test:customer-import": "node --test src/api/customerImportApi.test.js src/app/customerImportHandlers.test.mjs src/features/customerImport/customerImportModel.test.js src/features/customerImport/CustomerImportPanel.test.mjs src/features/salesWorkbench/pages/CustomerPage.test.mjs",
+    "test:customer-metadata": "node --test src/features/salesWorkbench/pages/customerRecordMetadata.test.js",
+    "test:browser-evidence": "node --test scripts/browser-evidence.test.mjs",
+    "test:scroll-wheel": "node scripts/scroll-wheel-qa.test.mjs",
+    "test:customer-import-acceptance": "node scripts/customer-import-acceptance.mjs",
+    "test:quickwins": "node --test src/components/toastModel.test.js src/features/salesWorkbench/datetimeLocal.test.js src/features/salesWorkbench/weeklyDaily.test.js",
     "test:contract": "node scripts/customer-opportunity-contract.test.mjs",
     "test:static": "node --test scripts/static-server.test.mjs",
     "test:copy": "node --test scripts/formal-ui-copy.test.mjs",
@@ -31,20 +42,35 @@
     "test:stage-strip": "node --test scripts/stage-strip-timeout.test.mjs scripts/stage-strip-data.test.mjs",
     "test:visual": "node --test scripts/visual-rhythm.test.mjs",
     "test:modules": "node --test scripts/module-coverage.test.mjs",
+    "test:settings": "node --test src/features/settings/SystemSettingsPage.test.mjs src/features/settings/UserManagementPage.test.mjs",
+    "test:user-management": "node --test scripts/user-management-page.test.mjs",
+    "test:tender": "node --test src/features/hospitalTender/HospitalTenderPage.test.mjs src/features/hospitalTender/HospitalTenderPage.browser.test.mjs",
     "scan:secrets": "node scripts/secret-scan.mjs",
-    "qa:local": "npm run build && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run scan:secrets",
-    "qa:integration": "node scripts/integration-qa.mjs",
+    "test:bundle": "node --test scripts/bundle-budget.test.mjs",
+    "test:mobile-shell": "node --test scripts/mobile-shell.test.mjs",
+    "test:pwa": "node --test scripts/pwa-manifest.test.mjs",
+    "test:input-capabilities": "node --test scripts/input-capabilities.test.mjs",
+    "test:bootstrap-cache": "node --test scripts/bootstrap-cache.test.mjs",
+    "test:service-worker": "node --test scripts/service-worker.test.mjs",
+    "test:assistant-chat": "node --test scripts/weixinCardParse.test.mjs scripts/assistant-chat.test.mjs scripts/assistant-fab.test.mjs",
+    "qa:local": "npm run build && npm run test:bundle && npm run test:auth && npm run test:download && npm run test:quick && npm run test:week && npm run test:state && npm run test:routes && npm run test:api && npm run test:temperature && npm run test:asr-capture && npm run test:sales-decision && npm run test:sales-decision-page && npm run test:ai-card && npm run test:itinerary && npm run test:itinerary-page && npm run test:travel-expense && npm run test:list-actions && npm run test:overview-layout && npm run test:proactive-assistant && npm run test:customer-import && npm run test:customer-metadata && npm run test:browser-evidence && npm run test:quickwins && npm run test:contract && npm run test:static && npm run test:copy && npm run test:controls && npm run test:forms && npm run test:polish && npm run test:readonly && npm run test:favicon && npm run test:stage-strip && npm run test:visual && npm run test:modules && npm run test:settings && npm run test:user-management && npm run test:tender && npm run test:mobile-shell && npm run test:pwa && npm run test:input-capabilities && npm run test:bootstrap-cache && npm run test:service-worker && npm run test:assistant-chat && npm run scan:secrets",
+    "qa:integration": "node scripts/integration-qa.mjs && npm run test:scroll-wheel && npm run test:customer-import-acceptance",
     "qa:webkit": "node scripts/webkit-qa.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "5.0.4",
     "lucide-react": "^1.17.0",
-    "pdfjs-dist": "5.6.205",
+    "pdfjs-dist": "6.3.289",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "vite": "6.4.2"
+    "vite": "6.4.3"
   },
   "devDependencies": {
-    "playwright": "1.61.1"
+    "playwright": "1.61.1",
+    "postcss": "8.5.28",
+    "vite-plugin-pwa": "^0.21.1"
+  },
+  "overrides": {
+    "nanoid": "3.3.18"
   }
 }

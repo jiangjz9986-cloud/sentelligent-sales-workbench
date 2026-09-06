@@ -50,6 +50,12 @@ function mapState(row) {
     lastRejectedCount: Number(row.last_rejected_count),
     lastHighRelevanceCount: Number(row.last_high_relevance_count),
     notificationCount: Number(row.notification_count),
+    activeStartHour: row.active_start_hour === undefined || row.active_start_hour === null
+      ? 9
+      : Number(row.active_start_hour),
+    activeEndHour: row.active_end_hour === undefined || row.active_end_hour === null
+      ? 20
+      : Number(row.active_end_hour),
     nextRunAt: row.next_run_at ?? null,
     updatedAt: row.updated_at,
   };
@@ -115,6 +121,7 @@ export function createHospitalTenderSchedulerRepository(db, {
       "cycleCustomerCount", "cycleProcessedCount", "lastStartedAt", "lastFinishedAt", "lastStatus", "lastError",
       "lastBatchStartCustomerId", "lastBatchEndCustomerId", "lastBatchCount", "lastAcceptedCount",
       "lastRejectedCount", "lastHighRelevanceCount", "notificationCount", "nextRunAt",
+      "activeStartHour", "activeEndHour",
     ]);
     for (const key of Object.keys(patch)) if (!allowed.has(key)) throw new TypeError(`unknown scheduler state field: ${key}`);
     const next = { ...current, ...patch };
@@ -123,6 +130,11 @@ export function createHospitalTenderSchedulerRepository(db, {
     const intervalMinutes = positiveInteger(next.intervalMinutes, "intervalMinutes");
     const batchSize = positiveInteger(next.batchSize, "batchSize");
     if (intervalMinutes > 1440 || batchSize > 200) throw new TypeError("scheduler bounds exceeded");
+    const activeStartHour = nonNegativeInteger(next.activeStartHour ?? 9, "activeStartHour");
+    const activeEndHour = positiveInteger(next.activeEndHour ?? 20, "activeEndHour");
+    if (activeStartHour > 23 || activeEndHour > 24 || activeStartHour >= activeEndHour) {
+      throw new TypeError("active window is invalid");
+    }
     const fields = {
       enabled: next.enabled ? 1 : 0,
       interval_minutes: intervalMinutes,
@@ -143,6 +155,8 @@ export function createHospitalTenderSchedulerRepository(db, {
       last_rejected_count: nonNegativeInteger(next.lastRejectedCount, "lastRejectedCount"),
       last_high_relevance_count: nonNegativeInteger(next.lastHighRelevanceCount, "lastHighRelevanceCount"),
       notification_count: nonNegativeInteger(next.notificationCount, "notificationCount"),
+      active_start_hour: activeStartHour,
+      active_end_hour: activeEndHour,
       next_run_at: iso(next.nextRunAt, "nextRunAt", { nullable: true }),
       updated_at: now(),
     };
@@ -157,7 +171,9 @@ export function createHospitalTenderSchedulerRepository(db, {
         last_batch_end_customer_id = $last_batch_end_customer_id, last_batch_count = $last_batch_count,
         last_accepted_count = $last_accepted_count, last_rejected_count = $last_rejected_count,
         last_high_relevance_count = $last_high_relevance_count,
-        notification_count = $notification_count, next_run_at = $next_run_at, updated_at = $updated_at
+        notification_count = $notification_count,
+        active_start_hour = $active_start_hour, active_end_hour = $active_end_hour,
+        next_run_at = $next_run_at, updated_at = $updated_at
       WHERE id = 1
     `).run(fields);
     return getState();

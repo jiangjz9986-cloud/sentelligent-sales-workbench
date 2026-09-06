@@ -1,5 +1,19 @@
 import { buildQuickRecordAnalysis } from "./quickRecordAnalysis.js";
 import { analyzeSalesDecision as analyzeSalesDecisionAgent } from "./ai/agents/salesDecisionAgent.js";
+import { readBoundedResponseText } from "./http/request.js";
+
+const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "ERR_INTERNET_DISCONNECTED",
+  "ERR_NETWORK",
+  "UND_ERR_SOCKET",
+]);
 
 function fallbackAnalysis(rawContent, source) {
   const analysis = buildQuickRecordAnalysis(rawContent);
@@ -68,15 +82,29 @@ export function parseModelAnalysisContent(content, provider = "model") {
   };
 }
 
-function buildMessages(rawContent) {
+function buildKnowledgeContextLines(knowledgeItems = []) {
+  if (!Array.isArray(knowledgeItems) || knowledgeItems.length === 0) return [];
+  const entries = knowledgeItems.slice(0, 4).map((item, index) => ({
+    id: String(item?.id ?? `knowledge-${index + 1}`),
+    title: String(item?.title ?? "").slice(0, 120),
+    summary: String(item?.summary ?? "").slice(0, 240),
+  }));
+  return [
+    "可参考的销售知识库条目（仅当与记录内容相关时引用，不得虚构其他知识）：",
+    JSON.stringify(entries),
+  ];
+}
+
+function buildMessages(rawContent, systemPrompt = null, knowledgeItems = []) {
   return [
     {
       role: "system",
       content: [
-        "你是森特智行 AI 销售作战台的销售记录分析器。",
+        systemPrompt || "你是森特智行 AI 销售作战台的销售记录分析器。",
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 customer、opportunity、weekly、summary。",
         "summary 必须包含 request、feedback、risk、action，每项都有 title 和 text。",
+        ...buildKnowledgeContextLines(knowledgeItems),
         "示例 JSON：",
         JSON.stringify({
           customer: { id: "rizhao", value: "日照中医医院", meta: "置信度 90%", tone: "blue" },
@@ -116,25 +144,74 @@ async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 120
     signal: AbortSignal.timeout(config.modelTimeoutMs ?? 30000),
   });
 
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
+  const text = await readBoundedResponseText(response, {
+    maxBytes: MAX_MODEL_RESPONSE_BYTES,
+    errorMessage: "Model provider response is too large",
+  });
   if (!response.ok) {
     throw new Error(`model provider returned ${response.status}`);
   }
+  const body = text ? JSON.parse(text) : {};
 
   const content = body.choices?.[0]?.message?.content;
   if (!content) throw new Error("model provider returned empty content");
   return content;
 }
 
-async function callModel(rawContent, config, fetchImpl) {
+async function callModel(rawContent, config, fetchImpl, systemPrompt = null, knowledgeItems = []) {
   const content = await callChatCompletion({
-    messages: buildMessages(rawContent),
+    messages: buildMessages(rawContent, systemPrompt, knowledgeItems),
     config,
     fetchImpl,
     maxTokens: 3200,
   });
   return parseModelAnalysisContent(content, config.modelProvider ?? "model");
+}
+
+function buildVisitTemperatureMessages(snapshot) {
+  const facts = (snapshot?.facts ?? []).slice(0, 50).map((fact) => ({
+    key: String(fact?.key ?? "").slice(0, 200),
+    label: String(fact?.label ?? fact?.key ?? "").slice(0, 200),
+    value: typeof fact?.value === "string"
+      ? fact.value.slice(0, 500)
+      : fact?.value,
+    confidence: fact?.confidence,
+    sourceRefs: Array.isArray(fact?.sourceRefs)
+      ? fact.sourceRefs.slice(0, 4).map((ref) => ({
+          type: String(ref?.type ?? "").slice(0, 100),
+          id: String(ref?.id ?? "").slice(0, 200),
+        }))
+      : [],
+  }));
+  return [
+    {
+      role: "system",
+      content: [
+        "你是客户温度建议器，只能根据已确认拜访的结构化事实生成建议。",
+        "不得创造事实，不得自动写回客户资料；只输出合法 JSON。",
+        "suggestedValue 和 confidence 必须是 0 到 100 的整数。",
+        "inferences 必须是有界数组，每项包含 claim、confidence、basisKeys；basisKeys 只能引用输入 facts.key。",
+        "证据不足时 suggestedValue 应保持当前 relation，不得凭空放大变化。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        currentRelation: snapshot?.customer?.relation,
+        facts,
+      }),
+    },
+  ];
+}
+
+export async function generateVisitTemperatureSuggestionWithModel(snapshot, config = {}, options = {}) {
+  const content = await callChatCompletion({
+    messages: buildVisitTemperatureMessages(snapshot),
+    config,
+    fetchImpl: options.fetchImpl ?? fetch,
+    maxTokens: 900,
+  });
+  return JSON.parse(stripJsonFence(content));
 }
 
 export function resolveModelApiKey(config = {}) {
@@ -151,6 +228,90 @@ function shouldUseModel(config) {
 function parseModelDraftContent(content) {
   const parsed = JSON.parse(stripJsonFence(content));
   return requireText(parsed.content, "content");
+}
+
+function modelProviderSource(config = {}) {
+  const provider = String(config.modelProvider ?? "").trim();
+  return provider || "model";
+}
+
+/**
+ * Keep fallback metadata stable and deliberately small.  The provider error
+ * itself is never returned to callers because it may contain implementation
+ * details or sensitive request information.  Only errors that can be
+ * identified reliably are given a more specific reason; all other provider
+ * failures retain the legacy feature-level `*_model_failure` reason.
+ */
+function modelFailureKind(error) {
+  const name = String(error?.name ?? "");
+  const code = String(error?.code ?? "").toUpperCase();
+  const message = String(error?.message ?? "");
+
+  if (
+    error instanceof SyntaxError
+    || code === "MODEL_INVALID_JSON"
+    || code === "INVALID_JSON"
+    || /invalid\s+json|unexpected\s+(?:end|token).*json|json\s+parse/i.test(message)
+  ) {
+    return "invalid_json";
+  }
+
+  if (
+    name === "TimeoutError"
+    || name === "AbortError"
+    || code === "ETIMEDOUT"
+    || code === "TIMEOUT"
+    || code === "UND_ERR_CONNECT_TIMEOUT"
+    || /(?:timed?\s*out|timeout|deadline\s+exceeded|request\s+aborted)/i.test(message)
+  ) {
+    return "timeout";
+  }
+
+  if (
+    NETWORK_ERROR_CODES.has(code)
+    || name === "FetchError"
+    || /fetch\s+failed|network\s+error|connection\s+(?:closed|refused|reset)|socket\s+(?:closed|hang\s*up)/i.test(message)
+  ) {
+    return "network_error";
+  }
+
+  return "model_failure";
+}
+
+function fallbackReason(feature, error = null) {
+  return `${feature}_${modelFailureKind(error)}`;
+}
+
+function withModelAvailability(fallback, config, feature) {
+  if (config.aiAnalysisMode === "model") {
+    return {
+      ...fallback,
+      source: "fallback",
+      fallbackReason: `${feature}_missing_model_key`,
+    };
+  }
+  return {
+    ...fallback,
+    source: "deterministic",
+    fallbackReason: null,
+  };
+}
+
+function withModelFailure(fallback, feature, error) {
+  return {
+    ...fallback,
+    source: "fallback",
+    fallbackReason: fallbackReason(feature, error),
+  };
+}
+
+function withModelContent(fallback, content, config) {
+  return {
+    ...fallback,
+    content,
+    source: modelProviderSource(config),
+    fallbackReason: null,
+  };
 }
 
 function compact(value, limit = 900) {
@@ -171,20 +332,21 @@ function buildWeeklyDraftMessages(context) {
     {
       role: "system",
       content: [
-        "你是森特智行 AI 销售作战台的周报提炼助手。",
+        context.systemPrompt || "你是森特智行 AI 销售作战台的周报提炼助手。",
         "请只输出合法 JSON，不要输出解释文字。",
         "JSON 必须包含 content 字段，content 为中文 Markdown 周报正文。",
         "必须保留人工确认后的事实，不要编造客户、金额或承诺。",
+        "只能引用下方 sourceRefs 中存在的来源标识；不要声称周报已保存、发布、提交或写入。",
       ].join("\n"),
     },
     {
       role: "user",
       content: JSON.stringify({
-        owner: context.owner,
         periodStart: context.periodStart,
         periodEnd: context.periodEnd,
         records,
         knowledge: context.knowledge ?? [],
+        sourceRefs: context.sourceRefs ?? [],
         fallbackContent: compact(context.fallbackDraft?.content, 1600),
       }),
     },
@@ -237,9 +399,52 @@ function labelForSuggestionType(type) {
 }
 
 function sourceRefForSuggestion(type, context = {}) {
+  const subject = {
+    customer_profile: context.customer,
+    opportunity_push: context.opportunity,
+    knowledge_talk: context.knowledge,
+  }[type] ?? context.customer ?? context.opportunity ?? context.knowledge ?? context.title;
+  const sourceId = {
+    customer_profile: context.customerId,
+    opportunity_push: context.opportunityId,
+    knowledge_talk: context.knowledgeId,
+  }[type] ?? context.id ?? context.customerId ?? context.opportunityId ?? context.knowledgeId;
+  const sourceLabel = {
+    customer_profile: "客户档案",
+    opportunity_push: "商机档案",
+    knowledge_talk: "知识材料",
+  }[type] ?? "业务上下文";
   return {
     type: type || "manual_suggestion",
-    id: context.id ?? context.customerId ?? context.opportunityId ?? context.knowledgeId ?? "manual",
+    id: sourceId ?? "manual",
+    title: `${sourceLabel}：${subject ?? "当前业务对象"}`,
+    detail: "生成时固定的业务上下文快照",
+  };
+}
+
+function suggestionConfidence(context = {}) {
+  const evidenceFields = Object.values(context).filter((value) => {
+    if (typeof value === "string") return value.trim().length > 0;
+    if (typeof value === "number") return Number.isFinite(value);
+    if (typeof value === "boolean") return true;
+    if (Array.isArray(value)) return value.length > 0;
+    return value && typeof value === "object" && Object.keys(value).length > 0;
+  }).length;
+  return Math.min(90, 54 + Math.min(evidenceFields, 9) * 4);
+}
+
+function suggestionConfirmationPreview(type) {
+  const target = {
+    customer_profile: "人工审核记录（不会自动修改客户画像）",
+    opportunity_push: "人工审核记录（不会自动修改商机档案）",
+    knowledge_talk: "人工审核记录（不会自动修改知识库）",
+  }[type] ?? "人工审核记录（不会自动修改业务档案）";
+  return {
+    target,
+    changes: [
+      { field: "建议状态", before: "待人工确认", after: "已人工确认" },
+      { field: "业务档案写回", before: "未写入", after: "仍不写入" },
+    ],
   };
 }
 
@@ -250,7 +455,7 @@ function buildFallbackSuggestion({ type, title, context = {} }) {
   return {
     type: type || "manual_suggestion",
     title: headline,
-    status: "generated",
+    status: "pending",
     content: [
       `## ${headline}`,
       "",
@@ -261,7 +466,9 @@ function buildFallbackSuggestion({ type, title, context = {} }) {
       "### 上下文摘要",
       contextText || "当前未提供额外上下文。",
     ].join("\n"),
+    confidence: suggestionConfidence(context),
     sourceRefs: [sourceRefForSuggestion(type, context)],
+    confirmationPreview: suggestionConfirmationPreview(type),
   };
 }
 
@@ -338,7 +545,8 @@ function buildItineraryOrderMessages(fallback, context) {
 }
 
 async function enhanceDraftWithModel(fallbackDraft, messages, config, options = {}) {
-  if (!shouldUseModel(config)) return fallbackDraft;
+  const feature = options.feature ?? "draft";
+  if (!shouldUseModel(config)) return withModelAvailability(fallbackDraft, config, feature);
 
   try {
     const content = await callChatCompletion({
@@ -347,12 +555,9 @@ async function enhanceDraftWithModel(fallbackDraft, messages, config, options = 
       fetchImpl: options.fetchImpl ?? fetch,
       maxTokens: 2600,
     });
-    return {
-      ...fallbackDraft,
-      content: parseModelDraftContent(content),
-    };
-  } catch {
-    return fallbackDraft;
+    return withModelContent(fallbackDraft, parseModelDraftContent(content), config);
+  } catch (error) {
+    return withModelFailure(fallbackDraft, feature, error);
   }
 }
 
@@ -361,7 +566,22 @@ export async function enhanceWeeklyDraftWithModel(fallbackDraft, context, config
     fallbackDraft,
     buildWeeklyDraftMessages({ ...context, fallbackDraft }),
     config,
-    options,
+    { ...options, feature: "weekly_draft" },
+  );
+}
+
+/**
+ * Compose a source-backed weekly draft while retaining whether the model was
+ * actually used. Both weekly entry points share the same provenance contract
+ * so the assistant adapter and the direct Web endpoint report the same source
+ * and fallback reason.
+ */
+export async function composeWeeklyDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
+  return enhanceDraftWithModel(
+    fallbackDraft,
+    buildWeeklyDraftMessages({ ...context, fallbackDraft, systemPrompt: options.systemPrompt }),
+    config,
+    { ...options, feature: "weekly_draft" },
   );
 }
 
@@ -370,13 +590,15 @@ export async function enhanceSolutionDraftWithModel(fallbackDraft, context, conf
     fallbackDraft,
     buildSolutionDraftMessages({ ...context, fallbackDraft }),
     config,
-    options,
+    { ...options, feature: "solution_draft" },
   );
 }
 
 export async function generateManualSuggestion(input, config = {}, options = {}) {
   const fallbackSuggestion = buildFallbackSuggestion(input ?? {});
-  if (!shouldUseModel(config)) return fallbackSuggestion;
+  if (!shouldUseModel(config)) {
+    return withModelAvailability(fallbackSuggestion, config, "manual_suggestion");
+  }
 
   try {
     const content = await callChatCompletion({
@@ -385,17 +607,14 @@ export async function generateManualSuggestion(input, config = {}, options = {})
       fetchImpl: options.fetchImpl ?? fetch,
       maxTokens: 1800,
     });
-    return {
-      ...fallbackSuggestion,
-      content: parseModelDraftContent(content),
-    };
-  } catch {
-    return fallbackSuggestion;
+    return withModelContent(fallbackSuggestion, parseModelDraftContent(content), config);
+  } catch (error) {
+    return withModelFailure(fallbackSuggestion, "manual_suggestion", error);
   }
 }
 
 export async function enhanceItineraryOrderWithModel(fallback, context, config = {}, options = {}) {
-  if (!shouldUseModel(config)) return fallback;
+  if (!shouldUseModel(config)) return withModelAvailability(fallback, config, "itinerary_order");
   try {
     const expectedStopIds = (context.stops ?? []).map((stop) => stop.id);
     const content = await callChatCompletion({
@@ -406,29 +625,58 @@ export async function enhanceItineraryOrderWithModel(fallback, context, config =
     });
     return {
       ...parseItineraryOrderContent(content, expectedStopIds),
-      source: config.modelProvider ?? "model",
+      source: modelProviderSource(config),
+      fallbackReason: null,
     };
-  } catch {
-    return fallback;
+  } catch (error) {
+    return withModelFailure(fallback, "itinerary_order", error);
   }
+}
+
+function normalizeAnalysisKnowledgeItems(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item) => item && String(item.id ?? "").trim())
+    .slice(0, 4)
+    .map((item) => ({
+      id: String(item.id).trim(),
+      title: String(item.title ?? "").trim(),
+      summary: String(item.summary ?? "").trim(),
+    }));
+}
+
+function withKnowledgeRefs(analysis, knowledgeItems) {
+  if (!analysis || knowledgeItems.length === 0) return analysis;
+  return {
+    ...analysis,
+    knowledgeRefs: knowledgeItems.map((item) => ({
+      type: "knowledge",
+      id: item.id,
+      title: item.title,
+    })),
+  };
 }
 
 export async function analyzeQuickRecord(rawContent, config = {}, options = {}) {
   const text = String(rawContent ?? "").trim();
   if (!text) return null;
+  const knowledgeItems = normalizeAnalysisKnowledgeItems(options.knowledgeItems);
 
   if (config.aiAnalysisMode !== "model") {
-    return fallbackAnalysis(text, "mock");
+    return withKnowledgeRefs(fallbackAnalysis(text, "mock"), knowledgeItems);
   }
 
   if (!resolveModelApiKey(config)) {
-    return fallbackAnalysis(text, "mock_missing_model_key");
+    return withKnowledgeRefs(fallbackAnalysis(text, "mock_missing_model_key"), knowledgeItems);
   }
 
   try {
-    return await callModel(text, config, options.fetchImpl ?? fetch);
+    return withKnowledgeRefs(
+      await callModel(text, config, options.fetchImpl ?? fetch, options.systemPrompt ?? null, knowledgeItems),
+      knowledgeItems,
+    );
   } catch {
-    return fallbackAnalysis(text, "mock_model_fallback");
+    return withKnowledgeRefs(fallbackAnalysis(text, "mock_model_fallback"), knowledgeItems);
   }
 }
 
