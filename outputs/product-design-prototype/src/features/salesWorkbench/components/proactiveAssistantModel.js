@@ -252,24 +252,41 @@ function normalizePriority(value) {
 
 /** Return the four editable values shown in the review form. */
 export function normalizeProactiveEditableFields(item = {}) {
-  const owner = nestedValue(item, [
+  const reviewFields = item?.reviewFields
+    && typeof item.reviewFields === "object"
+    && !Array.isArray(item.reviewFields)
+    ? item.reviewFields
+    : null;
+  const reviewField = (names) => {
+    for (const name of names) {
+      if (reviewFields && Object.hasOwn(reviewFields, name) && reviewFields[name] !== undefined) {
+        return { found: true, value: reviewFields[name] };
+      }
+    }
+    return { found: false, value: null };
+  };
+  const reviewOwner = reviewField(["assignee", "owner"]);
+  const reviewDueDate = reviewField(["dueDate", "due"]);
+  const reviewPriority = reviewField(["priority"]);
+  const reviewExpectedResult = reviewField(["expectedResult", "result"]);
+  const owner = reviewOwner.found ? reviewOwner.value : nestedValue(item, [
     ["assignee"], ["assigneeName"], ["responsible"], ["responsibleName"],
     ["ownerName"], ["owner"], ["lifecycle", "assignee"], ["lifecycle", "owner"],
   ]);
   const ownerText = owner && typeof owner === "object"
     ? text(firstPresent(owner.name, owner.displayName, owner.account, owner.id))
     : text(owner);
-  const dateValue = nestedValue(item, [
+  const dateValue = reviewDueDate.found ? reviewDueDate.value : nestedValue(item, [
     ["dueDate"], ["targetDate"], ["followUpDate"], ["followUpAt"], ["due"], ["nextDate"],
     ["lifecycle", "dueDate"], ["lifecycle", "targetDate"], ["lifecycle", "followUpDate"],
     ["writebackPreview", "action", "due"], ["writebackPreview", "action", "dueDate"],
     ["writebackPreview", "action", "followUpDate"],
   ]);
-  const priorityValue = nestedValue(item, [
+  const priorityValue = reviewPriority.found ? reviewPriority.value : nestedValue(item, [
     ["priority"], ["priorityLabel"], ["urgency"], ["lifecycle", "priority"],
     ["writebackPreview", "action", "priority"],
   ]);
-  const expectedResult = nestedValue(item, [
+  const expectedResult = reviewExpectedResult.found ? reviewExpectedResult.value : nestedValue(item, [
     ["expectedResult"], ["expectedOutcome"], ["outcome"], ["lifecycle", "expectedResult"],
     ["writebackPreview", "action", "expectedResult"], ["writebackPreview", "action", "expectedOutcome"],
   ]);

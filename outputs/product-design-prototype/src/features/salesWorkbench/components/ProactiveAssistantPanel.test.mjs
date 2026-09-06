@@ -119,6 +119,35 @@ test("normalizes owner, date, priority, and expected-result fields", () => {
     priority: "低",
     expectedResult: "",
   });
+  assert.deepEqual(normalizeProactiveEditableFields({
+    assignee: "旧负责人",
+    due: "2026-01-01",
+    priority: "低",
+    expectedResult: "旧结果",
+    reviewFields: {
+      assignee: "李雷",
+      dueDate: "2026-09-20",
+      priority: "high",
+      expectedResult: "人工确认结果",
+    },
+  }), {
+    owner: "李雷",
+    dueDate: "2026-09-20",
+    priority: "高",
+    expectedResult: "人工确认结果",
+  });
+  assert.deepEqual(normalizeProactiveEditableFields({
+    assignee: "旧负责人",
+    due: "2026-01-01",
+    priority: "低",
+    expectedResult: "旧结果",
+    reviewFields: { assignee: null, dueDate: null, priority: null, expectedResult: null },
+  }), {
+    owner: "",
+    dueDate: "",
+    priority: "中",
+    expectedResult: "",
+  });
 });
 
 test("builds a non-mutating review preview with edited values", () => {
