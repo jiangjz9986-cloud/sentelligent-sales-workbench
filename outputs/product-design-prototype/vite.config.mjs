@@ -30,7 +30,7 @@ export default defineConfig(({ mode }) => {
       VitePWA({
         strategies: "generateSW",
         injectRegister: null,
-        registerType: "prompt",
+        registerType: "autoUpdate",
         manifest: {
           name: "森特智行销售工作台",
           short_name: "森特智行",
@@ -50,6 +50,8 @@ export default defineConfig(({ mode }) => {
           ],
         },
         workbox: {
+          skipWaiting: true,
+          clientsClaim: true,
           globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest}"],
           navigateFallback: "index.html",
           navigateFallbackDenylist: [/^\/api/],

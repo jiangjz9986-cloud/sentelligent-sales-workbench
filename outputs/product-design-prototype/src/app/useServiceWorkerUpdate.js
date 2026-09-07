@@ -24,11 +24,11 @@ export function useServiceWorkerUpdate(toast) {
       if (registration) notifyUpdate(registration);
     });
 
+    let reloadRequested = false;
     const onControllerChange = () => {
-      if (!sessionStorage.getItem("sw_reload_guard")) {
-        sessionStorage.setItem("sw_reload_guard", "1");
-        window.location.reload();
-      }
+      if (reloadRequested) return;
+      reloadRequested = true;
+      window.location.reload();
     };
 
     const onUpdateFound = (registration) => {
