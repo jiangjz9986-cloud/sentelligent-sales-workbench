@@ -15,7 +15,7 @@
 - **上下文过期可诊断**：微信 worker 将严格 canonical UTC `expiresAt` 作为 readiness 元数据回报；过期上下文不会丢弃 outbox 消息。真实入站消息恢复上下文后，worker 按约 1 秒间隔释放积压，避免一次性突发发送。普通轮询或 heartbeat 不被宣称为上下文续期机制。
 - **验证**：AI 平台 `37/37`、业务客户端 `11/11`、后端全量 `2036/2036`、根部署门禁 `286 通过 / 2 跳过 / 0 失败`、发布测试 `99 通过 / 1 跳过 / 0 失败`、完整 Git 历史密钥扫描 `findings=[]`、Mac Chrome 集成/滚轮/客户导入/StageStrip/视觉 QA、WebKit QA 和 Python 采集器 `24/24` 通过。
 
-本版本仍是本地候选；没有读取 iCloud、没有连接或修改生产，也没有发送真实微信通知。生产切换必须以本版本最终 exact commit、immutable release、fresh preflight、数据库备份和 postflight evidence 为准。
+本版本已进入基于最新 `origin/main` 的正式发布候选；没有读取 iCloud。`2026-09-08` 已使用用户提供的桌面 SSH 密钥完成只读生产盘点和微信 context 密文可恢复性核验，但尚未上传制品、迁移、切换、重启服务或发送真实微信通知。生产切换必须以最终 exact commit、GitHub Release 的 Linux/x64 immutable release、fresh preflight、数据库备份和 postflight evidence 为准；项目所有者已明确取消 iPhone 真机验收，该项不计入门禁，也不记录为通过。
 
 ## [0.12.1] - 2026-09-07
 

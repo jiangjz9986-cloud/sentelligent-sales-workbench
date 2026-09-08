@@ -8,9 +8,9 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前版本 | 当前工作树版本字段为 `0.12.2`（AI 统一调度平台独立底座、PushPlus 退役、微信 Clawbot 唯一外部通知通道；未发布候选）；生产版本仍以服务器 `current` 指向目录的 manifest 与逐版证据表为准 |
+| 当前版本 | 当前工作树版本字段为 `0.12.2`（AI 统一调度平台独立底座、PushPlus 退役、微信 Clawbot 唯一外部通知通道；正式发布候选）；截至 `2026-09-08` 的只读服务器盘点，生产 `current` 仍为 `v0.12.1` / `741d104e79e2c81a040a2e9ef84bd635c294f1b9` |
 | 生产身份 | 以服务器 `releases/` 当前 `current` 指向目录的 manifest（完整 commit）为准；`docs/releases/vX.Y.Z.md` 逐版保存部署证据表 |
-| 发布方式 | 自 v0.6.5 起按项目所有者授权采用本地 exact-commit 路径：本地注释 tag（不推 GitHub）+ git bundle + 服务器打包为不可变 release 目录；GitHub Release 停在 v0.6.1，是否恢复同步为待决策项 |
+| 发布方式 | 常规发布必须来自已合并的 `origin/main`、唯一正式 tag 和 GitHub Release 生成的 Linux/x64 不可变制品；历史本地 exact-commit 授权例外只适用于 `v0.6.15` 至 `v0.6.24` |
 | 制品与备份 | v0.8.0 起服务器每日 02:30 自动备份数据库与微信会话（14 天保留），发布 bundle+evidence 自动归档到 `backups/releases/<version>/`（root:root 0700） |
 | 回滚 | 每版部署证据表记录回滚点 release 目录；回滚只切换三个项目 systemd 服务 |
 
