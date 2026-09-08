@@ -79,7 +79,7 @@ function modelDraftFetch(content = draftContent()) {
 }
 
 describe("model-backed quick record analysis", () => {
-  it("allocates enough completion tokens for reasoning-capable model output", async () => {
+  it("disables DeepSeek thinking for bounded structured extraction", async () => {
     let requestBody;
     await analyzeQuickRecord("Validate the budget owner and decision chain.", {
       aiAnalysisMode: "model",
@@ -96,6 +96,28 @@ describe("model-backed quick record analysis", () => {
     });
 
     assert.equal(requestBody.max_tokens, 3200);
+    assert.deepEqual(requestBody.thinking, { type: "disabled" });
+  });
+
+  it("omits the DeepSeek thinking extension for other providers", async () => {
+    let requestBody;
+    await analyzeQuickRecord("Validate the budget owner and decision chain.", {
+      aiAnalysisMode: "model",
+      modelProvider: "openai-compatible",
+      modelApiKey: "fixture",
+      modelBaseUrl: "https://model.example.test/v1",
+      modelName: "fixture-model",
+    }, {
+      fetchImpl: async (_url, options) => {
+        requestBody = JSON.parse(options.body);
+        return jsonResponse({
+          choices: [{ message: { content: modelContent() } }],
+        });
+      },
+    });
+
+    assert.equal(requestBody.max_tokens, 3200);
+    assert.equal(Object.hasOwn(requestBody, "thinking"), false);
   });
 
   it("calls an OpenAI-compatible JSON chat completion endpoint for model mode", async () => {
@@ -127,6 +149,7 @@ describe("model-backed quick record analysis", () => {
     const body = JSON.parse(calls[0].options.body);
     assert.equal(body.model, "deepseek-v4-flash");
     assert.deepEqual(body.response_format, { type: "json_object" });
+    assert.deepEqual(body.thinking, { type: "disabled" });
     assert.equal(body.stream, false);
     assert.ok(body.messages.some((message) => /json/i.test(message.content)));
 
@@ -350,16 +373,25 @@ describe("model provenance for drafts and suggestions", () => {
   };
 
   it("marks direct weekly enhancement as model-generated on valid output", async () => {
+    let requestBody;
     const result = await enhanceWeeklyDraftWithModel(
       draftFixture(),
       weeklyContext,
       modelConfig(),
-      { fetchImpl: modelDraftFetch(draftContent("# 周报模型正文")) },
+      {
+        fetchImpl: async (_url, options) => {
+          requestBody = JSON.parse(options.body);
+          return jsonResponse({
+            choices: [{ message: { content: draftContent("# 周报模型正文") } }],
+          });
+        },
+      },
     );
 
     assert.equal(result.content, "# 周报模型正文");
     assert.equal(result.source, "deepseek");
     assert.equal(result.fallbackReason, null);
+    assert.equal(Object.hasOwn(requestBody, "thinking"), false);
   });
 
   it("marks weekly and solution drafts as deterministic when model mode is disabled", async () => {
