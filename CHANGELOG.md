@@ -13,7 +13,8 @@
 - **历史兼容不等于新投递**：保留历史迁移、旧数据库行和只读 legacy channel 映射以支持升级与审计；现行 API 不展示、不写入、不发送历史 PushPlus 配置，新的 `pushplus` delivery 写入会被拒绝。
 - **无绑定时 fail closed**：医院招标继续采集、入库和审计但不外发；运维告警返回 `OPS_ALERT_DELIVERY_UNAVAILABLE`；主动助手保留站内通知，不旁路到全局 token。
 - **上下文过期可诊断**：微信 worker 将严格 canonical UTC `expiresAt` 作为 readiness 元数据回报；过期上下文不会丢弃 outbox 消息。真实入站消息恢复上下文后，worker 按约 1 秒间隔释放积压，避免一次性突发发送。普通轮询或 heartbeat 不被宣称为上下文续期机制。
-- **验证**：AI 平台 `37/37`、业务客户端 `11/11`、后端全量 `2036/2036`、根部署门禁 `286 通过 / 2 跳过 / 0 失败`、发布测试 `99 通过 / 1 跳过 / 0 失败`、完整 Git 历史密钥扫描 `findings=[]`、Mac Chrome 集成/滚轮/客户导入/StageStrip/视觉 QA、WebKit QA 和 Python 采集器 `24/24` 通过。
+- **运维告警不补发历史噪声**：`ops_alert` 只保留 15 分钟可行动窗口；后端启动时先终止过期 queued 与租约已失效的 processing 行，租约渲染再做第二道 TTL 检查，统一记为 `failed/WEIXIN_OUTBOX_STALE`。客户提醒、招标、记账和主动助手等业务 outbox 不受该 TTL 影响；五分钟巡检排除 stale/superseded/cancelled 生命周期终态，避免清理动作再次生成告警。
+- **验证**：AI 平台 `39/39`、业务客户端 `11/11`、后端全量 `2040/2040`、根部署门禁 `288 通过 / 2 跳过 / 0 失败`、发布测试 `99 通过 / 1 跳过 / 0 失败`、完整 Git 历史密钥扫描 `findings=[]`、Mac Chrome 集成/滚轮/客户导入/StageStrip/视觉 QA、WebKit QA 和 Python 采集器 `24/24` 通过。
 
 本版本已进入基于最新 `origin/main` 的正式发布候选；没有读取 iCloud。`2026-09-08` 已使用用户提供的桌面 SSH 密钥完成只读生产盘点和微信 context 密文可恢复性核验，但尚未上传制品、迁移、切换、重启服务或发送真实微信通知。生产切换必须以最终 exact commit、GitHub Release 的 Linux/x64 immutable release、fresh preflight、数据库备份和 postflight evidence 为准；项目所有者已明确取消 iPhone 真机验收，该项不计入门禁，也不记录为通过。
 

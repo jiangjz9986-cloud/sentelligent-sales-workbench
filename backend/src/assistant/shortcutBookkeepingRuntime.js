@@ -15,7 +15,7 @@ import { shortcutBookkeepingConversationId } from "../weixin/bookkeepingDelivery
 import { renderHospitalTenderNoticeMessage } from "../hospitalTender/weixinNotifier.js";
 import { renderActionReminderMessage } from "../actionReminders/reminderMessage.js";
 import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "../dailyDigest/digestMessage.js";
-import { renderOpsAlertMessage } from "../ops/opsAlertMessage.js";
+import { renderOpsAlertOutboxMessage } from "../ops/opsAlertMessage.js";
 import { buildAutomaticMealNote, buildBookkeepingAnalysis } from "./bookkeepingCapture.js";
 import { resolveItineraryTripRegion } from "./bookkeepingTripRegion.js";
 
@@ -1270,7 +1270,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       return renderFridayCloseoutMessage(payload);
     }
     if (payload.kind === "ops_alert") {
-      return renderOpsAlertMessage(payload);
+      return renderOpsAlertOutboxMessage(outboxItem, { clock });
     }
     if (payload.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) {
       const row = db.prepare(`

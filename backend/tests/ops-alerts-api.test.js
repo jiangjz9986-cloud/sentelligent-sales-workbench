@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
+import { openDatabase } from "../src/db.js";
 import { createConnection } from "../src/db/connection.js";
 import { createServer } from "../src/server.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
+import { createWeixinConfirmationOutboxRepository } from "../src/weixin/outboxRepository.js";
 import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const opsToken = ["fixture", "ops", "monitor", "token"].join("-");
@@ -215,6 +217,50 @@ describe("ops alerts machine endpoint", () => {
     const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 2);
     db.close();
+  });
+
+  it("sweeps stale ops alerts before listening without expiring business outbox rows", async () => {
+    const databaseUrl = join(tempDir, "ops-alerts.sqlite");
+    const seedDb = openDatabase({ databaseUrl });
+    let id = 0;
+    const seedOutbox = createWeixinConfirmationOutboxRepository(seedDb, {
+      clock: () => new Date("2026-08-29T00:00:00.000Z"),
+      idFactory: () => `startup-sweep-${++id}`,
+    });
+    const stale = seedOutbox.enqueue({
+      owner,
+      conversationId: shortcutBookkeepingConversationId(owner, sender),
+      idempotencyKey: "startup-stale-ops",
+      payload: {
+        kind: "ops_alert",
+        origin: "ops-inspect:weixin-worker",
+        severity: "critical",
+        summary: "历史 worker 告警",
+        occurredAt: "2026-08-29T00:00:00.000Z",
+      },
+    });
+    const business = seedOutbox.enqueue({
+      owner,
+      conversationId: shortcutBookkeepingConversationId(owner, sender),
+      idempotencyKey: "startup-business-message",
+      payload: { kind: "daily_digest", digestDate: "2026-08-29" },
+    });
+    seedDb.close();
+
+    clockNow = "2026-08-29T01:20:00.000Z";
+    await startServer({
+      assistantClock: () => new Date(clockNow),
+      weixinConfirmationOutboxClock: () => new Date(clockNow),
+    });
+
+    const db = createConnection({ databaseUrl });
+    const rows = db.prepare("SELECT id, status, last_error_code FROM weixin_confirmation_outbox WHERE id IN ($stale, $business) ORDER BY id")
+      .all({ $stale: stale.id, $business: business.id });
+    db.close();
+    assert.deepEqual(rows.map((row) => ({ ...row })), [
+      { id: business.id, status: "queued", last_error_code: null },
+      { id: stale.id, status: "failed", last_error_code: "WEIXIN_OUTBOX_STALE" },
+    ].sort((left, right) => left.id.localeCompare(right.id)));
   });
 
   it("returns 503 without a bound WeChat target and has no fallback notification option", async () => {

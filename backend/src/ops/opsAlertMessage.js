@@ -10,6 +10,20 @@ const ORIGIN_RE = /^[A-Za-z0-9:._@-]{1,100}$/u;
 const MAX_SUMMARY_CHARS = 300;
 const MAX_DETAIL_CHARS = 2000;
 
+export const OPS_ALERT_MAX_QUEUE_AGE_MS = 15 * 60 * 1000;
+
+function timestamp(value, name) {
+  const parsed = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  if (!Number.isFinite(parsed)) throw new TypeError(`${name} is invalid`);
+  return parsed;
+}
+
+function staleOpsAlertError() {
+  return Object.assign(new Error("ops alert outbox item is stale"), {
+    code: "WEIXIN_OUTBOX_STALE",
+  });
+}
+
 function shanghaiMinuteLabel(value, name) {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) throw new TypeError(`${name} is invalid`);
@@ -45,4 +59,18 @@ export function renderOpsAlertMessage(payload) {
     ],
     "同一来源一小时内只提醒一次；处理后无需回复。排查：journalctl -u <单元名>",
   );
+}
+
+export function renderOpsAlertOutboxMessage(outboxItem, {
+  clock = () => new Date(),
+  maxQueueAgeMs = OPS_ALERT_MAX_QUEUE_AGE_MS,
+} = {}) {
+  if (typeof clock !== "function") throw new TypeError("clock must be a function");
+  if (!Number.isSafeInteger(maxQueueAgeMs) || maxQueueAgeMs <= 0) {
+    throw new TypeError("maxQueueAgeMs is invalid");
+  }
+  const nowMs = timestamp(clock(), "clock");
+  const createdAtMs = timestamp(outboxItem?.createdAt, "ops alert createdAt");
+  if (nowMs - createdAtMs > maxQueueAgeMs) throw staleOpsAlertError();
+  return renderOpsAlertMessage(outboxItem?.payload);
 }

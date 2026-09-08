@@ -112,6 +112,7 @@ import { createShortcutAdvanceAllocationRepository } from "./integrations/shortc
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import { createMockAmapClient } from "./maps/amapMockClient.js";
+import { OPS_ALERT_MAX_QUEUE_AGE_MS } from "./ops/opsAlertMessage.js";
 import { createOpsAlertService } from "./ops/opsAlertService.js";
 import {
   claimIdempotency,
@@ -3701,6 +3702,16 @@ export function createServer(options = {}) {
   });
 
   const assistantClock = options.assistantClock ?? options.now ?? (() => new Date());
+  const opsAlertClock = options.opsAlertClock ?? assistantClock;
+  if (typeof weixinConfirmationOutboxRepository.discardExpiredOpsAlerts === "function") {
+    const sweep = weixinConfirmationOutboxRepository.discardExpiredOpsAlerts({
+      maxQueueAgeMs: OPS_ALERT_MAX_QUEUE_AGE_MS,
+      now: opsAlertClock(),
+    });
+    if ((sweep?.discardedCount ?? 0) > 0) {
+      console.warn(`category=weixin_outbox stale_ops_alerts_discarded count=${sweep.discardedCount} cutoffAt=${sweep.cutoffAt}`);
+    }
+  }
   const proactiveClock = options.proactiveAssistantClock ?? assistantClock;
   const injectedProactiveAssistantWorker = options.proactiveAssistantWorker ?? null;
   const proactiveScanRepository = injectedProactiveAssistantWorker?.scanRepository
@@ -4191,7 +4202,7 @@ export function createServer(options = {}) {
       after: null,
       metadata,
     }),
-    clock: options.opsAlertClock ?? (() => new Date()),
+    clock: opsAlertClock,
   });
   const proactiveNotificationScheduler = options.proactiveNotificationScheduler
     ?? createProactiveNotificationScheduler({

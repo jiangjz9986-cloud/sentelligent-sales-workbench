@@ -40,7 +40,7 @@ alert() { # $1 source  $2 summary  $3 detail
     http://127.0.0.1:8897/api/integrations/ops-alerts | grep -qE '^2'
 }
 # 1. new failed outbox rows (watermark = latest failed updated_at)
-FAILED_MAX="$("$NODE" --input-type=module -e "import{DatabaseSync}from'node:sqlite';const d=new DatabaseSync('$DB',{readOnly:true});const r=d.prepare(\"SELECT COALESCE(MAX(updated_at),'') m, COUNT(*) n FROM weixin_confirmation_outbox WHERE status='failed'\").get();console.log(r.m+'|'+r.n)" 2>/dev/null)"
+FAILED_MAX="$("$NODE" --input-type=module -e "import{DatabaseSync}from'node:sqlite';const d=new DatabaseSync('$DB',{readOnly:true});const r=d.prepare(\"SELECT COALESCE(MAX(updated_at),'') m, COUNT(*) n FROM weixin_confirmation_outbox WHERE status='failed' AND COALESCE(last_error_code,'') NOT IN ('WEIXIN_OUTBOX_STALE','WEIXIN_OUTBOX_SUPERSEDED','WEIXIN_OUTBOX_CANCELLED')\").get();console.log(r.m+'|'+r.n)" 2>/dev/null)"
 if [[ -n "$FAILED_MAX" ]]; then
   MARK="$(state_get outbox_failed_mark)"
   CUR="${FAILED_MAX%%|*}"

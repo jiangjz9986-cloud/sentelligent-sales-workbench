@@ -243,6 +243,9 @@ beforeEach(async () => {
     weixinAgentOwner: OWNER_A,
     weixinBookkeepingConfirmationEnabled: true,
     assistantConfirmationSecret: confirmationSecret,
+    assistantClock: clock,
+    weixinConfirmationOutboxClock: clock,
+    opsAlertClock: clock,
     travelExpenseAnalyzer: async () => ({
       status: "ready",
       confidence: 0.98,
