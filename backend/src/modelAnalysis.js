@@ -126,21 +126,29 @@ function buildMessages(rawContent, systemPrompt = null, knowledgeItems = []) {
   ];
 }
 
-async function callChatCompletion({ messages, config, fetchImpl, maxTokens = 1200 }) {
+async function callChatCompletion({
+  messages,
+  config,
+  fetchImpl,
+  maxTokens = 1200,
+  thinking = null,
+}) {
+  const requestBody = {
+    model: config.modelName ?? "deepseek-v4-flash",
+    messages,
+    response_format: { type: "json_object" },
+    temperature: 0.1,
+    max_tokens: maxTokens,
+    stream: false,
+    ...(thinking ? { thinking } : {}),
+  };
   const response = await fetchImpl(completionUrl(config.modelBaseUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${resolveModelApiKey(config)}`,
     },
-    body: JSON.stringify({
-      model: config.modelName ?? "deepseek-v4-flash",
-      messages,
-      response_format: { type: "json_object" },
-      temperature: 0.1,
-      max_tokens: maxTokens,
-      stream: false,
-    }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(config.modelTimeoutMs ?? 30000),
   });
 
@@ -164,6 +172,9 @@ async function callModel(rawContent, config, fetchImpl, systemPrompt = null, kno
     config,
     fetchImpl,
     maxTokens: 3200,
+    ...(String(config.modelProvider ?? "").trim().toLowerCase() === "deepseek"
+      ? { thinking: { type: "disabled" } }
+      : {}),
   });
   return parseModelAnalysisContent(content, config.modelProvider ?? "model");
 }

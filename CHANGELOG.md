@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-09-08
+
+### 快速记录 DeepSeek 结构化抽取稳定性热修复
+
+- **真实生产复现**：v0.12.2 切换后的 HTTPS smoke 连续两轮仅在快速记录模型来源门禁失败；供应商实际返回 HTTP 200，但 reasoning 输出可能消耗全部 completion 预算，导致最终 `message.content` 为空并触发确定性回退。两轮清理均为 `cleanup=clean`，临时登录哈希均已恢复。
+- **按任务关闭 thinking**：快速记录属于有严格 JSON schema 的有界抽取任务，DeepSeek 请求显式发送 `thinking.type=disabled`，继续保留 `response_format=json_object`、3200 token 上限和原有 60 秒超时；销售决策、周报、方案、行程等共享模型调用不改变 thinking 行为。
+- **契约与回归**：新增请求体回归，证明 DeepSeek quick-record 带关闭 thinking 参数，并证明共享周报模型路径不意外携带该参数；不修改 shared API、`0042–0045` 迁移、业务数据库 schema、通知通道或写回契约。
+- **发布边界**：该热修复从已发布 `main` 精确提交 `28bb7394ee081efbb377a32698fd8304de1056c7` 分叉；生产切换仍须完成正式 CI、GitHub Release、fresh preflight/cutover/postflight、HTTPS smoke `25/25`、Mac Chrome 和微信 Clawbot 验收。iPhone 真机验收已由项目所有者取消，不属于门禁，也不得记录为通过。
+
 ## [0.12.2] - 2026-09-08
 
 ### AI 统一调度平台底座、PushPlus 退役与微信投递边界收口
