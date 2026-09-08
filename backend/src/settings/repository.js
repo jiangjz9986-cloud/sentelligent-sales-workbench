@@ -1,12 +1,10 @@
 import { decryptSecret, encryptSecret, maskSecret } from "./secretBox.js";
 
 export const DEEPSEEK_SETTING_KEY = "deepseek_api_key";
-export const PUSHPLUS_SETTING_KEY = "hospital_tender_pushplus_token";
 export const ASR_SETTING_KEY = "asr_api_key";
 
 const ALLOWED_KEYS = new Set([
   DEEPSEEK_SETTING_KEY,
-  PUSHPLUS_SETTING_KEY,
   ASR_SETTING_KEY,
 ]);
 
@@ -164,7 +162,6 @@ export function createSecureSettingsRepository(db, { masterKey, clock = () => ne
     listMetadata() {
       return {
         deepseek: metadata(DEEPSEEK_SETTING_KEY),
-        pushplus: metadata(PUSHPLUS_SETTING_KEY),
         asr: metadata(ASR_SETTING_KEY),
       };
     },

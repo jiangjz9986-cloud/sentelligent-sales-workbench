@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,6 +46,20 @@ function sessionHash(secret, cookie) {
   return createHmac("sha256", secret)
     .update(`session-store:v1:${cookie}`)
     .digest("base64url");
+}
+
+function sha256(value) {
+  return createHash("sha256").update(String(value), "utf8").digest("hex");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]),
+    );
+  }
+  return value;
 }
 
 function insertFixture(db, {
@@ -208,6 +222,148 @@ function insertFixture(db, {
   };
 }
 
+function insertProactiveDerivatives(db, {
+  fixture,
+  account = "jiangjz",
+  customerId = fixture.ids.customer,
+  opportunityId = fixture.ids.opportunity,
+  marker = fixture.marker,
+  count = 4,
+  includeSubject = true,
+} = {}) {
+  const now = "2099-01-03T02:00:00.000Z";
+  const sourceRefs = JSON.stringify([
+    { type: "customer", id: customerId, label: `${marker} 客户` },
+    { type: "opportunity", id: opportunityId, label: `${marker} 商机` },
+  ]);
+  if (includeSubject) {
+    db.prepare(`
+      INSERT INTO proactive_subjects (
+        id, owner, subject_type, subject_id, subject_key, customer_id,
+        version, source_digest, source_refs_json, created_at, updated_at
+      ) VALUES (
+        $id, $owner, 'customer', $customerId, $subjectKey, $customerId,
+        1, $sourceDigest, $sourceRefs, $now, $now
+      )
+    `).run({
+      $id: randomUUID(),
+      $owner: account,
+      $customerId: customerId,
+      $subjectKey: `customer:${account}:${customerId}`,
+      $sourceDigest: sha256(`subject:${account}:${customerId}`),
+      $sourceRefs: sourceRefs,
+      $now: now,
+    });
+  }
+
+  const result = { suggestions: [], notifications: [], outbox: [] };
+  const triggers = [
+    "budget_unknown",
+    "decision_chain_unknown",
+    "purchase_timing_unknown",
+    "stage_evidence_mismatch",
+  ];
+  for (let index = 0; index < count; index += 1) {
+    const suggestionId = randomUUID();
+    const notificationId = randomUUID();
+    const outboxId = randomUUID();
+    const trigger = triggers[index % triggers.length];
+    const title = `${marker} 主动建议 ${index + 1}`;
+    const content = JSON.stringify({
+      marker,
+      subjectType: "customer",
+      subjectId: customerId,
+      customerId,
+      opportunityId,
+      title,
+      trigger: { type: trigger },
+    });
+    db.prepare(`
+      INSERT INTO ai_suggestions (
+        id, version, owner, type, title, status, content, draft_content,
+        confidence, source_id, source_refs, confirmation_preview, source,
+        proactive_trigger, proactive_subject_type, proactive_subject_id,
+        proactive_subject_key, proactive_subject_version, proactive_source_digest,
+        proactive_source_refs, proactive_customer_id, proactive_opportunity_id,
+        proactive_dedupe_key, proactive_rule_version, proactive_priority,
+        proactive_status, proactive_generated_at, proactive_last_seen_at,
+        proactive_payload_hash, created_at, updated_at
+      ) VALUES (
+        $id, 1, $owner, 'opportunity_push', $title, 'pending', $content, $content,
+        80, $customerId, $sourceRefs, $confirmationPreview, 'deterministic',
+        $trigger, 'customer', $customerId, $subjectKey, 1, $sourceDigest,
+        $sourceRefs, $customerId, $opportunityId, $dedupeKey,
+        'customer-proactive-subject-v1', 80, 'pending', $now, $now,
+        $payloadHash, $now, $now
+      )
+    `).run({
+      $id: suggestionId,
+      $owner: account,
+      $title: title,
+      $content: content,
+      $customerId: customerId,
+      $opportunityId: opportunityId,
+      $sourceRefs: sourceRefs,
+      $confirmationPreview: JSON.stringify({ marker, customerId, opportunityId }),
+      $trigger: trigger,
+      $subjectKey: `customer:${account}:${customerId}`,
+      $sourceDigest: sha256(`source:${suggestionId}`),
+      $dedupeKey: `proactive:v1:${account}:${customerId}:${trigger}:${index}`,
+      $payloadHash: sha256(content),
+      $now: now,
+    });
+
+    const payload = canonicalJson({
+      kind: "proactive_suggestion",
+      suggestionId,
+      title,
+      trigger,
+      status: "pending",
+      priority: 80,
+      summary: title,
+    });
+    const payloadJson = JSON.stringify(payload);
+    db.prepare(`
+      INSERT INTO weixin_confirmation_outbox (
+        id, owner, conversation_id, idempotency_key_hash, payload_json,
+        payload_hash, status, attempt_count, available_at, created_at, updated_at
+      ) VALUES (
+        $id, $owner, 'smoke-conversation', $keyHash, $payloadJson,
+        $payloadHash, 'queued', 0, $now, $now, $now
+      )
+    `).run({
+      $id: outboxId,
+      $owner: account,
+      $keyHash: sha256(`proactive-suggestion:${suggestionId}:v1`),
+      $payloadJson: payloadJson,
+      $payloadHash: sha256(payloadJson),
+      $now: now,
+    });
+    db.prepare(`
+      INSERT INTO proactive_notifications (
+        id, owner, suggestion_id, suggestion_version, channel, status,
+        title, trigger, priority, summary, outbox_id, attempt_count,
+        available_at, created_at, updated_at
+      ) VALUES (
+        $id, $owner, $suggestionId, 1, 'weixin', 'queued',
+        $title, $trigger, 80, $title, $outboxId, 0, $now, $now, $now
+      )
+    `).run({
+      $id: notificationId,
+      $owner: account,
+      $suggestionId: suggestionId,
+      $title: title,
+      $trigger: trigger,
+      $outboxId: outboxId,
+      $now: now,
+    });
+    result.suggestions.push(suggestionId);
+    result.notifications.push(notificationId);
+    result.outbox.push(outboxId);
+  }
+  return result;
+}
+
 function count(db, table, where = "1 = 1", params = {}) {
   return Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${where}`).get(params).count);
 }
@@ -273,6 +429,9 @@ test("cleanup removes only marker-owned smoke data and its exact session", () =>
     itineraries: 0,
     weeklyReports: 0,
     auditLogs: 0,
+    proactiveSuggestions: 0,
+    proactiveNotifications: 0,
+    weixinConfirmationOutbox: 0,
     authSessions: 0,
     idempotencyKeys: 0,
   });
@@ -296,6 +455,221 @@ test("cleanup removes only marker-owned smoke data and its exact session", () =>
     ]) {
       assert.equal(count(verify, table, "id = $id", { $id: id }), 0, `${table} residue`);
     }
+  } finally {
+    verify.close();
+  }
+});
+
+test("cleanup removes marker-owned proactive suggestions, notifications, and WeChat outbox rows", () => {
+  const { db, databaseUrl } = temporaryDatabase();
+  const runId = randomUUID();
+  const sessionCookie = "q".repeat(43);
+  const fixture = insertFixture(db, {
+    runId,
+    sessionCookie,
+    sessionSecret: TEST_SESSION_SECRET,
+  });
+  const derivatives = insertProactiveDerivatives(db, { fixture });
+  db.close();
+
+  const report = cleanupProductionSmokeRun({
+    databaseUrl,
+    runId,
+    account: "jiangjz",
+    sessionCookie,
+    authSessionSecret: TEST_SESSION_SECRET,
+    createdIds: fixture.createdIds,
+    idempotencyKeys: fixture.idempotencyKeys,
+  });
+
+  assert.equal(report.status, "clean");
+  assert.equal(report.discovered.proactiveSuggestions, 4);
+  assert.equal(report.discovered.proactiveNotifications, 4);
+  assert.equal(report.discovered.weixinConfirmationOutbox, 4);
+  assert.equal(report.deleted.proactiveSuggestions, 4);
+  assert.equal(report.deleted.proactiveNotifications, 4);
+  assert.equal(report.deleted.weixinConfirmationOutbox, 4);
+  assert.equal(report.residual.proactiveSuggestions, 0);
+  assert.equal(report.residual.proactiveNotifications, 0);
+  assert.equal(report.residual.weixinConfirmationOutbox, 0);
+  assert.ok(Object.values(report.residual).every((value) => value === 0));
+  assert.equal(report.integrity.quickCheck, "ok");
+  assert.equal(report.integrity.foreignKeyViolations, 0);
+
+  const verify = openDatabase({ databaseUrl });
+  try {
+    for (const id of derivatives.suggestions) {
+      assert.equal(count(verify, "ai_suggestions", "id = $id", { $id: id }), 0);
+    }
+    for (const id of derivatives.notifications) {
+      assert.equal(count(verify, "proactive_notifications", "id = $id", { $id: id }), 0);
+    }
+    for (const id of derivatives.outbox) {
+      assert.equal(count(verify, "weixin_confirmation_outbox", "id = $id", { $id: id }), 0);
+    }
+    assert.equal(
+      count(verify, "proactive_subjects", "customer_id = $id", { $id: fixture.ids.customer }),
+      0,
+    );
+  } finally {
+    verify.close();
+  }
+});
+
+test("cleanup preserves copied markers when proactive data is bound to unrelated parents", () => {
+  const { db, databaseUrl } = temporaryDatabase();
+  const runId = randomUUID();
+  const sessionCookie = "r".repeat(43);
+  const fixture = insertFixture(db, {
+    runId,
+    sessionCookie,
+    sessionSecret: TEST_SESSION_SECRET,
+  });
+  const smokeDerivatives = insertProactiveDerivatives(db, { fixture });
+  const realCustomerId = randomUUID();
+  const realOpportunityId = randomUUID();
+  db.prepare("INSERT INTO customers (id, name, owner) VALUES ($id, '真实客户', 'jiangjz')")
+    .run({ $id: realCustomerId });
+  db.prepare(`
+    INSERT INTO opportunities (id, customer_id, name, owner)
+    VALUES ($id, $customerId, '真实商机', 'jiangjz')
+  `).run({ $id: realOpportunityId, $customerId: realCustomerId });
+  const unrelated = insertProactiveDerivatives(db, {
+    fixture,
+    customerId: realCustomerId,
+    opportunityId: realOpportunityId,
+    count: 1,
+  });
+  db.close();
+
+  const report = cleanupProductionSmokeRun({
+    databaseUrl,
+    runId,
+    account: "jiangjz",
+    sessionCookie,
+    authSessionSecret: TEST_SESSION_SECRET,
+    createdIds: fixture.createdIds,
+    idempotencyKeys: fixture.idempotencyKeys,
+  });
+
+  assert.equal(report.deleted.proactiveSuggestions, 4);
+  const verify = openDatabase({ databaseUrl });
+  try {
+    assert.equal(count(verify, "ai_suggestions", "id = $id", { $id: unrelated.suggestions[0] }), 1);
+    assert.equal(
+      count(verify, "proactive_notifications", "id = $id", { $id: unrelated.notifications[0] }),
+      1,
+    );
+    assert.equal(
+      count(verify, "weixin_confirmation_outbox", "id = $id", { $id: unrelated.outbox[0] }),
+      1,
+    );
+    for (const id of smokeDerivatives.suggestions) {
+      assert.equal(count(verify, "ai_suggestions", "id = $id", { $id: id }), 0);
+    }
+  } finally {
+    verify.close();
+  }
+});
+
+test("cleanup rejects proactive data owned by another account when it targets smoke parents", () => {
+  const { db, databaseUrl } = temporaryDatabase();
+  const runId = randomUUID();
+  const sessionCookie = "s".repeat(43);
+  const fixture = insertFixture(db, {
+    runId,
+    sessionCookie,
+    sessionSecret: TEST_SESSION_SECRET,
+  });
+  const forged = insertProactiveDerivatives(db, {
+    fixture,
+    account: "real-user",
+    count: 1,
+  });
+  db.close();
+
+  assert.throws(
+    () => cleanupProductionSmokeRun({
+      databaseUrl,
+      runId,
+      account: "jiangjz",
+      sessionCookie,
+      authSessionSecret: TEST_SESSION_SECRET,
+      createdIds: fixture.createdIds,
+      idempotencyKeys: fixture.idempotencyKeys,
+    }),
+    /unrelated proactive suggestion|owner|smoke customer/i,
+  );
+
+  const verify = openDatabase({ databaseUrl });
+  try {
+    assert.equal(count(verify, "customers", "id = $id", { $id: fixture.ids.customer }), 1);
+    assert.equal(count(verify, "ai_suggestions", "id = $id", { $id: forged.suggestions[0] }), 1);
+    assert.equal(
+      count(verify, "proactive_notifications", "id = $id", { $id: forged.notifications[0] }),
+      1,
+    );
+    assert.equal(count(verify, "weixin_confirmation_outbox", "id = $id", { $id: forged.outbox[0] }), 1);
+  } finally {
+    verify.close();
+  }
+});
+
+test("cleanup rejects a forged proactive outbox envelope and preserves the transaction", () => {
+  const { db, databaseUrl } = temporaryDatabase();
+  const runId = randomUUID();
+  const sessionCookie = "t".repeat(43);
+  const fixture = insertFixture(db, {
+    runId,
+    sessionCookie,
+    sessionSecret: TEST_SESSION_SECRET,
+  });
+  const derivatives = insertProactiveDerivatives(db, { fixture, count: 1 });
+  const row = db.prepare(`
+    SELECT payload_json FROM weixin_confirmation_outbox WHERE id = $id
+  `).get({ $id: derivatives.outbox[0] });
+  const forgedPayload = {
+    ...JSON.parse(row.payload_json),
+    title: "真实业务通知",
+    summary: "真实业务通知",
+  };
+  const forgedPayloadJson = JSON.stringify(canonicalJson(forgedPayload));
+  db.prepare(`
+    UPDATE weixin_confirmation_outbox
+       SET payload_json = $payloadJson, payload_hash = $payloadHash
+     WHERE id = $id
+  `).run({
+    $id: derivatives.outbox[0],
+    $payloadJson: forgedPayloadJson,
+    $payloadHash: sha256(forgedPayloadJson),
+  });
+  db.close();
+
+  assert.throws(
+    () => cleanupProductionSmokeRun({
+      databaseUrl,
+      runId,
+      account: "jiangjz",
+      sessionCookie,
+      authSessionSecret: TEST_SESSION_SECRET,
+      createdIds: fixture.createdIds,
+      idempotencyKeys: fixture.idempotencyKeys,
+    }),
+    /unrelated.*outbox|unowned.*outbox|ownership/i,
+  );
+
+  const verify = openDatabase({ databaseUrl });
+  try {
+    assert.equal(count(verify, "customers", "id = $id", { $id: fixture.ids.customer }), 1);
+    assert.equal(count(verify, "ai_suggestions", "id = $id", { $id: derivatives.suggestions[0] }), 1);
+    assert.equal(
+      count(verify, "proactive_notifications", "id = $id", { $id: derivatives.notifications[0] }),
+      1,
+    );
+    assert.equal(
+      count(verify, "weixin_confirmation_outbox", "id = $id", { $id: derivatives.outbox[0] }),
+      1,
+    );
   } finally {
     verify.close();
   }

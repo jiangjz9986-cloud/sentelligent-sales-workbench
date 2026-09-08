@@ -28,28 +28,28 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("check-config", help="validate configuration without contacting sources")
     sub.add_parser("list-sources", help="list enabled configured sources")
     sub.add_parser("list-customers", help="list configured customer hospitals and coverage states")
-    sub.add_parser("dry-run", help="fetch and classify without database or notification writes")
+    sub.add_parser("dry-run", help="fetch and classify without database writes")
     sub.add_parser(
         "smoke",
         help="run a credential-free live-source smoke and emit a safe summary",
     )
-    run = sub.add_parser("run", help="collect, persist, and notify once")
-    run.add_argument("--possible", action="store_true", help="include possible matches in notifications")
+    run = sub.add_parser("run", help="collect and persist once")
+    run.add_argument("--possible", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("health", help="show persisted source health")
     sub.add_parser("db-check", help="initialize and run SQLite quick_check")
     export = sub.add_parser("export-snapshot", help="write a normalized snapshot for an external consumer")
     export.add_argument("--output", type=Path, required=True)
     run_export = sub.add_parser("run-and-export", help="collect once and write a normalized snapshot")
     run_export.add_argument("--output", type=Path, required=True)
-    run_export.add_argument("--possible", action="store_true", help="include possible matches in notifications")
+    run_export.add_argument("--possible", action="store_true", help=argparse.SUPPRESS)
     sync = sub.add_parser("sync", help="send the persisted snapshot to Sentelligent")
     sync.add_argument("--endpoint", default=os.environ.get("SENTELLIGENT_HOSPITAL_TENDER_SYNC_URL", ""))
     run_sync = sub.add_parser("run-and-sync", help="collect once, then send the normalized snapshot to Sentelligent")
     run_sync.add_argument("--endpoint", default=os.environ.get("SENTELLIGENT_HOSPITAL_TENDER_SYNC_URL", ""))
-    run_sync.add_argument("--possible", action="store_true", help="include possible matches in notifications")
+    run_sync.add_argument("--possible", action="store_true", help=argparse.SUPPRESS)
     optional_sync = sub.add_parser("run-and-sync-if-configured", help="collect once and sync when the bridge is configured")
     optional_sync.add_argument("--endpoint", default=os.environ.get("SENTELLIGENT_HOSPITAL_TENDER_SYNC_URL", ""))
-    optional_sync.add_argument("--possible", action="store_true", help="include possible matches in notifications")
+    optional_sync.add_argument("--possible", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "smoke":
             # The smoke deliberately uses the same adapters, resolver checks,
             # retry budget, and parser path as production.  It never writes
-            # the collector database or sends notifications. A partial run is
+            # the collector database. A partial run is
             # useful evidence (and recoverable by the scheduler); only an
             # all-source failure is a hard smoke failure.
             summary = runner.run(dry_run=True)

@@ -27,15 +27,15 @@ function safePositiveInteger(value, fallback) {
 }
 
 function commandEnvironment({ collectorRoot, dataDir, customerHospitalsPath, env = process.env }) {
-  // Only pass runtime basics. In particular, do not inherit sync URLs, bearer
-  // tokens, PushPlus credentials, cookies, or model keys into the collector.
+  // This is an explicit allowlist. The collector has no notification client,
+  // and must never inherit PushPlus credentials, sync URLs, bearer tokens,
+  // cookies, or model keys from the backend process.
   const path = typeof env.PATH === "string" ? env.PATH : "";
   const pythonPath = join(collectorRoot, "src");
   return {
     PATH: path,
     PYTHONPATH: pythonPath,
     PYTHONIOENCODING: "utf-8",
-    HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS: "1",
     HOSPITAL_TENDER_MONITOR_DATA_DIR: dataDir,
     // Python's macOS urllib otherwise discovers and silently uses the host's
     // system proxy even though proxy URLs were excluded from this allowlist.

@@ -755,9 +755,6 @@ export function loadConfig(
       if (parsed < 1_000) throw new Error("OPPORTUNITY_STAGE_REVIEW_BUDGET_MS must be at least 1000");
       return parsed;
     })(),
-    hospitalTenderPushplusToken: String(
-      env.hospitalTenderPushplusToken ?? env.HOSPITAL_TENDER_PUSHPLUS_TOKEN ?? "",
-    ).trim(),
     settingsEncryptionKey: String(
       env.settingsEncryptionKey ?? env.SETTINGS_ENCRYPTION_KEY ?? "",
     ).trim(),

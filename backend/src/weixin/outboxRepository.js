@@ -312,6 +312,30 @@ export function createWeixinConfirmationOutboxRepository(db, {
     });
   }
 
+  function discardExpiredOpsAlerts({ maxQueueAgeMs, now = clock() } = {}) {
+    if (!Number.isSafeInteger(maxQueueAgeMs) || maxQueueAgeMs <= 0) {
+      throw new TypeError("maxQueueAgeMs is invalid");
+    }
+    const nowDate = now instanceof Date ? now : new Date(now);
+    if (Number.isNaN(nowDate.getTime())) throw new TypeError("now is invalid");
+    const nowIso = nowDate.toISOString();
+    const cutoffAt = new Date(nowDate.getTime() - maxQueueAgeMs).toISOString();
+    return withImmediateTransaction(db, () => {
+      const result = db.prepare(`
+        UPDATE weixin_confirmation_outbox
+        SET status = 'failed', lease_proof_hash = NULL, lease_until = NULL,
+            last_error_code = 'WEIXIN_OUTBOX_STALE', updated_at = $now
+        WHERE json_extract(payload_json, '$.kind') = 'ops_alert'
+          AND created_at < $cutoffAt
+          AND (
+            status = 'queued'
+            OR (status = 'processing' AND lease_until IS NOT NULL AND lease_until <= $now)
+          )
+      `).run({ $cutoffAt: cutoffAt, $now: nowIso });
+      return { discardedCount: Number(result.changes ?? 0), cutoffAt };
+    });
+  }
+
   function isLeaseCurrent(idValue, leaseTokenValue) {
     try {
       const state = checkLease(idValue, leaseTokenValue);
@@ -357,6 +381,7 @@ export function createWeixinConfirmationOutboxRepository(db, {
     discardLeased,
     requeueFailed,
     closePending,
+    discardExpiredOpsAlerts,
     isLeaseCurrent,
     statusCounts,
     latestForEntry,

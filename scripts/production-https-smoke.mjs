@@ -58,6 +58,9 @@ const CLEANUP_RESIDUAL_KEYS = Object.freeze([
   "itineraries",
   "weeklyReports",
   "auditLogs",
+  "proactiveSuggestions",
+  "proactiveNotifications",
+  "weixinConfirmationOutbox",
   "authSessions",
   "idempotencyKeys",
 ]);

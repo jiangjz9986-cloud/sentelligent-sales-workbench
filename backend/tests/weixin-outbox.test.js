@@ -284,6 +284,65 @@ test("closes queued or leased draft messages when a newer decision supersedes th
   });
 });
 
+test("startup sweep discards only stale ops alerts without stealing a current lease", () => {
+  withDatabase((db) => {
+    const clock = makeClock("2026-08-29T00:00:00.000Z");
+    let sequence = 0;
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      idFactory: () => `outbox-ops-sweep-${++sequence}`,
+    });
+    const enqueue = (key, kind) => repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: key,
+      payload: kind === "ops_alert"
+        ? { kind, origin: "ops-inspect:test", severity: "warning", summary: key, occurredAt: "2026-08-29T00:00:00.000Z" }
+        : { kind, digestDate: "2026-08-29" },
+    });
+    const staleQueued = enqueue("stale-queued", "ops_alert");
+    const staleBusiness = enqueue("stale-business", "daily_digest");
+    const expiredProcessing = enqueue("expired-processing", "ops_alert");
+    const currentProcessing = enqueue("current-processing", "ops_alert");
+    const alreadySent = enqueue("already-sent", "ops_alert");
+    const alreadyFailed = enqueue("already-failed", "ops_alert");
+
+    db.prepare(`
+      UPDATE weixin_confirmation_outbox
+      SET status = 'processing', lease_proof_hash = $proof, lease_until = '2026-08-29T00:10:00.000Z'
+      WHERE id = $id
+    `).run({ $id: expiredProcessing.id, $proof: "a".repeat(64) });
+    db.prepare(`
+      UPDATE weixin_confirmation_outbox
+      SET status = 'processing', lease_proof_hash = $proof, lease_until = '2026-08-29T01:10:00.000Z'
+      WHERE id = $id
+    `).run({ $id: currentProcessing.id, $proof: "b".repeat(64) });
+    db.prepare("UPDATE weixin_confirmation_outbox SET status = 'sent', sent_at = created_at WHERE id = $id")
+      .run({ $id: alreadySent.id });
+    db.prepare("UPDATE weixin_confirmation_outbox SET status = 'failed', last_error_code = 'WEIXIN_SEND_FAILED' WHERE id = $id")
+      .run({ $id: alreadyFailed.id });
+
+    clock.advance(50 * 60 * 1000);
+    const freshQueued = enqueue("fresh-queued", "ops_alert");
+    clock.advance(10 * 60 * 1000);
+
+    const result = repository.discardExpiredOpsAlerts({ maxQueueAgeMs: 15 * 60 * 1000 });
+    assert.deepEqual(result, {
+      discardedCount: 2,
+      cutoffAt: "2026-08-29T00:45:00.000Z",
+    });
+    assert.equal(repository.get(staleQueued.id).status, "failed");
+    assert.equal(repository.get(staleQueued.id).lastErrorCode, "WEIXIN_OUTBOX_STALE");
+    assert.equal(repository.get(expiredProcessing.id).status, "failed");
+    assert.equal(repository.get(expiredProcessing.id).lastErrorCode, "WEIXIN_OUTBOX_STALE");
+    assert.equal(repository.get(staleBusiness.id).status, "queued");
+    assert.equal(repository.get(currentProcessing.id).status, "processing");
+    assert.equal(repository.get(alreadySent.id).status, "sent");
+    assert.equal(repository.get(alreadyFailed.id).lastErrorCode, "WEIXIN_SEND_FAILED");
+    assert.equal(repository.get(freshQueued.id).status, "queued");
+  });
+});
+
 test("statusCounts reports per-status totals and the oldest queued availability", () => {
   withDatabase((db) => {
     const clock = makeClock("2026-08-29T01:00:00.000Z");

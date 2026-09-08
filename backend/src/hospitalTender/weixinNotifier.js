@@ -98,7 +98,7 @@ export function renderHospitalTenderNoticeMessage(payload) {
  *
  * v0.9.3 多播：公告按匹配客户的 owner 分组（一公告可入多组，组内去重）；
  * 无路由组（客户 owner 无 active∧digest 绑定）→ 全部投 digest-enabled 的 admin
- * 绑定 → 再无 → PushPlus 兜底 → 再无 → 审计 unrouted 计数后视为已处理，保持
+ * 绑定 → 再无 → 审计 unrouted 计数后视为已处理，保持
  * `notified === newHighNotices.length` 的调度器重试契约。
  */
 export function createHospitalTenderWeixinNotifier({
@@ -106,7 +106,6 @@ export function createHospitalTenderWeixinNotifier({
   resolveDigestDeliveries,
   resolveAdminDeliveries,
   resolveCustomerOwners,
-  pushplusNotify = null,
   recordUnrouted = null,
   onSuccess = null,
   onFailure = null,
@@ -117,7 +116,6 @@ export function createHospitalTenderWeixinNotifier({
   if (typeof resolveDigestDeliveries !== "function") throw new TypeError("resolveDigestDeliveries must be a function");
   if (typeof resolveAdminDeliveries !== "function") throw new TypeError("resolveAdminDeliveries must be a function");
   if (typeof resolveCustomerOwners !== "function") throw new TypeError("resolveCustomerOwners must be a function");
-  if (pushplusNotify !== null && typeof pushplusNotify !== "function") throw new TypeError("pushplusNotify must be a function");
   if (recordUnrouted !== null && typeof recordUnrouted !== "function") throw new TypeError("recordUnrouted must be a function");
   if (onSuccess !== null && typeof onSuccess !== "function") throw new TypeError("onSuccess must be a function");
   if (onFailure !== null && typeof onFailure !== "function") throw new TypeError("onFailure must be a function");
@@ -181,13 +179,6 @@ export function createHospitalTenderWeixinNotifier({
           for (const notice of unrouted) groups.get(owner).add(notice);
           if (!digestTargets.has(owner)) digestTargets.set(owner, delivery);
         }
-      } else if (pushplusNotify) {
-        try {
-          await pushplusNotify({ cycleNumber: safeCycleNumber, batchCustomerIds, notices: unrouted });
-        } catch {
-          // PushPlus 兜底失败：审计计数后视为已处理（公告数据仍在库，Web 可见）。
-          try { recordUnrouted?.({ count: unrouted.length, cycleNumber: safeCycleNumber }); } catch {}
-        }
       } else {
         try { recordUnrouted?.({ count: unrouted.length, cycleNumber: safeCycleNumber }); } catch {}
       }
@@ -232,7 +223,7 @@ export function createHospitalTenderWeixinNotifier({
       throw error;
     }
     try { onSuccess?.({ count: notices.length, chunkCount: chunkTotal }); } catch {}
-    // 全部公告要么已入队、要么经 PushPlus/审计视为已处理 → 返回全量计数。
+    // 全部公告要么已入队、要么经审计视为已处理 → 返回全量计数。
     return notices.length;
   };
 }

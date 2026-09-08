@@ -1,6 +1,6 @@
 {
   "name": "sentelligent-sales-workbench",
-  "version": "0.12.0",
+  "version": "0.12.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -29,9 +29,10 @@
     "asr:cleanup": "node scripts/asr-runtime-cleanup.mjs",
     "smoke:production:asr": "node scripts/asr-production-smoke.mjs",
     "smoke:production:https": "node scripts/production-https-smoke.mjs",
+    "test:ai-platform": "npm --prefix ai-platform test && node --test backend/src/aiPlatform/client.test.js",
     "test:release": "node --test scripts/release-package.test.mjs scripts/production-preflight.test.mjs",
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
-    "qa:full": "npm run test:deploy && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration && npm --prefix outputs/product-design-prototype run qa:webkit"
+    "qa:full": "npm run test:deploy && npm run test:ai-platform && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration && npm --prefix outputs/product-design-prototype run qa:webkit"
   },
   "description": "Sentelligent AI sales workbench for customer, opportunity, action, risk, voice and weekly workflows.",
   "main": "index.js",

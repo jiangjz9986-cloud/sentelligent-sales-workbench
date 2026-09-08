@@ -1,4 +1,4 @@
-"""Run-once orchestration for source collection, classification, persistence, and delivery."""
+"""Run-once orchestration for source collection, classification, and persistence."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from .classifier import classify, load_keyword_rules
 from .config import AppConfig
 from .http import HttpClient
 from .models import ClassifiedNotice, RelevanceLevel, SourceHealth
-from .notifier import DeliveryResult, PushPlusNotifier
 from .sources import (
     DongyingAdapter,
     HospitalHtmlAdapter,
@@ -79,6 +78,8 @@ class RunSummary:
     notice_count: int
     inserted_count: int = 0
     revised_count: int = 0
+    # Retained for snapshot/API compatibility. This collector has no outbound
+    # notification channel, so both values are always false/zero.
     notification_sent: bool = False
     notification_count: int = 0
     dry_run: bool = False
@@ -98,7 +99,6 @@ class MonitorRunner:
         *,
         repository: Repository | None = None,
         http_client: HttpClient | None = None,
-        notifier: PushPlusNotifier | None = None,
         clock: Callable[[], datetime] | None = None,
         lock_path: Path | None = None,
     ) -> None:
@@ -108,11 +108,6 @@ class MonitorRunner:
             config.timeout_seconds,
             max_attempts=min(5, max(1, config.retries)),
             min_interval_seconds=DEFAULT_REQUEST_INTERVAL_SECONDS,
-        )
-        self.notifier = notifier or (
-            PushPlusNotifier(self.http_client, config.pushplus_token)
-            if config.pushplus_token
-            else None
         )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lock_path = Path(lock_path or (Path(config.database_path).with_suffix(".lock")))
@@ -178,8 +173,10 @@ class MonitorRunner:
 
     def run(self, *, include_possible: bool | None = None, dry_run: bool = False) -> RunSummary:
         """Collect and process all enabled direct sources once."""
+        # Keep the argument for callers of the former notification API. It has
+        # no effect because delivery is intentionally retired from this worker.
+        del include_possible
         started = self._now()
-        include_possible = self.config.notify_possible if include_possible is None else bool(include_possible)
         # Dry-run/smoke is intentionally side-effect free: no SQLite setup and
         # no lock-file creation. Persisted runs still take the process lock so
         # two scheduled collectors cannot overlap.
@@ -252,29 +249,10 @@ class MonitorRunner:
                 if not dry_run:
                     self.repository.record_source_health(health)
 
-            notification_sent = False
-            notification_count = 0
-            notification_failed = False
-            if not dry_run and self.notifier is not None:
-                levels = (RelevanceLevel.HIGH, RelevanceLevel.POSSIBLE) if include_possible else (RelevanceLevel.HIGH,)
-                pending = self.repository.pending_notifications(levels=levels)
-                if pending:
-                    try:
-                        result = self.notifier.send(tuple(item.classified for item in pending), title="医院IT招标监测")
-                        delivered = type(getattr(result, "success", False)) is bool and result.success
-                    except Exception:
-                        delivered = False
-                    if delivered:
-                        ids = [item.revision_id for item in pending]
-                        notification_count = self.repository.mark_delivered(ids, delivered_at=self._now())
-                        notification_sent = True
-                    else:
-                        notification_failed = True
-                        logger.warning("notification failed pending_count=%s", len(pending))
             finished = self._now()
             usable_collection = failed == 0 or successful > 0
-            success = usable_collection and not notification_failed
-            error = "notification failure" if notification_failed else ("source failure" if failed else "")
+            success = usable_collection
+            error = "source failure" if failed else ""
             if not dry_run:
                 self.repository.record_run(RunRecord(
                     run_id=0,
@@ -284,16 +262,30 @@ class MonitorRunner:
                     # health.  A partially usable snapshot remains a failed
                     # collector run and is exported to the main system as
                     # partial, while RunSummary.success permits the snapshot.
-                    success=failed == 0 and not notification_failed,
+                    success=failed == 0,
                     source_count=len(sources),
                     successful_source_count=successful,
                     failed_source_count=failed,
                     notice_count=notice_count,
                     inserted_count=inserted,
                     revised_count=revised,
-                    error="run failure" if notification_failed else error,
+                    error=error,
                 ))
-            return RunSummary(started, finished, success, len(sources), successful, failed, notice_count, inserted, revised, notification_sent, notification_count, dry_run, error)
+            return RunSummary(
+                started_at=started,
+                finished_at=finished,
+                success=success,
+                source_count=len(sources),
+                successful_source_count=successful,
+                failed_source_count=failed,
+                notice_count=notice_count,
+                inserted_count=inserted,
+                revised_count=revised,
+                notification_sent=False,
+                notification_count=0,
+                dry_run=dry_run,
+                error=error,
+            )
 
     def health(self):
         """Return persisted source health in UTC; presentation belongs to the CLI."""

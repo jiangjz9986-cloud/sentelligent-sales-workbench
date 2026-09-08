@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
+import { openDatabase } from "../src/db.js";
 import { createConnection } from "../src/db/connection.js";
 import { createServer } from "../src/server.js";
 import { shortcutBookkeepingConversationId } from "../src/weixin/bookkeepingDeliveryScope.js";
+import { createWeixinConfirmationOutboxRepository } from "../src/weixin/outboxRepository.js";
 import { seedWeixinBinding } from "./helpers/weixin-binding-fixtures.js";
 
 const opsToken = ["fixture", "ops", "monitor", "token"].join("-");
@@ -18,7 +20,6 @@ let tempDir;
 let server;
 let baseUrl;
 let clockNow;
-let pushplusCalls;
 
 async function request(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -40,6 +41,7 @@ function alertBody(overrides = {}) {
 }
 
 function startServer(overrides = {}) {
+  const { seedBinding = true, ...serverOverrides } = overrides;
   server = createServer({
     databaseUrl: join(tempDir, "ops-alerts.sqlite"),
     seed: false,
@@ -55,20 +57,18 @@ function startServer(overrides = {}) {
     weixinAllowedSenderIds: sender,
     assistantConfirmationSecret: Buffer.alloc(32, 0x33),
     opsAlertClock: () => new Date(clockNow),
-    fetchImpl: async (url, init) => {
-      pushplusCalls.push({ url: String(url), body: JSON.parse(init.body) });
-      return new Response(JSON.stringify({ code: 200 }), { status: 200 });
-    },
-    ...overrides,
+    ...serverOverrides,
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => {
     baseUrl = `http://127.0.0.1:${server.address().port}`;
     // v0.9.3：告警目标 = active admin 绑定（listAdminTargets）。
-    const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
-    try {
-      seedWeixinBinding(db, { account: owner, senderId: sender, role: "admin" });
-    } finally {
-      db.close();
+    if (seedBinding) {
+      const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
+      try {
+        seedWeixinBinding(db, { account: owner, senderId: sender, role: "admin" });
+      } finally {
+        db.close();
+      }
     }
     resolve();
   }));
@@ -77,7 +77,6 @@ function startServer(overrides = {}) {
 beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), "sentelligent-ops-alerts-"));
   clockNow = "2026-08-29T01:20:00.000Z";
-  pushplusCalls = [];
 });
 
 afterEach(async () => {
@@ -155,7 +154,6 @@ describe("ops alerts machine endpoint", () => {
     assert.equal(first.response.status, 200);
     assert.equal(first.body.item.status, "queued");
     assert.equal(first.body.item.replayed, false);
-    assert.equal(first.body.item.pushplusFallback, false);
 
     for (let index = 0; index < 9; index += 1) {
       const replay = await request("/api/integrations/ops-alerts", {
@@ -177,7 +175,6 @@ describe("ops alerts machine endpoint", () => {
     });
     assert.equal(changedDetail.response.status, 200);
     assert.equal(changedDetail.body.item.replayed, true);
-    assert.equal(changedDetail.body.item.pushplusFallback, false);
 
     const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
     const rows = db.prepare("SELECT owner, conversation_id, payload_json FROM weixin_confirmation_outbox").all();
@@ -198,7 +195,6 @@ describe("ops alerts machine endpoint", () => {
     assert.equal(metadata.replayed, false);
     assert.equal(JSON.parse(audits.at(-1).metadata_json).replayed, true);
     db.close();
-    assert.equal(pushplusCalls.length, 0);
   });
 
   it("opens a second outbox row when the hour rolls over", async () => {
@@ -223,33 +219,54 @@ describe("ops alerts machine endpoint", () => {
     db.close();
   });
 
-  it("falls back to PushPlus in-request while WeChat delivery is not bound", async () => {
-    const pushplusFixtureToken = ["fixture", "pushplus", "fallback", "token"].join("-");
+  it("sweeps stale ops alerts before listening without expiring business outbox rows", async () => {
+    const databaseUrl = join(tempDir, "ops-alerts.sqlite");
+    const seedDb = openDatabase({ databaseUrl });
+    let id = 0;
+    const seedOutbox = createWeixinConfirmationOutboxRepository(seedDb, {
+      clock: () => new Date("2026-08-29T00:00:00.000Z"),
+      idFactory: () => `startup-sweep-${++id}`,
+    });
+    const stale = seedOutbox.enqueue({
+      owner,
+      conversationId: shortcutBookkeepingConversationId(owner, sender),
+      idempotencyKey: "startup-stale-ops",
+      payload: {
+        kind: "ops_alert",
+        origin: "ops-inspect:weixin-worker",
+        severity: "critical",
+        summary: "历史 worker 告警",
+        occurredAt: "2026-08-29T00:00:00.000Z",
+      },
+    });
+    const business = seedOutbox.enqueue({
+      owner,
+      conversationId: shortcutBookkeepingConversationId(owner, sender),
+      idempotencyKey: "startup-business-message",
+      payload: { kind: "daily_digest", digestDate: "2026-08-29" },
+    });
+    seedDb.close();
+
+    clockNow = "2026-08-29T01:20:00.000Z";
     await startServer({
-      weixinBookkeepingConfirmationEnabled: false,
-      hospitalTenderPushplusToken: pushplusFixtureToken,
+      assistantClock: () => new Date(clockNow),
+      weixinConfirmationOutboxClock: () => new Date(clockNow),
     });
-    const accepted = await request("/api/integrations/ops-alerts", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${opsToken}` },
-      body: JSON.stringify(alertBody()),
-    });
-    assert.equal(accepted.response.status, 200);
-    assert.equal(accepted.body.item.pushplusFallback, true);
-    assert.equal(pushplusCalls.length, 1);
-    assert.equal(new URL(pushplusCalls[0].url).hostname, "www.pushplus.plus");
-    assert.equal(pushplusCalls[0].body.token, pushplusFixtureToken);
-    assert.match(pushplusCalls[0].body.title, /【严重】/u);
-    assert.match(pushplusCalls[0].body.content, /systemd:sentelligent-frontend.service/u);
-    const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
-    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 0);
-    const audit = db.prepare("SELECT metadata_json FROM audit_logs WHERE action = 'ops_alert.receive'").get();
-    assert.equal(JSON.parse(audit.metadata_json).delivery, "pushplus");
+
+    const db = createConnection({ databaseUrl });
+    const rows = db.prepare("SELECT id, status, last_error_code FROM weixin_confirmation_outbox WHERE id IN ($stale, $business) ORDER BY id")
+      .all({ $stale: stale.id, $business: business.id });
     db.close();
+    assert.deepEqual(rows.map((row) => ({ ...row })), [
+      { id: business.id, status: "queued", last_error_code: null },
+      { id: stale.id, status: "failed", last_error_code: "WEIXIN_OUTBOX_STALE" },
+    ].sort((left, right) => left.id.localeCompare(right.id)));
   });
 
-  it("returns 503 when both delivery channels are unavailable", async () => {
-    await startServer({ weixinBookkeepingConfirmationEnabled: false });
+  it("returns 503 without a bound WeChat target and has no fallback notification option", async () => {
+    await startServer({
+      seedBinding: false,
+    });
     const unavailable = await request("/api/integrations/ops-alerts", {
       method: "POST",
       headers: { Authorization: `Bearer ${opsToken}` },
@@ -257,6 +274,61 @@ describe("ops alerts machine endpoint", () => {
     });
     assert.equal(unavailable.response.status, 503);
     assert.equal(unavailable.body.error.code, "OPS_ALERT_DELIVERY_UNAVAILABLE");
+    const db = createConnection({ databaseUrl: join(tempDir, "ops-alerts.sqlite") });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox").get().count, 0);
+    db.close();
+  });
+
+  it("keeps the alert queued while the worker reports an expired context", async () => {
+    await startServer();
+    const report = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: {
+        Authorization: `Bearer ${weixinToken}`,
+        "X-Weixin-Delivery-Status": "not_ready",
+        "X-Weixin-Delivery-Reason": "context_token_expired",
+        "X-Weixin-Delivery-Expires-At": "2026-08-28T17:00:00.000Z",
+      },
+    });
+    assert.equal(report.response.status, 204);
+
+    const accepted = await request("/api/integrations/ops-alerts", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${opsToken}` },
+      body: JSON.stringify(alertBody()),
+    });
+    assert.equal(accepted.response.status, 200);
+    assert.equal(accepted.body.item.status, "queued");
+    const status = await request("/api/integrations/ops-alerts/status", {
+      headers: { Authorization: `Bearer ${opsToken}` },
+    });
+    assert.equal(status.response.status, 200);
+    assert.deepEqual(status.body.item.weixinDelivery, {
+      status: "not_ready",
+      reason: "context_token_expired",
+      expiresAt: "2026-08-28T17:00:00.000Z",
+      reportedAt: status.body.item.weixinDelivery.reportedAt,
+    });
+  });
+
+  it("rejects a non-canonical worker expiry header before changing readiness", async () => {
+    await startServer();
+    const rejected = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: {
+        Authorization: `Bearer ${weixinToken}`,
+        "X-Weixin-Delivery-Status": "not_ready",
+        "X-Weixin-Delivery-Reason": "context_token_expired",
+        "X-Weixin-Delivery-Expires-At": "2026-08-28T17:00:00Z",
+      },
+    });
+    assert.equal(rejected.response.status, 422);
+    assert.equal(rejected.body.error.code, "VALIDATION_ERROR");
+
+    const status = await request("/api/integrations/ops-alerts/status", {
+      headers: { Authorization: `Bearer ${opsToken}` },
+    });
+    assert.equal(status.response.status, 200);
+    assert.equal(status.body.item.weixinDelivery.reason, "worker_unavailable");
+    assert.equal(Object.hasOwn(status.body.item.weixinDelivery, "expiresAt"), false);
   });
 
   it("delivers the rendered alert card to a ready worker lease", async () => {

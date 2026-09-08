@@ -430,7 +430,8 @@ function assertProactiveAssistant(value, path = "proactiveAssistant") {
   return item;
 }
 
-const PROACTIVE_NOTIFICATION_CHANNELS = new Set(["in_app", "weixin", "pushplus"]);
+const PROACTIVE_NOTIFICATION_CHANNELS = new Set(["in_app", "weixin"]);
+const LEGACY_PROACTIVE_NOTIFICATION_CHANNEL = "pushplus";
 const PROACTIVE_NOTIFICATION_STATUSES = new Set(["queued", "processing", "sent", "failed", "read"]);
 
 function proactiveNotificationText(value, path, { max, nullable = false } = {}) {
@@ -440,14 +441,22 @@ function proactiveNotificationText(value, path, { max, nullable = false } = {}) 
   return normalized;
 }
 
+function normalizeProactiveNotificationChannel(value, path) {
+  const channel = proactiveNotificationText(value, path, { max: 20 });
+  if (PROACTIVE_NOTIFICATION_CHANNELS.has(channel)) return channel;
+  // Historical rows remain readable, but the retired vendor channel never
+  // enters browser state as an active delivery option.
+  if (channel === LEGACY_PROACTIVE_NOTIFICATION_CHANNEL) return "retired";
+  throw new TypeError(`${path}: invalid channel`);
+}
+
 function assertProactiveNotification(value, path = "proactiveNotification") {
   const item = apiObject(value, path);
   const id = proactiveNotificationText(item.id, `${path}.id`, { max: 200 });
   const suggestionId = proactiveNotificationText(item.suggestionId, `${path}.suggestionId`, { max: 500 });
   const suggestionVersion = requiredApiVersion(item.suggestionVersion, `${path}.suggestionVersion`);
-  const channel = proactiveNotificationText(item.channel, `${path}.channel`, { max: 20 });
+  const channel = normalizeProactiveNotificationChannel(item.channel, `${path}.channel`);
   const status = proactiveNotificationText(item.status, `${path}.status`, { max: 20 });
-  if (!PROACTIVE_NOTIFICATION_CHANNELS.has(channel)) throw new TypeError(`${path}.channel: invalid channel`);
   if (!PROACTIVE_NOTIFICATION_STATUSES.has(status)) throw new TypeError(`${path}.status: invalid status`);
   const title = proactiveNotificationText(item.title, `${path}.title`, { max: 200 });
   const trigger = proactiveNotificationText(item.trigger, `${path}.trigger`, { max: 100 });
@@ -2564,31 +2573,6 @@ export function createSalesWorkbenchApi({ baseUrl, fetchImpl = fetch, onUnauthor
       const response = await requestApi("/api/settings/deepseek-key", {
         method: "DELETE",
         body: JSON.stringify({ confirmation: "CLEAR" }),
-      });
-      return response.item;
-    },
-
-    async savePushplusToken(token) {
-      if (typeof token !== "string" || !token.trim()) throw new TypeError("PushPlus Token is required");
-      const response = await requestApi("/api/settings/pushplus-token", {
-        method: "PUT",
-        body: JSON.stringify({ token: token.trim() }),
-      });
-      return response.item;
-    },
-
-    async clearPushplusToken() {
-      const response = await requestApi("/api/settings/pushplus-token", {
-        method: "DELETE",
-        body: JSON.stringify({ confirmation: "CLEAR" }),
-      });
-      return response.item;
-    },
-
-    async testPushplusToken() {
-      const response = await requestApi("/api/settings/pushplus/test", {
-        method: "POST",
-        body: "{}",
       });
       return response.item;
     },

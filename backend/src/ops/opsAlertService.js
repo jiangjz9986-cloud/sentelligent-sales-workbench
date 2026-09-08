@@ -1,7 +1,8 @@
 // Machine-facing ops-alert intake. Validation is fail-closed (unknown fields
 // rejected), storm control is the hour-keyed outbox idempotency key, and the
-// WeChat outbox stays the primary channel with PushPlus as the in-request
-// fallback while WeChat delivery is not bound.
+// WeChat outbox is the only external channel. Delivery readiness is deliberately
+// not consulted here: a bound conversation must retain alerts durably while the
+// provider context is temporarily unavailable or expired.
 
 import { HttpError } from "../http/errors.js";
 
@@ -58,8 +59,6 @@ function validateAlertInput(body) {
 export function createOpsAlertService({
   outboxRepository,
   resolveDeliveries,
-  weixinDeliveryReady,
-  pushplusNotify = null,
   recordAudit = null,
   clock = () => new Date(),
 } = {}) {
@@ -68,10 +67,6 @@ export function createOpsAlertService({
   }
   if (typeof resolveDeliveries !== "function") {
     throw new TypeError("resolveDeliveries is required");
-  }
-  if (typeof weixinDeliveryReady !== "function") throw new TypeError("weixinDeliveryReady is required");
-  if (pushplusNotify !== null && typeof pushplusNotify !== "function") {
-    throw new TypeError("pushplusNotify must be a function");
   }
   if (recordAudit !== null && typeof recordAudit !== "function") {
     throw new TypeError("recordAudit must be a function");
@@ -100,21 +95,18 @@ export function createOpsAlertService({
 
     let item;
     let delivery;
-    let pushplusFallback = false;
-    // v0.9.3 多播：目标=active admin 绑定（告警非订阅内容，无视 digest_enabled）；
-    // 幂等键加 owner 后缀。无 admin 绑定时落 PushPlus 兜底分支。
+    // 目标=active admin 绑定（告警非订阅内容，无视 digest_enabled）；幂等键
+    // 加 owner 后缀。没有绑定时明确失败，调用方不得旁路到其他通知提供方。
     let targets = [];
-    if (weixinDeliveryReady()) {
-      try {
-        targets = (resolveDeliveries() ?? [])
-          .map((target) => ({
-            owner: String(target?.account ?? target?.owner ?? "").trim(),
-            conversationId: String(target?.conversationId ?? "").trim(),
-          }))
-          .filter((target) => target.owner && target.conversationId);
-      } catch {
-        targets = [];
-      }
+    try {
+      targets = (resolveDeliveries() ?? [])
+        .map((target) => ({
+          owner: String(target?.account ?? target?.owner ?? "").trim(),
+          conversationId: String(target?.conversationId ?? "").trim(),
+        }))
+        .filter((target) => target.owner && target.conversationId);
+    } catch {
+      targets = [];
     }
     if (targets.length > 0) {
       let firstQueued = null;
@@ -143,25 +135,7 @@ export function createOpsAlertService({
         : { id: null, status: "deduplicated", replayed: true };
       delivery = "weixin_outbox";
     } else {
-      if (!pushplusNotify) {
-        throw new HttpError(503, "OPS_ALERT_DELIVERY_UNAVAILABLE", "No ops alert delivery channel is available");
-      }
-      try {
-        await pushplusNotify({
-          title: `【${input.severity === "critical" ? "严重" : "警告"}】${input.summary}`.slice(0, 200),
-          content: [
-            `来源：${input.source}`,
-            `时间：${payload.occurredAt}`,
-            `摘要：${input.summary}`,
-            ...(input.detail ? [`详情：${input.detail}`] : []),
-          ].join("\n"),
-        });
-      } catch {
-        throw new HttpError(503, "OPS_ALERT_DELIVERY_UNAVAILABLE", "No ops alert delivery channel is available");
-      }
-      item = { id: null, status: "pushplus_delivered", replayed: false };
-      delivery = "pushplus";
-      pushplusFallback = true;
+      throw new HttpError(503, "OPS_ALERT_DELIVERY_UNAVAILABLE", "No bound WeChat ops alert delivery is available");
     }
 
     try {
@@ -173,9 +147,9 @@ export function createOpsAlertService({
       });
     } catch {
       // Auditing must never turn a delivered alert into a caller-visible
-      // failure; the outbox/PushPlus side effect already happened.
+      // failure; the outbox side effect already happened.
     }
-    return { item: { ...item, pushplusFallback } };
+    return { item };
   }
 
   return Object.freeze({ receive });

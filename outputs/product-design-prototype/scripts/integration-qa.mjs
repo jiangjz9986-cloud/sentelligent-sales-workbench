@@ -1301,8 +1301,13 @@ async function runViewport(cdp, url, viewport, historicalSolution, historicalIti
             [...document.querySelectorAll('[data-testid="weixin-binding-page"] button')].some((button) => button.textContent.includes(label)));
         document.querySelector('[data-testid="subnav-settings-notifications"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="settings-notifications-section"]'), 5000);
+        const notificationSettingsSection = document.querySelector('[data-testid="settings-notifications-section"]');
+        const notificationSettingsText = notificationSettingsSection?.textContent ?? '';
         settingsIa.notifications = window.location.pathname === '/settings/notifications'
-          && document.querySelector('[data-testid="settings-notifications-section"]')?.textContent.includes('PushPlus');
+          && notificationSettingsText.includes('微信 Clawbot')
+          && notificationSettingsText.includes('只读')
+          && notificationSettingsText.includes('服务端管理')
+          && !notificationSettingsSection?.querySelector('form, input, button');
         document.querySelector('[data-testid="subnav-settings-tender-schedule"]')?.click();
         await waitUntil(() => document.querySelector('[data-testid="settings-tender-schedule-section"]'), 5000);
         settingsIa.tenderSchedule = window.location.pathname === '/settings/tender-schedule'
@@ -3142,7 +3147,7 @@ async function main() {
         assert.equal(result.settingsIa.security, true, "desktop system settings should open the focused security and AI page");
         assert.equal(result.settingsIa.primaryHighlighted, true, "desktop settings child pages should keep system settings highlighted");
         assert.equal(result.settingsIa.weixin, true, "desktop WeChat settings child should preserve the complete binding controls");
-        assert.equal(result.settingsIa.notifications, true, "desktop notification settings child should expose PushPlus configuration");
+        assert.equal(result.settingsIa.notifications, true, "desktop notification settings child should expose read-only WeChat Clawbot status");
         assert.equal(result.settingsIa.tenderSchedule, true, "desktop tender scheduler settings child should expose fixed policy and run controls");
         assert.equal(result.aiSuggestions.customer, true, "desktop customer page should generate an AI suggestion through the UI");
         assert.equal(result.aiSuggestions.opportunity, true, "desktop opportunity page should generate an AI suggestion through the UI");

@@ -26,21 +26,30 @@ describe("service worker registration", () => {
     assert.match(source, /scope: serviceWorkerScope\(\)/);
   });
 
-  it("builds a sw.js asset during production builds", async () => {
+  it("reloads once per page when a new worker takes control", () => {
+    const source = readFileSync(resolve("src/app/useServiceWorkerUpdate.js"), "utf8");
+    assert.match(source, /let reloadRequested = false/);
+    assert.match(source, /if \(reloadRequested\) return/);
+    assert.doesNotMatch(source, /sw_reload_guard/);
+  });
+
+  it("configures generated workers to activate and claim clients automatically", () => {
+    const configSource = readFileSync(resolve("vite.config.mjs"), "utf8");
+    assert.match(configSource, /strategies:\s*"generateSW"/);
+    assert.match(configSource, /registerType:\s*"autoUpdate"/);
+    assert.match(configSource, /skipWaiting:\s*true/);
+    assert.match(configSource, /clientsClaim:\s*true/);
+  });
+
+  it("builds a sw.js asset that skips waiting and claims clients", () => {
     const distSw = resolve("dist/sw.js");
-    if (!existsSync(distSw)) {
-      return;
-    }
+    assert.equal(existsSync(distSw), true, "dist/sw.js is missing; run the production build first");
     const sw = readFileSync(distSw, "utf8");
     assert.match(sw, /precache/);
     assert.match(sw, /startsWith\("\/api\/"\)/);
-  });
-
-  it("prompts users before activating waiting workers", () => {
-    const updateSource = readFileSync(resolve("src/app/useServiceWorkerUpdate.js"), "utf8");
-    const registerSource = readFileSync(resolve("src/app/registerServiceWorker.js"), "utf8");
-    assert.match(updateSource, /新版本可用/);
-    assert.match(registerSource, /SKIP_WAITING/);
+    assert.match(sw, /self\.skipWaiting\(\)/);
+    assert.match(sw, /clientsClaim\(\)/);
+    assert.doesNotMatch(sw, /SKIP_WAITING/);
   });
 
   it("exports a safe disabled check for tests", () => {

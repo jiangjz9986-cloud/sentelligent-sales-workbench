@@ -12,6 +12,10 @@ const ciWorkflow = readFileSync(
   resolve(".github", "workflows", "ci.yml"),
   "utf8",
 );
+const releaseWorkflow = readFileSync(
+  resolve(".github", "workflows", "release.yml"),
+  "utf8",
+);
 
 describe("root package QA scripts", () => {
   it("explicitly runs the proactive panel regression in regular frontend QA", () => {
@@ -47,10 +51,20 @@ describe("root package QA scripts", () => {
 
     assert.ok(script, "qa:full should exist");
     assert.match(script, /npm run test:deploy/);
+    assert.match(script, /npm run test:ai-platform/);
     assert.match(script, /npm --prefix backend test/);
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:local/);
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:integration/);
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:webkit/);
+  });
+
+  it("keeps the isolated AI platform in local, CI, and release verification", () => {
+    assert.equal(
+      packageJson.scripts?.["test:ai-platform"],
+      "npm --prefix ai-platform test && node --test backend/src/aiPlatform/client.test.js",
+    );
+    assert.match(ciWorkflow, /npm run test:ai-platform/);
+    assert.match(releaseWorkflow, /npm run test:ai-platform/);
   });
 
   it("pins the GitHub Linux Chrome executable for browser-backed frontend QA", () => {

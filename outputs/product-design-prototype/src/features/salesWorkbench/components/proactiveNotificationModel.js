@@ -9,7 +9,7 @@ export const PROACTIVE_NOTIFICATION_STATUS_META = Object.freeze({
 const CHANNEL_LABELS = Object.freeze({
   in_app: "站内",
   weixin: "微信",
-  pushplus: "PushPlus",
+  retired: "已退役通道",
 });
 
 export function normalizeProactiveNotificationStatus(notification) {
@@ -23,11 +23,15 @@ export function proactiveNotificationIsUnread(notification) {
 
 export function proactiveNotificationStatusMeta(notification) {
   const status = normalizeProactiveNotificationStatus(notification);
+  const readOnly = notification?.channel === "retired";
+  const statusMeta = PROACTIVE_NOTIFICATION_STATUS_META[status];
   return {
-    ...PROACTIVE_NOTIFICATION_STATUS_META[status],
+    ...statusMeta,
+    tone: readOnly ? "retired" : statusMeta.tone,
     status,
-    channelLabel: CHANNEL_LABELS[notification?.channel] ?? "站内",
+    channelLabel: CHANNEL_LABELS[notification?.channel] ?? "未知通道",
     unread: proactiveNotificationIsUnread(notification),
+    readOnly,
   };
 }
 

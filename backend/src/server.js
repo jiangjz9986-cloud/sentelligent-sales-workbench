@@ -112,8 +112,8 @@ import { createShortcutAdvanceAllocationRepository } from "./integrations/shortc
 import { planVisitItinerary } from "./itinerary/planner.js";
 import { AmapServiceError, createAmapClient } from "./maps/amapClient.js";
 import { createMockAmapClient } from "./maps/amapMockClient.js";
+import { OPS_ALERT_MAX_QUEUE_AGE_MS } from "./ops/opsAlertMessage.js";
 import { createOpsAlertService } from "./ops/opsAlertService.js";
-import { createOpsAlertPushplusNotifier } from "./ops/opsAlertPushplusNotifier.js";
 import {
   claimIdempotency,
   completeIdempotency,
@@ -245,7 +245,6 @@ import {
   ASR_SETTING_KEY,
   createSecureSettingsRepository,
   DEEPSEEK_SETTING_KEY,
-  PUSHPLUS_SETTING_KEY,
 } from "./settings/repository.js";
 import { isValidSettingsEncryptionKey, maskSecret } from "./settings/secretBox.js";
 import {
@@ -255,7 +254,6 @@ import {
   serializeHospitalTenderSource,
 } from "./hospitalTender/sync.js";
 import { createInternalHospitalTenderRunner } from "./hospitalTender/internalRunner.js";
-import { createHospitalTenderNotifier } from "./hospitalTender/notifier.js";
 import { createHospitalTenderWeixinNotifier } from "./hospitalTender/weixinNotifier.js";
 import {
   partialSchema,
@@ -535,7 +533,26 @@ function validateWeixinOutboxAckPayload(value) {
 
 function weixinDeliveryReportFromHeaders(headers, expectedScope = null) {
   const rawStatus = headers["x-weixin-delivery-status"];
-  if (rawStatus === undefined) return { status: "not_ready", reason: "worker_status_missing" };
+  const rawExpiresAt = headers["x-weixin-delivery-expires-at"];
+  let expiresAt = null;
+  if (rawExpiresAt !== undefined) {
+    if (
+      typeof rawExpiresAt !== "string"
+      || rawExpiresAt !== rawExpiresAt.trim()
+      || !Number.isFinite(Date.parse(rawExpiresAt))
+      || new Date(Date.parse(rawExpiresAt)).toISOString() !== rawExpiresAt
+    ) {
+      validationFailure("X-Weixin-Delivery-Expires-At", "canonical_iso_utc");
+    }
+    expiresAt = rawExpiresAt;
+  }
+  if (rawStatus === undefined) {
+    return {
+      status: "not_ready",
+      reason: "worker_status_missing",
+      ...(expiresAt ? { expiresAt } : {}),
+    };
+  }
   if (typeof rawStatus !== "string" || !["ready", "not_ready"].includes(rawStatus)) {
     validationFailure("X-Weixin-Delivery-Status", "ready_or_not_ready");
   }
@@ -547,16 +564,31 @@ function weixinDeliveryReportFromHeaders(headers, expectedScope = null) {
   if (rawStatus === "ready") {
     const rawScope = headers["x-weixin-delivery-scope"];
     if (typeof expectedScope !== "string" || !expectedScope) {
-      return { status: "not_ready", reason: "configuration_incomplete" };
+      return {
+        status: "not_ready",
+        reason: "configuration_incomplete",
+        ...(expiresAt ? { expiresAt } : {}),
+      };
     }
-    if (rawScope === undefined) return { status: "not_ready", reason: "worker_scope_missing" };
+    if (rawScope === undefined) {
+      return {
+        status: "not_ready",
+        reason: "worker_scope_missing",
+        ...(expiresAt ? { expiresAt } : {}),
+      };
+    }
     if (typeof rawScope !== "string" || rawScope !== expectedScope) {
-      return { status: "not_ready", reason: "delivery_scope_mismatch" };
+      return {
+        status: "not_ready",
+        reason: "delivery_scope_mismatch",
+        ...(expiresAt ? { expiresAt } : {}),
+      };
     }
   }
   return {
     status: rawStatus,
     ...(rawStatus === "not_ready" ? { reason: rawReason ?? "status_unspecified" } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
   };
 }
 
@@ -1704,19 +1736,6 @@ function validateSecureSettingBody(value, { field, max = 500 } = {}) {
     validationFailure(field, "format");
   }
   return body[field].trim();
-}
-
-function pushplusDeliveryErrorCode(error) {
-  const code = String(error?.message ?? "notification_failed");
-  return new Set([
-    "notification unavailable",
-    "notification rejected",
-    "notification response invalid",
-    "notification content too large",
-    "notification batch too large",
-  ]).has(code)
-    ? code.replaceAll(" ", "_")
-    : "notification_failed";
 }
 
 function validationFailure(field, rule = "reference") {
@@ -3411,9 +3430,6 @@ export function createServer(options = {}) {
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
       : {}),
   });
-  const resolvePushplusToken = () => secureSettingsRepository
-    ? secureSettingsRepository.resolveSecret(PUSHPLUS_SETTING_KEY, config.hospitalTenderPushplusToken)
-    : config.hospitalTenderPushplusToken;
   const secureSettingMetadata = (key, fallback = "") => {
     const stored = secureSettingsRepository?.has(key) ?? false;
     if (stored) {
@@ -3449,35 +3465,19 @@ export function createServer(options = {}) {
       fallbackSuppressed: false,
     };
   };
-  const hospitalTenderPushplusNotifier = createHospitalTenderNotifier({
-        ...(secureSettingsRepository
-          ? { tokenProvider: resolvePushplusToken }
-          : { token: config.hospitalTenderPushplusToken }),
-        fetchImpl: options.fetchImpl ?? fetch,
-        onSuccess: ({ count, chunkCount }) => {
-          if (!secureSettingsRepository || !secureSettingsRepository.has(PUSHPLUS_SETTING_KEY)) return;
-          try {
-            secureSettingsRepository.recordDeliverySuccess(PUSHPLUS_SETTING_KEY, {
-              count,
-              chunkCount,
-            });
-          } catch {}
-        },
-        onFailure: ({ errorCode }) => {
-          if (!secureSettingsRepository || !secureSettingsRepository.has(PUSHPLUS_SETTING_KEY)) return;
-          try {
-            secureSettingsRepository.recordDeliveryFailure(PUSHPLUS_SETTING_KEY, { errorCode });
-          } catch {}
-        },
-      });
-  // WeChat "小小" push is the primary tender-notification channel. The
+  // WeChat "小小" is the only tender-notification channel. The
   // shortcut-bookkeeping runtime and outbox repository are declared later in
-  // this scope, so readiness and the notifier itself resolve lazily at call
-  // time; PushPlus remains only as a fallback while no WeChat binding is
-  // active.
+  // this scope, so readiness and the notifier itself resolve lazily at call time.
   const weixinDeliveryEnabled = () => {
     try {
       return Boolean(shortcutBookkeepingAssistantRuntime?.ready);
+    } catch {
+      return false;
+    }
+  };
+  const weixinTenderDeliveryBound = () => {
+    try {
+      return weixinBindingsRepository.listDigestTargets().length > 0;
     } catch {
       return false;
     }
@@ -3509,12 +3509,6 @@ export function createServer(options = {}) {
           (target) => weixinBindingsRepository.activeByAccount(target.account)?.digestEnabled === true,
         ),
         resolveCustomerOwners: resolveCustomerOwnersByIds,
-        pushplusNotify: async (batch) => {
-          if (!hospitalTenderPushplusNotifier || !resolvePushplusToken()) {
-            throw new Error("notification unavailable");
-          }
-          return hospitalTenderPushplusNotifier(batch);
-        },
         recordUnrouted: ({ count, cycleNumber }) => insertAudit(db, {
           action: "hospital_tender.push.unrouted",
           entityType: "hospital_tender_notice",
@@ -3530,16 +3524,10 @@ export function createServer(options = {}) {
   };
   const hospitalTenderNotifier = options.hospitalTenderNotifier !== undefined
     ? options.hospitalTenderNotifier
-    : async (batch) => {
-      if (weixinDeliveryEnabled()) return hospitalTenderWeixinNotify(batch);
-      if (hospitalTenderPushplusNotifier && resolvePushplusToken()) return hospitalTenderPushplusNotifier(batch);
-      throw new Error("notification unavailable");
-    };
+    : hospitalTenderWeixinNotify;
   const hospitalTenderNotificationState = () => ({
-    status: weixinDeliveryEnabled() || (hospitalTenderPushplusNotifier && resolvePushplusToken())
-      ? "enabled"
-      : "disabled",
-    provider: weixinDeliveryEnabled() ? "weixin" : "pushplus",
+    status: weixinTenderDeliveryBound() ? "enabled" : "disabled",
+    provider: "weixin",
   });
   const hospitalTenderScheduler = createHospitalTenderScheduler({
     db,
@@ -3552,11 +3540,9 @@ export function createServer(options = {}) {
     ).map(customerFromRow),
     notifier: hospitalTenderNotifier,
     onBatchCommitted: (payload) => enqueueProactiveTenderEvents(payload),
-    // The notifier is intentionally constructed once so a newly saved or
-    // cleared encrypted setting takes effect without restarting the scheduler.
-    // A missing/cleared token disables delivery while allowing collection and
-    // durable matching to continue normally.
-    notificationEnabled: () => weixinDeliveryEnabled() || Boolean(resolvePushplusToken()),
+    // Binding readiness, not provider context freshness, gates creation. Once
+    // bound, an expired context still retains messages in the durable outbox.
+    notificationEnabled: weixinTenderDeliveryBound,
     clock: options.hospitalTenderSchedulerClock ?? (() => new Date()),
     ...(options.hospitalTenderSchedulerIdFactory
       ? { idFactory: options.hospitalTenderSchedulerIdFactory }
@@ -3716,6 +3702,16 @@ export function createServer(options = {}) {
   });
 
   const assistantClock = options.assistantClock ?? options.now ?? (() => new Date());
+  const opsAlertClock = options.opsAlertClock ?? assistantClock;
+  if (typeof weixinConfirmationOutboxRepository.discardExpiredOpsAlerts === "function") {
+    const sweep = weixinConfirmationOutboxRepository.discardExpiredOpsAlerts({
+      maxQueueAgeMs: OPS_ALERT_MAX_QUEUE_AGE_MS,
+      now: opsAlertClock(),
+    });
+    if ((sweep?.discardedCount ?? 0) > 0) {
+      console.warn(`category=weixin_outbox stale_ops_alerts_discarded count=${sweep.discardedCount} cutoffAt=${sweep.cutoffAt}`);
+    }
+  }
   const proactiveClock = options.proactiveAssistantClock ?? assistantClock;
   const injectedProactiveAssistantWorker = options.proactiveAssistantWorker ?? null;
   const proactiveScanRepository = injectedProactiveAssistantWorker?.scanRepository
@@ -4191,16 +4187,11 @@ export function createServer(options = {}) {
   });
   const dailyDigestAutoRun = options.dailyDigestAutoRun ?? config.dailyDigestAutoRun;
   if (dailyDigestAutoRun && options.dailyDigestSchedulerEnabled !== false) dailyDigestScheduler.start();
-  const opsAlertPushplusNotifier = createOpsAlertPushplusNotifier({
-    tokenProvider: resolvePushplusToken,
-    fetchImpl: options.fetchImpl ?? fetch,
-  });
   const opsAlertService = options.opsAlertService ?? createOpsAlertService({
     outboxRepository: weixinConfirmationOutboxRepository,
-    // 告警非订阅内容：目标=active admin 绑定（无视 digest_enabled），无则 PushPlus 兜底。
+    // 告警非订阅内容：目标=active admin 绑定（无视 digest_enabled）。上下文
+    // 失效时照常入队；无绑定则端点返回 503。
     resolveDeliveries: () => weixinBindingsRepository.listAdminTargets(),
-    weixinDeliveryReady: weixinDeliveryEnabled,
-    pushplusNotify: opsAlertPushplusNotifier,
     recordAudit: ({ actor, requestId, entityId, metadata }) => insertAudit(db, {
       action: "ops_alert.receive",
       entityType: "ops_alert",
@@ -4211,7 +4202,7 @@ export function createServer(options = {}) {
       after: null,
       metadata,
     }),
-    clock: options.opsAlertClock ?? (() => new Date()),
+    clock: opsAlertClock,
   });
   const proactiveNotificationScheduler = options.proactiveNotificationScheduler
     ?? createProactiveNotificationScheduler({
@@ -4221,9 +4212,7 @@ export function createServer(options = {}) {
       outboxRepository: weixinConfirmationOutboxRepository,
       resolveDeliveries: () => weixinBindingsRepository.listDigestTargets(),
       // Proactive suggestions stay in the owner-scoped in-app inbox when the
-      // owner has no WeChat binding.  The existing PushPlus token is a global
-      // hospital-tender/ops channel and cannot be used to prove this user's
-      // delivery target, so it is deliberately not wired as a fallback here.
+      // owner has no WeChat binding; there is no global notification fallback.
       clock: options.proactiveNotificationClock ?? assistantClock,
       pollMs: options.proactiveNotificationPollMs ?? config.proactiveNotificationPollMs,
       quietStartHour: options.proactiveNotificationQuietStartHour ?? config.proactiveNotificationQuietStart.hour,
@@ -5875,10 +5864,6 @@ export function createServer(options = {}) {
         try {
           item = {
             deepseek: secureSettingMetadata(DEEPSEEK_SETTING_KEY, config.modelApiKey),
-            pushplus: secureSettingMetadata(
-              PUSHPLUS_SETTING_KEY,
-              config.hospitalTenderPushplusToken,
-            ),
             asr: secureSettingMetadata(ASR_SETTING_KEY),
           };
         } catch {
@@ -6002,120 +5987,6 @@ export function createServer(options = {}) {
           return cleared;
         });
         sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      if (
-        (request.method === "PUT" || request.method === "POST")
-        && (url.pathname === "/api/settings/pushplus-token" || url.pathname === "/api/settings/pushplus")
-      ) {
-        requireAdminRole(db, request);
-        const value = validateSecureSettingBody(await readJson(request), { field: "token", max: 512 });
-        const repository = requireSecureSettings(secureSettingsRepository);
-        const item = withImmediateTransaction(db, () => {
-          const saved = repository.setSecret(PUSHPLUS_SETTING_KEY, value);
-          insertAudit(db, {
-            action: "settings.pushplus_token.save",
-            entityType: "secure_setting",
-            entityId: PUSHPLUS_SETTING_KEY,
-            actor: request.authContext.account,
-            requestId,
-            before: null,
-            after: {
-              status: saved.status,
-              masked: saved.masked,
-              updatedAt: saved.updatedAt,
-            },
-            metadata: { setting: PUSHPLUS_SETTING_KEY },
-          });
-          return saved;
-        });
-        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      if (
-        request.method === "DELETE"
-        && (url.pathname === "/api/settings/pushplus-token" || url.pathname === "/api/settings/pushplus")
-      ) {
-        requireAdminRole(db, request);
-        const confirmation = validateSecureSettingBody(
-          await readJson(request),
-          { field: "confirmation", max: 32 },
-        );
-        if (confirmation !== "CLEAR") {
-          throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear the PushPlus token");
-        }
-        const repository = requireSecureSettings(secureSettingsRepository);
-        const item = withImmediateTransaction(db, () => {
-          const cleared = repository.clearSecret(PUSHPLUS_SETTING_KEY);
-          insertAudit(db, {
-            action: "settings.pushplus_token.clear",
-            entityType: "secure_setting",
-            entityId: PUSHPLUS_SETTING_KEY,
-            actor: request.authContext.account,
-            requestId,
-            before: null,
-            after: { status: cleared.status, updatedAt: cleared.updatedAt },
-            metadata: { setting: PUSHPLUS_SETTING_KEY, confirmation: "provided" },
-          });
-          return cleared;
-        });
-        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
-        return;
-      }
-
-      if (request.method === "POST" && url.pathname === "/api/settings/pushplus/test") {
-        requireAdminRole(db, request);
-        await validateEmptyBody(request);
-        const repository = requireSecureSettings(secureSettingsRepository);
-        if (!resolvePushplusToken()) {
-          throw new HttpError(409, "PUSHPLUS_NOT_CONFIGURED", "PushPlus Token 尚未配置");
-        }
-        if (typeof hospitalTenderNotifier !== "function") {
-          throw new HttpError(503, "PUSHPLUS_UNAVAILABLE", "PushPlus 通知服务暂不可用");
-        }
-        try {
-          const count = await hospitalTenderNotifier({
-            cycleNumber: 0,
-            batchCustomerIds: [],
-            notices: [{
-              title: "森特智行测试通知",
-              sourceName: "系统配置",
-              publishedAt: new Date().toISOString(),
-            }],
-          });
-          insertAudit(db, {
-            action: "settings.pushplus_token.test",
-            entityType: "secure_setting",
-            entityId: PUSHPLUS_SETTING_KEY,
-            actor: request.authContext.account,
-            requestId,
-            before: null,
-            after: { status: "sent", notificationCount: count },
-            metadata: { setting: PUSHPLUS_SETTING_KEY },
-          });
-          sendJson(response, 200, {
-            item: {
-              status: "sent",
-              notificationCount: count,
-              testedAt: new Date().toISOString(),
-            },
-          }, { "Cache-Control": "no-store" });
-        } catch (error) {
-          const errorCode = pushplusDeliveryErrorCode(error);
-          insertAudit(db, {
-            action: "settings.pushplus_token.test_failed",
-            entityType: "secure_setting",
-            entityId: PUSHPLUS_SETTING_KEY,
-            actor: request.authContext.account,
-            requestId,
-            before: null,
-            after: { status: "failed", errorCode },
-            metadata: { setting: PUSHPLUS_SETTING_KEY },
-          });
-          throw new HttpError(502, "PUSHPLUS_TEST_FAILED", "PushPlus 测试通知失败，请检查 Token 或稍后重试");
-        }
         return;
       }
 

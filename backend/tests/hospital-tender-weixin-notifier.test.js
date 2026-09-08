@@ -127,7 +127,7 @@ describe("hospital tender weixin notifier", () => {
     });
   });
 
-  it("falls back for unrouted notices: admin binding, then PushPlus, then the unrouted audit", async () => {
+  it("routes unrouted notices to an admin binding or records a bounded audit", async () => {
     // admin 兜底。
     await withOutbox(async ({ db, outboxRepository }) => {
       const notify = createHospitalTenderWeixinNotifier({
@@ -142,22 +142,7 @@ describe("hospital tender weixin notifier", () => {
       assert.equal(rows[0].owner, "jiangjz");
       assert.equal(rows[0].conversation_id, "conversation-admin");
     });
-    // PushPlus 兜底。
-    await withOutbox(async ({ db, outboxRepository }) => {
-      const pushed = [];
-      const notify = createHospitalTenderWeixinNotifier({
-        outboxRepository,
-        resolveDigestDeliveries: () => [],
-        resolveAdminDeliveries: () => [],
-        resolveCustomerOwners: () => new Map(),
-        pushplusNotify: async (batch) => { pushed.push(batch); },
-      });
-      assert.equal(await notify({ cycleNumber: 4, batchCustomerIds: ["c1"], notices: [notice(1)] }), 1);
-      assert.equal(queuedRows(db).length, 0);
-      assert.equal(pushed.length, 1);
-      assert.equal(pushed[0].notices.length, 1);
-    });
-    // 审计计数后视为已处理。
+    // 无任何绑定时只记录审计，公告仍在主库可见，由后续人工处理。
     await withOutbox(async ({ db, outboxRepository }) => {
       const unrouted = [];
       const notify = createHospitalTenderWeixinNotifier({
@@ -167,9 +152,9 @@ describe("hospital tender weixin notifier", () => {
         resolveCustomerOwners: () => new Map(),
         recordUnrouted: (event) => unrouted.push(event),
       });
-      assert.equal(await notify({ cycleNumber: 5, batchCustomerIds: ["c1"], notices: [notice(1), notice(2)] }), 2);
+      assert.equal(await notify({ cycleNumber: 4, batchCustomerIds: ["c1"], notices: [notice(1), notice(2)] }), 2);
       assert.equal(queuedRows(db).length, 0);
-      assert.deepEqual(unrouted, [{ count: 2, cycleNumber: 5 }]);
+      assert.deepEqual(unrouted, [{ count: 2, cycleNumber: 4 }]);
     });
   });
 

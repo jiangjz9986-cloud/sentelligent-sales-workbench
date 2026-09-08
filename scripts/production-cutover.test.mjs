@@ -401,6 +401,24 @@ describe("controlled production cutover", () => {
     }
   });
 
+  it("pins the WeChat session directory to the worker-owned production path", () => {
+    for (const candidate of [
+      `${projectRoot}/other-session`,
+      "/home/sentelligent",
+    ]) {
+      const args = validArguments.map((argument) =>
+        argument.startsWith("--weixin-session-dir=")
+          ? `--weixin-session-dir=${candidate}`
+          : argument,
+      );
+      const result = runBash([toBashPath(scriptPath), ...args]);
+
+      assert.notEqual(result.status, 0, `${candidate} must fail`);
+      assert.match(outputOf(result), /worker-owned production path/i);
+      assert.doesNotMatch(outputOf(result), /systemctl/i);
+    }
+  });
+
   it("fails when any protected service PID changes", () => {
     const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-protected-"));
     const beforePath = join(root, "before.tsv");
@@ -1144,6 +1162,7 @@ printf 'EnvironmentFile=%s\\n' "$value"
       /PRAGMA foreign_key_check/,
       /tar -czf "\$WEIXIN_BACKUP"/,
       /tar -tzf "\$WEIXIN_BACKUP"/,
+      /restore_weixin_session_backup/,
       /systemd-analyze verify/,
       /mv -Tf "\$CURRENT_TEMPORARY" "\$CURRENT_LINK"/,
       /rollback_cutover\(\)/,
@@ -1164,11 +1183,54 @@ printf 'EnvironmentFile=%s\\n' "$value"
       source,
       /atomic_replace_file "\$FRONTEND_ENV_BACKUP" "\$FRONTEND_ENV" rollback/,
     );
+    assert.match(source, /weixin-session-candidate-failed/);
+    assert.match(source, /CUTOVER_WEIXIN_RESTORED/);
     assert.match(source, /current_target="\$\(readlink -f "\$CURRENT_LINK"/);
     assert.match(
       source,
       /if \[\[ "\$current_target" != "\$OLD_RELEASE" \]\]/,
     );
+  });
+
+  it("restores the verified WeChat session backup before rollback restarts the worker", () => {
+    const root = mkdtempSync(join(tmpdir(), "sent-zx-cutover-weixin-restore-"));
+    const session = join(root, "weixin-session");
+    const backup = join(root, "backups");
+    try {
+      mkdirSync(session, { recursive: true });
+      mkdirSync(backup, { recursive: true });
+      writeFileSync(join(session, "context.json"), "before\n", "utf8");
+
+      const result = runBash([
+        "-c",
+        [
+          'source "$1"',
+          "WEIXIN_SESSION_DIR=$2",
+          "RUN_BACKUP_DIR=$3",
+          "backup_weixin_session",
+          'printf "after\\n" > "$WEIXIN_SESSION_DIR/context.json"',
+          'printf "candidate\\n" > "$WEIXIN_SESSION_DIR/candidate.txt"',
+          "restore_weixin_session_backup",
+        ].join("\n"),
+        "production-cutover-test",
+        toBashPath(scriptPath),
+        toBashPath(session),
+        toBashPath(backup),
+      ]);
+
+      assert.equal(result.status, 0, outputOf(result));
+      assert.equal(readFileSync(join(session, "context.json"), "utf8"), "before\n");
+      assert.equal(
+        readFileSync(join(backup, "weixin-session-candidate-failed", "context.json"), "utf8"),
+        "after\n",
+      );
+      assert.equal(
+        readFileSync(join(backup, "weixin-session-candidate-failed", "candidate.txt"), "utf8"),
+        "candidate\n",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("contains no embedded release version, commit, host, or credential", () => {

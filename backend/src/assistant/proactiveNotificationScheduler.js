@@ -26,16 +26,10 @@ export function createProactiveNotificationScheduler({
   db = null,
   suggestionRepository, notificationRepository, outboxRepository,
   resolveDeliveries = () => [],
-  // A PushPlus sender is only accepted when the caller resolves a sender for
-  // this exact owner.  The old global `pushplusNotify`/`pushplusReady` pair is
-  // intentionally not supported here: a single global token cannot prove
-  // which account should receive a proactive suggestion.
-  resolvePushplusDelivery = null,
   clock = () => new Date(), pollMs = 60_000, quietStartHour = 22, quietStartMinute = 0, quietEndHour = 8, quietEndMinute = 0,
   hourlyLimit = 3, dailyLimit = 12, batchLimit = 20,
 } = {}) {
   if (!suggestionRepository?.list || !notificationRepository?.ensure || !outboxRepository?.enqueue) throw new TypeError("repositories are required");
-  if (resolvePushplusDelivery !== null && typeof resolvePushplusDelivery !== "function") throw new TypeError("resolvePushplusDelivery must be a function");
   if (![quietStartHour, quietEndHour].every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 23)
     || ![quietStartMinute, quietEndMinute].every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 59)) throw new TypeError("quiet hours are invalid");
   if (![hourlyLimit, dailyLimit, batchLimit, pollMs].every((value) => Number.isSafeInteger(value) && value > 0)) throw new TypeError("notification limits are invalid");
@@ -84,7 +78,6 @@ export function createProactiveNotificationScheduler({
   }
   async function runTick() {
     notificationRepository.syncOutbox();
-    notificationRepository.recoverStalePushplus?.();
     // Discover all owners from pending proactive rows without widening content scope.
     const owners = suggestionRepository.listOwners?.() ?? [];
     for (const owner of owners) {
@@ -103,23 +96,7 @@ export function createProactiveNotificationScheduler({
         failed += 1; continue;
       }
       const delivery = resolveDeliveries().find((target) => target.account === item.owner);
-      let pushplus = null;
-      if (!delivery && resolvePushplusDelivery) {
-        try {
-          const resolved = resolvePushplusDelivery({ owner: item.owner });
-          if (resolved && typeof resolved.notify === "function"
-            && (resolved.ready === undefined || resolved.ready() === true)) {
-            pushplus = resolved;
-          }
-        } catch {
-          // A sender resolver is an optional, owner-scoped integration.  A
-          // resolver failure must leave the durable in-app notification intact
-          // rather than widening delivery to a global token.
-          pushplus = null;
-        }
-      }
-      const canPushplus = !delivery && Boolean(pushplus);
-      if (!delivery && !canPushplus) {
+      if (!delivery) {
         // The durable row itself is the in-app delivery. It is immediate and
         // is not throttled by external-channel quiet hours or rate limits.
         notificationRepository.setDelivery(item.id, { owner: item.owner, channel: "in_app", status: "sent" });
@@ -154,17 +131,6 @@ export function createProactiveNotificationScheduler({
           queued += 1;
         } catch {
           const state = notificationRepository.recordFailure(item.id, { owner: item.owner, channel: "weixin", errorCode: "WEIXIN_OUTBOX_FAILED" });
-          if (state.status === "failed") failed += 1; else deferred += 1;
-        }
-      } else if (canPushplus) {
-        try {
-          notificationRepository.setDelivery(item.id, { owner: item.owner, channel: "pushplus", status: "processing" });
-          await pushplus.notify({ title: `主动建议：${payload.title}`, content: `${payload.summary}\n建议编号：${payload.suggestionId}` });
-          notificationRepository.setDelivery(item.id, { owner: item.owner, channel: "pushplus", status: "sent" });
-          sent += 1;
-          externalSent += 1;
-        } catch {
-          const state = notificationRepository.recordFailure(item.id, { owner: item.owner, channel: "pushplus", errorCode: "PUSHPLUS_SEND_FAILED" });
           if (state.status === "failed") failed += 1; else deferred += 1;
         }
       }

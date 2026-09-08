@@ -82,7 +82,7 @@ cp .env.example .env
 - `HOSPITAL_TENDER_AUTO_RUN`: 是否启动自动轮巡；生产默认开启，开发默认关闭。
 - `HOSPITAL_TENDER_INTERVAL_MINUTES`: 自动轮巡间隔，默认 `60` 分钟。
 - `HOSPITAL_TENDER_BATCH_SIZE`: 每次匹配客户数量，默认 `10`；批次游标和未完成快照保存在 SQLite 中，服务重启后继续。
-- `HOSPITAL_TENDER_PUSHPLUS_TOKEN`: 开发环境可选，仅由后端读取，用于把本批新增高相关公告聚合推送到 PushPlus；缺省时仍采集但通知状态为 `disabled`，不会传给 Python 采集器、前端或 SQLite。生产自动轮巡 preflight 会要求专用的强 Token。
+- 医院招标通知不再读取或发送到 PushPlus；有活动微信绑定时统一写入 WeChat Clawbot durable outbox，无绑定时继续采集和入库并报告通知未启用。
 - `SETTINGS_ENCRYPTION_KEY`: 配置页密钥库的 32 字节 base64url 主密钥；只放在后端环境文件或进程环境，不进入 SQLite、前端或 Git。未配置时系统配置 API fail-closed。
 
 Model mode example:
@@ -95,9 +95,9 @@ AI_ANALYSIS_MODE=model npm start
 
 ## System settings security boundary
 
-登录后的 `/settings/config` 页面通过 `/api/settings/security` 查看 iCost、DeepSeek 和 PushPlus 的非敏感状态。`POST /api/settings/icost-token/rotate` 生成的 iCost 令牌只在该次成功响应出现一次；后续响应仅包含掩码、时间和状态。DeepSeek API Key 与 PushPlus Token 只能由服务端接收、使用 AES-256-GCM 信封加密后保存，普通 API 和前端永远不能读取明文；替换不会回显旧值，清除要求请求体提供精确的 `confirmation: "CLEAR"`。PushPlus 可通过 `PUT /api/settings/pushplus-token` 设置或替换、`DELETE /api/settings/pushplus-token` 清除，并通过 `POST /api/settings/pushplus/test` 发送一条不含客户数据的测试通知。配置页保存的 PushPlus 值会覆盖部署环境中的旧兼容值；清除会显式停用该兼容回退。
+登录后的 `/settings/config` 页面通过 `/api/settings/security` 查看 DeepSeek、ASR 和微信 Clawbot 的非敏感状态。`POST /api/settings/icost-token/rotate` 生成的 iCost 令牌只在该次成功响应出现一次；后续响应仅包含掩码、时间和状态。DeepSeek API Key 与其他仍支持的服务端密钥只能由服务端接收、使用 AES-256-GCM 信封加密后保存，普通 API 和前端永远不能读取明文。PushPlus 设置接口已退役并返回 404；历史 `secure_settings` 行仅保留用于迁移兼容，不会被读取用于新投递。
 
-SQLite 的 `secure_settings` 表只保存版本化密文和时间元数据。解密主密钥由 `SETTINGS_ENCRYPTION_KEY` 提供，服务启动时不把它写入数据库；若主密钥缺失或格式不正确，配置读写接口返回 `503 SECURE_SETTINGS_NOT_CONFIGURED`，不会退回到明文数据库字段。运行时模型、iCost webhook 和医院招标 PushPlus notifier 每次从服务端密钥库读取；配置页的显式清除会抑制同名部署环境回退。令牌/Key 不进入审计快照、错误正文、HTML 或 `localStorage`。PushPlus 最近成功/失败时间、发送条数和安全错误码只保存为元数据。
+SQLite 的 `secure_settings` 表只保存版本化密文和时间元数据。解密主密钥由 `SETTINGS_ENCRYPTION_KEY` 提供，服务启动时不把它写入数据库；若主密钥缺失或格式不正确，配置读写接口返回 `503 SECURE_SETTINGS_NOT_CONFIGURED`，不会退回到明文数据库字段。运行时模型、iCost webhook 和微信 Clawbot 投递边界从受保护配置与绑定表读取；令牌/Key 不进入审计快照、错误正文、HTML 或 `localStorage`。微信上下文过期不会删除 durable outbox 消息；真实入站消息恢复上下文后，worker 逐条按约 1 秒间隔释放积压。
 
 如果后端 `.env` 未配置 `DEEPSEEK_API_KEY`，快速记录分析会返回 `source=mock_missing_model_key` 的确定性分析结果，周报和方案草稿会安全降级到本地确定性草稿，前端流程不受影响。
 

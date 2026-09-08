@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { renderOpsAlertMessage } from "../src/ops/opsAlertMessage.js";
+import {
+  OPS_ALERT_MAX_QUEUE_AGE_MS,
+  renderOpsAlertMessage,
+  renderOpsAlertOutboxMessage,
+} from "../src/ops/opsAlertMessage.js";
 
 function payload(overrides = {}) {
   return {
@@ -49,5 +53,28 @@ describe("ops alert WeChat card renderer", () => {
     assert.throws(() => renderOpsAlertMessage(payload({ summary: "" })), TypeError);
     assert.throws(() => renderOpsAlertMessage(payload({ summary: "x".repeat(301) })), TypeError);
     assert.throws(() => renderOpsAlertMessage(payload({ occurredAt: "not-a-date" })), TypeError);
+  });
+
+  it("renders only while the queued alert remains actionable", () => {
+    const createdAt = "2026-08-29T01:00:00.000Z";
+    const outboxItem = { createdAt, payload: payload() };
+    const message = renderOpsAlertOutboxMessage(outboxItem, {
+      clock: () => new Date(Date.parse(createdAt) + OPS_ALERT_MAX_QUEUE_AGE_MS),
+    });
+    assert.match(message, /小小运维告警/u);
+  });
+
+  it("marks an alert older than the queue TTL as lifecycle-stale", () => {
+    const createdAt = "2026-08-29T01:00:00.000Z";
+    assert.throws(
+      () => renderOpsAlertOutboxMessage({ createdAt, payload: payload() }, {
+        clock: () => new Date(Date.parse(createdAt) + OPS_ALERT_MAX_QUEUE_AGE_MS + 1),
+      }),
+      (error) => error?.code === "WEIXIN_OUTBOX_STALE",
+    );
+    assert.throws(
+      () => renderOpsAlertOutboxMessage({ createdAt: "invalid", payload: payload() }),
+      TypeError,
+    );
   });
 });

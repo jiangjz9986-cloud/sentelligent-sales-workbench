@@ -79,6 +79,8 @@ frontend_config_backup_ready=0
 frontend_config_install_started=0
 current_switched=0
 protected_snapshot_ready=0
+weixin_backup_ready=0
+weixin_session_restored=0
 cutover_complete=0
 
 usage() {
@@ -307,12 +309,8 @@ validate_arguments() {
   validate_controlled_output_path "$BACKUP_DIR" "$PROJECT_ROOT/backups" "Backup directory"
   validate_controlled_output_path "$EVIDENCE_DIR" "$PROJECT_ROOT/evidence" "Evidence directory"
   validate_plain_absolute_path "$WEIXIN_SESSION_DIR" "WeChat session directory"
-  [[ "$WEIXIN_SESSION_DIR" == "$PROJECT_ROOT/"* ]] ||
-    fail "WeChat session directory must remain under the project root"
-  [[ "$WEIXIN_SESSION_DIR" != "$RELEASES_ROOT/"* &&
-    "$WEIXIN_SESSION_DIR" != "$CURRENT_LINK" &&
-    "$WEIXIN_SESSION_DIR" != "$CURRENT_LINK/"* ]] ||
-    fail "WeChat session directory cannot be release-owned"
+  [[ "$WEIXIN_SESSION_DIR" == "$PROJECT_ROOT/weixin-session" ]] ||
+    fail "WeChat session directory must match the worker-owned production path"
   validate_state_path_isolation
   validate_plain_absolute_path "$NODE_BIN" "Node executable"
   [[ "$NODE_BIN" == "$PROJECT_ROOT/runtime/"* ]] ||
@@ -1044,6 +1042,51 @@ backup_weixin_session() {
   tar -tzf "$WEIXIN_BACKUP" >/dev/null
   WEIXIN_BACKUP_SHA="$(sha256_file "$WEIXIN_BACKUP")"
   [[ "$WEIXIN_BACKUP_SHA" =~ ^[0-9a-f]{64}$ ]] || fail "WeChat backup hash failed"
+  weixin_backup_ready=1
+}
+
+restore_weixin_session_backup() {
+  local directory_name restore_root restored_dir quarantine actual_sha
+  [[ "$weixin_backup_ready" -eq 1 ]] || fail "WeChat session backup is not ready"
+  [[ -f "$WEIXIN_BACKUP" && ! -L "$WEIXIN_BACKUP" ]] ||
+    fail "WeChat session backup is unavailable"
+  actual_sha="$(sha256_file "$WEIXIN_BACKUP")"
+  [[ "$actual_sha" == "$WEIXIN_BACKUP_SHA" ]] ||
+    fail "WeChat session backup SHA-256 changed before rollback"
+  tar -tzf "$WEIXIN_BACKUP" >/dev/null
+
+  directory_name="$(basename "$WEIXIN_SESSION_DIR")"
+  restore_root="$RUN_BACKUP_DIR/weixin-session-rollback-restore"
+  restored_dir="$restore_root/$directory_name"
+  quarantine="$RUN_BACKUP_DIR/weixin-session-candidate-failed"
+  [[ ! -e "$restore_root" && ! -L "$restore_root" ]] ||
+    fail "WeChat rollback restore directory already exists"
+  [[ ! -e "$quarantine" && ! -L "$quarantine" ]] ||
+    fail "WeChat candidate-state quarantine already exists"
+
+  mkdir -m 0700 "$restore_root"
+  tar -xzf "$WEIXIN_BACKUP" -C "$restore_root"
+  [[ -d "$restored_dir" && ! -L "$restored_dir" ]] ||
+    fail "WeChat rollback archive did not restore the expected directory"
+  if find "$restore_root" -mindepth 1 -maxdepth 1 ! -name "$directory_name" -print -quit |
+    grep -q .; then
+    fail "WeChat rollback archive contains an unexpected top-level entry"
+  fi
+
+  if [[ -e "$WEIXIN_SESSION_DIR" || -L "$WEIXIN_SESSION_DIR" ]]; then
+    mv -- "$WEIXIN_SESSION_DIR" "$quarantine"
+  fi
+  if ! mv -- "$restored_dir" "$WEIXIN_SESSION_DIR"; then
+    if [[ -e "$quarantine" || -L "$quarantine" ]]; then
+      mv -- "$quarantine" "$WEIXIN_SESSION_DIR" || true
+    fi
+    fail "WeChat rollback session replacement failed"
+    return 1
+  fi
+  rmdir "$restore_root"
+  [[ -d "$WEIXIN_SESSION_DIR" && ! -L "$WEIXIN_SESSION_DIR" ]] ||
+    fail "Restored WeChat session directory is not a regular directory"
+  weixin_session_restored=1
 }
 
 verify_sqlite_integrity() {
@@ -1246,6 +1289,7 @@ write_evidence() {
   CUTOVER_EXPECTED_COMMIT="$EXPECTED_COMMIT" CUTOVER_DATABASE="$DATABASE_PATH" \
   CUTOVER_FINAL_BACKUP="$FINAL_BACKUP" CUTOVER_FINAL_BACKUP_SHA="$FINAL_BACKUP_SHA" \
   CUTOVER_WEIXIN_BACKUP="$WEIXIN_BACKUP" CUTOVER_WEIXIN_BACKUP_SHA="$WEIXIN_BACKUP_SHA" \
+  CUTOVER_WEIXIN_RESTORED="$weixin_session_restored" \
   CUTOVER_PROTECTED_BEFORE="$PROTECTED_BEFORE" \
   CUTOVER_PROTECTED_BEFORE_SHA="$PROTECTED_BEFORE_SHA" \
   CUTOVER_PROTECTED_AFTER="$PROTECTED_AFTER" \
@@ -1280,6 +1324,7 @@ write_evidence() {
         weixinSession: {
           backup: optional(process.env.CUTOVER_WEIXIN_BACKUP),
           backupSha256: optional(process.env.CUTOVER_WEIXIN_BACKUP_SHA),
+          restoredOnRollback: process.env.CUTOVER_WEIXIN_RESTORED === "1",
         },
         protectedState: {
           before: optional(process.env.CUTOVER_PROTECTED_BEFORE),
@@ -1300,6 +1345,7 @@ rollback_cutover() {
   local observed_status=$?
   local exit_code=${1:-$observed_status}
   local rollback_failed=0
+  local weixin_restore_failed=0
   local service
   FAILURE_LINE=${BASH_LINENO[0]:-0}
   trap - ERR HUP INT TERM
@@ -1347,15 +1393,24 @@ rollback_cutover() {
     fi
   fi
 
+  if [[ "$mutation_started" -eq 1 && "$weixin_backup_ready" -eq 1 ]]; then
+    if ! restore_weixin_session_backup; then
+      rollback_failed=1
+      weixin_restore_failed=1
+    fi
+  fi
+
   if [[ "$mutation_started" -eq 1 ]]; then
     systemctl_mutate restart sentelligent-backend.service || rollback_failed=1
     wait_for_url "http://127.0.0.1:8897/api/health" 80 || rollback_failed=1
     systemctl_mutate restart sentelligent-frontend.service || rollback_failed=1
     wait_for_url "http://127.0.0.1:8088/_health" 80 || rollback_failed=1
     assert_frontend_release_health "$OLD_RELEASE" || rollback_failed=1
-    systemctl_mutate restart sentelligent-weixin-agent.service || rollback_failed=1
-    sleep 1
-    assert_project_services_ready "$OLD_RELEASE" || rollback_failed=1
+    if [[ "$weixin_restore_failed" -eq 0 ]]; then
+      systemctl_mutate restart sentelligent-weixin-agent.service || rollback_failed=1
+      sleep 1
+      assert_project_services_ready "$OLD_RELEASE" || rollback_failed=1
+    fi
   fi
 
   if [[ "$protected_snapshot_ready" -eq 1 ]]; then

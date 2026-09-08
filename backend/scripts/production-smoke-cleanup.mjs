@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 
 import { openDatabase, resolveDatabasePath } from "../src/db.js";
@@ -19,6 +19,21 @@ const CREATED_ID_KEYS = Object.freeze([
   "itineraries",
   "weeklyReports",
   "auditLogs",
+]);
+const DERIVED_ID_KEYS = Object.freeze([
+  "proactiveSuggestions",
+  "proactiveNotifications",
+  "weixinConfirmationOutbox",
+]);
+const OWNED_ID_KEYS = Object.freeze([...CREATED_ID_KEYS, ...DERIVED_ID_KEYS]);
+const PROACTIVE_NOTIFICATION_PAYLOAD_KEYS = Object.freeze([
+  "kind",
+  "priority",
+  "status",
+  "suggestionId",
+  "summary",
+  "title",
+  "trigger",
 ]);
 
 function assertInputs({
@@ -75,6 +90,10 @@ function sessionHash(secret, cookie) {
   return createHmac("sha256", secret)
     .update(`session-store:v1:${cookie}`)
     .digest("base64url");
+}
+
+function sha256(value) {
+  return createHash("sha256").update(String(value), "utf8").digest("hex");
 }
 
 function normalizeCreatedIds(value) {
@@ -200,9 +219,147 @@ function containsMarker(row, fields, marker) {
   return fields.some((field) => String(row[field] ?? "").includes(marker));
 }
 
+function parseJson(value, fallback = null) {
+  if (typeof value !== "string" || !value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function sourceRefsBindToSmokeParents(row, customerIds, opportunityIds) {
+  const sources = [row.source_refs, row.proactive_source_refs];
+  let customerBound = false;
+  let opportunityBound = !row.proactive_opportunity_id;
+
+  for (const source of sources) {
+    const refs = parseJson(source);
+    if (!Array.isArray(refs)) return false;
+    for (const ref of refs) {
+      if (!ref || typeof ref !== "object" || Array.isArray(ref)) continue;
+      const type = String(ref.type ?? "");
+      const id = String(ref.id ?? "");
+      if (type === "customer") {
+        if (!customerIds.has(id)) return false;
+        if (id === String(row.proactive_customer_id ?? "")) customerBound = true;
+      }
+      if (type === "opportunity") {
+        if (!opportunityIds.has(id)) return false;
+        if (id === String(row.proactive_opportunity_id ?? "")) opportunityBound = true;
+      }
+    }
+  }
+
+  return customerBound && opportunityBound;
+}
+
+function proactiveSuggestionReferencesSmokeParent(row, customerIds, opportunityIds) {
+  return customerIds.has(String(row.proactive_customer_id ?? ""))
+    || opportunityIds.has(String(row.proactive_opportunity_id ?? ""))
+    || (
+      row.proactive_subject_type === "customer"
+      && customerIds.has(String(row.proactive_subject_id ?? ""))
+    )
+    || (
+      row.proactive_subject_type === "opportunity"
+      && opportunityIds.has(String(row.proactive_subject_id ?? ""))
+    );
+}
+
+function isSmokeProactiveSuggestion(row, { marker, account, customerIds, opportunityIds }) {
+  const customerId = String(row.proactive_customer_id ?? "");
+  const opportunityId = String(row.proactive_opportunity_id ?? "");
+  const subjectId = String(row.proactive_subject_id ?? "");
+  if (
+    row.owner !== account
+    || !row.proactive_trigger
+    || !customerIds.has(customerId)
+    || (opportunityId && !opportunityIds.has(opportunityId))
+    || String(row.source_id ?? "") !== subjectId
+    || !containsMarker(
+      row,
+      ["title", "content", "draft_content", "source_refs", "confirmation_preview", "proactive_source_refs"],
+      marker,
+    )
+    || !sourceRefsBindToSmokeParents(row, customerIds, opportunityIds)
+  ) {
+    return false;
+  }
+
+  if (row.proactive_subject_type === "customer") {
+    return subjectId === customerId
+      && row.proactive_subject_key === `customer:${account}:${customerId}`;
+  }
+  if (row.proactive_subject_type === "opportunity") {
+    return Boolean(opportunityId)
+      && subjectId === opportunityId
+      && !row.proactive_subject_key;
+  }
+  return false;
+}
+
+function isSmokeProactiveNotification(row, suggestionRows, { marker, account }) {
+  const suggestion = suggestionRows.get(String(row.suggestion_id ?? ""));
+  const suggestionVersion = Number(row.suggestion_version);
+  return Boolean(suggestion)
+    && row.owner === account
+    && Number.isSafeInteger(suggestionVersion)
+    && suggestionVersion >= 1
+    && suggestionVersion <= Number(suggestion.version)
+    && row.trigger === suggestion.proactive_trigger
+    && row.title === row.summary
+    && containsMarker(row, ["title", "summary"], marker);
+}
+
+function proactiveOutboxNotification(row, notificationRows, suggestionRows, { marker, account }) {
+  if (row.owner !== account || sha256(row.payload_json) !== row.payload_hash) return null;
+  const payload = parseJson(row.payload_json);
+  if (
+    !payload
+    || typeof payload !== "object"
+    || Array.isArray(payload)
+    || JSON.stringify(Object.keys(payload).sort())
+      !== JSON.stringify([...PROACTIVE_NOTIFICATION_PAYLOAD_KEYS].sort())
+    || payload.kind !== "proactive_suggestion"
+    || payload.status !== "pending"
+    || payload.title !== payload.summary
+    || !String(payload.title ?? "").includes(marker)
+  ) {
+    return null;
+  }
+
+  const suggestion = suggestionRows.get(String(payload.suggestionId ?? ""));
+  if (!suggestion || payload.trigger !== suggestion.proactive_trigger) return null;
+  const matches = notificationRows.filter((notification) => (
+    notification.owner === account
+    && notification.channel === "weixin"
+    && notification.suggestion_id === suggestion.id
+    && notification.title === payload.title
+    && notification.summary === payload.summary
+    && notification.trigger === payload.trigger
+    && Number(notification.priority) === Number(payload.priority)
+    && sha256(
+      `proactive-suggestion:${notification.suggestion_id}:v${notification.suggestion_version}`,
+    ) === row.idempotency_key_hash
+    && (!notification.outbox_id || notification.outbox_id === row.id)
+  ));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function isSmokeProactiveSubject(row, { marker, account, customerIds }) {
+  const customerId = String(row.customer_id ?? "");
+  return row.owner === account
+    && row.subject_type === "customer"
+    && row.subject_id === customerId
+    && customerIds.has(customerId)
+    && row.subject_key === `customer:${account}:${customerId}`
+    && String(row.source_refs_json ?? "").includes(marker);
+}
+
 function discoverSmokeOwnedIds(db, owned, { marker, runLabel, account }) {
   const discovered = Object.fromEntries(
-    CREATED_ID_KEYS.map((key) => [key, new Set(owned[key])]),
+    OWNED_ID_KEYS.map((key) => [key, new Set(owned[key] ?? [])]),
   );
   const addMatching = (key, rows, predicate) => {
     for (const row of rows) {
@@ -275,6 +432,44 @@ function discoverSmokeOwnedIds(db, owned, { marker, runLabel, account }) {
     (row) => row.owner === runLabel || containsMarker(row, ["content", "source_refs"], marker),
   );
 
+  const customerIds = discovered.customers;
+  const opportunityIds = discovered.opportunities;
+  const proactiveSuggestionRows = db.prepare(`
+    SELECT * FROM ai_suggestions WHERE proactive_trigger IS NOT NULL
+  `).all();
+  addMatching(
+    "proactiveSuggestions",
+    proactiveSuggestionRows,
+    (row) => isSmokeProactiveSuggestion(row, {
+      marker,
+      account,
+      customerIds,
+      opportunityIds,
+    }),
+  );
+  const ownedSuggestionRows = new Map(proactiveSuggestionRows
+    .filter((row) => discovered.proactiveSuggestions.has(String(row.id)))
+    .map((row) => [String(row.id), row]));
+  const proactiveNotificationRows = db.prepare("SELECT * FROM proactive_notifications").all();
+  addMatching(
+    "proactiveNotifications",
+    proactiveNotificationRows,
+    (row) => isSmokeProactiveNotification(row, ownedSuggestionRows, { marker, account }),
+  );
+  const ownedNotificationRows = proactiveNotificationRows.filter((row) => (
+    discovered.proactiveNotifications.has(String(row.id))
+  ));
+  addMatching(
+    "weixinConfirmationOutbox",
+    db.prepare("SELECT * FROM weixin_confirmation_outbox").all(),
+    (row) => Boolean(proactiveOutboxNotification(
+      row,
+      ownedNotificationRows,
+      ownedSuggestionRows,
+      { marker, account },
+    )),
+  );
+
   const auditTargets = new Set([
     ...[...discovered.customers].map((id) => JSON.stringify(["customer", id])),
     ...[...discovered.opportunities].map((id) => JSON.stringify(["opportunity", id])),
@@ -292,7 +487,7 @@ function discoverSmokeOwnedIds(db, owned, { marker, runLabel, account }) {
   );
 
   return Object.fromEntries(
-    CREATED_ID_KEYS.map((key) => [key, [...discovered[key]]]),
+    OWNED_ID_KEYS.map((key) => [key, [...discovered[key]]]),
   );
 }
 
@@ -309,6 +504,21 @@ function assertManifestOwnership(db, owned, { marker, runLabel, account }) {
   const customerIds = new Set(owned.customers);
   const opportunityIds = new Set(owned.opportunities);
   const quickRecordIds = new Set(owned.quickRecords);
+  const proactiveSuggestionRows = rowsByIds(
+    db,
+    "ai_suggestions",
+    owned.proactiveSuggestions,
+    "ownedProactiveSuggestion",
+  );
+  const proactiveSuggestionsById = new Map(
+    proactiveSuggestionRows.map((row) => [String(row.id), row]),
+  );
+  const proactiveNotificationRows = rowsByIds(
+    db,
+    "proactive_notifications",
+    owned.proactiveNotifications,
+    "ownedProactiveNotification",
+  );
   const auditTargets = new Set([
     ...owned.customers.map((id) => JSON.stringify(["customer", id])),
     ...owned.opportunities.map((id) => JSON.stringify(["opportunity", id])),
@@ -374,6 +584,39 @@ function assertManifestOwnership(db, owned, { marker, runLabel, account }) {
     owned.weeklyReports.length,
   );
   assertRowsOwned(
+    proactiveSuggestionRows,
+    (row) => isSmokeProactiveSuggestion(row, {
+      marker,
+      account,
+      customerIds,
+      opportunityIds,
+    }),
+    "Proactive suggestion",
+    owned.proactiveSuggestions.length,
+  );
+  assertRowsOwned(
+    proactiveNotificationRows,
+    (row) => isSmokeProactiveNotification(row, proactiveSuggestionsById, { marker, account }),
+    "Proactive notification",
+    owned.proactiveNotifications.length,
+  );
+  assertRowsOwned(
+    rowsByIds(
+      db,
+      "weixin_confirmation_outbox",
+      owned.weixinConfirmationOutbox,
+      "ownedWeixinConfirmationOutbox",
+    ),
+    (row) => Boolean(proactiveOutboxNotification(
+      row,
+      proactiveNotificationRows,
+      proactiveSuggestionsById,
+      { marker, account },
+    )),
+    "WeChat confirmation outbox",
+    owned.weixinConfirmationOutbox.length,
+  );
+  assertRowsOwned(
     rowsByIds(db, "audit_logs", owned.auditLogs, "ownedAudit"),
     (row) =>
       row.actor === account &&
@@ -420,10 +663,15 @@ function countIdempotencyKeys(db, entries) {
   );
 }
 
-function assertNoUnrelatedDependents(db, owned) {
+function assertNoUnrelatedDependents(db, owned, { marker, account }) {
   const customerClause = inClause(owned.customers, "customer");
   const opportunityClause = inClause(owned.opportunities, "opportunity");
   const quickRecordClause = inClause(owned.quickRecords, "quick");
+  const customerIds = new Set(owned.customers);
+  const opportunityIds = new Set(owned.opportunities);
+  const proactiveSuggestionIds = new Set(owned.proactiveSuggestions);
+  const proactiveNotificationIds = new Set(owned.proactiveNotifications);
+  const proactiveOutboxIds = new Set(owned.weixinConfirmationOutbox);
 
   if (owned.customers.length > 0) {
     const opportunityIds = new Set(owned.opportunities);
@@ -467,6 +715,29 @@ function assertNoUnrelatedDependents(db, owned) {
         throw new Error(`Unrelated dependent ${table} data refers to smoke rows`);
       }
     }
+
+    const unrelatedSuggestions = db.prepare(`
+      SELECT * FROM ai_suggestions WHERE proactive_trigger IS NOT NULL
+    `).all().filter((row) => (
+      proactiveSuggestionReferencesSmokeParent(row, customerIds, opportunityIds)
+      && !proactiveSuggestionIds.has(String(row.id))
+    ));
+    if (unrelatedSuggestions.length > 0) {
+      throw new Error("Unrelated proactive suggestion data refers to smoke customer or opportunity rows");
+    }
+  }
+
+  if (owned.customers.length > 0) {
+    const subjectRows = db.prepare(`
+      SELECT * FROM proactive_subjects WHERE customer_id IN (${customerClause.sql})
+    `).all(customerClause.params);
+    if (subjectRows.some((row) => !isSmokeProactiveSubject(row, {
+      marker,
+      account,
+      customerIds,
+    }))) {
+      throw new Error("Unrelated proactive subject data refers to smoke customer rows");
+    }
   }
 
   if (owned.quickRecords.length > 0) {
@@ -490,6 +761,59 @@ function assertNoUnrelatedDependents(db, owned) {
       throw new Error("Unrelated dependent risk data refers to smoke quick records");
     }
   }
+
+
+  if (owned.proactiveSuggestions.length > 0) {
+    const suggestionClause = inClause(owned.proactiveSuggestions, "proactiveSuggestion");
+    const notificationRows = db.prepare(`
+      SELECT id FROM proactive_notifications
+      WHERE suggestion_id IN (${suggestionClause.sql})
+    `).all(suggestionClause.params);
+    if (notificationRows.some((row) => !proactiveNotificationIds.has(String(row.id)))) {
+      throw new Error("Unrelated proactive notification data refers to smoke suggestions");
+    }
+    const previewCount = Number(db.prepare(`
+      SELECT COUNT(*) AS count FROM proactive_confirmation_previews
+      WHERE suggestion_id IN (${suggestionClause.sql})
+    `).get(suggestionClause.params).count);
+    if (previewCount > 0) {
+      throw new Error("Unrelated proactive confirmation preview data refers to smoke suggestions");
+    }
+
+    const outboxRows = db.prepare("SELECT id, payload_json FROM weixin_confirmation_outbox").all();
+    const unrelatedOutbox = outboxRows.some((row) => {
+      const payload = parseJson(row.payload_json);
+      return payload?.kind === "proactive_suggestion"
+        && proactiveSuggestionIds.has(String(payload.suggestionId ?? ""))
+        && !proactiveOutboxIds.has(String(row.id));
+    });
+    if (unrelatedOutbox) {
+      throw new Error("Unrelated WeChat outbox data refers to smoke suggestions");
+    }
+  }
+
+  if (owned.proactiveNotifications.length > 0) {
+    const missingOwnedOutbox = rowsByIds(
+      db,
+      "proactive_notifications",
+      owned.proactiveNotifications,
+      "dependentProactiveNotification",
+    ).some((row) => row.outbox_id && !proactiveOutboxIds.has(String(row.outbox_id)));
+    if (missingOwnedOutbox) {
+      throw new Error("A smoke proactive notification refers to an unowned WeChat outbox row");
+    }
+  }
+
+  if (owned.weixinConfirmationOutbox.length > 0) {
+    const outboxClause = inClause(owned.weixinConfirmationOutbox, "proactiveOutbox");
+    const notificationRows = db.prepare(`
+      SELECT id FROM proactive_notifications
+      WHERE outbox_id IN (${outboxClause.sql})
+    `).all(outboxClause.params);
+    if (notificationRows.some((row) => !proactiveNotificationIds.has(String(row.id)))) {
+      throw new Error("Unrelated proactive notification data refers to a smoke WeChat outbox row");
+    }
+  }
 }
 
 function residualCounts(db, tokenHash, owned, idempotencyKeys) {
@@ -502,6 +826,19 @@ function residualCounts(db, tokenHash, owned, idempotencyKeys) {
     itineraries: countByIds(db, "visit_itineraries", "id", owned.itineraries),
     weeklyReports: countByIds(db, "weekly_reports", "id", owned.weeklyReports),
     auditLogs: countByIds(db, "audit_logs", "id", owned.auditLogs),
+    proactiveSuggestions: countByIds(db, "ai_suggestions", "id", owned.proactiveSuggestions),
+    proactiveNotifications: countByIds(
+      db,
+      "proactive_notifications",
+      "id",
+      owned.proactiveNotifications,
+    ),
+    weixinConfirmationOutbox: countByIds(
+      db,
+      "weixin_confirmation_outbox",
+      "id",
+      owned.weixinConfirmationOutbox,
+    ),
     authSessions: Number(db.prepare(
       "SELECT COUNT(*) AS count FROM auth_sessions WHERE token_hash = $tokenHash",
     ).get({ $tokenHash: tokenHash }).count),
@@ -514,6 +851,13 @@ function assertDiscoveredMatchesManifest(discovered, owned) {
     if (discovered[key] !== owned[key].length) {
       throw new Error(
         `${key} manifest expected ${owned[key].length} rows but discovered ${discovered[key]}`,
+      );
+    }
+  }
+  for (const key of DERIVED_ID_KEYS) {
+    if (discovered[key] !== owned[key].length) {
+      throw new Error(
+        `${key} ownership expected ${owned[key].length} rows but discovered ${discovered[key]}`,
       );
     }
   }
@@ -559,7 +903,10 @@ export function cleanupProductionSmokeRun({
         runLabel,
         account: account.trim(),
       });
-      assertNoUnrelatedDependents(db, owned);
+      assertNoUnrelatedDependents(db, owned, {
+        marker,
+        account: account.trim(),
+      });
       const discovered = residualCounts(db, tokenHash, owned, exactIdempotencyKeys);
       assertDiscoveredMatchesManifest(discovered, owned);
 
@@ -567,6 +914,24 @@ export function cleanupProductionSmokeRun({
         auditLogs: deleteByIds(db, "audit_logs", "id", owned.auditLogs),
         salesDecisions: deleteByIds(db, "sales_decision_analyses", "id", owned.salesDecisions),
         aiInsights: deleteByIds(db, "ai_insights", "id", owned.aiInsights),
+        proactiveNotifications: deleteByIds(
+          db,
+          "proactive_notifications",
+          "id",
+          owned.proactiveNotifications,
+        ),
+        weixinConfirmationOutbox: deleteByIds(
+          db,
+          "weixin_confirmation_outbox",
+          "id",
+          owned.weixinConfirmationOutbox,
+        ),
+        proactiveSuggestions: deleteByIds(
+          db,
+          "ai_suggestions",
+          "id",
+          owned.proactiveSuggestions,
+        ),
         quickRecords: deleteByIds(db, "quick_records", "id", owned.quickRecords),
         itineraries: deleteByIds(db, "visit_itineraries", "id", owned.itineraries),
         weeklyReports: deleteByIds(db, "weekly_reports", "id", owned.weeklyReports),

@@ -6,7 +6,7 @@
 #   3. backend liveness + three scheduler lastError + delivery readiness via
 #      one GET on the ops-alerts status endpoint
 #   4. daily backup freshness (< 26h)
-# Alerts go to the endpoint first (hour-keyed dedup there); PushPlus fallback.
+# Alerts go only to the Clawbot-backed outbox endpoint (hour-keyed dedup there).
 # Runs as root, installed 0700 at /opt/sentelligent-sales-workbench/tools/ops-inspect.sh.
 # python3 blocks do an explicit fsencode/UTF-8 round trip because systemd runs
 # this under the C locale (surrogate-escaped argv would emit mojibake JSON).
@@ -17,7 +17,6 @@ NODE="$ROOT/runtime/node-v24/bin/node"
 DB="/var/lib/sentelligent-sales-workbench/sales-workbench.sqlite"
 env_value() { grep -E "^$1=" "$ROOT/config/backend.env" 2>/dev/null | head -1 | cut -d= -f2-; }
 OPS_BEARER="$(env_value OPS_ALERT_TOKEN)"
-PUSH_BEARER="$(env_value HOSPITAL_TENDER_PUSHPLUS_TOKEN)"
 state_get() { grep -E "^$1=" "$STATE" 2>/dev/null | head -1 | cut -d= -f2-; }
 state_set() {
   touch "$STATE"
@@ -30,23 +29,18 @@ json_utf8() { # argv -> UTF-8-safe JSON object per the calling template
   python3 -c '
 import json, os, sys
 argv = [os.fsencode(value).decode("utf-8", "replace") for value in sys.argv[2:]]
-if sys.argv[1] == "alert":
-    body = {"source": argv[0], "severity": "critical", "summary": argv[1], "detail": argv[2]}
-else:
-    body = {"token": argv[0], "title": argv[1], "content": argv[2], "template": "txt"}
+body = {"source": argv[0], "severity": "critical", "summary": argv[1], "detail": argv[2]}
 print(json.dumps(body))
 ' "$@"
 }
 alert() { # $1 source  $2 summary  $3 detail
+  [[ -n "$OPS_BEARER" ]] || return 1
   curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $OPS_BEARER" \
     -H 'Content-Type: application/json' --data "$(json_utf8 alert "$1" "$2" "$3")" \
-    http://127.0.0.1:8897/api/integrations/ops-alerts | grep -qE '^2' && return 0
-  [[ -n "$PUSH_BEARER" ]] && curl -sS --max-time 10 -o /dev/null -H 'Content-Type: application/json' \
-    --data "$(json_utf8 pushplus "$PUSH_BEARER" "【巡检】$2" "$3")" \
-    https://www.pushplus.plus/send
+    http://127.0.0.1:8897/api/integrations/ops-alerts | grep -qE '^2'
 }
 # 1. new failed outbox rows (watermark = latest failed updated_at)
-FAILED_MAX="$("$NODE" --input-type=module -e "import{DatabaseSync}from'node:sqlite';const d=new DatabaseSync('$DB',{readOnly:true});const r=d.prepare(\"SELECT COALESCE(MAX(updated_at),'') m, COUNT(*) n FROM weixin_confirmation_outbox WHERE status='failed'\").get();console.log(r.m+'|'+r.n)" 2>/dev/null)"
+FAILED_MAX="$("$NODE" --input-type=module -e "import{DatabaseSync}from'node:sqlite';const d=new DatabaseSync('$DB',{readOnly:true});const r=d.prepare(\"SELECT COALESCE(MAX(updated_at),'') m, COUNT(*) n FROM weixin_confirmation_outbox WHERE status='failed' AND COALESCE(last_error_code,'') NOT IN ('WEIXIN_OUTBOX_STALE','WEIXIN_OUTBOX_SUPERSEDED','WEIXIN_OUTBOX_CANCELLED')\").get();console.log(r.m+'|'+r.n)" 2>/dev/null)"
 if [[ -n "$FAILED_MAX" ]]; then
   MARK="$(state_get outbox_failed_mark)"
   CUR="${FAILED_MAX%%|*}"
@@ -67,18 +61,43 @@ if [[ -z "$STATUS_JSON" ]]; then
   alert "ops-inspect:backend" "backend 状态端点不可达" "curl 127.0.0.1:8897 失败；若 systemd 显示 active 可能在崩溃循环"
 else
   echo "$STATUS_JSON" | python3 -c "
-import json, sys
+import datetime, json, sys
 item = json.loads(sys.stdin.buffer.read().decode('utf-8', 'replace')).get('item', {})
 out = []
 for name, s in (item.get('schedulers') or {}).items():
     if s and s.get('lastError'):
         out.append('scheduler-' + name + '|' + str(s.get('lastError')))
 w = item.get('weixinDelivery') or {}
+expires_at = w.get('expiresAt')
+if isinstance(expires_at, str):
+    try:
+        expiry = datetime.datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+        remaining = (expiry - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+        if remaining <= 0:
+            out.append('weixin-context-expired|' + expires_at)
+        elif remaining <= 3 * 60 * 60:
+            out.append('weixin-context-expiring|' + expires_at)
+    except ValueError:
+        pass
 if w.get('status') != 'ready':
     out.append('weixin-delivery|' + str(w.get('reason', 'not_ready')))
 sys.stdout.buffer.write(('\n'.join(out)).encode('utf-8'))
 " | while IFS='|' read -r SRC ERR; do
-    [[ -n "$SRC" ]] && alert "ops-inspect:$SRC" "巡检发现异常：$SRC" "$ERR"
+    case "$SRC" in
+      weixin-context-expiring)
+        alert "ops-inspect:weixin-context-expiry" \
+          "微信主动推送上下文将在 3 小时内到期" \
+          "expiresAt=$ERR；请在到期前给小小回复任意消息，以刷新微信主动推送上下文。普通心跳不能续期。"
+        ;;
+      weixin-context-expired)
+        alert "ops-inspect:weixin-context-expiry" \
+          "微信主动推送上下文已到期" \
+          "expiresAt=$ERR；业务消息仍会保留在 outbox 排队，但必须给小小发送一条真实微信消息后才能恢复发送。普通心跳不能续期。"
+        ;;
+      *)
+        [[ -n "$SRC" ]] && alert "ops-inspect:$SRC" "巡检发现异常：$SRC" "$ERR"
+        ;;
+    esac
   done
 fi
 # 4. daily backup freshness (< 26h)

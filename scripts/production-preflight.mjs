@@ -20,23 +20,20 @@ import { fileURLToPath } from "node:url";
 
 import { REQUIRED_ENV_NAMES } from "./release-package.mjs";
 import { MODEL_TIMEOUT_MS_MAX } from "../backend/src/config.js";
-import { decryptSecret } from "../backend/src/settings/secretBox.js";
 
 // A pre-cutover report may inspect the already-running release whose manifest
-// predates the WeChat-bookkeeping confirmation and PushPlus names. This relaxed set
+// predates the WeChat-bookkeeping confirmation names. This relaxed set
 // is valid only for the canonical current release path; candidate releases
 // always use the complete contract.
 const LEGACY_CURRENT_EXCLUDED_ENV_NAMES = new Set([
-  "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
   "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
   "WEIXIN_BOOKKEEPING_OWNER",
   "WEIXIN_BOOKKEEPING_SENDER_ID",
   "WEIXIN_OUTBOX_POLL_MS",
 ]);
 const LEGACY_CURRENT_REQUIRED_ENV_NAMES = Object.freeze(
-  REQUIRED_ENV_NAMES.filter(
-    (name) => !LEGACY_CURRENT_EXCLUDED_ENV_NAMES.has(name),
-  ),
+  [...new Set([...REQUIRED_ENV_NAMES, "HOSPITAL_TENDER_PUSHPLUS_TOKEN"])]
+    .filter((name) => !LEGACY_CURRENT_EXCLUDED_ENV_NAMES.has(name)),
 );
 // v0.6.18 is the immediate rollback/current baseline for v0.6.19. Its
 // immutable manifest predates only the dedicated document-vision model and
@@ -134,6 +131,7 @@ const REQUIRED_PROTECTED_SERVICES = Object.freeze([
 const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
 const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
+const WEIXIN_SESSION_HOME = `${DEFAULT_PROJECT_PATH}/weixin-session`;
 const FRONTEND_ENVIRONMENT_FILE = `${DEFAULT_PROJECT_PATH}/config/frontend.env`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
 const PROJECT_NODE_EXECUTABLE =
@@ -298,6 +296,7 @@ function hasWeixinBookkeepingConfirmationConfiguration(environment) {
   const pollMs = Number(environment.WEIXIN_OUTBOX_POLL_MS);
   return (
     environment.WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED === "true" &&
+    environment.WEIXIN_AGENT_SESSION_HOME === WEIXIN_SESSION_HOME &&
     typeof owner === "string" &&
     owner.length > 0 &&
     owner.length <= 200 &&
@@ -320,38 +319,8 @@ function hasHospitalTenderSchedulerConfiguration(environment, database) {
   return (
     (schedulerMode === "true" || schedulerMode === "false") &&
     environment.HOSPITAL_TENDER_INTERVAL_MINUTES === "60" &&
-    environment.HOSPITAL_TENDER_BATCH_SIZE === "10" &&
-    hasHospitalTenderNotificationConfiguration(environment, database)
+    environment.HOSPITAL_TENDER_BATCH_SIZE === "10"
   );
-}
-
-function isStrongHospitalTenderPushplusToken(value) {
-  return (
-    typeof value === "string" &&
-    value.length >= 32 &&
-    value.length <= 512 &&
-    value === value.trim() &&
-    /^[A-Za-z0-9_-]+$/u.test(value) &&
-    !/^(?:fixture|test|example|change|replace|your|dummy|sample)/iu.test(value)
-  );
-}
-
-function hasHospitalTenderNotificationConfiguration(environment, database) {
-  const token = environment.HOSPITAL_TENDER_PUSHPLUS_TOKEN;
-  const schedulerEnabled = environment.HOSPITAL_TENDER_AUTO_RUN === "true";
-  if (!schedulerEnabled) return true;
-  const otherSecrets = [
-    environment.AUTH_SESSION_SECRET,
-    environment.WEIXIN_AGENT_API_TOKEN,
-    environment.ASSISTANT_CONFIRMATION_SECRET,
-    environment.SETTINGS_ENCRYPTION_KEY,
-    environment.MODEL_API_KEY,
-    environment.HOSPITAL_TENDER_SYNC_TOKEN,
-  ].filter((value) => typeof value === "string" && value.length > 0);
-  const settingState = database?.hospitalTenderPushplusSettingState ?? "missing";
-  if (settingState === "active-valid") return true;
-  if (settingState !== "missing") return false;
-  return isStrongHospitalTenderPushplusToken(token) && !otherSecrets.includes(token);
 }
 
 function isPositiveSafeIntegerText(value, max = Number.MAX_SAFE_INTEGER) {
@@ -407,6 +376,7 @@ function hasNoRetiredBookkeepingVariables(environment) {
     "SHORTCUT_WEBHOOK_OWNER",
     "SHORTCUT_WEBHOOK_RATE_LIMIT",
     "SHORTCUT_WEBHOOK_WINDOW_MS",
+    "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
   ].every((name) => !String(environment?.[name] ?? "").trim());
 }
 
@@ -1123,8 +1093,6 @@ export async function inspectSqlite(
   filePath,
   {
     requireNoSidecars = false,
-    settingsEncryptionKey = "",
-    hospitalTenderSecretIsolationValues = [],
   } = {},
 ) {
   const resolvedPath = resolve(filePath);
@@ -1174,36 +1142,10 @@ export async function inspectSqlite(
                   : []),
               ])].sort()
             : [];
-          let hospitalTenderPushplusSettingState = "missing";
-          if (tableNames.has("secure_settings")) {
-            const setting = database.prepare(`
-              SELECT ciphertext, status
-              FROM secure_settings
-              WHERE setting_key = 'hospital_tender_pushplus_token'
-            `).get();
-            if (setting) {
-              if (setting.status !== "active" || !setting.ciphertext) {
-                hospitalTenderPushplusSettingState = "cleared";
-              } else {
-                try {
-                  const token = decryptSecret(setting.ciphertext, settingsEncryptionKey);
-                  const isolated = Array.isArray(hospitalTenderSecretIsolationValues)
-                    && !hospitalTenderSecretIsolationValues.includes(token);
-                  hospitalTenderPushplusSettingState =
-                    isStrongHospitalTenderPushplusToken(token) && isolated
-                      ? "active-valid"
-                      : "active-invalid";
-                } catch {
-                  hospitalTenderPushplusSettingState = "active-invalid";
-                }
-              }
-            }
-          }
           return {
             quickCheck,
             foreignKeyViolations: foreignKeyViolations.length,
             businessOwners,
-            hospitalTenderPushplusSettingState,
           };
         } finally {
           database.close();
@@ -2691,15 +2633,6 @@ export async function runProductionPreflight({
         message: releaseManifestResult.error,
       };
   const database = await inspectSqlite(databasePath ?? "", {
-    settingsEncryptionKey: environment.SETTINGS_ENCRYPTION_KEY,
-    hospitalTenderSecretIsolationValues: [
-      environment.AUTH_SESSION_SECRET,
-      environment.WEIXIN_AGENT_API_TOKEN,
-      environment.ASSISTANT_CONFIRMATION_SECRET,
-      environment.SETTINGS_ENCRYPTION_KEY,
-      environment.MODEL_API_KEY,
-      environment.HOSPITAL_TENDER_SYNC_TOKEN,
-    ].filter((value) => typeof value === "string" && value.length > 0),
   });
   const backup = await inspectSqlite(backupPath ?? "", {
     requireNoSidecars: true,
@@ -2774,9 +2707,9 @@ export async function runProductionPreflight({
       environmentResult.error === null &&
         environment.NODE_ENV === "production" &&
         hasHospitalTenderSchedulerConfiguration(environment, database),
-      "Environment is explicitly production with the fixed 60-minute/10-customer tender schedule; automatic execution may be explicitly enabled or disabled, and enabled notification requires a dedicated PushPlus token.",
+      "Environment is explicitly production with the fixed 60-minute/10-customer tender schedule; automatic execution may be explicitly enabled or disabled and all notifications use the bound WeChat Clawbot outbox.",
       environmentResult.error ??
-        "NODE_ENV must be production, hospital tender auto-run must be explicitly true or false with the fixed 60-minute/10-customer schedule, and enabled execution requires a dedicated strong PushPlus value.",
+        "NODE_ENV must be production, hospital tender auto-run must be explicitly true or false with the fixed 60-minute/10-customer schedule, and PushPlus must not be used as a notification dependency.",
     ),
     makeCheck(
       "env.authRequired",
@@ -2807,8 +2740,8 @@ export async function runProductionPreflight({
     makeCheck(
       "env.weixinBookkeepingConfirmation",
       hasWeixinBookkeepingConfirmationConfiguration(environment),
-      "WeChat bookkeeping confirmation is enabled for the bound owner and direct-message sender with a bounded outbox poll interval.",
-      "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.",
+      "WeChat bookkeeping confirmation is enabled for the bound owner and direct-message sender, uses the worker-owned session directory, and has a bounded outbox poll interval.",
+      `WEIXIN_AGENT_SESSION_HOME must be ${WEIXIN_SESSION_HOME}; WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.`,
     ),
     makeCheck(
       "env.secureCookie",
@@ -2837,8 +2770,8 @@ export async function runProductionPreflight({
     makeCheck(
       "env.retiredBookkeepingIntegrations",
       hasNoRetiredBookkeepingVariables(environment),
-      "Retired Shortcut and iCost write variables are absent from the production environment.",
-      "Remove ICOST_WEBHOOK_*, SHORTCUT_WEBHOOK_*, and SHORTCUT_WEIXIN_CONFIRMATION_ENABLED before release.",
+      "Retired Shortcut, iCost, and PushPlus notification variables are absent from the production environment.",
+      "Remove ICOST_WEBHOOK_*, SHORTCUT_WEBHOOK_*, SHORTCUT_WEIXIN_CONFIRMATION_ENABLED, and HOSPITAL_TENDER_PUSHPLUS_TOKEN before release.",
     ),
     makeCheck(
       "env.invoiceExtraction",

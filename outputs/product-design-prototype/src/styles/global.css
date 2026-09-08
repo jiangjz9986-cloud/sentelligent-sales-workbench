@@ -1490,6 +1490,16 @@ h1 {
   background: var(--gray-soft);
 }
 
+.tone-retired {
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: var(--gray-soft);
+}
+
+.proactive-notification-state .tone-retired ~ .ghost-button {
+  display: none;
+}
+
 .screen-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
@@ -6148,9 +6158,9 @@ textarea:focus {
   background: #dff7fb;
 }
 
-.settings-card-icon.pushplus {
-  color: #9a3412;
-  background: #ffedd5;
+.settings-card-icon.clawbot {
+  color: #0f6b52;
+  background: #def7ec;
 }
 
 .settings-facts {

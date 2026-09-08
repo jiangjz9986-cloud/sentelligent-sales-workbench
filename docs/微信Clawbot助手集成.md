@@ -59,6 +59,14 @@ ASSISTANT_CONFIRMATION_SECRET=<独立的至少 32 字节 canonical base64url 密
 3. 确认旧 Token/cursor 不再消费后启用新 Token 和新 worker；
 4. 禁止新旧 Token 或 cursor 并行消费。
 
+## 主动推送窗口与心跳边界
+
+微信主动发送依赖最近一次真实入站消息携带的 `context_token`。SDK 将它以 AES-256-GCM 密文保存在微信 session 目录，密文同时绑定 Clawbot 账号、目标用户、到期时间和由 `WEIXIN_AGENT_API_TOKEN` 派生的 delivery key；服务重启或 release 切换后，只要账号和机器 Token 未变化，仍在有效期内的 context 可以恢复，明文不会写入磁盘或日志。
+
+本项目按 23 小时本地安全窗口处理该凭据。空轮询、typing、`getconfig` 和普通定时 heartbeat 不能替代真实微信入站，也不得被声明为续期成功。运维巡检在剩余不足 3 小时和已过期时分别告警；到期后，业务消息继续保留在 durable outbox，不增加发送尝试次数。本人向小小发送任意一条真实微信消息取得新 context 后，worker 再按约 1 秒间隔释放业务积压，避免短时间突发发送。`ops_alert` 是唯一例外：排队超过 15 分钟后由后端启动 sweep 或租约渲染终止为 `WEIXIN_OUTBOX_STALE`，不会把失去时效的历史运维告警补发给用户。
+
+因此定时任务的职责是检查 worker heartbeat、outbox backlog 和 context 到期时间，而不是伪造微信心跳。机器 Token 轮换、重新扫码导致账号身份变化，或 session 目录被清空时，旧 context 密文必须失效并等待同一目标用户的新入站消息。
+
 ## 本地验收与发布边界
 
 ```bash

@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7fb">
+    <meta name="description" content="Sentelligent AI platform operations console">
+    <title>Sentelligent AI Platform Admin</title>
+    <link rel="stylesheet" href="./admin.css">
+  </head>
+  <body>
+    <svg class="svg-sprite" aria-hidden="true" focusable="false">
+      <symbol id="icon-layout-dashboard" viewBox="0 0 24 24">
+        <rect width="7" height="9" x="3" y="3" rx="1"></rect>
+        <rect width="7" height="5" x="14" y="3" rx="1"></rect>
+        <rect width="7" height="9" x="14" y="12" rx="1"></rect>
+        <rect width="7" height="5" x="3" y="16" rx="1"></rect>
+      </symbol>
+      <symbol id="icon-list-checks" viewBox="0 0 24 24">
+        <path d="m3 7 2 2 4-4"></path>
+        <path d="M13 6h8"></path>
+        <path d="M3 12h2"></path>
+        <path d="M13 12h8"></path>
+        <path d="m3 17 2 2 4-4"></path>
+        <path d="M13 18h8"></path>
+      </symbol>
+      <symbol id="icon-bot" viewBox="0 0 24 24">
+        <rect width="16" height="12" x="4" y="8" rx="3"></rect>
+        <path d="M12 4v4"></path>
+        <path d="M8 13h.01"></path>
+        <path d="M16 13h.01"></path>
+        <path d="M8 17h8"></path>
+      </symbol>
+      <symbol id="icon-book-open-check" viewBox="0 0 24 24">
+        <path d="M12 7v14"></path>
+        <path d="M3 18a4 4 0 0 1 4-4h5V3H7a4 4 0 0 0-4 4z"></path>
+        <path d="M21 18a4 4 0 0 0-4-4h-5V3h5a4 4 0 0 1 4 4z"></path>
+        <path d="m16 8 1.5 1.5L20 7"></path>
+      </symbol>
+      <symbol id="icon-cpu" viewBox="0 0 24 24">
+        <rect width="16" height="16" x="4" y="4" rx="2"></rect>
+        <rect width="6" height="6" x="9" y="9" rx="1"></rect>
+        <path d="M9 1v3"></path>
+        <path d="M15 1v3"></path>
+        <path d="M9 20v3"></path>
+        <path d="M15 20v3"></path>
+        <path d="M20 9h3"></path>
+        <path d="M20 14h3"></path>
+        <path d="M1 9h3"></path>
+        <path d="M1 14h3"></path>
+      </symbol>
+      <symbol id="icon-calendar-clock" viewBox="0 0 24 24">
+        <path d="M8 2v4"></path>
+        <path d="M16 2v4"></path>
+        <rect width="18" height="18" x="3" y="4" rx="2"></rect>
+        <path d="M3 10h18"></path>
+        <circle cx="16" cy="16" r="4"></circle>
+        <path d="M16 14v2l1 1"></path>
+      </symbol>
+      <symbol id="icon-wallet-cards" viewBox="0 0 24 24">
+        <rect width="18" height="14" x="3" y="5" rx="2"></rect>
+        <path d="M3 10h18"></path>
+        <path d="M7 15h2"></path>
+        <path d="M15 15h2"></path>
+      </symbol>
+      <symbol id="icon-refresh-cw" viewBox="0 0 24 24">
+        <path d="M3 12a9 9 0 0 1 15.4-6.4L21 8"></path>
+        <path d="M21 3v5h-5"></path>
+        <path d="M21 12a9 9 0 0 1-15.4 6.4L3 16"></path>
+        <path d="M3 21v-5h5"></path>
+      </symbol>
+      <symbol id="icon-menu" viewBox="0 0 24 24">
+        <path d="M4 6h16"></path>
+        <path d="M4 12h16"></path>
+        <path d="M4 18h16"></path>
+      </symbol>
+      <symbol id="icon-x" viewBox="0 0 24 24">
+        <path d="M18 6 6 18"></path>
+        <path d="m6 6 12 12"></path>
+      </symbol>
+      <symbol id="icon-arrow-up-right" viewBox="0 0 24 24">
+        <path d="M7 17 17 7"></path>
+        <path d="M7 7h10v10"></path>
+      </symbol>
+      <symbol id="icon-alert-triangle" viewBox="0 0 24 24">
+        <path d="m21.7 18-8.4-14a1.5 1.5 0 0 0-2.6 0L2.3 18A1.5 1.5 0 0 0 3.6 20h16.8a1.5 1.5 0 0 0 1.3-2z"></path>
+        <path d="M12 9v4"></path>
+        <path d="M12 17h.01"></path>
+      </symbol>
+      <symbol id="icon-check-circle" viewBox="0 0 24 24">
+        <path d="M21 11.5V12a9 9 0 1 1-5.3-8.2"></path>
+        <path d="m8 12 2.5 2.5L20 5"></path>
+      </symbol>
+      <symbol id="icon-lock-keyhole" viewBox="0 0 24 24">
+        <circle cx="12" cy="16" r="1"></circle>
+        <rect width="16" height="12" x="4" y="10" rx="2"></rect>
+        <path d="M8 10V7a4 4 0 0 1 8 0v3"></path>
+      </symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="7"></circle>
+        <path d="m20 20-4-4"></path>
+      </symbol>
+      <symbol id="icon-chevron-right" viewBox="0 0 24 24">
+        <path d="m9 18 6-6-6-6"></path>
+      </symbol>
+      <symbol id="icon-activity" viewBox="0 0 24 24">
+        <path d="M3 12h4l3-8 4 16 3-8h4"></path>
+      </symbol>
+      <symbol id="icon-database" viewBox="0 0 24 24">
+        <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
+        <path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5"></path>
+        <path d="M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"></path>
+      </symbol>
+      <symbol id="icon-sliders-horizontal" viewBox="0 0 24 24">
+        <line x1="21" x2="14" y1="4" y2="4"></line>
+        <line x1="10" x2="3" y1="4" y2="4"></line>
+        <line x1="21" x2="12" y1="12" y2="12"></line>
+        <line x1="8" x2="3" y1="12" y2="12"></line>
+        <line x1="21" x2="16" y1="20" y2="20"></line>
+        <line x1="12" x2="3" y1="20" y2="20"></line>
+        <line x1="14" x2="14" y1="2" y2="6"></line>
+        <line x1="8" x2="8" y1="10" y2="14"></line>
+        <line x1="16" x2="16" y1="18" y2="22"></line>
+      </symbol>
+    </svg>
+
+    <div class="app-shell" id="app-shell">
+      <div class="mobile-overlay" id="mobile-overlay" hidden></div>
+
+      <aside class="sidebar" id="sidebar" aria-label="AI platform navigation">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">S</div>
+          <div class="brand-copy">
+            <strong data-copy="brand">Sentelligent</strong>
+            <span data-copy="product">AI Platform</span>
+          </div>
+          <button class="icon-button sidebar-close" id="sidebar-close" type="button" aria-label="Close navigation">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-x"></use></svg>
+          </button>
+        </div>
+
+        <div class="nav-section-label" data-copy="navWorkspace">WORKSPACE</div>
+        <nav class="primary-nav" id="primary-nav" aria-label="Primary navigation">
+          <button class="nav-item is-active" type="button" data-view="overview">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-layout-dashboard"></use></svg>
+            <span data-copy="navOverview">Overview</span>
+          </button>
+          <button class="nav-item" type="button" data-view="tasks">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-list-checks"></use></svg>
+            <span data-copy="navTasks">Tasks</span>
+            <span class="nav-badge" id="nav-task-count" hidden></span>
+          </button>
+          <button class="nav-item" type="button" data-view="agents">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-bot"></use></svg>
+            <span data-copy="navAgents">Agents</span>
+          </button>
+          <button class="nav-item" type="button" data-view="standards">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-book-open-check"></use></svg>
+            <span data-copy="navStandards">Standards</span>
+          </button>
+          <button class="nav-item" type="button" data-view="models">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-cpu"></use></svg>
+            <span data-copy="navModels">Models</span>
+          </button>
+          <button class="nav-item" type="button" data-view="schedules">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-calendar-clock"></use></svg>
+            <span data-copy="navSchedules">Schedules</span>
+          </button>
+          <button class="nav-item" type="button" data-view="costs">
+            <svg class="ui-icon" aria-hidden="true"><use href="#icon-wallet-cards"></use></svg>
+            <span data-copy="navCosts">Costs &amp; budgets</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-spacer"></div>
+        <div class="sidebar-footer">
+          <div class="runtime-label">
+            <span class="status-dot is-muted" id="sidebar-runtime-dot"></span>
+            <span data-copy="runtimeLabel">Runtime</span>
+            <span class="runtime-state" id="sidebar-runtime-state">--</span>
+          </div>
+          <div class="build-label"><span data-copy="buildLabel">AI Platform</span> <span class="mono">v1</span></div>
+        </div>
+      </aside>
+
+      <div class="app-main">
+        <header class="topbar">
+          <div class="topbar-title">
+            <button class="icon-button mobile-menu-button" id="mobile-menu-button" type="button" aria-label="Open navigation" aria-expanded="false">
+              <svg class="ui-icon" aria-hidden="true"><use href="#icon-menu"></use></svg>
+            </button>
+            <div>
+              <div class="eyebrow" data-copy="eyebrow">OPERATIONS CONSOLE</div>
+              <h1 id="page-title">Overview</h1>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <div class="connection-pill is-loading" id="connection-pill" role="status">
+              <span class="status-dot"></span>
+              <span id="connection-label">Connecting</span>
+            </div>
+            <button class="secondary-button" id="refresh-button" type="button">
+              <svg class="ui-icon" aria-hidden="true"><use href="#icon-refresh-cw"></use></svg>
+              <span data-copy="refresh">Refresh</span>
+            </button>
+          </div>
+        </header>
+
+        <main class="main-content" id="main-content">
+          <div class="global-alert" id="global-alert" role="alert" hidden></div>
+
+          <section class="view-panel is-active" data-view-panel="overview" aria-labelledby="overview-heading">
+            <div class="page-heading">
+              <div>
+                <div class="section-kicker" data-copy="overviewKicker">AI CONTROL PLANE</div>
+                <h2 id="overview-heading" data-copy="overviewTitle">Platform overview</h2>
+                <p data-copy="overviewDescription">Monitor execution, released configuration, scheduler health and spend from one place.</p>
+              </div>
+              <div class="heading-meta">
+                <span data-copy="lastSync">Last sync</span>
+                <strong id="last-sync">--</strong>
+              </div>
+            </div>
+
+            <section class="kpi-grid" id="kpi-grid" aria-label="Key performance indicators">
+              <article class="kpi-card accent-blue">
+                <div class="kpi-label"><span data-copy="kpiTasks">Total tasks</span><svg class="ui-icon" aria-hidden="true"><use href="#icon-list-checks"></use></svg></div>
+                <strong class="kpi-value" data-kpi-value="tasks">--</strong>
+                <span class="kpi-note" data-kpi-note="tasks">--</span>
+              </article>
+              <article class="kpi-card accent-green">
+                <div class="kpi-label"><span data-copy="kpiSuccess">Success rate</span><svg class="ui-icon" aria-hidden="true"><use href="#icon-check-circle"></use></svg></div>
+                <strong class="kpi-value" data-kpi-value="success">--</strong>
+                <span class="kpi-note" data-kpi-note="success">--</span>
+              </article>
+              <article class="kpi-card accent-amber">
+                <div class="kpi-label"><span data-copy="kpiSpend">Period spend</span><svg class="ui-icon" aria-hidden="true"><use href="#icon-wallet-cards"></use></svg></div>
+                <strong class="kpi-value" data-kpi-value="spend">--</strong>
+                <span class="kpi-note" data-kpi-note="spend">--</span>
+              </article>
+              <article class="kpi-card accent-coral">
+                <div class="kpi-label"><span data-copy="kpiQueue">Queue depth</span><svg class="ui-icon" aria-hidden="true"><use href="#icon-activity"></use></svg></div>
+                <strong class="kpi-value" data-kpi-value="queue">--</strong>
+                <span class="kpi-note" data-kpi-note="queue">--</span>
+              </article>
+            </section>
+
+            <div class="content-grid grid-top">
+              <section class="panel panel-tall" aria-labelledby="recent-tasks-heading">
+                <div class="panel-header">
+                  <div>
+                    <h3 id="recent-tasks-heading" data-copy="recentTasks">Recent tasks</h3>
+                    <p data-copy="recentTasksDescription">Latest requests observed by the control plane.</p>
+                  </div>
+                  <button class="text-button" type="button" data-view-link="tasks">
+                    <span data-copy="viewAll">View all</span>
+                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg>
+                  </button>
+                </div>
+                <div class="table-scroll" id="overview-task-table"></div>
+              </section>
+
+              <section class="panel panel-tall" aria-labelledby="model-health-heading">
+                <div class="panel-header">
+                  <div>
+                    <h3 id="model-health-heading" data-copy="modelHealth">Model connectivity</h3>
+                    <p data-copy="modelHealthDescription">Enabled providers and capabilities reported by the platform.</p>
+                  </div>
+                  <button class="text-button" type="button" data-view-link="models">
+                    <span data-copy="manage">Open</span>
+                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg>
+                  </button>
+                </div>
+                <div class="model-list" id="overview-model-list"></div>
+              </section>
+            </div>
+
+            <div class="content-grid grid-middle">
+              <section class="panel" aria-labelledby="agents-heading">
+                <div class="panel-header">
+                  <div>
+                    <h3 id="agents-heading" data-copy="agentsHeading">Agents</h3>
+                    <p data-copy="agentsDescription">Released versions currently available for new tasks.</p>
+                  </div>
+                  <button class="text-button" type="button" data-view-link="agents">
+                    <span data-copy="viewAll">View all</span>
+                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg>
+                  </button>
+                </div>
+                <div class="agent-list" id="overview-agent-list"></div>
+              </section>
+
+              <section class="panel" aria-labelledby="cost-summary-heading">
+                <div class="panel-header">
+                  <div>
+                    <h3 id="cost-summary-heading" data-copy="costHeading">Cost summary</h3>
+                    <p data-copy="costDescription">Supplier cost and configured budget signals.</p>
+                  </div>
+                  <button class="text-button" type="button" data-view-link="costs">
+                    <span data-copy="details">Details</span>
+                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg>
+                  </button>
+                </div>
+                <div id="overview-cost-summary"></div>
+              </section>
+            </div>
+
+            <section class="panel" aria-labelledby="schedules-heading">
+              <div class="panel-header">
+                <div>
+                  <h3 id="schedules-heading" data-copy="schedulesHeading">Scheduler status</h3>
+                  <p data-copy="schedulesDescription">Background analysis schedules and their last known run.</p>
+                </div>
+                <button class="text-button" type="button" data-view-link="schedules">
+                  <span data-copy="viewAll">View all</span>
+                  <svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up-right"></use></svg>
+                </button>
+              </div>
+              <div class="schedule-grid" id="overview-schedule-list"></div>
+            </section>
+          </section>
+
+          <section class="view-panel" data-view-panel="tasks" aria-labelledby="tasks-page-heading" hidden>
+            <div class="page-heading">
+              <div>
+                <div class="section-kicker" data-copy="tasksKicker">EXECUTION TRACE</div>
+                <h2 id="tasks-page-heading" data-copy="tasksTitle">Tasks</h2>
+                <p data-copy="tasksDescription">Inspect status, source, version pinning and request timing.</p>
+              </div>
+            </div>
+            <div class="view-toolbar">
+              <label class="search-field">
+                <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+                <span class="sr-only" data-copy="searchTasks">Search tasks</span>
+                <input id="tasks-search" type="search" data-placeholder="searchTasksPlaceholder" placeholder="Search tasks">
+              </label>
+              <select id="tasks-status-filter" aria-label="Filter tasks by status">
+                <option value="" data-copy="allStatuses">All statuses</option>
+                <option value="queued" data-copy="statusQueued">Queued</option>
+                <option value="running" data-copy="statusRunning">Running</option>
+                <option value="succeeded" data-copy="statusSucceeded">Succeeded</option>
+                <option value="failed" data-copy="statusFailed">Failed</option>
+                <option value="cancelled" data-copy="statusCancelled">Cancelled</option>
+                <option value="expired" data-copy="statusExpired">Expired</option>
+              </select>
+            </div>
+            <section class="panel" aria-label="Task table">
+              <div class="table-scroll" id="tasks-view-content"></div>
+            </section>
+          </section>
+
+          <section class="view-panel" data-view-panel="agents" aria-labelledby="agents-page-heading" hidden>
+            <div class="page-heading">
+              <div>
+                <div class="section-kicker" data-copy="agentsKicker">CONFIGURATION CATALOG</div>
+                <h2 id="agents-page-heading" data-copy="agentsTitle">Agents</h2>
+                <p data-copy="agentsPageDescription">Released versions, task coverage and runtime lifecycle.</p>
+              </div>
+            </div>
+            <div class="view-toolbar">
+              <label class="search-field">
+                <svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg>
+                <span class="sr-only" data-copy="searchAgents">Search agents</span>
+                <input id="agents-search" type="search" data-placeholder="searchAgentsPlaceholder" placeholder="Search agents">
+              </label>
+            </div>
+            <section class="panel" aria-label="Agent list">
+              <div class="agent-list agent-list-page" id="agents-view-content"></div>
+            </section>
+          </section>
+
+          <section class="view-panel" data-view-panel="standards" aria-labelledby="standards-page-heading" hidden>
+            <div class="page-heading">
+              <div>
+                <div class="section-kicker" data-copy="standardsKicker">POLICY CATALOG</div>
+                <h2 id="standards-page-heading" data-copy="standardsTitle">Standards</h2>
+                <p data-copy="standardsDescription">Published business rules and grounding requirements referenced by agents.</p>
+              </div>
+            </div>
+            <section class="panel" aria-label="Standards table">
+              <div class="table-scroll" id="standards-view-content"></div>
+            </section>
+          </section>
+
+          <section class="view-panel" data-view-panel="models" aria-labelledby="models-page-heading" hidden>
+            <div class="page-heading">
+              <div>
+                <div class="section-kicker" data-copy="modelsKicker">MODEL REGISTRY</div>
+                <h2 id="models-page-heading" data-copy="modelsTitle">Models</h2>
+                <p data-copy="modelsDescription">Provider status, capability boundaries and price metadata. Secret values are never rendered.</p>
+              </div>
+            </div>
+            <section class="panel" aria-label="Models table">
+              <div class="table-scroll" id="models-view-content"></div>
+            </section>
+          </section>
+
+          <section class="view-panel" data-view-panel="schedules" aria-labelledby="schedules-page-heading" hidden>
+            <div class="page-heading">
+              <div>
+                <div class="section-kicker" data-copy="schedulesKicker">BACKGROUND CONTROL</div>
+                <h2 id="schedules-page-heading" data-copy="schedulesTitle">Schedules</h2>
+                <p data-copy="schedulesPageDescription">Observe pause state, next run, backlog and last execution outcome.</p>
+              </div>
+            </div>
+            <section class="panel" aria-label="Schedule list">
+              <div class="schedule-grid schedule-grid-page" id="schedules-view-content"></div>
+            </section>
+          </section>
+
+          <section class="view-panel" data-view-panel="costs" aria-labelledby="costs-page-heading" hidden>
+            <div class="page-heading">
+              <div>
+                <div class="section-kicker" data-copy="costsKicker">USAGE LEDGER</div>
+                <h2 id="costs-page-heading" data-copy="costsTitle">Costs &amp; budgets</h2>
+                <p data-copy="costsDescription">Separate supplier usage, estimates, unknown charges and configured feature fees.</p>
+              </div>
+            </div>
+            <div class="kpi-grid cost-kpi-grid" id="costs-kpi-grid"></div>
+            <section class="panel" aria-label="Cost breakdown">
+              <div class="table-scroll" id="costs-view-content"></div>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script src="./admin.js" defer></script>
+  </body>
+</html>

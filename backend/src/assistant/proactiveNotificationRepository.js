@@ -70,11 +70,11 @@ export function createProactiveNotificationRepository(db, { clock = () => new Da
 
   function setDelivery(idValue, { owner, channel, outboxId = null, status = "queued", errorCode = null } = {}) {
     const id = required(idValue, "id", 200); const normalizedOwner = required(owner, "owner", 200);
-    if (!["in_app", "weixin", "pushplus"].includes(channel)) throw new TypeError("channel is invalid");
+    if (!["in_app", "weixin"].includes(channel)) throw new TypeError("channel is invalid");
     if (!["queued", "processing", "sent", "failed"].includes(status)) throw new TypeError("status is invalid");
     const now = nowIso(clock);
     db.prepare(`UPDATE proactive_notifications SET channel=$channel,status=$status,outbox_id=$outboxId,
-      delivery_started_at=CASE WHEN $channel IN ('weixin','pushplus') THEN COALESCE(delivery_started_at,$now) ELSE delivery_started_at END,
+      delivery_started_at=CASE WHEN $channel='weixin' THEN COALESCE(delivery_started_at,$now) ELSE delivery_started_at END,
       attempt_count=attempt_count+CASE WHEN $status IN ('processing','failed') THEN 1 ELSE 0 END,
       last_error_code=$errorCode,sent_at=CASE WHEN $status='sent' THEN $now ELSE sent_at END,updated_at=$now
       WHERE id=$id AND owner=$owner AND status <> 'read'`).run({
@@ -99,7 +99,7 @@ export function createProactiveNotificationRepository(db, { clock = () => new Da
 
   function recordFailure(idValue, { owner, channel, errorCode, retryBaseMs = 60_000, maxAttempts = 5 } = {}) {
     const id = required(idValue, "id", 200); const normalizedOwner = required(owner, "owner", 200);
-    if (!["weixin", "pushplus"].includes(channel)) throw new TypeError("channel is invalid");
+    if (channel !== "weixin") throw new TypeError("channel is invalid");
     const current = byId.get({ $id: id, $owner: normalizedOwner });
     if (!current) throw new HttpError(404, "PROACTIVE_NOTIFICATION_NOT_FOUND", "The proactive notification was not found");
     const attempt = current.status === "processing"
@@ -128,15 +128,6 @@ export function createProactiveNotificationRepository(db, { clock = () => new Da
           AND (outbox.status<>notification.status OR outbox.attempt_count<>notification.attempt_count
             OR COALESCE(outbox.last_error_code,'')<>COALESCE(notification.last_error_code,'')))`).run({ $now: now });
     return Number(changed.changes);
-  }
-
-  function recoverStalePushplus({ staleMs = 5 * 60_000 } = {}) {
-    if (!Number.isSafeInteger(staleMs) || staleMs < 10_000 || staleMs > 24*60*60*1000) throw new TypeError("staleMs is invalid");
-    const now = nowIso(clock); const cutoff = new Date(Date.parse(now)-staleMs).toISOString();
-    const result = db.prepare(`UPDATE proactive_notifications SET status='queued',available_at=$now,
-      last_error_code='PUSHPLUS_PROCESSING_RECOVERED',updated_at=$now
-      WHERE channel='pushplus' AND status='processing' AND updated_at <= $cutoff`).run({ $now: now, $cutoff: cutoff });
-    return Number(result.changes);
   }
 
   function list({ owner, limit = 50, offset = 0 } = {}) {
@@ -187,5 +178,5 @@ export function createProactiveNotificationRepository(db, { clock = () => new Da
   function getByOutboxId(outboxId) {
     return map(db.prepare("SELECT * FROM proactive_notifications WHERE outbox_id=$id").get({ $id: required(outboxId,"outboxId",200) }));
   }
-  return Object.freeze({ ensure, claimDue, setDelivery, defer, recordFailure, syncOutbox, recoverStalePushplus, list, count, statusCounts, rateLimitUntil, markRead, getBySuggestion, getByOutboxId });
+  return Object.freeze({ ensure, claimDue, setDelivery, defer, recordFailure, syncOutbox, list, count, statusCounts, rateLimitUntil, markRead, getBySuggestion, getByOutboxId });
 }

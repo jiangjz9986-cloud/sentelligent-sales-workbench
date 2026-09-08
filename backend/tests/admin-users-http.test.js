@@ -134,7 +134,6 @@ describe("admin user management API", () => {
       ["PUT", "/api/settings/deepseek-key", JSON.stringify({ apiKey: "unit-api-key" })],
       ["PATCH", "/api/hospital-tenders/scheduler", JSON.stringify({ enabled: false })],
       ["POST", "/api/hospital-tenders/run", "{}"],
-      ["POST", "/api/settings/pushplus/test", "{}"],
       ["POST", "/api/integrations/weixin-agent/login", "{}"],
     ];
     for (const [method, path, body] of attempts) {
@@ -142,6 +141,14 @@ describe("admin user management API", () => {
       assert.equal(denied.response.status, 403, `${method} ${path}`);
       assert.equal(denied.body.error.code, "ADMIN_ROLE_REQUIRED", `${method} ${path}`);
     }
+
+    const retiredPushplus = await request("/api/settings/pushplus/test", {
+      method: "POST",
+      headers: admin.headers,
+      body: "{}",
+    });
+    assert.equal(retiredPushplus.response.status, 404);
+    assert.equal(retiredPushplus.body.error.code, "NOT_FOUND");
 
     // 改密端点对 member 开放（任意登录用户）。
     const changeAllowed = await request("/api/auth/change-password", {

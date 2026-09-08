@@ -13,6 +13,18 @@ function reasonText(value) {
   return normalized;
 }
 
+function canonicalExpiresAt(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string" || value !== value.trim()) {
+    throw new TypeError("delivery expiresAt is invalid");
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== value) {
+    throw new TypeError("delivery expiresAt is invalid");
+  }
+  return value;
+}
+
 export function createWeixinDeliveryReadiness({
   clock = Date.now,
   staleMs = 30_000,
@@ -23,12 +35,13 @@ export function createWeixinDeliveryReadiness({
   }
   let current = null;
 
-  function report({ status, reason = null } = {}) {
+  function report({ status, reason = null, expiresAt = null } = {}) {
     if (!STATUS_VALUES.has(status)) throw new TypeError("delivery status is invalid");
     const reportedAtMs = nowMs(clock);
     current = {
       status,
       reason: status === "ready" ? null : reasonText(reason),
+      expiresAt: canonicalExpiresAt(expiresAt),
       reportedAtMs,
     };
     return snapshot();
@@ -37,11 +50,17 @@ export function createWeixinDeliveryReadiness({
   function snapshot() {
     const currentTimeMs = nowMs(clock);
     if (!current || currentTimeMs - current.reportedAtMs > staleMs) {
-      return Object.freeze({ status: "not_ready", reason: "worker_unavailable" });
+      return Object.freeze({
+        status: "not_ready",
+        reason: "worker_unavailable",
+        ...(current?.expiresAt ? { expiresAt: current.expiresAt } : {}),
+        ...(current ? { reportedAt: new Date(current.reportedAtMs).toISOString() } : {}),
+      });
     }
     return Object.freeze({
       status: current.status,
       ...(current.reason ? { reason: current.reason } : {}),
+      ...(current.expiresAt ? { expiresAt: current.expiresAt } : {}),
       reportedAt: new Date(current.reportedAtMs).toISOString(),
     });
   }

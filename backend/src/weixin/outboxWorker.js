@@ -43,6 +43,8 @@ export function createWeixinOutboxHttpClient({ backendUrl, apiToken, fetchImpl =
       if (DELIVERY_SCOPE_RE.test(deliveryScope)) {
         values["X-Weixin-Delivery-Scope"] = deliveryScope;
       }
+      const expiresAt = safeExpiresAt(delivery.expiresAt);
+      if (expiresAt) values["X-Weixin-Delivery-Expires-At"] = expiresAt;
     }
     return values;
   };
@@ -112,13 +114,24 @@ function sleep(ms, signal) {
   });
 }
 
+function safeExpiresAt(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return null;
+  const parsed = Date.parse(normalized);
+  if (!Number.isFinite(parsed)) return null;
+  const canonical = new Date(parsed).toISOString();
+  return canonical === normalized ? canonical : null;
+}
+
 export async function runWeixinOutboxPump({
   client,
   bot,
   authorizeDelivery,
   pollMs = 5_000,
+  sendDelayMs = 1_000,
   abortSignal,
   log = () => {},
+  sleepImpl = sleep,
 } = {}) {
   if (!client || typeof client.lease !== "function" || typeof client.ack !== "function" || typeof client.isCurrent !== "function") {
     throw new TypeError("client is required");
@@ -126,6 +139,8 @@ export async function runWeixinOutboxPump({
   if (!bot || typeof bot.sendMessage !== "function") throw new TypeError("bot is required");
   if (authorizeDelivery !== undefined && typeof authorizeDelivery !== "function") throw new TypeError("authorizeDelivery must be a function");
   if (!Number.isSafeInteger(pollMs) || pollMs < 500 || pollMs > 60_000) throw new TypeError("pollMs is invalid");
+  if (!Number.isSafeInteger(sendDelayMs) || sendDelayMs < 0 || sendDelayMs > 60_000) throw new TypeError("sendDelayMs is invalid");
+  if (typeof sleepImpl !== "function") throw new TypeError("sleepImpl must be a function");
   let lastReadiness = "";
   while (!abortSignal?.aborted) {
     let lease = null;
@@ -137,8 +152,9 @@ export async function runWeixinOutboxPump({
           const deliveryScope = DELIVERY_SCOPE_RE.test(String(candidate?.deliveryScope ?? ""))
             ? String(candidate.deliveryScope)
             : null;
+          const expiresAt = safeExpiresAt(candidate?.expiresAt);
           delivery = candidate?.ready === true && candidate?.status === "ready"
-            ? { ready: true, status: "ready", ...(deliveryScope ? { deliveryScope } : {}) }
+            ? { ready: true, status: "ready", ...(deliveryScope ? { deliveryScope } : {}), ...(expiresAt ? { expiresAt } : {}) }
             : {
                 ready: false,
                 status: "not_ready",
@@ -146,14 +162,15 @@ export async function runWeixinOutboxPump({
                   ? String(candidate.reason)
                   : "sdk_status_unavailable",
                 ...(deliveryScope ? { deliveryScope } : {}),
+                ...(expiresAt ? { expiresAt } : {}),
               };
         } catch {
           delivery = { ready: false, status: "not_ready", reason: "sdk_status_unavailable" };
         }
       }
-      const readinessKey = `${delivery.status}:${delivery.reason ?? ""}`;
+      const readinessKey = `${delivery.status}:${delivery.reason ?? ""}:${delivery.expiresAt ?? ""}`;
       if (readinessKey !== lastReadiness) {
-        log(`[weixin] category=outbox status=${delivery.status} reason=${delivery.reason ?? "available"}`);
+        log(`[weixin] category=outbox status=${delivery.status} reason=${delivery.reason ?? "available"}${delivery.expiresAt ? ` expiresAt=${delivery.expiresAt}` : ""}`);
         lastReadiness = readinessKey;
       }
       lease = await client.lease(delivery);
@@ -197,6 +214,10 @@ export async function runWeixinOutboxPump({
           ok: true,
           ...(providerMessageId ? { providerMessageId } : {}),
         });
+        // A recovered context can release a backlog in one tight loop.  Keep a
+        // small provider-facing gap so queued messages do not become a burst or
+        // trip short-window throttles after the first inbound activation.
+        if (sendDelayMs > 0 && !abortSignal?.aborted) await sleepImpl(sendDelayMs, abortSignal);
       } catch (error) {
         const terminalScopeFailure = [
           "WEIXIN_DELIVERY_SCOPE_MISMATCH",
