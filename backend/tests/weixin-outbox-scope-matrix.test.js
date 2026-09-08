@@ -136,6 +136,9 @@ async function drainOutbox({ bot, mutateLease = null, timeoutMs = 8_000 } = {}) 
     bot,
     authorizeDelivery: authorizeWeixinBoundDelivery,
     pollMs: 500,
+    // Production intentionally paces recovered backlog at 1 second per
+    // message; this matrix tests routing, so disable the delay here.
+    sendDelayMs: 0,
     abortSignal: abort.signal,
   });
   const startedAt = Date.now();

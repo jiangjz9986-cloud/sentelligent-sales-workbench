@@ -111,31 +111,25 @@ describe("0040 proactive notification ledger", () => {
     f.db.close();
   });
 
-  it("uses PushPlus only through an explicit owner-scoped resolver", async () => {
+  it("does not accept a retired global or owner-scoped notification resolver", async () => {
     const f = fixture(); save(f.suggestions, "scoped-a");
     const otherOwner = "owner-b";
     const other = suggestion("scoped-b", "另一账号建议");
     f.suggestions.save({ owner: otherOwner, suggestion: other, dedupeKey: "dedupe:scoped-b" });
-    const calls = [];
     const scheduler = createProactiveNotificationScheduler({
       suggestionRepository: f.suggestions,
       notificationRepository: f.notifications,
       outboxRepository: f.outbox,
       resolveDeliveries: () => [],
-      resolvePushplusDelivery: ({ owner }) => owner === OWNER
-        ? { ready: () => true, notify: async (payload) => { calls.push({ owner, payload }); } }
-        : null,
       clock: f.time.now,
     });
     const result = await scheduler.tick();
     assert.deepEqual(result, {
-      queued: 0, sent: 2, externalSent: 1, inAppDelivered: 1, failed: 0, deferred: 0,
+      queued: 0, sent: 2, externalSent: 0, inAppDelivered: 2, failed: 0, deferred: 0,
     });
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].owner, OWNER);
     const ownerANotification = f.notifications.list({ owner: OWNER })[0];
     const ownerBNotification = f.notifications.list({ owner: otherOwner })[0];
-    assert.equal(ownerANotification.channel, "pushplus");
+    assert.equal(ownerANotification.channel, "in_app");
     assert.equal(ownerANotification.status, "sent");
     assert.equal(ownerBNotification.channel, "in_app");
     assert.equal(ownerBNotification.status, "sent");
@@ -157,14 +151,19 @@ describe("0040 proactive notification ledger", () => {
     f.db.close();
   });
 
-  it("recovers a PushPlus attempt left processing by a crashed scheduler", () => {
+  it("rejects a retired channel while retaining a historical row for reads", () => {
     const f = fixture(); const item = save(f.suggestions, "push-crash-1");
     const notification = f.notifications.ensure({ owner: OWNER, suggestion: item }).item;
-    f.notifications.setDelivery(notification.id, { owner: OWNER, channel: "pushplus", status: "processing" });
-    f.time.advance(5*60_000+1);
-    assert.equal(f.notifications.recoverStalePushplus(), 1);
-    const recovered = f.notifications.list({ owner: OWNER })[0];
-    assert.equal(recovered.status, "queued"); assert.equal(recovered.lastErrorCode, "PUSHPLUS_PROCESSING_RECOVERED");
+    f.db.prepare(`UPDATE proactive_notifications
+      SET channel='pushplus', status='processing'
+      WHERE id=$id`).run({ $id: notification.id });
+    assert.throws(
+      () => f.notifications.setDelivery(notification.id, { owner: OWNER, channel: "pushplus", status: "processing" }),
+      /channel is invalid/u,
+    );
+    const historical = f.notifications.list({ owner: OWNER })[0];
+    assert.equal(historical.channel, "pushplus");
+    assert.equal(historical.status, "processing");
     f.db.close();
   });
 
@@ -236,23 +235,17 @@ describe("0040 proactive notification ledger", () => {
     // A changed reminder timestamp is a new reminder cycle, so the proactive
     // external delivery is allowed rather than being suppressed by the old key.
     f.db.prepare("UPDATE action_items SET remind_at = '2026-09-05T12:00:00.000Z' WHERE id = 'action-period'").run();
-    const calls = [];
     const scheduler = createProactiveNotificationScheduler({
       db: f.db,
       suggestionRepository: f.suggestions,
       notificationRepository: f.notifications,
       outboxRepository: f.outbox,
       resolveDeliveries: () => [],
-      resolvePushplusDelivery: ({ owner }) => ({
-        ready: () => true,
-        notify: async (payload) => calls.push({ owner, payload }),
-      }),
       clock: f.time.now,
     });
     assert.deepEqual(await scheduler.tick(), {
-      queued: 0, sent: 1, externalSent: 1, inAppDelivered: 0, failed: 0, deferred: 0,
+      queued: 0, sent: 1, externalSent: 0, inAppDelivered: 1, failed: 0, deferred: 0,
     });
-    assert.equal(calls.length, 1);
     f.db.close();
   });
 });

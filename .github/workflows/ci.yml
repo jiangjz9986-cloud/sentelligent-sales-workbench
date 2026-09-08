@@ -52,6 +52,9 @@ jobs:
       - name: Verify release tooling
         run: node --test scripts/*.test.mjs
 
+      - name: Test isolated AI platform
+        run: npm run test:ai-platform
+
       - name: Test backend
         run: npm --prefix backend test
 

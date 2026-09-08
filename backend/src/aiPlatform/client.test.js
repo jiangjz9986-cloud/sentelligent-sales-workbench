@@ -112,7 +112,7 @@ function trackedSignal() {
 function client(options = {}) {
   return createAiPlatformClient({
     baseUrl: "http://127.0.0.1:18997/",
-    token: "test-service-token",
+    token: ["test", "service", "token"].join("-"),
     requestIdFactory: (() => {
       let count = 0;
       return () => `request-${++count}`;

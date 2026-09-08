@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-09-08
+
+### AI 统一调度平台底座、PushPlus 退役与微信投递边界收口
+
+- **AI 平台独立底座**：整合独立 AI 任务服务、专用 SQLite 迁移、任务租约/重试/取消、预算与用量台账、Agent/规范版本、主动调度基础、管理 API/静态管理台及业务侧受限客户端；当前保持 `local-simulated`，尚未接管现有业务 AI 入口或启用生产服务。
+- **唯一外部通知通道**：删除现行 PushPlus client、token 解析、设置写入/测试接口、医院招标 fallback、运维告警 fallback 和主动助手 PushPlus 投递路径；医院招标、运维告警和主动助手外发统一写入微信 Clawbot durable outbox。
+- **历史兼容不等于新投递**：保留历史迁移、旧数据库行和只读 legacy channel 映射以支持升级与审计；现行 API 不展示、不写入、不发送历史 PushPlus 配置，新的 `pushplus` delivery 写入会被拒绝。
+- **无绑定时 fail closed**：医院招标继续采集、入库和审计但不外发；运维告警返回 `OPS_ALERT_DELIVERY_UNAVAILABLE`；主动助手保留站内通知，不旁路到全局 token。
+- **上下文过期可诊断**：微信 worker 将严格 canonical UTC `expiresAt` 作为 readiness 元数据回报；过期上下文不会丢弃 outbox 消息。真实入站消息恢复上下文后，worker 按约 1 秒间隔释放积压，避免一次性突发发送。普通轮询或 heartbeat 不被宣称为上下文续期机制。
+- **验证**：AI 平台 `37/37`、业务客户端 `11/11`、后端全量 `2036/2036`、根部署门禁 `286 通过 / 2 跳过 / 0 失败`、发布测试 `99 通过 / 1 跳过 / 0 失败`、完整 Git 历史密钥扫描 `findings=[]`、Mac Chrome 集成/滚轮/客户导入/StageStrip/视觉 QA、WebKit QA 和 Python 采集器 `24/24` 通过。
+
+本版本仍是本地候选；没有读取 iCloud、没有连接或修改生产，也没有发送真实微信通知。生产切换必须以本版本最终 exact commit、immutable release、fresh preflight、数据库备份和 postflight evidence 为准。
+
 ## [0.12.1] - 2026-09-07
 
 ### PWA 更新接管与桌面滚动修复

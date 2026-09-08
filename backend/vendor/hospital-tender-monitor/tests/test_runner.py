@@ -22,7 +22,6 @@ class _Config:
     retries = 2
     stale_after_hours = 48
     notify_possible = False
-    pushplus_token = ""
     sources = ()
 
 
@@ -31,6 +30,7 @@ class _Repository:
         self.saved = []
         self.health = []
         self.runs = []
+        self.notification_queries = 0
 
     def initialize(self) -> None:
         pass
@@ -45,6 +45,7 @@ class _Repository:
         return tuple(SimpleNamespace(inserted=True, revised=False) for _ in items)
 
     def pending_notifications(self, *, levels=()):
+        self.notification_queries += 1
         return ()
 
     def record_source_health(self, health) -> None:
@@ -121,6 +122,9 @@ class RunnerIsolationTests(TestCase):
         self.assertEqual(client.budgets, [45.0, 45.0])
         self.assertEqual([item.notice.source_id for item in repository.saved], ["healthy"])
         self.assertEqual([health.success for health in repository.health], [False, True])
+        self.assertFalse(summary.notification_sent)
+        self.assertEqual(summary.notification_count, 0)
+        self.assertEqual(repository.notification_queries, 0)
 
     def test_persists_each_source_with_one_bounded_bulk_write(self) -> None:
         config = _Config()

@@ -27,5 +27,44 @@ test("Weixin delivery readiness expires safely and exposes only bounded state", 
   assert.deepEqual(readiness.snapshot(), {
     status: "not_ready",
     reason: "worker_unavailable",
+    reportedAt: "2026-08-21T00:00:00.000Z",
+  });
+});
+
+test("accepts only canonical UTC expiry timestamps and retains the last report when stale", () => {
+  let current = Date.parse("2026-08-21T00:00:00.000Z");
+  const readiness = createWeixinDeliveryReadiness({
+    clock: () => current,
+    staleMs: 5_000,
+  });
+
+  assert.deepEqual(readiness.report({
+    status: "ready",
+    expiresAt: "2026-08-21T23:00:00.000Z",
+  }), {
+    status: "ready",
+    expiresAt: "2026-08-21T23:00:00.000Z",
+    reportedAt: "2026-08-21T00:00:00.000Z",
+  });
+
+  for (const expiresAt of [
+    "2026-08-21T23:00:00.000+00:00",
+    " 2026-08-21T23:00:00.000Z",
+    "2026-08-21T23:00:00Z",
+    "not-a-date",
+  ]) {
+    assert.throws(
+      () => readiness.report({ status: "ready", expiresAt }),
+      /expiresAt is invalid/u,
+      expiresAt,
+    );
+  }
+
+  current += 5_001;
+  assert.deepEqual(readiness.snapshot(), {
+    status: "not_ready",
+    reason: "worker_unavailable",
+    expiresAt: "2026-08-21T23:00:00.000Z",
+    reportedAt: "2026-08-21T00:00:00.000Z",
   });
 });

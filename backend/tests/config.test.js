@@ -111,7 +111,7 @@ describe("backend model configuration", () => {
       assert.deepEqual(config.proactiveNotificationQuietEnd, { hour: 7, minute: 0 });
       assert.equal(config.proactiveNotificationHourlyLimit, 4);
       assert.equal(config.proactiveNotificationDailyLimit, 20);
-      assert.equal(config.hospitalTenderPushplusToken, "fixture-pushplus-token");
+      assert.equal(Object.hasOwn(config, "hospitalTenderPushplusToken"), false);
       assert.equal(config.invoiceEscalationAutoRun, true);
       assert.equal(config.invoiceEscalationPollMs, 45_000);
       assert.equal(config.port, 8788);
@@ -170,7 +170,7 @@ describe("backend model configuration", () => {
     assert.deepEqual(config.proactiveNotificationQuietEnd, { hour: 8, minute: 0 });
     assert.equal(config.proactiveNotificationHourlyLimit, 3);
     assert.equal(config.proactiveNotificationDailyLimit, 12);
-    assert.equal(config.hospitalTenderPushplusToken, "");
+    assert.equal(Object.hasOwn(config, "hospitalTenderPushplusToken"), false);
     assert.equal(config.invoiceEscalationAutoRun, false);
     assert.equal(config.invoiceEscalationPollMs, 60_000);
     assert.equal(config.nodeEnv, "development");

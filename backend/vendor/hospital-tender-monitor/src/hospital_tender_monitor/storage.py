@@ -556,7 +556,7 @@ class Repository:
         """Export a bounded, credential-free snapshot for an external consumer.
 
         The export intentionally contains only normalized notice fields already
-        persisted by the monitor.  Raw HTTP responses, PushPlus credentials,
+        persisted by the monitor.  Raw HTTP responses, third-party credentials,
         delivery state, and SQLite details never cross this boundary.
         """
         now = datetime.now(timezone.utc) if now is None else now

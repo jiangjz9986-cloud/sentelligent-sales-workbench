@@ -1924,7 +1924,6 @@ describe("portable release package", () => {
         "HOSPITAL_TENDER_AUTO_RUN",
         "HOSPITAL_TENDER_INTERVAL_MINUTES",
         "HOSPITAL_TENDER_BATCH_SIZE",
-        "HOSPITAL_TENDER_PUSHPLUS_TOKEN",
         "WEIXIN_AGENT_API_TOKEN",
         "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED",
         "WEIXIN_BOOKKEEPING_OWNER",
@@ -1940,6 +1939,10 @@ describe("portable release package", () => {
           `manifest should name ${name}`,
         );
       }
+      assert.ok(
+        !manifest.requiredEnvNames.includes("HOSPITAL_TENDER_PUSHPLUS_TOKEN"),
+        "the release manifest must not retain the retired PushPlus environment contract",
+      );
       assert.equal(
         manifest.rollback.strategy,
         "repin-systemd-units-to-immutable-release",

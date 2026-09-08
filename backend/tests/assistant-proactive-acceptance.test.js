@@ -339,7 +339,7 @@ describe("主动助手真实对象验收", () => {
     }
   });
 
-  it("缓存命中不增加建议版本、额度或 fake 外送通知", async () => {
+  it("缓存命中不增加建议版本、额度或外部通知", async () => {
     const db = openDatabase({ databaseUrl: ":memory:" });
     let current = new Date(NOW);
     let modelCalls = 0;
@@ -379,16 +379,14 @@ describe("主动助手真实对象验收", () => {
 
     const notificationRepository = createProactiveNotificationRepository(db, { clock });
     const outboxRepository = createWeixinConfirmationOutboxRepository(db, { clock });
-    const delivered = [];
     const scheduler = createProactiveNotificationScheduler({
       suggestionRepository: worker.suggestionRepository,
       notificationRepository,
       outboxRepository,
       resolveDeliveries: () => [],
-      resolvePushplusDelivery: () => ({ ready: () => true, notify: async (payload) => { delivered.push(payload); } }),
       clock,
     });
-    assert.deepEqual(await scheduler.tick(), { queued: 0, sent: 1, externalSent: 1, inAppDelivered: 0, failed: 0, deferred: 0 });
+    assert.deepEqual(await scheduler.tick(), { queued: 0, sent: 1, externalSent: 0, inAppDelivered: 1, failed: 0, deferred: 0 });
 
     current = new Date(current.getTime() + 60_000);
     const second = await worker.runOnce({ force: true });
@@ -401,7 +399,6 @@ describe("主动助手真实对象验收", () => {
     assert.equal(db.prepare("SELECT call_count FROM proactive_model_usage WHERE scope = 'owner' AND owner = 'cache-owner'").get().call_count, 1);
     assert.equal(db.prepare("SELECT call_count FROM proactive_model_usage WHERE scope = 'global'").get().call_count, 1);
     assert.deepEqual(await scheduler.tick(), { queued: 0, sent: 0, externalSent: 0, inAppDelivered: 0, failed: 0, deferred: 0 });
-    assert.equal(delivered.length, 1);
     assert.equal(notificationRepository.count({ owner: "cache-owner" }), 1);
     assert.equal(notificationRepository.list({ owner: "cache-owner" })[0].status, "sent");
     db.close();

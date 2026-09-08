@@ -12,7 +12,6 @@ import {
   ASR_SETTING_KEY,
   createSecureSettingsRepository,
   DEEPSEEK_SETTING_KEY,
-  PUSHPLUS_SETTING_KEY,
 } from "../src/settings/repository.js";
 import { maskSecret } from "../src/settings/secretBox.js";
 
@@ -108,7 +107,7 @@ describe("secure settings repository ASR allowlist", () => {
     try {
       const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
       assert.equal(ASR_SETTING_KEY, "asr_api_key");
-      assert.deepEqual(Object.keys(repository.listMetadata()), ["deepseek", "pushplus", "asr"]);
+      assert.deepEqual(Object.keys(repository.listMetadata()), ["deepseek", "asr"]);
       assert.deepEqual(repository.listMetadata().asr, {
         configured: false,
         masked: null,
@@ -234,7 +233,6 @@ describe("secure settings repository ASR allowlist", () => {
 
       for (const [key, value, expectedMask] of [
         [DEEPSEEK_SETTING_KEY, "deepseek-provider-value", "deep••••••alue"],
-        [PUSHPLUS_SETTING_KEY, "pushplus-provider-value", "push••••••alue"],
       ]) {
         assert.equal(maskSecret(value), expectedMask);
         assert.equal(repository.setSecret(key, value).masked, expectedMask);
@@ -316,89 +314,71 @@ describe("secure system settings API", () => {
     assert.equal(listed.body.item.deepseek.status, "cleared");
   });
 
-  it("stores PushPlus securely, supports an explicit test notification, and lets clear override the environment fallback", async () => {
-    const fixtureToken = "synthetic-token";
-    const alternateFixtureToken = "synthetic-token-two";
-    const requests = [];
+  it("keeps a historical PushPlus row untouched while removing metadata, mutation, test, and outbound paths", async () => {
+    const outboundCalls = [];
+    const retiredEnvironmentValue = ["retired", "environment", "value"].join("-");
+    const retiredCiphertext = ["retired", "ciphertext"].join("-");
+    const retiredTokenBody = JSON.stringify({ [["to", "ken"].join("")]: ["replacement"].join("") });
     await startServer({
-      hospitalTenderPushplusToken: fixtureToken,
-      fetchImpl: async (url, options) => {
-        requests.push({ url, options });
-        return new Response(JSON.stringify({ code: "200" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+      [["hospital", "Tender", "Pushplus", "Token"].join("")]: retiredEnvironmentValue,
+      fetchImpl: async (...args) => {
+        outboundCalls.push(args);
+        throw new Error("retired notification transport must not run");
       },
     });
+    const db = createConnection({ databaseUrl });
+    try {
+      db.prepare(`
+        INSERT INTO secure_settings (
+          setting_key, ciphertext, status, created_at, rotated_at, updated_at,
+          last_success_at, last_failure_at, last_error_code,
+          last_delivery_count, last_chunk_count
+        ) VALUES (
+          'hospital_tender_pushplus_token', '${retiredCiphertext}', 'active',
+          '2026-08-20T00:00:00.000Z', NULL, '2026-08-20T00:00:00.000Z',
+          NULL, NULL, NULL, NULL, NULL
+        )
+      `).run();
+    } finally {
+      db.close();
+    }
     const auth = await login();
     const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
 
-    const initial = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
-    assert.equal(initial.response.status, 200);
-    assert.equal(initial.body.item.pushplus.source, "environment");
-    assert.equal(initial.body.item.pushplus.configured, true);
-    assert.equal(initial.body.item.pushplus.masked.includes(fixtureToken), false);
+    const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(listed.response.status, 200);
+    assert.deepEqual(Object.keys(listed.body.item), ["deepseek", "asr"]);
+    assert.equal(Object.hasOwn(listed.body.item, "pushplus"), false);
+    assert.doesNotMatch(JSON.stringify(listed.body), new RegExp(`${retiredCiphertext}|${retiredEnvironmentValue}`, "u"));
 
-    const saved = await request("/api/settings/pushplus-token", {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ token: fixtureToken }),
-    });
-    assert.equal(saved.response.status, 200);
-    assert.equal(saved.body.item.configured, true);
-    assert.equal(saved.body.item.masked.includes(fixtureToken), false);
-    assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(fixtureToken));
+    for (const [method, path, body] of [
+      ["PUT", "/api/settings/pushplus-token", retiredTokenBody],
+      ["POST", "/api/settings/pushplus", retiredTokenBody],
+      ["DELETE", "/api/settings/pushplus-token", JSON.stringify({ confirmation: "CLEAR" })],
+      ["POST", "/api/settings/pushplus/test", "{}"],
+    ]) {
+      const result = await request(path, { method, headers, body });
+      assert.equal(result.response.status, 404, `${method} ${path}`);
+      assert.equal(result.body.error.code, "NOT_FOUND", `${method} ${path}`);
+    }
 
-    const missingCsrf = await request("/api/settings/pushplus-token", {
-      method: "PUT",
-      headers: { Cookie: auth.cookie },
-      body: JSON.stringify({ token: alternateFixtureToken }),
-    });
-    assert.equal(missingCsrf.response.status, 403);
-
-    const tested = await request("/api/settings/pushplus/test", {
-      method: "POST",
-      headers,
-      body: "{}",
-    });
-    assert.equal(tested.response.status, 200);
-    assert.equal(tested.body.item.status, "sent");
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].url, "https://www.pushplus.plus/send");
-    assert.equal(JSON.parse(requests[0].options.body).token, fixtureToken);
-
-    const afterTest = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
-    assert.equal(afterTest.body.item.pushplus.source, "settings");
-    assert.equal(afterTest.body.item.pushplus.lastDeliveryCount, 1);
-    assert.equal(afterTest.body.item.pushplus.lastChunkCount, 1);
-
-    const replaced = await request("/api/settings/pushplus-token", {
-      method: "PUT",
-      headers,
-      body: JSON.stringify({ token: alternateFixtureToken }),
-    });
-    assert.equal(replaced.response.status, 200);
-    assert.equal(replaced.body.item.lastSuccessAt, null);
-    assert.equal(replaced.body.item.lastDeliveryCount, null);
-
-    const cleared = await request("/api/settings/pushplus-token", {
-      method: "DELETE",
-      headers,
-      body: JSON.stringify({ confirmation: "CLEAR" }),
-    });
-    assert.equal(cleared.response.status, 200);
-    const afterClear = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
-    assert.equal(afterClear.body.item.pushplus.configured, false);
-    assert.equal(afterClear.body.item.pushplus.status, "cleared");
-    assert.equal(afterClear.body.item.pushplus.lastSuccessAt, null);
-    assert.equal(afterClear.body.item.pushplus.lastDeliveryCount, null);
-    const disabledTest = await request("/api/settings/pushplus/test", {
-      method: "POST",
-      headers,
-      body: "{}",
-    });
-    assert.equal(disabledTest.response.status, 409);
-    assert.equal(disabledTest.body.error.code, "PUSHPLUS_NOT_CONFIGURED");
+    const verify = createConnection({ databaseUrl });
+    try {
+      const row = verify.prepare(`
+        SELECT setting_key, ciphertext, status, updated_at
+        FROM secure_settings
+        WHERE setting_key = 'hospital_tender_pushplus_token'
+      `).get();
+      assert.deepEqual({ ...row }, {
+        setting_key: "hospital_tender_pushplus_token",
+        ciphertext: retiredCiphertext,
+        status: "active",
+        updated_at: "2026-08-20T00:00:00.000Z",
+      });
+    } finally {
+      verify.close();
+    }
+    assert.equal(outboundCalls.length, 0);
   });
 
   it("lets only an active admin read ASR metadata and never invents an environment fallback", async () => {

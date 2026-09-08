@@ -14,7 +14,6 @@ import {
 } from "./salesWorkbenchApi.js";
 import * as salesWorkbenchApiModule from "./salesWorkbenchApi.js";
 
-const syntheticToken = "synthetic-token";
 const syntheticKey = "synthetic-deepseek-key";
 
 function responseHeaders(values = {}) {
@@ -4097,6 +4096,50 @@ describe("sales workbench API client", () => {
     );
   });
 
+  it("accepts current notification channels, projects legacy rows as retired, and rejects unknown channels", async () => {
+    const makeNotification = (channel, id) => ({
+      id,
+      suggestionId: `suggestion-${id}`,
+      suggestionVersion: 1,
+      channel,
+      status: "sent",
+      title: "主动提醒",
+      trigger: "missing_next_step",
+      priority: 80,
+      summary: "请补充下一步行动。",
+      attemptCount: 1,
+      availableAt: "2026-09-07T01:00:00.000Z",
+      lastErrorCode: null,
+      sentAt: "2026-09-07T01:00:01.000Z",
+      readAt: null,
+      createdAt: "2026-09-07T01:00:00.000Z",
+      updatedAt: "2026-09-07T01:00:01.000Z",
+    });
+    const api = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        items: [
+          makeNotification("in_app", "in-app"),
+          makeNotification("weixin", "weixin"),
+          makeNotification("pushplus", "legacy"),
+        ],
+        total: 3,
+      }),
+    });
+
+    const page = await api.getProactiveNotifications();
+    assert.deepEqual(page.items.map((item) => item.channel), ["in_app", "weixin", "retired"]);
+
+    const unknownApi = createSalesWorkbenchApi({
+      baseUrl: "https://example.test",
+      fetchImpl: async () => jsonResponse({
+        items: [makeNotification("sms", "unknown")],
+        total: 1,
+      }),
+    });
+    await assert.rejects(() => unknownApi.getProactiveNotifications(), /channel: invalid channel/u);
+  });
+
   it("keeps secure settings writes on the authenticated CSRF boundary and never normalizes secrets into storage", async () => {
     const calls = [];
     const api = createSalesWorkbenchApi({
@@ -4112,15 +4155,6 @@ describe("sales workbench API client", () => {
         if (url.endsWith("/api/settings/deepseek-key") && options.method === "DELETE") {
           return jsonResponse({ item: { configured: false, masked: null, status: "cleared" } });
         }
-        if (url.endsWith("/api/settings/pushplus-token") && options.method === "PUT") {
-          return jsonResponse({ item: { configured: true, masked: "push••••test", status: "active", source: "settings" } });
-        }
-        if (url.endsWith("/api/settings/pushplus-token") && options.method === "DELETE") {
-          return jsonResponse({ item: { configured: false, masked: null, status: "cleared", source: "settings" } });
-        }
-        if (url.endsWith("/api/settings/pushplus/test")) {
-          return jsonResponse({ item: { status: "sent", notificationCount: 1, testedAt: "2026-08-20T00:00:00.000Z" } });
-        }
         return jsonResponse({ error: "not_found" }, 404);
       },
     });
@@ -4129,16 +4163,12 @@ describe("sales workbench API client", () => {
     assert.equal((await api.getSecuritySettings()).deepseek.configured, false);
     await api.saveDeepSeekApiKey(syntheticKey);
     await api.clearDeepSeekApiKey();
-    await api.savePushplusToken(syntheticToken);
-    await api.testPushplusToken();
-    await api.clearPushplusToken();
-    assert.equal(calls.length, 6);
+    assert.equal(api.savePushplusToken, undefined);
+    assert.equal(api.clearPushplusToken, undefined);
+    assert.equal(api.testPushplusToken, undefined);
+    assert.equal(calls.length, 3);
     assert.equal(calls[1].options.body, JSON.stringify({ apiKey: syntheticKey }));
     assert.equal(calls[1].options.headers["X-CSRF-Token"], "fixture-csrf-token");
     assert.equal(calls[2].options.body, JSON.stringify({ confirmation: "CLEAR" }));
-    assert.equal(calls[3].options.body, JSON.stringify({ token: syntheticToken }));
-    assert.equal(calls[4].options.method, "POST");
-    assert.equal(calls[4].options.headers["X-CSRF-Token"], "fixture-csrf-token");
-    assert.equal(calls[5].options.body, JSON.stringify({ confirmation: "CLEAR" }));
   });
 });

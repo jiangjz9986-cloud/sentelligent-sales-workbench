@@ -5,7 +5,7 @@ import { createServiceToken } from "../src/auth/internalAuth.js";
 import { loadAiPlatformConfig } from "../src/config.js";
 import { createServer } from "../src/server.js";
 
-const SECRET = "test-ai-platform-secret";
+const SECRET = ["test", "ai", "platform", "secret"].join("-");
 
 let server;
 let baseUrl;

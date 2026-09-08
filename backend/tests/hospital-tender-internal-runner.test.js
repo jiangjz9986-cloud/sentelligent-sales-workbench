@@ -37,6 +37,7 @@ describe("internal hospital tender runner", () => {
         ["HOSPITAL_TENDER_" + "SYNC_TOKEN"]: "must-not-forward",
         ["SENTELLIGENT_HOSPITAL_TENDER_" + "SYNC_URL"]: "https://must-not-forward.example",
         ["PUSHPLUS_" + "TOKEN"]: "must-not-forward",
+        HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS: "must-not-forward",
       },
       spawnImpl(command, args, options) {
         invocation = { command, args, options };
@@ -66,7 +67,6 @@ describe("internal hospital tender runner", () => {
     assert.deepEqual(invocation.args.slice(0, 5), [
       "-m", "hospital_tender_monitor.cli", "--project-root", "/opt/sentelligent/vendor/hospital-tender-monitor", "run-and-export",
     ]);
-    assert.equal(invocation.options.env.HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS, "1");
     assert.equal(invocation.options.env.NO_PROXY, "*");
     assert.equal(invocation.options.env.no_proxy, "*");
     assert.equal("HTTPS_PROXY" in invocation.options.env, false);
@@ -74,6 +74,7 @@ describe("internal hospital tender runner", () => {
     assert.equal("HOSPITAL_TENDER_SYNC_TOKEN" in invocation.options.env, false);
     assert.equal("SENTELLIGENT_HOSPITAL_TENDER_SYNC_URL" in invocation.options.env, false);
     assert.equal("PUSHPLUS_TOKEN" in invocation.options.env, false);
+    assert.equal("HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS" in invocation.options.env, false);
     assert.match(invocation.options.env.HOSPITAL_TENDER_MONITOR_CUSTOMER_HOSPITALS_PATH, /customer_hospitals\.json$/u);
   });
 

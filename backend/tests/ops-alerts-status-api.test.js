@@ -130,6 +130,7 @@ describe("ops alerts status endpoint", () => {
         Authorization: `Bearer ${weixinToken}`,
         "X-Weixin-Delivery-Status": "ready",
         "X-Weixin-Delivery-Scope": "weixin:multi:v1",
+        "X-Weixin-Delivery-Expires-At": "2026-08-28T17:00:00.000Z",
       },
     });
     assert.equal(workerReport.status, 200);
@@ -143,5 +144,6 @@ describe("ops alerts status endpoint", () => {
     assert.equal(after.body.item.outbox.processing, 1);
     assert.equal(after.body.item.outbox.queued, 0);
     assert.equal(after.body.item.weixinDelivery.status, "ready");
+    assert.equal(after.body.item.weixinDelivery.expiresAt, "2026-08-28T17:00:00.000Z");
   });
 });

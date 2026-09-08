@@ -81,10 +81,12 @@ test("admin reads all resource families and never echoes provider secrets", () =
 
 test("provider, model, and price details are read-only and keep secrets masked", () => {
   const { db, service } = fixture();
+  const providerDetailCredential = ["test", "provider", "detail", "secret"].join("-");
+  const modelDetailCredential = ["test", "model", "detail", "secret"].join("-");
   try {
     db.prepare("UPDATE providers SET config_json = $config WHERE id = $id").run({
       $config: JSON.stringify({
-        apiKey: "test-provider-detail-secret",
+        apiKey: providerDetailCredential,
         endpoint: "https://provider-detail.invalid/v1",
       }),
       $id: "provider-mock",
@@ -92,7 +94,7 @@ test("provider, model, and price details are read-only and keep secrets masked",
     db.prepare("UPDATE models SET capabilities_json = $capabilities WHERE id = $id").run({
       $capabilities: JSON.stringify({
         text: true,
-        credential: "model-detail-secret",
+        credential: modelDetailCredential,
         endpoint: "https://model-detail.invalid",
       }),
       $id: "model-mock-standard-v1",
@@ -103,7 +105,7 @@ test("provider, model, and price details are read-only and keep secrets masked",
     assert.equal(provider.id, "provider-mock");
     assert.equal(provider.credentialConfigured, true);
     assert.equal(Object.hasOwn(provider, "config"), false);
-    assert.equal(JSON.stringify(provider).includes("test-provider-detail-secret"), false);
+    assert.equal(JSON.stringify(provider).includes(providerDetailCredential), false);
     assert.equal(JSON.stringify(provider).includes("provider-detail.invalid"), false);
     assert.equal(service.readProvider, service.getProvider);
 
@@ -113,7 +115,7 @@ test("provider, model, and price details are read-only and keep secrets masked",
     assert.equal(model.capabilities.credential, "[redacted]");
     assert.equal(model.capabilities.endpoint, "[redacted]");
     assert.equal(model.credentialConfigured, true);
-    assert.equal(JSON.stringify(model).includes("model-detail-secret"), false);
+    assert.equal(JSON.stringify(model).includes(modelDetailCredential), false);
     assert.equal(service.readModel, service.getModel);
 
     const price = service.getPrice({ identity: ADMIN, priceVersionId: "price-mock-zero-v1" });
@@ -664,6 +666,7 @@ test("publish scope, optimistic failures, and audit redaction stay bounded", () 
       }),
       (error) => error.code === "invalid_request",
     );
+    const redactedAgentCredential = ["test", "agent", "api", "key"].join("-");
     const secretAgent = service.createAgent({
       identity: ADMIN,
       requestId: "secret-redaction-agent",
@@ -671,13 +674,13 @@ test("publish scope, optimistic failures, and audit redaction stay bounded", () 
       draft: agentDraft(standard.latestVersion.id, {
         slug: "secret-redaction-agent",
         name: "Secret redaction agent",
-        instructions: { noDirectWrite: true, apiKey: "test-agent-api-key" },
+        instructions: { noDirectWrite: true, apiKey: redactedAgentCredential },
       }),
     });
     const serialized = JSON.stringify(secretAgent);
-    assert.equal(serialized.includes("test-agent-api-key"), false);
+    assert.equal(serialized.includes(redactedAgentCredential), false);
     const audit = service.listAudit({ identity: ADMIN });
-    assert.equal(JSON.stringify(audit).includes("test-agent-api-key"), false);
+    assert.equal(JSON.stringify(audit).includes(redactedAgentCredential), false);
   } finally {
     db.close();
   }

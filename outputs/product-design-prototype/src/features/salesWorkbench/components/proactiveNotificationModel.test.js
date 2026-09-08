@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -30,7 +31,25 @@ test("keeps queued, processing, sent, and failed deliveries unread until an expl
   }
   assert.equal(proactiveNotificationIsUnread(notification("read")), false);
   assert.equal(proactiveNotificationStatusMeta(notification("queued")).label, "待发送");
+  assert.equal(proactiveNotificationStatusMeta(notification("queued")).channelLabel, "微信");
   assert.match(proactiveNotificationStatusMeta(notification("queued")).description, /仍为未读/u);
+});
+
+test("labels normalized legacy notifications as a retired read-only channel", async () => {
+  assert.deepEqual(
+    proactiveNotificationStatusMeta(notification("sent", { channel: "retired" })),
+    {
+      label: "已送达",
+      tone: "retired",
+      description: "通知已送达，等待人工阅读。",
+      status: "sent",
+      channelLabel: "已退役通道",
+      unread: true,
+      readOnly: true,
+    },
+  );
+  const styles = await readFile(new URL("../../../styles/global.css", import.meta.url), "utf8");
+  assert.match(styles, /\.proactive-notification-state \.tone-retired ~ \.ghost-button\s*\{[^}]*display:\s*none;/s);
 });
 
 test("counts delivery state separately from explicit read state", () => {

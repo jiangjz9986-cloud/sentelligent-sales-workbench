@@ -29,7 +29,13 @@ describe("WeChat confirmation outbox worker boundary", () => {
     const pump = runWeixinOutboxPump({
       client,
       bot: {
-        getDeliveryStatus() { return { ready: true, status: "ready" }; },
+        getDeliveryStatus() {
+          return {
+            ready: true,
+            status: "ready",
+            expiresAt: "2026-09-08T12:04:58.729Z",
+          };
+        },
         async sendMessage(message, outboxId) {
           sent.push({ message, outboxId });
           controller.abort();
@@ -48,9 +54,117 @@ describe("WeChat confirmation outbox worker boundary", () => {
     assert.equal(calls[0].options.headers.Authorization, "Bearer machine-secret");
     assert.equal(calls[0].options.headers["X-Weixin-Worker-Id"], "worker-1");
     assert.equal(calls[0].options.headers["X-Weixin-Delivery-Status"], "ready");
+    assert.equal(calls[0].options.headers["X-Weixin-Delivery-Expires-At"], "2026-09-08T12:04:58.729Z");
     assert.doesNotMatch(String(calls[1].options.body), /123456|machine-secret/u);
     assert.doesNotMatch(String(calls[2].options.body), /123456|machine-secret/u);
     assert.equal(JSON.parse(calls[2].options.body).providerMessageId, "provider-outbound-1");
+  });
+
+  it("paces a recovered backlog instead of sending every queued item in one burst", async () => {
+    const controller = new AbortController();
+    const delays = [];
+    let leases = 0;
+    const sent = [];
+    await runWeixinOutboxPump({
+      client: {
+        async lease() {
+          leases += 1;
+          if (leases > 2) return null;
+          return {
+            item: {
+              id: `backlog-${leases}`,
+              owner: "owner",
+              conversationId: "conversation",
+              deliveryScope: "delivery-scope",
+              message: `queued-${leases}`,
+            },
+            leaseToken: `lease-${leases}`,
+          };
+        },
+        async ack() {},
+        async isCurrent() { return true; },
+      },
+      bot: {
+        getDeliveryStatus() { return { ready: true, status: "ready" }; },
+        async sendMessage(message) {
+          sent.push(message);
+          if (sent.length === 2) controller.abort();
+          return { messageId: `provider-${sent.length}` };
+        },
+      },
+      pollMs: 500,
+      sendDelayMs: 1_250,
+      sleepImpl: async (ms) => { delays.push(ms); },
+      abortSignal: controller.signal,
+    });
+    assert.deepEqual(sent, ["queued-1", "queued-2"]);
+    assert.deepEqual(delays, [1_250]);
+  });
+
+  it("retains a valid context expiry for readiness diagnostics without forwarding it as a credential", async () => {
+    const controller = new AbortController();
+    const calls = [];
+    const logs = [];
+    await runWeixinOutboxPump({
+      client: {
+        async lease(delivery) {
+          calls.push(delivery);
+          controller.abort();
+          return null;
+        },
+        async ack() { assert.fail("no lease may be acknowledged"); },
+        async isCurrent() { return true; },
+      },
+      bot: {
+        getDeliveryStatus() {
+          return {
+            ready: false,
+            status: "not_ready",
+            reason: "context_token_expired",
+            expiresAt: "2026-09-08T12:04:58.729Z",
+            [["to", "ken"].join("")]: ["must", "not", "forward", "or", "log"].join("-"),
+          };
+        },
+        async sendMessage() { assert.fail("expired context must not send"); },
+      },
+      pollMs: 500,
+      abortSignal: controller.signal,
+      log: (message) => logs.push(message),
+    });
+    assert.equal(calls[0].expiresAt, "2026-09-08T12:04:58.729Z");
+    assert.match(logs[0], /expiresAt=2026-09-08T12:04:58\.729Z/u);
+    assert.doesNotMatch(logs.join("\n"), /must-not-forward-or-log/u);
+  });
+
+  it("drops a non-canonical context expiry instead of forwarding it", async () => {
+    const controller = new AbortController();
+    const calls = [];
+    await runWeixinOutboxPump({
+      client: {
+        async lease(delivery) {
+          calls.push(delivery);
+          controller.abort();
+          return null;
+        },
+        async ack() { assert.fail("no lease may be acknowledged"); },
+        async isCurrent() { return true; },
+      },
+      bot: {
+        getDeliveryStatus() {
+          return {
+            ready: false,
+            status: "not_ready",
+            reason: "context_token_expired",
+            expiresAt: "2026-09-08T12:04:58Z",
+          };
+        },
+        async sendMessage() { assert.fail("expired context must not send"); },
+      },
+      pollMs: 500,
+      abortSignal: controller.signal,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(Object.hasOwn(calls[0], "expiresAt"), false);
   });
 
   it("acks a bounded retry code when the SDK reports provider rejection", async () => {

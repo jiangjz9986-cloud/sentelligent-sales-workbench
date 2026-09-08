@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { openDatabase } from "../src/db.js";
-import { createHospitalTenderNotifier } from "../src/hospitalTender/notifier.js";
 import { createHospitalTenderRepository } from "../src/hospitalTender/repository.js";
 import { createHospitalTenderSchedulerRepository } from "../src/hospitalTender/schedulerRepository.js";
 import { collectorCustomers, createHospitalTenderScheduler } from "../src/hospitalTender/scheduler.js";
@@ -435,7 +434,7 @@ describe("hospital tender scheduler", () => {
     });
   });
 
-  it("eventually delivers an oversized chunked notification batch before advancing", async () => {
+  it("retries a large notification batch before advancing", async () => {
     await withDb(async (db) => {
       const payload = snapshot();
       payload.notices = Array.from({ length: 120 }, (_, index) => ({
@@ -448,17 +447,13 @@ describe("hospital tender scheduler", () => {
         contentSha256: (index + 1).toString(16).padStart(64, "0"),
       }));
       let calls = 0;
-      const notifier = createHospitalTenderNotifier({
-        token: ["fixture", "chunked", "value"].join("-"),
-        fetchImpl: async () => {
-          calls += 1;
-          if (calls === 2) return new Response("provider-private", { status: 503 });
-          return new Response(JSON.stringify({ code: "200" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
-        },
-      });
+      const queued = [];
+      const notifier = async ({ notices }) => {
+        calls += 1;
+        if (calls === 1) throw new Error("notification unavailable");
+        queued.push(...notices);
+        return notices.length;
+      };
       const { scheduler, schedulerRepository, tenderRepository } = setup(db, {
         runner: { run: async () => ({ payload, source: "test" }) },
         notifier,
@@ -471,7 +466,28 @@ describe("hospital tender scheduler", () => {
       assert.equal(recovered.notificationCount, 120);
       assert.equal(schedulerRepository.getState().cursorCustomerId, "customer-10");
       assert.equal(tenderRepository.listNotices({ limit: 200, offset: 0 }).length, 120);
-      assert.equal(calls, 4);
+      assert.equal(calls, 2);
+      assert.equal(queued.length, 120);
+    });
+  });
+
+  it("retries a WeChat notifier failure without advancing the customer cursor", async () => {
+    await withDb(async (db) => {
+      let calls = 0;
+      const notifier = async ({ notices }) => {
+        calls += 1;
+        if (calls === 1) throw new Error("notification unavailable");
+        return notices.length;
+      };
+      const { scheduler, schedulerRepository } = setup(db, {
+        notifier,
+      });
+
+      assert.equal((await scheduler.runNext({ force: true })).status, "partial");
+      assert.equal(schedulerRepository.getState().cursorCustomerId, null);
+      assert.equal((await scheduler.runNext({ force: true })).status, "success");
+      assert.equal(calls, 2);
+      assert.equal(schedulerRepository.getState().cursorCustomerId, "customer-10");
     });
   });
 

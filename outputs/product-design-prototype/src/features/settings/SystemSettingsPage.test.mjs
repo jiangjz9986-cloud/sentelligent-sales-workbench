@@ -24,6 +24,31 @@ test("system settings renders one focused child page for each grouped settings r
   assert.match(shellSource, /<SystemSettingsPage[\s\S]*?section=\{settingsSection\}/);
 });
 
+test("notification settings expose read-only WeChat Clawbot runtime status", async () => {
+  const [source, styles] = await Promise.all([
+    readFile(pagePath, "utf8"),
+    readFile(stylesPath, "utf8"),
+  ]);
+  const notificationSection = source.match(
+    /\{!loading && section === "notifications"[\s\S]*?(?=\{!loading && section === "tender-schedule")/u,
+  )?.[0] ?? "";
+
+  assert.notEqual(notificationSection, "");
+  assert.match(source, /\["notifications", "tender-schedule", "bookkeeping-log"\]\.includes\(section\)/);
+  assert.match(source, /readsNotifications \? read\("getWeixinBindingStatus"/);
+  assert.match(notificationSection, /data-notification-mode="read-only"/);
+  assert.match(notificationSection, /微信 Clawbot 通知状态/);
+  assert.match(notificationSection, /meta="只读"/);
+  assert.match(notificationSection, /meta="服务端管理"/);
+  assert.match(notificationSection, /服务端自动入队并按策略投递/);
+  assert.match(notificationSection, /保持微信 Clawbot 在线/);
+  assert.match(notificationSection, /服务端在投递前校验业务账号绑定、收件人和可用会话上下文/);
+  assert.doesNotMatch(notificationSection, /<(?:form|input|button)\b/u);
+  assert.doesNotMatch(source, /pushplus/iu);
+  assert.match(styles, /\.settings-card-icon\.clawbot\s*\{/);
+  assert.doesNotMatch(styles, /\.settings-card-icon\.pushplus\s*\{/i);
+});
+
 test("bookkeeping realtime log polls the scoped audit feed read-only", async () => {
   const source = await readFile(pagePath, "utf8");
 

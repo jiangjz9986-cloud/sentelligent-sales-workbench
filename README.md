@@ -8,7 +8,7 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前版本 | 本地开发候选为 `v0.11.0`；生产版本仍以服务器 `current` 指向目录的 manifest 与逐版证据表为准 |
+| 当前版本 | 当前工作树版本字段为 `0.12.2`（AI 统一调度平台独立底座、PushPlus 退役、微信 Clawbot 唯一外部通知通道；未发布候选）；生产版本仍以服务器 `current` 指向目录的 manifest 与逐版证据表为准 |
 | 生产身份 | 以服务器 `releases/` 当前 `current` 指向目录的 manifest（完整 commit）为准；`docs/releases/vX.Y.Z.md` 逐版保存部署证据表 |
 | 发布方式 | 自 v0.6.5 起按项目所有者授权采用本地 exact-commit 路径：本地注释 tag（不推 GitHub）+ git bundle + 服务器打包为不可变 release 目录；GitHub Release 停在 v0.6.1，是否恢复同步为待决策项 |
 | 制品与备份 | v0.8.0 起服务器每日 02:30 自动备份数据库与微信会话（14 天保留），发布 bundle+evidence 自动归档到 `backups/releases/<version>/`（root:root 0700） |
@@ -31,8 +31,9 @@
 | 智能待办与晨报 | 微信创建/完成待办、到点提醒（remind_at）、每日晨报（行程/待办/风险/新招标聚合推送） | remind_at 暂无 Web 编辑入口；晨报周末不补发 |
 | 周报与汇报 | 真实业务数据生成、编辑、保存、导出 | 生成内容仍需人工检查 |
 | 知识库 | 搜索、条目维护；快速记录与销售决策自动引用并标注出处 | 引用为确定性匹配，模型不得虚构知识 id |
-| 系统配置 | 加密保存 DeepSeek API Key 与 PushPlus Token、通知设置、招标调度、记账日志 | 主加密密钥只进后端受保护环境，页面不回显明文 |
-| 微信机器人 | 绑定、worker 自启动、持久化会话、图片/PDF 接入、outbox 单次投递 | 机器身份只获得声明的写入路由 |
+| 系统配置 | 加密保存 DeepSeek API Key、微信 Clawbot 状态、通知设置、招标调度、记账日志 | 主加密密钥只进后端受保护环境，页面不回显明文；微信是唯一外部通知通道 |
+| 微信机器人 | 绑定、worker 自启动、持久化会话、图片/PDF 接入、durable outbox 投递 | 微信 Clawbot 是唯一外部通知通道；上下文过期时消息留在 outbox，恢复后限速释放 |
+| AI 统一调度平台 | 独立 SQLite、任务/租约/重试/预算/用量、Agent 与规范版本、主动调度基础、管理 API/静态管理台、业务侧受限客户端 | 当前只完成 `local-simulated` 独立底座；业务 AI 入口、共享登录代理、真实供应商和生产服务均未切换 |
 | 方案辅助 | 只读兼容入口 | 按产品决策暂停写入与 AI 调用 |
 
 ## 技术结构
@@ -44,7 +45,7 @@ Cookie Session + CSRF + JSON API
         |
 Node.js 24 + node:http
         |
-SQLite migrations (0001–0028) + optimistic locking + soft delete + audit
+SQLite migrations (0001–0045) + optimistic locking + soft delete + audit
         |
 DeepSeek / AMap / WeChat Agent / browser voice
 ```
@@ -55,7 +56,9 @@ DeepSeek / AMap / WeChat Agent / browser voice
 | --- | --- |
 | `outputs/product-design-prototype/` | 正式 React 前端；`src/features/` 按域组织（salesWorkbench 页面已拆分至 `pages/` 子目录，`pages.jsx` 为桶文件） |
 | `backend/` | API、认证、迁移、AI、地图、微信、招标、差旅、待办、晨报等子域与服务脚本 |
+| `ai-platform/` | 独立 AI 任务、预算、调度、管理 API 与自有 SQLite 迁移；当前未接管业务调用 |
 | `shared/` | 前后端共享业务契约 |
+| `outputs/ai-platform-admin/` | AI 平台独立静态管理台；当前不挂入正式业务登录与导航 |
 | `scripts/` | 本地编排、密钥扫描、发布打包、生产预检/切换/冒烟与发布测试 |
 | `docs/` | 需求、架构、开发、验收、部署与版本记录；`docs/superpowers/` 存放蓝图/研究/报告 |
 
@@ -80,6 +83,7 @@ npm run dev:stop   # 停止本地服务
 ```bash
 npm run scan:secrets
 npm run test:deploy                                   # 根发布工具测试
+npm run test:ai-platform                              # 独立 AI 平台 37 项 + 业务客户端 11 项
 npm --prefix backend test                             # 后端全量（v0.8.3 基线 1276）
 CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   npm --prefix outputs/product-design-prototype run qa:local    # 前端本地 QA（v0.8.3 基线 434）

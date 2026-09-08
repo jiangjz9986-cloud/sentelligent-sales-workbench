@@ -38,7 +38,7 @@ class ConfigGateTests(TestCase):
                 "hospital_names": ["示例医院"],
             }
             self._write_config(root, [source])
-            config = load_config({"HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS": "1"}, root)
+            config = load_config({}, root)
             self.assertEqual(config.sources[0]["id"], "public-source")
             for invalid in (
                 [{**source, "enabled": "true"}],
@@ -48,4 +48,23 @@ class ConfigGateTests(TestCase):
                 with self.subTest(invalid=invalid):
                     self._write_config(root, invalid)
                     with self.assertRaises(ValueError):
-                        load_config({"HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS": "1"}, root)
+                        load_config({}, root)
+
+    def test_retired_notification_environment_is_ignored(self) -> None:
+        with TemporaryDirectory(prefix="hospital-tender-config-") as raw_root:
+            root = Path(raw_root)
+            source = {
+                "id": "public-source",
+                "name": "公开来源",
+                "adapter": "hospital_html",
+                "url": "https://public.example.test/notices",
+                "hospital_names": ["示例医院"],
+            }
+            self._write_config(root, [source])
+            retired_value = "-".join(("retired", "notification", "value"))
+            config = load_config({
+                "PUSHPLUS_TOKEN": retired_value,
+                "HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS": "not-a-boolean",
+            }, root)
+            self.assertFalse(hasattr(config, "pushplus_token"))
+            self.assertNotIn(retired_value, repr(config))

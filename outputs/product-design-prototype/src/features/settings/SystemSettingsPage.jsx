@@ -11,7 +11,6 @@ import {
   Power,
   RefreshCw,
   ScrollText,
-  Send,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -169,7 +168,6 @@ function StatusMark({ status, children }) {
 export function SystemSettingsPage({ apiClient, backendStatus, section = "security", role = "admin" }) {
   const [settings, setSettings] = useState(null);
   const [apiKey, setApiKey] = useState("");
-  const [pushplusToken, setPushplusToken] = useState("");
   const [passwordForm, setPasswordForm] = useState({ current: "", next: "", confirm: "" });
   const [integrationStatus, setIntegrationStatus] = useState({
     loading: true,
@@ -186,7 +184,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
   const [bookkeepingLogReloadToken, setBookkeepingLogReloadToken] = useState(0);
 
   async function loadSettings() {
-    if (section === "tender-schedule" || section === "bookkeeping-log") {
+    if (["notifications", "tender-schedule", "bookkeeping-log"].includes(section)) {
       setLoading(false);
       return;
     }
@@ -216,9 +214,14 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
 
   useEffect(() => {
     let disposed = false;
-    // member 只见安全子页，不发运行状态探测——微信绑定状态是 admin 门禁端点，
-    // 成员探测只会产生 403 日志噪音（v0.9.1 遗留⑥，本版收口）。
-    if (!apiClient?.isEnabled || backendStatus !== "connected" || role !== "admin") {
+    const readsNotifications = section === "notifications";
+    const readsTenderSchedule = section === "tender-schedule";
+    // 运行状态端点均为 admin 门禁。只读取当前子页需要的数据，避免成员
+    // 或其他设置子页产生无意义的 403 和后台探测。
+    if (!apiClient?.isEnabled
+      || backendStatus !== "connected"
+      || role !== "admin"
+      || (!readsNotifications && !readsTenderSchedule)) {
       setIntegrationStatus({ loading: false, error: "", weixin: null, hospitalHealth: null, scheduler: null });
       return () => {
         disposed = true;
@@ -235,18 +238,18 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       }
     };
     void Promise.all([
-      read("getWeixinBindingStatus", (value) => value ? {
+      readsNotifications ? read("getWeixinBindingStatus", (value) => value ? {
         status: value.status,
         message: value.message,
         updatedAt: value.updatedAt,
-      } : null),
-      read("getHospitalTenderHealth", (value) => value ? {
+      } : null) : Promise.resolve(null),
+      readsTenderSchedule ? read("getHospitalTenderHealth", (value) => value ? {
         status: value.status,
         sourceCount: value.sourceCount,
         staleCount: value.staleCount,
         latestRun: value.latestRun,
-      } : null),
-      read("getHospitalTenderScheduler", (value) => {
+      } : null) : Promise.resolve(null),
+      readsTenderSchedule ? read("getHospitalTenderScheduler", (value) => {
         const item = value?.item ?? value;
         return item ? {
           item: {
@@ -281,10 +284,12 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
             lastFailureAt: value.notification.lastFailureAt,
           } : null,
         } : null;
-      }),
+      }) : Promise.resolve(null),
     ]).then(([weixin, hospitalHealth, scheduler]) => {
       if (disposed) return;
-      const failed = weixin === null && hospitalHealth === null && scheduler === null;
+      const failed = readsNotifications
+        ? weixin === null
+        : hospitalHealth === null && scheduler === null;
       setIntegrationStatus({
         loading: false,
         error: failed ? "运行状态暂时无法读取。" : "",
@@ -358,70 +363,6 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       setError("");
     } catch {
       setError("DeepSeek API Key 清除失败，请稍后重试。");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function savePushplusToken(event) {
-    event.preventDefault();
-    if (!pushplusToken.trim()) {
-      setError("请输入 PushPlus Token。");
-      return;
-    }
-    setBusy("pushplus");
-    setNotice("");
-    try {
-      const result = await apiClient.savePushplusToken(pushplusToken);
-      setPushplusToken("");
-      setSettings((current) => ({ ...(current ?? {}), pushplus: result }));
-      setNotice("PushPlus Token 已加密保存，页面不会再次显示明文。");
-      setError("");
-    } catch {
-      setError("PushPlus Token 保存失败，请检查输入后重试。");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function clearPushplusToken() {
-    const confirmed = typeof window !== "undefined"
-      && window.confirm("确定清除 PushPlus Token 吗？清除后医院招标监测将停止发送通知。");
-    if (!confirmed) return;
-    setBusy("clear-pushplus");
-    setNotice("");
-    try {
-      const result = await apiClient.clearPushplusToken();
-      setSettings((current) => ({ ...(current ?? {}), pushplus: result }));
-      setNotice("PushPlus Token 已清除，医院招标通知已停用。");
-      setError("");
-    } catch {
-      setError("PushPlus Token 清除失败，请稍后重试。");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function testPushplusToken() {
-    setBusy("test-pushplus");
-    setNotice("");
-    try {
-      const result = await apiClient.testPushplusToken();
-      setSettings((current) => ({
-        ...(current ?? {}),
-        pushplus: {
-          ...(current?.pushplus ?? {}),
-          lastSuccessAt: result.testedAt,
-          lastFailureAt: null,
-          lastErrorCode: null,
-          lastDeliveryCount: result.notificationCount,
-          lastChunkCount: 1,
-        },
-      }));
-      setNotice("测试通知已发送，请在 PushPlus 中确认收到。");
-      setError("");
-    } catch {
-      setError("PushPlus 测试通知失败，请检查 Token 或稍后重试。");
     } finally {
       setBusy("");
     }
@@ -509,24 +450,28 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
   }
 
   const deepseek = settings?.deepseek;
-  const pushplus = settings?.pushplus;
-  const pushplusSourceLabel = pushplus?.source === "environment"
-    ? "部署环境"
-    : pushplus?.source === "settings" ? "加密配置" : "—";
   const schedulerState = integrationStatus.scheduler?.item ?? integrationStatus.scheduler ?? null;
   const schedulerRuns = Array.isArray(integrationStatus.scheduler?.runs)
     ? integrationStatus.scheduler.runs
     : [];
   const hospitalHealth = integrationStatus.hospitalHealth;
   const weixin = integrationStatus.weixin;
+  const weixinReady = ["logged_in", "authenticated"].includes(weixin?.status);
+  const notificationRuntimeStatus = backendStatus !== "connected"
+    ? backendStatus
+    : weixinReady ? "connected" : weixin?.status;
+  const notificationRuntimeLabel = backendStatus !== "connected"
+    ? "服务未连接"
+    : integrationStatus.loading
+      ? "读取中"
+      : integrationStatus.error
+        ? "状态不可用"
+        : weixinReady ? "Clawbot 在线" : bindingStatusLabel(weixin?.status);
   const schedulerStatus = !schedulerState
     ? undefined
     : schedulerState.lastStatus === "failed"
       ? "error"
       : schedulerState.enabled ? "connected" : "offline";
-  const integrationMeta = integrationStatus.loading
-    ? "读取中"
-    : integrationStatus.error ? "暂不可用" : "只读状态";
   const sectionMeta = {
     security: {
       eyebrow: "安全与 AI",
@@ -536,8 +481,8 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     },
     notifications: {
       eyebrow: "通知服务",
-      title: "PushPlus 通知",
-      description: "管理医院招标高相关公告通知，并发送不含客户数据的测试消息。",
+      title: "微信 Clawbot 通知",
+      description: "查看系统通知的微信 Clawbot 运行状态。通知入队、投递与失败重试由服务端统一管理。",
       icon: BellRing,
     },
     "tender-schedule": {
@@ -688,79 +633,53 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
       ) : null}
 
       {!loading && section === "notifications" ? (
-        <section className="settings-focused-section" data-testid="settings-notifications-section">
+        <section
+          className="settings-focused-section"
+          data-testid="settings-notifications-section"
+          data-notification-mode="read-only"
+        >
           <div className="settings-grid settings-grid-focused">
-            <Panel title="PushPlus 通知 Token" meta={statusLabel(pushplus?.status)} className="settings-card">
-              <div className="settings-card-icon pushplus"><BellRing size={20} /></div>
-              <p className="settings-description">用于医院招标监测的高相关公告通知。Token 只在服务端使用，测试通知不会带客户数据。</p>
+            <Panel title="微信 Clawbot 通知状态" meta="只读" className="settings-card settings-status-card">
+              <div className="settings-card-icon clawbot"><BellRing size={20} /></div>
+              <p className="settings-description">系统通知仅通过已绑定的微信 Clawbot 投递。本页只展示运行状态，不保存凭据，也不提供人工测试或清理操作。</p>
               <dl className="settings-facts">
-                <div><dt>状态</dt><dd><CheckCircle2 size={15} /> {statusLabel(pushplus?.status)}</dd></div>
-                <div><dt>来源</dt><dd>{pushplusSourceLabel}</dd></div>
-                <div><dt>当前掩码</dt><dd>{pushplus?.masked ?? "未配置"}</dd></div>
-                <div><dt>最近成功</dt><dd>{formatDate(pushplus?.lastSuccessAt)}</dd></div>
-                <div><dt>最近失败</dt><dd>{formatDate(pushplus?.lastFailureAt)}</dd></div>
-                {pushplus?.lastErrorCode ? <div><dt>失败原因</dt><dd>{pushplus.lastErrorCode}</dd></div> : null}
-                {pushplus?.lastDeliveryCount !== null && pushplus?.lastDeliveryCount !== undefined ? (
-                  <div><dt>最近发送</dt><dd>{pushplus.lastDeliveryCount} 条 / {pushplus.lastChunkCount ?? 0} 片</dd></div>
-                ) : null}
+                <div><dt>通知通道</dt><dd>微信 Clawbot</dd></div>
+                <div><dt>运行状态</dt><dd><StatusMark status={notificationRuntimeStatus}>{notificationRuntimeLabel}</StatusMark></dd></div>
+                <div><dt>Clawbot 会话</dt><dd>{integrationStatus.loading ? "读取中" : bindingStatusLabel(weixin?.status)}</dd></div>
+                <div><dt>状态更新时间</dt><dd>{formatDate(weixin?.updatedAt)}</dd></div>
               </dl>
-              {pushplus?.source === "environment" ? (
-                <p className="settings-inline-note">当前 Token 来自部署环境；在此保存后会切换为加密配置。</p>
-              ) : pushplus?.fallbackSuppressed ? (
-                <p className="settings-inline-note">已显式清除当前 Token，部署环境中的同名回退也已停用。</p>
-              ) : null}
-              <form className="settings-key-form" onSubmit={savePushplusToken}>
-                <label>
-                  <span>{pushplus?.configured ? "替换 PushPlus Token" : "设置 PushPlus Token"}</span>
-                  <input
-                    type="password"
-                    value={pushplusToken}
-                    onChange={(event) => setPushplusToken(event.target.value)}
-                    autoComplete="new-password"
-                    placeholder="仅在此处输入，不会写入浏览器存储"
-                    aria-label="PushPlus Token"
-                  />
-                </label>
-                <div className="settings-button-row">
-                  <button className="primary-button" type="submit" disabled={busy !== ""}>
-                    <KeyRound size={16} /> {busy === "pushplus" ? "保存中…" : "安全保存"}
-                  </button>
-                  {pushplus?.configured ? (
-                    <>
-                      <button className="ghost-button" type="button" onClick={testPushplusToken} disabled={busy !== ""}>
-                        <Send size={16} /> {busy === "test-pushplus" ? "发送中…" : "发送测试通知"}
-                      </button>
-                      <button className="danger-button" type="button" onClick={clearPushplusToken} disabled={busy !== ""}>
-                        <Trash2 size={16} /> {busy === "clear-pushplus" ? "清除中…" : "清除"}
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              </form>
+              {weixin?.message ? <p className="settings-inline-note">{weixin.message}</p> : null}
             </Panel>
 
-            <Panel title="通知运行状态" meta={integrationMeta} className="settings-card settings-status-card">
+            <Panel title="投递运行说明" meta="服务端管理" className="settings-card settings-status-card">
               <div className="settings-status-list">
                 <div className="settings-status-item">
                   <div>
-                    <strong>PushPlus 通道</strong>
-                    <span>高相关新增公告按批次聚合发送</span>
+                    <strong>服务连接</strong>
+                    <span>通知读取、入队与状态回写依赖后端连接</span>
                   </div>
-                  <StatusMark status={pushplus?.configured ? "connected" : "offline"}>
-                    {pushplus?.configured ? "已配置" : "未配置"}
+                  <StatusMark status={backendStatus}>
+                    {backendStatus === "connected" ? "已连接" : backendStatus === "connecting" ? "连接中" : "未连接"}
                   </StatusMark>
                 </div>
                 <div className="settings-status-item">
                   <div>
-                    <strong>最近投递</strong>
-                    <span>失败后保留批次，由下一次运行重试</span>
+                    <strong>Clawbot 登录与账号绑定</strong>
+                    <span>保持微信 Clawbot 在线，并完成当前业务账号绑定</span>
                   </div>
-                  <StatusMark status={pushplus?.lastFailureAt ? "error" : pushplus?.lastSuccessAt ? "connected" : undefined}>
-                    {pushplus?.lastFailureAt ? "需检查" : pushplus?.lastSuccessAt ? "已送达" : "暂无记录"}
+                  <StatusMark status={weixin?.status}>
+                    {integrationStatus.loading ? "读取中" : bindingStatusLabel(weixin?.status)}
                   </StatusMark>
                 </div>
+                <div className="settings-status-item">
+                  <div>
+                    <strong>账号绑定与会话上下文</strong>
+                    <span>服务端在投递前校验业务账号绑定、收件人和可用会话上下文</span>
+                  </div>
+                  <StatusMark>服务端校验</StatusMark>
+                </div>
               </div>
-              <p className="settings-inline-note">测试通知只验证通道，不包含客户名称、公告正文或业务原始数据。</p>
+              <p className="settings-inline-note">通知由服务端自动入队并按策略投递；临时失败会保留队列并重试，无需在本页手工触发。</p>
             </Panel>
           </div>
         </section>

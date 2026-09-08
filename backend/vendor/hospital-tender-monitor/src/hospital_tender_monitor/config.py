@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -206,7 +206,6 @@ def _source_text(source: Mapping[str, Any], key: str, *, required: bool = True) 
 class AppConfig:
     project_root: Path
     database_path: Path
-    pushplus_token: str = field(repr=False)
     sources: tuple[Mapping[str, Any], ...]
     keywords: Mapping[str, Any]
     customer_hospitals: tuple[Mapping[str, Any], ...] = ()
@@ -221,7 +220,6 @@ class AppConfig:
         return (
             "AppConfig("
             f"project_root={self.project_root!r}, database_path={self.database_path!r}, "
-            f"notifications_configured={bool(self.pushplus_token)!r}, "
             f"sources={self.sources!r}, keywords={self.keywords!r}, "
             f"customer_hospitals={len(self.customer_hospitals)!r}, "
             f"timezone={self.timezone!r}, schedule_time={self.schedule_time!r}, "
@@ -231,11 +229,7 @@ class AppConfig:
 
 
 def load_config(env: Mapping[str, str], project_root: Path) -> AppConfig:
-    """Load file and environment configuration without ever exposing a token."""
-    token = env.get("PUSHPLUS_TOKEN", "").strip()
-    notifications_disabled = _boolean(env, "HOSPITAL_TENDER_MONITOR_DISABLE_NOTIFICATIONS", False)
-    if not token and not notifications_disabled:
-        raise ValueError("PUSHPLUS_TOKEN is required")
+    """Load collector configuration without any outbound notification credentials."""
     root = Path(project_root).resolve()
     config_dir = root / "config"
     raw_sources = _read_json(config_dir / "sources.json", "sources")
@@ -285,7 +279,6 @@ def load_config(env: Mapping[str, str], project_root: Path) -> AppConfig:
     return AppConfig(
         project_root=root,
         database_path=database_path,
-        pushplus_token=token,
         sources=tuple(sources),
         keywords=_freeze(keywords_document),
         customer_hospitals=customer_hospitals,
