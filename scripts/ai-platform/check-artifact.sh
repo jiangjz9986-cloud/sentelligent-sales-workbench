@@ -49,11 +49,24 @@ parse_arguments() {
 
 unsafe_member() {
   local member=$1
+  local normalized basename
+  normalized=$(printf '%s' "$member" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  basename=${normalized##*/}
   [[ "$member" != /* ]] || return 0
   [[ "$member" != *"../"* && "$member" != *"/.." && "$member" != ".." ]] || return 0
-  [[ ! "$member" =~ (^|/)(\.runtime|runtime|logs?|backups?)(/|$) ]] || return 0
-  [[ ! "$member" =~ (^|/)(\.env|backend\.env|frontend\.env|[^/]+\.(sqlite|sqlite3|db|sqlite-wal|sqlite-shm|log|out|pem|key|p12|pfx))$ ]] || return 0
-  [[ ! "$member" =~ (^|/)[^/]*(secret|credential|token|api[-_]?key)[^/]*$ ]] || return 0
+  [[ ! "$normalized" =~ (^|/)(\.runtime|runtime|logs?|backups?)(/|$) ]] || return 0
+  [[ ! "$normalized" =~ (^|/)(\.env|backend\.env|frontend\.env|[^/]+\.(sqlite|sqlite3|db|sqlite-wal|sqlite-shm|log|out|pem|key|p12|pfx))$ ]] || return 0
+
+  # Source identifiers such as `shortcut_webhook_tokens.mjs` are not secret
+  # files. Keep name-only rejection for non-source credential artifacts and
+  # let the release content scanner inspect source contents separately.
+  case "$basename" in
+    *.c|*.cc|*.cpp|*.cjs|*.css|*.go|*.h|*.hpp|*.html|*.java|*.js|*.jsx|*.kt|*.mjs|*.php|*.py|*.rb|*.rs|*.sh|*.sql|*.swift|*.ts|*.tsx|*.vue|*.zsh)
+      return 1
+      ;;
+  esac
+
+  [[ ! "$normalized" =~ (^|/)[^/]*(secret|credential|token|api[-_]?key)[^/]*$ ]] || return 0
   return 1
 }
 
