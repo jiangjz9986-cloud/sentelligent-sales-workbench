@@ -133,6 +133,7 @@ function validEnvironment(origin, databaseUrl) {
       `HOSPITAL_TENDER_SYNC_TOKEN=${hospitalTenderSyncToken}`,
       `WEIXIN_AGENT_API_TOKEN=${weixinAgentApiToken}`,
       "WEIXIN_AGENT_OWNER=fixture-owner",
+      "WEIXIN_AGENT_SESSION_HOME=/opt/sentelligent-sales-workbench/weixin-session",
       "WEIXIN_ALLOWED_SENDER_IDS=fixture-sender",
       "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED=true",
       "WEIXIN_BOOKKEEPING_OWNER=fixture-owner",
@@ -1028,6 +1029,8 @@ describe("production preflight", () => {
 
       const cases = [
         ["disabled", "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED", "false"],
+        ["blank session home", "WEIXIN_AGENT_SESSION_HOME", ""],
+        ["wrong session home", "WEIXIN_AGENT_SESSION_HOME", "/home/sentelligent"],
         ["owner mismatch", "WEIXIN_BOOKKEEPING_OWNER", "another-owner"],
         ["blank sender", "WEIXIN_BOOKKEEPING_SENDER_ID", ""],
         ["sender not allowlisted", "WEIXIN_BOOKKEEPING_SENDER_ID", "other-sender"],

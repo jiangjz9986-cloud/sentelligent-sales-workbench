@@ -131,6 +131,7 @@ const REQUIRED_PROTECTED_SERVICES = Object.freeze([
 const DEFAULT_PROJECT_PATH = "/opt/sentelligent-sales-workbench";
 const PROJECT_CURRENT_PATH = `${DEFAULT_PROJECT_PATH}/current`;
 const PROJECT_RELEASES_PATH = `${DEFAULT_PROJECT_PATH}/releases`;
+const WEIXIN_SESSION_HOME = `${DEFAULT_PROJECT_PATH}/weixin-session`;
 const FRONTEND_ENVIRONMENT_FILE = `${DEFAULT_PROJECT_PATH}/config/frontend.env`;
 const CADDY_CONFIG_PATH = "/etc/caddy/Caddyfile";
 const PROJECT_NODE_EXECUTABLE =
@@ -295,6 +296,7 @@ function hasWeixinBookkeepingConfirmationConfiguration(environment) {
   const pollMs = Number(environment.WEIXIN_OUTBOX_POLL_MS);
   return (
     environment.WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED === "true" &&
+    environment.WEIXIN_AGENT_SESSION_HOME === WEIXIN_SESSION_HOME &&
     typeof owner === "string" &&
     owner.length > 0 &&
     owner.length <= 200 &&
@@ -2738,8 +2740,8 @@ export async function runProductionPreflight({
     makeCheck(
       "env.weixinBookkeepingConfirmation",
       hasWeixinBookkeepingConfirmationConfiguration(environment),
-      "WeChat bookkeeping confirmation is enabled for the bound owner and direct-message sender with a bounded outbox poll interval.",
-      "WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.",
+      "WeChat bookkeeping confirmation is enabled for the bound owner and direct-message sender, uses the worker-owned session directory, and has a bounded outbox poll interval.",
+      `WEIXIN_AGENT_SESSION_HOME must be ${WEIXIN_SESSION_HOME}; WEIXIN_BOOKKEEPING_CONFIRMATION_ENABLED must be true; WEIXIN_BOOKKEEPING_OWNER must match WEIXIN_AGENT_OWNER; the sender must be allowlisted; and WEIXIN_OUTBOX_POLL_MS must be 500-60000.`,
     ),
     makeCheck(
       "env.secureCookie",
