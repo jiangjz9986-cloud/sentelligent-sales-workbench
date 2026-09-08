@@ -8,7 +8,7 @@
 - 分支：`codex/ai-unified-platform-v1`。
 - 独立工作树：`/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/ai-unified-platform-v1`。
 - 开发基线：`741d104e79e2c81a040a2e9ef84bd635c294f1b9`。
-- 独立实现提交：`0d693152b3c3d099d8e04a634d4786b874d2e19a`。
+- 独立实现提交：`8732328e6bec7acd1e01597dacd6240d45ac782f`。
 - 平台版本：`0.1.0`。
 - 目标模型配置：`gpt-5.6-luna / max`。
 - 当前执行模式：`local-simulated`；供应商注册仍为本地模拟供应商，不代表已经调用真实模型。
