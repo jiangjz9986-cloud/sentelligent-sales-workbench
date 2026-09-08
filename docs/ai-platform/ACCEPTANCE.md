@@ -1,6 +1,24 @@
 # AI 平台验收矩阵
 
-状态全部从 `未执行` 开始。代码存在、模拟供应商返回或页面截图均不能替代未运行的测试；每项需要绑定精确提交、命令和结果。
+本矩阵对应独立实现提交 `0d693152b3c3d099d8e04a634d4786b874d2e19a`。本轮只记录本地模拟环境中实际执行的证据；未列入“本轮实际证据”的用例继续保持 `未执行`，不能因为代码存在、模拟供应商返回或页面截图而自动视为通过。
+
+## 本轮实际证据
+
+| 范围 | 当前结果 | 精确证据 |
+| --- | --- | --- |
+| ISO-01、ISO-02 | 通过（本地） | 独立工作树和分支；临时端口 `19997`/`19998`，独立 runtime、PID、SQLite、日志和备份目录；未修改另一升级工作树 |
+| SEC-02、SEC-03 | 通过（已覆盖子项） | `npm test`、`node --test ai-platform/tests/http-server.test.js`；owner 隔离、跨 owner 读取/取消、管理员作用域和只读管理员写入拒绝 |
+| SEC-06 | 通过（已覆盖子项） | `npm test`；凭据、lease token、URL、请求/响应元数据和审计内容脱敏测试 |
+| SEC-07 | 通过（模拟门禁） | `node --test ai-platform/tests/task-service.test.js`；local simulation 阻断外部模型，外部供应商还需显式配置与 Agent 策略 |
+| TASK-01 至 TASK-05 | 通过（已覆盖子项） | `npm test`；幂等、生命周期、租约恢复、重试、取消、超时和预算上限测试 |
+| COST-01、COST-03、COST-04、COST-05 | 通过（模拟/台账） | `npm test`；尝试级用量、原子预算、未知费用、重试计量和功能费用分账测试 |
+| AGENT-02、AGENT-03 | 通过（独立管理服务） | `npm test`；保存草稿不发布、版本固定、发布、回滚、乐观锁和审计测试 |
+| SCHED-01 至 SCHED-04 | 通过（调度服务基础） | `node --test ai-platform/tests/schedule-service.test.js`；页面无关的服务执行、去重、暂停竞态、stale run 恢复和 fencing |
+| UI-01 | 通过（本地 API/静态台） | `node --test ai-platform/tests/http-server.test.js`；管理台静态入口和真实管理 API 联调通过；业务登录代理尚未整合 |
+| OPS-02 | 通过（临时库） | `backup.sh` 与 `restore.sh` 演练；运行中拒绝、`--force` 门禁、SQLite 完整性、旧库保留均通过 |
+| OPS-05 | 通过（边界验证） | 全部运行只使用 `local-simulated`、本地模拟供应商和临时目录；没有生产部署、付费调用或真实通知 |
+
+本轮尚未执行或尚未满足的重点包括：SEC-01 的完整过期/重放矩阵、SEC-04/SEC-05 工具与业务确认整合、COST-02 历史价格变更演练、M3/M5/M6 业务入口接入、媒体清理、UI-02/UI-03/UI-04 的共享登录与最终浏览器证据、OPS-01/OPS-03/OPS-04，以及 INT-* 和真实模型质量验收。它们必须在共享整合或另行授权后重新执行。
 
 | ID | 用例 | 通过标准 | 阶段 |
 | --- | --- | --- | --- |

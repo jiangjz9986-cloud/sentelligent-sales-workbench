@@ -1,0 +1,49 @@
+# Render this template before installation. Replace every @...@ placeholder
+# with an absolute path or service account value. Keep the environment file
+# outside the release tree and mode 0600; never put a provider secret here.
+
+[Unit]
+Description=Sentelligent AI unified platform
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=@PROJECT_ROOT@/ai-platform/src/cli.js
+
+[Service]
+Type=forking
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@PROJECT_ROOT@
+EnvironmentFile=/etc/sentelligent/ai-platform.env
+Environment=AI_PLATFORM_OPS_NODE=@NODE_BIN@
+Environment=NODE_ENV=production
+Environment=AI_PLATFORM_HOST=127.0.0.1
+Environment=AI_PLATFORM_PORT=18997
+Environment=AI_PLATFORM_TARGET_MODEL=gpt-5.6-luna
+Environment=AI_PLATFORM_TARGET_REASONING_EFFORT=max
+# Keep the first deployment local-only until an approved provider change.
+Environment=AI_PLATFORM_EXECUTION_MODE=local-simulated
+Environment=AI_PLATFORM_EXTERNAL_PROVIDERS=false
+RuntimeDirectory=sentelligent-ai-platform
+RuntimeDirectoryMode=0700
+PIDFile=@RUNTIME_DIR@/ai-platform.pid
+ExecStartPre=/usr/bin/test -x @NODE_BIN@
+ExecStartPre=/usr/bin/test -f @PROJECT_ROOT@/ai-platform/src/cli.js
+ExecStart=/bin/bash @PROJECT_ROOT@/scripts/ai-platform/start.sh --root=@PROJECT_ROOT@ --node=@NODE_BIN@ --host=127.0.0.1 --port=18997 --runtime-dir=@RUNTIME_DIR@ --pid-file=@RUNTIME_DIR@/ai-platform.pid --runtime-file=@RUNTIME_DIR@/runtime.json --database=@DATABASE_DIR@/ai-platform.sqlite --log-file=@LOG_DIR@/ai-platform.log
+ExecStop=/bin/bash @PROJECT_ROOT@/scripts/ai-platform/stop.sh --root=@PROJECT_ROOT@ --node=@NODE_BIN@ --host=127.0.0.1 --port=18997 --runtime-dir=@RUNTIME_DIR@ --pid-file=@RUNTIME_DIR@/ai-platform.pid --runtime-file=@RUNTIME_DIR@/runtime.json --database=@DATABASE_DIR@/ai-platform.sqlite --log-file=@LOG_DIR@/ai-platform.log --timeout-seconds=25
+Restart=on-failure
+RestartSec=5
+# CentOS 7 / systemd 219 spelling is intentional.
+StartLimitInterval=300
+StartLimitBurst=5
+TimeoutStartSec=75
+TimeoutStopSec=35
+KillMode=process
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=@RUNTIME_DIR@ @DATABASE_DIR@ @LOG_DIR@
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

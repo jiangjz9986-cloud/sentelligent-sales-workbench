@@ -1,0 +1,100 @@
+import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+
+function text(value, fallback, max = 500) {
+  const candidate = value === undefined || value === null || value === "" ? fallback : String(value);
+  if (!candidate || candidate.length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(candidate)) {
+    throw new Error("invalid AI platform configuration");
+  }
+  return candidate;
+}
+
+function positiveInteger(value, fallback, max) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) throw new Error("invalid AI platform numeric configuration");
+  return parsed;
+}
+
+function booleanValue(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (value === true || value === "true" || value === "1") return true;
+  if (value === false || value === "false" || value === "0") return false;
+  throw new Error("invalid AI platform boolean configuration");
+}
+
+export function loadAiPlatformConfig(overrides = {}, env = process.env) {
+  const nodeEnv = text(overrides.nodeEnv ?? env.NODE_ENV, "development", 40);
+  const host = text(overrides.host ?? env.AI_PLATFORM_HOST, "127.0.0.1", 200);
+  const port = positiveInteger(overrides.port ?? env.AI_PLATFORM_PORT, 18997, 65_535);
+  const databasePathValue = text(
+    overrides.databasePath ?? env.AI_PLATFORM_DATABASE,
+    ".runtime/ai-platform/ai-platform.sqlite",
+    1_000,
+  );
+  const databasePath = databasePathValue === ":memory:"
+    ? databasePathValue
+    : (isAbsolute(databasePathValue) ? databasePathValue : resolve(PROJECT_ROOT, databasePathValue));
+  const authSecret = text(overrides.authSecret ?? env.AI_PLATFORM_AUTH_SECRET, "ai-platform-development-secret-change-me", 4_000);
+  const externalProvidersEnabled = booleanValue(
+    overrides.externalProvidersEnabled ?? env.AI_PLATFORM_EXTERNAL_PROVIDERS,
+    false,
+  );
+  const staticDirectoryValue = text(
+    overrides.staticDirectory ?? env.AI_PLATFORM_STATIC_DIRECTORY,
+    "outputs/ai-platform-admin",
+    2_000,
+  );
+  const staticDirectory = isAbsolute(staticDirectoryValue)
+    ? staticDirectoryValue
+    : resolve(PROJECT_ROOT, staticDirectoryValue);
+  const config = {
+    nodeEnv,
+    host,
+    port,
+    databasePath,
+    authSecret,
+    externalProvidersEnabled,
+    staticDirectory,
+    targetModel: text(
+      overrides.targetModel ?? env.AI_PLATFORM_TARGET_MODEL,
+      "gpt-5.6-luna",
+      200,
+    ),
+    targetReasoningEffort: text(
+      overrides.targetReasoningEffort ?? env.AI_PLATFORM_TARGET_REASONING_EFFORT,
+      "max",
+      40,
+    ),
+    executionMode: text(
+      overrides.executionMode ?? env.AI_PLATFORM_EXECUTION_MODE,
+      "local-simulated",
+      40,
+    ),
+    bodyLimitBytes: positiveInteger(overrides.bodyLimitBytes ?? env.AI_PLATFORM_BODY_LIMIT_BYTES, 512 * 1024, 8 * 1024 * 1024),
+    taskLeaseMs: positiveInteger(overrides.taskLeaseMs ?? env.AI_PLATFORM_TASK_LEASE_MS, 60_000, 10 * 60_000),
+    taskPollMs: positiveInteger(overrides.taskPollMs ?? env.AI_PLATFORM_TASK_POLL_MS, 500, 60_000),
+    taskConcurrency: positiveInteger(overrides.taskConcurrency ?? env.AI_PLATFORM_TASK_CONCURRENCY, 2, 20),
+    taskOwnerConcurrency: positiveInteger(overrides.taskOwnerConcurrency ?? env.AI_PLATFORM_TASK_OWNER_CONCURRENCY, 2, 20),
+    taskQueueLimit: positiveInteger(overrides.taskQueueLimit ?? env.AI_PLATFORM_TASK_QUEUE_LIMIT, 1_000, 100_000),
+    taskRetentionDays: positiveInteger(overrides.taskRetentionDays ?? env.AI_PLATFORM_TASK_RETENTION_DAYS, 30, 3650),
+    adminEnabled: booleanValue(overrides.adminEnabled ?? env.AI_PLATFORM_ADMIN_ENABLED, true),
+  };
+  if (!new Set(["local-simulated", "external-provider"]).has(config.executionMode)) {
+    throw new Error("AI_PLATFORM_EXECUTION_MODE is invalid");
+  }
+  if (config.executionMode === "external-provider" && !config.externalProvidersEnabled) {
+    throw new Error("external-provider execution requires AI_PLATFORM_EXTERNAL_PROVIDERS=true");
+  }
+  if (nodeEnv === "production") {
+    if (config.authSecret.length < 32 || config.authSecret.includes("change-me")) {
+      throw new Error("AI_PLATFORM_AUTH_SECRET must be a strong production secret");
+    }
+    if (config.host === "0.0.0.0" && !config.externalProvidersEnabled) {
+      throw new Error("public AI platform must explicitly configure provider policy");
+    }
+  }
+  return Object.freeze(config);
+}
