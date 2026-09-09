@@ -92,6 +92,11 @@ export function sha256(value) {
   return createHash("sha256").update(input).digest("hex");
 }
 
+export function taskEvidenceInput(input) {
+  const { mediaRef: _mediaRef, ...evidence } = input;
+  return evidence;
+}
+
 export function requireText(value, name, { max = 500, pattern = null } = {}) {
   if (typeof value !== "string" || !value.trim()) {
     throw new AiContractError(`${name} is required`, "invalid_request");

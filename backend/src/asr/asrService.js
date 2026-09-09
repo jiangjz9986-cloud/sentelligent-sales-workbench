@@ -1,4 +1,5 @@
 import * as fsPromises from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import {
@@ -1122,7 +1123,7 @@ export function createAsrService(config = {}, dependencies = {}) {
         try {
           let providerResult;
           if (useAiPlatform) {
-            const descriptor = safePlatformDescriptor({
+            let descriptor = safePlatformDescriptor({
               uploaded,
               normalized,
               purpose,
@@ -1131,20 +1132,31 @@ export function createAsrService(config = {}, dependencies = {}) {
             if (typeof aiPlatformRuntime?.runTask !== "function") {
               throw contractError("ASR_NOT_CONFIGURED", 503, "ASR platform is not configured");
             }
-            const platformResult = await processingGuard.race(aiPlatformRuntime.runTask({
+            let uploadedMedia;
+            try {
+              if (config.aiPlatformExecutionMode === "external-provider") {
+                if (typeof aiPlatformRuntime.uploadMedia !== "function") throw contractError("ASR_NOT_CONFIGURED", 503, "ASR media transport is unavailable");
+                const audio = await processingGuard.race(fsImpl.readFile(normalized.outputPath));
+                descriptor = { ...descriptor, sha256: createHash("sha256").update(audio).digest("hex") };
+                uploadedMedia = await processingGuard.race(aiPlatformRuntime.uploadMedia({ bytes: audio, media: descriptor, owner, actor: owner, signal: controller.signal }));
+              }
+              const platformResult = await processingGuard.race(aiPlatformRuntime.runTask({
               taskType: AI_PLATFORM_TASK_TYPE,
               feature: AI_PLATFORM_FEATURE,
               channel: "web",
               owner,
               actor: owner,
               subject: { type: "asr_audio", id: `sha256-${descriptor.sha256}` },
-              input: Object.freeze({ media: descriptor }),
+              input: Object.freeze({ media: descriptor, ...(uploadedMedia ? { mediaRef: uploadedMedia.id } : {}) }),
               evidenceDigest: descriptor.sha256,
               priority: "interactive",
               idempotencyKey,
               signal: controller.signal,
             }));
-            providerResult = { text: platformTranscript(platformResult) };
+              providerResult = { text: platformTranscript(platformResult) };
+            } finally {
+              if (uploadedMedia) await aiPlatformRuntime.discardMedia({ id: uploadedMedia.id, owner, actor: owner });
+            }
           } else {
             providerResult = await processingGuard.race(provider.transcribe({
               audioPath: normalized.outputPath,

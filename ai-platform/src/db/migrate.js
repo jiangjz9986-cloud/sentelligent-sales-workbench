@@ -4,6 +4,8 @@ import * as core from "./migrations/0001_core.mjs";
 import * as seed from "./migrations/0002_seed.mjs";
 import * as control from "./migrations/0003_operational_control.mjs";
 import * as authReplays from "./migrations/0004_auth_replays.mjs";
+import * as mediaObjects from "./migrations/0005_media_objects.mjs";
+import * as priceCalendars from "./migrations/0006_price_calendars.mjs";
 import { withImmediateTransaction } from "../utils.js";
 
 const MIGRATIONS = [
@@ -11,6 +13,8 @@ const MIGRATIONS = [
   { migration: seed, file: "0002_seed.mjs" },
   { migration: control, file: "0003_operational_control.mjs" },
   { migration: authReplays, file: "0004_auth_replays.mjs" },
+  { migration: mediaObjects, file: "0005_media_objects.mjs" },
+  { migration: priceCalendars, file: "0006_price_calendars.mjs" },
 ];
 
 function migrationChecksum(file) {

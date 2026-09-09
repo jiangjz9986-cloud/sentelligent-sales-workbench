@@ -65,7 +65,9 @@ export const mockProvider = Object.freeze({
 export function createProviderRegistry({ providers = null, config = {}, env = process.env, fetchImpl = fetch } = {}) {
   const configured = providers ?? [
     mockProvider,
-    ...(config.externalProvidersEnabled ? (config.providerPolicies ?? []).map((policy) => createOpenAiCompatibleProvider(policy, { env, fetchImpl })) : []),
+    ...(config.externalProvidersEnabled ? (config.providerPolicies ?? []).map((policy) => createOpenAiCompatibleProvider(policy, {
+      env, fetchImpl, pdfOptions: { command: config.pdfImageCommand ?? "pdftoppm", ...(config.mediaDirectory ? { tempRoot: config.mediaDirectory } : {}) },
+    })) : []),
   ];
   if (new Set(configured.map((provider) => provider.id)).size !== configured.length) throw new Error("duplicate AI provider registration");
   const map = new Map(configured.map((provider) => [provider.id, provider]));

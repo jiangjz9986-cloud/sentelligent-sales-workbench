@@ -46,7 +46,7 @@ test("migration schema and checksum ledger roll back together on failure", () =>
     assert.equal(db.prepare("SELECT count(*) n FROM sqlite_schema WHERE name = 'providers'").get().n, 0);
     assert.equal(db.prepare("SELECT count(*) n FROM platform_migrations").get().n, 0);
     migrateAiPlatformDatabase(db);
-    assert.equal(db.prepare("SELECT count(*) n FROM platform_migrations").get().n, 4);
+    assert.equal(db.prepare("SELECT count(*) n FROM platform_migrations").get().n, 6);
     const unchanged = readOperationalControl(db);
     assert.throws(
       () => updateOperationalControl(db, { paused: true, expectedGeneration: 0, identity: { ...identity, scopes: ["ai:task:create"] } }),

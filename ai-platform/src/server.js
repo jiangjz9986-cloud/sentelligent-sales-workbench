@@ -6,13 +6,16 @@ import { basename, extname, relative, resolve, sep } from "node:path";
 import { loadAiPlatformConfig } from "./config.js";
 import { openAiPlatformDatabase } from "./db/index.js";
 import { asPlatformError, errorBody, AiPlatformError } from "./errors.js";
-import { authenticateRequest, consumeRequestNonce } from "./auth/internalAuth.js";
+import { authenticateRequest, consumeRequestNonce, verifyServiceToken } from "./auth/internalAuth.js";
 import { createRequestBinding } from "../../shared/aiPlatformRequestAuth.mjs";
 import { createProviderRegistry } from "./providers/mockProvider.js";
 import { createTaskService } from "./tasks/taskService.js";
 import { createAdminService } from "./admin/adminService.js";
 import { createScheduleService } from "./schedules/scheduleService.js";
 import { readOperationalControl, updateOperationalControl } from "./operations/control.js";
+import { createMediaStore } from "./media/store.js";
+import { applyDeploymentPolicy, normalizeDeploymentPolicy } from "./operations/deploymentPolicy.js";
+import { sha256 } from "../../shared/aiPlatformContract.mjs";
 import { safeLimit, safeOffset } from "./utils.js";
 
 const PACKAGE_VERSION = "0.1.0";
@@ -73,8 +76,12 @@ function methodNotAllowed(response, requestId, allow) {
   }, requestId, { Allow: allow });
 }
 
-async function readJsonBody(request, maxBytes) {
-  if (requestBodies.has(request)) return requestBodies.get(request).value;
+async function readRequestBytes(request, maxBytes) {
+  if (requestBodies.has(request)) {
+    const cached = requestBodies.get(request).raw;
+    if (cached.length > maxBytes) throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
+    return cached;
+  }
   const declared = Number(request.headers["content-length"] ?? 0);
   if (Number.isSafeInteger(declared) && declared > maxBytes) {
     throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
@@ -86,11 +93,15 @@ async function readJsonBody(request, maxBytes) {
     if (size > maxBytes) throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
     chunks.push(chunk);
   }
-  if (!size) {
-    requestBodies.set(request, { raw: Buffer.alloc(0), value: {} });
-    return {};
-  }
   const raw = Buffer.concat(chunks);
+  requestBodies.set(request, { raw });
+  return raw;
+}
+
+async function readJsonBody(request, maxBytes) {
+  const raw = await readRequestBytes(request, maxBytes);
+  if (!raw.length) return {};
+  if (requestBodies.get(request).value) return requestBodies.get(request).value;
   const text = raw.toString("utf8");
   try {
     const parsed = JSON.parse(text);
@@ -242,6 +253,10 @@ export function createAiPlatformRuntime(options = {}) {
   const config = loadAiPlatformConfig(options.config ?? options, options.env ?? process.env);
   const ownsDatabase = !options.db;
   const db = options.db ?? openAiPlatformDatabase(config.databasePath);
+  const mediaStore = options.mediaStore ?? (config.mediaDirectory ? createMediaStore({
+    db, directory: config.mediaDirectory, encryptionKey: config.mediaEncryptionKey,
+    maxBytes: config.mediaMaxBytes, capacityBytes: config.mediaCapacityBytes,
+  }) : null);
   const providerRegistry = options.providerRegistry ?? createProviderRegistry({
     config,
     env: options.env ?? process.env,
@@ -251,6 +266,7 @@ export function createAiPlatformRuntime(options = {}) {
     db,
     config,
     providerRegistry,
+    mediaStore,
     clock: options.clock,
     logger: options.logger,
   });
@@ -268,6 +284,14 @@ export function createAiPlatformRuntime(options = {}) {
   });
   if (options.autoStart !== false && !options.taskService) taskService.start();
   if (options.autoStart !== false && !options.scheduleService) scheduleService.start();
+  mediaStore?.sweep();
+  const mediaSweepTimer = mediaStore ? setInterval(() => {
+    try { mediaStore.sweep(); } catch {
+      taskService.pause?.();
+      options.logger?.error?.("media cleanup failed; task execution paused");
+    }
+  }, 5_000) : null;
+  mediaSweepTimer?.unref?.();
   let closing = null;
   return Object.freeze({
     config,
@@ -276,6 +300,7 @@ export function createAiPlatformRuntime(options = {}) {
     taskService,
     adminService,
     scheduleService,
+    mediaStore,
     async drain() {
       taskService.pause?.();
       scheduleService.stop?.();
@@ -290,6 +315,8 @@ export function createAiPlatformRuntime(options = {}) {
           await scheduleService.drain?.();
           await taskService.drain?.();
           await taskService.close?.();
+          clearInterval(mediaSweepTimer);
+          mediaStore?.sweep();
           if (ownsDatabase) db.close();
         })().catch((error) => {
           closing = null;
@@ -313,7 +340,11 @@ export function createServer(options = {}) {
     }
     let requestBinding = null;
     if (config.requestBindingRequired) {
-      await readJsonBody(request, config.bodyLimitBytes);
+      const match = String(request.headers.authorization ?? "").match(/^Bearer\s+(.+)$/iu);
+      if (!match) throw new AiPlatformError("authentication required", { code: "missing_auth", status: 401 });
+      verifyServiceToken(match[1], { secret: config.authSecret, expectedIssuer: config.trustedIssuer, requiredScopes: scopes });
+      const upload = request.method === "POST" && new URL(request.url, "http://internal").pathname === API_PREFIX + "/media";
+      await readRequestBytes(request, upload ? config.mediaMaxBytes : config.bodyLimitBytes);
       requestBinding = createRequestBinding({
         method: request.method,
         path: request.url,
@@ -611,13 +642,38 @@ export function createServer(options = {}) {
     const suffix = url.pathname.slice(API_PREFIX.length);
     const parts = pathParts(suffix);
     if (parts[0] === "admin") return handleAdmin(request, response, requestId, url);
+    if (parts[0] === "media") {
+      const upload = request.method === "POST" && parts.length === 1;
+      const discard = request.method === "DELETE" && parts.length === 2;
+      if (!upload && !discard) throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
+      const auth = await authenticate(request, [upload ? "ai:media:write" : "ai:media:delete"]);
+      if (!runtime.mediaStore) throw new AiPlatformError("media storage unavailable", { code: "media_unavailable", status: 503 });
+      if (discard) return sendJson(response, 200, { item: runtime.mediaStore.discard({ id: parts[1], owner: auth.owner }) }, requestId);
+      if (!taskService.status().admissionOpen) throw new AiPlatformError("AI platform is draining", { code: "service_draining", status: 503 });
+      if ([...url.searchParams.keys()].some((key) => !["mediaType", "sha256"].includes(key))) {
+        throw new AiPlatformError("invalid upload metadata", { code: "invalid_request", status: 400 });
+      }
+      const bytes = await readRequestBytes(request, config.mediaMaxBytes);
+      const item = runtime.mediaStore.put({ owner: auth.owner, bytes, mediaType: url.searchParams.get("mediaType"), sha256: url.searchParams.get("sha256") });
+      return sendJson(response, 201, { item }, requestId);
+    }
     if (parts[0] === "operations") {
       const read = request.method === "GET" && parts.length === 1;
-      const write = request.method === "POST" && parts.length === 2 && ["drain", "resume"].includes(parts[1]);
+      const write = request.method === "POST" && parts.length === 2 && ["drain", "resume", "policy", "policy-preview"].includes(parts[1]);
       if (!read && !write) throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
       const auth = await authenticate(request, [read ? "ai:ops:read" : "ai:ops:write"]);
       if (read) return sendJson(response, 200, { item: { ...readOperationalControl(db), executor: taskService.status(), queue: queueSnapshot(db) } }, requestId);
       const body = await readJsonBody(request, config.bodyLimitBytes);
+      if (parts[1] === "policy-preview") {
+        if (Object.keys(body).some((key) => key !== "policy")) throw new AiPlatformError("invalid policy request", { code: "invalid_request", status: 400 });
+        const policy = normalizeDeploymentPolicy(body.policy, config);
+        return sendJson(response, 200, { item: { id: policy.id, digest: sha256(policy), models: policy.models.length, agents: policy.agents.length } }, requestId);
+      }
+      if (parts[1] === "policy") {
+        if (Object.keys(body).some((key) => !["policy", "expectedDigest", "expectedGeneration"].includes(key))) throw new AiPlatformError("invalid policy request", { code: "invalid_request", status: 400 });
+        const item = applyDeploymentPolicy({ db, config, policy: body.policy, expectedDigest: body.expectedDigest, expectedGeneration: body.expectedGeneration, identity: auth });
+        return sendJson(response, 200, { item }, requestId);
+      }
       if (Object.keys(body).some((key) => key !== "expectedGeneration")) {
         throw new AiPlatformError("unexpected operation field", { code: "invalid_request", status: 400 });
       }

@@ -1,3 +1,4 @@
+import { taskEvidenceInput } from "../../../shared/aiPlatformContract.mjs";
 import {
   AI_TASK_RESULT_SCHEMA_VERSION,
   AI_TASK_TYPES,
@@ -329,7 +330,8 @@ async function executePlatformTask({
   const normalizedSubject = subjectOf(subject);
   const normalizedInput = assertJsonInput(input);
   assertNoRawMedia(normalizedInput);
-  const normalizedEvidenceDigest = digestOf(evidenceDigest, normalizedInput);
+  const evidenceInput = taskEvidenceInput(normalizedInput);
+  const normalizedEvidenceDigest = digestOf(evidenceDigest, evidenceInput);
   const normalizedMaxWaitMs = waitOf(
     maxWaitMs ?? options.maxWaitMs ?? config.aiPlatformMaxWaitMs,
     DEFAULT_MAX_WAIT_MS,
@@ -350,7 +352,7 @@ async function executePlatformTask({
     actor: normalizedActor,
     subject: normalizedSubject,
     evidenceDigest: normalizedEvidenceDigest,
-    input: normalizedInput,
+    input: evidenceInput,
   });
   const request = requestShape({
     taskType: normalizedTaskType,
@@ -513,14 +515,23 @@ export async function runAiPlatformMediaTask({
   taskType,
   media,
   referenceDate,
+  bytes = null,
   ...options
 } = {}) {
   const input = normalizeAiPlatformMediaInput(taskType, { media, referenceDate });
-  return runAiPlatformStructuredTask({
-    ...options,
-    taskType,
-    input,
-  });
+  const runtime = options.config?.aiPlatformRuntime ?? options.options?.aiPlatformRuntime;
+  let uploaded = null;
+  try {
+    if (options.config?.aiPlatformExecutionMode === "external-provider") {
+      if (!bytes || typeof runtime?.uploadMedia !== "function") throw new AiPlatformStructuredTaskError("media upload is unavailable", { code: "media_unavailable", status: 503 });
+      uploaded = await runtime.uploadMedia({ bytes, media: input.media, owner: options.owner, actor: options.actor ?? options.owner, signal: options.signal });
+    }
+    return await runAiPlatformStructuredTask({
+      ...options, taskType, input: { ...input, ...(uploaded ? { mediaRef: uploaded.id } : {}) },
+    });
+  } finally {
+    if (uploaded) await runtime.discardMedia({ id: uploaded.id, owner: options.owner, actor: options.actor ?? options.owner });
+  }
 }
 
 export function isAiPlatformMediaTaskType(taskType) {

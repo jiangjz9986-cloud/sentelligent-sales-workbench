@@ -33,6 +33,12 @@
 - Platform migration 0004 reserves a hashed request-nonce ledger. Production
   service credentials bind method, full path/query, exact body bytes and
   idempotency key; one nonce is consumed once even across process restarts.
+- Platform migration 0005 reserves owner-scoped encrypted temporary media
+  metadata, task binding, expiry and deletion tombstones. Raw bytes are kept
+  outside the task database and release, encrypted with a separate media key.
+- Platform migration 0006 reserves immutable price calendars and deployment
+  policy publication evidence. Preview is zero-write; publication requires a
+  paused, empty queue and a fresh generation/digest, and advances that generation.
 - Platform shutdown stops admission and claiming before waiting for attempts
   and usage settlement. A drain timeout must not close a database still in use,
   clear an unknown charge or allow a second worker to start.
@@ -112,3 +118,32 @@ routing and business-event remediation are still outstanding.
 - Security settings source regressions: 7 passed; frontend production build passed.
 - Full backend output is in ignored `.runtime/fusion-backend-20260910-r2.log`.
   These are local tests, not production acceptance or real supplier quality.
+
+## Media And Pricing Progress
+
+- Signed binary uploads, encrypted temporary blobs, owner/task binding, expiry,
+  terminal cleanup and replay-safe media references are implemented.
+- Vision and ASR use real provider HTTP protocols; local HTTP fixtures verify
+  image content, WAV multipart content, cross-owner rejection, usage and cleanup.
+- Existing financial prompts and the bounded PDF renderer are shared by both
+  Backend and Platform. PDF cancellation waits for the child to exit before
+  workspace removal. Failed/expired objects retain metadata tombstones.
+- Existing supplier/model/CNY pricing was checked read-only; see
+  [PROVIDER-BASELINE-20260910.md](PROVIDER-BASELINE-20260910.md).
+- No real completion was made during these checks. Live quality, cost
+  reconciliation, routing/transition tools and final production acceptance
+  remain pending.
+
+## Media Checkpoint Evidence
+
+- `npm run test:ai-platform`: 78 platform tests and 35 Backend adapter tests passed.
+- Targeted ASR/vision/PDF Backend regression: 163 passed; broader media/ASR
+  integration before the pricing additions: 235 passed.
+- All suppliers in these test runs were local HTTP fixtures. Separate read-only
+  production model/balance calls confirmed existing DeepSeek text/vision access
+  and CNY availability, without invoking completions.
+- New platform migrations 0005/0006 have not run in production.
+- Remaining delivery work: policy-based routing and admission, independent
+  systemd/transition tools and associated release contracts, provider quality
+  smoke, load/backup/restore/browser/full QA, formal release, fresh production
+  preflight/cutover/postflight, observation and rollback evidence.

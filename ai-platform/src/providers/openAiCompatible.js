@@ -1,9 +1,10 @@
 import { AI_TASK_TYPES } from "../../../shared/aiPlatformContract.mjs";
 import { AiPlatformError } from "../errors.js";
+import { prepareMediaRequest } from "./mediaRequest.js";
 
 const TEXT_TASKS = new Set(AI_TASK_TYPES.filter((type) => !["invoice.recognize", "payment-proof.recognize", "bookkeeping.extract", "asr.transcribe"].includes(type)));
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u;
-const ALLOWED_FIELDS = new Set(["id", "baseUrl", "credentialEnv", "models"]);
+const ALLOWED_FIELDS = new Set(["id", "kind", "baseUrl", "credentialEnv", "models"]);
 const MODEL_FIELDS = new Set(["name", "taskTypes", "reasoning", "reasoningEffort", "maxOutputTokens"]);
 
 function invalid(message = "invalid provider policy") {
@@ -27,6 +28,8 @@ export function normalizeProviderPolicies(value, { allowedOrigins = [], allowTes
       || !/^provider-[a-z0-9-]{1,60}$/u.test(policy.id) || policy.id === "provider-mock"
       || ids.has(policy.id) || !/^AI_PROVIDER_[A-Z0-9_]{1,80}_KEY$/u.test(policy.credentialEnv)) throw invalid();
     ids.add(policy.id);
+    const kind = policy.kind ?? "openai_compatible";
+    if (!["openai_compatible", "vision", "asr"].includes(kind)) throw invalid();
     let url;
     try { url = new URL(policy.baseUrl); } catch { throw invalid(); }
     const testLoopback = allowTestLoopback && url.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(url.hostname);
@@ -40,14 +43,16 @@ export function normalizeProviderPolicies(value, { allowedOrigins = [], allowTes
       if (!plain(model) || Object.keys(model).some((key) => !MODEL_FIELDS.has(key))
         || !MODEL_NAME.test(model.name) || names.has(model.name)
         || !Array.isArray(model.taskTypes) || !model.taskTypes.length
-        || model.taskTypes.some((type) => !TEXT_TASKS.has(type))
+        || model.taskTypes.some((type) => kind === "asr" ? type !== "asr.transcribe" : kind === "vision"
+          ? !["invoice.recognize", "payment-proof.recognize"].includes(type)
+          : !TEXT_TASKS.has(type) && type !== "bookkeeping.extract")
         || !["none", "deepseek-thinking", "reasoning-effort"].includes(model.reasoning ?? "none")
         || (model.reasoningEffort !== undefined && !["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(model.reasoningEffort))
         || !Number.isSafeInteger(model.maxOutputTokens) || model.maxOutputTokens < 1 || model.maxOutputTokens > 100_000) throw invalid();
       names.add(model.name);
       return Object.freeze({ ...model, taskTypes: Object.freeze([...new Set(model.taskTypes)]), reasoning: model.reasoning ?? "none" });
     });
-    return Object.freeze({ ...policy, baseUrl: policy.baseUrl.replace(/\/+$/u, ""), models: Object.freeze(models) });
+    return Object.freeze({ ...policy, kind, baseUrl: policy.baseUrl.replace(/\/+$/u, ""), models: Object.freeze(models) });
   });
 }
 
@@ -85,13 +90,16 @@ async function boundedResponse(response, maxBytes) {
   }
 }
 
-export function createOpenAiCompatibleProvider(policy, { env = process.env, fetchImpl = fetch } = {}) {
+export function createOpenAiCompatibleProvider(policy, { env = process.env, fetchImpl = fetch, pdfOptions = {} } = {}) {
   const key = String(env[policy.credentialEnv] ?? "");
   if (!key || key.length > 4096 || /[\s\u0000-\u001f\u007f]/u.test(key)) throw invalid("registered provider credential is unavailable");
-  function prepare({ task, model, agent, limits }) {
+  async function prepare({ task, model, agent, limits, mediaStore, signal }) {
     const selected = policy.models.find((item) => item.name === model.name && item.taskTypes.includes(task.taskType));
     if (!selected || model.providerId !== policy.id) throw invalid("task model is not registered for this capability");
     const input = task.input;
+    if (input?.protocol !== "chat.completions.v1") {
+      return prepareMediaRequest({ task, model, agent, limits, mediaStore, signal }, { policy, selected, pdfOptions });
+    }
     if (input?.protocol !== "chat.completions.v1" || !plain(input.request)) {
       throw new AiPlatformError("unsupported provider input protocol", { code: "invalid_request", status: 422 });
     }
@@ -122,15 +130,15 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
   }
   return Object.freeze({
     id: policy.id,
-    kind: "openai_compatible",
+    kind: policy.kind,
     prepare,
-    async execute({ task, model, agent, limits, prepared, signal }) {
-      const input = prepared ?? prepare({ task, model, agent, limits });
+    async execute({ task, model, agent, limits, prepared, signal, mediaStore }) {
+      const input = prepared ?? await prepare({ task, model, agent, limits, mediaStore, signal });
       let response;
       try {
-        response = await fetchImpl(policy.baseUrl + "/chat/completions", {
+        response = await fetchImpl(policy.baseUrl + (input.path ?? "/chat/completions"), {
           method: "POST", redirect: "error", signal,
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          headers: { ...(input.kind === "asr" ? {} : { "Content-Type": "application/json" }), Authorization: `Bearer ${key}` },
           body: input.body,
         });
       } catch {
@@ -141,7 +149,10 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
         throw new AiPlatformError("provider rejected request", { code: response.status === 429 ? "rate_limited" : "provider_error", status: 502 });
       }
       const parsed = await boundedResponse(response, 512 * 1024);
-      const usage = usageFromResponse(parsed.usage);
+      const duration = typeof parsed.duration === "number" && parsed.duration > 0 && parsed.duration <= 122 ? Math.ceil(parsed.duration) : null;
+      const usage = input.kind === "asr"
+        ? { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, audioSeconds: duration ?? input.audioSeconds, imagePages: 0 }
+        : usageFromResponse(parsed.usage);
       const content = parsed.choices?.[0]?.message?.content;
       const externalRequestId = safeRequestId(response, parsed);
       const reject = (code) => {
@@ -150,18 +161,36 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
         error.externalRequestId = externalRequestId;
         throw error;
       };
-      if (typeof content !== "string" || !content.trim() || Buffer.byteLength(content) > 48 * 1024) reject("invalid_result");
-      if (parsed.model !== model.name) reject("provider_model_mismatch");
-      if (parsed.choices?.[0]?.finish_reason !== "stop") reject("provider_incomplete");
+      let payload;
+      if (input.kind === "asr") {
+        if (typeof parsed.text !== "string" || !parsed.text.trim() || Buffer.byteLength(parsed.text) > 32 * 1024) reject("invalid_result");
+        if (parsed.model && parsed.model !== model.name) reject("provider_model_mismatch");
+        payload = { text: parsed.text.trim(), language: "zh-CN" };
+      } else {
+        if (typeof content !== "string" || !content.trim() || Buffer.byteLength(content) > 48 * 1024) reject("invalid_result");
+        if (parsed.model !== model.name) reject("provider_model_mismatch");
+        if (parsed.choices?.[0]?.finish_reason !== "stop") reject("provider_incomplete");
+        if (input.kind === "structured") {
+          try {
+            payload = JSON.parse(content.trim().replace(/^\x60{3}(?:json)?\s*/u, "").replace(/\s*\x60{3}$/u, ""));
+            if (!plain(payload)) reject("invalid_result");
+          } catch { reject("invalid_result"); }
+        }
+      }
       return {
         externalRequestId,
         usage,
+        usageStatus: input.kind === "asr" && duration === null ? "estimated" : "reported",
         result: {
           schemaVersion: "ai-task-result-v1", status: "success", source: "model",
           facts: [], inferences: [], unknowns: [], suggestions: [],
           sourceRefs: [{ type: "ai_task", id: task.id }],
           writebackPreview: { requiresHumanConfirmation: true, actions: [] },
-          metadata: { completion: content, provider: policy.id, actualModel: parsed.model, executionMode: "external-provider", agentVersion: agent.versionId },
+          metadata: {
+            ...(payload ? { payload, ...(input.kind === "asr" ? { transcript: payload.text } : {}) } : { completion: content }),
+            provider: policy.id, actualModel: parsed.model ?? model.name, modelIdentitySource: parsed.model ? "response" : "registered-policy",
+            executionMode: "external-provider", agentVersion: agent.versionId,
+          },
         },
       };
     },

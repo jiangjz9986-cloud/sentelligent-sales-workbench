@@ -8,6 +8,7 @@ import {
   AI_TASK_RESULT_SCHEMA_VERSION,
   sha256,
   stableJson,
+  taskEvidenceInput,
 } from "../../../shared/aiPlatformContract.mjs";
 import { AiPlatformClientError, createAiPlatformClient } from "./client.js";
 import { normalizeRequestBinding } from "../../../shared/aiPlatformRequestAuth.mjs";
@@ -19,6 +20,8 @@ const DEFAULT_SCOPES = Object.freeze([
   "ai:task:create",
   "ai:task:read",
   "ai:task:cancel",
+  "ai:media:write",
+  "ai:media:delete",
 ]);
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_WAIT_MS = 30_000;
@@ -185,7 +188,7 @@ function normalizeInput(input) {
 }
 
 function normalizeEvidenceDigest(value, input) {
-  if (value === null || value === undefined || value === "") return sha256(input);
+  if (value === null || value === undefined || value === "") return sha256(taskEvidenceInput(input));
   const normalized = String(value).trim();
   if (!/^[0-9a-f]{64}$/u.test(normalized)) throw new TypeError("evidenceDigest is invalid");
   return normalized;
@@ -195,7 +198,7 @@ function defaultIdempotencyKey({ taskType, feature, identity, input, idempotency
   if (idempotencyKey !== undefined && idempotencyKey !== null && idempotencyKey !== "") {
     return bounded(idempotencyKey, "idempotencyKey", SAFE_ID, 200);
   }
-  const digest = sha256({ taskType, feature, owner: identity.owner, input }).slice(0, 48);
+  const digest = sha256({ taskType, feature, owner: identity.owner, input: taskEvidenceInput(input) }).slice(0, 48);
   return `${feature}:${taskType.replace(/[^A-Za-z0-9_.:-]/gu, "-")}:${digest}`.slice(0, 200);
 }
 
@@ -571,6 +574,21 @@ export function createAiPlatformRuntime({
     return { ...response, transcript };
   }
 
+  async function uploadMedia({ bytes, media, owner, actor = owner, signal }) {
+    assertEnabled();
+    if (!Buffer.isBuffer(bytes) || !media || sha256(bytes) !== media.sha256 || bytes.length !== media.byteLength) {
+      throw new AiPlatformRuntimeError("media does not match descriptor", { code: "media_descriptor_mismatch", status: 422 });
+    }
+    const scoped = clientFor({ owner, actor });
+    if (typeof scoped.client.uploadMedia !== "function") throw new AiPlatformRuntimeError("media upload is unavailable", { code: "media_unavailable", status: 503 });
+    return scoped.client.uploadMedia({ bytes, mediaType: media.mediaType, sha256: media.sha256, signal });
+  }
+
+  async function discardMedia({ id, owner, actor = owner }) {
+    const scoped = clientFor({ owner, actor });
+    return scoped.client.discardMedia(id);
+  }
+
   function health() {
     return {
       mode,
@@ -593,6 +611,8 @@ export function createAiPlatformRuntime({
     runTask,
     runStructuredTask,
     transcribe,
+    uploadMedia,
+    discardMedia,
     createCompletionClient,
     clearCache() { cache.clear(); },
   });

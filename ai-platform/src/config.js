@@ -84,6 +84,11 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     host,
     port,
     databasePath,
+    mediaDirectory: overrides.mediaDirectory ?? env.AI_PLATFORM_MEDIA_DIRECTORY ?? null,
+    mediaEncryptionKey: overrides.mediaEncryptionKey ?? env.AI_PLATFORM_MEDIA_ENCRYPTION_KEY ?? null,
+    mediaMaxBytes: positiveInteger(overrides.mediaMaxBytes ?? env.AI_PLATFORM_MEDIA_MAX_BYTES, 16 * 1024 * 1024, 32 * 1024 * 1024),
+    mediaCapacityBytes: positiveInteger(overrides.mediaCapacityBytes ?? env.AI_PLATFORM_MEDIA_CAPACITY_BYTES, 64 * 1024 * 1024, 256 * 1024 * 1024),
+    pdfImageCommand: text(overrides.pdfImageCommand ?? env.AI_PLATFORM_PDF_IMAGE_COMMAND, "/usr/bin/pdftoppm", 1000),
     authSecret,
     trustedIssuer: text(overrides.trustedIssuer ?? env.AI_PLATFORM_TRUSTED_ISSUER, "sentelligent-sales-backend", 400),
     requestBindingRequired: booleanValue(overrides.requestBindingRequired ?? env.AI_PLATFORM_REQUEST_BINDING_REQUIRED, nodeEnv === "production"),
@@ -134,11 +139,10 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
   }
   if (nodeEnv === "production") {
     if (!config.requestBindingRequired) throw new Error("request binding is required in production");
+    if (!["127.0.0.1", "::1"].includes(config.host)) throw new Error("AI platform must bind to loopback in production");
+    if (!config.pdfImageCommand.startsWith("/")) throw new Error("AI platform PDF command must be absolute in production");
     if (config.authSecret.length < 32 || config.authSecret.includes("change-me")) {
       throw new Error("AI_PLATFORM_AUTH_SECRET must be a strong production secret");
-    }
-    if (config.host === "0.0.0.0" && !config.externalProvidersEnabled) {
-      throw new Error("public AI platform must explicitly configure provider policy");
     }
   }
   return Object.freeze(config);

@@ -11,6 +11,7 @@ import {
 import { reserveBudget, releaseBudget, settleBudget, calculateCostMicro, estimateUsage } from "../budgets/ledger.js";
 import { AiPlatformError } from "../errors.js";
 import { readOperationalControl } from "../operations/control.js";
+import { priceAtAttempt } from "../budgets/priceCalendar.js";
 import { id, iso, safeLimit, safeOffset, stringify, withImmediateTransaction } from "../utils.js";
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/u;
@@ -108,6 +109,7 @@ function executionLimits(agentVersion, config) {
   const limits = parseObject(agentVersion.limits_json, {});
   return {
     maxTokens: safePositiveInteger(limits.maxTokens, 1_000, 100_000),
+    maxInputTokens: safePositiveInteger(limits.maxInputTokens, 0, 2_000_000),
     maxSteps: safePositiveInteger(limits.maxSteps, 8, 100),
     maxAttempts: safePositiveInteger(limits.maxAttempts, 2, 3),
     timeoutMs: Math.min(
@@ -215,6 +217,9 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
     throw new AiPlatformError("AI model or provider is disabled", { code: "provider_disabled", status: 503 });
   }
   const externalModel = model.provider_kind !== "mock";
+  if (!externalModel && config.nodeEnv === "production" && config.executionMode === "external-provider") {
+    throw new AiPlatformError("simulation is not permitted for production tasks", { code: "provider_policy_blocked", status: 503 });
+  }
   if (externalModel && config.executionMode !== "external-provider") {
     throw new AiPlatformError("external AI execution is disabled by execution mode", {
       code: "provider_policy_blocked",
@@ -251,6 +256,7 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
 function taskView(row) {
   return {
     id: row.id,
+    owner: row.owner,
     requestId: row.request_id,
     taskType: row.task_type,
     feature: row.feature,
@@ -337,6 +343,14 @@ function chargeForUsage(usage, price) {
 
 function estimatedCharge(input, limits, price) {
   const usage = estimateUsage({ input, maxTokens: limits.maxTokens });
+  const media = input?.input?.media;
+  if (media && media.mediaType !== "audio/wav") {
+    usage.inputTokens = Math.max(usage.inputTokens, limits.maxInputTokens);
+    if (media.mediaType === "application/pdf") usage.imagePages = 4;
+  } else if (media?.mediaType === "audio/wav") {
+    usage.inputTokens = 0;
+    usage.outputTokens = 0;
+  }
   const charge = chargeForUsage(usage, price);
   return { usage, charge };
 }
@@ -444,6 +458,7 @@ export function createTaskService({
   db,
   config,
   providerRegistry,
+  mediaStore = null,
   clock = () => new Date(),
   logger = console,
 } = {}) {
@@ -463,7 +478,10 @@ export function createTaskService({
     const auth = normalizedIdentity(identity);
     const key = normalizeIdempotencyKey(idempotencyKey);
     const normalized = normalizeTaskCreate(request);
-    const requestHash = sha256({ issuer: auth.issuer, owner: auth.owner, task: normalized });
+    const mediaRef = normalized.input.mediaRef;
+    const hashedInput = { ...normalized.input };
+    if (mediaRef !== undefined) delete hashedInput.mediaRef;
+    const requestHash = sha256({ issuer: auth.issuer, owner: auth.owner, task: { ...normalized, input: hashedInput } });
     const requestedAt = now();
     const existing = db.prepare(`
       SELECT * FROM tasks
@@ -495,6 +513,9 @@ export function createTaskService({
       at: requestedAt,
       config,
     });
+    if (normalized.input.media && execution.model.provider_kind === "vision" && execution.limits.maxInputTokens < 1) {
+      throw new AiPlatformError("vision input budget is not configured", { code: "budget_not_configured", status: 503 });
+    }
     const estimate = estimatedCharge({
       input: normalized.input,
       systemPrompt: execution.agentVersion.system_prompt,
@@ -576,6 +597,10 @@ export function createTaskService({
         $requestedAt: requestedAt,
         $updatedAt: requestedAt,
       });
+      if (mediaRef !== undefined) {
+        if (!mediaStore) throw new AiPlatformError("media storage unavailable", { code: "media_unavailable", status: 503 });
+        mediaStore.bind({ id: mediaRef, owner: auth.owner, taskId, descriptor: normalized.input.media });
+      }
       reserveBudget(db, {
         taskId,
         owner: auth.owner,
@@ -699,7 +724,7 @@ export function createTaskService({
                p.kind AS provider_kind, p.enabled AS provider_enabled,
                m.enabled AS model_enabled, pr.id AS price_version_id,
                pr.version AS price_version, pr.currency,
-               pr.input_micro_per_1k, pr.output_micro_per_1k,
+               pc.policy_json AS pricing_policy_json, pr.input_micro_per_1k, pr.output_micro_per_1k,
                pr.cached_input_micro_per_1k, pr.audio_micro_per_minute,
                pr.image_micro_per_page, pr.function_fee_micro,
                pr.effective_from AS price_effective_from,
@@ -718,6 +743,7 @@ export function createTaskService({
                ORDER BY pv.effective_from DESC, pv.created_at DESC, pv.id DESC
                LIMIT 1
             )
+          LEFT JOIN price_calendars pc ON pc.price_version_id = pr.id
          WHERE ${where}
            AND (
              SELECT COUNT(*) FROM tasks running
@@ -775,6 +801,19 @@ export function createTaskService({
         attemptNo,
         leaseExpiresAt,
       }, claimedAt);
+      const attemptPrice = selected.price_version_id ? priceAtAttempt({
+        id: selected.price_version_id, version: selected.price_version, currency: selected.currency,
+        input_micro_per_1k: selected.input_micro_per_1k, output_micro_per_1k: selected.output_micro_per_1k,
+        cached_input_micro_per_1k: selected.cached_input_micro_per_1k, audio_micro_per_minute: selected.audio_micro_per_minute,
+        image_micro_per_page: selected.image_micro_per_page, function_fee_micro: selected.function_fee_micro,
+        pricing_policy_json: selected.pricing_policy_json,
+      }, claimedAt) : null;
+      if (attemptPrice?.pricingTier) {
+        db.prepare("UPDATE task_attempts SET request_meta_json = ? WHERE id = ?").run(
+          stringify({ channel: selected.channel, feature: selected.feature, pricingTier: attemptPrice.pricingTier, pricingAt: claimedAt }),
+          attemptId,
+        );
+      }
       return {
         task: selected,
         attempt: {
@@ -807,6 +846,7 @@ export function createTaskService({
           function_fee_micro: selected.function_fee_micro,
           effective_from: selected.price_effective_from,
           effective_to: selected.price_effective_to,
+          ...attemptPrice,
         } : null,
         limits: executionLimits(selected, config),
       };
@@ -865,6 +905,7 @@ export function createTaskService({
     const usage = normalizeUsage(providerResponse?.usage);
     const result = normalizeTaskResult(providerResponse?.result ?? providerResponse);
     const charge = chargeForUsage(usage, context.priceVersion);
+    if (usage && providerResponse?.usageStatus === "estimated") charge.costStatus = "estimated";
     return withImmediateTransaction(db, () => {
       const current = rowById(db, context.task.id);
       if (!current || current.status !== "running" || current.lease_token !== context.attempt.leaseToken) {
@@ -1146,6 +1187,7 @@ export function createTaskService({
         task: taskView(context.task),
         agent: context.agent,
         limits: context.limits,
+        mediaStore,
         model: modelView({
           id: context.model.id,
           provider_id: context.model.providerId,
@@ -1184,6 +1226,10 @@ export function createTaskService({
       clearTimeout(timeout);
       clearInterval(leaseHeartbeat);
       activeExecutions.delete(context.task.id);
+      try { mediaStore?.sweep(); } catch (error) {
+        pause();
+        throw error;
+      }
     }
   }
 
