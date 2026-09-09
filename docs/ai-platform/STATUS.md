@@ -5,17 +5,16 @@
 ## 当前交付状态
 
 - 任务：AI 统一调度平台一期开发。
-- 分支：`codex/ai-unified-platform-v1`。
-- 独立工作树：`/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/ai-unified-platform-v1`。
-- 开发基线：`741d104e79e2c81a040a2e9ef84bd635c294f1b9`。
-- 独立实现提交：`8732328e6bec7acd1e01597dacd6240d45ac782f`。
-- 独立验收文档提交：`2e046cc36b8d2ffc5f5be7d0b4c771bf475b89db`。
-- 共享源码整合：`codex/v0120-full-upgrade` 已从 `741d104e79e2c81a040a2e9ef84bd635c294f1b9` 快进保留 `3337b340`、`8732328e`、`2e046cc3` 三项原始提交；旧含敏感测试字面量的提交未进入该分支。
+- 当前工作树：`/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/ai-unified-platform-v2`。
+- 当前分支：`codex/ai-unified-platform-v2`。
+- 当前基线提交：`456ec8b59f1f3fbc07dc8cb64f3cdd7417a6df59`；工作树仍有本任务的未提交改动，不能把它视为已发布制品。
+- 并行升级工作树：`/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/v0120-full-upgrade`；本任务未修改该工作树。
 - 平台版本：`0.1.0`。
-- 目标模型配置：`gpt-5.6-luna / max`。
-- 当前执行模式：`local-simulated`；供应商注册仍为本地模拟供应商，不代表已经调用真实模型。
+- 目标模型：`gpt-5.6-luna / max`。
+- 当前执行模式：`local-simulated`，仅使用本地模拟供应商。
+- 主动分析调度唯一所有者：Backend `proactive worker`；AI Platform 不自行执行 `proactive.analyze` 计划。
 
-本提交交付的是独立平台底座、管理 API、静态管理台、业务侧受限客户端和运维脚本。源码现已进入升级分支和统一质量门，但它不是现有业务系统的 AI 调用切换提交，也没有改动业务数据库或生产进程。
+当前交付是独立平台底座、管理 API、静态管理台、业务侧受限客户端、媒体/ASR 适配和本地双服务联调基础。它不是生产切换完成，也不等同于真实模型质量或真实费用验收。
 
 ## 已完成并验证
 
@@ -29,31 +28,53 @@
 - 业务侧 `backend/src/aiPlatform/client.js`，包含安全 URL/请求头约束、token provider、超时、取消、响应大小上限、轮询清理和错误映射。
 - 独立静态管理台：概览、任务、Agent、规范、模型、预算、调度、成本和审计视图；不依赖业务前端页面运行。
 - 独立 `start/stop/status/health/backup/restore` 脚本、制品检查脚本和 systemd 模板。
-- 根 `npm run test:ai-platform` 同时运行平台 `37` 项和业务客户端 `11` 项，并已接入本地 `qa:full`、CI 与 release 验证。
+- 根 `npm run test:ai-platform` 同时运行平台专项和业务客户端专项，并已接入本地 `qa:full`、CI 与 release 验证。
+- Backend 与 AI Platform 在本地临时端口上已完成双服务 HTTP 联调：快速记录和拜访行程均能创建平台任务，并验证 `owner`、`actor`、`channel`、`taskType`、`subject`、目标模型和推理档位。
+- 行程规划入口现在由服务端生成行程 ID，再以 `itinerary-<id>` 作为平台对象标识；ASR 使用 `sha256-<digest>` 作为音频对象标识，平台请求不携带原始媒体路径或字节。
+- 健康接口仅返回非敏感运行状态，不返回 AI Platform HMAC、服务令牌、旧模型密钥或 ASR 凭据。
+- 静态管理台 `/admin` 和 `/ai-platform-admin` 的无尾斜杠入口会重定向到带尾斜杠入口，避免相对 CSS/JS 被解析到根路径；HTTP 回归已覆盖该行为。
 
 ## 本轮证据
 
-以下证据均来自本工作树和本地模拟执行，不包含真实供应商、生产数据库或真实通知。
+以下证据均来自当前工作树和本地模拟执行，不包含真实供应商、生产数据库或真实通知。精确总数和浏览器证据已在本轮补齐。
 
 | 范围 | 命令/环境 | 结果 |
 | --- | --- | --- |
-| 平台单元与集成测试 | `cd ai-platform && npm test` | 37 passed，0 failed，0 skipped |
-| 业务侧客户端测试 | `node --test backend/src/aiPlatform/client.test.js` | 11 passed，0 failed |
-| HTTP 管理 API | `node --test ai-platform/tests/http-server.test.js` | 7 passed，包含资源详情、任务子资源、成本筛选、管理员取消、调度和布尔筛选 |
-| 调度专项 | `node --test ai-platform/tests/schedule-service.test.js` | 9 passed，包含去重、暂停竞态、stale run 恢复、旧租约 fencing 和并发 claim |
-| 语法与空白检查 | `node --check ...`、`git diff --cached --check` | 通过 |
-| 独立运行态 | 临时端口 `19997`，独立 PID、runtime、SQLite 和日志目录 | `start/status/health/stop` 通过；健康状态为 `local-simulated`、数据库 `ready` |
+| 平台单元与集成测试 | `cd ai-platform && npm test` | 52 passed，0 failed，0 skipped |
+| 业务侧客户端/适配器测试 | `node --test backend/src/aiPlatform/*.test.js backend/tests/ai-platform-server-integration.test.js backend/tests/model-analysis.test.js` | 54 passed，0 failed，0 skipped |
+| 双服务 HTTP 联调 | `node --test backend/tests/ai-platform-server-integration.test.js` | 4 passed，0 failed，包含快速记录、行程、owner 隔离和健康脱敏 |
+| 行程规划回归 | `node --test backend/tests/itinerary-planner.test.js backend/tests/itinerary-api.test.js` | 17 passed，0 failed |
+| ASR 回归 | `node --test backend/tests/asr-*.test.js` | 297 passed，0 failed，0 cancelled，0 skipped |
+| Backend 全量测试 | `npm --prefix backend test` | 2057 passed，0 failed，0 cancelled，0 skipped；240 suites |
+| 静态入口回归 | `node --test ai-platform/tests/http-server.test.js` | 8 passed，0 failed；覆盖 `/admin` 与 `/ai-platform-admin` 尾斜杠重定向和路径穿越拒绝 |
+| Secret scan | `npm run scan:secrets` | `passed`；986 files、4194 Git objects、779 Git messages、0 findings |
+| 语法与空白检查 | `node --check ...`、`git diff --check` | 本轮改动已通过 |
+| 独立运行态 | 临时端口 `52251`，独立 PID、runtime、SQLite 和浏览器数据 | `healthz` 与 `readyz` 返回正常；停止后端口已释放；状态为 `local-simulated`、数据库 `ready` |
 | 备份 | `scripts/ai-platform/backup.sh` | `quickCheck=ok`，`foreignKeyErrors=0`，迁移数 `2`；备份位于临时证据目录 |
 | 恢复 | 独立临时端口 `19998` 和临时数据库 | 运行中恢复拒绝为 `service_running`；无 `--force` 拒绝为 `confirmation_required`；强制恢复通过，并保留 `.before-restore-*` 旧库 |
+| 管理台浏览器验收 | 本地无头 Chrome，`http://127.0.0.1:52251/admin/` | 1440x900、1024x768、390x844、360x800 均无整体横向溢出；连接为“已连接”、运行态为“就绪”；0 控制台错误、0 失败请求。证据：`/tmp/ai-platform-browser-evidence-20260908/browser-evidence.json` 及四张 PNG |
+| 管理台真实写入 | 同上，临时 SQLite | Agent 保存/发布/回滚：`PATCH 200`、`POST 200`、`POST 200`，版本 `1.0.1 -> 1.0.0`；规范：`POST 201`、`PATCH 200`；预算：`PATCH 200`；调度编辑/普通调度启停：`PATCH 200`、`POST 200`、`POST 200` |
+| 主动分析所有权 | 同上 | 勾选启用 `proactive.analyze` 后停留在表单并显示 Backend 独占错误，新增管理请求数为 `0`；Backend 所有权未被 UI 绕过 |
 
-## 已整合源码但尚未切换业务或生产
+## 已接入但尚未完成最终验收
 
-- M3 的周报、快速记录、手工建议、温度、销售决策和行程等现有业务入口尚未挂入业务 `server.js`；客户端已经准备，但当前没有旁路改造声明。
-- M5 的业务快照、受限业务工具、旧主动 worker 停止/排空/切换和结果投递尚未进入共享文件整合窗口。
-- M6 的视觉、票据和 ASR 真实网络协议适配尚未实施。
-- 尚未执行真实供应商质量/费用验收，尚未启用 `external-provider`，尚未发送真实通知，尚未部署生产或安装 systemd 单元。
-- 有界负载下的 CPU、内存、临时文件和日志增长测试尚未执行；不能用本地空载健康检查替代 OPS-04。
-- 管理台当前使用独立本地 API；业务登录代理、生产访问控制和现有前端结果卡的最终整合仍待双方提交 SHA 后串行完成。
+- 周报、快速记录、手工建议、温度、销售决策、行程、ASR、票据和记账入口已有平台适配；本轮已补充行程和 ASR 的显式对象身份，但全部入口仍需在共享质量门中逐项保留 HTTP/权限/历史读取证据。
+- 主动分析仍由 Backend worker 负责读取业务快照、调用平台适配并处理结果投递；需要继续执行停旧、排空、启新、回滚演练，证明不双跑、不重复写回、不重复通知。
+- 本地模拟供应商只验证调度、隔离、生命周期、台账和契约，不验证真实模型质量、真实供应商延迟、真实供应商费用、视觉识别质量或 ASR 质量。
+- 尚未启用 `external-provider`，尚未使用真实供应商密钥，尚未发送真实通知，尚未部署生产或安装 systemd 单元。
+- 有界负载下的 CPU、内存、临时文件和日志增长测试尚未执行；不能用空载健康检查替代 OPS-04。
+- 管理台已绑定独立本地 API；本地浏览器证据已完成，但共享登录代理、生产访问控制和业务前端结果卡整合仍待最终共享窗口完成。
+
+## 运行边界
+
+- 本任务未连接生产服务器。
+- 本任务未修改生产数据库、生产服务或生产配置。
+- 本任务未调用真实付费模型或供应商。
+- 本任务未读取或持久化真实供应商密钥。
+- 本任务未发送真实通知。
+- `local-simulated` 的文本任务在平台没有 completion 内容时，业务层回退到 deterministic 结果，并保留 `mock_model_fallback`；不能把模拟摘要描述为真实模型输出。
+- `solution` Agent 当前保持 `disabled`，不会因为平台可用或存在模型配置而自动启用。
+- AI Platform 只接收有界快照、结构化输入或媒体描述符，不直接读取销售业务表，也不直接写业务表或发送业务通知；业务写回和通知仍由 Backend 负责。
 
 ## 下一步
 

@@ -1,4 +1,5 @@
 import {
+  AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
   AI_TASK_SCHEMA_VERSION,
   boundedObject,
   identifier,
@@ -21,6 +22,7 @@ const DEFAULT_SCAN_LIMIT = 100;
 const DEFAULT_CATCH_UP = 1;
 const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_DISPATCH_CONCURRENCY = 4;
+const PROACTIVE_TASK_TYPE = "proactive.analyze";
 const RUN_STATUSES = new Set(["queued", "running", "succeeded", "failed", "skipped"]);
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "skipped"]);
@@ -41,6 +43,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   configuration_error: "scheduled task configuration is unavailable",
   provider_disabled: "scheduled task provider is disabled",
   provider_policy_blocked: "scheduled task provider is blocked by policy",
+  proactive_schedule_owned_by_backend: "proactive analysis scheduling is owned by the backend worker",
   schedule_dispatch_failed: "scheduled task dispatch failed",
 });
 
@@ -167,6 +170,17 @@ function normalizeTaskType(value) {
   } catch (error) {
     throw normalizeThrown(error);
   }
+}
+
+function proactiveScheduleOwnershipError() {
+  return new AiPlatformError(
+    `${PROACTIVE_TASK_TYPE} schedule is owned by ${AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER} proactive worker`,
+    { code: "proactive_schedule_owned_by_backend", status: 409 },
+  );
+}
+
+function assertScheduleOwnership(taskType, enabled) {
+  if (enabled && taskType === PROACTIVE_TASK_TYPE) throw proactiveScheduleOwnershipError();
 }
 
 function normalizeScheduleCreate(value, at) {
@@ -409,6 +423,7 @@ export function buildScheduledTaskRequest(claim) {
   const scheduleId = String(claim?.scheduleId ?? schedule?.id ?? "").trim();
   const taskTypeValue = String(claim?.taskType ?? schedule?.taskType ?? schedule?.task_type ?? "").trim();
   const featureValue = String(claim?.feature ?? schedule?.feature ?? "").trim();
+  if (taskTypeValue === PROACTIVE_TASK_TYPE) throw proactiveScheduleOwnershipError();
   const input = claim?.inputTemplate ?? schedule?.inputTemplate ?? parseObject(schedule?.input_template_json, {});
   return {
     schemaVersion: AI_TASK_SCHEMA_VERSION,
@@ -639,6 +654,33 @@ export function createScheduleService({
     });
   }
 
+  function markProactiveScheduleBlocked(row, at) {
+    const message = `${PROACTIVE_TASK_TYPE} schedule is owned by ${AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER} proactive worker`;
+    db.prepare(`
+      UPDATE schedules
+         SET enabled = 0, next_run_at = NULL, last_status = 'skipped',
+             last_error = $lastError, updated_at = $updatedAt
+       WHERE id = $id AND enabled = 1
+    `).run({ $lastError: message, $updatedAt: at, $id: row.id });
+    writeAudit({
+      actor: safeSchedulerId,
+      action: "schedule.proactive_owner_blocked",
+      resourceType: "schedule",
+      resourceId: row.id,
+      before: scheduleAuditView(row),
+      after: {
+        ...scheduleAuditView(row),
+        enabled: false,
+        nextRunAt: null,
+        lastStatus: "skipped",
+        lastError: message,
+      },
+      requestId: `schedule:${row.id}:proactive-owner-blocked`,
+      at,
+    });
+    return message;
+  }
+
   function claimDueOccurrences({ limit = DEFAULT_SCAN_LIMIT, maxOccurrencesPerSchedule = DEFAULT_CATCH_UP, at = null } = {}) {
     let safeLimit;
     let safeCatchUp;
@@ -668,6 +710,13 @@ export function createScheduleService({
         while (perSchedule < safeCatchUp && considered < safeLimit) {
           const row = rowById(candidate.id);
           if (!row || !Number(row.enabled) || !row.next_run_at || row.next_run_at > atIso) break;
+          if (row.task_type === PROACTIVE_TASK_TYPE) {
+            markProactiveScheduleBlocked(row, atIso);
+            skipped.push({ scheduleId: row.id, reason: "proactive_schedule_owned_by_backend" });
+            perSchedule += 1;
+            considered += 1;
+            break;
+          }
           let dueAt;
           try {
             dueAt = cleanDate(row.next_run_at, "nextRunAt");
@@ -1081,6 +1130,16 @@ export function createScheduleService({
   }
 
   async function dispatchClaim(claim) {
+    if (claim?.taskType === PROACTIVE_TASK_TYPE) {
+      return {
+        claim,
+        outcome: finishRun(claim, {
+          status: "skipped",
+          errorCode: "proactive_schedule_owned_by_backend",
+          errorMessage: `${PROACTIVE_TASK_TYPE} schedule is owned by ${AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER} proactive worker`,
+        }),
+      };
+    }
     if (!currentScheduleEnabled(claim.scheduleId)) {
       return {
         claim,
@@ -1343,6 +1402,7 @@ export function createScheduleService({
     const actor = normalizeActor(options.actor, safeSchedulerId);
     const requestId = normalizeRequestId(options.requestId);
     const normalized = normalizeScheduleCreate(options, at);
+    assertScheduleOwnership(normalized.taskType, normalized.enabled);
     try {
       return withImmediateTransaction(db, () => {
         const createdAt = at;
@@ -1399,6 +1459,7 @@ export function createScheduleService({
           throw new AiPlatformError("schedule was modified by another request", { code: "conflict", status: 409 });
         }
         const normalized = normalizeScheduleUpdate(options, current, at);
+        assertScheduleOwnership(normalized.taskType, normalized.enabled);
         db.prepare(`
           UPDATE schedules
              SET slug = $slug, name = $name, task_type = $taskType, feature = $feature,
@@ -1445,6 +1506,9 @@ export function createScheduleService({
     try {
       return withImmediateTransaction(db, () => {
         const current = requireSchedule(scheduleId);
+        if (enabled && current.task_type === PROACTIVE_TASK_TYPE) {
+          throw proactiveScheduleOwnershipError();
+        }
         const before = scheduleAuditView(current);
         const nextRunAt = enabled
           ? (current.next_run_at && new Date(current.next_run_at).getTime() > new Date(at).getTime()

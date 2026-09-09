@@ -34,6 +34,121 @@ function contractError(code, status, message) {
   return new AsrContractError(code, status, message);
 }
 
+const AI_PLATFORM_MODES = new Set(["disabled", "optional", "required"]);
+const AI_PLATFORM_PROVIDER_ID = "ai-platform";
+const AI_PLATFORM_TASK_TYPE = "asr.transcribe";
+const AI_PLATFORM_FEATURE = "asr";
+
+function normalizeAiPlatformMode(value) {
+  const mode = value === undefined || value === null || value === ""
+    ? "disabled"
+    : String(value).trim().toLowerCase();
+  if (!AI_PLATFORM_MODES.has(mode)) throw new TypeError("AI platform mode is invalid");
+  return mode;
+}
+
+function aiPlatformIsConfigured(aiPlatformRuntime) {
+  if (!aiPlatformRuntime) return false;
+  try {
+    if (typeof aiPlatformRuntime.configured === "function") {
+      return aiPlatformRuntime.configured() === true;
+    }
+    return aiPlatformRuntime.configured === true;
+  } catch {
+    return false;
+  }
+}
+
+function aiPlatformState(mode, aiPlatformRuntime) {
+  const configured = aiPlatformIsConfigured(aiPlatformRuntime);
+  const selected = mode === "required" || (mode === "optional" && configured);
+  return Object.freeze({
+    mode,
+    configured,
+    selected,
+    ready: !selected
+      || (configured && typeof aiPlatformRuntime?.runTask === "function"),
+  });
+}
+
+function safePlatformDescriptor({ uploaded, normalized, purpose, language }) {
+  if (
+    !Number.isSafeInteger(normalized?.byteLength)
+    || normalized.byteLength <= 0
+    || !Number.isSafeInteger(normalized?.durationMs)
+    || normalized.durationMs <= 0
+    || typeof uploaded?.sha256 !== "string"
+    || !/^[0-9a-f]{64}$/u.test(uploaded.sha256)
+    || language !== ASR_CONFIG_DEFAULTS.language
+  ) {
+    throw contractError("ASR_TRANSCODE_FAILED", 500, "ASR audio normalization failed");
+  }
+  return Object.freeze({
+    mediaType: "audio/wav",
+    byteLength: normalized.byteLength,
+    durationMs: normalized.durationMs,
+    purpose,
+    language,
+    sha256: uploaded.sha256,
+  });
+}
+
+function platformTranscript(value) {
+  const compatibility = value?.result?.metadata?.compatibility;
+  const candidates = [
+    value?.transcript,
+    value?.text,
+    value?.result?.transcript,
+    value?.result?.text,
+    value?.result?.metadata?.transcript,
+    value?.result?.metadata?.payload?.text,
+    compatibility?.text,
+    value?.task?.result?.metadata?.compatibility?.text,
+  ];
+  return candidates.find((candidate) => typeof candidate === "string") ?? null;
+}
+
+function mapAiPlatformError(error) {
+  if (error instanceof AsrContractError || error?.name === "AbortError") return error;
+  const code = typeof error?.code === "string" ? error.code.trim().toLowerCase() : "";
+  if (["cancelled", "canceled", "task_cancelled", "ai_platform_aborted"].includes(code) || error?.status === 499) {
+    return new DOMException("ASR platform task was cancelled", "AbortError");
+  }
+  if (
+    [
+      "ai_platform_not_configured",
+      "ai_platform_disabled",
+      "invalid_runtime",
+      "agent_not_configured",
+      "configuration_error",
+      "provider_disabled",
+      "price_not_configured",
+      "provider_policy_blocked",
+    ].includes(code)
+  ) {
+    return contractError("ASR_NOT_CONFIGURED", 503, "ASR platform is not configured");
+  }
+  if (
+    [
+      "asr_timeout",
+      "ai_platform_timeout",
+      "timeout",
+      "task_pending",
+      "expired",
+      "deadline_exceeded",
+      "request_timeout",
+    ].includes(code)
+    || error?.name === "TimeoutError"
+    || error?.status === 504
+  ) {
+    return contractError("ASR_TIMEOUT", 504, "ASR processing timed out");
+  }
+  if (["rate_limited", "queue_full", "capacity_exceeded"].includes(code) || error?.status === 429) {
+    return contractError("ASR_CAPACITY_EXCEEDED", 429, "ASR processing capacity is exhausted");
+  }
+  return contractError("ASR_PROVIDER_BAD_RESPONSE", 502, "ASR platform request failed");
+}
+
 function capacityError() {
   return contractError("ASR_CAPACITY_EXCEEDED", 429, "ASR processing capacity is exhausted");
 }
@@ -122,7 +237,7 @@ export function createProcessingCapacity({
   });
 }
 
-function normalizedConfig(config) {
+function normalizedConfig(config, aiPlatformMode = config.aiPlatformMode) {
   const mode = config.asrMode ?? config.mode ?? ASR_CONFIG_DEFAULTS.mode;
   const providerName = config.asrProvider ?? config.provider ?? ASR_CONFIG_DEFAULTS.provider;
   if (!new Set(["disabled", "live"]).has(mode)) throw new TypeError("ASR mode is invalid");
@@ -150,6 +265,7 @@ function normalizedConfig(config) {
   return Object.freeze({
     mode,
     providerName,
+    aiPlatformMode: normalizeAiPlatformMode(aiPlatformMode),
     baseUrl: config.asrBaseUrl ?? config.baseUrl ?? ASR_CONFIG_DEFAULTS.baseUrl,
     model: config.asrModel ?? config.model ?? ASR_CONFIG_DEFAULTS.model,
     providerTimeoutMs: config.asrTimeoutMs ?? config.timeoutMs ?? ASR_CONFIG_DEFAULTS.timeoutMs,
@@ -181,7 +297,11 @@ function externalAbortError(signal) {
 }
 
 export function createAsrService(config = {}, dependencies = {}) {
-  const runtime = normalizedConfig(config);
+  const aiPlatformRuntime = dependencies.aiPlatformRuntime ?? config.aiPlatformRuntime ?? null;
+  const runtime = normalizedConfig(
+    config,
+    config.aiPlatformMode ?? aiPlatformRuntime?.mode,
+  );
   const now = dependencies.now ?? Date.now;
   const fsImpl = dependencies.fsImpl ?? fsPromises;
   const currentUid = dependencies.currentUid ?? process.getuid?.();
@@ -206,6 +326,7 @@ export function createAsrService(config = {}, dependencies = {}) {
   const cleanupImpl = dependencies.cleanupImpl ?? removeWorkspaceAndVerify;
   const sweepImpl = dependencies.sweepImpl ?? sweepTempRoot;
   let provider = dependencies.provider ?? null;
+  let useAiPlatform = false;
   let initialized = false;
   let initializing = null;
   let accepting = true;
@@ -722,10 +843,18 @@ export function createAsrService(config = {}, dependencies = {}) {
       }
       try {
         if (!accepting) return readiness();
-        const activeProvider = createProviderIfNeeded();
-        const providerReadiness = activeProvider.readiness?.() ?? { ready: true, code: "READY" };
-        if (providerReadiness.ready !== true) {
-          throw contractError("ASR_NOT_CONFIGURED", 503, "ASR provider is not ready");
+        const platform = aiPlatformState(runtime.aiPlatformMode, aiPlatformRuntime);
+        useAiPlatform = platform.selected;
+        if (platform.selected) {
+          if (!platform.ready) {
+            throw contractError("ASR_NOT_CONFIGURED", 503, "ASR platform is not configured");
+          }
+        } else {
+          const activeProvider = createProviderIfNeeded();
+          const providerReadiness = activeProvider.readiness?.() ?? { ready: true, code: "READY" };
+          if (providerReadiness.ready !== true) {
+            throw contractError("ASR_NOT_CONFIGURED", 503, "ASR provider is not ready");
+          }
         }
         if (existingStartup === null) {
           if (!accepting) return readiness();
@@ -768,6 +897,7 @@ export function createAsrService(config = {}, dependencies = {}) {
     const idempotencyKey = boundedString(input?.idempotencyKey, "idempotencyKey", 128);
     const purpose = parseAsrPurpose(input?.purpose);
     const mediaType = canonicalizeAsrMediaType(input?.mediaType);
+    const language = input?.language ?? ASR_CONFIG_DEFAULTS.language;
     if (!input?.body || typeof input.body.pipe !== "function") throw new TypeError("ASR body stream is required");
     const contentLength = input.contentLength ?? null;
     if (contentLength !== null) {
@@ -988,34 +1118,62 @@ export function createAsrService(config = {}, dependencies = {}) {
         });
 
         const providerStarted = now();
+        const providerId = useAiPlatform ? AI_PLATFORM_PROVIDER_ID : provider.id;
         try {
-          const providerResult = await processingGuard.race(provider.transcribe({
-            audioPath: normalized.outputPath,
-            mediaType: "audio/wav",
-            language: "zh-CN",
-            durationMs: normalized.durationMs,
-            purpose,
-            signal: controller.signal,
-            requestId,
-            [ASR_PROVIDER_RESOURCE_LIFECYCLE]: onLateResourceLifecycle,
-          }));
+          let providerResult;
+          if (useAiPlatform) {
+            const descriptor = safePlatformDescriptor({
+              uploaded,
+              normalized,
+              purpose,
+              language,
+            });
+            if (typeof aiPlatformRuntime?.runTask !== "function") {
+              throw contractError("ASR_NOT_CONFIGURED", 503, "ASR platform is not configured");
+            }
+            const platformResult = await processingGuard.race(aiPlatformRuntime.runTask({
+              taskType: AI_PLATFORM_TASK_TYPE,
+              feature: AI_PLATFORM_FEATURE,
+              channel: "web",
+              owner,
+              actor: owner,
+              subject: { type: "asr_audio", id: `sha256-${descriptor.sha256}` },
+              input: Object.freeze({ media: descriptor }),
+              evidenceDigest: descriptor.sha256,
+              priority: "interactive",
+              idempotencyKey,
+              signal: controller.signal,
+            }));
+            providerResult = { text: platformTranscript(platformResult) };
+          } else {
+            providerResult = await processingGuard.race(provider.transcribe({
+              audioPath: normalized.outputPath,
+              mediaType: "audio/wav",
+              language,
+              durationMs: normalized.durationMs,
+              purpose,
+              signal: controller.signal,
+              requestId,
+              [ASR_PROVIDER_RESOURCE_LIFECYCLE]: onLateResourceLifecycle,
+            }));
+          }
           throwIfAborted();
           providerMs = Math.max(0, now() - providerStarted);
           const transcript = normalizeAsrTranscript(providerResult?.text, purpose);
-          metrics.recordProviderCall({ provider: provider.id, outcome: "success" });
+          metrics.recordProviderCall({ provider: providerId, outcome: "success" });
           metrics.recordStageDuration({ stage: "provider", purpose, elapsedMs: providerMs });
           result = Object.freeze({
             transcript,
-            language: "zh-CN",
+            language,
             durationMs: normalized.durationMs,
             source: "server_asr",
             replayed: false,
           });
         } catch (error) {
           providerMs = Math.max(0, now() - providerStarted);
-          metrics.recordProviderCall({ provider: provider.id, outcome: "error" });
+          metrics.recordProviderCall({ provider: providerId, outcome: "error" });
           metrics.recordStageDuration({ stage: "provider", purpose, elapsedMs: providerMs });
-          throw error;
+          throw useAiPlatform ? mapAiPlatformError(error) : error;
         }
       }
     } catch (error) {
@@ -1210,7 +1368,9 @@ export function createAsrService(config = {}, dependencies = {}) {
     }
 
     const { outcome, errorCode } = resultOutcome(primaryError);
-    const providerId = provider?.id ?? runtime.providerName;
+    const providerId = useAiPlatform
+      ? AI_PLATFORM_PROVIDER_ID
+      : provider?.id ?? runtime.providerName;
     metrics.recordRequest({ purpose, provider: providerId, outcome, errorCode });
     metrics.recordCompletion({
       purpose,

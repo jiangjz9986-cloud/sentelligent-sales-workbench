@@ -1330,7 +1330,7 @@ describe("sales workbench backend API", () => {
     assert.ok(draft.body.item.sourceRefs.some((ref) => ref.type === "knowledge" && ref.id === knowledge.body.item.id));
   });
 
-  it("uses the configured DeepSeek model when generating solution drafts", async () => {
+  it("keeps the disabled solution Agent off the model path", async () => {
     if (server) {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -1368,13 +1368,10 @@ describe("sales workbench backend API", () => {
     });
 
     assert.equal(draft.response.status, 201);
-    assert.equal(providerCalls.length, 1);
-    assert.equal(providerCalls[0].url, "https://api.deepseek.com/chat/completions");
-    assert.equal(providerCalls[0].options.headers.Authorization, "Bearer test-provider-key");
-    assert.equal(JSON.parse(providerCalls[0].options.body).model, "deepseek-v4-flash");
-    assert.match(draft.body.item.content, /DeepSeek solution draft/);
-    assert.equal(draft.body.item.source, "deepseek");
-    assert.equal(draft.body.item.fallbackReason, null);
+    assert.equal(providerCalls.length, 0);
+    assert.match(draft.body.item.content, /客户现状与痛点/);
+    assert.equal(draft.body.item.source, "fallback");
+    assert.equal(draft.body.item.fallbackReason, "solution_draft_agent_disabled");
     assert.ok(draft.body.item.sourceRefs.some((ref) => ref.type === "customer" && ref.id === "rizhao"));
     assert.doesNotMatch(JSON.stringify(draft.body.item), /test-provider-key/);
   });

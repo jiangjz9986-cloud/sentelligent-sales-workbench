@@ -190,6 +190,7 @@ describe("backend model configuration", () => {
     const validMachineToken = Buffer.alloc(32, 6).toString("base64url");
     const validConfirmationSecret = Buffer.alloc(32, 8).toString("base64url");
     const validSettingsEncryptionKey = Buffer.alloc(32, 10).toString("base64url");
+    const validAiPlatformSecret = Buffer.alloc(32, 12).toString("base64url");
     const valid = {
       envFile,
       NODE_ENV: " Production ",
@@ -201,6 +202,11 @@ describe("backend model configuration", () => {
       WEIXIN_AGENT_OWNER: "jiangjz",
       ASSISTANT_CONFIRMATION_SECRET: validConfirmationSecret,
       SETTINGS_ENCRYPTION_KEY: validSettingsEncryptionKey,
+      AI_PLATFORM_MODE: "required",
+      AI_PLATFORM_BASE_URL: "https://ai-platform.example.test",
+      AI_PLATFORM_AUTH_SECRET: validAiPlatformSecret,
+      AI_PLATFORM_TARGET_MODEL: "gpt-5.6-luna",
+      AI_PLATFORM_TARGET_REASONING_EFFORT: "max",
       WEIXIN_ALLOWED_SENDER_IDS: "production-sender",
       WEIXIN_ALLOW_GROUPS: "false",
       WEIXIN_ALLOWED_GROUP_IDS: "",
@@ -214,6 +220,13 @@ describe("backend model configuration", () => {
     assert.equal(config.authCookieSecure, true);
     assert.equal(config.weixinAgentApiToken, validMachineToken);
     assert.equal(config.assistantConfirmationSecret, validConfirmationSecret);
+    assert.equal(config.aiPlatformMode, "required");
+    assert.equal(config.aiPlatformBaseUrl, "https://ai-platform.example.test");
+    assert.equal(config.aiPlatformAuthSecret, validAiPlatformSecret);
+    assert.equal(config.aiPlatformTargetModel, "gpt-5.6-luna");
+    assert.equal(config.aiPlatformTargetReasoningEffort, "max");
+    assert.equal(config.aiPlatformExecutionMode, "local-simulated");
+    assert.equal(config.aiPlatformProactiveScheduleOwner, "backend");
     assert.deepEqual(config.weixinAllowedSenderIds, ["production-sender"]);
     assert.equal(config.weixinAllowGroups, false);
     assert.deepEqual(config.weixinAllowedGroupIds, []);
@@ -254,6 +267,7 @@ describe("backend model configuration", () => {
     );
     assert.throws(() => loadConfig({ ...valid, ASSISTANT_CONFIRMATION_SECRET: validSessionSecret }), /independent|ASSISTANT_CONFIRMATION_SECRET/);
     assert.throws(() => loadConfig({ ...valid, WEIXIN_AGENT_API_TOKEN: validSessionSecret }), /independent|WEIXIN_AGENT_API_TOKEN/);
+    assert.throws(() => loadConfig({ ...valid, AI_PLATFORM_AUTH_SECRET: validSessionSecret }), /independent|AI_PLATFORM_AUTH_SECRET/);
     // v0.9.3：sender 白名单退役为 bootstrap 种子键（运行时 sender 过滤由 weixin_bindings
     // 表承担，入口对未绑定 sender 固定拒答）；群闸语义原样保留。
     const unbound = loadConfig({ ...valid, WEIXIN_ALLOWED_SENDER_IDS: "" });

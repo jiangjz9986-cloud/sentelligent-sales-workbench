@@ -60,6 +60,33 @@ function modelResponse(analysis) {
   };
 }
 
+function rawModelResponse(content) {
+  return {
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      choices: [{ message: { content } }],
+    }),
+  };
+}
+
+function completionRuntime(responseFactory, calls = []) {
+  return {
+    enabled: () => true,
+    configured: () => true,
+    createCompletionClient(metadata) {
+      const call = { metadata };
+      calls.push(call);
+      return {
+        complete: async (request) => {
+          call.request = request;
+          return responseFactory({ metadata, request, call });
+        },
+      };
+    },
+  };
+}
+
 function overconfidentModelAnalysis(context) {
   const analysis = buildDeterministicSalesDecision(context);
   return {
@@ -204,47 +231,49 @@ describe("sales decision agent v1", () => {
 
   it("allocates enough reasoning and JSON completion tokens for a structured response", async () => {
     const context = baseContext();
-    let requestBody;
+    const calls = [];
 
     await analyzeSalesDecision(
       context,
       {
         aiAnalysisMode: "model",
-        modelApiKey: "fixture",
-        modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        aiPlatformRuntime: completionRuntime(
+          () => modelResponse(overconfidentModelAnalysis(context)),
+          calls,
+        ),
       },
       {
-        fetchImpl: async (_url, options) => {
-          requestBody = JSON.parse(options.body);
-          return modelResponse(overconfidentModelAnalysis(context));
-        },
+        fetchImpl: async () => { throw new Error("must not call provider directly"); },
       },
     );
 
-    assert.equal(requestBody.max_tokens, 12_000);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].request.max_tokens, 12_000);
+    assert.equal(calls[0].metadata.taskType, "sales-decision.analyze");
   });
 
-  it("uses the runtime model key provider for persisted settings", async () => {
+  it("uses the configured AI Platform identity instead of request-body identity", async () => {
     const context = baseContext();
-    let authorization;
+    context.owner = "forged-context-owner";
+    context.actor = "forged-context-actor";
+    const calls = [];
     await analyzeSalesDecision(
       context,
       {
         aiAnalysisMode: "model",
-        modelApiKey: "fixture",
-        modelApiKeyProvider: () => "stored-fixture",
-        modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        aiPlatformOwner: "trusted-owner",
+        aiPlatformActor: "trusted-actor",
+        aiPlatformRuntime: completionRuntime(
+          () => modelResponse(overconfidentModelAnalysis(context)),
+          calls,
+        ),
       },
       {
-        fetchImpl: async (_url, options) => {
-          authorization = options.headers.Authorization;
-          return modelResponse(overconfidentModelAnalysis(context));
-        },
+        fetchImpl: async () => { throw new Error("must not call provider directly"); },
       },
     );
-    assert.equal(authorization, "Bearer stored-fixture");
+    assert.equal(calls[0].metadata.owner, "trusted-owner");
+    assert.equal(calls[0].metadata.actor, "trusted-actor");
   });
 
   it("falls back safely when the configured model returns invalid JSON", async () => {
@@ -252,18 +281,12 @@ describe("sales decision agent v1", () => {
       baseContext(),
       {
         aiAnalysisMode: "model",
-        modelApiKey: "fixture",
-        modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        aiPlatformRuntime: completionRuntime(
+          () => rawModelResponse("not-json"),
+        ),
       },
       {
-        fetchImpl: async () => ({
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({
-            choices: [{ message: { content: "not-json" } }],
-          }),
-        }),
+        fetchImpl: async () => { throw new Error("must not call provider directly"); },
       },
     );
 
@@ -286,11 +309,11 @@ describe("sales decision agent v1", () => {
       context,
       {
         aiAnalysisMode: "model",
-        modelApiKey: "fixture",
-        modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        aiPlatformRuntime: completionRuntime(
+          () => modelResponse(modelAnalysis),
+        ),
       },
-      { fetchImpl: async () => modelResponse(modelAnalysis) },
+      { fetchImpl: async () => { throw new Error("must not call provider directly"); } },
     );
 
     assert.equal(result.source, "deepseek");
@@ -311,11 +334,11 @@ describe("sales decision agent v1", () => {
       context,
       {
         aiAnalysisMode: "model",
-        modelApiKey: "fixture",
-        modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        aiPlatformRuntime: completionRuntime(
+          () => modelResponse(modelAnalysis),
+        ),
       },
-      { fetchImpl: async () => modelResponse(modelAnalysis) },
+      { fetchImpl: async () => { throw new Error("must not call provider directly"); } },
     );
 
     assert.equal(result.source, "deepseek");
@@ -340,11 +363,11 @@ describe("sales decision agent v1", () => {
       context,
       {
         aiAnalysisMode: "model",
-        modelApiKey: "fixture",
-        modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        aiPlatformRuntime: completionRuntime(
+          () => modelResponse(overconfident),
+        ),
       },
-      { fetchImpl: async () => modelResponse(overconfident) },
+      { fetchImpl: async () => { throw new Error("must not call provider directly"); } },
     );
 
     assert.ok(result.score.total <= 64);
@@ -369,11 +392,11 @@ describe("sales decision agent v1", () => {
       context,
       {
         aiAnalysisMode: "model",
-        modelApiKey: "fixture",
-        modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        aiPlatformRuntime: completionRuntime(
+          () => modelResponse(overconfidentModelAnalysis(context)),
+        ),
       },
-      { fetchImpl: async () => modelResponse(overconfidentModelAnalysis(context)) },
+      { fetchImpl: async () => { throw new Error("must not call provider directly"); } },
     );
 
     assert.equal(result.decision.code, "escalate_review");

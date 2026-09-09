@@ -34,6 +34,7 @@ function jsonResponse(value, options) {
 
 function providerWith(overrides = {}, dependencies = {}) {
   return createOpenAiCompatibleProvider({
+    executionMode: "external-provider",
     baseUrl: "https://provider.example/v1",
     model: "synthetic-asr",
     timeoutMs: 1_000,
@@ -45,6 +46,100 @@ function providerWith(overrides = {}, dependencies = {}) {
     ...dependencies,
   });
 }
+
+function localProviderWith(overrides = {}, dependencies = {}) {
+  return createOpenAiCompatibleProvider({
+    executionMode: "local-simulated",
+    model: "synthetic-local-asr",
+    timeoutMs: 1_000,
+    ...overrides,
+  }, dependencies);
+}
+
+describe("ASR local-simulated platform adapter", () => {
+  it("defaults to local simulation without requiring key, file, form, or fetch dependencies", async () => {
+    const calls = { key: 0, blob: 0, fetch: 0 };
+    const provider = createOpenAiCompatibleProvider({
+      model: "synthetic-local-asr",
+      timeoutMs: 1_000,
+      asrApiKeyProvider: async () => {
+        calls.key += 1;
+        return "must-not-be-read";
+      },
+    }, {
+      openAsBlobImpl: async () => {
+        calls.blob += 1;
+        throw new Error("local simulation must not open media");
+      },
+      fetchImpl: async () => {
+        calls.fetch += 1;
+        throw new Error("local simulation must not fetch");
+      },
+    });
+
+    assert.equal(provider.executionMode, "local-simulated");
+    assert.deepEqual(await provider.transcribe({
+      ...VALID_INPUT,
+      simulation: { transcript: "统一平台本地转写" },
+    }), { text: "统一平台本地转写" });
+    assert.deepEqual(calls, { key: 0, blob: 0, fetch: 0 });
+  });
+
+  it("requires explicit external-provider mode for the legacy HTTP path", () => {
+    assert.throws(
+      () => createOpenAiCompatibleProvider({
+        executionMode: "external-provider",
+        model: "synthetic-asr",
+        asrApiKeyProvider: async () => "synthetic-provider-key",
+      }),
+      /base URL/,
+    );
+    assert.throws(
+      () => localProviderWith({ executionMode: "unexpected-mode" }),
+      /execution mode/,
+    );
+  });
+
+  it("preserves caller cancellation and removes its abort listener", async () => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const originalAdd = signal.addEventListener.bind(signal);
+    const originalRemove = signal.removeEventListener.bind(signal);
+    let addCalls = 0;
+    let removeCalls = 0;
+    signal.addEventListener = (...args) => {
+      if (args[0] === "abort") addCalls += 1;
+      return originalAdd(...args);
+    };
+    signal.removeEventListener = (...args) => {
+      if (args[0] === "abort") removeCalls += 1;
+      return originalRemove(...args);
+    };
+    try {
+      const provider = localProviderWith({ timeoutMs: 1_000 });
+      const pending = provider.transcribe({
+        ...VALID_INPUT,
+        signal,
+        simulation: { delayMs: 50 },
+      });
+      setTimeout(() => controller.abort(new DOMException("synthetic caller cancel", "AbortError")), 5);
+      await assert.rejects(pending, (error) => error.name === "AbortError");
+      assert.equal(addCalls, 1);
+      assert.equal(removeCalls, 1);
+    } finally {
+      signal.addEventListener = originalAdd;
+      signal.removeEventListener = originalRemove;
+    }
+  });
+
+  it("maps local simulation timeout to ASR_TIMEOUT and stops the simulation", async () => {
+    const provider = localProviderWith({ timeoutMs: 10 });
+    await assert.rejects(
+      provider.transcribe({ ...VALID_INPUT, simulation: { delayMs: 50 } }),
+      (error) => error.code === "ASR_TIMEOUT" && error.status === 504,
+    );
+  });
+});
 
 describe("ASR OpenAI-compatible provider URL contract", () => {
   it("preserves root and /v1 base pathnames with and without trailing slash", () => {
@@ -362,6 +457,7 @@ describe("ASR OpenAI-compatible provider upload", () => {
   it("freezes the registry to openai-compatible", () => {
     assert.equal(createAsrProvider({
       provider: "openai-compatible",
+      executionMode: "external-provider",
       baseUrl: "https://provider.example/v1",
       model: "synthetic-asr",
       asrApiKeyProvider: async () => "synthetic-provider-key",

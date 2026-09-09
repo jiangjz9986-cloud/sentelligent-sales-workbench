@@ -113,6 +113,7 @@ function createHarness({
   ]);
   const suggestions = new Map();
   let failMarkConfirmed = false;
+  let generatorContext = null;
 
   const visitRepository = {
     getConfirmed({ owner, visitId }) {
@@ -218,8 +219,9 @@ function createHarness({
     }
   };
 
-  const suggestionGenerator = async (input) => {
+  const suggestionGenerator = async (input, context) => {
     counters.generatorCalls += 1;
+    generatorContext = clone(context);
     assert.equal(input.owner, undefined);
     assert.equal(input.customer.owner, undefined);
     assert.equal(input.visit.owner, undefined);
@@ -245,6 +247,7 @@ function createHarness({
     suggestions,
     advance(ms) { now = new Date(now.getTime() + ms); },
     setFailMarkConfirmed(value) { failMarkConfirmed = value; },
+    generatorContext() { return clone(generatorContext); },
   };
 }
 
@@ -295,6 +298,12 @@ describe("visit temperature suggestion core", () => {
     assert.equal(harness.counters.customerWrites, 0);
     assert.equal(harness.counters.generatorCalls, 1);
     assert.equal(harness.counters.suggestionCreates, 1);
+    assert.deepEqual(harness.generatorContext(), {
+      owner: "owner-a",
+      actor: "owner-a",
+      channel: "web",
+      subject: { type: "visit", id: "visit-a" },
+    });
   });
 
   it("reuses one durable suggestion and keeps history read-only without recalling the generator", async () => {

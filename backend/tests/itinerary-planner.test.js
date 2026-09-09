@@ -115,6 +115,32 @@ describe("visit itinerary planner", () => {
     assert.doesNotMatch(JSON.stringify(plan), /model-secret/);
   });
 
+  it("passes server-owned identity metadata to the AI order enhancer", async () => {
+    const amap = createAmapFixture();
+    let enhancerOptions;
+    await planVisitItinerary(request(), {
+      amapClient: amap.client,
+      identity: {
+        owner: "owner-a",
+        actor: "actor-a",
+        subject: { type: "itinerary", id: "itinerary-123" },
+        channel: "web",
+        idempotencyKey: "itinerary-plan-123",
+      },
+      enhanceOrder: async (fallback, _context, _modelConfig, options) => {
+        enhancerOptions = options;
+        return fallback;
+      },
+    });
+
+    assert.equal(enhancerOptions.owner, "owner-a");
+    assert.equal(enhancerOptions.actor, "actor-a");
+    assert.deepEqual(enhancerOptions.subject, { type: "itinerary", id: "itinerary-123" });
+    assert.equal(enhancerOptions.channel, "web");
+    assert.equal(enhancerOptions.idempotencyKey, "itinerary-plan-123");
+    assert.equal(enhancerOptions.signal, null);
+  });
+
   it("reverse verifies browser-resolved locations instead of repeating forward geocoding", async () => {
     const amap = createAmapFixture();
     const base = request();

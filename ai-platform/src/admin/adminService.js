@@ -1919,6 +1919,12 @@ export function createAdminService({ db, clock = () => new Date(), timeZone = "A
       const intervalSeconds = patch.intervalSeconds ?? integerOrZero(row.interval_seconds);
       const inputTemplate = patch.inputTemplate ?? parseObject(row.input_template_json, {});
       const enabled = patch.enabled ?? parseBooleanColumn(row.enabled);
+      if (enabled && taskType === "proactive.analyze") {
+        throw new AiPlatformError("proactive analysis scheduling is owned by the backend worker", {
+          code: "proactive_schedule_owned_by_backend",
+          status: 409,
+        });
+      }
       const updatedAt = now();
       let nextRunAt = row.next_run_at;
       if (Object.hasOwn(patch, "enabled")) {

@@ -24,6 +24,7 @@ const NO_STORE_HEADERS = Object.freeze({
   "Cache-Control": "no-store, max-age=0",
   Pragma: "no-cache",
 });
+const AI_PLATFORM_MODES = new Set(["disabled", "optional", "required"]);
 
 function boundedNow(now) {
   if (!Number.isSafeInteger(now) || !Number.isFinite(now)) {
@@ -265,6 +266,37 @@ function credentialIsActive(metadata) {
   );
 }
 
+function normalizeAiPlatformMode(value) {
+  const mode = value === undefined || value === null || value === ""
+    ? "disabled"
+    : String(value).trim().toLowerCase();
+  if (!AI_PLATFORM_MODES.has(mode)) throw new TypeError("AI platform mode is invalid");
+  return mode;
+}
+
+function aiPlatformIsConfigured(aiPlatformRuntime) {
+  if (!aiPlatformRuntime) return false;
+  try {
+    if (typeof aiPlatformRuntime.configured === "function") {
+      return aiPlatformRuntime.configured() === true;
+    }
+    return aiPlatformRuntime.configured === true;
+  } catch {
+    return false;
+  }
+}
+
+function aiPlatformPreflightState(config, aiPlatformRuntime) {
+  const mode = normalizeAiPlatformMode(config?.aiPlatformMode ?? aiPlatformRuntime?.mode);
+  const configured = aiPlatformIsConfigured(aiPlatformRuntime);
+  return Object.freeze({
+    mode,
+    configured,
+    bypassLegacyCredential: mode === "required"
+      || (mode === "optional" && configured),
+  });
+}
+
 function requestAbortLifecycle(request, response) {
   const controller = new AbortController();
   const abort = () => {
@@ -398,6 +430,7 @@ export function createAsrHttpHandlers({
   config,
   service,
   credentialMetadataProvider,
+  aiPlatformRuntime = null,
   now = Date.now,
   preflightTimeoutMs = Math.min(5_000, config?.asrTimeoutMs ?? 5_000),
   setTimeoutImpl = globalThis.setTimeout,
@@ -405,7 +438,12 @@ export function createAsrHttpHandlers({
 } = {}) {
   if (!db || typeof db.prepare !== "function") throw new TypeError("db is required");
   if (!service || typeof service.transcribe !== "function") throw new TypeError("ASR service is required");
-  if (typeof credentialMetadataProvider !== "function") {
+  const platformRuntime = aiPlatformRuntime ?? config?.aiPlatformRuntime ?? null;
+  const initialPlatformState = aiPlatformPreflightState(config, platformRuntime);
+  if (
+    typeof credentialMetadataProvider !== "function"
+    && !initialPlatformState.bypassLegacyCredential
+  ) {
     throw new TypeError("ASR credential metadata provider is required");
   }
   if (typeof now !== "function") throw new TypeError("now must be a function");
@@ -417,7 +455,11 @@ export function createAsrHttpHandlers({
   }
   const rateLimitSecret = boundedIdentity(config?.authSessionSecret, "rate limit secret");
 
-  async function activeCredential(signal) {
+  async function activeCredential(signal, { skip = false } = {}) {
+    if (skip) {
+      if (signal?.aborted) throw abortReason(signal);
+      return true;
+    }
     try {
       const metadata = await awaitRequestPreflight(
         (operationSignal) => credentialMetadataProvider({ signal: operationSignal }),
@@ -466,10 +508,12 @@ export function createAsrHttpHandlers({
       if (config.asrMode !== "live") {
         throw new HttpError(503, "ASR_NOT_CONFIGURED", "ASR is not configured");
       }
-      // Independent secure_settings metadata is checked before initialize and
-      // before the request stream is handed to the runtime.  A missing or
-      // explicitly cleared row therefore fails closed without model fallback.
-      if (!await activeCredential(abortLifecycle.signal)) {
+      const platformState = aiPlatformPreflightState(config, platformRuntime);
+      // Legacy secure_settings readiness remains a compatibility gate only
+      // when this request is not required to pass through the AI platform.
+      if (!await activeCredential(abortLifecycle.signal, {
+        skip: platformState.bypassLegacyCredential,
+      })) {
         throw new HttpError(503, "ASR_NOT_CONFIGURED", "ASR is not configured");
       }
       consumeAsrRateLimit(
@@ -553,9 +597,12 @@ export function createAsrHttpHandlers({
   async function statusSnapshot({ request, response } = {}) {
     const abortLifecycle = request && response
       ? requestAbortLifecycle(request, response)
-      : Object.freeze({ signal: undefined, cleanup() {} });
+    : Object.freeze({ signal: undefined, cleanup() {} });
     try {
-      const configured = await activeCredential(abortLifecycle.signal);
+      const platformState = aiPlatformPreflightState(config, platformRuntime);
+      const configured = platformState.bypassLegacyCredential
+        ? platformState.configured
+        : await activeCredential(abortLifecycle.signal);
       const readiness = await awaitRequestPreflight((operationSignal) => service.readiness({
         signal: operationSignal,
       }), {

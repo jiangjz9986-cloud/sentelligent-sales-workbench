@@ -129,6 +129,7 @@ export async function planVisitItinerary(input, {
   fetchImpl,
   clock = () => new Date(),
   enhanceOrder = enhanceItineraryOrderWithModel,
+  identity = {},
 } = {}) {
   const request = normalizeRequest(input);
   assertAmapClient(amapClient);
@@ -168,7 +169,15 @@ export async function planVisitItinerary(input, {
       stops: stops.map(({ location: _location, ...stop }) => stop),
       durationMatrix: matrix.durations,
       distanceMatrix: matrix.distances,
-    }, modelConfig, { fetchImpl });
+    }, modelConfig, {
+      fetchImpl,
+      owner: identity.owner ?? null,
+      actor: identity.actor ?? null,
+      subject: identity.subject ?? null,
+      channel: identity.channel ?? "web",
+      idempotencyKey: identity.idempotencyKey ?? null,
+      signal: identity.signal ?? null,
+    });
   } catch {
     enhanced = fallback;
   }

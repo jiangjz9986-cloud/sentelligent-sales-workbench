@@ -1,8 +1,7 @@
 import { buildQuickRecordAnalysis } from "./quickRecordAnalysis.js";
 import { analyzeSalesDecision as analyzeSalesDecisionAgent } from "./ai/agents/salesDecisionAgent.js";
-import { readBoundedResponseText } from "./http/request.js";
+import { runAiPlatformTextCompletion, textModelAvailability } from "./aiPlatform/textAdapter.js";
 
-const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
 const NETWORK_ERROR_CODES = new Set([
   "ECONNABORTED",
   "ECONNREFUSED",
@@ -19,10 +18,6 @@ function fallbackAnalysis(rawContent, source) {
   const analysis = buildQuickRecordAnalysis(rawContent);
   if (!analysis) return null;
   return { ...analysis, source };
-}
-
-function completionUrl(baseUrl) {
-  return `${String(baseUrl ?? "https://api.deepseek.com").replace(/\/+$/, "")}/chat/completions`;
 }
 
 function requireText(value, path) {
@@ -129,48 +124,54 @@ function buildMessages(rawContent, systemPrompt = null, knowledgeItems = []) {
 async function callChatCompletion({
   messages,
   config,
-  fetchImpl,
-  maxTokens = 1200,
+  options = {},
+  taskType,
+  feature,
+  owner = null,
+  actor = null,
+  subject = null,
+  channel = null,
+  idempotencyKey = null,
+  signal = null,
   thinking = null,
+  maxTokens = 1200,
 }) {
-  const requestBody = {
-    model: config.modelName ?? "deepseek-v4-flash",
-    messages,
-    response_format: { type: "json_object" },
-    temperature: 0.1,
-    max_tokens: maxTokens,
-    stream: false,
-    ...(thinking ? { thinking } : {}),
-  };
-  const response = await fetchImpl(completionUrl(config.modelBaseUrl), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${resolveModelApiKey(config)}`,
+  return runAiPlatformTextCompletion({
+    config,
+    options: {
+      ...options,
+      fetchImpl: options.fetchImpl ?? fetch,
     },
-    body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(config.modelTimeoutMs ?? 30000),
+    taskType,
+    feature,
+    channel: channel ?? options.channel,
+    owner,
+    actor,
+    subject,
+    messages,
+    maxTokens,
+    maxWaitMs: options.maxWaitMs,
+    pollMs: options.pollMs,
+    priority: options.priority,
+    idempotencyKey,
+    signal: signal ?? options.signal ?? null,
+    thinking,
   });
-
-  const text = await readBoundedResponseText(response, {
-    maxBytes: MAX_MODEL_RESPONSE_BYTES,
-    errorMessage: "Model provider response is too large",
-  });
-  if (!response.ok) {
-    throw new Error(`model provider returned ${response.status}`);
-  }
-  const body = text ? JSON.parse(text) : {};
-
-  const content = body.choices?.[0]?.message?.content;
-  if (!content) throw new Error("model provider returned empty content");
-  return content;
 }
 
-async function callModel(rawContent, config, fetchImpl, systemPrompt = null, knowledgeItems = []) {
+async function callModel(rawContent, config, options = {}, systemPrompt = null, knowledgeItems = []) {
   const content = await callChatCompletion({
     messages: buildMessages(rawContent, systemPrompt, knowledgeItems),
     config,
-    fetchImpl,
+    options,
+    taskType: "quick-record.analyze",
+    feature: "quick_record_analysis",
+    owner: options.owner ?? config.aiPlatformOwner,
+    actor: options.actor ?? config.aiPlatformActor,
+    subject: options.subject ?? null,
+    channel: options.channel,
+    idempotencyKey: options.idempotencyKey,
+    signal: options.signal,
     maxTokens: 3200,
     ...(String(config.modelProvider ?? "").trim().toLowerCase() === "deepseek"
       ? { thinking: { type: "disabled" } }
@@ -219,7 +220,17 @@ export async function generateVisitTemperatureSuggestionWithModel(snapshot, conf
   const content = await callChatCompletion({
     messages: buildVisitTemperatureMessages(snapshot),
     config,
-    fetchImpl: options.fetchImpl ?? fetch,
+    options,
+    taskType: "customer.temperature",
+    feature: "customer_temperature",
+    owner: options.owner ?? config.aiPlatformOwner,
+    actor: options.actor ?? config.aiPlatformActor,
+    subject: options.subject ?? (snapshot?.customer?.id
+      ? { type: "customer", id: snapshot.customer.id }
+      : null),
+    channel: options.channel,
+    idempotencyKey: options.idempotencyKey,
+    signal: options.signal,
     maxTokens: 900,
   });
   return JSON.parse(stripJsonFence(content));
@@ -232,8 +243,12 @@ export function resolveModelApiKey(config = {}) {
   return String(config.modelApiKey ?? "");
 }
 
-function shouldUseModel(config) {
-  return config.aiAnalysisMode === "model" && Boolean(resolveModelApiKey(config));
+function modelAvailability(config, options = {}) {
+  return textModelAvailability(config, options);
+}
+
+function shouldUseModel(config, options = {}) {
+  return modelAvailability(config, options) === "available";
 }
 
 function parseModelDraftContent(content) {
@@ -286,6 +301,8 @@ function modelFailureKind(error) {
     return "network_error";
   }
 
+  if (code === "LOCAL_SIMULATION_ONLY") return "local_simulated";
+
   return "model_failure";
 }
 
@@ -293,12 +310,20 @@ function fallbackReason(feature, error = null) {
   return `${feature}_${modelFailureKind(error)}`;
 }
 
-function withModelAvailability(fallback, config, feature) {
-  if (config.aiAnalysisMode === "model") {
+function withModelAvailability(fallback, config, feature, options = {}) {
+  const availability = modelAvailability(config, options);
+  if (availability === "missing") {
     return {
       ...fallback,
       source: "fallback",
       fallbackReason: `${feature}_missing_model_key`,
+    };
+  }
+  if (availability === "unavailable") {
+    return {
+      ...fallback,
+      source: "fallback",
+      fallbackReason: `${feature}_model_failure`,
     };
   }
   return {
@@ -557,13 +582,22 @@ function buildItineraryOrderMessages(fallback, context) {
 
 async function enhanceDraftWithModel(fallbackDraft, messages, config, options = {}) {
   const feature = options.feature ?? "draft";
-  if (!shouldUseModel(config)) return withModelAvailability(fallbackDraft, config, feature);
+  if (!shouldUseModel(config, options)) return withModelAvailability(fallbackDraft, config, feature, options);
+  if (!options.taskType) return withModelFailure(fallbackDraft, feature, new Error("task type is not registered"));
 
   try {
     const content = await callChatCompletion({
       messages,
       config,
-      fetchImpl: options.fetchImpl ?? fetch,
+      options,
+      taskType: options.taskType,
+      feature,
+      owner: options.owner,
+      actor: options.actor,
+      subject: options.subject,
+      channel: options.channel,
+      idempotencyKey: options.idempotencyKey,
+      signal: options.signal,
       maxTokens: 2600,
     });
     return withModelContent(fallbackDraft, parseModelDraftContent(content), config);
@@ -577,7 +611,13 @@ export async function enhanceWeeklyDraftWithModel(fallbackDraft, context, config
     fallbackDraft,
     buildWeeklyDraftMessages({ ...context, fallbackDraft }),
     config,
-    { ...options, feature: "weekly_draft" },
+    {
+      ...options,
+      feature: "weekly_draft",
+      taskType: "weekly.generate",
+      owner: options.owner,
+      subject: options.subject ?? (context?.reportId ? { type: "weekly_report", id: context.reportId } : null),
+    },
   );
 }
 
@@ -592,30 +632,57 @@ export async function composeWeeklyDraftWithModel(fallbackDraft, context, config
     fallbackDraft,
     buildWeeklyDraftMessages({ ...context, fallbackDraft, systemPrompt: options.systemPrompt }),
     config,
-    { ...options, feature: "weekly_draft" },
+    {
+      ...options,
+      feature: "weekly_draft",
+      taskType: "weekly.generate",
+      owner: options.owner,
+      subject: options.subject ?? (context?.reportId ? { type: "weekly_report", id: context.reportId } : null),
+    },
   );
 }
 
 export async function enhanceSolutionDraftWithModel(fallbackDraft, context, config = {}, options = {}) {
-  return enhanceDraftWithModel(
-    fallbackDraft,
-    buildSolutionDraftMessages({ ...context, fallbackDraft }),
-    config,
-    { ...options, feature: "solution_draft" },
-  );
+  const feature = "solution_draft";
+  const availability = modelAvailability(config, options);
+  if (config.aiAnalysisMode !== "model") {
+    return withModelAvailability(fallbackDraft, config, feature, options);
+  }
+  // The solution Agent is registered as disabled and has no platform task
+  // type. Preserve the historical missing-key reason for callers that have
+  // not configured any model, but never attempt a platform or legacy model
+  // call merely because a key exists.
+  if (availability === "missing") {
+    return withModelAvailability(fallbackDraft, config, feature, options);
+  }
+  return {
+    ...fallbackDraft,
+    source: "fallback",
+    fallbackReason: "solution_draft_agent_disabled",
+  };
 }
 
 export async function generateManualSuggestion(input, config = {}, options = {}) {
   const fallbackSuggestion = buildFallbackSuggestion(input ?? {});
-  if (!shouldUseModel(config)) {
-    return withModelAvailability(fallbackSuggestion, config, "manual_suggestion");
+  if (!shouldUseModel(config, options)) {
+    return withModelAvailability(fallbackSuggestion, config, "manual_suggestion", options);
   }
 
   try {
     const content = await callChatCompletion({
       messages: buildManualSuggestionMessages({ ...(input ?? {}), fallbackSuggestion }),
       config,
-      fetchImpl: options.fetchImpl ?? fetch,
+      options,
+      taskType: "suggestion.generate",
+      feature: "manual_suggestion",
+      owner: options.owner,
+      actor: options.actor,
+      subject: options.subject ?? (input?.context?.opportunityId
+        ? { type: "opportunity", id: input.context.opportunityId }
+        : input?.context?.customerId ? { type: "customer", id: input.context.customerId } : null),
+      channel: options.channel,
+      idempotencyKey: options.idempotencyKey,
+      signal: options.signal,
       maxTokens: 1800,
     });
     return withModelContent(fallbackSuggestion, parseModelDraftContent(content), config);
@@ -625,13 +692,21 @@ export async function generateManualSuggestion(input, config = {}, options = {})
 }
 
 export async function enhanceItineraryOrderWithModel(fallback, context, config = {}, options = {}) {
-  if (!shouldUseModel(config)) return withModelAvailability(fallback, config, "itinerary_order");
+  if (!shouldUseModel(config, options)) return withModelAvailability(fallback, config, "itinerary_order", options);
   try {
     const expectedStopIds = (context.stops ?? []).map((stop) => stop.id);
     const content = await callChatCompletion({
       messages: buildItineraryOrderMessages(fallback, context),
       config,
-      fetchImpl: options.fetchImpl ?? fetch,
+      options,
+      taskType: "itinerary.enhance",
+      feature: "itinerary_order",
+      owner: options.owner,
+      actor: options.actor,
+      subject: options.subject ?? (context?.id ? { type: "itinerary", id: context.id } : null),
+      channel: options.channel,
+      idempotencyKey: options.idempotencyKey,
+      signal: options.signal,
       maxTokens: 1000,
     });
     return {
@@ -672,18 +747,23 @@ export async function analyzeQuickRecord(rawContent, config = {}, options = {}) 
   const text = String(rawContent ?? "").trim();
   if (!text) return null;
   const knowledgeItems = normalizeAnalysisKnowledgeItems(options.knowledgeItems);
+  const availability = modelAvailability(config, options);
 
   if (config.aiAnalysisMode !== "model") {
     return withKnowledgeRefs(fallbackAnalysis(text, "mock"), knowledgeItems);
   }
 
-  if (!resolveModelApiKey(config)) {
+  if (availability === "missing") {
     return withKnowledgeRefs(fallbackAnalysis(text, "mock_missing_model_key"), knowledgeItems);
+  }
+
+  if (availability !== "available") {
+    return withKnowledgeRefs(fallbackAnalysis(text, "mock_model_fallback"), knowledgeItems);
   }
 
   try {
     return withKnowledgeRefs(
-      await callModel(text, config, options.fetchImpl ?? fetch, options.systemPrompt ?? null, knowledgeItems),
+      await callModel(text, config, options, options.systemPrompt ?? null, knowledgeItems),
       knowledgeItems,
     );
   } catch {

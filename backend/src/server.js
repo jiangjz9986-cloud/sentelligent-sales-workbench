@@ -43,6 +43,13 @@ import {
   updateUserVersioned,
 } from "./auth/usersStore.js";
 import { loadConfig } from "./config.js";
+import { createAiPlatformRuntime } from "./aiPlatform/runtime.js";
+import { textModelAvailability } from "./aiPlatform/textAdapter.js";
+import {
+  aiPlatformStructuredTaskAvailability,
+  runAiPlatformMediaTask,
+  runAiPlatformStructuredTask,
+} from "./aiPlatform/structuredAdapter.js";
 import { all, get, openDatabase, run } from "./db.js";
 import { createDatabaseIdentity } from "./db/databaseIdentity.js";
 import { withImmediateTransaction } from "./db/transaction.js";
@@ -59,9 +66,13 @@ import {
   TravelExpenseVersionConflictError,
   createTravelExpenseRepository,
 } from "./travelExpense/repository.js";
-import { analyzeExpenseText } from "./travelExpense/ingestionAnalysis.js";
+import {
+  analyzeExpenseText,
+  normalizeExpenseModelResponse,
+} from "./travelExpense/ingestionAnalysis.js";
 import { analyzeInvoiceText } from "./travelExpense/invoiceTextAnalysis.js";
 import {
+  inspectInvoiceFile,
   recognizeInvoiceDocument,
   validateDocumentFileName,
 } from "./travelExpense/invoiceRecognition.js";
@@ -326,8 +337,15 @@ function modelCompletionUrl(baseUrl) {
   return `${String(baseUrl ?? "https://api.deepseek.com").replace(/\/+$/, "")}/chat/completions`;
 }
 
-function createExpenseModelClient(config, fetchImpl) {
+function createExpenseModelClient(config, fetchImpl, aiPlatformRuntime = null) {
   if (config.aiAnalysisMode !== "model") return null;
+  // Once the unified platform is configured, the old provider-shaped client
+  // must not become an accidental bypass.  The feature adapters either use
+  // the platform runtime or return a bounded deterministic fallback.
+  if (
+    config.aiPlatformMode === "required"
+    || (config.aiPlatformMode === "optional" && aiPlatformRuntime?.configured?.() === true)
+  ) return null;
   return async ({ signal, ...request }) => {
     const apiKey = resolveRuntimeModelApiKey(config);
     if (!apiKey) throw new Error("model_not_configured");
@@ -348,6 +366,115 @@ function resolveRuntimeModelApiKey(config) {
     return String(config.modelApiKeyProvider() ?? "");
   }
   return String(config.modelApiKey ?? "");
+}
+
+function aiPlatformRoutingState(config) {
+  const availability = aiPlatformStructuredTaskAvailability(config);
+  return Object.freeze({
+    mode: config.aiPlatformMode ?? "disabled",
+    availability,
+    usePlatform: config.aiPlatformMode !== "disabled" && availability !== "missing",
+  });
+}
+
+function estimateDocumentPageCount(mediaType, buffer) {
+  if (mediaType !== "application/pdf") return 1;
+  const text = Buffer.from(buffer).toString("latin1");
+  const count = [...text.matchAll(/\/Type[\x00\t\n\f\r ]+\/Page(?:[\x00\t\n\f\r />]|$)/gu)].length;
+  // A compressed or unusual PDF may not expose page objects as plain text.
+  // Use one page in that case; the platform still receives the original byte
+  // digest and the local PDF/vision path remains bounded to four pages.
+  return count > 0 ? count : 1;
+}
+
+function documentMediaDescriptor(file) {
+  const inspected = inspectInvoiceFile(file);
+  return {
+    inspected,
+    media: {
+      mediaType: inspected.mediaType,
+      byteLength: inspected.sizeBytes,
+      pageCount: estimateDocumentPageCount(inspected.mediaType, inspected.buffer),
+      sha256: inspected.sha256,
+    },
+  };
+}
+
+function platformSubjectForDigest(type, digest) {
+  return { type, id: `sha256-${digest}` };
+}
+
+function platformMediaRecognitionError(error, fallback = "AI_PLATFORM_RECOGNITION_FAILED") {
+  const code = String(error?.code ?? "").trim();
+  return /^[A-Z0-9_]{1,80}$/u.test(code) ? code : fallback;
+}
+
+function platformInvoiceFields(payload) {
+  if (payload?.fields && typeof payload.fields === "object" && !Array.isArray(payload.fields)) {
+    return payload.fields;
+  }
+  if (payload?.invoice && typeof payload.invoice === "object" && !Array.isArray(payload.invoice)) {
+    return payload.invoice;
+  }
+  return payload;
+}
+
+function platformPaymentModel(payload) {
+  const evidence = payload?.evidence && typeof payload.evidence === "object" && !Array.isArray(payload.evidence)
+    ? payload.evidence
+    : payload;
+  return {
+    documentKind: payload?.documentKind ?? "payment_proof",
+    amountCents: evidence?.amountCents ?? null,
+    occurredOn: evidence?.occurredOn ?? null,
+    ...(Object.hasOwn(evidence ?? {}, "occurredOnYearExplicit")
+      ? { occurredOnYearExplicit: evidence.occurredOnYearExplicit }
+      : {}),
+    paidTime: evidence?.paidTime ?? null,
+    merchant: evidence?.merchant ?? null,
+    paymentMethod: evidence?.paymentMethod ?? null,
+    transactions: Array.isArray(payload?.transactions) ? payload.transactions : [],
+    confidence: payload?.confidence ?? null,
+    warnings: Array.isArray(payload?.warnings) ? payload.warnings : [],
+  };
+}
+
+function platformBookkeepingModel(payload) {
+  if (payload?.expense && typeof payload.expense === "object" && !Array.isArray(payload.expense)) {
+    return {
+      confidence: payload.confidence,
+      expense: payload.expense,
+    };
+  }
+  const candidate = Array.isArray(payload?.candidates)
+    ? payload.candidates.find((item) => item?.expense && typeof item.expense === "object")
+    : null;
+  if (candidate) {
+    return {
+      confidence: candidate.confidence ?? payload.confidence,
+      expense: candidate.expense,
+    };
+  }
+  return payload;
+}
+
+function normalizedExpenseFromPlatform(payload) {
+  const model = platformBookkeepingModel(payload);
+  return normalizeExpenseModelResponse({
+    choices: [{ message: { content: JSON.stringify(model) } }],
+  });
+}
+
+function rejectedRuleFields(expense, warnings) {
+  const result = { ...expense };
+  if (warnings.includes("missing_date") || warnings.includes("invalid_date")) {
+    result.occurredOn = null;
+  }
+  if (warnings.includes("missing_amount") || warnings.includes("invalid_amount")) {
+    result.amountCents = null;
+    result.reimbursementCents = null;
+  }
+  return result;
 }
 
 function shortcutResponseItem(item, replayed, extra = {}) {
@@ -3317,7 +3444,11 @@ function buildSalesDecisionContext(db, body, owner = null) {
 }
 
 export function createServer(options = {}) {
-  const config = loadConfig(options);
+  const config = loadConfig(options, {
+    allowAiPlatformTestLoopbackHttp: options.allowAiPlatformTestLoopbackHttp === true,
+    allowAsrTestLoopbackHttp: options.allowAsrTestLoopbackHttp === true,
+    allowModelTestLoopbackHttp: options.allowModelTestLoopbackHttp === true,
+  });
   const db = openDatabase({ databaseUrl: config.databaseUrl });
   const quickRecordConfirmationRepositories = createQuickRecordConfirmationRepositories(db, {
     // The legacy auth-disabled development mode stores quick records under the
@@ -3369,6 +3500,17 @@ export function createServer(options = {}) {
       ? secureSettingsRepository.resolveSecret(DEEPSEEK_SETTING_KEY, config.modelApiKey)
       : config.modelApiKey,
   };
+  const aiPlatformRuntime = options.aiPlatformRuntime ?? createAiPlatformRuntime({
+    config: runtimeConfig,
+    client: options.aiPlatformClient ?? null,
+    tokenProvider: options.aiPlatformTokenProvider ?? null,
+    fetchImpl: options.aiPlatformFetchImpl ?? options.fetchImpl ?? fetch,
+    now: options.aiPlatformNow ?? (() => Date.now()),
+  });
+  // All business adapters receive the same process-owned runtime.  They may
+  // still select their task type and subject, but cannot silently construct a
+  // second platform client or read the platform credential themselves.
+  runtimeConfig.aiPlatformRuntime = aiPlatformRuntime;
   // A server owns exactly one ASR runtime.  Its independent key provider reads
   // secure_settings on every provider request, so save/rotate/clear takes
   // effect without restart and a missing or cleared row never falls back to
@@ -3379,6 +3521,7 @@ export function createServer(options = {}) {
   const asrService = options.asrService ?? (config.authSessionSecret
     ? createAsrService(config, {
         ...(options.asrServiceDependencies ?? {}),
+        aiPlatformRuntime,
         asrApiKeyProvider: resolveAsrApiKey,
         providerDependencies: {
           fetchImpl: options.asrFetchImpl ?? options.fetchImpl ?? fetch,
@@ -3396,6 +3539,7 @@ export function createServer(options = {}) {
         config,
         service: asrService,
         credentialMetadataProvider: asrCredentialMetadata,
+        aiPlatformRuntime,
         now: options.asrHttpClock ?? Date.now,
         ...(options.asrHttpOptions ?? {}),
       })
@@ -3598,7 +3742,12 @@ export function createServer(options = {}) {
         ? { levels: options.invoiceEscalationLevels }
         : {}),
     });
-  const expenseModelClient = createExpenseModelClient(runtimeConfig, options.fetchImpl ?? fetch);
+  const expenseModelClient = createExpenseModelClient(
+    runtimeConfig,
+    options.fetchImpl ?? fetch,
+    aiPlatformRuntime,
+  );
+  const aiPlatformRouting = aiPlatformRoutingState(runtimeConfig);
   const invoiceTextTools = options.invoiceTextTools ?? probeLocalDocumentTextTools({
     ocrCommand: config.invoiceOcrCommand,
     pdfTextCommand: config.invoicePdfTextCommand,
@@ -3621,17 +3770,42 @@ export function createServer(options = {}) {
         pdfRenderer: invoicePdfImageRenderer,
       })
     : null);
-  const invoiceRecognizer = options.invoiceRecognizer ?? ((file) => recognizeInvoiceDocument(file, {
-    textExtractor: invoiceTextExtractor,
-    analyzeText: options.invoiceTextAnalyzer ?? ((text) => analyzeInvoiceText(text, {
-      modelClient: expenseModelClient,
-      modelName: config.modelName,
-      modelTimeoutMs: config.modelTimeoutMs,
-    })),
-    ...(documentVisionAnalyzer
-      ? { analyzeDocument: options.invoiceDocumentVisionAnalyzer ?? documentVisionAnalyzer.analyzeInvoice }
-      : {}),
-  }));
+  const platformInvoiceAnalyzer = async (file, recognitionOptions = {}) => {
+    const { inspected, media } = documentMediaDescriptor(file);
+    const payload = await runAiPlatformMediaTask({
+      config: runtimeConfig,
+      taskType: "invoice.recognize",
+      feature: "invoice_recognition",
+      channel: recognitionOptions.channel ?? "web",
+      owner: recognitionOptions.owner ?? runtimeConfig.aiPlatformOwner,
+      actor: recognitionOptions.actor ?? recognitionOptions.owner ?? runtimeConfig.aiPlatformOwner,
+      subject: recognitionOptions.subject ?? platformSubjectForDigest("invoice", inspected.sha256),
+      media,
+      idempotencyKey: recognitionOptions.idempotencyKey,
+      maxWaitMs: recognitionOptions.maxWaitMs,
+      pollMs: recognitionOptions.pollMs,
+      signal: recognitionOptions.signal ?? null,
+    });
+    return platformInvoiceFields(payload);
+  };
+  const invoiceRecognizer = options.invoiceRecognizer ?? ((file, recognitionOptions = {}) => {
+    if (aiPlatformRouting.usePlatform) {
+      return recognizeInvoiceDocument(file, {
+        analyzeDocument: (analyzerFile) => platformInvoiceAnalyzer(analyzerFile, recognitionOptions),
+      });
+    }
+    return recognizeInvoiceDocument(file, {
+      textExtractor: invoiceTextExtractor,
+      analyzeText: options.invoiceTextAnalyzer ?? ((text) => analyzeInvoiceText(text, {
+        modelClient: expenseModelClient,
+        modelName: config.modelName,
+        modelTimeoutMs: config.modelTimeoutMs,
+      })),
+      ...(documentVisionAnalyzer
+        ? { analyzeDocument: options.invoiceDocumentVisionAnalyzer ?? documentVisionAnalyzer.analyzeInvoice }
+        : {}),
+    });
+  });
   const shortcutBookkeepingRepository = createShortcutBookkeepingRepository(db, {
     ...(options.shortcutBookkeepingIdFactory ? { idFactory: options.shortcutBookkeepingIdFactory } : {}),
     ...(options.shortcutBookkeepingClock ? { clock: options.shortcutBookkeepingClock } : {}),
@@ -3651,8 +3825,43 @@ export function createServer(options = {}) {
       clock: options.weixinDeliveryReadinessClock ?? Date.now,
       staleMs: Math.max(15_000, Math.min(10 * 60_000, config.weixinOutboxPollMs * 4)),
     });
-  const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => (
-    recognizePaymentProofDocument(file, {
+  const platformPaymentAnalyzer = async (file, recognitionOptions = {}) => {
+    const { inspected, media } = documentMediaDescriptor(file);
+    const payload = await runAiPlatformMediaTask({
+      config: runtimeConfig,
+      taskType: "payment-proof.recognize",
+      feature: "payment_proof_recognition",
+      channel: recognitionOptions.channel ?? "web",
+      owner: recognitionOptions.owner ?? runtimeConfig.aiPlatformOwner,
+      actor: recognitionOptions.actor ?? recognitionOptions.owner ?? runtimeConfig.aiPlatformOwner,
+      subject: recognitionOptions.subject ?? platformSubjectForDigest("payment-proof", inspected.sha256),
+      media,
+      referenceDate: recognitionOptions.referenceDate,
+      idempotencyKey: recognitionOptions.idempotencyKey,
+      maxWaitMs: recognitionOptions.maxWaitMs,
+      pollMs: recognitionOptions.pollMs,
+      signal: recognitionOptions.signal ?? null,
+    });
+    return platformPaymentModel(payload);
+  };
+  const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => {
+    if (aiPlatformRouting.usePlatform) {
+      return recognizePaymentProofDocument(file, {
+        typedEvidence: recognitionOptions.typedEvidence,
+        referenceDate: recognitionOptions.referenceDate,
+        analyzeDocument: (analyzerFile, analyzerOptions = {}) => platformPaymentAnalyzer(
+          analyzerFile,
+          {
+            ...recognitionOptions,
+            referenceDate: analyzerOptions.referenceDate ?? recognitionOptions.referenceDate,
+          },
+        ),
+        modelProvider: "ai-platform",
+        modelName: config.aiPlatformTargetModel,
+        modelTimeoutMs: config.aiPlatformTimeoutMs,
+      });
+    }
+    return recognizePaymentProofDocument(file, {
       typedEvidence: recognitionOptions.typedEvidence,
       referenceDate: recognitionOptions.referenceDate,
       textExtractor: invoiceTextExtractor,
@@ -3670,16 +3879,70 @@ export function createServer(options = {}) {
       modelProvider: config.modelProvider,
       modelName: documentVisionAnalyzer ? config.modelVisionName : config.modelName,
       modelTimeoutMs: config.modelTimeoutMs,
-    })
-  ));
-  const travelExpenseAnalyzer = options.travelExpenseAnalyzer ?? ((text) => analyzeExpenseText(text, {
+    });
+  });
+  const legacyTravelExpenseAnalyzer = (text) => analyzeExpenseText(text, {
     clock: options.travelExpenseAnalysisClock ?? options.travelExpenseClock ?? (() => new Date()),
     modelClient: expenseModelClient,
     modelProvider: config.modelProvider,
     modelName: config.modelName,
     modelTimeoutMs: config.modelTimeoutMs,
     minModelConfidence: 0.8,
-  }));
+  });
+  const travelExpenseAnalyzer = options.travelExpenseAnalyzer ?? (aiPlatformRouting.usePlatform
+    ? async (text, analysisOptions = {}) => {
+        const ruleResult = await analyzeExpenseText(text, {
+          clock: options.travelExpenseAnalysisClock ?? options.travelExpenseClock ?? (() => new Date()),
+        });
+        const rawText = String(text ?? "").trim();
+        if (!rawText) return ruleResult;
+        try {
+          const payload = await runAiPlatformStructuredTask({
+            config: runtimeConfig,
+            taskType: "bookkeeping.extract",
+            feature: "bookkeeping_text_analysis",
+            channel: analysisOptions.channel ?? "web",
+            owner: analysisOptions.owner ?? runtimeConfig.aiPlatformOwner,
+            actor: analysisOptions.actor ?? analysisOptions.owner ?? runtimeConfig.aiPlatformOwner,
+            subject: analysisOptions.subject ?? null,
+            input: {
+              text: rawText.slice(0, 20_000),
+              ruleExpense: ruleResult.expense,
+            },
+            idempotencyKey: analysisOptions.idempotencyKey,
+            maxWaitMs: analysisOptions.maxWaitMs,
+            pollMs: analysisOptions.pollMs,
+            signal: analysisOptions.signal ?? null,
+          });
+          const normalized = await normalizedExpenseFromPlatform(payload);
+          const warnings = [...ruleResult.warnings];
+          if (normalized.confidence < 0.8) warnings.push("low_model_confidence");
+          return {
+            status: warnings.length === 0 ? "ready" : "review_required",
+            confidence: normalized.confidence,
+            expense: rejectedRuleFields(normalized.expense, warnings),
+            warnings: [...new Set(warnings)],
+            source: {
+              provider: "ai-platform",
+              model: config.aiPlatformTargetModel,
+            },
+          };
+        } catch (error) {
+          return {
+            ...ruleResult,
+            status: "review_required",
+            warnings: [...new Set([
+              ...(Array.isArray(ruleResult.warnings) ? ruleResult.warnings : []),
+              platformMediaRecognitionError(error, "AI_PLATFORM_BOOKKEEPING_FAILED"),
+            ])],
+            source: {
+              provider: "ai-platform",
+              model: config.aiPlatformTargetModel,
+            },
+          };
+        }
+      }
+    : legacyTravelExpenseAnalyzer);
   const salesDecisionRepository = createSalesDecisionRepository(db, {
     ...(options.salesDecisionIdFactory ? { idFactory: options.salesDecisionIdFactory } : {}),
     ...(options.salesDecisionClock ? { clock: options.salesDecisionClock } : {}),
@@ -3773,6 +4036,14 @@ export function createServer(options = {}) {
               const result = await analyzeSalesDecision(context, runtimeConfig, {
                 fetchImpl: options.fetchImpl ?? fetch,
                 signal: modelOptions.signal,
+                owner: context.owner ?? context.opportunity?.owner ?? runtimeConfig.aiPlatformOwner,
+                actor: context.actor ?? context.owner ?? context.opportunity?.owner ?? runtimeConfig.aiPlatformOwner,
+                channel: "worker",
+                subject: context.opportunity?.id
+                  ? { type: "opportunity", id: context.opportunity.id }
+                  : context.customer?.id
+                    ? { type: "customer", id: context.customer.id }
+                    : null,
                 throwOnFailure: true,
               });
               return result;
@@ -4333,7 +4604,7 @@ export function createServer(options = {}) {
     confirmationSecret: assistantConfirmationSecret,
   });
 
-  async function buildItineraryPlan(body) {
+  async function buildItineraryPlan(body, identity = {}) {
     if (!amapClient) {
       throw new HttpError(503, "AMAP_NOT_CONFIGURED", "Map service is not configured");
     }
@@ -4343,6 +4614,7 @@ export function createServer(options = {}) {
         modelConfig: runtimeConfig,
         fetchImpl: options.fetchImpl,
         clock: options.itineraryClock ?? (() => new Date()),
+        identity,
         ...(options.itineraryEnhanceOrder ? { enhanceOrder: options.itineraryEnhanceOrder } : {}),
       });
     } catch (error) {
@@ -4487,6 +4759,18 @@ export function createServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/api/health") {
         get(db, "SELECT 1 AS ready");
+        const platformHealth = typeof aiPlatformRuntime?.health === "function"
+          ? aiPlatformRuntime.health()
+          : {
+              mode: config.aiPlatformMode,
+              enabled: config.aiPlatformMode !== "disabled",
+              configured: false,
+              baseUrl: config.aiPlatformBaseUrl || null,
+              targetModel: config.aiPlatformTargetModel,
+              targetReasoningEffort: config.aiPlatformTargetReasoningEffort,
+              executionMode: config.aiPlatformExecutionMode,
+              proactiveScheduleOwner: config.aiPlatformProactiveScheduleOwner,
+            };
         sendJson(response, 200, {
           status: "ok",
           database: "ready",
@@ -4494,7 +4778,20 @@ export function createServer(options = {}) {
           aiAnalysisMode: config.aiAnalysisMode,
           modelProvider: config.modelProvider,
           modelName: config.modelName,
-          modelReady: config.aiAnalysisMode === "model" && Boolean(resolveRuntimeModelApiKey(runtimeConfig)),
+          modelReady: config.aiAnalysisMode === "model"
+            && textModelAvailability(runtimeConfig) === "available",
+          aiPlatform: {
+            mode: platformHealth.mode,
+            enabled: platformHealth.enabled,
+            configured: platformHealth.configured,
+            ready: platformHealth.mode === "disabled" || platformHealth.configured === true,
+            baseUrl: platformHealth.baseUrl ?? null,
+            targetModel: platformHealth.targetModel,
+            targetReasoningEffort: platformHealth.targetReasoningEffort,
+            executionMode: platformHealth.executionMode ?? config.aiPlatformExecutionMode,
+            proactiveScheduleOwner: platformHealth.proactiveScheduleOwner
+              ?? config.aiPlatformProactiveScheduleOwner,
+          },
           invoiceTextTools,
           authEnabled: isAuthEnabled(config),
         });
@@ -5257,7 +5554,12 @@ export function createServer(options = {}) {
             let analyzed;
             try {
               analyzed = applyShortcutSelectionAnalysis(
-                await travelExpenseAnalyzer(current.rawText),
+                await travelExpenseAnalyzer(current.rawText, {
+                  owner,
+                  actor: owner,
+                  channel: request.authContext.kind === "machine" ? "worker" : "web",
+                  subject: { type: "bookkeeping", id: reviewId },
+                }),
                 current,
               );
             } catch {
@@ -7278,6 +7580,11 @@ export function createServer(options = {}) {
             mediaType: body.mediaType,
             buffer: body.content,
           }, {
+            owner: request.authContext.account,
+            actor: request.authContext.account,
+            referenceDate: body.occurredOn,
+            channel: request.authContext.kind === "machine" ? "worker" : "web",
+            subject: { type: "payment-proof", id: body.sourceRef ?? requestId },
             typedEvidence: {
               amountCents: body.amountCents,
               occurredOn: body.occurredOn,
@@ -7524,6 +7831,12 @@ export function createServer(options = {}) {
             fileName: body.fileName,
             mediaType: body.mediaType,
             buffer: body.content,
+          }, {
+            owner: request.authContext.account,
+            actor: request.authContext.account,
+            idempotencyKey: idempotencyScope.key,
+            channel: request.authContext.kind === "machine" ? "worker" : "web",
+            subject: { type: "invoice", id: requestId },
           });
         } catch {
           recognition = {
@@ -8550,9 +8863,16 @@ export function createServer(options = {}) {
       if (request.method === "POST" && url.pathname === "/api/itineraries") {
         const body = validateVisitItineraryRequest(await readJson(request));
         const snapshotRequest = { ...body, status: body.status ?? "planned" };
-        const plan = await buildItineraryPlan(snapshotRequest);
+        const itineraryId = randomUUID();
+        const plan = await buildItineraryPlan(snapshotRequest, {
+          owner: requestOwner(request) ?? LEGACY_OWNER,
+          actor: request.authContext.account,
+          channel: request.authContext.kind === "machine" ? "worker" : "web",
+          subject: { type: "itinerary", id: `itinerary-${itineraryId}` },
+        });
         const item = withImmediateTransaction(db, () => {
           const created = itineraryRepository.create({
+            id: itineraryId,
             title: snapshotRequest.title,
             visitDate: snapshotRequest.visitDate,
             status: snapshotRequest.status,
@@ -8620,7 +8940,12 @@ export function createServer(options = {}) {
           });
         }
         const snapshotRequest = { ...body, status: body.status ?? current.status };
-        const plan = await buildItineraryPlan(snapshotRequest);
+        const plan = await buildItineraryPlan(snapshotRequest, {
+          owner: itineraryOwner ?? LEGACY_OWNER,
+          actor: request.authContext.account,
+          channel: request.authContext.kind === "machine" ? "worker" : "web",
+          subject: { type: "itinerary", id: `itinerary-${parts[2]}` },
+        });
         const item = withImmediateTransaction(db, () => {
           const before = itineraryRepository.get(parts[2], { owner: itineraryOwner });
           if (!before) notFound();
@@ -9454,6 +9779,10 @@ export function createServer(options = {}) {
         const analysis = await analyzeQuickRecord(rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
           knowledgeItems: analysisKnowledge,
+          owner: requestOwner(request) ?? LEGACY_OWNER,
+          actor: request.authContext.account,
+          channel: request.authContext.kind === "machine" ? "worker" : "web",
+          subject: null,
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
 
@@ -9553,6 +9882,10 @@ export function createServer(options = {}) {
         const analysis = await analyzeQuickRecord(quickRecord.rawContent, runtimeConfig, {
           fetchImpl: options.fetchImpl,
           knowledgeItems: analysisKnowledge,
+          owner: quickRecord.owner ?? requestOwner(request) ?? LEGACY_OWNER,
+          actor: request.authContext.account,
+          channel: request.authContext.kind === "machine" ? "worker" : "web",
+          subject: quickRecord.id ? { type: "quick_record", id: quickRecord.id } : null,
         });
         if (!analysis) return badRequest(response, "quick record content is empty");
 
@@ -9858,6 +10191,16 @@ export function createServer(options = {}) {
         const inputSnapshot = buildSalesDecisionInputSnapshot(context);
         const analysis = await analyzeSalesDecision(context, runtimeConfig, {
           fetchImpl: options.fetchImpl,
+          owner: decisionOwner ?? LEGACY_OWNER,
+          actor: request.authContext.account,
+          channel: request.authContext.kind === "machine" ? "worker" : "web",
+          subject: context.opportunity?.id
+            ? { type: "opportunity", id: context.opportunity.id }
+            : context.customer?.id
+              ? { type: "customer", id: context.customer.id }
+              : context.quickRecord?.id
+                ? { type: "quick_record", id: context.quickRecord.id }
+                : null,
         });
         const item = withImmediateTransaction(db, () => {
           const created = salesDecisionRepository.create({
@@ -10028,7 +10371,13 @@ export function createServer(options = {}) {
             context: body.context && typeof body.context === "object" ? body.context : {},
           },
           runtimeConfig,
-          { fetchImpl: options.fetchImpl },
+          {
+            fetchImpl: options.fetchImpl,
+            owner: requestOwner(request) ?? LEGACY_OWNER,
+            actor: request.authContext.account,
+            channel: request.authContext.kind === "machine" ? "worker" : "web",
+            subject: null,
+          },
         );
         const item = withImmediateTransaction(db, () => {
           const id = randomUUID();
@@ -10434,7 +10783,16 @@ export function createServer(options = {}) {
             knowledge,
           },
           runtimeConfig,
-          { fetchImpl: options.fetchImpl },
+          {
+            fetchImpl: options.fetchImpl,
+            owner: draftOwner,
+            actor: request.authContext.account,
+            channel: request.authContext.kind === "machine" ? "worker" : "web",
+            subject: {
+              type: "weekly_report",
+              id: `${body.periodStart}-${body.periodEnd}`,
+            },
+          },
         );
 
         const item = withImmediateTransaction(db, () => {
@@ -10671,7 +11029,17 @@ export function createServer(options = {}) {
             knowledge,
           },
           runtimeConfig,
-          { fetchImpl: options.fetchImpl },
+          {
+            fetchImpl: options.fetchImpl,
+            owner: draftOwner,
+            actor: request.authContext.account,
+            channel: request.authContext.kind === "machine" ? "worker" : "web",
+            subject: opportunity.id
+              ? { type: "opportunity", id: opportunity.id }
+              : customer.id
+                ? { type: "customer", id: customer.id }
+                : null,
+          },
         );
 
         const item = withImmediateTransaction(db, () => {
@@ -10810,6 +11178,11 @@ export function createServer(options = {}) {
     dailyDigestScheduler.stop();
     proactiveAssistantWorker.stop();
     proactiveNotificationScheduler.stop();
+    try {
+      Promise.resolve(aiPlatformRuntime?.close?.()).catch(() => {});
+    } catch {
+      // Runtime shutdown must not prevent the HTTP server and database from closing.
+    }
     db.close();
   });
   server.hospitalTenderScheduler = hospitalTenderScheduler;
@@ -10824,6 +11197,7 @@ export function createServer(options = {}) {
   server.invoiceEscalationGapRepository = invoiceEscalationGapRepository;
   server.dailyDigestScheduler = dailyDigestScheduler;
   server.asrService = asrService;
+  server.aiPlatformRuntime = aiPlatformRuntime;
   server.proactiveAssistantWorker = proactiveAssistantWorker;
   server.proactiveScanRepository = proactiveScanRepository;
   server.proactiveSuggestionRepository = proactiveSuggestionRepository;

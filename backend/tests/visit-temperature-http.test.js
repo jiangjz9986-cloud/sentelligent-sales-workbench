@@ -82,7 +82,12 @@ describe("visit temperature suggestion HTTP adapter", () => {
     assert.equal(result.body.requestId, "req-temperature-suggest");
     assert.equal(result.body.item.status, "pending");
     assert.equal(result.body.item.requiresHumanConfirmation, true);
-    assert.deepEqual(harness.calls, [["suggest", { owner: "owner-a", visitId: "visit-a" }]]);
+    assert.deepEqual(harness.calls, [["suggest", {
+      owner: "owner-a",
+      actor: "owner-a",
+      channel: "web",
+      visitId: "visit-a",
+    }]]);
   });
 
   it("exposes owner-scoped item and history reads with bounded query parsing", async () => {

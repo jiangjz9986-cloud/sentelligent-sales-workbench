@@ -1,6 +1,13 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  AI_EXECUTION_MODE,
+  AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
+  AI_TARGET_MODEL,
+  AI_TARGET_REASONING_EFFORT,
+} from "../../shared/aiPlatformContract.mjs";
+
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function text(value, fallback, max = 500) {
@@ -23,6 +30,15 @@ function booleanValue(value, fallback) {
   if (value === true || value === "true" || value === "1") return true;
   if (value === false || value === "false" || value === "0") return false;
   throw new Error("invalid AI platform boolean configuration");
+}
+
+function fixedTarget(value, expected, name, max) {
+  if (value === undefined || value === null || value === "") return expected;
+  const candidate = String(value);
+  if (candidate !== expected || candidate.length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(candidate)) {
+    throw new Error(`${name} must be ${expected}`);
+  }
+  return expected;
 }
 
 export function loadAiPlatformConfig(overrides = {}, env = process.env) {
@@ -58,19 +74,27 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     authSecret,
     externalProvidersEnabled,
     staticDirectory,
-    targetModel: text(
+    targetModel: fixedTarget(
       overrides.targetModel ?? env.AI_PLATFORM_TARGET_MODEL,
-      "gpt-5.6-luna",
+      AI_TARGET_MODEL,
+      "AI_PLATFORM_TARGET_MODEL",
       200,
     ),
-    targetReasoningEffort: text(
+    targetReasoningEffort: fixedTarget(
       overrides.targetReasoningEffort ?? env.AI_PLATFORM_TARGET_REASONING_EFFORT,
-      "max",
+      AI_TARGET_REASONING_EFFORT,
+      "AI_PLATFORM_TARGET_REASONING_EFFORT",
       40,
     ),
     executionMode: text(
       overrides.executionMode ?? env.AI_PLATFORM_EXECUTION_MODE,
-      "local-simulated",
+      AI_EXECUTION_MODE,
+      40,
+    ),
+    proactiveScheduleOwner: fixedTarget(
+      overrides.proactiveScheduleOwner ?? env.AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
+      AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
+      "AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER",
       40,
     ),
     bodyLimitBytes: positiveInteger(overrides.bodyLimitBytes ?? env.AI_PLATFORM_BODY_LIMIT_BYTES, 512 * 1024, 8 * 1024 * 1024),

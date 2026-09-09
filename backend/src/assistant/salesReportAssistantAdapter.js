@@ -405,7 +405,17 @@ export function createSalesReportAssistantAdapter({
             sourceRefs: snapshot.sourceRefs,
           },
           config,
-          { fetchImpl, systemPrompt: manifest.systemPrompt },
+          {
+            fetchImpl,
+            systemPrompt: manifest.systemPrompt,
+            owner: normalizedOwner,
+            actor: normalizedOwner,
+            channel: ["web", "weixin", "worker", "system"].includes(channel) ? channel : "web",
+            subject: {
+              type: "weekly_report",
+              id: `${snapshot.period.start}-${snapshot.period.end}`,
+            },
+          },
         )
         : { ...snapshot.fallbackDraft, source: "deterministic", fallbackReason: null };
       const composed = guardedComposition(rawComposition, snapshot.fallbackDraft, snapshot.sourceRefs);

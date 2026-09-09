@@ -106,6 +106,7 @@ function handlers(db, {
   config = {},
   service = fakeService(),
   metadataProvider,
+  aiPlatformRuntime,
   ...options
 } = {}) {
   return createAsrHttpHandlers({
@@ -118,6 +119,7 @@ function handlers(db, {
     },
     service,
     credentialMetadataProvider: metadataProvider ?? (() => ({ configured: true, status: "active" })),
+    aiPlatformRuntime,
     now: () => Date.parse("2026-08-30T12:00:00.000Z"),
     ...options,
   });
@@ -243,6 +245,127 @@ describe("ASR HTTP handlers", () => {
       assert.equal(initializeCalls, 0);
       assert.equal(transcribeCalls, 0);
       assert.equal(request.destroyed, false);
+      response.emit("finish");
+      assert.equal(request.destroyed, true);
+    });
+  });
+
+  it("does not run the legacy credential preflight for required platform mode", async () => {
+    await withDatabase(async (db) => {
+      let metadataCalls = 0;
+      let initializeCalls = 0;
+      const http = handlers(db, {
+        config: { aiPlatformMode: "required" },
+        aiPlatformRuntime: {
+          mode: "required",
+          configured: () => true,
+        },
+        metadataProvider: () => {
+          metadataCalls += 1;
+          throw new Error("legacy ASR key must not be checked");
+        },
+        service: fakeService({
+          async initialize() {
+            initializeCalls += 1;
+            return { ready: true, code: "READY" };
+          },
+        }),
+      });
+      const result = await http.handleTranscription(
+        transcriptionInput(requestStream(), responseEmitter()),
+      );
+      assert.equal(result.status, 200);
+      assert.equal(metadataCalls, 0);
+      assert.equal(initializeCalls, 1);
+    });
+  });
+
+  it("does not run the legacy credential preflight for configured optional platform mode", async () => {
+    await withDatabase(async (db) => {
+      let metadataCalls = 0;
+      const http = handlers(db, {
+        config: { aiPlatformMode: "optional" },
+        aiPlatformRuntime: {
+          mode: "optional",
+          configured: () => true,
+        },
+        metadataProvider: () => {
+          metadataCalls += 1;
+          return { configured: false, status: "cleared" };
+        },
+      });
+      const result = await http.handleTranscription(
+        transcriptionInput(requestStream(), responseEmitter()),
+      );
+      assert.equal(result.status, 200);
+      assert.equal(metadataCalls, 0);
+    });
+  });
+
+  it("keeps the legacy credential preflight when optional platform mode is not configured", async () => {
+    await withDatabase(async (db) => {
+      let metadataCalls = 0;
+      let initializeCalls = 0;
+      const http = handlers(db, {
+        config: { aiPlatformMode: "optional" },
+        aiPlatformRuntime: {
+          mode: "optional",
+          configured: () => false,
+        },
+        metadataProvider: () => {
+          metadataCalls += 1;
+          return { configured: false, status: "cleared" };
+        },
+        service: fakeService({
+          async initialize() {
+            initializeCalls += 1;
+            return { ready: true, code: "READY" };
+          },
+        }),
+      });
+      const request = requestStream();
+      const response = responseEmitter();
+      await assert.rejects(
+        () => http.handleTranscription(transcriptionInput(request, response)),
+        (error) => error.status === 503 && error.code === "ASR_NOT_CONFIGURED",
+      );
+      assert.equal(metadataCalls, 1);
+      assert.equal(initializeCalls, 0);
+      response.emit("finish");
+      assert.equal(request.destroyed, true);
+    });
+  });
+
+  it("fails required platform mode closed without checking a legacy key when the platform is unavailable", async () => {
+    await withDatabase(async (db) => {
+      let metadataCalls = 0;
+      let transcribeCalls = 0;
+      const http = handlers(db, {
+        config: { aiPlatformMode: "required" },
+        aiPlatformRuntime: {
+          mode: "required",
+          configured: () => false,
+        },
+        metadataProvider: () => {
+          metadataCalls += 1;
+          throw new Error("legacy ASR key must not be checked");
+        },
+        service: fakeService({
+          readiness() { return { ready: false, code: "ASR_NOT_CONFIGURED" }; },
+          async transcribe() {
+            transcribeCalls += 1;
+            throw new Error("transcription must not run");
+          },
+        }),
+      });
+      const request = requestStream();
+      const response = responseEmitter();
+      await assert.rejects(
+        () => http.handleTranscription(transcriptionInput(request, response)),
+        (error) => error.status === 503 && error.code === "ASR_NOT_CONFIGURED",
+      );
+      assert.equal(metadataCalls, 0);
+      assert.equal(transcribeCalls, 0);
       response.emit("finish");
       assert.equal(request.destroyed, true);
     });
@@ -421,6 +544,41 @@ describe("ASR HTTP handlers", () => {
         null,
       );
       assert.equal(metadataCalls, 0);
+    });
+  });
+
+  it("does not consume a rate-limit slot when a platform-mode request is already aborted", async () => {
+    await withDatabase(async (db) => {
+      let metadataCalls = 0;
+      let initializeCalls = 0;
+      const http = handlers(db, {
+        config: { aiPlatformMode: "required" },
+        aiPlatformRuntime: {
+          mode: "required",
+          configured: () => true,
+        },
+        metadataProvider: () => {
+          metadataCalls += 1;
+          throw new Error("legacy ASR key must not be checked");
+        },
+        service: fakeService({
+          async initialize() {
+            initializeCalls += 1;
+            throw new Error("initialize must not run");
+          },
+        }),
+      });
+      const request = requestStream();
+      request.aborted = true;
+      const response = responseEmitter();
+      assert.equal(
+        await http.handleTranscription(transcriptionInput(request, response)),
+        null,
+      );
+      const key = asrRateLimitKey(rateSecret, "account-a", "127.0.0.1");
+      assert.equal(db.prepare("SELECT failures FROM login_rate_limits WHERE key = ?").get(key), undefined);
+      assert.equal(metadataCalls, 0);
+      assert.equal(initializeCalls, 0);
     });
   });
 

@@ -275,20 +275,21 @@ test("budget and schedule writes require a fresh condition and are audited", () 
     );
 
     const schedule = service.getSchedule({ identity: ADMIN, scheduleId: "schedule-proactive" });
-    const enabled = service.setScheduleEnabled({
-      identity: ADMIN,
-      requestId: "schedule-enable",
-      scheduleId: schedule.id,
-      expectedUpdatedAt: schedule.updatedAt,
-      enabled: true,
-    });
-    assert.equal(enabled.enabled, true);
-    assert.ok(enabled.nextRunAt);
+    assert.throws(
+      () => service.setScheduleEnabled({
+        identity: ADMIN,
+        requestId: "schedule-enable",
+        scheduleId: schedule.id,
+        expectedUpdatedAt: schedule.updatedAt,
+        enabled: true,
+      }),
+      (error) => error.code === "proactive_schedule_owned_by_backend" && error.status === 409,
+    );
     const stopped = service.updateSchedule({
       identity: ADMIN,
       requestId: "schedule-disable",
       scheduleId: schedule.id,
-      expectedUpdatedAt: enabled.updatedAt,
+      expectedUpdatedAt: schedule.updatedAt,
       patch: { enabled: false, intervalSeconds: 7200 },
     });
     assert.equal(stopped.enabled, false);
@@ -296,8 +297,8 @@ test("budget and schedule writes require a fresh condition and are audited", () 
     assert.equal(stopped.intervalSeconds, 7200);
 
     const audit = service.listAudit({ identity: ADMIN });
-    assert.equal(audit.total, 3);
-    assert.deepEqual(audit.items.map((entry) => entry.action).sort(), ["budget.update", "schedule.update", "schedule.update"]);
+    assert.equal(audit.total, 2);
+    assert.deepEqual(audit.items.map((entry) => entry.action).sort(), ["budget.update", "schedule.update"]);
   } finally {
     db.close();
   }
@@ -619,10 +620,21 @@ test("matches the current server method surface and request body shape", () => {
       identity: ADMIN,
       requestId: "server-shaped-schedule-update",
       scheduleId: schedule.id,
-      patch: { expectedUpdatedAt: schedule.updatedAt, enabled: true },
+      patch: { expectedUpdatedAt: schedule.updatedAt, intervalSeconds: 7200, enabled: false },
       expectedUpdatedAt: schedule.updatedAt,
     });
-    assert.equal(updatedSchedule.enabled, true);
+    assert.equal(updatedSchedule.enabled, false);
+    assert.equal(updatedSchedule.intervalSeconds, 7200);
+    assert.throws(
+      () => service.setScheduleEnabled({
+        identity: ADMIN,
+        requestId: "server-shaped-schedule-enable",
+        scheduleId: schedule.id,
+        expectedUpdatedAt: updatedSchedule.updatedAt,
+        enabled: true,
+      }),
+      (error) => error.code === "proactive_schedule_owned_by_backend" && error.status === 409,
+    );
   } finally {
     db.close();
   }

@@ -159,6 +159,12 @@ function pickBodyFields(body, fields) {
     .map((field) => [field, body[field]]));
 }
 
+function omitBodyFields(body, fields) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const omitted = new Set(fields);
+  return Object.fromEntries(Object.entries(body).filter(([field]) => !omitted.has(field)));
+}
+
 function copyQueryFields(url, target, fields) {
   for (const field of fields) {
     const value = url.searchParams.get(field);
@@ -196,7 +202,11 @@ async function serveStatic(request, response, config, requestId) {
     methodNotAllowed(response, requestId, "GET, HEAD");
     return;
   }
-  const pathname = new URL(request.url ?? "/", "http://ai-platform.local").pathname;
+  const requestUrl = new URL(request.url ?? "/", "http://ai-platform.local");
+  const pathname = requestUrl.pathname;
+  if (pathname === "/admin" || pathname === "/ai-platform-admin") {
+    return sendEmpty(response, 308, requestId, { Location: `${pathname}/${requestUrl.search}` });
+  }
   const filePath = staticPathFor(config.staticDirectory, pathname);
   let fileStat;
   try {
@@ -492,7 +502,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateAgent", {
         identity: identityForTask(writeAuth),
         agentId: resourceId,
-        draft: body,
+        draft: omitBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion", "expectedReleaseId"]),
         ...pickBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion", "expectedReleaseId"]),
         requestId,
       }) }, requestId);
@@ -524,7 +534,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateStandard", {
         identity: identityForTask(writeAuth),
         standardId: resourceId,
-        patch: body,
+        patch: omitBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion"]),
         ...pickBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion"]),
         requestId,
       }) }, requestId);
@@ -534,7 +544,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateBudget", {
         identity: identityForTask(writeAuth),
         policyId: resourceId,
-        patch: body,
+        patch: omitBodyFields(body, ["expectedUpdatedAt"]),
         ...pickBodyFields(body, ["expectedUpdatedAt"]),
         requestId,
       }) }, requestId);
@@ -544,7 +554,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateSchedule", {
         identity: identityForTask(writeAuth),
         scheduleId: resourceId,
-        patch: body,
+        patch: omitBodyFields(body, ["expectedUpdatedAt"]),
         ...pickBodyFields(body, ["expectedUpdatedAt"]),
         requestId,
       }) }, requestId);
@@ -666,6 +676,7 @@ function healthSnapshot(runtime, requestId = null) {
     providers: runtime.providerRegistry.list().map((provider) => ({ id: provider.id, kind: provider.kind })),
     externalProvidersEnabled: runtime.config.externalProvidersEnabled,
     executionMode: runtime.config.executionMode,
+    proactiveScheduleOwner: runtime.config.proactiveScheduleOwner,
     targetModel: runtime.config.targetModel,
     targetReasoningEffort: runtime.config.targetReasoningEffort,
     adminEnabled: runtime.config.adminEnabled,

@@ -515,6 +515,14 @@ export function createVisitCaptureAssistantAdapter({
         modelResult = await analyzeQuickRecord(normalizedContent, config, {
           fetchImpl,
           systemPrompt: manifest.systemPrompt,
+          owner: normalizedOwner,
+          actor: normalizedOwner,
+          channel: ["web", "weixin", "worker", "system"].includes(channel) ? channel : "web",
+          subject: context.opportunityId
+            ? { type: "opportunity", id: context.opportunityId }
+            : context.customerId
+              ? { type: "customer", id: context.customerId }
+              : null,
         });
       } catch {
         modelResult = null;
