@@ -76,3 +76,39 @@ Items above describe the implementation contract, not completed acceptance.
 
 The production transition tool, real suppliers/media, management proxy, staged
 routing and business-event remediation are still outstanding.
+
+## Integration Progress
+
+- Registered text providers now load from approved runtime policies and
+  credential environment references. The default service uses the registry,
+  not only a test injection. Vendor requests pin actual models, output limits
+  and supported reasoning options; usage distinguishes cached input and retains
+  request identity on malformed completion. Local HTTP supplier tests pass;
+  no real supplier has been called by this implementation stage.
+- Business-admin session proxy and console use `/api/ai-platform/admin/*`
+  and `/api/ai-platform/console/`. Internal request signatures are generated
+  by Backend; member sessions, missing CSRF and logged-out sessions are rejected.
+  The security settings page links to the authenticated console.
+- Production read-only diagnosis at 2026-09-10 01:28 Asia/Shanghai found all
+  40 failing customer references missing (none active/deleted/cross-owner).
+  Their origin is not established as test data. Background processing now
+  independently rechecks owner-scoped availability and completes unavailable
+  references with `PROACTIVE_SUBJECT_UNAVAILABLE`, preserving event records.
+  Active-customer service failures stay retryable. Production rows have not
+  been modified by this work.
+- All six Backend background schedulers expose drain, and Backend closes its
+  database after HTTP, ASR and background work settle. Direct service startup
+  now handles SIGTERM/SIGINT through this shutdown path.
+- Real media transport, provider/price publication, staged routing, transition
+  tooling and final acceptance remain outstanding.
+
+## Validation At This Checkpoint
+
+- `npm --prefix backend test`: 2067 passed, 0 failed, 240 suites.
+- `npm run test:ai-platform`: platform 73 passed and adapters 34 passed;
+  the subsequently added long-wait runtime case passed separately.
+- Background scheduler and dual-service regression: 104 passed.
+- Admin proxy, execution drain and ASR shutdown integration: 17 passed.
+- Security settings source regressions: 7 passed; frontend production build passed.
+- Full backend output is in ignored `.runtime/fusion-backend-20260910-r2.log`.
+  These are local tests, not production acceptance or real supplier quality.

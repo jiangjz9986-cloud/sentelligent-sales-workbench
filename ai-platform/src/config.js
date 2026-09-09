@@ -1,5 +1,6 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { normalizeProviderPolicies } from "./providers/openAiCompatible.js";
 
 import {
   AI_EXECUTION_MODE,
@@ -66,6 +67,18 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
   const staticDirectory = isAbsolute(staticDirectoryValue)
     ? staticDirectoryValue
     : resolve(PROJECT_ROOT, staticDirectoryValue);
+  const approvedOrigins = overrides.providerAllowedOrigins ?? String(env.AI_PLATFORM_PROVIDER_ALLOWED_ORIGINS ?? "").split(",").filter(Boolean);
+  if (!Array.isArray(approvedOrigins) || approvedOrigins.length > 8
+    || approvedOrigins.some((origin) => {
+      try {
+        const url = new URL(origin);
+        return url.protocol !== "https:" || url.origin !== origin || url.username || url.password;
+      } catch { return true; }
+    })) throw new Error("invalid AI platform provider allowed origins");
+  const providerPolicies = normalizeProviderPolicies(overrides.providerPolicies ?? env.AI_PLATFORM_PROVIDER_POLICIES ?? [], {
+    allowedOrigins: approvedOrigins,
+    allowTestLoopback: nodeEnv === "test" && overrides.allowProviderTestLoopback === true,
+  });
   const config = {
     nodeEnv,
     host,
@@ -75,6 +88,8 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     trustedIssuer: text(overrides.trustedIssuer ?? env.AI_PLATFORM_TRUSTED_ISSUER, "sentelligent-sales-backend", 400),
     requestBindingRequired: booleanValue(overrides.requestBindingRequired ?? env.AI_PLATFORM_REQUEST_BINDING_REQUIRED, nodeEnv === "production"),
     externalProvidersEnabled,
+    providerPolicies,
+    providerAllowedOrigins: Object.freeze(approvedOrigins.slice()),
     staticDirectory,
     targetModel: fixedTarget(
       overrides.targetModel ?? env.AI_PLATFORM_TARGET_MODEL,
@@ -101,6 +116,7 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     ),
     bodyLimitBytes: positiveInteger(overrides.bodyLimitBytes ?? env.AI_PLATFORM_BODY_LIMIT_BYTES, 512 * 1024, 8 * 1024 * 1024),
     taskLeaseMs: positiveInteger(overrides.taskLeaseMs ?? env.AI_PLATFORM_TASK_LEASE_MS, 60_000, 10 * 60_000),
+    taskTimeoutMaxMs: positiveInteger(overrides.taskTimeoutMaxMs ?? env.AI_PLATFORM_TASK_TIMEOUT_MAX_MS, 10 * 60_000, 10 * 60_000),
     taskPollMs: positiveInteger(overrides.taskPollMs ?? env.AI_PLATFORM_TASK_POLL_MS, 500, 60_000),
     taskConcurrency: positiveInteger(overrides.taskConcurrency ?? env.AI_PLATFORM_TASK_CONCURRENCY, 2, 20),
     taskOwnerConcurrency: positiveInteger(overrides.taskOwnerConcurrency ?? env.AI_PLATFORM_TASK_OWNER_CONCURRENCY, 2, 20),

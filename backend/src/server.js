@@ -44,6 +44,7 @@ import {
 } from "./auth/usersStore.js";
 import { loadConfig } from "./config.js";
 import { createAiPlatformRuntime } from "./aiPlatform/runtime.js";
+import { AI_ADMIN_PREFIX, AI_CONSOLE_PREFIX, createAiAdminProxy, readAiConsoleAsset } from "./aiPlatform/adminProxy.js";
 import { textModelAvailability } from "./aiPlatform/textAdapter.js";
 import {
   aiPlatformStructuredTaskAvailability,
@@ -5872,6 +5873,38 @@ export function createServer(options = {}) {
         return;
       }
 
+      if (url.pathname === AI_CONSOLE_PREFIX || url.pathname.startsWith(AI_CONSOLE_PREFIX + "/")) {
+        requireAdminRole(db, request);
+        if (!["GET", "HEAD"].includes(request.method)) throw new HttpError(405, "METHOD_NOT_ALLOWED", "Only GET and HEAD are allowed");
+        if (url.pathname === AI_CONSOLE_PREFIX) {
+          sendDocument(response, 308, "", { Location: AI_CONSOLE_PREFIX + "/" });
+          return;
+        }
+        const asset = await readAiConsoleAsset(url.pathname);
+        sendDocument(response, 200, request.method === "HEAD" ? "" : asset.body, {
+          "Content-Type": asset.contentType,
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'",
+        });
+        return;
+      }
+      if (url.pathname === AI_ADMIN_PREFIX || url.pathname.startsWith(AI_ADMIN_PREFIX + "/")) {
+        const administrator = requireAdminRole(db, request);
+        const body = request.method === "GET" ? undefined : await readJson(request, { maxBytes: 512 * 1024 });
+        const controller = new AbortController();
+        const abort = () => { if (!response.writableEnded) controller.abort(); };
+        response.once("close", abort);
+        try {
+          const result = await createAiAdminProxy({ config: runtimeConfig, fetchImpl: options.aiPlatformAdminFetchImpl ?? fetch })({
+            method: request.method, url, body, identity: administrator, requestId, signal: controller.signal,
+          });
+          sendJson(response, result.status, result.payload, { "Cache-Control": "no-store" });
+        } finally {
+          response.removeListener("close", abort);
+        }
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/admin/users") {
         requireAdminRole(db, request);
         sendJson(response, 200, {
@@ -11171,20 +11204,18 @@ export function createServer(options = {}) {
     }
   });
 
-  server.on("close", () => {
+  let backgroundStopped = false;
+  function stopBackgroundSchedulers() {
+    if (backgroundStopped) return;
+    backgroundStopped = true;
     hospitalTenderScheduler.stop();
     actionReminderScheduler.stop();
     invoiceEscalationScheduler.stop();
     dailyDigestScheduler.stop();
     proactiveAssistantWorker.stop();
     proactiveNotificationScheduler.stop();
-    try {
-      Promise.resolve(aiPlatformRuntime?.close?.()).catch(() => {});
-    } catch {
-      // Runtime shutdown must not prevent the HTTP server and database from closing.
-    }
-    db.close();
-  });
+  }
+  server.on("close", stopBackgroundSchedulers);
   server.hospitalTenderScheduler = hospitalTenderScheduler;
   server.hospitalTenderSchedulerRepository = hospitalTenderSchedulerRepository;
   server.hospitalTenderLeadConversionService = hospitalTenderLeadConversionService;
@@ -11208,24 +11239,29 @@ export function createServer(options = {}) {
   server.proactiveNotificationScheduler = proactiveNotificationScheduler;
 
   // Node's native close callback only waits for HTTP connections.  Wrap it so
-  // callers (tests, service scripts and production shutdown) also wait for ASR
-  // request abort, media-child termination, pending cleanup and final sweep.
+  // callers wait for HTTP, ASR cleanup and background writes before closing DB.
   const closeHttpServer = server.close.bind(server);
   let shutdownPromise = null;
+  let httpShutdown = null;
   server.close = function closeWithAsr(callback) {
     if (!shutdownPromise) {
+      stopBackgroundSchedulers();
       const asrClose = asrService?.close?.() ?? Promise.resolve();
-      // Attach a rejection observer immediately; the native HTTP close may
-      // take longer than ASR teardown when keep-alive connections exist.
-      Promise.resolve(asrClose).catch(() => {});
-      shutdownPromise = new Promise((resolve, reject) => {
+      const backgroundDrain = Promise.all([
+        hospitalTenderScheduler, actionReminderScheduler, invoiceEscalationScheduler,
+        dailyDigestScheduler, proactiveAssistantWorker, proactiveNotificationScheduler,
+      ].map((scheduler) => scheduler.drain?.()));
+      httpShutdown ??= new Promise((resolve, reject) => {
         closeHttpServer((httpError) => {
-          Promise.resolve(asrClose).then(
-            () => httpError ? reject(httpError) : resolve(),
-            reject,
-          );
+          if (httpError?.code === "ERR_SERVER_NOT_RUNNING") resolve();
+          else if (httpError) reject(httpError);
+          else resolve();
         });
       });
+      shutdownPromise = Promise.all([asrClose, backgroundDrain, httpShutdown])
+        .then(() => aiPlatformRuntime?.close?.())
+        .then(() => { db.close(); })
+        .catch((error) => { shutdownPromise = null; throw error; });
     }
     if (typeof callback === "function") {
       shutdownPromise.then(() => callback(), (error) => callback(error));
@@ -11241,4 +11277,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   server.listen(config.port, config.host, () => {
     console.log(`Backend listening on http://${config.host}:${config.port}`);
   });
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    server.close((error) => {
+      if (error) {
+        console.error("Backend shutdown incomplete; state retained for recovery");
+        process.exitCode = 1;
+        return;
+      }
+      process.exit(0);
+    });
+  };
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
 }

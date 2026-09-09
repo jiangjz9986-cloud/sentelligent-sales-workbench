@@ -617,7 +617,7 @@ export async function runAiPlatformTextCompletion({
   subject = null,
   messages,
   maxTokens = 1200,
-  maxWaitMs = DEFAULT_MAX_WAIT_MS,
+  maxWaitMs = undefined,
   pollMs = DEFAULT_POLL_MS,
   priority = DEFAULT_PRIORITY,
   idempotencyKey = null,

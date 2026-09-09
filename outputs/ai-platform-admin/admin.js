@@ -1,7 +1,9 @@
 (() => {
   "use strict";
 
-  const API_BASE = "/internal/ai/v1/admin";
+  const BUSINESS_PROXY = location.pathname.startsWith("/api/ai-platform/console/");
+  const API_BASE = BUSINESS_PROXY ? "/api/ai-platform/admin" : "/internal/ai/v1/admin";
+  let sessionCsrf = "";
   const PAGE_SIZE = 20;
 
   const copy = Object.freeze({
@@ -427,7 +429,8 @@
 
   function requestHeaders() {
     const headers = { Accept: "application/json" };
-    if (isLocalDevelopmentHost()) headers["X-AI-Platform-Dev-Auth"] = "1";
+    if (!BUSINESS_PROXY && isLocalDevelopmentHost()) headers["X-AI-Platform-Dev-Auth"] = "1";
+    if (BUSINESS_PROXY && sessionCsrf) headers["X-CSRF-Token"] = sessionCsrf;
     return headers;
   }
 
@@ -541,6 +544,15 @@
   }
 
   async function loadAll() {
+    if (BUSINESS_PROXY) {
+      try {
+        const response = await fetch("/api/auth/session", { credentials: "same-origin", cache: "no-store" });
+        const session = response.ok ? await response.json() : null;
+        sessionCsrf = session?.role === "admin" && typeof session.csrfToken === "string" ? session.csrfToken : "";
+      } catch {
+        sessionCsrf = "";
+      }
+    }
     if (state.controller) state.controller.abort();
     const controller = new AbortController();
     const generation = state.generation + 1;

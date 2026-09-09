@@ -5,6 +5,7 @@ import {
   sha256,
 } from "../../../shared/aiPlatformContract.mjs";
 import { executeMediaTask, isMediaTaskType } from "./mediaAdapter.js";
+import { createOpenAiCompatibleProvider } from "./openAiCompatible.js";
 
 function boundedText(value, max = 300) {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").trim().slice(0, max);
@@ -61,8 +62,13 @@ export const mockProvider = Object.freeze({
   },
 });
 
-export function createProviderRegistry({ providers = [mockProvider] } = {}) {
-  const map = new Map(providers.map((provider) => [provider.id, provider]));
+export function createProviderRegistry({ providers = null, config = {}, env = process.env, fetchImpl = fetch } = {}) {
+  const configured = providers ?? [
+    mockProvider,
+    ...(config.externalProvidersEnabled ? (config.providerPolicies ?? []).map((policy) => createOpenAiCompatibleProvider(policy, { env, fetchImpl })) : []),
+  ];
+  if (new Set(configured.map((provider) => provider.id)).size !== configured.length) throw new Error("duplicate AI provider registration");
+  const map = new Map(configured.map((provider) => [provider.id, provider]));
   return Object.freeze({
     get: (id) => map.get(id) ?? null,
     list: () => [...map.values()],

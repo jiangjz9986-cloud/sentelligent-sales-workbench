@@ -363,7 +363,7 @@ export function createAiPlatformRuntime({
     config.aiPlatformMaxWaitMs,
     "aiPlatformMaxWaitMs",
     DEFAULT_MAX_WAIT_MS,
-    30_000,
+    10 * 60_000,
   );
   const pollMs = positiveInteger(
     config.aiPlatformPollMs,
@@ -434,7 +434,7 @@ export function createAiPlatformRuntime({
     const normalizedIdentity = normalizeIdentity(identity ?? { owner, actor });
     const normalizedInput = normalizeInput(input);
     const normalizedSubject = normalizeSubject(subject);
-    const normalizedMaxWaitMs = positiveInteger(requestedMaxWaitMs, "maxWaitMs", maxWaitMs, 30_000);
+    const normalizedMaxWaitMs = positiveInteger(requestedMaxWaitMs, "maxWaitMs", maxWaitMs, 10 * 60_000);
     const normalizedPollMs = Math.max(1, positiveInteger(requestedPollMs, "pollMs", pollMs, 30_000));
     const key = defaultIdempotencyKey({
       taskType: normalizedTaskType,
@@ -452,7 +452,7 @@ export function createAiPlatformRuntime({
       input: normalizedInput,
       evidenceDigest: normalizeEvidenceDigest(evidenceDigest, normalizedInput),
       priority,
-      requestedWaitMs: normalizedMaxWaitMs,
+      requestedWaitMs: Math.min(normalizedMaxWaitMs, 30_000),
     };
     const scoped = clientFor(normalizedIdentity);
     let outcome;

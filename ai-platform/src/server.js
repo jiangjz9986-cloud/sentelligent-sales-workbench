@@ -242,7 +242,11 @@ export function createAiPlatformRuntime(options = {}) {
   const config = loadAiPlatformConfig(options.config ?? options, options.env ?? process.env);
   const ownsDatabase = !options.db;
   const db = options.db ?? openAiPlatformDatabase(config.databasePath);
-  const providerRegistry = options.providerRegistry ?? createProviderRegistry();
+  const providerRegistry = options.providerRegistry ?? createProviderRegistry({
+    config,
+    env: options.env ?? process.env,
+    fetchImpl: options.providerFetchImpl ?? fetch,
+  });
   const taskService = options.taskService ?? createTaskService({
     db,
     config,

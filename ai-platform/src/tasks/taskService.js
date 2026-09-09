@@ -112,7 +112,7 @@ function executionLimits(agentVersion, config) {
     maxAttempts: safePositiveInteger(limits.maxAttempts, 2, 3),
     timeoutMs: Math.min(
       safePositiveInteger(limits.timeoutMs, config.taskLeaseMs, 10 * 60_000),
-      config.taskLeaseMs,
+      config.taskTimeoutMaxMs ?? 10 * 60_000,
     ),
   };
 }
@@ -1016,7 +1016,7 @@ export function createTaskService({
                input_tokens = $inputTokens, output_tokens = $outputTokens,
                cached_input_tokens = $cachedInputTokens, audio_seconds = $audioSeconds,
                image_pages = $imagePages, cost_micro = $costMicro,
-               cost_status = $costStatus, error_code = $errorCode,
+               cost_status = $costStatus, external_request_id = $externalRequestId, error_code = $errorCode,
                error_message = $errorMessage, completed_at = $completedAt
          WHERE id = $id AND status = 'running'
       `).run({
@@ -1030,6 +1030,7 @@ export function createTaskService({
         $imagePages: usage?.imagePages ?? 0,
         $costMicro: charge.costMicro,
         $costStatus: usage ? charge.costStatus : (unknown ? "unknown" : "not_applicable"),
+        $externalRequestId: typeof error?.externalRequestId === "string" && /^[A-Za-z0-9_.:-]{1,200}$/u.test(error.externalRequestId) ? error.externalRequestId : null,
         $errorCode: cancelled ? "cancelled" : code,
         $errorMessage: taskErrorMessage(cancelled ? "cancelled" : code),
         $completedAt: completedAt,
@@ -1141,10 +1142,10 @@ export function createTaskService({
         error.code = "provider_policy_blocked";
         throw error;
       }
-      providerStarted = true;
-      const response = await provider.execute({
+      const providerInput = {
         task: taskView(context.task),
         agent: context.agent,
+        limits: context.limits,
         model: modelView({
           id: context.model.id,
           provider_id: context.model.providerId,
@@ -1155,7 +1156,10 @@ export function createTaskService({
           enabled: 1,
         }),
         signal: controller.signal,
-      });
+      };
+      const prepared = provider.prepare ? await provider.prepare(providerInput) : undefined;
+      providerStarted = true;
+      const response = await provider.execute({ ...providerInput, prepared });
       if (timeoutTriggered) {
         const error = new Error("provider execution timed out");
         error.code = "provider_timeout";

@@ -419,6 +419,74 @@ describe("proactive background worker", () => {
     db.close();
   });
 
+  it("finishes unavailable customer events without losing their audit or starving live work", async () => {
+    const db = database();
+    const harness = clockHarness();
+    insertOpportunity(db, { owner: "owner-a", customerId: "live-customer", id: "live-opportunity" });
+    db.prepare("INSERT INTO customers (id, name, owner, deleted_at) VALUES ('deleted-customer', 'deleted', 'owner-a', ?), ('other-customer', 'other', 'owner-b', NULL)").run(NOW_ISO);
+    const suggestionRepository = createProactiveSuggestionRepository(db, { clock: harness.now });
+    const subjectService = createCustomerProactiveSubjectService({ db, clock: harness.now, suggestionRepository });
+    const worker = createProactiveBackgroundWorker({
+      db, clock: harness.now, suggestionRepository, customerProactiveSubjectService: subjectService,
+      workerId: "worker-stale-subjects", eventBatchSize: 10,
+    });
+    try {
+      const stale = ["missing-customer", "deleted-customer", "other-customer"].map((customerId) => worker.enqueueEvent({
+        owner: "owner-a", eventKey: customerId + ":changed:1",
+        entityType: "customer", entityId: customerId, payload: { customerId },
+      }));
+      const live = worker.enqueueEvent({
+        owner: "owner-a", eventKey: "live:changed:1",
+        entityType: "customer", entityId: "live-customer", payload: { customerId: "live-customer" },
+      });
+      const result = await worker.runOnce({ force: true });
+      assert.equal(result.status, "success");
+      assert.equal(result.customerScan.skippedCount, 3);
+      assert.equal(result.customerScan.failedCount, 0);
+      assert.equal(result.state.failureCount, 0);
+      for (const event of stale) {
+        const row = worker.scanRepository.getEvent(event.item.id);
+        assert.equal(row.status, "completed");
+        assert.equal(row.lastErrorCode, "PROACTIVE_SUBJECT_UNAVAILABLE");
+        assert.equal(row.attemptCount, 1);
+        assert.ok(row.completedAt);
+      }
+      assert.equal(worker.scanRepository.getEvent(live.item.id).status, "completed");
+      assert.ok(subjectService.getSubject({ owner: "owner-a", customerId: "live-customer" }));
+      harness.advance(60 * 60_000);
+      await worker.runOnce({ force: true });
+      assert.equal(worker.scanRepository.getEvent(stale[0].item.id).attemptCount, 1);
+      assert.equal(db.prepare("SELECT count(*) n FROM proactive_scan_events").get().n, 4);
+    } finally {
+      worker.stop();
+      db.close();
+    }
+  });
+
+  it("does not suppress a not-found error when the customer still exists for the owner", async () => {
+    const db = database();
+    const harness = clockHarness();
+    insertOpportunity(db, { owner: "owner-a", customerId: "present-customer", id: "present-opportunity" });
+    const suggestionRepository = createProactiveSuggestionRepository(db, { clock: harness.now });
+    const worker = createProactiveBackgroundWorker({
+      db, clock: harness.now, suggestionRepository, workerId: "worker-broken-subject-service",
+      customerProactiveSubjectService: {
+        suggestionRepository,
+        syncCustomer() { throw Object.assign(new Error("unexpected subject failure"), { code: "PROACTIVE_CUSTOMER_NOT_FOUND" }); },
+      },
+    });
+    try {
+      const event = worker.enqueueEvent({ owner: "owner-a", eventKey: "present:changed:1", entityType: "customer", entityId: "present-customer", payload: { customerId: "present-customer" } });
+      const result = await worker.runOnce({ force: true });
+      assert.equal(result.status, "failed");
+      assert.equal(worker.scanRepository.getEvent(event.item.id).status, "failed");
+      assert.equal(result.customerScan.skippedCount, 0);
+    } finally {
+      worker.stop();
+      db.close();
+    }
+  });
+
   it("keeps an event retryable when customer subject sync fails", async () => {
     const db = database();
     const harness = clockHarness();

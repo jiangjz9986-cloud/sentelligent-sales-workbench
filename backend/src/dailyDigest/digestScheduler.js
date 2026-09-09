@@ -1,4 +1,5 @@
 import { insertAudit } from "../audit/auditRepository.js";
+import { createExecutionDrain } from "../services/executionDrain.js";
 import { fridayOfWeek, shanghaiDateParts, weekStartOf } from "./digestContent.js";
 import { renderDailyDigestMessage, renderFridayCloseoutMessage } from "./digestMessage.js";
 
@@ -194,7 +195,9 @@ export function createDailyDigestScheduler({
     return { owner: delivery.owner, status: "sent", digestDate, outboxId: enqueued.id ?? null };
   }
 
-  async function runOnce() {
+  const execution = createExecutionDrain();
+  function runOnce() { return execution.run(executeRunOnce); }
+  async function executeRunOnce() {
     const now = clock();
     const nowDate = now instanceof Date ? now : new Date(now);
     state.lastTickAt = nowDate.toISOString();
@@ -242,7 +245,8 @@ export function createDailyDigestScheduler({
   // Manual delivery for POST /api/digest/run: bypasses the time-of-day gate
   // (a deliberate same-day re-issue after an outage) but never the idempotency
   // marker, so a repeated manual run cannot duplicate a real push.
-  async function runManual({ kind } = {}) {
+  function runManual(options) { return execution.run(() => executeRunManual(options)); }
+  async function executeRunManual({ kind } = {}) {
     if (kind !== "daily" && kind !== "friday") throw new TypeError("kind must be daily or friday");
     const now = clock();
     const nowDate = now instanceof Date ? now : new Date(now);
@@ -344,5 +348,5 @@ export function createDailyDigestScheduler({
     };
   }
 
-  return Object.freeze({ start, stop, runOnce, runManual, markers, status });
+  return Object.freeze({ start, stop, runOnce, runManual, markers, status, drain(options) { stop(); return execution.drain(options); } });
 }

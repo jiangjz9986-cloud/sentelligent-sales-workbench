@@ -1,4 +1,5 @@
 import { insertAudit } from "../audit/auditRepository.js";
+import { createExecutionDrain } from "../services/executionDrain.js";
 import { renderActionReminderMessage } from "./reminderMessage.js";
 
 // Lightweight due-reminder loop (v0.7.5). The action_items table itself is
@@ -61,7 +62,9 @@ export function createActionReminderScheduler({
 
   // v0.9.3 多播：逐 digest 目标扫描各自到期项（批上限 per-owner 不变）。owner 无
   // 绑定 → 其到期项不扫描、不置 reminded_at，后补绑定即补发（>24h 自动带过期标记）。
-  async function runOnce() {
+  const execution = createExecutionDrain();
+  function runOnce() { return execution.run(executeRunOnce); }
+  async function executeRunOnce() {
     const now = clock();
     const nowIso = (now instanceof Date ? now : new Date(now)).toISOString();
     state.lastTickAt = nowIso;
@@ -186,5 +189,5 @@ export function createActionReminderScheduler({
     };
   }
 
-  return Object.freeze({ start, stop, runOnce, status });
+  return Object.freeze({ start, stop, runOnce, status, drain(options) { stop(); return execution.drain(options); } });
 }
