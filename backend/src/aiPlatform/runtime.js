@@ -10,6 +10,7 @@ import {
   stableJson,
 } from "../../../shared/aiPlatformContract.mjs";
 import { AiPlatformClientError, createAiPlatformClient } from "./client.js";
+import { normalizeRequestBinding } from "../../../shared/aiPlatformRequestAuth.mjs";
 
 const DEFAULT_MODE = "disabled";
 const DEFAULT_ISSUER = "sentelligent-sales-backend";
@@ -100,6 +101,7 @@ export function createAiPlatformServiceToken({
   ttlSeconds = 300,
   now = () => Date.now(),
   jti = randomUUID(),
+  requestBinding = null,
 } = {}) {
   if (typeof secret !== "string" || !secret) throw new TypeError("AI platform auth secret is required");
   const normalizedIssuer = bounded(issuer, "issuer", SAFE_OWNER);
@@ -122,6 +124,7 @@ export function createAiPlatformServiceToken({
     iat: issuedAt,
     exp: issuedAt + ttlSeconds,
     jti: bounded(jti, "jti", SAFE_OWNER, 400),
+    ...(requestBinding ? { request: normalizeRequestBinding(requestBinding) } : {}),
   };
   const unsigned = `aip1.${encodeTokenPayload(payload)}`;
   return `${unsigned}.${tokenSignature(secret, unsigned)}`;
@@ -327,7 +330,7 @@ function makeClient({ config, identity, fetchImpl, tokenProvider, now }) {
     : typeof config.aiPlatformAuthTokenProvider === "function"
       ? ({ signal, ...meta }) => config.aiPlatformAuthTokenProvider({ signal, ...meta, identity })
       : typeof config.aiPlatformAuthSecret === "string" && config.aiPlatformAuthSecret.trim()
-        ? () => createAiPlatformServiceToken({
+        ? ({ requestBinding }) => createAiPlatformServiceToken({
             secret: config.aiPlatformAuthSecret,
             issuer: config.aiPlatformIssuer ?? DEFAULT_ISSUER,
             subject: config.aiPlatformSubject ?? DEFAULT_SUBJECT,
@@ -336,6 +339,7 @@ function makeClient({ config, identity, fetchImpl, tokenProvider, now }) {
             scopes: identity.scopes,
             ttlSeconds: 300,
             now,
+            requestBinding,
           })
         : null;
   return createAiPlatformClient({

@@ -72,6 +72,8 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     port,
     databasePath,
     authSecret,
+    trustedIssuer: text(overrides.trustedIssuer ?? env.AI_PLATFORM_TRUSTED_ISSUER, "sentelligent-sales-backend", 400),
+    requestBindingRequired: booleanValue(overrides.requestBindingRequired ?? env.AI_PLATFORM_REQUEST_BINDING_REQUIRED, nodeEnv === "production"),
     externalProvidersEnabled,
     staticDirectory,
     targetModel: fixedTarget(
@@ -104,6 +106,8 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     taskOwnerConcurrency: positiveInteger(overrides.taskOwnerConcurrency ?? env.AI_PLATFORM_TASK_OWNER_CONCURRENCY, 2, 20),
     taskQueueLimit: positiveInteger(overrides.taskQueueLimit ?? env.AI_PLATFORM_TASK_QUEUE_LIMIT, 1_000, 100_000),
     taskRetentionDays: positiveInteger(overrides.taskRetentionDays ?? env.AI_PLATFORM_TASK_RETENTION_DAYS, 30, 3650),
+    drainTimeoutMs: positiveInteger(overrides.drainTimeoutMs ?? env.AI_PLATFORM_DRAIN_TIMEOUT_MS, 180_000, 15 * 60_000),
+    taskAdmissionEnabled: booleanValue(overrides.taskAdmissionEnabled ?? env.AI_PLATFORM_TASK_ADMISSION_ENABLED, nodeEnv !== "production"),
     adminEnabled: booleanValue(overrides.adminEnabled ?? env.AI_PLATFORM_ADMIN_ENABLED, true),
   };
   if (!new Set(["local-simulated", "external-provider"]).has(config.executionMode)) {
@@ -113,6 +117,7 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     throw new Error("external-provider execution requires AI_PLATFORM_EXTERNAL_PROVIDERS=true");
   }
   if (nodeEnv === "production") {
+    if (!config.requestBindingRequired) throw new Error("request binding is required in production");
     if (config.authSecret.length < 32 || config.authSecret.includes("change-me")) {
       throw new Error("AI_PLATFORM_AUTH_SECRET must be a strong production secret");
     }

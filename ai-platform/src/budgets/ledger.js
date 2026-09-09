@@ -30,12 +30,13 @@ function usedForPolicy(db, policyId, period) {
 
 export function estimateUsage({ input, maxTokens = 1_000 } = {}) {
   const inputBytes = Buffer.byteLength(stringify(input, "{}"), "utf8");
+  const media = input?.media ?? input?.input?.media ?? {};
   return {
-    inputTokens: Math.max(1, Math.ceil(inputBytes / 4)),
-    outputTokens: Math.max(1, Math.min(Number(maxTokens) || 1_000, 1_000)),
+    inputTokens: Math.max(1, inputBytes),
+    outputTokens: Math.max(1, Math.min(Number(maxTokens) || 1_000, 100_000)),
     cachedInputTokens: 0,
-    audioSeconds: 0,
-    imagePages: 0,
+    audioSeconds: Number.isSafeInteger(media.durationMs) ? Math.max(0, Math.ceil(media.durationMs / 1_000)) : 0,
+    imagePages: Number.isSafeInteger(media.pageCount) ? Math.max(0, media.pageCount) : 0,
   };
 }
 
@@ -46,12 +47,22 @@ export function calculateCostMicro(usage, price) {
   const cached = Number(usage?.cachedInputTokens ?? 0);
   const audio = Number(usage?.audioSeconds ?? 0);
   const pages = Number(usage?.imagePages ?? 0);
-  const perThousand = (value, rate) => Math.ceil((Math.max(0, value) * Math.max(0, Number(rate ?? 0))) / 1_000);
+  const scaled = (value, rate, divisor) => {
+    const unitRate = Number(rate ?? 0);
+    if (![value, unitRate].every((number) => Number.isSafeInteger(number) && number >= 0)) {
+      throw new AiPlatformError("invalid usage or price", { code: "invalid_cost", status: 503 });
+    }
+    const result = (BigInt(value) * BigInt(unitRate) + BigInt(divisor - 1)) / BigInt(divisor);
+    if (result > BigInt(Number.MAX_SAFE_INTEGER)) throw new AiPlatformError("cost exceeds integer bounds", { code: "invalid_cost", status: 503 });
+    return Number(result);
+  };
+  const perThousand = (value, rate) => scaled(value, rate, 1_000);
   const costMicro = perThousand(input, price.input_micro_per_1k)
     + perThousand(output, price.output_micro_per_1k)
     + perThousand(cached, price.cached_input_micro_per_1k)
-    + Math.ceil((Math.max(0, audio) * Math.max(0, Number(price.audio_micro_per_minute ?? 0))) / 60)
-    + (Math.max(0, pages) * Math.max(0, Number(price.image_micro_per_page ?? 0)));
+    + scaled(audio, price.audio_micro_per_minute, 60)
+    + scaled(pages, price.image_micro_per_page, 1);
+  if (!Number.isSafeInteger(costMicro)) throw new AiPlatformError("cost exceeds integer bounds", { code: "invalid_cost", status: 503 });
   return { costMicro, costStatus: "calculated" };
 }
 
@@ -61,11 +72,22 @@ export function reserveBudget(db, {
   feature,
   agentId,
   estimatedCostMicro = 0,
+  currency = null,
+  requirePolicy = false,
   at = new Date(),
   timeZone = "Asia/Shanghai",
   reservationIdFactory = () => id("reservation"),
 } = {}) {
   const policies = policyRows(db, { owner, feature, agentId });
+  if (!Number.isSafeInteger(estimatedCostMicro) || estimatedCostMicro < 0) {
+    throw new AiPlatformError("invalid budget reservation", { code: "invalid_cost", status: 503 });
+  }
+  if (requirePolicy && !policies.some((policy) => policy.scope_type === "global" && Number(policy.amount_micro) > 0)) {
+    throw new AiPlatformError("a finite global budget is required", { code: "budget_not_configured", status: 503 });
+  }
+  if (currency && policies.some((policy) => policy.currency !== currency)) {
+    throw new AiPlatformError("budget and price currencies differ", { code: "budget_currency_mismatch", status: 503 });
+  }
   const reservations = [];
   for (const policy of policies) {
     const period = periodKey(at, policy.period, timeZone);

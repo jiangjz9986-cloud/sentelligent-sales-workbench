@@ -9,6 +9,7 @@ import {
   taskType,
 } from "../../../shared/aiPlatformContract.mjs";
 import { AiPlatformError } from "../errors.js";
+import { readOperationalControl } from "../operations/control.js";
 import { id, iso, safeLimit, safeOffset, stringify, withImmediateTransaction } from "../utils.js";
 
 const MIN_INTERVAL_SECONDS = 30;
@@ -1283,7 +1284,7 @@ export function createScheduleService({
   }
 
   async function scanDue({ limit = DEFAULT_SCAN_LIMIT, maxOccurrencesPerSchedule = DEFAULT_CATCH_UP } = {}) {
-    if (closed) {
+    if (closed || readOperationalControl(db).paused) {
       return {
         scanned: 0,
         recovered: 0,

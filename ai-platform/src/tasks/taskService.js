@@ -10,6 +10,7 @@ import {
 } from "../../../shared/aiPlatformContract.mjs";
 import { reserveBudget, releaseBudget, settleBudget, calculateCostMicro, estimateUsage } from "../budgets/ledger.js";
 import { AiPlatformError } from "../errors.js";
+import { readOperationalControl } from "../operations/control.js";
 import { id, iso, safeLimit, safeOffset, stringify, withImmediateTransaction } from "../utils.js";
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/u;
@@ -355,7 +356,7 @@ function sumTaskCharges(db, taskId) {
      WHERE task_id = $taskId
   `).get({ $taskId: taskId });
   const reservation = db.prepare(`
-    SELECT COALESCE(SUM(reserved_micro), 0) AS reserved_micro
+    SELECT COALESCE(MAX(reserved_micro), 0) AS reserved_micro
       FROM budget_reservations
      WHERE task_id = $taskId
   `).get({ $taskId: taskId });
@@ -425,7 +426,7 @@ function markAttemptUnknown(db, task, attempt, at, code = "lease_expired") {
   });
   insertUsageLedger(db, {
     task,
-    attempt: { ...attempt, currency: "USD" },
+    attempt,
     usage: {},
     charge: { costMicro: 0, functionFeeMicro: 0, feeStatus: "not_configured" },
     costStatus: "unknown",
@@ -452,6 +453,7 @@ export function createTaskService({
   let pumpPromise = null;
   let runPromise = null;
   let closed = false;
+  let paused = config.taskAdmissionEnabled === false;
 
   function now() {
     return iso(clock);
@@ -485,12 +487,19 @@ export function createTaskService({
       };
     }
 
+    if (paused || closed || readOperationalControl(db).paused) {
+      throw new AiPlatformError("AI platform is draining", { code: "service_draining", status: 503 });
+    }
     const execution = resolveExecutionConfiguration(db, {
       taskType: normalized.taskType,
       at: requestedAt,
       config,
     });
-    const estimate = estimatedCharge(normalized.input, execution.limits, execution.price);
+    const estimate = estimatedCharge({
+      input: normalized.input,
+      systemPrompt: execution.agentVersion.system_prompt,
+      instructions: execution.agentVersion.instructions_json,
+    }, execution.limits, execution.price);
     // One task owns one budget reservation across its bounded retry window.
     // Reserve the per-attempt upper bound up front so a retry cannot bypass
     // an amount limit; each provider attempt remains separately ledgered.
@@ -523,6 +532,9 @@ export function createTaskService({
           model: race.model_id,
           standardDigest: race.standard_digest,
         };
+      }
+      if (readOperationalControl(db).paused) {
+        throw new AiPlatformError("AI platform is draining", { code: "service_draining", status: 503 });
       }
       const queuedCount = db.prepare(`
         SELECT COUNT(*) AS count FROM tasks WHERE status = 'queued'
@@ -570,6 +582,8 @@ export function createTaskService({
         feature: normalized.feature,
         agentId: execution.agentVersion.agent_id,
         estimatedCostMicro: reservedCostMicro,
+        currency: execution.price?.currency ?? null,
+        requirePolicy: execution.model.provider_kind !== "mock",
         at: new Date(requestedAt),
       });
       emitEvent(db, taskId, "task.created", {
@@ -674,6 +688,7 @@ export function createTaskService({
     const leaseToken = id("lease");
     const leaseExpiresAt = new Date(new Date(claimedAt).getTime() + config.taskLeaseMs).toISOString();
     return withImmediateTransaction(db, () => {
+      if (readOperationalControl(db).paused) return null;
       const where = taskId ? "t.id = $taskId AND t.status = 'queued'" : "t.status = 'queued'";
       const selected = db.prepare(`
         SELECT t.*, av.limits_json, av.system_prompt, av.instructions_json,
@@ -1029,7 +1044,9 @@ export function createTaskService({
           at: completedAt,
         });
       }
-      const retry = !cancelled && shouldRetry(error, context.attempt.attemptNo, context.limits, { providerStarted });
+      const retry = !cancelled
+        && (!unknown || context.model.providerKind === "mock")
+        && shouldRetry(error, context.attempt.attemptNo, context.limits, { providerStarted });
       if (retry) {
         db.prepare(`
           UPDATE tasks
@@ -1142,11 +1159,13 @@ export function createTaskService({
       if (timeoutTriggered) {
         const error = new Error("provider execution timed out");
         error.code = "provider_timeout";
+        error.usage = response?.usage;
         throw error;
       }
       if (controller.signal.aborted || cancellationRequested(context.task.id)) {
         const error = new Error("task cancelled");
         error.code = "cancelled";
+        error.usage = response?.usage;
         throw error;
       }
       try {
@@ -1170,10 +1189,12 @@ export function createTaskService({
     const at = now();
     const stale = db.prepare(`
       SELECT t.*, ta.id AS attempt_id, ta.attempt_no, ta.provider_id, ta.model_id,
-             ta.price_version_id, av.limits_json
+             ta.price_version_id, av.limits_json, p.kind AS provider_kind, pr.currency
         FROM tasks t
         JOIN task_attempts ta ON ta.task_id = t.id AND ta.attempt_no = t.current_attempt
         JOIN agent_versions av ON av.id = t.agent_version_id
+        JOIN providers p ON p.id = ta.provider_id
+        LEFT JOIN price_versions pr ON pr.id = ta.price_version_id
        WHERE t.status = 'running'
          AND t.lease_expires_at IS NOT NULL
          AND t.lease_expires_at < $at
@@ -1191,10 +1212,12 @@ export function createTaskService({
           providerId: staleTask.provider_id,
           modelId: staleTask.model_id,
           priceVersionId: staleTask.price_version_id,
+          currency: staleTask.currency ?? "USD",
         };
         markAttemptUnknown(db, current, attempt, at);
         const limits = executionLimits(staleTask, config);
-        const canRetry = !current.cancel_requested_at && attempt.attemptNo < limits.maxAttempts;
+        const canRetry = staleTask.provider_kind === "mock"
+          && !current.cancel_requested_at && attempt.attemptNo < limits.maxAttempts;
         if (canRetry) {
           db.prepare(`
             UPDATE tasks
@@ -1235,7 +1258,7 @@ export function createTaskService({
   async function runPending({ limit = config.taskConcurrency } = {}) {
     if (runPromise) return runPromise;
     runPromise = (async () => {
-      if (closed) return { claimed: 0, completed: 0, results: [] };
+      if (closed || paused) return { claimed: 0, completed: 0, results: [] };
       let safe;
       try { safe = safeLimit(limit, config.taskConcurrency, config.taskConcurrency); } catch { safe = config.taskConcurrency; }
       recoverExpiredLeases({ limit: safe });
@@ -1275,12 +1298,62 @@ export function createTaskService({
     }
   }
 
-  function close() {
-    closed = true;
+  function pause() {
+    paused = true;
     if (pumpTimer) clearInterval(pumpTimer);
     pumpTimer = null;
-    for (const execution of activeExecutions.values()) execution.controller.abort();
-    activeExecutions.clear();
+  }
+
+  async function drain({ timeoutMs = config.drainTimeoutMs ?? 180_000, abort = false } = {}) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15 * 60_000) {
+      throw new TypeError("drain timeout is invalid");
+    }
+    pause();
+    if (abort) {
+      for (const execution of activeExecutions.values()) execution.controller.abort();
+    }
+    const pending = runPromise;
+    if (!pending) return status();
+    let timeout;
+    try {
+      await Promise.race([
+        pending,
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new AiPlatformError("AI platform drain timed out", {
+            code: "drain_timeout",
+            status: 503,
+          })), timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+    return status();
+  }
+
+  function status() {
+    const control = readOperationalControl(db);
+    return {
+      admissionOpen: !paused && !closed && !control.paused,
+      paused: paused || control.paused,
+      closed,
+      activeExecutions: activeExecutions.size,
+      generation: control.generation,
+    };
+  }
+
+  function resume() {
+    if (closed || readOperationalControl(db).paused) {
+      throw new AiPlatformError("AI platform is not resumable", { code: "service_draining", status: 503 });
+    }
+    paused = false;
+    start();
+    return status();
+  }
+
+  async function close() {
+    closed = true;
+    return drain({ abort: true });
   }
 
   return Object.freeze({
@@ -1294,6 +1367,10 @@ export function createTaskService({
     runPending,
     waitForTask,
     start,
+    pause,
+    drain,
+    status,
+    resume,
     close,
   });
 }

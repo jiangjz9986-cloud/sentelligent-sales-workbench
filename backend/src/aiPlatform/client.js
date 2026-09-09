@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createRequestBinding } from "../../../shared/aiPlatformRequestAuth.mjs";
 
 const DEFAULT_RESPONSE_LIMIT = 512 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -623,6 +624,12 @@ export function createAiPlatformClient({
           method,
           path: `${normalizedPath}${query && query.toString() ? `?${query.toString()}` : ""}`,
           requestId: requestIdentifier,
+          requestBinding: createRequestBinding({
+            method,
+            path: new URL(url).pathname + new URL(url).search,
+            body: bodyText ?? "",
+            idempotencyKey: normalizedIdempotencyKey,
+          }),
           signal: abortContext.signal,
         });
         providedToken = optionalHeaderToken(await awaitWithSignal(providerResult, abortContext.signal));

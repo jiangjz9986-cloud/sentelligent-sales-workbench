@@ -44,7 +44,14 @@ async function start(overrides) {
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    server.closeAiPlatform(() => process.exit(0));
+    server.closeAiPlatform((error) => {
+      if (error) {
+        process.stderr.write("AI platform shutdown incomplete; task state retained\n");
+        process.exitCode = 1;
+        return;
+      }
+      process.exit(0);
+    });
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);

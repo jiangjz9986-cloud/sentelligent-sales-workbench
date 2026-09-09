@@ -6,17 +6,20 @@ import { basename, extname, relative, resolve, sep } from "node:path";
 import { loadAiPlatformConfig } from "./config.js";
 import { openAiPlatformDatabase } from "./db/index.js";
 import { asPlatformError, errorBody, AiPlatformError } from "./errors.js";
-import { authenticateRequest } from "./auth/internalAuth.js";
+import { authenticateRequest, consumeRequestNonce } from "./auth/internalAuth.js";
+import { createRequestBinding } from "../../shared/aiPlatformRequestAuth.mjs";
 import { createProviderRegistry } from "./providers/mockProvider.js";
 import { createTaskService } from "./tasks/taskService.js";
 import { createAdminService } from "./admin/adminService.js";
 import { createScheduleService } from "./schedules/scheduleService.js";
+import { readOperationalControl, updateOperationalControl } from "./operations/control.js";
 import { safeLimit, safeOffset } from "./utils.js";
 
 const PACKAGE_VERSION = "0.1.0";
 const ADMIN_PREFIX = "/internal/ai/v1/admin";
 const API_PREFIX = "/internal/ai/v1";
 const STATIC_PREFIXES = new Set(["/admin", "/ai-platform-admin"]);
+const requestBodies = new WeakMap();
 const MIME_TYPES = Object.freeze({
   ".css": "text/css; charset=utf-8",
   ".gif": "image/gif",
@@ -71,6 +74,7 @@ function methodNotAllowed(response, requestId, allow) {
 }
 
 async function readJsonBody(request, maxBytes) {
+  if (requestBodies.has(request)) return requestBodies.get(request).value;
   const declared = Number(request.headers["content-length"] ?? 0);
   if (Number.isSafeInteger(declared) && declared > maxBytes) {
     throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
@@ -82,13 +86,18 @@ async function readJsonBody(request, maxBytes) {
     if (size > maxBytes) throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
     chunks.push(chunk);
   }
-  if (!size) return {};
-  const text = Buffer.concat(chunks).toString("utf8");
+  if (!size) {
+    requestBodies.set(request, { raw: Buffer.alloc(0), value: {} });
+    return {};
+  }
+  const raw = Buffer.concat(chunks);
+  const text = raw.toString("utf8");
   try {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("body must be an object");
     }
+    requestBodies.set(request, { raw, value: parsed });
     return parsed;
   } catch {
     throw new AiPlatformError("request body must be valid JSON", { code: "invalid_json", status: 400 });
@@ -255,7 +264,7 @@ export function createAiPlatformRuntime(options = {}) {
   });
   if (options.autoStart !== false && !options.taskService) taskService.start();
   if (options.autoStart !== false && !options.scheduleService) scheduleService.start();
-  let closed = false;
+  let closing = null;
   return Object.freeze({
     config,
     db,
@@ -263,12 +272,27 @@ export function createAiPlatformRuntime(options = {}) {
     taskService,
     adminService,
     scheduleService,
+    async drain() {
+      taskService.pause?.();
+      scheduleService.stop?.();
+      await scheduleService.drain?.();
+      await taskService.drain?.();
+    },
     close() {
-      if (closed) return;
-      closed = true;
-      taskService.close?.();
-      scheduleService.close?.();
-      if (ownsDatabase) db.close();
+      if (!closing) {
+        taskService.pause?.();
+        scheduleService.close?.();
+        closing = (async () => {
+          await scheduleService.drain?.();
+          await taskService.drain?.();
+          await taskService.close?.();
+          if (ownsDatabase) db.close();
+        })().catch((error) => {
+          closing = null;
+          throw error;
+        });
+      }
+      return closing;
     },
   });
 }
@@ -277,15 +301,32 @@ export function createServer(options = {}) {
   const runtime = options.runtime ?? createAiPlatformRuntime(options);
   const { config, db, taskService, scheduleService } = runtime;
   const logger = options.logger ?? console;
+  const nonceConsumed = new WeakSet();
 
   async function authenticate(request, scopes, { admin = false } = {}) {
     if (admin && config.adminEnabled === false) {
       throw new AiPlatformError("AI platform administration is disabled", { code: "admin_disabled", status: 404 });
     }
-    return authenticateRequest(request, config, {
+    let requestBinding = null;
+    if (config.requestBindingRequired) {
+      await readJsonBody(request, config.bodyLimitBytes);
+      requestBinding = createRequestBinding({
+        method: request.method,
+        path: request.url,
+        body: requestBodies.get(request).raw,
+        idempotencyKey: request.headers["idempotency-key"] ?? null,
+      });
+    }
+    const auth = authenticateRequest(request, config, {
       requiredScopes: scopes,
       allowDevAdmin: admin,
+      requestBinding,
     });
+    if (config.requestBindingRequired && !nonceConsumed.has(request)) {
+      consumeRequestNonce(db, auth);
+      nonceConsumed.add(request);
+    }
+    return auth;
   }
 
   async function adminCall(name, args) {
@@ -566,6 +607,27 @@ export function createServer(options = {}) {
     const suffix = url.pathname.slice(API_PREFIX.length);
     const parts = pathParts(suffix);
     if (parts[0] === "admin") return handleAdmin(request, response, requestId, url);
+    if (parts[0] === "operations") {
+      const read = request.method === "GET" && parts.length === 1;
+      const write = request.method === "POST" && parts.length === 2 && ["drain", "resume"].includes(parts[1]);
+      if (!read && !write) throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
+      const auth = await authenticate(request, [read ? "ai:ops:read" : "ai:ops:write"]);
+      if (read) return sendJson(response, 200, { item: { ...readOperationalControl(db), executor: taskService.status(), queue: queueSnapshot(db) } }, requestId);
+      const body = await readJsonBody(request, config.bodyLimitBytes);
+      if (Object.keys(body).some((key) => key !== "expectedGeneration")) {
+        throw new AiPlatformError("unexpected operation field", { code: "invalid_request", status: 400 });
+      }
+      const paused = parts[1] === "drain";
+      updateOperationalControl(db, { paused, expectedGeneration: body.expectedGeneration, identity: auth });
+      if (paused) {
+        await runtime.drain();
+        if (queueSnapshot(db).running > 0) throw new AiPlatformError("another executor is still running", { code: "drain_incomplete", status: 503 });
+      } else {
+        taskService.resume();
+        scheduleService.start();
+      }
+      return sendJson(response, 200, { item: { ...readOperationalControl(db), executor: taskService.status(), queue: queueSnapshot(db) } }, requestId);
+    }
     if (parts[0] !== "tasks") throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
 
     const method = request.method ?? "GET";
@@ -639,6 +701,7 @@ export function createServer(options = {}) {
       const staticPrefix = [...STATIC_PREFIXES].find((prefix) => url.pathname === prefix || url.pathname.startsWith(`${prefix}/`));
       if (staticPrefix) return await serveStatic(request, response, config, requestId);
       if (url.pathname === API_PREFIX || url.pathname.startsWith(`${API_PREFIX}/`)) {
+        if (config.requestBindingRequired) await authenticate(request, []);
         return await handleApi(request, response, requestId, url);
       }
       throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
@@ -657,9 +720,22 @@ export function createServer(options = {}) {
   });
   server.aiPlatform = runtime;
   server.health = health;
+  let shutdown = null;
+  let httpShutdown = null;
   server.closeAiPlatform = (callback) => {
-    runtime.close();
-    server.close(callback);
+    if (!shutdown) {
+      runtime.taskService.pause?.();
+      runtime.scheduleService.close?.();
+      httpShutdown ??= new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+      shutdown = Promise.all([httpShutdown, runtime.drain()]).then(() => runtime.close()).catch((error) => {
+        shutdown = null;
+        throw error;
+      });
+    }
+    if (typeof callback === "function") shutdown.then(() => callback(), callback);
+    return shutdown;
   };
   return server;
 }
@@ -668,8 +744,9 @@ function healthSnapshot(runtime, requestId = null) {
   let database = "ready";
   try { runtime.db.prepare("SELECT 1 AS ok").get(); } catch { database = "unavailable"; }
   const queue = database === "ready" ? queueSnapshot(runtime.db) : null;
+  const executor = database === "ready" ? runtime.taskService.status?.() ?? null : null;
   return {
-    status: database === "ready" ? "ok" : "degraded",
+    status: database !== "ready" ? "degraded" : executor?.admissionOpen === false ? "paused" : "ok",
     service: "sentelligent-ai-unified-platform",
     version: PACKAGE_VERSION,
     database,
@@ -681,6 +758,7 @@ function healthSnapshot(runtime, requestId = null) {
     targetReasoningEffort: runtime.config.targetReasoningEffort,
     adminEnabled: runtime.config.adminEnabled,
     queue,
+    executor,
     ...(requestId ? { requestId } : {}),
   };
 }

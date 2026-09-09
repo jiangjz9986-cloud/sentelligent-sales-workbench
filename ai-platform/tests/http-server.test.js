@@ -63,6 +63,36 @@ afterEach(async () => {
 });
 
 describe("AI platform HTTP server", () => {
+  it("requires operations scopes and a fresh generation to pause and resume admission", async () => {
+    const regular = token("alice", ["ai:task:create"]);
+    const operator = token("operator", ["ai:ops:write", "ai:ops:read"]);
+    const path = "/internal/ai/v1/operations";
+    const rejected = await request(path + "/drain", {
+      method: "POST", headers: { Authorization: `Bearer ${regular}` }, body: JSON.stringify({ expectedGeneration: 0 }),
+    });
+    assert.equal(rejected.response.status, 403);
+    const paused = await request(path + "/drain", {
+      method: "POST", headers: { Authorization: `Bearer ${operator}` }, body: JSON.stringify({ expectedGeneration: 0 }),
+    });
+    assert.equal(paused.response.status, 200);
+    assert.equal(paused.body.item.paused, true);
+    assert.equal(paused.body.item.generation, 1);
+    assert.equal((await request("/healthz")).response.status, 200);
+    assert.equal((await request("/readyz")).response.status, 503);
+    const stale = await request(path + "/resume", {
+      method: "POST", headers: { Authorization: `Bearer ${operator}` }, body: JSON.stringify({ expectedGeneration: 0 }),
+    });
+    assert.equal(stale.response.status, 409);
+    const resumed = await request(path + "/resume", {
+      method: "POST", headers: { Authorization: `Bearer ${operator}` }, body: JSON.stringify({ expectedGeneration: 1 }),
+    });
+    assert.equal(resumed.response.status, 200);
+    assert.equal(resumed.body.item.paused, false);
+    assert.equal(resumed.body.item.generation, 2);
+    assert.equal((await request("/readyz")).response.status, 200);
+    assert.equal(server.aiPlatform.db.prepare("SELECT count(*) n FROM platform_control_events").get().n, 2);
+  });
+
   it("exposes health and readiness without credentials", async () => {
     const health = await request("/healthz");
     assert.equal(health.response.status, 200);
