@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, chmodSync, lstatSync, unlinkSync } from "node:fs";
+import { dirname } from "node:path";
+import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import { loadAiPlatformConfig } from "./config.js";
@@ -33,18 +35,47 @@ function print(value) {
 
 async function start(overrides) {
   const config = configFromOverrides(overrides);
+  if (config.socketPath) {
+    const parent = lstatSync(dirname(config.socketPath));
+    if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.() || (parent.mode & 0o022) !== 0) throw new Error("AI socket directory is unsafe");
+    if (existsSync(config.socketPath)) {
+      const before = lstatSync(config.socketPath);
+      if (!before.isSocket() || before.uid !== process.getuid?.()) throw new Error("AI socket identity is unsafe");
+      const active = await new Promise((resolve, reject) => {
+        const probe = createConnection(config.socketPath);
+        probe.setTimeout(1000, () => probe.destroy(new Error("AI socket probe timed out")));
+        probe.once("connect", () => { probe.destroy(); resolve(true); });
+        probe.once("error", (error) => ["ECONNREFUSED", "ENOENT"].includes(error.code) ? resolve(false) : reject(error));
+      });
+      if (active) throw new Error("AI platform already owns the socket");
+      if (existsSync(config.socketPath)) {
+        const after = lstatSync(config.socketPath);
+        if (after.ino !== before.ino || after.dev !== before.dev) throw new Error("AI socket changed during inspection");
+        unlinkSync(config.socketPath);
+      }
+    }
+  }
   const server = createServer({ config, autoStart: true });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(config.port, config.host, resolve);
+    if (config.socketPath) server.listen(config.socketPath, resolve);
+    else server.listen(config.port, config.host, resolve);
   });
   const address = server.address();
-  process.stdout.write(`AI platform listening on http://${config.host}:${address.port}\n`);
+  if (config.socketPath) chmodSync(config.socketPath, 0o666);
+  process.stdout.write(config.socketPath ? "AI platform listening on its protected local socket\n" : `AI platform listening on http://${config.host}:${address.port}\n`);
   let stopping = false;
   const stop = () => {
     if (stopping) return;
     stopping = true;
-    server.closeAiPlatform(() => process.exit(0));
+    server.closeAiPlatform((error) => {
+      if (error) {
+        process.stderr.write("AI platform shutdown incomplete; task state retained\n");
+        process.exitCode = 1;
+        return;
+      }
+      process.exit(0);
+    });
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 
 import { createServiceToken } from "../src/auth/internalAuth.js";
 import { loadAiPlatformConfig } from "../src/config.js";
-import { createServer } from "../src/server.js";
+import { createServer, PACKAGE_VERSION } from "../src/server.js";
 
 const SECRET = ["test", "ai", "platform", "secret"].join("-");
 
@@ -63,11 +64,43 @@ afterEach(async () => {
 });
 
 describe("AI platform HTTP server", () => {
+  it("requires operations scopes and a fresh generation to pause and resume admission", async () => {
+    const regular = token("alice", ["ai:task:create"]);
+    const operator = token("operator", ["ai:ops:write", "ai:ops:read"]);
+    const path = "/internal/ai/v1/operations";
+    const rejected = await request(path + "/drain", {
+      method: "POST", headers: { Authorization: `Bearer ${regular}` }, body: JSON.stringify({ expectedGeneration: 0 }),
+    });
+    assert.equal(rejected.response.status, 403);
+    const paused = await request(path + "/drain", {
+      method: "POST", headers: { Authorization: `Bearer ${operator}` }, body: JSON.stringify({ expectedGeneration: 0 }),
+    });
+    assert.equal(paused.response.status, 200);
+    assert.equal(paused.body.item.paused, true);
+    assert.equal(paused.body.item.generation, 1);
+    assert.equal((await request("/healthz")).response.status, 200);
+    assert.equal((await request("/readyz")).response.status, 503);
+    const stale = await request(path + "/resume", {
+      method: "POST", headers: { Authorization: `Bearer ${operator}` }, body: JSON.stringify({ expectedGeneration: 0 }),
+    });
+    assert.equal(stale.response.status, 409);
+    const resumed = await request(path + "/resume", {
+      method: "POST", headers: { Authorization: `Bearer ${operator}` }, body: JSON.stringify({ expectedGeneration: 1 }),
+    });
+    assert.equal(resumed.response.status, 200);
+    assert.equal(resumed.body.item.paused, false);
+    assert.equal(resumed.body.item.generation, 2);
+    assert.equal((await request("/readyz")).response.status, 200);
+    assert.equal(server.aiPlatform.db.prepare("SELECT count(*) n FROM platform_control_events").get().n, 2);
+  });
+
   it("exposes health and readiness without credentials", async () => {
     const health = await request("/healthz");
     assert.equal(health.response.status, 200);
     assert.equal(health.body.status, "ok");
     assert.equal(health.body.database, "ready");
+    assert.equal(health.body.version, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
+    assert.equal(health.body.version, PACKAGE_VERSION);
     assert.equal(typeof health.body.requestId, "string");
 
     const ready = await request("/readyz");
@@ -236,6 +269,185 @@ describe("AI platform HTTP server", () => {
     assert.equal(cancelled.body.item.status, "cancelled");
   });
 
+  it("completes the management write lifecycle over HTTP with optimistic conflicts", async () => {
+    const headers = { "X-AI-Platform-Dev-Auth": "1" };
+
+    const createdAgent = await request("/internal/ai/v1/admin/agents", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        slug: "http-write-agent",
+        name: "HTTP 写入 Agent",
+        description: "Created through the management API.",
+        lifecycle: "draft",
+        taskTypes: ["assistant.execute"],
+        systemPrompt: "Use only the supplied facts.",
+        instructions: { factsFirst: true, noDirectWrite: true },
+        tools: [],
+        modelPolicy: { providerId: "provider-mock", modelId: "model-mock-standard-v1", externalAllowed: false },
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        standardIds: ["standard-grounding-v1"],
+        limits: { maxTokens: 500, timeoutMs: 1_000, maxSteps: 4, maxAttempts: 1 },
+      }),
+    });
+    assert.equal(createdAgent.response.status, 201);
+    const createdAgentId = createdAgent.body.item.id;
+    assert.match(createdAgentId, /^agent-/u);
+    assert.equal(createdAgent.body.item.lifecycle, "draft");
+    assert.ok(createdAgent.body.item.draftVersionId);
+
+    const agentPath = `/internal/ai/v1/admin/agents/${encodeURIComponent(createdAgentId)}`;
+    const agentDetail = await request(agentPath, { headers });
+    assert.equal(agentDetail.response.status, 200);
+    assert.equal(agentDetail.body.item.description, "Created through the management API.");
+    const agentUpdated = await request(agentPath, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        expectedUpdatedAt: agentDetail.body.item.updatedAt,
+        description: "Updated through the management API.",
+        systemPrompt: "Use only current, supplied facts.",
+      }),
+    });
+    assert.equal(agentUpdated.response.status, 200);
+    assert.equal(agentUpdated.body.item.description, "Updated through the management API.");
+    assert.ok(agentUpdated.body.item.draftVersionId);
+
+    const savedAgentDetail = await request(agentPath, { headers });
+    assert.equal(savedAgentDetail.response.status, 200);
+    assert.equal(savedAgentDetail.body.item.description, "Updated through the management API.");
+    assert.equal(savedAgentDetail.body.item.latestVersion.systemPrompt, "Use only current, supplied facts.");
+
+    const seededAgent = await request("/internal/ai/v1/admin/agents/agent-suggestion", { headers });
+    assert.equal(seededAgent.response.status, 200);
+    const originalAgentVersionId = seededAgent.body.item.activeVersion.id;
+    const seededAgentUpdate = await request("/internal/ai/v1/admin/agents/agent-suggestion", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        expectedUpdatedAt: seededAgent.body.item.updatedAt,
+        systemPrompt: "Use only the supplied facts and identify unknowns.",
+      }),
+    });
+    assert.equal(seededAgentUpdate.response.status, 200);
+    const draftVersionId = seededAgentUpdate.body.item.draftVersionId;
+    assert.ok(draftVersionId);
+
+    const published = await request("/internal/ai/v1/admin/agents/agent-suggestion/publish", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedUpdatedAt: seededAgentUpdate.body.item.updatedAt,
+        versionId: draftVersionId,
+        testRunId: "http-write-publish",
+      }),
+    });
+    assert.equal(published.response.status, 200);
+    assert.equal(published.body.item.activeVersion.id, draftVersionId);
+    assert.equal(published.body.item.activeRelease.testRunId, "http-write-publish");
+
+    const rolledBack = await request("/internal/ai/v1/admin/agents/agent-suggestion/rollback", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        expectedUpdatedAt: published.body.item.updatedAt,
+        targetVersionId: originalAgentVersionId,
+        testRunId: "http-write-rollback",
+      }),
+    });
+    assert.equal(rolledBack.response.status, 200);
+    assert.equal(rolledBack.body.item.activeVersion.id, originalAgentVersionId);
+    assert.equal(rolledBack.body.item.rolledBack, true);
+
+    const staleAgentUpdate = await request("/internal/ai/v1/admin/agents/agent-suggestion", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        expectedUpdatedAt: seededAgent.body.item.updatedAt,
+        description: "This must be rejected as stale.",
+      }),
+    });
+    assert.equal(staleAgentUpdate.response.status, 409);
+    assert.equal(staleAgentUpdate.body.error.code, "conflict");
+
+    const createdStandard = await request("/internal/ai/v1/admin/standards", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        slug: "http-write-standard",
+        name: "HTTP 写入规范",
+        description: "Created through the management API.",
+        lifecycle: "draft",
+        content: "Separate facts, inferences, unknowns, and suggestions.",
+        rules: { requireUnknowns: true, forbidDirectWrite: true },
+      }),
+    });
+    assert.equal(createdStandard.response.status, 201);
+    const createdStandardId = createdStandard.body.item.id;
+    assert.match(createdStandardId, /^standard-/u);
+    const standardPath = `/internal/ai/v1/admin/standards/${encodeURIComponent(createdStandardId)}`;
+    const standardDetail = await request(standardPath, { headers });
+    assert.equal(standardDetail.response.status, 200);
+    const updatedStandard = await request(standardPath, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        expectedVersionId: standardDetail.body.item.latestVersion.id,
+        name: "HTTP 写入规范（已更新）",
+        content: "Separate facts, inferences, unknowns, suggestions, and source references.",
+      }),
+    });
+    assert.equal(updatedStandard.response.status, 200);
+    const savedStandard = await request(standardPath, { headers });
+    assert.equal(savedStandard.response.status, 200);
+    assert.equal(savedStandard.body.item.name, "HTTP 写入规范（已更新）");
+    assert.equal(savedStandard.body.item.latestVersion.content, "Separate facts, inferences, unknowns, suggestions, and source references.");
+
+    const budget = await request("/internal/ai/v1/admin/budgets/budget-global-daily", { headers });
+    assert.equal(budget.response.status, 200);
+    const budgetUpdated = await request("/internal/ai/v1/admin/budgets/budget-global-daily", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ expectedUpdatedAt: budget.body.item.updatedAt, enabled: false }),
+    });
+    assert.equal(budgetUpdated.response.status, 200);
+    assert.equal(budgetUpdated.body.item.enabled, false);
+    const savedBudget = await request("/internal/ai/v1/admin/budgets/budget-global-daily", { headers });
+    assert.equal(savedBudget.body.item.enabled, false);
+
+    const schedule = await request("/internal/ai/v1/admin/schedules/schedule-proactive", { headers });
+    assert.equal(schedule.response.status, 200);
+    const renamedSchedule = await request("/internal/ai/v1/admin/schedules/schedule-proactive", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ expectedUpdatedAt: schedule.body.item.updatedAt, name: "主动分析（Backend 独占）" }),
+    });
+    assert.equal(renamedSchedule.response.status, 200);
+    const savedSchedule = await request("/internal/ai/v1/admin/schedules/schedule-proactive", { headers });
+    assert.equal(savedSchedule.body.item.name, "主动分析（Backend 独占）");
+
+    const proactiveEnable = await request("/internal/ai/v1/admin/schedules/schedule-proactive/enable", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+    });
+    assert.equal(proactiveEnable.response.status, 409);
+    assert.equal(proactiveEnable.body.error.code, "proactive_schedule_owned_by_backend");
+
+    const regular = token("bob", ["ai:admin:read"]);
+    const forbidden = await request(agentPath, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${regular}` },
+      body: JSON.stringify({
+        expectedUpdatedAt: savedAgentDetail.body.item.updatedAt,
+        description: "read-only must not write",
+      }),
+    });
+    assert.equal(forbidden.response.status, 403);
+    assert.equal(forbidden.body.error.code, "forbidden");
+  });
+
   it("supports schedule creation, enable/disable, scan, and run inspection", async () => {
     const headers = { "X-AI-Platform-Dev-Auth": "1" };
     const created = await request("/internal/ai/v1/admin/schedules", {
@@ -301,6 +513,14 @@ describe("AI platform HTTP server", () => {
   });
 
   it("serves the isolated management console and rejects path traversal", async () => {
+    const bareAdmin = await request("/admin?view=overview", { redirect: "manual" });
+    assert.equal(bareAdmin.response.status, 308);
+    assert.equal(bareAdmin.response.headers.get("location"), "/admin/?view=overview");
+
+    const bareAlias = await request("/ai-platform-admin", { redirect: "manual" });
+    assert.equal(bareAlias.response.status, 308);
+    assert.equal(bareAlias.response.headers.get("location"), "/ai-platform-admin/");
+
     const page = await request("/ai-platform-admin/");
     assert.equal(page.response.status, 200);
     assert.match(page.response.headers.get("content-type"), /text\/html/u);

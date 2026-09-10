@@ -1,6 +1,10 @@
 import { openAsBlob } from "node:fs";
 
 import {
+  MediaAdapterError,
+  simulateAsrTranscription,
+} from "../../../../ai-platform/src/providers/mediaAdapter.js";
+import {
   ASR_LIMITS,
   AsrContractError,
   canonicalizeAsrMediaType,
@@ -13,6 +17,8 @@ export const ASR_PROVIDER_RESOURCE_LIFECYCLE = Symbol("asr.providerResourceLifec
 const ASYNC_BODY_READ_CANCELLED = Symbol("asr.asyncBodyReadCancelled");
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const EXECUTION_MODES = new Set(["local-simulated", "external-provider"]);
+const LOCAL_SIMULATED_MODEL = "local-simulated-asr";
 
 function contractError(code, status, message) {
   return new AsrContractError(code, status, message);
@@ -449,6 +455,97 @@ function externalAbortError(signal) {
   return new DOMException("The operation was aborted", "AbortError");
 }
 
+function normalizeExecutionMode(value) {
+  const mode = value === undefined || value === null || value === ""
+    ? "local-simulated"
+    : value;
+  if (typeof mode !== "string" || !EXECUTION_MODES.has(mode)) {
+    throw new TypeError("ASR provider execution mode is invalid");
+  }
+  return mode;
+}
+
+function localMediaContractError(error) {
+  const mappings = {
+    MEDIA_TOO_LARGE: ["AUDIO_TOO_LARGE", 413, "Audio exceeds the upload limit"],
+    MEDIA_TOO_LONG: ["AUDIO_TOO_LONG", 422, "Audio is too long"],
+    MEDIA_TOO_SHORT: ["AUDIO_TOO_SHORT", 422, "Audio is too short"],
+    MEDIA_TYPE_UNSUPPORTED: ["AUDIO_MEDIA_TYPE_UNSUPPORTED", 415, "Audio media type is unsupported"],
+    MEDIA_DESCRIPTOR_TOO_LARGE: ["AUDIO_INVALID", 422, "Audio metadata is invalid"],
+    MEDIA_DESCRIPTOR_INVALID: ["AUDIO_INVALID", 422, "Audio metadata is invalid"],
+    MEDIA_RAW_PAYLOAD_FORBIDDEN: ["AUDIO_INVALID", 422, "Audio metadata is invalid"],
+  };
+  const mapping = mappings[error?.code];
+  if (!mapping) {
+    return contractError(
+      "ASR_PROVIDER_BAD_RESPONSE",
+      502,
+      "ASR provider request failed",
+    );
+  }
+  return contractError(mapping[0], mapping[1], mapping[2]);
+}
+
+async function transcribeLocalSimulated(input, { timeoutMs }) {
+  if (canonicalizeAsrMediaType(input.mediaType) !== "audio/wav") {
+    throw new TypeError("provider accepts only normalized audio/wav");
+  }
+  const purpose = parseAsrPurpose(input.purpose);
+  if (input.language !== "zh-CN") {
+    throw new TypeError("provider accepts only zh-CN input");
+  }
+  if (typeof input.audioPath !== "string" || input.audioPath.length === 0) {
+    throw new TypeError("provider audioPath must be a server-generated path");
+  }
+  if (!Number.isSafeInteger(input.durationMs) || input.durationMs <= 0) {
+    throw new TypeError("provider durationMs must be a positive safe integer");
+  }
+  if (input.signal !== undefined && !(input.signal instanceof AbortSignal)) {
+    throw new TypeError("provider signal must be an AbortSignal");
+  }
+  const onResourceLifecycle = input[ASR_PROVIDER_RESOURCE_LIFECYCLE];
+  if (
+    onResourceLifecycle !== undefined
+    && typeof onResourceLifecycle !== "function"
+  ) {
+    throw new TypeError("onLateResourceLifecycle must be a function");
+  }
+  if (input.signal?.aborted) throw externalAbortError(input.signal);
+
+  const operation = createProviderOperationGuard({
+    signal: input.signal,
+    timeoutMs,
+    setTimeoutImpl: globalThis.setTimeout,
+    clearTimeoutImpl: globalThis.clearTimeout,
+  });
+  try {
+    const result = await operation.race(
+      simulateAsrTranscription({
+        mediaType: "audio/wav",
+        byteLength: input.byteLength,
+        sha256: input.sha256 ?? input.audioSha256,
+        durationMs: input.durationMs,
+        purpose,
+        language: "zh-CN",
+        ...(input.simulation === undefined ? {} : { simulation: input.simulation }),
+        signal: operation.controller.signal,
+      }),
+    );
+    if (input.signal?.aborted) throw externalAbortError(input.signal);
+    return Object.freeze({ text: normalizeAsrTranscript(result.text, purpose) });
+  } catch (error) {
+    if (input.signal?.aborted) throw externalAbortError(input.signal);
+    if (operation.timedOut()) {
+      throw contractError("ASR_TIMEOUT", 504, "ASR provider timed out");
+    }
+    if (error instanceof AsrContractError) throw error;
+    if (error instanceof MediaAdapterError) throw localMediaContractError(error);
+    throw contractError("ASR_PROVIDER_BAD_RESPONSE", 502, "ASR provider request failed");
+  } finally {
+    operation.cleanup();
+  }
+}
+
 function createProviderOperationGuard({
   signal,
   timeoutMs,
@@ -493,16 +590,46 @@ function createProviderOperationGuard({
 }
 
 export function createOpenAiCompatibleProvider(config = {}, dependencies = {}) {
-  const {
-    endpoint,
-  } = normalizeOpenAiCompatibleBaseUrl(config.baseUrl, {
-    allowLoopbackHttpForTests: dependencies.allowLoopbackHttpForTests === true,
-  });
-  const model = validateModel(config.model);
+  const executionMode = normalizeExecutionMode(
+    config.executionMode ?? dependencies.executionMode,
+  );
+  const model = validateModel(
+    executionMode === "local-simulated"
+      && (config.model === undefined || config.model === null || config.model === "")
+      ? LOCAL_SIMULATED_MODEL
+      : config.model,
+  );
   const timeoutMs = validateTimeout(config.timeoutMs ?? ASR_LIMITS.providerTimeoutMs);
+
+  const normalizedBaseUrl = config.baseUrl === undefined
+    || config.baseUrl === null
+    || config.baseUrl === ""
+    ? null
+    : normalizeOpenAiCompatibleBaseUrl(config.baseUrl, {
+        allowLoopbackHttpForTests: dependencies.allowLoopbackHttpForTests === true,
+      });
+  if (executionMode === "external-provider" && !normalizedBaseUrl) {
+    throw new TypeError("ASR provider base URL is invalid");
+  }
+  if (executionMode === "local-simulated") {
+    return Object.freeze({
+      id: PROVIDER_ID,
+      executionMode,
+      credentialCompatibility: "independent",
+      readiness() {
+        return Object.freeze({ ready: true, code: "READY" });
+      },
+      async transcribe(input = {}) {
+        return transcribeLocalSimulated(input, { timeoutMs });
+      },
+    });
+  }
+
   if (typeof config.asrApiKeyProvider !== "function") {
     throw new TypeError("asrApiKeyProvider must be a function");
   }
+
+  const endpoint = normalizedBaseUrl.endpoint;
 
   const fetchImpl = dependencies.fetchImpl ?? globalThis.fetch;
   const openAsBlobImpl = dependencies.openAsBlobImpl ?? openAsBlob;
@@ -522,6 +649,7 @@ export function createOpenAiCompatibleProvider(config = {}, dependencies = {}) {
 
   return Object.freeze({
     id: PROVIDER_ID,
+    executionMode,
     credentialCompatibility: "independent",
     readiness() {
       return Object.freeze({ ready: true, code: "READY" });

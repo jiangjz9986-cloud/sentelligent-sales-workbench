@@ -1,4 +1,5 @@
 import { proactiveNotificationPayload } from "./proactiveNotificationMessage.js";
+import { createExecutionDrain } from "../services/executionDrain.js";
 
 const TERMINAL = new Set(["dismissed", "ignored", "resolved", "confirmed", "executed", "expired", "failed"]);
 
@@ -137,7 +138,9 @@ export function createProactiveNotificationScheduler({
     }
     return { queued, sent, externalSent, inAppDelivered, failed, deferred };
   }
-  async function tick() {
+  const execution = createExecutionDrain();
+  function tick() { return execution.run(executeTick); }
+  async function executeTick() {
     state.lastTickAt = date(clock).toISOString();
     state.lastStatus = "running"; state.lastError = null;
     try {
@@ -157,5 +160,5 @@ export function createProactiveNotificationScheduler({
     quietStart: `${String(quietStartHour).padStart(2,"0")}:${String(quietStartMinute).padStart(2,"0")}`,
     quietEnd: `${String(quietEndHour).padStart(2,"0")}:${String(quietEndMinute).padStart(2,"0")}`,
     hourlyLimit, dailyLimit, batchLimit, ...state }; }
-  return Object.freeze({ tick, start, stop, status });
+  return Object.freeze({ tick, start, stop, status, drain(options) { stop(); return execution.drain(options); } });
 }

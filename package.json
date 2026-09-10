@@ -1,6 +1,6 @@
 {
   "name": "sentelligent-sales-workbench",
-  "version": "0.12.3",
+  "version": "0.13.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -29,7 +29,7 @@
     "asr:cleanup": "node scripts/asr-runtime-cleanup.mjs",
     "smoke:production:asr": "node scripts/asr-production-smoke.mjs",
     "smoke:production:https": "node scripts/production-https-smoke.mjs",
-    "test:ai-platform": "npm --prefix ai-platform test && node --test backend/src/aiPlatform/client.test.js",
+    "test:ai-platform": "npm --prefix ai-platform test && node --test backend/src/aiPlatform/*.test.js && node --test scripts/ai-platform/*.test.mjs",
     "test:release": "node --test scripts/release-package.test.mjs scripts/production-preflight.test.mjs",
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
     "qa:full": "npm run test:deploy && npm run test:ai-platform && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration && npm --prefix outputs/product-design-prototype run qa:webkit"

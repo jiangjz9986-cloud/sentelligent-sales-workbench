@@ -973,7 +973,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
 
     assert.equal(received.response.status, 200, JSON.stringify(received.body));
-    assert.deepEqual(lastRecognitionOptions, { referenceDate: "2026-08-25" });
+    assert.equal(lastRecognitionOptions?.referenceDate, "2026-08-25");
     const draft = await leaseOutbox();
     assert.match(draft.item.message, /编号：202608201129/u);
     assert.match(draft.item.message, /金额：37\.10 元/u);
@@ -1314,7 +1314,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
 
     assert.equal(received.response.status, 200, JSON.stringify(received.body));
     assert.match(received.body.text, /发票已存入/u);
-    assert.deepEqual(lastRecognitionOptions, { referenceDate: "2026-08-25" });
+    assert.equal(lastRecognitionOptions?.referenceDate, "2026-08-25");
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM invoice_documents").get().count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 0);

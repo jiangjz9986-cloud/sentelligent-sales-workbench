@@ -674,7 +674,15 @@ export function createAssistantToolHandlers({
             fileName: media.fileName,
             mediaType: media.mediaType,
             buffer: content,
-          }, { referenceDate: shanghaiDate(receivedAt) }));
+          }, {
+            owner: context.owner,
+            actor: context.owner,
+            channel: context.channel,
+            subject: media.sourceRef
+              ? { type: "payment-proof", id: media.sourceRef }
+              : null,
+            referenceDate: shanghaiDate(receivedAt),
+          }));
         } catch {
           recognition = { extractedText: null, evidence: null, warnings: ["RECOGNITION_FAILED"], source: { provider: "rules", model: null } };
         }
@@ -715,7 +723,14 @@ export function createAssistantToolHandlers({
         let expenseAnalysis = null;
         if (rowText && typeof travelExpenseAnalyzer === "function") {
           try {
-            expenseAnalysis = await travelExpenseAnalyzer(rowText);
+            expenseAnalysis = await travelExpenseAnalyzer(rowText, {
+              owner: context.owner,
+              actor: context.owner,
+              channel: context.channel,
+              subject: media?.sourceRef
+                ? { type: "bookkeeping", id: `${media.sourceRef}:${row.index ?? 0}` }
+                : null,
+            });
           } catch {
             expenseAnalysis = { warnings: ["ANALYSIS_FAILED"], expense: null, source: { provider: "rules", model: null } };
           }
@@ -2683,6 +2698,12 @@ export function createAssistantToolHandlers({
           fileName: media.fileName,
           mediaType: media.mediaType,
           buffer: content,
+        }, {
+          owner: context.owner,
+          actor: context.owner,
+          subject: media.sourceRef
+            ? { type: "invoice", id: media.sourceRef }
+            : null,
         }));
       } catch {
         recognition = { status: "review_required", extractedText: null, warnings: ["RECOGNITION_FAILED"], conflicts: [], fields: {} };
@@ -2795,6 +2816,12 @@ export function createAssistantToolHandlers({
           fileName: media.fileName,
           mediaType: media.mediaType,
           buffer: content,
+        }, {
+          owner: context.owner,
+          actor: context.owner,
+          subject: media.sourceRef
+            ? { type: "payment-proof", id: media.sourceRef }
+            : null,
         }));
       } catch {
         recognition = { evidence: null, candidates: [], warnings: ["RECOGNITION_FAILED"] };

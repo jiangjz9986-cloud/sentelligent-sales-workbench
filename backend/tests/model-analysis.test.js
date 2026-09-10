@@ -19,6 +19,25 @@ function jsonResponse(body, status = 200) {
   };
 }
 
+function completionRuntime(responseFactory, calls = []) {
+  return {
+    enabled: () => true,
+    configured: () => true,
+    createCompletionClient(metadata) {
+      const call = { metadata };
+      calls.push(call);
+      return {
+        complete: async (request) => {
+          call.request = request;
+          return typeof responseFactory === "function"
+            ? responseFactory({ metadata, request, call })
+            : responseFactory;
+        },
+      };
+    },
+  };
+}
+
 function modelContent(overrides = {}) {
   return JSON.stringify({
     customer: {
@@ -62,13 +81,15 @@ function draftFixture(overrides = {}) {
 }
 
 function modelConfig(overrides = {}) {
+  const { aiPlatformRuntime, ...rest } = overrides;
   return {
     aiAnalysisMode: "model",
     modelProvider: "deepseek",
-    modelApiKey: "fixture",
-    modelBaseUrl: "https://api.deepseek.com/",
     modelName: "deepseek-v4-flash",
-    ...overrides,
+    ...rest,
+    aiPlatformRuntime: aiPlatformRuntime ?? completionRuntime(
+      () => jsonResponse({ choices: [{ message: { content: draftContent() } }] }),
+    ),
   };
 }
 
@@ -79,79 +100,67 @@ function modelDraftFetch(content = draftContent()) {
 }
 
 describe("model-backed quick record analysis", () => {
-  it("disables DeepSeek thinking for bounded structured extraction", async () => {
-    let requestBody;
+  it("allocates enough completion tokens and disables DeepSeek thinking for bounded extraction", async () => {
+    const calls = [];
     await analyzeQuickRecord("Validate the budget owner and decision chain.", {
       aiAnalysisMode: "model",
       modelProvider: "deepseek",
-      modelApiKey: "fixture",
-      modelName: "deepseek-v4-flash",
+      aiPlatformRuntime: completionRuntime(
+        () => jsonResponse({ choices: [{ message: { content: modelContent() } }] }),
+        calls,
+      ),
     }, {
-      fetchImpl: async (_url, options) => {
-        requestBody = JSON.parse(options.body);
-        return jsonResponse({
-          choices: [{ message: { content: modelContent() } }],
-        });
-      },
+      fetchImpl: async () => { throw new Error("must not call provider directly"); },
     });
 
-    assert.equal(requestBody.max_tokens, 3200);
-    assert.deepEqual(requestBody.thinking, { type: "disabled" });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].request.max_tokens, 3200);
+    assert.deepEqual(calls[0].request.thinking, { type: "disabled" });
   });
 
   it("omits the DeepSeek thinking extension for other providers", async () => {
-    let requestBody;
+    const calls = [];
     await analyzeQuickRecord("Validate the budget owner and decision chain.", {
       aiAnalysisMode: "model",
       modelProvider: "openai-compatible",
-      modelApiKey: "fixture",
-      modelBaseUrl: "https://model.example.test/v1",
       modelName: "fixture-model",
+      aiPlatformRuntime: completionRuntime(
+        () => jsonResponse({ choices: [{ message: { content: modelContent() } }] }),
+        calls,
+      ),
     }, {
-      fetchImpl: async (_url, options) => {
-        requestBody = JSON.parse(options.body);
-        return jsonResponse({
-          choices: [{ message: { content: modelContent() } }],
-        });
-      },
+      fetchImpl: async () => { throw new Error("must not call provider directly"); },
     });
 
-    assert.equal(requestBody.max_tokens, 3200);
-    assert.equal(Object.hasOwn(requestBody, "thinking"), false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].request.max_tokens, 3200);
+    assert.equal(Object.hasOwn(calls[0].request, "thinking"), false);
   });
 
-  it("calls an OpenAI-compatible JSON chat completion endpoint for model mode", async () => {
+  it("routes model mode through the AI Platform completion runtime", async () => {
     const calls = [];
     const result = await analyzeQuickRecord("日照中医医院需要十五五规划材料", {
       aiAnalysisMode: "model",
       modelProvider: "deepseek",
-      modelApiKey: "secret-model-key",
-      modelBaseUrl: "https://api.deepseek.com/",
-      modelName: "deepseek-v4-flash",
+      aiPlatformTargetModel: "gpt-5.6-luna",
+      aiPlatformRuntime: completionRuntime(
+        () => jsonResponse({ choices: [{ message: { content: modelContent() } }] }),
+        calls,
+      ),
     }, {
-      fetchImpl: async (url, options) => {
-        calls.push({ url, options });
-        return jsonResponse({
-          choices: [
-            {
-              message: {
-                content: modelContent(),
-              },
-            },
-          ],
-        });
-      },
+      fetchImpl: async () => { throw new Error("must not call provider directly"); },
     });
 
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "https://api.deepseek.com/chat/completions");
-    assert.equal(calls[0].options.headers.Authorization, "Bearer secret-model-key");
-    const body = JSON.parse(calls[0].options.body);
-    assert.equal(body.model, "deepseek-v4-flash");
-    assert.deepEqual(body.response_format, { type: "json_object" });
-    assert.deepEqual(body.thinking, { type: "disabled" });
-    assert.equal(body.stream, false);
-    assert.ok(body.messages.some((message) => /json/i.test(message.content)));
+    assert.equal(calls[0].metadata.taskType, "quick-record.analyze");
+    assert.equal(calls[0].metadata.feature, "quick_record_analysis");
+    assert.equal(calls[0].metadata.channel, "web");
+    assert.equal(calls[0].metadata.owner, "sentelligent-sales-workbench");
+    assert.equal(calls[0].request.model, "gpt-5.6-luna");
+    assert.deepEqual(calls[0].request.response_format, { type: "json_object" });
+    assert.deepEqual(calls[0].request.thinking, { type: "disabled" });
+    assert.equal(calls[0].request.stream, false);
+    assert.ok(calls[0].request.messages.some((message) => /json/i.test(message.content)));
 
     assert.equal(result.source, "deepseek");
     assert.equal(result.customer.id, "rizhao");
@@ -183,13 +192,12 @@ describe("model-backed quick record analysis", () => {
     const result = await analyzeQuickRecord("日照中医医院需要移动云双活方案", {
       aiAnalysisMode: "model",
       modelProvider: "deepseek",
-      modelApiKey: "fixture",
-      modelName: "deepseek-v4-flash",
+      aiPlatformRuntime: completionRuntime(
+        () => jsonResponse({ choices: [{ message: { content: modelContent() } }] }),
+        calls,
+      ),
     }, {
-      fetchImpl: async (url, options) => {
-        calls.push({ url, options });
-        return jsonResponse({ choices: [{ message: { content: modelContent() } }] });
-      },
+      fetchImpl: async () => { throw new Error("must not call provider directly"); },
       knowledgeItems: [
         { id: "kn-mobile-cloud", title: "移动云双活方案要点", summary: "双活机房与计费策略。" },
         { id: "kn-hospital-case", title: "医院行业成功案例", summary: "地市医院上云案例。" },
@@ -197,7 +205,7 @@ describe("model-backed quick record analysis", () => {
     });
 
     assert.equal(calls.length, 1);
-    const body = JSON.parse(calls[0].options.body);
+    const body = calls[0].request;
     const systemMessage = body.messages.find((message) => message.role === "system");
     assert.match(systemMessage.content, /知识库条目/);
     assert.match(systemMessage.content, /kn-mobile-cloud/);
@@ -263,26 +271,22 @@ describe("model-backed itinerary ordering", () => {
     const result = await enhanceItineraryOrderWithModel(fallback, context, {
       aiAnalysisMode: "model",
       modelProvider: "deepseek",
-      modelApiKey: "fixture",
-      modelBaseUrl: "https://api.deepseek.com/",
-      modelName: "deepseek-v4-flash",
-      modelTimeoutMs: 5000,
-    }, {
-      fetchImpl: async (url, options) => {
-        calls.push({ url, options });
-        return jsonResponse({
+      aiPlatformRuntime: completionRuntime(
+        () => jsonResponse({
           choices: [{ message: { content: JSON.stringify({
             orderedStopIds: ["customer-b", "customer-a"],
             summary: "优先处理重点客户，再沿返程方向拜访客户甲。",
             advice: ["提前确认停车入口", "预留十分钟签到"],
           }) } }],
-        });
-      },
+        }),
+        calls,
+      ),
+    }, {
+      fetchImpl: async () => { throw new Error("must not call provider directly"); },
     });
 
     assert.equal(calls.length, 1);
-    const body = JSON.parse(calls[0].options.body);
-    assert.equal(body.model, "deepseek-v4-flash");
+    const body = calls[0].request;
     assert.deepEqual(body.response_format, { type: "json_object" });
     assert.match(JSON.stringify(body.messages), /customer-a/);
     assert.deepEqual(result, {
@@ -306,14 +310,15 @@ describe("model-backed itinerary ordering", () => {
         aiAnalysisMode: "model",
         modelProvider: "deepseek",
         modelApiKey: "model-key",
-      }, {
-        fetchImpl: async () => jsonResponse({
+        aiPlatformRuntime: completionRuntime(() => jsonResponse({
           choices: [{ message: { content: JSON.stringify({
             orderedStopIds,
             summary: "无效顺序",
             advice: [],
           }) } }],
-        }),
+        })),
+      }, {
+        fetchImpl: async () => { throw new Error("must not call provider directly"); },
       });
       assert.equal(result.source, "fallback");
       assert.equal(result.fallbackReason, "itinerary_order_model_failure");
@@ -373,25 +378,24 @@ describe("model provenance for drafts and suggestions", () => {
   };
 
   it("marks direct weekly enhancement as model-generated on valid output", async () => {
-    let requestBody;
+    const calls = [];
     const result = await enhanceWeeklyDraftWithModel(
       draftFixture(),
       weeklyContext,
-      modelConfig(),
-      {
-        fetchImpl: async (_url, options) => {
-          requestBody = JSON.parse(options.body);
-          return jsonResponse({
-            choices: [{ message: { content: draftContent("# 周报模型正文") } }],
-          });
-        },
-      },
+      modelConfig({
+        aiPlatformRuntime: completionRuntime(
+          () => jsonResponse({ choices: [{ message: { content: draftContent("# 周报模型正文") } }] }),
+          calls,
+        ),
+      }),
+      { fetchImpl: async () => { throw new Error("must not call provider directly"); } },
     );
 
     assert.equal(result.content, "# 周报模型正文");
     assert.equal(result.source, "deepseek");
     assert.equal(result.fallbackReason, null);
-    assert.equal(Object.hasOwn(requestBody, "thinking"), false);
+    assert.equal(calls.length, 1);
+    assert.equal(Object.hasOwn(calls[0].request, "thinking"), false);
   });
 
   it("marks weekly and solution drafts as deterministic when model mode is disabled", async () => {
@@ -434,12 +438,36 @@ describe("model provenance for drafts and suggestions", () => {
     );
   });
 
+  it("keeps the disabled solution Agent off the model path even when a platform is available", async () => {
+    const calls = [];
+    const result = await enhanceSolutionDraftWithModel(
+      draftFixture(),
+      solutionContext,
+      modelConfig({
+        aiPlatformRuntime: completionRuntime(
+          () => jsonResponse({ choices: [{ message: { content: draftContent("must not be used") } }] }),
+          calls,
+        ),
+      }),
+      { fetchImpl: async () => { throw new Error("must not call legacy provider"); } },
+    );
+
+    assert.equal(calls.length, 0);
+    assert.equal(result.source, "fallback");
+    assert.equal(result.fallbackReason, "solution_draft_agent_disabled");
+    assert.equal(result.content, draftFixture().content);
+  });
+
   it("keeps the legacy weekly failure reason for an otherwise unclassified provider error", async () => {
     const result = await enhanceWeeklyDraftWithModel(
       draftFixture(),
       weeklyContext,
-      modelConfig(),
-      { fetchImpl: async () => { throw new Error("provider unavailable"); } },
+      modelConfig({
+        aiPlatformRuntime: completionRuntime(() => {
+          throw new Error("provider unavailable");
+        }),
+      }),
+      { fetchImpl: async () => { throw new Error("must not call provider directly"); } },
     );
 
     assert.equal(result.source, "fallback");
@@ -448,27 +476,34 @@ describe("model provenance for drafts and suggestions", () => {
   });
 
   it("attributes invalid JSON, timeout, and network failures without exposing provider errors", async () => {
-    const invalidJson = await enhanceSolutionDraftWithModel(
+    const invalidJson = await enhanceWeeklyDraftWithModel(
       draftFixture(),
-      solutionContext,
-      modelConfig(),
-      { fetchImpl: modelDraftFetch("{not-json") },
+      weeklyContext,
+      modelConfig({
+        aiPlatformRuntime: completionRuntime(() => jsonResponse({
+          choices: [{ message: { content: "{not-json" } }],
+        })),
+      }),
     );
     const timeoutError = Object.assign(new Error("upstream deadline exceeded"), { name: "TimeoutError" });
     const timeout = await generateManualSuggestion(
       manualInput,
-      modelConfig(),
-      { fetchImpl: async () => { throw timeoutError; } },
+      modelConfig({
+        aiPlatformRuntime: completionRuntime(() => { throw timeoutError; }),
+      }),
     );
     const network = await enhanceWeeklyDraftWithModel(
       draftFixture(),
       weeklyContext,
-      modelConfig(),
-      { fetchImpl: async () => { throw Object.assign(new Error("fetch failed"), { code: "ECONNRESET" }); } },
+      modelConfig({
+        aiPlatformRuntime: completionRuntime(() => {
+          throw Object.assign(new Error("fetch failed"), { code: "ECONNRESET" });
+        }),
+      }),
     );
 
     assert.equal(invalidJson.source, "fallback");
-    assert.equal(invalidJson.fallbackReason, "solution_draft_invalid_json");
+    assert.equal(invalidJson.fallbackReason, "weekly_draft_invalid_json");
     assert.equal(timeout.source, "fallback");
     assert.equal(timeout.fallbackReason, "manual_suggestion_timeout");
     assert.equal(network.source, "fallback");
@@ -489,13 +524,17 @@ describe("model provenance for drafts and suggestions", () => {
     const result = await enhanceItineraryOrderWithModel(
       fallback,
       context,
-      modelConfig(),
-      {
-        fetchImpl: modelDraftFetch(JSON.stringify({
-          orderedStopIds: ["customer-a", "customer-a"],
-          summary: "重复停靠点",
-          advice: [],
+      modelConfig({
+        aiPlatformRuntime: completionRuntime(() => jsonResponse({
+          choices: [{ message: { content: JSON.stringify({
+            orderedStopIds: ["customer-a", "customer-a"],
+            summary: "重复停靠点",
+            advice: [],
+          }) } }],
         })),
+      }),
+      {
+        fetchImpl: async () => { throw new Error("must not call provider directly"); },
       },
     );
 

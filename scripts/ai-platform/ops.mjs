@@ -1293,6 +1293,10 @@ function printError(error, format) {
 async function run(parsed) {
   const context = await resolveCommandContext(parsed);
   const { config, runtime } = context;
+  if (config.database.startsWith("/var/lib/sentelligent-ai-platform/")
+    && ["start", "stop", "restore", "status", "health"].includes(parsed.command)) {
+    fail("production_control_required", "Production service changes require the systemd transition tool");
+  }
   if (parsed.command === "start") return { value: await startCommand({ ...config, force: parsed.options.force === true }), config };
   if (parsed.command === "stop") return { value: await stopCommand({ ...config, force: parsed.options.force === true }), config };
   if (parsed.command === "status") return { value: await statusCommand(config, runtime), config };

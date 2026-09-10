@@ -113,6 +113,16 @@ test("members only see the change-password card in the security section", async 
   assert.match(shellSource, /<SystemSettingsPage[\s\S]*?role=\{authSession\?\.role \?\? "member"\}/);
 });
 
+test("admin AI platform entry uses the shared accessible button treatment", async () => {
+  const source = await readFile(pagePath, "utf8");
+
+  assert.match(
+    source,
+    /<a href="\/api\/ai-platform\/console\/"[\s\S]*className="ghost-button"[\s\S]*>\s*<ExternalLink/,
+  );
+  assert.doesNotMatch(source, /className="button secondary"/);
+});
+
 test("grouped settings navigation and controls keep responsive accessible styling", async () => {
   const styles = await readFile(stylesPath, "utf8");
 

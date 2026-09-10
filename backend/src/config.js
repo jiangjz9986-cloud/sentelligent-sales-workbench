@@ -4,6 +4,14 @@ import { isAbsolute, resolve } from "node:path";
 import { ASR_CONFIG_DEFAULTS, ASR_LIMITS } from "./asr/contracts.js";
 import { validatePasswordHashEncoding } from "./auth/password.js";
 import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
+import { normalizeAiRoutingPolicy } from "./aiPlatform/routingPolicy.js";
+import { PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
+import {
+  AI_EXECUTION_MODE,
+  AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
+  AI_TARGET_MODEL,
+  AI_TARGET_REASONING_EFFORT,
+} from "../../shared/aiPlatformContract.mjs";
 
 export const MODEL_TIMEOUT_MS_MAX = 120_000;
 export const PROACTIVE_ASSISTANT_INTERVAL_SECONDS_MAX = 24 * 60 * 60;
@@ -12,6 +20,14 @@ export const PROACTIVE_ASSISTANT_POLL_MS_MAX = 24 * 60 * 60 * 1000;
 export const PROACTIVE_ASSISTANT_MODEL_CACHE_TTL_MS_MAX = 30 * 24 * 60 * 60 * 1000;
 export const PROACTIVE_ASSISTANT_MODEL_OWNER_DAILY_LIMIT_MAX = 1_000_000;
 export const PROACTIVE_ASSISTANT_MODEL_GLOBAL_DAILY_LIMIT_MAX = 10_000_000;
+export const AI_PLATFORM_TIMEOUT_MS_MAX = 10 * 60 * 1000;
+export const AI_PLATFORM_MAX_WAIT_MS_MAX = 10 * 60 * 1000;
+export const AI_PLATFORM_POLL_MS_MAX = 30_000;
+
+const AI_PLATFORM_MODES = new Set(["disabled", "optional", "required"]);
+const AI_PLATFORM_EXECUTION_MODES = new Set(["local-simulated", "external-provider"]);
+const AI_PLATFORM_LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const AI_PLATFORM_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 
 export function loadEnvFile(filePath = resolve(process.cwd(), ".env")) {
   if (!existsSync(filePath)) return {};
@@ -165,6 +181,88 @@ function modelIdentifierValue(value, fallback, name) {
     throw new Error(`${name} must be a bounded model identifier`);
   }
   return normalized;
+}
+
+function aiPlatformModeValue(value, fallback = "disabled") {
+  const candidate = value === undefined || value === null || value === ""
+    ? fallback
+    : String(value).trim().toLowerCase();
+  if (!AI_PLATFORM_MODES.has(candidate)) {
+    throw new Error("AI_PLATFORM_MODE must be disabled, optional, or required");
+  }
+  return candidate;
+}
+
+function boundedSecretValue(value, name) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string" || value !== value.trim() || value.length > 4_000
+    || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)) {
+    throw new Error(`${name} must be a bounded secret`);
+  }
+  return value;
+}
+
+function aiPlatformBaseUrlValue(value, { nodeEnv, allowAiPlatformTestLoopbackHttp = false } = {}) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string" || value !== value.trim() || value.length > 2_048
+    || /[\u0000-\u0020\u007f-\u009f\u2028\u2029]/u.test(value)) {
+    throw new Error("AI_PLATFORM_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("AI_PLATFORM_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol)
+    || !url.hostname
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) {
+    throw new Error("AI_PLATFORM_BASE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment");
+  }
+  const loopback = AI_PLATFORM_LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
+  const testLoopback = nodeEnv === "test" && allowAiPlatformTestLoopbackHttp && loopback;
+  if (url.protocol !== "https:" && !loopback && !testLoopback) {
+    throw new Error("AI_PLATFORM_BASE_URL must use https unless it targets a loopback host");
+  }
+  return value;
+}
+
+function aiPlatformIssuerValue(value, fallback, name) {
+  return modelIdentifierValue(value, fallback, name);
+}
+
+function aiPlatformReasoningEffortValue(value, fallback = "max") {
+  const normalized = String(value ?? fallback).trim().toLowerCase();
+  if (!AI_PLATFORM_REASONING_EFFORTS.has(normalized)) {
+    throw new Error("AI_PLATFORM_TARGET_REASONING_EFFORT is invalid");
+  }
+  return normalized;
+}
+
+function aiPlatformFixedTargetValue(value, expected, name, max = 200) {
+  const normalized = String(value ?? expected).trim();
+  if (normalized !== expected || normalized.length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)) {
+    throw new Error(`${name} must be ${expected}`);
+  }
+  return expected;
+}
+
+function aiPlatformExecutionModeValue(value, fallback = AI_EXECUTION_MODE) {
+  const normalized = String(value ?? fallback).trim().toLowerCase();
+  if (!AI_PLATFORM_EXECUTION_MODES.has(normalized)) {
+    throw new Error("AI_PLATFORM_EXECUTION_MODE is invalid");
+  }
+  return normalized;
+}
+
+function aiPlatformPollValue(value, fallback, name, max) {
+  const candidate = value === undefined || value === null || value === "" ? fallback : value;
+  return boundedPositiveInteger(candidate, name, max);
 }
 
 function asrEnumValue(value, fallback, name, allowed) {
@@ -359,6 +457,8 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
     config.settingsEncryptionKey,
     config.weixinAgentApiToken,
     config.assistantConfirmationSecret,
+    config.aiPlatformAuthSecret,
+    ...(config.aiPlatformAuthToken ? [config.aiPlatformAuthToken] : []),
     ...(config.hospitalTenderSyncToken ? [config.hospitalTenderSyncToken] : []),
     ...(config.opsAlertToken ? [config.opsAlertToken] : []),
   ];
@@ -369,11 +469,37 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!explicitAllowedOrigins || config.corsAllowedOrigins.length === 0) {
     throw new Error("CORS_ALLOWED_ORIGINS is required in production");
   }
+  if (config.aiPlatformRoutingPolicy?.phase === "legacy") {
+    if (config.aiPlatformMode !== "disabled") throw new Error("legacy AI routing requires AI_PLATFORM_MODE=disabled");
+    return;
+  }
+  if (config.aiPlatformMode !== "required") {
+    throw new Error("AI_PLATFORM_MODE must be required in production");
+  }
+  if (!config.aiPlatformBaseUrl) {
+    throw new Error("AI_PLATFORM_BASE_URL is required in production");
+  }
+  if (!config.aiPlatformAuthSecret || !isStrongIndependentSecret(config.aiPlatformAuthSecret)) {
+    throw new Error("AI_PLATFORM_AUTH_SECRET must contain at least 32 bytes of high-entropy data in production");
+  }
+  if (config.aiPlatformAuthToken && !isStrongIndependentSecret(config.aiPlatformAuthToken)) {
+    throw new Error("AI_PLATFORM_AUTH_TOKEN must contain at least 32 bytes of high-entropy data in production");
+  }
+  if (config.aiPlatformTargetModel !== "gpt-5.6-luna") {
+    throw new Error("AI_PLATFORM_TARGET_MODEL must be gpt-5.6-luna in production");
+  }
+  if (config.aiPlatformTargetReasoningEffort !== "max") {
+    throw new Error("AI_PLATFORM_TARGET_REASONING_EFFORT must be max in production");
+  }
 }
 
 export function loadConfig(
   overrides = {},
-  { allowAsrTestLoopbackHttp = false, allowModelTestLoopbackHttp = false } = {},
+  {
+    allowAiPlatformTestLoopbackHttp = false,
+    allowAsrTestLoopbackHttp = false,
+    allowModelTestLoopbackHttp = false,
+  } = {},
 ) {
   const envFile = loadEnvFile(overrides.envFile);
   const env = { ...envFile, ...process.env, ...overrides };
@@ -597,6 +723,84 @@ export function loadConfig(
   const aiAnalysisMode = aiAnalysisModeValue(
     env.aiAnalysisMode !== undefined ? env.aiAnalysisMode : env.AI_ANALYSIS_MODE,
   );
+  const aiPlatformMode = aiPlatformModeValue(
+    env.aiPlatformMode !== undefined ? env.aiPlatformMode : env.AI_PLATFORM_MODE,
+  );
+  const aiPlatformBaseUrl = aiPlatformBaseUrlValue(
+    env.aiPlatformBaseUrl !== undefined ? env.aiPlatformBaseUrl : env.AI_PLATFORM_BASE_URL,
+    { nodeEnv, allowAiPlatformTestLoopbackHttp },
+  );
+  const aiPlatformAuthToken = boundedSecretValue(
+    env.aiPlatformAuthToken ?? env.AI_PLATFORM_AUTH_TOKEN,
+    "AI_PLATFORM_AUTH_TOKEN",
+  );
+  const aiPlatformAuthSecret = boundedSecretValue(
+    env.aiPlatformAuthSecret ?? env.AI_PLATFORM_AUTH_SECRET,
+    "AI_PLATFORM_AUTH_SECRET",
+  );
+  const aiPlatformTargetModel = aiPlatformFixedTargetValue(
+    env.aiPlatformTargetModel ?? env.AI_PLATFORM_TARGET_MODEL,
+    AI_TARGET_MODEL,
+    "AI_PLATFORM_TARGET_MODEL",
+  );
+  const aiPlatformTargetReasoningEffort = aiPlatformFixedTargetValue(
+    env.aiPlatformTargetReasoningEffort ?? env.AI_PLATFORM_TARGET_REASONING_EFFORT,
+    AI_TARGET_REASONING_EFFORT,
+    "AI_PLATFORM_TARGET_REASONING_EFFORT",
+  );
+  const aiPlatformExecutionMode = aiPlatformExecutionModeValue(
+    env.aiPlatformExecutionMode ?? env.AI_PLATFORM_EXECUTION_MODE,
+  );
+  const aiPlatformProactiveScheduleOwner = aiPlatformFixedTargetValue(
+    env.aiPlatformProactiveScheduleOwner ?? env.AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
+    AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
+    "AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER",
+    40,
+  );
+  const aiPlatformIssuer = aiPlatformIssuerValue(
+    env.aiPlatformIssuer ?? env.AI_PLATFORM_ISSUER,
+    "sentelligent-sales-backend",
+    "AI_PLATFORM_ISSUER",
+  );
+  const aiPlatformSubject = aiPlatformIssuerValue(
+    env.aiPlatformSubject ?? env.AI_PLATFORM_SUBJECT,
+    "sentelligent-backend",
+    "AI_PLATFORM_SUBJECT",
+  );
+  const aiPlatformOwner = [
+    env.aiPlatformOwner,
+    env.AI_PLATFORM_OWNER,
+    env.authAccount,
+    env.AUTH_ACCOUNT,
+    "sentelligent-sales-workbench",
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find(Boolean) ?? "";
+  if (!aiPlatformOwner || aiPlatformOwner.length > 400 || /[\u0000-\u001f\u007f-\u009f]/u.test(aiPlatformOwner)) {
+    throw new Error("AI_PLATFORM_OWNER is invalid");
+  }
+  const aiPlatformTimeoutMs = boundedPositiveInteger(
+    env.aiPlatformTimeoutMs ?? env.AI_PLATFORM_TIMEOUT_MS ?? 30_000,
+    "AI_PLATFORM_TIMEOUT_MS",
+    AI_PLATFORM_TIMEOUT_MS_MAX,
+  );
+  const aiPlatformRequestTimeoutMs = boundedPositiveInteger(
+    env.aiPlatformRequestTimeoutMs ?? env.AI_PLATFORM_REQUEST_TIMEOUT_MS ?? aiPlatformTimeoutMs,
+    "AI_PLATFORM_REQUEST_TIMEOUT_MS",
+    AI_PLATFORM_TIMEOUT_MS_MAX,
+  );
+  const aiPlatformMaxWaitMs = aiPlatformPollValue(
+    env.aiPlatformMaxWaitMs ?? env.AI_PLATFORM_MAX_WAIT_MS,
+    30_000,
+    "AI_PLATFORM_MAX_WAIT_MS",
+    AI_PLATFORM_MAX_WAIT_MS_MAX,
+  );
+  const aiPlatformPollMs = aiPlatformPollValue(
+    env.aiPlatformPollMs ?? env.AI_PLATFORM_POLL_MS,
+    250,
+    "AI_PLATFORM_POLL_MS",
+    AI_PLATFORM_POLL_MS_MAX,
+  );
   const modelBaseUrl = modelBaseUrlValue(
     env.modelBaseUrl !== undefined
       ? env.modelBaseUrl
@@ -612,6 +816,24 @@ export function loadConfig(
     port: Number(env.port ?? env.PORT ?? 8787),
     databaseUrl: env.databaseUrl ?? env.DATABASE_URL ?? "./data/sales-workbench.sqlite",
     aiAnalysisMode,
+    aiPlatformMode,
+    aiPlatformSocketPath: env.aiPlatformSocketPath ?? env.AI_PLATFORM_SOCKET_PATH
+      ?? (nodeEnv === "production" && aiPlatformBaseUrl?.startsWith("http://127.0.0.1") ? PRODUCTION_AI_SOCKET : null),
+    aiPlatformRoutingPolicy: normalizeAiRoutingPolicy(env.aiPlatformRoutingPolicy ?? env.AI_PLATFORM_ROUTING_POLICY),
+    aiPlatformBaseUrl,
+    aiPlatformAuthToken,
+    aiPlatformAuthSecret,
+    aiPlatformIssuer,
+    aiPlatformSubject,
+    aiPlatformOwner,
+    aiPlatformTargetModel,
+    aiPlatformTargetReasoningEffort,
+    aiPlatformExecutionMode,
+    aiPlatformProactiveScheduleOwner,
+    aiPlatformTimeoutMs,
+    aiPlatformRequestTimeoutMs,
+    aiPlatformMaxWaitMs,
+    aiPlatformPollMs,
     modelProvider: env.modelProvider ?? env.MODEL_PROVIDER ?? "deepseek",
     modelApiKey: env.modelApiKey ?? env.MODEL_API_KEY ?? env.DEEPSEEK_API_KEY ?? "",
     modelBaseUrl,

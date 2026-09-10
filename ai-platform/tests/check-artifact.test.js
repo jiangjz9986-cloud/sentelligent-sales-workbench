@@ -30,6 +30,37 @@ function createArchive(root, archivePath) {
 }
 
 describe("AI platform artifact name boundary", () => {
+  it("allows dependency runtime helpers but rejects project runtime state", () => {
+    const safeRoot = mkdtempSync(join(tmpdir(), "ai-platform-artifact-dependency-runtime-"));
+    try {
+      writeEntry(safeRoot, "node_modules/ajv/dist/runtime/equal.d.ts");
+      assert.equal(runChecker(safeRoot).status, 0);
+    } finally {
+      rmSync(safeRoot, { recursive: true, force: true });
+    }
+
+    for (const relativePath of [
+      "runtime/state.json",
+      ".runtime/state.json",
+      "src/runtime/state.json",
+      "data/sales.sqlite",
+      "config/service.pem",
+    ]) {
+      const unsafeRoot = mkdtempSync(join(tmpdir(), "ai-platform-artifact-project-state-"));
+      try {
+        writeEntry(unsafeRoot, relativePath);
+        const rejected = runChecker(unsafeRoot);
+        assert.notEqual(rejected.status, 0, relativePath);
+        assert.match(
+          `${rejected.stdout}\n${rejected.stderr}`,
+          /ARTIFACT_CHECK_STATUS=failed\nARTIFACT_CHECK_ERROR=forbidden runtime or secret-like artifact member:/u,
+        );
+      } finally {
+        rmSync(unsafeRoot, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("allows source filenames containing token while rejecting credential artifacts", () => {
     const root = mkdtempSync(join(tmpdir(), "ai-platform-artifact-safe-"));
     try {

@@ -1,15 +1,20 @@
 import {
   AiContractError,
   AI_TASK_STATUSES,
+  AI_TASK_TYPES,
   AI_TASK_TERMINAL_STATUSES,
   normalizeTaskCreate,
   normalizeTaskResult,
-  publicTaskShape,
+  publicTaskShape as rawPublicTaskShape,
   sha256,
   stableJson,
 } from "../../../shared/aiPlatformContract.mjs";
 import { reserveBudget, releaseBudget, settleBudget, calculateCostMicro, estimateUsage } from "../budgets/ledger.js";
 import { AiPlatformError } from "../errors.js";
+import { readOperationalControl } from "../operations/control.js";
+import { priceAtAttempt } from "../budgets/priceCalendar.js";
+import { assertAgentSchema } from "./schemaValidation.js";
+import { createTaskPayloadCodec } from "./payloadCodec.js";
 import { id, iso, safeLimit, safeOffset, stringify, withImmediateTransaction } from "../utils.js";
 
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/u;
@@ -107,16 +112,17 @@ function executionLimits(agentVersion, config) {
   const limits = parseObject(agentVersion.limits_json, {});
   return {
     maxTokens: safePositiveInteger(limits.maxTokens, 1_000, 100_000),
+    maxInputTokens: safePositiveInteger(limits.maxInputTokens, 0, 2_000_000),
     maxSteps: safePositiveInteger(limits.maxSteps, 8, 100),
     maxAttempts: safePositiveInteger(limits.maxAttempts, 2, 3),
     timeoutMs: Math.min(
       safePositiveInteger(limits.timeoutMs, config.taskLeaseMs, 10 * 60_000),
-      config.taskLeaseMs,
+      config.taskTimeoutMaxMs ?? 10 * 60_000,
     ),
   };
 }
 
-function standardDigest(db, standardIds) {
+function standardVersions(db, standardIds) {
   const ids = [...new Set(standardIds.map(String))].sort();
   const versions = ids.map((standardId) => {
     const row = db.prepare(`
@@ -138,7 +144,11 @@ function standardDigest(db, standardIds) {
       rules: parseObject(row.rules_json, {}),
     };
   });
-  return sha256(versions);
+  return versions;
+}
+
+function standardDigest(db, standardIds) {
+  return sha256(standardVersions(db, standardIds));
 }
 
 function activeAgentForTask(db, taskType) {
@@ -214,6 +224,9 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
     throw new AiPlatformError("AI model or provider is disabled", { code: "provider_disabled", status: 503 });
   }
   const externalModel = model.provider_kind !== "mock";
+  if (!externalModel && config.nodeEnv === "production" && config.executionMode === "external-provider") {
+    throw new AiPlatformError("simulation is not permitted for production tasks", { code: "provider_policy_blocked", status: 503 });
+  }
   if (externalModel && config.executionMode !== "external-provider") {
     throw new AiPlatformError("external AI execution is disabled by execution mode", {
       code: "provider_policy_blocked",
@@ -250,6 +263,7 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
 function taskView(row) {
   return {
     id: row.id,
+    owner: row.owner,
     requestId: row.request_id,
     taskType: row.task_type,
     feature: row.feature,
@@ -272,6 +286,8 @@ function agentView(row) {
     taskTypes: parseArray(row.task_types_json),
     systemPrompt: row.system_prompt,
     instructions: parseObject(row.instructions_json, {}),
+    inputSchema: parseObject(row.input_schema_json, {}),
+    outputSchema: parseObject(row.output_schema_json, {}),
     tools: parseArray(row.tools_json),
     modelPolicy: parseObject(row.model_policy_json, {}),
     limits: parseObject(row.limits_json, {}),
@@ -336,14 +352,23 @@ function chargeForUsage(usage, price) {
 
 function estimatedCharge(input, limits, price) {
   const usage = estimateUsage({ input, maxTokens: limits.maxTokens });
+  const media = input?.input?.media;
+  if (media && media.mediaType !== "audio/wav") {
+    usage.inputTokens = Math.max(usage.inputTokens, limits.maxInputTokens);
+    if (media.mediaType === "application/pdf") usage.imagePages = 4;
+  } else if (media?.mediaType === "audio/wav") {
+    usage.inputTokens = 0;
+    usage.outputTokens = 0;
+  }
   const charge = chargeForUsage(usage, price);
   return { usage, charge };
 }
 
-function terminalResult(row) {
+function terminalResult(row, decodeRow) {
+  const decoded = decodeRow(row);
   return {
-    task: publicTaskShape(row),
-    result: parseJson(row.output_json, null),
+    task: rawPublicTaskShape(decoded),
+    result: parseJson(decoded.output_json, null),
   };
 }
 
@@ -355,7 +380,7 @@ function sumTaskCharges(db, taskId) {
      WHERE task_id = $taskId
   `).get({ $taskId: taskId });
   const reservation = db.prepare(`
-    SELECT COALESCE(SUM(reserved_micro), 0) AS reserved_micro
+    SELECT COALESCE(MAX(reserved_micro), 0) AS reserved_micro
       FROM budget_reservations
      WHERE task_id = $taskId
   `).get({ $taskId: taskId });
@@ -425,7 +450,7 @@ function markAttemptUnknown(db, task, attempt, at, code = "lease_expired") {
   });
   insertUsageLedger(db, {
     task,
-    attempt: { ...attempt, currency: "USD" },
+    attempt,
     usage: {},
     charge: { costMicro: 0, functionFeeMicro: 0, feeStatus: "not_configured" },
     costStatus: "unknown",
@@ -443,15 +468,20 @@ export function createTaskService({
   db,
   config,
   providerRegistry,
+  mediaStore = null,
+  payloadCodec = createTaskPayloadCodec(),
   clock = () => new Date(),
   logger = console,
 } = {}) {
   if (!db || !config || !providerRegistry) throw new TypeError("db, config and providerRegistry are required");
   const activeExecutions = new Map();
+  const publicTaskShape = (row) => rawPublicTaskShape(payloadCodec.decodeRow(row, { includeInput: false }));
+  let lastPayloadSweepAt = 0;
   let pumpTimer = null;
   let pumpPromise = null;
   let runPromise = null;
   let closed = false;
+  let paused = config.taskAdmissionEnabled === false;
 
   function now() {
     return iso(clock);
@@ -461,7 +491,10 @@ export function createTaskService({
     const auth = normalizedIdentity(identity);
     const key = normalizeIdempotencyKey(idempotencyKey);
     const normalized = normalizeTaskCreate(request);
-    const requestHash = sha256({ issuer: auth.issuer, owner: auth.owner, task: normalized });
+    const mediaRef = normalized.input.mediaRef;
+    const hashedInput = { ...normalized.input };
+    if (mediaRef !== undefined) delete hashedInput.mediaRef;
+    const requestHash = sha256({ issuer: auth.issuer, owner: auth.owner, task: { ...normalized, input: hashedInput } });
     const requestedAt = now();
     const existing = db.prepare(`
       SELECT * FROM tasks
@@ -485,12 +518,24 @@ export function createTaskService({
       };
     }
 
+    if (paused || closed || readOperationalControl(db).paused) {
+      throw new AiPlatformError("AI platform is draining", { code: "service_draining", status: 503 });
+    }
     const execution = resolveExecutionConfiguration(db, {
       taskType: normalized.taskType,
       at: requestedAt,
       config,
     });
-    const estimate = estimatedCharge(normalized.input, execution.limits, execution.price);
+    if (normalized.input.media && execution.model.provider_kind === "vision" && execution.limits.maxInputTokens < 1) {
+      throw new AiPlatformError("vision input budget is not configured", { code: "budget_not_configured", status: 503 });
+    }
+    assertAgentSchema(normalized.input, parseObject(execution.agentVersion.input_schema_json, {}), "input");
+    const estimate = estimatedCharge({
+      input: normalized.input,
+      systemPrompt: execution.agentVersion.system_prompt,
+      instructions: execution.agentVersion.instructions_json,
+      standards: standardVersions(db, execution.standardIds),
+    }, execution.limits, execution.price);
     // One task owns one budget reservation across its bounded retry window.
     // Reserve the per-attempt upper bound up front so a retry cannot bypass
     // an amount limit; each provider attempt remains separately ledgered.
@@ -524,6 +569,9 @@ export function createTaskService({
           standardDigest: race.standard_digest,
         };
       }
+      if (readOperationalControl(db).paused) {
+        throw new AiPlatformError("AI platform is draining", { code: "service_draining", status: 503 });
+      }
       const queuedCount = db.prepare(`
         SELECT COUNT(*) AS count FROM tasks WHERE status = 'queued'
       `).get();
@@ -554,7 +602,7 @@ export function createTaskService({
         $subjectType: subjectType,
         $subjectId: subjectId,
         $priority: normalized.priority,
-        $inputJson: inputJson,
+        $inputJson: payloadCodec.encode(inputJson, { id: taskId, owner: auth.owner }, "input"),
         $evidenceDigest: normalized.evidenceDigest,
         $requestHash: requestHash,
         $idempotencyKey: key,
@@ -564,12 +612,18 @@ export function createTaskService({
         $requestedAt: requestedAt,
         $updatedAt: requestedAt,
       });
+      if (mediaRef !== undefined) {
+        if (!mediaStore) throw new AiPlatformError("media storage unavailable", { code: "media_unavailable", status: 503 });
+        mediaStore.bind({ id: mediaRef, owner: auth.owner, taskId, descriptor: normalized.input.media });
+      }
       reserveBudget(db, {
         taskId,
         owner: auth.owner,
         feature: normalized.feature,
         agentId: execution.agentVersion.agent_id,
         estimatedCostMicro: reservedCostMicro,
+        currency: execution.price?.currency ?? null,
+        requirePolicy: execution.model.provider_kind !== "mock",
         at: new Date(requestedAt),
       });
       emitEvent(db, taskId, "task.created", {
@@ -609,7 +663,8 @@ export function createTaskService({
     if (!TERMINAL_STATUSES.has(row.status)) {
       throw new AiPlatformError("task result is not ready", { code: "result_not_ready", status: 409 });
     }
-    return terminalResult(row);
+    if (row.payload_pruned_at) throw new AiPlatformError("task payload retention expired", { code: "result_expired", status: 410 });
+    return terminalResult(row, payloadCodec.decodeRow);
   }
 
   function readTaskEvents({ identity, taskId, limit = 100 } = {}) {
@@ -674,9 +729,10 @@ export function createTaskService({
     const leaseToken = id("lease");
     const leaseExpiresAt = new Date(new Date(claimedAt).getTime() + config.taskLeaseMs).toISOString();
     return withImmediateTransaction(db, () => {
+      if (readOperationalControl(db).paused) return null;
       const where = taskId ? "t.id = $taskId AND t.status = 'queued'" : "t.status = 'queued'";
       const selected = db.prepare(`
-        SELECT t.*, av.limits_json, av.system_prompt, av.instructions_json,
+        SELECT t.*, av.limits_json, av.system_prompt, av.instructions_json, av.standard_ids_json, av.input_schema_json, av.output_schema_json,
                av.tools_json, av.task_types_json, av.model_policy_json,
                a.slug, a.name, a.description,
                m.provider_id, m.name AS model_name, m.capabilities_json,
@@ -684,7 +740,7 @@ export function createTaskService({
                p.kind AS provider_kind, p.enabled AS provider_enabled,
                m.enabled AS model_enabled, pr.id AS price_version_id,
                pr.version AS price_version, pr.currency,
-               pr.input_micro_per_1k, pr.output_micro_per_1k,
+               pc.policy_json AS pricing_policy_json, pr.input_micro_per_1k, pr.output_micro_per_1k,
                pr.cached_input_micro_per_1k, pr.audio_micro_per_minute,
                pr.image_micro_per_page, pr.function_fee_micro,
                pr.effective_from AS price_effective_from,
@@ -703,15 +759,25 @@ export function createTaskService({
                ORDER BY pv.effective_from DESC, pv.created_at DESC, pv.id DESC
                LIMIT 1
             )
+          LEFT JOIN price_calendars pc ON pc.price_version_id = pr.id
          WHERE ${where}
+           AND (SELECT COUNT(*) FROM tasks active WHERE active.status = 'running') < $globalConcurrency
            AND (
              SELECT COUNT(*) FROM tasks running
               WHERE running.owner = t.owner AND running.status = 'running'
            ) < $ownerConcurrency
          ORDER BY ${PRIORITY_ORDER}, t.requested_at ASC
          LIMIT 1
-      `).get(taskId ? { $taskId: taskId, $ownerConcurrency: config.taskOwnerConcurrency } : { $ownerConcurrency: config.taskOwnerConcurrency });
+      `).get({
+        ...(taskId ? { $taskId: taskId } : {}),
+        $ownerConcurrency: config.taskOwnerConcurrency,
+        $globalConcurrency: config.taskConcurrency,
+      });
       if (!selected) return null;
+      const standards = standardVersions(db, parseArray(selected.standard_ids_json));
+      if (sha256(standards) !== selected.standard_digest) {
+        throw new AiPlatformError("pinned standards changed", { code: "standard_version_mismatch", status: 503 });
+      }
       const attemptNo = Number(selected.current_attempt ?? 0) + 1;
       const attemptId = id("attempt");
       db.prepare(`
@@ -760,6 +826,19 @@ export function createTaskService({
         attemptNo,
         leaseExpiresAt,
       }, claimedAt);
+      const attemptPrice = selected.price_version_id ? priceAtAttempt({
+        id: selected.price_version_id, version: selected.price_version, currency: selected.currency,
+        input_micro_per_1k: selected.input_micro_per_1k, output_micro_per_1k: selected.output_micro_per_1k,
+        cached_input_micro_per_1k: selected.cached_input_micro_per_1k, audio_micro_per_minute: selected.audio_micro_per_minute,
+        image_micro_per_page: selected.image_micro_per_page, function_fee_micro: selected.function_fee_micro,
+        pricing_policy_json: selected.pricing_policy_json,
+      }, claimedAt) : null;
+      if (attemptPrice?.pricingTier) {
+        db.prepare("UPDATE task_attempts SET request_meta_json = ? WHERE id = ?").run(
+          stringify({ channel: selected.channel, feature: selected.feature, pricingTier: attemptPrice.pricingTier, pricingAt: claimedAt }),
+          attemptId,
+        );
+      }
       return {
         task: selected,
         attempt: {
@@ -771,7 +850,7 @@ export function createTaskService({
           providerId: selected.provider_id,
           modelId: selected.model_id,
         },
-        agent: agentView({ ...selected, id: selected.agent_version_id, agent_id: selected.agent_id }),
+        agent: { ...agentView({ ...selected, id: selected.agent_version_id, agent_id: selected.agent_id }), standards },
         model: {
           id: selected.model_id,
           providerId: selected.provider_id,
@@ -792,6 +871,7 @@ export function createTaskService({
           function_fee_micro: selected.function_fee_micro,
           effective_from: selected.price_effective_from,
           effective_to: selected.price_effective_to,
+          ...attemptPrice,
         } : null,
         limits: executionLimits(selected, config),
       };
@@ -849,7 +929,9 @@ export function createTaskService({
     const completedAt = now();
     const usage = normalizeUsage(providerResponse?.usage);
     const result = normalizeTaskResult(providerResponse?.result ?? providerResponse);
+    assertAgentSchema(result, context.agent.outputSchema, "output");
     const charge = chargeForUsage(usage, context.priceVersion);
+    if (usage && providerResponse?.usageStatus === "estimated") charge.costStatus = "estimated";
     return withImmediateTransaction(db, () => {
       const current = rowById(db, context.task.id);
       if (!current || current.status !== "running" || current.lease_token !== context.attempt.leaseToken) {
@@ -952,7 +1034,7 @@ export function createTaskService({
          WHERE id = $taskId AND status = 'running' AND lease_token = $leaseToken
       `).run({
         $source: result.source,
-        $outputJson: stableJson(result),
+        $outputJson: payloadCodec.encode(stableJson(result), current, "output"),
         $outputDigest: sha256(result),
         $completedAt: completedAt,
         $updatedAt: completedAt,
@@ -1001,7 +1083,7 @@ export function createTaskService({
                input_tokens = $inputTokens, output_tokens = $outputTokens,
                cached_input_tokens = $cachedInputTokens, audio_seconds = $audioSeconds,
                image_pages = $imagePages, cost_micro = $costMicro,
-               cost_status = $costStatus, error_code = $errorCode,
+               cost_status = $costStatus, external_request_id = $externalRequestId, error_code = $errorCode,
                error_message = $errorMessage, completed_at = $completedAt
          WHERE id = $id AND status = 'running'
       `).run({
@@ -1015,6 +1097,7 @@ export function createTaskService({
         $imagePages: usage?.imagePages ?? 0,
         $costMicro: charge.costMicro,
         $costStatus: usage ? charge.costStatus : (unknown ? "unknown" : "not_applicable"),
+        $externalRequestId: typeof error?.externalRequestId === "string" && /^[A-Za-z0-9_.:-]{1,200}$/u.test(error.externalRequestId) ? error.externalRequestId : null,
         $errorCode: cancelled ? "cancelled" : code,
         $errorMessage: taskErrorMessage(cancelled ? "cancelled" : code),
         $completedAt: completedAt,
@@ -1029,7 +1112,9 @@ export function createTaskService({
           at: completedAt,
         });
       }
-      const retry = !cancelled && shouldRetry(error, context.attempt.attemptNo, context.limits, { providerStarted });
+      const retry = !cancelled
+        && (!unknown || context.model.providerKind === "mock")
+        && shouldRetry(error, context.attempt.attemptNo, context.limits, { providerStarted });
       if (retry) {
         db.prepare(`
           UPDATE tasks
@@ -1067,7 +1152,7 @@ export function createTaskService({
         $leaseToken: context.attempt.leaseToken,
       });
       const total = sumTaskCharges(db, current.id);
-      if (!providerStarted && !usage) {
+      if (!providerStarted && !usage && !total.unknown && total.totalMicro === 0) {
         releaseBudget(db, { taskId: current.id, at: new Date(completedAt) });
       } else {
         settleBudget(db, {
@@ -1124,10 +1209,11 @@ export function createTaskService({
         error.code = "provider_policy_blocked";
         throw error;
       }
-      providerStarted = true;
-      const response = await provider.execute({
-        task: taskView(context.task),
+      const providerInput = {
+        task: taskView(payloadCodec.decodeRow(context.task)),
         agent: context.agent,
+        limits: context.limits,
+        mediaStore,
         model: modelView({
           id: context.model.id,
           provider_id: context.model.providerId,
@@ -1138,15 +1224,20 @@ export function createTaskService({
           enabled: 1,
         }),
         signal: controller.signal,
-      });
+      };
+      const prepared = provider.prepare ? await provider.prepare(providerInput) : undefined;
+      providerStarted = true;
+      const response = await provider.execute({ ...providerInput, prepared });
       if (timeoutTriggered) {
         const error = new Error("provider execution timed out");
         error.code = "provider_timeout";
+        error.usage = response?.usage;
         throw error;
       }
       if (controller.signal.aborted || cancellationRequested(context.task.id)) {
         const error = new Error("task cancelled");
         error.code = "cancelled";
+        error.usage = response?.usage;
         throw error;
       }
       try {
@@ -1156,11 +1247,15 @@ export function createTaskService({
         throw finalizeError;
       }
     } catch (error) {
-      return finalizeFailure(context, error, { providerStarted, timedOut: timeoutTriggered });
+      return finalizeFailure(context, error, { providerStarted: error?.providerStarted === false ? false : providerStarted, timedOut: timeoutTriggered });
     } finally {
       clearTimeout(timeout);
       clearInterval(leaseHeartbeat);
       activeExecutions.delete(context.task.id);
+      try { mediaStore?.sweep(); } catch (error) {
+        pause();
+        throw error;
+      }
     }
   }
 
@@ -1170,10 +1265,12 @@ export function createTaskService({
     const at = now();
     const stale = db.prepare(`
       SELECT t.*, ta.id AS attempt_id, ta.attempt_no, ta.provider_id, ta.model_id,
-             ta.price_version_id, av.limits_json
+             ta.price_version_id, av.limits_json, p.kind AS provider_kind, pr.currency
         FROM tasks t
         JOIN task_attempts ta ON ta.task_id = t.id AND ta.attempt_no = t.current_attempt
         JOIN agent_versions av ON av.id = t.agent_version_id
+        JOIN providers p ON p.id = ta.provider_id
+        LEFT JOIN price_versions pr ON pr.id = ta.price_version_id
        WHERE t.status = 'running'
          AND t.lease_expires_at IS NOT NULL
          AND t.lease_expires_at < $at
@@ -1191,10 +1288,12 @@ export function createTaskService({
           providerId: staleTask.provider_id,
           modelId: staleTask.model_id,
           priceVersionId: staleTask.price_version_id,
+          currency: staleTask.currency ?? "USD",
         };
         markAttemptUnknown(db, current, attempt, at);
         const limits = executionLimits(staleTask, config);
-        const canRetry = !current.cancel_requested_at && attempt.attemptNo < limits.maxAttempts;
+        const canRetry = staleTask.provider_kind === "mock"
+          && !current.cancel_requested_at && attempt.attemptNo < limits.maxAttempts;
         if (canRetry) {
           db.prepare(`
             UPDATE tasks
@@ -1235,7 +1334,7 @@ export function createTaskService({
   async function runPending({ limit = config.taskConcurrency } = {}) {
     if (runPromise) return runPromise;
     runPromise = (async () => {
-      if (closed) return { claimed: 0, completed: 0, results: [] };
+      if (closed || paused) return { claimed: 0, completed: 0, results: [] };
       let safe;
       try { safe = safeLimit(limit, config.taskConcurrency, config.taskConcurrency); } catch { safe = config.taskConcurrency; }
       recoverExpiredLeases({ limit: safe });
@@ -1249,6 +1348,31 @@ export function createTaskService({
       return { claimed: contexts.length, completed: results.length, results };
     })().finally(() => { runPromise = null; });
     return runPromise;
+  }
+
+  function prunePayloads({ force = false } = {}) {
+    const at = Date.parse(now());
+    if (!force && at - lastPayloadSweepAt < 60 * 60_000) return 0;
+    const cutoff = new Date(at - (config.taskRetentionDays ?? 30) * 86400_000).toISOString();
+    const result = db.prepare(`UPDATE tasks SET input_json='{}',output_json=NULL,payload_pruned_at=?
+      WHERE payload_pruned_at IS NULL AND completed_at < ? AND status IN ('succeeded','failed','cancelled','expired')`)
+      .run(new Date(at).toISOString(), cutoff);
+    lastPayloadSweepAt = at;
+    return result.changes;
+  }
+
+  function configurationReadiness() {
+    return Object.fromEntries(AI_TASK_TYPES.map((type) => {
+      try {
+        const execution = resolveExecutionConfiguration(db, { taskType: type, at: now(), config });
+        const provider = providerRegistry.get(execution.model.provider_id);
+        const registered = Boolean(provider) && (execution.model.provider_kind === "mock"
+          || provider.supports?.({ modelName: execution.model.name, taskType: type }) === true);
+        return [type, { ready: registered, model: execution.model.name, provider: execution.model.provider_id }];
+      } catch {
+        return [type, { ready: false }];
+      }
+    }));
   }
 
   function start() {
@@ -1275,12 +1399,62 @@ export function createTaskService({
     }
   }
 
-  function close() {
-    closed = true;
+  function pause() {
+    paused = true;
     if (pumpTimer) clearInterval(pumpTimer);
     pumpTimer = null;
-    for (const execution of activeExecutions.values()) execution.controller.abort();
-    activeExecutions.clear();
+  }
+
+  async function drain({ timeoutMs = config.drainTimeoutMs ?? 180_000, abort = false } = {}) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 15 * 60_000) {
+      throw new TypeError("drain timeout is invalid");
+    }
+    pause();
+    if (abort) {
+      for (const execution of activeExecutions.values()) execution.controller.abort();
+    }
+    const pending = runPromise;
+    if (!pending) return status();
+    let timeout;
+    try {
+      await Promise.race([
+        pending,
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new AiPlatformError("AI platform drain timed out", {
+            code: "drain_timeout",
+            status: 503,
+          })), timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+    return status();
+  }
+
+  function status() {
+    const control = readOperationalControl(db);
+    return {
+      admissionOpen: !paused && !closed && !control.paused,
+      paused: paused || control.paused,
+      closed,
+      activeExecutions: activeExecutions.size,
+      generation: control.generation,
+    };
+  }
+
+  function resume() {
+    if (closed || readOperationalControl(db).paused) {
+      throw new AiPlatformError("AI platform is not resumable", { code: "service_draining", status: 503 });
+    }
+    paused = false;
+    start();
+    return status();
+  }
+
+  async function close() {
+    closed = true;
+    return drain({ abort: true });
   }
 
   return Object.freeze({
@@ -1294,6 +1468,12 @@ export function createTaskService({
     runPending,
     waitForTask,
     start,
+    pause,
+    drain,
+    status,
+    configurationReadiness,
+    prunePayloads,
+    resume,
     close,
   });
 }

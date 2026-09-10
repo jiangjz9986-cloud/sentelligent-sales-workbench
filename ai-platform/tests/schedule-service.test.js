@@ -80,7 +80,7 @@ function createSchedule(service, clock, overrides = {}) {
     id: overrides.id ?? "schedule-test",
     slug: overrides.slug ?? "schedule-test",
     name: overrides.name ?? "Schedule test",
-    taskType: overrides.taskType ?? "proactive.analyze",
+    taskType: overrides.taskType ?? "weekly.generate",
     feature: overrides.feature ?? "proactive-assistant",
     intervalSeconds: overrides.intervalSeconds ?? INTERVAL_SECONDS,
     enabled: overrides.enabled ?? true,
@@ -89,7 +89,11 @@ function createSchedule(service, clock, overrides = {}) {
   });
 }
 
-function insertTask(db, taskId, { status = "queued", feature = "proactive-assistant" } = {}) {
+function insertTask(db, taskId, {
+  status = "queued",
+  feature = "proactive-assistant",
+  taskType = "weekly.generate",
+} = {}) {
   const at = BASE_TIME;
   db.prepare(`
     INSERT INTO tasks (
@@ -99,7 +103,7 @@ function insertTask(db, taskId, { status = "queued", feature = "proactive-assist
       standard_digest, status, source, requested_at, updated_at
     ) VALUES (
       $id, $requestId, 'schedule-test', '__system__', 'schedule-test', 'worker',
-      $feature, 'proactive.analyze', 'schedule', 'schedule-test', 'background',
+      $feature, $taskType, 'schedule', 'schedule-test', 'background',
       '{}', NULL, $requestHash, $idempotencyKey, 'agent-proactive-v1',
       'model-mock-standard-v1', 'standard-digest', $status, 'model', $at, $at
     )
@@ -107,6 +111,7 @@ function insertTask(db, taskId, { status = "queued", feature = "proactive-assist
     $id: taskId,
     $requestId: `request-${taskId}`,
     $feature: feature,
+    $taskType: taskType,
     $requestHash: `hash-${taskId}`,
     $idempotencyKey: `key-${taskId}`,
     $status: status,
@@ -127,6 +132,67 @@ function taskCreatorFor(db, { prefix = "scheduled", status = "queued", calls = [
 }
 
 describe("AI platform schedule service", () => {
+  it("keeps proactive scheduling disabled because backend owns proactive analysis", () => {
+    const clock = makeClock();
+    const harness = openHarness({ clock });
+
+    assert.throws(
+      () => createSchedule(harness.service, clock, {
+        id: "proactive-enabled",
+        slug: "proactive-enabled",
+        taskType: "proactive.analyze",
+        enabled: true,
+      }),
+      (error) => error?.code === "proactive_schedule_owned_by_backend" && error?.status === 409,
+    );
+
+    const disabled = createSchedule(harness.service, clock, {
+      id: "proactive-disabled",
+      slug: "proactive-disabled",
+      taskType: "proactive.analyze",
+      enabled: false,
+    });
+    assert.equal(disabled.enabled, false);
+    assert.throws(
+      () => harness.service.enableSchedule({ scheduleId: disabled.id }),
+      (error) => error?.code === "proactive_schedule_owned_by_backend" && error?.status === 409,
+    );
+  });
+
+  it("quarantines a manually enabled proactive schedule before task creation", async () => {
+    const clock = makeClock();
+    const calls = [];
+    const harness = openHarness({
+      clock,
+      createTask: async (args) => {
+        calls.push(args);
+        throw new Error("must not create a proactive platform task");
+      },
+    });
+    const schedule = createSchedule(harness.service, clock, {
+      id: "proactive-quarantine",
+      slug: "proactive-quarantine",
+      taskType: "proactive.analyze",
+      enabled: false,
+    });
+    harness.db.prepare(`
+      UPDATE schedules
+         SET enabled = 1, next_run_at = $nextRunAt
+       WHERE id = $id
+    `).run({ $nextRunAt: BASE_TIME, $id: schedule.id });
+
+    const result = await harness.service.scanDue();
+    assert.equal(calls.length, 0);
+    assert.equal(result.claimed, 0);
+    assert.equal(result.skipped, 1);
+    assert.equal(result.skippedRuns[0].reason, "proactive_schedule_owned_by_backend");
+    assert.equal(harness.service.readSchedule(schedule.id).enabled, false);
+    assert.equal(
+      harness.db.prepare("SELECT COUNT(*) AS count FROM admin_audit WHERE action = 'schedule.proactive_owner_blocked'").get().count,
+      1,
+    );
+  });
+
   it("keeps queued and running non-terminal, then reconciles to a terminal state", async () => {
     const clock = makeClock();
     const calls = [];

@@ -1592,7 +1592,7 @@ async function serviceFixture(t, overrides = {}) {
   const root = overrides.root ?? await tempRoot(t);
   const providerCalls = overrides.providerCalls ?? [];
   const workspaces = [];
-  const provider = overrides.provider ?? {
+  const provider = Object.hasOwn(overrides, "provider") ? overrides.provider : {
     id: "openai-compatible",
     readiness: () => ({ ready: true, code: "READY" }),
     async transcribe(input) {
@@ -1631,6 +1631,12 @@ async function serviceFixture(t, overrides = {}) {
     ...overrides.config,
   }, {
     provider,
+    aiPlatformRuntime: overrides.aiPlatformRuntime,
+    asrApiKeyProvider: overrides.asrApiKeyProvider,
+    modelApiKeyProvider: overrides.modelApiKeyProvider,
+    modelCredentialReuseVerified: overrides.modelCredentialReuseVerified,
+    credentialCompatibility: overrides.credentialCompatibility,
+    providerDependencies: overrides.providerDependencies,
     metrics: overrides.metrics,
     uploadCapacity: overrides.uploadCapacity,
     processingCapacity: overrides.processingCapacity,
@@ -1707,6 +1713,223 @@ describe("ASR service orchestration, cleanup, and provider zero-delta gates", ()
     });
     assert.equal(fixture.service.capacitySnapshot().processing.globalActive, 0);
     await assertWorkspacesRemoved(fixture.workspaces);
+  });
+
+  it("routes required ASR through the platform with a descriptor-only task and never reads the legacy key", async (t) => {
+    const platformCalls = [];
+    let keyCalls = 0;
+    const fixture = await serviceFixture(t, {
+      provider: null,
+      config: { aiPlatformMode: "required" },
+      aiPlatformRuntime: {
+        mode: "required",
+        configured: () => true,
+        async runTask(input) {
+          platformCalls.push(input);
+          return {
+            result: {
+              metadata: { compatibility: { text: "统一平台转写结果" } },
+            },
+          };
+        },
+      },
+      asrApiKeyProvider: async () => {
+        keyCalls += 1;
+        return "must-not-be-read";
+      },
+    });
+
+    const result = await fixture.service.transcribe(requestInput({
+      key: "asr:synthetic-platform-required",
+    }));
+    assert.deepEqual(result, {
+      transcript: "统一平台转写结果",
+      language: "zh-CN",
+      durationMs: 1_000,
+      source: "server_asr",
+      replayed: false,
+    });
+    assert.equal(platformCalls.length, 1);
+    assert.equal(platformCalls[0].taskType, "asr.transcribe");
+    assert.equal(platformCalls[0].feature, "asr");
+    assert.equal(platformCalls[0].owner, "owner-a");
+    assert.equal(platformCalls[0].actor, "owner-a");
+    assert.deepEqual(platformCalls[0].subject, {
+      type: "asr_audio",
+      id: `sha256-${"a".repeat(64)}`,
+    });
+    assert.equal(platformCalls[0].channel, "web");
+    assert.equal(platformCalls[0].idempotencyKey, "asr:synthetic-platform-required");
+    assert.deepEqual(Object.keys(platformCalls[0].input), ["media"]);
+    assert.deepEqual(Object.keys(platformCalls[0].input.media), [
+      "mediaType", "byteLength", "durationMs", "purpose", "language", "sha256",
+    ]);
+    assert.deepEqual(platformCalls[0].input.media, {
+      mediaType: "audio/wav",
+      byteLength: 32_044,
+      durationMs: 1_000,
+      purpose: "quick_record",
+      language: "zh-CN",
+      sha256: "a".repeat(64),
+    });
+    assert.equal(JSON.stringify(platformCalls[0]).includes(fixture.root), false);
+    assert.equal(JSON.stringify(platformCalls[0]).includes("audioPath"), false);
+    assert.equal(JSON.stringify(platformCalls[0]).includes("input.audio"), false);
+    assert.equal(keyCalls, 0);
+    assert.deepEqual(fixture.service.metrics.snapshot().counters.providerCallsTotal, {
+      "ai-platform|success": 1,
+    });
+    await assertWorkspacesRemoved(fixture.workspaces);
+  });
+
+  it("fails required platform mode closed without creating the legacy provider or reading its key", async (t) => {
+    let keyCalls = 0;
+    let transcodeCalls = 0;
+    const fixture = await serviceFixture(t, {
+      provider: null,
+      config: { aiPlatformMode: "required" },
+      aiPlatformRuntime: {
+        mode: "required",
+        configured: () => false,
+        async runTask() {
+          throw new Error("platform must not run when unconfigured");
+        },
+      },
+      asrApiKeyProvider: async () => {
+        keyCalls += 1;
+        return "must-not-be-read";
+      },
+      transcodeImpl: async () => {
+        transcodeCalls += 1;
+        throw new Error("transcode must not run when platform is unconfigured");
+      },
+    });
+
+    assert.deepEqual(fixture.service.readiness(), {
+      ready: false,
+      code: "ASR_NOT_CONFIGURED",
+    });
+    await assert.rejects(
+      fixture.service.transcribe(requestInput({ key: "asr:synthetic-platform-missing" })),
+      expectCode("ASR_NOT_CONFIGURED", 503),
+    );
+    assert.equal(keyCalls, 0);
+    assert.equal(transcodeCalls, 0);
+    assert.equal(fixture.service.metrics.snapshot().counters.providerCallsTotal["ai-platform|success"], undefined);
+  });
+
+  it("uses the platform for optional mode only when it is configured and keeps the legacy fallback otherwise", async (t) => {
+    const configuredCalls = [];
+    const configured = await serviceFixture(t, {
+      provider: null,
+      config: { aiPlatformMode: "optional" },
+      aiPlatformRuntime: {
+        mode: "optional",
+        configured: () => true,
+        async runTask(input) {
+          configuredCalls.push(input);
+          return { transcript: "可选平台结果" };
+        },
+      },
+      asrApiKeyProvider: async () => { throw new Error("optional platform must not read legacy key"); },
+    });
+    assert.equal(
+      (await configured.service.transcribe(requestInput({ key: "asr:synthetic-platform-optional" }))).transcript,
+      "可选平台结果",
+    );
+    assert.equal(configuredCalls.length, 1);
+    assert.equal(configured.providerCalls.length, 0);
+
+    const fallbackCalls = [];
+    const fallbackPlatformCalls = [];
+    const fallback = await serviceFixture(t, {
+      providerCalls: fallbackCalls,
+      config: { aiPlatformMode: "optional" },
+      aiPlatformRuntime: {
+        mode: "optional",
+        configured: () => false,
+        async runTask(input) {
+          fallbackPlatformCalls.push(input);
+          return { transcript: "must-not-run" };
+        },
+      },
+    });
+    assert.equal(
+      (await fallback.service.transcribe(requestInput({ key: "asr:synthetic-platform-fallback" }))).transcript,
+      "合成转写结果",
+    );
+    assert.equal(fallbackCalls.length, 1);
+    assert.equal(fallbackPlatformCalls.length, 0);
+  });
+
+  it("maps platform not-configured, timeout, and cancellation failures to the ASR contract", async (t) => {
+    const cases = [
+      ["ai_platform_not_configured", "ASR_NOT_CONFIGURED", 503],
+      ["agent_not_configured", "ASR_NOT_CONFIGURED", 503],
+      ["provider_disabled", "ASR_NOT_CONFIGURED", 503],
+      ["AI_PLATFORM_NOT_CONFIGURED", "ASR_NOT_CONFIGURED", 503],
+      ["task_pending", "ASR_TIMEOUT", 504],
+      ["ai_platform_timeout", "ASR_TIMEOUT", 504],
+      ["cancelled", "AbortError", undefined],
+      ["ai_platform_aborted", "AbortError", undefined],
+      ["queue_full", "ASR_CAPACITY_EXCEEDED", 429],
+    ];
+    for (const [platformCode, expectedCode, expectedStatus] of cases) {
+      const fixture = await serviceFixture(t, {
+        provider: null,
+        config: { aiPlatformMode: "required" },
+        aiPlatformRuntime: {
+          mode: "required",
+          configured: () => true,
+          async runTask() {
+            const error = new Error("private platform failure");
+            error.code = platformCode;
+            throw error;
+          },
+        },
+      });
+      await assert.rejects(
+        fixture.service.transcribe(requestInput({
+          key: `asr:synthetic-platform-error-${platformCode}`,
+        })),
+        (error) => {
+          assert.equal(error.name === "AbortError" ? "AbortError" : error.code, expectedCode);
+          if (expectedStatus !== undefined) assert.equal(error.status, expectedStatus);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("propagates the request processing deadline to platform runTask", async (t) => {
+    let platformSignal = null;
+    const fixture = await serviceFixture(t, {
+      provider: null,
+      processingTimeoutMs: 10,
+      config: { aiPlatformMode: "required" },
+      aiPlatformRuntime: {
+        mode: "required",
+        configured: () => true,
+        async runTask({ signal }) {
+          platformSignal = signal;
+          return new Promise((resolve, reject) => {
+            const onAbort = () => {
+              signal.removeEventListener("abort", onAbort);
+              reject(signal.reason);
+            };
+            signal.addEventListener("abort", onAbort, { once: true });
+          });
+        },
+      },
+    });
+
+    await assert.rejects(
+      fixture.service.transcribe(requestInput({ key: "asr:synthetic-platform-timeout" })),
+      expectCode("ASR_TIMEOUT", 504),
+    );
+    assert.ok(platformSignal);
+    assert.equal(platformSignal.aborted, true);
+    assert.equal(platformSignal.reason?.name, "TimeoutError");
   });
 
   it("keeps provider delta zero for upload, magic, probe, and transcode rejection", async (t) => {
@@ -3935,6 +4158,7 @@ describe("ASR independent credential selection", () => {
       asrApiKeyProvider: async () => { asrKeyCalls += 1; return "synthetic-asr-key"; },
       modelApiKeyProvider: async () => { modelKeyCalls += 1; return "synthetic-model-key"; },
       providerDependencies: {
+        executionMode: "external-provider",
         openAsBlobImpl: async () => new Blob(["synthetic"], { type: "audio/wav" }),
         fetchImpl: async () => {
           fetchCalls += 1;
@@ -3984,6 +4208,7 @@ describe("ASR independent credential selection", () => {
         return new Promise(() => {});
       },
       providerDependencies: {
+        executionMode: "external-provider",
         openAsBlobImpl: async () => { blobCalls += 1; return new Blob(); },
         fetchImpl: async () => {
           fetchCalls += 1;
@@ -4028,6 +4253,7 @@ describe("ASR independent credential selection", () => {
     let resolveFetch;
     let cancelCalls = 0;
     const provider = createOpenAiCompatibleProvider({
+      executionMode: "external-provider",
       baseUrl: "https://provider.example/v1",
       model: "synthetic-asr",
       timeoutMs: 10,
@@ -4076,6 +4302,7 @@ describe("ASR independent credential selection", () => {
     let returnCalls = 0;
     let iteratorFactoryCalls = 0;
     const provider = createOpenAiCompatibleProvider({
+      executionMode: "external-provider",
       baseUrl: "https://provider.example/v1",
       model: "synthetic-asr",
       timeoutMs: 1_000,
@@ -4125,6 +4352,7 @@ describe("ASR independent credential selection", () => {
 
   it("bounds close when the provider fetch and its registered lifecycle never settle", async (t) => {
     const provider = createOpenAiCompatibleProvider({
+      executionMode: "external-provider",
       baseUrl: "https://provider.example/v1",
       model: "synthetic-asr",
       timeoutMs: 10,
@@ -4186,6 +4414,7 @@ describe("ASR independent credential selection", () => {
         },
         asrApiKeyProvider: async () => "synthetic-provider-key",
         providerDependencies: {
+          executionMode: "external-provider",
           readerCleanupTimeoutMs: 10,
           openAsBlobImpl: async () => new Blob(["synthetic-wav"], { type: "audio/wav" }),
           fetchImpl: async () => ({

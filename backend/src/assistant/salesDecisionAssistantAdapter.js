@@ -299,7 +299,19 @@ export function createSalesDecisionAssistantAdapter({
       });
     }
     try {
-      const result = await analyzeSalesDecision(prepared.context, config, { fetchImpl });
+      const result = await analyzeSalesDecision(prepared.context, config, {
+        fetchImpl,
+        owner: normalizedOwner,
+        actor: normalizedOwner,
+        channel: ["web", "weixin", "worker", "system"].includes(channel) ? channel : "web",
+        subject: prepared.context.opportunity?.id
+          ? { type: "opportunity", id: prepared.context.opportunity.id }
+          : prepared.context.customer?.id
+            ? { type: "customer", id: prepared.context.customer.id }
+            : prepared.context.quickRecord?.id
+              ? { type: "quick_record", id: prepared.context.quickRecord.id }
+              : null,
+      });
       const persistedRefs = outputSourceRefs(result, refs);
       const source = sourceClass(result?.source);
       const fallbackReason = source === "fallback" ? String(result?.source ?? "fallback") : null;

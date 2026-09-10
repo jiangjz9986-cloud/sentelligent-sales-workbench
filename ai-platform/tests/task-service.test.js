@@ -77,18 +77,194 @@ function createService(provider = mockProvider, overrides = {}) {
   return service;
 }
 
-function closeService() {
-  service?.close();
+async function closeService() {
+  await service?.close();
   service = null;
   db?.close();
   db = null;
 }
 
-afterEach(() => {
-  closeService();
+afterEach(async () => {
+  await closeService();
 });
 
 describe("AI platform task service", () => {
+  it("enforces global concurrency across two executors and different owners", async () => {
+    let finish;
+    createService({
+      ...mockProvider,
+      async execute() {
+        await new Promise((resolve) => { finish = resolve; });
+        return successfulResponse("global-concurrency");
+      },
+    }, { taskConcurrency: 1 });
+    service.createTask({ identity: identity("alice"), idempotencyKey: "concurrency-a", request: validRequest() });
+    service.createTask({ identity: identity("bob"), idempotencyKey: "concurrency-b", request: validRequest() });
+    const pending = service.runPending();
+    const other = createTaskService({
+      db, config: loadAiPlatformConfig({ databasePath: ":memory:", taskConcurrency: 1 }),
+      providerRegistry: createProviderRegistry(), clock: () => currentTime,
+    });
+    try {
+      assert.equal((await other.runPending()).claimed, 0);
+      assert.equal(db.prepare("SELECT count(*) n FROM tasks WHERE status='running'").get().n, 1);
+    } finally {
+      finish();
+      await pending;
+    }
+    assert.equal((await other.runPending()).claimed, 1);
+    await other.close();
+  });
+
+  it("preserves the price currency and reservation when a paid lease expires", async () => {
+    let finish;
+    let calls = 0;
+    createService({
+      ...mockProvider, kind: "openai_compatible",
+      async execute() {
+        calls += 1;
+        await new Promise((resolve) => { finish = resolve; });
+        return successfulResponse("lost-paid-lease");
+      },
+    }, { executionMode: "external-provider", externalProvidersEnabled: true });
+    db.prepare("UPDATE providers SET kind = 'openai_compatible' WHERE id = 'provider-mock'").run();
+    db.prepare("UPDATE agent_versions SET model_policy_json = json_set(model_policy_json, '$.externalAllowed', json('true'))").run();
+    db.prepare("UPDATE price_versions SET currency = 'CNY', input_micro_per_1k = 1000, output_micro_per_1k = 1000").run();
+    db.prepare("UPDATE budget_policies SET currency = 'CNY'").run();
+    const owner = identity("alice");
+    const task = service.createTask({ identity: owner, idempotencyKey: "lost-paid-lease", request: validRequest() });
+    const pending = service.runPending();
+    try {
+      currentTime = new Date(new Date(BASE_TIME).getTime() + 3_000);
+      const recovered = service.recoverExpiredLeases();
+      assert.equal(recovered[0].status, "expired");
+      const usage = db.prepare("SELECT currency, cost_status FROM usage_ledger WHERE task_id = ?").get(task.taskId);
+      assert.equal(usage.currency, "CNY");
+      assert.equal(usage.cost_status, "unknown");
+      const budget = db.prepare("SELECT status, actual_micro, reserved_micro FROM budget_reservations WHERE task_id = ?").get(task.taskId);
+      assert.equal(budget.status, "unknown");
+      assert.equal(budget.actual_micro, budget.reserved_micro);
+    } finally {
+      finish();
+      await pending;
+    }
+    await service.runPending();
+    assert.equal(calls, 1);
+    assert.equal(service.readTask({ identity: owner, taskId: task.taskId }).status, "expired");
+  });
+
+  it("does not retry an external request with unknown charges", async () => {
+    let calls = 0;
+    createService({
+      ...mockProvider, kind: "openai_compatible",
+      async execute() {
+        calls += 1;
+        throw Object.assign(new Error("response lost"), { code: "network_error", retryable: true });
+      },
+    }, { executionMode: "external-provider", externalProvidersEnabled: true });
+    db.prepare("UPDATE providers SET kind = 'openai_compatible' WHERE id = 'provider-mock'").run();
+    db.prepare("UPDATE agent_versions SET model_policy_json = json_set(model_policy_json, '$.externalAllowed', json('true'))").run();
+    db.prepare("UPDATE price_versions SET input_micro_per_1k = 1000, output_micro_per_1k = 1000").run();
+    const owner = identity("alice");
+    const task = service.createTask({ identity: owner, idempotencyKey: "unknown-external", request: validRequest() });
+    await service.runPending();
+    await service.runPending();
+    assert.equal(calls, 1);
+    assert.equal(service.readTask({ identity: owner, taskId: task.taskId }).status, "failed");
+    const reservation = db.prepare("SELECT status, reserved_micro, actual_micro FROM budget_reservations WHERE task_id = ?").get(task.taskId);
+    assert.equal(reservation.status, "unknown");
+    assert.equal(reservation.actual_micro, reservation.reserved_micro);
+    assert.ok(reservation.actual_micro > 0);
+  });
+
+  it("rejects external calls without a matching finite budget before task acceptance", () => {
+    createService({ ...mockProvider, kind: "openai_compatible" }, { executionMode: "external-provider", externalProvidersEnabled: true });
+    db.prepare("UPDATE providers SET kind = 'openai_compatible' WHERE id = 'provider-mock'").run();
+    db.prepare("UPDATE agent_versions SET model_policy_json = json_set(model_policy_json, '$.externalAllowed', json('true'))").run();
+    db.prepare("UPDATE price_versions SET currency = 'CNY'").run();
+    const input = { identity: identity("alice"), idempotencyKey: "currency", request: validRequest() };
+    assert.throws(() => service.createTask(input), (error) => error.code === "budget_currency_mismatch");
+    db.prepare("UPDATE budget_policies SET currency = 'CNY', amount_micro = 0").run();
+    assert.throws(() => service.createTask(input), (error) => error.code === "budget_not_configured");
+    assert.equal(db.prepare("SELECT count(*) n FROM tasks").get().n, 0);
+  });
+
+  it("drains in-flight usage before stopping and leaves queued reservations intact", async () => {
+    let finish;
+    let calls = 0;
+    createService({
+      ...mockProvider,
+      async execute() {
+        calls += 1;
+        await new Promise((resolve) => { finish = resolve; });
+        return successfulResponse("drained");
+      },
+    }, { taskConcurrency: 1 });
+    const owner = identity("alice");
+    const first = service.createTask({ identity: owner, idempotencyKey: "drain-running", request: validRequest() });
+    const queued = service.createTask({ identity: owner, idempotencyKey: "drain-queued", request: validRequest() });
+    const pending = service.runPending();
+    const draining = service.drain();
+    assert.equal(service.status().admissionOpen, false);
+    assert.equal(service.status().activeExecutions, 1);
+    assert.throws(
+      () => service.createTask({ identity: owner, idempotencyKey: "drain-new", request: validRequest() }),
+      (error) => error.code === "service_draining" && error.status === 503,
+    );
+    assert.equal(service.createTask({ identity: owner, idempotencyKey: "drain-running", request: validRequest() }).replayed, true);
+    finish();
+    await Promise.all([pending, draining]);
+    assert.equal(service.readTask({ identity: owner, taskId: first.taskId }).status, "succeeded");
+    assert.equal(db.prepare("SELECT output_tokens FROM task_attempts WHERE task_id = ?").get(first.taskId).output_tokens, 20);
+    assert.equal(db.prepare("SELECT status FROM budget_reservations WHERE task_id = ?").get(first.taskId).status, "settled");
+    assert.equal(db.prepare("SELECT status FROM budget_reservations WHERE task_id = ?").get(queued.taskId).status, "reserved");
+    assert.equal((await service.runPending()).claimed, 0);
+    assert.equal(calls, 1);
+  });
+
+  it("keeps a timed-out drain paused and preserves late supplier usage", async () => {
+    let finish;
+    createService({
+      ...mockProvider,
+      async execute() {
+        await new Promise((resolve) => { finish = resolve; });
+        return successfulResponse("late-drain");
+      },
+    });
+    const owner = identity("alice");
+    const task = service.createTask({ identity: owner, idempotencyKey: "late-drain", request: validRequest() });
+    const pending = service.runPending();
+    await assert.rejects(service.drain({ timeoutMs: 10 }), (error) => error.code === "drain_timeout");
+    assert.equal(service.status().paused, true);
+    assert.equal(service.readTask({ identity: owner, taskId: task.taskId }).status, "running");
+    assert.equal(db.prepare("SELECT status FROM budget_reservations WHERE task_id = ?").get(task.taskId).status, "reserved");
+    finish();
+    await pending;
+    await service.drain();
+    assert.equal(service.readTask({ identity: owner, taskId: task.taskId }).status, "succeeded");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM usage_ledger WHERE task_id = ?").get(task.taskId).n, 1);
+  });
+
+  it("records usage received after abort instead of treating it as unknown", async () => {
+    let finish;
+    createService({
+      ...mockProvider,
+      async execute() {
+        await new Promise((resolve) => { finish = resolve; });
+        return successfulResponse("abort-usage");
+      },
+    });
+    const owner = identity("alice");
+    const task = service.createTask({ identity: owner, idempotencyKey: "abort-usage", request: validRequest() });
+    const pending = service.runPending();
+    const closing = service.close();
+    finish();
+    await Promise.all([pending, closing]);
+    assert.equal(service.readTask({ identity: owner, taskId: task.taskId }).status, "cancelled");
+    assert.equal(db.prepare("SELECT output_tokens FROM task_attempts WHERE task_id = ?").get(task.taskId).output_tokens, 20);
+    assert.notEqual(db.prepare("SELECT cost_status FROM usage_ledger WHERE task_id = ?").get(task.taskId).cost_status, "unknown");
+  });
+
   it("passes the persisted provider name to the provider execution context", async () => {
     let receivedModel;
     const provider = {

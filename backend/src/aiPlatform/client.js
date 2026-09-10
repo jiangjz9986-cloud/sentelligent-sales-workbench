@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createRequestBinding } from "../../../shared/aiPlatformRequestAuth.mjs";
 
 const DEFAULT_RESPONSE_LIMIT = 512 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -586,6 +587,7 @@ export function createAiPlatformClient({
 
   async function performRequest(method, path, {
     body = undefined,
+    binaryBody = undefined,
     idempotencyKey = null,
     signal = null,
     query = null,
@@ -599,7 +601,8 @@ export function createAiPlatformClient({
       ? buildUrl(root, prefix, normalizedPath, query)
       : buildUrl(root, "", normalizedPath, query);
     const requestIdentifier = requestId();
-    let bodyText;
+    let bodyText = binaryBody;
+    if (binaryBody !== undefined && (!Buffer.isBuffer(binaryBody) || body !== undefined)) throw invalidArgument("invalid binary media body");
     if (body !== undefined) {
       try {
         bodyText = JSON.stringify(body);
@@ -623,6 +626,12 @@ export function createAiPlatformClient({
           method,
           path: `${normalizedPath}${query && query.toString() ? `?${query.toString()}` : ""}`,
           requestId: requestIdentifier,
+          requestBinding: createRequestBinding({
+            method,
+            path: new URL(url).pathname + new URL(url).search,
+            body: bodyText ?? "",
+            idempotencyKey: normalizedIdempotencyKey,
+          }),
           signal: abortContext.signal,
         });
         providedToken = optionalHeaderToken(await awaitWithSignal(providerResult, abortContext.signal));
@@ -634,7 +643,7 @@ export function createAiPlatformClient({
         Accept: "application/json",
         "X-Request-Id": requestIdentifier,
       };
-      if (bodyText !== undefined) headers["Content-Type"] = "application/json";
+      if (bodyText !== undefined) headers["Content-Type"] = binaryBody === undefined ? "application/json" : "application/octet-stream";
       if (normalizedIdempotencyKey !== null) headers["Idempotency-Key"] = normalizedIdempotencyKey;
       if (authenticate) {
         const normalizedToken = tokenProvider ? providedToken : optionalHeaderToken(providedToken);
@@ -694,6 +703,20 @@ export function createAiPlatformClient({
       idempotencyKey,
       signal,
     });
+    return unwrapItem(response.payload);
+  }
+
+  async function uploadMedia({ bytes, mediaType, sha256, signal = null }) {
+    if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 32 * 1024 * 1024
+      || !["image/png", "image/jpeg", "image/webp", "application/pdf", "audio/wav"].includes(mediaType)
+      || typeof sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(sha256)) throw invalidArgument("invalid media upload");
+    const query = new URLSearchParams({ mediaType, sha256 });
+    const response = await performRequest("POST", "/media", { binaryBody: bytes, query, signal });
+    return unwrapItem(response.payload);
+  }
+
+  async function discardMedia(id, { signal = null } = {}) {
+    const response = await performRequest("DELETE", `/media/${encodeIdPath(id, "mediaId")}`, { signal });
     return unwrapItem(response.payload);
   }
 
@@ -792,6 +815,8 @@ export function createAiPlatformClient({
 
   return Object.freeze({
     createTask,
+    uploadMedia,
+    discardMedia,
     getTask,
     getResult,
     cancelTask,

@@ -429,7 +429,7 @@ export function createVisitTemperatureSuggestionService({
     return { owner, suggestionId, item };
   }
 
-  async function suggest({ owner: ownerValue, visitId: visitIdValue } = {}) {
+  async function suggest({ owner: ownerValue, actor: actorValue = ownerValue, channel = "web", visitId: visitIdValue } = {}) {
     const owner = identifier(ownerValue, "owner");
     const visitId = identifier(visitIdValue, "visitId");
     const existingRaw = suggestionRepository.findByVisit({ owner, visitId });
@@ -451,7 +451,14 @@ export function createVisitTemperatureSuggestionService({
       customer: customerSnapshot(customer),
       facts,
     };
-    const generatedRaw = await suggestionGenerator(clone(inputSnapshot));
+    // Keep owner out of the persisted evidence snapshot.  It is an execution
+    // boundary supplied by the authenticated service caller, not model input.
+    const generatedRaw = await suggestionGenerator(clone(inputSnapshot), Object.freeze({
+      owner,
+      actor: actorValue,
+      channel,
+      subject: { type: "visit", id: visit.id },
+    }));
     const generated = normalizeGenerated(generatedRaw, facts);
     const now = clockDate(clock);
     const id = identifier(idFactory(), "generated suggestion id");

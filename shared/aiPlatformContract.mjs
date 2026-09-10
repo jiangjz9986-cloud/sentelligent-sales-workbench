@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 export const AI_TASK_SCHEMA_VERSION = "ai-task-v1";
 export const AI_TASK_RESULT_SCHEMA_VERSION = "ai-task-result-v1";
 export const AI_ERROR_SCHEMA_VERSION = "ai-error-v1";
+export const AI_TARGET_MODEL = "gpt-5.6-luna";
+export const AI_TARGET_REASONING_EFFORT = "max";
+export const AI_EXECUTION_MODE = "local-simulated";
+export const AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER = "backend";
 
 export const AI_TASK_STATUSES = Object.freeze([
   "queued",
@@ -86,6 +90,11 @@ export function stableJson(value) {
 export function sha256(value) {
   const input = typeof value === "string" || Buffer.isBuffer(value) ? value : stableJson(value);
   return createHash("sha256").update(input).digest("hex");
+}
+
+export function taskEvidenceInput(input) {
+  const { mediaRef: _mediaRef, ...evidence } = input;
+  return evidence;
 }
 
 export function requireText(value, name, { max = 500, pattern = null } = {}) {

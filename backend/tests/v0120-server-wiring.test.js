@@ -84,6 +84,40 @@ test("v0.12.0 server wiring prefers injected worker repositories and exposes sha
   assert.equal(stopCount, 1);
 });
 
+test("server shutdown waits for background drain before closing shared repositories", async () => {
+  let release;
+  let stopped = 0;
+  let finished = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const worker = {
+    scanRepository: scanRepository(),
+    suggestionRepository: suggestionRepository(),
+    start() {},
+    stop() { stopped += 1; },
+    status: () => ({}),
+    drain: () => gate,
+  };
+  worker.customerProactiveSubjectService = { suggestionRepository: worker.suggestionRepository, assertCurrentRevision() {} };
+  const server = createServer(serverOptions({ proactiveAssistantWorker: worker }));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const closing = new Promise((resolve, reject) => {
+    server.close((error) => {
+      finished = true;
+      error ? reject(error) : resolve();
+    });
+  });
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(finished, false);
+    assert.equal(stopped, 1);
+    assert.doesNotThrow(() => server.proactiveNotificationRepository.statusCounts());
+  } finally {
+    release();
+    await closing;
+  }
+  assert.throws(() => server.proactiveNotificationRepository.statusCounts(), /not open|closed/i);
+});
+
 test("v0.12.0 server wiring rejects a customer subject service bound to another suggestion repository", () => {
   const workerSuggestionRepository = suggestionRepository();
   const mismatchedSuggestionRepository = suggestionRepository();

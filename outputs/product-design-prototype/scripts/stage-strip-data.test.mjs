@@ -18,6 +18,7 @@ import {
 
 const chromePath = [
   process.env.CHROME_PATH,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "C:/Program Files/Google/Chrome/Application/chrome.exe",
   "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
   "C:/Program Files/Microsoft/Edge/Application/msedge.exe",

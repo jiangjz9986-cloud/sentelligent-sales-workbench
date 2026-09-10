@@ -3,6 +3,7 @@ import {
   CalendarClock,
   CheckCircle2,
   CircleAlert,
+  ExternalLink,
   Clock3,
   KeyRound,
   LoaderCircle,
@@ -29,6 +30,7 @@ function statusLabel(value) {
 }
 
 function sourceLabel(value) {
+  if (value === "ai-platform") return "AI 调度平台";
   return value === "settings"
     ? "加密配置"
     : value === "environment"
@@ -513,6 +515,11 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
           <span className="eyebrow">{sectionMeta?.eyebrow ?? "系统配置"}</span>
           <h2>{sectionMeta?.title ?? "系统配置"}</h2>
           <p>{sectionMeta?.description ?? "管理系统安全配置与服务连接。"}</p>
+          {role === "admin" && section === "security" ? (
+            <a href="/api/ai-platform/console/" target="_blank" rel="noopener noreferrer" className="ghost-button">
+              <ExternalLink size={16} aria-hidden="true" />AI 统一调度平台
+            </a>
+          ) : null}
         </div>
         <SectionIcon size={30} aria-hidden="true" />
       </div>

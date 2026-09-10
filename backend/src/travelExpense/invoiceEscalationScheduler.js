@@ -1,3 +1,4 @@
+import { createExecutionDrain } from "../services/executionDrain.js";
 import {
   DEFAULT_INVOICE_ESCALATION_LEVELS,
   evaluateInvoiceEscalationGap,
@@ -76,7 +77,9 @@ export function createInvoiceEscalationScheduler({
     lastCounts: emptyCounts(),
   };
 
-  async function executeRunOnce() {
+  const execution = createExecutionDrain();
+  function executeRunOnce() { return execution.run(performRunOnce); }
+  async function performRunOnce() {
     let now;
     try {
       now = validClockDate(clock);
@@ -253,5 +256,5 @@ export function createInvoiceEscalationScheduler({
     };
   }
 
-  return Object.freeze({ start, stop, runOnce, status });
+  return Object.freeze({ start, stop, runOnce, status, drain(options) { stop(); return execution.drain(options); } });
 }

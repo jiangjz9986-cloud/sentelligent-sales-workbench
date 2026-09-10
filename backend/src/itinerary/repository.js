@@ -154,7 +154,7 @@ export function createVisitItineraryRepository(db, {
   }
 
   function create(input = {}) {
-    const id = requiredText(idFactory(), "generated itinerary id");
+    const id = requiredText(input.id ?? idFactory(), "generated itinerary id");
     const actor = requiredText(input.actor, "actor");
     // v0.9.2：owner=归属/隔离键（创建即定，无转移功能），默认与 actor 恒等。
     const owner = normalizeOwner(input.owner) ?? actor;

@@ -1,12 +1,21 @@
 # AI 平台验收矩阵
 
-本矩阵对应独立实现提交 `8732328e6bec7acd1e01597dacd6240d45ac782f`。本轮只记录本地模拟环境中实际执行的证据；未列入“本轮实际证据”的用例继续保持 `未执行`，不能因为代码存在、模拟供应商返回或页面截图而自动视为通过。
+2026-09-10 融合阶段：现行写集和操作协议见
+[FUSION-EXECUTION.md](FUSION-EXECUTION.md)，当前进度见
+[STATUS.md](STATUS.md)。平台 69/69、适配器 34/34、双服务和脚本门禁
+16/16 已通过；新增请求签名/重放、跨连接暂停、排空超时保全、迁移
+原子性和未知费用恢复用例。以下表格保留为 09-08 历史验收，尚未
+通过的新生产/供应商/浏览器完整门禁不得据此放行。
+
+本矩阵对应当前隔离工作树 `ai-unified-platform-v2`、分支 `codex/ai-unified-platform-v2`，基线提交 `456ec8b59f1f3fbc07dc8cb64f3cdd7417a6df59`。目标模型固定为 `gpt-5.6-luna / max`，执行模式固定为 `local-simulated`，主动分析调度所有者固定为 Backend。 本轮只记录本地模拟环境中实际执行的证据；未列入“本轮实际证据”的用例继续保持 `未执行`，不能因为代码存在、模拟供应商返回或页面截图而自动视为通过。
+
+以下事实是验收前提，而不是通过证据：未接入真实供应商、未使用真实供应商密钥、未连接生产服务器、未修改生产数据库/生产服务/生产配置、未发送真实通知。模拟供应商不代表真实模型质量、真实延迟、真实费用、视觉识别质量或 ASR 质量。
 
 ## 本轮实际证据
 
 | 范围 | 当前结果 | 精确证据 |
 | --- | --- | --- |
-| ISO-01、ISO-02 | 通过（本地） | 独立工作树和分支；临时端口 `19997`/`19998`，独立 runtime、PID、SQLite、日志和备份目录；未修改另一升级工作树 |
+| ISO-01、ISO-02 | 通过（本地） | 当前工作树为 `ai-unified-platform-v2`；测试只使用临时端口、临时 runtime、临时 SQLite、临时日志和临时备份目录；未修改 `v0120-full-upgrade` |
 | SEC-02、SEC-03 | 通过（已覆盖子项） | `npm test`、`node --test ai-platform/tests/http-server.test.js`；owner 隔离、跨 owner 读取/取消、管理员作用域和只读管理员写入拒绝 |
 | SEC-06 | 通过（已覆盖子项） | `npm test`；凭据、lease token、URL、请求/响应元数据和审计内容脱敏测试 |
 | SEC-07 | 通过（模拟门禁） | `node --test ai-platform/tests/task-service.test.js`；local simulation 阻断外部模型，外部供应商还需显式配置与 Agent 策略 |
@@ -14,11 +23,18 @@
 | COST-01、COST-03、COST-04、COST-05 | 通过（模拟/台账） | `npm test`；尝试级用量、原子预算、未知费用、重试计量和功能费用分账测试 |
 | AGENT-02、AGENT-03 | 通过（独立管理服务） | `npm test`；保存草稿不发布、版本固定、发布、回滚、乐观锁和审计测试 |
 | SCHED-01 至 SCHED-04 | 通过（调度服务基础） | `node --test ai-platform/tests/schedule-service.test.js`；页面无关的服务执行、去重、暂停竞态、stale run 恢复和 fencing |
-| UI-01 | 通过（本地 API/静态台） | `node --test ai-platform/tests/http-server.test.js`；管理台静态入口和真实管理 API 联调通过；业务登录代理尚未整合 |
+| UI-01 | 通过（本地 API/静态台） | `node --test ai-platform/tests/http-server.test.js`：8 passed；管理台静态入口、尾斜杠重定向、真实管理 API 和路径穿越拒绝通过；业务登录代理尚未整合 |
+| UI-02 | 通过（本地） | HTTP 测试覆盖乐观锁、管理员作用域和只读写入拒绝；浏览器写入均使用真实管理 API，成功后重新 GET 数据 |
+| UI-03 | 通过（本地浏览器） | 无头 Chrome 验收 `1440x900`、`1024x768`、`390x844`、`360x800`：滚动宽度分别等于视口宽度；移动端抽屉打开、Agent 导航切换和遮罩关闭通过；截图及摘要位于 `/tmp/ai-platform-browser-evidence-20260908/` |
+| UI-04 | 通过（本地模拟） | 浏览器完成 Agent 保存/发布/回滚、规范新建/编辑、预算编辑、主动分析调度编辑、普通调度启停和主动分析启用拒绝；任务查询/取消由 HTTP 与 Backend 全量测试覆盖 |
 | OPS-02 | 通过（临时库） | `backup.sh` 与 `restore.sh` 演练；运行中拒绝、`--force` 门禁、SQLite 完整性、旧库保留均通过 |
 | OPS-05 | 通过（边界验证） | 全部运行只使用 `local-simulated`、本地模拟供应商和临时目录；没有生产部署、付费调用或真实通知 |
 
-本轮尚未执行或尚未满足的重点包括：SEC-01 的完整过期/重放矩阵、SEC-04/SEC-05 工具与业务确认整合、COST-02 历史价格变更演练、M3/M5/M6 业务入口接入、媒体清理、UI-02/UI-03/UI-04 的共享登录与最终浏览器证据、OPS-01/OPS-03/OPS-04，以及 INT-* 和真实模型质量验收。它们必须在共享整合或另行授权后重新执行。
+本轮新增的双服务证据：`node --test backend/tests/ai-platform-server-integration.test.js` 已覆盖快速记录和拜访行程的真实本地 HTTP 路径、平台任务身份元数据、稳定 `subject`、固定目标模型/推理档位、owner 隔离和 Backend 健康信息脱敏。ASR 的平台任务新增音频 SHA-256 `subject`，ASR 适配和媒体边界由 `backend/tests/asr-*.test.js`、Backend 全量测试及平台媒体专项覆盖；真实供应商质量仍未执行。
+
+浏览器管理台证据：本地临时服务使用 `52251` 端口、独立临时 SQLite 和独立无头 Chrome profile。页面在四个视口均连接到真实本地管理 API；Agent、规范、预算和调度写操作返回预期 HTTP 状态，并在成功后重新读取列表。主动分析启用由 Backend 所有权门禁拒绝，未发出写请求。完整安全摘要位于 `/tmp/ai-platform-browser-evidence-20260908/browser-evidence.json`，截图为 `desktop-1440x900.png`、`desktop-1024x768.png`、`mobile-390x844.png`、`mobile-360x800.png`。
+
+本轮尚未执行或尚未满足的重点包括：SEC-01 的完整过期/重放矩阵、SEC-04/SEC-05 工具与业务确认整合、COST-02 历史价格变更演练、全部业务入口的逐项 HTTP/历史回放证据、媒体清理的全生命周期证据、共享登录和生产访问控制、OPS-01/OPS-03/OPS-04，以及 INT-* 的完整共享整合验收和真实模型质量验收。UI-03/UI-04 的本地浏览器部分已通过，但共享登录、生产访问控制和生产部署仍未执行。它们必须在共享整合或另行授权后重新执行。
 
 | ID | 用例 | 通过标准 | 阶段 |
 | --- | --- | --- | --- |

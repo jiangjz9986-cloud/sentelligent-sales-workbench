@@ -4,11 +4,10 @@ import {
   SALES_DECISION_STAGES,
 } from "./salesDecisionSchema.js";
 import { resolveSalesDecisionPlaybook } from "./salesDecisionPlaybooks.js";
-import { readBoundedResponseText } from "../../http/request.js";
+import { runAiPlatformTextCompletion, textModelAvailability } from "../../aiPlatform/textAdapter.js";
 
 const IMPACT_PATTERN = /影响|导致|成本|效率|故障|风险|收入|停机|合规|患者|恢复|损失|压力/;
 const MINIMUM_SALES_DECISION_MODEL_TIMEOUT_MS = 120_000;
-const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
 const COMPLIANCE_PATTERNS = [
   { pattern: /回扣|返点|红包|利益输送|不当宴请/, flag: "疑似不当利益安排" },
   { pattern: /围标|串标|陪标|泄露标底|操纵采购/, flag: "疑似采购不当或围标串标" },
@@ -577,17 +576,6 @@ export function buildSalesDecisionMessages(inputContext = {}) {
   ];
 }
 
-function completionUrl(baseUrl) {
-  return `${String(baseUrl ?? "https://api.deepseek.com").replace(/\/+$/, "")}/chat/completions`;
-}
-
-function resolveModelApiKey(config = {}) {
-  if (typeof config.modelApiKeyProvider === "function") {
-    return String(config.modelApiKeyProvider() ?? "");
-  }
-  return String(config.modelApiKey ?? "");
-}
-
 function stripJsonFence(content) {
   const text = String(content ?? "").trim();
   const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
@@ -616,32 +604,27 @@ function sanitizeWritebackPreview(value) {
   };
 }
 
-async function callSalesDecisionModel(context, config, fetchImpl, externalSignal = null) {
-  const apiKey = resolveModelApiKey(config);
-  const response = await fetchImpl(completionUrl(config.modelBaseUrl), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+async function callSalesDecisionModel(context, config, options = {}) {
+  const content = await runAiPlatformTextCompletion({
+    config,
+    options: {
+      ...options,
+      fetchImpl: options.fetchImpl ?? fetch,
     },
-    body: JSON.stringify({
-      model: config.modelName ?? "deepseek-v4-flash",
-      messages: buildSalesDecisionMessages(context),
-      response_format: { type: "json_object" },
-      temperature: 0.1,
-      max_tokens: 12_000,
-      stream: false,
-    }),
-    signal: externalSignal ?? AbortSignal.timeout(resolveSalesDecisionModelTimeoutMs(config)),
+    taskType: options.proactive === true ? "proactive.analyze" : "sales-decision.analyze",
+    feature: options.proactive === true ? "proactive_assistant" : "sales_decision",
+    priority: options.proactive === true ? "background" : "interactive",
+    owner: options.owner ?? config.aiPlatformOwner,
+    actor: options.actor ?? config.aiPlatformActor,
+    subject: options.subject ?? (context?.opportunity?.id
+      ? { type: "opportunity", id: context.opportunity.id }
+      : context?.customer?.id ? { type: "customer", id: context.customer.id } : null),
+    channel: options.channel,
+    messages: buildSalesDecisionMessages(context),
+    maxTokens: 12_000,
+    idempotencyKey: options.idempotencyKey,
+    signal: options.signal ?? null,
   });
-  const bodyText = await readBoundedResponseText(response, {
-    maxBytes: MAX_MODEL_RESPONSE_BYTES,
-    errorMessage: "Sales decision model response is too large",
-  });
-  if (!response.ok) throw new Error(`sales decision model returned ${response.status}`);
-  const body = bodyText ? JSON.parse(bodyText) : {};
-  const content = body.choices?.[0]?.message?.content;
-  if (!content) throw new Error("sales decision model returned empty content");
   return JSON.parse(stripJsonFence(content));
 }
 
@@ -651,7 +634,8 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
     { source },
   );
   if (config.aiAnalysisMode !== "model") return fallback("mock");
-  if (!resolveModelApiKey(config)) {
+  const availability = textModelAvailability(config, options);
+  if (availability === "missing") {
     if (options.throwOnFailure) {
       const error = new Error("model_not_configured");
       error.code = "MODEL_NOT_CONFIGURED";
@@ -659,14 +643,15 @@ export async function analyzeSalesDecision(inputContext, config = {}, options = 
     }
     return fallback("mock_missing_model_key");
   }
+  if (availability !== "available") {
+    const error = new Error("AI platform text runtime is unavailable");
+    error.code = "AI_PLATFORM_NOT_CONFIGURED";
+    if (options.throwOnFailure) throw error;
+    return fallback("mock_model_fallback");
+  }
 
   try {
-    const parsed = await callSalesDecisionModel(
-      inputContext,
-      config,
-      options.fetchImpl ?? fetch,
-      options.signal ?? null,
-    );
+    const parsed = await callSalesDecisionModel(inputContext, config, options);
     const deterministic = buildDeterministicSalesDecision(inputContext);
     const recommendedStage = SALES_DECISION_STAGES.includes(parsed?.stage?.recommended)
       ? parsed.stage.recommended

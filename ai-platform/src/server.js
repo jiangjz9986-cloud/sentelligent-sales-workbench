@@ -6,17 +6,25 @@ import { basename, extname, relative, resolve, sep } from "node:path";
 import { loadAiPlatformConfig } from "./config.js";
 import { openAiPlatformDatabase } from "./db/index.js";
 import { asPlatformError, errorBody, AiPlatformError } from "./errors.js";
-import { authenticateRequest } from "./auth/internalAuth.js";
+import { authenticateRequest, consumeRequestNonce, verifyServiceToken } from "./auth/internalAuth.js";
+import { createRequestBinding } from "../../shared/aiPlatformRequestAuth.mjs";
 import { createProviderRegistry } from "./providers/mockProvider.js";
 import { createTaskService } from "./tasks/taskService.js";
 import { createAdminService } from "./admin/adminService.js";
 import { createScheduleService } from "./schedules/scheduleService.js";
+import { readOperationalControl, updateOperationalControl } from "./operations/control.js";
+import { createMediaStore } from "./media/store.js";
+import { applyDeploymentPolicy, normalizeDeploymentPolicy } from "./operations/deploymentPolicy.js";
+import { sha256 } from "../../shared/aiPlatformContract.mjs";
+import { createProviderCredentials } from "./providers/credentials.js";
+import { createTaskPayloadCodec } from "./tasks/payloadCodec.js";
 import { safeLimit, safeOffset } from "./utils.js";
 
-const PACKAGE_VERSION = "0.1.0";
+const PACKAGE_VERSION = "0.2.0";
 const ADMIN_PREFIX = "/internal/ai/v1/admin";
 const API_PREFIX = "/internal/ai/v1";
 const STATIC_PREFIXES = new Set(["/admin", "/ai-platform-admin"]);
+const requestBodies = new WeakMap();
 const MIME_TYPES = Object.freeze({
   ".css": "text/css; charset=utf-8",
   ".gif": "image/gif",
@@ -70,7 +78,12 @@ function methodNotAllowed(response, requestId, allow) {
   }, requestId, { Allow: allow });
 }
 
-async function readJsonBody(request, maxBytes) {
+async function readRequestBytes(request, maxBytes) {
+  if (requestBodies.has(request)) {
+    const cached = requestBodies.get(request).raw;
+    if (cached.length > maxBytes) throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
+    return cached;
+  }
   const declared = Number(request.headers["content-length"] ?? 0);
   if (Number.isSafeInteger(declared) && declared > maxBytes) {
     throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
@@ -82,13 +95,22 @@ async function readJsonBody(request, maxBytes) {
     if (size > maxBytes) throw new AiPlatformError("request body is too large", { code: "payload_too_large", status: 413 });
     chunks.push(chunk);
   }
-  if (!size) return {};
-  const text = Buffer.concat(chunks).toString("utf8");
+  const raw = Buffer.concat(chunks);
+  requestBodies.set(request, { raw });
+  return raw;
+}
+
+async function readJsonBody(request, maxBytes) {
+  const raw = await readRequestBytes(request, maxBytes);
+  if (!raw.length) return {};
+  if (requestBodies.get(request).value) return requestBodies.get(request).value;
+  const text = raw.toString("utf8");
   try {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("body must be an object");
     }
+    requestBodies.set(request, { raw, value: parsed });
     return parsed;
   } catch {
     throw new AiPlatformError("request body must be valid JSON", { code: "invalid_json", status: 400 });
@@ -159,6 +181,12 @@ function pickBodyFields(body, fields) {
     .map((field) => [field, body[field]]));
 }
 
+function omitBodyFields(body, fields) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+  const omitted = new Set(fields);
+  return Object.fromEntries(Object.entries(body).filter(([field]) => !omitted.has(field)));
+}
+
 function copyQueryFields(url, target, fields) {
   for (const field of fields) {
     const value = url.searchParams.get(field);
@@ -196,7 +224,11 @@ async function serveStatic(request, response, config, requestId) {
     methodNotAllowed(response, requestId, "GET, HEAD");
     return;
   }
-  const pathname = new URL(request.url ?? "/", "http://ai-platform.local").pathname;
+  const requestUrl = new URL(request.url ?? "/", "http://ai-platform.local");
+  const pathname = requestUrl.pathname;
+  if (pathname === "/admin" || pathname === "/ai-platform-admin") {
+    return sendEmpty(response, 308, requestId, { Location: `${pathname}/${requestUrl.search}` });
+  }
   const filePath = staticPathFor(config.staticDirectory, pathname);
   let fileStat;
   try {
@@ -223,16 +255,35 @@ export function createAiPlatformRuntime(options = {}) {
   const config = loadAiPlatformConfig(options.config ?? options, options.env ?? process.env);
   const ownsDatabase = !options.db;
   const db = options.db ?? openAiPlatformDatabase(config.databasePath);
-  const providerRegistry = options.providerRegistry ?? createProviderRegistry();
+  const payloadCodec = createTaskPayloadCodec({
+    encryptionKey: config.taskEncryptionKey,
+    required: config.nodeEnv === "production" && config.executionMode === "external-provider",
+  });
+  const mediaStore = options.mediaStore ?? (config.mediaDirectory ? createMediaStore({
+    db, directory: config.mediaDirectory, encryptionKey: config.mediaEncryptionKey,
+    maxBytes: config.mediaMaxBytes, capacityBytes: config.mediaCapacityBytes,
+  }) : null);
+  const providerCredentials = config.credentialEncryptionKey ? createProviderCredentials({
+    db, encryptionKey: config.credentialEncryptionKey, policies: config.providerPolicies, env: options.env ?? process.env,
+  }) : null;
+  const providerRegistry = options.providerRegistry ?? createProviderRegistry({
+    config,
+    env: options.env ?? process.env,
+    fetchImpl: options.providerFetchImpl ?? fetch,
+    credentialResolver: providerCredentials?.resolve,
+  });
   const taskService = options.taskService ?? createTaskService({
     db,
     config,
     providerRegistry,
+    mediaStore,
+    payloadCodec,
     clock: options.clock,
     logger: options.logger,
   });
   const adminService = options.adminService ?? createAdminService({
     db,
+    payloadCodec,
     clock: options.clock,
     timeZone: options.timeZone,
   });
@@ -245,7 +296,19 @@ export function createAiPlatformRuntime(options = {}) {
   });
   if (options.autoStart !== false && !options.taskService) taskService.start();
   if (options.autoStart !== false && !options.scheduleService) scheduleService.start();
-  let closed = false;
+  taskService.prunePayloads?.();
+  mediaStore?.sweep();
+  const mediaSweepTimer = setInterval(() => {
+    try {
+      mediaStore?.sweep();
+      taskService.prunePayloads?.();
+    } catch {
+      taskService.pause?.();
+      options.logger?.error?.("media cleanup failed; task execution paused");
+    }
+  }, 5_000);
+  mediaSweepTimer?.unref?.();
+  let closing = null;
   return Object.freeze({
     config,
     db,
@@ -253,12 +316,31 @@ export function createAiPlatformRuntime(options = {}) {
     taskService,
     adminService,
     scheduleService,
+    mediaStore,
+    providerCredentials,
+    async drain() {
+      taskService.pause?.();
+      scheduleService.stop?.();
+      await scheduleService.drain?.();
+      await taskService.drain?.();
+    },
     close() {
-      if (closed) return;
-      closed = true;
-      taskService.close?.();
-      scheduleService.close?.();
-      if (ownsDatabase) db.close();
+      if (!closing) {
+        taskService.pause?.();
+        scheduleService.close?.();
+        closing = (async () => {
+          await scheduleService.drain?.();
+          await taskService.drain?.();
+          await taskService.close?.();
+          clearInterval(mediaSweepTimer);
+          mediaStore?.sweep();
+          if (ownsDatabase) db.close();
+        })().catch((error) => {
+          closing = null;
+          throw error;
+        });
+      }
+      return closing;
     },
   });
 }
@@ -267,15 +349,36 @@ export function createServer(options = {}) {
   const runtime = options.runtime ?? createAiPlatformRuntime(options);
   const { config, db, taskService, scheduleService } = runtime;
   const logger = options.logger ?? console;
+  const nonceConsumed = new WeakSet();
 
   async function authenticate(request, scopes, { admin = false } = {}) {
     if (admin && config.adminEnabled === false) {
       throw new AiPlatformError("AI platform administration is disabled", { code: "admin_disabled", status: 404 });
     }
-    return authenticateRequest(request, config, {
+    let requestBinding = null;
+    if (config.requestBindingRequired) {
+      const match = String(request.headers.authorization ?? "").match(/^Bearer\s+(.+)$/iu);
+      if (!match) throw new AiPlatformError("authentication required", { code: "missing_auth", status: 401 });
+      verifyServiceToken(match[1], { secret: config.authSecret, expectedIssuer: config.trustedIssuer, requiredScopes: scopes });
+      const upload = request.method === "POST" && new URL(request.url, "http://internal").pathname === API_PREFIX + "/media";
+      await readRequestBytes(request, upload ? config.mediaMaxBytes : config.bodyLimitBytes);
+      requestBinding = createRequestBinding({
+        method: request.method,
+        path: request.url,
+        body: requestBodies.get(request).raw,
+        idempotencyKey: request.headers["idempotency-key"] ?? null,
+      });
+    }
+    const auth = authenticateRequest(request, config, {
       requiredScopes: scopes,
       allowDevAdmin: admin,
+      requestBinding,
     });
+    if (config.requestBindingRequired && !nonceConsumed.has(request)) {
+      consumeRequestNonce(db, auth);
+      nonceConsumed.add(request);
+    }
+    return auth;
   }
 
   async function adminCall(name, args) {
@@ -302,6 +405,20 @@ export function createServer(options = {}) {
       { admin: true },
     );
     const identity = identityForTask(auth);
+    if (parts.length === 3 && parts[0] === "providers" && parts[2] === "credential") {
+      const provider = config.providerPolicies.find((item) => item.id === parts[1]);
+      if (!provider || !runtime.providerCredentials) throw new AiPlatformError("credential storage unavailable", { code: "credential_storage_unavailable", status: 503 });
+      if (method === "GET") return sendJson(response, 200, { item: runtime.providerCredentials.metadata(provider.credentialEnv) }, requestId);
+      if (!["POST", "DELETE"].includes(method)) return methodNotAllowed(response, requestId, "GET, POST, DELETE");
+      const writeAuth = await authenticate(request, ["ai:admin:credential"], { admin: true });
+      const body = await readJsonBody(request, config.bodyLimitBytes);
+      if (Object.keys(body).some((key) => !["apiKey", "confirmation", "expectedRevision"].includes(key))
+        || (method === "DELETE" && body.confirmation !== "CLEAR")) throw new AiPlatformError("invalid credential update", { code: "invalid_request", status: 422 });
+      const item = runtime.providerCredentials.update({
+        id: provider.credentialEnv, value: body.apiKey, clear: method === "DELETE", expectedRevision: body.expectedRevision, actor: writeAuth.actor,
+      });
+      return sendJson(response, 200, { item }, requestId);
+    }
     if (parts.length === 0 || (parts.length === 1 && parts[0] === "health")) {
       if (method !== "GET") return methodNotAllowed(response, requestId, "GET");
       return sendJson(response, 200, { item: healthSnapshot(runtime) }, requestId);
@@ -492,7 +609,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateAgent", {
         identity: identityForTask(writeAuth),
         agentId: resourceId,
-        draft: body,
+        draft: omitBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion", "expectedReleaseId"]),
         ...pickBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion", "expectedReleaseId"]),
         requestId,
       }) }, requestId);
@@ -524,7 +641,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateStandard", {
         identity: identityForTask(writeAuth),
         standardId: resourceId,
-        patch: body,
+        patch: omitBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion"]),
         ...pickBodyFields(body, ["expectedUpdatedAt", "expectedVersionId", "expectedVersion"]),
         requestId,
       }) }, requestId);
@@ -534,7 +651,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateBudget", {
         identity: identityForTask(writeAuth),
         policyId: resourceId,
-        patch: body,
+        patch: omitBodyFields(body, ["expectedUpdatedAt"]),
         ...pickBodyFields(body, ["expectedUpdatedAt"]),
         requestId,
       }) }, requestId);
@@ -544,7 +661,7 @@ export function createServer(options = {}) {
       return sendJson(response, 200, { item: await adminCall("updateSchedule", {
         identity: identityForTask(writeAuth),
         scheduleId: resourceId,
-        patch: body,
+        patch: omitBodyFields(body, ["expectedUpdatedAt"]),
         ...pickBodyFields(body, ["expectedUpdatedAt"]),
         requestId,
       }) }, requestId);
@@ -556,6 +673,52 @@ export function createServer(options = {}) {
     const suffix = url.pathname.slice(API_PREFIX.length);
     const parts = pathParts(suffix);
     if (parts[0] === "admin") return handleAdmin(request, response, requestId, url);
+    if (parts[0] === "media") {
+      const upload = request.method === "POST" && parts.length === 1;
+      const discard = request.method === "DELETE" && parts.length === 2;
+      if (!upload && !discard) throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
+      const auth = await authenticate(request, [upload ? "ai:media:write" : "ai:media:delete"]);
+      if (!runtime.mediaStore) throw new AiPlatformError("media storage unavailable", { code: "media_unavailable", status: 503 });
+      if (discard) return sendJson(response, 200, { item: runtime.mediaStore.discard({ id: parts[1], owner: auth.owner }) }, requestId);
+      if (!taskService.status().admissionOpen) throw new AiPlatformError("AI platform is draining", { code: "service_draining", status: 503 });
+      if ([...url.searchParams.keys()].some((key) => !["mediaType", "sha256"].includes(key))) {
+        throw new AiPlatformError("invalid upload metadata", { code: "invalid_request", status: 400 });
+      }
+      const bytes = await readRequestBytes(request, config.mediaMaxBytes);
+      const item = runtime.mediaStore.put({ owner: auth.owner, bytes, mediaType: url.searchParams.get("mediaType"), sha256: url.searchParams.get("sha256") });
+      return sendJson(response, 201, { item }, requestId);
+    }
+    if (parts[0] === "operations") {
+      const read = request.method === "GET" && parts.length === 1;
+      const write = request.method === "POST" && parts.length === 2 && ["drain", "resume", "policy", "policy-preview"].includes(parts[1]);
+      if (!read && !write) throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
+      const auth = await authenticate(request, [read ? "ai:ops:read" : "ai:ops:write"]);
+      if (read) return sendJson(response, 200, { item: { ...readOperationalControl(db), executor: taskService.status(), queue: queueSnapshot(db) } }, requestId);
+      const body = await readJsonBody(request, config.bodyLimitBytes);
+      if (parts[1] === "policy-preview") {
+        if (Object.keys(body).some((key) => key !== "policy")) throw new AiPlatformError("invalid policy request", { code: "invalid_request", status: 400 });
+        const policy = normalizeDeploymentPolicy(body.policy, config);
+        return sendJson(response, 200, { item: { id: policy.id, digest: sha256(policy), models: policy.models.length, agents: policy.agents.length } }, requestId);
+      }
+      if (parts[1] === "policy") {
+        if (Object.keys(body).some((key) => !["policy", "expectedDigest", "expectedGeneration"].includes(key))) throw new AiPlatformError("invalid policy request", { code: "invalid_request", status: 400 });
+        const item = applyDeploymentPolicy({ db, config, policy: body.policy, expectedDigest: body.expectedDigest, expectedGeneration: body.expectedGeneration, identity: auth });
+        return sendJson(response, 200, { item }, requestId);
+      }
+      if (Object.keys(body).some((key) => key !== "expectedGeneration")) {
+        throw new AiPlatformError("unexpected operation field", { code: "invalid_request", status: 400 });
+      }
+      const paused = parts[1] === "drain";
+      updateOperationalControl(db, { paused, expectedGeneration: body.expectedGeneration, identity: auth });
+      if (paused) {
+        await runtime.drain();
+        if (queueSnapshot(db).running > 0) throw new AiPlatformError("another executor is still running", { code: "drain_incomplete", status: 503 });
+      } else {
+        taskService.resume();
+        scheduleService.start();
+      }
+      return sendJson(response, 200, { item: { ...readOperationalControl(db), executor: taskService.status(), queue: queueSnapshot(db) } }, requestId);
+    }
     if (parts[0] !== "tasks") throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
 
     const method = request.method ?? "GET";
@@ -629,6 +792,7 @@ export function createServer(options = {}) {
       const staticPrefix = [...STATIC_PREFIXES].find((prefix) => url.pathname === prefix || url.pathname.startsWith(`${prefix}/`));
       if (staticPrefix) return await serveStatic(request, response, config, requestId);
       if (url.pathname === API_PREFIX || url.pathname.startsWith(`${API_PREFIX}/`)) {
+        if (config.requestBindingRequired) await authenticate(request, []);
         return await handleApi(request, response, requestId, url);
       }
       throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
@@ -647,9 +811,22 @@ export function createServer(options = {}) {
   });
   server.aiPlatform = runtime;
   server.health = health;
+  let shutdown = null;
+  let httpShutdown = null;
   server.closeAiPlatform = (callback) => {
-    runtime.close();
-    server.close(callback);
+    if (!shutdown) {
+      runtime.taskService.pause?.();
+      runtime.scheduleService.close?.();
+      httpShutdown ??= new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+      shutdown = Promise.all([httpShutdown, runtime.drain()]).then(() => runtime.close()).catch((error) => {
+        shutdown = null;
+        throw error;
+      });
+    }
+    if (typeof callback === "function") shutdown.then(() => callback(), callback);
+    return shutdown;
   };
   return server;
 }
@@ -658,18 +835,22 @@ function healthSnapshot(runtime, requestId = null) {
   let database = "ready";
   try { runtime.db.prepare("SELECT 1 AS ok").get(); } catch { database = "unavailable"; }
   const queue = database === "ready" ? queueSnapshot(runtime.db) : null;
+  const executor = database === "ready" ? runtime.taskService.status?.() ?? null : null;
   return {
-    status: database === "ready" ? "ok" : "degraded",
+    status: database !== "ready" ? "degraded" : executor?.admissionOpen === false ? "paused" : "ok",
     service: "sentelligent-ai-unified-platform",
     version: PACKAGE_VERSION,
     database,
     providers: runtime.providerRegistry.list().map((provider) => ({ id: provider.id, kind: provider.kind })),
     externalProvidersEnabled: runtime.config.externalProvidersEnabled,
     executionMode: runtime.config.executionMode,
+    proactiveScheduleOwner: runtime.config.proactiveScheduleOwner,
     targetModel: runtime.config.targetModel,
     targetReasoningEffort: runtime.config.targetReasoningEffort,
     adminEnabled: runtime.config.adminEnabled,
     queue,
+    tasks: database === "ready" ? runtime.taskService.configurationReadiness?.() ?? {} : {},
+    executor,
     ...(requestId ? { requestId } : {}),
   };
 }

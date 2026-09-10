@@ -669,6 +669,7 @@ export function createProactiveScanRepository(db, {
   function completeEvent(idValue, input = {}) {
     const id = identifier(idValue, "event id");
     const leaseToken = text(input.leaseToken, "leaseToken", 500);
+    const skippedSubjects = integer(input.skippedSubjects ?? 0, "skippedSubjects", { min: 0, max: 10_000 });
     const current = clockDate(clock);
     const nowIso = current.toISOString();
     return withImmediateTransaction(db, () => {
@@ -682,9 +683,13 @@ export function createProactiveScanRepository(db, {
       const result = db.prepare(`
         UPDATE proactive_scan_events
            SET status = 'completed', lease_token_hash = NULL, lease_expires_at = NULL,
-               completed_at = $now, last_error_code = NULL, last_error_text = NULL, updated_at = $now
+               completed_at = $now, last_error_code = $completionCode, last_error_text = $completionText, updated_at = $now
          WHERE id = $id AND status = 'processing' AND lease_token_hash = $leaseTokenHash
-      `).run({ $id: id, $leaseTokenHash: hash(leaseToken), $now: nowIso });
+      `).run({
+        $id: id, $leaseTokenHash: hash(leaseToken), $now: nowIso,
+        $completionCode: skippedSubjects > 0 ? "PROACTIVE_SUBJECT_UNAVAILABLE" : null,
+        $completionText: skippedSubjects > 0 ? `Skipped ${skippedSubjects} unavailable customer subject(s)` : null,
+      });
       if (Number(result.changes) !== 1) throw eventLeaseLost();
       return { item: mapEvent(selectEvent(id)), replayed: false };
     });

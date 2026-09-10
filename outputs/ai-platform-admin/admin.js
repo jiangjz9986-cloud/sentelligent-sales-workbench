@@ -1,7 +1,9 @@
 (() => {
   "use strict";
 
-  const API_BASE = "/internal/ai/v1/admin";
+  const BUSINESS_PROXY = location.pathname.startsWith("/api/ai-platform/console/");
+  const API_BASE = BUSINESS_PROXY ? "/api/ai-platform/admin" : "/internal/ai/v1/admin";
+  let sessionCsrf = "";
   const PAGE_SIZE = 20;
 
   const copy = Object.freeze({
@@ -160,6 +162,104 @@
     runtimeUnknown: "\u672A\u77E5",
     refreshStarted: "\u5DF2\u53D1\u8D77\u5237\u65B0",
     refreshFinished: "\u6570\u636E\u5DF2\u5237\u65B0",
+    save: "\u4FDD\u5B58",
+    cancel: "\u53D6\u6D88",
+    close: "\u5173\u95ED",
+    create: "\u65B0\u5EFA",
+    edit: "\u7F16\u8F91",
+    publish: "\u53D1\u5E03",
+    rollback: "\u56DE\u6EDA",
+    inspect: "\u67E5\u770B",
+    enable: "\u542F\u7528",
+    disable: "\u505C\u7528",
+    cancelTask: "\u53D6\u6D88\u4EFB\u52A1",
+    taskDetail: "\u4EFB\u52A1\u8BE6\u60C5",
+    newAgent: "\u65B0\u5EFA Agent",
+    editAgent: "\u7F16\u8F91 Agent",
+    publishAgent: "\u53D1\u5E03 Agent",
+    rollbackAgent: "\u56DE\u6EDA Agent",
+    newStandard: "\u65B0\u5EFA\u89C4\u8303",
+    editStandard: "\u7F16\u8F91\u89C4\u8303",
+    editBudget: "\u7F16\u8F91\u9884\u7B97",
+    editSchedule: "\u7F16\u8F91\u8C03\u5EA6",
+    version: "\u7248\u672C",
+    taskTypes: "\u4EFB\u52A1\u7C7B\u578B",
+    systemPrompt: "\u7CFB\u7EDF Prompt",
+    modelPolicy: "\u6A21\u578B\u7B56\u7565 JSON",
+    instructions: "\u6267\u884C\u89C4\u5219 JSON",
+    inputSchema: "\u8F93\u5165 Schema JSON",
+    outputSchema: "\u8F93\u51FA Schema JSON",
+    standardIds: "\u89C4\u8303\u7248\u672C ID",
+    limits: "\u6267\u884C\u9650\u5236 JSON",
+    content: "\u89C4\u8303\u5185\u5BB9",
+    rules: "\u89C4\u5219 JSON",
+    testRunId: "\u6D4B\u8BD5\u8FD0\u884C ID",
+    testRunRequired: "\u53D1\u5E03\u5FC5\u987B\u63D0\u4F9B\u6D4B\u8BD5\u8FD0\u884C ID",
+    targetVersion: "\u76EE\u6807\u7248\u672C",
+    amountMicro: "\u9884\u7B97\u989D\u5EA6\uFF08micro\uFF09",
+    callLimit: "\u8C03\u7528\u6B21\u6570\u4E0A\u9650",
+    warningPercent: "\u9884\u8B66\u767E\u5206\u6BD4",
+    intervalSeconds: "\u8FD0\u884C\u95F4\u9694\uFF08\u79D2\uFF09",
+    inputTemplate: "\u8F93\u5165\u6A21\u677F JSON",
+    saveSuccess: "\u4FDD\u5B58\u6210\u529F",
+    publishSuccess: "\u53D1\u5E03\u6210\u529F",
+    rollbackSuccess: "\u56DE\u6EDA\u6210\u529F",
+    actionFailed: "\u64CD\u4F5C\u5931\u8D25",
+    conflictDetail: "\u914D\u7F6E\u5DF2\u88AB\u5176\u4ED6\u7BA1\u7406\u5458\u4FEE\u6539\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5",
+    permissionActionDetail: "\u5F53\u524D\u8D26\u53F7\u6CA1\u6709\u6267\u884C\u6B64\u5199\u5165\u64CD\u4F5C\u7684\u6743\u9650",
+    testRunPlaceholder: "offline-2026-09-08-001",
+    jsonInvalid: "JSON \u683C\u5F0F\u4E0D\u6B63\u786E",
+    noPreviousVersion: "\u6CA1\u6709\u53EF\u56DE\u6EDA\u7684\u7248\u672C",
+    loadingAction: "\u6B63\u5728\u63D0\u4EA4",
+    save: "\u4FDD\u5B58",
+    cancel: "\u53D6\u6D88",
+    close: "\u5173\u95ED",
+    create: "\u65B0\u5EFA",
+    edit: "\u7F16\u8F91",
+    publish: "\u53D1\u5E03",
+    rollback: "\u56DE\u6EDA",
+    inspect: "\u67E5\u770B",
+    enable: "\u542F\u7528",
+    disable: "\u505C\u7528",
+    cancelTask: "\u53D6\u6D88\u4EFB\u52A1",
+    taskDetail: "\u4EFB\u52A1\u8BE6\u60C5",
+    newAgent: "\u65B0\u5EFA Agent",
+    editAgent: "\u7F16\u8F91 Agent",
+    publishAgent: "\u53D1\u5E03 Agent",
+    rollbackAgent: "\u56DE\u6EDA Agent",
+    newStandard: "\u65B0\u5EFA\u89C4\u8303",
+    editStandard: "\u7F16\u8F91\u89C4\u8303",
+    editBudget: "\u7F16\u8F91\u9884\u7B97",
+    editSchedule: "\u7F16\u8F91\u8C03\u5EA6",
+    version: "\u7248\u672C",
+    taskTypes: "\u4EFB\u52A1\u7C7B\u578B",
+    systemPrompt: "\u7CFB\u7EDF Prompt",
+    modelPolicy: "\u6A21\u578B\u7B56\u7565 JSON",
+    instructions: "\u6267\u884C\u89C4\u5219 JSON",
+    inputSchema: "\u8F93\u5165 Schema JSON",
+    outputSchema: "\u8F93\u51FA Schema JSON",
+    standardIds: "\u89C4\u8303\u7248\u672C ID",
+    limits: "\u6267\u884C\u9650\u5236 JSON",
+    content: "\u89C4\u8303\u5185\u5BB9",
+    rules: "\u89C4\u5219 JSON",
+    testRunId: "\u6D4B\u8BD5\u8FD0\u884C ID",
+    testRunRequired: "\u53D1\u5E03\u5FC5\u987B\u63D0\u4F9B\u6D4B\u8BD5\u8FD0\u884C ID",
+    targetVersion: "\u76EE\u6807\u7248\u672C",
+    amountMicro: "\u9884\u7B97\u989D\u5EA6\uFF08micro\uFF09",
+    callLimit: "\u8C03\u7528\u6B21\u6570\u4E0A\u9650",
+    warningPercent: "\u9884\u8B66\u767E\u5206\u6BD4",
+    intervalSeconds: "\u8FD0\u884C\u95F4\u9694\uFF08\u79D2\uFF09",
+    inputTemplate: "\u8F93\u5165\u6A21\u677F JSON",
+    saveSuccess: "\u4FDD\u5B58\u6210\u529F",
+    publishSuccess: "\u53D1\u5E03\u6210\u529F",
+    rollbackSuccess: "\u56DE\u6EDA\u6210\u529F",
+    actionFailed: "\u64CD\u4F5C\u5931\u8D25",
+    conflictDetail: "\u914D\u7F6E\u5DF2\u88AB\u5176\u4ED6\u7BA1\u7406\u5458\u4FEE\u6539\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5",
+    permissionActionDetail: "\u5F53\u524D\u8D26\u53F7\u6CA1\u6709\u6267\u884C\u6B64\u5199\u5165\u64CD\u4F5C\u7684\u6743\u9650",
+    testRunPlaceholder: "offline-2026-09-08-001",
+    jsonInvalid: "JSON \u683C\u5F0F\u4E0D\u6B63\u786E",
+    noPreviousVersion: "\u6CA1\u6709\u53EF\u56DE\u6EDA\u7684\u7248\u672C",
+    loadingAction: "\u6B63\u5728\u63D0\u4EA4",
   });
 
   const RESOURCE_DEFINITIONS = Object.freeze({
@@ -170,6 +270,7 @@
     models: { path: "/models", kind: "list", label: copy.navModels },
     schedules: { path: "/schedules", kind: "list", label: copy.navSchedules },
     costs: { path: "/costs", kind: "object", label: copy.navCosts },
+    budgets: { path: "/budgets", kind: "list", label: copy.navCosts },
   });
 
   const state = {
@@ -186,6 +287,14 @@
         fetchedAt: null,
       }]),
     ),
+    modal: {
+      open: false,
+      title: "",
+      content: "",
+      footer: "",
+      context: null,
+      pending: false,
+    },
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -306,8 +415,8 @@
     return `<svg class="ui-icon" aria-hidden="true"><use href="#icon-${escapeHtml(name)}"></use></svg>`;
   }
 
-  function createError(kind, status = 0, code = null, requestId = null) {
-    return { kind, status, code: text(code, null), requestId: text(requestId, null) };
+  function createError(kind, status = 0, code = null, requestId = null, message = null) {
+    return { kind, status, code: text(code, null), requestId: text(requestId, null), message: text(message, null) };
   }
 
   function isLocalDevelopmentHost() {
@@ -320,7 +429,8 @@
 
   function requestHeaders() {
     const headers = { Accept: "application/json" };
-    if (isLocalDevelopmentHost()) headers["X-AI-Platform-Dev-Auth"] = "1";
+    if (!BUSINESS_PROXY && isLocalDevelopmentHost()) headers["X-AI-Platform-Dev-Auth"] = "1";
+    if (BUSINESS_PROXY && sessionCsrf) headers["X-CSRF-Token"] = sessionCsrf;
     return headers;
   }
 
@@ -328,10 +438,46 @@
     const payloadCode = isRecord(payload)
       ? firstDefined(payload, ["errorCode", "code", "error.code"])
       : undefined;
+    const payloadMessage = isRecord(payload)
+      ? firstDefined(payload, ["message", "error.message", "error.detail"])
+      : undefined;
     if (response.status === 401 || response.status === 403) {
-      return createError("forbidden", response.status, payloadCode || "admin_forbidden", requestId);
+      return createError("forbidden", response.status, payloadCode || "admin_forbidden", requestId, payloadMessage);
     }
-    return createError("server", response.status, payloadCode || `http_${response.status}`, requestId);
+    return createError("server", response.status, payloadCode || `http_${response.status}`, requestId, payloadMessage);
+  }
+
+  async function requestJson(path, { method = "GET", body = undefined, signal = undefined } = {}) {
+    if (location.protocol === "file:") {
+      throw createError("file", 0, "file_protocol", null, copy.fileProtocolDetail);
+    }
+    const headers = requestHeaders();
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    let response;
+    try {
+      response = await fetch(`${API_BASE}${path}`, {
+        method,
+        credentials: "same-origin",
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
+      throw createError("network", 0, "network_unavailable", null, error?.message || copy.serviceUnavailableDetail);
+    }
+    const requestId = response.headers.get("x-request-id") || response.headers.get("x-correlation-id");
+    const raw = await response.text();
+    let payload = null;
+    if (raw.trim()) {
+      try { payload = JSON.parse(raw); } catch { payload = null; }
+    }
+    if (!response.ok) {
+      const error = errorForResponse(response, payload, requestId);
+      error.payload = payload;
+      throw error;
+    }
+    return { data: unwrapPayload(payload), payload, requestId, response };
   }
 
   async function fetchResource(key, generation, signal) {
@@ -398,6 +544,15 @@
   }
 
   async function loadAll() {
+    if (BUSINESS_PROXY) {
+      try {
+        const response = await fetch("/api/auth/session", { credentials: "same-origin", cache: "no-store" });
+        const session = response.ok ? await response.json() : null;
+        sessionCsrf = session?.role === "admin" && typeof session.csrfToken === "string" ? session.csrfToken : "";
+      } catch {
+        sessionCsrf = "";
+      }
+    }
     if (state.controller) state.controller.abort();
     const controller = new AbortController();
     const generation = state.generation + 1;
@@ -785,17 +940,18 @@
   function taskTableMarkup(items, key = "tasks", { limit = null, filters = false } = {}) {
     const resource = state.resources[key];
     if (!resource || resource.status === "idle" || resource.status === "loading" || resource.status === "error" || resource.status === "forbidden") {
-      return `<table class="data-table"><tbody>${tableStateRow(key, 6)}</tbody></table>`;
+      return `<table class="data-table"><tbody>${tableStateRow(key, 7)}</tbody></table>`;
     }
     const visible = limit ? items.slice(0, limit) : items;
     if (!visible.length) {
       const mode = filters ? "filter-empty" : "empty";
-      return `<table class="data-table"><tbody>${tableStateRow(key, 6, mode)}</tbody></table>`;
+      return `<table class="data-table"><tbody>${tableStateRow(key, 7, mode)}</tbody></table>`;
     }
-    const header = `<thead><tr><th>${escapeHtml(copy.taskColTask)}</th><th class="hide-on-mobile">${escapeHtml(copy.taskColType)}</th><th>${escapeHtml(copy.taskColStatus)}</th><th class="hide-on-mobile">${escapeHtml(copy.taskColSource)}</th><th class="hide-on-mobile">${escapeHtml(copy.taskColRequested)}</th><th>${escapeHtml(copy.taskColAttempt)}</th></tr></thead>`;
+    const header = `<thead><tr><th>${escapeHtml(copy.taskColTask)}</th><th class="hide-on-mobile">${escapeHtml(copy.taskColType)}</th><th>${escapeHtml(copy.taskColStatus)}</th><th class="hide-on-mobile">${escapeHtml(copy.taskColSource)}</th><th class="hide-on-mobile">${escapeHtml(copy.taskColRequested)}</th><th>${escapeHtml(copy.taskColAttempt)}</th><th class="actions-column">${escapeHtml(copy.details)}</th></tr></thead>`;
     const rows = visible.map((task) => {
       const secondary = [task.feature, task.channel].filter((value) => value && value !== "--").join(" / ");
       const version = [task.source, task.agentVersion !== "--" ? task.agentVersion : null].filter(Boolean).join(" / ");
+      const canCancel = ["queued", "running"].includes(task.status);
       return `<tr>
         <td><span class="primary-cell mono-cell">${displayValue(task.id)}</span><span class="secondary-cell">${displayValue(secondary || task.requestId || "--")}</span></td>
         <td class="hide-on-mobile"><span class="primary-cell">${displayValue(task.taskType)}</span><span class="secondary-cell">${displayValue(task.priority)}</span></td>
@@ -803,6 +959,7 @@
         <td class="hide-on-mobile"><span class="primary-cell">${displayValue(version || "--")}</span><span class="secondary-cell">${displayValue(task.model)}</span></td>
         <td class="hide-on-mobile"><span class="primary-cell">${displayValue(formatDate(task.requestedAt))}</span><span class="secondary-cell">${displayValue(task.completedAt ? formatDate(task.completedAt) : "--")}</span></td>
         <td><span class="primary-cell">${displayValue(task.currentAttempt ?? "--")}</span><span class="secondary-cell">${displayValue(task.owner)}</span></td>
+        <td class="actions-cell"><button class="table-action" type="button" data-action="task-detail" data-task-id="${escapeHtml(task.id)}" title="${escapeHtml(copy.taskDetail)}">${icon("arrow-up-right")}</button>${canCancel ? `<button class="table-action is-danger" type="button" data-action="task-cancel" data-task-id="${escapeHtml(task.id)}" title="${escapeHtml(copy.cancelTask)}">${icon("x")}</button>` : ""}</td>
       </tr>`;
     }).join("");
     return `<table class="data-table">${header}<tbody>${rows}</tbody></table>`;
@@ -841,6 +998,11 @@
       version: text(firstDefined(row, ["activeVersion.version", "latestVersion.version", "activeVersion.versionId", "latestVersion.versionId", "activeVersionId", "active_version_id", "publishedVersion", "published_version", "activeVersion.id", "latestVersion.id"]), copy.noVersion),
       taskTypes: Array.isArray(taskTypes) && taskTypes.length ? taskTypes : (Array.isArray(nestedTaskTypes) ? nestedTaskTypes : []),
       standards: parseJson(firstDefined(row, ["standards", "standardIds", "standard_ids"]), []),
+      activeVersionId: text(firstDefined(row, ["activeVersion.id", "active_version.id", "activeVersionId", "active_version_id"]), ""),
+      latestVersionId: text(firstDefined(row, ["latestVersion.id", "latest_version.id", "latestVersionId", "latest_version_id"]), ""),
+      draftVersionId: text(firstDefined(row, ["draftVersionId", "draft_version_id"]), ""),
+      activeReleaseId: text(firstDefined(row, ["activeRelease.id", "active_release.id", "activeReleaseId", "active_release_id"]), ""),
+      versionCount: number(firstDefined(row, ["versionCount", "version_count"])) ?? 0,
       updatedAt: firstDefined(row, ["updatedAt", "updated_at", "publishedAt", "published_at"]),
     };
   }
@@ -863,7 +1025,7 @@
     return `<div class="agent-row">
       <span class="entity-mark ${markTone}">AG</span>
       <div class="entity-copy"><strong>${displayValue(agent.name)}</strong><span>${displayValue(agent.slug)} / ${displayValue(taskText)}</span></div>
-      <div class="entity-meta">${statusBadge(lifecycle)}<span class="version-tag">${displayValue(agent.version)}</span></div>
+      <div class="entity-meta">${statusBadge(lifecycle)}<span class="version-tag">${displayValue(agent.version)}</span><div class="row-actions"><button class="table-action" type="button" data-action="agent-edit" data-agent-id="${escapeHtml(agent.id)}" title="${escapeHtml(copy.edit)}">${icon("sliders-horizontal")}</button>${lifecycle === "draft" || agent.releaseStatus === "draft" || Boolean(agent.draftVersionId) ? `<button class="table-action is-primary" type="button" data-action="agent-publish" data-agent-id="${escapeHtml(agent.id)}" title="${escapeHtml(copy.publish)}">${icon("check-circle")}</button>` : ""}${lifecycle === "active" && agent.versionCount > 1 ? `<button class="table-action" type="button" data-action="agent-rollback" data-agent-id="${escapeHtml(agent.id)}" title="${escapeHtml(copy.rollback)}">${icon("refresh-cw")}</button>` : ""}</div></div>
     </div>`;
   }
 
@@ -897,6 +1059,8 @@
       description: text(firstDefined(row, ["description"]), copy.noDescription),
       lifecycle: text(firstDefined(row, ["lifecycle", "status"]), "unknown").toLowerCase(),
       version: text(firstDefined(row, ["latestVersion.version", "latest_version.version", "latestVersion.versionId", "latest_version.versionId", "latestVersion.id", "latest_version.id", "activeVersionId", "active_version_id"]), copy.noVersion),
+      latestVersionId: text(firstDefined(row, ["latestVersion.id", "latest_version.id", "latestVersionId", "latest_version_id"]), ""),
+      versionCount: number(firstDefined(row, ["versionCount", "version_count"])) ?? 0,
       updatedAt: firstDefined(row, ["updatedAt", "updated_at", "createdAt", "created_at"]),
     };
   }
@@ -910,12 +1074,12 @@
     if (!container) return;
     const resource = state.resources.standards;
     if (!resource || resource.status === "idle" || resource.status === "loading" || resource.status === "error" || resource.status === "forbidden") {
-      container.innerHTML = `<table class="data-table"><tbody>${tableStateRow("standards", 5)}</tbody></table>`;
+      container.innerHTML = `<table class="data-table"><tbody>${tableStateRow("standards", 6)}</tbody></table>`;
       return;
     }
     const items = standardItems();
     if (!items.length) {
-      container.innerHTML = `<table class="data-table"><tbody>${tableStateRow("standards", 5, "empty")}</tbody></table>`;
+      container.innerHTML = `<table class="data-table"><tbody>${tableStateRow("standards", 6, "empty")}</tbody></table>`;
       return;
     }
     const rows = items.map((standard) => `<tr>
@@ -924,8 +1088,9 @@
       <td><span class="mono-cell">${displayValue(standard.version)}</span></td>
       <td><span class="primary-cell">${displayValue(standard.description)}</span></td>
       <td>${displayValue(formatDate(standard.updatedAt))}</td>
+      <td class="actions-cell"><button class="table-action" type="button" data-action="standard-edit" data-standard-id="${escapeHtml(standard.id)}" title="${escapeHtml(copy.edit)}">${icon("sliders-horizontal")}</button></td>
     </tr>`).join("");
-    container.innerHTML = `<table class="data-table"><thead><tr><th>${escapeHtml(copy.standardColName)}</th><th>${escapeHtml(copy.standardColLifecycle)}</th><th>${escapeHtml(copy.standardColVersion)}</th><th class="hide-on-mobile">${escapeHtml(copy.standardColDescription)}</th><th class="hide-on-mobile">${escapeHtml(copy.standardColUpdated)}</th></tr></thead><tbody>${rows}</tbody></table>`;
+    container.innerHTML = `<table class="data-table"><thead><tr><th>${escapeHtml(copy.standardColName)}</th><th>${escapeHtml(copy.standardColLifecycle)}</th><th>${escapeHtml(copy.standardColVersion)}</th><th class="hide-on-mobile">${escapeHtml(copy.standardColDescription)}</th><th class="hide-on-mobile">${escapeHtml(copy.standardColUpdated)}</th><th class="actions-column">${escapeHtml(copy.details)}</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
 
   function normalizeModel(row) {
@@ -1032,6 +1197,63 @@
     return extractItems(resourceData("schedules")).map(normalizeSchedule);
   }
 
+  function normalizeBudget(row) {
+    const usage = row?.usage || {};
+    return {
+      id: text(firstDefined(row, ["id", "policyId", "policy_id"]), "--"),
+      scopeType: text(firstDefined(row, ["scopeType", "scope_type"]), "--"),
+      scopeKey: text(firstDefined(row, ["scopeKey", "scope_key"]), "--"),
+      period: text(firstDefined(row, ["period"]), "--"),
+      currency: currencyCode(firstDefined(row, ["currency"]), "USD"),
+      amountMicro: firstDefined(row, ["amountMicro", "amount_micro"]),
+      callLimit: firstDefined(row, ["callLimit", "call_limit"]),
+      warningPercent: firstDefined(row, ["warningPercent", "warning_percent"]),
+      enabled: firstDefined(row, ["enabled", "isEnabled"]) === undefined ? null : Boolean(firstDefined(row, ["enabled", "isEnabled"])),
+      usedMicro: firstDefined(usage, ["usedMicro", "used_micro"]),
+      callCount: firstDefined(usage, ["callCount", "call_count"]),
+      utilizationPercent: firstDefined(usage, ["utilizationPercent", "utilization_percent"]),
+      updatedAt: firstDefined(row, ["updatedAt", "updated_at"]),
+    };
+  }
+
+  function budgetItems() {
+    return extractItems(resourceData("budgets")).map(normalizeBudget);
+  }
+
+  function budgetMoney(budget) {
+    const value = number(budget.amountMicro);
+    return value === null ? "--" : formatMoney({ amount: value / 1_000_000, currency: budget.currency, known: true });
+  }
+
+  function renderBudgets() {
+    const container = $("#budgets-view-content");
+    if (!container) return;
+    const resource = state.resources.budgets;
+    if (!resource || resource.status === "idle" || resource.status === "loading" || resource.status === "error" || resource.status === "forbidden") {
+      container.innerHTML = `<table class="data-table"><tbody>${tableStateRow("budgets", 7)}</tbody></table>`;
+      return;
+    }
+    const items = budgetItems();
+    if (!items.length) {
+      container.innerHTML = `<table class="data-table"><tbody>${tableStateRow("budgets", 7, "empty")}</tbody></table>`;
+      return;
+    }
+    const rows = items.map((budget) => {
+      const utilization = number(budget.utilizationPercent);
+      const status = budget.enabled === false ? "disabled" : utilization !== null && utilization >= 100 ? "failed" : "enabled";
+      return `<tr>
+        <td><span class="primary-cell">${displayValue(budget.scopeType)} / ${displayValue(budget.scopeKey)}</span><span class="secondary-cell">${displayValue(budget.period)} / ${displayValue(budget.id)}</span></td>
+        <td><span class="primary-cell">${displayValue(budgetMoney(budget))}</span><span class="secondary-cell">${displayValue(formatInteger(budget.amountMicro))} micro</span></td>
+        <td>${displayValue(budget.callLimit === undefined ? "--" : formatInteger(budget.callLimit))}</td>
+        <td>${displayValue(budget.warningPercent === undefined ? "--" : `${formatInteger(budget.warningPercent)}%`)}</td>
+        <td><span class="primary-cell">${displayValue(utilization === null ? "--" : formatPercent(utilization))}</span><span class="secondary-cell">${displayValue(budget.callCount === undefined ? "--" : `${formatInteger(budget.callCount)} ${copy.calls}`)}</span></td>
+        <td>${statusBadge(status)}</td>
+        <td class="actions-cell"><button class="table-action" type="button" data-action="budget-edit" data-budget-id="${escapeHtml(budget.id)}" title="${escapeHtml(copy.edit)}">${icon("sliders-horizontal")}</button></td>
+      </tr>`;
+    }).join("");
+    container.innerHTML = `<table class="data-table"><thead><tr><th>${escapeHtml(copy.costColFeature)}</th><th>${escapeHtml(copy.amountMicro)}</th><th>${escapeHtml(copy.callLimit)}</th><th>${escapeHtml(copy.warningPercent)}</th><th>${escapeHtml(copy.budget)}</th><th>${escapeHtml(copy.costColStatus)}</th><th class="actions-column">${escapeHtml(copy.details)}</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
   function scheduleStatus(schedule) {
     if (schedule.enabled === false) return "paused";
     if (schedule.enabled === true && schedule.lastStatus === "succeeded") return "succeeded";
@@ -1043,7 +1265,11 @@
   function scheduleMarkup(schedule) {
     const status = scheduleStatus(schedule);
     const backlog = number(schedule.backlog);
-    return `<div class="schedule-item"><span class="entity-mark ${status === "succeeded" || status === "enabled" ? "is-green" : status === "failed" ? "is-amber" : ""}"><svg class="ui-icon" aria-hidden="true"><use href="#icon-calendar-clock"></use></svg></span><div class="schedule-copy"><strong>${displayValue(schedule.name)}</strong><span>${displayValue(schedule.taskType)} / ${displayValue(schedule.feature)}</span><span>${escapeHtml(copy.interval)} ${displayValue(formatInterval(schedule.intervalSeconds))}${backlog !== null ? ` / ${escapeHtml(copy.budget)} ${displayValue(formatInteger(backlog))}` : ""}</span></div><div class="schedule-meta">${statusBadge(status)}<span class="schedule-time">${escapeHtml(copy.nextRun)} ${displayValue(formatDate(schedule.nextRunAt))}</span></div></div>`;
+    const backendOwned = schedule.taskType === "proactive.analyze";
+    const toggle = backendOwned
+      ? `<span class="ownership-note">Backend</span>`
+      : `<button class="table-action ${schedule.enabled ? "is-danger" : "is-primary"}" type="button" data-action="schedule-toggle" data-schedule-id="${escapeHtml(schedule.id)}" data-enabled="${schedule.enabled ? "true" : "false"}" title="${escapeHtml(schedule.enabled ? copy.disable : copy.enable)}">${icon(schedule.enabled ? "pause" : "play")}</button>`;
+    return `<div class="schedule-item"><span class="entity-mark ${status === "succeeded" || status === "enabled" ? "is-green" : status === "failed" ? "is-amber" : ""}"><svg class="ui-icon" aria-hidden="true"><use href="#icon-calendar-clock"></use></svg></span><div class="schedule-copy"><strong>${displayValue(schedule.name)}</strong><span>${displayValue(schedule.taskType)} / ${displayValue(schedule.feature)}</span><span>${escapeHtml(copy.interval)} ${displayValue(formatInterval(schedule.intervalSeconds))}${backlog !== null ? ` / ${escapeHtml(copy.budget)} ${displayValue(formatInteger(backlog))}` : ""}${backendOwned ? " / Backend 独占" : ""}</span></div><div class="schedule-meta">${statusBadge(status)}<span class="schedule-time">${escapeHtml(copy.nextRun)} ${displayValue(formatDate(schedule.nextRunAt))}</span><div class="row-actions"><button class="table-action" type="button" data-action="schedule-edit" data-schedule-id="${escapeHtml(schedule.id)}" title="${escapeHtml(copy.edit)}">${icon("sliders-horizontal")}</button>${toggle}</div></div></div>`;
   }
 
   function renderScheduleList(container, { page = false } = {}) {
@@ -1160,6 +1386,7 @@
       return;
     }
     tableContainer.innerHTML = `<table class="data-table"><thead><tr><th>${escapeHtml(copy.costColFeature)}</th><th>${escapeHtml(copy.costColCalls)}</th><th>${escapeHtml(copy.costColSupplier)}</th><th>${escapeHtml(copy.costColFunction)}</th><th>${escapeHtml(copy.costColStatus)}</th></tr></thead><tbody>${rows.map((row) => `<tr><td><span class="primary-cell">${displayValue(row.feature)}</span></td><td>${displayValue(row.calls === undefined ? "--" : `${formatInteger(row.calls)} ${copy.calls}`)}</td><td>${displayValue(formatMoney(row.supplier))}</td><td>${displayValue(formatMoney(row.functionFee))}</td><td>${statusBadge(row.status)}</td></tr>`).join("")}</tbody></table>`;
+    renderBudgets();
   }
 
   function renderTasksPage() {
@@ -1169,6 +1396,483 @@
     const statusFilter = text($("#tasks-status-filter")?.value, "");
     const items = taskItems().filter((task) => taskSearchMatches(task, query, statusFilter));
     container.innerHTML = taskTableMarkup(items, "tasks", { filters: Boolean(query || statusFilter) });
+  }
+
+  function jsonPretty(value, fallback = {}) {
+    try {
+      return JSON.stringify(value ?? fallback, null, 2);
+    } catch {
+      return JSON.stringify(fallback, null, 2);
+    }
+  }
+
+  function formInput(name, label, value = "", { type = "text", required = false, placeholder = "", min = null, max = null } = {}) {
+    const attributes = [
+      `name="${escapeHtml(name)}"`,
+      `type="${escapeHtml(type)}"`,
+      `value="${escapeHtml(value)}"`,
+      required ? "required" : "",
+      placeholder ? `placeholder="${escapeHtml(placeholder)}"` : "",
+      min === null ? "" : `min="${escapeHtml(min)}"`,
+      max === null ? "" : `max="${escapeHtml(max)}"`,
+    ].filter(Boolean).join(" ");
+    return `<label class="form-field"><span>${escapeHtml(label)}${required ? " *" : ""}</span><input ${attributes}></label>`;
+  }
+
+  function formTextarea(name, label, value = "", { required = false, rows = 5, help = "" } = {}) {
+    return `<label class="form-field form-field-wide"><span>${escapeHtml(label)}${required ? " *" : ""}</span><textarea name="${escapeHtml(name)}" rows="${rows}"${required ? " required" : ""}>${escapeHtml(value)}</textarea>${help ? `<small>${escapeHtml(help)}</small>` : ""}</label>`;
+  }
+
+  function formJsonTextarea(name, label, value = {}, { rows = 5, help = "" } = {}) {
+    return formTextarea(name, label, jsonPretty(value), { rows, help });
+  }
+
+  function formSelect(name, label, value, options, { required = false } = {}) {
+    return `<label class="form-field"><span>${escapeHtml(label)}${required ? " *" : ""}</span><select name="${escapeHtml(name)}"${required ? " required" : ""}>${options.map((option) => `<option value="${escapeHtml(option.value)}"${String(option.value) === String(value) ? " selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`;
+  }
+
+  function formCheckbox(name, label, checked = false, { help = "" } = {}) {
+    return `<label class="form-check"><input type="checkbox" name="${escapeHtml(name)}"${checked ? " checked" : ""}><span>${escapeHtml(label)}</span>${help ? `<small>${escapeHtml(help)}</small>` : ""}</label>`;
+  }
+
+  function readFormValue(form, name) {
+    const control = form.elements?.namedItem(name);
+    if (!control) return "";
+    if (control.type === "checkbox") return control.checked;
+    return control.value;
+  }
+
+  function readFormLines(form, name) {
+    const raw = text(readFormValue(form, name), "");
+    return raw ? [...new Set(raw.split(/[\n,]+/u).map((value) => value.trim()).filter(Boolean))] : [];
+  }
+
+  function readFormJson(form, name, fallback = {}) {
+    const raw = text(readFormValue(form, name), "");
+    if (!raw) return fallback;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      const error = new Error(`${copy.jsonInvalid}: ${name}`);
+      error.code = "invalid_json";
+      throw error;
+    }
+  }
+
+  function defaultModelPolicy() {
+    const model = modelItems().find((item) => item.enabled !== false) || { id: "model-mock-standard-v1", provider: "provider-mock" };
+    return {
+      providerId: model.providerId || "provider-mock",
+      modelId: model.id,
+      externalAllowed: false,
+      responseFormat: "json",
+    };
+  }
+
+  function defaultStandardIds() {
+    const standard = standardItems().find((item) => item.slug === "grounding") || standardItems()[0];
+    return standard?.latestVersionId ? [standard.latestVersionId] : ["standard-grounding-v1"];
+  }
+
+  function optimisticFields(detail, kind) {
+    const fields = {};
+    if (detail?.updatedAt) fields.expectedUpdatedAt = detail.updatedAt;
+    if (kind === "agent") {
+      if (detail?.latestVersion?.id) fields.expectedVersionId = detail.latestVersion.id;
+      if (detail?.activeRelease?.id) fields.expectedReleaseId = detail.activeRelease.id;
+    }
+    if (kind === "standard" && detail?.latestVersion?.id) fields.expectedVersionId = detail.latestVersion.id;
+    return fields;
+  }
+
+  function agentForm(detail = null) {
+    const version = detail?.draftVersion || detail?.latestVersion || detail?.activeVersion || {};
+    const modelPolicy = version.modelPolicy || defaultModelPolicy();
+    const taskTypes = Array.isArray(version.taskTypes) && version.taskTypes.length ? version.taskTypes : ["quick-record.analyze"];
+    const standards = Array.isArray(version.standardIds) && version.standardIds.length ? version.standardIds : defaultStandardIds();
+    const isCreate = !detail;
+    const lifecycle = detail?.lifecycle || "draft";
+    return `<form id="admin-modal-form" data-form-kind="agent-save" class="admin-form">
+      <div class="form-grid">
+        ${formInput("slug", "slug", detail?.slug || "new-agent", { required: true })}
+        ${formInput("name", "名称", detail?.name || "新 Agent", { required: true })}
+        ${formInput("version", copy.version, isCreate ? "1.0.0" : "", { required: false, placeholder: isCreate ? "1.0.0" : "留空自动递增" })}
+        ${isCreate ? `<input type="hidden" name="lifecycle" value="draft">` : formSelect("lifecycle", "生命周期", lifecycle, [{ value: "active", label: copy.active }, { value: "draft", label: copy.draft }, { value: "disabled", label: copy.disabled }])}
+        ${formTextarea("description", "说明", detail?.description || "", { rows: 3 })}
+        ${formTextarea("taskTypes", copy.taskTypes, taskTypes.join("\n"), { required: true, rows: 3, help: "每行一个已注册任务类型" })}
+        ${formTextarea("systemPrompt", copy.systemPrompt, version.systemPrompt || "你是森特智行的业务 Agent。只基于服务端提供的事实输出结构化结果。", { required: true, rows: 6 })}
+        ${formJsonTextarea("modelPolicy", copy.modelPolicy, modelPolicy, { rows: 6, help: "目标模型由平台策略校验；当前默认使用本地模拟模型" })}
+        ${formJsonTextarea("instructions", copy.instructions, version.instructions || { factsFirst: true, noDirectWrite: true }, { rows: 5 })}
+        ${formJsonTextarea("inputSchema", copy.inputSchema, version.inputSchema || { type: "object" }, { rows: 4 })}
+        ${formJsonTextarea("outputSchema", copy.outputSchema, version.outputSchema || { type: "object", required: ["facts", "inferences", "unknowns", "sourceRefs"] }, { rows: 5 })}
+        ${formTextarea("standardIds", copy.standardIds, standards.join("\n"), { rows: 3, help: "每行一个规范版本 ID" })}
+        ${formJsonTextarea("limits", copy.limits, version.limits || { maxTokens: 3200, timeoutMs: 30000, maxSteps: 8 }, { rows: 4 })}
+        ${formJsonTextarea("tools", "只读工具 JSON", version.tools || [], { rows: 3, help: "写工具会被平台安全策略拒绝" })}
+      </div>
+      <div class="form-note">${escapeHtml(isCreate ? "新建记录先保存为草稿；通过离线测试后再发布。" : "保存版本会追加新的 Agent 版本，不会覆盖历史版本。")}</div>
+    </form>`;
+  }
+
+  function standardForm(detail = null) {
+    const version = detail?.latestVersion || {};
+    const isCreate = !detail;
+    return `<form id="admin-modal-form" data-form-kind="standard-save" class="admin-form">
+      <div class="form-grid">
+        ${formInput("slug", "slug", detail?.slug || "new-standard", { required: true })}
+        ${formInput("name", "名称", detail?.name || "新规范", { required: true })}
+        ${formInput("version", copy.version, isCreate ? "1.0.0" : "", { placeholder: isCreate ? "1.0.0" : "留空自动递增" })}
+        ${isCreate ? `<input type="hidden" name="lifecycle" value="draft">` : formSelect("lifecycle", "生命周期", detail?.lifecycle || "draft", [{ value: "active", label: copy.active }, { value: "draft", label: copy.draft }, { value: "disabled", label: copy.disabled }])}
+        ${formTextarea("description", "说明", detail?.description || "", { rows: 3 })}
+        ${formTextarea("content", copy.content, version.content || "只使用服务端提供的 owner-scoped 事实；区分事实、推断、未知和建议。", { required: true, rows: 8 })}
+        ${formJsonTextarea("rules", copy.rules, version.rules || { requireSourceRefs: true, requireUnknowns: true, forbidDirectWrite: true }, { rows: 7 })}
+      </div>
+      <div class="form-note">保存规范会追加新版本，历史版本保留用于审计和回溯。</div>
+    </form>`;
+  }
+
+  function publishForm(detail) {
+    const versions = Array.isArray(detail?.versions) ? detail.versions : [];
+    const activeId = detail?.activeRelease?.agentVersionId || detail?.activeVersion?.id || "";
+    const candidates = versions.filter((version) => version.id !== activeId);
+    const target = detail?.draftVersion?.id || candidates[0]?.id || "";
+    return `<form id="admin-modal-form" data-form-kind="agent-publish" class="admin-form">
+      <div class="form-grid">
+        ${formSelect("versionId", copy.targetVersion, target, candidates.map((version) => ({ value: version.id, label: `${version.version} / ${version.id}` })), { required: true })}
+        ${formInput("testRunId", copy.testRunId, "", { required: true, placeholder: copy.testRunPlaceholder })}
+      </div>
+      <div class="form-note">${escapeHtml(copy.testRunRequired)}。发布前请填入可追溯的离线或集成测试运行 ID。</div>
+    </form>`;
+  }
+
+  function rollbackForm(detail) {
+    const activeId = detail?.activeRelease?.agentVersionId || detail?.activeVersion?.id || "";
+    const versions = (Array.isArray(detail?.versions) ? detail.versions : []).filter((version) => version.id !== activeId);
+    return `<form id="admin-modal-form" data-form-kind="agent-rollback" class="admin-form">
+      ${versions.length ? `<div class="form-grid">${formSelect("versionId", copy.targetVersion, versions[0].id, versions.map((version) => ({ value: version.id, label: `${version.version} / ${version.id}` })), { required: true })}${formInput("testRunId", copy.testRunId, "", { placeholder: copy.testRunPlaceholder })}</div><div class="form-note">回滚会创建新的 active release，原发布记录保留。</div>` : `<div class="form-note is-warning">${escapeHtml(copy.noPreviousVersion)}</div>`}
+    </form>`;
+  }
+
+  function budgetForm(detail) {
+    return `<form id="admin-modal-form" data-form-kind="budget-save" class="admin-form">
+      <div class="form-grid">
+        ${formInput("amountMicro", copy.amountMicro, detail?.amountMicro ?? 0, { type: "number", required: true, min: 0 })}
+        ${formInput("callLimit", copy.callLimit, detail?.callLimit ?? 0, { type: "number", required: true, min: 0 })}
+        ${formInput("warningPercent", copy.warningPercent, detail?.warningPercent ?? 80, { type: "number", required: true, min: 1, max: 100 })}
+        ${formCheckbox("enabled", detail?.enabled ? copy.enabled : copy.disabledState, detail?.enabled !== false)}
+      </div>
+      <div class="form-note">金额使用平台要求的整数 micro 单位；当前策略为 ${escapeHtml(`${detail?.scopeType || "--"} / ${detail?.scopeKey || "--"} / ${detail?.period || "--"}`)}。</div>
+    </form>`;
+  }
+
+  function scheduleForm(detail) {
+    const backendOwned = detail?.taskType === "proactive.analyze";
+    return `<form id="admin-modal-form" data-form-kind="schedule-save" class="admin-form">
+      <div class="form-grid">
+        ${formInput("name", "名称", detail?.name || "", { required: true })}
+        ${formInput("taskType", copy.scheduleColType, detail?.taskType || "", { required: true })}
+        ${formInput("feature", "功能", detail?.feature || "", { required: true })}
+        ${formInput("intervalSeconds", copy.intervalSeconds, detail?.intervalSeconds ?? 3600, { type: "number", required: true, min: 30, max: 2592000 })}
+        ${formCheckbox("enabled", detail?.enabled ? copy.enabled : copy.disabledState, Boolean(detail?.enabled), { help: backendOwned ? "proactive.analyze 由 Backend worker 独占，不能通过此处启用" : "" })}
+        ${formJsonTextarea("inputTemplate", copy.inputTemplate, detail?.inputTemplate || {}, { rows: 5 })}
+      </div>
+      ${backendOwned ? `<div class="form-note is-warning">主动分析调度唯一所有者是 Backend proactive worker；平台写入会拒绝启用该任务类型。</div>` : ""}
+    </form>`;
+  }
+
+  function modalFooter(submitLabel = copy.save, { submit = true } = {}) {
+    return `<button class="secondary-button" type="button" data-action="close-modal">${icon("x")}<span>${escapeHtml(copy.cancel)}</span></button>${submit ? `<button class="primary-button" type="submit" form="admin-modal-form" data-modal-submit>${icon("check-circle")}<span data-submit-label>${escapeHtml(submitLabel)}</span></button>` : ""}`;
+  }
+
+  function renderModal() {
+    const root = $("#admin-modal");
+    if (!root) return;
+    root.hidden = !state.modal.open;
+    root.setAttribute("aria-hidden", String(!state.modal.open));
+    const title = $("#admin-modal-title");
+    const body = $("#admin-modal-body");
+    const footer = $("#admin-modal-footer");
+    if (title) title.textContent = state.modal.title;
+    if (body) body.innerHTML = state.modal.content;
+    if (footer) footer.innerHTML = state.modal.footer;
+    const error = $("#modal-error");
+    if (error) {
+      error.hidden = true;
+      error.textContent = "";
+    }
+    if (state.modal.open) {
+      window.setTimeout(() => $("#admin-modal input, #admin-modal select, #admin-modal textarea")?.focus(), 0);
+    }
+  }
+
+  function openModal(title, content, footer, context = null) {
+    state.modal = { open: true, title, content, footer, context, pending: false };
+    renderModal();
+  }
+
+  function closeModal() {
+    if (state.modal.pending) return;
+    state.modal = { open: false, title: "", content: "", footer: "", context: null, pending: false };
+    renderModal();
+  }
+
+  function setModalBusy(pending) {
+    state.modal.pending = pending;
+    const form = $("#admin-modal-form");
+    if (form) $$('input, select, textarea, button', form).forEach((element) => { element.disabled = pending; });
+    const submitLabel = $("[data-submit-label]");
+    if (submitLabel) submitLabel.textContent = pending ? copy.loadingAction : (state.modal.context?.submitLabel || copy.save);
+  }
+
+  function setModalError(message) {
+    const existing = $("#modal-error");
+    if (existing) {
+      existing.textContent = message;
+      existing.hidden = !message;
+      return;
+    }
+    const form = $("#admin-modal-form");
+    if (!form) return;
+    const alert = document.createElement("div");
+    alert.id = "modal-error";
+    alert.className = "modal-error";
+    alert.setAttribute("role", "alert");
+    alert.textContent = message;
+    form.prepend(alert);
+  }
+
+  function actionErrorMessage(error) {
+    if (error?.status === 409 || error?.code === "conflict" || error?.code === "active_task_type_conflict") return copy.conflictDetail;
+    if (error?.status === 403 || error?.status === 401 || error?.code === "forbidden") return copy.permissionActionDetail;
+    const payloadMessage = firstDefined(error?.payload, ["message", "error.message", "error.detail"]);
+    const message = text(error?.message || payloadMessage, copy.actionFailed);
+    const requestId = text(error?.requestId, "");
+    return requestId ? `${message} (${copy.noRequestId}: ${requestId})` : message;
+  }
+
+  async function openAgentEditor(agentId = null) {
+    if (!agentId) {
+      openModal(copy.newAgent, agentForm(), modalFooter(copy.create), { kind: "agent-save", mode: "create", submitLabel: copy.create });
+      return;
+    }
+    try {
+      const { data } = await requestJson(`/agents/${encodeURIComponent(agentId)}`);
+      openModal(copy.editAgent, agentForm(data), modalFooter(copy.save), { kind: "agent-save", mode: "edit", resourceId: agentId, detail: data, ...optimisticFields(data, "agent"), submitLabel: copy.save });
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  async function openAgentPublish(agentId) {
+    try {
+      const { data } = await requestJson(`/agents/${encodeURIComponent(agentId)}`);
+      const versions = Array.isArray(data?.versions) ? data.versions : [];
+      const activeId = data?.activeRelease?.agentVersionId || data?.activeVersion?.id;
+      if (versions.filter((version) => version.id !== activeId).length === 0) {
+        showToast(copy.noVersion, "is-error");
+        return;
+      }
+      openModal(copy.publishAgent, publishForm(data), modalFooter(copy.publish), { kind: "agent-publish", resourceId: agentId, ...optimisticFields(data, "agent"), submitLabel: copy.publish });
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  async function openAgentRollback(agentId) {
+    try {
+      const { data } = await requestJson(`/agents/${encodeURIComponent(agentId)}`);
+      const versions = Array.isArray(data?.versions) ? data.versions : [];
+      const activeId = data?.activeRelease?.agentVersionId || data?.activeVersion?.id;
+      if (versions.filter((version) => version.id !== activeId).length === 0) {
+        showToast(copy.noPreviousVersion, "is-error");
+        return;
+      }
+      openModal(copy.rollbackAgent, rollbackForm(data), modalFooter(copy.rollback), { kind: "agent-rollback", resourceId: agentId, ...optimisticFields(data, "agent"), submitLabel: copy.rollback });
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  async function openStandardEditor(standardId = null) {
+    if (!standardId) {
+      openModal(copy.newStandard, standardForm(), modalFooter(copy.create), { kind: "standard-save", mode: "create", submitLabel: copy.create });
+      return;
+    }
+    try {
+      const { data } = await requestJson(`/standards/${encodeURIComponent(standardId)}`);
+      openModal(copy.editStandard, standardForm(data), modalFooter(copy.save), { kind: "standard-save", mode: "edit", resourceId: standardId, detail: data, ...optimisticFields(data, "standard"), submitLabel: copy.save });
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  async function openBudgetEditor(budgetId) {
+    try {
+      const { data } = await requestJson(`/budgets/${encodeURIComponent(budgetId)}`);
+      openModal(copy.editBudget, budgetForm(data), modalFooter(copy.save), { kind: "budget-save", resourceId: budgetId, detail: data, ...optimisticFields(data, "budget"), submitLabel: copy.save });
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  async function openScheduleEditor(scheduleId) {
+    try {
+      const { data } = await requestJson(`/schedules/${encodeURIComponent(scheduleId)}`);
+      openModal(copy.editSchedule, scheduleForm(data), modalFooter(copy.save), { kind: "schedule-save", resourceId: scheduleId, detail: data, ...optimisticFields(data, "schedule"), submitLabel: copy.save });
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  async function openTaskDetail(taskId) {
+    try {
+      const { data } = await requestJson(`/tasks/${encodeURIComponent(taskId)}`);
+      const task = data?.task || data;
+      const canCancel = ["queued", "running"].includes(text(task?.status, "").toLowerCase());
+      const detailHtml = `<div class="detail-summary"><div><span>ID</span><strong>${displayValue(task?.id || taskId)}</strong></div><div><span>${escapeHtml(copy.taskColStatus)}</span><strong>${statusBadge(task?.status)}</strong></div><div><span>${escapeHtml(copy.taskColType)}</span><strong>${displayValue(task?.taskType)}</strong></div><div><span>${escapeHtml(copy.costColFeature)}</span><strong>${displayValue(task?.feature)}</strong></div></div><pre class="json-view">${escapeHtml(jsonPretty(data, {}))}</pre>`;
+      openModal(copy.taskDetail, detailHtml, `${canCancel ? `<button class="danger-button" type="button" data-action="task-cancel" data-task-id="${escapeHtml(taskId)}">${icon("x")}<span>${escapeHtml(copy.cancelTask)}</span></button>` : ""}<button class="secondary-button" type="button" data-action="close-modal">${icon("x")}<span>${escapeHtml(copy.close)}</span></button>`, { kind: "task-detail", resourceId: taskId });
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  function openTaskCancel(taskId) {
+    openModal(copy.cancelTask, `<div class="form-note is-warning">${escapeHtml("此操作会向任务发送取消请求；已完成任务不会被回写为取消。")}</div><form id="admin-modal-form" data-form-kind="task-cancel" class="admin-form"><input type="hidden" name="taskId" value="${escapeHtml(taskId)}"></form>`, modalFooter(copy.cancelTask), { kind: "task-cancel", resourceId: taskId, submitLabel: copy.cancelTask });
+  }
+
+  async function toggleSchedule(scheduleId, enabled) {
+    const schedule = scheduleItems().find((item) => item.id === scheduleId);
+    if (schedule?.taskType === "proactive.analyze") {
+      showToast("主动分析调度由 Backend worker 独占", "is-error");
+      return;
+    }
+    try {
+      await requestJson(`/schedules/${encodeURIComponent(scheduleId)}/${enabled ? "disable" : "enable"}`, { method: "POST", body: {} });
+      showToast(enabled ? copy.disable : copy.enable, "is-success");
+      await loadAll();
+    } catch (error) {
+      showToast(actionErrorMessage(error), "is-error");
+    }
+  }
+
+  async function handleModalSubmit(event) {
+    event.preventDefault();
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || state.modal.pending) return;
+    const context = state.modal.context || {};
+    setModalBusy(true);
+    setModalError("");
+    try {
+      let path;
+      let method = "POST";
+      let body = {};
+      let successMessage = copy.saveSuccess;
+      if (context.kind === "agent-save") {
+        const modelPolicy = readFormJson(form, "modelPolicy", defaultModelPolicy());
+        body = {
+          slug: text(readFormValue(form, "slug"), ""),
+          name: text(readFormValue(form, "name"), ""),
+          description: readFormValue(form, "description"),
+          lifecycle: text(readFormValue(form, "lifecycle"), "draft"),
+          taskTypes: readFormLines(form, "taskTypes"),
+          systemPrompt: readFormValue(form, "systemPrompt"),
+          instructions: readFormJson(form, "instructions", {}),
+          tools: readFormJson(form, "tools", []),
+          modelPolicy,
+          inputSchema: readFormJson(form, "inputSchema", {}),
+          outputSchema: readFormJson(form, "outputSchema", {}),
+          standardIds: readFormLines(form, "standardIds"),
+          limits: readFormJson(form, "limits", {}),
+        };
+        const version = text(readFormValue(form, "version"), "");
+        if (version) body.version = version;
+        Object.assign(body, optimisticFields(context.detail, "agent"));
+        if (context.mode === "create") {
+          path = "/agents";
+          method = "POST";
+          delete body.expectedUpdatedAt;
+          delete body.expectedVersionId;
+          delete body.expectedReleaseId;
+        } else {
+          path = `/agents/${encodeURIComponent(context.resourceId)}`;
+          method = "PATCH";
+          Object.assign(body, context.expectedUpdatedAt ? { expectedUpdatedAt: context.expectedUpdatedAt } : {}, context.expectedVersionId ? { expectedVersionId: context.expectedVersionId } : {}, context.expectedReleaseId ? { expectedReleaseId: context.expectedReleaseId } : {});
+        }
+        successMessage = context.mode === "create" ? copy.create : copy.saveSuccess;
+      } else if (context.kind === "agent-publish") {
+        const versionId = text(readFormValue(form, "versionId"), "");
+        const testRunId = text(readFormValue(form, "testRunId"), "");
+        if (!versionId || !testRunId) throw new Error(copy.testRunRequired);
+        body = { versionId, testRunId, expectedUpdatedAt: context.expectedUpdatedAt, expectedVersionId: context.expectedVersionId, expectedReleaseId: context.expectedReleaseId };
+        path = `/agents/${encodeURIComponent(context.resourceId)}/publish`;
+        successMessage = copy.publishSuccess;
+      } else if (context.kind === "agent-rollback") {
+        const versionId = text(readFormValue(form, "versionId"), "");
+        if (!versionId) throw new Error(copy.noPreviousVersion);
+        body = { versionId, testRunId: text(readFormValue(form, "testRunId"), ""), expectedUpdatedAt: context.expectedUpdatedAt, expectedVersionId: context.expectedVersionId, expectedReleaseId: context.expectedReleaseId };
+        if (!body.testRunId) delete body.testRunId;
+        path = `/agents/${encodeURIComponent(context.resourceId)}/rollback`;
+        successMessage = copy.rollbackSuccess;
+      } else if (context.kind === "standard-save") {
+        body = {
+          slug: text(readFormValue(form, "slug"), ""),
+          name: text(readFormValue(form, "name"), ""),
+          description: readFormValue(form, "description"),
+          lifecycle: text(readFormValue(form, "lifecycle"), "draft"),
+          content: readFormValue(form, "content"),
+          rules: readFormJson(form, "rules", {}),
+        };
+        const version = text(readFormValue(form, "version"), "");
+        if (version) body.version = version;
+        if (context.mode === "create") {
+          path = "/standards";
+          delete body.expectedUpdatedAt;
+          delete body.expectedVersionId;
+        } else {
+          path = `/standards/${encodeURIComponent(context.resourceId)}`;
+          method = "PATCH";
+          Object.assign(body, context.expectedUpdatedAt ? { expectedUpdatedAt: context.expectedUpdatedAt } : {}, context.expectedVersionId ? { expectedVersionId: context.expectedVersionId } : {});
+        }
+        successMessage = context.mode === "create" ? copy.create : copy.saveSuccess;
+      } else if (context.kind === "budget-save") {
+        body = {
+          amountMicro: Number(readFormValue(form, "amountMicro")),
+          callLimit: Number(readFormValue(form, "callLimit")),
+          warningPercent: Number(readFormValue(form, "warningPercent")),
+          enabled: Boolean(readFormValue(form, "enabled")),
+          expectedUpdatedAt: context.expectedUpdatedAt,
+        };
+        path = `/budgets/${encodeURIComponent(context.resourceId)}`;
+        method = "PATCH";
+      } else if (context.kind === "schedule-save") {
+        const taskType = text(readFormValue(form, "taskType"), "");
+        const enabled = Boolean(readFormValue(form, "enabled"));
+        if (taskType === "proactive.analyze" && enabled) throw new Error("主动分析调度由 Backend worker 独占，不能启用");
+        body = {
+          name: text(readFormValue(form, "name"), ""),
+          taskType,
+          feature: text(readFormValue(form, "feature"), ""),
+          intervalSeconds: Number(readFormValue(form, "intervalSeconds")),
+          inputTemplate: readFormJson(form, "inputTemplate", {}),
+          enabled,
+          expectedUpdatedAt: context.expectedUpdatedAt,
+        };
+        path = `/schedules/${encodeURIComponent(context.resourceId)}`;
+        method = "PATCH";
+      } else if (context.kind === "task-cancel") {
+        path = `/tasks/${encodeURIComponent(context.resourceId)}/cancel`;
+        successMessage = copy.cancelTask;
+      } else {
+        throw new Error(copy.actionFailed);
+      }
+      await requestJson(path, { method, body });
+      setModalBusy(false);
+      closeModal();
+      showToast(successMessage, "is-success");
+      await loadAll();
+    } catch (error) {
+      setModalBusy(false);
+      setModalError(actionErrorMessage(error));
+    }
   }
 
   function renderViews() {
@@ -1198,7 +1902,10 @@
     if (active === "standards") renderStandards();
     if (active === "models") renderModelsPage();
     if (active === "schedules") renderScheduleList($("#schedules-view-content"), { page: true });
-    if (active === "costs") renderCostsPage();
+    if (active === "costs") {
+      renderCostsPage();
+      renderBudgets();
+    }
   }
 
   function renderAll() {
@@ -1211,6 +1918,7 @@
     renderCostSummary();
     renderScheduleList($("#overview-schedule-list"));
     renderViews();
+    renderModal();
     const lastSync = $("#last-sync");
     if (lastSync) lastSync.textContent = state.lastSync ? formatDate(state.lastSync) : "--";
   }
@@ -1220,8 +1928,10 @@
     state.activeView = view;
     const shell = $("#app-shell");
     const menuButton = $("#mobile-menu-button");
+    const overlay = $("#mobile-overlay");
     if (shell) shell.classList.remove("is-nav-open");
     if (menuButton) menuButton.setAttribute("aria-expanded", "false");
+    if (overlay) overlay.hidden = true;
     renderViews();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -1229,10 +1939,12 @@
   function toggleNavigation(force = null) {
     const shell = $("#app-shell");
     const menuButton = $("#mobile-menu-button");
+    const overlay = $("#mobile-overlay");
     if (!shell || !menuButton) return;
     const open = force === null ? !shell.classList.contains("is-nav-open") : force;
     shell.classList.toggle("is-nav-open", open);
     menuButton.setAttribute("aria-expanded", String(open));
+    if (overlay) overlay.hidden = !open;
   }
 
   function showToast(message, tone = "") {
@@ -1265,6 +1977,54 @@
         });
         return;
       }
+      if (action?.dataset.action === "close-modal") {
+        closeModal();
+        return;
+      }
+      if (action?.dataset.action === "agent-edit") {
+        void openAgentEditor(action.dataset.agentId);
+        return;
+      }
+      if (action?.dataset.action === "agent-create") {
+        void openAgentEditor();
+        return;
+      }
+      if (action?.dataset.action === "agent-publish") {
+        void openAgentPublish(action.dataset.agentId);
+        return;
+      }
+      if (action?.dataset.action === "agent-rollback") {
+        void openAgentRollback(action.dataset.agentId);
+        return;
+      }
+      if (action?.dataset.action === "standard-edit") {
+        void openStandardEditor(action.dataset.standardId);
+        return;
+      }
+      if (action?.dataset.action === "standard-create") {
+        void openStandardEditor();
+        return;
+      }
+      if (action?.dataset.action === "budget-edit") {
+        void openBudgetEditor(action.dataset.budgetId);
+        return;
+      }
+      if (action?.dataset.action === "schedule-edit") {
+        void openScheduleEditor(action.dataset.scheduleId);
+        return;
+      }
+      if (action?.dataset.action === "schedule-toggle") {
+        void toggleSchedule(action.dataset.scheduleId, action.dataset.enabled === "true");
+        return;
+      }
+      if (action?.dataset.action === "task-detail") {
+        void openTaskDetail(action.dataset.taskId);
+        return;
+      }
+      if (action?.dataset.action === "task-cancel") {
+        openTaskCancel(action.dataset.taskId);
+        return;
+      }
       if (event.target.closest("#mobile-menu-button")) {
         toggleNavigation();
         return;
@@ -1272,6 +2032,16 @@
       if (event.target.closest("#sidebar-close") || event.target.closest("#mobile-overlay")) {
         toggleNavigation(false);
       }
+    });
+
+    document.addEventListener("submit", (event) => {
+      if (event.target.matches("#admin-modal-form")) void handleModalSubmit(event);
+    });
+    $("#admin-modal")?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) closeModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && state.modal.open) closeModal();
     });
 
     $("#refresh-button")?.addEventListener("click", () => {

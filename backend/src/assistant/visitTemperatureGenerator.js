@@ -1,4 +1,5 @@
-import { generateVisitTemperatureSuggestionWithModel, resolveModelApiKey } from "../modelAnalysis.js";
+import { generateVisitTemperatureSuggestionWithModel } from "../modelAnalysis.js";
+import { textModelAvailability } from "../aiPlatform/textAdapter.js";
 
 const MAX_FACTS = 50;
 const MAX_TEXT = 2_000;
@@ -66,8 +67,9 @@ function evidenceRuleSuggestion(snapshot) {
   };
 }
 
-function modelConfigAvailable(config) {
-  return config?.aiAnalysisMode === "model" && Boolean(resolveModelApiKey(config));
+function modelConfigAvailable(config, options = {}) {
+  const availability = textModelAvailability(config, options);
+  return availability === "available" || availability === "legacy";
 }
 
 function validModelResult(value, facts) {
@@ -104,15 +106,25 @@ export function createVisitTemperatureSuggestionGenerator({
   if (!config || typeof config !== "object") throw new TypeError("config is required");
   if (typeof modelGenerator !== "function") throw new TypeError("modelGenerator must be a function");
   if (typeof fallbackGenerator !== "function") throw new TypeError("fallbackGenerator must be a function");
-  return async function generate(snapshot) {
+  return async function generate(snapshot, context = {}) {
     const input = {
       visit: snapshot?.visit,
       customer: snapshot?.customer,
       facts: Array.isArray(snapshot?.facts) ? snapshot.facts.slice(0, MAX_FACTS) : [],
     };
-    if (modelConfigAvailable(config)) {
+    if (modelConfigAvailable(config, context)) {
       try {
-        const result = await modelGenerator(input, config, { fetchImpl });
+        const result = await modelGenerator(input, config, {
+          fetchImpl,
+          owner: context.owner,
+          actor: context.actor ?? context.owner,
+          subject: context.subject ?? (input.customer?.id
+            ? { type: "customer", id: input.customer.id }
+            : null),
+          channel: context.channel,
+          idempotencyKey: context.idempotencyKey,
+          signal: context.signal,
+        });
         if (validModelResult(result, input.facts)) return result;
       } catch {
         // Model failures are deliberately silent at this boundary: the HTTP

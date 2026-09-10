@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { createExecutionDrain } from "../services/executionDrain.js";
 
 import { buildProactiveAssistantSnapshot } from "./proactiveAssistant.js";
 import {
@@ -401,6 +402,7 @@ function emptyCustomerSubjectScan({ enabled = false } = {}) {
     attemptedCount: 0,
     succeededCount: 0,
     failedCount: 0,
+    skippedCount: 0,
     subjectCount: 0,
     suggestionCount: 0,
     insertedCount: 0,
@@ -417,6 +419,7 @@ function addCustomerSubjectScan(left, right) {
     attemptedCount: Number(left?.attemptedCount ?? 0) + Number(right?.attemptedCount ?? 0),
     succeededCount: Number(left?.succeededCount ?? 0) + Number(right?.succeededCount ?? 0),
     failedCount: Number(left?.failedCount ?? 0) + Number(right?.failedCount ?? 0),
+    skippedCount: Number(left?.skippedCount ?? 0) + Number(right?.skippedCount ?? 0),
     subjectCount: Number(left?.subjectCount ?? 0) + Number(right?.subjectCount ?? 0),
     suggestionCount: Number(left?.suggestionCount ?? 0) + Number(right?.suggestionCount ?? 0),
     insertedCount: Number(left?.insertedCount ?? 0) + Number(right?.insertedCount ?? 0),
@@ -548,6 +551,7 @@ export function createProactiveBackgroundWorker({
   let timer = null;
   let started = false;
   let ticking = false;
+  const execution = createExecutionDrain();
   let lastCustomerSubjectScan = emptyCustomerSubjectScan({ enabled: Boolean(customerSubjects) });
   const modelQueue = createConcurrencyLimiter(modelConcurrency);
   const modelRuntime = modelAnalyzer && tableExists(db, "proactive_model_cache") && tableExists(db, "proactive_model_usage")
@@ -1296,6 +1300,17 @@ function relatedRows(owner, opportunities) {
         scanResult.dedupedCount += result.dedupedCount;
         scanResult.results.push(result);
       } catch (error) {
+        if (error?.code === "PROACTIVE_CUSTOMER_NOT_FOUND"
+          && !db.prepare("SELECT 1 FROM customers WHERE id = ? AND owner = ? AND deleted_at IS NULL").get(group.customerId, group.owner)) {
+          scanResult.skippedCount += 1;
+          scanResult.results.push({
+            status: "skipped",
+            owner: group.owner,
+            customerId: group.customerId,
+            reasonCode: "PROACTIVE_SUBJECT_UNAVAILABLE",
+          });
+          continue;
+        }
         const failure = {
           status: "failed",
           owner: group.owner,
@@ -1539,7 +1554,11 @@ function relatedRows(owner, opportunities) {
     return new Date(now.getTime() + retryBaseMs * (2 ** exponent)).toISOString();
   }
 
-  async function runOnce({ force = false, trigger = "scheduled" } = {}) {
+  function runOnce(options) {
+    return execution.run(() => executeRunOnce(options));
+  }
+
+  async function executeRunOnce({ force = false, trigger = "scheduled" } = {}) {
     if (!RUN_TRIGGERS.has(trigger)) throw new TypeError("trigger is invalid");
     if (ticking) return { status: "skipped", reason: "running", state: getState() };
     ticking = true;
@@ -1635,6 +1654,9 @@ function relatedRows(owner, opportunities) {
         const customerFailures = new Map(customerScan.results
           .filter((result) => result?.status === "failed")
           .map((result) => [customerRowKey(result), result]));
+        const skippedCustomers = new Set(customerScan.results
+          .filter((result) => result?.status === "skipped")
+          .map(customerRowKey));
         for (const ready of readyEvents) {
           const failure = ready.customerKeys.map((key) => customerFailures.get(key)).find(Boolean);
           if (failure) {
@@ -1648,6 +1670,7 @@ function relatedRows(owner, opportunities) {
           scan.completeEvent(ready.claimed.item.id, {
             workerId: configuredWorkerId,
             leaseToken: ready.claimed.leaseToken,
+            skippedSubjects: ready.customerKeys.filter((key) => skippedCustomers.has(key)).length,
           });
         }
         const finishedAt = clockDate(clock);
@@ -1892,6 +1915,7 @@ function relatedRows(owner, opportunities) {
   return Object.freeze({
     start,
     stop,
+    drain(options) { stop(); return execution.drain(options); },
     runOnce,
     runNext: runOnce,
     runManual: (options = {}) => runOnce({ ...options, force: true, trigger: "manual" }),

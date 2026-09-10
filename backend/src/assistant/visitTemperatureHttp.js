@@ -152,7 +152,12 @@ export function createVisitTemperatureSuggestionHttpHandlers({ service } = {}) {
       if (route.kind === "collection" && method === "POST") {
         const input = assertObject(body);
         assertAllowedKeys(input, new Set(["visitId"]));
-        item = await service.suggest({ owner, visitId: identifier(input.visitId, "visitId") });
+        item = await service.suggest({
+          owner,
+          actor: requestIdentity.account,
+          channel: requestIdentity.kind === "machine" ? "worker" : "web",
+          visitId: identifier(input.visitId, "visitId"),
+        });
       } else if (route.kind === "collection" && method === "GET") {
         const input = queryObject(query);
         assertAllowedKeys(input, new Set(["customerId", "limit"]), "query.");

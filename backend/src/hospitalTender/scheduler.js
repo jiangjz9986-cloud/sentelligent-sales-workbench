@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createExecutionDrain } from "../services/executionDrain.js";
 
 import { ingestHospitalTenderSnapshot, customerSnapshotFromRow } from "./sync.js";
 
@@ -232,7 +233,11 @@ export function createHospitalTenderScheduler({
     timer.unref?.();
   }
 
-  async function runNext({ force = false } = {}) {
+  const execution = createExecutionDrain();
+  function runNext(options) {
+    return execution.run(() => executeRunNext(options));
+  }
+  async function executeRunNext({ force = false } = {}) {
     const owner = `hospital-tender-scheduler-${idFactory()}`;
     const startedAt = now().toISOString();
     const lockedUntil = new Date(Date.parse(startedAt) + leaseMs).toISOString();
@@ -598,6 +603,7 @@ export function createHospitalTenderScheduler({
     runNext,
     start,
     stop,
+    drain(options) { stop(); return execution.drain(options); },
     isStarted: () => started,
     getState: state,
     listRuns: repository.listRuns,
