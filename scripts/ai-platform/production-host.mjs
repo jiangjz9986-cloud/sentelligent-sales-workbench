@@ -7,7 +7,7 @@ import { runProductionPreflight, validateReleaseIdentity } from "../production-p
 import { loadAiPlatformConfig } from "../../ai-platform/src/config.js";
 import { loadConfig } from "../../backend/src/config.js";
 import { createProviderCredentials } from "../../ai-platform/src/providers/credentials.js";
-import { normalizeDeploymentPolicy } from "../../ai-platform/src/operations/deploymentPolicy.js";
+import { normalizeDeploymentPolicy, registeredProviderPolicy } from "../../ai-platform/src/operations/deploymentPolicy.js";
 import { sha256 } from "../../shared/aiPlatformContract.mjs";
 import { socketFetch, PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
 import {
@@ -691,7 +691,7 @@ export async function runAiProductionPreflight(manifest) {
     if (rolloutPhase === "P1") check(health.executor?.admissionOpen === false, "P1_ADMISSION_MUST_BE_CLOSED");
     for (const binding of candidate.policy.agents) {
       const model = candidate.policy.models.find((item) => item.id === binding.modelId);
-      const registered = candidate.platform.providerPolicies.find((item) => item.id === model.providerId)?.models.find((item) => item.name === model.name);
+      const registered = registeredProviderPolicy(candidate.platform, model.providerId)?.models.find((item) => item.name === model.name);
       check(registered && Object.values(health.tasks ?? {}).some((item) => item.ready && item.model === model.name && item.provider === model.providerId), "PLATFORM_MODEL_NOT_READY");
     }
   });

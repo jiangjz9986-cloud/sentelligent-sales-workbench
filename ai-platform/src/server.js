@@ -20,7 +20,7 @@ import { createProviderCredentials } from "./providers/credentials.js";
 import { createTaskPayloadCodec } from "./tasks/payloadCodec.js";
 import { safeLimit, safeOffset } from "./utils.js";
 
-const PACKAGE_VERSION = "0.1.0";
+const PACKAGE_VERSION = "0.2.0";
 const ADMIN_PREFIX = "/internal/ai/v1/admin";
 const API_PREFIX = "/internal/ai/v1";
 const STATIC_PREFIXES = new Set(["/admin", "/ai-platform-admin"]);

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { readFileSync } from "node:fs";
 
 import { createServiceToken } from "../src/auth/internalAuth.js";
 import { loadAiPlatformConfig } from "../src/config.js";
-import { createServer } from "../src/server.js";
+import { createServer, PACKAGE_VERSION } from "../src/server.js";
 
 const SECRET = ["test", "ai", "platform", "secret"].join("-");
 
@@ -98,6 +99,8 @@ describe("AI platform HTTP server", () => {
     assert.equal(health.response.status, 200);
     assert.equal(health.body.status, "ok");
     assert.equal(health.body.database, "ready");
+    assert.equal(health.body.version, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
+    assert.equal(health.body.version, PACKAGE_VERSION);
     assert.equal(typeof health.body.requestId, "string");
 
     const ready = await request("/readyz");

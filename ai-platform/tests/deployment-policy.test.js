@@ -69,3 +69,73 @@ test("failed policy application rolls back model, price, budget and release writ
     assert.equal(db.prepare("SELECT count(*) n FROM deployment_policy_releases").get().n, 0);
   } finally { db.close(); }
 });
+
+test("P1 mock policy publishes without an external provider and keeps zero-cost capabilities", () => {
+  const db = openAiPlatformDatabase(":memory:");
+  const mockConfig = loadAiPlatformConfig({ providerAllowedOrigins: [] }, {});
+  const mockPolicy = {
+    id: "policy-mock-p1",
+    sourceCommit: "c".repeat(40),
+    testEvidenceSha256: "d".repeat(64),
+    currency: "USD",
+    dailyBudgetMicro: 1,
+    dailyCallLimit: 1,
+    models: [{
+      id: "model-mock-standard-v1",
+      providerId: "provider-mock",
+      name: "mock-standard-v1",
+      price: {
+        id: "price-mock-p1",
+        version: "mock-p1-v1",
+        effectiveFrom: "2026-01-01T00:00:00.000Z",
+        sourceUrl: "https://example.invalid/mock-pricing",
+        input_micro_per_1k: 0,
+        output_micro_per_1k: 0,
+        cached_input_micro_per_1k: 0,
+        audio_micro_per_minute: 0,
+        image_micro_per_page: 0,
+      },
+    }],
+    agents: [{
+      slug: "quick-record",
+      modelId: "model-mock-standard-v1",
+      version: "1.1.1",
+      maxTokens: 3200,
+      maxInputTokens: 128000,
+      timeoutMs: 120000,
+    }],
+  };
+  const identity = { issuer: "deployment", actor: "operator", scopes: ["ai:ops:write"] };
+  try {
+    const normalized = normalizeDeploymentPolicy(mockPolicy, mockConfig);
+    assert.equal(mockConfig.externalProvidersEnabled, false);
+    assert.equal(mockConfig.providerPolicies.some((item) => item.id === "provider-mock"), false);
+    updateOperationalControl(db, { paused: true, expectedGeneration: 0, identity });
+    const result = applyDeploymentPolicy({
+      db,
+      config: mockConfig,
+      policy: mockPolicy,
+      expectedDigest: sha256(normalized),
+      expectedGeneration: 1,
+      identity,
+    });
+    assert.equal(result.replayed, false);
+    const provider = db.prepare("SELECT kind FROM providers WHERE id='provider-mock'").get();
+    assert.equal(provider.kind, "mock");
+    const model = db.prepare("SELECT capabilities_json FROM models WHERE id='model-mock-standard-v1'").get();
+    assert.deepEqual(JSON.parse(model.capabilities_json), {
+      text: true,
+      vision: true,
+      audio: true,
+      external: false,
+    });
+    const active = db.prepare(`
+      SELECT av.model_policy_json
+        FROM agent_versions av
+        JOIN agent_releases ar ON ar.agent_version_id=av.id
+       WHERE ar.status='active' AND av.agent_id=(SELECT id FROM agents WHERE slug='quick-record')
+    `).get();
+    assert.equal(JSON.parse(active.model_policy_json).externalAllowed, false);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM providers WHERE kind <> 'mock'").get().n, 0);
+  } finally { db.close(); }
+});
