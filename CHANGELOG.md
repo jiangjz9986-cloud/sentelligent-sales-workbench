@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-09-10
+
+### AI 平台切换清理检查修复
+
+- 修正 AI Platform 生产准备失败清理路径使用的表名，改为当前 `task_attempts`、`usage_ledger` 和 `result_deliveries` schema，并增加空平台库回归测试。
+- 保持 P1 `local-simulated`、平台 admission 关闭、Backend 主动调度单一所有者及 PushPlus 退役边界不变。
+
 ## [0.13.1] - 2026-09-10
 
 ### AI 平台生产切换收尾修复

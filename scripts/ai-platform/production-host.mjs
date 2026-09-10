@@ -470,11 +470,11 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
   };
 }
 
-function platformDatabaseIsEmpty(path) {
+export function platformDatabaseIsEmpty(path) {
   if (!existsSync(path)) return true;
   const db = new DatabaseSync(path, { readOnly: true });
   try {
-    for (const table of ["tasks", "attempts", "usage_records", "budget_reservations", "deliveries"]) {
+    for (const table of ["tasks", "task_attempts", "usage_ledger", "budget_reservations", "result_deliveries"]) {
       if (db.prepare(`SELECT count(*) n FROM ${table}`).get().n !== 0) return false;
     }
     return db.prepare("PRAGMA quick_check").get().quick_check === "ok"
