@@ -16,6 +16,8 @@ import { readOperationalControl, updateOperationalControl } from "./operations/c
 import { createMediaStore } from "./media/store.js";
 import { applyDeploymentPolicy, normalizeDeploymentPolicy } from "./operations/deploymentPolicy.js";
 import { sha256 } from "../../shared/aiPlatformContract.mjs";
+import { createProviderCredentials } from "./providers/credentials.js";
+import { createTaskPayloadCodec } from "./tasks/payloadCodec.js";
 import { safeLimit, safeOffset } from "./utils.js";
 
 const PACKAGE_VERSION = "0.1.0";
@@ -253,25 +255,35 @@ export function createAiPlatformRuntime(options = {}) {
   const config = loadAiPlatformConfig(options.config ?? options, options.env ?? process.env);
   const ownsDatabase = !options.db;
   const db = options.db ?? openAiPlatformDatabase(config.databasePath);
+  const payloadCodec = createTaskPayloadCodec({
+    encryptionKey: config.taskEncryptionKey,
+    required: config.nodeEnv === "production" && config.executionMode === "external-provider",
+  });
   const mediaStore = options.mediaStore ?? (config.mediaDirectory ? createMediaStore({
     db, directory: config.mediaDirectory, encryptionKey: config.mediaEncryptionKey,
     maxBytes: config.mediaMaxBytes, capacityBytes: config.mediaCapacityBytes,
   }) : null);
+  const providerCredentials = config.credentialEncryptionKey ? createProviderCredentials({
+    db, encryptionKey: config.credentialEncryptionKey, policies: config.providerPolicies, env: options.env ?? process.env,
+  }) : null;
   const providerRegistry = options.providerRegistry ?? createProviderRegistry({
     config,
     env: options.env ?? process.env,
     fetchImpl: options.providerFetchImpl ?? fetch,
+    credentialResolver: providerCredentials?.resolve,
   });
   const taskService = options.taskService ?? createTaskService({
     db,
     config,
     providerRegistry,
     mediaStore,
+    payloadCodec,
     clock: options.clock,
     logger: options.logger,
   });
   const adminService = options.adminService ?? createAdminService({
     db,
+    payloadCodec,
     clock: options.clock,
     timeZone: options.timeZone,
   });
@@ -284,13 +296,17 @@ export function createAiPlatformRuntime(options = {}) {
   });
   if (options.autoStart !== false && !options.taskService) taskService.start();
   if (options.autoStart !== false && !options.scheduleService) scheduleService.start();
+  taskService.prunePayloads?.();
   mediaStore?.sweep();
-  const mediaSweepTimer = mediaStore ? setInterval(() => {
-    try { mediaStore.sweep(); } catch {
+  const mediaSweepTimer = setInterval(() => {
+    try {
+      mediaStore?.sweep();
+      taskService.prunePayloads?.();
+    } catch {
       taskService.pause?.();
       options.logger?.error?.("media cleanup failed; task execution paused");
     }
-  }, 5_000) : null;
+  }, 5_000);
   mediaSweepTimer?.unref?.();
   let closing = null;
   return Object.freeze({
@@ -301,6 +317,7 @@ export function createAiPlatformRuntime(options = {}) {
     adminService,
     scheduleService,
     mediaStore,
+    providerCredentials,
     async drain() {
       taskService.pause?.();
       scheduleService.stop?.();
@@ -388,6 +405,20 @@ export function createServer(options = {}) {
       { admin: true },
     );
     const identity = identityForTask(auth);
+    if (parts.length === 3 && parts[0] === "providers" && parts[2] === "credential") {
+      const provider = config.providerPolicies.find((item) => item.id === parts[1]);
+      if (!provider || !runtime.providerCredentials) throw new AiPlatformError("credential storage unavailable", { code: "credential_storage_unavailable", status: 503 });
+      if (method === "GET") return sendJson(response, 200, { item: runtime.providerCredentials.metadata(provider.credentialEnv) }, requestId);
+      if (!["POST", "DELETE"].includes(method)) return methodNotAllowed(response, requestId, "GET, POST, DELETE");
+      const writeAuth = await authenticate(request, ["ai:admin:credential"], { admin: true });
+      const body = await readJsonBody(request, config.bodyLimitBytes);
+      if (Object.keys(body).some((key) => !["apiKey", "confirmation", "expectedRevision"].includes(key))
+        || (method === "DELETE" && body.confirmation !== "CLEAR")) throw new AiPlatformError("invalid credential update", { code: "invalid_request", status: 422 });
+      const item = runtime.providerCredentials.update({
+        id: provider.credentialEnv, value: body.apiKey, clear: method === "DELETE", expectedRevision: body.expectedRevision, actor: writeAuth.actor,
+      });
+      return sendJson(response, 200, { item }, requestId);
+    }
     if (parts.length === 0 || (parts.length === 1 && parts[0] === "health")) {
       if (method !== "GET") return methodNotAllowed(response, requestId, "GET");
       return sendJson(response, 200, { item: healthSnapshot(runtime) }, requestId);
@@ -818,6 +849,7 @@ function healthSnapshot(runtime, requestId = null) {
     targetReasoningEffort: runtime.config.targetReasoningEffort,
     adminEnabled: runtime.config.adminEnabled,
     queue,
+    tasks: database === "ready" ? runtime.taskService.configurationReadiness?.() ?? {} : {},
     executor,
     ...(requestId ? { requestId } : {}),
   };

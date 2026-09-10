@@ -45,6 +45,7 @@ import {
 import { loadConfig } from "./config.js";
 import { createAiPlatformRuntime } from "./aiPlatform/runtime.js";
 import { AI_ADMIN_PREFIX, AI_CONSOLE_PREFIX, createAiAdminProxy, readAiConsoleAsset } from "./aiPlatform/adminProxy.js";
+import { usesPlatformForTask, routingPolicyStatus } from "./aiPlatform/routingPolicy.js";
 import { textModelAvailability } from "./aiPlatform/textAdapter.js";
 import {
   aiPlatformStructuredTaskAvailability,
@@ -3744,7 +3745,7 @@ export function createServer(options = {}) {
         : {}),
     });
   const expenseModelClient = createExpenseModelClient(
-    runtimeConfig,
+    config.aiPlatformRoutingPolicy?.phase === "canary" ? { ...runtimeConfig, aiPlatformMode: "disabled" } : runtimeConfig,
     options.fetchImpl ?? fetch,
     aiPlatformRuntime,
   );
@@ -3791,7 +3792,7 @@ export function createServer(options = {}) {
     return platformInvoiceFields(payload);
   };
   const invoiceRecognizer = options.invoiceRecognizer ?? ((file, recognitionOptions = {}) => {
-    if (aiPlatformRouting.usePlatform) {
+    if (aiPlatformRouting.usePlatform && usesPlatformForTask(runtimeConfig, { taskType: "invoice.recognize", owner: recognitionOptions.owner ?? runtimeConfig.aiPlatformOwner })) {
       return recognizeInvoiceDocument(file, {
         analyzeDocument: (analyzerFile) => platformInvoiceAnalyzer(analyzerFile, recognitionOptions),
       });
@@ -3848,7 +3849,7 @@ export function createServer(options = {}) {
     return platformPaymentModel(payload);
   };
   const paymentProofRecognizer = options.paymentProofRecognizer ?? ((file, recognitionOptions = {}) => {
-    if (aiPlatformRouting.usePlatform) {
+    if (aiPlatformRouting.usePlatform && usesPlatformForTask(runtimeConfig, { taskType: "payment-proof.recognize", owner: recognitionOptions.owner ?? runtimeConfig.aiPlatformOwner })) {
       return recognizePaymentProofDocument(file, {
         typedEvidence: recognitionOptions.typedEvidence,
         referenceDate: recognitionOptions.referenceDate,
@@ -3894,6 +3895,9 @@ export function createServer(options = {}) {
   });
   const travelExpenseAnalyzer = options.travelExpenseAnalyzer ?? (aiPlatformRouting.usePlatform
     ? async (text, analysisOptions = {}) => {
+        if (!usesPlatformForTask(runtimeConfig, { taskType: "bookkeeping.extract", owner: analysisOptions.owner ?? runtimeConfig.aiPlatformOwner })) {
+          return legacyTravelExpenseAnalyzer(text);
+        }
         const ruleResult = await analyzeExpenseText(text, {
           clock: options.travelExpenseAnalysisClock ?? options.travelExpenseClock ?? (() => new Date()),
         });
@@ -4042,6 +4046,7 @@ export function createServer(options = {}) {
                 owner: context.owner ?? context.opportunity?.owner ?? runtimeConfig.aiPlatformOwner,
                 actor: context.actor ?? context.owner ?? context.opportunity?.owner ?? runtimeConfig.aiPlatformOwner,
                 channel: "worker",
+                proactive: true,
                 subject: context.opportunity?.id
                   ? { type: "opportunity", id: context.opportunity.id }
                   : context.customer?.id
@@ -4762,8 +4767,9 @@ export function createServer(options = {}) {
 
       if (request.method === "GET" && url.pathname === "/api/health") {
         get(db, "SELECT 1 AS ready");
-        const platformHealth = typeof aiPlatformRuntime?.health === "function"
-          ? aiPlatformRuntime.health()
+        const platformHealth = typeof aiPlatformRuntime?.probeHealth === "function"
+          ? await aiPlatformRuntime.probeHealth()
+          : typeof aiPlatformRuntime?.health === "function" ? aiPlatformRuntime.health()
           : {
               mode: config.aiPlatformMode,
               enabled: config.aiPlatformMode !== "disabled",
@@ -4782,12 +4788,15 @@ export function createServer(options = {}) {
           modelProvider: config.modelProvider,
           modelName: config.modelName,
           modelReady: config.aiAnalysisMode === "model"
-            && textModelAvailability(runtimeConfig) === "available",
+            && textModelAvailability(runtimeConfig) === "available"
+            && (config.aiPlatformMode !== "required" || platformHealth.ready === true),
           aiPlatform: {
+            routing: routingPolicyStatus(config),
             mode: platformHealth.mode,
             enabled: platformHealth.enabled,
             configured: platformHealth.configured,
-            ready: platformHealth.mode === "disabled" || platformHealth.configured === true,
+            ready: platformHealth.mode === "disabled" || platformHealth.ready === true,
+            serviceStatus: platformHealth.serviceStatus ?? "unverified",
             baseUrl: platformHealth.baseUrl ?? null,
             targetModel: platformHealth.targetModel,
             targetReasoningEffort: platformHealth.targetReasoningEffort,
@@ -6194,14 +6203,36 @@ export function createServer(options = {}) {
         return;
       }
 
+      const platformOwnsProviderCredential = config.aiPlatformMode !== "disabled"
+        && config.aiPlatformExecutionMode === "external-provider";
+      const platformOwnsAsrCredential = platformOwnsProviderCredential
+        && config.aiPlatformRoutingPolicy?.phase !== "canary" && config.asrMode === "live";
+      const platformCredential = async (method, body = undefined, providerId = "provider-deepseek") => {
+        const administrator = requireAdminRole(db, request);
+        const target = new URL(`/api/ai-platform/admin/providers/${providerId}/credential`, "http://internal");
+        const proxy = createAiAdminProxy({ config: runtimeConfig, fetchImpl: options.aiPlatformAdminFetchImpl ?? fetch });
+        if (method === "GET") {
+          const result = await proxy({ method, url: target, identity: administrator, requestId });
+          if (result.status !== 200) throw new HttpError(503, "AI_PLATFORM_CREDENTIAL_UNAVAILABLE", "Provider credential is unavailable");
+          return result.payload.item;
+        }
+        const metadata = await proxy({ method: "GET", url: target, identity: administrator, requestId });
+        if (metadata.status !== 200) throw new HttpError(503, "AI_PLATFORM_CREDENTIAL_UNAVAILABLE", "Provider credential is unavailable");
+        const result = await proxy({ method, url: target, body: { ...body, expectedRevision: metadata.payload.item.revision }, identity: administrator, requestId });
+        if (result.status !== 200) throw new HttpError(result.status, "AI_PLATFORM_CREDENTIAL_UPDATE_FAILED", "Provider credential update failed");
+        return result.payload.item;
+      };
+
       if (request.method === "GET" && url.pathname === "/api/settings/security") {
         requireAdminRole(db, request);
         const repository = requireSecureSettings(secureSettingsRepository);
         let item;
         try {
           item = {
-            deepseek: secureSettingMetadata(DEEPSEEK_SETTING_KEY, config.modelApiKey),
-            asr: secureSettingMetadata(ASR_SETTING_KEY),
+            deepseek: platformOwnsProviderCredential
+              ? await platformCredential("GET")
+              : secureSettingMetadata(DEEPSEEK_SETTING_KEY, config.modelApiKey),
+            asr: platformOwnsAsrCredential ? await platformCredential("GET", undefined, "provider-asr") : secureSettingMetadata(ASR_SETTING_KEY),
           };
         } catch {
           throw new HttpError(503, "SECURE_SETTINGS_UNAVAILABLE", "Secure settings storage is unavailable");
@@ -6217,6 +6248,9 @@ export function createServer(options = {}) {
         requireAdminRole(db, request);
         const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
         const repository = requireSecureSettings(secureSettingsRepository);
+        const platformMetadata = platformOwnsAsrCredential
+          ? await platformCredential("POST", { apiKey: value }, "provider-asr")
+          : null;
         const item = withImmediateTransaction(db, () => {
           const saved = repository.setSecret(ASR_SETTING_KEY, value);
           insertAudit(db, {
@@ -6231,11 +6265,11 @@ export function createServer(options = {}) {
               masked: saved.masked,
               updatedAt: saved.updatedAt,
             },
-            metadata: { setting: ASR_SETTING_KEY },
+            metadata: { setting: ASR_SETTING_KEY, ...(platformMetadata ? { platformRevision: platformMetadata.revision } : {}) },
           });
           return saved;
         });
-        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        sendJson(response, 200, { item: platformMetadata ?? item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -6249,6 +6283,9 @@ export function createServer(options = {}) {
           throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear the ASR API key");
         }
         const repository = requireSecureSettings(secureSettingsRepository);
+        const platformMetadata = platformOwnsAsrCredential
+          ? await platformCredential("DELETE", { confirmation: "CLEAR" }, "provider-asr")
+          : null;
         const item = withImmediateTransaction(db, () => {
           const cleared = repository.clearSecret(ASR_SETTING_KEY);
           insertAudit(db, {
@@ -6259,11 +6296,11 @@ export function createServer(options = {}) {
             requestId,
             before: null,
             after: { status: cleared.status, updatedAt: cleared.updatedAt },
-            metadata: { setting: ASR_SETTING_KEY, confirmation: "provided" },
+            metadata: { setting: ASR_SETTING_KEY, confirmation: "provided", ...(platformMetadata ? { platformRevision: platformMetadata.revision } : {}) },
           });
           return cleared;
         });
-        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        sendJson(response, 200, { item: platformMetadata ?? item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -6274,6 +6311,9 @@ export function createServer(options = {}) {
         requireAdminRole(db, request);
         const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
         const repository = requireSecureSettings(secureSettingsRepository);
+        const platformMetadata = platformOwnsProviderCredential
+          ? await platformCredential("POST", { apiKey: value })
+          : null;
         const item = withImmediateTransaction(db, () => {
           const saved = repository.setSecret(DEEPSEEK_SETTING_KEY, value);
           insertAudit(db, {
@@ -6288,11 +6328,11 @@ export function createServer(options = {}) {
               masked: saved.masked,
               updatedAt: saved.updatedAt,
             },
-            metadata: { setting: DEEPSEEK_SETTING_KEY },
+            metadata: { setting: DEEPSEEK_SETTING_KEY, ...(platformMetadata ? { platformRevision: platformMetadata.revision } : {}) },
           });
           return saved;
         });
-        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        sendJson(response, 200, { item: platformMetadata ?? item }, { "Cache-Control": "no-store" });
         return;
       }
 
@@ -6309,6 +6349,9 @@ export function createServer(options = {}) {
           throw new HttpError(428, "CONFIRMATION_REQUIRED", "Explicit confirmation is required to clear the DeepSeek key");
         }
         const repository = requireSecureSettings(secureSettingsRepository);
+        const platformMetadata = platformOwnsProviderCredential
+          ? await platformCredential("DELETE", { confirmation: "CLEAR" })
+          : null;
         const item = withImmediateTransaction(db, () => {
           const cleared = repository.clearSecret(DEEPSEEK_SETTING_KEY);
           insertAudit(db, {
@@ -6319,11 +6362,11 @@ export function createServer(options = {}) {
             requestId,
             before: null,
             after: { status: cleared.status, updatedAt: cleared.updatedAt },
-            metadata: { setting: DEEPSEEK_SETTING_KEY, confirmation: "provided" },
+            metadata: { setting: DEEPSEEK_SETTING_KEY, confirmation: "provided", ...(platformMetadata ? { platformRevision: platformMetadata.revision } : {}) },
           });
           return cleared;
         });
-        sendJson(response, 200, { item }, { "Cache-Control": "no-store" });
+        sendJson(response, 200, { item: platformMetadata ?? item }, { "Cache-Control": "no-store" });
         return;
       }
 

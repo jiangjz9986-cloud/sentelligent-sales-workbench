@@ -89,6 +89,33 @@ afterEach(async () => {
 });
 
 describe("AI platform task service", () => {
+  it("enforces global concurrency across two executors and different owners", async () => {
+    let finish;
+    createService({
+      ...mockProvider,
+      async execute() {
+        await new Promise((resolve) => { finish = resolve; });
+        return successfulResponse("global-concurrency");
+      },
+    }, { taskConcurrency: 1 });
+    service.createTask({ identity: identity("alice"), idempotencyKey: "concurrency-a", request: validRequest() });
+    service.createTask({ identity: identity("bob"), idempotencyKey: "concurrency-b", request: validRequest() });
+    const pending = service.runPending();
+    const other = createTaskService({
+      db, config: loadAiPlatformConfig({ databasePath: ":memory:", taskConcurrency: 1 }),
+      providerRegistry: createProviderRegistry(), clock: () => currentTime,
+    });
+    try {
+      assert.equal((await other.runPending()).claimed, 0);
+      assert.equal(db.prepare("SELECT count(*) n FROM tasks WHERE status='running'").get().n, 1);
+    } finally {
+      finish();
+      await pending;
+    }
+    assert.equal((await other.runPending()).claimed, 1);
+    await other.close();
+  });
+
   it("preserves the price currency and reservation when a paid lease expires", async () => {
     let finish;
     let calls = 0;

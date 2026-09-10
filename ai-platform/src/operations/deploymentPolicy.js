@@ -42,6 +42,10 @@ export function normalizeDeploymentPolicy(input, config) {
     if (url.protocol !== "https:" || url.username || url.password || url.search) invalid();
     for (const key of RATE_FIELDS) integer(price[key], 0, 1_000_000_000);
     if (!RATE_FIELDS.some((key) => price[key] > 0)) invalid();
+    if (provider.kind === "asr" && (price.audio_micro_per_minute <= 0
+      || ["input_micro_per_1k", "output_micro_per_1k", "cached_input_micro_per_1k", "image_micro_per_page"].some((key) => price[key] !== 0))) invalid("unsupported_asr_pricing");
+    if (provider.kind === "vision" && (price.image_micro_per_page !== 0 || price.audio_micro_per_minute !== 0
+      || price.input_micro_per_1k <= 0)) invalid("unsupported_vision_pricing");
     const calendar = normalizePriceCalendar(price.calendar, price);
     return { ...model, price: { ...price, calendar } };
   });

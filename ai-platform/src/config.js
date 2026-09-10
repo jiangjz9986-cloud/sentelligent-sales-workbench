@@ -1,6 +1,7 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeProviderPolicies } from "./providers/openAiCompatible.js";
+import { PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
 
 import {
   AI_EXECUTION_MODE,
@@ -44,6 +45,7 @@ function fixedTarget(value, expected, name, max) {
 
 export function loadAiPlatformConfig(overrides = {}, env = process.env) {
   const nodeEnv = text(overrides.nodeEnv ?? env.NODE_ENV, "development", 40);
+  if (!["development", "test", "production"].includes(nodeEnv)) throw new Error("invalid AI platform NODE_ENV");
   const host = text(overrides.host ?? env.AI_PLATFORM_HOST, "127.0.0.1", 200);
   const port = positiveInteger(overrides.port ?? env.AI_PLATFORM_PORT, 18997, 65_535);
   const databasePathValue = text(
@@ -83,9 +85,12 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
     nodeEnv,
     host,
     port,
+    socketPath: overrides.socketPath ?? env.AI_PLATFORM_SOCKET_PATH ?? (nodeEnv === "production" ? PRODUCTION_AI_SOCKET : null),
     databasePath,
     mediaDirectory: overrides.mediaDirectory ?? env.AI_PLATFORM_MEDIA_DIRECTORY ?? null,
     mediaEncryptionKey: overrides.mediaEncryptionKey ?? env.AI_PLATFORM_MEDIA_ENCRYPTION_KEY ?? null,
+    credentialEncryptionKey: overrides.credentialEncryptionKey ?? env.AI_PLATFORM_CREDENTIAL_ENCRYPTION_KEY ?? null,
+    taskEncryptionKey: overrides.taskEncryptionKey ?? env.AI_PLATFORM_TASK_ENCRYPTION_KEY ?? null,
     mediaMaxBytes: positiveInteger(overrides.mediaMaxBytes ?? env.AI_PLATFORM_MEDIA_MAX_BYTES, 16 * 1024 * 1024, 32 * 1024 * 1024),
     mediaCapacityBytes: positiveInteger(overrides.mediaCapacityBytes ?? env.AI_PLATFORM_MEDIA_CAPACITY_BYTES, 64 * 1024 * 1024, 256 * 1024 * 1024),
     pdfImageCommand: text(overrides.pdfImageCommand ?? env.AI_PLATFORM_PDF_IMAGE_COMMAND, "/usr/bin/pdftoppm", 1000),
@@ -140,6 +145,7 @@ export function loadAiPlatformConfig(overrides = {}, env = process.env) {
   if (nodeEnv === "production") {
     if (!config.requestBindingRequired) throw new Error("request binding is required in production");
     if (!["127.0.0.1", "::1"].includes(config.host)) throw new Error("AI platform must bind to loopback in production");
+    if (config.socketPath !== PRODUCTION_AI_SOCKET) throw new Error("AI platform production socket is fixed");
     if (!config.pdfImageCommand.startsWith("/")) throw new Error("AI platform PDF command must be absolute in production");
     if (config.authSecret.length < 32 || config.authSecret.includes("change-me")) {
       throw new Error("AI_PLATFORM_AUTH_SECRET must be a strong production secret");

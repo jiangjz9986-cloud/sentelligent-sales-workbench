@@ -39,6 +39,9 @@ jobs:
       - name: Install backend dependencies
         run: npm ci --prefix backend
 
+      - name: Install AI platform dependencies
+        run: npm ci --prefix ai-platform --ignore-scripts
+
       - name: Install frontend dependencies
         run: npm ci --prefix outputs/product-design-prototype
 

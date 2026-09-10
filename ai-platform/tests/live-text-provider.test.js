@@ -11,7 +11,7 @@ const POLICY = {
 const ENV = { AI_PROVIDER_TEST_KEY: ["synthetic", "provider", "credential"].join("-") };
 const requestInput = {
   protocol: "chat.completions.v1",
-  request: { model: "body-must-not-select-model", max_tokens: 12_000, messages: [{ role: "user", content: "fixture JSON" }], apiKey: "ignored", thinking: { type: "enabled" } },
+  request: { model: "body-must-not-select-model", max_tokens: 12_000, messages: [{ role: "user", content: "fixture JSON" }], apiKey: "test-credential", thinking: { type: "enabled" } },
 };
 function providerInput(taskType = "quick-record.analyze") {
   return {
@@ -72,12 +72,27 @@ test("invalid completion and model mismatch retain usage and vendor request iden
   assert.equal(unknown.usage, null);
 });
 
+test("released standard contents and instruction versions reach the actual provider prompt", async () => {
+  let body;
+  const provider = configured(async (_url, options) => {
+    body = JSON.parse(options.body);
+    return Response.json(completion());
+  });
+  const input = providerInput();
+  input.agent.standards = [{ version: "2.0.0", content: "Only documented facts.", rules: { noGuessing: true } }];
+  input.agent.instructions = { noDirectWrite: true };
+  await provider.execute(input);
+  assert.match(body.messages[0].content, /Only documented facts/);
+  assert.match(body.messages[0].content, /2\.0\.0/);
+  assert.match(body.messages[0].content, /noDirectWrite/);
+});
+
 test("provider policy rejects unapproved origins, raw credentials, unsupported capabilities and oversized responses", async () => {
   for (const policy of [
     { ...POLICY, baseUrl: "http://api.deepseek.com" },
     { ...POLICY, baseUrl: "https://api.deepseek.com@127.0.0.1" },
     { ...POLICY, baseUrl: "https://api.deepseek.com?key=forged" },
-    { ...POLICY, apiKey: "forged" },
+    { ...POLICY, apiKey: "test-credential" },
     { ...POLICY, models: [{ ...POLICY.models[0], taskTypes: ["asr.transcribe"] }] },
   ]) {
     assert.throws(() => normalizeProviderPolicies([policy], { allowedOrigins: ["https://api.deepseek.com"] }), (error) => error.code === "provider_configuration_invalid");

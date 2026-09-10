@@ -1,3 +1,5 @@
+import { compileAgentSchema } from "../tasks/schemaValidation.js";
+import { createTaskPayloadCodec } from "../tasks/payloadCodec.js";
 import {
   AI_TASK_STATUSES,
   AI_TASK_TYPES,
@@ -387,7 +389,7 @@ function priceView(row) {
   };
 }
 
-function taskView(row, { includeInput = false, includeOutput = true } = {}) {
+function taskRecordView(row, { includeInput = false, includeOutput = true } = {}) {
   if (!row) return null;
   return {
     id: row.id,
@@ -773,6 +775,8 @@ function validateStandardReferences(db, standardIds) {
 }
 
 function validateAgentVersion(db, version) {
+  compileAgentSchema(version.inputSchema ?? {});
+  compileAgentSchema(version.outputSchema ?? {});
   validateModelReference(db, version.modelPolicy);
   validateStandardReferences(db, version.standardIds);
   if (version.instructions && version.instructions.noDirectWrite === false) {
@@ -816,7 +820,8 @@ function nextTimestamp(clock, last = null) {
   return next.toISOString();
 }
 
-export function createAdminService({ db, clock = () => new Date(), timeZone = "Asia/Shanghai" } = {}) {
+export function createAdminService({ db, clock = () => new Date(), timeZone = "Asia/Shanghai", payloadCodec = createTaskPayloadCodec() } = {}) {
+  const taskView = (row, options) => taskRecordView(payloadCodec.decodeRow(row, options), options);
   if (!db) throw new TypeError("db is required");
   let lastWriteAt = null;
 
@@ -2036,5 +2041,5 @@ export {
   releaseView,
   scheduleView,
   standardVersionView,
-  taskView,
+  taskRecordView as taskView,
 };

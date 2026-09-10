@@ -6,6 +6,8 @@ import {
 } from "../../../shared/aiPlatformContract.mjs";
 import { readBoundedResponseText } from "../http/request.js";
 import { createAiPlatformClient } from "./client.js";
+import { configForAiTask } from "./routingPolicy.js";
+import { platformFetch } from "../../../shared/aiPlatformSocketTransport.mjs";
 
 const DEFAULT_MAX_WAIT_MS = 30_000;
 const DEFAULT_POLL_MS = 250;
@@ -215,7 +217,7 @@ function configuredClient(config, options) {
       baseUrl: config.aiPlatformBaseUrl,
       token: config.aiPlatformAuthToken,
       tokenProvider: config.aiPlatformAuthTokenProvider,
-      fetchImpl: options.fetchImpl ?? fetch,
+      fetchImpl: platformFetch(config, options.fetchImpl ?? fetch),
       timeoutMs: config.aiPlatformRequestTimeoutMs ?? config.aiPlatformTimeoutMs,
     });
   } catch {
@@ -673,7 +675,7 @@ export async function runAiPlatformTextCompletion({
       idempotencyKey: normalizedIdempotencyKey,
     });
 
-    const execution = platformExecution(config, options);
+    const execution = platformExecution(configForAiTask(config, { taskType: normalizedTaskType, owner: normalizedOwner }), options);
     let raw;
     if (execution.runtime) {
       raw = await invokeRuntime(

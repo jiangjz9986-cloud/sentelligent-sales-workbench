@@ -266,7 +266,7 @@ function normalizedConfig(config, aiPlatformMode = config.aiPlatformMode) {
   return Object.freeze({
     mode,
     providerName,
-    aiPlatformMode: normalizeAiPlatformMode(aiPlatformMode),
+    aiPlatformMode: config.aiPlatformRoutingPolicy?.phase === "canary" ? "disabled" : normalizeAiPlatformMode(aiPlatformMode),
     baseUrl: config.asrBaseUrl ?? config.baseUrl ?? ASR_CONFIG_DEFAULTS.baseUrl,
     model: config.asrModel ?? config.model ?? ASR_CONFIG_DEFAULTS.model,
     providerTimeoutMs: config.asrTimeoutMs ?? config.timeoutMs ?? ASR_CONFIG_DEFAULTS.timeoutMs,

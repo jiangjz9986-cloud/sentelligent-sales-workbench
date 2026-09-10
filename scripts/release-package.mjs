@@ -40,9 +40,9 @@ const PRODUCT_DIST_PREFIX = "outputs/product-design-prototype/dist/";
 const PRODUCT_NODE_MODULES_PREFIX = "outputs/product-design-prototype/node_modules/";
 const PRODUCT_LOCKFILE_RELEASE_PATH = "outputs/product-design-prototype/package-lock.json";
 const BACKEND_PATH = "backend";
-const BACKEND_LOCKFILE_RELEASE_PATH = "backend/package-lock.json";
 const BACKEND_NODE_MODULES_PATH = join(BACKEND_PATH, "node_modules");
 const BACKEND_NODE_MODULES_PREFIX = "backend/node_modules/";
+const AI_PLATFORM_NODE_MODULES_PREFIX = "ai-platform/node_modules/";
 const FRONTEND_BUILD_ENVIRONMENT_IDENTITY = "sentelligent-release-frontend-v1";
 const RELEASE_NPM_CLI_ENV = "SENTELLIGENT_RELEASE_NPM_CLI";
 const WINDOWS_IMPLICIT_BUILD_ENV_NAMES = Object.freeze([
@@ -1514,13 +1514,16 @@ function installFrontendDependencies({
   };
 }
 
-function installBackendProductionDependencies({
+function installComponentProductionDependencies({
   checkoutRoot,
   commit,
   temporaryRoot,
   nodeExecutable,
+  componentPath = BACKEND_PATH,
 }) {
-  const backendRoot = join(checkoutRoot, BACKEND_PATH);
+  if (![BACKEND_PATH, "ai-platform"].includes(componentPath)) throw new Error("Unsupported release component");
+  const lockfileReleasePath = componentPath + "/package-lock.json";
+  const backendRoot = join(checkoutRoot, componentPath);
   const packagePath = join(backendRoot, "package.json");
   if (!existsSync(packagePath)) return null;
 
@@ -1551,13 +1554,13 @@ function installBackendProductionDependencies({
   const lockfilePath = join(backendRoot, "package-lock.json");
   if (!existsSync(lockfilePath)) {
     throw new Error(
-      `Backend production dependencies require the committed lockfile ${BACKEND_LOCKFILE_RELEASE_PATH}`,
+      `Component production dependencies require the committed lockfile ${lockfileReleasePath}`,
     );
   }
   const committedLockfile = gitFileContent(
     checkoutRoot,
     commit,
-    BACKEND_LOCKFILE_RELEASE_PATH,
+    lockfileReleasePath,
   );
   let lockfile;
   try {
@@ -1575,9 +1578,9 @@ function installBackendProductionDependencies({
     tracked: new Set(trackedFiles(checkoutRoot)),
   });
 
-  const cacheRoot = join(temporaryRoot, "backend-npm-cache");
-  const userConfigPath = join(temporaryRoot, "empty-backend-user-npmrc");
-  const globalConfigPath = join(temporaryRoot, "empty-backend-global-npmrc");
+  const cacheRoot = join(temporaryRoot, componentPath + "-npm-cache");
+  const userConfigPath = join(temporaryRoot, "empty-" + componentPath + "-user-npmrc");
+  const globalConfigPath = join(temporaryRoot, "empty-" + componentPath + "-global-npmrc");
   mkdirSync(cacheRoot, { recursive: true });
   writeFileSync(userConfigPath, "", { flag: "wx" });
   writeFileSync(globalConfigPath, "", { flag: "wx" });
@@ -1619,14 +1622,14 @@ function installBackendProductionDependencies({
       `Backend production dependency installation from the committed lockfile failed${message ? `: ${String(message).trim()}` : ""}`,
     );
   }
-  if (!existsSync(join(checkoutRoot, BACKEND_NODE_MODULES_PATH))) {
+  if (!existsSync(join(backendRoot, "node_modules"))) {
     throw new Error(
       "Backend production dependency installation did not create node_modules",
     );
   }
   return {
     lockfile: {
-      path: BACKEND_LOCKFILE_RELEASE_PATH,
+      path: lockfileReleasePath,
       sha256: hashBuffer(committedLockfile),
       lockfileVersion: lockfile.lockfileVersion,
     },
@@ -1773,12 +1776,15 @@ function collectSourceFiles(root) {
   if (existsSync(backendDependenciesRoot)) {
     candidates.push(...walkAllRegularFiles(root, backendDependenciesRoot));
   }
+  const platformDependenciesRoot = join(root, "ai-platform/node_modules");
+  if (existsSync(platformDependenciesRoot)) candidates.push(...walkAllRegularFiles(root, platformDependenciesRoot));
 
   const unique = new Set();
   for (const relativePath of candidates) {
     if (
       shouldExcludeReleasePath(relativePath) &&
-      !relativePath.startsWith(BACKEND_NODE_MODULES_PREFIX)
+      !relativePath.startsWith(BACKEND_NODE_MODULES_PREFIX) &&
+      !relativePath.startsWith(AI_PLATFORM_NODE_MODULES_PREFIX)
     ) {
       continue;
     }
@@ -1841,6 +1847,9 @@ export function buildReleaseManifest({
     sourceFiles.map((file) => [file, hashBuffer(contentByPath.get(file))]),
   );
   const serviceUnitList = PROJECT_SERVICE_UNITS.join(", ");
+  const platformPackage = contentByPath.has("ai-platform/package.json")
+    ? JSON.parse(contentByPath.get("ai-platform/package.json").toString("utf8")) : null;
+  const platformDependencyHashes = checksumsFor(files, contentByPath, AI_PLATFORM_NODE_MODULES_PREFIX);
 
   return {
     schemaVersion: 3,
@@ -1848,6 +1857,16 @@ export function buildReleaseManifest({
     createdAt,
     source,
     buildProvenance,
+    ...(platformPackage ? {
+      components: {
+        aiPlatform: {
+          version: platformPackage.version, sourceCommit: source.commit,
+          entrypoint: "ai-platform/src/cli.js", protocol: "ai-task-v1",
+          migrations: checksumsFor(files, contentByPath, "ai-platform/src/db/migrations/"),
+          dependencies: { files: platformDependencyHashes, treeSha256: sourceTreeHash(platformDependencyHashes) },
+        },
+      },
+    } : {}),
     archive: {
       format: "tar.gz",
       rootDirectory,
@@ -2185,17 +2204,25 @@ export async function createReleasePackage(options = {}) {
       worktree.temporaryRoot,
       nodeExecutable,
     );
-    const backendBuildProvenance = installBackendProductionDependencies({
+    const backendBuildProvenance = installComponentProductionDependencies({
       checkoutRoot: worktree.checkoutRoot,
       commit: source.commit,
       temporaryRoot: worktree.temporaryRoot,
       nodeExecutable,
+    });
+    const platformBuildProvenance = installComponentProductionDependencies({
+      checkoutRoot: worktree.checkoutRoot,
+      commit: source.commit,
+      temporaryRoot: worktree.temporaryRoot,
+      nodeExecutable,
+      componentPath: "ai-platform",
     });
     const buildProvenance = {
       ...(frontendBuildProvenance || {}),
       ...(backendBuildProvenance
         ? { backend: backendBuildProvenance }
         : {}),
+      ...(platformBuildProvenance ? { aiPlatform: platformBuildProvenance } : {}),
     };
     files = collectSourceFiles(worktree.checkoutRoot);
     const tracked = new Set(trackedFiles(worktree.checkoutRoot));

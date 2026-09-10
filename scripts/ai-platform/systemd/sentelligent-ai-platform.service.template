@@ -9,40 +9,42 @@ Wants=network-online.target
 ConditionPathExists=@PROJECT_ROOT@/ai-platform/src/cli.js
 
 [Service]
-Type=forking
+Type=simple
 User=@SERVICE_USER@
 Group=@SERVICE_GROUP@
 WorkingDirectory=@PROJECT_ROOT@
-EnvironmentFile=/etc/sentelligent/ai-platform.env
-Environment=AI_PLATFORM_OPS_NODE=@NODE_BIN@
+EnvironmentFile=/opt/sentelligent-sales-workbench/config/ai-platform.env
 Environment=NODE_ENV=production
 Environment=AI_PLATFORM_HOST=127.0.0.1
 Environment=AI_PLATFORM_PORT=18997
 Environment=AI_PLATFORM_TARGET_MODEL=gpt-5.6-luna
 Environment=AI_PLATFORM_TARGET_REASONING_EFFORT=max
-# Keep the first deployment local-only until an approved provider change.
-Environment=AI_PLATFORM_EXECUTION_MODE=local-simulated
-Environment=AI_PLATFORM_EXTERNAL_PROVIDERS=false
 RuntimeDirectory=sentelligent-ai-platform
-RuntimeDirectoryMode=0700
-PIDFile=@RUNTIME_DIR@/ai-platform.pid
+RuntimeDirectoryMode=0711
+Environment=AI_PLATFORM_SOCKET_PATH=/run/sentelligent-ai-platform/api.sock
 ExecStartPre=/usr/bin/test -x @NODE_BIN@
 ExecStartPre=/usr/bin/test -f @PROJECT_ROOT@/ai-platform/src/cli.js
-ExecStart=/bin/bash @PROJECT_ROOT@/scripts/ai-platform/start.sh --root=@PROJECT_ROOT@ --node=@NODE_BIN@ --host=127.0.0.1 --port=18997 --runtime-dir=@RUNTIME_DIR@ --pid-file=@RUNTIME_DIR@/ai-platform.pid --runtime-file=@RUNTIME_DIR@/runtime.json --database=@DATABASE_DIR@/ai-platform.sqlite --log-file=@LOG_DIR@/ai-platform.log
-ExecStop=/bin/bash @PROJECT_ROOT@/scripts/ai-platform/stop.sh --root=@PROJECT_ROOT@ --node=@NODE_BIN@ --host=127.0.0.1 --port=18997 --runtime-dir=@RUNTIME_DIR@ --pid-file=@RUNTIME_DIR@/ai-platform.pid --runtime-file=@RUNTIME_DIR@/runtime.json --database=@DATABASE_DIR@/ai-platform.sqlite --log-file=@LOG_DIR@/ai-platform.log --timeout-seconds=25
+ExecStart=@NODE_BIN@ @PROJECT_ROOT@/ai-platform/src/cli.js serve
+Environment=AI_PLATFORM_DATABASE=@DATABASE_DIR@/ai-platform.sqlite
+Environment=AI_PLATFORM_MEDIA_DIRECTORY=@DATABASE_DIR@/media
 Restart=on-failure
 RestartSec=5
 # CentOS 7 / systemd 219 spelling is intentional.
 StartLimitInterval=300
 StartLimitBurst=5
 TimeoutStartSec=75
-TimeoutStopSec=35
-KillMode=process
+TimeoutStopSec=210
+KillMode=control-group
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=@RUNTIME_DIR@ @DATABASE_DIR@ @LOG_DIR@
+ReadWriteDirectories=@RUNTIME_DIR@ @DATABASE_DIR@
+MemoryLimit=768M
+CPUQuota=100%
+LimitNOFILE=4096
+StandardOutput=journal
+StandardError=journal
 UMask=0077
 
 [Install]

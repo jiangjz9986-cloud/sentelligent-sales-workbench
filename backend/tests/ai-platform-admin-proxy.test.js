@@ -16,7 +16,12 @@ const close = (server) => new Promise((resolve, reject) => server.close((error) 
 test("business session enforces admin and CSRF before signed platform proxy and console access", async () => {
   const dir = await mkdtemp(join(tmpdir(), "ai-admin-proxy-"));
   const platform = createPlatformServer({
-    config: { nodeEnv: "production", databasePath: ":memory:", authSecret: AUTH, taskAdmissionEnabled: true },
+    config: {
+      nodeEnv: "production", databasePath: ":memory:", authSecret: AUTH, taskAdmissionEnabled: true,
+      credentialEncryptionKey: Buffer.alloc(32, 101).toString("base64url"),
+      providerAllowedOrigins: ["https://api.deepseek.com"],
+      providerPolicies: [{ id: "provider-deepseek", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_DEEPSEEK_KEY", models: [{ name: "deepseek-v4-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }] }],
+    },
     autoStart: false, logger: { error() {} },
   });
   await listen(platform);
@@ -25,6 +30,8 @@ test("business session enforces admin and CSRF before signed platform proxy and 
     authRequired: true, authAccount: "admin", authPassword: "", authPasswordHash: adminHash,
     authSessionSecret: Buffer.alloc(32, 85).toString("base64url"), authCookieSecure: false,
     aiPlatformMode: "required", aiPlatformAuthSecret: AUTH,
+    aiPlatformExecutionMode: "external-provider",
+    settingsEncryptionKey: Buffer.alloc(32, 102).toString("base64url"),
     aiPlatformBaseUrl: `http://127.0.0.1:${platform.address().port}`,
   });
   await listen(backend);
@@ -67,11 +74,23 @@ test("business session enforces admin and CSRF before signed platform proxy and 
     assert.equal(updated.response.status, 200);
     assert.equal(updated.payload.item.amountMicro, 5000000);
     assert.equal(platform.aiPlatform.db.prepare("SELECT count(*) n FROM platform_auth_replays").get().n > 0, true);
+    const replaced = await request("/api/settings/deepseek-key", {
+      method: "PUT", headers, body: { apiKey: "synthetic-new-provider-credential" },
+    });
+    assert.equal(replaced.response.status, 200);
+    assert.equal(replaced.payload.item.source, "ai-platform");
+    assert.equal(platform.aiPlatform.providerCredentials.resolve("AI_PROVIDER_DEEPSEEK_KEY"), "synthetic-new-provider-credential");
+    const cleared = await request("/api/settings/deepseek-key", {
+      method: "DELETE", headers, body: { confirmation: "CLEAR" },
+    });
+    assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.payload.item.configured, false);
+    assert.equal(platform.aiPlatform.providerCredentials.resolve("AI_PROVIDER_DEEPSEEK_KEY"), "");
     const member = await request("/api/admin/users", {
-      method: "POST", headers, body: { account: "member", displayName: "Member", password: "unit-member-password", role: "member" },
+      method: "POST", headers, body: { account: "member", displayName: "Member", password: "unit-test-password", role: "member" },
     });
     assert.equal(member.response.status, 201);
-    const memberLogin = await request("/api/auth/login", { method: "POST", body: { account: "member", password: "unit-member-password" } });
+    const memberLogin = await request("/api/auth/login", { method: "POST", body: { account: "member", password: "unit-test-password" } });
     const memberCookie = memberLogin.response.headers.get("set-cookie").split(";")[0];
     assert.equal((await request(adminPath + "/overview", { headers: { Cookie: memberCookie } })).response.status, 403);
     assert.equal((await request("/api/ai-platform/console/", { headers: { Cookie: memberCookie } })).response.status, 403);

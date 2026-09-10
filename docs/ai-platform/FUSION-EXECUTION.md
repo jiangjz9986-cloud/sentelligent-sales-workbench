@@ -39,6 +39,8 @@
 - Platform migration 0006 reserves immutable price calendars and deployment
   policy publication evidence. Preview is zero-write; publication requires a
   paused, empty queue and a fresh generation/digest, and advances that generation.
+- Platform migration 0007 reserves encrypted provider credentials and revision
+  audit. A cleared row overrides environment credentials across restarts.
 - Platform shutdown stops admission and claiming before waiting for attempts
   and usage settlement. A drain timeout must not close a database still in use,
   clear an unknown charge or allow a second worker to start.
@@ -147,3 +149,76 @@ routing and business-event remediation are still outstanding.
   systemd/transition tools and associated release contracts, provider quality
   smoke, load/backup/restore/browser/full QA, formal release, fresh production
   preflight/cutover/postflight, observation and rollback evidence.
+
+## Routing Contract
+
+- `AI_PLATFORM_ROUTING_POLICY` is a versioned JSON object with
+  `version, phase, owners, taskTypes`.
+- `legacy` requires `AI_PLATFORM_MODE=disabled`; `platform` and
+  `canary` use required mode in production. Legacy/platform phases require
+  empty selector arrays; canary requires explicit nonempty owner/task lists.
+- Canary routes selected text, vision and bookkeeping calls exclusively through
+  Platform; excluded calls use the existing provider explicitly. Platform
+  errors never trigger an implicit legacy retry.
+- ASR is not an owner-canary task: it retains its independent existing provider
+  during canary and switches only in the full platform phase after ASR gates.
+- Public health exposes only phase and policy digest, not owner selectors.
+- Backend health now probes the real platform with a bounded cached request;
+  mere credential configuration is not reported as platform readiness.
+- Backend proactive model execution is classified as `proactive.analyze` with
+  background priority, rather than merging its costs into interactive sales
+  decisions. Scheduling ownership remains Backend.
+
+## Remaining Production-Critical Checks
+
+- Complete credential rotation/clear behavior across the legacy settings page
+  and platform provider references. Full platform routing must not keep using
+  a cleared credential or silently revive it on rollback.
+- Complete cross-entry canary tests for vision/bookkeeping/ASR and ensure legacy
+  ASR HTTP readiness uses the same routing decision as the ASR runtime.
+- Build and test the independent systemd unit, transition manifest/tool,
+  immutable release checks, environment migration/backup and rollback.
+- Handle existing unavailable-customer events through the audited worker logic
+  during the controlled window; none have been changed in production yet.
+- Finish resource/media crash-cleanup tests, final shared QA, Mac Chrome
+  acceptance, live provider quality/cost probes, CI/release and production gates.
+
+## Credential Handoff
+
+- The existing settings API now uses the platform vault when external platform
+  routing is active, then mirrors the successful change into the existing
+  encrypted Backend store. DeepSeek text/vision policies share one credential
+  reference. Live ASR uses its separate `provider-asr` reference in full routing.
+- The platform is changed first, so clear takes effect before a legacy mirror.
+  A Backend database failure after platform acknowledgement is a partial
+  synchronization failure, not permission to revive the old value.
+- Rollback must compare credential revisions and reconcile the latest vault
+  state into the legacy encrypted store, or remain blocked. It must not restore
+  stale credential backups over a clear/rotation performed during the window.
+- Current production ASR remains disabled/unconfigured; no live ASR credential
+  has been invented or enabled by this work.
+
+## Routing And Credential Checkpoint
+
+- Platform 79/79 and Backend adapter 38/38 tests passed.
+- Backend full regression passed 2067/2067 on the routing/credential wiring.
+- The subsequently added proactive-event reconciliation regression passed
+  separately. Preview is zero-write; execution requires an unchanged digest,
+  preserves all event rows and retry counts, and adds an audit entry.
+- No production mutation, service restart, completion or notification has been
+  performed during these implementation checkpoints.
+- Current work is still not a release candidate: transition tooling, credential
+  reconciliation on rollback, full shared QA/browser/load/restore evidence and
+  the production cutover/observation remain unfinished.
+
+## Systemd Verification
+
+- A temporary rendered unit referencing the existing immutable CLI path was
+  uploaded to `/tmp/sentelligent-ai-platform-verification.service`.
+- On the actual CentOS 7/systemd 219 host, `systemd-analyze verify` exited 0.
+  No service was installed or started by this verification.
+- Production unit uses Type=simple, direct Node, sentai, control-group shutdown,
+  ReadWriteDirectories, 210-second stop timeout, 768M memory ceiling and one CPU.
+  These are initial limits pending the required measured load gate.
+- Development forked-process start/stop/restore scripts now reject production
+  platform database paths; production uses the independent transition tool.

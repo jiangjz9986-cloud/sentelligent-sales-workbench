@@ -61,7 +61,7 @@ describe("root package QA scripts", () => {
   it("keeps the isolated AI platform in local, CI, and release verification", () => {
     assert.equal(
       packageJson.scripts?.["test:ai-platform"],
-      "npm --prefix ai-platform test && node --test backend/src/aiPlatform/*.test.js",
+      "npm --prefix ai-platform test && node --test backend/src/aiPlatform/*.test.js && node --test scripts/ai-platform/*.test.mjs",
     );
     assert.match(ciWorkflow, /npm run test:ai-platform/);
     assert.match(releaseWorkflow, /npm run test:ai-platform/);

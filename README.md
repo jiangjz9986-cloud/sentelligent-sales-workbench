@@ -8,7 +8,7 @@
 
 | 项目 | 状态 |
 | --- | --- |
-| 当前版本 | 当前工作树版本字段为 `0.12.3`（快速记录 DeepSeek 结构化抽取关闭 thinking 的生产热修复候选）；截至 `2026-09-08` 的服务器证据，生产 `current` 为 `v0.12.2` / `28bb7394ee081efbb377a32698fd8304de1056c7` |
+| 当前版本 | 当前工作树版本字段为 `0.13.0`（AI 统一调度平台融合升级候选）；截至 `2026-09-10` 的服务器证据，生产 `current` 仍为 `v0.12.3` / `3209a073486e22370307a6f46021ac9cf2ec71d1`，尚未切换 |
 | 生产身份 | 以服务器 `releases/` 当前 `current` 指向目录的 manifest（完整 commit）为准；`docs/releases/vX.Y.Z.md` 逐版保存部署证据表 |
 | 发布方式 | 常规发布必须来自已合并的 `origin/main`、唯一正式 tag 和 GitHub Release 生成的 Linux/x64 不可变制品；历史本地 exact-commit 授权例外只适用于 `v0.6.15` 至 `v0.6.24` |
 | 制品与备份 | v0.8.0 起服务器每日 02:30 自动备份数据库与微信会话（14 天保留），发布 bundle+evidence 自动归档到 `backups/releases/<version>/`（root:root 0700） |

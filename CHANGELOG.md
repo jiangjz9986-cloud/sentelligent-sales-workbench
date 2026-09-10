@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-10
+
+### AI 统一调度平台融合升级
+
+- 接入独立 AI Platform，统一任务、租约、预算、用量、费用、模型/Agent 版本和加密临时媒体边界；Backend 继续独占业务写回、主动分析调度和微信 Clawbot 投递。
+- 增加真实供应商策略、CNY 价格日历、凭据版本与清除同步、owner/task 灰度路由和平台 admission 排空控制；PushPlus 保持退役。
+- 增加生产 transition 合同、独立 systemd 服务、阶段切换、只读观察、双库备份、主动事件审计纠正和受控回滚工具。
+- 增加 Mac Google Chrome 管理台验收、AI Platform 组件依赖锁定及 Linux/x64 发布 manifest；iPhone 真机验收不属于本版本门禁。
+
+本条目表示候选代码版本已经冻结，生产部署仍须以 GitHub Release、fresh preflight、备份、切换、观察和 postflight evidence 共同确认。
+
 ## [0.12.3] - 2026-09-08
 
 ### 快速记录 DeepSeek 结构化抽取稳定性热修复

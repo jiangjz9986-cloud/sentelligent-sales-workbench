@@ -1,6 +1,7 @@
 import { AI_TASK_TYPES } from "../../../shared/aiPlatformContract.mjs";
 import { AiPlatformError } from "../errors.js";
 import { prepareMediaRequest } from "./mediaRequest.js";
+import { agentPolicyText } from "./agentPolicyText.js";
 
 const TEXT_TASKS = new Set(AI_TASK_TYPES.filter((type) => !["invoice.recognize", "payment-proof.recognize", "bookkeeping.extract", "asr.transcribe"].includes(type)));
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u;
@@ -90,10 +91,18 @@ async function boundedResponse(response, maxBytes) {
   }
 }
 
-export function createOpenAiCompatibleProvider(policy, { env = process.env, fetchImpl = fetch, pdfOptions = {} } = {}) {
-  const key = String(env[policy.credentialEnv] ?? "");
-  if (!key || key.length > 4096 || /[\s\u0000-\u001f\u007f]/u.test(key)) throw invalid("registered provider credential is unavailable");
+export function createOpenAiCompatibleProvider(policy, { env = process.env, fetchImpl = fetch, pdfOptions = {}, credentialResolver = null } = {}) {
+  function credential() {
+    const value = String(credentialResolver ? credentialResolver(policy.credentialEnv) : env[policy.credentialEnv] ?? "");
+    if (!value || value.length > 4096 || /[\s\u0000-\u001f\u007f]/u.test(value)) {
+      const error = invalid("registered provider credential is unavailable");
+      error.providerStarted = false;
+      throw error;
+    }
+    return value;
+  }
   async function prepare({ task, model, agent, limits, mediaStore, signal }) {
+    credential();
     const selected = policy.models.find((item) => item.name === model.name && item.taskTypes.includes(task.taskType));
     if (!selected || model.providerId !== policy.id) throw invalid("task model is not registered for this capability");
     const input = task.input;
@@ -109,7 +118,8 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
       if (!plain(item) || !["system", "user", "assistant"].includes(item.role) || typeof item.content !== "string") throw invalid("invalid completion message");
       return { role: item.role, content: item.content };
     });
-    if (agent.systemPrompt) messages.unshift({ role: "system", content: agent.systemPrompt });
+    const policyText = agentPolicyText(agent);
+    if (policyText) messages.unshift({ role: "system", content: policyText });
     const limit = Math.min(limits?.maxTokens ?? agent.limits?.maxTokens ?? 1_000, selected.maxOutputTokens);
     if (!Number.isSafeInteger(request.max_tokens) || request.max_tokens < 1 || !Number.isSafeInteger(limit) || limit < 1) throw invalid("invalid completion token limit");
     const body = {
@@ -131,9 +141,14 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
   return Object.freeze({
     id: policy.id,
     kind: policy.kind,
+    supports({ modelName, taskType }) {
+      try { credential(); } catch { return false; }
+      return policy.models.some((model) => model.name === modelName && model.taskTypes.includes(taskType));
+    },
     prepare,
     async execute({ task, model, agent, limits, prepared, signal, mediaStore }) {
       const input = prepared ?? await prepare({ task, model, agent, limits, mediaStore, signal });
+      const key = credential();
       let response;
       try {
         response = await fetchImpl(policy.baseUrl + (input.path ?? "/chat/completions"), {

@@ -287,7 +287,9 @@ function aiPlatformIsConfigured(aiPlatformRuntime) {
 }
 
 function aiPlatformPreflightState(config, aiPlatformRuntime) {
-  const mode = normalizeAiPlatformMode(config?.aiPlatformMode ?? aiPlatformRuntime?.mode);
+  const mode = config?.aiPlatformRoutingPolicy?.phase === "canary"
+    ? "disabled"
+    : normalizeAiPlatformMode(config?.aiPlatformMode ?? aiPlatformRuntime?.mode);
   const configured = aiPlatformIsConfigured(aiPlatformRuntime);
   return Object.freeze({
     mode,

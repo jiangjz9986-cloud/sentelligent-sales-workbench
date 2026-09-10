@@ -12,6 +12,7 @@ import {
 } from "../../../shared/aiPlatformContract.mjs";
 import { AiPlatformClientError, createAiPlatformClient } from "./client.js";
 import { normalizeRequestBinding } from "../../../shared/aiPlatformRequestAuth.mjs";
+import { platformFetch } from "../../../shared/aiPlatformSocketTransport.mjs";
 
 const DEFAULT_MODE = "disabled";
 const DEFAULT_ISSUER = "sentelligent-sales-backend";
@@ -349,7 +350,7 @@ function makeClient({ config, identity, fetchImpl, tokenProvider, now }) {
     baseUrl: config.aiPlatformBaseUrl,
     token: staticToken,
     tokenProvider: dynamicProvider,
-    fetchImpl,
+    fetchImpl: platformFetch(config, fetchImpl),
     timeoutMs: config.aiPlatformRequestTimeoutMs ?? config.aiPlatformTimeoutMs ?? DEFAULT_TIMEOUT_MS,
   });
 }
@@ -375,6 +376,9 @@ export function createAiPlatformRuntime({
     30_000,
   ) || 250;
   const cache = new Map();
+  let healthProbe = null;
+  let healthProbeAt = 0;
+  let healthProbePending = null;
 
   function enabled() {
     return mode !== "disabled";
@@ -589,6 +593,32 @@ export function createAiPlatformRuntime({
     return scoped.client.discardMedia(id);
   }
 
+  async function probeHealth() {
+    if (mode === "disabled") return { ...health(), ready: true, serviceStatus: "disabled" };
+    if (!configured()) return { ...health(), ready: false, serviceStatus: "unavailable" };
+    if (healthProbe && Date.now() - healthProbeAt < 5_000) return healthProbe;
+    if (!healthProbePending) {
+      healthProbePending = (async () => {
+        try {
+          const scoped = clientFor({ owner: config.aiPlatformOwner || "system-health", actor: "system-health" });
+          const result = await scoped.client.health({ signal: AbortSignal.timeout(2_000) });
+          healthProbe = {
+            ...health(),
+            ready: result.status === "ok" && result.database === "ready"
+              && result.executionMode === (config.aiPlatformExecutionMode ?? AI_EXECUTION_MODE),
+            serviceStatus: result.status,
+            tasks: result.tasks ?? {},
+          };
+        } catch {
+          healthProbe = { ...health(), ready: false, serviceStatus: "unavailable", tasks: {} };
+        }
+        healthProbeAt = Date.now();
+        return healthProbe;
+      })().finally(() => { healthProbePending = null; });
+    }
+    return healthProbePending;
+  }
+
   function health() {
     return {
       mode,
@@ -608,6 +638,7 @@ export function createAiPlatformRuntime({
     enabled,
     configured,
     health,
+    probeHealth,
     runTask,
     runStructuredTask,
     transcribe,

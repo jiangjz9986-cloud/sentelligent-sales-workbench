@@ -611,8 +611,9 @@ async function callSalesDecisionModel(context, config, options = {}) {
       ...options,
       fetchImpl: options.fetchImpl ?? fetch,
     },
-    taskType: "sales-decision.analyze",
-    feature: "sales_decision",
+    taskType: options.proactive === true ? "proactive.analyze" : "sales-decision.analyze",
+    feature: options.proactive === true ? "proactive_assistant" : "sales_decision",
+    priority: options.proactive === true ? "background" : "interactive",
     owner: options.owner ?? config.aiPlatformOwner,
     actor: options.actor ?? config.aiPlatformActor,
     subject: options.subject ?? (context?.opportunity?.id

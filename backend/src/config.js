@@ -4,6 +4,8 @@ import { isAbsolute, resolve } from "node:path";
 import { ASR_CONFIG_DEFAULTS, ASR_LIMITS } from "./asr/contracts.js";
 import { validatePasswordHashEncoding } from "./auth/password.js";
 import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
+import { normalizeAiRoutingPolicy } from "./aiPlatform/routingPolicy.js";
+import { PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
 import {
   AI_EXECUTION_MODE,
   AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
@@ -467,6 +469,10 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (!explicitAllowedOrigins || config.corsAllowedOrigins.length === 0) {
     throw new Error("CORS_ALLOWED_ORIGINS is required in production");
   }
+  if (config.aiPlatformRoutingPolicy?.phase === "legacy") {
+    if (config.aiPlatformMode !== "disabled") throw new Error("legacy AI routing requires AI_PLATFORM_MODE=disabled");
+    return;
+  }
   if (config.aiPlatformMode !== "required") {
     throw new Error("AI_PLATFORM_MODE must be required in production");
   }
@@ -811,6 +817,9 @@ export function loadConfig(
     databaseUrl: env.databaseUrl ?? env.DATABASE_URL ?? "./data/sales-workbench.sqlite",
     aiAnalysisMode,
     aiPlatformMode,
+    aiPlatformSocketPath: env.aiPlatformSocketPath ?? env.AI_PLATFORM_SOCKET_PATH
+      ?? (nodeEnv === "production" && aiPlatformBaseUrl?.startsWith("http://127.0.0.1") ? PRODUCTION_AI_SOCKET : null),
+    aiPlatformRoutingPolicy: normalizeAiRoutingPolicy(env.aiPlatformRoutingPolicy ?? env.AI_PLATFORM_ROUTING_POLICY),
     aiPlatformBaseUrl,
     aiPlatformAuthToken,
     aiPlatformAuthSecret,
