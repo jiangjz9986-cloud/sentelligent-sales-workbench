@@ -54,7 +54,14 @@ unsafe_member() {
   basename=${normalized##*/}
   [[ "$member" != /* ]] || return 0
   [[ "$member" != *"../"* && "$member" != *"/.." && "$member" != ".." ]] || return 0
-  [[ ! "$normalized" =~ (^|/)(\.runtime|runtime|logs?|backups?)(/|$) ]] || return 0
+  # A locked dependency may legitimately ship runtime helpers below
+  # `node_modules/**/runtime/**`; reject project runtime state everywhere else.
+  if [[ "$normalized" =~ (^|/)(\.runtime|logs?|backups?)(/|$) ]]; then
+    return 0
+  fi
+  if [[ "$normalized" =~ (^|/)runtime(/|$) ]] && [[ ! "$normalized" =~ (^|/)node_modules/.*/runtime(/|$) ]]; then
+    return 0
+  fi
   [[ ! "$normalized" =~ (^|/)(\.env|backend\.env|frontend\.env|[^/]+\.(sqlite|sqlite3|db|sqlite-wal|sqlite-shm|log|out|pem|key|p12|pfx))$ ]] || return 0
 
   # Source identifiers such as `shortcut_webhook_tokens.mjs` are not secret
