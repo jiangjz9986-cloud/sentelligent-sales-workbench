@@ -28,6 +28,21 @@ function optionalJsonFile(path) {
   if (!existsSync(path)) return null;
   return JSON.parse(privateFile(path).content.toString("utf8"));
 }
+function unitEnabled(unit) {
+  try { return runCommand("/bin/systemctl", ["is-enabled", unit]).trim() === "enabled"; }
+  catch { return false; }
+}
+export function platformUnitMatchesRelease(content, release) {
+  try {
+    const expected = renderPlatformUnit(
+      readFileSync(join(release, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8"),
+      release,
+    );
+    return content === expected;
+  } catch {
+    return false;
+  }
+}
 function fileDigest(path, options = {}) {
   return existsSync(path) ? privateFile(path, null, options).sha256 : null;
 }
@@ -219,6 +234,24 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         assertProtected();
         return state;
       }
+      const platformPreparationPath = join(manifest.evidenceDir, "platform-preparation-state.json");
+      const platformPreparation = jsonFile(platformPreparationPath);
+      check(platformPreparation.status === "prepared", "PLATFORM_NOT_PREPARED");
+      const platformState = {
+        adoptedExisting: Boolean(platformPreparation.adoptedExisting),
+        previousPlatformActive: Boolean(platformPreparation.previousPlatformActive),
+        previousPlatformEnabled: Boolean(platformPreparation.previousPlatformEnabled),
+      };
+      if (platformState.adoptedExisting) {
+        privateFile(platformPreparation.platformUnitBackup, platformPreparation.platformUnitBackupSha256, { requirePrivate: false });
+        privateFile(platformPreparation.platformEnvironmentBackup, platformPreparation.platformEnvironmentBackupSha256);
+        Object.assign(platformState, {
+          platformUnitBackup: platformPreparation.platformUnitBackup,
+          platformUnitBackupSha256: platformPreparation.platformUnitBackupSha256,
+          platformEnvironmentBackup: platformPreparation.platformEnvironmentBackup,
+          platformEnvironmentBackupSha256: platformPreparation.platformEnvironmentBackupSha256,
+        });
+      }
       const env = privateFile(BUSINESS_ENV);
       const unit = privateFile(backendUnit, null, { requirePrivate: false });
       const envBackup = join(manifest.backupDir, "backend-before.env");
@@ -229,6 +262,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         schemaVersion: 1, transitionId: manifest.id, manifestDigest, transitionIdentityDigest: transitionKey, rolloutPhase: manifest.rolloutPhase,
         status: "captured", protected: protectedSnapshot(), backendEnvBackup: envBackup,
         backendEnvSha256: env.sha256, backendUnitBackup: unitBackup, backendUnitSha256: unit.sha256,
+        platformPreparation: platformState,
         phaseHistory: [],
       };
       writeState();
@@ -348,7 +382,26 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       markState({ currentRelease: manifest.oldRelease, status: "core-rolled-back" });
     },
     rollbackPlatform() {
-      if (existsSync("/etc/systemd/system/" + PLATFORM_SERVICE)) {
+      loadState();
+      const unitPath = "/etc/systemd/system/" + PLATFORM_SERVICE;
+      const platformState = state.platformPreparation;
+      if (platformState?.adoptedExisting) {
+        runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 240_000 });
+        const currentEnvironment = privateFile(PLATFORM_ENV);
+        if (currentEnvironment.sha256 !== platformState.platformEnvironmentBackupSha256) {
+          const backup = privateFile(platformState.platformEnvironmentBackup, platformState.platformEnvironmentBackupSha256);
+          atomicReplace(PLATFORM_ENV, backup.content, currentEnvironment.sha256);
+        }
+        const currentUnit = privateFile(unitPath, null, { requirePrivate: false });
+        if (currentUnit.sha256 !== platformState.platformUnitBackupSha256) {
+          const backup = privateFile(platformState.platformUnitBackup, platformState.platformUnitBackupSha256, { requirePrivate: false });
+          atomicReplace(unitPath, backup.content, currentUnit.sha256, { requirePrivate: false });
+        }
+        runCommand("/bin/systemctl", ["daemon-reload"]);
+        if (platformState.previousPlatformEnabled) runCommand("/bin/systemctl", ["enable", PLATFORM_SERVICE]);
+        else runCommand("/bin/systemctl", ["disable", PLATFORM_SERVICE]);
+        if (platformState.previousPlatformActive) runCommand("/bin/systemctl", ["start", PLATFORM_SERVICE], { timeout: 90_000 });
+      } else if (existsSync(unitPath)) {
         runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 240_000 });
         runCommand("/bin/systemctl", ["disable", PLATFORM_SERVICE]);
       }
@@ -364,10 +417,18 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       return state;
     },
     async verifyRollback() {
+      loadState();
       check(realpathSync(PRODUCTION_ROOT + "/current") === manifest.oldRelease, "ROLLBACK_RELEASE_INVALID");
       const unit = inspectUnit("sentelligent-backend.service");
       check(unit.ActiveState === "active" && unit.ExecStart.includes(manifest.oldRelease), "ROLLBACK_BACKEND_INVALID");
-      if (existsSync("/etc/systemd/system/" + PLATFORM_SERVICE)) {
+      const platformState = state.platformPreparation;
+      if (platformState?.adoptedExisting) {
+        const platform = inspectUnit(PLATFORM_SERVICE);
+        if (platformState.previousPlatformActive) check(platform.ActiveState === "active", "ROLLBACK_PLATFORM_NOT_ACTIVE");
+        else check(platform.ActiveState !== "active", "ROLLBACK_PLATFORM_STILL_ACTIVE");
+        check(platformUnitMatchesRelease(privateFile("/etc/systemd/system/" + PLATFORM_SERVICE, null, { requirePrivate: false }).content.toString(), manifest.oldRelease), "ROLLBACK_PLATFORM_UNIT_INVALID");
+        check(privateFile(PLATFORM_ENV).sha256 === platformState.platformEnvironmentBackupSha256, "ROLLBACK_PLATFORM_ENV_INVALID");
+      } else if (existsSync("/etc/systemd/system/" + PLATFORM_SERVICE)) {
         const platform = inspectUnit(PLATFORM_SERVICE);
         check(platform.ActiveState !== "active", "ROLLBACK_PLATFORM_STILL_ACTIVE");
       }
@@ -514,22 +575,64 @@ export async function preparePlatformService(manifest) {
     const fields = accountLine.split(":");
     account = { uid: Number(fields[2]), gid: Number(fields[3]) };
   }
+  const platformUnitBackup = join(manifest.evidenceDir, "platform-before.service");
+  const platformEnvironmentBackup = join(manifest.evidenceDir, "platform-before.env");
+  const existingPlatformPaths = [unitPath, PLATFORM_ENV, PLATFORM_DATABASE, dataDirectory].filter((path) => existsSync(path));
+  const hasExistingPlatformState = existingPlatformPaths.length > 0 || Boolean(account);
+  let existingPlatformUnit = null;
+  let existingPlatformEnvironment = null;
+  let previousPlatformActive = false;
+  let previousPlatformEnabled = false;
+  if (hasExistingPlatformState) {
+    check(account && existingPlatformPaths.length === 4, "PLATFORM_PARTIAL_STATE_UNOWNED");
+    check(platformDataDirectoryIsSafe(dataDirectory, account), "PLATFORM_DATA_PERMISSIONS_INVALID");
+    const database = lstatSync(PLATFORM_DATABASE);
+    check(database.isFile() && !database.isSymbolicLink() && database.nlink === 1
+      && database.uid === account.uid && database.gid === account.gid && (database.mode & 0o077) === 0,
+    "PLATFORM_DATABASE_PERMISSIONS_INVALID");
+    existingPlatformUnit = privateFile(unitPath, null, { requirePrivate: false });
+    existingPlatformEnvironment = privateFile(PLATFORM_ENV);
+    check(platformUnitMatchesRelease(existingPlatformUnit.content.toString(), manifest.oldRelease), "PLATFORM_UNIT_NOT_ADOPTABLE");
+    const currentUnit = inspectUnit(PLATFORM_SERVICE);
+    previousPlatformActive = currentUnit.ActiveState === "active";
+    previousPlatformEnabled = unitEnabled(PLATFORM_SERVICE);
+    if (previousPlatformActive) {
+      const existingPlatformOperations = await platformRequest("/operations");
+      check(existingPlatformOperations.paused && existingPlatformOperations.queue.running === 0
+        && existingPlatformOperations.queue.queued === 0, "PLATFORM_MUST_BE_PAUSED_FOR_UPGRADE");
+    }
+  }
   let preparation = optionalJsonFile(preparationStatePath);
   let preparationSha = preparation ? privateFile(preparationStatePath).sha256 : null;
   if (preparation) {
     check(preparation.manifestDigest === manifestDigest && preparation.transitionId === manifest.id, "PLATFORM_PREPARATION_STATE_MISMATCH");
     if (preparation.status === "cleanup-complete") {
-      preparation = { ...preparation, status: "preparing", createdUser: false, createdDataDirectory: false, createdEnvironment: false, createdUnit: false };
+      preparation = {
+        ...preparation, status: "preparing", createdUser: false, createdDataDirectory: false,
+        createdEnvironment: false, createdUnit: false, platformServiceStopped: false,
+        platformEnvironmentChanged: false, platformUnitChanged: false,
+      };
       preparationSha = replacePrivateJson(preparationStatePath, preparation, preparationSha);
     }
   } else {
-    const partial = [unitPath, PLATFORM_ENV, PLATFORM_DATABASE, dataDirectory].some((path) => existsSync(path)) || Boolean(account);
-    check(!partial, "PLATFORM_PARTIAL_STATE_UNOWNED");
     preparation = {
       schemaVersion: 1, transitionId: manifest.id, manifestDigest, status: "preparing",
       createdUser: false, createdDataDirectory: false, createdEnvironment: false, createdUnit: false,
       unitSha256: unitDigest, environmentSha256: hashBytes(candidate.platformRaw), startedAt: new Date().toISOString(),
+      adoptedExisting: hasExistingPlatformState,
+      ...(hasExistingPlatformState ? {
+        platformUnitBackup,
+        platformUnitBackupSha256: existingPlatformUnit.sha256,
+        platformEnvironmentBackup,
+        platformEnvironmentBackupSha256: existingPlatformEnvironment.sha256,
+        previousPlatformActive,
+        previousPlatformEnabled,
+      } : {}),
     };
+    if (hasExistingPlatformState) {
+      writeOnceOrVerify(platformUnitBackup, existingPlatformUnit.content, { expectedSha: existingPlatformUnit.sha256, requirePrivate: false });
+      writeOnceOrVerify(platformEnvironmentBackup, existingPlatformEnvironment.content, { expectedSha: existingPlatformEnvironment.sha256 });
+    }
     preparationSha = writeExclusive(preparationStatePath, JSON.stringify(preparation, null, 2) + "\n");
   }
   const persist = (patch) => {
@@ -540,6 +643,29 @@ export async function preparePlatformService(manifest) {
   const cleanUp = () => {
     let incomplete = false;
     try {
+      if (preparation.adoptedExisting && (preparation.platformServiceStopped
+        || preparation.platformEnvironmentChanged || preparation.platformUnitChanged)) {
+        try { runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 30_000 }); } catch {}
+        if (preparation.platformEnvironmentBackup && existsSync(preparation.platformEnvironmentBackup)) {
+          const current = privateFile(PLATFORM_ENV);
+          if (current.sha256 !== preparation.platformEnvironmentBackupSha256) {
+            const backup = privateFile(preparation.platformEnvironmentBackup, preparation.platformEnvironmentBackupSha256);
+            atomicReplace(PLATFORM_ENV, backup.content, current.sha256);
+          }
+        }
+        if (preparation.platformUnitBackup && existsSync(preparation.platformUnitBackup)) {
+          const current = privateFile(unitPath, null, { requirePrivate: false });
+          if (current.sha256 !== preparation.platformUnitBackupSha256) {
+            const backup = privateFile(preparation.platformUnitBackup, preparation.platformUnitBackupSha256, { requirePrivate: false });
+            atomicReplace(unitPath, backup.content, current.sha256, { requirePrivate: false });
+          }
+        }
+        runCommand("/bin/systemctl", ["daemon-reload"]);
+        if (preparation.previousPlatformEnabled) runCommand("/bin/systemctl", ["enable", PLATFORM_SERVICE]);
+        else try { runCommand("/bin/systemctl", ["disable", PLATFORM_SERVICE]); } catch {}
+        if (preparation.previousPlatformActive) runCommand("/bin/systemctl", ["start", PLATFORM_SERVICE], { timeout: 90_000 });
+        else try { runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 30_000 }); } catch {}
+      }
       if (preparation.createdUnit && existsSync(unitPath)) {
         const installed = privateFile(unitPath, null, { requirePrivate: false }).content.toString();
         check(installed === unit, "PREPARE_CLEANUP_UNIT_DRIFT");
@@ -574,7 +700,7 @@ export async function preparePlatformService(manifest) {
       const fields = accountLine.split(":");
       account = { uid: Number(fields[2]), gid: Number(fields[3]) };
       persist({ createdUser: true });
-    } else {
+    } else if (!preparation.adoptedExisting) {
       check(preparation.createdUser, "PLATFORM_ACCOUNT_ALREADY_EXISTS");
     }
     if (!existsSync(dataDirectory)) {
@@ -582,14 +708,31 @@ export async function preparePlatformService(manifest) {
       persist({ createdDataDirectory: true });
     }
     check(platformDataDirectoryIsSafe(dataDirectory, account), "PLATFORM_DATA_PERMISSIONS_INVALID");
-    if (!existsSync(PLATFORM_ENV)) {
+    const expectedEnvironmentSha256 = hashBytes(candidate.platformRaw);
+    const currentEnvironment = existsSync(PLATFORM_ENV) ? privateFile(PLATFORM_ENV) : null;
+    const currentUnit = existsSync(unitPath) ? privateFile(unitPath, null, { requirePrivate: false }) : null;
+    const environmentChanged = Boolean(currentEnvironment && currentEnvironment.sha256 !== expectedEnvironmentSha256);
+    const unitChanged = Boolean(currentUnit && currentUnit.content.toString() !== unit);
+    if (preparation.adoptedExisting && (environmentChanged || unitChanged)) {
+      runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 30_000 });
+      persist({ platformServiceStopped: true });
+    }
+    if (!currentEnvironment) {
       writeExclusive(PLATFORM_ENV, candidate.platformRaw);
       persist({ createdEnvironment: true });
-    } else check(privateFile(PLATFORM_ENV).sha256 === hashBytes(candidate.platformRaw), "PLATFORM_ENV_DRIFT");
+    } else if (environmentChanged) {
+      check(preparation.adoptedExisting && currentEnvironment.sha256 === preparation.platformEnvironmentBackupSha256, "PLATFORM_ENV_DRIFT");
+      atomicReplace(PLATFORM_ENV, candidate.platformRaw, currentEnvironment.sha256);
+      persist({ platformEnvironmentChanged: true });
+    }
     if (!existsSync(unitPath)) {
       writeExclusive(unitPath, unit);
       persist({ createdUnit: true });
-    } else check(privateFile(unitPath, null, { requirePrivate: false }).content.toString() === unit, "PLATFORM_UNIT_DRIFT");
+    } else if (unitChanged) {
+      check(preparation.adoptedExisting && currentUnit.sha256 === preparation.platformUnitBackupSha256, "PLATFORM_UNIT_DRIFT");
+      atomicReplace(unitPath, unit, currentUnit.sha256, { requirePrivate: false });
+      persist({ platformUnitChanged: true });
+    }
     runCommand("/usr/bin/systemd-analyze", ["verify", unitPath]);
     runCommand("/bin/systemctl", ["daemon-reload"]);
     runCommand("/bin/systemctl", ["enable", PLATFORM_SERVICE]);
@@ -608,7 +751,10 @@ export async function preparePlatformService(manifest) {
     }
     check(ready, "PREPARED_PLATFORM_NOT_PAUSED");
     check(JSON.stringify(before) === JSON.stringify(protectedSnapshot()), "PROTECTED_STATE_CHANGED");
-    const result = { status: "prepared", newCommit: manifest.newCommit, platformUnitSha256: unitDigest, protected: before, manifestDigest };
+    const result = {
+      status: "prepared", newCommit: manifest.newCommit, platformUnitSha256: unitDigest,
+      adoptedExisting: Boolean(preparation.adoptedExisting), protected: before, manifestDigest,
+    };
     writeOnceOrVerify(join(manifest.evidenceDir, "platform-preparation.json"), JSON.stringify(result, null, 2) + "\n");
     persist({ status: "prepared", preparedAt: new Date().toISOString(), result });
     return result;
