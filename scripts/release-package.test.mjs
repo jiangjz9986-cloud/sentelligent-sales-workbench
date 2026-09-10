@@ -13,6 +13,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -185,6 +186,11 @@ function writeMinimumReleaseFixture(workspace) {
     "outputs/product-design-prototype/dist/index.html",
     "<main>ready</main>\n",
   );
+  const releaseHelper = workspace.write(
+    "scripts/release-helper.sh",
+    "#!/bin/sh\nexit 0\n",
+  );
+  chmodSync(releaseHelper, 0o755);
 }
 
 function runReleaseCli(args) {
@@ -1533,6 +1539,65 @@ describe("portable release package", () => {
     } finally {
       workspace.cleanup();
       output.cleanup();
+    }
+  });
+
+  it("preserves executable bits and binds the archive inventory to the extracted release", async () => {
+    const workspace = makeWorkspace("sentelligent-archive-binding-");
+    const output = makeWorkspace("sentelligent-archive-binding-output-");
+    const extracted = makeWorkspace("sentelligent-archive-binding-extracted-");
+    try {
+      writeMinimumReleaseFixture(workspace);
+      commitWorkspace(workspace);
+
+      const { createReleasePackage, validateReleaseArchiveBinding } =
+        await loadReleaseModule();
+      const result = await createReleasePackage({
+        sourceRoot: workspace.root,
+        outputDir: output.root,
+        createdAt: "2026-07-19T08:00:00.000Z",
+      });
+      extractArchive(result.archivePath, extracted.root);
+
+      const releaseRoot = join(extracted.root, result.rootDirectory);
+      const helperPath = join(releaseRoot, "scripts", "release-helper.sh");
+      assert.equal(statSync(helperPath).mode & 0o777, 0o755);
+      const releaseManifest = JSON.parse(
+        readFileSync(join(releaseRoot, "release-manifest.json"), "utf8"),
+      );
+      const archiveContent = readFileSync(result.archivePath);
+      assert.deepEqual(
+        validateReleaseArchiveBinding({
+          archiveContent,
+          releaseDirectoryPath: releaseRoot,
+          manifest: releaseManifest,
+          enforcePosix: false,
+        }),
+        {
+          valid: true,
+          rootDirectory: result.rootDirectory,
+          entries: result.manifest.archive.packagedFiles,
+          archiveSha256: result.archiveSha256,
+        },
+      );
+
+      writeFileSync(
+        join(releaseRoot, "backend", "src", "server.js"),
+        "export const tampered = true;\n",
+        "utf8",
+      );
+      const invalid = validateReleaseArchiveBinding({
+        archiveContent,
+        releaseDirectoryPath: releaseRoot,
+        manifest: releaseManifest,
+        enforcePosix: false,
+      });
+      assert.equal(invalid.valid, false);
+      assert.match(invalid.message, /content|mode|differs/i);
+    } finally {
+      workspace.cleanup();
+      output.cleanup();
+      extracted.cleanup();
     }
   });
 

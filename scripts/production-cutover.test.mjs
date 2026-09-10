@@ -673,10 +673,26 @@ describe("controlled production cutover", () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "sent-zx-cutover-preflight-")));
     const reportPath = join(root, "preflight.json");
     const releasePath = `${projectRoot}/releases/release-candidate`;
-    const currentReleasePath = `${projectRoot}/releases/current-release`;
+    const currentReleasePath = join(root, "current-release");
     const expectedCommit = "a".repeat(40);
+    const previousCommit = "b".repeat(40);
     const databasePath = "/var/lib/sentelligent-sales-workbench/sales-workbench.sqlite";
     try {
+      mkdirSync(currentReleasePath, { recursive: true });
+      writeFileSync(
+        join(currentReleasePath, "release-manifest.json"),
+        JSON.stringify({
+          schemaVersion: 3,
+          product: "sentelligent-sales-workbench",
+          source: { commit: previousCommit, clean: true },
+        }),
+        "utf8",
+      );
+      const validReport = (overrides = {}) => validPreflightReport({
+        releasePath: currentReleasePath,
+        expectedCommit: previousCommit,
+        ...overrides,
+      });
       const runValidation = (report, expectedSha256 = null) => {
         writeFileSync(reportPath, `${JSON.stringify(report)}\n`, "utf8");
         chmodSync(reportPath, 0o600);
@@ -697,22 +713,41 @@ describe("controlled production cutover", () => {
         );
       };
 
-      const validResult = runValidation(validPreflightReport({
-        releasePath: currentReleasePath,
-        expectedCommit: "b".repeat(40),
-      }));
+      const validResult = runValidation(validReport());
       assert.equal(validResult.status, 0, outputOf(validResult));
+
+      writeFileSync(
+        join(currentReleasePath, "release-manifest.json"),
+        JSON.stringify({
+          schemaVersion: 3,
+          product: "sentelligent-sales-workbench",
+          source: { commit: "c".repeat(40), clean: true },
+        }),
+        "utf8",
+      );
+      const sourceMismatch = runValidation(validReport());
+      assert.notEqual(sourceMismatch.status, 0, "release manifest commit mismatch must fail");
+      assert.match(outputOf(sourceMismatch), /previous release manifest|expectedCommit|commit/i);
+      writeFileSync(
+        join(currentReleasePath, "release-manifest.json"),
+        JSON.stringify({
+          schemaVersion: 3,
+          product: "sentelligent-sales-workbench",
+          source: { commit: previousCommit, clean: true },
+        }),
+        "utf8",
+      );
 
       for (const [name, report, expectedPattern] of [
         [
           "stale",
-          validPreflightReport({ generatedAt: "2026-08-01T00:00:00.000Z" }),
+          validReport({ generatedAt: "2026-08-01T00:00:00.000Z" }),
           /fresh|age/i,
         ],
         [
           "not a complete canonical report",
           {
-            ...validPreflightReport(),
+            ...validReport(),
             status: "failed",
             summary: {
               total: preflightCheckTotal,
@@ -725,9 +760,9 @@ describe("controlled production cutover", () => {
         [
           "legacy 24\/24 report without the assistant secret gate",
           {
-            ...validPreflightReport(),
+            ...validReport(),
             summary: { total: 24, passed: 24, failed: 0 },
-            checks: validPreflightReport().checks.filter(
+            checks: validReport().checks.filter(
               (check) => check.id !== "env.assistantSecrets",
             ),
           },
@@ -737,7 +772,7 @@ describe("controlled production cutover", () => {
           "wrong release",
           validPreflightReport({
             releasePath: `${projectRoot}/releases/other-candidate`,
-            expectedCommit: "b".repeat(40),
+            expectedCommit: previousCommit,
           }),
           /scope|release/i,
         ],
@@ -751,9 +786,7 @@ describe("controlled production cutover", () => {
         ],
         [
           "wrong database",
-          validPreflightReport({
-            releasePath: currentReleasePath,
-            expectedCommit: "b".repeat(40),
+          validReport({
             databasePath: "/var/lib/sentelligent-sales-workbench/other.sqlite",
           }),
           /scope|database/i,
@@ -765,7 +798,7 @@ describe("controlled production cutover", () => {
       }
 
       const hashMismatch = runValidation(
-        validPreflightReport(),
+        validReport(),
         "d".repeat(64),
       );
       assert.notEqual(hashMismatch.status, 0, "hash mismatch must fail");

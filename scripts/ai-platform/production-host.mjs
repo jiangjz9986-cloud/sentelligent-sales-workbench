@@ -19,6 +19,7 @@ import {
 } from "./production-contract.mjs";
 import { assertHost, privateFile, privateDirectory, writeExclusive, writeOnceOrVerify, replacePrivateJson, atomicReplace, inspectUnit, parseEnvironment, platformRequest, backupSqlite, runCommand } from "./production-io.mjs";
 import { validateAiComponentManifest } from "./component-manifest.mjs";
+import { validateReleaseArchiveBinding } from "../release-package.mjs";
 
 function check(condition, code) {
   if (!condition) throw Object.assign(new Error(code), { code });
@@ -80,6 +81,22 @@ function assertCoreProof(proof, manifest, release, commit) {
     && proof.scope.machineIdSha256 === hashBytes(manifest.machineId)
     && Date.now() - Date.parse(proof.generatedAt) >= -30_000
     && Date.now() - Date.parse(proof.generatedAt) < 15 * 60_000, "CORE_PREFLIGHT_INVALID");
+}
+
+function verifyNewReleaseArchive(manifest) {
+  const archive = privateFile(manifest.newArchive, manifest.newArchiveSha256);
+  const releaseManifest = JSON.parse(
+    readFileSync(join(manifest.newRelease, "release-manifest.json"), "utf8"),
+  );
+  const binding = validateReleaseArchiveBinding({
+    archiveContent: archive.content,
+    releaseDirectoryPath: manifest.newRelease,
+    manifest: releaseManifest,
+    enforcePosix: true,
+  });
+  check(binding.valid, "RELEASE_ARCHIVE_BINDING_INVALID");
+  check(releaseManifest.source?.commit === manifest.newCommit, "RELEASE_ARCHIVE_COMMIT_INVALID");
+  return binding;
 }
 
 export function validateCandidateConfiguration(manifest) {
@@ -213,7 +230,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
     },
     verifyPreflight() {
       validateCandidateConfiguration(manifest);
-      privateFile(manifest.newArchive, manifest.newArchiveSha256);
+      verifyNewReleaseArchive(manifest);
       const core = jsonFile(manifest.corePreflight, manifest.corePreflightSha256);
       assertCoreProof(core, manifest, manifest.oldRelease, manifest.oldCommit);
       check(Boolean(proofPath && proofSha256), "AI_PREFLIGHT_REQUIRED");
@@ -554,7 +571,7 @@ export async function preparePlatformService(manifest) {
   assertHost(manifest);
   const candidate = validateCandidateConfiguration(manifest);
   privateDirectory(manifest.evidenceDir); privateDirectory(manifest.backupDir);
-  privateFile(manifest.newArchive, manifest.newArchiveSha256);
+  verifyNewReleaseArchive(manifest);
   runCommand("/bin/bash", [
     "-c", 'source "$1"; NEW_RELEASE="$2"; EXPECTED_COMMIT="$3"; NODE_BIN="$4"; assert_candidate_release_frozen; verify_release_manifest',
     "verify-release", join(manifest.newRelease, "scripts/production-cutover.sh"), manifest.newRelease, manifest.newCommit, PROJECT_NODE,
@@ -779,7 +796,7 @@ export async function runAiProductionPreflight(manifest) {
   }
   await verify("host.identity", () => assertHost(manifest));
   await verify("release.archive", () => {
-    privateFile(manifest.newArchive, manifest.newArchiveSha256);
+    verifyNewReleaseArchive(manifest);
     check(validateAiComponentManifest(JSON.parse(readFileSync(join(manifest.newRelease, "release-manifest.json"), "utf8"))), "AI_COMPONENT_MANIFEST_INVALID");
     runCommand("/bin/bash", [
       "-c", 'source "$1"; NEW_RELEASE="$2"; EXPECTED_COMMIT="$3"; NODE_BIN="$4"; assert_candidate_release_frozen; verify_release_manifest',
