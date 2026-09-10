@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync, readFileSync, symlinkSync, linkSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync, readFileSync, symlinkSync, linkSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -37,6 +37,9 @@ test("SQLite backup captures committed WAL data without overwriting an existing 
     assert.match(result.sha256, /^[0-9a-f]{64}$/);
     const snapshot = new DatabaseSync(destination, { readOnly: true });
     try { assert.equal(snapshot.prepare("SELECT value FROM records").get().value, "committed"); } finally { snapshot.close(); }
+    assert.equal(existsSync(`${destination}-wal`), false);
+    assert.equal(existsSync(`${destination}-shm`), false);
+    assert.equal(existsSync(`${destination}-journal`), false);
     await assert.rejects(backupSqlite(path, destination), /exist/i);
     assert.equal(hashBytes(readFileSync(destination)), result.sha256);
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }

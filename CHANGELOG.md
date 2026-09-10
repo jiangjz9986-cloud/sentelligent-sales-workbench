@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-09-10
+
+### AI 平台生产切换收尾修复
+
+- 生产 transition 的 SQLite 快照统一使用 `VACUUM INTO`，保证 WAL 在线备份是无 sidecar 的独立 DELETE-journal 文件，回滚和 postflight 预检不会被残留 `-wal/-shm` 拒绝。
+- P1 收尾读取 AI 平台 operations 时增加有界的幂等 socket 瞬态错误重试，降低服务切换后单次 `EPIPE` 导致整条 transition 进入回滚的概率。
+- 增加备份 sidecar 回归断言；保持 PushPlus 退役、Backend 主动调度单一所有者、平台 P1 local-simulated 和业务 legacy 路由边界不变。
+
 ## [0.13.0] - 2026-09-10
 
 ### AI 统一调度平台融合升级
