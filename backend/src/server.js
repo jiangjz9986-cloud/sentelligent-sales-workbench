@@ -254,6 +254,7 @@ import { createHospitalTenderLeadConversionService } from "./hospitalTender/lead
 import { createHospitalTenderLeadConversionHttpHandlers } from "./hospitalTender/leadConversionHttp.js";
 import { createHospitalTenderSchedulerRepository } from "./hospitalTender/schedulerRepository.js";
 import { createHospitalTenderScheduler } from "./hospitalTender/scheduler.js";
+import { buildHospitalTenderProactiveEvent } from "./hospitalTender/proactiveEvent.js";
 import {
   ASR_SETTING_KEY,
   createSecureSettingsRepository,
@@ -4139,7 +4140,6 @@ export function createServer(options = {}) {
   function enqueueProactiveTenderEvents({
     changedAt,
     snapshotId,
-    runId,
     notices = [],
   } = {}) {
     if (!Array.isArray(notices) || notices.length === 0) return [];
@@ -4180,29 +4180,24 @@ export function createServer(options = {}) {
     const normalizedSnapshotId = typeof snapshotId === "string" && snapshotId.trim()
       ? snapshotId.trim()
       : normalizedChangedAt;
-    const normalizedRunId = typeof runId === "string" && runId.trim() ? runId.trim() : null;
     const results = [];
     for (const [owner, group] of byOwner.entries()) {
       const ownerCustomerIds = [...group.customerIds].sort();
       const ownerNoticeIds = [...group.noticeIds].sort();
-      const payload = {
+      const event = buildHospitalTenderProactiveEvent({
         changedAt: normalizedChangedAt,
         snapshotId: normalizedSnapshotId,
-        ...(normalizedRunId ? { runId: normalizedRunId } : {}),
         customerIds: ownerCustomerIds,
         noticeIds: ownerNoticeIds,
-      };
-      const eventKeyDigest = createHash("sha256")
-        .update(JSON.stringify({ snapshotId: normalizedSnapshotId, customerIds: ownerCustomerIds, noticeIds: ownerNoticeIds }), "utf8")
-        .digest("hex");
+      });
       try {
         results.push(proactiveAssistantWorker.enqueueEvent({
           owner,
-          eventKey: `hospital-tender:${normalizedSnapshotId}:${eventKeyDigest}`,
+          eventKey: event.eventKey,
           eventType: "hospital_tender_changed",
           entityType: "hospital_tender",
           entityId: normalizedSnapshotId,
-          payload,
+          payload: event.payload,
         }));
       } catch (error) {
         // The periodic proactive scan remains authoritative if the auxiliary

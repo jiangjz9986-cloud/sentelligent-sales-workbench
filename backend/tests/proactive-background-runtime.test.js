@@ -7,6 +7,7 @@ import { createCustomerProactiveSubjectService } from "../src/assistant/customer
 import { createProactiveBackgroundWorker } from "../src/assistant/proactiveBackgroundWorker.js";
 import { createProactiveScanRepository } from "../src/assistant/proactiveScanRepository.js";
 import { createProactiveSuggestionRepository } from "../src/assistant/proactiveSuggestionRepository.js";
+import { buildHospitalTenderProactiveEvent } from "../src/hospitalTender/proactiveEvent.js";
 
 const NOW_ISO = "2026-09-05T12:00:00.000Z";
 
@@ -199,6 +200,50 @@ describe("proactive scan repository leases and events", () => {
     assert.equal(repository.completeEvent(retried.item.id, { leaseToken: retried.leaseToken }).item.status, "completed");
     assert.equal(repository.enqueueEvent({ owner: "owner-a", eventKey: "op-a:updated:1", entityType: "opportunity", entityId: "op-a", payload: { opportunityId: "op-a", changedAt: NOW_ISO } }).replayed, true);
     assert.equal(repository.pendingEventCount({ owner: "owner-a" }), 0);
+    db.close();
+  });
+
+  it("replays legacy hospital tender events when only the scheduler run id changes", () => {
+    const db = database();
+    const repository = createProactiveScanRepository(db, { clock: () => new Date(NOW_ISO) });
+    const stable = buildHospitalTenderProactiveEvent({
+      changedAt: "2026-09-05T12:00:00.000Z",
+      snapshotId: "snapshot-a",
+      customerIds: ["customer-b", "customer-a", "customer-a"],
+      noticeIds: ["notice-b", "notice-a"],
+    });
+
+    const first = repository.enqueueEvent({
+      owner: "owner-a",
+      eventKey: stable.eventKey,
+      eventType: "hospital_tender_changed",
+      entityType: "hospital_tender",
+      entityId: "snapshot-a",
+      payload: { ...stable.payload, runId: "scheduler-run-1" },
+    });
+    const replay = repository.enqueueEvent({
+      owner: "owner-a",
+      eventKey: stable.eventKey,
+      eventType: "hospital_tender_changed",
+      entityType: "hospital_tender",
+      entityId: "snapshot-a",
+      payload: { ...stable.payload, runId: "scheduler-run-2" },
+    });
+
+    assert.equal(first.replayed, false);
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(replay.item.payload, { ...stable.payload, runId: "scheduler-run-1" });
+    assert.throws(
+      () => repository.enqueueEvent({
+        owner: "owner-a",
+        eventKey: stable.eventKey,
+        eventType: "hospital_tender_changed",
+        entityType: "hospital_tender",
+        entityId: "snapshot-a",
+        payload: { ...stable.payload, noticeIds: ["notice-a", "notice-c"], runId: "scheduler-run-3" },
+      }),
+      (error) => error.code === "PROACTIVE_EVENT_CONFLICT",
+    );
     db.close();
   });
 });

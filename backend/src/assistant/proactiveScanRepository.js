@@ -75,6 +75,18 @@ function hash(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function comparablePayloadHash(eventType, payloadJson) {
+  if (eventType !== "hospital_tender_changed") return hash(payloadJson);
+  const payload = parseJson(payloadJson, null);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return hash(payloadJson);
+  // Older tender events persisted the scheduler attempt id in the payload
+  // while the event key intentionally excluded it. Ignore that one legacy
+  // field during replay comparison; all business identities remain strict.
+  if (!Object.hasOwn(payload, "runId")) return hash(payloadJson);
+  const { runId: _legacyRunId, ...stablePayload } = payload;
+  return hash(json(stablePayload, "payload"));
+}
+
 function canonical(value, path = "value", depth = 0, seen = new Set()) {
   if (depth > 10) throw new TypeError(`${path} is too deeply nested`);
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
@@ -564,7 +576,7 @@ export function createProactiveScanRepository(db, {
     const entityType = optionalText(input.entityType, "entityType", 100);
     const entityId = input.entityId === undefined || input.entityId === null ? null : identifier(input.entityId, "entityId");
     const payloadJson = json(input.payload ?? {}, "payload");
-    const payloadHash = hash(payloadJson);
+    const payloadHash = comparablePayloadHash(eventType, payloadJson);
     const current = clockDate(clock);
     const nowIso = current.toISOString();
     const availableAt = iso(input.availableAt ?? current, "availableAt");
@@ -573,7 +585,7 @@ export function createProactiveScanRepository(db, {
         SELECT * FROM proactive_scan_events WHERE owner = $owner AND event_key = $eventKey
       `).get({ $owner: owner, $eventKey: eventKey });
       if (existing) {
-        if (hash(existing.payload_json) !== payloadHash
+        if (comparablePayloadHash(existing.event_type, existing.payload_json) !== payloadHash
           || existing.event_type !== eventType
           || (existing.entity_id ?? null) !== entityId) {
           throw new HttpError(409, "PROACTIVE_EVENT_CONFLICT", "The proactive event key was reused for different content");
