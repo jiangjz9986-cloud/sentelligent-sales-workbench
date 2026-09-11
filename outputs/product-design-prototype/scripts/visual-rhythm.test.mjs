@@ -364,7 +364,11 @@ async function cleanupChromeSession({ cdp, chrome, profilePath, requestBrowserCl
   if (errors.length > 1) throw new AggregateError(errors, "Chrome cleanup failed");
 }
 
-async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } = {}) {
+async function openChromeCdp({
+  failFirstBootstrap = false,
+  opportunities = [],
+  commandTimeoutMs = 20_000,
+} = {}) {
   const profilePath = mkdtempSync(join(tmpdir(), "sent-zx-visual-chrome-"));
   traceVisualQa(`created profile ${profilePath}`);
   const chrome = spawnManaged(chromePath, [
@@ -397,7 +401,7 @@ async function openChromeCdp({ failFirstBootstrap = false, opportunities = [] } 
     }).then((response) => response.json());
     const page = targets.find((item) => item.type === "page");
     if (!page) throw new Error("No Chrome page target found for visual rhythm QA.");
-    cdp = await connectCdp(page.webSocketDebuggerUrl);
+    cdp = await connectCdp(page.webSocketDebuggerUrl, { commandTimeoutMs });
     traceVisualQa("connected to CDP");
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
@@ -913,7 +917,7 @@ describe("visual rhythm", () => {
 
     let cdp;
     try {
-      cdp = await openChromeCdp();
+      cdp = await openChromeCdp({ commandTimeoutMs: 120_000 });
       const allResults = [];
       for (const viewport of viewports) {
         const measurements = await measureVisualRhythm(cdp, `http://127.0.0.1:${port}`, viewport);
