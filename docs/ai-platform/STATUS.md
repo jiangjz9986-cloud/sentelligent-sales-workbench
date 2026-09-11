@@ -5,11 +5,12 @@
 本节覆盖此前历史段落；历史段落保留作为实施过程记录，不作为当前生产状态依据。
 
 - 当前融合工作树：`ai-platform-production-integration-20260909`。
-- 当前提交：`d38a89144b660e6ace213c9d32787e3870006667`；候选分支已同步到
-  `origin/codex/ai-platform-production-integration-20260909`。
+- 当前工作树 HEAD：`23517390a32e5912ea9351cde3100900f649f292`；该提交只补充本状态
+  记录，候选分支已同步到 `origin/codex/ai-platform-production-integration-20260909`。
 - 生产 current：
   `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-d38a89144b66`；
-  release manifest 的 source commit 与当前提交一致。
+  该生产 release manifest 的 source commit 为
+  `d38a89144b660e6ace213c9d32787e3870006667`。文档提交未重新部署。
 - 生产服务 `sentelligent-backend.service`、`sentelligent-frontend.service`、
   `sentelligent-weixin-agent.service`、`sentelligent-ai-platform.service` 和
   `sentelligent-caddy.service` 均已核实为 active；`/_health`、`/api/health`、
