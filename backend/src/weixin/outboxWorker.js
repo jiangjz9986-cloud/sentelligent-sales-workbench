@@ -123,6 +123,13 @@ function safeExpiresAt(value) {
   return canonical === normalized ? canonical : null;
 }
 
+function expiryHasPassed(value, clock) {
+  if (!value) return false;
+  const now = clock();
+  const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  return Number.isFinite(nowMs) && Date.parse(value) <= nowMs;
+}
+
 export async function runWeixinOutboxPump({
   client,
   bot,
@@ -132,6 +139,7 @@ export async function runWeixinOutboxPump({
   abortSignal,
   log = () => {},
   sleepImpl = sleep,
+  clock = Date.now,
 } = {}) {
   if (!client || typeof client.lease !== "function" || typeof client.ack !== "function" || typeof client.isCurrent !== "function") {
     throw new TypeError("client is required");
@@ -141,6 +149,7 @@ export async function runWeixinOutboxPump({
   if (!Number.isSafeInteger(pollMs) || pollMs < 500 || pollMs > 60_000) throw new TypeError("pollMs is invalid");
   if (!Number.isSafeInteger(sendDelayMs) || sendDelayMs < 0 || sendDelayMs > 60_000) throw new TypeError("sendDelayMs is invalid");
   if (typeof sleepImpl !== "function") throw new TypeError("sleepImpl must be a function");
+  if (typeof clock !== "function") throw new TypeError("clock must be a function");
   let lastReadiness = "";
   while (!abortSignal?.aborted) {
     let lease = null;
@@ -153,14 +162,17 @@ export async function runWeixinOutboxPump({
             ? String(candidate.deliveryScope)
             : null;
           const expiresAt = safeExpiresAt(candidate?.expiresAt);
-          delivery = candidate?.ready === true && candidate?.status === "ready"
+          const expired = expiryHasPassed(expiresAt, clock);
+          delivery = candidate?.ready === true && candidate?.status === "ready" && !expired
             ? { ready: true, status: "ready", ...(deliveryScope ? { deliveryScope } : {}), ...(expiresAt ? { expiresAt } : {}) }
             : {
                 ready: false,
                 status: "not_ready",
-                reason: /^[a-z0-9_]{1,64}$/u.test(String(candidate?.reason ?? ""))
-                  ? String(candidate.reason)
-                  : "sdk_status_unavailable",
+                reason: expired
+                  ? "context_token_expired"
+                  : /^[a-z0-9_]{1,64}$/u.test(String(candidate?.reason ?? ""))
+                    ? String(candidate.reason)
+                    : "sdk_status_unavailable",
                 ...(deliveryScope ? { deliveryScope } : {}),
                 ...(expiresAt ? { expiresAt } : {}),
               };

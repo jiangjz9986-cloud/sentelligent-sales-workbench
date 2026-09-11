@@ -43,6 +43,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
         },
       },
       pollMs: 500,
+      clock: () => Date.parse("2026-09-08T12:00:00.000Z"),
       abortSignal: controller.signal,
     });
     await pump;
@@ -165,6 +166,39 @@ describe("WeChat confirmation outbox worker boundary", () => {
     });
     assert.equal(calls.length, 1);
     assert.equal(Object.hasOwn(calls[0], "expiresAt"), false);
+  });
+
+  it("fails closed when a ready SDK report has an expired context", async () => {
+    const controller = new AbortController();
+    let sendCalls = 0;
+    let reportedDelivery;
+    await runWeixinOutboxPump({
+      client: {
+        async lease(delivery) {
+          reportedDelivery = delivery;
+          controller.abort();
+          return null;
+        },
+        async ack() { assert.fail("expired readiness must not ack"); },
+        async isCurrent() { return true; },
+      },
+      bot: {
+        getDeliveryStatus() {
+          return { ready: true, status: "ready", expiresAt: "2026-09-08T12:04:58.729Z" };
+        },
+        async sendMessage() { sendCalls += 1; },
+      },
+      pollMs: 500,
+      clock: () => Date.parse("2026-09-08T12:05:00.000Z"),
+      abortSignal: controller.signal,
+    });
+    assert.deepEqual(reportedDelivery, {
+      ready: false,
+      status: "not_ready",
+      reason: "context_token_expired",
+      expiresAt: "2026-09-08T12:04:58.729Z",
+    });
+    assert.equal(sendCalls, 0);
   });
 
   it("acks a bounded retry code when the SDK reports provider rejection", async () => {

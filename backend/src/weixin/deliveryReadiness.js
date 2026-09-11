@@ -57,6 +57,14 @@ export function createWeixinDeliveryReadiness({
         ...(current ? { reportedAt: new Date(current.reportedAtMs).toISOString() } : {}),
       });
     }
+    if (current.status === "ready" && current.expiresAt && Date.parse(current.expiresAt) <= currentTimeMs) {
+      return Object.freeze({
+        status: "not_ready",
+        reason: "context_token_expired",
+        expiresAt: current.expiresAt,
+        reportedAt: new Date(current.reportedAtMs).toISOString(),
+      });
+    }
     return Object.freeze({
       status: current.status,
       ...(current.reason ? { reason: current.reason } : {}),

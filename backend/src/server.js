@@ -661,7 +661,7 @@ function validateWeixinOutboxAckPayload(value) {
   };
 }
 
-function weixinDeliveryReportFromHeaders(headers, expectedScope = null) {
+function weixinDeliveryReportFromHeaders(headers, expectedScope = null, clock = Date.now) {
   const rawStatus = headers["x-weixin-delivery-status"];
   const rawExpiresAt = headers["x-weixin-delivery-expires-at"];
   let expiresAt = null;
@@ -712,6 +712,13 @@ function weixinDeliveryReportFromHeaders(headers, expectedScope = null) {
         status: "not_ready",
         reason: "delivery_scope_mismatch",
         ...(expiresAt ? { expiresAt } : {}),
+      };
+    }
+    if (expiresAt && Date.parse(expiresAt) <= Number(clock())) {
+      return {
+        status: "not_ready",
+        reason: "context_token_expired",
+        expiresAt,
       };
     }
   }
@@ -3824,9 +3831,10 @@ export function createServer(options = {}) {
       ...(options.weixinConfirmationOutboxIdFactory ? { idFactory: options.weixinConfirmationOutboxIdFactory } : {}),
       ...(options.weixinConfirmationOutboxClock ? { clock: options.weixinConfirmationOutboxClock } : {}),
     });
+  const weixinDeliveryReadinessClock = options.weixinDeliveryReadinessClock ?? Date.now;
   const weixinDeliveryReadiness = options.weixinDeliveryReadiness
     ?? createWeixinDeliveryReadiness({
-      clock: options.weixinDeliveryReadinessClock ?? Date.now,
+      clock: weixinDeliveryReadinessClock,
       staleMs: Math.max(15_000, Math.min(10 * 60_000, config.weixinOutboxPollMs * 4)),
     });
   const platformPaymentAnalyzer = async (file, recognitionOptions = {}) => {
@@ -4851,6 +4859,7 @@ export function createServer(options = {}) {
           const deliveryReport = weixinDeliveryReportFromHeaders(
             request.headers,
             expectedDeliveryScope,
+            weixinDeliveryReadinessClock,
           );
           weixinDeliveryReadiness.report(deliveryReport);
           if (deliveryReport.status !== "ready") {
