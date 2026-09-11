@@ -50,6 +50,37 @@
   excluded; Mac Google Chrome functional acceptance remains required.
 - Shared Caddy and Qingyang stay protected. PushPlus remains retired.
 
+## Current Evidence Override (2026-09-11)
+
+The ordered implementation notes below retain their historical checkpoint
+language. The following is the current production evidence and takes
+precedence when describing deployment state:
+
+- The production `current` release is
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-d38a89144b66`,
+  bound to source commit `d38a89144b660e6ace213c9d32787e3870006667`.
+- Backend, frontend, WeChat agent, AI Platform and shared Caddy services are
+  active. HTTPS, application health, database `quick_check` and foreign-key
+  checks passed. The current branch contains later documentation-only commits
+  and has not been redeployed.
+- The released configuration keeps AI Platform `disabled` with
+  `local-simulated` execution, keeps Backend as the sole proactive scheduler,
+  and keeps proactive assistant/notification auto-run disabled. This is a
+  controlled integration release, not proof of live supplier routing or live
+  proactive notification delivery.
+- Mac Google Chrome production acceptance is recorded as 32/32 checks passed,
+  32 screenshots, 7 write requests, zero failed requests and zero console
+  errors. The formal report is in
+  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`.
+- Historical production smoke rows were removed by the protected server-local
+  cleanup path; residual smoke rows are zero and database integrity remains
+  clean.
+- The remaining blockers are visible desktop/WeChat acceptance while CUA still
+  reports the Mac as locked, the absence of a Clawbot context renewal/rebind
+  protocol for indefinite proactive delivery, and separate Linux/x64 plus
+  real-supplier quality/cost evidence. None of these may be inferred from a
+  health response or local simulated tests.
+
 ## Ordered Work
 
 1. Drain/settlement lifecycle and complete adapter-test coverage.
