@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
+import { sha256 as canonicalSha256 } from "../../shared/aiPlatformContract.mjs";
 
 export const PRODUCTION_ROOT = "/opt/sentelligent-sales-workbench";
 export const PLATFORM_SERVICE = "sentelligent-ai-platform.service";
@@ -22,6 +23,256 @@ export const AI_PREFLIGHT_CHECKS = Object.freeze([
 ]);
 
 const ROLLOUT_PHASE_ORDER = Object.freeze(Object.fromEntries(ROLLOUT_PHASES.map((phase, index) => [phase, index + 1])));
+
+export const P2_ACCEPTANCE_SCHEMA_VERSION = 1;
+export const P2_ACCEPTANCE_MIN_SAMPLES = 10;
+export const P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS = 2 * 60 * 60;
+export const P2_ACCEPTANCE_MAX_AGE_MS = 24 * 60 * 60_000;
+export const P2_ACCEPTANCE_PRODUCER_ID = "ai-platform-p2-acceptance";
+export const P2_ACCEPTANCE_PRODUCER_VERSION = "1";
+
+const ACCEPTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/u;
+const ACCEPTANCE_COMMIT = /^[0-9a-f]{40}$/u;
+const ACCEPTANCE_DIGEST = /^[0-9a-f]{64}$/u;
+const ACCEPTANCE_CURRENCIES = new Set(["CNY", "USD"]);
+
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function contractError(code, message = code) {
+  throw Object.assign(new Error(message), { code });
+}
+
+function requireAcceptanceId(value, name) {
+  if (typeof value !== "string" || !ACCEPTANCE_ID.test(value)) contractError("P2_ACCEPTANCE_INVALID", `${name} is invalid`);
+  return value;
+}
+
+function requireAcceptanceDigest(value, name, length = 64) {
+  const pattern = length === 40 ? ACCEPTANCE_COMMIT : ACCEPTANCE_DIGEST;
+  if (typeof value !== "string" || !pattern.test(value)) contractError("P2_ACCEPTANCE_INVALID", `${name} is invalid`);
+  return value;
+}
+
+function exactIsoDate(value, name) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    contractError("P2_ACCEPTANCE_INVALID", `${name} is invalid`);
+  }
+  const parsed = Date.parse(value);
+  if (new Date(parsed).toISOString() !== value) contractError("P2_ACCEPTANCE_INVALID", `${name} must be canonical ISO-8601`);
+  return parsed;
+}
+
+export function rolloutControlsForPhase(value) {
+  const phase = normalizeRolloutPhase(value);
+  const legacy = phase === "P1" || phase === "P2";
+  const controls = {
+    rolloutPhase: phase,
+    routingPhase: routingPhaseForRollout(phase),
+    executionMode: phase === "P1" ? "local-simulated" : "external-provider",
+    externalProvidersEnabled: phase !== "P1",
+    taskAdmissionEnabled: !legacy,
+    queuePaused: legacy,
+    businessAdmission: !legacy,
+    singleConcurrency: legacy,
+    taskConcurrency: legacy ? 1 : null,
+    taskOwnerConcurrency: legacy ? 1 : null,
+  };
+  return Object.freeze(controls);
+}
+
+export function validateRolloutConfiguration(value, config = {}) {
+  const controls = rolloutControlsForPhase(value);
+  if (!isPlainRecord(config)) contractError("ROLLOUT_CONFIGURATION_INVALID");
+  if (config.executionMode !== controls.executionMode) contractError("ROLLOUT_EXECUTION_MODE_INVALID");
+  if (config.externalProvidersEnabled !== controls.externalProvidersEnabled) contractError("ROLLOUT_EXTERNAL_PROVIDER_MODE_INVALID");
+  if (config.taskAdmissionEnabled !== controls.taskAdmissionEnabled) contractError("ROLLOUT_TASK_ADMISSION_INVALID");
+  if (controls.singleConcurrency
+    && (config.taskConcurrency !== 1 || config.taskOwnerConcurrency !== 1)) {
+    contractError("ROLLOUT_SINGLE_CONCURRENCY_REQUIRED");
+  }
+  return controls;
+}
+
+export function validateRolloutRuntime(value, { operations, backendHealth = null, requireQueueEmpty = false } = {}) {
+  const controls = rolloutControlsForPhase(value);
+  if (!isPlainRecord(operations)) contractError("ROLLOUT_RUNTIME_INVALID");
+  const queue = operations.queue;
+  const executor = operations.executor;
+  if (!isPlainRecord(queue) || !isPlainRecord(executor)
+    || !Number.isSafeInteger(queue.running) || queue.running < 0
+    || !Number.isSafeInteger(queue.queued) || queue.queued < 0) {
+    contractError("ROLLOUT_RUNTIME_INVALID");
+  }
+  if (controls.queuePaused) {
+    if (operations.paused !== true || executor.admissionOpen !== false) contractError("ROLLOUT_QUEUE_MUST_BE_PAUSED");
+  } else if (operations.paused !== false || executor.admissionOpen !== true) {
+    contractError("ROLLOUT_BUSINESS_ADMISSION_REQUIRED");
+  }
+  if (requireQueueEmpty && (queue.running !== 0 || queue.queued !== 0)) contractError("ROLLOUT_QUEUE_NOT_EMPTY");
+  const routingPhase = backendHealth?.aiPlatform?.routing?.phase;
+  if (routingPhase !== undefined && routingPhase !== controls.routingPhase) contractError("ROLLOUT_BACKEND_ROUTING_INVALID");
+  return controls;
+}
+
+export function providerPolicyDigest(providerPolicies) {
+  if (!Array.isArray(providerPolicies)) contractError("PROVIDER_POLICY_DIGEST_INPUT_INVALID");
+  return canonicalSha256(providerPolicies);
+}
+
+function probeState(probe) {
+  if (!isPlainRecord(probe) || probe.status !== "passed") return "none";
+  const source = probe.source ?? probe.type;
+  if (!ACCEPTANCE_ID.test(String(probe.requestId ?? "")) || !Number.isFinite(Date.parse(probe.observedAt ?? ""))) return "none";
+  if (source === "live" || source === "external-provider") return "live";
+  if (source === "endpoint" || source === "health") return "probe";
+  return "none";
+}
+
+export function providerReadiness({
+  providerKind, configured = false, probe = null, capability = true,
+} = {}) {
+  const configuredReady = configured === true && capability !== false;
+  if (providerKind === "mock") {
+    return Object.freeze({ configured: configuredReady, probeReady: configuredReady, liveReady: configuredReady, ready: configuredReady });
+  }
+  const state = configuredReady ? probeState(probe) : "none";
+  const probeReady = state === "probe" || state === "live";
+  const liveReady = state === "live";
+  return Object.freeze({ configured: configuredReady, probeReady, liveReady, ready: liveReady });
+}
+
+export function providerReadinessFromHealth(entry, { providerKind = entry?.providerKind ?? entry?.kind } = {}) {
+  const value = isPlainRecord(entry) ? entry : {};
+  const nested = isPlainRecord(value.readiness) ? value.readiness : value;
+  const configured = nested.configured === true || value.configured === true || value.ready === true;
+  const probe = nested.probe ?? value.probe ?? null;
+  return providerReadiness({ providerKind, configured, probe });
+}
+
+function validateUsage(usage, index) {
+  if (!isPlainRecord(usage)) contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].usage is invalid`);
+  const usageFields = ["inputTokens", "outputTokens", "cachedInputTokens", "audioSeconds", "imagePages", "promptTokens", "completionTokens"];
+  const present = usageFields.filter((field) => usage[field] !== undefined);
+  if (!present.length || present.some((field) => typeof usage[field] !== "number" || !Number.isFinite(usage[field]) || usage[field] < 0)) {
+    contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].usage must contain recorded non-negative metrics`);
+  }
+}
+
+function validateCost(cost, index, currency) {
+  if (!isPlainRecord(cost)) contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].cost is invalid`);
+  const amountMicro = cost.micro ?? cost.amountMicro ?? cost.costMicro;
+  if (!Number.isSafeInteger(amountMicro) || amountMicro < 0
+    || typeof cost.currency !== "string" || !ACCEPTANCE_CURRENCIES.has(cost.currency)
+    || (currency !== undefined && cost.currency !== currency)) {
+    contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].cost is invalid`);
+  }
+}
+
+function validateBillingReconciliation(value, index) {
+  if (!isPlainRecord(value) || (value.status !== "reconciled" && value.reconciled !== true)) {
+    contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].billingReconciliation is not reconciled`);
+  }
+  for (const field of ["checkedAt", "reconciledAt"]) {
+    if (value[field] !== undefined) exactIsoDate(value[field], `samples[${index}].billingReconciliation.${field}`);
+  }
+  if (value.reference !== undefined) requireAcceptanceId(value.reference, `samples[${index}].billingReconciliation.reference`);
+}
+
+function validateP2Sample(sample, index, { currency } = {}) {
+  if (!isPlainRecord(sample) || sample.approved !== true) contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}] must be approved`);
+  requireAcceptanceId(sample.requestId, `samples[${index}].requestId`);
+  const priceVersion = typeof sample.priceVersion === "string" ? sample.priceVersion : sample.priceVersion?.id ?? sample.priceVersionId;
+  requireAcceptanceId(priceVersion, `samples[${index}].priceVersion`);
+  validateUsage(sample.usage, index);
+  validateCost(sample.cost, index, currency);
+  validateBillingReconciliation(sample.billingReconciliation, index);
+  if (sample.observedAt !== undefined) exactIsoDate(sample.observedAt, `samples[${index}].observedAt`);
+  return { requestId: sample.requestId, priceVersion };
+}
+
+export function validateP2AcceptanceReport(input, {
+  sourceCommit,
+  policyDigest,
+  providerPolicyDigest: expectedProviderPolicyDigest,
+  currency,
+  now = Date.now(),
+  maxAgeMs = P2_ACCEPTANCE_MAX_AGE_MS,
+} = {}) {
+  if (!isPlainRecord(input)
+    || input.schemaVersion !== P2_ACCEPTANCE_SCHEMA_VERSION
+    || input.status !== "passed"
+    || (input.phase ?? input.rolloutPhase) !== "P2"
+    || !isPlainRecord(input.summary)
+    || input.summary.failed !== 0
+    || !Array.isArray(input.samples)
+    || input.samples.length > 1_000) {
+    contractError("P2_ACCEPTANCE_INVALID");
+  }
+  const reportCommit = input.sourceCommit ?? input.commit;
+  requireAcceptanceDigest(reportCommit, "sourceCommit", 40);
+  if (sourceCommit !== undefined && reportCommit !== sourceCommit) contractError("P2_ACCEPTANCE_COMMIT_MISMATCH");
+  requireAcceptanceDigest(input.policyDigest, "policyDigest");
+  if (policyDigest !== undefined && input.policyDigest !== policyDigest) contractError("P2_ACCEPTANCE_POLICY_DIGEST_MISMATCH");
+  requireAcceptanceDigest(input.providerPolicyDigest, "providerPolicyDigest");
+  if (expectedProviderPolicyDigest !== undefined && input.providerPolicyDigest !== expectedProviderPolicyDigest) contractError("P2_ACCEPTANCE_PROVIDER_POLICY_DIGEST_MISMATCH");
+  if (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1 || maxAgeMs > 7 * 24 * 60 * 60_000) contractError("P2_ACCEPTANCE_INVALID");
+
+  const generatedAtMs = exactIsoDate(input.generatedAt, "generatedAt");
+  if (!Number.isFinite(now) || now - generatedAtMs > maxAgeMs || now - generatedAtMs < -30_000) contractError("P2_ACCEPTANCE_STALE");
+
+  const observation = input.observation;
+  if (!isPlainRecord(observation)) contractError("P2_ACCEPTANCE_OBSERVATION_INVALID");
+  const startedAtMs = exactIsoDate(observation.startedAt, "observation.startedAt");
+  const finishedAtMs = exactIsoDate(observation.finishedAt, "observation.finishedAt");
+  const durationSeconds = observation.durationSeconds;
+  if (!Number.isSafeInteger(durationSeconds) || durationSeconds < P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS
+    || finishedAtMs < startedAtMs || finishedAtMs - startedAtMs < P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS * 1_000
+    || finishedAtMs > now + 30_000) contractError("P2_ACCEPTANCE_OBSERVATION_INVALID");
+
+  const failures = input.failures ?? [];
+  if (!Array.isArray(failures) || failures.length !== 0) contractError("P2_ACCEPTANCE_FAILURES_PRESENT");
+  const samples = input.samples.map((sample, index) => validateP2Sample(sample, index, { currency }));
+  const requestIds = new Set(samples.map((sample) => sample.requestId));
+  if (requestIds.size !== samples.length) contractError("P2_ACCEPTANCE_DUPLICATE_REQUEST_ID");
+  const approvedSampleCount = samples.length;
+  if (approvedSampleCount < P2_ACCEPTANCE_MIN_SAMPLES
+    || (input.summary.total !== undefined && input.summary.total !== samples.length)
+    || (input.summary.approved !== undefined && input.summary.approved !== approvedSampleCount)) {
+    contractError("P2_ACCEPTANCE_SAMPLE_COUNT_INVALID");
+  }
+
+  const producer = input.producerProvenance ?? input.provenance;
+  if (!isPlainRecord(producer)
+    || producer.controlled !== true
+    || producer.producerId !== P2_ACCEPTANCE_PRODUCER_ID
+    || producer.producerVersion !== P2_ACCEPTANCE_PRODUCER_VERSION
+    || producer.sourceCommit !== reportCommit
+    || producer.generatedAt !== input.generatedAt) {
+    contractError("P2_ACCEPTANCE_PRODUCER_INVALID");
+  }
+  requireAcceptanceId(producer.runId, "producerProvenance.runId");
+
+  return Object.freeze({
+    schemaVersion: P2_ACCEPTANCE_SCHEMA_VERSION,
+    status: "passed",
+    phase: "P2",
+    sourceCommit: reportCommit,
+    policyDigest: input.policyDigest,
+    providerPolicyDigest: input.providerPolicyDigest,
+    generatedAt: input.generatedAt,
+    observationSeconds: durationSeconds,
+    sampleCount: samples.length,
+    approvedSampleCount,
+    failureCount: 0,
+    producerId: producer.producerId,
+    producerVersion: producer.producerVersion,
+    producerRunId: producer.runId,
+  });
+}
 
 export function normalizeRolloutPhase(value) {
   if (typeof value !== "string" || !ROLLOUT_PHASES.includes(value)) throw new Error("invalid rollout phase");
