@@ -57,34 +57,63 @@ language. The following is the current production evidence and takes
 precedence when describing deployment state:
 
 - The production `current` release is
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-d38a89144b66`,
-  bound to source commit `d38a89144b660e6ace213c9d32787e3870006667`.
-- Backend, frontend, WeChat agent, AI Platform and shared Caddy services are
-  active. HTTPS, application health, database `quick_check` and foreign-key
-  checks passed. The current branch contains later documentation-only commits
-  and has not been redeployed.
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7570a47acedc`,
+  bound to source commit `7570a47acedc501fafe7874baaa73c63e4e6fd11`.
+  The release was rebuilt on the production Linux/x64 host. Its archive
+  SHA-256 is
+  `6388ddda67a13bc64a0dccbae0874a34285380cb6c363b961ed65ebeaabdbaed`.
+  The manifest records schema `3`, Node `v24.18.0` and npm `11.16.0`.
+- The controlled cutover completed at `2026-09-11T11-26-37Z`. The cutover
+  report and log are at
+  `/opt/sentelligent-sales-workbench/evidence/2026-09-11T11-26-37Z-20156/cutover-report.json`
+  and
+  `/opt/sentelligent-sales-workbench/evidence/2026-09-11T11-26-37Z-20156/cutover.log`.
+  The final offline database backup is
+  `/opt/sentelligent-sales-workbench/backups/2026-09-11T11-26-37Z-20156/database-final-offline.sqlite`
+  with SHA-256
+  `b9be774df368effe0208a48ca12136a9a1b365427dc45a3e0d95af56a804c3b1`.
+  The WeChat session backup is
+  `/opt/sentelligent-sales-workbench/backups/2026-09-11T11-26-37Z-20156/weixin-session.tar.gz`
+  with SHA-256
+  `8cf339401f003fae56b57433217b146d1130bbf04c52565af8a6e7151b9d65c3`.
+- Backend, frontend, WeChat agent, AI Platform, shared Caddy and Qingyang
+  services are active. `https://82.156.210.199/_health` and
+  `https://82.156.210.199/api/health` returned HTTP 200; database
+  `quick_check=ok` and foreign-key checks returned zero violations.
 - The released configuration keeps AI Platform `disabled` with
   `local-simulated` execution, keeps Backend as the sole proactive scheduler,
-  and keeps proactive assistant/notification auto-run disabled. This is a
-  controlled integration release, not proof of live supplier routing or live
-  proactive notification delivery.
+  and keeps proactive assistant/notification auto-run disabled. The target
+  metadata remains `gpt-5.6-luna` / `max`, but that metadata does not establish
+  live supplier routing or real-model readiness.
 - The production environment retains the fixed `60`-minute/`10`-customer
   tender baseline, while the durable scheduler row currently records an
   enabled `120`-minute/`10`-customer runtime. The scheduler implementation
   treats an existing persisted row as authoritative over initialization
   defaults; this was verified read-only and was not changed during the
   integration.
-- Mac Google Chrome production acceptance is recorded as 32/32 checks passed,
-  32 screenshots, 7 write requests, zero failed requests and zero console
-  errors. The formal report is in
-  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`.
+- Fresh Mac Google Chrome checks against the new release covered the tender
+  schedule, overview, customer list and customer detail flows. The tender
+  schedule showed the persisted `120`-minute/`10`-customer cadence, the
+  overview and customer records rendered normally, the customer detail page
+  exposed proactive suggestions and CSV/XLSX preview controls, and a
+  downward-wheel check reached the recent-run section. The page cited the
+  new `/assets/index-Bym6csvS.js` bundle, which matched the candidate release
+  source. These are fresh functional checks, but they are not a claim that the
+  older 32/32 report at
+  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`
+  covers this final release.
 - Historical production smoke rows were removed by the protected server-local
   cleanup path; residual smoke rows are zero and database integrity remains
   clean.
-- The remaining blockers are the absence of a Clawbot context renewal/rebind
-  protocol for indefinite proactive delivery, and separate Linux/x64 plus
-  real-supplier quality/cost evidence. None of these may be inferred from a
-  health response or local simulated tests.
+- The WeChat Clawbot outbox is fail-closed when its encrypted
+  `context_token` is missing or expired. The vendored SDK accepts that token
+  only after an inbound message, caches it for about 23 hours, and exposes no
+  renewal/rebind operation. Polling the outbox or sending a synthetic
+  heartbeat cannot refresh it. Messages remain persisted for retry, but
+  indefinite proactive delivery without a user message is not currently
+  supported. The remaining blockers are this external protocol contract and
+  separate real-supplier quality/cost evidence; neither may be inferred from
+  a health response or local simulated tests.
 
 ## Ordered Work
 

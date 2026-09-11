@@ -4,20 +4,29 @@
 
 本节覆盖此前历史段落；历史段落保留作为实施过程记录，不作为当前生产状态依据。
 
-- 当前融合工作树：`ai-platform-production-integration-20260909`。
-- 当前工作树 HEAD：`ee591adc8f1059fba5cb322c6d56f610524630b5`；该提交只补充融合执行
-  记录，候选分支尚有该文档提交待同步。
+- 当前融合工作树：`ai-platform-production-integration-20260909`；原始状态已核对，当前仅有本次
+  文档收口改动待提交。
+- 当前工作树 HEAD：`7570a47acedc501fafe7874baaa73c63e4e6fd11`；最近两个提交修正招标
+  调度节奏文案及其集成 QA 断言。
 - 生产 current：
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-d38a89144b66`；
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7570a47acedc`；
   该生产 release manifest 的 source commit 为
-  `d38a89144b660e6ace213c9d32787e3870006667`。文档提交未重新部署。
+  `7570a47acedc501fafe7874baaa73c63e4e6fd11`。该制品在生产 Linux/x64 主机重新构建，
+  归档 SHA-256 为
+  `6388ddda67a13bc64a0dccbae0874a34285380cb6c363b961ed65ebeaabdbaed`。
+- 生产切换于 `2026-09-11T11-26-37Z` 完成；切换报告为
+  `/opt/sentelligent-sales-workbench/evidence/2026-09-11T11-26-37Z-20156/cutover-report.json`，
+  最终离线数据库备份 SHA-256 为
+  `b9be774df368effe0208a48ca12136a9a1b365427dc45a3e0d95af56a804c3b1`，微信 session 备份
+  SHA-256 为
+  `8cf339401f003fae56b57433217b146d1130bbf04c52565af8a6e7151b9d65c3`。
 - 生产服务 `sentelligent-backend.service`、`sentelligent-frontend.service`、
   `sentelligent-weixin-agent.service`、`sentelligent-ai-platform.service` 和
-  `sentelligent-caddy.service` 均已核实为 active；`/_health`、`/api/health`、
-  数据库 `quick_check` 和外键检查均通过。
+  `sentelligent-caddy.service` 均已核实为 active；`/_health`、`/api/health` 均返回 HTTP 200，
+  数据库 `quick_check=ok`，外键违规数为 `0`。
 - 当前生产 AI Platform 配置仍是 `disabled`、`local-simulated`，主动助手与主动通知
-  auto-run 均为关闭；这表示平台融合代码已随 current 发布，但不表示真实供应商路由、
-  真实主动扫描或真实通知已经开通。
+  auto-run 均为关闭，目标元数据为 `gpt-5.6-luna` / `max`；这表示平台融合代码已随 current
+  发布，但不表示真实供应商路由、真实主动扫描或真实通知已经开通。
 - 生产招标调度的环境基线仍为 `HOSPITAL_TENDER_INTERVAL_MINUTES=60`、
   `HOSPITAL_TENDER_BATCH_SIZE=10`，但只读读取持久化状态显示当前已启用、运行间隔为
   `120` 分钟、每批 `10` 家。调度仓储的既有状态优先于初始化选项，因此页面的 120 分钟
@@ -25,17 +34,21 @@
 - Backend 仍是 `proactive.analyze` 和业务通知 outbox 的唯一调度所有者；PushPlus
   仍为退役状态。微信 outbox 在 Clawbot context 缺失或过期时 fail-closed，消息保留
   在持久 outbox 中，不通过 heartbeat 冒充 context 续期。
-- Mac Google Chrome 生产功能验收：32/32 通过、32 张截图、7 个写请求记录、0 个
-  failedRequests、0 个控制台错误；`422/404/401` 均已标为预期错误边界。正式汇总：
-  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`。
+- 新 release 的 Mac Google Chrome 新鲜验收已覆盖招标调度、战情总览、客户列表和客户详情：
+  页面正常渲染，招标调度显示持久化的每 `120` 分钟、每批 `10` 家，客户详情显示主动建议
+  与 CSV/XLSX 预览入口，并已实测向下滚轮能够到达最近运行记录区域。页面实际引用的
+  `/assets/index-Bym6csvS.js` 与候选 release 一致。此前的 32/32 报告仍保留在
+  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`，
+  但不把它冒充为本次最终 release 的完整逐页验收。
 - 生产 smoke 历史残留已通过受保护的 server-local cleanup 精确清理；残留为 0，
   数据库完整性仍为 `quick_check=ok`、外键违规 0。
 
-当前未完成的门禁只有：Clawbot 尚未提供 context renewal/rebind 合同，因此不能把“系统
-永远主动推送”或真实主动微信投递标记为已验收；Linux/x64 正式构建、真实供应商质量/费用
-验收也必须分别保留证据。
+当前未完成的门禁包括：Clawbot 尚未提供 `context_token` renewal/rebind 合同，因此不能把
+“系统永远主动推送”或真实主动微信投递标记为已验收；当前 outbox 会在 token 缺失或过期时
+保留消息并 fail-closed，heartbeat 不能替代 provider 续期。真实供应商质量/费用验收也必须
+分别保留证据。
 
-更新：2026-09-10。主任务已接管生产融合，完整执行边界见
+更新：2026-09-11。主任务已接管生产融合，完整执行边界见
 [FUSION-EXECUTION.md](FUSION-EXECUTION.md)。
 
 ## 融合进度
