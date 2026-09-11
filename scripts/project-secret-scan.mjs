@@ -210,6 +210,12 @@ function isExplicitTestFixtureValue(value, filePath) {
     /^weixin[-_]machine[-_]test[-_]token$/i,
     /^shortcut[-_]weixin[-_]confirmation[-_]test[-_]secret[-_]\d{30,}$/i,
     /^shortcut[-_]bookkeeping[-_]safety[-_]test[-_]secret[-_]\d{30,}$/i,
+    // The outbox lease tests use short state labels rather than credentials.
+    // Keep this allowlist exact and test-file-scoped so lease-shaped values in
+    // runtime configuration still fail the scanner.
+    /^lease[-_]expired$/i,
+    /^lease[-_]context[-_]expired(?:[-_]race)?$/i,
+    /^legacy[-_]expired[-_]lease$/i,
     /^action[-_]lease$/i,
     /^entry[-_]lease$/i,
   ].some((pattern) => pattern.test(value));
