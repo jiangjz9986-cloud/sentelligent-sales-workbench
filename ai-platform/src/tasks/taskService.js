@@ -87,6 +87,9 @@ function taskErrorMessage(code) {
     rate_limited: "provider rate limited",
     temporary_failure: "provider temporary failure",
     network_error: "provider network error",
+    provider_capability_unsupported: "provider does not support this task capability",
+    provider_not_ready: "provider is not ready",
+    provider_live_not_ready: "provider live readiness is unavailable",
     invalid_result: "provider returned an invalid result",
     lease_expired: "task lease expired before completion",
     configuration_error: "AI execution configuration unavailable",
@@ -108,13 +111,14 @@ function normalizeUsage(usage) {
   return normalized;
 }
 
-function executionLimits(agentVersion, config) {
+function executionLimits(agentVersion, config, providerKind = null) {
   const limits = parseObject(agentVersion.limits_json, {});
+  const externalProvider = providerKind !== null && providerKind !== "mock";
   return {
     maxTokens: safePositiveInteger(limits.maxTokens, 1_000, 100_000),
     maxInputTokens: safePositiveInteger(limits.maxInputTokens, 0, 2_000_000),
     maxSteps: safePositiveInteger(limits.maxSteps, 8, 100),
-    maxAttempts: safePositiveInteger(limits.maxAttempts, 2, 3),
+    maxAttempts: externalProvider ? 1 : safePositiveInteger(limits.maxAttempts, 2, 3),
     timeoutMs: Math.min(
       safePositiveInteger(limits.timeoutMs, config.taskLeaseMs, 10 * 60_000),
       config.taskTimeoutMaxMs ?? 10 * 60_000,
@@ -212,7 +216,169 @@ function activePrice(db, modelId, at) {
   `).get({ $modelId: modelId, $at: at }) ?? null;
 }
 
-function resolveExecutionConfiguration(db, { taskType, at, config }) {
+function isRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readProviderReadiness(providerRegistry, provider, context) {
+  const candidates = [];
+  if (typeof providerRegistry?.readiness === "function") {
+    candidates.push(() => providerRegistry.readiness({ providerId: provider.id, ...context }));
+  }
+  if (typeof provider?.readiness === "function") {
+    candidates.push(() => provider.readiness(context));
+  } else if (provider?.readiness !== undefined && provider?.readiness !== null) {
+    candidates.push(() => provider.readiness);
+  }
+  if (typeof provider?.getReadiness === "function") {
+    candidates.push(() => provider.getReadiness(context));
+  }
+  if (provider?.readiness === undefined && typeof provider?.ready === "boolean") {
+    candidates.push(() => ({ ready: provider.ready }));
+  }
+  if (provider?.readiness === undefined && provider?.liveReady !== undefined) {
+    candidates.push(() => ({
+      ready: provider.liveReady === true,
+      liveReady: provider.liveReady === true,
+      ...(typeof provider.configured === "boolean" ? { configured: provider.configured } : {}),
+    }));
+  }
+
+  for (const candidate of candidates) {
+    let snapshot;
+    try {
+      snapshot = candidate();
+    } catch {
+      return { explicit: true, valid: false, snapshot: null };
+    }
+    if (snapshot === undefined || snapshot === null) continue;
+    if (snapshot && typeof snapshot.then === "function") {
+      return { explicit: true, valid: false, snapshot: null };
+    }
+    if (typeof snapshot === "boolean") snapshot = { ready: snapshot };
+    if (!isRecord(snapshot)) return { explicit: true, valid: false, snapshot: null };
+    return { explicit: true, valid: true, snapshot };
+  }
+  return { explicit: false, valid: true, snapshot: null };
+}
+
+function evaluateProviderAdmission(providerRegistry, model, taskType, config) {
+  let provider = null;
+  try {
+    provider = providerRegistry?.get?.(model.provider_id) ?? null;
+  } catch {
+    provider = null;
+  }
+  if (!provider) {
+    return {
+      provider: null,
+      external: model.provider_kind !== "mock",
+      capabilityReady: false,
+      configured: false,
+      credentialReady: false,
+      probeReady: false,
+      liveReady: false,
+      ready: false,
+      liveRequired: model.provider_kind !== "mock"
+        && config.nodeEnv === "production"
+        && config.executionMode === "external-provider",
+      code: "provider_unavailable",
+    };
+  }
+
+  const external = model.provider_kind !== "mock";
+  // Existing mock fixtures sometimes change the persisted provider kind to
+  // exercise external accounting while retaining the mock provider object.
+  const mockCompatible = model.provider_kind === "mock" || provider.id === "provider-mock";
+  const context = {
+    modelId: model.id,
+    modelName: model.name,
+    providerId: model.provider_id,
+    taskType,
+  };
+  const readiness = readProviderReadiness(providerRegistry, provider, context);
+  const snapshot = readiness.snapshot ?? {};
+  let capabilityReady = mockCompatible;
+  if (!mockCompatible && typeof provider.supports === "function") {
+    try {
+      capabilityReady = provider.supports({ modelName: model.name, taskType }) === true;
+    } catch {
+      capabilityReady = false;
+    }
+  } else if (!mockCompatible && readiness.valid && readiness.explicit && Object.hasOwn(snapshot, "capabilityReady")) {
+    capabilityReady = snapshot.capabilityReady === true;
+  }
+
+  const configured = mockCompatible
+    ? true
+    : readiness.explicit
+      ? (Object.hasOwn(snapshot, "configured")
+        ? snapshot.configured === true
+        : snapshot.credentialReady !== false)
+      : capabilityReady;
+  const credentialReady = mockCompatible
+    ? true
+    : readiness.explicit
+      ? (Object.hasOwn(snapshot, "credentialReady")
+        ? snapshot.credentialReady === true
+        : configured)
+      : capabilityReady;
+  const statedReady = !readiness.explicit
+    || !readiness.valid
+    || !Object.hasOwn(snapshot, "ready")
+    || snapshot.ready === true;
+  const probeReady = mockCompatible || (readiness.valid && readiness.explicit && snapshot.probeReady === true);
+  const liveReady = mockCompatible || (readiness.valid && readiness.explicit && snapshot.liveReady === true);
+  const liveRequired = external
+    && config.nodeEnv === "production"
+    && config.executionMode === "external-provider";
+  const baseReady = capabilityReady && configured && credentialReady && readiness.valid && statedReady;
+  const ready = baseReady && (!liveRequired || liveReady);
+  return {
+    provider,
+    external,
+    capabilityReady,
+    configured,
+    credentialReady,
+    probeReady,
+    liveReady,
+    baseReady,
+    ready,
+    liveRequired,
+    code: !capabilityReady
+      ? "provider_capability_unsupported"
+      : (!configured || !credentialReady || !readiness.valid || !statedReady)
+        ? "provider_not_ready"
+        : liveRequired && !liveReady
+          ? "provider_live_not_ready"
+          : null,
+  };
+}
+
+function assertProviderAdmission(providerRegistry, model, taskType, config) {
+  const admission = evaluateProviderAdmission(providerRegistry, model, taskType, config);
+  if (!admission.provider) {
+    throw new AiPlatformError("AI provider is not registered", { code: "provider_unavailable", status: 503 });
+  }
+  if (!admission.capabilityReady) {
+    throw new AiPlatformError("AI provider does not support this task capability", {
+      code: "provider_capability_unsupported",
+      status: 503,
+    });
+  }
+  if (!admission.baseReady) {
+    throw new AiPlatformError("AI provider is not ready", { code: "provider_not_ready", status: 503 });
+  }
+  if (admission.liveRequired && !admission.liveReady) {
+    throw new AiPlatformError("AI provider live readiness is unavailable", {
+      code: "provider_live_not_ready",
+      status: 503,
+    });
+  }
+  return admission;
+}
+
+function resolveExecutionConfiguration(db, { taskType, at, config, providerRegistry, enforceProviderAdmission = true }) {
   const agentVersion = activeAgentForTask(db, taskType);
   const modelPolicy = parseObject(agentVersion.model_policy_json, {});
   const modelId = String(modelPolicy.modelId ?? "").trim();
@@ -245,6 +411,9 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
       status: 503,
     });
   }
+  const providerAdmission = enforceProviderAdmission
+    ? assertProviderAdmission(providerRegistry, model, taskType, config)
+    : evaluateProviderAdmission(providerRegistry, model, taskType, config);
   const price = activePrice(db, model.id, at);
   if (!price && model.provider_kind !== "mock") {
     throw new AiPlatformError("AI model price is not configured", { code: "price_not_configured", status: 503 });
@@ -254,9 +423,10 @@ function resolveExecutionConfiguration(db, { taskType, at, config }) {
     agentVersion,
     model,
     price,
+    providerAdmission,
     standardIds,
     standardDigest: standardDigest(db, standardIds),
-    limits: executionLimits(agentVersion, config),
+    limits: executionLimits(agentVersion, config, model.provider_kind),
   };
 }
 
@@ -525,6 +695,7 @@ export function createTaskService({
       taskType: normalized.taskType,
       at: requestedAt,
       config,
+      providerRegistry,
     });
     if (normalized.input.media && execution.model.provider_kind === "vision" && execution.limits.maxInputTokens < 1) {
       throw new AiPlatformError("vision input budget is not configured", { code: "budget_not_configured", status: 503 });
@@ -583,12 +754,12 @@ export function createTaskService({
           id, request_id, issuer, owner, actor, channel, feature, task_type,
           subject_type, subject_id, priority, input_json, evidence_digest,
           request_hash, idempotency_key, agent_version_id, model_id,
-          standard_digest, status, source, requested_at, updated_at
+          price_version_id, standard_digest, status, source, requested_at, updated_at
         ) VALUES (
           $id, $requestId, $issuer, $owner, $actor, $channel, $feature, $taskType,
           $subjectType, $subjectId, $priority, $inputJson, $evidenceDigest,
           $requestHash, $idempotencyKey, $agentVersionId, $modelId,
-          $standardDigest, 'queued', 'model', $requestedAt, $updatedAt
+          $priceVersionId, $standardDigest, 'queued', 'model', $requestedAt, $updatedAt
         )
       `).run({
         $id: taskId,
@@ -608,6 +779,7 @@ export function createTaskService({
         $idempotencyKey: key,
         $agentVersionId: execution.agentVersion.id,
         $modelId: execution.model.id,
+        $priceVersionId: execution.price?.id ?? null,
         $standardDigest: execution.standardDigest,
         $requestedAt: requestedAt,
         $updatedAt: requestedAt,
@@ -632,6 +804,7 @@ export function createTaskService({
         feature: normalized.feature,
         agentVersionId: execution.agentVersion.id,
         modelId: execution.model.id,
+        priceVersionId: execution.price?.id ?? null,
         estimatedCostMicro: reservedCostMicro,
         estimatedAttemptCostMicro: estimate.charge.totalMicro,
         maxAttempts: execution.limits.maxAttempts,
@@ -738,7 +911,7 @@ export function createTaskService({
                m.provider_id, m.name AS model_name, m.capabilities_json,
                p.name AS provider_name,
                p.kind AS provider_kind, p.enabled AS provider_enabled,
-               m.enabled AS model_enabled, pr.id AS price_version_id,
+               m.enabled AS model_enabled, t.price_version_id AS price_version_id,
                pr.version AS price_version, pr.currency,
                pc.policy_json AS pricing_policy_json, pr.input_micro_per_1k, pr.output_micro_per_1k,
                pr.cached_input_micro_per_1k, pr.audio_micro_per_minute,
@@ -750,15 +923,7 @@ export function createTaskService({
           JOIN agents a ON a.id = av.agent_id
           JOIN models m ON m.id = t.model_id
           JOIN providers p ON p.id = m.provider_id
-          LEFT JOIN price_versions pr
-            ON pr.id = (
-              SELECT pv.id FROM price_versions pv
-               WHERE pv.model_id = t.model_id
-                 AND pv.effective_from <= t.requested_at
-                 AND (pv.effective_to IS NULL OR pv.effective_to > t.requested_at)
-               ORDER BY pv.effective_from DESC, pv.created_at DESC, pv.id DESC
-               LIMIT 1
-            )
+          LEFT JOIN price_versions pr ON pr.id = t.price_version_id AND pr.model_id = t.model_id
           LEFT JOIN price_calendars pc ON pc.price_version_id = pr.id
          WHERE ${where}
            AND (SELECT COUNT(*) FROM tasks active WHERE active.status = 'running') < $globalConcurrency
@@ -873,7 +1038,7 @@ export function createTaskService({
           effective_to: selected.price_effective_to,
           ...attemptPrice,
         } : null,
-        limits: executionLimits(selected, config),
+        limits: executionLimits(selected, config, selected.provider_kind),
       };
     });
   }
@@ -1291,7 +1456,7 @@ export function createTaskService({
           currency: staleTask.currency ?? "USD",
         };
         markAttemptUnknown(db, current, attempt, at);
-        const limits = executionLimits(staleTask, config);
+        const limits = executionLimits(staleTask, config, staleTask.provider_kind);
         const canRetry = staleTask.provider_kind === "mock"
           && !current.cancel_requested_at && attempt.attemptNo < limits.maxAttempts;
         if (canRetry) {
@@ -1364,12 +1529,24 @@ export function createTaskService({
   function configurationReadiness() {
     return Object.fromEntries(AI_TASK_TYPES.map((type) => {
       try {
-        const execution = resolveExecutionConfiguration(db, { taskType: type, at: now(), config });
-        const provider = providerRegistry.get(execution.model.provider_id);
-        const registered = Boolean(provider) && (execution.model.provider_kind === "mock"
-          || provider.supports?.({ modelName: execution.model.name, taskType: type }) === true);
-        return [type, { ready: registered, model: execution.model.name, provider: execution.model.provider_id }];
-      } catch {
+        const execution = resolveExecutionConfiguration(db, {
+          taskType: type,
+          at: now(),
+          config,
+          providerRegistry,
+          enforceProviderAdmission: false,
+        });
+        const admission = execution.providerAdmission;
+        return [type, {
+          ready: admission.ready,
+          configured: admission.configured,
+          probeReady: admission.probeReady,
+          liveReady: admission.liveReady,
+          capabilityReady: admission.capabilityReady,
+          model: execution.model.name,
+          provider: execution.model.provider_id,
+        }];
+      } catch (error) {
         return [type, { ready: false }];
       }
     }));
