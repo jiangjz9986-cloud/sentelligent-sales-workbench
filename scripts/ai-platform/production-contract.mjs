@@ -297,12 +297,17 @@ export function compareRolloutPhase(left, right) {
   return Math.sign(leftOrder - rightOrder);
 }
 
+export function p2AcceptanceRequiredForRollout(value) {
+  return compareRolloutPhase(value, "P3") >= 0;
+}
+
 export function transitionIdentityDigest(manifest) {
   return hashBytes(JSON.stringify({
     schemaVersion: manifest.schemaVersion, id: manifest.id, hostname: manifest.hostname,
     machineId: manifest.machineId, oldRelease: manifest.oldRelease, oldCommit: manifest.oldCommit,
     newRelease: manifest.newRelease, newCommit: manifest.newCommit, newArchive: manifest.newArchive,
     newArchiveSha256: manifest.newArchiveSha256, evidenceDir: manifest.evidenceDir, backupDir: manifest.backupDir,
+    p2AcceptanceReport: manifest.p2AcceptanceReport, p2AcceptanceReportSha256: manifest.p2AcceptanceReportSha256,
   }));
 }
 
@@ -328,7 +333,7 @@ export function platformStaticDirectoryForRelease(release) {
 }
 
 export function validateTransitionManifest(input) {
-  const allowed = ["schemaVersion", "id", "hostname", "machineId", "oldRelease", "oldCommit", "newRelease", "newCommit", "newArchive", "newArchiveSha256", "evidenceDir", "backupDir", "platformEnvCandidate", "backendEnvCandidate", "platformEnvSha256", "backendEnvSha256", "corePreflight", "corePreflightSha256", "policyFile", "policySha256", "qualityReport", "qualityReportSha256", "phase", "rolloutPhase"];
+  const allowed = ["schemaVersion", "id", "hostname", "machineId", "oldRelease", "oldCommit", "newRelease", "newCommit", "newArchive", "newArchiveSha256", "evidenceDir", "backupDir", "platformEnvCandidate", "backendEnvCandidate", "platformEnvSha256", "backendEnvSha256", "corePreflight", "corePreflightSha256", "policyFile", "policySha256", "qualityReport", "qualityReportSha256", "p2AcceptanceReport", "p2AcceptanceReportSha256", "phase", "rolloutPhase"];
   if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((key) => !allowed.includes(key))
     || input.schemaVersion !== 1 || !/^[a-z0-9][a-z0-9-]{0,99}$/u.test(input.id)
     || !/^[A-Za-z0-9.-]{1,253}$/u.test(input.hostname)
@@ -339,6 +344,13 @@ export function validateTransitionManifest(input) {
   if (routingPhaseForRollout(rolloutPhase) !== input.phase && !(input.phase === "legacy" && ["P1", "P2"].includes(rolloutPhase))) {
     throw new Error("rollout and routing phases do not match");
   }
+  const hasP2AcceptanceReport = input.p2AcceptanceReport !== undefined || input.p2AcceptanceReportSha256 !== undefined;
+  if (hasP2AcceptanceReport && (input.p2AcceptanceReport === undefined || input.p2AcceptanceReportSha256 === undefined)) {
+    throw new Error("p2 acceptance binding is incomplete");
+  }
+  if (p2AcceptanceRequiredForRollout(rolloutPhase) && !hasP2AcceptanceReport) {
+    throw new Error("p2 acceptance binding is required for P3+");
+  }
   releasePath(input.oldRelease); releasePath(input.newRelease);
   if (input.oldRelease === input.newRelease) throw new Error("new and old releases must differ");
   requireDigest(input.oldCommit, "oldCommit", 40); requireDigest(input.newCommit, "newCommit", 40);
@@ -348,6 +360,10 @@ export function validateTransitionManifest(input) {
     controlledPath(input[field], input.evidenceDir, field);
   }
   for (const field of ["platformEnvSha256", "backendEnvSha256", "corePreflightSha256", "policySha256", "newArchiveSha256", "qualityReportSha256"]) requireDigest(input[field], field);
+  if (hasP2AcceptanceReport) {
+    controlledPath(input.p2AcceptanceReport, input.evidenceDir, "p2AcceptanceReport");
+    requireDigest(input.p2AcceptanceReportSha256, "p2AcceptanceReportSha256");
+  }
   return Object.freeze({ ...input, rolloutPhase });
 }
 

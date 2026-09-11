@@ -15,6 +15,7 @@ const manifest = {
   policyFile: evidence + "/policy.json", policySha256: "1".repeat(64),
   newArchive: evidence + "/release.tar.gz", newArchiveSha256: "2".repeat(64),
   qualityReport: evidence + "/quality.json", qualityReportSha256: "3".repeat(64),
+  p2AcceptanceReport: evidence + "/p2-acceptance.json", p2AcceptanceReportSha256: "4".repeat(64),
 };
 const methods = ["acquireLock", "inspect", "verifyPreflight", "captureState", "drainPlatform", "backupPlatform", "stageBackendConfig", "resumePlatform", "cutoverCore", "reconcileProactiveEvents", "verifyPostflight", "reconcileCredentials", "restoreBackendConfig", "rollbackCore", "rollbackPlatform", "releaseLock", "verifyRollbackState", "verifyRollback"];
 function fixture(failures = []) {

@@ -18,7 +18,8 @@ import {
   PRODUCTION_ROOT, PROJECT_NODE, PLATFORM_SERVICE, PLATFORM_DATABASE, PLATFORM_USER, PLATFORM_SOCKET_GROUP,
   PLATFORM_ENV, BUSINESS_ENV, BUSINESS_DATABASE, PROTECTED_UNITS, WEIXIN_SESSION,
   hashBytes, renderPlatformUnit, releasePath, normalizeRolloutPhase, rolloutPhaseForManifest, transitionIdentityDigest,
-  routingPhaseForRollout, compareRolloutPhase, platformStaticDirectoryForRelease,
+  routingPhaseForRollout, compareRolloutPhase, p2AcceptanceRequiredForRollout, platformStaticDirectoryForRelease,
+  providerPolicyDigest, validateP2AcceptanceReport,
   AI_PREFLIGHT_CHECKS,
 } from "./production-contract.mjs";
 import { assertHost, privateFile, privateDirectory, writeExclusive, writeOnceOrVerify, replacePrivateJson, atomicReplace, inspectUnit, parseEnvironment, platformRequest, backupSqlite, runCommand } from "./production-io.mjs";
@@ -152,6 +153,23 @@ function verifyNewReleaseArchive(manifest) {
   return binding;
 }
 
+function validateP2AcceptanceBinding(manifest, { platform, policy }) {
+  const rolloutPhase = rolloutPhaseForManifest(manifest);
+  const hasReport = manifest.p2AcceptanceReport !== undefined || manifest.p2AcceptanceReportSha256 !== undefined;
+  if (!hasReport) {
+    check(!p2AcceptanceRequiredForRollout(rolloutPhase), "P2_ACCEPTANCE_BINDING_REQUIRED");
+    return null;
+  }
+  check(manifest.p2AcceptanceReport && manifest.p2AcceptanceReportSha256, "P2_ACCEPTANCE_BINDING_INCOMPLETE");
+  const report = jsonFile(manifest.p2AcceptanceReport, manifest.p2AcceptanceReportSha256);
+  return validateP2AcceptanceReport(report, {
+    sourceCommit: manifest.newCommit,
+    policyDigest: sha256(policy),
+    expectedProviderPolicyDigest: providerPolicyDigest(platform.providerPolicies),
+    currency: policy.currency,
+  });
+}
+
 export function validateCandidateConfiguration(manifest) {
   const platformRaw = privateFile(manifest.platformEnvCandidate, manifest.platformEnvSha256, { maxBytes: 128 * 1024 }).content.toString("utf8");
   const backendRaw = privateFile(manifest.backendEnvCandidate, manifest.backendEnvSha256, { maxBytes: 128 * 1024 }).content.toString("utf8");
@@ -185,7 +203,8 @@ export function validateCandidateConfiguration(manifest) {
   if (manifest.phase !== "platform") check(!backend.proactiveAssistantAutoRun && !backend.proactiveNotificationAutoRun, "BACKGROUND_CANARY_MUST_BE_PAUSED");
   const policy = normalizeDeploymentPolicy(jsonFile(manifest.policyFile, manifest.policySha256), platform);
   check(policy.sourceCommit === manifest.newCommit, "POLICY_SOURCE_MISMATCH");
-  return { platformRaw, backendRaw, platformEnv, backendEnv, platform, backend, policy };
+  const p2Acceptance = validateP2AcceptanceBinding(manifest, { platform, policy });
+  return { platformRaw, backendRaw, platformEnv, backendEnv, platform, backend, policy, p2Acceptance };
 }
 
 export function createProductionHostAdapter(manifest, { proofPath, proofSha256 } = {}) {
@@ -902,6 +921,7 @@ export async function runAiProductionPreflight(manifest) {
   });
   await verify("supplier.acceptance", () => {
     quality = jsonFile(manifest.qualityReport, manifest.qualityReportSha256);
+    check(!p2AcceptanceRequiredForRollout(rolloutPhase) || candidate?.p2Acceptance?.sourceCommit === manifest.newCommit, "P2_ACCEPTANCE_REQUIRED");
     check(quality.status === "passed" && quality.sourceCommit === manifest.newCommit
       && quality.executionMode === (rolloutPhase === "P1" ? "local-simulated" : "external-provider")
       && quality.currency === candidate.policy.currency
@@ -962,6 +982,7 @@ export async function runAiProductionPreflight(manifest) {
   return {
     schemaVersion: 1, generatedAt: new Date().toISOString(),
     manifestDigest: hashBytes(JSON.stringify(manifest)), sourceCommit: manifest.newCommit,
+    p2Acceptance: candidate?.p2Acceptance ?? null,
     status: checks.every((item) => item.status === "passed") ? "passed" : "failed", checks,
   };
 }

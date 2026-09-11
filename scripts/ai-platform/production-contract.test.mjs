@@ -4,7 +4,10 @@ import { test } from "node:test";
 import {
   PLATFORM_SOCKET_GROUP,
   platformStaticDirectoryForRelease,
+  p2AcceptanceRequiredForRollout,
   validateTransitionManifest,
+  validateP2AcceptanceReport,
+  transitionIdentityDigest,
   renderPlatformUnit,
   PRODUCTION_ROOT,
 } from "./production-contract.mjs";
@@ -22,6 +25,7 @@ const manifest = {
   policyFile: evidence + "/policy.json", policySha256: "1".repeat(64), phase: "canary",
   newArchive: evidence + "/release.tar.gz", newArchiveSha256: "2".repeat(64),
   qualityReport: evidence + "/quality.json", qualityReportSha256: "3".repeat(64),
+  p2AcceptanceReport: evidence + "/p2-acceptance.json", p2AcceptanceReportSha256: "4".repeat(64),
 };
 test("transition identities are exact and cannot expand services, releases or state paths", () => {
   assert.equal(validateTransitionManifest(manifest).newCommit, manifest.newCommit);
@@ -72,9 +76,88 @@ test("platform unit adoption only extracts direct immutable release paths", () =
 });
 
 test("rollout phases preserve the lower-level routing contract", () => {
+  assert.equal(p2AcceptanceRequiredForRollout("P1"), false);
+  assert.equal(p2AcceptanceRequiredForRollout("P2"), false);
+  assert.equal(p2AcceptanceRequiredForRollout("P3"), true);
   assert.equal(validateTransitionManifest({ ...manifest, phase: "legacy", rolloutPhase: "P1" }).rolloutPhase, "P1");
   assert.equal(validateTransitionManifest({ ...manifest, phase: "legacy", rolloutPhase: "P2" }).rolloutPhase, "P2");
   assert.equal(validateTransitionManifest({ ...manifest, phase: "canary", rolloutPhase: "P4" }).rolloutPhase, "P4");
   assert.equal(validateTransitionManifest({ ...manifest, phase: "platform", rolloutPhase: "P6" }).rolloutPhase, "P6");
   assert.throws(() => validateTransitionManifest({ ...manifest, phase: "legacy", rolloutPhase: "P5" }));
+  assert.doesNotThrow(() => validateTransitionManifest({
+    ...manifest,
+    phase: "legacy",
+    rolloutPhase: "P1",
+    p2AcceptanceReport: undefined,
+    p2AcceptanceReportSha256: undefined,
+  }));
+  assert.throws(() => validateTransitionManifest({
+    ...manifest,
+    p2AcceptanceReport: undefined,
+    p2AcceptanceReportSha256: undefined,
+  }), /p2 acceptance binding is required/u);
+  assert.throws(() => validateTransitionManifest({
+    ...manifest,
+    p2AcceptanceReport: undefined,
+  }), /p2 acceptance binding is incomplete/u);
+});
+
+test("P2 acceptance evidence is bound to the candidate commit, policy, provider policies, and reconciled samples", () => {
+  const now = Date.parse("2026-09-11T12:00:00.000Z");
+  const sourceCommit = "c".repeat(40);
+  const policyDigest = "1".repeat(64);
+  const providerDigest = "2".repeat(64);
+  const generatedAt = "2026-09-11T10:00:00.000Z";
+  const report = {
+    schemaVersion: 1,
+    status: "passed",
+    phase: "P2",
+    sourceCommit,
+    policyDigest,
+    providerPolicyDigest: providerDigest,
+    generatedAt,
+    observation: {
+      startedAt: "2026-09-11T07:59:00.000Z",
+      finishedAt: generatedAt,
+      durationSeconds: 7_260,
+    },
+    summary: { total: 10, approved: 10, failed: 0 },
+    failures: [],
+    samples: Array.from({ length: 10 }, (_value, index) => ({
+      approved: true,
+      requestId: `p2-request-${index}`,
+      priceVersion: `price-version-${index}`,
+      usage: { inputTokens: 1, outputTokens: 1 },
+      cost: { micro: 1, currency: "CNY" },
+      billingReconciliation: { status: "reconciled", reference: `billing-${index}` },
+    })),
+    producerProvenance: {
+      controlled: true,
+      producerId: "ai-platform-p2-acceptance",
+      producerVersion: "1",
+      sourceCommit,
+      generatedAt,
+      runId: "p2-run-20260911",
+    },
+  };
+  const normalized = validateP2AcceptanceReport(report, {
+    sourceCommit,
+    policyDigest,
+    expectedProviderPolicyDigest: providerDigest,
+    currency: "CNY",
+    now,
+  });
+  assert.equal(normalized.sampleCount, 10);
+  assert.equal(normalized.observationSeconds, 7_260);
+  assert.throws(() => validateP2AcceptanceReport(report, {
+    sourceCommit: "d".repeat(40),
+    policyDigest,
+    expectedProviderPolicyDigest: providerDigest,
+    currency: "CNY",
+    now,
+  }), /P2_ACCEPTANCE_COMMIT_MISMATCH/u);
+  assert.notEqual(
+    transitionIdentityDigest(manifest),
+    transitionIdentityDigest({ ...manifest, p2AcceptanceReportSha256: "5".repeat(64) }),
+  );
 });
