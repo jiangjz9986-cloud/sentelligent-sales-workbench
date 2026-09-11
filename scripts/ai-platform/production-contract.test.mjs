@@ -8,6 +8,7 @@ import {
   renderPlatformUnit,
   PRODUCTION_ROOT,
 } from "./production-contract.mjs";
+import { platformUnitReleasePath } from "./production-host.mjs";
 
 const evidence = PRODUCTION_ROOT + "/evidence/fusion-test";
 const manifest = {
@@ -54,6 +55,20 @@ test("platform static assets are bound to the immutable candidate release", () =
     manifest.newRelease + "/outputs/ai-platform-admin",
   );
   assert.throws(() => platformStaticDirectoryForRelease(PRODUCTION_ROOT + "/current"));
+});
+
+test("platform unit adoption only extracts direct immutable release paths", () => {
+  const template = readFileSync(new URL("./systemd/sentelligent-ai-platform.service.template", import.meta.url), "utf8");
+  const rendered = renderPlatformUnit(template, manifest.oldRelease);
+  assert.equal(platformUnitReleasePath(rendered), manifest.oldRelease);
+  assert.equal(
+    platformUnitReleasePath(rendered.replace(`WorkingDirectory=${manifest.oldRelease}`, `WorkingDirectory=${PRODUCTION_ROOT}/current`)),
+    null,
+  );
+  assert.equal(
+    platformUnitReleasePath(rendered.replace(`WorkingDirectory=${manifest.oldRelease}`, `${manifest.oldRelease}/nested`)),
+    null,
+  );
 });
 
 test("rollout phases preserve the lower-level routing contract", () => {

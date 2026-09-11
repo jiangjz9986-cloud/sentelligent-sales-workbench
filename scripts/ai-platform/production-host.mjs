@@ -17,7 +17,7 @@ import {
 import {
   PRODUCTION_ROOT, PROJECT_NODE, PLATFORM_SERVICE, PLATFORM_DATABASE, PLATFORM_USER, PLATFORM_SOCKET_GROUP,
   PLATFORM_ENV, BUSINESS_ENV, BUSINESS_DATABASE, PROTECTED_UNITS, WEIXIN_SESSION,
-  hashBytes, renderPlatformUnit, normalizeRolloutPhase, rolloutPhaseForManifest, transitionIdentityDigest,
+  hashBytes, renderPlatformUnit, releasePath, normalizeRolloutPhase, rolloutPhaseForManifest, transitionIdentityDigest,
   routingPhaseForRollout, compareRolloutPhase, platformStaticDirectoryForRelease,
   AI_PREFLIGHT_CHECKS,
 } from "./production-contract.mjs";
@@ -74,6 +74,27 @@ export function platformUnitMatchesRelease(content, release) {
     return content === renderPlatformUnit(template, release, { serviceGroup: PLATFORM_USER });
   } catch {
     return false;
+  }
+}
+export function platformUnitReleasePath(content) {
+  const line = String(content).split(/\r?\n/u).find((value) => value.startsWith("WorkingDirectory="));
+  const release = line?.slice("WorkingDirectory=".length) ?? "";
+  try {
+    releasePath(release);
+    return release;
+  } catch {
+    return null;
+  }
+}
+export function platformUnitIsAdoptable(content) {
+  const release = platformUnitReleasePath(content);
+  if (!release) return null;
+  try {
+    const metadata = lstatSync(release);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || realpathSync(release) !== release) return null;
+    return platformUnitMatchesRelease(content, release) ? release : null;
+  } catch {
+    return null;
   }
 }
 function fileDigest(path, options = {}) {
@@ -640,6 +661,7 @@ export async function preparePlatformService(manifest) {
   const existingPlatformPaths = [unitPath, PLATFORM_ENV, PLATFORM_DATABASE, dataDirectory].filter((path) => existsSync(path));
   const hasExistingPlatformState = existingPlatformPaths.length > 0 || Boolean(account);
   let existingPlatformUnit = null;
+  let existingPlatformUnitRelease = null;
   let existingPlatformEnvironment = null;
   let previousPlatformActive = false;
   let previousPlatformEnabled = false;
@@ -652,7 +674,8 @@ export async function preparePlatformService(manifest) {
     "PLATFORM_DATABASE_PERMISSIONS_INVALID");
     existingPlatformUnit = privateFile(unitPath, null, { requirePrivate: false });
     existingPlatformEnvironment = privateFile(PLATFORM_ENV);
-    check(platformUnitMatchesRelease(existingPlatformUnit.content.toString(), manifest.oldRelease), "PLATFORM_UNIT_NOT_ADOPTABLE");
+    existingPlatformUnitRelease = platformUnitIsAdoptable(existingPlatformUnit.content.toString());
+    check(existingPlatformUnitRelease, "PLATFORM_UNIT_NOT_ADOPTABLE");
     const currentUnit = inspectUnit(PLATFORM_SERVICE);
     previousPlatformActive = currentUnit.ActiveState === "active";
     previousPlatformEnabled = unitEnabled(PLATFORM_SERVICE);
@@ -686,6 +709,7 @@ export async function preparePlatformService(manifest) {
       ...(hasExistingPlatformState ? {
         platformUnitBackup,
         platformUnitBackupSha256: existingPlatformUnit.sha256,
+        platformUnitRelease: existingPlatformUnitRelease,
         platformEnvironmentBackup,
         platformEnvironmentBackupSha256: existingPlatformEnvironment.sha256,
         previousPlatformActive,
@@ -836,7 +860,9 @@ export async function preparePlatformService(manifest) {
     check(JSON.stringify(before) === JSON.stringify(protectedSnapshot()), "PROTECTED_STATE_CHANGED");
     const result = {
       status: "prepared", newCommit: manifest.newCommit, platformUnitSha256: unitDigest,
-      adoptedExisting: Boolean(preparation.adoptedExisting), protected: before, manifestDigest,
+      adoptedExisting: Boolean(preparation.adoptedExisting),
+      adoptedPlatformUnitRelease: preparation.platformUnitRelease ?? null,
+      protected: before, manifestDigest,
       socketGroup: { name: PLATFORM_SOCKET_GROUP, gid: socketGroup.gid },
     };
     writeOnceOrVerify(join(manifest.evidenceDir, "platform-preparation.json"), JSON.stringify(result, null, 2) + "\n");
