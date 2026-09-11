@@ -1,5 +1,35 @@
 # AI 平台融合升级状态
 
+## 2026-09-11 当前融合与生产事实
+
+本节覆盖此前历史段落；历史段落保留作为实施过程记录，不作为当前生产状态依据。
+
+- 当前融合工作树：`ai-platform-production-integration-20260909`。
+- 当前提交：`d38a89144b660e6ace213c9d32787e3870006667`；候选分支已同步到
+  `origin/codex/ai-platform-production-integration-20260909`。
+- 生产 current：
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-d38a89144b66`；
+  release manifest 的 source commit 与当前提交一致。
+- 生产服务 `sentelligent-backend.service`、`sentelligent-frontend.service`、
+  `sentelligent-weixin-agent.service`、`sentelligent-ai-platform.service` 和
+  `sentelligent-caddy.service` 均已核实为 active；`/_health`、`/api/health`、
+  数据库 `quick_check` 和外键检查均通过。
+- 当前生产 AI Platform 配置仍是 `disabled`、`local-simulated`，主动助手与主动通知
+  auto-run 均为关闭；这表示平台融合代码已随 current 发布，但不表示真实供应商路由、
+  真实主动扫描或真实通知已经开通。
+- Backend 仍是 `proactive.analyze` 和业务通知 outbox 的唯一调度所有者；PushPlus
+  仍为退役状态。微信 outbox 在 Clawbot context 缺失或过期时 fail-closed，消息保留
+  在持久 outbox 中，不通过 heartbeat 冒充 context 续期。
+- Mac Google Chrome 生产功能验收：32/32 通过、32 张截图、7 个写请求记录、0 个
+  failedRequests、0 个控制台错误；`422/404/401` 均已标为预期错误边界。正式汇总：
+  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`。
+- 生产 smoke 历史残留已通过受保护的 server-local cleanup 精确清理；残留为 0，
+  数据库完整性仍为 `quick_check=ok`、外键违规 0。
+
+当前未完成的门禁只有：可见桌面/微信窗口验收仍受 CUA 报告的锁屏状态阻断；Clawbot
+尚未提供 context renewal/rebind 合同，因此不能把“系统永远主动推送”或真实主动微信投递
+标记为已验收；Linux/x64 正式构建、真实供应商质量/费用验收也必须分别保留证据。
+
 更新：2026-09-10。主任务已接管生产融合，完整执行边界见
 [FUSION-EXECUTION.md](FUSION-EXECUTION.md)。
 
