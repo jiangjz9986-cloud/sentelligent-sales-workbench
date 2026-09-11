@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 import { loadAiPlatformConfig } from "./config.js";
 import { openAiPlatformDatabase } from "./db/index.js";
 import { createServer, PACKAGE_VERSION } from "./server.js";
+import {
+  AI_PLATFORM_SOCKET_MODE,
+  assertAiPlatformSocket,
+  assertAiPlatformSocketDirectory,
+} from "../../shared/aiPlatformSocketTransport.mjs";
 
 function parseArgs(argv) {
   const [command = "status", ...rest] = argv;
@@ -36,8 +41,10 @@ function print(value) {
 async function start(overrides) {
   const config = configFromOverrides(overrides);
   if (config.socketPath) {
-    const parent = lstatSync(dirname(config.socketPath));
-    if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== process.getuid?.() || (parent.mode & 0o022) !== 0) throw new Error("AI socket directory is unsafe");
+    const parentPath = dirname(config.socketPath);
+    const ownerUid = process.getuid?.();
+    const groupGid = process.getegid?.();
+    assertAiPlatformSocketDirectory(parentPath, { ownerUid, groupGid });
     if (existsSync(config.socketPath)) {
       const before = lstatSync(config.socketPath);
       if (!before.isSocket() || before.uid !== process.getuid?.()) throw new Error("AI socket identity is unsafe");
@@ -62,7 +69,15 @@ async function start(overrides) {
     else server.listen(config.port, config.host, resolve);
   });
   const address = server.address();
-  if (config.socketPath) chmodSync(config.socketPath, 0o666);
+  if (config.socketPath) {
+    try {
+      chmodSync(config.socketPath, AI_PLATFORM_SOCKET_MODE);
+      assertAiPlatformSocket(config.socketPath, { ownerUid: process.getuid?.(), groupGid: process.getegid?.() });
+    } catch (error) {
+      await server.closeAiPlatform().catch(() => {});
+      throw error;
+    }
+  }
   process.stdout.write(config.socketPath ? "AI platform listening on its protected local socket\n" : `AI platform listening on http://${config.host}:${address.port}\n`);
   let stopping = false;
   const stop = () => {

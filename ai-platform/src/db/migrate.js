@@ -8,6 +8,7 @@ import * as mediaObjects from "./migrations/0005_media_objects.mjs";
 import * as priceCalendars from "./migrations/0006_price_calendars.mjs";
 import * as providerCredentials from "./migrations/0007_provider_credentials.mjs";
 import * as payloadRetention from "./migrations/0008_task_payload_retention.mjs";
+import * as providerCredentialOperations from "./migrations/0009_provider_credential_operations.mjs";
 import { withImmediateTransaction } from "../utils.js";
 
 const MIGRATIONS = [
@@ -19,6 +20,7 @@ const MIGRATIONS = [
   { migration: priceCalendars, file: "0006_price_calendars.mjs" },
   { migration: providerCredentials, file: "0007_provider_credentials.mjs" },
   { migration: payloadRetention, file: "0008_task_payload_retention.mjs" },
+  { migration: providerCredentialOperations, file: "0009_provider_credential_operations.mjs" },
 ];
 
 function migrationChecksum(file) {

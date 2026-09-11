@@ -89,6 +89,147 @@ function readSettingsState() {
   }
 }
 
+function readSecureSettingState(key) {
+  const db = createConnection({ databaseUrl });
+  try {
+    return {
+      setting: db.prepare(
+        "SELECT * FROM secure_settings WHERE setting_key = $key",
+      ).get({ $key: key }) ?? null,
+      sync: db.prepare(
+        "SELECT * FROM secure_setting_sync_state WHERE setting_key = $key",
+      ).get({ $key: key }) ?? null,
+      operation: db.prepare(
+        "SELECT * FROM secure_setting_sync_operations WHERE setting_key = $key ORDER BY rowid DESC LIMIT 1",
+      ).get({ $key: key }) ?? null,
+      audit: db.prepare(`
+        SELECT action, entity_type, entity_id, actor, metadata_json, before_json, after_json
+        FROM audit_logs
+        WHERE entity_type = 'secure_setting' AND entity_id = $key
+        ORDER BY rowid
+      `).all({ $key: key }).map((row) => ({ ...row })),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function readSecureSecret(key, { fallback = undefined } = {}) {
+  const db = createConnection({ databaseUrl });
+  try {
+    const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
+    if (fallback === undefined) return repository.readSecret(key);
+    return repository.resolveSecret(key, fallback);
+  } finally {
+    db.close();
+  }
+}
+
+function jsonResponse(item, status = 200) {
+  return new Response(JSON.stringify({ item }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function createCredentialPlatformHarness({
+  writeBehavior = "success",
+  compensationBehavior = "success",
+} = {}) {
+  let value = null;
+  let revision = 0;
+  const operations = new Map();
+  const calls = [];
+  const metadata = () => ({
+    configured: Boolean(value),
+    status: value ? "active" : revision > 0 ? "cleared" : "not_configured",
+    revision,
+    updatedAt: revision > 0 ? "2026-08-30T05:06:07.000Z" : null,
+    source: "ai-platform",
+    masked: value ? "synt••••••tial" : null,
+  });
+
+  const fetchImpl = async (input, init = {}) => {
+    const url = new URL(input);
+    const method = String(init.method ?? "GET").toUpperCase();
+    const body = init.body ? JSON.parse(String(init.body)) : {};
+    calls.push({ method, pathname: url.pathname, body });
+    const operationMatch = url.pathname.match(/\/operations\/([^/]+)$/u);
+    if (method === "GET" && operationMatch) {
+      const operation = operations.get(decodeURIComponent(operationMatch[1]));
+      return operation ? jsonResponse(operation) : new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    }
+    if (method === "GET" && url.pathname.endsWith("/credential")) return jsonResponse(metadata());
+    if (!((method === "POST" || method === "DELETE") && url.pathname.endsWith("/credential"))) {
+      return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+    }
+
+    const operationId = String(body.operationId ?? "");
+    const isCompensation = operationId.endsWith(":compensate");
+    const behavior = isCompensation ? compensationBehavior : writeBehavior;
+    if (operations.has(operationId)) return jsonResponse(operations.get(operationId).item);
+    if (behavior === "reject") return new Response(JSON.stringify({ error: "rejected" }), { status: 422 });
+    if (behavior === "fail") throw new Error("synthetic credential transport failure");
+    if (body.expectedRevision !== revision) return new Response(JSON.stringify({ error: "conflict" }), { status: 409 });
+
+    value = method === "DELETE" ? null : body.apiKey;
+    revision += 1;
+    const item = metadata();
+    const operation = { status: "applied", item };
+    operations.set(operationId, operation);
+    if (behavior === "lose-response") throw new Error("synthetic response lost after commit");
+    return jsonResponse(item);
+  };
+
+  return {
+    fetchImpl,
+    calls,
+    get value() { return value; },
+    get revision() { return revision; },
+  };
+}
+
+async function startPlatformOwnedServer(platform, overrides = {}) {
+  await startServer({
+    aiPlatformMode: "required",
+    aiPlatformExecutionMode: "external-provider",
+    aiPlatformBaseUrl: "http://127.0.0.1:18997",
+    aiPlatformSocketPath: null,
+    aiPlatformAuthSecret: Buffer.alloc(32, 94).toString("base64url"),
+    aiPlatformRoutingPolicy: { version: "test-platform", phase: "platform", owners: [], taskTypes: [] },
+    allowAiPlatformTestLoopbackHttp: true,
+    modelApiKey: "synthetic-test-value",
+    aiPlatformAdminFetchImpl: platform.fetchImpl,
+    ...overrides,
+  });
+}
+
+function seedSecureSetting(key, value) {
+  const db = createConnection({ databaseUrl });
+  try {
+    const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
+    repository.setSecret(key, value);
+  } finally {
+    db.close();
+  }
+}
+
+function addAuditFailureTrigger() {
+  const db = createConnection({ databaseUrl });
+  try {
+    db.exec(`
+      CREATE TRIGGER fail_secure_setting_audit
+      BEFORE INSERT ON audit_logs
+      WHEN NEW.entity_type = 'secure_setting'
+      BEGIN
+        SELECT RAISE(ABORT, 'synthetic secure-setting audit failure');
+      END;
+    `);
+  } finally {
+    db.close();
+  }
+}
+
 beforeEach(() => {
   tempDir = null;
   databaseUrl = null;
@@ -241,6 +382,71 @@ describe("secure settings repository ASR allowlist", () => {
       db.close();
     }
   });
+
+  it("keeps credential synchronization fail-closed across finalize, abort, compensation, and unknown states", () => {
+    const db = openDatabase({ databaseUrl: ":memory:" });
+    try {
+      const repository = createSecureSettingsRepository(db, { masterKey: encryptionKey });
+      repository.setSecret(DEEPSEEK_SETTING_KEY, "synthetic-previous-credential");
+
+      const prepared = repository.prepareSync(DEEPSEEK_SETTING_KEY, {
+        operationId: "settings-sync-finalize",
+        operation: "set",
+        value: "synthetic-next-credential",
+      });
+      assert.equal(prepared.operation.state, "prepared");
+      assert.equal(repository.syncStatus(DEEPSEEK_SETTING_KEY).state, "pending");
+      assert.equal(repository.resolveSecret(DEEPSEEK_SETTING_KEY, "synthetic-fallback"), "");
+      repository.markPlatformApplied("settings-sync-finalize", 1);
+      let finalized;
+      const synced = repository.finalizeSync("settings-sync-finalize", 1, (metadata) => {
+        finalized = metadata;
+      });
+      assert.equal(synced.syncState, "synchronized");
+      assert.deepEqual(finalized, synced);
+      assert.equal(repository.resolveSecret(DEEPSEEK_SETTING_KEY, "synthetic-fallback"), "synthetic-next-credential");
+
+      const failed = repository.prepareSync(DEEPSEEK_SETTING_KEY, {
+        operationId: "settings-sync-compensation",
+        operation: "set",
+        value: "synthetic-compensation-credential",
+      });
+      assert.equal(failed.metadata.syncState, "pending");
+      repository.markPlatformApplied("settings-sync-compensation", 2);
+      assert.throws(
+        () => repository.finalizeSync("settings-sync-compensation", 2, () => {
+          throw new Error("synthetic business finalize failure");
+        }),
+        /synthetic business finalize failure/u,
+      );
+      assert.equal(repository.syncStatus(DEEPSEEK_SETTING_KEY).state, "pending");
+      assert.equal(repository.previousCredential("settings-sync-compensation").value, "synthetic-next-credential");
+      repository.compensateSync("settings-sync-compensation", { platformRevision: 3 });
+      assert.equal(repository.resolveSecret(DEEPSEEK_SETTING_KEY, "synthetic-fallback"), "synthetic-next-credential");
+      assert.equal(repository.syncStatus(DEEPSEEK_SETTING_KEY).state, "synchronized");
+
+      const aborted = repository.prepareSync(DEEPSEEK_SETTING_KEY, {
+        operationId: "settings-sync-abort",
+        operation: "clear",
+      });
+      assert.equal(aborted.metadata.status, "cleared");
+      repository.abortSync("settings-sync-abort", { errorCode: "synthetic-platform-rejection" });
+      assert.equal(repository.resolveSecret(DEEPSEEK_SETTING_KEY, "synthetic-fallback"), "");
+      assert.equal(repository.syncStatus(DEEPSEEK_SETTING_KEY).state, "degraded");
+
+      const unknown = repository.prepareSync(DEEPSEEK_SETTING_KEY, {
+        operationId: "settings-sync-unknown",
+        operation: "set",
+        value: "synthetic-unknown-credential",
+      });
+      assert.equal(unknown.metadata.status, "active");
+      repository.markUnknown("settings-sync-unknown", { errorCode: "synthetic-transport-unknown" });
+      assert.equal(repository.resolveSecret(DEEPSEEK_SETTING_KEY, "synthetic-fallback"), "");
+      assert.equal(repository.metadata(DEEPSEEK_SETTING_KEY).syncState, "unknown");
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe("secure system settings API", () => {
@@ -275,6 +481,187 @@ describe("secure system settings API", () => {
     assert.equal(listed.body.item.deepseek.source, "environment");
     assert.equal(listed.body.item.deepseek.configured, true);
     assert.equal(JSON.stringify(listed.body).includes(environmentFallbacks.deepseek), false);
+  });
+
+  it("synchronizes a platform-owned DeepSeek credential before finalizing the business snapshot", async () => {
+    const platform = createCredentialPlatformHarness();
+    const environmentFallback = "synthetic-environment-must-stay-suppressed";
+    await startPlatformOwnedServer(platform, {
+      modelApiKey: environmentFallback,
+      settingsClock: () => new Date("2026-08-30T05:06:07.000Z"),
+    });
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    const value = "synthetic-platform-owned-deepseek";
+
+    const saved = await request("/api/settings/deepseek-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: value }),
+    });
+    assert.equal(saved.response.status, 200);
+    assert.equal(saved.body.item.source, "ai-platform");
+    assert.equal(saved.body.item.syncState, "synchronized");
+    assert.equal(saved.body.item.platformRevision, 1);
+    assert.equal(saved.body.item.fallbackSuppressed, false);
+    assert.equal(platform.value, value);
+    assert.doesNotMatch(JSON.stringify(saved.body), new RegExp(value, "u"));
+
+    const savedState = readSecureSettingState(DEEPSEEK_SETTING_KEY);
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY), value);
+    assert.equal(savedState.setting.status, "active");
+    assert.equal(savedState.sync.state, "synchronized");
+    assert.equal(savedState.sync.platform_revision, 1);
+    assert.equal(savedState.operation.state, "synchronized");
+    assert.equal(savedState.operation.operation, "set");
+    assert.deepEqual(savedState.audit.map((row) => row.action), ["settings.deepseek_key.save"]);
+
+    const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(listed.response.status, 200);
+    assert.equal(listed.body.item.deepseek.syncState, "synchronized");
+    assert.equal(listed.body.item.deepseek.platformRevision, 1);
+    assert.equal(listed.body.item.deepseek.fallbackSuppressed, false);
+    assert.equal(listed.body.item.deepseek.source, "ai-platform");
+
+    const cleared = await request("/api/settings/deepseek-key", {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify({ confirmation: "CLEAR" }),
+    });
+    assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.body.item.status, "cleared");
+    assert.equal(cleared.body.item.syncState, "synchronized");
+    assert.equal(cleared.body.item.platformRevision, 2);
+    assert.equal(platform.value, null);
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY), null);
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY, { fallback: environmentFallback }), "");
+
+    const clearedState = readSecureSettingState(DEEPSEEK_SETTING_KEY);
+    assert.equal(clearedState.setting.status, "cleared");
+    assert.equal(clearedState.sync.state, "synchronized");
+    assert.equal(clearedState.sync.platform_revision, 2);
+    assert.equal(clearedState.operation.state, "synchronized");
+    assert.equal(clearedState.operation.operation, "clear");
+    assert.deepEqual(clearedState.audit.map((row) => row.action), [
+      "settings.deepseek_key.save",
+      "settings.deepseek_key.clear",
+    ]);
+  });
+
+  it("restores the prior business snapshot after an explicit platform rejection", async () => {
+    const platform = createCredentialPlatformHarness({ writeBehavior: "reject" });
+    await startPlatformOwnedServer(platform);
+    seedSecureSetting(DEEPSEEK_SETTING_KEY, "synthetic-previous-platform-credential");
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+
+    const rejected = await request("/api/settings/deepseek-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: "synthetic-rejected-platform-credential" }),
+    });
+    assert.equal(rejected.response.status, 422);
+    assert.equal(rejected.body.error.code, "AI_PLATFORM_CREDENTIAL_UPDATE_FAILED");
+    assert.equal(platform.value, null);
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY), "synthetic-previous-platform-credential");
+
+    const state = readSecureSettingState(DEEPSEEK_SETTING_KEY);
+    assert.equal(state.setting.status, "active");
+    assert.equal(state.sync.state, "degraded");
+    assert.equal(state.sync.last_error_code, "credential_sync_rejected");
+    assert.equal(state.operation.state, "aborted");
+    assert.equal(state.operation.last_error_code, "credential_sync_rejected");
+
+    const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(listed.response.status, 200);
+    assert.equal(listed.body.item.deepseek.syncState, "degraded");
+    assert.equal(listed.body.item.deepseek.fallbackSuppressed, true);
+    assert.equal(listed.body.item.deepseek.syncErrorCode, "credential_sync_rejected");
+  });
+
+  it("reconciles a lost platform response by operation id without issuing a second write", async () => {
+    const platform = createCredentialPlatformHarness({ writeBehavior: "lose-response" });
+    await startPlatformOwnedServer(platform);
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+    const value = "synthetic-lost-response-credential";
+
+    const saved = await request("/api/settings/deepseek-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: value }),
+    });
+    assert.equal(saved.response.status, 200);
+    assert.equal(saved.body.item.syncState, "synchronized");
+    assert.equal(saved.body.item.platformRevision, 1);
+    assert.equal(platform.value, value);
+    assert.equal(platform.calls.filter((call) => call.method === "POST").length, 1);
+    assert.equal(platform.calls.filter((call) => call.pathname.includes("/operations/")).length, 1);
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY), value);
+
+    const state = readSecureSettingState(DEEPSEEK_SETTING_KEY);
+    assert.equal(state.operation.state, "synchronized");
+    assert.equal(state.sync.state, "synchronized");
+  });
+
+  it("compensates a platform write when business finalize fails", async () => {
+    const platform = createCredentialPlatformHarness();
+    await startPlatformOwnedServer(platform);
+    seedSecureSetting(DEEPSEEK_SETTING_KEY, "synthetic-compensation-previous");
+    addAuditFailureTrigger();
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+
+    const failed = await request("/api/settings/deepseek-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: "synthetic-compensation-next" }),
+    });
+    assert.equal(failed.response.status, 503);
+    assert.equal(failed.body.error.code, "CREDENTIAL_SYNC_FAILED");
+    assert.equal(platform.value, "synthetic-compensation-previous");
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY), "synthetic-compensation-previous");
+
+    const state = readSecureSettingState(DEEPSEEK_SETTING_KEY);
+    assert.equal(state.setting.status, "active");
+    assert.equal(state.sync.state, "synchronized");
+    assert.equal(state.sync.platform_revision, 2);
+    assert.equal(state.operation.state, "compensated");
+    assert.equal(state.operation.last_error_code, "credential_sync_business_finalize_failed");
+    assert.deepEqual(state.audit, []);
+  });
+
+  it("marks compensation failure unknown and suppresses every legacy environment fallback", async () => {
+    const platform = createCredentialPlatformHarness({ compensationBehavior: "fail" });
+    const environmentFallback = "synthetic-unknown-environment-fallback";
+    await startPlatformOwnedServer(platform, { modelApiKey: environmentFallback });
+    seedSecureSetting(DEEPSEEK_SETTING_KEY, "synthetic-unknown-previous");
+    addAuditFailureTrigger();
+    const auth = await login();
+    const headers = { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf };
+
+    const failed = await request("/api/settings/deepseek-key", {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ [apiKeyField]: "synthetic-unknown-next" }),
+    });
+    assert.equal(failed.response.status, 503);
+    assert.equal(failed.body.error.code, "CREDENTIAL_SYNC_FAILED");
+    assert.equal(platform.value, "synthetic-unknown-next");
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY), "synthetic-unknown-next");
+    assert.equal(readSecureSecret(DEEPSEEK_SETTING_KEY, { fallback: environmentFallback }), "");
+
+    const state = readSecureSettingState(DEEPSEEK_SETTING_KEY);
+    assert.equal(state.sync.state, "unknown");
+    assert.equal(state.sync.last_error_code, "credential_sync_compensation_failed");
+    assert.equal(state.operation.state, "unknown");
+    assert.equal(state.operation.last_error_code, "credential_sync_compensation_failed");
+
+    const listed = await request("/api/settings/security", { headers: { Cookie: auth.cookie } });
+    assert.equal(listed.response.status, 200);
+    assert.equal(listed.body.item.deepseek.syncState, "unknown");
+    assert.equal(listed.body.item.deepseek.fallbackSuppressed, true);
+    assert.equal(listed.body.item.deepseek.syncErrorCode, "credential_sync_compensation_failed");
   });
 
   it("never returns a DeepSeek key and requires explicit confirmation to clear it", async () => {

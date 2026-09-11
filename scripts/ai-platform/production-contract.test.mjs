@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { validateTransitionManifest, renderPlatformUnit, PRODUCTION_ROOT } from "./production-contract.mjs";
+import {
+  PLATFORM_SOCKET_GROUP,
+  platformStaticDirectoryForRelease,
+  validateTransitionManifest,
+  renderPlatformUnit,
+  PRODUCTION_ROOT,
+} from "./production-contract.mjs";
 
 const evidence = PRODUCTION_ROOT + "/evidence/fusion-test";
 const manifest = {
@@ -31,10 +37,23 @@ test("unit uses the exact release, direct Node, isolated account and CentOS 7 co
   const template = readFileSync(new URL("./systemd/sentelligent-ai-platform.service.template", import.meta.url), "utf8");
   const rendered = renderPlatformUnit(template, manifest.newRelease);
   assert.match(rendered, /User=sentai/);
+  assert.match(rendered, new RegExp(`Group=${PLATFORM_SOCKET_GROUP}`));
   assert.match(rendered, /Type=simple/);
+  assert.match(rendered, /RuntimeDirectoryMode=0710/);
   assert.match(rendered, /ReadWriteDirectories=\/run\/sentelligent-ai-platform \/var\/lib\/sentelligent-ai-platform/);
+  assert.match(rendered, /UMask=0077/);
+  assert.doesNotMatch(rendered, /Group=sentai|Group=sentzx/);
   assert.ok(rendered.includes(manifest.newRelease + "/ai-platform/src/cli.js serve"));
   assert.doesNotMatch(rendered, /Type=forking|PIDFile=|ExecStop=|ReadWritePaths=/);
+  assert.match(renderPlatformUnit(template, manifest.newRelease, { serviceGroup: "sentai" }), /Group=sentai/);
+});
+
+test("platform static assets are bound to the immutable candidate release", () => {
+  assert.equal(
+    platformStaticDirectoryForRelease(manifest.newRelease),
+    manifest.newRelease + "/outputs/ai-platform-admin",
+  );
+  assert.throws(() => platformStaticDirectoryForRelease(PRODUCTION_ROOT + "/current"));
 });
 
 test("rollout phases preserve the lower-level routing contract", () => {

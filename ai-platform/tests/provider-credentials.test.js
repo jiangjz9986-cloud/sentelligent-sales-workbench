@@ -47,3 +47,54 @@ test("credential replacement and clear affect each request, remain encrypted and
     assert.equal(JSON.stringify(vault.metadata(policy.credentialEnv)).includes("synthetic-replacement"), false);
   } finally { db.close(); }
 });
+
+test("credential operation ids are idempotent and cannot be reused for another desired value", () => {
+  const db = openAiPlatformDatabase(":memory:");
+  const policy = normalizeProviderPolicies([{
+    id: "provider-deepseek", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_DEEPSEEK_KEY",
+    models: [{ name: "deepseek-v4-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }],
+  }], { allowedOrigins: ["https://api.deepseek.com"] })[0];
+  const encryptionKey = Buffer.alloc(32, 100).toString("base64url");
+  const vault = createProviderCredentials({
+    db,
+    encryptionKey,
+    policies: [policy],
+    env: { AI_PROVIDER_DEEPSEEK_KEY: "synthetic-environment-credential" },
+  });
+  try {
+    const first = vault.update({
+      id: policy.credentialEnv,
+      value: "synthetic-operation-credential",
+      expectedRevision: 0,
+      actor: "admin",
+      operationId: "credential-operation-replay",
+    });
+    const replay = vault.update({
+      id: policy.credentialEnv,
+      value: "synthetic-operation-credential",
+      expectedRevision: 0,
+      actor: "admin",
+      operationId: "credential-operation-replay",
+    });
+    assert.deepEqual(replay, first);
+    assert.equal(db.prepare("SELECT revision FROM provider_credentials WHERE credential_id=?").get(policy.credentialEnv).revision, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM provider_credential_audit").get().count, 1);
+
+    assert.throws(() => vault.update({
+      id: policy.credentialEnv,
+      value: "synthetic-different-operation-value",
+      expectedRevision: 0,
+      actor: "admin",
+      operationId: "credential-operation-replay",
+    }), (error) => error.code === "credential_operation_conflict");
+
+    const operation = vault.readOperation("credential-operation-replay");
+    assert.equal(operation.status, "applied");
+    assert.equal(operation.resultingRevision, 1);
+    assert.equal(operation.item.revision, 1);
+    assert.equal(operation.item.configured, true);
+    assert.doesNotMatch(JSON.stringify(operation), /synthetic-operation-credential/u);
+  } finally {
+    db.close();
+  }
+});

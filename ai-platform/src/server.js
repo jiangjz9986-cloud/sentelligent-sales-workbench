@@ -405,17 +405,27 @@ export function createServer(options = {}) {
       { admin: true },
     );
     const identity = identityForTask(auth);
-    if (parts.length === 3 && parts[0] === "providers" && parts[2] === "credential") {
+    const credentialRoute = parts[0] === "providers" && parts[2] === "credential";
+    const credentialOperationRoute = credentialRoute && parts.length === 5 && parts[3] === "operations";
+    if (credentialRoute && (parts.length === 3 || credentialOperationRoute)) {
       const provider = config.providerPolicies.find((item) => item.id === parts[1]);
       if (!provider || !runtime.providerCredentials) throw new AiPlatformError("credential storage unavailable", { code: "credential_storage_unavailable", status: 503 });
+      if (credentialOperationRoute) {
+        if (method !== "GET") return methodNotAllowed(response, requestId, "GET");
+        const item = runtime.providerCredentials.readOperation(parts[4]);
+        if (!item) throw new AiPlatformError("credential operation not found", { code: "not_found", status: 404 });
+        if (item.credentialId !== provider.credentialEnv) throw new AiPlatformError("credential operation not found", { code: "not_found", status: 404 });
+        return sendJson(response, 200, { item }, requestId);
+      }
       if (method === "GET") return sendJson(response, 200, { item: runtime.providerCredentials.metadata(provider.credentialEnv) }, requestId);
       if (!["POST", "DELETE"].includes(method)) return methodNotAllowed(response, requestId, "GET, POST, DELETE");
       const writeAuth = await authenticate(request, ["ai:admin:credential"], { admin: true });
       const body = await readJsonBody(request, config.bodyLimitBytes);
-      if (Object.keys(body).some((key) => !["apiKey", "confirmation", "expectedRevision"].includes(key))
+      if (Object.keys(body).some((key) => !["apiKey", "confirmation", "expectedRevision", "operationId"].includes(key))
         || (method === "DELETE" && body.confirmation !== "CLEAR")) throw new AiPlatformError("invalid credential update", { code: "invalid_request", status: 422 });
       const item = runtime.providerCredentials.update({
-        id: provider.credentialEnv, value: body.apiKey, clear: method === "DELETE", expectedRevision: body.expectedRevision, actor: writeAuth.actor,
+        id: provider.credentialEnv, value: body.apiKey, clear: method === "DELETE", expectedRevision: body.expectedRevision,
+        operationId: body.operationId, actor: writeAuth.actor,
       });
       return sendJson(response, 200, { item }, requestId);
     }

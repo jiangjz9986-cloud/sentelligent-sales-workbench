@@ -6202,7 +6202,12 @@ export function createServer(options = {}) {
         && config.aiPlatformExecutionMode === "external-provider";
       const platformOwnsAsrCredential = platformOwnsProviderCredential
         && config.aiPlatformRoutingPolicy?.phase !== "canary" && config.asrMode === "live";
-      const platformCredential = async (method, body = undefined, providerId = "provider-deepseek") => {
+      const platformCredential = async (
+        method,
+        body = undefined,
+        providerId = "provider-deepseek",
+        { operationId = null, expectedRevision = null } = {},
+      ) => {
         const administrator = requireAdminRole(db, request);
         const target = new URL(`/api/ai-platform/admin/providers/${providerId}/credential`, "http://internal");
         const proxy = createAiAdminProxy({ config: runtimeConfig, fetchImpl: options.aiPlatformAdminFetchImpl ?? fetch });
@@ -6213,21 +6218,147 @@ export function createServer(options = {}) {
         }
         const metadata = await proxy({ method: "GET", url: target, identity: administrator, requestId });
         if (metadata.status !== 200) throw new HttpError(503, "AI_PLATFORM_CREDENTIAL_UNAVAILABLE", "Provider credential is unavailable");
-        const result = await proxy({ method, url: target, body: { ...body, expectedRevision: metadata.payload.item.revision }, identity: administrator, requestId });
+        const result = await proxy({
+          method,
+          url: target,
+          body: {
+            ...body,
+            expectedRevision: expectedRevision ?? metadata.payload.item.revision,
+            ...(operationId ? { operationId } : {}),
+          },
+          identity: administrator,
+          requestId,
+        });
         if (result.status !== 200) throw new HttpError(result.status, "AI_PLATFORM_CREDENTIAL_UPDATE_FAILED", "Provider credential update failed");
         return result.payload.item;
+      };
+
+      const platformCredentialOperation = async (operationId, providerId = "provider-deepseek") => {
+        const administrator = requireAdminRole(db, request);
+        const target = new URL(
+          `/api/ai-platform/admin/providers/${providerId}/credential/operations/${operationId}`,
+          "http://internal",
+        );
+        const proxy = createAiAdminProxy({ config: runtimeConfig, fetchImpl: options.aiPlatformAdminFetchImpl ?? fetch });
+        const result = await proxy({ method: "GET", url: target, identity: administrator, requestId });
+        if (result.status === 404) return null;
+        if (result.status !== 200) throw new HttpError(503, "AI_PLATFORM_CREDENTIAL_UNAVAILABLE", "Provider credential is unavailable");
+        return result.payload.item;
+      };
+
+      const credentialSyncResponse = (localMetadata, platformMetadata, operationId) => ({
+        ...platformMetadata,
+        syncState: localMetadata.syncState ?? "synchronized",
+        platformRevision: platformMetadata.revision,
+        fallbackSuppressed: !["local", "synchronized"].includes(localMetadata.syncState ?? "synchronized"),
+        operationId,
+      });
+
+      const synchronizePlatformCredential = async ({
+        key,
+        providerId,
+        operation,
+        value = null,
+        onFinalized = null,
+      }) => {
+        const repository = requireSecureSettings(secureSettingsRepository);
+        const prepared = repository.prepareSync(key, {
+          operation,
+          value,
+        });
+        const operationId = prepared.operation.operationId;
+        const requestBody = operation === "clear" ? { confirmation: "CLEAR" } : { apiKey: value };
+        let platformItem;
+        try {
+          platformItem = await platformCredential(
+            operation === "clear" ? "DELETE" : "POST",
+            requestBody,
+            providerId,
+            { operationId },
+          );
+        } catch (error) {
+          // A transport failure is ambiguous: the platform may have committed
+          // the write before the response was lost. Reconcile by operation ID;
+          // never guess from the current revision or fall back to legacy.
+          if (error instanceof HttpError && error.status < 500) {
+            repository.abortSync(operationId, { errorCode: "credential_sync_rejected" });
+            throw error;
+          }
+          try {
+            const operationResult = await platformCredentialOperation(operationId, providerId);
+            if (operationResult?.status === "applied") {
+              platformItem = operationResult.item;
+            } else {
+              repository.abortSync(operationId, { errorCode: "credential_sync_not_applied" });
+              throw new HttpError(503, "AI_PLATFORM_CREDENTIAL_UPDATE_FAILED", "Provider credential update failed");
+            }
+          } catch (reconcileError) {
+            if (reconcileError instanceof HttpError
+              && reconcileError.code === "AI_PLATFORM_CREDENTIAL_UPDATE_FAILED") {
+              throw reconcileError;
+            }
+            if (reconcileError instanceof HttpError && reconcileError.status < 500) {
+              repository.abortSync(operationId, { errorCode: "credential_sync_not_applied" });
+              throw error;
+            }
+            repository.markUnknown(operationId, { errorCode: "credential_sync_unknown" });
+            throw error;
+          }
+        }
+
+        try {
+          repository.markPlatformApplied(operationId, platformItem.revision);
+          const localMetadata = repository.finalizeSync(operationId, platformItem.revision, onFinalized);
+          return credentialSyncResponse(localMetadata, platformItem, operationId);
+        } catch (finalizeError) {
+          try {
+            const previous = repository.previousCredential(operationId);
+            const compensationOperationId = `${operationId.slice(0, 160)}:compensate`;
+            const compensationItem = await platformCredential(
+              previous.shouldClear ? "DELETE" : "POST",
+              previous.shouldClear ? { confirmation: "CLEAR" } : { apiKey: previous.value },
+              providerId,
+              { operationId: compensationOperationId, expectedRevision: platformItem.revision },
+            );
+            repository.compensateSync(operationId, {
+              platformRevision: compensationItem.revision,
+              errorCode: "credential_sync_business_finalize_failed",
+            });
+          } catch {
+            repository.markUnknown(operationId, {
+              errorCode: "credential_sync_compensation_failed",
+              platformRevision: platformItem.revision,
+            });
+          }
+          throw new HttpError(503, "CREDENTIAL_SYNC_FAILED", "Provider credential synchronization failed");
+        }
       };
 
       if (request.method === "GET" && url.pathname === "/api/settings/security") {
         requireAdminRole(db, request);
         const repository = requireSecureSettings(secureSettingsRepository);
+        const platformSettingMetadata = (key, item) => {
+          const sync = repository.syncStatus(key);
+          return {
+            ...item,
+            syncState: sync.state,
+            syncOperationId: sync.operationId,
+            syncErrorCode: sync.lastErrorCode,
+            platformRevision: Number(item.revision ?? sync.platformRevision ?? 0),
+            // A pending/degraded/unknown business snapshot must never look
+            // usable merely because the platform still exposes metadata.
+            fallbackSuppressed: !["local", "synchronized"].includes(sync.state),
+          };
+        };
         let item;
         try {
           item = {
             deepseek: platformOwnsProviderCredential
-              ? await platformCredential("GET")
+              ? platformSettingMetadata(DEEPSEEK_SETTING_KEY, await platformCredential("GET"))
               : secureSettingMetadata(DEEPSEEK_SETTING_KEY, config.modelApiKey),
-            asr: platformOwnsAsrCredential ? await platformCredential("GET", undefined, "provider-asr") : secureSettingMetadata(ASR_SETTING_KEY),
+            asr: platformOwnsAsrCredential
+              ? platformSettingMetadata(ASR_SETTING_KEY, await platformCredential("GET", undefined, "provider-asr"))
+              : secureSettingMetadata(ASR_SETTING_KEY),
           };
         } catch {
           throw new HttpError(503, "SECURE_SETTINGS_UNAVAILABLE", "Secure settings storage is unavailable");
@@ -6244,8 +6375,31 @@ export function createServer(options = {}) {
         const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
         const repository = requireSecureSettings(secureSettingsRepository);
         const platformMetadata = platformOwnsAsrCredential
-          ? await platformCredential("POST", { apiKey: value }, "provider-asr")
+          ? await synchronizePlatformCredential({
+              key: ASR_SETTING_KEY,
+              providerId: "provider-asr",
+              operation: "set",
+              value,
+              onFinalized: (localMetadata) => insertAudit(db, {
+                action: "settings.asr_api_key.save",
+                entityType: "secure_setting",
+                entityId: ASR_SETTING_KEY,
+                actor: request.authContext.account,
+                requestId,
+                before: null,
+                after: localMetadata,
+                metadata: {
+                  setting: ASR_SETTING_KEY,
+                  platformRevision: localMetadata.platformRevision,
+                  syncState: localMetadata.syncState,
+                },
+              }),
+            })
           : null;
+        if (platformMetadata) {
+          sendJson(response, 200, { item: platformMetadata }, { "Cache-Control": "no-store" });
+          return;
+        }
         const item = withImmediateTransaction(db, () => {
           const saved = repository.setSecret(ASR_SETTING_KEY, value);
           insertAudit(db, {
@@ -6279,8 +6433,31 @@ export function createServer(options = {}) {
         }
         const repository = requireSecureSettings(secureSettingsRepository);
         const platformMetadata = platformOwnsAsrCredential
-          ? await platformCredential("DELETE", { confirmation: "CLEAR" }, "provider-asr")
+          ? await synchronizePlatformCredential({
+              key: ASR_SETTING_KEY,
+              providerId: "provider-asr",
+              operation: "clear",
+              onFinalized: (localMetadata) => insertAudit(db, {
+                action: "settings.asr_api_key.clear",
+                entityType: "secure_setting",
+                entityId: ASR_SETTING_KEY,
+                actor: request.authContext.account,
+                requestId,
+                before: null,
+                after: localMetadata,
+                metadata: {
+                  setting: ASR_SETTING_KEY,
+                  confirmation: "provided",
+                  platformRevision: localMetadata.platformRevision,
+                  syncState: localMetadata.syncState,
+                },
+              }),
+            })
           : null;
+        if (platformMetadata) {
+          sendJson(response, 200, { item: platformMetadata }, { "Cache-Control": "no-store" });
+          return;
+        }
         const item = withImmediateTransaction(db, () => {
           const cleared = repository.clearSecret(ASR_SETTING_KEY);
           insertAudit(db, {
@@ -6307,8 +6484,31 @@ export function createServer(options = {}) {
         const value = validateSecureSettingBody(await readJson(request), { field: "apiKey", max: 500 });
         const repository = requireSecureSettings(secureSettingsRepository);
         const platformMetadata = platformOwnsProviderCredential
-          ? await platformCredential("POST", { apiKey: value })
+          ? await synchronizePlatformCredential({
+              key: DEEPSEEK_SETTING_KEY,
+              providerId: "provider-deepseek",
+              operation: "set",
+              value,
+              onFinalized: (localMetadata) => insertAudit(db, {
+                action: "settings.deepseek_key.save",
+                entityType: "secure_setting",
+                entityId: DEEPSEEK_SETTING_KEY,
+                actor: request.authContext.account,
+                requestId,
+                before: null,
+                after: localMetadata,
+                metadata: {
+                  setting: DEEPSEEK_SETTING_KEY,
+                  platformRevision: localMetadata.platformRevision,
+                  syncState: localMetadata.syncState,
+                },
+              }),
+            })
           : null;
+        if (platformMetadata) {
+          sendJson(response, 200, { item: platformMetadata }, { "Cache-Control": "no-store" });
+          return;
+        }
         const item = withImmediateTransaction(db, () => {
           const saved = repository.setSecret(DEEPSEEK_SETTING_KEY, value);
           insertAudit(db, {
@@ -6345,8 +6545,31 @@ export function createServer(options = {}) {
         }
         const repository = requireSecureSettings(secureSettingsRepository);
         const platformMetadata = platformOwnsProviderCredential
-          ? await platformCredential("DELETE", { confirmation: "CLEAR" })
+          ? await synchronizePlatformCredential({
+              key: DEEPSEEK_SETTING_KEY,
+              providerId: "provider-deepseek",
+              operation: "clear",
+              onFinalized: (localMetadata) => insertAudit(db, {
+                action: "settings.deepseek_key.clear",
+                entityType: "secure_setting",
+                entityId: DEEPSEEK_SETTING_KEY,
+                actor: request.authContext.account,
+                requestId,
+                before: null,
+                after: localMetadata,
+                metadata: {
+                  setting: DEEPSEEK_SETTING_KEY,
+                  confirmation: "provided",
+                  platformRevision: localMetadata.platformRevision,
+                  syncState: localMetadata.syncState,
+                },
+              }),
+            })
           : null;
+        if (platformMetadata) {
+          sendJson(response, 200, { item: platformMetadata }, { "Cache-Control": "no-store" });
+          return;
+        }
         const item = withImmediateTransaction(db, () => {
           const cleared = repository.clearSecret(DEEPSEEK_SETTING_KEY);
           insertAudit(db, {

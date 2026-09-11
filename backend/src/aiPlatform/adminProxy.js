@@ -26,7 +26,7 @@ export function createAiAdminProxy({ config, fetchImpl = fetch }) {
     const suffix = url.pathname.slice(AI_ADMIN_PREFIX.length);
     const segments = suffix.split("/").filter(Boolean);
     if (!url.pathname.startsWith(AI_ADMIN_PREFIX + "/") || suffix.length > 2048
-      || !RESOURCE_NAMES.has(segments[0]) || segments.length > 4
+      || !RESOURCE_NAMES.has(segments[0]) || segments.length > 5
       || segments.some((part) => !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/u.test(part) || part === "." || part === "..")
       || !["GET", "POST", "PATCH", "DELETE"].includes(method) || url.search.length > 4096) {
       throw new HttpError(404, "NOT_FOUND", "Management resource not found");
@@ -43,10 +43,11 @@ export function createAiAdminProxy({ config, fetchImpl = fetch }) {
     target.search = url.search;
     const text = method === "GET" ? "" : JSON.stringify(body ?? {});
     if (Buffer.byteLength(text) > 512 * 1024) throw new HttpError(413, "PAYLOAD_TOO_LARGE", "Management request is too large");
-    const credentialRoute = segments[0] === "providers" && segments[2] === "credential" && segments.length === 3;
-    if (method === "DELETE" && !credentialRoute) throw new HttpError(404, "NOT_FOUND", "Management resource not found");
+    const credentialRoute = segments[0] === "providers" && segments[2] === "credential";
+    const credentialWriteRoute = credentialRoute && segments.length === 3;
+    if (method === "DELETE" && !credentialWriteRoute) throw new HttpError(404, "NOT_FOUND", "Management resource not found");
     const scopes = method === "GET" ? ["ai:admin:read"]
-      : ["ai:admin:write", ...(credentialRoute ? ["ai:admin:credential"] : []),
+      : ["ai:admin:write", ...(credentialWriteRoute ? ["ai:admin:credential"] : []),
         ...(["publish", "rollback"].includes(segments[2]) ? ["ai:admin:publish"] : [])];
     const token = createAiPlatformServiceToken({
       secret: config.aiPlatformAuthSecret,

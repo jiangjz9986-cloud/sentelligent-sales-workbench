@@ -11,6 +11,8 @@ ConditionPathExists=@PROJECT_ROOT@/ai-platform/src/cli.js
 [Service]
 Type=simple
 User=@SERVICE_USER@
+# The platform keeps its own UID and uses a dedicated group only for the
+# protected local API socket.  It must never use the business service group.
 Group=@SERVICE_GROUP@
 WorkingDirectory=@PROJECT_ROOT@
 EnvironmentFile=/opt/sentelligent-sales-workbench/config/ai-platform.env
@@ -20,7 +22,7 @@ Environment=AI_PLATFORM_PORT=18997
 Environment=AI_PLATFORM_TARGET_MODEL=gpt-5.6-luna
 Environment=AI_PLATFORM_TARGET_REASONING_EFFORT=max
 RuntimeDirectory=sentelligent-ai-platform
-RuntimeDirectoryMode=0711
+RuntimeDirectoryMode=0710
 Environment=AI_PLATFORM_SOCKET_PATH=/run/sentelligent-ai-platform/api.sock
 ExecStartPre=/usr/bin/test -x @NODE_BIN@
 ExecStartPre=/usr/bin/test -f @PROJECT_ROOT@/ai-platform/src/cli.js
@@ -45,6 +47,8 @@ CPUQuota=100%
 LimitNOFILE=4096
 StandardOutput=journal
 StandardError=journal
+# Keep all other service-created files private; cli.js explicitly promotes the
+# bound API socket to 0660 after the listener is ready.
 UMask=0077
 
 [Install]

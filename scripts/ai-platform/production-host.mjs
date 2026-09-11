@@ -9,12 +9,16 @@ import { loadConfig } from "../../backend/src/config.js";
 import { createProviderCredentials } from "../../ai-platform/src/providers/credentials.js";
 import { normalizeDeploymentPolicy, registeredProviderPolicy } from "../../ai-platform/src/operations/deploymentPolicy.js";
 import { sha256 } from "../../shared/aiPlatformContract.mjs";
-import { socketFetch, PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
 import {
-  PRODUCTION_ROOT, PROJECT_NODE, PLATFORM_SERVICE, PLATFORM_DATABASE, PLATFORM_USER,
+  socketFetch,
+  PRODUCTION_AI_SOCKET,
+  assertAiPlatformSocket,
+} from "../../shared/aiPlatformSocketTransport.mjs";
+import {
+  PRODUCTION_ROOT, PROJECT_NODE, PLATFORM_SERVICE, PLATFORM_DATABASE, PLATFORM_USER, PLATFORM_SOCKET_GROUP,
   PLATFORM_ENV, BUSINESS_ENV, BUSINESS_DATABASE, PROTECTED_UNITS, WEIXIN_SESSION,
   hashBytes, renderPlatformUnit, normalizeRolloutPhase, rolloutPhaseForManifest, transitionIdentityDigest,
-  routingPhaseForRollout, compareRolloutPhase,
+  routingPhaseForRollout, compareRolloutPhase, platformStaticDirectoryForRelease,
   AI_PREFLIGHT_CHECKS,
 } from "./production-contract.mjs";
 import { assertHost, privateFile, privateDirectory, writeExclusive, writeOnceOrVerify, replacePrivateJson, atomicReplace, inspectUnit, parseEnvironment, platformRequest, backupSqlite, runCommand } from "./production-io.mjs";
@@ -33,13 +37,41 @@ function unitEnabled(unit) {
   try { return runCommand("/bin/systemctl", ["is-enabled", unit]).trim() === "enabled"; }
   catch { return false; }
 }
+function passwdRecord(user) {
+  let line = "";
+  try { line = runCommand("/usr/bin/getent", ["passwd", user]).trim(); } catch {}
+  if (!line) return null;
+  const fields = line.split(":");
+  const uid = Number(fields[2]);
+  const gid = Number(fields[3]);
+  return fields[0] === user && Number.isSafeInteger(uid) && uid > 0
+    && Number.isSafeInteger(gid) && gid > 0 ? { name: user, uid, gid } : null;
+}
+function groupRecord(group) {
+  let line = "";
+  try { line = runCommand("/usr/bin/getent", ["group", group]).trim(); } catch {}
+  if (!line) return null;
+  const fields = line.split(":");
+  const gid = Number(fields[2]);
+  const members = new Set((fields[3] ?? "").split(",").map((value) => value.trim()).filter(Boolean));
+  return fields[0] === group && Number.isSafeInteger(gid) && gid > 0
+    ? { name: group, gid, members } : null;
+}
+function userHasGroup(user, group) {
+  try {
+    return runCommand("/usr/bin/id", ["-nG", user]).trim().split(/\s+/u).includes(group);
+  } catch {
+    return false;
+  }
+}
 export function platformUnitMatchesRelease(content, release) {
   try {
-    const expected = renderPlatformUnit(
-      readFileSync(join(release, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8"),
-      release,
-    );
-    return content === expected;
+    const template = readFileSync(join(release, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8");
+    if (content === renderPlatformUnit(template, release)) return true;
+    // Existing v0.12.x installs used the platform UID's private primary
+    // group.  Accept that exact legacy rendering only while adopting the old
+    // unit; all new units are rendered with PLATFORM_SOCKET_GROUP.
+    return content === renderPlatformUnit(template, release, { serviceGroup: PLATFORM_USER });
   } catch {
     return false;
   }
@@ -108,7 +140,8 @@ export function validateCandidateConfiguration(manifest) {
   const backend = loadConfig({ ...backendEnv, envFile: manifest.backendEnvCandidate });
   check(platform.nodeEnv === "production" && backend.nodeEnv === "production", "PRODUCTION_MODE_REQUIRED");
   check(platform.host === "127.0.0.1" && platform.port === 18997 && platform.databasePath === PLATFORM_DATABASE
-    && platform.mediaDirectory === "/var/lib/sentelligent-ai-platform/media", "PLATFORM_STATE_BINDING_INVALID");
+    && platform.mediaDirectory === "/var/lib/sentelligent-ai-platform/media"
+    && platform.staticDirectory === platformStaticDirectoryForRelease(manifest.newRelease), "PLATFORM_STATE_BINDING_INVALID");
   check(platform.authSecret === backend.aiPlatformAuthSecret && platform.authSecret.length >= 32
     && backend.aiPlatformBaseUrl === "http://127.0.0.1:18997"
     && backend.aiPlatformSocketPath === PRODUCTION_AI_SOCKET && platform.socketPath === PRODUCTION_AI_SOCKET, "PLATFORM_AUTH_BINDING_INVALID");
@@ -258,6 +291,8 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         adoptedExisting: Boolean(platformPreparation.adoptedExisting),
         previousPlatformActive: Boolean(platformPreparation.previousPlatformActive),
         previousPlatformEnabled: Boolean(platformPreparation.previousPlatformEnabled),
+        socketGroupCreated: Boolean(platformPreparation.socketGroupCreated),
+        businessSocketGroupAdded: Boolean(platformPreparation.businessSocketGroupAdded),
       };
       if (platformState.adoptedExisting) {
         privateFile(platformPreparation.platformUnitBackup, platformPreparation.platformUnitBackupSha256, { requirePrivate: false });
@@ -422,6 +457,14 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         runCommand("/bin/systemctl", ["stop", PLATFORM_SERVICE], { timeout: 240_000 });
         runCommand("/bin/systemctl", ["disable", PLATFORM_SERVICE]);
       }
+      // Remove only the transition-created shared boundary after the old
+      // platform unit and the restarted Backend no longer depend on it.
+      if (platformState?.businessSocketGroupAdded) {
+        runCommand("/usr/sbin/gpasswd", ["-d", "sentzx", PLATFORM_SOCKET_GROUP]);
+      }
+      if (platformState?.socketGroupCreated && groupRecord(PLATFORM_SOCKET_GROUP)) {
+        runCommand("/usr/sbin/groupdel", [PLATFORM_SOCKET_GROUP]);
+      }
       markState({ status: "platform-rolled-back", platformAdmission: "closed" });
     },
     verifyRollbackState() {
@@ -449,6 +492,8 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         const platform = inspectUnit(PLATFORM_SERVICE);
         check(platform.ActiveState !== "active", "ROLLBACK_PLATFORM_STILL_ACTIVE");
       }
+      if (platformState?.socketGroupCreated) check(!groupRecord(PLATFORM_SOCKET_GROUP), "ROLLBACK_SOCKET_GROUP_REMAINS");
+      if (platformState?.businessSocketGroupAdded) check(!userHasGroup("sentzx", PLATFORM_SOCKET_GROUP), "ROLLBACK_BUSINESS_SOCKET_GROUP_REMAINS");
       assertProtected();
       return { status: "passed", release: manifest.oldRelease };
     },
@@ -585,13 +630,11 @@ export async function preparePlatformService(manifest) {
   const template = readFileSync(join(manifest.newRelease, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8");
   const unit = renderPlatformUnit(template, manifest.newRelease);
   const unitDigest = hashBytes(unit);
-  let accountLine;
-  try { accountLine = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim(); } catch { accountLine = ""; }
-  let account = null;
-  if (accountLine) {
-    const fields = accountLine.split(":");
-    account = { uid: Number(fields[2]), gid: Number(fields[3]) };
-  }
+  let account = passwdRecord(PLATFORM_USER);
+  const businessAccount = passwdRecord("sentzx");
+  check(businessAccount, "BUSINESS_SERVICE_ACCOUNT_INVALID");
+  const socketGroupInitiallyPresent = Boolean(groupRecord(PLATFORM_SOCKET_GROUP));
+  const businessSocketGroupInitiallyPresent = userHasGroup("sentzx", PLATFORM_SOCKET_GROUP);
   const platformUnitBackup = join(manifest.evidenceDir, "platform-before.service");
   const platformEnvironmentBackup = join(manifest.evidenceDir, "platform-before.env");
   const existingPlatformPaths = [unitPath, PLATFORM_ENV, PLATFORM_DATABASE, dataDirectory].filter((path) => existsSync(path));
@@ -628,6 +671,7 @@ export async function preparePlatformService(manifest) {
         ...preparation, status: "preparing", createdUser: false, createdDataDirectory: false,
         createdEnvironment: false, createdUnit: false, platformServiceStopped: false,
         platformEnvironmentChanged: false, platformUnitChanged: false,
+        socketGroupCreated: false, businessSocketGroupAdded: false,
       };
       preparationSha = replacePrivateJson(preparationStatePath, preparation, preparationSha);
     }
@@ -635,6 +679,8 @@ export async function preparePlatformService(manifest) {
     preparation = {
       schemaVersion: 1, transitionId: manifest.id, manifestDigest, status: "preparing",
       createdUser: false, createdDataDirectory: false, createdEnvironment: false, createdUnit: false,
+      socketGroupCreated: false, businessSocketGroupAdded: false,
+      socketGroupInitiallyPresent, businessSocketGroupInitiallyPresent,
       unitSha256: unitDigest, environmentSha256: hashBytes(candidate.platformRaw), startedAt: new Date().toISOString(),
       adoptedExisting: hasExistingPlatformState,
       ...(hasExistingPlatformState ? {
@@ -700,6 +746,12 @@ export async function preparePlatformService(manifest) {
         check(platformDatabaseIsEmpty(PLATFORM_DATABASE), "PREPARE_CLEANUP_DATA_NOT_EMPTY");
         rmSync(dataDirectory, { recursive: true, force: false });
       }
+      if (preparation.businessSocketGroupAdded && !businessSocketGroupInitiallyPresent) {
+        try { runCommand("/usr/sbin/gpasswd", ["-d", "sentzx", PLATFORM_SOCKET_GROUP]); } catch {}
+      }
+      if (preparation.socketGroupCreated && !socketGroupInitiallyPresent && groupRecord(PLATFORM_SOCKET_GROUP)) {
+        runCommand("/usr/sbin/groupdel", [PLATFORM_SOCKET_GROUP]);
+      }
       if (preparation.createdUser) {
         let currentAccount = "";
         try { currentAccount = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim(); } catch {}
@@ -713,13 +765,24 @@ export async function preparePlatformService(manifest) {
   try {
     if (!account) {
       runCommand("/usr/sbin/useradd", ["--system", "--user-group", "--no-create-home", "--home-dir", dataDirectory, "--shell", "/sbin/nologin", PLATFORM_USER]);
-      accountLine = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim();
-      const fields = accountLine.split(":");
-      account = { uid: Number(fields[2]), gid: Number(fields[3]) };
+      account = passwdRecord(PLATFORM_USER);
+      check(account, "PLATFORM_ACCOUNT_CREATE_FAILED");
       persist({ createdUser: true });
     } else if (!preparation.adoptedExisting) {
       check(preparation.createdUser, "PLATFORM_ACCOUNT_ALREADY_EXISTS");
     }
+    if (!groupRecord(PLATFORM_SOCKET_GROUP)) {
+      runCommand("/usr/sbin/groupadd", ["--system", PLATFORM_SOCKET_GROUP]);
+      check(groupRecord(PLATFORM_SOCKET_GROUP), "PLATFORM_SOCKET_GROUP_CREATE_FAILED");
+      persist({ socketGroupCreated: true });
+    }
+    check(groupRecord(PLATFORM_SOCKET_GROUP), "PLATFORM_SOCKET_GROUP_INVALID");
+    if (!preparation.businessSocketGroupAdded && !businessSocketGroupInitiallyPresent) {
+      runCommand("/usr/sbin/usermod", ["-a", "-G", PLATFORM_SOCKET_GROUP, businessAccount.name]);
+      check(userHasGroup(businessAccount.name, PLATFORM_SOCKET_GROUP), "BUSINESS_SOCKET_GROUP_ADD_FAILED");
+      persist({ businessSocketGroupAdded: true });
+    }
+    check(userHasGroup(businessAccount.name, PLATFORM_SOCKET_GROUP), "BUSINESS_SOCKET_GROUP_INVALID");
     if (!existsSync(dataDirectory)) {
       runCommand("/usr/bin/install", ["-d", "-o", PLATFORM_USER, "-g", PLATFORM_USER, "-m", "0700", dataDirectory]);
       persist({ createdDataDirectory: true });
@@ -767,10 +830,14 @@ export async function preparePlatformService(manifest) {
       await sleep(1000);
     }
     check(ready, "PREPARED_PLATFORM_NOT_PAUSED");
+    const socketGroup = groupRecord(PLATFORM_SOCKET_GROUP);
+    check(socketGroup, "PLATFORM_SOCKET_GROUP_INVALID");
+    assertAiPlatformSocket(PRODUCTION_AI_SOCKET, { ownerUid: account.uid, groupGid: socketGroup.gid });
     check(JSON.stringify(before) === JSON.stringify(protectedSnapshot()), "PROTECTED_STATE_CHANGED");
     const result = {
       status: "prepared", newCommit: manifest.newCommit, platformUnitSha256: unitDigest,
       adoptedExisting: Boolean(preparation.adoptedExisting), protected: before, manifestDigest,
+      socketGroup: { name: PLATFORM_SOCKET_GROUP, gid: socketGroup.gid },
     };
     writeOnceOrVerify(join(manifest.evidenceDir, "platform-preparation.json"), JSON.stringify(result, null, 2) + "\n");
     persist({ status: "prepared", preparedAt: new Date().toISOString(), result });
@@ -829,6 +896,7 @@ export async function runAiProductionPreflight(manifest) {
   await verify("platform.service", () => {
     const unit = inspectUnit(PLATFORM_SERVICE);
     check(unit.ActiveState === "active" && Number(unit.MainPID) > 1 && unit.User === PLATFORM_USER
+      && unit.Group === PLATFORM_SOCKET_GROUP
       && unit.WorkingDirectory === manifest.newRelease && unit.ExecStart.includes(manifest.newRelease + "/ai-platform/src/cli.js serve"), "PLATFORM_UNIT_IDENTITY_INVALID");
     const file = privateFile("/etc/systemd/system/" + PLATFORM_SERVICE, null, { requirePrivate: false }).content.toString();
     const expected = renderPlatformUnit(readFileSync(join(manifest.newRelease, "scripts/ai-platform/systemd/sentelligent-ai-platform.service.template"), "utf8"), manifest.newRelease);
@@ -836,6 +904,9 @@ export async function runAiProductionPreflight(manifest) {
     const account = runCommand("/usr/bin/getent", ["passwd", PLATFORM_USER]).trim().split(":");
     const directory = lstatSync("/var/lib/sentelligent-ai-platform");
     check(directory.uid === Number(account[2]) && (directory.mode & 0o077) === 0, "PLATFORM_DATA_PERMISSIONS_INVALID");
+    const socketGroup = groupRecord(PLATFORM_SOCKET_GROUP);
+    check(socketGroup && userHasGroup("sentzx", PLATFORM_SOCKET_GROUP), "PLATFORM_SOCKET_GROUP_INVALID");
+    assertAiPlatformSocket(PRODUCTION_AI_SOCKET, { ownerUid: Number(account[2]), groupGid: socketGroup.gid });
   });
   await verify("platform.database", () => {
     const db = new DatabaseSync(PLATFORM_DATABASE, { readOnly: true });

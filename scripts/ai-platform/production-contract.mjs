@@ -5,6 +5,9 @@ export const PRODUCTION_ROOT = "/opt/sentelligent-sales-workbench";
 export const PLATFORM_SERVICE = "sentelligent-ai-platform.service";
 export const PLATFORM_DATABASE = "/var/lib/sentelligent-ai-platform/ai-platform.sqlite";
 export const PLATFORM_USER = "sentai";
+// The platform never joins the business service group.  This dedicated group
+// is the only shared boundary needed for Backend -> AI Platform socket access.
+export const PLATFORM_SOCKET_GROUP = "sentelligent-ai";
 export const PROJECT_NODE = PRODUCTION_ROOT + "/runtime/node-v24/bin/node";
 export const PROTECTED_UNITS = ["sentelligent-caddy.service", "qingyang-store.service"];
 export const CORE_UNITS = ["sentelligent-backend.service", "sentelligent-frontend.service", "sentelligent-weixin-agent.service"];
@@ -68,6 +71,11 @@ export function releasePath(value) {
   return value;
 }
 
+export function platformStaticDirectoryForRelease(release) {
+  releasePath(release);
+  return release + "/outputs/ai-platform-admin";
+}
+
 export function validateTransitionManifest(input) {
   const allowed = ["schemaVersion", "id", "hostname", "machineId", "oldRelease", "oldCommit", "newRelease", "newCommit", "newArchive", "newArchiveSha256", "evidenceDir", "backupDir", "platformEnvCandidate", "backendEnvCandidate", "platformEnvSha256", "backendEnvSha256", "corePreflight", "corePreflightSha256", "policyFile", "policySha256", "qualityReport", "qualityReportSha256", "phase", "rolloutPhase"];
   if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((key) => !allowed.includes(key))
@@ -92,11 +100,14 @@ export function validateTransitionManifest(input) {
   return Object.freeze({ ...input, rolloutPhase });
 }
 
-export function renderPlatformUnit(template, release) {
+export function renderPlatformUnit(template, release, { serviceGroup = PLATFORM_SOCKET_GROUP } = {}) {
   releasePath(release);
+  if (typeof serviceGroup !== "string" || !/^[A-Za-z_][A-Za-z0-9_-]*$/u.test(serviceGroup)) {
+    throw new Error("invalid platform service group");
+  }
   const substitutions = {
     PROJECT_ROOT: release, NODE_BIN: PROJECT_NODE,
-    SERVICE_USER: PLATFORM_USER, SERVICE_GROUP: PLATFORM_USER,
+    SERVICE_USER: PLATFORM_USER, SERVICE_GROUP: serviceGroup,
     RUNTIME_DIR: "/run/sentelligent-ai-platform", DATABASE_DIR: "/var/lib/sentelligent-ai-platform",
   };
   const result = template.replace(/@([A-Z_]+)@/gu, (_match, key) => {
