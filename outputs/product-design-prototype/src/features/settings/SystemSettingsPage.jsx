@@ -490,7 +490,7 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
     "tender-schedule": {
       eyebrow: "招标调度",
       title: "医院招标自动轮巡",
-      description: "查看固定的每小时、每批 10 家客户轮巡状态，并控制启停或立即运行下一批。",
+      description: "查看固定节奏、按批次推进的客户轮巡状态，并控制启停或立即运行下一批。",
       icon: CalendarClock,
     },
     "bookkeeping-log": {
@@ -742,8 +742,8 @@ export function SystemSettingsPage({ apiClient, backendStatus, section = "securi
               <div className="settings-schedule-policy">
                 <CalendarClock size={22} aria-hidden="true" />
                 <div>
-                  <strong>每小时处理下一批 10 家客户</strong>
-                  <p>系统按稳定客户序号循环，成功后才推进游标；本页面不开放任意间隔或批量修改。</p>
+                  <strong>固定节奏处理下一批客户</strong>
+                  <p>当前为每 {schedulerState?.intervalMinutes ?? 60} 分钟、每批 {schedulerState?.batchSize ?? 10} 家客户；系统按稳定客户序号循环，成功后才推进游标。</p>
                 </div>
               </div>
               <div className="settings-button-row settings-scheduler-actions">
