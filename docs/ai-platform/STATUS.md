@@ -4,10 +4,9 @@
 
 本节覆盖此前历史段落；历史段落保留作为实施过程记录，不作为当前生产状态依据。
 
-- 当前融合工作树：`ai-platform-production-integration-20260909`；原始状态已核对，当前仅有本次
-  文档收口改动待提交。
-- 当前工作树 HEAD：`7570a47acedc501fafe7874baaa73c63e4e6fd11`；最近两个提交修正招标
-  调度节奏文案及其集成 QA 断言。
+- 当前融合工作树：`ai-platform-production-integration-20260909`；工作树干净。
+- 当前工作树 HEAD：`29c00561c437849212ca7a777649a969f4a04da6`；最近的文档收口提交记录了
+  `7570a47...` 生产切换、Linux/x64 制品和新 release 验收边界。
 - 生产 current：
   `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7570a47acedc`；
   该生产 release manifest 的 source commit 为
