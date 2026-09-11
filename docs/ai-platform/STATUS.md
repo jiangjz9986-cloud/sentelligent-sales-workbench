@@ -2,55 +2,66 @@
 
 ## 2026-09-11 当前融合与生产事实
 
-本节覆盖此前历史段落；历史段落保留作为实施过程记录，不作为当前生产状态依据。
+本节是最终 P1 交付记录；下方较早段落保留为实施过程和历史检查点，不覆盖本节事实。
 
-- 当前融合工作树：`ai-platform-production-integration-20260909`；工作树干净。
-- 当前工作树 HEAD：`29c00561c437849212ca7a777649a969f4a04da6`；最近的文档收口提交记录了
-  `7570a47...` 生产切换、Linux/x64 制品和新 release 验收边界。
-- 生产 current：
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7570a47acedc`；
-  该生产 release manifest 的 source commit 为
-  `7570a47acedc501fafe7874baaa73c63e4e6fd11`。该制品在生产 Linux/x64 主机重新构建，
-  归档 SHA-256 为
-  `6388ddda67a13bc64a0dccbae0874a34285380cb6c363b961ed65ebeaabdbaed`。
-- 生产切换于 `2026-09-11T11-26-37Z` 完成；切换报告为
-  `/opt/sentelligent-sales-workbench/evidence/2026-09-11T11-26-37Z-20156/cutover-report.json`，
-  最终离线数据库备份 SHA-256 为
-  `b9be774df368effe0208a48ca12136a9a1b365427dc45a3e0d95af56a804c3b1`，微信 session 备份
-  SHA-256 为
-  `8cf339401f003fae56b57433217b146d1130bbf04c52565af8a6e7151b9d65c3`。
+- 当前融合工作树：`ai-platform-production-integration-20260909`。生产候选源提交为
+  `4afffee25c7cf25561c3212f19c97353e9cdc76c`；本次只读验收前工作树干净。
+- 生产 `current` 已切换为
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-4afffee25c7c`，
+  `readlink -f /opt/sentelligent-sales-workbench/current` 已现场核实为该路径。
+- 生产切换 transition 为 `ai-platform-4afffee-20260911-p1`，旧提交为
+  `7570a47acedc501fafe7874baaa73c63e4e6fd11`，新提交为
+  `4afffee25c7cf25561c3212f19c97353e9cdc76c`。transition report 为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/ai-transition-report.json`
+  （SHA-256 `cd5a7f03a75312d32fda7afac873f7da060add4e4a7c535148b68a1832d21fb3`），manifest 为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/transition-manifest.json`。
+- 120 秒观察报告为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/observation.json`
+  （SHA-256 `c317427fbd59a1cc578252b74609010665d8b74aca1d7906505f808f6b6604af`）。观察期间
+  `thresholdFailures=[]`，AI 平台队列深度保持 `0`，`activeExecutions=0`。
+- 候选制品为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/sentelligent-sales-workbench-4afffee25c7c.tar.gz`
+  （SHA-256 `03c4a77869bd67dd9495517295e3ded185afa14faad42dcc5a2f3e86045bc46b`）；P1 policy
+  SHA-256 为 `ffc730e7921dcdd8a2aaa3fc5f88a14c8775965f2e6f1b1f59b186d36295a347`，quality report
+  SHA-256 为 `4845f641c10667d3509c8d344719266ad225b747ad4c35ef89330a6953020d5a`。
 - 生产服务 `sentelligent-backend.service`、`sentelligent-frontend.service`、
   `sentelligent-weixin-agent.service`、`sentelligent-ai-platform.service` 和
-  `sentelligent-caddy.service` 均已核实为 active；`/_health`、`/api/health` 均返回 HTTP 200，
-  数据库 `quick_check=ok`，外键违规数为 `0`。
-- 当前生产 AI Platform 配置仍是 `disabled`、`local-simulated`，主动助手与主动通知
-  auto-run 均为关闭，目标元数据为 `gpt-5.6-luna` / `max`；这表示平台融合代码已随 current
-  发布，但不表示真实供应商路由、真实主动扫描或真实通知已经开通。
-- 生产招标调度的环境基线仍为 `HOSPITAL_TENDER_INTERVAL_MINUTES=60`、
-  `HOSPITAL_TENDER_BATCH_SIZE=10`，但只读读取持久化状态显示当前已启用、运行间隔为
-  `120` 分钟、每批 `10` 家。调度仓储的既有状态优先于初始化选项，因此页面的 120 分钟
-  是数据库中的真实运行配置，不是前端映射错误；本次未修改生产调度。
-- Backend 仍是 `proactive.analyze` 和业务通知 outbox 的唯一调度所有者；PushPlus
-  仍为退役状态。微信 outbox 在 Clawbot context 缺失或过期时 fail-closed，消息保留
-  在持久 outbox 中，不通过 heartbeat 冒充 context 续期。
-- 新 release 的 Mac Google Chrome 新鲜验收已覆盖招标调度、战情总览、客户列表和客户详情：
-  页面正常渲染，招标调度显示持久化的每 `120` 分钟、每批 `10` 家，客户详情显示主动建议
-  与 CSV/XLSX 预览入口，并已实测向下滚轮能够到达最近运行记录区域。页面实际引用的
-  `/assets/index-Bym6csvS.js` 与候选 release 一致。此前的 32/32 报告仍保留在
-  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`，
-  但不把它冒充为本次最终 release 的完整逐页验收。
-- 生产 smoke 历史残留已通过受保护的 server-local cleanup 精确清理；残留为 0，
-  数据库完整性仍为 `quick_check=ok`、外键违规 0。
+  `sentelligent-caddy.service` 均为 `active`。`/_health`、`/api/health` 与 AI Platform Unix
+  socket `/run/sentelligent-ai-platform/api.sock/healthz` 均返回 `200`；数据库为 `ready`，
+  `quick_check=ok`，外键违规数为 `0`。
+- Caddy PID `13001`、Qingyang PID `9217` 未被切换改变，Caddyfile SHA-256 仍为
+  `ee907b56aecf1c23b44c49a6e8e15f777cbab0f5029bd7290e3280758cc612f5`。本次没有手工修改
+  `current`、systemd unit、Caddy 配置或生产数据库。
+- P1 安全边界仍为 `phase=legacy`、`rolloutPhase=P1`、`AI_PLATFORM_MODE=disabled`、
+  `executionMode=local-simulated`、`paused=true`、`admissionOpen=false`、
+  `externalProvidersEnabled=false`，仅有 `provider-mock`。逻辑目标元数据为
+  `gpt-5.6-luna` / `max`，不代表真实付费模型已调用；Backend 仍是 `proactive.analyze`
+  和业务通知 outbox 的唯一调度所有者。
+- PushPlus 已退役且不再作为生产通知渠道。微信 Clawbot outbox 在加密
+  `context_token` 缺失或过期时 fail-closed，消息保留在持久 outbox；当前 SDK 没有
+  `context_token` renewal/rebind 合同，heartbeat 或轮询不能伪造续期。因此“无用户消息也能
+  永久主动推送”与真实主动微信投递仍未验收，不能用本地模拟或健康检查替代。
+- Mac Google Chrome 生产验收已完成：`/overview`、`/customers`、客户详情（含 CSV/XLSX
+  客户导入预览和客户级主动助手）、客户招标监测、`/opportunities`、`/opportunities/risks`、
+  `/opportunities/actions`、`/itineraries`、`/travel-expenses`、`/weekly-reports`、`/knowledge`、
+  `/settings/config`、`/settings/notifications` 以及 AI Platform 管理台均可打开并渲染。
+  只读检查确认通知页为微信 Clawbot 状态页、PushPlus 无操作入口、AI 管理台仅显示 mock provider
+  与队列 `0`，未暴露 provider secret。
+- 页面上下滚动已在 Chrome 原生窗口通过 `Page Down` 验证；同时 `qa:integration` 的
+  scroll-wheel 回归和 customer-import acceptance 均通过。没有上传生产 CSV/XLSX、生成生产
+  周报、写入客户/商机/action/risk、发送微信或 PushPlus 消息；不做 iPhone 真机验收。
+- 最终 `npm run qa:full` 通过：`test:deploy` 为 `291 pass / 2 skipped / 0 fail`，AI Platform
+  `89/89`，Backend `2077/2077`，前端本地 QA、Chrome 集成 QA、滚轮回归、CSV/XLSX 客户批量
+  导入验收和 WebKit 自动化均通过。WebKit 结果是浏览器自动化，不是 iPhone 真机证据。
 
-当前未完成的门禁包括：Clawbot 尚未提供 `context_token` renewal/rebind 合同，因此不能把
-“系统永远主动推送”或真实主动微信投递标记为已验收；当前 outbox 会在 token 缺失或过期时
-保留消息并 fail-closed，heartbeat 不能替代 provider 续期。真实供应商质量/费用验收也必须
-分别保留证据。
+当前剩余门禁仅为真实外部能力：Clawbot 的 context 续期/rebind 协议、真实供应商质量与费用
+证据、以及在明确启用前提下的真实主动扫描和通知验收。它们不影响本次 P1 代码与受控生产切换
+交付，但不能被描述为已经上线。
 
 更新：2026-09-11。主任务已接管生产融合，完整执行边界见
 [FUSION-EXECUTION.md](FUSION-EXECUTION.md)。
 
-## 融合进度
+## 历史融合进度
 
 - 工作树：`ai-platform-production-integration-20260909`；
   融合基线 `4cfdcdb9d3f499056c45a7c83434d3fa7b96d3cd`，
@@ -60,8 +71,8 @@
 - 平台迁移新增 0003/0004；业务 0042-0045 和平台 0001/0002 未改写。
 - 本地平台 69/69、全部适配器 34/34、双服务和 QA 脚本专项 16/16
   通过。生产认证模式测试使用临时库和模拟供应商，不等同生产上线。
-- 真实供应商/媒体、管理代理、灰度、主动事件修复、生产发布控制
-  与最终全量验收仍在实施；当前生产没有改变，不能标为交付完成。
+- 以上条目记录的是早期实施检查点。管理代理、生产发布控制、主动事件修复、全量验收和
+  受控 P1 切换已在本页顶部记录中完成；真实供应商、费用和主动微信投递仍受外部能力门禁约束。
 
 ## 2026-09-08 历史验收记录
 

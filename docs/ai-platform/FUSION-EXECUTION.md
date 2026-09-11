@@ -28,8 +28,9 @@
   explicit scopes and request authentication, without exposing internal secrets.
 - Business migrations 0042-0045 and platform migrations 0001-0002 stay immutable.
   Platform migration 0003 is reserved for operational pause/generation and its
-  audit ledger. The live production has no platform database/service installed;
-  business migration numbers are not consumed by this change.
+  audit ledger. The P1 production release includes the independently managed
+  platform database/service; business migration numbers are not consumed by this
+  change.
 - Platform migration 0004 reserves a hashed request-nonce ledger. Production
   service credentials bind method, full path/query, exact body bytes and
   idempotency key; one nonce is consumed once even across process restarts.
@@ -57,25 +58,23 @@ language. The following is the current production evidence and takes
 precedence when describing deployment state:
 
 - The production `current` release is
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7570a47acedc`,
-  bound to source commit `7570a47acedc501fafe7874baaa73c63e4e6fd11`.
-  The release was rebuilt on the production Linux/x64 host. Its archive
-  SHA-256 is
-  `6388ddda67a13bc64a0dccbae0874a34285380cb6c363b961ed65ebeaabdbaed`.
-  The manifest records schema `3`, Node `v24.18.0` and npm `11.16.0`.
-- The controlled cutover completed at `2026-09-11T11-26-37Z`. The cutover
-  report and log are at
-  `/opt/sentelligent-sales-workbench/evidence/2026-09-11T11-26-37Z-20156/cutover-report.json`
-  and
-  `/opt/sentelligent-sales-workbench/evidence/2026-09-11T11-26-37Z-20156/cutover.log`.
-  The final offline database backup is
-  `/opt/sentelligent-sales-workbench/backups/2026-09-11T11-26-37Z-20156/database-final-offline.sqlite`
-  with SHA-256
-  `b9be774df368effe0208a48ca12136a9a1b365427dc45a3e0d95af56a804c3b1`.
-  The WeChat session backup is
-  `/opt/sentelligent-sales-workbench/backups/2026-09-11T11-26-37Z-20156/weixin-session.tar.gz`
-  with SHA-256
-  `8cf339401f003fae56b57433217b146d1130bbf04c52565af8a6e7151b9d65c3`.
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-4afffee25c7c`,
+  bound to source commit `4afffee25c7cf25561c3212f19c97353e9cdc76c`. The controlled
+  transition id is `ai-platform-4afffee-20260911-p1`; the old commit was
+  `7570a47acedc501fafe7874baaa73c63e4e6fd11`.
+  The candidate archive is
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/sentelligent-sales-workbench-4afffee25c7c.tar.gz`
+  with SHA-256 `03c4a77869bd67dd9495517295e3ded185afa14faad42dcc5a2f3e86045bc46b`.
+- The controlled transition report is
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/ai-transition-report.json`
+  with SHA-256 `cd5a7f03a75312d32fda7afac873f7da060add4e4a7c535148b68a1832d21fb3`.
+  The 120-second observation report is
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/observation.json`
+  with SHA-256 `c317427fbd59a1cc578252b74609010665d8b74aca1d7906505f808f6b6604af`; it finished
+  with `status=passed`, `thresholdFailures=[]`, queue depth `0`, and no active executions.
+  The P1 policy SHA-256 is `ffc730e7921dcdd8a2aaa3fc5f88a14c8775965f2e6f1b1f59b186d36295a347`,
+  and the quality report SHA-256 is
+  `4845f641c10667d3509d8c344719266ad225b747ad4c35ef89330a6953020d5a`.
 - Backend, frontend, WeChat agent, AI Platform, shared Caddy and Qingyang
   services are active. `https://82.156.210.199/_health` and
   `https://82.156.210.199/api/health` returned HTTP 200; database
@@ -91,17 +90,15 @@ precedence when describing deployment state:
   treats an existing persisted row as authoritative over initialization
   defaults; this was verified read-only and was not changed during the
   integration.
-- Fresh Mac Google Chrome checks against the new release covered the tender
-  schedule, overview, customer list and customer detail flows. The tender
-  schedule showed the persisted `120`-minute/`10`-customer cadence, the
-  overview and customer records rendered normally, the customer detail page
-  exposed proactive suggestions and CSV/XLSX preview controls, and a
-  downward-wheel check reached the recent-run section. The page cited the
-  new `/assets/index-Bym6csvS.js` bundle, which matched the candidate release
-  source. These are fresh functional checks, but they are not a claim that the
-  older 32/32 report at
-  `/Users/jiangjizhen/Documents/森特智行/.runtime/production-browser-evidence/2026-09-11T09-03-16-819Z/report.json`
-  covers this final release.
+- Fresh Mac Google Chrome checks against the final release covered `/overview`, `/customers`,
+  customer detail with CSV/XLSX preview and proactive assistant, customer tender monitoring,
+  opportunities/actions/risks, itineraries, travel expenses, weekly reports, knowledge,
+  security configuration, notification settings, and the AI Platform console. The tender page
+  showed the persisted `120`-minute/`10`-customer cadence; the customer detail page rendered the
+  import and assistant controls; notification settings showed read-only WeChat Clawbot status;
+  the AI console showed only the mock provider and queue `0`. A Chrome native-window `Page Down`
+  check reached the lower overview content, confirming vertical scrolling is restored. No production
+  write action, file upload, report generation, or real notification was performed.
 - Historical production smoke rows were removed by the protected server-local
   cleanup path; residual smoke rows are zero and database integrity remains
   clean.
@@ -147,8 +144,10 @@ Items above describe the implementation contract, not completed acceptance.
   reconciliation, without automatic supplier retry. Recovery uses the original
   price currency. Reservations cover full output and media limits.
 
-The production transition tool, real suppliers/media, management proxy, staged
-routing and business-event remediation are still outstanding.
+The controlled production transition, management proxy, staged routing controls,
+and business-event remediation are complete for this P1 candidate. Real
+supplier/media quality and cost evidence, and the external Clawbot context
+renewal/rebind contract, remain explicitly outside the P1 claim.
 
 ## Integration Progress
 
@@ -172,8 +171,9 @@ routing and business-event remediation are still outstanding.
 - All six Backend background schedulers expose drain, and Backend closes its
   database after HTTP, ASR and background work settle. Direct service startup
   now handles SIGTERM/SIGINT through this shutdown path.
-- Real media transport, provider/price publication, staged routing, transition
-  tooling and final acceptance remain outstanding.
+- Real media transport and provider/price publication are implemented behind the
+  P1 gates but were not enabled in production. Production remains on the
+  legacy/local-simulated/mock-only boundary.
 
 ## Validation At This Checkpoint
 
@@ -184,7 +184,11 @@ routing and business-event remediation are still outstanding.
 - Admin proxy, execution drain and ASR shutdown integration: 17 passed.
 - Security settings source regressions: 7 passed; frontend production build passed.
 - Full backend output is in ignored `.runtime/fusion-backend-20260910-r2.log`.
-  These are local tests, not production acceptance or real supplier quality.
+  The final aggregate additionally passed `npm run qa:full`: deploy
+  `291 pass / 2 skipped / 0 fail`, AI Platform `89/89`, Backend `2077/2077`,
+  frontend local QA, Chrome integration QA, scroll-wheel regression, customer
+  import acceptance, and WebKit automation. WebKit is not iPhone hardware
+  evidence, and all real-supplier/real-notification claims remain gated.
 
 ## Media And Pricing Progress
 
