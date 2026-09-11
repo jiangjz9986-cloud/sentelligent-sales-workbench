@@ -29,6 +29,10 @@
   `sentelligent-caddy.service` 均为 `active`。`/_health`、`/api/health` 与 AI Platform Unix
   socket `/run/sentelligent-ai-platform/api.sock/healthz` 均返回 `200`；数据库为 `ready`，
   `quick_check=ok`，外键违规数为 `0`。
+- 另有 `sentelligent-ops-alert@sentelligent-backend.service.service` 在
+  `2026-09-11 19:23:44 CST` 因告警投递失败而处于 `failed`；该时间早于本次
+  `21:16:03–21:16:16 CST` 的生产切换。已只读核对其日志，未将其误判为本 release 回归，
+  也未在本次交付中重启或修改该告警服务。
 - Caddy PID `13001`、Qingyang PID `9217` 未被切换改变，Caddyfile SHA-256 仍为
   `ee907b56aecf1c23b44c49a6e8e15f777cbab0f5029bd7290e3280758cc612f5`。本次没有手工修改
   `current`、systemd unit、Caddy 配置或生产数据库。

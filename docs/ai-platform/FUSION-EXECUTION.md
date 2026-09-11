@@ -79,6 +79,10 @@ precedence when describing deployment state:
   services are active. `https://82.156.210.199/_health` and
   `https://82.156.210.199/api/health` returned HTTP 200; database
   `quick_check=ok` and foreign-key checks returned zero violations.
+- The separate `sentelligent-ops-alert@sentelligent-backend.service.service`
+  unit remains failed from `2026-09-11 19:23:44 CST` because alert delivery
+  failed. That predates the `21:16:03–21:16:16 CST` cutover; it was inspected
+  read-only and was not restarted or changed as part of this release.
 - The released configuration keeps AI Platform `disabled` with
   `local-simulated` execution, keeps Backend as the sole proactive scheduler,
   and keeps proactive assistant/notification auto-run disabled. The target
