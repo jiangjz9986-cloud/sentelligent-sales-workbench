@@ -1,29 +1,38 @@
 # AI 平台融合升级状态
 
-## 2026-09-11 当前融合与生产事实
+## 2026-09-12 当前融合与生产事实
 
 本节是最终 P1 交付记录；下方较早段落保留为实施过程和历史检查点，不覆盖本节事实。
 
 - 当前融合工作树：`ai-platform-production-integration-20260909`。生产候选源提交为
-  `4afffee25c7cf25561c3212f19c97353e9cdc76c`；本次只读验收前工作树干净。
+  `7ed981a1b58e24c3098b823ecdef7d6fc574562c`；发布时工作树干净。
 - 生产 `current` 已切换为
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-4afffee25c7c`，
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e`，
   `readlink -f /opt/sentelligent-sales-workbench/current` 已现场核实为该路径。
-- 生产切换 transition 为 `ai-platform-4afffee-20260911-p1`，旧提交为
-  `7570a47acedc501fafe7874baaa73c63e4e6fd11`，新提交为
-  `4afffee25c7cf25561c3212f19c97353e9cdc76c`。transition report 为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/ai-transition-report.json`
-  （SHA-256 `cd5a7f03a75312d32fda7afac873f7da060add4e4a7c535148b68a1832d21fb3`），manifest 为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/transition-manifest.json`。
+- 新 release manifest 为
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e/release-manifest.json`
+  （SHA-256 `bd62acb8ec61d00ba759c9f776c85381c13ceaf102f4a71e2b2615a7c778cbfe`）；制品在
+  `linux/x64`、Node `v24.18.0`、npm `11.16.0` 环境构建，归档包含 `1748` 个文件。
+- 生产切换 transition 为 `ai-platform-7ed981a-20260911-p1-r3`，旧提交为
+  `4afffee25c7cf25561c3212f19c97353e9cdc76c`，新提交为
+  `7ed981a1b58e24c3098b823ecdef7d6fc574562c`。transition report 为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/ai-transition-report.json`
+  （SHA-256 `cb6ff148e3238f4f20d5e35f1d8e1f86245525d8e7b97e0e61873aab02315211`），manifest 为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/transition-manifest.json`
+  （SHA-256 `6e22c3ab81dffa8228a90765e137bbe898ace769f5f1ce757238abb926b9e8a7`）。
 - 120 秒观察报告为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/observation.json`
-  （SHA-256 `c317427fbd59a1cc578252b74609010665d8b74aca1d7906505f808f6b6604af`）。观察期间
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/observation-1789152661216.json`
+  （SHA-256 `eaad438118f0402528c58a152367defe5d610fcbb38b560f356fe8da92001e86`）。观察期间
   `thresholdFailures=[]`，AI 平台队列深度保持 `0`，`activeExecutions=0`。
 - 候选制品为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/sentelligent-sales-workbench-4afffee25c7c.tar.gz`
-  （SHA-256 `03c4a77869bd67dd9495517295e3ded185afa14faad42dcc5a2f3e86045bc46b`）；P1 policy
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/sentelligent-sales-workbench-7ed981a1b58e-linux.tar.gz`
+  （SHA-256 `9fc57f4179e8b0ae02fe13ca25b168b130998d375ffb882f2c4e96cf8fbf48c8`）；P1 policy
   SHA-256 为 `ffc730e7921dcdd8a2aaa3fc5f88a14c8775965f2e6f1b1f59b186d36295a347`，quality report
   SHA-256 为 `4845f641c10667d3509c8d344719266ad225b747ad4c35ef89330a6953020d5a`。
+- 最新旧版本业务库只读备份为
+  `/opt/sentelligent-sales-workbench/backups/ai-platform-7ed981a-20260911-p1-r3/core-preflight-business.sqlite`
+  （SHA-256 `118de1ca4baba4bf5cb52c6d40ffb9486dc2dfc11dbe7141949656e3c51f827a`）；core preflight
+  `25/25` 通过，AI preflight 的 `9` 个 gate 全部通过。
 - 生产服务 `sentelligent-backend.service`、`sentelligent-frontend.service`、
   `sentelligent-weixin-agent.service`、`sentelligent-ai-platform.service` 和
   `sentelligent-caddy.service` 均为 `active`。`/_health`、`/api/health` 与 AI Platform Unix
@@ -55,14 +64,14 @@
   scroll-wheel 回归和 customer-import acceptance 均通过。没有上传生产 CSV/XLSX、生成生产
   周报、写入客户/商机/action/risk、发送微信或 PushPlus 消息；不做 iPhone 真机验收。
 - 最终 `npm run qa:full` 通过：`test:deploy` 为 `291 pass / 2 skipped / 0 fail`，AI Platform
-  `89/89`，Backend `2077/2077`，前端本地 QA、Chrome 集成 QA、滚轮回归、CSV/XLSX 客户批量
+  `89/89`，Backend `2083/2083`，前端本地 QA、Chrome 集成 QA、滚轮回归、CSV/XLSX 客户批量
   导入验收和 WebKit 自动化均通过。WebKit 结果是浏览器自动化，不是 iPhone 真机证据。
 
 当前剩余门禁仅为真实外部能力：Clawbot 的 context 续期/rebind 协议、真实供应商质量与费用
 证据、以及在明确启用前提下的真实主动扫描和通知验收。它们不影响本次 P1 代码与受控生产切换
 交付，但不能被描述为已经上线。
 
-更新：2026-09-11。主任务已接管生产融合，完整执行边界见
+更新：2026-09-12（生产切换证据生成于 2026-09-11）。主任务已接管生产融合，完整执行边界见
 [FUSION-EXECUTION.md](FUSION-EXECUTION.md)。
 
 ## 历史融合进度

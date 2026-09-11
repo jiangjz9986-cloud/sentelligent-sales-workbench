@@ -51,30 +51,39 @@
   excluded; Mac Google Chrome functional acceptance remains required.
 - Shared Caddy and Qingyang stay protected. PushPlus remains retired.
 
-## Current Evidence Override (2026-09-11)
+## Current Evidence Override (2026-09-12)
 
 The ordered implementation notes below retain their historical checkpoint
 language. The following is the current production evidence and takes
 precedence when describing deployment state:
 
 - The production `current` release is
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-4afffee25c7c`,
-  bound to source commit `4afffee25c7cf25561c3212f19c97353e9cdc76c`. The controlled
-  transition id is `ai-platform-4afffee-20260911-p1`; the old commit was
-  `7570a47acedc501fafe7874baaa73c63e4e6fd11`.
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e`,
+  bound to source commit `7ed981a1b58e24c3098b823ecdef7d6fc574562c`. Its release manifest is
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e/release-manifest.json`
+  with SHA-256 `bd62acb8ec61d00ba759c9f776c85381c13ceaf102f4a71e2b2615a7c778cbfe`.
+  The controlled transition id is `ai-platform-7ed981a-20260911-p1-r3`; the old commit was
+  `4afffee25c7cf25561c3212f19c97353e9cdc76c`.
   The candidate archive is
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/sentelligent-sales-workbench-4afffee25c7c.tar.gz`
-  with SHA-256 `03c4a77869bd67dd9495517295e3ded185afa14faad42dcc5a2f3e86045bc46b`.
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/sentelligent-sales-workbench-7ed981a1b58e-linux.tar.gz`
+  with SHA-256 `9fc57f4179e8b0ae02fe13ca25b168b130998d375ffb882f2c4e96cf8fbf48c8`.
 - The controlled transition report is
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/ai-transition-report.json`
-  with SHA-256 `cd5a7f03a75312d32fda7afac873f7da060add4e4a7c535148b68a1832d21fb3`.
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/ai-transition-report.json`
+  with SHA-256 `cb6ff148e3238f4f20d5e35f1d8e1f86245525d8e7b97e0e61873aab02315211`.
+  The transition manifest is
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/transition-manifest.json`
+  with SHA-256 `6e22c3ab81dffa8228a90765e137bbe898ace769f5f1ce757238abb926b9e8a7`.
   The 120-second observation report is
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-4afffee-20260911-p1/observation.json`
-  with SHA-256 `c317427fbd59a1cc578252b74609010665d8b74aca1d7906505f808f6b6604af`; it finished
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/observation-1789152661216.json`
+  with SHA-256 `eaad438118f0402528c58a152367defe5d610fcbb38b560f356fe8da92001e86`; it finished
   with `status=passed`, `thresholdFailures=[]`, queue depth `0`, and no active executions.
   The P1 policy SHA-256 is `ffc730e7921dcdd8a2aaa3fc5f88a14c8775965f2e6f1b1f59b186d36295a347`,
   and the quality report SHA-256 is
   `4845f641c10667d3509d8c344719266ad225b747ad4c35ef89330a6953020d5a`.
+- The latest old-version business read-only backup is
+  `/opt/sentelligent-sales-workbench/backups/ai-platform-7ed981a-20260911-p1-r3/core-preflight-business.sqlite`
+  with SHA-256 `118de1ca4baba4bf5cb52c6d40ffb9486dc2dfc11dbe7141949656e3c51f827a`.
+  The core preflight passed `25/25` checks and the AI preflight passed all `9` gates.
 - Backend, frontend, WeChat agent, AI Platform, shared Caddy and Qingyang
   services are active. `https://82.156.210.199/_health` and
   `https://82.156.210.199/api/health` returned HTTP 200; database
@@ -189,7 +198,7 @@ renewal/rebind contract, remain explicitly outside the P1 claim.
 - Security settings source regressions: 7 passed; frontend production build passed.
 - Full backend output is in ignored `.runtime/fusion-backend-20260910-r2.log`.
   The final aggregate additionally passed `npm run qa:full`: deploy
-  `291 pass / 2 skipped / 0 fail`, AI Platform `89/89`, Backend `2077/2077`,
+  `291 pass / 2 skipped / 0 fail`, AI Platform `89/89`, Backend `2083/2083`,
   frontend local QA, Chrome integration QA, scroll-wheel regression, customer
   import acceptance, and WebKit automation. WebKit is not iPhone hardware
   evidence, and all real-supplier/real-notification claims remain gated.
