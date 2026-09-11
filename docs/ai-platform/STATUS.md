@@ -5,8 +5,8 @@
 本节覆盖此前历史段落；历史段落保留作为实施过程记录，不作为当前生产状态依据。
 
 - 当前融合工作树：`ai-platform-production-integration-20260909`。
-- 当前工作树 HEAD：`23517390a32e5912ea9351cde3100900f649f292`；该提交只补充本状态
-  记录，候选分支已同步到 `origin/codex/ai-platform-production-integration-20260909`。
+- 当前工作树 HEAD：`ee591adc8f1059fba5cb322c6d56f610524630b5`；该提交只补充融合执行
+  记录，候选分支尚有该文档提交待同步。
 - 生产 current：
   `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-d38a89144b66`；
   该生产 release manifest 的 source commit 为
@@ -18,6 +18,10 @@
 - 当前生产 AI Platform 配置仍是 `disabled`、`local-simulated`，主动助手与主动通知
   auto-run 均为关闭；这表示平台融合代码已随 current 发布，但不表示真实供应商路由、
   真实主动扫描或真实通知已经开通。
+- 生产招标调度的环境基线仍为 `HOSPITAL_TENDER_INTERVAL_MINUTES=60`、
+  `HOSPITAL_TENDER_BATCH_SIZE=10`，但只读读取持久化状态显示当前已启用、运行间隔为
+  `120` 分钟、每批 `10` 家。调度仓储的既有状态优先于初始化选项，因此页面的 120 分钟
+  是数据库中的真实运行配置，不是前端映射错误；本次未修改生产调度。
 - Backend 仍是 `proactive.analyze` 和业务通知 outbox 的唯一调度所有者；PushPlus
   仍为退役状态。微信 outbox 在 Clawbot context 缺失或过期时 fail-closed，消息保留
   在持久 outbox 中，不通过 heartbeat 冒充 context 续期。
@@ -27,9 +31,9 @@
 - 生产 smoke 历史残留已通过受保护的 server-local cleanup 精确清理；残留为 0，
   数据库完整性仍为 `quick_check=ok`、外键违规 0。
 
-当前未完成的门禁只有：可见桌面/微信窗口验收仍受 CUA 报告的锁屏状态阻断；Clawbot
-尚未提供 context renewal/rebind 合同，因此不能把“系统永远主动推送”或真实主动微信投递
-标记为已验收；Linux/x64 正式构建、真实供应商质量/费用验收也必须分别保留证据。
+当前未完成的门禁只有：Clawbot 尚未提供 context renewal/rebind 合同，因此不能把“系统
+永远主动推送”或真实主动微信投递标记为已验收；Linux/x64 正式构建、真实供应商质量/费用
+验收也必须分别保留证据。
 
 更新：2026-09-10。主任务已接管生产融合，完整执行边界见
 [FUSION-EXECUTION.md](FUSION-EXECUTION.md)。

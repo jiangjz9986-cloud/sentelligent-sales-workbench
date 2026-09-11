@@ -68,6 +68,12 @@ precedence when describing deployment state:
   and keeps proactive assistant/notification auto-run disabled. This is a
   controlled integration release, not proof of live supplier routing or live
   proactive notification delivery.
+- The production environment retains the fixed `60`-minute/`10`-customer
+  tender baseline, while the durable scheduler row currently records an
+  enabled `120`-minute/`10`-customer runtime. The scheduler implementation
+  treats an existing persisted row as authoritative over initialization
+  defaults; this was verified read-only and was not changed during the
+  integration.
 - Mac Google Chrome production acceptance is recorded as 32/32 checks passed,
   32 screenshots, 7 write requests, zero failed requests and zero console
   errors. The formal report is in
@@ -75,8 +81,7 @@ precedence when describing deployment state:
 - Historical production smoke rows were removed by the protected server-local
   cleanup path; residual smoke rows are zero and database integrity remains
   clean.
-- The remaining blockers are visible desktop/WeChat acceptance while CUA still
-  reports the Mac as locked, the absence of a Clawbot context renewal/rebind
+- The remaining blockers are the absence of a Clawbot context renewal/rebind
   protocol for indefinite proactive delivery, and separate Linux/x64 plus
   real-supplier quality/cost evidence. None of these may be inferred from a
   health response or local simulated tests.
