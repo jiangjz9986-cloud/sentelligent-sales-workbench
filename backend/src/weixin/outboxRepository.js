@@ -7,8 +7,10 @@ const MAX_PAYLOAD_BYTES = 20_000;
 const SENSITIVE_KEY = /(?:^|_)(?:confirmation|code|token|secret|credential|password|authorization)(?:$|_)/iu;
 const RETRYABLE_FAILURE_CODES = new Set([
   "WEIXIN_CONTEXT_NOT_READY",
+  "WEIXIN_CONTEXT_EXPIRED",
   "WEIXIN_SEND_FAILED",
 ]);
+const WEIXIN_CONTEXT_EXPIRED = "WEIXIN_CONTEXT_EXPIRED";
 
 function text(value, name, max = 5000) {
   if (typeof value !== "string" || !value.trim()) throw new TypeError(`${name} is required`);
@@ -216,6 +218,11 @@ export function createWeixinConfirmationOutboxRepository(db, {
   function ackFailure(idValue, { leaseToken, errorCode = "WEIXIN_SEND_FAILED" } = {}) {
     const id = text(idValue, "id", 200);
     const normalizedError = text(errorCode, "errorCode", 100).replace(/[^A-Za-z0-9_.-]/gu, "_").slice(0, 100) || "WEIXIN_SEND_FAILED";
+    // Keep the existing HTTP acknowledgement shape compatible while giving
+    // the context-expiry classification its own no-attempt state transition.
+    if (normalizedError === WEIXIN_CONTEXT_EXPIRED) {
+      return releaseLeaseWithoutAttempt(id, { leaseToken, errorCode: normalizedError });
+    }
     return withImmediateTransaction(db, () => {
       const state = checkLease(id, leaseToken);
       if (state.replayed) return item(state.row);
@@ -232,6 +239,35 @@ export function createWeixinConfirmationOutboxRepository(db, {
       `).run({ $id: id, $status: terminal ? "failed" : "queued", $attemptCount: nextAttempt, $availableAt: new Date(Date.parse(now) + delay).toISOString(), $leaseProofHash: hash(leaseToken), $errorCode: normalizedError, $now: now });
       return item(selectById.get({ $id: id }));
     });
+  }
+
+  function releaseLeaseWithoutAttempt(idValue, { leaseToken, errorCode = WEIXIN_CONTEXT_EXPIRED } = {}) {
+    const id = text(idValue, "id", 200);
+    const normalizedError = text(errorCode, "errorCode", 100)
+      .replace(/[^A-Za-z0-9_.-]/gu, "_")
+      .slice(0, 100) || WEIXIN_CONTEXT_EXPIRED;
+    return withImmediateTransaction(db, () => {
+      const state = checkLease(id, leaseToken);
+      if (state.replayed) return item(state.row);
+      const now = iso(clock);
+      const updated = db.prepare(`
+        UPDATE weixin_confirmation_outbox
+        SET status = 'queued', available_at = $now,
+            lease_proof_hash = NULL, lease_until = NULL,
+            provider_message_id = NULL, sent_at = NULL,
+            last_error_code = $errorCode, updated_at = $now
+        WHERE id = $id AND status = 'processing' AND lease_proof_hash = $leaseProofHash
+      `).run({ $id: id, $now: now, $errorCode: normalizedError, $leaseProofHash: hash(leaseToken) });
+      if (updated.changes !== 1) {
+        throw new HttpError(409, "WEIXIN_OUTBOX_LEASE_LOST", "WeChat outbox lease is no longer current");
+      }
+      return item(selectById.get({ $id: id }));
+    });
+  }
+
+  // Compatibility alias for callers that describe this transition as defer.
+  function defer(idValue, options = {}) {
+    return releaseLeaseWithoutAttempt(idValue, options);
   }
 
   function discardLeased(idValue, { leaseToken, errorCode = "WEIXIN_OUTBOX_STALE" } = {}) {
@@ -378,6 +414,8 @@ export function createWeixinConfirmationOutboxRepository(db, {
     leaseNext,
     ackSuccess,
     ackFailure,
+    releaseLeaseWithoutAttempt,
+    defer,
     discardLeased,
     requeueFailed,
     closePending,

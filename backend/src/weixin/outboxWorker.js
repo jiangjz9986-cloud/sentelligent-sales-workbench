@@ -1,4 +1,5 @@
 const OUTBOX_PATH = "/api/integrations/weixin-agent/confirmation-outbox";
+const WEIXIN_CONTEXT_EXPIRED = "WEIXIN_CONTEXT_EXPIRED";
 // v0.9.3 协议 v2：多绑定就绪哨兵 multi:v1 与既有单绑定哈希 scope 并存（升级窗口）。
 const DELIVERY_SCOPE_RE = /^weixin:(?:shortcut:v1:[0-9a-f]{64}|multi:v1)$/u;
 
@@ -48,6 +49,21 @@ export function createWeixinOutboxHttpClient({ backendUrl, apiToken, fetchImpl =
     }
     return values;
   };
+  const postAck = async ({ id: itemId, leaseToken, ok, providerMessageId = null, errorCode = null, terminal = false } = {}) => {
+    const response = await fetchImpl(`${base}${OUTBOX_PATH}`, {
+      method: "POST",
+      headers: { ...headers(), "Content-Type": "application/json" },
+      body: JSON.stringify({ id: itemId, leaseToken, ok, ...(terminal === true ? { terminal: true } : {}), ...(providerMessageId ? { providerMessageId } : {}), ...(errorCode ? { errorCode } : {}) }),
+    });
+    if (!response.ok) throw new Error("outbox_ack_failed");
+    return jsonResponse(response);
+  };
+  const releaseLeaseWithoutAttempt = async ({ id: itemId, leaseToken } = {}) => postAck({
+    id: itemId,
+    leaseToken,
+    ok: false,
+    errorCode: WEIXIN_CONTEXT_EXPIRED,
+  });
 
   return Object.freeze({
     async lease(delivery = null) {
@@ -77,15 +93,10 @@ export function createWeixinOutboxHttpClient({ backendUrl, apiToken, fetchImpl =
         throw new Error("outbox_lease_invalid");
       }
     },
-    async ack({ id: itemId, leaseToken, ok, providerMessageId = null, errorCode = null, terminal = false } = {}) {
-      const response = await fetchImpl(`${base}${OUTBOX_PATH}`, {
-        method: "POST",
-        headers: { ...headers(), "Content-Type": "application/json" },
-        body: JSON.stringify({ id: itemId, leaseToken, ok, ...(terminal === true ? { terminal: true } : {}), ...(providerMessageId ? { providerMessageId } : {}), ...(errorCode ? { errorCode } : {}) }),
-      });
-      if (!response.ok) throw new Error("outbox_ack_failed");
-      return jsonResponse(response);
-    },
+    ack: postAck,
+    releaseLeaseWithoutAttempt,
+    // Compatibility alias for callers that use the shorter defer name.
+    defer: releaseLeaseWithoutAttempt,
     async isCurrent({ id: itemId, leaseToken } = {}) {
       const response = await fetchImpl(`${base}${OUTBOX_PATH}`, {
         method: "POST",
@@ -128,6 +139,19 @@ function expiryHasPassed(value, clock) {
   const now = clock();
   const nowMs = now instanceof Date ? now.getTime() : Number(now);
   return Number.isFinite(nowMs) && Date.parse(value) <= nowMs;
+}
+
+async function releaseContextExpiredLease(client, lease) {
+  const release = typeof client.releaseLeaseWithoutAttempt === "function"
+    ? client.releaseLeaseWithoutAttempt
+    : client.defer;
+  if (typeof release !== "function") return false;
+  await release.call(client, {
+    id: lease.item.id,
+    leaseToken: lease.leaseToken,
+    errorCode: WEIXIN_CONTEXT_EXPIRED,
+  });
+  return true;
 }
 
 export async function runWeixinOutboxPump({
@@ -191,6 +215,17 @@ export async function runWeixinOutboxPump({
         continue;
       }
       if (!delivery.ready) {
+        if (delivery.reason === "context_token_expired") {
+          try {
+            if (!await releaseContextExpiredLease(client, lease)) {
+              log("[weixin] category=outbox status=context_expired_release_unavailable");
+            }
+          } catch {
+            log("[weixin] category=outbox status=context_expired_release_failed");
+          }
+          await sleep(pollMs, abortSignal);
+          continue;
+        }
         // A rolling-upgrade peer may ignore the readiness header and still
         // return a lease. Do not acknowledge it: letting the lease expire
         // preserves attempt_count until a delivery-capable worker is ready.
@@ -231,6 +266,16 @@ export async function runWeixinOutboxPump({
         // trip short-window throttles after the first inbound activation.
         if (sendDelayMs > 0 && !abortSignal?.aborted) await sleepImpl(sendDelayMs, abortSignal);
       } catch (error) {
+        if (error?.code === WEIXIN_CONTEXT_EXPIRED) {
+          try {
+            if (!await releaseContextExpiredLease(client, lease)) {
+              log("[weixin] category=outbox status=context_expired_release_unavailable");
+            }
+          } catch {
+            log("[weixin] category=outbox status=context_expired_release_failed");
+          }
+          continue;
+        }
         const terminalScopeFailure = [
           "WEIXIN_DELIVERY_SCOPE_MISMATCH",
           "WEIXIN_DELIVERY_TARGET_MISMATCH",
@@ -250,7 +295,17 @@ export async function runWeixinOutboxPump({
           });
         } catch { /* retry on next lease */ }
       }
-    } catch {
+    } catch (error) {
+      if (error?.code === WEIXIN_CONTEXT_EXPIRED && lease) {
+        try {
+          if (!await releaseContextExpiredLease(client, lease)) {
+            log("[weixin] category=outbox status=context_expired_release_unavailable");
+          }
+        } catch {
+          log("[weixin] category=outbox status=context_expired_release_failed");
+        }
+        continue;
+      }
       log("[weixin] category=outbox status=retryable_error");
       await sleep(pollMs, abortSignal);
     }

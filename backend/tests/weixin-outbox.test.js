@@ -157,6 +157,80 @@ test("expired processing lease is recovered without overlap and stale acknowledg
   });
 });
 
+test("context expiry releases a fenced lease without changing attempts", () => {
+  withDatabase((db) => {
+    const clock = makeClock("2026-08-29T02:00:00.000Z");
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      leaseMs: 10_000,
+      idFactory: () => "outbox-context-expired",
+    });
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "context-expired-1",
+      payload: { kind: "confirmation", amountCents: 9 },
+    });
+    const first = repository.leaseNext({ workerId: "worker-1", renderMessage: () => "draft-1" });
+    clock.advance(10_001);
+    const current = repository.leaseNext({ workerId: "worker-2", renderMessage: () => "draft-2" });
+    assert.notEqual(current.leaseToken, first.leaseToken);
+
+    assert.throws(
+      () => repository.releaseLeaseWithoutAttempt(created.id, {
+        leaseToken: first.leaseToken,
+      }),
+      (error) => error?.code === "WEIXIN_OUTBOX_LEASE_LOST",
+    );
+    assert.equal(repository.get(created.id).status, "processing");
+    assert.equal(repository.get(created.id).attemptCount, 0);
+
+    const released = repository.releaseLeaseWithoutAttempt(created.id, {
+      leaseToken: current.leaseToken,
+    });
+    assert.equal(released.status, "queued");
+    assert.equal(released.attemptCount, 0);
+    assert.equal(released.availableAt, "2026-08-29T02:00:10.001Z");
+    assert.equal(released.lastErrorCode, "WEIXIN_CONTEXT_EXPIRED");
+    const raw = db.prepare(`
+      SELECT status, attempt_count, lease_proof_hash, lease_until, last_error_code
+      FROM weixin_confirmation_outbox WHERE id = $id
+    `).get({ $id: created.id });
+    assert.deepEqual({ ...raw }, {
+      status: "queued",
+      attempt_count: 0,
+      lease_proof_hash: null,
+      lease_until: null,
+      last_error_code: "WEIXIN_CONTEXT_EXPIRED",
+    });
+  });
+});
+
+test("the legacy failure acknowledgement routes context expiry to no-attempt release", () => {
+  withDatabase((db) => {
+    const clock = makeClock("2026-08-29T03:00:00.000Z");
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      clock: clock.now,
+      maxAttempts: 1,
+      idFactory: () => "outbox-context-ack-compat",
+    });
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "context-expired-ack-compat",
+      payload: { kind: "confirmation" },
+    });
+    const lease = repository.leaseNext({ renderMessage: () => "draft" });
+    const released = repository.ackFailure(created.id, {
+      leaseToken: lease.leaseToken,
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    });
+    assert.equal(released.status, "queued");
+    assert.equal(released.attemptCount, 0);
+    assert.equal(released.lastErrorCode, "WEIXIN_CONTEXT_EXPIRED");
+  });
+});
+
 test("explicit recovery requeues only transient delivery failures without resetting attempts", () => {
   withDatabase((db) => {
     const clock = makeClock();

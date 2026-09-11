@@ -61,6 +61,29 @@ describe("WeChat confirmation outbox worker boundary", () => {
     assert.equal(JSON.parse(calls[2].options.body).providerMessageId, "provider-outbound-1");
   });
 
+  it("posts context expiry through a dedicated no-attempt release while preserving worker auth", async () => {
+    let request;
+    const client = createWeixinOutboxHttpClient({
+      backendUrl: "http://127.0.0.1:8787",
+      apiToken: "machine-secret",
+      workerId: "worker-expired",
+      fetchImpl: async (url, options) => {
+        request = { url, options };
+        return response(200, JSON.stringify({ item: { id: "outbox-expired", status: "queued", attemptCount: 0, lastErrorCode: "WEIXIN_CONTEXT_EXPIRED" } }));
+      },
+    });
+    await client.releaseLeaseWithoutAttempt({ id: "outbox-expired", leaseToken: "lease-expired" });
+    assert.equal(client.defer, client.releaseLeaseWithoutAttempt);
+    assert.equal(request.options.headers.Authorization, "Bearer machine-secret");
+    assert.equal(request.options.headers["X-Weixin-Worker-Id"], "worker-expired");
+    assert.deepEqual(JSON.parse(request.options.body), {
+      id: "outbox-expired",
+      leaseToken: "lease-expired",
+      ok: false,
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    });
+  });
+
   it("paces a recovered backlog instead of sending every queued item in one burst", async () => {
     const controller = new AbortController();
     const delays = [];
@@ -199,6 +222,93 @@ describe("WeChat confirmation outbox worker boundary", () => {
       expiresAt: "2026-09-08T12:04:58.729Z",
     });
     assert.equal(sendCalls, 0);
+  });
+
+  it("releases a context-expired lease without calling ordinary ack", async () => {
+    const controller = new AbortController();
+    const acknowledgements = [];
+    const releases = [];
+    await runWeixinOutboxPump({
+      client: {
+        async lease() {
+          return {
+            item: { id: "outbox-context-expired", owner: "owner", conversationId: "scope", deliveryScope: "scope", message: "draft" },
+            leaseToken: "lease-context-expired",
+          };
+        },
+        async ack(value) { acknowledgements.push(value); },
+        async releaseLeaseWithoutAttempt(value) {
+          releases.push(value);
+          controller.abort();
+        },
+        async isCurrent() { return true; },
+      },
+      bot: {
+        getDeliveryStatus() { return { ready: true, status: "ready" }; },
+        async sendMessage() {
+          const error = new Error("context details must not be persisted");
+          error.code = "WEIXIN_CONTEXT_EXPIRED";
+          throw error;
+        },
+      },
+      pollMs: 500,
+      abortSignal: controller.signal,
+    });
+    assert.deepEqual(acknowledgements, []);
+    assert.deepEqual(releases, [{
+      id: "outbox-context-expired",
+      leaseToken: "lease-context-expired",
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    }]);
+  });
+
+  it("releases a legacy-backend lease when readiness is already context-expired", async () => {
+    const controller = new AbortController();
+    const acknowledgements = [];
+    const releases = [];
+    let reportedDelivery;
+    await runWeixinOutboxPump({
+      client: {
+        async lease(delivery) {
+          reportedDelivery = delivery;
+          return {
+            item: { id: "legacy-expired", owner: "owner", conversationId: "scope", message: "draft" },
+            leaseToken: "legacy-expired-lease",
+          };
+        },
+        async ack(value) { acknowledgements.push(value); },
+        async releaseLeaseWithoutAttempt(value) {
+          releases.push(value);
+          controller.abort();
+        },
+        async isCurrent() { assert.fail("an expired lease must be released before lease verification"); },
+      },
+      bot: {
+        getDeliveryStatus() {
+          return {
+            ready: false,
+            status: "not_ready",
+            reason: "context_token_expired",
+            expiresAt: "2026-09-08T12:04:58.729Z",
+          };
+        },
+        async sendMessage() { assert.fail("an expired context must not send"); },
+      },
+      pollMs: 500,
+      abortSignal: controller.signal,
+    });
+    assert.deepEqual(reportedDelivery, {
+      ready: false,
+      status: "not_ready",
+      reason: "context_token_expired",
+      expiresAt: "2026-09-08T12:04:58.729Z",
+    });
+    assert.deepEqual(acknowledgements, []);
+    assert.deepEqual(releases, [{
+      id: "legacy-expired",
+      leaseToken: "legacy-expired-lease",
+      errorCode: "WEIXIN_CONTEXT_EXPIRED",
+    }]);
   });
 
   it("acks a bounded retry code when the SDK reports provider rejection", async () => {
