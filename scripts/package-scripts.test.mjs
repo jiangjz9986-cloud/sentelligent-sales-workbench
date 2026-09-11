@@ -107,6 +107,14 @@ describe("root package QA scripts", () => {
     assert.doesNotMatch(packageJson.scripts?.["smoke:production:asr"] ?? "", /password|cookie|csrf|82\.156/iu);
   });
 
+  it("exposes the explicitly confirmed P2 live-provider acceptance runner", () => {
+    assert.equal(
+      packageJson.scripts?.["acceptance:ai-platform:p2"],
+      "node scripts/ai-platform/p2-acceptance.mjs",
+    );
+    assert.doesNotMatch(packageJson.scripts?.["acceptance:ai-platform:p2"] ?? "", /password|cookie|csrf|82\.156|api[_-]?key/iu);
+  });
+
   it("exposes repeatable WebKit acceptance for iPhone Safari equivalence", () => {
     assert.equal(
       frontendPackageJson.scripts?.["qa:webkit"],

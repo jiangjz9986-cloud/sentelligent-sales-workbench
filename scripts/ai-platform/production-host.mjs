@@ -19,6 +19,7 @@ import {
   PLATFORM_ENV, BUSINESS_ENV, BUSINESS_DATABASE, PROTECTED_UNITS, WEIXIN_SESSION,
   hashBytes, renderPlatformUnit, releasePath, normalizeRolloutPhase, rolloutPhaseForManifest, transitionIdentityDigest,
   routingPhaseForRollout, compareRolloutPhase, p2AcceptanceRequiredForRollout, platformStaticDirectoryForRelease,
+  rolloutControlsForPhase,
   providerPolicyDigest, validateP2AcceptanceReport,
   AI_PREFLIGHT_CHECKS,
 } from "./production-contract.mjs";
@@ -191,13 +192,15 @@ export function validateCandidateConfiguration(manifest) {
   check(new Set([platform.authSecret, platform.mediaEncryptionKey, platform.credentialEncryptionKey, platform.taskEncryptionKey, backend.authSessionSecret, backend.settingsEncryptionKey, backend.weixinAgentApiToken]).size === 7, "PLATFORM_KEY_ISOLATION_INVALID");
   check(backend.aiPlatformRoutingPolicy?.phase === manifest.phase, "ROUTING_PHASE_MISMATCH");
   const rolloutPhase = rolloutPhaseForManifest(manifest);
+  const rolloutControls = rolloutControlsForPhase(rolloutPhase);
   check(routingPhaseForRollout(rolloutPhase) === manifest.phase, "ROLLOUT_PHASE_MISMATCH");
-  if (rolloutPhase === "P1" || rolloutPhase === "P2") {
+  if (rolloutPhase === "P1") {
     check(platform.executionMode === "local-simulated" && platform.externalProvidersEnabled === false, "INITIAL_PLATFORM_MUST_BE_SIMULATED");
   } else {
     check(platform.executionMode === "external-provider" && platform.externalProvidersEnabled === true, "EXTERNAL_PLATFORM_REQUIRED");
   }
   check(backend.aiPlatformProactiveScheduleOwner === "backend" && platform.proactiveScheduleOwner === "backend", "PROACTIVE_OWNER_INVALID");
+  check(platform.taskAdmissionEnabled === rolloutControls.taskAdmissionEnabled, "ROLLOUT_TASK_ADMISSION_INVALID");
   check(backend.databaseUrl === BUSINESS_DATABASE && backend.weixinAgentSessionHome === WEIXIN_SESSION, "BUSINESS_STATE_BINDING_INVALID");
   check(platform.taskConcurrency === 1 && platform.taskOwnerConcurrency === 1, "INITIAL_CONCURRENCY_INVALID");
   if (manifest.phase !== "platform") check(!backend.proactiveAssistantAutoRun && !backend.proactiveNotificationAutoRun, "BACKGROUND_CANARY_MUST_BE_PAUSED");
@@ -394,7 +397,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
     },
     async resumePlatform() {
       const rolloutPhase = rolloutPhaseForManifest(manifest);
-      if (["P1", "P2"].includes(rolloutPhase)) {
+      if (rolloutPhase === "P1") {
         const current = await platformRequest("/operations");
         check(current.paused && current.executor.admissionOpen === false, "PLATFORM_MUST_REMAIN_PAUSED");
         return current;
@@ -427,7 +430,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       const response = await fetch("http://127.0.0.1:8897/api/health", { signal: AbortSignal.timeout(10000) });
       const health = await response.json();
       check(response.status === 200 && health.database === "ready"
-        && (manifest.phase === "legacy" || health.aiPlatform?.ready === true), "BUSINESS_POSTFLIGHT_FAILED");
+        && health.aiPlatform?.ready === (rolloutPhase !== "P1"), "BUSINESS_POSTFLIGHT_FAILED");
       assertProtected();
       markState({ status: "cutover-passed", currentRelease: manifest.newRelease });
     },
@@ -969,6 +972,7 @@ export async function runAiProductionPreflight(manifest) {
     check(response.status === 200 && health.database === "ready" && health.proactiveScheduleOwner === "backend"
       && health.executionMode === (rolloutPhase === "P1" ? "local-simulated" : "external-provider"), "PLATFORM_RUNTIME_INVALID");
     if (rolloutPhase === "P1") check(health.executor?.admissionOpen === false, "P1_ADMISSION_MUST_BE_CLOSED");
+    else check(health.executor?.admissionOpen === true, "LIVE_ADMISSION_MUST_BE_OPEN");
     for (const binding of candidate.policy.agents) {
       const model = candidate.policy.models.find((item) => item.id === binding.modelId);
       const registered = registeredProviderPolicy(candidate.platform, model.providerId)?.models.find((item) => item.name === model.name);

@@ -4,6 +4,9 @@ import { test } from "node:test";
 import {
   PLATFORM_SOCKET_GROUP,
   platformStaticDirectoryForRelease,
+  rolloutControlsForPhase,
+  validateRolloutConfiguration,
+  validateRolloutRuntime,
   p2AcceptanceRequiredForRollout,
   validateTransitionManifest,
   validateP2AcceptanceReport,
@@ -76,6 +79,21 @@ test("platform unit adoption only extracts direct immutable release paths", () =
 });
 
 test("rollout phases preserve the lower-level routing contract", () => {
+  assert.deepEqual(rolloutControlsForPhase("P1"), {
+    rolloutPhase: "P1", routingPhase: "legacy", executionMode: "local-simulated",
+    externalProvidersEnabled: false, taskAdmissionEnabled: false, queuePaused: true,
+    businessAdmission: false, singleConcurrency: true, taskConcurrency: 1, taskOwnerConcurrency: 1,
+  });
+  assert.deepEqual(rolloutControlsForPhase("P2"), {
+    rolloutPhase: "P2", routingPhase: "legacy", executionMode: "external-provider",
+    externalProvidersEnabled: true, taskAdmissionEnabled: true, queuePaused: false,
+    businessAdmission: false, singleConcurrency: true, taskConcurrency: 1, taskOwnerConcurrency: 1,
+  });
+  assert.deepEqual(rolloutControlsForPhase("P3"), {
+    rolloutPhase: "P3", routingPhase: "canary", executionMode: "external-provider",
+    externalProvidersEnabled: true, taskAdmissionEnabled: true, queuePaused: false,
+    businessAdmission: true, singleConcurrency: false, taskConcurrency: null, taskOwnerConcurrency: null,
+  });
   assert.equal(p2AcceptanceRequiredForRollout("P1"), false);
   assert.equal(p2AcceptanceRequiredForRollout("P2"), false);
   assert.equal(p2AcceptanceRequiredForRollout("P3"), true);
@@ -102,6 +120,41 @@ test("rollout phases preserve the lower-level routing contract", () => {
   }), /p2 acceptance binding is incomplete/u);
 });
 
+test("rollout configuration and runtime gates distinguish paused P1 from live-provider P2", () => {
+  assert.deepEqual(validateRolloutConfiguration("P1", {
+    executionMode: "local-simulated",
+    externalProvidersEnabled: false,
+    taskAdmissionEnabled: false,
+    taskConcurrency: 1,
+    taskOwnerConcurrency: 1,
+  }), rolloutControlsForPhase("P1"));
+  assert.deepEqual(validateRolloutConfiguration("P2", {
+    executionMode: "external-provider",
+    externalProvidersEnabled: true,
+    taskAdmissionEnabled: true,
+    taskConcurrency: 1,
+    taskOwnerConcurrency: 1,
+  }), rolloutControlsForPhase("P2"));
+  assert.throws(() => validateRolloutConfiguration("P1", {
+    executionMode: "local-simulated", externalProvidersEnabled: false, taskAdmissionEnabled: true,
+    taskConcurrency: 1, taskOwnerConcurrency: 1,
+  }), /ROLLOUT_TASK_ADMISSION_INVALID/u);
+  assert.throws(() => validateRolloutConfiguration("P2", {
+    executionMode: "local-simulated", externalProvidersEnabled: false, taskAdmissionEnabled: true,
+    taskConcurrency: 1, taskOwnerConcurrency: 1,
+  }), /ROLLOUT_EXECUTION_MODE_INVALID/u);
+
+  const paused = { paused: true, executor: { admissionOpen: false }, queue: { running: 0, queued: 0 } };
+  const open = { paused: false, executor: { admissionOpen: true }, queue: { running: 0, queued: 0 } };
+  assert.equal(validateRolloutRuntime("P1", { operations: paused, requireQueueEmpty: true }).queuePaused, true);
+  assert.equal(validateRolloutRuntime("P2", { operations: open, requireQueueEmpty: true }).queuePaused, false);
+  assert.throws(() => validateRolloutRuntime("P1", { operations: open }), /ROLLOUT_QUEUE_MUST_BE_PAUSED/u);
+  assert.throws(() => validateRolloutRuntime("P2", { operations: paused }), /ROLLOUT_BUSINESS_ADMISSION_REQUIRED/u);
+  assert.throws(() => validateRolloutRuntime("P2", {
+    operations: { ...open, queue: { running: 1, queued: 0 } }, requireQueueEmpty: true,
+  }), /ROLLOUT_QUEUE_NOT_EMPTY/u);
+});
+
 test("P2 acceptance evidence is bound to the candidate commit, policy, provider policies, and reconciled samples", () => {
   const now = Date.parse("2026-09-11T12:00:00.000Z");
   const sourceCommit = "c".repeat(40);
@@ -126,10 +179,14 @@ test("P2 acceptance evidence is bound to the candidate commit, policy, provider 
     samples: Array.from({ length: 10 }, (_value, index) => ({
       approved: true,
       requestId: `p2-request-${index}`,
+      providerRequestId: `provider-request-${index}`,
       priceVersion: `price-version-${index}`,
       usage: { inputTokens: 1, outputTokens: 1 },
-      cost: { micro: 1, currency: "CNY" },
-      billingReconciliation: { status: "reconciled", reference: `billing-${index}` },
+      cost: { micro: 1, currency: "CNY", status: "calculated" },
+      billingReconciliation: {
+        status: "reconciled", reference: `billing-${index}`, providerRequestId: `provider-request-${index}`,
+        amountMicro: 1, currency: "CNY",
+      },
     })),
     producerProvenance: {
       controlled: true,

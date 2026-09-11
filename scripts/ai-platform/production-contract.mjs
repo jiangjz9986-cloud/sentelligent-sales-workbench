@@ -68,18 +68,22 @@ function exactIsoDate(value, name) {
 
 export function rolloutControlsForPhase(value) {
   const phase = normalizeRolloutPhase(value);
-  const legacy = phase === "P1" || phase === "P2";
+  const platformPaused = phase === "P1";
+  const singleConcurrency = phase === "P1" || phase === "P2";
   const controls = {
     rolloutPhase: phase,
     routingPhase: routingPhaseForRollout(phase),
     executionMode: phase === "P1" ? "local-simulated" : "external-provider",
     externalProvidersEnabled: phase !== "P1",
-    taskAdmissionEnabled: !legacy,
-    queuePaused: legacy,
-    businessAdmission: !legacy,
-    singleConcurrency: legacy,
-    taskConcurrency: legacy ? 1 : null,
-    taskOwnerConcurrency: legacy ? 1 : null,
+    // P2 is a platform-only live-provider acceptance window.  Its queue is
+    // open for explicitly controlled samples, while Backend business routing
+    // remains on the legacy path until P3.
+    taskAdmissionEnabled: !platformPaused,
+    queuePaused: platformPaused,
+    businessAdmission: compareRolloutPhase(phase, "P3") >= 0,
+    singleConcurrency,
+    taskConcurrency: singleConcurrency ? 1 : null,
+    taskOwnerConcurrency: singleConcurrency ? 1 : null,
   };
   return Object.freeze(controls);
 }
@@ -167,12 +171,14 @@ function validateCost(cost, index, currency) {
   const amountMicro = cost.micro ?? cost.amountMicro ?? cost.costMicro;
   if (!Number.isSafeInteger(amountMicro) || amountMicro < 0
     || typeof cost.currency !== "string" || !ACCEPTANCE_CURRENCIES.has(cost.currency)
-    || (currency !== undefined && cost.currency !== currency)) {
+    || (currency !== undefined && cost.currency !== currency)
+    || (cost.status ?? "calculated") !== "calculated") {
     contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].cost is invalid`);
   }
+  return { amountMicro, currency: cost.currency };
 }
 
-function validateBillingReconciliation(value, index) {
+function validateBillingReconciliation(value, index, { providerRequestId, cost } = {}) {
   if (!isPlainRecord(value) || (value.status !== "reconciled" && value.reconciled !== true)) {
     contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].billingReconciliation is not reconciled`);
   }
@@ -180,18 +186,30 @@ function validateBillingReconciliation(value, index) {
     if (value[field] !== undefined) exactIsoDate(value[field], `samples[${index}].billingReconciliation.${field}`);
   }
   if (value.reference !== undefined) requireAcceptanceId(value.reference, `samples[${index}].billingReconciliation.reference`);
+  if (value.providerRequestId !== undefined && value.providerRequestId !== providerRequestId) {
+    contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].billingReconciliation.providerRequestId does not match`);
+  }
+  const billedMicro = value.micro ?? value.amountMicro ?? value.costMicro;
+  if (billedMicro !== undefined && (!Number.isSafeInteger(billedMicro) || billedMicro < 0 || billedMicro !== cost.amountMicro)) {
+    contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].billingReconciliation amount does not match`);
+  }
+  if (value.currency !== undefined && value.currency !== cost.currency) {
+    contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].billingReconciliation currency does not match`);
+  }
 }
 
 function validateP2Sample(sample, index, { currency } = {}) {
   if (!isPlainRecord(sample) || sample.approved !== true) contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}] must be approved`);
   requireAcceptanceId(sample.requestId, `samples[${index}].requestId`);
+  const providerRequestId = sample.providerRequestId ?? sample.externalRequestId;
+  requireAcceptanceId(providerRequestId, `samples[${index}].providerRequestId`);
   const priceVersion = typeof sample.priceVersion === "string" ? sample.priceVersion : sample.priceVersion?.id ?? sample.priceVersionId;
   requireAcceptanceId(priceVersion, `samples[${index}].priceVersion`);
   validateUsage(sample.usage, index);
-  validateCost(sample.cost, index, currency);
-  validateBillingReconciliation(sample.billingReconciliation, index);
+  const cost = validateCost(sample.cost, index, currency);
+  validateBillingReconciliation(sample.billingReconciliation, index, { providerRequestId, cost });
   if (sample.observedAt !== undefined) exactIsoDate(sample.observedAt, `samples[${index}].observedAt`);
-  return { requestId: sample.requestId, priceVersion };
+  return { requestId: sample.requestId, providerRequestId, priceVersion };
 }
 
 export function validateP2AcceptanceReport(input, {
@@ -238,6 +256,8 @@ export function validateP2AcceptanceReport(input, {
   const samples = input.samples.map((sample, index) => validateP2Sample(sample, index, { currency }));
   const requestIds = new Set(samples.map((sample) => sample.requestId));
   if (requestIds.size !== samples.length) contractError("P2_ACCEPTANCE_DUPLICATE_REQUEST_ID");
+  const providerRequestIds = new Set(samples.map((sample) => sample.providerRequestId));
+  if (providerRequestIds.size !== samples.length) contractError("P2_ACCEPTANCE_DUPLICATE_PROVIDER_REQUEST_ID");
   const approvedSampleCount = samples.length;
   if (approvedSampleCount < P2_ACCEPTANCE_MIN_SAMPLES
     || (input.summary.total !== undefined && input.summary.total !== samples.length)
