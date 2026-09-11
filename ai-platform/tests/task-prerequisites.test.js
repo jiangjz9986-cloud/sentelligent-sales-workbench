@@ -88,7 +88,7 @@ function externalHarness(provider, { nodeEnv = "test", config: configOverrides =
     executionMode: "external-provider",
     externalProvidersEnabled: true,
     taskAdmissionEnabled: true,
-    ...(nodeEnv === "production" ? { authSecret: "a".repeat(32) } : {}),
+    ...(nodeEnv === "production" ? { authSecret: Buffer.alloc(32, 97).toString("base64url") } : {}),
     ...configOverrides,
   });
   configureExternalModel(db, { providerId: provider.id, modelId: "model-external-fixture" });

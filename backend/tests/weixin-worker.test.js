@@ -233,7 +233,7 @@ describe("WeChat worker wiring", () => {
               targetSenderId: "sender-1",
               message: "synthetic bookkeeping draft",
             },
-            leaseToken: "lease-context-expired-race",
+            leaseToken: "test-context-expired-token",
           }), { status: 200, headers: { "Content-Type": "application/json" } });
         }
         const body = JSON.parse(options.body);
@@ -268,10 +268,10 @@ describe("WeChat worker wiring", () => {
     assert.ok(statusCalls >= 2);
     assert.equal(sendCalls, 0);
     assert.deepEqual(postBodies, [
-      { id: "outbox-context-expired-race", leaseToken: "lease-context-expired-race", check: true },
+      { id: "outbox-context-expired-race", leaseToken: "test-context-expired-token", check: true },
       {
         id: "outbox-context-expired-race",
-        leaseToken: "lease-context-expired-race",
+        leaseToken: "test-context-expired-token",
         ok: false,
         errorCode: "WEIXIN_CONTEXT_EXPIRED",
       },

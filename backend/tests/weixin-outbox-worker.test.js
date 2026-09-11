@@ -72,13 +72,13 @@ describe("WeChat confirmation outbox worker boundary", () => {
         return response(200, JSON.stringify({ item: { id: "outbox-expired", status: "queued", attemptCount: 0, lastErrorCode: "WEIXIN_CONTEXT_EXPIRED" } }));
       },
     });
-    await client.releaseLeaseWithoutAttempt({ id: "outbox-expired", leaseToken: "lease-expired" });
+    await client.releaseLeaseWithoutAttempt({ id: "outbox-expired", leaseToken: "test-expired-token" });
     assert.equal(client.defer, client.releaseLeaseWithoutAttempt);
     assert.equal(request.options.headers.Authorization, "Bearer machine-secret");
     assert.equal(request.options.headers["X-Weixin-Worker-Id"], "worker-expired");
     assert.deepEqual(JSON.parse(request.options.body), {
       id: "outbox-expired",
-      leaseToken: "lease-expired",
+      leaseToken: "test-expired-token",
       ok: false,
       errorCode: "WEIXIN_CONTEXT_EXPIRED",
     });
@@ -233,7 +233,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
         async lease() {
           return {
             item: { id: "outbox-context-expired", owner: "owner", conversationId: "scope", deliveryScope: "scope", message: "draft" },
-            leaseToken: "lease-context-expired",
+            leaseToken: "test-context-expired-token",
           };
         },
         async ack(value) { acknowledgements.push(value); },
@@ -257,7 +257,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
     assert.deepEqual(acknowledgements, []);
     assert.deepEqual(releases, [{
       id: "outbox-context-expired",
-      leaseToken: "lease-context-expired",
+      leaseToken: "test-context-expired-token",
       errorCode: "WEIXIN_CONTEXT_EXPIRED",
     }]);
   });
@@ -273,7 +273,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
           reportedDelivery = delivery;
           return {
             item: { id: "legacy-expired", owner: "owner", conversationId: "scope", message: "draft" },
-            leaseToken: "legacy-expired-lease",
+            leaseToken: "test-expired-token",
           };
         },
         async ack(value) { acknowledgements.push(value); },
@@ -306,7 +306,7 @@ describe("WeChat confirmation outbox worker boundary", () => {
     assert.deepEqual(acknowledgements, []);
     assert.deepEqual(releases, [{
       id: "legacy-expired",
-      leaseToken: "legacy-expired-lease",
+      leaseToken: "test-expired-token",
       errorCode: "WEIXIN_CONTEXT_EXPIRED",
     }]);
   });
