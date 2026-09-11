@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   fsyncSync,
   linkSync,
@@ -1392,6 +1393,81 @@ function npmCliInvocation(environment, nodeExecutable) {
   );
 }
 
+function copyNpmCacheSeed(sourceRoot, destinationRoot) {
+  if (!sourceRoot || !existsSync(sourceRoot)) return false;
+  const sourceStat = lstatSync(sourceRoot);
+  if (!sourceStat.isDirectory()) {
+    throw new Error("Npm cache seed must be a directory");
+  }
+
+  const pending = [{ source: sourceRoot, destination: destinationRoot }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    mkdirSync(current.destination, { recursive: true });
+    for (const entry of readdirSync(current.source, { withFileTypes: true })) {
+      const sourcePath = join(current.source, entry.name);
+      const destinationPath = join(current.destination, entry.name);
+      const entryStat = lstatSync(sourcePath);
+      if (entryStat.isSymbolicLink()) {
+        throw new Error(`Npm cache seed cannot contain symbolic links: ${sourcePath}`);
+      }
+      if (entryStat.isDirectory()) {
+        pending.push({ source: sourcePath, destination: destinationPath });
+        continue;
+      }
+      if (!entryStat.isFile()) {
+        throw new Error(`Npm cache seed contains an unsupported entry: ${sourcePath}`);
+      }
+      mkdirSync(dirname(destinationPath), { recursive: true });
+      copyFileSync(sourcePath, destinationPath);
+    }
+  }
+  return true;
+}
+
+function runNpmCi({
+  npm,
+  cwd,
+  environment,
+  cacheRoot,
+  userConfigPath,
+  globalConfigPath,
+  includeDev = false,
+  cacheSeeded,
+}) {
+  const installOptions = [
+    "--ignore-scripts",
+    ...(includeDev ? ["--include=dev"] : ["--omit=dev", "--install-links"]),
+    "--no-audit",
+    "--no-fund",
+    "--cache",
+    cacheRoot,
+    "--userconfig",
+    userConfigPath,
+    "--globalconfig",
+    globalConfigPath,
+  ];
+  const cacheModes = cacheSeeded
+    ? ["--offline", "--prefer-offline"]
+    : ["--prefer-offline"];
+  let result;
+  for (const cacheMode of cacheModes) {
+    result = spawnSync(
+      npm.command,
+      [...npm.argsPrefix, "ci", ...installOptions.slice(0, 4), cacheMode, ...installOptions.slice(4)],
+      {
+        cwd,
+        encoding: "utf8",
+        env: npm.environment ?? environment,
+        timeout: 300_000,
+        windowsHide: true,
+      },
+    );
+    if (result.status === 0 || cacheMode === "--prefer-offline") break;
+  }
+  return result;
+}
+
 function installFrontendDependencies({
   checkoutRoot,
   commit,
@@ -1399,6 +1475,7 @@ function installFrontendDependencies({
   packageJson,
   temporaryRoot,
   nodeExecutable,
+  cacheSeedRoot,
 }) {
   const lockfilePath = join(frontendRoot, "package-lock.json");
   const committedLockfile = existsSync(lockfilePath)
@@ -1454,6 +1531,7 @@ function installFrontendDependencies({
   const userConfigPath = join(temporaryRoot, "empty-user-npmrc");
   const globalConfigPath = join(temporaryRoot, "empty-global-npmrc");
   mkdirSync(cacheRoot, { recursive: true });
+  const cacheSeeded = copyNpmCacheSeed(cacheSeedRoot, cacheRoot);
   writeFileSync(userConfigPath, "", { flag: "wx" });
   writeFileSync(globalConfigPath, "", { flag: "wx" });
   const installEnvironment = npmInstallEnvironment(
@@ -1463,30 +1541,16 @@ function installFrontendDependencies({
     nodeExecutable,
   );
   const npm = npmCliInvocation(installEnvironment, nodeExecutable);
-  const result = spawnSync(
-    npm.command,
-    [
-      ...npm.argsPrefix,
-      "ci",
-      "--ignore-scripts",
-      "--include=dev",
-      "--no-audit",
-      "--no-fund",
-      "--cache",
-      cacheRoot,
-      "--userconfig",
-      userConfigPath,
-      "--globalconfig",
-      globalConfigPath,
-    ],
-    {
-      cwd: frontendRoot,
-      encoding: "utf8",
-      env: npm.environment ?? installEnvironment,
-      timeout: 300_000,
-      windowsHide: true,
-    },
-  );
+  const result = runNpmCi({
+    npm,
+    cwd: frontendRoot,
+    environment: installEnvironment,
+    cacheRoot,
+    userConfigPath,
+    globalConfigPath,
+    includeDev: true,
+    cacheSeeded,
+  });
   if (result.status !== 0) {
     const message = result.error?.message || result.stderr || result.stdout;
     throw new Error(
@@ -1520,6 +1584,7 @@ function installComponentProductionDependencies({
   temporaryRoot,
   nodeExecutable,
   componentPath = BACKEND_PATH,
+  cacheSeedRoot,
 }) {
   if (![BACKEND_PATH, "ai-platform"].includes(componentPath)) throw new Error("Unsupported release component");
   const lockfileReleasePath = componentPath + "/package-lock.json";
@@ -1582,6 +1647,7 @@ function installComponentProductionDependencies({
   const userConfigPath = join(temporaryRoot, "empty-" + componentPath + "-user-npmrc");
   const globalConfigPath = join(temporaryRoot, "empty-" + componentPath + "-global-npmrc");
   mkdirSync(cacheRoot, { recursive: true });
+  const cacheSeeded = copyNpmCacheSeed(cacheSeedRoot, cacheRoot);
   writeFileSync(userConfigPath, "", { flag: "wx" });
   writeFileSync(globalConfigPath, "", { flag: "wx" });
   const installEnvironment = npmInstallEnvironment(
@@ -1591,31 +1657,15 @@ function installComponentProductionDependencies({
     nodeExecutable,
   );
   const npm = npmCliInvocation(installEnvironment, nodeExecutable);
-  const result = spawnSync(
-    npm.command,
-    [
-      ...npm.argsPrefix,
-      "ci",
-      "--ignore-scripts",
-      "--omit=dev",
-      "--install-links",
-      "--no-audit",
-      "--no-fund",
-      "--cache",
-      cacheRoot,
-      "--userconfig",
-      userConfigPath,
-      "--globalconfig",
-      globalConfigPath,
-    ],
-    {
-      cwd: backendRoot,
-      encoding: "utf8",
-      env: npm.environment ?? installEnvironment,
-      timeout: 300_000,
-      windowsHide: true,
-    },
-  );
+  const result = runNpmCi({
+    npm,
+    cwd: backendRoot,
+    environment: installEnvironment,
+    cacheRoot,
+    userConfigPath,
+    globalConfigPath,
+    cacheSeeded,
+  });
   if (result.status !== 0) {
     const message = result.error?.message || result.stderr || result.stdout;
     throw new Error(
@@ -1695,7 +1745,13 @@ function assertBuildDidNotMutateCommit(checkoutRoot, commit) {
   }
 }
 
-function buildFrontendFromCommit(checkoutRoot, commit, temporaryRoot, nodeExecutable) {
+function buildFrontendFromCommit(
+  checkoutRoot,
+  commit,
+  temporaryRoot,
+  nodeExecutable,
+  cacheSeedRoot,
+) {
   const frontendRoot = join(checkoutRoot, PRODUCT_FRONTEND_PATH);
   const packagePath = join(frontendRoot, "package.json");
   if (!existsSync(packagePath)) {
@@ -1725,6 +1781,7 @@ function buildFrontendFromCommit(checkoutRoot, commit, temporaryRoot, nodeExecut
       packageJson,
       temporaryRoot,
       nodeExecutable,
+      cacheSeedRoot,
     });
     const invocation = resolveNpmBuildInvocation(
       frontendRoot,
@@ -2402,12 +2459,14 @@ export async function createReleasePackage(options = {}) {
       source.commit,
       worktree.temporaryRoot,
       nodeExecutable,
+      join(root, PRODUCT_FRONTEND_PATH, ".npm-cache"),
     );
     const backendBuildProvenance = installComponentProductionDependencies({
       checkoutRoot: worktree.checkoutRoot,
       commit: source.commit,
       temporaryRoot: worktree.temporaryRoot,
       nodeExecutable,
+      cacheSeedRoot: join(root, BACKEND_PATH, ".npm-cache"),
     });
     const platformBuildProvenance = installComponentProductionDependencies({
       checkoutRoot: worktree.checkoutRoot,
@@ -2415,6 +2474,7 @@ export async function createReleasePackage(options = {}) {
       temporaryRoot: worktree.temporaryRoot,
       nodeExecutable,
       componentPath: "ai-platform",
+      cacheSeedRoot: join(root, "ai-platform", ".npm-cache"),
     });
     const buildProvenance = {
       ...(frontendBuildProvenance || {}),

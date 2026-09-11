@@ -246,6 +246,19 @@ function copyTrackedProject(sourceRoot, destinationRoot) {
     join(destinationRoot, productDist),
   );
 
+  const productNpmCache = join(
+    sourceRoot,
+    "outputs",
+    "product-design-prototype",
+    ".npm-cache",
+  );
+  if (existsSync(productNpmCache)) {
+    copyDirectoryFiles(
+      productNpmCache,
+      join(destinationRoot, "outputs", "product-design-prototype", ".npm-cache"),
+    );
+  }
+
 }
 
 async function withEnvironmentVariable(name, value, callback) {
