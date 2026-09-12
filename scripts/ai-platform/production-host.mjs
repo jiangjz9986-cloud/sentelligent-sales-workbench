@@ -148,6 +148,33 @@ export function postflightHealthMatchesRollout(health, rolloutPhase) {
   return platform?.ready === true;
 }
 
+export function postflightHealthResponseMatchesRollout(status, health, rolloutPhase) {
+  return status === 200
+    && health?.database === "ready"
+    && postflightHealthMatchesRollout(health, rolloutPhase);
+}
+
+export async function pollPostflightHealth(
+  rolloutPhase,
+  { fetcher = fetch, attempts = 12, retryMs = 250, sleepFn = sleep } = {},
+) {
+  let last = { status: 0, health: null };
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetcher("http://127.0.0.1:8897/api/health", {
+        signal: AbortSignal.timeout(10_000),
+      });
+      const health = await response.json().catch(() => null);
+      last = { status: response.status, health };
+      if (postflightHealthResponseMatchesRollout(response.status, health, rolloutPhase)) return last;
+    } catch {
+      last = { status: 0, health: null };
+    }
+    if (attempt + 1 < attempts) await sleepFn(retryMs);
+  }
+  return last;
+}
+
 function verifyNewReleaseArchive(manifest) {
   const archive = privateFile(manifest.newArchive, manifest.newArchiveSha256);
   const releaseManifest = JSON.parse(
@@ -437,10 +464,8 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       await corePreflight(manifest.newRelease, manifest.newCommit, "postflight");
       const unit = inspectUnit(PLATFORM_SERVICE);
       check(unit.ActiveState === "active" && unit.User === PLATFORM_USER && unit.WorkingDirectory === manifest.newRelease, "PLATFORM_UNIT_IDENTITY_INVALID");
-      const response = await fetch("http://127.0.0.1:8897/api/health", { signal: AbortSignal.timeout(10000) });
-      const health = await response.json();
-      check(response.status === 200 && health.database === "ready"
-        && postflightHealthMatchesRollout(health, rolloutPhase), "BUSINESS_POSTFLIGHT_FAILED");
+      const postflight = await pollPostflightHealth(rolloutPhase);
+      check(postflightHealthResponseMatchesRollout(postflight.status, postflight.health, rolloutPhase), "BUSINESS_POSTFLIGHT_FAILED");
       assertProtected();
       markState({ status: "cutover-passed", currentRelease: manifest.newRelease });
     },
