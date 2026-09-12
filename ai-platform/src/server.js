@@ -427,6 +427,7 @@ export function createServer(options = {}) {
         id: provider.credentialEnv, value: body.apiKey, clear: method === "DELETE", expectedRevision: body.expectedRevision,
         operationId: body.operationId, actor: writeAuth.actor,
       });
+      await runtime.providerRegistry.refreshReadiness?.({ providerId: provider.id });
       return sendJson(response, 200, { item }, requestId);
     }
     if (parts.length === 0 || (parts.length === 1 && parts[0] === "health")) {

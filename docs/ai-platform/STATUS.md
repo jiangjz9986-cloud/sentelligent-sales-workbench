@@ -88,6 +88,12 @@
 更新：2026-09-12（r11 生产切换与 Chrome 直达验收证据均生成于 2026-09-12）。主任务已接管生产融合，完整执行边界见
 [FUSION-EXECUTION.md](FUSION-EXECUTION.md)。
 
+后续完整开发完善计划见 [FOLLOW-UP-PLAN-20260912.md](FOLLOW-UP-PLAN-20260912.md)。目标工具已创建
+`active` 目标；用户指定的开发执行设置为 Codex `gpt-5.6-luna / max`，实际切换以应用工具返回为准。
+业务系统仍统一调用 DeepSeek `deepseek-flash`。当前有新增代码待收口：首次真实 canary 放行、
+与 provider 相容的 P2 请求、可恢复采样和后置账单对账；不能仅将它们归类为外部条件不足。
+模型目录 GET 只建立 `probeReady`，不证明真实 completion 成功，不得直接设置 `liveReady`。
+
 ## 历史融合进度
 
 - 工作树：`ai-platform-production-integration-20260909`；

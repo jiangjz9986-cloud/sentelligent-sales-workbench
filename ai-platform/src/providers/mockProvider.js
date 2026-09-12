@@ -74,5 +74,10 @@ export function createProviderRegistry({ providers = null, config = {}, env = pr
   return Object.freeze({
     get: (id) => map.get(id) ?? null,
     list: () => [...map.values()],
+    readiness: (context = {}) => map.get(context.providerId)?.readiness?.(context) ?? null,
+    async refreshReadiness(context = {}) {
+      const selected = context.providerId ? [map.get(context.providerId)].filter(Boolean) : [...map.values()];
+      return Promise.all(selected.map((provider) => provider.refreshReadiness?.(context) ?? provider.readiness?.(context) ?? null));
+    },
   });
 }

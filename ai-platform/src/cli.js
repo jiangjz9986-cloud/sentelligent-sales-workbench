@@ -78,6 +78,10 @@ async function start(overrides) {
       throw error;
     }
   }
+  const providerProbe = config.executionMode === "external-provider" && config.externalProvidersEnabled
+    ? server.aiPlatform.providerRegistry.refreshReadiness?.({ signal: AbortSignal.timeout(10_000) })
+    : null;
+  if (providerProbe) await providerProbe;
   process.stdout.write(config.socketPath ? "AI platform listening on its protected local socket\n" : `AI platform listening on http://${config.host}:${address.port}\n`);
   let stopping = false;
   const stop = () => {

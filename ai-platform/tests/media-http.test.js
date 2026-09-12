@@ -26,6 +26,11 @@ test("signed binary upload drives vision and ASR over HTTP with owner binding, r
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "ai-media-http-")));
   const supplied = [];
   const supplier = createHttpServer(async (request, response) => {
+    if (request.url === "/models") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify({ data: [{ id: "vision-test" }, { id: "asr-test" }] }));
+      return;
+    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const raw = Buffer.concat(chunks);
@@ -72,6 +77,7 @@ test("signed binary upload drives vision and ASR over HTTP with owner binding, r
     );
     db.prepare("INSERT INTO price_versions SELECT ?, ?, 'fixture-v1', 'USD', 1000, 1000, 0, 60, 0, 0, effective_from, effective_to, created_at FROM price_versions WHERE id = 'price-mock-zero-v1'").run("price-" + model.name, model.name);
   }
+  await platform.aiPlatform.providerRegistry.refreshReadiness();
   platform.aiPlatform.taskService.start();
   await listen(platform);
   const runtimeConfig = {

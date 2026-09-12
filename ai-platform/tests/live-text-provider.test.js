@@ -104,9 +104,85 @@ test("provider policy rejects unapproved origins, raw credentials, unsupported c
   await assert.rejects(provider.execute(providerInput()), (error) => error.code === "provider_response_too_large");
 });
 
+test("an authenticated model catalogue establishes probe readiness without claiming live completion evidence", async () => {
+  const calls = [];
+  const provider = configured(async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ data: [{ id: "deepseek-flash" }] });
+  });
+  assert.equal(provider.readiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" }).ready, false);
+  const ready = await provider.refreshReadiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" });
+  assert.equal(ready.ready, true);
+  assert.equal(ready.probeReady, true);
+  assert.equal(ready.liveReady, false);
+  assert.equal(ready.code, "probe_ready");
+  assert.equal(calls[0].url, "https://api.deepseek.com/models");
+  assert.equal(calls[0].options.method, "GET");
+  assert.equal(calls[0].options.headers.Authorization, `Bearer ${ENV.AI_PROVIDER_TEST_KEY}`);
+
+  const missing = configured(async () => Response.json({ data: [{ id: "other-model" }] }));
+  const blocked = await missing.refreshReadiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" });
+  assert.equal(blocked.ready, false);
+  assert.equal(blocked.code, "model_unavailable");
+});
+
+test("the production runtime rejects a catalogue-only provider before creating a task or reserving budget", async () => {
+  const requests = [];
+  const runtime = createAiPlatformRuntime({
+    config: {
+      nodeEnv: "production", databasePath: ":memory:", executionMode: "external-provider",
+      externalProvidersEnabled: true, taskAdmissionEnabled: true,
+      authSecret: Buffer.alloc(32, 91).toString("base64url"),
+      taskEncryptionKey: Buffer.alloc(32, 92).toString("base64url"),
+      providerAllowedOrigins: ["https://api.deepseek.com"], providerPolicies: [POLICY],
+    },
+    env: ENV, autoStart: false,
+    providerFetchImpl: async (url, options) => {
+      requests.push({ url, method: options.method });
+      return Response.json({ data: [{ id: "deepseek-flash" }] });
+    },
+  });
+  try {
+    const db = runtime.db;
+    db.prepare("INSERT INTO providers VALUES (?, ?, 'openai_compatible', 1, '{}', ?, ?)").run(POLICY.id, "Fixture", "2026-01-01", "2026-01-01");
+    db.prepare("INSERT INTO models VALUES ('model-text-test', ?, 'deepseek-flash', '{\"text\":true}', 1, ?, ?)").run(POLICY.id, "2026-01-01", "2026-01-01");
+    db.prepare("UPDATE agent_versions SET model_policy_json = ? WHERE agent_id = 'agent-quick-record'")
+      .run(JSON.stringify({ providerId: POLICY.id, modelId: "model-text-test", externalAllowed: true }));
+    db.prepare("INSERT INTO price_versions SELECT 'price-text-test', 'model-text-test', 'test-v1', 'USD', 1000, 1000, 100, 0, 0, 0, effective_from, effective_to, created_at FROM price_versions WHERE id = 'price-mock-zero-v1'").run();
+    await runtime.providerRegistry.refreshReadiness({ providerId: POLICY.id });
+    const status = runtime.taskService.configurationReadiness()["quick-record.analyze"];
+    assert.equal(status.probeReady, true);
+    assert.equal(status.liveReady, false);
+    assert.equal(status.ready, false);
+    assert.throws(() => runtime.taskService.createTask({
+      identity: { issuer: "backend", owner: "alice", actor: "alice" },
+      idempotencyKey: "catalogue-only",
+      request: { taskType: "quick-record.analyze", feature: "quick-record", channel: "web", input: requestInput },
+    }), (error) => error.code === "provider_live_not_ready");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM tasks").get().n, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM budget_reservations").get().n, 0);
+    assert.deepEqual(requests, [{ url: "https://api.deepseek.com/models", method: "GET" }]);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("provider readiness never exposes the credential when the probe fails", async () => {
+  const provider = configured(async () => { throw new Error("network failure"); });
+  const result = await provider.refreshReadiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" });
+  assert.equal(result.ready, false);
+  assert.equal(result.code, "probe_failed");
+  assert.equal(JSON.stringify(result).includes(ENV.AI_PROVIDER_TEST_KEY), false);
+});
+
 test("default runtime registers configured text providers and persists real HTTP attempts and usage", async () => {
   let calls = 0;
   const supplier = createHttpServer(async (req, res) => {
+    if (req.url === "/models") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ data: [{ id: "deepseek-flash" }] }));
+      return;
+    }
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const payload = JSON.parse(Buffer.concat(chunks).toString());
@@ -133,6 +209,7 @@ test("default runtime registers configured text providers and persists real HTTP
       .run(JSON.stringify({ providerId: POLICY.id, modelId: "model-text-test", externalAllowed: true }));
     db.prepare("INSERT INTO price_versions SELECT 'price-text-test', 'model-text-test', 'test-v1', 'USD', 1000, 1000, 100, 0, 0, 0, effective_from, effective_to, created_at FROM price_versions WHERE id = 'price-mock-zero-v1'").run();
     const identity = { issuer: "backend", owner: "alice", actor: "alice" };
+    await runtime.providerRegistry.refreshReadiness({ providerId: POLICY.id });
     const task = runtime.taskService.createTask({ identity, idempotencyKey: "live-http", request: { taskType: "quick-record.analyze", feature: "quick-record", channel: "web", input: requestInput } });
     await runtime.taskService.runPending();
     assert.equal(runtime.taskService.readTask({ identity, taskId: task.taskId }).status, "succeeded");

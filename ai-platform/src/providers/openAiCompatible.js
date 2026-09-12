@@ -7,6 +7,8 @@ const TEXT_TASKS = new Set(AI_TASK_TYPES.filter((type) => !["invoice.recognize",
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/u;
 const ALLOWED_FIELDS = new Set(["id", "kind", "baseUrl", "credentialEnv", "models"]);
 const MODEL_FIELDS = new Set(["name", "taskTypes", "reasoning", "reasoningEffort", "maxOutputTokens"]);
+const PROBE_MAX_BYTES = 128 * 1024;
+const PROBE_TIMEOUT_MS = 10_000;
 
 function invalid(message = "invalid provider policy") {
   return new AiPlatformError(message, { code: "provider_configuration_invalid", status: 503 });
@@ -92,6 +94,17 @@ async function boundedResponse(response, maxBytes) {
 }
 
 export function createOpenAiCompatibleProvider(policy, { env = process.env, fetchImpl = fetch, pdfOptions = {}, credentialResolver = null } = {}) {
+  let readinessState = Object.freeze({
+    configured: false,
+    credentialReady: false,
+    probeReady: false,
+    liveReady: false,
+    ready: false,
+    code: "not_configured",
+    checkedAt: null,
+    models: Object.freeze([]),
+  });
+
   function credential() {
     const value = String(credentialResolver ? credentialResolver(policy.credentialEnv) : env[policy.credentialEnv] ?? "");
     if (!value || value.length > 4096 || /[\s\u0000-\u001f\u007f]/u.test(value)) {
@@ -100,6 +113,111 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
       throw error;
     }
     return value;
+  }
+  function configuredModelNames() {
+    return policy.models.map((model) => model.name);
+  }
+  function readiness(context = {}) {
+    let credentialReady = true;
+    try { credential(); } catch { credentialReady = false; }
+    const modelName = typeof context.modelName === "string" ? context.modelName : null;
+    const taskType = typeof context.taskType === "string" ? context.taskType : null;
+    const capabilityReady = modelName && taskType
+      ? policy.models.some((model) => model.name === modelName && model.taskTypes.includes(taskType))
+      : true;
+    const modelReady = modelName ? readinessState.models.includes(modelName) : readinessState.probeReady;
+    const probeReady = credentialReady && readinessState.probeReady && modelReady;
+    const liveReady = credentialReady && readinessState.liveReady && modelReady;
+    // Production task admission also requires liveReady. A model catalogue
+    // response only establishes the endpoint probe, never completion evidence.
+    const ready = credentialReady && capabilityReady && probeReady;
+    const code = !credentialReady
+      ? "not_configured"
+      : !capabilityReady
+        ? "capability_unsupported"
+        : readinessState.code;
+    return Object.freeze({
+      configured: credentialReady,
+      credentialReady,
+      capabilityReady,
+      probeReady,
+      liveReady,
+      ready,
+      code,
+      checkedAt: readinessState.checkedAt,
+      models: readinessState.models,
+    });
+  }
+  async function refreshReadiness({ modelName = null, taskType = null, signal } = {}) {
+    let key;
+    try {
+      key = credential();
+    } catch {
+      readinessState = Object.freeze({
+        configured: false,
+        credentialReady: false,
+        probeReady: false,
+        liveReady: false,
+        ready: false,
+        code: "not_configured",
+        checkedAt: new Date().toISOString(),
+        models: Object.freeze([]),
+      });
+      return readiness({ modelName, taskType });
+    }
+    const requestSignal = signal ?? AbortSignal.timeout(PROBE_TIMEOUT_MS);
+    try {
+      const response = await fetchImpl(policy.baseUrl + "/models", {
+        method: "GET",
+        redirect: "error",
+        signal: requestSignal,
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      if (!response.ok) {
+        await response.body?.cancel?.();
+        readinessState = Object.freeze({
+          configured: true,
+          credentialReady: true,
+          probeReady: false,
+          liveReady: false,
+          ready: false,
+          code: response.status === 429 ? "rate_limited" : "probe_failed",
+          checkedAt: new Date().toISOString(),
+          models: Object.freeze([]),
+        });
+        return readiness({ modelName, taskType });
+      }
+      const parsed = await boundedResponse(response, PROBE_MAX_BYTES);
+      const available = Array.isArray(parsed?.data)
+        ? parsed.data.map((item) => item?.id)
+        : Array.isArray(parsed?.models)
+          ? parsed.models.map((item) => typeof item === "string" ? item : item?.id ?? item?.name)
+          : [];
+      const availableModels = [...new Set(available.filter((item) => typeof item === "string" && MODEL_NAME.test(item)))];
+      const missing = configuredModelNames().filter((name) => !availableModels.includes(name));
+      readinessState = Object.freeze({
+        configured: true,
+        credentialReady: true,
+        probeReady: missing.length === 0,
+        liveReady: false,
+        ready: missing.length === 0,
+        code: missing.length === 0 ? "probe_ready" : "model_unavailable",
+        checkedAt: new Date().toISOString(),
+        models: Object.freeze(availableModels),
+      });
+    } catch (error) {
+      readinessState = Object.freeze({
+        configured: true,
+        credentialReady: true,
+        probeReady: false,
+        liveReady: false,
+        ready: false,
+        code: requestSignal.aborted ? "probe_timeout" : error?.code === "provider_response_too_large" ? error.code : "probe_failed",
+        checkedAt: new Date().toISOString(),
+        models: Object.freeze([]),
+      });
+    }
+    return readiness({ modelName, taskType });
   }
   async function prepare({ task, model, agent, limits, mediaStore, signal }) {
     credential();
@@ -141,6 +259,8 @@ export function createOpenAiCompatibleProvider(policy, { env = process.env, fetc
   return Object.freeze({
     id: policy.id,
     kind: policy.kind,
+    readiness,
+    refreshReadiness,
     supports({ modelName, taskType }) {
       try { credential(); } catch { return false; }
       return policy.models.some((model) => model.name === modelName && model.taskTypes.includes(taskType));
