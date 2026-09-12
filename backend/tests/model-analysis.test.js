@@ -85,7 +85,7 @@ function modelConfig(overrides = {}) {
   return {
     aiAnalysisMode: "model",
     modelProvider: "deepseek",
-    modelName: "deepseek-v4-flash",
+    modelName: "deepseek-flash",
     ...rest,
     aiPlatformRuntime: aiPlatformRuntime ?? completionRuntime(
       () => jsonResponse({ choices: [{ message: { content: draftContent() } }] }),
@@ -142,7 +142,7 @@ describe("model-backed quick record analysis", () => {
     const result = await analyzeQuickRecord("日照中医医院需要十五五规划材料", {
       aiAnalysisMode: "model",
       modelProvider: "deepseek",
-      aiPlatformTargetModel: "gpt-5.6-luna",
+      aiPlatformTargetModel: "deepseek-flash",
       aiPlatformRuntime: completionRuntime(
         () => jsonResponse({ choices: [{ message: { content: modelContent() } }] }),
         calls,
@@ -156,7 +156,7 @@ describe("model-backed quick record analysis", () => {
     assert.equal(calls[0].metadata.feature, "quick_record_analysis");
     assert.equal(calls[0].metadata.channel, "web");
     assert.equal(calls[0].metadata.owner, "sentelligent-sales-workbench");
-    assert.equal(calls[0].request.model, "gpt-5.6-luna");
+    assert.equal(calls[0].request.model, "deepseek-flash");
     assert.deepEqual(calls[0].request.response_format, { type: "json_object" });
     assert.deepEqual(calls[0].request.thinking, { type: "disabled" });
     assert.equal(calls[0].request.stream, false);

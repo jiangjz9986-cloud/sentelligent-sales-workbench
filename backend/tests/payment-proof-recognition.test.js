@@ -37,7 +37,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
       referenceDate: "2026-08-25",
     });
 
@@ -50,7 +50,7 @@ describe("payment-proof recognition", () => {
     assert.equal(result.evidence.amountCents, 200);
     assert.deepEqual(result.source, {
       provider: "deepseek",
-      model: "deepseek-v4-flash-vision-exp",
+      model: "deepseek-flash",
     });
     assert.deepEqual(result.warnings, []);
   });
@@ -70,7 +70,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
     });
 
     assert.equal(result.documentKind, "invoice");
@@ -111,7 +111,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
     });
 
     assert.deepEqual(result.evidence, {
@@ -154,7 +154,7 @@ describe("payment-proof recognition", () => {
           })),
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
     });
     assert.equal(overflow.evidence, null);
     assert.equal(Object.hasOwn(overflow, "transactions"), false);
@@ -174,7 +174,7 @@ describe("payment-proof recognition", () => {
           }],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
     });
     assert.equal(unexpectedField.evidence, null);
     assert.deepEqual(unexpectedField.warnings, ["MODEL_INVALID_RESPONSE"]);
@@ -195,7 +195,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
       referenceDate: "2026-08-26",
     });
     assert.equal(sameYear.evidence.occurredOn, "2026-08-24");
@@ -215,7 +215,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
       referenceDate: "2026-01-02",
     });
     assert.equal(previousYear.evidence.occurredOn, "2025-12-31");
@@ -234,7 +234,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
       referenceDate: "2025-02-28",
     });
     assert.equal(leapDay.evidence.occurredOn, "2024-02-29");
@@ -255,7 +255,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
     });
     assert.equal(result.evidence.occurredOn, null);
     assert.equal(result.evidence.occurredOnYearExplicit, false);
@@ -295,7 +295,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
       referenceDate: "2026-08-26",
     });
 
@@ -324,7 +324,7 @@ describe("payment-proof recognition", () => {
           warnings: [],
         };
       },
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
       referenceDate: "2026-08-26",
     });
     assert.equal(noDate.evidence.occurredOn, null);
@@ -349,7 +349,7 @@ describe("payment-proof recognition", () => {
     ]) {
       const invalid = await recognizePaymentProofDocument(file, {
         async analyzeDocument() { return invalidResult; },
-        modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
         referenceDate: "2026-08-26",
       });
       assert.equal(invalid.evidence, null);
@@ -372,7 +372,7 @@ describe("payment-proof recognition", () => {
             warnings: [],
           };
         },
-        modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
         referenceDate: "2026-08-26",
       });
       assert.equal(result.evidence.occurredOn, occurredOn);
@@ -428,7 +428,7 @@ describe("payment-proof recognition", () => {
     });
     assert.deepEqual(result.conflicts, []);
     assert.equal(result.confidence, 0.94);
-    assert.deepEqual(result.source, { provider: "deepseek", model: "deepseek-v4-flash" });
+    assert.deepEqual(result.source, { provider: "deepseek", model: "deepseek-flash" });
     assert.deepEqual(result.warnings, []);
   });
 
@@ -446,7 +446,7 @@ describe("payment-proof recognition", () => {
           }],
         };
       },
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
     });
 
     assert.deepEqual(result, {

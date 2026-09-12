@@ -889,7 +889,7 @@ describe("proactive background worker", () => {
       retryBaseMs: 10,
       snapshotBuilder: () => ({ items: [{ ...makeSuggestion("proactive-model"), opportunityId: "op-model", subjectId: "op-model", customerId: "owner-a-customer" }] }),
       modelProvider: "deepseek",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       modelTimeoutMs: 1_000,
       modelRetryLimit: 0,
       modelAnalyzer: async (context) => {
@@ -914,7 +914,7 @@ describe("proactive background worker", () => {
     const item = worker.suggestionRepository.get("proactive-model", { owner: "owner-a" });
     assert.equal(item.source, "model");
     assert.equal(item.modelProvider, "deepseek");
-    assert.equal(item.modelName, "deepseek-v4-flash");
+    assert.equal(item.modelName, "deepseek-flash");
     assert.equal(item.fallbackReason, null);
     db.close();
   });
@@ -979,7 +979,7 @@ describe("proactive background worker", () => {
         }],
       }),
       modelProvider: "deepseek",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       modelTimeoutMs: 1_000,
       modelRetryLimit: 0,
       modelAnalyzer: async (context) => {
@@ -1022,7 +1022,7 @@ describe("proactive background worker", () => {
       retryBaseMs: 10,
       snapshotBuilder: () => ({ items: [{ ...makeSuggestion("proactive-model-fail"), opportunityId: "op-model-fail", subjectId: "op-model-fail", customerId: "owner-a-customer" }] }),
       modelProvider: "deepseek",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       modelTimeoutMs: 1_000,
       modelRetryLimit: 0,
       modelAnalyzer: async () => { throw Object.assign(new Error("provider unavailable"), { code: "UPSTREAM_UNAVAILABLE" }); },
@@ -1054,7 +1054,7 @@ describe("proactive background worker", () => {
       leaseMs: 1_000,
       retryBaseMs: 10,
       modelProvider: "deepseek",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       modelRetryLimit: 0,
       modelCacheTtlMs: 1_000,
       modelOwnerDailyLimit: 10,
@@ -1126,7 +1126,7 @@ describe("proactive background worker", () => {
       leaseMs: 1_000,
       retryBaseMs: 10,
       modelProvider: "deepseek",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       modelRetryLimit: 0,
       modelCacheTtlMs: 60_000,
       modelOwnerDailyLimit: 1,
@@ -1166,7 +1166,7 @@ describe("proactive background worker", () => {
       leaseMs: 1_000,
       retryBaseMs: 10,
       modelProvider: "deepseek",
-      modelName: "deepseek-v4-flash",
+      modelName: "deepseek-flash",
       modelRetryLimit: 0,
       modelCacheTtlMs: 60_000,
       modelOwnerDailyLimit: 1,

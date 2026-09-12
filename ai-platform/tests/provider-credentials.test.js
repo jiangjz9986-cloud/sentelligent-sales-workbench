@@ -8,7 +8,7 @@ test("credential replacement and clear affect each request, remain encrypted and
   const db = openAiPlatformDatabase(":memory:");
   const policy = normalizeProviderPolicies([{
     id: "provider-deepseek", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_DEEPSEEK_KEY",
-    models: [{ name: "deepseek-v4-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }],
+    models: [{ name: "deepseek-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }],
   }], { allowedOrigins: ["https://api.deepseek.com"] })[0];
   const env = { AI_PROVIDER_DEEPSEEK_KEY: "synthetic-initial-credential" };
   const encryptionKey = Buffer.alloc(32, 99).toString("base64url");
@@ -19,14 +19,14 @@ test("credential replacement and clear affect each request, remain encrypted and
     fetchImpl: async (_url, options) => {
       calls.push(options.headers.Authorization);
       return Response.json({
-        model: "deepseek-v4-flash", choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
+        model: "deepseek-flash", choices: [{ message: { content: "{}" }, finish_reason: "stop" }],
         usage: { prompt_tokens: 1, completion_tokens: 1 },
       });
     },
   });
   const task = {
     task: { id: "task-key-rotation", taskType: "quick-record.analyze", input: { protocol: "chat.completions.v1", request: { max_tokens: 3200, messages: [{ role: "user", content: "fixture" }] } } },
-    model: { name: "deepseek-v4-flash", providerId: policy.id }, agent: { limits: { maxTokens: 3200 } },
+    model: { name: "deepseek-flash", providerId: policy.id }, agent: { limits: { maxTokens: 3200 } },
   };
   try {
     await provider.execute(task);
@@ -41,7 +41,7 @@ test("credential replacement and clear affect each request, remain encrypted and
     assert.equal(cleared.configured, false);
     vault = createProviderCredentials({ db, encryptionKey, policies: [policy], env });
     await assert.rejects(provider.execute(task), (error) => error.providerStarted === false);
-    assert.equal(provider.supports({ modelName: "deepseek-v4-flash", taskType: "quick-record.analyze" }), false);
+    assert.equal(provider.supports({ modelName: "deepseek-flash", taskType: "quick-record.analyze" }), false);
     assert.equal(calls.length, 2);
     assert.equal(db.prepare("SELECT count(*) n FROM provider_credential_audit").get().n, 2);
     assert.equal(JSON.stringify(vault.metadata(policy.credentialEnv)).includes("synthetic-replacement"), false);
@@ -52,7 +52,7 @@ test("credential operation ids are idempotent and cannot be reused for another d
   const db = openAiPlatformDatabase(":memory:");
   const policy = normalizeProviderPolicies([{
     id: "provider-deepseek", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_DEEPSEEK_KEY",
-    models: [{ name: "deepseek-v4-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }],
+    models: [{ name: "deepseek-flash", taskTypes: ["quick-record.analyze"], maxOutputTokens: 3200 }],
   }], { allowedOrigins: ["https://api.deepseek.com"] })[0];
   const encryptionKey = Buffer.alloc(32, 100).toString("base64url");
   const vault = createProviderCredentials({

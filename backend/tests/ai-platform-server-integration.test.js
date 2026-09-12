@@ -185,7 +185,7 @@ beforeEach(async () => {
     aiPlatformMode: "required",
     aiPlatformBaseUrl,
     aiPlatformAuthSecret: PLATFORM_SECRET,
-    aiPlatformTargetModel: "gpt-5.6-luna",
+    aiPlatformTargetModel: "deepseek-flash",
     aiPlatformTargetReasoningEffort: "max",
     aiPlatformExecutionMode: "local-simulated",
     aiPlatformMaxWaitMs: 5_000,
@@ -276,9 +276,9 @@ describe("backend and AI platform HTTP integration", () => {
     assert.equal(task.channel, "web");
     assert.equal(task.taskType, "quick-record.analyze");
     assert.equal(task.status, "succeeded");
-    assert.equal(task.input.model, "gpt-5.6-luna");
+    assert.equal(task.input.model, "deepseek-flash");
     assert.equal(task.input.reasoningEffort, "max");
-    assert.equal(task.input.request.model, "gpt-5.6-luna");
+    assert.equal(task.input.request.model, "deepseek-flash");
     assert.equal(task.input.request.reasoningEffort, "max");
 
     const detail = await request(
@@ -288,7 +288,7 @@ describe("backend and AI platform HTTP integration", () => {
     );
     assert.equal(detail.response.status, 200);
     assert.equal(detail.body.item.task.output.metadata.executionMode, "local-simulated");
-    assert.equal(detail.body.item.task.output.metadata.logicalTargetModel, "gpt-5.6-luna");
+    assert.equal(detail.body.item.task.output.metadata.logicalTargetModel, "deepseek-flash");
     assert.equal(detail.body.item.task.output.metadata.targetReasoningEffort, "max");
     assert.ok(detail.body.item.usageLedger.length >= 1);
   });
@@ -380,9 +380,9 @@ describe("backend and AI platform HTTP integration", () => {
       type: "itinerary",
       id: `itinerary-${created.body.item.id}`,
     });
-    assert.equal(task.input.model, "gpt-5.6-luna");
+    assert.equal(task.input.model, "deepseek-flash");
     assert.equal(task.input.reasoningEffort, "max");
-    assert.equal(task.input.request.model, "gpt-5.6-luna");
+    assert.equal(task.input.request.model, "deepseek-flash");
     assert.equal(task.input.request.reasoningEffort, "max");
   });
 
@@ -393,7 +393,7 @@ describe("backend and AI platform HTTP integration", () => {
     assert.doesNotMatch(serialized, new RegExp(PLATFORM_SECRET, "u"));
     assert.doesNotMatch(serialized, /test-model-key-must-not-be-used/u);
     assert.doesNotMatch(serialized, /authPassword|authSessionSecret|apiKey|secret|token/iu);
-    assert.equal(health.body.aiPlatform.targetModel, "gpt-5.6-luna");
+    assert.equal(health.body.aiPlatform.targetModel, "deepseek-flash");
     assert.equal(health.body.aiPlatform.targetReasoningEffort, "max");
     assert.equal(health.body.aiPlatform.executionMode, "local-simulated");
   });

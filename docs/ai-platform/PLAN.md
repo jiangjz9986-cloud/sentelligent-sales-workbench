@@ -1,5 +1,7 @@
 # AI 统一调度平台一期：完整设计与实施方案
 
+> 当前模型合同（2026-09-12）：所有 DeepSeek 文本、JSON、工具调用、图像理解和 PDF 页面请求统一使用 `deepseek-flash`（DeepSeek-V4.1-Flash）。`gpt-5.6-luna/max` 仅表示 Codex 执行代理选择，不是业务供应商模型。
+
 ## 0. 文档状态
 
 | 项目 | 内容 |
@@ -12,7 +14,7 @@
 | 工作树 | `/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/ai-unified-platform-v1` |
 | 开发基线 | `741d104e79e2c81a040a2e9ef84bd635c294f1b9` |
 | 业务基线版本 | `0.12.1`；后续并行修复通过明确提交整合，不读取对方未提交文件作为基线 |
-| 用户指定模型 | 用户已明确确认为 `gpt-5.6-luna / max`；通过本任务的后续运行模型配置应用，不声称在途回答已改变模型 |
+| 业务模型合同 | `deepseek-flash`；文本与视觉路由统一使用同一模型。官方价格日历为 CNY `20/40`、`1000/2000`、`4000/8000` micro-CNY 每 1K token（缓存命中输入、缓存未命中输入、输出；空闲/高峰） |
 | 独立实现提交 | `8732328e6bec7acd1e01597dacd6240d45ac782f` |
 | 当前执行模式 | `local-simulated`；不调用真实付费供应商，不发送真实通知，不修改或部署生产 |
 | 生产权限 | 本任务未获生产部署、修改数据库、付费模型调用或真实通知发送授权 |

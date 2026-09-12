@@ -42,7 +42,7 @@ describe("document vision analysis", () => {
     assert.equal(captured.messages[1].content[1].type, "image_url");
     assert.match(captured.messages[1].content[1].image_url.url, /^data:image\/png;base64,/u);
     assert.equal(captured.messages[1].content[1].image_url.detail, "high");
-    assert.doesNotMatch(JSON.stringify(captured.messages[0]), /deepseek-v4-flash(?!-vision)/u);
+    assert.equal(captured.model, "deepseek-flash");
     assert.match(captured.messages[0].content, /documentKind/u);
     assert.match(captured.messages[0].content, /transactions/u);
     assert.match(captured.messages[0].content, /最多 20 笔/u);
@@ -120,7 +120,7 @@ describe("document vision analysis", () => {
       buffer: VALID_PDF,
     }, {
       documentKind: "invoice",
-      modelName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
       pdfRenderer: {
         async render(buffer) {
           rendererInput = buffer;

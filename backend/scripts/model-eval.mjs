@@ -118,7 +118,7 @@ function envConfig(mode) {
     modelProvider: process.env.MODEL_PROVIDER || "deepseek",
     modelApiKey: process.env.MODEL_API_KEY || "",
     modelBaseUrl: process.env.MODEL_BASE_URL || "https://api.deepseek.com",
-    modelName: process.env.MODEL_NAME || "deepseek-v4-flash",
+    modelName: process.env.MODEL_NAME || "deepseek-flash",
     modelTimeoutMs: Number(process.env.MODEL_TIMEOUT_MS || 30_000),
   };
 }

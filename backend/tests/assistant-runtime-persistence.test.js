@@ -75,7 +75,7 @@ describe("assistant runtime persistence", () => {
         modelApiKey: "unit-fixture-key",
         modelApiKeyProvider: () => "stored-fixture",
         modelBaseUrl: "https://example.invalid",
-        modelName: "deepseek-v4-flash",
+        modelName: "deepseek-flash",
       },
       sessionRepository: sessions,
       fetchImpl: async (_url, options) => {

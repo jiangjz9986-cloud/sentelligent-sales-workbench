@@ -137,7 +137,7 @@ describe("AI platform media adapter", () => {
         },
       },
       agent: { versionId: "agent-bookkeeping-v1" },
-      model: { name: "gpt-5.6-luna", providerId: "provider-mock" },
+      model: { name: "deepseek-flash", providerId: "provider-mock" },
       signal: new AbortController().signal,
     });
 
@@ -157,7 +157,7 @@ describe("AI platform media adapter", () => {
         input: taskInput(documentMedia(), { fixture: "invoice-demo" }),
       },
       agent: { versionId: "agent-v1" },
-      model: { name: "gpt-5.6-luna", providerId: "provider-mock" },
+      model: { name: "deepseek-flash", providerId: "provider-mock" },
       signal: new AbortController().signal,
     });
 
@@ -316,7 +316,7 @@ describe("AI platform media adapter", () => {
         taskType: "asr.transcribe",
         input: taskInput(audioMedia(), { transcript: "本地结果" }),
       },
-      model: { name: "gpt-5.6-luna" },
+      model: { name: "deepseek-flash" },
       signal: new AbortController().signal,
     });
     const serialized = JSON.stringify(output);

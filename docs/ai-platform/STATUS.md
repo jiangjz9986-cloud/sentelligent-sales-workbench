@@ -48,8 +48,11 @@
 - P1 安全边界仍为 `phase=legacy`、`rolloutPhase=P1`、`AI_PLATFORM_MODE=disabled`、
   `executionMode=local-simulated`、`paused=true`、`admissionOpen=false`、
   `externalProvidersEnabled=false`，仅有 `provider-mock`。逻辑目标元数据为
-  `gpt-5.6-luna` / `max`，不代表真实付费模型已调用；Backend 仍是 `proactive.analyze`
+  `deepseek-flash` / `max`，不代表真实付费模型已调用；Backend 仍是 `proactive.analyze`
   和业务通知 outbox 的唯一调度所有者。
+- 当前 DeepSeek 文本和视觉模型统一为 `deepseek-flash`（DeepSeek-V4.1-Flash）。
+  官方 CNY 价格日历为：缓存命中输入 `20/40`、缓存未命中输入 `1000/2000`、输出
+  `4000/8000` micro-CNY 每 1K token（空闲/高峰）；旧 V4 Flash 名称仅保留为兼容转发历史。
 - PushPlus 已退役且不再作为生产通知渠道。微信 Clawbot outbox 在加密
   `context_token` 缺失或过期时 fail-closed，消息保留在持久 outbox；当前 SDK 没有
   `context_token` renewal/rebind 合同，heartbeat 或轮询不能伪造续期。因此“无用户消息也能

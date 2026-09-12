@@ -48,7 +48,7 @@ function readyAnalysis(overrides = {}) {
     warnings: [],
     source: {
       provider: "deepseek",
-      model: "deepseek-chat",
+      model: "deepseek-flash",
       ...(overrides.source ?? {}),
     },
     ...overrides,

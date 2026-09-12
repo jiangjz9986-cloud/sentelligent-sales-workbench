@@ -400,7 +400,7 @@ async function assertBackend(config) {
   const health = await fetch(`${config.backendUrl}/api/health`).then((response) => response.json());
   assert.equal(health.status, "ok", "backend health status should be ok");
   assert.equal(health.modelProvider, "deepseek", "fixed business stack should use DeepSeek provider");
-  assert.equal(health.modelName, "deepseek-v4-flash", "fixed business stack should use DeepSeek-V4-Flash");
+  assert.equal(health.modelName, "deepseek-flash", "fixed business stack should use deepseek-flash");
   assert.equal(health.modelReady, true, "fixed business stack model should be ready");
   return health;
 }

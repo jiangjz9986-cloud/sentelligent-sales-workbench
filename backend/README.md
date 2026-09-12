@@ -75,7 +75,7 @@ cp .env.example .env
 - `AI_ANALYSIS_MODE`: 开发/自动化测试可用 `mock`；业务运行环境使用 `model`
 - `MODEL_PROVIDER`: 默认 `deepseek`
 - `DEEPSEEK_BASE_URL`: 默认 `https://api.deepseek.com`
-- `DEEPSEEK_MODEL`: 默认 `deepseek-v4-flash`
+- `DEEPSEEK_MODEL`: 默认 `deepseek-flash`
 - `DEEPSEEK_API_KEY`: 仅放后端 `.env`，不要进入前端、文档正文或日志
 - `MODEL_TIMEOUT_MS`: 默认 `30000`
 - `HOSPITAL_TENDER_PYTHON`: 内置医院招标采集器使用的 Python 3.11+ 可执行文件；默认 `python3`，如果系统默认 Python 版本较旧，请填入受保护环境中的绝对路径。

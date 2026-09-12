@@ -33,7 +33,7 @@ function productionConfig(overrides = {}) {
     AI_PLATFORM_MODE: "required",
     AI_PLATFORM_BASE_URL: "https://ai-platform.example.test",
     AI_PLATFORM_AUTH_SECRET: Buffer.alloc(32, 37).toString("base64url"),
-    AI_PLATFORM_TARGET_MODEL: "gpt-5.6-luna",
+    AI_PLATFORM_TARGET_MODEL: "deepseek-flash",
     AI_PLATFORM_TARGET_REASONING_EFFORT: "max",
     ASR_TEMP_ROOT: "/run/sentelligent-asr",
     ASR_FFPROBE_COMMAND: "/usr/bin/ffprobe",

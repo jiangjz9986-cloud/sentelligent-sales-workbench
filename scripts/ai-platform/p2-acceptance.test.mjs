@@ -70,7 +70,7 @@ function fakeHarness({ mode = "external-provider", proactive = false } = {}) {
         executionMode: mode,
         externalProvidersEnabled: mode === "external-provider",
         proactiveScheduleOwner: "backend",
-        targetModel: "gpt-5.6-luna",
+        targetModel: "deepseek-flash",
         targetReasoningEffort: "max",
         executor: { paused: mode !== "external-provider", admissionOpen: mode === "external-provider" },
         providers: [{ id: PROVIDER_ID, kind: "openai_compatible" }],

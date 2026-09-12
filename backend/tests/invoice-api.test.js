@@ -179,8 +179,8 @@ describe("authenticated invoice API", () => {
       },
       aiAnalysisMode: "model",
       modelApiKey: "test-provider-key",
-      modelName: "deepseek-v4-flash",
-      modelVisionName: "deepseek-v4-flash-vision-exp",
+      modelName: "deepseek-flash",
+      modelVisionName: "deepseek-flash",
       fetchImpl: async (_url, options) => {
         modelRequest = JSON.parse(options.body);
         return {
@@ -202,7 +202,7 @@ describe("authenticated invoice API", () => {
     assert.equal(uploaded.response.status, 201);
     assert.equal(uploaded.body.item.status, "unmatched");
     assert.equal(uploaded.body.item.totalCents, 10000);
-    assert.equal(modelRequest.model, "deepseek-v4-flash-vision-exp");
+    assert.equal(modelRequest.model, "deepseek-flash");
     assert.deepEqual(modelRequest.thinking, { type: "disabled" });
     assert.equal(modelRequest.messages[1].content[1].type, "image_url");
     assert.match(modelRequest.messages[1].content[1].image_url.url, /^data:image\/jpeg;base64,/u);

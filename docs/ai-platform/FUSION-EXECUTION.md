@@ -95,8 +95,11 @@ precedence when describing deployment state:
 - The released configuration keeps AI Platform `disabled` with
   `local-simulated` execution, keeps Backend as the sole proactive scheduler,
   and keeps proactive assistant/notification auto-run disabled. The target
-  metadata remains `gpt-5.6-luna` / `max`, but that metadata does not establish
+  metadata is `deepseek-flash` / `max`, but that metadata does not establish
   live supplier routing or real-model readiness.
+- All business DeepSeek calls, including text and bounded image/PDF analysis,
+  use `deepseek-flash` (DeepSeek-V4.1-Flash). The retired V4 Flash names are
+  compatibility aliases only and are rejected by new production configuration.
 - The production environment retains the fixed `60`-minute/`10`-customer
   tender baseline, while the durable scheduler row currently records an
   enabled `120`-minute/`10`-customer runtime. The scheduler implementation

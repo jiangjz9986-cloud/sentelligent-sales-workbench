@@ -208,7 +208,7 @@ beforeEach(async () => {
               ],
               confidence: 0.99,
               warnings: [],
-              source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+              source: { provider: "test", model: "deepseek-flash" },
             }
           : {
               documentKind: "payment_proof",
@@ -222,7 +222,7 @@ beforeEach(async () => {
               },
               confidence: 0.5,
               warnings: [],
-              source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+              source: { provider: "test", model: "deepseek-flash" },
             };
       }
       if (fileName === "concurrent.png") {
@@ -248,7 +248,7 @@ beforeEach(async () => {
           transactions,
           confidence: 0.99,
           warnings: [],
-          source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+          source: { provider: "test", model: "deepseek-flash" },
         };
       }
       if (fileName === "visual-document.png") return {
@@ -257,7 +257,7 @@ beforeEach(async () => {
         evidence: null,
         confidence: 0.99,
         warnings: [],
-        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+        source: { provider: "test", model: "deepseek-flash" },
       };
       if (fileName === "vision-only.png") return {
         documentKind: "payment_proof",
@@ -271,7 +271,7 @@ beforeEach(async () => {
         },
         confidence: 0.99,
         warnings: [],
-        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+        source: { provider: "test", model: "deepseek-flash" },
       };
       if (fileName === "reclass.png") return {
         documentKind: "payment_proof",
@@ -285,7 +285,7 @@ beforeEach(async () => {
         },
         confidence: 0.99,
         warnings: [],
-        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+        source: { provider: "test", model: "deepseek-flash" },
       };
       if (fileName === "stale-category-warning.png") return {
         documentKind: "payment_proof",
@@ -299,7 +299,7 @@ beforeEach(async () => {
         },
         confidence: 0.99,
         warnings: ["missing_category", "invalid_category"],
-        source: { provider: "test", model: "deepseek-v4-flash-vision-exp" },
+        source: { provider: "test", model: "deepseek-flash" },
       };
       if (fileName === "generic-invoice.png") return {
           extractedText: "电子发票 发票号码 00000000 购买方 合成公司 销售方 合成商户 价税合计 219.00",

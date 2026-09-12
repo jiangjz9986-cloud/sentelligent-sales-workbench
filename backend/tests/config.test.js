@@ -19,8 +19,8 @@ describe("backend model configuration", () => {
         "MODEL_PROVIDER=deepseek",
         "DEEPSEEK_API_KEY=secret-from-env-file",
         "DEEPSEEK_BASE_URL=https://api.deepseek.com",
-        "DEEPSEEK_MODEL=deepseek-v4-flash",
-        "MODEL_VISION_NAME=deepseek-v4-flash-vision-exp",
+        "DEEPSEEK_MODEL=deepseek-flash",
+        "MODEL_VISION_NAME=deepseek-flash",
         "AMAP_WEB_SERVICE_KEY=amap-secret-from-env-file",
         "AMAP_TIMEOUT_MS=12345",
         "AUTH_ACCOUNT=jiangjz",
@@ -70,8 +70,8 @@ describe("backend model configuration", () => {
       assert.equal(config.aiAnalysisMode, "model");
       assert.equal(config.modelProvider, "deepseek");
       assert.equal(config.modelBaseUrl, "https://api.deepseek.com");
-      assert.equal(config.modelName, "deepseek-v4-flash");
-      assert.equal(config.modelVisionName, "deepseek-v4-flash-vision-exp");
+      assert.equal(config.modelName, "deepseek-flash");
+      assert.equal(config.modelVisionName, "deepseek-flash");
       assert.equal(config.modelApiKey, "secret-from-env-file");
       assert.equal(config.amapWebServiceKey, "amap-secret-from-env-file");
       assert.equal(config.amapTimeoutMs, 12345);
@@ -149,7 +149,7 @@ describe("backend model configuration", () => {
     assert.equal(config.invoiceOcrCommand, "");
     assert.equal(config.invoicePdfTextCommand, "");
     assert.equal(config.invoicePdfImageCommand, "pdftoppm");
-    assert.equal(config.modelVisionName, "deepseek-v4-flash-vision-exp");
+    assert.equal(config.modelVisionName, "deepseek-flash");
     assert.equal(config.invoiceOcrLanguages, "chi_sim+eng");
     assert.equal(config.invoiceTextExtractionTimeoutMs, 30_000);
     assert.equal(config.hospitalTenderAutoRun, false);
@@ -205,7 +205,7 @@ describe("backend model configuration", () => {
       AI_PLATFORM_MODE: "required",
       AI_PLATFORM_BASE_URL: "https://ai-platform.example.test",
       AI_PLATFORM_AUTH_SECRET: validAiPlatformSecret,
-      AI_PLATFORM_TARGET_MODEL: "gpt-5.6-luna",
+      AI_PLATFORM_TARGET_MODEL: "deepseek-flash",
       AI_PLATFORM_TARGET_REASONING_EFFORT: "max",
       WEIXIN_ALLOWED_SENDER_IDS: "production-sender",
       WEIXIN_ALLOW_GROUPS: "false",
@@ -223,7 +223,7 @@ describe("backend model configuration", () => {
     assert.equal(config.aiPlatformMode, "required");
     assert.equal(config.aiPlatformBaseUrl, "https://ai-platform.example.test");
     assert.equal(config.aiPlatformAuthSecret, validAiPlatformSecret);
-    assert.equal(config.aiPlatformTargetModel, "gpt-5.6-luna");
+    assert.equal(config.aiPlatformTargetModel, "deepseek-flash");
     assert.equal(config.aiPlatformTargetReasoningEffort, "max");
     assert.equal(config.aiPlatformExecutionMode, "local-simulated");
     assert.equal(config.aiPlatformProactiveScheduleOwner, "backend");
@@ -242,6 +242,15 @@ describe("backend model configuration", () => {
     assert.equal(config.proactiveAssistantPollMs, 30_000);
     assert.equal(config.proactiveAssistantModelConcurrency, 2);
     assert.equal(config.proactiveAssistantModelRetryLimit, 1);
+
+    assert.throws(
+      () => loadConfig({ ...valid, MODEL_NAME: "deepseek-v4-flash" }),
+      /DeepSeek production calls must use deepseek-flash/u,
+    );
+    assert.throws(
+      () => loadConfig({ ...valid, MODEL_VISION_NAME: "deepseek-v4-flash-vision-exp" }),
+      /DeepSeek production calls must use deepseek-flash/u,
+    );
 
     for (const [field, message] of [
       ["AUTH_ACCOUNT", /AUTH_ACCOUNT/],

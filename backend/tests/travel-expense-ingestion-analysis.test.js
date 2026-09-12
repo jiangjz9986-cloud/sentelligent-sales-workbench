@@ -99,7 +99,7 @@ describe("travel expense ingestion analysis", () => {
     const secret = "test-expense-analysis-key";
     const result = await analyzeExpenseText("2026-08-04 午餐 招待客户 支付宝 128.50元", {
       modelProvider: "deepseek",
-      modelName: "deepseek-chat",
+      modelName: "deepseek-flash",
       modelApiKey: secret,
       modelClient: async (value) => {
         request = value;
@@ -128,7 +128,7 @@ ${JSON.stringify({
       },
     });
 
-    assert.equal(request.model, "deepseek-chat");
+    assert.equal(request.model, "deepseek-flash");
     assert.deepEqual(request.response_format, { type: "json_object" });
     assert.equal(request.stream, false);
     assert.ok(request.signal instanceof AbortSignal);
@@ -149,7 +149,7 @@ ${JSON.stringify({
         paymentMethod: "alipay",
       },
       warnings: [],
-      source: { provider: "deepseek", model: "deepseek-chat" },
+      source: { provider: "deepseek", model: "deepseek-flash" },
     });
     assert.doesNotMatch(JSON.stringify(result), new RegExp(secret));
   });
@@ -158,7 +158,7 @@ ${JSON.stringify({
     const secret = "test-provider-error-secret";
     const result = await analyzeExpenseText("2026-08-04 午餐 招待客户 支付宝 128.50元", {
       modelProvider: "deepseek",
-      modelName: "deepseek-chat",
+      modelName: "deepseek-flash",
       modelClient: async () => {
         throw new Error(secret);
       },

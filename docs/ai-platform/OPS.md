@@ -9,7 +9,7 @@
 - 生产数据库、日志和运行态应放在 release 目录之外；建议分别使用 `/var/lib/sentelligent-ai-platform/`、`/var/log/sentelligent-ai-platform/` 和 `/run/sentelligent-ai-platform/`。
 - 备份文件是敏感数据库数据，不是发布制品。生产备份建议放在 `/var/backups/sentelligent-ai-platform/`，不放入 Git、release tar、`ai-platform/`、`outputs/`、`scripts/ai-platform/` 或 `docs/ai-platform/`。
 - 供应商密钥只从 release 外的 systemd `EnvironmentFile` 或受控运行环境注入。脚本不接受 `--secret`、`--token`、`--api-key` 等参数，也不会把环境变量写入 runtime JSON。
-- 当前目标模型配置由平台返回 `gpt-5.6-luna` 与 `max`；运维脚本不改变模型选择，默认执行模式仍是 `local-simulated`，不代表已经调用真实供应商。
+- 当前业务目标模型配置由平台返回 `deepseek-flash` 与 `max`；运维脚本不改变模型选择，默认执行模式仍是 `local-simulated`，不代表已经调用真实供应商。`gpt-5.6-luna` 仅是 Codex 执行代理选择。
 
 ## 2. 本地隔离运行
 
@@ -90,7 +90,7 @@ LOG=/tmp/sentelligent-ai-platform-dev/log/ai-platform.log
 scripts/ai-platform/systemd/sentelligent-ai-platform.service.template
 ```
 
-模板兼容现有 CentOS 7 / systemd 219 的 `StartLimitInterval` 写法，使用 `Type=forking`、独立 `PIDFile` 和 `RuntimeDirectory`。模板固定 `NODE_ENV=production`、目标模型 `gpt-5.6-luna`、推理档位 `max` 和 `local-simulated` 执行模式，避免服务因缺少环境变量而退回开发模式。安装前替换全部占位符：
+模板兼容现有 CentOS 7 / systemd 219 的 `StartLimitInterval` 写法，使用 `Type=forking`、独立 `PIDFile` 和 `RuntimeDirectory`。模板固定 `NODE_ENV=production`、目标模型 `deepseek-flash`、推理档位 `max` 和 `local-simulated` 执行模式，避免服务因缺少环境变量而退回开发模式。安装前替换全部占位符：
 
 | 占位符 | 示例 | 说明 |
 | --- | --- | --- |

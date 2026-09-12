@@ -17,7 +17,7 @@
 每个商机有独立卡片：客户、金额、阶段、需求、竞争对手、方案方向、关键风险、下一步动作。
 3. **AI沟通纪要**
 把拜访记录、电话记录、微信内容、会议纪要丢进去，自动提炼：客户诉求、明确事项、风险点、待办动作。
-使用AI分析，根据固定框架思考，提炼，使用deep seek的DeepSeek-V4-Flash模型 API文档：https://api-docs.deepseek.com/zh-cn/密钥[redacted-backend-env-only]
+使用AI分析，根据固定框架思考，提炼，使用 DeepSeek `deepseek-flash`（DeepSeek-V4.1-Flash）模型。文本、JSON、工具调用、图像理解和 PDF 页面请求统一使用这一模型；API 文档：https://api-docs.deepseek.com/zh-cn/密钥[redacted-backend-env-only]
 4. **下一步动作提醒**
 系统根据商机状态自动提示：该约谁、该补什么资料、该找售前支持、该推进方案还是该确认预算。
 5. **方案辅助**

@@ -4,6 +4,7 @@ import {
   sha256,
   stableJson,
 } from "../../../shared/aiPlatformContract.mjs";
+import { DEEPSEEK_FLASH_MODEL } from "../../../shared/deepseekContract.mjs";
 
 export const MEDIA_TASK_TYPES = Object.freeze([
   "asr.transcribe",
@@ -96,7 +97,7 @@ const PAYMENT_EMPTY_EVIDENCE = Object.freeze({
   paymentMethod: null,
 });
 
-const DEFAULT_SIMULATION_MODEL = "gpt-5.6-luna";
+const DEFAULT_SIMULATION_MODEL = DEEPSEEK_FLASH_MODEL;
 const DEFAULT_SIMULATION_REASONING_EFFORT = "max";
 
 export class MediaAdapterError extends Error {

@@ -6,6 +6,7 @@ import { validatePasswordHashEncoding } from "./auth/password.js";
 import { isValidSettingsEncryptionKey } from "./settings/secretBox.js";
 import { normalizeAiRoutingPolicy } from "./aiPlatform/routingPolicy.js";
 import { PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
+import { DEEPSEEK_FLASH_MODEL } from "../../shared/deepseekContract.mjs";
 import {
   AI_EXECUTION_MODE,
   AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER,
@@ -452,6 +453,10 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (config.weixinAllowedGroupIds.length > 0) {
     throw new Error("WEIXIN_ALLOWED_GROUP_IDS must be empty in production");
   }
+  if (String(config.modelProvider).trim().toLowerCase() === "deepseek"
+    && (config.modelName !== DEEPSEEK_FLASH_MODEL || config.modelVisionName !== DEEPSEEK_FLASH_MODEL)) {
+    throw new Error(`DeepSeek production calls must use ${DEEPSEEK_FLASH_MODEL}`);
+  }
   const independentSecrets = [
     config.authSessionSecret,
     config.settingsEncryptionKey,
@@ -485,8 +490,8 @@ function validateProductionConfig(config, { explicitAllowedOrigins }) {
   if (config.aiPlatformAuthToken && !isStrongIndependentSecret(config.aiPlatformAuthToken)) {
     throw new Error("AI_PLATFORM_AUTH_TOKEN must contain at least 32 bytes of high-entropy data in production");
   }
-  if (config.aiPlatformTargetModel !== "gpt-5.6-luna") {
-    throw new Error("AI_PLATFORM_TARGET_MODEL must be gpt-5.6-luna in production");
+  if (config.aiPlatformTargetModel !== AI_TARGET_MODEL) {
+    throw new Error(`AI_PLATFORM_TARGET_MODEL must be ${AI_TARGET_MODEL} in production`);
   }
   if (config.aiPlatformTargetReasoningEffort !== "max") {
     throw new Error("AI_PLATFORM_TARGET_REASONING_EFFORT must be max in production");
@@ -839,12 +844,12 @@ export function loadConfig(
     modelBaseUrl,
     modelName: modelIdentifierValue(
       env.modelName ?? env.MODEL_NAME ?? env.DEEPSEEK_MODEL,
-      "deepseek-v4-flash",
+      DEEPSEEK_FLASH_MODEL,
       "MODEL_NAME",
     ),
     modelVisionName: modelIdentifierValue(
       env.modelVisionName ?? env.MODEL_VISION_NAME ?? env.DEEPSEEK_VISION_MODEL,
-      "deepseek-v4-flash-vision-exp",
+      DEEPSEEK_FLASH_MODEL,
       "MODEL_VISION_NAME",
     ),
     modelTimeoutMs: boundedPositiveInteger(

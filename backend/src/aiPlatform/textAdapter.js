@@ -8,6 +8,7 @@ import { readBoundedResponseText } from "../http/request.js";
 import { createAiPlatformClient } from "./client.js";
 import { configForAiTask } from "./routingPolicy.js";
 import { platformFetch } from "../../../shared/aiPlatformSocketTransport.mjs";
+import { DEEPSEEK_FLASH_MODEL } from "../../../shared/deepseekContract.mjs";
 
 const DEFAULT_MAX_WAIT_MS = 30_000;
 const DEFAULT_POLL_MS = 250;
@@ -292,7 +293,7 @@ function legacyModelName(config, options) {
   return firstText(
     options.legacyModel,
     config.modelName,
-    "deepseek-v4-flash",
+    DEEPSEEK_FLASH_MODEL,
   );
 }
 

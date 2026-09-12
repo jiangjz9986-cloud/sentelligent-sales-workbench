@@ -1,4 +1,5 @@
 import { boundModelText } from "./modelTextBound.js";
+import { DEEPSEEK_FLASH_MODEL } from "../../../shared/deepseekContract.mjs";
 
 class InvoiceModelError extends Error {
   constructor(code, message) {
@@ -90,7 +91,7 @@ export async function analyzeInvoiceText(value, options = {}) {
   const extractedText = String(value ?? "").trim();
   if (!extractedText) throw new TypeError("extracted invoice text is required");
   const modelText = boundModelText(extractedText).text;
-  const modelName = String(options.modelName ?? "deepseek-chat").trim() || "deepseek-chat";
+  const modelName = String(options.modelName ?? DEEPSEEK_FLASH_MODEL).trim() || DEEPSEEK_FLASH_MODEL;
   const timeoutMs = Number.isSafeInteger(options.modelTimeoutMs) && options.modelTimeoutMs > 0
     ? options.modelTimeoutMs
     : 30_000;

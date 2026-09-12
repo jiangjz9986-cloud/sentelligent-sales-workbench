@@ -6,7 +6,7 @@ import { createOpenAiCompatibleProvider, normalizeProviderPolicies } from "../sr
 
 const POLICY = {
   id: "provider-text-test", baseUrl: "https://api.deepseek.com", credentialEnv: "AI_PROVIDER_TEST_KEY",
-  models: [{ name: "deepseek-v4-flash", taskTypes: ["quick-record.analyze", "weekly.generate"], reasoning: "deepseek-thinking", maxOutputTokens: 4000 }],
+  models: [{ name: "deepseek-flash", taskTypes: ["quick-record.analyze", "weekly.generate"], reasoning: "deepseek-thinking", maxOutputTokens: 4000 }],
 };
 const ENV = { AI_PROVIDER_TEST_KEY: ["synthetic", "provider", "credential"].join("-") };
 const requestInput = {
@@ -23,7 +23,7 @@ function providerInput(taskType = "quick-record.analyze") {
 }
 function completion(extra = {}) {
   return {
-    id: "request-vendor-1", model: "deepseek-v4-flash",
+    id: "request-vendor-1", model: "deepseek-flash",
     choices: [{ message: { content: '{"value":1}' }, finish_reason: "stop" }],
     usage: { prompt_tokens: 100, prompt_cache_hit_tokens: 40, completion_tokens: 20 }, ...extra,
   };
@@ -43,13 +43,13 @@ test("registered model and token limits control the request, cached input is cou
   const sent = JSON.parse(calls[0].body);
   assert.equal(calls[0].url, "https://api.deepseek.com/chat/completions");
   assert.equal(calls[0].redirect, "error");
-  assert.equal(sent.model, "deepseek-v4-flash");
+  assert.equal(sent.model, "deepseek-flash");
   assert.equal(sent.max_tokens, 3200);
   assert.deepEqual(sent.thinking, { type: "disabled" });
   assert.equal(Object.hasOwn(sent, "apiKey"), false);
   assert.equal(sent.messages[0].content, "Return JSON.");
   assert.deepEqual(result.usage, { inputTokens: 60, outputTokens: 20, cachedInputTokens: 40, audioSeconds: 0, imagePages: 0 });
-  assert.equal(result.result.metadata.actualModel, "deepseek-v4-flash");
+  assert.equal(result.result.metadata.actualModel, "deepseek-flash");
   assert.equal(result.externalRequestId, "request-vendor-1");
   await provider.execute(providerInput("weekly.generate"));
   assert.equal(Object.hasOwn(JSON.parse(calls[1].body), "thinking"), false);
@@ -112,7 +112,7 @@ test("default runtime registers configured text providers and persists real HTTP
     const payload = JSON.parse(Buffer.concat(chunks).toString());
     calls++;
     assert.equal(req.url, "/chat/completions");
-    assert.equal(payload.model, "deepseek-v4-flash");
+    assert.equal(payload.model, "deepseek-flash");
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(completion()));
   });
@@ -128,7 +128,7 @@ test("default runtime registers configured text providers and persists real HTTP
   try {
     const db = runtime.db;
     db.prepare("INSERT INTO providers VALUES (?, ?, 'openai_compatible', 1, '{}', ?, ?)").run(POLICY.id, "HTTP fixture", "2026-01-01", "2026-01-01");
-    db.prepare("INSERT INTO models VALUES ('model-text-test', ?, 'deepseek-v4-flash', '{\"text\":true}', 1, ?, ?)").run(POLICY.id, "2026-01-01", "2026-01-01");
+    db.prepare("INSERT INTO models VALUES ('model-text-test', ?, 'deepseek-flash', '{\"text\":true}', 1, ?, ?)").run(POLICY.id, "2026-01-01", "2026-01-01");
     db.prepare("UPDATE agent_versions SET model_policy_json = ? WHERE id = (SELECT agent_version_id FROM agent_releases WHERE agent_id = (SELECT id FROM agents WHERE slug = 'quick-record'))")
       .run(JSON.stringify({ providerId: POLICY.id, modelId: "model-text-test", externalAllowed: true }));
     db.prepare("INSERT INTO price_versions SELECT 'price-text-test', 'model-text-test', 'test-v1', 'USD', 1000, 1000, 100, 0, 0, 0, effective_from, effective_to, created_at FROM price_versions WHERE id = 'price-mock-zero-v1'").run();

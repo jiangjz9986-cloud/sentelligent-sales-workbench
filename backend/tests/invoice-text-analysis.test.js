@@ -8,7 +8,7 @@ describe("invoice text model analysis", () => {
   it("sends only extracted text to an OpenAI-compatible model and parses fenced JSON", async () => {
     let captured;
     const result = await analyzeInvoiceText("发票日期 2026-08-04 合计 100.00 元", {
-      modelName: "deepseek-chat",
+      modelName: "deepseek-flash",
       modelClient: async (request) => {
         captured = request;
         return {
@@ -26,7 +26,7 @@ describe("invoice text model analysis", () => {
       totalCents: 10000,
       suggestedCategory: "lodging",
     });
-    assert.equal(captured.model, "deepseek-chat");
+    assert.equal(captured.model, "deepseek-flash");
     assert.equal(captured.response_format.type, "json_object");
     assert.equal(captured.messages[1].content, "发票日期 2026-08-04 合计 100.00 元");
     assert.equal(Buffer.isBuffer(captured.messages[1].content), false);

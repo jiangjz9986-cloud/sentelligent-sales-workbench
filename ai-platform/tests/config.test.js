@@ -7,7 +7,7 @@ describe("AI platform target configuration", () => {
   it("defaults to the fixed logical target and local simulation", () => {
     const config = loadAiPlatformConfig({ databasePath: ":memory:" }, {});
 
-    assert.equal(config.targetModel, "gpt-5.6-luna");
+    assert.equal(config.targetModel, "deepseek-flash");
     assert.equal(config.targetReasoningEffort, "max");
     assert.equal(config.executionMode, "local-simulated");
     assert.equal(config.proactiveScheduleOwner, "backend");
@@ -16,7 +16,7 @@ describe("AI platform target configuration", () => {
   it("rejects attempts to change the target model or reasoning effort", () => {
     assert.throws(
       () => loadAiPlatformConfig({ databasePath: ":memory:", targetModel: "forged-model" }, {}),
-      /AI_PLATFORM_TARGET_MODEL must be gpt-5\.6-luna/u,
+      /AI_PLATFORM_TARGET_MODEL must be deepseek-flash/u,
     );
     assert.throws(
       () => loadAiPlatformConfig({ databasePath: ":memory:", targetReasoningEffort: "low" }, {}),
@@ -24,7 +24,7 @@ describe("AI platform target configuration", () => {
     );
     assert.throws(
       () => loadAiPlatformConfig({}, { AI_PLATFORM_TARGET_MODEL: "forged-model" }),
-      /AI_PLATFORM_TARGET_MODEL must be gpt-5\.6-luna/u,
+      /AI_PLATFORM_TARGET_MODEL must be deepseek-flash/u,
     );
     assert.throws(
       () => loadAiPlatformConfig({}, { AI_PLATFORM_PROACTIVE_SCHEDULE_OWNER: "ai-platform" }),
