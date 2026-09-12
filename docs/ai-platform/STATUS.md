@@ -5,34 +5,39 @@
 本节是最终 P1 交付记录；下方较早段落保留为实施过程和历史检查点，不覆盖本节事实。
 
 - 当前融合工作树：`ai-platform-production-integration-20260909`。生产候选源提交为
-  `7ed981a1b58e24c3098b823ecdef7d6fc574562c`；发布时工作树干净。
+  `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`；发布时工作树干净。
+- 模型边界已固定：本次代码开发、测试和 Mac Chrome 验收使用 Codex
+  `gpt-5.6-luna / max`；业务系统 AI 助手统一使用 provider `deepseek`、model
+  `deepseek-flash`。开发执行模型不会写入业务生产配置，也不代表生产已调用 Codex 模型。
 - 生产 `current` 已切换为
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e`，
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-44e6d36c5aa9`，
   `readlink -f /opt/sentelligent-sales-workbench/current` 已现场核实为该路径。
 - 新 release manifest 为
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e/release-manifest.json`
-  （SHA-256 `bd62acb8ec61d00ba759c9f776c85381c13ceaf102f4a71e2b2615a7c778cbfe`）；制品在
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-44e6d36c5aa9/release-manifest.json`
+  （SHA-256 `db31f480b1bf24abad0c0aa94ded391828cb6640dd0859f3875e34c9c11c2914`）；制品在
   `linux/x64`、Node `v24.18.0`、npm `11.16.0` 环境构建，归档包含 `1748` 个文件。
-- 生产切换 transition 为 `ai-platform-7ed981a-20260911-p1-r3`，旧提交为
-  `4afffee25c7cf25561c3212f19c97353e9cdc76c`，新提交为
-  `7ed981a1b58e24c3098b823ecdef7d6fc574562c`。transition report 为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/ai-transition-report.json`
-  （SHA-256 `cb6ff148e3238f4f20d5e35f1d8e1f86245525d8e7b97e0e61873aab02315211`），manifest 为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/transition-manifest.json`
-  （SHA-256 `6e22c3ab81dffa8228a90765e137bbe898ace769f5f1ce757238abb926b9e8a7`）。
+- 生产切换 transition 为 `ai-platform-44e6d36-20260912-p1-r11`，旧提交为
+  `89ff3d5ffce2cae165897fd1340b6f62490550aa`，新提交为
+  `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`。transition report 为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/ai-transition-report.json`
+  （SHA-256 `fddb7f6df191d601b62652ea4ef26964384681ef5e8d614598b1238d3c3dbe99`，
+  `status=passed`、`rollbackStatus=not-required`），manifest 为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/transition-manifest.json`
+  （SHA-256 `becf72f3fe14e0569f184e4b1e4d6dc3a527856d159ebfe79fa57a725464c306`）。
 - 120 秒观察报告为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/observation-1789152661216.json`
-  （SHA-256 `eaad438118f0402528c58a152367defe5d610fcbb38b560f356fe8da92001e86`）。观察期间
-  `thresholdFailures=[]`，AI 平台队列深度保持 `0`，`activeExecutions=0`。
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/observation-120s.json`
+  （SHA-256 `ff7238dc2e10ec7d92f3ce1eea3e1e33a7704914907d65ab4acb7d2843f4bbab`，
+  `status=passed`、`sampleCount=4`、`thresholdFailures=[]`）。观察期间 AI 平台队列深度为
+  `0`，没有活动执行。
 - 候选制品为
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/sentelligent-sales-workbench-7ed981a1b58e-linux.tar.gz`
-  （SHA-256 `9fc57f4179e8b0ae02fe13ca25b168b130998d375ffb882f2c4e96cf8fbf48c8`）；P1 policy
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/sentelligent-sales-workbench-44e6d36c5aa9-linux.tar.gz`
+  （SHA-256 `aed619feae9c9c5b87c8715a5d1d94e88d4cbc4f4a24158e656a8077df8b03c3`）；P1 policy
   SHA-256 为 `ffc730e7921dcdd8a2aaa3fc5f88a14c8775965f2e6f1b1f59b186d36295a347`，quality report
   SHA-256 为 `4845f641c10667d3509c8d344719266ad225b747ad4c35ef89330a6953020d5a`。
 - 最新旧版本业务库只读备份为
-  `/opt/sentelligent-sales-workbench/backups/ai-platform-7ed981a-20260911-p1-r3/core-preflight-business.sqlite`
-  （SHA-256 `118de1ca4baba4bf5cb52c6d40ffb9486dc2dfc11dbe7141949656e3c51f827a`）；core preflight
-  `25/25` 通过，AI preflight 的 `9` 个 gate 全部通过。
+  `/opt/sentelligent-sales-workbench/backups/ai-platform-44e6d36-20260912-p1-r11/core-preflight-business.sqlite`
+  （SHA-256 `118de1ca4baba4bf5cb52c6d40ffb9486dc2dfc11dbe7141949656e3c51f827a`）；
+  `old-core-preflight.json` 为 `25/25`，`ai-preflight.json` 的 `9` 个 gate 全部通过。
 - 生产服务 `sentelligent-backend.service`、`sentelligent-frontend.service`、
   `sentelligent-weixin-agent.service`、`sentelligent-ai-platform.service` 和
   `sentelligent-caddy.service` 均为 `active`。`/_health`、`/api/health` 与 AI Platform Unix
@@ -60,9 +65,15 @@
 - Mac Google Chrome 生产验收已完成：`/overview`、`/customers`、客户详情（含 CSV/XLSX
   客户导入预览和客户级主动助手）、客户招标监测、`/opportunities`、`/opportunities/risks`、
   `/opportunities/actions`、`/itineraries`、`/travel-expenses`、`/weekly-reports`、`/knowledge`、
-  `/settings/config`、`/settings/notifications` 以及 AI Platform 管理台均可打开并渲染。
+  `/settings/config`、`/settings/notifications` 以及登录保护的 AI Platform 管理台代理均可打开并渲染。
   只读检查确认通知页为微信 Clawbot 状态页、PushPlus 无操作入口、AI 管理台仅显示 mock provider
-  与队列 `0`，未暴露 provider secret。
+  与队列 `0`，未暴露 provider secret。正式管理台入口是 `/api/ai-platform/console/`；裸路径
+  `/ai-platform-admin/` 在生产按预期回到业务 `/overview`，不计作管理台验收通过。
+- 直达路由验收报告为
+  `.runtime/browser-evidence/v0120/production-direct-2026-09-12T12-50-14-562Z/production-direct-report.json`：
+  `/opportunities/risks` 和 `/opportunities/actions` 均 HTTP `200`、路径不变且页面 test id 正确；
+  `/api/ai-platform/console/` HTTP `200`；Chrome `153.0.8010.36`，控制台错误、页面错误、失败请求
+  和登录之外的非 GET 请求均为 `0`。
 - 页面上下滚动已在 Chrome 原生窗口通过 `Page Down` 验证；同时 `qa:integration` 的
   scroll-wheel 回归和 customer-import acceptance 均通过。没有上传生产 CSV/XLSX、生成生产
   周报、写入客户/商机/action/risk、发送微信或 PushPlus 消息；不做 iPhone 真机验收。
@@ -74,7 +85,7 @@
 证据、以及在明确启用前提下的真实主动扫描和通知验收。它们不影响本次 P1 代码与受控生产切换
 交付，但不能被描述为已经上线。
 
-更新：2026-09-12（生产切换证据生成于 2026-09-11）。主任务已接管生产融合，完整执行边界见
+更新：2026-09-12（r11 生产切换与 Chrome 直达验收证据均生成于 2026-09-12）。主任务已接管生产融合，完整执行边界见
 [FUSION-EXECUTION.md](FUSION-EXECUTION.md)。
 
 ## 历史融合进度

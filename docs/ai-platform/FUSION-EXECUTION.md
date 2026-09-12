@@ -58,30 +58,31 @@ language. The following is the current production evidence and takes
 precedence when describing deployment state:
 
 - The production `current` release is
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e`,
-  bound to source commit `7ed981a1b58e24c3098b823ecdef7d6fc574562c`. Its release manifest is
-  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-7ed981a1b58e/release-manifest.json`
-  with SHA-256 `bd62acb8ec61d00ba759c9f776c85381c13ceaf102f4a71e2b2615a7c778cbfe`.
-  The controlled transition id is `ai-platform-7ed981a-20260911-p1-r3`; the old commit was
-  `4afffee25c7cf25561c3212f19c97353e9cdc76c`.
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-44e6d36c5aa9`,
+  bound to source commit `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`. Its release manifest is
+  `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-44e6d36c5aa9/release-manifest.json`
+  with SHA-256 `db31f480b1bf24abad0c0aa94ded391828cb6640dd0859f3875e34c9c11c2914`.
+  The controlled transition id is `ai-platform-44e6d36-20260912-p1-r11`; the old commit was
+  `89ff3d5ffce2cae165897fd1340b6f62490550aa`.
   The candidate archive is
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/sentelligent-sales-workbench-7ed981a1b58e-linux.tar.gz`
-  with SHA-256 `9fc57f4179e8b0ae02fe13ca25b168b130998d375ffb882f2c4e96cf8fbf48c8`.
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/sentelligent-sales-workbench-44e6d36c5aa9-linux.tar.gz`
+  with SHA-256 `aed619feae9c9c5b87c8715a5d1d94e88d4cbc4f4a24158e656a8077df8b03c3`.
 - The controlled transition report is
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/ai-transition-report.json`
-  with SHA-256 `cb6ff148e3238f4f20d5e35f1d8e1f86245525d8e7b97e0e61873aab02315211`.
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/ai-transition-report.json`
+  with SHA-256 `fddb7f6df191d601b62652ea4ef26964384681ef5e8d614598b1238d3c3dbe99`; it passed with
+  `rollbackStatus=not-required`.
   The transition manifest is
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/transition-manifest.json`
-  with SHA-256 `6e22c3ab81dffa8228a90765e137bbe898ace769f5f1ce757238abb926b9e8a7`.
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/transition-manifest.json`
+  with SHA-256 `becf72f3fe14e0569f184e4b1e4d6dc3a527856d159ebfe79fa57a725464c306`.
   The 120-second observation report is
-  `/opt/sentelligent-sales-workbench/evidence/ai-platform-7ed981a-20260911-p1-r3/observation-1789152661216.json`
-  with SHA-256 `eaad438118f0402528c58a152367defe5d610fcbb38b560f356fe8da92001e86`; it finished
-  with `status=passed`, `thresholdFailures=[]`, queue depth `0`, and no active executions.
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-44e6d36-20260912-p1-r11/observation-120s.json`
+  with SHA-256 `ff7238dc2e10ec7d92f3ce1eea3e1e33a7704914907d65ab4acb7d2843f4bbab`; it finished
+  with `status=passed`, `sampleCount=4`, `thresholdFailures=[]`, queue depth `0`, and no active executions.
   The P1 policy SHA-256 is `ffc730e7921dcdd8a2aaa3fc5f88a14c8775965f2e6f1b1f59b186d36295a347`,
   and the quality report SHA-256 is
   `4845f641c10667d3509d8c344719266ad225b747ad4c35ef89330a6953020d5a`.
 - The latest old-version business read-only backup is
-  `/opt/sentelligent-sales-workbench/backups/ai-platform-7ed981a-20260911-p1-r3/core-preflight-business.sqlite`
+  `/opt/sentelligent-sales-workbench/backups/ai-platform-44e6d36-20260912-p1-r11/core-preflight-business.sqlite`
   with SHA-256 `118de1ca4baba4bf5cb52c6d40ffb9486dc2dfc11dbe7141949656e3c51f827a`.
   The core preflight passed `25/25` checks and the AI preflight passed all `9` gates.
 - Backend, frontend, WeChat agent, AI Platform, shared Caddy and Qingyang
@@ -92,7 +93,9 @@ precedence when describing deployment state:
   unit remains failed from `2026-09-11 19:23:44 CST` because alert delivery
   failed. That predates the `21:16:03–21:16:16 CST` cutover; it was inspected
   read-only and was not restarted or changed as part of this release.
-- The released configuration keeps AI Platform `disabled` with
+- Development and QA use Codex `gpt-5.6-luna / max`; the released business configuration keeps
+  DeepSeek provider `deepseek` and model `deepseek-flash`. The development model is never written
+  into the business runtime configuration. The released AI Platform configuration keeps it `disabled` with
   `local-simulated` execution, keeps Backend as the sole proactive scheduler,
   and keeps proactive assistant/notification auto-run disabled. The target
   metadata is `deepseek-flash` / `max`, but that metadata does not establish
@@ -109,12 +112,16 @@ precedence when describing deployment state:
 - Fresh Mac Google Chrome checks against the final release covered `/overview`, `/customers`,
   customer detail with CSV/XLSX preview and proactive assistant, customer tender monitoring,
   opportunities/actions/risks, itineraries, travel expenses, weekly reports, knowledge,
-  security configuration, notification settings, and the AI Platform console. The tender page
+  security configuration, notification settings, and the authenticated AI Platform console proxy. The tender page
   showed the persisted `120`-minute/`10`-customer cadence; the customer detail page rendered the
   import and assistant controls; notification settings showed read-only WeChat Clawbot status;
   the AI console showed only the mock provider and queue `0`. A Chrome native-window `Page Down`
   check reached the lower overview content, confirming vertical scrolling is restored. No production
-  write action, file upload, report generation, or real notification was performed.
+  write action, file upload, report generation, or real notification was performed. Direct checks in
+  `.runtime/browser-evidence/v0120/production-direct-2026-09-12T12-50-14-562Z/production-direct-report.json`
+  confirmed `/opportunities/risks` and `/opportunities/actions` stayed on their requested paths with
+  the expected page markers. `/ai-platform-admin/` intentionally returned to `/overview`; the supported
+  management entry is `/api/ai-platform/console/`, which returned HTTP 200 without a non-GET request.
 - Historical production smoke rows were removed by the protected server-local
   cleanup path; residual smoke rows are zero and database integrity remains
   clean.
