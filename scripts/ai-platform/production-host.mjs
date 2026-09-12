@@ -138,6 +138,16 @@ function assertCoreProof(proof, manifest, release, commit) {
     && Date.now() - Date.parse(proof.generatedAt) < 15 * 60_000, "CORE_PREFLIGHT_INVALID");
 }
 
+export function postflightHealthMatchesRollout(health, rolloutPhase) {
+  const platform = health?.aiPlatform;
+  if (rolloutPhase === "P1") {
+    return platform?.mode === "disabled"
+      && platform.ready === true
+      && platform.executionMode === "local-simulated";
+  }
+  return platform?.ready === true;
+}
+
 function verifyNewReleaseArchive(manifest) {
   const archive = privateFile(manifest.newArchive, manifest.newArchiveSha256);
   const releaseManifest = JSON.parse(
@@ -430,7 +440,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       const response = await fetch("http://127.0.0.1:8897/api/health", { signal: AbortSignal.timeout(10000) });
       const health = await response.json();
       check(response.status === 200 && health.database === "ready"
-        && health.aiPlatform?.ready === (rolloutPhase !== "P1"), "BUSINESS_POSTFLIGHT_FAILED");
+        && postflightHealthMatchesRollout(health, rolloutPhase), "BUSINESS_POSTFLIGHT_FAILED");
       assertProtected();
       markState({ status: "cutover-passed", currentRelease: manifest.newRelease });
     },
