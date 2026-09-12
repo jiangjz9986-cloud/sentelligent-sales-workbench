@@ -461,6 +461,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       markState({ proactiveReconciled: true });
     },
     async verifyPostflight() {
+      const rolloutPhase = rolloutPhaseForManifest(manifest);
       await corePreflight(manifest.newRelease, manifest.newCommit, "postflight");
       const unit = inspectUnit(PLATFORM_SERVICE);
       check(unit.ActiveState === "active" && unit.User === PLATFORM_USER && unit.WorkingDirectory === manifest.newRelease, "PLATFORM_UNIT_IDENTITY_INVALID");
