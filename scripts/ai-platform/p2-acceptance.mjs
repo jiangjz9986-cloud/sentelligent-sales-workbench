@@ -31,6 +31,7 @@ export const P2_ACCEPTANCE_DEFAULT_OBSERVATION_INTERVAL_SECONDS = 60;
 export const P2_ACCEPTANCE_MAX_SAMPLES = 100;
 export const P2_ACCEPTANCE_MAX_TIMEOUT_SECONDS = 600;
 export const P2_ACCEPTANCE_MAX_OBSERVATION_SECONDS = 7 * 24 * 60 * 60;
+export const P2_ACCEPTANCE_SAMPLE_MAX_OUTPUT_TOKENS = 256;
 export const P2_ACCEPTANCE_DEFAULT_BASE_URL = "http://127.0.0.1:18997";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/u;
@@ -296,12 +297,28 @@ export function parseP2AcceptanceArguments(argv) {
 export function createP2AcceptanceSamples(runId, count = P2_ACCEPTANCE_DEFAULT_SAMPLE_COUNT) {
   safeId(runId, "runId");
   safeInteger(count, "sampleCount", { min: P2_ACCEPTANCE_MIN_SAMPLES, max: P2_ACCEPTANCE_MAX_SAMPLES });
-  return Array.from({ length: count }, (_item, index) => ({
-    id: `sample-${String(index + 1).padStart(3, "0")}`,
-    input: {
-      text: `Controlled P2 acceptance sample ${index + 1} for run ${runId}. Return a JSON object with documented facts only.`,
-    },
-  }));
+  return Array.from({ length: count }, (_item, index) => {
+    const id = `sample-${String(index + 1).padStart(3, "0")}`;
+    const message = JSON.stringify({
+      sampleId: id,
+      runId,
+      text: `Synthetic P2 acceptance sample ${index + 1}.`,
+      output: "json-only",
+    });
+    return {
+      id,
+      input: {
+        protocol: "chat.completions.v1",
+        model: AI_TARGET_MODEL,
+        reasoningEffort: AI_TARGET_REASONING_EFFORT,
+        request: {
+          model: AI_TARGET_MODEL,
+          messages: [{ role: "user", content: message }],
+          max_tokens: P2_ACCEPTANCE_SAMPLE_MAX_OUTPUT_TOKENS,
+        },
+      },
+    };
+  });
 }
 
 function assertHealth(health, policy) {

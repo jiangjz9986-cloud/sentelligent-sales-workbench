@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { normalizeDeploymentPolicy as normalizeRuntimeDeploymentPolicy } from "../../ai-platform/src/operations/deploymentPolicy.js";
-import { normalizeProviderPolicies } from "../../ai-platform/src/providers/openAiCompatible.js";
-import { sha256 } from "../../shared/aiPlatformContract.mjs";
+import { createOpenAiCompatibleProvider, normalizeProviderPolicies } from "../../ai-platform/src/providers/openAiCompatible.js";
+import { AI_TARGET_MODEL, sha256 } from "../../shared/aiPlatformContract.mjs";
 import {
   P2_ACCEPTANCE_LIVE_CONFIRMATION,
+  P2_ACCEPTANCE_SAMPLE_MAX_OUTPUT_TOKENS,
   P2_ACCEPTANCE_TASK_TYPE,
+  createP2AcceptanceSamples,
   parseP2AcceptanceArguments,
   runP2Acceptance,
 } from "./p2-acceptance.mjs";
@@ -199,6 +201,60 @@ test("an enabled proactive schedule is rejected before any acceptance task is cr
   const harness = fakeHarness({ proactive: true });
   await assert.rejects(baseRun(harness), (error) => error.code === "P2_PROACTIVE_SCHEDULE_ENABLED");
   assert.equal(harness.created(), 0);
+});
+
+test("generated P2 samples prepare as bounded deepseek-flash JSON chat completions", async () => {
+  const samples = createP2AcceptanceSamples("run-provider-fixture");
+  const sample = samples[0];
+  assert.equal(sample.id, "sample-001");
+  assert.equal(sample.input.protocol, "chat.completions.v1");
+  assert.equal(sample.input.model, AI_TARGET_MODEL);
+  assert.equal(sample.input.request.model, AI_TARGET_MODEL);
+  assert.equal(sample.input.request.max_tokens, P2_ACCEPTANCE_SAMPLE_MAX_OUTPUT_TOKENS);
+  assert.deepEqual(JSON.parse(sample.input.request.messages[0].content), {
+    sampleId: "sample-001",
+    runId: "run-provider-fixture",
+    text: "Synthetic P2 acceptance sample 1.",
+    output: "json-only",
+  });
+
+  const [policy] = normalizeProviderPolicies([{
+    id: "provider-deepseek-fixture",
+    kind: "openai_compatible",
+    baseUrl: "https://provider.example.test",
+    credentialEnv: "AI_PROVIDER_DEEPSEEK_FIXTURE_KEY",
+    models: [{
+      name: AI_TARGET_MODEL,
+      taskTypes: [P2_ACCEPTANCE_TASK_TYPE],
+      reasoning: "deepseek-thinking",
+      maxOutputTokens: 3_200,
+    }],
+  }], { allowedOrigins: ["https://provider.example.test"] });
+  let fetchCalls = 0;
+  const provider = createOpenAiCompatibleProvider(policy, {
+    env: { [policy.credentialEnv]: "synthetic-p2-provider-credential" },
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error("provider requests are forbidden in this test");
+    },
+  });
+
+  const prepared = await provider.prepare({
+    task: { id: "task-provider-fixture", taskType: P2_ACCEPTANCE_TASK_TYPE, input: sample.input },
+    model: { providerId: policy.id, name: AI_TARGET_MODEL },
+    agent: { versionId: "quick-record-fixture-v1", limits: { maxTokens: 3_200 } },
+    limits: { maxTokens: 3_200 },
+  });
+  const body = JSON.parse(prepared.body);
+  assert.equal(fetchCalls, 0);
+  assert.equal(prepared.selected.name, AI_TARGET_MODEL);
+  assert.equal(body.model, AI_TARGET_MODEL);
+  assert.equal(body.max_tokens, P2_ACCEPTANCE_SAMPLE_MAX_OUTPUT_TOKENS);
+  assert.deepEqual(body.messages, sample.input.request.messages);
+  assert.deepEqual(body.response_format, { type: "json_object" });
+  assert.equal(body.stream, false);
+  assert.equal(body.temperature, 0.1);
+  assert.deepEqual(body.thinking, { type: "disabled" });
 });
 
 test("live acceptance uses only the controlled task path and produces a contract-valid two-hour report", async () => {
