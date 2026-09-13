@@ -290,3 +290,11 @@ DeepSeek 官方价格页已在 2026-09-13 重新核对：逻辑名 `deepseek-fla
 - 测试 fixture 的数据库 identity/session value 已统一满足至少 32 字节服务端契约，且使用 scanner-safe placeholder；没有降低生产验证强度，也没有把任何真实凭据写入仓库。
 
 本轮本地代码与 Chrome 验收已收口，但生产结论保持不变：当前 production 仍是 `paused`、`local-simulated`、`externalProvidersEnabled=false`、`admissionOpen=false`，微信 context 缺失。真实 DeepSeek `deepseek-flash` 的逐请求账单/失败场景/观察、有效 Clawbot context 下的主动投递、备份恢复/transition/drain/rollback 和 48 小时灰度仍未完成；因此本轮没有切换生产、没有修改生产数据库、没有发送真实微信消息，也没有宣称已完成完整交付。
+
+## 2026-09-13 生产只读刷新
+
+- 只读 SSH 核对目标为 `root@82.156.210.199`，使用 `/Users/jiangjizhen/Desktop/ssh.pem`；未读取 iCloud、未读取生产密钥、未执行服务/数据库/配置写入。
+- 生产 `current` 仍为 `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-21cb281ee37e`，manifest `source.commit=21cb281ee37e30c12cf9c1de663c50cc0d9bc5ab`，与候选 `5871405e58a01c048e0577f63829dc089c42f35a` 不同；Backend、Frontend、Caddy、AI platform、WeChat 三个项目服务均为 active，运行时 Node 为 `v22.21.1`。
+- 最新 AI platform P1 quality evidence 为 `ai-platform-21cb281-20260913-p1/quality.json`：`status=passed` 仅表示 mock P1 质量通过，`executionMode=local-simulated`、`providerScope=mock-only`、模型为 `mock-standard-v1`；`unknowns` 明确记载未调用真实供应商、未验证真实模型质量/延迟/费用、未发送真实微信通知。
+- WeChat worker 日志仍为 `category=outbox status=not_ready reason=context_token_missing`；`sentelligent-ops-alert@sentelligent-backend.service.service` 仍为 failed。两项都不能通过清除状态或虚拟 heartbeat 伪造为已恢复。
+- 因此候选制品虽已本地生成并通过完整 QA，当前生产仍保持 NO-GO；任何真实 provider activation、P4 生产写回、Clawbot 主动消息和 cutover 必须等对应证据与 rollback/backup 门禁完成后单独执行。
