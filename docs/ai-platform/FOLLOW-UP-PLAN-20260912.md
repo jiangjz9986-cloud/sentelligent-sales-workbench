@@ -367,3 +367,20 @@ DeepSeek provider `deepseek` 的逻辑模型 `deepseek-flash`。Codex 执行模�
 Chrome 报告路径、P2 checkpoint/report 和逐请求账单状态、Clawbot context/发送 receipt/outbox 水位、
 F4 写入/清理/审计/SQLite 完整性、preflight/backup/transition/postflight/rollback/观察报告，以及
 仍未执行或受上游限制的项目。只有这些证据全部闭环，才将目标从 `active` 标记为 `complete`。
+
+## 2026-09-13 clean commit 复验
+
+本轮按上述计划在 clean worktree 对 `54986118314b00ddc1e928378bb0b335e6196d87` 重新执行
+`npm run qa:desktop`，退出码为 `0`：
+
+- 部署门禁 `297 passed / 0 failed / 2 skipped`，完整历史 secret scan `findings=[]`；
+- AI Platform `100/100`，Backend 全量 `2093/2093`、`240` suites，v0.12.0 business acceptance `4/4`；
+- 前端本地 QA、集成 QA、滚动回归和客户导入验收全部通过；
+- clean Chrome 报告：
+  `.runtime/browser-evidence/v0120/scroll-wheel/2026-09-13T09-13-31-749Z-54986118314b-clean-NYiCci/scroll-wheel-report.json`；
+  `.runtime/browser-evidence/v0120/customer-import-acceptance/2026-09-13T09-13-42-342Z-54986118314b-clean-mSTr3a/customer-import-acceptance-report.json`；
+- 候选制品仍为 `.runtime/releases/sentelligent-sales-workbench-54986118314b.tar.gz`，SHA-256 为
+  `fd25ba85af574a4d0afd5c663c8467299c43fedb864d579dcfd6e5b5e2e29880`。
+
+该复验只证明代码、隔离测试和 Mac Chrome 证据稳定，不改变 P2 逐请求账单、真实 Clawbot
+context、生产合成写回、备份恢复/切换/回滚及观察门禁的未完成状态；目标继续保持 `active`。
