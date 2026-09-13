@@ -7,15 +7,19 @@
 #      one GET on the ops-alerts status endpoint
 #   4. daily backup freshness (< 26h)
 # Alerts go only to the Clawbot-backed outbox endpoint (hour-keyed dedup there).
+# If Backend is unavailable, ops-alert.sh durably spools the JSON and this
+# inspector drains it on a later run; no secondary notification provider exists.
 # Runs as root, installed 0700 at /opt/sentelligent-sales-workbench/tools/ops-inspect.sh.
 # python3 blocks do an explicit fsencode/UTF-8 round trip because systemd runs
 # this under the C locale (surrogate-escaped argv would emit mojibake JSON).
 set -uo pipefail
-ROOT="/opt/sentelligent-sales-workbench"
+ROOT="${SENTELLIGENT_ROOT:-/opt/sentelligent-sales-workbench}"
 STATE="$ROOT/tools/.ops-inspect-state"
 NODE="$ROOT/runtime/node-v24/bin/node"
 DB="/var/lib/sentelligent-sales-workbench/sales-workbench.sqlite"
-env_value() { grep -E "^$1=" "$ROOT/config/backend.env" 2>/dev/null | head -1 | cut -d= -f2-; }
+OPS_ALERT_SCRIPT="${OPS_ALERT_SCRIPT:-$ROOT/tools/ops-alert.sh}"
+ENV_FILE="${OPS_ALERT_ENV_FILE:-$ROOT/config/backend.env}"
+env_value() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-; }
 OPS_BEARER="$(env_value OPS_ALERT_TOKEN)"
 state_get() { grep -E "^$1=" "$STATE" 2>/dev/null | head -1 | cut -d= -f2-; }
 state_set() {
@@ -25,20 +29,12 @@ state_set() {
   echo "$1=$2" >> "$STATE.tmp"
   mv "$STATE.tmp" "$STATE"
 }
-json_utf8() { # argv -> UTF-8-safe JSON object per the calling template
-  python3 -c '
-import json, os, sys
-argv = [os.fsencode(value).decode("utf-8", "replace") for value in sys.argv[2:]]
-body = {"source": argv[0], "severity": "critical", "summary": argv[1], "detail": argv[2]}
-print(json.dumps(body))
-' "$@"
-}
 alert() { # $1 source  $2 summary  $3 detail
-  [[ -n "$OPS_BEARER" ]] || return 1
-  curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $OPS_BEARER" \
-    -H 'Content-Type: application/json' --data "$(json_utf8 alert "$1" "$2" "$3")" \
-    http://127.0.0.1:8897/api/integrations/ops-alerts | grep -qE '^2'
+  "$OPS_ALERT_SCRIPT" --emit "$1" critical "$2" "$3"
 }
+# First, replay root-only alerts captured while Backend was down. A failed
+# drain is expected to remain pending and must not suppress the current checks.
+"$OPS_ALERT_SCRIPT" --drain >/dev/null 2>&1 || true
 # 1. new failed outbox rows (watermark = latest failed updated_at)
 FAILED_MAX="$("$NODE" --input-type=module -e "import{DatabaseSync}from'node:sqlite';const d=new DatabaseSync('$DB',{readOnly:true});const r=d.prepare(\"SELECT COALESCE(MAX(updated_at),'') m, COUNT(*) n FROM weixin_confirmation_outbox WHERE status='failed' AND COALESCE(last_error_code,'') NOT IN ('WEIXIN_OUTBOX_STALE','WEIXIN_OUTBOX_SUPERSEDED','WEIXIN_OUTBOX_CANCELLED')\").get();console.log(r.m+'|'+r.n)" 2>/dev/null)"
 if [[ -n "$FAILED_MAX" ]]; then

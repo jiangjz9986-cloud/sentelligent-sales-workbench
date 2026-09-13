@@ -83,6 +83,12 @@
 7. 增加 production transition、preflight、postflight、backup/restore、rollback 的负向测试和证据绑定。
 8. 将 P2 采样改为可恢复流程：持久记录 runId、sourceCommit、两种 policy digest、样本/task/attempt/request id；先采样、再观察和对账、最后验证报告。断线、重启、账单未到都不能重发已收费样本；unknown 保留预算待核对。
 
+本轮已补齐运维告警的恢复性：`ops-alert.sh` 在 Backend 不可用时进入受限本地 spool，
+`ops-inspect.sh` 在后续巡检中经同一 Backend ops-alert endpoint 排空；脚本 payload 带稳定
+`eventId`/`occurredAt`，跨小时重试不重复入队。该实现不引入 PushPlus 或直接 Clawbot 旁路，
+并已通过脚本集成、bash 语法和 ops API 回归；部署仍需纳入下一正式 release，并在生产用成功
+receipt 复核历史 failed unit。
+
 退出条件：本地代码门禁全部通过；`gpt-5.6-luna / max` 只作为开发执行模型；业务配置仍只出现 `deepseek-flash`。
 
 ### P2：真实 DeepSeek 单并发 canary
@@ -126,6 +132,10 @@
 4. 微信：验证已有有效 context 时无需本次先发消息即可主动发送；context 过期时消息留在 outbox，真实新入站恢复后验证限速、重试、去重和审计。重新登录/绑定不等于 provider context 已续期。若上游仍无续期 API，完整交付须明确这一产品限制，不能承诺永久无入站推送。
 5. 只在单独的真实消息验收窗口启用真实微信发送；PushPlus 不恢复。
 6. 复核历史 `sentelligent-ops-alert@sentelligent-backend.service.service` 失败的原因；修复实际告警链路并验证成功 receipt，不能只清除 systemd failed 标记。
+
+当前代码层修复已经完成，但生产 receipt 尚未取得：待下一候选 release 安装脚本后，先以受控
+`manual-test` 告警验证 endpoint 入队/Clawbot 投递，再只读复核该历史 failed unit 的恢复状态；
+若 context 缺失，告警必须保持 queued/spooled，不能把缺少 context 当作投递成功。
 
 退出条件：至少覆盖一次主动扫描周期和 26 小时观察；媒体清理、租约、预算、outbox 和上下文状态均有证据。
 

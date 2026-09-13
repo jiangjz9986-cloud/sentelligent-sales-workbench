@@ -5,6 +5,11 @@
 - 当前继续在 `ai-platform-production-integration-20260909` 工作树开发，目标模式保持
   `active`，开发执行设置为 Codex `gpt-5.6-luna / max`；业务系统仍统一使用 DeepSeek
   provider `deepseek`、逻辑模型 `deepseek-flash`。本轮未读取 iCloud，未从生产取密钥，未修改生产。
+- 已修复历史 `sentelligent-ops-alert@sentelligent-backend.service.service` 的告警失败路径：
+  `ops-alert.sh` 现在在 Backend 暂不可用时把告警以 root-only、600 权限的 JSON 原子写入本地 spool，
+  `ops-inspect.sh` 后续只通过同一个 Backend ops-alert endpoint 排空；没有 PushPlus、直接微信或其他
+  旁路通道。systemd 事件携带稳定 `eventId` 和固定 `occurredAt`，Backend 接受后响应丢失并跨小时恢复时
+  仍保持幂等。对应脚本集成测试、bash 语法检查和 ops API 回归已通过；该改动尚未进入生产 release。
 - 本轮收口提交为 `2423707c37d442176ff97ad77b68070cef6c1ccf`：P2 每个已结算样本现在必须同时绑定供应商返回的
   `actualModel`，并校验它与策略模型一致；旧 checkpoint 缺字段时只读回填任务详情，不创建新任务、不重复收费。
 - provider readiness 已收口为 `configured`、`probeReady`、`liveReady` 分层，并绑定凭据 revision/digest、

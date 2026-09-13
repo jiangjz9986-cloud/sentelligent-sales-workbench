@@ -7,8 +7,9 @@
 import { HttpError } from "../http/errors.js";
 
 const SOURCE_RE = /^[A-Za-z0-9:._@-]{1,100}$/u;
+const EVENT_ID_RE = /^[A-Za-z0-9:._@-]{1,200}$/u;
 const SEVERITIES = new Set(["critical", "warning"]);
-const ALLOWED_FIELDS = new Set(["source", "severity", "summary", "detail", "occurredAt"]);
+const ALLOWED_FIELDS = new Set(["source", "severity", "summary", "detail", "occurredAt", "eventId"]);
 const MAX_SUMMARY_CHARS = 300;
 const MAX_DETAIL_CHARS = 2000;
 
@@ -53,7 +54,9 @@ function validateAlertInput(body) {
     if (!Number.isFinite(parsed)) throw validationError({ occurredAt: "invalid" });
     occurredAt = new Date(parsed).toISOString();
   }
-  return { source, severity, summary, detail, occurredAt };
+  const eventId = boundedText(body.eventId, "eventId", 200);
+  if (eventId !== null && !EVENT_ID_RE.test(eventId)) throw validationError({ eventId: "invalid" });
+  return { source, severity, summary, detail, occurredAt, eventId };
 }
 
 export function createOpsAlertService({
@@ -78,10 +81,14 @@ export function createOpsAlertService({
     const nowDate = now instanceof Date ? now : new Date(now);
     if (Number.isNaN(nowDate.getTime())) throw new TypeError("clock must return a valid Date");
     const nowIso = nowDate.toISOString();
-    // Hour-keyed idempotency is the only storm gate: one queued message per
-    // source per UTC hour; a persistent fault re-alerts hourly by design.
+    // Script-originated failures carry a stable event id so an accepted POST
+    // whose HTTP response is lost can be retried after a restart or hour roll
+    // without a duplicate outbox row. Older callers retain the source/hour
+    // storm gate and therefore still re-alert persistent faults hourly.
     const hourKey = nowIso.slice(0, 13);
-    const idempotencyKey = `ops-alert:${input.source}:${hourKey}`;
+    const idempotencyKey = input.eventId
+      ? `ops-alert:event:${input.eventId}`
+      : `ops-alert:${input.source}:${hourKey}`;
     const payload = {
       kind: "ops_alert",
       // The `source` input is renamed `origin` at rest: the outbox payload
@@ -121,9 +128,9 @@ export function createOpsAlertService({
             payload,
           });
         } catch (error) {
-          // Same source within the same hour but with different content (for
-          // example a fresh journal tail): the hour gate must still hold, so
-          // report a replay instead of surfacing the outbox idempotency 409.
+          // Same source/event gate but with different content (for example a
+          // fresh journal tail): the gate must still hold, so report a replay
+          // instead of surfacing the outbox idempotency 409.
           if (error?.code !== "WEIXIN_OUTBOX_IDEMPOTENCY_CONFLICT") throw error;
           queued = null;
         }
