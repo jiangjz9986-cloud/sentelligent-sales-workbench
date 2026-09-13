@@ -277,3 +277,16 @@ DeepSeek 官方价格页已在 2026-09-13 重新核对：逻辑名 `deepseek-fla
 ### 当前判断
 
 当前可继续开发和验收，但尚未达到完整 AI 统一调度平台生产交付：P2 的账单/失败场景/观察、P4 的生产专项写回证据、P5 的真实 Clawbot context，以及 P6 的 48 小时灰度仍未齐。P1 受控生产在线不等于上述门禁通过。
+
+## 2026-09-13 本轮收口证据
+
+本节覆盖前述历史计数，绑定本轮 `qa:desktop` 的最终退出码；工作树仍需提交后才能生成正式制品。
+
+- 新增受控 `acceptance:v0120:production` runner：生产 origin、密码 stdin、session/CSRF、服务端数据库 identity、CSV/XLSX 导入、客户/商机、医院招标 bridge、客户级主动助手、action/risk preview/confirm/replay、登出、精确 manifest、审计完整性、cleanup 和敏感信息脱敏均有合同测试；该 runner 不加入普通 `qa:desktop`，避免误写生产。
+- 新增 server-local synthetic fixture 与精确 cleanup：使用真实 customer proactive subject、action/risk writeback service，按 owner/run marker/manifest 删除，遗漏 FK 或审计实体时事务回滚，删除后执行 `quick_check` 和 `foreign_key_check`。
+- `npm run qa:desktop` 最终通过：部署门禁 `297 passed / 0 failed / 2 skipped`；历史 secret scan 扫描 `1068` 文件、`4651` Git 对象、`840` Git 消息，`findings=[]`；AI Platform `100/100`，Backend 全量 `2093/2093`、`240` suites，v0.12.0 business acceptance `4/4`，前端 `qa:local` 和 `qa:integration` 均通过。
+- Mac Google Chrome 集成与移动尺寸浏览器兼容性均通过，覆盖 `1920x1080`、`1440x900`、`1366x768`、`1024x768`、`390x844`、`360x800`；页面横向溢出为 `0`，滚动回归通过，客户 CSV/XLSX 验收通过。按用户范围未执行 iPhone 真机/WebKit 验收。
+- 可追溯的最新滚动报告为 `.runtime/browser-evidence/v0120/scroll-wheel/2026-09-13T08-20-28-149Z-0b5e73b72f01-dirty-snapshot-gKq569/scroll-wheel-report.json`；客户导入报告为 `.runtime/browser-evidence/v0120/customer-import-acceptance/2026-09-13T08-20-38-268Z-0b5e73b72f01-dirty-snapshot-5f9wPU/customer-import-acceptance-report.json`。两份报告均标记 `passed`，但来自 dirty worktree，不能直接作为正式 release manifest。
+- 测试 fixture 的数据库 identity/session value 已统一满足至少 32 字节服务端契约，且使用 scanner-safe placeholder；没有降低生产验证强度，也没有把任何真实凭据写入仓库。
+
+本轮本地代码与 Chrome 验收已收口，但生产结论保持不变：当前 production 仍是 `paused`、`local-simulated`、`externalProvidersEnabled=false`、`admissionOpen=false`，微信 context 缺失。真实 DeepSeek `deepseek-flash` 的逐请求账单/失败场景/观察、有效 Clawbot context 下的主动投递、备份恢复/transition/drain/rollback 和 48 小时灰度仍未完成；因此本轮没有切换生产、没有修改生产数据库、没有发送真实微信消息，也没有宣称已完成完整交付。

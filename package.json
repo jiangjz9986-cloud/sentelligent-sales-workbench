@@ -28,6 +28,7 @@
     "preflight:production": "node scripts/production-preflight.mjs",
     "acceptance:ai-platform:p2": "node scripts/ai-platform/p2-acceptance.mjs",
     "acceptance:v0120:business": "node scripts/ai-platform/v0120-business-acceptance.mjs",
+    "acceptance:v0120:production": "node scripts/ai-platform/v0120-production-acceptance.mjs",
     "asr:cleanup": "node scripts/asr-runtime-cleanup.mjs",
     "smoke:production:asr": "node scripts/asr-production-smoke.mjs",
     "smoke:production:https": "node scripts/production-https-smoke.mjs",
