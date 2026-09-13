@@ -309,10 +309,22 @@ test("live acceptance uses only the controlled task path and produces a contract
   assert.equal(report.providerPolicyDigest, providerPolicyDigest(normalizedProviders));
 });
 
-test("missing billing reconciliation blocks the run before provider task creation", async () => {
+test("missing billing reconciliation leaves a resumable checkpoint after controlled sampling", async () => {
+  const checkpoint = temporaryCheckpoint();
   const harness = fakeHarness();
-  await assert.rejects(baseRun(harness, { billing: null, billingLoader: null }), (error) => error.code === "P2_BILLING_RECONCILIATION_REQUIRED");
-  assert.equal(harness.created(), 0);
+  try {
+    await assert.rejects(
+      baseRun(harness, { billing: null, billingLoader: null, checkpointPath: checkpoint.path }),
+      (error) => error.code === "P2_BILLING_RECONCILIATION_MISSING",
+    );
+    const pending = JSON.parse(readFileSync(checkpoint.path, "utf8"));
+    assert.equal(pending.phase, "failed");
+    assert.equal(pending.failure.resumePhase, "reconciling");
+    assert.ok(pending.samples.every((sample) => sample.status === "settled"));
+    assert.equal(harness.created(), 10);
+  } finally {
+    checkpoint.cleanup();
+  }
 });
 
 test("provider and deployment policy inputs use the production validators", async () => {

@@ -637,7 +637,6 @@ export async function runP2Acceptance({
   safeInteger(observationSeconds, "observationSeconds", { min: P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS, max: P2_ACCEPTANCE_MAX_OBSERVATION_SECONDS });
   safeInteger(observationIntervalSeconds, "observationIntervalSeconds", { min: 1, max: 3_600 });
   if (!client) failure("P2_ACCEPTANCE_CLIENT_REQUIRED");
-  if (typeof billingLoader !== "function" && billing === null) failure("P2_BILLING_RECONCILIATION_REQUIRED");
 
   const providers = parseProviderPolicies(providerPolicies);
   const policy = normalizeDeploymentPolicy(deploymentPolicy, sourceCommit, providers);
@@ -672,7 +671,11 @@ export async function runP2Acceptance({
   };
 
   const readBilling = async () => normalizeBillingEntries(
-    typeof billingLoader === "function" ? await billingLoader() : billing,
+    typeof billingLoader === "function"
+      ? await billingLoader()
+      : billing === null
+        ? { entries: [] }
+        : billing,
   );
 
   const replaceSample = (state, sampleIndex, patch) => ({
@@ -913,12 +916,13 @@ async function main() {
   const env = process.env;
   const runId = options.runId;
   try {
-    if (!existsSync(options.billingPath) && !existsSync(options.checkpointPath)) failure("P2_BILLING_RECONCILIATION_REQUIRED");
     const result = await runP2Acceptance({
       sourceCommit: options.sourceCommit,
       deploymentPolicy: parseJsonFile(options.policyPath, "deployment policy"),
       providerPolicies: parseProviderPolicies(parseJsonFile(options.providerPoliciesPath, "provider policies")),
-      billingLoader: () => parseJsonFile(options.billingPath, "billing reconciliation"),
+      billingLoader: () => existsSync(options.billingPath)
+        ? parseJsonFile(options.billingPath, "billing reconciliation")
+        : { entries: [] },
       client: createP2AcceptanceClient({
         secret: env.AI_PLATFORM_AUTH_SECRET, issuer: env.AI_PLATFORM_TRUSTED_ISSUER,
         owner: options.owner, baseUrl: options.baseUrl, socketPath: options.socketPath,
