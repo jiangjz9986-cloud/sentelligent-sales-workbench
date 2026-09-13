@@ -5,19 +5,21 @@
 - 当前继续在 `ai-platform-production-integration-20260909` 工作树开发，目标模式保持
   `active`，开发执行设置为 Codex `gpt-5.6-luna / max`；业务系统仍统一使用 DeepSeek
   provider `deepseek`、逻辑模型 `deepseek-flash`。本轮未读取 iCloud，未从生产取密钥，未修改生产。
+- 本轮收口提交为 `2423707c37d442176ff97ad77b68070cef6c1ccf`：P2 每个已结算样本现在必须同时绑定供应商返回的
+  `actualModel`，并校验它与策略模型一致；旧 checkpoint 缺字段时只读回填任务详情，不创建新任务、不重复收费。
 - provider readiness 已收口为 `configured`、`probeReady`、`liveReady` 分层，并绑定凭据 revision/digest、
   provider policy digest、有效期和真实 completion evidence；只有 `/models` 成功时不能放行普通生产任务。
 - P2 真实供应商验收已具备可恢复 checkpoint 状态机和固定幂等键，已通过 `13/13` checkpoint 测试；
   AI Platform `100/100`、Backend AI adapter `38/38`、部署/AI 脚本 `36/36`、Backend 全量 `2083/2083`
   和部署门禁 `292 passed / 0 failed / 2 skipped`。本轮已补齐 live 文本样本的
-  `finishReason=stop` 持久化和报告 contract 校验。
+  `finishReason=stop`、供应商实际模型身份持久化和报告 contract 校验。
 - Mac 原生 Google Chrome 集成验收已通过，包含客户级主动助手、医院招标 bridge、action/risk 预览边界、
   CSV/XLSX 导入、滚动回归、管理台、AI Platform console、权限/冲突和桌面/窄窗口视口。按用户要求不做
   iPhone 真机或 WebKit 验收；浏览器移动尺寸检查不等同于真机证据。
 - 真实 DeepSeek canary 已完成 10 个合成样本，状态为 `samples_passed`，但账单和观察门禁仍未完成。
   当前续跑绑定为 runId `p2-prod-20260913-aa443cc-r1`，候选提交为
   `aa443cc63430185650c01e0811ddc96fa27c6172`；10/10 样本均返回
-  `model=deepseek-flash`、`provider=provider-deepseek`、`finishReason=stop` 和唯一 provider request id，
+  `model=deepseek-flash`、`actualModel=deepseek-flash`、`provider=provider-deepseek`、`finishReason=stop` 和唯一 provider request id，
   暂计费用约为 `6,540 micro-CNY`。检查点为
   `/opt/sentelligent-sales-workbench/evidence/ai-platform-aa443cc-p2-20260913/p2-checkpoint-r1.json`，
   报告为 `/opt/sentelligent-sales-workbench/evidence/ai-platform-aa443cc-p2-20260913/p2-report-r1.json`。
