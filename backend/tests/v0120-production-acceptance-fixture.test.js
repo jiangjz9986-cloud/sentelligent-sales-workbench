@@ -16,6 +16,7 @@ function createDatabaseFixture() {
   const directory = mkdtempSync(join(tmpdir(), "sentelligent-v0120-fixture-"));
   temporaryDirectories.push(directory);
   const databaseUrl = join(directory, "acceptance.sqlite");
+  const runId = randomUUID();
   const customerId = `customer-${randomUUID()}`;
   const opportunityId = `opportunity-${randomUUID()}`;
   const db = openDatabase({ databaseUrl });
@@ -24,7 +25,7 @@ function createDatabaseFixture() {
     VALUES ($id, $name, $owner, $summary, $now, $now)
   `).run({
     $id: customerId,
-    $name: "v0.12 fixture customer",
+    $name: `[v0.12:${runId}] fixture customer`,
     $owner: OWNER,
     $summary: "fixture customer",
     $now: "2026-09-13T00:00:00.000Z",
@@ -35,13 +36,13 @@ function createDatabaseFixture() {
   `).run({
     $id: opportunityId,
     $customerId: customerId,
-    $name: "v0.12 fixture opportunity",
+    $name: `[v0.12:${runId}] fixture opportunity`,
     $owner: OWNER,
     $sourceRecord: "fixture",
     $now: "2026-09-13T00:00:00.000Z",
   });
   db.close();
-  return { databaseUrl, customerId, opportunityId };
+  return { databaseUrl, customerId, opportunityId, runId };
 }
 
 afterEach(() => {
@@ -52,7 +53,7 @@ afterEach(() => {
 
 test("v0.12.0 production fixture uses the real proactive subject and writeback services", () => {
   const fixture = createDatabaseFixture();
-  const runId = randomUUID();
+  const runId = fixture.runId;
   const result = createV0120ProductionAcceptanceFixture({
     databaseUrl: fixture.databaseUrl,
     authSessionSecret: TEST_SESSION_VALUE,
@@ -112,4 +113,29 @@ test("v0.12.0 production fixture rejects a cross-owner customer/opportunity pair
     }),
     /belong to the acceptance owner/i,
   );
+});
+
+test("fixture rejects real business rows without the current run marker before writing", () => {
+  const fixture = createDatabaseFixture();
+  assert.throws(() => createV0120ProductionAcceptanceFixture({
+    ...fixture, runId: randomUUID(), owner: OWNER, authSessionSecret: TEST_SESSION_VALUE,
+  }), /exact run marker/);
+  const db = openDatabase({ databaseUrl: fixture.databaseUrl });
+  try { assert.equal(db.prepare("SELECT COUNT(*) AS count FROM risk_items").get().count, 0); }
+  finally { db.close(); }
+});
+
+test("fixture rolls seed and audit back when subject creation fails", () => {
+  const fixture = createDatabaseFixture();
+  let clockCalls = 0;
+  assert.throws(() => createV0120ProductionAcceptanceFixture({
+    ...fixture, owner: OWNER, authSessionSecret: TEST_SESSION_VALUE,
+    clock: () => { if (++clockCalls > 1) throw new Error("fixture clock failed"); return new Date("2026-09-13T08:00:00Z"); },
+  }), /fixture clock failed/);
+  const db = openDatabase({ databaseUrl: fixture.databaseUrl });
+  try {
+    for (const table of ["risk_items", "audit_logs", "proactive_subjects", "ai_suggestions"]) {
+      assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, table);
+    }
+  } finally { db.close(); }
 });

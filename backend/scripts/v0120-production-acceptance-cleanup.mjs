@@ -124,6 +124,11 @@ export function normalizeV0120AcceptanceManifest(value) {
     key,
     normalizeIdArray(value[key], key),
   ]));
+  // This runner never creates these entities. Accepting arbitrary ids here
+  // would bypass the ownership/marker validation used for the supported rows.
+  if (arrays.quickRecordIds.length || arrays.solutionDraftIds.length) {
+    throw new TypeError("Quick records and solution drafts are outside the acceptance write set");
+  }
   return Object.freeze({
     schemaVersion: 1,
     runId,
@@ -357,6 +362,9 @@ function validateBusinessRows(db, manifest) {
     if (row.owner !== manifest.owner || !batchIds.has(String(row.batch_id))) {
       throw new Error("Acceptance import row ownership mismatch");
     }
+    if (row.customer_id && !manifest.customerIds.includes(String(row.customer_id))) {
+      throw new Error("Acceptance import row references a customer outside the manifest");
+    }
   }
 
   const customerIds = new Set(manifest.customerIds);
@@ -425,6 +433,10 @@ function validateBusinessRows(db, manifest) {
     if (!canonicalIds.has(String(row.canonical_notice_id))) throw new Error("Acceptance notice identity mismatch");
     assertContainsMarker(row, marker, ["id", "identity_key", "title", "content_text"], "Acceptance tender notice");
     assertDigest(row.canonical_digest, "Acceptance notice canonical digest");
+    const matches = parseJson(row.match_customer_ids_json, []);
+    if (!Array.isArray(matches) || matches.some((id) => !customerIds.has(String(id)))) {
+      throw new Error("Acceptance notice matches an unrelated customer");
+    }
   }
   const bridges = rowsByIds(db, "hospital_tender_bridges", manifest.bridgeIds, "hospital tender bridge");
   for (const row of bridges) {
@@ -437,6 +449,9 @@ function validateBusinessRows(db, manifest) {
     }
     assertDigest(row.notice_digest, "Acceptance bridge notice digest");
     assertDigest(row.preview_digest, "Acceptance bridge preview digest");
+    for (const [field, ids] of [["opportunity_id", manifest.opportunityIds], ["action_item_id", manifest.actionIds]]) {
+      if (row[field] && !ids.includes(String(row[field]))) throw new Error("Acceptance bridge writeback is outside the manifest");
+    }
   }
 
   const previews = rowsByIds(
@@ -475,6 +490,7 @@ function validateBusinessRows(db, manifest) {
     if (!payload || !suggestionIdSet.has(String(payload.suggestionId ?? ""))) {
       throw new Error("Acceptance outbox is not bound to an acceptance suggestion");
     }
+    if (row.status === "processing") throw new Error("Acceptance outbox must be drained before cleanup");
   }
 
   const allowedEntities = new Set([
@@ -530,6 +546,8 @@ function validateBusinessRows(db, manifest) {
 function residualCounts(db, manifest, tokenHash) {
   return {
     customers: exactCount(db, "customers", manifest.customerIds),
+    quickRecords: exactCount(db, "quick_records", manifest.quickRecordIds),
+    solutionDrafts: exactCount(db, "solution_drafts", manifest.solutionDraftIds),
     importBatches: exactCount(db, "customer_import_batches", manifest.importBatchIds),
     importRows: exactCount(db, "customer_import_rows", manifest.importRowIds),
     opportunities: exactCount(db, "opportunities", manifest.opportunityIds),
@@ -547,6 +565,53 @@ function residualCounts(db, manifest, tokenHash) {
       "SELECT COUNT(*) AS count FROM auth_sessions WHERE token_hash = $tokenHash AND account = $owner",
     ).get({ $tokenHash: tokenHash, $owner: manifest.owner }).count),
     idempotencyKeys: exactIdempotencyCount(db, manifest.idempotencyKeys),
+  };
+}
+
+function acceptanceAuxiliaryRows(db, manifest) {
+  const sourceId = `v0120-${manifest.runId}-source`;
+  const runId = `v0120-${manifest.runId}-run`;
+  const sources = db.prepare("SELECT * FROM hospital_tender_sources WHERE source_id = $id").all({ $id: sourceId });
+  const runs = db.prepare("SELECT * FROM hospital_tender_runs WHERE id = $id").all({ $id: runId });
+  for (const row of [...sources, ...runs]) {
+    if (row.source_id !== sourceId) throw new Error("Acceptance tender source/run identity mismatch");
+    const timestamp = row.started_at ?? row.last_run_at;
+    if (!manifest.snapshotIds.includes(timestamp)) throw new Error("Acceptance tender source/run snapshot mismatch");
+  }
+  for (const snapshot of manifest.snapshotIds) {
+    const audits = db.prepare("SELECT id, actor FROM audit_logs WHERE entity_type = 'hospital_tender_snapshot' AND entity_id = $id")
+      .all({ $id: snapshot });
+    if (audits.length !== 1 || ![MACHINE_ACTOR, manifest.owner].includes(audits[0].actor) || !manifest.auditIds.includes(String(audits[0].id))) {
+      throw new Error("Acceptance snapshot audit identity is missing or ambiguous");
+    }
+  }
+  const events = [];
+  for (const [type, ids] of [
+    ["customer", manifest.customerIds], ["opportunity", manifest.opportunityIds],
+    ["action", manifest.actionIds], ["risk", manifest.riskIds], ["hospital_tender", manifest.snapshotIds],
+  ]) {
+    for (const id of ids) {
+      const rows = db.prepare("SELECT * FROM proactive_scan_events WHERE entity_type = $type AND entity_id = $id")
+        .all({ $type: type, $id: id });
+      for (const row of rows) {
+        if (row.owner !== manifest.owner || row.status === "processing") throw new Error("Acceptance event owner mismatch or worker has not drained");
+        const payload = parseJson(row.payload_json, {});
+        if (type === "hospital_tender" && (!Array.isArray(payload.customerIds)
+          || payload.customerIds.some((customerId) => !manifest.customerIds.includes(customerId)))) {
+          throw new Error("Acceptance tender event includes unrelated customers");
+        }
+        events.push(String(row.id));
+      }
+    }
+  }
+  return { sourceId, sources, runs, eventIds: [...new Set(events)] };
+}
+
+function auxiliaryCounts(db, auxiliary) {
+  return {
+    tenderSources: Number(db.prepare("SELECT COUNT(*) AS count FROM hospital_tender_sources WHERE source_id = $id").get({ $id: auxiliary.sourceId }).count),
+    tenderRuns: exactCount(db, "hospital_tender_runs", auxiliary.runs.map((row) => row.id)),
+    scanEvents: exactCount(db, "proactive_scan_events", auxiliary.eventIds),
   };
 }
 
@@ -576,9 +641,13 @@ export function cleanupV0120ProductionAcceptance({
     return withImmediateTransaction(db, () => {
       const tokenHash = sessionHash(authSessionSecret, manifest.sessionCookie);
       validateBusinessRows(db, manifest);
-      const discovered = residualCounts(db, manifest, tokenHash);
+      const auxiliary = acceptanceAuxiliaryRows(db, manifest);
+      const discovered = { ...residualCounts(db, manifest, tokenHash), ...auxiliaryCounts(db, auxiliary) };
 
       const deleted = {
+        scanEvents: deleteByIds(db, "proactive_scan_events", auxiliary.eventIds),
+        tenderRuns: deleteByIds(db, "hospital_tender_runs", auxiliary.runs.map((row) => row.id)),
+        tenderSources: Number(db.prepare("DELETE FROM hospital_tender_sources WHERE source_id = $id").run({ $id: auxiliary.sourceId }).changes),
         audits: deleteByIds(db, "audit_logs", manifest.auditIds),
         notifications: deleteByIds(db, "proactive_notifications", manifest.notificationIds),
         outboxes: deleteByIds(db, "weixin_confirmation_outbox", manifest.outboxIds),
@@ -600,7 +669,7 @@ export function cleanupV0120ProductionAcceptance({
         ).run({ $tokenHash: tokenHash, $owner: manifest.owner }).changes),
         idempotencyKeys: deleteIdempotencyKeys(db, manifest.idempotencyKeys),
       };
-      const residual = residualCounts(db, manifest, tokenHash);
+      const residual = { ...residualCounts(db, manifest, tokenHash), ...auxiliaryCounts(db, auxiliary) };
       if (Object.values(residual).some((count) => count !== 0)) {
         throw new Error(`v0.12.0 cleanup left residual rows: ${JSON.stringify(residual)}`);
       }

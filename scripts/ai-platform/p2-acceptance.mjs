@@ -21,6 +21,7 @@ import {
   validateP2AcceptanceReport,
 } from "./production-contract.mjs";
 import { atomicReplace, privateFile, writeExclusive, writeOnceOrVerify } from "./production-io.mjs";
+import { createDeepSeekAggregateReconciliation, readAggregateBillingInput } from "./p2-billing-aggregate.mjs";
 
 export const P2_ACCEPTANCE_LIVE_CONFIRMATION = "I_UNDERSTAND_P2_LIVE_PROVIDER_CALLS";
 export const P2_ACCEPTANCE_TASK_TYPE = "quick-record.analyze";
@@ -355,7 +356,7 @@ function validateCompletedCheckpoint(state, { sourceCommit, policyDigest, provid
   }
   const report = state.report;
   validateP2AcceptanceReport(report, {
-    sourceCommit, policyDigest, expectedProviderPolicyDigest: providerDigest, currency, now,
+    sourceCommit, policyDigest, providerPolicyDigest: providerDigest, currency, now,
   });
   if (report.checkpointDigest !== checkpointStateDigest(state)) {
     checkpointFailure("P2_CHECKPOINT_INVALID", "completed checkpoint digest does not match report");
@@ -462,12 +463,14 @@ export function parseP2AcceptanceArguments(argv) {
   const pollIntervalSeconds = integerOption("poll-interval-seconds", P2_ACCEPTANCE_DEFAULT_POLL_INTERVAL_SECONDS, 1, 300);
   const observationSeconds = integerOption("observation-seconds", P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS, P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS, P2_ACCEPTANCE_MAX_OBSERVATION_SECONDS);
   const observationIntervalSeconds = integerOption("observation-interval-seconds", P2_ACCEPTANCE_DEFAULT_OBSERVATION_INTERVAL_SECONDS, 1, 3_600);
+  if (values["resume-only"] !== undefined && !["true", "false"].includes(values["resume-only"])) failure("P2_ACCEPTANCE_ARGUMENTS_INVALID");
   return Object.freeze({
     sourceCommit: values["source-commit"], policyPath: resolve(values.policy), providerPoliciesPath: resolve(values["provider-policies"]),
     billingPath: resolve(values.billing), reportPath: resolve(values.report),
     checkpointPath: resolve(values.checkpoint ?? `${values.report}.checkpoint.json`), confirmation: values.confirm,
     baseUrl: values["base-url"] ?? P2_ACCEPTANCE_DEFAULT_BASE_URL, socketPath: values.socket ?? PRODUCTION_AI_SOCKET,
     owner: values.owner ?? P2_ACCEPTANCE_DEFAULT_OWNER, runId: values["run-id"] ?? randomUUID(), sampleCount,
+    resumeOnly: values["resume-only"] === "true",
     taskTimeoutSeconds, pollIntervalSeconds, observationSeconds, observationIntervalSeconds,
   });
 }
@@ -600,9 +603,10 @@ async function waitForTerminal(client, taskId, { timeoutMs, pollIntervalMs, cloc
 }
 
 async function observeWindow(client, {
-  startedAtMs, durationSeconds, intervalSeconds, clock, sleep, policy, checks = [], onCheck = null,
+  durationSeconds, intervalSeconds, clock, sleep, policy, checks = [], onCheck = null,
 }) {
   const observedChecks = [...checks];
+  let firstCheckAt = observedChecks[0]?.at ?? null;
   while (true) {
     const health = await client.health();
     assertHealth(health, policy);
@@ -611,10 +615,16 @@ async function observeWindow(client, {
     assertProactiveClosed(await client.proactiveSchedules());
     assertProactiveTasksClosed(await client.proactiveTasks());
     observedChecks.push({ at: nowIso(clock), status: "passed" });
+    firstCheckAt ??= observedChecks[0].at;
+    const previousAt = observedChecks.at(-2)?.at;
+    if (previousAt && (Date.parse(observedChecks.at(-1).at) - Date.parse(previousAt) > (intervalSeconds + 30) * 1_000
+      || Date.parse(observedChecks.at(-1).at) < Date.parse(previousAt))) {
+      failure("P2_OBSERVATION_GAP");
+    }
     if (typeof onCheck === "function") await onCheck(observedChecks);
-    const elapsed = nowMs(clock) - startedAtMs;
+    const elapsed = nowMs(clock) - Date.parse(firstCheckAt);
     if (elapsed >= durationSeconds * 1_000) {
-      return { checks: observedChecks, finishedAt: nowIso(clock), durationSeconds: Math.floor(elapsed / 1_000) };
+      return { startedAt: firstCheckAt, checks: observedChecks, finishedAt: nowIso(clock), durationSeconds: Math.floor(elapsed / 1_000) };
     }
     await sleep(Math.min(intervalSeconds * 1_000, durationSeconds * 1_000 - elapsed));
   }
@@ -635,6 +645,7 @@ export async function runP2Acceptance({
   observationSeconds = P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS,
   observationIntervalSeconds = P2_ACCEPTANCE_DEFAULT_OBSERVATION_INTERVAL_SECONDS,
   checkpointPath = null,
+  resumeOnly = false,
   liveConfirmation,
   clock = () => new Date(),
   sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
@@ -682,12 +693,12 @@ export async function runP2Acceptance({
     throw error;
   };
 
-  const readBilling = async () => normalizeBillingEntries(
+  const readBilling = async () => (
     typeof billingLoader === "function"
       ? await billingLoader()
       : billing === null
         ? { entries: [] }
-        : billing,
+        : billing
   );
 
   const replaceSample = (state, sampleIndex, patch) => ({
@@ -739,6 +750,7 @@ export async function runP2Acceptance({
         persist({ ...existing, phase: currentPhase, failure: null, updatedAt: nowIso(clock) });
       }
     } else {
+      if (resumeOnly) failure("P2_RESUME_CHECKPOINT_REQUIRED");
       checkpointState = initialCheckpoint({
         runId: generatedRunId, sourceCommit, policyDigest: policy.digest,
         providerPolicyDigest: expectedProviderPolicyDigest, owner, sampleCount, startedAt: nowIso(clock),
@@ -746,6 +758,9 @@ export async function runP2Acceptance({
       persist(checkpointState);
     }
 
+    if (resumeOnly && checkpointState.samples.some((sample) => sample.status !== "settled")) {
+      failure("P2_RESUME_REQUIRES_SETTLED_SAMPLES");
+    }
     const healthBefore = await client.health();
     // The first controlled canary is the operation that creates live evidence.
     // Before it settles, probeReady is the only valid admission state; every
@@ -801,47 +816,37 @@ export async function runP2Acceptance({
         checkpointState = persist(replaceSample(checkpointState, sampleIndex, { evidence: normalized }));
         sample = checkpointSample(checkpointState, sampleIndex);
       }
-      evidence.push(normalizeStoredEvidence(sample.evidence));
+      evidence.push({ ...normalizeStoredEvidence(sample.evidence), requestedAt: sample.requestedAt, settledAt: sample.settledAt });
       if (sampleIndex === 1) assertHealth(await client.health(), policy);
     }
 
-    currentPhase = "reconciling";
-    if (checkpointState.phase !== "reconciling" || checkpointState.billing?.initial?.status !== "reconciled") {
-      checkpointState = persist({ ...checkpointState, phase: "reconciling", failure: null });
-    }
-    const initialBillingEntries = await readBilling();
-    const initialObservedAt = nowIso(clock);
-    const initialSamplesWithBilling = reconcileEvidence(evidence, initialBillingEntries, { observedAt: initialObservedAt });
-    checkpointState = persist({
-      ...checkpointState,
-      phase: "observing",
-      samples: checkpointState.samples.map((sample, index) => ({
-        ...sample,
-        ...(initialSamplesWithBilling[index] ? { billingReconciliation: initialSamplesWithBilling[index].billingReconciliation, observedAt: initialSamplesWithBilling[index].observedAt } : {}),
-      })),
-      billing: {
-        ...(checkpointState.billing ?? {}),
-        initial: {
-          status: "reconciled", checkedAt: initialObservedAt,
-          entryCount: initialBillingEntries.size, entriesDigest: billingEntriesDigest(initialBillingEntries),
-        },
-        final: checkpointState.billing?.final ?? null,
-      },
-      failure: null,
-    });
-
+    // Provider exports can arrive hours after settlement. Observe immediately;
+    // the final reconciliation remains mandatory before producing a pass.
     currentPhase = "observing";
     let observation = checkpointState.observation;
+    if (observation && observation.finishedAt === null) {
+      const lastCheckAt = Date.parse(observation.checks.at(-1)?.at ?? observation.startedAt);
+      const elapsed = nowMs(clock) - lastCheckAt;
+      if (elapsed < 0 || elapsed > (observationIntervalSeconds + 30) * 1_000) {
+        checkpointState = persist({
+          ...checkpointState,
+          observationHistory: [...(checkpointState.observationHistory ?? []), {
+            ...observation, invalidatedAt: nowIso(clock), reason: "P2_OBSERVATION_GAP",
+          }],
+          observation: null,
+        });
+        observation = null;
+      }
+    }
     if (!observation) {
-      observation = { startedAt: nowIso(clock), finishedAt: null, checks: [] };
+      observation = { startedAt: nowIso(clock), finishedAt: null, checks: [], intervalSeconds: observationIntervalSeconds };
       checkpointState = persist({ ...checkpointState, phase: "observing", observation });
     }
-    const observationStartedAtMs = Date.parse(canonicalIso(observation.startedAt, "checkpoint.observation.startedAt"));
+    canonicalIso(observation.startedAt, "checkpoint.observation.startedAt");
     if (observation.finishedAt !== null) {
       canonicalIso(observation.finishedAt, "checkpoint.observation.finishedAt");
     } else {
       const observed = await observeWindow(client, {
-        startedAtMs: observationStartedAtMs,
         durationSeconds: observationSeconds,
         intervalSeconds: observationIntervalSeconds,
         clock, sleep, policy,
@@ -850,7 +855,7 @@ export async function runP2Acceptance({
           checkpointState = persist({
             ...checkpointState,
             phase: "observing",
-            observation: { ...checkpointState.observation, checks, finishedAt: null },
+            observation: { ...checkpointState.observation, startedAt: checks[0].at, checks, finishedAt: null },
             failure: null,
           });
         },
@@ -860,10 +865,25 @@ export async function runP2Acceptance({
     }
 
     currentPhase = "reconciling";
-    const finalBillingEntries = await readBilling();
-    const samplesWithBilling = reconcileEvidence(evidence, finalBillingEntries, {
-      observedAt: checkpointState.samples[0]?.observedAt ?? nowIso(clock),
-    });
+    const finalBillingInput = await readBilling();
+    let aggregateBilling = null;
+    let finalBillingEntries = null;
+    let samplesWithBilling;
+    if (finalBillingInput?.scope === "aggregate") {
+      aggregateBilling = createDeepSeekAggregateReconciliation({
+        ...readAggregateBillingInput(finalBillingInput), samples: evidence, runId: generatedRunId, sourceCommit,
+      });
+      samplesWithBilling = evidence.map((sample) => ({
+        ...sample, approved: true, observedAt: nowIso(clock),
+        billingReconciliation: { scope: "aggregate", status: "covered", aggregateDigest: aggregateBilling.digest },
+      }));
+    } else {
+      finalBillingEntries = normalizeBillingEntries(finalBillingInput);
+      if (finalBillingEntries.size !== evidence.length) failure("P2_BILLING_RECONCILIATION_MISSING");
+      samplesWithBilling = reconcileEvidence(evidence, finalBillingEntries, {
+        observedAt: checkpointState.samples[0]?.observedAt ?? nowIso(clock),
+      });
+    }
     checkpointState = persist({
       ...checkpointState,
       phase: "finalizing",
@@ -875,7 +895,10 @@ export async function runP2Acceptance({
         ...(checkpointState.billing ?? {}),
         final: {
           status: "reconciled", checkedAt: nowIso(clock),
-          entryCount: finalBillingEntries.size, entriesDigest: billingEntriesDigest(finalBillingEntries),
+          scope: aggregateBilling ? "aggregate" : "request",
+          entryCount: evidence.length,
+          entriesDigest: aggregateBilling?.digest ?? billingEntriesDigest(finalBillingEntries),
+          ...(aggregateBilling ? { aggregate: aggregateBilling } : {}),
         },
       },
       failure: null,
@@ -900,13 +923,22 @@ export async function runP2Acceptance({
       providerPolicyDigest: expectedProviderPolicyDigest,
       generatedAt,
       checkpointDigest: reportCheckpointDigest,
-      observation: { startedAt: observation.startedAt, finishedAt: observation.finishedAt, durationSeconds: observation.durationSeconds ?? Math.floor((Date.parse(observation.finishedAt) - Date.parse(observation.startedAt)) / 1_000) },
+      observation: {
+        startedAt: observation.startedAt, finishedAt: observation.finishedAt,
+        durationSeconds: observation.durationSeconds ?? Math.floor((Date.parse(observation.finishedAt) - Date.parse(observation.startedAt)) / 1_000),
+        checks: observation.checks, intervalSeconds: observation.intervalSeconds ?? observationIntervalSeconds,
+      },
       summary: { total: samplesWithBilling.length, approved: samplesWithBilling.length, failed: 0 },
       failures: [],
       samples: samplesWithBilling,
+      ...(aggregateBilling ? { billingReconciliation: aggregateBilling } : {}),
       producerProvenance: {
         controlled: true, producerId: P2_ACCEPTANCE_PRODUCER_ID, producerVersion: P2_ACCEPTANCE_PRODUCER_VERSION,
         sourceCommit, generatedAt, runId: generatedRunId,
+        sourceIdentity: "runtime-under-test",
+        processorFiles: ["p2-acceptance.mjs", "p2-billing-aggregate.mjs", "production-contract.mjs"].map((name) => ({
+          path: `scripts/ai-platform/${name}`, sha256: hashBytes(readFileSync(new URL(name, import.meta.url))),
+        })),
       },
       runtime: {
         executionMode: "external-provider", externalProvidersEnabled: true, providerId: policy.providerId,
@@ -916,7 +948,7 @@ export async function runP2Acceptance({
       sideEffects: { businessDatabaseAccessed: false, notificationsInvoked: false, proactiveSchedulesChanged: false },
     };
     validateP2AcceptanceReport(report, {
-      sourceCommit, policyDigest: policy.digest, expectedProviderPolicyDigest,
+      sourceCommit, policyDigest: policy.digest, providerPolicyDigest: expectedProviderPolicyDigest,
       currency: policy.currency, now: nowMs(clock),
     });
     persist({ ...completedBase, report });
@@ -924,6 +956,23 @@ export async function runP2Acceptance({
   } catch (error) {
     return recordFailure(error);
   }
+}
+
+export function writeP2AcceptanceReport(path, report) {
+  const absolute = resolve(path);
+  const content = checkpointContent(report);
+  const fileOptions = { ownerUid: process.getuid?.() ?? 0 };
+  mkdirSync(dirname(absolute), { recursive: true, mode: 0o700 });
+  if (!existsSync(absolute)) return writeOnceOrVerify(absolute, content, fileOptions);
+  const existing = privateFile(absolute, null, fileOptions);
+  if (existing.sha256 === hashBytes(content)) return existing.sha256;
+  let previous;
+  try { previous = JSON.parse(existing.content.toString("utf8")); } catch { failure("P2_REPORT_REPLACE_FORBIDDEN"); }
+  if (previous.status !== "failed" || previous.sourceCommit !== report.sourceCommit
+    || previous.producerProvenance?.runId !== report.producerProvenance?.runId) failure("P2_REPORT_REPLACE_FORBIDDEN");
+  writeOnceOrVerify(`${absolute}.failed-${existing.sha256}.json`, existing.content, fileOptions);
+  atomicReplace(absolute, content, existing.sha256, fileOptions);
+  return hashBytes(content);
 }
 
 function writeFailureReport(path, { sourceCommit, runId, error, clock }) {
@@ -958,10 +1007,11 @@ async function main() {
       taskTimeoutSeconds: options.taskTimeoutSeconds, pollIntervalSeconds: options.pollIntervalSeconds,
       observationSeconds: options.observationSeconds, observationIntervalSeconds: options.observationIntervalSeconds,
       checkpointPath: options.checkpointPath,
+      resumeOnly: options.resumeOnly,
       liveConfirmation: options.confirmation,
     });
     mkdirSync(dirname(options.reportPath), { recursive: true, mode: 0o700 });
-    writeOnceOrVerify(options.reportPath, JSON.stringify(result, null, 2) + "\n", { ownerUid: process.getuid?.() ?? 0 });
+    writeP2AcceptanceReport(options.reportPath, result);
     process.stdout.write(JSON.stringify({ status: result.status, report: options.reportPath, checkpoint: options.checkpointPath, runId, sampleCount: result.samples.length }) + "\n");
   } catch (error) {
     try { writeFailureReport(options.reportPath, { sourceCommit: options.sourceCommit, runId, error, clock: () => new Date() }); } catch {}

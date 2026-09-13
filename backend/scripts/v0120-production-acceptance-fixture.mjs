@@ -50,9 +50,11 @@ function ownedOpportunity(db, { owner, customerId, opportunityId }) {
     SELECT
       customer.id AS customer_id,
       customer.owner AS customer_owner,
+      customer.name AS customer_name,
       customer.deleted_at AS customer_deleted_at,
       opportunity.id AS opportunity_id,
       opportunity.owner AS opportunity_owner,
+      opportunity.name AS opportunity_name,
       opportunity.customer_id AS opportunity_customer_id,
       opportunity.deleted_at AS opportunity_deleted_at
       FROM opportunities opportunity
@@ -118,16 +120,33 @@ export function createV0120ProductionAcceptanceFixture({
   const marker = markerFor(exactRunId);
   const seedRiskId = `v0120-risk-${exactRunId}`;
   try {
+    return withImmediateTransaction(db, () => {
     const relationship = ownedOpportunity(db, {
       owner: exactOwner,
       customerId: exactCustomerId,
       opportunityId: exactOpportunityId,
     });
+    if (!relationship.customer_name.includes(marker) || !relationship.opportunity_name.includes(marker)) {
+      throw new Error("The acceptance customer and opportunity must contain the exact run marker");
+    }
+    // The subject service owns a transaction; map it to a savepoint so seed,
+    // subject persistence and the final assertions commit or roll back together.
+    const subjectDb = {
+      prepare: db.prepare.bind(db),
+      exec(sql) {
+        const commands = {
+          "BEGIN IMMEDIATE": "SAVEPOINT v0120_subject",
+          COMMIT: "RELEASE SAVEPOINT v0120_subject",
+          ROLLBACK: "ROLLBACK TO SAVEPOINT v0120_subject; RELEASE SAVEPOINT v0120_subject",
+        };
+        return db.exec(commands[sql] ?? sql);
+      },
+    };
     const writeback = createActionRiskWritebackService({
       db,
       idFactory: () => seedRiskId,
     });
-    const seeded = withImmediateTransaction(db, () => {
+    const seeded = (() => {
       const risk = writeback.writeRisk({
         mode: "create",
         id: seedRiskId,
@@ -165,9 +184,9 @@ export function createV0120ProductionAcceptanceFixture({
         },
       });
       return { risk, audit };
-    });
+    })();
 
-    const subjectService = createCustomerProactiveSubjectService({ db, clock });
+    const subjectService = createCustomerProactiveSubjectService({ db: subjectDb, clock });
     const synced = subjectService.syncCustomer({
       owner: exactOwner,
       customerId: exactCustomerId,
@@ -212,6 +231,7 @@ export function createV0120ProductionAcceptanceFixture({
       riskSuggestionId: riskSuggestion.id,
       riskSuggestionVersion: riskSuggestion.version,
       riskSuggestionDigest: riskSuggestion.previewDigests?.risk ?? riskSuggestion.previewDigest ?? null,
+    });
     });
   } finally {
     db.close();

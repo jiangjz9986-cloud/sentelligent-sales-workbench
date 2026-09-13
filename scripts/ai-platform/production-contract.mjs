@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { sha256 as canonicalSha256 } from "../../shared/aiPlatformContract.mjs";
+import { validateDeepSeekAggregateReconciliation } from "./p2-billing-aggregate.mjs";
 
 export const PRODUCTION_ROOT = "/opt/sentelligent-sales-workbench";
 export const PLATFORM_SERVICE = "sentelligent-ai-platform.service";
@@ -198,7 +199,7 @@ function validateBillingReconciliation(value, index, { providerRequestId, cost }
   }
 }
 
-function validateP2Sample(sample, index, { currency, expectedModelName = null } = {}) {
+function validateP2Sample(sample, index, { currency, expectedModelName = null, aggregateDigest = null } = {}) {
   if (!isPlainRecord(sample) || sample.approved !== true) contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}] must be approved`);
   requireAcceptanceId(sample.requestId, `samples[${index}].requestId`);
   const providerRequestId = sample.providerRequestId ?? sample.externalRequestId;
@@ -212,7 +213,16 @@ function validateP2Sample(sample, index, { currency, expectedModelName = null } 
   requireAcceptanceId(priceVersion, `samples[${index}].priceVersion`);
   validateUsage(sample.usage, index);
   const cost = validateCost(sample.cost, index, currency);
-  validateBillingReconciliation(sample.billingReconciliation, index, { providerRequestId, cost });
+  if (aggregateDigest !== null) {
+    const binding = sample.billingReconciliation;
+    if (!isPlainRecord(binding) || binding.scope !== "aggregate" || binding.status !== "covered"
+      || binding.aggregateDigest !== aggregateDigest || Object.keys(binding).length !== 3) {
+      contractError("P2_ACCEPTANCE_SAMPLE_INVALID", "aggregate coverage cannot claim per-request billing");
+    }
+  } else {
+    if (sample.billingReconciliation?.scope === "aggregate") contractError("P2_AGGREGATE_INVALID");
+    validateBillingReconciliation(sample.billingReconciliation, index, { providerRequestId, cost });
+  }
   if (sample.observedAt !== undefined) exactIsoDate(sample.observedAt, `samples[${index}].observedAt`);
   return { requestId: sample.requestId, providerRequestId, priceVersion };
 }
@@ -255,11 +265,30 @@ export function validateP2AcceptanceReport(input, {
   if (!Number.isSafeInteger(durationSeconds) || durationSeconds < P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS
     || finishedAtMs < startedAtMs || finishedAtMs - startedAtMs < P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS * 1_000
     || finishedAtMs > now + 30_000) contractError("P2_ACCEPTANCE_OBSERVATION_INVALID");
+  if (observation.checks !== undefined) {
+    const { checks, intervalSeconds } = observation;
+    if (!Array.isArray(checks) || checks.length < 2 || !Number.isSafeInteger(intervalSeconds)
+      || intervalSeconds < 1 || intervalSeconds > 3_600) contractError("P2_ACCEPTANCE_OBSERVATION_INVALID");
+    let previous = startedAtMs;
+    for (const [index, check] of checks.entries()) {
+      const at = exactIsoDate(check?.at, "observation.check.at");
+      if (check.status !== "passed" || at < previous || at > finishedAtMs
+        || at - previous > (index === 0 ? 30_000 : (intervalSeconds + 30) * 1_000)) {
+        contractError("P2_ACCEPTANCE_OBSERVATION_INVALID");
+      }
+      previous = at;
+    }
+    if (finishedAtMs - previous > 30_000 || previous - Date.parse(checks[0].at) < P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS * 1_000
+      || durationSeconds !== Math.floor((finishedAtMs - startedAtMs) / 1_000)) contractError("P2_ACCEPTANCE_OBSERVATION_INVALID");
+  }
 
   const failures = input.failures ?? [];
   if (!Array.isArray(failures) || failures.length !== 0) contractError("P2_ACCEPTANCE_FAILURES_PRESENT");
   const expectedModelName = typeof input.runtime?.modelName === "string" ? input.runtime.modelName : null;
-  const samples = input.samples.map((sample, index) => validateP2Sample(sample, index, { currency, expectedModelName }));
+  const aggregate = input.billingReconciliation === undefined ? null : validateDeepSeekAggregateReconciliation(input.billingReconciliation, {
+    samples: input.samples, runId: input.producerProvenance?.runId, sourceCommit: reportCommit,
+  });
+  const samples = input.samples.map((sample, index) => validateP2Sample(sample, index, { currency, expectedModelName, aggregateDigest: aggregate?.digest ?? null }));
   const requestIds = new Set(samples.map((sample) => sample.requestId));
   if (requestIds.size !== samples.length) contractError("P2_ACCEPTANCE_DUPLICATE_REQUEST_ID");
   const providerRequestIds = new Set(samples.map((sample) => sample.providerRequestId));
@@ -297,6 +326,7 @@ export function validateP2AcceptanceReport(input, {
     producerId: producer.producerId,
     producerVersion: producer.producerVersion,
     producerRunId: producer.runId,
+    ...(aggregate ? { billingScope: "aggregate", billingDigest: aggregate.digest } : {}),
   });
 }
 

@@ -7,12 +7,19 @@ import { afterEach, test } from "node:test";
 import {
   parseCliArguments,
   runV0120ProductionAcceptance,
+  collectManifestFromDb,
 } from "./v0120-production-acceptance.mjs";
+import { createServer } from "../../backend/src/server.js";
+import { hashPassword } from "../../backend/src/auth/password.js";
+import { readProductionDatabaseIdentity } from "../../backend/scripts/production-smoke-cleanup.mjs";
+import { cleanupV0120ProductionAcceptance } from "../../backend/scripts/v0120-production-acceptance-cleanup.mjs";
+import { openDatabase } from "../../backend/src/db.js";
 import { PRODUCTION_ORIGIN, parseProductionOrigin } from "../production-https-smoke.mjs";
 
 const OWNER = "jiangjz";
 const PASSWORD = "fixture-production-password";
 const MACHINE_TOKEN = "fixture-machine-token";
+const OPS_TOKEN = "fixture-ops-status-token";
 const TEST_SESSION_VALUE = "fixture-session-secret-placeholder-value";
 const DATABASE_IDENTITY = "d".repeat(43);
 const SESSION_COOKIE = "s".repeat(43);
@@ -86,9 +93,13 @@ function createFakeProductionFetch({ cleanupMode = "clean" } = {}) {
   let tenderPreviewCount = 0;
   let tenderConfirmed = false;
   let csvConfirmed = false;
+  const batches = new Map();
+  const confirmations = new Map();
+  const reviewedFields = new Map();
 
   const suggestion = (id, trigger) => ({
     id,
+    version: 1,
     customerId: ids.csvCustomer,
     opportunityId: ids.opportunity,
     trigger: { type: trigger },
@@ -112,32 +123,41 @@ function createFakeProductionFetch({ cleanupMode = "clean" } = {}) {
       });
     }
     if (url.pathname === "/api/auth/logout" && method === "POST") return new Response(null, { status: 204 });
+    if (url.pathname === "/api/assistant/proactive/status") return jsonResponse({ item: {
+      running: false, ticking: false, notificationScheduler: { running: false, ticking: false },
+    } });
+    if (url.pathname === "/api/integrations/ops-alerts/status") return jsonResponse({ item: {
+      schedulers: Object.fromEntries(["actionReminders", "invoiceEscalation", "dailyDigest", "proactiveNotifications"].map((name) => [name, { running: false, ticking: false }])),
+    } });
 
     if (url.pathname === "/api/customer-imports/preview" && method === "POST") {
       const xlsx = fileName.endsWith(".xlsx");
-      const batchId = xlsx ? ids.xlsxBatch : ids.csvBatch;
-      const rowId = xlsx ? ids.xlsxRow : ids.csvRow;
-      return jsonResponse({
-        item: {
-          customerImportBatch: { id: batchId, fileSha256: `${xlsx ? "b" : "a"}`.repeat(64) },
-          customerImportRows: [{ id: rowId, customerId: xlsx ? null : ids.csvCustomer }],
+      const suffix = fileName.includes("cancel-customers") ? "-cancel" : "";
+      const batchId = `${xlsx ? ids.xlsxBatch : ids.csvBatch}${suffix}`;
+      const rowId = `${xlsx ? ids.xlsxRow : ids.csvRow}${suffix}`;
+      const item = {
+          customerImportBatch: { id: batchId, owner: OWNER, status: "preview", fileSha256: `${xlsx ? "b" : "a"}`.repeat(64) },
+          customerImportRows: [{ id: rowId, action: "create", customerId: null }],
           previewDigest: `${xlsx ? "e" : "c"}`.repeat(64),
-        },
-      }, 201);
+      };
+      batches.set(batchId, item);
+      return jsonResponse({ item }, 201);
     }
-    if (url.pathname === `/api/customer-imports/${ids.csvBatch}/confirm` && method === "POST") {
+    const importMatch = url.pathname.match(/^\/api\/customer-imports\/([^/]+)\/(confirm|cancel)$/u);
+    if (importMatch && method === "POST") {
+      const item = batches.get(importMatch[1]);
+      const operation = importMatch[2];
       if (jsonBody?.previewDigest === "0".repeat(64) || jsonBody?.fileSha256 === "f".repeat(64)) {
         return jsonResponse({ error: { code: "PREVIEW_DIGEST_MISMATCH" } }, 409);
       }
-      if (jsonBody?.confirmed === true && csvConfirmed) {
-        return jsonResponse({ item: { replayed: true } });
+      const finalStatus = operation === "confirm" ? "committed" : "cancelled";
+      if (item.customerImportBatch.status !== "preview" && item.customerImportBatch.status !== finalStatus) {
+        return jsonResponse({ error: { code: "CUSTOMER_IMPORT_STATE_CONFLICT" } }, 409);
       }
-      csvConfirmed = true;
-      return jsonResponse({ item: { customerImportRows: [{ id: ids.csvRow, customerId: ids.csvCustomer }] } }, 201);
-    }
-    if (url.pathname === `/api/customer-imports/${ids.xlsxBatch}/cancel` && method === "POST") {
-      const replayed = requests.filter((request) => request.url.pathname === url.pathname).length > 1;
-      return jsonResponse({ item: replayed ? { replayed: true } : { status: "cancelled" } });
+      const replayed = item.customerImportBatch.status === finalStatus;
+      item.customerImportBatch.status = finalStatus;
+      if (operation === "confirm") item.customerImportRows[0].customerId = importMatch[1] === ids.csvBatch ? ids.csvCustomer : "fixture-xlsx-customer";
+      return jsonResponse({ item: { ...item, replayed } }, operation === "confirm" && !replayed ? 201 : 200);
     }
 
     if (url.pathname === "/api/opportunities" && method === "POST") {
@@ -188,6 +208,11 @@ function createFakeProductionFetch({ cleanupMode = "clean" } = {}) {
     if (url.pathname === "/api/assistant/proactive" && method === "GET") {
       return jsonResponse({ items: [suggestion(ids.actionSuggestion, "missing_next_step"), suggestion(ids.riskSuggestion, "risk_open")] });
     }
+    const fieldsMatch = url.pathname.match(/^\/api\/assistant\/proactive\/([^/]+)\/fields$/u);
+    if (fieldsMatch && method === "PATCH") {
+      reviewedFields.set(fieldsMatch[1], jsonBody);
+      return jsonResponse({ item: { version: 2, reviewFields: jsonBody } });
+    }
     const proactivePreviewMatch = url.pathname.match(/^\/api\/assistant\/proactive\/([^/]+)\/previews$/u);
     if (proactivePreviewMatch && method === "POST") {
       const target = jsonBody.target;
@@ -204,10 +229,20 @@ function createFakeProductionFetch({ cleanupMode = "clean" } = {}) {
     }
     const proactiveConfirmMatch = url.pathname.match(/^\/api\/assistant\/proactive\/([^/]+)\/confirm$/u);
     if (proactiveConfirmMatch && method === "POST") {
-      const replayed = requests.filter((request) => request.url.pathname === url.pathname).length > 1;
-      if (replayed) return jsonResponse({ item: { replayed: true } });
-      if (jsonBody.target === "risk") return jsonResponse({ item: { risk: { id: ids.riskWriteback } } }, 201);
-      return jsonResponse({ item: { action: { id: ids.actionWriteback } } }, 201);
+      const suggestionId = proactiveConfirmMatch[1];
+      const key = new Headers(options.headers).get("Idempotency-Key");
+      if (confirmations.has(key)) return jsonResponse(confirmations.get(key), 201);
+      const fields = reviewedFields.get(suggestionId);
+      const item = { replayed: key.endsWith("stable-replay"), [jsonBody.target]: {
+        id: jsonBody.target === "risk" ? ids.riskWriteback : ids.actionWriteback,
+        owner: OWNER, customerId: ids.csvCustomer, opportunityId: ids.opportunity,
+        assignee: fields.assignee, due: fields.dueDate, expectedResult: fields.expectedResult,
+        priority: "低", severity: "低",
+        sourceType: "proactive_assistant", sourceId: suggestionId, sourceProactiveId: suggestionId,
+        version: 1, writebackDigest: "a".repeat(64),
+      } };
+      confirmations.set(key, { item });
+      return jsonResponse({ item }, item.replayed ? 200 : 201);
     }
 
     throw new Error(`Unexpected fake production request: ${method} ${url.pathname}`);
@@ -231,6 +266,7 @@ function callbacksFor({ fake, cleanupMode = "clean" }) {
       actionSuggestionId: fake.ids.actionSuggestion,
       riskSuggestionId: fake.ids.riskSuggestion,
     }),
+    verifyWriteback: async () => ({ syntheticMock: true }),
     cleanup: async (input) => {
       cleanupCalls.push(input);
       return cleanupMode === "clean"
@@ -240,6 +276,7 @@ function callbacksFor({ fake, cleanupMode = "clean" }) {
     databaseUrl: "/tmp/fixture-production.sqlite",
     authSessionSecret: TEST_SESSION_VALUE,
     hospitalTenderSyncToken: MACHINE_TOKEN,
+    opsAlertToken: OPS_TOKEN,
     cleanupCalls,
   };
 }
@@ -289,9 +326,8 @@ test("v0.12.0 production acceptance completes the isolated business matrix and s
   assert.ok(report.checks.some((check) => check.id === "customer-import.csv.preview-confirm-replay"));
   assert.ok(report.checks.some((check) => check.id === "hospital-tender.bridge-preview-cancel-confirm-replay"));
   assert.ok(report.checks.some((check) => check.id === "proactive.action-risk.preview-confirm-replay"));
-  assert.equal(report.businessModel.model, "deepseek-flash");
-  assert.equal(report.developmentTarget.model, "gpt-5.6-luna");
-  assert.equal(report.developmentTarget.reasoningEffort, "max");
+  assert.deepEqual(report.businessModel, { provider: "deepseek", model: "deepseek-flash" });
+  assert.deepEqual(report.developmentTarget, { model: "gpt-6" });
   assert.equal(report.boundaries.pushPlus, "retired");
   assert.equal(report.boundaries.notificationChannel, "weixin-clawbot-only");
   assert.equal(report.cleanup.status, "clean");
@@ -299,7 +335,7 @@ test("v0.12.0 production acceptance completes the isolated business matrix and s
   assert.equal(callbacks.cleanupCalls[0].manifest.runId, RUN_ID);
   assert.equal(callbacks.cleanupCalls[0].manifest.databaseIdentity, DATABASE_IDENTITY);
   const reportText = readFileSync(reportPath, "utf8");
-  for (const secret of [PASSWORD, SESSION_COOKIE, CSRF_TOKEN, MACHINE_TOKEN]) {
+  for (const secret of [PASSWORD, SESSION_COOKIE, CSRF_TOKEN, MACHINE_TOKEN, OPS_TOKEN]) {
     assert.doesNotMatch(reportText, new RegExp(secret, "u"));
   }
   assert.ok(fake.requests.some((request) => request.url.pathname === "/api/auth/login"));
@@ -329,4 +365,44 @@ test("v0.12.0 production acceptance fails when server-local cleanup is not clean
   });
   assert.equal(report.status, "failed");
   assert.equal(report.cleanup.status, "failed");
+});
+
+test("synthetic acceptance runs through real local HTTP routes and cleans every business write", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "sentelligent-v0120-real-http-"));
+  temporaryDirectories.push(directory);
+  const databaseUrl = join(directory, "acceptance.sqlite");
+  const authSessionSecret = TEST_SESSION_VALUE;
+  const server = createServer({
+    databaseUrl, seed: false, nodeEnv: "test", aiAnalysisMode: "mock", modelApiKey: "",
+    authRequired: true, authAccount: OWNER, authPassword: "", authPasswordHash: await hashPassword(PASSWORD),
+    authSessionSecret, authCookieSecure: false, corsAllowedOrigins: [PRODUCTION_ORIGIN],
+    hospitalTenderSyncToken: MACHINE_TOKEN, opsAlertToken: OPS_TOKEN, hospitalTenderAutoRun: false,
+    proactiveAssistantAutoRun: false, proactiveAssistantWorkerEnabled: false,
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const localOrigin = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const report = await runV0120ProductionAcceptance({
+      origin: PRODUCTION_ORIGIN, password: PASSWORD, reportPath: join(directory, "report.json"),
+      databaseUrl, authSessionSecret, hospitalTenderSyncToken: MACHINE_TOKEN, opsAlertToken: OPS_TOKEN,
+      fetchImpl: (input, options) => {
+        const url = new URL(input);
+        assert.equal(url.origin, PRODUCTION_ORIGIN);
+        return fetch(`${localOrigin}${url.pathname}${url.search}`, options);
+      },
+      verifyDatabaseIdentity: () => readProductionDatabaseIdentity({ databaseUrl, authSessionSecret }).databaseIdentity,
+      collectManifest: collectManifestFromDb, cleanup: cleanupV0120ProductionAcceptance,
+    });
+    assert.equal(report.status, "passed", JSON.stringify(report, null, 2));
+    assert.equal(report.boundaries.liveProviderProof, false);
+    const db = openDatabase({ databaseUrl });
+    try {
+      for (const table of ["customers", "opportunities", "action_items", "risk_items", "customer_import_batches", "customer_import_rows", "hospital_tender_notices", "hospital_tender_bridges", "hospital_tender_sources", "hospital_tender_runs", "proactive_scan_events", "proactive_subjects", "proactive_confirmation_previews", "ai_suggestions", "auth_sessions", "idempotency_keys"]) {
+        assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, table);
+      }
+    } finally { db.close(); }
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
 });

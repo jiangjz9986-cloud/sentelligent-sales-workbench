@@ -12,6 +12,7 @@ import { createV0120ProductionAcceptanceFixture } from "../../backend/scripts/v0
 import { cleanupV0120ProductionAcceptance } from "../../backend/scripts/v0120-production-acceptance-cleanup.mjs";
 import { openDatabase } from "../../backend/src/db.js";
 import { readProductionDatabaseIdentity } from "../../backend/scripts/production-smoke-cleanup.mjs";
+import { ACTION_WRITEBACK_COLUMN_MAP, RISK_WRITEBACK_COLUMN_MAP, computeWritebackDigest } from "../../backend/src/actionRisk/writeback.js";
 
 export const V0120_PRODUCTION_ACCOUNT = "jiangjz";
 export const V0120_MACHINE_ACTOR = "hospital-tender-monitor";
@@ -185,7 +186,7 @@ function csvFixture(marker) {
 function xlsxFixture(marker) {
   return minimalXlsx([
     ["name", "region", "summary"],
-    [`${marker} XLSX 客户`, "山东", `${marker} XLSX 取消验收`],
+    [`${marker} XLSX 客户`, "山东", `${marker} XLSX 导入验收`],
   ]);
 }
 
@@ -203,7 +204,32 @@ function unique(values) {
   return [...new Set(values.filter((value) => typeof value === "string" && value))];
 }
 
-function collectManifestFromDb({ databaseUrl, authSessionSecret, state }) {
+function verifyPersistedWriteback({ databaseUrl, authSessionSecret, databaseIdentity, target, item, suggestionId }) {
+  const identity = readProductionDatabaseIdentity({ databaseUrl, authSessionSecret });
+  if (identity.databaseIdentity !== databaseIdentity) throw new Error("Writeback proof database identity changed");
+  const db = openDatabase({ databaseUrl: identity.databasePath });
+  try {
+    const table = target === "action" ? "action_items" : "risk_items";
+    const columns = target === "action" ? ACTION_WRITEBACK_COLUMN_MAP : RISK_WRITEBACK_COLUMN_MAP;
+    const row = db.prepare(`SELECT * FROM ${table} WHERE id = $id`).get({ $id: item.id });
+    if (!row) throw new Error(`${target} writeback was not persisted`);
+    for (const [field, column] of Object.entries(columns)) {
+      if ((row[column] ?? null) !== (item[field] ?? null)) throw new Error(`${target} persisted ${field} differs from the HTTP response`);
+    }
+    if (row.version !== item.version || computeWritebackDigest(target, item) !== item.writebackDigest) throw new Error(`${target} persisted version or digest is invalid`);
+    const count = db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE source_proactive_id = $id AND owner = $owner`)
+      .get({ $id: suggestionId, $owner: item.owner }).count;
+    if (count !== 1) throw new Error(`${target} replay created duplicate writebacks`);
+    const audits = db.prepare("SELECT id, entity_version, metadata_json FROM audit_logs WHERE action = $action AND entity_type = $type AND entity_id = $id AND actor = $owner")
+      .all({ $action: `${target}.create`, $type: target, $id: item.id, $owner: item.owner });
+    if (audits.length !== 1 || audits[0].entity_version !== item.version || JSON.parse(audits[0].metadata_json).writebackDigest !== item.writebackDigest) {
+      throw new Error(`${target} writeback audit is missing, duplicated or has an invalid digest`);
+    }
+    return { persistedFields: Object.keys(columns).length, uniqueWriteback: true, createAuditId: audits[0].id };
+  } finally { db.close(); }
+}
+
+export function collectManifestFromDb({ databaseUrl, authSessionSecret, state }) {
   const identity = readProductionDatabaseIdentity({ databaseUrl, authSessionSecret });
   if (identity.databaseIdentity !== state.databaseIdentity) {
     throw new Error("The server-local database identity changed during v0.12.0 acceptance");
@@ -325,9 +351,11 @@ export async function runV0120ProductionAcceptance({
   verifyDatabaseIdentity,
   collectManifest,
   fixtureFactory = createV0120ProductionAcceptanceFixture,
+  verifyWriteback = verifyPersistedWriteback,
   databaseUrl = process.env.DATABASE_URL,
   authSessionSecret = process.env.AUTH_SESSION_SECRET,
   hospitalTenderSyncToken = process.env.HOSPITAL_TENDER_SYNC_TOKEN,
+  opsAlertToken = process.env.OPS_ALERT_TOKEN,
   owner = V0120_PRODUCTION_ACCOUNT,
   runId = randomUUID(),
   now = () => new Date(),
@@ -344,6 +372,7 @@ export async function runV0120ProductionAcceptance({
   if (typeof hospitalTenderSyncToken !== "string" || !hospitalTenderSyncToken) {
     throw new TypeError("HOSPITAL_TENDER_SYNC_TOKEN is required before production acceptance");
   }
+  if (typeof opsAlertToken !== "string" || !opsAlertToken) throw new TypeError("Server-local OPS_ALERT_TOKEN is required for read-only scheduler checks");
   if (typeof databaseUrl !== "string" || !databaseUrl || typeof authSessionSecret !== "string" || authSessionSecret.length < 32) {
     throw new TypeError("Server-local DATABASE_URL and AUTH_SESSION_SECRET are required before production acceptance");
   }
@@ -430,7 +459,7 @@ export async function runV0120ProductionAcceptance({
       checks.push({ id, status: "passed", ...(details ? { details } : {}) });
       return details;
     } catch (error) {
-      checks.push({ id, status: "failed", error: safeErrorMessage(error, [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken]) });
+      checks.push({ id, status: "failed", error: safeErrorMessage(error, [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken, opsAlertToken]) });
       throw error;
     }
   };
@@ -460,11 +489,30 @@ export async function runV0120ProductionAcceptance({
       return { account: owner };
     });
 
-    await runCheck("customer-import.csv.preview-confirm-replay", async () => {
+    await runCheck("preflight.synthetic-workers-stopped", async () => {
+      const status = await request("/api/assistant/proactive/status", { authenticated: true });
+      expectStatus(status, 200, "proactive runtime status");
+      const worker = itemOf(status, "proactive runtime status");
+      const ops = await request("/api/integrations/ops-alerts/status", { headers: { Authorization: `Bearer ${opsAlertToken}` } });
+      expectStatus(ops, 200, "notification scheduler status");
+      const schedulers = itemOf(ops, "notification scheduler status").schedulers;
+      for (const [name, runtime] of [
+        ["proactive worker", worker], ["proactive notification", worker.notificationScheduler],
+        ...["actionReminders", "invoiceEscalation", "dailyDigest", "proactiveNotifications"].map((name) => [name, schedulers?.[name]]),
+      ]) {
+        if (!runtime || runtime.running !== false || runtime.ticking !== false) throw new Error(`${name} must be stopped and drained before synthetic acceptance`);
+      }
+      return { providerCalls: "none", notificationSchedulers: "stopped", evidenceType: "synthetic" };
+    });
+
+    for (const format of ["csv", "xlsx"]) {
+    await runCheck(`customer-import.${format}.preview-confirm-replay`, async () => {
       const form = new FormData();
-      form.append("file", new Blob([csvFixture(marker)], { type: "text/csv" }), `${marker} customers.csv`);
+      form.append("file", new Blob([format === "csv" ? csvFixture(marker) : xlsxFixture(marker)], {
+        type: format === "csv" ? "text/csv" : XLSX_MEDIA_TYPE,
+      }), `${marker} customers.${format}`);
       form.append("mapping", JSON.stringify({ name: "name", region: "region", summary: "summary" }));
-      const previewKey = `v0120:${exactRunId}:csv-preview`;
+      const previewKey = `v0120:${exactRunId}:${format}-preview`;
       const previewResult = await request("/api/customer-imports/preview", {
         method: "POST",
         authenticated: true,
@@ -479,6 +527,11 @@ export async function runV0120ProductionAcceptance({
       if (!batch?.id || !rows?.[0]?.id) throw new Error("CSV import preview omitted exact batch/row ids");
       state.importBatchIds.push(batch.id);
       state.importRowIds.push(...rows.map((row) => row.id));
+      if (batch.owner !== owner || batch.status !== "preview" || rows.length !== 1 || rows[0].action !== "create" || rows[0].customerId) {
+        throw new Error(`${format} preview must create exactly one new owner-scoped customer`);
+      }
+      assertDigest(preview.previewDigest, `${format} preview digest`);
+      assertDigest(batch.fileSha256, `${format} file digest`);
       const confirmBody = {
         confirmed: true,
         previewDigest: preview.previewDigest,
@@ -488,7 +541,7 @@ export async function runV0120ProductionAcceptance({
         method: "POST",
         authenticated: true,
         csrfProtected: true,
-        headers: { "Idempotency-Key": `v0120:${exactRunId}:csv-wrong-preview` },
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-wrong-preview` },
         body: { ...confirmBody, previewDigest: "0".repeat(64) },
       });
       expectStatus(wrongPreview, [409, 422], "CSV wrong preview digest");
@@ -496,7 +549,7 @@ export async function runV0120ProductionAcceptance({
         method: "POST",
         authenticated: true,
         csrfProtected: true,
-        headers: { "Idempotency-Key": `v0120:${exactRunId}:csv-wrong-file` },
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-wrong-file` },
         body: { ...confirmBody, fileSha256: "f".repeat(64) },
       });
       expectStatus(wrongFile, [409, 422], "CSV wrong file digest");
@@ -504,7 +557,7 @@ export async function runV0120ProductionAcceptance({
         method: "POST",
         authenticated: true,
         csrfProtected: true,
-        headers: { "Idempotency-Key": `v0120:${exactRunId}:csv-confirm` },
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-confirm` },
         body: confirmBody,
       });
       expectStatus(confirmedResult, [200, 201], "CSV import confirm");
@@ -513,28 +566,43 @@ export async function runV0120ProductionAcceptance({
       const customerId = confirmed.customerImportRows?.[0]?.customerId ?? rows[0].customerId;
       if (!customerId) throw new Error("CSV import confirmation did not return the customer id");
       state.customerIds.push(customerId);
+      if (confirmed.customerImportBatch?.status !== "committed" || confirmed.customerImportRows?.[0]?.action !== "create") {
+        throw new Error(`${format} confirmation did not commit a new customer`);
+      }
       const replay = await request(`/api/customer-imports/${encodeURIComponent(batch.id)}/confirm`, {
         method: "POST",
         authenticated: true,
         csrfProtected: true,
-        headers: { "Idempotency-Key": `v0120:${exactRunId}:csv-confirm` },
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-confirm` },
         body: confirmBody,
       });
       expectStatus(replay, 200, "CSV import confirm replay");
       if (itemOf(replay, "CSV import replay").replayed !== true) throw new Error("CSV confirm replay was not durable");
-      state.customer = { id: customerId, name: `${marker} 客户` };
+      if (itemOf(replay, "import replay").customerImportRows?.[0]?.customerId !== customerId) throw new Error("Import replay changed customer identity");
+      const conflict = await request(`/api/customer-imports/${encodeURIComponent(batch.id)}/cancel`, {
+        method: "POST", authenticated: true, csrfProtected: true,
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-cancel-committed` },
+        body: { reason: "v0120-production-acceptance" },
+      });
+      expectStatus(conflict, 409, `${format} cannot cancel a committed batch`);
+      if (format === "csv") state.customer = { id: customerId, name: `${marker} 客户` };
       return { batchId: batch.id, customerId, replayed: true };
     });
+    }
 
-    await runCheck("customer-import.xlsx.preview-cancel-replay", async () => {
+    for (const format of ["csv", "xlsx"]) {
+    await runCheck(`customer-import.${format}.preview-cancel-replay`, async () => {
       const form = new FormData();
-      form.append("file", new Blob([xlsxFixture(marker)], { type: XLSX_MEDIA_TYPE }), `${marker} customers.xlsx`);
+      const cancelMarker = `${marker} cancel`;
+      form.append("file", new Blob([format === "csv" ? csvFixture(cancelMarker) : xlsxFixture(cancelMarker)], {
+        type: format === "csv" ? "text/csv" : XLSX_MEDIA_TYPE,
+      }), `${marker} cancel-customers.${format}`);
       form.append("mapping", JSON.stringify({ name: "name", region: "region", summary: "summary" }));
       const previewResult = await request("/api/customer-imports/preview", {
         method: "POST",
         authenticated: true,
         csrfProtected: true,
-        headers: { "Idempotency-Key": `v0120:${exactRunId}:xlsx-preview` },
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-cancel-preview` },
         body: form,
       });
       expectStatus(previewResult, 201, "XLSX import preview");
@@ -548,21 +616,30 @@ export async function runV0120ProductionAcceptance({
         method: "POST",
         authenticated: true,
         csrfProtected: true,
-        headers: { "Idempotency-Key": `v0120:${exactRunId}:xlsx-cancel` },
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-cancel` },
         body: cancelBody,
       });
       expectStatus(cancelled, 200, "XLSX import cancel");
+      const cancelledItem = itemOf(cancelled, "Import cancel");
+      if (cancelledItem.customerImportBatch?.status !== "cancelled" || cancelledItem.customerImportRows?.some((row) => row.customerId)) throw new Error("Cancelled import created a customer");
       const replay = await request(`/api/customer-imports/${encodeURIComponent(batch.id)}/cancel`, {
         method: "POST",
         authenticated: true,
         csrfProtected: true,
-        headers: { "Idempotency-Key": `v0120:${exactRunId}:xlsx-cancel` },
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-cancel` },
         body: cancelBody,
       });
       expectStatus(replay, 200, "XLSX import cancel replay");
       if (itemOf(replay, "XLSX cancel replay").replayed !== true) throw new Error("XLSX cancel replay was not durable");
+      const conflict = await request(`/api/customer-imports/${encodeURIComponent(batch.id)}/confirm`, {
+        method: "POST", authenticated: true, csrfProtected: true,
+        headers: { "Idempotency-Key": `v0120:${exactRunId}:${format}-confirm-cancelled` },
+        body: { confirmed: true, previewDigest: preview.previewDigest, fileSha256: batch.fileSha256 },
+      });
+      expectStatus(conflict, 409, `${format} cannot confirm a cancelled batch`);
       return { batchId: batch.id, customerCount: 0, replayed: true };
     });
+    }
 
     await runCheck("opportunity.create", async () => {
       const result = await request("/api/opportunities", {
@@ -624,6 +701,11 @@ export async function runV0120ProductionAcceptance({
           lastItemCount: 1,
           lastUpsertedCount: 1,
           lastRejectedCount: 0,
+        }],
+        runs: [{
+          id: `v0120-${exactRunId}-run`, sourceId: `v0120-${exactRunId}-source`,
+          startedAt: generatedAt, finishedAt: generatedAt, status: "success",
+          fetchedCount: 1, upsertedCount: 1, rejectedCount: 0,
         }],
       };
       const synced = await request("/api/integrations/hospital-tenders/sync", {
@@ -708,14 +790,21 @@ export async function runV0120ProductionAcceptance({
     });
 
     await runCheck("proactive.action-risk.preview-confirm-replay", async () => {
-      const list = await request(`/api/assistant/proactive?customerId=${encodeURIComponent(state.customer.id)}&limit=500`, { authenticated: true });
+      const list = await request(`/api/assistant/proactive?customerId=${encodeURIComponent(state.customer.id)}&limit=100`, { authenticated: true });
       expectStatus(list, 200, "customer proactive list");
-      const items = Array.isArray(list.body?.items) ? list.body.items : [];
+      const items = list.body?.items ?? list.body?.item?.items ?? [];
       const actionSuggestion = items.find((item) => item.id === state.fixture.actionSuggestionId);
       const riskSuggestion = items.find((item) => item.id === state.fixture.riskSuggestionId);
       if (!actionSuggestion || !riskSuggestion) throw new Error("customer proactive list omitted fixture suggestions");
 
       const confirmTarget = async (suggestion, target, prefix) => {
+        const expectedFields = { assignee: owner, dueDate: "2099-12-30", priority: "low", expectedResult: `${marker} ${target} expected result` };
+        const edit = await request(`/api/assistant/proactive/${encodeURIComponent(suggestion.id)}/fields`, {
+          method: "PATCH", authenticated: true, csrfProtected: true,
+          headers: { "Idempotency-Key": `v0120:${exactRunId}:${prefix}-fields` },
+          body: { ...expectedFields, expectedVersion: suggestion.version },
+        });
+        expectStatus(edit, 200, `${prefix} review fields`);
         const previewResult = await request(`/api/assistant/proactive/${encodeURIComponent(suggestion.id)}/previews`, {
           method: "POST",
           authenticated: true,
@@ -727,6 +816,7 @@ export async function runV0120ProductionAcceptance({
         const preview = itemOf(previewResult, `${prefix} proactive preview`);
         assertDigest(preview.previewDigest, `${prefix} preview digest`);
         state.confirmationPreviewIds.push(preview.id);
+        if (preview.customerId !== state.customer.id || preview.opportunityId !== state.opportunity.id) throw new Error(`${prefix} preview changed the acceptance relationship`);
         const body = {
           confirmationPreviewId: preview.id,
           target,
@@ -748,6 +838,15 @@ export async function runV0120ProductionAcceptance({
         const confirmed = itemOf(confirmedResult, `${prefix} proactive confirm`);
         if (target === "action") state.actionIds.push(confirmed.action.id);
         else state.riskIds.push(confirmed.risk.id);
+        const written = confirmed[target];
+        assertDigest(written.writebackDigest, `${prefix} writeback digest`);
+        if (written.owner !== owner || written.customerId !== state.customer.id || written.opportunityId !== state.opportunity.id
+          || written.assignee !== expectedFields.assignee || written.due !== expectedFields.dueDate
+          || written.expectedResult !== expectedFields.expectedResult || written.sourceProactiveId !== suggestion.id
+          || written[target === "action" ? "priority" : "severity"] !== "低"
+          || written.sourceId !== suggestion.id || written.sourceType !== "proactive_assistant" || !(written.version >= 1)) {
+          throw new Error(`${prefix} writeback lost reviewed fields, ownership or provenance`);
+        }
         const replayResult = await request(`/api/assistant/proactive/${encodeURIComponent(suggestion.id)}/confirm`, {
           method: "POST",
           authenticated: true,
@@ -755,9 +854,17 @@ export async function runV0120ProductionAcceptance({
           headers: { "Idempotency-Key": `v0120:${exactRunId}:${prefix}-confirm` },
           body,
         });
-        expectStatus(replayResult, 200, `${prefix} proactive confirm replay`);
-        if (itemOf(replayResult, `${prefix} proactive replay`).replayed !== true) throw new Error(`${prefix} proactive replay was not durable`);
-        return { previewId: preview.id, writebackId: target === "action" ? confirmed.action.id : confirmed.risk.id };
+        expectStatus(replayResult, confirmedResult.status, `${prefix} exact idempotency replay`);
+        if (json(replayResult.body) !== json(confirmedResult.body)) throw new Error(`${prefix} exact replay changed its response`);
+        const stableReplay = await request(`/api/assistant/proactive/${encodeURIComponent(suggestion.id)}/confirm`, {
+          method: "POST", authenticated: true, csrfProtected: true,
+          headers: { "Idempotency-Key": `v0120:${exactRunId}:${prefix}-stable-replay` }, body,
+        });
+        expectStatus(stableReplay, 200, `${prefix} stable business replay`);
+        const stable = itemOf(stableReplay, "stable replay");
+        if (stable.replayed !== true || stable[target]?.id !== written.id || stable[target]?.writebackDigest !== written.writebackDigest) throw new Error(`${prefix} stable replay changed writeback identity`);
+        const persisted = await verifyWriteback({ databaseUrl, authSessionSecret, databaseIdentity: state.databaseIdentity, target, item: written, suggestionId: suggestion.id });
+        return { previewId: preview.id, writebackId: written.id, persisted };
       };
 
       const action = await confirmTarget(actionSuggestion, "action", "action");
@@ -765,7 +872,7 @@ export async function runV0120ProductionAcceptance({
       return { action, risk };
     });
   } catch (error) {
-    fatalError = safeErrorMessage(error, [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken]);
+    fatalError = safeErrorMessage(error, [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken, opsAlertToken]);
   } finally {
     if (state.cookieHeader && state.csrfToken) {
       try {
@@ -785,7 +892,7 @@ export async function runV0120ProductionAcceptance({
           manifest: collectedManifest,
         });
       } catch (error) {
-        cleanupReport = { status: "failed", error: safeErrorMessage(error, [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken]) };
+        cleanupReport = { status: "failed", error: safeErrorMessage(error, [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken, opsAlertToken]) };
       }
     }
   }
@@ -797,9 +904,11 @@ export async function runV0120ProductionAcceptance({
     runId: exactRunId,
     target: { origin: exactOrigin, account: owner },
     businessModel: { provider: "deepseek", model: "deepseek-flash" },
-    developmentTarget: { model: "gpt-5.6-luna", reasoningEffort: "max" },
+    developmentTarget: { model: "gpt-6" },
     boundaries: {
-      productionWrites: "synthetic-only-and-cleaned",
+      productionWrites: cleanupReport.status === "clean" ? "synthetic-only-and-cleaned" : "synthetic-cleanup-required",
+      evidenceType: "synthetic-business-http",
+      liveProviderProof: false,
       pushPlus: "retired",
       notificationChannel: "weixin-clawbot-only",
       iphoneRealDevice: "out-of-scope",
@@ -817,10 +926,17 @@ export async function runV0120ProductionAcceptance({
     databaseIdentity: state.databaseIdentity || null,
     cleanup: {
       status: cleanupReport.status,
+      error: cleanupReport.error ?? null,
       sessionLogout,
       deleted: cleanupReport.deleted ?? {},
       residual: cleanupReport.residual ?? {},
       integrity: cleanupReport.integrity ?? null,
+      recovery: cleanupReport.status === "clean" ? null : {
+        runId: exactRunId, owner, databaseIdentity: state.databaseIdentity,
+        entityIds: Object.fromEntries(Object.entries(state).filter(([key]) => key.endsWith("Ids"))),
+        idempotencyKeys: [...state.idempotencyKeys.values()],
+        instruction: "Drain workers and reconcile exact run ids before retrying cleanup; never delete by marker substring or rerun blindly.",
+      },
       manifestCounts: collectedManifest
         ? Object.fromEntries([
             "customerIds", "importBatchIds", "importRowIds", "opportunityIds", "actionIds", "riskIds",
@@ -831,7 +947,7 @@ export async function runV0120ProductionAcceptance({
     },
   };
   const reportText = JSON.stringify(report);
-  for (const secret of [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken]) {
+  for (const secret of [password, state.sessionCookie, state.csrfToken, hospitalTenderSyncToken, opsAlertToken]) {
     if (secret && reportText.includes(secret)) throw new Error("v0.12.0 production acceptance report contains sensitive material");
   }
   atomicWriteJsonReport(reportPath, report);
