@@ -200,8 +200,8 @@ git status --short --branch
   `finalizing`、`completed`、`failed`；样本使用固定 provider-canary 幂等键，进程重启或账单未到
   不会重新调用供应商或重复收费。每个 live 文本样本同时必须记录 `finishReason=stop`，并在
   settlement、报告 contract 和 transition binding 中验证。
-- P2 checkpoint 测试 `12/12`、AI Platform 测试 `99/99`、Backend AI adapter 测试 `38/38`、
-  部署脚本测试 `35/35` 全部通过。
+- P2 checkpoint 测试 `13/13`、AI Platform 测试 `100/100`、Backend AI adapter 测试 `38/38`、
+  部署/AI 脚本测试 `36/36` 全部通过。
 - Backend 全量测试 `2083/2083`（`240` suites）通过；部署门禁 `292 passed / 0 failed / 2 skipped`。
   secret scan 无 findings；`git diff --check` 已通过一次，候选提交前复跑。
 - `qa:local` 已通过前端 production build、bundle budget、auth/session、route/state/API contract、

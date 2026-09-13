@@ -7,8 +7,8 @@
   provider `deepseek`、逻辑模型 `deepseek-flash`。本轮未读取 iCloud，未从生产取密钥，未修改生产。
 - provider readiness 已收口为 `configured`、`probeReady`、`liveReady` 分层，并绑定凭据 revision/digest、
   provider policy digest、有效期和真实 completion evidence；只有 `/models` 成功时不能放行普通生产任务。
-- P2 真实供应商验收已具备可恢复 checkpoint 状态机和固定幂等键，已通过 `12/12` checkpoint 测试；
-  AI Platform `99/99`、Backend AI adapter `38/38`、部署脚本 `35/35`、Backend 全量 `2083/2083`
+- P2 真实供应商验收已具备可恢复 checkpoint 状态机和固定幂等键，已通过 `13/13` checkpoint 测试；
+  AI Platform `100/100`、Backend AI adapter `38/38`、部署/AI 脚本 `36/36`、Backend 全量 `2083/2083`
   和部署门禁 `292 passed / 0 failed / 2 skipped`。本轮已补齐 live 文本样本的
   `finishReason=stop` 持久化和报告 contract 校验。
 - Mac 原生 Google Chrome 集成验收已通过，包含客户级主动助手、医院招标 bridge、action/risk 预览边界、
