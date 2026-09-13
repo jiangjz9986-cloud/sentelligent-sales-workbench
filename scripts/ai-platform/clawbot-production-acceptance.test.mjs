@@ -318,7 +318,7 @@ test("DB identity and top-level health contract match production-smoke-cleanup",
     { status: 200, body: { ...health.body, database: "not_ready" } },
     { status: 503, body: health.body },
   ]) assert.throws(() => assertClawbotDatabaseHealth(bad, identity), { code: "CLAWBOT_DATABASE_HEALTH_BINDING_MISMATCH" });
-  assert.throws(() => createDatabaseIdentity({ databaseUrl, secret: "short" }));
+  assert.throws(() => createDatabaseIdentity({ databaseUrl, secret: randomBytes(5).toString("hex") }));
 });
 
 test("bindings query executes against actual migrations and matches listAdminTargets", () => {
@@ -392,7 +392,7 @@ test("real worker fixture paces two messages and preserves the provider IDs it a
   let index = 0;
   await runWeixinOutboxPump({
     client: {
-      async lease() { index += 1; return { item: { id: String(index), message: "fixture" }, leaseToken: "fixture-lease" }; },
+      async lease() { index += 1; return { item: { id: String(index), message: "fixture" }, leaseToken: randomBytes(16).toString("hex") }; },
       async isCurrent() { return true; },
       async ack(value) { acknowledgements.push(value); if (acknowledgements.length === 2) controller.abort(); },
     },

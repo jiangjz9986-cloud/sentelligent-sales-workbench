@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +20,7 @@ import { PRODUCTION_ORIGIN, parseProductionOrigin } from "../production-https-sm
 const OWNER = "jiangjz";
 const PASSWORD = "fixture-production-password";
 const MACHINE_TOKEN = "fixture-machine-token";
-const OPS_TOKEN = "fixture-ops-status-token";
+const OPS_TOKEN = randomBytes(32).toString("hex");
 const TEST_SESSION_VALUE = "fixture-session-secret-placeholder-value";
 const DATABASE_IDENTITY = "d".repeat(43);
 const SESSION_COOKIE = "s".repeat(43);
