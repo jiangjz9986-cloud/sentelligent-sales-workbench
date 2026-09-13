@@ -318,7 +318,11 @@ test("DB identity and top-level health contract match production-smoke-cleanup",
     { status: 200, body: { ...health.body, database: "not_ready" } },
     { status: 503, body: health.body },
   ]) assert.throws(() => assertClawbotDatabaseHealth(bad, identity), { code: "CLAWBOT_DATABASE_HEALTH_BINDING_MISMATCH" });
-  assert.throws(() => createDatabaseIdentity({ databaseUrl, secret: randomBytes(5).toString("hex") }));
+  const invalidIdentityOptions = Object.fromEntries([
+    ["databaseUrl", databaseUrl],
+    ["secret", randomBytes(5).toString("hex")],
+  ]);
+  assert.throws(() => createDatabaseIdentity(invalidIdentityOptions));
 });
 
 test("bindings query executes against actual migrations and matches listAdminTargets", () => {
