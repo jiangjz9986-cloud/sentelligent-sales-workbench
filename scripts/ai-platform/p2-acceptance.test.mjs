@@ -65,7 +65,7 @@ const deploymentPolicy = {
   }],
 };
 
-function fakeHarness({ mode = "external-provider", proactive = false, interruptSample = null, initialLiveReady = mode === "external-provider" } = {}) {
+function fakeHarness({ mode = "external-provider", proactive = false, interruptSample = null, initialLiveReady = mode === "external-provider", responseMetaFallback = false } = {}) {
   let now = Date.parse("2026-09-11T00:00:00.000Z");
   let created = 0;
   let liveReady = initialLiveReady;
@@ -134,7 +134,7 @@ function fakeHarness({ mode = "external-provider", proactive = false, interruptS
           channel: "system",
           subject: { type: "p2_acceptance", id: "run-fixture" },
           status: "succeeded",
-          output: { metadata: { actualModel: "live-fixture-v1", finishReason: "stop" } },
+          output: responseMetaFallback ? null : { metadata: { actualModel: "live-fixture-v1", finishReason: "stop" } },
         },
         attempts: [{
           status: "succeeded",
@@ -145,6 +145,7 @@ function fakeHarness({ mode = "external-provider", proactive = false, interruptS
           usage: { inputTokens: 10, outputTokens: 20, cachedInputTokens: 0, audioSeconds: 0, imagePages: 0 },
           costMicro: 14,
           costStatus: "calculated",
+          ...(responseMetaFallback ? { responseMeta: { actualModel: "live-fixture-v1", finishReason: "stop" } } : {}),
         }],
         usageLedger: [{
           providerId: PROVIDER_ID,
@@ -218,6 +219,13 @@ test("argument parser requires explicit live confirmation and rejects secret-bea
     "--confirm=wrong",
   ]), (error) => error.code === "P2_LIVE_CONFIRMATION_REQUIRED");
   assert.throws(() => parseP2AcceptanceArguments(["--password=never" ]), (error) => error.code === "P2_ACCEPTANCE_SECRET_ARGUMENT_FORBIDDEN");
+});
+
+test("P2 evidence can use persisted response metadata when encrypted output is unavailable", async () => {
+  const harness = fakeHarness({ responseMetaFallback: true });
+  const report = await baseRun(harness);
+  assert.equal(report.status, "passed");
+  assert.equal(report.samples.every((sample) => sample.actualModel === "live-fixture-v1"), true);
 });
 
 test("local simulation is rejected before any acceptance task is created", async () => {

@@ -1209,6 +1209,18 @@ export function createTaskService({
     assertAgentSchema(result, context.agent.outputSchema, "output");
     const charge = chargeForUsage(usage, context.priceVersion);
     if (usage && providerResponse?.usageStatus === "estimated") charge.costStatus = "estimated";
+    // Keep the small, non-sensitive provider identity alongside the encrypted
+    // result so audit tooling can still verify model provenance after a task
+    // payload key rotation or an isolated evidence export.
+    const metadata = result.metadata ?? {};
+    const responseMeta = {
+      source: result.source,
+      ...(typeof metadata.provider === "string" ? { provider: metadata.provider } : {}),
+      ...(typeof metadata.actualModel === "string" ? { actualModel: metadata.actualModel } : {}),
+      ...(typeof metadata.modelIdentitySource === "string" ? { modelIdentitySource: metadata.modelIdentitySource } : {}),
+      ...(typeof metadata.finishReason === "string" ? { finishReason: metadata.finishReason } : {}),
+      ...(typeof metadata.executionMode === "string" ? { executionMode: metadata.executionMode } : {}),
+    };
     return withImmediateTransaction(db, () => {
       const current = rowById(db, context.task.id);
       if (!current || current.status !== "running" || current.lease_token !== context.attempt.leaseToken) {
@@ -1283,7 +1295,7 @@ export function createTaskService({
          WHERE id = $id AND status = 'running'
       `).run({
         $id: context.attempt.id,
-        $responseMeta: stringify({ source: result.source }, "{}"),
+        $responseMeta: stringify(responseMeta, "{}"),
         $inputTokens: usage?.inputTokens ?? 0,
         $outputTokens: usage?.outputTokens ?? 0,
         $cachedInputTokens: usage?.cachedInputTokens ?? 0,

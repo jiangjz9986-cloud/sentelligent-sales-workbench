@@ -576,10 +576,15 @@ function normalizeTaskEvidence(detail, policy, owner, runId) {
   // Accept both shapes so live acceptance validates the same evidence that
   // the production admin endpoint actually returns.
   const result = task?.output ?? task?.result;
-  const actualModel = result?.metadata?.actualModel;
+  // Newer runtimes persist this identity in responseMeta as well. It is
+  // deliberately limited to non-sensitive metadata so an audit can continue
+  // when the encrypted output payload is unavailable to the evidence reader.
+  const resultMetadata = isPlainRecord(result?.metadata) ? result.metadata : {};
+  const responseMetadata = isPlainRecord(attempt?.responseMeta) ? attempt.responseMeta : {};
+  const actualModel = resultMetadata.actualModel ?? responseMetadata.actualModel;
   if (typeof actualModel !== "string" || !SAFE_ID.test(actualModel)) failure("P2_MODEL_IDENTITY_INVALID");
   if (actualModel !== policy.modelName) failure("P2_MODEL_IDENTITY_MISMATCH");
-  const finishReason = result?.metadata?.finishReason;
+  const finishReason = resultMetadata.finishReason ?? responseMetadata.finishReason;
   if (finishReason !== "stop") failure("P2_FINISH_REASON_INVALID");
   if (!isPlainRecord(ledger) || ledger.providerId !== policy.providerId || ledger.modelId !== policy.modelId
     || ledger.priceVersionId !== attempt.priceVersionId || ledger.costStatus !== "calculated"
