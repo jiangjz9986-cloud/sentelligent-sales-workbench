@@ -336,6 +336,7 @@ function normalizeStoredEvidence(value) {
   if (!isPlainRecord(value)
     || typeof value.requestId !== "string" || !SAFE_ID.test(value.requestId)
     || typeof value.providerRequestId !== "string" || !SAFE_ID.test(value.providerRequestId)
+    || typeof value.actualModel !== "string" || !SAFE_ID.test(value.actualModel)
     || value.finishReason !== "stop"
     || typeof value.priceVersion !== "string" || !SAFE_ID.test(value.priceVersion)
     || !isPlainRecord(value.usage)
@@ -572,6 +573,9 @@ function normalizeTaskEvidence(detail, policy, owner, runId) {
   // Accept both shapes so live acceptance validates the same evidence that
   // the production admin endpoint actually returns.
   const result = task?.output ?? task?.result;
+  const actualModel = result?.metadata?.actualModel;
+  if (typeof actualModel !== "string" || !SAFE_ID.test(actualModel)) failure("P2_MODEL_IDENTITY_INVALID");
+  if (actualModel !== policy.modelName) failure("P2_MODEL_IDENTITY_MISMATCH");
   const finishReason = result?.metadata?.finishReason;
   if (finishReason !== "stop") failure("P2_FINISH_REASON_INVALID");
   if (!isPlainRecord(ledger) || ledger.providerId !== policy.providerId || ledger.modelId !== policy.modelId
@@ -580,7 +584,7 @@ function normalizeTaskEvidence(detail, policy, owner, runId) {
     failure("P2_USAGE_LEDGER_INVALID");
   }
   return {
-    requestId: safeId(task.requestId, "task.requestId"), providerRequestId, finishReason, priceVersion: attempt.priceVersionId,
+    requestId: safeId(task.requestId, "task.requestId"), providerRequestId, actualModel, finishReason, priceVersion: attempt.priceVersionId,
     usage, cost: { micro: attempt.costMicro, currency: ledger.currency, status: "calculated" },
   };
 }
@@ -788,6 +792,15 @@ export async function runP2Acceptance({
         sample = checkpointSample(checkpointState, sampleIndex);
       }
       if (sample.status !== "settled") failure("P2_CHECKPOINT_INVALID", "sample did not reach settled state");
+      // Older checkpoints predate persisted actualModel. Re-read the completed
+      // task detail to upgrade them without creating another provider task or
+      // replaying a paid completion.
+      if (!sample.evidence?.actualModel) {
+        const detail = await client.taskDetail(sample.taskId);
+        const normalized = normalizeTaskEvidence(detail, policy, owner, generatedRunId);
+        checkpointState = persist(replaceSample(checkpointState, sampleIndex, { evidence: normalized }));
+        sample = checkpointSample(checkpointState, sampleIndex);
+      }
       evidence.push(normalizeStoredEvidence(sample.evidence));
       if (sampleIndex === 1) assertHealth(await client.health(), policy);
     }

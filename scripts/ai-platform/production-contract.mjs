@@ -198,11 +198,15 @@ function validateBillingReconciliation(value, index, { providerRequestId, cost }
   }
 }
 
-function validateP2Sample(sample, index, { currency } = {}) {
+function validateP2Sample(sample, index, { currency, expectedModelName = null } = {}) {
   if (!isPlainRecord(sample) || sample.approved !== true) contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}] must be approved`);
   requireAcceptanceId(sample.requestId, `samples[${index}].requestId`);
   const providerRequestId = sample.providerRequestId ?? sample.externalRequestId;
   requireAcceptanceId(providerRequestId, `samples[${index}].providerRequestId`);
+  requireAcceptanceId(sample.actualModel, `samples[${index}].actualModel`);
+  if (expectedModelName !== null && sample.actualModel !== expectedModelName) {
+    contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].actualModel does not match runtime.modelName`);
+  }
   if (sample.finishReason !== "stop") contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].finishReason must be stop`);
   const priceVersion = typeof sample.priceVersion === "string" ? sample.priceVersion : sample.priceVersion?.id ?? sample.priceVersionId;
   requireAcceptanceId(priceVersion, `samples[${index}].priceVersion`);
@@ -254,7 +258,8 @@ export function validateP2AcceptanceReport(input, {
 
   const failures = input.failures ?? [];
   if (!Array.isArray(failures) || failures.length !== 0) contractError("P2_ACCEPTANCE_FAILURES_PRESENT");
-  const samples = input.samples.map((sample, index) => validateP2Sample(sample, index, { currency }));
+  const expectedModelName = typeof input.runtime?.modelName === "string" ? input.runtime.modelName : null;
+  const samples = input.samples.map((sample, index) => validateP2Sample(sample, index, { currency, expectedModelName }));
   const requestIds = new Set(samples.map((sample) => sample.requestId));
   if (requestIds.size !== samples.length) contractError("P2_ACCEPTANCE_DUPLICATE_REQUEST_ID");
   const providerRequestIds = new Set(samples.map((sample) => sample.providerRequestId));

@@ -175,11 +175,13 @@ test("P2 acceptance evidence is bound to the candidate commit, policy, provider 
       durationSeconds: 7_260,
     },
     summary: { total: 10, approved: 10, failed: 0 },
+    runtime: { modelName: "live-fixture-v1" },
     failures: [],
     samples: Array.from({ length: 10 }, (_value, index) => ({
       approved: true,
       requestId: `p2-request-${index}`,
       providerRequestId: `provider-request-${index}`,
+      actualModel: "live-fixture-v1",
       finishReason: "stop",
       priceVersion: `price-version-${index}`,
       usage: { inputTokens: 1, outputTokens: 1 },

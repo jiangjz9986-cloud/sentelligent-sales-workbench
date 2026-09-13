@@ -132,7 +132,7 @@ function fakeHarness({ mode = "external-provider", proactive = false, interruptS
           channel: "system",
           subject: { type: "p2_acceptance", id: "run-fixture" },
           status: "succeeded",
-          output: { metadata: { finishReason: "stop" } },
+          output: { metadata: { actualModel: "live-fixture-v1", finishReason: "stop" } },
         },
         attempts: [{
           status: "succeeded",
@@ -290,6 +290,7 @@ test("live acceptance uses only the controlled task path and produces a contract
   const report = await baseRun(harness);
   assert.equal(report.status, "passed");
   assert.equal(report.samples.length, 10);
+  assert.equal(report.samples[0].actualModel, "live-fixture-v1");
   assert.equal(report.observation.durationSeconds, 7_200);
   assert.deepEqual(report.sideEffects, {
     businessDatabaseAccessed: false,
@@ -403,6 +404,12 @@ test("billing reconciliation can resume without another provider call", async ()
     assert.ok(beforeResume.samples.every((sample) => sample.status === "settled"));
     const callsBefore = harness.calls.filter((call) => call === "providerCanary").length;
     assert.equal(harness.created(), 10);
+
+    // Simulate a checkpoint written by the previous schema. The completed
+    // task detail remains available, so resume must backfill identity without
+    // creating another provider task.
+    for (const sample of beforeResume.samples) delete sample.evidence.actualModel;
+    writeFileSync(checkpoint.path, JSON.stringify(beforeResume, null, 2) + "\n");
 
     billingReady = true;
     const report = await baseRun(harness, { checkpointPath: checkpoint.path, billingLoader });
