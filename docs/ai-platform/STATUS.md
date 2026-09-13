@@ -4,7 +4,8 @@
 
 - 当前继续在 `ai-platform-production-integration-20260909` 工作树开发，目标模式保持
   `active`，开发执行设置为 Codex `gpt-5.6-luna / max`；业务系统仍统一使用 DeepSeek
-  provider `deepseek`、逻辑模型 `deepseek-flash`。本轮未读取 iCloud，未从生产取密钥，未修改生产。
+  provider `deepseek`、逻辑模型 `deepseek-flash`。本轮未读取 iCloud，未从生产取密钥；2026-09-13
+  仅做了生产 release、服务和 AI healthz 的只读核对。
 - 已修复历史 `sentelligent-ops-alert@sentelligent-backend.service.service` 的告警失败路径：
   `ops-alert.sh` 现在在 Backend 暂不可用时把告警以 root-only、600 权限的 JSON 原子写入本地 spool，
   `ops-inspect.sh` 后续只通过同一个 Backend ops-alert endpoint 排空；没有 PushPlus、直接微信或其他
@@ -34,9 +35,16 @@
 - 微信 Clawbot 仍是唯一外部通知通道，PushPlus 保持退役。SDK 当前 context token 从真实入站消息建立，
   有效期约 23 小时；轮询或 heartbeat 只维持 worker 在线，不能伪造 token 续期。context 过期时 outbox
   保留并不消耗发送次数，真实新入站后才可恢复；这一限制已由本地合成测试覆盖，真实微信窗口仍待执行。
-- 生产保持 P1 边界：AI Platform `disabled`、execution `local-simulated`、admission closed；本轮分支
-  未部署生产。生产切换前仍必须完成真实 canary/账单、真实 Clawbot 投递、备份恢复、transition lock、
-  drain、preflight/postflight、回滚演练和观察窗口。
+- 较早记录中的生产 P1 边界和“本轮分支未部署生产”是历史状态；当前现场仍保持 AI Platform
+  `disabled`、execution `local-simulated`、admission closed。完整生产交付仍必须完成真实
+  canary/账单、真实 Clawbot 投递、备份恢复、transition lock、drain、preflight/postflight、回滚演练和观察窗口。
+
+### 2026-09-13 现场核对覆盖项
+
+- 生产 `current` 已现场核实为 `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-21cb281ee37e`，提交为 `21cb281ee37e30c12cf9c1de663c50cc0d9bc5ab`；五个相关 systemd 服务均为 `active`。
+- AI platform Unix socket healthz 返回 `paused`、`executionMode=local-simulated`、`externalProvidersEnabled=false`、`admissionOpen=false`、`provider-mock` only、queue depth `0`；目标元数据仍为 `deepseek-flash`。
+- WeChat agent 最新日志仍为 `context_token_missing`。这项只能继续保持 fail-closed 和 outbox 保留，不能通过 heartbeat 或轮询伪造主动投递成功。
+- 上述现场核对不改变 P2/P4/P5/P6 未完成判断；完整执行顺序和放行条件见 `FOLLOW-UP-PLAN-20260912.md` 的“2026-09-13 执行附录”。
 
 ## 2026-09-12 当前融合与生产事实
 

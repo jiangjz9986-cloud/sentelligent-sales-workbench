@@ -31,8 +31,8 @@
 | 外部通知通道 | 微信 Clawbot；PushPlus 永久退役 |
 | 生产数据 | 业务 SQLite 与平台 SQLite 分离；不读取 iCloud |
 | 浏览器验收 | Mac 原生 Google Chrome；移动尺寸只做浏览器兼容性 |
-| 当前生产 release | `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9` |
-| 当前生产阶段 | P1：`disabled`、`local-simulated`、admission closed |
+| 当前生产 release | `21cb281ee37e30c12cf9c1de663c50cc0d9bc5ab`（只读核对于 2026-09-13） |
+| 当前生产阶段 | P1 受控在线：`paused`、`local-simulated`、`externalProvidersEnabled=false`、admission closed |
 
 ## 阶段计划
 
@@ -185,16 +185,13 @@ receipt 复核历史 failed unit。
 每个阶段都绑定当前 exact commit，并保存独立报告。最终收口至少执行：
 
 ```bash
-npm run test:deploy
-npm run test:ai-platform
-npm --prefix backend test
-npm --prefix outputs/product-design-prototype run qa:local
-CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npm --prefix outputs/product-design-prototype run qa:integration
+npm run qa:desktop
 git diff --check
 git status --short --branch
 ```
 
-`qa:webkit`/iPhone 真机验收不属于本次交付范围；仅当用户重新授权移动真机验收时才追加执行。
+`qa:desktop` 包含部署门禁、AI Platform、Backend、前端本地 QA 和 Mac Chrome 集成验收；
+`qa:webkit`/iPhone 真机验收不属于本次交付范围，仅当用户重新授权移动真机验收时才追加执行。
 
 真实 provider、真实微信和生产写入验收必须单独记录：请求数、owner、样本标识、实际 model、request id、费用状态、写入行数、清理行数、outbox 水位、context 状态和报告 SHA-256。
 
@@ -234,8 +231,8 @@ git status --short --branch
 | 生产交付 | `blocked by gates` | canary/账单、备份恢复、transition lock、admission freeze、drain、preflight/postflight、回滚演练、观察窗口 |
 | iPhone 真机验收 | `out of scope` | 用户已取消；仅保留 Mac Chrome 桌面和移动尺寸兼容性检查 |
 
-生产仍保持历史 P1 边界：release `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`，AI Platform
-`disabled`、execution `local-simulated`、admission closed。本轮分支尚未部署生产；真实 DeepSeek
+较早记录中的 P1 release `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`、AI Platform
+`disabled`、execution `local-simulated`、admission closed 和“本轮分支尚未部署生产”均为历史状态；真实 DeepSeek
 canary 已在候选提交 `aa443cc63430185650c01e0811ddc96fa27c6172` 的隔离运行目录完成 10/10 样本，
 但费用账单、失败场景、观察窗口和真实微信证据仍未齐全，因此不改变生产边界，也不把 canary
 样本成功写成生产完成。当前可恢复续跑绑定为 `p2-prod-20260913-aa443cc-r1`，不能重发已结算样本。
@@ -244,3 +241,39 @@ DeepSeek 官方价格页已在 2026-09-13 重新核对：逻辑名 `deepseek-fla
 文本输入/输出价格仍以供应商页面的百万 tokens 口径为准，现有 off-peak/peak 微元换算与代码合同
 一致；真实 canary 仍必须记录 `/models`、completion 响应和真实账单。若供应商响应返回的模型名与
 逻辑名不同，必须先形成显式映射证据再放行。
+
+## 2026-09-13 执行附录（覆盖较早的当前状态描述）
+
+本附录是本轮继续开发前的现场基线，优先于本文中较早的历史段落；历史段落保留用于追溯，不作为
+当前生产判断。
+
+### 已核对现场事实
+
+- 工作树为 `/Users/jiangjizhen/Documents/Codex/repos/sentelligent-sales-workbench/.worktrees/ai-platform-production-integration-20260909`，分支 `codex/ai-platform-production-integration-20260909`；本附录开始执行时的代码基线为 `21cb281ee37e30c12cf9c1de663c50cc0d9bc5ab`。后续放行以提交后的 exact release manifest 为准。
+- 开发执行目标继续保持 `gpt-5.6-luna / reasoning max`；这是 Codex 开发设置，不写入业务运行时。业务助手固定使用 provider `deepseek`、model `deepseek-flash`。
+- 生产 `current` 为 `/opt/sentelligent-sales-workbench/releases/sentelligent-sales-workbench-21cb281ee37e`，Backend、Frontend、WeChat agent、AI platform、Caddy 均为 active；本轮只读核对，没有读取 iCloud、没有读取生产密钥、没有修改生产。
+- AI 平台 healthz 当前为 `paused`，`executionMode=local-simulated`，`externalProvidersEnabled=false`，`admissionOpen=false`，队列深度为 `0`，provider 仅有 `provider-mock`。`targetModel=deepseek-flash` 只是目标元数据，不是已完成真实调用的证据。
+- WeChat agent 在线，但最新日志为 `category=outbox status=not_ready reason=context_token_missing`。没有有效 Clawbot context 前，不做主动消息成功声明、不清空 queued outbox、不恢复 PushPlus。
+
+### 后续开发与验收顺序
+
+| 优先级 | 交付项 | 实施动作 | 放行证据 |
+| --- | --- | --- | --- |
+| P0 | 代码与合同收口 | 保持 `configured/probeReady/liveReady` 分层、真实模型身份、finish reason、凭据/策略 digest 和固定幂等键；把 ops alert spool 修复纳入候选 release | 本地专项、secret scan、diff check、发布制品 manifest |
+| P2 | DeepSeek 真实 canary | 只用合成文本、单并发、固定 runId/checkpoint；先补失败场景，再以供应商逐请求账单续跑，不重发已结算样本 | 10 样本、`actualModel=deepseek-flash`、`finishReason=stop`、request id、账单逐条 reconciliation、至少 2 小时观察 |
+| P4 | v0.12.0 业务写回 | 逐项验收客户 CSV/XLSX preview/confirm/conflict/cancel、action/risk preview/confirm/writeback、医院招标 bridge preview/confirm/cancel；每项使用唯一 synthetic marker，完成审计读取和精确清理 | 写入行数=预期、owner/relationship/version/digest 正确、审计完整、清理后 residual=0、SQLite integrity 通过 |
+| P5 | Clawbot 主动消息 | 先取得有效真实入站 context；验证无入站主动投递、过期保留 outbox、新入站恢复、限速/重试/去重/审计；context 缺失只做诊断 | 真实消息窗口报告；无 context 时保持 pending/blocked，不以 heartbeat 替代 |
+| P6 | 完整生产交付 | 账单和微信门禁通过后才锁 admission，执行备份、drain、transition、postflight、回滚演练和灰度观察 | fresh preflight、transition manifest、backup/restore、rollback、48 小时观察和最终 release SHA |
+
+### 快速执行规则
+
+1. 先在隔离临时库完成 P4 专项回归和生产脚本的 contract test；不重复实现已通过的业务模块。
+2. P2 只允许使用同一 `runId` 和 checkpoint 续跑；账单缺失时保持 `reconciling/pending`，不修改 `liveReady`。
+3. P4 生产写入必须通过已有 HTTPS smoke 的 server-local cleanup 保护；cleanup、audit manifest 或
+   `foreign_key_check` 任一失败，立即停止后续生产写入。
+4. P5 不尝试用定时心跳伪造 context renewal；上游没有 renewal/rebind 合同时，产品限制必须保留在交付结论中。
+5. 每个阶段以当前 exact commit、报告路径、SHA-256、清理结果和未执行项归档；只有所有硬门禁通过才允许把目标标为 complete。
+
+### 当前判断
+
+当前可继续开发和验收，但尚未达到完整 AI 统一调度平台生产交付：P2 的账单/失败场景/观察、P4 的生产专项写回证据、P5 的真实 Clawbot context，以及 P6 的 48 小时灰度仍未齐。P1 受控生产在线不等于上述门禁通过。

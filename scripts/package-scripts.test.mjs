@@ -58,6 +58,17 @@ describe("root package QA scripts", () => {
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:webkit/);
   });
 
+  it("exposes a desktop-only formal delivery verification without iPhone/WebKit scope", () => {
+    const script = packageJson.scripts?.["qa:desktop"];
+    assert.ok(script, "qa:desktop should exist");
+    assert.match(script, /npm run test:deploy/);
+    assert.match(script, /npm run test:ai-platform/);
+    assert.match(script, /npm --prefix backend test/);
+    assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:local/);
+    assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:integration/);
+    assert.doesNotMatch(script, /qa:webkit|webkit|iphone/iu);
+  });
+
   it("keeps the isolated AI platform in local, CI, and release verification", () => {
     assert.equal(
       packageJson.scripts?.["test:ai-platform"],
@@ -113,6 +124,14 @@ describe("root package QA scripts", () => {
       "node scripts/ai-platform/p2-acceptance.mjs",
     );
     assert.doesNotMatch(packageJson.scripts?.["acceptance:ai-platform:p2"] ?? "", /password|cookie|csrf|82\.156|api[_-]?key/iu);
+  });
+
+  it("exposes the isolated v0.12.0 business acceptance runner", () => {
+    assert.equal(
+      packageJson.scripts?.["acceptance:v0120:business"],
+      "node scripts/ai-platform/v0120-business-acceptance.mjs",
+    );
+    assert.doesNotMatch(packageJson.scripts?.["acceptance:v0120:business"] ?? "", /production|password|cookie|csrf|82\.156|api[_-]?key/iu);
   });
 
   it("exposes repeatable WebKit acceptance for iPhone Safari equivalence", () => {
