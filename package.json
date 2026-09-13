@@ -34,7 +34,7 @@
     "test:ai-platform": "npm --prefix ai-platform test && node --test backend/src/aiPlatform/*.test.js && node --test scripts/ai-platform/*.test.mjs",
     "test:release": "node --test scripts/release-package.test.mjs scripts/production-preflight.test.mjs",
     "test:deploy": "npm run scan:secrets && node --test scripts/*.test.mjs",
-    "qa:desktop": "npm run test:deploy && npm run test:ai-platform && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration",
+    "qa:desktop": "npm run test:deploy && npm run test:ai-platform && npm run acceptance:v0120:business && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration",
     "qa:full": "npm run test:deploy && npm run test:ai-platform && npm --prefix backend test && npm --prefix outputs/product-design-prototype run qa:local && npm --prefix outputs/product-design-prototype run qa:integration && npm --prefix outputs/product-design-prototype run qa:webkit"
   },
   "description": "Sentelligent AI sales workbench for customer, opportunity, action, risk, voice and weekly workflows.",

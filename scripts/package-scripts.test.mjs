@@ -63,6 +63,7 @@ describe("root package QA scripts", () => {
     assert.ok(script, "qa:desktop should exist");
     assert.match(script, /npm run test:deploy/);
     assert.match(script, /npm run test:ai-platform/);
+    assert.match(script, /npm run acceptance:v0120:business/);
     assert.match(script, /npm --prefix backend test/);
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:local/);
     assert.match(script, /npm --prefix outputs\/product-design-prototype run qa:integration/);
