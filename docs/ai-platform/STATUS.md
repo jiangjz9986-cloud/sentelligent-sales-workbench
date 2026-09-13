@@ -15,12 +15,15 @@
   CSV/XLSX 导入、滚动回归、管理台、AI Platform console、权限/冲突和桌面/窄窗口视口。按用户要求不做
   iPhone 真机或 WebKit 验收；浏览器移动尺寸检查不等同于真机证据。
 - 真实 DeepSeek canary 已完成 10 个合成样本，状态为 `samples_passed`，但账单和观察门禁仍未完成。
-  runId 为 `p2-prod-20260913-ten-r4`，候选提交为 `88f83d157bc9dc1ae6c95557993c7ed133625010`，
-  10/10 样本均返回 `model=deepseek-flash`、`provider=provider-deepseek` 和唯一 provider request id，
-  暂计费用为 `6,634 micro-CNY`。脱敏报告位于 `/private/tmp/p2-prod-20260913-ten-r4.json`，
-  SHA-256 为 `57b4060095d964c3e14d3380044e955de0852a136c3f8a7bc5e32b84332c4309`。
-  报告明确 `billing.status=pending`、未访问业务库、未调用通知、未修改生产服务；仍需供应商逐请求账单
-  证据、失败场景补验和至少 2 小时观察，不能把本项标记为 reconciled 或 production-ready。
+  当前续跑绑定为 runId `p2-prod-20260913-aa443cc-r1`，候选提交为
+  `aa443cc63430185650c01e0811ddc96fa27c6172`；10/10 样本均返回
+  `model=deepseek-flash`、`provider=provider-deepseek`、`finishReason=stop` 和唯一 provider request id，
+  暂计费用约为 `6,540 micro-CNY`。检查点为
+  `/opt/sentelligent-sales-workbench/evidence/ai-platform-aa443cc-p2-20260913/p2-checkpoint-r1.json`，
+  报告为 `/opt/sentelligent-sales-workbench/evidence/ai-platform-aa443cc-p2-20260913/p2-report-r1.json`。
+  报告明确 `billing.status=pending`、`resumePhase=reconciling`；未访问业务库、未调用通知、未修改生产服务。
+  取得逐请求供应商账单后应复用同一 runId/checkpoint 续跑，不得重发已成功样本；仍需失败场景补验和至少
+  2 小时观察，不能把本项标记为 reconciled 或 production-ready。
 - 微信 Clawbot 仍是唯一外部通知通道，PushPlus 保持退役。SDK 当前 context token 从真实入站消息建立，
   有效期约 23 小时；轮询或 heartbeat 只维持 worker 在线，不能伪造 token 续期。context 过期时 outbox
   保留并不消耗发送次数，真实新入站后才可恢复；这一限制已由本地合成测试覆盖，真实微信窗口仍待执行。

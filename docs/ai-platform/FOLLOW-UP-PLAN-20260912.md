@@ -226,9 +226,9 @@ git status --short --branch
 
 生产仍保持历史 P1 边界：release `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`，AI Platform
 `disabled`、execution `local-simulated`、admission closed。本轮分支尚未部署生产；真实 DeepSeek
-canary 已在候选提交 `88f83d157bc9dc1ae6c95557993c7ed133625010` 的隔离运行目录完成 10/10 样本，
+canary 已在候选提交 `aa443cc63430185650c01e0811ddc96fa27c6172` 的隔离运行目录完成 10/10 样本，
 但费用账单、失败场景、观察窗口和真实微信证据仍未齐全，因此不改变生产边界，也不把 canary
-样本成功写成生产完成。
+样本成功写成生产完成。当前可恢复续跑绑定为 `p2-prod-20260913-aa443cc-r1`，不能重发已结算样本。
 
 DeepSeek 官方价格页已在 2026-09-13 重新核对：逻辑名 `deepseek-flash` 对应 DeepSeek-V4.1-Flash，
 文本输入/输出价格仍以供应商页面的百万 tokens 口径为准，现有 off-peak/peak 微元换算与代码合同
