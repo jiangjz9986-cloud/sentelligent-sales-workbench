@@ -336,6 +336,7 @@ function normalizeStoredEvidence(value) {
   if (!isPlainRecord(value)
     || typeof value.requestId !== "string" || !SAFE_ID.test(value.requestId)
     || typeof value.providerRequestId !== "string" || !SAFE_ID.test(value.providerRequestId)
+    || value.finishReason !== "stop"
     || typeof value.priceVersion !== "string" || !SAFE_ID.test(value.priceVersion)
     || !isPlainRecord(value.usage)
     || !isPlainRecord(value.cost)
@@ -563,13 +564,15 @@ function normalizeTaskEvidence(detail, policy, owner, runId) {
     failure("P2_SAMPLE_ATTEMPT_INVALID");
   }
   const usage = normalizeUsage(attempt.usage);
+  const finishReason = task?.result?.metadata?.finishReason;
+  if (finishReason !== "stop") failure("P2_FINISH_REASON_INVALID");
   if (!isPlainRecord(ledger) || ledger.providerId !== policy.providerId || ledger.modelId !== policy.modelId
     || ledger.priceVersionId !== attempt.priceVersionId || ledger.costStatus !== "calculated"
     || ledger.currency === undefined || ledger.costMicro !== attempt.costMicro) {
     failure("P2_USAGE_LEDGER_INVALID");
   }
   return {
-    requestId: safeId(task.requestId, "task.requestId"), providerRequestId, priceVersion: attempt.priceVersionId,
+    requestId: safeId(task.requestId, "task.requestId"), providerRequestId, finishReason, priceVersion: attempt.priceVersionId,
     usage, cost: { micro: attempt.costMicro, currency: ledger.currency, status: "calculated" },
   };
 }

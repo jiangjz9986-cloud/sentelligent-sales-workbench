@@ -203,6 +203,7 @@ function validateP2Sample(sample, index, { currency } = {}) {
   requireAcceptanceId(sample.requestId, `samples[${index}].requestId`);
   const providerRequestId = sample.providerRequestId ?? sample.externalRequestId;
   requireAcceptanceId(providerRequestId, `samples[${index}].providerRequestId`);
+  if (sample.finishReason !== "stop") contractError("P2_ACCEPTANCE_SAMPLE_INVALID", `samples[${index}].finishReason must be stop`);
   const priceVersion = typeof sample.priceVersion === "string" ? sample.priceVersion : sample.priceVersion?.id ?? sample.priceVersionId;
   requireAcceptanceId(priceVersion, `samples[${index}].priceVersion`);
   validateUsage(sample.usage, index);

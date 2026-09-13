@@ -50,6 +50,7 @@ test("registered model and token limits control the request, cached input is cou
   assert.equal(sent.messages[0].content, "Return JSON.");
   assert.deepEqual(result.usage, { inputTokens: 60, outputTokens: 20, cachedInputTokens: 40, audioSeconds: 0, imagePages: 0 });
   assert.equal(result.result.metadata.actualModel, "deepseek-flash");
+  assert.equal(result.result.metadata.finishReason, "stop");
   assert.equal(result.externalRequestId, "request-vendor-1");
   await provider.execute(providerInput("weekly.generate"));
   assert.equal(Object.hasOwn(JSON.parse(calls[1].body), "thinking"), false);
@@ -70,6 +71,56 @@ test("invalid completion and model mismatch retain usage and vendor request iden
   }
   const unknown = await configured(async () => Response.json(completion({ usage: {} }))).execute(providerInput());
   assert.equal(unknown.usage, null);
+});
+
+test("supplier and transport failures map to bounded errors without leaking bodies or retrying", async () => {
+  for (const status of [429, 500, 503]) {
+    await assert.rejects(
+      configured(async () => new Response(JSON.stringify({ secret: ENV.AI_PROVIDER_TEST_KEY }), { status })).execute(providerInput()),
+      (error) => {
+        assert.equal(error.code, status === 429 ? "rate_limited" : "provider_error");
+        assert.equal(error.externalRequestId ?? null, null);
+        assert.equal(error.usage, undefined);
+        assert.doesNotMatch(error.message, /synthetic|credential|secret/i);
+        return true;
+      },
+    );
+  }
+
+  for (const body of ["", "{not-json"]) {
+    await assert.rejects(
+      configured(async () => new Response(body)).execute(providerInput()),
+      (error) => {
+        assert.equal(error.code, "invalid_result");
+        assert.equal(error.externalRequestId ?? null, null);
+        assert.equal(error.usage ?? null, null);
+        return true;
+      },
+    );
+  }
+
+  await assert.rejects(
+    configured(async () => { throw new Error("socket disconnected with private details"); }).execute(providerInput()),
+    (error) => {
+      assert.equal(error.code, "network_error");
+      assert.doesNotMatch(error.message, /socket|private|details/i);
+      return true;
+    },
+  );
+
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    configured(async (_url, options) => {
+      assert.equal(options.signal, controller.signal);
+      throw new Error("request cancelled");
+    }).execute({ ...providerInput(), signal: controller.signal }),
+    (error) => {
+      assert.equal(error.code, "cancelled");
+      assert.doesNotMatch(error.message, /cancelled/i);
+      return true;
+    },
+  );
 });
 
 test("released standard contents and instruction versions reach the actual provider prompt", async () => {

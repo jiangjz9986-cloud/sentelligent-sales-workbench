@@ -75,7 +75,7 @@
 目标是让“真实 provider、费用、媒体、主动推送、写回和回滚”都拥有可执行合同。
 
 1. 补齐 OpenAI-compatible provider 的就绪状态：凭据、模型能力、官方 `GET /models` 探针、真实 completion 分级记录。凭据变更、证据超期或旧探针晚返回不得保留错误的 liveReady；启动失败可恢复，关闭期间中止探针并等待清理。
-2. 固定 DeepSeek 价格版本与高峰预算上限：缓存命中输入、未命中输入、输出分别记账，图片按输入 token 计费，不虚构页费；未知 usage 保留 unknown 预算。
+2. 固定 DeepSeek 价格版本与高峰预算上限：缓存命中输入、未命中输入、输出分别记账，图片按输入 token 计费，不虚构页费；未知 usage 保留 unknown 预算。真实文本 completion 的 `finish_reason=stop` 必须从 provider 结果一路写入 canary settlement 和 P2 报告，不能只在请求过程中校验。
 3. 校验所有业务入口的 provider、model、agent、price version、owner、actor、channel、subject 和 request id；历史读取不得触发模型请求。
 4. 完善管理代理和内部认证的 request binding、issuer、jti replay、CSRF、管理员/成员权限矩阵。
 5. 串接 Backend proactive worker、AI executor、微信 outbox worker 的 drain/close/restore，确保关闭时等待在途结算，超时进入 unknown 而不是静默重跑。
@@ -198,7 +198,8 @@ git status --short --branch
   绑定。仅有 `GET /models` 探针时，普通生产任务仍拒绝 admission，不创建 task 或预算预占。
 - P2 真实供应商验收已改为可恢复 checkpoint 状态机：`collecting`、`observing`、`reconciling`、
   `finalizing`、`completed`、`failed`；样本使用固定 provider-canary 幂等键，进程重启或账单未到
-  不会重新调用供应商或重复收费。
+  不会重新调用供应商或重复收费。每个 live 文本样本同时必须记录 `finishReason=stop`，并在
+  settlement、报告 contract 和 transition binding 中验证。
 - P2 checkpoint 测试 `12/12`、AI Platform 测试 `99/99`、Backend AI adapter 测试 `38/38`、
   部署脚本测试 `35/35` 全部通过。
 - Backend 全量测试 `2083/2083`（`240` suites）通过；部署门禁 `292 passed / 0 failed / 2 skipped`。
@@ -218,14 +219,16 @@ git status --short --branch
 
 | 门禁 | 当前状态 | 完成所需证据 |
 | --- | --- | --- |
-| 真实 DeepSeek canary | `pending` | `/models`、真实 `chat/completions` 的 model/usage/finish reason/request id、10 个合成样本、费用与账单核对 |
+| 真实 DeepSeek canary | `10/10 samples passed; billing pending` | 已完成真实 `chat/completions` 的 model/usage/request id 和 10 个合成样本；新候选需重新采样并记录 `finish_reason=stop`，仍需失败场景补验、逐请求账单核对和至少 2 小时观察 |
 | 微信 Clawbot 主动投递 | `pending` | 有效 context 无入站主动发送、context 到期保留 outbox、新入站恢复、限速/重试/去重/审计 |
 | 生产交付 | `blocked by gates` | canary/账单、备份恢复、transition lock、admission freeze、drain、preflight/postflight、回滚演练、观察窗口 |
 | iPhone 真机验收 | `out of scope` | 用户已取消；仅保留 Mac Chrome 桌面和移动尺寸兼容性检查 |
 
 生产仍保持历史 P1 边界：release `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`，AI Platform
-`disabled`、execution `local-simulated`、admission closed。本轮分支尚未部署生产；未拿到真实供应商
-和真实微信证据前，不改变该判断，也不把本地模拟成功写成生产完成。
+`disabled`、execution `local-simulated`、admission closed。本轮分支尚未部署生产；真实 DeepSeek
+canary 已在候选提交 `88f83d157bc9dc1ae6c95557993c7ed133625010` 的隔离运行目录完成 10/10 样本，
+但费用账单、失败场景、观察窗口和真实微信证据仍未齐全，因此不改变生产边界，也不把 canary
+样本成功写成生产完成。
 
 DeepSeek 官方价格页已在 2026-09-13 重新核对：逻辑名 `deepseek-flash` 对应 DeepSeek-V4.1-Flash，
 文本输入/输出价格仍以供应商页面的百万 tokens 口径为准，现有 off-peak/peak 微元换算与代码合同

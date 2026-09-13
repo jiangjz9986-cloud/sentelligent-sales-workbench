@@ -1486,6 +1486,7 @@ export function createTaskService({
     const providerRequestId = attempt.external_request_id;
     const totalMicro = Number(attempt.cost_micro ?? 0) + Number(ledger.function_fee_micro ?? 0);
     const result = parseJson(decoded.output_json, null);
+    const finishReason = result?.metadata?.finishReason;
     if (attempt.status !== "succeeded" || attempt.provider_id !== model.provider_id || attempt.model_id !== model.id
       || !providerRequestId || !/^[A-Za-z0-9_.:-]{1,200}$/u.test(providerRequestId)
       || !attempt.price_version_id || attempt.cost_status !== "calculated"
@@ -1495,6 +1496,7 @@ export function createTaskService({
       || ledger.cost_micro !== attempt.cost_micro || reservation.status !== "settled"
       || Number(reservation.actual_micro) !== totalMicro
       || !result || result.schemaVersion !== "ai-task-result-v1" || result.status !== "success" || result.source !== "model"
+      || finishReason !== "stop"
       || row.output_digest !== sha256(result)) {
       throw new AiPlatformError("provider canary settlement is invalid", { code: "provider_canary_invalid", status: 422 });
     }
@@ -1533,6 +1535,7 @@ export function createTaskService({
       currency: ledger.currency,
       resultSchemaVersion: result.schemaVersion,
       resultDigest: row.output_digest,
+      finishReason,
       settledStatus: "settled",
       observedAt,
       expiresAt,

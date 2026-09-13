@@ -502,6 +502,7 @@ export function createOpenAiCompatibleProvider(policy, {
         ? { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, audioSeconds: duration ?? input.audioSeconds, imagePages: 0 }
         : usageFromResponse(parsed.usage);
       const content = parsed.choices?.[0]?.message?.content;
+      const finishReason = input.kind === "asr" ? null : parsed.choices?.[0]?.finish_reason;
       const externalRequestId = safeRequestId(response, parsed);
       const reject = (code) => {
         const error = new AiPlatformError("invalid provider completion", { code, status: 502 });
@@ -536,6 +537,7 @@ export function createOpenAiCompatibleProvider(policy, {
           writebackPreview: { requiresHumanConfirmation: true, actions: [] },
           metadata: {
             ...(payload ? { payload, ...(input.kind === "asr" ? { transcript: payload.text } : {}) } : { completion: content }),
+            ...(finishReason ? { finishReason } : {}),
             provider: policy.id, actualModel: parsed.model ?? model.name, modelIdentitySource: parsed.model ? "response" : "registered-policy",
             executionMode: "external-provider", agentVersion: agent.versionId,
           },

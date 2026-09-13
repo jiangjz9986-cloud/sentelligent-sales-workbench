@@ -147,6 +147,7 @@ test("provider canary endpoint enforces fixed scope/body and settles evidence id
     assert.equal(settled.body.item.ready, true);
     assert.equal(settled.body.item.task.status, "succeeded");
     assert.equal(settled.body.item.evidence.settledStatus, "settled");
+    assert.equal(settled.body.item.evidence.finishReason, "stop");
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM provider_readiness_evidence").get().count, 1);
     assert.equal(server.aiPlatform.providerRegistry.get(POLICY.id).readiness({ modelName: "deepseek-flash", taskType: "quick-record.analyze" }).liveReady, true);
 

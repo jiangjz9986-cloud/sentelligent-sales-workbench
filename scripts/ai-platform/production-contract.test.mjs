@@ -180,6 +180,7 @@ test("P2 acceptance evidence is bound to the candidate commit, policy, provider 
       approved: true,
       requestId: `p2-request-${index}`,
       providerRequestId: `provider-request-${index}`,
+      finishReason: "stop",
       priceVersion: `price-version-${index}`,
       usage: { inputTokens: 1, outputTokens: 1 },
       cost: { micro: 1, currency: "CNY", status: "calculated" },
@@ -206,6 +207,16 @@ test("P2 acceptance evidence is bound to the candidate commit, policy, provider 
   });
   assert.equal(normalized.sampleCount, 10);
   assert.equal(normalized.observationSeconds, 7_260);
+  assert.throws(() => validateP2AcceptanceReport({
+    ...report,
+    samples: report.samples.map((sample, index) => index === 0 ? { ...sample, finishReason: "length" } : sample),
+  }, {
+    sourceCommit,
+    policyDigest,
+    expectedProviderPolicyDigest: providerDigest,
+    currency: "CNY",
+    now,
+  }), /finishReason must be stop/u);
   assert.throws(() => validateP2AcceptanceReport(report, {
     sourceCommit: "d".repeat(40),
     policyDigest,
