@@ -231,3 +231,43 @@ test("P2 acceptance evidence is bound to the candidate commit, policy, provider 
     transitionIdentityDigest({ ...manifest, p2AcceptanceReportSha256: "5".repeat(64) }),
   );
 });
+
+test("transition identity digest binds every manifest field that affects state or evidence", () => {
+  const validated = validateTransitionManifest(manifest);
+  const changes = {
+    schemaVersion: 2,
+    id: "fusion-test-mutated",
+    hostname: "mutated-host",
+    machineId: "b".repeat(32),
+    oldRelease: PRODUCTION_ROOT + "/releases/v0.12.4-test",
+    oldCommit: "d".repeat(40),
+    newRelease: PRODUCTION_ROOT + "/releases/v0.13.1-test",
+    newCommit: "e".repeat(40),
+    newArchive: evidence + "/release-mutated.tar.gz",
+    newArchiveSha256: "5".repeat(64),
+    evidenceDir: PRODUCTION_ROOT + "/evidence/fusion-test-mutated",
+    backupDir: PRODUCTION_ROOT + "/backups/fusion-test-mutated",
+    platformEnvCandidate: evidence + "/platform-mutated.env",
+    backendEnvCandidate: evidence + "/backend-mutated.env",
+    platformEnvSha256: "6".repeat(64),
+    backendEnvSha256: "7".repeat(64),
+    corePreflight: evidence + "/core-mutated.json",
+    corePreflightSha256: "8".repeat(64),
+    policyFile: evidence + "/policy-mutated.json",
+    policySha256: "9".repeat(64),
+    qualityReport: evidence + "/quality-mutated.json",
+    qualityReportSha256: "a".repeat(64),
+    p2AcceptanceReport: evidence + "/p2-acceptance-mutated.json",
+    p2AcceptanceReportSha256: "b".repeat(64),
+    phase: "platform",
+    rolloutPhase: "P6",
+  };
+  const baseline = transitionIdentityDigest(validated);
+  for (const [field, value] of Object.entries(changes)) {
+    assert.notEqual(
+      transitionIdentityDigest({ ...validated, [field]: value }),
+      baseline,
+      `${field} must be bound to the transition identity digest`,
+    );
+  }
+});

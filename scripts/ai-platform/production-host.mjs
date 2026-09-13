@@ -154,6 +154,97 @@ export function postflightHealthResponseMatchesRollout(status, health, rolloutPh
     && postflightHealthMatchesRollout(health, rolloutPhase);
 }
 
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function observationReportIdentity(manifest, currentRelease = manifest?.newRelease) {
+  const rolloutPhase = rolloutPhaseForManifest(manifest);
+  const controls = rolloutControlsForPhase(rolloutPhase);
+  return {
+    transitionId: manifest.id,
+    manifestDigest: hashBytes(JSON.stringify(manifest)),
+    transitionIdentityDigest: transitionIdentityDigest(manifest),
+    newRelease: manifest.newRelease,
+    newCommit: manifest.newCommit,
+    phase: manifest.phase,
+    rolloutPhase,
+    currentRelease,
+    expectedPaused: controls.queuePaused,
+    expectedAdmissionOpen: controls.taskAdmissionEnabled,
+    expectedExecutionMode: controls.executionMode,
+    expectedExternalProvidersEnabled: controls.externalProvidersEnabled,
+  };
+}
+
+export function validateObservationBinding(manifest, state, currentRelease) {
+  const identity = observationReportIdentity(manifest, currentRelease);
+  check(isRecord(state), "OBSERVE_STATE_REQUIRED");
+  check(state.transitionId === identity.transitionId
+    && state.manifestDigest === identity.manifestDigest
+    && state.transitionIdentityDigest === identity.transitionIdentityDigest,
+  "OBSERVE_STATE_MISMATCH");
+  check(state.rolloutPhase === identity.rolloutPhase, "OBSERVE_STATE_ROLLOUT_MISMATCH");
+  check(state.newRelease === identity.newRelease && state.newCommit === identity.newCommit,
+    "OBSERVE_STATE_RELEASE_MISMATCH");
+  check(state.currentRelease === identity.newRelease, "OBSERVE_STATE_CURRENT_RELEASE_MISMATCH");
+  check(currentRelease === identity.newRelease, "OBSERVE_CURRENT_RELEASE_MISMATCH");
+  return identity;
+}
+
+export function validateObservationRuntime(identity, { operations, aiHealth, backend, currentRelease } = {}) {
+  check(currentRelease === identity.newRelease, "CURRENT_RELEASE_CHANGED");
+  check(isRecord(operations) && isRecord(operations.executor) && isRecord(operations.queue)
+    && Number.isSafeInteger(operations.queue.running) && operations.queue.running >= 0
+    && Number.isSafeInteger(operations.queue.queued) && operations.queue.queued >= 0,
+  "OBSERVE_OPERATIONS_INVALID");
+  check(operations.paused === identity.expectedPaused
+    && operations.executor.admissionOpen === identity.expectedAdmissionOpen,
+  identity.expectedPaused ? "P1_ADMISSION_MUST_BE_CLOSED" : "LIVE_ADMISSION_MUST_BE_OPEN");
+  const platform = aiHealth?.body;
+  check(aiHealth?.status === 200 && isRecord(platform) && platform.database === "ready",
+    "OBSERVE_PLATFORM_UNHEALTHY");
+  check(platform.executionMode === identity.expectedExecutionMode
+    && platform.externalProvidersEnabled === identity.expectedExternalProvidersEnabled,
+  "OBSERVE_EXECUTION_MODE_MISMATCH");
+  check(platform.executor?.admissionOpen === identity.expectedAdmissionOpen,
+    "OBSERVE_HEALTH_ADMISSION_MISMATCH");
+  check(backend?.status === 200 && backend.body?.database === "ready"
+    && backend.body?.aiPlatform?.routing?.phase === routingPhaseForRollout(identity.rolloutPhase),
+  "OBSERVE_BACKEND_ROLLOUT_MISMATCH");
+  return true;
+}
+
+export function phaseRecoveryPlan({ policyApplied = false, backendRestored = false, beforeOperations } = {}) {
+  const beforeOpen = isRecord(beforeOperations)
+    && beforeOperations.paused === false
+    && beforeOperations.executor?.admissionOpen === true;
+  if (policyApplied || !backendRestored || !isRecord(beforeOperations)) {
+    return {
+      mode: "fail-closed", policy: policyApplied ? "unrestored" : "unchanged",
+      paused: true, admissionOpen: false,
+    };
+  }
+  return {
+    mode: "restore", policy: "unchanged", paused: !beforeOpen, admissionOpen: beforeOpen,
+  };
+}
+
+export function migrationInventoryDigest(releaseManifest) {
+  const files = releaseManifest?.migrationChecksums?.files;
+  if (!files || typeof files !== "object" || Array.isArray(files)) return null;
+  const entries = Object.entries(files).sort(([left], [right]) =>
+    Buffer.compare(Buffer.from(left), Buffer.from(right)),
+  );
+  return hashBytes(JSON.stringify(entries));
+}
+
+export function migrationInventoriesMatch(oldReleaseManifest, newReleaseManifest) {
+  const oldDigest = migrationInventoryDigest(oldReleaseManifest);
+  const newDigest = migrationInventoryDigest(newReleaseManifest);
+  return oldDigest !== null && oldDigest === newDigest;
+}
+
 export async function pollPostflightHealth(
   rolloutPhase,
   { fetcher = fetch, attempts = 12, retryMs = 250, sleepFn = sleep } = {},
@@ -189,6 +280,19 @@ function verifyNewReleaseArchive(manifest) {
   check(binding.valid, "RELEASE_ARCHIVE_BINDING_INVALID");
   check(releaseManifest.source?.commit === manifest.newCommit, "RELEASE_ARCHIVE_COMMIT_INVALID");
   return binding;
+}
+
+function assertRollbackMigrationCompatibility(manifest) {
+  const oldReleaseManifest = JSON.parse(
+    readFileSync(join(manifest.oldRelease, "release-manifest.json"), "utf8"),
+  );
+  const newReleaseManifest = JSON.parse(
+    readFileSync(join(manifest.newRelease, "release-manifest.json"), "utf8"),
+  );
+  check(
+    migrationInventoriesMatch(oldReleaseManifest, newReleaseManifest),
+    "ROLLBACK_MIGRATION_COMPATIBILITY_UNPROVEN",
+  );
 }
 
 function validateP2AcceptanceBinding(manifest, { platform, policy }) {
@@ -261,7 +365,9 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
     if (!state) {
       state = jsonFile(statePath);
       stateSha256 = privateFile(statePath).sha256;
-      check(state.transitionIdentityDigest === transitionKey && state.transitionId === manifest.id, "TRANSITION_STATE_MISMATCH");
+      check(state.manifestDigest === manifestDigest
+        && state.transitionIdentityDigest === transitionKey
+        && state.transitionId === manifest.id, "TRANSITION_STATE_MISMATCH");
     }
     return state;
   }
@@ -310,6 +416,61 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       join(manifest.newRelease, "scripts/ai-platform/reconcile-business-state.mjs"), command,
     ], { uid: Number(account[2]), gid: Number(account[3]), input: JSON.stringify(input), timeout: 30_000 }));
   }
+  function operationSummary(value) {
+    return {
+      paused: value?.paused,
+      admissionOpen: value?.executor?.admissionOpen,
+      generation: value?.generation,
+      running: value?.queue?.running,
+      queued: value?.queue?.queued,
+    };
+  }
+  async function forcePlatformClosed() {
+    const current = await platformRequest("/operations");
+    if (current.paused === true && current.executor?.admissionOpen === false
+      && current.queue?.running === 0 && current.queue?.queued === 0) return current;
+    const result = await platformRequest("/operations/drain", {
+      method: "POST", body: { expectedGeneration: current.generation },
+    });
+    check(result.paused === true && result.executor?.admissionOpen === false
+      && result.queue?.running === 0 && result.queue?.queued === 0,
+    "PHASE_FAIL_CLOSED_UNCONFIRMED");
+    return result;
+  }
+  async function restorePhaseAdmission(plan) {
+    if (plan.mode === "fail-closed" || !plan.admissionOpen) return forcePlatformClosed();
+    const current = await platformRequest("/operations");
+    const result = current.paused
+      ? await platformRequest("/operations/resume", {
+        method: "POST", body: { expectedGeneration: current.generation },
+      })
+      : current;
+    check(result.paused === false && result.executor?.admissionOpen === true,
+      "PHASE_ADMISSION_RESTORE_FAILED");
+    return result;
+  }
+  async function recoverPhaseFailure(beforeOperations, { policyApplied, backendRestored }) {
+    const plan = phaseRecoveryPlan({ policyApplied, backendRestored, beforeOperations });
+    try {
+      const result = await restorePhaseAdmission(plan);
+      return { ...plan, status: "passed", observed: operationSummary(result) };
+    } catch (recoveryError) {
+      // A failed resume can leave the real state unknown.  Try one final
+      // drain so a failed phase never reopens execution with mismatched code.
+      try {
+        const closed = await forcePlatformClosed();
+        return {
+          ...plan, mode: "fail-closed", status: "passed", policy: policyApplied ? "unrestored" : plan.policy,
+          observed: operationSummary(closed), fallbackErrorCode: recoveryError?.code ?? "PHASE_RECOVERY_FAILED",
+        };
+      } catch (closedError) {
+        return {
+          ...plan, mode: "fail-closed", status: "failed", policy: policyApplied ? "unrestored" : plan.policy,
+          errorCode: closedError?.code ?? recoveryError?.code ?? "PHASE_RECOVERY_FAILED",
+        };
+      }
+    }
+  }
   return {
     acquireLock() {
       privateDirectory(manifest.evidenceDir);
@@ -343,6 +504,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
     },
     verifyPreflight() {
       validateCandidateConfiguration(manifest);
+      assertRollbackMigrationCompatibility(manifest);
       verifyNewReleaseArchive(manifest);
       const core = jsonFile(manifest.corePreflight, manifest.corePreflightSha256);
       assertCoreProof(core, manifest, manifest.oldRelease, manifest.oldCommit);
@@ -391,7 +553,9 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       writeOnceOrVerify(envBackup, env.content, { expectedSha: env.sha256 });
       writeOnceOrVerify(unitBackup, unit.content, { expectedSha: unit.sha256, requirePrivate: false });
       state = {
-        schemaVersion: 1, transitionId: manifest.id, manifestDigest, transitionIdentityDigest: transitionKey, rolloutPhase: manifest.rolloutPhase,
+        schemaVersion: 1, transitionId: manifest.id, manifestDigest, transitionIdentityDigest: transitionKey,
+        newRelease: manifest.newRelease, newCommit: manifest.newCommit, phase: manifest.phase,
+        rolloutPhase: manifest.rolloutPhase,
         status: "captured", protected: protectedSnapshot(), backendEnvBackup: envBackup,
         backendEnvSha256: env.sha256, backendUnitBackup: unitBackup, backendUnitSha256: unit.sha256,
         platformPreparation: platformState,
@@ -585,14 +749,18 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       check(compareRolloutPhase(target, state.rolloutPhase) >= 0, "PHASE_REGRESSION_REQUIRES_ROLLBACK");
       check(realpathSync(PRODUCTION_ROOT + "/current") === manifest.newRelease, "CURRENT_RELEASE_CHANGED");
       const candidate = validateCandidateConfiguration(manifest);
-      const operations = await platformRequest("/operations");
-      if (!operations.paused || operations.queue.running !== 0 || operations.queue.queued !== 0) await this.drainPlatform(manifest);
+      const operationsBefore = await platformRequest("/operations");
       const before = privateFile(BUSINESS_ENV);
       const backupPath = join(manifest.backupDir, `backend-before-${target}.env`);
       writeOnceOrVerify(backupPath, before.content, { expectedSha: before.sha256 });
       let policyApplied = false;
+      let backendChanged = false;
       try {
+        if (!operationsBefore.paused || operationsBefore.queue.running !== 0 || operationsBefore.queue.queued !== 0) {
+          await this.drainPlatform(manifest);
+        }
         atomicReplace(BUSINESS_ENV, candidate.backendRaw, before.sha256);
+        backendChanged = true;
         runCommand("/bin/systemctl", ["daemon-reload"]);
         runCommand("/bin/systemctl", ["restart", "sentelligent-backend.service"], { timeout: 240_000 });
         const backend = await readHealth("http://127.0.0.1:8897/api/health");
@@ -613,18 +781,42 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         markState({ rolloutPhase: target, status: "phase-set", phaseHistory: history, platformAdmission: resumed.paused ? "closed" : "open" });
         return { status: "passed", phase: target, routingPhase: manifest.phase, policy: applied, backendEnvSha256: hashBytes(candidate.backendRaw), policyApplied };
       } catch (error) {
-        const current = privateFile(BUSINESS_ENV);
-        if (current.sha256 !== before.sha256) {
-          atomicReplace(BUSINESS_ENV, before.content, current.sha256);
-          runCommand("/bin/systemctl", ["daemon-reload"]);
-          runCommand("/bin/systemctl", ["restart", "sentelligent-backend.service"], { timeout: 240_000 });
+        let backendRestored = !backendChanged;
+        try {
+          const current = privateFile(BUSINESS_ENV);
+          if (current.sha256 !== before.sha256) {
+            atomicReplace(BUSINESS_ENV, before.content, current.sha256);
+            runCommand("/bin/systemctl", ["daemon-reload"]);
+            runCommand("/bin/systemctl", ["restart", "sentelligent-backend.service"], { timeout: 240_000 });
+          }
+          backendRestored = true;
+        } catch (restoreError) {
+          error.backendRestoreErrorCode = restoreError?.code ?? "BACKEND_RESTORE_FAILED";
         }
-        if (policyApplied) error.code = error.code ?? "PHASE_POLICY_APPLIED_RECOVERY_REQUIRED";
+        const recovery = await recoverPhaseFailure(operationsBefore, { policyApplied, backendRestored });
+        error.phaseRecovery = recovery;
+        try {
+          markState({
+            status: recovery.status === "passed" && recovery.mode === "fail-closed"
+              ? "phase-recovery-failed-closed" : "phase-recovery-complete",
+            phaseRecovery: recovery,
+            platformAdmission: recovery.observed?.admissionOpen === true ? "open" : "closed",
+          });
+        } catch (stateError) {
+          error.phaseRecoveryStateErrorCode = stateError?.code ?? "PHASE_RECOVERY_STATE_WRITE_FAILED";
+        }
+        if (recovery.status !== "passed") error.code = error.code ?? "PHASE_RECOVERY_FAILED";
+        else if (policyApplied) error.code = error.code ?? "PHASE_POLICY_APPLIED_FAIL_CLOSED";
         throw error;
       }
     },
     async observe(_input, { durationSeconds, sampleIntervalSeconds = 30 } = {}) {
-      if (!state && existsSync(statePath)) loadState();
+      check(existsSync(statePath), "OBSERVE_STATE_REQUIRED");
+      loadState();
+      let initialCurrentRelease;
+      try { initialCurrentRelease = realpathSync(PRODUCTION_ROOT + "/current"); }
+      catch { throw Object.assign(new Error("OBSERVE_CURRENT_RELEASE_MISMATCH"), { code: "OBSERVE_CURRENT_RELEASE_MISMATCH" }); }
+      const identity = validateObservationBinding(manifest, state, initialCurrentRelease);
       const startedAt = new Date().toISOString();
       const deadline = Date.now() + durationSeconds * 1000;
       const samples = [];
@@ -636,6 +828,8 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         const at = new Date().toISOString();
         let operations;
         let aiHealth;
+        let currentRelease = null;
+        try { currentRelease = realpathSync(PRODUCTION_ROOT + "/current"); } catch {}
         let protectedState;
         try { operations = await platformRequest("/operations"); } catch (error) { operations = { errorCode: error?.code ?? "OPERATIONS_UNAVAILABLE" }; }
         try {
@@ -646,10 +840,16 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         try { protectedState = protectedSnapshot(); } catch (error) { protectedState = { errorCode: error?.code ?? "PROTECTED_STATE_UNAVAILABLE" }; }
         let memory;
         try { memory = memorySnapshot(); } catch (error) { memory = { errorCode: error?.code ?? "MEMORY_UNAVAILABLE" }; }
-        const sample = { at, operations, aiHealth, backend, protected: protectedState, memory };
+        const sample = { at, currentRelease, operations, aiHealth, backend, protected: protectedState, memory };
         samples.push(sample);
-        const healthy = aiHealth.status === 200 && backend.status === 200 && backend.body?.database === "ready"
-          && operations?.errorCode === undefined && protectedState?.errorCode === undefined;
+        let runtimeFailure = null;
+        try {
+          validateObservationRuntime(identity, { operations, aiHealth, backend, currentRelease });
+        } catch (error) {
+          runtimeFailure = error;
+          failures.push({ at, code: error?.code ?? "OBSERVE_RUNTIME_INVALID" });
+        }
+        const healthy = runtimeFailure === null && protectedState?.errorCode === undefined;
         consecutiveHealthFailures = healthy ? 0 : consecutiveHealthFailures + 1;
         if (!healthy) failures.push({ at, code: "HEALTH_THRESHOLD_SAMPLE_FAILED" });
         const depth = Number(operations?.queue?.depth);
@@ -658,13 +858,13 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
         if (Number.isSafeInteger(depth)) lastQueueDepth = depth;
         if (JSON.stringify(protectedState) !== JSON.stringify(state?.protected ?? protectedState)) failures.push({ at, code: "PROTECTED_STATE_CHANGED" });
         if (Number.isFinite(memory.availableMiB) && memory.availableMiB < 1024) failures.push({ at, code: "AVAILABLE_MEMORY_LOW" });
-        if (consecutiveHealthFailures >= 3 || queueGrowthSamples >= 10 || failures.some((item) => ["PROTECTED_STATE_CHANGED", "AVAILABLE_MEMORY_LOW"].includes(item.code))) break;
+        if (consecutiveHealthFailures >= 3 || queueGrowthSamples >= 10 || failures.some((item) => ["CURRENT_RELEASE_CHANGED", "PROTECTED_STATE_CHANGED", "AVAILABLE_MEMORY_LOW"].includes(item.code))) break;
         if (Date.now() >= deadline) break;
         await sleep(Math.min(sampleIntervalSeconds * 1000, Math.max(50, deadline - Date.now())));
       }
       const thresholdFailures = failures.filter((item, index, list) => index === list.findIndex((other) => other.code === item.code));
       return {
-        schemaVersion: 1, status: thresholdFailures.length ? "failed" : "passed", startedAt,
+        schemaVersion: 1, ...identity, status: thresholdFailures.length ? "failed" : "passed", startedAt,
         finishedAt: new Date().toISOString(), durationSeconds, sampleCount: samples.length,
         thresholdFailures, samples,
       };
@@ -948,6 +1148,7 @@ export async function runAiProductionPreflight(manifest) {
   await verify("host.identity", () => assertHost(manifest));
   await verify("release.archive", () => {
     verifyNewReleaseArchive(manifest);
+    assertRollbackMigrationCompatibility(manifest);
     check(validateAiComponentManifest(JSON.parse(readFileSync(join(manifest.newRelease, "release-manifest.json"), "utf8"))), "AI_COMPONENT_MANIFEST_INVALID");
     runCommand("/bin/bash", [
       "-c", 'source "$1"; NEW_RELEASE="$2"; EXPECTED_COMMIT="$3"; NODE_BIN="$4"; assert_candidate_release_frozen; verify_release_manifest',

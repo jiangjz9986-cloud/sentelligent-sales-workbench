@@ -357,14 +357,18 @@ export function p2AcceptanceRequiredForRollout(value) {
   return compareRolloutPhase(value, "P3") >= 0;
 }
 
+const TRANSITION_MANIFEST_FIELDS = Object.freeze([
+  "schemaVersion", "id", "hostname", "machineId", "oldRelease", "oldCommit", "newRelease", "newCommit",
+  "newArchive", "newArchiveSha256", "evidenceDir", "backupDir", "platformEnvCandidate", "backendEnvCandidate",
+  "platformEnvSha256", "backendEnvSha256", "corePreflight", "corePreflightSha256", "policyFile", "policySha256",
+  "qualityReport", "qualityReportSha256", "p2AcceptanceReport", "p2AcceptanceReportSha256", "phase", "rolloutPhase",
+]);
+
 export function transitionIdentityDigest(manifest) {
-  return hashBytes(JSON.stringify({
-    schemaVersion: manifest.schemaVersion, id: manifest.id, hostname: manifest.hostname,
-    machineId: manifest.machineId, oldRelease: manifest.oldRelease, oldCommit: manifest.oldCommit,
-    newRelease: manifest.newRelease, newCommit: manifest.newCommit, newArchive: manifest.newArchive,
-    newArchiveSha256: manifest.newArchiveSha256, evidenceDir: manifest.evidenceDir, backupDir: manifest.backupDir,
-    p2AcceptanceReport: manifest.p2AcceptanceReport, p2AcceptanceReportSha256: manifest.p2AcceptanceReportSha256,
-  }));
+  const identity = Object.fromEntries(
+    TRANSITION_MANIFEST_FIELDS.map((field) => [field, manifest?.[field]]),
+  );
+  return hashBytes(JSON.stringify(identity));
 }
 
 export function hashBytes(value) { return createHash("sha256").update(value).digest("hex"); }
@@ -389,8 +393,7 @@ export function platformStaticDirectoryForRelease(release) {
 }
 
 export function validateTransitionManifest(input) {
-  const allowed = ["schemaVersion", "id", "hostname", "machineId", "oldRelease", "oldCommit", "newRelease", "newCommit", "newArchive", "newArchiveSha256", "evidenceDir", "backupDir", "platformEnvCandidate", "backendEnvCandidate", "platformEnvSha256", "backendEnvSha256", "corePreflight", "corePreflightSha256", "policyFile", "policySha256", "qualityReport", "qualityReportSha256", "p2AcceptanceReport", "p2AcceptanceReportSha256", "phase", "rolloutPhase"];
-  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((key) => !allowed.includes(key))
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((key) => !TRANSITION_MANIFEST_FIELDS.includes(key))
     || input.schemaVersion !== 1 || !/^[a-z0-9][a-z0-9-]{0,99}$/u.test(input.id)
     || !/^[A-Za-z0-9.-]{1,253}$/u.test(input.hostname)
     || !/^[0-9a-f]{32}$/u.test(input.machineId)
