@@ -298,3 +298,72 @@ DeepSeek 官方价格页已在 2026-09-13 重新核对：逻辑名 `deepseek-fla
 - 最新 AI platform P1 quality evidence 为 `ai-platform-21cb281-20260913-p1/quality.json`：`status=passed` 仅表示 mock P1 质量通过，`executionMode=local-simulated`、`providerScope=mock-only`、模型为 `mock-standard-v1`；`unknowns` 明确记载未调用真实供应商、未验证真实模型质量/延迟/费用、未发送真实微信通知。
 - WeChat worker 日志仍为 `category=outbox status=not_ready reason=context_token_missing`；`sentelligent-ops-alert@sentelligent-backend.service.service` 仍为 failed。两项都不能通过清除状态或虚拟 heartbeat 伪造为已恢复。
 - 因此候选制品虽已本地生成并通过完整 QA，当前生产仍保持 NO-GO；任何真实 provider activation、P4 生产写回、Clawbot 主动消息和 cutover 必须等对应证据与 rollback/backup 门禁完成后单独执行。
+
+## 2026-09-13 快速完成计划（当前执行批次）
+
+本节是当前主任务的执行清单，优先级高于本文中更早的历史计划段落。目标模式已设定为
+`active`：开发执行模型为 Codex `gpt-5.6-luna / reasoning max`；业务系统运行时仍只使用
+DeepSeek provider `deepseek` 的逻辑模型 `deepseek-flash`。Codex 执行模型不会写入业务配置，
+也不会被当作生产供应商调用证据。
+
+### 目标与边界
+
+- v0.12.0 原始基线：`3370b9451f390cfcfa56bf8c4eb9b2df31c43a68`；当前融合候选以本工作树的
+  clean exact commit 和 release manifest 为准。
+- 权威工作树：`ai-platform-production-integration-20260909`；不读取 iCloud，不把 iCloud
+  文件或密钥作为源码、配置或验收输入。
+- PushPlus 永久退役；外部业务通知唯一走微信 Clawbot outbox。没有有效 context 时必须
+  fail-closed，消息留在持久 outbox，不用 heartbeat、轮询或清状态伪造 context 续期。
+- 不执行 iPhone 真机/WebKit 验收；Mac 原生 Google Chrome 是本轮人工浏览器验收环境，
+  移动尺寸仅作为响应式回归证据。
+- 生产切换只允许使用候选 release、固定 host、固定 manifest、固定备份和可回滚 transition；
+  不修改共享 Caddy/Qingyang 或无关服务，不跳过 admission、drain、备份、回滚和观察门禁。
+
+### 阶段、并行关系与完成证据
+
+| 阶段 | 工作内容 | 并行策略 | 完成条件 |
+| --- | --- | --- | --- |
+| F0 合同冻结 | shared API contract、0042 起迁移注册、文件所有权、owner/tenant 隔离、幂等和审计规则 | 只由主整合者修改 shared、迁移注册、server/config、release 文件；其他工作流只提交接口变更 | contract test、迁移顺序/回滚测试、`git diff --check`、ownership 清单一致 |
+| F1 本地代码收口 | 客户级主动助手、医院招标 bridge、action/risk 写回、CSV/XLSX 导入；provider readiness、P2 checkpoint、ops-alert spool | 业务线、provider/P2、微信/ops 可并行；`backend/src/server.js` 和发布脚本串行整合 | Backend/AI/deploy/前端全量测试通过，secret scan 无 findings |
+| F2 Mac Chrome 验收 | 每个 v0.12.0 功能、权限/冲突/replay、滚动、窄窗口和管理台 | 浏览器验收单进程串行，避免共享 dev server 和 session 互相污染 | Chrome 报告、视口矩阵、横向溢出为 0、失败请求和控制台错误为 0 |
+| F3 真实 DeepSeek canary | 同一 `runId=p2-prod-20260913-aa443cc-r1` 续跑；不重发已结算样本 | 与 F4 本地回归、F5 协议核对并行；真实付费采样本身单并发串行 | 每样本 actual model、`finish_reason=stop`、request id、usage、费用逐条对账；失败场景和至少 2 小时观察通过 |
+| F4 生产合成写回 | 生产候选 release 下的 CSV/XLSX、客户/商机、招标 bridge、主动助手、action/risk synthetic marker | 只能在 F3/F5 具备放行资格后执行；一次只跑一个 acceptance marker | 预期写入行数、owner/version/digest、审计、精确清理、`quick_check` 和 `foreign_key_check` 全通过 |
+| F5 Clawbot 主动投递 | 有效真实入站 context 下无先发消息主动投递；过期保留；新入站恢复；限速/重试/去重/审计 | 与 F3/F4 的代码和本地测试可并行；真实微信窗口单线程 | 真实发送 receipt、context 状态、outbox 水位和审计链完整；无 context 时明确 pending |
+| F6 受控生产交付 | fresh preflight、备份/恢复、admission freeze、drain、transition、postflight、rollback、灰度观察 | 所有前置门禁完成后严格串行；任何一步失败立即停止并按 transition 合同回滚 | release/current/manifest/backup/transition/postflight/rollback/观察报告可互相校验；观察窗口达标 |
+
+### 文件所有权与整合规则
+
+- Provider/P2 工作集：`ai-platform/src/providers/`、任务执行/readiness 相关代码、
+  `scripts/ai-platform/p2-acceptance*`、`scripts/ai-platform/production-contract*`；不直接写业务库、
+  不直接发送微信。
+- v0.12.0 业务工作集：`backend/src/assistant/`、`backend/src/hospitalTender/`、
+  `backend/src/customerImport/`、业务迁移 `0042+` 及其专项测试；写回只能经过 Backend 的
+  owner、版本、确认和幂等门。
+- Clawbot/ops 工作集：`backend/src/weixin/`、`backend/src/ops/`、`scripts/deploy/`；唯一外部
+  通知通道为持久微信 outbox，不恢复 PushPlus。
+- 主整合者独占 `shared/`、迁移注册、`backend/src/server.js`、`backend/src/config.js`、
+  发布制品、production preflight/transition 和 `package.json`；浏览器 QA 由主整合者串行执行。
+
+### 快速执行顺序
+
+1. 先复核 clean exact commit、迁移注册、shared contract 和当前生产只读身份；若工作树有非本轮改动，
+   只读理解后再整合，不回滚用户改动。
+2. 在临时库完成 F1/F4 的业务合同回归和 cleanup 失败回滚测试，同时补齐 P2 负向场景、provider
+   readiness 失效和 ops-alert receipt；这些工作不等待真实微信。
+3. 生成新的 clean release manifest，重跑 `npm run qa:desktop`、`git diff --check`、secret scan、
+   release hash 和 Mac Chrome evidence；所有浏览器检查只跑串行一次。
+4. P2 继续使用已有 checkpoint；账单未到或失败场景未闭环时保持 `reconciling/pending`，不设置
+   `liveReady`，不重发已结算样本，不进入 F4/F6 生产写入。
+5. Clawbot 只接受真实有效 context；worker 必须独立轮询持久 outbox，context 过期只释放租约而不
+   增加发送次数；新入站后才恢复投递。若上游没有 renewal/rebind 合同，交付结论必须保留该限制。
+6. F3/F5 通过后才执行 F4 生产 synthetic acceptance；F4 清理或审计/SQLite 完整性任一失败，
+   立即停止并不继续切换。
+7. F6 先做备份恢复和回滚演练，再锁 admission、排空、切换、postflight，并以 48 小时观察作为
+   最终 complete 条件。只要任一硬门禁缺证据，目标保持 `active`，不能宣称完整交付。
+
+### 最终交付包
+
+最终报告必须同时包含：源提交和 release SHA-256、shared/migration/ownership 版本、全量测试退出码、
+Chrome 报告路径、P2 checkpoint/report 和逐请求账单状态、Clawbot context/发送 receipt/outbox 水位、
+F4 写入/清理/审计/SQLite 完整性、preflight/backup/transition/postflight/rollback/观察报告，以及
+仍未执行或受上游限制的项目。只有这些证据全部闭环，才将目标从 `active` 标记为 `complete`。
