@@ -498,7 +498,7 @@ export function createP2AcceptanceSamples(runId, count = P2_ACCEPTANCE_DEFAULT_S
   });
 }
 
-function assertHealth(health, policy) {
+function assertHealth(health, policy, { allowCanaryProbe = false } = {}) {
   if (!isPlainRecord(health) || health.executionMode !== "external-provider" || health.externalProvidersEnabled !== true
     || health.proactiveScheduleOwner !== "backend" || health.targetModel !== AI_TARGET_MODEL
     || health.targetReasoningEffort !== AI_TARGET_REASONING_EFFORT
@@ -507,7 +507,10 @@ function assertHealth(health, policy) {
     failure("P2_RUNTIME_NOT_READY");
   }
   const readiness = health.tasks?.[P2_ACCEPTANCE_TASK_TYPE];
-  if (!readiness || readiness.ready !== true || readiness.liveReady !== true || readiness.provider !== policy.providerId) {
+  const providerReady = readiness?.provider === policy.providerId
+    && readiness?.probeReady === true
+    && (allowCanaryProbe || (readiness.ready === true && readiness.liveReady === true));
+  if (!providerReady) {
     failure("P2_PROVIDER_NOT_READY");
   }
 }
@@ -735,7 +738,12 @@ export async function runP2Acceptance({
     }
 
     const healthBefore = await client.health();
-    assertHealth(healthBefore, policy);
+    // The first controlled canary is the operation that creates live evidence.
+    // Before it settles, probeReady is the only valid admission state; every
+    // later health check must require the resulting liveReady evidence.
+    assertHealth(healthBefore, policy, {
+      allowCanaryProbe: !checkpointState.samples.some((sample) => sample.status === "settled"),
+    });
     const operationsBefore = await client.operations();
     assertOperations(operationsBefore);
     assertProactiveClosed(await client.proactiveSchedules());
@@ -776,6 +784,7 @@ export async function runP2Acceptance({
       }
       if (sample.status !== "settled") failure("P2_CHECKPOINT_INVALID", "sample did not reach settled state");
       evidence.push(normalizeStoredEvidence(sample.evidence));
+      if (sampleIndex === 1) assertHealth(await client.health(), policy);
     }
 
     currentPhase = "reconciling";

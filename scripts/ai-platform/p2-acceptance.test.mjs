@@ -63,9 +63,10 @@ const deploymentPolicy = {
   }],
 };
 
-function fakeHarness({ mode = "external-provider", proactive = false, interruptSample = null } = {}) {
+function fakeHarness({ mode = "external-provider", proactive = false, interruptSample = null, initialLiveReady = mode === "external-provider" } = {}) {
   let now = Date.parse("2026-09-11T00:00:00.000Z");
   let created = 0;
+  let liveReady = initialLiveReady;
   const canaryCalls = new Map();
   const calls = [];
   const client = {
@@ -80,7 +81,7 @@ function fakeHarness({ mode = "external-provider", proactive = false, interruptS
         targetReasoningEffort: "max",
         executor: { paused: mode !== "external-provider", admissionOpen: mode === "external-provider" },
         providers: [{ id: PROVIDER_ID, kind: "openai_compatible" }],
-        tasks: { [P2_ACCEPTANCE_TASK_TYPE]: { ready: mode === "external-provider", liveReady: mode === "external-provider", provider: PROVIDER_ID } },
+        tasks: { [P2_ACCEPTANCE_TASK_TYPE]: { ready: liveReady, probeReady: mode === "external-provider", liveReady, provider: PROVIDER_ID } },
       };
     },
     async operations() {
@@ -103,6 +104,7 @@ function fakeHarness({ mode = "external-provider", proactive = false, interruptS
       const count = (canaryCalls.get(key) ?? 0) + 1;
       canaryCalls.set(key, count);
       if (count === 1) created += 1;
+      if (count > 1) liveReady = true;
       if (count === 1 && sampleIndex === interruptSample) {
         throw Object.assign(new Error("simulated transport interruption"), { code: "P2_TRANSPORT_INTERRUPTED" });
       }
@@ -307,6 +309,13 @@ test("live acceptance uses only the controlled task path and produces a contract
   });
   assert.equal(report.policyDigest, sha256(normalizedPolicy));
   assert.equal(report.providerPolicyDigest, providerPolicyDigest(normalizedProviders));
+});
+
+test("first live canary may bootstrap live readiness from probe readiness", async () => {
+  const harness = fakeHarness({ initialLiveReady: false });
+  const report = await baseRun(harness);
+  assert.equal(report.status, "passed");
+  assert.equal(harness.created(), 10);
 });
 
 test("missing billing reconciliation leaves a resumable checkpoint after controlled sampling", async () => {
