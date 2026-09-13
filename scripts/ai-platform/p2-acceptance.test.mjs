@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 import { normalizeDeploymentPolicy as normalizeRuntimeDeploymentPolicy } from "../../ai-platform/src/operations/deploymentPolicy.js";
@@ -60,9 +63,10 @@ const deploymentPolicy = {
   }],
 };
 
-function fakeHarness({ mode = "external-provider", proactive = false } = {}) {
+function fakeHarness({ mode = "external-provider", proactive = false, interruptSample = null } = {}) {
   let now = Date.parse("2026-09-11T00:00:00.000Z");
   let created = 0;
+  const canaryCalls = new Map();
   const calls = [];
   const client = {
     async health() {
@@ -91,11 +95,22 @@ function fakeHarness({ mode = "external-provider", proactive = false } = {}) {
       calls.push("proactiveTasks");
       return { items: [] };
     },
-    async createTask(_body, idempotencyKey) {
-      calls.push("createTask");
-      created += 1;
-      assert.match(idempotencyKey, /^p2-acceptance:/u);
-      return { taskId: `task-${created}` };
+    async providerCanary(runId, sampleIndex) {
+      calls.push("providerCanary");
+      assert.equal(runId, "run-fixture");
+      assert.ok(Number.isSafeInteger(sampleIndex));
+      const key = `${runId}:${sampleIndex}`;
+      const count = (canaryCalls.get(key) ?? 0) + 1;
+      canaryCalls.set(key, count);
+      if (count === 1) created += 1;
+      if (count === 1 && sampleIndex === interruptSample) {
+        throw Object.assign(new Error("simulated transport interruption"), { code: "P2_TRANSPORT_INTERRUPTED" });
+      }
+      return {
+        taskId: `task-${sampleIndex}`,
+        ready: count > 1,
+        ...(count > 1 ? { evidence: { runId, sampleIndex, settledStatus: "settled" } } : {}),
+      };
     },
     async readTask(taskId) {
       calls.push("readTask");
@@ -152,6 +167,7 @@ function fakeHarness({ mode = "external-provider", proactive = false } = {}) {
     billing,
     calls,
     created: () => created,
+    canaryCalls: (sampleIndex) => canaryCalls.get(`run-fixture:${sampleIndex}`) ?? 0,
     clock: () => new Date(now),
     sleep: async (milliseconds) => { now += milliseconds; },
   };
@@ -176,6 +192,15 @@ function baseRun(harness, overrides = {}) {
     sleep: harness.sleep,
     ...overrides,
   });
+}
+
+function temporaryCheckpoint() {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "p2-acceptance-checkpoint-")));
+  return {
+    directory,
+    path: join(directory, "p2-checkpoint.json"),
+    cleanup: () => rmSync(directory, { recursive: true, force: true }),
+  };
 }
 
 test("argument parser requires explicit live confirmation and rejects secret-bearing flags", () => {
@@ -269,7 +294,8 @@ test("live acceptance uses only the controlled task path and produces a contract
     proactiveSchedulesChanged: false,
   });
   assert.equal(harness.created(), 10);
-  assert.equal(harness.calls.includes("createTask"), true);
+  assert.equal(harness.calls.includes("providerCanary"), true);
+  assert.equal(harness.calls.filter((item) => item === "providerCanary").length, 20);
   assert.equal(harness.calls.filter((item) => item === "taskDetail").length, 10);
 
   const normalizedProviders = normalizeProviderPolicies(providerPolicies, {
@@ -311,4 +337,123 @@ test("provider and deployment policy inputs use the production validators", asyn
     error.code === "P2_ACCEPTANCE_DEPLOYMENT_POLICY_INVALID"
   ));
   assert.equal(policyHarness.created(), 0);
+});
+
+test("checkpoint resume replays the fixed canary key without recreating a lost-response task", async () => {
+  const checkpoint = temporaryCheckpoint();
+  const harness = fakeHarness({ interruptSample: 3 });
+  try {
+    await assert.rejects(
+      baseRun(harness, { checkpointPath: checkpoint.path }),
+      (error) => error.code === "P2_TRANSPORT_INTERRUPTED",
+    );
+    const interrupted = JSON.parse(readFileSync(checkpoint.path, "utf8"));
+    assert.equal(interrupted.phase, "failed");
+    assert.equal(interrupted.failure.resumePhase, "collecting");
+    assert.deepEqual(interrupted.samples.slice(0, 2).map((sample) => sample.status), ["settled", "settled"]);
+    assert.equal(interrupted.samples[2].status, "pending");
+
+    const report = await baseRun(harness, { checkpointPath: checkpoint.path });
+    assert.equal(report.status, "passed");
+    assert.equal(harness.created(), 10);
+    assert.equal(harness.canaryCalls(1), 2);
+    assert.equal(harness.canaryCalls(2), 2);
+    assert.equal(harness.canaryCalls(3), 3);
+    assert.equal(harness.canaryCalls(4), 2);
+  } finally {
+    checkpoint.cleanup();
+  }
+});
+
+test("billing reconciliation can resume without another provider call", async () => {
+  const checkpoint = temporaryCheckpoint();
+  const harness = fakeHarness();
+  let billingReady = false;
+  const billingLoader = () => billingReady ? harness.billing : { entries: [] };
+  try {
+    await assert.rejects(
+      baseRun(harness, { checkpointPath: checkpoint.path, billingLoader }),
+      (error) => error.code === "P2_BILLING_RECONCILIATION_MISSING",
+    );
+    const beforeResume = JSON.parse(readFileSync(checkpoint.path, "utf8"));
+    assert.equal(beforeResume.phase, "failed");
+    assert.equal(beforeResume.failure.resumePhase, "reconciling");
+    assert.ok(beforeResume.samples.every((sample) => sample.status === "settled"));
+    const callsBefore = harness.calls.filter((call) => call === "providerCanary").length;
+    assert.equal(harness.created(), 10);
+
+    billingReady = true;
+    const report = await baseRun(harness, { checkpointPath: checkpoint.path, billingLoader });
+    assert.equal(report.status, "passed");
+    assert.equal(harness.created(), 10);
+    assert.equal(harness.calls.filter((call) => call === "providerCanary").length, callsBefore);
+  } finally {
+    checkpoint.cleanup();
+  }
+});
+
+test("observation checkpoint resumes from persisted checks after interruption", async () => {
+  const checkpoint = temporaryCheckpoint();
+  const harness = fakeHarness();
+  let interrupted = false;
+  try {
+    await assert.rejects(
+      baseRun(harness, {
+        checkpointPath: checkpoint.path,
+        sleep: async (milliseconds) => {
+          if (!interrupted) {
+            interrupted = true;
+            throw Object.assign(new Error("simulated observation interruption"), { code: "P2_OBSERVATION_INTERRUPTED" });
+          }
+          await harness.sleep(milliseconds);
+        },
+      }),
+      (error) => error.code === "P2_OBSERVATION_INTERRUPTED",
+    );
+    const interruptedCheckpoint = JSON.parse(readFileSync(checkpoint.path, "utf8"));
+    assert.equal(interruptedCheckpoint.phase, "failed");
+    assert.equal(interruptedCheckpoint.failure.resumePhase, "observing");
+    assert.equal(interruptedCheckpoint.observation.checks.length, 1);
+    const callsBefore = harness.calls.filter((call) => call === "providerCanary").length;
+
+    const report = await baseRun(harness, { checkpointPath: checkpoint.path });
+    assert.equal(report.status, "passed");
+    assert.equal(report.runtime.observationChecks, 4);
+    assert.equal(harness.calls.filter((call) => call === "providerCanary").length, callsBefore);
+  } finally {
+    checkpoint.cleanup();
+  }
+});
+
+test("completed checkpoint reuses a validated report and rejects a different run binding", async () => {
+  const checkpoint = temporaryCheckpoint();
+  const harness = fakeHarness();
+  try {
+    const first = await baseRun(harness, { checkpointPath: checkpoint.path });
+    const callsAfterFirstRun = harness.calls.filter((call) => call === "providerCanary").length;
+    const second = await baseRun(harness, { checkpointPath: checkpoint.path });
+    assert.deepEqual(second, first);
+    assert.equal(harness.calls.filter((call) => call === "providerCanary").length, callsAfterFirstRun);
+    await assert.rejects(
+      baseRun(harness, { checkpointPath: checkpoint.path, runId: "different-run" }),
+      (error) => error.code === "P2_CHECKPOINT_MISMATCH",
+    );
+  } finally {
+    checkpoint.cleanup();
+  }
+});
+
+test("corrupt checkpoint fails closed before any acceptance task is created", async () => {
+  const checkpoint = temporaryCheckpoint();
+  const harness = fakeHarness();
+  try {
+    writeFileSync(checkpoint.path, "{\"schemaVersion\":0}\n");
+    await assert.rejects(
+      baseRun(harness, { checkpointPath: checkpoint.path }),
+      (error) => error.code === "P2_CHECKPOINT_INVALID",
+    );
+    assert.equal(harness.created(), 0);
+  } finally {
+    checkpoint.cleanup();
+  }
 });

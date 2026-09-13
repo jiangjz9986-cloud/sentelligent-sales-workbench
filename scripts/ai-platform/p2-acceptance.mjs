@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { createServiceToken } from "../../ai-platform/src/auth/internalAuth.js";
 import { normalizeDeploymentPolicy as normalizeRuntimeDeploymentPolicy } from "../../ai-platform/src/operations/deploymentPolicy.js";
 import { normalizeProviderPolicies } from "../../ai-platform/src/providers/openAiCompatible.js";
-import { AI_TASK_SCHEMA_VERSION, AI_TASK_TERMINAL_STATUSES, AI_TARGET_MODEL, AI_TARGET_REASONING_EFFORT, sha256 } from "../../shared/aiPlatformContract.mjs";
+import { AI_TASK_TERMINAL_STATUSES, AI_TARGET_MODEL, AI_TARGET_REASONING_EFFORT, sha256 } from "../../shared/aiPlatformContract.mjs";
+import { providerCanaryIdempotencyKey } from "../../shared/aiPlatformCanaryContract.mjs";
 import { createRequestBinding } from "../../shared/aiPlatformRequestAuth.mjs";
 import { socketFetch, PRODUCTION_AI_SOCKET } from "../../shared/aiPlatformSocketTransport.mjs";
 import { readBoundedResponseText } from "../../backend/src/http/request.js";
@@ -15,10 +16,11 @@ import {
   P2_ACCEPTANCE_MIN_SAMPLES,
   P2_ACCEPTANCE_PRODUCER_ID,
   P2_ACCEPTANCE_PRODUCER_VERSION,
+  hashBytes,
   providerPolicyDigest,
   validateP2AcceptanceReport,
 } from "./production-contract.mjs";
-import { writeExclusive } from "./production-io.mjs";
+import { atomicReplace, privateFile, writeExclusive, writeOnceOrVerify } from "./production-io.mjs";
 
 export const P2_ACCEPTANCE_LIVE_CONFIRMATION = "I_UNDERSTAND_P2_LIVE_PROVIDER_CALLS";
 export const P2_ACCEPTANCE_TASK_TYPE = "quick-record.analyze";
@@ -33,6 +35,10 @@ export const P2_ACCEPTANCE_MAX_TIMEOUT_SECONDS = 600;
 export const P2_ACCEPTANCE_MAX_OBSERVATION_SECONDS = 7 * 24 * 60 * 60;
 export const P2_ACCEPTANCE_SAMPLE_MAX_OUTPUT_TOKENS = 256;
 export const P2_ACCEPTANCE_DEFAULT_BASE_URL = "http://127.0.0.1:18997";
+export const P2_ACCEPTANCE_CHECKPOINT_SCHEMA_VERSION = 1;
+export const P2_ACCEPTANCE_CHECKPOINT_PHASES = Object.freeze([
+  "collecting", "observing", "reconciling", "finalizing", "completed", "failed",
+]);
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
@@ -192,6 +198,169 @@ function responseError(response, payload) {
   return Object.assign(new Error("AI platform request failed"), { code });
 }
 
+function checkpointFailure(code, message = code) {
+  failure(code, message);
+}
+
+function checkpointContent(value) {
+  return JSON.stringify(value, null, 2) + "\n";
+}
+
+function checkpointDigest(value) {
+  return hashBytes(Buffer.from(checkpointContent(value), "utf8"));
+}
+
+function readCheckpoint(path) {
+  if (!path || !existsSync(resolve(path))) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(resolve(path), "utf8"));
+  } catch {
+    checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint is unavailable or invalid");
+  }
+  if (!isPlainRecord(parsed)
+    || parsed.schemaVersion !== P2_ACCEPTANCE_CHECKPOINT_SCHEMA_VERSION
+    || !SAFE_ID.test(parsed.runId ?? "")
+    || !COMMIT.test(parsed.sourceCommit ?? "")
+    || !/^[0-9a-f]{64}$/u.test(parsed.policyDigest ?? "")
+    || !/^[0-9a-f]{64}$/u.test(parsed.providerPolicyDigest ?? "")
+    || !P2_ACCEPTANCE_CHECKPOINT_PHASES.includes(parsed.phase)
+    || !Array.isArray(parsed.samples)) {
+    checkpointFailure("P2_CHECKPOINT_INVALID");
+  }
+  return parsed;
+}
+
+function writeCheckpoint(path, value) {
+  if (!path) return null;
+  const absolute = resolve(path);
+  mkdirSync(dirname(absolute), { recursive: true, mode: 0o700 });
+  const ownerUid = process.getuid?.() ?? 0;
+  const expectedSha = existsSync(absolute)
+    ? privateFile(absolute, null, { ownerUid }).sha256
+    : null;
+  atomicReplace(absolute, checkpointContent(value), expectedSha, { ownerUid });
+  return checkpointDigest(value);
+}
+
+function initialCheckpoint({ runId, sourceCommit, policyDigest, providerPolicyDigest: providerDigest, owner, sampleCount, startedAt }) {
+  return {
+    schemaVersion: P2_ACCEPTANCE_CHECKPOINT_SCHEMA_VERSION,
+    phase: "collecting",
+    runId,
+    sourceCommit,
+    policyDigest,
+    providerPolicyDigest: providerDigest,
+    owner,
+    sampleCount,
+    startedAt,
+    updatedAt: startedAt,
+    samples: Array.from({ length: sampleCount }, (_item, index) => ({
+      sampleIndex: index + 1,
+      sampleId: `sample-${String(index + 1).padStart(3, "0")}`,
+      status: "pending",
+    })),
+    observation: null,
+    billing: null,
+    report: null,
+    failure: null,
+  };
+}
+
+function checkpointSample(state, sampleIndex) {
+  const item = state.samples.find((sample) => sample.sampleIndex === sampleIndex);
+  if (!item) checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint sample is missing");
+  return item;
+}
+
+function updateCheckpoint(state, patch, clock) {
+  return {
+    ...state,
+    ...patch,
+    updatedAt: nowIso(clock),
+  };
+}
+
+function validateCheckpointMatches(state, { runId, sourceCommit, policyDigest, providerPolicyDigest: providerDigest, owner, sampleCount }) {
+  if (state.runId !== runId || state.sourceCommit !== sourceCommit
+    || state.policyDigest !== policyDigest || state.providerPolicyDigest !== providerDigest
+    || state.owner !== owner || state.sampleCount !== sampleCount
+    || state.samples.length !== sampleCount
+    || new Set(state.samples.map((sample) => sample.sampleIndex)).size !== sampleCount) {
+    checkpointFailure("P2_CHECKPOINT_MISMATCH", "checkpoint does not match the requested run");
+  }
+  for (const sample of state.samples) {
+    if (!Number.isSafeInteger(sample.sampleIndex) || sample.sampleIndex < 1 || sample.sampleIndex > sampleCount
+      || !SAFE_ID.test(sample.sampleId ?? "")
+      || !["pending", "requested", "succeeded", "settled"].includes(sample.status)) {
+      checkpointFailure("P2_CHECKPOINT_INVALID");
+    }
+    if (["requested", "succeeded", "settled"].includes(sample.status)
+      && (typeof sample.taskId !== "string" || !SAFE_ID.test(sample.taskId))) {
+      checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint sample task is missing");
+    }
+    if (sample.status === "settled" && !isPlainRecord(sample.evidence)) {
+      checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint sample evidence is missing");
+    }
+  }
+  if (state.observation !== null) {
+    if (!isPlainRecord(state.observation) || !Array.isArray(state.observation.checks)
+      || !Object.hasOwn(state.observation, "startedAt") || !Object.hasOwn(state.observation, "finishedAt")) {
+      checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint observation is invalid");
+    }
+    canonicalIso(state.observation.startedAt, "checkpoint.observation.startedAt");
+    if (state.observation.finishedAt !== null) canonicalIso(state.observation.finishedAt, "checkpoint.observation.finishedAt");
+    for (const check of state.observation.checks) {
+      if (!isPlainRecord(check) || check.status !== "passed") checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint observation check is invalid");
+      canonicalIso(check.at, "checkpoint.observation.check.at");
+    }
+  }
+  if (state.failure !== null && (!isPlainRecord(state.failure)
+    || !SAFE_ID.test(state.failure.code ?? "")
+    || !["collecting", "observing", "reconciling", "finalizing"].includes(state.failure.resumePhase))) {
+    checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint failure is invalid");
+  }
+  return state;
+}
+
+function checkpointStateDigest(state) {
+  const { report: _report, ...withoutReport } = state;
+  return checkpointDigest({ ...withoutReport, report: null });
+}
+
+function billingEntriesDigest(entries) {
+  return hashBytes(JSON.stringify([...entries.entries()].sort(([left], [right]) => left.localeCompare(right))));
+}
+
+function normalizeStoredEvidence(value) {
+  if (!isPlainRecord(value)
+    || typeof value.requestId !== "string" || !SAFE_ID.test(value.requestId)
+    || typeof value.providerRequestId !== "string" || !SAFE_ID.test(value.providerRequestId)
+    || typeof value.priceVersion !== "string" || !SAFE_ID.test(value.priceVersion)
+    || !isPlainRecord(value.usage)
+    || !isPlainRecord(value.cost)
+    || !Number.isSafeInteger(value.cost.micro) || value.cost.micro < 0
+    || !["CNY", "USD"].includes(value.cost.currency)
+    || value.cost.status !== "calculated") {
+    checkpointFailure("P2_CHECKPOINT_INVALID", "checkpoint evidence is invalid");
+  }
+  return value;
+}
+
+function validateCompletedCheckpoint(state, { sourceCommit, policyDigest, providerPolicyDigest: providerDigest, currency, now }) {
+  if (state.phase !== "completed" || !isPlainRecord(state.report)) {
+    checkpointFailure("P2_CHECKPOINT_INVALID", "completed checkpoint report is missing");
+  }
+  const report = state.report;
+  validateP2AcceptanceReport(report, {
+    sourceCommit, policyDigest, expectedProviderPolicyDigest: providerDigest, currency, now,
+  });
+  if (report.checkpointDigest !== checkpointStateDigest(state)) {
+    checkpointFailure("P2_CHECKPOINT_INVALID", "completed checkpoint digest does not match report");
+  }
+  return report;
+}
+
 async function responseJson(response) {
   const text = await readBoundedResponseText(response, { maxBytes: 1_048_576, errorMessage: "AI platform response exceeded limit" });
   if (!text.trim()) return {};
@@ -251,8 +420,14 @@ export function createP2AcceptanceClient({
     async proactiveTasks() {
       return request({ path: "/internal/ai/v1/admin/tasks?taskType=proactive.analyze&limit=200", scopes: ["ai:admin:read"] });
     },
-    async createTask(body, idempotencyKey) {
-      return request({ method: "POST", path: "/internal/ai/v1/tasks", body, idempotencyKey, scopes: ["ai:task:create"] });
+    async providerCanary(runId, sampleIndex) {
+      return request({
+        method: "POST",
+        path: "/internal/ai/v1/provider-canaries",
+        body: { runId, sampleIndex },
+        idempotencyKey: providerCanaryIdempotencyKey(runId, sampleIndex),
+        scopes: ["ai:provider:canary"],
+      });
     },
     async readTask(taskId) {
       return request({ path: `/internal/ai/v1/tasks/${encodeURIComponent(taskId)}`, scopes: ["ai:task:read"] });
@@ -287,7 +462,8 @@ export function parseP2AcceptanceArguments(argv) {
   const observationIntervalSeconds = integerOption("observation-interval-seconds", P2_ACCEPTANCE_DEFAULT_OBSERVATION_INTERVAL_SECONDS, 1, 3_600);
   return Object.freeze({
     sourceCommit: values["source-commit"], policyPath: resolve(values.policy), providerPoliciesPath: resolve(values["provider-policies"]),
-    billingPath: resolve(values.billing), reportPath: resolve(values.report), confirmation: values.confirm,
+    billingPath: resolve(values.billing), reportPath: resolve(values.report),
+    checkpointPath: resolve(values.checkpoint ?? `${values.report}.checkpoint.json`), confirmation: values.confirm,
     baseUrl: values["base-url"] ?? P2_ACCEPTANCE_DEFAULT_BASE_URL, socketPath: values.socket ?? PRODUCTION_AI_SOCKET,
     owner: values.owner ?? P2_ACCEPTANCE_DEFAULT_OWNER, runId: values["run-id"] ?? randomUUID(), sampleCount,
     taskTimeoutSeconds, pollIntervalSeconds, observationSeconds, observationIntervalSeconds,
@@ -409,9 +585,9 @@ async function waitForTerminal(client, taskId, { timeoutMs, pollIntervalMs, cloc
 }
 
 async function observeWindow(client, {
-  startedAtMs, durationSeconds, intervalSeconds, clock, sleep, policy,
+  startedAtMs, durationSeconds, intervalSeconds, clock, sleep, policy, checks = [], onCheck = null,
 }) {
-  const checks = [];
+  const observedChecks = [...checks];
   while (true) {
     const health = await client.health();
     assertHealth(health, policy);
@@ -419,10 +595,11 @@ async function observeWindow(client, {
     assertOperations(operations);
     assertProactiveClosed(await client.proactiveSchedules());
     assertProactiveTasksClosed(await client.proactiveTasks());
-    checks.push({ at: nowIso(clock), status: "passed" });
+    observedChecks.push({ at: nowIso(clock), status: "passed" });
+    if (typeof onCheck === "function") await onCheck(observedChecks);
     const elapsed = nowMs(clock) - startedAtMs;
     if (elapsed >= durationSeconds * 1_000) {
-      return { checks, finishedAt: nowIso(clock), durationSeconds: Math.floor(elapsed / 1_000) };
+      return { checks: observedChecks, finishedAt: nowIso(clock), durationSeconds: Math.floor(elapsed / 1_000) };
     }
     await sleep(Math.min(intervalSeconds * 1_000, durationSeconds * 1_000 - elapsed));
   }
@@ -442,6 +619,7 @@ export async function runP2Acceptance({
   pollIntervalSeconds = P2_ACCEPTANCE_DEFAULT_POLL_INTERVAL_SECONDS,
   observationSeconds = P2_ACCEPTANCE_MIN_OBSERVATION_SECONDS,
   observationIntervalSeconds = P2_ACCEPTANCE_DEFAULT_OBSERVATION_INTERVAL_SECONDS,
+  checkpointPath = null,
   liveConfirmation,
   clock = () => new Date(),
   sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
@@ -460,90 +638,259 @@ export async function runP2Acceptance({
 
   const providers = parseProviderPolicies(providerPolicies);
   const policy = normalizeDeploymentPolicy(deploymentPolicy, sourceCommit, providers);
+  const expectedProviderPolicyDigest = providerPolicyDigest(providers);
   const generatedRunId = runId;
-  const samples = createP2AcceptanceSamples(generatedRunId, sampleCount);
-  const healthBefore = await client.health();
-  assertHealth(healthBefore, policy);
-  const operationsBefore = await client.operations();
-  assertOperations(operationsBefore);
-  assertProactiveClosed(await client.proactiveSchedules());
-  assertProactiveTasksClosed(await client.proactiveTasks());
+  let checkpointState = null;
+  let currentPhase = "collecting";
 
-  const evidence = [];
-  for (const [index, sample] of samples.entries()) {
-    const idempotencyKey = `p2-acceptance:${generatedRunId}:sample:${index + 1}`;
-    const created = await client.createTask({
-      schemaVersion: AI_TASK_SCHEMA_VERSION,
-      taskType: P2_ACCEPTANCE_TASK_TYPE,
-      feature: P2_ACCEPTANCE_FEATURE,
-      channel: "system",
-      priority: "interactive",
-      subject: { type: "p2_acceptance", id: generatedRunId },
-      input: sample.input,
-    }, idempotencyKey);
-    const taskId = created?.taskId;
-    if (typeof taskId !== "string" || !SAFE_ID.test(taskId)) failure("P2_SAMPLE_CREATE_INVALID");
-    const terminal = await waitForTerminal(client, taskId, {
-      timeoutMs: taskTimeoutSeconds * 1_000, pollIntervalMs: pollIntervalSeconds * 1_000, clock, sleep,
-    });
-    if (terminal.status !== "succeeded") failure("P2_SAMPLE_FAILED");
-    const detail = await client.taskDetail(taskId);
-    evidence.push(normalizeTaskEvidence(detail, policy, owner, generatedRunId));
-  }
+  const persist = (nextState) => {
+    checkpointState = nextState;
+    writeCheckpoint(checkpointPath, nextState);
+    return nextState;
+  };
+
+  const recordFailure = (error) => {
+    if (checkpointPath && checkpointState) {
+      try {
+        const code = /^[A-Za-z0-9_.:-]{1,100}$/u.test(error?.code ?? "") ? error.code : "P2_ACCEPTANCE_FAILED";
+        checkpointState = {
+          ...checkpointState,
+          phase: "failed",
+          updatedAt: nowIso(clock),
+          failure: { code, at: nowIso(clock), resumePhase: currentPhase },
+        };
+        writeCheckpoint(checkpointPath, checkpointState);
+      } catch {
+        // The original acceptance error is more useful than masking it with a
+        // filesystem error while attempting to preserve the checkpoint.
+      }
+    }
+    throw error;
+  };
 
   const readBilling = async () => normalizeBillingEntries(
     typeof billingLoader === "function" ? await billingLoader() : billing,
   );
-  const billingEntries = await readBilling();
-  const samplesWithBilling = evidence.map((sample) => {
-    const reconciliation = billingEntries.get(sample.providerRequestId);
-    if (!reconciliation || reconciliation.currency !== sample.cost.currency || reconciliation.amountMicro !== sample.cost.micro) {
-      failure("P2_BILLING_RECONCILIATION_MISSING");
-    }
-    return { ...sample, approved: true, billingReconciliation: reconciliation, observedAt: nowIso(clock) };
+
+  const replaceSample = (state, sampleIndex, patch) => ({
+    ...state,
+    samples: state.samples.map((sample) => sample.sampleIndex === sampleIndex
+      ? { ...sample, ...patch }
+      : sample),
   });
 
-  const observationStartedAt = nowIso(clock);
-  const observation = await observeWindow(client, {
-    startedAtMs: Date.parse(observationStartedAt), durationSeconds: observationSeconds,
-    intervalSeconds: observationIntervalSeconds, clock, sleep, policy,
-  });
-  const finalBillingEntries = await readBilling();
-  for (const sample of samplesWithBilling) {
-    const reconciliation = finalBillingEntries.get(sample.providerRequestId);
-    if (!reconciliation || reconciliation.currency !== sample.cost.currency || reconciliation.amountMicro !== sample.cost.micro) {
+  const assertSettledResponse = (settled, sampleIndex) => {
+    if (!isPlainRecord(settled) || settled.ready !== true
+      || !isPlainRecord(settled.evidence) || settled.evidence.runId !== generatedRunId
+      || settled.evidence.sampleIndex !== sampleIndex || settled.evidence.settledStatus !== "settled") {
+      failure("P2_SAMPLE_SETTLEMENT_INVALID");
+    }
+    return settled;
+  };
+
+  const reconcileEvidence = (evidence, entries, { observedAt = null } = {}) => evidence.map((sample) => {
+    const reconciliation = entries.get(sample.providerRequestId);
+    if (!reconciliation || reconciliation.currency !== sample.cost.currency
+      || reconciliation.amountMicro !== sample.cost.micro) {
       failure("P2_BILLING_RECONCILIATION_MISSING");
     }
-  }
-  const generatedAt = nowIso(clock);
-  const report = {
-    schemaVersion: 1,
-    status: "passed",
-    phase: "P2",
-    sourceCommit,
-    policyDigest: policy.digest,
-    providerPolicyDigest: providerPolicyDigest(providers),
-    generatedAt,
-    observation: { startedAt: observationStartedAt, finishedAt: observation.finishedAt, durationSeconds: observation.durationSeconds },
-    summary: { total: samplesWithBilling.length, approved: samplesWithBilling.length, failed: 0 },
-    failures: [],
-    samples: samplesWithBilling,
-    producerProvenance: {
-      controlled: true, producerId: P2_ACCEPTANCE_PRODUCER_ID, producerVersion: P2_ACCEPTANCE_PRODUCER_VERSION,
-      sourceCommit, generatedAt, runId: generatedRunId,
-    },
-    runtime: {
-      executionMode: "external-provider", externalProvidersEnabled: true, providerId: policy.providerId,
-      modelId: policy.modelId, modelName: policy.modelName, singleConcurrency: true,
-      observationChecks: observation.checks.length,
-    },
-    sideEffects: { businessDatabaseAccessed: false, notificationsInvoked: false, proactiveSchedulesChanged: false },
-  };
-  validateP2AcceptanceReport(report, {
-    sourceCommit, policyDigest: policy.digest, expectedProviderPolicyDigest: providerPolicyDigest(providers),
-    currency: policy.currency, now: Date.parse(generatedAt),
+    return {
+      ...sample,
+      approved: true,
+      billingReconciliation: reconciliation,
+      observedAt: observedAt ?? sample.observedAt ?? nowIso(clock),
+    };
   });
-  return Object.freeze(report);
+
+  try {
+    const existing = readCheckpoint(checkpointPath);
+    if (existing) {
+      validateCheckpointMatches(existing, {
+        runId: generatedRunId, sourceCommit, policyDigest: policy.digest,
+        providerPolicyDigest: expectedProviderPolicyDigest, owner, sampleCount,
+      });
+      if (existing.phase === "completed") {
+        return Object.freeze(validateCompletedCheckpoint(existing, {
+          sourceCommit, policyDigest: policy.digest,
+          providerPolicyDigest: expectedProviderPolicyDigest, currency: policy.currency, now: nowMs(clock),
+        }));
+      }
+      checkpointState = existing;
+      if (existing.phase === "failed") {
+        currentPhase = existing.failure.resumePhase;
+        persist({ ...existing, phase: currentPhase, failure: null, updatedAt: nowIso(clock) });
+      }
+    } else {
+      checkpointState = initialCheckpoint({
+        runId: generatedRunId, sourceCommit, policyDigest: policy.digest,
+        providerPolicyDigest: expectedProviderPolicyDigest, owner, sampleCount, startedAt: nowIso(clock),
+      });
+      persist(checkpointState);
+    }
+
+    const healthBefore = await client.health();
+    assertHealth(healthBefore, policy);
+    const operationsBefore = await client.operations();
+    assertOperations(operationsBefore);
+    assertProactiveClosed(await client.proactiveSchedules());
+    assertProactiveTasksClosed(await client.proactiveTasks());
+
+    const evidence = [];
+    for (let sampleIndex = 1; sampleIndex <= sampleCount; sampleIndex += 1) {
+      currentPhase = "collecting";
+      let sample = checkpointSample(checkpointState, sampleIndex);
+      if (sample.status === "pending") {
+        const created = await client.providerCanary(generatedRunId, sampleIndex);
+        const taskId = created?.taskId;
+        if (typeof taskId !== "string" || !SAFE_ID.test(taskId)) failure("P2_SAMPLE_CREATE_INVALID");
+        checkpointState = persist(replaceSample(checkpointState, sampleIndex, {
+          status: "requested", taskId, requestedAt: nowIso(clock),
+        }));
+        sample = checkpointSample(checkpointState, sampleIndex);
+      }
+      if (sample.status === "requested") {
+        const terminal = await waitForTerminal(client, sample.taskId, {
+          timeoutMs: taskTimeoutSeconds * 1_000, pollIntervalMs: pollIntervalSeconds * 1_000, clock, sleep,
+        });
+        if (terminal.status !== "succeeded") failure("P2_SAMPLE_FAILED");
+        checkpointState = persist(replaceSample(checkpointState, sampleIndex, {
+          status: "succeeded", succeededAt: nowIso(clock), terminalStatus: terminal.status,
+        }));
+        sample = checkpointSample(checkpointState, sampleIndex);
+      }
+      if (sample.status === "succeeded") {
+        const settled = assertSettledResponse(await client.providerCanary(generatedRunId, sampleIndex), sampleIndex);
+        const detail = await client.taskDetail(sample.taskId);
+        const normalized = normalizeTaskEvidence(detail, policy, owner, generatedRunId);
+        checkpointState = persist(replaceSample(checkpointState, sampleIndex, {
+          status: "settled", settledAt: nowIso(clock),
+          settlement: settled.evidence, evidence: normalized,
+        }));
+        sample = checkpointSample(checkpointState, sampleIndex);
+      }
+      if (sample.status !== "settled") failure("P2_CHECKPOINT_INVALID", "sample did not reach settled state");
+      evidence.push(normalizeStoredEvidence(sample.evidence));
+    }
+
+    currentPhase = "reconciling";
+    if (checkpointState.phase !== "reconciling" || checkpointState.billing?.initial?.status !== "reconciled") {
+      checkpointState = persist({ ...checkpointState, phase: "reconciling", failure: null });
+    }
+    const initialBillingEntries = await readBilling();
+    const initialObservedAt = nowIso(clock);
+    const initialSamplesWithBilling = reconcileEvidence(evidence, initialBillingEntries, { observedAt: initialObservedAt });
+    checkpointState = persist({
+      ...checkpointState,
+      phase: "observing",
+      samples: checkpointState.samples.map((sample, index) => ({
+        ...sample,
+        ...(initialSamplesWithBilling[index] ? { billingReconciliation: initialSamplesWithBilling[index].billingReconciliation, observedAt: initialSamplesWithBilling[index].observedAt } : {}),
+      })),
+      billing: {
+        ...(checkpointState.billing ?? {}),
+        initial: {
+          status: "reconciled", checkedAt: initialObservedAt,
+          entryCount: initialBillingEntries.size, entriesDigest: billingEntriesDigest(initialBillingEntries),
+        },
+        final: checkpointState.billing?.final ?? null,
+      },
+      failure: null,
+    });
+
+    currentPhase = "observing";
+    let observation = checkpointState.observation;
+    if (!observation) {
+      observation = { startedAt: nowIso(clock), finishedAt: null, checks: [] };
+      checkpointState = persist({ ...checkpointState, phase: "observing", observation });
+    }
+    const observationStartedAtMs = Date.parse(canonicalIso(observation.startedAt, "checkpoint.observation.startedAt"));
+    if (observation.finishedAt !== null) {
+      canonicalIso(observation.finishedAt, "checkpoint.observation.finishedAt");
+    } else {
+      const observed = await observeWindow(client, {
+        startedAtMs: observationStartedAtMs,
+        durationSeconds: observationSeconds,
+        intervalSeconds: observationIntervalSeconds,
+        clock, sleep, policy,
+        checks: observation.checks,
+        onCheck: async (checks) => {
+          checkpointState = persist({
+            ...checkpointState,
+            phase: "observing",
+            observation: { ...checkpointState.observation, checks, finishedAt: null },
+            failure: null,
+          });
+        },
+      });
+      observation = { ...observation, ...observed };
+      checkpointState = persist({ ...checkpointState, phase: "reconciling", observation, failure: null });
+    }
+
+    currentPhase = "reconciling";
+    const finalBillingEntries = await readBilling();
+    const samplesWithBilling = reconcileEvidence(evidence, finalBillingEntries, {
+      observedAt: checkpointState.samples[0]?.observedAt ?? nowIso(clock),
+    });
+    checkpointState = persist({
+      ...checkpointState,
+      phase: "finalizing",
+      samples: checkpointState.samples.map((sample, index) => ({
+        ...sample,
+        ...(samplesWithBilling[index] ? { billingReconciliation: samplesWithBilling[index].billingReconciliation, observedAt: samplesWithBilling[index].observedAt } : {}),
+      })),
+      billing: {
+        ...(checkpointState.billing ?? {}),
+        final: {
+          status: "reconciled", checkedAt: nowIso(clock),
+          entryCount: finalBillingEntries.size, entriesDigest: billingEntriesDigest(finalBillingEntries),
+        },
+      },
+      failure: null,
+    });
+
+    currentPhase = "finalizing";
+    const generatedAt = nowIso(clock);
+    const completedBase = {
+      ...checkpointState,
+      phase: "completed",
+      updatedAt: generatedAt,
+      report: null,
+      failure: null,
+    };
+    const reportCheckpointDigest = checkpointStateDigest(completedBase);
+    const report = {
+      schemaVersion: 1,
+      status: "passed",
+      phase: "P2",
+      sourceCommit,
+      policyDigest: policy.digest,
+      providerPolicyDigest: expectedProviderPolicyDigest,
+      generatedAt,
+      checkpointDigest: reportCheckpointDigest,
+      observation: { startedAt: observation.startedAt, finishedAt: observation.finishedAt, durationSeconds: observation.durationSeconds ?? Math.floor((Date.parse(observation.finishedAt) - Date.parse(observation.startedAt)) / 1_000) },
+      summary: { total: samplesWithBilling.length, approved: samplesWithBilling.length, failed: 0 },
+      failures: [],
+      samples: samplesWithBilling,
+      producerProvenance: {
+        controlled: true, producerId: P2_ACCEPTANCE_PRODUCER_ID, producerVersion: P2_ACCEPTANCE_PRODUCER_VERSION,
+        sourceCommit, generatedAt, runId: generatedRunId,
+      },
+      runtime: {
+        executionMode: "external-provider", externalProvidersEnabled: true, providerId: policy.providerId,
+        modelId: policy.modelId, modelName: policy.modelName, singleConcurrency: true,
+        observationChecks: observation.checks.length,
+      },
+      sideEffects: { businessDatabaseAccessed: false, notificationsInvoked: false, proactiveSchedulesChanged: false },
+    };
+    validateP2AcceptanceReport(report, {
+      sourceCommit, policyDigest: policy.digest, expectedProviderPolicyDigest,
+      currency: policy.currency, now: nowMs(clock),
+    });
+    persist({ ...completedBase, report });
+    return Object.freeze(report);
+  } catch (error) {
+    return recordFailure(error);
+  }
 }
 
 function writeFailureReport(path, { sourceCommit, runId, error, clock }) {
@@ -563,7 +910,7 @@ async function main() {
   const env = process.env;
   const runId = options.runId;
   try {
-    if (!existsSync(options.billingPath)) failure("P2_BILLING_RECONCILIATION_REQUIRED");
+    if (!existsSync(options.billingPath) && !existsSync(options.checkpointPath)) failure("P2_BILLING_RECONCILIATION_REQUIRED");
     const result = await runP2Acceptance({
       sourceCommit: options.sourceCommit,
       deploymentPolicy: parseJsonFile(options.policyPath, "deployment policy"),
@@ -576,11 +923,12 @@ async function main() {
       runId, owner: options.owner, sampleCount: options.sampleCount,
       taskTimeoutSeconds: options.taskTimeoutSeconds, pollIntervalSeconds: options.pollIntervalSeconds,
       observationSeconds: options.observationSeconds, observationIntervalSeconds: options.observationIntervalSeconds,
+      checkpointPath: options.checkpointPath,
       liveConfirmation: options.confirmation,
     });
     mkdirSync(dirname(options.reportPath), { recursive: true, mode: 0o700 });
-    writeExclusive(options.reportPath, JSON.stringify(result, null, 2) + "\n");
-    process.stdout.write(JSON.stringify({ status: result.status, report: options.reportPath, runId, sampleCount: result.samples.length }) + "\n");
+    writeOnceOrVerify(options.reportPath, JSON.stringify(result, null, 2) + "\n", { ownerUid: process.getuid?.() ?? 0 });
+    process.stdout.write(JSON.stringify({ status: result.status, report: options.reportPath, checkpoint: options.checkpointPath, runId, sampleCount: result.samples.length }) + "\n");
   } catch (error) {
     try { writeFailureReport(options.reportPath, { sourceCommit: options.sourceCommit, runId, error, clock: () => new Date() }); } catch {}
     process.stderr.write(JSON.stringify({ status: "failed", code: /^[A-Za-z0-9_.:-]{1,100}$/u.test(error?.code ?? "") ? error.code : "P2_ACCEPTANCE_FAILED" }) + "\n");

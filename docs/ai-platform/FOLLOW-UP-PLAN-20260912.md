@@ -1,6 +1,6 @@
 # AI 统一调度平台后续开发完善计划
 
-更新时间：2026-09-12（Asia/Shanghai）  
+更新时间：2026-09-13（Asia/Shanghai）
 目标模式：本主任务已通过目标工具创建为 `active`。  
 用户指定的开发设置：model `gpt-5.6-luna`、reasoning effort `max`；实际切换以应用工具返回为准，文档本身不会切换模型。  
 业务模型：DeepSeek provider `deepseek`，统一模型 `deepseek-flash`。  
@@ -180,21 +180,54 @@ npm run test:ai-platform
 npm --prefix backend test
 npm --prefix outputs/product-design-prototype run qa:local
 CHROME_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' npm --prefix outputs/product-design-prototype run qa:integration
-npm --prefix outputs/product-design-prototype run qa:webkit
 git diff --check
 git status --short --branch
 ```
+
+`qa:webkit`/iPhone 真机验收不属于本次交付范围；仅当用户重新授权移动真机验收时才追加执行。
 
 真实 provider、真实微信和生产写入验收必须单独记录：请求数、owner、样本标识、实际 model、request id、费用状态、写入行数、清理行数、outbox 水位、context 状态和报告 SHA-256。
 
 ## 当前交付判断
 
-本轮首批检查已完成：平台测试 `98/98`、Backend 平台客户端/适配器 `38/38`、生产脚本
-`29/29`，另有共享管理员登录/CSRF 代理集成 `1/1`，`git diff --check` 通过。
-新增测试验证：仅模型目录 GET 成功时，production runtime 拒绝普通模型任务，且不创建 task
-或预算预占。这是本地合成环境的行为证据，首次受控真实 canary 的实现仍在下一批完成。
+### 已完成（本轮代码与本地证据）
 
-生产已核对为 P1；本轮后续代码正在开发。目标工具已设为 active，开发模型由应用设置为
-`gpt-5.6-luna / max` 后继续执行本计划，业务配置保持 DeepSeek `deepseek-flash`。
-本轮请求官方价格页未取得可引用的正文；真实 canary 前仍须重新核实模型 ID、能力和价格，
-现有共享常量与历史基线文档不替代此次实供核验。
+- 目标模式已保持 `active`：开发执行模型为 `gpt-5.6-luna / reasoning max`，业务调用模型仍为
+  `deepseek-flash`；Codex 执行模型不会写入业务运行配置。
+- provider readiness 已增加凭据 revision/digest、policy digest、过期时间和真实 live evidence
+  绑定。仅有 `GET /models` 探针时，普通生产任务仍拒绝 admission，不创建 task 或预算预占。
+- P2 真实供应商验收已改为可恢复 checkpoint 状态机：`collecting`、`observing`、`reconciling`、
+  `finalizing`、`completed`、`failed`；样本使用固定 provider-canary 幂等键，进程重启或账单未到
+  不会重新调用供应商或重复收费。
+- P2 checkpoint 测试 `12/12`、AI Platform 测试 `99/99`、Backend AI adapter 测试 `38/38`、
+  部署脚本测试 `35/35` 全部通过。
+- Backend 全量测试 `2083/2083`（`240` suites）通过；部署门禁 `292 passed / 0 failed / 2 skipped`。
+  secret scan 无 findings；`git diff --check` 已通过一次，候选提交前复跑。
+- `qa:local` 已通过前端 production build、bundle budget、auth/session、route/state/API contract、
+  客户 CSV/XLSX 导入、客户级主动助手、客户元数据、医院招标、action/risk、浏览器证据、滚动回归、
+  管理设置、AI card、行程、ASR capture、销售决策和响应式视口检查。
+
+### 已完成的本地验收
+
+- Mac 原生 Google Chrome 集成验收已通过：客户级主动助手、医院招标 bridge、销售决策和 action/risk
+  预览边界、CSV/XLSX 导入、overview 下滚动、管理台和 AI Platform console、任务/费用/队列/provider
+  readiness、权限/冲突、桌面与窄窗口视口均完成；滚动回归和客户导入验收也已通过。按用户明确范围不
+  执行 iPhone 真机/WebKit 验收。
+
+### 未完成且不能用模拟证据替代
+
+| 门禁 | 当前状态 | 完成所需证据 |
+| --- | --- | --- |
+| 真实 DeepSeek canary | `pending` | `/models`、真实 `chat/completions` 的 model/usage/finish reason/request id、10 个合成样本、费用与账单核对 |
+| 微信 Clawbot 主动投递 | `pending` | 有效 context 无入站主动发送、context 到期保留 outbox、新入站恢复、限速/重试/去重/审计 |
+| 生产交付 | `blocked by gates` | canary/账单、备份恢复、transition lock、admission freeze、drain、preflight/postflight、回滚演练、观察窗口 |
+| iPhone 真机验收 | `out of scope` | 用户已取消；仅保留 Mac Chrome 桌面和移动尺寸兼容性检查 |
+
+生产仍保持历史 P1 边界：release `44e6d36c5aa9b30285ee63ce9b3a48a3e197edf9`，AI Platform
+`disabled`、execution `local-simulated`、admission closed。本轮分支尚未部署生产；未拿到真实供应商
+和真实微信证据前，不改变该判断，也不把本地模拟成功写成生产完成。
+
+DeepSeek 官方价格页已在 2026-09-13 重新核对：逻辑名 `deepseek-flash` 对应 DeepSeek-V4.1-Flash，
+文本输入/输出价格仍以供应商页面的百万 tokens 口径为准，现有 off-peak/peak 微元换算与代码合同
+一致；真实 canary 仍必须记录 `/models`、completion 响应和真实账单。若供应商响应返回的模型名与
+逻辑名不同，必须先形成显式映射证据再放行。

@@ -19,6 +19,13 @@ import { sha256 } from "../../shared/aiPlatformContract.mjs";
 import { createProviderCredentials } from "./providers/credentials.js";
 import { createTaskPayloadCodec } from "./tasks/payloadCodec.js";
 import { safeLimit, safeOffset } from "./utils.js";
+import {
+  AI_PROVIDER_CANARY_ACTOR,
+  AI_PROVIDER_CANARY_OWNER,
+  AI_PROVIDER_CANARY_ISSUER,
+  providerCanaryIdempotencyKey,
+  normalizeProviderCanaryCoordinates,
+} from "../../shared/aiPlatformCanaryContract.mjs";
 
 const PACKAGE_VERSION = "0.2.0";
 const ADMIN_PREFIX = "/internal/ai/v1/admin";
@@ -271,6 +278,8 @@ export function createAiPlatformRuntime(options = {}) {
     env: options.env ?? process.env,
     fetchImpl: options.providerFetchImpl ?? fetch,
     credentialResolver: providerCredentials?.resolve,
+    credentialMetadata: providerCredentials?.metadata,
+    db,
   });
   const taskService = options.taskService ?? createTaskService({
     db,
@@ -684,6 +693,57 @@ export function createServer(options = {}) {
     const suffix = url.pathname.slice(API_PREFIX.length);
     const parts = pathParts(suffix);
     if (parts[0] === "admin") return handleAdmin(request, response, requestId, url);
+    if (parts[0] === "provider-canaries") {
+      if (parts.length !== 1) throw new AiPlatformError("resource not found", { code: "not_found", status: 404 });
+      if (request.method !== "POST") return methodNotAllowed(response, requestId, "POST");
+      const auth = await authenticate(request, ["ai:provider:canary"]);
+      const body = await readJsonBody(request, config.bodyLimitBytes);
+      if (Object.keys(body).length !== 2 || !Object.hasOwn(body, "runId") || !Object.hasOwn(body, "sampleIndex")) {
+        throw new AiPlatformError("provider canary body must contain only runId and sampleIndex", {
+          code: "invalid_request",
+          status: 422,
+        });
+      }
+      let coordinates;
+      try {
+        coordinates = normalizeProviderCanaryCoordinates(body);
+      } catch {
+        throw new AiPlatformError("provider canary coordinates are invalid", { code: "invalid_request", status: 422 });
+      }
+      const expectedIdempotencyKey = providerCanaryIdempotencyKey(coordinates.runId, coordinates.sampleIndex);
+      if (request.headers["idempotency-key"] !== expectedIdempotencyKey) {
+        throw new AiPlatformError("provider canary Idempotency-Key is invalid", { code: "invalid_request", status: 422 });
+      }
+      const created = taskService.createProviderCanaryTask(coordinates);
+      const canaryIdentity = {
+        issuer: AI_PROVIDER_CANARY_ISSUER,
+        owner: AI_PROVIDER_CANARY_OWNER,
+        actor: AI_PROVIDER_CANARY_ACTOR,
+      };
+      const task = taskService.readTask({ identity: canaryIdentity, taskId: created.taskId });
+      const location = `${API_PREFIX}/tasks/${encodeURIComponent(created.taskId)}`;
+      if (["queued", "running"].includes(task.status)) {
+        return sendJson(response, 202, { item: { ...created, task, ready: false } }, requestId, { Location: location });
+      }
+      if (task.status !== "succeeded") {
+        throw new AiPlatformError("provider canary task failed", {
+          code: "provider_canary_failed",
+          status: 502,
+          details: { taskId: created.taskId, status: task.status, errorCode: task.errorCode ?? null },
+        });
+      }
+      const settlement = taskService.readProviderCanarySettlement({ taskId: created.taskId, ...coordinates });
+      if (typeof runtime.providerRegistry.recordLiveEvidence !== "function") {
+        throw new AiPlatformError("provider readiness evidence storage is unavailable", {
+          code: "provider_evidence_unavailable",
+          status: 503,
+        });
+      }
+      const evidence = runtime.providerRegistry.recordLiveEvidence(settlement);
+      return sendJson(response, created.replayed ? 200 : 201, {
+        item: { ...created, task, ready: true, evidence },
+      }, requestId, { Location: location });
+    }
     if (parts[0] === "media") {
       const upload = request.method === "POST" && parts.length === 1;
       const discard = request.method === "DELETE" && parts.length === 2;

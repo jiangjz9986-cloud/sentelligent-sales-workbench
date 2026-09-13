@@ -78,26 +78,38 @@ async function start(overrides) {
       throw error;
     }
   }
-  const providerProbe = config.executionMode === "external-provider" && config.externalProvidersEnabled
-    ? server.aiPlatform.providerRegistry.refreshReadiness?.({ signal: AbortSignal.timeout(10_000) })
-    : null;
-  if (providerProbe) await providerProbe;
-  process.stdout.write(config.socketPath ? "AI platform listening on its protected local socket\n" : `AI platform listening on http://${config.host}:${address.port}\n`);
   let stopping = false;
+  let shutdown = null;
+  const startupAbort = new AbortController();
   const stop = () => {
-    if (stopping) return;
+    if (stopping) return shutdown;
     stopping = true;
-    server.closeAiPlatform((error) => {
-      if (error) {
+    startupAbort.abort(new Error("AI platform shutdown requested"));
+    shutdown = server.closeAiPlatform().then(
+      () => process.exit(0),
+      (error) => {
         process.stderr.write("AI platform shutdown incomplete; task state retained\n");
         process.exitCode = 1;
-        return;
-      }
-      process.exit(0);
-    });
+        return error;
+      },
+    );
+    return shutdown;
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  const providerProbe = config.executionMode === "external-provider" && config.externalProvidersEnabled
+    ? server.aiPlatform.providerRegistry.refreshReadiness?.({ signal: startupAbort.signal })
+    : null;
+  try {
+    if (providerProbe) await providerProbe;
+  } catch (error) {
+    if (!stopping) {
+      await server.closeAiPlatform().catch(() => {});
+      throw error;
+    }
+  }
+  if (stopping) return shutdown;
+  process.stdout.write(config.socketPath ? "AI platform listening on its protected local socket\n" : `AI platform listening on http://${config.host}:${address.port}\n`);
   return new Promise(() => {});
 }
 

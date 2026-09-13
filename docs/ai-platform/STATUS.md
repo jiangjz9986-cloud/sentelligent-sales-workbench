@@ -1,5 +1,28 @@
 # AI 平台融合升级状态
 
+## 2026-09-13 当前后续收口状态
+
+- 当前继续在 `ai-platform-production-integration-20260909` 工作树开发，目标模式保持
+  `active`，开发执行设置为 Codex `gpt-5.6-luna / max`；业务系统仍统一使用 DeepSeek
+  provider `deepseek`、逻辑模型 `deepseek-flash`。本轮未读取 iCloud，未从生产取密钥，未修改生产。
+- provider readiness 已收口为 `configured`、`probeReady`、`liveReady` 分层，并绑定凭据 revision/digest、
+  provider policy digest、有效期和真实 completion evidence；只有 `/models` 成功时不能放行普通生产任务。
+- P2 真实供应商验收已具备可恢复 checkpoint 状态机和固定幂等键，已通过 `12/12` checkpoint 测试；
+  AI Platform `99/99`、Backend AI adapter `38/38`、部署脚本 `35/35`、Backend 全量 `2083/2083`
+  和部署门禁 `292 passed / 0 failed / 2 skipped`。
+- Mac 原生 Google Chrome 集成验收已通过，包含客户级主动助手、医院招标 bridge、action/risk 预览边界、
+  CSV/XLSX 导入、滚动回归、管理台、AI Platform console、权限/冲突和桌面/窄窗口视口。按用户要求不做
+  iPhone 真机或 WebKit 验收；浏览器移动尺寸检查不等同于真机证据。
+- 真实 DeepSeek canary 当前为 `pending`：本地执行环境未配置 `AI_PROVIDER_DEEPSEEK_KEY`、
+  `DEEPSEEK_API_KEY` 或 `MODEL_API_KEY`，因此没有发送真实请求，也没有产生费用。需要在独立 canary
+  窗口注入受控凭据后，完成 10 个合成样本、实际响应身份/usage/request id、账单对账和观察窗口。
+- 微信 Clawbot 仍是唯一外部通知通道，PushPlus 保持退役。SDK 当前 context token 从真实入站消息建立，
+  有效期约 23 小时；轮询或 heartbeat 只维持 worker 在线，不能伪造 token 续期。context 过期时 outbox
+  保留并不消耗发送次数，真实新入站后才可恢复；这一限制已由本地合成测试覆盖，真实微信窗口仍待执行。
+- 生产保持 P1 边界：AI Platform `disabled`、execution `local-simulated`、admission closed；本轮分支
+  未部署生产。生产切换前仍必须完成真实 canary/账单、真实 Clawbot 投递、备份恢复、transition lock、
+  drain、preflight/postflight、回滚演练和观察窗口。
+
 ## 2026-09-12 当前融合与生产事实
 
 本节是最终 P1 交付记录；下方较早段落保留为实施过程和历史检查点，不覆盖本节事实。

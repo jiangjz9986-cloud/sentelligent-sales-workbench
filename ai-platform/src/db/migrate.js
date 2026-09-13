@@ -10,6 +10,7 @@ import * as providerCredentials from "./migrations/0007_provider_credentials.mjs
 import * as payloadRetention from "./migrations/0008_task_payload_retention.mjs";
 import * as providerCredentialOperations from "./migrations/0009_provider_credential_operations.mjs";
 import * as priceVersionPinning from "./migrations/0010_price_version_pinning.mjs";
+import * as providerReadiness from "./migrations/0011_provider_readiness.mjs";
 import { withImmediateTransaction } from "../utils.js";
 
 const MIGRATIONS = [
@@ -23,6 +24,7 @@ const MIGRATIONS = [
   { migration: payloadRetention, file: "0008_task_payload_retention.mjs" },
   { migration: providerCredentialOperations, file: "0009_provider_credential_operations.mjs" },
   { migration: priceVersionPinning, file: "0010_price_version_pinning.mjs" },
+  { migration: providerReadiness, file: "0011_provider_readiness.mjs" },
 ];
 
 function migrationChecksum(file) {
