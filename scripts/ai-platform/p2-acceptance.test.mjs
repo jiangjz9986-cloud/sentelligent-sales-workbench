@@ -132,7 +132,7 @@ function fakeHarness({ mode = "external-provider", proactive = false, interruptS
           channel: "system",
           subject: { type: "p2_acceptance", id: "run-fixture" },
           status: "succeeded",
-          result: { metadata: { finishReason: "stop" } },
+          output: { metadata: { finishReason: "stop" } },
         },
         attempts: [{
           status: "succeeded",

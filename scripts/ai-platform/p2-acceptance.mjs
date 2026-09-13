@@ -567,7 +567,12 @@ function normalizeTaskEvidence(detail, policy, owner, runId) {
     failure("P2_SAMPLE_ATTEMPT_INVALID");
   }
   const usage = normalizeUsage(attempt.usage);
-  const finishReason = task?.result?.metadata?.finishReason;
+  // The authenticated admin task contract exposes the persisted model result
+  // as `output`; older test harnesses used the terminal task shape's `result`.
+  // Accept both shapes so live acceptance validates the same evidence that
+  // the production admin endpoint actually returns.
+  const result = task?.output ?? task?.result;
+  const finishReason = result?.metadata?.finishReason;
   if (finishReason !== "stop") failure("P2_FINISH_REASON_INVALID");
   if (!isPlainRecord(ledger) || ledger.providerId !== policy.providerId || ledger.modelId !== policy.modelId
     || ledger.priceVersionId !== attempt.priceVersionId || ledger.costStatus !== "calculated"
