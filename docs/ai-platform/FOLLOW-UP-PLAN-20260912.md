@@ -385,14 +385,7 @@ F4 写入/清理/审计/SQLite 完整性、preflight/backup/transition/postfligh
 该复验只证明代码、隔离测试和 Mac Chrome 证据稳定，不改变 P2 逐请求账单、真实 Clawbot
 context、生产合成写回、备份恢复/切换/回滚及观察门禁的未完成状态；目标继续保持 `active`。
 
-## 2026-09-13 release candidate 绑定
-
-计划记录提交后重新生成的当前候选以 release manifest 为准：
-
-- source commit：`ba74687b1513221b3c6af1cd2d12e5e30d0be164`，`source.clean=true`；
-- archive：`.runtime/releases/sentelligent-sales-workbench-ba74687.tar.gz`；
-- archive SHA-256：`07eb9d5b3e97a7a94b7751f6f4205f8c159f15b27d9bb11ce4228080b60485b2`；
-- manifest `schemaVersion=3`，封装文件数 `1765`，运行时构建使用 Node `v24.19.0`。
-
-该制品只表示可发布候选，不表示已经切换生产；生产 current、账单、Clawbot context、备份和
-观察门禁仍必须以现场 fresh evidence 为准。
+候选制品不写死在计划文档中：每次文档或代码提交后，必须重新生成 release manifest，并以其
+`source.commit`、`source.clean`、archive SHA-256 和文件清单作为唯一候选身份。候选只表示可发布，
+不表示已经切换生产；生产 current、账单、Clawbot context、备份和观察门禁仍必须以现场 fresh
+evidence 为准。
