@@ -262,6 +262,45 @@ test("explicit recovery requeues only transient delivery failures without resett
   });
 });
 
+test("explicit recovery refuses stale failures without mutating terminal state", () => {
+  withDatabase((db) => {
+    const repository = createWeixinConfirmationOutboxRepository(db, {
+      idFactory: () => "outbox-stale-requeue",
+    });
+    const created = repository.enqueue({
+      owner: "owner-1",
+      conversationId: "conversation-1",
+      idempotencyKey: "shortcut-stale-requeue",
+      payload: { kind: "ops_alert", summary: "stale" },
+    });
+    const lease = repository.leaseNext({ renderMessage: () => "draft" });
+    repository.discardLeased(created.id, {
+      leaseToken: lease.leaseToken,
+      errorCode: "WEIXIN_OUTBOX_STALE",
+    });
+    const before = db.prepare(`
+      SELECT status, attempt_count, last_error_code
+      FROM weixin_confirmation_outbox WHERE id = $id
+    `).get({ $id: created.id });
+
+    assert.throws(
+      () => repository.requeueFailed(created.id),
+      (error) => error?.code === "WEIXIN_OUTBOX_NOT_RETRYABLE",
+    );
+
+    const after = db.prepare(`
+      SELECT status, attempt_count, last_error_code
+      FROM weixin_confirmation_outbox WHERE id = $id
+    `).get({ $id: created.id });
+    assert.deepEqual({ ...before }, {
+      status: "failed",
+      attempt_count: 0,
+      last_error_code: "WEIXIN_OUTBOX_STALE",
+    });
+    assert.deepEqual({ ...after }, { ...before });
+  });
+});
+
 test("explicit recovery refuses scope and lifecycle terminal failures", () => {
   withDatabase((db) => {
     const repository = createWeixinConfirmationOutboxRepository(db, {
