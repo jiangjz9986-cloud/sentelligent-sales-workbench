@@ -20,7 +20,10 @@ import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
 import { IsoWeekFallback } from "./IsoWeekFallback.jsx";
 import { supportsInputType } from "../../app/inputCapabilities.js";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
-import { canSaveRegionProfileForWeek } from "./travelExpensePageState.js";
+import {
+  canSaveRegionProfileForWeek,
+  defaultExpenseOccurredOn,
+} from "./travelExpensePageState.js";
 import { hasResponsibleCity } from "./responsibleRegionModel.js";
 import {
   naturalWeekFor,
@@ -650,7 +653,17 @@ export function TravelExpensePage({
         <nav ref={tabsRef} className="expense-tabs" aria-label="差旅报销功能" role="tablist">
           {TABS.map((tab, index) => <button key={tab.id} id={`expense-tab-${tab.id}`} className={activeTab === tab.id ? "active" : ""} data-testid={`expense-tab-${tab.id}`} data-trip-region-focus-fallback={tab.id === "ledger" || undefined} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`expense-panel-${tab.id}`} tabIndex={activeTab === tab.id ? 0 : -1} onClick={() => navigate(tab.id)} onKeyDown={(event) => handleTabKeyDown(event, index)}>{tab.label}</button>)}
         </nav>
-        <button className="primary-button" type="button" onClick={() => { setEditingExpense(null); setDraftPrefill(null); setEditorOpen(true); }}><Plus size={16} />手工记一笔</button>
+        <button className="primary-button" type="button" onClick={() => {
+          setEditingExpense(null);
+          setDraftPrefill({
+            occurredOn: defaultExpenseOccurredOn({
+              weekStart: week.start,
+              weekEnd: week.end,
+              selectedDate: selectedLedgerDate,
+            }),
+          });
+          setEditorOpen(true);
+        }}><Plus size={16} />手工记一笔</button>
       </header>
 
       <section className="expense-week-strip">

@@ -519,7 +519,8 @@ describe("travel expense feature boundary", () => {
     // Prefill reaches the drawer only for the linked opening; manual entry and
     // closing always clear it.
     assert.match(page, /prefill=\{draftPrefill\}/);
-    assert.match(page, /setEditingExpense\(null\); setDraftPrefill\(null\); setEditorOpen\(true\);/);
+    assert.match(page, /setEditingExpense\(null\);[\s\S]*?setDraftPrefill\(\{[\s\S]*?defaultExpenseOccurredOn/);
+    assert.match(page, /selectedDate: selectedLedgerDate/);
     assert.match(page, /setEditorOpen\(false\); setEditingExpense\(null\); setDraftPrefill\(null\);/);
     // Region mismatch is advisory only: a warning plus a settings shortcut,
     // never an automatic region-profile write.
