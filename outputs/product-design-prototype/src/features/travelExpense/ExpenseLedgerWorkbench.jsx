@@ -93,12 +93,12 @@ function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
           maxDimension={360}
           className="ledger-proof-preview-image"
         />
-        <span><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span>
+        <span className="ledger-proof-preview-meta"><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span>
       </div>
     );
   }
   if (first && isTravelExpensePdf(first)) {
-    return <div className="ledger-proof-preview is-pdf"><span className="ledger-proof-pdf-mark">PDF</span><span><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span></div>;
+    return <div className="ledger-proof-preview is-pdf"><span className="ledger-proof-pdf-mark">PDF</span><span className="ledger-proof-preview-meta"><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span></div>;
   }
   const Icon = item.proofState === "attached" || item.proofState === "system"
     ? CheckCircle2

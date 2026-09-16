@@ -110,13 +110,25 @@ describe("expense ledger workbench shell", () => {
     assert.match(component, /ledger-proof-pdf-mark/);
     assert.match(component, /未上传/);
     assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: contain/s);
-    // v0.8.2: at least double the former 48×54 thumbnail so receipt content is
-    // readable directly in the row, and the proof column is one of the widest.
-    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width: 104px[^}]*height: 117px[^}]*flex: 0 0 104px/s);
-    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*26%;\s*\}/);
+    assert.match(css, /\.ledger-proof-preview\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width:\s*100%[^}]*height:\s*auto[^}]*aspect-ratio:\s*16\s*\/\s*9/s);
+    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*contain/s);
+    assert.match(css, /\.ledger-proof-preview-meta\s*\{[^}]*width:\s*100%[^}]*display:\s*flex/s);
+    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*23%;\s*\}/);
     assert.doesNotMatch(css, /\.ledger-workbench-desktop-table th:nth-child\(8\)/);
     assert.match(component, /共 \{item\.paymentProofCount\} 份/);
+    assert.match(component, /className="ledger-proof-preview-meta"/);
     assert.match(component, /aria-label=\{`查看\$\{item\.paymentProofCount\}份付款凭证`\}/);
+  });
+
+  it("keeps the complete row readable when proof and actions share a desktop row", async () => {
+    const css = await source("expenseLedgerWorkbench.css");
+
+    assert.match(css, /\.ledger-workbench-desktop-table\s*\{[\s\S]*?overflow-x:\s*auto;/s);
+    assert.match(css, /\.ledger-workbench-category\s+strong\s*\{[\s\S]*?white-space:\s*normal;/s);
+    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(7\)\s*\{\s*width:\s*15%;\s*\}/);
+    assert.match(css, /\.ledger-workbench-row-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
+    assert.match(css, /@media \(max-width: 1180px\)[\s\S]*?\.ledger-workbench-row-actions\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
   });
 
   it("loads only its isolated stylesheet and leaves the existing page stylesheet untouched", async () => {
