@@ -406,6 +406,7 @@ describe("travel expense feature boundary", () => {
     assert.match(ledger, /<AuthenticatedImageFrame/);
     assert.match(ledgerCss, /object-fit: contain/);
     assert.match(ledger, /共 \{item\.paymentProofCount\} 份/);
+    assert.match(proofCss, /\.expense-proof-files\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     assert.match(proofCss, /\.expense-proof-file\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     assert.match(proofCss, /\.expense-proof-file-preview\s*\{[\s\S]*?width:\s*100%;[\s\S]*?aspect-ratio:\s*16\s*\/\s*9;/s);
     assert.match(proofCss, /\.expense-proof-file-preview > \.authenticated-image-frame\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/s);

@@ -3076,7 +3076,7 @@
 .expense-proof-files {
   min-height: 74px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding: 12px 14px 14px;
 }
@@ -4423,7 +4423,7 @@
   .expense-organizer-summary > span:nth-child(n + 4) { border-top: 1px solid var(--expense-soft-line); }
   .expense-advance-form { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .payment-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .expense-proof-files { grid-template-columns: repeat(2, minmax(220px, 1fr)); }
+  .expense-proof-files { grid-template-columns: minmax(0, 1fr); }
   .invoice-review-form > div { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .invoice-no-ticket-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .invoice-no-ticket-form > button { width: 100%; }
