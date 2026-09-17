@@ -407,8 +407,9 @@ describe("travel expense feature boundary", () => {
     assert.match(ledgerCss, /object-fit: contain/);
     assert.match(ledger, /共 \{item\.paymentProofCount\} 份/);
     assert.match(proofCss, /\.expense-proof-files\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
-    assert.match(proofCss, /\.expense-proof-file\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
-    assert.match(proofCss, /\.expense-proof-file-preview\s*\{[\s\S]*?width:\s*100%;[\s\S]*?aspect-ratio:\s*16\s*\/\s*9;/s);
+    assert.match(proofCss, /\.expense-proof-file\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*360px\)\s+minmax\(0,\s*1fr\);/s);
+    assert.match(proofCss, /\.expense-proof-file-preview\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*64px;[\s\S]*?aspect-ratio:\s*45\s*\/\s*8;/s);
+    assert.match(proofCss, /@media \(max-width: 430px\)[\s\S]*?\.expense-proof-file\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     assert.match(proofCss, /\.expense-proof-file-preview > \.authenticated-image-frame\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/s);
     assert.match(proofCss, /\.expense-proof-file-preview img\s*\{[\s\S]*?object-fit:\s*contain;/s);
     assert.match(page, /focusExpenseId=\{proofFocusExpenseId\}/);

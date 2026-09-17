@@ -103,6 +103,7 @@ describe("expense ledger workbench shell", () => {
   it("renders authenticated first-proof previews in desktop rows and mobile cards", async () => {
     const component = await source("ExpenseLedgerWorkbench.jsx");
     const css = await source("expenseLedgerWorkbench.css");
+    const proofCenterCss = await source("travelExpense.css");
 
     assert.match(component, /AuthenticatedImageFrame/);
     assert.match(component, /paymentProofs\?\.\[0\]/);
@@ -111,10 +112,13 @@ describe("expense ledger workbench shell", () => {
     assert.match(component, /未上传/);
     assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: contain/s);
     assert.match(css, /\.ledger-proof-preview\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
-    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width:\s*100%[^}]*height:\s*auto[^}]*aspect-ratio:\s*16\s*\/\s*9/s);
+    assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width:\s*min\(100%,\s*360px\)[^}]*height:\s*64px[^}]*aspect-ratio:\s*45\s*\/\s*8/s);
     assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*contain/s);
     assert.match(css, /\.ledger-proof-preview-meta\s*\{[^}]*width:\s*100%[^}]*display:\s*flex/s);
-    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*23%;\s*\}/);
+    assert.match(proofCenterCss, /\.expense-proof-file\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*360px\)\s+minmax\(0,\s*1fr\)/s);
+    assert.match(proofCenterCss, /\.expense-proof-file-preview\s*\{[^}]*width:\s*100%[^}]*height:\s*64px[^}]*aspect-ratio:\s*45\s*\/\s*8/s);
+    assert.match(proofCenterCss, /@media \(max-width: 430px\)[\s\S]*?\.expense-proof-file\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*35%;\s*\}/);
     assert.doesNotMatch(css, /\.ledger-workbench-desktop-table th:nth-child\(8\)/);
     assert.match(component, /共 \{item\.paymentProofCount\} 份/);
     assert.match(component, /className="ledger-proof-preview-meta"/);
@@ -126,7 +130,7 @@ describe("expense ledger workbench shell", () => {
 
     assert.match(css, /\.ledger-workbench-desktop-table\s*\{[\s\S]*?overflow-x:\s*auto;/s);
     assert.match(css, /\.ledger-workbench-category\s+strong\s*\{[\s\S]*?white-space:\s*normal;/s);
-    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(7\)\s*\{\s*width:\s*15%;\s*\}/);
+    assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(7\)\s*\{\s*width:\s*12%;\s*\}/);
     assert.match(css, /\.ledger-workbench-row-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/s);
     assert.match(css, /@media \(max-width: 1180px\)[\s\S]*?\.ledger-workbench-row-actions\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
   });

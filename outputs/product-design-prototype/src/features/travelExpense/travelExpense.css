@@ -3078,13 +3078,14 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
-  padding: 12px 14px 14px;
+  padding: 8px 14px 10px;
 }
 
 .expense-proof-file {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 360px) minmax(0, 1fr);
+  align-items: center;
   overflow: hidden;
   border: 1px solid var(--expense-line);
   border-radius: 8px;
@@ -3093,11 +3094,13 @@
 
 .expense-proof-file-preview {
   width: 100%;
+  height: 64px;
+  min-width: 0;
   min-height: 0;
-  aspect-ratio: 16 / 9;
   display: grid;
   place-items: center;
   overflow: hidden;
+  aspect-ratio: 45 / 8;
   color: #315797;
   background: #f2f5fa;
   text-decoration: none;
@@ -3133,7 +3136,7 @@
   display: grid;
   align-content: center;
   gap: 4px;
-  padding: 8px;
+  padding: 8px 12px;
 }
 
 .expense-proof-file > div > strong,

@@ -319,15 +319,15 @@
   letter-spacing: 0.02em;
 }
 
-/* Seven columns since v0.8.2: keep the proof preview readable while reserving
- * enough room for both row actions on a normal desktop viewport. */
+/* Seven columns since v0.8.2: reserve the largest share for the compact
+ * 360x64 proof preview so the source ratio remains readable in one row. */
 .ledger-workbench-desktop-table th:nth-child(1) { width: 7.5%; }
 .ledger-workbench-desktop-table th:nth-child(2) { width: 8.5%; }
-.ledger-workbench-desktop-table th:nth-child(3) { width: 21%; }
-.ledger-workbench-desktop-table th:nth-child(4) { width: 10%; }
-.ledger-workbench-desktop-table th:nth-child(5) { width: 23%; }
-.ledger-workbench-desktop-table th:nth-child(6) { width: 15%; }
-.ledger-workbench-desktop-table th:nth-child(7) { width: 15%; }
+.ledger-workbench-desktop-table th:nth-child(3) { width: 18%; }
+.ledger-workbench-desktop-table th:nth-child(4) { width: 9%; }
+.ledger-workbench-desktop-table th:nth-child(5) { width: 35%; }
+.ledger-workbench-desktop-table th:nth-child(6) { width: 10%; }
+.ledger-workbench-desktop-table th:nth-child(7) { width: 12%; }
 
 .ledger-workbench-desktop-table tbody tr {
   transition: background 0.15s ease;
@@ -512,8 +512,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  gap: 6px;
-  padding: 3px;
+  gap: 4px;
+  padding: 0;
   border: 0;
   border-radius: 8px;
   color: #304361;
@@ -522,15 +522,18 @@
 }
 
 .ledger-proof-preview:hover { background: #f1f5fb; }
-/* Keep the first payment proof readable across the whole proof column. The
- * contain fit preserves the complete source image, including long receipts. */
+/*
+ * Single-row captures provided for this view are 1320px wide and average
+ * 232.45px high. 360x64 keeps that ratio with a small clarity margin and
+ * avoids the large vertical letterbox created by the former 16:9 frame.
+ */
 .ledger-proof-preview-image,
 .ledger-proof-pdf-mark {
-  width: 100%;
-  height: auto;
+  width: min(100%, 360px);
+  height: 64px;
   min-width: 0;
   min-height: 0;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 45 / 8;
   flex: none;
   overflow: hidden;
   border: 1px solid #dce3ed;
@@ -538,14 +541,14 @@
   background: #f5f7fa;
 }
 
-/* Override the shared authenticated frame's full-height rule for this
- * bounded, full-width ledger preview. */
+/* Override the shared authenticated frame's full-height rule for the compact
+ * bounded ledger preview. */
 .ledger-proof-preview-image.authenticated-image-frame {
-  width: 100%;
-  height: auto;
+  width: min(100%, 360px);
+  height: 64px;
   min-width: 0;
   min-height: 0;
-  aspect-ratio: 16 / 9;
+  aspect-ratio: 45 / 8;
   flex: none;
 }
 
