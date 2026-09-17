@@ -3084,7 +3084,7 @@
 .expense-proof-file {
   min-width: 0;
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid var(--expense-line);
   border-radius: 8px;
@@ -3092,7 +3092,9 @@
 }
 
 .expense-proof-file-preview {
-  min-height: 96px;
+  width: 100%;
+  min-height: 0;
+  aspect-ratio: 16 / 9;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -3101,11 +3103,19 @@
   text-decoration: none;
 }
 
+.expense-proof-file-preview > .authenticated-image-frame {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
 .expense-proof-file-preview img {
   width: 100%;
   height: 100%;
-  min-height: 96px;
-  object-fit: cover;
+  min-width: 0;
+  min-height: 0;
+  object-fit: contain;
 }
 
 .expense-proof-file-preview > span {
@@ -4534,7 +4544,7 @@
   .expense-tabs button { min-width: 78px; padding-inline: 10px; }
   .expense-proof-card-head { align-items: flex-start; }
   .expense-proof-payments { padding: 8px; }
-  .expense-proof-file { grid-template-columns: 62px minmax(0, 1fr); }
+  .expense-proof-file { grid-template-columns: minmax(0, 1fr); }
   .invoice-manager-actions { grid-template-columns: 1fr; }
   .invoice-repository-list > button { grid-template-columns: 38px minmax(0, 1fr); }
   .invoice-repository-list > button > span:last-child { grid-column: 2; text-align: left; }

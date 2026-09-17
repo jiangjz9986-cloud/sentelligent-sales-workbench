@@ -371,6 +371,7 @@ describe("travel expense feature boundary", () => {
     const page = await source("src/features/travelExpense/TravelExpensePage.jsx");
     const ledger = await source("src/features/travelExpense/ExpenseLedgerWorkbench.jsx");
     const ledgerCss = await source("src/features/travelExpense/expenseLedgerWorkbench.css");
+    const proofCss = await source("src/features/travelExpense/travelExpense.css");
     const model = await source("src/features/travelExpense/expenseLedgerWorkbenchModel.js");
     const regionCard = await source("src/features/travelExpense/TripRegionSettingsCard.jsx");
     const regionCss = await source("src/features/travelExpense/tripRegionSettingsCard.css");
@@ -405,6 +406,10 @@ describe("travel expense feature boundary", () => {
     assert.match(ledger, /<AuthenticatedImageFrame/);
     assert.match(ledgerCss, /object-fit: contain/);
     assert.match(ledger, /共 \{item\.paymentProofCount\} 份/);
+    assert.match(proofCss, /\.expense-proof-file\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
+    assert.match(proofCss, /\.expense-proof-file-preview\s*\{[\s\S]*?width:\s*100%;[\s\S]*?aspect-ratio:\s*16\s*\/\s*9;/s);
+    assert.match(proofCss, /\.expense-proof-file-preview > \.authenticated-image-frame\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;/s);
+    assert.match(proofCss, /\.expense-proof-file-preview img\s*\{[\s\S]*?object-fit:\s*contain;/s);
     assert.match(page, /focusExpenseId=\{proofFocusExpenseId\}/);
     assert.match(page, /onFocusExpenseHandled=\{handleProofFocusHandled\}/);
     assert.match(page, /const handleProofFocusHandled = useCallback/);
