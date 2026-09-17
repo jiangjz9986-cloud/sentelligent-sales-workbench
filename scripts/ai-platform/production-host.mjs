@@ -230,6 +230,12 @@ export function phaseRecoveryPlan({ policyApplied = false, backendRestored = fal
   };
 }
 
+export function releaseIdentityValidationOptions(identity, currentReleasePath) {
+  return identity === "old"
+    ? { allowLegacyCurrent: true, currentReleasePath }
+    : {};
+}
+
 export function migrationInventoryDigest(releaseManifest) {
   const files = releaseManifest?.migrationChecksums?.files;
   if (!files || typeof files !== "object" || Array.isArray(files)) return null;
@@ -521,6 +527,7 @@ export function createProductionHostAdapter(manifest, { proofPath, proofSha256 }
       const result = validateReleaseIdentity({
         manifest: releaseManifest, manifestPath: join(release, "release-manifest.json"),
         releaseDirectoryPath: release, expectedCommit: commit, servicePlan,
+        ...releaseIdentityValidationOptions(identity, realpathSync(PRODUCTION_ROOT + "/current")),
       });
       check(result.valid, "RELEASE_IDENTITY_INVALID");
       assertProtected();

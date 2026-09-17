@@ -8,6 +8,7 @@ import {
   pollPostflightHealth,
   postflightHealthMatchesRollout,
   postflightHealthResponseMatchesRollout,
+  releaseIdentityValidationOptions,
   validateObservationBinding,
   validateObservationRuntime,
 } from "./production-host.mjs";
@@ -113,6 +114,15 @@ test("phase recovery fails closed after policy application and otherwise restore
   assert.deepEqual(phaseRecoveryPlan({ policyApplied: false, backendRestored: false, beforeOperations: open }), {
     mode: "fail-closed", policy: "unchanged", paused: true, admissionOpen: false,
   });
+});
+
+test("legacy release identity compatibility is limited to the old release inspection", () => {
+  const currentReleasePath = PRODUCTION_ROOT + "/releases/legacy-current";
+  assert.deepEqual(releaseIdentityValidationOptions("old", currentReleasePath), {
+    allowLegacyCurrent: true,
+    currentReleasePath,
+  });
+  assert.deepEqual(releaseIdentityValidationOptions("new", currentReleasePath), {});
 });
 
 test("automatic rollback preserves old migrations and allows only appended versions", () => {
