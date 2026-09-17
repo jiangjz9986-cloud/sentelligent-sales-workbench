@@ -239,10 +239,34 @@ export function migrationInventoryDigest(releaseManifest) {
   return hashBytes(JSON.stringify(entries));
 }
 
+function migrationVersion(path) {
+  const match = String(path).match(/(?:^|\/)(\d+)(?:[_\-.]|$)/u);
+  return match ? Number(match[1]) : null;
+}
+
 export function migrationInventoriesMatch(oldReleaseManifest, newReleaseManifest) {
-  const oldDigest = migrationInventoryDigest(oldReleaseManifest);
-  const newDigest = migrationInventoryDigest(newReleaseManifest);
-  return oldDigest !== null && oldDigest === newDigest;
+  const oldFiles = oldReleaseManifest?.migrationChecksums?.files;
+  const newFiles = newReleaseManifest?.migrationChecksums?.files;
+  if (!oldFiles || typeof oldFiles !== "object" || Array.isArray(oldFiles)
+    || !newFiles || typeof newFiles !== "object" || Array.isArray(newFiles)) return false;
+
+  // Rollback keeps the schema forward-only: every migration already known to
+  // the old release must retain its exact checksum, while new migrations may
+  // only be appended with a strictly higher numeric version.
+  for (const [path, checksum] of Object.entries(oldFiles)) {
+    if (newFiles[path] !== checksum) return false;
+  }
+  const oldVersions = Object.keys(oldFiles)
+    .map(migrationVersion)
+    .filter((value) => Number.isSafeInteger(value));
+  if (!oldVersions.length) return false;
+  const highestOldVersion = Math.max(...oldVersions);
+  return Object.keys(newFiles)
+    .filter((path) => !Object.hasOwn(oldFiles, path))
+    .every((path) => {
+      const version = migrationVersion(path);
+      return Number.isSafeInteger(version) && version > highestOldVersion;
+    });
 }
 
 export async function pollPostflightHealth(

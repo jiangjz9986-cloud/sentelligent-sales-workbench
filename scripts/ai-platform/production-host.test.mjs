@@ -115,13 +115,19 @@ test("phase recovery fails closed after policy application and otherwise restore
   });
 });
 
-test("automatic rollback requires an identical, present migration inventory", () => {
+test("automatic rollback preserves old migrations and allows only appended versions", () => {
   const oldRelease = { migrationChecksums: { files: { "0042.mjs": "a".repeat(64), "0043.mjs": "b".repeat(64) } } };
   const sameRelease = { migrationChecksums: { files: { "0043.mjs": "b".repeat(64), "0042.mjs": "a".repeat(64) } } };
-  const changedRelease = { migrationChecksums: { files: { "0042.mjs": "a".repeat(64), "0044.mjs": "c".repeat(64) } } };
+  const appendedRelease = { migrationChecksums: { files: { "0042.mjs": "a".repeat(64), "0043.mjs": "b".repeat(64), "0044.mjs": "c".repeat(64) } } };
+  const insertedRelease = { migrationChecksums: { files: { "0041.mjs": "c".repeat(64), "0042.mjs": "a".repeat(64), "0043.mjs": "b".repeat(64) } } };
+  const changedRelease = { migrationChecksums: { files: { "0042.mjs": "z".repeat(64), "0043.mjs": "b".repeat(64) } } };
+  const removedRelease = { migrationChecksums: { files: { "0042.mjs": "a".repeat(64) } } };
   assert.equal(migrationInventoryDigest(oldRelease), migrationInventoryDigest(sameRelease));
   assert.equal(migrationInventoriesMatch(oldRelease, sameRelease), true);
+  assert.equal(migrationInventoriesMatch(oldRelease, appendedRelease), true);
+  assert.equal(migrationInventoriesMatch(oldRelease, insertedRelease), false);
   assert.equal(migrationInventoriesMatch(oldRelease, changedRelease), false);
+  assert.equal(migrationInventoriesMatch(oldRelease, removedRelease), false);
   assert.equal(migrationInventoriesMatch(oldRelease, {}), false);
 });
 
