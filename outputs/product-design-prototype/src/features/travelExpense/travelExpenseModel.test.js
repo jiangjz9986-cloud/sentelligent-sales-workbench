@@ -3,8 +3,10 @@ import { describe, it } from "node:test";
 
 import {
   buildExpenseLedgerRows,
+  buildAutomaticExpenseNote,
   deriveExpenseInvoiceStates,
   EXPENSE_CATEGORIES,
+  EXPENSE_INVOICE_TYPES,
   flattenPaymentRows,
   formatCny,
   formatSignedCny,
@@ -53,6 +55,18 @@ describe("travel expense categories and settlement", () => {
       EXPENSE_CATEGORIES.map((item) => item.id),
       ["breakfast", "lunch", "dinner", "lodging", "transport", "hospitality", "other"],
     );
+  });
+
+  it("builds the requested compact travel notes and keeps invoice type choices exclusive", () => {
+    assert.equal(
+      buildAutomaticExpenseNote({ occurredOn: "2026-09-18", category: "lodging", tripRegion: "济宁" }),
+      "济宁出差住宿1晚",
+    );
+    assert.equal(
+      buildAutomaticExpenseNote({ occurredOn: "2026-09-18", category: "dinner", tripRegion: "济宁" }),
+      "9.18济宁出差晚餐",
+    );
+    assert.deepEqual(EXPENSE_INVOICE_TYPES.map((item) => item.id), ["electronic", "paper", "substitute"]);
   });
 
   it("excludes company-direct payments from personal settlement", () => {
@@ -252,6 +266,8 @@ describe("six-field expense ledger", () => {
       "amountCents",
       "paymentProofs",
       "invoiceStates",
+      "invoiceType",
+      "invoiceLabel",
       "notes",
     ]);
     assert.equal(row.visible.date, "2026-08-04—2026-08-06");

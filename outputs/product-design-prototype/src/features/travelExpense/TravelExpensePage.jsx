@@ -741,7 +741,7 @@ export function TravelExpensePage({
         </div>
       ) : null}
 
-      <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} prefill={draftPrefill} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); setDraftPrefill(null); }} onSave={saveExpense} />
+      <ExpenseEditorDrawer open={editorOpen} expense={editingExpense} week={week} itineraries={itineraries} customers={customers} regionProfile={regionProfile} prefill={draftPrefill} pending={saving} onClose={() => { setEditorOpen(false); setEditingExpense(null); setDraftPrefill(null); }} onSave={saveExpense} />
       <TripRegionSettingsCard open={selectedWeekLoaded && regionSettingsOpen} profile={regionProfile} pending={regionSaving} onClose={() => setRegionSettingsOpen(false)} onSave={saveRegionProfile} />
       </section>
     </>

@@ -108,7 +108,7 @@ function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
           loadImage={({ signal }) => getAttachmentContentResponse(first.id, { signal })}
           title={first.fileName || "付款凭证"}
           variant="thumbnail"
-          maxDimension={360}
+          maxDimension={720}
           className="ledger-proof-preview-image"
         />
       </div>

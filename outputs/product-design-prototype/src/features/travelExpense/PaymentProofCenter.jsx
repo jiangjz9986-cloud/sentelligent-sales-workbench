@@ -336,7 +336,7 @@ export function PaymentProofCenter({
                     <article className="expense-proof-file" key={attachment.id}>
                       <div className="expense-proof-file-preview" aria-label={`${attachment.fileName}预览`}>
                         {isImage ? (
-                          <AuthenticatedImageFrame resourceKey={attachment.id} loadImage={({ signal }) => getAttachmentContentResponse(attachment.id, { signal })} title={attachment.fileName} maxDimension={360} />
+                          <AuthenticatedImageFrame resourceKey={attachment.id} loadImage={({ signal }) => getAttachmentContentResponse(attachment.id, { signal })} title={attachment.fileName} maxDimension={720} />
                         ) : (
                           <span><FileText size={24} /><strong>{isPdf ? "PDF" : "文件"}</strong></span>
                         )}

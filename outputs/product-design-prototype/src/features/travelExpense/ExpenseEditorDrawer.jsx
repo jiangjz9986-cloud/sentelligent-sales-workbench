@@ -8,7 +8,9 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  buildAutomaticExpenseNote,
   EXPENSE_CATEGORIES,
+  EXPENSE_INVOICE_TYPES,
   FUNDING_SOURCES,
   INVOICE_STATUSES,
 } from "./travelExpenseModel.js";
@@ -56,18 +58,39 @@ function emptyPayment() {
   };
 }
 
-function createDraft(expense, weekStart, prefill = null) {
+function regionForDate(regionProfile, occurredOn) {
+  const override = regionProfile?.dateOverrides?.find((item) => item.date === occurredOn);
+  if (override?.city) return { city: override.city, source: "date_override" };
+  if (regionProfile?.defaultCity) return { city: regionProfile.defaultCity, source: "week_default" };
+  return { city: null, source: null };
+}
+
+function createDraft(expense, weekStart, prefill = null, regionProfile = null) {
+  const occurredOn = expense?.occurredOn ?? prefill?.occurredOn ?? weekStart;
+  const category = expense?.category ?? (prefill ? "transport" : "breakfast");
+  const resolvedRegion = regionForDate(regionProfile, occurredOn);
+  const tripRegion = expense?.tripRegion ?? prefill?.tripRegion ?? resolvedRegion.city ?? "";
+  const tripRegionSource = expense?.tripRegionSource ?? prefill?.tripRegionSource ?? resolvedRegion.source ?? "";
+  const suppliedNotes = expense?.notes ?? prefill?.notes;
+  const notes = (typeof suppliedNotes === "string" ? suppliedNotes.trim() : "") || buildAutomaticExpenseNote({
+    occurredOn,
+    category,
+    tripRegion,
+  });
   if (!expense) {
     return {
-      occurredOn: prefill?.occurredOn ?? weekStart,
+      occurredOn,
       // A visit-linked draft defaults to transport (the most common on-the-road
       // expense); plain manual entry keeps the existing breakfast default.
-      category: prefill ? "transport" : "breakfast",
+      category,
       purpose: prefill?.purpose ?? "",
       merchant: "",
       itineraryId: prefill?.itineraryId ?? "",
       customerId: prefill?.customerId ?? "",
-      notes: "",
+      invoiceType: "",
+      tripRegion,
+      tripRegionSource,
+      notes,
       payments: [emptyPayment()],
     };
   }
@@ -80,7 +103,10 @@ function createDraft(expense, weekStart, prefill = null) {
     merchant: expense.merchant ?? "",
     itineraryId: expense.itineraryId ?? "",
     customerId: expense.customerId ?? "",
-    notes: expense.notes ?? "",
+    invoiceType: expense.invoiceType ?? "",
+    tripRegion,
+    tripRegionSource,
+    notes,
     payments: expense.payments.map((payment) => ({
       id: payment.id,
       paidAt: localDateTime(payment.paidAt),
@@ -101,19 +127,20 @@ export function ExpenseEditorDrawer({
   week,
   itineraries = [],
   customers = [],
+  regionProfile = null,
   prefill = null,
   pending = false,
   onClose,
   onSave,
 }) {
-  const [draft, setDraft] = useState(() => createDraft(expense, week.start, prefill));
+  const [draft, setDraft] = useState(() => createDraft(expense, week.start, prefill, regionProfile));
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!open) return;
-    setDraft(createDraft(expense, week.start, prefill));
+    setDraft(createDraft(expense, week.start, prefill, regionProfile));
     setError("");
-  }, [expense, open, prefill, week.start]);
+  }, [expense, open, prefill, regionProfile, week.start]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -134,7 +161,28 @@ export function ExpenseEditorDrawer({
   if (!open) return null;
 
   function updateField(field, value) {
-    setDraft((current) => ({ ...current, [field]: value }));
+    setDraft((current) => {
+      if (field !== "category" && field !== "occurredOn") return { ...current, [field]: value };
+      const oldAutomaticNote = buildAutomaticExpenseNote({
+        occurredOn: current.occurredOn,
+        category: current.category,
+        tripRegion: current.tripRegion,
+      });
+      const nextOccurredOn = field === "occurredOn" ? value : current.occurredOn;
+      const nextCategory = field === "category" ? value : current.category;
+      const nextAutomaticNote = buildAutomaticExpenseNote({
+        occurredOn: nextOccurredOn,
+        category: nextCategory,
+        tripRegion: current.tripRegion,
+      });
+      const currentNotes = current.notes.trim();
+      const shouldRefreshNote = !currentNotes || currentNotes === oldAutomaticNote;
+      return {
+        ...current,
+        [field]: value,
+        ...(shouldRefreshNote ? { notes: nextAutomaticNote } : {}),
+      };
+    });
   }
 
   function updatePayment(index, field, value) {
@@ -190,6 +238,9 @@ export function ExpenseEditorDrawer({
         merchant: draft.merchant.trim(),
         itineraryId: draft.itineraryId || null,
         customerId: draft.customerId || null,
+        invoiceType: draft.invoiceType || null,
+        tripRegion: draft.tripRegion || null,
+        tripRegionSource: draft.tripRegionSource || null,
         notes: draft.notes.trim(),
         payments,
       });
@@ -223,10 +274,8 @@ export function ExpenseEditorDrawer({
             <div className="expense-form-grid">
               <label className="form-field"><span>发生日期</span><input type="date" min={week.start} max={week.end} value={draft.occurredOn} onChange={(event) => updateField("occurredOn", event.target.value)} required /></label>
               <label className="form-field"><span>分类</span><select value={draft.category} onChange={(event) => updateField("category", event.target.value)}>{EXPENSE_CATEGORIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-              <div className="expense-derived-status" role="note">
-                <span>票据状态</span>
-                <div><strong className={`expense-status ${derivedInvoiceStatus.id}`}>{derivedInvoiceStatus.label}</strong><small>由发票匹配、无票确认和候选处理自动更新</small></div>
-              </div>
+              <label className="form-field"><span>票据状态</span><select value={draft.invoiceType} onChange={(event) => updateField("invoiceType", event.target.value)}><option value="">未选择</option>{EXPENSE_INVOICE_TYPES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select><small>选择“电子”后，可在发票页上传并自动识别。</small></label>
+              <div className="expense-derived-status" role="note"><span>票据覆盖</span><div><strong className={`expense-status ${derivedInvoiceStatus.id}`}>{derivedInvoiceStatus.label}</strong><small>覆盖状态由匹配、无票确认和候选处理自动更新</small></div></div>
               <label className="form-field expense-span-2"><span>费用事由</span><input value={draft.purpose} onChange={(event) => updateField("purpose", event.target.value)} placeholder="如：济宁酒店住宿、客户晚餐招待" required /></label>
               <label className="form-field"><span>默认收款方</span><input value={draft.merchant} onChange={(event) => updateField("merchant", event.target.value)} placeholder="商户或收款方" /></label>
               <label className="form-field"><span>关联行程</span><select value={draft.itineraryId} onChange={(event) => updateField("itineraryId", event.target.value)}><option value="">不关联</option>{itineraries.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>

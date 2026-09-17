@@ -167,6 +167,26 @@ function parseSafeConflictReply(value) {
   return { status: body.status, text: body.text };
 }
 
+function suppressDurableAcceptedReceipt(body) {
+  const result = body?.result;
+  if (
+    body?.status !== "ok"
+    || !result
+    || typeof result !== "object"
+    || Array.isArray(result)
+    || result.status !== "accepted"
+    || typeof result.entryId !== "string"
+    || !result.entryId.trim()
+  ) {
+    return body;
+  }
+
+  // Accepted bookkeeping receipts are durably queued by the backend and must
+  // be delivered by the outbox worker exactly once. Returning the backend's
+  // text here would make the Weixin SDK send a synchronous mirror as well.
+  return { ...body, text: "" };
+}
+
 async function normalizeMedia(request) {
   if (!request.media) return null;
   try {
@@ -272,7 +292,7 @@ export function createRemoteClawbotAgent(options = {}) {
         throw new RemoteAgentError("REMOTE_AGENT_REQUEST_FAILED", SAFE_FAILURE_MESSAGE, { permanent });
       }
       try {
-        return parseResponseBody(responseText);
+        return suppressDurableAcceptedReceipt(parseResponseBody(responseText));
       } catch (error) {
         if (error instanceof RemoteAgentError) throw error;
         throw new RemoteAgentError("REMOTE_AGENT_INVALID_RESPONSE");

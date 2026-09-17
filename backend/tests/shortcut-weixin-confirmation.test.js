@@ -482,7 +482,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.match(configured.body.text, /济南/u);
 
     const refreshedDraft = await leaseOutbox();
-    assert.match(refreshedDraft.item.message, /备注：8\.25济南午餐/u);
+    assert.match(refreshedDraft.item.message, /备注：8\.25济南出差午餐/u);
     assert.match(refreshedDraft.item.message, /请引用本消息并回复/u);
     assert.doesNotMatch(refreshedDraft.item.message, /请先回复出差区域/u);
     await ackOutbox(refreshedDraft, true, "provider-region-required-refreshed");
@@ -516,7 +516,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
         SELECT notes, trip_region, trip_region_source FROM travel_expenses
       `).get();
       assert.deepEqual({ ...expense }, {
-        notes: "8.25济南午餐",
+        notes: "8.25济南出差午餐",
         trip_region: "济南",
         trip_region_source: "week_default",
       });
@@ -563,7 +563,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       });
       assert.equal(configured.response.status, 200);
       const refreshed = await leaseOutbox();
-      assert.match(refreshed.item.message, new RegExp(`备注：8\\.25${city}午餐`, "u"));
+      assert.match(refreshed.item.message, new RegExp(`备注：8\\.25${city}出差午餐`, "u"));
       await ackOutbox(refreshed, true, `provider-region-change-${id}`);
     }
 
@@ -600,7 +600,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     const acceptedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     const expense = acceptedDb.prepare("SELECT notes, trip_region, trip_region_source FROM travel_expenses").get();
     assert.deepEqual({ ...expense }, {
-      notes: "8.25青岛午餐",
+      notes: "8.25青岛出差午餐",
       trip_region: "青岛",
       trip_region_source: "week_default",
     });
@@ -643,7 +643,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
     assert.equal(configured.response.status, 200, JSON.stringify(configured.body));
     const refreshed = await leaseOutbox();
-    assert.match(refreshed.item.message, /备注：8\.25济南午餐/u);
+    assert.match(refreshed.item.message, /备注：8\.25济南出差午餐/u);
     await ackOutbox(refreshed, true, "provider-region-recovery-refreshed");
 
     const failedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
@@ -694,7 +694,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.match(confirmed.body.text, /已确认并录入/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     const expense = db.prepare("SELECT notes, trip_region FROM travel_expenses").get();
-    assert.deepEqual({ ...expense }, { notes: "8.25济南午餐", trip_region: "济南" });
+    assert.deepEqual({ ...expense }, { notes: "8.25济南出差午餐", trip_region: "济南" });
     db.close();
   });
 
@@ -831,7 +831,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.match(configured.body.text, /2026-08-17/u);
     assert.match(configured.body.text, /2026-08-23/u);
     const refreshed = await leaseOutbox();
-    assert.match(refreshed.item.message, /备注：8\.20济南午餐/u);
+    assert.match(refreshed.item.message, /备注：8\.20济南出差午餐/u);
 
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     try {
@@ -979,7 +979,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.match(draft.item.message, /金额：37\.10 元/u);
     assert.match(draft.item.message, /费用类别：餐饮/u);
     assert.doesNotMatch(draft.item.message, /费用类别：餐饮-午餐/u);
-    assert.match(draft.item.message, /备注：8\.20济宁午餐/u);
+    assert.match(draft.item.message, /备注：8\.20济宁出差午餐/u);
     assert.match(draft.item.message, /周期：20260817-20260823/u);
     assert.match(draft.item.message, /AI 状态：已识别，待你确认/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
@@ -988,7 +988,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(row.occurred_on, "2026-08-20");
     assert.equal(row.category, "餐饮");
     assert.equal(row.subcategory, "午餐");
-    assert.equal(row.note, "8.20济宁午餐");
+    assert.equal(row.note, "8.20济宁出差午餐");
     db.close();
 
     await ackOutbox(draft, true, "provider-meal-original");
@@ -1006,7 +1006,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
     assert.equal(changedDate.response.status, 200, JSON.stringify(changedDate.body));
     const dateDraft = await leaseOutbox();
-    assert.match(dateDraft.item.message, /备注：8\.21枣庄午餐/u);
+    assert.match(dateDraft.item.message, /备注：8\.21枣庄出差午餐/u);
     await ackOutbox(dateDraft, true, "provider-meal-date");
 
     const changedMeal = await request("/api/integrations/weixin-agent/events", {
@@ -1023,7 +1023,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
     assert.equal(changedMeal.response.status, 200, JSON.stringify(changedMeal.body));
     const mealDraft = await leaseOutbox();
-    assert.match(mealDraft.item.message, /备注：8\.21枣庄晚餐/u);
+    assert.match(mealDraft.item.message, /备注：8\.21枣庄出差晚餐/u);
     await ackOutbox(mealDraft, true, "provider-meal-subcategory");
 
     const invalidCategory = await request("/api/integrations/weixin-agent/events", {
@@ -1113,7 +1113,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(received.response.status, 200, JSON.stringify(received.body));
     const initial = await leaseOutbox();
     assert.match(initial.item.message, /费用类别：餐饮/u);
-    assert.match(initial.item.message, /备注：8\.25午餐/u);
+    assert.match(initial.item.message, /备注：8\.25出差午餐/u);
     await ackOutbox(initial, true, "provider-reclass-initial");
 
     const zeroAmount = await request("/api/integrations/weixin-agent/events", {
@@ -1178,7 +1178,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       quotedMessageId: "provider-reclass-over-limit",
     });
     assert.match(lowAmount.item.message, /费用类别：餐饮/u);
-    assert.match(lowAmount.item.message, /备注：8\.25午餐/u);
+    assert.match(lowAmount.item.message, /备注：8\.25出差午餐/u);
     await ackOutbox(lowAmount, true, "provider-reclass-low");
 
     const dinner = await revise({
@@ -1187,7 +1187,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       quotedMessageId: "provider-reclass-low",
     });
     assert.match(dinner.item.message, /费用类别：餐饮/u);
-    assert.match(dinner.item.message, /备注：8\.25晚餐/u);
+    assert.match(dinner.item.message, /备注：8\.25出差晚餐/u);
     await ackOutbox(dinner, true, "provider-reclass-time");
 
     const manualCategory = await revise({
@@ -1273,7 +1273,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     const revisedDraft = await leaseOutbox();
     assert.match(revisedDraft.item.message, /金额：30\.00 元/u);
     assert.match(revisedDraft.item.message, /费用类别：餐饮/u);
-    assert.match(revisedDraft.item.message, /备注：8\.25午餐/u);
+    assert.match(revisedDraft.item.message, /备注：8\.25出差午餐/u);
     assert.match(revisedDraft.item.message, /AI 状态：待复核：出差区域待确认/u);
     assert.match(revisedDraft.item.message, /请先回复“20260824-20260830区域是济南”/u);
     assert.doesNotMatch(revisedDraft.item.message, /信息待补充/u);
@@ -1620,6 +1620,11 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
     assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
     assert.match(accepted.body.text, /已确认并录入/u);
+    const acceptedReceipt = await leaseOutbox();
+    assert.equal(
+      acceptedReceipt.item.message,
+      "已确认并录入小小记账：2026年8月18日8.18晚餐：继振、宫涛，金额 219.00 元。",
+    );
     const acceptedDb = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.equal(acceptedDb.prepare("SELECT status FROM shortcut_bookkeeping_entries").get().status, "accepted");
     assert.equal(acceptedDb.prepare("SELECT notes FROM travel_expenses").get().notes, "8.18晚餐：继振、宫涛");
@@ -1999,13 +2004,13 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     const first = await leaseOutbox();
     assert.match(first.item.message, /金额：12\.34 元/u);
     assert.match(first.item.message, /费用类别：餐饮/u);
-    assert.match(first.item.message, /备注：8\.18济南早餐/u);
+    assert.match(first.item.message, /备注：8\.18济南出差早餐/u);
     assert.match(first.item.message, /周期：20260817-20260823/u);
     await ackOutbox(first, true, "multi-draft-1");
     const second = await leaseOutbox();
     assert.match(second.item.message, /金额：56\.78 元/u);
     assert.match(second.item.message, /费用类别：餐饮/u);
-    assert.match(second.item.message, /备注：8\.18济南晚餐/u);
+    assert.match(second.item.message, /备注：8\.18济南出差晚餐/u);
     await ackOutbox(second, true, "multi-draft-2");
 
     for (const [index, quotedMessageId] of ["multi-draft-1", "multi-draft-2"].entries()) {
@@ -2037,8 +2042,8 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.deepEqual(
       db.prepare("SELECT category, notes FROM travel_expenses ORDER BY rowid").all().map((row) => ({ ...row })),
       [
-        { category: "breakfast", notes: "8.18济南早餐" },
-        { category: "dinner", notes: "8.18济南晚餐" },
+        { category: "breakfast", notes: "8.18济南出差早餐" },
+        { category: "dinner", notes: "8.18济南出差晚餐" },
       ],
     );
     db.close();
@@ -2170,7 +2175,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.deepEqual(
       db.prepare("SELECT note FROM shortcut_bookkeeping_entries").all().map((row) => row.note),
-      ["8.18早餐", "8.18晚餐"],
+      ["8.18出差早餐", "8.18出差晚餐"],
     );
     assert.deepEqual(db.prepare("SELECT version FROM assistant_pending_actions").all().map((row) => row.version), [1, 1]);
     db.close();

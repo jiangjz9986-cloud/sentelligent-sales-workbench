@@ -2142,9 +2142,9 @@
 .expense-list-print-sheet {
   width: 100%;
   min-width: 0;
-  aspect-ratio: 1 / 1.414;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto auto auto;
+  align-content: start;
   gap: 12px;
   padding: 24px;
   border: 1px solid rgba(16, 35, 75, 0.12);
@@ -2190,6 +2190,7 @@
 
 .expense-list-print-table {
   width: 100%;
+  height: max-content;
   border-collapse: collapse;
   table-layout: fixed;
   color: #111;
@@ -2239,14 +2240,15 @@
 }
 
 .expense-list-payment-thumbnail img {
-  /* Matches the embedded XLSX picture box (~2in wide) so the printed sheet
-   * and the exported workbook show the payment proof at the same size. */
+  /* Keep the generated JPEG's real aspect ratio so long screenshots do not
+   * carry a white letterbox into the printed sheet. */
   width: 100%;
   max-width: 190px;
-  aspect-ratio: 3 / 2;
+  height: auto;
+  max-height: 96px;
   display: block;
   border: 1px solid #8b8b8b;
-  background: #fff;
+  background: transparent;
   object-fit: contain;
 }
 
@@ -3118,7 +3120,7 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
-  object-fit: contain;
+  object-fit: fill;
 }
 
 .expense-proof-file-preview > span {

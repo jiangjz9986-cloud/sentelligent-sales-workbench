@@ -433,7 +433,7 @@ describe("authenticated travel expense API", () => {
             confidence: 1,
             category: "餐饮",
             subcategory: "午餐",
-            note: "8.25济南午餐",
+            note: "8.25济南出差午餐",
             noteAutomation: {
               kind: "meal",
               mealKey: "lunch",

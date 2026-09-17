@@ -7,6 +7,7 @@ import {
   PAYMENT_PROOF_THUMBNAIL,
   PaymentProofThumbnailError,
   calculatePaymentProofContain,
+  calculatePaymentProofDimensions,
   createPaymentProofThumbnail,
 } from "./paymentProofThumbnail.js";
 
@@ -61,10 +62,10 @@ function canvasHarness(encoded = jpegBlob()) {
   return { canvas, context, calls };
 }
 
-function bitmapFactoryForSource({ width, height, onClose = () => {} }) {
+function bitmapFactoryForSource({ width, height, outputWidth = 360, outputHeight = 240, onClose = () => {} }) {
   return async (_blob, { stage }) => {
     if (stage === "source") return { width, height, close: onClose };
-    return { width: 360, height: 240, close() {} };
+    return { width: outputWidth, height: outputHeight, close() {} };
   };
 }
 
@@ -91,13 +92,13 @@ describe("payment proof output thumbnails", () => {
     });
   });
 
-  it("re-encodes a PNG onto a 360x240 white JPEG canvas at quality 0.72", async () => {
+  it("re-encodes a PNG onto a compact aspect-ratio JPEG at quality 0.72", async () => {
     const source = sourceBlob("image/png");
     const drawable = { width: 720, height: 1280, close() {} };
-    const { canvas, context, calls } = canvasHarness();
+    const { canvas, context, calls } = canvasHarness(jpegBlob(135, 240));
     const result = await createPaymentProofThumbnail(source, {
       bitmapFactory: async (_blob, { stage }) => (
-        stage === "source" ? drawable : { width: 360, height: 240, close() {} }
+        stage === "source" ? drawable : { width: 135, height: 240, close() {} }
       ),
       canvasFactory: () => canvas,
     });
@@ -106,11 +107,9 @@ describe("payment proof output thumbnails", () => {
     assert.equal(result.type, "image/jpeg");
     assert.notEqual(result, source);
     assert.equal(canvas.width, 0, "the ephemeral output canvas is released");
-    assert.deepEqual(calls.find(([name]) => name === "fillRect"), [
-      "fillRect", "#ffffff", 0, 0, 360, 240,
-    ]);
+    assert.equal(calls.some(([name]) => name === "fillRect"), false);
     assert.deepEqual(calls.find(([name]) => name === "drawImage"), [
-      "drawImage", drawable, 112, 0, 135, 240,
+      "drawImage", drawable, 0, 0, 135, 240,
     ]);
     assert.deepEqual(calls.find(([name]) => name === "convertToBlob"), [
       "convertToBlob",
@@ -129,12 +128,12 @@ describe("payment proof output thumbnails", () => {
   it("renders only the first PDF page and then re-encodes it as JPEG", async () => {
     const source = sourceBlob("application/pdf");
     const rendered = { width: 612, height: 792, source: { kind: "page-one" }, close() {} };
-    const { canvas, calls } = canvasHarness();
+    const { canvas, calls } = canvasHarness(jpegBlob(185, 240));
     let request;
     const result = await createPaymentProofThumbnail(source, {
       bitmapFactory: async (_blob, { stage }) => {
         assert.equal(stage, "output-validation");
-        return { width: 360, height: 240, close() {} };
+        return { width: 185, height: 240, close() {} };
       },
       canvasFactory: () => canvas,
       pdfRenderer: async (blob, options) => {
@@ -149,17 +148,17 @@ describe("payment proof output thumbnails", () => {
     assert.equal(request.options.maxWidth, 360);
     assert.equal(request.options.maxHeight, 240);
     assert.deepEqual(calls.find(([name]) => name === "drawImage"), [
-      "drawImage", rendered.source, 87, 0, 185, 240,
+      "drawImage", rendered.source, 0, 0, 185, 240,
     ]);
   });
 
   it("can return verified JPEG bytes for spreadsheet embedding", async () => {
     const source = sourceBlob("image/webp");
-    const encoded = jpegBlob(360, 240, [7, 8, 9]);
+    const encoded = jpegBlob(320, 240, [7, 8, 9]);
     const { canvas } = canvasHarness(encoded);
     const result = await createPaymentProofThumbnail(source, {
       output: "uint8array",
-      bitmapFactory: bitmapFactoryForSource({ width: 800, height: 600 }),
+      bitmapFactory: bitmapFactoryForSource({ width: 800, height: 600, outputWidth: 320, outputHeight: 240 }),
       canvasFactory: () => canvas,
     });
     assert.ok(result instanceof Uint8Array);
@@ -229,7 +228,7 @@ describe("payment proof output thumbnails", () => {
 
   it("rejects output that claims valid headers but cannot be decoded", async () => {
     const source = sourceBlob("image/png");
-    const { canvas } = canvasHarness();
+    const { canvas } = canvasHarness(jpegBlob(320, 240));
     await assert.rejects(
       () => createPaymentProofThumbnail(source, {
         bitmapFactory: async (_blob, { stage }) => {

@@ -300,7 +300,12 @@ function renderDraftMessage(entry, { prefix = "检测到一笔新记账，请确
 }
 
 function resultMessage(entry) {
-  return `已确认并录入森特智行：${entry.expenseReferenceCode ?? entry.expenseId ?? entry.id}，金额 ${formatMoney(entry.amountCents)}。`;
+  const occurredOn = dateOnly(entry.occurredOn);
+  const dateLabel = occurredOn
+    ? `${occurredOn.slice(0, 4)}年${Number(occurredOn.slice(5, 7))}月${Number(occurredOn.slice(8, 10))}日`
+    : "日期待确认";
+  const note = fieldText(entry.note ?? entry.purpose, "本次记账");
+  return `已确认并录入小小记账：${dateLabel}${note}，金额 ${formatMoney(entry.amountCents)}。`;
 }
 
 // 修改… only counts as bookkeeping language when the remainder opens with a
@@ -1310,7 +1315,9 @@ export function createShortcutBookkeepingAssistantRuntime({
     }
     if (payload.kind === "accepted") {
       const row = db.prepare(`
-        SELECT entry.*, expense.reference_code AS expense_reference_code
+        SELECT entry.*, expense.reference_code AS expense_reference_code,
+               expense.occurred_on AS expense_occurred_on,
+               expense.notes AS expense_notes
         FROM shortcut_bookkeeping_entries entry
         LEFT JOIN travel_expenses expense ON expense.id = entry.expense_id
         WHERE entry.id = $id AND entry.owner = $owner
@@ -1321,6 +1328,9 @@ export function createShortcutBookkeepingAssistantRuntime({
         expenseId: row.expense_id,
         id: row.id,
         entryType: row.entry_type,
+        occurredOn: row.expense_occurred_on ?? row.occurred_on,
+        note: row.expense_notes ?? row.note,
+        purpose: row.purpose,
         amountCents: row.amount_cents === null ? null : Number(row.amount_cents),
       });
     }

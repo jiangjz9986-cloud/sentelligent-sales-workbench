@@ -5,6 +5,8 @@ import { detectDocumentType, validateDocumentFileName } from "./invoiceRecogniti
 export const MAX_TRAVEL_EXPENSE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 
 const CATEGORIES = new Set(["breakfast", "lunch", "dinner", "lodging", "transport", "hospitality", "other"]);
+const INVOICE_TYPES = new Set(["electronic", "paper", "substitute"]);
+const TRIP_REGION_SOURCES = new Set(["week_default", "date_override", "user_correction", "itinerary", "payment_text"]);
 const FUNDING_SOURCES = new Set(["personal", "company", "advance"]);
 const PAYMENT_METHODS = new Set(["wechat", "alipay", "card", "cash", "other"]);
 const ATTACHMENT_KINDS = new Set(["payment_proof", "invoice", "substitute"]);
@@ -18,6 +20,9 @@ const EXPENSE_FIELDS = new Set([
   "merchant",
   "itineraryId",
   "customerId",
+  "invoiceType",
+  "tripRegion",
+  "tripRegionSource",
   "notes",
   "payments",
 ]);
@@ -145,6 +150,12 @@ function optionalProperty(target, key, value) {
   if (value !== undefined) target[key] = value;
 }
 
+function nullableEnum(value, allowed, field) {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  return enumValue(value, allowed, field);
+}
+
 function validatePayment(value, index) {
   const prefix = `payments[${index}].`;
   assertObject(value, `payments[${index}]`);
@@ -193,6 +204,9 @@ export function validateTravelExpensePayload(value) {
   optionalProperty(result, "merchant", optionalText(value.merchant, "merchant", 500));
   optionalProperty(result, "itineraryId", optionalText(value.itineraryId, "itineraryId", 200));
   optionalProperty(result, "customerId", optionalText(value.customerId, "customerId", 200));
+  optionalProperty(result, "invoiceType", nullableEnum(value.invoiceType, INVOICE_TYPES, "invoiceType"));
+  optionalProperty(result, "tripRegion", optionalText(value.tripRegion, "tripRegion", 100));
+  optionalProperty(result, "tripRegionSource", nullableEnum(value.tripRegionSource, TRIP_REGION_SOURCES, "tripRegionSource"));
   optionalProperty(result, "notes", optionalText(value.notes, "notes", 5000));
   return result;
 }

@@ -112,10 +112,10 @@ describe("expense ledger workbench shell", () => {
     assert.match(component, /未上传/);
     assert.match(component, /role: "button"/);
     assert.match(component, /event\.key !== "Enter" && event\.key !== " "/);
-    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: contain/s);
+    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: fill/s);
     assert.match(css, /\.ledger-proof-preview\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
     assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width:\s*min\(100%,\s*360px\)[^}]*height:\s*64px[^}]*aspect-ratio:\s*45\s*\/\s*8/s);
-    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*contain/s);
+    assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*fill/s);
     assert.match(css, /\.ledger-proof-preview:focus-visible\s*\{[^}]*outline:/s);
     assert.doesNotMatch(css, /\.ledger-proof-preview-meta/);
     assert.match(proofCenterCss, /\.expense-proof-file\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*360px\)\s+minmax\(0,\s*1fr\)/s);

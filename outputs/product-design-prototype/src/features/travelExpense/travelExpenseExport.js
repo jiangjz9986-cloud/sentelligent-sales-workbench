@@ -1,8 +1,10 @@
 import {
   buildExpenseLedgerRows,
+  expenseInvoiceTypeLabel,
   flattenPaymentRows,
   formatCny,
   formatTravelExpenseDateTime,
+  naturalWeekFor,
 } from "./travelExpenseModel.js";
 
 const PAYMENT_METHOD_LABELS = Object.freeze({
@@ -18,13 +20,6 @@ const INVOICE_STATUS_LABELS = Object.freeze({
   covered: "已覆盖",
   partial: "部分覆盖",
   missing: "缺少票据",
-});
-
-const EXPENSE_INVOICE_STATE_LABELS = Object.freeze({
-  electronic_invoice: "电子",
-  substitute_invoice: "替票",
-  no_invoice: "无票确认",
-  invoice_pending: "待补",
 });
 
 const EXPENSE_LIST_PURPOSE_LABELS = Object.freeze({
@@ -65,7 +60,7 @@ export const EXPENSE_LIST_FORMAT_CAPABILITIES = Object.freeze({
 
 const PAYMENT_RECORD_THUMBNAIL_POLICY = Object.freeze({
   format: "image/jpeg",
-  fit: "contain",
+  fit: "preserve_aspect_ratio",
   maxWidthPx: 360,
   maxHeightPx: 240,
   quality: 0.72,
@@ -191,9 +186,7 @@ function expenseListNotes(row) {
 
 export function buildExpenseListRows(expenses = [], context = {}) {
   return buildExpenseLedgerRows(expenses, context).map((row, index) => {
-    const stateLabels = row.visible.invoiceStates
-      .map((state) => EXPENSE_INVOICE_STATE_LABELS[state.id] ?? state.label)
-      .filter(Boolean);
+    const invoiceLabel = expenseInvoiceTypeLabel(row.source, context);
     return {
       sequence: index + 1,
       expenseId: row.id,
@@ -209,9 +202,9 @@ export function buildExpenseListRows(expenses = [], context = {}) {
       paymentProofLabel: row.visible.paymentProofs.length > 0
         ? `${row.visible.paymentProofs.length} 张`
         : "未上传",
-      invoiceLabel: stateLabels.join("、") || "待补",
+      invoiceLabel,
       // Kept as a compatibility alias for the existing print renderer.
-      invoiceStatusLabel: stateLabels.join("、") || "待补",
+      invoiceStatusLabel: invoiceLabel,
       notes: expenseListNotes(row),
     };
   });
@@ -225,18 +218,16 @@ function expenseListMonthDay(date) {
 
 /**
  * Builds the user-confirmed sheet title `M.D-M.D<城市顿号列表>出差费用清单`,
- * e.g. `8.17-8.21济宁、东营出差费用清单`. The date range covers the actual
- * expense occurrence dates (falling back to the natural week when the list is
- * empty) and the city list comes from the week's responsible-region profile.
+ * e.g. `8.17-8.23济宁、东营出差费用清单`. The date range always follows the
+ * selected natural week; the city list comes from the week's responsible-region profile.
  */
 export function buildExpenseListTitle({ expenses = [], week = null, regionProfile = null } = {}) {
   if (!Array.isArray(expenses)) throw new TypeError("expenses must be an array");
-  const dates = expenses
-    .flatMap((expense) => [expense?.occurredOn, expense?.endedOn ?? expense?.occurredEndOn])
-    .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value ?? "")))
-    .sort();
-  const start = dates[0] ?? week?.start;
-  const end = dates.at(-1) ?? week?.end ?? start;
+  const fallbackWeek = !week?.start && expenses[0]?.occurredOn
+    ? naturalWeekFor(expenses[0].occurredOn)
+    : null;
+  const start = week?.start ?? fallbackWeek?.start;
+  const end = week?.end ?? fallbackWeek?.end ?? start;
   const startLabel = expenseListMonthDay(start);
   const endLabel = expenseListMonthDay(end);
   const rangeLabel = startLabel && endLabel ? `${startLabel}-${endLabel}` : "";

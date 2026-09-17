@@ -94,7 +94,7 @@ export function ExpenseLedger({
                   <td><span className={`expense-category-pill ${row.categoryId}`}>{categoryLabel[row.categoryId]}</span></td>
                   <td className="expense-money">{formatCny(row.visible.amountCents)}</td>
                   <td><LedgerProofs attachments={row.visible.paymentProofs} getAttachmentUrl={getAttachmentUrl} /></td>
-                  <td><div className="expense-ledger-invoice-states">{row.visible.invoiceStates.map((state) => <span key={state.id} className={`expense-invoice-state ${state.id}`}>{state.id === "invoice_pending" ? <CircleAlert size={13} /> : <CheckCircle2 size={13} />}{state.label}</span>)}</div></td>
+                  <td><div className="expense-ledger-invoice-states"><span className={`expense-invoice-state ${row.visible.invoiceType ?? "pending"}`}>{row.visible.invoiceType ? <CheckCircle2 size={13} /> : <CircleAlert size={13} />}{row.visible.invoiceLabel}</span></div></td>
                   <td className="expense-ledger-notes">
                     <strong>{row.visible.notes}</strong>
                     <div className="expense-reference-row">

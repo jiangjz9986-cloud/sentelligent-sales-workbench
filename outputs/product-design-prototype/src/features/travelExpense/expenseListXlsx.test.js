@@ -6,6 +6,14 @@ import { buildExpenseListXlsx, buildExpenseListXlsxBlob } from "./expenseListXls
 
 const JPEG_BASE64 = "/9j/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAn/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAABv/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AJ9AFA4//9k=";
 const JPEG_BYTES = Uint8Array.from(Buffer.from(JPEG_BASE64, "base64"));
+const WIDE_JPEG_BYTES = Uint8Array.from([
+  0xff, 0xd8,
+  0xff, 0xe0, 0x00, 0x04, 0x00, 0x00,
+  0xff, 0xc0, 0x00, 0x0b, 0x08,
+  0x00, 0xe8, 0x05, 0x28,
+  0x01, 0x01, 0x11, 0x00,
+  0xff, 0xd9,
+]);
 
 const expenses = [
   {
@@ -99,10 +107,10 @@ describe("seven-column expense list XLSX", () => {
     const bytes = buildExpenseListXlsx({
       expenseList: createExport(),
       thumbnailImages: {
-        "proof-1": JPEG_BYTES,
-        "proof-2": `data:image/jpeg;base64,${JPEG_BASE64}`,
-        "proof-3": { bytes: JPEG_BYTES },
-        "proof-4": { dataUrl: `data:image/jpg;base64,${JPEG_BASE64}` },
+        "proof-1": WIDE_JPEG_BYTES,
+        "proof-2": { bytes: WIDE_JPEG_BYTES },
+        "proof-3": WIDE_JPEG_BYTES,
+        "proof-4": { bytes: WIDE_JPEG_BYTES },
       },
       createdAt: "2026-08-26T00:00:00Z",
     });
@@ -132,7 +140,7 @@ describe("seven-column expense list XLSX", () => {
     assert.match(sheet, /<dimension ref="A1:G8"\/>/);
     // Row 1 is the merged manual-sheet title; the seven fixed headers sit on
     // row 2 with the pane frozen beneath them.
-    assert.match(sheet, /<c r="A1"[^>]*>.*8\.24-8\.25出差费用清单/s);
+    assert.match(sheet, /<c r="A1"[^>]*>.*8\.24-8\.30出差费用清单/s);
     assert.match(sheet, /<mergeCell ref="A1:G1"\/>/);
     assert.match(sheet, /<pane ySplit="2" topLeftCell="A3"/);
     assert.match(sheet, /<c r="A2"[^>]*>.*序号.*<c r="B2"[^>]*>.*日期.*<c r="C2"[^>]*>.*用途.*<c r="D2"[^>]*>.*金额.*<c r="E2"[^>]*>.*付款记录.*<c r="F2"[^>]*>.*发票.*<c r="G2"[^>]*>.*备注/s);
@@ -140,6 +148,8 @@ describe("seven-column expense list XLSX", () => {
     assert.match(sheet, /<col min="7" max="7"/);
     assert.doesNotMatch(sheet, /<col min="8"|r="H\d+"/);
     assert.match(sheet, /<drawing r:id="rId1"\/>/);
+    assert.match(sheet, /<row r="3" ht="36" customHeight="1"/);
+    assert.doesNotMatch(sheet, /<row r="3" ht="96" customHeight="1"/);
   });
 
   it("writes the region cities and date range into the merged title row when provided", () => {
@@ -161,7 +171,7 @@ describe("seven-column expense list XLSX", () => {
       createdAt: "2026-08-26T00:00:00Z",
     }));
     const sheet = text(entries, "xl/worksheets/sheet1.xml");
-    assert.match(sheet, /<c r="A1"[^>]*>.*8\.24-8\.25济宁、东营出差费用清单/s);
+    assert.match(sheet, /<c r="A1"[^>]*>.*8\.24-8\.30济宁、东营出差费用清单/s);
   });
 
   it("embeds every payment proof and vertically merges non-proof cells for a multi-proof expense", () => {

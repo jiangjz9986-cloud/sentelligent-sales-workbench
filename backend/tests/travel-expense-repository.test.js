@@ -89,6 +89,20 @@ describe("travel expense repository", () => {
     assert.equal(created.invoiceStatus, "pending");
   });
 
+  it("fills the compact lodging note when a new expense leaves notes blank", () => {
+    const created = repository.createExpense(expense({
+      category: "lodging",
+      purpose: "济宁出差住宿",
+      notes: "",
+      tripRegion: "济宁",
+      tripRegionSource: "user_correction",
+    }));
+
+    assert.equal(created.notes, "济宁出差住宿1晚");
+    assert.equal(created.tripRegion, "济宁");
+    assert.equal(created.tripRegionSource, "user_correction");
+  });
+
   it("recomputes invoice status instead of preserving a forged stored value", () => {
     for (const derivedStatus of ["missing", "partial", "covered"]) {
       const created = repository.createExpense(expense());

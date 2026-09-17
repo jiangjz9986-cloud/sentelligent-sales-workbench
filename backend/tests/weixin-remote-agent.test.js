@@ -293,6 +293,43 @@ describe("remote Clawbot agent adapter", () => {
     }
   });
 
+  it("suppresses the synchronous mirror for durable accepted bookkeeping receipts", async () => {
+    const acceptedReply = {
+      status: "ok",
+      text: "已确认并录入森特智行：EXP-20260818-0001，金额 200.00 元。",
+      result: {
+        status: "accepted",
+        entryId: "entry-accepted-1",
+        expenseId: "expense-accepted-1",
+        paymentId: "payment-accepted-1",
+      },
+    };
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-secret-token",
+      fetchImpl: async () => jsonResponse(acceptedReply),
+    });
+    const request = {
+      conversationId: "c-accepted",
+      text: "确认",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"d".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1786500000123,
+    };
+
+    const first = await agent.chat(request);
+    const replay = await agent.chat({
+      ...request,
+      messageId: `weixin:delivery:v1:${"e".repeat(64)}`,
+    });
+
+    assert.equal(first.text, "");
+    assert.equal(replay.text, "");
+    assert.deepEqual(first.result, acceptedReply.result);
+    assert.deepEqual(replay.result, acceptedReply.result);
+  });
+
   it("rejects malformed or expanded 409 response shapes as permanent safe errors", async () => {
     let responseBody = { status: "clarify", text: "valid", debug: { path: "/private/db" } };
     let rawResponse = null;

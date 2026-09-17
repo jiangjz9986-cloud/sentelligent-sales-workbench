@@ -1,3 +1,5 @@
+import { buildAutomaticTravelExpenseNote } from "../travelExpense/expenseNote.js";
+
 const CATEGORY_LABELS = Object.freeze({
   breakfast: ["餐饮", "早餐"],
   lunch: ["餐饮", "午餐"],
@@ -263,12 +265,12 @@ export function tripRegionFromText(text) {
 }
 
 export function buildAutomaticMealNote({ occurredOn, tripRegion, mealKey }) {
-  const meal = MEAL_SUBCATEGORY_BY_KEY[mealKey];
-  if (!meal) return null;
-  const date = validDate(occurredOn);
-  if (!date) return null;
-  const dateLabel = `${Number(date.slice(5, 7))}.${Number(date.slice(8, 10))}`;
-  return `${dateLabel}${normalizedTripRegion(tripRegion) ?? ""}${meal}`;
+  if (!MEAL_SUBCATEGORY_BY_KEY[mealKey]) return null;
+  return buildAutomaticTravelExpenseNote({
+    occurredOn,
+    category: mealKey,
+    tripRegion: normalizedTripRegion(tripRegion),
+  });
 }
 
 function normalizedOcrLines(value) {

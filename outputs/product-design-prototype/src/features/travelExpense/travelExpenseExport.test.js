@@ -407,13 +407,13 @@ describe("confirmed seven-column expense list export", () => {
 
     assert.equal(
       buildExpenseListTitle({ expenses, regionProfile }),
-      "8.3-8.4济宁、东营出差费用清单",
+      "8.3-8.9济宁、东营出差费用清单",
     );
     assert.equal(
       buildExpenseListTitle({ expenses: [], week: { start: "2026-08-17", end: "2026-08-23" }, regionProfile }),
       "8.17-8.23济宁、东营出差费用清单",
     );
-    assert.equal(buildExpenseListTitle({ expenses }), "8.3-8.4出差费用清单");
+    assert.equal(buildExpenseListTitle({ expenses }), "8.3-8.9出差费用清单");
     assert.equal(buildExpenseListTitle({}), "出差费用清单");
 
     const output = buildExpenseListExport({
@@ -421,7 +421,7 @@ describe("confirmed seven-column expense list export", () => {
       week: { start: "2026-08-03", end: "2026-08-09" },
       regionProfile,
     });
-    assert.equal(output.title, "8.3-8.4济宁、东营出差费用清单");
+    assert.equal(output.title, "8.3-8.9济宁、东营出差费用清单");
   });
 
   it("keeps one logical lodging entry and stacks multiple proofs into physical rows", () => {
