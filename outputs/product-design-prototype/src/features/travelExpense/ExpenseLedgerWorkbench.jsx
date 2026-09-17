@@ -82,9 +82,27 @@ function CategoryCopy({ item }) {
 
 function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
   const first = item.paymentProofs?.[0];
+  const proofLabel = `查看${item.paymentProofCount}份付款凭证`;
+  const openProof = () => onOpenProof?.(item.original, item);
+  const handleProofPreviewKeyDown = (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openProof();
+  };
+  const previewProps = {
+    className: "ledger-proof-preview",
+    role: "button",
+    tabIndex: 0,
+    "aria-label": proofLabel,
+    onClick: (event) => {
+      if (event.target instanceof Element && event.target.closest("button")) return;
+      openProof();
+    },
+    onKeyDown: handleProofPreviewKeyDown,
+  };
   if (first && isTravelExpenseImage(first) && typeof getAttachmentContentResponse === "function") {
     return (
-      <div className="ledger-proof-preview">
+      <div {...previewProps}>
         <AuthenticatedImageFrame
           resourceKey={first.id}
           loadImage={({ signal }) => getAttachmentContentResponse(first.id, { signal })}
@@ -93,12 +111,11 @@ function ProofState({ item, getAttachmentContentResponse, onOpenProof }) {
           maxDimension={360}
           className="ledger-proof-preview-image"
         />
-        <span className="ledger-proof-preview-meta"><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span>
       </div>
     );
   }
   if (first && isTravelExpensePdf(first)) {
-    return <div className="ledger-proof-preview is-pdf"><span className="ledger-proof-pdf-mark">PDF</span><span className="ledger-proof-preview-meta"><strong>共 {item.paymentProofCount} 份</strong><button type="button" aria-label={`查看${item.paymentProofCount}份付款凭证`} onClick={() => onOpenProof?.(item.original, item)}>查看</button></span></div>;
+    return <div {...previewProps} className="ledger-proof-preview is-pdf"><span className="ledger-proof-pdf-mark">PDF</span></div>;
   }
   const Icon = item.proofState === "attached" || item.proofState === "system"
     ? CheckCircle2

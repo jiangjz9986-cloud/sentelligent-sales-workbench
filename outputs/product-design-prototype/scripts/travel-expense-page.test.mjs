@@ -405,7 +405,10 @@ describe("travel expense feature boundary", () => {
     assert.match(model, /paymentProofs: ledgerRow\.visible\.paymentProofs/);
     assert.match(ledger, /<AuthenticatedImageFrame/);
     assert.match(ledgerCss, /object-fit: contain/);
-    assert.match(ledger, /共 \{item\.paymentProofCount\} 份/);
+    assert.doesNotMatch(ledger, /共 \{item\.paymentProofCount\} 份/);
+    assert.doesNotMatch(ledger, /ledger-proof-preview-meta/);
+    assert.match(ledger, /role: "button"/);
+    assert.match(ledger, /"aria-label": proofLabel/);
     assert.match(proofCss, /\.expense-proof-files\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     assert.match(proofCss, /\.expense-proof-file\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*360px\)\s+minmax\(0,\s*1fr\);/s);
     assert.match(proofCss, /\.expense-proof-file-preview\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*64px;[\s\S]*?aspect-ratio:\s*45\s*\/\s*8;/s);

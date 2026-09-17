@@ -519,9 +519,14 @@
   color: #304361;
   text-align: left;
   background: transparent;
+  cursor: pointer;
 }
 
 .ledger-proof-preview:hover { background: #f1f5fb; }
+.ledger-proof-preview:focus-visible {
+  outline: 2px solid #2862d5;
+  outline-offset: 2px;
+}
 /*
  * Single-row captures provided for this view are 1320px wide and average
  * 232.45px high. 360x64 keeps that ratio with a small clarity margin and
@@ -586,19 +591,6 @@
   font-size: 11px;
   font-weight: 820;
 }
-
-.ledger-proof-preview-meta {
-  min-width: 0;
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.ledger-proof-preview-meta strong,
-.ledger-proof-preview-meta button { overflow: visible; text-overflow: clip; white-space: normal; }
-.ledger-proof-preview-meta strong { color: #27405e; font-size: 10.5px; }
-.ledger-proof-preview-meta button { min-height: 28px; min-width: 0; padding: 2px 0; border: 0; color: #2862d5; background: transparent; font-size: 9.5px; text-align: left; }
 
 .ledger-workbench-link,
 .ledger-workbench-review-button {

@@ -107,22 +107,23 @@ describe("expense ledger workbench shell", () => {
 
     assert.match(component, /AuthenticatedImageFrame/);
     assert.match(component, /paymentProofs\?\.\[0\]/);
-    assert.match(component, /共 \{item\.paymentProofCount\} 份/);
+    assert.doesNotMatch(component, /共 \{item\.paymentProofCount\} 份/);
     assert.match(component, /ledger-proof-pdf-mark/);
     assert.match(component, /未上传/);
+    assert.match(component, /role: "button"/);
+    assert.match(component, /event\.key !== "Enter" && event\.key !== " "/);
     assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*object-fit: contain/s);
     assert.match(css, /\.ledger-proof-preview\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
     assert.match(css, /\.ledger-proof-preview-image\.authenticated-image-frame\s*\{[^}]*width:\s*min\(100%,\s*360px\)[^}]*height:\s*64px[^}]*aspect-ratio:\s*45\s*\/\s*8/s);
     assert.match(css, /\.ledger-proof-preview-image > img\s*\{[^}]*width:\s*100%[^}]*height:\s*100%[^}]*object-fit:\s*contain/s);
-    assert.match(css, /\.ledger-proof-preview-meta\s*\{[^}]*width:\s*100%[^}]*display:\s*flex/s);
+    assert.match(css, /\.ledger-proof-preview:focus-visible\s*\{[^}]*outline:/s);
+    assert.doesNotMatch(css, /\.ledger-proof-preview-meta/);
     assert.match(proofCenterCss, /\.expense-proof-file\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*360px\)\s+minmax\(0,\s*1fr\)/s);
     assert.match(proofCenterCss, /\.expense-proof-file-preview\s*\{[^}]*width:\s*100%[^}]*height:\s*64px[^}]*aspect-ratio:\s*45\s*\/\s*8/s);
     assert.match(proofCenterCss, /@media \(max-width: 430px\)[\s\S]*?\.expense-proof-file\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/s);
     assert.match(css, /\.ledger-workbench-desktop-table th:nth-child\(5\)\s*\{\s*width:\s*35%;\s*\}/);
     assert.doesNotMatch(css, /\.ledger-workbench-desktop-table th:nth-child\(8\)/);
-    assert.match(component, /共 \{item\.paymentProofCount\} 份/);
-    assert.match(component, /className="ledger-proof-preview-meta"/);
-    assert.match(component, /aria-label=\{`查看\$\{item\.paymentProofCount\}份付款凭证`\}/);
+    assert.match(component, /"aria-label": proofLabel/);
   });
 
   it("keeps the complete row readable when proof and actions share a desktop row", async () => {
