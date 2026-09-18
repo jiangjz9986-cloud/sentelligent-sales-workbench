@@ -27,8 +27,6 @@ const CONFIRMATION_WARNING = "WEIXIN_CONFIRMATION_REQUIRED";
 const MAX_MESSAGE_LENGTH = 20_000;
 const SHORTCUT_PENDING_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DRAFT_REFERENCE_RE = /BK-[0-9A-F]{12}|(?:编号\s*[：:]\s*)([0-9]{12})/u;
-const IMPLICIT_CURRENT_WINDOW_MS = 15 * 60 * 1000;
-const IMPLICIT_CURRENT_GAP_MS = 60 * 60 * 1000;
 const EXPLICIT_TRIP_REGION_SOURCES = new Set(["text", "user_correction"]);
 
 function requiredText(value, name, max = 500) {
@@ -949,24 +947,30 @@ export function createShortcutBookkeepingAssistantRuntime({
   function activeShortcutActions(account, { limit = 3 } = {}) {
     const normalizedAccount = requiredText(account, "account", 200);
     const now = iso(clock);
-    withImmediateTransaction(db, () => {
-      db.prepare(`
-        UPDATE assistant_pending_actions
-        SET status = 'expired', version = version + 1, updated_at = $now
-        WHERE owner = $owner AND channel = $channel AND action_type = $actionType
-          AND status IN ('pending', 'confirmed') AND datetime(expires_at) <= datetime($now)
-      `).run({
-        $owner: normalizedAccount,
-        $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
-        $actionType: SHORTCUT_BOOKKEEPING_ACTION,
-        $now: now,
+    // The production connection is better-sqlite3 and supports an atomic
+    // expiry sweep. Small injected runtime harnesses may provide only the
+    // read surface needed for routing; they must still be able to exercise
+    // confirmation recovery without pretending to own a SQLite transaction.
+    if (typeof db.exec === "function") {
+      withImmediateTransaction(db, () => {
+        db.prepare(`
+          UPDATE assistant_pending_actions
+          SET status = 'expired', version = version + 1, updated_at = $now
+          WHERE owner = $owner AND channel = $channel AND action_type = $actionType
+            AND status IN ('pending', 'confirmed') AND datetime(expires_at) <= datetime($now)
+        `).run({
+          $owner: normalizedAccount,
+          $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+          $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+          $now: now,
+        });
       });
-    });
+    }
     return db.prepare(`
       SELECT id FROM assistant_pending_actions
       WHERE owner = $owner AND channel = $channel AND action_type = $actionType
         AND status IN ('pending', 'confirmed', 'processing')
-      ORDER BY updated_at DESC, created_at DESC, id DESC
+      ORDER BY created_at ASC, id ASC
       LIMIT $limit
     `).all({
       $owner: normalizedAccount,
@@ -981,28 +985,65 @@ export function createShortcutBookkeepingAssistantRuntime({
       .filter((action) => actionPayload(action)?.kind !== SHORTCUT_ADVANCE_ALLOCATION_KIND)
       .map((action) => ({
         action,
-        updatedMs: Date.parse(action.updatedAt ?? action.createdAt ?? ""),
+        createdMs: Date.parse(action.createdAt ?? ""),
       }))
-      .filter((candidate) => Number.isFinite(candidate.updatedMs))
-      .sort((left, right) => right.updatedMs - left.updatedMs || right.action.id.localeCompare(left.action.id));
+      .filter((candidate) => Number.isFinite(candidate.createdMs))
+      .sort((left, right) => left.createdMs - right.createdMs || left.action.id.localeCompare(right.action.id));
     if (candidates.length === 0) return null;
-    let selected = null;
-    if (candidates.length === 1) {
-      selected = candidates[0].action;
-    } else {
-      const nowMs = Date.parse(iso(clock));
-      const newest = candidates[0];
-      const next = candidates[1];
-      if (nowMs - newest.updatedMs <= IMPLICIT_CURRENT_WINDOW_MS
-        && newest.updatedMs - next.updatedMs >= IMPLICIT_CURRENT_GAP_MS) {
-        selected = newest.action;
-      }
-    }
+    const selected = candidates[0].action;
     if (!selected || allowUndelivered) return selected;
     const payload = actionPayload(selected);
     if (!payload?.entryId || typeof outboxRepository.latestForEntry !== "function") return null;
     const latest = outboxRepository.latestForEntry({ owner: selected.owner, entryId: payload.entryId });
     return latest?.status === "sent" ? selected : null;
+  }
+
+  // Bookkeeping confirmations share one WeChat delivery scope. A source image
+  // may create several pending actions in one transaction, so only the oldest
+  // active bookkeeping action is allowed to expose a confirmation draft. The
+  // rest remain durable in assistant_pending_actions until the queue advances.
+  function bookkeepingQueueHead(account) {
+    return activeShortcutActions(account, { limit: 100 })
+      .find((action) => actionPayload(action)?.kind !== SHORTCUT_ADVANCE_ALLOCATION_KIND) ?? null;
+  }
+
+  function enqueueQueueHead(account, {
+    expectedActionId = null,
+    kind = "confirmation",
+    extraPayload = {},
+  } = {}) {
+    const head = bookkeepingQueueHead(account);
+    if (!head || (expectedActionId && head.id !== expectedActionId)) return null;
+    const payload = actionPayload(head);
+    if (!payload || payload.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) return null;
+    const entry = shortcutBookkeepingRepository.getReview(payload.entryId, { owner: account });
+    if (!entry || entry.status !== "review_required") return null;
+
+    const latest = outboxRepository.latestForEntry?.({ owner: account, entryId: payload.entryId });
+    const latestPayload = latest?.payload;
+    const currentVersion = Number(head.version);
+    const latestMatchesCurrent = latestPayload?.actionId === head.id
+      && Number(latestPayload?.version) === currentVersion;
+    if (latestMatchesCurrent && ["queued", "processing", "sent"].includes(latest.status)) return latest;
+    if (latestMatchesCurrent && latest?.status === "failed" && typeof outboxRepository.requeueFailed === "function") {
+      try {
+        return outboxRepository.requeueFailed(latest.id);
+      } catch {
+        // A terminal stale row must not be reopened. The current version fence
+        // remains authoritative and a later correction will receive a new key.
+      }
+    }
+    return enqueue(account, conversationFor(account), head, payload.entryId, kind, extraPayload);
+  }
+
+  function advanceBookkeepingQueue(account) {
+    try {
+      return enqueueQueueHead(account);
+    } catch {
+      // Financial state is authoritative. Delivery is durable and retried by
+      // the worker/reconciliation pass when the binding or outbox is ready.
+      return null;
+    }
   }
 
   function activeAdvanceAllocationActions(account, { limit = 3 } = {}) {
@@ -1172,6 +1213,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         // decisions are likewise retried by the terminal-review reconciliation.
       }
     }
+    advanceBookkeepingQueue(normalizedAccount);
     if (decision === "accepted" && entry.advanceId && advanceAllocationRepository) {
       try {
         startAdvanceAllocationReview({
@@ -1197,7 +1239,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     });
     const existing = findActionForEntry(account, entry.id);
     if (existing) {
-      const outbox = enqueue(account, conversationId, existing, entry.id, "confirmation");
+      const outbox = enqueueQueueHead(account, { expectedActionId: existing.id });
       return { action: existing, conversationId, outbox, replayed: true };
     }
     const actionId = requiredText(idFactory(), "actionId", 200);
@@ -1213,7 +1255,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       confirmationCode: stateCredential,
       expiresAt,
     });
-    const outbox = enqueue(account, conversationId, action, entry.id, "confirmation");
+    const outbox = enqueueQueueHead(account, { expectedActionId: action.id });
     return { action, conversationId, outbox, replayed: false };
   }
 
@@ -1447,6 +1489,20 @@ export function createShortcutBookkeepingAssistantRuntime({
         return null;
       }
     }).filter(Boolean);
+    // Recover a queue head after a process crash or an expired first draft.
+    // This is intentionally independent from the receipt query: an accepted
+    // receipt may already exist while the next-draft enqueue was interrupted.
+    const queueOwners = db.prepare(`
+      SELECT DISTINCT owner
+      FROM assistant_pending_actions
+      WHERE channel = $channel AND action_type = $actionType
+        AND COALESCE(json_extract(payload_json, '$.kind'), 'confirmation') <> $allocationKind
+    `).all({
+      $channel: SHORTCUT_BOOKKEEPING_CHANNEL,
+      $actionType: SHORTCUT_BOOKKEEPING_ACTION,
+      $allocationKind: SHORTCUT_ADVANCE_ALLOCATION_KIND,
+    });
+    for (const row of queueOwners) advanceBookkeepingQueue(row.owner);
     if (advanceAllocationRepository) {
       const loanRows = db.prepare(`
         SELECT entry.id AS entry_id, entry.owner,
@@ -1501,6 +1557,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (claimed.replayed) {
       attachSourceDocumentAfterAcceptance({ account, entry, accepted: acceptedResult(entry), requestId: action.id });
       enqueueAcceptedReceipt({ account, scope, action: claimed.item ?? action, entry });
+      advanceBookkeepingQueue(account);
       return acceptedResponse(entry);
     }
     if (claimed.inProgress) {
@@ -1514,6 +1571,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       });
       attachSourceDocumentAfterAcceptance({ account, entry, accepted: acceptedResult(entry), requestId: action.id });
       enqueueAcceptedReceipt({ account, scope, action, entry });
+      advanceBookkeepingQueue(account);
       return acceptedResponse(entry);
     } catch (error) {
       try {
@@ -1661,6 +1719,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         requestId: action.id,
       });
       try { enqueue(account, conversationFor(account), { ...action, version: Number(action.version) + 1 }, target.entryId, "accepted"); } catch { /* financial write remains durable; replay can enqueue again */ }
+      advanceBookkeepingQueue(account);
       if (completed.advance || accepted.advanceId) {
         try {
           startAdvanceAllocationReview({
@@ -1730,6 +1789,7 @@ export function createShortcutBookkeepingAssistantRuntime({
         });
       }
       try { enqueue(account, conversationFor(account), action, target.entryId, "cancelled"); } catch { /* best effort */ }
+      advanceBookkeepingQueue(account);
     }
     return { status: 200, body: { status: "cancel", text: "已取消当前小小记账，未写入费用。" }, draftText: "已取消小小记账。" };
   }
@@ -2203,7 +2263,12 @@ export function createShortcutBookkeepingAssistantRuntime({
         }
         if (action && ["pending", "confirmed"].includes(action.status)
           && !(latest?.status === "sent" && Number(latest?.payload?.version) === Number(action.version))) {
-          try { enqueue(account, conversationFor(account), action, entry.id, "region_refresh"); } catch { /* retry later */ }
+          try {
+            enqueueQueueHead(account, {
+              expectedActionId: action.id,
+              kind: "region_refresh",
+            });
+          } catch { /* retry later */ }
         }
         continue;
       }
@@ -2245,7 +2310,10 @@ export function createShortcutBookkeepingAssistantRuntime({
           revisionSource: "system",
         });
         if (renewedAction) {
-          enqueue(account, conversationFor(account), renewedAction, entry.id, "region_refresh");
+          enqueueQueueHead(account, {
+            expectedActionId: renewedAction.id,
+            kind: "region_refresh",
+          });
         }
         refreshed.push(updated.item.id);
       } catch (error) {
@@ -2375,6 +2443,7 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (newCapture) return null;
     let targetAction = null;
     let implicitTarget = false;
+    const queueHead = bookkeepingQueueHead(account);
     const allocationCandidates = intent.intent === "loan_assignment" && !pendingActionId && !action
       ? activeAdvanceAllocationActions(account, { limit: 3 })
       : [];
@@ -2405,16 +2474,22 @@ export function createShortcutBookkeepingAssistantRuntime({
     } else if (action?.actionType === SHORTCUT_BOOKKEEPING_ACTION) {
       targetAction = action;
     } else {
-      const active = activeShortcutActions(account, { limit: 3 });
+      const active = activeShortcutActions(account, { limit: 100 });
       const draftOnlyCorrection = intent.intent === "correction" || Boolean(explicitModification(text));
       const implicit = implicitCurrentAction(active, { allowUndelivered: draftOnlyCorrection });
       if (implicit) {
         targetAction = implicit;
         implicitTarget = true;
-      } else if (active.length > 1 && commandTargetsShortcut(text, textClassification, pendingActionId, quote)) {
-        return { status: 409, body: { status: "clarify", text: "当前有多笔待确认记账，请引用对应的小小草稿后回复“确认”“修改…”或“取消”。" }, draftText: "等待引用具体记账草稿。" };
-      } else if (active.length === 1 && commandTargetsShortcut(text, textClassification, pendingActionId, quote)) {
-        return { status: 200, body: { status: "clarify", text: "最新记账草稿尚未确认送达，请等待小小发出草稿后再回复。" }, draftText: "等待最新记账草稿送达。" };
+      } else if (active.length > 0 && commandTargetsShortcut(text, textClassification, pendingActionId, quote)) {
+        advanceBookkeepingQueue(account);
+        return {
+          status: 200,
+          body: {
+            status: "clarify",
+            text: "当前排队中的记账草稿尚未送达，请先查看小小发送的当前草稿后再回复“确认”。",
+          },
+          draftText: "等待当前排队草稿送达。",
+        };
       }
     }
     if (!targetAction) return null;
@@ -2432,6 +2507,22 @@ export function createShortcutBookkeepingAssistantRuntime({
     if (pendingActionId && pendingActionId !== targetAction.id) {
       return { status: 409, body: { status: "error", text: "当前会话的待确认操作已变化，请查看最新微信消息。" }, draftText: "确认信息已处理。" };
     }
+    const targetPayload = actionPayload(targetAction);
+    if (
+      targetPayload?.kind !== SHORTCUT_ADVANCE_ALLOCATION_KIND
+      && queueHead
+      && targetAction.id !== queueHead.id
+    ) {
+      advanceBookkeepingQueue(account);
+      return {
+        status: 409,
+        body: {
+          status: "clarify",
+          text: "当前按顺序处理多笔记账，请先确认当前队首草稿；上一笔完成后小小会发送下一笔。",
+        },
+        draftText: "等待当前队首记账完成。",
+      };
+    }
     const isFinancialCommand = intent.status === "accepted"
       && ["confirm", "cancel", "correction", "loan_assignment"].includes(intent.intent);
     if (context?.channel === SHORTCUT_BOOKKEEPING_CHANNEL
@@ -2446,7 +2537,7 @@ export function createShortcutBookkeepingAssistantRuntime({
       channel: SHORTCUT_BOOKKEEPING_CHANNEL,
       conversationId: targetAction.conversationId,
     };
-    if (actionPayload(targetAction)?.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) {
+    if (targetPayload?.kind === SHORTCUT_ADVANCE_ALLOCATION_KIND) {
       if (!quote) return quoteRequiredResponse();
       if (confirmationCode !== undefined && confirmationCode !== null) {
         return { status: 200, body: { status: "clarify", text: "借款分配不使用六位确认码，请引用借款消息并说明用于哪一周或哪笔费用。" }, draftText: "等待借款分配范围。" };

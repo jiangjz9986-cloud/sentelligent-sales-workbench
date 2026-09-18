@@ -169,14 +169,23 @@ function parseSafeConflictReply(value) {
 
 function suppressDurableAcceptedReceipt(body) {
   const result = body?.result;
+  const hasAcceptedStatus = result?.status === "accepted";
+  // The bookkeeping runtime's first successful confirmation returns the
+  // accepted identifiers without a nested status; replayed confirmations do
+  // carry status: "accepted". Both shapes are durable outbox receipts.
+  const hasAcceptedBookkeepingIds = result?.status === undefined
+    && typeof result?.entryId === "string"
+    && result.entryId.trim()
+    && typeof result?.expenseId === "string"
+    && result.expenseId.trim()
+    && typeof result?.paymentId === "string"
+    && result.paymentId.trim();
   if (
     body?.status !== "ok"
     || !result
     || typeof result !== "object"
     || Array.isArray(result)
-    || result.status !== "accepted"
-    || typeof result.entryId !== "string"
-    || !result.entryId.trim()
+    || (!hasAcceptedStatus && !hasAcceptedBookkeepingIds)
   ) {
     return body;
   }

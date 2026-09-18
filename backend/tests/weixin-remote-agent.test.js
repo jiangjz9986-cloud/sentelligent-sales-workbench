@@ -298,16 +298,21 @@ describe("remote Clawbot agent adapter", () => {
       status: "ok",
       text: "已确认并录入森特智行：EXP-20260818-0001，金额 200.00 元。",
       result: {
-        status: "accepted",
         entryId: "entry-accepted-1",
         expenseId: "expense-accepted-1",
         paymentId: "payment-accepted-1",
       },
     };
+    let calls = 0;
     const agent = createRemoteClawbotAgent({
       backendUrl: "https://sales.example.test",
       apiToken: "test-secret-token",
-      fetchImpl: async () => jsonResponse(acceptedReply),
+      fetchImpl: async () => jsonResponse(calls++ === 0
+        ? acceptedReply
+        : {
+            ...acceptedReply,
+            result: { status: "accepted", ...acceptedReply.result },
+          }),
     });
     const request = {
       conversationId: "c-accepted",
@@ -327,7 +332,7 @@ describe("remote Clawbot agent adapter", () => {
     assert.equal(first.text, "");
     assert.equal(replay.text, "");
     assert.deepEqual(first.result, acceptedReply.result);
-    assert.deepEqual(replay.result, acceptedReply.result);
+    assert.deepEqual(replay.result, { status: "accepted", ...acceptedReply.result });
   });
 
   it("rejects malformed or expanded 409 response shapes as permanent safe errors", async () => {

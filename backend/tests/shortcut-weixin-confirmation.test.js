@@ -189,6 +189,22 @@ beforeEach(async () => {
     paymentProofRecognizer: async ({ fileName }, recognitionOptions = {}) => {
       lastRecognitionOptions = recognitionOptions;
       if (fileName === "multi.png") return multiRowRecognition();
+      if (fileName === "queue3.png") {
+        const transactions = [
+          { amountCents: 2800, occurredOn: "2026-08-18", paidTime: "12:00", merchant: "东营午餐", paymentMethod: "wechat" },
+          { amountCents: 3600, occurredOn: "2026-08-18", paidTime: "18:00", merchant: "东营晚餐", paymentMethod: "wechat" },
+          { amountCents: 4800, occurredOn: "2026-08-18", paidTime: "20:00", merchant: "东营夜宵", paymentMethod: "wechat" },
+        ];
+        return {
+          documentKind: "payment_proof",
+          extractedText: null,
+          evidence: transactions[0],
+          transactions,
+          confidence: 0.99,
+          warnings: [],
+          source: { provider: "test", model: "deepseek-flash" },
+        };
+      }
       if (fileName === "drift.png") {
         driftingRecognitionCalls += 1;
         return driftingRecognitionCalls === 1
@@ -1631,7 +1647,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     acceptedDb.close();
   });
 
-  it("uses the uniquely recent draft when Weixin omits quote metadata and keeps older pending work untouched", async () => {
+  it("uses the FIFO queue head when Weixin omits quote metadata", async () => {
     const capture = async (sourceMessageId, fileName, content, mimeType) => request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders(sourceMessageId),
@@ -1684,11 +1700,11 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.deepEqual(
       db.prepare("SELECT id, note FROM shortcut_bookkeeping_entries ORDER BY id").all().map((row) => ({ ...row })),
-      [{ id: "entry-1", note: null }, { id: "entry-2", note: "8.18晚餐：继振、宫涛" }],
+      [{ id: "entry-1", note: "8.18晚餐：继振、宫涛" }, { id: "entry-2", note: null }],
     );
     assert.deepEqual(
       db.prepare("SELECT id, version FROM assistant_pending_actions ORDER BY id").all().map((row) => ({ ...row })),
-      [{ id: "action-1", version: 1 }, { id: "action-2", version: 2 }],
+      [{ id: "action-1", version: 2 }, { id: "action-2", version: 1 }],
     );
     db.close();
 
@@ -1706,10 +1722,16 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
     assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
     assert.match(confirmed.body.text, /已确认并录入/u);
+    const firstReceipt = await leaseOutbox();
+    assert.match(firstReceipt.item.message, /已确认并录入/u);
+    await ackOutbox(firstReceipt, true, "provider-missing-quote-first-receipt");
+    const secondDraft = await leaseOutbox();
+    assert.match(secondDraft.item.message, /【小小提醒！新增一条待记账信息】/u);
+    await ackOutbox(secondDraft, true, "provider-missing-quote-second-draft");
     db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.deepEqual(
       db.prepare("SELECT id, status FROM shortcut_bookkeeping_entries ORDER BY id").all().map((row) => ({ ...row })),
-      [{ id: "entry-1", status: "review_required" }, { id: "entry-2", status: "accepted" }],
+      [{ id: "entry-1", status: "accepted" }, { id: "entry-2", status: "review_required" }],
     );
     assert.equal(db.prepare("SELECT notes FROM travel_expenses").get().notes, "8.18晚餐：继振、宫涛");
     db.close();
@@ -1774,11 +1796,11 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
       assert.equal(body.toolName, undefined, text);
     }
 
-    // Bare 确认/取消 while the freshest draft is still undelivered keep the
-    // existing wait-for-draft guidance (unchanged behavior).
+    // Bare 确认/取消 while the queue head is still undelivered keep the
+    // FIFO wait-for-draft guidance.
     for (const [index, text] of [["confirm", "确认"], ["cancel", "取消"]]) {
       const body = await send(`hold-${index}`, text);
-      assert.match(body.text, /最新记账草稿尚未确认送达/u, text);
+      assert.match(body.text, /当前排队中的记账草稿尚未送达/u, text);
       assert.equal(body.toolName, undefined, text);
     }
 
@@ -1963,7 +1985,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     after.close();
   });
 
-  it("splits a multi-row payment screenshot into separately quoted drafts and replays the same image", async () => {
+  it("queues multi-row payment drafts FIFO and emits one receipt per confirmation", async () => {
     const sendImage = (sourceMessageId) => request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders(sourceMessageId),
@@ -2007,28 +2029,60 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.match(first.item.message, /备注：8\.18济南出差早餐/u);
     assert.match(first.item.message, /周期：20260817-20260823/u);
     await ackOutbox(first, true, "multi-draft-1");
+
+    const blockedUntilFirstConfirmation = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(blockedUntilFirstConfirmation.response.status, 204);
+
+    const firstConfirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-multi-confirm-1"),
+      body: JSON.stringify({
+        conversationId: "conversation-multi-image",
+        text: "确认",
+        sourceMessageId: "weixin-multi-confirm-1",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "multi-draft-1",
+      }),
+    });
+    assert.equal(firstConfirmed.response.status, 200, JSON.stringify(firstConfirmed.body));
+    assert.match(firstConfirmed.body.text, /已确认并录入/u);
+
+    const firstReceipt = await leaseOutbox();
+    assert.equal(
+      firstReceipt.item.message,
+      "已确认并录入小小记账：2026年8月18日8.18济南出差早餐，金额 12.34 元。",
+    );
+    await ackOutbox(firstReceipt, true, "multi-receipt-1");
+
     const second = await leaseOutbox();
     assert.match(second.item.message, /金额：56\.78 元/u);
     assert.match(second.item.message, /费用类别：餐饮/u);
     assert.match(second.item.message, /备注：8\.18济南出差晚餐/u);
     await ackOutbox(second, true, "multi-draft-2");
 
-    for (const [index, quotedMessageId] of ["multi-draft-1", "multi-draft-2"].entries()) {
-      const confirmed = await request("/api/integrations/weixin-agent/events", {
-        method: "POST",
-        headers: eventHeaders(`weixin-multi-confirm-${index + 1}`),
-        body: JSON.stringify({
-          conversationId: "conversation-multi-image",
-          text: "确认",
-          sourceMessageId: `weixin-multi-confirm-${index + 1}`,
-          senderId: sender,
-          chatType: "direct",
-          quotedMessageId,
-        }),
-      });
-      assert.equal(confirmed.response.status, 200);
-      assert.match(confirmed.body.text, /已确认并录入/u);
-    }
+    const secondConfirmed = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-multi-confirm-2"),
+      body: JSON.stringify({
+        conversationId: "conversation-multi-image",
+        text: "确认",
+        sourceMessageId: "weixin-multi-confirm-2",
+        senderId: sender,
+        chatType: "direct",
+        quotedMessageId: "multi-draft-2",
+      }),
+    });
+    assert.equal(secondConfirmed.response.status, 200, JSON.stringify(secondConfirmed.body));
+    assert.match(secondConfirmed.body.text, /已确认并录入/u);
+    const secondReceipt = await leaseOutbox();
+    assert.equal(
+      secondReceipt.item.message,
+      "已确认并录入小小记账：2026年8月18日8.18济南出差晚餐，金额 56.78 元。",
+    );
+    await ackOutbox(secondReceipt, true, "multi-receipt-2");
 
     const replay = await sendImage("weixin-multi-image-replay");
     assert.equal(replay.response.status, 200);
@@ -2037,6 +2091,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM shortcut_bookkeeping_entries").get().count, 2);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expenses").get().count, 2);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_attachments WHERE kind = 'payment_proof'").get().count, 2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox WHERE json_extract(payload_json, '$.kind') = 'accepted'").get().count, 2);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM travel_expense_document_inbox").get().count, 1);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM document_blobs").get().count, 1);
     assert.deepEqual(
@@ -2046,6 +2101,85 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
         { category: "dinner", notes: "8.18济南出差晚餐" },
       ],
     );
+    db.close();
+  });
+
+  it("confirms a three-task capture one draft at a time and never duplicates accepted receipts", async () => {
+    const sourceMessageId = "weixin-queue-three-image";
+    const captured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders(sourceMessageId),
+      body: JSON.stringify({
+        conversationId: "conversation-queue-three",
+        text: "",
+        sourceMessageId,
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+        media: {
+          type: "image",
+          fileName: "queue3.png",
+          mimeType: "image/png",
+          contentBase64: VALID_PNG.toString("base64"),
+        },
+      }),
+    });
+    assert.equal(captured.response.status, 200, JSON.stringify(captured.body));
+    assert.match(captured.body.text, /共识别 3 笔/u);
+
+    const configured = await request("/api/integrations/weixin-agent/events", {
+      method: "POST",
+      headers: eventHeaders("weixin-queue-three-region"),
+      body: JSON.stringify({
+        conversationId: "conversation-queue-three",
+        text: "上周区域是东营",
+        sourceMessageId: "weixin-queue-three-region",
+        senderId: sender,
+        chatType: "direct",
+        suppressQuote: true,
+      }),
+    });
+    assert.equal(configured.response.status, 200, JSON.stringify(configured.body));
+    assert.match(configured.body.text, /已刷新 3 条/u);
+
+    const expected = [
+      ["金额：28.00 元", "已确认并录入小小记账：2026年8月18日8.18东营出差午餐，金额 28.00 元。"],
+      ["金额：36.00 元", "已确认并录入小小记账：2026年8月18日8.18东营出差晚餐，金额 36.00 元。"],
+      ["金额：48.00 元", "已确认并录入小小记账：2026年8月18日8.18东营出差晚餐，金额 48.00 元。"],
+    ];
+    for (const [index, [draftMarker, receiptText]] of expected.entries()) {
+      const draft = await leaseOutbox();
+      assert.match(draft.item.message, new RegExp(draftMarker.replace(".", "\\."), "u"));
+      await ackOutbox(draft, true, `queue-three-draft-${index + 1}`);
+      const confirmed = await request("/api/integrations/weixin-agent/events", {
+        method: "POST",
+        headers: eventHeaders(`weixin-queue-three-confirm-${index + 1}`),
+        body: JSON.stringify({
+          conversationId: "conversation-queue-three",
+          text: "确认",
+          sourceMessageId: `weixin-queue-three-confirm-${index + 1}`,
+          senderId: sender,
+          chatType: "direct",
+          quotedMessageId: `queue-three-draft-${index + 1}`,
+        }),
+      });
+      assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.body));
+      assert.match(confirmed.body.text, /已确认并录入/u);
+      const receipt = await leaseOutbox();
+      assert.equal(receipt.item.message, receiptText);
+      await ackOutbox(receipt, true, `queue-three-receipt-${index + 1}`);
+    }
+
+    const drained = await request("/api/integrations/weixin-agent/confirmation-outbox", {
+      headers: workerHeaders(),
+    });
+    assert.equal(drained.response.status, 204);
+    const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
+    assert.deepEqual(
+      db.prepare("SELECT status FROM shortcut_bookkeeping_entries ORDER BY id").all().map((row) => row.status),
+      ["accepted", "accepted", "accepted"],
+    );
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM weixin_confirmation_outbox WHERE json_extract(payload_json, '$.kind') = 'accepted'").get().count, 3);
     db.close();
   });
 
@@ -2136,7 +2270,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     db.close();
   });
 
-  it("keeps time-adjacent drafts ambiguous when provider quote metadata is missing", async () => {
+  it("uses the FIFO queue head when provider quote metadata is missing", async () => {
     const received = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin-multi-missing-quote"),
@@ -2157,7 +2291,7 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
     });
     assert.equal(received.response.status, 200);
 
-    const ambiguous = await request("/api/integrations/weixin-agent/events", {
+    const corrected = await request("/api/integrations/weixin-agent/events", {
       method: "POST",
       headers: eventHeaders("weixin-multi-missing-quote-correction"),
       body: JSON.stringify({
@@ -2169,15 +2303,18 @@ describe("小小微信图片记账与自然语言确认闭环", () => {
         suppressQuote: true,
       }),
     });
-    assert.equal(ambiguous.response.status, 409);
-    assert.equal(ambiguous.body.status, "clarify");
-    assert.match(ambiguous.body.text, /多笔待确认/u);
+    assert.equal(corrected.response.status, 200, JSON.stringify(corrected.body));
+    assert.equal(corrected.body.status, "review_required");
+    assert.match(corrected.body.text, /已按你的修改更新草稿/u);
     const db = openDatabase({ databaseUrl: join(tempDir, "assistant.sqlite") });
     assert.deepEqual(
-      db.prepare("SELECT note FROM shortcut_bookkeeping_entries").all().map((row) => row.note),
-      ["8.18出差早餐", "8.18出差晚餐"],
+      db.prepare("SELECT note FROM shortcut_bookkeeping_entries ORDER BY created_at, id").all().map((row) => row.note),
+      ["晚餐", "8.18出差晚餐"],
     );
-    assert.deepEqual(db.prepare("SELECT version FROM assistant_pending_actions").all().map((row) => row.version), [1, 1]);
+    assert.deepEqual(
+      db.prepare("SELECT version FROM assistant_pending_actions ORDER BY created_at, id").all().map((row) => row.version),
+      [2, 1],
+    );
     db.close();
   });
 

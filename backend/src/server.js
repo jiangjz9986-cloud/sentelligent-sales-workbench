@@ -5088,18 +5088,41 @@ export function createServer(options = {}) {
           },
         });
         const runtimeBody = result.body && typeof result.body === "object" ? result.body : {};
-        const toolResult = runtimeBody.result && typeof runtimeBody.result === "object"
+        const toolResult = runtimeBody.result
+          && typeof runtimeBody.result === "object"
+          && !Array.isArray(runtimeBody.result)
           ? runtimeBody.result
-          : {};
+          : null;
+        const acceptedBookkeepingResult = toolResult
+          && (
+            (toolResult.status === "accepted" && typeof toolResult.entryId === "string" && toolResult.entryId.trim())
+            || (
+              toolResult.status === undefined
+              && typeof toolResult.entryId === "string"
+              && toolResult.entryId.trim()
+              && typeof toolResult.expenseId === "string"
+              && toolResult.expenseId.trim()
+              && typeof toolResult.paymentId === "string"
+              && toolResult.paymentId.trim()
+            )
+          )
+          ? {
+              status: "accepted",
+              entryId: toolResult.entryId,
+              expenseId: toolResult.expenseId ?? null,
+              paymentId: toolResult.paymentId ?? null,
+            }
+          : null;
         const publicBody = {
           status: runtimeBody.status ?? (result.status >= 400 ? "error" : "ok"),
           text: typeof runtimeBody.text === "string"
             ? runtimeBody.text
-            : typeof toolResult.text === "string"
+            : typeof toolResult?.text === "string"
               ? toolResult.text
             : typeof runtimeBody.message === "string"
               ? runtimeBody.message
               : "处理完成。",
+          ...(acceptedBookkeepingResult ? { result: acceptedBookkeepingResult } : {}),
           ...(runtimeBody.toolName ? { toolName: runtimeBody.toolName } : {}),
           ...(runtimeBody.actionId ? { actionId: runtimeBody.actionId } : {}),
           ...(runtimeBody.risk ? { risk: runtimeBody.risk } : {}),
