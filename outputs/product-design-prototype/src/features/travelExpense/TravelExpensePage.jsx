@@ -19,6 +19,7 @@ import { PaymentProofCenter } from "./PaymentProofCenter.jsx";
 import { downloadExpenseListXlsx } from "./ReimbursementOrganizer.jsx";
 import { TripRegionSettingsCard } from "./TripRegionSettingsCard.jsx";
 import { IsoWeekFallback } from "./IsoWeekFallback.jsx";
+import "./travelExpense.css";
 import { supportsInputType } from "../../app/inputCapabilities.js";
 import { prepareTravelExpenseDocument } from "./travelExpenseDocument.js";
 import {
