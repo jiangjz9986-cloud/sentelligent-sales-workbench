@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { readWeixinDocument } from "../src/travelExpense/documentInboxMedia.js";
-import { VALID_PNG } from "./helpers/image-fixtures.js";
+import { PDF_XREF_STREAM_PREDICTOR, VALID_PNG } from "./helpers/image-fixtures.js";
 
 describe("WeChat remote media normalization", () => {
   it("accepts canonical Base64 bytes and preserves the original hash", async () => {
@@ -29,5 +29,19 @@ describe("WeChat remote media normalization", () => {
       }),
       (error) => error.code === "file_unavailable",
     );
+  });
+
+  it("accepts a real-world style PDF XRef stream with PNG predictor rows", async () => {
+    const document = await readWeixinDocument({
+      type: "file",
+      fileName: "发票金额 26.50元.pdf",
+      mimeType: "application/pdf",
+      contentBase64: PDF_XREF_STREAM_PREDICTOR.toString("base64"),
+    });
+
+    assert.equal(document.fileName, "发票金额 26.50元.pdf");
+    assert.equal(document.mediaType, "application/pdf");
+    assert.equal(document.sha256.length, 64);
+    assert.deepEqual(Buffer.from(document.contentBase64, "base64"), PDF_XREF_STREAM_PREDICTOR);
   });
 });

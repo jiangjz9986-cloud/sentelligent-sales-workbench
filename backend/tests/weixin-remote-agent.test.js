@@ -6,7 +6,7 @@ import { afterEach, describe, it } from "node:test";
 
 import { validateWeixinAssistantEvent } from "../src/assistant/weixinEvent.js";
 import { createRemoteClawbotAgent } from "../src/weixin/remoteAgent.js";
-import { VALID_JPEG, VALID_PNG } from "./helpers/image-fixtures.js";
+import { PDF_XREF_STREAM_PREDICTOR, VALID_JPEG, VALID_PNG } from "./helpers/image-fixtures.js";
 
 const temporaryDirectories = [];
 
@@ -23,6 +23,14 @@ async function jpegMediaPath() {
   temporaryDirectories.push(directory);
   const filePath = join(directory, "payment-proof.jpg");
   await writeFile(filePath, VALID_JPEG);
+  return filePath;
+}
+
+async function predictorPdfMediaPath() {
+  const directory = await mkdtemp(join(tmpdir(), "sentelligent-remote-agent-pdf-"));
+  temporaryDirectories.push(directory);
+  const filePath = join(directory, "invoice-26.50.pdf");
+  await writeFile(filePath, PDF_XREF_STREAM_PREDICTOR);
   return filePath;
 }
 
@@ -128,6 +136,35 @@ describe("remote Clawbot agent adapter", () => {
     assert.equal(validatedEvent.media.mediaType, "image/jpeg");
     assert.equal(validatedEvent.media.contentBase64, VALID_JPEG.toString("base64"));
     assert.equal(Object.hasOwn(postedBody.media, "filePath"), false);
+  });
+
+  it("carries a predictor-based invoice PDF through the strict event boundary", async () => {
+    const filePath = await predictorPdfMediaPath();
+    let postedBody;
+    const agent = createRemoteClawbotAgent({
+      backendUrl: "https://sales.example.test",
+      apiToken: "test-machine-token",
+      fetchImpl: async (_url, options) => {
+        postedBody = JSON.parse(options.body);
+        await validateWeixinAssistantEvent(postedBody);
+        return jsonResponse({ status: "ok", text: "发票已收到" });
+      },
+    });
+
+    const result = await agent.chat({
+      conversationId: "conversation-pdf",
+      text: "",
+      senderId: "sender-1",
+      messageId: `weixin:delivery:v1:${"f".repeat(64)}`,
+      chatType: "direct",
+      deliveryTimestampMs: 1_786_500_000_123,
+      media: { type: "file", filePath, mimeType: "application/pdf", fileName: "发票金额 26.50元.pdf" },
+    });
+
+    assert.deepEqual(result, { status: "ok", text: "发票已收到" });
+    assert.equal(postedBody.media.mediaType, "application/pdf");
+    assert.equal(postedBody.media.fileName, "发票金额 26.50元.pdf");
+    assert.equal(Buffer.from(postedBody.media.contentBase64, "base64").length, PDF_XREF_STREAM_PREDICTOR.length);
   });
 
   it("preserves only the exact image and file media kinds at the remote boundary", async () => {

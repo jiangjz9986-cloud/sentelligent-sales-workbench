@@ -349,13 +349,81 @@ function validClassicPdfXref(buffer, xrefOffset, startxrefOffset) {
   return /\/Size[\x00\x09\x0a\x0c\x0d\x20]+\d+/.test(text.slice(trailerOffset + 7));
 }
 
+function pdfPaeth(left, up, upperLeft) {
+  const estimate = left + up - upperLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const upDistance = Math.abs(estimate - up);
+  const upperLeftDistance = Math.abs(estimate - upperLeft);
+  if (leftDistance <= upDistance && leftDistance <= upperLeftDistance) return left;
+  if (upDistance <= upperLeftDistance) return up;
+  return upperLeft;
+}
+
+function decodePdfXrefStreamPredictor(decoded, { entryCount, entryWidth, dictionary }) {
+  const whitespace = "\\x00\\x09\\x0a\\x0c\\x0d\\x20";
+  const decodeParms = new RegExp(`/DecodeParms[${whitespace}]*<<([\\s\\S]*?)>>`).exec(dictionary)?.[1] ?? "";
+  const number = (name, fallback) => {
+    const match = new RegExp(`/${name}[${whitespace}]+(\\d+)`).exec(decodeParms);
+    return match ? Number(match[1]) : fallback;
+  };
+  const predictor = number("Predictor", 1);
+  const columns = number("Columns", entryWidth);
+  const colors = number("Colors", 1);
+  const bitsPerComponent = number("BitsPerComponent", 8);
+  if (
+    !Number.isSafeInteger(predictor)
+    || !Number.isSafeInteger(columns)
+    || !Number.isSafeInteger(colors)
+    || !Number.isSafeInteger(bitsPerComponent)
+    || predictor < 1
+    || (predictor !== 1 && (predictor < 10 || predictor > 15))
+    || columns !== entryWidth
+    || columns <= 0
+    || colors <= 0
+    || bitsPerComponent <= 0
+    || bitsPerComponent > 8
+  ) return null;
+
+  if (predictor === 1) {
+    return decoded.length === entryCount * entryWidth ? decoded : null;
+  }
+
+  const rowLength = columns + 1;
+  if (decoded.length !== entryCount * rowLength) return null;
+  const bytesPerPixel = Math.max(1, Math.ceil((colors * bitsPerComponent) / 8));
+  const result = Buffer.alloc(entryCount * columns);
+  let previous = Buffer.alloc(columns);
+  for (let rowIndex = 0; rowIndex < entryCount; rowIndex += 1) {
+    const rowOffset = rowIndex * rowLength;
+    const filter = decoded[rowOffset];
+    if (filter > 4) return null;
+    const current = Buffer.alloc(columns);
+    for (let column = 0; column < columns; column += 1) {
+      const raw = decoded[rowOffset + 1 + column];
+      const left = column >= bytesPerPixel ? current[column - bytesPerPixel] : 0;
+      const up = previous[column];
+      const upperLeft = column >= bytesPerPixel ? previous[column - bytesPerPixel] : 0;
+      let value;
+      if (filter === 0) value = raw;
+      else if (filter === 1) value = (raw + left) & 0xff;
+      else if (filter === 2) value = (raw + up) & 0xff;
+      else if (filter === 3) value = (raw + Math.floor((left + up) / 2)) & 0xff;
+      else value = (raw + pdfPaeth(left, up, upperLeft)) & 0xff;
+      current[column] = value;
+    }
+    current.copy(result, rowIndex * columns);
+    previous = current;
+  }
+  return result;
+}
+
 function validPdfXrefStream(buffer, xrefOffset, startxrefOffset) {
   const text = buffer.subarray(xrefOffset, startxrefOffset).toString("latin1");
   const objectHeader = /^\d{1,10}[\x00\x09\x0a\x0c\x0d\x20]+\d{1,5}[\x00\x09\x0a\x0c\x0d\x20]+obj(?:[\x00\x09\x0a\x0c\x0d\x20]|$)/.exec(text);
   if (!objectHeader) return false;
   const dictionaryStart = text.indexOf("<<", objectHeader[0].length);
   if (dictionaryStart < 0) return false;
-  const streamMatch = />>[\x00\x09\x0c\x20]*stream(?:\r\n|\r|\n)/.exec(text.slice(dictionaryStart));
+  const streamMatch = />>[\x00\x09\x0a\x0c\x0d\x20]*stream(?:\r\n|\r|\n)/.exec(text.slice(dictionaryStart));
   if (!streamMatch) return false;
   const streamMarkerOffset = dictionaryStart + streamMatch.index;
   const dictionary = text.slice(dictionaryStart, streamMarkerOffset + 2);
@@ -420,7 +488,8 @@ function validPdfXrefStream(buffer, xrefOffset, startxrefOffset) {
       return false;
     }
   }
-  if (decoded.length !== entryCount * entryWidth) return false;
+  decoded = decodePdfXrefStreamPredictor(decoded, { entryCount, entryWidth, dictionary });
+  if (!decoded) return false;
 
   if (widths[0] > 0) {
     for (let offset = 0; offset < decoded.length; offset += entryWidth) {

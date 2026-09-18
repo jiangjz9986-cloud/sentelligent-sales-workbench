@@ -10,6 +10,7 @@ import {
 } from "../src/travelExpense/invoiceRecognition.js";
 import {
   PDF_PREFIX_SHELL,
+  PDF_XREF_STREAM_PREDICTOR,
   PDF_XREF_STREAM_SHELL,
   PDF_WITHOUT_OBJECTS,
   SHORT_JPEG_ENVELOPE,
@@ -70,6 +71,7 @@ describe("invoice recognition", () => {
     assert.equal(detectDocumentType(VALID_JPEG), "image/jpeg");
     assert.equal(detectDocumentType(VALID_WEBP), "image/webp");
     assert.equal(detectDocumentType(PDF), "application/pdf");
+    assert.equal(detectDocumentType(PDF_XREF_STREAM_PREDICTOR), "application/pdf");
     assert.equal(detectDocumentType(Buffer.from("<html>invoice</html>")), null);
     assert.equal(detectDocumentType(Buffer.from("MZ executable")), null);
   });
